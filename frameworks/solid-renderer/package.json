@@ -1,0 +1,19 @@
+{
+  "name": "@uifw/solid-renderer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Solid universal renderer. The encoder records version 1 bytes. The runtime drives core.",
+  "exports": {
+    ".": "./runtime/index.ts",
+    "./defaults": "./src/defaults.ts"
+  },
+  "dependencies": {
+    "@solidjs/universal": "2.0.0-rc.17",
+    "solid-js": "2.0.0-rc.17"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types src/encode.test.ts && node --experimental-strip-types src/tree.test.ts",
+    "gallery": "node --experimental-strip-types ../../apps/gallery-solid/gallery.ts"
+  }
+}

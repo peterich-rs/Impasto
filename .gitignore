@@ -1,0 +1,17 @@
+build/
+node_modules/
+target/
+third_party/impeller-sdk/
+hosts/android/apk/.gradle/
+hosts/android/apk/build/
+hosts/android/apk/app/build/
+hosts/android/apk/app/src/main/assets/
+hosts/android/apk/app/src/main/jniLibs/
+third_party/quickjs/
+third_party/solid/
+third_party/kiteui/
+.gradle/
+.kotlin/
+.DS_Store
+cmake-build-*/
+compile_commands.json

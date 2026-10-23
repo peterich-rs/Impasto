@@ -1,0 +1,20 @@
+[package]
+name = "engine"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+protocol = { workspace = true }
+thiserror = { workspace = true }
+
+[build-dependencies]
+bindgen = "0.72"
+
+[lints.rust]
+unsafe_code = "allow"
+unused_qualifications = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

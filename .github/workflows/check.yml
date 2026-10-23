@@ -1,0 +1,76 @@
+# 与 just check 对齐，并检查 rustfmt。
+# 不下载 Impeller SDK，也不下载 quickjs-ng。
+# macos crate 只在 macOS 上编译。
+
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: cargo test (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: test
+        run: cargo test --workspace --exclude macos
+
+  rust-macos:
+    name: cargo test (macos)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: test macos host
+        run: cargo test -p macos
+
+  kotlin:
+    name: kotlin
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - name: jvmTest and gallery
+        run: bash frameworks/kotlin-ui/gradlew -p frameworks/kotlin-ui :library:jvmTest :gallery:runGallery
+
+  solid:
+    name: solid
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: bytes, tree, gallery
+        env:
+          UIFW_COUNTER_BYTES: ${{ github.workspace }}/protocol/tests/fixtures/counter.bin
+        run: |
+          node --experimental-strip-types frameworks/solid-renderer/src/encode.test.ts
+          node --experimental-strip-types frameworks/solid-renderer/src/tree.test.ts
+          node --experimental-strip-types apps/gallery-solid/gallery.ts

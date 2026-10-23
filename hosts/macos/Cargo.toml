@@ -1,0 +1,93 @@
+[package]
+name = "macos"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = "1"
+core = { workspace = true }
+engine = { workspace = true }
+quickjs = { workspace = true }
+session = { workspace = true }
+hostshell = { workspace = true }
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "bitflags",
+    "NSApplication",
+    "NSEvent",
+    "NSGraphics",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSScreen",
+    "NSTextInputClient",
+    "NSView",
+    "NSWindow",
+    "objc2-core-foundation",
+    "objc2-quartz-core",
+] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "bitflags",
+    "CFCGTypes",
+    "CFData",
+    "CFString",
+    "CFURL",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "bitflags",
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGDataProvider",
+    "CGImage",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSDate",
+    "NSGeometry",
+    "NSNotification",
+    "NSObject",
+    "NSString",
+    "objc2-core-foundation",
+] }
+objc2-image-io = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CGImageDestination",
+    "CGImageSource",
+    "objc2-core-graphics",
+] }
+objc2-metal = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "bitflags",
+    "MTLDevice",
+    "MTLPixelFormat",
+    "MTLTexture",
+    "MTLTypes",
+] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CALayer",
+    "CAMetalLayer",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-metal",
+] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CVBase",
+    "CVDisplayLink",
+    "CVHostTime",
+    "CVReturn",
+] }
+protocol = { workspace = true }
+
+[lints.rust]
+unsafe_code = "allow"
+unused_qualifications = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

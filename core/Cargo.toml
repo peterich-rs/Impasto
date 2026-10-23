@@ -1,0 +1,17 @@
+[package]
+name = "core"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# The package name is `core`. Rustdoc's harness cannot load libcore beside it.
+doctest = false
+
+[dependencies]
+protocol = { workspace = true }
+taffy = "0.9"
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
