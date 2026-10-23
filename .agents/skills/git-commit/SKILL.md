@@ -1,6 +1,6 @@
 ---
 name: git-commit
-description: Plan and write commits from the unpublished branch delta, not only the working tree. Use when the user asks to commit, amend, squash, or tidy local history. Messages use conventional type(scope), a bullet body, and a #AI commit# or #ignore# tag.
+description: Plan and write commits from the unpublished branch delta, not only the working tree. Use when the user asks to commit, amend, squash, or tidy local history. Messages use conventional type(scope), a bullet body.
 ---
 
 # Git Commit
