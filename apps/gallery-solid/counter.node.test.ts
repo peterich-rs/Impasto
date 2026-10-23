@@ -209,6 +209,15 @@ const core = {
   onComposing: (node: number, fn: (text: string | null) => void) => {
     calls.push({ name: "onComposing", args: [node, typeof fn] });
   },
+  onHover: (node: number, fn: () => void) => {
+    calls.push({ name: "onHover", args: [node, typeof fn] });
+  },
+  onLeave: (node: number, fn: () => void) => {
+    calls.push({ name: "onLeave", args: [node, typeof fn] });
+  },
+  onWheel: (node: number, fn: (dx: number, dy: number) => void) => {
+    calls.push({ name: "onWheel", args: [node, typeof fn] });
+  },
   onFrame: (fn: () => void) => {
     calls.push({ name: "onFrame", args: [typeof fn] });
   },

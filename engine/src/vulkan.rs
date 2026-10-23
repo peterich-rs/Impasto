@@ -197,16 +197,20 @@ impl super::Engine {
     }
 
     /// Acquires the next swapchain image, draws the current display list, and presents.
-    /// A null acquire is [`Status::NotReady`]: the caller drops the swapchain.
+    /// A null acquire is [`Status::PresentFailed`]. The caller keeps the swapchain
+    /// and tries the next frame. No display list is [`Status::NotReady`].
     pub fn draw_vulkan(&mut self, swapchain: &VulkanSwapchain) -> Result<(), Status> {
-        if self.list.is_null() || swapchain.raw.is_null() {
+        if self.context.is_null() || self.list.is_null() {
             return Err(Status::NotReady);
+        }
+        if swapchain.raw.is_null() {
+            return Err(Status::PresentFailed);
         }
         // SAFETY: `swapchain.raw` is a live swapchain. Acquire may block until the
         // next image. The returned surface is released before this function returns.
         let surface = unsafe { ffi::ImpellerVulkanSwapchainAcquireNextSurfaceNew(swapchain.raw) };
         if surface.is_null() {
-            return Err(Status::NotReady);
+            return Err(Status::PresentFailed);
         }
         let presented = unsafe {
             let drew = ffi::ImpellerSurfaceDrawDisplayList(surface, self.list);
@@ -217,7 +221,7 @@ impl super::Engine {
         if presented {
             Ok(())
         } else {
-            Err(Status::NotReady)
+            Err(Status::PresentFailed)
         }
     }
 }

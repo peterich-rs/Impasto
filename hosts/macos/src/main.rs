@@ -35,7 +35,10 @@ fn load() -> anyhow::Result<(app::Launch, PathBuf, Vec<u8>)> {
     let launch = if let Some(script) = &paths.script {
         let source = std::fs::read_to_string(script)
             .with_context(|| format!("failed to read script {}", script.display()))?;
-        app::Launch::Script(source)
+        app::Launch::Script {
+            name: script.display().to_string(),
+            source,
+        }
     } else {
         let scene_bytes = std::fs::read(&paths.scene)
             .with_context(|| format!("failed to read scene {}", paths.scene.display()))?;

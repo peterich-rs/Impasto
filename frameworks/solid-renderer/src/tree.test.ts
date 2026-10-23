@@ -33,6 +33,7 @@ function mockHost() {
     row: (gap) => alloc("row", [gap]),
     stack: () => alloc("stack", []),
     padding: (edges) => alloc("padding", [edges]),
+    grid: (columns, rows, gap) => alloc("grid", [columns, rows, gap]),
     pointerRegion: () => alloc("pointerRegion", []),
     clip: (radius) => alloc("clip", [radius]),
     opacity: (alpha) => alloc("opacity", [alpha]),
@@ -53,6 +54,14 @@ function mockHost() {
     setColor: (node, color) => note("setColor", [node, color]),
     setGap: (node, gap) => note("setGap", [node, gap]),
     setPadding: (node, edges) => note("setPadding", [node, edges]),
+    setPaddingEdges: (node, top, right, bottom, left) =>
+      note("setPaddingEdges", [node, top, right, bottom, left]),
+    setMargin: (node, top, right, bottom, left) => note("setMargin", [node, top, right, bottom, left]),
+    setMinSize: (node, width, height) => note("setMinSize", [node, width, height]),
+    setMaxSize: (node, width, height) => note("setMaxSize", [node, width, height]),
+    setShrink: (node, shrink) => note("setShrink", [node, shrink]),
+    setBasis: (node, basis) => note("setBasis", [node, basis]),
+    setAlignSelf: (node, align) => note("setAlignSelf", [node, align]),
     setGrow: (node, grow) => note("setGrow", [node, grow]),
     setRadius: (node, radius) => note("setRadius", [node, radius]),
     setAlpha: (node, alpha) => note("setAlpha", [node, alpha]),
@@ -95,6 +104,10 @@ function mockHost() {
     onKey: (node, fn) => note("onKey", [node, typeof fn]),
     onText: (node, fn) => note("onText", [node, typeof fn]),
     onComposing: (node, fn) => note("onComposing", [node, typeof fn]),
+    onHover: (node, fn) => note("onHover", [node, typeof fn]),
+    onLeave: (node, fn) => note("onLeave", [node, typeof fn]),
+    onWheel: (node, fn) => note("onWheel", [node, typeof fn]),
+    onSecondaryClick: (node, fn) => note("onSecondaryClick", [node, typeof fn]),
     onFrame: (fn) => note("onFrame", [typeof fn]),
   };
   return {
@@ -244,6 +257,28 @@ if (find(mock.calls, "onFocus")?.args[0] !== field.id) fail("onFocus");
 if (find(mock.calls, "sized")?.args[0] !== 1 || find(mock.calls, "sized")?.args[1] !== 22) fail("sized");
 if (box.id === 0) fail("sized id");
 
+const tracks = options.createElement("grid", { columns: ["40", "1fr"], rows: ["min"], gap: 0 });
+const gridCall = find(mock.calls, "grid");
+if (JSON.stringify(gridCall?.args[0]) !== JSON.stringify(["40", "1fr"])) fail("grid columns");
+if (JSON.stringify(gridCall?.args[1]) !== JSON.stringify(["min"])) fail("grid rows");
+if (gridCall?.args[2] !== 0 || tracks.id === 0) fail("grid");
+const inset = options.createElement("padding", { edges: 4, left: 4, top: 6 });
+const edgeCall = mock.calls.filter((call) => call.name === "setPaddingEdges" && call.args[0] === inset.id);
+const lastEdge = edgeCall[edgeCall.length - 1];
+if (lastEdge?.args[1] !== 6 || lastEdge.args[4] !== 4) fail("padding edges");
+options.setProperty(row, "margin", 8);
+options.setProperty(row, "shrink", 0);
+options.setProperty(row, "alignSelf", "center");
+const wheeled = () => {};
+options.setProperty(scroller, "onWheel", wheeled);
+if (find(mock.calls, "setMargin")?.args[1] !== 8) fail("margin");
+if (find(mock.calls, "setShrink")?.args[1] !== 0) fail("shrink");
+if (find(mock.calls, "setAlignSelf")?.args[1] !== "center") fail("alignSelf");
+if (find(mock.calls, "onWheel")?.args[0] !== scroller.id) fail("onWheel");
+const secondary = () => {};
+options.setProperty(field, "onSecondaryClick", secondary);
+if (find(mock.calls, "onSecondaryClick")?.args[0] !== field.id) fail("onSecondaryClick");
+
 let threw = false;
 try {
   options.createElement("nope");
@@ -252,4 +287,123 @@ try {
 }
 if (!threw) fail("unknown tag");
 
+await reorderFor();
+
 console.log("solid-renderer host tree ok");
+
+// `solid-js`'s node export is the server build, which does not rerun effects.
+// `node --conditions=browser` loads the client build, where `<For>` reorders.
+async function reorderFor(): Promise<void> {
+  let solid: typeof import("solid-js");
+  let universal: typeof import("@solidjs/universal");
+  try {
+    solid = await import("solid-js");
+    universal = await import("@solidjs/universal");
+  } catch (error) {
+    const code = error !== null && typeof error === "object" && "code" in error ? error.code : "";
+    if (code === "ERR_MODULE_NOT_FOUND") {
+      return;
+    }
+    throw error;
+  }
+  const resolved = import.meta.resolve("solid-js");
+  if (resolved.includes("server.js")) {
+    return;
+  }
+
+  let next = 1;
+  const texts = new Map<number, string>();
+  const children = new Map<number, number[]>();
+  const parentOf = new Map<number, number>();
+  const kids = (parent: number) => {
+    let list = children.get(parent);
+    if (list === undefined) {
+      list = [];
+      children.set(parent, list);
+    }
+    return list;
+  };
+  const unlink = (child: number) => {
+    const parent = parentOf.get(child);
+    if (parent === undefined) {
+      return;
+    }
+    const list = children.get(parent);
+    if (list !== undefined) {
+      const index = list.indexOf(child);
+      if (index >= 0) {
+        list.splice(index, 1);
+      }
+    }
+    parentOf.delete(child);
+  };
+  const impl = {
+    column: () => next++,
+    text: (utf8: string) => {
+      const id = next++;
+      texts.set(id, utf8);
+      return id;
+    },
+    setText: (node: number, utf8: string) => {
+      texts.set(node, utf8);
+    },
+    isText: (node: number) => texts.has(node),
+    append: (parent: number, child: number) => impl.insert(parent, child, 0),
+    insert: (parent: number, child: number, before: number) => {
+      unlink(child);
+      const list = kids(parent);
+      const at = before === 0 ? list.length : list.indexOf(before);
+      list.splice(at < 0 ? list.length : at, 0, child);
+      parentOf.set(child, parent);
+    },
+    remove: (_parent: number, child: number) => {
+      unlink(child);
+    },
+    parent: (node: number) => parentOf.get(node) ?? 0,
+    firstChild: (node: number) => kids(node)[0] ?? 0,
+    nextSibling: (node: number) => {
+      const parent = parentOf.get(node);
+      if (parent === undefined) {
+        return 0;
+      }
+      const list = kids(parent);
+      const index = list.indexOf(node);
+      return list[index + 1] ?? 0;
+    },
+  };
+  const host = new Proxy(impl, {
+    get(target, prop) {
+      if (typeof prop === "string" && prop in target) {
+        return target[prop as keyof typeof target];
+      }
+      return () => {
+        throw new Error(`unexpected host.${String(prop)}`);
+      };
+    },
+  });
+  const options = hostRendererOptions(host);
+  const renderer = universal.createRenderer(options);
+  const root = options.createElement("column");
+  const [items, setItems] = solid.createSignal([
+    { id: "a", label: "Alpha" },
+    { id: "b", label: "Beta" },
+  ]);
+  renderer.insert(root, () =>
+    solid.For({
+      get each() {
+        return items();
+      },
+      children: (item) => options.createTextNode(item.label),
+    }),
+  );
+  const labels = () => kids(root.id).map((id) => texts.get(id));
+  if (labels().join(",") !== "Alpha,Beta") {
+    fail(`For first order ${labels().join(",")}`);
+  }
+  const current = items();
+  setItems([current[1], current[0]]);
+  solid.flush();
+  if (labels().join(",") !== "Beta,Alpha") {
+    fail(`For reorder ${labels().join(",")}`);
+  }
+}

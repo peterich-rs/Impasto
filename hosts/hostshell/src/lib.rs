@@ -4,6 +4,7 @@
 mod command;
 mod error;
 mod input;
+mod present;
 mod ptr;
 mod queue;
 mod render;
@@ -16,6 +17,7 @@ use session::Metrics;
 
 pub use command::{Command, SurfaceTarget};
 pub use error::{BootError, LogLevel, SessionError};
+pub use present::{AfterPresent, after_present};
 pub use ptr::NativePtr;
 pub use render::{EngineSlot, Link, Poster, start};
 pub use session::Lifecycle;

@@ -53,6 +53,11 @@ struct CachedTexture {
     used: u64,
 }
 
+struct Face {
+    bytes: Vec<u8>,
+    family: CString,
+}
+
 enum Save {
     Clip,
     Transform,
@@ -70,8 +75,8 @@ pub struct Engine {
     retired: Vec<ffi::ImpellerParagraph>,
     list_generation: u64,
     paragraphs_stale: bool,
-    font: Vec<u8>,
-    family: Option<CString>,
+    faces: Vec<Face>,
+    default_family: Option<CString>,
     /// `dlopen` handle for `libvulkan.so`. Null until [`Engine::create_vulkan`].
     #[cfg(target_os = "android")]
     vulkan_lib: *mut c_void,
@@ -122,8 +127,8 @@ impl Engine {
             retired: Vec::new(),
             list_generation: 0,
             paragraphs_stale: false,
-            font: Vec::new(),
-            family: None,
+            faces: Vec::new(),
+            default_family: None,
             #[cfg(target_os = "android")]
             vulkan_lib: ptr::null_mut(),
             saves: Vec::new(),
@@ -159,8 +164,22 @@ impl Engine {
         if !registered {
             return Err(Status::BadScene);
         }
-        self.font = owned;
-        self.family = Some(family);
+        if self.default_family.is_none() {
+            self.default_family = Some(family.clone());
+        }
+        if let Some(face) = self
+            .faces
+            .iter_mut()
+            .find(|face| face.family.as_bytes() == family.as_bytes())
+        {
+            face.bytes = owned;
+            face.family = family;
+        } else {
+            self.faces.push(Face {
+                bytes: owned,
+                family,
+            });
+        }
         if self.list.is_null() {
             self.release_paragraphs();
             self.paragraphs_stale = false;
@@ -305,10 +324,13 @@ impl Engine {
         color: [u8; 4],
         style: &TextStyle,
     ) -> Result<(f32, f32), Status> {
-        if utf8.is_empty() || self.family.is_none() && style.family.is_none() {
+        if utf8.is_empty() {
             return Err(Status::BadScene);
         }
-        let Some(key) = para_key(utf8, font_size, max_width, color, style) else {
+        let Some(family) = self.resolved_family(style.family.as_deref()) else {
+            return Err(Status::BadScene);
+        };
+        let Some(key) = para_key(utf8, font_size, max_width, color, &family, style) else {
             return Err(Status::BadScene);
         };
         if !self.paragraphs_stale {
@@ -326,8 +348,11 @@ impl Engine {
 
     #[cfg(not(target_os = "android"))]
     pub fn draw_metal(&mut self, metal_drawable: *mut c_void) -> Result<(), Status> {
-        if self.list.is_null() || metal_drawable.is_null() {
+        if self.context.is_null() || self.list.is_null() {
             return Err(Status::NotReady);
+        }
+        if metal_drawable.is_null() {
+            return Err(Status::PresentFailed);
         }
         // SAFETY: `metal_drawable` is a CAMetalDrawable from the system default device,
         // kept alive by the caller for this call. The context uses that same device.
@@ -335,7 +360,7 @@ impl Engine {
             ffi::ImpellerSurfaceCreateWrappedMetalDrawableNew(self.context, metal_drawable)
         };
         if surface.is_null() {
-            return Err(Status::NotReady);
+            return Err(Status::PresentFailed);
         }
         let presented = unsafe {
             let drew = ffi::ImpellerSurfaceDrawDisplayList(surface, self.list);
@@ -346,7 +371,7 @@ impl Engine {
         if presented {
             Ok(())
         } else {
-            Err(Status::NotReady)
+            Err(Status::PresentFailed)
         }
     }
 
@@ -534,10 +559,13 @@ impl Engine {
         utf8: &str,
         text_style: &TextStyle,
     ) -> bool {
-        if utf8.is_empty() || (self.family.is_none() && text_style.family.is_none()) {
+        if utf8.is_empty() {
             return false;
         }
-        let Some(key) = para_key(utf8, font_size, max_width, color, text_style) else {
+        let Some(family) = self.resolved_family(text_style.family.as_deref()) else {
+            return false;
+        };
+        let Some(key) = para_key(utf8, font_size, max_width, color, &family, text_style) else {
             return false;
         };
         let cached = if self.paragraphs_stale {
@@ -606,6 +634,29 @@ impl Engine {
         })
     }
 
+    /// Family actually passed to Impeller. A missing name falls back to the first
+    /// registered face so a typo does not fail the whole frame.
+    fn resolved_family(&self, requested: Option<&str>) -> Option<String> {
+        self.resolved_face(requested)
+            .and_then(|family| family.to_str().ok().map(str::to_owned))
+    }
+
+    fn resolved_face(&self, requested: Option<&str>) -> Option<&CString> {
+        if let Some(name) = requested.filter(|name| !name.is_empty())
+            && let Some(face) = self
+                .faces
+                .iter()
+                .find(|face| face.family.as_bytes() == name.as_bytes())
+        {
+            return Some(&face.family);
+        }
+        let default = self.default_family.as_ref()?;
+        self.faces
+            .iter()
+            .find(|face| face.family.as_c_str() == default.as_c_str())
+            .map(|face| &face.family)
+    }
+
     fn shape(
         &self,
         paint: Option<ffi::ImpellerPaint>,
@@ -614,14 +665,8 @@ impl Engine {
         max_width: f32,
         text_style: &TextStyle,
     ) -> Option<ffi::ImpellerParagraph> {
-        let custom = match &text_style.family {
-            Some(name) => Some(CString::new(name.as_str()).ok()?),
-            None => None,
-        };
-        let family = match &custom {
-            Some(name) => name.as_ptr(),
-            None => self.family.as_ref()?.as_ptr(),
-        };
+        let family = self.resolved_face(text_style.family.as_deref())?;
+        let family = family.as_ptr();
         let ellipsis = match &text_style.ellipsis {
             Some(text) => Some(CString::new(text.as_str()).ok()?),
             None => None,
@@ -935,6 +980,7 @@ fn para_key(
     font_size: f32,
     max_width: f32,
     color: [u8; 4],
+    family: &str,
     style: &TextStyle,
 ) -> Option<ParaKey> {
     if !font_size.is_finite() || font_size <= 0.0 || !max_width.is_finite() || max_width <= 0.0 {
@@ -945,7 +991,7 @@ fn para_key(
         font_size: font_size.to_bits(),
         max_width: max_width.to_bits(),
         color,
-        family: style.family.clone().unwrap_or_default(),
+        family: family.to_owned(),
         max_lines: style.max_lines.unwrap_or(0),
         ellipsis: style.ellipsis.clone().unwrap_or_default(),
         align: style.align,

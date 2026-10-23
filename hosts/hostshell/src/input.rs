@@ -38,9 +38,6 @@ impl Input {
 
     /// Returns whether the platform should arm the next vsync.
     pub fn push_pointer(&mut self, event: PointerEvent) -> bool {
-        if event.phase == Phase::Move && !self.down {
-            return false;
-        }
         if event.phase == Phase::Down {
             self.down = true;
         }
@@ -68,12 +65,8 @@ impl Input {
     pub fn pause(&mut self) -> bool {
         self.paused = true;
         if self.down {
-            self.pointers.push_back(PointerEvent {
-                phase: Phase::Cancel,
-                x: 0.0,
-                y: 0.0,
-                time_ms: 0.0,
-            });
+            self.pointers
+                .push_back(PointerEvent::new(Phase::Cancel, 0.0, 0.0, 0.0));
             self.down = false;
             return true;
         }
@@ -119,12 +112,7 @@ mod tests {
     use ui_core::Phase;
 
     fn event(phase: Phase, x: f32) -> PointerEvent {
-        PointerEvent {
-            phase,
-            x,
-            y: 0.0,
-            time_ms: 0.0,
-        }
+        PointerEvent::new(phase, x, 0.0, 0.0)
     }
 
     fn phases(input: &Input) -> Vec<Phase> {
@@ -132,18 +120,26 @@ mod tests {
     }
 
     #[test]
-    fn moves_outside_a_press_are_dropped_and_cancel_passes() {
+    fn moves_outside_a_press_are_queued_for_hover() {
         let mut input = Input::new();
-        assert!(!input.push_pointer(event(Phase::Move, 1.0)));
-        assert!(input.pointers.is_empty());
+        assert!(input.push_pointer(event(Phase::Move, 1.0)));
         assert!(input.push_pointer(event(Phase::Down, 1.0)));
         assert!(input.push_pointer(event(Phase::Move, 2.0)));
         assert!(input.push_pointer(event(Phase::Up, 2.0)));
-        assert!(!input.push_pointer(event(Phase::Move, 3.0)));
+        assert!(input.push_pointer(event(Phase::Move, 3.0)));
+        assert!(input.push_pointer(PointerEvent::wheel(0.0, 0.0, 0.0, 0.0, 8.0)));
         assert!(input.push_pointer(event(Phase::Cancel, 0.0)));
         assert_eq!(
             phases(&input),
-            vec![Phase::Down, Phase::Move, Phase::Up, Phase::Cancel]
+            vec![
+                Phase::Move,
+                Phase::Down,
+                Phase::Move,
+                Phase::Up,
+                Phase::Move,
+                Phase::Wheel,
+                Phase::Cancel
+            ]
         );
     }
 

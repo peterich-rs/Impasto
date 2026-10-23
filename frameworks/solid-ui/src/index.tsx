@@ -2,8 +2,10 @@ import { createSignal } from "solid-js";
 import { Text, type NodeHandle } from "@uifw/solid-renderer";
 import { BUTTON_FILL, BUTTON_LABEL, BUTTON_PRESSED, FONT_SIZE } from "@uifw/solid-renderer/defaults";
 
+export { Dialog } from "./Dialog.tsx";
 export { Field } from "./Field.tsx";
 export { ScrollArea } from "./ScrollArea.tsx";
+export { Switch } from "./Switch.tsx";
 
 export function Button(props: { label: string; onClick: () => void }): NodeHandle {
   const [pressed, setPressed] = createSignal(false);

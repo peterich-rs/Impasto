@@ -1,5 +1,9 @@
 [versions]
 kotlin = "2.3.20"
+reactive = "5.1.2"
+
+[libraries]
+reactive = { module = "com.lightningkite:reactive", version.ref = "reactive" }
 
 [plugins]
 kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }

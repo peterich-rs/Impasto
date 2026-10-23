@@ -8,4 +8,6 @@ pub enum Status {
     BadScene,
     #[error("frame is not ready")]
     NotReady,
+    #[error("present failed")]
+    PresentFailed,
 }

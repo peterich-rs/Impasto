@@ -68,12 +68,7 @@ mod tests {
     use ui_core::{Phase, PointerEvent};
 
     fn move_event(x: f32, time_ms: f64) -> PointerEvent {
-        PointerEvent {
-            phase: Phase::Move,
-            x,
-            y: 0.0,
-            time_ms,
-        }
+        PointerEvent::new(Phase::Move, x, 0.0, time_ms)
     }
 
     #[test]
@@ -94,14 +89,23 @@ mod tests {
         let mut commands = VecDeque::new();
         push_coalesced(
             &mut commands,
-            Command::Pointer(PointerEvent {
-                phase: Phase::Down,
-                x: 0.0,
-                y: 0.0,
-                time_ms: 0.0,
-            }),
+            Command::Pointer(PointerEvent::new(Phase::Down, 0.0, 0.0, 0.0)),
         );
         push_coalesced(&mut commands, Command::Pointer(move_event(3.0, 4.0)));
+        assert_eq!(commands.len(), 2);
+    }
+
+    #[test]
+    fn wheels_stay_in_order() {
+        let mut commands = VecDeque::new();
+        push_coalesced(
+            &mut commands,
+            Command::Pointer(PointerEvent::wheel(1.0, 2.0, 0.0, 0.0, 4.0)),
+        );
+        push_coalesced(
+            &mut commands,
+            Command::Pointer(PointerEvent::wheel(1.0, 2.0, 8.0, 0.0, 6.0)),
+        );
         assert_eq!(commands.len(), 2);
     }
 }

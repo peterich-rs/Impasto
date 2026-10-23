@@ -1,8 +1,8 @@
 # 原生层
 
-场景字节、渲染树、播放器、会话、壳、macOS 宿主和 Android 宿主是 Rust。字节格式仍是版本 1，开头是 `UIFW`。Solid 编译、Kotlin 的 cinterop 和图片管线不在这里。iOS 没有 Impeller 预构建产物，宿主还没写。
+场景格式、渲染树、渲染引擎、会话、`hostshell`、macOS 宿主和 Android 宿主是 Rust。字节格式是版本 1，开头是 `UIFW`。Solid 编译、Kotlin 的 cinterop 和图片管线不在这里。iOS 没有 Impeller 预构建产物，宿主还没写。
 
-`cargo test` 核对 208 字节和布局结果。macOS 宿主把计数器金样画成第一帧。`--js` 走 QuickJS 会话。Kotlin 和 TypeScript 仍用自己的编码器对字节，不调用 Rust。所以这里不提供产品 C 头文件。`core` 的 C ABI 留到 Kotlin cinterop 真要链接的时候再写。QuickJS 会话直接调用 `Tree`，胶水 C 只在 `runtimes/quickjs/src/glue.c`。
+`cargo test` 核对 208 字节和布局结果。不加载脚本时，macOS 宿主把 `counter.bin` 画成第一帧。`--js` 走 QuickJS 会话。Kotlin 和 TypeScript 用自己的编码器对这套字节，不调用 Rust。这几层没有对外的 C 头文件。`core` 的 C ABI 留到 Kotlin cinterop 真要链接的时候再写。QuickJS 会话直接调用 `Tree`，胶水 C 只在 `runtimes/quickjs/src/glue.c`。
 
 没有 `third_party/quickjs` 时会话 crate 返回 `NotLinked`。根上没有 CMake。
 
@@ -10,7 +10,7 @@
 
 | crate 或目录 | 内容 |
 |---|---|
-| `protocol/` | 版本 1 的编码、解码、计数器金样，以及把它收成 `DrawList` |
+| `protocol/` | 版本 1 的编码、解码、`counter.bin`，以及把它收成 `DrawList` |
 | `core/` | Taffy 布局、等宽排版、绘制录制、命中、click、drag 和焦点 |
 | `engine/` | 读 `DrawList`，调用 `impeller.h` |
 | `session/` | `metrics`、`pointer`、`input`、`frame`、`wants_frame`、`wants_ime`、`lifecycle` |
@@ -19,7 +19,7 @@
 | `hosts/android/` | GameActivity、`AChoreographer`、Vulkan、logcat。库名 `uifw` |
 | `runtimes/quickjs/` | quickjs-ng 会话。包名 `quickjs` |
 
-`just check` 先 `cargo test --workspace`，再跑 Kotlin 和 Solid 的字节对比。金样是 `protocol/tests/fixtures/counter.bin`。环境变量仍叫 `UIFW_COUNTER_BYTES`。Kotlin 和 TypeScript 的包名不在这里改。
+`just check` 先 `cargo test --workspace`，再跑 Kotlin 和 Solid 的字节对比。对照文件是 `protocol/tests/fixtures/counter.bin`，环境变量是 `UIFW_COUNTER_BYTES`。
 
 ## 仓库
 
@@ -28,9 +28,9 @@
 ```
 protocol/          版本 1 字节，以及把它变成 DrawList 的映射
 core/              渲染树。依赖 taffy 和 protocol
-engine/            播放器。依赖 protocol 和 Impeller 头文件
+engine/            渲染引擎。依赖 protocol 和 Impeller 头文件
 session/           会话 trait。依赖 core 和 protocol
-hosts/hostshell/   壳。依赖 core、engine、protocol、session
+hosts/hostshell/   命令队列、帧调度、渲染线程。依赖 core、engine、protocol、session
 hosts/macos/       二进制。依赖 hostshell、core、engine、protocol、session、quickjs
 hosts/android/     cdylib `uifw`。依赖 hostshell，并在 Android 上打开 QuickJS 会话
 runtimes/quickjs/  QuickJS 会话。依赖 core、protocol、session
@@ -44,7 +44,7 @@ Taffy 用 crates.io 上引入时的版本，写进 `Cargo.lock`。不使用它�
 
 宿主和核心直接用 Rust 调用，不经过 C。帧顺序、依赖方向和会话里的冲刷在 `docs/architecture.md`。三端线程和表面在 `docs/platform-hosts.md`。
 
-计数器金样不经过渲染树。`just host` 把版本 1 字节收成 `DrawList`，提交一次。这条映射只为保住第一帧，不在里面做 Taffy 布局。`just host-js` 走会话那一帧。
+`just host` 不经过渲染树。它把 `counter.bin` 收成 `DrawList` 并提交一次，不做 Taffy 布局。`just host-js` 走会话那一帧。
 
 ## protocol
 
@@ -57,9 +57,9 @@ Taffy 用 crates.io 上引入时的版本，写进 `Cargo.lock`。不使用它�
 - kind 是 `LAYER=1`、`RECT=2`、`TEXT=3`、`IMAGE=4`
 - 短缓冲区返回失败且不写出。解码要求魔数、版本、kind 和字节刚好用完。解码结果拥有 `String`，并拒绝非法 UTF-8
 
-计数器金样是这棵手写的绝对坐标树，编码长度 208。文件是 `protocol/tests/fixtures/counter.bin`。Rust 测试对这个文件逐字节比较，不用编码器再算一遍「应该是 208」，也不重新生成它。解码测试覆盖：截断、错误魔数、错误版本、非法 kind、尾部多余字节、金样里 `"Count"` 的坐标和 `"asset:logo"` 的宽度。
+计数器场景是这棵手写的绝对坐标树，编码长度 208。文件是 `protocol/tests/fixtures/counter.bin`。Rust 测试对这个文件逐字节比较，不用编码器再算一遍「应该是 208」，也不重新生成它。解码测试覆盖：截断、错误魔数、错误版本、非法 kind、尾部多余字节、文件里 `"Count"` 的坐标和 `"asset:logo"` 的宽度。
 
-`draw_list` 把解码后的版本 1 节点收成绘制命令。规则和版本 1 的播放相同：
+`draw_list` 把解码后的版本 1 节点收成绘制命令：
 
 - 跳过 `LAYER`
 - 先铺 rgba `(17, 17, 17, 255)` 的全屏矩形
@@ -83,7 +83,7 @@ pub struct DrawList {
 }
 ```
 
-`core::Tree::record` 交出带节点自己的字号和测量约束的同一份列表。播放器只认 `DrawList`，不自己解析场景字节，也没有默认字号。
+`core::Tree::record` 交出带节点自己的字号和测量约束的同一份列表。渲染引擎只认 `DrawList`，不自己解析场景字节，也没有默认字号。
 
 ## core
 
@@ -104,7 +104,7 @@ pub struct DrawList {
 | `Decorated` | 一列子节点，间距 0 | 边框盒一条矩形，圆角记在命令上。命中交给子节点 |
 | `PointerRegion` | 尺寸等于子节点 | 不绘制 |
 
-文字测量是 trait。测试实现按字节计宽：一个字节的前进宽度是 `font_size * 0.5`，高度是 `font_size`。放不下就换行。宿主的实现调用 `Engine::measure_paragraph`，测量和绘制共用同一次排版，颜色在测量时写进前景。`core` 不链接 Impeller。
+文字测量是 trait。测试实现按 Unicode 标量计宽：一个标量的前进宽度是 `font_size * 0.5`，高度是 `font_size`。放不下就换行。宿主的实现调用 `Engine::measure_paragraph`，测量和绘制共用同一次排版，颜色在测量时写进前景。`core` 不链接 Impeller。
 
 命中测试用布局之后的盒子，从最后一个子节点往前。宽或高为 0 的节点跳过。`opaque` 命中盒子就收下，`defer` 只看子节点。点必须落在每个祖先盒子内。圆角不改变命中。`PointerRegion` 把自己放进命中结果。子节点的 `set_grow` 写 `flex_grow`，负值拒绝。flex 父节点有确定主轴尺寸时，正的 grow 在下一次 `layout` 分到剩余空间。
 
@@ -125,13 +125,13 @@ pub struct DrawList {
 
 ## engine
 
-播放器用 `bindgen` 包含当前目标平台目录下的 `impeller.h`，例如 `third_party/impeller-sdk/darwin-arm64/include/impeller.h`。创建 Metal context 时传入该头文件里的 `IMPELLER_VERSION`。没有 SDK 时 `engine` 的图形测试跳过，不另放一个 C stub。
+渲染引擎用 `bindgen` 包含当前目标平台目录下的 `impeller.h`，例如 `third_party/impeller-sdk/darwin-arm64/include/impeller.h`。创建 Metal context 时传入该头文件里的 `IMPELLER_VERSION`。没有 SDK 时 `engine` 的图形测试跳过，不另放一个 C stub。
 
 `submit` 接收 `DrawList`、`point_scale` 和图片回调。回调里的 source 是 `&str`。RGBA 只要活到 `submit` 返回。`draw_metal` 接收系统默认设备上的 `CAMetalLayer` drawable。Android 目标另外提供 `create_vulkan` 和 `draw_vulkan`。成功是 `Result::Ok`。失败是 `Status::NotLinked`、`BadScene`、`NotReady`。
 
 第一条非 `Fill` 命令之前做一次缩放。`PushClip`、`PushOpacity` 和 `PushTransform` 也走这次缩放，因此 `Save` 和 `Restore` 之间的矩阵都含 `point_scale`。半径不大于 0 时走直角接口，否则钳到短边的一半再画圆角或圆角裁剪。透明度用单独的 layer paint，白底加上命令里的 alpha，`Restore` 之后释放。`PushTransform` 在 `Save` 之后是 `Translate`、`Rotate`、`Scale`，`Pop` 复用 `Restore`。多一个 `Pop`，或结束时栈还没排空，都是 `BadScene`，并且不创建显示列表。失败时先把残留的 save 恢复掉，再释放 builder。没有 SDK 时这些测试早退，不另放 C stub。
 
-绘制时坐标乘 `point_scale`，文字用已注册字体和命令里的字号、字重、对齐、方向，字号不再乘缩放。缺省样式不额外调用最大行数、省略号和行高接口。图片必须是紧排 RGBA8888。版本 1 映射带来的文字已经带上字号 28、段落宽 280 和缺省样式。纹理按 `source` 跨帧保留，段落按文字、字号、宽度、颜色和样式跨帧保留。`measure_paragraph` 和绘制共用这张表。成功提交结束时只释放当前显示列表没有引用的条目。`register_font` 使段落在下一次提交释放显示列表之后失效。present 失败是 `NotReady`。
+绘制时坐标乘 `point_scale`，文字用已注册字体和命令里的字号、字重、对齐、方向，字号不再乘缩放。缺省样式不额外调用最大行数、省略号和行高接口。图片必须是紧排 RGBA8888。版本 1 映射带来的文字已经带上字号 28、段落宽 280 和缺省样式。纹理按 `source` 跨帧保留，段落按文字、字号、宽度、颜色和样式跨帧保留。`measure_paragraph` 和绘制共用这张表。成功提交结束时只释放当前显示列表没有引用的条目。`register_font` 使段落在下一次提交释放显示列表之后失效。上屏失败是 `PresentFailed`。还没有表面或显示列表是 `NotReady`。
 
 ## 宿主
 
@@ -139,7 +139,7 @@ macOS 宿主用 `objc2`、`objc2-app-kit` 和 `objc2-metal` 调用 AppKit。窗�
 
 环境变量仍叫 `UIFW_DUMP`。设置之后画出第一帧，写成 PNG，然后进程退出。字体仍读 `/System/Library/Fonts/Supplemental/Arial.ttf`。图片按 `asset:<name>` 到资产目录里找 `<name>.png`，目录由启动参数给出，默认是 `hosts/macos/assets`。Android 用同一约定读 `assets/images/<name>.png`。
 
-指针从 `NSEvent` 换成场景点放进队列。先把窗口坐标换进内容视图，再把原点改到左上。`timestamp` 乘 1000 写进 `time_ms`。AppKit 给出的已经是点，不除 `backingScaleFactor`。Android 的 `event_time` 是纳秒，除以 1_000_000 得到毫秒。队列在渲染线程排空。夹具路径提交一次绘制列表后只 present 第一帧。`--js` 由会话出队。没有新的指针或 metrics，并且会话没有申请下一帧时，不再登记 `CVDisplayLink`。列表与上次提交相同时不调用 `submit`。会话申请了下一帧时，列表相同也再登记恰好一帧。不要在宿主里写计数器。
+指针从 `NSEvent` 换成场景点放进队列。先把窗口坐标换进内容视图，再把原点改到左上。`timestamp` 乘 1000 写进 `time_ms`。AppKit 给出的已经是点，不除 `backingScaleFactor`。Android 的 `event_time` 是纳秒，除以 1_000_000 得到毫秒。队列在渲染线程排空。`just host` 提交一次绘制列表后只 present 第一帧。`--js` 由会话出队。没有新的指针或 metrics，并且会话没有申请下一帧时，不再登记 `CVDisplayLink`。列表与上次提交相同时不调用 `submit`。会话申请了下一帧时，列表相同也再登记恰好一帧。计数器的加减写在应用里。
 
 Android 宿主是 `hosts/android` 的 cdylib，库名 `uifw`。`android_main` 入队后回到 looper。`present` 里 acquire、`draw_vulkan`、present。`ANativeWindow` 要等 `SurfaceDropped` 之后才释放。字体是 `assets/fonts/UIFWSans.ttf`（Roboto Regular，注册名仍是 `UIFWSans`）。图片是 `assets/images/logo.png`，用 `AImageDecoder` 解成 RGBA。`just android` 先编 cdylib，再打 APK。
 
@@ -149,6 +149,6 @@ Android 宿主是 `hosts/android` 的 cdylib，库名 `uifw`。`android_main` �
 
 1. `protocol` 的测试与 `counter.bin` 逐字节相同，解码拒绝损坏输入。
 2. `core` 的布局和 click 测试通过，且不链 Impeller。
-3. `UIFW_DUMP` 配合 `just host` 画出夹具：深色底、白色 `Count`、绿色 `0`、右上角绿色斜线标志，这些像素仍在场景坐标里。窗口默认是 360×640，所以整张 dump 比原来的 320×180 大，多出来的区域是清空色。`just host-js` 的第一帧还有圆角按钮和 `asset:logo`。按钮角上是窗口底色，内部是按钮填充色。
+3. `UIFW_DUMP` 配合 `just host` 画出计数器场景：深色底、白色 `Count`、绿色 `0`、右上角绿色斜线标志，这些像素在场景坐标里。窗口默认是 360×640，画面比场景里的 320×180 大，多出来的区域是清空色。`just host-js` 的第一帧还有圆角按钮和 `asset:logo`。按钮角上是窗口底色，内部是按钮填充色。
 4. `just check` 仍跑通 Kotlin 和 Solid 的字节对比。QuickJS 测试读的是提交进仓库的 `dist/counter.js`，改宿主树之后要先 `just solid-app` 重编再跑 `cargo test`。真机验收：首帧避开状态栏，点减号得到 `Count: -1`，按下变色、抬起恢复，旋转或分屏后仍避让，Home 再回来不崩。没有指针、也没有 `requestFrame` 时不再登记帧。`console` 和运行期脚本错误出现在宿主日志里，进程继续。
 5. `protocol`、`core`、`engine`、`hosts/macos` 没有 C 或 Objective-C 源码，根上也没有原生 CMake。QuickJS 的 `glue.c` 由 `cc` 编进 `quickjs` crate。没有解释器源码时这一步不编译 C。Android 宿主的 NDK 调用留在 `hosts/android`。

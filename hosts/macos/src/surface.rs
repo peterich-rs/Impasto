@@ -39,7 +39,7 @@ impl MetalSurface {
         // down. `nextDrawable` is the render thread's only use of it.
         let layer = unsafe { &*self.layer.0.cast::<CAMetalLayer>() };
         let Some(drawable) = layer.nextDrawable() else {
-            return Err(engine::Status::NotReady);
+            return Err(engine::Status::PresentFailed);
         };
         let drawable_ptr = Retained::as_ptr(&drawable) as *mut c_void;
         // SAFETY: `drawable` stays retained until this function returns.

@@ -1,21 +1,26 @@
-use crate::{Gesture, MonoShaper, Phase, PointerEvent, Shaper, Tree};
+use crate::{
+    Button, Edges, Gesture, Modifiers, MonoShaper, Phase, PointerEvent, Shaper, TrackSize, Tree,
+};
 
 fn event(phase: Phase, x: f32, y: f32) -> PointerEvent {
+    PointerEvent::new(phase, x, y, 0.0)
+}
+
+fn button_event(phase: Phase, x: f32, y: f32, button: Button) -> PointerEvent {
     PointerEvent {
         phase,
         x,
         y,
         time_ms: 0.0,
+        button,
+        modifiers: Modifiers::empty(),
+        dx: 0.0,
+        dy: 0.0,
     }
 }
 
 fn timed(phase: Phase, x: f32, y: f32, time_ms: f64) -> PointerEvent {
-    PointerEvent {
-        phase,
-        x,
-        y,
-        time_ms,
-    }
+    PointerEvent::new(phase, x, y, time_ms)
 }
 
 #[test]
@@ -142,7 +147,7 @@ fn recorded_text_uses_the_ancestor_origin() -> Result<(), crate::Error> {
 #[test]
 fn viewport_wraps_text_to_the_available_width() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper);
-    tree.set_viewport(0.0, 0.0, 10.0, 40.0);
+    tree.set_viewport(0.0, 0.0, 10.0, 40.0)?;
     let text = tree.text("Hi", 16.0, [0, 0, 0, 255])?;
     tree.layout()?;
     assert_eq!((tree.rect(text)?.w, tree.rect(text)?.h), (8.0, 32.0));
@@ -573,7 +578,7 @@ fn grow_fills_free_space_on_the_next_layout() -> Result<(), crate::Error> {
 #[test]
 fn viewport_origin_shifts_hit_testing() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper);
-    tree.set_viewport(12.0, 30.0, 80.0, 100.0);
+    tree.set_viewport(12.0, 30.0, 80.0, 100.0)?;
     let region = tree.pointer_region()?;
     let child = tree.sized(20.0, 10.0)?;
     tree.add_child(region, child)?;
@@ -710,10 +715,10 @@ fn non_finite_gap_does_not_mark_the_tree() -> Result<(), crate::Error> {
 }
 
 #[test]
-fn mono_shaper_counts_utf8_bytes() {
+fn mono_shaper_counts_scalars() {
     let size = MonoShaper.measure(
-        "你",
-        10.0,
+        "中",
+        16.0,
         1_000_000.0,
         [0, 0, 0, 255],
         &protocol::TextStyle::default(),
@@ -721,10 +726,18 @@ fn mono_shaper_counts_utf8_bytes() {
     assert_eq!(
         size,
         crate::TextSize {
-            width: 15.0,
-            height: 10.0
+            width: 8.0,
+            height: 16.0
         }
     );
+    let latin = MonoShaper.measure(
+        "Hi",
+        16.0,
+        1_000_000.0,
+        [0, 0, 0, 255],
+        &protocol::TextStyle::default(),
+    );
+    assert_eq!(latin.width, 16.0);
 }
 
 #[test]
@@ -853,7 +866,7 @@ fn structure_change_drops_a_locked_drag() -> Result<(), crate::Error> {
 #[test]
 fn scroll_offset_moves_paint_and_hits_without_moving_layout() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper);
-    tree.set_viewport(0.0, 0.0, 100.0, 80.0);
+    tree.set_viewport(0.0, 0.0, 100.0, 80.0)?;
     let root = tree.column(0.0)?;
     tree.set_fill(root)?;
     let header = tree.sized(20.0, 20.0)?;
@@ -914,7 +927,7 @@ fn scroll_offset_moves_paint_and_hits_without_moving_layout() -> Result<(), crat
 #[test]
 fn scroll_hit_uses_the_offset_and_stays_inside_the_viewport() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper);
-    tree.set_viewport(0.0, 0.0, 100.0, 80.0);
+    tree.set_viewport(0.0, 0.0, 100.0, 80.0)?;
     let root = tree.column(0.0)?;
     tree.set_fill(root)?;
     let scroll = tree.scroll()?;
@@ -948,7 +961,7 @@ fn scroll_hit_uses_the_offset_and_stays_inside_the_viewport() -> Result<(), crat
     );
 
     let mut tree = Tree::new(MonoShaper);
-    tree.set_viewport(0.0, 0.0, 100.0, 80.0);
+    tree.set_viewport(0.0, 0.0, 100.0, 80.0)?;
     let root = tree.column(0.0)?;
     tree.set_fill(root)?;
     let scroll = tree.scroll()?;
@@ -982,7 +995,7 @@ fn scroll_hit_uses_the_offset_and_stays_inside_the_viewport() -> Result<(), crat
 #[test]
 fn nested_fill_keeps_the_scroll_inside_the_viewport() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper);
-    tree.set_viewport(0.0, 0.0, 320.0, 180.0);
+    tree.set_viewport(0.0, 0.0, 320.0, 180.0)?;
     let root = tree.column(0.0)?;
     tree.set_fill(root)?;
     let app = tree.column(8.0)?;
@@ -1009,7 +1022,7 @@ fn nested_fill_keeps_the_scroll_inside_the_viewport() -> Result<(), crate::Error
 #[test]
 fn justify_and_wrap_use_the_flex_line() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper);
-    tree.set_viewport(0.0, 0.0, 100.0, 40.0);
+    tree.set_viewport(0.0, 0.0, 100.0, 40.0)?;
     let row = tree.row(0.0)?;
     tree.set_fill(row)?;
     tree.set_justify(row, crate::Justify::SpaceBetween)?;
@@ -1030,7 +1043,7 @@ fn justify_and_wrap_use_the_flex_line() -> Result<(), crate::Error> {
     ));
 
     let mut tree = Tree::new(MonoShaper);
-    tree.set_viewport(0.0, 0.0, 50.0, 80.0);
+    tree.set_viewport(0.0, 0.0, 50.0, 80.0)?;
     let row = tree.row(0.0)?;
     tree.set_fill(row)?;
     tree.set_wrap(row, true)?;
@@ -1119,7 +1132,7 @@ fn click_moves_focus_and_a_locked_drag_does_not() -> Result<(), crate::Error> {
     tree.add_child(column, field)?;
     tree.add_child(column, plain)?;
     tree.add_child(scroll, column)?;
-    tree.set_viewport(0.0, 0.0, 40.0, 80.0);
+    tree.set_viewport(0.0, 0.0, 40.0, 80.0)?;
     tree.layout()?;
     let field_rect = tree.rect(field)?;
     let plain_rect = tree.rect(plain)?;
@@ -1225,15 +1238,218 @@ fn programmatic_focus_remove_and_insert() -> Result<(), crate::Error> {
 }
 
 #[test]
+fn padding_edges_offset_the_child() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    let pad = tree.padding(0.0)?;
+    tree.set_padding_edges(
+        pad,
+        Edges {
+            top: 6.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 4.0,
+        },
+    )?;
+    let child = tree.sized(10.0, 10.0)?;
+    tree.add_child(pad, child)?;
+    tree.layout()?;
+    let rect = tree.rect(child)?;
+    assert_eq!((rect.x, rect.y), (4.0, 6.0));
+    Ok(())
+}
+
+#[test]
+fn margin_offsets_the_child() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    let column = tree.column(0.0)?;
+    let child = tree.sized(10.0, 10.0)?;
+    tree.add_child(column, child)?;
+    tree.set_margin(
+        child,
+        Edges {
+            top: 6.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 4.0,
+        },
+    )?;
+    tree.layout()?;
+    let rect = tree.rect(child)?;
+    assert_eq!((rect.x, rect.y), (4.0, 6.0));
+    Ok(())
+}
+
+#[test]
+fn grid_tracks_assign_fixed_and_fraction_columns() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    let grid = tree.grid_tracks(
+        &[TrackSize::Points(40.0), TrackSize::Fraction(1.0)],
+        &[TrackSize::MinContent],
+        0.0,
+    )?;
+    let left = tree.column(0.0)?;
+    let right = tree.column(0.0)?;
+    tree.add_child(grid, left)?;
+    tree.add_child(grid, right)?;
+    tree.set_fill(grid)?;
+    tree.set_viewport(0.0, 0.0, 100.0, 40.0)?;
+    tree.layout()?;
+    let second = tree.rect(right)?;
+    assert_eq!(second.x, 40.0);
+    assert_eq!(second.w, 60.0);
+    Ok(())
+}
+
+#[test]
+fn non_finite_margin_does_not_mark_the_tree() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    let column = tree.column(0.0)?;
+    tree.layout()?;
+    assert!(matches!(
+        tree.set_margin(column, Edges::all(f32::NAN)),
+        Err(crate::Error::BadNumber)
+    ));
+    assert!(!tree.is_dirty());
+    assert!(matches!(
+        tree.set_shrink(column, -1.0),
+        Err(crate::Error::BadNumber)
+    ));
+    assert!(!tree.is_dirty());
+    assert!(matches!(
+        tree.set_viewport(f32::NAN, 0.0, 10.0, 10.0),
+        Err(crate::Error::BadNumber)
+    ));
+    assert!(!tree.is_dirty());
+    Ok(())
+}
+
+#[test]
+fn hover_enters_and_leaves_and_a_wheel_does_not_scroll() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    let scroll = tree.scroll()?;
+    let child = tree.image("asset:a", 40.0, 80.0)?;
+    tree.add_child(scroll, child)?;
+    tree.set_viewport(0.0, 0.0, 40.0, 40.0)?;
+    tree.layout()?;
+    assert_eq!(
+        tree.pointer(event(Phase::Move, 10.0, 10.0)),
+        vec![Gesture::Hover(child)]
+    );
+    assert_eq!(
+        tree.pointer(event(Phase::Move, 80.0, 80.0)),
+        vec![Gesture::Leave(child)]
+    );
+    assert_eq!(
+        tree.pointer(PointerEvent::wheel(10.0, 10.0, 0.0, 0.0, 12.0)),
+        vec![Gesture::Wheel(scroll, 0.0, 12.0)]
+    );
+    assert_eq!(tree.scroll_offset(scroll)?, (0.0, 0.0));
+    Ok(())
+}
+
+#[test]
 fn measure_text_matches_the_laid_out_paragraph() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper);
     let color = [9, 8, 7, 6];
     let text = tree.text("Hello", 10.0, color)?;
-    tree.set_viewport(0.0, 0.0, 10.0, 40.0);
+    tree.set_viewport(0.0, 0.0, 10.0, 40.0)?;
     tree.layout()?;
     let rect = tree.rect(text)?;
     let measured = tree.measure_text("Hello", 10.0, 10.0, color, &protocol::TextStyle::default());
     assert_eq!((measured.width, measured.height), (rect.w, rect.h));
+    Ok(())
+}
+
+#[test]
+fn secondary_click_does_not_press_or_focus() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    let region = tree.pointer_region()?;
+    let child = tree.sized(40.0, 20.0)?;
+    tree.set_focusable(region, true)?;
+    tree.add_child(region, child)?;
+    tree.layout()?;
+    let down = button_event(Phase::Down, 10.0, 10.0, Button::Secondary);
+    let up = button_event(Phase::Up, 10.0, 10.0, Button::Secondary);
+    assert!(tree.pointer(down).is_empty());
+    assert_eq!(tree.pointer(up), vec![Gesture::SecondaryClick(region)]);
+    assert_eq!(tree.focused(), None);
+    Ok(())
+}
+
+#[test]
+fn secondary_move_past_the_slop_cancels_the_click() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    let region = tree.pointer_region()?;
+    let child = tree.sized(80.0, 80.0)?;
+    tree.add_child(region, child)?;
+    tree.layout()?;
+    assert!(
+        tree.pointer(button_event(Phase::Down, 10.0, 10.0, Button::Secondary))
+            .is_empty()
+    );
+    assert!(
+        tree.pointer(button_event(Phase::Move, 10.0, 19.0, Button::Secondary))
+            .is_empty()
+    );
+    assert!(
+        tree.pointer(button_event(Phase::Up, 10.0, 19.0, Button::Secondary))
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn secondary_during_a_primary_drag_leaves_the_drag_end() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    let scroll = tree.scroll()?;
+    let region = tree.pointer_region()?;
+    let child = tree.sized(80.0, 80.0)?;
+    tree.add_child(region, child)?;
+    tree.add_child(scroll, region)?;
+    tree.layout()?;
+    assert_eq!(
+        tree.pointer(timed(Phase::Down, 10.0, 10.0, 0.0)),
+        vec![Gesture::Press(region)]
+    );
+    let locked = tree.pointer(timed(Phase::Move, 10.0, 30.0, 26.0));
+    assert!(
+        locked
+            .iter()
+            .any(|gesture| matches!(gesture, Gesture::DragBegin(_)))
+    );
+    assert!(
+        tree.pointer(button_event(Phase::Down, 12.0, 32.0, Button::Secondary))
+            .is_empty()
+    );
+    assert_eq!(
+        tree.pointer(button_event(Phase::Up, 12.0, 32.0, Button::Secondary)),
+        vec![Gesture::SecondaryClick(region)]
+    );
+    assert!(
+        tree.pointer(timed(Phase::Up, 10.0, 30.0, 40.0))
+            .iter()
+            .any(|gesture| matches!(gesture, Gesture::DragEnd(_, _, _)))
+    );
+    Ok(())
+}
+
+#[test]
+fn auxiliary_click_is_ignored() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    let region = tree.pointer_region()?;
+    let child = tree.sized(40.0, 20.0)?;
+    tree.set_focusable(region, true)?;
+    tree.add_child(region, child)?;
+    tree.layout()?;
+    assert!(
+        tree.pointer(button_event(Phase::Down, 10.0, 10.0, Button::Auxiliary))
+            .is_empty()
+    );
+    assert!(
+        tree.pointer(button_event(Phase::Up, 10.0, 10.0, Button::Auxiliary))
+            .is_empty()
+    );
+    assert_eq!(tree.focused(), None);
     Ok(())
 }
 

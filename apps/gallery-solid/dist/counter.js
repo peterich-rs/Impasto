@@ -3089,9 +3089,35 @@
     }
     return "start";
   }
+  function trackList(value) {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    return value.map((item) => String(item));
+  }
+  function sizePair(value) {
+    if (typeof value === "number") {
+      return {
+        w: value,
+        h: value
+      };
+    }
+    if (value !== null && typeof value === "object") {
+      const record = value;
+      return {
+        w: asNumber(record.w, 0),
+        h: asNumber(record.h, 0)
+      };
+    }
+    return {
+      w: 0,
+      h: 0
+    };
+  }
   function hostRendererOptions(host2) {
     const nodes = /* @__PURE__ */ new Map();
     const transforms = /* @__PURE__ */ new Map();
+    const paddings = /* @__PURE__ */ new Map();
     function writeTransform(id, patch) {
       const prev = transforms.get(id) ?? {
         x: 0,
@@ -3105,6 +3131,20 @@
       };
       transforms.set(id, next);
       host2.setTransform(id, next.x, next.y, next.rotate, next.scale);
+    }
+    function writePadding(id, patch) {
+      const prev = paddings.get(id) ?? {
+        top: 0,
+        right: 0,
+        bottom: 0,
+        left: 0
+      };
+      const next = {
+        ...prev,
+        ...patch
+      };
+      paddings.set(id, next);
+      host2.setPaddingEdges(id, next.top, next.right, next.bottom, next.left);
     }
     function wrap(id) {
       let node = nodes.get(id);
@@ -3124,8 +3164,60 @@
         case "gap":
           host2.setGap(node.id, asNumber(value, 0));
           return;
-        case "edges":
-          host2.setPadding(node.id, asNumber(value, 0));
+        case "edges": {
+          const edge = asNumber(value, 0);
+          host2.setPadding(node.id, edge);
+          paddings.set(node.id, {
+            top: edge,
+            right: edge,
+            bottom: edge,
+            left: edge
+          });
+          return;
+        }
+        case "top":
+          writePadding(node.id, {
+            top: asNumber(value, 0)
+          });
+          return;
+        case "right":
+          writePadding(node.id, {
+            right: asNumber(value, 0)
+          });
+          return;
+        case "bottom":
+          writePadding(node.id, {
+            bottom: asNumber(value, 0)
+          });
+          return;
+        case "left":
+          writePadding(node.id, {
+            left: asNumber(value, 0)
+          });
+          return;
+        case "margin":
+          if (typeof value === "number") {
+            host2.setMargin(node.id, value, value, value, value);
+          }
+          return;
+        case "min": {
+          const size = sizePair(value);
+          host2.setMinSize(node.id, size.w, size.h);
+          return;
+        }
+        case "max": {
+          const size = sizePair(value);
+          host2.setMaxSize(node.id, size.w, size.h);
+          return;
+        }
+        case "shrink":
+          host2.setShrink(node.id, asNumber(value, 0));
+          return;
+        case "basis":
+          host2.setBasis(node.id, asNumber(value, 0));
+          return;
+        case "alignSelf":
+          host2.setAlignSelf(node.id, alignName(value));
           return;
         case "grow":
           host2.setGrow(node.id, asNumber(value, 0));
@@ -3258,6 +3350,21 @@
             host2.onComposing(node.id, value);
           }
           return;
+        case "onHover":
+          if (typeof value === "function") {
+            host2.onHover(node.id, value);
+          }
+          return;
+        case "onLeave":
+          if (typeof value === "function") {
+            host2.onLeave(node.id, value);
+          }
+          return;
+        case "onWheel":
+          if (typeof value === "function") {
+            host2.onWheel(node.id, value);
+          }
+          return;
         case "children":
         case "ref":
           return;
@@ -3278,8 +3385,19 @@
           case "stack":
             id = host2.stack();
             break;
-          case "padding":
-            id = host2.padding(asNumber(staticProps?.edges, 0));
+          case "padding": {
+            const edge = asNumber(staticProps?.edges, 0);
+            id = host2.padding(edge);
+            paddings.set(id, {
+              top: edge,
+              right: edge,
+              bottom: edge,
+              left: edge
+            });
+            break;
+          }
+          case "grid":
+            id = host2.grid(trackList(staticProps?.columns), trackList(staticProps?.rows), asNumber(staticProps?.gap, 0));
             break;
           case "pointer":
             id = host2.pointerRegion();
@@ -3311,7 +3429,7 @@
         const node = wrap(id);
         if (staticProps !== void 0) {
           for (const [name, value] of Object.entries(staticProps)) {
-            if (name === "gap" || name === "edges" || name === "color" || name === "radius" || name === "alpha" || name === "source" || name === "w" || name === "h") {
+            if (name === "gap" || name === "edges" || name === "columns" || name === "rows" || name === "color" || name === "radius" || name === "alpha" || name === "source" || name === "w" || name === "h") {
               continue;
             }
             setProperty(node, name, value);
@@ -3472,10 +3590,8 @@
   var FIELD_BORDER_FOCUS = "#7CFF6B";
   var CURSOR = "#7CFF6B";
   var MEASURE_WIDTH = 1e6;
-  function popChar(value) {
-    const chars = Array.from(value);
-    chars.pop();
-    return chars.join("");
+  function scalars(value) {
+    return Array.from(value);
   }
   function reveal(id) {
     const field = host.rect(id);
@@ -3512,6 +3628,7 @@
     const [focused, setFocused] = createSignal2(false);
     const [blink, setBlink] = createSignal2(true);
     const [caret, setCaret] = createSignal2(0);
+    const [caretIndex, setCaretIndex] = createSignal2(0);
     let node = 0;
     const body = () => text() + (composing() ?? "");
     const shown = () => {
@@ -3528,8 +3645,9 @@
       setBlink(Math.floor(timeMs / 500) % 2 === 0);
       requestFrame();
     });
-    createRenderEffect2(body, (value) => {
-      const size = host.measureText(value, FONT_SIZE, MEASURE_WIDTH, TEXT_BYTES);
+    createRenderEffect2(() => [caretIndex(), text()], ([index, committed]) => {
+      const prefix = scalars(committed).slice(0, index).join("");
+      const size = host.measureText(prefix, FONT_SIZE, MEASURE_WIDTH, TEXT_BYTES);
       setCaret(size.w);
     });
     var _el$ = createElement("pointer", {
@@ -3547,8 +3665,18 @@
         host.setImeEnabled(false);
       },
       onKey: (key) => {
-        if (key === "Backspace") {
-          const next = popChar(text());
+        const chars = scalars(text());
+        const index = Math.min(caretIndex(), chars.length);
+        if (key === "Left") {
+          setCaretIndex(Math.max(0, index - 1));
+        }
+        if (key === "Right") {
+          setCaretIndex(Math.min(chars.length, index + 1));
+        }
+        if (key === "Backspace" && index > 0) {
+          chars.splice(index - 1, 1);
+          const next = chars.join("");
+          setCaretIndex(index - 1);
           setText(next);
           host.setImeText(next);
         }
@@ -3556,7 +3684,14 @@
           props.onInput?.(text());
         }
       },
-      onText: (value) => setText(text() + value),
+      onText: (value) => {
+        const chars = scalars(text());
+        const index = Math.min(caretIndex(), chars.length);
+        const incoming = scalars(value);
+        chars.splice(index, 0, ...incoming);
+        setText(chars.join(""));
+        setCaretIndex(index + incoming.length);
+      },
       onComposing: (value) => setComposing(value)
     }), _el$2 = createElement("padding", {
       edges: 8
@@ -3657,6 +3792,11 @@
         coasting = false;
         const live = viewport === 0 ? off() : host.scrollOffset(viewport);
         setOff(clamp(live.x - dx, live.y - dy));
+      },
+      onWheel: (dx, dy) => {
+        coasting = false;
+        const live = viewport === 0 ? off() : host.scrollOffset(viewport);
+        setOff(clamp(live.x + dx, live.y + dy));
       },
       onDragEnd: (vx, vy) => {
         velocityX = vx;

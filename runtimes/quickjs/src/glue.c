@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "quickjs.h"
 
@@ -72,6 +73,17 @@ typedef struct QjsFns {
     int (*set_ime_text)(void *session, const char *utf8, size_t len);
     int (*measure_text)(void *session, const char *utf8, size_t len, float font_size,
                         float max_width, const uint8_t color[4], float *w, float *h);
+    int (*grid)(void *session, const char *columns, size_t columns_len, const char *rows,
+                size_t rows_len, float gap, uint64_t *out);
+    int (*set_padding_edges)(void *session, uint64_t node, float top, float right, float bottom,
+                             float left);
+    int (*set_margin)(void *session, uint64_t node, float top, float right, float bottom,
+                      float left);
+    int (*set_min_size)(void *session, uint64_t node, float width, float height);
+    int (*set_max_size)(void *session, uint64_t node, float width, float height);
+    int (*set_shrink)(void *session, uint64_t node, float shrink);
+    int (*set_basis)(void *session, uint64_t node, float basis);
+    int (*set_align_self)(void *session, uint64_t node, uint32_t align);
 } QjsFns;
 
 typedef struct Tap {
@@ -87,6 +99,10 @@ typedef struct Tap {
     JSValue key;
     JSValue text;
     JSValue composing;
+    JSValue hover;
+    JSValue leave;
+    JSValue wheel;
+    JSValue secondary_click;
     int has_click;
     int has_press;
     int has_release;
@@ -98,6 +114,10 @@ typedef struct Tap {
     int has_key;
     int has_text;
     int has_composing;
+    int has_hover;
+    int has_leave;
+    int has_wheel;
+    int has_secondary_click;
 } Tap;
 
 typedef struct Host {
@@ -110,7 +130,35 @@ typedef struct Host {
     JSValue frame_cb;
     int has_frame;
     int wants_frame;
+    int64_t deadline_ms;
 } Host;
+
+#define UIFW_JS_MEMORY_LIMIT (16u << 20)
+#define UIFW_JS_SLICE_MS 8
+/* Debug builds of quickjs-ng take about 44 ms to eval dist/counter.js. */
+#define UIFW_JS_EVAL_MS 128
+
+static int64_t now_ms(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return (int64_t)ts.tv_sec * 1000 + (int64_t)ts.tv_nsec / 1000000;
+}
+
+static void arm_slice(Host *host) {
+    host->deadline_ms = now_ms() + UIFW_JS_SLICE_MS;
+}
+
+static void arm_eval(Host *host) {
+    host->deadline_ms = now_ms() + UIFW_JS_EVAL_MS;
+}
+
+static int interrupt_handler(JSRuntime *rt, void *opaque) {
+    (void)rt;
+    Host *host = opaque;
+    return now_ms() > host->deadline_ms;
+}
 
 static JSValue throw_msg(JSContext *ctx, const char *msg) {
     return JS_ThrowTypeError(ctx, "%s", msg);
@@ -626,6 +674,18 @@ static void free_tap(Host *host, Tap *tap) {
     if (tap->has_composing) {
         JS_FreeValue(host->ctx, tap->composing);
     }
+    if (tap->has_hover) {
+        JS_FreeValue(host->ctx, tap->hover);
+    }
+    if (tap->has_leave) {
+        JS_FreeValue(host->ctx, tap->leave);
+    }
+    if (tap->has_wheel) {
+        JS_FreeValue(host->ctx, tap->wheel);
+    }
+    if (tap->has_secondary_click) {
+        JS_FreeValue(host->ctx, tap->secondary_click);
+    }
 }
 
 static int tap_slot(Tap *tap, int kind, JSValue **slot, int **has) {
@@ -673,6 +733,22 @@ static int tap_slot(Tap *tap, int kind, JSValue **slot, int **has) {
     case 10:
         *slot = &tap->composing;
         *has = &tap->has_composing;
+        return 0;
+    case 11:
+        *slot = &tap->hover;
+        *has = &tap->has_hover;
+        return 0;
+    case 12:
+        *slot = &tap->leave;
+        *has = &tap->has_leave;
+        return 0;
+    case 13:
+        *slot = &tap->wheel;
+        *has = &tap->has_wheel;
+        return 0;
+    case 14:
+        *slot = &tap->secondary_click;
+        *has = &tap->has_secondary_click;
         return 0;
     default:
         return -1;
@@ -1403,6 +1479,250 @@ static JSValue js_set_fill(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     return done(ctx, status, "setFill failed");
 }
 
+static int join_array(JSContext *ctx, JSValueConst value, char **out, size_t *out_len) {
+    if (!JS_IsArray(value)) {
+        return 1;
+    }
+    JSValue length_value = JS_GetPropertyStr(ctx, value, "length");
+    int32_t length = 0;
+    if (JS_ToInt32(ctx, &length, length_value) || length < 0) {
+        JS_FreeValue(ctx, length_value);
+        return -1;
+    }
+    JS_FreeValue(ctx, length_value);
+    size_t cap = 64;
+    char *buf = malloc(cap);
+    if (!buf) {
+        return -1;
+    }
+    buf[0] = 0;
+    size_t len = 0;
+    for (int32_t index = 0; index < length; index++) {
+        JSValue item = JS_GetPropertyUint32(ctx, value, (uint32_t)index);
+        size_t part_len = 0;
+        const char *part = JS_ToCStringLen(ctx, &part_len, item);
+        JS_FreeValue(ctx, item);
+        if (!part) {
+            free(buf);
+            return -1;
+        }
+        size_t extra = part_len + (index > 0 ? 1 : 0);
+        if (len + extra + 1 > cap) {
+            size_t next = cap * 2;
+            while (next < len + extra + 1) {
+                next *= 2;
+            }
+            char *grown = realloc(buf, next);
+            if (!grown) {
+                JS_FreeCString(ctx, part);
+                free(buf);
+                return -1;
+            }
+            buf = grown;
+            cap = next;
+        }
+        if (index > 0) {
+            buf[len++] = ',';
+        }
+        memcpy(buf + len, part, part_len);
+        len += part_len;
+        buf[len] = 0;
+        JS_FreeCString(ctx, part);
+    }
+    *out = buf;
+    *out_len = len;
+    return 0;
+}
+
+static JSValue js_grid(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 3) {
+        return throw_msg(ctx, "grid(columns, rows, gap)");
+    }
+    char *columns = NULL;
+    char *rows = NULL;
+    size_t columns_len = 0;
+    size_t rows_len = 0;
+    double gap = 0;
+    int columns_status = join_array(ctx, argv[0], &columns, &columns_len);
+    int rows_status = columns_status == 0 ? join_array(ctx, argv[1], &rows, &rows_len) : 0;
+    int gap_status = columns_status == 0 && rows_status == 0 ? JS_ToFloat64(ctx, &gap, argv[2]) : 0;
+    if (columns_status < 0 || rows_status < 0 || gap_status) {
+        free(columns);
+        free(rows);
+        return JS_EXCEPTION;
+    }
+    if (columns_status > 0 || rows_status > 0) {
+        free(columns);
+        free(rows);
+        return throw_msg(ctx, "grid(columns, rows, gap)");
+    }
+    uint64_t id = 0;
+    int status = host->fns.grid(host->fns.session, columns, columns_len, rows, rows_len, (float)gap,
+                                &id);
+    free(columns);
+    free(rows);
+    return created(ctx, status, id, "grid failed");
+}
+
+static int read_edges(JSContext *ctx, int argc, JSValueConst *argv, uint64_t *node, float *top,
+                      float *right, float *bottom, float *left) {
+    if (argc < 5 || read_handle(ctx, argv[0], node)) {
+        return -1;
+    }
+    double values[4];
+    for (int index = 0; index < 4; index++) {
+        if (JS_ToFloat64(ctx, &values[index], argv[index + 1])) {
+            return -1;
+        }
+    }
+    *top = (float)values[0];
+    *right = (float)values[1];
+    *bottom = (float)values[2];
+    *left = (float)values[3];
+    return 0;
+}
+
+static JSValue js_set_padding_edges(JSContext *ctx, JSValueConst this_val, int argc,
+                                    JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    uint64_t node = 0;
+    float top = 0, right = 0, bottom = 0, left = 0;
+    if (argc < 5) {
+        return throw_msg(ctx, "setPaddingEdges(node, top, right, bottom, left)");
+    }
+    if (read_edges(ctx, argc, argv, &node, &top, &right, &bottom, &left)) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.set_padding_edges(host->fns.session, node, top, right, bottom, left);
+    return done(ctx, status, "setPaddingEdges failed");
+}
+
+static JSValue js_set_margin(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    uint64_t node = 0;
+    float top = 0, right = 0, bottom = 0, left = 0;
+    if (argc < 5) {
+        return throw_msg(ctx, "setMargin(node, top, right, bottom, left)");
+    }
+    if (read_edges(ctx, argc, argv, &node, &top, &right, &bottom, &left)) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.set_margin(host->fns.session, node, top, right, bottom, left);
+    return done(ctx, status, "setMargin failed");
+}
+
+static JSValue js_set_min_size(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 3) {
+        return throw_msg(ctx, "setMinSize(node, width, height)");
+    }
+    uint64_t node = 0;
+    double width = 0, height = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToFloat64(ctx, &width, argv[1]) ||
+        JS_ToFloat64(ctx, &height, argv[2])) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.set_min_size(host->fns.session, node, (float)width, (float)height);
+    return done(ctx, status, "setMinSize failed");
+}
+
+static JSValue js_set_max_size(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 3) {
+        return throw_msg(ctx, "setMaxSize(node, width, height)");
+    }
+    uint64_t node = 0;
+    double width = 0, height = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToFloat64(ctx, &width, argv[1]) ||
+        JS_ToFloat64(ctx, &height, argv[2])) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.set_max_size(host->fns.session, node, (float)width, (float)height);
+    return done(ctx, status, "setMaxSize failed");
+}
+
+static JSValue js_set_shrink(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "setShrink(node, shrink)");
+    }
+    uint64_t node = 0;
+    double shrink = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToFloat64(ctx, &shrink, argv[1])) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.set_shrink(host->fns.session, node, (float)shrink);
+    return done(ctx, status, "setShrink failed");
+}
+
+static JSValue js_set_basis(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "setBasis(node, basis)");
+    }
+    uint64_t node = 0;
+    double basis = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToFloat64(ctx, &basis, argv[1])) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.set_basis(host->fns.session, node, (float)basis);
+    return done(ctx, status, "setBasis failed");
+}
+
+static JSValue js_set_align_self(JSContext *ctx, JSValueConst this_val, int argc,
+                                 JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "setAlignSelf(node, align)");
+    }
+    uint64_t node = 0;
+    if (read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
+    const char *name = JS_ToCString(ctx, argv[1]);
+    if (!name) {
+        return JS_EXCEPTION;
+    }
+    uint32_t align = 0;
+    int bad = named_align(name, &align, "start", 0, "center", 1, "end", 2);
+    JS_FreeCString(ctx, name);
+    if (bad) {
+        return throw_msg(ctx, "align must be start, center, or end");
+    }
+    int status = host->fns.set_align_self(host->fns.session, node, align);
+    return done(ctx, status, "setAlignSelf failed");
+}
+
+static JSValue js_on_hover(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    return bind_gesture(ctx, argc, argv, 11, "onHover(node, fn)");
+}
+
+static JSValue js_on_leave(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    return bind_gesture(ctx, argc, argv, 12, "onLeave(node, fn)");
+}
+
+static JSValue js_on_wheel(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    return bind_gesture(ctx, argc, argv, 13, "onWheel(node, fn)");
+}
+
+static JSValue js_on_secondary_click(JSContext *ctx, JSValueConst this_val, int argc,
+                                     JSValueConst *argv) {
+    (void)this_val;
+    return bind_gesture(ctx, argc, argv, 14, "onSecondaryClick(node, fn)");
+}
+
 static JSValue js_request_frame(JSContext *ctx, JSValueConst this_val, int argc,
                                 JSValueConst *argv) {
     (void)this_val;
@@ -1553,6 +1873,18 @@ static int bind_core(Host *host) {
     failed |= bind_fn(ctx, core, "setJustify", js_set_justify, 2);
     failed |= bind_fn(ctx, core, "setWrap", js_set_wrap, 2);
     failed |= bind_fn(ctx, core, "setFill", js_set_fill, 1);
+    failed |= bind_fn(ctx, core, "grid", js_grid, 3);
+    failed |= bind_fn(ctx, core, "setPaddingEdges", js_set_padding_edges, 5);
+    failed |= bind_fn(ctx, core, "setMargin", js_set_margin, 5);
+    failed |= bind_fn(ctx, core, "setMinSize", js_set_min_size, 3);
+    failed |= bind_fn(ctx, core, "setMaxSize", js_set_max_size, 3);
+    failed |= bind_fn(ctx, core, "setShrink", js_set_shrink, 2);
+    failed |= bind_fn(ctx, core, "setBasis", js_set_basis, 2);
+    failed |= bind_fn(ctx, core, "setAlignSelf", js_set_align_self, 2);
+    failed |= bind_fn(ctx, core, "onHover", js_on_hover, 2);
+    failed |= bind_fn(ctx, core, "onLeave", js_on_leave, 2);
+    failed |= bind_fn(ctx, core, "onWheel", js_on_wheel, 2);
+    failed |= bind_fn(ctx, core, "onSecondaryClick", js_on_secondary_click, 2);
     failed |= bind_fn(ctx, core, "sized", js_sized, 2);
     failed |= bind_fn(ctx, core, "setFocusable", js_set_focusable, 2);
     failed |= bind_fn(ctx, core, "focus", js_focus, 1);
@@ -1595,6 +1927,10 @@ Host *qjs_open(const QjsFns *fns) {
         return NULL;
     }
     JS_SetContextOpaque(host->ctx, host);
+    host->deadline_ms = INT64_MAX;
+    JS_SetMemoryLimit(host->rt, UIFW_JS_MEMORY_LIMIT);
+    JS_SetMaxStackSize(host->rt, 1u << 20);
+    JS_SetInterruptHandler(host->rt, interrupt_handler, host);
     if (bind_core(host) || bind_console(host)) {
         JS_FreeContext(host->ctx);
         JS_FreeRuntime(host->rt);
@@ -1606,6 +1942,7 @@ Host *qjs_open(const QjsFns *fns) {
 }
 
 int qjs_eval(Host *host, const char *src, size_t len, const char *name, char *err, size_t err_len) {
+    arm_eval(host);
     /* QuickJS reads input[input_len] and requires it to be 0. */
     char *owned = malloc(len + 1);
     if (!owned) {
@@ -1627,6 +1964,7 @@ int qjs_eval(Host *host, const char *src, size_t len, const char *name, char *er
 }
 
 int qjs_dispatch(Host *host, uint64_t id, int kind, double a, double b, char *err, size_t err_len) {
+    arm_slice(host);
     int failed = 0;
     for (size_t index = 0; index < host->tap_len; index++) {
         JSValue *slot = NULL;
@@ -1639,7 +1977,7 @@ int qjs_dispatch(Host *host, uint64_t id, int kind, double a, double b, char *er
         }
         JSValue args[2];
         int argc = 0;
-        if (kind == 4 || kind == 5) {
+        if (kind == 4 || kind == 5 || kind == 13) {
             args[0] = JS_NewFloat64(host->ctx, a);
             args[1] = JS_NewFloat64(host->ctx, b);
             argc = 2;
@@ -1666,6 +2004,7 @@ int qjs_dispatch(Host *host, uint64_t id, int kind, double a, double b, char *er
 
 int qjs_dispatch_input(Host *host, uint64_t id, int kind, const char *utf8, size_t len, char *err,
                        size_t err_len) {
+    arm_slice(host);
     int failed = 0;
     for (size_t index = 0; index < host->tap_len; index++) {
         JSValue *slot = NULL;
@@ -1702,6 +2041,7 @@ int qjs_dispatch_input(Host *host, uint64_t id, int kind, const char *utf8, size
 #define UIFW_JOB_ROUND_LIMIT 32
 
 int qjs_drain_jobs(Host *host, char *err, size_t err_len) {
+    arm_slice(host);
     int rounds = 0;
     while (JS_IsJobPending(host->rt)) {
         if (rounds >= UIFW_JOB_ROUND_LIMIT) {
@@ -1733,6 +2073,7 @@ int qjs_tap_count(Host *host) {
 }
 
 int qjs_frame(Host *host, double time_ms, char *err, size_t err_len) {
+    arm_slice(host);
     if (!host->has_frame) {
         return 0;
     }

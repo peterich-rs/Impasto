@@ -10,10 +10,8 @@ const CURSOR = "#7CFF6B";
 const LINE = 22;
 const MEASURE_WIDTH = 1_000_000;
 
-function popChar(value: string): string {
-  const chars = Array.from(value);
-  chars.pop();
-  return chars.join("");
+function scalars(value: string): string[] {
+  return Array.from(value);
 }
 
 /** Scroll the nearest scroll ancestor so `id`'s layout box sits inside the viewport. */
@@ -57,6 +55,7 @@ export function Field(props: { placeholder?: string; onInput?: (value: string) =
   const [focused, setFocused] = createSignal(false);
   const [blink, setBlink] = createSignal(true);
   const [caret, setCaret] = createSignal(0);
+  const [caretIndex, setCaretIndex] = createSignal(0);
   let node = 0;
 
   const body = () => text() + (composing() ?? "");
@@ -76,10 +75,14 @@ export function Field(props: { placeholder?: string; onInput?: (value: string) =
     requestFrame();
   });
 
-  createRenderEffect(body, (value) => {
-    const size = host.measureText(value, FONT_SIZE, MEASURE_WIDTH, TEXT_BYTES);
-    setCaret(size.w);
-  });
+  createRenderEffect(
+    () => [caretIndex(), text()] as const,
+    ([index, committed]) => {
+      const prefix = scalars(committed).slice(0, index).join("");
+      const size = host.measureText(prefix, FONT_SIZE, MEASURE_WIDTH, TEXT_BYTES);
+      setCaret(size.w);
+    },
+  );
 
   return (
     <pointer
@@ -100,8 +103,18 @@ export function Field(props: { placeholder?: string; onInput?: (value: string) =
         host.setImeEnabled(false);
       }}
       onKey={(key) => {
-        if (key === "Backspace") {
-          const next = popChar(text());
+        const chars = scalars(text());
+        const index = Math.min(caretIndex(), chars.length);
+        if (key === "Left") {
+          setCaretIndex(Math.max(0, index - 1));
+        }
+        if (key === "Right") {
+          setCaretIndex(Math.min(chars.length, index + 1));
+        }
+        if (key === "Backspace" && index > 0) {
+          chars.splice(index - 1, 1);
+          const next = chars.join("");
+          setCaretIndex(index - 1);
           setText(next);
           host.setImeText(next);
         }
@@ -109,7 +122,14 @@ export function Field(props: { placeholder?: string; onInput?: (value: string) =
           props.onInput?.(text());
         }
       }}
-      onText={(value) => setText(text() + value)}
+      onText={(value) => {
+        const chars = scalars(text());
+        const index = Math.min(caretIndex(), chars.length);
+        const incoming = scalars(value);
+        chars.splice(index, 0, ...incoming);
+        setText(chars.join(""));
+        setCaretIndex(index + incoming.length);
+      }}
       onComposing={(value) => setComposing(value)}
     >
       <padding edges={8}>

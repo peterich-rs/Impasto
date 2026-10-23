@@ -18,7 +18,7 @@ kotlin:
 
 solid:
     UIFW_COUNTER_BYTES="{{counter}}" node --experimental-strip-types "{{root}}/frameworks/solid-renderer/src/encode.test.ts"
-    node --experimental-strip-types "{{root}}/frameworks/solid-renderer/src/tree.test.ts"
+    node --conditions=browser --experimental-strip-types "{{root}}/frameworks/solid-renderer/src/tree.test.ts"
     node --experimental-strip-types "{{root}}/apps/gallery-solid/gallery.ts"
 
 solid-app:
@@ -32,6 +32,11 @@ quickjs:
 
 host-js:
     cargo run --manifest-path "{{root}}/Cargo.toml" -p macos -- --js "{{root}}/apps/gallery-solid/dist/counter.js" "{{logo}}"
+
+# Local pixel compare. Needs the Impeller SDK. Not part of `just check`.
+pixel-test:
+    UIFW_DUMP=/tmp/uifw-counter-frame.png cargo run --manifest-path "{{root}}/Cargo.toml" -p macos -- "{{counter}}" "{{logo}}"
+    UIFW_FRAME=/tmp/uifw-counter-frame.png cargo test --manifest-path "{{root}}/Cargo.toml" -p macos -- --ignored pixels::tests::counter_frame_matches_the_reference --exact
 
 # Cargo cdylib, then the GameActivity APK. Needs the Android NDK and the arm64 Impeller SDK.
 android:

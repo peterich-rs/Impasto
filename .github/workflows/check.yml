@@ -72,5 +72,5 @@ jobs:
           UIFW_COUNTER_BYTES: ${{ github.workspace }}/protocol/tests/fixtures/counter.bin
         run: |
           node --experimental-strip-types frameworks/solid-renderer/src/encode.test.ts
-          node --experimental-strip-types frameworks/solid-renderer/src/tree.test.ts
+          node --conditions=browser --experimental-strip-types frameworks/solid-renderer/src/tree.test.ts
           node --experimental-strip-types apps/gallery-solid/gallery.ts

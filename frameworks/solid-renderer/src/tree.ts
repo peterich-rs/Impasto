@@ -58,15 +58,41 @@ function justifyName(
 }
 
 type TransformValue = { x: number; y: number; rotate: number; scale: number };
+type EdgeValue = { top: number; right: number; bottom: number; left: number };
+
+function trackList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item) => String(item));
+}
+
+function sizePair(value: unknown): { w: number; h: number } {
+  if (typeof value === "number") {
+    return { w: value, h: value };
+  }
+  if (value !== null && typeof value === "object") {
+    const record = value as { w?: unknown; h?: unknown };
+    return { w: asNumber(record.w, 0), h: asNumber(record.h, 0) };
+  }
+  return { w: 0, h: 0 };
+}
 
 export function hostRendererOptions(host: CoreHost): HostRendererOptions {
   const nodes = new Map<number, HostNode>();
   const transforms = new Map<number, TransformValue>();
+  const paddings = new Map<number, EdgeValue>();
   function writeTransform(id: number, patch: Partial<TransformValue>): void {
     const prev = transforms.get(id) ?? { x: 0, y: 0, rotate: 0, scale: 1 };
     const next = { ...prev, ...patch };
     transforms.set(id, next);
     host.setTransform(id, next.x, next.y, next.rotate, next.scale);
+  }
+  function writePadding(id: number, patch: Partial<EdgeValue>): void {
+    const prev = paddings.get(id) ?? { top: 0, right: 0, bottom: 0, left: 0 };
+    const next = { ...prev, ...patch };
+    paddings.set(id, next);
+    host.setPaddingEdges(id, next.top, next.right, next.bottom, next.left);
   }
   function wrap(id: number): HostNode {
     let node = nodes.get(id);
@@ -85,8 +111,47 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions {
       case "gap":
         host.setGap(node.id, asNumber(value, 0));
         return;
-      case "edges":
-        host.setPadding(node.id, asNumber(value, 0));
+      case "edges": {
+        const edge = asNumber(value, 0);
+        host.setPadding(node.id, edge);
+        paddings.set(node.id, { top: edge, right: edge, bottom: edge, left: edge });
+        return;
+      }
+      case "top":
+        writePadding(node.id, { top: asNumber(value, 0) });
+        return;
+      case "right":
+        writePadding(node.id, { right: asNumber(value, 0) });
+        return;
+      case "bottom":
+        writePadding(node.id, { bottom: asNumber(value, 0) });
+        return;
+      case "left":
+        writePadding(node.id, { left: asNumber(value, 0) });
+        return;
+      case "margin":
+        if (typeof value === "number") {
+          host.setMargin(node.id, value, value, value, value);
+        }
+        return;
+      case "min": {
+        const size = sizePair(value);
+        host.setMinSize(node.id, size.w, size.h);
+        return;
+      }
+      case "max": {
+        const size = sizePair(value);
+        host.setMaxSize(node.id, size.w, size.h);
+        return;
+      }
+      case "shrink":
+        host.setShrink(node.id, asNumber(value, 0));
+        return;
+      case "basis":
+        host.setBasis(node.id, asNumber(value, 0));
+        return;
+      case "alignSelf":
+        host.setAlignSelf(node.id, alignName(value));
         return;
       case "grow":
         host.setGrow(node.id, asNumber(value, 0));
@@ -211,6 +276,26 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions {
           host.onComposing(node.id, value as (text: string | null) => void);
         }
         return;
+      case "onHover":
+        if (typeof value === "function") {
+          host.onHover(node.id, value as () => void);
+        }
+        return;
+      case "onLeave":
+        if (typeof value === "function") {
+          host.onLeave(node.id, value as () => void);
+        }
+        return;
+      case "onWheel":
+        if (typeof value === "function") {
+          host.onWheel(node.id, value as (dx: number, dy: number) => void);
+        }
+        return;
+      case "onSecondaryClick":
+        if (typeof value === "function") {
+          host.onSecondaryClick(node.id, value as () => void);
+        }
+        return;
       case "children":
       case "ref":
         return;
@@ -232,8 +317,18 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions {
         case "stack":
           id = host.stack();
           break;
-        case "padding":
-          id = host.padding(asNumber(staticProps?.edges, 0));
+        case "padding": {
+          const edge = asNumber(staticProps?.edges, 0);
+          id = host.padding(edge);
+          paddings.set(id, { top: edge, right: edge, bottom: edge, left: edge });
+          break;
+        }
+        case "grid":
+          id = host.grid(
+            trackList(staticProps?.columns),
+            trackList(staticProps?.rows),
+            asNumber(staticProps?.gap, 0),
+          );
           break;
         case "pointer":
           id = host.pointerRegion();
@@ -275,6 +370,8 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions {
           if (
             name === "gap" ||
             name === "edges" ||
+            name === "columns" ||
+            name === "rows" ||
             name === "color" ||
             name === "radius" ||
             name === "alpha" ||

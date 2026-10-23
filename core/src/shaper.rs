@@ -29,10 +29,11 @@ pub trait Shaper {
     ) -> TextSize;
 }
 
-/// Test shaper. Each byte advances `font_size * 0.5`. A line is `font_size` tall.
+/// Test shaper. Each Unicode scalar advances `font_size * 0.5`. A line is `font_size` tall.
 ///
-/// Bytes that do not fit the line move to the next one. At least one byte stays
-/// on a line when the advance is wider than `max_width`.
+/// Scalars that do not fit the line move to the next one. At least one scalar stays
+/// on a line when the advance is wider than `max_width`. This is not a grapheme
+/// or font metric. The host measures with Impeller.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MonoShaper;
 
@@ -52,7 +53,8 @@ impl Shaper for MonoShaper {
             };
         }
         let advance = font_size * 0.5;
-        let content = advance * text.len() as f32;
+        let count = text.chars().count();
+        let content = advance * count as f32;
         if content <= max_width {
             return TextSize {
                 width: content,
@@ -60,8 +62,8 @@ impl Shaper for MonoShaper {
             };
         }
         let per_line = (max_width / advance).floor().max(1.0) as usize;
-        let lines = text.len().div_ceil(per_line);
-        let longest = per_line.min(text.len());
+        let lines = count.div_ceil(per_line);
+        let longest = per_line.min(count);
         TextSize {
             width: advance * longest as f32,
             height: capped_height(font_size, lines, style.max_lines),

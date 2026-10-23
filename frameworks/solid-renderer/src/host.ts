@@ -10,6 +10,7 @@ export interface CoreHost {
   row(gap: number): NodeHandle;
   stack(): NodeHandle;
   padding(edges: number): NodeHandle;
+  grid(columns: string[], rows: string[], gap: number): NodeHandle;
   pointerRegion(): NodeHandle;
   decorated(color: number[], radius: number): NodeHandle;
   clip(radius: number): NodeHandle;
@@ -30,6 +31,13 @@ export interface CoreHost {
   setColor(node: NodeHandle, color: number[]): void;
   setGap(node: NodeHandle, gap: number): void;
   setPadding(node: NodeHandle, edges: number): void;
+  setPaddingEdges(node: NodeHandle, top: number, right: number, bottom: number, left: number): void;
+  setMargin(node: NodeHandle, top: number, right: number, bottom: number, left: number): void;
+  setMinSize(node: NodeHandle, width: number, height: number): void;
+  setMaxSize(node: NodeHandle, width: number, height: number): void;
+  setShrink(node: NodeHandle, shrink: number): void;
+  setBasis(node: NodeHandle, basis: number): void;
+  setAlignSelf(node: NodeHandle, align: "start" | "center" | "end"): void;
   setGrow(node: NodeHandle, grow: number): void;
   setRadius(node: NodeHandle, radius: number): void;
   setAlpha(node: NodeHandle, alpha: number): void;
@@ -77,5 +85,9 @@ export interface CoreHost {
   onKey(node: NodeHandle, fn: (key: string) => void): void;
   onText(node: NodeHandle, fn: (text: string) => void): void;
   onComposing(node: NodeHandle, fn: (text: string | null) => void): void;
+  onHover(node: NodeHandle, fn: () => void): void;
+  onLeave(node: NodeHandle, fn: () => void): void;
+  onWheel(node: NodeHandle, fn: (dx: number, dy: number) => void): void;
+  onSecondaryClick(node: NodeHandle, fn: () => void): void;
   onFrame(fn: (timeMs: number) => void): void;
 }

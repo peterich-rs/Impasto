@@ -1,14 +1,14 @@
 //! Live QuickJS session. Tap handlers are JS values owned by the interpreter.
 
 use std::cell::{Cell, RefCell};
-use std::ffi::{c_char, c_void};
+use std::ffi::{CString, c_char, c_void};
 use std::marker::PhantomData;
 use std::ptr;
 use std::rc::Rc;
 
 use protocol::{DrawList, TextAlign};
 use session::{InputEvent, Key, Metrics, Session};
-use ui_core::{Alignment, Justify, NodeId, Shaper, Tree};
+use ui_core::{Alignment, Edges, Justify, NodeId, Shaper, TrackSize, Tree};
 
 use crate::Error;
 
@@ -78,6 +78,22 @@ struct QjsFns {
         *mut f32,
         *mut f32,
     ) -> i32,
+    grid: unsafe extern "C" fn(
+        *mut c_void,
+        *const c_char,
+        usize,
+        *const c_char,
+        usize,
+        f32,
+        *mut u64,
+    ) -> i32,
+    set_padding_edges: unsafe extern "C" fn(*mut c_void, u64, f32, f32, f32, f32) -> i32,
+    set_margin: unsafe extern "C" fn(*mut c_void, u64, f32, f32, f32, f32) -> i32,
+    set_min_size: unsafe extern "C" fn(*mut c_void, u64, f32, f32) -> i32,
+    set_max_size: unsafe extern "C" fn(*mut c_void, u64, f32, f32) -> i32,
+    set_shrink: unsafe extern "C" fn(*mut c_void, u64, f32) -> i32,
+    set_basis: unsafe extern "C" fn(*mut c_void, u64, f32) -> i32,
+    set_align_self: unsafe extern "C" fn(*mut c_void, u64, u32) -> i32,
 }
 
 unsafe extern "C" {
@@ -134,6 +150,7 @@ pub struct JsSession {
 impl JsSession {
     pub fn open(
         script: &str,
+        name: &str,
         shaper: impl Shaper + 'static,
         log: Box<dyn Fn(u8, &str)>,
     ) -> Result<Self, Error> {
@@ -200,6 +217,14 @@ impl JsSession {
             set_ime_enabled,
             set_ime_text,
             measure_text,
+            grid,
+            set_padding_edges,
+            set_margin,
+            set_min_size,
+            set_max_size,
+            set_shrink,
+            set_basis,
+            set_align_self,
         };
         // SAFETY: `inner` stays at this address until `Drop`. `qjs_open` copies
         // the function table. The copied session pointer is only used while
@@ -213,14 +238,15 @@ impl JsSession {
         // is the pointer `qjs_open` just returned.
         unsafe { (*inner).host = host };
         let mut error = [0u8; 512];
-        // SAFETY: `script` is borrowed for the call. The name is a NUL-terminated
-        // literal. `error` is a writable buffer of the length we pass.
+        let name = CString::new(name).map_err(|_| Error::Runtime)?;
+        // SAFETY: `script` is borrowed for the call. `name` is NUL-terminated and
+        // lives until `qjs_eval` returns. `error` is a writable buffer of the length we pass.
         let failed = unsafe {
             qjs_eval(
                 host,
                 script.as_ptr().cast(),
                 script.len(),
-                c"counter.js".as_ptr(),
+                name.as_ptr(),
                 error.as_mut_ptr().cast(),
                 error.len(),
             )
@@ -287,7 +313,7 @@ impl Session for JsSession {
         let top = metrics.inset_top.max(0.0);
         let right = metrics.inset_right.max(0.0);
         let bottom = metrics.inset_bottom.max(0.0);
-        inner.tree.borrow_mut().set_viewport(
+        let _ = inner.tree.borrow_mut().set_viewport(
             left,
             top,
             (metrics.width - left - right).max(0.0),
@@ -357,6 +383,7 @@ impl Session for JsSession {
             unsafe { qjs_frame(inner.host, time_ms, error.as_mut_ptr().cast(), error.len()) };
         if failed != 0 {
             self.note_script_error(c_message(&error));
+            return self.last_frame.clone();
         }
         if let Err(message) = drain_jobs(inner.host) {
             self.note_script_error(message);
@@ -364,10 +391,11 @@ impl Session for JsSession {
         }
         let mut tree = inner.tree.borrow_mut();
         if tree.is_dirty() {
-            if tree.layout().is_err() {
-                return DrawList {
-                    commands: Vec::new(),
-                };
+            if let Err(error) = tree.layout() {
+                let message = error.to_string();
+                drop(tree);
+                self.note_script_error(message);
+                return self.last_frame.clone();
             }
             self.last_frame = tree.record().unwrap_or(DrawList {
                 commands: Vec::new(),
@@ -991,6 +1019,163 @@ unsafe extern "C" fn set_fill(session: *mut c_void, node: u64) -> i32 {
     status(inner.tree.borrow_mut().set_fill(NodeId::from_raw(node)))
 }
 
+fn parse_tracks(text: &str) -> Result<Vec<TrackSize>, ui_core::Error> {
+    if text.is_empty() {
+        return Err(ui_core::Error::BadNumber);
+    }
+    text.split(',').map(parse_track).collect()
+}
+
+fn parse_track(token: &str) -> Result<TrackSize, ui_core::Error> {
+    let token = token.trim();
+    match token {
+        "min" => Ok(TrackSize::MinContent),
+        "max" => Ok(TrackSize::MaxContent),
+        other if let Some(value) = other.strip_suffix("fr") => {
+            let value = value
+                .parse::<f32>()
+                .map_err(|_| ui_core::Error::BadNumber)?;
+            if !value.is_finite() || value < 0.0 {
+                return Err(ui_core::Error::BadNumber);
+            }
+            Ok(TrackSize::Fraction(value))
+        }
+        other => {
+            let value = other
+                .parse::<f32>()
+                .map_err(|_| ui_core::Error::BadNumber)?;
+            if !value.is_finite() || value < 0.0 {
+                return Err(ui_core::Error::BadNumber);
+            }
+            Ok(TrackSize::Points(value))
+        }
+    }
+}
+
+unsafe extern "C" fn grid(
+    session: *mut c_void,
+    columns: *const c_char,
+    columns_len: usize,
+    rows: *const c_char,
+    rows_len: usize,
+    gap: f32,
+    out: *mut u64,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    let Some(columns) = (unsafe { utf8_of(columns, columns_len) }) else {
+        return -1;
+    };
+    let Some(rows) = (unsafe { utf8_of(rows, rows_len) }) else {
+        return -1;
+    };
+    let Ok(columns) = parse_tracks(columns) else {
+        return -1;
+    };
+    let Ok(rows) = parse_tracks(rows) else {
+        return -1;
+    };
+    created(
+        inner.tree.borrow_mut().grid_tracks(&columns, &rows, gap),
+        out,
+    )
+}
+
+unsafe extern "C" fn set_padding_edges(
+    session: *mut c_void,
+    node: u64,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    left: f32,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    status(inner.tree.borrow_mut().set_padding_edges(
+        NodeId::from_raw(node),
+        Edges {
+            top,
+            right,
+            bottom,
+            left,
+        },
+    ))
+}
+
+unsafe extern "C" fn set_margin(
+    session: *mut c_void,
+    node: u64,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    left: f32,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    status(inner.tree.borrow_mut().set_margin(
+        NodeId::from_raw(node),
+        Edges {
+            top,
+            right,
+            bottom,
+            left,
+        },
+    ))
+}
+
+unsafe extern "C" fn set_min_size(session: *mut c_void, node: u64, width: f32, height: f32) -> i32 {
+    let inner = unsafe { inner(session) };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_min_size(NodeId::from_raw(node), width, height),
+    )
+}
+
+unsafe extern "C" fn set_max_size(session: *mut c_void, node: u64, width: f32, height: f32) -> i32 {
+    let inner = unsafe { inner(session) };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_max_size(NodeId::from_raw(node), width, height),
+    )
+}
+
+unsafe extern "C" fn set_shrink(session: *mut c_void, node: u64, shrink: f32) -> i32 {
+    let inner = unsafe { inner(session) };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_shrink(NodeId::from_raw(node), shrink),
+    )
+}
+
+unsafe extern "C" fn set_basis(session: *mut c_void, node: u64, basis: f32) -> i32 {
+    let inner = unsafe { inner(session) };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_basis(NodeId::from_raw(node), basis),
+    )
+}
+
+unsafe extern "C" fn set_align_self(session: *mut c_void, node: u64, align: u32) -> i32 {
+    let alignment = match align {
+        0 => Alignment::Start,
+        1 => Alignment::Center,
+        2 => Alignment::End,
+        _ => return -1,
+    };
+    let inner = unsafe { inner(session) };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_align_self(NodeId::from_raw(node), alignment),
+    )
+}
+
 fn justify_of(value: u32) -> Option<Justify> {
     match value {
         0 => Some(Justify::Start),
@@ -1027,6 +1212,10 @@ fn gesture_parts(gesture: ui_core::Gesture) -> (NodeId, i32, f64, f64) {
         ui_core::Gesture::DragEnd(id, vx, vy) => (id, 5, f64::from(vx), f64::from(vy)),
         ui_core::Gesture::Focus(id) => (id, 6, 0.0, 0.0),
         ui_core::Gesture::Blur(id) => (id, 7, 0.0, 0.0),
+        ui_core::Gesture::Hover(id) => (id, 11, 0.0, 0.0),
+        ui_core::Gesture::Leave(id) => (id, 12, 0.0, 0.0),
+        ui_core::Gesture::Wheel(id, dx, dy) => (id, 13, f64::from(dx), f64::from(dy)),
+        ui_core::Gesture::SecondaryClick(id) => (id, 14, 0.0, 0.0),
     }
 }
 

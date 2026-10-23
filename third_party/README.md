@@ -14,6 +14,6 @@ git clone --branch next https://github.com/solidjs/solid.git third_party/solid
 git clone --branch version-8.3 https://github.com/lightningkite/kiteui.git third_party/kiteui
 ```
 
-Solid 用来对照 `@solidjs/universal` 和 `packages/signals`。KiteUI 用来对照 Kotlin lambda 的写法。跑起来的界面改 `core` 的渲染树。版本 1 字节只留给夹具编码器。
+Solid 用来对照 `@solidjs/universal` 和 `packages/signals`。KiteUI 用来对照 Kotlin lambda 的写法。跑起来的界面改 `core` 的渲染树。版本 1 编码器只用来和 `counter.bin` 对照。
 
 Impeller SDK 和 quickjs-ng 源码另外取：`engine/fetch-impeller-sdk.sh` 解到 `third_party/impeller-sdk/`，`just quickjs` 解到 `third_party/quickjs/`。这两处也不进 git。

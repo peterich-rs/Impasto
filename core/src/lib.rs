@@ -9,6 +9,6 @@ mod tree;
 mod layout_test;
 
 pub use error::Error;
-pub use pointer::{Phase, PointerEvent};
+pub use pointer::{Button, Modifiers, Phase, PointerEvent};
 pub use shaper::{MonoShaper, SINGLE_LINE_MAX, Shaper, TextSize};
-pub use tree::{Alignment, Discarded, Gesture, Justify, NodeId, Rect, Tree};
+pub use tree::{Alignment, Discarded, Edges, Gesture, Justify, NodeId, Rect, TrackSize, Tree};

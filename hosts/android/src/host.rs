@@ -6,8 +6,8 @@ use std::ffi::{CStr, CString, c_char};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use android_activity::input::{
-    ImeOptions, InputEvent, InputType, KeyAction, MotionAction, TextInputAction, TextInputState,
-    TextSpan,
+    Axis, ImeOptions, InputEvent, InputType, KeyAction, MotionAction, TextInputAction,
+    TextInputState, TextSpan,
 };
 use android_activity::{AndroidApp, AndroidAppWaker, InputStatus, MainEvent, PollEvent};
 use hostshell::{
@@ -26,7 +26,7 @@ use crate::vsync::FrameClock;
 
 const FONT_FAMILY: &str = "UIFWSans";
 const FONT_PATH: &CStr = c"fonts/UIFWSans.ttf";
-const SCRIPT_PATH: &CStr = c"counter.js";
+const SCRIPT_NAME: &str = "counter.js";
 
 unsafe extern "C" {
     fn __android_log_write(priority: i32, tag: *const c_char, text: *const c_char) -> i32;
@@ -210,6 +210,7 @@ fn asset_image_path(source: &str) -> Option<CString> {
 pub fn run(app: AndroidApp) -> i32 {
     let assets = Arc::new(app.asset_manager());
     let script_assets = Arc::clone(&assets);
+    let requested = script_extra(&app);
     let clock = FrameClock::new(app.create_waker());
     let ime = Arc::new(ImeMailbox {
         commands: Mutex::new(VecDeque::new()),
@@ -218,13 +219,13 @@ pub fn run(app: AndroidApp) -> i32 {
     let boot = Boot {
         font_family: FONT_FAMILY.to_string(),
         launch: Launch::Session(Box::new(move |slot| {
-            let bytes = decode::read_bytes(&script_assets, SCRIPT_PATH)
-                .ok_or_else(|| SessionError::Runtime)?;
-            let script = String::from_utf8(bytes).map_err(|_| SessionError::Runtime)?;
-            quickjs::open(&script, slot.shaper(), slot.log_hook()).map_err(|error| match error {
-                quickjs::Error::NotLinked => SessionError::NotLinked,
-                quickjs::Error::Runtime => SessionError::Runtime,
-                quickjs::Error::Script(text) => SessionError::Script(text),
+            let (name, script) = load_script(&script_assets, requested.as_deref())?;
+            quickjs::open(&script, &name, slot.shaper(), slot.log_hook()).map_err(|error| {
+                match error {
+                    quickjs::Error::NotLinked => SessionError::NotLinked,
+                    quickjs::Error::Runtime => SessionError::Runtime,
+                    quickjs::Error::Script(text) => SessionError::Script(text),
+                }
             })
         })),
         services: Box::new(AndroidServices {
@@ -345,7 +346,9 @@ fn pump_input(app: &AndroidApp, link: &hostshell::Link, text: &mut Snapshot, ime
     loop {
         let read = events.next(|event| match event {
             InputEvent::MotionEvent(motion) => {
-                if let Some(pointer) = accepted_pointer(motion, density) {
+                let pointer =
+                    wheel_pointer(motion, density).or_else(|| accepted_pointer(motion, density));
+                if let Some(pointer) = pointer {
                     link.post(Command::Pointer(pointer));
                     InputStatus::Handled
                 } else {
@@ -458,6 +461,97 @@ fn observe_ime(app: &AndroidApp, link: &hostshell::Link, ime_bottom: &mut i32) {
     *ime_bottom = next;
 }
 
+fn wheel_pointer(
+    motion: &android_activity::input::MotionEvent<'_>,
+    density: f32,
+) -> Option<core::PointerEvent> {
+    if motion.action() != MotionAction::Scroll {
+        return None;
+    }
+    let pointer = motion
+        .pointers()
+        .find(|pointer| pointer.pointer_index() == 0)?;
+    let (dx, dy) = motion::wheel_scene_delta(
+        pointer.axis_value(Axis::Hscroll),
+        pointer.axis_value(Axis::Vscroll),
+    )?;
+    let (x, y) = scene_point(pointer.x(), pointer.y(), density)?;
+    Some(core::PointerEvent::wheel(
+        x,
+        y,
+        motion.event_time() as f64 / 1_000_000.0,
+        dx,
+        dy,
+    ))
+}
+
+fn load_script(
+    assets: &AssetManager,
+    requested: Option<&str>,
+) -> Result<(String, String), SessionError> {
+    let mut names = Vec::new();
+    if let Some(path) = requested.and_then(motion::script_asset_path) {
+        names.push(path);
+    }
+    names.push("app.js".to_string());
+    names.push(SCRIPT_NAME.to_string());
+    for name in names {
+        let Ok(path) = CString::new(name.clone()) else {
+            continue;
+        };
+        let Some(bytes) = decode::read_bytes(assets, &path) else {
+            continue;
+        };
+        let script = String::from_utf8(bytes).map_err(|_| SessionError::Runtime)?;
+        return Ok((name, script));
+    }
+    Err(SessionError::Runtime)
+}
+
+fn script_extra(app: &AndroidApp) -> Option<String> {
+    let vm_ptr = app.vm_as_ptr();
+    let activity_ptr = app.activity_as_ptr();
+    if vm_ptr.is_null() || activity_ptr.is_null() {
+        return None;
+    }
+    let vm = unsafe { jni::JavaVM::from_raw(vm_ptr.cast()) };
+    let read = vm.attach_current_thread(|env| {
+        let activity = unsafe { jni::objects::JObject::from_raw(env, activity_ptr.cast()) };
+        let intent = env
+            .call_method(
+                &activity,
+                jni::jni_str!("getIntent"),
+                jni::jni_sig!("()Landroid/content/Intent;"),
+                &[],
+            )?
+            .l()?;
+        let text = if intent.is_null() {
+            None
+        } else {
+            let key = env.new_string("uifw.script")?;
+            let value = env
+                .call_method(
+                    &intent,
+                    jni::jni_str!("getStringExtra"),
+                    jni::jni_sig!("(Ljava/lang/String;)Ljava/lang/String;"),
+                    &[jni::objects::JValue::Object(&key)],
+                )?
+                .l()?;
+            if value.is_null() {
+                None
+            } else {
+                // SAFETY: `getStringExtra` returned a local `java.lang.String`. Null was
+                // handled above. `value` gives up that reference here.
+                let string = unsafe { jni::objects::JString::from_raw(env, value.into_raw()) };
+                Some(string.try_to_string(env)?)
+            }
+        };
+        let _ = activity.into_raw();
+        Ok::<Option<String>, jni::errors::Error>(text)
+    });
+    read.ok().flatten()
+}
+
 fn accepted_pointer(
     motion: &android_activity::input::MotionEvent<'_>,
     density: f32,
@@ -481,6 +575,14 @@ fn accepted_pointer(
         y,
         // `event_time` is nanoseconds. Velocity only needs deltas on this clock.
         time_ms: motion.event_time() as f64 / 1_000_000.0,
+        button: if phase == core::Phase::Cancel {
+            core::Button::None
+        } else {
+            core::Button::Primary
+        },
+        modifiers: core::Modifiers::empty(),
+        dx: 0.0,
+        dy: 0.0,
     })
 }
 

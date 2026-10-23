@@ -18,7 +18,7 @@ const solid = {
         filename: args.path,
         babelrc: false,
         configFile: false,
-        sourceMaps: false,
+        sourceMaps: true,
         plugins: [
           ["@babel/plugin-transform-typescript", { isTSX: true, allExtensions: true }],
           [
@@ -38,7 +38,7 @@ const solid = {
   },
 };
 
-await esbuild.build({
+const options = {
   absWorkingDir: here,
   entryPoints: ["counter.tsx"],
   outfile: "dist/counter.js",
@@ -49,8 +49,16 @@ await esbuild.build({
   target: "es2022",
   plugins: [solid],
   nodePaths: [join(here, "node_modules")],
+  sourcemap: true,
   define: {
     "process.env.NODE_ENV": '"production"',
   },
   logLevel: "info",
-});
+};
+
+if (process.argv.includes("--watch")) {
+  const ctx = await esbuild.context(options);
+  await ctx.watch();
+} else {
+  await esbuild.build(options);
+}

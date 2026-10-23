@@ -15,20 +15,22 @@ pub use error::Error;
 
 /// Loads `script` and returns the session the host pumps each frame.
 ///
-/// `log` receives console lines. Level 3 is an error. Other levels are informational.
+/// `name` is the filename the interpreter reports for this script. `log` receives
+/// console lines. Level 3 is an error. Other levels are informational.
 pub fn open(
     script: &str,
+    name: &str,
     shaper: impl Shaper + 'static,
     log: Box<dyn Fn(u8, &str)>,
 ) -> Result<Box<dyn session::Session>, Error> {
     #[cfg(quickjs_missing)]
     {
-        let _ = (script, shaper, log);
+        let _ = (script, name, shaper, log);
         Err(Error::NotLinked)
     }
     #[cfg(quickjs)]
     {
-        Ok(Box::new(JsSession::open(script, shaper, log)?))
+        Ok(Box::new(JsSession::open(script, name, shaper, log)?))
     }
 }
 
@@ -80,23 +82,13 @@ mod tests {
     }
 
     fn click(session: &mut dyn Session, x: f32, y: f32) {
-        session.pointer(PointerEvent {
-            phase: Phase::Down,
-            x,
-            y,
-            time_ms: 0.0,
-        });
-        session.pointer(PointerEvent {
-            phase: Phase::Up,
-            x,
-            y,
-            time_ms: 0.0,
-        });
+        session.pointer(PointerEvent::new(Phase::Down, x, y, 0.0));
+        session.pointer(PointerEvent::new(Phase::Up, x, y, 0.0));
     }
 
     fn open_counter() -> Option<Box<dyn Session>> {
         let source = include_str!("../../../apps/gallery-solid/dist/counter.js");
-        match open(source, ui_core::MonoShaper, no_log()) {
+        match open(source, "test.js", ui_core::MonoShaper, no_log()) {
             Ok(session) => Some(session),
             Err(Error::NotLinked) => None,
             Err(error) => panic!("{error}"),
@@ -127,10 +119,11 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = include_str!("../../../apps/gallery-solid/dist/counter.js");
-            let mut session = match super::JsSession::open(source, ui_core::MonoShaper, no_log()) {
-                Ok(session) => session,
-                Err(error) => panic!("{error}"),
-            };
+            let mut session =
+                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
+                    Ok(session) => session,
+                    Err(error) => panic!("{error}"),
+                };
             session.metrics(&metrics());
             let first = session.frame(0.0);
             assert!(!session.jobs_pending());
@@ -162,10 +155,11 @@ mod tests {
                 core.onClick(region, () => {});
                 core.remove(root, region);
             "#;
-            let session = match super::JsSession::open(kept, ui_core::MonoShaper, no_log()) {
-                Ok(session) => session,
-                Err(error) => panic!("{error}"),
-            };
+            let session =
+                match super::JsSession::open(kept, "test.js", ui_core::MonoShaper, no_log()) {
+                    Ok(session) => session,
+                    Err(error) => panic!("{error}"),
+                };
             assert_eq!(session.tap_count(), 0);
             let dropped = r#"
                 const root = core.column(0);
@@ -174,7 +168,7 @@ mod tests {
                 core.remove(root, label);
                 core.setText(label, "no");
             "#;
-            match super::JsSession::open(dropped, ui_core::MonoShaper, no_log()) {
+            match super::JsSession::open(dropped, "test.js", ui_core::MonoShaper, no_log()) {
                 Err(Error::Script(message)) => {
                     assert!(message.contains("setText"), "script error was {message:?}");
                 }
@@ -206,24 +200,9 @@ mod tests {
         session.metrics(&metrics());
         let first = session.frame(0.0);
         let (x, y) = text_spot(&first, "-");
-        session.pointer(PointerEvent {
-            phase: Phase::Down,
-            x,
-            y,
-            time_ms: 0.0,
-        });
-        session.pointer(PointerEvent {
-            phase: Phase::Move,
-            x: 300.0,
-            y: 170.0,
-            time_ms: 0.0,
-        });
-        session.pointer(PointerEvent {
-            phase: Phase::Up,
-            x: 300.0,
-            y: 170.0,
-            time_ms: 0.0,
-        });
+        session.pointer(PointerEvent::new(Phase::Down, x, y, 0.0));
+        session.pointer(PointerEvent::new(Phase::Move, 300.0, 170.0, 0.0));
+        session.pointer(PointerEvent::new(Phase::Up, 300.0, 170.0, 0.0));
         let second = session.frame(16.0);
         assert!(texts(&second).contains(&"Count: 0"));
         assert!(!texts(&second).contains(&"Count: -1"));
@@ -249,27 +228,18 @@ mod tests {
                 core.onRelease(region, () => note("R"));
                 core.onClick(region, () => note("C"));
             "#;
-            let mut session = match super::JsSession::open(source, ui_core::MonoShaper, no_log()) {
-                Ok(session) => session,
-                Err(error) => panic!("{error}"),
-            };
+            let mut session =
+                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
+                    Ok(session) => session,
+                    Err(error) => panic!("{error}"),
+                };
             session.metrics(&metrics());
             let first = session.frame(0.0);
             let (x, y) = text_spot(&first, "idle");
-            session.pointer(PointerEvent {
-                phase: Phase::Down,
-                x,
-                y,
-                time_ms: 0.0,
-            });
+            session.pointer(PointerEvent::new(Phase::Down, x, y, 0.0));
             let pressed = session.frame(16.0);
             assert_eq!(texts(&pressed), ["P"]);
-            session.pointer(PointerEvent {
-                phase: Phase::Up,
-                x,
-                y,
-                time_ms: 0.0,
-            });
+            session.pointer(PointerEvent::new(Phase::Up, x, y, 0.0));
             let lifted = session.frame(32.0);
             assert_eq!(texts(&lifted), ["PRC"]);
         }
@@ -286,10 +256,11 @@ mod tests {
             let source = r#"
                 const label = core.text("Hi", 16, [0, 0, 0, 255]);
             "#;
-            let mut session = match super::JsSession::open(source, ui_core::MonoShaper, no_log()) {
-                Ok(session) => session,
-                Err(error) => panic!("{error}"),
-            };
+            let mut session =
+                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
+                    Ok(session) => session,
+                    Err(error) => panic!("{error}"),
+                };
             let mut window = metrics();
             window.inset_left = 8.0;
             window.inset_top = 14.0;
@@ -303,10 +274,42 @@ mod tests {
 
     #[test]
     fn syntax_error_script_is_reported() {
-        match open("{", ui_core::MonoShaper, no_log()) {
+        match open("{", "test.js", ui_core::MonoShaper, no_log()) {
             Err(Error::NotLinked | Error::Script(_)) => {}
             Err(error) => panic!("{error}"),
             Ok(_) => panic!("expected a script error"),
+        }
+    }
+
+    #[test]
+    fn an_infinite_frame_callback_keeps_the_previous_list() {
+        #[cfg(not(quickjs))]
+        {
+            return;
+        }
+        #[cfg(quickjs)]
+        {
+            let source = r#"
+                const root = core.column(0);
+                let ticks = 0;
+                core.onFrame(() => {
+                    ticks += 1;
+                    if (ticks > 1) {
+                        while (true) {}
+                    }
+                });
+            "#;
+            let mut session =
+                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
+                    Ok(session) => session,
+                    Err(error) => panic!("{error}"),
+                };
+            session.metrics(&metrics());
+            let first = session.frame(0.0);
+            assert!(session.take_script_error().is_none());
+            let second = session.frame(16.0);
+            assert_eq!(second, first);
+            assert!(session.take_script_error().is_some());
         }
     }
 
@@ -326,10 +329,11 @@ mod tests {
                 core.append(root, region);
                 core.onClick(region, () => { throw new Error("boom"); });
             "#;
-            let mut session = match super::JsSession::open(source, ui_core::MonoShaper, no_log()) {
-                Ok(session) => session,
-                Err(error) => panic!("{error}"),
-            };
+            let mut session =
+                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
+                    Ok(session) => session,
+                    Err(error) => panic!("{error}"),
+                };
             session.metrics(&metrics());
             let first = session.frame(0.0);
             let (x, y) = text_spot(&first, "Go");
@@ -353,6 +357,7 @@ mod tests {
             let record = std::rc::Rc::clone(&seen);
             let opened = super::JsSession::open(
                 "console.log('boot')",
+                "test.js",
                 ui_core::MonoShaper,
                 Box::new(move |level, text| {
                     *record.borrow_mut() = Some((level, text.to_owned()));
@@ -386,10 +391,11 @@ mod tests {
                     if (n < 2) core.requestFrame();
                 });
             "#;
-            let mut session = match super::JsSession::open(source, ui_core::MonoShaper, no_log()) {
-                Ok(session) => session,
-                Err(error) => panic!("{error}"),
-            };
+            let mut session =
+                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
+                    Ok(session) => session,
+                    Err(error) => panic!("{error}"),
+                };
             session.metrics(&metrics());
             let first = session.frame(0.0);
             assert_eq!(texts(&first), ["1"]);
@@ -424,51 +430,22 @@ mod tests {
                 core.onDragEnd(scroll, () => note("E"));
                 core.onClick(region, () => note("C"));
             "#;
-            let mut session = match super::JsSession::open(source, ui_core::MonoShaper, no_log()) {
-                Ok(session) => session,
-                Err(error) => panic!("{error}"),
-            };
+            let mut session =
+                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
+                    Ok(session) => session,
+                    Err(error) => panic!("{error}"),
+                };
             session.metrics(&metrics());
             let first = session.frame(0.0);
             let (x, y) = text_spot(&first, "idle");
-            session.pointer(PointerEvent {
-                phase: Phase::Down,
-                x,
-                y,
-                time_ms: 0.0,
-            });
-            session.pointer(PointerEvent {
-                phase: Phase::Move,
-                x,
-                y: y + 4.0,
-                time_ms: 10.0,
-            });
-            session.pointer(PointerEvent {
-                phase: Phase::Up,
-                x,
-                y: y + 4.0,
-                time_ms: 20.0,
-            });
+            session.pointer(PointerEvent::new(Phase::Down, x, y, 0.0));
+            session.pointer(PointerEvent::new(Phase::Move, x, y + 4.0, 10.0));
+            session.pointer(PointerEvent::new(Phase::Up, x, y + 4.0, 20.0));
             let clicked = session.frame(16.0);
             assert_eq!(texts(&clicked), ["C"]);
-            session.pointer(PointerEvent {
-                phase: Phase::Down,
-                x,
-                y,
-                time_ms: 30.0,
-            });
-            session.pointer(PointerEvent {
-                phase: Phase::Move,
-                x,
-                y: y + 24.0,
-                time_ms: 40.0,
-            });
-            session.pointer(PointerEvent {
-                phase: Phase::Up,
-                x,
-                y: y + 24.0,
-                time_ms: 50.0,
-            });
+            session.pointer(PointerEvent::new(Phase::Down, x, y, 30.0));
+            session.pointer(PointerEvent::new(Phase::Move, x, y + 24.0, 40.0));
+            session.pointer(PointerEvent::new(Phase::Up, x, y + 24.0, 50.0));
             let dragged = session.frame(32.0);
             assert_eq!(texts(&dragged), ["CBME"]);
         }
@@ -483,10 +460,11 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = include_str!("../../../apps/gallery-solid/dist/counter.js");
-            let mut session = match super::JsSession::open(source, ui_core::MonoShaper, no_log()) {
-                Ok(session) => session,
-                Err(error) => panic!("{error}"),
-            };
+            let mut session =
+                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
+                    Ok(session) => session,
+                    Err(error) => panic!("{error}"),
+                };
             session.metrics(&metrics());
             let first = session.frame(0.0);
             let Some((clip_y, clip_h)) = first.commands.iter().find_map(|command| match command {
@@ -511,18 +489,8 @@ mod tests {
             }) else {
                 panic!("label");
             };
-            session.pointer(PointerEvent {
-                phase: Phase::Down,
-                x,
-                y: before + 1.0,
-                time_ms: 0.0,
-            });
-            session.pointer(PointerEvent {
-                phase: Phase::Move,
-                x,
-                y: before - 39.0,
-                time_ms: 16.0,
-            });
+            session.pointer(PointerEvent::new(Phase::Down, x, before + 1.0, 0.0));
+            session.pointer(PointerEvent::new(Phase::Move, x, before - 39.0, 16.0));
             let scrolled = session.frame(16.0);
             let Some(after) = scrolled.commands.iter().find_map(|command| match command {
                 Command::Text { utf8, y, .. } if utf8 == &label => Some(*y),
@@ -589,10 +557,11 @@ mod tests {
                     }
                 });
             "#;
-            let mut session = match super::JsSession::open(source, ui_core::MonoShaper, no_log()) {
-                Ok(session) => session,
-                Err(error) => panic!("{error}"),
-            };
+            let mut session =
+                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
+                    Ok(session) => session,
+                    Err(error) => panic!("{error}"),
+                };
             session.metrics(&metrics());
             let first = session.frame(0.0);
             assert!(texts(&first).contains(&"field"));

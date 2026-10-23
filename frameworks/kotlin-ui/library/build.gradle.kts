@@ -13,6 +13,11 @@ kotlin {
     }
     sourceSets {
         commonMain.dependencies {}
+        val jvmMain by getting {
+            dependencies {
+                api(libs.reactive)
+            }
+        }
         val jvmTest by getting {
             dependencies {
                 implementation(kotlin("test"))

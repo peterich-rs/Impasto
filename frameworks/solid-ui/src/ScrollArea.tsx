@@ -66,6 +66,11 @@ export function ScrollArea(props: { children?: unknown }): NodeHandle {
         const live = viewport === 0 ? off() : host.scrollOffset(viewport);
         setOff(clamp(live.x - dx, live.y - dy));
       }}
+      onWheel={(dx, dy) => {
+        coasting = false;
+        const live = viewport === 0 ? off() : host.scrollOffset(viewport);
+        setOff(clamp(live.x + dx, live.y + dy));
+      }}
       onDragEnd={(vx, vy) => {
         velocityX = vx;
         velocityY = vy;

@@ -20,6 +20,70 @@ pub struct Rgba {
     pub pixels: Vec<u8>,
 }
 
+/// Channel tolerance against a reference image. A pixel whose reference value
+/// differs from a 4-neighbor by more than 32 in any channel is an edge and
+/// allows ±6. Every other pixel allows ±2. A size mismatch fails.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn pixels_close(actual: &[u8], expected: &[u8], width: u32, height: u32) -> bool {
+    let Some(count) = (width as usize).checked_mul(height as usize) else {
+        return false;
+    };
+    let Some(len) = count.checked_mul(4) else {
+        return false;
+    };
+    if width == 0 || height == 0 || actual.len() != len || expected.len() != len {
+        return false;
+    }
+    for index in 0..count {
+        let allowance = if edge_pixel(expected, width, index) {
+            6
+        } else {
+            2
+        };
+        let at = index * 4;
+        for channel in 0..4 {
+            let delta = (i16::from(actual[at + channel]) - i16::from(expected[at + channel]))
+                .unsigned_abs();
+            if delta > allowance {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn edge_pixel(expected: &[u8], width: u32, index: usize) -> bool {
+    let x = index % width as usize;
+    let y = index / width as usize;
+    let center = index * 4;
+    let neighbors = [
+        x.checked_sub(1).map(|nx| (nx, y)),
+        Some((x + 1, y)),
+        y.checked_sub(1).map(|ny| (x, ny)),
+        Some((x, y + 1)),
+    ];
+    for neighbor in neighbors.into_iter().flatten() {
+        let (nx, ny) = neighbor;
+        if nx >= width as usize {
+            continue;
+        }
+        let at = ny * width as usize + nx;
+        if at * 4 + 4 > expected.len() {
+            continue;
+        }
+        let at = at * 4;
+        for channel in 0..4 {
+            let delta = (i16::from(expected[center + channel]) - i16::from(expected[at + channel]))
+                .unsigned_abs();
+            if delta > 32 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn load_rgba_png(path: &Path) -> anyhow::Result<Rgba> {
     let url = file_url(path)?;
     // SAFETY: `url` is a file URL. A null options dictionary is the documented default.
@@ -126,7 +190,7 @@ fn file_url(path: &Path) -> anyhow::Result<objc2_core_foundation::CFRetained<CFU
 
 #[cfg(test)]
 mod tests {
-    use super::load_rgba_png;
+    use super::{load_rgba_png, pixels_close};
     use std::path::Path;
 
     #[test]
@@ -140,5 +204,57 @@ mod tests {
         assert_eq!(image.height, 56);
         assert_eq!(image.pixels.len(), 56 * 56 * 4);
         assert!(image.pixels.iter().any(|byte| *byte != 0));
+    }
+
+    #[test]
+    fn a_flat_pixel_allows_two_and_rejects_three() {
+        let expected = [10, 10, 10, 255];
+        let mut within = expected;
+        within[0] = 12;
+        let mut outside = expected;
+        outside[0] = 13;
+        assert!(pixels_close(&within, &expected, 1, 1));
+        assert!(!pixels_close(&outside, &expected, 1, 1));
+    }
+
+    #[test]
+    fn an_edge_pixel_allows_six_and_rejects_seven() {
+        let expected = [0, 0, 0, 255, 255, 255, 255, 255];
+        let mut within = expected;
+        within[0] = 6;
+        let mut outside = expected;
+        outside[0] = 7;
+        assert!(pixels_close(&within, &expected, 2, 1));
+        assert!(!pixels_close(&outside, &expected, 2, 1));
+    }
+
+    #[test]
+    #[ignore = "needs UIFW_FRAME from just pixel-test and a local Impeller SDK"]
+    fn counter_frame_matches_the_reference() {
+        let frame = match std::env::var("UIFW_FRAME") {
+            Ok(frame) => frame,
+            Err(error) => panic!("UIFW_FRAME: {error}"),
+        };
+        let actual = match load_rgba_png(Path::new(&frame)) {
+            Ok(image) => image,
+            Err(error) => panic!("{error:#}"),
+        };
+        let reference = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/pixels/counter.png");
+        let expected = match load_rgba_png(&reference) {
+            Ok(image) => image,
+            Err(error) => panic!("{error:#}"),
+        };
+        assert_eq!(actual.width, expected.width);
+        assert_eq!(actual.height, expected.height);
+        assert!(
+            pixels_close(
+                &actual.pixels,
+                &expected.pixels,
+                expected.width,
+                expected.height
+            ),
+            "frame differs from {}",
+            reference.display()
+        );
     }
 }

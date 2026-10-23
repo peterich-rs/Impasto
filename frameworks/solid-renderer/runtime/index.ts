@@ -72,6 +72,9 @@ export const core = {
   padding(edges: number) {
     return scene.createElement("padding", { edges });
   },
+  grid(columns: string[], rows: string[], gap: number) {
+    return scene.createElement("grid", { columns, rows, gap });
+  },
   pointerRegion() {
     return scene.createElement("pointer");
   },

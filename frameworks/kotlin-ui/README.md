@@ -1,6 +1,6 @@
 # kotlin-ui
 
-Kotlin 声明式 UI。信号和原生目标还没接。现在这份 DSL 把场景收成版本 1 字节，用来和 `protocol/tests/fixtures/counter.bin` 对拍。
+Kotlin 声明式 UI。信号和原生目标还没接。现在这份 DSL 把场景编成版本 1 字节，并和 `protocol/tests/fixtures/counter.bin` 逐字节比较。
 
 ```kotlin
 scene {

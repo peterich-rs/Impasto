@@ -1,9 +1,11 @@
 package dev.uifw.gallery
 
+import com.lightningkite.reactive.core.Signal
 import dev.uifw.scene.counterScene
 
 fun main() {
-    val scene = counterScene()
-    print(scene.debug())
-    println("encoded ${scene.encode().size} bytes")
+    val count = Signal(0)
+    print(counterScene(count).debug())
+    count.value = 1
+    print(counterScene(count).debug())
 }

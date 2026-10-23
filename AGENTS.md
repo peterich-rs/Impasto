@@ -4,6 +4,8 @@
 
 用户和仓库文档使用中文。回复用户用中文。
 
+写 README 和 `docs/` 时用目录名和类型名。渲染在 `engine`。版本 1 计数器场景的对照文件是 `protocol/tests/fixtures/counter.bin`。文档只写仓库里能核对的事实，不自造叫法，也不写某次讨论的背景。
+
 ## 名字
 
 项目名是 Future。产品代码的开源协议是 Apache-2.0，见仓库根的 `LICENSE` 和 `NOTICE`。
@@ -16,14 +18,14 @@ C 符号没有模块，所以前缀用层名，不用产品名：
 |---|---|---|
 | 场景协议 | `protocol_` | `protocol_decode` |
 | UI 核心 | `core_` | `core_tree_layout` |
-| 播放器 | `engine_` | `engine_draw` |
+| 渲染引擎 | `engine_` | `engine_draw` |
 | 运行时会话 | `session_` | `session_frame` |
 
 宿主是可执行文件，不导出符号。Rust 模块内部不要再加这些前缀。不要使用 `future_` 或 `uifw_` 作为新符号的前缀。Cargo 把 rlib 放在 `target/`，不要安装成系统里的 `libcore`。
 
 Kotlin 包名 `dev.uifw`、Solid 包名 `@uifw/solid-renderer`、环境变量 `UIFW_COUNTER_BYTES` 和 `UIFW_DUMP` 仍用旧前缀。这些名字留到改对应语言层时再换，不单独做一次改名。
 
-计数器金样是 `protocol/tests/fixtures/counter.bin`，208 字节。Kotlin 和 TypeScript 用自己的编码器对这一个文件，还不调用 Rust。这不是 Protobuf。记录布局是固定的小端字段，测试要求字节相同。Protobuf 的字段 tag 和 varint 对不上这个布局，还会多一个代码生成工具。开头四个字节是 `UIFW`。这是格式里的魔数，用来拒绝不是场景的输入。它不是 C 头文件。
+计数器场景的版本 1 编码在 `protocol/tests/fixtures/counter.bin`，208 字节。Kotlin 和 TypeScript 各自编码这一棵树，输出必须和这个文件逐字节相同，目前不调用 Rust。格式是固定的小端字段，开头四字节是 `UIFW`，用来识别这份场景。改这套字节时，Rust、Kotlin、TypeScript 和这个文件一起改。
 
 ## 优先复用已有实现
 
@@ -46,7 +48,7 @@ Kotlin 包名 `dev.uifw`、Solid 包名 `@uifw/solid-renderer`、环境变量 `U
 
 Taffy 只算盒子的位置和大小，含 Grid。文字和图片用它的 measure 回调把尺寸交回去，排版仍走 Impeller。命中测试、手势和绘制仍在 `core/`。
 
-我们自己写的原生代码用 Rust：渲染树、场景字节、Impeller 播放器、macOS 宿主。Rust 编码以 `.agents/skills/rust-best-practice` 为准，调用 `/rust-best-practice`。写本仓库的 Rust 时重点看其中的 trait、强类型、引用和泛型。布局和绘制在渲染线程上同步执行，不放进 async 运行时。异步留给以后的文件、网络和脚本加载。平台线程做窗口、输入换算和 vsync 登记。`Engine` 是 `!Send`。`register_font`、`submit`、`draw_metal`、`draw_vulkan` 和 typography 只在渲染线程上调用，并且在该线程上创建和销毁。`CAMetalLayer` 在主线程创建并挂到视图上；渲染线程只用层指针取 drawable。Metal context 仍用 `MTLCreateSystemDefaultDevice()`。
+我们自己写的原生代码用 Rust：渲染树、场景格式、用 Impeller 绘制的渲染引擎、macOS 宿主。Rust 编码以 `.agents/skills/rust-best-practice` 为准，调用 `/rust-best-practice`。写本仓库的 Rust 时重点看其中的 trait、强类型、引用和泛型。布局和绘制在渲染线程上同步执行，不放进 async 运行时。异步留给以后的文件、网络和脚本加载。平台线程做窗口、输入换算和 vsync 登记。`Engine` 是 `!Send`。`register_font`、`submit`、`draw_metal`、`draw_vulkan` 和 typography 只在渲染线程上调用，并且在该线程上创建和销毁。`CAMetalLayer` 在主线程创建并挂到视图上；渲染线程只用层指针取 drawable。Metal context 仍用 `MTLCreateSystemDefaultDevice()`。
 
 `protocol`、`core`、`engine`、`session`、`hosts/hostshell`、`hosts/macos`、`hosts/android`、`runtimes/quickjs` 是 Cargo workspace。`protocol`、`core`、`engine`、`hosts/macos` 在进程内部不经过 C。不要再给这四层加 C 或 Objective-C，也不要新增产品 C 头文件。QuickJS 的 C 只在 `runtimes/quickjs/src/glue.c`：解释器回调进 Rust 的 `Tree`，不把 Rust 类型漏出进程。没有 quickjs-ng 源码时这个 crate 返回 `NotLinked`。Kotlin 的 C ABI 留到 cinterop 有调用者时再写。工具链用 `rust-toolchain.toml` 钉住 stable。原生构建以 Cargo 为准。
 
@@ -54,7 +56,7 @@ Taffy 只算盒子的位置和大小，含 Grid。文字和图片用它的 measu
 
 代码和文档只保留当前路径还要用的东西。方案被替换、文件没有引用、文档在描述已经放弃的做法时，直接删。不要留兼容壳、注释掉的旧实现、空目录，或「以前曾经」的段落。
 
-删除前用搜索确认没有引用，并跑受影响的测试。`third_party` 里钉住的上游对照和 SDK 不按废弃代码删。测试还在读的夹具留着；测试改完，旁边的临时编码器、临时播放路径一起删。
+删除前用搜索确认没有引用，并跑受影响的测试。`third_party` 里钉住的上游对照和 SDK 不按废弃代码删。测试还在读的样本文件留着；测试改完，旁边的临时编码器和临时绘制路径一起删。
 
 改文档时替换旧段落。不要在下面追加更正，让两套说法同时存在。
 
@@ -75,17 +77,17 @@ Kotlin 路线的写法参考 KiteUI（`scene { layer { rect(...) } }`）。KiteU
 
 ## 技术路线
 
-场景字节是 ABI。`protocol` 的 Rust 编码器是准绳，金样是 `counter.bin`。Kotlin 和 TypeScript 各有一份对照编码器，由这份金样锁住，还不调用 Rust。以后 Kotlin 走 cinterop，再删掉这两份对照实现。QuickJS 会话在进程内直接调用 `core::Tree`。
+场景格式是 ABI。以 `protocol` 的 Rust 编码器和 `counter.bin` 为准。Kotlin 和 TypeScript 各有一份对照编码器，输出必须和这个文件逐字节相同，目前不调用 Rust。以后 Kotlin 走 cinterop，再删掉这两份对照实现。QuickJS 会话在进程内直接调用 `core::Tree`。
 
-绘制不经过 Dart。`embedder.h` / `FlutterEngineRun` 会启动 Dart VM，本进程不使用它。macOS 宿主用 Impeller standalone SDK（`impeller.h`）的 Metal 后端，调用 `Engine::draw_metal`。Android 宿主用同一份 SDK 的 Vulkan 后端，调用 `Engine::create_vulkan` 和 `Engine::draw_vulkan`。版本 1 金样先由 `protocol` 收成 `DrawList`，播放器只画这份列表：矩形、段落、RGBA 纹理。iOS 预构建矩阵没有这一列，宿主还没写。UI 代码继续写 Kotlin 或 JS。
+绘制不经过 Dart。`embedder.h` / `FlutterEngineRun` 会启动 Dart VM，本进程不使用它。macOS 宿主用 Impeller standalone SDK（`impeller.h`）的 Metal 后端，调用 `Engine::draw_metal`。Android 宿主用同一份 SDK 的 Vulkan 后端，调用 `Engine::create_vulkan` 和 `Engine::draw_vulkan`。不加载脚本时，`protocol` 把 `counter.bin` 转成 `DrawList`，渲染引擎只画这份列表：矩形、段落、RGBA 纹理。iOS 预构建矩阵没有这一列，宿主还没写。UI 代码继续写 Kotlin 或 JS。
 
 Impeller 的 C API 没有稳定 ABI。钉住的是一份 Flutter 框架提交，不是 engine 仓库的提交。创建 context 时传入该头文件里的 `IMPELLER_VERSION`。升级 pin 时一起改调用代码。
 
-macOS 上由夹具字节画出第一帧。`just host` 打开 360×640 的窗口，提交一次夹具 `DrawList`。`UIFW_DUMP` 把第一帧 Metal 纹理写成 PNG 后退出。`just host-js` 加载 `apps/gallery-solid/dist/counter.js`。宿主把指针换成左上角的场景点放进队列。夹具路径不把队列交给会话。`--js` 路径由会话出队。宿主不写计数器。click 的验收是 `core` 里的 `Gesture`，以及 QuickJS 会话里减号把文字改成 `Count: -1`。按下和抬起另外分发 press 与 release。抬起仍在按下区域内时，焦点沿父链找到 `focusable` 节点，发出 `Blur` 再 `Focus`。滑出、取消、以及越过拖动阈值交给 `Scroll` 的手势不改焦点。
+不加载脚本时，macOS 用 `counter.bin` 画出第一帧。`just host` 打开 360×640 的窗口，提交一次这份 `DrawList`。`UIFW_DUMP` 把第一帧 Metal 纹理写成 PNG 后退出。`just host-js` 加载 `apps/gallery-solid/dist/counter.js`。宿主把指针换成左上角的场景点放进队列。`just host` 不把队列交给会话。`--js` 由会话出队。计数器的加减写在应用里，不写在宿主里。click 的验收是 `core` 里的 `Gesture`，以及 QuickJS 会话里减号把文字改成 `Count: -1`。按下和抬起另外分发 press 与 release。抬起仍在按下区域内时，焦点沿父链找到 `focusable` 节点，发出 `Blur` 再 `Focus`。滑出、取消、以及越过拖动阈值交给 `Scroll` 的手势不改焦点。
 
 计数器加减是第一条应用，用来验收框架，不是把逻辑写进宿主。`count`、`onClick` 和按钮摆放都属于上层。
 
-仍然守住的外部约束：不要把 Flutter engine 源码克隆进本仓库。engine fork 是另一个仓库。iOS 要等上游预构建矩阵有这一列再写宿主。场景 diff 在有实测工作负载之前不做：静止时壳已经不登记下一帧，交互帧的固定开销在纹理上传和排版。macOS 与 Android 都是平台线程入队，渲染线程绘制。
+仍然守住的外部约束：不要把 Flutter engine 源码克隆进本仓库。engine fork 是另一个仓库。iOS 要等上游预构建矩阵有这一列再写宿主。场景 diff 在有实测工作负载之前不做：静止时宿主已经不登记下一帧，交互帧的固定开销在纹理上传和排版。macOS 与 Android 都是平台线程入队，渲染线程绘制。
 
 ## 框架分层
 
@@ -117,15 +119,15 @@ present 之后 wants_ime 变化才让平台弹出或收起键盘
 
 指针事件是 `core::PointerEvent`：down、move、up、cancel，坐标是场景点，原点在左上。macOS 宿主先把窗口坐标换进内容视图，再把 Y 翻到左上。AppKit 给出的已经是点，不除 `backingScaleFactor`。宿主只入队。命中测试在 `core` 里沿着上一帧的盒子走，不读场景字节。`Text` 和 `Image` 命中自己的盒子。布局容器把命中交给子节点。`click` 由 `Tree::pointer` 合成：按下时记住最近的 `PointerRegion`，移出则取消，抬起时仍是该节点或其子孙就返回该区域的 `NodeId`。同一次抬起才移动焦点：从命中节点沿父链找 `focusable`，先 `Blur` 旧节点，再 `Focus` 新节点。已经聚焦的节点再点一次不重复发 `Focus`。锁定成拖动之后不再发 click，也不改焦点。会话在这次借用结束后分发监听器。监听器只改状态，例如 `set_text`。`set_text` 保留上一帧的几何，到下一次 `layout` 才重算。
 
-按键和输入法不进 `core`。`session::InputEvent` 是 `Key`、`Text` 或 `Composing`。无焦点时会话丢掉事件。有焦点时，借用结束后把事件派发给该节点的监听器，监听器只改自己的字符串。`Tree::measure_text` 用这棵树的 `Shaper`，参数与 `Shaper::measure` 相同。`Session::wants_ime` 表示键盘是否该弹出，壳在 `frame` 之后比较上次投递的值，变了才调用 `Services::set_ime`。`take_ime_text` 只在聚焦和由 `Key` 改动已提交串时取走一份，用来调用 `set_ime_text` 把平台缓冲写成这份串；`Text` 和 `Composing` 不回写，避免清掉输入法正在用的组合区间。用户把键盘收起时，壳投递 `ImeDismissed`，会话失焦并清掉 `wants_ime`。光标闪烁只在聚焦时 `requestFrame`。
+按键和输入法不进 `core`。`session::InputEvent` 是 `Key`、`Text` 或 `Composing`。无焦点时会话丢掉事件。有焦点时，借用结束后把事件派发给该节点的监听器，监听器只改自己的字符串。`Tree::measure_text` 用这棵树的 `Shaper`，参数与 `Shaper::measure` 相同。`Session::wants_ime` 表示键盘是否该弹出，宿主在 `frame` 之后比较上次投递的值，变了才调用 `Services::set_ime`。`take_ime_text` 只在聚焦和由 `Key` 改动已提交串时取走一份，用来调用 `set_ime_text` 把平台缓冲写成这份串；`Text` 和 `Composing` 不回写，避免清掉输入法正在用的组合区间。用户把键盘收起时，宿主投递 `ImeDismissed`，会话失焦并清掉 `wants_ime`。光标闪烁只在聚焦时 `requestFrame`。
 
-场景协议版本 1 是夹具。播放器不解析这些字节。第一帧由 `protocol::scene_to_draw_list` 收成 `DrawList`。`core::Tree::record` 交出同一份列表，坐标已经是绝对的。圆角、裁剪、透明度已进 `DrawList`。文字命令还带段落样式：对齐、字重、方向、最大行数、省略号、行高倍数，以及可选的 family。缺省是左对齐、字重 400、从左到右、不限制行数，行高用字体自己的。family 缺省时用播放器注册的那一份字体。`PushTransform` 把随后的命令平移、顺时针旋转再等比缩放，直到配对的 `Pop`。旋转单位是弧度。命中仍用布局盒子，不吃变换。版本 1 字节不产生这条命令。布局样式留在渲染树上，不进字节，也不由 `core` 再编码成版本 1。Kotlin 和 TypeScript 的编码器只为锁住夹具。
+版本 1 字节记录已经算好坐标的矩形、文字和图片。渲染引擎不解析这套字节。`just host` 的第一帧由 `protocol::scene_to_draw_list` 收成 `DrawList`。运行中的界面由 `core::Tree::record` 交出同一份列表，坐标已经是绝对的。圆角、裁剪、透明度已进 `DrawList`。文字命令还带段落样式：对齐、字重、方向、最大行数、省略号、行高倍数，以及可选的 family。缺省是左对齐、字重 400、从左到右、不限制行数，行高用字体自己的。family 缺省时用渲染引擎注册的那一份字体。`PushTransform` 把随后的命令平移、顺时针旋转再等比缩放，直到配对的 `Pop`。旋转单位是弧度。命中仍用布局盒子，不吃变换。版本 1 字节不产生这条命令。布局样式留在渲染树上，不进字节，也不由 `core` 再编码成版本 1。Kotlin 和 TypeScript 的版本 1 编码器只用来和 `counter.bin` 对照。
 
-文字测量的实现必须和播放器绘制文字的实现是同一个排版器。`DrawList` 的文字命令带 `font_size`、`max_width` 和颜色。版本 1 字节没有样式，映射时填字号 28、段落宽 280，这两个常数在 `protocol`。播放器按命令里的字号绘制，不乘 `point_scale`。宿主注入的排版器调用 `Engine::measure_paragraph`，和绘制共用同一段已经带上前景色的段落。测试用 `MonoShaper`。不要往播放器里加布局。
+文字测量的实现必须和渲染引擎绘制文字的实现是同一个排版器。`DrawList` 的文字命令带 `font_size`、`max_width` 和颜色。版本 1 字节没有样式，映射时填字号 28、段落宽 280，这两个常数在 `protocol`。渲染引擎按命令里的字号绘制，不乘 `point_scale`。宿主注入的排版器调用 `Engine::measure_paragraph`，和绘制共用同一段已经带上前景色的段落。测试用 `MonoShaper`。不要往渲染引擎里加布局。
 
 布局原语是 `Sized`、`Padding`、`Align`、`Stack`、`Row`、`Column`、`Grid`、`Text`、`Image`、`PointerRegion`、`Decorated`、`Clip`、`Opacity`、`Scroll`、`Transform`。任何节点都可以 `set_focusable`。几何交给 Taffy，含 flex grow 和 grid。`Stack`、`Clip`、`Opacity`、`Transform` 是一格的 grid，子节点放在第 1 行第 1 列。`Scroll` 也是一格 grid，轨道是 `max_content`：视口是边框盒，子节点按完整尺寸布局，可以高出视口。`set_scroll_offset` 不进 Taffy，只让下一帧的录制和命中平移。绘制坐标减去 offset，命中查询加上 offset，并用 `PushClip` 裁到视口。`Transform` 录 `PushTransform` … `Pop`。`set_justify` 和 `set_wrap` 写行或列的主轴对齐和换行。`Text` 和 `Image` 用 measure 回调报告尺寸。`Decorated` 按子节点定尺寸，命中交给子节点，并录一条盖住边框盒的矩形，圆角记在命令上。宽或高为 0 时不录矩形。`Clip`、`Opacity`、`Scroll` 和 `Transform` 在子节点前后录 `Push` 和 `Pop`，盒子为 0 也成对。
 
-已落地的原生层写在 `docs/native-phase.md`。那是 `protocol`、`core`、播放器、会话、壳、macOS 宿主和 Android 宿主的规格，不是待办清单。iOS 没有预构建 SDK，宿主还没写。字节保持版本 1。不新增产品 C 头文件。计数器的 Solid 产物由 QuickJS 加载。Kotlin 还没有原生调用者，所以不写 C ABI。
+已落地的原生层写在 `docs/native-phase.md`。那是 `protocol`、`core`、渲染引擎、会话、`hostshell`、macOS 宿主和 Android 宿主的规格，不是待办清单。iOS 没有预构建 SDK，宿主还没写。字节保持版本 1。不新增产品 C 头文件。计数器的 Solid 产物由 QuickJS 加载。Kotlin 还没有原生调用者，所以不写 C ABI。
 
 不要在 `frameworks/solid-renderer` 或 `frameworks/kotlin-ui` 里实现第二套 measure / layout。
 
@@ -137,24 +139,24 @@ present 之后 wants_ime 变化才让平台弹出或收起键盘
 - 没有 Impeller SDK 时 `Engine::create_metal` 返回 `Status::NotLinked`。没有 C stub。
 - 不要提交 `third_party/impeller-sdk/`、`target/`，也不要解压约 1GB 的 `libimpeller.a`。`engine/fetch-impeller-sdk.sh` 按 `engine/engine.pin` 把每个平台解到 `third_party/impeller-sdk/<平台>/`，只留 `include/*`、动态库和 `LICENSE.sdk.md`。darwin 的 install name 是 `@rpath/libimpeller.dylib`。Android 的 SONAME 是 `libimpeller.so`。Cargo 的输出在 `target/`。
 - 改场景字节时同时改 Rust `protocol`、Kotlin、TypeScript 和 `protocol/tests/fixtures/counter.bin`。调试文本不是 ABI。
-- 节点的 `x, y` 是绝对坐标。`parent` 只表示结构，播放器不加父节点变换。`LAYER` 不产生绘制调用。
-- 宿主不保存 UI 状态，不创建按钮，不解释 `count`，也不做命中测试。它把指针入队，并把 `DrawList` 交给播放器。夹具路径提交一次列表。`--js` 路径每帧把队列交给会话。命中、手势和绘制录制在 `core`。场景字节在 `protocol`。Impeller 播放在 `engine`。布局只调用 Taffy。Solid 渲染器和 Kotlin DSL 只改元素树。不要给 `protocol`、`core`、`engine`、`hosts/macos` 再加 C 或 Objective-C。QuickJS 的胶水 C 只留在 `runtimes/quickjs`。
+- 节点的 `x, y` 是绝对坐标。`parent` 只表示结构，渲染引擎不加父节点变换。`LAYER` 不产生绘制调用。
+- 宿主不保存 UI 状态，不创建按钮，不解释 `count`，也不做命中测试。它把指针入队，并把 `DrawList` 交给渲染引擎。`just host` 提交一次列表。`--js` 每帧把队列交给会话。命中、手势和绘制录制在 `core`。场景格式在 `protocol`。Impeller 绘制在 `engine`。布局只调用 Taffy。Solid 渲染器和 Kotlin DSL 只改元素树。不要给 `protocol`、`core`、`engine`、`hosts/macos` 再加 C 或 Objective-C。QuickJS 的胶水 C 只留在 `runtimes/quickjs`。
 - `register_font`、`submit`、`draw_metal`、`draw_vulkan` 只在渲染线程上调用。`Engine` 是 `!Send`。Impeller 的 typography context 不能离开这条线程。`CAMetalLayer` 在主线程创建并挂到视图上；渲染线程只用层指针取 drawable。Metal context 仍用 `MTLCreateSystemDefaultDevice()`。Android 的 `ANativeWindow` 由平台线程持有，要等渲染线程应答 `SurfaceDropped` 之后才 `release`。
 
 ## Monorepo
 
 ```
-protocol/                  版本 1 字节、解码、计数器金样、DrawList
+protocol/                  版本 1 场景格式、解码、counter.bin、DrawList
 core/                      渲染树。Taffy、等宽排版、命中、click
-engine/                    播放器。只读 DrawList，调用 impeller.h
+engine/                    渲染引擎。只读 DrawList，调用 impeller.h
 session/                   会话 trait。宿主只看见 metrics、pointer、frame、lifecycle
-hosts/hostshell/          壳。命令队列、帧调度、渲染线程
+hosts/hostshell/          命令队列、帧调度、渲染线程
 hosts/macos/               macOS 窗口。指针入队、CVDisplayLink、UIFW_DUMP
 hosts/android/             Android 宿主。GameActivity、AChoreographer、Vulkan。`just android` 打 APK
 hosts/ios                  还没有。上游预构建矩阵没有 iOS 列
 runtimes/quickjs/          quickjs-ng 会话。包名 `quickjs`。没有源码时返回 NotLinked
 frameworks/solid-renderer/ 版本 1 编码器，以及接到 core 的运行时。不做布局
-frameworks/solid-ui/       Button、ScrollArea、Field
+frameworks/solid-ui/       Button、ScrollArea、Field、Switch、Dialog
 frameworks/kotlin-ui/      Kotlin Gradle 根。DSL、控件、以后的 cinterop
 apps/gallery-solid/        Solid 应用。源码 counter.tsx，产物 dist/counter.js
 apps/gallery-kotlin/       Kotlin 应用
@@ -185,7 +187,7 @@ solidPlugin({
 
 ## 场景协议
 
-格式在 `protocol` crate，版本 1，小端。测试在 `protocol/tests/scene.rs`，金样是 `protocol/tests/fixtures/counter.bin`。
+格式在 `protocol` crate，版本 1，小端。测试在 `protocol/tests/scene.rs`，对照文件是 `protocol/tests/fixtures/counter.bin`。
 
 - 0–3：`UIFW`
 - uint32 版本，uint32 `node_count`
@@ -194,7 +196,7 @@ solidPlugin({
 - id 从 1 起，按创建顺序。parent 可以出现在子节点后面。`Scene` 在创建时拒绝未知 parent
 - 固定前缀 36 字节再加字符串。短缓冲区返回 `Error::ShortBuffer`，并且不写输出
 
-计数器夹具（`protocol::counter`、Kotlin `counterScene()`、TypeScript `counterScene()`）是同一棵树：
+计数器场景（`protocol::counter`、Kotlin `counterScene()`、TypeScript `counterScene()`）是同一棵树：
 
 - layer，id 1，parent 0
 - rect，id 2，parent 1，`(0, 0, 320, 180)`，rgba `(17, 17, 17, 255)`
@@ -208,7 +210,7 @@ solidPlugin({
 
 ## 绘制
 
-播放器是 `engine::Engine`。它接收 `protocol::DrawList`，不解析场景字节，也不依赖 `core`。
+渲染引擎是 `engine::Engine`。它接收 `protocol::DrawList`，不解析场景字节，也不依赖 `core`。
 
 - `Engine::create_metal`：没有 SDK 时返回 `Status::NotLinked`
 - `register_font`：拷贝字体字节。宿主默认注册 `/System/Library/Fonts/Supplemental/Arial.ttf`，family 名 `UIFWSans`
@@ -218,7 +220,7 @@ solidPlugin({
 
 成功是 `Result::Ok`。失败是 `Status::NotLinked`、`BadScene`、`NotReady`（还没有 drawable、context 或 display list，或者 present 失败）。空文字、缺图、非正缩放是 `BadScene`。
 
-`Fill` 在缩放之前铺满画布。缩放只做一次，放在第一条非填充命令之前。版本 1 映射先放一条 `Fill`，颜色是 `(17, 17, 17, 255)`，并把文字填成字号 28、段落宽 280、缺省段落样式。播放器使用命令里的 family、字号、字重、对齐、方向和 `max_width`，字号不乘 `point_scale`。左上角放在命令的 `(x, y)`。`measure_paragraph` 和绘制共用同一段段落。相同文字、字号、宽度、颜色和样式跨帧复用。纹理按 `source` 跨帧复用，资产在进程内不可变。成功提交结束时只释放当前显示列表没有引用的纹理和段落。`register_font` 使旧段落在下一次提交释放显示列表之后失效。present 失败是 `NotReady`。图片要调用方给出紧排 RGBA8888。Impeller 不接受 PNG 或 JPEG。`source` 以 `asset:` 开头。macOS 把它映射成启动参数里的资产目录下的 `<name>.png`，默认目录是 `hosts/macos/assets`。Android 映射成 APK 里的 `assets/images/<name>.png`。缺图仍是 `BadScene`。
+`Fill` 在缩放之前铺满画布。缩放只做一次，放在第一条非填充命令之前。版本 1 映射先放一条 `Fill`，颜色是 `(17, 17, 17, 255)`，并把文字填成字号 28、段落宽 280、缺省段落样式。渲染引擎使用命令里的 family、字号、字重、对齐、方向和 `max_width`，字号不乘 `point_scale`。左上角放在命令的 `(x, y)`。`measure_paragraph` 和绘制共用同一段段落。相同文字、字号、宽度、颜色和样式跨帧复用。纹理按 `source` 跨帧复用，资产在进程内不可变。成功提交结束时只释放当前显示列表没有引用的纹理和段落。`register_font` 使旧段落在下一次提交释放显示列表之后失效。上屏失败是 `PresentFailed`，宿主保留表面并再要一帧。还没有表面或显示列表是 `NotReady`。图片要调用方给出紧排 RGBA8888。Impeller 不接受 PNG 或 JPEG。`source` 以 `asset:` 开头。macOS 把它映射成启动参数里的资产目录下的 `<name>.png`，默认目录是 `hosts/macos/assets`。Android 映射成 APK 里的 `assets/images/<name>.png`。缺图仍是 `BadScene`。
 
 窗口标题 `uifw counter`，内容默认 360×640，可关闭、可最小化、可缩放。缩放和改尺寸都投递 `Metrics`。`contentsScale` 和 `drawableSize` 来自窗口所在屏幕的 `backingScaleFactor`（取不到时用 2），尺寸变化时按内容视图重算。这一层 `framebufferOnly = NO`，这样 `UIFW_DUMP` 能读回纹理。
 
@@ -237,13 +239,13 @@ just check
 
 `just check` 先 `cargo test --workspace`，再跑 Kotlin 的 `:library:jvmTest` 与 `:gallery:runGallery`，以及 Solid 的字节对比和 gallery。它不会打开窗口。没有 quickjs-ng 源码时 QuickJS 测试走 `NotLinked`。有源码时会编译解释器并跑编译后的计数器。没有 SDK 时 `Engine` 返回 `NotLinked`，图形测试不编译；Kotlin 和 Solid 不需要 SDK。`just host` 需要 SDK。
 
-GitHub Actions 工作流是 `.github/workflows/check.yml`。它跑 `cargo fmt --all -- --check`、Linux 上的 `cargo test --workspace --exclude macos`、macOS 上的 `cargo test -p macos`，以及和 `just kotlin`、`just solid` 相同的检查。`macos` 这个 crate 只在 macOS 上编译。工作流不下载 Impeller SDK，也不下载 quickjs-ng，因此播放器走 `NotLinked`，QuickJS 测试同样走 `NotLinked`。窗口、`just android` 和 `just solid-app` 不在这套检查里。
+GitHub Actions 工作流是 `.github/workflows/check.yml`。它跑 `cargo fmt --all -- --check`、Linux 上的 `cargo test --workspace --exclude macos`、macOS 上的 `cargo test -p macos`，以及和 `just kotlin`、`just solid` 相同的检查。`macos` 这个 crate 只在 macOS 上编译。工作流不下载 Impeller SDK，也不下载 quickjs-ng，因此渲染引擎走 `NotLinked`，QuickJS 测试同样走 `NotLinked`。窗口、`just android` 和 `just solid-app` 不在这套检查里。
 
 | 命令 | 作用 |
 |---|---|
 | `just check` | `cargo test`，然后 Kotlin 和 Solid。不启动 GUI |
 | `just test` | `cargo test --workspace` |
-| `just kotlin` | JVM 测试和 Kotlin gallery。Gradle 任务自己把 `UIFW_COUNTER_BYTES` 指到金样 |
+| `just kotlin` | JVM 测试和 Kotlin gallery。Gradle 任务把 `UIFW_COUNTER_BYTES` 指到 `counter.bin` |
 | `just solid` | 用 `UIFW_COUNTER_BYTES` 对比字节，跑宿主树测试，再跑 Solid gallery |
 | `just solid-app` | 安装依赖，重编 `dist/counter.js`，再用 mock host 跑渲染 |
 | `just host` | 打开 macOS 窗口。参数是 `protocol/tests/fixtures/counter.bin` 和 `hosts/macos/assets/logo.png` |
@@ -265,7 +267,7 @@ JVM 测试的环境变量由 `library/build.gradle.kts` 设成 `protocol/tests/f
 ## 改代码时
 
 - 动到节点布局或编码，先让 `protocol` 的测试、Kotlin `CounterEncodeTest`、`frameworks/solid-renderer/src/encode.test.ts` 和 `counter.bin` 仍是同一份字节。
-- 播放器调用在 `engine/src/player.rs`，对照 `impeller.h`。没有 stub。没有 SDK 时走 `Status::NotLinked`。
+- 渲染引擎调用在 `engine/src/player.rs`，对照 `impeller.h`。没有 stub。没有 SDK 时走 `Status::NotLinked`。
 - 动到 pin 或 `impeller.h` 的调用，保持 `IMPELLER_VERSION` 来自刚解压的那份头文件。fetch 脚本继续改 darwin 的 install name，并核对 Android 的 SONAME。`engine` 和 `hosts/macos` 的 `build.rs` 都要把 rpath 指到 `third_party/impeller-sdk/darwin-arm64/lib`。Android 目标链接 `third_party/impeller-sdk/android-arm64/lib`。
 - 给宿主加第二种图片时，在解析回调里按 source 区分，并把像素保持到 `submit` 返回。
-- 不要为了对齐调试文本去改编码器。不要把节点坐标改成相对父节点，除非协议版本一起升级，并且 Kotlin、TypeScript 和播放器一起改。
+- 不要为了对齐调试文本去改编码器。不要把节点坐标改成相对父节点，除非协议版本一起升级，并且 Kotlin、TypeScript 和渲染引擎一起改。

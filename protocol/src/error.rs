@@ -14,8 +14,8 @@ pub enum Error {
     Truncated,
     #[error("magic is not UIFW")]
     BadMagic,
-    #[error("version is not 1")]
-    BadVersion,
+    #[error("version {0} is not 1")]
+    BadVersion(u32),
     #[error("node kind is not valid")]
     BadKind,
     #[error("node id is not creation order")]

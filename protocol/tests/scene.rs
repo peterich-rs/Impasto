@@ -69,7 +69,7 @@ fn decode_rejects_damaged_input() {
 
     let mut version = bytes.clone();
     version[4] = 2;
-    assert_eq!(decode(&version), Err(Error::BadVersion));
+    assert_eq!(decode(&version), Err(Error::BadVersion(2)));
 
     let mut kind = bytes.clone();
     // First node kind sits at header + 8.

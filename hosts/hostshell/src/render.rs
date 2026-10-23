@@ -10,9 +10,103 @@ use session::Lifecycle;
 use crate::command::Command;
 use crate::error::BootError;
 use crate::input::{Input, same_draw_list};
+use crate::present::{AfterPresent, after_present};
 use crate::queue::Inbox;
 use crate::shaper::ImpellerShaper;
-use crate::{Boot, Launch, LogLevel, Presented, Surface};
+use crate::{Boot, Launch, LogLevel, Surface};
+
+/// Inputs to one present decision. `paused` comes from [`Input`], not a second flag.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FrameView {
+    pub surface_open: bool,
+    pub paused: bool,
+    pub fixture_open: bool,
+    pub fixture_presented: bool,
+    pub unchanged: bool,
+    pub needs_present: bool,
+    pub again: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FrameStep {
+    Cancel,
+    Skip { again: bool },
+    Submit,
+    PresentCached,
+}
+
+/// What to do after [`after_present`], without touching the engine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PresentFollowup {
+    pub needs_present: bool,
+    pub mark_fixture_presented: bool,
+    pub clear_surface: bool,
+    pub vsync: VsyncOp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VsyncOp {
+    Request,
+    Cancel,
+    Stop,
+}
+
+pub(crate) fn frame_step(view: &FrameView) -> FrameStep {
+    if !view.surface_open || view.paused || (view.fixture_open && view.fixture_presented) {
+        return FrameStep::Cancel;
+    }
+    if view.unchanged && !view.needs_present {
+        return FrameStep::Skip { again: view.again };
+    }
+    if view.unchanged {
+        FrameStep::PresentCached
+    } else {
+        FrameStep::Submit
+    }
+}
+
+pub(crate) fn present_followup(after: AfterPresent, is_fixture: bool) -> PresentFollowup {
+    match after {
+        AfterPresent::Shown { again } => PresentFollowup {
+            needs_present: false,
+            mark_fixture_presented: is_fixture,
+            clear_surface: false,
+            vsync: if again {
+                VsyncOp::Request
+            } else {
+                VsyncOp::Cancel
+            },
+        },
+        AfterPresent::Stop => PresentFollowup {
+            needs_present: false,
+            mark_fixture_presented: false,
+            clear_surface: false,
+            vsync: VsyncOp::Stop,
+        },
+        AfterPresent::Retry => PresentFollowup {
+            needs_present: true,
+            mark_fixture_presented: false,
+            clear_surface: false,
+            vsync: VsyncOp::Request,
+        },
+        AfterPresent::WaitForSurface => PresentFollowup {
+            needs_present: false,
+            mark_fixture_presented: false,
+            clear_surface: true,
+            vsync: VsyncOp::Cancel,
+        },
+    }
+}
+
+/// Surface loss clears the last list. `SurfaceDestroyed` and `WaitForSurface` share this.
+pub(crate) fn surface_lost() -> PresentFollowup {
+    PresentFollowup {
+        needs_present: false,
+        mark_fixture_presented: false,
+        clear_surface: true,
+        vsync: VsyncOp::Cancel,
+    }
+}
 
 pub struct EngineSlot {
     engine: Rc<RefCell<engine::Engine>>,
@@ -205,14 +299,22 @@ fn render(
     let mut point_scale = 1.0_f32;
     let mut fixture_presented = false;
     let mut ime_shown = false;
+    let mut needs_present = false;
 
     while let Some(command) = inbox.recv() {
         match command {
             Command::Shutdown => break,
             Command::SurfaceDestroyed => {
-                surface = None;
-                last_submitted = None;
-                surface_dropped.signal();
+                apply_followup(
+                    &mut surface,
+                    &mut last_submitted,
+                    &mut needs_present,
+                    &mut fixture_presented,
+                    surface_lost(),
+                    false,
+                    boot.vsync.as_ref(),
+                    surface_dropped,
+                );
             }
             Command::SurfaceReady(target) => {
                 note_scale(
@@ -235,6 +337,7 @@ fn render(
                     Err(engine::Status::NotReady) => {
                         surface = None;
                         last_submitted = None;
+                        needs_present = false;
                         surface_dropped.signal();
                         boot.vsync.cancel();
                     }
@@ -297,7 +400,16 @@ fn render(
                 }
             }
             Command::Frame { time_ms } => {
-                if surface.is_none() {
+                if frame_step(&FrameView {
+                    surface_open: surface.is_some(),
+                    paused: false,
+                    fixture_open: false,
+                    fixture_presented: false,
+                    unchanged: false,
+                    needs_present: true,
+                    again: false,
+                }) == FrameStep::Cancel
+                {
                     boot.vsync.cancel();
                     continue;
                 }
@@ -322,7 +434,16 @@ fn render(
                 if let Some(session) = session.as_mut() {
                     publish_ime(session.as_mut(), &services, &mut ime_shown);
                 }
-                if frame.paused || (fixture.is_some() && fixture_presented) {
+                if frame_step(&FrameView {
+                    surface_open: true,
+                    paused: frame.paused,
+                    fixture_open: fixture.is_some(),
+                    fixture_presented,
+                    unchanged: false,
+                    needs_present: true,
+                    again: false,
+                }) == FrameStep::Cancel
+                {
                     boot.vsync.cancel();
                     continue;
                 }
@@ -338,24 +459,38 @@ fn render(
                     boot.vsync.cancel();
                     continue;
                 };
-                if same_draw_list(last_submitted.as_ref(), &list) {
-                    if again {
-                        boot.vsync.request_frame();
-                    } else {
+                let unchanged = same_draw_list(last_submitted.as_ref(), &list);
+                match frame_step(&FrameView {
+                    surface_open: surface.is_some(),
+                    paused: false,
+                    fixture_open: false,
+                    fixture_presented: false,
+                    unchanged,
+                    needs_present,
+                    again,
+                }) {
+                    FrameStep::Cancel | FrameStep::Skip { again: false } => {
                         boot.vsync.cancel();
+                        continue;
                     }
-                    continue;
+                    FrameStep::Skip { again: true } => {
+                        boot.vsync.request_frame();
+                        continue;
+                    }
+                    FrameStep::Submit => {
+                        let services_for_image = services.borrow();
+                        let submitted = engine.borrow_mut().submit(&list, point_scale, |source| {
+                            services_for_image.image(source)
+                        });
+                        if let Err(status) = submitted {
+                            log(LogLevel::Error, &format!("scene submit failed: {status}"));
+                            boot.vsync.cancel();
+                            continue;
+                        }
+                        last_submitted = Some(list);
+                    }
+                    FrameStep::PresentCached => {}
                 }
-                let services_for_image = services.borrow();
-                let submitted = engine.borrow_mut().submit(&list, point_scale, |source| {
-                    services_for_image.image(source)
-                });
-                if let Err(status) = submitted {
-                    log(LogLevel::Error, &format!("scene submit failed: {status}"));
-                    boot.vsync.cancel();
-                    continue;
-                }
-                last_submitted = Some(list);
                 let presented = {
                     let Some(surface) = surface.as_mut() else {
                         boot.vsync.cancel();
@@ -363,29 +498,20 @@ fn render(
                     };
                     surface.present(&mut engine.borrow_mut())
                 };
-                match presented {
-                    Ok(Presented::Continue) => {
-                        fixture_presented = fixture.is_some();
-                        if again {
-                            boot.vsync.request_frame();
-                        } else {
-                            boot.vsync.cancel();
-                        }
-                    }
-                    Ok(Presented::Stop) => {
-                        boot.vsync.cancel();
-                        break;
-                    }
-                    Err(engine::Status::NotReady) => {
-                        surface = None;
-                        last_submitted = None;
-                        surface_dropped.signal();
-                        boot.vsync.cancel();
-                    }
-                    Err(status) => {
-                        log(LogLevel::Error, &format!("draw failed: {status}"));
-                        boot.vsync.cancel();
-                    }
+                let after = after_present(presented, again);
+                let followup = present_followup(after, fixture.is_some());
+                let stop = apply_followup(
+                    &mut surface,
+                    &mut last_submitted,
+                    &mut needs_present,
+                    &mut fixture_presented,
+                    followup,
+                    matches!(after, AfterPresent::Shown { .. }),
+                    boot.vsync.as_ref(),
+                    surface_dropped,
+                );
+                if stop {
+                    break;
                 }
             }
         }
@@ -447,6 +573,36 @@ fn publish_ime(
     }
 }
 
+fn apply_followup(
+    surface: &mut Option<Box<dyn Surface>>,
+    last_submitted: &mut Option<DrawList>,
+    needs_present: &mut bool,
+    fixture_presented: &mut bool,
+    followup: PresentFollowup,
+    write_fixture: bool,
+    vsync: &dyn crate::Vsync,
+    surface_dropped: &Ack,
+) -> bool {
+    *needs_present = followup.needs_present;
+    if write_fixture {
+        *fixture_presented = followup.mark_fixture_presented;
+    }
+    if followup.clear_surface {
+        *surface = None;
+        *last_submitted = None;
+        surface_dropped.signal();
+    }
+    match followup.vsync {
+        VsyncOp::Request => vsync.request_frame(),
+        VsyncOp::Cancel => vsync.cancel(),
+        VsyncOp::Stop => {
+            vsync.cancel();
+            return true;
+        }
+    }
+    false
+}
+
 fn note_scale(last_submitted: &mut Option<DrawList>, point_scale: &mut f32, next: f32) {
     if (next - *point_scale).abs() > f32::EPSILON && last_submitted.is_some() {
         *last_submitted = None;
@@ -463,6 +619,10 @@ mod tests {
 
     use session::{InputEvent, Session};
 
+    use super::{
+        AfterPresent, FrameStep, FrameView, VsyncOp, frame_step, present_followup, surface_lost,
+    };
+
     /// A fixture frame has no session, so queued text is dropped.
     fn deliver_inputs(session: Option<&mut dyn Session>, inputs: VecDeque<InputEvent>) -> usize {
         let Some(session) = session else {
@@ -474,6 +634,92 @@ mod tests {
             count += 1;
         }
         count
+    }
+
+    fn view(overrides: FrameView) -> FrameView {
+        overrides
+    }
+
+    fn open_view() -> FrameView {
+        FrameView {
+            surface_open: true,
+            paused: false,
+            fixture_open: false,
+            fixture_presented: false,
+            unchanged: false,
+            needs_present: false,
+            again: false,
+        }
+    }
+
+    #[test]
+    fn a_closed_surface_pauses_and_a_finished_fixture_cancel() {
+        assert_eq!(
+            frame_step(&view(FrameView {
+                surface_open: false,
+                ..open_view()
+            })),
+            FrameStep::Cancel
+        );
+        assert_eq!(
+            frame_step(&view(FrameView {
+                paused: true,
+                ..open_view()
+            })),
+            FrameStep::Cancel
+        );
+        assert_eq!(
+            frame_step(&view(FrameView {
+                fixture_open: true,
+                fixture_presented: true,
+                ..open_view()
+            })),
+            FrameStep::Cancel
+        );
+    }
+
+    #[test]
+    fn an_unchanged_list_skips_unless_present_must_retry() {
+        assert_eq!(
+            frame_step(&view(FrameView {
+                unchanged: true,
+                again: true,
+                ..open_view()
+            })),
+            FrameStep::Skip { again: true }
+        );
+        assert_eq!(
+            frame_step(&view(FrameView {
+                unchanged: true,
+                ..open_view()
+            })),
+            FrameStep::Skip { again: false }
+        );
+        assert_eq!(
+            frame_step(&view(FrameView {
+                unchanged: true,
+                needs_present: true,
+                ..open_view()
+            })),
+            FrameStep::PresentCached
+        );
+        assert_eq!(frame_step(&open_view()), FrameStep::Submit);
+    }
+
+    #[test]
+    fn a_failed_present_asks_for_another_frame_and_surface_loss_clears() {
+        let retry = present_followup(AfterPresent::Retry, false);
+        assert!(retry.needs_present);
+        assert_eq!(retry.vsync, VsyncOp::Request);
+        assert!(!retry.clear_surface);
+        let lost = present_followup(AfterPresent::WaitForSurface, true);
+        assert!(!lost.needs_present);
+        assert!(lost.clear_surface);
+        assert_eq!(lost.vsync, VsyncOp::Cancel);
+        assert_eq!(surface_lost(), lost);
+        let shown = present_followup(AfterPresent::Shown { again: false }, true);
+        assert!(shown.mark_fixture_presented);
+        assert_eq!(shown.vsync, VsyncOp::Cancel);
     }
 
     #[test]

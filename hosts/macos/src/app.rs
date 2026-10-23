@@ -11,12 +11,14 @@ use hostshell::{
     Boot, BootError, Command, Launch as ShellLaunch, Link, LogLevel, NativePtr, Poster, Services,
     SessionError, SurfaceTarget, metrics,
 };
+use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, available, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSEvent, NSScreen, NSTextInputClient, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSEvent, NSEventModifierFlags, NSScreen, NSTextInputClient, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{
@@ -33,15 +35,35 @@ use crate::pixels::Rgba;
 use crate::pointer::pointer_event;
 use crate::surface::MetalSurface;
 use crate::vsync::DisplayLink;
+use core::{Button, Modifiers, Phase, PointerEvent};
 
 const CONTENT_WIDTH: f64 = 360.0;
 const CONTENT_HEIGHT: f64 = 640.0;
 const FONT_FAMILY: &str = "UIFWSans";
 
+fn modifiers_of(event: &NSEvent) -> Modifiers {
+    let flags = event.modifierFlags();
+    let mut modifiers = Modifiers::empty();
+    if flags.contains(NSEventModifierFlags::Shift) {
+        modifiers = modifiers.with(Modifiers::SHIFT);
+    }
+    if flags.contains(NSEventModifierFlags::Control) {
+        modifiers = modifiers.with(Modifiers::CONTROL);
+    }
+    if flags.contains(NSEventModifierFlags::Option) {
+        modifiers = modifiers.with(Modifiers::ALT);
+    }
+    if flags.contains(NSEventModifierFlags::Command) {
+        modifiers = modifiers.with(Modifiers::META);
+    }
+    modifiers
+}
+
 struct ContentIvars {
     poster: Poster,
     wants_ime: Cell<bool>,
     marked: RefCell<Marked>,
+    tracking: RefCell<Option<Retained<NSTrackingArea>>>,
 }
 
 define_class!(
@@ -170,17 +192,53 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            self.enqueue(core::Phase::Down, event);
+            self.enqueue(Phase::Down, event, Button::Primary);
         }
 
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
-            self.enqueue(core::Phase::Move, event);
+            self.enqueue(Phase::Move, event, Button::Primary);
         }
 
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
-            self.enqueue(core::Phase::Up, event);
+            self.enqueue(Phase::Up, event, Button::Primary);
+        }
+
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, event: &NSEvent) {
+            self.enqueue(Phase::Down, event, Button::Secondary);
+        }
+
+        #[unsafe(method(rightMouseDragged:))]
+        fn right_mouse_dragged(&self, event: &NSEvent) {
+            self.enqueue(Phase::Move, event, Button::Secondary);
+        }
+
+        #[unsafe(method(rightMouseUp:))]
+        fn right_mouse_up(&self, event: &NSEvent) {
+            self.enqueue(Phase::Up, event, Button::Secondary);
+        }
+
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: &NSEvent) {
+            self.enqueue(Phase::Move, event, Button::None);
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, event: &NSEvent) {
+            self.post_outside(event);
+        }
+
+        #[unsafe(method(updateTrackingAreas))]
+        fn update_tracking_areas(&self) {
+            unsafe { msg_send![super(self), updateTrackingAreas] }
+            self.install_tracking_area();
+        }
+
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            self.enqueue(Phase::Wheel, event, Button::None);
         }
     }
 );
@@ -191,21 +249,70 @@ impl ContentView {
             poster,
             wants_ime: Cell::new(false),
             marked: RefCell::new(Marked::default()),
+            tracking: RefCell::new(None),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer. The ivars are
         // already installed, and `frame` is a finite content rectangle.
         unsafe { msg_send![super(this), initWithFrame: frame] }
     }
 
-    fn enqueue(&self, phase: core::Phase, event: &NSEvent) {
+    fn install_tracking_area(&self) {
+        if let Some(old) = self.ivars().tracking.borrow_mut().take() {
+            self.removeTrackingArea(&old);
+        }
+        let options = NSTrackingAreaOptions::MouseEnteredAndExited
+            | NSTrackingAreaOptions::MouseMoved
+            | NSTrackingAreaOptions::ActiveInKeyWindow
+            | NSTrackingAreaOptions::InVisibleRect;
+        let area = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                NSTrackingArea::alloc(),
+                self.bounds(),
+                options,
+                Some(self),
+                None,
+            )
+        };
+        self.addTrackingArea(&area);
+        *self.ivars().tracking.borrow_mut() = Some(area);
+    }
+
+    fn post_outside(&self, event: &NSEvent) {
+        self.ivars().poster.post(Command::Pointer(PointerEvent {
+            phase: Phase::Move,
+            x: -1.0,
+            y: -1.0,
+            time_ms: event.timestamp() * 1000.0,
+            button: Button::None,
+            modifiers: modifiers_of(event),
+            dx: 0.0,
+            dy: 0.0,
+        }));
+    }
+
+    fn enqueue(&self, phase: Phase, event: &NSEvent, button: Button) {
         let local = self.convertPoint_fromView(event.locationInWindow(), None);
         let height = self.bounds().size.height;
+        let modifiers = modifiers_of(event);
+        let (dx, dy) = if phase == Phase::Wheel {
+            // AppKit's positive delta Y points up. Scene Y grows downward.
+            (
+                event.scrollingDeltaX() as f32,
+                -(event.scrollingDeltaY() as f32),
+            )
+        } else {
+            (0.0, 0.0)
+        };
         self.ivars().poster.post(Command::Pointer(pointer_event(
             phase,
             local.x,
             local.y,
             height,
             event.timestamp() * 1000.0,
+            button,
+            modifiers,
+            dx,
+            dy,
         )));
     }
 
@@ -466,7 +573,7 @@ impl Services for MacServices {
 /// What the window paints. The fixture path submits once. A script is a session.
 pub enum Launch {
     Fixture(protocol::DrawList),
-    Script(String),
+    Script { name: String, source: String },
 }
 
 pub enum RunError {
@@ -508,11 +615,13 @@ pub fn run(launch: Launch, assets: PathBuf, font: &[u8]) -> Result<(), RunError>
     });
     let shell_launch = match launch {
         Launch::Fixture(list) => ShellLaunch::Fixture(list),
-        Launch::Script(script) => ShellLaunch::Session(Box::new(move |slot| {
-            quickjs::open(&script, slot.shaper(), slot.log_hook()).map_err(|error| match error {
-                quickjs::Error::NotLinked => SessionError::NotLinked,
-                quickjs::Error::Runtime => SessionError::Runtime,
-                quickjs::Error::Script(text) => SessionError::Script(text),
+        Launch::Script { name, source } => ShellLaunch::Session(Box::new(move |slot| {
+            quickjs::open(&source, &name, slot.shaper(), slot.log_hook()).map_err(|error| {
+                match error {
+                    quickjs::Error::NotLinked => SessionError::NotLinked,
+                    quickjs::Error::Runtime => SessionError::Runtime,
+                    quickjs::Error::Script(text) => SessionError::Script(text),
+                }
             })
         })),
     };
@@ -561,6 +670,7 @@ pub fn run(launch: Launch, assets: PathBuf, font: &[u8]) -> Result<(), RunError>
         )
     };
     window.setTitle(&NSString::from_str("uifw counter"));
+    window.setAcceptsMouseMovedEvents(true);
     // SAFETY: `HostState` keeps this window retained until the process leaves `run`.
     unsafe { window.setReleasedWhenClosed(false) };
 

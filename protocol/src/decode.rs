@@ -15,7 +15,7 @@ pub fn decode(bytes: &[u8]) -> Result<Scene, Error> {
     }
     let version = read_u32(&bytes[4..8])?;
     if version != VERSION {
-        return Err(Error::BadVersion);
+        return Err(Error::BadVersion(version));
     }
     let count = read_u32(&bytes[8..12])? as usize;
     let room = bytes.len().saturating_sub(HEADER_LEN) / NODE_PREFIX;
