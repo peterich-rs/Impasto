@@ -17,6 +17,7 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(quickjs_missing)");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/glue.c");
+    println!("cargo:rerun-if-changed=src/runtime_host.inc");
     println!("cargo:rerun-if-changed={}", source.display());
     if !source.join("quickjs.c").is_file() {
         println!("cargo:rustc-cfg=quickjs_missing");

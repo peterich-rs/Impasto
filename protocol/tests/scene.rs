@@ -136,7 +136,11 @@ fn version_one_draw_list_skips_the_layer() {
                 w: 320.0,
                 h: 180.0,
                 corner_radius: 0.0,
-                color: [17, 17, 17, 255]
+                color: [17, 17, 17, 255],
+                stroke_width: 0.0,
+                stroke_color: [0, 0, 0, 0],
+                gradient: None,
+                shadow: None,
             },
             Command::Text {
                 x: 24.0,
@@ -144,8 +148,10 @@ fn version_one_draw_list_skips_the_layer() {
                 max_width: 280.0,
                 font_size: 28.0,
                 color: [255, 255, 255, 255],
-                utf8: "Count".to_owned(),
+                utf8: std::sync::Arc::from("Count"),
                 style: protocol::TextStyle::default(),
+                spans: Vec::new(),
+                links: Vec::new(),
             },
             Command::Text {
                 x: 24.0,
@@ -153,15 +159,19 @@ fn version_one_draw_list_skips_the_layer() {
                 max_width: 280.0,
                 font_size: 28.0,
                 color: [124, 255, 107, 255],
-                utf8: "0".to_owned(),
+                utf8: std::sync::Arc::from("0"),
                 style: protocol::TextStyle::default(),
+                spans: Vec::new(),
+                links: Vec::new(),
             },
             Command::Image {
                 x: 240.0,
                 y: 24.0,
                 w: 56.0,
                 h: 56.0,
-                source: "asset:logo".to_owned()
+                source: std::sync::Arc::from("asset:logo"),
+                mode: protocol::ContentMode::Fill,
+                required: true,
             },
         ]
     );

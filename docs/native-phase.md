@@ -13,10 +13,10 @@
 | `protocol/` | 版本 1 的编码、解码、`counter.bin`，以及把它收成 `DrawList` |
 | `core/` | Taffy 布局、等宽排版、绘制录制、命中、click、drag 和焦点 |
 | `engine/` | 读 `DrawList`，调用 `impeller.h` |
-| `session/` | `metrics`、`pointer`、`input`、`frame`、`wants_frame`、`wants_ime`、`lifecycle` |
+| `session/` | `metrics`、`pointer`、`input`、`frame`、`wants_frame`、`take_ime`、`lifecycle`、`settings` |
 | `hosts/hostshell/` | 命令队列、指针过滤、相同列表跳过提交、表面应答 |
 | `hosts/macos/` | 窗口、`CVDisplayLink`、指针入队、`UIFW_DUMP`。`--js` 时每帧问会话要列表 |
-| `hosts/android/` | GameActivity、`AChoreographer`、Vulkan、logcat。库名 `uifw` |
+| `hosts/android/` | `HostActivity`、`HostView`、`Choreographer`、Vulkan、logcat。库名 `uifw` |
 | `runtimes/quickjs/` | quickjs-ng 会话。包名 `quickjs` |
 
 `just check` 先 `cargo test --workspace`，再跑 Kotlin 和 Solid 的字节对比。对照文件是 `protocol/tests/fixtures/counter.bin`，环境变量是 `UIFW_COUNTER_BYTES`。
@@ -98,7 +98,7 @@ pub struct DrawList {
 | `Clip` | 与 `Stack` 相同 | `PushClip` … 子节点 … `Pop`。盒子为 0 也成对 |
 | `Opacity` | 与 `Stack` 相同 | `PushOpacity` … 子节点 … `Pop`。子树离屏后按 alpha 回贴 |
 | `Scroll` | 一格 `max_content` grid。边框盒是视口 | `PushClip` … 子树减去 offset … `Pop`。offset 不进 Taffy |
-| `Transform` | 与 `Stack` 相同 | `PushTransform` … 子节点 … `Pop`。命中用未变换盒子 |
+| `Transform` | 与 `Stack` 相同 | `PushTransform` … 子节点 … `Pop`。命中使用逆变换 |
 | `Text` | measure 回调返回段落尺寸 | `Text` 命令，带字号、行宽约束和颜色 |
 | `Image` | measure 回调返回固有尺寸 | `Image` 命令 |
 | `Decorated` | 一列子节点，间距 0 | 边框盒一条矩形，圆角记在命令上。命中交给子节点 |
@@ -108,7 +108,7 @@ pub struct DrawList {
 
 命中测试用布局之后的盒子，从最后一个子节点往前。宽或高为 0 的节点跳过。`opaque` 命中盒子就收下，`defer` 只看子节点。点必须落在每个祖先盒子内。圆角不改变命中。`PointerRegion` 把自己放进命中结果。子节点的 `set_grow` 写 `flex_grow`，负值拒绝。flex 父节点有确定主轴尺寸时，正的 grow 在下一次 `layout` 分到剩余空间。
 
-`PointerEvent` 是 `phase`、`x`、`y` 和 `time_ms`。`time_ms` 是宿主事件时间，毫秒，用来算拖拽速度。相邻 `Move` 在队列里合并时保留队尾那一笔的时间。点击记在 `PointerRegion` 上。按下返回 `Press`。位移不超过 8 点时，移出或 `Cancel` 返回 `Release`，抬起仍在区域内时先 `Release` 再 `Click`。位移超过 8 点且按下点有 `Scroll` 祖先时，先 `Release`，再 `DragBegin`、`DragBy`，抬起是 `DragEnd(vx, vy)`，单位是场景点/毫秒。没有 `Scroll` 时超过 8 点仍走按下语义。拖拽中的 `Cancel` 补 `DragEnd(0, 0)`。树上不存闭包。`set_scroll_offset` 只标脏，不改 Taffy；录制把子树坐标减去 offset，命中把查询点加上 offset。测试用合成的 down、move、up、cancel，不打开窗口。监听器里不调用 `layout`。`set_text`、字号、颜色、间距和内边距只标脏，几何留到下一次 `layout`。挂上或摘下节点会清掉当前按下和拖拽，并让命中失效。`set_viewport(x, y, w, h)` 把根放到 `(x, y)`，可用空间是 `(w, h)`。
+`PointerEvent` 是 `phase`、`x`、`y` 和 `time_ms`。`time_ms` 是宿主事件时间，毫秒，用来算拖拽速度。相邻 `Move` 在队列里合并时保留队尾那一笔的时间。点击记在 `PointerRegion` 上。按下返回 `Press`。位移不超过 8 点时，移出或 `Cancel` 返回 `Release`，抬起仍在区域内时先 `Release` 再 `Click`。位移超过 8 点且按下点有 `Scroll` 祖先时，先 `Release`，再 `DragBegin`、`DragBy`，抬起是 `DragEnd(vx, vy)`，单位是场景点/毫秒。没有 `Scroll` 时超过 8 点仍走按下语义。拖拽中的 `Cancel` 补 `DragEnd(0, 0)`。树上不存闭包。`set_scroll_offset` 只标绘制，不改 Taffy，也不让下一次 `layout` 进入 Taffy；录制把子树坐标减去 offset，命中把查询点加上 offset。测试用合成的 down、move、up、cancel，不打开窗口。监听器里不调用 `layout`。`set_text`、字号、间距和内边距标布局脏，几何留到下一次 `layout`。颜色、圆角、透明度和变换只标绘制。插入节点保留当前按下和拖拽。摘掉子树时只取消目标在这棵子树里的按下和拖拽。`set_viewport(x, y, w, h)` 把根放到 `(x, y)`，可用空间是 `(w, h)`。
 
 无窗口测试至少锁住这些结果：
 
@@ -131,7 +131,7 @@ pub struct DrawList {
 
 第一条非 `Fill` 命令之前做一次缩放。`PushClip`、`PushOpacity` 和 `PushTransform` 也走这次缩放，因此 `Save` 和 `Restore` 之间的矩阵都含 `point_scale`。半径不大于 0 时走直角接口，否则钳到短边的一半再画圆角或圆角裁剪。透明度用单独的 layer paint，白底加上命令里的 alpha，`Restore` 之后释放。`PushTransform` 在 `Save` 之后是 `Translate`、`Rotate`、`Scale`，`Pop` 复用 `Restore`。多一个 `Pop`，或结束时栈还没排空，都是 `BadScene`，并且不创建显示列表。失败时先把残留的 save 恢复掉，再释放 builder。没有 SDK 时这些测试早退，不另放 C stub。
 
-绘制时坐标乘 `point_scale`，文字用已注册字体和命令里的字号、字重、对齐、方向，字号不再乘缩放。缺省样式不额外调用最大行数、省略号和行高接口。图片必须是紧排 RGBA8888。版本 1 映射带来的文字已经带上字号 28、段落宽 280 和缺省样式。纹理按 `source` 跨帧保留，段落按文字、字号、宽度、颜色和样式跨帧保留。`measure_paragraph` 和绘制共用这张表。成功提交结束时只释放当前显示列表没有引用的条目。`register_font` 使段落在下一次提交释放显示列表之后失效。上屏失败是 `PresentFailed`。还没有表面或显示列表是 `NotReady`。
+绘制时坐标乘 `point_scale`，文字用已注册字体和命令里的字号、字重、对齐、方向，字号不再乘缩放。缺省样式不额外调用最大行数、省略号和行高接口。图片必须是紧排 RGBA8888。版本 1 映射带来的文字已经带上字号 28、段落宽 280 和缺省样式。纹理按 `source` 跨帧保留，段落按文字、字号、宽度、颜色和样式跨帧保留。`measure_paragraph` 和绘制共用这张表。成功提交结束时只释放当前显示列表没有引用的条目。`register_font` 使段落在下一次提交释放显示列表之后失效。上屏失败是 `PresentFailed`。还没有表面或显示列表是 `NotReady`。这两种都不丢掉 `Surface`。`submit` 失败时已经在屏幕上的显示列表还在。
 
 ## 宿主
 
@@ -141,9 +141,9 @@ macOS 宿主用 `objc2`、`objc2-app-kit` 和 `objc2-metal` 调用 AppKit。窗�
 
 指针从 `NSEvent` 换成场景点放进队列。先把窗口坐标换进内容视图，再把原点改到左上。`timestamp` 乘 1000 写进 `time_ms`。AppKit 给出的已经是点，不除 `backingScaleFactor`。Android 的 `event_time` 是纳秒，除以 1_000_000 得到毫秒。队列在渲染线程排空。`just host` 提交一次绘制列表后只 present 第一帧。`--js` 由会话出队。没有新的指针或 metrics，并且会话没有申请下一帧时，不再登记 `CVDisplayLink`。列表与上次提交相同时不调用 `submit`。会话申请了下一帧时，列表相同也再登记恰好一帧。计数器的加减写在应用里。
 
-Android 宿主是 `hosts/android` 的 cdylib，库名 `uifw`。`android_main` 入队后回到 looper。`present` 里 acquire、`draw_vulkan`、present。`ANativeWindow` 要等 `SurfaceDropped` 之后才释放。字体是 `assets/fonts/UIFWSans.ttf`（Roboto Regular，注册名仍是 `UIFWSans`）。图片是 `assets/images/logo.png`，用 `AImageDecoder` 解成 RGBA。`just android` 先编 cdylib，再打 APK。
+Android 宿主是 `hosts/android` 的 cdylib，库名 `uifw`。Java 主线程入队。`present` 里 acquire、`draw_vulkan`、present。`ANativeWindow` 要等 `SurfaceDropped` 之后才释放。字体是 `assets/fonts/UIFWSans.ttf`（Roboto Regular，注册名仍是 `UIFWSans`）。图片是 `assets/images/logo.png`，用 `AImageDecoder` 解成 RGBA。`just android` 先编 cdylib，再打 APK。
 
-文本输入：`Command::Input` 和 `ImeDismissed` 与指针一起入队。macOS 内容视图在 `set_ime(true)` 之后成为 first responder，`keyDown:` 只调用 `interpretKeyEvents:`，`NSTextInputClient` 的查询读主线程镜像。Android 在 looper 上把 `TextInputState` 差分成 `Text`、`Composing` 和退格，UTF-16 下标先换成字节再切串。`set_ime` 和 `set_ime_text` 从渲染线程投递，平台线程再 `show_soft_input` / `hide_soft_input` / `set_text_input_state`。键盘避让把 `WindowInsets.Type.ime()` 并进 `inset_bottom`。系统返回键在键盘可见时只失焦。
+文本输入：`Command::Input` 和 `ImeDismissed` 与指针一起入队。会话用 `take_ime` 交出 `ImeUpdate`。macOS 在 `Show` 之后把内容视图设成 first responder，`keyDown:` 只调用 `interpretKeyEvents:`，`NSTextInputClient` 读主线程上的那份 `ImeState`。Android 的 `TextInput` 实现 `InputConnection`。`commitText`、`setComposingText`、`finishComposingText` 和 `deleteSurroundingText` 收成 `Text`、`Composing`，以及用 `SelectAll` 加 `Text` 换上的新串。`Update` 写回 `Editable` 的选区和组合区间，单位是 UTF-16，并用插入符矩形更新 `CursorAnchorInfo`。键盘避让把 IME inset 放进 `view_insets`。系统返回键在键盘可见时只失焦。
 
 ## 验收
 

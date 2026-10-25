@@ -1,26 +1,31 @@
 //! What the shell does after one present attempt.
 //!
-//! [`engine::Status::PresentFailed`] keeps the surface and asks for another
-//! vsync. [`engine::Status::NotReady`] waits until the platform posts a new surface.
+//! A present error keeps the surface. The surface is dropped only when the
+//! platform posts [`crate::Command::SurfaceDestroyed`].
 
 use crate::Presented;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AfterPresent {
-    Shown { again: bool },
+    Shown {
+        again: bool,
+    },
     Stop,
+    /// Drawable or display list was not ready, or the list was rejected.
+    /// The surface stays.
     Retry,
-    WaitForSurface,
+    /// The engine context is gone.
+    Fatal,
 }
 
 pub fn after_present(result: Result<Presented, engine::Status>, again: bool) -> AfterPresent {
     match result {
         Ok(Presented::Continue) => AfterPresent::Shown { again },
         Ok(Presented::Stop) => AfterPresent::Stop,
-        Err(engine::Status::PresentFailed) => AfterPresent::Retry,
-        Err(engine::Status::NotReady | engine::Status::NotLinked | engine::Status::BadScene) => {
-            AfterPresent::WaitForSurface
-        }
+        Err(
+            engine::Status::PresentFailed | engine::Status::NotReady | engine::Status::BadScene,
+        ) => AfterPresent::Retry,
+        Err(engine::Status::NotLinked) => AfterPresent::Fatal,
     }
 }
 
@@ -37,7 +42,15 @@ mod tests {
         );
         assert_eq!(
             after_present(Err(engine::Status::NotReady), true),
-            AfterPresent::WaitForSurface
+            AfterPresent::Retry
+        );
+        assert_eq!(
+            after_present(Err(engine::Status::BadScene), false),
+            AfterPresent::Retry
+        );
+        assert_eq!(
+            after_present(Err(engine::Status::NotLinked), false),
+            AfterPresent::Fatal
         );
         assert_eq!(
             after_present(Ok(Presented::Continue), true),

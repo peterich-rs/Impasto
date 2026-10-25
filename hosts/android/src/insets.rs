@@ -1,11 +1,14 @@
 //! Window pixels and density become scene points. A missing density is not replaced.
 
+#[cfg_attr(not(test), allow(dead_code))]
 const DENSITY_ANY: u32 = 0xfffe;
+#[cfg_attr(not(test), allow(dead_code))]
 const DENSITY_NONE: u32 = 0xffff;
 
-/// Dots-per-inch from `AConfiguration`, divided by the mdpi baseline.
+/// Dots per inch divided by the mdpi baseline.
 ///
 /// `0`, `DENSITY_ANY`, and `DENSITY_NONE` are unread values.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn density_scale(dpi: u32) -> Option<f32> {
     if dpi == 0 || dpi == DENSITY_ANY || dpi == DENSITY_NONE {
         return None;
@@ -24,6 +27,7 @@ pub fn scene_point(x_px: f32, y_px: f32, density: f32) -> Option<(f32, f32)> {
 }
 
 /// Insets in pixels: the content rect is the area inside the window.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn content_insets(
     window_width: i32,
     window_height: i32,

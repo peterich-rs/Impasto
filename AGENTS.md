@@ -38,7 +38,7 @@ Kotlin 包名 `dev.uifw`、Solid 包名 `@uifw/solid-renderer`、环境变量 `U
 | 布局 | [Taffy](https://github.com/DioxusLabs/taffy)（MIT，Rust crate）。`core` 直接调它的 Rust API，覆盖 Flexbox、Grid、Block | 自研 flex。Yoga。Flutter 的 RenderObject（在 Dart 里，拆不出来）。Taffy 未完成的 C 绑定 |
 | 文字测量和绘制 | 已钉住的 Impeller Typography。测试用一份等宽的假排版器 | 再链一套 HarfBuzz / FreeType |
 | 光栅 | Impeller standalone SDK | `embedder.h`、Flutter shell、Skia、engine 源码。这三样都会带上 Dart VM，或等于把 engine 克隆进仓库 |
-| 宿主窗口 | 各端系统 API。macOS 用 objc2 调 AppKit。Android 用 `android-activity` 0.6.1（MIT OR Apache-2.0）包 GameActivity，vsync 用 `AChoreographer`。图片解码用 `AImageDecoder`。`ndk` 0.9.0 只提供 NDK 绑定 | GLFW。Flutter embedding。这两样都会带进另一套窗口或 Dart VM |
+| 宿主窗口 | 各端系统 API。macOS 用 objc2 调 AppKit。Android 用 `Activity` 与 `HostView`：`SurfaceView` 给出 `ANativeWindow`，vsync 用主线程 `Choreographer`，输入法用 `InputConnection`。图片解码用 `AImageDecoder`。`ndk` 0.9.0 只提供 NDK 绑定 | GLFW。Flutter embedding。这两样都会带进另一套窗口或 Dart VM |
 | JavaScript | [quickjs-ng](https://github.com/quickjs-ng/quickjs)（MIT）v0.17.0。`runtimes/quickjs/quickjs.pin` 钉 tag 和 sha256，`cc` 编进包名 `quickjs` 的 crate。源码在 `third_party/quickjs`，不进 git | bellard/quickjs（上游基本停更）、Hermes、V8、React Native JSI |
 | Solid 状态 | `solid-js` 的 signal 和 `@solidjs/universal` | 改 `third_party/solid` |
 | Kotlin 状态 | 接到信号时依赖已发布的 `com.lightningkite:reactive`，版本那时再钉 | 把 KiteUI 或这份库的源码拷进仓库 |
@@ -105,7 +105,7 @@ Solid 的 `@solidjs/universal` 只有 `createElement`、`insertNode`、`setPrope
 | 场景协议 | `protocol/` | 布局和绘制之后的显示列表 ABI。绝对坐标。没有 flex，没有回调，没有应用状态 |
 | 渲染器 | `frameworks/solid-renderer`，`frameworks/kotlin-ui` | 把 JSX 或 Kotlin DSL 变成对 `core/` 的增删改。只标脏，不算坐标 |
 | 响应式 | Solid signal；Kotlin 侧以后的 signal | 应用和控件的状态。写信号会标脏对应元素并请求下一帧 |
-| 基础控件 | 布局原语在 `core/`。`Button`、`ScrollArea`、`Field` 这类组合控件在各语言包一层 | `Text`、`Row`、`Column`、`Stack`、`Padding`、`Clip`、`Opacity`、`Scroll`、`Transform` 是渲染对象。`Button` 用它们加上手势组成。`Field` 自己保存字符串、光标和组合文本 |
+| 基础控件 | 布局原语在 `core/`。`Button`、`ScrollArea`、`Field` 这类组合控件在各语言包一层 | `Text`、`Row`、`Column`、`Stack`、`Padding`、`Clip`、`Opacity`、`Scroll`、`Transform` 是渲染对象。`Button` 用它们加上手势组成。`Field` 绑定 `core` 的 `TextEditor`。编辑按字形簇进行，偏移是 UTF-16 |
 | 应用 | `apps/gallery-solid`、`apps/gallery-kotlin` | 只写状态和控件组合 |
 
 一帧在渲染线程上完成。平台线程把指针、metrics 和生命周期放进命令队列后立即返回。命中测试用上一帧的几何，在渲染线程排空队列时做。监听器只写状态。接着才冲刷、布局、录制。列表与上次提交不同才 `submit` 和 present。没有新的指针、metrics 或表面事件时不再登记下一帧，除非会话申请了恰好下一帧。这个申请在 present 之后被取走。动画要连续播放，就在每一帧里再申请。目录、依赖方向和各层内部见 `docs/architecture.md`。三端差异见 `docs/platform-hosts.md`。
@@ -121,7 +121,7 @@ present 之后 wants_ime 变化才让平台弹出或收起键盘
 
 按键和输入法不进 `core`。`session::InputEvent` 是 `Key`、`Text` 或 `Composing`。无焦点时会话丢掉事件。有焦点时，借用结束后把事件派发给该节点的监听器，监听器只改自己的字符串。`Tree::measure_text` 用这棵树的 `Shaper`，参数与 `Shaper::measure` 相同。`Session::wants_ime` 表示键盘是否该弹出，宿主在 `frame` 之后比较上次投递的值，变了才调用 `Services::set_ime`。`take_ime_text` 只在聚焦和由 `Key` 改动已提交串时取走一份，用来调用 `set_ime_text` 把平台缓冲写成这份串；`Text` 和 `Composing` 不回写，避免清掉输入法正在用的组合区间。用户把键盘收起时，宿主投递 `ImeDismissed`，会话失焦并清掉 `wants_ime`。光标闪烁只在聚焦时 `requestFrame`。
 
-版本 1 字节记录已经算好坐标的矩形、文字和图片。渲染引擎不解析这套字节。`just host` 的第一帧由 `protocol::scene_to_draw_list` 收成 `DrawList`。运行中的界面由 `core::Tree::record` 交出同一份列表，坐标已经是绝对的。圆角、裁剪、透明度已进 `DrawList`。文字命令还带段落样式：对齐、字重、方向、最大行数、省略号、行高倍数，以及可选的 family。缺省是左对齐、字重 400、从左到右、不限制行数，行高用字体自己的。family 缺省时用渲染引擎注册的那一份字体。`PushTransform` 把随后的命令平移、顺时针旋转再等比缩放，直到配对的 `Pop`。旋转单位是弧度。命中仍用布局盒子，不吃变换。版本 1 字节不产生这条命令。布局样式留在渲染树上，不进字节，也不由 `core` 再编码成版本 1。Kotlin 和 TypeScript 的版本 1 编码器只用来和 `counter.bin` 对照。
+版本 1 字节记录已经算好坐标的矩形、文字和图片。渲染引擎不解析这套字节。`just host` 的第一帧由 `protocol::scene_to_draw_list` 收成 `DrawList`。运行中的界面由 `core::Tree::record` 交出同一份列表，坐标已经是绝对的。圆角、裁剪、透明度已进 `DrawList`。文字命令还带段落样式：对齐、字重、方向、最大行数、省略号、行高倍数，以及可选的 family。缺省是左对齐、字重 400、从左到右、不限制行数，行高用字体自己的。family 缺省时用渲染引擎注册的那一份字体。`PushTransform` 把随后的命令平移、顺时针旋转再等比缩放，直到配对的 `Pop`。旋转单位是弧度。命中把查询点按这条变换的逆矩阵送进子节点。圆角裁剪按圆角拒绝角上的点。版本 1 字节不产生这条命令。布局样式留在渲染树上，不进字节，也不由 `core` 再编码成版本 1。Kotlin 和 TypeScript 的版本 1 编码器只用来和 `counter.bin` 对照。
 
 文字测量的实现必须和渲染引擎绘制文字的实现是同一个排版器。`DrawList` 的文字命令带 `font_size`、`max_width` 和颜色。版本 1 字节没有样式，映射时填字号 28、段落宽 280，这两个常数在 `protocol`。渲染引擎按命令里的字号绘制，不乘 `point_scale`。宿主注入的排版器调用 `Engine::measure_paragraph`，和绘制共用同一段已经带上前景色的段落。测试用 `MonoShaper`。不要往渲染引擎里加布局。
 
@@ -152,7 +152,7 @@ engine/                    渲染引擎。只读 DrawList，调用 impeller.h
 session/                   会话 trait。宿主只看见 metrics、pointer、frame、lifecycle
 hosts/hostshell/          命令队列、帧调度、渲染线程
 hosts/macos/               macOS 窗口。指针入队、CVDisplayLink、UIFW_DUMP
-hosts/android/             Android 宿主。GameActivity、AChoreographer、Vulkan。`just android` 打 APK
+hosts/android/             Android 宿主。`HostActivity`、`HostView`、Choreographer、Vulkan。`just android` 打 APK
 hosts/ios                  还没有。上游预构建矩阵没有 iOS 列
 runtimes/quickjs/          quickjs-ng 会话。包名 `quickjs`。没有源码时返回 NotLinked
 frameworks/solid-renderer/ 版本 1 编码器，以及接到 core 的运行时。不做布局
@@ -220,6 +220,14 @@ solidPlugin({
 
 成功是 `Result::Ok`。失败是 `Status::NotLinked`、`BadScene`、`NotReady`（还没有 drawable、context 或 display list，或者 present 失败）。空文字、缺图、非正缩放是 `BadScene`。
 
+Impeller 句柄的所有权以刚解压的 `impeller.h` 为准，调用在 `engine/src/player.rs`。不要按「C++ 分配的内存都由 Rust 释放」处理。
+
+- 函数名以 `New` 结尾，头文件写明用对应的 `Release` 释放：调用方持有一次引用，用完释放一次。context、typography、paint、path、texture、paragraph、display list、surface、swapchain、glyph info、color source、image filter 属于这一类。
+- 取得函数没有 `New`，头文件写明结果缓存在已有对象上：指针是借来的。读出数字后丢掉，不要 `Release`。`ImpellerParagraphGetLineMetrics` 的行高缓存在段落上，段落释放时由 Impeller 释放。`Engine::lines` 把基线、宽高和码元区间抄进 `LineMetric`。同一段再查一次仍用这份缓存。
+- `ImpellerMapping.on_release` 在头文件里可空。`register_font` 仍传入非空的 `keep_font_bytes`：创建字型失败时 Impeller 也会调用回调，空指针会崩溃。回调不释放字节。成功时字节留在 `Engine::faces`，typography context 先于这些字节释放。纹理走 `ImpellerTextureCreateWithContentsNew`。没有回调时，头文件允许 Impeller 在调用返回前拷贝像素；`player.rs` 让像素活到这次调用返回，`on_release` 保持空。不要把调用方的缓冲交给一个会事后释放的回调。
+
+升级 `engine/engine.pin` 时，对每个新返回的句柄再读一遍头文件，按前两条归类，再改 `player.rs`。
+
 `Fill` 在缩放之前铺满画布。缩放只做一次，放在第一条非填充命令之前。版本 1 映射先放一条 `Fill`，颜色是 `(17, 17, 17, 255)`，并把文字填成字号 28、段落宽 280、缺省段落样式。渲染引擎使用命令里的 family、字号、字重、对齐、方向和 `max_width`，字号不乘 `point_scale`。左上角放在命令的 `(x, y)`。`measure_paragraph` 和绘制共用同一段段落。相同文字、字号、宽度、颜色和样式跨帧复用。纹理按 `source` 跨帧复用，资产在进程内不可变。成功提交结束时只释放当前显示列表没有引用的纹理和段落。`register_font` 使旧段落在下一次提交释放显示列表之后失效。上屏失败是 `PresentFailed`，宿主保留表面并再要一帧。还没有表面或显示列表是 `NotReady`。图片要调用方给出紧排 RGBA8888。Impeller 不接受 PNG 或 JPEG。`source` 以 `asset:` 开头。macOS 把它映射成启动参数里的资产目录下的 `<name>.png`，默认目录是 `hosts/macos/assets`。Android 映射成 APK 里的 `assets/images/<name>.png`。缺图仍是 `BadScene`。
 
 窗口标题 `uifw counter`，内容默认 360×640，可关闭、可最小化、可缩放。缩放和改尺寸都投递 `Metrics`。`contentsScale` 和 `drawableSize` 来自窗口所在屏幕的 `backingScaleFactor`（取不到时用 2），尺寸变化时按内容视图重算。这一层 `framebufferOnly = NO`，这样 `UIFW_DUMP` 能读回纹理。
@@ -251,7 +259,7 @@ GitHub Actions 工作流是 `.github/workflows/check.yml`。它跑 `cargo fmt --
 | `just host` | 打开 macOS 窗口。参数是 `protocol/tests/fixtures/counter.bin` 和 `hosts/macos/assets/logo.png` |
 | `just quickjs` | 按 `runtimes/quickjs/quickjs.pin` 下载 quickjs-ng 源码 |
 | `just host-js` | 打开 macOS 窗口并加载 `apps/gallery-solid/dist/counter.js`。需要 SDK 和 quickjs-ng 源码 |
-| `just android` | 编 `aarch64-linux-android` 的 `libuifw.so`，再打 GameActivity APK。需要 NDK 和 `android-arm64` SDK |
+| `just android` | 编 `aarch64-linux-android` 的 `libuifw.so`，再打 APK。需要 NDK 和 `android-arm64` SDK |
 | `UIFW_DUMP=/tmp/uifw-frame.png just host` | 画出第一帧，写成 PNG，然后进程退出 |
 
 单独跑 Gradle 时也要钉住工程目录：
@@ -267,7 +275,7 @@ JVM 测试的环境变量由 `library/build.gradle.kts` 设成 `protocol/tests/f
 ## 改代码时
 
 - 动到节点布局或编码，先让 `protocol` 的测试、Kotlin `CounterEncodeTest`、`frameworks/solid-renderer/src/encode.test.ts` 和 `counter.bin` 仍是同一份字节。
-- 渲染引擎调用在 `engine/src/player.rs`，对照 `impeller.h`。没有 stub。没有 SDK 时走 `Status::NotLinked`。
-- 动到 pin 或 `impeller.h` 的调用，保持 `IMPELLER_VERSION` 来自刚解压的那份头文件。fetch 脚本继续改 darwin 的 install name，并核对 Android 的 SONAME。`engine` 和 `hosts/macos` 的 `build.rs` 都要把 rpath 指到 `third_party/impeller-sdk/darwin-arm64/lib`。Android 目标链接 `third_party/impeller-sdk/android-arm64/lib`。
+- 渲染引擎调用在 `engine/src/player.rs`，对照 `impeller.h`。没有 stub。没有 SDK 时走 `Status::NotLinked`。句柄按「绘制」里的 Impeller 规则释放：`New` 且写明 `Release` 的用完释放一次；缓存在段落上的 `ImpellerParagraphGetLineMetrics` 不要 `Release`；`register_font` 的 `on_release` 必须非空。
+- 动到 pin 或 `impeller.h` 的调用，保持 `IMPELLER_VERSION` 来自刚解压的那份头文件，并按「绘制」重新归类新句柄。fetch 脚本继续改 darwin 的 install name，并核对 Android 的 SONAME。`engine` 和 `hosts/macos` 的 `build.rs` 都要把 rpath 指到 `third_party/impeller-sdk/darwin-arm64/lib`。Android 目标链接 `third_party/impeller-sdk/android-arm64/lib`。
 - 给宿主加第二种图片时，在解析回调里按 source 区分，并把像素保持到 `submit` 返回。
 - 不要为了对齐调试文本去改编码器。不要把节点坐标改成相对父节点，除非协议版本一起升级，并且 Kotlin、TypeScript 和渲染引擎一起改。

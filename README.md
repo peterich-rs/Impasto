@@ -61,7 +61,7 @@ just host-js
 just android
 ```
 
-`just host` 打开默认 360×640 的窗口，把 `counter.bin` 转成绘制列表并画一次。`UIFW_DUMP` 把第一帧 Metal 纹理写成 PNG 后退出。比较像素时解码 PNG，不要比较文件字节。`just host-js` 加载 `apps/gallery-solid/dist/counter.js`。`just android` 打 GameActivity APK。
+`just host` 打开默认 360×640 的窗口，把 `counter.bin` 转成绘制列表并画一次。`UIFW_DUMP` 把第一帧 Metal 纹理写成 PNG 后退出。比较像素时解码 PNG，不要比较文件字节。`just host-js` 加载 `apps/gallery-solid/dist/counter.js`。`just android` 打 APK。
 
 ## 目录
 
@@ -72,7 +72,7 @@ engine/                    渲染引擎。读绘制列表，调用 Impeller
 session/                   会话。宿主每帧调用 metrics、pointer、frame、wants_frame、lifecycle
 hosts/hostshell/           壳。命令队列、帧调度、渲染线程
 hosts/macos/               macOS 窗口
-hosts/android/             Android 宿主。GameActivity、AChoreographer、Vulkan
+hosts/android/             Android 宿主。`HostActivity`、`HostView`、Choreographer、Vulkan
 runtimes/quickjs/          quickjs-ng 会话。没有源码时返回 NotLinked
 frameworks/solid-renderer/ 版本 1 编码器，以及接到 core 的运行时
 frameworks/solid-ui/       Button、ScrollArea、Field、Switch、Dialog

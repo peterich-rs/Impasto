@@ -34,18 +34,18 @@ Vulkan 入口与 `example_vk.c` 一致，例子只提供调用顺序，不引入
 |---|---|---|---|
 | 1 | 启动装配 | Flutter `Shell`、Android `FlutterActivityAndFragmentDelegate`；RN `ReactHost` | `hostshell` 编排启动。语言会话由宿主在渲染线程上打开后交进来 |
 | 2 | 线程 | `ThreadHost`；RN 无 ui/raster 流水线 | 平台线程 + 渲染线程。测量与绘制仍共用一个 typography，不做 ui/raster 重叠 |
-| 3 | 指针 | `pointer_data_dispatcher`、`PointerDataPacketConverter`；Android `MotionEventTracker` | 换算后入队，vsync 上排空再命中。有 hover、滚轮、按键和修饰键。没有 resampling，没有多点 |
-| 4 | 按键 / 输入法 | `TextInputPlugin`、`FlutterTextInputPlugin` | `Session::input` 收 `InputEvent`。焦点在 `core`。编辑在组件。macOS 用 `NSTextInputClient`。Android 把 GameActivity 的全量缓冲差分成 `Text` / `Composing` |
+| 3 | 指针 | `pointer_data_dispatcher`、`PointerDataPacketConverter`；Android `MotionEventTracker` | 换算后入队，vsync 上排空再命中。有 hover、滚轮、按键和修饰键。每根手指一条 `PointerId`。没有 resampling |
+| 4 | 按键 / 输入法 | `TextInputPlugin`、`InputConnectionAdaptor` | `Session::input` 收 `InputEvent`。焦点在 `core`。编辑在组件。macOS 用 `NSTextInputClient`。Android 的 `TextInput` 用 `InputConnection`，把 `commitText`、`setComposingText` 和 `deleteSurroundingText` 收成 `Text` / `Composing` |
 | 5 | 帧调度 | `Animator::RequestFrame`、`VsyncWaiter`；RN `ReactChoreographer` 槽位 | 指针、metrics、表面事件，或会话申请的下一帧，才登记。列表与上次相同则不 `submit`，除非会话还要这一帧 |
 | 6 | 表面 | `AndroidSurface`、`FlutterSurfaceController` | `Surface` 只负责 acquire 与 present。尺寸变化不丢 Vulkan 链；surface 销毁才丢 |
 | 7 | 平台能力 | platform channel、`PlatformPlugin` | `Services`。第一批是字体、已解码图片、日志 |
-| 8 | 资产 | `FlutterAssetManager` 密度变体 | 固定路径，启动时解码一次。无变体、无色彩管理 |
+| 8 | 资产 | `FlutterAssetManager` 密度变体 | 密度变体按 scale 桶选择；色彩管理和降采样保持今天的设备 RGB、预乘 |
 | 9 | 生命周期 | `AppLifecycleState` 五态 | `Pause` / `Resume`。inset 写入 `Metrics`，再交给 `set_viewport` |
 | 10 | 平台视图 | `PlatformViewsController`、`TextureRegistry` | 无原生控件混排。图片是 `DrawList` 的 `Image` |
-| 11 | 可访问性 | `AccessibilityBridge` | `frame` 里的语义遍历保持空位，不建桥 |
+| 11 | 可访问性 | `AccessibilityBridge` | `Services::semantics` 把语义树交给平台。Generic 不建元素，子节点改挂到最近的非 Generic 祖先。macOS 的 label 进 `accessibilityLabel`，description 进 `accessibilityHelp`。Android 用并行数组交给 `AccessBridge`。Switch 用 CheckBox。有 ACTIVATE 才可点，有 SET_TEXT 才投递文本 |
 | 12 | 多窗口 | `FlutterEngineGroup` | 一进程一窗口一会话 |
 | 13 | 入口 | `DartEntrypoint`；RN `AppRegistry.runApplication` | 宿主在渲染线程调用 `quickjs::open(script, shaper)`。`hostshell` 不依赖 `quickjs` |
-| 14 | 文本缩放 / 亮度 / locale | `SettingsChannel` | `Metrics` 先不加这些字段 |
+| 14 | 文本缩放 / 亮度 / locale | `SettingsChannel` | `Session::settings` 收 locale、text_scale、亮度、reduce_motion、bold_text、high_contrast。这些不进 `Metrics`。macOS 的 text_scale 是 preferredFont 字号除以 13，夹在 0.5 到 3；非有限或非正数用 1。bold_text 固定 false |
 
 `hostshell` 不调用 `quickjs::open`。一个可执行文件只链一种会话；以后 Kotlin 宿主替换打开会话的闭包，这些 trait 不动。
 
@@ -57,12 +57,12 @@ apps/gallery-solid/dist/counter.js
         ▼
 runtimes/quickjs          宿主在渲染线程上打开，得到 Box<dyn Session>
         │
-session::Session          metrics · pointer · input · frame · wants_frame · wants_ime · lifecycle
+session::Session          metrics · pointer · input · frame · wants_frame · take_ime · lifecycle · settings
         ▲
 hostshell                 命令队列 · 指针过滤 · 帧调度 · 相同列表不提交 · boot
         │
         ├── hosts/macos        AppKit、CAMetalLayer、CVDisplayLink
-        ├── hosts/android      GameActivity、AChoreographer、Vulkan surface
+        ├── hosts/android      HostActivity、HostView、Choreographer、Vulkan surface
         └── hosts/ios          UIKit、CAMetalLayer、CADisplayLink。预构建矩阵没有 iOS，这一端还没写
         │
         ▼
@@ -96,7 +96,8 @@ pub trait Surface {
 }
 
 pub trait Vsync: Send + Sync {
-    fn request_frame(&self);
+    fn bind(&self, sink: Arc<dyn Fn(FrameToken, FrameTime) + Send + Sync>);
+    fn request_frame(&self, token: FrameToken);
     fn cancel(&self);
 }
 ```
@@ -134,7 +135,7 @@ Shell::start(Boot) ────────────────────�
 表面就绪，投递 SurfaceReady ──────────────►  创建 Surface，下发 metrics，强制出首帧
 ```
 
-字体缺失、`create_metal` / `create_vulkan` 失败、会话闭包失败，都在渲染线程记日志并把退出码交回主线程，进程退出。不留下只建了一半的 `Engine`。
+字体缺失、`create_metal` / `create_vulkan` 失败、会话闭包失败，都在渲染线程记日志并把退出码交回平台线程。不留下只建了一半的 `Engine`。macOS 随进程退出。Android 在 `onDestroy` 里等渲染线程结束再返回。`std::process::exit` 跳过这一步，`onDestroy` 仍停在等待上。
 
 退出码：
 
@@ -161,7 +162,7 @@ enum Command {
     SurfaceReady(SurfaceTarget),
     SurfaceChanged(SurfaceTarget),
     SurfaceDestroyed,
-    Frame { time_ms: f64 },
+    Frame { token: FrameToken, time: FrameTime },
     Shutdown,
 }
 ```
@@ -180,11 +181,11 @@ enum Command {
 
 vsync 源不在渲染线程上跑帧：
 
-- Android：`AChoreographer_postFrameCallback64` 挂在 `android_main` 的 `ALooper` 上。那不是 Java 的 main looper。
+- Android：`Choreographer` 挂在 Java 主线程。API 33 及以上用 `postVsyncCallback` 的帧开始时刻和预计上屏时刻；更低版本用 `frameTimeNanos` 加上刷新间隔。
 - iOS：`CADisplayLink` 挂在主线程 runloop。
 - macOS：`CVDisplayLink` 的回调线程。主线程上不常开 `NSTimer`。
 
-三端的回调都只入队 `Frame { time_ms }`。`time_ms` 是单调毫秒，原点由平台自定。Android 用 `frameTimeNanos / 1e6`，Apple 用 vsync 时间戳乘 1000。QuickJS 今天忽略这个参数。
+三端的回调都只入队 `Frame { token, time }`。`FrameTime` 有 `vsync_ms`、`target_ms` 和 `interval_ms`，都是单调毫秒，原点由平台自定。动画采样 `target_ms`。macOS 的 `inNow` 是 `vsync_ms`，`inOutputTime` 是 `target_ms`。Android API 33 及以上用 `Choreographer.postVsyncCallback` 的帧开始时刻和预计上屏时刻；更低版本用 `frameTimeNanos` 加上刷新间隔。`Session::frame` 把 `target_ms` 和 `interval_ms` 交给 `onFrame`。
 
 `Vsync::request_frame` 只向应答队列投递「登记下一帧」，不等待登记完成。`cancel` 同样立即返回。渲染线程阻塞在命令队列上。`Pointer`、`Metrics`、`Lifecycle` 和表面尺寸变化只写入渲染线程的本地状态；调用 `session.pointer` 与 `frame` 的是随后的 `Frame`。当时若没有在途的帧，就 `request_frame` 一次。`SurfaceDestroyed` 与 `Shutdown` 收到即处理，不等下一帧，否则平台线程会停在销毁回调上等一个不会再来的 `Frame`。
 
@@ -192,14 +193,14 @@ vsync 源不在渲染线程上跑帧：
 
 ## 3. 指针
 
-`core::PointerEvent` 的相位只有 `Down`、`Move`、`Up`、`Cancel`，另有 `time_ms`，没有 pointer id。多指过滤放在各端入队之前：只保留 pointer index 0，丢掉 `ACTION_POINTER_DOWN` / `ACTION_POINTER_UP`，不展开历史采样。第二指不进入队列，因此不会覆盖 `Tree` 里记住的按下目标。
+`core::PointerEvent` 带 `pointer`、`kind`、`button` 和 `buttons`。相位是 `Down`、`Move`、`Up`、`Cancel`、`Wheel`。`Tree` 按 `PointerId` 各记一条按下和拖动。Android 按 `MotionEvent` 的 action index 展开每根手指。历史采样不入队。
 
 入队前各端把坐标换成场景点，原点在左上：
 
 | 端 | 换算 |
 |---|---|
 | macOS | 窗口坐标转进内容视图，Y 翻转。AppKit 已是点，不除 `backingScaleFactor` |
-| Android | 物理像素除以 density。density 来自 `AConfiguration`，读不到就失败，不猜 |
+| Android | 物理像素除以 `DisplayMetrics.density`。density 不是有限正数就丢掉这次采样 |
 | iOS | `location(in:)` 已是点，原点在视图左上，不翻转、不除 scale |
 
 指针先进入 `hostshell` 的队列，渲染线程再交给 `core` 做命中和手势。三端共用这一份队列：
@@ -208,17 +209,17 @@ vsync 源不在渲染线程上跑帧：
 - 未按下时的 `Move` 保留，用来做 hover。相邻的 `Move` 合并成最后一笔。滚轮事件保持原顺序。
 - `Cancel` 原样送到 `Session::pointer`。`Tree::pointer` 会清掉按下的区域。macOS 没有系统 cancel。
 
-还没有轨迹重采样，也没有多点。Android 只取 pointer index 0。
+还没有轨迹重采样。Android 按 pointer id 送出每一根手指。一个 `Scroll` 同时只锁定一根手指。
 
 ## 4. 按键与输入法
 
 文本焦点在 `core::Tree`。点击（抬起且没有锁成拖动）才移动焦点。`Session::input` 把 `Key`、`Text`、`Composing` 交给当前焦点；没有焦点就丢掉。组件保存字符串、光标和组合文本。`core` 不编辑字符串。
 
-平台线程把 `Command::Input` 入队，和指针一样在下一帧排空，并登记这一帧。暂停时先留在队列里。`wants_ime` 在 `session.frame` 之后读取，和上次投递不同才 `Services::set_ime`。相同显示列表提前返回的那条路也要读。`take_ime_text` 有值时，平台线程 `set_text_input_state`（Android）或替换 macOS 的协议镜像。组合过程中不回写。
+平台线程把 `Command::Input` 入队，和指针一样在下一帧排空，并登记这一帧。暂停时先留在队列里。`take_ime` 在输入派发之后和 `session.frame` 之后各读一次。`Show` 弹出键盘，`Update` 写入选区、组合区间和光标，`Hide` 收起键盘。组合过程中的 `InputEvent::Composing` 不另写一份缓冲。
 
 macOS：`keyDown:` 调用 `interpretKeyEvents:`。`insertText:` 是 `Text`，`setMarkedText:` / `unmarkText` 是 `Composing`，`doCommandBySelector:` 把回车、退格和方向键收成 `Key`，其余 selector 吞掉并打印。`selectedRange` 和 `markedRange` 读主线程上的镜像。`firstRectForCharacterRange:` 返回内容视图 bounds 换到屏幕坐标后的矩形。`set_ime(true)` 在主线程 `makeFirstResponder`。
 
-Android：`TextEvent` 的下标是 UTF-16。宿主先换成字节下标，再拆成已提交串和组合串。变长用 `Text`，变短用相应次数的 `Backspace`，组合区间变化用 `Composing`。`KeyAction::Up` 不映射。软键盘可见时忽略 `KEYCODE_DEL`。`KEYCODE_BACK` 在键盘可见时投递 `ImeDismissed`，不删字符。聚焦和本地按键修改之后 `set_text_input_state`，光标在末尾。键盘高度来自 `WindowInsets.Type.ime()`（8），并进 `Metrics.inset_bottom`。`targetSdk` 35 不靠 `adjustResize` 缩小 Surface。inset 从非零变成 0 视为用户收起键盘，会话失焦。
+Android：`TextEvent` 的下标是 UTF-16。宿主先换成字节下标，再拆成已提交串和组合串。已提交串只在末尾变长时用 `Text` 追加后缀。其它变化先 `SelectAll` 再 `Text` 写成新串。组合区间变化用 `Composing`。`KeyAction::Up` 不映射。软键盘可见时，同一轮已经有缓冲变化就不再映射 `KEYCODE_DEL`；没有缓冲变化才投递 `Backspace`。读缓冲在写回 `set_text_input_state` 之前。用户刚改过的串还没被会话确认时，丢掉文本不同的 `Update`，避免把刚删掉的字写回去。`KEYCODE_BACK` 在键盘可见时投递 `ImeDismissed`，不删字符。聚焦和本地按键修改之后 `set_text_input_state`，光标在末尾。键盘高度来自 `WindowInsets.Type.ime()`（8），并进 `Metrics.inset_bottom`。`targetSdk` 35 不靠 `adjustResize` 缩小 Surface。inset 从非零变成 0 视为用户收起键盘，会话失焦。
 
 还没有的能力：选区、复制粘贴、点按把光标放到任意偏移、修饰键和快捷键、组合文本下划线、键盘方向键移动焦点。窗口失焦见 §9，和文本焦点不同名。
 
@@ -239,7 +240,7 @@ Android：`TextEvent` 的下标是 UTF-16。宿主先换成字节下标，再拆
 ⑥ 本帧不再 request_frame
 ```
 
-下一帧只在这些命令到达、且当时没有在途帧时登记：指针、metrics 发生变化、`Resume`、`SurfaceReady`，以及启动后的第一帧。`Session` 不增加 `poll_dirty`。树的脏标记在 `layout` 成功时清掉，`frame` 返回之后 `hostshell` 看不到它。`hostshell` 也不能在调用 `frame` 之前猜树是干净的，否则 `flush` 不会跑。
+下一帧在这些命令到达、且当时没有在途帧时登记：指针、metrics 发生变化、`Resume`、`SurfaceReady`，以及启动后的第一帧。`hostshell` 仍然只看 `wants_frame`，不读树。会话在这一位里并上还没布局的变更、还没绘制的变更、没排空的 job，以及仍在衰减的滚动。脚本错误会清掉这一次的需求，避免用失败回调自己再要帧。
 
 `set_viewport` 会把树标脏。metrics 与上一份 `PartialEq` 相同则不再调用 `session.metrics`，否则静止画面每帧都重新布局。窗口第一次就绪时一定下发。`SurfaceDestroyed` 丢掉 `hostshell` 记住的那份列表，下一次表面就绪必须重新 `submit`。
 
@@ -254,11 +255,11 @@ pub enum Lifecycle {
 pub trait Session {
     fn metrics(&mut self, metrics: &Metrics);
     fn pointer(&mut self, event: core::PointerEvent);
-    fn frame(&mut self, time_ms: f64) -> DrawList;
+    fn frame(&mut self, time: FrameTime) -> DrawList;
     fn wants_frame(&mut self) -> bool { false }
     fn lifecycle(&mut self, _event: Lifecycle) {}
     fn input(&mut self, _event: InputEvent) {}
-    fn wants_ime(&self) -> bool { false }
+    fn take_ime(&mut self) -> Option<ImeUpdate> { None }
     fn take_ime_text(&mut self) -> Option<String> { None }
     fn ime_dismissed(&mut self) {}
 }
@@ -283,7 +284,7 @@ pub trait Session {
 
 平台线程只在 `SurfaceDestroyed` 里等待 `SurfaceDropped`，然后才 `ANativeWindow_release`。渲染线程处理这条命令时不反过来等平台线程。除此之外平台线程不等待渲染线程。
 
-`present` 返回 `NotReady` 时同样丢掉 `Surface` 并应答，等下一次 `SurfaceReady`。重建或再次就绪之后，先下发 metrics，再出帧。
+`present` 返回 `NotReady`、`PresentFailed` 或 `BadScene` 时留着 `Surface` 和 swapchain，再登记一帧。`Surface` 只在 `SurfaceDestroyed` 时丢掉。销毁按 `SurfaceId` 回 ack。平台线程在 ack 之前不释放窗口；等不及 ack 时继续跑 looper，窗口引用留到 ack 之后再放。
 
 尺寸变化不调用 `ImpellerVulkanSwapchain` 的丢弃。只有表面本身失效才重建，顺序仍是 GetVulkanInfo 的 instance、`vkCreateAndroidSurfaceKHR`、`ImpellerVulkanSwapchainCreateNew`。
 
@@ -291,7 +292,7 @@ pub trait Session {
 
 `Services` 替代 platform channel。三端各一份实现，由 `hostshell` 在渲染线程调用。
 
-字体按注册名取字节，启动时交给 `register_font`。图片在 `Services` 实现里解码一次并留着，`image` 返回对这份缓存的借用。未知 `source` 返回 `None`，`submit` 按缺图处理。日志从渲染线程调用：macOS 写 stderr，Android 写 logcat，iOS 写 `os_log`。
+字体按注册名取字节，启动时交给 `register_font`。`UIFWSans` 和 `UIFWSansCJK` 是启动时的两张脸。脚本 `registerFont` 把字节放进会话队列，渲染线程在 `submit` 之前 `take_fonts` 再 `register_font`。同名替换字节。新名字加上已经交出的名字最多 8 个，那两张启动脸不占名额。失败只记 family 和状态，这一帧继续，缺的 family 退回第一次成功登记的脸。图片由 `ImageDecoder` 在 `uifw-io` 线程解码成紧排 RGBA，结果经 `Command::ImageReady` 回到渲染线程的 `ImageCache`。`submit` 只读这份缓存。必选缺图记一次日志并且这一帧不提交，已安装的显示列表留在引擎里。可选缺图跳过该命令。`https:` 图片在这条线程下载，正文最多 4 MiB，日志只记 scheme 和 host。脚本 `reload(source)` 把名字排进会话，渲染线程在读缓存之前排空。`reload_image` 删掉该键并再要一帧。日志从渲染线程调用：macOS 写 stderr，Android 写 logcat，iOS 写 `os_log`。`Services::semantics` 收到语义树后，宿主把它交给平台辅助功能。
 
 以后若要剪贴板、触觉、系统音或打开 URL，逐个加方法。不加字符串消息通道。
 
@@ -300,19 +301,19 @@ pub trait Session {
 | 键 | macOS | Android | iOS |
 |---|---|---|---|
 | 注册名 `UIFWSans` | `/System/Library/Fonts/Supplemental/Arial.ttf` | `assets/fonts/UIFWSans.ttf` | Bundle 内同名文件 |
-| `asset:<name>` | 启动参数给出的资产目录下 `<name>.png`，ImageIO | `assets/images/<name>.png`，`AImageDecoder` | Bundle 内同名文件，ImageIO |
+| `asset:<name>` | 资产目录按 scale 桶找 `name@3x`、`name@2x`、`name`，扩展名 `.png` `.jpg` `.jpeg` `.webp`，ImageIO | `assets/images/` 下同一组候选，`AImageDecoder` | 宿主还没写 |
 
 Android 与 iOS 的字体是可再分发的文件，注册名仍叫 `UIFWSans`。系统 Arial 不打进 APK 或 Bundle。因此 Android 首帧不和 macOS 的 `UIFW_DUMP` 逐像素对比：字形度量会不同。三端要同一份字体字节之后，文字位置才有可比性。
 
-`AssetManager` 在 `android_main` 上取得。渲染线程第一次要字体或图片时读取并解码，结果留在 `Services` 里。
+`AssetManager` 在 `HostActivity` 启动时从 Java 取到。渲染线程第一次要字体或图片时读取并解码，结果留在 `Services` 里。
 
-密度变体、降采样、色彩管理和图片缓存层仍停着，不在平台层先做。
+密度变体按 scale 桶选择；色彩管理和降采样保持今天的设备 RGB、预乘。
 
 ## 9. 生命周期与 inset
 
 `Pause` 与 `Resume` 两态。Android 对应 `onPause` / `onResume`，iOS 对应进后台与回前台。macOS 随窗口关闭退出，不发这两态。初始状态就是在跑，启动时不另发 `Resume`。
 
-`Pause` 到达时，若按下还没 `Up` 或 `Cancel`，`hostshell` 先补一个 `Cancel` 再停帧。这样切走应用不会把 `Tree` 的按下状态留到下一次 `Down`。窗口失焦以后若要同样补 `Cancel`，另加事件。那个事件不是文本焦点。
+`Pause` 到达时，若还有按下的指针，`hostshell` 把当时的指针队列冻结，并为每个指针补一个 `Cancel`，这一帧只送这份冻结队列。之后再来的指针、按键和 metrics 留到 `Resume`。窗口失焦以后若要同样补 `Cancel`，另加事件。那个事件不是文本焦点。
 
 路由恢复不做。
 
@@ -321,16 +322,15 @@ Android 与 iOS 的字体是可再分发的文件，注册名仍叫 `UIFWSans`�
 ## 10–12. 继续不做的部分
 
 - 无原生控件混排，无外接纹理。以后若要视频帧，再对照 `TextureRegistry` 的接口形状。
-- 不建可访问性桥。语义遍历的空位留在 `session.frame` 里。
 - 一进程一窗口一会话。QuickJS 是单实例，不做多引擎共享。
 
 ## 三端差异
 
 | | macOS | Android | iOS |
 |---|---|---|---|
-| 窗口 | `NSWindow` + `CAMetalLayer` | GameActivity + `ANativeWindow` | `UIView` + `CAMetalLayer` |
-| 平台线程 | AppKit 主线程 | `android_main` 的 looper | `UIApplicationMain` |
-| vsync | `CVDisplayLink`，回调只入队 | `AChoreographer_postFrameCallback64` | 主线程 `CADisplayLink` |
+| 窗口 | `NSWindow` + `CAMetalLayer` | `HostActivity` + `HostSurfaceView` | `UIView` + `CAMetalLayer` |
+| 平台线程 | AppKit 主线程 | Java 主线程 | `UIApplicationMain` |
+| vsync | `CVDisplayLink`，回调只入队 | 主线程 `Choreographer` | 主线程 `CADisplayLink` |
 | 光栅 | Metal | Vulkan | Metal，调用同一 `draw_metal` |
 | 指针 | `mouseDown` / `Dragged` / `Up` | `MotionEvent`，含 `ACTION_CANCEL` | `touches*`，含 `touchesCancelled` |
 | 坐标 | 内容视图 + Y 翻转 | 像素 ÷ density | 已是点 |
@@ -343,5 +343,5 @@ Android 与 iOS 的字体是可再分发的文件，注册名仍叫 `UIFWSans`�
 - crate 均 `publish = false`。`Shell` 含有 `Engine` 和会话，因此不是 `Send`。跨线程的只有命令队列、`Vsync`，以及有意标记为 `Send` 的窗口指针 newtype。
 - `unsafe` 集中在 Vulkan 句柄、Android 窗口与 NDK 事件、objc2，以及那个 `Send` 指针。每处按 `engine/src/player.rs` 写 SAFETY 注释。workspace 的 `unsafe_code = deny` 仍有效。
 - `hostshell` 的队列、过滤、相同列表跳过提交，以及表面应答，用无窗口单测。各端坐标换算沿用 `hosts/macos/src/pointer.rs` 这种单测。端上验收是出帧、点击改字，以及有读回时的像素。
-- 场景格式保持版本 1。不做 GL 后备、resampling、多点、选区、复制粘贴、点按定位光标、组合下划线、平台视图、可访问性桥和多窗口。显示列表的命令级 diff 不做；相同列表直接跳过 `submit`。
-- 新依赖在引入时钉版本。`android-activity` 与 `ndk` 已钉住。它们不带 UI 框架或 Dart VM。要裁 Impeller 后端时放到以后的 engine 仓库，不在本仓库编 engine。
+- 场景格式保持版本 1。不做 GL 后备、resampling、点按定位光标、组合下划线、平台视图和多窗口。显示列表的命令级 diff 不做；相同列表直接跳过 `submit`。
+- 新依赖在引入时钉版本。`ndk` 0.9.0 与 `jni` 0.22.4 已钉住。它们不带 UI 框架或 Dart VM。要裁 Impeller 后端时放到以后的 engine 仓库，不在本仓库编 engine。

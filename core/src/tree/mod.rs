@@ -5,11 +5,16 @@ mod hit;
 mod layout;
 mod node;
 mod record;
+mod semantics;
 mod store;
 
-pub use node::{Alignment, Discarded, Edges, Gesture, Justify, NodeId, Rect, TrackSize};
+pub use node::{
+    Alignment, AxisSize, Discarded, DragClaim, Edges, FocusDirection, Gesture, GridLine, Inset,
+    Justify, NodeId, Rect, TrackSize,
+};
 
-use gesture::{DragState, SecondaryPress};
+use std::collections::HashMap;
+
 use node::Slot;
 use taffy::TaffyTree;
 
@@ -29,14 +34,25 @@ pub struct Tree {
     taffy: TaffyTree<usize>,
     shaper: Box<dyn Shaper>,
     root: Option<NodeId>,
-    pressed: Option<NodeId>,
-    secondary: Option<SecondaryPress>,
+    /// Press, drag, and hover routes. Structure edits do not clear this.
+    arena: gesture::GestureArena,
     focused: Option<NodeId>,
-    hovered: Option<NodeId>,
-    /// Leave gestures produced by a structure change, delivered on the next pointer or remove.
-    pending: Vec<Gesture>,
-    drag: Option<DragState>,
-    dirty: bool,
+    /// Innermost focus scope. Empty means the whole tree.
+    scopes: Vec<NodeId>,
+    /// Scroll offsets still coasting. Values are scene points per millisecond.
+    fling: HashMap<NodeId, (f32, f32)>,
+    /// Offset notices produced by [`Tree::tick_fling`], drained by the session.
+    scroll_notices: Vec<Gesture>,
+    /// Per-node editors. Field bindings call in; the tree does not paint from this map.
+    editors: HashMap<NodeId, crate::text::TextEditor>,
+    /// Style or structure must run Taffy again.
+    needs_layout: bool,
+    /// Paint changed. Layout boxes stay valid.
+    needs_paint: bool,
+    /// How many times `layout` entered Taffy. Paint-only updates leave this unchanged.
+    layout_passes: u64,
+    /// Multiplier applied when measuring and recording text. `1.0` leaves sizes alone.
+    text_scale: f32,
     laid_out: bool,
     /// Content origin in scene points. Insets shift the root; `(0, 0)` is the surface origin.
     origin: (f32, f32),

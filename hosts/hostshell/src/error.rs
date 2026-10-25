@@ -24,13 +24,15 @@ pub enum BootError {
     Font(String),
     #[error(transparent)]
     Session(#[from] SessionError),
+    #[error("render thread panicked")]
+    Panicked,
 }
 
 impl BootError {
     /// Process status from the startup table: engine 2, runtime 3, script 4.
     pub fn code(&self) -> u8 {
         match self {
-            Self::Engine(_) | Self::Font(_) => 2,
+            Self::Engine(_) | Self::Font(_) | Self::Panicked => 2,
             Self::Session(SessionError::NotLinked | SessionError::Runtime) => 3,
             Self::Session(SessionError::Script(_)) => 4,
         }

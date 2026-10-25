@@ -1,74 +1,50 @@
-//! GameActivity loop. Pointers, insets, and pause are posted. The window is released
-//! only after the render thread drops the surface.
+//! UI thread shell. `HostActivity` and `HostView` own the window, the surface,
+//! and the input connection. This thread only enqueues. The render thread owns
+//! the engine. `ANativeWindow` is released after the render thread drops it.
 
-use std::collections::{HashMap, VecDeque};
 use std::ffi::{CStr, CString, c_char};
+use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
-use android_activity::input::{
-    Axis, ImeOptions, InputEvent, InputType, KeyAction, MotionAction, TextInputAction,
-    TextInputState, TextSpan,
-};
-use android_activity::{AndroidApp, AndroidAppWaker, InputStatus, MainEvent, PollEvent};
 use hostshell::{
-    Boot, Command, Launch, LogLevel, NativePtr, Services, SessionError, SurfaceTarget, Vsync,
+    Boot, Command, Launch, LogLevel, NativePtr, PlatformBridge, Services, SessionError, SurfaceId,
+    SurfaceTarget, Vsync,
 };
+use jni::objects::{Global, JObject, JString};
+use jni::sys::{jboolean, jint, jlong};
+use jni::{Env, EnvUnowned};
 use ndk::asset::AssetManager;
 use ndk::native_window::NativeWindow;
 use session::{InputEvent as EditEvent, Key, Metrics};
 
-use crate::decode::{self, Rgba};
-use crate::insets::{content_insets, density_scale, insets_in_points, scene_point};
-use crate::motion::{self, Action};
+use crate::decode;
+use crate::insets::{insets_in_points, scene_point};
+use crate::motion::{self, android_wheel};
 use crate::surface::VulkanSurface;
-use crate::textinput::{self, Edit, KeyOutcome, Snapshot};
+use crate::textinput::{self, Client, Edit, KeyOutcome};
 use crate::vsync::FrameClock;
 
 const FONT_FAMILY: &str = "UIFWSans";
 const FONT_PATH: &CStr = c"fonts/UIFWSans.ttf";
 const SCRIPT_NAME: &str = "counter.js";
+const IME_SHOW: i32 = 1;
+const IME_UPDATE: i32 = 2;
+const IME_HIDE: i32 = 3;
 
 unsafe extern "C" {
     fn __android_log_write(priority: i32, tag: *const c_char, text: *const c_char) -> i32;
 }
 
-struct AndroidServices {
+struct Bridge {
+    vm: jni::JavaVM,
+    view: Global<JObject<'static>>,
     assets: Arc<AssetManager>,
     font: OnceLock<Vec<u8>>,
-    images: Mutex<HashMap<String, Arc<Rgba>>>,
-    ime: Arc<ImeMailbox>,
-    waker: AndroidAppWaker,
+    semantics: Mutex<Option<core::SemanticsUpdate>>,
 }
 
-enum ImeCommand {
-    Show,
-    Hide,
-    Text(String),
-}
-
-struct ImeMailbox {
-    commands: Mutex<VecDeque<ImeCommand>>,
-}
-
-impl ImeMailbox {
-    fn push(&self, command: ImeCommand) {
-        self.commands
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .push_back(command);
-    }
-
-    fn drain(&self) -> VecDeque<ImeCommand> {
-        std::mem::take(
-            &mut *self
-                .commands
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()),
-        )
-    }
-}
-
-impl AndroidServices {
+impl Bridge {
     fn font_bytes(&self) -> Option<&[u8]> {
         let bytes = self
             .font
@@ -80,142 +56,469 @@ impl AndroidServices {
         }
     }
 
-    fn cached<'a>(&'a self, source: &str) -> Option<&'a Rgba> {
-        let mut images = self
-            .images
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !images.contains_key(source) {
-            let Some(path) = asset_image_path(source) else {
-                log_line(LogLevel::Error, &format!("bad asset name {source}"));
-                return None;
-            };
-            let bytes = match load_asset(&self.assets, &path) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    log_line(
-                        LogLevel::Error,
-                        &format!("asset {} failed: {error}", path.to_string_lossy()),
-                    );
-                    return None;
-                }
-            };
-            let rgba = match decode::decode_rgba(&bytes) {
-                Ok(rgba) => rgba,
-                Err(error) => {
-                    let magic: String = bytes
-                        .iter()
-                        .take(8)
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect();
-                    log_line(
-                        LogLevel::Error,
-                        &format!(
-                            "decode failed {} ({} bytes {magic}): {error}",
-                            path.to_string_lossy(),
-                            bytes.len()
-                        ),
-                    );
-                    return None;
-                }
-            };
-            images.insert(source.to_string(), Arc::new(rgba));
+    fn call(&self, body: impl FnOnce(&mut Env) -> jni::errors::Result<()>) {
+        let result = self.vm.attach_current_thread(|env| body(env));
+        if let Err(error) = result {
+            log_line(LogLevel::Error, &format!("jni: {error}"));
         }
-        let ptr = Arc::as_ptr(images.get(source)?);
-        // SAFETY: the map only inserts. The decoded pixels stay allocated until this
-        // service drops, which is after `submit` has finished reading them.
-        Some(unsafe { &*ptr })
+    }
+
+    fn schedule_frame(&self) {
+        self.call(|env| {
+            env.call_method(
+                self.view.as_obj(),
+                jni::jni_str!("scheduleFrame"),
+                jni::jni_sig!("()V"),
+                &[],
+            )?;
+            Ok(())
+        });
+    }
+
+    fn finish(&self) {
+        self.call(|env| {
+            env.call_method(
+                self.view.as_obj(),
+                jni::jni_str!("finishHost"),
+                jni::jni_sig!("()V"),
+                &[],
+            )?;
+            Ok(())
+        });
+    }
+
+    fn write_clipboard_text(&self, text: &str) {
+        self.call(|env| {
+            let text = env.new_string(text)?;
+            env.call_method(
+                self.view.as_obj(),
+                jni::jni_str!("setClipboard"),
+                jni::jni_sig!("(Ljava/lang/String;)V"),
+                &[jni::objects::JValue::Object(&text)],
+            )?;
+            Ok(())
+        });
+    }
+
+    fn launch_view_url(&self, url: &str) -> Result<(), String> {
+        self.call(|env| {
+            let url = env.new_string(url)?;
+            env.call_method(
+                self.view.as_obj(),
+                jni::jni_str!("openUrl"),
+                jni::jni_sig!("(Ljava/lang/String;)V"),
+                &[jni::objects::JValue::Object(&url)],
+            )?;
+            Ok(())
+        });
+        Ok(())
+    }
+
+    fn clipboard_text(&self) -> String {
+        let mut copied = String::new();
+        self.call(|env| {
+            let value = env
+                .call_method(
+                    self.view.as_obj(),
+                    jni::jni_str!("readClipboard"),
+                    jni::jni_sig!("()Ljava/lang/String;"),
+                    &[],
+                )?
+                .l()?;
+            if !value.is_null() {
+                let string = unsafe { JString::from_raw(env, value.as_raw()) };
+                copied = string.try_to_string(env)?;
+            }
+            Ok(())
+        });
+        copied
+    }
+
+    fn publish_semantics(&self, update: &core::SemanticsUpdate) {
+        let nodes = crate::a11y::bridge_nodes(update);
+        self.call(|env| {
+            let n = nodes.len();
+            let ids = jni::objects::JLongArray::new(env, n)?;
+            let roles = jni::objects::JIntArray::new(env, n)?;
+            let flags = jni::objects::JIntArray::new(env, n)?;
+            let actions = jni::objects::JIntArray::new(env, n)?;
+            let parents = jni::objects::JLongArray::new(env, n)?;
+            let scroll = jni::objects::JFloatArray::new(env, n.saturating_mul(4))?;
+            let mut id_buf = vec![0i64; n];
+            let mut role_buf = vec![0i32; n];
+            let mut flag_buf = vec![0i32; n];
+            let mut action_buf = vec![0i32; n];
+            let mut parent_buf = vec![0i64; n];
+            let mut scroll_buf = vec![0.0f32; n.saturating_mul(4)];
+            for (index, node) in nodes.iter().enumerate() {
+                id_buf[index] = node.id as i64;
+                role_buf[index] = node.role;
+                flag_buf[index] = node.flags as i32;
+                action_buf[index] = node.actions as i32;
+                parent_buf[index] = node.parent.unwrap_or(0) as i64;
+                let base = index.saturating_mul(4);
+                scroll_buf[base] = node.offset_x;
+                scroll_buf[base + 1] = node.offset_y;
+                scroll_buf[base + 2] = node.content_w;
+                scroll_buf[base + 3] = node.content_h;
+            }
+            ids.set_region(env, 0, &id_buf)?;
+            roles.set_region(env, 0, &role_buf)?;
+            flags.set_region(env, 0, &flag_buf)?;
+            actions.set_region(env, 0, &action_buf)?;
+            parents.set_region(env, 0, &parent_buf)?;
+            scroll.set_region(env, 0, &scroll_buf)?;
+            let empty = env.new_string("")?;
+            let labels = jni::objects::JObjectArray::<JString>::new(env, n, &empty)?;
+            let values = jni::objects::JObjectArray::<JString>::new(env, n, &empty)?;
+            let descriptions = jni::objects::JObjectArray::<JString>::new(env, n, &empty)?;
+            for (index, node) in nodes.iter().enumerate() {
+                let label = env.new_string(&node.label)?;
+                labels.set_element(env, index, &label)?;
+                let value = env.new_string(&node.value)?;
+                values.set_element(env, index, &value)?;
+                let description = env.new_string(&node.description)?;
+                descriptions.set_element(env, index, &description)?;
+            }
+            env.call_method(
+                self.view.as_obj(),
+                jni::jni_str!("publishSemantics"),
+                jni::jni_sig!(
+                    "([J[I[Ljava/lang/String;[Ljava/lang/String;[I[I[F[Ljava/lang/String;[J)V"
+                ),
+                &[
+                    jni::objects::JValue::Object(ids.as_ref()),
+                    jni::objects::JValue::Object(roles.as_ref()),
+                    jni::objects::JValue::Object(labels.as_ref()),
+                    jni::objects::JValue::Object(values.as_ref()),
+                    jni::objects::JValue::Object(flags.as_ref()),
+                    jni::objects::JValue::Object(actions.as_ref()),
+                    jni::objects::JValue::Object(scroll.as_ref()),
+                    jni::objects::JValue::Object(descriptions.as_ref()),
+                    jni::objects::JValue::Object(parents.as_ref()),
+                ],
+            )?;
+            Ok(())
+        });
+    }
+
+    fn apply_ime(&self, call: ImeCall) {
+        self.call(|env| {
+            let text = env.new_string(&call.text)?;
+            env.call_method(
+                self.view.as_obj(),
+                jni::jni_str!("applyIme"),
+                jni::jni_sig!("(ILjava/lang/String;IIIIFFFFII)V"),
+                &[
+                    jni::objects::JValue::Int(call.op),
+                    jni::objects::JValue::Object(&text),
+                    jni::objects::JValue::Int(call.sel_start),
+                    jni::objects::JValue::Int(call.sel_end),
+                    jni::objects::JValue::Int(call.comp_start),
+                    jni::objects::JValue::Int(call.comp_end),
+                    jni::objects::JValue::Float(call.caret_x),
+                    jni::objects::JValue::Float(call.caret_y),
+                    jni::objects::JValue::Float(call.caret_w),
+                    jni::objects::JValue::Float(call.caret_h),
+                    jni::objects::JValue::Int(call.input_type),
+                    jni::objects::JValue::Int(call.ime_action),
+                ],
+            )?;
+            Ok(())
+        });
     }
 }
 
-impl Services for AndroidServices {
+struct ImeCall {
+    op: i32,
+    text: String,
+    sel_start: i32,
+    sel_end: i32,
+    comp_start: i32,
+    comp_end: i32,
+    caret_x: f32,
+    caret_y: f32,
+    caret_w: f32,
+    caret_h: f32,
+    input_type: i32,
+    ime_action: i32,
+}
+
+impl ImeCall {
+    fn from_state(op: i32, state: &session::ImeState) -> Self {
+        let (comp_start, comp_end) = match &state.composing {
+            Some(range) => (range.start as i32, range.end as i32),
+            None => (-1, -1),
+        };
+        Self {
+            op,
+            text: state.text.clone(),
+            sel_start: state.selection.start as i32,
+            sel_end: state.selection.end as i32,
+            comp_start,
+            comp_end,
+            caret_x: state.caret.x,
+            caret_y: state.caret.y,
+            caret_w: state.caret.w,
+            caret_h: state.caret.h,
+            input_type: input_type(state.keyboard),
+            ime_action: ime_action(state.action),
+        }
+    }
+
+    fn hide() -> Self {
+        Self {
+            op: IME_HIDE,
+            text: String::new(),
+            sel_start: 0,
+            sel_end: 0,
+            comp_start: -1,
+            comp_end: -1,
+            caret_x: 0.0,
+            caret_y: 0.0,
+            caret_w: 0.0,
+            caret_h: 0.0,
+            input_type: input_type(session::KeyboardType::Text),
+            ime_action: ime_action(session::TextInputAction::Done),
+        }
+    }
+}
+
+impl PlatformBridge for Bridge {
+    fn read_clipboard(&self) -> String {
+        self.clipboard_text()
+    }
+
+    fn write_clipboard(&self, text: &str) {
+        self.write_clipboard_text(text);
+    }
+
+    fn open_url(&self, url: &str) -> Result<(), String> {
+        self.launch_view_url(url)
+    }
+}
+
+struct Shared(Arc<Bridge>);
+
+impl Services for Shared {
     fn font(&self, family: &str) -> Option<&[u8]> {
         if family != FONT_FAMILY {
             return None;
         }
-        self.font_bytes()
+        self.0.font_bytes()
     }
 
-    fn image<'a>(&'a self, source: &str) -> Option<engine::ImagePixels<'a>> {
-        let Some(rgba) = self.cached(source) else {
-            self.log(LogLevel::Error, &format!("unresolved image {source}"));
-            return None;
-        };
-        Some(engine::ImagePixels {
-            width: rgba.width,
-            height: rgba.height,
-            rgba: &rgba.pixels,
-        })
+    fn image<'a>(&'a self, _source: &str) -> Option<engine::ImagePixels<'a>> {
+        None
+    }
+
+    fn semantics(&self, update: &core::SemanticsUpdate) {
+        *self
+            .0
+            .semantics
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(update.clone());
+        self.0.publish_semantics(update);
     }
 
     fn log(&self, level: LogLevel, message: &str) {
         log_line(level, message);
     }
 
-    fn set_ime(&self, enabled: bool) {
-        self.ime.push(if enabled {
-            ImeCommand::Show
-        } else {
-            ImeCommand::Hide
-        });
-        self.waker.wake();
+    fn request_exit(&self) {
+        self.0.finish();
     }
 
-    fn set_ime_text(&self, text: &str) {
-        self.ime.push(ImeCommand::Text(text.to_owned()));
-        self.waker.wake();
+    fn set_clipboard(&self, text: &str) {
+        self.0.write_clipboard_text(text);
+    }
+
+    fn extra_fonts(&self) -> Vec<(String, Vec<u8>)> {
+        const PATHS: &[&str] = &[
+            "/system/fonts/NotoSansCJK-Regular.ttc",
+            "/system/fonts/NotoSansSC-Regular.otf",
+            "/system/fonts/NotoSerifCJK-Regular.ttc",
+        ];
+        for path in PATHS {
+            if let Ok(bytes) = std::fs::read(path)
+                && !bytes.is_empty()
+            {
+                return vec![("UIFWSansCJK".to_string(), bytes)];
+            }
+        }
+        Vec::new()
+    }
+
+    fn apply_ime(&self, update: &session::ImeUpdate) {
+        let call = match update {
+            session::ImeUpdate::Show(state) => ImeCall::from_state(IME_SHOW, state),
+            session::ImeUpdate::Update(state) => ImeCall::from_state(IME_UPDATE, state),
+            session::ImeUpdate::Hide => ImeCall::hide(),
+        };
+        self.0.apply_ime(call);
     }
 }
 
-fn load_asset(assets: &AssetManager, path: &CStr) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-    let mut asset = assets.open(path).ok_or_else(|| "open failed".to_string())?;
-    match asset.buffer() {
-        Ok(bytes) if !bytes.is_empty() => Ok(bytes.to_vec()),
-        other => {
-            let why = match other {
-                Ok(_) => "empty buffer".to_string(),
-                Err(error) => error.to_string(),
-            };
-            let mut bytes = Vec::new();
-            asset
-                .read_to_end(&mut bytes)
-                .map_err(|error| format!("{why}; read {error}"))?;
-            if bytes.is_empty() {
-                Err(format!("{why}; read empty"))
-            } else {
-                Ok(bytes)
+struct Viewport {
+    width_px: i32,
+    height_px: i32,
+    density: f32,
+    pad_left: i32,
+    pad_top: i32,
+    pad_right: i32,
+    pad_bottom: i32,
+    ime_left: i32,
+    ime_top: i32,
+    ime_right: i32,
+    ime_bottom: i32,
+}
+
+struct Ui {
+    window: Option<NativeWindow>,
+    surface_id: Option<SurfaceId>,
+    viewport: Option<Viewport>,
+    client: Client,
+    pending_user: Option<String>,
+    ime_client: bool,
+    ime_bottom: i32,
+}
+
+impl Ui {
+    fn new() -> Self {
+        Self {
+            window: None,
+            surface_id: None,
+            viewport: None,
+            client: Client::new(),
+            pending_user: None,
+            ime_client: false,
+            ime_bottom: 0,
+        }
+    }
+}
+
+struct Host {
+    link: hostshell::Link,
+    clock: Arc<FrameClock>,
+    bridge: Arc<Bridge>,
+    ui: Mutex<Ui>,
+}
+
+static HOST: Mutex<Option<Arc<Host>>> = Mutex::new(None);
+
+fn host() -> Option<Arc<Host>> {
+    HOST.lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+        .map(Arc::clone)
+}
+
+impl Host {
+    fn ui<T>(&self, body: impl FnOnce(&mut Ui) -> T) -> T {
+        let mut ui = self.ui.lock().unwrap_or_else(|error| error.into_inner());
+        body(&mut ui)
+    }
+
+    fn clear_pending(&self) {
+        self.ui(|ui| ui.pending_user = None);
+    }
+
+    fn post_edits(&self, edits: Vec<Edit>) {
+        if edits.is_empty() {
+            return;
+        }
+        self.ui(|ui| {
+            ui.pending_user = Some(ui.client.text());
+        });
+        for edit in edits {
+            if let Some(event) = edit_event(edit, false) {
+                self.link.post(Command::Input(event));
             }
         }
     }
 }
 
-fn asset_image_path(source: &str) -> Option<CString> {
-    let name = source.strip_prefix("asset:")?;
-    if name.is_empty() {
-        return None;
-    }
-    let mut relative = String::from("images");
-    for part in name.split('/') {
-        if part.is_empty() || part == "." || part == ".." || part.contains('\\') {
-            return None;
-        }
-        relative.push('/');
-        relative.push_str(part);
-    }
-    relative.push_str(".png");
-    CString::new(relative).ok()
+fn edit_event(edit: Edit, shift: bool) -> Option<EditEvent> {
+    let press = |key| EditEvent::Key(session::KeyPress { key, shift });
+    Some(match edit {
+        Edit::Backspace => press(Key::Backspace),
+        Edit::Delete => press(Key::Delete),
+        Edit::Enter => press(Key::Enter),
+        Edit::Tab => press(Key::Tab),
+        Edit::Escape => press(Key::Escape),
+        Edit::Left => press(Key::Left),
+        Edit::Right => press(Key::Right),
+        Edit::Up => press(Key::Up),
+        Edit::Down => press(Key::Down),
+        Edit::Home => press(Key::Home),
+        Edit::End => press(Key::End),
+        Edit::WordLeft => press(Key::WordLeft),
+        Edit::WordRight => press(Key::WordRight),
+        Edit::DocumentStart => press(Key::DocumentStart),
+        Edit::DocumentEnd => press(Key::DocumentEnd),
+        Edit::DeleteWord => press(Key::DeleteWord),
+        Edit::DeleteWordForward => press(Key::DeleteWordForward),
+        Edit::SelectAll => EditEvent::SelectAll,
+        Edit::Text(text) => EditEvent::Text(text),
+        Edit::Composing(text) => EditEvent::Composing(text),
+    })
 }
 
-pub fn run(app: AndroidApp) -> i32 {
-    let assets = Arc::new(app.asset_manager());
-    let script_assets = Arc::clone(&assets);
-    let requested = script_extra(&app);
-    let clock = FrameClock::new(app.create_waker());
-    let ime = Arc::new(ImeMailbox {
-        commands: Mutex::new(VecDeque::new()),
+fn input_type(keyboard: session::KeyboardType) -> i32 {
+    const CLASS_TEXT: i32 = 1;
+    const CLASS_NUMBER: i32 = 2;
+    const CLASS_PHONE: i32 = 3;
+    const VARIATION_URI: i32 = 0x10;
+    const VARIATION_EMAIL: i32 = 0x20;
+    const VARIATION_PERSON_NAME: i32 = 0x60;
+    const VARIATION_PASSWORD: i32 = 0x80;
+    const FLAG_CAP_WORDS: i32 = 0x2000;
+    const FLAG_AUTO_CORRECT: i32 = 0x8000;
+    const FLAG_MULTI_LINE: i32 = 0x20000;
+    const FLAG_NO_SUGGESTIONS: i32 = 0x80000;
+    match keyboard {
+        session::KeyboardType::Text => CLASS_TEXT | FLAG_AUTO_CORRECT,
+        session::KeyboardType::Multiline => CLASS_TEXT | FLAG_MULTI_LINE | FLAG_AUTO_CORRECT,
+        session::KeyboardType::Number => CLASS_NUMBER,
+        session::KeyboardType::Phone => CLASS_PHONE,
+        session::KeyboardType::Email => CLASS_TEXT | VARIATION_EMAIL,
+        session::KeyboardType::Url => CLASS_TEXT | VARIATION_URI,
+        session::KeyboardType::Name => CLASS_TEXT | VARIATION_PERSON_NAME | FLAG_CAP_WORDS,
+        session::KeyboardType::Password => CLASS_TEXT | VARIATION_PASSWORD | FLAG_NO_SUGGESTIONS,
+    }
+}
+
+fn ime_action(action: session::TextInputAction) -> i32 {
+    match action {
+        session::TextInputAction::None | session::TextInputAction::Newline => 1,
+        session::TextInputAction::Go => 2,
+        session::TextInputAction::Search => 3,
+        session::TextInputAction::Send => 4,
+        session::TextInputAction::Next => 5,
+        session::TextInputAction::Done => 6,
+        session::TextInputAction::Previous => 7,
+    }
+}
+
+struct Attach {
+    view: Global<JObject<'static>>,
+    assets: Arc<AssetManager>,
+    script: Option<String>,
+    settings: session::PlatformSettings,
+}
+
+fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
+    let bridge = Arc::new(Bridge {
+        vm: env.get_java_vm().map_err(|error| error.to_string())?,
+        view: request.view,
+        assets: Arc::clone(&request.assets),
+        font: OnceLock::new(),
+        semantics: Mutex::new(None),
     });
-    let ime_for_services = Arc::clone(&ime);
+    let bridge_for_clock = Arc::clone(&bridge);
+    let clock = FrameClock::new(Arc::new(move || bridge_for_clock.schedule_frame()));
+    let script_assets = Arc::clone(&request.assets);
+    let requested = request.script;
     let boot = Boot {
         font_family: FONT_FAMILY.to_string(),
         launch: Launch::Session(Box::new(move |slot| {
@@ -228,362 +531,119 @@ pub fn run(app: AndroidApp) -> i32 {
                 }
             })
         })),
-        services: Box::new(AndroidServices {
-            assets,
-            font: OnceLock::new(),
-            images: Mutex::new(HashMap::new()),
-            ime: ime_for_services,
-            waker: app.create_waker(),
-        }),
+        services: Box::new(Shared(Arc::clone(&bridge))),
         vsync: Arc::clone(&clock) as Arc<dyn Vsync>,
+        decoder: Arc::new(AssetDecoder {
+            assets: request.assets,
+        }),
+        bridge: Arc::clone(&bridge) as Arc<dyn PlatformBridge>,
         open_surface: Box::new(|engine, target| {
             Ok(Box::new(VulkanSurface::open(engine, target.layer)?))
         }),
     };
-    let link = match hostshell::start(boot) {
-        Ok(link) => link,
-        Err(error) => {
-            log_line(LogLevel::Error, &error.to_string());
-            return i32::from(error.code());
-        }
-    };
-
-    let mut window: Option<NativeWindow> = None;
-    let mut failed: Option<i32> = None;
-    let mut leaving = false;
-    let mut ime_text = Snapshot::empty();
-    let mut ime_bottom = 0;
-    loop {
-        app.poll_events(None, |event| {
-            apply_ime(&app, &ime, &mut ime_text);
-            match event {
-                PollEvent::Main(MainEvent::InitWindow { .. }) => {
-                    if window.is_some() {
-                        link.destroy_surface_and_wait();
-                        window = None;
-                    }
-                    if let Some(next) = app.native_window() {
-                        configure_window_buffers(&next);
-                        match scene_metrics(&app, &next) {
-                            Some(metrics) => {
-                                let ptr = next.ptr().as_ptr().cast();
-                                window = Some(next);
-                                link.post(Command::SurfaceReady(SurfaceTarget {
-                                    layer: NativePtr(ptr),
-                                    metrics,
-                                }));
-                            }
-                            None => {
-                                log_line(LogLevel::Error, "display density was not provided");
-                                failed = Some(1);
-                            }
-                        }
-                    }
-                }
-                PollEvent::Main(MainEvent::WindowResized { .. }) => {
-                    if let Some(held) = window.as_ref() {
-                        configure_window_buffers(held);
-                    }
-                    observe_ime(&app, &link, &mut ime_bottom);
-                    post_surface_changed(&app, &link, window.as_ref());
-                }
-                PollEvent::Main(
-                    MainEvent::InsetsChanged { .. } | MainEvent::ContentRectChanged { .. },
-                ) => {
-                    observe_ime(&app, &link, &mut ime_bottom);
-                    post_surface_changed(&app, &link, window.as_ref());
-                }
-                PollEvent::Main(MainEvent::TerminateWindow { .. }) => {
-                    link.destroy_surface_and_wait();
-                    window = None;
-                }
-                PollEvent::Main(MainEvent::Pause) => {
-                    // Cancel first so a frame requested for a synthetic pointer cancel is not dropped.
-                    clock.cancel();
-                    link.post(Command::Lifecycle(hostshell::Lifecycle::Pause));
-                }
-                PollEvent::Main(MainEvent::Resume { .. }) => {
-                    link.post(Command::Lifecycle(hostshell::Lifecycle::Resume));
-                }
-                PollEvent::Main(MainEvent::Destroy) => {
-                    link.destroy_surface_and_wait();
-                    window = None;
-                    leaving = true;
-                }
-                _ => {}
-            }
-        });
-        if let Some(code) = failed {
-            let _ = link.shutdown_and_join();
-            return code;
-        }
-        if leaving {
-            return finish(&link);
-        }
-        pump_input(&app, &link, &mut ime_text, ime_bottom > 0);
-        clock.arm_if_needed();
-    }
+    let link = hostshell::start(boot).map_err(|error| error.to_string())?;
+    link.post(Command::Settings(request.settings));
+    *HOST.lock().unwrap_or_else(|error| error.into_inner()) = Some(Arc::new(Host {
+        link,
+        clock,
+        bridge,
+        ui: Mutex::new(Ui::new()),
+    }));
+    Ok(())
 }
 
-fn finish(link: &hostshell::Link) -> i32 {
-    match link.shutdown_and_join() {
-        Ok(()) => 0,
-        Err(error) => {
-            log_line(LogLevel::Error, &error.to_string());
-            i32::from(error.code())
-        }
-    }
-}
-
-fn pump_input(app: &AndroidApp, link: &hostshell::Link, text: &mut Snapshot, ime_visible: bool) {
-    let Ok(mut events) = app.input_events_iter() else {
+fn detach() {
+    let Some(host) = HOST
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+    else {
         return;
     };
-    let density = match app.config().density().and_then(density_scale) {
-        Some(density) => density,
-        None => return,
+    destroy_surface(&host);
+    if let Err(error) = host.link.shutdown_and_join() {
+        log_line(LogLevel::Error, &error.to_string());
+    }
+}
+
+fn destroy_surface(host: &Host) {
+    let (window, id) = host.ui(|ui| (ui.window.take(), ui.surface_id.take()));
+    let (Some(window), Some(id)) = (window, id) else {
+        return;
     };
-    loop {
-        let read = events.next(|event| match event {
-            InputEvent::MotionEvent(motion) => {
-                let pointer =
-                    wheel_pointer(motion, density).or_else(|| accepted_pointer(motion, density));
-                if let Some(pointer) = pointer {
-                    link.post(Command::Pointer(pointer));
-                    InputStatus::Handled
-                } else {
-                    InputStatus::Unhandled
-                }
-            }
-            InputEvent::KeyEvent(key) => match textinput::map_key(
-                key.action() == KeyAction::Down,
-                key.key_code().into(),
-                ime_visible,
-            ) {
-                Some(KeyOutcome::Dismiss) => {
-                    link.post(Command::ImeDismissed);
-                    InputStatus::Handled
-                }
-                Some(KeyOutcome::Edit(edit)) => {
-                    if let Some(event) = edit_event(edit) {
-                        link.post(Command::Input(event));
-                    }
-                    InputStatus::Handled
-                }
-                None => InputStatus::Unhandled,
-            },
-            InputEvent::TextEvent(state) => {
-                let next = snapshot_from(state);
-                for edit in textinput::diff(text, &next) {
-                    if let Some(event) = edit_event(edit) {
-                        link.post(Command::Input(event));
-                    }
-                }
-                *text = next;
-                InputStatus::Handled
-            }
-            InputEvent::TextAction(action) => match action {
-                TextInputAction::Done
-                | TextInputAction::Go
-                | TextInputAction::Send
-                | TextInputAction::Search => {
-                    link.post(Command::Input(EditEvent::Key(Key::Enter)));
-                    InputStatus::Handled
-                }
-                _ => InputStatus::Unhandled,
-            },
-            _ => InputStatus::Unhandled,
-        });
-        if !read {
-            break;
+    host.link.begin_destroy(id);
+    if !wait_dropped(&host.link, id) {
+        log_line(
+            LogLevel::Error,
+            "surface drop timed out; keeping the window",
+        );
+        std::mem::forget(window);
+        return;
+    }
+    drop(window);
+}
+
+fn wait_dropped(link: &hostshell::Link, id: SurfaceId) -> bool {
+    for _ in 0..4_000 {
+        if link.poll_dropped(id) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    false
+}
+
+fn open_surface(host: &Host, window: NativeWindow) {
+    configure_window_buffers(&window);
+    let previous = host.ui(|ui| (ui.window.take(), ui.surface_id.take()));
+    if let (Some(window), Some(id)) = previous {
+        host.link.begin_destroy(id);
+        if !wait_dropped(&host.link, id) {
+            log_line(LogLevel::Error, "replaced surface drop timed out");
+            std::mem::forget(window);
         }
     }
+    host.ui(|ui| ui.window = Some(window));
+    post_ready(host);
 }
 
-fn edit_event(edit: Edit) -> Option<EditEvent> {
-    Some(match edit {
-        Edit::Backspace => EditEvent::Key(Key::Backspace),
-        Edit::Enter => EditEvent::Key(Key::Enter),
-        Edit::Tab => EditEvent::Key(Key::Tab),
-        Edit::Left => EditEvent::Key(Key::Left),
-        Edit::Right => EditEvent::Key(Key::Right),
-        Edit::Up => EditEvent::Key(Key::Up),
-        Edit::Down => EditEvent::Key(Key::Down),
-        Edit::Text(text) => EditEvent::Text(text),
-        Edit::Composing(text) => EditEvent::Composing(text),
-    })
-}
-
-fn snapshot_from(state: &TextInputState) -> Snapshot {
-    let compose = state.compose_region.and_then(|span| {
-        let start = span.start.min(span.end);
-        let end = span.start.max(span.end);
-        (start != end).then_some((start, end))
-    });
-    Snapshot {
-        text: state.text.clone(),
-        compose,
-    }
-}
-
-fn apply_ime(app: &AndroidApp, mailbox: &ImeMailbox, text: &mut Snapshot) {
-    for command in mailbox.drain() {
-        match command {
-            ImeCommand::Show => {
-                app.set_ime_editor_info(
-                    InputType::TYPE_CLASS_TEXT,
-                    TextInputAction::Done,
-                    ImeOptions::IME_FLAG_NO_FULLSCREEN,
-                );
-                app.show_soft_input(false);
-            }
-            ImeCommand::Hide => app.hide_soft_input(false),
-            ImeCommand::Text(value) => {
-                *text = textinput::seed(&value);
-                let end = textinput::utf16_len(&text.text);
-                app.set_text_input_state(TextInputState {
-                    text: text.text.clone(),
-                    selection: TextSpan { start: end, end },
-                    compose_region: None,
-                });
-            }
+/// Posts `SurfaceReady` once the window and the viewport both exist.
+fn post_ready(host: &Host) -> bool {
+    let ready = host.ui(|ui| {
+        if ui.surface_id.is_some() {
+            return None;
         }
-    }
-}
-
-fn observe_ime(app: &AndroidApp, link: &hostshell::Link, ime_bottom: &mut i32) {
-    let next = java_insets(app, IME)
-        .map(|edges| edges.bottom.max(0))
-        .unwrap_or(0);
-    if *ime_bottom > 0 && next == 0 {
-        link.post(Command::ImeDismissed);
-    }
-    *ime_bottom = next;
-}
-
-fn wheel_pointer(
-    motion: &android_activity::input::MotionEvent<'_>,
-    density: f32,
-) -> Option<core::PointerEvent> {
-    if motion.action() != MotionAction::Scroll {
-        return None;
-    }
-    let pointer = motion
-        .pointers()
-        .find(|pointer| pointer.pointer_index() == 0)?;
-    let (dx, dy) = motion::wheel_scene_delta(
-        pointer.axis_value(Axis::Hscroll),
-        pointer.axis_value(Axis::Vscroll),
-    )?;
-    let (x, y) = scene_point(pointer.x(), pointer.y(), density)?;
-    Some(core::PointerEvent::wheel(
-        x,
-        y,
-        motion.event_time() as f64 / 1_000_000.0,
-        dx,
-        dy,
-    ))
-}
-
-fn load_script(
-    assets: &AssetManager,
-    requested: Option<&str>,
-) -> Result<(String, String), SessionError> {
-    let mut names = Vec::new();
-    if let Some(path) = requested.and_then(motion::script_asset_path) {
-        names.push(path);
-    }
-    names.push("app.js".to_string());
-    names.push(SCRIPT_NAME.to_string());
-    for name in names {
-        let Ok(path) = CString::new(name.clone()) else {
-            continue;
-        };
-        let Some(bytes) = decode::read_bytes(assets, &path) else {
-            continue;
-        };
-        let script = String::from_utf8(bytes).map_err(|_| SessionError::Runtime)?;
-        return Ok((name, script));
-    }
-    Err(SessionError::Runtime)
-}
-
-fn script_extra(app: &AndroidApp) -> Option<String> {
-    let vm_ptr = app.vm_as_ptr();
-    let activity_ptr = app.activity_as_ptr();
-    if vm_ptr.is_null() || activity_ptr.is_null() {
-        return None;
-    }
-    let vm = unsafe { jni::JavaVM::from_raw(vm_ptr.cast()) };
-    let read = vm.attach_current_thread(|env| {
-        let activity = unsafe { jni::objects::JObject::from_raw(env, activity_ptr.cast()) };
-        let intent = env
-            .call_method(
-                &activity,
-                jni::jni_str!("getIntent"),
-                jni::jni_sig!("()Landroid/content/Intent;"),
-                &[],
-            )?
-            .l()?;
-        let text = if intent.is_null() {
-            None
-        } else {
-            let key = env.new_string("uifw.script")?;
-            let value = env
-                .call_method(
-                    &intent,
-                    jni::jni_str!("getStringExtra"),
-                    jni::jni_sig!("(Ljava/lang/String;)Ljava/lang/String;"),
-                    &[jni::objects::JValue::Object(&key)],
-                )?
-                .l()?;
-            if value.is_null() {
-                None
-            } else {
-                // SAFETY: `getStringExtra` returned a local `java.lang.String`. Null was
-                // handled above. `value` gives up that reference here.
-                let string = unsafe { jni::objects::JString::from_raw(env, value.into_raw()) };
-                Some(string.try_to_string(env)?)
-            }
-        };
-        let _ = activity.into_raw();
-        Ok::<Option<String>, jni::errors::Error>(text)
+        let window = ui.window.as_ref()?;
+        let viewport = ui.viewport.as_ref()?;
+        let metrics = metrics_of(&Viewport {
+            width_px: window.width(),
+            height_px: window.height(),
+            density: viewport.density,
+            pad_left: viewport.pad_left,
+            pad_top: viewport.pad_top,
+            pad_right: viewport.pad_right,
+            pad_bottom: viewport.pad_bottom,
+            ime_left: viewport.ime_left,
+            ime_top: viewport.ime_top,
+            ime_right: viewport.ime_right,
+            ime_bottom: viewport.ime_bottom,
+        })?;
+        let id = SurfaceId::fresh();
+        let ptr = window.ptr().as_ptr().cast();
+        ui.surface_id = Some(id);
+        ui.ime_bottom = viewport.ime_bottom;
+        Some(SurfaceTarget {
+            id,
+            layer: NativePtr(ptr),
+            metrics,
+        })
     });
-    read.ok().flatten()
-}
-
-fn accepted_pointer(
-    motion: &android_activity::input::MotionEvent<'_>,
-    density: f32,
-) -> Option<core::PointerEvent> {
-    let phase = motion::phase_for(match motion.action() {
-        MotionAction::Down => Action::Down,
-        MotionAction::Move => Action::Move,
-        MotionAction::Up => Action::Up,
-        MotionAction::Cancel => Action::Cancel,
-        MotionAction::PointerDown => Action::PointerDown,
-        MotionAction::PointerUp => Action::PointerUp,
-        _ => Action::Other,
-    })?;
-    let pointer = motion
-        .pointers()
-        .find(|pointer| pointer.pointer_index() == 0)?;
-    let (x, y) = scene_point(pointer.x(), pointer.y(), density)?;
-    Some(core::PointerEvent {
-        phase,
-        x,
-        y,
-        // `event_time` is nanoseconds. Velocity only needs deltas on this clock.
-        time_ms: motion.event_time() as f64 / 1_000_000.0,
-        button: if phase == core::Phase::Cancel {
-            core::Button::None
-        } else {
-            core::Button::Primary
-        },
-        modifiers: core::Modifiers::empty(),
-        dx: 0.0,
-        dy: 0.0,
-    })
+    if let Some(target) = ready {
+        host.link.post(Command::SurfaceReady(target));
+        true
+    } else {
+        false
+    }
 }
 
 fn configure_window_buffers(window: &NativeWindow) {
@@ -609,134 +669,231 @@ fn configure_window_buffers(window: &NativeWindow) {
     engine::note_swapchain_extent(width as u32, height as u32);
 }
 
-fn post_surface_changed(app: &AndroidApp, link: &hostshell::Link, window: Option<&NativeWindow>) {
-    let Some(held) = window else {
-        return;
-    };
-    let Some(metrics) = scene_metrics(app, held) else {
-        return;
-    };
-    link.post(Command::SurfaceChanged(SurfaceTarget {
-        layer: NativePtr(held.ptr().as_ptr().cast()),
-        metrics,
-    }));
-}
-
-fn scene_metrics(app: &AndroidApp, window: &NativeWindow) -> Option<Metrics> {
-    let density = density_scale(app.config().density()?)?;
-    let (width, height) = scene_point(window.width() as f32, window.height() as f32, density)?;
-    let (left, top, right, bottom) = system_bar_insets(app).unwrap_or_else(|| {
-        let content = app.content_rect();
-        content_insets(
-            window.width(),
-            window.height(),
-            content.left,
-            content.top,
-            content.right,
-            content.bottom,
-        )
-        .unwrap_or((0, 0, 0, 0))
-    });
-    let (inset_left, inset_top, inset_right, inset_bottom) =
-        insets_in_points(left, top, right, bottom, density)?;
-    Some(Metrics {
+fn metrics_of(viewport: &Viewport) -> Option<Metrics> {
+    let (width, height) = scene_point(
+        viewport.width_px as f32,
+        viewport.height_px as f32,
+        viewport.density,
+    )?;
+    let (pad_left, pad_top, pad_right, pad_bottom) = insets_in_points(
+        viewport.pad_left,
+        viewport.pad_top,
+        viewport.pad_right,
+        viewport.pad_bottom,
+        viewport.density,
+    )?;
+    let (ime_left, ime_top, ime_right, ime_bottom) = insets_in_points(
+        viewport.ime_left,
+        viewport.ime_top,
+        viewport.ime_right,
+        viewport.ime_bottom,
+        viewport.density,
+    )?;
+    Some(Metrics::from_insets(
         width,
         height,
-        device_pixel_ratio: density,
-        inset_left,
-        inset_top,
-        inset_right,
-        inset_bottom,
-    })
-}
-
-/// Status and navigation bars, in pixels. `content_rect` stays the full buffer
-/// when the surface is laid out in screen, so the bars come from GameActivity.
-fn system_bar_insets(app: &AndroidApp) -> Option<(i32, i32, i32, i32)> {
-    let status = java_insets(app, STATUS_BARS)?;
-    let navigation = java_insets(app, NAVIGATION_BARS).unwrap_or(InsetEdges::default());
-    let ime = java_insets(app, IME).unwrap_or(InsetEdges::default());
-    log_line(
-        LogLevel::Info,
-        &format!(
-            "insets status {} {} {} {} nav {} {} {} {} ime {}",
-            status.left,
-            status.top,
-            status.right,
-            status.bottom,
-            navigation.left,
-            navigation.top,
-            navigation.right,
-            navigation.bottom,
-            ime.bottom
-        ),
-    );
-    Some((
-        status.left.max(navigation.left).max(ime.left),
-        status.top.max(navigation.top).max(ime.top),
-        status.right.max(navigation.right).max(ime.right),
-        status.bottom.max(navigation.bottom).max(ime.bottom),
+        viewport.density,
+        session::Insets {
+            left: pad_left,
+            top: pad_top,
+            right: pad_right,
+            bottom: pad_bottom,
+        },
+        session::Insets {
+            left: ime_left,
+            top: ime_top,
+            right: ime_right,
+            bottom: ime_bottom,
+        },
     ))
 }
 
-/// `WindowInsets.Type` values. Status bars are `1 << 0`, navigation bars `1 << 1`,
-/// IME is `1 << 3`. `targetSdk` 35 keeps the surface full screen, so the keyboard
-/// height arrives here instead of shrinking the buffer.
-const STATUS_BARS: i32 = 1;
-const NAVIGATION_BARS: i32 = 2;
-const IME: i32 = 8;
-
-#[derive(Clone, Copy, Default)]
-struct InsetEdges {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
+fn publish_metrics(host: &Host) {
+    if post_ready(host) {
+        return;
+    }
+    let (id, metrics, dismiss) = host.ui(|ui| {
+        let Some(window) = ui.window.as_ref() else {
+            return (None, None, false);
+        };
+        let Some(viewport) = ui.viewport.as_ref() else {
+            return (None, None, false);
+        };
+        let sized = Viewport {
+            width_px: window.width(),
+            height_px: window.height(),
+            density: viewport.density,
+            pad_left: viewport.pad_left,
+            pad_top: viewport.pad_top,
+            pad_right: viewport.pad_right,
+            pad_bottom: viewport.pad_bottom,
+            ime_left: viewport.ime_left,
+            ime_top: viewport.ime_top,
+            ime_right: viewport.ime_right,
+            ime_bottom: viewport.ime_bottom,
+        };
+        let dismiss = ui.ime_bottom > 0 && sized.ime_bottom == 0;
+        ui.ime_bottom = sized.ime_bottom;
+        (ui.surface_id, metrics_of(&sized), dismiss)
+    });
+    if dismiss {
+        host.link.post(Command::ImeDismissed);
+    }
+    if let (Some(id), Some(metrics)) = (id, metrics) {
+        host.link.post(Command::SurfaceChanged { id, metrics });
+    }
 }
 
-fn java_insets(app: &AndroidApp, kind: i32) -> Option<InsetEdges> {
-    let vm_ptr = app.vm_as_ptr();
-    let activity_ptr = app.activity_as_ptr();
-    if vm_ptr.is_null() || activity_ptr.is_null() {
-        return None;
+fn load_script(
+    assets: &AssetManager,
+    requested: Option<&str>,
+) -> Result<(String, String), SessionError> {
+    let mut names = Vec::new();
+    if let Some(path) = requested.and_then(motion::script_asset_path) {
+        names.push(path);
     }
-    // SAFETY: both pointers belong to this `AndroidApp` and stay valid until it drops.
-    let vm = unsafe { jni::JavaVM::from_raw(vm_ptr.cast()) };
-    vm.attach_current_thread(|env| {
-        let activity = unsafe { jni::objects::JObject::from_raw(env, activity_ptr.cast()) };
-        let value = env.call_method(
-            &activity,
-            jni::jni_str!("getWindowInsets"),
-            jni::jni_sig!("(I)Landroidx/core/graphics/Insets;"),
-            &[jni::objects::JValue::Int(kind)],
-        )?;
-        let insets = value.l()?;
-        let edges = if insets.is_null() {
-            InsetEdges::default()
-        } else {
-            InsetEdges {
-                left: env
-                    .get_field(&insets, jni::jni_str!("left"), jni::jni_sig!("I"))?
-                    .i()?,
-                top: env
-                    .get_field(&insets, jni::jni_str!("top"), jni::jni_sig!("I"))?
-                    .i()?,
-                right: env
-                    .get_field(&insets, jni::jni_str!("right"), jni::jni_sig!("I"))?
-                    .i()?,
-                bottom: env
-                    .get_field(&insets, jni::jni_str!("bottom"), jni::jni_sig!("I"))?
-                    .i()?,
-            }
+    names.push("app.js".to_string());
+    names.push(SCRIPT_NAME.to_string());
+    for name in names {
+        let Ok(path) = CString::new(name.clone()) else {
+            continue;
         };
-        let _ = activity.into_raw();
-        Ok::<InsetEdges, jni::errors::Error>(edges)
-    })
-    .map_err(|error| {
-        log_line(LogLevel::Error, &format!("window insets: {error}"));
-        error
-    })
-    .ok()
+        let Some(bytes) = decode::read_bytes(assets, &path) else {
+            continue;
+        };
+        let script = String::from_utf8(bytes).map_err(|_| SessionError::Runtime)?;
+        return Ok((name, script));
+    }
+    Err(SessionError::Runtime)
+}
+
+fn asset_image_path(source: &str, scale_bucket: u8) -> Vec<CString> {
+    let scale = f32::from(scale_bucket.max(1));
+    crate::assets::asset_image_candidates(source, scale)
+        .into_iter()
+        .filter_map(|path| CString::new(path).ok())
+        .collect()
+}
+
+fn load_asset(assets: &AssetManager, path: &CStr) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut asset = assets.open(path).ok_or_else(|| "open failed".to_string())?;
+    match asset.buffer() {
+        Ok(bytes) if !bytes.is_empty() => Ok(bytes.to_vec()),
+        other => {
+            let why = match other {
+                Ok(_) => "empty buffer".to_string(),
+                Err(error) => error.to_string(),
+            };
+            let mut bytes = Vec::new();
+            asset
+                .read_to_end(&mut bytes)
+                .map_err(|error| format!("{why}; read {error}"))?;
+            if bytes.is_empty() {
+                Err(format!("{why}; read empty"))
+            } else {
+                Ok(bytes)
+            }
+        }
+    }
+}
+
+struct AssetDecoder {
+    assets: Arc<AssetManager>,
+}
+
+impl hostshell::ImageDecoder for AssetDecoder {
+    fn decode(&self, source: &str) -> Result<hostshell::ImageHandle, hostshell::ImageError> {
+        self.decode_at(source, 1)
+    }
+
+    fn decode_at(
+        &self,
+        source: &str,
+        scale_bucket: u8,
+    ) -> Result<hostshell::ImageHandle, hostshell::ImageError> {
+        let paths = asset_image_path(source, scale_bucket);
+        if paths.is_empty() {
+            return Err(hostshell::ImageError::Missing);
+        }
+        for path in &paths {
+            let bytes = match load_asset(&self.assets, path) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            };
+            return match decode::decode_rgba(&bytes) {
+                Ok(rgba) => Ok(image_handle(source, rgba.width, rgba.height, rgba.pixels)),
+                Err(message) => Err(hostshell::ImageError::Failed(message)),
+            };
+        }
+        Err(hostshell::ImageError::Missing)
+    }
+
+    fn decode_bytes(
+        &self,
+        source: &str,
+        bytes: &[u8],
+    ) -> Result<hostshell::ImageHandle, hostshell::ImageError> {
+        match decode::decode_rgba(bytes) {
+            Ok(rgba) => Ok(image_handle(source, rgba.width, rgba.height, rgba.pixels)),
+            Err(message) => Err(hostshell::ImageError::Failed(message)),
+        }
+    }
+}
+
+fn image_handle(source: &str, width: u32, height: u32, pixels: Vec<u8>) -> hostshell::ImageHandle {
+    hostshell::ImageHandle {
+        source: Arc::from(source),
+        generation: 0,
+        size: [width, height],
+        pixels: Arc::from(pixels),
+    }
+}
+
+fn settings_from(
+    locale: String,
+    text_scale: f32,
+    dark: bool,
+    reduce_motion: bool,
+    bold_text: bool,
+    high_contrast: bool,
+) -> session::PlatformSettings {
+    session::PlatformSettings {
+        locale,
+        text_scale: if text_scale.is_finite() && text_scale > 0.0 {
+            text_scale
+        } else {
+            1.0
+        },
+        brightness: if dark {
+            session::Brightness::Dark
+        } else {
+            session::Brightness::Light
+        },
+        reduce_motion,
+        bold_text,
+        high_contrast,
+    }
+}
+
+fn java_string(env: &mut Env, value: &JString) -> Result<Option<String>, jni::errors::Error> {
+    if value.is_null() {
+        Ok(None)
+    } else {
+        Ok(Some(value.try_to_string(env)?))
+    }
+}
+
+fn asset_manager(env: &mut Env, assets: &JObject<'_>) -> Result<Arc<AssetManager>, String> {
+    let raw = unsafe { ndk_sys::AAssetManager_fromJava(env.get_raw().cast(), assets.as_raw()) };
+    let Some(ptr) = NonNull::new(raw) else {
+        return Err("asset manager was null".to_string());
+    };
+    Ok(Arc::new(unsafe { AssetManager::from_ptr(ptr) }))
+}
+
+fn flag(value: jboolean) -> bool {
+    value
 }
 
 pub(crate) fn log_line(level: LogLevel, message: &str) {
@@ -746,8 +903,634 @@ pub(crate) fn log_line(level: LogLevel, message: &str) {
     };
     let mut bytes = message.replace('\0', " ").into_bytes();
     bytes.push(0);
-    // SAFETY: `bytes` is NUL-terminated and lives for this call. The tag is a literal.
     unsafe {
         __android_log_write(priority, c"uifw".as_ptr(), bytes.as_ptr().cast());
     }
+}
+
+fn with_env<'local, T: Default>(
+    env: &mut EnvUnowned<'local>,
+    body: impl FnOnce(&mut Env<'local>) -> jni::errors::Result<T>,
+) -> T {
+    env.with_env(body)
+        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeAttach<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JObject<'local>,
+    _activity: JObject<'local>,
+    view: JObject<'local>,
+    assets: JObject<'local>,
+    script: JString<'local>,
+    locale: JString<'local>,
+    text_scale: f32,
+    dark: jboolean,
+    reduce_motion: jboolean,
+    bold_text: jboolean,
+    high_contrast: jboolean,
+) -> jint {
+    with_env(&mut env, |env| {
+        let script = java_string(env, &script)?;
+        let locale = java_string(env, &locale)?.unwrap_or_default();
+        let assets = match asset_manager(env, &assets) {
+            Ok(assets) => assets,
+            Err(message) => {
+                log_line(LogLevel::Error, &message);
+                return Ok(1);
+            }
+        };
+        let view = env.new_global_ref(&view)?;
+        let request = Attach {
+            view,
+            assets,
+            script,
+            settings: settings_from(
+                locale,
+                text_scale,
+                flag(dark),
+                flag(reduce_motion),
+                flag(bold_text),
+                flag(high_contrast),
+            ),
+        };
+        match attach(env, request) {
+            Ok(()) => Ok(0),
+            Err(message) => {
+                log_line(LogLevel::Error, &message);
+                Ok(1)
+            }
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeDetach(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+) {
+    detach();
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeResume(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    host.link
+        .post(Command::Lifecycle(hostshell::Lifecycle::Resumed));
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_HostActivity_nativePause(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    host.clock.cancel();
+    host.link
+        .post(Command::Lifecycle(hostshell::Lifecycle::Paused));
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeFocus(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+    focused: jboolean,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    host.link.post(Command::WindowFocus(flag(focused)));
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeBack(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    host.clear_pending();
+    let visible = host.ui(|ui| ui.ime_client || ui.ime_bottom > 0);
+    if visible {
+        host.link.post(Command::ImeDismissed);
+    } else {
+        host.link.post(Command::Input(EditEvent::Back));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeSettings<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JObject<'local>,
+    locale: JString<'local>,
+    text_scale: f32,
+    dark: jboolean,
+    reduce_motion: jboolean,
+    bold_text: jboolean,
+    high_contrast: jboolean,
+) {
+    with_env(&mut env, |env| {
+        let Some(host) = host() else {
+            return Ok(());
+        };
+        let locale = java_string(env, &locale)?.unwrap_or_default();
+        host.link.post(Command::Settings(settings_from(
+            locale,
+            text_scale,
+            flag(dark),
+            flag(reduce_motion),
+            flag(bold_text),
+            flag(high_contrast),
+        )));
+        Ok(())
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_HostSurfaceView_nativeSurfaceCreated<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JObject<'local>,
+    surface: JObject<'local>,
+) {
+    with_env(&mut env, |env| {
+        let Some(host) = host() else {
+            return Ok(());
+        };
+        let raw =
+            unsafe { ndk_sys::ANativeWindow_fromSurface(env.get_raw().cast(), surface.as_raw()) };
+        let Some(ptr) = NonNull::new(raw) else {
+            log_line(LogLevel::Error, "surface produced no native window");
+            return Ok(());
+        };
+        let window = unsafe { NativeWindow::from_ptr(ptr) };
+        open_surface(&host, window);
+        publish_metrics(&host);
+        Ok(())
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_HostSurfaceView_nativeSurfaceChanged(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+    _width: jint,
+    _height: jint,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    host.ui(|ui| {
+        if let Some(window) = ui.window.as_ref() {
+            configure_window_buffers(window);
+        }
+    });
+    publish_metrics(&host);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_HostSurfaceView_nativeSurfaceDestroyed(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    destroy_surface(&host);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_HostView_nativeMetrics(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+    width: jint,
+    height: jint,
+    density: f32,
+    pad_left: jint,
+    pad_top: jint,
+    pad_right: jint,
+    pad_bottom: jint,
+    ime_left: jint,
+    ime_top: jint,
+    ime_right: jint,
+    ime_bottom: jint,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    host.ui(|ui| {
+        ui.viewport = Some(Viewport {
+            width_px: width,
+            height_px: height,
+            density,
+            pad_left,
+            pad_top,
+            pad_right,
+            pad_bottom,
+            ime_left,
+            ime_top,
+            ime_right,
+            ime_bottom,
+        });
+    });
+    publish_metrics(&host);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_HostView_nativePointer(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+    phase: jint,
+    pointer_id: jint,
+    x: f32,
+    y: f32,
+    time_ms: jlong,
+    kind: jint,
+    button: jint,
+    buttons: jint,
+    modifiers: jint,
+    wheel_x: f32,
+    wheel_y: f32,
+    density: f32,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    let Some((x, y)) = scene_point(x, y, density) else {
+        return;
+    };
+    let kind = match kind {
+        1 => core::PointerKind::Mouse,
+        2 => core::PointerKind::Pen,
+        _ => core::PointerKind::Touch,
+    };
+    let button = match button {
+        1 => core::Button::Primary,
+        2 => core::Button::Secondary,
+        3 => core::Button::Auxiliary,
+        _ => core::Button::None,
+    };
+    if phase == 5 {
+        let Some((dx, dy)) = android_wheel(wheel_x, wheel_y) else {
+            return;
+        };
+        host.link.post(Command::Pointer(core::PointerEvent::wheel(
+            x,
+            y,
+            time_ms as f64,
+            dx,
+            dy,
+        )));
+        return;
+    }
+    let phase = match phase {
+        0 => core::Phase::Down,
+        1 | 4 => core::Phase::Move,
+        2 => core::Phase::Up,
+        3 => core::Phase::Cancel,
+        _ => return,
+    };
+    let button = if phase == core::Phase::Cancel {
+        core::Button::None
+    } else if kind == core::PointerKind::Touch && button == core::Button::None {
+        core::Button::Primary
+    } else {
+        button
+    };
+    host.link.post(Command::Pointer(core::PointerEvent {
+        pointer: core::PointerId(u64::from(pointer_id as u32)),
+        kind,
+        phase,
+        x,
+        y,
+        time_ms: time_ms as f64,
+        button,
+        buttons: core::Buttons::from_bits(buttons as u8),
+        modifiers: core::Modifiers::from_bits(modifiers as u8),
+        dx: 0.0,
+        dy: 0.0,
+    }));
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_HostView_nativeKey(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+    action: jint,
+    key_code: jint,
+    meta: jint,
+    unicode: jint,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    let down = action == 0;
+    let shift = meta & 1 != 0;
+    let ctrl = meta & 2 != 0;
+    let ime = host.ui(|ui| ui.ime_client);
+    if down {
+        let code = key_code as u32;
+        if code == textinput::KEY_COPY {
+            host.clear_pending();
+            host.link.post(Command::Input(EditEvent::Copy));
+            return;
+        }
+        if code == textinput::KEY_CUT {
+            host.clear_pending();
+            host.link.post(Command::Input(EditEvent::Cut));
+            return;
+        }
+        if code == textinput::KEY_PASTE {
+            host.clear_pending();
+            let text = host.bridge.clipboard_text();
+            host.link.post(Command::Input(EditEvent::Paste(text)));
+            return;
+        }
+        if !ime && let Some(text) = char::from_u32(unicode as u32).filter(|ch| !ch.is_control()) {
+            let edits = host.ui(|ui| ui.client.commit(&text.to_string()));
+            host.post_edits(edits);
+            return;
+        }
+    }
+    match textinput::map_key(down, key_code as u32, ime, shift, ctrl) {
+        Some(KeyOutcome::Dismiss) => {
+            host.clear_pending();
+            host.link.post(Command::ImeDismissed);
+        }
+        Some(KeyOutcome::Back) => {
+            host.clear_pending();
+            host.link.post(Command::Input(EditEvent::Back));
+        }
+        Some(KeyOutcome::Edit { edit, shift }) => {
+            host.clear_pending();
+            if let Some(event) = edit_event(edit, shift) {
+                host.link.post(Command::Input(event));
+            }
+        }
+        None => {}
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_TextInput_nativeBegin(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    host.ui(|ui| ui.client.begin());
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_TextInput_nativeEnd(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    let edits = host.ui(|ui| ui.client.end());
+    host.post_edits(edits);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_TextInput_nativeCommit<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JObject<'local>,
+    text: JString<'local>,
+) {
+    with_env(&mut env, |env| {
+        let Some(host) = host() else {
+            return Ok(());
+        };
+        let Some(text) = java_string(env, &text)? else {
+            return Ok(());
+        };
+        let edits = host.ui(|ui| ui.client.commit(&text));
+        host.post_edits(edits);
+        Ok(())
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_TextInput_nativeComposing<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JObject<'local>,
+    text: JString<'local>,
+) {
+    with_env(&mut env, |env| {
+        let Some(host) = host() else {
+            return Ok(());
+        };
+        let Some(text) = java_string(env, &text)? else {
+            return Ok(());
+        };
+        let edits = host.ui(|ui| ui.client.composing(&text));
+        host.post_edits(edits);
+        Ok(())
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_TextInput_nativeFinish(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    let edits = host.ui(|ui| ui.client.finish());
+    host.post_edits(edits);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_TextInput_nativeDelete(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+    before: jint,
+    after: jint,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    let before = u32::try_from(before).unwrap_or(0) as usize;
+    let after = u32::try_from(after).unwrap_or(0) as usize;
+    let edits = host.ui(|ui| ui.client.delete(before, after));
+    host.post_edits(edits);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_TextInput_nativeAction(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    host.clear_pending();
+    host.link
+        .post(Command::Input(EditEvent::Key(session::KeyPress::new(
+            Key::Enter,
+        ))));
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_TextInput_nativeContext(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+    kind: jint,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    host.clear_pending();
+    match kind {
+        1 => host.link.post(Command::Input(EditEvent::Copy)),
+        2 => host.link.post(Command::Input(EditEvent::Cut)),
+        3 => {
+            let text = host.bridge.clipboard_text();
+            host.link.post(Command::Input(EditEvent::Paste(text)));
+        }
+        4 => host.link.post(Command::Input(EditEvent::SelectAll)),
+        _ => {}
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_TextInput_nativeAccept<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JObject<'local>,
+    op: jint,
+    text: JString<'local>,
+    sel_start: jint,
+    sel_end: jint,
+    comp_start: jint,
+    comp_end: jint,
+) -> jboolean {
+    with_env(&mut env, |env| {
+        let Some(host) = host() else {
+            return Ok(false);
+        };
+        let text = java_string(env, &text)?.unwrap_or_default();
+        let accept = host.ui(|ui| {
+            if op == IME_HIDE {
+                ui.client.apply_state("", 0..0, None);
+                ui.pending_user = None;
+                ui.ime_client = false;
+                return true;
+            }
+            if ui
+                .pending_user
+                .as_deref()
+                .is_some_and(|expected| expected != text)
+            {
+                return false;
+            }
+            ui.pending_user = None;
+            ui.ime_client = true;
+            let compose = if comp_start < 0 || comp_end < comp_start {
+                None
+            } else {
+                Some((comp_start as u32)..(comp_end as u32))
+            };
+            let start = u32::try_from(sel_start).unwrap_or(0);
+            let end = u32::try_from(sel_end).unwrap_or(start);
+            ui.client.apply_state(&text, start..end, compose);
+            true
+        });
+        Ok(accept)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_VsyncWaiter_nativeOnVsync(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+    frame_time_nanos: jlong,
+    target_nanos: jlong,
+    interval_nanos: jlong,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    host.clock
+        .on_vsync(frame_time_nanos, target_nanos, interval_nanos);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_AccessBridge_nativeActivate(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+    id: jlong,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    host.link
+        .post(Command::SemanticsAction(core::SemanticsAction::Activate(
+            core::SemanticsId(id as u64),
+        )));
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_AccessBridge_nativeScroll(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+    id: jlong,
+    forward: jboolean,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    let id = core::SemanticsId(id as u64);
+    let (dx, dy) = {
+        let update = host
+            .bridge
+            .semantics
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(update) = update.as_ref() else {
+            return;
+        };
+        crate::a11y::scroll_action(update, id, forward)
+    };
+    if dx == 0.0 && dy == 0.0 {
+        return;
+    }
+    host.link
+        .post(Command::SemanticsAction(core::SemanticsAction::Scroll {
+            id,
+            dx,
+            dy,
+        }));
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_AccessBridge_nativeSetText<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JObject<'local>,
+    id: jlong,
+    text: JString<'local>,
+) {
+    with_env(&mut env, |env| {
+        let Some(host) = host() else {
+            return Ok(());
+        };
+        let text = java_string(env, &text)?.unwrap_or_default();
+        host.link
+            .post(Command::SemanticsAction(core::SemanticsAction::SetText {
+                id: core::SemanticsId(id as u64),
+                text,
+            }));
+        Ok(())
+    });
 }

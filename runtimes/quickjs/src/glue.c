@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -71,6 +72,15 @@ typedef struct QjsFns {
     int (*blur)(void *session);
     int (*set_ime_enabled)(void *session, int enabled);
     int (*set_ime_text)(void *session, const char *utf8, size_t len);
+    int (*set_ime_state)(void *session, int shown, const char *utf8, size_t len, uint32_t sel_start,
+                         uint32_t sel_end, int comp_start, int comp_end, float x, float y, float w,
+                         float h);
+    int (*set_semantics)(void *session, uint64_t node, int role, const char *label, size_t label_len,
+                         const char *value, size_t value_len, int checked, int sel_start,
+                         int sel_end, int disabled, int editable, int read_only,
+                         const char *description, size_t description_len);
+    double (*text_scale)(void *session);
+    int (*reduce_motion)(void *session);
     int (*measure_text)(void *session, const char *utf8, size_t len, float font_size,
                         float max_width, const uint8_t color[4], float *w, float *h);
     int (*grid)(void *session, const char *columns, size_t columns_len, const char *rows,
@@ -84,7 +94,61 @@ typedef struct QjsFns {
     int (*set_shrink)(void *session, uint64_t node, float shrink);
     int (*set_basis)(void *session, uint64_t node, float basis);
     int (*set_align_self)(void *session, uint64_t node, uint32_t align);
+    int (*set_drag_claim)(void *session, uint64_t node, int claim);
+    int (*caret_at)(void *session, uint64_t node, float x, float y, uint32_t *unit, float *out_x,
+                    float *out_y, float *out_w, float *out_h);
+    int (*word_range)(void *session, uint64_t node, uint32_t unit, uint32_t *start, uint32_t *end);
+    int (*focus_step)(void *session, int direction);
+    int (*push_focus_scope)(void *session, uint64_t node);
+    int (*pop_focus_scope)(void *session);
+    int (*pointer_position)(void *session, float *x, float *y);
+    int (*text_edit)(void *session, uint64_t node, int op, const char *utf8, size_t len,
+                     uint32_t *sel_start, uint32_t *sel_end);
+    const uint8_t *(*text_edit_bytes)(void *session, size_t *len);
+    int (*set_text_scale)(void *session, float scale);
+    int (*set_soft_wrap)(void *session, uint64_t node, int wrap);
+    int (*set_overflow)(void *session, uint64_t node, int overflow);
+    int (*caret_at_unit)(void *session, uint64_t node, uint32_t unit, float *x, float *y, float *w,
+                         float *h);
+    int (*selection_rects)(void *session, uint64_t node, uint32_t start, uint32_t end);
+    const uint8_t *(*selection_rect_bytes)(void *session, size_t *len);
+    int (*set_ime_config)(void *session, int keyboard, int action);
+    int (*http)(void *session, uint64_t token, const char *method, size_t method_len,
+                const char *url, size_t url_len, const char *headers, size_t headers_len,
+                const uint8_t *body, size_t body_len);
+    void (*abort_token)(void *session, uint64_t token);
+    int (*module_has)(void *session, const char *name, size_t len);
+    int (*module_call)(void *session, uint64_t token, const char *name, size_t name_len,
+                       const char *method, size_t method_len, const char *json, size_t json_len);
+    void (*socket_open)(void *session, uint64_t id, const char *url, size_t url_len);
+    void (*socket_send)(void *session, uint64_t id, const uint8_t *data, size_t len, int is_text);
+    void (*socket_close)(void *session, uint64_t id);
+    uint64_t (*focused)(void *session);
+    int (*is_focusable)(void *session, uint64_t node);
+    uint32_t (*grapheme_index)(const char *utf8, size_t len, uint32_t unit);
+    uint32_t (*grapheme_count)(const char *utf8, size_t len);
+    uint32_t (*grapheme_unit)(const char *utf8, size_t len, uint32_t index);
+    int (*set_reverse)(void *session, uint64_t node, int reverse);
+    int (*set_axis_size)(void *session, uint64_t node, int width_tag, float width, int height_tag,
+                         float height);
+    int (*set_aspect_ratio)(void *session, uint64_t node, int present, float ratio);
+    int (*set_position)(void *session, uint64_t node, int absolute);
+    int (*set_inset)(void *session, uint64_t node, int top_auto, float top, int right_auto, float right,
+                     int bottom_auto, float bottom, int left_auto, float left);
+    int (*set_grid_placement)(void *session, uint64_t node, int column_start_tag, int column_start,
+                              int column_end_tag, int column_end, int row_start_tag, int row_start,
+                              int row_end_tag, int row_end);
+    int (*set_scale_xy)(void *session, uint64_t node, float scale_x, float scale_y);
+    int (*register_font)(void *session, const char *family, size_t family_len, const uint8_t *bytes,
+                         size_t byte_len);
+    int (*set_image_mode)(void *session, uint64_t node, int mode, int required);
+    int (*reload)(void *session, const char *source, size_t source_len);
 } QjsFns;
+
+typedef struct BackHandler {
+    uint64_t id;
+    JSValue fn;
+} BackHandler;
 
 typedef struct Tap {
     uint64_t id;
@@ -103,6 +167,9 @@ typedef struct Tap {
     JSValue leave;
     JSValue wheel;
     JSValue secondary_click;
+    JSValue scroll;
+    JSValue text_replaced;
+    JSValue link;
     int has_click;
     int has_press;
     int has_release;
@@ -118,7 +185,33 @@ typedef struct Tap {
     int has_leave;
     int has_wheel;
     int has_secondary_click;
+    int has_scroll;
+    int has_text_replaced;
+    int has_link;
 } Tap;
+
+typedef struct Timer {
+    uint64_t id;
+    int64_t due_ms;
+    int64_t interval_ms;
+    uint64_t min_frame;
+    JSValue fn;
+    JSValue extra;
+    int kind;
+    int active;
+} Timer;
+
+typedef struct PromiseSlot {
+    uint64_t token;
+    JSValue resolve;
+    JSValue reject;
+    int live;
+} PromiseSlot;
+
+typedef struct SettingsHandler {
+    uint64_t id;
+    JSValue fn;
+} SettingsHandler;
 
 typedef struct Host {
     JSRuntime *rt;
@@ -131,12 +224,43 @@ typedef struct Host {
     int has_frame;
     int wants_frame;
     int64_t deadline_ms;
+    BackHandler *backs;
+    size_t back_len;
+    size_t back_cap;
+    uint64_t back_next;
+    Timer *timers;
+    size_t timer_len;
+    size_t timer_cap;
+    uint64_t timer_next;
+    PromiseSlot *promises;
+    size_t promise_len;
+    size_t promise_cap;
+    uint64_t token_next;
+    uint64_t socket_next;
+    int64_t mono_ms;
+    int64_t origin_ms;
+    int origin_set;
+    uint64_t frame_seq;
+    int paused;
+    char *locale;
+    size_t locale_len;
+    double settings_text_scale;
+    int settings_dark;
+    int settings_reduce;
+    int settings_bold;
+    int settings_contrast;
+    SettingsHandler *settings_handlers;
+    size_t settings_len;
+    size_t settings_cap;
+    uint64_t settings_next;
 } Host;
 
 #define UIFW_JS_MEMORY_LIMIT (16u << 20)
-#define UIFW_JS_SLICE_MS 8
-/* Debug builds of quickjs-ng take about 44 ms to eval dist/counter.js. */
-#define UIFW_JS_EVAL_MS 128
+/* Debug quickjs-ng takes about 44 ms to eval dist/counter.js. Mounting the
+   gallery list does the same kind of host calls and also exceeds one frame.
+   Crossing the limit throws InternalError: interrupted and discards the turn,
+   so this is a runaway cutoff, not a frame budget. */
+#define UIFW_JS_TURN_MS 128
 
 static int64_t now_ms(void) {
     struct timespec ts;
@@ -147,11 +271,11 @@ static int64_t now_ms(void) {
 }
 
 static void arm_slice(Host *host) {
-    host->deadline_ms = now_ms() + UIFW_JS_SLICE_MS;
+    host->deadline_ms = now_ms() + UIFW_JS_TURN_MS;
 }
 
 static void arm_eval(Host *host) {
-    host->deadline_ms = now_ms() + UIFW_JS_EVAL_MS;
+    host->deadline_ms = now_ms() + UIFW_JS_TURN_MS;
 }
 
 static int interrupt_handler(JSRuntime *rt, void *opaque) {
@@ -686,6 +810,15 @@ static void free_tap(Host *host, Tap *tap) {
     if (tap->has_secondary_click) {
         JS_FreeValue(host->ctx, tap->secondary_click);
     }
+    if (tap->has_scroll) {
+        JS_FreeValue(host->ctx, tap->scroll);
+    }
+    if (tap->has_text_replaced) {
+        JS_FreeValue(host->ctx, tap->text_replaced);
+    }
+    if (tap->has_link) {
+        JS_FreeValue(host->ctx, tap->link);
+    }
 }
 
 static int tap_slot(Tap *tap, int kind, JSValue **slot, int **has) {
@@ -750,6 +883,18 @@ static int tap_slot(Tap *tap, int kind, JSValue **slot, int **has) {
         *slot = &tap->secondary_click;
         *has = &tap->has_secondary_click;
         return 0;
+    case 15:
+        *slot = &tap->scroll;
+        *has = &tap->has_scroll;
+        return 0;
+    case 16:
+        *slot = &tap->text_replaced;
+        *has = &tap->has_text_replaced;
+        return 0;
+    case 17:
+        *slot = &tap->link;
+        *has = &tap->has_link;
+        return 0;
     default:
         return -1;
     }
@@ -811,6 +956,8 @@ static JSValue bind_gesture(JSContext *ctx, int argc, JSValueConst *argv, int ki
     return JS_UNDEFINED;
 }
 
+static int image_mode_tag(JSContext *ctx, JSValue value, int *mode);
+
 static JSValue js_image(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
     Host *host = host_of(ctx);
@@ -831,7 +978,63 @@ static JSValue js_image(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     uint64_t id = 0;
     int status = host->fns.image(host->fns.session, utf8, len, (float)width, (float)height, &id);
     JS_FreeCString(ctx, utf8);
-    return created(ctx, status, id, "image failed");
+    if (status != 0) {
+        return created(ctx, status, id, "image failed");
+    }
+    if (argc >= 4) {
+        int mode = 0;
+        int mode_status = image_mode_tag(ctx, argv[3], &mode);
+        if (mode_status > 0) {
+            return JS_EXCEPTION;
+        }
+        if (mode_status < 0) {
+            return throw_msg(ctx, "bad image");
+        }
+        int required = 0;
+        if (argc >= 5 && !JS_IsUndefined(argv[4]) && !JS_IsNull(argv[4])) {
+            required = JS_ToBool(ctx, argv[4]);
+            if (required < 0) {
+                return JS_EXCEPTION;
+            }
+        }
+        status = host->fns.set_image_mode(host->fns.session, id, mode, required);
+        if (status != 0) {
+            return throw_msg(ctx, "bad image");
+        }
+    }
+    return created(ctx, 0, id, "image failed");
+}
+
+static int image_mode_tag(JSContext *ctx, JSValue value, int *mode) {
+    if (JS_IsNumber(value)) {
+        int tag = 0;
+        if (JS_ToInt32(ctx, &tag, value)) {
+            return 1;
+        }
+        if (tag < 0 || tag > 2) {
+            return -1;
+        }
+        *mode = tag;
+        return 0;
+    }
+    const char *text = JS_ToCString(ctx, value);
+    if (!text) {
+        return -1;
+    }
+    int tag = -1;
+    if (strcmp(text, "fill") == 0) {
+        tag = 0;
+    } else if (strcmp(text, "fit") == 0) {
+        tag = 1;
+    } else if (strcmp(text, "crop") == 0) {
+        tag = 2;
+    }
+    JS_FreeCString(ctx, text);
+    if (tag < 0) {
+        return -1;
+    }
+    *mode = tag;
+    return 0;
 }
 
 static JSValue js_on_click(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -874,6 +1077,715 @@ static JSValue js_on_blur(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     return bind_gesture(ctx, argc, argv, 7, "onBlur(node, function)");
 }
 
+static int focus_direction(const char *name) {
+    if (strcmp(name, "next") == 0) {
+        return 0;
+    }
+    if (strcmp(name, "previous") == 0) {
+        return 1;
+    }
+    if (strcmp(name, "left") == 0) {
+        return 2;
+    }
+    if (strcmp(name, "right") == 0) {
+        return 3;
+    }
+    if (strcmp(name, "up") == 0) {
+        return 4;
+    }
+    if (strcmp(name, "down") == 0) {
+        return 5;
+    }
+    return -1;
+}
+
+static JSValue js_set_drag_claim(JSContext *ctx, JSValueConst this_val, int argc,
+                                 JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "setDragClaim(node, claim)");
+    }
+    uint64_t node = 0;
+    const char *name = JS_ToCString(ctx, argv[1]);
+    if (read_handle(ctx, argv[0], &node) || !name) {
+        return JS_EXCEPTION;
+    }
+    int claim = 0;
+    if (strcmp(name, "horizontal") == 0) {
+        claim = 1;
+    } else if (strcmp(name, "free") == 0) {
+        claim = 2;
+    } else if (strcmp(name, "none") != 0) {
+        JS_FreeCString(ctx, name);
+        return throw_msg(ctx, "drag claim");
+    }
+    JS_FreeCString(ctx, name);
+    return done(ctx, host->fns.set_drag_claim(host->fns.session, node, claim), "setDragClaim failed");
+}
+
+static JSValue js_caret_at(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 3) {
+        return throw_msg(ctx, "caretAt(node, x, y)");
+    }
+    uint64_t node = 0;
+    double x = 0;
+    double y = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToFloat64(ctx, &x, argv[1]) ||
+        JS_ToFloat64(ctx, &y, argv[2])) {
+        return JS_EXCEPTION;
+    }
+    uint32_t unit = 0;
+    float cx = 0;
+    float cy = 0;
+    float cw = 0;
+    float ch = 0;
+    if (host->fns.caret_at(host->fns.session, node, (float)x, (float)y, &unit, &cx, &cy, &cw,
+                           &ch)) {
+        return throw_msg(ctx, "caretAt failed");
+    }
+    JSValue result = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, result, "unit", JS_NewUint32(ctx, unit));
+    JS_SetPropertyStr(ctx, result, "x", JS_NewFloat64(ctx, cx));
+    JS_SetPropertyStr(ctx, result, "y", JS_NewFloat64(ctx, cy));
+    JS_SetPropertyStr(ctx, result, "w", JS_NewFloat64(ctx, cw));
+    JS_SetPropertyStr(ctx, result, "h", JS_NewFloat64(ctx, ch));
+    return result;
+}
+
+static JSValue js_word_range(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "wordRange(node, unit)");
+    }
+    uint64_t node = 0;
+    uint32_t unit = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToUint32(ctx, &unit, argv[1])) {
+        return JS_EXCEPTION;
+    }
+    uint32_t start = 0;
+    uint32_t end = 0;
+    if (host->fns.word_range(host->fns.session, node, unit, &start, &end)) {
+        return throw_msg(ctx, "wordRange failed");
+    }
+    JSValue result = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, result, "start", JS_NewUint32(ctx, start));
+    JS_SetPropertyStr(ctx, result, "end", JS_NewUint32(ctx, end));
+    return result;
+}
+
+static JSValue js_focus_step(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "focusStep(direction)");
+    }
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) {
+        return JS_EXCEPTION;
+    }
+    int direction = focus_direction(name);
+    JS_FreeCString(ctx, name);
+    if (direction < 0) {
+        return throw_msg(ctx, "focus direction");
+    }
+    return done(ctx, host->fns.focus_step(host->fns.session, direction), "focusStep failed");
+}
+
+static JSValue js_push_focus_scope(JSContext *ctx, JSValueConst this_val, int argc,
+                                   JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "pushFocusScope(node)");
+    }
+    uint64_t node = 0;
+    if (read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
+    return done(ctx, host->fns.push_focus_scope(host->fns.session, node), "pushFocusScope failed");
+}
+
+static JSValue js_pop_focus_scope(JSContext *ctx, JSValueConst this_val, int argc,
+                                  JSValueConst *argv) {
+    (void)this_val;
+    (void)argc;
+    (void)argv;
+    Host *host = host_of(ctx);
+    return done(ctx, host->fns.pop_focus_scope(host->fns.session), "popFocusScope failed");
+}
+
+static JSValue js_pointer_position(JSContext *ctx, JSValueConst this_val, int argc,
+                                   JSValueConst *argv) {
+    (void)this_val;
+    (void)argc;
+    (void)argv;
+    Host *host = host_of(ctx);
+    float x = 0;
+    float y = 0;
+    if (host->fns.pointer_position(host->fns.session, &x, &y)) {
+        return throw_msg(ctx, "pointerPosition failed");
+    }
+    JSValue result = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, result, "x", JS_NewFloat64(ctx, x));
+    JS_SetPropertyStr(ctx, result, "y", JS_NewFloat64(ctx, y));
+    return result;
+}
+
+static JSValue settings_object(JSContext *ctx, Host *host) {
+    JSValue object = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, object, "locale",
+                      JS_NewStringLen(ctx, host->locale ? host->locale : "", host->locale_len));
+    JS_SetPropertyStr(ctx, object, "textScale", JS_NewFloat64(ctx, host->settings_text_scale));
+    JS_SetPropertyStr(ctx, object, "brightness",
+                      JS_NewString(ctx, host->settings_dark ? "dark" : "light"));
+    JS_SetPropertyStr(ctx, object, "reduceMotion", JS_NewBool(ctx, host->settings_reduce));
+    JS_SetPropertyStr(ctx, object, "boldText", JS_NewBool(ctx, host->settings_bold));
+    JS_SetPropertyStr(ctx, object, "highContrast", JS_NewBool(ctx, host->settings_contrast));
+    return object;
+}
+
+static JSValue js_settings(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    (void)argc;
+    (void)argv;
+    return settings_object(ctx, host_of(ctx));
+}
+
+static JSValue js_on_settings(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1 || !JS_IsFunction(ctx, argv[0])) {
+        return throw_msg(ctx, "onSettings(function)");
+    }
+    if (host->settings_len == host->settings_cap) {
+        size_t cap = host->settings_cap ? host->settings_cap * 2 : 4;
+        SettingsHandler *next = realloc(host->settings_handlers, cap * sizeof(SettingsHandler));
+        if (!next) {
+            return throw_msg(ctx, "onSettings failed");
+        }
+        host->settings_handlers = next;
+        host->settings_cap = cap;
+    }
+    host->settings_next += 1;
+    host->settings_handlers[host->settings_len].id = host->settings_next;
+    host->settings_handlers[host->settings_len].fn = JS_DupValue(ctx, argv[0]);
+    host->settings_len += 1;
+    return JS_NewUint32(ctx, (uint32_t)host->settings_next);
+}
+
+static JSValue js_off_settings(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "offSettings(id)");
+    }
+    uint32_t id = 0;
+    if (JS_ToUint32(ctx, &id, argv[0])) {
+        return JS_EXCEPTION;
+    }
+    for (size_t index = 0; index < host->settings_len; index++) {
+        if (host->settings_handlers[index].id != id) {
+            continue;
+        }
+        JS_FreeValue(ctx, host->settings_handlers[index].fn);
+        memmove(&host->settings_handlers[index], &host->settings_handlers[index + 1],
+                (host->settings_len - index - 1) * sizeof(SettingsHandler));
+        host->settings_len -= 1;
+        break;
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_focused(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    (void)argc;
+    (void)argv;
+    Host *host = host_of(ctx);
+    return handle_value(ctx, host->fns.focused(host->fns.session));
+}
+
+static JSValue js_is_focusable(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "isFocusable(node)");
+    }
+    uint64_t node = 0;
+    if (read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.is_focusable(host->fns.session, node);
+    if (status < 0) {
+        return throw_msg(ctx, "isFocusable failed");
+    }
+    return JS_NewBool(ctx, status);
+}
+
+static JSValue js_grapheme_index(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "graphemeIndex(text, unit)");
+    }
+    size_t len = 0;
+    const char *text = JS_ToCStringLen(ctx, &len, argv[0]);
+    if (!text) {
+        return JS_EXCEPTION;
+    }
+    uint32_t unit = 0;
+    if (JS_ToUint32(ctx, &unit, argv[1])) {
+        JS_FreeCString(ctx, text);
+        return JS_EXCEPTION;
+    }
+    uint32_t index = host->fns.grapheme_index(text, len, unit);
+    JS_FreeCString(ctx, text);
+    return JS_NewUint32(ctx, index);
+}
+
+static JSValue js_grapheme_count(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "graphemeCount(text)");
+    }
+    size_t len = 0;
+    const char *text = JS_ToCStringLen(ctx, &len, argv[0]);
+    if (!text) {
+        return JS_EXCEPTION;
+    }
+    uint32_t count = host->fns.grapheme_count(text, len);
+    JS_FreeCString(ctx, text);
+    return JS_NewUint32(ctx, count);
+}
+
+static JSValue js_grapheme_unit(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "graphemeUnit(text, index)");
+    }
+    size_t len = 0;
+    const char *text = JS_ToCStringLen(ctx, &len, argv[0]);
+    if (!text) {
+        return JS_EXCEPTION;
+    }
+    uint32_t index = 0;
+    if (JS_ToUint32(ctx, &index, argv[1])) {
+        JS_FreeCString(ctx, text);
+        return JS_EXCEPTION;
+    }
+    uint32_t unit = host->fns.grapheme_unit(text, len, index);
+    JS_FreeCString(ctx, text);
+    return JS_NewUint32(ctx, unit);
+}
+
+static JSValue js_set_reverse(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "setReverse(node, reverse)");
+    }
+    uint64_t node = 0;
+    if (read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
+    int reverse = JS_ToBool(ctx, argv[1]);
+    if (reverse < 0) {
+        return JS_EXCEPTION;
+    }
+    return done(ctx, host->fns.set_reverse(host->fns.session, node, reverse), "setReverse failed");
+}
+
+static int read_axis(JSContext *ctx, JSValueConst value, int *tag, float *number) {
+    if (JS_IsString(value)) {
+        const char *text = JS_ToCString(ctx, value);
+        if (!text) {
+            return -1;
+        }
+        if (strcmp(text, "auto") == 0) {
+            *tag = 0;
+            *number = 0;
+            JS_FreeCString(ctx, text);
+            return 0;
+        }
+        char *end = NULL;
+        double parsed = strtod(text, &end);
+        if (end != text && end[0] == '%' && end[1] == '\0' && isfinite(parsed) && parsed >= 0.0) {
+            *tag = 2;
+            *number = (float)(parsed / 100.0);
+            JS_FreeCString(ctx, text);
+            return 0;
+        }
+        JS_FreeCString(ctx, text);
+        JS_ThrowTypeError(ctx, "bad axis");
+        return -1;
+    }
+    if (!JS_IsNumber(value)) {
+        JS_ThrowTypeError(ctx, "bad axis");
+        return -1;
+    }
+    double parsed = 0;
+    if (JS_ToFloat64(ctx, &parsed, value)) {
+        return -1;
+    }
+    if (!isfinite(parsed) || parsed < 0.0) {
+        JS_ThrowTypeError(ctx, "bad axis");
+        return -1;
+    }
+    *tag = 1;
+    *number = (float)parsed;
+    return 0;
+}
+
+static int read_inset_edge(JSContext *ctx, JSValueConst value, int *is_auto, float *number) {
+    if (JS_IsString(value)) {
+        const char *text = JS_ToCString(ctx, value);
+        if (!text) {
+            return -1;
+        }
+        int ok = strcmp(text, "auto") == 0;
+        JS_FreeCString(ctx, text);
+        if (!ok) {
+            JS_ThrowTypeError(ctx, "bad inset");
+            return -1;
+        }
+        *is_auto = 1;
+        *number = 0;
+        return 0;
+    }
+    if (!JS_IsNumber(value)) {
+        JS_ThrowTypeError(ctx, "bad inset");
+        return -1;
+    }
+    double parsed = 0;
+    if (JS_ToFloat64(ctx, &parsed, value)) {
+        return -1;
+    }
+    if (!isfinite(parsed)) {
+        JS_ThrowTypeError(ctx, "bad inset");
+        return -1;
+    }
+    *is_auto = 0;
+    *number = (float)parsed;
+    return 0;
+}
+
+static int read_grid_line(JSContext *ctx, JSValueConst value, int *tag, int *number) {
+    if (JS_IsString(value)) {
+        const char *text = JS_ToCString(ctx, value);
+        if (!text) {
+            return -1;
+        }
+        int ok = strcmp(text, "auto") == 0;
+        JS_FreeCString(ctx, text);
+        if (!ok) {
+            JS_ThrowTypeError(ctx, "bad grid line");
+            return -1;
+        }
+        *tag = 0;
+        *number = 0;
+        return 0;
+    }
+    if (!JS_IsObject(value) || JS_IsNull(value) || JS_IsArray(value)) {
+        JS_ThrowTypeError(ctx, "bad grid line");
+        return -1;
+    }
+    JSValue line = JS_GetPropertyStr(ctx, value, "line");
+    JSValue span = JS_GetPropertyStr(ctx, value, "span");
+    int has_line = !JS_IsUndefined(line);
+    int has_span = !JS_IsUndefined(span);
+    if (has_line == has_span) {
+        JS_FreeValue(ctx, line);
+        JS_FreeValue(ctx, span);
+        JS_ThrowTypeError(ctx, "bad grid line");
+        return -1;
+    }
+    JSValue chosen = has_line ? line : span;
+    double parsed = 0;
+    if (JS_ToFloat64(ctx, &parsed, chosen)) {
+        JS_FreeValue(ctx, line);
+        JS_FreeValue(ctx, span);
+        return -1;
+    }
+    JS_FreeValue(ctx, line);
+    JS_FreeValue(ctx, span);
+    if (!isfinite(parsed) || parsed != trunc(parsed)) {
+        JS_ThrowTypeError(ctx, "bad grid line");
+        return -1;
+    }
+    if (has_line) {
+        if (parsed == 0.0 || parsed < -32768.0 || parsed > 32767.0) {
+            JS_ThrowTypeError(ctx, "bad grid line");
+            return -1;
+        }
+        *tag = 1;
+    } else if (parsed < 1.0 || parsed > 65535.0) {
+        JS_ThrowTypeError(ctx, "bad grid line");
+        return -1;
+    } else {
+        *tag = 2;
+    }
+    *number = (int)parsed;
+    return 0;
+}
+
+static JSValue js_set_axis_size(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 3) {
+        return throw_msg(ctx, "setAxisSize(node, width, height)");
+    }
+    uint64_t node = 0;
+    int width_tag = 0;
+    int height_tag = 0;
+    float width = 0;
+    float height = 0;
+    if (read_handle(ctx, argv[0], &node) || read_axis(ctx, argv[1], &width_tag, &width) ||
+        read_axis(ctx, argv[2], &height_tag, &height)) {
+        return JS_EXCEPTION;
+    }
+    return done(ctx,
+                host->fns.set_axis_size(host->fns.session, node, width_tag, width, height_tag, height),
+                "setAxisSize failed");
+}
+
+static JSValue js_set_aspect_ratio(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "setAspectRatio(node, ratio)");
+    }
+    uint64_t node = 0;
+    if (read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
+    int present = 1;
+    float ratio = 0;
+    if (JS_IsNull(argv[1]) || JS_IsUndefined(argv[1])) {
+        present = 0;
+    } else {
+        double parsed = 0;
+        if (JS_ToFloat64(ctx, &parsed, argv[1]) || !isfinite(parsed) || parsed <= 0.0) {
+            return throw_msg(ctx, "bad aspect");
+        }
+        ratio = (float)parsed;
+    }
+    return done(ctx, host->fns.set_aspect_ratio(host->fns.session, node, present, ratio),
+                "setAspectRatio failed");
+}
+
+static JSValue js_set_position(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "setPosition(node, absolute)");
+    }
+    uint64_t node = 0;
+    if (read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
+    int absolute = JS_ToBool(ctx, argv[1]);
+    if (absolute < 0) {
+        return JS_EXCEPTION;
+    }
+    return done(ctx, host->fns.set_position(host->fns.session, node, absolute), "setPosition failed");
+}
+
+static JSValue js_set_inset(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 5) {
+        return throw_msg(ctx, "setInset(node, top, right, bottom, left)");
+    }
+    uint64_t node = 0;
+    int top_auto = 0;
+    int right_auto = 0;
+    int bottom_auto = 0;
+    int left_auto = 0;
+    float top = 0;
+    float right = 0;
+    float bottom = 0;
+    float left = 0;
+    if (read_handle(ctx, argv[0], &node) || read_inset_edge(ctx, argv[1], &top_auto, &top) ||
+        read_inset_edge(ctx, argv[2], &right_auto, &right) ||
+        read_inset_edge(ctx, argv[3], &bottom_auto, &bottom) ||
+        read_inset_edge(ctx, argv[4], &left_auto, &left)) {
+        return JS_EXCEPTION;
+    }
+    return done(ctx,
+                host->fns.set_inset(host->fns.session, node, top_auto, top, right_auto, right, bottom_auto,
+                                    bottom, left_auto, left),
+                "setInset failed");
+}
+
+static JSValue js_set_grid_placement(JSContext *ctx, JSValueConst this_val, int argc,
+                                     JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 5) {
+        return throw_msg(ctx, "setGridPlacement(node, columnStart, columnEnd, rowStart, rowEnd)");
+    }
+    uint64_t node = 0;
+    int tags[4] = {0, 0, 0, 0};
+    int values[4] = {0, 0, 0, 0};
+    if (read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
+    for (int i = 0; i < 4; i++) {
+        if (read_grid_line(ctx, argv[i + 1], &tags[i], &values[i])) {
+            return JS_EXCEPTION;
+        }
+    }
+    return done(ctx,
+                host->fns.set_grid_placement(host->fns.session, node, tags[0], values[0], tags[1], values[1],
+                                             tags[2], values[2], tags[3], values[3]),
+                "setGridPlacement failed");
+}
+
+static JSValue js_set_scale_xy(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 3) {
+        return throw_msg(ctx, "setScaleXY(node, scaleX, scaleY)");
+    }
+    uint64_t node = 0;
+    double scale_x = 0;
+    double scale_y = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToFloat64(ctx, &scale_x, argv[1]) ||
+        JS_ToFloat64(ctx, &scale_y, argv[2])) {
+        return JS_EXCEPTION;
+    }
+    return done(ctx, host->fns.set_scale_xy(host->fns.session, node, (float)scale_x, (float)scale_y),
+                "setScaleXY failed");
+}
+
+static JSValue js_register_font(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "registerFont(family, bytes)");
+    }
+    size_t family_len = 0;
+    const char *family = JS_ToCStringLen(ctx, &family_len, argv[0]);
+    if (!family) {
+        return JS_EXCEPTION;
+    }
+    size_t offset = 0;
+    size_t byte_len = 0;
+    JSValue buffer = JS_GetTypedArrayBuffer(ctx, argv[1], &offset, &byte_len, NULL);
+    if (JS_IsException(buffer)) {
+        JS_FreeCString(ctx, family);
+        return JS_EXCEPTION;
+    }
+    size_t buffer_len = 0;
+    uint8_t *data = JS_GetArrayBuffer(ctx, &buffer_len, buffer);
+    JS_FreeValue(ctx, buffer);
+    if (!data || offset > buffer_len || byte_len > buffer_len - offset) {
+        JS_FreeCString(ctx, family);
+        return throw_msg(ctx, "registerFont failed");
+    }
+    int status = host->fns.register_font(host->fns.session, family, family_len, data + offset, byte_len);
+    JS_FreeCString(ctx, family);
+    if (status != 0) {
+        return throw_msg(ctx, "registerFont failed");
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_reload(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "reload(source)");
+    }
+    size_t len = 0;
+    const char *text = JS_ToCStringLen(ctx, &len, argv[0]);
+    if (!text) {
+        return JS_EXCEPTION;
+    }
+    if (len == 0) {
+        JS_FreeCString(ctx, text);
+        return throw_msg(ctx, "reload(source)");
+    }
+    int status = host->fns.reload(host->fns.session, text, len);
+    JS_FreeCString(ctx, text);
+    return done(ctx, status, "reload failed");
+}
+
+static JSValue js_set_image_mode(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 3) {
+        return throw_msg(ctx, "setImageMode(node, mode, required)");
+    }
+    uint64_t node = 0;
+    if (read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
+    int mode = 0;
+    int mode_status = image_mode_tag(ctx, argv[1], &mode);
+    if (mode_status > 0) {
+        return JS_EXCEPTION;
+    }
+    if (mode_status < 0) {
+        return throw_msg(ctx, "bad image");
+    }
+    int required = JS_ToBool(ctx, argv[2]);
+    if (required < 0) {
+        return JS_EXCEPTION;
+    }
+    return done(ctx, host->fns.set_image_mode(host->fns.session, node, mode, required), "bad image");
+}
+
+static JSValue js_on_back(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1 || !JS_IsFunction(ctx, argv[0])) {
+        return throw_msg(ctx, "onBack(function)");
+    }
+    if (host->back_len == host->back_cap) {
+        size_t cap = host->back_cap ? host->back_cap * 2 : 4;
+        BackHandler *next = realloc(host->backs, cap * sizeof(BackHandler));
+        if (!next) {
+            return throw_msg(ctx, "onBack failed");
+        }
+        host->backs = next;
+        host->back_cap = cap;
+    }
+    host->back_next += 1;
+    host->backs[host->back_len].id = host->back_next;
+    host->backs[host->back_len].fn = JS_DupValue(ctx, argv[0]);
+    host->back_len += 1;
+    return JS_NewUint32(ctx, (uint32_t)host->back_next);
+}
+
+static JSValue js_off_back(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "offBack(id)");
+    }
+    uint32_t id = 0;
+    if (JS_ToUint32(ctx, &id, argv[0])) {
+        return JS_EXCEPTION;
+    }
+    for (size_t index = 0; index < host->back_len; index++) {
+        if (host->backs[index].id != id) {
+            continue;
+        }
+        JS_FreeValue(ctx, host->backs[index].fn);
+        memmove(&host->backs[index], &host->backs[index + 1],
+                (host->back_len - index - 1) * sizeof(BackHandler));
+        host->back_len -= 1;
+        break;
+    }
+    return JS_UNDEFINED;
+}
+
 static JSValue js_on_key(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
     return bind_gesture(ctx, argc, argv, 8, "onKey(node, function)");
@@ -882,6 +1794,17 @@ static JSValue js_on_key(JSContext *ctx, JSValueConst this_val, int argc, JSValu
 static JSValue js_on_text(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
     return bind_gesture(ctx, argc, argv, 9, "onText(node, function)");
+}
+
+static JSValue js_on_text_replaced(JSContext *ctx, JSValueConst this_val, int argc,
+                                   JSValueConst *argv) {
+    (void)this_val;
+    return bind_gesture(ctx, argc, argv, 16, "onTextReplaced(node, function)");
+}
+
+static JSValue js_on_link(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    return bind_gesture(ctx, argc, argv, 17, "onLink(node, function)");
 }
 
 static JSValue js_on_composing(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -970,6 +1893,160 @@ static JSValue js_set_ime_text(JSContext *ctx, JSValueConst this_val, int argc, 
     int status = host->fns.set_ime_text(host->fns.session, utf8, len);
     JS_FreeCString(ctx, utf8);
     return done(ctx, status, "setImeText failed");
+}
+
+static JSValue js_set_ime_state(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "setImeState");
+    }
+    if (JS_IsNull(argv[0]) || JS_IsUndefined(argv[0])) {
+        return done(ctx, host->fns.set_ime_state(host->fns.session, 0, "", 0, 0, 0, -1, -1, 0, 0, 0, 0),
+                    "setImeState failed");
+    }
+    if (argc < 9) {
+        return throw_msg(ctx, "setImeState(text, selection, composing, caret)");
+    }
+    size_t len = 0;
+    const char *utf8 = JS_ToCStringLen(ctx, &len, argv[0]);
+    if (!utf8) {
+        return JS_EXCEPTION;
+    }
+    uint32_t sel_start = 0;
+    uint32_t sel_end = 0;
+    int32_t comp_start = -1;
+    int32_t comp_end = -1;
+    double x = 0;
+    double y = 0;
+    double w = 0;
+    double h = 0;
+    int bad = JS_ToUint32(ctx, &sel_start, argv[1]) || JS_ToUint32(ctx, &sel_end, argv[2]) ||
+              JS_ToInt32(ctx, &comp_start, argv[3]) || JS_ToInt32(ctx, &comp_end, argv[4]) ||
+              JS_ToFloat64(ctx, &x, argv[5]) || JS_ToFloat64(ctx, &y, argv[6]) ||
+              JS_ToFloat64(ctx, &w, argv[7]) || JS_ToFloat64(ctx, &h, argv[8]);
+    if (bad) {
+        JS_FreeCString(ctx, utf8);
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.set_ime_state(host->fns.session, 1, utf8, len, sel_start, sel_end,
+                                         comp_start, comp_end, (float)x, (float)y, (float)w,
+                                         (float)h);
+    JS_FreeCString(ctx, utf8);
+    return done(ctx, status, "setImeState failed");
+}
+
+static JSValue js_set_semantics(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "setSemantics(node, role)");
+    }
+    uint64_t node = 0;
+    int32_t role = 0;
+    int32_t checked = -1;
+    int32_t sel_start = -1;
+    int32_t sel_end = -1;
+    int32_t disabled = -1;
+    int32_t editable = -1;
+    int32_t read_only = -1;
+    int status = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToInt32(ctx, &role, argv[1])) {
+        return JS_EXCEPTION;
+    }
+    const char *label = "";
+    size_t label_len = 0;
+    const char *value = "";
+    size_t value_len = 0;
+    const char *description = "";
+    size_t description_len = 0;
+    if (argc > 2 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2])) {
+        label = JS_ToCStringLen(ctx, &label_len, argv[2]);
+        if (!label) {
+            return JS_EXCEPTION;
+        }
+    }
+    if (argc > 3 && !JS_IsUndefined(argv[3]) && !JS_IsNull(argv[3])) {
+        value = JS_ToCStringLen(ctx, &value_len, argv[3]);
+        if (!value) {
+            if (label_len) {
+                JS_FreeCString(ctx, label);
+            }
+            return JS_EXCEPTION;
+        }
+    }
+    if (argc > 4 && !JS_IsUndefined(argv[4]) && JS_ToInt32(ctx, &checked, argv[4])) {
+        if (label_len) {
+            JS_FreeCString(ctx, label);
+        }
+        if (value_len) {
+            JS_FreeCString(ctx, value);
+        }
+        return JS_EXCEPTION;
+    }
+    if (argc > 6) {
+        if (JS_ToInt32(ctx, &sel_start, argv[5]) || JS_ToInt32(ctx, &sel_end, argv[6])) {
+            if (label_len) {
+                JS_FreeCString(ctx, label);
+            }
+            if (value_len) {
+                JS_FreeCString(ctx, value);
+            }
+            return JS_EXCEPTION;
+        }
+    }
+    if (argc > 7 && !JS_IsUndefined(argv[7]) && JS_ToInt32(ctx, &disabled, argv[7])) {
+        goto fail_strings;
+    }
+    if (argc > 8 && !JS_IsUndefined(argv[8]) && JS_ToInt32(ctx, &editable, argv[8])) {
+        goto fail_strings;
+    }
+    if (argc > 9 && !JS_IsUndefined(argv[9]) && JS_ToInt32(ctx, &read_only, argv[9])) {
+        goto fail_strings;
+    }
+    if (argc > 10 && !JS_IsUndefined(argv[10]) && !JS_IsNull(argv[10])) {
+        description = JS_ToCStringLen(ctx, &description_len, argv[10]);
+        if (!description) {
+            goto fail_strings;
+        }
+    }
+    status = host->fns.set_semantics(
+        host->fns.session, node, role, label, label_len, value, value_len, checked, sel_start,
+        sel_end, disabled, editable, read_only, description, description_len);
+    if (label_len) {
+        JS_FreeCString(ctx, label);
+    }
+    if (value_len) {
+        JS_FreeCString(ctx, value);
+    }
+    if (description_len) {
+        JS_FreeCString(ctx, description);
+    }
+    return done(ctx, status, "setSemantics failed");
+fail_strings:
+    if (label_len) {
+        JS_FreeCString(ctx, label);
+    }
+    if (value_len) {
+        JS_FreeCString(ctx, value);
+    }
+    return JS_EXCEPTION;
+}
+
+static JSValue js_text_scale(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    (void)argc;
+    (void)argv;
+    Host *host = host_of(ctx);
+    return JS_NewFloat64(ctx, host->fns.text_scale(host->fns.session));
+}
+
+static JSValue js_reduce_motion(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    (void)argc;
+    (void)argv;
+    Host *host = host_of(ctx);
+    return JS_NewBool(ctx, host->fns.reduce_motion(host->fns.session));
 }
 
 static JSValue js_measure_text(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -1723,6 +2800,170 @@ static JSValue js_on_secondary_click(JSContext *ctx, JSValueConst this_val, int 
     return bind_gesture(ctx, argc, argv, 14, "onSecondaryClick(node, fn)");
 }
 
+static JSValue js_on_scroll(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    return bind_gesture(ctx, argc, argv, 15, "onScroll(node, fn)");
+}
+
+static JSValue js_set_text_scale(JSContext *ctx, JSValueConst this_val, int argc,
+                                 JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "setTextScale(scale)");
+    }
+    double scale = 0;
+    if (JS_ToFloat64(ctx, &scale, argv[0])) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.set_text_scale(host->fns.session, (float)scale);
+    return done(ctx, status, "setTextScale failed");
+}
+
+static JSValue js_set_soft_wrap(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "setSoftWrap(node, wrap)");
+    }
+    uint64_t node = 0;
+    int32_t wrap = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToInt32(ctx, &wrap, argv[1])) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.set_soft_wrap(host->fns.session, node, wrap);
+    return done(ctx, status, "setSoftWrap failed");
+}
+
+static JSValue js_set_overflow(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "setOverflow(node, overflow)");
+    }
+    uint64_t node = 0;
+    int32_t overflow = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToInt32(ctx, &overflow, argv[1])) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.set_overflow(host->fns.session, node, overflow);
+    return done(ctx, status, "setOverflow failed");
+}
+
+static JSValue js_caret_at_unit(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "caretAtUnit(node, unit)");
+    }
+    uint64_t node = 0;
+    uint32_t unit = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToUint32(ctx, &unit, argv[1])) {
+        return JS_EXCEPTION;
+    }
+    float x = 0;
+    float y = 0;
+    float w = 0;
+    float h = 0;
+    int status = host->fns.caret_at_unit(host->fns.session, node, unit, &x, &y, &w, &h);
+    if (status) {
+        return throw_msg(ctx, "caretAtUnit failed");
+    }
+    JSValue result = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, result, "x", JS_NewFloat64(ctx, x));
+    JS_SetPropertyStr(ctx, result, "y", JS_NewFloat64(ctx, y));
+    JS_SetPropertyStr(ctx, result, "w", JS_NewFloat64(ctx, w));
+    JS_SetPropertyStr(ctx, result, "h", JS_NewFloat64(ctx, h));
+    return result;
+}
+
+static JSValue js_selection_rects(JSContext *ctx, JSValueConst this_val, int argc,
+                                  JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 3) {
+        return throw_msg(ctx, "selectionRects(node, start, end)");
+    }
+    uint64_t node = 0;
+    uint32_t start = 0;
+    uint32_t end = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToUint32(ctx, &start, argv[1]) ||
+        JS_ToUint32(ctx, &end, argv[2])) {
+        return JS_EXCEPTION;
+    }
+    int count = host->fns.selection_rects(host->fns.session, node, start, end);
+    if (count < 0) {
+        return throw_msg(ctx, "selectionRects failed");
+    }
+    size_t bytes = 0;
+    const uint8_t *raw = host->fns.selection_rect_bytes(host->fns.session, &bytes);
+    JSValue list = JS_NewArray(ctx);
+    const float *values = (const float *)raw;
+    int floats = (int)(bytes / sizeof(float));
+    for (int i = 0; i + 3 < floats; i += 4) {
+        JSValue rect = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, rect, "x", JS_NewFloat64(ctx, values[i]));
+        JS_SetPropertyStr(ctx, rect, "y", JS_NewFloat64(ctx, values[i + 1]));
+        JS_SetPropertyStr(ctx, rect, "w", JS_NewFloat64(ctx, values[i + 2]));
+        JS_SetPropertyStr(ctx, rect, "h", JS_NewFloat64(ctx, values[i + 3]));
+        JS_SetPropertyUint32(ctx, list, (uint32_t)(i / 4), rect);
+    }
+    return list;
+}
+
+static JSValue js_set_ime_config(JSContext *ctx, JSValueConst this_val, int argc,
+                                 JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "setImeConfig(keyboard, action)");
+    }
+    int32_t keyboard = 0;
+    int32_t action = 0;
+    if (JS_ToInt32(ctx, &keyboard, argv[0]) || JS_ToInt32(ctx, &action, argv[1])) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.set_ime_config(host->fns.session, keyboard, action);
+    return done(ctx, status, "setImeConfig failed");
+}
+
+static JSValue js_text_edit(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "textEdit(node, op, text)");
+    }
+    uint64_t node = 0;
+    int32_t op = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToInt32(ctx, &op, argv[1])) {
+        return JS_EXCEPTION;
+    }
+    const char *utf8 = NULL;
+    size_t len = 0;
+    if (argc >= 3 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2])) {
+        utf8 = JS_ToCStringLen(ctx, &len, argv[2]);
+        if (!utf8) {
+            return JS_EXCEPTION;
+        }
+    }
+    uint32_t start = 0;
+    uint32_t end = 0;
+    int status = host->fns.text_edit(host->fns.session, node, op, utf8, len, &start, &end);
+    if (utf8) {
+        JS_FreeCString(ctx, utf8);
+    }
+    if (status) {
+        return throw_msg(ctx, "textEdit failed");
+    }
+    size_t out_len = 0;
+    const uint8_t *bytes = host->fns.text_edit_bytes(host->fns.session, &out_len);
+    JSValue result = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, result, "text", JS_NewStringLen(ctx, (const char *)bytes, out_len));
+    JS_SetPropertyStr(ctx, result, "start", JS_NewUint32(ctx, start));
+    JS_SetPropertyStr(ctx, result, "end", JS_NewUint32(ctx, end));
+    return result;
+}
+
 static JSValue js_request_frame(JSContext *ctx, JSValueConst this_val, int argc,
                                 JSValueConst *argv) {
     (void)this_val;
@@ -1885,12 +3126,24 @@ static int bind_core(Host *host) {
     failed |= bind_fn(ctx, core, "onLeave", js_on_leave, 2);
     failed |= bind_fn(ctx, core, "onWheel", js_on_wheel, 2);
     failed |= bind_fn(ctx, core, "onSecondaryClick", js_on_secondary_click, 2);
+    failed |= bind_fn(ctx, core, "onScroll", js_on_scroll, 2);
+    failed |= bind_fn(ctx, core, "textEdit", js_text_edit, 2);
+    failed |= bind_fn(ctx, core, "setTextScale", js_set_text_scale, 1);
+    failed |= bind_fn(ctx, core, "setSoftWrap", js_set_soft_wrap, 2);
+    failed |= bind_fn(ctx, core, "setOverflow", js_set_overflow, 2);
+    failed |= bind_fn(ctx, core, "caretAtUnit", js_caret_at_unit, 2);
+    failed |= bind_fn(ctx, core, "selectionRects", js_selection_rects, 3);
+    failed |= bind_fn(ctx, core, "setImeConfig", js_set_ime_config, 2);
     failed |= bind_fn(ctx, core, "sized", js_sized, 2);
     failed |= bind_fn(ctx, core, "setFocusable", js_set_focusable, 2);
     failed |= bind_fn(ctx, core, "focus", js_focus, 1);
     failed |= bind_fn(ctx, core, "blur", js_blur, 0);
     failed |= bind_fn(ctx, core, "setImeEnabled", js_set_ime_enabled, 1);
     failed |= bind_fn(ctx, core, "setImeText", js_set_ime_text, 1);
+    failed |= bind_fn(ctx, core, "setImeState", js_set_ime_state, 1);
+    failed |= bind_fn(ctx, core, "setSemantics", js_set_semantics, 2);
+    failed |= bind_fn(ctx, core, "textScale", js_text_scale, 0);
+    failed |= bind_fn(ctx, core, "reduceMotion", js_reduce_motion, 0);
     failed |= bind_fn(ctx, core, "measureText", js_measure_text, 4);
     failed |= bind_fn(ctx, core, "requestFrame", js_request_frame, 0);
     failed |= bind_fn(ctx, core, "onClick", js_on_click, 2);
@@ -1903,13 +3156,46 @@ static int bind_core(Host *host) {
     failed |= bind_fn(ctx, core, "onBlur", js_on_blur, 2);
     failed |= bind_fn(ctx, core, "onKey", js_on_key, 2);
     failed |= bind_fn(ctx, core, "onText", js_on_text, 2);
+    failed |= bind_fn(ctx, core, "onTextReplaced", js_on_text_replaced, 2);
+    failed |= bind_fn(ctx, core, "onLink", js_on_link, 2);
     failed |= bind_fn(ctx, core, "onComposing", js_on_composing, 2);
     failed |= bind_fn(ctx, core, "onFrame", js_on_frame, 1);
+    failed |= bind_fn(ctx, core, "setDragClaim", js_set_drag_claim, 2);
+    failed |= bind_fn(ctx, core, "caretAt", js_caret_at, 3);
+    failed |= bind_fn(ctx, core, "wordRange", js_word_range, 2);
+    failed |= bind_fn(ctx, core, "focusStep", js_focus_step, 1);
+    failed |= bind_fn(ctx, core, "pushFocusScope", js_push_focus_scope, 1);
+    failed |= bind_fn(ctx, core, "popFocusScope", js_pop_focus_scope, 0);
+    failed |= bind_fn(ctx, core, "pointerPosition", js_pointer_position, 0);
+    failed |= bind_fn(ctx, core, "onBack", js_on_back, 1);
+    failed |= bind_fn(ctx, core, "offBack", js_off_back, 1);
+    failed |= bind_fn(ctx, core, "settings", js_settings, 0);
+    failed |= bind_fn(ctx, core, "onSettings", js_on_settings, 1);
+    failed |= bind_fn(ctx, core, "offSettings", js_off_settings, 1);
+    failed |= bind_fn(ctx, core, "focused", js_focused, 0);
+    failed |= bind_fn(ctx, core, "isFocusable", js_is_focusable, 1);
+    failed |= bind_fn(ctx, core, "graphemeIndex", js_grapheme_index, 2);
+    failed |= bind_fn(ctx, core, "graphemeCount", js_grapheme_count, 1);
+    failed |= bind_fn(ctx, core, "graphemeUnit", js_grapheme_unit, 2);
+    failed |= bind_fn(ctx, core, "setReverse", js_set_reverse, 2);
+    failed |= bind_fn(ctx, core, "setAxisSize", js_set_axis_size, 3);
+    failed |= bind_fn(ctx, core, "setAspectRatio", js_set_aspect_ratio, 2);
+    failed |= bind_fn(ctx, core, "setPosition", js_set_position, 2);
+    failed |= bind_fn(ctx, core, "setInset", js_set_inset, 5);
+    failed |= bind_fn(ctx, core, "setGridPlacement", js_set_grid_placement, 5);
+    failed |= bind_fn(ctx, core, "setScaleXY", js_set_scale_xy, 3);
+    failed |= bind_fn(ctx, core, "registerFont", js_register_font, 2);
+    failed |= bind_fn(ctx, core, "setImageMode", js_set_image_mode, 3);
+    failed |= bind_fn(ctx, core, "reload", js_reload, 1);
     /* JS_SetPropertyStr takes ownership of `core`. Success is 1, not 0. */
     failed |= JS_SetPropertyStr(ctx, global, "core", core) < 0;
     JS_FreeValue(ctx, global);
     return failed ? -1 : 0;
 }
+
+static int bind_host_globals(Host *host);
+static void free_timers(Host *host);
+static void free_promises(Host *host);
 
 Host *qjs_open(const QjsFns *fns) {
     Host *host = calloc(1, sizeof(Host));
@@ -1917,6 +3203,7 @@ Host *qjs_open(const QjsFns *fns) {
         return NULL;
     }
     host->fns = *fns;
+    host->settings_text_scale = 1.0;
     host->rt = JS_NewRuntime();
     host->ctx = host->rt ? JS_NewContext(host->rt) : NULL;
     if (!host->ctx) {
@@ -1931,7 +3218,7 @@ Host *qjs_open(const QjsFns *fns) {
     JS_SetMemoryLimit(host->rt, UIFW_JS_MEMORY_LIMIT);
     JS_SetMaxStackSize(host->rt, 1u << 20);
     JS_SetInterruptHandler(host->rt, interrupt_handler, host);
-    if (bind_core(host) || bind_console(host)) {
+    if (bind_core(host) || bind_console(host) || bind_host_globals(host)) {
         JS_FreeContext(host->ctx);
         JS_FreeRuntime(host->rt);
         free(host->taps);
@@ -1977,15 +3264,17 @@ int qjs_dispatch(Host *host, uint64_t id, int kind, double a, double b, char *er
         }
         JSValue args[2];
         int argc = 0;
-        if (kind == 4 || kind == 5 || kind == 13) {
+        if (kind == 4 || kind == 5 || kind == 13 || kind == 15) {
             args[0] = JS_NewFloat64(host->ctx, a);
             args[1] = JS_NewFloat64(host->ctx, b);
             argc = 2;
+        } else if (kind == 17) {
+            args[0] = JS_NewFloat64(host->ctx, a);
+            argc = 1;
         }
         JSValue result = JS_Call(host->ctx, *slot, JS_UNDEFINED, argc, argc ? args : NULL);
-        if (argc) {
-            JS_FreeValue(host->ctx, args[0]);
-            JS_FreeValue(host->ctx, args[1]);
+        for (int arg = 0; arg < argc; arg++) {
+            JS_FreeValue(host->ctx, args[arg]);
         }
         if (!JS_IsException(result)) {
             JS_FreeValue(host->ctx, result);
@@ -2038,6 +3327,11 @@ int qjs_dispatch_input(Host *host, uint64_t id, int kind, const char *utf8, size
     return failed ? -1 : 0;
 }
 
+int qjs_dispatch_text(Host *host, uint64_t id, const char *utf8, size_t len, char *err,
+                      size_t err_len) {
+    return qjs_dispatch_input(host, id, 16, utf8, len, err, err_len);
+}
+
 #define UIFW_JOB_ROUND_LIMIT 32
 
 int qjs_drain_jobs(Host *host, char *err, size_t err_len) {
@@ -2072,14 +3366,17 @@ int qjs_tap_count(Host *host) {
     return host ? (int)host->tap_len : 0;
 }
 
-int qjs_frame(Host *host, double time_ms, char *err, size_t err_len) {
+int qjs_frame(Host *host, double target_ms, double interval_ms, char *err, size_t err_len) {
     arm_slice(host);
     if (!host->has_frame) {
         return 0;
     }
-    JSValue arg = JS_NewFloat64(host->ctx, time_ms);
-    JSValue result = JS_Call(host->ctx, host->frame_cb, JS_UNDEFINED, 1, &arg);
-    JS_FreeValue(host->ctx, arg);
+    JSValue args[2];
+    args[0] = JS_NewFloat64(host->ctx, target_ms);
+    args[1] = JS_NewFloat64(host->ctx, interval_ms);
+    JSValue result = JS_Call(host->ctx, host->frame_cb, JS_UNDEFINED, 2, args);
+    JS_FreeValue(host->ctx, args[0]);
+    JS_FreeValue(host->ctx, args[1]);
     if (!JS_IsException(result)) {
         JS_FreeValue(host->ctx, result);
         return 0;
@@ -2097,6 +3394,72 @@ int qjs_take_wants_frame(Host *host) {
     return value;
 }
 
+int qjs_apply_settings(Host *host, const char *locale, size_t locale_len, double text_scale, int dark,
+                       int reduce_motion, int bold_text, int high_contrast, char *err,
+                       size_t err_len) {
+    if (!host) {
+        return -1;
+    }
+    free(host->locale);
+    host->locale = NULL;
+    host->locale_len = 0;
+    if (locale && locale_len > 0) {
+        char *copy = malloc(locale_len + 1);
+        if (!copy) {
+            return -1;
+        }
+        memcpy(copy, locale, locale_len);
+        copy[locale_len] = 0;
+        host->locale = copy;
+        host->locale_len = locale_len;
+    }
+    host->settings_text_scale = text_scale;
+    host->settings_dark = dark;
+    host->settings_reduce = reduce_motion;
+    host->settings_bold = bold_text;
+    host->settings_contrast = high_contrast;
+    if (host->settings_len == 0) {
+        return 0;
+    }
+    arm_slice(host);
+    JSValue object = settings_object(host->ctx, host);
+    for (size_t index = 0; index < host->settings_len; index++) {
+        JSValue fn = host->settings_handlers[index].fn;
+        JSValue result = JS_Call(host->ctx, fn, JS_UNDEFINED, 1, &object);
+        if (JS_IsException(result)) {
+            JS_FreeValue(host->ctx, object);
+            write_exception(host->ctx, err, err_len);
+            return -1;
+        }
+        JS_FreeValue(host->ctx, result);
+    }
+    JS_FreeValue(host->ctx, object);
+    return 0;
+}
+
+int qjs_dispatch_back(Host *host, char *err, size_t err_len) {
+    if (!host || host->back_len == 0) {
+        return 0;
+    }
+    arm_slice(host);
+    for (size_t index = host->back_len; index > 0; index--) {
+        JSValue fn = host->backs[index - 1].fn;
+        JSValue result = JS_Call(host->ctx, fn, JS_UNDEFINED, 0, NULL);
+        if (JS_IsException(result)) {
+            write_exception(host->ctx, err, err_len);
+            return -1;
+        }
+        int handled = JS_ToBool(host->ctx, result);
+        JS_FreeValue(host->ctx, result);
+        if (handled > 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+#include "runtime_host.inc"
+
 void qjs_close(Host *host) {
     if (!host) {
         return;
@@ -2105,9 +3468,20 @@ void qjs_close(Host *host) {
         free_tap(host, &host->taps[index]);
     }
     free(host->taps);
+    for (size_t index = 0; index < host->back_len; index++) {
+        JS_FreeValue(host->ctx, host->backs[index].fn);
+    }
+    free(host->backs);
+    for (size_t index = 0; index < host->settings_len; index++) {
+        JS_FreeValue(host->ctx, host->settings_handlers[index].fn);
+    }
+    free(host->settings_handlers);
+    free(host->locale);
     if (host->has_frame) {
         JS_FreeValue(host->ctx, host->frame_cb);
     }
+    free_timers(host);
+    free_promises(host);
     if (host->ctx) {
         JS_FreeContext(host->ctx);
     }

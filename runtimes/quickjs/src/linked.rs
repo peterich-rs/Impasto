@@ -1,16 +1,27 @@
 //! Live QuickJS session. Tap handlers are JS values owned by the interpreter.
 
 use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CString, c_char, c_void};
 use std::marker::PhantomData;
 use std::ptr;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use protocol::{DrawList, TextAlign};
-use session::{InputEvent, Key, Metrics, Session};
-use ui_core::{Alignment, Edges, Justify, NodeId, Shaper, TrackSize, Tree};
+use session::{
+    HttpError, HttpRequest, HttpResponse, InputEvent, IoJob, Key, Metrics, PluginResult,
+    PluginValue, Session,
+};
+use ui_core::{
+    Alignment, AxisSize, DragClaim, Edges, FocusDirection, GridLine, Inset, Justify, NodeId,
+    Shaper, TrackSize, Tree,
+};
 
 use crate::Error;
+
+mod host;
 
 #[repr(C)]
 struct QjsFns {
@@ -68,6 +79,39 @@ struct QjsFns {
     blur: unsafe extern "C" fn(*mut c_void) -> i32,
     set_ime_enabled: unsafe extern "C" fn(*mut c_void, i32) -> i32,
     set_ime_text: unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> i32,
+    set_ime_state: unsafe extern "C" fn(
+        *mut c_void,
+        i32,
+        *const c_char,
+        usize,
+        u32,
+        u32,
+        i32,
+        i32,
+        f32,
+        f32,
+        f32,
+        f32,
+    ) -> i32,
+    set_semantics: unsafe extern "C" fn(
+        *mut c_void,
+        u64,
+        i32,
+        *const c_char,
+        usize,
+        *const c_char,
+        usize,
+        i32,
+        i32,
+        i32,
+        i32,
+        i32,
+        i32,
+        *const c_char,
+        usize,
+    ) -> i32,
+    text_scale: unsafe extern "C" fn(*mut c_void) -> f64,
+    reduce_motion: unsafe extern "C" fn(*mut c_void) -> i32,
     measure_text: unsafe extern "C" fn(
         *mut c_void,
         *const c_char,
@@ -94,6 +138,85 @@ struct QjsFns {
     set_shrink: unsafe extern "C" fn(*mut c_void, u64, f32) -> i32,
     set_basis: unsafe extern "C" fn(*mut c_void, u64, f32) -> i32,
     set_align_self: unsafe extern "C" fn(*mut c_void, u64, u32) -> i32,
+    set_drag_claim: unsafe extern "C" fn(*mut c_void, u64, i32) -> i32,
+    caret_at: unsafe extern "C" fn(
+        *mut c_void,
+        u64,
+        f32,
+        f32,
+        *mut u32,
+        *mut f32,
+        *mut f32,
+        *mut f32,
+        *mut f32,
+    ) -> i32,
+    word_range: unsafe extern "C" fn(*mut c_void, u64, u32, *mut u32, *mut u32) -> i32,
+    focus_step: unsafe extern "C" fn(*mut c_void, i32) -> i32,
+    push_focus_scope: unsafe extern "C" fn(*mut c_void, u64) -> i32,
+    pop_focus_scope: unsafe extern "C" fn(*mut c_void) -> i32,
+    pointer_position: unsafe extern "C" fn(*mut c_void, *mut f32, *mut f32) -> i32,
+    text_edit: unsafe extern "C" fn(
+        *mut c_void,
+        u64,
+        i32,
+        *const c_char,
+        usize,
+        *mut u32,
+        *mut u32,
+    ) -> i32,
+    text_edit_bytes: unsafe extern "C" fn(*mut c_void, *mut usize) -> *const u8,
+    set_text_scale: unsafe extern "C" fn(*mut c_void, f32) -> i32,
+    set_soft_wrap: unsafe extern "C" fn(*mut c_void, u64, i32) -> i32,
+    set_overflow: unsafe extern "C" fn(*mut c_void, u64, i32) -> i32,
+    caret_at_unit:
+        unsafe extern "C" fn(*mut c_void, u64, u32, *mut f32, *mut f32, *mut f32, *mut f32) -> i32,
+    selection_rects: unsafe extern "C" fn(*mut c_void, u64, u32, u32) -> i32,
+    selection_rect_bytes: unsafe extern "C" fn(*mut c_void, *mut usize) -> *const u8,
+    set_ime_config: unsafe extern "C" fn(*mut c_void, i32, i32) -> i32,
+    http: unsafe extern "C" fn(
+        *mut c_void,
+        u64,
+        *const c_char,
+        usize,
+        *const c_char,
+        usize,
+        *const c_char,
+        usize,
+        *const u8,
+        usize,
+    ) -> i32,
+    abort_token: unsafe extern "C" fn(*mut c_void, u64),
+    module_has: unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> i32,
+    module_call: unsafe extern "C" fn(
+        *mut c_void,
+        u64,
+        *const c_char,
+        usize,
+        *const c_char,
+        usize,
+        *const c_char,
+        usize,
+    ) -> i32,
+    socket_open: unsafe extern "C" fn(*mut c_void, u64, *const c_char, usize),
+    socket_send: unsafe extern "C" fn(*mut c_void, u64, *const u8, usize, i32),
+    socket_close: unsafe extern "C" fn(*mut c_void, u64),
+    focused: unsafe extern "C" fn(*mut c_void) -> u64,
+    is_focusable: unsafe extern "C" fn(*mut c_void, u64) -> i32,
+    grapheme_index: unsafe extern "C" fn(*const c_char, usize, u32) -> u32,
+    grapheme_count: unsafe extern "C" fn(*const c_char, usize) -> u32,
+    grapheme_unit: unsafe extern "C" fn(*const c_char, usize, u32) -> u32,
+    set_reverse: unsafe extern "C" fn(*mut c_void, u64, i32) -> i32,
+    set_axis_size: unsafe extern "C" fn(*mut c_void, u64, i32, f32, i32, f32) -> i32,
+    set_aspect_ratio: unsafe extern "C" fn(*mut c_void, u64, i32, f32) -> i32,
+    set_position: unsafe extern "C" fn(*mut c_void, u64, i32) -> i32,
+    set_inset:
+        unsafe extern "C" fn(*mut c_void, u64, i32, f32, i32, f32, i32, f32, i32, f32) -> i32,
+    set_grid_placement:
+        unsafe extern "C" fn(*mut c_void, u64, i32, i32, i32, i32, i32, i32, i32, i32) -> i32,
+    set_scale_xy: unsafe extern "C" fn(*mut c_void, u64, f32, f32) -> i32,
+    register_font: unsafe extern "C" fn(*mut c_void, *const c_char, usize, *const u8, usize) -> i32,
+    set_image_mode: unsafe extern "C" fn(*mut c_void, u64, i32, i32) -> i32,
+    reload: unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> i32,
 }
 
 unsafe extern "C" {
@@ -124,26 +247,165 @@ unsafe extern "C" {
         err: *mut c_char,
         err_len: usize,
     ) -> i32;
-    fn qjs_frame(host: *mut c_void, time_ms: f64, err: *mut c_char, err_len: usize) -> i32;
+    fn qjs_dispatch_text(
+        host: *mut c_void,
+        id: u64,
+        utf8: *const c_char,
+        len: usize,
+        err: *mut c_char,
+        err_len: usize,
+    ) -> i32;
+    fn qjs_frame(
+        host: *mut c_void,
+        target_ms: f64,
+        interval_ms: f64,
+        err: *mut c_char,
+        err_len: usize,
+    ) -> i32;
     fn qjs_take_wants_frame(host: *mut c_void) -> i32;
     fn qjs_drain_jobs(host: *mut c_void, err: *mut c_char, err_len: usize) -> i32;
     fn qjs_jobs_pending(host: *mut c_void) -> i32;
     fn qjs_tap_count(host: *mut c_void) -> i32;
     fn qjs_close(host: *mut c_void);
+    fn qjs_dispatch_back(host: *mut c_void, err: *mut c_char, err_len: usize) -> i32;
+    fn qjs_apply_settings(
+        host: *mut c_void,
+        locale: *const c_char,
+        locale_len: usize,
+        text_scale: f64,
+        dark: i32,
+        reduce_motion: i32,
+        bold_text: i32,
+        high_contrast: i32,
+        err: *mut c_char,
+        err_len: usize,
+    ) -> i32;
+    fn qjs_set_clock(host: *mut c_void, mono_ms: i64, paused: i32);
+    fn qjs_fire_timers(host: *mut c_void, err: *mut c_char, err_len: usize) -> i32;
+    fn qjs_fire_raf(host: *mut c_void, err: *mut c_char, err_len: usize) -> i32;
+    fn qjs_needs_frame(host: *mut c_void) -> i32;
+    fn qjs_next_deadline(host: *mut c_void) -> i64;
+    fn qjs_settle_json(
+        host: *mut c_void,
+        token: u64,
+        ok: i32,
+        text: *const c_char,
+        len: usize,
+    ) -> i32;
+    fn qjs_settle_http(
+        host: *mut c_void,
+        token: u64,
+        status: i32,
+        headers: *const c_char,
+        headers_len: usize,
+        body: *const u8,
+        body_len: usize,
+        error: *const c_char,
+    ) -> i32;
+    fn qjs_emit(
+        host: *mut c_void,
+        name: *const c_char,
+        event: *const c_char,
+        json: *const c_char,
+        len: usize,
+    ) -> i32;
+    fn qjs_socket_event(
+        host: *mut c_void,
+        id: u64,
+        event: *const c_char,
+        is_text: i32,
+        data: *const u8,
+        len: usize,
+    ) -> i32;
 }
 
 struct Inner {
     tree: RefCell<Tree>,
     host: *mut c_void,
     log: Box<dyn Fn(u8, &str)>,
-    ime_enabled: Cell<bool>,
-    ime_text: RefCell<Option<String>>,
+    ime: RefCell<ImeSlot>,
+    text_scale: Cell<f32>,
+    reduce_motion: Cell<bool>,
+    platform: RefCell<session::PlatformSettings>,
+    settings_frame: Cell<bool>,
+    /// Bytes from the latest `text_edit`. Stable until the next edit.
+    edit_bytes: RefCell<Vec<u8>>,
+    /// Copy or Cut text waiting for the platform clipboard.
+    clipboard: RefCell<Option<String>>,
+    /// Selection rectangles from the latest query, as packed `x,y,w,h` floats.
+    selection_rects: RefCell<Vec<f32>>,
+    io: RefCell<Option<Box<dyn Fn(IoJob) + Send>>>,
+    http: RefCell<Option<Arc<dyn session::HttpClient>>>,
+    launch_url: RefCell<Option<String>>,
+    app_state: RefCell<String>,
+    paused: Cell<bool>,
+    cancels: RefCell<HashMap<u64, Arc<AtomicBool>>>,
+    module_clipboard: RefCell<String>,
+    pending: RefCell<Pending>,
+    fonts: RefCell<FontBook>,
+    /// Sources passed to `reload` since the last [`Session::take_reloads`].
+    reloads: RefCell<Vec<String>>,
+}
+
+struct Pending {
+    http: Vec<(u64, Result<HttpResponse, HttpError>)>,
+    plugin: Vec<(u64, PluginResult)>,
+    socket: Vec<(u64, String, bool, Vec<u8>)>,
+}
+
+impl Pending {
+    fn new() -> Self {
+        Self {
+            http: Vec::new(),
+            plugin: Vec::new(),
+            socket: Vec::new(),
+        }
+    }
+}
+
+struct ImeSlot {
+    shown: bool,
+    announced: bool,
+    dirty: bool,
+    state: session::ImeState,
+}
+
+impl ImeSlot {
+    fn new() -> Self {
+        Self {
+            shown: false,
+            announced: false,
+            dirty: false,
+            state: session::ImeState::at_end(""),
+        }
+    }
+
+    fn take(&mut self) -> Option<session::ImeUpdate> {
+        if !self.dirty {
+            return None;
+        }
+        self.dirty = false;
+        if !self.shown {
+            self.announced = false;
+            return Some(session::ImeUpdate::Hide);
+        }
+        let state = self.state.clone();
+        if self.announced {
+            Some(session::ImeUpdate::Update(state))
+        } else {
+            self.announced = true;
+            Some(session::ImeUpdate::Show(state))
+        }
+    }
 }
 
 pub struct JsSession {
     inner: *mut Inner,
     last_frame: DrawList,
     script_error: RefCell<Option<String>>,
+    exit: Cell<bool>,
+    /// A failed frame must not schedule another frame by itself.
+    suppress_demand: Cell<bool>,
     _thread: PhantomData<Rc<()>>,
 }
 
@@ -154,12 +416,38 @@ impl JsSession {
         shaper: impl Shaper + 'static,
         log: Box<dyn Fn(u8, &str)>,
     ) -> Result<Self, Error> {
+        Self::open_with(script, name, shaper, log, None)
+    }
+
+    pub fn open_with(
+        script: &str,
+        name: &str,
+        shaper: impl Shaper + 'static,
+        log: Box<dyn Fn(u8, &str)>,
+        http: Option<Arc<dyn session::HttpClient>>,
+    ) -> Result<Self, Error> {
         let inner = Box::into_raw(Box::new(Inner {
             tree: RefCell::new(Tree::new(shaper)),
             host: ptr::null_mut(),
             log,
-            ime_enabled: Cell::new(false),
-            ime_text: RefCell::new(None),
+            ime: RefCell::new(ImeSlot::new()),
+            text_scale: Cell::new(1.0),
+            reduce_motion: Cell::new(false),
+            platform: RefCell::new(session::PlatformSettings::default()),
+            settings_frame: Cell::new(false),
+            edit_bytes: RefCell::new(Vec::new()),
+            clipboard: RefCell::new(None),
+            selection_rects: RefCell::new(Vec::new()),
+            io: RefCell::new(None),
+            http: RefCell::new(None),
+            launch_url: RefCell::new(None),
+            app_state: RefCell::new("unknown".to_owned()),
+            paused: Cell::new(false),
+            cancels: RefCell::new(HashMap::new()),
+            module_clipboard: RefCell::new(String::new()),
+            pending: RefCell::new(Pending::new()),
+            fonts: RefCell::new(FontBook::new()),
+            reloads: RefCell::new(Vec::new()),
         }));
         let fns = QjsFns {
             session: inner.cast(),
@@ -216,6 +504,10 @@ impl JsSession {
             blur: blur_node,
             set_ime_enabled,
             set_ime_text,
+            set_ime_state,
+            set_semantics,
+            text_scale,
+            reduce_motion,
             measure_text,
             grid,
             set_padding_edges,
@@ -225,6 +517,44 @@ impl JsSession {
             set_shrink,
             set_basis,
             set_align_self,
+            set_drag_claim,
+            caret_at,
+            word_range,
+            focus_step,
+            push_focus_scope,
+            pop_focus_scope,
+            pointer_position,
+            text_edit,
+            text_edit_bytes,
+            set_text_scale,
+            set_soft_wrap,
+            set_overflow,
+            caret_at_unit,
+            selection_rects,
+            selection_rect_bytes,
+            set_ime_config,
+            http: http_call,
+            abort_token,
+            module_has,
+            module_call,
+            socket_open,
+            socket_send,
+            socket_close,
+            focused: focused_id,
+            is_focusable,
+            grapheme_index: grapheme_index_of,
+            grapheme_count: grapheme_count_of,
+            grapheme_unit: grapheme_unit_of,
+            set_reverse,
+            set_axis_size,
+            set_aspect_ratio,
+            set_position,
+            set_inset,
+            set_grid_placement,
+            set_scale_xy,
+            register_font,
+            set_image_mode,
+            reload,
         };
         // SAFETY: `inner` stays at this address until `Drop`. `qjs_open` copies
         // the function table. The copied session pointer is only used while
@@ -237,8 +567,38 @@ impl JsSession {
         // SAFETY: `inner` is the allocation from `Box::into_raw` above, and `host`
         // is the pointer `qjs_open` just returned.
         unsafe { (*inner).host = host };
+        if let Some(client) = http {
+            unsafe { (*inner).http = RefCell::new(Some(client)) };
+        }
         let mut error = [0u8; 512];
-        let name = CString::new(name).map_err(|_| Error::Runtime)?;
+        let prelude_name = CString::new("prelude.js").map_err(|_| Error::Runtime)?;
+        let prelude_failed = unsafe {
+            qjs_eval(
+                host,
+                host::PRELUDE.as_ptr().cast(),
+                host::PRELUDE.len(),
+                prelude_name.as_ptr(),
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        };
+        if prelude_failed != 0 {
+            let message = c_message(&error);
+            unsafe { qjs_close(host) };
+            unsafe { (*inner).host = ptr::null_mut() };
+            unsafe { drop(Box::from_raw(inner)) };
+            return Err(Error::Script(message));
+        }
+        error = [0u8; 512];
+        let name = match CString::new(name) {
+            Ok(name) => name,
+            Err(_) => {
+                unsafe { qjs_close(host) };
+                unsafe { (*inner).host = ptr::null_mut() };
+                unsafe { drop(Box::from_raw(inner)) };
+                return Err(Error::Runtime);
+            }
+        };
         // SAFETY: `script` is borrowed for the call. `name` is NUL-terminated and
         // lives until `qjs_eval` returns. `error` is a writable buffer of the length we pass.
         let failed = unsafe {
@@ -264,8 +624,16 @@ impl JsSession {
                 commands: Vec::new(),
             },
             script_error: RefCell::new(None),
+            exit: Cell::new(false),
+            suppress_demand: Cell::new(false),
             _thread: PhantomData,
         })
+    }
+
+    fn hold_frame(&mut self, message: String) -> DrawList {
+        self.note_script_error(message);
+        self.suppress_demand.set(true);
+        self.last_frame.clone()
     }
 
     pub fn take_script_error(&self) -> Option<String> {
@@ -335,79 +703,311 @@ impl Session for JsSession {
         // SAFETY: `inner` is owned by this session. The tree borrow ends before
         // the callback, which may re-enter the tree.
         let inner = unsafe { &*self.inner };
+        let escape = matches!(event, InputEvent::Key(press) if press.key == Key::Escape);
+        if matches!(event, InputEvent::Back) || escape {
+            let mut error = [0u8; 512];
+            let handled =
+                unsafe { qjs_dispatch_back(inner.host, error.as_mut_ptr().cast(), error.len()) };
+            if handled < 0 {
+                self.note_script_error(c_message(&error));
+            } else if handled == 0 && !escape {
+                self.exit.set(true);
+            }
+            return;
+        }
+        if let InputEvent::Key(press) = &event
+            && press.key == Key::Tab
+        {
+            let direction = if press.shift {
+                FocusDirection::Previous
+            } else {
+                FocusDirection::Next
+            };
+            let gestures = inner.tree.borrow_mut().focus_step(direction);
+            if let Err(message) = dispatch_gestures(inner, gestures) {
+                self.note_script_error(message);
+            }
+            return;
+        }
         let Some(id) = inner.tree.borrow().focused() else {
             return;
         };
         let (kind, text) = match event {
-            InputEvent::Key(key) => (8, Some(key_name(key).to_string())),
-            InputEvent::Text(text) => (9, Some(text)),
+            InputEvent::Key(press) => (8, Some(key_name(press))),
+            InputEvent::Text(text) | InputEvent::Paste(text) => (9, Some(text)),
             InputEvent::Composing(text) => (10, text),
+            InputEvent::Copy => (8, Some("Copy".to_string())),
+            InputEvent::Cut => (8, Some("Cut".to_string())),
+            InputEvent::SelectAll => (8, Some("SelectAll".to_string())),
+            InputEvent::Back => return,
         };
         if let Err(message) = dispatch_input(inner, id, kind, text.as_deref()) {
             self.note_script_error(message);
         }
     }
 
-    fn wants_ime(&self) -> bool {
-        // SAFETY: `inner` is owned by this session. The flag is a `Cell`.
+    fn take_ime(&mut self) -> Option<session::ImeUpdate> {
         let inner = unsafe { &*self.inner };
-        inner.ime_enabled.get()
+        inner.ime.borrow_mut().take()
     }
 
-    fn take_ime_text(&mut self) -> Option<String> {
-        // SAFETY: `inner` is owned by this session.
+    fn settings(&mut self, settings: &session::PlatformSettings) {
         let inner = unsafe { &*self.inner };
-        inner.ime_text.borrow_mut().take()
+        let previous = inner.platform.borrow().clone();
+        let changed = previous != *settings;
+        let scale_changed = (previous.text_scale - settings.text_scale).abs() > f32::EPSILON;
+        inner.text_scale.set(settings.text_scale);
+        inner.reduce_motion.set(settings.reduce_motion);
+        *inner.platform.borrow_mut() = settings.clone();
+        if scale_changed {
+            let _ = inner.tree.borrow_mut().set_text_scale(settings.text_scale);
+        }
+        if !changed {
+            return;
+        }
+        inner.settings_frame.set(true);
+        if inner.host.is_null() {
+            return;
+        }
+        let mut error = [0u8; 512];
+        let dark = i32::from(settings.brightness == session::Brightness::Dark);
+        let failed = unsafe {
+            qjs_apply_settings(
+                inner.host,
+                settings.locale.as_ptr().cast(),
+                settings.locale.len(),
+                f64::from(settings.text_scale),
+                dark,
+                i32::from(settings.reduce_motion),
+                i32::from(settings.bold_text),
+                i32::from(settings.high_contrast),
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        };
+        if failed < 0 {
+            self.note_script_error(c_message(&error));
+        }
+    }
+
+    fn image_source_counts(&mut self) -> Option<HashMap<Arc<str>, u32>> {
+        let inner = unsafe { &*self.inner };
+        Some(inner.tree.borrow().image_source_counts())
+    }
+
+    fn semantics_action(&mut self, action: ui_core::SemanticsAction) {
+        let inner = unsafe { &*self.inner };
+        let gestures = inner.tree.borrow_mut().semantics_action(action);
+        if let Err(message) = dispatch_gestures(inner, gestures) {
+            self.note_script_error(message);
+        }
+    }
+
+    fn take_fonts(&mut self) -> Vec<(String, Vec<u8>)> {
+        let inner = unsafe { &*self.inner };
+        inner.fonts.borrow_mut().take()
+    }
+
+    fn take_reloads(&mut self) -> Vec<String> {
+        let inner = unsafe { &*self.inner };
+        std::mem::take(&mut *inner.reloads.borrow_mut())
+    }
+
+    fn take_exit(&mut self) -> bool {
+        self.exit.replace(false)
+    }
+
+    fn take_clipboard(&mut self) -> Option<String> {
+        let inner = unsafe { &*self.inner };
+        inner.clipboard.borrow_mut().take()
     }
 
     fn ime_dismissed(&mut self) {
-        // SAFETY: `inner` is owned by this session. Blur runs before the callback.
+        // SAFETY: `inner` is owned by this session. The ime borrow ends before
+        // blur, because the blur callback calls `setImeState` on the same cell.
         let inner = unsafe { &*self.inner };
-        inner.ime_enabled.set(false);
+        {
+            let mut ime = inner.ime.borrow_mut();
+            ime.shown = false;
+            ime.dirty = true;
+        }
         let gestures = inner.tree.borrow_mut().blur();
         if let Err(message) = dispatch_gestures(inner, gestures) {
             self.note_script_error(message);
         }
     }
 
-    fn frame(&mut self, time_ms: f64) -> DrawList {
+    fn semantics(&mut self) -> Option<ui_core::SemanticsUpdate> {
+        let inner = unsafe { &*self.inner };
+        inner.tree.borrow().semantics()
+    }
+
+    fn frame(&mut self, time: session::FrameTime) -> DrawList {
         // SAFETY: `inner` is owned by this session. Job drain and `qjs_frame` may
         // re-enter the tree through the `RefCell`; this function does not hold that borrow yet.
         let inner = unsafe { &*self.inner };
-        if let Err(message) = drain_jobs(inner.host) {
-            self.note_script_error(message);
-            return self.last_frame.clone();
+        {
+            let mut tree = inner.tree.borrow_mut();
+            if inner.reduce_motion.get() {
+                tree.clear_fling();
+            } else {
+                let dt = if time.interval_ms > 0.0 {
+                    time.interval_ms
+                } else {
+                    16.0
+                };
+                tree.tick_fling(dt);
+            }
+            let notices = tree.take_scroll_notices();
+            drop(tree);
+            if let Err(message) = dispatch_gestures(inner, notices) {
+                return self.hold_frame(message);
+            }
         }
+        if let Err(message) = drain_jobs(inner.host) {
+            return self.hold_frame(message);
+        }
+        let paused = self_paused(inner);
+        unsafe { qjs_set_clock(inner.host, time.mono_ms as i64, i32::from(paused)) };
+        flush_pending(inner);
         let mut error = [0u8; 512];
-        let failed =
-            unsafe { qjs_frame(inner.host, time_ms, error.as_mut_ptr().cast(), error.len()) };
-        if failed != 0 {
+        let timer_failed =
+            unsafe { qjs_fire_timers(inner.host, error.as_mut_ptr().cast(), error.len()) };
+        if timer_failed != 0 {
             self.note_script_error(c_message(&error));
-            return self.last_frame.clone();
         }
         if let Err(message) = drain_jobs(inner.host) {
-            self.note_script_error(message);
-            return self.last_frame.clone();
+            return self.hold_frame(message);
+        }
+        error = [0u8; 512];
+        let raf_failed =
+            unsafe { qjs_fire_raf(inner.host, error.as_mut_ptr().cast(), error.len()) };
+        if raf_failed != 0 {
+            self.note_script_error(c_message(&error));
+        }
+        if let Err(message) = drain_jobs(inner.host) {
+            return self.hold_frame(message);
+        }
+        error = [0u8; 512];
+        let failed = unsafe {
+            qjs_frame(
+                inner.host,
+                time.target_ms,
+                time.interval_ms,
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        };
+        if failed != 0 {
+            return self.hold_frame(c_message(&error));
+        }
+        if let Err(message) = drain_jobs(inner.host) {
+            return self.hold_frame(message);
         }
         let mut tree = inner.tree.borrow_mut();
-        if tree.is_dirty() {
+        if tree.needs_layout() {
             if let Err(error) = tree.layout() {
                 let message = error.to_string();
                 drop(tree);
-                self.note_script_error(message);
-                return self.last_frame.clone();
+                return self.hold_frame(message);
             }
-            self.last_frame = tree.record().unwrap_or(DrawList {
-                commands: Vec::new(),
-            });
         }
+        if tree.needs_paint() {
+            let mut commands = std::mem::take(&mut self.last_frame.commands);
+            if tree.record_into(&mut commands).is_err() {
+                commands.clear();
+            }
+            self.last_frame.commands = commands;
+            tree.clear_paint();
+        }
+        drop(tree);
         self.last_frame.clone()
     }
 
     fn wants_frame(&mut self) -> bool {
         // SAFETY: `inner` is owned by this session. The call reads and clears one flag.
         let inner = unsafe { &*self.inner };
-        unsafe { qjs_take_wants_frame(inner.host) != 0 }
+        if self.suppress_demand.replace(false) {
+            inner.settings_frame.set(false);
+            let _ = unsafe { qjs_take_wants_frame(inner.host) };
+            return false;
+        }
+        let visual = {
+            let tree = inner.tree.borrow();
+            tree.needs_layout() || tree.needs_paint() || tree.fling_active()
+        };
+        let jobs = unsafe { qjs_jobs_pending(inner.host) != 0 };
+        let soon = unsafe { qjs_needs_frame(inner.host) != 0 };
+        let explicit =
+            inner.settings_frame.take() || unsafe { qjs_take_wants_frame(inner.host) != 0 };
+        explicit || visual || jobs || soon
+    }
+
+    fn lifecycle(&mut self, event: session::Lifecycle) {
+        let inner = unsafe { &*self.inner };
+        let paused = matches!(
+            event,
+            session::Lifecycle::Hidden | session::Lifecycle::Paused
+        );
+        inner.paused.set(paused);
+        let name = match event {
+            session::Lifecycle::Resumed => "resumed",
+            session::Lifecycle::Inactive => "inactive",
+            session::Lifecycle::Hidden => "hidden",
+            session::Lifecycle::Paused => "paused",
+            session::Lifecycle::Detached => "detached",
+        };
+        let state = host::app_state(name);
+        *inner.app_state.borrow_mut() = state.to_owned();
+        emit_state(inner, state);
+    }
+
+    fn window_focus(&mut self, focused: bool) {
+        let inner = unsafe { &*self.inner };
+        emit_json(
+            inner,
+            "AppState",
+            "focus",
+            if focused { "true" } else { "false" },
+        );
+    }
+
+    fn bind_io(&mut self, submit: Box<dyn Fn(IoJob) + Send>) {
+        let inner = unsafe { &*self.inner };
+        *inner.io.borrow_mut() = Some(submit);
+    }
+
+    fn plugin_result(&mut self, token: u64, result: PluginResult) {
+        let inner = unsafe { &*self.inner };
+        settle_plugin(inner, token, &result);
+    }
+
+    fn http_result(&mut self, token: u64, result: Result<HttpResponse, HttpError>) {
+        let inner = unsafe { &*self.inner };
+        settle_http(inner, token, &result);
+    }
+
+    fn socket_event(&mut self, id: u64, event: &str, text: bool, data: &[u8]) {
+        let inner = unsafe { &*self.inner };
+        deliver_socket(inner, id, event, text, data);
+    }
+
+    fn next_wake_ms(&mut self) -> Option<f64> {
+        let inner = unsafe { &*self.inner };
+        if inner.paused.get() {
+            return None;
+        }
+        let deadline = unsafe { qjs_next_deadline(inner.host) };
+        if deadline < 0 {
+            None
+        } else {
+            Some(deadline as f64)
+        }
+    }
+
+    fn set_launch_url(&mut self, url: &str) {
+        let inner = unsafe { &*self.inner };
+        *inner.launch_url.borrow_mut() = Some(url.to_owned());
     }
 }
 
@@ -919,6 +1519,226 @@ unsafe extern "C" fn set_scroll_offset(session: *mut c_void, node: u64, dx: f32,
     )
 }
 
+unsafe extern "C" fn text_edit(
+    session: *mut c_void,
+    node: u64,
+    op: i32,
+    utf8: *const c_char,
+    len: usize,
+    sel_start: *mut u32,
+    sel_end: *mut u32,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    if sel_start.is_null() || sel_end.is_null() {
+        return -1;
+    }
+    let extra = if utf8.is_null() {
+        String::new()
+    } else {
+        let Some(text) = (unsafe { utf8_of(utf8, len) }) else {
+            return -1;
+        };
+        text.to_owned()
+    };
+    let edit = match op {
+        0 => ui_core::Edit::Load(extra),
+        1 => ui_core::Edit::Left,
+        2 => ui_core::Edit::Right,
+        3 => ui_core::Edit::Backspace,
+        4 => ui_core::Edit::Insert(extra),
+        5 => ui_core::Edit::Composing(if extra.is_empty() { None } else { Some(extra) }),
+        6 => ui_core::Edit::Paste(extra),
+        7 => ui_core::Edit::Undo,
+        8 => ui_core::Edit::Redo,
+        9 => ui_core::Edit::SelectAll,
+        10 => ui_core::Edit::Copy,
+        11 => ui_core::Edit::Cut,
+        12 => ui_core::Edit::SetCaret(extra.parse::<u32>().unwrap_or(0)),
+        13 => ui_core::Edit::ForwardDelete,
+        14 => ui_core::Edit::Newline,
+        15 => ui_core::Edit::WordLeft,
+        16 => ui_core::Edit::WordRight,
+        17 => ui_core::Edit::LineStart,
+        18 => ui_core::Edit::LineEnd,
+        19 => ui_core::Edit::ExtendLeft,
+        20 => ui_core::Edit::ExtendRight,
+        21 => ui_core::Edit::ExtendWordLeft,
+        22 => ui_core::Edit::ExtendWordRight,
+        23 => ui_core::Edit::ExtendLineStart,
+        24 => ui_core::Edit::ExtendLineEnd,
+        25 => ui_core::Edit::Up,
+        26 => ui_core::Edit::Down,
+        27 => ui_core::Edit::ExtendUp,
+        28 => ui_core::Edit::ExtendDown,
+        29 => ui_core::Edit::ExtendCaret(extra.parse::<u32>().unwrap_or(0)),
+        30 => ui_core::Edit::DeleteWordBackward,
+        31 => ui_core::Edit::DeleteWordForward,
+        32 => ui_core::Edit::DeleteToLineStart,
+        33 => ui_core::Edit::DeleteToLineEnd,
+        34 => ui_core::Edit::DocumentStart,
+        35 => ui_core::Edit::DocumentEnd,
+        36 => ui_core::Edit::ExtendDocumentStart,
+        37 => ui_core::Edit::ExtendDocumentEnd,
+        _ => return -1,
+    };
+    let Ok(value) = inner
+        .tree
+        .borrow_mut()
+        .text_edit(NodeId::from_raw(node), edit)
+    else {
+        return -1;
+    };
+    let start = value.selection.base;
+    let end = value.selection.extent;
+    *inner.edit_bytes.borrow_mut() = value.text.into_bytes();
+    if matches!(op, 10 | 11) {
+        *inner.clipboard.borrow_mut() = inner
+            .tree
+            .borrow()
+            .text_clipboard(NodeId::from_raw(node))
+            .ok()
+            .flatten();
+    }
+    unsafe {
+        *sel_start = start;
+        *sel_end = end;
+    }
+    0
+}
+
+unsafe extern "C" fn set_soft_wrap(session: *mut c_void, node: u64, wrap: i32) -> i32 {
+    let inner = unsafe { inner(session) };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_soft_wrap(NodeId::from_raw(node), wrap != 0),
+    )
+}
+
+unsafe extern "C" fn set_overflow(session: *mut c_void, node: u64, overflow: i32) -> i32 {
+    let inner = unsafe { inner(session) };
+    let overflow = match overflow {
+        1 => protocol::TextOverflow::Ellipsis,
+        2 => protocol::TextOverflow::Visible,
+        _ => protocol::TextOverflow::Clip,
+    };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_overflow(NodeId::from_raw(node), overflow),
+    )
+}
+
+unsafe extern "C" fn caret_at_unit(
+    session: *mut c_void,
+    node: u64,
+    unit: u32,
+    x: *mut f32,
+    y: *mut f32,
+    w: *mut f32,
+    h: *mut f32,
+) -> i32 {
+    if x.is_null() || y.is_null() || w.is_null() || h.is_null() {
+        return -1;
+    }
+    let inner = unsafe { inner(session) };
+    match inner
+        .tree
+        .borrow()
+        .caret_at_unit(NodeId::from_raw(node), unit)
+    {
+        Ok(caret) => {
+            unsafe {
+                *x = caret.x;
+                *y = caret.y;
+                *w = caret.w;
+                *h = caret.h;
+            }
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+unsafe extern "C" fn selection_rects(session: *mut c_void, node: u64, start: u32, end: u32) -> i32 {
+    let inner = unsafe { inner(session) };
+    let Ok(rects) = inner
+        .tree
+        .borrow()
+        .selection_rects(NodeId::from_raw(node), start, end)
+    else {
+        return -1;
+    };
+    let mut packed = Vec::with_capacity(rects.len() * 4);
+    for rect in rects {
+        packed.extend([rect.x, rect.y, rect.w, rect.h]);
+    }
+    let count = i32::try_from(packed.len() / 4).unwrap_or(0);
+    *inner.selection_rects.borrow_mut() = packed;
+    count
+}
+
+unsafe extern "C" fn selection_rect_bytes(session: *mut c_void, out_len: *mut usize) -> *const u8 {
+    let inner = unsafe { inner(session) };
+    let bytes = inner.selection_rects.borrow();
+    if !out_len.is_null() {
+        unsafe { *out_len = bytes.len() * 4 };
+    }
+    if bytes.is_empty() {
+        b"\0".as_ptr()
+    } else {
+        bytes.as_ptr().cast()
+    }
+}
+
+unsafe extern "C" fn set_ime_config(session: *mut c_void, keyboard: i32, action: i32) -> i32 {
+    let inner = unsafe { inner(session) };
+    let mut ime = inner.ime.borrow_mut();
+    ime.state.keyboard = match keyboard {
+        1 => session::KeyboardType::Multiline,
+        2 => session::KeyboardType::Number,
+        3 => session::KeyboardType::Phone,
+        4 => session::KeyboardType::Email,
+        5 => session::KeyboardType::Url,
+        6 => session::KeyboardType::Name,
+        7 => session::KeyboardType::Password,
+        _ => session::KeyboardType::Text,
+    };
+    ime.state.action = match action {
+        1 => session::TextInputAction::Done,
+        2 => session::TextInputAction::Next,
+        3 => session::TextInputAction::Search,
+        4 => session::TextInputAction::Go,
+        5 => session::TextInputAction::Send,
+        6 => session::TextInputAction::Previous,
+        7 => session::TextInputAction::Newline,
+        _ => session::TextInputAction::None,
+    };
+    ime.dirty = true;
+    0
+}
+
+unsafe extern "C" fn set_text_scale(session: *mut c_void, scale: f32) -> i32 {
+    let inner = unsafe { inner(session) };
+    inner.text_scale.set(scale);
+    status(inner.tree.borrow_mut().set_text_scale(scale))
+}
+
+unsafe extern "C" fn text_edit_bytes(session: *mut c_void, out_len: *mut usize) -> *const u8 {
+    let inner = unsafe { inner(session) };
+    let bytes = inner.edit_bytes.borrow();
+    if !out_len.is_null() {
+        unsafe { *out_len = bytes.len() };
+    }
+    if bytes.is_empty() {
+        b"\0".as_ptr()
+    } else {
+        bytes.as_ptr()
+    }
+}
+
 unsafe extern "C" fn scroll_offset(
     session: *mut c_void,
     node: u64,
@@ -1216,31 +2036,74 @@ fn gesture_parts(gesture: ui_core::Gesture) -> (NodeId, i32, f64, f64) {
         ui_core::Gesture::Leave(id) => (id, 12, 0.0, 0.0),
         ui_core::Gesture::Wheel(id, dx, dy) => (id, 13, f64::from(dx), f64::from(dy)),
         ui_core::Gesture::SecondaryClick(id) => (id, 14, 0.0, 0.0),
+        ui_core::Gesture::Scroll(id, x, y) => (id, 15, f64::from(x), f64::from(y)),
+        ui_core::Gesture::TextReplaced(id) => (id, 16, 0.0, 0.0),
+        ui_core::Gesture::ActivateLink { id, link } => (id, 17, f64::from(link), 0.0),
     }
 }
 
 fn dispatch_gestures(inner: &Inner, gestures: Vec<ui_core::Gesture>) -> Result<(), String> {
     for gesture in gestures {
-        let mut error = [0u8; 512];
-        let (id, kind, a, b) = gesture_parts(gesture);
-        // SAFETY: `error` is writable for the length we pass. `host` is this session's
-        // interpreter. `kind` selects one callback. Drag kinds read `a` and `b`.
-        let failed = unsafe {
-            qjs_dispatch(
-                inner.host,
-                id.to_raw(),
-                kind,
-                a,
-                b,
-                error.as_mut_ptr().cast(),
-                error.len(),
-            )
-        };
-        if failed != 0 {
-            return Err(c_message(&error));
+        match gesture {
+            ui_core::Gesture::TextReplaced(id) => {
+                let text = inner.tree.borrow().editor_text(id).unwrap_or_default();
+                dispatch_text(inner, id, &text)?;
+                continue;
+            }
+            ui_core::Gesture::ActivateLink { id, link } => {
+                dispatch_kind(inner, id, 17, f64::from(link), 0.0)?;
+                continue;
+            }
+            other => {
+                let (id, kind, a, b) = gesture_parts(other);
+                dispatch_kind(inner, id, kind, a, b)?;
+            }
         }
     }
     Ok(())
+}
+
+fn dispatch_kind(inner: &Inner, id: NodeId, kind: i32, a: f64, b: f64) -> Result<(), String> {
+    let mut error = [0u8; 512];
+    // SAFETY: `error` is writable for the length we pass. `host` is this session's
+    // interpreter. `kind` selects one callback. Drag kinds read `a` and `b`.
+    let failed = unsafe {
+        qjs_dispatch(
+            inner.host,
+            id.to_raw(),
+            kind,
+            a,
+            b,
+            error.as_mut_ptr().cast(),
+            error.len(),
+        )
+    };
+    if failed != 0 {
+        Err(c_message(&error))
+    } else {
+        Ok(())
+    }
+}
+
+fn dispatch_text(inner: &Inner, id: NodeId, text: &str) -> Result<(), String> {
+    let mut error = [0u8; 512];
+    // SAFETY: `text` lives until this call returns. The interpreter copies it
+    // into a JS string before the callback runs.
+    let failed = unsafe {
+        qjs_dispatch_text(
+            inner.host,
+            id.to_raw(),
+            text.as_ptr().cast(),
+            text.len(),
+            error.as_mut_ptr().cast(),
+            error.len(),
+        )
+    };
+    if failed == 0 {
+        Ok(())
+    } else {
+        Err(c_message(&error))
+    }
 }
 
 fn dispatch_input(inner: &Inner, id: NodeId, kind: i32, text: Option<&str>) -> Result<(), String> {
@@ -1271,21 +2134,153 @@ fn dispatch_input(inner: &Inner, id: NodeId, kind: i32, text: Option<&str>) -> R
     }
 }
 
-fn key_name(key: Key) -> &'static str {
-    match key {
+fn key_name(press: session::KeyPress) -> String {
+    let name = match press.key {
         Key::Backspace => "Backspace",
+        Key::Delete => "Delete",
         Key::Enter => "Enter",
         Key::Tab => "Tab",
+        Key::Escape => "Escape",
         Key::Left => "Left",
         Key::Right => "Right",
         Key::Up => "Up",
         Key::Down => "Down",
+        Key::Home => "Home",
+        Key::End => "End",
+        Key::WordLeft => "WordLeft",
+        Key::WordRight => "WordRight",
+        Key::DocumentStart => "DocumentStart",
+        Key::DocumentEnd => "DocumentEnd",
+        Key::DeleteWord => "DeleteWord",
+        Key::DeleteWordForward => "DeleteWordForward",
+        Key::DeleteToLineStart => "DeleteToLineStart",
+        Key::DeleteToLineEnd => "DeleteToLineEnd",
+    };
+    if press.shift {
+        format!("Shift+{name}")
+    } else {
+        name.to_owned()
     }
 }
 
 unsafe extern "C" fn sized(session: *mut c_void, width: f32, height: f32, out: *mut u64) -> i32 {
     let inner = unsafe { inner(session) };
     created(inner.tree.borrow_mut().sized(width, height), out)
+}
+
+unsafe extern "C" fn set_drag_claim(session: *mut c_void, node: u64, claim: i32) -> i32 {
+    let inner = unsafe { inner(session) };
+    let claim = match claim {
+        1 => DragClaim::Horizontal,
+        2 => DragClaim::Free,
+        _ => DragClaim::None,
+    };
+    match inner
+        .tree
+        .borrow_mut()
+        .set_drag_claim(NodeId::from_raw(node), claim)
+    {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+unsafe extern "C" fn caret_at(
+    session: *mut c_void,
+    node: u64,
+    x: f32,
+    y: f32,
+    unit: *mut u32,
+    out_x: *mut f32,
+    out_y: *mut f32,
+    out_w: *mut f32,
+    out_h: *mut f32,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    match inner.tree.borrow().caret_at(NodeId::from_raw(node), x, y) {
+        Ok(caret) => {
+            // SAFETY: the pointers are local out-params from `js_caret_at`.
+            unsafe {
+                *unit = caret.unit;
+                *out_x = caret.x;
+                *out_y = caret.y;
+                *out_w = caret.w;
+                *out_h = caret.h;
+            }
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+unsafe extern "C" fn word_range(
+    session: *mut c_void,
+    node: u64,
+    unit: u32,
+    start: *mut u32,
+    end: *mut u32,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    match inner.tree.borrow().word_range(NodeId::from_raw(node), unit) {
+        Ok((word_start, word_end)) => {
+            unsafe {
+                *start = word_start;
+                *end = word_end;
+            }
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+unsafe extern "C" fn focus_step(session: *mut c_void, direction: i32) -> i32 {
+    let inner = unsafe { inner(session) };
+    let direction = match direction {
+        0 => FocusDirection::Next,
+        1 => FocusDirection::Previous,
+        2 => FocusDirection::Left,
+        3 => FocusDirection::Right,
+        4 => FocusDirection::Up,
+        5 => FocusDirection::Down,
+        _ => return -1,
+    };
+    let gestures = inner.tree.borrow_mut().focus_step(direction);
+    if dispatch_gestures(inner, gestures).is_err() {
+        return -1;
+    }
+    0
+}
+
+unsafe extern "C" fn push_focus_scope(session: *mut c_void, node: u64) -> i32 {
+    let inner = unsafe { inner(session) };
+    let gestures = match inner
+        .tree
+        .borrow_mut()
+        .push_focus_scope(NodeId::from_raw(node))
+    {
+        Ok(gestures) => gestures,
+        Err(_) => return -1,
+    };
+    if dispatch_gestures(inner, gestures).is_err() {
+        return -1;
+    }
+    0
+}
+
+unsafe extern "C" fn pop_focus_scope(session: *mut c_void) -> i32 {
+    let inner = unsafe { inner(session) };
+    inner.tree.borrow_mut().pop_focus_scope();
+    0
+}
+
+unsafe extern "C" fn pointer_position(session: *mut c_void, x: *mut f32, y: *mut f32) -> i32 {
+    let inner = unsafe { inner(session) };
+    let (px, py) = inner.tree.borrow().pointer_position();
+    unsafe {
+        *x = px;
+        *y = py;
+    }
+    0
 }
 
 unsafe extern "C" fn set_focusable(session: *mut c_void, node: u64, enabled: i32) -> i32 {
@@ -1316,6 +2311,338 @@ unsafe extern "C" fn focus_node(session: *mut c_void, node: u64) -> i32 {
     0
 }
 
+unsafe extern "C" fn focused_id(session: *mut c_void) -> u64 {
+    let inner = unsafe { inner(session) };
+    inner
+        .tree
+        .borrow()
+        .focused()
+        .map(NodeId::to_raw)
+        .unwrap_or(0)
+}
+
+unsafe extern "C" fn is_focusable(session: *mut c_void, node: u64) -> i32 {
+    let inner = unsafe { inner(session) };
+    match inner.tree.borrow().is_focusable(NodeId::from_raw(node)) {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(_) => -1,
+    }
+}
+
+unsafe extern "C" fn grapheme_index_of(utf8: *const c_char, len: usize, unit: u32) -> u32 {
+    let text = unsafe { utf8_of(utf8, len) }.unwrap_or("");
+    ui_core::grapheme_index(text, unit)
+}
+
+unsafe extern "C" fn grapheme_count_of(utf8: *const c_char, len: usize) -> u32 {
+    let text = unsafe { utf8_of(utf8, len) }.unwrap_or("");
+    ui_core::grapheme_count(text)
+}
+
+unsafe extern "C" fn grapheme_unit_of(utf8: *const c_char, len: usize, index: u32) -> u32 {
+    let text = unsafe { utf8_of(utf8, len) }.unwrap_or("");
+    ui_core::grapheme_unit(text, index)
+}
+
+unsafe extern "C" fn set_reverse(session: *mut c_void, node: u64, reverse: i32) -> i32 {
+    let inner = unsafe { inner(session) };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_reverse(NodeId::from_raw(node), reverse != 0),
+    )
+}
+
+unsafe extern "C" fn set_scale_xy(
+    session: *mut c_void,
+    node: u64,
+    scale_x: f32,
+    scale_y: f32,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_scale_xy(NodeId::from_raw(node), scale_x, scale_y),
+    )
+}
+
+unsafe extern "C" fn register_font(
+    session: *mut c_void,
+    utf8: *const c_char,
+    len: usize,
+    bytes: *const u8,
+    byte_len: usize,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    let Some(family) = (unsafe { utf8_of(utf8, len) }) else {
+        return -1;
+    };
+    if byte_len > 0 && bytes.is_null() {
+        return -1;
+    }
+    let data = if byte_len == 0 {
+        Vec::new()
+    } else {
+        // SAFETY: `bytes` points at `byte_len` initialized octets for this call.
+        unsafe { std::slice::from_raw_parts(bytes, byte_len) }.to_vec()
+    };
+    if inner
+        .fonts
+        .borrow_mut()
+        .enqueue(family.to_owned(), data)
+        .is_err()
+    {
+        return -1;
+    }
+    0
+}
+
+unsafe extern "C" fn reload(session: *mut c_void, utf8: *const c_char, len: usize) -> i32 {
+    let inner = unsafe { inner(session) };
+    let Some(source) = (unsafe { utf8_of(utf8, len) }) else {
+        return -1;
+    };
+    if source.is_empty() {
+        return -1;
+    }
+    inner.reloads.borrow_mut().push(source.to_owned());
+    0
+}
+
+unsafe extern "C" fn set_image_mode(
+    session: *mut c_void,
+    node: u64,
+    mode: i32,
+    required: i32,
+) -> i32 {
+    let mode = match mode {
+        0 => protocol::ContentMode::Fill,
+        1 => protocol::ContentMode::Fit,
+        2 => protocol::ContentMode::Crop,
+        _ => return -1,
+    };
+    if required != 0 && required != 1 {
+        return -1;
+    }
+    let inner = unsafe { inner(session) };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_image_mode(NodeId::from_raw(node), mode, required != 0),
+    )
+}
+
+const FONT_LIMIT: usize = 8;
+const FONT_BYTE_LIMIT: usize = 4 * 1024 * 1024;
+
+struct FontBook {
+    queued: Vec<(String, Vec<u8>)>,
+    handed: HashSet<String>,
+}
+
+impl FontBook {
+    fn new() -> Self {
+        Self {
+            queued: Vec::new(),
+            handed: HashSet::new(),
+        }
+    }
+
+    /// Queues one face. The same family replaces bytes and does not take another slot.
+    /// `UIFWSans` and `UIFWSansCJK` do not count toward the eight-name cap.
+    fn enqueue(&mut self, family: String, bytes: Vec<u8>) -> Result<(), ()> {
+        if family.is_empty() || bytes.len() > FONT_BYTE_LIMIT {
+            return Err(());
+        }
+        if let Some(slot) = self.queued.iter_mut().find(|(name, _)| name == &family) {
+            slot.1 = bytes;
+            return Ok(());
+        }
+        let seen = self.handed.contains(&family);
+        if !seen && !startup_font(&family) && self.occupied() >= FONT_LIMIT {
+            return Err(());
+        }
+        self.queued.push((family, bytes));
+        Ok(())
+    }
+
+    fn take(&mut self) -> Vec<(String, Vec<u8>)> {
+        let taken = std::mem::take(&mut self.queued);
+        for (name, _) in &taken {
+            self.handed.insert(name.clone());
+        }
+        taken
+    }
+
+    fn occupied(&self) -> usize {
+        self.handed
+            .iter()
+            .filter(|name| !startup_font(name))
+            .count()
+            + self
+                .queued
+                .iter()
+                .filter(|(name, _)| !startup_font(name))
+                .count()
+    }
+}
+
+fn startup_font(name: &str) -> bool {
+    name == "UIFWSans" || name == "UIFWSansCJK"
+}
+
+fn axis_from_tag(tag: i32, value: f32) -> Result<AxisSize, ui_core::Error> {
+    match tag {
+        0 => Ok(AxisSize::Auto),
+        1 => Ok(AxisSize::Points(value)),
+        2 => Ok(AxisSize::Fraction(value)),
+        _ => Err(ui_core::Error::BadNumber),
+    }
+}
+
+fn inset_from_tag(is_auto: i32, value: f32) -> Option<f32> {
+    if is_auto == 0 { Some(value) } else { None }
+}
+
+fn grid_from_tag(tag: i32, value: i32) -> Result<GridLine, ui_core::Error> {
+    match tag {
+        0 => Ok(GridLine::Auto),
+        1 => {
+            let index = i16::try_from(value).map_err(|_| ui_core::Error::BadNumber)?;
+            if index == 0 {
+                return Err(ui_core::Error::BadNumber);
+            }
+            Ok(GridLine::Line(index))
+        }
+        2 => {
+            let count = u16::try_from(value).map_err(|_| ui_core::Error::BadNumber)?;
+            if count == 0 {
+                return Err(ui_core::Error::BadNumber);
+            }
+            Ok(GridLine::Span(count))
+        }
+        _ => Err(ui_core::Error::BadNumber),
+    }
+}
+
+unsafe extern "C" fn set_axis_size(
+    session: *mut c_void,
+    node: u64,
+    width_tag: i32,
+    width: f32,
+    height_tag: i32,
+    height: f32,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    let width = match axis_from_tag(width_tag, width) {
+        Ok(size) => size,
+        Err(_) => return -1,
+    };
+    let height = match axis_from_tag(height_tag, height) {
+        Ok(size) => size,
+        Err(_) => return -1,
+    };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_axis_size(NodeId::from_raw(node), width, height),
+    )
+}
+
+unsafe extern "C" fn set_aspect_ratio(
+    session: *mut c_void,
+    node: u64,
+    present: i32,
+    ratio: f32,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    let ratio = if present == 0 { None } else { Some(ratio) };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_aspect_ratio(NodeId::from_raw(node), ratio),
+    )
+}
+
+unsafe extern "C" fn set_position(session: *mut c_void, node: u64, absolute: i32) -> i32 {
+    let inner = unsafe { inner(session) };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_position(NodeId::from_raw(node), absolute != 0),
+    )
+}
+
+unsafe extern "C" fn set_inset(
+    session: *mut c_void,
+    node: u64,
+    top_auto: i32,
+    top: f32,
+    right_auto: i32,
+    right: f32,
+    bottom_auto: i32,
+    bottom: f32,
+    left_auto: i32,
+    left: f32,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    status(inner.tree.borrow_mut().set_inset(
+        NodeId::from_raw(node),
+        Inset {
+            top: inset_from_tag(top_auto, top),
+            right: inset_from_tag(right_auto, right),
+            bottom: inset_from_tag(bottom_auto, bottom),
+            left: inset_from_tag(left_auto, left),
+        },
+    ))
+}
+
+unsafe extern "C" fn set_grid_placement(
+    session: *mut c_void,
+    node: u64,
+    column_start_tag: i32,
+    column_start: i32,
+    column_end_tag: i32,
+    column_end: i32,
+    row_start_tag: i32,
+    row_start: i32,
+    row_end_tag: i32,
+    row_end: i32,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    let column_start = match grid_from_tag(column_start_tag, column_start) {
+        Ok(line) => line,
+        Err(_) => return -1,
+    };
+    let column_end = match grid_from_tag(column_end_tag, column_end) {
+        Ok(line) => line,
+        Err(_) => return -1,
+    };
+    let row_start = match grid_from_tag(row_start_tag, row_start) {
+        Ok(line) => line,
+        Err(_) => return -1,
+    };
+    let row_end = match grid_from_tag(row_end_tag, row_end) {
+        Ok(line) => line,
+        Err(_) => return -1,
+    };
+    status(inner.tree.borrow_mut().set_grid_placement(
+        NodeId::from_raw(node),
+        column_start,
+        column_end,
+        row_start,
+        row_end,
+    ))
+}
+
 unsafe extern "C" fn blur_node(session: *mut c_void) -> i32 {
     let inner = unsafe { inner(session) };
     let gestures = inner.tree.borrow_mut().blur();
@@ -1327,7 +2654,9 @@ unsafe extern "C" fn blur_node(session: *mut c_void) -> i32 {
 
 unsafe extern "C" fn set_ime_enabled(session: *mut c_void, enabled: i32) -> i32 {
     let inner = unsafe { inner(session) };
-    inner.ime_enabled.set(enabled != 0);
+    let mut ime = inner.ime.borrow_mut();
+    ime.shown = enabled != 0;
+    ime.dirty = true;
     0
 }
 
@@ -1336,8 +2665,138 @@ unsafe extern "C" fn set_ime_text(session: *mut c_void, utf8: *const c_char, len
     let Some(text) = (unsafe { utf8_of(utf8, len) }) else {
         return -1;
     };
-    *inner.ime_text.borrow_mut() = Some(text.to_owned());
+    let mut ime = inner.ime.borrow_mut();
+    ime.state = session::ImeState::at_end(text);
+    ime.dirty = true;
     0
+}
+
+unsafe extern "C" fn set_ime_state(
+    session: *mut c_void,
+    shown: i32,
+    utf8: *const c_char,
+    len: usize,
+    sel_start: u32,
+    sel_end: u32,
+    comp_start: i32,
+    comp_end: i32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    let mut ime = inner.ime.borrow_mut();
+    if shown == 0 {
+        ime.shown = false;
+        ime.dirty = true;
+        return 0;
+    }
+    let Some(text) = (unsafe { utf8_of(utf8, len) }) else {
+        return -1;
+    };
+    let text_len = session::utf16_len(text);
+    let (sel_start, sel_end) = if sel_start <= sel_end {
+        (sel_start, sel_end)
+    } else {
+        (sel_end, sel_start)
+    };
+    if sel_end > text_len {
+        return -1;
+    }
+    let action = ime.state.action;
+    let keyboard = ime.state.keyboard;
+    let composing = if comp_start < 0 {
+        None
+    } else {
+        let start = comp_start as u32;
+        let end = comp_end as u32;
+        if start > end || end > text_len {
+            return -1;
+        }
+        Some(start..end)
+    };
+    ime.shown = true;
+    ime.dirty = true;
+    ime.state = session::ImeState {
+        text: text.to_owned(),
+        selection: sel_start..sel_end,
+        composing,
+        caret: ui_core::Rect { x, y, w, h },
+        action,
+        keyboard,
+    };
+    0
+}
+
+fn tri_state(value: i32) -> Option<bool> {
+    match value {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
+unsafe extern "C" fn set_semantics(
+    session: *mut c_void,
+    node: u64,
+    role: i32,
+    label: *const c_char,
+    label_len: usize,
+    value: *const c_char,
+    value_len: usize,
+    checked: i32,
+    sel_start: i32,
+    sel_end: i32,
+    disabled: i32,
+    editable: i32,
+    read_only: i32,
+    description: *const c_char,
+    description_len: usize,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    let label = unsafe { utf8_of(label, label_len) }.map(str::to_owned);
+    let value = unsafe { utf8_of(value, value_len) }.map(str::to_owned);
+    let description = unsafe { utf8_of(description, description_len) }.map(str::to_owned);
+    let hint = ui_core::SemanticsHint {
+        role: role_of(role),
+        label: label.filter(|text| !text.is_empty()),
+        value: value.filter(|text| !text.is_empty()),
+        checked: tri_state(checked),
+        selection: (sel_start >= 0 && sel_end >= sel_start)
+            .then_some((sel_start as u32, sel_end as u32)),
+        disabled: tri_state(disabled),
+        editable: tri_state(editable),
+        read_only: tri_state(read_only),
+        description: description.filter(|text| !text.is_empty()),
+    };
+    let result = inner
+        .tree
+        .borrow_mut()
+        .set_semantics(NodeId::from_raw(node), hint);
+    if result.is_err() { -1 } else { 0 }
+}
+
+fn role_of(role: i32) -> Option<ui_core::SemanticsRole> {
+    Some(match role {
+        1 => ui_core::SemanticsRole::Button,
+        2 => ui_core::SemanticsRole::Text,
+        3 => ui_core::SemanticsRole::Image,
+        4 => ui_core::SemanticsRole::Scroll,
+        5 => ui_core::SemanticsRole::Switch,
+        6 => ui_core::SemanticsRole::TextField,
+        _ => return None,
+    })
+}
+
+unsafe extern "C" fn text_scale(session: *mut c_void) -> f64 {
+    let inner = unsafe { inner(session) };
+    f64::from(inner.text_scale.get())
+}
+
+unsafe extern "C" fn reduce_motion(session: *mut c_void) -> i32 {
+    let inner = unsafe { inner(session) };
+    i32::from(inner.reduce_motion.get())
 }
 
 unsafe extern "C" fn measure_text(
@@ -1370,4 +2829,431 @@ unsafe extern "C" fn measure_text(
         *out_h = size.height;
     }
     0
+}
+
+fn self_paused(inner: &Inner) -> bool {
+    inner.paused.get()
+}
+
+fn cstring(text: &str) -> CString {
+    let mut bytes = text.replace('\0', "").into_bytes();
+    bytes.push(0);
+    // SAFETY: `replace` removed every interior NUL, and the last byte is the terminator.
+    unsafe { CString::from_vec_with_nul_unchecked(bytes) }
+}
+
+fn settle_json(inner: &Inner, token: u64, ok: bool, text: &str) {
+    let bytes = cstring(text);
+    let _ = unsafe {
+        qjs_settle_json(
+            inner.host,
+            token,
+            i32::from(ok),
+            bytes.as_ptr(),
+            text.replace('\0', "").len(),
+        )
+    };
+}
+
+fn settle_plugin(inner: &Inner, token: u64, result: &PluginResult) {
+    match result {
+        PluginResult::Done(value) => {
+            let json = host::encode(value);
+            settle_json(inner, token, true, &json);
+        }
+        PluginResult::Failed { message } => settle_json(inner, token, false, message),
+    }
+}
+
+fn settle_http(inner: &Inner, token: u64, result: &Result<HttpResponse, HttpError>) {
+    match result {
+        Ok(response) => {
+            if response.body.len() > session::HTTP_BODY_LIMIT {
+                let message = cstring("TypeError");
+                let _ = unsafe {
+                    qjs_settle_http(
+                        inner.host,
+                        token,
+                        0,
+                        ptr::null(),
+                        0,
+                        ptr::null(),
+                        0,
+                        message.as_ptr(),
+                    )
+                };
+                return;
+            }
+            let headers = host::header_block(&response.headers);
+            let header_bytes = cstring(&headers);
+            let _ = unsafe {
+                qjs_settle_http(
+                    inner.host,
+                    token,
+                    i32::from(response.status),
+                    header_bytes.as_ptr(),
+                    headers.len(),
+                    response.body.as_ptr(),
+                    response.body.len(),
+                    ptr::null(),
+                )
+            };
+        }
+        Err(error) => {
+            let message = cstring(&error.message);
+            let _ = unsafe {
+                qjs_settle_http(
+                    inner.host,
+                    token,
+                    0,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    0,
+                    message.as_ptr(),
+                )
+            };
+        }
+    }
+}
+
+fn flush_pending(inner: &Inner) {
+    let pending = std::mem::replace(&mut *inner.pending.borrow_mut(), Pending::new());
+    for (token, result) in pending.http {
+        if cancelled(inner, token) {
+            continue;
+        }
+        settle_http(inner, token, &result);
+    }
+    for (token, result) in pending.plugin {
+        settle_plugin(inner, token, &result);
+    }
+    for (id, event, text, data) in pending.socket {
+        deliver_socket(inner, id, &event, text, &data);
+    }
+}
+
+fn cancelled(inner: &Inner, token: u64) -> bool {
+    inner
+        .cancels
+        .borrow()
+        .get(&token)
+        .is_some_and(|flag| flag.load(Ordering::Acquire))
+}
+
+fn deliver_socket(inner: &Inner, id: u64, event: &str, text: bool, data: &[u8]) {
+    let event = cstring(event);
+    let _ = unsafe {
+        qjs_socket_event(
+            inner.host,
+            id,
+            event.as_ptr(),
+            i32::from(text),
+            data.as_ptr(),
+            data.len(),
+        )
+    };
+}
+
+fn emit_state(inner: &Inner, state: &str) {
+    emit_json(inner, "AppState", "change", &host::json_string(state));
+}
+
+fn emit_json(inner: &Inner, name: &str, event: &str, json: &str) {
+    let name = cstring(name);
+    let event = cstring(event);
+    let _ = unsafe {
+        qjs_emit(
+            inner.host,
+            name.as_ptr(),
+            event.as_ptr(),
+            json.as_ptr().cast(),
+            json.len(),
+        )
+    };
+}
+
+fn submit_or_queue(inner: &Inner, job: IoJob, inline: impl FnOnce()) {
+    if let Some(submit) = inner.io.borrow().as_ref() {
+        submit(job);
+    } else {
+        inline();
+    }
+}
+
+fn first_string(args: &[PluginValue]) -> String {
+    match args.first() {
+        Some(PluginValue::Str(text)) => text.clone(),
+        _ => String::new(),
+    }
+}
+
+unsafe extern "C" fn http_call(
+    session: *mut c_void,
+    token: u64,
+    method: *const c_char,
+    method_len: usize,
+    url: *const c_char,
+    url_len: usize,
+    headers: *const c_char,
+    headers_len: usize,
+    body: *const u8,
+    body_len: usize,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    let Some(method) = (unsafe { utf8_of(method, method_len) }) else {
+        return -1;
+    };
+    let Some(url) = (unsafe { utf8_of(url, url_len) }) else {
+        return -1;
+    };
+    let headers = unsafe { utf8_of(headers, headers_len) }.unwrap_or("");
+    if body_len > session::HTTP_BODY_LIMIT {
+        inner
+            .pending
+            .borrow_mut()
+            .http
+            .push((token, Err(HttpError::new("TypeError"))));
+        return 0;
+    }
+    let bytes = if body.is_null() || body_len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(body, body_len).to_vec() }
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    inner
+        .cancels
+        .borrow_mut()
+        .insert(token, Arc::clone(&cancel));
+    let request = HttpRequest {
+        token,
+        method: method.to_owned(),
+        url: url.to_owned(),
+        headers: host::header_pairs(headers),
+        body: bytes,
+        cancel,
+    };
+    if !request.url.starts_with("http://") && !request.url.starts_with("https://") {
+        inner
+            .pending
+            .borrow_mut()
+            .http
+            .push((token, Err(HttpError::new("unsupported URL"))));
+        return 0;
+    }
+    if let Some(submit) = inner.io.borrow().as_ref() {
+        submit(IoJob::Http(request));
+        return 0;
+    }
+    if let Some(client) = inner.http.borrow().as_ref().cloned() {
+        let result = client.perform(&request);
+        inner.pending.borrow_mut().http.push((token, result));
+        return 0;
+    }
+    inner
+        .pending
+        .borrow_mut()
+        .http
+        .push((token, Err(HttpError::new("http is not linked"))));
+    0
+}
+
+unsafe extern "C" fn abort_token(session: *mut c_void, token: u64) {
+    let inner = unsafe { inner(session) };
+    if let Some(flag) = inner.cancels.borrow().get(&token) {
+        flag.store(true, Ordering::Release);
+    }
+    inner
+        .pending
+        .borrow_mut()
+        .http
+        .retain(|(pending, _)| *pending != token);
+    let aborted = Err(HttpError::new("AbortError"));
+    settle_http(inner, token, &aborted);
+    if let Some(submit) = inner.io.borrow().as_ref() {
+        submit(IoJob::Abort { token });
+    }
+}
+
+unsafe extern "C" fn module_has(session: *mut c_void, name: *const c_char, len: usize) -> i32 {
+    let Some(name) = (unsafe { utf8_of(name, len) }) else {
+        return 0;
+    };
+    let _ = session;
+    i32::from(matches!(name, "AppState" | "Linking" | "Clipboard"))
+}
+
+unsafe extern "C" fn module_call(
+    session: *mut c_void,
+    token: u64,
+    name: *const c_char,
+    name_len: usize,
+    method: *const c_char,
+    method_len: usize,
+    json: *const c_char,
+    json_len: usize,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    let Some(name) = (unsafe { utf8_of(name, name_len) }) else {
+        return -1;
+    };
+    let Some(method) = (unsafe { utf8_of(method, method_len) }) else {
+        return -1;
+    };
+    let json = unsafe { utf8_of(json, json_len) }.unwrap_or("[]");
+    let args = match host::parse_args(json) {
+        Ok(args) => args,
+        Err(message) => {
+            inner
+                .pending
+                .borrow_mut()
+                .plugin
+                .push((token, PluginResult::Failed { message }));
+            return 0;
+        }
+    };
+    dispatch_module(inner, token, name, method, args);
+    0
+}
+
+fn dispatch_module(inner: &Inner, token: u64, name: &str, method: &str, args: Vec<PluginValue>) {
+    match (name, method) {
+        ("AppState", "getCurrentState") => {
+            let state = inner.app_state.borrow().clone();
+            inner
+                .pending
+                .borrow_mut()
+                .plugin
+                .push((token, PluginResult::Done(PluginValue::Str(state))));
+        }
+        ("Linking", "getInitialURL") => {
+            let value = match inner.launch_url.borrow().clone() {
+                Some(url) => PluginValue::Str(url),
+                None => PluginValue::Null,
+            };
+            inner
+                .pending
+                .borrow_mut()
+                .plugin
+                .push((token, PluginResult::Done(value)));
+        }
+        ("Clipboard", "getString") => {
+            submit_or_queue(
+                inner,
+                IoJob::Plugin {
+                    token,
+                    name: name.to_owned(),
+                    method: method.to_owned(),
+                    args,
+                },
+                || {
+                    let text = inner.module_clipboard.borrow().clone();
+                    inner
+                        .pending
+                        .borrow_mut()
+                        .plugin
+                        .push((token, PluginResult::Done(PluginValue::Str(text))));
+                },
+            );
+        }
+        ("Clipboard", "setString") => {
+            let text = first_string(&args);
+            submit_or_queue(
+                inner,
+                IoJob::Plugin {
+                    token,
+                    name: name.to_owned(),
+                    method: method.to_owned(),
+                    args,
+                },
+                || {
+                    *inner.module_clipboard.borrow_mut() = text;
+                    inner
+                        .pending
+                        .borrow_mut()
+                        .plugin
+                        .push((token, PluginResult::Done(PluginValue::Null)));
+                },
+            );
+        }
+        ("Linking", "openURL") => {
+            submit_or_queue(
+                inner,
+                IoJob::Plugin {
+                    token,
+                    name: name.to_owned(),
+                    method: method.to_owned(),
+                    args,
+                },
+                || {
+                    inner
+                        .pending
+                        .borrow_mut()
+                        .plugin
+                        .push((token, PluginResult::Done(PluginValue::Null)));
+                },
+            );
+        }
+        _ => {
+            inner.pending.borrow_mut().plugin.push((
+                token,
+                PluginResult::Failed {
+                    message: "module is not linked".to_owned(),
+                },
+            ));
+        }
+    }
+}
+
+unsafe extern "C" fn socket_open(session: *mut c_void, id: u64, url: *const c_char, len: usize) {
+    let inner = unsafe { inner(session) };
+    let Some(url) = (unsafe { utf8_of(url, len) }) else {
+        return;
+    };
+    let url = url.to_owned();
+    submit_or_queue(
+        inner,
+        IoJob::SocketOpen {
+            id,
+            url: url.clone(),
+        },
+        || {
+            inner.pending.borrow_mut().socket.push((
+                id,
+                "error".to_owned(),
+                true,
+                b"socket is not linked".to_vec(),
+            ));
+        },
+    );
+}
+
+unsafe extern "C" fn socket_send(
+    session: *mut c_void,
+    id: u64,
+    data: *const u8,
+    len: usize,
+    is_text: i32,
+) {
+    let inner = unsafe { inner(session) };
+    let bytes = if data.is_null() || len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(data, len).to_vec() }
+    };
+    if let Some(submit) = inner.io.borrow().as_ref() {
+        submit(IoJob::SocketSend {
+            id,
+            text: is_text != 0,
+            data: bytes,
+        });
+    }
+}
+
+unsafe extern "C" fn socket_close(session: *mut c_void, id: u64) {
+    let inner = unsafe { inner(session) };
+    if let Some(submit) = inner.io.borrow().as_ref() {
+        submit(IoJob::SocketClose { id });
+    }
 }

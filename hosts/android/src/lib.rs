@@ -1,4 +1,8 @@
-//! Android host. The platform thread is `android_main`. The render thread owns the engine.
+//! Android host. The platform thread is the Java UI thread. The render thread owns the engine.
+
+mod a11y;
+#[allow(dead_code)]
+mod assets;
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod insets;
@@ -15,10 +19,3 @@ mod host;
 mod surface;
 #[cfg(target_os = "android")]
 mod vsync;
-
-#[cfg(target_os = "android")]
-#[unsafe(no_mangle)]
-fn android_main(app: android_activity::AndroidApp) {
-    let code = host::run(app);
-    std::process::exit(code);
-}

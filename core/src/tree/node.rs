@@ -56,6 +56,38 @@ pub enum Gesture {
     Wheel(NodeId, f32, f32),
     /// Right click on a pointer region. No focus change.
     SecondaryClick(NodeId),
+    /// A scroll offset changed in core. The pair is the new offset in scene points.
+    Scroll(NodeId, f32, f32),
+    /// Accessibility loaded a new editor string. The text stays on the editor.
+    TextReplaced(NodeId),
+    /// A span link was activated. `link` is the UTF-16 range's id.
+    ActivateLink {
+        id: NodeId,
+        link: u32,
+    },
+}
+
+/// Which drags a pointer region takes before a scroll does.
+///
+/// `Horizontal` is a single-line field: a vertical move still scrolls.
+/// `Free` is a multi-line field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DragClaim {
+    #[default]
+    None,
+    Horizontal,
+    Free,
+}
+
+/// Where [`Tree::focus_step`] moves the text focus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FocusDirection {
+    Next,
+    Previous,
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 /// Ids retired by [`Tree::discard`], children before their parent, plus any
@@ -112,6 +144,35 @@ impl Edges {
     }
 }
 
+/// A main size written onto Taffy's `Style::size`.
+///
+/// `Fraction(0.5)` is 50% of the parent. Values above 1 are allowed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AxisSize {
+    Auto,
+    Points(f32),
+    Fraction(f32),
+}
+
+/// Insets in scene points. `None` is the auto edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Inset {
+    pub top: Option<f32>,
+    pub right: Option<f32>,
+    pub bottom: Option<f32>,
+    pub left: Option<f32>,
+}
+
+/// One edge of a grid placement. `Line(0)` and `Span(0)` are rejected.
+///
+/// A negative line counts from the end, the same way Taffy does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GridLine {
+    Auto,
+    Line(i16),
+    Span(u16),
+}
+
 /// One grid track. `Points` and `Fraction` must be finite and non-negative.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TrackSize {
@@ -157,12 +218,19 @@ pub(super) struct TextNode {
     /// Paragraph constraint passed to [`Shaper::measure`] for this layout.
     pub(super) max_width: Cell<f32>,
     pub(super) style: TextStyle,
+    /// Empty means one run with `color` and `style`. Non-empty runs concatenate to `utf8`.
+    pub(super) spans: Vec<protocol::TextSpan>,
+    /// UTF-16 ranges. A click whose caret falls in one emits `ActivateLink`.
+    pub(super) links: Vec<protocol::TextLink>,
 }
 
 pub(super) struct ImageNode {
     pub(super) source: String,
     pub(super) width: f32,
     pub(super) height: f32,
+    pub(super) mode: protocol::ContentMode,
+    /// Missing required images fail the frame. The three-argument constructor is optional.
+    pub(super) required: bool,
 }
 
 pub(super) struct Node {
@@ -186,10 +254,25 @@ pub(super) struct Node {
     pub(super) translate_x: f32,
     pub(super) translate_y: f32,
     pub(super) rotate_rad: f32,
-    /// Uniform scale for [`Kind::Transform`]. `1.0` leaves size unchanged.
+    /// Scale for [`Kind::Transform`]. `set_transform` writes both axes.
+    /// `1.0` leaves that axis unchanged. A negative `scale_x` mirrors.
     pub(super) scale: f32,
+    pub(super) scale_y: f32,
+    /// Center stroke on the fill rectangle. Non-positive width records no stroke.
+    pub(super) stroke_width: f32,
+    pub(super) stroke_color: [u8; 4],
+    pub(super) gradient: Option<protocol::Gradient>,
+    pub(super) shadow: Option<protocol::Shadow>,
+    /// Foreground blur sigma in scene points. Non-positive values record no push.
+    pub(super) blur: f32,
+    /// Backdrop blur sigma in scene points. Non-positive values record no push.
+    pub(super) backdrop: f32,
+    pub(super) blend: protocol::BlendMode,
     /// Tap-to-focus target. Containers start cleared. Text and images do too.
     pub(super) focusable: bool,
+    /// Wins a drag from this region before the scroll chain does.
+    pub(super) drag_claim: DragClaim,
+    pub(super) semantics: Option<crate::SemanticsHint>,
     pub(super) x: f32,
     pub(super) y: f32,
     pub(super) w: f32,

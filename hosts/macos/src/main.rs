@@ -1,7 +1,10 @@
 //! macOS host. Version 1 scene bytes become a draw list before the window is shown.
 //! `--js <script>` loads that script in the QuickJS session instead.
 
+mod a11y;
 mod app;
+#[allow(dead_code)]
+mod assets;
 mod pixels;
 mod pointer;
 mod surface;

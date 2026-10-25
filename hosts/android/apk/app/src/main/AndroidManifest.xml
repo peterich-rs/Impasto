@@ -4,14 +4,13 @@
         android:label="uifw counter"
         android:hasCode="true">
         <activity
-            android:name="com.google.androidgamesdk.GameActivity"
+            android:name="dev.uifw.host.HostActivity"
             android:exported="true"
-            android:theme="@style/Theme.AppCompat.NoActionBar"
-            android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|density"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+            android:hardwareAccelerated="true"
+            android:enableOnBackInvokedCallback="true"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:windowSoftInputMode="adjustResize">
-            <meta-data
-                android:name="android.app.lib_name"
-                android:value="uifw" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

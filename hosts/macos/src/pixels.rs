@@ -89,13 +89,26 @@ pub fn load_rgba_png(path: &Path) -> anyhow::Result<Rgba> {
     // SAFETY: `url` is a file URL. A null options dictionary is the documented default.
     let source = unsafe { CGImageSource::with_url(&url, None) }
         .with_context(|| format!("failed to read logo {}", path.display()))?;
+    rgba_from_source(&source, &path.display().to_string())
+}
+
+/// Decode PNG, JPEG, or WebP bytes the same way as a file: device RGB, premultiplied.
+pub fn load_rgba_bytes(bytes: &[u8]) -> anyhow::Result<Rgba> {
+    let data = CFData::from_bytes(bytes);
+    // SAFETY: `data` retains `bytes` for the source. A null options dictionary is the default.
+    let source =
+        unsafe { CGImageSource::with_data(&data, None) }.context("image bytes were not decoded")?;
+    rgba_from_source(&source, "image bytes")
+}
+
+fn rgba_from_source(source: &CGImageSource, label: &str) -> anyhow::Result<Rgba> {
     // SAFETY: index 0 is the first image. A null options dictionary keeps the source pixels.
     let image = unsafe { source.image_at_index(0, None) }
-        .with_context(|| format!("failed to read logo {}", path.display()))?;
+        .with_context(|| format!("failed to read {label}"))?;
     let width = CGImage::width(Some(&image));
     let height = CGImage::height(Some(&image));
     if width == 0 || height == 0 {
-        anyhow::bail!("failed to read logo {}", path.display());
+        anyhow::bail!("failed to read {label}");
     }
     let row = width.checked_mul(4).context("logo is too wide")?;
     let len = row.checked_mul(height).context("logo is too large")?;
@@ -114,7 +127,7 @@ pub fn load_rgba_png(path: &Path) -> anyhow::Result<Rgba> {
             info,
         )
     }
-    .with_context(|| format!("failed to read logo {}", path.display()))?;
+    .with_context(|| format!("failed to read {label}"))?;
     let rect = CGRect::new(
         CGPoint::new(0.0, 0.0),
         CGSize::new(width as f64, height as f64),

@@ -8,7 +8,8 @@ mod fixture;
 
 pub use decode::decode;
 pub use draw_list::{
-    Command, DrawList, TextAlign, TextStyle, V1_FONT_SIZE, V1_PARAGRAPH_WIDTH, scene_to_draw_list,
+    BlendMode, ColorStop, Command, ContentMode, DrawList, Gradient, Shadow, TextAlign, TextLink,
+    TextOverflow, TextSpan, TextStyle, V1_FONT_SIZE, V1_PARAGRAPH_WIDTH, scene_to_draw_list,
 };
 pub use encode::{Node, Scene};
 pub use error::Error;

@@ -1,22 +1,14 @@
-use crate::{
-    Button, Edges, Gesture, Modifiers, MonoShaper, Phase, PointerEvent, Shaper, TrackSize, Tree,
-};
+use crate::{Button, Edges, Gesture, MonoShaper, Phase, PointerEvent, Shaper, TrackSize, Tree};
 
 fn event(phase: Phase, x: f32, y: f32) -> PointerEvent {
     PointerEvent::new(phase, x, y, 0.0)
 }
 
 fn button_event(phase: Phase, x: f32, y: f32, button: Button) -> PointerEvent {
-    PointerEvent {
-        phase,
-        x,
-        y,
-        time_ms: 0.0,
-        button,
-        modifiers: Modifiers::empty(),
-        dx: 0.0,
-        dy: 0.0,
-    }
+    let mut event = PointerEvent::new(phase, x, y, 0.0);
+    event.button = button;
+    event.buttons = crate::Buttons::from_button(button);
+    event
 }
 
 fn timed(phase: Phase, x: f32, y: f32, time_ms: f64) -> PointerEvent {
@@ -136,7 +128,7 @@ fn recorded_text_uses_the_ancestor_origin() -> Result<(), crate::Error> {
             ..
         }) if *x == 8.0
             && *y == 8.0
-            && utf8 == "Hi"
+            && utf8.as_ref() == "Hi"
             && *color == [1, 2, 3, 4]
             && *font_size == 16.0
             && *max_width >= 16.0
@@ -203,7 +195,7 @@ fn set_text_keeps_the_hit_box_until_the_next_layout() -> Result<(), crate::Error
     let list = tree.record()?;
     assert!(matches!(
         list.commands.first(),
-        Some(protocol::Command::Text { utf8, .. }) if utf8 == "Hello"
+        Some(protocol::Command::Text { utf8, .. }) if utf8.as_ref() == "Hello"
     ));
     Ok(())
 }
@@ -388,7 +380,8 @@ fn setters_relayout_on_the_next_frame() -> Result<(), crate::Error> {
     tree.add_child(background, box_)?;
     tree.layout()?;
     tree.set_color(background, [9, 8, 7, 6])?;
-    assert!(tree.is_dirty());
+    assert!(tree.needs_paint());
+    assert!(!tree.needs_layout());
     assert_eq!(tree.rect(box_)?.w, 8.0);
     tree.layout()?;
     assert!(matches!(
@@ -479,7 +472,7 @@ fn clip_wraps_an_image_and_nested_clips_stay_balanced() -> Result<(), crate::Err
             },
             protocol::Command::Image { source, .. },
             protocol::Command::Pop,
-        ] if *corner_radius == 4.0 && *w == 10.0 && *h == 12.0 && source == "asset:logo"
+        ] if *corner_radius == 4.0 && *w == 10.0 && *h == 12.0 && source.as_ref() == "asset:logo"
     ));
 
     let mut tree = Tree::new(MonoShaper);
@@ -497,7 +490,7 @@ fn clip_wraps_an_image_and_nested_clips_stay_balanced() -> Result<(), crate::Err
             protocol::Command::Text { utf8, .. },
             protocol::Command::Pop,
             protocol::Command::Pop,
-        ] if *outer_radius == 3.0 && *inner_radius == 1.0 && utf8 == "Hi"
+        ] if *outer_radius == 3.0 && *inner_radius == 1.0 && utf8.as_ref() == "Hi"
     ));
     Ok(())
 }
@@ -515,7 +508,7 @@ fn opacity_wraps_text() -> Result<(), crate::Error> {
             protocol::Command::PushOpacity { alpha, .. },
             protocol::Command::Text { utf8, .. },
             protocol::Command::Pop,
-        ] if *alpha == 128 && utf8 == "Hi"
+        ] if *alpha == 128 && utf8.as_ref() == "Hi"
     ));
     Ok(())
 }
@@ -594,7 +587,7 @@ fn viewport_origin_shifts_hit_testing() -> Result<(), crate::Error> {
 }
 
 #[test]
-fn structure_change_drops_a_press() -> Result<(), crate::Error> {
+fn inserting_during_a_press_keeps_the_route() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper);
     let region = tree.pointer_region()?;
     let child = tree.sized(20.0, 10.0)?;
@@ -606,6 +599,28 @@ fn structure_change_drops_a_press() -> Result<(), crate::Error> {
     );
     let extra = tree.sized(4.0, 4.0)?;
     tree.add_child(region, extra)?;
+    tree.layout()?;
+    assert_eq!(
+        tree.pointer(event(Phase::Up, 1.0, 1.0)),
+        vec![Gesture::Release(region), Gesture::Click(region)]
+    );
+    Ok(())
+}
+
+#[test]
+fn removing_the_pressed_subtree_drops_the_route() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    let column = tree.column(0.0)?;
+    let region = tree.pointer_region()?;
+    let child = tree.sized(20.0, 10.0)?;
+    tree.add_child(region, child)?;
+    tree.add_child(column, region)?;
+    tree.layout()?;
+    assert_eq!(
+        tree.pointer(event(Phase::Down, 1.0, 1.0)),
+        vec![Gesture::Press(region)]
+    );
+    tree.remove(column, region)?;
     tree.layout()?;
     assert!(tree.pointer(event(Phase::Up, 1.0, 1.0)).is_empty());
     Ok(())
@@ -620,7 +635,8 @@ fn setters_update_paint_without_moving_the_previous_box() -> Result<(), crate::E
     tree.layout()?;
     let before = tree.rect(child)?;
     tree.set_radius(clip, 6.0)?;
-    assert!(tree.is_dirty());
+    assert!(tree.needs_paint());
+    assert!(!tree.needs_layout());
     assert_eq!(tree.rect(child)?.x, before.x);
     let list = tree.record()?;
     assert!(matches!(
@@ -639,7 +655,8 @@ fn setters_update_paint_without_moving_the_previous_box() -> Result<(), crate::E
     tree.layout()?;
     let width = tree.rect(box_)?.w;
     tree.set_alpha(fade, 40)?;
-    assert!(tree.is_dirty());
+    assert!(tree.needs_paint());
+    assert!(!tree.needs_layout());
     assert_eq!(tree.rect(box_)?.w, width);
     let list = tree.record()?;
     assert!(matches!(
@@ -691,7 +708,7 @@ fn setters_update_paint_without_moving_the_previous_box() -> Result<(), crate::E
     let list = tree.record()?;
     assert!(matches!(
         list.commands.first(),
-        Some(protocol::Command::Image { source, .. }) if source == "asset:mark"
+        Some(protocol::Command::Image { source, .. }) if source.as_ref() == "asset:mark"
     ));
     let plain = tree.sized(1.0, 1.0)?;
     assert!(matches!(
@@ -787,11 +804,15 @@ fn a_move_past_the_slop_without_a_scroll_still_clicks() -> Result<(), crate::Err
 #[test]
 fn passing_the_slop_over_a_scroll_locks_a_drag() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper);
+    tree.set_viewport(0.0, 0.0, 100.0, 40.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
     let scroll = tree.scroll()?;
     let region = tree.pointer_region()?;
-    let child = tree.sized(80.0, 80.0)?;
+    let child = tree.sized(80.0, 200.0)?;
     tree.add_child(region, child)?;
     tree.add_child(scroll, region)?;
+    tree.add_child(root, scroll)?;
     tree.layout()?;
 
     assert_eq!(
@@ -824,9 +845,13 @@ fn passing_the_slop_over_a_scroll_locks_a_drag() -> Result<(), crate::Error> {
 #[test]
 fn cancel_during_a_drag_ends_with_zero_velocity() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper);
+    tree.set_viewport(0.0, 0.0, 100.0, 40.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
     let scroll = tree.scroll()?;
-    let text = tree.text("Hi", 16.0, [0, 0, 0, 255])?;
+    let text = tree.image("asset:a", 40.0, 200.0)?;
     tree.add_child(scroll, text)?;
+    tree.add_child(root, scroll)?;
     tree.layout()?;
     assert!(tree.pointer(timed(Phase::Down, 1.0, 1.0, 0.0)).is_empty());
     let locked = tree.pointer(timed(Phase::Move, 1.0, 20.0, 10.0));
@@ -848,18 +873,97 @@ fn cancel_during_a_drag_ends_with_zero_velocity() -> Result<(), crate::Error> {
 #[test]
 fn structure_change_drops_a_locked_drag() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper);
+    tree.set_viewport(0.0, 0.0, 100.0, 40.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
     let scroll = tree.scroll()?;
     let region = tree.pointer_region()?;
-    let child = tree.sized(40.0, 40.0)?;
+    let child = tree.sized(40.0, 200.0)?;
     tree.add_child(region, child)?;
     tree.add_child(scroll, region)?;
+    tree.add_child(root, scroll)?;
     tree.layout()?;
     let _ = tree.pointer(event(Phase::Down, 4.0, 4.0));
     let _ = tree.pointer(event(Phase::Move, 4.0, 20.0));
     let extra = tree.sized(4.0, 4.0)?;
     tree.add_child(scroll, extra)?;
     tree.layout()?;
-    assert!(tree.pointer(event(Phase::Up, 4.0, 20.0)).is_empty());
+    let up = tree.pointer(event(Phase::Up, 4.0, 20.0));
+    assert!(
+        up.iter()
+            .any(|gesture| matches!(gesture, Gesture::DragEnd(id, _, _) if *id == scroll)),
+        "inserting a row keeps the scroll drag, got {up:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn record_omits_a_row_outside_the_scroll_viewport() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    tree.set_viewport(0.0, 0.0, 40.0, 40.0)?;
+    let scroll = tree.scroll()?;
+    tree.set_max_size(scroll, 40.0, 40.0)?;
+    let column = tree.column(0.0)?;
+    let near = tree.text("near", 16.0, [0, 0, 0, 255])?;
+    let gap = tree.sized(20.0, 40.0)?;
+    let far = tree.text("far", 16.0, [0, 0, 0, 255])?;
+    tree.add_child(column, near)?;
+    tree.add_child(column, gap)?;
+    tree.add_child(column, far)?;
+    tree.add_child(scroll, column)?;
+    tree.layout()?;
+    tree.set_scroll_offset(scroll, 0.0, 0.0)?;
+    let list = tree.record()?;
+    let labels: Vec<_> = list
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            protocol::Command::Text { utf8, .. } => Some(utf8.as_ref()),
+            _ => None,
+        })
+        .collect();
+    assert!(labels.contains(&"near"), "{labels:?}");
+    assert!(!labels.contains(&"far"), "{labels:?}");
+    Ok(())
+}
+
+#[test]
+fn text_scale_multiplies_measurement_and_the_recorded_size() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    let text = tree.text("Hi", 16.0, [0, 0, 0, 255])?;
+    tree.layout()?;
+    let logical = tree.rect(text)?.w;
+    tree.set_text_scale(2.0)?;
+    tree.layout()?;
+    assert!((tree.rect(text)?.w - logical * 2.0).abs() < 0.01);
+    let list = tree.record()?;
+    let size = list.commands.iter().find_map(|command| match command {
+        protocol::Command::Text { font_size, .. } => Some(*font_size),
+        _ => None,
+    });
+    assert_eq!(size, Some(32.0));
+    Ok(())
+}
+
+#[test]
+fn fling_changes_paint_without_another_layout() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    tree.set_viewport(0.0, 0.0, 40.0, 40.0)?;
+    let scroll = tree.scroll()?;
+    let body = tree.sized(40.0, 200.0)?;
+    tree.set_max_size(scroll, 40.0, 40.0)?;
+    tree.add_child(scroll, body)?;
+    tree.layout()?;
+    let passes = tree.layout_passes();
+    tree.set_scroll_offset(scroll, 0.0, 80.0)?;
+    tree.arm_fling(scroll, 0.0, 1.0)?;
+    assert!(tree.tick_fling(16.0));
+    assert!(tree.scroll_offset(scroll)?.1 < 80.0);
+    assert_eq!(tree.layout_passes(), passes);
+    assert!(tree.needs_paint());
+    let _ = tree.record()?;
+    tree.clear_paint();
+    assert!(!tree.needs_paint());
     Ok(())
 }
 
@@ -895,8 +999,12 @@ fn scroll_offset_moves_paint_and_hits_without_moving_layout() -> Result<(), crat
     );
     assert!(view.h <= 80.0, "viewport grew past the window: {}", view.h);
 
+    let passes = tree.layout_passes();
     tree.set_scroll_offset(scroll, 0.0, 30.0)?;
-    assert!(tree.is_dirty());
+    assert!(tree.needs_paint());
+    assert!(!tree.needs_layout());
+    tree.layout()?;
+    assert_eq!(tree.layout_passes(), passes);
     assert_eq!(tree.scroll_offset(scroll)?, (0.0, 30.0));
     tree.layout()?;
     assert_eq!(tree.rect(header)?, header_box);
@@ -904,7 +1012,7 @@ fn scroll_offset_moves_paint_and_hits_without_moving_layout() -> Result<(), crat
 
     let list = tree.record()?;
     let text = list.commands.iter().find_map(|command| match command {
-        protocol::Command::Text { utf8, x, y, .. } if utf8 == "B" => Some((*x, *y)),
+        protocol::Command::Text { utf8, x, y, .. } if utf8.as_ref() == "B" => Some((*x, *y)),
         _ => None,
     });
     assert_eq!(text, Some((label_box.x, label_box.y - 30.0)));
@@ -1062,7 +1170,7 @@ fn justify_and_wrap_use_the_flex_line() -> Result<(), crate::Error> {
 }
 
 #[test]
-fn transform_wraps_children_and_hit_ignores_it() -> Result<(), crate::Error> {
+fn transform_wraps_children_and_hit_uses_the_inverse() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper);
     let clip = tree.clip(0.0)?;
     let shifted = tree.transform()?;
@@ -1072,7 +1180,8 @@ fn transform_wraps_children_and_hit_ignores_it() -> Result<(), crate::Error> {
     tree.layout()?;
     let before = tree.rect(text)?;
     tree.set_transform(shifted, 40.0, 0.0, 0.0, 2.0)?;
-    assert!(tree.is_dirty());
+    assert!(tree.needs_paint());
+    assert!(!tree.needs_layout());
     assert_eq!(tree.rect(text)?, before);
     let list = tree.record()?;
     assert!(matches!(
@@ -1083,7 +1192,8 @@ fn transform_wraps_children_and_hit_ignores_it() -> Result<(), crate::Error> {
                 translate_x,
                 translate_y,
                 rotate_rad,
-                scale,
+                scale_x,
+                scale_y,
             },
             protocol::Command::Text { utf8, x, y, .. },
             protocol::Command::Pop,
@@ -1091,29 +1201,37 @@ fn transform_wraps_children_and_hit_ignores_it() -> Result<(), crate::Error> {
         ] if *translate_x == 40.0
             && *translate_y == 0.0
             && *rotate_rad == 0.0
-            && *scale == 2.0
-            && utf8 == "Hi"
+            && *scale_x == 2.0
+            && *scale_y == 2.0
+            && utf8.as_ref() == "Hi"
             && *x == before.x
             && *y == before.y
     ));
-    let region = tree.pointer_region()?;
-    let target = tree.sized(16.0, 16.0)?;
-    tree.add_child(region, target)?;
-    tree.add_child(shifted, region)?;
-    tree.layout()?;
-    let spot = tree.rect(target)?;
-    assert_eq!(
-        tree.pointer(event(Phase::Down, spot.x + 1.0, spot.y + 1.0)),
-        vec![Gesture::Press(region)]
-    );
-    assert!(
-        tree.pointer(event(Phase::Down, spot.x + 40.0, spot.y + 1.0))
-            .is_empty()
-    );
     assert!(matches!(
         tree.set_transform(text, 0.0, 0.0, 0.0, 1.0),
         Err(crate::Error::WrongKind)
     ));
+
+    let mut tree = Tree::new(MonoShaper);
+    let shifted = tree.transform()?;
+    let region = tree.pointer_region()?;
+    let target = tree.sized(16.0, 16.0)?;
+    tree.add_child(region, target)?;
+    tree.add_child(shifted, region)?;
+    tree.set_transform(shifted, 40.0, 0.0, 0.0, 2.0)?;
+    tree.layout()?;
+    let spot = tree.rect(target)?;
+    let visual_x = spot.x * 2.0 + 40.0;
+    let visual_y = spot.y * 2.0;
+    assert!(
+        tree.pointer(event(Phase::Down, spot.x + 1.0, spot.y + 1.0))
+            .is_empty(),
+        "the untransformed layout point is not the painted point"
+    );
+    assert_eq!(
+        tree.pointer(event(Phase::Down, visual_x + 1.0, visual_y + 1.0)),
+        vec![Gesture::Press(region)]
+    );
     Ok(())
 }
 
@@ -1126,11 +1244,14 @@ fn click_moves_focus_and_a_locked_drag_does_not() -> Result<(), crate::Error> {
     let plain = tree.pointer_region()?;
     let field_box = tree.sized(40.0, 20.0)?;
     let plain_box = tree.sized(40.0, 20.0)?;
+    let tail = tree.sized(40.0, 200.0)?;
     tree.set_focusable(field, true)?;
+    tree.set_fill(scroll)?;
     tree.add_child(field, field_box)?;
     tree.add_child(plain, plain_box)?;
     tree.add_child(column, field)?;
     tree.add_child(column, plain)?;
+    tree.add_child(column, tail)?;
     tree.add_child(scroll, column)?;
     tree.set_viewport(0.0, 0.0, 40.0, 80.0)?;
     tree.layout()?;
@@ -1328,6 +1449,7 @@ fn hover_enters_and_leaves_and_a_wheel_does_not_scroll() -> Result<(), crate::Er
     let mut tree = Tree::new(MonoShaper);
     let scroll = tree.scroll()?;
     let child = tree.image("asset:a", 40.0, 80.0)?;
+    tree.set_max_size(scroll, 40.0, 40.0)?;
     tree.add_child(scroll, child)?;
     tree.set_viewport(0.0, 0.0, 40.0, 40.0)?;
     tree.layout()?;
@@ -1401,11 +1523,15 @@ fn secondary_move_past_the_slop_cancels_the_click() -> Result<(), crate::Error> 
 #[test]
 fn secondary_during_a_primary_drag_leaves_the_drag_end() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper);
+    tree.set_viewport(0.0, 0.0, 100.0, 40.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
     let scroll = tree.scroll()?;
     let region = tree.pointer_region()?;
-    let child = tree.sized(80.0, 80.0)?;
+    let child = tree.sized(80.0, 200.0)?;
     tree.add_child(region, child)?;
     tree.add_child(scroll, region)?;
+    tree.add_child(root, scroll)?;
     tree.layout()?;
     assert_eq!(
         tree.pointer(timed(Phase::Down, 10.0, 10.0, 0.0)),
@@ -1453,13 +1579,246 @@ fn auxiliary_click_is_ignored() -> Result<(), crate::Error> {
     Ok(())
 }
 
+#[test]
+fn a_switch_hint_marks_checked_and_activate_clicks() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    let region = tree.pointer_region()?;
+    let child = tree.sized(40.0, 20.0)?;
+    tree.add_child(region, child)?;
+    tree.set_semantics(
+        region,
+        crate::SemanticsHint {
+            role: Some(crate::SemanticsRole::Switch),
+            label: Some("On".to_string()),
+            checked: Some(true),
+            ..crate::SemanticsHint::default()
+        },
+    )?;
+    tree.layout()?;
+    let update = tree.semantics().expect("semantics");
+    let node = update
+        .nodes
+        .iter()
+        .find(|node| node.id == crate::SemanticsId::from_node(region))
+        .expect("switch");
+    assert_eq!(node.role, crate::SemanticsRole::Switch);
+    assert!(node.flags.contains(crate::SemanticsFlags::CHECKED));
+    assert!(
+        tree.semantics_action(crate::SemanticsAction::Activate(node.id))
+            .contains(&Gesture::Click(region))
+    );
+    Ok(())
+}
+
+#[test]
+fn a_second_pointer_does_not_cancel_the_first() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    let region = tree.pointer_region()?;
+    let child = tree.sized(40.0, 20.0)?;
+    tree.add_child(region, child)?;
+    tree.layout()?;
+    let mut second = event(Phase::Down, 10.0, 10.0);
+    second.pointer = crate::PointerId(1);
+    assert_eq!(
+        tree.pointer(event(Phase::Down, 10.0, 10.0)),
+        vec![Gesture::Press(region)]
+    );
+    assert_eq!(tree.pointer(second), vec![Gesture::Press(region)]);
+    assert_eq!(
+        tree.pointer(event(Phase::Up, 10.0, 10.0)),
+        vec![Gesture::Release(region), Gesture::Click(region)]
+    );
+    second.phase = Phase::Up;
+    assert_eq!(
+        tree.pointer(second),
+        vec![Gesture::Release(region), Gesture::Click(region)]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_rounded_clip_misses_its_corner() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    let clip = tree.clip(8.0)?;
+    let region = tree.pointer_region()?;
+    let child = tree.sized(20.0, 20.0)?;
+    tree.add_child(region, child)?;
+    tree.add_child(clip, region)?;
+    tree.layout()?;
+    assert!(
+        tree.pointer(event(Phase::Down, 1.0, 1.0)).is_empty(),
+        "the corner outside the radius is clipped"
+    );
+    assert_eq!(
+        tree.pointer(event(Phase::Down, 10.0, 10.0)),
+        vec![Gesture::Press(region)]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_drag_at_the_inner_edge_locks_the_outer_scroll() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    tree.set_viewport(0.0, 0.0, 100.0, 80.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let outer = tree.scroll()?;
+    let column = tree.column(0.0)?;
+    let inner = tree.scroll()?;
+    tree.set_max_size(inner, 80.0, 40.0)?;
+    let inner_body = tree.image("asset:a", 80.0, 200.0)?;
+    let tail = tree.sized(80.0, 200.0)?;
+    tree.add_child(inner, inner_body)?;
+    tree.add_child(column, inner)?;
+    tree.add_child(column, tail)?;
+    tree.add_child(outer, column)?;
+    tree.add_child(root, outer)?;
+    tree.layout()?;
+    tree.set_scroll_offset(outer, 0.0, 30.0)?;
+    tree.layout()?;
+    assert!(tree.rect(inner)?.h + 1.0 < tree.rect(inner_body)?.h);
+    let _ = tree.pointer(timed(Phase::Down, 10.0, 4.0, 0.0));
+    let locked = tree.pointer(timed(Phase::Move, 10.0, 24.0, 16.0));
+    assert!(
+        locked.contains(&Gesture::DragBegin(outer)),
+        "inner offset is zero, so a downward drag goes to the outer scroll: {locked:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_second_finger_does_not_drag_the_same_scroll() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    tree.set_viewport(0.0, 0.0, 100.0, 40.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let scroll = tree.scroll()?;
+    let body = tree.image("asset:a", 80.0, 200.0)?;
+    tree.add_child(scroll, body)?;
+    tree.add_child(root, scroll)?;
+    tree.layout()?;
+    tree.set_scroll_offset(scroll, 0.0, 40.0)?;
+    tree.layout()?;
+    assert!(matches!(
+        tree.pointer(timed(Phase::Down, 10.0, 10.0, 0.0)).as_slice(),
+        []
+    ));
+    let first = tree.pointer(timed(Phase::Move, 10.0, 30.0, 16.0));
+    assert!(first.contains(&Gesture::DragBegin(scroll)));
+    let mut second = timed(Phase::Down, 20.0, 10.0, 20.0);
+    second.pointer = crate::PointerId(1);
+    let _ = tree.pointer(second);
+    second.phase = Phase::Move;
+    second.y = 40.0;
+    let extra = tree.pointer(second);
+    assert!(
+        !extra
+            .iter()
+            .any(|gesture| matches!(gesture, Gesture::DragBegin(_))),
+        "the scroll already has a finger: {extra:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_horizontal_claim_keeps_a_sideways_drag_off_the_scroll() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    tree.set_viewport(0.0, 0.0, 100.0, 40.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let scroll = tree.scroll()?;
+    let region = tree.pointer_region()?;
+    let child = tree.sized(80.0, 200.0)?;
+    tree.add_child(region, child)?;
+    tree.add_child(scroll, region)?;
+    tree.add_child(root, scroll)?;
+    tree.set_drag_claim(region, crate::DragClaim::Horizontal)?;
+    tree.layout()?;
+    assert_eq!(
+        tree.pointer(event(Phase::Down, 10.0, 10.0)),
+        vec![Gesture::Press(region)]
+    );
+    let sideways = tree.pointer(event(Phase::Move, 30.0, 12.0));
+    assert!(
+        sideways.contains(&Gesture::DragBegin(region)),
+        "horizontal claim wins: {sideways:?}"
+    );
+    assert!(!sideways.contains(&Gesture::Release(region)));
+    Ok(())
+}
+
+#[test]
+fn caret_at_a_point_uses_mono_advances() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    let text = tree.text("Hi", 16.0, [0, 0, 0, 255])?;
+    tree.layout()?;
+    let rect = tree.rect(text)?;
+    let caret = tree.caret_at(text, rect.x + 12.0, rect.y + 1.0)?;
+    assert_eq!(caret.unit, 2);
+    assert!((caret.x - 16.0).abs() < 0.1, "caret x {}", caret.x);
+    let word = tree.word_range(text, 0)?;
+    assert_eq!(word, (0, 2));
+    Ok(())
+}
+
+#[test]
+fn vertical_motion_moves_between_wrapped_lines() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    tree.set_viewport(0.0, 0.0, 20.0, 80.0)?;
+    let root = tree.column(0.0)?;
+    let text = tree.text("abcd", 16.0, [0, 0, 0, 255])?;
+    tree.add_child(root, text)?;
+    tree.layout()?;
+    let loaded = tree.text_edit(text, crate::Edit::Load("abcd".to_owned()))?;
+    assert_eq!(loaded.selection.extent, 4);
+    let up = tree.text_edit(text, crate::Edit::Up)?;
+    assert!(
+        up.selection.extent < 4,
+        "up stays on the first line, extent {}",
+        up.selection.extent
+    );
+    let down = tree.text_edit(text, crate::Edit::Down)?;
+    assert_eq!(down.selection.extent, 4);
+    Ok(())
+}
+
+#[test]
+fn focus_step_stays_inside_the_scope() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper);
+    let outer = tree.pointer_region()?;
+    let scope = tree.column(0.0)?;
+    let inner = tree.pointer_region()?;
+    let box_a = tree.sized(20.0, 20.0)?;
+    let box_b = tree.sized(20.0, 20.0)?;
+    tree.add_child(outer, box_a)?;
+    tree.add_child(inner, box_b)?;
+    tree.add_child(scope, inner)?;
+    tree.add_child(outer, scope)?;
+    tree.set_focusable(outer, true)?;
+    tree.set_focusable(inner, true)?;
+    tree.layout()?;
+    tree.push_focus_scope(scope)?;
+    assert_eq!(
+        tree.focus_step(crate::FocusDirection::Next),
+        vec![Gesture::Focus(inner)]
+    );
+    assert_eq!(
+        tree.focus_step(crate::FocusDirection::Next),
+        Vec::<Gesture>::new()
+    );
+    tree.pop_focus_scope();
+    let stepped = tree.focus_step(crate::FocusDirection::Next);
+    assert_eq!(stepped, vec![Gesture::Blur(inner), Gesture::Focus(outer)]);
+    Ok(())
+}
+
 fn texts(tree: &Tree) -> Result<Vec<String>, crate::Error> {
     Ok(tree
         .record()?
         .commands
         .iter()
         .filter_map(|command| match command {
-            protocol::Command::Text { utf8, .. } => Some(utf8.clone()),
+            protocol::Command::Text { utf8, .. } => Some(utf8.to_string()),
             _ => None,
         })
         .collect())

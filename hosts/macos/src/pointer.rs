@@ -23,11 +23,14 @@ pub fn pointer_event(
 ) -> PointerEvent {
     let (x, y) = scene_point(local_x, local_y, view_height);
     PointerEvent {
+        pointer: core::PointerId(0),
+        kind: core::PointerKind::Mouse,
         phase,
         x,
         y,
         time_ms,
         button,
+        buttons: core::Buttons::from_button(button),
         modifiers,
         dx,
         dy,

@@ -1,15 +1,14 @@
 //! AppKit window. The render thread owns the engine and the session.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
-use std::sync::{Arc, Mutex};
 
 use hostshell::{
-    Boot, BootError, Command, Launch as ShellLaunch, Link, LogLevel, NativePtr, Poster, Services,
-    SessionError, SurfaceTarget, metrics,
+    Boot, BootError, Command, Launch as ShellLaunch, Link, LogLevel, NativePtr, PlatformBridge,
+    Poster, Services, SessionError, SurfaceTarget, metrics,
 };
 use objc2::AnyThread;
 use objc2::rc::Retained;
@@ -17,13 +16,14 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel}
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, available, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSEvent, NSEventModifierFlags, NSScreen, NSTextInputClient, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSEvent, NSEventModifierFlags, NSFont, NSFontTextStyleBody, NSScreen, NSTextInputClient,
+    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSWorkspace,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{
-    NSArray, NSAttributedString, NSNotFound, NSNotification, NSPoint, NSRange, NSRect, NSString,
-    NSUInteger,
+    NSArray, NSAttributedString, NSDictionary, NSLocale, NSNotFound, NSNotification, NSPoint,
+    NSRange, NSRect, NSString, NSUInteger,
 };
 use session::{InputEvent, Key};
 
@@ -31,7 +31,6 @@ use crate::text_client::Marked;
 use objc2_metal::{MTLCreateSystemDefaultDevice, MTLPixelFormat};
 use objc2_quartz_core::{CALayer, CAMetalLayer};
 
-use crate::pixels::Rgba;
 use crate::pointer::pointer_event;
 use crate::surface::MetalSurface;
 use crate::vsync::DisplayLink;
@@ -64,6 +63,7 @@ struct ContentIvars {
     wants_ime: Cell<bool>,
     marked: RefCell<Marked>,
     tracking: RefCell<Option<Retained<NSTrackingArea>>>,
+    a11y: crate::a11y::A11yHost,
 }
 
 define_class!(
@@ -112,9 +112,13 @@ define_class!(
 
         #[unsafe(method(selectedRange))]
         fn selectedRange(&self) -> NSRange {
+            let marked = self.ivars().marked.borrow();
             NSRange {
-                location: self.ivars().marked.borrow().caret_utf16() as NSUInteger,
-                length: 0,
+                location: marked.selection.start as NSUInteger,
+                length: marked
+                    .selection
+                    .end
+                    .saturating_sub(marked.selection.start) as NSUInteger,
             }
         }
 
@@ -169,7 +173,12 @@ define_class!(
                     };
                 }
             }
-            self.screen_bounds()
+            let caret = self.ivars().marked.borrow().caret;
+            if caret.w > 0.0 && caret.h > 0.0 {
+                self.scene_rect_to_screen(caret)
+            } else {
+                self.screen_bounds()
+            }
         }
 
         #[unsafe(method(characterIndexForPoint:))]
@@ -181,7 +190,17 @@ define_class!(
     impl ContentView {
         #[unsafe(method(acceptsFirstResponder))]
         fn accepts_first_responder(&self) -> bool {
-            self.ivars().wants_ime.get()
+            self.window().is_some()
+        }
+
+        #[unsafe(method(isAccessibilityElement))]
+        fn is_accessibility_element(&self) -> bool {
+            false
+        }
+
+        #[unsafe(method_id(accessibilityChildren))]
+        fn accessibility_children(&self) -> Retained<NSArray<crate::a11y::A11yNode>> {
+            self.ivars().a11y.root_children()
         }
 
         #[unsafe(method(keyDown:))]
@@ -250,6 +269,7 @@ impl ContentView {
             wants_ime: Cell::new(false),
             marked: RefCell::new(Marked::default()),
             tracking: RefCell::new(None),
+            a11y: crate::a11y::A11yHost::new(),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer. The ivars are
         // already installed, and `frame` is a finite content rectangle.
@@ -279,11 +299,14 @@ impl ContentView {
 
     fn post_outside(&self, event: &NSEvent) {
         self.ivars().poster.post(Command::Pointer(PointerEvent {
+            pointer: core::PointerId(0),
+            kind: core::PointerKind::Mouse,
             phase: Phase::Move,
             x: -1.0,
             y: -1.0,
             time_ms: event.timestamp() * 1000.0,
             button: Button::None,
+            buttons: core::Buttons::empty(),
             modifiers: modifiers_of(event),
             dx: 0.0,
             dy: 0.0,
@@ -332,20 +355,34 @@ impl ContentView {
 
     fn perform_command(&self, selector: Sel) {
         let name = selector_name(selector);
+        if let Some(press) = command_key(&name) {
+            self.post_edits(vec![InputEvent::Key(press)]);
+            return;
+        }
         let events = match name.as_str() {
-            "insertNewline:" => vec![InputEvent::Key(Key::Enter)],
-            "insertTab:" => vec![InputEvent::Key(Key::Tab)],
             "deleteBackward:" => self.ivars().marked.borrow_mut().backspace(),
-            "moveLeft:" => vec![InputEvent::Key(Key::Left)],
-            "moveRight:" => vec![InputEvent::Key(Key::Right)],
-            "moveUp:" => vec![InputEvent::Key(Key::Up)],
-            "moveDown:" => vec![InputEvent::Key(Key::Down)],
+            "copy:" => vec![InputEvent::Copy],
+            "cut:" => vec![InputEvent::Cut],
+            "paste:" => vec![InputEvent::Paste(read_pasteboard())],
             _ => {
                 eprintln!("uifw text command ignored: {name}");
                 return;
             }
         };
         self.post_edits(events);
+    }
+
+    fn scene_rect_to_screen(&self, rect: core::Rect) -> NSRect {
+        let height = self.bounds().size.height;
+        let local = NSRect::new(
+            NSPoint::new(rect.x as f64, height - rect.y as f64 - rect.h as f64),
+            CGSize::new(rect.w as f64, rect.h as f64),
+        );
+        let in_window = self.convertRect_toView(local, None);
+        match self.window() {
+            Some(window) => window.convertRectToScreen(in_window),
+            None => in_window,
+        }
     }
 
     fn screen_bounds(&self) -> NSRect {
@@ -357,20 +394,32 @@ impl ContentView {
         }
     }
 
-    fn apply_ime(&self, enabled: bool) {
-        self.ivars().wants_ime.set(enabled);
+    fn apply_semantics(&self, update: core::SemanticsUpdate) {
+        self.ivars().a11y.apply(
+            self.mtm(),
+            &self.ivars().poster,
+            self as *const ContentView as *const NSView,
+            &update,
+        );
+    }
+
+    fn apply_ime_update(&self, update: &session::ImeUpdate) {
         let Some(window) = self.window() else {
             return;
         };
-        if enabled {
-            let _: bool = window.makeFirstResponder(Some(self));
-        } else {
-            let _: bool = window.makeFirstResponder(None);
+        match update {
+            session::ImeUpdate::Hide => {
+                self.ivars().wants_ime.set(false);
+                let _: bool = window.makeFirstResponder(None);
+            }
+            session::ImeUpdate::Show(state) | session::ImeUpdate::Update(state) => {
+                self.ivars().marked.borrow_mut().apply(state);
+                self.ivars().wants_ime.set(true);
+                if matches!(update, session::ImeUpdate::Show(_)) {
+                    let _: bool = window.makeFirstResponder(Some(self));
+                }
+            }
         }
-    }
-
-    fn apply_ime_text(&self, text: String) {
-        self.ivars().marked.borrow_mut().replace_committed(text);
     }
 }
 
@@ -410,7 +459,32 @@ define_class!(
 
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _notification: &NSNotification) {
+            self.ivars()
+                .link
+                .post(Command::Lifecycle(session::Lifecycle::Detached));
             let _ = self.ivars().link.shutdown_and_join();
+        }
+
+        #[unsafe(method(applicationDidBecomeActive:))]
+        fn did_become_active(&self, _notification: &NSNotification) {
+            self.ivars()
+                .link
+                .post(Command::Lifecycle(session::Lifecycle::Resumed));
+            self.post_settings();
+        }
+
+        #[unsafe(method(applicationWillResignActive:))]
+        fn will_resign_active(&self, _notification: &NSNotification) {
+            self.ivars()
+                .link
+                .post(Command::Lifecycle(session::Lifecycle::Inactive));
+        }
+
+        #[unsafe(method(applicationDidHide:))]
+        fn did_hide(&self, _notification: &NSNotification) {
+            self.ivars()
+                .link
+                .post(Command::Lifecycle(session::Lifecycle::Hidden));
         }
     }
 
@@ -429,6 +503,30 @@ define_class!(
         #[unsafe(method(windowDidChangeBackingProperties:))]
         fn window_did_change_backing(&self, _notification: &NSNotification) {
             self.post_metrics();
+        }
+
+        #[unsafe(method(windowDidBecomeKey:))]
+        fn window_did_become_key(&self, _notification: &NSNotification) {
+            self.ivars().link.post(Command::WindowFocus(true));
+        }
+
+        #[unsafe(method(windowDidResignKey:))]
+        fn window_did_resign_key(&self, _notification: &NSNotification) {
+            self.ivars().link.post(Command::WindowFocus(false));
+        }
+
+        #[unsafe(method(windowDidMiniaturize:))]
+        fn window_did_miniaturize(&self, _notification: &NSNotification) {
+            self.ivars()
+                .link
+                .post(Command::Lifecycle(session::Lifecycle::Hidden));
+        }
+
+        #[unsafe(method(windowDidDeminiaturize:))]
+        fn window_did_deminiaturize(&self, _notification: &NSNotification) {
+            self.ivars()
+                .link
+                .post(Command::Lifecycle(session::Lifecycle::Resumed));
         }
     }
 );
@@ -454,9 +552,11 @@ impl Host {
         let scale = point_scale(window, self.mtm());
         let layer = Retained::as_ptr(&self.ivars().layer) as *mut c_void;
         self.ivars().link.post(Command::SurfaceReady(SurfaceTarget {
+            id: hostshell::SurfaceId::fresh(),
             layer: NativePtr(layer),
             metrics: metrics(CONTENT_WIDTH as f32, CONTENT_HEIGHT as f32, scale as f32),
         }));
+        self.post_settings();
         println!("uifw host ready");
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
@@ -491,31 +591,111 @@ impl Host {
             scale as f32,
         )));
     }
+
+    fn post_settings(&self) {
+        self.ivars()
+            .link
+            .post(Command::Settings(current_settings()));
+    }
+}
+
+fn current_settings() -> session::PlatformSettings {
+    let locale = NSLocale::currentLocale()
+        .localeIdentifier()
+        .to_string()
+        .replace('_', "-");
+    let mut text_scale = 1.0;
+    let mut brightness = session::Brightness::Light;
+    let mut reduce_motion = false;
+    let mut high_contrast = false;
+    if let Some(mtm) = MainThreadMarker::new() {
+        let name = NSApplication::sharedApplication(mtm)
+            .effectiveAppearance()
+            .name()
+            .to_string();
+        brightness = appearance_brightness(&name);
+        let workspace = NSWorkspace::sharedWorkspace();
+        reduce_motion = workspace.accessibilityDisplayShouldReduceMotion();
+        high_contrast = workspace.accessibilityDisplayShouldIncreaseContrast();
+        let options: Retained<NSDictionary<objc2_app_kit::NSFontTextStyleOptionKey, AnyObject>> =
+            NSDictionary::new();
+        let font =
+            unsafe { NSFont::preferredFontForTextStyle_options(NSFontTextStyleBody, &options) };
+        text_scale = text_scale_from_point_size(font.pointSize());
+    }
+    session::PlatformSettings {
+        locale,
+        text_scale,
+        brightness,
+        reduce_motion,
+        bold_text: false,
+        high_contrast,
+    }
+}
+
+/// `Dark` when the appearance name contains `Dark`.
+pub(crate) fn appearance_brightness(name: &str) -> session::Brightness {
+    if name.contains("Dark") {
+        session::Brightness::Dark
+    } else {
+        session::Brightness::Light
+    }
+}
+
+/// Body point size divided by 13, clamped to `[0.5, 3]`. Non-finite or non-positive sizes are 1.
+pub(crate) fn text_scale_from_point_size(point_size: f64) -> f32 {
+    if !point_size.is_finite() || point_size <= 0.0 {
+        return 1.0;
+    }
+    let scale = (point_size / 13.0) as f32;
+    if !scale.is_finite() {
+        return 1.0;
+    }
+    scale.clamp(0.5, 3.0)
+}
+
+fn command_key(selector: &str) -> Option<session::KeyPress> {
+    let (key, shift) = match selector {
+        "insertNewline:" => (Key::Enter, false),
+        "insertTab:" => (Key::Tab, false),
+        "insertBacktab:" => (Key::Tab, true),
+        "cancelOperation:" => (Key::Escape, false),
+        "deleteForward:" => (Key::Delete, false),
+        "deleteWordBackward:" => (Key::DeleteWord, false),
+        "deleteWordForward:" => (Key::DeleteWordForward, false),
+        "deleteToBeginningOfLine:" => (Key::DeleteToLineStart, false),
+        "deleteToEndOfLine:" => (Key::DeleteToLineEnd, false),
+        "moveLeft:" => (Key::Left, false),
+        "moveRight:" => (Key::Right, false),
+        "moveUp:" => (Key::Up, false),
+        "moveDown:" => (Key::Down, false),
+        "moveLeftAndModifySelection:" => (Key::Left, true),
+        "moveRightAndModifySelection:" => (Key::Right, true),
+        "moveUpAndModifySelection:" => (Key::Up, true),
+        "moveDownAndModifySelection:" => (Key::Down, true),
+        "moveWordLeft:" => (Key::WordLeft, false),
+        "moveWordRight:" => (Key::WordRight, false),
+        "moveWordLeftAndModifySelection:" => (Key::WordLeft, true),
+        "moveWordRightAndModifySelection:" => (Key::WordRight, true),
+        "moveToBeginningOfLine:" | "moveToBeginningOfParagraph:" => (Key::Home, false),
+        "moveToEndOfLine:" | "moveToEndOfParagraph:" => (Key::End, false),
+        "moveToBeginningOfLineAndModifySelection:"
+        | "moveToBeginningOfParagraphAndModifySelection:" => (Key::Home, true),
+        "moveToEndOfLineAndModifySelection:" | "moveToEndOfParagraphAndModifySelection:" => {
+            (Key::End, true)
+        }
+        "moveToBeginningOfDocument:" => (Key::DocumentStart, false),
+        "moveToEndOfDocument:" => (Key::DocumentEnd, false),
+        "moveToBeginningOfDocumentAndModifySelection:" => (Key::DocumentStart, true),
+        "moveToEndOfDocumentAndModifySelection:" => (Key::DocumentEnd, true),
+        _ => return None,
+    };
+    Some(session::KeyPress { key, shift })
 }
 
 struct MacServices {
     font: Vec<u8>,
-    assets: PathBuf,
-    images: Mutex<HashMap<String, Arc<Rgba>>>,
     ime_view: Arc<AtomicPtr<c_void>>,
-}
-
-impl MacServices {
-    fn cached<'a>(&'a self, source: &str) -> Option<&'a Rgba> {
-        let mut images = self
-            .images
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !images.contains_key(source) {
-            let path = asset_png(&self.assets, source)?;
-            let rgba = crate::pixels::load_rgba_png(&path).ok()?;
-            images.insert(source.to_string(), Arc::new(rgba));
-        }
-        let ptr = Arc::as_ptr(images.get(source)?);
-        // SAFETY: the map only inserts. The `Rgba` allocation lives until `MacServices`
-        // drops, which is after `submit` has finished reading these pixels.
-        Some(unsafe { &*ptr })
-    }
 }
 
 impl Services for MacServices {
@@ -523,16 +703,38 @@ impl Services for MacServices {
         (family == FONT_FAMILY).then_some(self.font.as_slice())
     }
 
-    fn image<'a>(&'a self, source: &str) -> Option<engine::ImagePixels<'a>> {
-        let Some(rgba) = self.cached(source) else {
-            self.log(LogLevel::Error, &format!("unresolved image {source}"));
-            return None;
-        };
-        Some(engine::ImagePixels {
-            width: rgba.width,
-            height: rgba.height,
-            rgba: &rgba.pixels,
-        })
+    fn image<'a>(&'a self, _source: &str) -> Option<engine::ImagePixels<'a>> {
+        None
+    }
+
+    fn semantics(&self, update: &core::SemanticsUpdate) {
+        let view = self.ime_view.load(Ordering::Acquire) as usize;
+        if view == 0 {
+            return;
+        }
+        let update = update.clone();
+        dispatch_main(Box::new(move || {
+            // SAFETY: the address is the content view, stored on the main thread
+            // before the run loop, and this closure also runs on the main thread.
+            let view = unsafe { &*(view as *const ContentView) };
+            view.apply_semantics(update);
+        }));
+    }
+
+    fn extra_fonts(&self) -> Vec<(String, Vec<u8>)> {
+        const PATHS: &[&str] = &[
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+            "/System/Library/Fonts/Supplemental/Songti.ttc",
+        ];
+        for path in PATHS {
+            if let Ok(bytes) = std::fs::read(path)
+                && !bytes.is_empty()
+            {
+                return vec![("UIFWSansCJK".to_string(), bytes)];
+            }
+        }
+        Vec::new()
     }
 
     fn log(&self, level: LogLevel, message: &str) {
@@ -542,30 +744,23 @@ impl Services for MacServices {
         }
     }
 
-    fn set_ime(&self, enabled: bool) {
+    fn set_clipboard(&self, text: &str) {
+        let text = text.to_owned();
+        dispatch_main(Box::new(move || write_pasteboard(&text)));
+    }
+
+    fn apply_ime(&self, update: &session::ImeUpdate) {
         let view = self.ime_view.load(Ordering::Acquire) as usize;
         if view == 0 {
             return;
         }
+        let update = update.clone();
         dispatch_main(Box::new(move || {
             // SAFETY: the address is the content view, stored on the main thread before
             // the run loop, and this closure also runs on the main thread. The window
             // retains the view for the process lifetime.
             let view = unsafe { &*(view as *const ContentView) };
-            view.apply_ime(enabled);
-        }));
-    }
-
-    fn set_ime_text(&self, text: &str) {
-        let view = self.ime_view.load(Ordering::Acquire) as usize;
-        if view == 0 {
-            return;
-        }
-        let text = text.to_owned();
-        dispatch_main(Box::new(move || {
-            // SAFETY: same view address as `set_ime`, used only on the main thread.
-            let view = unsafe { &*(view as *const ContentView) };
-            view.apply_ime_text(text);
+            view.apply_ime_update(&update);
         }));
     }
 }
@@ -627,18 +822,18 @@ pub fn run(launch: Launch, assets: PathBuf, font: &[u8]) -> Result<(), RunError>
     };
     let dump_for_surface = dump.clone();
     let on_stop_for_surface = Arc::clone(&on_stop);
-    let images = preload_assets(&assets);
     let ime_view = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
+    let decoder = Arc::new(PngDecoder { directory: assets });
     let link = hostshell::start(Boot {
         font_family: FONT_FAMILY.to_string(),
         launch: shell_launch,
         services: Box::new(MacServices {
             font: font.to_vec(),
-            assets,
-            images: Mutex::new(images),
             ime_view: Arc::clone(&ime_view),
         }),
         vsync: Arc::new(vsync),
+        decoder,
+        bridge: Arc::new(MacBridge),
         open_surface: Box::new(move |_engine, target| {
             Ok(Box::new(MetalSurface::new(
                 target.layer,
@@ -714,25 +909,47 @@ pub fn run(launch: Launch, assets: PathBuf, font: &[u8]) -> Result<(), RunError>
     Ok(())
 }
 
-fn preload_assets(directory: &Path) -> HashMap<String, Arc<Rgba>> {
-    let mut images = HashMap::new();
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return images;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("png") {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-            continue;
-        };
-        let Ok(rgba) = crate::pixels::load_rgba_png(&path) else {
-            continue;
-        };
-        images.insert(format!("asset:{stem}"), Arc::new(rgba));
+struct PngDecoder {
+    directory: PathBuf,
+}
+
+impl hostshell::ImageDecoder for PngDecoder {
+    fn decode(&self, source: &str) -> Result<hostshell::ImageHandle, hostshell::ImageError> {
+        self.decode_at(source, 1)
     }
-    images
+
+    fn decode_at(
+        &self,
+        source: &str,
+        scale_bucket: u8,
+    ) -> Result<hostshell::ImageHandle, hostshell::ImageError> {
+        let scale = f32::from(scale_bucket.max(1));
+        let Some(path) = crate::assets::resolve_asset_path(&self.directory, source, scale) else {
+            return Err(hostshell::ImageError::Missing);
+        };
+        let rgba = crate::pixels::load_rgba_png(&path)
+            .map_err(|error| hostshell::ImageError::Failed(error.to_string()))?;
+        Ok(image_handle(source, rgba))
+    }
+
+    fn decode_bytes(
+        &self,
+        source: &str,
+        bytes: &[u8],
+    ) -> Result<hostshell::ImageHandle, hostshell::ImageError> {
+        let rgba = crate::pixels::load_rgba_bytes(bytes)
+            .map_err(|error| hostshell::ImageError::Failed(error.to_string()))?;
+        Ok(image_handle(source, rgba))
+    }
+}
+
+fn image_handle(source: &str, rgba: crate::pixels::Rgba) -> hostshell::ImageHandle {
+    hostshell::ImageHandle {
+        source: Arc::from(source),
+        generation: 0,
+        size: [rgba.width, rgba.height],
+        pixels: Arc::from(rgba.pixels),
+    }
 }
 
 fn asset_png(directory: &Path, source: &str) -> Option<PathBuf> {
@@ -779,6 +996,165 @@ mod asset_tests {
         assert!(asset_png(Path::new("/assets"), "logo").is_none());
         assert!(asset_png(Path::new("/assets"), "asset:").is_none());
     }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use session::{Brightness, Key};
+
+    use super::{appearance_brightness, command_key, text_scale_from_point_size};
+
+    #[test]
+    fn dark_appearance_names_are_dark() {
+        assert_eq!(
+            appearance_brightness("NSAppearanceNameDarkAqua"),
+            Brightness::Dark
+        );
+        assert_eq!(
+            appearance_brightness("NSAppearanceNameAqua"),
+            Brightness::Light
+        );
+        assert_eq!(
+            appearance_brightness("NSAppearanceNameAccessibilityHighContrastDarkAqua"),
+            Brightness::Dark
+        );
+    }
+
+    #[test]
+    fn text_scale_uses_body_point_size_over_thirteen() {
+        assert_eq!(text_scale_from_point_size(13.0), 1.0);
+        assert_eq!(text_scale_from_point_size(26.0), 2.0);
+        assert_eq!(text_scale_from_point_size(0.0), 1.0);
+        assert_eq!(text_scale_from_point_size(f64::NAN), 1.0);
+        assert_eq!(text_scale_from_point_size(100.0), 3.0);
+    }
+
+    #[test]
+    fn backtab_sets_shift_and_tab_does_not() {
+        let Some(tab) = command_key("insertTab:") else {
+            panic!("tab");
+        };
+        assert_eq!(tab.key, Key::Tab);
+        assert!(!tab.shift);
+        let Some(back) = command_key("insertBacktab:") else {
+            panic!("backtab");
+        };
+        assert_eq!(back.key, Key::Tab);
+        assert!(back.shift);
+        assert!(command_key("copy:").is_none());
+    }
+}
+
+struct MacBridge;
+
+impl PlatformBridge for MacBridge {
+    fn read_clipboard(&self) -> String {
+        on_main_string(read_pasteboard)
+    }
+
+    fn write_clipboard(&self, text: &str) {
+        let text = text.to_owned();
+        on_main_unit(move || write_pasteboard(&text));
+    }
+
+    fn open_url(&self, url: &str) -> Result<(), String> {
+        let url = url.to_owned();
+        on_main_result(move || open_url_main(&url))
+    }
+}
+
+fn on_main_string(work: impl FnOnce() -> String + Send + 'static) -> String {
+    if MainThreadMarker::new().is_some() {
+        return work();
+    }
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    dispatch_main(Box::new(move || {
+        let _ = tx.send(work());
+    }));
+    rx.recv().unwrap_or_default()
+}
+
+fn on_main_unit(work: impl FnOnce() + Send + 'static) {
+    if MainThreadMarker::new().is_some() {
+        work();
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    dispatch_main(Box::new(move || {
+        work();
+        let _ = tx.send(());
+    }));
+    let _ = rx.recv();
+}
+
+fn on_main_result(
+    work: impl FnOnce() -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
+    if MainThreadMarker::new().is_some() {
+        return work();
+    }
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    dispatch_main(Box::new(move || {
+        let _ = tx.send(work());
+    }));
+    match rx.recv() {
+        Ok(result) => result,
+        Err(_) => Err("openURL is not linked".to_owned()),
+    }
+}
+
+fn open_url_main(url: &str) -> Result<(), String> {
+    let Some(workspace) = objc2::runtime::AnyClass::get(c"NSWorkspace") else {
+        return Err("openURL is not linked".to_owned());
+    };
+    let Some(urls) = objc2::runtime::AnyClass::get(c"NSURL") else {
+        return Err("openURL is not linked".to_owned());
+    };
+    let shared: *mut AnyObject = unsafe { msg_send![workspace, sharedWorkspace] };
+    if shared.is_null() {
+        return Err("openURL is not linked".to_owned());
+    }
+    let text = NSString::from_str(url);
+    let nsurl: *mut AnyObject = unsafe { msg_send![urls, URLWithString: &*text] };
+    if nsurl.is_null() {
+        return Err("unsupported URL".to_owned());
+    }
+    let opened: bool = unsafe { msg_send![shared, openURL: nsurl] };
+    if opened {
+        Ok(())
+    } else {
+        Err("openURL failed".to_owned())
+    }
+}
+
+fn write_pasteboard(text: &str) {
+    let Some(class) = objc2::runtime::AnyClass::get(c"NSPasteboard") else {
+        return;
+    };
+    let pasteboard: *mut AnyObject = unsafe { msg_send![class, generalPasteboard] };
+    if pasteboard.is_null() {
+        return;
+    }
+    let value = NSString::from_str(text);
+    let kind = NSString::from_str("public.utf8-plain-text");
+    let _: () = unsafe { msg_send![pasteboard, clearContents] };
+    let _: bool = unsafe { msg_send![pasteboard, setString: &*value, forType: &*kind] };
+}
+
+fn read_pasteboard() -> String {
+    let Some(class) = objc2::runtime::AnyClass::get(c"NSPasteboard") else {
+        return String::new();
+    };
+    let pasteboard: *mut AnyObject = unsafe { msg_send![class, generalPasteboard] };
+    if pasteboard.is_null() {
+        return String::new();
+    }
+    let kind = NSString::from_str("public.utf8-plain-text");
+    let value: *mut AnyObject = unsafe { msg_send![pasteboard, stringForType: &*kind] };
+    if value.is_null() {
+        return String::new();
+    }
+    unsafe { &*value.cast::<NSString>() }.to_string()
 }
 
 fn wake_main() {

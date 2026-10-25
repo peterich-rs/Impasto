@@ -1,12 +1,14 @@
 //! Slots, generations, and structural edits.
 
 use std::cell::Cell;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use protocol::TextStyle;
 use taffy::prelude::*;
 
 use super::layout::{align_axes, finite_number, flex_style, scroll_style, stack_style, tracks};
-use super::node::{Hit, ImageNode, Kind, MAX_GENERATION, Node, Slot, TextNode};
+use super::node::{DragClaim, Hit, ImageNode, Kind, MAX_GENERATION, Node, Slot, TextNode};
 use super::{Alignment, Discarded, Gesture, NodeId, TrackSize, Tree};
 use crate::{Error, Shaper};
 
@@ -18,13 +20,16 @@ impl Tree {
             taffy: TaffyTree::new(),
             shaper: Box::new(shaper),
             root: None,
-            pressed: None,
-            secondary: None,
+            arena: super::gesture::GestureArena::default(),
             focused: None,
-            hovered: None,
-            pending: Vec::new(),
-            drag: None,
-            dirty: false,
+            scopes: Vec::new(),
+            fling: HashMap::new(),
+            scroll_notices: Vec::new(),
+            editors: HashMap::new(),
+            needs_layout: false,
+            needs_paint: false,
+            layout_passes: 0,
+            text_scale: 1.0,
             laid_out: false,
             origin: (0.0, 0.0),
             viewport: None,
@@ -142,7 +147,7 @@ impl Tree {
 
     /// Clips descendants to this border box. A radius of zero is a rectangle.
     ///
-    /// Hit testing uses that rectangle. The rounded outline does not change hits.
+    /// Hit testing uses the rounded outline. A point in the corner does not reach a child.
     pub fn clip(&mut self, corner_radius: f32) -> Result<NodeId, Error> {
         let id = self.container(Kind::Clip, Hit::Defer, stack_style())?;
         self.node_mut(id)?.corner_radius = corner_radius;
@@ -164,7 +169,10 @@ impl Tree {
         self.container(Kind::Scroll, Hit::Defer, scroll_style())
     }
 
-    /// A paint transform around the current origin. Layout and hit testing ignore it.
+    /// A paint transform around the current origin. Layout ignores it.
+    ///
+    /// Hit testing inverts the same translate, clockwise rotate, and uniform scale
+    /// the recorder pushes.
     ///
     /// The initial transform is identity: no translation, no rotation, scale 1.
     pub fn transform(&mut self) -> Result<NodeId, Error> {
@@ -206,6 +214,8 @@ impl Tree {
                     color,
                     max_width: Cell::new(0.0),
                     style: TextStyle::default(),
+                    spans: Vec::new(),
+                    links: Vec::new(),
                 }),
                 image: None,
                 fill: None,
@@ -216,7 +226,17 @@ impl Tree {
                 translate_y: 0.0,
                 rotate_rad: 0.0,
                 scale: 1.0,
+                scale_y: 1.0,
+                stroke_width: 0.0,
+                stroke_color: [0, 0, 0, 0],
+                gradient: None,
+                shadow: None,
+                blur: 0.0,
+                backdrop: 0.0,
+                blend: protocol::BlendMode::SrcOver,
                 focusable: false,
+                drag_claim: DragClaim::None,
+                semantics: None,
                 x: 0.0,
                 y: 0.0,
                 w: 0.0,
@@ -258,6 +278,8 @@ impl Tree {
                     source: source.into(),
                     width,
                     height,
+                    mode: protocol::ContentMode::Fill,
+                    required: false,
                 }),
                 fill: None,
                 corner_radius: 0.0,
@@ -267,7 +289,17 @@ impl Tree {
                 translate_y: 0.0,
                 rotate_rad: 0.0,
                 scale: 1.0,
+                scale_y: 1.0,
+                stroke_width: 0.0,
+                stroke_color: [0, 0, 0, 0],
+                gradient: None,
+                shadow: None,
+                blur: 0.0,
+                backdrop: 0.0,
+                blend: protocol::BlendMode::SrcOver,
                 focusable: false,
+                drag_claim: DragClaim::None,
+                semantics: None,
                 x: 0.0,
                 y: 0.0,
                 w: 0.0,
@@ -385,6 +417,7 @@ impl Tree {
         self.node_mut(child)?.parent = None;
         self.release_taffy(child)?;
         let mut gestures = self.blur_contained(child);
+        self.drop_routes_in(child);
         self.mark_structure();
         gestures.extend(self.drain_pending());
         Ok(gestures)
@@ -401,17 +434,15 @@ impl Tree {
             return Err(Error::NotAChild);
         }
         let gestures = self.blur_contained(id);
+        self.drop_routes_in(id);
         if self.node(id)?.taffy.is_some() {
             self.release_taffy(id)?;
         }
         let mut ids = Vec::new();
         self.retire_postorder(id, &mut ids)?;
-        if self
-            .secondary
-            .as_ref()
-            .is_some_and(|press| ids.contains(&press.target))
-        {
-            self.secondary = None;
+        for id in &ids {
+            self.fling.remove(id);
+            self.editors.remove(id);
         }
         self.mark_structure();
         let mut gestures = gestures;
@@ -486,7 +517,17 @@ impl Tree {
                 translate_y: 0.0,
                 rotate_rad: 0.0,
                 scale: 1.0,
+                scale_y: 1.0,
+                stroke_width: 0.0,
+                stroke_color: [0, 0, 0, 0],
+                gradient: None,
+                shadow: None,
+                blur: 0.0,
+                backdrop: 0.0,
+                blend: protocol::BlendMode::SrcOver,
                 focusable: false,
+                drag_claim: DragClaim::None,
+                semantics: None,
                 x: 0.0,
                 y: 0.0,
                 w: 0.0,
@@ -525,18 +566,9 @@ impl Tree {
         if self.root.is_some_and(|root| root.index == index) {
             self.root = None;
         }
-        if self.pressed.is_some_and(|pressed| pressed.index == index) {
-            self.pressed = None;
-        }
+        self.arena.clear_index(index);
         if self.focused.is_some_and(|focused| focused.index == index) {
             self.focused = None;
-        }
-        if self
-            .drag
-            .as_ref()
-            .is_some_and(|drag| drag.scroll.is_some_and(|scroll| scroll.index == index))
-        {
-            self.drag = None;
         }
         let Some(slot) = self.slots.get_mut(index as usize) else {
             return;
@@ -567,6 +599,30 @@ impl Tree {
 
     pub(super) fn get(&self, id: NodeId) -> Option<&Node> {
         self.node(id).ok()
+    }
+
+    /// Every image still attached to the tree, including children of a zero-size clip.
+    pub fn image_source_counts(&self) -> HashMap<Arc<str>, u32> {
+        let mut counts = HashMap::new();
+        if let Some(root) = self.root {
+            self.accumulate_images(root, &mut counts);
+        }
+        counts
+    }
+
+    fn accumulate_images(&self, id: NodeId, counts: &mut HashMap<Arc<str>, u32>) {
+        let Some(node) = self.get(id) else {
+            return;
+        };
+        if let Some(image) = &node.image {
+            if !image.source.is_empty() {
+                *counts.entry(Arc::from(image.source.as_str())).or_insert(0) += 1;
+            }
+        }
+        let children = node.children.clone();
+        for child in children {
+            self.accumulate_images(child, counts);
+        }
     }
 
     pub(super) fn is_under(&self, mut node: NodeId, ancestor: NodeId) -> Result<bool, Error> {
@@ -673,12 +729,10 @@ impl Tree {
     }
 
     pub(super) fn mark_structure(&mut self) {
-        self.dirty = true;
+        self.mark_layout();
         self.laid_out = false;
-        self.pressed = None;
-        self.drag = None;
-        if let Some(id) = self.hovered.take() {
-            self.pending.push(Gesture::Leave(id));
+        if let Some(id) = self.arena.hovered.take() {
+            self.arena.pending.push(Gesture::Leave(id));
         }
     }
 }

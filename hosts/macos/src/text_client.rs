@@ -7,10 +7,28 @@
 
 use session::{InputEvent, Key};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Marked {
     pub committed: String,
     pub composing: String,
+    pub selection: std::ops::Range<u32>,
+    pub caret: core::Rect,
+}
+
+impl Default for Marked {
+    fn default() -> Self {
+        Self {
+            committed: String::new(),
+            composing: String::new(),
+            selection: 0..0,
+            caret: core::Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            },
+        }
+    }
 }
 
 impl Marked {
@@ -35,6 +53,7 @@ impl Marked {
             self.committed.push_str(text);
             events.push(InputEvent::Text(text.to_owned()));
         }
+        self.selection_at_end();
         events
     }
 
@@ -44,6 +63,7 @@ impl Marked {
             return vec![InputEvent::Composing(None)];
         }
         self.composing = text.to_owned();
+        self.selection_at_end();
         vec![InputEvent::Composing(Some(self.composing.clone()))]
     }
 
@@ -68,15 +88,31 @@ impl Marked {
             return Vec::new();
         }
         pop_char(&mut self.committed);
-        vec![InputEvent::Key(Key::Backspace)]
+        self.selection_at_end();
+        vec![InputEvent::Key(session::KeyPress::new(Key::Backspace))]
+    }
+
+    fn selection_at_end(&mut self) {
+        let end = (Self::utf16_len(&self.committed) + Self::utf16_len(&self.composing)) as u32;
+        self.selection = end..end;
     }
 
     pub fn utf16_len(text: &str) -> usize {
         text.encode_utf16().count()
     }
 
+    pub fn apply(&mut self, state: &session::ImeState) {
+        self.committed = state.text.clone();
+        self.selection = state.selection.clone();
+        self.caret = state.caret;
+        self.composing = match &state.composing {
+            Some(range) => utf16_slice(&state.text, range.start, range.end),
+            None => String::new(),
+        };
+    }
+
     pub fn caret_utf16(&self) -> usize {
-        Self::utf16_len(&self.committed) + Self::utf16_len(&self.composing)
+        self.selection.end as usize
     }
 
     /// Marked range in UTF-16 units, or `None` when nothing is composing.
@@ -90,6 +126,15 @@ impl Marked {
             ))
         }
     }
+}
+
+fn utf16_slice(text: &str, start: u32, end: u32) -> String {
+    let units: Vec<u16> = text
+        .encode_utf16()
+        .skip(start as usize)
+        .take(end.saturating_sub(start) as usize)
+        .collect();
+    String::from_utf16_lossy(&units)
 }
 
 fn pop_char(text: &mut String) {
@@ -133,7 +178,10 @@ mod tests {
             vec![InputEvent::Composing(Some("n".to_string()))]
         );
         marked.unmark();
-        assert_eq!(marked.backspace(), vec![InputEvent::Key(Key::Backspace)]);
+        assert_eq!(
+            marked.backspace(),
+            vec![InputEvent::Key(session::KeyPress::new(Key::Backspace))]
+        );
         assert!(marked.committed.is_empty());
         assert!(marked.backspace().is_empty());
     }

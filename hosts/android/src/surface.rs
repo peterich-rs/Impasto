@@ -23,10 +23,6 @@ impl Surface for VulkanSurface {
         };
         match engine.draw_vulkan(swapchain) {
             Ok(()) => Ok(Presented::Continue),
-            Err(engine::Status::NotReady) => {
-                self.swapchain = None;
-                Err(engine::Status::NotReady)
-            }
             Err(status) => Err(status),
         }
     }

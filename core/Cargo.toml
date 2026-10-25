@@ -12,6 +12,7 @@ doctest = false
 protocol = { workspace = true }
 taffy = "0.9"
 thiserror = { workspace = true }
+unicode-segmentation = "1"
 
 [lints]
 workspace = true

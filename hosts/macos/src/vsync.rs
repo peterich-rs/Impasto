@@ -5,7 +5,7 @@ use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::{Arc, Mutex};
 
-use hostshell::Vsync;
+use hostshell::{FrameTime, FrameToken, Vsync};
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{
     CVDisplayLink, CVDisplayLinkOutputCallback, CVGetHostClockFrequency, CVTimeStamp,
@@ -13,7 +13,8 @@ use objc2_core_video::{
 };
 
 struct Callback {
-    post: Mutex<Option<Arc<dyn Fn(f64) + Send + Sync>>>,
+    post: Mutex<Option<Arc<dyn Fn(FrameToken, FrameTime) + Send + Sync>>>,
+    token: Mutex<Option<FrameToken>>,
 }
 
 pub struct DisplayLink {
@@ -46,6 +47,7 @@ impl DisplayLink {
         };
         let callback = Box::into_raw(Box::new(Callback {
             post: Mutex::new(None),
+            token: Mutex::new(None),
         }));
         // SAFETY: `raw` is the link just created. The callback pointer stays
         // alive until `Drop` stops the link and frees it.
@@ -68,7 +70,7 @@ impl DisplayLink {
 }
 
 impl Vsync for DisplayLink {
-    fn bind(&self, post_frame: Arc<dyn Fn(f64) + Send + Sync>) {
+    fn bind(&self, post_frame: Arc<dyn Fn(FrameToken, FrameTime) + Send + Sync>) {
         let callback = unsafe { &*self.callback };
         *callback
             .post
@@ -76,7 +78,12 @@ impl Vsync for DisplayLink {
             .unwrap_or_else(|error| error.into_inner()) = Some(post_frame);
     }
 
-    fn request_frame(&self) {
+    fn request_frame(&self, token: FrameToken) {
+        let callback = unsafe { &*self.callback };
+        *callback
+            .token
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(token);
         if self.link.is_running() {
             return;
         }
@@ -84,6 +91,11 @@ impl Vsync for DisplayLink {
     }
 
     fn cancel(&self) {
+        let callback = unsafe { &*self.callback };
+        *callback
+            .token
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
         if self.link.is_running() {
             let _ = self.link.stop();
         }
@@ -108,11 +120,22 @@ unsafe extern "C-unwind" fn on_frame(
     context: *mut c_void,
 ) -> i32 {
     let callback = unsafe { &*context.cast::<Callback>() };
+    let token = callback
+        .token
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take();
+    let Some(token) = token else {
+        return kCVReturnSuccess;
+    };
     let frequency = CVGetHostClockFrequency();
-    let time_ms = if frequency > 0.0 {
-        unsafe { output.as_ref() }.hostTime as f64 / frequency * 1000.0
-    } else {
-        0.0
+    let now = unsafe { _now.as_ref() };
+    let shown = unsafe { output.as_ref() };
+    let time = FrameTime {
+        vsync_ms: host_ms(now, frequency),
+        target_ms: host_ms(shown, frequency),
+        interval_ms: refresh_ms(shown),
+        mono_ms: 0.0,
     };
     if let Some(post) = callback
         .post
@@ -120,9 +143,24 @@ unsafe extern "C-unwind" fn on_frame(
         .unwrap_or_else(|error| error.into_inner())
         .clone()
     {
-        post(time_ms);
+        post(token, time);
     }
     kCVReturnSuccess
+}
+
+fn host_ms(stamp: &CVTimeStamp, frequency: f64) -> f64 {
+    if frequency > 0.0 {
+        stamp.hostTime as f64 / frequency * 1000.0
+    } else {
+        0.0
+    }
+}
+
+fn refresh_ms(stamp: &CVTimeStamp) -> f64 {
+    if stamp.videoTimeScale <= 0 {
+        return 0.0;
+    }
+    stamp.videoRefreshPeriod as f64 / f64::from(stamp.videoTimeScale) * 1000.0
 }
 
 // The generated binding's callback alias includes `CVOptionFlags`.

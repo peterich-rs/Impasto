@@ -38,7 +38,7 @@ pixel-test:
     UIFW_DUMP=/tmp/uifw-counter-frame.png cargo run --manifest-path "{{root}}/Cargo.toml" -p macos -- "{{counter}}" "{{logo}}"
     UIFW_FRAME=/tmp/uifw-counter-frame.png cargo test --manifest-path "{{root}}/Cargo.toml" -p macos -- --ignored pixels::tests::counter_frame_matches_the_reference --exact
 
-# Cargo cdylib, then the GameActivity APK. Needs the Android NDK and the arm64 Impeller SDK.
+# Cargo cdylib, then the APK. Needs the Android NDK and the arm64 Impeller SDK.
 android:
     #!/usr/bin/env bash
     set -euo pipefail
