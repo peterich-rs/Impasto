@@ -40,7 +40,9 @@ function mockHost() {
     scroll: () => alloc("scroll", []),
     transform: () => alloc("transform", []),
     decorated: (color, radius) => alloc("decorated", [color, radius]),
-    image: (source, width, height) => alloc("image", [source, width, height]),
+    image: (source, width, height, mode, required) =>
+      alloc("image", [source, width, height, mode, required]),
+    setImageMode: (node, mode, required) => note("setImageMode", [node, mode, required]),
     text: (utf8, fontSize, color) => alloc("text", [utf8, fontSize, color]),
     append: (parent, child) => note("append", [parent, child]),
     insert: (parent, child, before) => note("insert", [parent, child, before]),
@@ -62,6 +64,17 @@ function mockHost() {
     setShrink: (node, shrink) => note("setShrink", [node, shrink]),
     setBasis: (node, basis) => note("setBasis", [node, basis]),
     setAlignSelf: (node, align) => note("setAlignSelf", [node, align]),
+    setDragClaim: () => {},
+    caretAt: () => ({ unit: 0, x: 0, y: 0, w: 1, h: 0 }),
+    caretAtUnit: () => ({ x: 0, y: 0, w: 1, h: 0 }),
+    selectionRects: () => [],
+    wordRange: () => ({ start: 0, end: 0 }),
+    focusStep: () => {},
+    pushFocusScope: () => {},
+    popFocusScope: () => {},
+    pointerPosition: () => ({ x: 0, y: 0 }),
+    onBack: () => 0,
+    offBack: () => {},
     setGrow: (node, grow) => note("setGrow", [node, grow]),
     setRadius: (node, radius) => note("setRadius", [node, radius]),
     setAlpha: (node, alpha) => note("setAlpha", [node, alpha]),
@@ -70,6 +83,8 @@ function mockHost() {
     setImage: (node, source, width, height) => note("setImage", [node, source, width, height]),
     setMaxLines: (node, lines) => note("setMaxLines", [node, lines]),
     setEllipsis: (node, text) => note("setEllipsis", [node, text]),
+    setSoftWrap: (node, wrap) => note("setSoftWrap", [node, wrap]),
+    setOverflow: (node, overflow) => note("setOverflow", [node, overflow]),
     setTextAlign: (node, align) => note("setTextAlign", [node, align]),
     setFontWeight: (node, weight) => note("setFontWeight", [node, weight]),
     setTextDirection: (node, direction) => note("setTextDirection", [node, direction]),
@@ -85,9 +100,40 @@ function mockHost() {
     sized: (width, height) => alloc("sized", [width, height]),
     setFocusable: (node, enabled) => note("setFocusable", [node, enabled]),
     focus: (node) => note("focus", [node]),
-    blur: (node) => note("blur", [node]),
+    blur: () => note("blur", []),
+    focused: () => 0,
+    isFocusable: () => false,
     setImeEnabled: (enabled) => note("setImeEnabled", [enabled]),
     setImeText: (text) => note("setImeText", [text]),
+    setImeState: (text) => note("setImeState", [text]),
+    setImeConfig: (keyboard, action) => note("setImeConfig", [keyboard, action]),
+    setSemantics: (node, role) => note("setSemantics", [node, role]),
+    textScale: () => 1,
+    setTextScale: (scale) => note("setTextScale", [scale]),
+    reduceMotion: () => false,
+    settings: () => ({
+      locale: "",
+      textScale: 1,
+      brightness: "light",
+      reduceMotion: false,
+      boldText: false,
+      highContrast: false,
+    }),
+    onSettings: () => 0,
+    offSettings: () => {},
+    graphemeIndex: () => 0,
+    graphemeCount: () => 0,
+    graphemeUnit: () => 0,
+    setReverse: (node, reverse) => note("setReverse", [node, reverse]),
+    setScaleXY: (node, scaleX, scaleY) => note("setScaleXY", [node, scaleX, scaleY]),
+    registerFont: (family, bytes) => note("registerFont", [family, bytes.length]),
+    reload: (source) => note("reload", [source]),
+    setAxisSize: (node, width, height) => note("setAxisSize", [node, width, height]),
+    setAspectRatio: (node, ratio) => note("setAspectRatio", [node, ratio]),
+    setPosition: (node, absolute) => note("setPosition", [node, absolute]),
+    setInset: (node, top, right, bottom, left) => note("setInset", [node, top, right, bottom, left]),
+    setGridPlacement: (node, columnStart, columnEnd, rowStart, rowEnd) =>
+      note("setGridPlacement", [node, columnStart, columnEnd, rowStart, rowEnd]),
     measureText: (text, fontSize, maxWidth, color) => {
       note("measureText", [text, fontSize, maxWidth, color]);
       return { w: text.length, h: fontSize };
@@ -103,11 +149,18 @@ function mockHost() {
     onBlur: (node, fn) => note("onBlur", [node, typeof fn]),
     onKey: (node, fn) => note("onKey", [node, typeof fn]),
     onText: (node, fn) => note("onText", [node, typeof fn]),
+    onTextReplaced: (node, fn) => note("onTextReplaced", [node, typeof fn]),
+    onLink: (node, fn) => note("onLink", [node, typeof fn]),
     onComposing: (node, fn) => note("onComposing", [node, typeof fn]),
     onHover: (node, fn) => note("onHover", [node, typeof fn]),
     onLeave: (node, fn) => note("onLeave", [node, typeof fn]),
     onWheel: (node, fn) => note("onWheel", [node, typeof fn]),
+    onScroll: (node, fn) => note("onScroll", [node, typeof fn]),
     onSecondaryClick: (node, fn) => note("onSecondaryClick", [node, typeof fn]),
+    textEdit: (node, op, text) => {
+      note("textEdit", [node, op, text]);
+      return { text: text ?? "", start: 0, end: 0 };
+    },
     onFrame: (fn) => note("onFrame", [typeof fn]),
   };
   return {
@@ -278,6 +331,40 @@ if (find(mock.calls, "onWheel")?.args[0] !== scroller.id) fail("onWheel");
 const secondary = () => {};
 options.setProperty(field, "onSecondaryClick", secondary);
 if (find(mock.calls, "onSecondaryClick")?.args[0] !== field.id) fail("onSecondaryClick");
+
+options.setProperty(box, "w", "50%");
+const axisCalls = mock.calls.filter((call) => call.name === "setAxisSize" && call.args[0] === box.id);
+const half = axisCalls[axisCalls.length - 1];
+if (half?.args[1] !== "50%" || half.args[2] !== 22) fail("axis percent");
+options.setProperty(box, "h", "auto");
+const autoHeight = mock.calls.filter((call) => call.name === "setAxisSize" && call.args[0] === box.id);
+const autoCall = autoHeight[autoHeight.length - 1];
+if (autoCall?.args[1] !== "50%" || autoCall.args[2] !== "auto") fail("axis auto");
+options.setProperty(box, "aspect", null);
+options.setProperty(box, "absolute", true);
+options.setProperty(box, "insetTop", 10);
+options.setProperty(box, "insetLeft", 4);
+options.setProperty(box, "columnStart", { span: 2 });
+options.setProperty(box, "columnEnd", "auto");
+if (find(mock.calls, "setAspectRatio")?.args[0] !== box.id || find(mock.calls, "setAspectRatio")?.args[1] !== null) {
+  fail("aspect");
+}
+if (find(mock.calls, "setPosition")?.args[1] !== true) fail("absolute");
+const insetCalls = mock.calls.filter((call) => call.name === "setInset" && call.args[0] === box.id);
+const lastInset = insetCalls[insetCalls.length - 1];
+if (lastInset?.args[1] !== 10 || lastInset.args[4] !== 4) fail("inset");
+const placement = mock.calls.filter((call) => call.name === "setGridPlacement" && call.args[0] === box.id);
+const lastPlacement = placement[placement.length - 1];
+if (JSON.stringify(lastPlacement?.args[1]) !== JSON.stringify({ span: 2 }) || lastPlacement?.args[2] !== "auto") {
+  fail("grid line");
+}
+let badAxis = false;
+try {
+  options.setProperty(box, "w", "fill");
+} catch {
+  badAxis = true;
+}
+if (!badAxis) fail("bad axis");
 
 let threw = false;
 try {

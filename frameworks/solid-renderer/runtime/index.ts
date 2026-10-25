@@ -6,6 +6,7 @@ import { hostRendererOptions } from "../src/tree.ts";
 import { host } from "./host.ts";
 import { bindText } from "./text.ts";
 import { bindImage } from "./image.ts";
+import { onFrame, runFrames } from "./frames.ts";
 
 const scene = hostRendererOptions(host);
 bindText(scene);
@@ -33,30 +34,43 @@ export { Image } from "./image.ts";
 export { host } from "./host.ts";
 export type { HostNode as NodeHandle } from "../src/tree.ts";
 
-const ticks: Array<(timeMs: number) => void> = [];
-
-/** Runs after Solid flushes, once per frame the host delivers. */
-export function onFrame(fn: (timeMs: number) => void): void {
-  ticks.push(fn);
-}
+export { frameListenerCount, onFrame } from "./frames.ts";
 
 /** Asks the host for exactly one more frame after the current one. */
 export function requestFrame(): void {
   host.requestFrame();
 }
 
+let overlayId = 0;
+
+/** Fill stack painted after the app column. Dialog moves its children here. */
+export function overlayParent(): number {
+  return overlayId;
+}
+
+/** Drops `node` from its parent and forgets the renderer tables for that subtree. */
+export function removeNode(node: HostNode): void {
+  const parent = scene.getParentNode(node);
+  if (parent) {
+    scene.removeNode(parent, node);
+  }
+}
+
 // App-facing core. Constructors return renderer nodes, not raw ids, because
 // universal treats a bare number as text.
-/** Registers Solid's `flush` and renders `component` into a root column. */
+/** Registers Solid's `flush` and renders `component` into the content column. */
 export function boot(component: () => HostNode) {
-  const root = scene.createElement("column", { gap: 0, fill: true });
-  host.onFrame((timeMs: number) => {
+  const root = scene.createElement("stack", { fill: true });
+  const content = scene.createElement("column", { gap: 0, fill: true });
+  const overlay = scene.createElement("stack", { fill: true });
+  scene.insertNode(root, content);
+  scene.insertNode(root, overlay);
+  overlayId = overlay.id;
+  host.onFrame((targetMs: number, intervalMs: number) => {
     flush();
-    for (const fn of ticks) {
-      fn(timeMs);
-    }
+    runFrames(targetMs, intervalMs);
   });
-  render(component, root);
+  render(component, content);
 }
 
 export const core = {
@@ -78,8 +92,8 @@ export const core = {
   pointerRegion() {
     return scene.createElement("pointer");
   },
-  onFrame(fn: (timeMs: number) => void) {
-    ticks.push(fn);
+  onFrame(fn: (targetMs: number, intervalMs: number) => void) {
+    onFrame(fn);
   },
 };
 

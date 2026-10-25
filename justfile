@@ -19,6 +19,7 @@ kotlin:
 solid:
     UIFW_COUNTER_BYTES="{{counter}}" node --experimental-strip-types "{{root}}/frameworks/solid-renderer/src/encode.test.ts"
     node --conditions=browser --experimental-strip-types "{{root}}/frameworks/solid-renderer/src/tree.test.ts"
+    node --experimental-strip-types "{{root}}/frameworks/solid-renderer/runtime/frame.test.ts"
     node --experimental-strip-types "{{root}}/apps/gallery-solid/gallery.ts"
 
 solid-app:

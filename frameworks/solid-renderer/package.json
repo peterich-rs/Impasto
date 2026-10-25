@@ -6,7 +6,8 @@
   "description": "Solid universal renderer. The encoder records version 1 bytes. The runtime drives core.",
   "exports": {
     ".": "./runtime/index.ts",
-    "./defaults": "./src/defaults.ts"
+    "./defaults": "./src/defaults.ts",
+    "./jsx": "./src/jsx.ts"
   },
   "dependencies": {
     "@solidjs/universal": "2.0.0-rc.17",

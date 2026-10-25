@@ -30,6 +30,8 @@ export function Text(props: {
   color?: string;
   maxLines?: number;
   ellipsis?: string;
+  softWrap?: boolean;
+  overflow?: "clip" | "ellipsis" | "visible";
   textAlign?: "left" | "center" | "right";
   weight?: number;
   direction?: "ltr" | "rtl";
@@ -46,6 +48,8 @@ export function Text(props: {
       color: props.color,
       maxLines: props.maxLines,
       ellipsis: props.ellipsis,
+      softWrap: props.softWrap,
+      overflow: props.overflow,
       textAlign: props.textAlign,
       weight: props.weight,
       direction: props.direction,
@@ -65,6 +69,12 @@ export function Text(props: {
       }
       if (next.ellipsis !== undefined) {
         options.setProperty(node, "ellipsis", next.ellipsis);
+      }
+      if (next.softWrap !== undefined) {
+        options.setProperty(node, "softWrap", next.softWrap);
+      }
+      if (next.overflow !== undefined) {
+        options.setProperty(node, "overflow", next.overflow);
       }
       if (next.textAlign !== undefined) {
         options.setProperty(node, "textAlign", next.textAlign);

@@ -1,6 +1,7 @@
 import { colorBytes } from "./colors.ts";
 import { BUTTON_FILL, FONT_SIZE, TEXT_COLOR } from "./defaults.ts";
-import type { CoreHost } from "./host.ts";
+import type { AxisSize, CoreHost, GridLine, InsetEdge } from "./host.ts";
+import { parseAxisSize, parseGridLine, parseInsetEdge } from "./layout-values.ts";
 
 /**
  * Renderer node. A bare number is text to `@solidjs/universal`, so the host
@@ -33,6 +34,13 @@ function alignName(value: unknown): "start" | "center" | "end" {
     return value;
   }
   return "start";
+}
+
+function overflowName(value: unknown): "clip" | "ellipsis" | "visible" {
+  if (value === "ellipsis" || value === "visible") {
+    return value;
+  }
+  return "clip";
 }
 
 function textAlignName(value: unknown): "left" | "center" | "right" {
@@ -78,10 +86,78 @@ function sizePair(value: unknown): { w: number; h: number } {
   return { w: 0, h: 0 };
 }
 
-export function hostRendererOptions(host: CoreHost): HostRendererOptions {
+export type RetainedCounts = {
+  nodes: number;
+  transforms: number;
+  paddings: number;
+  sizes: number;
+};
+
+export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
+  retainedCounts(): RetainedCounts;
+} {
   const nodes = new Map<number, HostNode>();
   const transforms = new Map<number, TransformValue>();
   const paddings = new Map<number, EdgeValue>();
+  const sizes = new Map<number, { w: AxisSize; h: AxisSize }>();
+  const insets = new Map<number, { top: InsetEdge; right: InsetEdge; bottom: InsetEdge; left: InsetEdge }>();
+  const lines = new Map<
+    number,
+    { columnStart: GridLine; columnEnd: GridLine; rowStart: GridLine; rowEnd: GridLine }
+  >();
+
+  function forget(id: number, seen = new Set<number>()): void {
+    if (id === 0 || seen.has(id)) {
+      return;
+    }
+    seen.add(id);
+    const children: number[] = [];
+    let child = host.firstChild(id);
+    while (child !== 0 && !seen.has(child)) {
+      children.push(child);
+      seen.add(child);
+      child = host.nextSibling(child);
+    }
+    for (const kid of children) {
+      forget(kid, seen);
+    }
+    nodes.delete(id);
+    transforms.delete(id);
+    paddings.delete(id);
+    sizes.delete(id);
+    insets.delete(id);
+    lines.delete(id);
+  }
+  function writeSize(id: number, patch: Partial<{ w: AxisSize; h: AxisSize }>): void {
+    const prev = sizes.get(id) ?? { w: 0, h: 0 };
+    const next = { ...prev, ...patch };
+    sizes.set(id, next);
+    if (typeof next.w === "number" && typeof next.h === "number") {
+      host.setSize(id, next.w, next.h);
+      return;
+    }
+    host.setAxisSize(id, next.w, next.h);
+  }
+  function writeInset(id: number, patch: Partial<{ top: InsetEdge; right: InsetEdge; bottom: InsetEdge; left: InsetEdge }>): void {
+    const prev = insets.get(id) ?? { top: "auto", right: "auto", bottom: "auto", left: "auto" };
+    const next = { ...prev, ...patch };
+    insets.set(id, next);
+    host.setInset(id, next.top, next.right, next.bottom, next.left);
+  }
+  function writeLines(
+    id: number,
+    patch: Partial<{ columnStart: GridLine; columnEnd: GridLine; rowStart: GridLine; rowEnd: GridLine }>,
+  ): void {
+    const prev = lines.get(id) ?? {
+      columnStart: "auto",
+      columnEnd: "auto",
+      rowStart: "auto",
+      rowEnd: "auto",
+    };
+    const next = { ...prev, ...patch };
+    lines.set(id, next);
+    host.setGridPlacement(id, next.columnStart, next.columnEnd, next.rowStart, next.rowEnd);
+  }
   function writeTransform(id: number, patch: Partial<TransformValue>): void {
     const prev = transforms.get(id) ?? { x: 0, y: 0, rotate: 0, scale: 1 };
     const next = { ...prev, ...patch };
@@ -171,6 +247,12 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions {
       case "ellipsis":
         host.setEllipsis(node.id, value == null ? "" : String(value));
         return;
+      case "softWrap":
+        host.setSoftWrap(node.id, value !== false);
+        return;
+      case "overflow":
+        host.setOverflow(node.id, overflowName(value));
+        return;
       case "textAlign":
         host.setTextAlign(node.id, textAlignName(value));
         return;
@@ -182,6 +264,49 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions {
         return;
       case "lineHeight":
         host.setLineHeight(node.id, asNumber(value, 0));
+        return;
+      case "w":
+        writeSize(node.id, { w: parseAxisSize(value) });
+        return;
+      case "h":
+        writeSize(node.id, { h: parseAxisSize(value) });
+        return;
+      case "aspect":
+        if (value === null) {
+          host.setAspectRatio(node.id, null);
+          return;
+        }
+        if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+          host.setAspectRatio(node.id, value);
+          return;
+        }
+        throw new Error("bad aspect");
+      case "absolute":
+        host.setPosition(node.id, value === true);
+        return;
+      case "insetTop":
+        writeInset(node.id, { top: parseInsetEdge(value) });
+        return;
+      case "insetRight":
+        writeInset(node.id, { right: parseInsetEdge(value) });
+        return;
+      case "insetBottom":
+        writeInset(node.id, { bottom: parseInsetEdge(value) });
+        return;
+      case "insetLeft":
+        writeInset(node.id, { left: parseInsetEdge(value) });
+        return;
+      case "columnStart":
+        writeLines(node.id, { columnStart: parseGridLine(value) });
+        return;
+      case "columnEnd":
+        writeLines(node.id, { columnEnd: parseGridLine(value) });
+        return;
+      case "rowStart":
+        writeLines(node.id, { rowStart: parseGridLine(value) });
+        return;
+      case "rowEnd":
+        writeLines(node.id, { rowEnd: parseGridLine(value) });
         return;
       case "family":
         host.setFamily(node.id, value == null ? "" : String(value));
@@ -271,6 +396,16 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions {
           host.onText(node.id, value as (text: string) => void);
         }
         return;
+      case "onTextReplaced":
+        if (typeof value === "function") {
+          host.onTextReplaced(node.id, value as (text: string) => void);
+        }
+        return;
+      case "onLink":
+        if (typeof value === "function") {
+          host.onLink(node.id, value as (link: number) => void);
+        }
+        return;
       case "onComposing":
         if (typeof value === "function") {
           host.onComposing(node.id, value as (text: string | null) => void);
@@ -289,6 +424,11 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions {
       case "onWheel":
         if (typeof value === "function") {
           host.onWheel(node.id, value as (dx: number, dy: number) => void);
+        }
+        return;
+      case "onScroll":
+        if (typeof value === "function") {
+          host.onScroll(node.id, value as (x: number, y: number) => void);
         }
         return;
       case "onSecondaryClick":
@@ -342,9 +482,16 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions {
         case "scroll":
           id = host.scroll();
           break;
-        case "sized":
-          id = host.sized(asNumber(staticProps?.w, 0), asNumber(staticProps?.h, 0));
+        case "sized": {
+          const width = staticProps?.w === undefined ? 0 : parseAxisSize(staticProps.w);
+          const height = staticProps?.h === undefined ? 0 : parseAxisSize(staticProps.h);
+          id = host.sized(typeof width === "number" ? width : 0, typeof height === "number" ? height : 0);
+          sizes.set(id, { w: width, h: height });
+          if (typeof width !== "number" || typeof height !== "number") {
+            host.setAxisSize(id, width, height);
+          }
           break;
+        }
         case "transform":
           id = host.transform();
           break;
@@ -359,6 +506,8 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions {
             staticProps?.source == null ? "" : String(staticProps.source),
             asNumber(staticProps?.w, 0),
             asNumber(staticProps?.h, 0),
+            staticProps?.mode == null ? "fill" : String(staticProps.mode),
+            staticProps?.required === true,
           );
           break;
         default:
@@ -377,7 +526,9 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions {
             name === "alpha" ||
             name === "source" ||
             name === "w" ||
-            name === "h"
+            name === "h" ||
+            name === "mode" ||
+            name === "required"
           ) {
             continue;
           }
@@ -402,6 +553,7 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions {
       host.insert(parent.id, node.id, anchor?.id ?? 0);
     },
     removeNode(parent, node) {
+      forget(node.id);
       host.remove(parent.id, node.id);
     },
     getParentNode(node) {
@@ -412,6 +564,14 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions {
     },
     getNextSibling(node) {
       return defined(host.nextSibling(node.id));
+    },
+    retainedCounts() {
+      return {
+        nodes: nodes.size,
+        transforms: transforms.size,
+        paddings: paddings.size,
+        sizes: sizes.size,
+      };
     },
   };
 }

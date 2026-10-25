@@ -1,3 +1,4 @@
+import type { AxisSize, GridLine, InsetEdge } from "./layout-values.ts";
 import type { HostNode } from "./tree.ts";
 
 type Children = { children?: unknown };
@@ -8,6 +9,8 @@ type Focusable = {
   onBlur?: () => void;
   onKey?: (key: string) => void;
   onText?: (text: string) => void;
+  onTextReplaced?: (text: string) => void;
+  onLink?: (link: number) => void;
   onComposing?: (text: string | null) => void;
 };
 type Grow = { grow?: number };
@@ -25,6 +28,18 @@ type Drag = {
 type Hover = { onHover?: () => void; onLeave?: () => void };
 type Secondary = { onSecondaryClick?: () => void };
 type Wheel = { onWheel?: (dx: number, dy: number) => void };
+type Place = {
+  aspect?: number | null;
+  absolute?: boolean;
+  insetTop?: InsetEdge;
+  insetRight?: InsetEdge;
+  insetBottom?: InsetEdge;
+  insetLeft?: InsetEdge;
+  columnStart?: GridLine;
+  columnEnd?: GridLine;
+  rowStart?: GridLine;
+  rowEnd?: GridLine;
+};
 type Box = {
   margin?: number;
   min?: { w?: number; h?: number };
@@ -32,7 +47,7 @@ type Box = {
   shrink?: number;
   basis?: number;
   alignSelf?: "start" | "center" | "end";
-};
+} & Place;
 type Tracks = { columns?: string[]; rows?: string[]; gap?: number };
 type PaddingEdges = { edges?: number; top?: number; right?: number; bottom?: number; left?: number };
 
@@ -45,12 +60,19 @@ declare module "solid-js" {
       grid: Children & Grow & Flex & Box & Tracks;
       padding: Children & Grow & Box & PaddingEdges;
       pointer: Children & Click & Focusable & Grow & Hover & Secondary & Box & Fill;
-      sized: { w?: number; h?: number };
-      clip: Children & Grow & { radius?: number };
+      sized: { w?: AxisSize; h?: AxisSize } & Place;
+      clip: Children & Grow & Box & { radius?: number };
       opacity: Children & Grow & { alpha?: number };
-      scroll: Children & Drag & Wheel & Box;
+      scroll: Children & Drag & Wheel & Box & { onScroll?: (x: number, y: number) => void };
       transform: Children & { x?: number; y?: number; rotate?: number; scale?: number };
-      image: { source?: string; w?: number; h?: number };
+      image: {
+        source?: string;
+        w?: number;
+        h?: number;
+        alt?: string;
+        mode?: "fill" | "fit" | "crop";
+        required?: boolean;
+      };
       decorated: Children & Grow & Fill & { color?: string; radius?: number };
     }
     type Element = HostNode;

@@ -10,7 +10,7 @@ export function bindImage(next: HostRendererOptions): void {
 }
 
 /** An image leaf. `source`, `w`, and `h` update together. */
-export function Image(props: { source?: string; w?: number; h?: number }): HostNode {
+export function Image(props: { source?: string; w?: number; h?: number; alt?: string }): HostNode {
   const node = options.createElement("image", {
     source: props.source ?? "",
     w: props.w ?? 0,
@@ -21,9 +21,13 @@ export function Image(props: { source?: string; w?: number; h?: number }): HostN
       source: props.source ?? "",
       w: props.w ?? 0,
       h: props.h ?? 0,
+      alt: props.alt ?? "",
     }),
     (next) => {
       host.setImage(node.id, next.source, next.w, next.h);
+      if (next.alt !== "") {
+        host.setSemantics(node.id, 3, next.alt);
+      }
     },
   );
   return node;
