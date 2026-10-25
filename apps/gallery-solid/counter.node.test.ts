@@ -121,6 +121,8 @@ const core = {
   setEllipsis: (node: number, text: string) => {
     calls.push({ name: "setEllipsis", args: [node, text] });
   },
+  setSoftWrap: () => {},
+  setOverflow: () => {},
   setTextAlign: (node: number, align: string) => {
     calls.push({ name: "setTextAlign", args: [node, align] });
   },
@@ -154,6 +156,9 @@ const core = {
     calls.push({ name: "setFill", args: [node] });
   },
   sized: (width: number, height: number) => alloc("sized", [width, height]),
+  setMinSize: () => {},
+  textEdit: () => ({ text: "", start: 0, end: 0 }),
+  onScroll: () => {},
   setFocusable: (node: number, enabled: boolean) => {
     calls.push({ name: "setFocusable", args: [node, enabled] });
   },
@@ -169,6 +174,14 @@ const core = {
   setImeText: (text: string) => {
     calls.push({ name: "setImeText", args: [text] });
   },
+  setImeState: (text: string | null) => {
+    calls.push({ name: "setImeState", args: [text] });
+  },
+  setImeConfig: () => {},
+  setSemantics: () => {},
+  textScale: () => 1,
+  setTextScale: () => {},
+  reduceMotion: () => false,
   measureText: (text: string, fontSize: number, maxWidth: number, color: number[]) => {
     calls.push({ name: "measureText", args: [text, fontSize, maxWidth, color] });
     return { w: text.length, h: fontSize };
@@ -221,6 +234,17 @@ const core = {
   onFrame: (fn: () => void) => {
     calls.push({ name: "onFrame", args: [typeof fn] });
   },
+  setDragClaim: () => {},
+  caretAt: () => ({ unit: 0, x: 0, y: 0, w: 1, h: 16 }),
+  caretAtUnit: () => ({ x: 0, y: 0, w: 1, h: 16 }),
+  selectionRects: () => [],
+  wordRange: () => ({ start: 0, end: 0 }),
+  focusStep: () => {},
+  pushFocusScope: () => {},
+  popFocusScope: () => {},
+  pointerPosition: () => ({ x: 0, y: 0 }),
+  onBack: () => 0,
+  offBack: () => {},
 };
 
 (globalThis as { core: typeof core }).core = core;
@@ -234,49 +258,18 @@ function fail(message: string): never {
 }
 
 const labels = calls.filter((call) => call.name === "setText").map((call) => call.args[1]);
-if (!labels.includes("Count: 0") || !labels.includes("-") || !labels.includes("+")) {
-  fail(`missing labels in ${labels.join(", ")}`);
+for (const label of ["调度", "导航", "列表", "微任务改字", "还是旧的"]) {
+  if (!labels.includes(label)) {
+    fail(`missing ${label} in ${labels.join(", ")}`);
+  }
 }
-if (calls.filter((call) => call.name === "onClick").length !== 53) {
-  fail("expected counter clicks, one Open handler per row, and Submit");
-}
-if (!calls.some((call) => call.name === "scroll")) {
-  fail("expected a scroll");
-}
-if (!calls.some((call) => call.name === "onDragBy" && call.args[1] === "function")) {
-  fail("expected a drag handler");
-}
-if (!calls.some((call) => call.name === "onDragEnd" && call.args[1] === "function")) {
-  fail("expected a drag end handler");
-}
-if (!labels.includes("Item 0") || !labels.includes("Item 49") || !labels.includes("Open")) {
-  fail("expected list labels");
+if (calls.filter((call) => call.name === "onClick").length < 4) {
+  fail("expected a click handler on each page button and the schedule action");
 }
 if (!calls.some((call) => call.name === "onFrame" && call.args[0] === "function")) {
   fail("expected onFrame");
 }
-if (!calls.some((call) => call.name === "requestFrame")) {
-  fail("expected requestFrame");
-}
 if (!calls.some((call) => call.name === "decorated" && call.args[1] === 6)) {
   fail("expected rounded buttons");
-}
-if (!calls.some((call) => call.name === "image" && call.args[0] === "asset:logo" && call.args[1] === 56 && call.args[2] === 56)) {
-  fail("expected logo image");
-}
-if (calls.filter((call) => call.name === "onPress").length !== 53 || calls.filter((call) => call.name === "onRelease").length !== 53) {
-  fail("expected press handlers on the counter, each row, and Submit");
-}
-if (calls.filter((call) => call.name === "setFocusable" && call.args[1] === true).length !== 2) {
-  fail("expected two focusable fields");
-}
-if (calls.filter((call) => call.name === "onFocus").length !== 2 || calls.filter((call) => call.name === "onText").length !== 2) {
-  fail("expected focus and text handlers on both fields");
-}
-if (!labels.includes("Name") || !labels.includes("Note") || !labels.includes("Submit")) {
-  fail("expected the form");
-}
-if (!calls.some((call) => call.name === "measureText")) {
-  fail("expected caret measurement");
 }
 console.log("gallery-solid counter render ok");

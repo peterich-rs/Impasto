@@ -183,6 +183,9 @@
     const r = n.toString(36), t = r.length - 1;
     return e + (t ? String.fromCharCode(64 + t) : "") + r;
   }
+  function getOwner() {
+    return context;
+  }
   function cleanup(e, n = context) {
     if (!n) return e;
     if (!n.He) n.He = e;
@@ -2026,6 +2029,9 @@
   }
 
   // node_modules/.pnpm/@solidjs+signals@2.0.0-rc.17/node_modules/@solidjs/signals/dist/prod/signals.js
+  function onCleanup(e) {
+    return cleanup(e);
+  }
   function accessor(e) {
     const t = read.bind(null, e);
     t[$REFRESH] = e;
@@ -2046,6 +2052,349 @@
   }
   function createRenderEffect(e, t, r) {
     effect(e, t, void 0, r);
+  }
+
+  // node_modules/.pnpm/@solidjs+signals@2.0.0-rc.17/node_modules/@solidjs/signals/dist/prod/map.js
+  function mapArray(t, e, i) {
+    const s = typeof i?.keyed === "function" ? i.keyed : void 0;
+    const n = e.length > 1;
+    const r = e;
+    const o = {
+      L: createOwner(),
+      it: 0,
+      st: t,
+      ot: [],
+      ft: r,
+      ht: [],
+      tn: [],
+      ze: s,
+      ct: s || i?.keyed === false ? [] : void 0,
+      lt: n && i?.keyed !== false ? [] : void 0,
+      ut: i?.keyed === false,
+      H: i?.fallback
+    };
+    const f = computed(updateKeyedMap.bind(o), void 0);
+    f.l &= ~CONFIG_AUTO_DISPOSE;
+    return accessor(f);
+  }
+  var pureOptions = {
+    ownedWrite: true
+  };
+  function trySmallMove(t, e, i, s) {
+    const n = t.ot;
+    const r = t.it - 1;
+    const o = [];
+    const f = [];
+    const h = [];
+    let c = 256;
+    let a = s;
+    let l = s;
+    let u = false;
+    while (a <= r && l <= i - 1) {
+      const t2 = n[a];
+      const s2 = e[l];
+      if (t2 === s2) {
+        if (!u) {
+          h.push(a, l, 0);
+          u = true;
+        }
+        h[h.length - 1]++;
+        a++;
+        l++;
+        continue;
+      }
+      u = false;
+      let d = -1;
+      let w = Math.min(32 - o.length, r - a, c);
+      for (let t3 = 1; t3 <= w; t3++) {
+        if (n[a + t3] === s2) {
+          d = t3;
+          break;
+        }
+      }
+      c -= d === -1 ? w : d;
+      let p = -1;
+      w = Math.min(32 - f.length, i - 1 - l, c);
+      for (let i2 = 1; i2 <= w; i2++) {
+        if (e[l + i2] === t2) {
+          p = i2;
+          break;
+        }
+      }
+      c -= p === -1 ? w : p;
+      if (d !== -1 && (p === -1 || d <= p)) {
+        while (d-- > 0) o.push(a++);
+        continue;
+      }
+      if (p !== -1) {
+        while (p-- > 0) f.push(l++);
+        continue;
+      }
+      if (c <= 0 || o.length === 32 || f.length === 32) return false;
+      o.push(a++);
+      f.push(l++);
+    }
+    for (; a <= r; a++) {
+      if (o.length === 32) return false;
+      o.push(a);
+    }
+    for (; l <= i - 1; l++) {
+      if (f.length === 32) return false;
+      f.push(l);
+    }
+    return commitSmallMove(t, e, i, o, f, h);
+  }
+  function commitSmallMove(t, e, i, s, n, r) {
+    const o = t.ot;
+    let f;
+    let h;
+    let c;
+    if (n.length !== 0) {
+      c = new Array(s.length);
+      for (h = 0; h < n.length; h++) {
+        let t2 = -1;
+        for (f = 0; f < s.length; f++) {
+          if (!c[f] && o[s[f]] === e[n[h]]) {
+            t2 = f;
+            break;
+          }
+        }
+        if (t2 === -1) return false;
+        c[t2] = true;
+        n[h] = n[h] << 6 | t2;
+      }
+    }
+    if (s.length !== 0 || n.length !== 0) {
+      const t2 = /* @__PURE__ */ new Set();
+      for (f = 0; f < s.length; f++) t2.add(o[s[f]]);
+      for (h = 0; h < n.length; h++) t2.add(e[n[h] >> 6]);
+      for (let e2 = 0; e2 < r.length; e2 += 3) {
+        const i2 = r[e2];
+        for (let s2 = 0, n2 = r[e2 + 2]; s2 < n2; s2++) if (t2.has(o[i2 + s2])) return false;
+      }
+    }
+    const a = t.ht;
+    const l = t.tn;
+    const u = a.slice(0, i);
+    const d = l.slice(0, i);
+    for (let t2 = 0; t2 < r.length; t2 += 3) {
+      const e2 = r[t2];
+      const i2 = r[t2 + 1];
+      if (e2 !== i2) {
+        for (let s2 = 0; s2 < r[t2 + 2]; s2++) {
+          u[i2 + s2] = a[e2 + s2];
+          d[i2 + s2] = l[e2 + s2];
+        }
+      }
+    }
+    for (h = 0; h < n.length; h++) {
+      const t2 = n[h] >> 6;
+      const e2 = s[n[h] & 63];
+      u[t2] = a[e2];
+      d[t2] = l[e2];
+    }
+    t.ht = u;
+    t.tn = d;
+    t.it = i;
+    t.ot = e.slice(0);
+    for (f = 0; f < s.length; f++) {
+      if (c === void 0 || !c[f]) l[s[f]].dispose();
+    }
+    return true;
+  }
+  function stageRemoval(t, e, i, s, n, r, o, f, h) {
+    const c = t.ze;
+    const a = t.ot;
+    const l = t.tn;
+    const u = [];
+    let d = i;
+    for (let w = i; w <= n; d++, w++) {
+      const n2 = c ? c(e[w]) : e[w];
+      while (d <= s && (c ? c(a[d]) : a[d]) !== n2) u.push(l[d++]);
+      if (d > s) {
+        o.fill(void 0);
+        return null;
+      }
+      r[w] = t.ht[d];
+      o[w - i] = l[d];
+      if (f) f[w - i] = t.ct[d];
+      if (h) h[w - i] = t.lt[d];
+    }
+    for (; d <= s; d++) u.push(l[d]);
+    return u;
+  }
+  function commitWindow(t, e, i, s, n, r, o, f, h) {
+    const c = t.tn;
+    const a = t.ct;
+    const l = t.lt;
+    const u = t.it;
+    const d = i - u;
+    let w, p;
+    if (d > 0) {
+      c.length = i;
+      if (a) a.length = i;
+      if (l) l.length = i;
+      for (w = u - 1, p = i - 1; w > n; w--, p--) {
+        c[p] = c[w];
+        if (a) a[p] = a[w];
+        if (l) l[p] = l[w];
+      }
+    } else if (d < 0) {
+      for (w = n + 1, p = r + 1; w < u; w++, p++) {
+        c[p] = c[w];
+        if (a) a[p] = a[w];
+        if (l) l[p] = l[w];
+      }
+      c.length = i;
+      if (a) a.length = i;
+      if (l) l.length = i;
+    }
+    for (p = s; p <= r; p++) {
+      c[p] = o[p - s];
+      if (a) setSignal(a[p] = f[p - s], e[p]);
+      if (l) setSignal(l[p] = h[p - s], p);
+    }
+    for (p = r + 1; p < i; p++) {
+      if (a) setSignal(a[p], e[p]);
+      if (l && d !== 0) setSignal(l[p], p);
+    }
+  }
+  function updateKeyedMap() {
+    this.L.Ye = getOwner();
+    const t = this.st() || [], e = t.length;
+    t[$TRACK];
+    runWithOwner(this.L, () => {
+      let i, s, n, r, o, f = this.ct ? this.ut ? () => {
+        r[n] = signal(t[s], pureOptions);
+        return this.ft(accessor(r[n]), s);
+      } : () => {
+        r[n] = signal(t[s], pureOptions);
+        o && (o[n] = signal(s, pureOptions));
+        return this.ft(accessor(r[n]), o ? accessor(o[n]) : void 0);
+      } : this.lt ? () => {
+        const e2 = t[s];
+        o[n] = signal(s, pureOptions);
+        return this.ft(e2, accessor(o[n]));
+      } : () => {
+        const e2 = t[s];
+        return this.ft(e2);
+      };
+      if (e === 0) {
+        if (this.it !== 0) {
+          this.L.dispose(false);
+          this.tn = [];
+          this.ot = [];
+          this.ht = [];
+          this.it = 0;
+          this.ct && (this.ct = []);
+          this.lt && (this.lt = []);
+        }
+        if (this.H && !this.ht.length) {
+          this.tn[0]?.dispose();
+          this.ht[0] = runWithOwner(this.tn[0] = createOwner(), this.H);
+        }
+      } else if (this.it === 0) {
+        const h = new Array(e);
+        const c = new Array(e);
+        r = this.ct && new Array(e);
+        o = this.lt && new Array(e);
+        try {
+          for (s = 0; s < e; s++) {
+            n = s;
+            h[s] = runWithOwner(c[s] = createOwner(), f);
+          }
+        } catch (t2) {
+          for (i = 0; i <= s; i++) c[i]?.dispose();
+          throw t2;
+        }
+        if (this.tn[0]) this.tn[0].dispose();
+        this.ht = h;
+        this.tn = c;
+        r && (this.ct = r);
+        o && (this.lt = o);
+        this.ot = t.slice(0);
+        this.it = e;
+      } else {
+        let h, c, a, l, u, d, w, p, m, O, _;
+        const y = setSignal;
+        for (h = 0, c = Math.min(this.it, e); h < c && (this.ot[h] === t[h] || this.ct && compare(this.ze, this.ot[h], t[h])); h++) {
+          if (this.ct) y(this.ct[h], t[h]);
+        }
+        for (c = this.it - 1, a = e - 1; c >= h && a >= h && (this.ot[c] === t[a] || this.ct && compare(this.ze, this.ot[c], t[a])); c--, a--) ;
+        if (h === e && this.it === e) {
+          this.ot = t.slice(0);
+          return;
+        }
+        if (e <= this.it && c - h > 64 && this.ct === void 0 && this.lt === void 0) {
+          const i2 = h + (a - h >> 1);
+          const s2 = t[i2];
+          const n2 = Math.min(c, i2 + 32);
+          let r2 = Math.max(h, i2 - 32);
+          while (r2 <= n2 && this.ot[r2] !== s2) r2++;
+          if (r2 <= n2 && trySmallMove(this, t, e, h)) return;
+        }
+        const g = e - this.it;
+        const A = a - h + 1;
+        const S = new Array(e);
+        const M = new Array(A);
+        r = this.ct ? new Array(A) : void 0;
+        o = this.lt ? new Array(A) : void 0;
+        const k = g < 0 ? stageRemoval(this, t, h, c, a, S, M, r, o) : null;
+        if (k !== null) {
+          if (k.length !== 0) p = k;
+        } else {
+          d = /* @__PURE__ */ new Map();
+          w = new Array(A);
+          for (s = a; s >= h; s--) {
+            l = t[s];
+            u = this.ze ? this.ze(l) : l;
+            i = d.get(u);
+            w[s - h] = i === void 0 ? -1 : i;
+            d.set(u, s);
+          }
+          for (i = h; i <= c; i++) {
+            l = this.ot[i];
+            u = this.ze ? this.ze(l) : l;
+            s = d.get(u);
+            if (s !== void 0 && s !== -1) {
+              S[s] = this.ht[i];
+              M[s - h] = this.tn[i];
+              r && (r[s - h] = this.ct[i]);
+              o && (o[s - h] = this.lt[i]);
+              s = w[s - h];
+              d.set(u, s);
+            } else {
+              (p ??= []).push(this.tn[i]);
+              if (false) ;
+            }
+          }
+          try {
+            for (s = h; s <= a; s++) {
+              if (M[s - h] !== void 0) continue;
+              (m ??= []).push(M[s - h] = createOwner());
+              if (false) ;
+              n = s - h;
+              S[s] = runWithOwner(M[s - h], f);
+            }
+          } catch (t2) {
+            if (m) for (i = 0; i < m.length; i++) m[i].dispose();
+            throw t2;
+          }
+        }
+        for (i = 0; i < h; i++) S[i] = this.ht[i];
+        for (s = a + 1; s < e; s++) S[s] = this.ht[s - g];
+        commitWindow(this, t, e, h, c, a, M, r, o);
+        this.ht = S;
+        this.it = e;
+        this.ot = t.slice(0);
+        if (p) for (i = 0; i < p.length; i++) p[i].dispose();
+        if (false) ;
+      }
+    });
+    return this.ht;
+  }
+  function compare(t, e, i) {
+    return t ? t(e) === t(i) : true;
   }
 
   // node_modules/.pnpm/@solidjs+signals@2.0.0-rc.17/node_modules/@solidjs/signals/dist/prod/flatten.js
@@ -2597,6 +2946,7 @@
   }
 
   // node_modules/.pnpm/solid-js@2.0.0-rc.17/node_modules/solid-js/dist/solid.js
+  var IS_DEV = false;
   var $DEVCOMP = Symbol(0);
   function children(fn) {
     const c = createMemo(fn, {
@@ -2616,6 +2966,11 @@
     id: Symbol("NoHydrateContext"),
     defaultValue: false
   };
+  var sharedConfig = {
+    hydrating: false,
+    registry: void 0,
+    done: false
+  };
   var _createRoot;
   var _createMemo;
   var _createSignal;
@@ -2633,6 +2988,45 @@
   var createRenderEffect2 = (...args) => (_createRenderEffect || createRenderEffect)(...args);
   function createComponent(Comp, props, name, loc) {
     return untrack(() => Comp(props || {}));
+  }
+  var narrowedError = (name) => `Stale read from <${name}>.`;
+  function For(props) {
+    const options3 = "fallback" in props ? {
+      keyed: props.keyed,
+      fallback: () => props.fallback
+    } : {
+      keyed: props.keyed
+    };
+    const owner = getOwner();
+    let mapped;
+    const create = () => runWithOwner(owner, () => mapArray(() => props.each, props.children, options3));
+    if (sharedConfig.hydrating) mapped = create();
+    const list2 = () => (mapped ?? (mapped = create()))();
+    return list2;
+  }
+  function Show(props) {
+    const keyed = props.keyed;
+    const conditionValue = createMemo(() => props.when, void 0);
+    const condition = keyed ? conditionValue : createMemo(conditionValue, {
+      equals: (a, b) => !a === !b,
+      sync: true
+    });
+    let shown = false;
+    return createMemo(() => {
+      const c = condition();
+      shown = c;
+      if (c) {
+        const child = props.children;
+        const fn = typeof child === "function" && child.length > 0;
+        return fn ? keyed ? untrack(() => child(c), IS_DEV) : untrack(() => child(() => {
+          if (!shown) throw narrowedError("Show");
+          return conditionValue();
+        }), IS_DEV) : child;
+      }
+      return props.fallback;
+    }, {
+      sync: true
+    });
   }
 
   // node_modules/.pnpm/@solidjs+universal@2.0.0-rc.17_solid-js@2.0.0-rc.17/node_modules/@solidjs/universal/dist/universal.js
@@ -2982,8 +3376,8 @@
         let disposer, disposed = false, mounted = [];
         const cleanup2 = cleanupNodes || defaultCleanupNodes;
         try {
-          createRoot2((dispose) => {
-            disposer = dispose;
+          createRoot2((dispose2) => {
+            disposer = dispose2;
             const tree = code();
             const renderOptions = {
               schedule: true,
@@ -3077,6 +3471,12 @@
     }
     return "start";
   }
+  function overflowName(value) {
+    if (value === "ellipsis" || value === "visible") {
+      return value;
+    }
+    return "clip";
+  }
   function textAlignName(value) {
     if (value === "center" || value === "right") {
       return value;
@@ -3118,6 +3518,19 @@
     const nodes = /* @__PURE__ */ new Map();
     const transforms = /* @__PURE__ */ new Map();
     const paddings = /* @__PURE__ */ new Map();
+    const sizes = /* @__PURE__ */ new Map();
+    function writeSize(id, patch) {
+      const prev = sizes.get(id) ?? {
+        w: 0,
+        h: 0
+      };
+      const next = {
+        ...prev,
+        ...patch
+      };
+      sizes.set(id, next);
+      host2.setSize(id, next.w, next.h);
+    }
     function writeTransform(id, patch) {
       const prev = transforms.get(id) ?? {
         x: 0,
@@ -3237,6 +3650,12 @@
         case "ellipsis":
           host2.setEllipsis(node.id, value == null ? "" : String(value));
           return;
+        case "softWrap":
+          host2.setSoftWrap(node.id, value !== false);
+          return;
+        case "overflow":
+          host2.setOverflow(node.id, overflowName(value));
+          return;
         case "textAlign":
           host2.setTextAlign(node.id, textAlignName(value));
           return;
@@ -3248,6 +3667,16 @@
           return;
         case "lineHeight":
           host2.setLineHeight(node.id, asNumber(value, 0));
+          return;
+        case "w":
+          writeSize(node.id, {
+            w: asNumber(value, 0)
+          });
+          return;
+        case "h":
+          writeSize(node.id, {
+            h: asNumber(value, 0)
+          });
           return;
         case "family":
           host2.setFamily(node.id, value == null ? "" : String(value));
@@ -3365,6 +3794,16 @@
             host2.onWheel(node.id, value);
           }
           return;
+        case "onScroll":
+          if (typeof value === "function") {
+            host2.onScroll(node.id, value);
+          }
+          return;
+        case "onSecondaryClick":
+          if (typeof value === "function") {
+            host2.onSecondaryClick(node.id, value);
+          }
+          return;
         case "children":
         case "ref":
           return;
@@ -3411,9 +3850,16 @@
           case "scroll":
             id = host2.scroll();
             break;
-          case "sized":
-            id = host2.sized(asNumber(staticProps?.w, 0), asNumber(staticProps?.h, 0));
+          case "sized": {
+            const width = asNumber(staticProps?.w, 0);
+            const height = asNumber(staticProps?.h, 0);
+            id = host2.sized(width, height);
+            sizes.set(id, {
+              w: width,
+              h: height
+            });
             break;
+          }
           case "transform":
             id = host2.transform();
             break;
@@ -3499,6 +3945,8 @@
       color: props.color,
       maxLines: props.maxLines,
       ellipsis: props.ellipsis,
+      softWrap: props.softWrap,
+      overflow: props.overflow,
       textAlign: props.textAlign,
       weight: props.weight,
       direction: props.direction,
@@ -3517,6 +3965,12 @@
       }
       if (next.ellipsis !== void 0) {
         options.setProperty(node, "ellipsis", next.ellipsis);
+      }
+      if (next.softWrap !== void 0) {
+        options.setProperty(node, "softWrap", next.softWrap);
+      }
+      if (next.overflow !== void 0) {
+        options.setProperty(node, "overflow", next.overflow);
       }
       if (next.textAlign !== void 0) {
         options.setProperty(node, "textAlign", next.textAlign);
@@ -3543,6 +3997,31 @@
     options2 = next;
   }
 
+  // node_modules/.pnpm/@uifw+solid-renderer@file+..+..+frameworks+solid-renderer/node_modules/@uifw/solid-renderer/runtime/frames.ts
+  var ticks = /* @__PURE__ */ new Map();
+  var nextTick = 1;
+  function onFrame(fn) {
+    const id = nextTick;
+    nextTick += 1;
+    ticks.set(id, fn);
+    return () => {
+      ticks.delete(id);
+    };
+  }
+  function frameListenerCount() {
+    return ticks.size;
+  }
+  function runFrames(targetMs, intervalMs) {
+    for (const [id, fn] of ticks) {
+      try {
+        fn(targetMs, intervalMs);
+      } catch (error) {
+        ticks.delete(id);
+        throw error;
+      }
+    }
+  }
+
   // node_modules/.pnpm/@uifw+solid-renderer@file+..+..+frameworks+solid-renderer/node_modules/@uifw/solid-renderer/runtime/index.ts
   var scene = hostRendererOptions(host);
   bindText(scene);
@@ -3563,10 +4042,6 @@
     createTextNode,
     insertNode
   } = renderer;
-  var ticks = [];
-  function onFrame(fn) {
-    ticks.push(fn);
-  }
   function requestFrame() {
     host.requestFrame();
   }
@@ -3575,23 +4050,152 @@
       gap: 0,
       fill: true
     });
-    host.onFrame((timeMs) => {
+    host.onFrame((targetMs, intervalMs) => {
       flush();
-      for (const fn of ticks) {
-        fn(timeMs);
-      }
+      runFrames(targetMs, intervalMs);
     });
     render(component, root);
   }
 
+  // node_modules/.pnpm/@uifw+solid-ui@file+..+..+frameworks+solid-ui/node_modules/@uifw/solid-ui/src/Dialog.tsx
+  function Dialog(props) {
+    var _el$ = createElement("stack", {
+      fill: true
+    });
+    insert(_el$, createComponent2(Show, {
+      get when() {
+        return props.open;
+      },
+      get children() {
+        return createComponent2(DialogLayer, {
+          get onClose() {
+            return props.onClose;
+          },
+          get children() {
+            return [(() => {
+              var _el$2 = createElement("pointer", {
+                fill: true,
+                onClick: () => props.onClose()
+              }), _el$3 = createElement("decorated", {
+                color: "#00000080",
+                radius: 0,
+                fill: true
+              });
+              insertNode(_el$2, _el$3);
+              return _el$2;
+            })(), (() => {
+              var _el$4 = createElement("column", {
+                gap: 8
+              });
+              insert(_el$4, () => props.children);
+              return _el$4;
+            })()];
+          }
+        });
+      }
+    }));
+    return _el$;
+  }
+  function DialogLayer(props) {
+    let back = 0;
+    onCleanup(() => {
+      host.popFocusScope();
+      if (back !== 0) {
+        host.offBack(back);
+      }
+    });
+    var _el$5 = createElement("stack", {
+      fill: true
+    });
+    ref(() => (node) => {
+      host.pushFocusScope(node.id);
+      back = host.onBack(() => {
+        props.onClose();
+        return true;
+      });
+    }, _el$5);
+    insert(_el$5, () => props.children);
+    return _el$5;
+  }
+
   // node_modules/.pnpm/@uifw+solid-ui@file+..+..+frameworks+solid-ui/node_modules/@uifw/solid-ui/src/Field.tsx
-  var TEXT_BYTES = [255, 255, 255, 255];
-  var FIELD_BORDER = "#3A3A3A";
+  var FIELD_BORDER = "#8A8A8A";
   var FIELD_BORDER_FOCUS = "#7CFF6B";
+  var HINT = "#8A8A8A";
   var CURSOR = "#7CFF6B";
-  var MEASURE_WIDTH = 1e6;
-  function scalars(value) {
-    return Array.from(value);
+  var LINE = 22;
+  var EDIT_LEFT = 1;
+  var EDIT_RIGHT = 2;
+  var EDIT_BACKSPACE = 3;
+  var EDIT_INSERT = 4;
+  var EDIT_COMPOSING = 5;
+  var EDIT_SELECT_ALL = 9;
+  var EDIT_CARET = 12;
+  var EDIT_FORWARD_DELETE = 13;
+  var EDIT_NEWLINE = 14;
+  var EDIT_WORD_LEFT = 15;
+  var EDIT_WORD_RIGHT = 16;
+  var EDIT_LINE_START = 17;
+  var EDIT_LINE_END = 18;
+  var EDIT_EXTEND_LEFT = 19;
+  var EDIT_EXTEND_RIGHT = 20;
+  var EDIT_EXTEND_WORD_LEFT = 21;
+  var EDIT_EXTEND_WORD_RIGHT = 22;
+  var EDIT_EXTEND_LINE_START = 23;
+  var EDIT_EXTEND_LINE_END = 24;
+  var EDIT_UP = 25;
+  var EDIT_DOWN = 26;
+  var EDIT_EXTEND_UP = 27;
+  var EDIT_EXTEND_DOWN = 28;
+  var EDIT_EXTEND_CARET = 29;
+  var EDIT_DELETE_WORD = 30;
+  var EDIT_DELETE_WORD_FORWARD = 31;
+  var EDIT_DELETE_TO_LINE_START = 32;
+  var EDIT_DELETE_TO_LINE_END = 33;
+  var EDIT_DOCUMENT_START = 34;
+  var EDIT_DOCUMENT_END = 35;
+  var EDIT_EXTEND_DOCUMENT_START = 36;
+  var EDIT_EXTEND_DOCUMENT_END = 37;
+  var KEYBOARD = {
+    text: 0,
+    multiline: 1,
+    number: 2,
+    phone: 3,
+    email: 4,
+    url: 5,
+    name: 6,
+    password: 7
+  };
+  var ACTION = {
+    none: 0,
+    done: 1,
+    next: 2,
+    search: 3,
+    go: 4,
+    send: 5,
+    previous: 6,
+    newline: 7
+  };
+  function utf16Len(value) {
+    let count = 0;
+    for (const char of value) {
+      count += (char.codePointAt(0) ?? 0) > 65535 ? 2 : 1;
+    }
+    return count;
+  }
+  function findText(id) {
+    let child = host.firstChild(id);
+    while (child !== 0) {
+      if (host.isText(child)) {
+        return child;
+      }
+      const nested = findText(child);
+      if (nested !== 0) {
+        return nested;
+      }
+      child = host.nextSibling(child);
+    }
+    return 0;
   }
   function reveal(id) {
     const field = host.rect(id);
@@ -3627,119 +4231,405 @@
     const [composing, setComposing] = createSignal2(null);
     const [focused, setFocused] = createSignal2(false);
     const [blink, setBlink] = createSignal2(true);
-    const [caret, setCaret] = createSignal2(0);
-    const [caretIndex, setCaretIndex] = createSignal2(0);
+    const [caretX, setCaretX] = createSignal2(0);
+    const [caretY, setCaretY] = createSignal2(0);
+    const [caretH, setCaretH] = createSignal2(LINE);
+    const [base, setBase] = createSignal2(0);
+    const [extent, setExtent] = createSignal2(0);
+    const [rects, setRects] = createSignal2([]);
     let node = 0;
-    const body = () => text() + (composing() ?? "");
+    let view = 0;
+    const hint = () => text().length === 0 && composing() == null;
     const shown = () => {
-      const value = body();
-      if (value.length === 0) {
+      if (hint()) {
         return props.placeholder ?? "";
       }
-      return value;
+      return text();
     };
-    onFrame((timeMs) => {
+    function leaf() {
+      return node === 0 ? 0 : findText(node);
+    }
+    function edit(op, extra = "") {
+      const id = leaf();
+      if (id === 0) {
+        return;
+      }
+      const next = host.textEdit(id, op, extra);
+      setText(next.text);
+      setBase(next.start);
+      setExtent(next.end);
+      host.setText(id, next.text.length === 0 ? props.placeholder ?? "" : next.text);
+    }
+    function keyboardCode() {
+      if (props.keyboard && props.keyboard !== "text") {
+        return KEYBOARD[props.keyboard] ?? 0;
+      }
+      return props.multiline ? 1 : 0;
+    }
+    function actionCode() {
+      if (props.action) {
+        return ACTION[props.action] ?? 0;
+      }
+      return props.multiline ? 7 : 1;
+    }
+    function publish(show) {
+      if (!show) {
+        host.setImeState(null);
+        return;
+      }
+      const full = text();
+      const extra = composing() ?? "";
+      const caret = extent();
+      const anchor = base();
+      const composingStart = extra.length === 0 ? -1 : Math.max(0, utf16Len(full) - utf16Len(extra));
+      const composingEnd = extra.length === 0 ? -1 : utf16Len(full);
+      const id = leaf();
+      let x = caretX();
+      let y = caretY();
+      let h = caretH();
+      if (id !== 0 && view !== 0) {
+        const textBox = host.rect(id);
+        const offset = host.scrollOffset(view);
+        x = textBox.x + caretX() - offset.x;
+        y = textBox.y + caretY() - offset.y;
+      }
+      host.setImeConfig(keyboardCode(), actionCode());
+      host.setImeState(full, anchor, caret, composingStart, composingEnd, x, y, 1, h || LINE);
+    }
+    function follow() {
+      if (view === 0) {
+        return;
+      }
+      const id = leaf();
+      if (id === 0) {
+        return;
+      }
+      const box = host.rect(view);
+      const textBox = host.rect(id);
+      const offset = host.scrollOffset(view);
+      let x = offset.x;
+      let y = offset.y;
+      const left = textBox.x + caretX() - x;
+      const top = textBox.y + caretY() - y;
+      const bottom = top + caretH();
+      if (left + 1 > box.x + box.w) {
+        x += left + 1 - (box.x + box.w);
+      }
+      if (left < box.x) {
+        x -= box.x - left;
+      }
+      if (bottom > box.y + box.h) {
+        y += bottom - (box.y + box.h);
+      }
+      if (top < box.y) {
+        y -= box.y - top;
+      }
+      if (x < 0) {
+        x = 0;
+      }
+      if (y < 0) {
+        y = 0;
+      }
+      if (x !== offset.x || y !== offset.y) {
+        host.setScrollOffset(view, x, y);
+      }
+    }
+    onCleanup(onFrame((targetMs) => {
       if (!focused()) {
         return;
       }
-      setBlink(Math.floor(timeMs / 500) % 2 === 0);
+      const id = leaf();
+      if (id !== 0 && text().length > 0) {
+        const hit = host.caretAtUnit(id, extent());
+        setCaretX(hit.x);
+        setCaretY(hit.y);
+        setCaretH(hit.h || LINE);
+      }
+      if (host.reduceMotion()) {
+        setBlink(true);
+        return;
+      }
+      setBlink(Math.floor(targetMs / 500) % 2 === 0);
       requestFrame();
+    }));
+    createRenderEffect2(() => [extent(), text(), base()], ([unit, value, anchor]) => {
+      const id = leaf();
+      if (id === 0 || value.length === 0) {
+        setCaretX(0);
+        setCaretY(0);
+        setCaretH(LINE);
+        setRects([]);
+        return;
+      }
+      const hit = host.caretAtUnit(id, unit);
+      setCaretX(hit.x);
+      setCaretY(hit.y);
+      setCaretH(hit.h || LINE);
+      const start = Math.min(anchor, unit);
+      const end = Math.max(anchor, unit);
+      setRects(start === end ? [] : host.selectionRects(id, start, end));
+      follow();
     });
-    createRenderEffect2(() => [caretIndex(), text()], ([index, committed]) => {
-      const prefix = scalars(committed).slice(0, index).join("");
-      const size = host.measureText(prefix, FONT_SIZE, MEASURE_WIDTH, TEXT_BYTES);
-      setCaret(size.w);
-    });
+    function move(collapsed, extend, shift) {
+      edit(shift ? extend : collapsed);
+      publish(true);
+    }
     var _el$ = createElement("pointer", {
+      min: {
+        w: 280,
+        h: 48
+      },
       focusable: true,
       onFocus: () => {
         setFocused(true);
         setBlink(true);
-        host.setImeEnabled(true);
-        host.setImeText(text());
+        publish(true);
         reveal(node);
         requestFrame();
       },
       onBlur: () => {
         setFocused(false);
-        host.setImeEnabled(false);
+        publish(false);
+      },
+      onPress: () => {
+        const id = leaf();
+        if (id === 0) {
+          return;
+        }
+        const point = host.pointerPosition();
+        const caretHit = host.caretAt(id, point.x, point.y);
+        edit(EDIT_CARET, String(caretHit.unit));
+        publish(true);
+      },
+      onDragBy: () => {
+        const id = leaf();
+        if (id === 0) {
+          return;
+        }
+        const point = host.pointerPosition();
+        const caretHit = host.caretAt(id, point.x, point.y);
+        edit(EDIT_EXTEND_CARET, String(caretHit.unit));
+        publish(true);
       },
       onKey: (key) => {
-        const chars = scalars(text());
-        const index = Math.min(caretIndex(), chars.length);
-        if (key === "Left") {
-          setCaretIndex(Math.max(0, index - 1));
+        const shift = key.startsWith("Shift+");
+        const name = shift ? key.slice("Shift+".length) : key;
+        if (name === "Left") {
+          move(EDIT_LEFT, EDIT_EXTEND_LEFT, shift);
+          return;
         }
-        if (key === "Right") {
-          setCaretIndex(Math.min(chars.length, index + 1));
+        if (name === "Right") {
+          move(EDIT_RIGHT, EDIT_EXTEND_RIGHT, shift);
+          return;
         }
-        if (key === "Backspace" && index > 0) {
-          chars.splice(index - 1, 1);
-          const next = chars.join("");
-          setCaretIndex(index - 1);
-          setText(next);
-          host.setImeText(next);
+        if (name === "Up") {
+          if (props.multiline) {
+            move(EDIT_UP, EDIT_EXTEND_UP, shift);
+          } else {
+            host.focusStep("up");
+          }
+          return;
         }
-        if (key === "Enter") {
-          props.onInput?.(text());
+        if (name === "Down") {
+          if (props.multiline) {
+            move(EDIT_DOWN, EDIT_EXTEND_DOWN, shift);
+          } else {
+            host.focusStep("down");
+          }
+          return;
+        }
+        if (name === "Home") {
+          move(EDIT_LINE_START, EDIT_EXTEND_LINE_START, shift);
+          return;
+        }
+        if (name === "End") {
+          move(EDIT_LINE_END, EDIT_EXTEND_LINE_END, shift);
+          return;
+        }
+        if (name === "WordLeft") {
+          move(EDIT_WORD_LEFT, EDIT_EXTEND_WORD_LEFT, shift);
+          return;
+        }
+        if (name === "WordRight") {
+          move(EDIT_WORD_RIGHT, EDIT_EXTEND_WORD_RIGHT, shift);
+          return;
+        }
+        if (name === "DocumentStart") {
+          move(EDIT_DOCUMENT_START, EDIT_EXTEND_DOCUMENT_START, shift);
+          return;
+        }
+        if (name === "DocumentEnd") {
+          move(EDIT_DOCUMENT_END, EDIT_EXTEND_DOCUMENT_END, shift);
+          return;
+        }
+        if (name === "SelectAll") {
+          edit(EDIT_SELECT_ALL);
+          publish(true);
+          return;
+        }
+        if (name === "Copy") {
+          edit(10);
+          return;
+        }
+        if (name === "Cut") {
+          edit(11);
+          publish(true);
+          return;
+        }
+        if (name === "Backspace") {
+          edit(EDIT_BACKSPACE);
+          publish(true);
+          return;
+        }
+        if (name === "Delete") {
+          edit(EDIT_FORWARD_DELETE);
+          publish(true);
+          return;
+        }
+        if (name === "DeleteWord") {
+          edit(EDIT_DELETE_WORD);
+          publish(true);
+          return;
+        }
+        if (name === "DeleteWordForward") {
+          edit(EDIT_DELETE_WORD_FORWARD);
+          publish(true);
+          return;
+        }
+        if (name === "DeleteToLineStart") {
+          edit(EDIT_DELETE_TO_LINE_START);
+          publish(true);
+          return;
+        }
+        if (name === "DeleteToLineEnd") {
+          edit(EDIT_DELETE_TO_LINE_END);
+          publish(true);
+          return;
+        }
+        if (name === "Enter") {
+          if (props.multiline && props.action !== "done" && props.action !== "search" && props.action !== "go" && props.action !== "send" && props.action !== "next") {
+            edit(EDIT_NEWLINE);
+            publish(true);
+          } else {
+            props.onInput?.(text());
+          }
         }
       },
       onText: (value) => {
-        const chars = scalars(text());
-        const index = Math.min(caretIndex(), chars.length);
-        const incoming = scalars(value);
-        chars.splice(index, 0, ...incoming);
-        setText(chars.join(""));
-        setCaretIndex(index + incoming.length);
+        setComposing(null);
+        edit(EDIT_INSERT, value);
+        publish(true);
       },
-      onComposing: (value) => setComposing(value)
+      onComposing: (value) => {
+        setComposing(value);
+        edit(EDIT_COMPOSING, value ?? "");
+        publish(true);
+      }
     }), _el$2 = createElement("padding", {
       edges: 8
     }), _el$3 = createElement("decorated", {
-      radius: 4
+      radius: 6,
+      fill: true,
+      min: {
+        w: 280,
+        h: 48
+      }
     }), _el$4 = createElement("padding", {
-      edges: 8
-    }), _el$5 = createElement("stack"), _el$6 = createElement("transform"), _el$7 = createElement("decorated"), _el$8 = createElement("sized", {
-      w: 1,
-      h: 22
+      edges: 1
+    }), _el$5 = createElement("decorated", {
+      color: "#1A1A1A",
+      radius: 5,
+      fill: true
+    }), _el$6 = createElement("padding", {
+      edges: 10
+    }), _el$7 = createElement("scroll"), _el$8 = createElement("padding", {
+      right: 2
+    }), _el$9 = createElement("stack"), _el$0 = createElement("transform"), _el$1 = createElement("decorated"), _el$10 = createElement("sized", {
+      w: 2
     });
     insertNode(_el$, _el$2);
     ref(() => (handle) => {
       node = handle.id;
+      host.setDragClaim(handle.id, "horizontal");
     }, _el$);
     insertNode(_el$2, _el$3);
     insertNode(_el$3, _el$4);
     insertNode(_el$4, _el$5);
     insertNode(_el$5, _el$6);
-    insert(_el$5, createComponent2(Text, {
+    insertNode(_el$6, _el$7);
+    insertNode(_el$7, _el$8);
+    ref(() => (handle) => {
+      view = handle.id;
+    }, _el$7);
+    insertNode(_el$8, _el$9);
+    insertNode(_el$9, _el$0);
+    insert(_el$9, createComponent2(Text, {
       fontSize: FONT_SIZE,
-      color: TEXT_COLOR,
-      maxLines: 1,
+      get color() {
+        return hint() ? HINT : TEXT_COLOR;
+      },
+      get softWrap() {
+        return !!props.multiline;
+      },
+      get overflow() {
+        return props.multiline ? "clip" : "visible";
+      },
+      get maxLines() {
+        return memo2(() => !!props.multiline)() ? props.maxLines : void 0;
+      },
       get children() {
         return shown();
       }
-    }), _el$6);
-    insertNode(_el$6, _el$7);
-    insertNode(_el$7, _el$8);
+    }), _el$0);
+    insert(_el$9, () => rects().map((rect) => (() => {
+      var _el$11 = createElement("transform"), _el$12 = createElement("decorated", {
+        color: "#7CFF6B66"
+      }), _el$13 = createElement("sized");
+      insertNode(_el$11, _el$12);
+      insertNode(_el$12, _el$13);
+      effect3(() => ({
+        e: rect.x,
+        t: rect.y,
+        a: rect.w,
+        o: rect.h
+      }), ({
+        e,
+        t,
+        a,
+        o
+      }, _p$) => {
+        e !== _p$?.e && setProp(_el$11, "x", e, _p$?.e);
+        t !== _p$?.t && setProp(_el$11, "y", t, _p$?.t);
+        a !== _p$?.a && setProp(_el$13, "w", a, _p$?.a);
+        o !== _p$?.o && setProp(_el$13, "h", o, _p$?.o);
+      });
+      return _el$11;
+    })()), _el$0);
+    insertNode(_el$0, _el$1);
+    insertNode(_el$1, _el$10);
     effect3(() => ({
       e: focused() ? FIELD_BORDER_FOCUS : FIELD_BORDER,
-      t: caret(),
-      a: focused() && blink() ? CURSOR : "#00000000"
+      t: caretX(),
+      a: caretY(),
+      o: focused() && blink() && base() === extent() ? CURSOR : "#00000000",
+      i: caretH()
     }), ({
       e,
       t,
-      a
+      a,
+      o,
+      i
     }, _p$) => {
       e !== _p$?.e && setProp(_el$3, "color", e, _p$?.e);
-      t !== _p$?.t && setProp(_el$6, "x", t, _p$?.t);
-      a !== _p$?.a && setProp(_el$7, "color", a, _p$?.a);
+      t !== _p$?.t && setProp(_el$0, "x", t, _p$?.t);
+      a !== _p$?.a && setProp(_el$0, "y", a, _p$?.a);
+      o !== _p$?.o && setProp(_el$1, "color", o, _p$?.o);
+      i !== _p$?.i && setProp(_el$10, "h", i, _p$?.i);
     });
     return _el$;
   }
 
   // node_modules/.pnpm/@uifw+solid-ui@file+..+..+frameworks+solid-ui/node_modules/@uifw/solid-ui/src/ScrollArea.tsx
-  var DECAY = 0.95;
-  var STOP = 0.05;
   function ScrollArea(props) {
     const [off, setOff] = createSignal2({
       x: 0,
@@ -3747,10 +4637,6 @@
     });
     let viewport = 0;
     let content = 0;
-    let velocityX = 0;
-    let velocityY = 0;
-    let last = 0;
-    let coasting = false;
     function clamp(x, y) {
       if (viewport === 0 || content === 0) {
         return {
@@ -3767,51 +4653,29 @@
         y: Math.min(maxY, Math.max(0, y))
       };
     }
-    onFrame((timeMs) => {
-      if (!coasting || viewport === 0) {
-        return;
-      }
-      const dt = last === 0 ? 16 : Math.min(34, Math.max(0, timeMs - last));
-      last = timeMs;
-      velocityX *= DECAY;
-      velocityY *= DECAY;
-      setOff(clamp(off().x - velocityX * dt, off().y - velocityY * dt));
-      if (Math.abs(velocityX) < STOP && Math.abs(velocityY) < STOP) {
-        coasting = false;
-        return;
-      }
-      requestFrame();
-    });
     createRenderEffect2(off, (next) => {
       if (viewport !== 0) {
         host.setScrollOffset(viewport, next.x, next.y);
+        props.onOffset?.(next, viewport);
       }
     });
     var _el$ = createElement("scroll", {
+      onScroll: (x, y) => {
+        setOff(clamp(x, y));
+      },
       onDragBy: (dx, dy) => {
-        coasting = false;
         const live = viewport === 0 ? off() : host.scrollOffset(viewport);
         setOff(clamp(live.x - dx, live.y - dy));
       },
       onWheel: (dx, dy) => {
-        coasting = false;
         const live = viewport === 0 ? off() : host.scrollOffset(viewport);
         setOff(clamp(live.x + dx, live.y + dy));
-      },
-      onDragEnd: (vx, vy) => {
-        velocityX = vx;
-        velocityY = vy;
-        last = 0;
-        if (Math.abs(vx) < STOP && Math.abs(vy) < STOP) {
-          return;
-        }
-        coasting = true;
-        requestFrame();
       }
     }), _el$2 = createElement("column");
     insertNode(_el$, _el$2);
     ref(() => (node) => {
       viewport = node.id;
+      props.viewportRef?.(node.id);
     }, _el$);
     ref(() => (node) => {
       content = node.id;
@@ -3820,18 +4684,143 @@
     return _el$;
   }
 
+  // node_modules/.pnpm/@uifw+solid-ui@file+..+..+frameworks+solid-ui/node_modules/@uifw/solid-ui/src/VirtualList.tsx
+  function VirtualList(props) {
+    const [range, setRange] = createSignal2({
+      start: 0,
+      end: 1,
+      top: 0,
+      bottom: 0
+    });
+    let viewport = 0;
+    function heightAt(index) {
+      const height = props.itemHeight;
+      const value = typeof height === "number" ? height : height(index);
+      return value > 0 ? value : 0;
+    }
+    function place(offsetY, viewHeight) {
+      const count = props.count;
+      if (count <= 0) {
+        setRange({
+          start: 0,
+          end: 0,
+          top: 0,
+          bottom: 0
+        });
+        return;
+      }
+      const prefix = [0];
+      for (let index = 0; index < count; index += 1) {
+        prefix.push((prefix[index] ?? 0) + heightAt(index));
+      }
+      const overscan = props.overscan ?? 4;
+      let start = 0;
+      while (start + 1 < count && (prefix[start + 1] ?? 0) <= offsetY) {
+        start += 1;
+      }
+      start = Math.max(0, start - overscan);
+      let end = start;
+      const limit = offsetY + Math.max(viewHeight, 0);
+      while (end < count && (prefix[end] ?? 0) < limit) {
+        end += 1;
+      }
+      end = Math.min(count, end + overscan);
+      const top = prefix[start] ?? 0;
+      const bottom = (prefix[count] ?? 0) - (prefix[end] ?? 0);
+      const current = range();
+      if (current.start !== start || current.end !== end || current.top !== top || current.bottom !== bottom) {
+        setRange({
+          start,
+          end,
+          top,
+          bottom
+        });
+      }
+    }
+    const stop = onFrame(() => {
+      if (viewport === 0) {
+        return;
+      }
+      const view = host.rect(viewport);
+      place(host.scrollOffset(viewport).y, view.h);
+      stop();
+    });
+    onCleanup(stop);
+    requestFrame();
+    const indexes = () => {
+      const windowed = range();
+      const out = [];
+      for (let index = windowed.start; index < windowed.end; index += 1) {
+        out.push(index);
+      }
+      return out;
+    };
+    return createComponent2(ScrollArea, {
+      viewportRef: (id) => {
+        viewport = id;
+      },
+      onOffset: (offset, id) => {
+        place(offset.y, host.rect(id).h);
+      },
+      get children() {
+        return [createComponent2(Show, {
+          get when() {
+            return range().top > 0;
+          },
+          get children() {
+            var _el$ = createElement("sized", {
+              w: 1
+            });
+            effect3(() => range().top, (_v$, _$p) => {
+              setProp(_el$, "h", _v$, _$p);
+            });
+            return _el$;
+          }
+        }), createComponent2(For, {
+          get each() {
+            return indexes();
+          },
+          children: (index) => props.children(index)
+        }), createComponent2(Show, {
+          get when() {
+            return range().bottom > 0;
+          },
+          get children() {
+            var _el$2 = createElement("sized", {
+              w: 1
+            });
+            effect3(() => range().bottom, (_v$, _$p) => {
+              setProp(_el$2, "h", _v$, _$p);
+            });
+            return _el$2;
+          }
+        })];
+      }
+    });
+  }
+
   // node_modules/.pnpm/@uifw+solid-ui@file+..+..+frameworks+solid-ui/node_modules/@uifw/solid-ui/src/index.tsx
   function Button(props) {
     const [pressed, setPressed] = createSignal2(false);
     var _el$ = createElement("pointer", {
-      onPress: () => setPressed(true),
-      onRelease: () => setPressed(false)
+      onPress: () => {
+        if (!props.disabled) {
+          setPressed(true);
+        }
+      },
+      onRelease: () => setPressed(false),
+      onClick: () => {
+        if (!props.disabled) {
+          props.onClick();
+        }
+      }
     }), _el$2 = createElement("padding", {
       edges: 8
     }), _el$3 = createElement("decorated", {
       radius: 6
     });
     insertNode(_el$, _el$2);
+    ref(() => (node) => host.setMinSize(node.id, 44, 44), _el$);
     insertNode(_el$2, _el$3);
     insert(_el$3, createComponent2(Text, {
       fontSize: FONT_SIZE,
@@ -3840,120 +4829,198 @@
         return props.label;
       }
     }));
-    effect3(() => ({
-      e: props.onClick,
-      t: pressed() ? BUTTON_PRESSED : BUTTON_FILL
-    }), ({
-      e,
-      t
-    }, _p$) => {
-      e !== _p$?.e && setProp(_el$, "onClick", e, _p$?.e);
-      t !== _p$?.t && setProp(_el$3, "color", t, _p$?.t);
+    effect3(() => pressed() ? BUTTON_PRESSED : BUTTON_FILL, (_v$, _$p) => {
+      setProp(_el$3, "color", _v$, _$p);
     });
     return _el$;
   }
 
   // counter.tsx
-  function Counter() {
-    const [count, setCount] = createSignal2(0);
-    const [alpha, setAlpha] = createSignal2(255);
-    console.log("boot", count());
-    onFrame((timeMs) => {
-      setAlpha(128 + Math.round(127 * Math.sin(timeMs / 300)));
-      requestFrame();
-    });
-    requestFrame();
+  function SchedulePage() {
+    const [label, setLabel] = createSignal2("\u8FD8\u662F\u65E7\u7684");
     var _el$ = createElement("column", {
       gap: 8
-    }), _el$2 = createElement("opacity"), _el$3 = createElement("image", {
-      source: "asset:logo",
-      w: 56,
-      h: 56
-    }), _el$4 = createElement("row", {
+    });
+    insert(_el$, createComponent2(Text, {
+      fontSize: 16,
+      color: "#FFFFFF",
+      get children() {
+        return label();
+      }
+    }), null);
+    insert(_el$, createComponent2(Button, {
+      label: "\u5FAE\u4EFB\u52A1\u6539\u5B57",
+      onClick: () => {
+        queueMicrotask(() => setLabel("\u5DF2\u7ECF\u6539\u4E86"));
+      }
+    }), null);
+    return _el$;
+  }
+  function NavPage() {
+    const [depth, setDepth] = createSignal2(0);
+    const [dialog, setDialog] = createSignal2(false);
+    const [listeners, setListeners] = createSignal2(frameListenerCount());
+    onCleanup(onFrame(() => setListeners(frameListenerCount())));
+    const back = host.onBack(() => {
+      if (depth() === 0) {
+        return false;
+      }
+      setDepth(depth() - 1);
+      return true;
+    });
+    onCleanup(() => host.offBack(back));
+    var _el$2 = createElement("column", {
       gap: 8
     });
-    insertNode(_el$, _el$2);
-    insertNode(_el$, _el$3);
-    insertNode(_el$, _el$4);
     insert(_el$2, createComponent2(Text, {
       fontSize: 16,
       color: "#FFFFFF",
       get children() {
-        return ["Count: ", memo2(() => count())];
+        return `\u7B2C ${depth() + 1} \u9875`;
       }
-    }));
-    insert(_el$4, createComponent2(Button, {
-      label: "-",
-      onClick: () => setCount(count() - 1)
     }), null);
-    insert(_el$4, createComponent2(Button, {
-      label: "+",
-      onClick: () => setCount(count() + 1)
-    }), null);
-    effect3(() => alpha(), (_v$, _$p) => {
-      setProp(_el$2, "alpha", _v$, _$p);
-    });
-    return _el$;
-  }
-  function ListPage() {
-    const rows = Array.from({
-      length: 50
-    }, (_, index) => index);
-    return createComponent2(ScrollArea, {
+    insert(_el$2, createComponent2(Text, {
+      fontSize: 16,
+      color: "#FFFFFF",
       get children() {
-        return rows.map((index) => (() => {
-          var _el$5 = createElement("row", {
-            gap: 8
-          });
-          insert(_el$5, createComponent2(Text, {
-            fontSize: 16,
-            color: "#FFFFFF",
-            children: `Item ${index}`
-          }), null);
-          insert(_el$5, createComponent2(Button, {
-            label: "Open",
-            onClick: () => {
-            }
-          }), null);
-          return _el$5;
-        })());
+        return `\u76D1\u542C ${listeners()}`;
       }
-    });
-  }
-  function FormPage() {
-    const [name, setName] = createSignal2("");
-    const [note, setNote] = createSignal2("");
-    const [submitted, setSubmitted] = createSignal2("");
-    return createComponent2(ScrollArea, {
+    }), null);
+    insert(_el$2, createComponent2(Button, {
+      label: "\u63A8\u8FDB",
+      onClick: () => setDepth(depth() + 1)
+    }), null);
+    insert(_el$2, createComponent2(Button, {
+      label: "\u5F39\u51FA",
+      onClick: () => setDepth(Math.max(0, depth() - 1))
+    }), null);
+    insert(_el$2, createComponent2(Button, {
+      label: "\u5BF9\u8BDD\u6846",
+      onClick: () => setDialog(true)
+    }), null);
+    insert(_el$2, createComponent2(Dialog, {
+      get open() {
+        return dialog();
+      },
+      onClose: () => setDialog(false),
       get children() {
-        return [createComponent2(Field, {
-          placeholder: "Name",
-          onInput: setName
-        }), createComponent2(Field, {
-          placeholder: "Note",
-          onInput: setNote
-        }), createComponent2(Button, {
-          label: "Submit",
-          onClick: () => setSubmitted(`${name()} ${note()}`)
-        }), createComponent2(Text, {
+        return createComponent2(Text, {
           fontSize: 16,
           color: "#FFFFFF",
-          get children() {
-            return submitted();
-          }
-        })];
+          children: "\u8FD4\u56DE\u952E\u5173\u95ED"
+        });
       }
+    }), null);
+    return _el$2;
+  }
+  function ListPage() {
+    const [scale, setScale] = createSignal2(1);
+    const [missing, setMissing] = createSignal2(false);
+    const [name, setName] = createSignal2("");
+    var _el$3 = createElement("column", {
+      gap: 8,
+      fill: true
+    }), _el$4 = createElement("row", {
+      gap: 8
     });
+    insertNode(_el$3, _el$4);
+    insert(_el$4, createComponent2(Button, {
+      get label() {
+        return scale() === 1 ? "\u5B57\u53F7 2.0" : "\u5B57\u53F7 1.0";
+      },
+      onClick: () => {
+        const next = scale() === 1 ? 2 : 1;
+        setScale(next);
+        host.setTextScale(next);
+      }
+    }), null);
+    insert(_el$4, createComponent2(Button, {
+      get label() {
+        return missing() ? "\u53BB\u6389\u7F3A\u56FE" : "\u7F3A\u56FE";
+      },
+      onClick: () => setMissing(!missing())
+    }), null);
+    insert(_el$3, createComponent2(Show, {
+      get when() {
+        return missing();
+      },
+      get children() {
+        return createElement("image", {
+          source: "asset:missing",
+          w: 32,
+          h: 32
+        });
+      }
+    }), null);
+    insert(_el$3, createComponent2(Field, {
+      placeholder: "\u59D3\u540D",
+      onInput: setName
+    }), null);
+    insert(_el$3, createComponent2(Text, {
+      fontSize: 16,
+      color: "#FFFFFF",
+      get children() {
+        return name() || "\u672A\u586B\u5199";
+      }
+    }), null);
+    insert(_el$3, createComponent2(VirtualList, {
+      count: 200,
+      itemHeight: 28,
+      children: (index) => createComponent2(Text, {
+        fontSize: 16,
+        color: "#FFFFFF",
+        children: `Item ${index}`
+      })
+    }), null);
+    return _el$3;
   }
   function App() {
+    const [page, setPage] = createSignal2("schedule");
     var _el$6 = createElement("column", {
       gap: 8,
       fill: true
+    }), _el$7 = createElement("row", {
+      gap: 8
     });
-    insert(_el$6, createComponent2(Counter, {}), null);
-    insert(_el$6, createComponent2(ListPage, {}), null);
-    insert(_el$6, createComponent2(FormPage, {}), null);
+    insertNode(_el$6, _el$7);
+    insert(_el$7, createComponent2(Button, {
+      label: "\u8C03\u5EA6",
+      onClick: () => setPage("schedule")
+    }), null);
+    insert(_el$7, createComponent2(Button, {
+      label: "\u5BFC\u822A",
+      onClick: () => setPage("nav")
+    }), null);
+    insert(_el$7, createComponent2(Button, {
+      label: "\u5217\u8868",
+      onClick: () => setPage("list")
+    }), null);
+    insert(_el$6, createComponent2(Show, {
+      get when() {
+        return page() === "schedule";
+      },
+      get children() {
+        return createComponent2(SchedulePage, {});
+      }
+    }), null);
+    insert(_el$6, createComponent2(Show, {
+      get when() {
+        return page() === "nav";
+      },
+      get children() {
+        return createComponent2(NavPage, {});
+      }
+    }), null);
+    insert(_el$6, createComponent2(Show, {
+      get when() {
+        return page() === "list";
+      },
+      get children() {
+        return createComponent2(ListPage, {});
+      }
+    }), null);
     return _el$6;
   }
   boot(App);
 })();
+//# sourceMappingURL=counter.js.map
