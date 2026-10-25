@@ -1,0 +1,5 @@
+export interface Linking {
+  getInitialURL(): Promise<string | null>;
+  openURL(url: string): Promise<void>;
+  addEventListener(type: "url", listener: (event: { url: string }) => void): void;
+}
