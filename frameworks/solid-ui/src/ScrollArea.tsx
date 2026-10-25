@@ -1,24 +1,24 @@
 import { createRenderEffect, createSignal } from "solid-js";
-import { host, onFrame, requestFrame, type NodeHandle } from "@uifw/solid-renderer";
-
-const DECAY = 0.95;
-const STOP = 0.05;
+import { host, type NodeHandle } from "@uifw/solid-renderer";
+import { pullDelta } from "./list-window.ts";
 
 /**
- * A vertical-and-horizontal scroller. Drag follows the finger. After release,
- * velocity decays until it falls under {@link STOP} scene points per millisecond.
+ * A vertical-and-horizontal scroller. Drag and wheel update the offset here.
+ * After release, `core` coasts and reports the offset through `onScroll`.
  *
- * Offset is clamped to the gap between the content box and the viewport. Both
- * sizes come from `core.rect` after layout. The tree does not run the decay.
+ * Offset is clamped to the gap between the content box and the viewport.
  */
-export function ScrollArea(props: { children?: unknown }): NodeHandle {
-  const [off, setOff] = createSignal({ x: 0, y: 0 });
+export function ScrollArea(props: {
+  children?: unknown;
+  onOffset?: (offset: { x: number; y: number }, viewport: number) => void;
+  viewportRef?: (viewport: number) => void;
+  onPull?: (delta: number, overflowing: boolean) => void;
+  onDragEnd?: () => void;
+  initialOffset?: { x: number; y: number };
+}): NodeHandle {
+  const [off, setOff] = createSignal(props.initialOffset ?? { x: 0, y: 0 });
   let viewport = 0;
   let content = 0;
-  let velocityX = 0;
-  let velocityY = 0;
-  let last = 0;
-  let coasting = false;
 
   function clamp(x: number, y: number): { x: number; y: number } {
     if (viewport === 0 || content === 0) {
@@ -34,25 +34,19 @@ export function ScrollArea(props: { children?: unknown }): NodeHandle {
     };
   }
 
-  onFrame((timeMs) => {
-    if (!coasting || viewport === 0) {
-      return;
+  function overflowing(): boolean {
+    if (viewport === 0 || content === 0) {
+      return false;
     }
-    const dt = last === 0 ? 16 : Math.min(34, Math.max(0, timeMs - last));
-    last = timeMs;
-    velocityX *= DECAY;
-    velocityY *= DECAY;
-    setOff(clamp(off().x - velocityX * dt, off().y - velocityY * dt));
-    if (Math.abs(velocityX) < STOP && Math.abs(velocityY) < STOP) {
-      coasting = false;
-      return;
-    }
-    requestFrame();
-  });
+    const view = host.rect(viewport);
+    const body = host.rect(content);
+    return body.h > view.h;
+  }
 
   createRenderEffect(off, (next) => {
     if (viewport !== 0) {
       host.setScrollOffset(viewport, next.x, next.y);
+      props.onOffset?.(next, viewport);
     }
   });
 
@@ -60,26 +54,24 @@ export function ScrollArea(props: { children?: unknown }): NodeHandle {
     <scroll
       ref={(node) => {
         viewport = node.id;
+        props.viewportRef?.(node.id);
+      }}
+      onScroll={(x, y) => {
+        setOff(clamp(x, y));
       }}
       onDragBy={(dx, dy) => {
-        coasting = false;
         const live = viewport === 0 ? off() : host.scrollOffset(viewport);
-        setOff(clamp(live.x - dx, live.y - dy));
+        const rawY = live.y - dy;
+        const next = clamp(live.x - dx, rawY);
+        props.onPull?.(pullDelta(live.y, rawY, next.y), overflowing());
+        setOff(next);
+      }}
+      onDragEnd={() => {
+        props.onDragEnd?.();
       }}
       onWheel={(dx, dy) => {
-        coasting = false;
         const live = viewport === 0 ? off() : host.scrollOffset(viewport);
         setOff(clamp(live.x + dx, live.y + dy));
-      }}
-      onDragEnd={(vx, vy) => {
-        velocityX = vx;
-        velocityY = vy;
-        last = 0;
-        if (Math.abs(vx) < STOP && Math.abs(vy) < STOP) {
-          return;
-        }
-        coasting = true;
-        requestFrame();
       }}
     >
       <column
