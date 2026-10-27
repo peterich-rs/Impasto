@@ -9,14 +9,15 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use protocol::{DrawList, TextAlign};
+use protocol::{Command, TextAlign};
 use session::{
-    HttpError, HttpRequest, HttpResponse, InputEvent, IoJob, Key, Metrics, PluginResult,
-    PluginValue, Session,
+    HostPlace, HostWait, HttpError, HttpRequest, HttpResponse, InputEvent, IoJob, Key, Metrics,
+    PluginResult, PluginValue, Session, host_method, host_module_linked, host_module_methods,
+    module_not_linked,
 };
 use ui_core::{
-    Alignment, AxisSize, DragClaim, Edges, FocusDirection, GridLine, Inset, Justify, NodeId,
-    Shaper, TrackSize, Tree,
+    Affinity, Alignment, AxisSize, DragClaim, Edges, FocusDirection, GridLine, Inset, Justify,
+    Modifiers, NodeId, Rect, RowCrossAlign, Shaper, TrackSize, Tree,
 };
 
 use crate::Error;
@@ -109,6 +110,9 @@ struct QjsFns {
         i32,
         *const c_char,
         usize,
+        i32,
+        i32,
+        i32,
     ) -> i32,
     text_scale: unsafe extern "C" fn(*mut c_void) -> f64,
     reduce_motion: unsafe extern "C" fn(*mut c_void) -> i32,
@@ -187,16 +191,8 @@ struct QjsFns {
     ) -> i32,
     abort_token: unsafe extern "C" fn(*mut c_void, u64),
     module_has: unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> i32,
-    module_call: unsafe extern "C" fn(
-        *mut c_void,
-        u64,
-        *const c_char,
-        usize,
-        *const c_char,
-        usize,
-        *const c_char,
-        usize,
-    ) -> i32,
+    module_prepare:
+        unsafe extern "C" fn(*mut c_void, *const c_char, usize, *const c_char, usize) -> i32,
     socket_open: unsafe extern "C" fn(*mut c_void, u64, *const c_char, usize),
     socket_send: unsafe extern "C" fn(*mut c_void, u64, *const u8, usize, i32),
     socket_close: unsafe extern "C" fn(*mut c_void, u64),
@@ -217,6 +213,44 @@ struct QjsFns {
     register_font: unsafe extern "C" fn(*mut c_void, *const c_char, usize, *const u8, usize) -> i32,
     set_image_mode: unsafe extern "C" fn(*mut c_void, u64, i32, i32) -> i32,
     reload: unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> i32,
+    push_mutation: unsafe extern "C" fn(
+        *mut c_void,
+        u32,
+        u64,
+        u64,
+        u64,
+        u32,
+        f64,
+        f64,
+        *const u8,
+        *const c_char,
+        usize,
+    ) -> i32,
+    layer_stats: unsafe extern "C" fn(*mut c_void, *mut u64, *mut u32, *mut u32) -> i32,
+    scroll_into_view: unsafe extern "C" fn(*mut c_void, u64, i32) -> i32,
+    animate:
+        unsafe extern "C" fn(*mut c_void, u64, *const c_char, usize, f64, f64, f64, f64) -> i32,
+    fling_target: unsafe extern "C" fn(*mut c_void, u64, *mut f32, *mut f32) -> i32,
+    set_recognizers: unsafe extern "C" fn(*mut c_void, u64, i32, i32, i32, f64) -> i32,
+    set_stroke: unsafe extern "C" fn(*mut c_void, u64, f32, *const u8) -> i32,
+    module_push_null: unsafe extern "C" fn(*mut c_void),
+    module_push_bool: unsafe extern "C" fn(*mut c_void, i32),
+    module_push_f64: unsafe extern "C" fn(*mut c_void, f64),
+    module_push_str: unsafe extern "C" fn(*mut c_void, *const c_char, usize),
+    module_push_bytes: unsafe extern "C" fn(*mut c_void, *const u8, usize),
+    module_begin_list: unsafe extern "C" fn(*mut c_void),
+    module_end_list: unsafe extern "C" fn(*mut c_void),
+    module_begin_map: unsafe extern "C" fn(*mut c_void),
+    module_map_key: unsafe extern "C" fn(*mut c_void, *const c_char, usize),
+    module_end_map: unsafe extern "C" fn(*mut c_void),
+    module_set_token: unsafe extern "C" fn(*mut c_void, u64),
+    module_finish: unsafe extern "C" fn(*mut c_void) -> i32,
+    module_count: unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> i32,
+    module_method_at:
+        unsafe extern "C" fn(*mut c_void, *const c_char, usize, i32, *mut usize) -> *const c_char,
+    align: unsafe extern "C" fn(*mut c_void, u32, *mut u64) -> i32,
+    set_cross: unsafe extern "C" fn(*mut c_void, u64, u32) -> i32,
+    viewport: unsafe extern "C" fn(*mut c_void, *mut f32, *mut f32) -> i32,
 }
 
 unsafe extern "C" {
@@ -229,6 +263,7 @@ unsafe extern "C" {
         err: *mut c_char,
         err_len: usize,
     ) -> i32;
+    fn qjs_set_app_dir(host: *mut c_void, dir: *const c_char);
     fn qjs_dispatch(
         host: *mut c_void,
         id: u64,
@@ -244,6 +279,11 @@ unsafe extern "C" {
         kind: i32,
         utf8: *const c_char,
         len: usize,
+        with_span: i32,
+        sel_start: i32,
+        sel_end: i32,
+        compose_start: i32,
+        compose_end: i32,
         err: *mut c_char,
         err_len: usize,
     ) -> i32;
@@ -268,6 +308,12 @@ unsafe extern "C" {
     fn qjs_tap_count(host: *mut c_void) -> i32;
     fn qjs_close(host: *mut c_void);
     fn qjs_dispatch_back(host: *mut c_void, err: *mut c_char, err_len: usize) -> i32;
+    fn qjs_try_shortcut(
+        host: *mut c_void,
+        spec: *const c_char,
+        err: *mut c_char,
+        err_len: usize,
+    ) -> i32;
     fn qjs_apply_settings(
         host: *mut c_void,
         locale: *const c_char,
@@ -285,13 +331,6 @@ unsafe extern "C" {
     fn qjs_fire_raf(host: *mut c_void, err: *mut c_char, err_len: usize) -> i32;
     fn qjs_needs_frame(host: *mut c_void) -> i32;
     fn qjs_next_deadline(host: *mut c_void) -> i64;
-    fn qjs_settle_json(
-        host: *mut c_void,
-        token: u64,
-        ok: i32,
-        text: *const c_char,
-        len: usize,
-    ) -> i32;
     fn qjs_settle_http(
         host: *mut c_void,
         token: u64,
@@ -302,11 +341,27 @@ unsafe extern "C" {
         body_len: usize,
         error: *const c_char,
     ) -> i32;
-    fn qjs_emit(
+    fn qjs_value_null(host: *mut c_void);
+    fn qjs_value_bool(host: *mut c_void, value: i32);
+    fn qjs_value_f64(host: *mut c_void, value: f64);
+    fn qjs_value_str(host: *mut c_void, text: *const c_char, len: usize);
+    fn qjs_value_bytes(host: *mut c_void, bytes: *const u8, len: usize);
+    fn qjs_value_list(host: *mut c_void, count: u32);
+    fn qjs_value_map(host: *mut c_void, count: u32);
+    fn qjs_settle_top(host: *mut c_void, token: u64, ok: i32) -> i32;
+    fn qjs_motion_end(
         host: *mut c_void,
-        name: *const c_char,
+        node: u64,
+        prop: *const c_char,
+        err: *mut c_char,
+        err_len: usize,
+    ) -> i32;
+    fn qjs_module_event(
+        host: *mut c_void,
+        module: *const c_char,
         event: *const c_char,
-        json: *const c_char,
+        shape: i32,
+        text: *const c_char,
         len: usize,
     ) -> i32;
     fn qjs_socket_event(
@@ -345,6 +400,73 @@ struct Inner {
     fonts: RefCell<FontBook>,
     /// Sources passed to `reload` since the last [`Session::take_reloads`].
     reloads: RefCell<Vec<String>>,
+    mutations: RefCell<Vec<PendingMutation>>,
+    prepared: RefCell<Option<PreparedCall>>,
+    memory_files: RefCell<HashMap<String, Vec<u8>>>,
+    memory_store: RefCell<HashMap<String, String>>,
+}
+
+struct ArgFrame {
+    map: bool,
+    items: Vec<PluginValue>,
+    keys: Vec<String>,
+    pending_key: Option<String>,
+}
+
+struct ArgBuild {
+    stack: Vec<PluginValue>,
+    frames: Vec<ArgFrame>,
+}
+
+impl ArgBuild {
+    fn new() -> Self {
+        Self {
+            stack: Vec::new(),
+            frames: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, value: PluginValue) {
+        if let Some(frame) = self.frames.last_mut() {
+            if frame.map {
+                let key = frame.pending_key.take().unwrap_or_default();
+                frame.keys.push(key);
+            }
+            frame.items.push(value);
+            return;
+        }
+        self.stack.push(value);
+    }
+
+    fn begin(&mut self, map: bool) {
+        self.frames.push(ArgFrame {
+            map,
+            items: Vec::new(),
+            keys: Vec::new(),
+            pending_key: None,
+        });
+    }
+
+    fn end(&mut self) {
+        let Some(frame) = self.frames.pop() else {
+            return;
+        };
+        let value = if frame.map {
+            PluginValue::Map(frame.keys.into_iter().zip(frame.items).collect())
+        } else {
+            PluginValue::List(frame.items)
+        };
+        self.push(value);
+    }
+}
+
+struct PreparedCall {
+    module: String,
+    method: String,
+    place: HostPlace,
+    wait: HostWait,
+    token: u64,
+    args: ArgBuild,
 }
 
 struct Pending {
@@ -368,6 +490,8 @@ struct ImeSlot {
     announced: bool,
     dirty: bool,
     state: session::ImeState,
+    /// Last editor revision copied into [`ImeSlot::state`].
+    revision: u64,
 }
 
 impl ImeSlot {
@@ -377,7 +501,44 @@ impl ImeSlot {
             announced: false,
             dirty: false,
             state: session::ImeState::at_end(""),
+            revision: 0,
         }
+    }
+
+    /// Recomputes the platform keyboard state when the focused editor moved.
+    fn sync_editor(&mut self, tree: &Tree) {
+        let Some(id) = tree.focused() else {
+            return;
+        };
+        let Some((revision, value)) = tree.editor_snapshot(id) else {
+            return;
+        };
+        if revision == self.revision {
+            return;
+        }
+        self.revision = revision;
+        let (start, end) = value.selection.ordered();
+        let caret = tree
+            .caret_for(id, value.selection.extent, Affinity::Downstream)
+            .ok();
+        let origin = tree.rect(id).unwrap_or(Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+        });
+        self.state.text = value.text;
+        self.state.selection = start..end;
+        self.state.composing = value.composing.map(|range| range.start..range.end);
+        if let Some(caret) = caret {
+            self.state.caret = Rect {
+                x: origin.x + caret.x,
+                y: origin.y + caret.y,
+                w: caret.w,
+                h: caret.h,
+            };
+        }
+        self.dirty = true;
     }
 
     fn take(&mut self) -> Option<session::ImeUpdate> {
@@ -399,9 +560,17 @@ impl ImeSlot {
     }
 }
 
+fn app_directory(name: &str) -> Option<&str> {
+    let index = name.rfind('/')?;
+    let dir = &name[..index];
+    if dir.is_empty() { None } else { Some(dir) }
+}
+
 pub struct JsSession {
     inner: *mut Inner,
-    last_frame: DrawList,
+    paint_commands: Vec<Command>,
+    layer_epoch: u64,
+    image_generation: u64,
     script_error: RefCell<Option<String>>,
     exit: Cell<bool>,
     /// A failed frame must not schedule another frame by itself.
@@ -448,6 +617,10 @@ impl JsSession {
             pending: RefCell::new(Pending::new()),
             fonts: RefCell::new(FontBook::new()),
             reloads: RefCell::new(Vec::new()),
+            mutations: RefCell::new(Vec::new()),
+            prepared: RefCell::new(None),
+            memory_files: RefCell::new(HashMap::new()),
+            memory_store: RefCell::new(HashMap::new()),
         }));
         let fns = QjsFns {
             session: inner.cast(),
@@ -536,7 +709,7 @@ impl JsSession {
             http: http_call,
             abort_token,
             module_has,
-            module_call,
+            module_prepare,
             socket_open,
             socket_send,
             socket_close,
@@ -555,6 +728,30 @@ impl JsSession {
             register_font,
             set_image_mode,
             reload,
+            push_mutation,
+            layer_stats,
+            scroll_into_view,
+            animate,
+            fling_target,
+            set_recognizers,
+            set_stroke,
+            module_push_null,
+            module_push_bool,
+            module_push_f64,
+            module_push_str,
+            module_push_bytes,
+            module_begin_list,
+            module_end_list,
+            module_begin_map,
+            module_map_key,
+            module_end_map,
+            module_set_token,
+            module_finish,
+            module_count,
+            module_method_at,
+            align,
+            set_cross,
+            viewport,
         };
         // SAFETY: `inner` stays at this address until `Drop`. `qjs_open` copies
         // the function table. The copied session pointer is only used while
@@ -590,6 +787,18 @@ impl JsSession {
             return Err(Error::Script(message));
         }
         error = [0u8; 512];
+        if let Some(dir) = app_directory(name) {
+            let dir = match CString::new(dir) {
+                Ok(dir) => dir,
+                Err(_) => {
+                    unsafe { qjs_close(host) };
+                    unsafe { (*inner).host = ptr::null_mut() };
+                    unsafe { drop(Box::from_raw(inner)) };
+                    return Err(Error::Runtime);
+                }
+            };
+            unsafe { qjs_set_app_dir(host, dir.as_ptr()) };
+        }
         let name = match CString::new(name) {
             Ok(name) => name,
             Err(_) => {
@@ -620,9 +829,9 @@ impl JsSession {
         }
         Ok(Self {
             inner,
-            last_frame: DrawList {
-                commands: Vec::new(),
-            },
+            paint_commands: Vec::new(),
+            layer_epoch: u64::MAX,
+            image_generation: u64::MAX,
             script_error: RefCell::new(None),
             exit: Cell::new(false),
             suppress_demand: Cell::new(false),
@@ -630,10 +839,27 @@ impl JsSession {
         })
     }
 
-    fn hold_frame(&mut self, message: String) -> DrawList {
+    fn hold_frame(&mut self, message: String) -> session::FrameOutput {
         self.note_script_error(message);
         self.suppress_demand.set(true);
-        self.last_frame.clone()
+        session::FrameOutput::unchanged()
+    }
+
+    #[cfg(test)]
+    #[cfg(test)]
+    pub(crate) fn picture_writes(&self) -> usize {
+        let inner = unsafe { &*self.inner };
+        inner.tree.borrow().picture_writes()
+    }
+
+    pub fn install_io(&mut self, submit: Box<dyn Fn(IoJob) + Send>) {
+        let inner = unsafe { &*self.inner };
+        *inner.io.borrow_mut() = Some(submit);
+    }
+
+    pub fn semantics(&mut self) -> Option<ui_core::SemanticsUpdate> {
+        let inner = unsafe { &*self.inner };
+        inner.tree.borrow().semantics()
     }
 
     pub fn take_script_error(&self) -> Option<String> {
@@ -703,6 +929,28 @@ impl Session for JsSession {
         // SAFETY: `inner` is owned by this session. The tree borrow ends before
         // the callback, which may re-enter the tree.
         let inner = unsafe { &*self.inner };
+        if let InputEvent::Key(press) = &event {
+            let spec = shortcut_spec(press);
+            let c_spec = CString::new(spec).ok();
+            if let Some(c_spec) = c_spec {
+                let mut error = [0u8; 512];
+                let hit = unsafe {
+                    qjs_try_shortcut(
+                        inner.host,
+                        c_spec.as_ptr(),
+                        error.as_mut_ptr().cast(),
+                        error.len(),
+                    )
+                };
+                if hit < 0 {
+                    self.note_script_error(c_message(&error));
+                    return;
+                }
+                if hit > 0 {
+                    return;
+                }
+            }
+        }
         let escape = matches!(event, InputEvent::Key(press) if press.key == Key::Escape);
         if matches!(event, InputEvent::Back) || escape {
             let mut error = [0u8; 512];
@@ -732,16 +980,56 @@ impl Session for JsSession {
         let Some(id) = inner.tree.borrow().focused() else {
             return;
         };
+        if let InputEvent::Replace {
+            text,
+            start,
+            end,
+            compose_start,
+            compose_end,
+        } = event
+        {
+            if let Err(message) = dispatch_input(
+                inner,
+                id,
+                16,
+                Some(&text),
+                Some((start as i32, end as i32, compose_start, compose_end)),
+            ) {
+                self.note_script_error(message);
+            }
+            return;
+        }
         let (kind, text) = match event {
+            InputEvent::Edit(edit) => {
+                let value = inner.tree.borrow_mut().text_edit(id, edit.clone());
+                if let Ok(value) = value {
+                    let _ = dispatch_text(inner, id, &value.text);
+                    return;
+                }
+                // The focused control is the field chrome. The editor lives on
+                // its text child, so a buffer edit is delivered as a key or text.
+                let (kind, forwarded) = match edit {
+                    ui_core::Edit::DeleteRange { .. } | ui_core::Edit::Backspace => {
+                        (8, Some("Backspace".to_string()))
+                    }
+                    ui_core::Edit::ForwardDelete => (8, Some("Delete".to_string())),
+                    ui_core::Edit::Insert(text) => (9, Some(text)),
+                    _ => return,
+                };
+                if let Err(message) = dispatch_input(inner, id, kind, forwarded.as_deref(), None) {
+                    self.note_script_error(message);
+                }
+                return;
+            }
             InputEvent::Key(press) => (8, Some(key_name(press))),
-            InputEvent::Text(text) | InputEvent::Paste(text) => (9, Some(text)),
+            InputEvent::Text(text) | InputEvent::Paste { plain: text, .. } => (9, Some(text)),
             InputEvent::Composing(text) => (10, text),
             InputEvent::Copy => (8, Some("Copy".to_string())),
             InputEvent::Cut => (8, Some("Cut".to_string())),
             InputEvent::SelectAll => (8, Some("SelectAll".to_string())),
-            InputEvent::Back => return,
+            InputEvent::Back | InputEvent::Replace { .. } => return,
         };
-        if let Err(message) = dispatch_input(inner, id, kind, text.as_deref()) {
+        if let Err(message) = dispatch_input(inner, id, kind, text.as_deref(), None) {
             self.note_script_error(message);
         }
     }
@@ -790,11 +1078,6 @@ impl Session for JsSession {
         }
     }
 
-    fn image_source_counts(&mut self) -> Option<HashMap<Arc<str>, u32>> {
-        let inner = unsafe { &*self.inner };
-        Some(inner.tree.borrow().image_source_counts())
-    }
-
     fn semantics_action(&mut self, action: ui_core::SemanticsAction) {
         let inner = unsafe { &*self.inner };
         let gestures = inner.tree.borrow_mut().semantics_action(action);
@@ -837,28 +1120,20 @@ impl Session for JsSession {
         }
     }
 
-    fn semantics(&mut self) -> Option<ui_core::SemanticsUpdate> {
-        let inner = unsafe { &*self.inner };
-        inner.tree.borrow().semantics()
-    }
-
-    fn frame(&mut self, time: session::FrameTime) -> DrawList {
+    fn frame(&mut self, time: session::FrameTime) -> session::FrameOutput {
         // SAFETY: `inner` is owned by this session. Job drain and `qjs_frame` may
         // re-enter the tree through the `RefCell`; this function does not hold that borrow yet.
         let inner = unsafe { &*self.inner };
         {
             let mut tree = inner.tree.borrow_mut();
+            inner.ime.borrow_mut().sync_editor(&tree);
             if inner.reduce_motion.get() {
-                tree.clear_fling();
+                tree.finish_motions();
             } else {
-                let dt = if time.interval_ms > 0.0 {
-                    time.interval_ms
-                } else {
-                    16.0
-                };
-                tree.tick_fling(dt);
+                tree.tick_motions(time.target_ms);
             }
-            let notices = tree.take_scroll_notices();
+            let mut notices = tree.tick(time.target_ms);
+            notices.extend(tree.take_scroll_notices());
             drop(tree);
             if let Err(message) = dispatch_gestures(inner, notices) {
                 return self.hold_frame(message);
@@ -888,6 +1163,23 @@ impl Session for JsSession {
         if let Err(message) = drain_jobs(inner.host) {
             return self.hold_frame(message);
         }
+        let ends = inner.tree.borrow_mut().take_motion_ends();
+        for (id, prop) in ends {
+            let name = cstring(prop.script_name());
+            error = [0u8; 512];
+            let failed = unsafe {
+                qjs_motion_end(
+                    inner.host,
+                    id.to_raw(),
+                    name.as_ptr(),
+                    error.as_mut_ptr().cast(),
+                    error.len(),
+                )
+            };
+            if failed != 0 {
+                self.note_script_error(c_message(&error));
+            }
+        }
         error = [0u8; 512];
         let failed = unsafe {
             qjs_frame(
@@ -904,6 +1196,7 @@ impl Session for JsSession {
         if let Err(message) = drain_jobs(inner.host) {
             return self.hold_frame(message);
         }
+        flush_mutations(inner);
         let mut tree = inner.tree.borrow_mut();
         if tree.needs_layout() {
             if let Err(error) = tree.layout() {
@@ -913,15 +1206,41 @@ impl Session for JsSession {
             }
         }
         if tree.needs_paint() {
-            let mut commands = std::mem::take(&mut self.last_frame.commands);
+            let mut commands = std::mem::take(&mut self.paint_commands);
             if tree.record_into(&mut commands).is_err() {
                 commands.clear();
             }
-            self.last_frame.commands = commands;
+            self.paint_commands = commands;
             tree.clear_paint();
         }
+        let epoch = tree.layer_epoch();
+        let layers = if epoch != self.layer_epoch {
+            self.layer_epoch = epoch;
+            Some(Arc::new(tree.layer_tree()))
+        } else {
+            None
+        };
+        let generation = tree.image_generation();
+        let images = if generation != self.image_generation {
+            self.image_generation = generation;
+            Some(Arc::new(tree.image_census()))
+        } else {
+            None
+        };
+        let semantics = tree.semantics_patch();
         drop(tree);
-        self.last_frame.clone()
+        let again = self.wants_frame();
+        session::FrameOutput {
+            layers,
+            again,
+            ime: self.take_ime(),
+            semantics,
+            fonts: self.take_fonts(),
+            reloads: self.take_reloads(),
+            clipboard: self.take_clipboard(),
+            exit: self.take_exit(),
+            images,
+        }
     }
 
     fn wants_frame(&mut self) -> bool {
@@ -959,37 +1278,32 @@ impl Session for JsSession {
         };
         let state = host::app_state(name);
         *inner.app_state.borrow_mut() = state.to_owned();
-        emit_state(inner, state);
+        emit_module(inner, "AppState", "change", 0, state);
     }
 
     fn window_focus(&mut self, focused: bool) {
         let inner = unsafe { &*self.inner };
-        emit_json(
+        emit_module(
             inner,
             "AppState",
             "focus",
+            0,
             if focused { "true" } else { "false" },
         );
     }
 
-    fn bind_io(&mut self, submit: Box<dyn Fn(IoJob) + Send>) {
+    fn io_event(&mut self, event: session::IoEvent) {
         let inner = unsafe { &*self.inner };
-        *inner.io.borrow_mut() = Some(submit);
-    }
-
-    fn plugin_result(&mut self, token: u64, result: PluginResult) {
-        let inner = unsafe { &*self.inner };
-        settle_plugin(inner, token, &result);
-    }
-
-    fn http_result(&mut self, token: u64, result: Result<HttpResponse, HttpError>) {
-        let inner = unsafe { &*self.inner };
-        settle_http(inner, token, &result);
-    }
-
-    fn socket_event(&mut self, id: u64, event: &str, text: bool, data: &[u8]) {
-        let inner = unsafe { &*self.inner };
-        deliver_socket(inner, id, event, text, data);
+        match event {
+            session::IoEvent::Http { token, result } => settle_http(inner, token, &result),
+            session::IoEvent::Plugin { token, result } => settle_plugin(inner, token, &result),
+            session::IoEvent::Socket {
+                id,
+                event,
+                text,
+                data,
+            } => deliver_socket(inner, id, &event, text, &data),
+        }
     }
 
     fn next_wake_ms(&mut self) -> Option<f64> {
@@ -1008,6 +1322,7 @@ impl Session for JsSession {
     fn set_launch_url(&mut self, url: &str) {
         let inner = unsafe { &*self.inner };
         *inner.launch_url.borrow_mut() = Some(url.to_owned());
+        emit_module(inner, "Linking", "url", 1, url);
     }
 }
 
@@ -1100,6 +1415,23 @@ unsafe extern "C" fn row(session: *mut c_void, gap: f32, out: *mut u64) -> i32 {
 unsafe extern "C" fn stack(session: *mut c_void, out: *mut u64) -> i32 {
     let inner = unsafe { inner(session) };
     created(inner.tree.borrow_mut().stack(), out)
+}
+
+fn alignment_of(align: u32) -> Option<Alignment> {
+    match align {
+        0 => Some(Alignment::Start),
+        1 => Some(Alignment::Center),
+        2 => Some(Alignment::End),
+        _ => None,
+    }
+}
+
+unsafe extern "C" fn align(session: *mut c_void, align: u32, out: *mut u64) -> i32 {
+    let Some(alignment) = alignment_of(align) else {
+        return -1;
+    };
+    let inner = unsafe { inner(session) };
+    created(inner.tree.borrow_mut().align(alignment), out)
 }
 
 unsafe extern "C" fn padding(session: *mut c_void, edges: f32, out: *mut u64) -> i32 {
@@ -1361,11 +1693,8 @@ unsafe extern "C" fn set_alpha(session: *mut c_void, node: u64, alpha: u8) -> i3
 }
 
 unsafe extern "C" fn set_align(session: *mut c_void, node: u64, align: u32) -> i32 {
-    let alignment = match align {
-        0 => Alignment::Start,
-        1 => Alignment::Center,
-        2 => Alignment::End,
-        _ => return -1,
+    let Some(alignment) = alignment_of(align) else {
+        return -1;
     };
     let inner = unsafe { inner(session) };
     status(
@@ -1374,6 +1703,43 @@ unsafe extern "C" fn set_align(session: *mut c_void, node: u64, align: u32) -> i
             .borrow_mut()
             .set_align(NodeId::from_raw(node), alignment),
     )
+}
+
+fn cross_of(align: u32) -> Option<RowCrossAlign> {
+    match align {
+        0 => Some(RowCrossAlign::Start),
+        1 => Some(RowCrossAlign::Center),
+        2 => Some(RowCrossAlign::End),
+        3 => Some(RowCrossAlign::Stretch),
+        4 => Some(RowCrossAlign::Baseline),
+        _ => None,
+    }
+}
+
+unsafe extern "C" fn set_cross(session: *mut c_void, node: u64, align: u32) -> i32 {
+    let Some(alignment) = cross_of(align) else {
+        return -1;
+    };
+    let inner = unsafe { inner(session) };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_row_cross(NodeId::from_raw(node), alignment),
+    )
+}
+
+unsafe extern "C" fn viewport(session: *mut c_void, width: *mut f32, height: *mut f32) -> i32 {
+    if width.is_null() || height.is_null() {
+        return -1;
+    }
+    let inner = unsafe { inner(session) };
+    let (w, h) = inner.tree.borrow().viewport_size();
+    unsafe {
+        *width = w;
+        *height = h;
+    }
+    0
 }
 
 unsafe extern "C" fn set_size(session: *mut c_void, node: u64, width: f32, height: f32) -> i32 {
@@ -1579,6 +1945,7 @@ unsafe extern "C" fn text_edit(
         35 => ui_core::Edit::DocumentEnd,
         36 => ui_core::Edit::ExtendDocumentStart,
         37 => ui_core::Edit::ExtendDocumentEnd,
+        38 => ui_core::Edit::Commit(extra),
         _ => return -1,
     };
     let Ok(value) = inner
@@ -1762,6 +2129,112 @@ unsafe extern "C" fn scroll_offset(
     }
 }
 
+struct PendingMutation {
+    op: u32,
+    id: u64,
+    parent: u64,
+    field: u32,
+    number: f64,
+    number2: f64,
+    text: String,
+}
+
+fn flush_mutations(inner: &Inner) -> bool {
+    let pending = std::mem::take(&mut *inner.mutations.borrow_mut());
+    if pending.is_empty() {
+        return false;
+    }
+    let mut tree = inner.tree.borrow_mut();
+    for mutation in pending {
+        let _ = apply_mutation(&mut tree, &mutation);
+    }
+    true
+}
+
+fn apply_mutation(tree: &mut Tree, mutation: &PendingMutation) -> Result<(), ui_core::Error> {
+    use crate::abi::{MutationOp, StyleField};
+    let op = mutation.op;
+    let id = NodeId::from_raw(mutation.id);
+    if op == MutationOp::SetText as u32 {
+        return tree.set_text(id, mutation.text.clone());
+    }
+    if op == MutationOp::Create as u32 {
+        let created = match mutation.field {
+            1 => tree.column(mutation.number as f32)?,
+            5 => tree.sized(mutation.number as f32, mutation.number2 as f32)?,
+            _ => return Err(ui_core::Error::WrongKind),
+        };
+        if mutation.parent != 0 {
+            tree.add_child(NodeId::from_raw(mutation.parent), created)?;
+        }
+        return Ok(());
+    }
+    if op != MutationOp::SetStyle as u32 {
+        return Ok(());
+    }
+    match mutation.field {
+        value if value == StyleField::Width as u32 => {
+            let height = if mutation.number2 > 0.0 {
+                mutation.number2 as f32
+            } else {
+                1.0
+            };
+            tree.set_size(id, mutation.number as f32, height)
+        }
+        value if value == StyleField::Height as u32 => {
+            let width = if mutation.number2 > 0.0 {
+                mutation.number2 as f32
+            } else {
+                1.0
+            };
+            tree.set_size(id, width, mutation.number as f32)
+        }
+        value if value == StyleField::Gap as u32 => tree.set_gap(id, mutation.number as f32),
+        value if value == StyleField::Grow as u32 => tree.set_grow(id, mutation.number as f32),
+        value if value == StyleField::FontSize as u32 => {
+            tree.set_font_size(id, mutation.number as f32)
+        }
+        value if value == StyleField::Alpha as u32 => {
+            tree.set_alpha(id, mutation.number.round().clamp(0.0, 255.0) as u8)
+        }
+        value if value == StyleField::Radius as u32 => tree.set_radius(id, mutation.number as f32),
+        _ => Ok(()),
+    }
+}
+
+unsafe extern "C" fn push_mutation(
+    session: *mut c_void,
+    op: u32,
+    id: u64,
+    parent: u64,
+    before: u64,
+    field: u32,
+    number: f64,
+    number2: f64,
+    color: *const u8,
+    text: *const c_char,
+    text_len: usize,
+) -> i32 {
+    let _ = (before, color);
+    let inner = unsafe { inner(session) };
+    let bytes = if text.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(text.cast::<u8>(), text_len) }
+    };
+    let text = String::from_utf8_lossy(bytes).into_owned();
+    inner.mutations.borrow_mut().push(PendingMutation {
+        op,
+        id,
+        parent,
+        field,
+        number,
+        number2,
+        text,
+    });
+    0
+}
+
 unsafe extern "C" fn rect(
     session: *mut c_void,
     node: u64,
@@ -1774,6 +2247,12 @@ unsafe extern "C" fn rect(
         return -1;
     }
     let inner = unsafe { inner(session) };
+    if flush_mutations(inner) {
+        let mut tree = inner.tree.borrow_mut();
+        if tree.needs_layout() {
+            let _ = tree.layout();
+        }
+    }
     match inner.tree.borrow().rect(NodeId::from_raw(node)) {
         Ok(rect) => {
             // SAFETY: glue passes four writable floats that live for this call.
@@ -2039,6 +2518,9 @@ fn gesture_parts(gesture: ui_core::Gesture) -> (NodeId, i32, f64, f64) {
         ui_core::Gesture::Scroll(id, x, y) => (id, 15, f64::from(x), f64::from(y)),
         ui_core::Gesture::TextReplaced(id) => (id, 16, 0.0, 0.0),
         ui_core::Gesture::ActivateLink { id, link } => (id, 17, f64::from(link), 0.0),
+        ui_core::Gesture::LongPress(id) => (id, 18, 0.0, 0.0),
+        ui_core::Gesture::DoubleTap(id) => (id, 19, 0.0, 0.0),
+        ui_core::Gesture::Zoom { id, scale } => (id, 20, f64::from(scale), 0.0),
     }
 }
 
@@ -2106,13 +2588,25 @@ fn dispatch_text(inner: &Inner, id: NodeId, text: &str) -> Result<(), String> {
     }
 }
 
-fn dispatch_input(inner: &Inner, id: NodeId, kind: i32, text: Option<&str>) -> Result<(), String> {
+fn dispatch_input(
+    inner: &Inner,
+    id: NodeId,
+    kind: i32,
+    text: Option<&str>,
+    span: Option<(i32, i32, i32, i32)>,
+) -> Result<(), String> {
     let mut error = [0u8; 512];
     let bytes = text.unwrap_or("");
     let ptr = if text.is_some() {
         bytes.as_ptr()
     } else {
         ptr::null()
+    };
+    let (with_span, sel_start, sel_end, compose_start, compose_end) = match span {
+        Some((start, end, compose_start, compose_end)) => {
+            (1, start, end, compose_start, compose_end)
+        }
+        None => (0, -1, -1, -1, -1),
     };
     // SAFETY: `bytes` lives for this call. A null pointer with `text == None` is the
     // composing-ended signal. `error` is writable for the length we pass.
@@ -2123,6 +2617,11 @@ fn dispatch_input(inner: &Inner, id: NodeId, kind: i32, text: Option<&str>) -> R
             kind,
             ptr.cast(),
             if text.is_some() { bytes.len() } else { 0 },
+            with_span,
+            sel_start,
+            sel_end,
+            compose_start,
+            compose_end,
             error.as_mut_ptr().cast(),
             error.len(),
         )
@@ -2132,6 +2631,30 @@ fn dispatch_input(inner: &Inner, id: NodeId, kind: i32, text: Option<&str>) -> R
     } else {
         Err(c_message(&error))
     }
+}
+
+fn shortcut_spec(press: &session::KeyPress) -> String {
+    let mut parts = Vec::new();
+    if press.modifiers.contains(Modifiers::META) || press.modifiers.contains(Modifiers::CONTROL) {
+        parts.push("mod".to_string());
+    }
+    if press.modifiers.contains(Modifiers::ALT) {
+        parts.push("alt".to_string());
+    }
+    if press.modifiers.contains(Modifiers::SHIFT) || press.shift {
+        parts.push("shift".to_string());
+    }
+    let key = match press.key {
+        Key::Char(ch) => ch.to_lowercase().to_string(),
+        other => key_name(session::KeyPress {
+            key: other,
+            shift: false,
+            modifiers: Modifiers::empty(),
+        })
+        .to_lowercase(),
+    };
+    parts.push(key);
+    parts.join("+")
 }
 
 fn key_name(press: session::KeyPress) -> String {
@@ -2155,6 +2678,7 @@ fn key_name(press: session::KeyPress) -> String {
         Key::DeleteWordForward => "DeleteWordForward",
         Key::DeleteToLineStart => "DeleteToLineStart",
         Key::DeleteToLineEnd => "DeleteToLineEnd",
+        Key::Char(ch) => return ch.to_string(),
     };
     if press.shift {
         format!("Shift+{name}")
@@ -2411,6 +2935,165 @@ unsafe extern "C" fn reload(session: *mut c_void, utf8: *const c_char, len: usiz
     }
     inner.reloads.borrow_mut().push(source.to_owned());
     0
+}
+
+unsafe extern "C" fn layer_stats(
+    session: *mut c_void,
+    epoch: *mut u64,
+    layers: *mut u32,
+    pictures: *mut u32,
+) -> i32 {
+    if epoch.is_null() || layers.is_null() || pictures.is_null() {
+        return -1;
+    }
+    let inner = unsafe { inner(session) };
+    let (epoch_value, layer_count, picture_count) = inner.tree.borrow().layer_tree_stats();
+    unsafe {
+        *epoch = epoch_value;
+        *layers = u32::try_from(layer_count).unwrap_or(u32::MAX);
+        *pictures = u32::try_from(picture_count).unwrap_or(u32::MAX);
+    }
+    0
+}
+
+unsafe extern "C" fn scroll_into_view(session: *mut c_void, node: u64, edge: i32) -> i32 {
+    let inner = unsafe { inner(session) };
+    let edge = match edge {
+        1 => ui_core::ScrollEdge::End,
+        2 => ui_core::ScrollEdge::Nearest,
+        _ => ui_core::ScrollEdge::Start,
+    };
+    match inner
+        .tree
+        .borrow_mut()
+        .scroll_into_view(NodeId::from_raw(node), edge)
+    {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+unsafe extern "C" fn animate(
+    session: *mut c_void,
+    node: u64,
+    prop: *const c_char,
+    prop_len: usize,
+    from: f64,
+    to: f64,
+    stiffness: f64,
+    damping: f64,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    let Some(name) = (unsafe { utf8_of(prop, prop_len) }) else {
+        return -1;
+    };
+    let Some(prop) = anim_prop(name) else {
+        return -1;
+    };
+    if ![from, to, stiffness, damping]
+        .into_iter()
+        .all(f64::is_finite)
+    {
+        return -1;
+    }
+    inner.tree.borrow_mut().animate(
+        NodeId::from_raw(node),
+        prop,
+        Box::new(ui_core::Spring {
+            x0: from as f32,
+            v0: 0.0,
+            target: to as f32,
+            stiffness: stiffness as f32,
+            damping: damping as f32,
+        }),
+    );
+    0
+}
+
+fn anim_prop(name: &str) -> Option<ui_core::AnimProp> {
+    Some(match name {
+        "scrollX" => ui_core::AnimProp::ScrollX,
+        "scrollY" => ui_core::AnimProp::ScrollY,
+        "opacity" => ui_core::AnimProp::Opacity,
+        "translateX" => ui_core::AnimProp::TranslateX,
+        "translateY" => ui_core::AnimProp::TranslateY,
+        "rotate" => ui_core::AnimProp::Rotate,
+        "scale" => ui_core::AnimProp::Scale,
+        "overscrollX" => ui_core::AnimProp::OverscrollX,
+        "overscrollY" => ui_core::AnimProp::OverscrollY,
+        _ => return None,
+    })
+}
+
+unsafe extern "C" fn fling_target(
+    session: *mut c_void,
+    node: u64,
+    out_x: *mut f32,
+    out_y: *mut f32,
+) -> i32 {
+    if out_x.is_null() || out_y.is_null() {
+        return -1;
+    }
+    let inner = unsafe { inner(session) };
+    match inner.tree.borrow().fling_target(NodeId::from_raw(node)) {
+        Some((x, y)) => {
+            unsafe {
+                *out_x = x;
+                *out_y = y;
+            }
+            0
+        }
+        None => 1,
+    }
+}
+
+unsafe extern "C" fn set_recognizers(
+    session: *mut c_void,
+    node: u64,
+    tap: i32,
+    long_press: i32,
+    drag: i32,
+    double_tap_ms: f64,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    let drag = match drag {
+        0 => Some(ui_core::DragAxis::Free),
+        1 => Some(ui_core::DragAxis::Horizontal),
+        2 => Some(ui_core::DragAxis::Vertical),
+        _ => None,
+    };
+    let double_tap = (double_tap_ms.is_finite() && double_tap_ms > 0.0).then(|| {
+        let mut config = ui_core::DoubleTapConfig::default();
+        config.window_ms = double_tap_ms;
+        config
+    });
+    status(inner.tree.borrow_mut().set_recognizers(
+        NodeId::from_raw(node),
+        ui_core::RecognizerSet {
+            tap: tap != 0,
+            long_press: long_press != 0,
+            drag,
+            double_tap,
+        },
+    ))
+}
+
+unsafe extern "C" fn set_stroke(
+    session: *mut c_void,
+    node: u64,
+    width: f32,
+    color: *const u8,
+) -> i32 {
+    let Some(color) = (unsafe { rgba(color) }) else {
+        return -1;
+    };
+    let inner = unsafe { inner(session) };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_stroke(NodeId::from_raw(node), width, color),
+    )
 }
 
 unsafe extern "C" fn set_image_mode(
@@ -2722,7 +3405,7 @@ unsafe extern "C" fn set_ime_state(
         text: text.to_owned(),
         selection: sel_start..sel_end,
         composing,
-        caret: ui_core::Rect { x, y, w, h },
+        caret: Rect { x, y, w, h },
         action,
         keyboard,
     };
@@ -2753,6 +3436,9 @@ unsafe extern "C" fn set_semantics(
     read_only: i32,
     description: *const c_char,
     description_len: usize,
+    order_set: i32,
+    order: i32,
+    live: i32,
 ) -> i32 {
     let inner = unsafe { inner(session) };
     let label = unsafe { utf8_of(label, label_len) }.map(str::to_owned);
@@ -2769,6 +3455,13 @@ unsafe extern "C" fn set_semantics(
         editable: tri_state(editable),
         read_only: tri_state(read_only),
         description: description.filter(|text| !text.is_empty()),
+        order: (order_set != 0).then_some(order),
+        live: match live {
+            0 => Some(ui_core::LiveRegion::Off),
+            1 => Some(ui_core::LiveRegion::Polite),
+            2 => Some(ui_core::LiveRegion::Assertive),
+            _ => None,
+        },
     };
     let result = inner
         .tree
@@ -2785,6 +3478,8 @@ fn role_of(role: i32) -> Option<ui_core::SemanticsRole> {
         4 => ui_core::SemanticsRole::Scroll,
         5 => ui_core::SemanticsRole::Switch,
         6 => ui_core::SemanticsRole::TextField,
+        7 => ui_core::SemanticsRole::SearchField,
+        8 => ui_core::SemanticsRole::TextArea,
         _ => return None,
     })
 }
@@ -2842,26 +3537,66 @@ fn cstring(text: &str) -> CString {
     unsafe { CString::from_vec_with_nul_unchecked(bytes) }
 }
 
-fn settle_json(inner: &Inner, token: u64, ok: bool, text: &str) {
-    let bytes = cstring(text);
+fn emit_module(inner: &Inner, module: &str, event: &str, shape: i32, text: &str) {
+    let module = cstring(module);
+    let event = cstring(event);
+    let body = cstring(text);
     let _ = unsafe {
-        qjs_settle_json(
+        qjs_module_event(
             inner.host,
-            token,
-            i32::from(ok),
-            bytes.as_ptr(),
+            module.as_ptr(),
+            event.as_ptr(),
+            shape,
+            body.as_ptr(),
             text.replace('\0', "").len(),
         )
     };
 }
 
+fn emit_value(host: *mut c_void, value: &PluginValue) {
+    match value {
+        PluginValue::Null => unsafe { qjs_value_null(host) },
+        PluginValue::Bool(flag) => unsafe { qjs_value_bool(host, i32::from(*flag)) },
+        PluginValue::F64(number) => unsafe { qjs_value_f64(host, *number) },
+        PluginValue::Str(text) => {
+            let bytes = cstring(text);
+            unsafe { qjs_value_str(host, bytes.as_ptr(), text.replace('\0', "").len()) };
+        }
+        PluginValue::Bytes(bytes) => unsafe {
+            let ptr = if bytes.is_empty() {
+                b"".as_ptr()
+            } else {
+                bytes.as_ptr()
+            };
+            qjs_value_bytes(host, ptr, bytes.len());
+        },
+        PluginValue::List(items) => {
+            for item in items {
+                emit_value(host, item);
+            }
+            unsafe { qjs_value_list(host, items.len() as u32) };
+        }
+        PluginValue::Map(entries) => {
+            for (key, item) in entries {
+                let bytes = cstring(key);
+                unsafe { qjs_value_str(host, bytes.as_ptr(), key.replace('\0', "").len()) };
+                emit_value(host, item);
+            }
+            unsafe { qjs_value_map(host, entries.len() as u32) };
+        }
+    }
+}
+
 fn settle_plugin(inner: &Inner, token: u64, result: &PluginResult) {
     match result {
         PluginResult::Done(value) => {
-            let json = host::encode(value);
-            settle_json(inner, token, true, &json);
+            emit_value(inner.host, value);
+            let _ = unsafe { qjs_settle_top(inner.host, token, 1) };
         }
-        PluginResult::Failed { message } => settle_json(inner, token, false, message),
+        PluginResult::Failed { message } => {
+            emit_value(inner.host, &PluginValue::Str(message.clone()));
+            let _ = unsafe { qjs_settle_top(inner.host, token, 0) };
+        }
     }
 }
 
@@ -2955,24 +3690,6 @@ fn deliver_socket(inner: &Inner, id: u64, event: &str, text: bool, data: &[u8]) 
     };
 }
 
-fn emit_state(inner: &Inner, state: &str) {
-    emit_json(inner, "AppState", "change", &host::json_string(state));
-}
-
-fn emit_json(inner: &Inner, name: &str, event: &str, json: &str) {
-    let name = cstring(name);
-    let event = cstring(event);
-    let _ = unsafe {
-        qjs_emit(
-            inner.host,
-            name.as_ptr(),
-            event.as_ptr(),
-            json.as_ptr().cast(),
-            json.len(),
-        )
-    };
-}
-
 fn submit_or_queue(inner: &Inner, job: IoJob, inline: impl FnOnce()) {
     if let Some(submit) = inner.io.borrow().as_ref() {
         submit(job);
@@ -3055,7 +3772,7 @@ unsafe extern "C" fn http_call(
         .pending
         .borrow_mut()
         .http
-        .push((token, Err(HttpError::new("http is not linked"))));
+        .push((token, Err(HttpError::new("network is not linked"))));
     0
 }
 
@@ -3076,23 +3793,58 @@ unsafe extern "C" fn abort_token(session: *mut c_void, token: u64) {
     }
 }
 
+fn prepared_mut(inner: &Inner) -> std::cell::RefMut<'_, Option<PreparedCall>> {
+    inner.prepared.borrow_mut()
+}
+
+fn push_prepared(inner: &Inner, value: PluginValue) {
+    if let Some(call) = prepared_mut(inner).as_mut() {
+        call.args.push(value);
+    }
+}
+
 unsafe extern "C" fn module_has(session: *mut c_void, name: *const c_char, len: usize) -> i32 {
     let Some(name) = (unsafe { utf8_of(name, len) }) else {
         return 0;
     };
     let _ = session;
-    i32::from(matches!(name, "AppState" | "Linking" | "Clipboard"))
+    i32::from(host_module_linked(name))
 }
 
-unsafe extern "C" fn module_call(
+unsafe extern "C" fn module_count(session: *mut c_void, name: *const c_char, len: usize) -> i32 {
+    let _ = session;
+    let Some(name) = (unsafe { utf8_of(name, len) }) else {
+        return 0;
+    };
+    host_module_methods(name).count() as i32
+}
+
+unsafe extern "C" fn module_method_at(
     session: *mut c_void,
-    token: u64,
+    name: *const c_char,
+    name_len: usize,
+    index: i32,
+    out_len: *mut usize,
+) -> *const c_char {
+    let _ = session;
+    let Some(name) = (unsafe { utf8_of(name, name_len) }) else {
+        return ptr::null();
+    };
+    let Some(method) = host_module_methods(name).nth(index as usize) else {
+        return ptr::null();
+    };
+    if !out_len.is_null() {
+        unsafe { *out_len = method.name.len() };
+    }
+    method.name.as_ptr().cast()
+}
+
+unsafe extern "C" fn module_prepare(
+    session: *mut c_void,
     name: *const c_char,
     name_len: usize,
     method: *const c_char,
     method_len: usize,
-    json: *const c_char,
-    json_len: usize,
 ) -> i32 {
     let inner = unsafe { inner(session) };
     let Some(name) = (unsafe { utf8_of(name, name_len) }) else {
@@ -3101,109 +3853,263 @@ unsafe extern "C" fn module_call(
     let Some(method) = (unsafe { utf8_of(method, method_len) }) else {
         return -1;
     };
-    let json = unsafe { utf8_of(json, json_len) }.unwrap_or("[]");
-    let args = match host::parse_args(json) {
-        Ok(args) => args,
-        Err(message) => {
-            inner
-                .pending
-                .borrow_mut()
-                .plugin
-                .push((token, PluginResult::Failed { message }));
-            return 0;
-        }
+    let Some(spec) = host_method(name, method) else {
+        return -1;
     };
-    dispatch_module(inner, token, name, method, args);
-    0
+    *inner.prepared.borrow_mut() = Some(PreparedCall {
+        module: name.to_owned(),
+        method: method.to_owned(),
+        place: spec.place,
+        wait: spec.wait,
+        token: 0,
+        args: ArgBuild::new(),
+    });
+    i32::from(spec.wait == HostWait::Promise)
 }
 
-fn dispatch_module(inner: &Inner, token: u64, name: &str, method: &str, args: Vec<PluginValue>) {
-    match (name, method) {
+unsafe extern "C" fn module_push_null(session: *mut c_void) {
+    push_prepared(unsafe { inner(session) }, PluginValue::Null);
+}
+
+unsafe extern "C" fn module_push_bool(session: *mut c_void, value: i32) {
+    push_prepared(unsafe { inner(session) }, PluginValue::Bool(value != 0));
+}
+
+unsafe extern "C" fn module_push_f64(session: *mut c_void, value: f64) {
+    push_prepared(unsafe { inner(session) }, PluginValue::F64(value));
+}
+
+unsafe extern "C" fn module_push_str(session: *mut c_void, text: *const c_char, len: usize) {
+    let text = unsafe { utf8_of(text, len) }.unwrap_or("").to_owned();
+    push_prepared(unsafe { inner(session) }, PluginValue::Str(text));
+}
+
+unsafe extern "C" fn module_push_bytes(session: *mut c_void, bytes: *const u8, len: usize) {
+    let bytes = if bytes.is_null() {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(bytes, len).to_vec() }
+    };
+    push_prepared(unsafe { inner(session) }, PluginValue::Bytes(bytes));
+}
+
+unsafe extern "C" fn module_begin_list(session: *mut c_void) {
+    if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
+        call.args.begin(false);
+    }
+}
+
+unsafe extern "C" fn module_end_list(session: *mut c_void) {
+    if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
+        call.args.end();
+    }
+}
+
+unsafe extern "C" fn module_begin_map(session: *mut c_void) {
+    if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
+        call.args.begin(true);
+    }
+}
+
+unsafe extern "C" fn module_map_key(session: *mut c_void, text: *const c_char, len: usize) {
+    let text = unsafe { utf8_of(text, len) }.unwrap_or("").to_owned();
+    if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut()
+        && let Some(frame) = call.args.frames.last_mut()
+    {
+        frame.pending_key = Some(text);
+    }
+}
+
+unsafe extern "C" fn module_end_map(session: *mut c_void) {
+    if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
+        call.args.end();
+    }
+}
+
+unsafe extern "C" fn module_set_token(session: *mut c_void, token: u64) {
+    if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
+        call.token = token;
+    }
+}
+
+unsafe extern "C" fn module_finish(session: *mut c_void) -> i32 {
+    let inner = unsafe { inner(session) };
+    let Some(call) = inner.prepared.borrow_mut().take() else {
+        return -1;
+    };
+    let args = call.args.stack;
+    if call.wait == HostWait::Sync {
+        let result = session_call(inner, &call.module, &call.method);
+        if let PluginResult::Done(value) = result {
+            emit_value(inner.host, &value);
+            return 0;
+        }
+        return -1;
+    }
+    let token = call.token;
+    let module = call.module.clone();
+    let method = call.method.clone();
+    if call.place == HostPlace::Session {
+        let result = session_call(inner, &module, &method);
+        inner.pending.borrow_mut().plugin.push((token, result));
+        return 1;
+    }
+    submit_or_queue(
+        inner,
+        IoJob::Plugin {
+            token,
+            name: module.clone(),
+            method: method.clone(),
+            args: args.clone(),
+        },
+        || {
+            let result = inline_platform(inner, &module, &method, &args);
+            inner.pending.borrow_mut().plugin.push((token, result));
+        },
+    );
+    1
+}
+
+fn session_call(inner: &Inner, module: &str, method: &str) -> PluginResult {
+    match (module, method) {
         ("AppState", "getCurrentState") => {
-            let state = inner.app_state.borrow().clone();
-            inner
-                .pending
-                .borrow_mut()
-                .plugin
-                .push((token, PluginResult::Done(PluginValue::Str(state))));
+            PluginResult::Done(PluginValue::Str(inner.app_state.borrow().clone()))
         }
         ("Linking", "getInitialURL") => {
             let value = match inner.launch_url.borrow().clone() {
                 Some(url) => PluginValue::Str(url),
                 None => PluginValue::Null,
             };
-            inner
-                .pending
-                .borrow_mut()
-                .plugin
-                .push((token, PluginResult::Done(value)));
+            PluginResult::Done(value)
         }
+        _ => PluginResult::Failed {
+            message: module_not_linked(module, Some(method)),
+        },
+    }
+}
+
+fn inline_platform(
+    inner: &Inner,
+    module: &str,
+    method: &str,
+    args: &[PluginValue],
+) -> PluginResult {
+    match (module, method) {
         ("Clipboard", "getString") => {
-            submit_or_queue(
-                inner,
-                IoJob::Plugin {
-                    token,
-                    name: name.to_owned(),
-                    method: method.to_owned(),
-                    args,
-                },
-                || {
-                    let text = inner.module_clipboard.borrow().clone();
-                    inner
-                        .pending
-                        .borrow_mut()
-                        .plugin
-                        .push((token, PluginResult::Done(PluginValue::Str(text))));
-                },
-            );
+            PluginResult::Done(PluginValue::Str(inner.module_clipboard.borrow().clone()))
         }
         ("Clipboard", "setString") => {
-            let text = first_string(&args);
-            submit_or_queue(
-                inner,
-                IoJob::Plugin {
-                    token,
-                    name: name.to_owned(),
-                    method: method.to_owned(),
-                    args,
-                },
-                || {
-                    *inner.module_clipboard.borrow_mut() = text;
-                    inner
-                        .pending
-                        .borrow_mut()
-                        .plugin
-                        .push((token, PluginResult::Done(PluginValue::Null)));
-                },
-            );
+            *inner.module_clipboard.borrow_mut() = first_string(args);
+            PluginResult::Done(PluginValue::Null)
         }
-        ("Linking", "openURL") => {
-            submit_or_queue(
-                inner,
-                IoJob::Plugin {
-                    token,
-                    name: name.to_owned(),
-                    method: method.to_owned(),
-                    args,
-                },
-                || {
-                    inner
-                        .pending
-                        .borrow_mut()
-                        .plugin
-                        .push((token, PluginResult::Done(PluginValue::Null)));
-                },
-            );
+        ("Linking", "openURL") => PluginResult::Done(PluginValue::Null),
+        ("FileSystem", "documentDirectory") => {
+            PluginResult::Done(PluginValue::Str("memory://documents".to_owned()))
         }
-        _ => {
-            inner.pending.borrow_mut().plugin.push((
-                token,
-                PluginResult::Failed {
-                    message: "module is not linked".to_owned(),
+        ("FileSystem", "read") => match session::document_relative(&first_string(args)) {
+            Ok(path) => match inner.memory_files.borrow().get(&path) {
+                Some(bytes) => PluginResult::Done(PluginValue::Bytes(bytes.clone())),
+                None => PluginResult::Failed {
+                    message: "file is missing".to_owned(),
                 },
-            ));
+            },
+            Err(message) => PluginResult::Failed { message },
+        },
+        ("FileSystem", "write") => match session::document_relative(&first_string(args)) {
+            Ok(path) => {
+                let bytes = match args.get(1) {
+                    Some(PluginValue::Bytes(bytes)) => bytes.clone(),
+                    Some(PluginValue::Str(text)) => text.as_bytes().to_vec(),
+                    _ => Vec::new(),
+                };
+                inner.memory_files.borrow_mut().insert(path, bytes);
+                PluginResult::Done(PluginValue::Null)
+            }
+            Err(message) => PluginResult::Failed { message },
+        },
+        ("FileSystem", "delete") => match session::document_relative(&first_string(args)) {
+            Ok(path) => {
+                inner.memory_files.borrow_mut().remove(&path);
+                PluginResult::Done(PluginValue::Null)
+            }
+            Err(message) => PluginResult::Failed { message },
+        },
+        ("FileSystem", "pick") => PluginResult::Done(PluginValue::Null),
+        ("AsyncStorage", "multiGet") => {
+            let keys = string_list(args.first());
+            let store = inner.memory_store.borrow();
+            let rows = keys
+                .into_iter()
+                .map(|key| {
+                    let value = store
+                        .get(&key)
+                        .cloned()
+                        .map(PluginValue::Str)
+                        .unwrap_or(PluginValue::Null);
+                    PluginValue::List(vec![PluginValue::Str(key), value])
+                })
+                .collect();
+            PluginResult::Done(PluginValue::List(rows))
         }
+        ("AsyncStorage", "multiSet") => {
+            let mut store = inner.memory_store.borrow_mut();
+            if let Some(PluginValue::List(rows)) = args.first() {
+                for row in rows {
+                    if let PluginValue::List(pair) = row
+                        && let (Some(PluginValue::Str(key)), Some(PluginValue::Str(value))) =
+                            (pair.first(), pair.get(1))
+                    {
+                        store.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+            PluginResult::Done(PluginValue::Null)
+        }
+        ("AsyncStorage", "multiRemove") => {
+            let mut store = inner.memory_store.borrow_mut();
+            for key in string_list(args.first()) {
+                store.remove(&key);
+            }
+            PluginResult::Done(PluginValue::Null)
+        }
+        ("AsyncStorage", "clear") => {
+            inner.memory_store.borrow_mut().clear();
+            PluginResult::Done(PluginValue::Null)
+        }
+        ("Permissions", "checkPermissionStatus") => {
+            PluginResult::Done(PluginValue::Str("denied".to_owned()))
+        }
+        ("Permissions", "requestPermissions") => {
+            let rows = string_list(args.first())
+                .into_iter()
+                .map(|name| (name, PluginValue::Str("denied".to_owned())))
+                .collect();
+            PluginResult::Done(PluginValue::Map(rows))
+        }
+        ("Permissions", "shouldShowRequestPermissionRationale") => {
+            PluginResult::Done(PluginValue::Bool(false))
+        }
+        ("Permissions", "checkServiceStatus") => {
+            PluginResult::Done(PluginValue::Str("notApplicable".to_owned()))
+        }
+        ("Permissions", "openAppSettings") => PluginResult::Done(PluginValue::Bool(false)),
+        _ => PluginResult::Failed {
+            message: module_not_linked(module, Some(method)),
+        },
     }
+}
+
+fn string_list(value: Option<&PluginValue>) -> Vec<String> {
+    let Some(PluginValue::List(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| match item {
+            PluginValue::Str(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 unsafe extern "C" fn socket_open(session: *mut c_void, id: u64, url: *const c_char, len: usize) {

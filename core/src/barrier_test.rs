@@ -8,7 +8,7 @@ use crate::{
 
 #[test]
 fn reverse_is_only_for_a_row() -> Result<(), crate::Error> {
-    let mut tree = Tree::new(MonoShaper);
+    let mut tree = Tree::new(MonoShaper::default());
     let row = tree.row(0.0)?;
     tree.set_reverse(row, true)?;
     let column = tree.column(0.0)?;
@@ -30,7 +30,7 @@ fn event(phase: Phase, x: f32, y: f32) -> PointerEvent {
 
 #[test]
 fn a_zero_clip_hides_its_focusable_child() -> Result<(), crate::Error> {
-    let mut tree = Tree::new(MonoShaper);
+    let mut tree = Tree::new(MonoShaper::default());
     let clip = tree.clip(0.0)?;
     tree.set_min_size(clip, 0.0, 0.0)?;
     tree.set_max_size(clip, 0.0, 0.0)?;
@@ -66,7 +66,7 @@ fn a_zero_clip_hides_its_focusable_child() -> Result<(), crate::Error> {
 
 #[test]
 fn a_positive_clip_keeps_its_focusable_child() -> Result<(), crate::Error> {
-    let mut tree = Tree::new(MonoShaper);
+    let mut tree = Tree::new(MonoShaper::default());
     let clip = tree.clip(0.0)?;
     let button = tree.pointer_region()?;
     let box_ = tree.sized(40.0, 24.0)?;
@@ -89,7 +89,7 @@ fn a_positive_clip_keeps_its_focusable_child() -> Result<(), crate::Error> {
 
 #[test]
 fn a_disabled_pointer_drops_activate_and_focusable() -> Result<(), crate::Error> {
-    let mut tree = Tree::new(MonoShaper);
+    let mut tree = Tree::new(MonoShaper::default());
     let button = tree.pointer_region()?;
     let box_ = tree.sized(40.0, 24.0)?;
     tree.add_child(button, box_)?;
@@ -121,7 +121,7 @@ fn near(actual: f32, expected: f32) -> bool {
 
 #[test]
 fn a_percent_width_is_half_the_parent() -> Result<(), crate::Error> {
-    let mut tree = Tree::new(MonoShaper);
+    let mut tree = Tree::new(MonoShaper::default());
     let parent = tree.column(0.0)?;
     tree.set_axis_size(parent, AxisSize::Points(200.0), AxisSize::Points(80.0))?;
     let child = tree.sized(10.0, 10.0)?;
@@ -140,7 +140,7 @@ fn a_percent_width_is_half_the_parent() -> Result<(), crate::Error> {
 
 #[test]
 fn aspect_ratio_sets_height_and_clear_removes_it() -> Result<(), crate::Error> {
-    let mut tree = Tree::new(MonoShaper);
+    let mut tree = Tree::new(MonoShaper::default());
     let ratio = tree.sized(10.0, 10.0)?;
     tree.set_axis_size(ratio, AxisSize::Points(100.0), AxisSize::Auto)?;
     tree.set_aspect_ratio(ratio, Some(2.0))?;
@@ -167,7 +167,7 @@ fn aspect_ratio_sets_height_and_clear_removes_it() -> Result<(), crate::Error> {
 #[test]
 fn absolute_inset_offsets_from_the_stack_and_later_sibling_paints_after() -> Result<(), crate::Error>
 {
-    let mut tree = Tree::new(MonoShaper);
+    let mut tree = Tree::new(MonoShaper::default());
     let stack = tree.stack()?;
     tree.set_axis_size(stack, AxisSize::Points(80.0), AxisSize::Points(100.0))?;
     let placed = tree.decorated([1, 0, 0, 255], 0.0)?;
@@ -229,7 +229,7 @@ fn absolute_inset_offsets_from_the_stack_and_later_sibling_paints_after() -> Res
 
 #[test]
 fn grid_line_two_lands_in_the_second_column() -> Result<(), crate::Error> {
-    let mut tree = Tree::new(MonoShaper);
+    let mut tree = Tree::new(MonoShaper::default());
     let grid = tree.grid_tracks(
         &[
             TrackSize::Points(40.0),
@@ -279,7 +279,7 @@ fn grid_line_two_lands_in_the_second_column() -> Result<(), crate::Error> {
 
 #[test]
 fn set_text_loads_the_editor_and_reports_replaced() -> Result<(), crate::Error> {
-    let mut tree = Tree::new(MonoShaper);
+    let mut tree = Tree::new(MonoShaper::default());
     let text = tree.text("old", 16.0, [0, 0, 0, 255])?;
     tree.set_semantics(
         text,
@@ -310,7 +310,7 @@ fn set_text_loads_the_editor_and_reports_replaced() -> Result<(), crate::Error> 
 
 #[test]
 fn a_read_only_field_has_no_set_text() -> Result<(), crate::Error> {
-    let mut tree = Tree::new(MonoShaper);
+    let mut tree = Tree::new(MonoShaper::default());
     let text = tree.text("old", 16.0, [0, 0, 0, 255])?;
     tree.set_semantics(
         text,
@@ -336,7 +336,7 @@ fn a_read_only_field_has_no_set_text() -> Result<(), crate::Error> {
 
 #[test]
 fn negative_scale_x_mirrors_a_local_point() -> Result<(), crate::Error> {
-    let mut tree = Tree::new(MonoShaper);
+    let mut tree = Tree::new(MonoShaper::default());
     let shifted = tree.transform()?;
     let region = tree.pointer_region()?;
     let target = tree.sized(16.0, 16.0)?;
@@ -382,7 +382,7 @@ fn negative_scale_x_mirrors_a_local_point() -> Result<(), crate::Error> {
 
 #[test]
 fn a_click_inside_a_link_range_activates_it() -> Result<(), crate::Error> {
-    let mut tree = Tree::new(MonoShaper);
+    let mut tree = Tree::new(MonoShaper::default());
     let region = tree.pointer_region()?;
     let text = tree.text("hello", 16.0, [0, 0, 0, 255])?;
     tree.add_child(region, text)?;
@@ -426,21 +426,26 @@ fn a_click_inside_a_link_range_activates_it() -> Result<(), crate::Error> {
     assert_eq!(utf8.as_ref(), "hello");
     assert_eq!(spans.len(), 2);
     assert_eq!(
-        links,
-        &vec![protocol::TextLink {
+        links.as_ref(),
+        &[protocol::TextLink {
             start: 0,
             end: 2,
             id: 7
-        }]
+        }][..]
     );
-    let width = MonoShaper.measure_spans(
-        "hello",
-        spans,
-        16.0,
-        1_000_000.0,
-        [0, 0, 0, 255],
-        &protocol::TextStyle::default(),
-    );
+    let width = MonoShaper::default()
+        .metrics(
+            &crate::paint_key(
+                std::sync::Arc::from("hello"),
+                std::sync::Arc::new(protocol::TextStyle::default()),
+                spans.as_ref(),
+                16.0,
+                1_000_000.0,
+                [0, 0, 0, 255],
+            )
+            .metrics,
+        )
+        .size;
     assert!((width.width - 40.0).abs() < 0.01, "{}", width.width);
     tree.pointer(event(Phase::Down, 2.0, 8.0));
     let inside = tree.pointer(event(Phase::Up, 2.0, 8.0));
@@ -469,7 +474,7 @@ fn a_click_inside_a_link_range_activates_it() -> Result<(), crate::Error> {
 
 #[test]
 fn short_gradients_blur_and_src_over_stay_out_of_the_list() -> Result<(), crate::Error> {
-    let mut tree = Tree::new(MonoShaper);
+    let mut tree = Tree::new(MonoShaper::default());
     let clip = tree.clip(0.0)?;
     let fill = tree.decorated([9, 9, 9, 255], 0.0)?;
     let sized = tree.sized(40.0, 20.0)?;
@@ -483,6 +488,7 @@ fn short_gradients_blur_and_src_over_stay_out_of_the_list() -> Result<(), crate:
             stops: vec![protocol::ColorStop {
                 offset: 0.0,
                 color: [1, 2, 3, 255],
+                space: protocol::ColorSpace::Srgb,
             }],
         }),
     )?;
@@ -514,10 +520,12 @@ fn short_gradients_blur_and_src_over_stay_out_of_the_list() -> Result<(), crate:
                 protocol::ColorStop {
                     offset: 0.0,
                     color: [4, 0, 0, 255],
+                    space: protocol::ColorSpace::Srgb,
                 },
                 protocol::ColorStop {
                     offset: 1.0,
                     color: [8, 0, 0, 255],
+                    space: protocol::ColorSpace::Srgb,
                 },
             ],
         }),
@@ -537,10 +545,12 @@ fn short_gradients_blur_and_src_over_stay_out_of_the_list() -> Result<(), crate:
                 protocol::ColorStop {
                     offset: 1.0,
                     color: [0, 0, 1, 255],
+                    space: protocol::ColorSpace::Srgb,
                 },
                 protocol::ColorStop {
                     offset: 0.0,
                     color: [0, 0, 2, 255],
+                    space: protocol::ColorSpace::Srgb,
                 },
             ],
         }),

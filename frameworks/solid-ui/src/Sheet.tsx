@@ -1,10 +1,9 @@
 import { onCleanup } from "solid-js";
-import { host, onFrame, overlayParent, removeNode, type NodeHandle } from "@uifw/solid-renderer";
+import { directionFor, host, onFrame, overlayParent, removeNode, restoreFocus, spring, takeInitialFocus, type NodeHandle } from "@uifw/solid-renderer";
 import { colorBytes } from "./colors.ts";
 import { coreHost, nodeId } from "./host-ext.ts";
-import { directionFor } from "./i18n.ts";
-import { moveChildren, restoreFocus, takeInitialFocus } from "./overlay.ts";
-import { transition } from "./motion.ts";
+import { registerOverlay } from "./overlay/registry.ts";
+import { moveChildren } from "./overlay.ts";
 import { Role } from "./semantics.ts";
 import { useTheme } from "./use-theme.ts";
 
@@ -23,10 +22,9 @@ export function Sheet(props: {
   let placeholder = 0;
   let layer: Layer | null = null;
   let closing = false;
-  let stopSlide = () => {};
+  let epoch = 0;
 
   function closeLayer(): void {
-    stopSlide();
     if (layer === null) {
       return;
     }
@@ -40,20 +38,61 @@ export function Sheet(props: {
         restoreFocus(current.previous);
       }
     } finally {
-      if (current.back !== 0) {
-        host.offBack(current.back);
+      if (current.unregister) {
+        current.unregister();
       }
       removeNode({ id: current.shell } as NodeHandle);
     }
   }
 
-  function paint(t: number, leaving: boolean): void {
+  function play(leaving: boolean, onDone?: () => void): void {
     if (layer === null) {
       return;
     }
-    const shift = leaving ? t : 1 - t;
-    host.setAlpha(layer.fade, Math.round((leaving ? 1 - t : t) * 255));
-    host.setTransform(layer.panel, 0, shift * 48, 0, 1);
+    const fade = layer.fade;
+    const panel = layer.panel;
+    let left = 2;
+    const done = () => {
+      left -= 1;
+      if (left <= 0) {
+        onDone?.();
+      }
+    };
+    spring({
+      id: fade,
+      prop: "opacity",
+      from: leaving ? 255 : 0,
+      to: leaving ? 0 : 255,
+      write: (value) => host.setAlpha(fade, Math.round(value)),
+      onDone: done,
+    });
+    spring({
+      id: panel,
+      prop: "translateY",
+      from: leaving ? 0 : 48,
+      to: leaving ? 48 : 0,
+      write: (value) => host.setTransform(panel, 0, value, 0, 1),
+      onDone: done,
+    });
+  }
+
+  function armEnter(): void {
+    play(false);
+  }
+
+  function beginClose(): void {
+    if (layer === null || closing) {
+      return;
+    }
+    closing = true;
+    layer.unregister?.();
+    layer.unregister = null;
+    const token = ++epoch;
+    play(true, () => {
+      if (token === epoch) {
+        closeLayer();
+      }
+    });
   }
 
   function ensureLayer(): Layer | null {
@@ -78,7 +117,7 @@ export function Sheet(props: {
 
     const column = host.column(0);
     host.setFill(column);
-    host.setAlign(column, "end");
+    host.setJustify(column, "end");
     host.insert(shell, column, 0);
 
     const fade = host.opacity(0);
@@ -102,32 +141,8 @@ export function Sheet(props: {
 
     const slot = host.column(theme().space.s);
     host.insert(inner, slot, 0);
-    layer = { shell, slot, panel, fade, titleId, previous: 0, back: 0, focused: false };
+    layer = { shell, slot, panel, fade, titleId, previous: 0, focused: false, unregister: null };
     return layer;
-  }
-
-  function armEnter(): void {
-    stopSlide();
-    const duration = theme().reduceMotion ? 0 : 220;
-    stopSlide = transition((t) => paint(t, false), duration);
-  }
-
-  function beginClose(): void {
-    if (layer === null || closing) {
-      return;
-    }
-    closing = true;
-    if (theme().reduceMotion) {
-      closeLayer();
-      return;
-    }
-    stopSlide();
-    stopSlide = transition((t) => {
-      paint(t, true);
-      if (t >= 1) {
-        closeLayer();
-      }
-    }, 220);
   }
 
   function sync(): void {
@@ -140,7 +155,7 @@ export function Sheet(props: {
     }
     const reopening = closing;
     if (closing) {
-      stopSlide();
+      epoch += 1;
       closing = false;
     }
     const created = layer === null;
@@ -155,15 +170,19 @@ export function Sheet(props: {
       moveChildren(placeholder, current.slot);
     }
     if (created) {
-      const previous = coreHost.focused();
-      host.pushFocusScope(current.shell);
-      current.previous = previous;
-      current.back = host.onBack(() => {
-        props.onClose();
-        return true;
-      });
-      current.focused = true;
-      takeInitialFocus(current.shell, props.initialFocus);
+      try {
+        const previous = coreHost.focused();
+        host.pushFocusScope(current.shell);
+        current.previous = previous;
+        current.unregister = registerOverlay({
+          modal: true,
+          close: () => props.onClose(),
+        });
+        current.focused = true;
+        takeInitialFocus(current.shell, props.initialFocus);
+      } catch {
+        // A failed focus restore must not escape into runFrames.
+      }
       armEnter();
     } else if (reopening) {
       armEnter();
@@ -171,15 +190,10 @@ export function Sheet(props: {
   }
 
   const stop = onFrame(() => {
-    try {
-      sync();
-    } catch {
-      // A failed focus restore must not escape into runFrames.
-    }
+    sync();
   });
   onCleanup(() => {
     stop();
-    stopSlide();
     closeLayer();
   });
 
@@ -205,6 +219,6 @@ type Layer = {
   fade: number;
   titleId: number;
   previous: number;
-  back: number;
   focused: boolean;
+  unregister: (() => void) | null;
 };

@@ -1,14 +1,16 @@
+import { LIGHT } from "./palette.ts";
+
 /** Default text size for host text nodes and the Text component. */
 export const FONT_SIZE = 16;
 
-/** Default text color, #111111. */
-export const TEXT_COLOR = "#111111";
+/** Default text color. The light palette `text`. */
+export const TEXT_COLOR = LIGHT.text;
 
-/** Button fill, surface #F2F2F2. */
-export const BUTTON_FILL = "#F2F2F2";
+/** Button fill. The light palette `surface`. */
+export const BUTTON_FILL = LIGHT.surface;
 
-/** Button fill while pressed, accent #148A32. */
-export const BUTTON_PRESSED = "#148A32";
+/** Button fill while pressed. The light palette `primary`. */
+export const BUTTON_PRESSED = LIGHT.primary;
 
-/** Button label, text #111111. */
-export const BUTTON_LABEL = "#111111";
+/** Button label. The light palette `onSurface`. */
+export const BUTTON_LABEL = LIGHT.onSurface;

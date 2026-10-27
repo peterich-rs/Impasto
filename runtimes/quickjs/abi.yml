@@ -1,0 +1,38 @@
+# The only mutation table. build.rs generates Rust, the C header, and the TypeScript constants.
+ops:
+  Create: 1
+  Insert: 2
+  Remove: 3
+  Discard: 4
+  SetText: 5
+  SetImage: 6
+  SetStyle: 7
+  SetRecognizers: 8
+  SetSemantics: 9
+  EditText: 10
+fields:
+  Width: 1
+  Height: 2
+  Padding: 3
+  Margin: 4
+  Gap: 5
+  Grow: 6
+  Shrink: 7
+  Basis: 8
+  MinSize: 9
+  MaxSize: 10
+  Align: 11
+  Justify: 12
+  Wrap: 13
+  Inset: 14
+  Grid: 15
+  FontSize: 16
+  TextAlign: 17
+  Weight: 18
+  MaxLines: 19
+  LineHeight: 20
+  Fill: 21
+  Radius: 22
+  Stroke: 23
+  Alpha: 24
+  Blur: 25

@@ -32,6 +32,7 @@ function mockHost() {
     column: (gap) => alloc("column", [gap]),
     row: (gap) => alloc("row", [gap]),
     stack: () => alloc("stack", []),
+    align: (align) => alloc("align", [align]),
     padding: (edges) => alloc("padding", [edges]),
     grid: (columns, rows, gap) => alloc("grid", [columns, rows, gap]),
     pointerRegion: () => alloc("pointerRegion", []),
@@ -79,6 +80,7 @@ function mockHost() {
     setRadius: (node, radius) => note("setRadius", [node, radius]),
     setAlpha: (node, alpha) => note("setAlpha", [node, alpha]),
     setAlign: (node, align) => note("setAlign", [node, align]),
+    setCross: (node, align) => note("setCross", [node, align]),
     setSize: (node, width, height) => note("setSize", [node, width, height]),
     setImage: (node, source, width, height) => note("setImage", [node, source, width, height]),
     setMaxLines: (node, lines) => note("setMaxLines", [node, lines]),
@@ -157,6 +159,7 @@ function mockHost() {
     onWheel: (node, fn) => note("onWheel", [node, typeof fn]),
     onScroll: (node, fn) => note("onScroll", [node, typeof fn]),
     onSecondaryClick: (node, fn) => note("onSecondaryClick", [node, typeof fn]),
+    onZoom: (node, fn) => note("onZoom", [node, typeof fn]),
     textEdit: (node, op, text) => {
       note("textEdit", [node, op, text]);
       return { text: text ?? "", start: 0, end: 0 };
@@ -301,6 +304,14 @@ if (find(mock.calls, "setWrap")?.args[0] !== spread.id || find(mock.calls, "setW
   fail("wrap");
 }
 if (find(mock.calls, "setFill")?.args[0] !== spread.id) fail("fill");
+const centered = options.createElement("align", { align: "center", fill: true });
+const alignCall = find(mock.calls, "align");
+if (alignCall?.args[0] !== "center" || centered.id === 0) fail("align");
+if (!mock.calls.some((call) => call.name === "setFill" && call.args[0] === centered.id)) fail("align fill");
+options.setProperty(spread, "cross", "center");
+if (find(mock.calls, "setCross")?.args[0] !== spread.id || find(mock.calls, "setCross")?.args[1] !== "center") {
+  fail("cross");
+}
 const field = options.createElement("pointer", { focusable: true, onFocus: clicked });
 const box = options.createElement("sized", { w: 1, h: 22 });
 if (find(mock.calls, "setFocusable")?.args[0] !== field.id || find(mock.calls, "setFocusable")?.args[1] !== true) {
@@ -331,6 +342,8 @@ if (find(mock.calls, "onWheel")?.args[0] !== scroller.id) fail("onWheel");
 const secondary = () => {};
 options.setProperty(field, "onSecondaryClick", secondary);
 if (find(mock.calls, "onSecondaryClick")?.args[0] !== field.id) fail("onSecondaryClick");
+options.setProperty(pointer, "onZoom", (scale: number) => scale);
+if (find(mock.calls, "onZoom")?.args[0] !== pointer.id) fail("onZoom");
 
 options.setProperty(box, "w", "50%");
 const axisCalls = mock.calls.filter((call) => call.name === "setAxisSize" && call.args[0] === box.id);
@@ -375,6 +388,7 @@ try {
 if (!threw) fail("unknown tag");
 
 await reorderFor();
+await colorStaysPut();
 
 console.log("solid-renderer host tree ok");
 
@@ -492,5 +506,43 @@ async function reorderFor(): Promise<void> {
   solid.flush();
   if (labels().join(",") !== "Beta,Alpha") {
     fail(`For reorder ${labels().join(",")}`);
+  }
+}
+
+async function colorStaysPut(): Promise<void> {
+  const solid = await import("solid-js");
+  const universal = await import("@solidjs/universal");
+  const { Text, bindText } = await import("../runtime/text.ts");
+  const mock = mockHost();
+  const options = hostRendererOptions(mock.host);
+  bindText(options);
+  const renderer = universal.createRenderer(options);
+  const parent = options.createElement("column");
+  const [color, setColor] = solid.createSignal("#111111");
+  solid.createRoot(() => {
+    renderer.render(
+      () =>
+        Text({
+          get color() {
+            return color();
+          },
+          fontSize: 16,
+          children: "Hi",
+        }),
+      parent,
+    );
+  });
+  solid.flush();
+  mock.calls.length = 0;
+  setColor("#ffffff");
+  solid.flush();
+  const names = [...new Set(mock.calls.map((call) => call.name))];
+  for (const name of names) {
+    if (name !== "setColor" && name !== "setStroke" && name !== "setAlpha") {
+      fail(`color change called ${name}`);
+    }
+  }
+  if (!names.includes("setColor")) {
+    fail(`expected setColor, saw ${names.join(",")}`);
   }
 }

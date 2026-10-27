@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use engine::ImagePixels;
-use protocol::DrawList;
 
 /// Owned RGBA8888. The render thread turns this into [`ImagePixels`] for `submit`.
 #[derive(Clone, Debug)]
@@ -145,9 +144,9 @@ impl ImageCache {
         self.frame = self.frame.wrapping_add(1);
     }
 
-    pub fn pin(&mut self, list: &DrawList, bucket: u8) {
+    pub fn pin_sources<'a>(&mut self, sources: impl IntoIterator<Item = &'a str>, bucket: u8) {
         self.pinned.clear();
-        for source in list.image_sources() {
+        for source in sources {
             let key = CacheKey {
                 source: Arc::from(source),
                 bucket,
@@ -158,10 +157,28 @@ impl ImageCache {
         }
     }
 
-    pub fn snapshot(&mut self, list: &DrawList, bucket: u8) -> Vec<(String, u32, u32, Arc<[u8]>)> {
-        self.pin(list, bucket);
+    pub fn snapshot_requirements(
+        &mut self,
+        requirements: &[(Arc<str>, bool)],
+        bucket: u8,
+    ) -> Vec<(String, u32, u32, Arc<[u8]>)> {
+        self.pin_sources(
+            requirements.iter().map(|(source, _)| source.as_ref()),
+            bucket,
+        );
+        self.snapshot_pinned(
+            requirements.iter().map(|(source, _)| source.as_ref()),
+            bucket,
+        )
+    }
+
+    fn snapshot_pinned<'a>(
+        &mut self,
+        sources: impl IntoIterator<Item = &'a str>,
+        bucket: u8,
+    ) -> Vec<(String, u32, u32, Arc<[u8]>)> {
         let mut out = Vec::new();
-        for source in list.image_sources() {
+        for source in sources {
             let key = CacheKey {
                 source: Arc::from(source),
                 bucket,
@@ -453,7 +470,6 @@ pub fn pixel_count_ok(size: [u32; 2]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{Command, ContentMode, DrawList};
 
     fn handle(source: &str, generation: u64, bytes: usize) -> ImageHandle {
         ImageHandle {
@@ -461,20 +477,6 @@ mod tests {
             generation,
             size: [1, 1],
             pixels: Arc::from(vec![0u8; bytes.max(4)]),
-        }
-    }
-
-    fn list(source: &str, required: bool) -> DrawList {
-        DrawList {
-            commands: vec![Command::Image {
-                x: 0.0,
-                y: 0.0,
-                w: 1.0,
-                h: 1.0,
-                source: Arc::from(source),
-                mode: ContentMode::Fill,
-                required,
-            }],
         }
     }
 
@@ -568,7 +570,7 @@ mod tests {
             request.generation,
             4,
         )));
-        let pixels = cache.snapshot(&list("asset:logo", true), 1);
+        let pixels = cache.snapshot_requirements(&[(Arc::from("asset:logo"), true)], 1);
         assert_eq!(pixels.len(), 1);
         match cache.entries.values().next() {
             Some(Entry::Ready { used_frame, .. }) => assert_eq!(*used_frame, cache.frame),

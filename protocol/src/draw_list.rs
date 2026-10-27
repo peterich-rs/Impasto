@@ -1,6 +1,27 @@
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::{Kind, Scene};
+/// Slot and generation of a retained paragraph.
+///
+/// `generation` is 0 when the command has no live paragraph. The player then
+/// rebuilds from the payload and does not touch a released slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ParagraphId {
+    pub index: u32,
+    pub generation: u32,
+}
+
+impl ParagraphId {
+    /// Rebuild from the command payload. Never matches a retained slot.
+    pub const NONE: Self = Self {
+        index: u32::MAX,
+        generation: 0,
+    };
+
+    pub const fn is_none(self) -> bool {
+        self.generation == 0
+    }
+}
 
 /// Horizontal alignment of one paragraph. The default is the left edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -25,7 +46,7 @@ pub enum TextOverflow {
 
 /// Paragraph style carried on a text command. Defaults match the player before
 /// these fields existed: one left-aligned run, weight 400, font line height.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TextStyle {
     /// `None` uses the single family registered on the player.
     pub family: Option<String>,
@@ -71,6 +92,40 @@ impl Default for TextStyle {
     }
 }
 
+impl PartialEq for TextStyle {
+    fn eq(&self, other: &Self) -> bool {
+        self.family == other.family
+            && self.max_lines == other.max_lines
+            && self.ellipsis == other.ellipsis
+            && self.align == other.align
+            && self.weight == other.weight
+            && self.direction_rtl == other.direction_rtl
+            && self.height.to_bits() == other.height.to_bits()
+            && self.underline == other.underline
+            && self.line_through == other.line_through
+            && self.soft_wrap == other.soft_wrap
+            && self.overflow == other.overflow
+    }
+}
+
+impl Eq for TextStyle {}
+
+impl Hash for TextStyle {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.family.hash(state);
+        self.max_lines.hash(state);
+        self.ellipsis.hash(state);
+        self.align.hash(state);
+        self.weight.hash(state);
+        self.direction_rtl.hash(state);
+        self.height.to_bits().hash(state);
+        self.underline.hash(state);
+        self.line_through.hash(state);
+        self.soft_wrap.hash(state);
+        self.overflow.hash(state);
+    }
+}
+
 impl TextStyle {
     /// Ellipsis glyphs, when this paragraph should truncate.
     pub fn ellipsis_str(&self) -> Option<&str> {
@@ -106,12 +161,28 @@ pub struct TextLink {
 }
 
 /// How an image is fitted into its layout box.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+///
+/// [`ContentMode::NineSlice`] insets are source pixels. The player slices the
+/// decoded image; record still emits one image command.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum ContentMode {
     #[default]
     Fill,
     Fit,
     Crop,
+    NineSlice {
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+    },
+}
+
+/// Color space of one gradient stop. Only sRGB is defined.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ColorSpace {
+    #[default]
+    Srgb,
 }
 
 /// One color stop on a gradient. `offset` is in `[0, 1]`.
@@ -119,9 +190,21 @@ pub enum ContentMode {
 pub struct ColorStop {
     pub offset: f32,
     pub color: [u8; 4],
+    pub space: ColorSpace,
+}
+
+impl ColorStop {
+    pub const fn srgb(offset: f32, color: [u8; 4]) -> Self {
+        Self {
+            offset,
+            color,
+            space: ColorSpace::Srgb,
+        }
+    }
 }
 
 /// Fill gradient in the rectangle's unit square. `(0, 0)` is the top-left.
+/// Sweep angles are radians, clockwise from the positive x axis.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Gradient {
     Linear {
@@ -134,6 +217,12 @@ pub enum Gradient {
         radius: f32,
         stops: Vec<ColorStop>,
     },
+    Sweep {
+        center: [f32; 2],
+        start_angle_rad: f32,
+        end_angle_rad: f32,
+        stops: Vec<ColorStop>,
+    },
 }
 
 /// Material shadow. `elevation` is scene points.
@@ -141,6 +230,18 @@ pub enum Gradient {
 pub struct Shadow {
     pub color: [u8; 4],
     pub elevation: f32,
+}
+
+/// A drop shadow drawn in the same picture as its rectangle.
+///
+/// `offset` and `blur_sigma` are scene points. The player does not multiply
+/// `blur_sigma` by `point_scale`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoxShadow {
+    pub offset: [f32; 2],
+    pub blur_sigma: f32,
+    pub spread: f32,
+    pub color: [u8; 4],
 }
 
 /// Layer blend. [`BlendMode::SrcOver`] is a no-op at record time.
@@ -171,6 +272,8 @@ pub enum Command {
         stroke_color: [u8; 4],
         gradient: Option<Gradient>,
         shadow: Option<Shadow>,
+        /// Drawn before the rectangle, in array order. Empty means no box shadow.
+        box_shadows: Arc<[BoxShadow]>,
     },
     Text {
         x: f32,
@@ -178,13 +281,15 @@ pub enum Command {
         /// Paragraph constraint used when this run was measured, in scene points.
         max_width: f32,
         font_size: f32,
+        /// Retained paragraph. [`ParagraphId::NONE`] rebuilds from the payload.
+        paragraph: ParagraphId,
         color: [u8; 4],
         utf8: Arc<str>,
-        style: TextStyle,
+        style: Arc<TextStyle>,
         /// Empty means one run with the command color and style.
-        spans: Vec<TextSpan>,
+        spans: Arc<[TextSpan]>,
         /// UTF-16 ranges. Interaction only; the player does not draw them.
-        links: Vec<TextLink>,
+        links: Arc<[TextLink]>,
     },
     Image {
         x: f32,
@@ -261,7 +366,7 @@ pub struct DrawList {
 }
 
 impl DrawList {
-    /// Image sources in paint order. The version 1 byte format is unchanged.
+    /// Image sources in paint order.
     pub fn image_sources(&self) -> impl Iterator<Item = &str> {
         self.commands.iter().filter_map(|command| match command {
             Command::Image { source, .. } => Some(source.as_ref()),
@@ -289,56 +394,15 @@ impl DrawList {
     }
 }
 
-const V1_CLEAR: [u8; 4] = [17, 17, 17, 255];
+#[cfg(test)]
+mod tests {
+    use super::{Command, DrawList};
 
-/// Font size the version 1 byte format implies. The bytes themselves have no style fields.
-pub const V1_FONT_SIZE: f32 = 28.0;
-
-/// Paragraph width the version 1 byte format implies.
-pub const V1_PARAGRAPH_WIDTH: f32 = 280.0;
-
-/// Map a version 1 scene the way the old player painted it.
-///
-/// `LAYER` is skipped. The clear color is painted first. Text commands carry
-/// [`V1_FONT_SIZE`] and [`V1_PARAGRAPH_WIDTH`] because the bytes have no style.
-pub fn scene_to_draw_list(scene: &Scene) -> DrawList {
-    let mut commands = vec![Command::Fill { color: V1_CLEAR }];
-    for node in scene.nodes() {
-        match node.kind {
-            Kind::Layer => {}
-            Kind::Rect => commands.push(Command::Rect {
-                x: node.x,
-                y: node.y,
-                w: node.w,
-                h: node.h,
-                corner_radius: 0.0,
-                color: node.color,
-                stroke_width: 0.0,
-                stroke_color: [0, 0, 0, 0],
-                gradient: None,
-                shadow: None,
-            }),
-            Kind::Text => commands.push(Command::Text {
-                x: node.x,
-                y: node.y,
-                max_width: V1_PARAGRAPH_WIDTH,
-                font_size: V1_FONT_SIZE,
-                color: node.color,
-                utf8: Arc::from(node.text.as_str()),
-                style: TextStyle::default(),
-                spans: Vec::new(),
-                links: Vec::new(),
-            }),
-            Kind::Image => commands.push(Command::Image {
-                x: node.x,
-                y: node.y,
-                w: node.w,
-                h: node.h,
-                source: Arc::from(node.text.as_str()),
-                mode: ContentMode::Fill,
-                required: true,
-            }),
-        }
+    #[test]
+    fn an_unbalanced_pop_is_stored_as_data() {
+        let list = DrawList {
+            commands: vec![Command::Pop],
+        };
+        assert_eq!(list.commands, vec![Command::Pop]);
     }
-    DrawList { commands }
 }

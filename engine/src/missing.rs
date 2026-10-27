@@ -1,5 +1,5 @@
 use crate::{ImagePixels, Status};
-use protocol::DrawList;
+use protocol::LayerTree;
 
 pub struct Engine;
 
@@ -15,9 +15,9 @@ impl Engine {
         Err(Status::NotLinked)
     }
 
-    pub fn submit<'pixels>(
+    pub fn submit_layers<'pixels>(
         &mut self,
-        _list: &DrawList,
+        _tree: &LayerTree,
         _point_scale: f32,
         _resolve: impl FnMut(&str) -> Option<ImagePixels<'pixels>>,
     ) -> Result<(), Status> {
@@ -128,6 +128,40 @@ impl Engine {
         _upstream: bool,
     ) -> Result<crate::CaretHit, Status> {
         Err(Status::NotLinked)
+    }
+
+    pub fn retain_paragraph(
+        &mut self,
+        _utf8: &str,
+        _font_size: f32,
+        _max_width: f32,
+        _color: [u8; 4],
+        _style: &protocol::TextStyle,
+        _spans: &[protocol::TextSpan],
+    ) -> Result<protocol::ParagraphId, Status> {
+        Err(Status::NotLinked)
+    }
+
+    pub fn release_paragraph(&mut self, _id: protocol::ParagraphId) {}
+
+    pub fn paragraph_live(&self, _id: protocol::ParagraphId) -> bool {
+        false
+    }
+
+    pub fn text_paint_probe(&self) -> (bool, [u8; 4]) {
+        (false, [0, 0, 0, 0])
+    }
+
+    pub fn picture_builds(&self) -> u64 {
+        0
+    }
+
+    pub fn cache_counts(&self) -> (usize, usize) {
+        (0, 0)
+    }
+
+    pub fn submit_stats(&self) -> crate::SubmitStats {
+        crate::SubmitStats::default()
     }
 }
 

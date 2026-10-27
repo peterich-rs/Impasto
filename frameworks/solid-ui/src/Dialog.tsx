@@ -1,15 +1,15 @@
 import { onCleanup } from "solid-js";
-import { host, onFrame, overlayParent, removeNode, type NodeHandle } from "@uifw/solid-renderer";
+import { directionFor, host, onFrame, overlayParent, removeNode, restoreFocus, spring, takeInitialFocus, type NodeHandle } from "@uifw/solid-renderer";
 import { colorBytes } from "./colors.ts";
 import { coreHost, nodeId } from "./host-ext.ts";
-import { directionFor } from "./i18n.ts";
-import { moveChildren, restoreFocus, takeInitialFocus } from "./overlay.ts";
+import { registerOverlay } from "./overlay/registry.ts";
+import { moveChildren } from "./overlay.ts";
 import { Role } from "./semantics.ts";
 import { useTheme } from "./use-theme.ts";
 
 /**
  * A 0×0 placeholder. While open, children live in the overlay column.
- * The move and the close sequence run on the runtime frame listener. No animation.
+ * Open and close fade through `host.animate`. The shell stays until the spring settles.
  */
 export function Dialog(props: {
   open: boolean;
@@ -21,6 +21,8 @@ export function Dialog(props: {
   const theme = useTheme();
   let placeholder = 0;
   let layer: Layer | null = null;
+  let closing = false;
+  let epoch = 0;
 
   function closeLayer(): void {
     if (layer === null) {
@@ -28,6 +30,7 @@ export function Dialog(props: {
     }
     const current = layer;
     layer = null;
+    closing = false;
     try {
       moveChildren(current.slot, placeholder);
       if (current.focused) {
@@ -35,11 +38,32 @@ export function Dialog(props: {
         restoreFocus(current.previous);
       }
     } finally {
-      if (current.back !== 0) {
-        host.offBack(current.back);
-      }
-      removeNode({ id: current.shell } as NodeHandle);
+      current.unregister?.();
+      removeNode({ id: current.fade } as NodeHandle);
     }
+  }
+
+  function beginClose(): void {
+    if (layer === null || closing) {
+      return;
+    }
+    closing = true;
+    layer.unregister?.();
+    layer.unregister = null;
+    const fade = layer.fade;
+    const token = ++epoch;
+    spring({
+      id: fade,
+      prop: "opacity",
+      from: 255,
+      to: 0,
+      write: (value) => host.setAlpha(fade, Math.round(value)),
+      onDone: () => {
+        if (token === epoch) {
+          closeLayer();
+        }
+      },
+    });
   }
 
   function ensureLayer(): Layer | null {
@@ -50,9 +74,12 @@ export function Dialog(props: {
       return null;
     }
     const overlay = nodeId(overlayParent());
+    const fade = host.opacity(0);
+    host.setFill(fade);
+    host.insert(overlay, fade, 0);
     const shell = host.stack();
     host.setFill(shell);
-    host.insert(overlay, shell, 0);
+    host.insert(fade, shell, 0);
 
     const scrim = host.pointerRegion();
     host.setFill(scrim);
@@ -62,10 +89,11 @@ export function Dialog(props: {
     host.setFill(paint);
     host.insert(scrim, paint, 0);
 
+    const frame = host.align("center");
+    host.setFill(frame);
+    host.insert(shell, frame, 0);
     const content = host.column(theme().space.m);
-    host.setFill(content);
-    host.setAlign(content, "center");
-    host.insert(shell, content, 0);
+    host.insert(frame, content, 0);
 
     const title = props.title ?? "";
     let titleId = 0;
@@ -79,7 +107,14 @@ export function Dialog(props: {
 
     const slot = host.column(theme().space.s);
     host.insert(content, slot, 0);
-    layer = { shell, slot, titleId, previous: 0, back: 0, focused: false };
+    layer = { shell, slot, titleId, fade, previous: 0, back: 0, focused: false, unregister: null };
+    spring({
+      id: fade,
+      prop: "opacity",
+      from: 0,
+      to: 255,
+      write: (value) => host.setAlpha(fade, Math.round(value)),
+    });
     return layer;
   }
 
@@ -88,8 +123,12 @@ export function Dialog(props: {
       return;
     }
     if (!props.open) {
-      closeLayer();
+      beginClose();
       return;
+    }
+    if (closing) {
+      epoch += 1;
+      closing = false;
     }
     const current = ensureLayer();
     if (current === null) {
@@ -104,23 +143,23 @@ export function Dialog(props: {
     if (current.focused) {
       return;
     }
-    const previous = coreHost.focused();
-    host.pushFocusScope(current.shell);
-    current.previous = previous;
-    current.back = host.onBack(() => {
-      props.onClose();
-      return true;
-    });
-    current.focused = true;
-    takeInitialFocus(current.shell, props.initialFocus);
-  }
-
-  const stop = onFrame(() => {
     try {
-      sync();
+      const previous = coreHost.focused();
+      host.pushFocusScope(current.shell);
+      current.previous = previous;
+      current.unregister = registerOverlay({
+        modal: true,
+        close: () => props.onClose(),
+      });
+      current.focused = true;
+      takeInitialFocus(current.shell, props.initialFocus);
     } catch {
       // A failed focus restore must not escape into runFrames.
     }
+  }
+
+  const stop = onFrame(() => {
+    sync();
   });
   onCleanup(() => {
     stop();
@@ -146,7 +185,9 @@ type Layer = {
   shell: number;
   slot: number;
   titleId: number;
+  fade: number;
   previous: number;
   back: number;
   focused: boolean;
+  unregister: (() => void) | null;
 };

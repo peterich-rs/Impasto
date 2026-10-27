@@ -43,6 +43,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: test macos host
         run: cargo test -p macos
+      - name: pixel golden
+        run: just pixel
 
   kotlin:
     name: kotlin
@@ -56,7 +58,7 @@ jobs:
           java-version: "21"
           cache: gradle
       - name: jvmTest and gallery
-        run: bash frameworks/kotlin-ui/gradlew -p frameworks/kotlin-ui :library:jvmTest :gallery:runGallery
+        run: bash frameworks/kotlin-ui/gradlew -p frameworks/kotlin-ui :library:jvmTest
 
   solid:
     name: solid
@@ -67,10 +69,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: bytes, tree, gallery
-        env:
-          UIFW_COUNTER_BYTES: ${{ github.workspace }}/protocol/tests/fixtures/counter.bin
+      - name: enable pnpm
+        run: corepack enable && corepack prepare pnpm@9.15.9 --activate
+      - name: solid packages
         run: |
-          node --experimental-strip-types frameworks/solid-renderer/src/encode.test.ts
           node --conditions=browser --experimental-strip-types frameworks/solid-renderer/src/tree.test.ts
-          node --experimental-strip-types apps/gallery-solid/gallery.ts
+          node --experimental-strip-types frameworks/solid-renderer/runtime/frame.test.ts
+          node --experimental-strip-types frameworks/solid-renderer/runtime/motion.test.ts
+          node --experimental-strip-types frameworks/solid-renderer/src/direction.test.ts
+          node --experimental-strip-types frameworks/net/src/index.test.ts
+          node --experimental-strip-types frameworks/i18n/src/index.test.ts
+          cd frameworks/solid-router && pnpm install --frozen-lockfile && node --experimental-strip-types src/path.test.ts && node --experimental-strip-types src/transition.test.ts && node --conditions=browser --experimental-strip-types --import ../register.mjs src/router.test.ts
+          cd ../form && pnpm install --frozen-lockfile && node --conditions=browser --experimental-strip-types src/index.test.ts
+          cd ../solid-ui && pnpm install --frozen-lockfile && for test in src/*.test.ts src/field/*.test.ts; do node --conditions=browser --experimental-strip-types --import ../register.mjs "$test"; done

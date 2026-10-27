@@ -2,6 +2,8 @@ export type MotionHooks = {
   reduceMotion: () => boolean;
   onFrame: (fn: (targetMs: number, intervalMs: number) => void) => () => void;
   requestFrame: () => void;
+  /** Submits a target value and a duration. `reduceMotion` never calls this. */
+  animate: (target: number, durationMs: number, write: (value: number) => void) => () => void;
 };
 
 let bound: MotionHooks | null = null;
@@ -20,6 +22,14 @@ function clock(): MotionHooks | null {
   return testHooks ?? bound;
 }
 
+export function prefersReducedMotion(): boolean {
+  const active = clock();
+  if (active === null) {
+    return false;
+  }
+  return active.reduceMotion();
+}
+
 /**
  * Writes `t` from 0 to 1 across `durationMs`.
  * `reduceMotion` or a non-positive duration writes 1 once and does not schedule a frame.
@@ -33,19 +43,29 @@ export function transition(write: (t: number) => void, durationMs: number): () =
     write(1);
     return () => {};
   }
+  return active.animate(1, durationMs, write);
+}
+
+/** Samples `target` across `durationMs` on the frame clock. */
+export function animateOnClock(
+  hooks: MotionHooks,
+  target: number,
+  durationMs: number,
+  write: (value: number) => void,
+): () => void {
   let start: number | null = null;
   let stop = () => {};
-  stop = active.onFrame((targetMs) => {
+  stop = hooks.onFrame((targetMs) => {
     if (start === null) {
       start = targetMs;
     }
     const t = Math.min(1, Math.max(0, (targetMs - start) / durationMs));
-    write(t);
+    write(target * t);
     if (t >= 1) {
       stop();
     }
   });
-  active.requestFrame();
+  hooks.requestFrame();
   return () => {
     stop();
   };

@@ -1,6 +1,11 @@
-import type { Rgba } from "./scene.ts";
+interface Rgba {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}
 
-export function parseColor(value: unknown): Rgba {
+function parseColor(value: unknown): Rgba {
   if (typeof value === "string") {
     const hex = value.startsWith("#") ? value.slice(1) : value;
     if (hex.length !== 6 && hex.length !== 8) {

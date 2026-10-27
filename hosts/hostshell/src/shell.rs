@@ -184,18 +184,20 @@ pub fn start(boot: Boot) -> Result<Link, BootError> {
     let acks = Arc::new(Acks::new());
     let acks_thread = Arc::clone(&acks);
     let (image_tx, image_rx) = mpsc::channel();
+    let http = boot.http.clone();
     let decoder = Arc::clone(&boot.decoder);
     let inbox_images = Arc::clone(&inbox);
+    let http_images = http.clone();
     let _io = thread::Builder::new()
         .name("uifw-io".to_string())
         .spawn(move || {
-            decode_loop(decoder, image_rx, &inbox_images);
+            decode_loop(decoder, image_rx, &inbox_images, http_images);
         });
     let (net_tx, net_rx) = mpsc::channel();
     let (wake_tx, wake_rx) = mpsc::channel();
     let inbox_net = Arc::clone(&inbox);
     let bridge = Arc::clone(&boot.bridge);
-    let _net = crate::net::spawn(net_rx, inbox_net, bridge);
+    let _net = crate::net::spawn(net_rx, inbox_net, bridge, http);
     let _time = crate::net::wake(wake_rx, Arc::clone(&inbox));
     let spawned = thread::Builder::new()
         .name("uifw-render".to_string())
@@ -229,15 +231,28 @@ pub fn start(boot: Boot) -> Result<Link, BootError> {
     }
 }
 
-fn decode_loop(decoder: Arc<dyn ImageDecoder>, jobs: Receiver<ImageRequest>, inbox: &Inbox) {
+fn decode_loop(
+    decoder: Arc<dyn ImageDecoder>,
+    jobs: Receiver<ImageRequest>,
+    inbox: &Inbox,
+    http: Option<Arc<dyn session::HttpClient>>,
+) {
     while let Ok(request) = jobs.recv() {
-        inbox.post(Command::ImageReady(decode_one(decoder.as_ref(), &request)));
+        inbox.post(Command::ImageReady(decode_one(
+            decoder.as_ref(),
+            http.as_deref(),
+            &request,
+        )));
     }
 }
 
-fn decode_one(decoder: &dyn ImageDecoder, request: &ImageRequest) -> ImageReady {
+fn decode_one(
+    decoder: &dyn ImageDecoder,
+    http: Option<&dyn session::HttpClient>,
+    request: &ImageRequest,
+) -> ImageReady {
     let result = if request.source.starts_with("https://") {
-        match crate::net::fetch_image_body(&request.source) {
+        match crate::net::fetch_image_body(http, &request.source) {
             Ok(bytes) => decoder.decode_bytes(&request.source, &bytes),
             Err(error) => Err(error),
         }
@@ -272,7 +287,6 @@ fn decode_one(decoder: &dyn ImageDecoder, request: &ImageRequest) -> ImageReady 
 }
 
 struct Installed {
-    list: protocol::DrawList,
     scale: f32,
 }
 
@@ -281,7 +295,7 @@ struct Runtime {
     engine: Rc<RefCell<engine::Engine>>,
     log: Rc<dyn Fn(LogLevel, &str)>,
     session: Option<Box<dyn session::Session>>,
-    fixture: Option<protocol::DrawList>,
+    latest: Option<Arc<protocol::LayerTree>>,
     input: Input,
     surfaces: SurfaceHost,
     scheduler: FrameScheduler,
@@ -295,13 +309,14 @@ struct Runtime {
     >,
     installed: Option<Installed>,
     point_scale: f32,
-    fixture_presented: bool,
     needs_present: bool,
     images: ImageCache,
     image_tx: Sender<ImageRequest>,
     frame_number: u64,
     semantics: Option<ui_core::SemanticsUpdate>,
+    panic_streak: u32,
     wake_tx: Sender<Option<i64>>,
+    dump_list: bool,
 }
 
 fn render(
@@ -330,32 +345,28 @@ fn render(
             services.borrow().log(level, message);
         }) as Rc<dyn Fn(LogLevel, &str)>
     };
-    let mut session = None;
-    let mut fixture = None;
-    match boot.launch {
-        Launch::Fixture(list) => fixture = Some(list),
-        Launch::Session(open) => {
-            let slot = EngineSlot {
-                engine: Rc::clone(&engine),
-                log: Rc::clone(&log),
-            };
-            match open(&slot) {
-                Ok(mut opened) => {
-                    let submit = net_tx.clone();
-                    opened.bind_io(Box::new(move |job| {
-                        let _ = submit.send(job);
-                    }));
-                    session = Some(opened);
-                }
-                Err(error) => {
-                    let error = BootError::Session(error);
-                    log(LogLevel::Error, &error.to_string());
-                    let _ = ready.send(Err(error.clone()));
-                    return Err(error);
-                }
+    let Launch::Session(open) = boot.launch;
+    let slot = EngineSlot {
+        engine: Rc::clone(&engine),
+        log: Rc::clone(&log),
+    };
+    let session = match open(
+        &slot,
+        Box::new({
+            let submit = net_tx.clone();
+            move |job| {
+                let _ = submit.send(job);
             }
+        }),
+    ) {
+        Ok(opened) => Some(opened),
+        Err(error) => {
+            let error = BootError::Session(error);
+            log(LogLevel::Error, &error.to_string());
+            let _ = ready.send(Err(error.clone()));
+            return Err(error);
         }
-    }
+    };
     if ready.send(Ok(())).is_err() {
         return Ok(());
     }
@@ -369,7 +380,7 @@ fn render(
         engine,
         log,
         session,
-        fixture,
+        latest: None,
         input: Input::new(),
         surfaces: SurfaceHost::new(),
         scheduler: FrameScheduler::new(),
@@ -377,13 +388,14 @@ fn render(
         open_surface: boot.open_surface,
         installed: None,
         point_scale: 1.0,
-        fixture_presented: false,
         needs_present: false,
         images: ImageCache::new(),
         image_tx,
         frame_number: 0,
+        panic_streak: 0,
         semantics: None,
         wake_tx,
+        dump_list: boot.dump_list,
     };
     while let Some(command) = inbox.recv() {
         if on_command(&mut runtime, command, acks)? {
@@ -530,7 +542,7 @@ fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bo
         }
         Command::HttpDone { token, result } => {
             if let Some(session) = runtime.session.as_mut() {
-                session.http_result(token, result);
+                session.io_event(session::IoEvent::Http { token, result });
                 if session.wants_frame() {
                     arm(runtime);
                 }
@@ -539,7 +551,7 @@ fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bo
         }
         Command::PluginDone { token, result } => {
             if let Some(session) = runtime.session.as_mut() {
-                session.plugin_result(token, result);
+                session.io_event(session::IoEvent::Plugin { token, result });
                 if session.wants_frame() {
                     arm(runtime);
                 }
@@ -553,7 +565,12 @@ fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bo
             data,
         } => {
             if let Some(session) = runtime.session.as_mut() {
-                session.socket_event(id, &event, text, &data);
+                session.io_event(session::IoEvent::Socket {
+                    id,
+                    event,
+                    text,
+                    data,
+                });
                 if session.wants_frame() {
                     arm(runtime);
                 }
@@ -584,6 +601,50 @@ fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bo
     }
 }
 
+fn fold_semantics(
+    snapshot: &mut Option<ui_core::SemanticsUpdate>,
+    patch: &ui_core::SemanticsPatch,
+) {
+    let update = snapshot.get_or_insert_with(|| ui_core::SemanticsUpdate {
+        root: patch.root,
+        nodes: Vec::new(),
+    });
+    update.root = patch.root;
+    for op in &patch.ops {
+        match op {
+            ui_core::SemanticsOp::Upsert(node) => {
+                if let Some(found) = update.nodes.iter_mut().find(|item| item.id == node.id) {
+                    *found = node.clone();
+                } else {
+                    update.nodes.push(node.clone());
+                }
+            }
+            ui_core::SemanticsOp::Remove(id) => update.nodes.retain(|node| node.id != *id),
+        }
+    }
+}
+
+fn layer_tree_line(tree: &protocol::LayerTree) -> String {
+    let pictures: Vec<String> = tree
+        .pictures
+        .iter()
+        .map(|picture| {
+            format!(
+                "{}:gen{}:{}cmds",
+                picture.id.0,
+                picture.generation,
+                picture.commands.len()
+            )
+        })
+        .collect();
+    format!(
+        "layer_tree epoch={} layers={} pictures=[{}]",
+        tree.epoch,
+        tree.layers.len(),
+        pictures.join(", ")
+    )
+}
+
 fn on_frame(runtime: &mut Runtime, time: FrameTime) -> Result<bool, BootError> {
     if !runtime.surfaces.is_open() {
         return Ok(end_frame(runtime, false, false));
@@ -603,52 +664,46 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime) -> Result<bool, BootError> {
         for event in frame.inputs {
             session.input(event);
         }
-        if let Some(text) = session.take_clipboard() {
-            runtime.services.borrow().set_clipboard(&text);
-        }
-        leave = session.take_exit();
         if frame.ime_dismissed {
             session.ime_dismissed();
         }
-        crate::ime::publish(session.as_mut(), &runtime.services);
-    }
-    if leave {
-        runtime.services.borrow().request_exit();
-    }
-    if frame.paused
-        || scheduler::frame_step(&FrameView {
-            surface_open: true,
-            paused: frame.paused,
-            fixture_open: runtime.fixture.is_some(),
-            fixture_presented: runtime.fixture_presented,
-            unchanged: false,
-            needs_present: true,
-            again: false,
-        }) == FrameStep::Cancel
-    {
-        return Ok(end_frame(runtime, false, false));
     }
     runtime.frame_number = runtime.frame_number.wrapping_add(1);
     let session_started = Instant::now();
-    let mut again = false;
-    let list = if let Some(session) = runtime.session.as_mut() {
-        let framed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let list = session.frame(time);
-            let again = session.wants_frame();
-            let semantics = session.semantics();
-            (list, again, semantics)
-        }));
+    let mut again;
+    let mut reloads = Vec::new();
+    let mut fonts = Vec::new();
+    let mut census = None;
+    let mut layers_changed = false;
+    if let Some(session) = runtime.session.as_mut() {
+        let framed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.frame(time)));
         match framed {
-            Ok((list, wants_another, update)) => {
-                again = wants_another;
-                if let Some(update) = update {
-                    if runtime.semantics.as_ref() != Some(&update) {
-                        runtime.services.borrow().semantics(&update);
-                        runtime.semantics = Some(update);
+            Ok(mut output) => {
+                runtime.panic_streak = 0;
+                again = output.again;
+                leave = output.exit;
+                if let Some(tree) = output.layers.take() {
+                    if runtime.dump_list {
+                        (runtime.log)(LogLevel::Info, &layer_tree_line(&tree));
+                    }
+                    runtime.latest = Some(tree);
+                    layers_changed = true;
+                }
+                if let Some(text) = output.clipboard.take() {
+                    runtime.services.borrow().set_clipboard(&text);
+                }
+                if let Some(update) = output.ime.take() {
+                    crate::ime::publish_update(&update, &runtime.services);
+                }
+                if let Some(patch) = output.semantics.take() {
+                    fold_semantics(&mut runtime.semantics, &patch);
+                    if let Some(update) = runtime.semantics.as_ref() {
+                        runtime.services.borrow().semantics(update);
                     }
                 }
-                crate::ime::publish(session.as_mut(), &runtime.services);
-                list
+                reloads = std::mem::take(&mut output.reloads);
+                fonts = std::mem::take(&mut output.fonts);
+                census = output.images.take();
             }
             Err(_) => {
                 (runtime.log)(
@@ -656,47 +711,47 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime) -> Result<bool, BootError> {
                     "render thread panicked; keeping the previous frame",
                 );
                 again = false;
-                runtime
-                    .installed
-                    .as_ref()
-                    .map(|installed| installed.list.clone())
-                    .unwrap_or(protocol::DrawList {
-                        commands: Vec::new(),
-                    })
+                runtime.panic_streak = runtime.panic_streak.saturating_add(1);
+                if runtime.panic_streak >= 3 {
+                    leave = true;
+                }
             }
         }
-    } else if let Some(list) = runtime.fixture.clone() {
-        list
     } else {
         return Ok(end_frame(runtime, false, false));
-    };
+    }
+    if leave {
+        runtime.services.borrow().request_exit();
+    }
     let session_ms = elapsed_ms(session_started);
-    let reloads = runtime
-        .session
-        .as_mut()
-        .map(|session| session.take_reloads())
-        .unwrap_or_default();
     let reloaded = !reloads.is_empty();
     for source in &reloads {
         runtime.images.reload(source);
     }
     again |= reloaded;
-    if !images_ready(runtime, &list) {
+    if !fonts.is_empty() {
+        install_fonts(
+            &mut runtime.engine.borrow_mut(),
+            fonts,
+            runtime.log.as_ref(),
+        );
+    }
+    let Some(tree) = runtime.latest.clone() else {
+        return Ok(end_frame(runtime, again, false));
+    };
+    let requirements = tree.image_requirements();
+    if !images_ready(runtime, &requirements, census.as_deref()) {
         return Ok(end_frame(runtime, reloaded, false));
     }
-    let unchanged = crate::input::same_draw_list(
-        runtime.installed.as_ref().map(|installed| &installed.list),
-        &list,
-    ) && runtime
-        .installed
-        .as_ref()
-        .is_some_and(|installed| installed.scale == runtime.point_scale);
+    let unchanged = !layers_changed
+        && runtime
+            .installed
+            .as_ref()
+            .is_some_and(|installed| installed.scale == runtime.point_scale);
     let mut submit_ms = 0.0;
     match scheduler::frame_step(&FrameView {
         surface_open: runtime.surfaces.is_open(),
-        paused: false,
-        fixture_open: false,
-        fixture_presented: false,
+        paused: frame.paused,
         unchanged,
         needs_present: runtime.needs_present,
         again,
@@ -708,33 +763,25 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime) -> Result<bool, BootError> {
             return Ok(end_frame(runtime, true, false));
         }
         FrameStep::Submit => {
-            let fonts = runtime
-                .session
-                .as_mut()
-                .map(|session| session.take_fonts())
-                .unwrap_or_default();
-            install_fonts(
-                &mut runtime.engine.borrow_mut(),
-                fonts,
-                runtime.log.as_ref(),
-            );
             let started = Instant::now();
             let pixels = runtime
                 .images
-                .snapshot(&list, images::scale_bucket(runtime.point_scale));
+                .snapshot_requirements(&requirements, images::scale_bucket(runtime.point_scale));
+            let resolve = |source: &str| {
+                pixels
+                    .iter()
+                    .find(|(name, ..)| name == source)
+                    .map(|(_, width, height, rgba)| engine::ImagePixels {
+                        width: *width,
+                        height: *height,
+                        rgba,
+                    })
+            };
             let submitted =
                 runtime
                     .engine
                     .borrow_mut()
-                    .submit(&list, runtime.point_scale, |source| {
-                        pixels.iter().find(|(name, ..)| name == source).map(
-                            |(_, width, height, rgba)| engine::ImagePixels {
-                                width: *width,
-                                height: *height,
-                                rgba,
-                            },
-                        )
-                    });
+                    .submit_layers(&tree, runtime.point_scale, resolve);
             submit_ms = elapsed_ms(started);
             if let Err(status) = submitted {
                 (runtime.log)(LogLevel::Error, &format!("scene submit failed: {status}"));
@@ -744,7 +791,6 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime) -> Result<bool, BootError> {
                 return Ok(end_frame(runtime, true, false));
             }
             runtime.installed = Some(Installed {
-                list,
                 scale: runtime.point_scale,
             });
         }
@@ -756,6 +802,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime) -> Result<bool, BootError> {
         runtime.surfaces.present(&mut engine)
     };
     let present_ms = elapsed_ms(started);
+    let stats = runtime.engine.borrow().submit_stats();
     let timing = FrameTiming {
         number: runtime.frame_number,
         vsync_ms: time.vsync_ms,
@@ -763,13 +810,22 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime) -> Result<bool, BootError> {
         session_ms,
         submit_ms,
         present_ms,
+        picture_rebuilt: stats.picture_rebuilt,
+        picture_reused: stats.picture_reused,
+        layer_count: stats.layer_count,
     };
     if timing.over_budget(time.interval_ms) {
         (runtime.log)(
             LogLevel::Info,
             &format!(
-                "frame {} session {:.2}ms submit {:.2}ms present {:.2}ms",
-                timing.number, timing.session_ms, timing.submit_ms, timing.present_ms
+                "frame {} session {:.2}ms submit {:.2}ms present {:.2}ms rebuilt {} reused {} layers {}",
+                timing.number,
+                timing.session_ms,
+                timing.submit_ms,
+                timing.present_ms,
+                timing.picture_rebuilt,
+                timing.picture_reused,
+                timing.layer_count
             ),
         );
     }
@@ -777,11 +833,8 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime) -> Result<bool, BootError> {
     if after == AfterPresent::Fatal {
         return Err(BootError::Engine(engine::Status::NotLinked));
     }
-    let follow = scheduler::present_followup(after, runtime.fixture.is_some());
+    let follow = scheduler::present_followup(after);
     runtime.needs_present = follow.needs_present;
-    if matches!(after, AfterPresent::Shown { .. }) {
-        runtime.fixture_presented = follow.mark_fixture_presented;
-    }
     if follow.clear_surface {
         runtime.surfaces.clear();
         runtime.installed = None;
@@ -791,37 +844,44 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime) -> Result<bool, BootError> {
     Ok(end_frame(runtime, again, stop))
 }
 
-fn images_ready(runtime: &mut Runtime, list: &protocol::DrawList) -> bool {
+fn images_ready(
+    runtime: &mut Runtime,
+    requirements: &[(Arc<str>, bool)],
+    census: Option<&ui_core::ImageCensus>,
+) -> bool {
     runtime.images.begin_frame();
-    if let Some(session) = runtime.session.as_mut() {
-        if let Some(counts) = session.image_source_counts() {
-            runtime.images.sync_counts(&counts);
-        }
+    if let Some(census) = census {
+        runtime.images.sync_counts(census.counts.as_ref());
     }
     let bucket = images::scale_bucket(runtime.point_scale);
-    runtime.images.pin(list, bucket);
+    runtime.images.pin_sources(
+        requirements.iter().map(|(source, _)| source.as_ref()),
+        bucket,
+    );
     let mut waiting = false;
     let mut blocked = false;
-    for (source, required) in list.image_requirements() {
-        if runtime.images.is_pending(&source, bucket) {
+    for (source, required) in requirements {
+        let source = source.as_ref();
+        let required = *required;
+        if runtime.images.is_pending(source, bucket) {
             if required {
                 waiting = true;
             }
             continue;
         }
-        if runtime.images.resolve(&source, bucket).is_some() {
+        if runtime.images.resolve(source, bucket).is_some() {
             continue;
         }
-        if runtime.images.is_negative(&source, bucket) {
+        if runtime.images.is_negative(source, bucket) {
             if required {
                 blocked = true;
-                if let Some(message) = runtime.images.take_required_log(&source, bucket) {
+                if let Some(message) = runtime.images.take_required_log(source, bucket) {
                     (runtime.log)(LogLevel::Error, &message);
                 }
             }
             continue;
         }
-        if let Some(request) = runtime.images.request(&source, bucket) {
+        if let Some(request) = runtime.images.request(source, bucket) {
             if runtime.image_tx.send(request).is_err() {
                 (runtime.log)(LogLevel::Error, "image decoder stopped");
             }

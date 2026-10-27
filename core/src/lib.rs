@@ -1,6 +1,9 @@
 //! Render tree. Layout goes through Taffy. This crate does not link Impeller.
 
 mod error;
+mod gesture;
+mod layer;
+mod motion;
 mod pointer;
 mod semantics;
 mod shaper;
@@ -11,19 +14,32 @@ mod tree;
 mod barrier_test;
 #[cfg(test)]
 mod layout_test;
+#[cfg(test)]
+mod refactor_test;
 
 pub use error::Error;
-pub use pointer::{Button, Buttons, Modifiers, Phase, PointerEvent, PointerId, PointerKind};
-pub use semantics::{
-    SemanticsAction, SemanticsActions, SemanticsFlags, SemanticsHint, SemanticsId, SemanticsNode,
-    SemanticsRole, SemanticsUpdate,
+pub use gesture::{
+    DoubleTapConfig, DragAxis, DragRecognizer, HitEntry, HitPath, LongPressRecognizer, Recognizer,
+    RecognizerClaim, RecognizerSet, ScrollRecognizer, TapRecognizer, TextSelectRecognizer,
+    VelocityRing, Vote,
 };
-pub use shaper::{Affinity, Caret, MonoShaper, SINGLE_LINE_MAX, Shaper, TextLine, TextSize};
+pub use layer::LayerTree;
+pub use motion::{AnimProp, Friction, SCROLL_TAU_MS, Simulation, Spring};
+pub use pointer::{Button, Buttons, Modifiers, Phase, PointerEvent, PointerId, PointerKind};
+pub use protocol::ParagraphId;
+pub use semantics::{
+    ImageCensus, LiveRegion, SemanticsAction, SemanticsActions, SemanticsFlags, SemanticsHint,
+    SemanticsId, SemanticsNode, SemanticsOp, SemanticsPatch, SemanticsRole, SemanticsUpdate,
+};
+pub use shaper::{
+    Affinity, Caret, MetricsKey, MonoShaper, PaintKey, ParagraphMetrics, SINGLE_LINE_MAX, Shaper,
+    SpanMetrics, TextLine, TextSize, paint_key, resolved_line_height,
+};
 pub use text::{
     Edit, TextEditingValue, TextEditor, TextSelection, grapheme_count, grapheme_index,
     grapheme_unit,
 };
 pub use tree::{
     Alignment, AxisSize, Discarded, DragClaim, Edges, FocusDirection, Gesture, GridLine, Inset,
-    Justify, NodeId, Rect, TrackSize, Tree,
+    Justify, NodeId, Rect, RowCrossAlign, ScrollEdge, TrackSize, Tree,
 };

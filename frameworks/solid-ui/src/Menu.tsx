@@ -1,5 +1,5 @@
 import { onCleanup } from "solid-js";
-import { host, onFrame, overlayParent, removeNode, type NodeHandle } from "@uifw/solid-renderer";
+import { host, onFrame, overlayParent, removeNode, spring, type NodeHandle } from "@uifw/solid-renderer";
 import { colorBytes } from "./colors.ts";
 import { nodeId } from "./host-ext.ts";
 import { moveChildren } from "./overlay.ts";
@@ -18,22 +18,19 @@ function Floating(props: {
   const theme = useTheme();
   let placeholder = 0;
   let shell = 0;
+  let fade = 0;
   let panel = 0;
   let slot = 0;
-  let back = 0;
 
   function closeLayer(): void {
     if (slot !== 0 && placeholder !== 0) {
       moveChildren(slot, placeholder);
     }
-    if (back !== 0) {
-      host.offBack(back);
-      back = 0;
-    }
     if (shell !== 0) {
       removeNode({ id: shell } as NodeHandle);
     }
     shell = 0;
+    fade = 0;
     panel = 0;
     slot = 0;
   }
@@ -46,15 +43,20 @@ function Floating(props: {
     shell = host.stack();
     host.setFill(shell);
     host.insert(overlay, shell, 0);
+    fade = host.opacity(0);
+    host.insert(shell, fade, 0);
     panel = host.transform();
-    host.insert(shell, panel, 0);
+    host.insert(fade, panel, 0);
     const paint = host.decorated(colorBytes(theme().color.surface), theme().radius.s);
     host.insert(panel, paint, 0);
     slot = host.column(theme().space.s);
     host.insert(paint, slot, 0);
-    back = host.onBack(() => {
-      props.onClose();
-      return true;
+    spring({
+      id: fade,
+      prop: "opacity",
+      from: 0,
+      to: 255,
+      write: (value) => host.setAlpha(fade, Math.round(value)),
     });
   }
 

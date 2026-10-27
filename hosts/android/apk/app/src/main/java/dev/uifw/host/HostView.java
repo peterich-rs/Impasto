@@ -8,8 +8,10 @@ import android.graphics.Insets;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsAnimation;
@@ -19,6 +21,9 @@ import android.view.inputmethod.InputConnection;
 import android.widget.FrameLayout;
 
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * The content view. It receives pointers, keys, insets, and creates the
@@ -30,6 +35,7 @@ public final class HostView extends FrameLayout {
     private final VsyncWaiter vsync;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final AccessBridge access = new AccessBridge();
+    private final ScaleGestureDetector scale;
     private float density = 1f;
     private WindowInsets deferredInsets;
     private boolean imeAnimating;
@@ -45,6 +51,18 @@ public final class HostView extends FrameLayout {
             display = activity.getDisplay();
         }
         vsync = new VsyncWaiter(display);
+        scale = new ScaleGestureDetector(context, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            @Override
+            public boolean onScale(ScaleGestureDetector detector) {
+                nativeZoom(
+                        detector.getScaleFactor(),
+                        detector.getFocusX(),
+                        detector.getFocusY(),
+                        SystemClock.uptimeMillis(),
+                        density);
+                return true;
+            }
+        });
         setFocusable(true);
         setFocusableInTouchMode(true);
         setClickable(true);
@@ -100,7 +118,30 @@ public final class HostView extends FrameLayout {
         });
     }
 
+    public String documentDirectory() {
+        return getContext().getFilesDir().getAbsolutePath();
+    }
+
     public String readClipboard() {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return readClipboardOnUi();
+        }
+        AtomicReference<String> box = new AtomicReference<>("");
+        CountDownLatch latch = new CountDownLatch(1);
+        runOnUi(() -> {
+            box.set(readClipboardOnUi());
+            latch.countDown();
+        });
+        try {
+            latch.await(1, TimeUnit.SECONDS);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+        String value = box.get();
+        return value == null ? "" : value;
+    }
+
+    private String readClipboardOnUi() {
         ClipboardManager manager = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
         if (manager == null || !manager.hasPrimaryClip() || manager.getPrimaryClip() == null) {
             return "";
@@ -158,6 +199,7 @@ public final class HostView extends FrameLayout {
     @Override
     public boolean onTouchEvent(MotionEvent event) {
         requestUnbufferedDispatch(event);
+        scale.onTouchEvent(event);
         emitPointers(event);
         return true;
     }
@@ -458,6 +500,8 @@ public final class HostView extends FrameLayout {
             float wheelX,
             float wheelY,
             float density);
+
+    private static native void nativeZoom(float scale, float x, float y, long timeMs, float density);
 
     private static native void nativeKey(int action, int keyCode, int meta, int unicode);
 }

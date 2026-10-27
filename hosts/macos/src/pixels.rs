@@ -240,34 +240,4 @@ mod tests {
         assert!(pixels_close(&within, &expected, 2, 1));
         assert!(!pixels_close(&outside, &expected, 2, 1));
     }
-
-    #[test]
-    #[ignore = "needs UIFW_FRAME from just pixel-test and a local Impeller SDK"]
-    fn counter_frame_matches_the_reference() {
-        let frame = match std::env::var("UIFW_FRAME") {
-            Ok(frame) => frame,
-            Err(error) => panic!("UIFW_FRAME: {error}"),
-        };
-        let actual = match load_rgba_png(Path::new(&frame)) {
-            Ok(image) => image,
-            Err(error) => panic!("{error:#}"),
-        };
-        let reference = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/pixels/counter.png");
-        let expected = match load_rgba_png(&reference) {
-            Ok(image) => image,
-            Err(error) => panic!("{error:#}"),
-        };
-        assert_eq!(actual.width, expected.width);
-        assert_eq!(actual.height, expected.height);
-        assert!(
-            pixels_close(
-                &actual.pixels,
-                &expected.pixels,
-                expected.width,
-                expected.height
-            ),
-            "frame differs from {}",
-            reference.display()
-        );
-    }
 }

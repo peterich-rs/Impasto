@@ -1,5 +1,4 @@
-import { Text, type NodeHandle } from "@uifw/solid-renderer";
-import { directionFor } from "./i18n.ts";
+import { Text, directionFor, type NodeHandle } from "@uifw/solid-renderer";
 import { Row } from "./Row.tsx";
 import { useTheme } from "./use-theme.ts";
 

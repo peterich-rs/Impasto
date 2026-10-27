@@ -36,6 +36,13 @@ function alignName(value: unknown): "start" | "center" | "end" {
   return "start";
 }
 
+function crossName(value: unknown): "start" | "center" | "end" | "stretch" | "baseline" {
+  if (value === "start" || value === "center" || value === "end" || value === "baseline") {
+    return value;
+  }
+  return "stretch";
+}
+
 function overflowName(value: unknown): "clip" | "ellipsis" | "visible" {
   if (value === "ellipsis" || value === "visible") {
     return value;
@@ -314,6 +321,9 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
       case "justify":
         host.setJustify(node.id, justifyName(value));
         return;
+      case "cross":
+        host.setCross(node.id, crossName(value));
+        return;
       case "wrap":
         host.setWrap(node.id, value === true);
         return;
@@ -436,6 +446,11 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
           host.onSecondaryClick(node.id, value as () => void);
         }
         return;
+      case "onZoom":
+        if (typeof value === "function" && typeof host.onZoom === "function") {
+          host.onZoom(node.id, value as (scale: number) => void);
+        }
+        return;
       case "children":
       case "ref":
         return;
@@ -456,6 +471,9 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
           break;
         case "stack":
           id = host.stack();
+          break;
+        case "align":
+          id = host.align(alignName(staticProps?.align));
           break;
         case "padding": {
           const edge = asNumber(staticProps?.edges, 0);

@@ -16,6 +16,7 @@ type Focusable = {
 type Grow = { grow?: number };
 type Flex = {
   justify?: "start" | "center" | "end" | "space-between" | "space-around" | "space-evenly";
+  cross?: "start" | "center" | "end" | "stretch" | "baseline";
   wrap?: boolean;
   fill?: boolean;
 };
@@ -27,6 +28,7 @@ type Drag = {
 };
 type Hover = { onHover?: () => void; onLeave?: () => void };
 type Secondary = { onSecondaryClick?: () => void };
+type Zoom = { onZoom?: (scale: number) => void };
 type Wheel = { onWheel?: (dx: number, dy: number) => void };
 type Place = {
   aspect?: number | null;
@@ -55,16 +57,17 @@ declare module "solid-js" {
   namespace JSX {
     interface IntrinsicElements {
       column: Children & Grow & Flex & Box & { gap?: number };
-      row: Children & Grow & Flex & Box & { gap?: number };
+      row: Children & Grow & Flex & Box & { gap?: number; w?: AxisSize; h?: AxisSize };
       stack: Children & Grow & Box & Fill;
+      align: Children & Grow & Box & Fill & { align?: "start" | "center" | "end" };
       grid: Children & Grow & Flex & Box & Tracks;
-      padding: Children & Grow & Box & PaddingEdges;
-      pointer: Children & Click & Focusable & Grow & Hover & Secondary & Box & Fill;
+      padding: Children & Grow & Fill & Box & PaddingEdges;
+      pointer: Children & Click & Focusable & Grow & Hover & Secondary & Zoom & Box & Fill;
       sized: { w?: AxisSize; h?: AxisSize } & Place;
       clip: Children & Grow & Box & { radius?: number };
-      opacity: Children & Grow & { alpha?: number };
+      opacity: Children & Grow & Fill & { alpha?: number };
       scroll: Children & Drag & Wheel & Box & { onScroll?: (x: number, y: number) => void };
-      transform: Children & { x?: number; y?: number; rotate?: number; scale?: number };
+      transform: Children & Zoom & Fill & { x?: number; y?: number; rotate?: number; scale?: number };
       image: {
         source?: string;
         w?: number;

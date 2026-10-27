@@ -12,10 +12,12 @@ thiserror = { workspace = true }
 # The workspace crate is named `core`. Linking it under that name shadows
 # the standard library, and `thiserror` expands to `::core::fmt`.
 ui_core = { package = "core", path = "../../core" }
-httparse = "1"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+bytes = "1"
+http = "1"
+http-body-util = "0.1"
+openwire = "0.1.2"
+tokio = { version = "1", features = ["io-util", "net", "rt-multi-thread", "sync", "time"] }
 tungstenite = { version = "0.26", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
-webpki-roots = "1"
 
 [lints]
 workspace = true

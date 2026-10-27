@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::sync::Arc;
+
 /// Paragraph size in scene points.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextSize {
@@ -53,102 +56,117 @@ pub struct TextLine {
 /// line is shaped the same way when it is drawn.
 pub const SINGLE_LINE_MAX: f32 = 1_000_000.0;
 
-/// Measures a paragraph. One implementation is live per tree.
+/// Color-free identity of one paragraph. `font_size` and `max_width` are the
+/// IEEE bits of the scene-point values, so two widths that compare equal as
+/// `f32` share a key.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MetricsKey {
+    pub text: Arc<str>,
+    pub style: Arc<protocol::TextStyle>,
+    pub spans: Arc<[SpanMetrics]>,
+    pub font_size: u32,
+    pub max_width: u32,
+}
+
+/// One run, without its color. Underline and strike change the shaped run, so
+/// they stay on this key even though the paint color does not.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SpanMetrics {
+    pub utf8: Arc<str>,
+    pub family: Arc<str>,
+    pub weight: u16,
+    pub underline: bool,
+    pub line_through: bool,
+}
+
+/// Laid-out size and lines. Shared by every color of the same [`MetricsKey`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParagraphMetrics {
+    pub size: TextSize,
+    pub lines: Arc<[TextLine]>,
+    /// Distance from the paragraph origin to the first line's baseline.
+    /// Zero when the paragraph has no lines.
+    first_baseline: f32,
+}
+
+impl ParagraphMetrics {
+    pub fn first_baseline(&self) -> f32 {
+        self.first_baseline
+    }
+
+    pub fn with_baseline(size: TextSize, lines: Arc<[TextLine]>, first_baseline: f32) -> Self {
+        Self {
+            size,
+            lines,
+            first_baseline,
+        }
+    }
+}
+
+/// Line box height. A positive `style.height` is a multiple of `font_size`.
+/// Otherwise the font's own line box (`font_line`) is used.
+pub fn resolved_line_height(style: &protocol::TextStyle, font_size: f32, font_line: f32) -> f32 {
+    if style.height.is_finite() && style.height > 0.0 {
+        font_size * style.height
+    } else {
+        font_line
+    }
+}
+
+/// Paint identity. The metrics key is embedded, so a color change keeps the
+/// line boxes and still allocates a new [`protocol::ParagraphId`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PaintKey {
+    pub metrics: MetricsKey,
+    pub color: [u8; 4],
+    pub span_colors: Arc<[[u8; 4]]>,
+}
+
+/// Builds the keys a text node retains. Empty span slices are a single run.
+pub fn paint_key(
+    text: Arc<str>,
+    style: Arc<protocol::TextStyle>,
+    spans: &[protocol::TextSpan],
+    font_size: f32,
+    max_width: f32,
+    color: [u8; 4],
+) -> PaintKey {
+    let span_metrics: Vec<SpanMetrics> = spans
+        .iter()
+        .map(|span| SpanMetrics {
+            utf8: Arc::from(span.utf8.as_str()),
+            family: Arc::from(span.family.as_deref().unwrap_or("")),
+            weight: span.weight,
+            underline: span.underline,
+            line_through: span.line_through,
+        })
+        .collect();
+    let span_colors: Vec<[u8; 4]> = spans.iter().map(|span| span.color).collect();
+    PaintKey {
+        metrics: MetricsKey {
+            text,
+            style,
+            spans: Arc::from(span_metrics),
+            font_size: font_size.to_bits(),
+            max_width: max_width.to_bits(),
+        },
+        color,
+        span_colors: Arc::from(span_colors),
+    }
+}
+
+/// Measures and retains paragraphs. One implementation is live per tree.
 ///
-/// `max_width` is the paragraph constraint in scene points. A wide value keeps
-/// the text on one line. The returned width is the longest line, at most
-/// `max_width`. `color` is the foreground baked into the shaped run when the
-/// shaper keeps that run for drawing. `style` is the same value later copied
-/// onto the text command.
+/// `metrics` ignores color. `retain_paint` bakes the foreground into the
+/// paragraph the player draws. The trait is not `Send`: an Impeller typography
+/// context stays on the render thread.
 pub trait Shaper {
-    fn measure(
-        &self,
-        text: &str,
-        font_size: f32,
-        max_width: f32,
-        color: [u8; 4],
-        style: &protocol::TextStyle,
-    ) -> TextSize {
-        self.measure_spans(text, &[], font_size, max_width, color, style)
-    }
-
-    /// Measure `text` with optional styled runs. An empty `spans` slice is the
-    /// command's single style. A non-empty slice is the same string the player
-    /// draws; implementors must not drop span family, weight, or color.
-    fn measure_spans(
-        &self,
-        text: &str,
-        spans: &[protocol::TextSpan],
-        font_size: f32,
-        max_width: f32,
-        color: [u8; 4],
-        style: &protocol::TextStyle,
-    ) -> TextSize;
-
-    /// Caret nearest `(x, y)` in paragraph space. The point is relative to the
-    /// paragraph origin, the same space [`Shaper::measure`] uses.
-    fn caret_at_point(
-        &self,
-        text: &str,
-        font_size: f32,
-        max_width: f32,
-        color: [u8; 4],
-        style: &protocol::TextStyle,
-        x: f32,
-        y: f32,
-    ) -> Caret;
-
-    /// Caret rectangle for a UTF-16 index. Indexes past the end clamp to the end.
-    ///
-    /// The caret uses [`Affinity::Downstream`].
-    fn caret_at_unit(
-        &self,
-        text: &str,
-        font_size: f32,
-        max_width: f32,
-        color: [u8; 4],
-        style: &protocol::TextStyle,
-        unit: u32,
-    ) -> Caret;
-
-    /// Caret at `unit`, using `affinity` when that offset is a soft line break.
-    fn caret_for(
-        &self,
-        text: &str,
-        font_size: f32,
-        max_width: f32,
-        color: [u8; 4],
-        style: &protocol::TextStyle,
-        unit: u32,
-        affinity: Affinity,
-    ) -> Caret {
-        let _ = affinity;
-        self.caret_at_unit(text, font_size, max_width, color, style, unit)
-    }
-
-    /// Lines of the paragraph, in paint order. Empty when the text is empty.
-    fn lines(
-        &self,
-        text: &str,
-        font_size: f32,
-        max_width: f32,
-        color: [u8; 4],
-        style: &protocol::TextStyle,
-    ) -> Vec<TextLine> {
-        let _ = (text, font_size, max_width, color, style);
-        Vec::new()
-    }
-
-    /// UTF-16 range of the word containing `unit`. Whitespace separates words.
-    fn word_range(
-        &self,
-        text: &str,
-        font_size: f32,
-        max_width: f32,
-        color: [u8; 4],
-        style: &protocol::TextStyle,
-        unit: u32,
-    ) -> (u32, u32);
+    fn metrics(&self, key: &MetricsKey) -> Arc<ParagraphMetrics>;
+    fn retain_paint(&self, key: &PaintKey) -> protocol::ParagraphId;
+    fn release_paint(&self, id: protocol::ParagraphId);
+    fn caret_at_unit(&self, key: &MetricsKey, unit: u32, affinity: Affinity) -> Caret;
+    fn caret_at_point(&self, key: &MetricsKey, x: f32, y: f32) -> Caret;
+    fn word_range(&self, key: &MetricsKey, unit: u32) -> (u32, u32);
 }
 
 /// Test shaper. Each Unicode scalar advances `font_size * 0.5`. A line is one
@@ -157,8 +175,125 @@ pub trait Shaper {
 /// Hard breaks are `\n`, `\r`, and `\r\n`. Soft wrap keeps at least one cluster
 /// on a line and prefers to break after whitespace. This is not a font metric.
 /// The host measures with Impeller.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct MonoShaper;
+#[derive(Debug)]
+pub struct MonoShaper {
+    paints: RefCell<PaintTable>,
+}
+
+impl Default for MonoShaper {
+    fn default() -> Self {
+        Self {
+            paints: RefCell::new(PaintTable::default()),
+        }
+    }
+}
+
+impl MonoShaper {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Debug, Default)]
+struct PaintTable {
+    slots: Vec<PaintSlot>,
+    free: Vec<u32>,
+}
+
+#[derive(Debug)]
+struct PaintSlot {
+    generation: u32,
+    refs: u32,
+    key: PaintKey,
+}
+
+impl Shaper for MonoShaper {
+    fn metrics(&self, key: &MetricsKey) -> Arc<ParagraphMetrics> {
+        let laid = layout_key(key);
+        let font_size = f32::from_bits(key.font_size);
+        let baseline = if laid.lines.is_empty() {
+            0.0
+        } else {
+            font_size * 0.8
+        };
+        Arc::new(ParagraphMetrics::with_baseline(
+            laid.size,
+            Arc::from(laid.lines),
+            baseline,
+        ))
+    }
+
+    fn retain_paint(&self, key: &PaintKey) -> protocol::ParagraphId {
+        let mut table = self.paints.borrow_mut();
+        if let Some(index) = table
+            .slots
+            .iter()
+            .position(|slot| slot.refs > 0 && slot.key == *key)
+        {
+            let slot = &mut table.slots[index];
+            slot.refs = slot.refs.saturating_add(1);
+            return protocol::ParagraphId {
+                index: index as u32,
+                generation: slot.generation,
+            };
+        }
+        let index = if let Some(index) = table.free.pop() {
+            index as usize
+        } else {
+            table.slots.push(PaintSlot {
+                generation: 0,
+                refs: 0,
+                key: key.clone(),
+            });
+            table.slots.len() - 1
+        };
+        let slot = &mut table.slots[index];
+        slot.generation = slot.generation.wrapping_add(1).max(1);
+        slot.refs = 1;
+        slot.key = key.clone();
+        protocol::ParagraphId {
+            index: index as u32,
+            generation: slot.generation,
+        }
+    }
+
+    fn release_paint(&self, id: protocol::ParagraphId) {
+        let mut table = self.paints.borrow_mut();
+        let Some(slot) = table.slots.get_mut(id.index as usize) else {
+            return;
+        };
+        if slot.generation != id.generation || slot.refs == 0 {
+            return;
+        }
+        slot.refs -= 1;
+        if slot.refs == 0 {
+            table.free.push(id.index);
+        }
+    }
+
+    fn caret_at_unit(&self, key: &MetricsKey, unit: u32, affinity: Affinity) -> Caret {
+        let laid = layout_key(key);
+        caret_for_unit(&laid, unit, affinity, f32::from_bits(key.font_size))
+    }
+
+    fn caret_at_point(&self, key: &MetricsKey, x: f32, y: f32) -> Caret {
+        let laid = layout_key(key);
+        caret_at_point(&laid, x, y, f32::from_bits(key.font_size))
+    }
+
+    fn word_range(&self, key: &MetricsKey, unit: u32) -> (u32, u32) {
+        whitespace_word(&key.text, unit)
+    }
+}
+
+fn layout_key(key: &MetricsKey) -> MonoLayout {
+    layout_mono(
+        &key.text,
+        f32::from_bits(key.font_size),
+        f32::from_bits(key.max_width),
+        &key.style,
+    )
+}
 
 #[derive(Clone, Copy)]
 struct Cluster {
@@ -173,102 +308,6 @@ struct MonoLayout {
     lines: Vec<TextLine>,
     clusters: Vec<Cluster>,
     size: TextSize,
-}
-
-impl Shaper for MonoShaper {
-    fn measure_spans(
-        &self,
-        text: &str,
-        spans: &[protocol::TextSpan],
-        font_size: f32,
-        max_width: f32,
-        _color: [u8; 4],
-        style: &protocol::TextStyle,
-    ) -> TextSize {
-        let owned;
-        let utf8 = if spans.is_empty() {
-            text
-        } else {
-            owned = spans
-                .iter()
-                .map(|span| span.utf8.as_str())
-                .collect::<String>();
-            debug_assert_eq!(owned, text);
-            &owned
-        };
-        layout_mono(utf8, font_size, max_width, style).size
-    }
-
-    fn caret_at_point(
-        &self,
-        text: &str,
-        font_size: f32,
-        max_width: f32,
-        _color: [u8; 4],
-        style: &protocol::TextStyle,
-        x: f32,
-        y: f32,
-    ) -> Caret {
-        let laid = layout_mono(text, font_size, max_width, style);
-        caret_at_point(&laid, x, y, font_size)
-    }
-
-    fn caret_at_unit(
-        &self,
-        text: &str,
-        font_size: f32,
-        max_width: f32,
-        color: [u8; 4],
-        style: &protocol::TextStyle,
-        unit: u32,
-    ) -> Caret {
-        self.caret_for(
-            text,
-            font_size,
-            max_width,
-            color,
-            style,
-            unit,
-            Affinity::Downstream,
-        )
-    }
-
-    fn caret_for(
-        &self,
-        text: &str,
-        font_size: f32,
-        max_width: f32,
-        _color: [u8; 4],
-        style: &protocol::TextStyle,
-        unit: u32,
-        affinity: Affinity,
-    ) -> Caret {
-        let laid = layout_mono(text, font_size, max_width, style);
-        caret_for_unit(&laid, unit, affinity, font_size)
-    }
-
-    fn lines(
-        &self,
-        text: &str,
-        font_size: f32,
-        max_width: f32,
-        _color: [u8; 4],
-        style: &protocol::TextStyle,
-    ) -> Vec<TextLine> {
-        layout_mono(text, font_size, max_width, style).lines
-    }
-
-    fn word_range(
-        &self,
-        text: &str,
-        _font_size: f32,
-        _max_width: f32,
-        _color: [u8; 4],
-        _style: &protocol::TextStyle,
-        unit: u32,
-    ) -> (u32, u32) {
-        whitespace_word(text, unit)
-    }
 }
 
 /// Word around `unit`. Whitespace is its own empty range at that offset.
@@ -328,11 +367,9 @@ fn layout_mono(
 }
 
 fn line_height(font_size: f32, style: &protocol::TextStyle) -> f32 {
-    if style.height.is_finite() && style.height > 0.0 {
-        font_size * style.height
-    } else {
-        font_size
-    }
+    // The mono font's own line box is one em. Impeller applies SetHeight itself,
+    // so this multiplier is only for the test shaper.
+    resolved_line_height(style, font_size, font_size)
 }
 
 fn clusters_of(text: &str, font_size: f32) -> Vec<Cluster> {
@@ -672,6 +709,18 @@ fn utf16_len(chars: &[char]) -> u32 {
 mod tests {
     use super::*;
 
+    fn key(text: &str, font_size: f32, max_width: f32, style: protocol::TextStyle) -> MetricsKey {
+        paint_key(
+            Arc::from(text),
+            Arc::new(style),
+            &[],
+            font_size,
+            max_width,
+            [0, 0, 0, 255],
+        )
+        .metrics
+    }
+
     fn style_ellipsis(max_lines: u32) -> protocol::TextStyle {
         protocol::TextStyle {
             max_lines: Some(max_lines),
@@ -682,44 +731,30 @@ mod tests {
 
     #[test]
     fn hard_break_puts_the_caret_on_the_next_line() {
-        let shaper = MonoShaper;
-        let style = protocol::TextStyle::default();
-        let lines = shaper.lines("a\nb", 16.0, 100.0, [0, 0, 0, 255], &style);
+        let shaper = MonoShaper::new();
+        let shaped = key("a\nb", 16.0, 100.0, protocol::TextStyle::default());
+        let metrics = shaper.metrics(&shaped);
+        let lines = &metrics.lines;
         assert_eq!(lines.len(), 2);
         assert!(lines[0].hard_break);
         assert_eq!(lines[1].start, 2);
-        let caret = shaper.caret_at_unit("a\nb", 16.0, 100.0, [0, 0, 0, 255], &style, 2);
+        let caret = shaper.caret_at_unit(&shaped, 2, Affinity::Downstream);
         assert!((caret.y - 16.0).abs() < 0.1, "y {}", caret.y);
         assert!((caret.x - 0.0).abs() < 0.1);
     }
 
     #[test]
     fn soft_wrap_affinity_distinguishes_the_line_edges() {
-        let shaper = MonoShaper;
-        let style = protocol::TextStyle::default();
+        let shaper = MonoShaper::new();
         // Advance is 8. Width 20 keeps two scalars on the first line.
-        let lines = shaper.lines("abcd", 16.0, 20.0, [0, 0, 0, 255], &style);
+        let shaped = key("abcd", 16.0, 20.0, protocol::TextStyle::default());
+        let metrics = shaper.metrics(&shaped);
+        let lines = &metrics.lines;
         assert_eq!(lines.len(), 2);
         assert!(!lines[0].hard_break);
         assert_eq!(lines[1].start, 2);
-        let down = shaper.caret_for(
-            "abcd",
-            16.0,
-            20.0,
-            [0, 0, 0, 255],
-            &style,
-            2,
-            Affinity::Downstream,
-        );
-        let up = shaper.caret_for(
-            "abcd",
-            16.0,
-            20.0,
-            [0, 0, 0, 255],
-            &style,
-            2,
-            Affinity::Upstream,
-        );
+        let down = shaper.caret_at_unit(&shaped, 2, Affinity::Downstream);
+        let up = shaper.caret_at_unit(&shaped, 2, Affinity::Upstream);
         assert!((down.y - 16.0).abs() < 0.1, "down {}", down.y);
         assert!((up.y - 0.0).abs() < 0.1, "up {}", up.y);
         assert!(up.x > down.x);
@@ -727,26 +762,50 @@ mod tests {
 
     #[test]
     fn ellipsis_drops_the_second_line_and_reserves_the_mark() {
-        let shaper = MonoShaper;
-        let style = style_ellipsis(1);
-        let size = shaper.measure("abcdef", 16.0, 40.0, [0, 0, 0, 255], &style);
+        let shaper = MonoShaper::new();
+        let shaped = key("abcdef", 16.0, 40.0, style_ellipsis(1));
+        let size = shaper.metrics(&shaped).size;
         assert!((size.height - 16.0).abs() < 0.1, "h {}", size.height);
         assert!(size.width <= 40.0 + 0.1, "w {}", size.width);
-        let lines = shaper.lines("abcdef", 16.0, 40.0, [0, 0, 0, 255], &style);
+        let metrics = shaper.metrics(&shaped);
+        let lines = &metrics.lines;
         assert_eq!(lines.len(), 1);
         assert!(lines[0].end < 6);
     }
 
     #[test]
     fn a_disabled_soft_wrap_keeps_one_wide_line() {
-        let shaper = MonoShaper;
+        let shaper = MonoShaper::new();
         let style = protocol::TextStyle {
             soft_wrap: false,
             overflow: protocol::TextOverflow::Visible,
             ..protocol::TextStyle::default()
         };
-        let size = shaper.measure("abcdef", 16.0, 20.0, [0, 0, 0, 255], &style);
+        let size = shaper.metrics(&key("abcdef", 16.0, 20.0, style)).size;
         assert!((size.width - 48.0).abs() < 0.1, "w {}", size.width);
         assert!((size.height - 16.0).abs() < 0.1, "h {}", size.height);
+    }
+
+    #[test]
+    fn color_change_keeps_metrics_and_bumps_the_paragraph_generation() {
+        let shaper = MonoShaper::new();
+        let metrics = key("Hi", 16.0, 100.0, protocol::TextStyle::default());
+        let red = PaintKey {
+            metrics: metrics.clone(),
+            color: [255, 0, 0, 255],
+            span_colors: Arc::from([]),
+        };
+        let green = PaintKey {
+            metrics: metrics.clone(),
+            color: [0, 255, 0, 255],
+            span_colors: Arc::from([]),
+        };
+        let first = shaper.retain_paint(&red);
+        let before = shaper.metrics(&metrics);
+        shaper.release_paint(first);
+        let second = shaper.retain_paint(&green);
+        assert_eq!(first.index, second.index);
+        assert_ne!(first.generation, second.generation);
+        assert_eq!(before.size, shaper.metrics(&green.metrics).size);
     }
 }

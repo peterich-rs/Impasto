@@ -1,4 +1,4 @@
-import { directionFor } from "./i18n.ts";
+import { directionFor } from "@uifw/solid-renderer";
 
 /** Map logical start/end padding to physical left/right. */
 export function resolvePadding(

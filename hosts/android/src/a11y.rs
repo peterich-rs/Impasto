@@ -13,6 +13,8 @@ pub const ROLE_IMAGE: i32 = 3;
 pub const ROLE_SCROLL: i32 = 4;
 pub const ROLE_SWITCH: i32 = 5;
 pub const ROLE_TEXT_FIELD: i32 = 6;
+pub const ROLE_SEARCH_FIELD: i32 = 7;
+pub const ROLE_TEXT_AREA: i32 = 8;
 
 /// One node the accessibility bridge exposes. Generic nodes never appear.
 #[derive(Clone, Debug, PartialEq)]
@@ -40,6 +42,8 @@ pub fn role_ordinal(role: SemanticsRole) -> i32 {
         SemanticsRole::Scroll => ROLE_SCROLL,
         SemanticsRole::Switch => ROLE_SWITCH,
         SemanticsRole::TextField => ROLE_TEXT_FIELD,
+        SemanticsRole::SearchField => ROLE_SEARCH_FIELD,
+        SemanticsRole::TextArea => ROLE_TEXT_AREA,
     }
 }
 
@@ -47,7 +51,7 @@ pub fn class_name(role: i32) -> &'static str {
     match role {
         ROLE_BUTTON => "android.widget.Button",
         ROLE_SWITCH => "android.widget.Switch",
-        ROLE_TEXT_FIELD => "android.widget.EditText",
+        ROLE_TEXT_FIELD | ROLE_SEARCH_FIELD | ROLE_TEXT_AREA => "android.widget.EditText",
         ROLE_SCROLL => "android.widget.ScrollView",
         ROLE_IMAGE => "android.widget.Image",
         ROLE_TEXT => "android.widget.TextView",
@@ -192,6 +196,7 @@ mod tests {
             flags: SemanticsFlags(0),
             scroll: None,
             selection: None,
+            caret: None,
             description: None,
         }
     }
@@ -233,6 +238,7 @@ mod tests {
                     flags: SemanticsFlags(0),
                     scroll: Some((0.0, 0.0)),
                     selection: None,
+                    caret: None,
                     description: None,
                 },
                 SemanticsNode {
@@ -246,6 +252,7 @@ mod tests {
                     flags: SemanticsFlags(0),
                     scroll: None,
                     selection: None,
+                    caret: None,
                     description: None,
                 },
             ],
@@ -276,6 +283,7 @@ mod tests {
                 flags: SemanticsFlags(0),
                 scroll: Some((12.0, 8.0)),
                 selection: None,
+                caret: None,
                 description: None,
             }],
             root: SemanticsId(1),

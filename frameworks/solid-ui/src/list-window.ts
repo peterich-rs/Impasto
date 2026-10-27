@@ -196,3 +196,40 @@ export function windowRange(
     bottom: prefix.total() - prefix.itemStart(end),
   };
 }
+
+/**
+ * Same window as `windowRange`, widened toward `flingY` while a fling is in
+ * flight. `flingY === null` keeps the viewport window.
+ */
+/** Expand immediately. Shrink only after the viewport has moved past `overscan` rows. */
+export function stabilizeWindow(
+  prefix: PrefixHeights,
+  current: WindowRange,
+  next: WindowRange,
+  overscan: number,
+): WindowRange {
+  const start =
+    next.start > current.start + overscan ? next.start : Math.min(current.start, next.start);
+  const end = next.end + overscan < current.end ? next.end : Math.max(current.end, next.end);
+  return {
+    start,
+    end,
+    top: prefix.itemStart(start),
+    bottom: prefix.total() - prefix.itemStart(end),
+  };
+}
+
+export function windowRangeForOffset(
+  prefix: PrefixHeights,
+  offset: number,
+  viewHeight: number,
+  overscan: number,
+  flingY: number | null,
+): WindowRange {
+  if (flingY === null || !Number.isFinite(flingY)) {
+    return windowRange(prefix, offset, viewHeight, overscan);
+  }
+  const startOffset = Math.min(offset, flingY);
+  const endOffset = Math.max(offset + Math.max(viewHeight, 0), flingY);
+  return windowRange(prefix, startOffset, Math.max(0, endOffset - startOffset), overscan);
+}

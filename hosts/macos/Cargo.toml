@@ -60,6 +60,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSDictionary",
     "NSLocale",
     "NSNotification",
+    "NSDistributedNotificationCenter",
     "NSObject",
     "NSString",
     "NSValue",
@@ -95,6 +96,9 @@ objc2-core-video = { version = "0.3.2", default-features = false, features = [
     "CVReturn",
 ] }
 protocol = { workspace = true }
+
+[dev-dependencies]
+png = "0.17"
 
 [lints.rust]
 unsafe_code = "allow"

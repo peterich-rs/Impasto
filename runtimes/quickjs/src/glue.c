@@ -78,7 +78,8 @@ typedef struct QjsFns {
     int (*set_semantics)(void *session, uint64_t node, int role, const char *label, size_t label_len,
                          const char *value, size_t value_len, int checked, int sel_start,
                          int sel_end, int disabled, int editable, int read_only,
-                         const char *description, size_t description_len);
+                         const char *description, size_t description_len, int order_set, int order,
+                         int live);
     double (*text_scale)(void *session);
     int (*reduce_motion)(void *session);
     int (*measure_text)(void *session, const char *utf8, size_t len, float font_size,
@@ -118,8 +119,9 @@ typedef struct QjsFns {
                 const uint8_t *body, size_t body_len);
     void (*abort_token)(void *session, uint64_t token);
     int (*module_has)(void *session, const char *name, size_t len);
-    int (*module_call)(void *session, uint64_t token, const char *name, size_t name_len,
-                       const char *method, size_t method_len, const char *json, size_t json_len);
+    /* 0 synchronous, 1 promise, -1 not linked. */
+    int (*module_prepare)(void *session, const char *name, size_t name_len, const char *method,
+                          size_t method_len);
     void (*socket_open)(void *session, uint64_t id, const char *url, size_t url_len);
     void (*socket_send)(void *session, uint64_t id, const uint8_t *data, size_t len, int is_text);
     void (*socket_close)(void *session, uint64_t id);
@@ -143,12 +145,46 @@ typedef struct QjsFns {
                          size_t byte_len);
     int (*set_image_mode)(void *session, uint64_t node, int mode, int required);
     int (*reload)(void *session, const char *source, size_t source_len);
+    int (*push_mutation)(void *session, uint32_t op, uint64_t id, uint64_t parent, uint64_t before,
+                         uint32_t field, double number, double number2, const uint8_t color[4],
+                         const char *text, size_t text_len);
+    int (*layer_stats)(void *session, uint64_t *epoch, uint32_t *layers, uint32_t *pictures);
+    int (*scroll_into_view)(void *session, uint64_t node, int edge);
+    int (*animate)(void *session, uint64_t node, const char *prop, size_t prop_len, double from,
+                   double to, double stiffness, double damping);
+    int (*fling_target)(void *session, uint64_t node, float *x, float *y);
+    int (*set_recognizers)(void *session, uint64_t node, int tap, int long_press, int drag,
+                           double double_tap_ms);
+    int (*set_stroke)(void *session, uint64_t node, float width, const uint8_t color[4]);
+    void (*module_push_null)(void *session);
+    void (*module_push_bool)(void *session, int value);
+    void (*module_push_f64)(void *session, double value);
+    void (*module_push_str)(void *session, const char *text, size_t len);
+    void (*module_push_bytes)(void *session, const uint8_t *bytes, size_t len);
+    void (*module_begin_list)(void *session);
+    void (*module_end_list)(void *session);
+    void (*module_begin_map)(void *session);
+    void (*module_map_key)(void *session, const char *text, size_t len);
+    void (*module_end_map)(void *session);
+    void (*module_set_token)(void *session, uint64_t token);
+    int (*module_finish)(void *session);
+    int (*module_count)(void *session, const char *name, size_t len);
+    const char *(*module_method_at)(void *session, const char *name, size_t name_len, int index,
+                                    size_t *out_len);
+    int (*align)(void *session, uint32_t align, uint64_t *out);
+    int (*set_cross)(void *session, uint64_t node, uint32_t align);
+    int (*viewport)(void *session, float *width, float *height);
 } QjsFns;
 
 typedef struct BackHandler {
     uint64_t id;
     JSValue fn;
 } BackHandler;
+
+typedef struct Shortcut {
+    char *spec;
+    JSValue fn;
+} Shortcut;
 
 typedef struct Tap {
     uint64_t id;
@@ -170,6 +206,7 @@ typedef struct Tap {
     JSValue scroll;
     JSValue text_replaced;
     JSValue link;
+    JSValue zoom;
     int has_click;
     int has_press;
     int has_release;
@@ -188,6 +225,7 @@ typedef struct Tap {
     int has_scroll;
     int has_text_replaced;
     int has_link;
+    int has_zoom;
 } Tap;
 
 typedef struct Timer {
@@ -213,6 +251,19 @@ typedef struct SettingsHandler {
     JSValue fn;
 } SettingsHandler;
 
+typedef struct ModuleListener {
+    char *module;
+    char *event;
+    JSValue fn;
+} ModuleListener;
+
+typedef struct MotionHandler {
+    uint64_t id;
+    uint64_t node;
+    char *prop;
+    JSValue fn;
+} MotionHandler;
+
 typedef struct Host {
     JSRuntime *rt;
     JSContext *ctx;
@@ -228,6 +279,10 @@ typedef struct Host {
     size_t back_len;
     size_t back_cap;
     uint64_t back_next;
+    Shortcut *shortcuts;
+    size_t shortcut_len;
+    size_t shortcut_cap;
+    int listener_freeze;
     Timer *timers;
     size_t timer_len;
     size_t timer_cap;
@@ -244,6 +299,7 @@ typedef struct Host {
     int paused;
     char *locale;
     size_t locale_len;
+    char *app_dir;
     double settings_text_scale;
     int settings_dark;
     int settings_reduce;
@@ -253,6 +309,16 @@ typedef struct Host {
     size_t settings_len;
     size_t settings_cap;
     uint64_t settings_next;
+    JSValue *values;
+    size_t values_len;
+    size_t values_cap;
+    ModuleListener *mod_listeners;
+    size_t mod_listener_len;
+    size_t mod_listener_cap;
+    MotionHandler *motions;
+    size_t motion_len;
+    size_t motion_cap;
+    uint64_t motion_next;
 } Host;
 
 #define UIFW_JS_MEMORY_LIMIT (16u << 20)
@@ -312,6 +378,26 @@ static void write_exception(JSContext *ctx, char *err, size_t err_len) {
         JS_FreeCString(ctx, text);
     }
     JS_FreeValue(ctx, exception);
+}
+
+/* `report` logs and keeps dispatching. `freeze` fails the call so the frame holds. */
+static void listener_failed(Host *host, char *err, size_t err_len, int *failed) {
+    if (!host->listener_freeze) {
+        char local[512];
+        local[0] = 0;
+        write_exception(host->ctx, local, sizeof(local));
+        if (host->fns.log) {
+            host->fns.log(host->fns.session, local, strlen(local), 3);
+        }
+        return;
+    }
+    if (!*failed) {
+        write_exception(host->ctx, err, err_len);
+    } else {
+        JSValue exception = JS_GetException(host->ctx);
+        JS_FreeValue(host->ctx, exception);
+    }
+    *failed = 1;
 }
 
 /* raw < 2^53, so the double is an exact integer. 0 is a valid "none". */
@@ -819,6 +905,9 @@ static void free_tap(Host *host, Tap *tap) {
     if (tap->has_link) {
         JS_FreeValue(host->ctx, tap->link);
     }
+    if (tap->has_zoom) {
+        JS_FreeValue(host->ctx, tap->zoom);
+    }
 }
 
 static int tap_slot(Tap *tap, int kind, JSValue **slot, int **has) {
@@ -894,6 +983,10 @@ static int tap_slot(Tap *tap, int kind, JSValue **slot, int **has) {
     case 17:
         *slot = &tap->link;
         *has = &tap->has_link;
+        return 0;
+    case 20:
+        *slot = &tap->zoom;
+        *has = &tap->has_zoom;
         return 0;
     default:
         return -1;
@@ -1763,6 +1856,74 @@ static JSValue js_on_back(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     return JS_NewUint32(ctx, (uint32_t)host->back_next);
 }
 
+static JSValue js_on_motion_end(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 3 || !JS_IsString(argv[1]) || !JS_IsFunction(ctx, argv[2])) {
+        return throw_msg(ctx, "onMotionEnd(id, prop, function)");
+    }
+    uint64_t node = 0;
+    if (read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
+    size_t prop_len = 0;
+    const char *prop = JS_ToCStringLen(ctx, &prop_len, argv[1]);
+    if (!prop) {
+        return JS_EXCEPTION;
+    }
+    if (host->motion_len == host->motion_cap) {
+        size_t cap = host->motion_cap ? host->motion_cap * 2 : 4;
+        MotionHandler *next = realloc(host->motions, cap * sizeof(MotionHandler));
+        if (!next) {
+            JS_FreeCString(ctx, prop);
+            return throw_msg(ctx, "onMotionEnd failed");
+        }
+        host->motions = next;
+        host->motion_cap = cap;
+    }
+    host->motion_next += 1;
+    MotionHandler *handler = &host->motions[host->motion_len];
+    handler->id = host->motion_next;
+    handler->node = node;
+    handler->prop = malloc(prop_len + 1);
+    if (handler->prop) {
+        memcpy(handler->prop, prop, prop_len);
+        handler->prop[prop_len] = 0;
+    }
+    handler->fn = JS_DupValue(ctx, argv[2]);
+    JS_FreeCString(ctx, prop);
+    if (!handler->prop) {
+        JS_FreeValue(ctx, handler->fn);
+        return throw_msg(ctx, "onMotionEnd failed");
+    }
+    host->motion_len += 1;
+    return JS_NewFloat64(ctx, (double)handler->id);
+}
+
+static JSValue js_off_motion_end(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return JS_UNDEFINED;
+    }
+    int64_t id = 0;
+    if (JS_ToInt64(ctx, &id, argv[0]) || id <= 0) {
+        return JS_UNDEFINED;
+    }
+    for (size_t index = 0; index < host->motion_len; index++) {
+        if ((int64_t)host->motions[index].id != id) {
+            continue;
+        }
+        free(host->motions[index].prop);
+        JS_FreeValue(ctx, host->motions[index].fn);
+        memmove(&host->motions[index], &host->motions[index + 1],
+                (host->motion_len - index - 1) * sizeof(MotionHandler));
+        host->motion_len--;
+        break;
+    }
+    return JS_UNDEFINED;
+}
+
 static JSValue js_off_back(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
     Host *host = host_of(ctx);
@@ -1784,6 +1945,247 @@ static JSValue js_off_back(JSContext *ctx, JSValueConst this_val, int argc, JSVa
         break;
     }
     return JS_UNDEFINED;
+}
+
+static char *shortcut_spec(JSContext *ctx, JSValueConst value) {
+    const char *text = JS_ToCString(ctx, value);
+    if (!text) {
+        return NULL;
+    }
+    size_t len = strlen(text);
+    char *copy = malloc(len + 1);
+    if (!copy) {
+        JS_FreeCString(ctx, text);
+        return NULL;
+    }
+    for (size_t index = 0; index < len; index++) {
+        char ch = text[index];
+        if (ch >= 'A' && ch <= 'Z') {
+            ch = (char)(ch - 'A' + 'a');
+        }
+        copy[index] = ch;
+    }
+    copy[len] = 0;
+    JS_FreeCString(ctx, text);
+    return copy;
+}
+
+static JSValue js_on_shortcut(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2 || !JS_IsFunction(ctx, argv[1])) {
+        return throw_msg(ctx, "onShortcut(spec, function)");
+    }
+    char *spec = shortcut_spec(ctx, argv[0]);
+    if (!spec || spec[0] == 0) {
+        free(spec);
+        return throw_msg(ctx, "onShortcut(spec, function)");
+    }
+    for (size_t index = 0; index < host->shortcut_len; index++) {
+        if (strcmp(host->shortcuts[index].spec, spec) != 0) {
+            continue;
+        }
+        JS_FreeValue(ctx, host->shortcuts[index].fn);
+        host->shortcuts[index].fn = JS_DupValue(ctx, argv[1]);
+        free(spec);
+        return JS_UNDEFINED;
+    }
+    if (host->shortcut_len == host->shortcut_cap) {
+        size_t cap = host->shortcut_cap ? host->shortcut_cap * 2 : 4;
+        Shortcut *next = realloc(host->shortcuts, cap * sizeof(Shortcut));
+        if (!next) {
+            free(spec);
+            return throw_msg(ctx, "onShortcut failed");
+        }
+        host->shortcuts = next;
+        host->shortcut_cap = cap;
+    }
+    host->shortcuts[host->shortcut_len].spec = spec;
+    host->shortcuts[host->shortcut_len].fn = JS_DupValue(ctx, argv[1]);
+    host->shortcut_len += 1;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_set_listener_error_policy(JSContext *ctx, JSValueConst this_val, int argc,
+                                            JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "setListenerErrorPolicy(policy)");
+    }
+    const char *text = JS_ToCString(ctx, argv[0]);
+    if (!text) {
+        return JS_EXCEPTION;
+    }
+    if (strcmp(text, "freeze") == 0) {
+        host->listener_freeze = 1;
+    } else if (strcmp(text, "report") == 0) {
+        host->listener_freeze = 0;
+    } else {
+        JS_FreeCString(ctx, text);
+        return throw_msg(ctx, "setListenerErrorPolicy(policy)");
+    }
+    JS_FreeCString(ctx, text);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_layer_tree_stats(JSContext *ctx, JSValueConst this_val, int argc,
+                                   JSValueConst *argv) {
+    (void)this_val;
+    (void)argc;
+    (void)argv;
+    Host *host = host_of(ctx);
+    uint64_t epoch = 0;
+    uint32_t layers = 0;
+    uint32_t pictures = 0;
+    if (!host->fns.layer_stats ||
+        host->fns.layer_stats(host->fns.session, &epoch, &layers, &pictures)) {
+        return throw_msg(ctx, "layerTreeStats");
+    }
+    JSValue object = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, object, "epoch", JS_NewFloat64(ctx, (double)epoch));
+    JS_SetPropertyStr(ctx, object, "layers", JS_NewUint32(ctx, layers));
+    JS_SetPropertyStr(ctx, object, "pictures", JS_NewUint32(ctx, pictures));
+    return object;
+}
+
+static JSValue js_scroll_into_view(JSContext *ctx, JSValueConst this_val, int argc,
+                                   JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "scrollIntoView(node, edge)");
+    }
+    uint64_t node = 0;
+    int32_t edge = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToInt32(ctx, &edge, argv[1])) {
+        return JS_EXCEPTION;
+    }
+    return done(ctx, host->fns.scroll_into_view(host->fns.session, node, edge), "scrollIntoView");
+}
+
+static JSValue js_animate(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 6) {
+        return throw_msg(ctx, "animate(node, prop, from, to, stiffness, damping)");
+    }
+    uint64_t node = 0;
+    size_t prop_len = 0;
+    double from = 0;
+    double to = 0;
+    double stiffness = 0;
+    double damping = 0;
+    if (read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
+    const char *prop = JS_ToCStringLen(ctx, &prop_len, argv[1]);
+    if (!prop || JS_ToFloat64(ctx, &from, argv[2]) || JS_ToFloat64(ctx, &to, argv[3]) ||
+        JS_ToFloat64(ctx, &stiffness, argv[4]) || JS_ToFloat64(ctx, &damping, argv[5])) {
+        if (prop) {
+            JS_FreeCString(ctx, prop);
+        }
+        return prop ? JS_EXCEPTION : throw_msg(ctx, "animate(node, prop, from, to, stiffness, damping)");
+    }
+    int status = host->fns.animate(host->fns.session, node, prop, prop_len, from, to, stiffness,
+                                   damping);
+    JS_FreeCString(ctx, prop);
+    return done(ctx, status, "animate");
+}
+
+static JSValue js_fling_target(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "flingTarget(node)");
+    }
+    uint64_t node = 0;
+    float x = 0;
+    float y = 0;
+    if (read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.fling_target(host->fns.session, node, &x, &y);
+    if (status > 0) {
+        return JS_NULL;
+    }
+    if (status < 0) {
+        return throw_msg(ctx, "flingTarget");
+    }
+    JSValue object = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, object, "x", JS_NewFloat64(ctx, x));
+    JS_SetPropertyStr(ctx, object, "y", JS_NewFloat64(ctx, y));
+    return object;
+}
+
+static JSValue js_set_recognizers(JSContext *ctx, JSValueConst this_val, int argc,
+                                  JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2 || !JS_IsObject(argv[1])) {
+        return throw_msg(ctx, "setRecognizers(node, spec)");
+    }
+    uint64_t node = 0;
+    if (read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
+    int tap = 0;
+    int long_press = 0;
+    int drag = -1;
+    double window_ms = 0;
+    JSValue tap_value = JS_GetPropertyStr(ctx, argv[1], "tap");
+    if (!JS_IsUndefined(tap_value) && !JS_IsNull(tap_value)) {
+        tap = JS_ToBool(ctx, tap_value) == 1;
+    }
+    JS_FreeValue(ctx, tap_value);
+    JSValue long_value = JS_GetPropertyStr(ctx, argv[1], "longPress");
+    if (!JS_IsUndefined(long_value) && !JS_IsNull(long_value)) {
+        long_press = JS_ToBool(ctx, long_value) == 1;
+    }
+    JS_FreeValue(ctx, long_value);
+    JSValue drag_value = JS_GetPropertyStr(ctx, argv[1], "drag");
+    if (!JS_IsUndefined(drag_value) && !JS_IsNull(drag_value)) {
+        const char *text = JS_ToCString(ctx, drag_value);
+        if (text) {
+            if (strcmp(text, "free") == 0) {
+                drag = 0;
+            } else if (strcmp(text, "horizontal") == 0) {
+                drag = 1;
+            } else if (strcmp(text, "vertical") == 0) {
+                drag = 2;
+            }
+            JS_FreeCString(ctx, text);
+        }
+    }
+    JS_FreeValue(ctx, drag_value);
+    JSValue window_value = JS_GetPropertyStr(ctx, argv[1], "doubleTapMs");
+    if (!JS_IsUndefined(window_value) && !JS_IsNull(window_value)) {
+        if (JS_ToFloat64(ctx, &window_ms, window_value)) {
+            JS_FreeValue(ctx, window_value);
+            return JS_EXCEPTION;
+        }
+    }
+    JS_FreeValue(ctx, window_value);
+    return done(ctx,
+                host->fns.set_recognizers(host->fns.session, node, tap, long_press, drag, window_ms),
+                "setRecognizers");
+}
+
+static JSValue js_set_stroke(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 3) {
+        return throw_msg(ctx, "setStroke(node, width, color)");
+    }
+    uint64_t node = 0;
+    double width = 0;
+    uint8_t color[4];
+    if (read_handle(ctx, argv[0], &node) || JS_ToFloat64(ctx, &width, argv[1]) ||
+        read_color(ctx, argv[2], color)) {
+        return JS_EXCEPTION;
+    }
+    return done(ctx, host->fns.set_stroke(host->fns.session, node, (float)width, color),
+                "setStroke");
 }
 
 static JSValue js_on_key(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -2010,9 +2412,41 @@ static JSValue js_set_semantics(JSContext *ctx, JSValueConst this_val, int argc,
             goto fail_strings;
         }
     }
+    int order_set = 0;
+    int32_t order = 0;
+    int32_t live = -1;
+    if (argc > 11 && JS_IsObject(argv[11])) {
+        JSValue order_value = JS_GetPropertyStr(ctx, argv[11], "order");
+        if (!JS_IsUndefined(order_value) && !JS_IsNull(order_value)) {
+            if (JS_ToInt32(ctx, &order, order_value)) {
+                JS_FreeValue(ctx, order_value);
+                goto fail_strings;
+            }
+            order_set = 1;
+        }
+        JS_FreeValue(ctx, order_value);
+        JSValue live_value = JS_GetPropertyStr(ctx, argv[11], "live");
+        if (!JS_IsUndefined(live_value) && !JS_IsNull(live_value)) {
+            const char *text = JS_ToCString(ctx, live_value);
+            if (!text) {
+                JS_FreeValue(ctx, live_value);
+                goto fail_strings;
+            }
+            if (strcmp(text, "off") == 0) {
+                live = 0;
+            } else if (strcmp(text, "polite") == 0) {
+                live = 1;
+            } else if (strcmp(text, "assertive") == 0) {
+                live = 2;
+            }
+            JS_FreeCString(ctx, text);
+        }
+        JS_FreeValue(ctx, live_value);
+    }
     status = host->fns.set_semantics(
         host->fns.session, node, role, label, label_len, value, value_len, checked, sel_start,
-        sel_end, disabled, editable, read_only, description, description_len);
+        sel_end, disabled, editable, read_only, description, description_len, order_set, order,
+        live);
     if (label_len) {
         JS_FreeCString(ctx, label);
     }
@@ -2174,6 +2608,97 @@ static JSValue js_set_align(JSContext *ctx, JSValueConst this_val, int argc, JSV
     }
     int status = host->fns.set_align(host->fns.session, node, align);
     return done(ctx, status, "setAlign failed");
+}
+
+static JSValue js_align(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "align(align)");
+    }
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) {
+        return JS_EXCEPTION;
+    }
+    uint32_t align = 0;
+    int bad = named_align(name, &align, "start", 0, "center", 1, "end", 2);
+    JS_FreeCString(ctx, name);
+    if (bad) {
+        return throw_msg(ctx, "align align");
+    }
+    uint64_t id = 0;
+    int status = host->fns.align(host->fns.session, align, &id);
+    return created(ctx, status, id, "align failed");
+}
+
+static int named_cross(const char *name, uint32_t *out) {
+    if (strcmp(name, "start") == 0) {
+        *out = 0;
+        return 0;
+    }
+    if (strcmp(name, "center") == 0) {
+        *out = 1;
+        return 0;
+    }
+    if (strcmp(name, "end") == 0) {
+        *out = 2;
+        return 0;
+    }
+    if (strcmp(name, "stretch") == 0) {
+        *out = 3;
+        return 0;
+    }
+    if (strcmp(name, "baseline") == 0) {
+        *out = 4;
+        return 0;
+    }
+    return -1;
+}
+
+static JSValue js_set_cross(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "setCross(node, align)");
+    }
+    uint64_t node = 0;
+    if (read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
+    const char *name = JS_ToCString(ctx, argv[1]);
+    if (!name) {
+        return JS_EXCEPTION;
+    }
+    uint32_t align = 0;
+    int bad = named_cross(name, &align);
+    JS_FreeCString(ctx, name);
+    if (bad) {
+        return throw_msg(ctx, "setCross align");
+    }
+    int status = host->fns.set_cross(host->fns.session, node, align);
+    return done(ctx, status, "setCross failed");
+}
+
+static JSValue js_metrics(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    (void)argc;
+    (void)argv;
+    Host *host = host_of(ctx);
+    float width = 0;
+    float height = 0;
+    if (host->fns.viewport(host->fns.session, &width, &height)) {
+        return throw_msg(ctx, "metrics failed");
+    }
+    JSValue object = JS_NewObject(ctx);
+    JSValue insets = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, insets, "top", JS_NewFloat64(ctx, 0));
+    JS_SetPropertyStr(ctx, insets, "right", JS_NewFloat64(ctx, 0));
+    JS_SetPropertyStr(ctx, insets, "bottom", JS_NewFloat64(ctx, 0));
+    JS_SetPropertyStr(ctx, insets, "left", JS_NewFloat64(ctx, 0));
+    JS_SetPropertyStr(ctx, object, "width", JS_NewFloat64(ctx, width));
+    JS_SetPropertyStr(ctx, object, "height", JS_NewFloat64(ctx, height));
+    JS_SetPropertyStr(ctx, object, "viewInsets", insets);
+    return object;
 }
 
 static JSValue js_set_size(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -2429,6 +2954,54 @@ static JSValue js_scroll_offset(JSContext *ctx, JSValueConst this_val, int argc,
         return throw_msg(ctx, "scrollOffset failed");
     }
     return point_object(ctx, x, y, 0, 0, 0);
+}
+
+static JSValue js_apply_mutation(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 8) {
+        return throw_msg(ctx, "applyMutation(op, id, parent, before, field, number, number2, color, text)");
+    }
+    int32_t op = 0;
+    int32_t field = 0;
+    uint64_t id = 0;
+    uint64_t parent = 0;
+    uint64_t before = 0;
+    double number = 0;
+    double number2 = 0;
+    uint8_t color[4] = {0, 0, 0, 0};
+    const char *text = "";
+    size_t text_len = 0;
+    if (JS_ToInt32(ctx, &op, argv[0]) || read_handle(ctx, argv[1], &id) ||
+        read_handle(ctx, argv[2], &parent) || read_handle(ctx, argv[3], &before) ||
+        JS_ToInt32(ctx, &field, argv[4]) || JS_ToFloat64(ctx, &number, argv[5]) ||
+        JS_ToFloat64(ctx, &number2, argv[6])) {
+        return JS_EXCEPTION;
+    }
+    if (JS_IsArray(argv[7])) {
+        for (int index = 0; index < 4; index++) {
+            JSValue item = JS_GetPropertyUint32(ctx, argv[7], (uint32_t)index);
+            int32_t channel = 0;
+            if (!JS_IsUndefined(item) && JS_ToInt32(ctx, &channel, item)) {
+                JS_FreeValue(ctx, item);
+                return JS_EXCEPTION;
+            }
+            color[index] = (uint8_t)channel;
+            JS_FreeValue(ctx, item);
+        }
+    }
+    if (argc > 8 && JS_IsString(argv[8])) {
+        text = JS_ToCStringLen(ctx, &text_len, argv[8]);
+        if (text == NULL) {
+            return JS_EXCEPTION;
+        }
+    }
+    int failed = host->fns.push_mutation(host->fns.session, (uint32_t)op, id, parent, before,
+                                         (uint32_t)field, number, number2, color, text, text_len);
+    if (text_len > 0) {
+        JS_FreeCString(ctx, text);
+    }
+    return done(ctx, failed, "applyMutation failed");
 }
 
 static JSValue js_rect(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -2805,6 +3378,11 @@ static JSValue js_on_scroll(JSContext *ctx, JSValueConst this_val, int argc, JSV
     return bind_gesture(ctx, argc, argv, 15, "onScroll(node, fn)");
 }
 
+static JSValue js_on_zoom(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    return bind_gesture(ctx, argc, argv, 20, "onZoom(node, fn)");
+}
+
 static JSValue js_set_text_scale(JSContext *ctx, JSValueConst this_val, int argc,
                                  JSValueConst *argv) {
     (void)this_val;
@@ -3073,6 +3651,7 @@ static int bind_core(Host *host) {
     int failed = bind_fn(ctx, core, "column", js_column, 1);
     failed |= bind_fn(ctx, core, "row", js_row, 1);
     failed |= bind_fn(ctx, core, "stack", js_stack, 0);
+    failed |= bind_fn(ctx, core, "align", js_align, 1);
     failed |= bind_fn(ctx, core, "padding", js_padding, 1);
     failed |= bind_fn(ctx, core, "pointerRegion", js_pointer_region, 0);
     failed |= bind_fn(ctx, core, "decorated", js_decorated, 1);
@@ -3096,6 +3675,8 @@ static int bind_core(Host *host) {
     failed |= bind_fn(ctx, core, "setRadius", js_set_radius, 2);
     failed |= bind_fn(ctx, core, "setAlpha", js_set_alpha, 2);
     failed |= bind_fn(ctx, core, "setAlign", js_set_align, 2);
+    failed |= bind_fn(ctx, core, "setCross", js_set_cross, 2);
+    failed |= bind_fn(ctx, core, "metrics", js_metrics, 0);
     failed |= bind_fn(ctx, core, "setSize", js_set_size, 3);
     failed |= bind_fn(ctx, core, "setImage", js_set_image, 4);
     failed |= bind_fn(ctx, core, "setMaxLines", js_set_max_lines, 2);
@@ -3109,6 +3690,7 @@ static int bind_core(Host *host) {
     failed |= bind_fn(ctx, core, "setScrollOffset", js_set_scroll_offset, 3);
     failed |= bind_fn(ctx, core, "scrollOffset", js_scroll_offset, 1);
     failed |= bind_fn(ctx, core, "rect", js_rect, 1);
+    failed |= bind_fn(ctx, core, "applyMutation", js_apply_mutation, 8);
     failed |= bind_fn(ctx, core, "transform", js_transform, 0);
     failed |= bind_fn(ctx, core, "setTransform", js_set_transform, 5);
     failed |= bind_fn(ctx, core, "setJustify", js_set_justify, 2);
@@ -3127,6 +3709,7 @@ static int bind_core(Host *host) {
     failed |= bind_fn(ctx, core, "onWheel", js_on_wheel, 2);
     failed |= bind_fn(ctx, core, "onSecondaryClick", js_on_secondary_click, 2);
     failed |= bind_fn(ctx, core, "onScroll", js_on_scroll, 2);
+    failed |= bind_fn(ctx, core, "onZoom", js_on_zoom, 2);
     failed |= bind_fn(ctx, core, "textEdit", js_text_edit, 2);
     failed |= bind_fn(ctx, core, "setTextScale", js_set_text_scale, 1);
     failed |= bind_fn(ctx, core, "setSoftWrap", js_set_soft_wrap, 2);
@@ -3168,7 +3751,17 @@ static int bind_core(Host *host) {
     failed |= bind_fn(ctx, core, "popFocusScope", js_pop_focus_scope, 0);
     failed |= bind_fn(ctx, core, "pointerPosition", js_pointer_position, 0);
     failed |= bind_fn(ctx, core, "onBack", js_on_back, 1);
+    failed |= bind_fn(ctx, core, "onMotionEnd", js_on_motion_end, 3);
+    failed |= bind_fn(ctx, core, "offMotionEnd", js_off_motion_end, 1);
     failed |= bind_fn(ctx, core, "offBack", js_off_back, 1);
+    failed |= bind_fn(ctx, core, "onShortcut", js_on_shortcut, 2);
+    failed |= bind_fn(ctx, core, "setListenerErrorPolicy", js_set_listener_error_policy, 1);
+    failed |= bind_fn(ctx, core, "layerTreeStats", js_layer_tree_stats, 0);
+    failed |= bind_fn(ctx, core, "scrollIntoView", js_scroll_into_view, 2);
+    failed |= bind_fn(ctx, core, "animate", js_animate, 6);
+    failed |= bind_fn(ctx, core, "flingTarget", js_fling_target, 1);
+    failed |= bind_fn(ctx, core, "setRecognizers", js_set_recognizers, 2);
+    failed |= bind_fn(ctx, core, "setStroke", js_set_stroke, 3);
     failed |= bind_fn(ctx, core, "settings", js_settings, 0);
     failed |= bind_fn(ctx, core, "onSettings", js_on_settings, 1);
     failed |= bind_fn(ctx, core, "offSettings", js_off_settings, 1);
@@ -3194,8 +3787,197 @@ static int bind_core(Host *host) {
 }
 
 static int bind_host_globals(Host *host);
+int qjs_drain_jobs(Host *host, char *err, size_t err_len);
 static void free_timers(Host *host);
 static void free_promises(Host *host);
+
+static void module_reject(JSContext *ctx) {
+    JS_ThrowReferenceError(ctx, "module path is outside the app directory");
+}
+
+static int module_segment(const char *text, size_t len) {
+    if (len == 0) {
+        return 0;
+    }
+    for (size_t index = 0; index < len; index++) {
+        char c = text[index];
+        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' ||
+                 c == '_' || c == '-';
+        if (!ok) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* `path` is absolute and already starts with `app_dir`. Collapses `.` and `..`. */
+static int module_canonicalize(char *path, size_t app_len) {
+    char *dst = path + app_len;
+    const char *src = path + app_len;
+    while (*src) {
+        while (*src == '/') {
+            src++;
+        }
+        if (!*src) {
+            break;
+        }
+        const char *slash = strchr(src, '/');
+        size_t seglen = slash ? (size_t)(slash - src) : strlen(src);
+        if (seglen == 1 && src[0] == '.') {
+            src += seglen;
+            continue;
+        }
+        if (seglen == 2 && src[0] == '.' && src[1] == '.') {
+            if (dst == path + app_len) {
+                return 0;
+            }
+            if (dst > path + app_len && dst[-1] == '/') {
+                dst--;
+            }
+            while (dst > path + app_len && dst[-1] != '/') {
+                dst--;
+            }
+            src += seglen;
+            continue;
+        }
+        if (!module_segment(src, seglen)) {
+            return 0;
+        }
+        if ((size_t)(dst - path) + seglen + 2 >= 4096) {
+            return 0;
+        }
+        *dst++ = '/';
+        memcpy(dst, src, seglen);
+        dst += seglen;
+        src += seglen;
+    }
+    *dst = 0;
+    if (path[app_len] != '/') {
+        return 0;
+    }
+    const char *rel = path + app_len + 1;
+    size_t rel_len = strlen(rel);
+    return rel_len >= 3 && strcmp(rel + rel_len - 3, ".js") == 0;
+}
+
+static char *module_normalize(JSContext *ctx, const char *base_name, const char *name, void *opaque) {
+    Host *host = opaque;
+    if (!host || !host->app_dir || !name || !name[0] || strchr(name, '\\') || strstr(name, "://")) {
+        module_reject(ctx);
+        return NULL;
+    }
+    const char *app = host->app_dir;
+    size_t app_len = strlen(app);
+    char raw[4096];
+    if (name[0] == '/') {
+        if (strlen(name) >= sizeof(raw)) {
+            module_reject(ctx);
+            return NULL;
+        }
+        memcpy(raw, name, strlen(name) + 1);
+    } else {
+        const char *dir = app;
+        size_t dir_len = app_len;
+        if (base_name && strchr(base_name, '/')) {
+            const char *slash = strrchr(base_name, '/');
+            dir = base_name;
+            dir_len = (size_t)(slash - base_name);
+        }
+        if (dir_len + 1 + strlen(name) + 1 >= sizeof(raw)) {
+            module_reject(ctx);
+            return NULL;
+        }
+        memcpy(raw, dir, dir_len);
+        raw[dir_len] = '/';
+        memcpy(raw + dir_len + 1, name, strlen(name) + 1);
+    }
+    if (strncmp(raw, app, app_len) != 0 || (raw[app_len] != '/' && raw[app_len] != 0)) {
+        module_reject(ctx);
+        return NULL;
+    }
+    if (!module_canonicalize(raw, app_len)) {
+        module_reject(ctx);
+        return NULL;
+    }
+    return js_strdup(ctx, raw);
+}
+
+static JSModuleDef *module_loader(JSContext *ctx, const char *module_name, void *opaque) {
+    Host *host = opaque;
+    if (!host || !host->app_dir || !module_name) {
+        module_reject(ctx);
+        return NULL;
+    }
+    size_t app_len = strlen(host->app_dir);
+    if (strncmp(module_name, host->app_dir, app_len) != 0 || module_name[app_len] != '/') {
+        module_reject(ctx);
+        return NULL;
+    }
+    FILE *file = fopen(module_name, "rb");
+    if (!file) {
+        JS_ThrowReferenceError(ctx, "could not load module '%s'", module_name);
+        return NULL;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        module_reject(ctx);
+        return NULL;
+    }
+    long length = ftell(file);
+    if (length < 0 || length > 16L * 1024L * 1024L) {
+        fclose(file);
+        module_reject(ctx);
+        return NULL;
+    }
+    if (fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        module_reject(ctx);
+        return NULL;
+    }
+    char *buf = malloc((size_t)length + 1);
+    if (!buf) {
+        fclose(file);
+        JS_ThrowOutOfMemory(ctx);
+        return NULL;
+    }
+    size_t got = fread(buf, 1, (size_t)length, file);
+    fclose(file);
+    if (got != (size_t)length) {
+        free(buf);
+        module_reject(ctx);
+        return NULL;
+    }
+    buf[length] = 0;
+    JSValue val = JS_Eval(ctx, buf, (size_t)length, module_name, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+    free(buf);
+    if (JS_IsException(val)) {
+        return NULL;
+    }
+    JSModuleDef *mod = JS_VALUE_GET_PTR(val);
+    JS_FreeValue(ctx, val);
+    return mod;
+}
+
+void qjs_set_app_dir(Host *host, const char *dir) {
+    if (!host) {
+        return;
+    }
+    free(host->app_dir);
+    host->app_dir = NULL;
+    if (!dir || !dir[0]) {
+        return;
+    }
+    size_t len = strlen(dir);
+    while (len > 1 && dir[len - 1] == '/') {
+        len--;
+    }
+    host->app_dir = malloc(len + 1);
+    if (!host->app_dir) {
+        return;
+    }
+    memcpy(host->app_dir, dir, len);
+    host->app_dir[len] = 0;
+}
 
 Host *qjs_open(const QjsFns *fns) {
     Host *host = calloc(1, sizeof(Host));
@@ -3216,8 +3998,10 @@ Host *qjs_open(const QjsFns *fns) {
     JS_SetContextOpaque(host->ctx, host);
     host->deadline_ms = INT64_MAX;
     JS_SetMemoryLimit(host->rt, UIFW_JS_MEMORY_LIMIT);
-    JS_SetMaxStackSize(host->rt, 1u << 20);
+    /* Solid 2's render effects nest deeper than 1 MiB on the gallery page. */
+    JS_SetMaxStackSize(host->rt, 8u << 20);
     JS_SetInterruptHandler(host->rt, interrupt_handler, host);
+    JS_SetModuleLoaderFunc(host->rt, module_normalize, module_loader, host);
     if (bind_core(host) || bind_console(host) || bind_host_globals(host)) {
         JS_FreeContext(host->ctx);
         JS_FreeRuntime(host->rt);
@@ -3240,10 +4024,14 @@ int qjs_eval(Host *host, const char *src, size_t len, const char *name, char *er
     }
     memcpy(owned, src, len);
     owned[len] = 0;
-    JSValue result = JS_Eval(host->ctx, owned, len, name, JS_EVAL_TYPE_GLOBAL);
+    int flags = JS_DetectModule(owned, len) ? JS_EVAL_TYPE_MODULE : JS_EVAL_TYPE_GLOBAL;
+    JSValue result = JS_Eval(host->ctx, owned, len, name, flags);
     free(owned);
     if (!JS_IsException(result)) {
         JS_FreeValue(host->ctx, result);
+        if (flags == JS_EVAL_TYPE_MODULE && qjs_drain_jobs(host, err, err_len) != 0) {
+            return -1;
+        }
         return 0;
     }
     write_exception(host->ctx, err, err_len);
@@ -3268,7 +4056,7 @@ int qjs_dispatch(Host *host, uint64_t id, int kind, double a, double b, char *er
             args[0] = JS_NewFloat64(host->ctx, a);
             args[1] = JS_NewFloat64(host->ctx, b);
             argc = 2;
-        } else if (kind == 17) {
+        } else if (kind == 17 || kind == 20) {
             args[0] = JS_NewFloat64(host->ctx, a);
             argc = 1;
         }
@@ -3280,19 +4068,14 @@ int qjs_dispatch(Host *host, uint64_t id, int kind, double a, double b, char *er
             JS_FreeValue(host->ctx, result);
             continue;
         }
-        if (!failed) {
-            write_exception(host->ctx, err, err_len);
-        } else {
-            JSValue exception = JS_GetException(host->ctx);
-            JS_FreeValue(host->ctx, exception);
-        }
-        failed = 1;
+        listener_failed(host, err, err_len, &failed);
     }
     return failed ? -1 : 0;
 }
 
-int qjs_dispatch_input(Host *host, uint64_t id, int kind, const char *utf8, size_t len, char *err,
-                       size_t err_len) {
+int qjs_dispatch_input(Host *host, uint64_t id, int kind, const char *utf8, size_t len,
+                       int with_span, int sel_start, int sel_end, int compose_start,
+                       int compose_end, char *err, size_t err_len) {
     arm_slice(host);
     int failed = 0;
     for (size_t index = 0; index < host->tap_len; index++) {
@@ -3304,32 +4087,36 @@ int qjs_dispatch_input(Host *host, uint64_t id, int kind, const char *utf8, size
         if (tap_slot(&host->taps[index], kind, &slot, &has) || !has || !*has || !slot) {
             continue;
         }
-        JSValue arg;
+        JSValue args[5];
+        int argc = 1;
         if (utf8 == NULL) {
-            arg = JS_NULL;
+            args[0] = JS_NULL;
         } else {
-            arg = JS_NewStringLen(host->ctx, utf8, len);
+            args[0] = JS_NewStringLen(host->ctx, utf8, len);
         }
-        JSValue result = JS_Call(host->ctx, *slot, JS_UNDEFINED, 1, &arg);
-        JS_FreeValue(host->ctx, arg);
+        if (with_span) {
+            args[1] = JS_NewInt32(host->ctx, sel_start);
+            args[2] = JS_NewInt32(host->ctx, sel_end);
+            args[3] = JS_NewInt32(host->ctx, compose_start);
+            args[4] = JS_NewInt32(host->ctx, compose_end);
+            argc = 5;
+        }
+        JSValue result = JS_Call(host->ctx, *slot, JS_UNDEFINED, argc, args);
+        for (int arg = 0; arg < argc; arg++) {
+            JS_FreeValue(host->ctx, args[arg]);
+        }
         if (!JS_IsException(result)) {
             JS_FreeValue(host->ctx, result);
             continue;
         }
-        if (!failed) {
-            write_exception(host->ctx, err, err_len);
-        } else {
-            JSValue exception = JS_GetException(host->ctx);
-            JS_FreeValue(host->ctx, exception);
-        }
-        failed = 1;
+        listener_failed(host, err, err_len, &failed);
     }
     return failed ? -1 : 0;
 }
 
 int qjs_dispatch_text(Host *host, uint64_t id, const char *utf8, size_t len, char *err,
                       size_t err_len) {
-    return qjs_dispatch_input(host, id, 16, utf8, len, err, err_len);
+    return qjs_dispatch_input(host, id, 16, utf8, len, 0, -1, -1, -1, -1, err, err_len);
 }
 
 #define UIFW_JOB_ROUND_LIMIT 32
@@ -3458,6 +4245,27 @@ int qjs_dispatch_back(Host *host, char *err, size_t err_len) {
     return 0;
 }
 
+int qjs_try_shortcut(Host *host, const char *spec, char *err, size_t err_len) {
+    if (!host || !spec) {
+        return 0;
+    }
+    for (size_t index = 0; index < host->shortcut_len; index++) {
+        if (strcmp(host->shortcuts[index].spec, spec) != 0) {
+            continue;
+        }
+        arm_slice(host);
+        JSValue result = JS_Call(host->ctx, host->shortcuts[index].fn, JS_UNDEFINED, 0, NULL);
+        if (JS_IsException(result)) {
+            int failed = 0;
+            listener_failed(host, err, err_len, &failed);
+            return host->listener_freeze ? -1 : 1;
+        }
+        JS_FreeValue(host->ctx, result);
+        return 1;
+    }
+    return 0;
+}
+
 #include "runtime_host.inc"
 
 void qjs_close(Host *host) {
@@ -3472,11 +4280,32 @@ void qjs_close(Host *host) {
         JS_FreeValue(host->ctx, host->backs[index].fn);
     }
     free(host->backs);
+    for (size_t index = 0; index < host->shortcut_len; index++) {
+        free(host->shortcuts[index].spec);
+        JS_FreeValue(host->ctx, host->shortcuts[index].fn);
+    }
+    free(host->shortcuts);
     for (size_t index = 0; index < host->settings_len; index++) {
         JS_FreeValue(host->ctx, host->settings_handlers[index].fn);
     }
     free(host->settings_handlers);
+    for (size_t index = 0; index < host->mod_listener_len; index++) {
+        free(host->mod_listeners[index].module);
+        free(host->mod_listeners[index].event);
+        JS_FreeValue(host->ctx, host->mod_listeners[index].fn);
+    }
+    free(host->mod_listeners);
+    for (size_t index = 0; index < host->motion_len; index++) {
+        free(host->motions[index].prop);
+        JS_FreeValue(host->ctx, host->motions[index].fn);
+    }
+    free(host->motions);
+    for (size_t index = 0; index < host->values_len; index++) {
+        JS_FreeValue(host->ctx, host->values[index]);
+    }
+    free(host->values);
     free(host->locale);
+    free(host->app_dir);
     if (host->has_frame) {
         JS_FreeValue(host->ctx, host->frame_cb);
     }

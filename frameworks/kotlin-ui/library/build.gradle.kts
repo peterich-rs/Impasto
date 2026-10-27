@@ -13,20 +13,10 @@ kotlin {
     }
     sourceSets {
         commonMain.dependencies {}
-        val jvmMain by getting {
-            dependencies {
-                api(libs.reactive)
-            }
-        }
         val jvmTest by getting {
             dependencies {
                 implementation(kotlin("test"))
             }
         }
     }
-}
-
-tasks.named<Test>("jvmTest") {
-    val counter = rootProject.projectDir.resolve("../../protocol/tests/fixtures/counter.bin")
-    environment("UIFW_COUNTER_BYTES", counter.absolutePath)
 }

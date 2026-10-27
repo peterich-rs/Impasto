@@ -4,8 +4,6 @@ use std::cell::RefCell;
 
 use crate::Services;
 
-pub fn publish(session: &mut dyn session::Session, services: &RefCell<Box<dyn Services>>) {
-    if let Some(update) = session.take_ime() {
-        services.borrow().apply_ime(&update);
-    }
+pub fn publish_update(update: &session::ImeUpdate, services: &RefCell<Box<dyn Services>>) {
+    services.borrow().apply_ime(update);
 }

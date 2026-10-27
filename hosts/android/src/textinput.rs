@@ -58,8 +58,15 @@ pub enum Edit {
     DeleteWordForward,
     Escape,
     /// Select the whole buffer so the following [`Edit::Text`] replaces it.
+    #[cfg_attr(not(test), allow(dead_code))]
     SelectAll,
     Text(String),
+    /// Delete a UTF-16 range, then [`Edit::Insert`] the replacement.
+    DeleteRange {
+        start: u32,
+        end: u32,
+    },
+    Insert(String),
     Composing(Option<String>),
 }
 
@@ -185,9 +192,28 @@ fn committed_edits(old: &str, new: &str) -> Vec<Edit> {
     {
         return vec![Edit::Text(suffix.to_owned())];
     }
-    // A shorter buffer, or an edit away from the end, replaces the field.
-    // Replaying backspaces only works when the caret is at the end.
-    vec![Edit::SelectAll, Edit::Text(new.to_owned())]
+    let prefix = common_prefix(old, new);
+    let mut edits = Vec::new();
+    if prefix < old.len() {
+        let start = utf16_len(&old[..prefix]) as u32;
+        let end = utf16_len(old) as u32;
+        edits.push(Edit::DeleteRange { start, end });
+    }
+    if prefix < new.len() {
+        edits.push(Edit::Insert(new[prefix..].to_owned()));
+    }
+    edits
+}
+
+fn common_prefix(left: &str, right: &str) -> usize {
+    let mut bytes = 0;
+    for (a, b) in left.chars().zip(right.chars()) {
+        if a != b {
+            break;
+        }
+        bytes += a.len_utf8();
+    }
+    bytes
 }
 
 /// One field's buffer, as the input connection last saw it.
@@ -264,6 +290,7 @@ impl Client {
         self.buffer.text.clone()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn begin(&mut self) {
         if self.depth == 0 {
             self.base = self.buffer.snapshot();
@@ -272,6 +299,7 @@ impl Client {
         self.depth += 1;
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn end(&mut self) -> Vec<Edit> {
         if self.depth == 0 {
             return Vec::new();
@@ -295,6 +323,7 @@ impl Client {
     }
 
     /// `setComposingText`. An empty string clears the composition.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn composing(&mut self, text: &str) -> Vec<Edit> {
         self.mutate(|buffer| {
             let (start, end) = buffer
@@ -305,6 +334,7 @@ impl Client {
     }
 
     /// `finishComposingText`. The marked characters stay and become committed.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn finish(&mut self) -> Vec<Edit> {
         if self.buffer.compose.is_none() {
             return Vec::new();
@@ -315,6 +345,7 @@ impl Client {
     }
 
     /// `deleteSurroundingText`. Lengths are UTF-16 units outside the selection.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn delete(&mut self, before: usize, after: usize) -> Vec<Edit> {
         if before == 0 && after == 0 {
             return Vec::new();
@@ -352,6 +383,7 @@ fn splice(buffer: &mut Buffer, start: usize, end: usize, insert: &str, composing
     buffer.compose = (composing && extra_len > 0).then_some((start, caret));
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn delete_surrounding(buffer: &mut Buffer, before: usize, after: usize) {
     let mut units: Vec<u16> = buffer.text.encode_utf16().collect();
     let sel_lo = buffer
@@ -385,6 +417,7 @@ fn delete_surrounding(buffer: &mut Buffer, before: usize, after: usize) {
 }
 
 /// Map a UTF-16 index across a deletion of `[from, sel_lo)` and `[sel_hi, to)`.
+#[cfg_attr(not(test), allow(dead_code))]
 fn shift_index(
     index: usize,
     from: usize,
@@ -456,17 +489,20 @@ mod tests {
     }
 
     #[test]
-    fn committed_backspace_replaces_the_buffer() {
+    fn committed_backspace_deletes_the_last_unit() {
         let events = diff(&marked("ab", None), &marked("a", None));
-        assert_eq!(events, vec![Edit::SelectAll, Edit::Text("a".to_string())]);
+        assert_eq!(events, vec![Edit::DeleteRange { start: 1, end: 2 }]);
     }
 
     #[test]
-    fn deletion_in_the_middle_replaces_the_buffer() {
+    fn deletion_in_the_middle_deletes_that_range_then_inserts() {
         let events = diff(&marked("hello", None), &marked("hllo", None));
         assert_eq!(
             events,
-            vec![Edit::SelectAll, Edit::Text("hllo".to_string())]
+            vec![
+                Edit::DeleteRange { start: 1, end: 5 },
+                Edit::Insert("llo".to_string())
+            ]
         );
     }
 

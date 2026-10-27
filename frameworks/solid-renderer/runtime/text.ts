@@ -1,4 +1,4 @@
-import { children, createRenderEffect } from "solid-js";
+import { children, createRenderEffect, createTrackedEffect } from "solid-js";
 
 import type { HostNode, HostRendererOptions } from "../src/tree.ts";
 
@@ -42,56 +42,50 @@ export function Text(props: {
   const resolved = children(() => props.children as never);
   const node = options.createTextNode("");
   createRenderEffect(
-    () => ({
-      value: textContent(resolved()),
-      fontSize: props.fontSize,
-      color: props.color,
-      maxLines: props.maxLines,
-      ellipsis: props.ellipsis,
-      softWrap: props.softWrap,
-      overflow: props.overflow,
-      textAlign: props.textAlign,
-      weight: props.weight,
-      direction: props.direction,
-      lineHeight: props.lineHeight,
-      family: props.family,
-    }),
-    (next) => {
-      options.replaceText(node, next.value);
-      if (next.fontSize !== undefined) {
-        options.setProperty(node, "fontSize", next.fontSize);
-      }
-      if (next.color !== undefined) {
-        options.setProperty(node, "color", next.color);
-      }
-      if (next.maxLines !== undefined) {
-        options.setProperty(node, "maxLines", next.maxLines);
-      }
-      if (next.ellipsis !== undefined) {
-        options.setProperty(node, "ellipsis", next.ellipsis);
-      }
-      if (next.softWrap !== undefined) {
-        options.setProperty(node, "softWrap", next.softWrap);
-      }
-      if (next.overflow !== undefined) {
-        options.setProperty(node, "overflow", next.overflow);
-      }
-      if (next.textAlign !== undefined) {
-        options.setProperty(node, "textAlign", next.textAlign);
-      }
-      if (next.weight !== undefined) {
-        options.setProperty(node, "weight", next.weight);
-      }
-      if (next.direction !== undefined) {
-        options.setProperty(node, "direction", next.direction);
-      }
-      if (next.lineHeight !== undefined) {
-        options.setProperty(node, "lineHeight", next.lineHeight);
-      }
-      if (next.family !== undefined) {
-        options.setProperty(node, "family", next.family);
+    () => textContent(resolved()),
+    (value) => {
+      options.replaceText(node, value);
+    },
+  );
+  createRenderEffect(
+    () => props.color,
+    (color) => {
+      if (color !== undefined) {
+        options.setProperty(node, "color", color);
       }
     },
   );
+  createTrackedEffect(() => {
+    if (props.fontSize !== undefined) {
+      options.setProperty(node, "fontSize", props.fontSize);
+    }
+    if (props.maxLines !== undefined) {
+      options.setProperty(node, "maxLines", props.maxLines);
+    }
+    if (props.ellipsis !== undefined) {
+      options.setProperty(node, "ellipsis", props.ellipsis);
+    }
+    if (props.softWrap !== undefined) {
+      options.setProperty(node, "softWrap", props.softWrap);
+    }
+    if (props.overflow !== undefined) {
+      options.setProperty(node, "overflow", props.overflow);
+    }
+    if (props.textAlign !== undefined) {
+      options.setProperty(node, "textAlign", props.textAlign);
+    }
+    if (props.weight !== undefined) {
+      options.setProperty(node, "weight", props.weight);
+    }
+    if (props.direction !== undefined) {
+      options.setProperty(node, "direction", props.direction);
+    }
+    if (props.lineHeight !== undefined) {
+      options.setProperty(node, "lineHeight", props.lineHeight);
+    }
+    if (props.family !== undefined) {
+      options.setProperty(node, "family", props.family);
+    }
+  });
   return node;
 }

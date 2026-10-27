@@ -8,6 +8,9 @@ pub struct FrameTiming {
     pub session_ms: f64,
     pub submit_ms: f64,
     pub present_ms: f64,
+    pub picture_rebuilt: u32,
+    pub picture_reused: u32,
+    pub layer_count: u32,
 }
 
 impl FrameTiming {

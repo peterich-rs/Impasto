@@ -48,7 +48,7 @@ impl Input {
             Phase::Up | Phase::Cancel => {
                 self.active.remove(&event.pointer);
             }
-            Phase::Move | Phase::Wheel => {}
+            Phase::Move | Phase::Wheel | Phase::Zoom => {}
         }
         self.pointers.push_back(event);
         !self.paused
@@ -147,11 +147,8 @@ fn cancel_event(pointer: PointerId) -> PointerEvent {
         modifiers: ui_core::Modifiers::empty(),
         dx: 0.0,
         dy: 0.0,
+        zoom: 0.0,
     }
-}
-
-pub fn same_draw_list(previous: Option<&protocol::DrawList>, next: &protocol::DrawList) -> bool {
-    previous == Some(next)
 }
 
 #[cfg(test)]
@@ -275,14 +272,5 @@ mod tests {
         assert!(input.set_metrics(metrics));
         let _ = input.begin_frame();
         assert!(!input.set_metrics(metrics));
-    }
-
-    #[test]
-    fn an_unchanged_draw_list_is_not_submitted_again() {
-        let list = protocol::DrawList {
-            commands: Vec::new(),
-        };
-        assert!(same_draw_list(Some(&list), &list));
-        assert!(!same_draw_list(None, &list));
     }
 }

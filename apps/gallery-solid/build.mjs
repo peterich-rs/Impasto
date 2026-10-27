@@ -1,6 +1,6 @@
 import { transformAsync } from "@babel/core";
 import * as esbuild from "esbuild";
-import { readFileSync } from "node:fs";
+import { copyFileSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -61,4 +61,11 @@ if (process.argv.includes("--watch")) {
   await ctx.watch();
 } else {
   await esbuild.build(options);
+  await esbuild.build({
+    ...options,
+    outfile: "dist/counter.esm.js",
+    format: "esm",
+    external: ["./util.js"],
+  });
+  copyFileSync(join(here, "util.js"), join(here, "dist/util.js"));
 }

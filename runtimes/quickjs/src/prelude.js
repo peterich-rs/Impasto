@@ -2,9 +2,6 @@
   "use strict";
 
   var bridge = global.__uifw;
-  var appStateValue = "unknown";
-  var appState = null;
-  var linking = null;
   var sockets = new Map();
   var modules = new Map();
 
@@ -406,87 +403,11 @@
     }
   };
 
-  function createAppState() {
-    return {
-      currentState: appStateValue,
-      _fns: [],
-      addEventListener: function (type, fn) {
-        if (type === "change") {
-          this._fns.push(fn);
-        }
-      },
-      removeEventListener: function (type, fn) {
-        if (type !== "change") {
-          return;
-        }
-        this._fns = this._fns.filter(function (item) {
-          return item !== fn;
-        });
-      },
-    };
-  }
-
-  function createLinking() {
-    return {
-      _fns: [],
-      getInitialURL: function () {
-        return bridge.call("Linking", "getInitialURL", "[]");
-      },
-      openURL: function (url) {
-        return bridge.call("Linking", "openURL", JSON.stringify([String(url)]));
-      },
-      addEventListener: function (type, fn) {
-        if (type === "url") {
-          this._fns.push(fn);
-        }
-      },
-    };
-  }
-
-  function createClipboard() {
-    return {
-      getString: function () {
-        return bridge.call("Clipboard", "getString", "[]");
-      },
-      setString: function (text) {
-        return bridge.call("Clipboard", "setString", JSON.stringify([String(text)]));
-      },
-    };
-  }
-
-  bridge._emit = function (name, event, data) {
-    if (name === "AppState" && event === "change") {
-      appStateValue = data;
-      if (appState) {
-        appState.currentState = data;
-        appState._fns.slice().forEach(function (fn) {
-          fn(data);
-        });
-      }
-    } else if (name === "Linking" && event === "url" && linking) {
-      linking._fns.slice().forEach(function (fn) {
-        fn({ url: data });
-      });
-    }
-  };
-
   function getModule(name) {
     if (modules.has(name)) {
       return modules.get(name);
     }
-    if (!bridge.hasModule(name)) {
-      return null;
-    }
-    var created = null;
-    if (name === "AppState") {
-      created = createAppState();
-      appState = created;
-    } else if (name === "Linking") {
-      created = createLinking();
-      linking = created;
-    } else if (name === "Clipboard") {
-      created = createClipboard();
-    }
+    var created = bridge.module(name);
     if (!created) {
       return null;
     }
@@ -510,7 +431,7 @@
     getEnforcing: function (name) {
       var mod = getModule(name);
       if (!mod) {
-        throw new Error("module " + name + " unavailable");
+        throw new Error("module \"" + name + "\" is not linked");
       }
       return mod;
     },

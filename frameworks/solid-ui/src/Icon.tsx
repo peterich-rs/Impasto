@@ -1,6 +1,5 @@
-import { createRenderEffect, createSignal } from "solid-js";
-import { type NodeHandle } from "@uifw/solid-renderer";
-import { directionFor } from "./i18n.ts";
+import { createTrackedEffect, createSignal } from "solid-js";
+import { directionFor, type NodeHandle } from "@uifw/solid-renderer";
 import { coreHost } from "./host-ext.ts";
 import { useTheme } from "./use-theme.ts";
 
@@ -10,7 +9,7 @@ import { useTheme } from "./use-theme.ts";
 export function Icon(props: { mirror?: boolean; children?: unknown }): NodeHandle {
   const theme = useTheme();
   const [iconId, setIconId] = createSignal(0);
-  createRenderEffect(() => {
+  createTrackedEffect(() => {
     const icon = iconId();
     const locale = theme().locale;
     const mirror = !!props.mirror;

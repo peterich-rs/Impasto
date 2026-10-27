@@ -3,6 +3,7 @@ package dev.uifw.host;
 import android.graphics.Matrix;
 import android.os.Build;
 import android.text.Selection;
+import android.text.Spanned;
 import android.view.KeyEvent;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.CompletionInfo;
@@ -33,6 +34,13 @@ final class TextInput {
     private boolean monitorCursor;
     private ExtractedTextRequest extractRequest;
     private final Matrix cursorMatrix = new Matrix();
+    private boolean syncPending;
+    private boolean haveSnapshot;
+    private String snapshotText = "";
+    private int snapshotStart;
+    private int snapshotEnd;
+    private int snapshotComposeStart = -1;
+    private int snapshotComposeEnd = -1;
 
     TextInput(HostView view) {
         this.view = view;
@@ -81,6 +89,7 @@ final class TextInput {
             return;
         }
         boolean opening = !client;
+        boolean typeChanged = client && (this.inputType != inputType || this.imeAction != imeAction);
         client = true;
         this.inputType = inputType;
         this.imeAction = imeAction;
@@ -88,7 +97,7 @@ final class TextInput {
         this.caretY = caretY;
         this.caretW = caretW;
         this.caretH = caretH;
-        boolean textChanged = text != null && !text.contentEquals(editable);
+        clearComposing();
         editable.clear();
         if (text != null) {
             editable.append(text);
@@ -104,13 +113,11 @@ final class TextInput {
         Selection.setSelection(editable, start, stop);
         if (compStart >= 0 && compEnd > compStart && compEnd <= end) {
             markComposing(compStart, compEnd);
-        } else {
-            markComposing(0, 0);
         }
-        if (opening || textChanged) {
+        if (opening || typeChanged) {
             view.requestFocus();
             imm.restartInput(view);
-            if (op == 1) {
+            if (opening && op == 1) {
                 imm.showSoftInput(view, 0);
             }
         } else {
@@ -128,7 +135,54 @@ final class TextInput {
     }
 
     void deleteSurrounding(int before, int after) {
-        nativeDelete(before, after);
+        if (before <= 0 && after <= 0) {
+            return;
+        }
+        new BaseInputConnection(view, false) {
+            @Override
+            public android.text.Editable getEditable() {
+                return editable;
+            }
+        }.deleteSurroundingText(Math.max(0, before), Math.max(0, after));
+        pushSnapshot();
+    }
+
+    private void noteEdit() {
+        if (batch > 0) {
+            syncPending = true;
+            return;
+        }
+        pushSnapshot();
+    }
+
+    /** Copy the editable the input method just mutated. Identical snapshots are skipped. */
+    private void pushSnapshot() {
+        int start = Selection.getSelectionStart(editable);
+        int end = Selection.getSelectionEnd(editable);
+        if (start < 0) {
+            start = editable.length();
+        }
+        if (end < 0) {
+            end = start;
+        }
+        int composeStart = BaseInputConnection.getComposingSpanStart(editable);
+        int composeEnd = BaseInputConnection.getComposingSpanEnd(editable);
+        String text = editable.toString();
+        if (haveSnapshot
+                && text.equals(snapshotText)
+                && start == snapshotStart
+                && end == snapshotEnd
+                && composeStart == snapshotComposeStart
+                && composeEnd == snapshotComposeEnd) {
+            return;
+        }
+        haveSnapshot = true;
+        snapshotText = text;
+        snapshotStart = start;
+        snapshotEnd = end;
+        snapshotComposeStart = composeStart;
+        snapshotComposeEnd = composeEnd;
+        nativeSync(text, start, end, composeStart, composeEnd);
     }
 
     private void updateCursor() {
@@ -182,7 +236,21 @@ final class TextInput {
         return extracted;
     }
 
+    private void clearComposing() {
+        Object[] spans = editable.getSpans(0, editable.length(), Object.class);
+        for (int i = spans.length - 1; i >= 0; i--) {
+            Object span = spans[i];
+            if ((editable.getSpanFlags(span) & Spanned.SPAN_COMPOSING) != 0) {
+                editable.removeSpan(span);
+            }
+        }
+    }
+
     private void markComposing(int start, int end) {
+        if (start < 0 || end <= start || end > editable.length()) {
+            clearComposing();
+            return;
+        }
         new BaseInputConnection(view, false) {
             @Override
             public android.text.Editable getEditable() {
@@ -211,9 +279,6 @@ final class TextInput {
         @Override
         public boolean beginBatchEdit() {
             batch += 1;
-            if (batch == 1) {
-                nativeBegin();
-            }
             return super.beginBatchEdit();
         }
 
@@ -222,8 +287,9 @@ final class TextInput {
             boolean result = super.endBatchEdit();
             if (batch > 0) {
                 batch -= 1;
-                if (batch == 0) {
-                    nativeEnd();
+                if (batch == 0 && syncPending) {
+                    syncPending = false;
+                    pushSnapshot();
                 }
             }
             return result;
@@ -232,7 +298,7 @@ final class TextInput {
         @Override
         public boolean commitText(CharSequence text, int newCursorPosition) {
             boolean result = super.commitText(text, newCursorPosition);
-            nativeCommit(text == null ? "" : text.toString());
+            noteEdit();
             updateCursor();
             return result;
         }
@@ -240,48 +306,51 @@ final class TextInput {
         @Override
         public boolean setComposingText(CharSequence text, int newCursorPosition) {
             boolean result = super.setComposingText(text, newCursorPosition);
-            nativeComposing(text == null ? "" : text.toString());
+            noteEdit();
             updateCursor();
             return result;
         }
 
         @Override
         public boolean setComposingRegion(int start, int end) {
-            boolean result = super.setComposingRegion(start, end);
             int from = Math.min(start, end);
             int to = Math.max(start, end);
             if (from < 0 || to > editable.length() || from >= to) {
-                nativeComposing("");
-            } else {
-                nativeComposing(editable.subSequence(from, to).toString());
+                clearComposing();
+                noteEdit();
+                return true;
             }
+            boolean result = super.setComposingRegion(start, end);
+            noteEdit();
             return result;
         }
 
         @Override
         public boolean finishComposingText() {
             boolean result = super.finishComposingText();
-            nativeFinish();
+            noteEdit();
             return result;
         }
 
         @Override
         public boolean deleteSurroundingText(int beforeLength, int afterLength) {
             boolean result = super.deleteSurroundingText(beforeLength, afterLength);
-            nativeDelete(Math.max(0, beforeLength), Math.max(0, afterLength));
+            noteEdit();
             return result;
         }
 
         @Override
         public boolean deleteSurroundingTextInCodePoints(int beforeLength, int afterLength) {
             boolean result = super.deleteSurroundingTextInCodePoints(beforeLength, afterLength);
-            nativeDelete(Math.max(0, beforeLength), Math.max(0, afterLength));
+            noteEdit();
             return result;
         }
 
         @Override
         public boolean setSelection(int start, int end) {
-            return super.setSelection(start, end);
+            boolean result = super.setSelection(start, end);
+            noteEdit();
+            return result;
         }
 
         @Override
@@ -346,17 +415,12 @@ final class TextInput {
             int compStart,
             int compEnd);
 
-    private static native void nativeBegin();
-
-    private static native void nativeEnd();
-
-    private static native void nativeCommit(String text);
-
-    private static native void nativeComposing(String text);
-
-    private static native void nativeFinish();
-
-    private static native void nativeDelete(int before, int after);
+    private static native void nativeSync(
+            String text,
+            int selStart,
+            int selEnd,
+            int compStart,
+            int compEnd);
 
     private static native void nativeAction();
 

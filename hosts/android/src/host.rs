@@ -296,6 +296,30 @@ impl PlatformBridge for Bridge {
     fn open_url(&self, url: &str) -> Result<(), String> {
         self.launch_view_url(url)
     }
+
+    fn document_dir(&self) -> Result<String, String> {
+        let mut copied = String::new();
+        self.call(|env| {
+            let value = env
+                .call_method(
+                    self.view.as_obj(),
+                    jni::jni_str!("documentDirectory"),
+                    jni::jni_sig!("()Ljava/lang/String;"),
+                    &[],
+                )?
+                .l()?;
+            if !value.is_null() {
+                let string = unsafe { JString::from_raw(env, value.as_raw()) };
+                copied = string.try_to_string(env)?;
+            }
+            Ok(())
+        });
+        if copied.is_empty() {
+            Err("module \"FileSystem\" is not linked".to_owned())
+        } else {
+            Ok(copied)
+        }
+    }
 }
 
 struct Shared(Arc<Bridge>);
@@ -439,7 +463,13 @@ impl Host {
 }
 
 fn edit_event(edit: Edit, shift: bool) -> Option<EditEvent> {
-    let press = |key| EditEvent::Key(session::KeyPress { key, shift });
+    let press = |key| {
+        EditEvent::Key(session::KeyPress {
+            key,
+            shift,
+            modifiers: core::Modifiers::empty(),
+        })
+    };
     Some(match edit {
         Edit::Backspace => press(Key::Backspace),
         Edit::Delete => press(Key::Delete),
@@ -460,6 +490,8 @@ fn edit_event(edit: Edit, shift: bool) -> Option<EditEvent> {
         Edit::DeleteWordForward => press(Key::DeleteWordForward),
         Edit::SelectAll => EditEvent::SelectAll,
         Edit::Text(text) => EditEvent::Text(text),
+        Edit::DeleteRange { start, end } => EditEvent::Edit(core::Edit::DeleteRange { start, end }),
+        Edit::Insert(text) => EditEvent::Edit(core::Edit::Insert(text)),
         Edit::Composing(text) => EditEvent::Composing(text),
     })
 }
@@ -521,15 +553,15 @@ fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
     let requested = request.script;
     let boot = Boot {
         font_family: FONT_FAMILY.to_string(),
-        launch: Launch::Session(Box::new(move |slot| {
+        launch: Launch::Session(Box::new(move |slot, io| {
             let (name, script) = load_script(&script_assets, requested.as_deref())?;
-            quickjs::open(&script, &name, slot.shaper(), slot.log_hook()).map_err(|error| {
-                match error {
+            quickjs::open_with_io(&script, &name, slot.shaper(), slot.log_hook(), Some(io)).map_err(
+                |error| match error {
                     quickjs::Error::NotLinked => SessionError::NotLinked,
                     quickjs::Error::Runtime => SessionError::Runtime,
                     quickjs::Error::Script(text) => SessionError::Script(text),
-                }
-            })
+                },
+            )
         })),
         services: Box::new(Shared(Arc::clone(&bridge))),
         vsync: Arc::clone(&clock) as Arc<dyn Vsync>,
@@ -537,9 +569,11 @@ fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
             assets: request.assets,
         }),
         bridge: Arc::clone(&bridge) as Arc<dyn PlatformBridge>,
+        http: Some(hostshell::http_client()?),
         open_surface: Box::new(|engine, target| {
             Ok(Box::new(VulkanSurface::open(engine, target.layer)?))
         }),
+        dump_list: false,
     };
     let link = hostshell::start(boot).map_err(|error| error.to_string())?;
     link.post(Command::Settings(request.settings));
@@ -1217,7 +1251,35 @@ pub extern "system" fn Java_dev_uifw_host_HostView_nativePointer(
         modifiers: core::Modifiers::from_bits(modifiers as u8),
         dx: 0.0,
         dy: 0.0,
+        zoom: 0.0,
     }));
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_HostView_nativeZoom(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+    scale: f32,
+    x: f32,
+    y: f32,
+    time_ms: jlong,
+    density: f32,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    let Some((x, y)) = scene_point(x, y, density) else {
+        return;
+    };
+    if !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+    host.link.post(Command::Pointer(core::PointerEvent::zoom(
+        x,
+        y,
+        time_ms as f64,
+        scale,
+    )));
 }
 
 #[unsafe(no_mangle)]
@@ -1251,7 +1313,10 @@ pub extern "system" fn Java_dev_uifw_host_HostView_nativeKey(
         if code == textinput::KEY_PASTE {
             host.clear_pending();
             let text = host.bridge.clipboard_text();
-            host.link.post(Command::Input(EditEvent::Paste(text)));
+            host.link.post(Command::Input(EditEvent::Paste {
+                plain: text,
+                html: None,
+            }));
             return;
         }
         if !ime && let Some(text) = char::from_u32(unicode as u32).filter(|ch| !ch.is_control()) {
@@ -1280,92 +1345,41 @@ pub extern "system" fn Java_dev_uifw_host_HostView_nativeKey(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_TextInput_nativeBegin(
-    _env: EnvUnowned<'_>,
-    _class: JObject<'_>,
-) {
-    let Some(host) = host() else {
-        return;
-    };
-    host.ui(|ui| ui.client.begin());
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_TextInput_nativeEnd(
-    _env: EnvUnowned<'_>,
-    _class: JObject<'_>,
-) {
-    let Some(host) = host() else {
-        return;
-    };
-    let edits = host.ui(|ui| ui.client.end());
-    host.post_edits(edits);
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_TextInput_nativeCommit<'local>(
+pub extern "system" fn Java_dev_uifw_host_TextInput_nativeSync<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
     text: JString<'local>,
+    sel_start: jint,
+    sel_end: jint,
+    comp_start: jint,
+    comp_end: jint,
 ) {
     with_env(&mut env, |env| {
         let Some(host) = host() else {
             return Ok(());
         };
-        let Some(text) = java_string(env, &text)? else {
-            return Ok(());
+        let text = java_string(env, &text)?.unwrap_or_default();
+        let start = u32::try_from(sel_start).unwrap_or(0);
+        let end = u32::try_from(sel_end).unwrap_or(start);
+        let compose = if comp_start >= 0 && comp_end > comp_start {
+            Some((comp_start as u32)..(comp_end as u32))
+        } else {
+            None
         };
-        let edits = host.ui(|ui| ui.client.commit(&text));
-        host.post_edits(edits);
+        host.ui(|ui| {
+            ui.client.apply_state(&text, start..end, compose);
+            ui.pending_user = Some(text.clone());
+            ui.ime_client = true;
+        });
+        host.link.post(Command::Input(EditEvent::Replace {
+            text,
+            start,
+            end,
+            compose_start: comp_start,
+            compose_end: comp_end,
+        }));
         Ok(())
     });
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_TextInput_nativeComposing<'local>(
-    mut env: EnvUnowned<'local>,
-    _class: JObject<'local>,
-    text: JString<'local>,
-) {
-    with_env(&mut env, |env| {
-        let Some(host) = host() else {
-            return Ok(());
-        };
-        let Some(text) = java_string(env, &text)? else {
-            return Ok(());
-        };
-        let edits = host.ui(|ui| ui.client.composing(&text));
-        host.post_edits(edits);
-        Ok(())
-    });
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_TextInput_nativeFinish(
-    _env: EnvUnowned<'_>,
-    _class: JObject<'_>,
-) {
-    let Some(host) = host() else {
-        return;
-    };
-    let edits = host.ui(|ui| ui.client.finish());
-    host.post_edits(edits);
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_TextInput_nativeDelete(
-    _env: EnvUnowned<'_>,
-    _class: JObject<'_>,
-    before: jint,
-    after: jint,
-) {
-    let Some(host) = host() else {
-        return;
-    };
-    let before = u32::try_from(before).unwrap_or(0) as usize;
-    let after = u32::try_from(after).unwrap_or(0) as usize;
-    let edits = host.ui(|ui| ui.client.delete(before, after));
-    host.post_edits(edits);
 }
 
 #[unsafe(no_mangle)]
@@ -1398,7 +1412,10 @@ pub extern "system" fn Java_dev_uifw_host_TextInput_nativeContext(
         2 => host.link.post(Command::Input(EditEvent::Cut)),
         3 => {
             let text = host.bridge.clipboard_text();
-            host.link.post(Command::Input(EditEvent::Paste(text)));
+            host.link.post(Command::Input(EditEvent::Paste {
+                plain: text,
+                html: None,
+            }));
         }
         4 => host.link.post(Command::Input(EditEvent::SelectAll)),
         _ => {}
@@ -1533,4 +1550,42 @@ pub extern "system" fn Java_dev_uifw_host_AccessBridge_nativeSetText<'local>(
             }));
         Ok(())
     });
+}
+
+#[cfg(test)]
+mod ime_map {
+    use super::{ime_action, input_type};
+    use session::{KeyboardType, TextInputAction};
+
+    #[test]
+    fn action_ordinals_match_android_ime_action() {
+        assert_eq!(ime_action(TextInputAction::None), 1);
+        assert_eq!(ime_action(TextInputAction::Newline), 1);
+        assert_eq!(ime_action(TextInputAction::Go), 2);
+        assert_eq!(ime_action(TextInputAction::Search), 3);
+        assert_eq!(ime_action(TextInputAction::Send), 4);
+        assert_eq!(ime_action(TextInputAction::Next), 5);
+        assert_eq!(ime_action(TextInputAction::Done), 6);
+        assert_eq!(ime_action(TextInputAction::Previous), 7);
+    }
+
+    #[test]
+    fn keyboard_ordinals_use_distinct_input_classes() {
+        assert_ne!(
+            input_type(KeyboardType::Text),
+            input_type(KeyboardType::Number)
+        );
+        assert_ne!(
+            input_type(KeyboardType::Phone),
+            input_type(KeyboardType::Email)
+        );
+        assert_ne!(
+            input_type(KeyboardType::Password),
+            input_type(KeyboardType::Text)
+        );
+        assert_ne!(
+            input_type(KeyboardType::Multiline),
+            input_type(KeyboardType::Text)
+        );
+    }
 }

@@ -32,6 +32,24 @@ export const {
 export { Text } from "./text.ts";
 export { Image } from "./image.ts";
 export { host } from "./host.ts";
+export {
+  animate,
+  callAsync,
+  callVoid,
+  flingTarget,
+  layerTreeStats,
+  log,
+  onShortcut,
+  readMetrics,
+  scrollIntoView,
+  setListenerErrorPolicy,
+  setRecognizers,
+  setStroke,
+} from "../src/guard.ts";
+export { directionFor } from "../src/direction.ts";
+export { onBack } from "./back.ts";
+export { firstFocusable, restoreFocus, takeInitialFocus } from "./focus.ts";
+export { SPRING, flushMotion, spring } from "./motion.ts";
 export type { HostNode as NodeHandle } from "../src/tree.ts";
 
 export { frameListenerCount, onFrame } from "./frames.ts";

@@ -1,9 +1,8 @@
 import { onCleanup } from "solid-js";
-import { host, onFrame, overlayParent, removeNode, requestFrame, type NodeHandle } from "@uifw/solid-renderer";
+import { directionFor, host, onFrame, overlayParent, removeNode, requestFrame, spring, type NodeHandle } from "@uifw/solid-renderer";
 import { colorBytes } from "./colors.ts";
 import { nodeId } from "./host-ext.ts";
-import { directionFor } from "./i18n.ts";
-import { transition } from "./motion.ts";
+import { Role } from "./semantics.ts";
 import { useTheme } from "./use-theme.ts";
 
 /**
@@ -23,19 +22,38 @@ export function Toast(props: {
   let label = 0;
   let openedAt: number | null = null;
   let closing = false;
-  let stopSlide = () => {};
 
-  function paint(t: number, leaving: boolean): void {
+  function slide(leaving: boolean, onDone?: () => void): void {
     if (fade === 0 || panel === 0) {
+      onDone?.();
       return;
     }
-    const shown = leaving ? 1 - t : t;
-    host.setAlpha(fade, Math.round(shown * 255));
-    host.setTransform(panel, 0, (1 - shown) * 24, 0, 1);
+    let left = 2;
+    const done = () => {
+      left -= 1;
+      if (left <= 0) {
+        onDone?.();
+      }
+    };
+    spring({
+      id: fade,
+      prop: "opacity",
+      from: leaving ? 255 : 0,
+      to: leaving ? 0 : 255,
+      write: (value) => host.setAlpha(fade, Math.round(value)),
+      onDone: done,
+    });
+    spring({
+      id: panel,
+      prop: "translateY",
+      from: leaving ? 0 : 24,
+      to: leaving ? 24 : 0,
+      write: (value) => host.setTransform(panel, 0, value, 0, 1),
+      onDone: done,
+    });
   }
 
   function dismiss(): void {
-    stopSlide();
     if (shell !== 0) {
       removeNode({ id: shell } as NodeHandle);
     }
@@ -54,10 +72,12 @@ export function Toast(props: {
     const overlay = nodeId(overlayParent());
     shell = host.stack();
     host.setFill(shell);
-    host.setAlign(shell, "end");
     host.insert(overlay, shell, 0);
+    const frame = host.align("end");
+    host.setFill(frame);
+    host.insert(shell, frame, 0);
     const pad = host.padding(theme().space.l);
-    host.insert(shell, pad, 0);
+    host.insert(frame, pad, 0);
     fade = host.opacity(0);
     host.insert(pad, fade, 0);
     panel = host.transform();
@@ -70,6 +90,9 @@ export function Toast(props: {
     host.setFontWeight(label, theme().weight.body);
     host.setTextDirection(label, directionFor(theme().locale));
     host.insert(inner, label, 0);
+    host.setSemantics(shell, Role.Text, props.text, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, {
+      live: "polite",
+    });
   }
 
   function beginClose(): void {
@@ -77,23 +100,12 @@ export function Toast(props: {
       return;
     }
     closing = true;
-    if (theme().reduceMotion) {
-      dismiss();
-      return;
-    }
-    stopSlide();
-    stopSlide = transition((t) => {
-      paint(t, true);
-      if (t >= 1) {
-        dismiss();
-      }
-    }, 180);
+    slide(true, () => dismiss());
   }
 
   function sync(targetMs: number): void {
     if (props.open) {
       if (closing) {
-        stopSlide();
         closing = false;
       }
       const born = shell === 0;
@@ -104,8 +116,7 @@ export function Toast(props: {
       }
       if (born) {
         openedAt = targetMs;
-        stopSlide();
-        stopSlide = transition((t) => paint(t, false), theme().reduceMotion ? 0 : 180);
+        slide(false);
       }
       const duration = props.durationMs ?? 3000;
       if (openedAt !== null && targetMs - openedAt >= duration) {
@@ -120,15 +131,10 @@ export function Toast(props: {
   }
 
   const stop = onFrame((targetMs) => {
-    try {
-      sync(targetMs);
-    } catch {
-      // Keep the listener. Closing still removes the shell on a later frame.
-    }
+    sync(targetMs);
   });
   onCleanup(() => {
     stop();
-    stopSlide();
     dismiss();
   });
 

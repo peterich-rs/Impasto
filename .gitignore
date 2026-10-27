@@ -15,3 +15,5 @@ third_party/kiteui/
 .DS_Store
 cmake-build-*/
 compile_commands.json
+.vscode/
+apps/gallery-solid/dist/*.map

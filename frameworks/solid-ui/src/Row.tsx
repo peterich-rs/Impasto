@@ -1,6 +1,5 @@
-import { createRenderEffect } from "solid-js";
-import { type NodeHandle } from "@uifw/solid-renderer";
-import { directionFor } from "./i18n.ts";
+import { createTrackedEffect } from "solid-js";
+import { directionFor, type NodeHandle } from "@uifw/solid-renderer";
 import { coreHost } from "./host-ext.ts";
 import { useTheme } from "./use-theme.ts";
 
@@ -18,7 +17,7 @@ export function Row(props: {
 }): NodeHandle {
   const theme = useTheme();
   let node = 0;
-  createRenderEffect(() => {
+  createTrackedEffect(() => {
     if (node !== 0) {
       coreHost.setReverse(node, directionFor(theme().locale) === "rtl");
     }

@@ -92,6 +92,9 @@ pub enum Edit {
     SelectAll,
     /// Replace the value. Used when a control binds a new string.
     Load(String),
+    /// Delete the composing range, then insert `String`. Does not clear composing
+    /// by the insert path, so a following insert cannot delete the same range again.
+    Commit(String),
     /// Move the caret to a UTF-16 offset, clamped to the text.
     SetCaret(u32),
     /// Keep `base` and move `extent` to a UTF-16 offset.
@@ -133,6 +136,7 @@ pub struct TextEditor {
     clipboard: Option<String>,
     /// Horizontal anchor for a run of vertical motions.
     column_x: Option<f32>,
+    revision: u64,
 }
 
 impl TextEditor {
@@ -143,7 +147,33 @@ impl TextEditor {
             redo: Vec::new(),
             clipboard: None,
             column_x: None,
+            revision: 0,
         }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Replace the string and clamp the selection and composing range into it.
+    ///
+    /// A composing range that collapses stays `Some`. The undo stack is left
+    /// alone. `revision` increments only when the text changes.
+    pub fn replace_keeping_composition(&mut self, next: String) -> bool {
+        if self.value.text == next {
+            return false;
+        }
+        let limit = utf16_len(&next);
+        self.value.text = next;
+        self.value.selection.base = self.value.selection.base.min(limit);
+        self.value.selection.extent = self.value.selection.extent.min(limit);
+        if let Some(range) = self.value.composing.as_mut() {
+            let start = range.start.min(limit);
+            let end = range.end.min(limit);
+            *range = start..end;
+        }
+        self.revision = self.revision.saturating_add(1);
+        true
     }
 
     pub fn value(&self) -> &TextEditingValue {
@@ -290,7 +320,13 @@ impl TextEditor {
                 };
                 self.delete_selection();
             }
+            Edit::Commit(text) => {
+                self.checkpoint();
+                self.delete_composing_text();
+                self.insert(&text);
+            }
         }
+        self.revision = self.revision.saturating_add(1);
     }
 
     fn checkpoint(&mut self) {
@@ -553,6 +589,23 @@ impl TextEditor {
 
     fn commit_composing(&mut self) {
         self.value.composing = None;
+    }
+
+    /// Remove the marked characters. The composing flag is cleared with them.
+    fn delete_composing_text(&mut self) {
+        let Some(range) = self.value.composing.take() else {
+            return;
+        };
+        let (start, end) = if range.start <= range.end {
+            (range.start, range.end)
+        } else {
+            (range.end, range.start)
+        };
+        if start == end {
+            return;
+        }
+        self.value.text = delete_utf16(&self.value.text, start, end);
+        self.value.selection = TextSelection::collapsed(start);
     }
 
     fn set_composing(&mut self, next: Option<String>) {

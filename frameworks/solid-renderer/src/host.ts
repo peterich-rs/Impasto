@@ -22,6 +22,7 @@ export interface CoreHost {
   column(gap: number): NodeHandle;
   row(gap: number): NodeHandle;
   stack(): NodeHandle;
+  align(align: "start" | "center" | "end"): NodeHandle;
   padding(edges: number): NodeHandle;
   grid(columns: string[], rows: string[], gap: number): NodeHandle;
   pointerRegion(): NodeHandle;
@@ -56,6 +57,10 @@ export interface CoreHost {
   setRadius(node: NodeHandle, radius: number): void;
   setAlpha(node: NodeHandle, alpha: number): void;
   setAlign(node: NodeHandle, align: "start" | "center" | "end"): void;
+  setCross(
+    node: NodeHandle,
+    align: "start" | "center" | "end" | "stretch" | "baseline",
+  ): void;
   setSize(node: NodeHandle, width: number, height: number): void;
   setImage(node: NodeHandle, source: string, width: number, height: number): void;
   setMaxLines(node: NodeHandle, lines: number): void;
@@ -111,6 +116,7 @@ export interface CoreHost {
     editable?: number,
     readOnly?: number,
     description?: string,
+    hint?: { order?: number; live?: "off" | "polite" | "assertive" },
   ): void;
   textScale(): number;
   setTextScale(scale: number): void;
@@ -188,4 +194,46 @@ export interface CoreHost {
   pointerPosition(): { x: number; y: number };
   onBack(fn: () => boolean): number;
   offBack(id: number): void;
+  onMotionEnd?(id: NodeHandle, prop: string, fn: () => void): number;
+  offMotionEnd?(id: number): void;
+  /** Pinch scale along the hit path. Older hosts omit it. */
+  onZoom?(node: NodeHandle, fn: (scale: number) => void): void;
+  /** Spec is `mod+k` style. Older hosts omit it. */
+  onShortcut?(spec: string, cb: () => void): void;
+  scrollIntoView?(id: NodeHandle, edge: number): void;
+  /**
+   * Spring on one property. `prop` is `scrollX`, `scrollY`, `opacity`,
+   * `translateX`, `translateY`, `rotate`, `scale`, `overscrollX`, or `overscrollY`.
+   * Core calls opacity `Opacity`; the script string is `opacity`.
+   */
+  animate?(
+    id: NodeHandle,
+    prop: string,
+    from: number,
+    to: number,
+    stiffness: number,
+    damping: number,
+  ): void;
+  flingTarget?(id: NodeHandle): { x: number; y: number } | null;
+  setListenerErrorPolicy?(policy: "report" | "freeze"): void;
+  layerTreeStats?(): { epoch: number; layers: number; pictures: number };
+  /**
+   * Optional recognizers. `doubleTapMs` is the double-tap window in milliseconds.
+   */
+  setRecognizers?(
+    node: NodeHandle,
+    spec: {
+      tap?: boolean;
+      longPress?: boolean;
+      drag?: "none" | "free" | "horizontal" | "vertical";
+      doubleTapMs?: number;
+    },
+  ): void;
+  setStroke?(node: NodeHandle, width: number, color: number[]): void;
+  log?(level: string, message: string): void;
+  metrics?(): {
+    width: number;
+    height: number;
+    viewInsets: { top: number; right: number; bottom: number; left: number };
+  };
 }

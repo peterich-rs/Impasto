@@ -1,7 +1,6 @@
-import { For, Show, createRenderEffect, createSignal, onCleanup } from "solid-js";
-import { Text, host, onFrame, requestFrame, type NodeHandle } from "@uifw/solid-renderer";
+import { For, Show, createTrackedEffect, createSignal, onCleanup } from "solid-js";
+import { Text, directionFor, flingTarget, host, onFrame, requestFrame, type NodeHandle } from "@uifw/solid-renderer";
 import { Button } from "./Button.tsx";
-import { directionFor } from "./i18n.ts";
 import {
   MIN_THUMB,
   PrefixHeights,
@@ -9,10 +8,11 @@ import {
   estimateHeight,
   nearEnd,
   retainHeights,
+  stabilizeWindow,
   stickyTranslate,
   thumbLength,
   thumbOffset,
-  windowRange,
+  windowRangeForOffset,
 } from "./list-window.ts";
 import { ScrollArea } from "./ScrollArea.tsx";
 import { useTheme } from "./use-theme.ts";
@@ -49,6 +49,8 @@ export function VirtualList<T>(props: {
   const mounted = new Map<string, Measure>();
   let keySeq = "";
   let viewport = 0;
+  let placedW = -1;
+  let placedH = -1;
   let measuring = false;
   let stopMeasure = () => {};
   let pull = 0;
@@ -56,7 +58,9 @@ export function VirtualList<T>(props: {
   let pinIndex = -1;
   let pinKey = "";
   const initial = props.restoreKey ? restoredOffsets.get(props.restoreKey) : undefined;
+  let previousOffset = initial?.y ?? 0;
   const [range, setRange] = createSignal({ start: 0, end: 0, top: 0, bottom: 0 });
+  const [extent, setExtent] = createSignal(0);
   const [thumb, setThumb] = createSignal({ h: MIN_THUMB, y: 0, visible: false });
   const [hThumb, setHThumb] = createSignal({ w: MIN_THUMB, x: 0, visible: false });
   const [pin, setPin] = createSignal<Pin | null>(null);
@@ -70,14 +74,18 @@ export function VirtualList<T>(props: {
     return keys.join("\0");
   }
 
-  function syncPrefix(items: readonly T[]): void {
+  function rowEstimate(): number {
+    return estimateHeight(props.estimatedHeight) * host.textScale();
+  }
+
+  function syncPrefix(items: readonly T[], force = false): void {
     const keys = keysOf(items);
     const next = sequence(keys);
-    if (next === keySeq && prefix.length === items.length) {
+    if (!force && next === keySeq && prefix.length === items.length) {
       return;
     }
     keySeq = next;
-    const estimate = estimateHeight(props.estimatedHeight);
+    const estimate = rowEstimate();
     prefix.rebuild(keys.map((key) => cache.get(key) ?? estimate));
     retainHeights(cache, keys);
   }
@@ -178,7 +186,29 @@ export function VirtualList<T>(props: {
 
   function place(offsetX: number, offsetY: number, viewWidth: number, viewHeight: number): void {
     syncPrefix(props.items);
-    const next = windowRange(prefix, offsetY, viewHeight, props.overscan ?? 4);
+    const total = prefix.total();
+    if (total !== extent()) {
+      queueMicrotask(() => setExtent(total));
+    }
+    const delta = offsetY - previousOffset;
+    previousOffset = offsetY;
+    const overscan = props.overscan ?? 4;
+    const lead =
+      delta === 0 || viewHeight <= 0 ? null : offsetY + Math.sign(delta) * viewHeight;
+    const flung = viewport === 0 ? null : flingTarget(viewport);
+    const far = flung
+      ? lead === null
+        ? flung.y
+        : delta > 0
+          ? Math.max(flung.y, lead)
+          : Math.min(flung.y, lead)
+      : lead;
+    const next = stabilizeWindow(
+      prefix,
+      range(),
+      windowRangeForOffset(prefix, offsetY, viewHeight, overscan, far),
+      overscan,
+    );
     const current = range();
     if (
       current.start !== next.start ||
@@ -206,11 +236,23 @@ export function VirtualList<T>(props: {
     return false;
   }
 
+  function rowBox(id: number): { x: number; y: number; w: number; h: number } | null {
+    try {
+      return host.rect(id);
+    } catch {
+      return null;
+    }
+  }
+
   function measureMounted(): boolean {
     let pending = false;
     let changed = false;
-    for (const [key, entry] of mounted) {
-      const box = host.rect(entry.id);
+    for (const [key, entry] of [...mounted]) {
+      const box = rowBox(entry.id);
+      if (box === null) {
+        mounted.delete(key);
+        continue;
+      }
       if (box.h === 0) {
         pending = true;
         continue;
@@ -223,11 +265,34 @@ export function VirtualList<T>(props: {
       }
     }
     if (changed && viewport !== 0) {
-      const view = host.rect(viewport);
-      const offset = host.scrollOffset(viewport);
-      place(offset.x, offset.y, view.w, view.h);
+      const view = rowBox(viewport);
+      if (view !== null) {
+        const offset = host.scrollOffset(viewport);
+        place(offset.x, offset.y, view.w, view.h);
+        placedW = view.w;
+        placedH = view.h;
+      }
     }
     return pending;
+  }
+
+  /** The ref runs before layout, so the first rect is empty. Re-window once the viewport has a size. */
+  function syncWindow(): boolean {
+    if (viewport === 0) {
+      return false;
+    }
+    const view = rowBox(viewport);
+    if (view === null || view.h <= 0) {
+      return false;
+    }
+    if (Math.abs(view.w - placedW) < HEIGHT_EPS && Math.abs(view.h - placedH) < HEIGHT_EPS) {
+      return false;
+    }
+    placedW = view.w;
+    placedH = view.h;
+    const offset = host.scrollOffset(viewport);
+    place(offset.x, offset.y, view.w, view.h);
+    return true;
   }
 
   function startMeasure(): void {
@@ -238,8 +303,9 @@ export function VirtualList<T>(props: {
     measuring = true;
     stopMeasure();
     stopMeasure = onFrame(() => {
+      const resized = syncWindow();
       const pending = measureMounted();
-      if (pending || windowNeedsMeasure()) {
+      if (pending || windowNeedsMeasure() || resized) {
         requestFrame();
         return;
       }
@@ -253,7 +319,44 @@ export function VirtualList<T>(props: {
     stopMeasure();
   });
 
-  createRenderEffect(() => {
+  let seenScale = host.textScale();
+  let pendingScale = false;
+  onCleanup(
+    onFrame(() => {
+      const scale = host.textScale();
+      if (scale !== seenScale) {
+        const ratio = seenScale > 0 ? scale / seenScale : scale;
+        seenScale = scale;
+        for (const [key, height] of cache) {
+          cache.set(key, height * ratio);
+        }
+        syncPrefix(props.items, true);
+        setExtent(prefix.total());
+        pendingScale = true;
+        requestFrame();
+        if (viewport !== 0) {
+          const view = host.rect(viewport);
+          const offset = host.scrollOffset(viewport);
+          place(offset.x, offset.y, view.w, view.h);
+        }
+        return;
+      }
+      if (!pendingScale) {
+        return;
+      }
+      pendingScale = false;
+      if (viewport !== 0) {
+        const view = host.rect(viewport);
+        const offset = host.scrollOffset(viewport);
+        place(offset.x, offset.y, view.w, view.h);
+      } else {
+        place(0, 0, 0, 0);
+      }
+      startMeasure();
+    }),
+  );
+
+  createTrackedEffect(() => {
     const blocked = (props.error ?? "").length > 0 || props.items.length === 0;
     syncPrefix(props.items);
     if (blocked) {
@@ -309,13 +412,16 @@ export function VirtualList<T>(props: {
       >
         <stack fill>
           <ScrollArea
+            contentMin={extent()}
             initialOffset={initial}
             viewportRef={(id) => {
               viewport = id;
-              const view = host.rect(id);
-              const offset = host.scrollOffset(id);
-              place(offset.x, offset.y, view.w, view.h);
-              if (windowNeedsMeasure()) {
+              if (!syncWindow()) {
+                const view = host.rect(id);
+                const offset = host.scrollOffset(id);
+                place(offset.x, offset.y, view.w, view.h);
+              }
+              if (windowNeedsMeasure() || placedH <= 0) {
                 startMeasure();
               }
             }}
@@ -353,7 +459,7 @@ export function VirtualList<T>(props: {
               {(item, index) => {
                 const abs = () => range().start + index();
                 let wrap = 0;
-                createRenderEffect(() => {
+                createTrackedEffect(() => {
                   if (wrap !== 0) {
                     mounted.set(String(props.itemKey(item())), { id: wrap, index: abs() });
                   }

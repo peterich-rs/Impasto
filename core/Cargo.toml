@@ -9,6 +9,7 @@ publish.workspace = true
 doctest = false
 
 [dependencies]
+bitflags = "2"
 protocol = { workspace = true }
 taffy = "0.9"
 thiserror = { workspace = true }

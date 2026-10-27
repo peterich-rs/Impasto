@@ -1,4 +1,4 @@
-//! Paints a draw list. Text uses the font size and paragraph width stored on each command.
+//! Paints a layer tree. Text uses the font size and paragraph width stored on each command.
 
 use std::collections::HashMap;
 use std::ffi::{CString, c_void};
@@ -6,8 +6,8 @@ use std::marker::PhantomData;
 use std::ptr;
 
 use protocol::{
-    BlendMode, ColorStop, Command, ContentMode, DrawList, Gradient, Shadow, TextAlign, TextSpan,
-    TextStyle,
+    BlendMode, ColorStop, Command, ContentMode, Gradient, LayerId, LayerKind, LayerTree, PictureId,
+    Shadow, TextAlign, TextSpan, TextStyle,
 };
 
 use crate::{ImagePixels, Status};
@@ -57,6 +57,26 @@ struct SpanKey {
     line_through: bool,
 }
 
+struct PaintSlot {
+    generation: u32,
+    refs: u32,
+    color: [u8; 4],
+    paragraph: ffi::ImpellerParagraph,
+    key: Option<ParaKey>,
+}
+
+impl PaintSlot {
+    fn empty() -> Self {
+        Self {
+            generation: 0,
+            refs: 0,
+            color: [0, 0, 0, 0],
+            paragraph: ptr::null_mut(),
+            key: None,
+        }
+    }
+}
+
 struct Shaped {
     width: f32,
     height: f32,
@@ -76,13 +96,25 @@ struct Face {
     family: CString,
 }
 
+struct RetainedPicture {
+    generation: u64,
+    list: ffi::ImpellerDisplayList,
+    /// Paragraphs this display list draws. Released only with the display list,
+    /// after any root list that flattened it.
+    held: Vec<ffi::ImpellerParagraph>,
+}
+
+#[derive(Default)]
+struct PictureSwap {
+    installed: Vec<PictureId>,
+    replaced: Vec<(PictureId, RetainedPicture)>,
+}
+
 enum Save {
     Clip,
     Transform,
     /// Paint read by `Restore`. Released after that restore.
     Layer(ffi::ImpellerPaint),
-    /// Invalid blur or SrcOver blend: no Impeller save, matching pop is skipped.
-    Skipped,
 }
 
 pub struct Engine {
@@ -91,10 +123,26 @@ pub struct Engine {
     list: ffi::ImpellerDisplayList,
     textures: HashMap<String, CachedTexture>,
     paragraphs: HashMap<ParaKey, Shaped>,
+    /// Retained paint paragraphs. A generation mismatch never reads the pointer.
+    paints: Vec<PaintSlot>,
+    paint_free: Vec<u32>,
+    /// Temporaries the display list currently being built references.
+    pending_held: Vec<ffi::ImpellerParagraph>,
+    /// Temporaries the installed display list still references.
+    held: Vec<ffi::ImpellerParagraph>,
+    last_text_rebuilt: bool,
+    last_text_color: [u8; 4],
     /// Paragraphs replaced while a display list might still reference them.
     retired: Vec<ffi::ImpellerParagraph>,
     list_generation: u64,
     paragraphs_stale: bool,
+    /// Child display lists keyed by picture id. `point_scale` is applied on the root.
+    pictures: HashMap<PictureId, RetainedPicture>,
+    picture_builds: u64,
+    last_submit: crate::SubmitStats,
+    warned_paragraphs: bool,
+    warned_textures: bool,
+    warned_pictures: bool,
     faces: Vec<Face>,
     default_family: Option<CString>,
     /// `dlopen` handle for `libvulkan.so`. Null until [`Engine::create_vulkan`].
@@ -144,9 +192,21 @@ impl Engine {
             list: ptr::null_mut(),
             textures: HashMap::new(),
             paragraphs: HashMap::new(),
+            paints: Vec::new(),
+            paint_free: Vec::new(),
+            pending_held: Vec::new(),
+            held: Vec::new(),
+            last_text_rebuilt: false,
+            last_text_color: [0, 0, 0, 0],
             retired: Vec::new(),
             list_generation: 0,
             paragraphs_stale: false,
+            pictures: HashMap::new(),
+            picture_builds: 0,
+            last_submit: crate::SubmitStats::default(),
+            warned_paragraphs: false,
+            warned_textures: false,
+            warned_pictures: false,
             faces: Vec::new(),
             default_family: None,
             #[cfg(target_os = "android")]
@@ -211,9 +271,14 @@ impl Engine {
         Ok(())
     }
 
-    pub fn submit<'pixels>(
+    /// Composite `tree`. Pictures are cached by [`PictureId`] and generation.
+    ///
+    /// `point_scale` is applied once on the root builder. A cache hit still scans
+    /// commands to mark textures used. Child display lists stay until the picture
+    /// leaves the tree, and only after the root list that flattened them is released.
+    pub fn submit_layers<'pixels>(
         &mut self,
-        list: &DrawList,
+        tree: &LayerTree,
         point_scale: f32,
         mut resolve: impl FnMut(&str) -> Option<ImagePixels<'pixels>>,
     ) -> Result<(), Status> {
@@ -221,9 +286,13 @@ impl Engine {
             return Err(Status::BadScene);
         }
         self.list_generation = self.list_generation.wrapping_add(1);
-        // The installed display list stays until this build succeeds. Releasing it
-        // first left the player empty when the new list failed.
-        // SAFETY: the context was created in `create_metal` and is released in Drop.
+        self.last_submit = crate::SubmitStats::default();
+        let mut swap = PictureSwap::default();
+        if let Err(status) = self.prepare_pictures(tree, point_scale, &mut resolve, &mut swap) {
+            self.last_submit = crate::SubmitStats::default();
+            self.rollback_pictures(swap);
+            return Err(status);
+        }
         let builder = unsafe { ffi::ImpellerDisplayListBuilderNew(ptr::null()) };
         let paint = unsafe { ffi::ImpellerPaintNew() };
         if builder.is_null() || paint.is_null() {
@@ -231,11 +300,94 @@ impl Engine {
                 ffi::ImpellerDisplayListBuilderRelease(builder);
                 ffi::ImpellerPaintRelease(paint);
             }
+            self.rollback_pictures(swap);
             return Err(Status::BadScene);
         }
-        let mut scaled = false;
-        let mut failed = false;
-        for command in &list.commands {
+        if !tree.layers.is_empty() {
+            self.scale_once(builder, point_scale, false);
+        }
+        let drawn = tree.layers.is_empty() || self.draw_layers(tree, builder, Some(tree.root));
+        let failed = !drawn || !self.saves.is_empty();
+        let display = if failed {
+            ptr::null_mut()
+        } else {
+            unsafe { ffi::ImpellerDisplayListBuilderCreateDisplayListNew(builder) }
+        };
+        self.drain_saves(builder);
+        unsafe {
+            ffi::ImpellerDisplayListBuilderRelease(builder);
+            ffi::ImpellerPaintRelease(paint);
+        }
+        if display.is_null() {
+            self.last_submit = crate::SubmitStats::default();
+            self.release_pending();
+            self.rollback_pictures(swap);
+            return Err(Status::BadScene);
+        }
+        self.release_display();
+        for (_, picture) in swap.replaced {
+            release_retained(picture);
+        }
+        self.evict_pictures_except(tree);
+        self.release_retired();
+        self.release_held();
+        self.held = std::mem::take(&mut self.pending_held);
+        self.paragraphs_stale = false;
+        self.list = display;
+        self.evict_unused();
+        self.evict_over_cap();
+        self.last_submit.layer_count = u32::try_from(tree.layers.len()).unwrap_or(u32::MAX);
+        self.note_cache_limits();
+        Ok(())
+    }
+
+    /// Pictures built since the engine was created. The cache key is picture id and generation.
+    pub fn picture_builds(&self) -> u64 {
+        self.picture_builds
+    }
+
+    /// Paragraph and texture entries retained after the last submit.
+    pub fn cache_counts(&self) -> (usize, usize) {
+        (self.paragraphs.len(), self.textures.len())
+    }
+
+    /// Counts from the last successful [`Engine::submit_layers`].
+    pub fn submit_stats(&self) -> crate::SubmitStats {
+        self.last_submit
+    }
+
+    fn note_cache_limits(&mut self) {
+        if self.paragraphs.len() > 1024 && !self.warned_paragraphs {
+            self.warned_paragraphs = true;
+            eprintln!(
+                "engine cache: {} paragraphs exceeds 1024",
+                self.paragraphs.len()
+            );
+        }
+        if self.textures.len() > 256 && !self.warned_textures {
+            self.warned_textures = true;
+            eprintln!("engine cache: {} textures exceeds 256", self.textures.len());
+        }
+        if self.pictures.len() > 4096 && !self.warned_pictures {
+            self.warned_pictures = true;
+            eprintln!(
+                "engine cache: {} pictures exceeds 4096",
+                self.pictures.len()
+            );
+        }
+    }
+
+    fn play_commands<'pixels>(
+        &mut self,
+        builder: ffi::ImpellerDisplayListBuilder,
+        paint: ffi::ImpellerPaint,
+        commands: &[Command],
+        point_scale: f32,
+        apply_scale: bool,
+        resolve: &mut impl FnMut(&str) -> Option<ImagePixels<'pixels>>,
+    ) -> bool {
+        let mut scaled = !apply_scale;
+        for command in commands {
             let drawn = match command {
                 Command::Fill { color } => {
                     self.paint_color(paint, *color);
@@ -253,6 +405,7 @@ impl Engine {
                     stroke_color,
                     gradient,
                     shadow,
+                    box_shadows,
                 } => {
                     scaled = self.scale_once(builder, point_scale, scaled);
                     self.draw_rect(
@@ -268,6 +421,7 @@ impl Engine {
                         *stroke_color,
                         gradient.as_ref(),
                         shadow.as_ref(),
+                        box_shadows,
                         point_scale,
                     )
                 }
@@ -276,6 +430,7 @@ impl Engine {
                     y,
                     max_width,
                     font_size,
+                    paragraph,
                     color,
                     utf8,
                     style,
@@ -284,7 +439,8 @@ impl Engine {
                 } => {
                     scaled = self.scale_once(builder, point_scale, scaled);
                     self.draw_text(
-                        builder, paint, *x, *y, *max_width, *font_size, *color, utf8, style, spans,
+                        builder, paint, *x, *y, *max_width, *font_size, *paragraph, *color, utf8,
+                        style, spans,
                     )
                 }
                 Command::Image {
@@ -297,17 +453,7 @@ impl Engine {
                     required,
                 } => {
                     scaled = self.scale_once(builder, point_scale, scaled);
-                    self.draw_image(
-                        builder,
-                        *x,
-                        *y,
-                        *w,
-                        *h,
-                        source,
-                        *mode,
-                        *required,
-                        &mut resolve,
-                    )
+                    self.draw_image(builder, *x, *y, *w, *h, source, *mode, *required, resolve)
                 }
                 Command::PushClip {
                     x,
@@ -357,18 +503,68 @@ impl Engine {
                 Command::Pop => self.pop_save(builder),
             };
             if !drawn {
-                failed = true;
-                break;
+                return false;
             }
         }
-        if !self.saves.is_empty() {
-            failed = true;
+        true
+    }
+
+    fn prepare_pictures<'pixels>(
+        &mut self,
+        tree: &LayerTree,
+        point_scale: f32,
+        resolve: &mut impl FnMut(&str) -> Option<ImagePixels<'pixels>>,
+        swap: &mut PictureSwap,
+    ) -> Result<(), Status> {
+        for picture in &tree.pictures {
+            if let Some(cached) = self.pictures.get(&picture.id)
+                && cached.generation == picture.generation
+                && !self.paragraphs_stale
+            {
+                self.touch_picture(picture);
+                self.last_submit.picture_reused = self.last_submit.picture_reused.saturating_add(1);
+                continue;
+            }
+            let built = self.build_picture(picture, point_scale, resolve)?;
+            self.picture_builds = self.picture_builds.saturating_add(1);
+            self.last_submit.picture_rebuilt = self.last_submit.picture_rebuilt.saturating_add(1);
+            swap.installed.push(picture.id);
+            if let Some(previous) = self.pictures.insert(picture.id, built) {
+                swap.replaced.push((picture.id, previous));
+            }
         }
-        let display = if failed {
+        Ok(())
+    }
+
+    fn build_picture<'pixels>(
+        &mut self,
+        picture: &protocol::Picture,
+        point_scale: f32,
+        resolve: &mut impl FnMut(&str) -> Option<ImagePixels<'pixels>>,
+    ) -> Result<RetainedPicture, Status> {
+        let saved = std::mem::take(&mut self.pending_held);
+        let builder = unsafe { ffi::ImpellerDisplayListBuilderNew(ptr::null()) };
+        let paint = unsafe { ffi::ImpellerPaintNew() };
+        if builder.is_null() || paint.is_null() {
+            unsafe {
+                ffi::ImpellerDisplayListBuilderRelease(builder);
+                ffi::ImpellerPaintRelease(paint);
+            }
+            self.pending_held = saved;
+            return Err(Status::BadScene);
+        }
+        let drawn = self.play_commands(
+            builder,
+            paint,
+            &picture.commands,
+            point_scale,
+            false,
+            resolve,
+        );
+        let failed = !drawn || !self.saves.is_empty();
+        let list = if failed {
             ptr::null_mut()
         } else {
-            // SAFETY: `builder` is the one created above. The save stack matches `self.saves`,
-            // which is empty on this path, so the recorded clips and layers are balanced.
             unsafe { ffi::ImpellerDisplayListBuilderCreateDisplayListNew(builder) }
         };
         self.drain_saves(builder);
@@ -376,22 +572,189 @@ impl Engine {
             ffi::ImpellerDisplayListBuilderRelease(builder);
             ffi::ImpellerPaintRelease(paint);
         }
-        if display.is_null() {
+        let held = std::mem::take(&mut self.pending_held);
+        self.pending_held = saved;
+        if list.is_null() {
+            for paragraph in held {
+                unsafe { ffi::ImpellerParagraphRelease(paragraph) };
+            }
             return Err(Status::BadScene);
         }
-        // Drop the installed list before retiring paragraphs it still references.
-        self.release_display();
-        self.release_retired();
-        self.paragraphs_stale = false;
-        self.list = display;
-        self.evict_unused();
-        self.evict_over_cap();
-        Ok(())
+        Ok(RetainedPicture {
+            generation: picture.generation,
+            list,
+            held,
+        })
+    }
+
+    fn touch_picture(&mut self, picture: &protocol::Picture) {
+        for command in picture.commands.iter() {
+            if let Command::Image { source, .. } = command
+                && let Some(cached) = self.textures.get_mut(source.as_ref())
+            {
+                cached.used = self.list_generation;
+            }
+        }
+    }
+
+    fn draw_layers(
+        &mut self,
+        tree: &LayerTree,
+        builder: ffi::ImpellerDisplayListBuilder,
+        start: Option<LayerId>,
+    ) -> bool {
+        let mut current = start;
+        while let Some(id) = current {
+            let Some(layer) = tree.layers.get(id.0 as usize) else {
+                return false;
+            };
+            let kind = layer.kind.clone();
+            let first_child = layer.first_child;
+            let next = layer.next;
+            let drawn = match kind {
+                LayerKind::Offset { x, y } => {
+                    unsafe {
+                        ffi::ImpellerDisplayListBuilderSave(builder);
+                        ffi::ImpellerDisplayListBuilderTranslate(builder, x, y);
+                    }
+                    self.saves.push(Save::Transform);
+                    let drawn = self.draw_layers(tree, builder, first_child);
+                    self.pop_save(builder) && drawn
+                }
+                LayerKind::Transform {
+                    translate_x,
+                    translate_y,
+                    rotate_rad,
+                    scale_x,
+                    scale_y,
+                } => {
+                    self.push_transform(
+                        builder,
+                        translate_x,
+                        translate_y,
+                        rotate_rad,
+                        scale_x,
+                        scale_y,
+                    );
+                    let drawn = self.draw_layers(tree, builder, first_child);
+                    self.pop_save(builder) && drawn
+                }
+                LayerKind::Clip {
+                    x,
+                    y,
+                    w,
+                    h,
+                    corner_radius,
+                } => {
+                    self.push_clip(builder, x, y, w, h, corner_radius);
+                    let drawn = self.draw_layers(tree, builder, first_child);
+                    self.pop_save(builder) && drawn
+                }
+                LayerKind::Opacity { alpha, x, y, w, h } => {
+                    if let Some(picture) = single_picture_child(tree, id) {
+                        self.draw_picture(tree, builder, picture, alpha as f32 / 255.0)
+                    } else if self.push_opacity(builder, x, y, w, h, alpha) {
+                        let drawn = self.draw_layers(tree, builder, first_child);
+                        self.pop_save(builder) && drawn
+                    } else {
+                        false
+                    }
+                }
+                LayerKind::Blur { x, y, w, h, sigma } => {
+                    if !self.push_blur(builder, x, y, w, h, sigma, false) {
+                        false
+                    } else {
+                        let drawn = self.draw_layers(tree, builder, first_child);
+                        self.pop_save(builder) && drawn
+                    }
+                }
+                LayerKind::BackdropBlur { x, y, w, h, sigma } => {
+                    if !self.push_blur(builder, x, y, w, h, sigma, true) {
+                        false
+                    } else {
+                        let drawn = self.draw_layers(tree, builder, first_child);
+                        self.pop_save(builder) && drawn
+                    }
+                }
+                LayerKind::Blend { x, y, w, h, mode } => {
+                    if !self.push_blend(builder, x, y, w, h, mode) {
+                        false
+                    } else {
+                        let drawn = self.draw_layers(tree, builder, first_child);
+                        self.pop_save(builder) && drawn
+                    }
+                }
+                LayerKind::Picture { picture } => self.draw_picture(tree, builder, picture, 1.0),
+            };
+            if !drawn {
+                return false;
+            }
+            current = next;
+        }
+        true
+    }
+
+    fn draw_picture(
+        &mut self,
+        tree: &LayerTree,
+        builder: ffi::ImpellerDisplayListBuilder,
+        id: PictureId,
+        opacity: f32,
+    ) -> bool {
+        let Some(picture) = tree.picture(id) else {
+            return false;
+        };
+        let origin = picture.origin;
+        let Some(retained) = self.pictures.get(&id) else {
+            return false;
+        };
+        if retained.list.is_null()
+            || !origin.0.is_finite()
+            || !origin.1.is_finite()
+            || !opacity.is_finite()
+        {
+            return false;
+        }
+        let list = retained.list;
+        unsafe {
+            ffi::ImpellerDisplayListBuilderSave(builder);
+            ffi::ImpellerDisplayListBuilderTranslate(builder, origin.0, origin.1);
+            ffi::ImpellerDisplayListBuilderDrawDisplayList(builder, list, opacity);
+            ffi::ImpellerDisplayListBuilderRestore(builder);
+        }
+        true
+    }
+
+    fn rollback_pictures(&mut self, swap: PictureSwap) {
+        for id in swap.installed {
+            if let Some(fresh) = self.pictures.remove(&id) {
+                release_retained(fresh);
+            }
+        }
+        for (id, previous) in swap.replaced {
+            if let Some(fresh) = self.pictures.insert(id, previous) {
+                release_retained(fresh);
+            }
+        }
+    }
+
+    fn evict_pictures_except(&mut self, tree: &LayerTree) {
+        let stale: Vec<PictureId> = self
+            .pictures
+            .keys()
+            .copied()
+            .filter(|id| tree.picture(*id).is_none())
+            .collect();
+        for id in stale {
+            if let Some(picture) = self.pictures.remove(&id) {
+                release_retained(picture);
+            }
+        }
     }
 
     /// Shapes `utf8` with `color` on this engine's typography context.
     ///
-    /// The paragraph is kept and drawn by the next [`Engine::submit`] that
+    /// The paragraph is kept and drawn by the next [`Engine::submit_layers`] that
     /// carries the same text, size, width, and color.
     pub fn measure_paragraph(
         &mut self,
@@ -714,6 +1077,7 @@ impl Engine {
         stroke_color: [u8; 4],
         gradient: Option<&Gradient>,
         shadow: Option<&Shadow>,
+        box_shadows: &[protocol::BoxShadow],
         point_scale: f32,
     ) -> bool {
         let paint = unsafe { ffi::ImpellerPaintNew() };
@@ -722,6 +1086,9 @@ impl Engine {
         }
         let stroke = stroke_width.is_finite() && stroke_width > 0.0;
         let fill = color[3] > 0 || gradient.is_some();
+        for shadow in box_shadows {
+            self.draw_box_shadow(builder, x, y, w, h, corner_radius, shadow);
+        }
         if let Some(shadow) = shadow
             && shadow.elevation.is_finite()
             && shadow.elevation > 0.0
@@ -851,6 +1218,60 @@ impl Engine {
             ffi::ImpellerPaintSetColorSource(paint, source);
             ffi::ImpellerColorSourceRelease(source);
         }
+    }
+
+    fn draw_box_shadow(
+        &self,
+        builder: ffi::ImpellerDisplayListBuilder,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        corner_radius: f32,
+        shadow: &protocol::BoxShadow,
+    ) {
+        if !shadow.blur_sigma.is_finite()
+            || shadow.blur_sigma < 0.0
+            || !shadow.spread.is_finite()
+            || !shadow.offset[0].is_finite()
+            || !shadow.offset[1].is_finite()
+        {
+            return;
+        }
+        let paint = unsafe { ffi::ImpellerPaintNew() };
+        if paint.is_null() {
+            return;
+        }
+        self.paint_color(paint, shadow.color);
+        unsafe {
+            ffi::ImpellerPaintSetDrawStyle(paint, ffi::ImpellerDrawStyle::kImpellerDrawStyleFill);
+        }
+        if shadow.blur_sigma > 0.0 {
+            let filter = unsafe {
+                ffi::ImpellerImageFilterCreateBlurNew(
+                    shadow.blur_sigma,
+                    shadow.blur_sigma,
+                    ffi::ImpellerTileMode::kImpellerTileModeDecal,
+                )
+            };
+            if !filter.is_null() {
+                unsafe {
+                    ffi::ImpellerPaintSetImageFilter(paint, filter);
+                    ffi::ImpellerImageFilterRelease(filter);
+                }
+            }
+        }
+        let spread = shadow.spread;
+        self.fill_rect(
+            builder,
+            paint,
+            x + shadow.offset[0] - spread,
+            y + shadow.offset[1] - spread,
+            w + spread * 2.0,
+            h + spread * 2.0,
+            corner_radius + spread,
+        );
+        unsafe { ffi::ImpellerPaintRelease(paint) };
     }
 
     fn draw_shadow(
@@ -992,8 +1413,7 @@ impl Engine {
         backdrop: bool,
     ) -> bool {
         if !sigma.is_finite() || sigma <= 0.0 {
-            self.saves.push(Save::Skipped);
-            return true;
+            return false;
         }
         #[cfg(test)]
         paint_trace::blur(sigma, sigma);
@@ -1050,10 +1470,7 @@ impl Engine {
         mode: BlendMode,
     ) -> bool {
         let blend = match mode {
-            BlendMode::SrcOver => {
-                self.saves.push(Save::Skipped);
-                return true;
-            }
+            BlendMode::SrcOver => return false,
             BlendMode::Multiply => ffi::ImpellerBlendMode::kImpellerBlendModeMultiply,
             BlendMode::Screen => ffi::ImpellerBlendMode::kImpellerBlendModeScreen,
         };
@@ -1085,7 +1502,6 @@ impl Engine {
             return false;
         }
         match self.saves.pop() {
-            Some(Save::Skipped) => true,
             Some(Save::Layer(layer_paint)) => {
                 unsafe { ffi::ImpellerDisplayListBuilderRestore(builder) };
                 if !layer_paint.is_null() {
@@ -1104,7 +1520,6 @@ impl Engine {
     fn drain_saves(&mut self, builder: ffi::ImpellerDisplayListBuilder) {
         while let Some(save) = self.saves.pop() {
             match save {
-                Save::Skipped => {}
                 Save::Layer(layer_paint) => {
                     unsafe { ffi::ImpellerDisplayListBuilderRestore(builder) };
                     if !layer_paint.is_null() {
@@ -1141,6 +1556,108 @@ impl Engine {
         unsafe { ffi::ImpellerPaintSetColor(paint, &color) };
     }
 
+    /// Retains a colored paragraph. The same key bumps the reference count and
+    /// returns the existing id. A released slot is reused with a new generation.
+    pub fn retain_paragraph(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+        spans: &[TextSpan],
+    ) -> Result<protocol::ParagraphId, Status> {
+        let owned;
+        let utf8 = if spans.is_empty() {
+            utf8
+        } else {
+            owned = spans
+                .iter()
+                .map(|span| span.utf8.as_str())
+                .collect::<String>();
+            &owned
+        };
+        let Some(family) = self.resolved_family(style.family.as_deref()) else {
+            return Err(Status::BadScene);
+        };
+        let Some(key) = para_key(utf8, font_size, max_width, color, &family, style, spans) else {
+            return Err(Status::BadScene);
+        };
+        if let Some(index) = self
+            .paints
+            .iter()
+            .position(|slot| slot.refs > 0 && slot.key.as_ref() == Some(&key))
+        {
+            let slot = &mut self.paints[index];
+            slot.refs = slot.refs.saturating_add(1);
+            return Ok(protocol::ParagraphId {
+                index: index as u32,
+                generation: slot.generation,
+            });
+        }
+        let shaped = self.build_paragraph(utf8, font_size, max_width, color, style, spans)?;
+        let index = if let Some(index) = self.paint_free.pop() {
+            index as usize
+        } else {
+            self.paints.push(PaintSlot::empty());
+            self.paints.len() - 1
+        };
+        let slot = &mut self.paints[index];
+        slot.generation = slot.generation.wrapping_add(1).max(1);
+        slot.refs = 1;
+        slot.color = color;
+        slot.paragraph = shaped.paragraph;
+        slot.key = Some(key);
+        Ok(protocol::ParagraphId {
+            index: index as u32,
+            generation: slot.generation,
+        })
+    }
+
+    /// Drops one retain. The slot pointer is cleared before it is released, so a
+    /// stale id cannot observe the new color or the freed paragraph.
+    pub fn release_paragraph(&mut self, id: protocol::ParagraphId) {
+        let Some(slot) = self.paints.get_mut(id.index as usize) else {
+            return;
+        };
+        if slot.generation != id.generation || slot.refs == 0 {
+            return;
+        }
+        slot.refs -= 1;
+        if slot.refs > 0 {
+            return;
+        }
+        let paragraph = slot.paragraph;
+        slot.paragraph = ptr::null_mut();
+        slot.key = None;
+        slot.color = [0, 0, 0, 0];
+        self.paint_free.push(id.index);
+        if !paragraph.is_null() {
+            self.retire_paragraph(paragraph);
+        }
+    }
+
+    /// True when `id` still names a live retained paragraph.
+    pub fn paragraph_live(&self, id: protocol::ParagraphId) -> bool {
+        self.paints.get(id.index as usize).is_some_and(|slot| {
+            slot.generation == id.generation && slot.refs > 0 && !slot.paragraph.is_null()
+        })
+    }
+
+    /// `(rebuilt_from_payload, color)` of the last text command submitted.
+    pub fn text_paint_probe(&self) -> (bool, [u8; 4]) {
+        (self.last_text_rebuilt, self.last_text_color)
+    }
+
+    fn live_paint(&self, id: protocol::ParagraphId) -> Option<ffi::ImpellerParagraph> {
+        let slot = self.paints.get(id.index as usize)?;
+        if slot.generation == id.generation && slot.refs > 0 && !slot.paragraph.is_null() {
+            Some(slot.paragraph)
+        } else {
+            None
+        }
+    }
+
     fn draw_text(
         &mut self,
         builder: ffi::ImpellerDisplayListBuilder,
@@ -1149,6 +1666,7 @@ impl Engine {
         y: f32,
         max_width: f32,
         font_size: f32,
+        paragraph_id: protocol::ParagraphId,
         color: [u8; 4],
         utf8: &str,
         text_style: &TextStyle,
@@ -1168,39 +1686,55 @@ impl Engine {
         if utf8.is_empty() {
             return false;
         }
-        let Some(family) = self.resolved_family(text_style.family.as_deref()) else {
+        if !self.paragraphs_stale
+            && let Some(paragraph) = self.live_paint(paragraph_id)
+        {
+            let painted = self
+                .paints
+                .get(paragraph_id.index as usize)
+                .map(|slot| slot.color)
+                .unwrap_or(color);
+            self.last_text_rebuilt = false;
+            self.last_text_color = painted;
+            let point = ffi::ImpellerPoint { x, y };
+            // SAFETY: `paragraph` is the slot's live object. `release_paragraph` nulls
+            // the slot before the pointer is freed, and this branch checks the generation.
+            unsafe { ffi::ImpellerDisplayListBuilderDrawParagraph(builder, paragraph, &point) };
+            return true;
+        }
+        let Ok(shaped) = self.build_paragraph(utf8, font_size, max_width, color, text_style, spans)
+        else {
             return false;
         };
-        let Some(key) = para_key(
-            utf8, font_size, max_width, color, &family, text_style, spans,
-        ) else {
-            return false;
-        };
-        let cached = if self.paragraphs_stale {
-            None
-        } else {
-            self.paragraphs.get_mut(&key).map(|shaped| {
-                shaped.used = self.list_generation;
-                shaped.paragraph
-            })
-        };
-        let paragraph = if let Some(paragraph) = cached {
-            paragraph
-        } else {
-            let Ok(mut shaped) =
-                self.build_paragraph(utf8, font_size, max_width, color, text_style, spans)
-            else {
-                return false;
-            };
-            shaped.used = self.list_generation;
-            let paragraph = shaped.paragraph;
-            self.store_paragraph(key, shaped);
-            paragraph
-        };
+        self.last_text_rebuilt = true;
+        self.last_text_color = color;
         let point = ffi::ImpellerPoint { x, y };
-        // SAFETY: `paragraph` stays in `self.paragraphs` until a later submit drops it,
-        // and only after the display list that referenced it has been released.
+        let paragraph = shaped.paragraph;
+        // SAFETY: `paragraph` is owned by this engine. A matching stale slot takes it
+        // over; otherwise it stays in `pending_held` until the display list that
+        // references it is released.
         unsafe { ffi::ImpellerDisplayListBuilderDrawParagraph(builder, paragraph, &point) };
+        let replaced = if self.paragraphs_stale {
+            self.paints
+                .get_mut(paragraph_id.index as usize)
+                .and_then(|slot| {
+                    if slot.generation == paragraph_id.generation && slot.refs > 0 {
+                        let old = slot.paragraph;
+                        slot.paragraph = paragraph;
+                        slot.color = color;
+                        Some(old)
+                    } else {
+                        None
+                    }
+                })
+        } else {
+            None
+        };
+        match replaced {
+            Some(old) if !old.is_null() => self.retire_paragraph(old),
+            Some(_) => {}
+            None => self.pending_held.push(paragraph),
+        }
         true
     }
 
@@ -1399,11 +1933,13 @@ impl Engine {
             let texture = cached.texture;
             let width = cached.width;
             let height = cached.height;
-            self.blit_texture(builder, texture, x, y, w, h, width, height, mode);
-            return true;
+            return self.blit_texture(builder, texture, x, y, w, h, width, height, mode);
         }
         let Some(image) = resolve(source) else {
-            return !required;
+            if required {
+                return false;
+            }
+            return self.paint_missing_image(builder, x, y, w, h);
         };
         if image.width == 0 || image.height == 0 {
             return true;
@@ -1454,7 +1990,37 @@ impl Engine {
                 used: self.list_generation,
             },
         );
-        self.blit_texture(builder, texture, x, y, w, h, width, height, mode);
+        self.blit_texture(builder, texture, x, y, w, h, width, height, mode)
+    }
+
+    /// A visible stand-in for an optional image whose bytes are not available.
+    fn paint_missing_image(
+        &self,
+        builder: ffi::ImpellerDisplayListBuilder,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> bool {
+        if !(w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0) {
+            return true;
+        }
+        let paint = unsafe { ffi::ImpellerPaintNew() };
+        if paint.is_null() {
+            return false;
+        }
+        self.paint_color(paint, [176, 72, 64, 255]);
+        unsafe {
+            ffi::ImpellerPaintSetDrawStyle(paint, ffi::ImpellerDrawStyle::kImpellerDrawStyleFill);
+        }
+        self.fill_rect(builder, paint, x, y, w, h, 4.0);
+        self.paint_color(paint, [96, 32, 28, 255]);
+        self.set_stroke(paint, 2.0);
+        unsafe {
+            ffi::ImpellerPaintSetDrawStyle(paint, ffi::ImpellerDrawStyle::kImpellerDrawStyleStroke);
+        }
+        self.fill_rect(builder, paint, x, y, w, h, 4.0);
+        unsafe { ffi::ImpellerPaintRelease(paint) };
         true
     }
 
@@ -1469,21 +2035,24 @@ impl Engine {
         width: f32,
         height: f32,
         mode: ContentMode,
-    ) {
-        let Some((src, dst)) = content_rects(x, y, w, h, width, height, mode) else {
-            return;
+    ) -> bool {
+        let Ok(pairs) = slice_rects(x, y, w, h, width, height, mode) else {
+            return false;
         };
-        // SAFETY: `texture` is owned by `self.textures` for at least this submit.
-        unsafe {
-            ffi::ImpellerDisplayListBuilderDrawTextureRect(
-                builder,
-                texture,
-                &src,
-                &dst,
-                ffi::ImpellerTextureSampling::kImpellerTextureSamplingLinear,
-                ptr::null_mut(),
-            );
+        for (src, dst) in pairs {
+            // SAFETY: `texture` is owned by `self.textures` for at least this submit.
+            unsafe {
+                ffi::ImpellerDisplayListBuilderDrawTextureRect(
+                    builder,
+                    texture,
+                    &src,
+                    &dst,
+                    ffi::ImpellerTextureSampling::kImpellerTextureSamplingLinear,
+                    ptr::null_mut(),
+                );
+            }
         }
+        true
     }
 
     fn store_paragraph(&mut self, key: ParaKey, shaped: Shaped) {
@@ -1590,11 +2159,74 @@ impl Engine {
         }
     }
 
+    fn release_held(&mut self) {
+        for paragraph in self.held.drain(..) {
+            // SAFETY: the display list that referenced these temporaries was just released.
+            unsafe { ffi::ImpellerParagraphRelease(paragraph) };
+        }
+    }
+
+    fn release_pending(&mut self) {
+        for paragraph in self.pending_held.drain(..) {
+            // SAFETY: the failed builder never installed a display list for these.
+            unsafe { ffi::ImpellerParagraphRelease(paragraph) };
+        }
+    }
+
+    fn release_pictures(&mut self) {
+        let pictures = std::mem::take(&mut self.pictures);
+        for (_, picture) in pictures {
+            release_retained(picture);
+        }
+    }
+
     fn release_frame(&mut self) {
         self.release_display();
+        self.release_pictures();
         self.release_retired();
+        self.release_held();
+        self.release_pending();
+        for slot in &mut self.paints {
+            if !slot.paragraph.is_null() {
+                // SAFETY: Drop runs after the display list is released.
+                unsafe { ffi::ImpellerParagraphRelease(slot.paragraph) };
+                slot.paragraph = ptr::null_mut();
+            }
+        }
         self.release_paragraphs();
         self.release_textures();
+    }
+
+    /// Test helper. Each call uses a new picture generation so the commands are rebuilt.
+    #[cfg(test)]
+    fn paint<'pixels>(
+        &mut self,
+        list: &protocol::DrawList,
+        point_scale: f32,
+        resolve: impl FnMut(&str) -> Option<ImagePixels<'pixels>>,
+    ) -> Result<(), Status> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let generation = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = PictureId(1);
+        let picture = std::sync::Arc::new(protocol::Picture {
+            id,
+            generation,
+            origin: (0.0, 0.0),
+            commands: std::sync::Arc::from(list.commands.as_slice()),
+        });
+        let tree = LayerTree {
+            layers: vec![protocol::Layer {
+                kind: LayerKind::Picture { picture: id },
+                parent: None,
+                first_child: None,
+                next: None,
+            }],
+            pictures: vec![picture],
+            root: LayerId(0),
+            epoch: generation,
+        };
+        self.submit_layers(&tree, point_scale, resolve)
     }
 
     #[cfg(test)]
@@ -1605,6 +2237,30 @@ impl Engine {
     #[cfg(test)]
     fn cached_paragraphs(&self) -> usize {
         self.paragraphs.len()
+    }
+
+    #[cfg(test)]
+    fn retained_pictures(&self) -> usize {
+        self.pictures.len()
+    }
+}
+
+fn release_retained(picture: RetainedPicture) {
+    unsafe { ffi::ImpellerDisplayListRelease(picture.list) };
+    for paragraph in picture.held {
+        unsafe { ffi::ImpellerParagraphRelease(paragraph) };
+    }
+}
+
+fn single_picture_child(tree: &LayerTree, id: LayerId) -> Option<PictureId> {
+    let layer = tree.layers.get(id.0 as usize)?;
+    let child = tree.layers.get(layer.first_child?.0 as usize)?;
+    if child.next.is_some() {
+        return None;
+    }
+    match child.kind {
+        LayerKind::Picture { picture } => Some(picture),
+        _ => None,
     }
 }
 
@@ -1655,6 +2311,7 @@ unsafe fn read_lines(paragraph: ffi::ImpellerParagraph) -> Result<Vec<crate::Lin
             y,
             w: unsafe { ffi::ImpellerLineMetricsGetWidth(metrics, line) } as f32,
             h: height as f32,
+            baseline: baseline as f32,
             hard_break: unsafe { ffi::ImpellerLineMetricsIsHardbreak(metrics, line) },
         });
     }
@@ -1840,7 +2497,93 @@ fn content_rects(
                 },
             ))
         }
+        ContentMode::NineSlice { .. } => None,
     }
+}
+
+fn slice_rects(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    tex_w: f32,
+    tex_h: f32,
+    mode: ContentMode,
+) -> Result<Vec<(ffi::ImpellerRect, ffi::ImpellerRect)>, ()> {
+    let ContentMode::NineSlice {
+        left,
+        top,
+        right,
+        bottom,
+    } = mode
+    else {
+        return content_rects(x, y, w, h, tex_w, tex_h, mode)
+            .map(|pair| vec![pair])
+            .ok_or(());
+    };
+    if ![left, top, right, bottom, w, h, tex_w, tex_h]
+        .iter()
+        .all(|value| value.is_finite())
+        || left < 0.0
+        || top < 0.0
+        || right < 0.0
+        || bottom < 0.0
+    {
+        return Err(());
+    }
+    if left + right >= w || top + bottom >= h {
+        return content_rects(x, y, w, h, tex_w, tex_h, ContentMode::Fill)
+            .map(|pair| vec![pair])
+            .ok_or(());
+    }
+    if left + right > tex_w || top + bottom > tex_h {
+        return Err(());
+    }
+    let src_cols = [left, tex_w - left - right, right];
+    let src_rows = [top, tex_h - top - bottom, bottom];
+    let dst_cols = [left, w - left - right, right];
+    let dst_rows = [top, h - top - bottom, bottom];
+    let mut pairs = Vec::new();
+    let mut src_y = 0.0;
+    let mut dst_y = y;
+    for row in 0..3 {
+        let mut src_x = 0.0;
+        let mut dst_x = x;
+        for col in 0..3 {
+            let sw = src_cols[col];
+            let sh = src_rows[row];
+            let dw = dst_cols[col];
+            let dh = dst_rows[row];
+            if sw > 0.0 && sh > 0.0 && dw > 0.0 && dh > 0.0 {
+                if src_x < 0.0
+                    || src_y < 0.0
+                    || src_x + sw > tex_w + 0.01
+                    || src_y + sh > tex_h + 0.01
+                {
+                    return Err(());
+                }
+                pairs.push((
+                    ffi::ImpellerRect {
+                        x: src_x,
+                        y: src_y,
+                        width: sw,
+                        height: sh,
+                    },
+                    ffi::ImpellerRect {
+                        x: dst_x,
+                        y: dst_y,
+                        width: dw,
+                        height: dh,
+                    },
+                ));
+            }
+            src_x += sw;
+            dst_x += dw;
+        }
+        src_y += src_rows[row];
+        dst_y += dst_rows[row];
+    }
+    Ok(pairs)
 }
 
 fn gradient_solid(gradient: Option<&Gradient>) -> Option<[u8; 4]> {
@@ -1864,8 +2607,19 @@ enum PreparedGradient {
 }
 
 enum GradientKind {
-    Linear { start: [f32; 2], end: [f32; 2] },
-    Radial { center: [f32; 2], radius: f32 },
+    Linear {
+        start: [f32; 2],
+        end: [f32; 2],
+    },
+    Radial {
+        center: [f32; 2],
+        radius: f32,
+    },
+    Sweep {
+        center: [f32; 2],
+        start_angle_rad: f32,
+        end_angle_rad: f32,
+    },
 }
 
 fn prepared_gradient(gradient: &Gradient) -> PreparedGradient {
@@ -1904,6 +2658,32 @@ fn prepared_gradient(gradient: &Gradient) -> PreparedGradient {
                 kind: GradientKind::Radial {
                     center: *center,
                     radius: *radius,
+                },
+                stops,
+            }
+        }
+        Gradient::Sweep {
+            center,
+            start_angle_rad,
+            end_angle_rad,
+            stops,
+        } => {
+            let Some(stops) = normalize_stops(stops) else {
+                return PreparedGradient::Invalid;
+            };
+            if !start_angle_rad.is_finite() || !end_angle_rad.is_finite() {
+                return PreparedGradient::Invalid;
+            }
+            if start_angle_rad == end_angle_rad {
+                return PreparedGradient::Solid(
+                    stops.last().map(|stop| stop.color).unwrap_or([0; 4]),
+                );
+            }
+            PreparedGradient::Paint {
+                kind: GradientKind::Sweep {
+                    center: *center,
+                    start_angle_rad: *start_angle_rad,
+                    end_angle_rad: *end_angle_rad,
                 },
                 stops,
             }
@@ -1980,6 +2760,31 @@ fn color_source(
                 ffi::ImpellerColorSourceCreateRadialGradientNew(
                     &center,
                     scene_radius,
+                    count,
+                    colors.as_ptr(),
+                    offsets.as_ptr(),
+                    ffi::ImpellerTileMode::kImpellerTileModeClamp,
+                    ptr::null(),
+                )
+            };
+            if source.is_null() { None } else { Some(source) }
+        }
+        GradientKind::Sweep {
+            center,
+            start_angle_rad,
+            end_angle_rad,
+        } => {
+            let center = ffi::ImpellerPoint {
+                x: x + center[0] * w,
+                y: y + center[1] * h,
+            };
+            let start = start_angle_rad * (180.0 / std::f32::consts::PI);
+            let end = end_angle_rad * (180.0 / std::f32::consts::PI);
+            let source = unsafe {
+                ffi::ImpellerColorSourceCreateSweepGradientNew(
+                    &center,
+                    start,
+                    end,
                     count,
                     colors.as_ptr(),
                     offsets.as_ptr(),
@@ -2116,7 +2921,32 @@ fn uniform_radii(radius: f32) -> ffi::ImpellerRoundingRadii {
 mod tests {
     use super::Engine;
     use crate::{ImagePixels, Status};
-    use protocol::{DrawList, scene_to_draw_list};
+    use protocol::DrawList;
+
+    #[test]
+    #[ignore]
+    fn submit_bench() {
+        let mut engine = match Engine::create_metal() {
+            Ok(engine) => engine,
+            Err(Status::NotLinked) => return,
+            Err(status) => panic!("{status}"),
+        };
+        const WARMUP: u64 = 10;
+        const SAMPLES: u64 = 40;
+        let commands = scrolled_commands();
+        let mut samples = Vec::with_capacity(SAMPLES as usize);
+        for index in 0..WARMUP + SAMPLES {
+            let tree = picture_tree(0.0, index + 1, std::sync::Arc::clone(&commands));
+            let started = std::time::Instant::now();
+            engine.submit_layers(&tree, 2.0, |_| None).expect("submit");
+            if index >= WARMUP {
+                samples.push(started.elapsed());
+            }
+        }
+        samples.sort();
+        let p95 = samples[37];
+        println!("submit_p95={:.3}ms", p95.as_secs_f64() * 1000.0);
+    }
 
     #[test]
     fn rejected_font_bytes_return_bad_scene() {
@@ -2142,38 +2972,11 @@ mod tests {
         let list = DrawList {
             commands: Vec::new(),
         };
-        assert_eq!(engine.submit(&list, 0.0, |_| None), Err(Status::BadScene));
-    }
-
-    #[test]
-    fn counter_list_builds_a_display_list() {
-        let mut engine = match Engine::create_metal() {
-            Ok(engine) => engine,
-            Err(Status::NotLinked) => return,
-            Err(status) => panic!("{status}"),
-        };
-        let font = match std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf") {
-            Ok(font) => font,
-            Err(_) => return,
-        };
-        engine
-            .register_font(&font, "UIFWSans")
-            .expect("font registers");
-        let list = scene_to_draw_list(&protocol::counter());
-        let rgba = vec![0u8; 56 * 56 * 4];
-        engine
-            .submit(&list, 1.0, |source| {
-                if source == "asset:logo" {
-                    Some(ImagePixels {
-                        width: 56,
-                        height: 56,
-                        rgba: &rgba,
-                    })
-                } else {
-                    None
-                }
-            })
-            .expect("counter draw list submits");
+        assert_eq!(engine.paint(&list, 0.0, |_| None), Err(Status::BadScene));
+        assert_eq!(
+            engine.submit_layers(&protocol::LayerTree::empty(), 0.0, |_| None),
+            Err(Status::BadScene)
+        );
     }
 
     #[test]
@@ -2230,15 +3033,16 @@ mod tests {
                 y: 0.0,
                 max_width: 280.0,
                 font_size: 28.0,
+                paragraph: protocol::ParagraphId::NONE,
                 color: [255, 255, 255, 255],
                 utf8: std::sync::Arc::from("Hi"),
-                style: protocol::TextStyle::default(),
-                spans: Vec::new(),
-                links: Vec::new(),
+                style: std::sync::Arc::new(protocol::TextStyle::default()),
+                spans: std::sync::Arc::from([]),
+                links: std::sync::Arc::from([]),
             }],
         };
         engine
-            .submit(&list, 1.0, |_| None)
+            .paint(&list, 1.0, |_| None)
             .expect("measured text submits");
     }
 
@@ -2251,7 +3055,7 @@ mod tests {
         let rgba = [0u8; 4];
         let mut calls = 0;
         let submit = |engine: &mut Engine, calls: &mut i32| {
-            engine.submit(&list, 1.0, |_| {
+            engine.paint(&list, 1.0, |_| {
                 *calls += 1;
                 Some(ImagePixels {
                     width: 1,
@@ -2267,7 +3071,7 @@ mod tests {
         let empty = DrawList {
             commands: Vec::new(),
         };
-        engine.submit(&empty, 1.0, |_| None).expect("empty");
+        engine.paint(&empty, 1.0, |_| None).expect("empty");
         assert_eq!(engine.cached_textures(), 0);
     }
 
@@ -2280,7 +3084,7 @@ mod tests {
         let rgba = [0u8; 4];
         let mut calls = 0;
         engine
-            .submit(&list, 1.0, |_| {
+            .paint(&list, 1.0, |_| {
                 calls += 1;
                 Some(ImagePixels {
                     width: 1,
@@ -2292,10 +3096,10 @@ mod tests {
         let broken = DrawList {
             commands: vec![protocol::Command::Pop],
         };
-        assert_eq!(engine.submit(&broken, 1.0, |_| None), Err(Status::BadScene));
+        assert_eq!(engine.paint(&broken, 1.0, |_| None), Err(Status::BadScene));
         assert_eq!(engine.cached_textures(), 1);
         engine
-            .submit(&list, 1.0, |_| {
+            .paint(&list, 1.0, |_| {
                 calls += 1;
                 Some(ImagePixels {
                     width: 1,
@@ -2322,19 +3126,60 @@ mod tests {
                 y: 0.0,
                 max_width: 280.0,
                 font_size: 28.0,
+                paragraph: protocol::ParagraphId::NONE,
                 color: [255, 255, 255, 255],
                 utf8: std::sync::Arc::from("Hi"),
-                style: style.clone(),
-                spans: Vec::new(),
-                links: Vec::new(),
+                style: std::sync::Arc::new(style.clone()),
+                spans: std::sync::Arc::from([]),
+                links: std::sync::Arc::from([]),
             }],
         };
-        engine.submit(&list, 1.0, |_| None).expect("submit");
+        engine.paint(&list, 1.0, |_| None).expect("submit");
         let second = engine
             .measure_paragraph("Hi", 28.0, 280.0, [255, 255, 255, 255], &style)
             .expect("cached");
         assert_eq!(first, second);
         assert_eq!(engine.cached_paragraphs(), 1);
+    }
+
+    #[test]
+    fn released_paragraph_id_does_not_paint_the_new_color() {
+        let Some(mut engine) = fonted() else {
+            return;
+        };
+        let style = protocol::TextStyle::default();
+        let red = [255, 0, 0, 255];
+        let green = [0, 255, 0, 255];
+        let old = engine
+            .retain_paragraph("Hi", 28.0, 280.0, red, &style, &[])
+            .expect("retain red");
+        engine.release_paragraph(old);
+        assert!(!engine.paragraph_live(old));
+        let next = engine
+            .retain_paragraph("Hi", 28.0, 280.0, green, &style, &[])
+            .expect("retain green");
+        assert_eq!(old.index, next.index);
+        assert_ne!(old.generation, next.generation);
+        assert!(engine.paragraph_live(next));
+        let list = DrawList {
+            commands: vec![protocol::Command::Text {
+                x: 0.0,
+                y: 0.0,
+                max_width: 280.0,
+                font_size: 28.0,
+                paragraph: old,
+                color: red,
+                utf8: std::sync::Arc::from("Hi"),
+                style: std::sync::Arc::new(style),
+                spans: std::sync::Arc::from([]),
+                links: std::sync::Arc::from([]),
+            }],
+        };
+        engine
+            .paint(&list, 1.0, |_| None)
+            .expect("stale id rebuilds");
+        assert_eq!(engine.text_paint_probe(), (true, red));
+        assert!(engine.paragraph_live(next));
     }
 
     #[test]
@@ -2354,7 +3199,7 @@ mod tests {
         let list = DrawList {
             commands: Vec::new(),
         };
-        engine.submit(&list, 1.0, |_| None).expect("empty");
+        engine.paint(&list, 1.0, |_| None).expect("empty");
         assert_eq!(engine.cached_paragraphs(), 0);
     }
 
@@ -2401,6 +3246,7 @@ mod tests {
             stroke_color: [0, 0, 0, 0],
             gradient: None,
             shadow: None,
+            box_shadows: std::sync::Arc::from([]),
         }
     }
 
@@ -2432,7 +3278,7 @@ mod tests {
             ],
         };
         engine
-            .submit(&list, 2.0, |_| None)
+            .paint(&list, 2.0, |_| None)
             .expect("clip and opacity submit");
     }
 
@@ -2463,7 +3309,7 @@ mod tests {
             ],
         };
         engine
-            .submit(&list, 2.0, |_| None)
+            .paint(&list, 2.0, |_| None)
             .expect("transform submit");
     }
 
@@ -2475,7 +3321,7 @@ mod tests {
         let list = DrawList {
             commands: vec![protocol::Command::Pop],
         };
-        assert_eq!(engine.submit(&list, 1.0, |_| None), Err(Status::BadScene));
+        assert_eq!(engine.paint(&list, 1.0, |_| None), Err(Status::BadScene));
     }
 
     #[test]
@@ -2492,7 +3338,7 @@ mod tests {
                 corner_radius: 0.0,
             }],
         };
-        assert_eq!(engine.submit(&list, 1.0, |_| None), Err(Status::BadScene));
+        assert_eq!(engine.paint(&list, 1.0, |_| None), Err(Status::BadScene));
     }
 
     #[test]
@@ -2519,10 +3365,10 @@ mod tests {
             return;
         };
         engine
-            .submit(&image_command(false), 1.0, |_| None)
+            .paint(&image_command(false), 1.0, |_| None)
             .expect("optional image");
         assert_eq!(
-            engine.submit(&image_command(true), 1.0, |_| None),
+            engine.paint(&image_command(true), 1.0, |_| None),
             Err(Status::BadScene)
         );
     }
@@ -2570,12 +3416,13 @@ mod tests {
                         color: [0, 0, 0, 128],
                         elevation: 5.0,
                     }),
+                    box_shadows: std::sync::Arc::from([]),
                 },
                 protocol::Command::Pop,
             ],
         };
         engine
-            .submit(&list, 2.0, |_| None)
+            .paint(&list, 2.0, |_| None)
             .expect("scene-point paint");
         let trace = super::paint_trace::take();
         assert_eq!(trace.stroke_widths, vec![3.0]);
@@ -2642,5 +3489,222 @@ mod tests {
             "{:?}",
             trace.decorations
         );
+    }
+
+    #[test]
+    fn scroll_offset_keeps_the_picture_display_list() {
+        let Some(mut engine) = opened() else {
+            return;
+        };
+        let mut commands = Vec::with_capacity(5000);
+        for row in 0..5000 {
+            let mut command = solid_rect(0.0);
+            if let protocol::Command::Rect { y, .. } = &mut command {
+                *y = row as f32 * 8.0;
+            }
+            commands.push(command);
+        }
+        let commands = std::sync::Arc::<[protocol::Command]>::from(commands);
+        let first = picture_tree(0.0, 1, std::sync::Arc::clone(&commands));
+        engine
+            .submit_layers(&first, 1.0, |_| None)
+            .expect("first layer tree");
+        assert_eq!(engine.picture_builds(), 1);
+        let scrolled = picture_tree(40.0, 1, commands);
+        engine
+            .submit_layers(&scrolled, 2.0, |_| None)
+            .expect("scrolled layer tree");
+        assert_eq!(engine.picture_builds(), 1);
+        assert_eq!(engine.retained_pictures(), 1);
+        let rewritten = picture_tree(40.0, 2, scrolled_commands());
+        engine
+            .submit_layers(&rewritten, 2.0, |_| None)
+            .expect("rewritten picture");
+        assert_eq!(engine.picture_builds(), 2);
+    }
+
+    #[test]
+    fn register_font_rebuilds_picture_display_lists() {
+        let Some(mut engine) = fonted() else {
+            return;
+        };
+        let style = std::sync::Arc::new(protocol::TextStyle::default());
+        let command = protocol::Command::Text {
+            x: 0.0,
+            y: 0.0,
+            max_width: 280.0,
+            font_size: 28.0,
+            paragraph: protocol::ParagraphId::NONE,
+            color: [255, 255, 255, 255],
+            utf8: std::sync::Arc::from("Hi"),
+            style,
+            spans: std::sync::Arc::from([]),
+            links: std::sync::Arc::from([]),
+        };
+        let tree = picture_tree(0.0, 1, std::sync::Arc::from([command]));
+        engine
+            .submit_layers(&tree, 1.0, |_| None)
+            .expect("text picture");
+        assert_eq!(engine.picture_builds(), 1);
+        let font =
+            std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf").expect("font file");
+        engine
+            .register_font(&font, "UIFWSans")
+            .expect("font registers again");
+        engine
+            .submit_layers(&tree, 1.0, |_| None)
+            .expect("picture after font");
+        assert_eq!(engine.picture_builds(), 2);
+    }
+
+    #[test]
+    fn layer_image_stays_cached_when_the_picture_is_reused() {
+        let Some(mut engine) = opened() else {
+            return;
+        };
+        let command = protocol::Command::Image {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+            source: std::sync::Arc::from("asset:logo"),
+            mode: protocol::ContentMode::Fill,
+            required: true,
+        };
+        let tree = picture_tree(0.0, 1, std::sync::Arc::from([command]));
+        let rgba = [0u8; 4];
+        let mut calls = 0;
+        let submit = |engine: &mut Engine, tree: &protocol::LayerTree, calls: &mut i32| {
+            engine.submit_layers(tree, 1.0, |_| {
+                *calls += 1;
+                Some(ImagePixels {
+                    width: 1,
+                    height: 1,
+                    rgba: &rgba,
+                })
+            })
+        };
+        submit(&mut engine, &tree, &mut calls).expect("first picture");
+        submit(&mut engine, &tree, &mut calls).expect("cached picture");
+        assert_eq!(calls, 1);
+        assert_eq!(engine.cached_textures(), 1);
+        let empty = protocol::LayerTree::empty();
+        engine
+            .submit_layers(&empty, 1.0, |_| None)
+            .expect("empty tree");
+        assert_eq!(engine.retained_pictures(), 0);
+        assert_eq!(engine.cached_textures(), 0);
+    }
+
+    fn scrolled_commands() -> std::sync::Arc<[protocol::Command]> {
+        std::sync::Arc::from([solid_rect(0.0)])
+    }
+
+    fn picture_tree(
+        offset_y: f32,
+        generation: u64,
+        commands: std::sync::Arc<[protocol::Command]>,
+    ) -> protocol::LayerTree {
+        use protocol::{Layer, LayerId, LayerKind, Picture, PictureId};
+        let id = PictureId(7);
+        let picture = std::sync::Arc::new(Picture {
+            id,
+            generation,
+            origin: (3.0, 4.0),
+            commands,
+        });
+        protocol::LayerTree {
+            layers: vec![
+                Layer {
+                    kind: LayerKind::Offset {
+                        x: 0.0,
+                        y: offset_y,
+                    },
+                    parent: None,
+                    first_child: Some(LayerId(1)),
+                    next: None,
+                },
+                Layer {
+                    kind: LayerKind::Picture { picture: id },
+                    parent: Some(LayerId(0)),
+                    first_child: None,
+                    next: None,
+                },
+            ],
+            pictures: vec![picture],
+            root: LayerId(0),
+            epoch: generation,
+        }
+    }
+
+    #[test]
+    fn picture_reuse_across_a_mixed_edit_sequence() {
+        let Some(mut engine) = opened() else {
+            return;
+        };
+        let commands = scrolled_commands();
+        let tree = many_pictures(5000, 1, 0.0, commands.clone());
+        engine
+            .submit_layers(&tree, 1.0, |_| None)
+            .expect("first submit");
+        let built = engine.picture_builds();
+        let moved = many_pictures(5000, 1, 4.0, commands.clone());
+        engine.submit_layers(&moved, 1.0, |_| None).expect("offset");
+        assert_eq!(engine.picture_builds(), built);
+        engine.submit_layers(&moved, 2.0, |_| None).expect("scale");
+        assert_eq!(engine.picture_builds(), built);
+        let mut bumped = many_pictures(5000, 1, 4.0, commands);
+        bumped.pictures[0] = std::sync::Arc::new(protocol::Picture {
+            id: bumped.pictures[0].id,
+            generation: 2,
+            origin: bumped.pictures[0].origin,
+            commands: std::sync::Arc::clone(&bumped.pictures[0].commands),
+        });
+        engine
+            .submit_layers(&bumped, 2.0, |_| None)
+            .expect("generation");
+        assert_eq!(engine.picture_builds(), built + 1);
+    }
+
+    fn many_pictures(
+        count: u32,
+        generation: u64,
+        offset_y: f32,
+        commands: std::sync::Arc<[protocol::Command]>,
+    ) -> protocol::LayerTree {
+        use protocol::{Layer, LayerId, LayerKind, Picture, PictureId};
+        let mut layers = Vec::with_capacity(count as usize + 1);
+        let mut pictures = Vec::with_capacity(count as usize);
+        layers.push(Layer {
+            kind: LayerKind::Offset {
+                x: 0.0,
+                y: offset_y,
+            },
+            parent: None,
+            first_child: (count > 0).then_some(LayerId(1)),
+            next: None,
+        });
+        for index in 0..count {
+            let id = PictureId(u64::from(index) + 1);
+            pictures.push(std::sync::Arc::new(Picture {
+                id,
+                generation,
+                origin: (0.0, 0.0),
+                commands: std::sync::Arc::clone(&commands),
+            }));
+            let layer_index = index + 1;
+            layers.push(Layer {
+                kind: LayerKind::Picture { picture: id },
+                parent: Some(LayerId(0)),
+                first_child: None,
+                next: (layer_index < count).then_some(LayerId(layer_index + 1)),
+            });
+        }
+        protocol::LayerTree {
+            layers,
+            pictures,
+            root: LayerId(0),
+            epoch: generation,
+        }
     }
 }

@@ -371,7 +371,7 @@ static JSValue js_http(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
         host->fns.http(host->fns.session, token, method, method_len, url, url_len, headers,
                        headers_len, body, body_len);
     } else {
-        settle(host, token, 0, JS_NewString(ctx, "http is not linked"));
+        settle(host, token, 0, JS_NewString(ctx, "network is not linked"));
     }
     if (argc >= 4) {
         release_body(ctx, argv[3], body);
@@ -417,46 +417,368 @@ static JSValue js_has_module(JSContext *ctx, JSValueConst this_val, int argc, JS
     return JS_NewBool(ctx, present);
 }
 
-static JSValue js_module_call(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    (void)this_val;
-    Host *host = host_of(ctx);
-    if (!host || argc < 3) {
-        return throw_msg(ctx, "call(name, method, json)");
+static int grow_values(Host *host) {
+    size_t cap = host->values_cap ? host->values_cap * 2 : 8;
+    JSValue *next = realloc(host->values, cap * sizeof(JSValue));
+    if (!next) {
+        return -1;
     }
+    host->values = next;
+    host->values_cap = cap;
+    return 0;
+}
+
+static void push_value(Host *host, JSValue value) {
+    if (host->values_len == host->values_cap && grow_values(host)) {
+        JS_FreeValue(host->ctx, value);
+        return;
+    }
+    host->values[host->values_len++] = value;
+}
+
+static JSValue pop_value(Host *host) {
+    if (host->values_len == 0) {
+        return JS_NULL;
+    }
+    host->values_len--;
+    return host->values[host->values_len];
+}
+
+static int push_js_arg(Host *host, JSValueConst value);
+
+static int push_object_arg(Host *host, JSValueConst value) {
+    JSPropertyEnum *tab = NULL;
+    uint32_t len = 0;
+    if (JS_GetOwnPropertyNames(host->ctx, &tab, &len, value,
+                               JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY)) {
+        return -1;
+    }
+    host->fns.module_begin_map(host->fns.session);
+    for (uint32_t index = 0; index < len; index++) {
+        JSValue key = JS_AtomToString(host->ctx, tab[index].atom);
+        size_t key_len = 0;
+        const char *key_text = JS_ToCStringLen(host->ctx, &key_len, key);
+        JSValue prop = JS_GetProperty(host->ctx, value, tab[index].atom);
+        if (key_text) {
+            host->fns.module_map_key(host->fns.session, key_text, key_len);
+            JS_FreeCString(host->ctx, key_text);
+        }
+        JS_FreeValue(host->ctx, key);
+        if (push_js_arg(host, prop)) {
+            JS_FreeValue(host->ctx, prop);
+            JS_FreePropertyEnum(host->ctx, tab, len);
+            host->fns.module_end_map(host->fns.session);
+            return -1;
+        }
+        JS_FreeValue(host->ctx, prop);
+    }
+    JS_FreePropertyEnum(host->ctx, tab, len);
+    host->fns.module_end_map(host->fns.session);
+    return 0;
+}
+
+static int push_js_arg(Host *host, JSValueConst value) {
+    if (JS_IsNull(value) || JS_IsUndefined(value)) {
+        host->fns.module_push_null(host->fns.session);
+        return 0;
+    }
+    if (JS_IsBool(value)) {
+        host->fns.module_push_bool(host->fns.session, JS_ToBool(host->ctx, value));
+        return 0;
+    }
+    if (JS_IsNumber(value)) {
+        double number = 0;
+        if (JS_ToFloat64(host->ctx, &number, value)) {
+            return -1;
+        }
+        host->fns.module_push_f64(host->fns.session, number);
+        return 0;
+    }
+    if (JS_IsString(value)) {
+        size_t len = 0;
+        const char *text = JS_ToCStringLen(host->ctx, &len, value);
+        if (!text) {
+            return -1;
+        }
+        host->fns.module_push_str(host->fns.session, text, len);
+        JS_FreeCString(host->ctx, text);
+        return 0;
+    }
+    if (JS_GetTypedArrayType(value) >= 0) {
+        size_t offset = 0;
+        size_t len = 0;
+        size_t stride = 0;
+        JSValue buffer = JS_GetTypedArrayBuffer(host->ctx, value, &offset, &len, &stride);
+        if (!JS_IsException(buffer)) {
+            size_t buf_len = 0;
+            uint8_t *bytes = JS_GetArrayBuffer(host->ctx, &buf_len, buffer);
+            if (bytes && offset + len <= buf_len) {
+                host->fns.module_push_bytes(host->fns.session, bytes + offset, len);
+            } else {
+                host->fns.module_push_bytes(host->fns.session, (const uint8_t *)"", 0);
+            }
+            JS_FreeValue(host->ctx, buffer);
+            return 0;
+        }
+        JSValue exception = JS_GetException(host->ctx);
+        JS_FreeValue(host->ctx, exception);
+    }
+    size_t raw_len = 0;
+    uint8_t *raw = JS_GetArrayBuffer(host->ctx, &raw_len, value);
+    if (raw) {
+        host->fns.module_push_bytes(host->fns.session, raw, raw_len);
+        return 0;
+    }
+    if (JS_IsArray(value)) {
+        int64_t length = 0;
+        if (JS_GetLength(host->ctx, value, &length) || length < 0) {
+            return -1;
+        }
+        host->fns.module_begin_list(host->fns.session);
+        for (int64_t index = 0; index < length; index++) {
+            JSValue item = JS_GetPropertyUint32(host->ctx, value, (uint32_t)index);
+            int failed = push_js_arg(host, item);
+            JS_FreeValue(host->ctx, item);
+            if (failed) {
+                host->fns.module_end_list(host->fns.session);
+                return -1;
+            }
+        }
+        host->fns.module_end_list(host->fns.session);
+        return 0;
+    }
+    if (JS_IsObject(value)) {
+        return push_object_arg(host, value);
+    }
+    host->fns.module_push_null(host->fns.session);
+    return 0;
+}
+
+static JSValue call_host_method(Host *host, const char *name, size_t name_len, const char *method,
+                                size_t method_len, int argc, JSValueConst *argv) {
+    if (!host->fns.module_prepare || !host->fns.module_finish) {
+        return throw_msg(host->ctx, "module is not linked");
+    }
+    int kind = host->fns.module_prepare(host->fns.session, name, name_len, method, method_len);
+    if (kind < 0) {
+        char message[160];
+        snprintf(message, sizeof(message), "module \"%.*s.%.*s\" is not linked", (int)name_len,
+                 name, (int)method_len, method);
+        return throw_msg(host->ctx, message);
+    }
+    JSValue promise = JS_UNDEFINED;
     uint64_t token = 0;
-    JSValue promise = make_promise(host, &token);
-    if (JS_IsException(promise)) {
-        return promise;
+    if (kind == 1) {
+        promise = make_promise(host, &token);
+        if (JS_IsException(promise)) {
+            return promise;
+        }
+        host->fns.module_set_token(host->fns.session, token);
+    }
+    for (int index = 0; index < argc; index++) {
+        if (push_js_arg(host, argv[index])) {
+            if (kind == 1) {
+                settle(host, token, 0, JS_NewString(host->ctx, "module"));
+                return promise;
+            }
+            return throw_msg(host->ctx, "module");
+        }
+    }
+    int finished = host->fns.module_finish(host->fns.session);
+    if (finished < 0) {
+        if (kind == 1) {
+            settle(host, token, 0, JS_NewString(host->ctx, "module is not linked"));
+            return promise;
+        }
+        return throw_msg(host->ctx, "module is not linked");
+    }
+    if (kind == 0) {
+        return pop_value(host);
+    }
+    return promise;
+}
+
+static JSValue js_host_method(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv,
+                              int magic, JSValueConst *func_data) {
+    (void)this_val;
+    (void)magic;
+    Host *host = host_of(ctx);
+    if (!host || !func_data) {
+        return throw_msg(ctx, "module is not linked");
     }
     size_t name_len = 0;
     size_t method_len = 0;
-    size_t json_len = 0;
-    const char *name = JS_ToCStringLen(ctx, &name_len, argv[0]);
-    const char *method = JS_ToCStringLen(ctx, &method_len, argv[1]);
-    const char *json = JS_ToCStringLen(ctx, &json_len, argv[2]);
-    if (!name || !method || !json) {
+    const char *name = JS_ToCStringLen(ctx, &name_len, func_data[0]);
+    const char *method = JS_ToCStringLen(ctx, &method_len, func_data[1]);
+    if (!name || !method) {
         if (name) {
             JS_FreeCString(ctx, name);
         }
         if (method) {
             JS_FreeCString(ctx, method);
         }
-        if (json) {
-            JS_FreeCString(ctx, json);
-        }
-        settle(host, token, 0, JS_NewString(ctx, "module"));
-        return promise;
+        return JS_EXCEPTION;
     }
-    if (host->fns.module_call) {
-        host->fns.module_call(host->fns.session, token, name, name_len, method, method_len, json,
-                              json_len);
-    } else {
-        settle(host, token, 0, JS_NewString(ctx, "module is not linked"));
-    }
+    JSValue result = call_host_method(host, name, name_len, method, method_len, argc, argv);
     JS_FreeCString(ctx, name);
     JS_FreeCString(ctx, method);
-    JS_FreeCString(ctx, json);
-    return promise;
+    return result;
+}
+
+static JSValue js_current_state(JSContext *ctx, JSValueConst this_val, int argc,
+                                JSValueConst *argv) {
+    (void)this_val;
+    (void)argc;
+    (void)argv;
+    Host *host = host_of(ctx);
+    if (!host) {
+        return JS_EXCEPTION;
+    }
+    const char *name = "AppState";
+    const char *method = "getCurrentState";
+    return call_host_method(host, name, strlen(name), method, strlen(method), 0, NULL);
+}
+
+static char *dup_text(const char *text, size_t len) {
+    char *copy = malloc(len + 1);
+    if (!copy) {
+        return NULL;
+    }
+    memcpy(copy, text, len);
+    copy[len] = 0;
+    return copy;
+}
+
+static JSValue js_module_listen(JSContext *ctx, JSValueConst this_val, int argc,
+                                JSValueConst *argv, int remove) {
+    Host *host = host_of(ctx);
+    if (!host || argc < 2 || !JS_IsString(argv[0]) || !JS_IsFunction(ctx, argv[1])) {
+        return JS_UNDEFINED;
+    }
+    JSValue module = JS_GetPropertyStr(ctx, this_val, "__module");
+    size_t module_len = 0;
+    size_t event_len = 0;
+    const char *module_text = JS_ToCStringLen(ctx, &module_len, module);
+    const char *event_text = JS_ToCStringLen(ctx, &event_len, argv[0]);
+    JS_FreeValue(ctx, module);
+    if (!module_text || !event_text) {
+        if (module_text) {
+            JS_FreeCString(ctx, module_text);
+        }
+        if (event_text) {
+            JS_FreeCString(ctx, event_text);
+        }
+        return JS_UNDEFINED;
+    }
+    if (remove) {
+        for (size_t index = 0; index < host->mod_listener_len; index++) {
+            ModuleListener *listener = &host->mod_listeners[index];
+            if (strcmp(listener->module, module_text) == 0 &&
+                strcmp(listener->event, event_text) == 0 &&
+                JS_IsStrictEqual(ctx, listener->fn, argv[1])) {
+                free(listener->module);
+                free(listener->event);
+                JS_FreeValue(ctx, listener->fn);
+                memmove(&host->mod_listeners[index], &host->mod_listeners[index + 1],
+                        (host->mod_listener_len - index - 1) * sizeof(ModuleListener));
+                host->mod_listener_len--;
+                break;
+            }
+        }
+        JS_FreeCString(ctx, module_text);
+        JS_FreeCString(ctx, event_text);
+        return JS_UNDEFINED;
+    }
+    if (host->mod_listener_len == host->mod_listener_cap) {
+        size_t cap = host->mod_listener_cap ? host->mod_listener_cap * 2 : 4;
+        ModuleListener *next = realloc(host->mod_listeners, cap * sizeof(ModuleListener));
+        if (!next) {
+            JS_FreeCString(ctx, module_text);
+            JS_FreeCString(ctx, event_text);
+            return JS_UNDEFINED;
+        }
+        host->mod_listeners = next;
+        host->mod_listener_cap = cap;
+    }
+    ModuleListener *listener = &host->mod_listeners[host->mod_listener_len];
+    listener->module = dup_text(module_text, module_len);
+    listener->event = dup_text(event_text, event_len);
+    listener->fn = JS_DupValue(ctx, argv[1]);
+    if (!listener->module || !listener->event) {
+        free(listener->module);
+        free(listener->event);
+        JS_FreeValue(ctx, listener->fn);
+    } else {
+        host->mod_listener_len++;
+    }
+    JS_FreeCString(ctx, module_text);
+    JS_FreeCString(ctx, event_text);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_module_add(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    return js_module_listen(ctx, this_val, argc, argv, 0);
+}
+
+static JSValue js_module_remove(JSContext *ctx, JSValueConst this_val, int argc,
+                                JSValueConst *argv) {
+    return js_module_listen(ctx, this_val, argc, argv, 1);
+}
+
+static JSValue js_host_module(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (!host || argc < 1 || !host->fns.module_has) {
+        return JS_NULL;
+    }
+    size_t name_len = 0;
+    const char *name = JS_ToCStringLen(ctx, &name_len, argv[0]);
+    if (!name) {
+        return JS_EXCEPTION;
+    }
+    if (!host->fns.module_has(host->fns.session, name, name_len)) {
+        JS_FreeCString(ctx, name);
+        return JS_NULL;
+    }
+    JSValue object = JS_NewObject(ctx);
+    JS_DefinePropertyValueStr(ctx, object, "__module", JS_NewStringLen(ctx, name, name_len),
+                              JS_PROP_CONFIGURABLE);
+    if (strcmp(name, "AppState") == 0) {
+        JSAtom atom = JS_NewAtom(ctx, "currentState");
+        JSValue getter = JS_NewCFunction(ctx, js_current_state, "currentState", 0);
+        JS_DefinePropertyGetSet(ctx, object, atom, getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE);
+        JS_FreeAtom(ctx, atom);
+    }
+    JSValue data[2];
+    data[0] = JS_NewStringLen(ctx, name, name_len);
+    if (host->fns.module_count && host->fns.module_method_at) {
+        int count = host->fns.module_count(host->fns.session, name, name_len);
+        for (int index = 0; index < count; index++) {
+            size_t method_len = 0;
+            const char *method =
+                host->fns.module_method_at(host->fns.session, name, name_len, index, &method_len);
+            if (!method) {
+                continue;
+            }
+            data[1] = JS_NewStringLen(ctx, method, method_len);
+            JSValue fn = JS_NewCFunctionData(ctx, js_host_method, 0, 0, 2, data);
+            char *method_name = dup_text(method, method_len);
+            if (method_name) {
+                JS_DefinePropertyValueStr(ctx, object, method_name, fn, JS_PROP_CONFIGURABLE);
+                free(method_name);
+            } else {
+                JS_FreeValue(ctx, fn);
+            }
+            JS_FreeValue(ctx, data[1]);
+        }
+    }
+    JS_FreeValue(ctx, data[0]);
+    JS_SetPropertyStr(ctx, object, "addEventListener",
+                      JS_NewCFunction(ctx, js_module_add, "addEventListener", 2));
+    JS_SetPropertyStr(ctx, object, "removeEventListener",
+                      JS_NewCFunction(ctx, js_module_remove, "removeEventListener", 2));
+    JS_FreeCString(ctx, name);
+    return object;
 }
 
 static JSValue js_socket_open(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -547,7 +869,7 @@ static int bind_host_globals(Host *host) {
     failed |= bind_fn(ctx, bridge, "http", js_http, 4);
     failed |= bind_fn(ctx, bridge, "abort", js_abort, 1);
     failed |= bind_fn(ctx, bridge, "hasModule", js_has_module, 1);
-    failed |= bind_fn(ctx, bridge, "call", js_module_call, 3);
+    failed |= bind_fn(ctx, bridge, "module", js_host_module, 1);
     failed |= bind_fn(ctx, bridge, "socketOpen", js_socket_open, 1);
     failed |= bind_fn(ctx, bridge, "socketSend", js_socket_send, 2);
     failed |= bind_fn(ctx, bridge, "socketClose", js_socket_close, 1);
@@ -713,22 +1035,114 @@ int64_t qjs_next_deadline(Host *host) {
     return best;
 }
 
-int qjs_settle_json(Host *host, uint64_t token, int ok, const char *text, size_t len) {
+void qjs_value_null(Host *host) {
+    if (host && host->ctx) {
+        push_value(host, JS_NULL);
+    }
+}
+
+void qjs_value_bool(Host *host, int value) {
+    if (host && host->ctx) {
+        push_value(host, JS_NewBool(host->ctx, value));
+    }
+}
+
+void qjs_value_f64(Host *host, double value) {
+    if (host && host->ctx) {
+        push_value(host, JS_NewFloat64(host->ctx, value));
+    }
+}
+
+void qjs_value_str(Host *host, const char *text, size_t len) {
+    if (host && host->ctx) {
+        push_value(host, JS_NewStringLen(host->ctx, text ? text : "", text ? len : 0));
+    }
+}
+
+void qjs_value_bytes(Host *host, const uint8_t *bytes, size_t len) {
+    if (!host || !host->ctx) {
+        return;
+    }
+    if (!bytes) {
+        bytes = (const uint8_t *)"";
+        len = 0;
+    }
+    push_value(host, JS_NewUint8ArrayCopy(host->ctx, bytes, len));
+}
+
+void qjs_value_list(Host *host, uint32_t count) {
+    if (!host || !host->ctx || host->values_len < count) {
+        return;
+    }
+    JSValue array = JS_NewArray(host->ctx);
+    size_t start = host->values_len - count;
+    for (uint32_t index = 0; index < count; index++) {
+        JS_DefinePropertyValueUint32(host->ctx, array, index, host->values[start + index],
+                                     JS_PROP_C_W_E);
+    }
+    host->values_len = start;
+    push_value(host, array);
+}
+
+void qjs_value_map(Host *host, uint32_t count) {
+    if (!host || !host->ctx || host->values_len < count * 2) {
+        return;
+    }
+    JSValue object = JS_NewObject(host->ctx);
+    size_t start = host->values_len - (size_t)count * 2;
+    for (uint32_t index = 0; index < count; index++) {
+        JSValue key = host->values[start + (size_t)index * 2];
+        JSValue item = host->values[start + (size_t)index * 2 + 1];
+        size_t key_len = 0;
+        const char *key_text = JS_ToCStringLen(host->ctx, &key_len, key);
+        if (key_text) {
+            JS_DefinePropertyValueStr(host->ctx, object, key_text, item, JS_PROP_C_W_E);
+            JS_FreeCString(host->ctx, key_text);
+        } else {
+            JS_FreeValue(host->ctx, item);
+        }
+        JS_FreeValue(host->ctx, key);
+    }
+    host->values_len = start;
+    push_value(host, object);
+}
+
+int qjs_settle_top(Host *host, uint64_t token, int ok) {
     if (!host || !host->ctx) {
         return -1;
     }
-    JSValue value;
-    if (ok) {
-        value = JS_ParseJSON(host->ctx, text ? text : "null", text ? len : 4, "<plugin>");
-        if (JS_IsException(value)) {
+    return settle(host, token, ok, pop_value(host));
+}
+
+int qjs_module_event(Host *host, const char *module, const char *event, int shape, const char *text,
+                     size_t len) {
+    if (!host || !host->ctx || !module || !event) {
+        return -1;
+    }
+    for (size_t index = 0; index < host->mod_listener_len; index++) {
+        ModuleListener *listener = &host->mod_listeners[index];
+        if (strcmp(listener->module, module) != 0 || strcmp(listener->event, event) != 0) {
+            continue;
+        }
+        JSValue arg;
+        if (shape == 1) {
+            arg = JS_NewObject(host->ctx);
+            JS_DefinePropertyValueStr(host->ctx, arg, "url",
+                                      JS_NewStringLen(host->ctx, text ? text : "", len),
+                                      JS_PROP_C_W_E);
+        } else {
+            arg = JS_NewStringLen(host->ctx, text ? text : "", len);
+        }
+        JSValue result = JS_Call(host->ctx, listener->fn, JS_UNDEFINED, 1, &arg);
+        JS_FreeValue(host->ctx, arg);
+        if (JS_IsException(result)) {
             JSValue exception = JS_GetException(host->ctx);
             JS_FreeValue(host->ctx, exception);
-            value = JS_NULL;
+        } else {
+            JS_FreeValue(host->ctx, result);
         }
-    } else {
-        value = JS_NewStringLen(host->ctx, text ? text : "", text ? len : 0);
     }
-    return settle(host, token, ok, value);
+    return 0;
 }
 
 int qjs_settle_http(Host *host, uint64_t token, int status, const char *headers, size_t headers_len,
@@ -750,40 +1164,59 @@ int qjs_settle_http(Host *host, uint64_t token, int status, const char *headers,
     return settle(host, token, 1, object);
 }
 
-int qjs_emit(Host *host, const char *name, const char *event, const char *json, size_t len) {
-    if (!host || !host->ctx) {
+int qjs_motion_end(Host *host, uint64_t node, const char *prop, char *err, size_t err_len) {
+    if (!host || !host->ctx || !prop) {
+        return 0;
+    }
+    size_t count = 0;
+    for (size_t index = 0; index < host->motion_len; index++) {
+        MotionHandler *handler = &host->motions[index];
+        if (handler->node == node && handler->prop && strcmp(handler->prop, prop) == 0) {
+            count++;
+        }
+    }
+    if (count == 0) {
+        return 0;
+    }
+    /* offMotionEnd drops the table's reference while JS_CallInternal still
+       stores that function as cur_func, without a ref of its own. A throw
+       then builds a stack from the freed object. Dup first, and call only
+       the handlers that were registered when this motion ended. */
+    JSValue *fns = malloc(count * sizeof(JSValue));
+    if (!fns) {
+        if (err && err_len > 0) {
+            snprintf(err, err_len, "onMotionEnd failed");
+        }
         return -1;
     }
-    JSValue global = JS_GetGlobalObject(host->ctx);
-    JSValue bridge = JS_GetPropertyStr(host->ctx, global, "__uifw");
-    JSValue emit = JS_GetPropertyStr(host->ctx, bridge, "_emit");
-    int failed = 0;
-    if (JS_IsFunction(host->ctx, emit)) {
-        JSValue args[3];
-        args[0] = JS_NewString(host->ctx, name ? name : "");
-        args[1] = JS_NewString(host->ctx, event ? event : "");
-        args[2] = JS_ParseJSON(host->ctx, json ? json : "null", json ? len : 4, "<emit>");
-        if (JS_IsException(args[2])) {
-            JSValue exception = JS_GetException(host->ctx);
-            JS_FreeValue(host->ctx, exception);
-            args[2] = JS_NULL;
+    size_t found = 0;
+    for (size_t index = 0; index < host->motion_len && found < count; index++) {
+        MotionHandler *handler = &host->motions[index];
+        if (handler->node != node || !handler->prop || strcmp(handler->prop, prop) != 0) {
+            continue;
         }
-        JSValue result = JS_Call(host->ctx, emit, JS_UNDEFINED, 3, args);
-        JS_FreeValue(host->ctx, args[0]);
-        JS_FreeValue(host->ctx, args[1]);
-        JS_FreeValue(host->ctx, args[2]);
-        if (JS_IsException(result)) {
+        fns[found++] = JS_DupValue(host->ctx, handler->fn);
+    }
+    int failed = 0;
+    for (size_t index = 0; index < found; index++) {
+        JSValue result = JS_Call(host->ctx, fns[index], JS_UNDEFINED, 0, NULL);
+        if (!JS_IsException(result)) {
+            JS_FreeValue(host->ctx, result);
+            continue;
+        }
+        if (!failed) {
+            write_exception(host->ctx, err, err_len);
+            failed = 1;
+        } else {
             JSValue exception = JS_GetException(host->ctx);
             JS_FreeValue(host->ctx, exception);
-            failed = -1;
-        } else {
-            JS_FreeValue(host->ctx, result);
         }
     }
-    JS_FreeValue(host->ctx, emit);
-    JS_FreeValue(host->ctx, bridge);
-    JS_FreeValue(host->ctx, global);
-    return failed;
+    for (size_t index = 0; index < found; index++) {
+        JS_FreeValue(host->ctx, fns[index]);
+    }
+    free(fns);
+    return failed ? -1 : 0;
 }
 
 int qjs_socket_event(Host *host, uint64_t id, const char *event, int is_text, const uint8_t *data,

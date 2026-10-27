@@ -1,6 +1,7 @@
-import { createEffect, createSignal } from "solid-js";
-import { Text, host, type NodeHandle } from "@uifw/solid-renderer";
-import { directionFor, messagesFor } from "./i18n.ts";
+import { createTrackedEffect, createSignal } from "solid-js";
+import { Text, directionFor, host, type NodeHandle } from "@uifw/solid-renderer";
+import { bindFocusRing } from "./focus.ts";
+import { messagesFor } from "./i18n.ts";
 import { Role } from "./semantics.ts";
 import { useTheme } from "./use-theme.ts";
 
@@ -28,7 +29,10 @@ export function Switch(props: {
     return value.length > 0 ? value : phrase();
   };
   const blocked = () => !!props.disabled;
+  const [focused, setFocused] = createSignal(false);
   let node = 0;
+  let box = 0;
+  bindFocusRing(() => box, focused);
 
   function toggle(): void {
     if (blocked()) {
@@ -58,7 +62,7 @@ export function Switch(props: {
     );
   }
 
-  createEffect(() => {
+  createTrackedEffect(() => {
     writeSemantics();
   });
 
@@ -70,6 +74,8 @@ export function Switch(props: {
           writeSemantics();
         }}
         onClick={toggle}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
         onKey={(key) => {
           if (key === "Enter") {
             toggle();
@@ -83,8 +89,11 @@ export function Switch(props: {
       >
         <padding edges={theme().space.s}>
           <decorated
+            ref={(handle) => {
+              box = handle.id;
+            }}
             color={on() ? theme().color.accent : theme().color.surface}
-            radius={theme().radius.m}
+            radius={theme().shape.m}
           >
             <Text
               fontSize={theme().fontSize.body}

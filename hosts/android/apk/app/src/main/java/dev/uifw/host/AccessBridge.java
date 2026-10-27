@@ -17,6 +17,8 @@ public final class AccessBridge extends AccessibilityNodeProvider {
     static final int ROLE_SCROLL = 4;
     static final int ROLE_SWITCH = 5;
     static final int ROLE_TEXT_FIELD = 6;
+    static final int ROLE_SEARCH_FIELD = 7;
+    static final int ROLE_TEXT_AREA = 8;
 
     static final int ACTIVATE = 1;
     static final int SCROLL = 2;
@@ -215,7 +217,7 @@ public final class AccessBridge extends AccessibilityNodeProvider {
         return switch (role) {
             case ROLE_BUTTON -> "android.widget.Button";
             case ROLE_SWITCH -> "android.widget.Switch";
-            case ROLE_TEXT_FIELD -> "android.widget.EditText";
+            case ROLE_TEXT_FIELD, ROLE_SEARCH_FIELD, ROLE_TEXT_AREA -> "android.widget.EditText";
             case ROLE_SCROLL -> "android.widget.ScrollView";
             case ROLE_IMAGE -> "android.widget.Image";
             case ROLE_TEXT -> "android.widget.TextView";

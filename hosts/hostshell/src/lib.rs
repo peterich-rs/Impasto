@@ -3,6 +3,8 @@
 
 mod command;
 mod error;
+mod files;
+mod http;
 mod images;
 mod ime;
 mod input;
@@ -19,11 +21,11 @@ mod timing;
 
 use std::sync::Arc;
 
-use protocol::DrawList;
 use session::Metrics;
 
 pub use command::{Command, FrameToken, SurfaceId, SurfaceTarget};
 pub use error::{BootError, LogLevel, SessionError};
+pub use http::{OpenWireClient, http_client};
 pub use images::{ImageDecoder, ImageError, ImageHandle, ImageReady};
 pub use platform::{EmptyBridge, PlatformBridge};
 pub use present::{AfterPresent, after_present};
@@ -34,11 +36,17 @@ pub use shell::{EngineSlot, Link, Poster, start};
 pub use timing::FrameTiming;
 
 pub enum Launch {
-    /// Submitted once, then presented. The shell does not pump a session.
-    Fixture(DrawList),
     /// Invoked on the render thread after the engine exists. The closure must
     /// not capture the engine; [`EngineSlot::shaper`] builds the shaper there.
-    Session(Box<dyn FnOnce(&EngineSlot) -> Result<Box<dyn session::Session>, SessionError> + Send>),
+    Session(
+        Box<
+            dyn FnOnce(
+                    &EngineSlot,
+                    Box<dyn Fn(session::IoJob) + Send>,
+                ) -> Result<Box<dyn session::Session>, SessionError>
+                + Send,
+        >,
+    ),
 }
 
 pub enum Presented {
@@ -83,10 +91,14 @@ pub struct Boot {
     pub vsync: Arc<dyn Vsync>,
     pub decoder: Arc<dyn ImageDecoder>,
     pub bridge: Arc<dyn PlatformBridge>,
+    /// Absent HTTP fails with `network is not linked`. Hosts inject [`http_client`].
+    pub http: Option<Arc<dyn session::HttpClient>>,
     pub open_surface: Box<
         dyn FnMut(&mut engine::Engine, SurfaceTarget) -> Result<Box<dyn Surface>, engine::Status>
             + Send,
     >,
+    /// Log one line of layer-tree shape after a frame records new layers.
+    pub dump_list: bool,
 }
 
 pub fn metrics(width: f32, height: f32, device_pixel_ratio: f32) -> Metrics {

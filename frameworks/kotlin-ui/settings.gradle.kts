@@ -14,5 +14,3 @@ dependencyResolutionManagement {
 
 rootProject.name = "kotlin-ui"
 include(":library")
-include(":gallery")
-project(":gallery").projectDir = file("../../apps/gallery-kotlin")

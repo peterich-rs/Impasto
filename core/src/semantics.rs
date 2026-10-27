@@ -15,6 +15,16 @@ pub enum SemanticsRole {
     Scroll,
     Switch,
     TextField,
+    SearchField,
+    TextArea,
+}
+
+/// How a live region announces changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveRegion {
+    Off,
+    Polite,
+    Assertive,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -59,6 +69,8 @@ pub struct SemanticsNode {
     pub scroll: Option<(f32, f32)>,
     /// UTF-16 selection inside [`SemanticsNode::value`].
     pub selection: Option<(u32, u32)>,
+    /// Collapsed caret, UTF-16 extent of the focused editor. Other nodes leave this empty.
+    pub caret: Option<u32>,
     /// Extra description, such as a field error. Never the password text.
     pub description: Option<String>,
 }
@@ -75,6 +87,9 @@ pub struct SemanticsHint {
     pub editable: Option<bool>,
     pub read_only: Option<bool>,
     pub description: Option<String>,
+    /// Focus traversal weight. Missing keeps tree order.
+    pub order: Option<i32>,
+    pub live: Option<LiveRegion>,
 }
 
 /// An action coming back from the platform accessibility bridge.
@@ -89,6 +104,27 @@ pub enum SemanticsAction {
 pub struct SemanticsUpdate {
     pub nodes: Vec<SemanticsNode>,
     pub root: SemanticsId,
+}
+
+/// One change since the previous semantics patch.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SemanticsOp {
+    Upsert(SemanticsNode),
+    Remove(SemanticsId),
+}
+
+/// Nodes that changed. An empty `ops` is not produced; the session uses `None`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SemanticsPatch {
+    pub root: SemanticsId,
+    pub ops: Vec<SemanticsOp>,
+}
+
+/// Live image sources. `generation` bumps on insert and removal, not on `Arc::strong_count`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageCensus {
+    pub generation: u64,
+    pub counts: std::sync::Arc<std::collections::HashMap<std::sync::Arc<str>, u32>>,
 }
 
 impl SemanticsId {

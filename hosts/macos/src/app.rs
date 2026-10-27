@@ -2,7 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
@@ -22,8 +22,9 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{
-    NSArray, NSAttributedString, NSDictionary, NSLocale, NSNotFound, NSNotification, NSPoint,
-    NSRange, NSRect, NSString, NSUInteger,
+    NSArray, NSAttributedString, NSDictionary, NSDistributedNotificationCenter, NSLocale,
+    NSNotFound, NSNotification, NSNotificationSuspensionBehavior, NSPoint, NSRange, NSRect,
+    NSString, NSUInteger,
 };
 use session::{InputEvent, Key};
 
@@ -56,6 +57,17 @@ fn modifiers_of(event: &NSEvent) -> Modifiers {
         modifiers = modifiers.with(Modifiers::META);
     }
     modifiers
+}
+
+fn shortcut_character(event: &NSEvent) -> Option<char> {
+    let text = event.charactersIgnoringModifiers()?;
+    let value = text.to_string();
+    let mut chars = value.chars();
+    let ch = chars.next()?;
+    if chars.next().is_some() || ch.is_control() {
+        return None;
+    }
+    Some(ch)
 }
 
 struct ContentIvars {
@@ -205,8 +217,33 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
+            let modifiers = modifiers_of(event);
+            let chord = modifiers.contains(Modifiers::CONTROL)
+                || modifiers.contains(Modifiers::ALT)
+                || modifiers.contains(Modifiers::META);
+            if chord && let Some(ch) = shortcut_character(event) {
+                self.post_edits(vec![InputEvent::Key(session::KeyPress {
+                    key: Key::Char(ch),
+                    shift: modifiers.contains(Modifiers::SHIFT),
+                    modifiers,
+                })]);
+                return;
+            }
             let events = NSArray::from_slice(&[event]);
             self.interpretKeyEvents(&events);
+        }
+
+        #[unsafe(method(magnifyWithEvent:))]
+        fn magnify_with_event(&self, event: &NSEvent) {
+            let local = self.convertPoint_fromView(event.locationInWindow(), None);
+            let (x, y) =
+                crate::pointer::scene_point(local.x, local.y, self.bounds().size.height);
+            self.ivars().poster.post(Command::Pointer(PointerEvent::zoom(
+                x,
+                y,
+                event.timestamp() * 1000.0,
+                event.magnification() as f32,
+            )));
         }
 
         #[unsafe(method(mouseDown:))]
@@ -310,6 +347,7 @@ impl ContentView {
             modifiers: modifiers_of(event),
             dx: 0.0,
             dy: 0.0,
+            zoom: 0.0,
         }));
     }
 
@@ -363,7 +401,10 @@ impl ContentView {
             "deleteBackward:" => self.ivars().marked.borrow_mut().backspace(),
             "copy:" => vec![InputEvent::Copy],
             "cut:" => vec![InputEvent::Cut],
-            "paste:" => vec![InputEvent::Paste(read_pasteboard())],
+            "paste:" => vec![InputEvent::Paste {
+                plain: read_pasteboard(),
+                html: read_pasteboard_html(),
+            }],
             _ => {
                 eprintln!("uifw text command ignored: {name}");
                 return;
@@ -470,6 +511,11 @@ define_class!(
             self.ivars()
                 .link
                 .post(Command::Lifecycle(session::Lifecycle::Resumed));
+            self.post_settings();
+        }
+
+        #[unsafe(method(themeChanged:))]
+        fn theme_changed(&self, _notification: &NSNotification) {
             self.post_settings();
         }
 
@@ -608,6 +654,7 @@ fn current_settings() -> session::PlatformSettings {
     let mut brightness = session::Brightness::Light;
     let mut reduce_motion = false;
     let mut high_contrast = false;
+    let mut bold_text = false;
     if let Some(mtm) = MainThreadMarker::new() {
         let name = NSApplication::sharedApplication(mtm)
             .effectiveAppearance()
@@ -617,6 +664,7 @@ fn current_settings() -> session::PlatformSettings {
         let workspace = NSWorkspace::sharedWorkspace();
         reduce_motion = workspace.accessibilityDisplayShouldReduceMotion();
         high_contrast = workspace.accessibilityDisplayShouldIncreaseContrast();
+        bold_text = unsafe { msg_send![&*workspace, accessibilityDisplayShouldPreferBoldText] };
         let options: Retained<NSDictionary<objc2_app_kit::NSFontTextStyleOptionKey, AnyObject>> =
             NSDictionary::new();
         let font =
@@ -628,7 +676,7 @@ fn current_settings() -> session::PlatformSettings {
         text_scale,
         brightness,
         reduce_motion,
-        bold_text: false,
+        bold_text,
         high_contrast,
     }
 }
@@ -690,7 +738,11 @@ fn command_key(selector: &str) -> Option<session::KeyPress> {
         "moveToEndOfDocumentAndModifySelection:" => (Key::DocumentEnd, true),
         _ => return None,
     };
-    Some(session::KeyPress { key, shift })
+    Some(session::KeyPress {
+        key,
+        shift,
+        modifiers: Modifiers::empty(),
+    })
 }
 
 struct MacServices {
@@ -765,9 +817,8 @@ impl Services for MacServices {
     }
 }
 
-/// What the window paints. The fixture path submits once. A script is a session.
+/// A script session. The shell paints the layer tree that session records.
 pub enum Launch {
-    Fixture(protocol::DrawList),
     Script { name: String, source: String },
 }
 
@@ -794,7 +845,7 @@ pub fn exit_code(error: &RunError) -> u8 {
     }
 }
 
-pub fn run(launch: Launch, assets: PathBuf, font: &[u8]) -> Result<(), RunError> {
+pub fn run(launch: Launch, assets: PathBuf, font: &[u8], dump_list: bool) -> Result<(), RunError> {
     let Some(mtm) = MainThreadMarker::new() else {
         return Err(RunError::Window(anyhow::anyhow!(
             "AppKit must start on the main thread"
@@ -808,18 +859,16 @@ pub fn run(launch: Launch, assets: PathBuf, font: &[u8]) -> Result<(), RunError>
         exit_for_stop.store(code, Ordering::SeqCst);
         wake_main();
     });
-    let shell_launch = match launch {
-        Launch::Fixture(list) => ShellLaunch::Fixture(list),
-        Launch::Script { name, source } => ShellLaunch::Session(Box::new(move |slot| {
-            quickjs::open(&source, &name, slot.shaper(), slot.log_hook()).map_err(|error| {
-                match error {
-                    quickjs::Error::NotLinked => SessionError::NotLinked,
-                    quickjs::Error::Runtime => SessionError::Runtime,
-                    quickjs::Error::Script(text) => SessionError::Script(text),
-                }
-            })
-        })),
-    };
+    let Launch::Script { name, source } = launch;
+    let shell_launch = ShellLaunch::Session(Box::new(move |slot, io| {
+        quickjs::open_with_io(&source, &name, slot.shaper(), slot.log_hook(), Some(io)).map_err(
+            |error| match error {
+                quickjs::Error::NotLinked => SessionError::NotLinked,
+                quickjs::Error::Runtime => SessionError::Runtime,
+                quickjs::Error::Script(text) => SessionError::Script(text),
+            },
+        )
+    }));
     let dump_for_surface = dump.clone();
     let on_stop_for_surface = Arc::clone(&on_stop);
     let ime_view = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
@@ -834,6 +883,10 @@ pub fn run(launch: Launch, assets: PathBuf, font: &[u8]) -> Result<(), RunError>
         vsync: Arc::new(vsync),
         decoder,
         bridge: Arc::new(MacBridge),
+        http: Some(
+            hostshell::http_client()
+                .map_err(|message| RunError::Window(anyhow::anyhow!(message)))?,
+        ),
         open_surface: Box::new(move |_engine, target| {
             Ok(Box::new(MetalSurface::new(
                 target.layer,
@@ -841,6 +894,7 @@ pub fn run(launch: Launch, assets: PathBuf, font: &[u8]) -> Result<(), RunError>
                 Arc::clone(&on_stop_for_surface),
             )))
         }),
+        dump_list,
     })
     .map_err(RunError::Boot)?;
 
@@ -902,11 +956,34 @@ pub fn run(launch: Launch, assets: PathBuf, font: &[u8]) -> Result<(), RunError>
         .window
         .setDelegate(Some(ProtocolObject::from_ref(&*host)));
     app.setDelegate(Some(ProtocolObject::from_ref(&*host)));
+    watch_appearance(&host);
     app.run();
     if exit_code.load(Ordering::SeqCst) != 0 {
         return Err(RunError::Dump);
     }
     Ok(())
+}
+
+fn watch_appearance(host: &Host) {
+    let name = NSString::from_str("AppleInterfaceThemeChangedNotification");
+    unsafe {
+        NSDistributedNotificationCenter::defaultCenter()
+            .addObserver_selector_name_object_suspensionBehavior(
+                host,
+                objc2::sel!(themeChanged:),
+                Some(&name),
+                None,
+                NSNotificationSuspensionBehavior::DeliverImmediately,
+            );
+        NSWorkspace::sharedWorkspace()
+            .notificationCenter()
+            .addObserver_selector_name_object(
+                host,
+                objc2::sel!(themeChanged:),
+                Some(objc2_app_kit::NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification),
+                None,
+            );
+    }
 }
 
 struct PngDecoder {
@@ -952,50 +1029,12 @@ fn image_handle(source: &str, rgba: crate::pixels::Rgba) -> hostshell::ImageHand
     }
 }
 
-fn asset_png(directory: &Path, source: &str) -> Option<PathBuf> {
-    let name = source.strip_prefix("asset:")?;
-    if name.is_empty() {
-        return None;
-    }
-    let mut path = directory.to_path_buf();
-    for part in name.split('/') {
-        if part.is_empty() || part == "." || part == ".." || part.contains('\\') {
-            return None;
-        }
-        path.push(part);
-    }
-    path.set_extension("png");
-    Some(path)
-}
-
 fn point_scale(window: &NSWindow, mtm: MainThreadMarker) -> f64 {
     let screen = window.screen().or_else(|| NSScreen::mainScreen(mtm));
     let factor = screen
         .map(|screen| screen.backingScaleFactor())
         .unwrap_or(0.0);
     if factor > 0.0 { factor } else { 2.0 }
-}
-
-#[cfg(test)]
-mod asset_tests {
-    use std::path::Path;
-
-    use super::asset_png;
-
-    #[test]
-    fn logo_stays_inside_the_asset_directory() {
-        let Some(path) = asset_png(Path::new("/assets"), "asset:logo") else {
-            panic!("logo");
-        };
-        assert_eq!(path, Path::new("/assets/logo.png"));
-    }
-
-    #[test]
-    fn parent_segments_are_rejected() {
-        assert!(asset_png(Path::new("/assets"), "asset:../logo").is_none());
-        assert!(asset_png(Path::new("/assets"), "logo").is_none());
-        assert!(asset_png(Path::new("/assets"), "asset:").is_none());
-    }
 }
 
 #[cfg(test)]
@@ -1061,6 +1100,95 @@ impl PlatformBridge for MacBridge {
         let url = url.to_owned();
         on_main_result(move || open_url_main(&url))
     }
+
+    fn document_dir(&self) -> Result<String, String> {
+        on_main_result_string(document_dir_main)
+    }
+
+    fn permission_status(&self, name: &str) -> String {
+        let name = name.to_owned();
+        on_main_string(move || permission_status_main(&name))
+    }
+
+    fn request_permissions(&self, names: &[String]) -> Vec<(String, String)> {
+        names
+            .iter()
+            .map(|name| {
+                let owned = name.clone();
+                (
+                    name.clone(),
+                    on_main_string(move || permission_status_main(&owned)),
+                )
+            })
+            .collect()
+    }
+
+    fn open_app_settings(&self) -> bool {
+        on_main_result(open_settings_main).is_ok()
+    }
+}
+
+fn on_main_result_string(
+    work: impl FnOnce() -> Result<String, String> + Send + 'static,
+) -> Result<String, String> {
+    if MainThreadMarker::new().is_some() {
+        return work();
+    }
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    dispatch_main(Box::new(move || {
+        let _ = tx.send(work());
+    }));
+    match rx.recv() {
+        Ok(result) => result,
+        Err(_) => Err("module \"FileSystem\" is not linked".to_owned()),
+    }
+}
+
+fn document_dir_main() -> Result<String, String> {
+    let Some(manager) = objc2::runtime::AnyClass::get(c"NSFileManager") else {
+        return Err("module \"FileSystem\" is not linked".to_owned());
+    };
+    let shared: *mut AnyObject = unsafe { msg_send![manager, defaultManager] };
+    if shared.is_null() {
+        return Err("module \"FileSystem\" is not linked".to_owned());
+    }
+    let url: *mut AnyObject = unsafe {
+        msg_send![shared, URLForDirectory: 9usize, inDomain: 1usize, appropriateForURL: std::ptr::null::<AnyObject>(), create: true, error: std::ptr::null_mut::<*mut AnyObject>()]
+    };
+    if url.is_null() {
+        return Err("module \"FileSystem\" is not linked".to_owned());
+    }
+    let path: *mut AnyObject = unsafe { msg_send![url, path] };
+    if path.is_null() {
+        return Err("module \"FileSystem\" is not linked".to_owned());
+    }
+    let text = unsafe { &*path.cast::<NSString>() };
+    Ok(text.to_string())
+}
+
+fn permission_status_main(name: &str) -> String {
+    match name {
+        "camera" | "microphone" => media_status(name),
+        _ => "denied".to_owned(),
+    }
+}
+
+fn media_status(name: &str) -> String {
+    let Some(device) = objc2::runtime::AnyClass::get(c"AVCaptureDevice") else {
+        return "denied".to_owned();
+    };
+    let media = NSString::from_str(if name == "camera" { "vide" } else { "soun" });
+    let status: i64 = unsafe { msg_send![device, authorizationStatusForMediaType: &*media] };
+    match status {
+        3 => "granted".to_owned(),
+        1 => "restricted".to_owned(),
+        2 => "denied".to_owned(),
+        _ => "denied".to_owned(),
+    }
+}
+
+fn open_settings_main() -> Result<(), String> {
+    open_url_main("x-apple.systempreferences:com.apple.preference.security?Privacy")
 }
 
 fn on_main_string(work: impl FnOnce() -> String + Send + 'static) -> String {
@@ -1141,7 +1269,16 @@ fn write_pasteboard(text: &str) {
     let _: bool = unsafe { msg_send![pasteboard, setString: &*value, forType: &*kind] };
 }
 
+fn read_pasteboard_html() -> Option<String> {
+    let text = pasteboard_string("public.html");
+    if text.is_empty() { None } else { Some(text) }
+}
+
 fn read_pasteboard() -> String {
+    pasteboard_string("public.utf8-plain-text")
+}
+
+fn pasteboard_string(kind: &str) -> String {
     let Some(class) = objc2::runtime::AnyClass::get(c"NSPasteboard") else {
         return String::new();
     };
@@ -1149,7 +1286,7 @@ fn read_pasteboard() -> String {
     if pasteboard.is_null() {
         return String::new();
     }
-    let kind = NSString::from_str("public.utf8-plain-text");
+    let kind = NSString::from_str(kind);
     let value: *mut AnyObject = unsafe { msg_send![pasteboard, stringForType: &*kind] };
     if value.is_null() {
         return String::new();

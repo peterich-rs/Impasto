@@ -1,7 +1,6 @@
-//! Blocking HTTP and WebSocket work for `uifw-net`.
+//! WebSocket work for `uifw-net`. HTTP is [`crate::http::OpenWireClient`].
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -9,7 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use session::{
-    HTTP_BODY_LIMIT, HttpError, HttpRequest, HttpResponse, IoJob, PluginResult, PluginValue,
+    HttpClient, HttpError, HttpRequest, IoJob, PluginResult, PluginValue, module_not_linked,
 };
 
 use crate::command::Command;
@@ -20,10 +19,11 @@ pub(crate) fn spawn(
     jobs: Receiver<IoJob>,
     inbox: Arc<Inbox>,
     bridge: Arc<dyn PlatformBridge>,
+    http: Option<Arc<dyn HttpClient>>,
 ) -> Option<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name("uifw-net".to_string())
-        .spawn(move || serve(jobs, inbox, bridge))
+        .spawn(move || serve(jobs, inbox, bridge, http))
         .ok()
 }
 
@@ -37,7 +37,12 @@ pub(crate) fn wake(
         .ok()
 }
 
-fn serve(jobs: Receiver<IoJob>, inbox: Arc<Inbox>, bridge: Arc<dyn PlatformBridge>) {
+fn serve(
+    jobs: Receiver<IoJob>,
+    inbox: Arc<Inbox>,
+    bridge: Arc<dyn PlatformBridge>,
+    http: Option<Arc<dyn HttpClient>>,
+) {
     let mut sockets: HashMap<u64, Sender<SocketCmd>> = HashMap::new();
     while let Ok(job) = jobs.recv() {
         match job {
@@ -46,7 +51,10 @@ fn serve(jobs: Receiver<IoJob>, inbox: Arc<Inbox>, bridge: Arc<dyn PlatformBridg
                     continue;
                 }
                 let token = request.token;
-                let result = perform_http(&request);
+                let result = match http.as_ref() {
+                    Some(client) => client.perform(&request),
+                    None => Err(HttpError::new("network is not linked")),
+                };
                 if request.cancel.load(Ordering::Acquire) {
                     continue;
                 }
@@ -93,12 +101,18 @@ enum SocketCmd {
     Close,
 }
 
-/// HTTPS image body. HTTP is rejected. The body cap matches [`session::HTTP_BODY_LIMIT`].
-pub(crate) fn fetch_image_body(url: &str) -> Result<Vec<u8>, crate::images::ImageError> {
+/// HTTPS image body. HTTP is rejected. The body cap matches [`crate::images::IMAGE_BODY_LIMIT`].
+pub(crate) fn fetch_image_body(
+    http: Option<&dyn HttpClient>,
+    url: &str,
+) -> Result<Vec<u8>, crate::images::ImageError> {
     use crate::images::ImageError;
     if !url.starts_with("https://") {
         return Err(ImageError::Failed("image URL must be https".into()));
     }
+    let Some(http) = http else {
+        return Err(ImageError::Failed("network is not linked".into()));
+    };
     let request = HttpRequest {
         token: 0,
         method: "GET".to_owned(),
@@ -107,7 +121,7 @@ pub(crate) fn fetch_image_body(url: &str) -> Result<Vec<u8>, crate::images::Imag
         body: Vec::new(),
         cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
-    match perform_http(&request) {
+    match http.perform(&request) {
         Ok(response) if (200..300).contains(&response.status) => {
             if response.body.len() > crate::images::IMAGE_BODY_LIMIT {
                 return Err(ImageError::Failed("image exceeds body limit".into()));
@@ -117,300 +131,6 @@ pub(crate) fn fetch_image_body(url: &str) -> Result<Vec<u8>, crate::images::Imag
         Ok(response) => Err(ImageError::Failed(format!("HTTP {}", response.status))),
         Err(error) => Err(ImageError::Failed(error.message)),
     }
-}
-
-pub(crate) fn perform_http(request: &HttpRequest) -> Result<HttpResponse, HttpError> {
-    if !(request.url.starts_with("http://") || request.url.starts_with("https://")) {
-        return Err(HttpError::new("unsupported URL"));
-    }
-    let mut url = request.url.clone();
-    let mut method = request.method.clone();
-    let mut body = request.body.clone();
-    for _ in 0..5 {
-        let target = parse_http_url(&url)?;
-        let response = exchange(&target, &method, &request.headers, &body)?;
-        if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
-            return Ok(response);
-        }
-        let Some(location) = response
-            .headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("location"))
-            .map(|(_, value)| value.clone())
-        else {
-            return Ok(response);
-        };
-        url = resolve_redirect(&target, &location);
-        if response.status == 303 {
-            method = "GET".to_owned();
-            body.clear();
-        }
-    }
-    Err(HttpError::new("too many redirects"))
-}
-
-struct HttpTarget {
-    https: bool,
-    host: String,
-    port: u16,
-    path: String,
-}
-
-fn parse_http_url(url: &str) -> Result<HttpTarget, HttpError> {
-    let (https, rest) = if let Some(rest) = url.strip_prefix("https://") {
-        (true, rest)
-    } else if let Some(rest) = url.strip_prefix("http://") {
-        (false, rest)
-    } else {
-        return Err(HttpError::new("unsupported URL"));
-    };
-    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-    if authority.is_empty() {
-        return Err(HttpError::new("unsupported URL"));
-    }
-    let (host, port) = if let Some(host) = authority.strip_prefix('[') {
-        let Some((host, port)) = host.split_once("]:") else {
-            return Err(HttpError::new("unsupported URL"));
-        };
-        let port = port
-            .parse::<u16>()
-            .map_err(|_| HttpError::new("unsupported URL"))?;
-        (host.to_owned(), port)
-    } else if let Some((host, port)) = authority.rsplit_once(':') {
-        let port = port
-            .parse::<u16>()
-            .map_err(|_| HttpError::new("unsupported URL"))?;
-        (host.to_owned(), port)
-    } else {
-        (authority.to_owned(), if https { 443 } else { 80 })
-    };
-    let path = if path.is_empty() {
-        "/".to_owned()
-    } else {
-        format!("/{path}")
-    };
-    Ok(HttpTarget {
-        https,
-        host,
-        port,
-        path,
-    })
-}
-
-fn resolve_redirect(current: &HttpTarget, location: &str) -> String {
-    if location.starts_with("http://") || location.starts_with("https://") {
-        return location.to_owned();
-    }
-    let scheme = if current.https { "https" } else { "http" };
-    if let Some(path) = location.strip_prefix('/') {
-        return format!("{scheme}://{}:{}/{path}", current.host, current.port);
-    }
-    format!(
-        "{scheme}://{}:{}{}",
-        current.host, current.port, current.path
-    )
-}
-
-fn exchange(
-    target: &HttpTarget,
-    method: &str,
-    headers: &[(String, String)],
-    body: &[u8],
-) -> Result<HttpResponse, HttpError> {
-    let address = format!("{}:{}", target.host, target.port);
-    let mut tcp =
-        std::net::TcpStream::connect(address).map_err(|error| HttpError::new(error.to_string()))?;
-    tcp.set_read_timeout(Some(Duration::from_secs(20)))
-        .map_err(|error| HttpError::new(error.to_string()))?;
-    tcp.set_write_timeout(Some(Duration::from_secs(20)))
-        .map_err(|error| HttpError::new(error.to_string()))?;
-    if target.https {
-        let mut tls = tls_stream(tcp, &target.host)?;
-        write_request(&mut tls, target, method, headers, body)?;
-        read_http(&mut tls)
-    } else {
-        write_request(&mut tcp, target, method, headers, body)?;
-        read_http(&mut tcp)
-    }
-}
-
-fn tls_stream(
-    tcp: std::net::TcpStream,
-    host: &str,
-) -> Result<rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>, HttpError> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    let name = rustls::pki_types::ServerName::try_from(host.to_owned())
-        .map_err(|_| HttpError::new("unsupported URL"))?;
-    let connection = rustls::ClientConnection::new(Arc::new(config), name)
-        .map_err(|error| HttpError::new(error.to_string()))?;
-    Ok(rustls::StreamOwned::new(connection, tcp))
-}
-
-fn write_request(
-    stream: &mut dyn Write,
-    target: &HttpTarget,
-    method: &str,
-    headers: &[(String, String)],
-    body: &[u8],
-) -> Result<(), HttpError> {
-    let mut head = format!(
-        "{method} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n",
-        target.path,
-        target.host,
-        body.len()
-    );
-    for (name, value) in headers {
-        if name.eq_ignore_ascii_case("host")
-            || name.eq_ignore_ascii_case("content-length")
-            || name.eq_ignore_ascii_case("connection")
-        {
-            continue;
-        }
-        head.push_str(name);
-        head.push_str(": ");
-        head.push_str(value);
-        head.push_str("\r\n");
-    }
-    head.push_str("\r\n");
-    stream
-        .write_all(head.as_bytes())
-        .and_then(|()| stream.write_all(body))
-        .map_err(|error| HttpError::new(error.to_string()))
-}
-
-fn read_http(stream: &mut dyn Read) -> Result<HttpResponse, HttpError> {
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 4096];
-    while raw.windows(4).all(|window| window != b"\r\n\r\n") {
-        let count = read_some(stream, &mut buf)?;
-        if count == 0 {
-            return Err(HttpError::new("short response"));
-        }
-        raw.extend_from_slice(&buf[..count]);
-        if raw.len() > HTTP_BODY_LIMIT {
-            return Err(HttpError::new("TypeError"));
-        }
-    }
-    let split = raw
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| HttpError::new("short response"))?
-        + 4;
-    let mut header_slots = [httparse::EMPTY_HEADER; 64];
-    let mut parsed = httparse::Response::new(&mut header_slots);
-    let status = parsed
-        .parse(&raw[..split])
-        .map_err(|error| HttpError::new(error.to_string()))?;
-    if status.is_partial() {
-        return Err(HttpError::new("short response"));
-    }
-    let Some(code) = parsed.code else {
-        return Err(HttpError::new("short response"));
-    };
-    let headers = parsed
-        .headers
-        .iter()
-        .map(|header| {
-            (
-                header.name.to_owned(),
-                String::from_utf8_lossy(header.value).into_owned(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let mut payload = raw[split..].to_vec();
-    let chunked = headers.iter().any(|(name, value)| {
-        name.eq_ignore_ascii_case("transfer-encoding")
-            && value.to_ascii_lowercase().contains("chunked")
-    });
-    let length = headers.iter().find_map(|(name, value)| {
-        name.eq_ignore_ascii_case("content-length")
-            .then(|| value.parse::<usize>().ok())
-            .flatten()
-    });
-    if let Some(length) = length {
-        while payload.len() < length {
-            let count = read_some(stream, &mut buf)?;
-            if count == 0 {
-                break;
-            }
-            payload.extend_from_slice(&buf[..count]);
-            if payload.len() > HTTP_BODY_LIMIT {
-                return Err(HttpError::new("TypeError"));
-            }
-        }
-        payload.truncate(length);
-    } else if chunked {
-        loop {
-            let count = read_some(stream, &mut buf)?;
-            if count == 0 {
-                break;
-            }
-            payload.extend_from_slice(&buf[..count]);
-            if payload.len() > HTTP_BODY_LIMIT {
-                return Err(HttpError::new("TypeError"));
-            }
-        }
-        payload = decode_chunked(&payload)?;
-    } else {
-        loop {
-            let count = read_some(stream, &mut buf)?;
-            if count == 0 {
-                break;
-            }
-            payload.extend_from_slice(&buf[..count]);
-            if payload.len() > HTTP_BODY_LIMIT {
-                return Err(HttpError::new("TypeError"));
-            }
-        }
-    }
-    if payload.len() > HTTP_BODY_LIMIT {
-        return Err(HttpError::new("TypeError"));
-    }
-    Ok(HttpResponse {
-        status: code,
-        headers,
-        body: payload,
-    })
-}
-
-fn read_some(stream: &mut dyn Read, buf: &mut [u8]) -> Result<usize, HttpError> {
-    loop {
-        match stream.read(buf) {
-            Ok(count) => return Ok(count),
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(HttpError::new(error.to_string())),
-        }
-    }
-}
-
-fn decode_chunked(data: &[u8]) -> Result<Vec<u8>, HttpError> {
-    let mut out = Vec::new();
-    let mut rest = data;
-    loop {
-        let Some(end) = rest.windows(2).position(|window| window == b"\r\n") else {
-            return Err(HttpError::new("chunk"));
-        };
-        let line = std::str::from_utf8(&rest[..end]).map_err(|_| HttpError::new("chunk"))?;
-        let size = usize::from_str_radix(line.split(';').next().unwrap_or(line).trim(), 16)
-            .map_err(|_| HttpError::new("chunk"))?;
-        rest = &rest[end + 2..];
-        if size == 0 {
-            break;
-        }
-        if rest.len() < size + 2 {
-            return Err(HttpError::new("chunk"));
-        }
-        out.extend_from_slice(&rest[..size]);
-        rest = &rest[size + 2..];
-        if out.len() > HTTP_BODY_LIMIT {
-            return Err(HttpError::new("TypeError"));
-        }
-    }
-    Ok(out)
 }
 
 fn plugin(
@@ -423,6 +143,11 @@ fn plugin(
         Some(PluginValue::Str(value)) => value.as_str(),
         _ => "",
     };
+    let root = || {
+        bridge
+            .document_dir()
+            .map(|dir| std::path::PathBuf::from(dir))
+    };
     match (name, method) {
         ("Clipboard", "getString") => PluginResult::Done(PluginValue::Str(bridge.read_clipboard())),
         ("Clipboard", "setString") => {
@@ -433,10 +158,131 @@ fn plugin(
             Ok(()) => PluginResult::Done(PluginValue::Null),
             Err(message) => PluginResult::Failed { message },
         },
+        ("FileSystem", "documentDirectory") => match bridge.document_dir() {
+            Ok(dir) => PluginResult::Done(PluginValue::Str(dir)),
+            Err(message) => PluginResult::Failed { message },
+        },
+        ("FileSystem", "read") => {
+            match root().and_then(|dir| crate::files::read_document(&dir, text)) {
+                Ok(bytes) => PluginResult::Done(PluginValue::Bytes(bytes)),
+                Err(message) => PluginResult::Failed { message },
+            }
+        }
+        ("FileSystem", "write") => {
+            let bytes = match args.get(1) {
+                Some(PluginValue::Bytes(bytes)) => bytes.clone(),
+                Some(PluginValue::Str(value)) => value.as_bytes().to_vec(),
+                _ => Vec::new(),
+            };
+            match root().and_then(|dir| crate::files::write_document(&dir, text, &bytes)) {
+                Ok(()) => PluginResult::Done(PluginValue::Null),
+                Err(message) => PluginResult::Failed { message },
+            }
+        }
+        ("FileSystem", "delete") => {
+            match root().and_then(|dir| crate::files::delete_document(&dir, text)) {
+                Ok(()) => PluginResult::Done(PluginValue::Null),
+                Err(message) => PluginResult::Failed { message },
+            }
+        }
+        ("FileSystem", "pick") => match bridge.pick_document() {
+            Ok(Some(name)) => PluginResult::Done(PluginValue::Map(vec![(
+                "name".to_owned(),
+                PluginValue::Str(name),
+            )])),
+            Ok(None) => PluginResult::Done(PluginValue::Null),
+            Err(message) => PluginResult::Failed { message },
+        },
+        ("AsyncStorage", "multiGet") => {
+            match root().and_then(|dir| crate::files::store_get(&dir, &string_list(args.first()))) {
+                Ok(rows) => PluginResult::Done(PluginValue::List(
+                    rows.into_iter()
+                        .map(|(key, value)| {
+                            PluginValue::List(vec![
+                                PluginValue::Str(key),
+                                value.map(PluginValue::Str).unwrap_or(PluginValue::Null),
+                            ])
+                        })
+                        .collect(),
+                )),
+                Err(message) => PluginResult::Failed { message },
+            }
+        }
+        ("AsyncStorage", "multiSet") => {
+            match root().and_then(|dir| crate::files::store_set(&dir, &string_pairs(args.first())))
+            {
+                Ok(()) => PluginResult::Done(PluginValue::Null),
+                Err(message) => PluginResult::Failed { message },
+            }
+        }
+        ("AsyncStorage", "multiRemove") => {
+            match root()
+                .and_then(|dir| crate::files::store_remove(&dir, &string_list(args.first())))
+            {
+                Ok(()) => PluginResult::Done(PluginValue::Null),
+                Err(message) => PluginResult::Failed { message },
+            }
+        }
+        ("AsyncStorage", "clear") => match root().and_then(|dir| crate::files::store_clear(&dir)) {
+            Ok(()) => PluginResult::Done(PluginValue::Null),
+            Err(message) => PluginResult::Failed { message },
+        },
+        ("Permissions", "checkPermissionStatus") => {
+            PluginResult::Done(PluginValue::Str(bridge.permission_status(text)))
+        }
+        ("Permissions", "requestPermissions") => {
+            let rows = bridge
+                .request_permissions(&string_list(args.first()))
+                .into_iter()
+                .map(|(name, status)| (name, PluginValue::Str(status)))
+                .collect();
+            PluginResult::Done(PluginValue::Map(rows))
+        }
+        ("Permissions", "shouldShowRequestPermissionRationale") => {
+            PluginResult::Done(PluginValue::Bool(bridge.permission_rationale(text)))
+        }
+        ("Permissions", "checkServiceStatus") => {
+            PluginResult::Done(PluginValue::Str(bridge.service_status(text)))
+        }
+        ("Permissions", "openAppSettings") => {
+            PluginResult::Done(PluginValue::Bool(bridge.open_app_settings()))
+        }
         _ => PluginResult::Failed {
-            message: "module is not linked".to_owned(),
+            message: module_not_linked(name, Some(method)),
         },
     }
+}
+
+fn string_list(value: Option<&PluginValue>) -> Vec<String> {
+    let Some(PluginValue::List(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| match item {
+            PluginValue::Str(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn string_pairs(value: Option<&PluginValue>) -> Vec<(String, String)> {
+    let Some(PluginValue::List(rows)) = value else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let PluginValue::List(pair) = row else {
+                return None;
+            };
+            match (pair.first(), pair.get(1)) {
+                (Some(PluginValue::Str(key)), Some(PluginValue::Str(value))) => {
+                    Some((key.clone(), value.clone()))
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 fn post_socket(inbox: &Inbox, id: u64, event: &str, text: bool, data: &[u8]) {
@@ -588,9 +434,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
-    use session::HttpRequest;
+    use session::{HttpClient, HttpRequest};
 
-    use super::perform_http;
+    use crate::http::OpenWireClient;
 
     fn request(url: &str) -> HttpRequest {
         HttpRequest {
@@ -605,7 +451,11 @@ mod tests {
 
     #[test]
     fn ftp_is_rejected_before_a_connection() {
-        match perform_http(&request("ftp://example.test")) {
+        let client = match OpenWireClient::new() {
+            Ok(client) => client,
+            Err(error) => panic!("{error}"),
+        };
+        match client.perform(&request("ftp://example.test")) {
             Err(error) => assert_eq!(error.message, "unsupported URL"),
             Ok(_) => panic!("ftp should fail"),
         }
@@ -635,9 +485,16 @@ mod tests {
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.write_all(body);
         });
-        let result = perform_http(&request(&format!("http://127.0.0.1:{port}/")));
+        let client = match OpenWireClient::new() {
+            Ok(client) => client,
+            Err(error) => panic!("{error}"),
+        };
+        let result = client.perform(&request(&format!("http://127.0.0.1:{port}/")));
         match result {
-            Ok(response) => assert_eq!(response.body, b"hello"),
+            Ok(response) => {
+                assert_eq!(response.status, 200);
+                assert_eq!(response.body, b"hello");
+            }
             Err(error) => panic!("{}", error.message),
         }
         let _ = server.join();

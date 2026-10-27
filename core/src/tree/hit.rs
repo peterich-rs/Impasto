@@ -49,11 +49,20 @@ impl Tree {
     /// True when the scene point lies in `id`'s own box, including a transform's
     /// scene bounds. Does not walk the rest of the tree.
     pub(super) fn point_hits_node(&self, id: NodeId, scene_x: f32, scene_y: f32) -> bool {
-        let Some(node) = self.get(id) else {
+        let Some((kind, w, h, radius, scale_x, scale_y)) = self.get(id).map(|node| {
+            let geom = node.transform();
+            (
+                node.kind,
+                node.w,
+                node.h,
+                node.corner_radius(),
+                geom.scale_x,
+                geom.scale_y,
+            )
+        }) else {
             return false;
         };
-        if node.kind == Kind::Transform {
-            let (scale_x, scale_y) = (node.scale, node.scale_y);
+        if kind == Kind::Transform {
             return scale_x.abs() >= SCALE_EPSILON
                 && scale_y.abs() >= SCALE_EPSILON
                 && self.transformed_box_contains(id, scene_x, scene_y);
@@ -61,82 +70,131 @@ impl Tree {
         let Some((x, y)) = self.scene_to_layout(id, scene_x, scene_y) else {
             return false;
         };
-        if x < node.x || y < node.y || x >= node.x + node.w || y >= node.y + node.h {
+        let Ok((bx, by)) = self.layout_point(id) else {
+            return false;
+        };
+        if x < bx || y < by || x >= bx + w || y >= by + h {
             return false;
         }
-        !radius_shapes_hit(node.kind)
-            || rounded_contains(node.x, node.y, node.w, node.h, node.corner_radius, x, y)
+        !radius_shapes_hit(kind) || rounded_contains(bx, by, w, h, radius, x, y)
+    }
+
+    /// Fills `out` from the root to the leaf under the scene point. The buffer is cleared first.
+    pub fn hit_path(&self, x: f32, y: f32, out: &mut crate::HitPath) {
+        out.clear();
+        let (origin_x, origin_y) = self.origin;
+        if let Some(root) = self.root {
+            let _ = self.hit(root, HitQuery::at_scene(x, y), origin_x, origin_y, out);
+        }
     }
 
     pub(super) fn hit_root(&self, x: f32, y: f32) -> Option<NodeId> {
-        self.root
-            .and_then(|root| self.hit(root, HitQuery::at_scene(x, y)))
+        let mut path = crate::HitPath::default();
+        self.hit_path(x, y, &mut path);
+        path.leaf()
     }
 
-    fn hit(&self, id: NodeId, query: HitQuery) -> Option<NodeId> {
+    fn hit(
+        &self,
+        id: NodeId,
+        query: HitQuery,
+        parent_x: f32,
+        parent_y: f32,
+        path: &mut crate::HitPath,
+    ) -> Option<NodeId> {
         let node = self.get(id)?;
+        // An empty text can be stretched across a stack cell. It is not drawn
+        // and must not sit in front of the scroll underneath it.
+        if node.kind == Kind::Text && node.text().is_none_or(|text| text.utf8.is_empty()) {
+            return None;
+        }
+        let abs_x = parent_x + node.x;
+        let abs_y = parent_y + node.y;
         if node.w == 0.0 || node.h == 0.0 {
             return None;
         }
         if node.kind == Kind::Transform {
-            let (scale_x, scale_y) = (node.scale, node.scale_y);
+            let geom = node.transform();
+            let (scale_x, scale_y) = (geom.scale_x, geom.scale_y);
             if scale_x.abs() < SCALE_EPSILON || scale_y.abs() < SCALE_EPSILON {
                 return None;
             }
-            if !transform_contains(node, &query) {
+            if !transform_contains(node, abs_x, abs_y, &query) {
                 return None;
             }
         } else {
             let (x, y) = query.layout_point();
-            if x < node.x || y < node.y || x >= node.x + node.w || y >= node.y + node.h {
+            if x < abs_x || y < abs_y || x >= abs_x + node.w || y >= abs_y + node.h {
                 return None;
             }
             if radius_shapes_hit(node.kind)
-                && !rounded_contains(node.x, node.y, node.w, node.h, node.corner_radius, x, y)
+                && !rounded_contains(abs_x, abs_y, node.w, node.h, node.corner_radius(), x, y)
             {
                 return None;
             }
         }
+        let (local_x, local_y) = query.layout_point();
+        path.push(crate::HitEntry {
+            id,
+            x: local_x - abs_x,
+            y: local_y - abs_y,
+        });
         let child_query = match node.kind {
-            Kind::Scroll => HitQuery {
-                scroll_x: query.scroll_x + node.scroll.0,
-                scroll_y: query.scroll_y + node.scroll.1,
-                ..query
-            },
+            Kind::Scroll => {
+                let scroll = node.scroll_paint();
+                HitQuery {
+                    scroll_x: query.scroll_x + scroll.0,
+                    scroll_y: query.scroll_y + scroll.1,
+                    ..query
+                }
+            }
             Kind::Transform => {
-                let (scale_x, scale_y) = (node.scale, node.scale_y);
+                let geom = node.transform();
                 let (x, y) = inverse_transform(
                     query.x,
                     query.y,
-                    node.translate_x,
-                    node.translate_y,
-                    node.rotate_rad,
-                    scale_x,
-                    scale_y,
+                    geom.translate_x,
+                    geom.translate_y,
+                    geom.rotate_rad,
+                    geom.scale_x,
+                    geom.scale_y,
                 )?;
                 HitQuery {
                     x,
                     y,
                     to_scene: query.to_scene.around(Affine::paint(
-                        node.translate_x,
-                        node.translate_y,
-                        node.rotate_rad,
-                        scale_x,
-                        scale_y,
+                        geom.translate_x,
+                        geom.translate_y,
+                        geom.rotate_rad,
+                        geom.scale_x,
+                        geom.scale_y,
                     )),
                     ..query
                 }
             }
             _ => query,
         };
-        for child in node.children.iter().rev() {
-            if let Some(hit) = self.hit(*child, child_query) {
+        let mut child = node.last_child;
+        let role = node.hit_role();
+        let kind = node.kind;
+        let _ = node;
+        while let Some(current) = child {
+            let prev = self.get(current)?.prev;
+            if let Some(hit) = self.hit(current, child_query, abs_x, abs_y, path) {
                 return Some(hit);
             }
+            child = prev;
         }
-        match node.hit {
+        match role {
             Hit::Opaque | Hit::Region => Some(id),
-            Hit::Defer => None,
+            // The viewport is the drag target. A point in the box with no child
+            // still starts a scroll, and does not become a press: the role stays
+            // defer, so `region_of` walks through it.
+            Hit::Defer if kind == Kind::Scroll => Some(id),
+            Hit::Defer => {
+                path.pop();
+                None
+            }
         }
     }
 
@@ -159,14 +217,15 @@ impl Tree {
         let node = self.get(id)?;
         let (scroll_x, scroll_y, mut transforms) = self.ancestor_paint(id)?;
         if node.kind == Kind::Transform {
+            let geom = node.transform();
             transforms.insert(
                 0,
                 (
-                    node.translate_x,
-                    node.translate_y,
-                    node.rotate_rad,
-                    node.scale,
-                    node.scale_y,
+                    geom.translate_x,
+                    geom.translate_y,
+                    geom.rotate_rad,
+                    geom.scale_x,
+                    geom.scale_y,
                 ),
             );
         }
@@ -187,16 +246,18 @@ impl Tree {
         while let Some(pid) = parent {
             let node = self.get(pid)?;
             if node.kind == Kind::Scroll {
-                scroll_x += node.scroll.0;
-                scroll_y += node.scroll.1;
+                let scroll = node.scroll_paint();
+                scroll_x += scroll.0;
+                scroll_y += scroll.1;
             }
             if node.kind == Kind::Transform {
+                let geom = node.transform();
                 transforms.push((
-                    node.translate_x,
-                    node.translate_y,
-                    node.rotate_rad,
-                    node.scale,
-                    node.scale_y,
+                    geom.translate_x,
+                    geom.translate_y,
+                    geom.rotate_rad,
+                    geom.scale_x,
+                    geom.scale_y,
                 ));
             }
             parent = node.parent;
@@ -208,12 +269,12 @@ impl Tree {
         let Some(node) = self.get(id) else {
             return false;
         };
-        let corners = [
-            (node.x, node.y),
-            (node.x + node.w, node.y),
-            (node.x + node.w, node.y + node.h),
-            (node.x, node.y + node.h),
-        ];
+        let (w, h) = (node.w, node.h);
+        let _ = node;
+        let Ok((bx, by)) = self.layout_point(id) else {
+            return false;
+        };
+        let corners = [(bx, by), (bx + w, by), (bx + w, by + h), (bx, by + h)];
         let mut min_x = f32::MAX;
         let mut min_y = f32::MAX;
         let mut max_x = f32::MIN;
@@ -279,10 +340,7 @@ impl Tree {
     }
 
     fn scroll_held_by_other(&self, id: NodeId, pointer: Option<crate::PointerId>) -> bool {
-        self.arena
-            .scroll_locks
-            .get(&id)
-            .is_some_and(|owner| pointer.is_none_or(|pointer| pointer != *owner))
+        crate::ScrollRecognizer::locked_by_other(&self.arena.scroll_locks, id, pointer)
     }
 
     fn overflows(&self, id: NodeId, horizontal: bool) -> bool {
@@ -307,7 +365,7 @@ impl Tree {
         let Some((content_w, content_h)) = self.scroll_content(id) else {
             return false;
         };
-        let (offset_x, offset_y) = node.scroll;
+        let (offset_x, offset_y) = node.scroll_offset();
         if horizontal {
             if content_w <= node.w + 0.5 {
                 return false;
@@ -333,10 +391,13 @@ impl Tree {
         let node = self.get(id)?;
         let mut width: f32 = 0.0;
         let mut height: f32 = 0.0;
-        for child in &node.children {
-            let child = self.get(*child)?;
-            width = width.max(child.w);
-            height = height.max(child.h);
+        let mut child = node.first_child;
+        while let Some(current) = child {
+            let next = self.get(current)?.next;
+            let child_node = self.get(current)?;
+            width = width.max(child_node.w);
+            height = height.max(child_node.h);
+            child = next;
         }
         Some((width, height))
     }
@@ -345,6 +406,9 @@ impl Tree {
         let Some(node) = self.get(id) else {
             return false;
         };
+        if let Some(axis) = node.recognizers.drag {
+            return axis.matches(dx, dy);
+        }
         match node.drag_claim {
             DragClaim::None => false,
             DragClaim::Free => dx != 0.0 || dy != 0.0,
@@ -358,7 +422,7 @@ impl Tree {
                 return None;
             }
             let node = self.get(id)?;
-            if node.focusable {
+            if node.is_focusable() {
                 return Some(id);
             }
             id = node.parent?;
@@ -375,7 +439,7 @@ impl Tree {
     pub(super) fn region_of(&self, mut id: NodeId) -> Option<NodeId> {
         loop {
             let node = self.get(id)?;
-            if node.hit == Hit::Region {
+            if node.hit_role() == Hit::Region {
                 return Some(id);
             }
             id = node.parent?;
@@ -398,19 +462,20 @@ impl Tree {
     }
 }
 
-fn transform_contains(node: &super::node::Node, query: &HitQuery) -> bool {
+fn transform_contains(node: &super::node::Node, abs_x: f32, abs_y: f32, query: &HitQuery) -> bool {
+    let geom = node.transform();
     let map = query.to_scene.around(Affine::paint(
-        node.translate_x,
-        node.translate_y,
-        node.rotate_rad,
-        node.scale,
-        node.scale_y,
+        geom.translate_x,
+        geom.translate_y,
+        geom.rotate_rad,
+        geom.scale_x,
+        geom.scale_y,
     ));
     let corners = [
-        (node.x, node.y),
-        (node.x + node.w, node.y),
-        (node.x + node.w, node.y + node.h),
-        (node.x, node.y + node.h),
+        (abs_x, abs_y),
+        (abs_x + node.w, abs_y),
+        (abs_x + node.w, abs_y + node.h),
+        (abs_x, abs_y + node.h),
     ];
     let mut min_x = f32::MAX;
     let mut min_y = f32::MAX;

@@ -68,6 +68,8 @@ pub struct PointerEvent {
     pub modifiers: Modifiers,
     pub dx: f32,
     pub dy: f32,
+    /// Relative magnification. Zero unless [`Phase::Zoom`].
+    pub zoom: f32,
 }
 
 impl PointerEvent {
@@ -84,6 +86,7 @@ impl PointerEvent {
             modifiers: Modifiers::empty(),
             dx: 0.0,
             dy: 0.0,
+            zoom: 0.0,
         }
     }
 
@@ -100,6 +103,25 @@ impl PointerEvent {
             modifiers: Modifiers::empty(),
             dx,
             dy,
+            zoom: 0.0,
+        }
+    }
+
+    /// Magnification sample. `scale` is the relative factor for this event.
+    pub fn zoom(x: f32, y: f32, time_ms: f64, scale: f32) -> Self {
+        Self {
+            pointer: PointerId(0),
+            kind: PointerKind::Mouse,
+            phase: Phase::Zoom,
+            x,
+            y,
+            time_ms,
+            button: Button::None,
+            buttons: Buttons::empty(),
+            modifiers: Modifiers::empty(),
+            dx: 0.0,
+            dy: 0.0,
+            zoom: scale,
         }
     }
 }
@@ -156,4 +178,7 @@ pub enum Phase {
     Up,
     Cancel,
     Wheel,
+    /// Magnification. The factor is [`PointerEvent::zoom`], not a payload here,
+    /// so [`Phase`] stays [`Eq`].
+    Zoom,
 }

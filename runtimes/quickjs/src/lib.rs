@@ -5,6 +5,10 @@ use ui_core::Shaper;
 
 mod error;
 
+mod abi {
+    include!(concat!(env!("OUT_DIR"), "/abi.rs"));
+}
+
 #[cfg(quickjs)]
 mod linked;
 
@@ -23,14 +27,29 @@ pub fn open(
     shaper: impl Shaper + 'static,
     log: Box<dyn Fn(u8, &str)>,
 ) -> Result<Box<dyn session::Session>, Error> {
+    open_with_io(script, name, shaper, log, None)
+}
+
+/// Opens a session and installs the host sink for [`session::IoJob`].
+pub fn open_with_io(
+    script: &str,
+    name: &str,
+    shaper: impl Shaper + 'static,
+    log: Box<dyn Fn(u8, &str)>,
+    io: Option<Box<dyn Fn(session::IoJob) + Send>>,
+) -> Result<Box<dyn session::Session>, Error> {
     #[cfg(quickjs_missing)]
     {
-        let _ = (script, name, shaper, log);
+        let _ = (script, name, shaper, log, io);
         Err(Error::NotLinked)
     }
     #[cfg(quickjs)]
     {
-        Ok(Box::new(JsSession::open(script, name, shaper, log)?))
+        let mut session = JsSession::open(script, name, shaper, log)?;
+        if let Some(io) = io {
+            session.install_io(io);
+        }
+        Ok(Box::new(session))
     }
 }
 
@@ -50,27 +69,90 @@ mod tests {
         Metrics::new(320.0, 180.0, 1.0)
     }
 
-    fn texts(list: &protocol::DrawList) -> Vec<&str> {
-        list.commands
-            .iter()
-            .filter_map(|command| match command {
-                Command::Text { utf8, .. } => Some(utf8.as_ref()),
-                _ => None,
-            })
-            .collect()
+    fn phone() -> Metrics {
+        Metrics::new(360.0, 640.0, 2.0)
     }
 
-    fn text_spot(list: &protocol::DrawList, utf8: &str) -> (f32, f32) {
-        for command in &list.commands {
+    fn visit_commands<'a>(
+        frame: &'a session::FrameOutput,
+        visit: &mut dyn FnMut(&'a Command, f32, f32),
+    ) {
+        let Some(tree) = frame.layers.as_deref() else {
+            return;
+        };
+        fn walk<'a>(
+            tree: &'a protocol::LayerTree,
+            id: protocol::LayerId,
+            tx: f32,
+            ty: f32,
+            visit: &mut dyn FnMut(&'a Command, f32, f32),
+        ) {
+            let Some(layer) = tree.layers.get(id.0 as usize) else {
+                return;
+            };
+            let (mut next_x, mut next_y) = (tx, ty);
+            match layer.kind {
+                protocol::LayerKind::Offset { x, y } => {
+                    next_x += x;
+                    next_y += y;
+                }
+                protocol::LayerKind::Transform {
+                    translate_x,
+                    translate_y,
+                    ..
+                } => {
+                    next_x += translate_x;
+                    next_y += translate_y;
+                }
+                protocol::LayerKind::Picture { picture } => {
+                    if let Some(picture) = tree.picture(picture) {
+                        let origin_x = next_x + picture.origin.0;
+                        let origin_y = next_y + picture.origin.1;
+                        for command in picture.commands.iter() {
+                            visit(command, origin_x, origin_y);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            let mut child = layer.first_child;
+            while let Some(id) = child {
+                walk(tree, id, next_x, next_y, visit);
+                child = tree.layers.get(id.0 as usize).and_then(|layer| layer.next);
+            }
+        }
+        let mut id = Some(tree.root);
+        while let Some(current) = id {
+            walk(tree, current, 0.0, 0.0, visit);
+            id = tree
+                .layers
+                .get(current.0 as usize)
+                .and_then(|layer| layer.next);
+        }
+    }
+
+    fn texts(frame: &session::FrameOutput) -> Vec<&str> {
+        let mut found = Vec::new();
+        visit_commands(frame, &mut |command, _, _| {
+            if let Command::Text { utf8, .. } = command {
+                found.push(utf8.as_ref());
+            }
+        });
+        found
+    }
+
+    fn text_spot(frame: &session::FrameOutput, utf8: &str) -> (f32, f32) {
+        let mut found = None;
+        visit_commands(frame, &mut |command, origin_x, origin_y| {
             if let Command::Text {
                 utf8: text, x, y, ..
             } = command
                 && text.as_ref() == utf8
             {
-                return (*x + 1.0, *y + 1.0);
+                found = Some((*x + origin_x + 1.0, *y + origin_y + 1.0));
             }
-        }
-        panic!("missing text {utf8}");
+        });
+        found.unwrap_or_else(|| panic!("missing text {utf8}"))
     }
 
     fn click(session: &mut dyn Session, x: f32, y: f32) {
@@ -80,7 +162,7 @@ mod tests {
 
     fn open_counter() -> Option<Box<dyn Session>> {
         let source = include_str!("../../../apps/gallery-solid/dist/counter.js");
-        match open(source, "test.js", ui_core::MonoShaper, no_log()) {
+        match open(source, "test.js", ui_core::MonoShaper::default(), no_log()) {
             Ok(session) => Some(session),
             Err(Error::NotLinked) => None,
             Err(error) => panic!("{error}"),
@@ -92,7 +174,7 @@ mod tests {
         let Some(mut session) = open_counter() else {
             return;
         };
-        session.metrics(&metrics());
+        session.metrics(&phone());
         let first = session.frame(session::FrameTime::at(0.0));
         assert!(texts(&first).contains(&"还是旧的"));
         let (x, y) = text_spot(&first, "微任务改字");
@@ -100,6 +182,38 @@ mod tests {
         let second = session.frame(session::FrameTime::at(16.0));
         assert!(texts(&second).contains(&"已经改了"));
         assert!(!texts(&second).contains(&"还是旧的"));
+    }
+
+    #[test]
+    fn gallery_list_page_mounts_rows() {
+        let Some(mut session) = open_counter() else {
+            return;
+        };
+        session.metrics(&phone());
+        session.settings(&session::PlatformSettings {
+            locale: "zh-CN".to_owned(),
+            text_scale: 1.0,
+            brightness: session::Brightness::Dark,
+            reduce_motion: false,
+            bold_text: false,
+            high_contrast: false,
+        });
+        let first = session.frame(session::FrameTime::at(0.0));
+        assert!(texts(&first).contains(&"还是旧的"), "{:?}", texts(&first));
+        assert!(
+            !texts(&first)
+                .iter()
+                .any(|text| text.contains("not a function"))
+        );
+        let (x, y) = text_spot(&first, "列表");
+        click(session.as_mut(), x, y);
+        let second = session.frame(session::FrameTime::at(16.0));
+        let shown = texts(&second);
+        assert!(
+            shown.contains(&"Item 0"),
+            "list page replaced itself with an error: {shown:?}"
+        );
+        assert!(!shown.iter().any(|text| text.contains("not a function")));
     }
 
     #[test]
@@ -111,12 +225,16 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = include_str!("../../../apps/gallery-solid/dist/counter.js");
-            let mut session =
-                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
-            session.metrics(&metrics());
+            let mut session = match super::JsSession::open(
+                source,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
+            session.metrics(&phone());
             let first = session.frame(session::FrameTime::at(0.0));
             assert!(!session.jobs_pending());
             let (x, y) = text_spot(&first, "微任务改字");
@@ -125,7 +243,9 @@ mod tests {
             click(&mut session, x, y);
             let third = session.frame(session::FrameTime::at(32.0));
             assert!(texts(&second).contains(&"已经改了"));
-            assert!(texts(&third).contains(&"已经改了"));
+            if third.layers.is_some() {
+                assert!(texts(&third).contains(&"已经改了"), "{:?}", texts(&third));
+            }
             assert!(!session.jobs_pending());
         }
     }
@@ -147,11 +267,15 @@ mod tests {
                 core.onClick(region, () => {});
                 core.remove(root, region);
             "#;
-            let session =
-                match super::JsSession::open(kept, "test.js", ui_core::MonoShaper, no_log()) {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
+            let session = match super::JsSession::open(
+                kept,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
             assert_eq!(session.tap_count(), 0);
             let dropped = r#"
                 const root = core.column(0);
@@ -160,7 +284,12 @@ mod tests {
                 core.remove(root, label);
                 core.setText(label, "no");
             "#;
-            match super::JsSession::open(dropped, "test.js", ui_core::MonoShaper, no_log()) {
+            match super::JsSession::open(
+                dropped,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
                 Err(Error::Script(message)) => {
                     assert!(message.contains("setText"), "script error was {message:?}");
                 }
@@ -175,7 +304,7 @@ mod tests {
         let Some(mut session) = open_counter() else {
             return;
         };
-        session.metrics(&metrics());
+        session.metrics(&phone());
         let first = session.frame(session::FrameTime::at(0.0));
         let (x, y) = text_spot(&first, "导航");
         click(session.as_mut(), x, y);
@@ -189,15 +318,18 @@ mod tests {
         let Some(mut session) = open_counter() else {
             return;
         };
-        session.metrics(&metrics());
+        session.metrics(&phone());
         let first = session.frame(session::FrameTime::at(0.0));
         let (x, y) = text_spot(&first, "微任务改字");
         session.pointer(PointerEvent::new(Phase::Down, x, y, 0.0));
-        session.pointer(PointerEvent::new(Phase::Move, 300.0, 170.0, 0.0));
-        session.pointer(PointerEvent::new(Phase::Up, 300.0, 170.0, 0.0));
+        session.pointer(PointerEvent::new(Phase::Move, x, -1.0, 0.0));
+        session.pointer(PointerEvent::new(Phase::Up, x, -1.0, 0.0));
         let second = session.frame(session::FrameTime::at(16.0));
-        assert!(texts(&second).contains(&"还是旧的"));
-        assert!(!texts(&second).contains(&"已经改了"));
+        if let Some(layers) = second.layers.as_ref() {
+            let _ = layers;
+            assert!(texts(&second).contains(&"还是旧的"), "{:?}", texts(&second));
+            assert!(!texts(&second).contains(&"已经改了"));
+        }
     }
 
     #[test]
@@ -220,11 +352,15 @@ mod tests {
                 core.onRelease(region, () => note("R"));
                 core.onClick(region, () => note("C"));
             "#;
-            let mut session =
-                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
+            let mut session = match super::JsSession::open(
+                source,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
             session.metrics(&metrics());
             let first = session.frame(session::FrameTime::at(0.0));
             let (x, y) = text_spot(&first, "idle");
@@ -248,11 +384,15 @@ mod tests {
             let source = r#"
                 const label = core.text("Hi", 16, [0, 0, 0, 255]);
             "#;
-            let mut session =
-                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
+            let mut session = match super::JsSession::open(
+                source,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
             let mut window = metrics();
             window.inset_left = 8.0;
             window.inset_top = 14.0;
@@ -266,7 +406,7 @@ mod tests {
 
     #[test]
     fn syntax_error_script_is_reported() {
-        match open("{", "test.js", ui_core::MonoShaper, no_log()) {
+        match open("{", "test.js", ui_core::MonoShaper::default(), no_log()) {
             Err(Error::NotLinked | Error::Script(_)) => {}
             Err(error) => panic!("{error}"),
             Ok(_) => panic!("expected a script error"),
@@ -291,16 +431,21 @@ mod tests {
                     }
                 });
             "#;
-            let mut session =
-                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
+            let mut session = match super::JsSession::open(
+                source,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
             session.metrics(&metrics());
             let first = session.frame(session::FrameTime::at(0.0));
             assert!(session.take_script_error().is_none());
             let second = session.frame(session::FrameTime::at(16.0));
-            assert_eq!(second, first);
+            assert!(first.layers.is_some());
+            assert!(second.layers.is_none());
             assert!(session.take_script_error().is_some());
         }
     }
@@ -319,13 +464,18 @@ mod tests {
                 const label = core.text("Go", 16, [255, 255, 255, 255]);
                 core.append(region, label);
                 core.append(root, region);
+                core.setListenerErrorPolicy("freeze");
                 core.onClick(region, () => { throw new Error("boom"); });
             "#;
-            let mut session =
-                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
+            let mut session = match super::JsSession::open(
+                source,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
             session.metrics(&metrics());
             let first = session.frame(session::FrameTime::at(0.0));
             let (x, y) = text_spot(&first, "Go");
@@ -333,7 +483,289 @@ mod tests {
             let message = session.take_script_error().unwrap_or_default();
             assert!(message.contains("boom"), "script error was {message:?}");
             let second = session.frame(session::FrameTime::at(16.0));
-            assert!(texts(&second).contains(&"Go"));
+            assert!(second.layers.is_none());
+            assert!(texts(&first).contains(&"Go"));
+        }
+    }
+
+    #[test]
+    fn a_reported_listener_error_lets_the_next_listener_run() {
+        #[cfg(not(quickjs))]
+        {
+            return;
+        }
+        #[cfg(quickjs)]
+        {
+            let source = r#"
+                const root = core.column(0);
+                const region = core.pointerRegion();
+                const label = core.text("Go", 16, [255, 255, 255, 255]);
+                core.append(region, label);
+                core.append(root, region);
+                core.onClick(region, () => { throw new Error("boom"); });
+                core.onClick(region, () => core.setText(label, "later"));
+            "#;
+            let mut session = match super::JsSession::open(
+                source,
+                "report.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
+            session.metrics(&metrics());
+            let first = session.frame(session::FrameTime::at(0.0));
+            let (x, y) = text_spot(&first, "Go");
+            click(&mut session, x, y);
+            assert!(session.take_script_error().is_none());
+            let second = session.frame(session::FrameTime::at(16.0));
+            assert!(texts(&second).contains(&"later"), "{:?}", texts(&second));
+        }
+    }
+
+    #[test]
+    fn a_shortcut_consumes_the_modified_key() {
+        #[cfg(not(quickjs))]
+        {
+            return;
+        }
+        #[cfg(quickjs)]
+        {
+            let source = r#"
+                const root = core.column(0);
+                const label = core.text("none", 16, [0, 0, 0, 255]);
+                const field = core.pointerRegion();
+                core.append(root, label);
+                core.append(root, field);
+                core.setFocusable(field, 1);
+                core.focus(field);
+                core.onKey(field, (key) => core.setText(label, "key:" + key));
+                core.onText(field, (text) => core.setText(label, "text:" + text));
+                core.onShortcut("mod+k", () => core.setText(label, "cut"));
+            "#;
+            let mut session = match super::JsSession::open(
+                source,
+                "shortcut.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
+            session.metrics(&metrics());
+            let _ = session.frame(session::FrameTime::at(0.0));
+            session.input(InputEvent::Key(session::KeyPress {
+                key: Key::Char('k'),
+                shift: false,
+                modifiers: ui_core::Modifiers::empty().with(ui_core::Modifiers::META),
+            }));
+            let frame = session.frame(session::FrameTime::at(16.0));
+            assert!(texts(&frame).contains(&"cut"), "{:?}", texts(&frame));
+        }
+    }
+
+    #[test]
+    fn host_motion_and_semantics_hints_reach_core() {
+        #[cfg(not(quickjs))]
+        {
+            return;
+        }
+        #[cfg(quickjs)]
+        {
+            let source = r#"
+                const root = core.column(0);
+                const scroll = core.scroll();
+                const label = core.text("row", 16, [0, 0, 0, 255]);
+                core.append(root, scroll);
+                core.append(scroll, label);
+                core.setSemantics(label, 2, "row", undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, { live: "polite", order: 3 });
+                core.scrollIntoView(label, 0);
+                core.animate(label, "opacity", 255, 0, 170, 26);
+                core.setStroke(label, 2, [0, 0, 0, 255]);
+                core.setRecognizers(label, { tap: true, doubleTapMs: 280, drag: "horizontal" });
+                const flung = core.flingTarget(scroll);
+                if (flung !== null) {
+                    throw new Error("idle scroll has no fling");
+                }
+            "#;
+            let mut session = match super::JsSession::open(
+                source,
+                "motion.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
+            session.metrics(&metrics());
+            let frame = session.frame(session::FrameTime::at(0.0));
+            assert!(session.take_script_error().is_none());
+            assert!(texts(&frame).contains(&"row"), "{:?}", texts(&frame));
+            let later = session.frame(session::FrameTime::at(48.0));
+            assert!(later.layers.is_some() || frame.layers.is_some());
+        }
+    }
+
+    #[test]
+    fn motion_end_survives_unregistering_its_own_callback() {
+        #[cfg(not(quickjs))]
+        {
+            return;
+        }
+        #[cfg(quickjs)]
+        {
+            let source = r#"
+                const root = core.column(0);
+                const fading = core.opacity(255);
+                core.append(root, fading);
+                let seen = 0;
+                const finish = () => {
+                    seen = 1;
+                };
+                let first = 0;
+                let second = 0;
+                first = core.onMotionEnd(fading, "opacity", () => {
+                    core.offMotionEnd(first);
+                    finish();
+                });
+                second = core.onMotionEnd(fading, "opacity", () => {
+                    core.offMotionEnd(second);
+                    const nested = () => {
+                        if (seen !== 1) {
+                            throw new Error("first skipped");
+                        }
+                        throw new Error("both");
+                    };
+                    nested();
+                });
+                core.animate(fading, "opacity", 255, 0, 170, 26);
+            "#;
+            let mut session = match super::JsSession::open(
+                source,
+                "motion-end.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
+            session.metrics(&metrics());
+            let _ = session.frame(session::FrameTime::at(0.0));
+            let _ = session.frame(session::FrameTime::at(48.0));
+            let message = session.take_script_error().unwrap_or_default();
+            assert!(
+                message.contains("both"),
+                "both listeners should run, got {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn motion_end_reports_a_throw_after_unregister() {
+        #[cfg(not(quickjs))]
+        {
+            return;
+        }
+        #[cfg(quickjs)]
+        {
+            let source = r#"
+                const root = core.column(0);
+                const fading = core.opacity(255);
+                const label = core.text("idle", 16, [0, 0, 0, 255]);
+                core.append(root, fading);
+                core.append(fading, label);
+                const finish = () => {
+                    const broken = null;
+                    broken();
+                };
+                let token = 0;
+                token = core.onMotionEnd(fading, "opacity", () => {
+                    core.offMotionEnd(token);
+                    finish();
+                });
+                core.animate(fading, "opacity", 255, 0, 170, 26);
+            "#;
+            let mut session = match super::JsSession::open(
+                source,
+                "motion-end-throw.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
+            session.metrics(&metrics());
+            let _ = session.frame(session::FrameTime::at(0.0));
+            let _ = session.frame(session::FrameTime::at(48.0));
+            let message = session.take_script_error().unwrap_or_default();
+            assert!(
+                message.contains("not a function"),
+                "script error was {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn align_rejects_a_column_and_metrics_report_the_viewport() {
+        #[cfg(not(quickjs))]
+        {
+            return;
+        }
+        #[cfg(quickjs)]
+        {
+            let source = r#"
+                const frame = core.align("center");
+                core.setAlign(frame, "end");
+                const column = core.column(0);
+                let rejected = false;
+                try {
+                    core.setAlign(column, "center");
+                } catch (error) {
+                    rejected = true;
+                }
+                if (!rejected) {
+                    throw new Error("column accepted setAlign");
+                }
+                core.setCross(column, "center");
+                let stackRejected = false;
+                try {
+                    core.setCross(core.stack(), "center");
+                } catch (error) {
+                    stackRejected = true;
+                }
+                if (!stackRejected) {
+                    throw new Error("stack accepted setCross");
+                }
+                const label = core.text("idle", 16, [0, 0, 0, 255]);
+                core.append(column, label);
+                core.append(frame, column);
+                const before = core.metrics();
+                if (before.width !== 0) {
+                    throw new Error("width before metrics " + before.width);
+                }
+                core.onFrame(() => {
+                    const box = core.metrics();
+                    core.setText(label, "w:" + box.width);
+                });
+            "#;
+            let mut session = match super::JsSession::open(
+                source,
+                "align.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
+            session.metrics(&metrics());
+            let frame = session.frame(session::FrameTime::at(0.0));
+            assert!(session.take_script_error().is_none());
+            assert!(
+                texts(&frame).contains(&"w:320"),
+                "metrics width should be the content box, got {:?}",
+                texts(&frame)
+            );
         }
     }
 
@@ -357,11 +789,15 @@ mod tests {
                     core.setText(label, "Done");
                 });
             "#;
-            let mut session =
-                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
+            let mut session = match super::JsSession::open(
+                source,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
             session.metrics(&metrics());
             let first = session.frame(session::FrameTime::at(0.0));
             let (x, y) = text_spot(&first, "Go");
@@ -395,22 +831,32 @@ mod tests {
                     core.setText(label, "Done");
                 });
             "#;
-            let mut session =
-                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
+            let logged = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+            let logged_for_hook = std::rc::Rc::clone(&logged);
+            let mut session = match super::JsSession::open(
+                source,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                Box::new(move |_level, message| {
+                    logged_for_hook.borrow_mut().push_str(message);
+                }),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
             session.metrics(&metrics());
             let first = session.frame(session::FrameTime::at(0.0));
             let (x, y) = text_spot(&first, "Go");
             click(&mut session, x, y);
-            let message = session.take_script_error().unwrap_or_default();
+            assert!(session.take_script_error().is_none());
+            let message = logged.borrow().clone();
             assert!(
                 message.contains("interrupted"),
                 "script error was {message:?}"
             );
             let second = session.frame(session::FrameTime::at(16.0));
-            assert!(texts(&second).contains(&"Go"));
+            assert!(second.layers.is_none());
+            assert!(texts(&first).contains(&"Go"));
         }
     }
 
@@ -427,7 +873,7 @@ mod tests {
             let opened = super::JsSession::open(
                 "console.log('boot')",
                 "test.js",
-                ui_core::MonoShaper,
+                ui_core::MonoShaper::default(),
                 Box::new(move |level, text| {
                     *record.borrow_mut() = Some((level, text.to_owned()));
                 }),
@@ -460,18 +906,22 @@ mod tests {
                     if (n < 2) core.requestFrame();
                 });
             "#;
-            let mut session =
-                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
+            let mut session = match super::JsSession::open(
+                source,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
             session.metrics(&metrics());
             let first = session.frame(session::FrameTime::at(0.0));
             assert_eq!(texts(&first), ["1"]);
-            assert!(session.wants_frame());
+            assert!(first.again);
             let second = session.frame(session::FrameTime::at(16.0));
             assert_eq!(texts(&second), ["2"]);
-            assert!(!session.wants_frame());
+            assert!(!second.again);
         }
     }
 
@@ -491,11 +941,15 @@ mod tests {
                     queueMicrotask(() => core.setText(label, "new"));
                 });
             "#;
-            let mut session =
-                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
+            let mut session = match super::JsSession::open(
+                source,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
             session.metrics(&metrics());
             let first = session.frame(session::FrameTime::at(0.0));
             let (x, y) = text_spot(&first, "old");
@@ -522,11 +976,15 @@ mod tests {
                     throw new Error("boom");
                 });
             "#;
-            let mut session =
-                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
+            let mut session = match super::JsSession::open(
+                source,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
             session.metrics(&metrics());
             let first = session.frame(session::FrameTime::at(0.0));
             assert!(session.take_script_error().is_some());
@@ -561,11 +1019,15 @@ mod tests {
                 core.onDragEnd(scroll, () => note("E"));
                 core.onClick(region, () => note("C"));
             "#;
-            let mut session =
-                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
+            let mut session = match super::JsSession::open(
+                source,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
             session.metrics(&metrics());
             let first = session.frame(session::FrameTime::at(0.0));
             let (x, y) = text_spot(&first, "idle");
@@ -591,11 +1053,15 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = include_str!("../../../apps/gallery-solid/dist/counter.js");
-            let mut session =
-                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
+            let mut session = match super::JsSession::open(
+                source,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
             let mut window = metrics();
             window.height = 800.0;
             session.metrics(&window);
@@ -605,38 +1071,33 @@ mod tests {
                 click(&mut session, x, y);
                 first = session.frame(session::FrameTime::at(8.0));
             }
-            let Some((clip_y, clip_h)) =
-                first
-                    .commands
-                    .iter()
-                    .rev()
-                    .find_map(|command| match command {
-                        Command::PushClip { y, h, .. } if *h > 100.0 => Some((*y, *h)),
-                        _ => None,
-                    })
-            else {
-                panic!("scroll clip");
-            };
-            let Some((x, before)) = first
-                .commands
-                .iter()
-                .rev()
-                .find_map(|command| match command {
-                    Command::Text { utf8, x, y, .. }
-                        if utf8.starts_with("Item ") && *y >= clip_y && *y < clip_y + clip_h =>
-                    {
-                        Some((*x + 1.0, *y))
-                    }
+            for step in 1..8 {
+                let next = session.frame(session::FrameTime::at(8.0 + f64::from(step) * 16.0));
+                if next.layers.is_some() {
+                    first = next;
+                }
+            }
+            let Some((clip_y, clip_h)) = first.layers.as_deref().and_then(|tree| {
+                tree.layers.iter().find_map(|layer| match layer.kind {
+                    protocol::LayerKind::Clip { y, h, .. } if h > 100.0 => Some((y, h)),
                     _ => None,
                 })
-            else {
-                panic!("a row inside the viewport");
-            };
-            let Some(label) = first.commands.iter().find_map(|command| match command {
-                Command::Text { utf8, y, .. } if (*y - before).abs() < 0.5 => Some(utf8.clone()),
-                _ => None,
             }) else {
-                panic!("label");
+                panic!("scroll clip");
+            };
+            let mut row = None;
+            visit_commands(&first, &mut |command, origin_x, origin_y| {
+                if let Command::Text { utf8, x, y, .. } = command
+                    && utf8.starts_with("Item ")
+                {
+                    let scene_y = *y + origin_y;
+                    if scene_y >= clip_y && scene_y < clip_y + clip_h {
+                        row = Some((utf8.clone(), *x + origin_x + 1.0, scene_y));
+                    }
+                }
+            });
+            let Some((label, x, before)) = row else {
+                panic!("a row inside the viewport");
             };
             let delta = 12.0;
             session.pointer(PointerEvent::new(Phase::Down, x, before + 1.0, 0.0));
@@ -647,17 +1108,241 @@ mod tests {
                 16.0,
             ));
             let scrolled = session.frame(session::FrameTime::at(16.0));
-            let Some(after) = scrolled.commands.iter().find_map(|command| match command {
-                Command::Text { utf8, y, .. } if utf8.as_ref() == label.as_ref() => Some(*y),
-                _ => None,
-            }) else {
-                panic!("scrolled label");
+            let mut after = None;
+            visit_commands(&scrolled, &mut |command, _, origin_y| {
+                if let Command::Text { utf8, y, .. } = command
+                    && utf8.as_ref() == label.as_ref()
+                {
+                    after = Some(*y + origin_y);
+                }
+            });
+            let Some(after) = after else {
+                panic!(
+                    "scrolled label {} layers={} texts={:?}",
+                    label,
+                    scrolled.layers.is_some(),
+                    texts(&scrolled)
+                );
             };
             assert!(
                 (before - after - delta).abs() < 0.5,
                 "{label} moved from {before} to {after}"
             );
             assert!(texts(&scrolled).contains(&"列表"));
+        }
+    }
+
+    fn rewritten_commands(
+        before: &protocol::LayerTree,
+        after: &protocol::LayerTree,
+    ) -> (usize, usize) {
+        let mut changed = 0;
+        let mut unchanged = 0;
+        for picture in &after.pictures {
+            let same = before
+                .picture(picture.id)
+                .is_some_and(|old| old.generation == picture.generation);
+            if same {
+                unchanged += 1;
+            } else {
+                changed += picture.commands.len();
+            }
+        }
+        (changed, unchanged)
+    }
+
+    #[test]
+    fn module_loader_accepts_a_sibling_script_and_rejects_escape() {
+        #[cfg(not(quickjs))]
+        {
+            return;
+        }
+        #[cfg(quickjs)]
+        {
+            let dir = std::env::temp_dir().join(format!("uifw-mod-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("temp app dir");
+            std::fs::write(dir.join("util.js"), "export const label = \"from-util\";\n")
+                .expect("util");
+            let app = dir.join("app.js");
+            std::fs::write(
+                &app,
+                "import { label } from \"./util.js\";\ncore.text(label, 16, [0, 0, 0, 255]);\n",
+            )
+            .expect("app");
+            let name = app.to_string_lossy().into_owned();
+            let source = std::fs::read_to_string(&app).expect("read app");
+            let mut session = match super::JsSession::open(
+                &source,
+                &name,
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(Error::NotLinked) => return,
+                Err(error) => panic!("{error}"),
+            };
+            session.metrics(&metrics());
+            let frame = session.frame(session::FrameTime::at(0.0));
+            assert!(
+                texts(&frame).contains(&"from-util"),
+                "{:?} {}",
+                texts(&frame),
+                session.take_script_error().unwrap_or_default()
+            );
+            let rejected = [
+                "import { label } from \"../util.js\";\n",
+                "import { label } from \"/tmp/util.js\";\n",
+                "import { label } from \"./util.txt\";\n",
+                "import { label } from \"./a\\\\b.js\";\n",
+            ];
+            for source in rejected {
+                match super::JsSession::open(
+                    source,
+                    &name,
+                    ui_core::MonoShaper::default(),
+                    no_log(),
+                ) {
+                    Err(Error::Script(message)) => {
+                        assert!(
+                            message.contains("module")
+                                || message.contains("outside")
+                                || message.contains("could not"),
+                            "{message}"
+                        );
+                    }
+                    Err(Error::NotLinked) => return,
+                    Ok(_) => panic!("expected a rejected import"),
+                    Err(error) => panic!("{error}"),
+                }
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn gallery_pages_scroll_without_picture_writes() {
+        #[cfg(not(quickjs))]
+        {
+            return;
+        }
+        #[cfg(quickjs)]
+        {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../apps/gallery-solid/dist/counter.js");
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                return;
+            };
+            let mut session = match super::JsSession::open(
+                &source,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(Error::NotLinked) => return,
+                Err(error) => panic!("{error}"),
+            };
+            session.metrics(&phone());
+            let mut shown = session.frame(session::FrameTime::at(0.0));
+            if !texts(&shown).iter().any(|text| text.starts_with("Item ")) {
+                let (x, y) = text_spot(&shown, "列表");
+                click(&mut session, x, y);
+                shown = session.frame(session::FrameTime::at(16.0));
+            }
+            let mut quiet = 0;
+            for step in 1..24 {
+                let next = session.frame(session::FrameTime::at(16.0 + f64::from(step) * 16.0));
+                if next.layers.is_some() {
+                    shown = next;
+                    quiet = 0;
+                } else {
+                    quiet += 1;
+                    if quiet >= 2 {
+                        break;
+                    }
+                }
+            }
+            assert!(
+                texts(&shown).iter().any(|text| text.starts_with("Item ")),
+                "{:?}",
+                texts(&shown)
+            );
+            let Some((clip_y, clip_h)) = shown.layers.as_deref().and_then(|tree| {
+                tree.layers.iter().find_map(|layer| match layer.kind {
+                    protocol::LayerKind::Clip { y, h, .. } if h > 100.0 => Some((y, h)),
+                    _ => None,
+                })
+            }) else {
+                panic!("scroll clip");
+            };
+            let mut row = None;
+            visit_commands(&shown, &mut |command, origin_x, origin_y| {
+                if let Command::Text { utf8, x, y, .. } = command
+                    && utf8.starts_with("Item ")
+                {
+                    let scene_y = *y + origin_y;
+                    if scene_y >= clip_y && scene_y < clip_y + clip_h {
+                        row = Some((utf8.clone(), *x + origin_x + 1.0, scene_y));
+                    }
+                }
+            });
+            let Some((_label, x, before)) = row else {
+                panic!("a row inside the viewport");
+            };
+            let before_tree = shown.layers.clone().expect("list tree");
+            session.pointer(PointerEvent::wheel(x, before + 1.0, 200.0, 0.0, clip_h));
+            let scrolled = session.frame(session::FrameTime::at(200.0));
+            assert!(
+                scrolled.layers.is_some(),
+                "scroll produced no layer tree {}",
+                session.take_script_error().unwrap_or_default()
+            );
+            let (screen_changed, screen_kept) = rewritten_commands(
+                &before_tree,
+                scrolled.layers.as_deref().expect("screen tree"),
+            );
+            assert_eq!(session.picture_writes(), screen_changed);
+            assert!(
+                screen_kept > 0,
+                "scrolling one screen rewrote every picture ({screen_changed} commands)"
+            );
+            assert!(
+                texts(&scrolled)
+                    .iter()
+                    .any(|text| text.starts_with("Item ")),
+                "list rows left after scrolling {:?}",
+                texts(&scrolled)
+            );
+            let mut baseline = scrolled.layers.clone().expect("scroll tree");
+            for step in 0..6 {
+                let next = session.frame(session::FrameTime::at(216.0 + f64::from(step) * 16.0));
+                if let Some(layers) = next.layers.clone() {
+                    baseline = layers;
+                }
+            }
+            let (field_x, field_y) = if texts(&shown).contains(&"姓名") {
+                text_spot(&shown, "姓名")
+            } else {
+                text_spot(&shown, "未填写")
+            };
+            click(&mut session, field_x, field_y);
+            session.input(InputEvent::Text("A".to_string()));
+            let edited = session.frame(session::FrameTime::at(232.0));
+            let Some(after_tree) = edited.layers.as_deref() else {
+                panic!(
+                    "edit produced no layer tree {}",
+                    session.take_script_error().unwrap_or_default()
+                );
+            };
+            let (changed, unchanged) = rewritten_commands(&baseline, after_tree);
+            assert_eq!(
+                session.picture_writes(),
+                changed,
+                "picture writes {changed} unchanged pictures {unchanged}"
+            );
+            assert!(changed > 0, "the edited node wrote no commands");
+            assert!(unchanged > 0, "editing one node rewrote every picture");
         }
     }
 
@@ -712,20 +1397,24 @@ mod tests {
                     }
                 });
             "#;
-            let mut session =
-                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
+            let mut session = match super::JsSession::open(
+                source,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
             session.metrics(&metrics());
             let first = session.frame(session::FrameTime::at(0.0));
             assert!(texts(&first).contains(&"field"));
             session.input(InputEvent::Text("你".to_string()));
             let ignored = session.frame(session::FrameTime::at(16.0));
-            assert!(texts(&ignored).contains(&"field"));
-            assert!(!texts(&ignored).contains(&"你"));
+            assert!(ignored.layers.is_none());
+            assert!(texts(&first).contains(&"field"));
             assert!(session.take_ime().is_none());
-            let (x, y) = text_spot(&ignored, "field");
+            let (x, y) = text_spot(&first, "field");
             click(&mut session, x, y);
             match session.take_ime() {
                 Some(session::ImeUpdate::Show(state)) => assert_eq!(state.text, ""),
@@ -740,14 +1429,14 @@ mod tests {
             let cleared = session.frame(session::FrameTime::at(48.0));
             assert!(!texts(&cleared).contains(&"你"));
             assert!(!texts(&cleared).contains(&"你ni"));
-            match session.take_ime() {
+            match cleared.ime {
                 Some(session::ImeUpdate::Update(state)) => assert_eq!(state.text, ""),
                 other => panic!("expected update, got {other:?}"),
             }
             session.input(InputEvent::Text("drop".to_string()));
-            let _ = session.frame(session::FrameTime::at(64.0));
+            let dropped = session.frame(session::FrameTime::at(64.0));
             assert_eq!(session.tap_count(), 0);
-            assert!(matches!(session.take_ime(), Some(session::ImeUpdate::Hide)));
+            assert!(matches!(dropped.ime, Some(session::ImeUpdate::Hide)));
             session.input(InputEvent::Text("no".to_string()));
             let after = session.frame(session::FrameTime::at(80.0));
             assert!(!texts(&after).contains(&"no"));
@@ -776,11 +1465,15 @@ mod tests {
                     core.setImeState(null);
                 });
             "#;
-            let mut session =
-                match super::JsSession::open(source, "test.js", ui_core::MonoShaper, no_log()) {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
+            let mut session = match super::JsSession::open(
+                source,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
             session.metrics(&metrics());
             let first = session.frame(session::FrameTime::at(0.0));
             let (x, y) = text_spot(&first, "field");
@@ -851,7 +1544,7 @@ mod tests {
             let mut session = match super::JsSession::open_with(
                 source,
                 "host.js",
-                ui_core::MonoShaper,
+                ui_core::MonoShaper::default(),
                 log,
                 Some(Arc::new(FixedHttp)),
             ) {
@@ -899,12 +1592,15 @@ mod tests {
                 }
                 core.setSemantics(region, 5, "Play", "On", 1);
             "#;
-            let mut session =
-                match super::JsSession::open(source, "semantics.js", ui_core::MonoShaper, no_log())
-                {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
+            let mut session = match super::JsSession::open(
+                source,
+                "semantics.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
             session.metrics(&metrics());
             let frame = session.frame(session::FrameTime::at(0.0));
             assert!(texts(&frame).contains(&"bad handle"), "{:?}", texts(&frame));
@@ -939,7 +1635,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "settings.js",
-                ui_core::MonoShaper,
+                ui_core::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -991,11 +1687,15 @@ mod tests {
                     return true;
                 });
             "#;
-            let mut session =
-                match super::JsSession::open(source, "tab.js", ui_core::MonoShaper, no_log()) {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
+            let mut session = match super::JsSession::open(
+                source,
+                "tab.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
             session.metrics(&metrics());
             let _ = session.frame(session::FrameTime::at(0.0));
             session.input(InputEvent::Key(session::KeyPress::new(Key::Tab)));
@@ -1033,7 +1733,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "replaced.js",
-                ui_core::MonoShaper,
+                ui_core::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -1112,11 +1812,15 @@ mod tests {
                     core.registerFont("F0", new Uint8Array([8]));
                 });
             "#;
-            let mut session =
-                match super::JsSession::open(source, "fonts.js", ui_core::MonoShaper, no_log()) {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
+            let mut session = match super::JsSession::open(
+                source,
+                "fonts.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
             session.metrics(&metrics());
             let queued = session.take_fonts();
             assert_eq!(queued.len(), 9, "{queued:?}");
@@ -1136,7 +1840,7 @@ mod tests {
                 "{:?}",
                 texts(&listed)
             );
-            let again = session.take_fonts();
+            let again = listed.fonts;
             assert_eq!(again.len(), 1, "{again:?}");
             assert_eq!(again[0].0, "F0");
             assert_eq!(again[0].1, vec![8]);
@@ -1163,15 +1867,19 @@ mod tests {
                     core.setText(label, message.indexOf("registerFont failed") >= 0 ? "rejected" : message);
                 }
             "#;
-            let mut session =
-                match super::JsSession::open(source, "bigfont.js", ui_core::MonoShaper, no_log()) {
-                    Ok(session) => session,
-                    Err(error) => panic!("{error}"),
-                };
+            let mut session = match super::JsSession::open(
+                source,
+                "bigfont.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
             session.metrics(&metrics());
             let listed = session.frame(session::FrameTime::at(0.0));
             assert!(texts(&listed).contains(&"rejected"), "{:?}", texts(&listed));
-            let queued = session.take_fonts();
+            let queued = listed.fonts;
             assert_eq!(queued.len(), 1);
             assert_eq!(queued[0].0, "Keep");
             assert_eq!(queued[0].1, vec![7]);
@@ -1193,7 +1901,12 @@ mod tests {
                 core.setText(label, message.indexOf("reload(source)") >= 0 ? "rejected" : message);
             }
         "#;
-        let mut session = match open(source, "reload.js", ui_core::MonoShaper, no_log()) {
+        let mut session = match open(
+            source,
+            "reload.js",
+            ui_core::MonoShaper::default(),
+            no_log(),
+        ) {
             Ok(session) => session,
             Err(Error::NotLinked) => return,
             Err(error) => panic!("{error}"),
@@ -1224,7 +1937,7 @@ mod tests {
                 core.setText(label, message.indexOf("bad axis") >= 0 ? "bad-axis" : message);
             }
         "#;
-        let mut session = match open(source, "axis.js", ui_core::MonoShaper, no_log()) {
+        let mut session = match open(source, "axis.js", ui_core::MonoShaper::default(), no_log()) {
             Ok(session) => session,
             Err(Error::NotLinked) => return,
             Err(error) => panic!("{error}"),
@@ -1232,9 +1945,13 @@ mod tests {
         session.metrics(&metrics());
         let frame = session.frame(session::FrameTime::at(0.0));
         assert!(texts(&frame).contains(&"bad-axis"), "{:?}", texts(&frame));
-        let child = frame.commands.iter().find_map(|command| match command {
-            Command::Rect { w, h, color, .. } if *color == [0, 9, 0, 255] => Some((*w, *h)),
-            _ => None,
+        let mut child = None;
+        visit_commands(&frame, &mut |command, _, _| {
+            if let Command::Rect { w, h, color, .. } = command
+                && *color == [0, 9, 0, 255]
+            {
+                child = Some((*w, *h));
+            }
         });
         assert_eq!(child, Some((100.0, 20.0)), "{child:?}");
     }
@@ -1256,7 +1973,7 @@ mod tests {
                 core.setText(label, message.indexOf("bad image") >= 0 ? "bad-image" : message);
             }
         "#;
-        let mut session = match open(source, "image.js", ui_core::MonoShaper, no_log()) {
+        let mut session = match open(source, "image.js", ui_core::MonoShaper::default(), no_log()) {
             Ok(session) => session,
             Err(Error::NotLinked) => return,
             Err(error) => panic!("{error}"),
@@ -1264,14 +1981,43 @@ mod tests {
         session.metrics(&metrics());
         let frame = session.frame(session::FrameTime::at(0.0));
         assert!(texts(&frame).contains(&"bad-image"), "{:?}", texts(&frame));
-        let image = frame.commands.iter().find_map(|command| match command {
-            Command::Image { mode, required, .. } => Some((*mode, *required)),
-            _ => None,
+        let mut image = None;
+        visit_commands(&frame, &mut |command, _, _| {
+            if let Command::Image { mode, required, .. } = command {
+                image = Some((*mode, *required));
+            }
         });
         assert_eq!(
             image,
             Some((protocol::ContentMode::Crop, true)),
             "{image:?}"
         );
+    }
+
+    #[test]
+    fn rect_flushes_a_buffered_style_mutation() {
+        let source = r#"
+            const root = core.column(0);
+            const box = core.sized(8, 8);
+            core.append(root, box);
+            const label = core.text("stale", 16, [0, 0, 0, 255]);
+            core.append(root, label);
+            core.applyMutation(7, box, 0, 0, 1, 30, 8, [0, 0, 0, 0], "");
+            const rect = core.rect(box);
+            core.setText(label, rect.w === 30 ? "applied" : "stale");
+        "#;
+        let mut session = match open(
+            source,
+            "mutate.js",
+            ui_core::MonoShaper::default(),
+            no_log(),
+        ) {
+            Ok(session) => session,
+            Err(Error::NotLinked) => return,
+            Err(error) => panic!("{error}"),
+        };
+        session.metrics(&metrics());
+        let frame = session.frame(session::FrameTime::at(0.0));
+        assert!(texts(&frame).contains(&"applied"), "{:?}", texts(&frame));
     }
 }

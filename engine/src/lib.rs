@@ -1,4 +1,4 @@
-//! Impeller player. It paints a [`protocol::DrawList`] and does not read scene bytes.
+//! Impeller renderer. It paints a [`protocol::LayerTree`] and does not read scene bytes.
 
 mod script;
 mod status;
@@ -49,10 +49,20 @@ pub struct LineMetric {
     pub y: f32,
     pub w: f32,
     pub h: f32,
+    /// Distance from the top of the line box to the baseline.
+    pub baseline: f32,
     pub hard_break: bool,
 }
 
-/// RGBA pixels borrowed until [`Engine::submit`] returns.
+/// Counts from the last successful [`Engine::submit_layers`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SubmitStats {
+    pub picture_rebuilt: u32,
+    pub picture_reused: u32,
+    pub layer_count: u32,
+}
+
+/// RGBA pixels borrowed until [`Engine::submit_layers`] returns.
 pub struct ImagePixels<'a> {
     pub width: u32,
     pub height: u32,

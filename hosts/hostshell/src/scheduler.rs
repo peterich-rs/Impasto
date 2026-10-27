@@ -7,8 +7,6 @@ use crate::present::AfterPresent;
 pub(crate) struct FrameView {
     pub surface_open: bool,
     pub paused: bool,
-    pub fixture_open: bool,
-    pub fixture_presented: bool,
     pub unchanged: bool,
     pub needs_present: bool,
     pub again: bool,
@@ -25,7 +23,6 @@ pub(crate) enum FrameStep {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PresentFollowup {
     pub needs_present: bool,
-    pub mark_fixture_presented: bool,
     pub clear_surface: bool,
     pub vsync: VsyncOp,
 }
@@ -38,7 +35,7 @@ pub(crate) enum VsyncOp {
 }
 
 pub(crate) fn frame_step(view: &FrameView) -> FrameStep {
-    if !view.surface_open || view.paused || (view.fixture_open && view.fixture_presented) {
+    if !view.surface_open || view.paused {
         return FrameStep::Cancel;
     }
     if view.unchanged && !view.needs_present {
@@ -51,11 +48,10 @@ pub(crate) fn frame_step(view: &FrameView) -> FrameStep {
     }
 }
 
-pub(crate) fn present_followup(after: AfterPresent, is_fixture: bool) -> PresentFollowup {
+pub(crate) fn present_followup(after: AfterPresent) -> PresentFollowup {
     match after {
         AfterPresent::Shown { again } => PresentFollowup {
             needs_present: false,
-            mark_fixture_presented: is_fixture,
             clear_surface: false,
             vsync: if again {
                 VsyncOp::Request
@@ -65,19 +61,16 @@ pub(crate) fn present_followup(after: AfterPresent, is_fixture: bool) -> Present
         },
         AfterPresent::Stop => PresentFollowup {
             needs_present: false,
-            mark_fixture_presented: false,
             clear_surface: false,
             vsync: VsyncOp::Stop,
         },
         AfterPresent::Retry => PresentFollowup {
             needs_present: true,
-            mark_fixture_presented: false,
             clear_surface: false,
             vsync: VsyncOp::Request,
         },
         AfterPresent::Fatal => PresentFollowup {
             needs_present: false,
-            mark_fixture_presented: false,
             clear_surface: false,
             vsync: VsyncOp::Stop,
         },
@@ -88,7 +81,6 @@ pub(crate) fn present_followup(after: AfterPresent, is_fixture: bool) -> Present
 pub(crate) fn surface_lost() -> PresentFollowup {
     PresentFollowup {
         needs_present: false,
-        mark_fixture_presented: false,
         clear_surface: true,
         vsync: VsyncOp::Cancel,
     }
@@ -168,8 +160,6 @@ mod tests {
         FrameView {
             surface_open: true,
             paused: false,
-            fixture_open: false,
-            fixture_presented: false,
             unchanged: false,
             needs_present: false,
             again: false,
@@ -177,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_surface_pauses_and_a_finished_fixture_cancel() {
+    fn a_closed_surface_or_pause_cancels() {
         assert_eq!(
             frame_step(&FrameView {
                 surface_open: false,
@@ -188,14 +178,6 @@ mod tests {
         assert_eq!(
             frame_step(&FrameView {
                 paused: true,
-                ..open_view()
-            }),
-            FrameStep::Cancel
-        );
-        assert_eq!(
-            frame_step(&FrameView {
-                fixture_open: true,
-                fixture_presented: true,
                 ..open_view()
             }),
             FrameStep::Cancel
@@ -232,15 +214,14 @@ mod tests {
 
     #[test]
     fn a_failed_present_retries_and_destruction_clears_the_surface() {
-        let retry = present_followup(AfterPresent::Retry, false);
+        let retry = present_followup(AfterPresent::Retry);
         assert!(retry.needs_present);
         assert_eq!(retry.vsync, VsyncOp::Request);
         assert!(!retry.clear_surface);
         let lost = surface_lost();
         assert!(lost.clear_surface);
         assert_eq!(lost.vsync, VsyncOp::Cancel);
-        let shown = present_followup(AfterPresent::Shown { again: false }, true);
-        assert!(shown.mark_fixture_presented);
+        let shown = present_followup(AfterPresent::Shown { again: false });
         assert_eq!(shown.vsync, VsyncOp::Cancel);
     }
 

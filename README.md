@@ -6,10 +6,10 @@
 
 | 路线 | 代码 | 现状 |
 |---|---|---|
-| Solid 2.0 TSX + QuickJS | `frameworks/solid-renderer`、`frameworks/solid-ui` | QuickJS 会话直接改 `core` 的渲染树。编译产物是 `apps/gallery-solid/dist/counter.js` |
-| Kotlin lambda DSL | `frameworks/kotlin-ui` | JVM 上把场景编成版本 1 字节，并和 `counter.bin` 逐字节比较。信号和 Kotlin/Native 还没接 |
+| Solid 2.0 TSX + QuickJS | `frameworks/solid-renderer`、`frameworks/solid-ui`、`frameworks/solid-router` | QuickJS 会话直接改 `core` 的渲染树。编译产物是 `apps/gallery-solid/dist/counter.js` |
+| Kotlin lambda DSL | `frameworks/kotlin-ui` | 暂缓。Gradle 工程还在，界面 DSL、信号和原生嵌入未接，见 `docs/refactor-plan.md` |
 
-macOS 宿主在 `hosts/macos`，用 Impeller standalone SDK 的 Metal 后端。Android 宿主在 `hosts/android`，用同一份 SDK 的 Vulkan 后端。没有 SDK 时渲染引擎返回 `NotLinked`，测试仍可通过。iOS 的预构建矩阵没有这一列，宿主还没写。
+macOS 宿主在 `hosts/macos`，用 Impeller standalone SDK 的 Metal 后端。Android 宿主在 `hosts/android`，用同一份 SDK 的 Vulkan 后端。没有 SDK 时渲染引擎返回 `NotLinked`，测试仍可通过。iOS 的预构建矩阵没有这一列，宿主还没写。未落地的迭代规划在 `docs/refactor-plan.md`。
 
 Kotlin 包名 `dev.uifw`、Solid 包名 `@uifw/solid-renderer` 仍是旧前缀，留到改这两层时再换。
 
@@ -17,10 +17,11 @@ Kotlin 包名 `dev.uifw`、Solid 包名 `@uifw/solid-renderer` 仍是旧前缀�
 
 | 文档 | 内容 |
 |---|---|
-| `docs/architecture.md` | 仓库分层、一帧、渲染器和控件 |
-| `docs/native-phase.md` | 版本 1 字节，以及渲染树、渲染引擎、宿主已经落地的行为 |
+| `docs/architecture.md` | 当前仓库分层、一帧、渲染器和控件 |
 | `docs/platform-hosts.md` | macOS、Android、iOS 的线程、表面和输入 |
-| `AGENTS.md` | 改代码时的边界。和源码不一致时，以 Rust 源码和测试为准 |
+| `docs/refactor-plan.md` | 生产级迭代规划。未落地 |
+| `docs/protocol-v2.md` | Picture 字节。未排期 |
+| `AGENTS.md` | 改代码时的边界。当前行为以源码为准，目标以规划为准 |
 
 ## 环境
 
@@ -46,7 +47,7 @@ Kotlin 包名 `dev.uifw`、Solid 包名 `@uifw/solid-renderer` 仍是旧前缀�
 just check
 ```
 
-依次跑 `cargo test --workspace`、Kotlin 的 `:library:jvmTest` 和 `:gallery:runGallery`、Solid 的字节对比、宿主树测试和 gallery。不打开窗口。
+依次跑 `cargo test --workspace`、Kotlin 的 `:library:jvmTest`、Solid 的宿主树测试。不打开窗口。
 
 没有 quickjs-ng 源码时，QuickJS 测试走 `NotLinked`。没有 SDK 时，渲染引擎的图形测试不编译。
 
@@ -61,7 +62,7 @@ just host-js
 just android
 ```
 
-`just host` 打开默认 360×640 的窗口，把 `counter.bin` 转成绘制列表并画一次。`UIFW_DUMP` 把第一帧 Metal 纹理写成 PNG 后退出。比较像素时解码 PNG，不要比较文件字节。`just host-js` 加载 `apps/gallery-solid/dist/counter.js`。`just android` 打 APK。
+`just host` 打开默认 360×640 的窗口，加载 `apps/gallery-solid/dist/counter.js`。`just host-js` 是同一条命令。`UIFW_DUMP` 把一帧 Metal 纹理写成 PNG 后退出，用来看画面。`just android` 打 APK。需要 SDK 和 quickjs-ng 源码。
 
 ## 目录
 
@@ -74,16 +75,19 @@ hosts/hostshell/           壳。命令队列、帧调度、渲染线程
 hosts/macos/               macOS 窗口
 hosts/android/             Android 宿主。`HostActivity`、`HostView`、Choreographer、Vulkan
 runtimes/quickjs/          quickjs-ng 会话。没有源码时返回 NotLinked
-frameworks/solid-renderer/ 版本 1 编码器，以及接到 core 的运行时
-frameworks/solid-ui/       Button、ScrollArea、Field、Switch、Dialog
+frameworks/modules/        宿主对象类型。权限、文件和存储走这里的接口
+frameworks/solid-renderer/ 接到 core 的运行时
+frameworks/solid-ui/       Button、Field、Dialog、theme、overlay
+frameworks/solid-router/   路径、栈和 RouterView
+frameworks/net/            createFetch
+frameworks/form/           createForm
+frameworks/i18n/           formatNumber、formatDate、plural
+frameworks/permissions/    权限 API
 frameworks/kotlin-ui/      Kotlin DSL。目前只开了 JVM 目标
-apps/gallery-solid/        Solid 画廊。计数器、呼吸灯、列表和输入。产物 dist/counter.js 在仓库里
-apps/gallery-kotlin/       Kotlin 路线的计数器场景
+apps/gallery-solid/        Solid 画廊。调度、导航、列表和对话框。产物 dist/counter.js、dist/counter.esm.js
 ```
 
 仓库根上的 `settings.gradle.kts` 没有 `include`，用来挡住 Gradle 往家目录继续找工程。Kotlin 工程在 `frameworks/kotlin-ui`。
-
-`protocol/tests/fixtures/counter.bin` 是计数器场景的版本 1 编码，208 字节。Rust、Kotlin、TypeScript 三份编码器的输出都要和它逐字节相同。格式写在 `docs/native-phase.md`。
 
 ## 许可证
 

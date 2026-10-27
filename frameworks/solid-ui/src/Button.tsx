@@ -1,9 +1,17 @@
-import { createEffect, createSignal } from "solid-js";
-import { Text, host, type NodeHandle } from "@uifw/solid-renderer";
-import { directionFor } from "./i18n.ts";
+import { createTrackedEffect, createSignal } from "solid-js";
+import { Text, directionFor, host, type NodeHandle } from "@uifw/solid-renderer";
+import { bindFocusRing } from "./focus.ts";
 import { Role } from "./semantics.ts";
 import { minTarget, type ButtonSize, type ButtonVariant } from "./theme.ts";
 import { useTheme } from "./use-theme.ts";
+
+function faded(hex: string, blocked: boolean): string {
+  if (!blocked) {
+    return hex;
+  }
+  const body = hex.startsWith("#") ? hex.slice(1) : hex;
+  return `#${body.slice(0, 6)}66`;
+}
 
 export function Button(props: {
   label: string;
@@ -13,23 +21,43 @@ export function Button(props: {
   variant?: ButtonVariant;
   size?: ButtonSize;
   icon?: NodeHandle;
+  /** Span the parent's width. Row siblings share that width. */
+  wide?: boolean;
 }): NodeHandle {
   const theme = useTheme();
   const [pressed, setPressed] = createSignal(false);
+  const [focused, setFocused] = createSignal(false);
   const blocked = () => !!props.disabled || !!props.loading;
   const size = () => props.size ?? "regular";
   const variant = () => props.variant ?? "quiet";
   let node = 0;
+  let box = 0;
+  bindFocusRing(() => box, focused);
 
-  function fill(): string {
-    if (pressed()) {
-      return theme().color.textMuted;
-    }
-    return variant() === "primary" ? theme().color.accent : theme().color.surface;
+  const scale = () => theme().textScale;
+  const padX = () => (size() === "compact" ? theme().space.m : theme().space.l) * scale();
+  const padY = () => (size() === "compact" ? theme().space.s : theme().space.l) * scale();
+  const target = () => minTarget(size(), theme().density) * scale();
+
+  function face(): string {
+    const color = pressed()
+      ? variant() === "primary"
+        ? theme().color.primaryContainer
+        : theme().color.surfaceContainer
+      : variant() === "primary"
+        ? theme().color.accent
+        : theme().color.surface;
+    return faded(color, blocked());
   }
 
   function labelColor(): string {
-    return variant() === "primary" ? theme().color.bg : theme().color.text;
+    const color =
+      variant() === "primary"
+        ? pressed()
+          ? theme().color.onPrimaryContainer
+          : theme().color.onPrimary
+        : theme().color.text;
+    return faded(color, blocked());
   }
 
   function activate(): void {
@@ -54,55 +82,70 @@ export function Button(props: {
       undefined,
       blocked() ? 1 : 0,
     );
-    const edge = minTarget(size(), theme().density);
+    const edge = target();
     host.setMinSize(node, edge, edge);
   }
 
-  createEffect(() => {
+  createTrackedEffect(() => {
     writeSemantics();
   });
 
   return (
-    <opacity alpha={blocked() ? 102 : 255}>
-      <pointer
+    <pointer
+      ref={(handle) => {
+        node = handle.id;
+        writeSemantics();
+      }}
+      w={props.wide ? "100%" : undefined}
+      onPress={() => {
+        if (!blocked()) {
+          setPressed(true);
+        }
+      }}
+      onRelease={() => setPressed(false)}
+      onClick={activate}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      onKey={(key) => {
+        if (key === "Enter") {
+          activate();
+        }
+      }}
+      onText={(value) => {
+        if (value === " ") {
+          activate();
+        }
+      }}
+    >
+      <decorated
         ref={(handle) => {
-          node = handle.id;
-          writeSemantics();
+          box = handle.id;
         }}
-        onPress={() => {
-          if (!blocked()) {
-            setPressed(true);
-          }
-        }}
-        onRelease={() => setPressed(false)}
-        onClick={activate}
-        onKey={(key) => {
-          if (key === "Enter") {
-            activate();
-          }
-        }}
-        onText={(value) => {
-          if (value === " ") {
-            activate();
-          }
-        }}
+        w={props.wide ? "100%" : undefined}
+        color={face()}
+        radius={theme().shape.full}
+        min={{ h: target() }}
       >
-        <padding edges={theme().space.s}>
-          <decorated color={fill()} radius={theme().radius.s}>
-            <row gap={theme().space.s}>
-              {props.icon}
-              <Text
-                fontSize={theme().fontSize.body}
-                color={labelColor()}
-                weight={theme().weight.emphasis}
-                direction={directionFor(theme().locale)}
-              >
-                {props.label}
-              </Text>
-            </row>
-          </decorated>
+        <padding
+          left={padX()}
+          right={padX()}
+          top={padY()}
+          bottom={padY()}
+          w={props.wide ? "100%" : undefined}
+        >
+          <row gap={theme().space.s} justify="center" w={props.wide ? "100%" : undefined}>
+            {props.icon}
+            <Text
+              fontSize={theme().typography.label.size}
+              color={labelColor()}
+              weight={theme().typography.label.weight}
+              direction={directionFor(theme().locale)}
+            >
+              {props.label}
+            </Text>
+          </row>
         </padding>
-      </pointer>
-    </opacity>
+      </decorated>
+    </pointer>
   );
 }

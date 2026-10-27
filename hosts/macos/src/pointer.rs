@@ -34,6 +34,7 @@ pub fn pointer_event(
         modifiers,
         dx,
         dy,
+        zoom: 0.0,
     }
 }
 

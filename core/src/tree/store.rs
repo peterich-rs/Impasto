@@ -1,14 +1,11 @@
 //! Slots, generations, and structural edits.
 
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-use protocol::TextStyle;
 use taffy::prelude::*;
 
 use super::layout::{align_axes, finite_number, flex_style, scroll_style, stack_style, tracks};
-use super::node::{DragClaim, Hit, ImageNode, Kind, MAX_GENERATION, Node, Slot, TextNode};
+use super::node::{ImagePayload, Kind, MAX_GENERATION, Node, Payload, Slot, TextPayload};
 use super::{Alignment, Discarded, Gesture, NodeId, TrackSize, Tree};
 use crate::{Error, Shaper};
 
@@ -23,9 +20,23 @@ impl Tree {
             arena: super::gesture::GestureArena::default(),
             focused: None,
             scopes: Vec::new(),
-            fling: HashMap::new(),
+            motions: Vec::new(),
+            motion_ends: Vec::new(),
+            clock_ms: 0.0,
+            applying_motion: false,
+            dirty_boundaries: Vec::new(),
+            pictures: HashMap::new(),
+            self_pictures: HashMap::new(),
+            layer_stack: Vec::new(),
+            layer_tail: Vec::new(),
+            layer_top: None,
+            picture_writes: 0,
+            layer_epoch: 0,
+            layers: crate::layer::LayerTree::empty(),
+            semantics_cache: HashMap::new(),
+            image_counts: HashMap::new(),
+            image_generation: 0,
             scroll_notices: Vec::new(),
-            editors: HashMap::new(),
             needs_layout: false,
             needs_paint: false,
             layout_passes: 0,
@@ -37,22 +48,17 @@ impl Tree {
     }
 
     pub fn row(&mut self, gap: f32) -> Result<NodeId, Error> {
-        self.container(Kind::Row, Hit::Defer, flex_style(FlexDirection::Row, gap))
+        self.container(Kind::Row, flex_style(FlexDirection::Row, gap))
     }
 
     pub fn column(&mut self, gap: f32) -> Result<NodeId, Error> {
-        self.container(
-            Kind::Column,
-            Hit::Defer,
-            flex_style(FlexDirection::Column, gap),
-        )
+        self.container(Kind::Column, flex_style(FlexDirection::Column, gap))
     }
 
     pub fn grid(&mut self, columns: u16) -> Result<NodeId, Error> {
         let tracks = (0..columns).map(|_| min_content()).collect();
         self.container(
             Kind::Grid,
-            Hit::Defer,
             Style {
                 display: Display::Grid,
                 grid_template_columns: tracks,
@@ -78,7 +84,6 @@ impl Tree {
         let rows = tracks(rows)?;
         self.container(
             Kind::Grid,
-            Hit::Defer,
             Style {
                 display: Display::Grid,
                 grid_template_columns: columns,
@@ -98,10 +103,9 @@ impl Tree {
         let edge = length(edges);
         self.container(
             Kind::Padding,
-            Hit::Defer,
             Style {
                 display: Display::Flex,
-                align_items: Some(AlignItems::Start),
+                align_items: Some(AlignItems::Stretch),
                 padding: Rect {
                     left: edge,
                     right: edge,
@@ -117,7 +121,6 @@ impl Tree {
         let (cross, main) = align_axes(alignment);
         self.container(
             Kind::Align,
-            Hit::Defer,
             Style {
                 display: Display::Flex,
                 align_items: Some(cross),
@@ -130,7 +133,6 @@ impl Tree {
     pub fn sized(&mut self, width: f32, height: f32) -> Result<NodeId, Error> {
         self.container(
             Kind::Sized,
-            Hit::Defer,
             Style {
                 size: Size {
                     width: length(width),
@@ -142,22 +144,24 @@ impl Tree {
     }
 
     pub fn stack(&mut self) -> Result<NodeId, Error> {
-        self.container(Kind::Stack, Hit::Defer, stack_style())
+        self.container(Kind::Stack, stack_style())
     }
 
     /// Clips descendants to this border box. A radius of zero is a rectangle.
     ///
     /// Hit testing uses the rounded outline. A point in the corner does not reach a child.
     pub fn clip(&mut self, corner_radius: f32) -> Result<NodeId, Error> {
-        let id = self.container(Kind::Clip, Hit::Defer, stack_style())?;
-        self.node_mut(id)?.corner_radius = corner_radius;
+        let id = self.container(Kind::Clip, stack_style())?;
+        self.node_mut(id)?
+            .write_paint(|paint| paint.corner_radius = corner_radius);
         Ok(id)
     }
 
     /// Composites descendants as one layer. `alpha` is 0–255.
     pub fn opacity(&mut self, alpha: u8) -> Result<NodeId, Error> {
-        let id = self.container(Kind::Opacity, Hit::Defer, stack_style())?;
-        self.node_mut(id)?.alpha = Some(alpha);
+        let id = self.container(Kind::Opacity, stack_style())?;
+        self.node_mut(id)?
+            .write_paint(|paint| paint.alpha = Some(alpha));
         Ok(id)
     }
 
@@ -166,7 +170,7 @@ impl Tree {
     /// The border box is the viewport. `set_scroll_offset` moves paint and hit
     /// testing only, so a scroll frame does not invalidate Taffy's layout cache.
     pub fn scroll(&mut self) -> Result<NodeId, Error> {
-        self.container(Kind::Scroll, Hit::Defer, scroll_style())
+        self.container(Kind::Scroll, scroll_style())
     }
 
     /// A paint transform around the current origin. Layout ignores it.
@@ -176,7 +180,7 @@ impl Tree {
     ///
     /// The initial transform is identity: no translation, no rotation, scale 1.
     pub fn transform(&mut self) -> Result<NodeId, Error> {
-        self.container(Kind::Transform, Hit::Defer, stack_style())
+        self.container(Kind::Transform, stack_style())
     }
 
     pub fn text(
@@ -201,47 +205,12 @@ impl Tree {
         Ok(self.occupy(
             index,
             generation,
-            Node {
-                kind: Kind::Text,
+            Node::new(
+                Kind::Text,
                 style,
-                taffy: Some(taffy),
-                parent: None,
-                children: Vec::new(),
-                hit: Hit::Opaque,
-                text: Some(TextNode {
-                    utf8,
-                    font_size,
-                    color,
-                    max_width: Cell::new(0.0),
-                    style: TextStyle::default(),
-                    spans: Vec::new(),
-                    links: Vec::new(),
-                }),
-                image: None,
-                fill: None,
-                corner_radius: 0.0,
-                alpha: None,
-                scroll: (0.0, 0.0),
-                translate_x: 0.0,
-                translate_y: 0.0,
-                rotate_rad: 0.0,
-                scale: 1.0,
-                scale_y: 1.0,
-                stroke_width: 0.0,
-                stroke_color: [0, 0, 0, 0],
-                gradient: None,
-                shadow: None,
-                blur: 0.0,
-                backdrop: 0.0,
-                blend: protocol::BlendMode::SrcOver,
-                focusable: false,
-                drag_claim: DragClaim::None,
-                semantics: None,
-                x: 0.0,
-                y: 0.0,
-                w: 0.0,
-                h: 0.0,
-            },
+                taffy,
+                Payload::Text(Box::new(TextPayload::new(utf8, font_size, color))),
+            ),
         ))
     }
 
@@ -263,49 +232,25 @@ impl Tree {
                 return Err(error.into());
             }
         };
-        Ok(self.occupy(
+        let source = Arc::<str>::from(source.into());
+        let id = self.occupy(
             index,
             generation,
-            Node {
-                kind: Kind::Image,
+            Node::new(
+                Kind::Image,
                 style,
-                taffy: Some(taffy),
-                parent: None,
-                children: Vec::new(),
-                hit: Hit::Opaque,
-                text: None,
-                image: Some(ImageNode {
-                    source: source.into(),
+                taffy,
+                Payload::Image(ImagePayload {
+                    source: Arc::clone(&source),
                     width,
                     height,
                     mode: protocol::ContentMode::Fill,
                     required: false,
                 }),
-                fill: None,
-                corner_radius: 0.0,
-                alpha: None,
-                scroll: (0.0, 0.0),
-                translate_x: 0.0,
-                translate_y: 0.0,
-                rotate_rad: 0.0,
-                scale: 1.0,
-                scale_y: 1.0,
-                stroke_width: 0.0,
-                stroke_color: [0, 0, 0, 0],
-                gradient: None,
-                shadow: None,
-                blur: 0.0,
-                backdrop: 0.0,
-                blend: protocol::BlendMode::SrcOver,
-                focusable: false,
-                drag_claim: DragClaim::None,
-                semantics: None,
-                x: 0.0,
-                y: 0.0,
-                w: 0.0,
-                h: 0.0,
-            },
-        ))
+            ),
+        );
+        self.note_image(&source, 1);
+        Ok(id)
     }
 
     /// Paints its border box and sizes itself to its children.
@@ -313,24 +258,21 @@ impl Tree {
     /// `corner_radius` is in scene points. Zero paints a sharp rectangle and does not
     /// change hit testing.
     pub fn decorated(&mut self, color: [u8; 4], corner_radius: f32) -> Result<NodeId, Error> {
-        let id = self.container(
-            Kind::Decorated,
-            Hit::Defer,
-            flex_style(FlexDirection::Column, 0.0),
-        )?;
+        let id = self.container(Kind::Decorated, flex_style(FlexDirection::Column, 0.0))?;
         let node = self.node_mut(id)?;
-        node.fill = Some(color);
-        node.corner_radius = corner_radius;
+        node.write_paint(|paint| {
+            paint.fill = Some(color);
+            paint.corner_radius = corner_radius;
+        });
         Ok(id)
     }
 
     pub fn pointer_region(&mut self) -> Result<NodeId, Error> {
         self.container(
             Kind::PointerRegion,
-            Hit::Region,
             Style {
                 display: Display::Flex,
-                align_items: Some(AlignItems::Start),
+                align_items: Some(AlignItems::Stretch),
                 justify_content: Some(JustifyContent::Start),
                 ..Style::default()
             },
@@ -385,20 +327,18 @@ impl Tree {
 
         self.pin_stack_child(parent, child)?;
         let index = match before {
-            Some(anchor) => self
-                .node(parent)?
-                .children
-                .iter()
-                .position(|id| *id == anchor)
-                .ok_or(Error::NotAChild)?,
-            None => self.node(parent)?.children.len(),
+            Some(anchor) => self.child_index(parent, anchor)?,
+            None => self.child_count(parent)?,
         };
         let parent_taffy = self.node(parent)?.taffy.ok_or(Error::UnknownNode)?;
         let child_taffy = self.node(child)?.taffy.ok_or(Error::UnknownNode)?;
         self.taffy
             .insert_child_at_index(parent_taffy, index, child_taffy)?;
-        self.node_mut(parent)?.children.insert(index, child);
-        self.node_mut(child)?.parent = Some(parent);
+        self.attach_links(parent, child, before)?;
+        if let Ok(node) = self.node_mut(child) {
+            node.flags.insert(super::node::NodeFlags::LAYOUT_DIRTY);
+        }
+        self.mark_layout_from(parent);
         self.promote(parent);
         self.mark_structure();
         Ok(())
@@ -413,11 +353,11 @@ impl Tree {
         if self.node(child)?.parent != Some(parent) {
             return Err(Error::NotAChild);
         }
-        self.node_mut(parent)?.children.retain(|id| *id != child);
-        self.node_mut(child)?.parent = None;
+        self.detach_links(child)?;
         self.release_taffy(child)?;
         let mut gestures = self.blur_contained(child);
         self.drop_routes_in(child);
+        self.mark_layout_from(parent);
         self.mark_structure();
         gestures.extend(self.drain_pending());
         Ok(gestures)
@@ -441,8 +381,7 @@ impl Tree {
         let mut ids = Vec::new();
         self.retire_postorder(id, &mut ids)?;
         for id in &ids {
-            self.fling.remove(id);
-            self.editors.remove(id);
+            self.motions.retain(|motion| motion.node != *id);
         }
         self.mark_structure();
         let mut gestures = gestures;
@@ -455,9 +394,11 @@ impl Tree {
         id: NodeId,
         retired: &mut Vec<NodeId>,
     ) -> Result<(), Error> {
-        let children = self.node(id)?.children.clone();
-        for child in children {
-            self.retire_postorder(child, retired)?;
+        let mut child = self.node(id)?.first_child;
+        while let Some(current) = child {
+            let next = self.node(current)?.next;
+            self.retire_postorder(current, retired)?;
+            child = next;
         }
         retired.push(id);
         self.retire(id.index);
@@ -469,26 +410,14 @@ impl Tree {
     }
 
     pub fn first_child(&self, id: NodeId) -> Result<Option<NodeId>, Error> {
-        Ok(self.node(id)?.children.first().copied())
+        Ok(self.node(id)?.first_child)
     }
 
     pub fn next_sibling(&self, id: NodeId) -> Result<Option<NodeId>, Error> {
-        let Some(parent) = self.node(id)?.parent else {
-            return Ok(None);
-        };
-        let children = &self.node(parent)?.children;
-        let Some(index) = children.iter().position(|child| *child == id) else {
-            return Ok(None);
-        };
-        Ok(children.get(index + 1).copied())
+        Ok(self.node(id)?.next)
     }
 
-    pub(super) fn container(
-        &mut self,
-        kind: Kind,
-        hit: Hit,
-        style: Style,
-    ) -> Result<NodeId, Error> {
+    pub(super) fn container(&mut self, kind: Kind, style: Style) -> Result<NodeId, Error> {
         let (index, generation) = self.reserve();
         let taffy = match self.taffy.new_leaf(style.clone()) {
             Ok(id) => id,
@@ -500,39 +429,7 @@ impl Tree {
         Ok(self.occupy(
             index,
             generation,
-            Node {
-                kind,
-                style,
-                taffy: Some(taffy),
-                parent: None,
-                children: Vec::new(),
-                hit,
-                text: None,
-                image: None,
-                fill: None,
-                corner_radius: 0.0,
-                alpha: None,
-                scroll: (0.0, 0.0),
-                translate_x: 0.0,
-                translate_y: 0.0,
-                rotate_rad: 0.0,
-                scale: 1.0,
-                scale_y: 1.0,
-                stroke_width: 0.0,
-                stroke_color: [0, 0, 0, 0],
-                gradient: None,
-                shadow: None,
-                blur: 0.0,
-                backdrop: 0.0,
-                blend: protocol::BlendMode::SrcOver,
-                focusable: false,
-                drag_claim: DragClaim::None,
-                semantics: None,
-                x: 0.0,
-                y: 0.0,
-                w: 0.0,
-                h: 0.0,
-            },
+            Node::new(kind, style, taffy, Payload::Container),
         ))
     }
 
@@ -543,6 +440,12 @@ impl Tree {
         let id = NodeId { index, generation };
         if self.root.is_none() {
             self.root = Some(id);
+            self.slots[index as usize].node.as_mut().map(|node| {
+                node.flags.insert(
+                    super::node::NodeFlags::RELAYOUT_BOUNDARY
+                        | super::node::NodeFlags::REPAINT_BOUNDARY,
+                );
+            });
         }
         id
     }
@@ -563,8 +466,35 @@ impl Tree {
 
     /// Drops whatever occupies `index` and recycles it until the generation cap.
     pub(super) fn retire(&mut self, index: u32) {
+        let paint = self.slots.get_mut(index as usize).and_then(|slot| {
+            slot.node.as_mut().and_then(|node| {
+                node.text_mut().and_then(|text| {
+                    text.metrics = None;
+                    text.cached = None;
+                    text.paragraph.take()
+                })
+            })
+        });
+        if let Some(id) = paint {
+            self.shaper.release_paint(id);
+        }
+        if let Some(source) = self
+            .slots
+            .get(index as usize)
+            .and_then(|slot| slot.node.as_ref())
+            .and_then(|node| node.image())
+            .map(|image| Arc::clone(&image.source))
+        {
+            self.note_image(&source, -1);
+        }
         if self.root.is_some_and(|root| root.index == index) {
             self.root = None;
+        }
+        let generation = self.slots.get(index as usize).map(|slot| slot.generation);
+        if let Some(generation) = generation {
+            let id = NodeId { index, generation };
+            self.pictures.remove(&id);
+            self.self_pictures.remove(&id);
         }
         self.arena.clear_index(index);
         if self.focused.is_some_and(|focused| focused.index == index) {
@@ -603,26 +533,41 @@ impl Tree {
 
     /// Every image still attached to the tree, including children of a zero-size clip.
     pub fn image_source_counts(&self) -> HashMap<Arc<str>, u32> {
-        let mut counts = HashMap::new();
-        if let Some(root) = self.root {
-            self.accumulate_images(root, &mut counts);
-        }
-        counts
+        self.image_counts.clone()
     }
 
-    fn accumulate_images(&self, id: NodeId, counts: &mut HashMap<Arc<str>, u32>) {
-        let Some(node) = self.get(id) else {
+    pub fn image_generation(&self) -> u64 {
+        self.image_generation
+    }
+
+    pub fn image_census(&self) -> crate::ImageCensus {
+        crate::ImageCensus {
+            generation: self.image_generation,
+            counts: Arc::new(self.image_counts.clone()),
+        }
+    }
+
+    pub fn layer_epoch(&self) -> u64 {
+        self.layer_epoch
+    }
+
+    pub fn layer_tree(&self) -> crate::LayerTree {
+        self.layers.clone()
+    }
+
+    pub(super) fn note_image(&mut self, source: &Arc<str>, delta: i32) {
+        if source.is_empty() || delta == 0 {
             return;
-        };
-        if let Some(image) = &node.image {
-            if !image.source.is_empty() {
-                *counts.entry(Arc::from(image.source.as_str())).or_insert(0) += 1;
+        }
+        if delta > 0 {
+            *self.image_counts.entry(Arc::clone(source)).or_insert(0) += delta as u32;
+        } else if let Some(count) = self.image_counts.get_mut(source) {
+            *count = count.saturating_sub((-delta) as u32);
+            if *count == 0 {
+                self.image_counts.remove(source);
             }
         }
-        let children = node.children.clone();
-        for child in children {
-            self.accumulate_images(child, counts);
-        }
+        self.image_generation = self.image_generation.wrapping_add(1);
     }
 
     pub(super) fn is_under(&self, mut node: NodeId, ancestor: NodeId) -> Result<bool, Error> {
@@ -646,13 +591,90 @@ impl Tree {
         let Some(parent) = self.node(child)?.parent else {
             return Ok(());
         };
-        self.node_mut(parent)?.children.retain(|id| *id != child);
         let parent_taffy = self.node(parent)?.taffy;
         let child_taffy = self.node(child)?.taffy;
         if let (Some(parent_taffy), Some(child_taffy)) = (parent_taffy, child_taffy) {
             self.taffy.remove_child(parent_taffy, child_taffy)?;
         }
-        self.node_mut(child)?.parent = None;
+        self.detach_links(child)
+    }
+
+    pub(super) fn child_count(&self, id: NodeId) -> Result<usize, Error> {
+        let mut count = 0;
+        let mut child = self.node(id)?.first_child;
+        while let Some(current) = child {
+            count += 1;
+            child = self.node(current)?.next;
+        }
+        Ok(count)
+    }
+
+    pub(super) fn child_index(&self, parent: NodeId, child: NodeId) -> Result<usize, Error> {
+        let mut index = 0;
+        let mut current = self.node(parent)?.first_child;
+        while let Some(id) = current {
+            if id == child {
+                return Ok(index);
+            }
+            index += 1;
+            current = self.node(id)?.next;
+        }
+        Err(Error::NotAChild)
+    }
+
+    /// `child` is already detached. Returns the Taffy insert index.
+    pub(super) fn attach_links(
+        &mut self,
+        parent: NodeId,
+        child: NodeId,
+        before: Option<NodeId>,
+    ) -> Result<usize, Error> {
+        let index = match before {
+            Some(anchor) => self.child_index(parent, anchor)?,
+            None => self.child_count(parent)?,
+        };
+        let prev = match before {
+            Some(anchor) => self.node(anchor)?.prev,
+            None => self.node(parent)?.last_child,
+        };
+        {
+            let node = self.node_mut(child)?;
+            node.parent = Some(parent);
+            node.prev = prev;
+            node.next = before;
+        }
+        if let Some(prev) = prev {
+            self.node_mut(prev)?.next = Some(child);
+        } else {
+            self.node_mut(parent)?.first_child = Some(child);
+        }
+        if let Some(anchor) = before {
+            self.node_mut(anchor)?.prev = Some(child);
+        } else {
+            self.node_mut(parent)?.last_child = Some(child);
+        }
+        Ok(index)
+    }
+
+    pub(super) fn detach_links(&mut self, child: NodeId) -> Result<(), Error> {
+        let (parent, prev, next) = {
+            let node = self.node(child)?;
+            (node.parent, node.prev, node.next)
+        };
+        if let Some(prev) = prev {
+            self.node_mut(prev)?.next = next;
+        } else if let Some(parent) = parent {
+            self.node_mut(parent)?.first_child = next;
+        }
+        if let Some(next) = next {
+            self.node_mut(next)?.prev = prev;
+        } else if let Some(parent) = parent {
+            self.node_mut(parent)?.last_child = prev;
+        }
+        let node = self.node_mut(child)?;
+        node.parent = None;
+        node.prev = None;
+        node.next = None;
         Ok(())
     }
 
@@ -670,7 +692,12 @@ impl Tree {
         if self.node(id)?.taffy.is_some() {
             return Ok(());
         }
-        let children = self.node(id)?.children.clone();
+        let mut child = self.node(id)?.first_child;
+        let mut children = Vec::new();
+        while let Some(current) = child {
+            children.push(current);
+            child = self.node(current)?.next;
+        }
         for child in &children {
             self.revive(*child)?;
         }
@@ -694,9 +721,11 @@ impl Tree {
     }
 
     pub(super) fn release_taffy(&mut self, id: NodeId) -> Result<(), Error> {
-        let children = self.node(id)?.children.clone();
-        for child in children {
-            self.release_taffy(child)?;
+        let mut child = self.node(id)?.first_child;
+        while let Some(current) = child {
+            let next = self.node(current)?.next;
+            self.release_taffy(current)?;
+            child = next;
         }
         let taffy_id = self.node_mut(id)?.taffy.take();
         if let Some(taffy_id) = taffy_id {
@@ -733,6 +762,27 @@ impl Tree {
         self.laid_out = false;
         if let Some(id) = self.arena.hovered.take() {
             self.arena.pending.push(Gesture::Leave(id));
+        }
+    }
+}
+
+impl Drop for Tree {
+    fn drop(&mut self) {
+        let paints: Vec<protocol::ParagraphId> = self
+            .slots
+            .iter_mut()
+            .filter_map(|slot| {
+                slot.node.as_mut().and_then(|node| {
+                    node.text_mut().and_then(|text| {
+                        text.metrics = None;
+                        text.cached = None;
+                        text.paragraph.take()
+                    })
+                })
+            })
+            .collect();
+        for id in paints {
+            self.shaper.release_paint(id);
         }
     }
 }

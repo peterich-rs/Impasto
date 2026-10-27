@@ -9,7 +9,9 @@ import {
   stickyTranslate,
   thumbLength,
   thumbOffset,
+  stabilizeWindow,
   windowRange,
+  windowRangeForOffset,
 } from "./list-window.ts";
 
 const prefix = new PrefixHeights();
@@ -48,6 +50,24 @@ assert.equal(alternating.heightAt(0), (heights[999] ?? 0) + 5);
 const view = windowRange(prefix, 0, 10, 4);
 assert.equal(view.start, 0);
 assert.ok(view.end <= 2);
+
+const held = windowRangeForOffset(prefix, 0, 10, 0, null);
+assert.deepEqual(held, windowRange(prefix, 0, 10, 0));
+const flung = windowRangeForOffset(prefix, 0, 10, 0, 40);
+assert.ok(flung.end > held.end);
+
+const rows = new PrefixHeights();
+rows.rebuild(Array.from({ length: 80 }, () => 10));
+const plain = windowRangeForOffset(rows, 100, 200, 4, null);
+assert.deepEqual(plain, windowRange(rows, 100, 200, 4));
+const led = windowRangeForOffset(rows, 100, 200, 4, 450);
+assert.ok(led.end > plain.end);
+const grown = stabilizeWindow(rows, plain, { ...plain, start: plain.start + 1 }, 4);
+assert.equal(grown.start, plain.start);
+const shifted = stabilizeWindow(rows, plain, { ...plain, start: plain.start + 5 }, 4);
+assert.equal(shifted.start, plain.start + 5);
+const expanded = stabilizeWindow(rows, plain, { ...plain, end: plain.end + 1 }, 4);
+assert.equal(expanded.end, plain.end + 1);
 
 const past = windowRange(prefix, 100, 10, 4);
 assert.equal(past.start, 2);

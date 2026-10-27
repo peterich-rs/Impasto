@@ -14,7 +14,7 @@ use objc2_app_kit::{
     NSAccessibilityTextFieldRole, NSView,
 };
 use objc2_core_foundation::CGSize;
-use objc2_foundation::{NSArray, NSNumber, NSPoint, NSRect, NSString};
+use objc2_foundation::{NSArray, NSNumber, NSPoint, NSRange, NSRect, NSString};
 
 /// One non-Generic node after Generic ancestors have been skipped.
 #[derive(Clone, Debug, PartialEq)]
@@ -27,6 +27,8 @@ pub struct VisibleNode {
     pub help: String,
     pub actions: core::SemanticsActions,
     pub flags: core::SemanticsFlags,
+    /// Selection, or a collapsed caret. Empty when the node has neither.
+    pub selection: Option<(u32, u32)>,
 }
 
 /// AppKit role that a visible node maps to. Switch is CheckBox.
@@ -38,6 +40,8 @@ pub enum AxRole {
     ScrollArea,
     CheckBox,
     TextField,
+    SearchField,
+    TextArea,
 }
 
 /// Stable slot for one [`core::SemanticsId`]. Disappeared ids are dropped.
@@ -84,6 +88,9 @@ pub fn visible_nodes(update: &core::SemanticsUpdate) -> Vec<VisibleNode> {
             help: node.description.clone().unwrap_or_default(),
             actions: node.actions,
             flags: node.flags,
+            selection: node
+                .selection
+                .or_else(|| node.caret.map(|unit| (unit, unit))),
         })
         .collect()
 }
@@ -113,6 +120,8 @@ pub fn ax_role(role: core::SemanticsRole) -> Option<AxRole> {
         core::SemanticsRole::Scroll => Some(AxRole::ScrollArea),
         core::SemanticsRole::Switch => Some(AxRole::CheckBox),
         core::SemanticsRole::TextField => Some(AxRole::TextField),
+        core::SemanticsRole::SearchField => Some(AxRole::SearchField),
+        core::SemanticsRole::TextArea => Some(AxRole::TextArea),
     }
 }
 
@@ -185,6 +194,7 @@ pub(crate) struct A11yIvars {
     rect: Cell<core::Rect>,
     actions: Cell<u32>,
     flags: Cell<u32>,
+    selected: Cell<Option<(u32, u32)>>,
     children: RefCell<Vec<Retained<A11yNode>>>,
 }
 
@@ -222,7 +232,12 @@ define_class!(
                     core::SemanticsRole::Image => Some(NSAccessibilityImageRole.retain()),
                     core::SemanticsRole::Scroll => Some(NSAccessibilityScrollAreaRole.retain()),
                     core::SemanticsRole::Switch => Some(NSAccessibilityCheckBoxRole.retain()),
-                    core::SemanticsRole::TextField => Some(NSAccessibilityTextFieldRole.retain()),
+                    core::SemanticsRole::TextField
+                    | core::SemanticsRole::SearchField
+                    | core::SemanticsRole::TextArea => {
+                        // objc2 does not export the search-field or text-area role symbols.
+                        Some(NSAccessibilityTextFieldRole.retain())
+                    }
                     core::SemanticsRole::Generic => None,
                 }
             }
@@ -235,6 +250,17 @@ define_class!(
                     core::SemanticsFlags(self.ivars().flags.get()),
                 ))),
                 _ => None,
+            }
+        }
+
+        #[unsafe(method(accessibilitySelectedTextRange))]
+        fn accessibility_selected_text_range(&self) -> NSRange {
+            match self.ivars().selected.get() {
+                Some((start, end)) => {
+                    let (start, end) = if start <= end { (start, end) } else { (end, start) };
+                    NSRange::new(start as usize, (end - start) as usize)
+                }
+                None => NSRange::new(usize::MAX, 0),
             }
         }
 
@@ -304,6 +330,7 @@ impl A11yNode {
             }),
             actions: Cell::new(0),
             flags: Cell::new(0),
+            selected: Cell::new(None),
             children: RefCell::new(Vec::new()),
         });
         // SAFETY: `init` is NSAccessibilityElement's designated initializer.
@@ -317,6 +344,7 @@ impl A11yNode {
         self.ivars().rect.set(node.rect);
         self.ivars().actions.set(node.actions.0);
         self.ivars().flags.set(node.flags.0);
+        self.ivars().selected.set(node.selection);
     }
 
     fn set_tree(&self, parent: *const AnyObject, children: Vec<Retained<A11yNode>>) {
@@ -429,6 +457,7 @@ mod tests {
             flags: SemanticsFlags(0),
             scroll: None,
             selection: None,
+            caret: None,
             description: None,
         }
     }
@@ -524,6 +553,7 @@ mod tests {
                     flags: SemanticsFlags(0),
                     scroll: Some((0.0, 0.0)),
                     selection: None,
+                    caret: None,
                     description: None,
                 },
                 SemanticsNode {
@@ -537,6 +567,7 @@ mod tests {
                     flags: SemanticsFlags(0),
                     scroll: None,
                     selection: None,
+                    caret: None,
                     description: None,
                 },
             ],

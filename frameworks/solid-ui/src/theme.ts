@@ -1,3 +1,11 @@
+import {
+  DARK,
+  HIGH_DARK,
+  HIGH_LIGHT,
+  LIGHT,
+  type Palette,
+} from "@uifw/solid-renderer/palette";
+
 export type PlatformSnapshot = {
   locale: string;
   textScale: number;
@@ -11,6 +19,30 @@ export type Density = "compact" | "regular" | "comfortable";
 export type ButtonSize = "regular" | "compact";
 export type ButtonVariant = "primary" | "quiet";
 
+export type { Palette };
+
+/** Six corner sizes. `full` is the pill radius. Spacing scales with density. */
+export type Shape = {
+  none: number;
+  xs: number;
+  s: number;
+  m: number;
+  l: number;
+  full: number;
+};
+
+export type TypeStyle = { size: number; weight: number; lineHeight: number };
+
+/** Six type roles. Sizes scale with density. Control chrome multiplies `textScale` at the call site. */
+export type Typography = {
+  display: TypeStyle;
+  headline: TypeStyle;
+  title: TypeStyle;
+  body: TypeStyle;
+  label: TypeStyle;
+  caption: TypeStyle;
+};
+
 export type Theme = {
   locale: string;
   density: Density;
@@ -18,15 +50,9 @@ export type Theme = {
   weight: { body: number; emphasis: number };
   space: { s: number; m: number; l: number };
   radius: { s: number; m: number };
-  color: {
-    bg: string;
-    surface: string;
-    text: string;
-    textMuted: string;
-    accent: string;
-    danger: string;
-    scrim: string;
-  };
+  shape: Shape;
+  typography: Typography;
+  color: Palette;
   reduceMotion: boolean;
   boldText: boolean;
   highContrast: boolean;
@@ -66,52 +92,21 @@ function densityCoeff(value: Density): number {
   return COEFF[value];
 }
 
-function palette(
-  brightness: "light" | "dark",
-  highContrast: boolean,
-): Theme["color"] {
+function palette(brightness: "light" | "dark", highContrast: boolean): Palette {
   if (highContrast && brightness === "dark") {
-    return {
-      bg: "#000000",
-      surface: "#000000",
-      text: "#FFFFFF",
-      textMuted: "#A3A3A3",
-      accent: "#FFFFFF",
-      danger: "#FF5A5A",
-      scrim: "#00000080",
-    };
+    return HIGH_DARK;
   }
   if (highContrast && brightness === "light") {
-    return {
-      bg: "#FFFFFF",
-      surface: "#FFFFFF",
-      text: "#000000",
-      textMuted: "#5C5C5C",
-      accent: "#000000",
-      danger: "#FF5A5A",
-      scrim: "#00000080",
-    };
+    return HIGH_LIGHT;
   }
   if (brightness === "dark") {
-    return {
-      bg: "#111111",
-      surface: "#282828",
-      text: "#FFFFFF",
-      textMuted: "#A3A3A3",
-      accent: "#7CFF6B",
-      danger: "#FF5A5A",
-      scrim: "#00000080",
-    };
+    return DARK;
   }
-  return {
-    bg: "#FFFFFF",
-    surface: "#F2F2F2",
-    text: "#111111",
-    textMuted: "#5C5C5C",
-    accent: "#148A32",
-    danger: "#FF5A5A",
-    scrim: "#00000080",
-  };
+  return LIGHT;
+}
+
+function typeStyle(size: number, weight: number): TypeStyle {
+  return { size, weight, lineHeight: size * 1.25 };
 }
 
 export function resolveTheme(settings: PlatformSnapshot, nextDensity: Density): Theme {
@@ -134,6 +129,22 @@ export function resolveTheme(settings: PlatformSnapshot, nextDensity: Density): 
     radius: {
       s: 4 * coeff,
       m: 6 * coeff,
+    },
+    shape: {
+      none: 0,
+      xs: 2 * coeff,
+      s: 4 * coeff,
+      m: 6 * coeff,
+      l: 12 * coeff,
+      full: 999,
+    },
+    typography: {
+      display: typeStyle(32 * coeff, settings.boldText ? 700 : 600),
+      headline: typeStyle(24 * coeff, settings.boldText ? 700 : 600),
+      title: typeStyle(20 * coeff, settings.boldText ? 700 : 600),
+      body: typeStyle(16 * coeff, settings.boldText ? 600 : 400),
+      label: typeStyle(14 * coeff, settings.boldText ? 600 : 500),
+      caption: typeStyle(12 * coeff, settings.boldText ? 600 : 400),
     },
     color: palette(settings.brightness, settings.highContrast),
     reduceMotion: settings.reduceMotion,
@@ -198,9 +209,23 @@ function ensureListening(): void {
   listening = true;
 }
 
-export function createTheme(): () => Theme {
+export function currentLocale(): string {
+  return snapshot.locale;
+}
+
+/**
+ * Shallow-merges `overrides` onto the resolved theme.
+ * A `color` override replaces the palette object; it does not merge keys.
+ */
+export function createTheme(overrides?: Partial<Theme>): () => Theme {
   ensureListening();
-  return () => resolveTheme(snapshot, density);
+  return () => {
+    const base = resolveTheme(snapshot, density);
+    if (overrides === undefined) {
+      return base;
+    }
+    return { ...base, ...overrides };
+  };
 }
 
 export function resetThemeForTests(): void {

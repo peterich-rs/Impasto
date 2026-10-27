@@ -1,8 +1,8 @@
 import { onCleanup } from "solid-js";
-import { host, onFrame, overlayParent, removeNode, type NodeHandle } from "@uifw/solid-renderer";
+import { directionFor, host, onFrame, overlayParent, removeNode, type NodeHandle } from "@uifw/solid-renderer";
 import { colorBytes } from "./colors.ts";
 import { nodeId } from "./host-ext.ts";
-import { directionFor } from "./i18n.ts";
+import { transition } from "./motion.ts";
 import { useTheme } from "./use-theme.ts";
 
 /**
@@ -12,14 +12,18 @@ import { useTheme } from "./use-theme.ts";
 export function Tooltip(props: { open: boolean; anchor: number; text: string }): NodeHandle {
   const theme = useTheme();
   let shell = 0;
+  let fade = 0;
   let panel = 0;
   let label = 0;
+  let stopFade = () => {};
 
   function dismiss(): void {
+    stopFade();
     if (shell !== 0) {
       removeNode({ id: shell } as NodeHandle);
     }
     shell = 0;
+    fade = 0;
     panel = 0;
     label = 0;
   }
@@ -32,8 +36,10 @@ export function Tooltip(props: { open: boolean; anchor: number; text: string }):
     shell = host.stack();
     host.setFill(shell);
     host.insert(overlay, shell, 0);
+    fade = host.opacity(0);
+    host.insert(shell, fade, 0);
     panel = host.transform();
-    host.insert(shell, panel, 0);
+    host.insert(fade, panel, 0);
     const paint = host.decorated(colorBytes(theme().color.surface), theme().radius.s);
     host.insert(panel, paint, 0);
     const pad = host.padding(theme().space.s);
@@ -41,6 +47,10 @@ export function Tooltip(props: { open: boolean; anchor: number; text: string }):
     label = host.text(props.text, theme().fontSize.body, colorBytes(theme().color.text));
     host.setTextDirection(label, directionFor(theme().locale));
     host.insert(pad, label, 0);
+    stopFade();
+    stopFade = transition((t) => {
+      host.setAlpha(fade, Math.round(t * 255));
+    }, 80);
   }
 
   function sync(): void {
@@ -67,6 +77,7 @@ export function Tooltip(props: { open: boolean; anchor: number; text: string }):
   });
   onCleanup(() => {
     stop();
+    stopFade();
     dismiss();
   });
 

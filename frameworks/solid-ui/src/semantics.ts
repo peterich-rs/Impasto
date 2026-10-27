@@ -6,6 +6,8 @@ export const Role = {
   Scroll: 4,
   Switch: 5,
   TextField: 6,
+  SearchField: 7,
+  TextArea: 8,
 } as const;
 
 export type Role = (typeof Role)[keyof typeof Role];

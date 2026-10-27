@@ -1,12 +1,13 @@
 //! One frame of a language runtime. The host calls this and never sees application state.
 
-use protocol::DrawList;
+use std::sync::Arc;
 
 mod io;
 
 pub use io::{
-    HTTP_BODY_LIMIT, HttpClient, HttpError, HttpRequest, HttpResponse, IoJob, PluginResult,
-    PluginValue,
+    HTTP_BODY_LIMIT, HostMethod, HostPlace, HostWait, HttpClient, HttpError, HttpRequest,
+    HttpResponse, IoJob, PluginResult, PluginValue, document_relative, host_method,
+    host_module_linked, host_module_methods, module_not_linked,
 };
 
 /// One edge of a window, in scene points.
@@ -165,6 +166,8 @@ pub enum Key {
     DeleteWordForward,
     DeleteToLineStart,
     DeleteToLineEnd,
+    /// A character key. Posted when modifiers are held, instead of [`InputEvent::Text`].
+    Char(char),
 }
 
 /// One key, plus whether the selection should extend.
@@ -172,15 +175,32 @@ pub enum Key {
 pub struct KeyPress {
     pub key: Key,
     pub shift: bool,
+    pub modifiers: core::Modifiers,
 }
 
 impl KeyPress {
     pub const fn new(key: Key) -> Self {
-        Self { key, shift: false }
+        Self {
+            key,
+            shift: false,
+            modifiers: core::Modifiers::empty(),
+        }
     }
 
     pub const fn extending(key: Key) -> Self {
-        Self { key, shift: true }
+        Self {
+            key,
+            shift: true,
+            modifiers: core::Modifiers::empty(),
+        }
+    }
+
+    pub const fn with_modifiers(key: Key, modifiers: core::Modifiers) -> Self {
+        Self {
+            key,
+            shift: modifiers.contains(core::Modifiers::SHIFT),
+            modifiers,
+        }
     }
 }
 
@@ -272,9 +292,76 @@ pub enum InputEvent {
     Back,
     Copy,
     Cut,
-    /// Clipboard text read on the platform thread.
-    Paste(String),
+    /// Clipboard payload read on the platform thread. The editor consumes `plain`.
+    Paste {
+        plain: String,
+        html: Option<String>,
+    },
     SelectAll,
+    /// A committed IME diff. The session applies it on the focused editor.
+    Edit(core::Edit),
+    /// The platform input connection's buffer, selection, and composing span.
+    ///
+    /// Indices are UTF-16. A composing start below zero means there is no span.
+    /// The focused field replaces its string with `text` instead of replaying a diff.
+    Replace {
+        text: String,
+        start: u32,
+        end: u32,
+        compose_start: i32,
+        compose_end: i32,
+    },
+}
+
+/// One IO completion delivered on the render thread.
+pub enum IoEvent {
+    Http {
+        token: u64,
+        result: Result<HttpResponse, HttpError>,
+    },
+    Plugin {
+        token: u64,
+        result: PluginResult,
+    },
+    Socket {
+        id: u64,
+        event: String,
+        text: bool,
+        data: Vec<u8>,
+    },
+}
+
+/// What one `frame` produced. `layers == None` means the host may `PresentCached`.
+#[derive(Clone, Debug)]
+pub struct FrameOutput {
+    /// `Some` when the layer epoch changed. The host submits that tree.
+    /// `None` means the host may present the installed tree again.
+    pub layers: Option<Arc<core::LayerTree>>,
+    pub again: bool,
+    pub ime: Option<ImeUpdate>,
+    pub semantics: Option<core::SemanticsPatch>,
+    pub fonts: Vec<(String, Vec<u8>)>,
+    pub reloads: Vec<String>,
+    pub clipboard: Option<String>,
+    pub exit: bool,
+    /// `None` means the image census generation did not change.
+    pub images: Option<Arc<core::ImageCensus>>,
+}
+
+impl FrameOutput {
+    pub fn unchanged() -> Self {
+        Self {
+            layers: None,
+            again: false,
+            ime: None,
+            semantics: None,
+            fonts: Vec::new(),
+            reloads: Vec::new(),
+            clipboard: None,
+            exit: false,
+            images: None,
+        }
+    }
 }
 
 /// A language runtime bound to one [`core::Tree`].
@@ -285,11 +372,7 @@ pub enum InputEvent {
 pub trait Session {
     fn metrics(&mut self, metrics: &Metrics);
     fn pointer(&mut self, event: core::PointerEvent);
-    fn frame(&mut self, time: FrameTime) -> DrawList;
-    /// Semantics produced with this frame. `None` means the tree did not change.
-    fn semantics(&mut self) -> Option<core::SemanticsUpdate> {
-        None
-    }
+    fn frame(&mut self, time: FrameTime) -> FrameOutput;
     /// True after the session asked for another frame, until the host takes it.
     ///
     /// Animation asks again inside each `frame`. One request schedules one frame.
@@ -298,15 +381,6 @@ pub trait Session {
     }
     fn lifecycle(&mut self, _event: Lifecycle) {}
     fn settings(&mut self, _settings: &PlatformSettings) {}
-    /// Live image nodes, including ones a clip kept out of the draw list.
-    ///
-    /// `None` means this session does not track images, so the host must not
-    /// cancel a decode because a count dropped to zero.
-    fn image_source_counts(
-        &mut self,
-    ) -> Option<std::collections::HashMap<std::sync::Arc<str>, u32>> {
-        None
-    }
     /// The window became or resigned key. This is not text focus.
     fn window_focus(&mut self, _focused: bool) {}
     /// Keyboard or IME input for the focused node. No focus means the session
@@ -340,14 +414,8 @@ pub trait Session {
     fn take_reloads(&mut self) -> Vec<String> {
         Vec::new()
     }
-    /// Installs the host sink for [`IoJob`]. The default drops every job.
-    fn bind_io(&mut self, _submit: Box<dyn Fn(IoJob) + Send>) {}
-    /// Resolves one promise allocated for [`IoJob`]. Called on the render thread.
-    fn plugin_result(&mut self, _token: u64, _result: PluginResult) {}
-    /// Resolves one `fetch` promise. Called on the render thread.
-    fn http_result(&mut self, _token: u64, _result: Result<HttpResponse, HttpError>) {}
-    /// Delivers one socket event. Called on the render thread.
-    fn socket_event(&mut self, _id: u64, _event: &str, _text: bool, _data: &[u8]) {}
+    /// Resolves one host IO completion. Called on the render thread.
+    fn io_event(&mut self, _event: IoEvent) {}
     /// Absolute monotonic milliseconds of the next timer, if one is armed.
     fn next_wake_ms(&mut self) -> Option<f64> {
         None
