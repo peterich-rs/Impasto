@@ -23,6 +23,7 @@ kotlin:
     "{{root}}/frameworks/kotlin-ui/gradlew" -p "{{root}}/frameworks/kotlin-ui" :library:jvmTest
 
 solid:
+    cd "{{root}}/frameworks/solid-renderer" && pnpm install --frozen-lockfile
     node --conditions=browser --experimental-strip-types "{{root}}/frameworks/solid-renderer/src/tree.test.ts"
     node --experimental-strip-types "{{root}}/frameworks/solid-renderer/runtime/frame.test.ts"
     node --conditions=browser --experimental-strip-types "{{root}}/frameworks/solid-renderer/runtime/slot.test.ts"
