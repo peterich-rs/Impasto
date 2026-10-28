@@ -1,12 +1,17 @@
 use crate::{ImagePixels, Status};
 use protocol::LayerTree;
 
-pub struct Engine;
+pub struct Typography;
+
+pub struct Engine {
+    typography: std::rc::Rc<std::cell::RefCell<Typography>>,
+}
 
 #[cfg(target_os = "android")]
 pub struct VulkanSwapchain;
 
 impl Engine {
+    #[cfg(not(target_os = "android"))]
     pub fn create_metal() -> Result<Self, Status> {
         Err(Status::NotLinked)
     }
@@ -24,6 +29,7 @@ impl Engine {
         Err(Status::NotLinked)
     }
 
+    #[cfg(not(target_os = "android"))]
     pub fn draw_metal(&mut self, _metal_drawable: *mut std::ffi::c_void) -> Result<(), Status> {
         Err(Status::NotLinked)
     }
@@ -46,6 +52,12 @@ impl Engine {
         Err(Status::NotLinked)
     }
 
+    pub fn typography(&self) -> std::rc::Rc<std::cell::RefCell<Typography>> {
+        std::rc::Rc::clone(&self.typography)
+    }
+}
+
+impl Typography {
     pub fn measure_paragraph(
         &mut self,
         utf8: &str,
@@ -108,13 +120,53 @@ impl Engine {
 
     pub fn lines(
         &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &protocol::TextStyle,
+    ) -> Result<Vec<crate::LineMetric>, Status> {
+        self.lines_with_spans(utf8, font_size, max_width, color, style, &[])
+    }
+
+    pub fn lines_with_spans(
+        &mut self,
         _utf8: &str,
         _font_size: f32,
         _max_width: f32,
         _color: [u8; 4],
         _style: &protocol::TextStyle,
+        _spans: &[protocol::TextSpan],
     ) -> Result<Vec<crate::LineMetric>, Status> {
         Err(Status::NotLinked)
+    }
+
+    pub fn measure_paint(
+        &mut self,
+        _utf8: &str,
+        _font_size: f32,
+        _max_width: f32,
+        _color: [u8; 4],
+        _style: &protocol::TextStyle,
+        _spans: &[protocol::TextSpan],
+    ) -> Result<(f32, f32), Status> {
+        Err(Status::NotLinked)
+    }
+
+    pub fn retain_measured(
+        &mut self,
+        _utf8: &str,
+        _font_size: f32,
+        _max_width: f32,
+        _color: [u8; 4],
+        _style: &protocol::TextStyle,
+        _spans: &[protocol::TextSpan],
+    ) -> Result<(protocol::ParagraphId, f32, f32, Vec<crate::LineMetric>, f32), Status> {
+        Err(Status::NotLinked)
+    }
+
+    pub fn take_shape_stats(&mut self) -> crate::ShapeStats {
+        crate::ShapeStats::default()
     }
 
     pub fn caret_for(
@@ -167,3 +219,35 @@ impl Engine {
 
 #[cfg(target_os = "android")]
 pub fn note_swapchain_extent(_width: u32, _height: u32) {}
+
+impl crate::Surface for Engine {
+    fn register_font(&mut self, data: &[u8], family: &str) -> Result<(), Status> {
+        Engine::register_font(self, data, family)
+    }
+
+    fn submit_layers<'pixels>(
+        &mut self,
+        tree: &LayerTree,
+        point_scale: f32,
+        resolve: impl FnMut(&str) -> Option<ImagePixels<'pixels>>,
+    ) -> Result<(), Status> {
+        Engine::submit_layers(self, tree, point_scale, resolve)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn draw_metal(&mut self, metal_drawable: *mut std::ffi::c_void) -> Result<(), Status> {
+        Engine::draw_metal(self, metal_drawable)
+    }
+
+    fn picture_builds(&self) -> u64 {
+        Engine::picture_builds(self)
+    }
+
+    fn cache_counts(&self) -> (usize, usize) {
+        Engine::cache_counts(self)
+    }
+
+    fn submit_stats(&self) -> crate::SubmitStats {
+        Engine::submit_stats(self)
+    }
+}

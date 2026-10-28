@@ -19,6 +19,39 @@ fn timed(phase: Phase, x: f32, y: f32, time_ms: f64) -> PointerEvent {
 }
 
 #[test]
+fn same_size_does_not_request_layout() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    let sized = tree.sized(10.0, 20.0)?;
+    tree.layout()?;
+    let _ = tree.take_layout_trace();
+    assert!(!tree.needs_layout());
+    tree.set_size(sized, 10.0, 20.0)?;
+    assert!(!tree.needs_layout());
+    assert_eq!(tree.take_layout_trace().cause, crate::LayoutCause::None);
+    tree.set_size(sized, 12.0, 20.0)?;
+    assert!(tree.needs_layout());
+    assert_eq!(tree.take_layout_trace().cause, crate::LayoutCause::Style);
+    Ok(())
+}
+
+#[test]
+fn repeating_scroll_offset_keeps_the_layer_epoch() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    let scroll = tree.scroll()?;
+    tree.set_max_size(scroll, 40.0, 40.0)?;
+    let body = tree.sized(20.0, 200.0)?;
+    tree.add_child(scroll, body)?;
+    tree.layout()?;
+    tree.set_scroll_offset(scroll, 0.0, 30.0)?;
+    let epoch = tree.layer_epoch();
+    tree.set_scroll_offset(scroll, 0.0, 30.0)?;
+    assert_eq!(tree.layer_epoch(), epoch);
+    assert!(!tree.needs_layout());
+    assert_eq!(tree.scroll_offset(scroll)?, (0.0, 30.0));
+    Ok(())
+}
+
+#[test]
 fn column_places_the_second_child_after_the_gap() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper::default());
     let column = tree.column(10.0)?;
@@ -992,6 +1025,37 @@ fn text_scale_multiplies_measurement_and_the_recorded_size() -> Result<(), crate
         _ => None,
     });
     assert_eq!(size, Some(32.0));
+    Ok(())
+}
+
+#[test]
+fn text_scale_grows_the_ancestor_boxes_of_the_button() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 360.0, 640.0)?;
+    let root = tree.column(16.0)?;
+    tree.set_fill(root)?;
+    let pointer = tree.pointer_region()?;
+    let decorated = tree.decorated([9, 9, 9, 255], 999.0)?;
+    let pad = tree.padding(16.0)?;
+    let row = tree.row(4.0)?;
+    let text = tree.text("微任务改字", 14.0, [0, 0, 0, 255])?;
+    tree.add_child(row, text)?;
+    tree.add_child(pad, row)?;
+    tree.add_child(decorated, pad)?;
+    tree.add_child(pointer, decorated)?;
+    tree.add_child(root, pointer)?;
+    tree.set_min_size(decorated, 0.0, 44.0)?;
+    tree.layout()?;
+    let before = tree.rect(decorated)?;
+    assert_eq!((before.w, before.h), (67.0, 46.0));
+    tree.set_text_scale(2.0)?;
+    tree.layout()?;
+    let after = tree.rect(decorated)?;
+    // The wrapper boxes grow with the scaled label. An orphan subtree must not
+    // become a relayout boundary, or Taffy's new sizes never reach the ancestors.
+    assert_eq!((after.w, after.h), (102.0, 60.0));
+    let text_rect = tree.rect(text)?;
+    assert_eq!((text_rect.w, text_rect.h), (70.0, 28.0));
     Ok(())
 }
 
@@ -2116,6 +2180,53 @@ fn focus_step_stays_inside_the_scope() -> Result<(), crate::Error> {
 }
 
 #[test]
+fn remove_pops_a_focus_scope_inside_the_subtree() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    let root = tree.column(0.0)?;
+    let outer = tree.pointer_region()?;
+    let scope = tree.column(0.0)?;
+    let inner = tree.pointer_region()?;
+    let box_a = tree.sized(20.0, 20.0)?;
+    let box_b = tree.sized(20.0, 20.0)?;
+    tree.add_child(outer, box_a)?;
+    tree.add_child(inner, box_b)?;
+    tree.add_child(scope, inner)?;
+    tree.add_child(outer, scope)?;
+    tree.add_child(root, outer)?;
+    tree.set_focusable(outer, true)?;
+    tree.set_focusable(inner, true)?;
+    tree.layout()?;
+    tree.push_focus_scope(scope)?;
+    tree.remove(outer, scope)?;
+    assert_eq!(
+        tree.focus_step(crate::FocusDirection::Next),
+        vec![Gesture::Focus(outer)]
+    );
+    Ok(())
+}
+
+#[test]
+fn reinsert_keeps_the_measured_text() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 200.0, 400.0)?;
+    let column = tree.column(0.0)?;
+    let text = tree.text("Hi", 16.0, [0, 0, 0, 255])?;
+    tree.add_child(column, text)?;
+    tree.layout()?;
+    let height = tree.rect(text)?.h;
+    let _ = tree.take_layout_trace();
+    tree.remove(column, text)?;
+    assert!(tree.parent(text)?.is_none());
+    assert_eq!(tree.rect(text)?.h, height);
+    tree.insert(column, text, None)?;
+    tree.layout()?;
+    let trace = tree.take_layout_trace();
+    assert_eq!(trace.text_shaped, 0, "shaped {}", trace.text_shaped);
+    assert_eq!(tree.rect(text)?.h, height);
+    Ok(())
+}
+
+#[test]
 fn a_long_press_wins_and_the_lift_is_not_a_click() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper::default());
     let region = tree.pointer_region()?;
@@ -2342,6 +2453,7 @@ fn discard_drops_the_picture_cache() -> Result<(), crate::Error> {
     let _ = tree.record()?;
     assert!(tree.picture_cache_len() > 0);
     tree.remove(scroll, text)?;
+    assert!(tree.picture_cache_len() > 0);
     tree.discard(text)?;
     tree.discard(scroll)?;
     assert_eq!(tree.picture_cache_len(), 0);
@@ -2449,4 +2561,542 @@ fn a_row_end_cross_axis_pins_a_short_child() -> Result<(), crate::Error> {
     let stretched = tree.rect(child)?;
     assert!((stretched.h - 40.0).abs() < 0.5, "h={}", stretched.h);
     Ok(())
+}
+
+#[test]
+fn flat_and_layer_trees_agree() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 200.0, 200.0)?;
+    let root = tree.column(0.0)?;
+    let chrome = tree.decorated([20, 20, 20, 255], 0.0)?;
+    let label = tree.text("chrome", 16.0, [0, 0, 0, 255])?;
+    tree.add_child(chrome, label)?;
+    tree.add_child(root, chrome)?;
+    let fade = tree.opacity(200)?;
+    let faded = tree.text("fade", 16.0, [0, 0, 0, 255])?;
+    tree.add_child(fade, faded)?;
+    tree.add_child(root, fade)?;
+    let frame = tree.clip(4.0)?;
+    let clipped = tree.text("clip", 16.0, [0, 0, 0, 255])?;
+    tree.add_child(frame, clipped)?;
+    tree.add_child(root, frame)?;
+    let shifted = tree.transform()?;
+    tree.set_transform(shifted, 50.0, 0.0, 0.0, 1.0)?;
+    let moved = tree.text("move", 16.0, [0, 0, 0, 255])?;
+    tree.add_child(shifted, moved)?;
+    tree.add_child(root, shifted)?;
+    let scroll = tree.scroll()?;
+    tree.set_max_size(scroll, 180.0, 40.0)?;
+    let row = tree.text("row", 16.0, [0, 0, 0, 255])?;
+    let image = tree.image("asset:logo", 12.0, 8.0)?;
+    tree.add_child(scroll, row)?;
+    tree.add_child(scroll, image)?;
+    tree.add_child(root, scroll)?;
+    tree.layout()?;
+    agree(&mut tree)?;
+
+    tree.set_scroll_offset(scroll, 0.0, 8.0)?;
+    assert_eq!(record_writes(&mut tree)?, 0);
+    agree(&mut tree)?;
+
+    tree.set_text(label, "CHROME")?;
+    tree.layout()?;
+    agree(&mut tree)?;
+
+    tree.set_alpha(fade, 128)?;
+    assert_eq!(record_writes(&mut tree)?, 0);
+    agree(&mut tree)?;
+
+    tree.set_transform(shifted, 50.0, 10.0, 0.0, 1.0)?;
+    assert_eq!(record_writes(&mut tree)?, 0);
+    agree(&mut tree)?;
+
+    let mut shifted_origin = Tree::new(MonoShaper::default());
+    shifted_origin.set_viewport(12.0, 30.0, 80.0, 40.0)?;
+    let origin_text = shifted_origin.text("origin", 16.0, [0, 0, 0, 255])?;
+    shifted_origin.layout()?;
+    agree(&mut shifted_origin)?;
+    let list = shifted_origin.record()?;
+    let spot = list.commands.iter().find_map(|command| match command {
+        protocol::Command::Text { x, y, utf8, .. } if utf8.as_ref() == "origin" => Some((*x, *y)),
+        _ => None,
+    });
+    let rect = shifted_origin.rect(origin_text)?;
+    assert_eq!(spot, Some((rect.x, rect.y)));
+    Ok(())
+}
+
+#[test]
+fn tab_bar_merges_into_one_run() -> Result<(), crate::Error> {
+    let mut counts = Vec::new();
+    for buttons in [4usize, 12] {
+        let mut tree = Tree::new(MonoShaper::default());
+        tree.set_viewport(0.0, 0.0, 360.0, 640.0)?;
+        let root = tree.column(0.0)?;
+        for index in 0..buttons {
+            let button = tree.decorated([index as u8, 0, 0, 255], 0.0)?;
+            let label = tree.text(format!("tab{index}"), 16.0, [0, 0, 0, 255])?;
+            tree.add_child(button, label)?;
+            tree.add_child(root, button)?;
+        }
+        let scroll = tree.scroll()?;
+        tree.set_max_size(scroll, 360.0, 400.0)?;
+        let row = tree.text("row", 16.0, [0, 0, 0, 255])?;
+        tree.add_child(scroll, row)?;
+        tree.add_child(root, scroll)?;
+        tree.layout()?;
+        let _ = tree.record()?;
+        assert_eq!(tree.picture_cache_len(), 2, "buttons={buttons}");
+        counts.push(tree.layer_tree().layers.len());
+    }
+    assert_eq!(counts[0], counts[1]);
+    Ok(())
+}
+
+#[test]
+fn editing_text_rewrites_only_the_owner_run() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 80.0, 80.0)?;
+    let root = tree.column(0.0)?;
+    let label = tree.text("chrome", 16.0, [0, 0, 0, 255])?;
+    let scroll = tree.scroll()?;
+    tree.set_max_size(scroll, 80.0, 40.0)?;
+    let row = tree.text("row", 16.0, [0, 0, 0, 255])?;
+    tree.add_child(scroll, row)?;
+    tree.add_child(root, label)?;
+    tree.add_child(root, scroll)?;
+    tree.layout()?;
+    let _ = tree.record()?;
+    let before = tree.layer_tree();
+    let kept = before
+        .picture(crate::layer::child_picture_id(scroll))
+        .expect("scroll picture");
+    let generation = kept.generation;
+    let commands = std::sync::Arc::clone(&kept.commands);
+    tree.set_text(label, "edited")?;
+    tree.layout()?;
+    let _ = tree.record()?;
+    let after = tree.layer_tree();
+    let chrome = after
+        .picture(crate::layer::self_picture_id(label))
+        .expect("chrome run");
+    assert_eq!(tree.picture_writes(), chrome.commands.len());
+    let again = after
+        .picture(crate::layer::child_picture_id(scroll))
+        .expect("scroll picture");
+    assert_eq!(again.generation, generation);
+    assert!(std::sync::Arc::ptr_eq(&again.commands, &commands));
+    let _ = tree.record()?;
+    assert_eq!(tree.picture_writes(), 0);
+    Ok(())
+}
+
+#[test]
+fn settled_clip_is_a_command() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    let clip = tree.clip(4.0)?;
+    let text = tree.text("Hi", 16.0, [0, 0, 0, 255])?;
+    tree.add_child(clip, text)?;
+    tree.layout()?;
+    let _ = tree.record()?;
+    let layers = tree.layer_tree();
+    assert!(
+        layers
+            .layers
+            .iter()
+            .all(|layer| !matches!(layer.kind, protocol::LayerKind::Clip { .. }))
+    );
+    assert_eq!(tree.picture_cache_len(), 1);
+    let picture = layers.pictures.iter().next().expect("picture");
+    assert!(
+        picture
+            .commands
+            .iter()
+            .any(|command| matches!(command, protocol::Command::PushClip { .. }))
+    );
+    Ok(())
+}
+
+#[test]
+fn clip_promotes_over_compositing_subtree() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 80.0, 80.0)?;
+    let root = tree.column(0.0)?;
+    let stay = tree.text("stay", 16.0, [0, 0, 0, 255])?;
+    let clip = tree.clip(2.0)?;
+    let fade = tree.opacity(128)?;
+    let body = tree.text("body", 16.0, [0, 0, 0, 255])?;
+    tree.add_child(fade, body)?;
+    tree.add_child(clip, fade)?;
+    tree.add_child(root, stay)?;
+    tree.add_child(root, clip)?;
+    tree.layout()?;
+    let _ = tree.record()?;
+    let before = tree.layer_tree();
+    assert!(
+        before
+            .layers
+            .iter()
+            .any(|layer| matches!(layer.kind, protocol::LayerKind::Clip { .. }))
+    );
+    assert!(
+        before
+            .layers
+            .iter()
+            .any(|layer| matches!(layer.kind, protocol::LayerKind::Opacity { .. }))
+    );
+    let root_generation = before
+        .picture(crate::layer::self_picture_id(stay))
+        .expect("root run")
+        .generation;
+    tree.set_text(body, "BODY")?;
+    tree.layout()?;
+    let _ = tree.record()?;
+    let after = tree.layer_tree();
+    assert_eq!(
+        after
+            .picture(crate::layer::self_picture_id(stay))
+            .expect("root run")
+            .generation,
+        root_generation
+    );
+    let rewritten = after
+        .picture(crate::layer::self_picture_id(body))
+        .expect("opacity run");
+    assert_eq!(tree.picture_writes(), rewritten.commands.len());
+    Ok(())
+}
+
+#[test]
+fn translate_transform_matches_flat() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    let shifted = tree.transform()?;
+    let text = tree.text("Hi", 16.0, [0, 0, 0, 255])?;
+    tree.add_child(shifted, text)?;
+    tree.set_transform(shifted, 50.0, 0.0, 0.0, 1.0)?;
+    tree.layout()?;
+    let list = tree.record()?;
+    agree_list(&tree, &list)?;
+    assert!(list.commands.iter().any(|command| matches!(
+        command,
+        protocol::Command::PushTransform {
+            translate_x,
+            translate_y,
+            rotate_rad,
+            scale_x,
+            scale_y,
+            ..
+        } if *translate_x == 50.0
+            && *translate_y == 0.0
+            && *rotate_rad == 0.0
+            && *scale_x == 1.0
+            && *scale_y == 1.0
+    )));
+    let layers = tree.layer_tree();
+    assert!(
+        layers
+            .layers
+            .iter()
+            .any(|layer| matches!(layer.kind, protocol::LayerKind::Transform { .. }))
+    );
+    let picture = layers.pictures.iter().next().expect("picture");
+    let local = picture.commands.iter().find_map(|command| match command {
+        protocol::Command::Text { x, .. } => Some(*x),
+        _ => None,
+    });
+    assert_eq!(local, Some(0.0));
+    Ok(())
+}
+
+fn agree(tree: &mut Tree) -> Result<(), crate::Error> {
+    let list = tree.record()?;
+    agree_list(tree, &list)
+}
+
+fn record_writes(tree: &mut Tree) -> Result<usize, crate::Error> {
+    let _ = tree.record()?;
+    Ok(tree.picture_writes())
+}
+
+fn agree_list(tree: &Tree, list: &protocol::DrawList) -> Result<(), crate::Error> {
+    let layers = tree.layer_tree();
+    let flat = scene_marks_in_commands(&list.commands, Aff::identity(), &[]);
+    let layered = scene_marks_in_layers(&layers);
+    assert_eq!(
+        flat.len(),
+        layered.len(),
+        "flat {flat:?}\nlayers {layered:?}"
+    );
+    for (left, right) in flat.iter().zip(layered.iter()) {
+        assert_eq!(left.label, right.label, "{flat:?} vs {layered:?}");
+        assert!(
+            (left.x - right.x).abs() < 0.05 && (left.y - right.y).abs() < 0.05,
+            "{left:?} vs {right:?}"
+        );
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct Aff {
+    a: f32,
+    b: f32,
+    c: f32,
+    d: f32,
+    e: f32,
+    f: f32,
+}
+
+impl Aff {
+    fn identity() -> Self {
+        Self {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 0.0,
+            f: 0.0,
+        }
+    }
+
+    fn translate(x: f32, y: f32) -> Self {
+        Self {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: x,
+            f: y,
+        }
+    }
+
+    fn then(self, next: Self) -> Self {
+        Self {
+            a: self.a * next.a + self.c * next.b,
+            b: self.b * next.a + self.d * next.b,
+            c: self.a * next.c + self.c * next.d,
+            d: self.b * next.c + self.d * next.d,
+            e: self.a * next.e + self.c * next.f + self.e,
+            f: self.b * next.e + self.d * next.f + self.f,
+        }
+    }
+
+    fn transform(
+        translate_x: f32,
+        translate_y: f32,
+        rotate_rad: f32,
+        scale_x: f32,
+        scale_y: f32,
+    ) -> Self {
+        let (sin, cos) = rotate_rad.sin_cos();
+        Self {
+            a: scale_x * cos,
+            b: scale_x * sin,
+            c: -scale_y * sin,
+            d: scale_y * cos,
+            e: translate_x,
+            f: translate_y,
+        }
+    }
+
+    fn apply(self, x: f32, y: f32) -> (f32, f32) {
+        (
+            self.a * x + self.c * y + self.e,
+            self.b * x + self.d * y + self.f,
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Mark {
+    label: String,
+    x: f32,
+    y: f32,
+}
+
+#[derive(Clone, Copy)]
+struct SceneClip {
+    ctm: Aff,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+fn inside_clips(point: (f32, f32), clips: &[SceneClip]) -> bool {
+    clips.iter().all(|clip| {
+        let (x0, y0) = clip.ctm.apply(clip.x, clip.y);
+        let (x1, y1) = clip.ctm.apply(clip.x + clip.w, clip.y + clip.h);
+        let (min_x, max_x) = (x0.min(x1), x0.max(x1));
+        let (min_y, max_y) = (y0.min(y1), y0.max(y1));
+        point.0 >= min_x - 0.01
+            && point.0 <= max_x + 0.01
+            && point.1 >= min_y - 0.01
+            && point.1 <= max_y + 0.01
+    })
+}
+
+fn push_mark(marks: &mut Vec<Mark>, label: String, x: f32, y: f32, ctm: Aff, clips: &[SceneClip]) {
+    let point = ctm.apply(x, y);
+    if inside_clips(point, clips) {
+        marks.push(Mark {
+            label,
+            x: point.0,
+            y: point.1,
+        });
+    }
+}
+
+fn scene_marks_in_commands(
+    commands: &[protocol::Command],
+    ctm: Aff,
+    clips: &[SceneClip],
+) -> Vec<Mark> {
+    let mut marks = Vec::new();
+    let mut stack = vec![(ctm, clips.to_vec())];
+    for command in commands {
+        let (ctm, clips) = stack.last().expect("frame").clone();
+        match command {
+            protocol::Command::Text { utf8, x, y, .. } => {
+                push_mark(&mut marks, utf8.to_string(), *x, *y, ctm, &clips);
+            }
+            protocol::Command::Image { source, x, y, .. } => {
+                push_mark(&mut marks, source.to_string(), *x, *y, ctm, &clips);
+            }
+            protocol::Command::Rect { x, y, color, .. } => {
+                push_mark(&mut marks, format!("rect:{color:?}"), *x, *y, ctm, &clips);
+            }
+            protocol::Command::PushClip { x, y, w, h, .. } => {
+                let mut clips = clips;
+                clips.push(SceneClip {
+                    ctm,
+                    x: *x,
+                    y: *y,
+                    w: *w,
+                    h: *h,
+                });
+                stack.push((ctm, clips));
+            }
+            protocol::Command::PushTransform {
+                translate_x,
+                translate_y,
+                rotate_rad,
+                scale_x,
+                scale_y,
+            } => {
+                stack.push((
+                    ctm.then(Aff::transform(
+                        *translate_x,
+                        *translate_y,
+                        *rotate_rad,
+                        *scale_x,
+                        *scale_y,
+                    )),
+                    clips,
+                ));
+            }
+            protocol::Command::PushOpacity { .. }
+            | protocol::Command::PushBlur { .. }
+            | protocol::Command::PushBackdropBlur { .. }
+            | protocol::Command::PushBlend { .. } => {
+                stack.push((ctm, clips));
+            }
+            protocol::Command::Pop => {
+                stack.pop();
+            }
+            protocol::Command::Fill { .. } => {}
+        }
+    }
+    marks
+}
+
+fn scene_marks_in_layers(tree: &protocol::LayerTree) -> Vec<Mark> {
+    fn walk(
+        tree: &protocol::LayerTree,
+        id: protocol::LayerId,
+        ctm: Aff,
+        clips: &[SceneClip],
+        marks: &mut Vec<Mark>,
+    ) {
+        let mut current = Some(id);
+        while let Some(layer_id) = current {
+            let Some(layer) = tree.layers.get(layer_id.0 as usize) else {
+                return;
+            };
+            let next = layer.next;
+            let child = layer.first_child;
+            match layer.kind {
+                protocol::LayerKind::Offset { x, y } => {
+                    if let Some(child) = child {
+                        walk(tree, child, ctm.then(Aff::translate(x, y)), clips, marks);
+                    }
+                }
+                protocol::LayerKind::Transform {
+                    translate_x,
+                    translate_y,
+                    rotate_rad,
+                    scale_x,
+                    scale_y,
+                } => {
+                    if let Some(child) = child {
+                        walk(
+                            tree,
+                            child,
+                            ctm.then(Aff::transform(
+                                translate_x,
+                                translate_y,
+                                rotate_rad,
+                                scale_x,
+                                scale_y,
+                            )),
+                            clips,
+                            marks,
+                        );
+                    }
+                }
+                protocol::LayerKind::Clip { x, y, w, h, .. } => {
+                    if let Some(child) = child {
+                        let mut clips = clips.to_vec();
+                        clips.push(SceneClip { ctm, x, y, w, h });
+                        walk(tree, child, ctm, &clips, marks);
+                    }
+                }
+                protocol::LayerKind::Opacity { .. }
+                | protocol::LayerKind::Blur { .. }
+                | protocol::LayerKind::BackdropBlur { .. }
+                | protocol::LayerKind::Blend { .. } => {
+                    if let Some(child) = child {
+                        walk(tree, child, ctm, clips, marks);
+                    }
+                }
+                protocol::LayerKind::Picture { picture } => {
+                    if let Some(picture) = tree.picture(picture) {
+                        let local = ctm.then(Aff::translate(picture.origin.0, picture.origin.1));
+                        marks.extend(scene_marks_in_commands(
+                            picture.commands.as_ref(),
+                            local,
+                            clips,
+                        ));
+                    }
+                }
+            }
+            current = next;
+        }
+    }
+    let mut marks = Vec::new();
+    if !tree.layers.is_empty() {
+        walk(tree, tree.root, Aff::identity(), &[], &mut marks);
+    }
+    marks
+}
+
+#[test]
+fn remove_then_discard_rejects_set_text() {
+    let mut tree = Tree::new(MonoShaper::default());
+    let root = tree.column(0.0).unwrap();
+    let label = tree.text("Go", 16.0, [255, 255, 255, 255]).unwrap();
+    tree.add_child(root, label).unwrap();
+    tree.remove(root, label).unwrap();
+    tree.discard(label).unwrap();
+    assert!(tree.set_text(label, "no").is_err());
 }

@@ -8,6 +8,13 @@ use super::node::Kind;
 use super::{NodeId, Tree};
 use crate::Error;
 
+/// One node in the iterative layer sweep. `expanded` means its children are already stacked.
+#[derive(Clone, Copy)]
+pub(super) struct SweepFrame {
+    id: NodeId,
+    expanded: bool,
+}
+
 /// Axis-aligned clip in paint space. `None` means a transform ancestor made culling unsafe.
 #[derive(Clone, Copy)]
 pub(super) struct PaintClip {
@@ -15,6 +22,26 @@ pub(super) struct PaintClip {
     y: f32,
     w: f32,
     h: f32,
+}
+
+/// Coordinate frame of the run currently being captured.
+#[derive(Clone, Copy)]
+pub(super) struct RunScope {
+    owner: NodeId,
+    /// Picture origin. Content commands are relative to this point.
+    base: (f32, f32),
+    /// Added to captured commands when writing the flat list.
+    mirror: (f32, f32),
+    /// Next segment index for `owner` in this frame.
+    segment: usize,
+}
+
+/// In-progress run. `scope` is `None` outside [`Tree::record_into`].
+#[derive(Default)]
+pub(super) struct RunState {
+    scope: Option<RunScope>,
+    commands: Vec<Command>,
+    first: Option<NodeId>,
 }
 
 impl Tree {
@@ -26,8 +53,9 @@ impl Tree {
 
     /// Clears `commands` and refills them. The caller can keep the buffer's capacity.
     ///
-    /// Pictures are local to a repaint boundary. A scroll or transform that did not
-    /// dirty its picture replays the cached commands.
+    /// A run is the commands between layer boundaries, owned by the root or by the
+    /// node that opens those layers. A clean owner adopts its cached runs. Scroll
+    /// still keeps one child picture.
     pub fn record_into(&mut self, commands: &mut Vec<Command>) -> Result<(), Error> {
         commands.clear();
         self.sync_paragraphs();
@@ -37,8 +65,24 @@ impl Tree {
         self.layer_stack.clear();
         self.layer_tail.clear();
         self.layer_top = None;
+        self.finished_owners.clear();
+        self.subtree_layers.clear();
         let root = self.root.ok_or(Error::NoRoot)?;
+        let _ = self.sweep_subtree_layers(root);
+        self.run = RunState {
+            scope: Some(RunScope {
+                owner: root,
+                base: self.origin,
+                mirror: self.origin,
+                segment: 0,
+            }),
+            commands: Vec::new(),
+            first: None,
+        };
         self.emit_node(root, commands, self.origin, (0.0, 0.0), None);
+        self.close_run();
+        self.leave_owner(root);
+        self.runs.retain(|id, _| self.finished_owners.contains(id));
         debug_assert!(self.layer_stack.is_empty());
         self.layers.epoch = self.layer_epoch;
         Ok(())
@@ -98,13 +142,13 @@ impl Tree {
         (
             self.layer_epoch,
             self.layers.layers.len(),
-            self.pictures.len() + self.self_pictures.len(),
+            self.pictures.len() + self.runs.values().map(Vec::len).sum::<usize>(),
         )
     }
 
     #[cfg(test)]
     pub(crate) fn picture_cache_len(&self) -> usize {
-        self.pictures.len() + self.self_pictures.len()
+        self.pictures.len() + self.runs.values().map(Vec::len).sum::<usize>()
     }
 
     /// Nodes `record` walks, including rows whose clipped children are skipped.
@@ -131,6 +175,7 @@ impl Tree {
         {
             return Err(Error::BadNumber);
         }
+        let was_identity = self.node(id)?.transform().is_identity();
         {
             let node = self.node_mut(id)?;
             let Some(geom) = node.transform_mut() else {
@@ -139,8 +184,12 @@ impl Tree {
             geom.scale_x = scale_x;
             geom.scale_y = scale_y;
         }
-        self.layer_epoch = self.layer_epoch.wrapping_add(1);
-        self.mark_paint();
+        let is_identity = self.node(id)?.transform().is_identity();
+        if was_identity == is_identity {
+            self.paint_layer_value();
+        } else {
+            self.repaint_ancestors(id);
+        }
         Ok(())
     }
 
@@ -196,23 +245,41 @@ impl Tree {
 
     /// Foreground blur in scene points. Non-positive or non-finite sigma records nothing.
     pub fn set_blur(&mut self, id: NodeId, sigma: f32) -> Result<(), Error> {
+        let previous = positive_sigma(self.node(id)?.blur()).is_some();
         self.node_mut(id)?.write_paint(|paint| paint.blur = sigma);
-        self.mark_repaint(id);
+        let next = positive_sigma(self.node(id)?.blur()).is_some();
+        if previous == next {
+            self.paint_layer_value();
+        } else {
+            self.repaint_ancestors(id);
+        }
         Ok(())
     }
 
     /// Backdrop blur in scene points. Non-positive or non-finite sigma records nothing.
     pub fn set_backdrop_blur(&mut self, id: NodeId, sigma: f32) -> Result<(), Error> {
+        let previous = positive_sigma(self.node(id)?.backdrop()).is_some();
         self.node_mut(id)?
             .write_paint(|paint| paint.backdrop = sigma);
-        self.mark_repaint(id);
+        let next = positive_sigma(self.node(id)?.backdrop()).is_some();
+        if previous == next {
+            self.paint_layer_value();
+        } else {
+            self.repaint_ancestors(id);
+        }
         Ok(())
     }
 
     /// Layer blend. [`protocol::BlendMode::SrcOver`] records no push and no pop.
     pub fn set_blend(&mut self, id: NodeId, mode: protocol::BlendMode) -> Result<(), Error> {
+        let previous = self.node(id)?.blend() != protocol::BlendMode::SrcOver;
         self.node_mut(id)?.write_paint(|paint| paint.blend = mode);
-        self.mark_repaint(id);
+        let next = self.node(id)?.blend() != protocol::BlendMode::SrcOver;
+        if previous == next {
+            self.paint_layer_value();
+        } else {
+            self.repaint_ancestors(id);
+        }
         Ok(())
     }
 
@@ -367,19 +434,10 @@ impl Tree {
         }
         let child_offset = if kind == Kind::Scroll {
             (offset.0 + scroll.0, offset.1 + scroll.1)
-        } else if kind == Kind::Transform
-            && geom.rotate_rad == 0.0
-            && geom.scale_x == 1.0
-            && geom.scale_y == 1.0
-        {
-            // Pure translation folds into the paint offset; no matrix command.
-            // Unlike scroll, a translation moves content toward the transform.
-            (offset.0 - geom.translate_x, offset.1 - geom.translate_y)
         } else {
             offset
         };
-        let pushes_matrix = kind == Kind::Transform
-            && !(geom.rotate_rad == 0.0 && geom.scale_x == 1.0 && geom.scale_y == 1.0);
+        let pushes_matrix = kind == Kind::Transform && !geom.is_identity();
         let pushes_opacity = kind == Kind::Opacity && alpha.unwrap_or(255) != 255;
         let child_clip = match kind {
             Kind::Transform => None,
@@ -469,50 +527,66 @@ impl Tree {
         let Some(node) = self.get(id) else {
             return;
         };
-        let layer = node.is_layer_kind();
-        let _ = node;
-        if layer {
+        let kind = node.kind;
+        let alpha = node.alpha();
+        let abs = (parent_abs.0 + node.x, parent_abs.1 + node.y);
+        let mut child = node.first_child;
+        if kind == Kind::Opacity && alpha == Some(0) {
+            self.capture(id, parent_abs, out, clip);
+            return;
+        }
+        if kind == Kind::Clip && !self.renders_layer_node(id) {
+            self.emit_settled_clip(id, out, parent_abs, ancestor_scroll, clip, abs, child);
+            return;
+        }
+        if self.renders_layer_node(id) {
             self.emit_layer(id, out, parent_abs, ancestor_scroll, clip);
             return;
         }
-        if self.root == Some(id) && self.subtree_plain(id) {
-            if !self.picture_fresh(id) {
-                self.fill_node(id, parent_abs);
-            } else if let Some(picture) = self.pictures.get(&id).cloned() {
-                self.adopt_picture(picture);
-            }
-            self.blit(id, out, parent_abs.0, parent_abs.1, clip);
-            return;
-        }
-        if self.root == Some(id) {
-            self.pictures.remove(&id);
-        }
-        let Some(node) = self.get(id) else {
-            return;
-        };
-        let abs = (parent_abs.0 + node.x, parent_abs.1 + node.y);
-        let paint = (abs.0 - ancestor_scroll.0, abs.1 - ancestor_scroll.1);
-        let (w, h, kind) = (node.w, node.h, node.kind);
-        let mut child = node.first_child;
-        let _ = node;
-        if kind != Kind::Transform && outside(clip, paint.0, paint.1, w, h) {
-            return;
-        }
-        let _ = self.record_node(
-            id,
-            out,
-            parent_abs,
-            ancestor_scroll,
-            (0.0, 0.0),
-            clip,
-            false,
-        );
-        self.note_self_picture(id, parent_abs);
+        self.capture(id, parent_abs, out, clip);
         while let Some(current) = child {
             let next = self.get(current).and_then(|node| node.next);
             self.emit_node(current, out, abs, ancestor_scroll, clip);
             child = next;
         }
+    }
+
+    fn emit_settled_clip(
+        &mut self,
+        id: NodeId,
+        out: &mut Vec<Command>,
+        parent_abs: (f32, f32),
+        ancestor_scroll: (f32, f32),
+        clip: Option<PaintClip>,
+        abs: (f32, f32),
+        mut child: Option<NodeId>,
+    ) {
+        let Some(node) = self.get(id) else {
+            return;
+        };
+        let (w, h) = (node.w, node.h);
+        let radius = node.corner_radius();
+        self.capture(id, parent_abs, out, clip);
+        let paint = (abs.0 - ancestor_scroll.0, abs.1 - ancestor_scroll.1);
+        let local = self.local_xy(abs);
+        self.push_run_bracket(
+            Some(id),
+            Command::PushClip {
+                x: local.0,
+                y: local.1,
+                w,
+                h,
+                corner_radius: radius,
+            },
+            out,
+        );
+        let child_clip = intersect(clip, paint.0, paint.1, w, h);
+        while let Some(current) = child {
+            let next = self.get(current).and_then(|node| node.next);
+            self.emit_node(current, out, abs, ancestor_scroll, child_clip);
+            child = next;
+        }
+        self.push_run_bracket(None, Command::Pop, out);
     }
 
     fn emit_layer(
@@ -545,56 +619,33 @@ impl Tree {
         let blend = node.blend();
         let blend = (blend != protocol::BlendMode::SrcOver).then_some(blend);
         let mut child = node.first_child;
-        let _ = node;
-        if kind != Kind::Transform && outside(clip, paint.0, paint.1, w, h) {
-            return;
-        }
-        let _ = self.record_node(
-            id,
-            out,
-            parent_abs,
-            ancestor_scroll,
-            (0.0, 0.0),
-            clip,
-            false,
-        );
-        self.note_self_picture(id, parent_abs);
-        let (x, y) = paint;
-        // A settled opacity composites nothing and a zero alpha hides the subtree.
-        if kind == Kind::Opacity && alpha == Some(0) {
-            self.clear_repaint(id);
-            return;
-        }
+        let caches = node.caches_picture();
+        self.capture(id, parent_abs, out, clip);
         let pushes_opacity = kind == Kind::Opacity && alpha.unwrap_or(255) != 255;
-        // Pure translation has no matrix command; the offset reaches children
-        // through the picture origin instead.
-        let plain_translate = kind == Kind::Transform
-            && geom.rotate_rad == 0.0
-            && geom.scale_x == 1.0
-            && geom.scale_y == 1.0;
+        let pushes_matrix = kind == Kind::Transform && !geom.is_identity();
         match kind {
             Kind::Clip => out.push(Command::PushClip {
-                x,
-                y,
+                x: paint.0,
+                y: paint.1,
                 w,
                 h,
                 corner_radius: radius,
             }),
             Kind::Opacity if pushes_opacity => out.push(Command::PushOpacity {
-                x,
-                y,
+                x: paint.0,
+                y: paint.1,
                 w,
                 h,
                 alpha: alpha.unwrap_or(255),
             }),
             Kind::Scroll => out.push(Command::PushClip {
-                x,
-                y,
+                x: paint.0,
+                y: paint.1,
                 w,
                 h,
                 corner_radius: 0.0,
             }),
-            Kind::Transform if !plain_translate => out.push(Command::PushTransform {
+            Kind::Transform if pushes_matrix => out.push(Command::PushTransform {
                 translate_x: transform.0,
                 translate_y: transform.1,
                 rotate_rad: transform.2,
@@ -604,36 +655,59 @@ impl Tree {
             _ => {}
         }
         if let Some(mode) = blend {
-            out.push(Command::PushBlend { x, y, w, h, mode });
+            out.push(Command::PushBlend {
+                x: paint.0,
+                y: paint.1,
+                w,
+                h,
+                mode,
+            });
         }
         if let Some(sigma) = blur {
-            out.push(Command::PushBlur { x, y, w, h, sigma });
+            out.push(Command::PushBlur {
+                x: paint.0,
+                y: paint.1,
+                w,
+                h,
+                sigma,
+            });
         }
         if let Some(sigma) = backdrop {
-            out.push(Command::PushBackdropBlur { x, y, w, h, sigma });
+            out.push(Command::PushBackdropBlur {
+                x: paint.0,
+                y: paint.1,
+                w,
+                h,
+                sigma,
+            });
         }
+        self.close_run();
+        let Some(saved) = self.run.scope else {
+            debug_assert!(false, "record scope");
+            return;
+        };
+        let next_scroll = if kind == Kind::Scroll {
+            (ancestor_scroll.0 + scroll.0, ancestor_scroll.1 + scroll.1)
+        } else {
+            ancestor_scroll
+        };
+        let child_clip = match kind {
+            Kind::Transform => None,
+            Kind::Scroll | Kind::Clip => intersect(clip, paint.0, paint.1, w, h),
+            _ => clip,
+        };
+        self.run.scope = Some(RunScope {
+            owner: id,
+            base: abs,
+            mirror: (abs.0 - next_scroll.0, abs.1 - next_scroll.1),
+            segment: if saved.owner == id { saved.segment } else { 0 },
+        });
+        self.run.commands.clear();
+        self.run.first = None;
         let pushed = self.push_effect_layers(
             kind, abs, w, h, radius, alpha, scroll, transform, blur, backdrop, blend,
         );
-        let own_scroll = if kind == Kind::Scroll {
-            scroll
-        } else if plain_translate {
-            // A pure translation moves content toward the transform, opposite
-            // to how a scroll offset shifts paint back.
-            (-geom.translate_x, -geom.translate_y)
-        } else {
-            (0.0, 0.0)
-        };
-        let next_scroll = (
-            ancestor_scroll.0 + own_scroll.0,
-            ancestor_scroll.1 + own_scroll.1,
-        );
-        let child_clip = match kind {
-            Kind::Transform => None,
-            Kind::Scroll | Kind::Clip => intersect(clip, x, y, w, h),
-            _ => clip,
-        };
-        if self.picture_fresh(id) || self.subtree_plain(id) {
+        if caches && (self.picture_fresh(id) || self.subtree_flat(id)) {
             if !self.picture_fresh(id) {
                 self.fill_children(id, abs);
             } else if let Some(picture) = self.pictures.get(&id).cloned() {
@@ -650,8 +724,17 @@ impl Tree {
                 child = next;
             }
         }
+        self.close_run();
+        if saved.owner != id {
+            self.leave_owner(id);
+            self.run.scope = Some(saved);
+        } else if let Some(scope) = self.run.scope.as_mut() {
+            scope.base = saved.base;
+            scope.mirror = saved.mirror;
+        }
+        self.run.commands.clear();
+        self.run.first = None;
         self.pop_layers(pushed);
-        self.clear_repaint(id);
         if backdrop.is_some() {
             out.push(Command::Pop);
         }
@@ -661,50 +744,179 @@ impl Tree {
         if blend.is_some() {
             out.push(Command::Pop);
         }
-        if matches!(kind, Kind::Clip | Kind::Scroll)
-            || (kind == Kind::Opacity && pushes_opacity)
-            || (kind == Kind::Transform && !plain_translate)
-        {
+        if matches!(kind, Kind::Clip | Kind::Scroll) || pushes_opacity || pushes_matrix {
             out.push(Command::Pop);
         }
     }
 
-    fn picture_fresh(&self, id: NodeId) -> bool {
-        self.pictures.contains_key(&id)
-            && self
-                .get(id)
-                .is_some_and(|node| !node.flags.contains(super::node::NodeFlags::REPAINT_DIRTY))
-    }
-
-    fn subtree_plain(&self, id: NodeId) -> bool {
-        let mut child = self.get(id).and_then(|node| node.first_child);
-        while let Some(current) = child {
-            let Some(node) = self.get(current) else {
-                return false;
-            };
-            let next = node.next;
-            let layer = node.is_layer_kind();
-            let _ = node;
-            if layer || !self.subtree_plain(current) {
-                return false;
-            }
-            child = next;
-        }
-        true
-    }
-
-    fn fill_node(&mut self, id: NodeId, parent_abs: (f32, f32)) {
-        let mut commands = Vec::new();
-        let _ = self.record_node(
+    pub(super) fn sweep_subtree_layers(&mut self, id: NodeId) -> bool {
+        self.sweep_stack.clear();
+        self.sweep_stack.push(SweepFrame {
             id,
-            &mut commands,
-            parent_abs,
-            (0.0, 0.0),
-            parent_abs,
-            None,
-            true,
-        );
-        self.store_picture(id, commands, parent_abs);
+            expanded: false,
+        });
+        let mut root_result = false;
+        while let Some(frame) = self.sweep_stack.pop() {
+            if !frame.expanded {
+                self.sweep_stack.push(SweepFrame {
+                    id: frame.id,
+                    expanded: true,
+                });
+                self.sweep_children.clear();
+                let mut child = self.get(frame.id).and_then(|node| node.first_child);
+                while let Some(current) = child {
+                    self.sweep_children.push(current);
+                    child = self.get(current).and_then(|node| node.next);
+                }
+                for child in self.sweep_children.iter().rev() {
+                    self.sweep_stack.push(SweepFrame {
+                        id: *child,
+                        expanded: false,
+                    });
+                }
+                continue;
+            }
+            let mut any = false;
+            let mut child = self.get(frame.id).and_then(|node| node.first_child);
+            while let Some(current) = child {
+                let stored = self.subtree_layers.get(&current).copied().unwrap_or(false);
+                let renders = self
+                    .get(current)
+                    .is_some_and(|node| node.renders_layers(stored));
+                any |= stored || renders;
+                child = self.get(current).and_then(|node| node.next);
+            }
+            let renders = self
+                .get(frame.id)
+                .is_some_and(|node| node.renders_layers(any));
+            self.subtree_layers.insert(frame.id, any);
+            root_result = any || renders;
+        }
+        root_result
+    }
+
+    fn subtree_flat(&self, id: NodeId) -> bool {
+        !self.subtree_layers.get(&id).copied().unwrap_or(false)
+    }
+
+    fn picture_fresh(&self, id: NodeId) -> bool {
+        self.pictures.contains_key(&id) && !self.is_repaint_dirty(id)
+    }
+
+    fn capture(
+        &mut self,
+        id: NodeId,
+        parent_abs: (f32, f32),
+        out: &mut Vec<Command>,
+        clip: Option<PaintClip>,
+    ) {
+        let space = self.run.scope.map(|scope| scope.base).unwrap_or((0.0, 0.0));
+        let mut buf = std::mem::take(&mut self.run.commands);
+        let before = buf.len();
+        let _ = self.record_node(id, &mut buf, parent_abs, (0.0, 0.0), space, None, false);
+        if self.run.first.is_none() && buf.len() > before {
+            self.run.first = Some(id);
+        }
+        self.mirror_tail(before, &buf, out, clip);
+        self.run.commands = buf;
+    }
+
+    fn mirror_tail(
+        &self,
+        before: usize,
+        buf: &[Command],
+        out: &mut Vec<Command>,
+        clip: Option<PaintClip>,
+    ) {
+        let Some(scope) = self.run.scope.as_ref() else {
+            return;
+        };
+        self.replay_commands(&buf[before..], scope.mirror.0, scope.mirror.1, clip, out);
+    }
+
+    fn local_xy(&self, abs: (f32, f32)) -> (f32, f32) {
+        let base = self.run.scope.map(|scope| scope.base).unwrap_or((0.0, 0.0));
+        (abs.0 - base.0, abs.1 - base.1)
+    }
+
+    fn push_run_bracket(
+        &mut self,
+        source: Option<NodeId>,
+        command: Command,
+        out: &mut Vec<Command>,
+    ) {
+        if self.run.first.is_none()
+            && let Some(source) = source
+        {
+            self.run.first = Some(source);
+        }
+        let mirror = self
+            .run
+            .scope
+            .map(|scope| scope.mirror)
+            .unwrap_or((0.0, 0.0));
+        let flat = translate_command(&command, mirror.0, mirror.1);
+        self.run.commands.push(command);
+        out.push(flat);
+    }
+
+    fn close_run(&mut self) {
+        let Some(scope) = self.run.scope else {
+            return;
+        };
+        let captured = std::mem::take(&mut self.run.commands);
+        let first = self.run.first.take();
+        if captured.is_empty() {
+            return;
+        }
+        let Some(first) = first else {
+            debug_assert!(false, "run with commands has a first node");
+            return;
+        };
+        let index = scope.segment;
+        if let Some(slot) = self.run.scope.as_mut() {
+            slot.segment = index + 1;
+        }
+        let picture_id = crate::layer::self_picture_id(first);
+        let dirty = self.is_repaint_dirty(scope.owner);
+        if !dirty
+            && let Some(matched) = self.runs.get(&scope.owner).and_then(|runs| runs.get(index))
+            && matched.id == picture_id
+            && matched.commands.as_ref() == captured.as_slice()
+        {
+            self.adopt_picture(Arc::clone(matched));
+            return;
+        }
+        self.picture_writes = self.picture_writes.saturating_add(captured.len());
+        let picture = Arc::new(protocol::Picture {
+            id: picture_id,
+            generation: self.layer_epoch,
+            origin: scope.base,
+            commands: Arc::from(captured),
+        });
+        self.store_run(scope.owner, index, Arc::clone(&picture));
+        self.adopt_picture(picture);
+    }
+
+    fn store_run(&mut self, owner: NodeId, index: usize, picture: Arc<protocol::Picture>) {
+        let runs = self.runs.entry(owner).or_default();
+        if index == 0 {
+            runs.clear();
+        } else {
+            runs.truncate(index);
+        }
+        runs.push(picture);
+    }
+
+    fn leave_owner(&mut self, owner: NodeId) {
+        let end = self.run.scope.map(|scope| scope.segment).unwrap_or(0);
+        if end == 0 {
+            self.runs.remove(&owner);
+        } else if let Some(runs) = self.runs.get_mut(&owner) {
+            runs.truncate(end);
+            self.finished_owners.push(owner);
+        }
+        self.clear_repaint(owner);
     }
 
     fn fill_children(&mut self, id: NodeId, abs: (f32, f32)) {
@@ -740,41 +952,6 @@ impl Tree {
         self.pictures.insert(id, Arc::clone(&picture));
         self.adopt_picture(picture);
         self.clear_repaint(id);
-    }
-
-    fn note_self_picture(&mut self, id: NodeId, parent_abs: (f32, f32)) {
-        let dirty = self
-            .get(id)
-            .is_some_and(|node| node.flags.contains(super::node::NodeFlags::REPAINT_DIRTY));
-        if self.self_pictures.contains_key(&id) && !dirty {
-            if let Some(picture) = self.self_pictures.get(&id).cloned() {
-                self.adopt_picture(picture);
-            }
-            return;
-        }
-        let mut commands = Vec::new();
-        let _ = self.record_node(
-            id,
-            &mut commands,
-            parent_abs,
-            (0.0, 0.0),
-            (0.0, 0.0),
-            None,
-            false,
-        );
-        if commands.is_empty() {
-            self.self_pictures.remove(&id);
-            return;
-        }
-        self.picture_writes = self.picture_writes.saturating_add(commands.len());
-        let picture = Arc::new(protocol::Picture {
-            id: crate::layer::self_picture_id(id),
-            generation: self.layer_epoch,
-            origin: (0.0, 0.0),
-            commands: Arc::from(commands),
-        });
-        self.self_pictures.insert(id, Arc::clone(&picture));
-        self.adopt_picture(picture);
     }
 
     fn adopt_picture(&mut self, picture: Arc<protocol::Picture>) {
@@ -848,7 +1025,9 @@ impl Tree {
         blend: Option<protocol::BlendMode>,
     ) -> usize {
         let mut pushed = 0;
-        let plain_translate = kind == Kind::Transform
+        let identity = kind == Kind::Transform
+            && transform.0 == 0.0
+            && transform.1 == 0.0
             && transform.2 == 0.0
             && transform.3 == 1.0
             && transform.4 == 1.0;
@@ -868,7 +1047,7 @@ impl Tree {
                 pushed += 2;
             }
             Kind::Transform => {
-                if !plain_translate {
+                if !identity {
                     self.push_layer(crate::layer::LayerKind::Transform {
                         translate_x: transform.0,
                         translate_y: transform.1,
@@ -940,9 +1119,20 @@ impl Tree {
         let Some(picture) = self.pictures.get(&id) else {
             return;
         };
-        for command in picture.commands.iter() {
+        self.replay_commands(picture.commands.as_ref(), dx, dy, clip, out);
+    }
+
+    fn replay_commands(
+        &self,
+        commands: &[Command],
+        dx: f32,
+        dy: f32,
+        clip: Option<PaintClip>,
+        out: &mut Vec<Command>,
+    ) {
+        for command in commands {
             let moved = translate_command(command, dx, dy);
-            if command_outside(&moved, clip) {
+            if is_leaf_paint(&moved) && command_outside(&moved, clip) {
                 continue;
             }
             out.push(moved);
@@ -1063,6 +1253,13 @@ fn translate_command(command: &Command, dx: f32, dy: f32) -> Command {
         },
         other => other,
     }
+}
+
+fn is_leaf_paint(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Rect { .. } | Command::Text { .. } | Command::Image { .. }
+    )
 }
 
 fn command_outside(command: &Command, clip: Option<PaintClip>) -> bool {

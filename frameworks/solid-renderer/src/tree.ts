@@ -102,6 +102,7 @@ export type RetainedCounts = {
 
 export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
   retainedCounts(): RetainedCounts;
+  forget(id: number): void;
 } {
   const nodes = new Map<number, HostNode>();
   const transforms = new Map<number, TransformValue>();
@@ -119,10 +120,11 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
     }
     seen.add(id);
     const children: number[] = [];
+    const listed = new Set<number>();
     let child = host.firstChild(id);
-    while (child !== 0 && !seen.has(child)) {
+    while (child !== 0 && !seen.has(child) && !listed.has(child)) {
       children.push(child);
-      seen.add(child);
+      listed.add(child);
       child = host.nextSibling(child);
     }
     for (const kid of children) {
@@ -590,6 +592,9 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
         paddings: paddings.size,
         sizes: sizes.size,
       };
+    },
+    forget(id: number) {
+      forget(id);
     },
   };
 }

@@ -1,39 +1,40 @@
-import { For, Show, createTrackedEffect, createSignal, onCleanup } from "solid-js";
-import { Text, directionFor, flingTarget, host, onFrame, requestFrame, type NodeHandle } from "@uifw/solid-renderer";
-import { Button } from "./Button.tsx";
+import { Show, createSignal, createTrackedEffect, onCleanup } from "solid-js";
 import {
-  MIN_THUMB,
-  PrefixHeights,
-  REFRESH_THRESHOLD,
-  estimateHeight,
-  nearEnd,
-  retainHeights,
-  stabilizeWindow,
-  stickyTranslate,
-  thumbLength,
-  thumbOffset,
-  windowRangeForOffset,
-} from "./list-window.ts";
-import { ScrollArea } from "./ScrollArea.tsx";
+  Text,
+  bindListRenderer,
+  createSlot,
+  directionFor,
+  host,
+  type NodeHandle,
+} from "@uifw/solid-renderer";
+import { Button } from "./Button.tsx";
+import { ScrollArea, type ScrollPhysicsProps } from "./ScrollArea.tsx";
+import {
+  createScrollController,
+  refreshListener,
+  type ScrollController,
+} from "./ScrollController.ts";
 import { useTheme } from "./use-theme.ts";
-
-const HEIGHT_EPS = 0.5;
 
 const restoredOffsets = new Map<string, { x: number; y: number }>();
 
-type Measure = { id: number; index: number };
 type Pin = { index: number; key: string };
 
 /**
- * Mounts only the rows near the viewport.
- * Heights live in a Fenwick tree; the window is rebuilt from that prefix.
+ * Mounts only the rows near the viewport. Window, measurement, and chrome
+ * live on `ListDriver`. This component is the template and the render callback.
  */
 export function VirtualList<T>(props: {
   items: readonly T[];
   itemKey: (item: T) => string | number;
   estimatedHeight: number;
   overscan?: number;
-  children: (item: T, index: number) => NodeHandle;
+  children?: (item: T, index: number) => NodeHandle;
+  recycle?: {
+    typeOf: (item: T) => string;
+    render: (item: () => T, index: () => number) => NodeHandle;
+    poolSize?: number;
+  };
   empty?: () => NodeHandle;
   error?: string;
   onRetry?: () => void;
@@ -42,343 +43,106 @@ export function VirtualList<T>(props: {
   sticky?: (item: T, index: number) => boolean;
   restoreKey?: string;
   onRefresh?: () => void;
+  controller?: ScrollController;
+  physics?: ScrollPhysicsProps;
+  onDragOverflow?: (overflowX: number, overflowY: number) => boolean;
 }): NodeHandle {
   const theme = useTheme();
-  const prefix = new PrefixHeights();
-  const cache = new Map<string, number>();
-  const mounted = new Map<string, Measure>();
-  let keySeq = "";
-  let viewport = 0;
-  let placedW = -1;
-  let placedH = -1;
-  let measuring = false;
-  let stopMeasure = () => {};
-  let pull = 0;
-  let endLength = -1;
-  let pinIndex = -1;
-  let pinKey = "";
+  const scroll = props.controller ?? createScrollController();
+  const native = host.listDriver?.(props.overscan ?? 4, props.estimatedHeight);
+  if (native === undefined) {
+    throw new Error("listDriver is not linked");
+  }
   const initial = props.restoreKey ? restoredOffsets.get(props.restoreKey) : undefined;
-  let previousOffset = initial?.y ?? 0;
-  const [range, setRange] = createSignal({ start: 0, end: 0, top: 0, bottom: 0 });
   const [extent, setExtent] = createSignal(0);
-  const [thumb, setThumb] = createSignal({ h: MIN_THUMB, y: 0, visible: false });
-  const [hThumb, setHThumb] = createSignal({ w: MIN_THUMB, x: 0, visible: false });
+  const [thumbOn, setThumbOn] = createSignal(false);
+  const [thumbH, setThumbH] = createSignal(24);
+  const [hThumbOn, setHThumbOn] = createSignal(false);
+  const [hThumbW, setHThumbW] = createSignal(24);
   const [pin, setPin] = createSignal<Pin | null>(null);
-  const [pinY, setPinY] = createSignal(0);
+  let viewport = 0;
+  let contentId = 0;
+  let top = 0;
+  let bottom = 0;
+  let rows = 0;
+  let vThumb = 0;
+  let hThumb = 0;
+  let pinNode = 0;
+  let vSize = 0;
+  let hSize = 0;
 
-  function keysOf(items: readonly T[]): string[] {
-    return items.map((item) => String(props.itemKey(item)));
+  function syncNodes(): void {
+    native.bind(viewport, contentId, top, bottom, rows, vThumb, hThumb, pinNode, vSize, hSize);
   }
-
-  function sequence(keys: readonly string[]): string {
-    return keys.join("\0");
-  }
-
-  function rowEstimate(): number {
-    return estimateHeight(props.estimatedHeight) * host.textScale();
-  }
-
-  function syncPrefix(items: readonly T[], force = false): void {
-    const keys = keysOf(items);
-    const next = sequence(keys);
-    if (!force && next === keySeq && prefix.length === items.length) {
-      return;
-    }
-    keySeq = next;
-    const estimate = rowEstimate();
-    prefix.rebuild(keys.map((key) => cache.get(key) ?? estimate));
-    retainHeights(cache, keys);
-  }
-
-  function contentWidth(): number {
-    if (viewport === 0) {
-      return 0;
-    }
-    const body = host.firstChild(viewport);
-    if (body === 0) {
-      return 0;
-    }
-    return host.rect(body).w;
-  }
-
-  function updateSticky(offsetY: number): void {
-    const sticky = props.sticky;
-    if (!sticky || props.items.length === 0) {
-      pinIndex = -1;
-      pinKey = "";
-      setPin(null);
-      setPinY(0);
-      return;
-    }
-    let current = -1;
-    for (let index = 0; index < props.items.length; index += 1) {
-      const item = props.items[index];
-      if (item === undefined || !sticky(item, index)) {
-        continue;
-      }
-      if (prefix.itemStart(index) <= offsetY) {
-        current = index;
-      } else {
-        break;
-      }
-    }
-    if (current < 0) {
-      pinIndex = -1;
-      pinKey = "";
-      setPin(null);
-      setPinY(0);
-      return;
-    }
-    let nextStart: number | null = null;
-    for (let index = current + 1; index < props.items.length; index += 1) {
-      const item = props.items[index];
-      if (item !== undefined && sticky(item, index)) {
-        nextStart = prefix.itemStart(index);
-        break;
-      }
-    }
-    const key = String(props.itemKey(props.items[current] as T));
-    if (pinIndex !== current || pinKey !== key) {
-      pinIndex = current;
-      pinKey = key;
-      setPin({ index: current, key });
-    }
-    setPinY(stickyTranslate(nextStart, offsetY, prefix.heightAt(current)));
-  }
-
-  function updateChrome(offsetX: number, offsetY: number, viewWidth: number, viewHeight: number): void {
-    const content = prefix.total();
-    const overflow = content > viewHeight + HEIGHT_EPS;
-    if (!overflow || viewHeight <= 0 || content <= 0) {
-      setThumb({ h: MIN_THUMB, y: 0, visible: false });
-    } else {
-      setThumb({
-        h: thumbLength(viewHeight, content),
-        y: thumbOffset(viewHeight, content, offsetY),
-        visible: true,
-      });
-    }
-    const width = contentWidth();
-    if (width > viewWidth + HEIGHT_EPS && viewWidth > 0) {
-      setHThumb({
-        w: thumbLength(viewWidth, width),
-        x: thumbOffset(viewWidth, width, offsetX),
-        visible: true,
-      });
-    } else {
-      setHThumb({ w: MIN_THUMB, x: 0, visible: false });
-    }
-    updateSticky(offsetY);
-  }
-
-  function maybeEnd(end: number): void {
-    if (!props.onEndReached || (props.error ?? "").length > 0) {
-      return;
-    }
-    const length = props.items.length;
-    const overscan = props.overscan ?? 4;
-    if (!nearEnd(end, length, overscan) || endLength === length) {
-      return;
-    }
-    endLength = length;
-    props.onEndReached();
-  }
-
-  function place(offsetX: number, offsetY: number, viewWidth: number, viewHeight: number): void {
-    syncPrefix(props.items);
-    const total = prefix.total();
-    if (total !== extent()) {
-      queueMicrotask(() => setExtent(total));
-    }
-    const delta = offsetY - previousOffset;
-    previousOffset = offsetY;
-    const overscan = props.overscan ?? 4;
-    const lead =
-      delta === 0 || viewHeight <= 0 ? null : offsetY + Math.sign(delta) * viewHeight;
-    const flung = viewport === 0 ? null : flingTarget(viewport);
-    const far = flung
-      ? lead === null
-        ? flung.y
-        : delta > 0
-          ? Math.max(flung.y, lead)
-          : Math.min(flung.y, lead)
-      : lead;
-    const next = stabilizeWindow(
-      prefix,
-      range(),
-      windowRangeForOffset(prefix, offsetY, viewHeight, overscan, far),
-      overscan,
-    );
-    const current = range();
-    if (
-      current.start !== next.start ||
-      current.end !== next.end ||
-      current.top !== next.top ||
-      current.bottom !== next.bottom
-    ) {
-      setRange(next);
-    }
-    updateChrome(offsetX, offsetY, viewWidth, viewHeight);
-    maybeEnd(next.end);
-  }
-
-  function windowNeedsMeasure(): boolean {
-    const windowed = range();
-    for (let index = windowed.start; index < windowed.end; index += 1) {
-      const item = props.items[index];
-      if (item === undefined) {
-        continue;
-      }
-      if (!cache.has(String(props.itemKey(item)))) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  function rowBox(id: number): { x: number; y: number; w: number; h: number } | null {
-    try {
-      return host.rect(id);
-    } catch {
-      return null;
-    }
-  }
-
-  function measureMounted(): boolean {
-    let pending = false;
-    let changed = false;
-    for (const [key, entry] of [...mounted]) {
-      const box = rowBox(entry.id);
-      if (box === null) {
-        mounted.delete(key);
-        continue;
-      }
-      if (box.h === 0) {
-        pending = true;
-        continue;
-      }
-      const prev = prefix.heightAt(entry.index);
-      cache.set(key, box.h);
-      if (Math.abs(box.h - prev) > HEIGHT_EPS) {
-        prefix.add(entry.index, box.h - prev);
-        changed = true;
-      }
-    }
-    if (changed && viewport !== 0) {
-      const view = rowBox(viewport);
-      if (view !== null) {
-        const offset = host.scrollOffset(viewport);
-        place(offset.x, offset.y, view.w, view.h);
-        placedW = view.w;
-        placedH = view.h;
-      }
-    }
-    return pending;
-  }
-
-  /** The ref runs before layout, so the first rect is empty. Re-window once the viewport has a size. */
-  function syncWindow(): boolean {
-    if (viewport === 0) {
-      return false;
-    }
-    const view = rowBox(viewport);
-    if (view === null || view.h <= 0) {
-      return false;
-    }
-    if (Math.abs(view.w - placedW) < HEIGHT_EPS && Math.abs(view.h - placedH) < HEIGHT_EPS) {
-      return false;
-    }
-    placedW = view.w;
-    placedH = view.h;
-    const offset = host.scrollOffset(viewport);
-    place(offset.x, offset.y, view.w, view.h);
-    return true;
-  }
-
-  function startMeasure(): void {
-    if (measuring) {
-      requestFrame();
-      return;
-    }
-    measuring = true;
-    stopMeasure();
-    stopMeasure = onFrame(() => {
-      const resized = syncWindow();
-      const pending = measureMounted();
-      if (pending || windowNeedsMeasure() || resized) {
-        requestFrame();
-        return;
-      }
-      stopMeasure();
-      measuring = false;
-    });
-    requestFrame();
-  }
-
-  onCleanup(() => {
-    stopMeasure();
-  });
-
-  let seenScale = host.textScale();
-  let pendingScale = false;
-  onCleanup(
-    onFrame(() => {
-      const scale = host.textScale();
-      if (scale !== seenScale) {
-        const ratio = seenScale > 0 ? scale / seenScale : scale;
-        seenScale = scale;
-        for (const [key, height] of cache) {
-          cache.set(key, height * ratio);
-        }
-        syncPrefix(props.items, true);
-        setExtent(prefix.total());
-        pendingScale = true;
-        requestFrame();
-        if (viewport !== 0) {
-          const view = host.rect(viewport);
-          const offset = host.scrollOffset(viewport);
-          place(offset.x, offset.y, view.w, view.h);
-        }
-        return;
-      }
-      if (!pendingScale) {
-        return;
-      }
-      pendingScale = false;
-      if (viewport !== 0) {
-        const view = host.rect(viewport);
-        const offset = host.scrollOffset(viewport);
-        place(offset.x, offset.y, view.w, view.h);
-      } else {
-        place(0, 0, 0, 0);
-      }
-      startMeasure();
-    }),
-  );
 
   createTrackedEffect(() => {
-    const blocked = (props.error ?? "").length > 0 || props.items.length === 0;
-    syncPrefix(props.items);
-    if (blocked) {
-      stopMeasure();
-      measuring = false;
-      updateSticky(0);
-      return;
+    const items = props.items;
+    native.configure(
+      props.estimatedHeight,
+      props.overscan ?? 4,
+      (props.error ?? "").length > 0,
+    );
+    if (props.onRefresh) {
+      scroll.setPull(2, 64);
     }
-    if (viewport !== 0) {
-      const view = host.rect(viewport);
-      const offset = host.scrollOffset(viewport);
-      place(offset.x, offset.y, view.w, view.h);
-    } else {
-      place(0, 0, 0, 0);
-    }
-    if (windowNeedsMeasure()) {
-      startMeasure();
-    }
+    native.setItems(
+      items.map((item, index) => ({
+        key: String(props.itemKey(item)),
+        type: props.recycle ? props.recycle.typeOf(item) : "item",
+        sticky: props.sticky?.(item, index) === true,
+      })),
+    );
   });
 
-  const windowItems = () => props.items.slice(range().start, range().end);
+  onCleanup(
+    bindListRenderer(native, {
+      parent: () => rows,
+      poolSize: () => (props.recycle ? (props.recycle.poolSize ?? 8) : 0),
+      itemAt: (index) => props.items[index] as T,
+      render: (item, index) => {
+        if (props.recycle) {
+          return props.recycle.render(item, index);
+        }
+        return props.children?.(item(), index()) ?? (<sized w={0} h={0} /> as unknown as NodeHandle);
+      },
+      createSlot,
+      onChrome(chrome) {
+        setExtent(chrome.extent);
+        setThumbOn(chrome.thumbOn);
+        setThumbH(chrome.thumbLen);
+        setHThumbOn(chrome.hThumbOn);
+        setHThumbW(chrome.hThumbLen);
+        if (chrome.pinIndex >= 0) {
+          setPin({ index: chrome.pinIndex, key: chrome.pinKey });
+        } else {
+          setPin(null);
+        }
+      },
+      onEnd() {
+        if ((props.error ?? "").length > 0) {
+          return;
+        }
+        props.onEndReached?.();
+      },
+    }),
+  );
+  onCleanup(refreshListener(scroll, () => props.onRefresh?.()));
+  onCleanup(() => {
+    const key = props.restoreKey;
+    if (key) {
+      restoredOffsets.set(key, scroll.offset());
+    }
+    native.release();
+  });
+
   const errored = () => (props.error ?? "").length > 0;
+  const pinned = () => {
+    const box = pin();
+    if (box === null) {
+      return null;
+    }
+    return props.items[box.index] === undefined ? null : box;
+  };
 
   return (
     <Show
@@ -414,99 +178,99 @@ export function VirtualList<T>(props: {
           <ScrollArea
             contentMin={extent()}
             initialOffset={initial}
+            controller={scroll}
+            physics={props.physics}
+            onDragOverflow={props.onDragOverflow}
             viewportRef={(id) => {
               viewport = id;
-              if (!syncWindow()) {
-                const view = host.rect(id);
-                const offset = host.scrollOffset(id);
-                place(offset.x, offset.y, view.w, view.h);
-              }
-              if (windowNeedsMeasure() || placedH <= 0) {
-                startMeasure();
-              }
+              syncNodes();
             }}
-            onOffset={(offset, id) => {
-              const key = props.restoreKey;
-              if (key) {
-                restoredOffsets.set(key, offset);
-              }
-              const view = host.rect(id);
-              place(offset.x, offset.y, view.w, view.h);
-              if (windowNeedsMeasure()) {
-                startMeasure();
-              }
-            }}
-            onPull={(delta, overflowing) => {
-              if (!props.onRefresh || !overflowing) {
-                pull = 0;
-                return;
-              }
-              if (delta > 0) {
-                pull += delta;
-              }
-            }}
-            onDragEnd={() => {
-              if (props.onRefresh && pull > REFRESH_THRESHOLD) {
-                props.onRefresh();
-              }
-              pull = 0;
+            contentRef={(id) => {
+              contentId = id;
+              syncNodes();
             }}
           >
-            <Show when={range().top > 0}>
-              <sized w={1} h={range().top} />
-            </Show>
-            <For each={windowItems()} keyed={(item) => props.itemKey(item)}>
-              {(item, index) => {
-                const abs = () => range().start + index();
-                let wrap = 0;
-                createTrackedEffect(() => {
-                  if (wrap !== 0) {
-                    mounted.set(String(props.itemKey(item())), { id: wrap, index: abs() });
-                  }
-                });
-                onCleanup(() => {
-                  mounted.delete(String(props.itemKey(item())));
-                });
-                return (
-                  <stack
-                    ref={(node) => {
-                      wrap = node.id;
-                      mounted.set(String(props.itemKey(item())), { id: wrap, index: abs() });
-                    }}
-                  >
-                    {props.children(item(), abs())}
-                  </stack>
-                );
+            <sized
+              w={1}
+              h={0}
+              ref={(node) => {
+                top = node.id;
+                syncNodes();
               }}
-            </For>
-            <Show when={range().bottom > 0}>
-              <sized w={1} h={range().bottom} />
-            </Show>
+            />
+            <column
+              ref={(node) => {
+                rows = node.id;
+                syncNodes();
+              }}
+            />
+            <sized
+              w={1}
+              h={0}
+              ref={(node) => {
+                bottom = node.id;
+                syncNodes();
+              }}
+            />
           </ScrollArea>
-          <Show when={pin()} keyed>
+          <Show when={pinned()} keyed>
             {(box) => (
-              <transform y={pinY()}>
-                {props.children(props.items[box.index] as T, box.index)}
+              <transform
+                ref={(node) => {
+                  pinNode = node.id;
+                  syncNodes();
+                }}
+              >
+                {props.recycle
+                  ? props.recycle.render(
+                      () => props.items[box.index] as T,
+                      () => box.index,
+                    )
+                  : props.children?.(props.items[box.index] as T, box.index)}
               </transform>
             )}
           </Show>
-          <Show when={thumb().visible}>
+          <Show when={thumbOn()}>
             <row fill justify="end">
               <padding right={theme().space.s}>
-                <transform y={thumb().y}>
+                <transform
+                  ref={(node) => {
+                    vThumb = node.id;
+                    syncNodes();
+                  }}
+                >
                   <decorated color={theme().color.textMuted} radius={theme().radius.s}>
-                    <sized w={3} h={thumb().h} />
+                    <sized
+                      w={3}
+                      h={thumbH()}
+                      ref={(node) => {
+                        vSize = node.id;
+                        syncNodes();
+                      }}
+                    />
                   </decorated>
                 </transform>
               </padding>
             </row>
           </Show>
-          <Show when={hThumb().visible}>
+          <Show when={hThumbOn()}>
             <column fill justify="end">
               <padding bottom={theme().space.s}>
-                <transform x={hThumb().x}>
+                <transform
+                  ref={(node) => {
+                    hThumb = node.id;
+                    syncNodes();
+                  }}
+                >
                   <decorated color={theme().color.textMuted} radius={theme().radius.s}>
-                    <sized w={hThumb().w} h={3} />
+                    <sized
+                      w={hThumbW()}
+                      h={3}
+                      ref={(node) => {
+                        hSize = node.id;
+                        syncNodes();
+                      }}
+                    />
                   </decorated>
                 </transform>
               </padding>
@@ -515,5 +279,5 @@ export function VirtualList<T>(props: {
         </stack>
       </Show>
     </Show>
-  );
+    );
 }

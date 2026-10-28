@@ -331,6 +331,54 @@ pub enum IoEvent {
     },
 }
 
+/// Durations inside one [`Session::frame`]. The host adds gesture time itself.
+///
+/// `script` splits the script interval. `trace` counts layout work and the
+/// input events already handled before `frame` returned.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FramePhases {
+    pub script_ms: f64,
+    pub layout_ms: f64,
+    /// Script that ran after the first `layout` and before `record`.
+    pub layout_cb_ms: f64,
+    pub sync_ms: f64,
+    pub record_ms: f64,
+    pub semantics_ms: f64,
+    pub script: ScriptPhases,
+    pub trace: FrameTrace,
+}
+
+/// Pieces of [`FramePhases::script_ms`], in call order.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScriptPhases {
+    pub motion_ms: f64,
+    pub dispatch_ms: f64,
+    pub timer_ms: f64,
+    pub raf_ms: f64,
+    pub callback_ms: f64,
+    pub flush_ms: f64,
+}
+
+/// Layout and input counts for one frame. Zeros mean that stage did not run.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameTrace {
+    /// All `layout` calls this frame, including those made from script.
+    pub laywork_ms: f64,
+    pub layout_passes: u32,
+    pub text_reused: u32,
+    pub text_shaped: u32,
+    /// `none` when nothing marked layout.
+    pub layout_cause: &'static str,
+    pub pointers: u32,
+    pub keys: u32,
+    pub edits: u32,
+    pub ime: u32,
+    pub scrolls: u32,
+    pub focus: u32,
+    pub blur: u32,
+    pub gestures: u32,
+}
+
 /// What one `frame` produced. `layers == None` means the host may `PresentCached`.
 #[derive(Clone, Debug)]
 pub struct FrameOutput {
@@ -346,6 +394,8 @@ pub struct FrameOutput {
     pub exit: bool,
     /// `None` means the image census generation did not change.
     pub images: Option<Arc<core::ImageCensus>>,
+    /// `None` when the session did not time the frame.
+    pub phases: Option<FramePhases>,
 }
 
 impl FrameOutput {
@@ -360,6 +410,7 @@ impl FrameOutput {
             clipboard: None,
             exit: false,
             images: None,
+            phases: None,
         }
     }
 }

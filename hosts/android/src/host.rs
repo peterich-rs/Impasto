@@ -5,11 +5,11 @@
 use std::ffi::{CStr, CString, c_char};
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::thread;
 
 use hostshell::{
-    Boot, Command, Launch, LogLevel, NativePtr, PlatformBridge, Services, SessionError, SurfaceId,
-    SurfaceTarget, Vsync,
+    Boot, Command, DropWait, Launch, LogLevel, NativePtr, PlatformBridge, Services, SessionError,
+    SurfaceId, SurfaceTarget, Vsync,
 };
 use jni::objects::{Global, JObject, JString};
 use jni::sys::{jboolean, jint, jlong};
@@ -606,25 +606,40 @@ fn destroy_surface(host: &Host) {
         return;
     };
     host.link.begin_destroy(id);
-    if !wait_dropped(&host.link, id) {
-        log_line(
-            LogLevel::Error,
-            "surface drop timed out; keeping the window",
-        );
-        std::mem::forget(window);
-        return;
-    }
-    drop(window);
+    release_when_dropped(host.link.drop_wait(), id, window);
 }
 
-fn wait_dropped(link: &hostshell::Link, id: SurfaceId) -> bool {
-    for _ in 0..4_000 {
-        if link.poll_dropped(id) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(1));
+/// Leaks the window if the drop thread never starts. After the ack, [`Self::release`] drops it.
+struct HeldWindow(Option<NativeWindow>);
+
+impl HeldWindow {
+    fn release(&mut self) {
+        drop(self.0.take());
     }
-    false
+}
+
+impl Drop for HeldWindow {
+    fn drop(&mut self) {
+        if let Some(window) = self.0.take() {
+            std::mem::forget(window);
+        }
+    }
+}
+
+fn release_when_dropped(wait: DropWait, id: SurfaceId, window: NativeWindow) {
+    let mut held = HeldWindow(Some(window));
+    let spawned = thread::Builder::new()
+        .name("uifw-surface-drop".into())
+        .spawn(move || {
+            wait.wait(id);
+            held.release();
+        });
+    if spawned.is_err() {
+        log_line(
+            LogLevel::Error,
+            "surface drop thread did not start; keeping the window",
+        );
+    }
 }
 
 fn open_surface(host: &Host, window: NativeWindow) {
@@ -632,10 +647,7 @@ fn open_surface(host: &Host, window: NativeWindow) {
     let previous = host.ui(|ui| (ui.window.take(), ui.surface_id.take()));
     if let (Some(window), Some(id)) = previous {
         host.link.begin_destroy(id);
-        if !wait_dropped(&host.link, id) {
-            log_line(LogLevel::Error, "replaced surface drop timed out");
-            std::mem::forget(window);
-        }
+        release_when_dropped(host.link.drop_wait(), id, window);
     }
     host.ui(|ui| ui.window = Some(window));
     post_ready(host);
@@ -1020,16 +1032,38 @@ pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeResume(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_HostActivity_nativePause(
+pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeInactive(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
 ) {
     let Some(host) = host() else {
         return;
     };
-    host.clock.cancel();
     host.link
-        .post(Command::Lifecycle(hostshell::Lifecycle::Paused));
+        .post(Command::Lifecycle(hostshell::Lifecycle::Inactive));
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeHidden(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    host.link
+        .post(Command::Lifecycle(hostshell::Lifecycle::Hidden));
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeTrimMemory(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+) {
+    let Some(host) = host() else {
+        return;
+    };
+    host.link.post(Command::MemoryWarning);
 }
 
 #[unsafe(no_mangle)]

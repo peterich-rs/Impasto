@@ -418,6 +418,15 @@ impl ImageCache {
         }
     }
 
+    /// Drops decoded pixels and in-flight keys. A late decode for the old generation is ignored.
+    pub fn trim(&mut self) {
+        self.entries.clear();
+        self.pending.clear();
+        self.logged_missing.clear();
+        self.pinned.clear();
+        self.generation = self.generation.wrapping_add(1);
+    }
+
     /// Drop cache entries for `source` and bump generation so an in-flight decode is stale.
     ///
     /// The shell posts [`crate::Command::ReloadImage`], which also arms one frame.
@@ -545,6 +554,31 @@ mod tests {
         cache.reload("asset:logo");
         assert!(!cache.contains("asset:logo", 2));
         assert!(cache.request("asset:logo", 2).is_some());
+    }
+
+    #[test]
+    fn trim_drops_pixels_and_ignores_an_in_flight_decode() {
+        let mut cache = ImageCache::new();
+        let request = cache.request("asset:logo", 1).unwrap();
+        cache.apply(ImageReady::Decoded(handle(
+            "asset:logo",
+            request.generation,
+            8,
+        )));
+        let in_flight = cache.request("asset:other", 1).unwrap();
+        cache.trim();
+        assert!(!cache.contains("asset:logo", 1));
+        assert!(
+            cache
+                .apply(ImageReady::Decoded(handle(
+                    "asset:other",
+                    in_flight.generation,
+                    4,
+                )))
+                .is_none()
+        );
+        assert!(!cache.contains("asset:other", 1));
+        assert!(cache.request("asset:logo", 1).is_some());
     }
 
     #[test]

@@ -10,7 +10,9 @@ const logs: string[] = [];
 
 const { reportError, installErrorHooks } = await import("./errors.ts");
 reportError(new Error("boom"));
-assert.deepEqual(logs, ["error:boom"]);
+assert.equal(logs.length, 1);
+assert.ok(logs[0].startsWith("error:"));
+assert.ok(logs[0].includes("boom"));
 const stop = installErrorHooks();
 assert.equal(typeof stop, "function");
 stop();

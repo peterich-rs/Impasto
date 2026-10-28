@@ -25,6 +25,8 @@ kotlin:
 solid:
     node --conditions=browser --experimental-strip-types "{{root}}/frameworks/solid-renderer/src/tree.test.ts"
     node --experimental-strip-types "{{root}}/frameworks/solid-renderer/runtime/frame.test.ts"
+    node --conditions=browser --experimental-strip-types "{{root}}/frameworks/solid-renderer/runtime/slot.test.ts"
+    node --experimental-strip-types "{{root}}/frameworks/solid-renderer/runtime/list-binding.test.ts"
     node --experimental-strip-types "{{root}}/frameworks/solid-renderer/runtime/motion.test.ts"
     node --experimental-strip-types "{{root}}/frameworks/solid-renderer/src/direction.test.ts"
     node --experimental-strip-types "{{root}}/frameworks/net/src/index.test.ts"

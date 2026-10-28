@@ -5,9 +5,12 @@ mod hit;
 mod layout;
 mod node;
 mod record;
+mod scroll;
 mod semantics;
 mod store;
+mod text;
 
+pub use layout::{LayoutCause, LayoutTrace};
 pub use node::{
     Alignment, AxisSize, Discarded, DragClaim, Edges, FocusDirection, Gesture, GridLine, Inset,
     Justify, NodeId, Rect, RowCrossAlign, ScrollEdge, TrackSize,
@@ -20,8 +23,11 @@ struct ActiveMotion {
     node: NodeId,
     prop: AnimProp,
     simulation: Box<dyn Simulation>,
+    /// This spring is the snap that follows coast. Its end must not snap again.
+    snap: bool,
 }
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -44,6 +50,9 @@ pub struct Tree {
     taffy: TaffyTree<usize>,
     shaper: Box<dyn Shaper>,
     root: Option<NodeId>,
+    /// Subtrees [`Tree::remove`] detached. [`Tree::discard_detached`] retires
+    /// the ones that are still parentless.
+    pending_discard: Vec<NodeId>,
     /// Press, drag, and hover routes. Structure edits do not clear this.
     arena: gesture::GestureArena,
     focused: Option<NodeId>,
@@ -59,10 +68,16 @@ pub struct Tree {
     applying_motion: bool,
     /// Relayout boundaries whose children must be read back from Taffy.
     dirty_boundaries: Vec<NodeId>,
-    /// Child commands for a repaint boundary. Replay skips the subtree.
+    /// Child picture of a scroll. Keyed by the scroll node.
     pictures: HashMap<NodeId, Arc<protocol::Picture>>,
-    /// Commands for the boundary node itself. Not the child picture's slot.
-    self_pictures: HashMap<NodeId, Arc<protocol::Picture>>,
+    /// Runs keyed by the owner that closed them, in paint order.
+    runs: HashMap<NodeId, Vec<Arc<protocol::Picture>>>,
+    /// Capture in progress. Empty outside `record_into`.
+    run: record::RunState,
+    /// Owners whose runs were sealed by the current `record_into`.
+    finished_owners: Vec<NodeId>,
+    /// Strict descendants that open layers. Recomputed at the start of each record.
+    subtree_layers: HashMap<NodeId, bool>,
     /// Parent layer while `record` is linking the layer tree.
     layer_stack: Vec<protocol::LayerId>,
     /// Last sibling linked under each layer, indexed by [`protocol::LayerId`].
@@ -87,6 +102,29 @@ pub struct Tree {
     needs_paint: bool,
     /// How many times `layout` entered Taffy. Paint-only updates leave this unchanged.
     layout_passes: u64,
+    /// Text nodes whose paint key must be retained before the next record.
+    pending_text: Vec<NodeId>,
+    sync_visited: u32,
+    sync_synced: u32,
+    sync_ms: f64,
+    taffy_ms: f64,
+    /// Sum of `layout` bodies since the last [`Tree::take_layout_trace`].
+    layout_work_ms: f64,
+    /// `layout` calls that entered Taffy since the last trace.
+    layout_entries: u32,
+    /// First reason `needs_layout` became true since the last trace.
+    layout_cause: LayoutCause,
+    text_reused: Cell<u32>,
+    text_shaped: Cell<u32>,
+    /// `layout_passes` already published by [`Tree::semantics_patch`].
+    semantics_layout_seen: u64,
+    /// Scroll nodes whose offset changed since the last full semantics walk.
+    scroll_semantics: Vec<NodeId>,
+    /// Hint or structure changed. The next patch walks the whole tree.
+    semantics_full: bool,
+    /// Reused by [`Tree::sweep_subtree_layers`].
+    sweep_stack: Vec<record::SweepFrame>,
+    sweep_children: Vec<NodeId>,
     /// Multiplier applied when measuring and recording text. `1.0` leaves sizes alone.
     text_scale: f32,
     laid_out: bool,
@@ -113,6 +151,51 @@ mod slot_tests {
             Err(Error::UnknownNode)
         ));
         tree.set_text(reused, "Ok")?;
+        Ok(())
+    }
+
+    #[test]
+    fn removed_child_can_be_inserted_until_discard_detached() -> Result<(), Error> {
+        let mut tree = Tree::new(MonoShaper::default());
+        let parent = tree.column(0.0)?;
+        let child = tree.text("Hi", 16.0, [0, 0, 0, 255])?;
+        tree.add_child(parent, child)?;
+        tree.remove(parent, child)?;
+        tree.set_text(child, "still")?;
+        tree.add_child(parent, child)?;
+        assert_eq!(tree.parent(child)?, Some(parent));
+        assert!(tree.discard_detached().ids.is_empty());
+        let anchor = tree.text("A", 16.0, [0, 0, 0, 255])?;
+        let extra = tree.text("B", 16.0, [0, 0, 0, 255])?;
+        tree.add_child(parent, anchor)?;
+        tree.remove(parent, anchor)?;
+        tree.insert(parent, extra, Some(anchor))?;
+        assert_eq!(tree.parent(extra)?, Some(parent));
+        tree.remove(parent, child)?;
+        tree.remove(parent, child)?;
+        let retired = tree.discard_detached();
+        assert!(retired.ids.contains(&child));
+        assert!(matches!(tree.parent(child), Err(Error::UnknownNode)));
+        Ok(())
+    }
+
+    #[test]
+    fn remove_keeps_taffy_and_the_paragraph() -> Result<(), Error> {
+        let mut tree = Tree::new(MonoShaper::default());
+        let parent = tree.column(0.0)?;
+        let child = tree.text("Hi", 16.0, [0, 0, 0, 255])?;
+        tree.add_child(parent, child)?;
+        tree.layout()?;
+        tree.remove(parent, child)?;
+        let node = tree.node(child)?;
+        assert!(node.taffy.is_some());
+        assert!(node.text().and_then(|text| text.paragraph).is_some());
+        assert!(tree.detach(parent, child)?.is_empty());
+        assert!(tree.pending_discard.is_empty());
+        assert!(tree.node(child)?.taffy.is_some());
+        let retired = tree.discard(child)?;
+        assert!(retired.ids.contains(&child));
+        assert!(matches!(tree.node(child), Err(Error::UnknownNode)));
         Ok(())
     }
 

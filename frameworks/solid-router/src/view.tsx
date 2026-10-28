@@ -48,6 +48,17 @@ function unwrapError(error: unknown): unknown {
   return typeof error === "function" ? (error as () => unknown)() : error;
 }
 
+function loggedError(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  const stack = typeof error.stack === "string" ? error.stack : "";
+  if (stack.length === 0) {
+    return error.message;
+  }
+  return stack.includes(error.message) ? stack : `${error.message}\n${stack}`;
+}
+
 export function StackTransition(props: TransitionProps & { background?: string }): NodeHandle {
   let mover = 0;
   let fade = 0;
@@ -172,8 +183,10 @@ function RouteHost(props: {
             children: (
               <Errored
                 fallback={(err, reset) => {
+                  const error = unwrapError(err);
+                  console.error(loggedError(error));
                   const fallback = props.errorFallback ?? plainError;
-                  return fallback(unwrapError(err), () => reset());
+                  return fallback(error, () => reset());
                 }}
               >
                 <Page params={props.entry().params} />

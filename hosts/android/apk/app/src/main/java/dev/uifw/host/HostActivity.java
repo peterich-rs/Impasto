@@ -46,6 +46,24 @@ public final class HostActivity extends Activity {
         attached = true;
         setContentView(view);
         registerBack();
+        registerComponentCallbacks(new android.content.ComponentCallbacks2() {
+            @Override
+            public void onTrimMemory(int level) {
+                if (attached) {
+                    nativeTrimMemory();
+                }
+            }
+
+            @Override
+            public void onConfigurationChanged(android.content.res.Configuration newConfig) {}
+
+            @Override
+            public void onLowMemory() {
+                if (attached) {
+                    nativeTrimMemory();
+                }
+            }
+        });
     }
 
     @Override
@@ -59,9 +77,26 @@ public final class HostActivity extends Activity {
     @Override
     protected void onPause() {
         if (attached) {
-            nativePause();
+            nativeInactive();
         }
         super.onPause();
+    }
+
+    @Override
+    protected void onStop() {
+        if (attached) {
+            nativeHidden();
+        }
+        super.onStop();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (attached) {
+            nativeTrimMemory();
+        }
     }
 
     @Override
@@ -173,7 +208,11 @@ public final class HostActivity extends Activity {
 
     private static native void nativeResume();
 
-    private static native void nativePause();
+    private static native void nativeInactive();
+
+    private static native void nativeHidden();
+
+    private static native void nativeTrimMemory();
 
     private static native void nativeFocus(boolean focused);
 

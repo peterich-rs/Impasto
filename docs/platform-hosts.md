@@ -143,26 +143,13 @@ Shell::start(Boot) ────────────────────�
 | 3 | 解释器 `NotLinked` 或 `Runtime` |
 | 4 | 启动期 `qjs_eval` 失败，`SessionError::Script`。运行期 `console` 和监听器错误只记日志，进程继续 |
 
-`UIFW_DUMP` 在一帧画出后读回像素，再让主线程结束进程。它用来看画面，不是像素门。系统把窗口重新暴露出来时，不因此再登记一帧。
+`UIFW_DUMP` 在一帧画出后读回像素，再让主线程结束进程。它用来看画面，不是像素门。窗口重新变为可见时，macOS 投递 `Invalidate`，置 `needs_present`。列表和缩放都没变则 `PresentCached`。
 
 ## 2. 线程
 
-渲染线程用来接住会阻塞的取表面。`ImpellerVulkanSwapchainAcquireNextSurfaceNew` 可能等到下一张图像；macOS 上 `nextDrawable` 今天在主线程取，窗口事件会一起停。平台线程只做窗口、输入换算和 vsync 源。测量和绘制仍是同一条渲染线程上的同一个 typography，不各持一份排版上下文。渲染线程是 `std::thread` 上的同步循环，不进 async 运行时。
+渲染线程用来接住会阻塞的取表面。`draw_vulkan` 里的 `ImpellerVulkanSwapchainAcquireNextSurfaceNew` 可能等到下一张图像。macOS 的 `nextDrawable` 在渲染线程的 `MetalSurface::present` 里取。平台线程只做窗口、输入换算和 vsync 源。测量和绘制仍是同一条渲染线程上的同一个 typography，不各持一份排版上下文。渲染线程是 `std::thread` 上的同步循环，不进 async 运行时。
 
-平台线程到渲染线程是一条命令队列。渲染线程到平台线程是一条应答队列，只放四件事：登记下一帧、取消登记、`SurfaceDropped`、退出。平台线程入队后立刻返回。锁只包住入队和出队。渲染线程把本帧要用的指针拷出来之后，在锁外跑会话和 `Engine`。平台线程只在 `SurfaceDestroyed` 里等待 `SurfaceDropped`；渲染线程处理销毁时不再等平台线程。
-
-```rust
-enum Command {
-    Pointer(core::PointerEvent),
-    Metrics(session::Metrics),
-    Lifecycle(session::Lifecycle),
-    SurfaceReady(SurfaceTarget),
-    SurfaceChanged(SurfaceTarget),
-    SurfaceDestroyed,
-    Frame { token: FrameToken, time: FrameTime },
-    Shutdown,
-}
-```
+平台线程到渲染线程是 `hosts/hostshell/src/command.rs` 里的 `Command` 队列。平台线程入队后立刻返回。渲染线程把本帧要用的指针拷出来之后，在锁外跑会话和 `Engine`。`SurfaceDestroyed` 由渲染线程立刻处理，先丢掉尚未打开的 `SurfaceTarget`，然后 `Acks::signal`。Android 的 `destroy_surface` 和 `open_surface` 把 `NativeWindow` 交给 `uifw-surface-drop`。该线程在 `DropWait` 上等待这条应答，然后 `ANativeWindow_release`。平台线程在 `spawn` 之后返回。渲染线程处理销毁时不再等平台线程。入队顺序仍是 `SurfaceDestroyed` 先于下一次 `SurfaceReady`。
 
 相邻的 `Pointer(Move)` 合并成队尾那一个，避免渲染线程停住时 move 无限堆积。`Down`、`Up`、`Cancel` 不合并、不丢弃。metrics 不从指针中间抽走，避免重排。
 
@@ -184,7 +171,7 @@ vsync 源不在渲染线程上跑帧：
 
 三端的回调都只入队 `Frame { token, time }`。`FrameTime` 有 `vsync_ms`、`target_ms` 和 `interval_ms`，都是单调毫秒，原点由平台自定。动画采样 `target_ms`。macOS 的 `inNow` 是 `vsync_ms`，`inOutputTime` 是 `target_ms`。Android API 33 及以上用 `Choreographer.postVsyncCallback` 的帧开始时刻和预计上屏时刻；更低版本用 `frameTimeNanos` 加上刷新间隔。`Session::frame` 把 `target_ms` 和 `interval_ms` 交给 `onFrame`。
 
-`Vsync::request_frame` 只向应答队列投递「登记下一帧」，不等待登记完成。`cancel` 同样立即返回。渲染线程阻塞在命令队列上。`Pointer`、`Metrics`、`Lifecycle` 和表面尺寸变化只写入渲染线程的本地状态；调用 `session.pointer` 与 `frame` 的是随后的 `Frame`。当时若没有在途的帧，就 `request_frame` 一次。`SurfaceDestroyed` 与 `Shutdown` 收到即处理，不等下一帧，否则平台线程会停在销毁回调上等一个不会再来的 `Frame`。
+`Vsync::request_frame` 由渲染线程调用。macOS 在该线程启动 `CVDisplayLink`，Android 在该线程经 JNI 调 `scheduleFrame`。`cancel` 同样由渲染线程在 `end_frame` 里执行。UI 线程不调用 `FrameClock::cancel`。渲染线程阻塞在命令队列上。`Pointer`、`Metrics`、`Lifecycle` 和表面尺寸变化只写入渲染线程的本地状态；调用 `session.pointer` 与 `frame` 的是随后的 `Frame`。当时若没有在途的帧，就 `request_frame` 一次。`SurfaceDestroyed` 与 `Shutdown` 收到即处理，不等下一帧。
 
 `UIFW_DUMP` 在渲染线程读回刚 present 的纹理并写 PNG，然后向主线程投递退出。不从渲染线程调用 `NSApplication::terminate`。
 
@@ -255,17 +242,22 @@ macOS 没有这套 `KeyboardType` 映射。粘贴同时读 `public.utf8-plain-te
    Pause 且仍有未结束的按下 → 先补一个 Cancel
 ② 排空指针队列，调用 session.pointer；再排空 Input，调用 session.input
    命中用上一帧几何。无焦点的输入丢掉。监听器只改状态
-③ 已 Pause，或还没有 Surface → 不提交。Pause 不再 request_frame
+③ FrameIn.paused，或还没有 Surface → 不 present。
+   Cancel 丢掉本帧的 again。finish 仍发出 pending 里已经记下的下一次 token
 ④ session.frame → FrameOutput
    会话内部先排空 QuickJS job，再 flush，再按树的脏标记 layout / record
-⑤ layer_epoch 未变且缩放相同 → PresentCached，present 已安装的显示列表
-   否则 engine.submit_layers，成功后记住这份层树和缩放，再 surface.present
+⑤ layer_epoch 未变、缩放与 installed 相同、且 needs_present 为假 → Skip
+   不 submit_layers，也不 present
+   needs_present 为真 → PresentCached：draw_metal / draw_vulkan 画已安装的显示列表
+   否则 engine.submit_layers，成功后把 installed 记为这一档缩放，再 surface.present
 ⑥ 没有新的指针、metrics 或表面事件，且会话没有申请下一帧时，不再 request_frame
 ```
 
-下一帧在这些命令到达、且当时没有在途帧时登记：指针、metrics 发生变化、`Resume`、`SurfaceReady`，以及启动后的第一帧。`hostshell` 仍然只看 `wants_frame`，不读树。会话在这一位里并上还没布局的变更、还没绘制的变更、没排空的 job，以及仍在衰减的滚动。脚本错误会清掉这一次的需求，避免用失败回调自己再要帧。
+下一帧在这些命令到达、且当时没有在途帧时登记：指针、metrics 发生变化、`Resumed`、`Invalidate`、`SurfaceReady`，以及启动后的第一帧。`Input::resume` 固定返回真，所以 `Resumed` 一定会 `arm`，并置 `needs_present`，保留 `installed`。`Invalidate` 同样置 `needs_present`。成功 present 之后清掉 `needs_present`，静止画面回到 `Skip`。`hostshell` 仍然只看 `wants_frame`，不读树。会话在这一位里并上还没布局的变更、还没绘制的变更、没排空的 job，以及仍在衰减的滚动。脚本错误会清掉这一次的需求，避免用失败回调自己再要帧。
 
-`set_viewport` 会把树标脏。metrics 与上一份 `PartialEq` 相同则不再调用 `session.metrics`，否则静止画面每帧都重新布局。窗口第一次就绪时一定下发。`SurfaceDestroyed` 丢掉 `hostshell` 记住的安装状态，下一次表面就绪必须重新 `submit_layers`。
+`set_viewport` 会把树标脏。metrics 与上一份 `PartialEq` 相同则不再调用 `session.metrics`，否则静止画面每帧都重新布局。窗口第一次就绪时一定下发。`installed` 在 `SurfaceDestroyed`、`MemoryWarning`，以及 `note_scale` 发现缩放变化时清掉。成功的 `SurfaceReady` 不清 `installed`。打开得到 `NotReady` 也不清。Android 先销毁再打开时，`installed` 已经是 `None`，下一帧走 `Submit`。表面还在、列表未变时，`Resumed` 和 `Invalidate` 走 `PresentCached`。
+
+连续的 `PresentFailed`、`NotReady` 或 `BadScene` 未满 3 次时，下一帧仍登记 vsync。从第 3 次起记一条 `present failed; backing off`，并用 `Wake` 延迟下一次尝试：16ms 起翻倍，上限 1000ms。成功 present 后计数归零。`MemoryWarning` 清 `installed` 并丢掉图片缓存里的像素，下一帧 `submit_layers`。
 
 `Session::frame` 返回 `FrameOutput`。`layers` 为 `None` 表示 epoch 未变。trait 的方法以 `session/src/lib.rs` 为准。布局失败时会话留着上一份成功的层树。
 
@@ -284,9 +276,9 @@ macOS 没有这套 `KeyboardType` 映射。粘贴同时读 `public.utf8-plain-te
 无 Surface（Engine、会话、typography 仍在）
 ```
 
-平台线程只在 `SurfaceDestroyed` 里等待 `SurfaceDropped`，然后才 `ANativeWindow_release`。渲染线程处理这条命令时不反过来等平台线程。除此之外平台线程不等待渲染线程。
+Android 的 `uifw-surface-drop` 在 `DropWait` 上等到 `Acks::signal`，然后才 `ANativeWindow_release`。平台线程不等待。渲染线程处理 `SurfaceDestroyed` 时不反过来等平台线程。macOS 不投递 `SurfaceDestroyed`。
 
-`present` 返回 `NotReady`、`PresentFailed` 或 `BadScene` 时留着 `Surface` 和 swapchain，再登记一帧。`Surface` 只在 `SurfaceDestroyed` 时丢掉。销毁按 `SurfaceId` 回 ack。平台线程在 ack 之前不释放窗口；等不及 ack 时继续跑 looper，窗口引用留到 ack 之后再放。
+已经打开的表面上，`present` 返回 `NotReady`、`PresentFailed` 或 `BadScene` 时留着 `Surface` 和 swapchain，置 `needs_present`。打开表面得到 `NotReady` 时留下 `SurfaceTarget` 并再登记一帧，不取消调度，也不清 `needs_present`。同一目标最多尝试 120 次，到顶记一条 `surface open failed; stopping retry` 并停止自动登记。之后的 `Resumed`，或该 id 的 `SurfaceChanged`，把次数清零再试一轮。`SurfaceDestroyed` 在应答前丢掉这次未打开的目标。其它打开失败结束渲染线程。`Surface` 只在匹配的 `SurfaceDestroyed` 时丢掉。销毁按 `SurfaceId` 回 ack。
 
 尺寸变化不调用 `ImpellerVulkanSwapchain` 的丢弃。只有表面本身失效才重建，顺序仍是 GetVulkanInfo 的 instance、`vkCreateAndroidSurfaceKHR`、`ImpellerVulkanSwapchainCreateNew`。
 
@@ -313,7 +305,7 @@ Android 与 iOS 的字体是可再分发的文件，注册名仍叫 `UIFWSans`�
 
 ## 9. 生命周期与 inset
 
-`session::Lifecycle` 是 `Detached`、`Resumed`、`Inactive`、`Hidden`、`Paused`。Android 的 `onPause` / `onResume` 对应 `Paused` / `Resumed`，iOS 进后台与回前台同样走这两态。macOS 随窗口关闭退出，不发这两态。初始状态就是在跑，启动时不另发 `Resumed`。
+`session::Lifecycle` 是 `Detached`、`Resumed`、`Inactive`、`Hidden`、`Paused`。`Hidden` 和 `Paused` 冻结指针。`Inactive` 不冻结。Android 的 `onPause` 对应 `Inactive`，`onStop` 对应 `Hidden`，`onResume` 对应 `Resumed`。iOS 进后台与回前台同样走 `Paused` / `Resumed`。macOS 的 `applicationDidBecomeActive` 与 `windowDidDeminiaturize` 投递 `Resumed`，`applicationWillResignActive` 投递 `Inactive`，`applicationDidHide` 与 `windowDidMiniaturize` 投递 `Hidden`。不投递 `Paused`。窗口关闭则退出。启动时 `activate` 会走到 `didBecomeActive`。`windowDidChangeOcclusionState:` 在 `NSWindowOcclusionState::Visible` 置上时投递 `Invalidate`。`applicationDidReceiveMemoryWarning:` 与 Android 的 `onTrimMemory` / `onLowMemory` 投递 `MemoryWarning`。
 
 `Hidden` 或 `Paused` 到达时，若还有按下的指针，`hostshell` 把当时的指针队列冻结，并为每个指针补一个 `Cancel`，这一帧只送这份冻结队列。之后再来的指针、按键和 metrics 留到 `Resumed`。窗口焦点是单独的事件，不是文本焦点。
 
@@ -337,13 +329,13 @@ Android 与 iOS 的字体是可再分发的文件，注册名仍叫 `UIFWSans`�
 | 指针 | `mouseDown` / `Dragged` / `Up` | `MotionEvent`，含 `ACTION_CANCEL` | `touches*`，含 `touchesCancelled` |
 | 坐标 | 内容视图 + Y 翻转 | 像素 ÷ density | 已是点 |
 | metrics | 默认 360×640，可缩放，inset 0 | 窗口尺寸 ÷ density。inset 变成根偏移并缩小可用空间 | bounds 与 scale。inset 同样只采集 |
-| 生命周期 | 关闭即退出 | `onPause` / `onResume` | 前后台 |
+| 生命周期 | `Inactive` / `Hidden` / `Resumed`；遮挡恢复投递 `Invalidate`；关闭即退出 | `onPause` → `Inactive`，`onStop` → `Hidden`，`onResume` → `Resumed` | 前后台 |
 | 像素 | `UIFW_DUMP` 读纹理 | 有渲染目标读回之后再比像素。`adb screencap` 只作人工查看 | 与 macOS 相同的纹理读回 |
 
 ## 实现约束
 
 - crate 均 `publish = false`。`Shell` 含有 `Engine` 和会话，因此不是 `Send`。跨线程的只有命令队列、`Vsync`，以及有意标记为 `Send` 的窗口指针 newtype。
-- `unsafe` 集中在 Vulkan 句柄、Android 窗口与 NDK 事件、objc2，以及那个 `Send` 指针。每处按 `engine/src/player.rs` 写 SAFETY 注释。workspace 的 `unsafe_code = deny` 仍有效。
+- `unsafe` 集中在 Vulkan 句柄、Android 窗口与 NDK 事件、objc2，以及那个 `Send` 指针。每处按 `engine/src/player/`、`engine/src/typography/` 和 `engine/src/vulkan.rs` 写 SAFETY 注释。workspace 的 `unsafe_code = deny` 仍有效。
 - `hostshell` 的队列、过滤、相同列表跳过提交，以及表面应答，用无窗口单测。各端坐标换算沿用 `hosts/macos/src/pointer.rs` 这种单测。端上验收是出帧、点击改字，以及有读回时的像素。
-- 场景格式保持版本 1。不做 GL 后备、轨迹重采样、平台视图和多窗口。不做显示列表的命令级 diff。`layer_epoch` 未变且缩放相同则 `PresentCached`。增量绘制走已落地的合成层，见 `docs/architecture.md`，不在这里另写一套禁令。
+- 场景格式保持版本 1。不做 GL 后备、轨迹重采样、平台视图和多窗口。不做显示列表的命令级 diff。`layer_epoch` 未变、缩放相同且 `needs_present` 为假则 `Skip`；`needs_present` 为真则 `PresentCached`。`Resumed` 与 `Invalidate` 置 `needs_present`。增量绘制走已落地的合成层，见 `docs/architecture.md`，不在这里另写一套禁令。
 - 新依赖在引入时钉版本。`ndk` 0.9.0 与 `jni` 0.22.4 已钉住。它们不带 UI 框架或 Dart VM。要裁 Impeller 后端时放到以后的 engine 仓库，不在本仓库编 engine。

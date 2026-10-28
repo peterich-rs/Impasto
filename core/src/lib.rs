@@ -3,6 +3,7 @@
 mod error;
 mod gesture;
 mod layer;
+mod list;
 mod motion;
 mod pointer;
 mod semantics;
@@ -16,6 +17,8 @@ mod barrier_test;
 mod layout_test;
 #[cfg(test)]
 mod refactor_test;
+#[cfg(test)]
+mod scroll_test;
 
 pub use error::Error;
 pub use gesture::{
@@ -24,7 +27,13 @@ pub use gesture::{
     VelocityRing, Vote,
 };
 pub use layer::LayerTree;
-pub use motion::{AnimProp, Friction, SCROLL_TAU_MS, Simulation, Spring};
+pub use list::{
+    Chrome, DragStep, DriverEvent, DriverId, DriverSet, ListItem, ListNodes, ListOp, PullMode,
+};
+pub use motion::{
+    AnimProp, Friction, OverscrollMode, SCROLL_TAU_MS, ScrollPhase, ScrollPhysics, Simulation,
+    SnapAlign, SnapGrid, Spring,
+};
 pub use pointer::{Button, Buttons, Modifiers, Phase, PointerEvent, PointerId, PointerKind};
 pub use protocol::ParagraphId;
 pub use semantics::{
@@ -41,5 +50,5 @@ pub use text::{
 };
 pub use tree::{
     Alignment, AxisSize, Discarded, DragClaim, Edges, FocusDirection, Gesture, GridLine, Inset,
-    Justify, NodeId, Rect, RowCrossAlign, ScrollEdge, TrackSize, Tree,
+    Justify, LayoutCause, LayoutTrace, NodeId, Rect, RowCrossAlign, ScrollEdge, TrackSize, Tree,
 };

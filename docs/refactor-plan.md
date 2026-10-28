@@ -1,6 +1,6 @@
 # 生产级迭代规划
 
-已落地的布局、文本、手势、焦点、主题、控件、错误处理、包拆分和脚本加载从本文删除，以代码为准。这里只留还没做的平台通道收尾。
+已落地的布局、文本、手势、焦点、主题、控件、错误处理、包拆分、脚本加载，以及恢复前台后的 present、表面打开重试和销毁等待从本文删除，以代码和 `docs/architecture.md` 为准。这里留还没做的平台通道收尾。录制按 owner 切分 picture 已落地，以 `core` 和 `docs/architecture.md` 为准。渲染引擎已按资源拆成 `Typography`、`Painter`、`PictureCache` 和 `TextureStore`。
 
 Kotlin 路线仍暂缓。`runtimes/quickjs/abi.yml` 维持现状。跨 picture 选区、Picture 字节和 `hosts/ios` 见文末。
 
@@ -189,7 +189,7 @@ export interface Permissions {
 
 ## 顺序
 
-上面的方法表、包拆分、脚本加载、`submit_bench` 和列表滚动的 picture 记账已经在代码里。
+平台通道一节里的方法表、包拆分、脚本加载、`submit_bench` 和列表滚动的 picture 记账已经在代码里。恢复前台的 present、表面重试、销毁等待、`Invalidate` 和 `MemoryWarning` 也已经在代码里。
 
 `just check` 含已有的 pixel 分支（无 SDK 自跳过）。计时基准只在 `just bench`。
 
@@ -201,6 +201,8 @@ export interface Permissions {
 - `hosts/ios`。预构建矩阵出现 iOS 列之前不写。
 - 导航往返之后 `picture_writes` 只计仍在树上的页面 picture。路由表已经是 `/schedule`、`/nav/:depth`、`/list`。包拆分不实现这条断言。
 - 带 schema 或迁移的存储库。`AsyncStorage` 与 `FileSystem` 落地之后再写，只依赖 `@uifw/modules`。
+- 把排版或 `submit_layers` 挪出渲染线程。现在的模块拆分仍然是 `uifw-render` 上的一个 `!Send` 所有者。按文件拆开不产生线程边界。
+- `core/src/tree/record.rs`、`runtimes/quickjs/src/linked.rs`、`hosts/hostshell/src/shell.rs` 和 `core/src/layout_test.rs` 还没按主题拆文件。公有 API 不因此改变。
 
 ## 风险
 

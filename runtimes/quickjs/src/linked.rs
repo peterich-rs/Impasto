@@ -22,6 +22,7 @@ use ui_core::{
 
 use crate::Error;
 
+mod driver;
 mod host;
 
 #[repr(C)]
@@ -37,6 +38,7 @@ struct QjsFns {
     append: unsafe extern "C" fn(*mut c_void, u64, u64) -> i32,
     insert: unsafe extern "C" fn(*mut c_void, u64, u64, u64) -> i32,
     remove: unsafe extern "C" fn(*mut c_void, u64, u64) -> i32,
+    detach: unsafe extern "C" fn(*mut c_void, u64, u64) -> i32,
     discard: unsafe extern "C" fn(*mut c_void, u64, *mut *mut u64, *mut usize) -> i32,
     free_ids: unsafe extern "C" fn(*mut u64, usize),
     parent: unsafe extern "C" fn(*mut c_void, u64, *mut u64) -> i32,
@@ -251,6 +253,51 @@ struct QjsFns {
     align: unsafe extern "C" fn(*mut c_void, u32, *mut u64) -> i32,
     set_cross: unsafe extern "C" fn(*mut c_void, u64, u32) -> i32,
     viewport: unsafe extern "C" fn(*mut c_void, *mut f32, *mut f32) -> i32,
+    set_scroll_physics:
+        unsafe extern "C" fn(*mut c_void, u64, f32, i32, f32, f32, f32, f32, i32, f32, i32) -> i32,
+    set_scroll_chain: unsafe extern "C" fn(*mut c_void, u64, i32) -> i32,
+    overscroll: unsafe extern "C" fn(*mut c_void, u64, *mut f32, *mut f32) -> i32,
+    arm_fling: unsafe extern "C" fn(*mut c_void, u64, f32, f32) -> i32,
+    stop_scroll: unsafe extern "C" fn(*mut c_void, u64) -> i32,
+    scroll_to: unsafe extern "C" fn(*mut c_void, u64, f32, f32, f32, f32) -> i32,
+    list_create: unsafe extern "C" fn(*mut c_void, i32, f32, *mut u32, *mut u32) -> i32,
+    list_release: unsafe extern "C" fn(*mut c_void, u32, u32) -> i32,
+    list_bind: unsafe extern "C" fn(*mut c_void, u32, u32, *const u64, i32) -> i32,
+    list_configure: unsafe extern "C" fn(*mut c_void, u32, u32, f32, i32, i32) -> i32,
+    list_begin: unsafe extern "C" fn(*mut c_void, u32, u32) -> i32,
+    list_item: unsafe extern "C" fn(
+        *mut c_void,
+        u32,
+        u32,
+        *const c_char,
+        usize,
+        *const c_char,
+        usize,
+        i32,
+    ) -> i32,
+    list_end: unsafe extern "C" fn(*mut c_void, u32, u32) -> i32,
+    list_note_row: unsafe extern "C" fn(*mut c_void, u32, u32, *const c_char, usize, u64) -> i32,
+    scroll_create: unsafe extern "C" fn(*mut c_void, *mut u32, *mut u32) -> i32,
+    scroll_release: unsafe extern "C" fn(*mut c_void, u32, u32) -> i32,
+    scroll_bind: unsafe extern "C" fn(*mut c_void, u32, u32, u64, u64) -> i32,
+    scroll_configure:
+        unsafe extern "C" fn(*mut c_void, u32, u32, f32, i32, f32, i32, f32, u32, u32, i32) -> i32,
+    scroll_drag_by: unsafe extern "C" fn(
+        *mut c_void,
+        u32,
+        u32,
+        f32,
+        f32,
+        *mut f32,
+        *mut f32,
+        *mut f32,
+        *mut f32,
+    ) -> i32,
+    scroll_finish: unsafe extern "C" fn(*mut c_void, u32, u32, i32) -> i32,
+    scroll_drag_end: unsafe extern "C" fn(*mut c_void, u32, u32) -> i32,
+    scroll_wheel: unsafe extern "C" fn(*mut c_void, u32, u32, f32, f32) -> i32,
+    scroll_query: unsafe extern "C" fn(*mut c_void, u32, u32, i32, *mut f32, *mut f32) -> i32,
+    scroll_consume: unsafe extern "C" fn(*mut c_void, u32, u32, f32, f32) -> i32,
 }
 
 unsafe extern "C" {
@@ -302,6 +349,40 @@ unsafe extern "C" {
         err: *mut c_char,
         err_len: usize,
     ) -> i32;
+    fn qjs_layout(host: *mut c_void, err: *mut c_char, err_len: usize) -> i32;
+    fn qjs_driver(
+        host: *mut c_void,
+        kind: i32,
+        index: u32,
+        generation: u32,
+        tag: i32,
+        i0: i32,
+        i1: i32,
+        f0: f32,
+        f1: f32,
+        f2: f32,
+        f3: f32,
+        f4: f32,
+        f5: f32,
+        s0: *const c_char,
+        n0: usize,
+        s1: *const c_char,
+        n1: usize,
+        err: *mut c_char,
+        err_len: usize,
+    ) -> i32;
+    fn qjs_scroll_state(
+        host: *mut c_void,
+        id: u64,
+        phase: i32,
+        vx: f32,
+        vy: f32,
+        ox: f32,
+        oy: f32,
+        err: *mut c_char,
+        err_len: usize,
+    ) -> i32;
+    fn qjs_forget_ids(host: *mut c_void, ids: *const u64, len: usize);
     fn qjs_take_wants_frame(host: *mut c_void) -> i32;
     fn qjs_drain_jobs(host: *mut c_void, err: *mut c_char, err_len: usize) -> i32;
     fn qjs_jobs_pending(host: *mut c_void) -> i32;
@@ -374,6 +455,65 @@ unsafe extern "C" {
     ) -> i32;
 }
 
+struct FrameMarks {
+    pointers: Cell<u32>,
+    keys: Cell<u32>,
+    edits: Cell<u32>,
+    ime: Cell<u32>,
+    scrolls: Cell<u32>,
+    focus: Cell<u32>,
+    blur: Cell<u32>,
+    gestures: Cell<u32>,
+}
+
+impl FrameMarks {
+    fn reset(&self) {
+        self.pointers.set(0);
+        self.keys.set(0);
+        self.edits.set(0);
+        self.ime.set(0);
+        self.scrolls.set(0);
+        self.focus.set(0);
+        self.blur.set(0);
+        self.gestures.set(0);
+    }
+}
+
+impl Default for FrameMarks {
+    fn default() -> Self {
+        Self {
+            pointers: Cell::new(0),
+            keys: Cell::new(0),
+            edits: Cell::new(0),
+            ime: Cell::new(0),
+            scrolls: Cell::new(0),
+            focus: Cell::new(0),
+            blur: Cell::new(0),
+            gestures: Cell::new(0),
+        }
+    }
+}
+
+fn bump(cell: &Cell<u32>) {
+    cell.set(cell.get().saturating_add(1));
+}
+
+fn note_gesture(marks: &FrameMarks, gesture: &ui_core::Gesture) {
+    bump(&marks.gestures);
+    match gesture {
+        ui_core::Gesture::Scroll(_, _, _) | ui_core::Gesture::ScrollPhaseChanged { .. } => {
+            bump(&marks.scrolls);
+        }
+        ui_core::Gesture::Focus(_) => bump(&marks.focus),
+        ui_core::Gesture::Blur(_) => bump(&marks.blur),
+        _ => {}
+    }
+}
+
+fn elapsed_ms(start: std::time::Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.0
+}
+
 struct Inner {
     tree: RefCell<Tree>,
     host: *mut c_void,
@@ -404,6 +544,9 @@ struct Inner {
     prepared: RefCell<Option<PreparedCall>>,
     memory_files: RefCell<HashMap<String, Vec<u8>>>,
     memory_store: RefCell<HashMap<String, String>>,
+    marks: FrameMarks,
+    drivers: RefCell<ui_core::DriverSet>,
+    driver_frame: Cell<bool>,
 }
 
 struct ArgFrame {
@@ -621,6 +764,9 @@ impl JsSession {
             prepared: RefCell::new(None),
             memory_files: RefCell::new(HashMap::new()),
             memory_store: RefCell::new(HashMap::new()),
+            marks: FrameMarks::default(),
+            drivers: RefCell::new(ui_core::DriverSet::new()),
+            driver_frame: Cell::new(false),
         }));
         let fns = QjsFns {
             session: inner.cast(),
@@ -634,6 +780,7 @@ impl JsSession {
             append,
             insert,
             remove,
+            detach,
             discard,
             free_ids,
             parent,
@@ -752,6 +899,30 @@ impl JsSession {
             align,
             set_cross,
             viewport,
+            set_scroll_physics,
+            set_scroll_chain,
+            overscroll,
+            arm_fling,
+            stop_scroll,
+            scroll_to,
+            list_create: driver::list_create,
+            list_release: driver::list_release,
+            list_bind: driver::list_bind,
+            list_configure: driver::list_configure,
+            list_begin: driver::list_begin,
+            list_item: driver::list_item,
+            list_end: driver::list_end,
+            list_note_row: driver::list_note_row,
+            scroll_create: driver::scroll_create,
+            scroll_release: driver::scroll_release,
+            scroll_bind: driver::scroll_bind,
+            scroll_configure: driver::scroll_configure,
+            scroll_drag_by: driver::scroll_drag_by,
+            scroll_finish: driver::scroll_finish,
+            scroll_drag_end: driver::scroll_drag_end,
+            scroll_wheel: driver::scroll_wheel,
+            scroll_query: driver::scroll_query,
+            scroll_consume: driver::scroll_consume,
         };
         // SAFETY: `inner` stays at this address until `Drop`. `qjs_open` copies
         // the function table. The copied session pointer is only used while
@@ -827,6 +998,9 @@ impl JsSession {
             unsafe { drop(Box::from_raw(inner)) };
             return Err(Error::Script(message));
         }
+        // SAFETY: `inner` is the session just opened. Eval has returned, so ids
+        // removed and not inserted again can be retired before the caller observes them.
+        sweep_detached(unsafe { &*inner });
         Ok(Self {
             inner,
             paint_commands: Vec::new(),
@@ -842,6 +1016,9 @@ impl JsSession {
     fn hold_frame(&mut self, message: String) -> session::FrameOutput {
         self.note_script_error(message);
         self.suppress_demand.set(true);
+        let inner = unsafe { &*self.inner };
+        sweep_detached(inner);
+        inner.marks.reset();
         session::FrameOutput::unchanged()
     }
 
@@ -919,7 +1096,9 @@ impl Session for JsSession {
         // SAFETY: the tree borrow ends before dispatch. JS handlers may call
         // back into the tree through the `RefCell`.
         let inner = unsafe { &*self.inner };
-        let gestures = inner.tree.borrow_mut().pointer(event);
+        let mut gestures = inner.tree.borrow_mut().pointer(event);
+        gestures.extend(inner.tree.borrow_mut().take_scroll_notices());
+        bump(&inner.marks.pointers);
         if let Err(message) = dispatch_gestures(inner, gestures) {
             self.note_script_error(message);
         }
@@ -929,6 +1108,17 @@ impl Session for JsSession {
         // SAFETY: `inner` is owned by this session. The tree borrow ends before
         // the callback, which may re-enter the tree.
         let inner = unsafe { &*self.inner };
+        match &event {
+            InputEvent::Key(_) | InputEvent::Back => bump(&inner.marks.keys),
+            InputEvent::Text(_)
+            | InputEvent::Composing(_)
+            | InputEvent::Copy
+            | InputEvent::Cut
+            | InputEvent::Paste { .. }
+            | InputEvent::SelectAll
+            | InputEvent::Edit(_)
+            | InputEvent::Replace { .. } => bump(&inner.marks.edits),
+        }
         if let InputEvent::Key(press) = &event {
             let spec = shortcut_spec(press);
             let c_spec = CString::new(spec).ok();
@@ -1109,6 +1299,7 @@ impl Session for JsSession {
         // SAFETY: `inner` is owned by this session. The ime borrow ends before
         // blur, because the blur callback calls `setImeState` on the same cell.
         let inner = unsafe { &*self.inner };
+        bump(&inner.marks.ime);
         {
             let mut ime = inner.ime.borrow_mut();
             ime.shown = false;
@@ -1121,9 +1312,11 @@ impl Session for JsSession {
     }
 
     fn frame(&mut self, time: session::FrameTime) -> session::FrameOutput {
+        let script_started = std::time::Instant::now();
         // SAFETY: `inner` is owned by this session. Job drain and `qjs_frame` may
         // re-enter the tree through the `RefCell`; this function does not hold that borrow yet.
         let inner = unsafe { &*self.inner };
+        let stamp = std::time::Instant::now();
         {
             let mut tree = inner.tree.borrow_mut();
             inner.ime.borrow_mut().sync_editor(&tree);
@@ -1135,114 +1328,204 @@ impl Session for JsSession {
             let mut notices = tree.tick(time.target_ms);
             notices.extend(tree.take_scroll_notices());
             drop(tree);
+            let motion_ms = elapsed_ms(stamp);
+            let stamp = std::time::Instant::now();
             if let Err(message) = dispatch_gestures(inner, notices) {
                 return self.hold_frame(message);
             }
-        }
-        if let Err(message) = drain_jobs(inner.host) {
-            return self.hold_frame(message);
-        }
-        let paused = self_paused(inner);
-        unsafe { qjs_set_clock(inner.host, time.mono_ms as i64, i32::from(paused)) };
-        flush_pending(inner);
-        let mut error = [0u8; 512];
-        let timer_failed =
-            unsafe { qjs_fire_timers(inner.host, error.as_mut_ptr().cast(), error.len()) };
-        if timer_failed != 0 {
-            self.note_script_error(c_message(&error));
-        }
-        if let Err(message) = drain_jobs(inner.host) {
-            return self.hold_frame(message);
-        }
-        error = [0u8; 512];
-        let raf_failed =
-            unsafe { qjs_fire_raf(inner.host, error.as_mut_ptr().cast(), error.len()) };
-        if raf_failed != 0 {
-            self.note_script_error(c_message(&error));
-        }
-        if let Err(message) = drain_jobs(inner.host) {
-            return self.hold_frame(message);
-        }
-        let ends = inner.tree.borrow_mut().take_motion_ends();
-        for (id, prop) in ends {
-            let name = cstring(prop.script_name());
+            if let Err(message) = drain_jobs(inner.host) {
+                return self.hold_frame(message);
+            }
+            let dispatch_ms = elapsed_ms(stamp);
+            let paused = self_paused(inner);
+            unsafe { qjs_set_clock(inner.host, time.mono_ms as i64, i32::from(paused)) };
+            flush_pending(inner);
+            let mut error = [0u8; 512];
+            let timer_started = std::time::Instant::now();
+            let timer_failed =
+                unsafe { qjs_fire_timers(inner.host, error.as_mut_ptr().cast(), error.len()) };
+            if timer_failed != 0 {
+                self.note_script_error(c_message(&error));
+            }
+            let timer_ms = elapsed_ms(timer_started);
+            if let Err(message) = drain_jobs(inner.host) {
+                return self.hold_frame(message);
+            }
             error = [0u8; 512];
+            let raf_started = std::time::Instant::now();
+            let raf_failed =
+                unsafe { qjs_fire_raf(inner.host, error.as_mut_ptr().cast(), error.len()) };
+            if raf_failed != 0 {
+                self.note_script_error(c_message(&error));
+            }
+            let raf_ms = elapsed_ms(raf_started);
+            if let Err(message) = drain_jobs(inner.host) {
+                return self.hold_frame(message);
+            }
+            let ends = inner.tree.borrow_mut().take_motion_ends();
+            for (id, prop) in ends {
+                let name = cstring(prop.script_name());
+                error = [0u8; 512];
+                let failed = unsafe {
+                    qjs_motion_end(
+                        inner.host,
+                        id.to_raw(),
+                        name.as_ptr(),
+                        error.as_mut_ptr().cast(),
+                        error.len(),
+                    )
+                };
+                if failed != 0 {
+                    self.note_script_error(c_message(&error));
+                }
+            }
+            error = [0u8; 512];
+            let callback_started = std::time::Instant::now();
             let failed = unsafe {
-                qjs_motion_end(
+                qjs_frame(
                     inner.host,
-                    id.to_raw(),
-                    name.as_ptr(),
+                    time.target_ms,
+                    time.interval_ms,
                     error.as_mut_ptr().cast(),
                     error.len(),
                 )
             };
             if failed != 0 {
-                self.note_script_error(c_message(&error));
+                return self.hold_frame(c_message(&error));
             }
-        }
-        error = [0u8; 512];
-        let failed = unsafe {
-            qjs_frame(
-                inner.host,
-                time.target_ms,
-                time.interval_ms,
-                error.as_mut_ptr().cast(),
-                error.len(),
-            )
-        };
-        if failed != 0 {
-            return self.hold_frame(c_message(&error));
-        }
-        if let Err(message) = drain_jobs(inner.host) {
-            return self.hold_frame(message);
-        }
-        flush_mutations(inner);
-        let mut tree = inner.tree.borrow_mut();
-        if tree.needs_layout() {
-            if let Err(error) = tree.layout() {
-                let message = error.to_string();
-                drop(tree);
+            let callback_ms = elapsed_ms(callback_started);
+            if let Err(message) = drain_jobs(inner.host) {
                 return self.hold_frame(message);
             }
-        }
-        if tree.needs_paint() {
-            let mut commands = std::mem::take(&mut self.paint_commands);
-            if tree.record_into(&mut commands).is_err() {
-                commands.clear();
+            let flush_started = std::time::Instant::now();
+            flush_mutations(inner);
+            let flush_ms = elapsed_ms(flush_started);
+            sweep_detached(inner);
+            let script_ms = elapsed_ms(script_started);
+            let mut tree = inner.tree.borrow_mut();
+            tree.prepare_sync_stats();
+            let mut ran_layout = tree.needs_layout();
+            if ran_layout {
+                if let Err(error) = tree.layout() {
+                    let message = error.to_string();
+                    drop(tree);
+                    return self.hold_frame(message);
+                }
             }
-            self.paint_commands = commands;
-            tree.clear_paint();
-        }
-        let epoch = tree.layer_epoch();
-        let layers = if epoch != self.layer_epoch {
-            self.layer_epoch = epoch;
-            Some(Arc::new(tree.layer_tree()))
-        } else {
-            None
-        };
-        let generation = tree.image_generation();
-        let images = if generation != self.image_generation {
-            self.image_generation = generation;
-            Some(Arc::new(tree.image_census()))
-        } else {
-            None
-        };
-        let semantics = tree.semantics_patch();
-        drop(tree);
-        let again = self.wants_frame();
-        session::FrameOutput {
-            layers,
-            again,
-            ime: self.take_ime(),
-            semantics,
-            fonts: self.take_fonts(),
-            reloads: self.take_reloads(),
-            clipboard: self.take_clipboard(),
-            exit: self.take_exit(),
-            images,
+            drop(tree);
+            for event in driver::collect_driver_tick(inner) {
+                if let Err(message) = driver::emit_driver(inner, &event) {
+                    self.note_script_error(message);
+                }
+            }
+            flush_mutations(inner);
+            {
+                let mut tree = inner.tree.borrow_mut();
+                if tree.needs_layout() {
+                    if let Err(error) = tree.layout() {
+                        let message = error.to_string();
+                        drop(tree);
+                        return self.hold_frame(message);
+                    }
+                    ran_layout = true;
+                }
+            }
+            let mut layout_cb_ms = 0.0;
+            if ran_layout {
+                let callback_started = std::time::Instant::now();
+                error = [0u8; 512];
+                let failed =
+                    unsafe { qjs_layout(inner.host, error.as_mut_ptr().cast(), error.len()) };
+                layout_cb_ms = elapsed_ms(callback_started);
+                if failed != 0 {
+                    return self.hold_frame(c_message(&error));
+                }
+                flush_mutations(inner);
+            }
+            let mut tree = inner.tree.borrow_mut();
+            if ran_layout && tree.needs_layout() {
+                if let Err(error) = tree.layout() {
+                    let message = error.to_string();
+                    drop(tree);
+                    return self.hold_frame(message);
+                }
+            }
+            let record_started = std::time::Instant::now();
+            if tree.needs_paint() {
+                let mut commands = std::mem::take(&mut self.paint_commands);
+                if tree.record_into(&mut commands).is_err() {
+                    commands.clear();
+                }
+                self.paint_commands = commands;
+                tree.clear_paint();
+            }
+            let record_ms = elapsed_ms(record_started);
+            let epoch = tree.layer_epoch();
+            let layers = if epoch != self.layer_epoch {
+                self.layer_epoch = epoch;
+                Some(Arc::new(tree.layer_tree()))
+            } else {
+                None
+            };
+            let generation = tree.image_generation();
+            let images = if generation != self.image_generation {
+                self.image_generation = generation;
+                Some(Arc::new(tree.image_census()))
+            } else {
+                None
+            };
+            let semantics_started = std::time::Instant::now();
+            let semantics = tree.semantics_patch();
+            let semantics_ms = elapsed_ms(semantics_started);
+            let (layout_ms, sync_ms) = tree.layout_timing();
+            let layout_trace = tree.take_layout_trace();
+            drop(tree);
+            let trace = session::FrameTrace {
+                laywork_ms: layout_trace.laywork_ms,
+                layout_passes: layout_trace.passes,
+                text_reused: layout_trace.text_reused,
+                text_shaped: layout_trace.text_shaped,
+                layout_cause: layout_trace.cause.name(),
+                pointers: inner.marks.pointers.take(),
+                keys: inner.marks.keys.take(),
+                edits: inner.marks.edits.take(),
+                ime: inner.marks.ime.take(),
+                scrolls: inner.marks.scrolls.take(),
+                focus: inner.marks.focus.take(),
+                blur: inner.marks.blur.take(),
+                gestures: inner.marks.gestures.take(),
+            };
+            let again = self.wants_frame();
+            return session::FrameOutput {
+                layers,
+                again,
+                ime: self.take_ime(),
+                semantics,
+                fonts: self.take_fonts(),
+                reloads: self.take_reloads(),
+                clipboard: self.take_clipboard(),
+                exit: self.take_exit(),
+                images,
+                phases: Some(session::FramePhases {
+                    script_ms,
+                    layout_ms,
+                    layout_cb_ms,
+                    sync_ms,
+                    record_ms,
+                    semantics_ms,
+                    script: session::ScriptPhases {
+                        motion_ms,
+                        dispatch_ms,
+                        timer_ms,
+                        raf_ms,
+                        callback_ms,
+                        flush_ms,
+                    },
+                    trace,
+                }),
+            };
         }
     }
-
     fn wants_frame(&mut self) -> bool {
         // SAFETY: `inner` is owned by this session. The call reads and clears one flag.
         let inner = unsafe { &*self.inner };
@@ -1259,7 +1542,8 @@ impl Session for JsSession {
         let soon = unsafe { qjs_needs_frame(inner.host) != 0 };
         let explicit =
             inner.settings_frame.take() || unsafe { qjs_take_wants_frame(inner.host) != 0 };
-        explicit || visual || jobs || soon
+        let driver = inner.driver_frame.get();
+        explicit || visual || jobs || soon || driver
     }
 
     fn lifecycle(&mut self, event: session::Lifecycle) {
@@ -1482,14 +1766,43 @@ unsafe extern "C" fn append(session: *mut c_void, parent: u64, child: u64) -> i3
     )
 }
 
+fn logged_status(inner: &Inner, result: Result<(), ui_core::Error>, what: &str) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(error) => {
+            (inner.log)(3, &format!("{what}: {error}"));
+            -1
+        }
+    }
+}
+
 unsafe extern "C" fn insert(session: *mut c_void, parent: u64, child: u64, before: u64) -> i32 {
     let inner = unsafe { inner(session) };
     let before = (before != 0).then(|| NodeId::from_raw(before));
-    status(inner.tree.borrow_mut().insert(
-        NodeId::from_raw(parent),
-        NodeId::from_raw(child),
-        before,
-    ))
+    logged_status(
+        inner,
+        inner
+            .tree
+            .borrow_mut()
+            .insert(NodeId::from_raw(parent), NodeId::from_raw(child), before),
+        "insert failed",
+    )
+}
+
+unsafe extern "C" fn detach(session: *mut c_void, parent: u64, child: u64) -> i32 {
+    let inner = unsafe { inner(session) };
+    let gestures = match inner
+        .tree
+        .borrow_mut()
+        .detach(NodeId::from_raw(parent), NodeId::from_raw(child))
+    {
+        Ok(gestures) => gestures,
+        Err(_) => return -1,
+    };
+    if let Err(message) = dispatch_gestures(inner, gestures) {
+        (inner.log)(3, &message);
+    }
+    0
 }
 
 unsafe extern "C" fn remove(session: *mut c_void, parent: u64, child: u64) -> i32 {
@@ -1502,8 +1815,8 @@ unsafe extern "C" fn remove(session: *mut c_void, parent: u64, child: u64) -> i3
         Ok(gestures) => gestures,
         Err(_) => return -1,
     };
-    // Blur runs before `js_remove` frees the tap. A handler error is logged
-    // and the detach still stands, so the id can be discarded.
+    // Blur runs before the script continues. The slot stays until
+    // `sweep_detached`, so this turn can insert the same id.
     if let Err(message) = dispatch_gestures(inner, gestures) {
         (inner.log)(3, &message);
     }
@@ -2106,6 +2419,114 @@ unsafe extern "C" fn text_edit_bytes(session: *mut c_void, out_len: *mut usize) 
     }
 }
 
+fn snap_grid(interval: f32, align: i32) -> Option<ui_core::SnapGrid> {
+    if !(interval.is_finite() && interval > 0.5) {
+        return None;
+    }
+    let align = match align {
+        1 => ui_core::SnapAlign::Center,
+        2 => ui_core::SnapAlign::End,
+        _ => ui_core::SnapAlign::Start,
+    };
+    Some(ui_core::SnapGrid { interval, align })
+}
+
+unsafe extern "C" fn set_scroll_physics(
+    session: *mut c_void,
+    node: u64,
+    tau: f32,
+    mode: i32,
+    stiffness: f32,
+    damping: f32,
+    factor: f32,
+    snap_x: f32,
+    align_x: i32,
+    snap_y: f32,
+    align_y: i32,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    let physics = ui_core::ScrollPhysics {
+        friction_tau_ms: tau,
+        overscroll: if mode == 1 {
+            ui_core::OverscrollMode::Clamp
+        } else {
+            ui_core::OverscrollMode::RubberBand
+        },
+        overscroll_stiffness: stiffness,
+        overscroll_damping: damping,
+        overscroll_factor: factor,
+        snap_x: snap_grid(snap_x, align_x),
+        snap_y: snap_grid(snap_y, align_y),
+    };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_scroll_physics(NodeId::from_raw(node), physics),
+    )
+}
+
+unsafe extern "C" fn set_scroll_chain(session: *mut c_void, node: u64, chain: i32) -> i32 {
+    let inner = unsafe { inner(session) };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_scroll_chain(NodeId::from_raw(node), chain != 0),
+    )
+}
+
+unsafe extern "C" fn overscroll(session: *mut c_void, node: u64, x: *mut f32, y: *mut f32) -> i32 {
+    if x.is_null() || y.is_null() {
+        return -1;
+    }
+    let inner = unsafe { inner(session) };
+    match inner.tree.borrow().overscroll(NodeId::from_raw(node)) {
+        Ok((ox, oy)) => {
+            unsafe {
+                *x = ox;
+                *y = oy;
+            }
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+unsafe extern "C" fn arm_fling(session: *mut c_void, node: u64, vx: f32, vy: f32) -> i32 {
+    let inner = unsafe { inner(session) };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .arm_fling(NodeId::from_raw(node), vx, vy),
+    )
+}
+
+unsafe extern "C" fn stop_scroll(session: *mut c_void, node: u64) -> i32 {
+    let inner = unsafe { inner(session) };
+    status(inner.tree.borrow_mut().stop_scroll(NodeId::from_raw(node)))
+}
+
+unsafe extern "C" fn scroll_to(
+    session: *mut c_void,
+    node: u64,
+    x: f32,
+    y: f32,
+    stiffness: f32,
+    damping: f32,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    let stiffness = (stiffness > 0.0).then_some(stiffness);
+    let damping = (damping > 0.0).then_some(damping);
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .scroll_to(NodeId::from_raw(node), x, y, stiffness, damping),
+    )
+}
+
 unsafe extern "C" fn scroll_offset(
     session: *mut c_void,
     node: u64,
@@ -2137,6 +2558,19 @@ struct PendingMutation {
     number: f64,
     number2: f64,
     text: String,
+}
+
+fn sweep_detached(inner: &Inner) {
+    let retired = inner.tree.borrow_mut().discard_detached();
+    if let Err(message) = dispatch_gestures(inner, retired.gestures) {
+        (inner.log)(3, &message);
+    }
+    if retired.ids.is_empty() {
+        return;
+    }
+    let raw: Vec<u64> = retired.ids.into_iter().map(NodeId::to_raw).collect();
+    // SAFETY: `raw` lives until this call returns. `host` is the open QuickJS host.
+    unsafe { qjs_forget_ids(inner.host, raw.as_ptr(), raw.len()) };
 }
 
 fn flush_mutations(inner: &Inner) -> bool {
@@ -2521,11 +2955,13 @@ fn gesture_parts(gesture: ui_core::Gesture) -> (NodeId, i32, f64, f64) {
         ui_core::Gesture::LongPress(id) => (id, 18, 0.0, 0.0),
         ui_core::Gesture::DoubleTap(id) => (id, 19, 0.0, 0.0),
         ui_core::Gesture::Zoom { id, scale } => (id, 20, f64::from(scale), 0.0),
+        ui_core::Gesture::ScrollPhaseChanged { id, .. } => (id, 21, 0.0, 0.0),
     }
 }
 
 fn dispatch_gestures(inner: &Inner, gestures: Vec<ui_core::Gesture>) -> Result<(), String> {
     for gesture in gestures {
+        note_gesture(&inner.marks, &gesture);
         match gesture {
             ui_core::Gesture::TextReplaced(id) => {
                 let text = inner.tree.borrow().editor_text(id).unwrap_or_default();
@@ -2536,6 +2972,17 @@ fn dispatch_gestures(inner: &Inner, gestures: Vec<ui_core::Gesture>) -> Result<(
                 dispatch_kind(inner, id, 17, f64::from(link), 0.0)?;
                 continue;
             }
+            ui_core::Gesture::ScrollPhaseChanged {
+                id,
+                phase,
+                vx,
+                vy,
+                ox,
+                oy,
+            } => {
+                dispatch_scroll_phase(inner, id, phase, vx, vy, ox, oy)?;
+                continue;
+            }
             other => {
                 let (id, kind, a, b) = gesture_parts(other);
                 dispatch_kind(inner, id, kind, a, b)?;
@@ -2543,6 +2990,36 @@ fn dispatch_gestures(inner: &Inner, gestures: Vec<ui_core::Gesture>) -> Result<(
         }
     }
     Ok(())
+}
+
+fn dispatch_scroll_phase(
+    inner: &Inner,
+    id: NodeId,
+    phase: ui_core::ScrollPhase,
+    vx: f32,
+    vy: f32,
+    ox: f32,
+    oy: f32,
+) -> Result<(), String> {
+    let mut error = [0u8; 512];
+    let failed = unsafe {
+        qjs_scroll_state(
+            inner.host,
+            id.to_raw(),
+            phase.code(),
+            vx,
+            vy,
+            ox,
+            oy,
+            error.as_mut_ptr().cast(),
+            error.len(),
+        )
+    };
+    if failed == 0 {
+        Ok(())
+    } else {
+        Err(c_message(&error))
+    }
 }
 
 fn dispatch_kind(inner: &Inner, id: NodeId, kind: i32, a: f64, b: f64) -> Result<(), String> {

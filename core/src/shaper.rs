@@ -163,6 +163,16 @@ pub fn paint_key(
 pub trait Shaper {
     fn metrics(&self, key: &MetricsKey) -> Arc<ParagraphMetrics>;
     fn retain_paint(&self, key: &PaintKey) -> protocol::ParagraphId;
+    /// Layout measurement. The default ignores color and uses [`Shaper::metrics`].
+    fn measure_paint(&self, key: &PaintKey) -> TextSize {
+        self.metrics(&key.metrics).size
+    }
+    /// One retain plus the line boxes. The default is [`Shaper::retain_paint`]
+    /// followed by [`Shaper::metrics`].
+    fn retain_measured(&self, key: &PaintKey) -> (protocol::ParagraphId, Arc<ParagraphMetrics>) {
+        let metrics = self.metrics(&key.metrics);
+        (self.retain_paint(key), metrics)
+    }
     fn release_paint(&self, id: protocol::ParagraphId);
     fn caret_at_unit(&self, key: &MetricsKey, unit: u32, affinity: Affinity) -> Caret;
     fn caret_at_point(&self, key: &MetricsKey, x: f32, y: f32) -> Caret;

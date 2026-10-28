@@ -4,8 +4,19 @@ import { log, setListenerErrorPolicy } from "@uifw/solid-renderer";
 setListenerErrorPolicy("report");
 
 export function reportError(error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error);
-  log("error", message);
+  log("error", formatError(error));
+}
+
+/** Message plus stack, so a host log line can be copied without the error page. */
+export function formatError(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  const stack = typeof error.stack === "string" ? error.stack : "";
+  if (stack.length === 0) {
+    return error.message;
+  }
+  return stack.includes(error.message) ? stack : `${error.message}\n${stack}`;
 }
 
 export function messageOf(error: unknown): string {

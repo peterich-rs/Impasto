@@ -215,6 +215,7 @@ impl Tree {
     }
 
     pub(super) fn mark_semantics_chain(&mut self, mut id: NodeId) {
+        self.semantics_full = true;
         loop {
             let parent = {
                 let Ok(node) = self.node_mut(id) else {
@@ -237,6 +238,46 @@ impl Tree {
         if !self.laid_out {
             return None;
         }
+        if self.layout_passes != self.semantics_layout_seen || self.semantics_full {
+            self.semantics_layout_seen = self.layout_passes;
+            self.semantics_full = false;
+            self.scroll_semantics.clear();
+            return self.semantics_full_patch(root);
+        }
+        if self.scroll_semantics.is_empty() {
+            return None;
+        }
+        self.patch_scroll_offsets(root)
+    }
+
+    fn patch_scroll_offsets(&mut self, root: NodeId) -> Option<SemanticsPatch> {
+        let ids = std::mem::take(&mut self.scroll_semantics);
+        let mut seen = std::collections::HashSet::new();
+        let mut ops = Vec::new();
+        for id in ids {
+            if !seen.insert(id) {
+                continue;
+            }
+            let sid = SemanticsId::from_node(id);
+            let Some(mut node) = self.semantics_cache.get(&sid).cloned() else {
+                self.semantics_full = true;
+                return self.semantics_full_patch(root);
+            };
+            node.scroll = self.node(id).ok().map(|node| node.scroll_offset());
+            self.semantics_cache.insert(sid, node.clone());
+            ops.push(SemanticsOp::Upsert(node));
+        }
+        if ops.is_empty() {
+            None
+        } else {
+            Some(SemanticsPatch {
+                root: SemanticsId::from_node(root),
+                ops,
+            })
+        }
+    }
+
+    fn semantics_full_patch(&mut self, root: NodeId) -> Option<SemanticsPatch> {
         let mut current = Vec::new();
         self.collect_semantics(root, None, &mut current);
         let mut live = std::collections::HashSet::new();

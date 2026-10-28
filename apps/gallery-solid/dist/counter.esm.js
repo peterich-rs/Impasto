@@ -4134,10 +4134,11 @@ function hostRendererOptions(host2) {
     }
     seen.add(id);
     const children2 = [];
+    const listed = /* @__PURE__ */ new Set();
     let child = host2.firstChild(id);
-    while (child !== 0 && !seen.has(child)) {
+    while (child !== 0 && !seen.has(child) && !listed.has(child)) {
       children2.push(child);
-      seen.add(child);
+      listed.add(child);
       child = host2.nextSibling(child);
     }
     for (const kid of children2) {
@@ -4658,6 +4659,9 @@ function hostRendererOptions(host2) {
         paddings: paddings.size,
         sizes: sizes.size
       };
+    },
+    forget(id) {
+      forget(id);
     }
   };
 }
@@ -4770,6 +4774,199 @@ function runFrames(targetMs, intervalMs) {
     }
   }
 }
+var layouts = /* @__PURE__ */ new Map();
+function runLayouts() {
+  for (const [id, fn2] of layouts) {
+    try {
+      fn2();
+    } catch (error) {
+      layouts.delete(id);
+      throw error;
+    }
+  }
+}
+
+// node_modules/.pnpm/@uifw+solid-renderer@file+..+..+frameworks+solid-renderer/node_modules/@uifw/solid-renderer/runtime/slot.ts
+function bindSlot(deps) {
+  return function createSlot2(initial, at, render2) {
+    let root;
+    let setItem;
+    let setIndex;
+    const dispose2 = runWithOwner(null, () => createRoot2((done) => {
+      const [item, writeItem] = createSignal2(initial);
+      const [index, writeIndex] = createSignal2(at);
+      setItem = writeItem;
+      setIndex = writeIndex;
+      root = deps.createElement("column", {
+        gap: 0
+      });
+      deps.insert(root, () => untrack(() => render2(item, index)));
+      return done;
+    }));
+    return {
+      get node() {
+        return root.id;
+      },
+      set(next, index) {
+        setItem(next);
+        setIndex(index);
+      },
+      attach(parent, anchor) {
+        deps.host.insert(parent, root.id, anchor ?? 0);
+      },
+      detach() {
+        const parent = deps.host.parent(root.id);
+        if (parent !== 0) {
+          deps.host.detach(parent, root.id);
+        }
+      },
+      place(parent, anchor = 0) {
+        if (deps.host.parent(root.id) === parent && deps.host.nextSibling(root.id) === anchor) {
+          return;
+        }
+        deps.host.insert(parent, root.id, anchor);
+      },
+      discard() {
+        const parent = deps.host.parent(root.id);
+        if (parent !== 0) {
+          deps.host.detach(parent, root.id);
+        }
+        dispose2();
+        deps.forget(root.id);
+        deps.host.discard(root.id);
+      }
+    };
+  };
+}
+
+// node_modules/.pnpm/@uifw+solid-renderer@file+..+..+frameworks+solid-renderer/node_modules/@uifw/solid-renderer/runtime/scroll-state.ts
+var listeners = /* @__PURE__ */ new Map();
+function phaseName(code) {
+  if (code === 1) {
+    return "dragging";
+  }
+  if (code === 2) {
+    return "coasting";
+  }
+  if (code === 3) {
+    return "settling";
+  }
+  return "idle";
+}
+function deliverScrollState(node, phase, vx, vy, ox, oy) {
+  const sample = {
+    phase: phaseName(phase),
+    vx,
+    vy,
+    ox,
+    oy
+  };
+  for (const fn2 of listeners.get(node) ?? []) {
+    fn2(sample);
+  }
+}
+function onScrollState(node, fn2) {
+  const set = listeners.get(node) ?? /* @__PURE__ */ new Set();
+  set.add(fn2);
+  listeners.set(node, set);
+  return () => {
+    set.delete(fn2);
+    if (set.size === 0) {
+      listeners.delete(node);
+    }
+  };
+}
+
+// node_modules/.pnpm/@uifw+solid-renderer@file+..+..+frameworks+solid-renderer/node_modules/@uifw/solid-renderer/runtime/driver.ts
+var lists = [];
+var refreshes = [];
+function same(id, index, generation) {
+  return id.index === index && id.generation === generation;
+}
+function deliverDriver(kind, index, generation, tag, i0, i1, f0, _f1, f2, _f3, _f4, f5, s0, s1) {
+  if (kind === 2 && tag === 5) {
+    for (const listener of refreshes) {
+      if (same(listener.id, index, generation)) {
+        listener.fn();
+      }
+    }
+    return;
+  }
+  if (kind !== 1) {
+    return;
+  }
+  for (const listener of lists) {
+    if (!same(listener.id, index, generation)) {
+      continue;
+    }
+    if (tag === 3) {
+      listener.onEnd();
+      continue;
+    }
+    if (tag === 2) {
+      listener.onChrome({
+        thumbOn: (i0 & 1) !== 0,
+        thumbLen: f0,
+        hThumbOn: (i0 & 2) !== 0,
+        hThumbLen: f2,
+        pinIndex: i1,
+        pinKey: s0,
+        extent: f5
+      });
+      continue;
+    }
+    if (tag !== 1) {
+      continue;
+    }
+    if (i0 === 1) {
+      listener.onOp({
+        kind: "detach",
+        key: s0
+      });
+    } else if (i0 === 2) {
+      listener.onOp({
+        kind: "adopt",
+        key: s0,
+        type: s1,
+        index: i1
+      });
+    } else if (i0 === 3) {
+      listener.onOp({
+        kind: "set",
+        key: s0,
+        index: i1
+      });
+    } else if (i0 === 4) {
+      listener.onOp({
+        kind: "place",
+        key: s0,
+        before: s1
+      });
+    }
+  }
+}
+function listenList(listener) {
+  lists.push(listener);
+  return () => {
+    const index = lists.indexOf(listener);
+    if (index >= 0) {
+      lists.splice(index, 1);
+    }
+  };
+}
+function listenRefresh(id, fn2) {
+  const listener = {
+    id,
+    fn: fn2
+  };
+  refreshes.push(listener);
+  return () => {
+    const index = refreshes.indexOf(listener);
+    if (index >= 0) {
+      refreshes.splice(index, 1);
+    }
+  };
+}
 
 // node_modules/.pnpm/@uifw+solid-renderer@file+..+..+frameworks+solid-renderer/node_modules/@uifw/solid-renderer/src/guard.ts
 function bag() {
@@ -4792,24 +4989,6 @@ function scrollIntoView(id, edge) {
 }
 function animate(id, prop, from, to, stiffness, damping) {
   callVoid("animate", [id, prop, from, to, stiffness, damping]);
-}
-function flingTarget(id) {
-  const impl = fn("flingTarget");
-  if (impl === null) {
-    return null;
-  }
-  const value = impl.apply(bag(), [id]);
-  if (value === null || value === void 0) {
-    return null;
-  }
-  const point = value;
-  if (typeof point.x !== "number" || typeof point.y !== "number") {
-    return null;
-  }
-  return {
-    x: point.x,
-    y: point.y
-  };
 }
 function setListenerErrorPolicy(policy) {
   callVoid("setListenerErrorPolicy", [policy]);
@@ -4985,6 +5164,116 @@ function spring(options3) {
   });
 }
 
+// node_modules/.pnpm/@uifw+solid-renderer@file+..+..+frameworks+solid-renderer/node_modules/@uifw/solid-renderer/runtime/list-binding.ts
+function applyListOp(state, op, hooks2) {
+  if (op.kind === "detach") {
+    const slot2 = state.live.get(op.key);
+    if (slot2 === void 0) {
+      return;
+    }
+    state.live.delete(op.key);
+    hooks2.note(op.key, 0);
+    park(state, slot2, hooks2.poolSize());
+    return;
+  }
+  if (op.kind === "adopt") {
+    const item = hooks2.itemAt(op.index);
+    let slot2 = state.live.get(op.key);
+    if (slot2 === void 0 || slot2.type !== op.type) {
+      if (slot2 !== void 0) {
+        state.live.delete(op.key);
+        hooks2.note(op.key, 0);
+        park(state, slot2, hooks2.poolSize());
+      }
+      slot2 = take(state, op.type, item, op.index, op.key, hooks2.create);
+      state.live.set(op.key, slot2);
+    } else {
+      slot2.set(item, op.index);
+    }
+    hooks2.note(op.key, slot2.node);
+    return;
+  }
+  if (op.kind === "set") {
+    const slot2 = state.live.get(op.key);
+    if (slot2 === void 0) {
+      return;
+    }
+    slot2.set(hooks2.itemAt(op.index), op.index);
+    hooks2.note(op.key, slot2.node);
+    return;
+  }
+  const slot = state.live.get(op.key);
+  const parent = hooks2.parent();
+  if (slot === void 0 || parent === 0) {
+    return;
+  }
+  const before = op.before.length === 0 ? 0 : state.live.get(op.before)?.node ?? 0;
+  slot.place(parent, before);
+}
+function park(state, slot, poolSize) {
+  slot.detach();
+  const pooled = state.pools.get(slot.type) ?? [];
+  pooled.push(slot);
+  state.pools.set(slot.type, pooled);
+  while (pooled.length > poolSize) {
+    pooled.shift()?.discard();
+  }
+}
+function take(state, type, item, index, key, create) {
+  const pooled = state.pools.get(type);
+  const slot = pooled?.pop();
+  if (slot === void 0) {
+    return create(type, item, index, key);
+  }
+  slot.key = key;
+  slot.set(item, index);
+  return slot;
+}
+function bindListRenderer(driver, options3) {
+  const state = {
+    live: /* @__PURE__ */ new Map(),
+    pools: /* @__PURE__ */ new Map()
+  };
+  const id = driver.id();
+  return listenList({
+    id,
+    onOp(op) {
+      applyListOp(state, op, {
+        parent: options3.parent,
+        poolSize: options3.poolSize,
+        itemAt: options3.itemAt,
+        note(key, node) {
+          driver.noteRow(key, node);
+        },
+        create(type, item, index, key) {
+          const slot = options3.createSlot(item, index, options3.render);
+          return {
+            key,
+            type,
+            get node() {
+              return slot.node;
+            },
+            set(next, at) {
+              slot.set(next, at);
+            },
+            detach() {
+              slot.detach();
+            },
+            discard() {
+              slot.discard();
+            },
+            place(parent, anchor) {
+              slot.place(parent, anchor);
+            }
+          };
+        }
+      });
+    },
+    onChrome: options3.onChrome,
+    onEnd: options3.onEnd
+  });
+}
+
 // node_modules/.pnpm/@uifw+solid-renderer@file+..+..+frameworks+solid-renderer/node_modules/@uifw/solid-renderer/runtime/index.ts
 var scene = hostRendererOptions(host);
 bindText(scene);
@@ -5005,6 +5294,16 @@ var {
   createTextNode,
   insertNode
 } = renderer;
+var createSlot = bindSlot({
+  createElement: scene.createElement,
+  insert: (parent, accessor2) => {
+    insert(parent, accessor2);
+  },
+  forget: (id) => {
+    scene.forget(id);
+  },
+  host
+});
 function requestFrame() {
   host.requestFrame();
 }
@@ -5016,7 +5315,10 @@ function removeNode(node) {
   const parent = scene.getParentNode(node);
   if (parent) {
     scene.removeNode(parent, node);
+    return;
   }
+  scene.forget(node.id);
+  host.discard(node.id);
 }
 function boot(component) {
   const root = scene.createElement("stack", {
@@ -5036,6 +5338,20 @@ function boot(component) {
     flush();
     runFrames(targetMs, intervalMs);
   });
+  host.onLayout(() => {
+    runLayouts();
+    flush();
+  });
+  if (typeof host.onScrollState === "function") {
+    host.onScrollState((node, phase, vx, vy, ox, oy) => {
+      deliverScrollState(node, phase, vx, vy, ox, oy);
+    });
+  }
+  if (typeof host.onDriver === "function") {
+    host.onDriver((kind, index, generation, tag, i0, i1, f0, f1, f2, f3, f4, f5, s0, s1) => {
+      deliverDriver(kind, index, generation, tag, i0, i1, f0, f1, f2, f3, f4, f5, s0, s1);
+    });
+  }
   render(component, content);
 }
 
@@ -5338,6 +5654,17 @@ function plainError(error, reset2) {
 function unwrapError(error) {
   return typeof error === "function" ? error() : error;
 }
+function loggedError(error) {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  const stack = typeof error.stack === "string" ? error.stack : "";
+  if (stack.length === 0) {
+    return error.message;
+  }
+  return stack.includes(error.message) ? stack : `${error.message}
+${stack}`;
+}
 function StackTransition(props) {
   let mover = 0;
   let fade = 0;
@@ -5471,8 +5798,10 @@ function RouteHost(props) {
             onDone: () => props.router.complete(props.entry().key),
             children: createComponent2(Errored, {
               fallback: (err, reset2) => {
+                const error = unwrapError(err);
+                console.error(loggedError(error));
                 const fallback2 = props.errorFallback ?? plainError;
-                return fallback2(unwrapError(err), () => reset2());
+                return fallback2(error, () => reset2());
               },
               get children() {
                 return createComponent2(Page, {
@@ -7145,264 +7474,257 @@ function OverlayRoot(props) {
   });
 }
 
-// node_modules/.pnpm/@uifw+solid-ui@file+..+..+frameworks+solid-ui/node_modules/@uifw/solid-ui/src/list-window.ts
-var REFRESH_THRESHOLD = 64;
-var MIN_THUMB = 24;
-function estimateHeight(value) {
-  return Number.isFinite(value) && value > 0 ? value : 1;
+// node_modules/.pnpm/@uifw+solid-ui@file+..+..+frameworks+solid-ui/node_modules/@uifw/solid-ui/src/ScrollController.ts
+var natives = /* @__PURE__ */ new WeakMap();
+function createScrollController() {
+  const native = host.scrollController?.();
+  if (native === void 0) {
+    throw new Error("scrollController is not linked");
+  }
+  return wrapScroll(native);
 }
-function thumbLength(viewport, content) {
-  if (!(content > 0) || !(viewport > 0)) {
-    return MIN_THUMB;
+function wrapScroll(native) {
+  let viewport = 0;
+  let content = 0;
+  let contentMin = 0;
+  let pullMode = 0;
+  let threshold = 64;
+  let rubber = false;
+  let factor = 0.55;
+  let parent = null;
+  const [phase, setPhase] = createSignal2("idle");
+  const [overscroll, setOverscroll] = createSignal2({
+    x: 0,
+    y: 0
+  });
+  const offsetListeners = /* @__PURE__ */ new Set();
+  let stopState = () => {
+  };
+  function push() {
+    native.configure(contentMin, pullMode, threshold, rubber, factor, parent);
   }
-  return Math.max(MIN_THUMB, viewport * viewport / content);
-}
-function thumbOffset(viewport, content, offset) {
-  const thumb = thumbLength(viewport, content);
-  const travel = Math.max(0, viewport - thumb);
-  return travel * offset / Math.max(content - viewport, 1);
-}
-function stickyTranslate(nextStart, offset, headerHeight) {
-  if (nextStart === null) {
-    return 0;
+  function readOver() {
+    const sample = native.query(2);
+    setOverscroll({
+      x: sample.x,
+      y: sample.y
+    });
   }
-  return Math.min(0, nextStart - offset - headerHeight);
-}
-function pullDelta(liveY, rawY, nextY) {
-  if (liveY <= 0 && rawY < 0) {
-    return nextY - rawY;
-  }
-  return 0;
-}
-function nearEnd(end, length, overscan) {
-  return length - end < overscan;
-}
-function retainHeights(cache, keys) {
-  const live = new Set(keys);
-  for (const key of cache.keys()) {
-    if (!live.has(key)) {
-      cache.delete(key);
-    }
-  }
-}
-function highestPowerOfTwo(n) {
-  if (n <= 0) {
-    return 0;
-  }
-  let bit = 1;
-  while (bit * 2 <= n) {
-    bit *= 2;
-  }
-  return bit;
-}
-var PrefixHeights = class {
-  values = [];
-  tree = [0];
-  get length() {
-    return this.values.length;
-  }
-  heightAt(index) {
-    return this.values[index] ?? 0;
-  }
-  rebuild(heights) {
-    this.values.length = 0;
-    for (const height of heights) {
-      this.values.push(height);
-    }
-    this.reindex();
-  }
-  reindex() {
-    this.tree.length = 0;
-    this.tree.push(0);
-    for (let index = 0; index < this.values.length; index += 1) {
-      this.tree.push(0);
-    }
-    for (let index = 0; index < this.values.length; index += 1) {
-      this.addDelta(index, this.values[index] ?? 0);
-    }
-  }
-  /** Point-update the height at `index` by `delta`. */
-  add(index, delta) {
-    if (index < 0 || index >= this.values.length || delta === 0) {
-      return;
-    }
-    const current = this.values[index] ?? 0;
-    this.values[index] = current + delta;
-    this.addDelta(index, delta);
-  }
-  addDelta(index, delta) {
-    let cursor = index + 1;
-    while (cursor < this.tree.length) {
-      this.tree[cursor] = (this.tree[cursor] ?? 0) + delta;
-      cursor += cursor & -cursor;
-    }
-  }
-  /** Sum of the first `k` items. `k` counts from 1. */
-  sum(k) {
-    let cursor = k;
-    let total = 0;
-    while (cursor > 0) {
-      total += this.tree[cursor] ?? 0;
-      cursor -= cursor & -cursor;
-    }
-    return total;
-  }
-  itemStart(index) {
-    return this.sum(index);
-  }
-  total() {
-    return this.sum(this.values.length);
-  }
-  /**
-   * Largest `i` in `0..=length` whose prefix is `<= target`.
-   * An offset past the total height returns `length`.
-   */
-  findIndex(target) {
-    let index = 0;
-    let bit = highestPowerOfTwo(this.values.length);
-    let acc = 0;
-    while (bit !== 0) {
-      const next = index + bit;
-      const node = this.tree[next] ?? 0;
-      if (next <= this.values.length && acc + node <= target) {
-        index = next;
-        acc += node;
+  const controller = {
+    node: () => viewport,
+    bind(next) {
+      stopState();
+      viewport = next;
+      if (next !== 0) {
+        native.bind(next, content);
+        stopState = onScrollState(next, (sample) => {
+          setPhase(sample.phase);
+          setOverscroll({
+            x: sample.ox,
+            y: sample.oy
+          });
+        });
       }
-      bit = Math.floor(bit / 2);
+    },
+    bindContent(next) {
+      content = next;
+      if (viewport !== 0) {
+        native.bind(viewport, next);
+      }
+    },
+    phase,
+    overscroll,
+    offset() {
+      const sample = native.query(0);
+      return {
+        x: sample.x,
+        y: sample.y
+      };
+    },
+    onOffset(fn2) {
+      offsetListeners.add(fn2);
+      return () => {
+        offsetListeners.delete(fn2);
+      };
+    },
+    noteOffset(offset) {
+      for (const fn2 of offsetListeners) {
+        fn2(offset);
+      }
+    },
+    setOverscroll(next) {
+      setOverscroll(next);
+    },
+    limits() {
+      const sample = native.query(1);
+      return {
+        x: sample.x,
+        y: sample.y
+      };
+    },
+    setLimits(_next) {
+    },
+    scrollTo(x, y, animate2) {
+      if (viewport === 0) {
+        return;
+      }
+      host.scrollTo(viewport, x, y, animate2?.stiffness ?? 0, animate2?.damping ?? 0);
+    },
+    fling(vx, vy) {
+      if (viewport === 0) {
+        return;
+      }
+      host.fling(viewport, vx, vy);
+    },
+    stop() {
+      if (viewport === 0) {
+        return;
+      }
+      host.stopScroll(viewport);
+    },
+    dragBy(dx, dy) {
+      const step = native.dragBy(dx, dy);
+      if (!step.pending) {
+        readOver();
+      }
+      return step;
+    },
+    finishDrag(taken) {
+      native.finishDrag(taken);
+      readOver();
+    },
+    dragEnd() {
+      native.dragEnd();
+    },
+    wheel(dx, dy) {
+      native.wheel(dx, dy);
+    },
+    setContentMin(height) {
+      contentMin = height;
+      push();
+    },
+    setPull(mode, nextThreshold) {
+      pullMode = mode;
+      threshold = nextThreshold;
+      push();
+    },
+    setRubber(nextRubber, nextFactor) {
+      rubber = nextRubber;
+      factor = nextFactor;
+      push();
+    },
+    setParent(next) {
+      parent = next === null ? null : natives.get(next) ?? null;
+      push();
+    },
+    consume(overflowX, overflowY) {
+      const taken = native.consume(overflowX, overflowY);
+      if (taken) {
+        const sample = native.query(0);
+        controller.noteOffset({
+          x: sample.x,
+          y: sample.y
+        });
+      }
+      return taken;
+    },
+    nativeId() {
+      return native.id();
     }
-    return index;
-  }
-};
-function windowRange(prefix, offset, viewHeight, overscan) {
-  const count = prefix.length;
-  if (count <= 0) {
-    return {
-      start: 0,
-      end: 0,
-      top: 0,
-      bottom: 0
-    };
-  }
-  let start = prefix.findIndex(offset);
-  if (start === count) {
-    return {
-      start: count,
-      end: count,
-      top: prefix.total(),
-      bottom: 0
-    };
-  }
-  let end = start;
-  const limit = offset + Math.max(viewHeight, 0);
-  while (end < count && prefix.itemStart(end) < limit) {
-    end += 1;
-  }
-  start = Math.max(0, start - overscan);
-  end = Math.min(count, end + overscan);
-  return {
-    start,
-    end,
-    top: prefix.itemStart(start),
-    bottom: prefix.total() - prefix.itemStart(end)
   };
+  natives.set(controller, native);
+  onCleanup(() => {
+    stopState();
+    native.release();
+  });
+  return controller;
 }
-function stabilizeWindow(prefix, current, next, overscan) {
-  const start = next.start > current.start + overscan ? next.start : Math.min(current.start, next.start);
-  const end = next.end + overscan < current.end ? next.end : Math.max(current.end, next.end);
-  return {
-    start,
-    end,
-    top: prefix.itemStart(start),
-    bottom: prefix.total() - prefix.itemStart(end)
-  };
-}
-function windowRangeForOffset(prefix, offset, viewHeight, overscan, flingY) {
-  if (flingY === null || !Number.isFinite(flingY)) {
-    return windowRange(prefix, offset, viewHeight, overscan);
-  }
-  const startOffset = Math.min(offset, flingY);
-  const endOffset = Math.max(offset + Math.max(viewHeight, 0), flingY);
-  return windowRange(prefix, startOffset, Math.max(0, endOffset - startOffset), overscan);
+function refreshListener(controller, fn2) {
+  return listenRefresh(controller.nativeId(), fn2);
 }
 
 // node_modules/.pnpm/@uifw+solid-ui@file+..+..+frameworks+solid-ui/node_modules/@uifw/solid-ui/src/ScrollArea.tsx
 function ScrollArea(props) {
-  const [off, setOff] = createSignal2(props.initialOffset ?? {
-    x: 0,
-    y: 0
-  });
+  const ctrl = props.controller ?? createScrollController();
   let viewport = 0;
   let content = 0;
-  let contentMin = 0;
   function applyContentMin() {
-    if (content !== 0 && Number.isFinite(contentMin) && contentMin > 0) {
-      host.setMinSize(content, 0, contentMin);
+    const min = props.contentMin ?? 0;
+    ctrl.setContentMin(min);
+    if (content !== 0 && Number.isFinite(min) && min > 0) {
+      host.setMinSize(content, 0, min);
     }
   }
-  function clamp(x, y) {
-    if (viewport === 0 || content === 0) {
-      return {
-        x: 0,
-        y: 0
-      };
+  function applyPhysics(node) {
+    const physics = props.physics;
+    const align = (name) => name === "center" ? 1 : name === "end" ? 2 : 0;
+    if (physics !== void 0) {
+      host.setScrollPhysics(node, physics.frictionTau ?? 180, physics.overscroll === "clamp" ? 1 : 0, physics.stiffness ?? 170, physics.damping ?? 26, physics.factor ?? 0.55, physics.snapX?.interval ?? 0, align(physics.snapX?.align), physics.snapY?.interval ?? 0, align(physics.snapY?.align));
+      if (physics.chain !== void 0) {
+        host.setScrollChain(node, physics.chain);
+      }
     }
-    const view = host.rect(viewport);
-    const body = host.rect(content);
-    const maxX = Math.max(0, body.w - view.w);
-    const maxY = Math.max(0, body.h - view.h, contentMin - view.h);
-    return {
-      x: Math.min(maxX, Math.max(0, x)),
-      y: Math.min(maxY, Math.max(0, y))
-    };
+    ctrl.setRubber(physics?.overscroll === "rubber", physics?.factor ?? 0.55);
   }
-  function overflowing() {
-    if (viewport === 0 || content === 0) {
-      return false;
-    }
-    const view = host.rect(viewport);
-    const body = host.rect(content);
-    return body.h > view.h;
-  }
-  createRenderEffect2(off, (next) => {
-    if (viewport !== 0) {
-      host.setScrollOffset(viewport, next.x, next.y);
-      props.onOffset?.(next, viewport);
-    }
-  });
   createTrackedEffect(() => {
-    contentMin = props.contentMin ?? 0;
     applyContentMin();
   });
   var _el$ = createElement("scroll", {
     fill: true,
-    onScroll: (x, y) => {
-      setOff(clamp(x, y));
-    },
     onDragBy: (dx, dy) => {
-      const live = viewport === 0 ? off() : host.scrollOffset(viewport);
-      const rawY = live.y - dy;
-      const next = clamp(live.x - dx, rawY);
-      props.onPull?.(pullDelta(live.y, rawY, next.y), overflowing());
-      setOff(next);
+      const step = ctrl.dragBy(dx, dy);
+      if (!step.pending) {
+        return;
+      }
+      const taken = props.onDragOverflow?.(step.ox, step.oy) === true;
+      ctrl.finishDrag(taken);
     },
     onDragEnd: () => {
+      ctrl.dragEnd();
       props.onDragEnd?.();
     },
     onWheel: (dx, dy) => {
-      const live = viewport === 0 ? off() : host.scrollOffset(viewport);
-      setOff(clamp(live.x + dx, live.y + dy));
+      ctrl.wheel(dx, dy);
     }
   }), _el$2 = createElement("column");
   insertNode(_el$, _el$2);
   ref(() => (node) => {
     viewport = node.id;
+    ctrl.bind(node.id);
+    applyPhysics(node.id);
+    const initial = props.initialOffset;
+    if (initial !== void 0 && (initial.x !== 0 || initial.y !== 0)) {
+      host.setScrollOffset(viewport, initial.x, initial.y);
+      ctrl.bind(node.id);
+    }
     props.viewportRef?.(node.id);
   }, _el$);
   ref(() => (node) => {
     content = node.id;
+    ctrl.bindContent(node.id);
     applyContentMin();
+    props.contentRef?.(node.id);
   }, _el$2);
   insert(_el$2, () => props.children);
+  return _el$;
+}
+
+// node_modules/.pnpm/@uifw+solid-ui@file+..+..+frameworks+solid-ui/node_modules/@uifw/solid-ui/src/RefreshControl.tsx
+var DEFAULT_THRESHOLD = 64;
+function RefreshControl(props) {
+  createRenderEffect2(() => props.threshold ?? DEFAULT_THRESHOLD, (threshold) => {
+    props.controller.setPull(1, threshold);
+  });
+  onCleanup(refreshListener(props.controller, () => props.onRefresh?.()));
+  const pull = () => Math.max(0, -props.controller.overscroll().y);
+  var _el$ = createElement("column"), _el$2 = createElement("sized", {
+    w: 1
+  });
+  insertNode(_el$, _el$2);
+  insert(_el$, () => props.children, null);
+  effect3(() => pull(), (_v$, _$p) => {
+    setProp(_el$2, "h", _v$, _$p);
+  });
   return _el$;
 }
 
@@ -7447,339 +7769,105 @@ var hooks = {
 bindMotion(hooks);
 
 // node_modules/.pnpm/@uifw+solid-ui@file+..+..+frameworks+solid-ui/node_modules/@uifw/solid-ui/src/VirtualList.tsx
-var HEIGHT_EPS = 0.5;
 var restoredOffsets = /* @__PURE__ */ new Map();
 function VirtualList(props) {
   const theme = useTheme();
-  const prefix = new PrefixHeights();
-  const cache = /* @__PURE__ */ new Map();
-  const mounted = /* @__PURE__ */ new Map();
-  let keySeq2 = "";
-  let viewport = 0;
-  let placedW = -1;
-  let placedH = -1;
-  let measuring = false;
-  let stopMeasure = () => {
-  };
-  let pull = 0;
-  let endLength = -1;
-  let pinIndex = -1;
-  let pinKey = "";
+  const scroll = props.controller ?? createScrollController();
+  const native = host.listDriver?.(props.overscan ?? 4, props.estimatedHeight);
+  if (native === void 0) {
+    throw new Error("listDriver is not linked");
+  }
   const initial = props.restoreKey ? restoredOffsets.get(props.restoreKey) : void 0;
-  let previousOffset = initial?.y ?? 0;
-  const [range, setRange] = createSignal2({
-    start: 0,
-    end: 0,
-    top: 0,
-    bottom: 0
-  });
   const [extent, setExtent] = createSignal2(0);
-  const [thumb, setThumb] = createSignal2({
-    h: MIN_THUMB,
-    y: 0,
-    visible: false
-  });
-  const [hThumb, setHThumb] = createSignal2({
-    w: MIN_THUMB,
-    x: 0,
-    visible: false
-  });
+  const [thumbOn, setThumbOn] = createSignal2(false);
+  const [thumbH, setThumbH] = createSignal2(24);
+  const [hThumbOn, setHThumbOn] = createSignal2(false);
+  const [hThumbW, setHThumbW] = createSignal2(24);
   const [pin, setPin] = createSignal2(null);
-  const [pinY, setPinY] = createSignal2(0);
-  function keysOf(items) {
-    return items.map((item) => String(props.itemKey(item)));
+  let viewport = 0;
+  let contentId = 0;
+  let top = 0;
+  let bottom = 0;
+  let rows = 0;
+  let vThumb = 0;
+  let hThumb = 0;
+  let pinNode = 0;
+  let vSize = 0;
+  let hSize = 0;
+  function syncNodes() {
+    native.bind(viewport, contentId, top, bottom, rows, vThumb, hThumb, pinNode, vSize, hSize);
   }
-  function sequence(keys) {
-    return keys.join("\0");
-  }
-  function rowEstimate() {
-    return estimateHeight(props.estimatedHeight) * host.textScale();
-  }
-  function syncPrefix(items, force = false) {
-    const keys = keysOf(items);
-    const next = sequence(keys);
-    if (!force && next === keySeq2 && prefix.length === items.length) {
-      return;
+  createTrackedEffect(() => {
+    const items = props.items;
+    native.configure(props.estimatedHeight, props.overscan ?? 4, (props.error ?? "").length > 0);
+    if (props.onRefresh) {
+      scroll.setPull(2, 64);
     }
-    keySeq2 = next;
-    const estimate = rowEstimate();
-    prefix.rebuild(keys.map((key) => cache.get(key) ?? estimate));
-    retainHeights(cache, keys);
-  }
-  function contentWidth() {
-    if (viewport === 0) {
-      return 0;
-    }
-    const body = host.firstChild(viewport);
-    if (body === 0) {
-      return 0;
-    }
-    return host.rect(body).w;
-  }
-  function updateSticky(offsetY) {
-    const sticky = props.sticky;
-    if (!sticky || props.items.length === 0) {
-      pinIndex = -1;
-      pinKey = "";
-      setPin(null);
-      setPinY(0);
-      return;
-    }
-    let current = -1;
-    for (let index = 0; index < props.items.length; index += 1) {
-      const item = props.items[index];
-      if (item === void 0 || !sticky(item, index)) {
-        continue;
+    native.setItems(items.map((item, index) => ({
+      key: String(props.itemKey(item)),
+      type: props.recycle ? props.recycle.typeOf(item) : "item",
+      sticky: props.sticky?.(item, index) === true
+    })));
+  });
+  onCleanup(bindListRenderer(native, {
+    parent: () => rows,
+    poolSize: () => props.recycle ? props.recycle.poolSize ?? 8 : 0,
+    itemAt: (index) => props.items[index],
+    render: (item, index) => {
+      if (props.recycle) {
+        return props.recycle.render(item, index);
       }
-      if (prefix.itemStart(index) <= offsetY) {
-        current = index;
+      return props.children?.(item(), index()) ?? createElement("sized", {
+        w: 0,
+        h: 0
+      });
+    },
+    createSlot,
+    onChrome(chrome) {
+      setExtent(chrome.extent);
+      setThumbOn(chrome.thumbOn);
+      setThumbH(chrome.thumbLen);
+      setHThumbOn(chrome.hThumbOn);
+      setHThumbW(chrome.hThumbLen);
+      if (chrome.pinIndex >= 0) {
+        setPin({
+          index: chrome.pinIndex,
+          key: chrome.pinKey
+        });
       } else {
-        break;
+        setPin(null);
       }
-    }
-    if (current < 0) {
-      pinIndex = -1;
-      pinKey = "";
-      setPin(null);
-      setPinY(0);
-      return;
-    }
-    let nextStart = null;
-    for (let index = current + 1; index < props.items.length; index += 1) {
-      const item = props.items[index];
-      if (item !== void 0 && sticky(item, index)) {
-        nextStart = prefix.itemStart(index);
-        break;
-      }
-    }
-    const key = String(props.itemKey(props.items[current]));
-    if (pinIndex !== current || pinKey !== key) {
-      pinIndex = current;
-      pinKey = key;
-      setPin({
-        index: current,
-        key
-      });
-    }
-    setPinY(stickyTranslate(nextStart, offsetY, prefix.heightAt(current)));
-  }
-  function updateChrome(offsetX, offsetY, viewWidth, viewHeight) {
-    const content = prefix.total();
-    const overflow = content > viewHeight + HEIGHT_EPS;
-    if (!overflow || viewHeight <= 0 || content <= 0) {
-      setThumb({
-        h: MIN_THUMB,
-        y: 0,
-        visible: false
-      });
-    } else {
-      setThumb({
-        h: thumbLength(viewHeight, content),
-        y: thumbOffset(viewHeight, content, offsetY),
-        visible: true
-      });
-    }
-    const width = contentWidth();
-    if (width > viewWidth + HEIGHT_EPS && viewWidth > 0) {
-      setHThumb({
-        w: thumbLength(viewWidth, width),
-        x: thumbOffset(viewWidth, width, offsetX),
-        visible: true
-      });
-    } else {
-      setHThumb({
-        w: MIN_THUMB,
-        x: 0,
-        visible: false
-      });
-    }
-    updateSticky(offsetY);
-  }
-  function maybeEnd(end) {
-    if (!props.onEndReached || (props.error ?? "").length > 0) {
-      return;
-    }
-    const length = props.items.length;
-    const overscan = props.overscan ?? 4;
-    if (!nearEnd(end, length, overscan) || endLength === length) {
-      return;
-    }
-    endLength = length;
-    props.onEndReached();
-  }
-  function place(offsetX, offsetY, viewWidth, viewHeight) {
-    syncPrefix(props.items);
-    const total = prefix.total();
-    if (total !== extent()) {
-      queueMicrotask(() => setExtent(total));
-    }
-    const delta = offsetY - previousOffset;
-    previousOffset = offsetY;
-    const overscan = props.overscan ?? 4;
-    const lead = delta === 0 || viewHeight <= 0 ? null : offsetY + Math.sign(delta) * viewHeight;
-    const flung = viewport === 0 ? null : flingTarget(viewport);
-    const far = flung ? lead === null ? flung.y : delta > 0 ? Math.max(flung.y, lead) : Math.min(flung.y, lead) : lead;
-    const next = stabilizeWindow(prefix, range(), windowRangeForOffset(prefix, offsetY, viewHeight, overscan, far), overscan);
-    const current = range();
-    if (current.start !== next.start || current.end !== next.end || current.top !== next.top || current.bottom !== next.bottom) {
-      setRange(next);
-    }
-    updateChrome(offsetX, offsetY, viewWidth, viewHeight);
-    maybeEnd(next.end);
-  }
-  function windowNeedsMeasure() {
-    const windowed = range();
-    for (let index = windowed.start; index < windowed.end; index += 1) {
-      const item = props.items[index];
-      if (item === void 0) {
-        continue;
-      }
-      if (!cache.has(String(props.itemKey(item)))) {
-        return true;
-      }
-    }
-    return false;
-  }
-  function rowBox(id) {
-    try {
-      return host.rect(id);
-    } catch {
-      return null;
-    }
-  }
-  function measureMounted() {
-    let pending2 = false;
-    let changed = false;
-    for (const [key, entry] of [...mounted]) {
-      const box = rowBox(entry.id);
-      if (box === null) {
-        mounted.delete(key);
-        continue;
-      }
-      if (box.h === 0) {
-        pending2 = true;
-        continue;
-      }
-      const prev = prefix.heightAt(entry.index);
-      cache.set(key, box.h);
-      if (Math.abs(box.h - prev) > HEIGHT_EPS) {
-        prefix.add(entry.index, box.h - prev);
-        changed = true;
-      }
-    }
-    if (changed && viewport !== 0) {
-      const view = rowBox(viewport);
-      if (view !== null) {
-        const offset = host.scrollOffset(viewport);
-        place(offset.x, offset.y, view.w, view.h);
-        placedW = view.w;
-        placedH = view.h;
-      }
-    }
-    return pending2;
-  }
-  function syncWindow() {
-    if (viewport === 0) {
-      return false;
-    }
-    const view = rowBox(viewport);
-    if (view === null || view.h <= 0) {
-      return false;
-    }
-    if (Math.abs(view.w - placedW) < HEIGHT_EPS && Math.abs(view.h - placedH) < HEIGHT_EPS) {
-      return false;
-    }
-    placedW = view.w;
-    placedH = view.h;
-    const offset = host.scrollOffset(viewport);
-    place(offset.x, offset.y, view.w, view.h);
-    return true;
-  }
-  function startMeasure() {
-    if (measuring) {
-      requestFrame();
-      return;
-    }
-    measuring = true;
-    stopMeasure();
-    stopMeasure = onFrame(() => {
-      const resized = syncWindow();
-      const pending2 = measureMounted();
-      if (pending2 || windowNeedsMeasure() || resized) {
-        requestFrame();
+    },
+    onEnd() {
+      if ((props.error ?? "").length > 0) {
         return;
       }
-      stopMeasure();
-      measuring = false;
-    });
-    requestFrame();
-  }
-  onCleanup(() => {
-    stopMeasure();
-  });
-  let seenScale = host.textScale();
-  let pendingScale = false;
-  onCleanup(onFrame(() => {
-    const scale = host.textScale();
-    if (scale !== seenScale) {
-      const ratio = seenScale > 0 ? scale / seenScale : scale;
-      seenScale = scale;
-      for (const [key, height] of cache) {
-        cache.set(key, height * ratio);
-      }
-      syncPrefix(props.items, true);
-      setExtent(prefix.total());
-      pendingScale = true;
-      requestFrame();
-      if (viewport !== 0) {
-        const view = host.rect(viewport);
-        const offset = host.scrollOffset(viewport);
-        place(offset.x, offset.y, view.w, view.h);
-      }
-      return;
+      props.onEndReached?.();
     }
-    if (!pendingScale) {
-      return;
-    }
-    pendingScale = false;
-    if (viewport !== 0) {
-      const view = host.rect(viewport);
-      const offset = host.scrollOffset(viewport);
-      place(offset.x, offset.y, view.w, view.h);
-    } else {
-      place(0, 0, 0, 0);
-    }
-    startMeasure();
   }));
-  createTrackedEffect(() => {
-    const blocked2 = (props.error ?? "").length > 0 || props.items.length === 0;
-    syncPrefix(props.items);
-    if (blocked2) {
-      stopMeasure();
-      measuring = false;
-      updateSticky(0);
-      return;
+  onCleanup(refreshListener(scroll, () => props.onRefresh?.()));
+  onCleanup(() => {
+    const key = props.restoreKey;
+    if (key) {
+      restoredOffsets.set(key, scroll.offset());
     }
-    if (viewport !== 0) {
-      const view = host.rect(viewport);
-      const offset = host.scrollOffset(viewport);
-      place(offset.x, offset.y, view.w, view.h);
-    } else {
-      place(0, 0, 0, 0);
-    }
-    if (windowNeedsMeasure()) {
-      startMeasure();
-    }
+    native.release();
   });
-  const windowItems = () => props.items.slice(range().start, range().end);
   const errored = () => (props.error ?? "").length > 0;
+  const pinned = () => {
+    const box = pin();
+    if (box === null) {
+      return null;
+    }
+    return props.items[box.index] === void 0 ? null : box;
+  };
   return createComponent2(Show, {
     get when() {
       return !errored();
     },
     get fallback() {
-      var _el$12 = createElement("column");
-      insert(_el$12, createComponent2(Text, {
+      var _el$14 = createElement("column");
+      insert(_el$14, createComponent2(Text, {
         get fontSize() {
           return theme().fontSize.body;
         },
@@ -7793,7 +7881,7 @@ function VirtualList(props) {
           return props.error ?? "";
         }
       }), null);
-      insert(_el$12, createComponent2(Show, {
+      insert(_el$14, createComponent2(Show, {
         get when() {
           return props.onRetry;
         },
@@ -7805,9 +7893,9 @@ function VirtualList(props) {
         }
       }), null);
       effect3(() => theme().space.s, (_v$, _$p) => {
-        setProp(_el$12, "gap", _v$, _$p);
+        setProp(_el$14, "gap", _v$, _$p);
       });
-      return _el$12;
+      return _el$14;
     },
     get children() {
       return createComponent2(Show, {
@@ -7821,200 +7909,163 @@ function VirtualList(props) {
           });
         },
         get children() {
-          var _el$ = createElement("stack", {
+          var _el$2 = createElement("stack", {
             fill: true
           });
-          insert(_el$, createComponent2(ScrollArea, {
+          insert(_el$2, createComponent2(ScrollArea, {
             get contentMin() {
               return extent();
             },
             initialOffset: initial,
+            controller: scroll,
+            get physics() {
+              return props.physics;
+            },
+            get onDragOverflow() {
+              return props.onDragOverflow;
+            },
             viewportRef: (id) => {
               viewport = id;
-              if (!syncWindow()) {
-                const view = host.rect(id);
-                const offset = host.scrollOffset(id);
-                place(offset.x, offset.y, view.w, view.h);
-              }
-              if (windowNeedsMeasure() || placedH <= 0) {
-                startMeasure();
-              }
+              syncNodes();
             },
-            onOffset: (offset, id) => {
-              const key = props.restoreKey;
-              if (key) {
-                restoredOffsets.set(key, offset);
-              }
-              const view = host.rect(id);
-              place(offset.x, offset.y, view.w, view.h);
-              if (windowNeedsMeasure()) {
-                startMeasure();
-              }
-            },
-            onPull: (delta, overflowing) => {
-              if (!props.onRefresh || !overflowing) {
-                pull = 0;
-                return;
-              }
-              if (delta > 0) {
-                pull += delta;
-              }
-            },
-            onDragEnd: () => {
-              if (props.onRefresh && pull > REFRESH_THRESHOLD) {
-                props.onRefresh();
-              }
-              pull = 0;
+            contentRef: (id) => {
+              contentId = id;
+              syncNodes();
             },
             get children() {
-              return [createComponent2(Show, {
-                get when() {
-                  return range().top > 0;
-                },
-                get children() {
-                  var _el$2 = createElement("sized", {
-                    w: 1
-                  });
-                  effect3(() => range().top, (_v$, _$p) => {
-                    setProp(_el$2, "h", _v$, _$p);
-                  });
-                  return _el$2;
-                }
-              }), createComponent2(For, {
-                get each() {
-                  return windowItems();
-                },
-                keyed: (item) => props.itemKey(item),
-                children: (item, index) => {
-                  const abs = () => range().start + index();
-                  let wrap = 0;
-                  createTrackedEffect(() => {
-                    if (wrap !== 0) {
-                      mounted.set(String(props.itemKey(item())), {
-                        id: wrap,
-                        index: abs()
-                      });
-                    }
-                  });
-                  onCleanup(() => {
-                    mounted.delete(String(props.itemKey(item())));
-                  });
-                  var _el$14 = createElement("stack");
-                  ref(() => (node) => {
-                    wrap = node.id;
-                    mounted.set(String(props.itemKey(item())), {
-                      id: wrap,
-                      index: abs()
-                    });
-                  }, _el$14);
-                  insert(_el$14, () => props.children(item(), abs()));
-                  return _el$14;
-                }
-              }), createComponent2(Show, {
-                get when() {
-                  return range().bottom > 0;
-                },
-                get children() {
-                  var _el$3 = createElement("sized", {
-                    w: 1
-                  });
-                  effect3(() => range().bottom, (_v$, _$p) => {
-                    setProp(_el$3, "h", _v$, _$p);
-                  });
-                  return _el$3;
-                }
-              })];
+              return [(() => {
+                var _el$3 = createElement("sized", {
+                  w: 1,
+                  h: 0
+                });
+                ref(() => (node) => {
+                  top = node.id;
+                  syncNodes();
+                }, _el$3);
+                return _el$3;
+              })(), (() => {
+                var _el$4 = createElement("column");
+                ref(() => (node) => {
+                  rows = node.id;
+                  syncNodes();
+                }, _el$4);
+                return _el$4;
+              })(), (() => {
+                var _el$5 = createElement("sized", {
+                  w: 1,
+                  h: 0
+                });
+                ref(() => (node) => {
+                  bottom = node.id;
+                  syncNodes();
+                }, _el$5);
+                return _el$5;
+              })()];
             }
           }), null);
-          insert(_el$, createComponent2(Show, {
+          insert(_el$2, createComponent2(Show, {
             get when() {
-              return pin();
+              return pinned();
             },
             keyed: true,
             children: (box) => (() => {
-              var _el$15 = createElement("transform");
-              insert(_el$15, () => props.children(props.items[box.index], box.index));
-              effect3(() => pinY(), (_v$, _$p) => {
-                setProp(_el$15, "y", _v$, _$p);
-              });
-              return _el$15;
+              var _el$16 = createElement("transform");
+              ref(() => (node) => {
+                pinNode = node.id;
+                syncNodes();
+              }, _el$16);
+              insert(_el$16, (() => {
+                var _c$ = memo2(() => !!props.recycle);
+                return () => _c$() ? props.recycle.render(() => props.items[box.index], () => box.index) : props.children?.(props.items[box.index], box.index);
+              })());
+              return _el$16;
             })()
           }), null);
-          insert(_el$, createComponent2(Show, {
+          insert(_el$2, createComponent2(Show, {
             get when() {
-              return thumb().visible;
+              return thumbOn();
             },
             get children() {
-              var _el$4 = createElement("row", {
+              var _el$6 = createElement("row", {
                 fill: true,
                 justify: "end"
-              }), _el$5 = createElement("padding"), _el$6 = createElement("transform"), _el$7 = createElement("decorated"), _el$8 = createElement("sized", {
+              }), _el$7 = createElement("padding"), _el$8 = createElement("transform"), _el$9 = createElement("decorated"), _el$0 = createElement("sized", {
                 w: 3
               });
-              insertNode(_el$4, _el$5);
-              insertNode(_el$5, _el$6);
               insertNode(_el$6, _el$7);
               insertNode(_el$7, _el$8);
+              insertNode(_el$8, _el$9);
+              ref(() => (node) => {
+                vThumb = node.id;
+                syncNodes();
+              }, _el$8);
+              insertNode(_el$9, _el$0);
+              ref(() => (node) => {
+                vSize = node.id;
+                syncNodes();
+              }, _el$0);
               effect3(() => ({
                 e: theme().space.s,
-                t: thumb().y,
-                a: theme().color.textMuted,
-                o: theme().radius.s,
-                i: thumb().h
+                t: theme().color.textMuted,
+                a: theme().radius.s,
+                o: thumbH()
               }), ({
                 e,
                 t: t2,
                 a,
-                o,
-                i
+                o
               }, _p$) => {
-                e !== _p$?.e && setProp(_el$5, "right", e, _p$?.e);
-                t2 !== _p$?.t && setProp(_el$6, "y", t2, _p$?.t);
-                a !== _p$?.a && setProp(_el$7, "color", a, _p$?.a);
-                o !== _p$?.o && setProp(_el$7, "radius", o, _p$?.o);
-                i !== _p$?.i && setProp(_el$8, "h", i, _p$?.i);
+                e !== _p$?.e && setProp(_el$7, "right", e, _p$?.e);
+                t2 !== _p$?.t && setProp(_el$9, "color", t2, _p$?.t);
+                a !== _p$?.a && setProp(_el$9, "radius", a, _p$?.a);
+                o !== _p$?.o && setProp(_el$0, "h", o, _p$?.o);
               });
-              return _el$4;
+              return _el$6;
             }
           }), null);
-          insert(_el$, createComponent2(Show, {
+          insert(_el$2, createComponent2(Show, {
             get when() {
-              return hThumb().visible;
+              return hThumbOn();
             },
             get children() {
-              var _el$9 = createElement("column", {
+              var _el$1 = createElement("column", {
                 fill: true,
                 justify: "end"
-              }), _el$0 = createElement("padding"), _el$1 = createElement("transform"), _el$10 = createElement("decorated"), _el$11 = createElement("sized", {
+              }), _el$10 = createElement("padding"), _el$11 = createElement("transform"), _el$12 = createElement("decorated"), _el$13 = createElement("sized", {
                 h: 3
               });
-              insertNode(_el$9, _el$0);
-              insertNode(_el$0, _el$1);
               insertNode(_el$1, _el$10);
               insertNode(_el$10, _el$11);
+              insertNode(_el$11, _el$12);
+              ref(() => (node) => {
+                hThumb = node.id;
+                syncNodes();
+              }, _el$11);
+              insertNode(_el$12, _el$13);
+              ref(() => (node) => {
+                hSize = node.id;
+                syncNodes();
+              }, _el$13);
               effect3(() => ({
                 e: theme().space.s,
-                t: hThumb().x,
-                a: theme().color.textMuted,
-                o: theme().radius.s,
-                i: hThumb().w
+                t: theme().color.textMuted,
+                a: theme().radius.s,
+                o: hThumbW()
               }), ({
                 e,
                 t: t2,
                 a,
-                o,
-                i
+                o
               }, _p$) => {
-                e !== _p$?.e && setProp(_el$0, "bottom", e, _p$?.e);
-                t2 !== _p$?.t && setProp(_el$1, "x", t2, _p$?.t);
-                a !== _p$?.a && setProp(_el$10, "color", a, _p$?.a);
-                o !== _p$?.o && setProp(_el$10, "radius", o, _p$?.o);
-                i !== _p$?.i && setProp(_el$11, "w", i, _p$?.i);
+                e !== _p$?.e && setProp(_el$10, "bottom", e, _p$?.e);
+                t2 !== _p$?.t && setProp(_el$12, "color", t2, _p$?.t);
+                a !== _p$?.a && setProp(_el$12, "radius", a, _p$?.a);
+                o !== _p$?.o && setProp(_el$13, "w", o, _p$?.o);
               });
-              return _el$9;
+              return _el$1;
             }
           }), null);
-          return _el$;
+          return _el$2;
         }
       });
     }
@@ -8216,11 +8267,18 @@ function SchedulePage(_props) {
   });
   return _el$8;
 }
+var LIST_ITEMS = Array.from({
+  length: 200
+}, (_, n) => ({
+  n
+}));
 function ListPage(_props) {
   const theme = useTheme();
+  const list2 = createScrollController();
   const [scale, setScale] = createSignal2(1);
   const [missing, setMissing] = createSignal2(false);
   const [name, setName] = createSignal2("");
+  const [refreshed, setRefreshed] = createSignal2(0);
   var _el$9 = createElement("column", {
     fill: true,
     w: "100%"
@@ -8285,51 +8343,106 @@ function ListPage(_props) {
     }
   }), _el$10);
   insertNode(_el$10, _el$11);
-  insert(_el$11, createComponent2(VirtualList, {
-    get items() {
-      return Array.from({
-        length: 200
-      }, (_, n) => ({
-        n
-      }));
-    },
-    itemKey: (item) => item.n,
-    estimatedHeight: 48,
-    children: (item) => (() => {
-      var _el$12 = createElement("padding");
-      insert(_el$12, createComponent2(Text, {
+  insert(_el$11, createComponent2(RefreshControl, {
+    controller: list2,
+    onRefresh: () => setRefreshed((count) => count + 1),
+    get children() {
+      return [createComponent2(Text, {
         get fontSize() {
-          return theme().typography.body.size;
+          return theme().typography.caption.size;
         },
         get color() {
-          return theme().color.text;
+          return theme().color.textMuted;
         },
         get direction() {
           return directionFor(theme().locale);
         },
         get children() {
-          return `Item ${item.n}`;
+          return memo2(() => refreshed() === 0)() ? "\u4E0B\u62C9\u5237\u65B0" : `\u5DF2\u5237\u65B0 ${refreshed()}`;
         }
-      }));
-      effect3(() => ({
-        e: theme().space.l,
-        t: theme().space.l,
-        a: theme().space.m,
-        o: theme().space.m
-      }), ({
-        e,
-        t: t2,
-        a,
-        o
-      }, _p$) => {
-        e !== _p$?.e && setProp(_el$12, "left", e, _p$?.e);
-        t2 !== _p$?.t && setProp(_el$12, "right", t2, _p$?.t);
-        a !== _p$?.a && setProp(_el$12, "top", a, _p$?.a);
-        o !== _p$?.o && setProp(_el$12, "bottom", o, _p$?.o);
-      });
-      return _el$12;
-    })()
-  }));
+      }), createComponent2(ScrollArea, {
+        physics: {
+          snapX: {
+            interval: 72,
+            align: "start"
+          },
+          overscroll: "clamp"
+        },
+        get children() {
+          var _el$12 = createElement("row", {
+            gap: 8
+          }), _el$13 = createElement("sized", {
+            w: 72,
+            h: 36
+          }), _el$14 = createElement("sized", {
+            w: 72,
+            h: 36
+          }), _el$15 = createElement("sized", {
+            w: 72,
+            h: 36
+          }), _el$16 = createElement("sized", {
+            w: 72,
+            h: 36
+          }), _el$17 = createElement("sized", {
+            w: 72,
+            h: 36
+          });
+          insertNode(_el$12, _el$13);
+          insertNode(_el$12, _el$14);
+          insertNode(_el$12, _el$15);
+          insertNode(_el$12, _el$16);
+          insertNode(_el$12, _el$17);
+          return _el$12;
+        }
+      })];
+    }
+  }), null);
+  insert(_el$11, createComponent2(VirtualList, {
+    items: LIST_ITEMS,
+    itemKey: (item) => item.n,
+    estimatedHeight: 48,
+    controller: list2,
+    physics: {
+      overscroll: "rubber"
+    },
+    recycle: {
+      typeOf: () => "row",
+      render: (item) => (() => {
+        var _el$18 = createElement("padding");
+        insert(_el$18, createComponent2(Text, {
+          get fontSize() {
+            return theme().typography.body.size;
+          },
+          get color() {
+            return theme().color.text;
+          },
+          get direction() {
+            return directionFor(theme().locale);
+          },
+          get children() {
+            return `Item ${item().n}`;
+          }
+        }));
+        effect3(() => ({
+          e: theme().space.l,
+          t: theme().space.l,
+          a: theme().space.m,
+          o: theme().space.m
+        }), ({
+          e,
+          t: t2,
+          a,
+          o
+        }, _p$) => {
+          e !== _p$?.e && setProp(_el$18, "left", e, _p$?.e);
+          t2 !== _p$?.t && setProp(_el$18, "right", t2, _p$?.t);
+          a !== _p$?.a && setProp(_el$18, "top", a, _p$?.a);
+          o !== _p$?.o && setProp(_el$18, "bottom", o, _p$?.o);
+        });
+        return _el$18;
+      })()
+    }
+  }), null);
   effect3(() => ({
     e: theme().space.l,
     t: theme().space.s,
@@ -8358,16 +8471,16 @@ function App() {
     component: (props) => {
       const depth = Number(props.params.depth ?? "1") || 1;
       const [dialog, setDialog] = createSignal2(false);
-      var _el$13 = createElement("column", {
+      var _el$19 = createElement("column", {
         w: "100%"
-      }), _el$14 = createElement("row", {
+      }), _el$20 = createElement("row", {
         w: "100%"
       });
-      insertNode(_el$13, _el$14);
-      insert(_el$13, createComponent2(Title, {
+      insertNode(_el$19, _el$20);
+      insert(_el$19, createComponent2(Title, {
         title: `\u7B2C ${depth} \u9875`
-      }), _el$14);
-      insert(_el$13, createComponent2(Text, {
+      }), _el$20);
+      insert(_el$19, createComponent2(Text, {
         get fontSize() {
           return theme().typography.body.size;
         },
@@ -8378,35 +8491,35 @@ function App() {
           return directionFor(theme().locale);
         },
         children: "\u63A8\u8FDB\u4F1A\u538B\u5165\u4E0B\u4E00\u5C42\uFF0C\u5F39\u51FA\u7B49\u8F6C\u573A\u7ED3\u675F\u518D\u5378\u4E0B\u3002"
-      }), _el$14);
-      insert(_el$13, createComponent2(Button, {
+      }), _el$20);
+      insert(_el$19, createComponent2(Button, {
         wide: true,
         variant: "primary",
         label: "\u63A8\u8FDB",
         onClick: () => router.push(`/nav/${depth + 1}`)
-      }), _el$14);
-      insert(_el$14, createComponent2(Button, {
+      }), _el$20);
+      insert(_el$20, createComponent2(Button, {
         wide: true,
         label: "\u5F39\u51FA",
         onClick: () => router.pop()
       }), null);
-      insert(_el$14, createComponent2(Button, {
+      insert(_el$20, createComponent2(Button, {
         wide: true,
         label: "\u5BF9\u8BDD\u6846",
         onClick: () => setDialog(true)
       }), null);
-      insert(_el$13, createComponent2(Dialog, {
+      insert(_el$19, createComponent2(Dialog, {
         get open() {
           return dialog();
         },
         onClose: () => setDialog(false),
         get children() {
-          var _el$15 = createElement("decorated"), _el$16 = createElement("padding"), _el$17 = createElement("column", {
+          var _el$21 = createElement("decorated"), _el$22 = createElement("padding"), _el$23 = createElement("column", {
             w: "100%"
           });
-          insertNode(_el$15, _el$16);
-          insertNode(_el$16, _el$17);
-          insert(_el$17, createComponent2(Text, {
+          insertNode(_el$21, _el$22);
+          insertNode(_el$22, _el$23);
+          insert(_el$23, createComponent2(Text, {
             get fontSize() {
               return theme().typography.title.size;
             },
@@ -8421,7 +8534,7 @@ function App() {
             },
             children: "\u8FD4\u56DE\u952E\u5173\u95ED"
           }), null);
-          insert(_el$17, createComponent2(Button, {
+          insert(_el$23, createComponent2(Button, {
             wide: true,
             variant: "primary",
             label: "\u5173\u95ED",
@@ -8438,12 +8551,12 @@ function App() {
             a,
             o
           }, _p$) => {
-            e !== _p$?.e && setProp(_el$15, "color", e, _p$?.e);
-            t2 !== _p$?.t && setProp(_el$15, "radius", t2, _p$?.t);
-            a !== _p$?.a && setProp(_el$16, "edges", a, _p$?.a);
-            o !== _p$?.o && setProp(_el$17, "gap", o, _p$?.o);
+            e !== _p$?.e && setProp(_el$21, "color", e, _p$?.e);
+            t2 !== _p$?.t && setProp(_el$21, "radius", t2, _p$?.t);
+            a !== _p$?.a && setProp(_el$22, "edges", a, _p$?.a);
+            o !== _p$?.o && setProp(_el$23, "gap", o, _p$?.o);
           });
-          return _el$15;
+          return _el$21;
         }
       }), null);
       effect3(() => ({
@@ -8453,10 +8566,10 @@ function App() {
         e,
         t: t2
       }, _p$) => {
-        e !== _p$?.e && setProp(_el$13, "gap", e, _p$?.e);
-        t2 !== _p$?.t && setProp(_el$14, "gap", t2, _p$?.t);
+        e !== _p$?.e && setProp(_el$19, "gap", e, _p$?.e);
+        t2 !== _p$?.t && setProp(_el$20, "gap", t2, _p$?.t);
       });
-      return _el$13;
+      return _el$19;
     }
   }, {
     path: "/list",
@@ -8471,10 +8584,10 @@ function App() {
           return [createComponent2(TabBar, {
             router
           }), (() => {
-            var _el$18 = createElement("stack", {
+            var _el$24 = createElement("stack", {
               fill: true
             });
-            insert(_el$18, createComponent2(RouterView, {
+            insert(_el$24, createComponent2(RouterView, {
               router,
               get background() {
                 return theme().color.background;
@@ -8490,7 +8603,7 @@ function App() {
                 onBack: () => router.pop()
               })
             }));
-            return _el$18;
+            return _el$24;
           })()];
         }
       });

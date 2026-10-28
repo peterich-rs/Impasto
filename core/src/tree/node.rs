@@ -75,6 +75,15 @@ pub enum Gesture {
         id: NodeId,
         scale: f32,
     },
+    /// A scroll's phase changed. Velocity is points per millisecond; positive increases offset.
+    ScrollPhaseChanged {
+        id: NodeId,
+        phase: crate::ScrollPhase,
+        vx: f32,
+        vy: f32,
+        ox: f32,
+        oy: f32,
+    },
 }
 
 /// Which drags a pointer region takes before a scroll does.
@@ -252,6 +261,9 @@ bitflags::bitflags! {
         const FOCUSABLE = 1 << 6;
         /// Row children share a text baseline. Column ignores this flag.
         const BASELINE_CROSS = 1 << 7;
+        /// Text paint identity changed and [`super::layout::Tree::sync_paragraphs`]
+        /// has not consumed it yet.
+        const TEXT_DIRTY = 1 << 8;
     }
 }
 
@@ -374,6 +386,9 @@ pub(super) struct ScrollGeom {
     pub(super) offset_y: f32,
     pub(super) overscroll_x: f32,
     pub(super) overscroll_y: f32,
+    pub(super) physics: crate::ScrollPhysics,
+    pub(super) chain: bool,
+    pub(super) phase: crate::ScrollPhase,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -449,6 +464,9 @@ impl Node {
                 offset_y: 0.0,
                 overscroll_x: 0.0,
                 overscroll_y: 0.0,
+                physics: crate::ScrollPhysics::default(),
+                chain: true,
+                phase: crate::ScrollPhase::Idle,
             }),
             Kind::Transform => Geom::Transform(TransformGeom::identity()),
             _ => Geom::None,
@@ -523,15 +541,35 @@ impl Node {
         }
     }
 
-    /// True when `record` stops flattening here and caches a picture.
+    /// Blur, backdrop blur, or a blend other than [`protocol::BlendMode::SrcOver`].
+    pub(super) fn paints_effect(&self) -> bool {
+        let live = |sigma: f32| sigma.is_finite() && sigma > 0.0;
+        live(self.blur()) || live(self.backdrop()) || self.blend() != protocol::BlendMode::SrcOver
+    }
+
+    /// This node opens layers and owns the runs under it this frame.
     ///
-    /// Clip, a settled opacity, and an identity transform still cache: the
-    /// layer stays as retained content, only without an offscreen composite.
-    pub(super) fn is_layer_kind(&self) -> bool {
-        matches!(
-            self.kind,
-            Kind::Scroll | Kind::Transform | Kind::Opacity | Kind::Clip
-        ) || self.composites()
+    /// `subtree` is true when a strict descendant opens layers. A clip uses that
+    /// to decide whether its bracket is a layer or commands inside the parent run.
+    /// Alpha 0 and a full alpha do not open an opacity layer. An identity transform
+    /// does not open a transform layer. Effects do, on any kind.
+    pub(super) fn renders_layers(&self, subtree: bool) -> bool {
+        if self.paints_effect() {
+            return true;
+        }
+        if self.kind == Kind::Clip {
+            return subtree;
+        }
+        // Alpha 0 skips the subtree. It does not open an opacity layer.
+        if self.kind == Kind::Opacity && self.alpha() == Some(0) {
+            return false;
+        }
+        self.composites()
+    }
+
+    /// Scroll keeps one child picture. Other layers keep runs.
+    pub(super) fn caches_picture(&self) -> bool {
+        self.kind == Kind::Scroll
     }
 
     pub(super) fn hit_role(&self) -> Hit {
@@ -657,6 +695,13 @@ impl Node {
         match self.geom {
             Geom::Scroll(geom) => (geom.overscroll_x, geom.overscroll_y),
             Geom::None | Geom::Transform(_) => (0.0, 0.0),
+        }
+    }
+
+    pub(super) fn scroll_geom(&self) -> Option<&ScrollGeom> {
+        match &self.geom {
+            Geom::Scroll(geom) => Some(geom),
+            Geom::None | Geom::Transform(_) => None,
         }
     }
 

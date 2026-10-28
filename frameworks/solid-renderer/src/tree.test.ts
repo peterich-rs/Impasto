@@ -48,6 +48,8 @@ function mockHost() {
     append: (parent, child) => note("append", [parent, child]),
     insert: (parent, child, before) => note("insert", [parent, child, before]),
     remove: (parent, child) => note("remove", [parent, child]),
+    detach: (parent, child) => note("detach", [parent, child]),
+    discard: (node) => note("discard", [node]),
     parent: () => parentOf,
     firstChild: () => first,
     nextSibling: () => sibling,
@@ -93,6 +95,12 @@ function mockHost() {
     setLineHeight: (node, height) => note("setLineHeight", [node, height]),
     setFamily: (node, family) => note("setFamily", [node, family]),
     setScrollOffset: (node, x, y) => note("setScrollOffset", [node, x, y]),
+    overscroll: () => ({ x: 0, y: 0 }),
+    setScrollPhysics: (node, tau) => note("setScrollPhysics", [node, tau]),
+    setScrollChain: (node, chain) => note("setScrollChain", [node, chain]),
+    fling: (node, vx, vy) => note("fling", [node, vx, vy]),
+    stopScroll: (node) => note("stopScroll", [node]),
+    scrollTo: (node, x, y) => note("scrollTo", [node, x, y]),
     scrollOffset: () => ({ x: 0, y: 0 }),
     rect: () => ({ x: 0, y: 0, w: 0, h: 0 }),
     setTransform: (node, x, y, rotate, scale) => note("setTransform", [node, x, y, rotate, scale]),
@@ -158,6 +166,7 @@ function mockHost() {
     onLeave: (node, fn) => note("onLeave", [node, typeof fn]),
     onWheel: (node, fn) => note("onWheel", [node, typeof fn]),
     onScroll: (node, fn) => note("onScroll", [node, typeof fn]),
+    onScrollState: (fn) => note("onScrollState", [typeof fn]),
     onSecondaryClick: (node, fn) => note("onSecondaryClick", [node, typeof fn]),
     onZoom: (node, fn) => note("onZoom", [node, typeof fn]),
     textEdit: (node, op, text) => {
@@ -165,6 +174,7 @@ function mockHost() {
       return { text: text ?? "", start: 0, end: 0 };
     },
     onFrame: (fn) => note("onFrame", [typeof fn]),
+    onLayout: (fn) => note("onLayout", [typeof fn]),
   };
   return {
     host,

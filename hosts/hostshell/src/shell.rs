@@ -9,28 +9,30 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Instant;
 
+use engine::Surface as _;
 use session::FrameTime;
 
-use crate::command::{Command, SurfaceId};
+use crate::command::{Command, SurfaceId, SurfaceTarget};
 use crate::error::BootError;
 use crate::images::{self, ImageCache, ImageDecoder, ImageError, ImageReady, ImageRequest};
 use crate::input::Input;
-use crate::present::{AfterPresent, after_present};
+use crate::present::{self, AfterPresent, after_present};
 use crate::queue::Inbox;
 use crate::scheduler::{self, FrameScheduler, FrameStep, FrameView, VsyncOp};
 use crate::shaper::ImpellerShaper;
-use crate::surface::{Changed, Destroyed, Ready, SurfaceHost};
+use crate::surface::{Changed, Destroyed, OpenRetry, PendingMetrics, Ready, SurfaceHost};
 use crate::timing::FrameTiming;
 use crate::{Boot, Launch, LogLevel, Services, Surface};
 
 pub struct EngineSlot {
     engine: Rc<RefCell<engine::Engine>>,
+    typography: Rc<RefCell<engine::Typography>>,
     log: Rc<dyn Fn(LogLevel, &str)>,
 }
 
 impl EngineSlot {
     pub fn shaper(&self) -> ImpellerShaper {
-        ImpellerShaper::new(Rc::clone(&self.engine))
+        ImpellerShaper::new(Rc::clone(&self.typography))
     }
 
     pub fn log_hook(&self) -> Box<dyn Fn(u8, &str)> {
@@ -104,6 +106,35 @@ impl Acks {
     }
 }
 
+/// Waits until the render thread has dropped `id`. Clones only the ack map.
+pub struct DropWait {
+    acks: Arc<Acks>,
+}
+
+impl DropWait {
+    /// Blocks until `id` is signalled, or until shutdown marks every ack done.
+    /// Returns immediately when `id` was never armed or was already taken.
+    pub fn wait(self, id: SurfaceId) {
+        let mut pending = lock(&self.acks.pending);
+        loop {
+            match pending.get(&id).copied() {
+                Some(true) => {
+                    pending.remove(&id);
+                    return;
+                }
+                None => return,
+                Some(false) => {
+                    pending = self
+                        .acks
+                        .cv
+                        .wait(pending)
+                        .unwrap_or_else(|error| error.into_inner());
+                }
+            }
+        }
+    }
+}
+
 pub struct Link {
     inbox: Arc<Inbox>,
     done: Mutex<Option<Receiver<Result<(), BootError>>>>,
@@ -127,7 +158,7 @@ impl Link {
     }
 
     /// Posts destruction and remembers `id`. The platform thread keeps the window
-    /// until [`Link::poll_dropped`] reports the render thread has dropped it.
+    /// until [`DropWait::wait`] sees this ack. [`Link::poll_dropped`] is the same bit.
     pub fn begin_destroy(&self, id: SurfaceId) {
         self.acks.arm(id);
         self.inbox.post(Command::SurfaceDestroyed { id });
@@ -135,6 +166,13 @@ impl Link {
 
     pub fn poll_dropped(&self, id: SurfaceId) -> bool {
         self.acks.poll(id)
+    }
+
+    /// A waiter for [`Self::begin_destroy`]. The platform thread does not block on it.
+    pub fn drop_wait(&self) -> DropWait {
+        DropWait {
+            acks: Arc::clone(&self.acks),
+        }
     }
 
     pub fn shutdown_and_join(&self) -> Result<(), BootError> {
@@ -293,6 +331,7 @@ struct Installed {
 struct Runtime {
     services: Rc<RefCell<Box<dyn Services>>>,
     engine: Rc<RefCell<engine::Engine>>,
+    typography: Rc<RefCell<engine::Typography>>,
     log: Rc<dyn Fn(LogLevel, &str)>,
     session: Option<Box<dyn session::Session>>,
     latest: Option<Arc<protocol::LayerTree>>,
@@ -301,10 +340,7 @@ struct Runtime {
     scheduler: FrameScheduler,
     vsync: Arc<dyn crate::Vsync>,
     open_surface: Box<
-        dyn FnMut(
-                &mut engine::Engine,
-                crate::command::SurfaceTarget,
-            ) -> Result<Box<dyn Surface>, engine::Status>
+        dyn FnMut(&mut engine::Engine, SurfaceTarget) -> Result<Box<dyn Surface>, engine::Status>
             + Send,
     >,
     installed: Option<Installed>,
@@ -317,6 +353,9 @@ struct Runtime {
     panic_streak: u32,
     wake_tx: Sender<Option<i64>>,
     dump_list: bool,
+    present_failures: u32,
+    present_logged: bool,
+    present_retry_at: Option<i64>,
 }
 
 fn render(
@@ -346,8 +385,10 @@ fn render(
         }) as Rc<dyn Fn(LogLevel, &str)>
     };
     let Launch::Session(open) = boot.launch;
+    let typography = engine.borrow().typography();
     let slot = EngineSlot {
         engine: Rc::clone(&engine),
+        typography: Rc::clone(&typography),
         log: Rc::clone(&log),
     };
     let session = match open(
@@ -377,6 +418,7 @@ fn render(
     }));
     let mut runtime = Runtime {
         services,
+        typography,
         engine,
         log,
         session,
@@ -396,6 +438,9 @@ fn render(
         semantics: None,
         wake_tx,
         dump_list: boot.dump_list,
+        present_failures: 0,
+        present_logged: false,
+        present_retry_at: None,
     };
     while let Some(command) = inbox.recv() {
         if on_command(&mut runtime, command, acks)? {
@@ -410,6 +455,7 @@ fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bo
     match command {
         Command::Shutdown => Ok(true),
         Command::SurfaceDestroyed { id } => {
+            runtime.surfaces.drop_pending(id);
             if runtime.surfaces.destroyed(id) == Destroyed::Dropped {
                 let follow = scheduler::surface_lost();
                 runtime.installed = None;
@@ -421,36 +467,14 @@ fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bo
             Ok(false)
         }
         Command::SurfaceReady(target) => {
-            note_scale(runtime, target.metrics.device_pixel_ratio);
-            let metrics = target.metrics;
-            let opened = {
-                let mut engine = runtime.engine.borrow_mut();
-                runtime
-                    .surfaces
-                    .ready(target, &mut engine, runtime.open_surface.as_mut())
-            };
-            match opened {
-                Ready::Opened { id, replaced } => {
-                    let _ = id;
+            let attempts = runtime.surfaces.take_prior_attempts(target.id);
+            match open_surface_target(runtime, target, attempts, OpenPlace::Command)? {
+                OpenedSurface::Ready { replaced } => {
                     if let Some(old) = replaced {
                         acks.signal(old);
                     }
-                    if runtime.input.set_metrics(metrics) {
-                        arm(runtime);
-                    }
-                    arm(runtime);
                 }
-                Ready::Failed(engine::Status::NotReady) => {
-                    runtime.installed = None;
-                    runtime.needs_present = false;
-                    runtime.scheduler.cancel();
-                    runtime.vsync.cancel();
-                }
-                Ready::Failed(status) => {
-                    let error = BootError::Engine(status);
-                    (runtime.log)(LogLevel::Error, &error.to_string());
-                    return Err(error);
-                }
+                OpenedSurface::Waiting => {}
             }
             Ok(false)
         }
@@ -459,6 +483,15 @@ fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bo
                 note_scale(runtime, metrics.device_pixel_ratio);
                 if runtime.input.set_metrics(metrics) {
                     arm(runtime);
+                }
+            } else {
+                match runtime.surfaces.retarget(id, metrics) {
+                    PendingMetrics::Absent => {}
+                    PendingMetrics::Updated => note_scale(runtime, metrics.device_pixel_ratio),
+                    PendingMetrics::Rearm => {
+                        note_scale(runtime, metrics.device_pixel_ratio);
+                        arm(runtime);
+                    }
                 }
             }
             Ok(false)
@@ -498,12 +531,32 @@ fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bo
             }
             let arm_frame = match state {
                 session::Lifecycle::Hidden | session::Lifecycle::Paused => runtime.input.pause(),
-                session::Lifecycle::Resumed => runtime.input.resume(),
+                session::Lifecycle::Resumed => {
+                    runtime.needs_present = true;
+                    runtime.present_failures = 0;
+                    runtime.present_logged = false;
+                    runtime.present_retry_at = None;
+                    runtime.surfaces.rearm_pending();
+                    runtime.input.resume()
+                }
                 session::Lifecycle::Inactive | session::Lifecycle::Detached => false,
             };
             if arm_frame {
                 arm(runtime);
             }
+            Ok(false)
+        }
+        Command::Invalidate => {
+            runtime.needs_present = true;
+            runtime.present_retry_at = None;
+            arm(runtime);
+            Ok(false)
+        }
+        Command::MemoryWarning => {
+            runtime.installed = None;
+            runtime.present_retry_at = None;
+            runtime.images.trim();
+            arm(runtime);
             Ok(false)
         }
         Command::Settings(settings) => {
@@ -578,7 +631,11 @@ fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bo
             Ok(false)
         }
         Command::Wake => {
-            if runtime.input.is_paused() || runtime.scheduler.busy() {
+            if runtime.input.is_paused() {
+                return Ok(false);
+            }
+            if runtime.scheduler.busy() {
+                arm(runtime);
                 return Ok(false);
             }
             let now = crate::net::mono_ms();
@@ -590,13 +647,14 @@ fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bo
                     interval_ms: 16.0,
                     mono_ms: now,
                 },
+                acks,
             )
         }
         Command::Frame { token, time } => {
             if !runtime.scheduler.accept(token) {
                 return Ok(false);
             }
-            on_frame(runtime, time)
+            on_frame(runtime, time, acks)
         }
     }
 }
@@ -645,7 +703,17 @@ fn layer_tree_line(tree: &protocol::LayerTree) -> String {
     )
 }
 
-fn on_frame(runtime: &mut Runtime, time: FrameTime) -> Result<bool, BootError> {
+fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool, BootError> {
+    if let Some((target, attempts)) = runtime.surfaces.take_attempt() {
+        match open_surface_target(runtime, target, attempts, OpenPlace::Frame)? {
+            OpenedSurface::Ready { replaced } => {
+                if let Some(old) = replaced {
+                    acks.signal(old);
+                }
+            }
+            OpenedSurface::Waiting => return Ok(end_frame(runtime, false, false)),
+        }
+    }
     if !runtime.surfaces.is_open() {
         return Ok(end_frame(runtime, false, false));
     }
@@ -656,6 +724,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime) -> Result<bool, BootError> {
             session.metrics(&metrics);
         }
     }
+    let gesture_started = Instant::now();
     let mut leave = false;
     if let Some(session) = runtime.session.as_mut() {
         for event in frame.pointers {
@@ -668,6 +737,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime) -> Result<bool, BootError> {
             session.ime_dismissed();
         }
     }
+    let gesture_ms = gesture_started.elapsed().as_secs_f64() * 1000.0;
     runtime.frame_number = runtime.frame_number.wrapping_add(1);
     let session_started = Instant::now();
     let mut again;
@@ -675,6 +745,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime) -> Result<bool, BootError> {
     let mut fonts = Vec::new();
     let mut census = None;
     let mut layers_changed = false;
+    let mut phases = None;
     if let Some(session) = runtime.session.as_mut() {
         let framed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.frame(time)));
         match framed {
@@ -704,6 +775,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime) -> Result<bool, BootError> {
                 reloads = std::mem::take(&mut output.reloads);
                 fonts = std::mem::take(&mut output.fonts);
                 census = output.images.take();
+                phases = output.phases.take();
             }
             Err(_) => {
                 (runtime.log)(
@@ -803,13 +875,27 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime) -> Result<bool, BootError> {
     };
     let present_ms = elapsed_ms(started);
     let stats = runtime.engine.borrow().submit_stats();
+    let shapes = runtime.typography.borrow_mut().take_shape_stats();
+    let phase = phases.unwrap_or_default();
     let timing = FrameTiming {
         number: runtime.frame_number,
         vsync_ms: time.vsync_ms,
         target_ms: time.target_ms,
         session_ms,
+        gesture_ms,
+        script_ms: phase.script_ms,
+        layout_ms: phase.layout_ms,
+        layout_cb_ms: phase.layout_cb_ms,
+        sync_ms: phase.sync_ms,
+        record_ms: phase.record_ms,
+        semantics_ms: phase.semantics_ms,
         submit_ms,
         present_ms,
+        shapes_built: shapes.built,
+        shapes_measure_hit: shapes.measure_hit,
+        shapes_measure_miss: shapes.measure_miss,
+        shapes_paint_hit: shapes.paint_hit,
+        shapes_paint_miss: shapes.paint_miss,
         picture_rebuilt: stats.picture_rebuilt,
         picture_reused: stats.picture_reused,
         layer_count: stats.layer_count,
@@ -818,14 +904,45 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime) -> Result<bool, BootError> {
         (runtime.log)(
             LogLevel::Info,
             &format!(
-                "frame {} session {:.2}ms submit {:.2}ms present {:.2}ms rebuilt {} reused {} layers {}",
+                "frame {} gesture {:.2}ms script {:.2}ms layout {:.2}ms layoutcb {:.2}ms sync {:.2}ms record {:.2}ms semantics {:.2}ms session {:.2}ms submit {:.2}ms present {:.2}ms shapes b{} mh{} mm{} ph{} pm{} rebuilt {} reused {} layers {} js motion {:.2} dispatch {:.2} timer {:.2} raf {:.2} callback {:.2} flush {:.2} laywork {:.2} x{} {} reuse {} shaped {} ptr {} key {} edit {} ime {} scroll {} focus {} blur {} gesture {}",
                 timing.number,
+                timing.gesture_ms,
+                timing.script_ms,
+                timing.layout_ms,
+                timing.layout_cb_ms,
+                timing.sync_ms,
+                timing.record_ms,
+                timing.semantics_ms,
                 timing.session_ms,
                 timing.submit_ms,
                 timing.present_ms,
+                timing.shapes_built,
+                timing.shapes_measure_hit,
+                timing.shapes_measure_miss,
+                timing.shapes_paint_hit,
+                timing.shapes_paint_miss,
                 timing.picture_rebuilt,
                 timing.picture_reused,
-                timing.layer_count
+                timing.layer_count,
+                phase.script.motion_ms,
+                phase.script.dispatch_ms,
+                phase.script.timer_ms,
+                phase.script.raf_ms,
+                phase.script.callback_ms,
+                phase.script.flush_ms,
+                phase.trace.laywork_ms,
+                phase.trace.layout_passes,
+                phase.trace.layout_cause,
+                phase.trace.text_reused,
+                phase.trace.text_shaped,
+                phase.trace.pointers,
+                phase.trace.keys,
+                phase.trace.edits,
+                phase.trace.ime,
+                phase.trace.scrolls,
+                phase.trace.focus,
+                phase.trace.blur,
+                phase.trace.gestures
             ),
         );
     }
@@ -839,9 +956,85 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime) -> Result<bool, BootError> {
         runtime.surfaces.clear();
         runtime.installed = None;
     }
+    if matches!(after, AfterPresent::Shown { .. } | AfterPresent::Stop) {
+        runtime.present_failures = 0;
+        runtime.present_logged = false;
+        runtime.present_retry_at = None;
+    }
+    let mut again = follow.vsync == VsyncOp::Request;
+    if after == AfterPresent::Retry {
+        runtime.present_failures = runtime.present_failures.saturating_add(1);
+        if let Some(delay) = present::present_retry_delay_ms(runtime.present_failures) {
+            if !runtime.present_logged {
+                runtime.present_logged = true;
+                (runtime.log)(LogLevel::Error, "present failed; backing off");
+            }
+            runtime.present_retry_at = Some(crate::net::mono_ms() as i64 + delay);
+            again = false;
+        } else {
+            runtime.present_retry_at = None;
+        }
+    }
     let stop = follow.vsync == VsyncOp::Stop;
-    let again = follow.vsync == VsyncOp::Request;
     Ok(end_frame(runtime, again, stop))
+}
+
+enum OpenPlace {
+    Command,
+    Frame,
+}
+
+enum OpenedSurface {
+    Ready { replaced: Option<SurfaceId> },
+    Waiting,
+}
+
+fn open_surface_target(
+    runtime: &mut Runtime,
+    target: SurfaceTarget,
+    attempts: u32,
+    place: OpenPlace,
+) -> Result<OpenedSurface, BootError> {
+    note_scale(runtime, target.metrics.device_pixel_ratio);
+    let metrics = target.metrics;
+    let kept = SurfaceTarget {
+        id: target.id,
+        layer: target.layer,
+        metrics,
+    };
+    let opened = {
+        let mut engine = runtime.engine.borrow_mut();
+        runtime
+            .surfaces
+            .ready(target, &mut engine, runtime.open_surface.as_mut())
+    };
+    match opened {
+        Ready::Opened { replaced, .. } => {
+            if matches!(place, OpenPlace::Command) {
+                if runtime.input.set_metrics(metrics) {
+                    arm(runtime);
+                }
+                arm(runtime);
+            } else {
+                runtime.input.set_metrics(metrics);
+            }
+            Ok(OpenedSurface::Ready { replaced })
+        }
+        Ready::Failed(engine::Status::NotReady) => {
+            let retry = runtime.surfaces.fail_attempt(kept, attempts);
+            if matches!(retry, OpenRetry::GaveUp) {
+                (runtime.log)(LogLevel::Error, "surface open failed; stopping retry");
+            } else {
+                arm(runtime);
+            }
+            Ok(OpenedSurface::Waiting)
+        }
+        Ready::Failed(status) => {
+            let error = BootError::Engine(status);
+            (runtime.log)(LogLevel::Error, &error.to_string());
+            Err(error)
+        }
+    }
 }
 
 fn images_ready(
@@ -903,13 +1096,22 @@ fn end_frame(runtime: &mut Runtime, again: bool, stop: bool) -> bool {
         note_wake(runtime, None);
         return true;
     }
-    let deadline = runtime.session.as_mut().and_then(|session| {
+    let session_deadline = runtime.session.as_mut().and_then(|session| {
         if runtime.input.is_paused() {
             None
         } else {
             session.next_wake_ms().map(|ms| ms as i64)
         }
     });
+    let deadline = if runtime.input.is_paused() {
+        session_deadline
+    } else {
+        match (session_deadline, runtime.present_retry_at) {
+            (Some(session_at), Some(retry_at)) => Some(session_at.min(retry_at)),
+            (None, Some(retry_at)) => Some(retry_at),
+            (session_at, None) => session_at,
+        }
+    };
     note_wake(runtime, deadline);
     if let Some(token) = runtime.scheduler.finish(again) {
         runtime.vsync.request_frame(token);

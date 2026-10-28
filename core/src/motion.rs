@@ -160,6 +160,86 @@ pub const OVERSCROLL_DAMPING: f32 = 26.0;
 /// Fraction of the distance past the scroll edge that becomes overscroll.
 pub const OVERSCROLL_FACTOR: f32 = 0.55;
 
+/// How a scroll treats a drag past its limits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverscrollMode {
+    /// Offset stays on the limit. The leftover times [`OVERSCROLL_FACTOR`] is overscroll.
+    RubberBand,
+    /// Offset stays on the limit and overscroll stays zero.
+    Clamp,
+}
+
+/// Which edge of a snap interval lines up with the viewport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapAlign {
+    Start,
+    Center,
+    End,
+}
+
+/// One axis of periodic snap targets, in scene points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SnapGrid {
+    pub interval: f32,
+    pub align: SnapAlign,
+}
+
+/// Per-scroll motion parameters. Defaults match the historical constants.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollPhysics {
+    pub friction_tau_ms: f32,
+    pub overscroll: OverscrollMode,
+    pub overscroll_stiffness: f32,
+    pub overscroll_damping: f32,
+    pub overscroll_factor: f32,
+    pub snap_x: Option<SnapGrid>,
+    pub snap_y: Option<SnapGrid>,
+}
+
+impl Default for ScrollPhysics {
+    fn default() -> Self {
+        Self {
+            friction_tau_ms: SCROLL_TAU_MS,
+            overscroll: OverscrollMode::RubberBand,
+            overscroll_stiffness: OVERSCROLL_STIFFNESS,
+            overscroll_damping: OVERSCROLL_DAMPING,
+            overscroll_factor: OVERSCROLL_FACTOR,
+            snap_x: None,
+            snap_y: None,
+        }
+    }
+}
+
+/// Coast, drag, and settle. Emitted only when the value changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ScrollPhase {
+    #[default]
+    Idle,
+    Dragging,
+    Coasting,
+    Settling,
+}
+
+impl ScrollPhase {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Dragging => "dragging",
+            Self::Coasting => "coasting",
+            Self::Settling => "settling",
+        }
+    }
+
+    pub fn code(self) -> i32 {
+        match self {
+            Self::Idle => 0,
+            Self::Dragging => 1,
+            Self::Coasting => 2,
+            Self::Settling => 3,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

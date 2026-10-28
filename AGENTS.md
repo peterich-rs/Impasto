@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本文件是后续 agent 的工作约定。协议、引擎接口和字节测试以代码为准。人类可读的简介在 `README.md`。两边不一致时，先读 Rust 源码和测试，再改文档。当前结构在 `docs/architecture.md`。还没落地的目标在 `docs/refactor-plan.md`；本文件里和那份规划冲突的远期禁令以规划为准。
+本文件是后续 agent 的工作约定。协议、引擎接口和字节测试以代码为准。人类可读的简介在 `README.md`。两边不一致时，先读 Rust 源码和测试，再改文档。当前结构在 `docs/architecture.md`。还没落地的目标在 `docs/refactor-plan.md`。本文件里和那份规划冲突的远期禁令以规划为准。
 
 用户和仓库文档使用中文。回复用户用中文。
 
@@ -103,15 +103,15 @@ Solid 的 `@solidjs/universal` 只有 `createElement`、`insertNode`、`setPrope
 | 场景协议 | `protocol/` | 进程内的 `DrawList` 与 `LayerTree`（`draw_list.rs`、`layer.rs`）。绝对坐标。没有 flex，没有回调，没有应用状态，没有场景字节 |
 | 渲染器 | `frameworks/solid-renderer`，`frameworks/kotlin-ui` | 把 JSX 或 Kotlin DSL 变成对 `core/` 的增删改。只标脏，不算坐标 |
 | 响应式 | Solid signal；Kotlin 侧以后的 signal | 应用和控件的状态。写信号会标脏对应元素并请求下一帧 |
-| 基础控件 | 布局原语在 `core/`。`Button`、`ScrollArea`、`Field` 这类组合控件在各语言包一层 | `Text`、`Row`、`Column`、`Stack`、`Padding`、`Clip`、`Opacity`、`Scroll`、`Transform` 是渲染对象。`Button` 用它们加上手势组成。`Field` 绑定 `core` 的 `TextEditor`。编辑按字形簇进行，偏移是 UTF-16 |
+| 基础控件 | 布局原语和组合控件内核在 `core/`。语言包是皮：模板、信号和渲染回调 | `Text`、`Row`、`Column`、`Stack`、`Padding`、`Clip`、`Opacity`、`Scroll`、`Transform` 是渲染对象。`Button` 用它们加上手势组成。`Field` 绑定 `core` 的 `TextEditor`。`ListDriver` 做窗口、测量调度和可见集 diff。`ScrollController` 做夹紧、拖动续算和刷新阈值。`createSlot` 仍是语言侧的 owner。编辑按字形簇进行，偏移是 UTF-16 |
 | 应用 | `apps/gallery-solid` | 只写状态和控件组合 |
 
-一帧在渲染线程上完成。平台线程把指针、metrics 和生命周期放进命令队列后立即返回。命中测试用上一帧的几何，在渲染线程排空队列时做。监听器只写状态。接着才冲刷、布局、录制。`layer_epoch` 未变且缩放相同则跳过 `submit_layers`，已安装的显示列表仍可 present。没有新的指针、metrics 或表面事件时不再登记下一帧，除非会话申请了恰好下一帧。这个申请在 present 之后被取走。动画要连续播放，就在每一帧里再申请。当前结构见 `docs/architecture.md`。三端差异见 `docs/platform-hosts.md`。迭代规划见 `docs/refactor-plan.md`。
+一帧在渲染线程上完成。平台线程把指针、metrics 和生命周期放进命令队列后立即返回。命中测试用上一帧的几何，在渲染线程排空队列时做。监听器只写状态。接着才冲刷、布局、布局回调、录制。`layer_epoch` 未变且缩放相同则跳过 `submit_layers`。`needs_present` 为假时也跳过 `present`；为真时 `PresentCached`，把已安装的显示列表画进新 drawable。`Resumed`、`Invalidate` 和 present 失败会置 `needs_present`。`MemoryWarning` 清掉已安装的列表，下一帧重新 `submit_layers`。没有新的指针、metrics 或表面事件时不再登记下一帧，除非会话申请了恰好下一帧。这个申请在 present 之后被取走。动画要连续播放，就在每一帧里再申请。当前结构见 `docs/architecture.md`。三端差异见 `docs/platform-hosts.md`。迭代规划见 `docs/refactor-plan.md`。
 
 ```
 pointer → hit-test（上一帧）→ 监听器写信号
 key / text / composing → 有焦点才派发到该节点
-vsync → 冲刷信号 → layout → 录成 DisplayList → player → present
+vsync → 冲刷信号 → layout → driver tick（写了树或可见集则再 layout）→ 布局回调（写了树则再 layout 一次）→ 录成 DisplayList → player → present
 present 之后 wants_ime 变化才让平台弹出或收起键盘
 ```
 
@@ -119,11 +119,11 @@ present 之后 wants_ime 变化才让平台弹出或收起键盘
 
 按键和输入法的事件类型在 `session::InputEvent`，以 `session/src/lib.rs` 为准。无焦点时会话丢掉事件。编辑状态在 `core` 的 `TextEditor`。有焦点时，借用结束后把事件派发给该节点的监听器。`Tree::measure_text` 用这棵树的 `Shaper`，参数与 `Shaper::measure` 相同。键盘状态由 `Session::take_ime` 交出 `ImeUpdate`（`Show` / `Update` / `Hide`），宿主在 `frame` 之后经 `Services::apply_ime` 投递给平台，`Update` 携带完整 `ImeState`（文本、UTF-16 选区、组合区间和光标矩形）。用户把键盘收起时，宿主投递 `ImeDismissed`，会话失焦。光标闪烁只在聚焦时 `requestFrame`。
 
-运行中的界面由 `core::Tree::record` 组出 `LayerTree`，picture 里的命令坐标相对该 picture 的原点。圆角、裁剪、透明度在层上。文字命令还带段落样式：对齐、字重、方向、最大行数、省略号、行高倍数，以及可选的 family。缺省是左对齐、字重 400、从左到右、不限制行数，行高用字体自己的。family 缺省时用渲染引擎注册的那一份字体。`PushTransform` 把随后的命令平移、顺时针旋转再等比缩放，直到配对的 `Pop`。旋转单位是弧度。命中把查询点按这条变换的逆矩阵送进子节点。圆角裁剪按圆角拒绝角上的点。布局样式留在渲染树上，不进 `DrawList`。
+运行中的界面由 `core::Tree::record` 组出 `LayerTree`，picture 里的命令坐标相对该 picture 的原点。一段 picture 属于一个 owner：根，或本帧开层的 `Scroll`、`Opacity`、`Transform`、`Clip` 与效果节点。没有开层后代的 `Clip` 把 `PushClip` 留在父 picture 里。`Scroll` 的内容是单独一张 child picture，滚动偏移在 `Offset` 层上。平移、旋转、缩放和半透明记在层上。圆角、裁剪、透明度在层上。文字命令还带段落样式：对齐、字重、方向、最大行数、省略号、行高倍数，以及可选的 family。缺省是左对齐、字重 400、从左到右、不限制行数，行高用字体自己的。family 缺省时用渲染引擎注册的那一份字体。`PushTransform` 把随后的命令平移、顺时针旋转再等比缩放，直到配对的 `Pop`。旋转单位是弧度。命中把查询点按这条变换的逆矩阵送进子节点。圆角裁剪按圆角拒绝角上的点。布局样式留在渲染树上，不进 `DrawList`。
 
-文字测量的实现必须和渲染引擎绘制文字的实现是同一个排版器。`DrawList` 的文字命令带 `font_size`、`max_width` 和颜色。渲染引擎按命令里的字号绘制，不乘 `point_scale`。宿主注入的排版器调用 `Engine::measure_paragraph`，和绘制共用同一段已经带上前景色的段落。测试用 `MonoShaper`。不要往渲染引擎里加布局。
+文字测量的实现必须和渲染引擎绘制文字的实现是同一个排版器。`DrawList` 的文字命令带 `font_size`、`max_width` 和颜色。渲染引擎按命令里的字号绘制，不乘 `point_scale`。布局测量走 `Typography::measure_paint`，`sync_paragraphs` 用 `retain_measured` 复用同一带前景色的槽。光标仍走 `Typography::measure_paragraph` 的度量缓存。测试用 `MonoShaper`。不要往渲染引擎里加布局。
 
-布局原语是 `Sized`、`Padding`、`Align`、`Stack`、`Row`、`Column`、`Grid`、`Text`、`Image`、`PointerRegion`、`Decorated`、`Clip`、`Opacity`、`Scroll`、`Transform`。任何节点都可以 `set_focusable`。几何交给 Taffy，含 flex grow 和 grid。`Stack`、`Clip`、`Opacity`、`Transform` 是一格的 grid，子节点放在第 1 行第 1 列。`Scroll` 也是一格 grid，轨道是 `max_content`：视口是边框盒，子节点按完整尺寸布局，可以高出视口。`set_scroll_offset` 不进 Taffy，只让下一帧的录制和命中平移。绘制坐标减去 offset，命中查询加上 offset，并用 `PushClip` 裁到视口。`Transform` 录 `PushTransform` … `Pop`。`set_justify` 和 `set_wrap` 写行或列的主轴对齐和换行。`Text` 和 `Image` 用 measure 回调报告尺寸。`Decorated` 按子节点定尺寸，命中交给子节点，并录一条盖住边框盒的矩形，圆角记在命令上。宽或高为 0 时不录矩形。`Clip`、`Opacity`、`Scroll` 和 `Transform` 在子节点前后录 `Push` 和 `Pop`，盒子为 0 也成对。
+布局原语是 `Sized`、`Padding`、`Align`、`Stack`、`Row`、`Column`、`Grid`、`Text`、`Image`、`PointerRegion`、`Decorated`、`Clip`、`Opacity`、`Scroll`、`Transform`。任何节点都可以 `set_focusable`。几何交给 Taffy，含 flex grow 和 grid。`Stack`、`Clip`、`Opacity`、`Transform` 是一格的 grid，子节点放在第 1 行第 1 列。`Scroll` 也是一格 grid，轨道是 `max_content`：视口是边框盒，子节点按完整尺寸布局，可以高出视口。`set_scroll_offset` 不进 Taffy，只让下一帧的录制和命中平移。扁平列表减去 offset，picture 保留内容局部坐标，由 `Offset` 层平移。命中查询加上 offset，并用 `PushClip` 裁到视口。非单位 `Transform`（含纯平移）是 `Transform` 层，扁平列表里是 `PushTransform` … `Pop`。`set_justify` 和 `set_wrap` 写行或列的主轴对齐和换行。`Text` 和 `Image` 用 measure 回调报告尺寸。`Decorated` 按子节点定尺寸，命中交给子节点，并录一条盖住边框盒的矩形，圆角记在命令上。宽或高为 0 时不录矩形。扁平列表里，开层的节点以及写成命令的 `Clip` 仍在子节点前后成对 `Push` / `Pop`，盒子为 0 也成对。alpha 为 255 和单位 `Transform` 不推这组命令。
 
 当前行为以源码和 `docs/architecture.md` 为准。未落地的目标以 `docs/refactor-plan.md` 为准。进程内的 `protocol`、`core`、`engine`、`hosts/macos` 不手写 C 或 Objective-C。QuickJS 的胶水 C 只在 `runtimes/quickjs`。变更缓冲的 C 布局由 `runtimes/quickjs/abi.yml` 生成，不把现有 setter 逐个包成头文件。计数器的 Solid 产物由 QuickJS 加载。iOS 宿主等预构建矩阵有这一列再写。
 
@@ -138,7 +138,7 @@ present 之后 wants_ime 变化才让平台弹出或收起键盘
 - 不要提交 `third_party/impeller-sdk/`、`target/`，也不要解压约 1GB 的 `libimpeller.a`。`engine/fetch-impeller-sdk.sh` 按 `engine/engine.pin` 把每个平台解到 `third_party/impeller-sdk/<平台>/`，只留 `include/*`、动态库和 `LICENSE.sdk.md`。darwin 的 install name 是 `@rpath/libimpeller.dylib`。Android 的 SONAME 是 `libimpeller.so`。Cargo 的输出在 `target/`。
 - 节点的 `x, y` 是父相对坐标。`parent` 只表示结构，渲染引擎不加父节点变换。`Tree::rect` 返回场景坐标。`LAYER` 不产生绘制调用。
 - 宿主不保存 UI 状态，不创建按钮，不解释 `count`，也不做命中测试。它把指针入队，并把 `LayerTree` 交给渲染引擎。`just host` 每帧把队列交给会话。命中、手势和绘制录制在 `core`。场景格式在 `protocol`。Impeller 绘制在 `engine`。布局只调用 Taffy。Solid 渲染器和 Kotlin DSL 只改元素树。不要给 `protocol`、`core`、`engine`、`hosts/macos` 再加 C 或 Objective-C。QuickJS 的胶水 C 只留在 `runtimes/quickjs`。
-- `register_font`、`submit_layers`、`draw_metal`、`draw_vulkan` 只在渲染线程上调用。`Engine` 是 `!Send`。Impeller 的 typography context 不能离开这条线程。`CAMetalLayer` 在主线程创建并挂到视图上；渲染线程只用层指针取 drawable。Metal context 仍用 `MTLCreateSystemDefaultDevice()`。Android 的 `ANativeWindow` 由平台线程持有，要等渲染线程应答 `SurfaceDropped` 之后才 `release`。
+- `register_font`、`submit_layers`、`draw_metal`、`draw_vulkan` 只在渲染线程上调用。`Engine` 是 `!Send`。Impeller 的 typography context 不能离开这条线程。`CAMetalLayer` 在主线程创建并挂到视图上；渲染线程只用层指针取 drawable。Metal context 仍用 `MTLCreateSystemDefaultDevice()`。Android 的 `ANativeWindow` 由平台线程持有，要等渲染线程应答 `SurfaceDropped` 之后才 `release`。等待在 `uifw-surface-drop` 上阻塞于 `DropWait`，平台线程不等待。
 
 ## Monorepo
 
@@ -200,15 +200,15 @@ solidPlugin({
 
 成功是 `Result::Ok`。失败是 `Status::NotLinked`、`BadScene`、`NotReady`（还没有 drawable、context 或 display list，或者 present 失败）。空文字、缺图、非正缩放是 `BadScene`。
 
-Impeller 句柄的所有权以刚解压的 `impeller.h` 为准，调用在 `engine/src/player.rs`。不要按「C++ 分配的内存都由 Rust 释放」处理。
+Impeller 句柄的所有权以刚解压的 `impeller.h` 为准。绘制在 `engine/src/painter.rs` 和 `engine/src/player/ops.rs`，文字在 `engine/src/typography/`，picture 在 `engine/src/pictures.rs`，纹理在 `engine/src/textures.rs`。不要按「C++ 分配的内存都由 Rust 释放」处理。
 
 - 函数名以 `New` 结尾，头文件写明用对应的 `Release` 释放：调用方持有一次引用，用完释放一次。context、typography、paint、path、texture、paragraph、display list、surface、swapchain、glyph info、color source、image filter 属于这一类。
 - 取得函数没有 `New`，头文件写明结果缓存在已有对象上：指针是借来的。读出数字后丢掉，不要 `Release`。`ImpellerParagraphGetLineMetrics` 的行高缓存在段落上，段落释放时由 Impeller 释放。`Engine::lines` 把基线、宽高和码元区间抄进 `LineMetric`。同一段再查一次仍用这份缓存。
-- `ImpellerMapping.on_release` 在头文件里可空。`register_font` 仍传入非空的 `keep_font_bytes`：创建字型失败时 Impeller 也会调用回调，空指针会崩溃。回调不释放字节。成功时字节留在 `Engine::faces`，typography context 先于这些字节释放。纹理走 `ImpellerTextureCreateWithContentsNew`。没有回调时，头文件允许 Impeller 在调用返回前拷贝像素；`player.rs` 让像素活到这次调用返回，`on_release` 保持空。不要把调用方的缓冲交给一个会事后释放的回调。
+- `ImpellerMapping.on_release` 在头文件里可空。`register_font` 仍传入非空的 `keep_font_bytes`：创建字型失败时 Impeller 也会调用回调，空指针会崩溃。回调不释放字节。成功时字节留在 `Typography` 的 `FontRegistry`，typography context 在 `Typography::drop` 里释放，先于这些字节。纹理走 `ImpellerTextureCreateWithContentsNew`。没有回调时，头文件允许 Impeller 在调用返回前拷贝像素；像素活到这次调用返回，`on_release` 保持空。不要把调用方的缓冲交给一个会事后释放的回调。
 
-升级 `engine/engine.pin` 时，对每个新返回的句柄再读一遍头文件，按前两条归类，再改 `player.rs`。
+升级 `engine/engine.pin` 时，对每个新返回的句柄再读一遍头文件，按前两条归类，再改绘制和文字模块。
 
-`Fill` 在缩放之前铺满画布。缩放只做一次，放在第一条非填充命令之前。渲染引擎使用命令里的 family、字号、字重、对齐、方向和 `max_width`，字号不乘 `point_scale`。左上角放在命令的 `(x, y)`。`measure_paragraph` 和绘制共用同一段段落。相同文字、字号、宽度、颜色和样式跨帧复用。纹理按 `source` 跨帧复用，资产在进程内不可变。成功提交结束时只释放当前显示列表没有引用的纹理和段落。`register_font` 使旧段落在下一次提交释放显示列表之后失效。上屏失败是 `PresentFailed`，宿主保留表面并再要一帧。还没有表面或显示列表是 `NotReady`。图片要调用方给出紧排 RGBA8888。Impeller 不接受 PNG 或 JPEG。`source` 以 `asset:` 开头。macOS 把它映射成启动参数里的资产目录下的 `<name>.png`，默认目录是 `hosts/macos/assets`。Android 映射成 APK 里的 `assets/images/<name>.png`。缺图仍是 `BadScene`。
+`Fill` 在缩放之前铺满画布。缩放只做一次，放在第一条非填充命令之前。渲染引擎使用命令里的 family、字号、字重、对齐、方向和 `max_width`，字号不乘 `point_scale`。左上角放在命令的 `(x, y)`。绘制用 paint 槽里带前景色的段落。布局测量命中同一槽。光标用度量缓存。相同文字、字号、宽度、颜色和样式跨帧复用，命中不复制整段文字。纹理按 `source` 跨帧复用，资产在进程内不可变。成功提交结束时只释放当前显示列表没有引用的纹理和段落，以及本帧没有 retain 的 `refs == 0` 测量槽。`register_font` 使旧段落在下一次提交释放显示列表之后失效。上屏失败是 `PresentFailed`，宿主保留表面并再要一帧。还没有表面或显示列表是 `NotReady`。图片要调用方给出紧排 RGBA8888。Impeller 不接受 PNG 或 JPEG。`source` 以 `asset:` 开头。macOS 把它映射成启动参数里的资产目录下的 `<name>.png`，默认目录是 `hosts/macos/assets`。Android 映射成 APK 里的 `assets/images/<name>.png`。缺图仍是 `BadScene`。
 
 窗口标题 `uifw counter`，内容默认 360×640，可关闭、可最小化、可缩放。缩放和改尺寸都投递 `Metrics`。`contentsScale` 和 `drawableSize` 来自窗口所在屏幕的 `backingScaleFactor`（取不到时用 2），尺寸变化时按内容视图重算。这一层 `framebufferOnly = NO`，这样 `UIFW_DUMP` 能读回纹理。
 
@@ -252,7 +252,7 @@ frameworks/kotlin-ui/gradlew -p frameworks/kotlin-ui :library:jvmTest
 
 ## 改代码时
 
-- 渲染引擎调用在 `engine/src/player.rs`，对照 `impeller.h`。没有 stub。没有 SDK 时走 `Status::NotLinked`。句柄按「绘制」里的 Impeller 规则释放：`New` 且写明 `Release` 的用完释放一次；缓存在段落上的 `ImpellerParagraphGetLineMetrics` 不要 `Release`；`register_font` 的 `on_release` 必须非空。
+- 渲染引擎调用在 `engine/src/painter.rs`、`engine/src/player/`、`engine/src/typography/`、`engine/src/pictures.rs` 和 `engine/src/textures.rs`，对照 `impeller.h`。没有 stub。没有 SDK 时走 `Status::NotLinked`。句柄按「绘制」里的 Impeller 规则释放：`New` 且写明 `Release` 的用完释放一次；缓存在段落上的 `ImpellerParagraphGetLineMetrics` 不要 `Release`；`register_font` 的 `on_release` 必须非空。
 - 动到 pin 或 `impeller.h` 的调用，保持 `IMPELLER_VERSION` 来自刚解压的那份头文件，并按「绘制」重新归类新句柄。fetch 脚本继续改 darwin 的 install name，并核对 Android 的 SONAME。`engine` 和 `hosts/macos` 的 `build.rs` 都要把 rpath 指到 `third_party/impeller-sdk/darwin-arm64/lib`。Android 目标链接 `third_party/impeller-sdk/android-arm64/lib`。
 - 给宿主加第二种图片时，在解析回调里按 source 区分，并把像素保持到 `submit` 返回。
 - 渲染树存储父相对坐标，`Tree::rect` 返回场景坐标。不要为了对齐调试文本去改录制路径。

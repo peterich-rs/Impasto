@@ -7,7 +7,10 @@ import {
   ErrorPage,
   Field,
   OverlayRoot,
+  RefreshControl,
+  ScrollArea,
   VirtualList,
+  createScrollController,
   messageOf,
   stackOf,
   useTheme,
@@ -127,11 +130,15 @@ function SchedulePage(_props: { params: RouteParams }) {
   );
 }
 
+const LIST_ITEMS = Array.from({ length: 200 }, (_, n) => ({ n }));
+
 function ListPage(_props: { params: RouteParams }) {
   const theme = useTheme();
+  const list = createScrollController();
   const [scale, setScale] = createSignal(1);
   const [missing, setMissing] = createSignal(false);
   const [name, setName] = createSignal("");
+  const [refreshed, setRefreshed] = createSignal(0);
   return (
     <column gap={theme().space.l} fill w="100%">
       <Title title="列表" />
@@ -160,23 +167,50 @@ function ListPage(_props: { params: RouteParams }) {
       </Text>
       <clip radius={theme().shape.l} fill>
         <decorated color={theme().color.surface} fill>
+          <RefreshControl controller={list} onRefresh={() => setRefreshed((count) => count + 1)}>
+            <Text
+              fontSize={theme().typography.caption.size}
+              color={theme().color.textMuted}
+              direction={directionFor(theme().locale)}
+            >
+              {refreshed() === 0 ? "下拉刷新" : `已刷新 ${refreshed()}`}
+            </Text>
+            <ScrollArea physics={{ snapX: { interval: 72, align: "start" }, overscroll: "clamp" }}>
+              <row gap={8}>
+                <sized w={72} h={36} />
+                <sized w={72} h={36} />
+                <sized w={72} h={36} />
+                <sized w={72} h={36} />
+                <sized w={72} h={36} />
+              </row>
+            </ScrollArea>
+          </RefreshControl>
           <VirtualList
-            items={Array.from({ length: 200 }, (_, n) => ({ n }))}
+            items={LIST_ITEMS}
             itemKey={(item) => item.n}
             estimatedHeight={48}
-          >
-            {(item) => (
-              <padding left={theme().space.l} right={theme().space.l} top={theme().space.m} bottom={theme().space.m}>
-                <Text
-                  fontSize={theme().typography.body.size}
-                  color={theme().color.text}
-                  direction={directionFor(theme().locale)}
+            controller={list}
+            physics={{ overscroll: "rubber" }}
+            recycle={{
+              typeOf: () => "row",
+              render: (item) => (
+                <padding
+                  left={theme().space.l}
+                  right={theme().space.l}
+                  top={theme().space.m}
+                  bottom={theme().space.m}
                 >
-                  {`Item ${item.n}`}
-                </Text>
-              </padding>
-            )}
-          </VirtualList>
+                  <Text
+                    fontSize={theme().typography.body.size}
+                    color={theme().color.text}
+                    direction={directionFor(theme().locale)}
+                  >
+                    {`Item ${item().n}`}
+                  </Text>
+                </padding>
+              ),
+            }}
+          />
         </decorated>
       </clip>
     </column>

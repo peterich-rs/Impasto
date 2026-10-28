@@ -447,6 +447,7 @@ impl Tree {
         drag.locked = true;
         drag.scroll = Some(scroll);
         self.cancel_scroll_motion(scroll);
+        self.note_scroll_phase(scroll, crate::ScrollPhase::Dragging, 0.0, 0.0);
         let mut gestures = Vec::new();
         if let Some(target) = route.pressed.take() {
             gestures.push(Gesture::Release(target));
@@ -516,6 +517,7 @@ impl Tree {
                     if self.get(id).is_some_and(|node| node.kind == Kind::Scroll) {
                         let _ = self.arm_fling(id, speed.0, speed.1);
                         self.arm_overscroll_spring(id);
+                        self.sync_scroll_phase(id);
                     }
                     vec![Gesture::DragEnd(id, speed.0, speed.1)]
                 })

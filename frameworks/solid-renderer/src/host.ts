@@ -37,6 +37,10 @@ export interface CoreHost {
   append(parent: NodeHandle, child: NodeHandle): void;
   insert(parent: NodeHandle, child: NodeHandle, before: NodeHandle): void;
   remove(parent: NodeHandle, child: NodeHandle): void;
+  /** Unlink `child` and keep its id. Does not queue retirement. */
+  detach(parent: NodeHandle, child: NodeHandle): void;
+  /** Retire a parentless node and its subtree. */
+  discard(node: NodeHandle): void;
   parent(node: NodeHandle): NodeHandle;
   firstChild(node: NodeHandle): NodeHandle;
   nextSibling(node: NodeHandle): NodeHandle;
@@ -73,6 +77,23 @@ export interface CoreHost {
   setLineHeight(node: NodeHandle, height: number): void;
   setFamily(node: NodeHandle, family: string): void;
   setScrollOffset(node: NodeHandle, x: number, y: number): void;
+  overscroll(node: NodeHandle): { x: number; y: number };
+  setScrollPhysics(
+    node: NodeHandle,
+    tau: number,
+    mode: number,
+    stiffness: number,
+    damping: number,
+    factor: number,
+    snapX: number,
+    alignX: number,
+    snapY: number,
+    alignY: number,
+  ): void;
+  setScrollChain(node: NodeHandle, chain: boolean): void;
+  fling(node: NodeHandle, vx: number, vy: number): void;
+  stopScroll(node: NodeHandle): void;
+  scrollTo(node: NodeHandle, x: number, y: number, stiffness: number, damping: number): void;
   scrollOffset(node: NodeHandle): { x: number; y: number };
   rect(node: NodeHandle): { x: number; y: number; w: number; h: number };
   setTransform(node: NodeHandle, x: number, y: number, rotate: number, scale: number): void;
@@ -172,9 +193,22 @@ export interface CoreHost {
   onLeave(node: NodeHandle, fn: () => void): void;
   onWheel(node: NodeHandle, fn: (dx: number, dy: number) => void): void;
   onScroll(node: NodeHandle, fn: (x: number, y: number) => void): void;
+  /** One callback, installed by `boot`. Phase is `idle` | `dragging` | `coasting` | `settling`. */
+  onScrollState(
+    fn: (
+      node: NodeHandle,
+      phase: number,
+      vx: number,
+      vy: number,
+      ox: number,
+      oy: number,
+    ) => void,
+  ): void;
   onSecondaryClick(node: NodeHandle, fn: () => void): void;
   textEdit(node: NodeHandle, op: number, text?: string): { text: string; start: number; end: number };
   onFrame(fn: (targetMs: number, intervalMs: number) => void): void;
+  /** One callback, installed by `boot`, run after layout. */
+  onLayout(fn: () => void): void;
   setDragClaim(node: NodeHandle, claim: "none" | "horizontal" | "free"): void;
   caretAt(
     node: NodeHandle,
@@ -236,4 +270,75 @@ export interface CoreHost {
     height: number;
     viewInsets: { top: number; right: number; bottom: number; left: number };
   };
+  /** Native list state machine. The skin applies render ops. */
+  listDriver?(overscan: number, estimate: number): ListDriver;
+  /** Native scroll clamp, drag, and refresh threshold. */
+  scrollController?(): ScrollDriver;
+  /**
+   * One callback for every driver. `kind` 1 is a list, 2 is a scroll.
+   * Installed once by `boot`.
+   */
+  onDriver?(
+    fn: (
+      kind: number,
+      index: number,
+      generation: number,
+      tag: number,
+      i0: number,
+      i1: number,
+      f0: number,
+      f1: number,
+      f2: number,
+      f3: number,
+      f4: number,
+      f5: number,
+      s0: string,
+      s1: string,
+    ) => void,
+  ): void;
+}
+
+/** Handle for `core.listDriver`. Methods stay on the QuickJS class. */
+export interface ListDriver {
+  bind(
+    viewport: number,
+    content: number,
+    top: number,
+    bottom: number,
+    rows: number,
+    vThumb: number,
+    hThumb: number,
+    pin: number,
+    vSize: number,
+    hSize: number,
+  ): void;
+  configure(estimate: number, overscan: number, blocked: boolean): void;
+  setItems(rows: { key: string; type: string; sticky: boolean }[]): void;
+  noteRow(key: string, node: number): void;
+  release(): void;
+  id(): { index: number; generation: number };
+}
+
+/** Handle for `core.scrollController`. */
+export interface ScrollDriver {
+  bind(viewport: number, content: number): void;
+  configure(
+    contentMin: number,
+    pullMode: number,
+    threshold: number,
+    rubber: boolean,
+    factor: number,
+    parent: ScrollDriver | null,
+  ): void;
+  dragBy(
+    dx: number,
+    dy: number,
+  ): { ox: number; oy: number; overX: number; overY: number; pending: boolean };
+  finishDrag(taken: boolean): void;
+  dragEnd(): void;
+  wheel(dx: number, dy: number): void;
+  query(cmd: number): { x: number; y: number };
+  consume(ox: number, oy: number): boolean;
+  release(): void;
+  id(): { index: number; generation: number };
 }

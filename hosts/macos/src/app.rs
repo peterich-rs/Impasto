@@ -17,8 +17,8 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, available, define_cl
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
     NSEvent, NSEventModifierFlags, NSFont, NSFontTextStyleBody, NSScreen, NSTextInputClient,
-    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
-    NSWorkspace,
+    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowDelegate,
+    NSWindowOcclusionState, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{
@@ -532,6 +532,11 @@ define_class!(
                 .link
                 .post(Command::Lifecycle(session::Lifecycle::Hidden));
         }
+
+        #[unsafe(method(applicationDidReceiveMemoryWarning:))]
+        fn did_receive_memory_warning(&self, _notification: &NSNotification) {
+            self.ivars().link.post(Command::MemoryWarning);
+        }
     }
 
     unsafe impl NSWindowDelegate for Host {
@@ -573,6 +578,18 @@ define_class!(
             self.ivars()
                 .link
                 .post(Command::Lifecycle(session::Lifecycle::Resumed));
+        }
+
+        #[unsafe(method(windowDidChangeOcclusionState:))]
+        fn window_did_change_occlusion(&self, _notification: &NSNotification) {
+            let visible = self
+                .ivars()
+                .window
+                .occlusionState()
+                .contains(NSWindowOcclusionState::Visible);
+            if visible {
+                self.ivars().link.post(Command::Invalidate);
+            }
         }
     }
 );

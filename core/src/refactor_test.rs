@@ -236,3 +236,77 @@ fn fling_target_is_clamped_to_the_scroll_limit() -> Result<(), crate::Error> {
     assert!(y <= limit + 0.01, "target {y} limit {limit}");
     Ok(())
 }
+
+#[test]
+fn transition_animates_without_picture_writes() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    let fade = tree.opacity(254)?;
+    let text = tree.text("Hi", 16.0, color())?;
+    tree.add_child(fade, text)?;
+    tree.layout()?;
+    let _ = tree.record()?;
+    let epoch = tree.layer_epoch();
+    let before = held_pictures(&tree.layer_tree());
+    for alpha in [200u8, 128] {
+        tree.set_alpha(fade, alpha)?;
+        let _ = tree.record()?;
+        assert_eq!(tree.picture_writes(), 0, "alpha {alpha}");
+        assert!(tree.layer_epoch() > epoch);
+        let after = held_pictures(&tree.layer_tree());
+        assert_eq!(after.len(), before.len());
+        for ((generation, commands), (next_generation, next_commands)) in before.iter().zip(&after)
+        {
+            assert_eq!(generation, next_generation);
+            assert!(std::sync::Arc::ptr_eq(commands, next_commands));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn alpha_flip_255_254_switches_track() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    let root = tree.column(0.0)?;
+    let stay = tree.text("stay", 16.0, color())?;
+    let fade = tree.opacity(255)?;
+    let body = tree.text("body", 16.0, color())?;
+    tree.add_child(fade, body)?;
+    tree.add_child(root, stay)?;
+    tree.add_child(root, fade)?;
+    tree.layout()?;
+    let _ = tree.record()?;
+    assert_eq!(tree.picture_cache_len(), 1);
+
+    tree.set_alpha(fade, 254)?;
+    let _ = tree.record()?;
+    assert!(tree.picture_writes() > 0);
+    assert!(
+        tree.layer_tree()
+            .layers
+            .iter()
+            .any(|layer| matches!(layer.kind, protocol::LayerKind::Opacity { alpha: 254, .. }))
+    );
+    let _ = tree.record()?;
+    assert_eq!(tree.picture_writes(), 0);
+
+    tree.set_alpha(fade, 255)?;
+    let _ = tree.record()?;
+    assert!(tree.picture_writes() > 0);
+    assert!(
+        tree.layer_tree()
+            .layers
+            .iter()
+            .all(|layer| { !matches!(layer.kind, protocol::LayerKind::Opacity { .. }) })
+    );
+    assert_eq!(tree.picture_cache_len(), 1);
+    let _ = tree.record()?;
+    assert_eq!(tree.picture_writes(), 0);
+    Ok(())
+}
+
+fn held_pictures(tree: &protocol::LayerTree) -> Vec<(u64, std::sync::Arc<[protocol::Command]>)> {
+    tree.pictures
+        .iter()
+        .map(|picture| (picture.generation, std::sync::Arc::clone(&picture.commands)))
+        .collect()
+}

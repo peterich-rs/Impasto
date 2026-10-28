@@ -11,7 +11,9 @@
  * Handles are raw NodeIds. Generation lives in the high bits, so a live id is
  * never 0. Callers pass 0 for "no anchor" / "no node". A detached subtree's
  * onClick stays in `taps`: the region cannot be hit, so the closure is never
- * called. `remove` discards the subtree and frees those taps. `qjs_close`
+ * called. `remove` queues the subtree; the session frees those taps when it retires
+ * ids that were not inserted again. `detach` leaves the taps and the ids.
+ * `discard` retires immediately and frees taps. `qjs_close`
  * frees whatever is still registered.
  */
 typedef struct QjsFns {
@@ -27,6 +29,7 @@ typedef struct QjsFns {
     int (*append)(void *session, uint64_t parent, uint64_t child);
     int (*insert)(void *session, uint64_t parent, uint64_t child, uint64_t before);
     int (*remove)(void *session, uint64_t parent, uint64_t child);
+    int (*detach)(void *session, uint64_t parent, uint64_t child);
     int (*discard)(void *session, uint64_t id, uint64_t **out_ids, size_t *out_len);
     void (*free_ids)(uint64_t *ids, size_t len);
     int (*parent)(void *session, uint64_t node, uint64_t *out);
@@ -174,6 +177,42 @@ typedef struct QjsFns {
     int (*align)(void *session, uint32_t align, uint64_t *out);
     int (*set_cross)(void *session, uint64_t node, uint32_t align);
     int (*viewport)(void *session, float *width, float *height);
+    int (*set_scroll_physics)(void *session, uint64_t node, float tau, int mode, float stiffness,
+                              float damping, float factor, float snap_x, int align_x, float snap_y,
+                              int align_y);
+    int (*set_scroll_chain)(void *session, uint64_t node, int chain);
+    int (*overscroll)(void *session, uint64_t node, float *x, float *y);
+    int (*arm_fling)(void *session, uint64_t node, float vx, float vy);
+    int (*stop_scroll)(void *session, uint64_t node);
+    int (*scroll_to)(void *session, uint64_t node, float x, float y, float stiffness, float damping);
+    int (*list_create)(void *session, int overscan, float estimate, uint32_t *index,
+                       uint32_t *generation);
+    int (*list_release)(void *session, uint32_t index, uint32_t generation);
+    int (*list_bind)(void *session, uint32_t index, uint32_t generation, const uint64_t *nodes,
+                     int count);
+    int (*list_configure)(void *session, uint32_t index, uint32_t generation, float estimate,
+                          int overscan, int blocked);
+    int (*list_begin)(void *session, uint32_t index, uint32_t generation);
+    int (*list_item)(void *session, uint32_t index, uint32_t generation, const char *key,
+                     size_t key_len, const char *type, size_t type_len, int sticky);
+    int (*list_end)(void *session, uint32_t index, uint32_t generation);
+    int (*list_note_row)(void *session, uint32_t index, uint32_t generation, const char *key,
+                         size_t key_len, uint64_t node);
+    int (*scroll_create)(void *session, uint32_t *index, uint32_t *generation);
+    int (*scroll_release)(void *session, uint32_t index, uint32_t generation);
+    int (*scroll_bind)(void *session, uint32_t index, uint32_t generation, uint64_t viewport,
+                       uint64_t content);
+    int (*scroll_configure)(void *session, uint32_t index, uint32_t generation, float content_min,
+                            int pull_mode, float threshold, int rubber, float factor,
+                            uint32_t parent_index, uint32_t parent_generation, int has_parent);
+    int (*scroll_drag_by)(void *session, uint32_t index, uint32_t generation, float dx, float dy,
+                          float *overflow_x, float *overflow_y, float *over_x, float *over_y);
+    int (*scroll_finish)(void *session, uint32_t index, uint32_t generation, int taken);
+    int (*scroll_drag_end)(void *session, uint32_t index, uint32_t generation);
+    int (*scroll_wheel)(void *session, uint32_t index, uint32_t generation, float dx, float dy);
+    int (*scroll_query)(void *session, uint32_t index, uint32_t generation, int cmd, float *x,
+                        float *y);
+    int (*scroll_consume)(void *session, uint32_t index, uint32_t generation, float ox, float oy);
 } QjsFns;
 
 typedef struct BackHandler {
@@ -273,6 +312,14 @@ typedef struct Host {
     size_t tap_cap;
     JSValue frame_cb;
     int has_frame;
+    JSValue layout_cb;
+    int has_layout;
+    JSValue scroll_state_cb;
+    int has_scroll_state;
+    JSValue driver_cb;
+    int has_driver;
+    JSClassID list_class;
+    JSClassID scroll_class;
     int wants_frame;
     int64_t deadline_ms;
     BackHandler *backs;
@@ -639,14 +686,51 @@ static JSValue js_remove(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     if (host->fns.remove(host->fns.session, parent, child)) {
         return throw_msg(ctx, "remove failed");
     }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_detach(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "detach(parent, child)");
+    }
+    uint64_t parent = 0;
+    uint64_t child = 0;
+    if (read_handle(ctx, argv[0], &parent) || read_handle(ctx, argv[1], &child)) {
+        return JS_EXCEPTION;
+    }
+    if (host->fns.detach(host->fns.session, parent, child)) {
+        return throw_msg(ctx, "detach failed");
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_discard(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "discard(node)");
+    }
+    uint64_t node = 0;
+    if (read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
     uint64_t *ids = NULL;
     size_t len = 0;
-    if (host->fns.discard(host->fns.session, child, &ids, &len)) {
-        return throw_msg(ctx, "remove failed");
+    if (host->fns.discard(host->fns.session, node, &ids, &len)) {
+        return throw_msg(ctx, "discard failed");
     }
     forget_taps(host, ids, len);
     host->fns.free_ids(ids, len);
     return JS_UNDEFINED;
+}
+
+void qjs_forget_ids(Host *host, const uint64_t *ids, size_t len) {
+    if (!host || !ids) {
+        return;
+    }
+    forget_taps(host, ids, len);
 }
 
 static JSValue js_parent(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -2533,6 +2617,23 @@ static JSValue js_on_frame(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     return JS_UNDEFINED;
 }
 
+static JSValue js_on_layout(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "onLayout(function)");
+    }
+    if (!JS_IsFunction(ctx, argv[0])) {
+        return throw_msg(ctx, "onLayout function");
+    }
+    if (host->has_layout) {
+        JS_FreeValue(ctx, host->layout_cb);
+    }
+    host->layout_cb = JS_DupValue(ctx, argv[0]);
+    host->has_layout = 1;
+    return JS_UNDEFINED;
+}
+
 static JSValue js_set_radius(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
     Host *host = host_of(ctx);
@@ -2936,6 +3037,146 @@ static JSValue js_set_scroll_offset(JSContext *ctx, JSValueConst this_val, int a
     }
     int status = host->fns.set_scroll_offset(host->fns.session, node, (float)x, (float)y);
     return done(ctx, status, "setScrollOffset failed");
+}
+
+static JSValue js_set_scroll_physics(JSContext *ctx, JSValueConst this_val, int argc,
+                                     JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 10) {
+        return throw_msg(ctx,
+                         "setScrollPhysics(node, tau, mode, stiffness, damping, factor, snapX, "
+                         "alignX, snapY, alignY)");
+    }
+    uint64_t node = 0;
+    double tau = 0;
+    int32_t mode = 0;
+    double stiffness = 0;
+    double damping = 0;
+    double factor = 0;
+    double snap_x = 0;
+    int32_t align_x = 0;
+    double snap_y = 0;
+    int32_t align_y = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToFloat64(ctx, &tau, argv[1]) ||
+        JS_ToInt32(ctx, &mode, argv[2]) || JS_ToFloat64(ctx, &stiffness, argv[3]) ||
+        JS_ToFloat64(ctx, &damping, argv[4]) || JS_ToFloat64(ctx, &factor, argv[5]) ||
+        JS_ToFloat64(ctx, &snap_x, argv[6]) || JS_ToInt32(ctx, &align_x, argv[7]) ||
+        JS_ToFloat64(ctx, &snap_y, argv[8]) || JS_ToInt32(ctx, &align_y, argv[9])) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.set_scroll_physics(
+        host->fns.session, node, (float)tau, mode, (float)stiffness, (float)damping, (float)factor,
+        (float)snap_x, align_x, (float)snap_y, align_y);
+    return done(ctx, status, "setScrollPhysics failed");
+}
+
+static JSValue js_set_scroll_chain(JSContext *ctx, JSValueConst this_val, int argc,
+                                   JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "setScrollChain(node, chain)");
+    }
+    uint64_t node = 0;
+    int chain = JS_ToBool(ctx, argv[1]);
+    if (read_handle(ctx, argv[0], &node) || chain < 0) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.set_scroll_chain(host->fns.session, node, chain);
+    return done(ctx, status, "setScrollChain failed");
+}
+
+static JSValue js_overscroll(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "overscroll(node)");
+    }
+    uint64_t node = 0;
+    float x = 0;
+    float y = 0;
+    if (read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.overscroll(host->fns.session, node, &x, &y);
+    if (status) {
+        return throw_msg(ctx, "overscroll failed");
+    }
+    JSValue result = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, result, "x", JS_NewFloat64(ctx, x));
+    JS_SetPropertyStr(ctx, result, "y", JS_NewFloat64(ctx, y));
+    return result;
+}
+
+static JSValue js_arm_fling(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 3) {
+        return throw_msg(ctx, "fling(node, vx, vy)");
+    }
+    uint64_t node = 0;
+    double vx = 0;
+    double vy = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToFloat64(ctx, &vx, argv[1]) ||
+        JS_ToFloat64(ctx, &vy, argv[2])) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.arm_fling(host->fns.session, node, (float)vx, (float)vy);
+    return done(ctx, status, "fling failed");
+}
+
+static JSValue js_stop_scroll(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "stopScroll(node)");
+    }
+    uint64_t node = 0;
+    if (read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.stop_scroll(host->fns.session, node);
+    return done(ctx, status, "stopScroll failed");
+}
+
+static JSValue js_scroll_to(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 5) {
+        return throw_msg(ctx, "scrollTo(node, x, y, stiffness, damping)");
+    }
+    uint64_t node = 0;
+    double x = 0;
+    double y = 0;
+    double stiffness = 0;
+    double damping = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToFloat64(ctx, &x, argv[1]) ||
+        JS_ToFloat64(ctx, &y, argv[2]) || JS_ToFloat64(ctx, &stiffness, argv[3]) ||
+        JS_ToFloat64(ctx, &damping, argv[4])) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.scroll_to(host->fns.session, node, (float)x, (float)y, (float)stiffness,
+                                    (float)damping);
+    return done(ctx, status, "scrollTo failed");
+}
+
+static JSValue js_on_scroll_state(JSContext *ctx, JSValueConst this_val, int argc,
+                                  JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "onScrollState(function)");
+    }
+    if (!JS_IsFunction(ctx, argv[0])) {
+        return throw_msg(ctx, "onScrollState function");
+    }
+    if (host->has_scroll_state) {
+        JS_FreeValue(ctx, host->scroll_state_cb);
+    }
+    host->scroll_state_cb = JS_DupValue(ctx, argv[0]);
+    host->has_scroll_state = 1;
+    return JS_UNDEFINED;
 }
 
 static JSValue js_scroll_offset(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -3644,7 +3885,519 @@ static int bind_fn(JSContext *ctx, JSValue core, const char *name, JSCFunction *
     return JS_SetPropertyStr(ctx, core, name, function) < 0 ? -1 : 0;
 }
 
+typedef struct DriverBox {
+    uint32_t index;
+    uint32_t generation;
+} DriverBox;
+
+static DriverBox *driver_box(Host *host, JSValueConst value, JSClassID class_id) {
+    if (!host) {
+        return NULL;
+    }
+    return JS_GetOpaque(value, class_id);
+}
+
+static void release_box(JSRuntime *rt, JSValueConst val, JSClassID class_id, int list) {
+    Host *host = JS_GetRuntimeOpaque(rt);
+    if (!host) {
+        return;
+    }
+    DriverBox *box = JS_GetOpaque(val, class_id);
+    if (!box) {
+        return;
+    }
+    if (list) {
+        host->fns.list_release(host->fns.session, box->index, box->generation);
+    } else {
+        host->fns.scroll_release(host->fns.session, box->index, box->generation);
+    }
+    free(box);
+}
+
+static void list_finalizer(JSRuntime *rt, JSValueConst val) {
+    Host *host = JS_GetRuntimeOpaque(rt);
+    if (!host) {
+        return;
+    }
+    release_box(rt, val, host->list_class, 1);
+}
+
+static void scroll_finalizer(JSRuntime *rt, JSValueConst val) {
+    Host *host = JS_GetRuntimeOpaque(rt);
+    if (!host) {
+        return;
+    }
+    release_box(rt, val, host->scroll_class, 0);
+}
+
+static JSValue make_driver(JSContext *ctx, JSClassID class_id, uint32_t index, uint32_t generation) {
+    JSValue obj = JS_NewObjectClass(ctx, class_id);
+    if (JS_IsException(obj)) {
+        return obj;
+    }
+    DriverBox *box = calloc(1, sizeof(DriverBox));
+    if (!box) {
+        JS_FreeValue(ctx, obj);
+        return throw_msg(ctx, "driver");
+    }
+    box->index = index;
+    box->generation = generation;
+    JS_SetOpaque(obj, box);
+    return obj;
+}
+
+static JSValue driver_id_value(JSContext *ctx, DriverBox *box) {
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "index", JS_NewUint32(ctx, box->index));
+    JS_SetPropertyStr(ctx, obj, "generation", JS_NewUint32(ctx, box->generation));
+    return obj;
+}
+
+static JSValue js_list_driver(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    int32_t overscan = 4;
+    double estimate = 1;
+    if (argc >= 1 && JS_ToInt32(ctx, &overscan, argv[0])) {
+        return JS_EXCEPTION;
+    }
+    if (argc >= 2 && JS_ToFloat64(ctx, &estimate, argv[1])) {
+        return JS_EXCEPTION;
+    }
+    uint32_t index = 0;
+    uint32_t generation = 0;
+    if (host->fns.list_create(host->fns.session, overscan, (float)estimate, &index, &generation)) {
+        return throw_msg(ctx, "listDriver");
+    }
+    return make_driver(ctx, host->list_class, index, generation);
+}
+
+static JSValue js_scroll_controller(JSContext *ctx, JSValueConst this_val, int argc,
+                                    JSValueConst *argv) {
+    (void)this_val;
+    (void)argc;
+    (void)argv;
+    Host *host = host_of(ctx);
+    uint32_t index = 0;
+    uint32_t generation = 0;
+    if (host->fns.scroll_create(host->fns.session, &index, &generation)) {
+        return throw_msg(ctx, "scrollController");
+    }
+    return make_driver(ctx, host->scroll_class, index, generation);
+}
+
+static JSValue js_list_id(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)argc;
+    (void)argv;
+    DriverBox *box = driver_box(host_of(ctx), this_val, host_of(ctx)->list_class);
+    if (!box) {
+        return throw_msg(ctx, "listDriver");
+    }
+    return driver_id_value(ctx, box);
+}
+
+static JSValue js_scroll_id(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)argc;
+    (void)argv;
+    DriverBox *box = driver_box(host_of(ctx), this_val, host_of(ctx)->scroll_class);
+    if (!box) {
+        return throw_msg(ctx, "scrollController");
+    }
+    return driver_id_value(ctx, box);
+}
+
+static JSValue js_list_release(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)argc;
+    (void)argv;
+    Host *host = host_of(ctx);
+    DriverBox *box = driver_box(host, this_val, host->list_class);
+    if (!box) {
+        return JS_UNDEFINED;
+    }
+    JS_SetOpaque(this_val, NULL);
+    host->fns.list_release(host->fns.session, box->index, box->generation);
+    free(box);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_scroll_release(JSContext *ctx, JSValueConst this_val, int argc,
+                                 JSValueConst *argv) {
+    (void)argc;
+    (void)argv;
+    Host *host = host_of(ctx);
+    DriverBox *box = driver_box(host, this_val, host->scroll_class);
+    if (!box) {
+        return JS_UNDEFINED;
+    }
+    JS_SetOpaque(this_val, NULL);
+    host->fns.scroll_release(host->fns.session, box->index, box->generation);
+    free(box);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_list_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    Host *host = host_of(ctx);
+    DriverBox *box = driver_box(host, this_val, host->list_class);
+    if (!box) {
+        return throw_msg(ctx, "listDriver");
+    }
+    uint64_t nodes[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    int count = argc < 10 ? argc : 10;
+    for (int index = 0; index < count; index++) {
+        if (JS_IsUndefined(argv[index]) || JS_IsNull(argv[index])) {
+            continue;
+        }
+        if (read_handle(ctx, argv[index], &nodes[index])) {
+            return JS_EXCEPTION;
+        }
+    }
+    if (host->fns.list_bind(host->fns.session, box->index, box->generation, nodes, 10)) {
+        return throw_msg(ctx, "listDriver.bind");
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_list_configure(JSContext *ctx, JSValueConst this_val, int argc,
+                                 JSValueConst *argv) {
+    Host *host = host_of(ctx);
+    DriverBox *box = driver_box(host, this_val, host->list_class);
+    if (!box || argc < 3) {
+        return throw_msg(ctx, "listDriver.configure");
+    }
+    double estimate = 0;
+    int32_t overscan = 0;
+    if (JS_ToFloat64(ctx, &estimate, argv[0]) || JS_ToInt32(ctx, &overscan, argv[1])) {
+        return JS_EXCEPTION;
+    }
+    int blocked = JS_ToBool(ctx, argv[2]);
+    if (blocked < 0) {
+        return JS_EXCEPTION;
+    }
+    if (host->fns.list_configure(host->fns.session, box->index, box->generation, (float)estimate,
+                                 overscan, blocked)) {
+        return throw_msg(ctx, "listDriver.configure");
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_list_set_items(JSContext *ctx, JSValueConst this_val, int argc,
+                                 JSValueConst *argv) {
+    Host *host = host_of(ctx);
+    DriverBox *box = driver_box(host, this_val, host->list_class);
+    if (!box || argc < 1 || !JS_IsArray(argv[0])) {
+        return throw_msg(ctx, "listDriver.setItems");
+    }
+    int64_t length = 0;
+    if (JS_GetLength(ctx, argv[0], &length)) {
+        return JS_EXCEPTION;
+    }
+    if (host->fns.list_begin(host->fns.session, box->index, box->generation)) {
+        return throw_msg(ctx, "listDriver.setItems");
+    }
+    for (int64_t index = 0; index < length; index++) {
+        JSValue item = JS_GetPropertyInt64(ctx, argv[0], index);
+        JSValue key_v = JS_GetPropertyStr(ctx, item, "key");
+        JSValue type_v = JS_GetPropertyStr(ctx, item, "type");
+        JSValue sticky_v = JS_GetPropertyStr(ctx, item, "sticky");
+        size_t key_len = 0;
+        size_t type_len = 0;
+        const char *key = JS_ToCStringLen(ctx, &key_len, key_v);
+        const char *type = JS_ToCStringLen(ctx, &type_len, type_v);
+        int sticky = JS_ToBool(ctx, sticky_v);
+        int failed = !key || !type || sticky < 0;
+        if (!failed) {
+            failed = host->fns.list_item(host->fns.session, box->index, box->generation, key, key_len,
+                                         type ? type : "", type_len, sticky) != 0;
+        }
+        if (key) {
+            JS_FreeCString(ctx, key);
+        }
+        if (type) {
+            JS_FreeCString(ctx, type);
+        }
+        JS_FreeValue(ctx, sticky_v);
+        JS_FreeValue(ctx, type_v);
+        JS_FreeValue(ctx, key_v);
+        JS_FreeValue(ctx, item);
+        if (failed) {
+            return throw_msg(ctx, "listDriver.setItems");
+        }
+    }
+    if (host->fns.list_end(host->fns.session, box->index, box->generation)) {
+        return throw_msg(ctx, "listDriver.setItems");
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_list_note_row(JSContext *ctx, JSValueConst this_val, int argc,
+                                JSValueConst *argv) {
+    Host *host = host_of(ctx);
+    DriverBox *box = driver_box(host, this_val, host->list_class);
+    if (!box || argc < 2) {
+        return throw_msg(ctx, "listDriver.noteRow");
+    }
+    size_t key_len = 0;
+    const char *key = JS_ToCStringLen(ctx, &key_len, argv[0]);
+    uint64_t node = 0;
+    if (!key || read_handle(ctx, argv[1], &node)) {
+        if (key) {
+            JS_FreeCString(ctx, key);
+        }
+        return key ? JS_EXCEPTION : throw_msg(ctx, "listDriver.noteRow");
+    }
+    int failed = host->fns.list_note_row(host->fns.session, box->index, box->generation, key, key_len,
+                                         node);
+    JS_FreeCString(ctx, key);
+    if (failed) {
+        return throw_msg(ctx, "listDriver.noteRow");
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_scroll_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    Host *host = host_of(ctx);
+    DriverBox *box = driver_box(host, this_val, host->scroll_class);
+    if (!box || argc < 2) {
+        return throw_msg(ctx, "scrollController.bind");
+    }
+    uint64_t viewport = 0;
+    uint64_t content = 0;
+    if (read_handle(ctx, argv[0], &viewport) || read_handle(ctx, argv[1], &content)) {
+        return JS_EXCEPTION;
+    }
+    if (host->fns.scroll_bind(host->fns.session, box->index, box->generation, viewport, content)) {
+        return throw_msg(ctx, "scrollController.bind");
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_scroll_configure(JSContext *ctx, JSValueConst this_val, int argc,
+                                   JSValueConst *argv) {
+    Host *host = host_of(ctx);
+    DriverBox *box = driver_box(host, this_val, host->scroll_class);
+    if (!box || argc < 5) {
+        return throw_msg(ctx, "scrollController.configure");
+    }
+    double content_min = 0;
+    int32_t pull_mode = 0;
+    double threshold = 0;
+    double factor = 0;
+    if (JS_ToFloat64(ctx, &content_min, argv[0]) || JS_ToInt32(ctx, &pull_mode, argv[1]) ||
+        JS_ToFloat64(ctx, &threshold, argv[2]) || JS_ToFloat64(ctx, &factor, argv[4])) {
+        return JS_EXCEPTION;
+    }
+    int rubber = JS_ToBool(ctx, argv[3]);
+    if (rubber < 0) {
+        return JS_EXCEPTION;
+    }
+    uint32_t parent_index = 0;
+    uint32_t parent_generation = 0;
+    int has_parent = 0;
+    if (argc >= 6 && !JS_IsUndefined(argv[5]) && !JS_IsNull(argv[5])) {
+        DriverBox *parent = driver_box(host, argv[5], host->scroll_class);
+        if (!parent) {
+            return throw_msg(ctx, "scrollController.configure parent");
+        }
+        has_parent = 1;
+        parent_index = parent->index;
+        parent_generation = parent->generation;
+    }
+    if (host->fns.scroll_configure(host->fns.session, box->index, box->generation, (float)content_min,
+                                   pull_mode, (float)threshold, rubber, (float)factor, parent_index,
+                                   parent_generation, has_parent)) {
+        return throw_msg(ctx, "scrollController.configure");
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue drag_object(JSContext *ctx, float ox, float oy, float over_x, float over_y,
+                           int pending) {
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "ox", JS_NewFloat64(ctx, ox));
+    JS_SetPropertyStr(ctx, obj, "oy", JS_NewFloat64(ctx, oy));
+    JS_SetPropertyStr(ctx, obj, "overX", JS_NewFloat64(ctx, over_x));
+    JS_SetPropertyStr(ctx, obj, "overY", JS_NewFloat64(ctx, over_y));
+    JS_SetPropertyStr(ctx, obj, "pending", JS_NewBool(ctx, pending));
+    return obj;
+}
+
+static JSValue js_scroll_drag_by(JSContext *ctx, JSValueConst this_val, int argc,
+                                 JSValueConst *argv) {
+    Host *host = host_of(ctx);
+    DriverBox *box = driver_box(host, this_val, host->scroll_class);
+    if (!box || argc < 2) {
+        return throw_msg(ctx, "scrollController.dragBy");
+    }
+    double dx = 0;
+    double dy = 0;
+    if (JS_ToFloat64(ctx, &dx, argv[0]) || JS_ToFloat64(ctx, &dy, argv[1])) {
+        return JS_EXCEPTION;
+    }
+    float ox = 0;
+    float oy = 0;
+    float over_x = 0;
+    float over_y = 0;
+    int status = host->fns.scroll_drag_by(host->fns.session, box->index, box->generation, (float)dx,
+                                          (float)dy, &ox, &oy, &over_x, &over_y);
+    if (status < 0) {
+        return throw_msg(ctx, "scrollController.dragBy");
+    }
+    return drag_object(ctx, ox, oy, over_x, over_y, status > 0);
+}
+
+static JSValue js_scroll_finish(JSContext *ctx, JSValueConst this_val, int argc,
+                                JSValueConst *argv) {
+    Host *host = host_of(ctx);
+    DriverBox *box = driver_box(host, this_val, host->scroll_class);
+    if (!box || argc < 1) {
+        return throw_msg(ctx, "scrollController.finishDrag");
+    }
+    int taken = JS_ToBool(ctx, argv[0]);
+    if (taken < 0) {
+        return JS_EXCEPTION;
+    }
+    if (host->fns.scroll_finish(host->fns.session, box->index, box->generation, taken)) {
+        return throw_msg(ctx, "scrollController.finishDrag");
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_scroll_drag_end(JSContext *ctx, JSValueConst this_val, int argc,
+                                  JSValueConst *argv) {
+    (void)argc;
+    (void)argv;
+    Host *host = host_of(ctx);
+    DriverBox *box = driver_box(host, this_val, host->scroll_class);
+    if (!box) {
+        return throw_msg(ctx, "scrollController.dragEnd");
+    }
+    if (host->fns.scroll_drag_end(host->fns.session, box->index, box->generation)) {
+        return throw_msg(ctx, "scrollController.dragEnd");
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_scroll_wheel(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    Host *host = host_of(ctx);
+    DriverBox *box = driver_box(host, this_val, host->scroll_class);
+    if (!box || argc < 2) {
+        return throw_msg(ctx, "scrollController.wheel");
+    }
+    double dx = 0;
+    double dy = 0;
+    if (JS_ToFloat64(ctx, &dx, argv[0]) || JS_ToFloat64(ctx, &dy, argv[1])) {
+        return JS_EXCEPTION;
+    }
+    if (host->fns.scroll_wheel(host->fns.session, box->index, box->generation, (float)dx, (float)dy)) {
+        return throw_msg(ctx, "scrollController.wheel");
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_scroll_query(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    Host *host = host_of(ctx);
+    DriverBox *box = driver_box(host, this_val, host->scroll_class);
+    if (!box || argc < 1) {
+        return throw_msg(ctx, "scrollController.query");
+    }
+    int32_t cmd = 0;
+    if (JS_ToInt32(ctx, &cmd, argv[0])) {
+        return JS_EXCEPTION;
+    }
+    float x = 0;
+    float y = 0;
+    if (host->fns.scroll_query(host->fns.session, box->index, box->generation, cmd, &x, &y)) {
+        return throw_msg(ctx, "scrollController.query");
+    }
+    return point_object(ctx, x, y, 0, 0, 0);
+}
+
+static JSValue js_scroll_consume(JSContext *ctx, JSValueConst this_val, int argc,
+                                 JSValueConst *argv) {
+    Host *host = host_of(ctx);
+    DriverBox *box = driver_box(host, this_val, host->scroll_class);
+    if (!box || argc < 2) {
+        return throw_msg(ctx, "scrollController.consume");
+    }
+    double ox = 0;
+    double oy = 0;
+    if (JS_ToFloat64(ctx, &ox, argv[0]) || JS_ToFloat64(ctx, &oy, argv[1])) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.scroll_consume(host->fns.session, box->index, box->generation, (float)ox,
+                                          (float)oy);
+    if (status < 0) {
+        return throw_msg(ctx, "scrollController.consume");
+    }
+    return JS_NewBool(ctx, status == 1);
+}
+
+static JSValue js_on_driver(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1 || !JS_IsFunction(ctx, argv[0])) {
+        return throw_msg(ctx, "onDriver(function)");
+    }
+    if (host->has_driver) {
+        JS_FreeValue(ctx, host->driver_cb);
+    }
+    host->driver_cb = JS_DupValue(ctx, argv[0]);
+    host->has_driver = 1;
+    return JS_UNDEFINED;
+}
+
+static const JSCFunctionListEntry list_methods[] = {
+    JS_CFUNC_DEF("bind", 10, js_list_bind),
+    JS_CFUNC_DEF("configure", 3, js_list_configure),
+    JS_CFUNC_DEF("setItems", 1, js_list_set_items),
+    JS_CFUNC_DEF("noteRow", 2, js_list_note_row),
+    JS_CFUNC_DEF("release", 0, js_list_release),
+    JS_CFUNC_DEF("id", 0, js_list_id),
+};
+
+static const JSCFunctionListEntry scroll_methods[] = {
+    JS_CFUNC_DEF("bind", 2, js_scroll_bind),
+    JS_CFUNC_DEF("configure", 6, js_scroll_configure),
+    JS_CFUNC_DEF("dragBy", 2, js_scroll_drag_by),
+    JS_CFUNC_DEF("finishDrag", 1, js_scroll_finish),
+    JS_CFUNC_DEF("dragEnd", 0, js_scroll_drag_end),
+    JS_CFUNC_DEF("wheel", 2, js_scroll_wheel),
+    JS_CFUNC_DEF("query", 1, js_scroll_query),
+    JS_CFUNC_DEF("consume", 2, js_scroll_consume),
+    JS_CFUNC_DEF("release", 0, js_scroll_release),
+    JS_CFUNC_DEF("id", 0, js_scroll_id),
+};
+
+static int bind_driver_classes(Host *host) {
+    JS_NewClassID(host->rt, &host->list_class);
+    JS_NewClassID(host->rt, &host->scroll_class);
+    JSClassDef list_def;
+    JSClassDef scroll_def;
+    memset(&list_def, 0, sizeof(list_def));
+    memset(&scroll_def, 0, sizeof(scroll_def));
+    list_def.class_name = "ListDriver";
+    list_def.finalizer = list_finalizer;
+    scroll_def.class_name = "ScrollController";
+    scroll_def.finalizer = scroll_finalizer;
+    if (JS_NewClass(host->rt, host->list_class, &list_def) ||
+        JS_NewClass(host->rt, host->scroll_class, &scroll_def)) {
+        return -1;
+    }
+    JSValue list_proto = JS_NewObject(host->ctx);
+    JSValue scroll_proto = JS_NewObject(host->ctx);
+    JS_SetPropertyFunctionList(host->ctx, list_proto, list_methods,
+                               (int)(sizeof(list_methods) / sizeof(list_methods[0])));
+    JS_SetPropertyFunctionList(host->ctx, scroll_proto, scroll_methods,
+                               (int)(sizeof(scroll_methods) / sizeof(scroll_methods[0])));
+    JS_SetClassProto(host->ctx, host->list_class, list_proto);
+    JS_SetClassProto(host->ctx, host->scroll_class, scroll_proto);
+    return 0;
+}
+
 static int bind_core(Host *host) {
+    if (bind_driver_classes(host)) {
+        return -1;
+    }
     JSContext *ctx = host->ctx;
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue core = JS_NewObject(ctx);
@@ -3659,6 +4412,8 @@ static int bind_core(Host *host) {
     failed |= bind_fn(ctx, core, "append", js_append, 2);
     failed |= bind_fn(ctx, core, "insert", js_insert, 3);
     failed |= bind_fn(ctx, core, "remove", js_remove, 2);
+    failed |= bind_fn(ctx, core, "detach", js_detach, 2);
+    failed |= bind_fn(ctx, core, "discard", js_discard, 1);
     failed |= bind_fn(ctx, core, "parent", js_parent, 1);
     failed |= bind_fn(ctx, core, "firstChild", js_first_child, 1);
     failed |= bind_fn(ctx, core, "nextSibling", js_next_sibling, 1);
@@ -3688,6 +4443,13 @@ static int bind_core(Host *host) {
     failed |= bind_fn(ctx, core, "setFamily", js_set_family, 2);
     failed |= bind_fn(ctx, core, "scroll", js_scroll, 0);
     failed |= bind_fn(ctx, core, "setScrollOffset", js_set_scroll_offset, 3);
+    failed |= bind_fn(ctx, core, "setScrollPhysics", js_set_scroll_physics, 10);
+    failed |= bind_fn(ctx, core, "setScrollChain", js_set_scroll_chain, 2);
+    failed |= bind_fn(ctx, core, "overscroll", js_overscroll, 1);
+    failed |= bind_fn(ctx, core, "fling", js_arm_fling, 3);
+    failed |= bind_fn(ctx, core, "stopScroll", js_stop_scroll, 1);
+    failed |= bind_fn(ctx, core, "scrollTo", js_scroll_to, 5);
+    failed |= bind_fn(ctx, core, "onScrollState", js_on_scroll_state, 1);
     failed |= bind_fn(ctx, core, "scrollOffset", js_scroll_offset, 1);
     failed |= bind_fn(ctx, core, "rect", js_rect, 1);
     failed |= bind_fn(ctx, core, "applyMutation", js_apply_mutation, 8);
@@ -3743,6 +4505,7 @@ static int bind_core(Host *host) {
     failed |= bind_fn(ctx, core, "onLink", js_on_link, 2);
     failed |= bind_fn(ctx, core, "onComposing", js_on_composing, 2);
     failed |= bind_fn(ctx, core, "onFrame", js_on_frame, 1);
+    failed |= bind_fn(ctx, core, "onLayout", js_on_layout, 1);
     failed |= bind_fn(ctx, core, "setDragClaim", js_set_drag_claim, 2);
     failed |= bind_fn(ctx, core, "caretAt", js_caret_at, 3);
     failed |= bind_fn(ctx, core, "wordRange", js_word_range, 2);
@@ -3780,6 +4543,9 @@ static int bind_core(Host *host) {
     failed |= bind_fn(ctx, core, "registerFont", js_register_font, 2);
     failed |= bind_fn(ctx, core, "setImageMode", js_set_image_mode, 3);
     failed |= bind_fn(ctx, core, "reload", js_reload, 1);
+    failed |= bind_fn(ctx, core, "listDriver", js_list_driver, 2);
+    failed |= bind_fn(ctx, core, "scrollController", js_scroll_controller, 0);
+    failed |= bind_fn(ctx, core, "onDriver", js_on_driver, 1);
     /* JS_SetPropertyStr takes ownership of `core`. Success is 1, not 0. */
     failed |= JS_SetPropertyStr(ctx, global, "core", core) < 0;
     JS_FreeValue(ctx, global);
@@ -3996,6 +4762,7 @@ Host *qjs_open(const QjsFns *fns) {
         return NULL;
     }
     JS_SetContextOpaque(host->ctx, host);
+    JS_SetRuntimeOpaque(host->rt, host);
     host->deadline_ms = INT64_MAX;
     JS_SetMemoryLimit(host->rt, UIFW_JS_MEMORY_LIMIT);
     /* Solid 2's render effects nest deeper than 1 MiB on the gallery page. */
@@ -4028,10 +4795,28 @@ int qjs_eval(Host *host, const char *src, size_t len, const char *name, char *er
     JSValue result = JS_Eval(host->ctx, owned, len, name, flags);
     free(owned);
     if (!JS_IsException(result)) {
-        JS_FreeValue(host->ctx, result);
-        if (flags == JS_EVAL_TYPE_MODULE && qjs_drain_jobs(host, err, err_len) != 0) {
-            return -1;
+        if (flags == JS_EVAL_TYPE_MODULE) {
+            if (qjs_drain_jobs(host, err, err_len) != 0) {
+                JS_FreeValue(host->ctx, result);
+                return -1;
+            }
+            /* A module body throw rejects the evaluation promise. `JS_Eval`
+               still returns that promise, so the rejection has to be read here. */
+            if (JS_PromiseState(host->ctx, result) == JS_PROMISE_REJECTED) {
+                JSValue reason = JS_PromiseResult(host->ctx, result);
+                const char *text = JS_ToCString(host->ctx, reason);
+                if (err && err_len > 0) {
+                    snprintf(err, err_len, "%s", text ? text : "module evaluation failed");
+                }
+                if (text) {
+                    JS_FreeCString(host->ctx, text);
+                }
+                JS_FreeValue(host->ctx, reason);
+                JS_FreeValue(host->ctx, result);
+                return -1;
+            }
         }
+        JS_FreeValue(host->ctx, result);
         return 0;
     }
     write_exception(host->ctx, err, err_len);
@@ -4151,6 +4936,79 @@ int qjs_jobs_pending(Host *host) {
 
 int qjs_tap_count(Host *host) {
     return host ? (int)host->tap_len : 0;
+}
+
+int qjs_scroll_state(Host *host, uint64_t id, int phase, float vx, float vy, float ox, float oy,
+                      char *err, size_t err_len) {
+    if (!host || !host->has_scroll_state) {
+        return 0;
+    }
+    arm_slice(host);
+    JSValue args[6];
+    args[0] = handle_value(host->ctx, id);
+    args[1] = JS_NewInt32(host->ctx, phase);
+    args[2] = JS_NewFloat64(host->ctx, vx);
+    args[3] = JS_NewFloat64(host->ctx, vy);
+    args[4] = JS_NewFloat64(host->ctx, ox);
+    args[5] = JS_NewFloat64(host->ctx, oy);
+    JSValue result = JS_Call(host->ctx, host->scroll_state_cb, JS_UNDEFINED, 6, args);
+    for (int index = 0; index < 6; index++) {
+        JS_FreeValue(host->ctx, args[index]);
+    }
+    if (!JS_IsException(result)) {
+        JS_FreeValue(host->ctx, result);
+        return 0;
+    }
+    write_exception(host->ctx, err, err_len);
+    return -1;
+}
+
+int qjs_driver(Host *host, int kind, uint32_t index, uint32_t generation, int tag, int i0, int i1,
+               float f0, float f1, float f2, float f3, float f4, float f5, const char *s0, size_t n0,
+               const char *s1, size_t n1, char *err, size_t err_len) {
+    if (!host || !host->has_driver) {
+        return 0;
+    }
+    arm_slice(host);
+    JSValue args[14];
+    args[0] = JS_NewInt32(host->ctx, kind);
+    args[1] = JS_NewUint32(host->ctx, index);
+    args[2] = JS_NewUint32(host->ctx, generation);
+    args[3] = JS_NewInt32(host->ctx, tag);
+    args[4] = JS_NewInt32(host->ctx, i0);
+    args[5] = JS_NewInt32(host->ctx, i1);
+    args[6] = JS_NewFloat64(host->ctx, f0);
+    args[7] = JS_NewFloat64(host->ctx, f1);
+    args[8] = JS_NewFloat64(host->ctx, f2);
+    args[9] = JS_NewFloat64(host->ctx, f3);
+    args[10] = JS_NewFloat64(host->ctx, f4);
+    args[11] = JS_NewFloat64(host->ctx, f5);
+    args[12] = JS_NewStringLen(host->ctx, s0 ? s0 : "", n0);
+    args[13] = JS_NewStringLen(host->ctx, s1 ? s1 : "", n1);
+    JSValue result = JS_Call(host->ctx, host->driver_cb, JS_UNDEFINED, 14, args);
+    for (int slot = 0; slot < 14; slot++) {
+        JS_FreeValue(host->ctx, args[slot]);
+    }
+    if (!JS_IsException(result)) {
+        JS_FreeValue(host->ctx, result);
+        return 0;
+    }
+    write_exception(host->ctx, err, err_len);
+    return -1;
+}
+
+int qjs_layout(Host *host, char *err, size_t err_len) {
+    if (!host || !host->has_layout) {
+        return 0;
+    }
+    arm_slice(host);
+    JSValue result = JS_Call(host->ctx, host->layout_cb, JS_UNDEFINED, 0, NULL);
+    if (!JS_IsException(result)) {
+        JS_FreeValue(host->ctx, result);
+        return 0;
+    }
+    write_exception(host->ctx, err, err_len);
+    return -1;
 }
 
 int qjs_frame(Host *host, double target_ms, double interval_ms, char *err, size_t err_len) {
@@ -4308,6 +5166,15 @@ void qjs_close(Host *host) {
     free(host->app_dir);
     if (host->has_frame) {
         JS_FreeValue(host->ctx, host->frame_cb);
+    }
+    if (host->has_layout) {
+        JS_FreeValue(host->ctx, host->layout_cb);
+    }
+    if (host->has_scroll_state) {
+        JS_FreeValue(host->ctx, host->scroll_state_cb);
+    }
+    if (host->has_driver) {
+        JS_FreeValue(host->ctx, host->driver_cb);
     }
     free_timers(host);
     free_promises(host);

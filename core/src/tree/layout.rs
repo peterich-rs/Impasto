@@ -1,5 +1,6 @@
 //! Taffy styles, measure, and the viewport.
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use protocol::{TextAlign, TextStyle};
@@ -24,6 +25,7 @@ impl Tree {
         finite_number(height)?;
         self.origin = (x, y);
         self.viewport = Some((width.max(0.0), height.max(0.0)));
+        self.note_layout(LayoutCause::Viewport);
         if let Some(root) = self.root {
             self.mark_layout_from(root);
             self.dirty_every_picture();
@@ -50,6 +52,27 @@ impl Tree {
         self.layout_passes
     }
 
+    pub(super) fn note_layout(&mut self, cause: LayoutCause) {
+        if self.layout_cause == LayoutCause::None {
+            self.layout_cause = cause;
+        }
+    }
+
+    /// Layout counters since the previous take. The next frame starts at zero.
+    pub fn take_layout_trace(&mut self) -> LayoutTrace {
+        let trace = LayoutTrace {
+            laywork_ms: self.layout_work_ms,
+            passes: self.layout_entries,
+            text_reused: self.text_reused.take(),
+            text_shaped: self.text_shaped.take(),
+            cause: self.layout_cause,
+        };
+        self.layout_work_ms = 0.0;
+        self.layout_entries = 0;
+        self.layout_cause = LayoutCause::None;
+        trace
+    }
+
     pub(super) fn mark_layout(&mut self) {
         self.needs_layout = true;
         self.needs_paint = true;
@@ -59,10 +82,10 @@ impl Tree {
         self.needs_paint = true;
     }
 
-    /// Diries the picture that owns `id`. A new layer also dirties its parent picture.
+    /// Diries the picture that owns `id`. A layer also dirties its parent picture.
     pub(super) fn mark_repaint(&mut self, id: NodeId) {
         self.dirty_picture(id);
-        if self.is_layer_node(id)
+        if self.renders_layer_node(id)
             && let Some(parent) = self.get(id).and_then(|node| node.parent)
         {
             self.dirty_picture(parent);
@@ -71,13 +94,39 @@ impl Tree {
         self.mark_paint();
     }
 
-    fn dirty_picture(&mut self, mut id: NodeId) {
+    /// A layer property changed and the run commands did not.
+    pub(super) fn paint_layer_value(&mut self) {
+        self.layer_epoch = self.layer_epoch.wrapping_add(1);
+        self.mark_paint();
+    }
+
+    /// The open-layer bracket flipped. Dirty every ancestor so outer runs rebuild.
+    ///
+    /// Recomputes `subtree_layers` first. A clip's layer bit depends on descendants,
+    /// and the map from the previous frame would stop the walk too early.
+    pub(super) fn repaint_ancestors(&mut self, id: NodeId) {
+        if let Some(root) = self.root {
+            self.subtree_layers.clear();
+            let _ = self.sweep_subtree_layers(root);
+        }
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            if let Ok(node) = self.node_mut(node_id) {
+                node.flags.insert(NodeFlags::REPAINT_DIRTY);
+            }
+            current = self.get(node_id).and_then(|node| node.parent);
+        }
+        self.layer_epoch = self.layer_epoch.wrapping_add(1);
+        self.mark_paint();
+    }
+
+    pub(super) fn dirty_picture(&mut self, mut id: NodeId) {
         loop {
-            let Ok(node) = self.node(id) else {
-                return;
+            let parent = match self.node(id) {
+                Ok(node) => node.parent,
+                Err(_) => return,
             };
-            let parent = node.parent;
-            let stop = parent.is_none() || node.is_layer_kind();
+            let stop = parent.is_none() || self.renders_layer_node(id);
             if stop {
                 if let Ok(node) = self.node_mut(id) {
                     node.flags.insert(NodeFlags::REPAINT_DIRTY);
@@ -91,27 +140,43 @@ impl Tree {
         }
     }
 
-    pub(super) fn is_layer_node(&self, id: NodeId) -> bool {
-        self.get(id).is_some_and(|node| node.is_layer_kind())
+    pub(super) fn renders_layer_node(&self, id: NodeId) -> bool {
+        let subtree = self.subtree_layers.get(&id).copied().unwrap_or(false);
+        self.get(id)
+            .is_some_and(|node| node.renders_layers(subtree))
     }
 
-    fn dirty_every_picture(&mut self) {
+    pub(super) fn is_repaint_dirty(&self, id: NodeId) -> bool {
+        self.get(id)
+            .is_some_and(|node| node.flags.contains(NodeFlags::REPAINT_DIRTY))
+    }
+
+    pub(super) fn dirty_every_picture(&mut self) {
+        let Some(root) = self.root else {
+            return;
+        };
+        self.subtree_layers.clear();
+        let _ = self.sweep_subtree_layers(root);
         let ids: Vec<NodeId> = self
             .slots
             .iter()
             .enumerate()
             .filter_map(|(index, slot)| {
-                let node = slot.node.as_ref()?;
-                if node.parent.is_some() && !node.is_layer_kind() {
-                    return None;
-                }
+                slot.node.as_ref()?;
                 Some(NodeId {
                     index: index as u32,
                     generation: slot.generation,
                 })
             })
             .collect();
-        for id in ids {
+        let owners: Vec<NodeId> = ids
+            .into_iter()
+            .filter(|id| {
+                self.get(*id).is_some_and(|node| node.parent.is_none())
+                    || self.renders_layer_node(*id)
+            })
+            .collect();
+        for id in owners {
             if let Ok(node) = self.node_mut(id) {
                 node.flags.insert(NodeFlags::REPAINT_DIRTY);
             }
@@ -120,55 +185,6 @@ impl Tree {
 
     pub fn clear_paint(&mut self) {
         self.needs_paint = false;
-    }
-
-    pub fn is_text(&self, id: NodeId) -> Result<bool, Error> {
-        Ok(self.node(id)?.kind == Kind::Text)
-    }
-
-    /// Replaces the text. The previous geometry stays valid for hit testing
-    /// until the next `layout`.
-    pub fn set_text(&mut self, id: NodeId, utf8: impl Into<String>) -> Result<(), Error> {
-        let next = utf8.into();
-        let changed = {
-            let node = self.node_mut(id)?;
-            let Some(text) = node.text_mut() else {
-                return Err(Error::NotText);
-            };
-            if text.editor.is_some() {
-                let (changed, stored) = {
-                    let editor = text.editor.as_mut().expect("editor");
-                    let changed = editor.replace_keeping_composition(next);
-                    (changed, editor.value().text.clone())
-                };
-                text.utf8 = Arc::from(stored);
-                changed
-            } else {
-                let changed = text.utf8.as_ref() != next;
-                text.utf8 = Arc::from(next);
-                changed
-            }
-        };
-        if !changed {
-            return Ok(());
-        }
-        self.mark_semantics_chain(id);
-        self.touch_measure(id)
-    }
-
-    pub fn set_font_size(&mut self, id: NodeId, font_size: f32) -> Result<(), Error> {
-        finite_number(font_size)?;
-        {
-            let node = self.node_mut(id)?;
-            let Some(text) = node.text_mut() else {
-                return Err(Error::NotText);
-            };
-            if text.font_size == font_size {
-                return Ok(());
-            }
-            text.font_size = font_size;
-        }
-        self.touch_measure(id)
     }
 
     /// Foreground for text, fill for a decorated box.
@@ -313,14 +329,18 @@ impl Tree {
 
     /// Layer alpha, 0–255. Geometry stays until the next layout.
     pub fn set_alpha(&mut self, id: NodeId, alpha: u8) -> Result<(), Error> {
-        let node = self.node_mut(id)?;
-        if node.kind != Kind::Opacity {
+        if self.node(id)?.kind != Kind::Opacity {
             return Err(Error::WrongKind);
         }
-        node.write_paint(|paint| paint.alpha = Some(alpha));
-        let _ = node;
-        self.layer_epoch = self.layer_epoch.wrapping_add(1);
-        self.mark_paint();
+        let previous = alpha_bucket(self.node(id)?.alpha());
+        self.node_mut(id)?
+            .write_paint(|paint| paint.alpha = Some(alpha));
+        let next = alpha_bucket(self.node(id)?.alpha());
+        if previous == next {
+            self.paint_layer_value();
+        } else {
+            self.repaint_ancestors(id);
+        }
         Ok(())
     }
 
@@ -452,11 +472,16 @@ impl Tree {
         }
         let width = finite_positive(width)?;
         let height = finite_positive(height)?;
+        let width = length(width);
+        let height = length(height);
+        {
+            let style = &self.node(id)?.style;
+            if style.size.width == width && style.size.height == height {
+                return Ok(());
+            }
+        }
         let mut style = self.node(id)?.style.clone();
-        style.size = Size {
-            width: length(width),
-            height: length(height),
-        };
+        style.size = Size { width, height };
         self.write_style(id, style)
     }
 
@@ -469,6 +494,12 @@ impl Tree {
     ) -> Result<(), Error> {
         let width = axis_dimension(width)?;
         let height = axis_dimension(height)?;
+        {
+            let style = &self.node(id)?.style;
+            if style.size.width == width && style.size.height == height {
+                return Ok(());
+            }
+        }
         let mut style = self.node(id)?.style.clone();
         style.size = Size { width, height };
         self.write_style(id, style)
@@ -589,212 +620,6 @@ impl Tree {
         Ok(())
     }
 
-    /// Styled runs and UTF-16 links. Non-empty spans replace `utf8` with their concatenation.
-    pub fn set_text_runs(
-        &mut self,
-        id: NodeId,
-        spans: Vec<protocol::TextSpan>,
-        links: Vec<protocol::TextLink>,
-    ) -> Result<(), Error> {
-        self.edit_text(id, |text| {
-            if !spans.is_empty() {
-                let joined: String = spans.iter().map(|span| span.utf8.as_str()).collect();
-                text.utf8 = Arc::from(joined);
-            }
-            text.spans = Arc::from(spans);
-            text.links = Arc::from(links);
-        })
-    }
-
-    pub fn set_max_lines(&mut self, id: NodeId, max_lines: Option<u32>) -> Result<(), Error> {
-        if matches!(max_lines, Some(0)) {
-            return Err(Error::BadNumber);
-        }
-        self.edit_text(id, |text| text.style_mut().max_lines = max_lines)
-    }
-
-    pub fn set_ellipsis(&mut self, id: NodeId, ellipsis: Option<&str>) -> Result<(), Error> {
-        let ellipsis = match ellipsis {
-            Some(text) if !text.is_empty() => Some(text.to_owned()),
-            _ => None,
-        };
-        self.edit_text(id, |text| {
-            if ellipsis.is_some() {
-                text.style_mut().overflow = protocol::TextOverflow::Ellipsis;
-            } else if text.style_mut().overflow == protocol::TextOverflow::Ellipsis {
-                text.style_mut().overflow = protocol::TextOverflow::Clip;
-            }
-            text.style_mut().ellipsis = ellipsis;
-        })
-    }
-
-    pub fn set_overflow(
-        &mut self,
-        id: NodeId,
-        overflow: protocol::TextOverflow,
-    ) -> Result<(), Error> {
-        self.edit_text(id, |text| {
-            text.style_mut().overflow = overflow;
-            if overflow == protocol::TextOverflow::Ellipsis && text.style_mut().ellipsis.is_none() {
-                text.style_mut().ellipsis = Some("…".to_owned());
-            }
-        })
-    }
-
-    pub fn set_soft_wrap(&mut self, id: NodeId, soft_wrap: bool) -> Result<(), Error> {
-        self.edit_text(id, |text| text.style_mut().soft_wrap = soft_wrap)
-    }
-
-    pub fn set_text_align(&mut self, id: NodeId, align: TextAlign) -> Result<(), Error> {
-        self.edit_text(id, |text| text.style_mut().align = align)
-    }
-
-    pub fn set_font_weight(&mut self, id: NodeId, weight: u16) -> Result<(), Error> {
-        if !matches!(weight, 100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900) {
-            return Err(Error::BadNumber);
-        }
-        self.edit_text(id, |text| text.style_mut().weight = weight)
-    }
-
-    pub fn set_text_direction(&mut self, id: NodeId, rtl: bool) -> Result<(), Error> {
-        self.edit_text(id, |text| text.style_mut().direction_rtl = rtl)
-    }
-
-    /// `0.0` uses the font's own line height.
-    pub fn set_line_height(&mut self, id: NodeId, height: f32) -> Result<(), Error> {
-        let height = finite_positive(height)?;
-        self.edit_text(id, |text| text.style_mut().height = height)
-    }
-
-    /// Marks every text node dirty so a text-scale change lays out again.
-    pub fn mark_text_dirty(&mut self) {
-        let ids: Vec<NodeId> = self
-            .slots
-            .iter()
-            .enumerate()
-            .filter_map(|(index, slot)| {
-                let node = slot.node.as_ref()?;
-                node.text()?;
-                Some(NodeId {
-                    index: index as u32,
-                    generation: slot.generation,
-                })
-            })
-            .collect();
-        for id in ids {
-            let _ = self.touch_measure(id);
-        }
-    }
-
-    /// Logical font sizes are multiplied by `scale` during measure and record.
-    pub fn set_text_scale(&mut self, scale: f32) -> Result<(), Error> {
-        finite_number(scale)?;
-        if scale <= 0.0 {
-            return Err(Error::BadNumber);
-        }
-        if (self.text_scale - scale).abs() <= f32::EPSILON {
-            return Ok(());
-        }
-        self.text_scale = scale;
-        self.mark_text_dirty();
-        Ok(())
-    }
-
-    pub fn overscroll(&self, id: NodeId) -> Result<(f32, f32), Error> {
-        let node = self.node(id)?;
-        if node.kind != Kind::Scroll {
-            return Err(Error::WrongKind);
-        }
-        Ok(node.overscroll())
-    }
-
-    pub fn text_scale(&self) -> f32 {
-        self.text_scale
-    }
-
-    /// Scroll paint offset in scene points. Does not run Taffy.
-    ///
-    /// Hit testing and `record` apply the offset. A later `layout` keeps the
-    /// cached boxes when this was the only change.
-    pub fn set_scroll_offset(&mut self, id: NodeId, dx: f32, dy: f32) -> Result<(), Error> {
-        finite_number(dx)?;
-        finite_number(dy)?;
-        if self.node(id)?.kind != Kind::Scroll {
-            return Err(Error::WrongKind);
-        }
-        let (max_x, max_y) = self.scroll_limits(id);
-        let (ox, oy) = rubber_band(dx, dy, max_x, max_y);
-        let applying = self.applying_motion;
-        {
-            let node = self.node_mut(id)?;
-            let Some(geom) = node.scroll_mut() else {
-                return Err(Error::WrongKind);
-            };
-            geom.offset_x = ox;
-            geom.offset_y = oy;
-            if !applying {
-                geom.overscroll_x = crate::motion::OVERSCROLL_FACTOR * (dx - ox);
-                geom.overscroll_y = crate::motion::OVERSCROLL_FACTOR * (dy - oy);
-            }
-        }
-        self.layer_epoch = self.layer_epoch.wrapping_add(1);
-        self.mark_paint();
-        if !self.applying_motion {
-            self.rebase_scroll(id, dx, dy);
-        }
-        Ok(())
-    }
-
-    pub fn fling_active(&self) -> bool {
-        self.motions.iter().any(|motion| {
-            matches!(
-                motion.prop,
-                crate::AnimProp::ScrollX | crate::AnimProp::ScrollY
-            )
-        })
-    }
-
-    /// Starts coasting. Speeds are scene points per millisecond.
-    ///
-    /// The finger velocity is negated: a positive drag speed decreases the offset,
-    /// matching the previous step. A slow release stops.
-    pub fn arm_fling(&mut self, id: NodeId, vx: f32, vy: f32) -> Result<(), Error> {
-        if self.node(id)?.kind != Kind::Scroll {
-            return Err(Error::WrongKind);
-        }
-        self.motions.retain(|motion| {
-            motion.node != id
-                || !matches!(
-                    motion.prop,
-                    crate::AnimProp::ScrollX | crate::AnimProp::ScrollY
-                )
-        });
-        let (x, y) = self.scroll_offset(id)?;
-        if vx.abs() >= 0.02 {
-            self.animate(
-                id,
-                crate::AnimProp::ScrollX,
-                Box::new(crate::Friction {
-                    x0: x,
-                    v0: -vx,
-                    tau_ms: crate::SCROLL_TAU_MS,
-                }),
-            );
-        }
-        if vy.abs() >= 0.02 {
-            self.animate(
-                id,
-                crate::AnimProp::ScrollY,
-                Box::new(crate::Friction {
-                    x0: y,
-                    v0: -vy,
-                    tau_ms: crate::SCROLL_TAU_MS,
-                }),
-            );
-        }
-        Ok(())
-    }
-
     /// Writes each motion's end value, then drops it.
     ///
     /// Springs land on `target`. Friction lands on `x0 + v0 * tau`, clamped to
@@ -820,106 +645,6 @@ impl Tree {
         }
     }
 
-    /// Friction asymptote clamped to the scroll limits. `None` when this scroll
-    /// is not coasting. Callers treat the pair as an upper bound on the offset.
-    pub fn fling_target(&self, id: NodeId) -> Option<(f32, f32)> {
-        if self.node(id).ok()?.kind != Kind::Scroll {
-            return None;
-        }
-        let (mut x, mut y) = self.scroll_offset(id).ok()?;
-        let mut coasting = false;
-        for motion in &self.motions {
-            if motion.node != id {
-                continue;
-            }
-            match motion.prop {
-                crate::AnimProp::ScrollX => {
-                    x = motion.simulation.terminal();
-                    coasting = true;
-                }
-                crate::AnimProp::ScrollY => {
-                    y = motion.simulation.terminal();
-                    coasting = true;
-                }
-                _ => {}
-            }
-        }
-        if !coasting {
-            return None;
-        }
-        let (max_x, max_y) = self.scroll_limits(id);
-        Some((x.clamp(0.0, max_x.max(0.0)), y.clamp(0.0, max_y.max(0.0))))
-    }
-
-    /// Springs the nearest scroll ancestors so `id` sits on `edge`.
-    /// `Ok(false)` when nothing in the parent chain can scroll.
-    pub fn scroll_into_view(&mut self, id: NodeId, edge: super::ScrollEdge) -> Result<bool, Error> {
-        self.node(id)?;
-        let mut scrolls = Vec::new();
-        let mut parent = self.node(id)?.parent;
-        while let Some(current) = parent {
-            if self.node(current)?.kind == Kind::Scroll {
-                scrolls.push(current);
-            }
-            parent = self.node(current)?.parent;
-        }
-        if scrolls.is_empty() {
-            return Ok(false);
-        }
-        for scroll in scrolls {
-            self.reveal(id, scroll, edge)?;
-        }
-        Ok(true)
-    }
-
-    fn reveal(&mut self, id: NodeId, scroll: NodeId, edge: super::ScrollEdge) -> Result<(), Error> {
-        let target = self.rect(id)?;
-        let view = self.rect(scroll)?;
-        let (ox, oy) = self.scroll_offset(scroll)?;
-        let (max_x, max_y) = self.scroll_limits(scroll);
-        let rel_x = target.x - view.x + ox;
-        let rel_y = target.y - view.y + oy;
-        let (nx, ny) = match edge {
-            super::ScrollEdge::Start => (rel_x, rel_y),
-            super::ScrollEdge::End => (rel_x + target.w - view.w, rel_y + target.h - view.h),
-            super::ScrollEdge::Nearest => (
-                nearest_offset(ox, rel_x, rel_x + target.w, view.w),
-                nearest_offset(oy, rel_y, rel_y + target.h, view.h),
-            ),
-        };
-        let nx = nx.clamp(0.0, max_x.max(0.0));
-        let ny = ny.clamp(0.0, max_y.max(0.0));
-        self.spring_scroll(scroll, crate::AnimProp::ScrollX, ox, nx);
-        self.spring_scroll(scroll, crate::AnimProp::ScrollY, oy, ny);
-        Ok(())
-    }
-
-    fn spring_scroll(&mut self, id: NodeId, prop: crate::AnimProp, from: f32, to: f32) {
-        if (from - to).abs() < f32::EPSILON {
-            return;
-        }
-        self.animate(
-            id,
-            prop,
-            Box::new(crate::Spring {
-                x0: from,
-                v0: 0.0,
-                target: to,
-                stiffness: crate::motion::OVERSCROLL_STIFFNESS,
-                damping: crate::motion::OVERSCROLL_DAMPING,
-            }),
-        );
-    }
-
-    pub fn clear_fling(&mut self) {
-        self.motions.retain(|motion| {
-            !matches!(
-                motion.prop,
-                crate::AnimProp::ScrollX | crate::AnimProp::ScrollY
-            )
-        });
-    }
-
     /// Samples every active motion at `target_ms`. Returns whether any remain.
     pub fn tick_motions(&mut self, target_ms: f64) -> bool {
         if !target_ms.is_finite() {
@@ -932,12 +657,25 @@ impl Tree {
             let t = (target_ms - started).max(0.0);
             let value = self.motions[index].simulation.x(t);
             let finished = self.motions[index].simulation.done(t);
+            let velocity = self.motions[index].simulation.dx(t);
             let node = self.motions[index].node;
             let prop = self.motions[index].prop;
+            let snap = self.motions[index].snap;
             let stop = self.apply_motion(node, prop, value) || finished;
             if stop {
                 self.motion_ends.push((node, prop));
                 self.motions.remove(index);
+                if matches!(prop, crate::AnimProp::ScrollX | crate::AnimProp::ScrollY) {
+                    self.after_scroll_motion(node, prop, velocity, snap);
+                } else if matches!(
+                    prop,
+                    crate::AnimProp::OverscrollX | crate::AnimProp::OverscrollY
+                ) {
+                    // The sample that crosses the settle threshold is not zero.
+                    // Land on the target, then let the phase notice carry that zero.
+                    let _ = self.apply_overscroll(node, prop, 0.0);
+                    self.sync_scroll_phase(node);
+                }
             } else {
                 index += 1;
             }
@@ -948,17 +686,6 @@ impl Tree {
     /// Motions removed by [`Tree::tick_motions`] or [`Tree::finish_motions`] since the last take.
     pub fn take_motion_ends(&mut self) -> Vec<(NodeId, crate::AnimProp)> {
         std::mem::take(&mut self.motion_ends)
-    }
-
-    /// Advances the clock by `dt_ms` and samples. Tests use this; the session
-    /// passes [`Tree::tick_motions`] an absolute timestamp.
-    pub fn tick_fling(&mut self, dt_ms: f64) -> bool {
-        let dt = if dt_ms.is_finite() && dt_ms > 0.0 {
-            dt_ms
-        } else {
-            16.0
-        };
-        self.tick_motions(self.clock_ms + dt)
     }
 
     /// Replaces any motion of `prop` on `id`. The sample clock is the last tick.
@@ -975,77 +702,28 @@ impl Tree {
             node: id,
             prop,
             simulation,
+            snap: false,
         });
     }
 
-    pub(super) fn cancel_scroll_motion(&mut self, id: NodeId) {
-        self.motions.retain(|motion| {
-            motion.node != id
-                || !matches!(
-                    motion.prop,
-                    crate::AnimProp::ScrollX | crate::AnimProp::ScrollY
-                )
-        });
-    }
-
-    /// Adds wheel speed into a coast already running on `id`.
-    pub(super) fn merge_wheel(&mut self, id: NodeId, dx: f32, dy: f32) {
-        self.kick_scroll(id, crate::AnimProp::ScrollX, dx);
-        self.kick_scroll(id, crate::AnimProp::ScrollY, dy);
-    }
-
-    fn kick_scroll(&mut self, id: NodeId, prop: crate::AnimProp, delta: f32) {
-        if delta == 0.0 {
-            return;
-        }
-        let Some(index) = self
+    pub(super) fn animate_snap(
+        &mut self,
+        id: NodeId,
+        prop: crate::AnimProp,
+        simulation: Box<dyn crate::Simulation>,
+    ) {
+        self.animate(id, prop, simulation);
+        if let Some(motion) = self
             .motions
-            .iter()
-            .position(|motion| motion.node == id && motion.prop == prop)
-        else {
-            return;
-        };
-        let t = (self.clock_ms - self.motions[index].started_ms).max(0.0);
-        let velocity = self.motions[index].simulation.dx(t) + delta;
-        let Ok((x, y)) = self.scroll_offset(id) else {
-            return;
-        };
-        let x0 = if prop == crate::AnimProp::ScrollX {
-            x
-        } else {
-            y
-        };
-        self.motions[index].started_ms = self.clock_ms;
-        self.motions[index].simulation = Box::new(crate::Friction {
-            x0,
-            v0: velocity,
-            tau_ms: crate::SCROLL_TAU_MS,
-        });
-    }
-
-    fn rebase_scroll(&mut self, id: NodeId, x: f32, y: f32) {
-        let clock = self.clock_ms;
-        for motion in &mut self.motions {
-            if motion.node != id {
-                continue;
-            }
-            let x0 = match motion.prop {
-                crate::AnimProp::ScrollX => x,
-                crate::AnimProp::ScrollY => y,
-                _ => continue,
-            };
-            let t = (clock - motion.started_ms).max(0.0);
-            let velocity = motion.simulation.dx(t);
-            motion.started_ms = clock;
-            motion.simulation = Box::new(crate::Friction {
-                x0,
-                v0: velocity,
-                tau_ms: crate::SCROLL_TAU_MS,
-            });
+            .iter_mut()
+            .rev()
+            .find(|motion| motion.node == id && motion.prop == prop)
+        {
+            motion.snap = true;
         }
     }
 
-    fn apply_motion(&mut self, id: NodeId, prop: crate::AnimProp, value: f32) -> bool {
+    pub(super) fn apply_motion(&mut self, id: NodeId, prop: crate::AnimProp, value: f32) -> bool {
         self.applying_motion = true;
         let stop = match prop {
             crate::AnimProp::ScrollX | crate::AnimProp::ScrollY => {
@@ -1067,29 +745,12 @@ impl Tree {
         stop
     }
 
-    fn apply_scroll(&mut self, id: NodeId, prop: crate::AnimProp, value: f32) -> bool {
-        let Ok((x, y)) = self.scroll_offset(id) else {
-            return true;
-        };
-        let (max_x, max_y) = self.scroll_limits(id);
-        let (nx, ny, hit) = if prop == crate::AnimProp::ScrollX {
-            let limit = max_x.max(0.0);
-            let next = value.clamp(0.0, limit);
-            (next, y, next <= 0.0 || next >= limit)
-        } else {
-            let limit = max_y.max(0.0);
-            let next = value.clamp(0.0, limit);
-            (x, next, next <= 0.0 || next >= limit)
-        };
-        if (nx - x).abs() > f32::EPSILON || (ny - y).abs() > f32::EPSILON {
-            if self.set_scroll_offset(id, nx, ny).is_ok() {
-                self.scroll_notices.push(Gesture::Scroll(id, nx, ny));
-            }
-        }
-        hit
-    }
-
-    fn apply_transform_prop(&mut self, id: NodeId, prop: crate::AnimProp, value: f32) -> bool {
+    pub(super) fn apply_transform_prop(
+        &mut self,
+        id: NodeId,
+        prop: crate::AnimProp,
+        value: f32,
+    ) -> bool {
         let Ok(node) = self.node(id) else {
             return true;
         };
@@ -1107,249 +768,6 @@ impl Tree {
         }
         self.set_transform(id, translate_x, translate_y, rotate, scale)
             .is_err()
-    }
-
-    fn apply_overscroll(&mut self, id: NodeId, prop: crate::AnimProp, value: f32) -> bool {
-        {
-            let Ok(node) = self.node_mut(id) else {
-                return true;
-            };
-            let Some(geom) = node.scroll_mut() else {
-                return true;
-            };
-            if prop == crate::AnimProp::OverscrollX {
-                geom.overscroll_x = value;
-            } else {
-                geom.overscroll_y = value;
-            }
-        }
-        self.layer_epoch = self.layer_epoch.wrapping_add(1);
-        self.mark_paint();
-        value.abs() < 0.5
-    }
-
-    pub(super) fn arm_overscroll_spring(&mut self, id: NodeId) {
-        let Ok((x, y)) = self.node(id).map(|node| node.overscroll()) else {
-            return;
-        };
-        if x.abs() > f32::EPSILON {
-            self.animate(
-                id,
-                crate::AnimProp::OverscrollX,
-                Box::new(crate::Spring {
-                    x0: x,
-                    v0: 0.0,
-                    target: 0.0,
-                    stiffness: crate::motion::OVERSCROLL_STIFFNESS,
-                    damping: crate::motion::OVERSCROLL_DAMPING,
-                }),
-            );
-        }
-        if y.abs() > f32::EPSILON {
-            self.animate(
-                id,
-                crate::AnimProp::OverscrollY,
-                Box::new(crate::Spring {
-                    x0: y,
-                    v0: 0.0,
-                    target: 0.0,
-                    stiffness: crate::motion::OVERSCROLL_STIFFNESS,
-                    damping: crate::motion::OVERSCROLL_DAMPING,
-                }),
-            );
-        }
-    }
-
-    pub fn take_scroll_notices(&mut self) -> Vec<Gesture> {
-        std::mem::take(&mut self.scroll_notices)
-    }
-
-    /// Applies one edit to the editor stored on `id` and returns the new value.
-    ///
-    /// Line, word, and vertical motions use this node's paragraph when the
-    /// editor string still matches the text node.
-    pub fn text_edit(
-        &mut self,
-        id: NodeId,
-        edit: crate::Edit,
-    ) -> Result<crate::TextEditingValue, Error> {
-        let lines = self.editor_lines(id);
-        let mut editor = self
-            .node_mut(id)?
-            .text_mut()
-            .ok_or(Error::NotText)?
-            .editor
-            .take()
-            .unwrap_or_else(|| crate::TextEditor::new(""));
-        editor.apply_in(
-            edit,
-            &lines,
-            |text, unit| self.word_at(id, text, unit),
-            |unit, affinity| {
-                self.caret_for(id, unit, affinity).unwrap_or(crate::Caret {
-                    unit,
-                    x: 0.0,
-                    y: 0.0,
-                    w: 1.0,
-                    h: 0.0,
-                    affinity,
-                })
-            },
-            |x, y| {
-                self.caret_at_local(id, x, y).unwrap_or(crate::Caret {
-                    unit: 0,
-                    x,
-                    y,
-                    w: 1.0,
-                    h: 0.0,
-                    affinity: crate::Affinity::Downstream,
-                })
-            },
-        );
-        let value = editor.value().clone();
-        let changed = {
-            let text = self.node_mut(id)?.text_mut().ok_or(Error::NotText)?;
-            let changed = text.utf8.as_ref() != value.text;
-            text.editor = Some(editor);
-            if changed {
-                text.utf8 = Arc::from(value.text.as_str());
-            }
-            changed
-        };
-        if changed {
-            self.touch_measure(id)?;
-        }
-        Ok(value)
-    }
-
-    /// Revision and value of the editor on `id`.
-    pub fn editor_snapshot(&self, id: NodeId) -> Option<(u64, crate::TextEditingValue)> {
-        let editor = self.node(id).ok()?.text()?.editor.as_ref()?;
-        Some((editor.revision(), editor.value().clone()))
-    }
-
-    /// The editor string, after [`Tree::text_edit`]. `None` when this node has no editor.
-    pub fn editor_text(&self, id: NodeId) -> Option<String> {
-        self.node(id)
-            .ok()?
-            .text()?
-            .editor
-            .as_ref()
-            .map(|editor| editor.value().text.clone())
-    }
-
-    /// Rectangles covering a UTF-16 selection, in paragraph space.
-    pub fn selection_rects(&self, id: NodeId, start: u32, end: u32) -> Result<Vec<Rect>, Error> {
-        let (start, end) = if start <= end {
-            (start, end)
-        } else {
-            (end, start)
-        };
-        if start == end {
-            return Ok(Vec::new());
-        }
-        let key = self.text_key(id)?;
-        let metrics = self.shaper.metrics(&key.metrics);
-        let lines = &metrics.lines;
-        let mut rects = Vec::new();
-        for line in lines.iter() {
-            let from = start.max(line.start);
-            let to = end.min(line.end);
-            if from >= to {
-                continue;
-            }
-            let left = self
-                .shaper
-                .caret_at_unit(&key.metrics, from, crate::Affinity::Downstream);
-            let right = self
-                .shaper
-                .caret_at_unit(&key.metrics, to, crate::Affinity::Upstream);
-            let x = left.x.min(right.x);
-            let w = (left.x - right.x).abs().max(1.0);
-            rects.push(Rect {
-                x,
-                y: line.y,
-                w,
-                h: line.h,
-            });
-        }
-        Ok(rects)
-    }
-
-    fn editor_lines(&self, id: NodeId) -> Vec<crate::TextLine> {
-        let matches = live_node(&self.slots, id).ok().is_some_and(|node| {
-            node.text().is_some_and(|text| {
-                text.editor
-                    .as_ref()
-                    .is_some_and(|editor| editor.value().text == text.utf8.as_ref())
-            })
-        });
-        if !matches {
-            return Vec::new();
-        }
-        let Ok(key) = self.text_key(id) else {
-            return Vec::new();
-        };
-        self.shaper.metrics(&key.metrics).lines.to_vec()
-    }
-
-    fn word_at(&self, id: NodeId, text: &str, unit: u32) -> (u32, u32) {
-        if let Ok(key) = self.text_key(id)
-            && key.metrics.text.as_ref() == text
-        {
-            return self.shaper.word_range(&key.metrics, unit);
-        }
-        crate::shaper::whitespace_word(text, unit)
-    }
-
-    pub fn caret_for(
-        &self,
-        id: NodeId,
-        unit: u32,
-        affinity: crate::Affinity,
-    ) -> Result<crate::Caret, Error> {
-        let key = self.text_key(id)?;
-        Ok(self.shaper.caret_at_unit(&key.metrics, unit, affinity))
-    }
-
-    fn caret_at_local(&self, id: NodeId, x: f32, y: f32) -> Result<crate::Caret, Error> {
-        let key = self.text_key(id)?;
-        Ok(self.shaper.caret_at_point(&key.metrics, x, y))
-    }
-
-    pub fn text_clipboard(&self, id: NodeId) -> Result<Option<String>, Error> {
-        let node = self.node(id)?;
-        Ok(node
-            .text()
-            .and_then(|text| text.editor.as_ref())
-            .and_then(|editor| editor.clipboard().map(str::to_owned)))
-    }
-
-    fn scroll_limits(&self, id: NodeId) -> (f32, f32) {
-        let Ok(node) = self.node(id) else {
-            return (0.0, 0.0);
-        };
-        let (width, height) = (node.w, node.h);
-        let mut child = node.first_child;
-        let mut content_w: f32 = 0.0;
-        let mut content_h: f32 = 0.0;
-        while let Some(current) = child {
-            let next = self.node(current).ok().and_then(|node| node.next);
-            if let Ok(child) = self.node(current) {
-                content_w = content_w.max(child.w);
-                content_h = content_h.max(child.h);
-            }
-            child = next;
-        }
-        ((content_w - width).max(0.0), (content_h - height).max(0.0))
-    }
-
-    pub fn scroll_offset(&self, id: NodeId) -> Result<(f32, f32), Error> {
-        let node = self.node(id)?;
-        if node.kind != Kind::Scroll {
-            return Err(Error::WrongKind);
-        }
-        Ok(node.scroll_offset())
     }
 
     /// Paint transform. Scale is uniform. Rotation is clockwise radians.
@@ -1378,6 +796,7 @@ impl Tree {
                 return Ok(());
             }
         }
+        let was_identity = self.node(id)?.transform().is_identity();
         {
             let node = self.node_mut(id)?;
             let Some(geom) = node.transform_mut() else {
@@ -1389,40 +808,13 @@ impl Tree {
             geom.scale_x = scale;
             geom.scale_y = scale;
         }
-        self.layer_epoch = self.layer_epoch.wrapping_add(1);
-        self.mark_paint();
-        Ok(())
-    }
-
-    /// `None` or `""` uses the family registered on the player.
-    pub fn set_family(&mut self, id: NodeId, family: Option<&str>) -> Result<(), Error> {
-        let family = match family {
-            Some(name) if !name.is_empty() => Some(name.to_owned()),
-            _ => None,
-        };
-        self.edit_text(id, |text| text.style_mut().family = family)
-    }
-
-    pub(super) fn edit_text(
-        &mut self,
-        id: NodeId,
-        edit: impl FnOnce(&mut TextPayload),
-    ) -> Result<(), Error> {
-        let same = {
-            let node = self.node_mut(id)?;
-            let Some(text) = node.text_mut() else {
-                return Err(Error::NotText);
-            };
-            let style = Arc::clone(&text.style);
-            let color = text.color;
-            let utf8 = Arc::clone(&text.utf8);
-            edit(text);
-            color == text.color && utf8 == text.utf8 && *style == *text.style
-        };
-        if same {
-            return Ok(());
+        let is_identity = self.node(id)?.transform().is_identity();
+        if was_identity == is_identity {
+            self.paint_layer_value();
+        } else {
+            self.repaint_ancestors(id);
         }
-        self.touch_measure(id)
+        Ok(())
     }
 
     pub fn layout(&mut self) -> Result<(), Error> {
@@ -1438,16 +830,35 @@ impl Tree {
             },
             None => Size::MAX_CONTENT,
         };
+        let started = std::time::Instant::now();
         let slots = &self.slots;
         let shaper = self.shaper.as_ref();
         let text_scale = self.text_scale;
+        let text_reused = &self.text_reused;
+        let text_shaped = &self.text_shaped;
+        let mut measured = Vec::new();
+        let taffy_started = std::time::Instant::now();
         self.taffy.compute_layout_with_measure(
             root_taffy,
             available,
             |known, available, _id, context, _style| {
-                measure_leaf(slots, shaper, text_scale, known, available, context)
+                measure_leaf(
+                    slots,
+                    shaper,
+                    text_scale,
+                    known,
+                    available,
+                    context,
+                    &mut measured,
+                    text_reused,
+                    text_shaped,
+                )
             },
         )?;
+        self.taffy_ms = taffy_started.elapsed().as_secs_f64() * 1000.0;
+        for id in measured {
+            self.note_text(id);
+        }
         let boundaries = std::mem::take(&mut self.dirty_boundaries);
         if boundaries.is_empty() {
             self.place_boundary(root)?;
@@ -1463,10 +874,12 @@ impl Tree {
             }
         }
         self.layout_passes = self.layout_passes.saturating_add(1);
+        self.layout_entries = self.layout_entries.saturating_add(1);
         self.needs_layout = false;
         self.needs_paint = true;
         self.laid_out = true;
         self.sync_paragraphs();
+        self.layout_work_ms += started.elapsed().as_secs_f64() * 1000.0;
         Ok(())
     }
 
@@ -1474,134 +887,6 @@ impl Tree {
     pub fn set_drag_claim(&mut self, id: NodeId, claim: super::DragClaim) -> Result<(), Error> {
         self.node_mut(id)?.drag_claim = claim;
         Ok(())
-    }
-
-    /// Caret for a scene point over a text node. The returned `x` and `y` are
-    /// relative to the paragraph origin.
-    pub fn caret_at(&self, id: NodeId, x: f32, y: f32) -> Result<crate::Caret, Error> {
-        let (local_x, local_y) = self.scene_to_layout(id, x, y).ok_or(Error::BadNumber)?;
-        let (abs_x, abs_y) = self.layout_point(id)?;
-        let key = self.text_key(id)?;
-        Ok(self
-            .shaper
-            .caret_at_point(&key.metrics, local_x - abs_x, local_y - abs_y))
-    }
-
-    /// Caret rectangle for a UTF-16 index in a text node.
-    pub fn caret_at_unit(&self, id: NodeId, unit: u32) -> Result<crate::Caret, Error> {
-        self.caret_for(id, unit, crate::Affinity::Downstream)
-    }
-
-    /// UTF-16 word range around `unit` in a text node.
-    pub fn word_range(&self, id: NodeId, unit: u32) -> Result<(u32, u32), Error> {
-        let key = self.text_key(id)?;
-        Ok(self.shaper.word_range(&key.metrics, unit))
-    }
-
-    /// Same shaper `layout` used for this tree.
-    pub fn measure_text(
-        &self,
-        utf8: &str,
-        font_size: f32,
-        max_width: f32,
-        color: [u8; 4],
-        style: &TextStyle,
-    ) -> TextSize {
-        let key = crate::paint_key(
-            Arc::from(utf8),
-            Arc::new(style.clone()),
-            &[],
-            font_size * self.text_scale,
-            max_width,
-            color,
-        );
-        self.shaper.metrics(&key.metrics).size
-    }
-
-    fn text_key(&self, id: NodeId) -> Result<crate::PaintKey, Error> {
-        let node = live_node(&self.slots, id)?;
-        let text = node.text().ok_or(Error::NotText)?;
-        Ok(crate::paint_key(
-            Arc::clone(&text.utf8),
-            Arc::clone(&text.style),
-            text.spans.as_ref(),
-            text.font_size * self.text_scale,
-            text.max_width.get(),
-            text.color,
-        ))
-    }
-
-    pub(super) fn sync_paragraphs(&mut self) {
-        let mut ids = Vec::new();
-        if let Some(root) = self.root {
-            self.collect_text(root, &mut ids);
-        }
-        for id in ids {
-            self.sync_paragraph(id);
-        }
-    }
-
-    fn collect_text(&self, id: NodeId, out: &mut Vec<NodeId>) {
-        let Some(node) = self.get(id) else {
-            return;
-        };
-        if node.text().is_some() {
-            out.push(id);
-        }
-        let mut child = node.first_child;
-        while let Some(current) = child {
-            let next = self.get(current).and_then(|node| node.next);
-            self.collect_text(current, out);
-            child = next;
-        }
-    }
-
-    fn sync_paragraph(&mut self, id: NodeId) {
-        let Ok(key) = self.text_key(id) else {
-            return;
-        };
-        if key.metrics.text.is_empty() {
-            self.release_paragraph(id);
-            return;
-        }
-        let same = self
-            .node(id)
-            .ok()
-            .and_then(|node| node.text())
-            .and_then(|text| text.cached.as_ref())
-            .is_some_and(|cached| cached == &key);
-        if same {
-            return;
-        }
-        let old = self
-            .node_mut(id)
-            .ok()
-            .and_then(|node| node.text_mut().and_then(|text| text.paragraph.take()));
-        if let Some(old) = old {
-            self.shaper.release_paint(old);
-        }
-        let metrics = self.shaper.metrics(&key.metrics);
-        let paragraph = self.shaper.retain_paint(&key);
-        if let Ok(node) = self.node_mut(id)
-            && let Some(text) = node.text_mut()
-        {
-            text.metrics = Some(metrics);
-            text.paragraph = Some(paragraph);
-            text.cached = Some(key);
-        }
-    }
-
-    fn release_paragraph(&mut self, id: NodeId) {
-        let old = self.node_mut(id).ok().and_then(|node| {
-            node.text_mut().and_then(|text| {
-                text.metrics = None;
-                text.cached = None;
-                text.paragraph.take()
-            })
-        });
-        if let Some(old) = old {
-            self.shaper.release_paint(old);
-        }
     }
 
     pub fn rect(&self, id: NodeId) -> Result<Rect, Error> {
@@ -1645,16 +930,23 @@ impl Tree {
         if let Some(taffy_id) = taffy_id {
             self.taffy.set_style(taffy_id, style)?;
         }
+        self.note_layout(LayoutCause::Style);
         self.mark_layout_from(id);
         Ok(())
     }
 
     pub(super) fn touch_measure(&mut self, id: NodeId) -> Result<(), Error> {
+        self.note_layout(LayoutCause::Text);
+        self.note_text(id);
         if let Some(taffy_id) = self.node(id)?.taffy {
             self.taffy.mark_dirty(taffy_id)?;
         }
         self.mark_layout_from(id);
         Ok(())
+    }
+
+    pub fn layout_timing(&self) -> (f64, f64) {
+        (self.taffy_ms, self.sync_ms)
     }
 
     /// Marks `id` and the nearest relayout boundary. The boundary includes `id`
@@ -1668,17 +960,18 @@ impl Tree {
         self.mark_repaint(id);
     }
 
-    fn mark_boundary(&mut self, mut id: NodeId) {
+    pub(super) fn mark_boundary(&mut self, mut id: NodeId) {
         loop {
             let Ok(node) = self.node(id) else {
                 return;
             };
             let parent = node.parent;
             let boundary = node.flags.contains(NodeFlags::RELAYOUT_BOUNDARY);
+            let is_root = parent.is_none() && self.root == Some(id);
             if boundary || parent.is_none() {
                 if let Ok(node) = self.node_mut(id) {
                     node.flags.insert(NodeFlags::BOUNDARY_DIRTY);
-                    if parent.is_none() {
+                    if is_root {
                         node.flags.insert(NodeFlags::RELAYOUT_BOUNDARY);
                     }
                 }
@@ -1694,7 +987,7 @@ impl Tree {
         }
     }
 
-    fn place_boundary(&mut self, id: NodeId) -> Result<(), Error> {
+    pub(super) fn place_boundary(&mut self, id: NodeId) -> Result<(), Error> {
         self.write_box_from_taffy(id)?;
         let mut child = self.node(id)?.first_child;
         while let Some(current) = child {
@@ -1717,7 +1010,7 @@ impl Tree {
         Ok(())
     }
 
-    fn write_box_from_taffy(&mut self, id: NodeId) -> Result<(), Error> {
+    pub(super) fn write_box_from_taffy(&mut self, id: NodeId) -> Result<(), Error> {
         let taffy_id = self.node(id)?.taffy.ok_or(Error::UnknownNode)?;
         let (x, y, w, h) = {
             let layout = self.taffy.layout(taffy_id)?;
@@ -1736,7 +1029,7 @@ impl Tree {
         Ok(())
     }
 
-    fn shift_baseline(&mut self, row: NodeId) -> Result<(), Error> {
+    pub(super) fn shift_baseline(&mut self, row: NodeId) -> Result<(), Error> {
         let mut child = self.node(row)?.first_child;
         let mut samples = Vec::new();
         let mut max_baseline = 0.0f32;
@@ -1753,7 +1046,7 @@ impl Tree {
         Ok(())
     }
 
-    fn node_baseline(&self, id: NodeId) -> f32 {
+    pub(super) fn node_baseline(&self, id: NodeId) -> f32 {
         let Ok(node) = self.node(id) else {
             return 0.0;
         };
@@ -1768,7 +1061,7 @@ impl Tree {
         node.h
     }
 
-    fn clear_layout_flags(&mut self, id: NodeId) {
+    pub(super) fn clear_layout_flags(&mut self, id: NodeId) {
         if let Ok(node) = self.node_mut(id) {
             node.flags
                 .remove(NodeFlags::LAYOUT_DIRTY | NodeFlags::BOUNDARY_DIRTY);
@@ -1777,11 +1070,11 @@ impl Tree {
     }
 }
 
-fn rubber_band(x: f32, y: f32, max_x: f32, max_y: f32) -> (f32, f32) {
+pub(super) fn rubber_band(x: f32, y: f32, max_x: f32, max_y: f32) -> (f32, f32) {
     (x.clamp(0.0, max_x.max(0.0)), y.clamp(0.0, max_y.max(0.0)))
 }
 
-fn nearest_offset(current: f32, start: f32, end: f32, view: f32) -> f32 {
+pub(super) fn nearest_offset(current: f32, start: f32, end: f32, view: f32) -> f32 {
     if end - start <= view {
         if start < current {
             start
@@ -1801,12 +1094,21 @@ fn is_length(size: Dimension) -> bool {
     size.tag() == CompactLength::LENGTH_TAG
 }
 
-fn live_node(slots: &[Slot], id: NodeId) -> Result<&super::node::Node, Error> {
+pub(super) fn live_node(slots: &[Slot], id: NodeId) -> Result<&super::node::Node, Error> {
     let slot = slots.get(id.slot()).ok_or(Error::UnknownNode)?;
     if slot.generation != id.generation {
         return Err(Error::UnknownNode);
     }
     slot.node.as_ref().ok_or(Error::UnknownNode)
+}
+
+/// 0 hides the subtree, 1 is an opacity layer, 2 draws into the parent run.
+fn alpha_bucket(alpha: Option<u8>) -> u8 {
+    match alpha {
+        Some(0) => 0,
+        Some(255) | None => 2,
+        Some(_) => 1,
+    }
 }
 
 pub(super) fn finite_number(value: f32) -> Result<(), Error> {
@@ -1817,7 +1119,40 @@ pub(super) fn finite_number(value: f32) -> Result<(), Error> {
     }
 }
 
-fn finite_positive(value: f32) -> Result<f32, Error> {
+/// Why the next `layout` has to run, plus how the last stretch measured text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LayoutCause {
+    #[default]
+    None,
+    Viewport,
+    Style,
+    Text,
+    Structure,
+}
+
+impl LayoutCause {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Viewport => "viewport",
+            Self::Style => "style",
+            Self::Text => "text",
+            Self::Structure => "structure",
+        }
+    }
+}
+
+/// Counters from [`Tree::take_layout_trace`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LayoutTrace {
+    pub laywork_ms: f64,
+    pub passes: u32,
+    pub text_reused: u32,
+    pub text_shaped: u32,
+    pub cause: LayoutCause,
+}
+
+pub(super) fn finite_positive(value: f32) -> Result<f32, Error> {
     if value.is_finite() && value >= 0.0 {
         Ok(value)
     } else {
@@ -1985,6 +1320,60 @@ pub(super) fn flex_style(direction: FlexDirection, gap: f32) -> Style {
     }
 }
 
+/// Size already laid out for this text, when `max_width` cannot change the lines.
+///
+/// Taffy asks once at max-content and again at the definite width. The max-content
+/// pass uses a million-point constraint, which misses the paint slot and builds a
+/// paragraph that is thrown away. A result that already fits inside its old
+/// constraint is the same at any wider limit, including that probe.
+fn reusable_text_size(
+    text: &super::node::TextPayload,
+    font_size: f32,
+    max_width: f32,
+) -> Option<TextSize> {
+    let cached = text.cached.as_ref()?;
+    let metrics = text.metrics.as_ref()?;
+    let key = &cached.metrics;
+    if key.font_size != font_size.to_bits() || key.text.as_ref() != text.utf8.as_ref() {
+        return None;
+    }
+    if key.style.as_ref() != text.style.as_ref() || cached.color != text.color {
+        return None;
+    }
+    if !spans_match(text, cached) {
+        return None;
+    }
+    let old = f32::from_bits(key.max_width);
+    let size = metrics.size;
+    if key.max_width == max_width.to_bits() {
+        return Some(size);
+    }
+    if size.width + 0.5 < old && size.width <= max_width + 0.5 {
+        return Some(size);
+    }
+    None
+}
+
+fn spans_match(text: &super::node::TextPayload, cached: &crate::PaintKey) -> bool {
+    if text.spans.len() != cached.metrics.spans.len()
+        || text.spans.len() != cached.span_colors.len()
+    {
+        return false;
+    }
+    text.spans
+        .iter()
+        .zip(cached.metrics.spans.iter())
+        .zip(cached.span_colors.iter())
+        .all(|((span, metric), color)| {
+            span.utf8 == metric.utf8.as_ref()
+                && span.weight == metric.weight
+                && span.underline == metric.underline
+                && span.line_through == metric.line_through
+                && span.family.as_deref().unwrap_or("") == metric.family.as_ref()
+                && span.color == *color
+        })
+}
+
 fn line_limit(space: AvailableSpace) -> f32 {
     match space {
         AvailableSpace::Definite(width) if width > 0.0 => width,
@@ -2000,6 +1389,9 @@ fn measure_leaf(
     known: Size<Option<f32>>,
     available: Size<AvailableSpace>,
     context: Option<&mut usize>,
+    measured: &mut Vec<NodeId>,
+    text_reused: &Cell<u32>,
+    text_shaped: &Cell<u32>,
 ) -> Size<f32> {
     let Some(index) = context.copied() else {
         return Size::ZERO;
@@ -2012,16 +1404,38 @@ fn measure_leaf(
     };
     let size = if let Some(text) = node.text() {
         let max_width = line_limit(available.width);
-        text.max_width.set(max_width);
-        let key = crate::paint_key(
-            Arc::clone(&text.utf8),
-            Arc::clone(&text.style),
-            text.spans.as_ref(),
-            text.font_size * text_scale,
-            max_width,
-            text.color,
-        );
-        shaper.metrics(&key.metrics).size
+        let font_size = text.font_size * text_scale;
+        if let Some(size) = reusable_text_size(text, font_size, max_width) {
+            text_reused.set(text_reused.get().saturating_add(1));
+            let paints_at = text
+                .cached
+                .as_ref()
+                .map(|key| key.metrics.max_width)
+                .unwrap_or(0);
+            if paints_at == max_width.to_bits() {
+                text.max_width.set(max_width);
+            }
+            size
+        } else {
+            let previous = text.max_width.get();
+            text.max_width.set(max_width);
+            if previous != max_width {
+                measured.push(NodeId {
+                    index: index as u32,
+                    generation: slot.generation,
+                });
+            }
+            let key = crate::paint_key(
+                Arc::clone(&text.utf8),
+                Arc::clone(&text.style),
+                text.spans.as_ref(),
+                font_size,
+                max_width,
+                text.color,
+            );
+            text_shaped.set(text_shaped.get().saturating_add(1));
+            shaper.measure_paint(&key)
+        }
     } else if let Some(image) = node.image() {
         TextSize {
             width: image.width,
@@ -2058,6 +1472,43 @@ fn mark_descendants_dirty(tree: &mut Tree, id: NodeId) {
     for child in child_ids(tree, id) {
         mark_descendants_dirty(tree, child);
     }
+}
+
+#[test]
+fn short_line_reuses_a_wider_constraint() {
+    let mut text = super::node::TextPayload::new("Item 1", 16.0, [0, 0, 0, 255]);
+    text.cached = Some(crate::paint_key(
+        Arc::clone(&text.utf8),
+        Arc::clone(&text.style),
+        &[],
+        16.0,
+        200.0,
+        text.color,
+    ));
+    text.metrics = Some(Arc::new(crate::ParagraphMetrics::with_baseline(
+        TextSize {
+            width: 48.0,
+            height: 16.0,
+        },
+        Arc::from([]),
+        12.0,
+    )));
+    let exact = reusable_text_size(&text, 16.0, 200.0).expect("same width");
+    assert_eq!(exact.width, 48.0);
+    let wider = reusable_text_size(&text, 16.0, SINGLE_LINE_MAX).expect("max content");
+    assert_eq!(wider.width, 48.0);
+    assert!(reusable_text_size(&text, 16.0, 20.0).is_none());
+
+    text.metrics = Some(Arc::new(crate::ParagraphMetrics::with_baseline(
+        TextSize {
+            width: 200.0,
+            height: 32.0,
+        },
+        Arc::from([]),
+        12.0,
+    )));
+    assert!(reusable_text_size(&text, 16.0, SINGLE_LINE_MAX).is_none());
+    assert!(reusable_text_size(&text, 16.0, 200.0).is_some());
 }
 
 #[test]

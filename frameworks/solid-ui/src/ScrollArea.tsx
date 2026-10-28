@@ -1,66 +1,73 @@
-import { createRenderEffect, createSignal, createTrackedEffect } from "solid-js";
+import { createTrackedEffect } from "solid-js";
 import { host, type NodeHandle } from "@uifw/solid-renderer";
-import { pullDelta } from "./list-window.ts";
+import { createScrollController, type ScrollController } from "./ScrollController.ts";
+
+export type ScrollPhysicsProps = {
+  frictionTau?: number;
+  overscroll?: "rubber" | "clamp";
+  stiffness?: number;
+  damping?: number;
+  factor?: number;
+  snapX?: { interval: number; align?: "start" | "center" | "end" };
+  snapY?: { interval: number; align?: "start" | "center" | "end" };
+  chain?: boolean;
+};
 
 /**
- * A vertical-and-horizontal scroller. Drag and wheel update the offset here.
- * After release, `core` coasts and reports the offset through `onScroll`.
- *
- * Offset is clamped to the gap between the content box and the viewport.
+ * A vertical-and-horizontal scroller. Drag, wheel, and clamp run on the
+ * scroll controller. After release, `core` coasts.
  */
 export function ScrollArea(props: {
   children?: unknown;
   onOffset?: (offset: { x: number; y: number }, viewport: number) => void;
   viewportRef?: (viewport: number) => void;
-  onPull?: (delta: number, overflowing: boolean) => void;
+  contentRef?: (content: number) => void;
   onDragEnd?: () => void;
   initialOffset?: { x: number; y: number };
   /** Minimum content height. Keeps the viewport scrollable when row layout lags the window. */
   contentMin?: number;
+  controller?: ScrollController;
+  physics?: ScrollPhysicsProps;
+  /** Remainder after this scroll clamped a drag it already owns. Return true if a parent took it. */
+  onDragOverflow?: (overflowX: number, overflowY: number) => boolean;
 }): NodeHandle {
-  const [off, setOff] = createSignal(props.initialOffset ?? { x: 0, y: 0 });
+  const ctrl = props.controller ?? createScrollController();
   let viewport = 0;
   let content = 0;
-  let contentMin = 0;
 
   function applyContentMin(): void {
-    if (content !== 0 && Number.isFinite(contentMin) && contentMin > 0) {
-      host.setMinSize(content, 0, contentMin);
+    const min = props.contentMin ?? 0;
+    ctrl.setContentMin(min);
+    if (content !== 0 && Number.isFinite(min) && min > 0) {
+      host.setMinSize(content, 0, min);
     }
   }
 
-  function clamp(x: number, y: number): { x: number; y: number } {
-    if (viewport === 0 || content === 0) {
-      return { x: 0, y: 0 };
+  function applyPhysics(node: number): void {
+    const physics = props.physics;
+    const align = (name: "start" | "center" | "end" | undefined) =>
+      name === "center" ? 1 : name === "end" ? 2 : 0;
+    if (physics !== undefined) {
+      host.setScrollPhysics(
+        node,
+        physics.frictionTau ?? 180,
+        physics.overscroll === "clamp" ? 1 : 0,
+        physics.stiffness ?? 170,
+        physics.damping ?? 26,
+        physics.factor ?? 0.55,
+        physics.snapX?.interval ?? 0,
+        align(physics.snapX?.align),
+        physics.snapY?.interval ?? 0,
+        align(physics.snapY?.align),
+      );
+      if (physics.chain !== undefined) {
+        host.setScrollChain(node, physics.chain);
+      }
     }
-    const view = host.rect(viewport);
-    const body = host.rect(content);
-    const maxX = Math.max(0, body.w - view.w);
-    const maxY = Math.max(0, body.h - view.h, contentMin - view.h);
-    return {
-      x: Math.min(maxX, Math.max(0, x)),
-      y: Math.min(maxY, Math.max(0, y)),
-    };
+    ctrl.setRubber(physics?.overscroll === "rubber", physics?.factor ?? 0.55);
   }
-
-  function overflowing(): boolean {
-    if (viewport === 0 || content === 0) {
-      return false;
-    }
-    const view = host.rect(viewport);
-    const body = host.rect(content);
-    return body.h > view.h;
-  }
-
-  createRenderEffect(off, (next) => {
-    if (viewport !== 0) {
-      host.setScrollOffset(viewport, next.x, next.y);
-      props.onOffset?.(next, viewport);
-    }
-  });
 
   createTrackedEffect(() => {
-    contentMin = props.contentMin ?? 0;
     applyContentMin();
   });
 
@@ -69,30 +76,37 @@ export function ScrollArea(props: {
       fill
       ref={(node) => {
         viewport = node.id;
+        ctrl.bind(node.id);
+        applyPhysics(node.id);
+        const initial = props.initialOffset;
+        if (initial !== undefined && (initial.x !== 0 || initial.y !== 0)) {
+          host.setScrollOffset(viewport, initial.x, initial.y);
+          ctrl.bind(node.id);
+        }
         props.viewportRef?.(node.id);
       }}
-      onScroll={(x, y) => {
-        setOff(clamp(x, y));
-      }}
       onDragBy={(dx, dy) => {
-        const live = viewport === 0 ? off() : host.scrollOffset(viewport);
-        const rawY = live.y - dy;
-        const next = clamp(live.x - dx, rawY);
-        props.onPull?.(pullDelta(live.y, rawY, next.y), overflowing());
-        setOff(next);
+        const step = ctrl.dragBy(dx, dy);
+        if (!step.pending) {
+          return;
+        }
+        const taken = props.onDragOverflow?.(step.ox, step.oy) === true;
+        ctrl.finishDrag(taken);
       }}
       onDragEnd={() => {
+        ctrl.dragEnd();
         props.onDragEnd?.();
       }}
       onWheel={(dx, dy) => {
-        const live = viewport === 0 ? off() : host.scrollOffset(viewport);
-        setOff(clamp(live.x + dx, live.y + dy));
+        ctrl.wheel(dx, dy);
       }}
     >
       <column
         ref={(node) => {
           content = node.id;
+          ctrl.bindContent(node.id);
           applyContentMin();
+          props.contentRef?.(node.id);
         }}
       >
         {props.children}

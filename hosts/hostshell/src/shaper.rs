@@ -7,13 +7,16 @@ use ui_core::{
 };
 
 /// Measures with the same typography context the player draws with.
+///
+/// The borrow must end before `session.frame()` returns. `submit_layers` borrows
+/// this same `Typography` only after that.
 pub struct ImpellerShaper {
-    engine: Rc<RefCell<engine::Engine>>,
+    typography: Rc<RefCell<engine::Typography>>,
 }
 
 impl ImpellerShaper {
-    pub fn new(engine: Rc<RefCell<engine::Engine>>) -> Self {
-        Self { engine }
+    pub fn new(typography: Rc<RefCell<engine::Typography>>) -> Self {
+        Self { typography }
     }
 }
 
@@ -23,7 +26,7 @@ impl Shaper for ImpellerShaper {
         let font_size = f32::from_bits(key.font_size);
         let max_width = f32::from_bits(key.max_width);
         let spans = spans_from(key);
-        let mut engine = self.engine.borrow_mut();
+        let mut engine = self.typography.borrow_mut();
         let size = engine
             .measure_with_spans(
                 &key.text,
@@ -39,7 +42,14 @@ impl Shaper for ImpellerShaper {
                 height: 0.0,
             });
         let measured = engine
-            .lines(&key.text, font_size, max_width, [0, 0, 0, 255], style)
+            .lines_with_spans(
+                &key.text,
+                font_size,
+                max_width,
+                [0, 0, 0, 255],
+                style,
+                &spans,
+            )
             .unwrap_or_default();
         let baseline = measured.first().map(|line| line.baseline).unwrap_or(0.0);
         let lines = measured
@@ -62,9 +72,68 @@ impl Shaper for ImpellerShaper {
         ))
     }
 
+    fn measure_paint(&self, key: &PaintKey) -> TextSize {
+        let spans = paint_spans(key);
+        let style = key.metrics.style.as_ref();
+        self.typography
+            .borrow_mut()
+            .measure_paint(
+                &key.metrics.text,
+                f32::from_bits(key.metrics.font_size),
+                f32::from_bits(key.metrics.max_width),
+                key.color,
+                style,
+                &spans,
+            )
+            .map(|(width, height)| TextSize { width, height })
+            .unwrap_or(TextSize {
+                width: 0.0,
+                height: 0.0,
+            })
+    }
+
+    fn retain_measured(&self, key: &PaintKey) -> (protocol::ParagraphId, Arc<ParagraphMetrics>) {
+        let spans = paint_spans(key);
+        let style = key.metrics.style.as_ref();
+        let measured = self.typography.borrow_mut().retain_measured(
+            &key.metrics.text,
+            f32::from_bits(key.metrics.font_size),
+            f32::from_bits(key.metrics.max_width),
+            key.color,
+            style,
+            &spans,
+        );
+        match measured {
+            Ok((id, width, height, lines, baseline)) => {
+                let lines = lines
+                    .into_iter()
+                    .map(|line| TextLine {
+                        start: line.start,
+                        end: line.end,
+                        end_with_break: line.end_with_break,
+                        x: line.x,
+                        y: line.y,
+                        w: line.w,
+                        h: line.h,
+                        hard_break: line.hard_break,
+                    })
+                    .collect::<Vec<_>>();
+                (
+                    id,
+                    Arc::new(ParagraphMetrics::with_baseline(
+                        TextSize { width, height },
+                        Arc::from(lines),
+                        baseline,
+                    )),
+                )
+            }
+            Err(_) => (protocol::ParagraphId::NONE, self.metrics(&key.metrics)),
+        }
+    }
+
     fn retain_paint(&self, key: &PaintKey) -> protocol::ParagraphId {
         let spans = paint_spans(key);
-        self.engine
+        self.typography
             .borrow_mut()
             .retain_paragraph(
                 &key.metrics.text,
@@ -78,12 +147,12 @@ impl Shaper for ImpellerShaper {
     }
 
     fn release_paint(&self, id: protocol::ParagraphId) {
-        self.engine.borrow_mut().release_paragraph(id);
+        self.typography.borrow_mut().release_paragraph(id);
     }
 
     fn caret_at_unit(&self, key: &MetricsKey, unit: u32, affinity: Affinity) -> Caret {
         let font_size = f32::from_bits(key.font_size);
-        self.engine
+        self.typography
             .borrow_mut()
             .caret_for(
                 &key.text,
@@ -100,7 +169,7 @@ impl Shaper for ImpellerShaper {
 
     fn caret_at_point(&self, key: &MetricsKey, x: f32, y: f32) -> Caret {
         let font_size = f32::from_bits(key.font_size);
-        self.engine
+        self.typography
             .borrow_mut()
             .caret_at_point(
                 &key.text,
@@ -116,7 +185,7 @@ impl Shaper for ImpellerShaper {
     }
 
     fn word_range(&self, key: &MetricsKey, unit: u32) -> (u32, u32) {
-        self.engine
+        self.typography
             .borrow_mut()
             .word_range(
                 &key.text,

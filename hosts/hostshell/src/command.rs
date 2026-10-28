@@ -36,6 +36,10 @@ pub enum Command {
     Metrics(Metrics),
     Settings(PlatformSettings),
     Lifecycle(Lifecycle),
+    /// The window is visible again. The installed display list may be off the glass.
+    Invalidate,
+    /// The platform asked the process to drop caches. The next frame resubmits.
+    MemoryWarning,
     WindowFocus(bool),
     SemanticsAction(ui_core::SemanticsAction),
     SurfaceReady(SurfaceTarget),

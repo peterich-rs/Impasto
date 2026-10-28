@@ -8,14 +8,38 @@ pub use script::split_scripts;
 #[cfg(impeller_missing)]
 mod missing;
 #[cfg(impeller)]
+mod painter;
+#[cfg(impeller)]
+mod pictures;
+#[cfg(impeller)]
 mod player;
+mod surface;
+#[cfg(impeller)]
+mod textures;
+#[cfg(impeller)]
+mod typography;
 
 pub use status::Status;
+pub use surface::Surface;
+
+/// Counts from paragraph build and cache lookup since the last [`Typography::take_shape_stats`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ShapeStats {
+    pub built: u32,
+    pub measure_hit: u32,
+    pub measure_miss: u32,
+    pub paint_hit: u32,
+    pub paint_miss: u32,
+}
 
 #[cfg(impeller_missing)]
 pub use missing::Engine;
+#[cfg(impeller_missing)]
+pub use missing::Typography;
 #[cfg(impeller)]
 pub use player::Engine;
+#[cfg(impeller)]
+pub use typography::Typography;
 
 #[cfg(all(impeller_missing, target_os = "android"))]
 pub use missing::VulkanSwapchain;

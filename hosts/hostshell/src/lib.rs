@@ -32,7 +32,7 @@ pub use present::{AfterPresent, after_present};
 pub use ptr::NativePtr;
 pub use session::{FrameTime, Lifecycle};
 pub use shaper::ImpellerShaper;
-pub use shell::{EngineSlot, Link, Poster, start};
+pub use shell::{DropWait, EngineSlot, Link, Poster, start};
 pub use timing::FrameTiming;
 
 pub enum Launch {

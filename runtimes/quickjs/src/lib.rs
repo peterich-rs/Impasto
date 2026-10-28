@@ -61,6 +61,31 @@ mod tests {
 
     use super::{Error, open};
 
+    #[test]
+    fn list_driver_methods_are_functions() {
+        let source = r#"
+          var d = core.listDriver(2, 20);
+          var proto = Object.getPrototypeOf(d);
+          var names = Object.getOwnPropertyNames(proto).join(",");
+          if (typeof d.configure !== "function") {
+            throw new Error("configure " + typeof d.configure + " proto " + names);
+          }
+          d.configure(20, 2, false);
+          d.setItems([{key:"a", type:"row", sticky:false}]);
+          d.release();
+        "#;
+        match open(
+            source,
+            "driver.js",
+            ui_core::MonoShaper::default(),
+            no_log(),
+        ) {
+            Ok(_) => {}
+            Err(Error::NotLinked) => {}
+            Err(error) => panic!("{error}"),
+        }
+    }
+
     fn no_log() -> Box<dyn Fn(u8, &str)> {
         Box::new(|_, _| {})
     }
@@ -216,6 +241,118 @@ mod tests {
         assert!(!shown.iter().any(|text| text.contains("not a function")));
     }
 
+    fn visible_items(frame: &session::FrameOutput) -> Vec<(i32, f32)> {
+        let mut rows = Vec::new();
+        visit_commands(frame, &mut |command, _, origin_y| {
+            if let Command::Text { utf8, y, .. } = command
+                && let Some(number) = utf8
+                    .strip_prefix("Item ")
+                    .and_then(|rest| rest.parse().ok())
+            {
+                rows.push((number, *y + origin_y));
+            }
+        });
+        rows.sort_by(|left, right| left.1.total_cmp(&right.1));
+        rows
+    }
+
+    #[test]
+    fn scrolled_list_numbers_stay_in_order() {
+        let Some(mut session) = open_counter() else {
+            return;
+        };
+        session.metrics(&phone());
+        let first = session.frame(session::FrameTime::at(0.0));
+        let (tab_x, tab_y) = text_spot(&first, "列表");
+        click(session.as_mut(), tab_x, tab_y);
+        let mut shown = session.frame(session::FrameTime::at(16.0));
+        for step in 0..6 {
+            let next = session.frame(session::FrameTime::at(32.0 + f64::from(step) * 16.0));
+            if next.layers.is_some() {
+                shown = next;
+            }
+        }
+        let start = visible_items(&shown);
+        assert!(
+            start.len() >= 2,
+            "need visible rows, texts {:?}",
+            texts(&shown)
+        );
+        let x = text_spot(&shown, &format!("Item {}", start[0].0)).0;
+        let y = start[start.len() / 2].1 + 4.0;
+        for step in 0..8 {
+            let time = 200.0 + f64::from(step) * 80.0;
+            session.pointer(PointerEvent::new(Phase::Down, x, y, time));
+            session.pointer(PointerEvent::new(Phase::Move, x, y - 120.0, time + 16.0));
+            session.pointer(PointerEvent::new(Phase::Up, x, y - 120.0, time + 32.0));
+            for tick in 0..4 {
+                let frame =
+                    session.frame(session::FrameTime::at(time + 48.0 + f64::from(tick) * 16.0));
+                if frame.layers.is_some() {
+                    shown = frame;
+                }
+            }
+            let rows = visible_items(&shown);
+            let numbers: Vec<i32> = rows.iter().map(|row| row.0).collect();
+            for pair in numbers.windows(2) {
+                assert!(
+                    pair[0] < pair[1],
+                    "rows out of order {numbers:?} after drag {step}"
+                );
+            }
+            assert!(
+                numbers.len() >= 2,
+                "rows disappeared {numbers:?} after drag {step}"
+            );
+        }
+    }
+
+    #[test]
+    fn pulling_the_list_commits_refresh() {
+        let Some(mut session) = open_counter() else {
+            return;
+        };
+        session.metrics(&phone());
+        let first = session.frame(session::FrameTime::at(0.0));
+        let (tab_x, tab_y) = text_spot(&first, "列表");
+        click(session.as_mut(), tab_x, tab_y);
+        let mut shown = session.frame(session::FrameTime::at(16.0));
+        for step in 0..4 {
+            let next = session.frame(session::FrameTime::at(32.0 + f64::from(step) * 16.0));
+            if next.layers.is_some() {
+                shown = next;
+            }
+        }
+        assert!(
+            texts(&shown).contains(&"下拉刷新"),
+            "refresh label missing {:?}",
+            texts(&shown)
+        );
+        let rows = visible_items(&shown);
+        assert!(!rows.is_empty(), "no rows {:?}", texts(&shown));
+        let x = text_spot(&shown, &format!("Item {}", rows[0].0)).0;
+        let y = rows[0].1 + 8.0;
+        session.pointer(PointerEvent::new(Phase::Down, x, y, 100.0));
+        session.pointer(PointerEvent::new(Phase::Move, x, y + 40.0, 116.0));
+        let _ = session.frame(session::FrameTime::at(132.0));
+        session.pointer(PointerEvent::new(Phase::Move, x, y + 180.0, 148.0));
+        let _ = session.frame(session::FrameTime::at(164.0));
+        session.pointer(PointerEvent::new(Phase::Up, x, y + 180.0, 180.0));
+        let mut refreshed = false;
+        let mut last = shown;
+        for step in 0..8 {
+            let frame = session.frame(session::FrameTime::at(200.0 + f64::from(step) * 16.0));
+            if frame.layers.is_some() {
+                last = frame;
+            }
+            if texts(&last).iter().any(|text| text.starts_with("已刷新")) {
+                refreshed = true;
+                break;
+            }
+        }
+        assert!(refreshed, "pull did not refresh {:?}", texts(&last));
+    }
+
     #[test]
     fn repeated_clicks_leave_no_pending_jobs() {
         #[cfg(not(quickjs))]
@@ -282,7 +419,8 @@ mod tests {
                 const label = core.text("Go", 16, [255, 255, 255, 255]);
                 core.append(root, label);
                 core.remove(root, label);
-                core.setText(label, "no");
+                core.setText(label, "still");
+                core.append(root, label);
             "#;
             match super::JsSession::open(
                 dropped,
@@ -290,12 +428,55 @@ mod tests {
                 ui_core::MonoShaper::default(),
                 no_log(),
             ) {
-                Err(Error::Script(message)) => {
-                    assert!(message.contains("setText"), "script error was {message:?}");
-                }
-                Err(error) => panic!("{error}"),
-                Ok(_) => panic!("discarded id still accepted setText"),
+                Ok(_) => {}
+                Err(error) => panic!("removed id could not be inserted again: {error}"),
             }
+        }
+    }
+
+    #[test]
+    fn detach_keeps_the_tap_until_discard() {
+        #[cfg(not(quickjs))]
+        {
+            return;
+        }
+        #[cfg(quickjs)]
+        {
+            let kept = r#"
+                const root = core.column(0);
+                const region = core.pointerRegion();
+                core.append(root, region);
+                core.onClick(region, () => {});
+                core.detach(root, region);
+            "#;
+            let mut session = match super::JsSession::open(
+                kept,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
+            assert_eq!(session.tap_count(), 1);
+            let dropped = r#"
+                const root = core.column(0);
+                const region = core.pointerRegion();
+                core.append(root, region);
+                core.onClick(region, () => {});
+                core.detach(root, region);
+                core.discard(region);
+            "#;
+            session = match super::JsSession::open(
+                dropped,
+                "test.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
+            assert_eq!(session.tap_count(), 0);
         }
     }
 

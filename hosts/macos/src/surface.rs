@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use engine::Engine;
+use engine::Surface as _;
 use hostshell::{NativePtr, Presented, Surface};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;

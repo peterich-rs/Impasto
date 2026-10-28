@@ -6,7 +6,10 @@ import { hostRendererOptions } from "../src/tree.ts";
 import { host } from "./host.ts";
 import { bindText } from "./text.ts";
 import { bindImage } from "./image.ts";
-import { onFrame, runFrames } from "./frames.ts";
+import { onFrame, onLayout as listenLayout, runFrames, runLayouts } from "./frames.ts";
+import { bindSlot } from "./slot.ts";
+import { deliverScrollState } from "./scroll-state.ts";
+import { deliverDriver } from "./driver.ts";
 
 const scene = hostRendererOptions(host);
 bindText(scene);
@@ -52,7 +55,21 @@ export { firstFocusable, restoreFocus, takeInitialFocus } from "./focus.ts";
 export { SPRING, flushMotion, spring } from "./motion.ts";
 export type { HostNode as NodeHandle } from "../src/tree.ts";
 
-export { frameListenerCount, onFrame } from "./frames.ts";
+export { frameListenerCount, layoutListenerCount, onFrame, onLayout } from "./frames.ts";
+export { onScrollState } from "./scroll-state.ts";
+export { listenRefresh } from "./driver.ts";
+export { bindListRenderer } from "./list-binding.ts";
+export type { ScrollPhaseName, ScrollSample } from "./scroll-state.ts";
+export const createSlot = bindSlot({
+  createElement: scene.createElement,
+  insert: (parent, accessor) => {
+    insert(parent, accessor);
+  },
+  forget: (id) => {
+    scene.forget(id);
+  },
+  host,
+});
 
 /** Asks the host for exactly one more frame after the current one. */
 export function requestFrame(): void {
@@ -71,7 +88,10 @@ export function removeNode(node: HostNode): void {
   const parent = scene.getParentNode(node);
   if (parent) {
     scene.removeNode(parent, node);
+    return;
   }
+  scene.forget(node.id);
+  host.discard(node.id);
 }
 
 // App-facing core. Constructors return renderer nodes, not raw ids, because
@@ -88,6 +108,22 @@ export function boot(component: () => HostNode) {
     flush();
     runFrames(targetMs, intervalMs);
   });
+  host.onLayout(() => {
+    runLayouts();
+    flush();
+  });
+  if (typeof host.onScrollState === "function") {
+    host.onScrollState((node, phase, vx, vy, ox, oy) => {
+      deliverScrollState(node, phase, vx, vy, ox, oy);
+    });
+  }
+  if (typeof host.onDriver === "function") {
+    host.onDriver(
+      (kind, index, generation, tag, i0, i1, f0, f1, f2, f3, f4, f5, s0, s1) => {
+        deliverDriver(kind, index, generation, tag, i0, i1, f0, f1, f2, f3, f4, f5, s0, s1);
+      },
+    );
+  }
   render(component, content);
 }
 
@@ -112,6 +148,9 @@ export const core = {
   },
   onFrame(fn: (targetMs: number, intervalMs: number) => void) {
     onFrame(fn);
+  },
+  onLayout(fn: () => void) {
+    listenLayout(fn);
   },
 };
 

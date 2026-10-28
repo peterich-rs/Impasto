@@ -42,7 +42,7 @@ export function installMockHost(): MockHost {
     return id;
   }
 
-  function detach(child: number) {
+  function unlink(child: number) {
     const node = nodes.get(child);
     if (node === undefined || node.parent === 0) {
       return;
@@ -53,6 +53,18 @@ export function installMockHost(): MockHost {
     }
     node.parent = 0;
     node.detached = true;
+  }
+
+  function dropNode(id: number) {
+    const node = nodes.get(id);
+    if (node === undefined) {
+      return;
+    }
+    for (const child of [...node.children]) {
+      dropNode(child);
+    }
+    nodes.delete(id);
+    texts.delete(id);
   }
 
   function shown(id: number): boolean {
@@ -98,7 +110,7 @@ export function installMockHost(): MockHost {
       if (parentNode === undefined || childNode === undefined) {
         throw new Error(`insert missing ${parent} ${child}`);
       }
-      detach(child);
+      unlink(child);
       childNode.parent = parent;
       childNode.detached = false;
       if (before === 0) {
@@ -112,12 +124,25 @@ export function installMockHost(): MockHost {
       }
       calls.push({ name: "insert", args: [parent, child, before] });
     },
+    detach: (parent: number, child: number) => {
+      const node = nodes.get(child);
+      if (node?.parent !== parent) {
+        throw new Error("not a child");
+      }
+      unlink(child);
+      calls.push({ name: "detach", args: [parent, child] });
+    },
+    discard: (id: number) => {
+      dropNode(id);
+      calls.push({ name: "discard", args: [id] });
+    },
     remove: (parent: number, child: number) => {
       const node = nodes.get(child);
       if (node?.parent !== parent) {
         throw new Error("not a child");
       }
-      detach(child);
+      unlink(child);
+      dropNode(child);
       calls.push({ name: "remove", args: [parent, child] });
     },
     parent: (node: number) => nodes.get(node)?.parent ?? 0,
@@ -212,6 +237,13 @@ export function installMockHost(): MockHost {
     setScrollOffset: (node: number, x: number, y: number) => {
       calls.push({ name: "setScrollOffset", args: [node, x, y] });
     },
+    overscroll: () => ({ x: 0, y: 0 }),
+    setScrollPhysics: () => {},
+    setScrollChain: () => {},
+    fling: () => {},
+    stopScroll: () => {},
+    scrollTo: () => {},
+    onScrollState: () => {},
     scrollOffset: () => ({ x: 0, y: 0 }),
     rect: () => ({ x: 0, y: 40, w: 100, h: 200 }),
     setTransform: (node: number, x: number, y: number, rotate: number, scale: number) => {
@@ -322,6 +354,9 @@ export function installMockHost(): MockHost {
       frames.push(fn);
       calls.push({ name: "onFrame", args: [typeof fn] });
       return frames.length;
+    },
+    onLayout: (fn: () => void) => {
+      calls.push({ name: "onLayout", args: [typeof fn] });
     },
     setDragClaim: () => {},
     caretAt: () => ({ unit: 0, x: 0, y: 0, w: 1, h: 16 }),

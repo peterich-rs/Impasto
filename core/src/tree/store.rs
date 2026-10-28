@@ -1,5 +1,6 @@
 //! Slots, generations, and structural edits.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use taffy::prelude::*;
@@ -17,6 +18,7 @@ impl Tree {
             taffy: TaffyTree::new(),
             shaper: Box::new(shaper),
             root: None,
+            pending_discard: Vec::new(),
             arena: super::gesture::GestureArena::default(),
             focused: None,
             scopes: Vec::new(),
@@ -26,7 +28,10 @@ impl Tree {
             applying_motion: false,
             dirty_boundaries: Vec::new(),
             pictures: HashMap::new(),
-            self_pictures: HashMap::new(),
+            runs: HashMap::new(),
+            run: super::record::RunState::default(),
+            finished_owners: Vec::new(),
+            subtree_layers: HashMap::new(),
             layer_stack: Vec::new(),
             layer_tail: Vec::new(),
             layer_top: None,
@@ -40,6 +45,21 @@ impl Tree {
             needs_layout: false,
             needs_paint: false,
             layout_passes: 0,
+            pending_text: Vec::new(),
+            sync_visited: 0,
+            sync_synced: 0,
+            sync_ms: 0.0,
+            taffy_ms: 0.0,
+            layout_work_ms: 0.0,
+            layout_entries: 0,
+            layout_cause: super::LayoutCause::None,
+            text_reused: Cell::new(0),
+            text_shaped: Cell::new(0),
+            semantics_layout_seen: 0,
+            scroll_semantics: Vec::new(),
+            semantics_full: false,
+            sweep_stack: Vec::new(),
+            sweep_children: Vec::new(),
             text_scale: 1.0,
             laid_out: false,
             origin: (0.0, 0.0),
@@ -202,7 +222,7 @@ impl Tree {
                 return Err(error.into());
             }
         };
-        Ok(self.occupy(
+        let id = self.occupy(
             index,
             generation,
             Node::new(
@@ -211,7 +231,9 @@ impl Tree {
                 taffy,
                 Payload::Text(Box::new(TextPayload::new(utf8, font_size, color))),
             ),
-        ))
+        );
+        self.note_text(id);
+        Ok(id)
     }
 
     pub fn image(
@@ -285,8 +307,8 @@ impl Tree {
 
     /// Places `child` under `parent`, before `before` when that anchor is set.
     ///
-    /// A child that already has a parent moves. A child whose Taffy nodes were
-    /// released is rebuilt from the stored style and child list.
+    /// A child that already has a parent moves. Taffy nodes that are still
+    /// attached to the scene node stay; `revive` runs only when they were released.
     pub fn insert(
         &mut self,
         parent: NodeId,
@@ -300,6 +322,12 @@ impl Tree {
             return Err(Error::NotAParent);
         }
         let _ = self.node(child)?;
+        // A sibling removed earlier in this turn is not a usable anchor.
+        // Appending keeps the insert from failing while that id is still live.
+        let before = match before {
+            Some(anchor) if anchor != child && self.pending_discard.contains(&anchor) => None,
+            other => other,
+        };
         if let Some(anchor) = before {
             if anchor == child {
                 return if self.node(child)?.parent == Some(parent) {
@@ -338,29 +366,68 @@ impl Tree {
         if let Ok(node) = self.node_mut(child) {
             node.flags.insert(super::node::NodeFlags::LAYOUT_DIRTY);
         }
+        self.note_text_tree(child);
         self.mark_layout_from(parent);
         self.promote(parent);
         self.mark_structure();
+        self.pending_discard.retain(|id| *id != child);
         Ok(())
     }
 
-    /// Detaches `child` from `parent` and releases the subtree's Taffy nodes.
+    /// Detaches `child` from `parent` and queues it for [`Tree::discard_detached`].
     ///
-    /// The scene nodes stay, with the same ids, so the subtree can be inserted
-    /// again. Handlers on a detached region are never hit. A focused node in
-    /// the subtree produces [`Gesture::Blur`]. Inserting elsewhere does not.
+    /// Taffy nodes, paint paragraphs, and picture cache entries stay with the
+    /// scene ids. A later [`Tree::insert`] drops the id from the queue and does
+    /// not rebuild Taffy. A focused node in the subtree produces [`Gesture::Blur`].
+    /// Focus scopes inside the subtree are popped. Handlers on a detached region
+    /// are never hit.
     pub fn remove(&mut self, parent: NodeId, child: NodeId) -> Result<Vec<Gesture>, Error> {
+        if self.pending_discard.contains(&child) {
+            return Ok(Vec::new());
+        }
         if self.node(child)?.parent != Some(parent) {
             return Err(Error::NotAChild);
         }
-        self.detach_links(child)?;
-        self.release_taffy(child)?;
+        let gestures = self.unlink_kept(parent, child)?;
+        self.pending_discard.push(child);
+        Ok(gestures)
+    }
+
+    /// Detaches `child` without queueing [`Tree::discard_detached`].
+    ///
+    /// The subtree keeps its Taffy nodes and ids across frames. [`Tree::discard`]
+    /// is what retires it. A node already queued by [`Tree::remove`] is taken off
+    /// that queue. A focused node still produces [`Gesture::Blur`].
+    pub fn detach(&mut self, parent: NodeId, child: NodeId) -> Result<Vec<Gesture>, Error> {
+        let _ = self.node(child)?;
+        let gestures = if self.node(child)?.parent == Some(parent) {
+            self.unlink_kept(parent, child)?
+        } else if self.node(child)?.parent.is_none() {
+            Vec::new()
+        } else {
+            return Err(Error::NotAChild);
+        };
+        self.pending_discard.retain(|id| *id != child);
+        Ok(gestures)
+    }
+
+    fn unlink_kept(&mut self, parent: NodeId, child: NodeId) -> Result<Vec<Gesture>, Error> {
+        self.drop_scopes_under(child);
+        self.unlink(child)?;
         let mut gestures = self.blur_contained(child);
         self.drop_routes_in(child);
         self.mark_layout_from(parent);
         self.mark_structure();
         gestures.extend(self.drain_pending());
         Ok(gestures)
+    }
+
+    fn drop_scopes_under(&mut self, root: NodeId) {
+        let scopes = self.scopes.clone();
+        self.scopes = scopes
+            .into_iter()
+            .filter(|scope| !self.contains(root, *scope))
+            .collect();
     }
 
     /// Retires `id` and every descendant. The caller guarantees `id` has no parent.
@@ -373,6 +440,8 @@ impl Tree {
         if self.node(id)?.parent.is_some() {
             return Err(Error::NotAChild);
         }
+        self.pending_discard.retain(|pending| *pending != id);
+        self.drop_scopes_under(id);
         let gestures = self.blur_contained(id);
         self.drop_routes_in(id);
         if self.node(id)?.taffy.is_some() {
@@ -387,6 +456,28 @@ impl Tree {
         let mut gestures = gestures;
         gestures.extend(self.drain_pending());
         Ok(Discarded { ids, gestures })
+    }
+
+    /// Retires subtrees [`Tree::remove`] detached that were not inserted again.
+    ///
+    /// A child inserted before this call is left in place. Ids already retired
+    /// by an earlier [`Tree::discard`] are skipped.
+    pub fn discard_detached(&mut self) -> Discarded {
+        let pending = std::mem::take(&mut self.pending_discard);
+        let mut ids = Vec::new();
+        let mut gestures = Vec::new();
+        for id in pending {
+            let parentless = self.node(id).ok().is_some_and(|node| node.parent.is_none());
+            if !parentless {
+                continue;
+            }
+            let Ok(retired) = self.discard(id) else {
+                continue;
+            };
+            ids.extend(retired.ids);
+            gestures.extend(retired.gestures);
+        }
+        Discarded { ids, gestures }
     }
 
     pub(super) fn retire_postorder(
@@ -494,7 +585,7 @@ impl Tree {
         if let Some(generation) = generation {
             let id = NodeId { index, generation };
             self.pictures.remove(&id);
-            self.self_pictures.remove(&id);
+            self.runs.remove(&id);
         }
         self.arena.clear_index(index);
         if self.focused.is_some_and(|focused| focused.index == index) {
@@ -758,6 +849,7 @@ impl Tree {
     }
 
     pub(super) fn mark_structure(&mut self) {
+        self.note_layout(super::LayoutCause::Structure);
         self.mark_layout();
         self.laid_out = false;
         if let Some(id) = self.arena.hovered.take() {
