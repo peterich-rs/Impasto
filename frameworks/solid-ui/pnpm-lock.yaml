@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@solidjs/universal':
+        specifier: 2.0.0-rc.17
+        version: 2.0.0-rc.17(solid-js@2.0.0-rc.17)
       '@uifw/solid-renderer':
         specifier: file:../solid-renderer
         version: file:../solid-renderer

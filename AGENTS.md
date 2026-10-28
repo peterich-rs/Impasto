@@ -177,7 +177,7 @@ docs/protocol-v2.md        Picture 字节。未排期，只在 Rust 里做
 
 Kotlin：Kotlin 2.3.20，Gradle wrapper 9.2.1，JVM target 21，group `dev.uifw`。`settings.gradle.kts` 里只有 `include(":library")`。界面 DSL 还没写。
 
-Solid：包名 `@uifw/solid-renderer`，`type: module`。`just solid` 先用 `node --experimental-strip-types` 跑 renderer 里不安装依赖的测试，以及 `net` 和 `i18n`。需要 `solid-js` 的 `solid-router`、`form`、`solid-ui` 在各自目录 `pnpm install` 后跑单测，并用 `frameworks/register.mjs` 把包名指到仓库里的 TypeScript 源。`hostRendererOptions()` 对齐 `@solidjs/universal` 的 `RendererOptions`。宿主标签是 `row`、`column`、`stack`、`align`、`padding`、`decorated`、`pointer`、`clip`、`opacity`、`scroll`、`transform`、`image`、`sized`。`Text` 是组件。编译在 `apps/gallery-solid/build.mjs`：
+Solid：包名 `@uifw/solid-renderer`，`type: module`。`just solid` 先在 `frameworks/solid-renderer` 里 `pnpm install --frozen-lockfile`，再跑 renderer、`net` 和 `i18n` 的测试。`solid-router`、`form`、`solid-ui` 在各自目录 `pnpm install --frozen-lockfile` 后跑单测，并用 `frameworks/register.mjs` 把包名指到仓库里的 TypeScript 源。`hostRendererOptions()` 对齐 `@solidjs/universal` 的 `RendererOptions`。宿主标签是 `row`、`column`、`stack`、`align`、`padding`、`decorated`、`pointer`、`clip`、`opacity`、`scroll`、`transform`、`image`、`sized`。`Text` 是组件。编译在 `apps/gallery-solid/build.mjs`：
 
 ```js
 solidPlugin({
@@ -248,7 +248,7 @@ GitHub Actions 工作流是 `.github/workflows/check.yml`。它跑 `cargo fmt --
 frameworks/kotlin-ui/gradlew -p frameworks/kotlin-ui :library:jvmTest
 ```
 
-看画面用 `UIFW_DUMP` 的读回。它不是像素门，也不进 `just check`。窗口进程用完要退出。dump 模式会自己终止；普通 `just host` 会留下窗口，验证完结束掉它。
+看画面用 `UIFW_DUMP` 的读回。窗口进程用完要退出。dump 模式会自己终止；普通 `just host` 会留下窗口，验证完结束掉它。
 
 ## 改代码时
 

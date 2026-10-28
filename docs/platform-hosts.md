@@ -143,7 +143,7 @@ Shell::start(Boot) ────────────────────�
 | 3 | 解释器 `NotLinked` 或 `Runtime` |
 | 4 | 启动期 `qjs_eval` 失败，`SessionError::Script`。运行期 `console` 和监听器错误只记日志，进程继续 |
 
-`UIFW_DUMP` 在一帧画出后读回像素，再让主线程结束进程。它用来看画面，不是像素门。窗口重新变为可见时，macOS 投递 `Invalidate`，置 `needs_present`。列表和缩放都没变则 `PresentCached`。
+`UIFW_DUMP` 在一帧画出后读回像素，再让主线程结束进程。它用来看画面。窗口重新变为可见时，macOS 投递 `Invalidate`，置 `needs_present`。列表和缩放都没变则 `PresentCached`。
 
 ## 2. 线程
 
@@ -297,7 +297,7 @@ Android 的 `uifw-surface-drop` 在 `DropWait` 上等到 `Acks::signal`，然后
 | 注册名 `UIFWSans` | `/System/Library/Fonts/Supplemental/Arial.ttf` | `assets/fonts/UIFWSans.ttf` | Bundle 内同名文件 |
 | `asset:<name>` | 资产目录按 scale 桶找 `name@3x`、`name@2x`、`name`，扩展名 `.png` `.jpg` `.jpeg` `.webp`，ImageIO | `assets/images/` 下同一组候选，`AImageDecoder` | 宿主还没写 |
 
-Android 与 iOS 的字体是可再分发的文件，注册名仍叫 `UIFWSans`。系统 Arial 不打进 APK 或 Bundle。因此 Android 首帧不和 macOS 的 `UIFW_DUMP` 逐像素对比：字形度量会不同。三端要同一份字体字节之后，文字位置才有可比性。
+Android 与 iOS 的字体是可再分发的文件，注册名仍叫 `UIFWSans`。系统 Arial 不打进 APK 或 Bundle，字形度量和 macOS 上的 Arial 不同。
 
 `AssetManager` 在 `HostActivity` 启动时从 Java 取到。渲染线程第一次要字体或图片时读取并解码，结果留在 `Services` 里。
 
@@ -330,12 +330,12 @@ Android 与 iOS 的字体是可再分发的文件，注册名仍叫 `UIFWSans`�
 | 坐标 | 内容视图 + Y 翻转 | 像素 ÷ density | 已是点 |
 | metrics | 默认 360×640，可缩放，inset 0 | 窗口尺寸 ÷ density。inset 变成根偏移并缩小可用空间 | bounds 与 scale。inset 同样只采集 |
 | 生命周期 | `Inactive` / `Hidden` / `Resumed`；遮挡恢复投递 `Invalidate`；关闭即退出 | `onPause` → `Inactive`，`onStop` → `Hidden`，`onResume` → `Resumed` | 前后台 |
-| 像素 | `UIFW_DUMP` 读纹理 | 有渲染目标读回之后再比像素。`adb screencap` 只作人工查看 | 与 macOS 相同的纹理读回 |
+| 读回 | `UIFW_DUMP` 把纹理写成 PNG | `adb screencap` 只作人工查看 | 与 macOS 相同的纹理读回 |
 
 ## 实现约束
 
 - crate 均 `publish = false`。`Shell` 含有 `Engine` 和会话，因此不是 `Send`。跨线程的只有命令队列、`Vsync`，以及有意标记为 `Send` 的窗口指针 newtype。
 - `unsafe` 集中在 Vulkan 句柄、Android 窗口与 NDK 事件、objc2，以及那个 `Send` 指针。每处按 `engine/src/player/`、`engine/src/typography/` 和 `engine/src/vulkan.rs` 写 SAFETY 注释。workspace 的 `unsafe_code = deny` 仍有效。
-- `hostshell` 的队列、过滤、相同列表跳过提交，以及表面应答，用无窗口单测。各端坐标换算沿用 `hosts/macos/src/pointer.rs` 这种单测。端上验收是出帧、点击改字，以及有读回时的像素。
+- `hostshell` 的队列、过滤、相同列表跳过提交，以及表面应答，用无窗口单测。各端坐标换算沿用 `hosts/macos/src/pointer.rs` 这种单测。端上验收是出帧和点击改字。
 - 场景格式保持版本 1。不做 GL 后备、轨迹重采样、平台视图和多窗口。不做显示列表的命令级 diff。`layer_epoch` 未变、缩放相同且 `needs_present` 为假则 `Skip`；`needs_present` 为真则 `PresentCached`。`Resumed` 与 `Invalidate` 置 `needs_present`。增量绘制走已落地的合成层，见 `docs/architecture.md`，不在这里另写一套禁令。
 - 新依赖在引入时钉版本。`ndk` 0.9.0 与 `jni` 0.22.4 已钉住。它们不带 UI 框架或 Dart VM。要裁 Impeller 后端时放到以后的 engine 仓库，不在本仓库编 engine。

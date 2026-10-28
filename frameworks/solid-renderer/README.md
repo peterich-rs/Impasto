@@ -4,4 +4,4 @@
 
 `runtime/index.ts` 是编译入口。`Text` 是组件。
 
-`just solid` 跑 `src/tree.test.ts` 和 `runtime/frame.test.ts`。编译计数器是 `just solid-app`。
+`just solid` 先在本目录 `pnpm install --frozen-lockfile`，再跑 renderer 的测试。编译计数器是 `just solid-app`。

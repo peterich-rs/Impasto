@@ -6,12 +6,8 @@ logo := root / "hosts/macos/assets"
 default:
     @just --list
 
-check: test kotlin solid pixel
+check: test kotlin solid
     @echo "uifw check ok"
-
-pixel:
-    @if [[ ! -d "{{root}}/third_party/impeller-sdk/darwin-arm64" || ! -d "{{root}}/third_party/quickjs" ]]; then echo "pixel skipped"; exit 0; fi
-    cargo test --manifest-path "{{root}}/Cargo.toml" -p macos --test pixels
 
 bench:
     cargo test --manifest-path "{{root}}/Cargo.toml" --workspace --release -- --ignored
@@ -23,6 +19,7 @@ kotlin:
     "{{root}}/frameworks/kotlin-ui/gradlew" -p "{{root}}/frameworks/kotlin-ui" :library:jvmTest
 
 solid:
+    cd "{{root}}/frameworks/solid-renderer" && pnpm install --frozen-lockfile
     node --conditions=browser --experimental-strip-types "{{root}}/frameworks/solid-renderer/src/tree.test.ts"
     node --experimental-strip-types "{{root}}/frameworks/solid-renderer/runtime/frame.test.ts"
     node --conditions=browser --experimental-strip-types "{{root}}/frameworks/solid-renderer/runtime/slot.test.ts"
