@@ -191,7 +191,7 @@ export interface Permissions {
 
 平台通道一节里的方法表、包拆分、脚本加载、`submit_bench` 和列表滚动的 picture 记账已经在代码里。恢复前台的 present、表面重试、销毁等待、`Invalidate` 和 `MemoryWarning` 也已经在代码里。
 
-`just check` 含已有的 pixel 分支（无 SDK 自跳过）。计时基准只在 `just bench`。
+计时基准只在 `just bench`。
 
 ## 暂缓
 

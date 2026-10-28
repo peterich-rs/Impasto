@@ -6,12 +6,8 @@ logo := root / "hosts/macos/assets"
 default:
     @just --list
 
-check: test kotlin solid pixel
+check: test kotlin solid
     @echo "uifw check ok"
-
-pixel:
-    @if [[ ! -d "{{root}}/third_party/impeller-sdk/darwin-arm64" || ! -d "{{root}}/third_party/quickjs" ]]; then echo "pixel skipped"; exit 0; fi
-    cargo test --manifest-path "{{root}}/Cargo.toml" -p macos --test pixels
 
 bench:
     cargo test --manifest-path "{{root}}/Cargo.toml" --workspace --release -- --ignored

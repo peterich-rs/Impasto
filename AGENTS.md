@@ -248,7 +248,7 @@ GitHub Actions 工作流是 `.github/workflows/check.yml`。它跑 `cargo fmt --
 frameworks/kotlin-ui/gradlew -p frameworks/kotlin-ui :library:jvmTest
 ```
 
-看画面用 `UIFW_DUMP` 的读回。它不是像素门，也不进 `just check`。窗口进程用完要退出。dump 模式会自己终止；普通 `just host` 会留下窗口，验证完结束掉它。
+看画面用 `UIFW_DUMP` 的读回。窗口进程用完要退出。dump 模式会自己终止；普通 `just host` 会留下窗口，验证完结束掉它。
 
 ## 改代码时
 

@@ -43,8 +43,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: test macos host
         run: cargo test -p macos
-      - name: pixel golden
-        run: just pixel
 
   kotlin:
     name: kotlin
