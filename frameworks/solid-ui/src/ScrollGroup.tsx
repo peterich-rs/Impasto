@@ -3,6 +3,7 @@ import type { ScrollController } from "./ScrollController.ts";
 /**
  * Drag remainder after the inner scroll already holds the lock.
  * Lock-time edge yield stays in `Tree::scroll_for`.
+ * A declared axis drops the other component before this remainder is computed.
  * Returns whether the parent consumed the overflow. Otherwise the child rubber-bands.
  */
 export function consumeScrollOverflow(

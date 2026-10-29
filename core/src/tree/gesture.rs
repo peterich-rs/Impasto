@@ -672,12 +672,16 @@ impl Tree {
             return Vec::new();
         };
         // Wheel sign is opposite the finger: positive dy increases the offset.
-        self.scroll_for(hit, -event.dx, -event.dy, None, false)
-            .map(|id| {
-                self.merge_wheel(id, event.dx, event.dy);
-                vec![Gesture::Wheel(id, event.dx, event.dy)]
-            })
-            .unwrap_or_default()
+        // Only the scroll's declared axis is forwarded.
+        let Some(id) = self.scroll_for(hit, -event.dx, -event.dy, None, false) else {
+            return Vec::new();
+        };
+        let (dx, dy) = self.axis_of(id).filter(event.dx, event.dy);
+        if dx == 0.0 && dy == 0.0 {
+            return Vec::new();
+        }
+        self.merge_wheel(id, dx, dy);
+        vec![Gesture::Wheel(id, dx, dy)]
     }
 
     /// Drops pointer routes whose target sits in `root`'s subtree.

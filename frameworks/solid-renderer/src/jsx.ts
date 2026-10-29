@@ -66,7 +66,13 @@ declare module "solid-js" {
       sized: { w?: AxisSize; h?: AxisSize } & Place;
       clip: Children & Grow & Box & { radius?: number };
       opacity: Children & Grow & Fill & { alpha?: number };
-      scroll: Children & Drag & Wheel & Box & { onScroll?: (x: number, y: number) => void };
+      scroll: Children &
+        Drag &
+        Wheel &
+        Box & {
+          onScroll?: (x: number, y: number) => void;
+          axis?: "vertical" | "horizontal" | "both";
+        };
       transform: Children & Zoom & Fill & { x?: number; y?: number; rotate?: number; scale?: number };
       image: {
         source?: string;

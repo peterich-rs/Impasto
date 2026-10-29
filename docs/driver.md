@@ -32,7 +32,7 @@ native 边界（glue.c）
   命令下行: class 方法
 Rust driver（core，一份）
   ListDriver: 窗口滞回、rect 测量、Fenwick、滑块、吸顶、可见集 diff
-  ScrollController: 夹紧、拖动续算、越界交给父控制器、两种刷新阈值
+  ScrollController: 夹紧、拖动续算、越界交给父控制器、两种刷新阈值。声明了单轴时丢掉跨轴增量，不交给父级
 core 底座
   Tree、ScrollPhysics、手势
 ```

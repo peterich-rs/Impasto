@@ -31,8 +31,8 @@ pub use list::{
     Chrome, DragStep, DriverEvent, DriverId, DriverSet, ListItem, ListNodes, ListOp, PullMode,
 };
 pub use motion::{
-    AnimProp, Friction, OverscrollMode, SCROLL_TAU_MS, ScrollPhase, ScrollPhysics, Simulation,
-    SnapAlign, SnapGrid, Spring,
+    AnimProp, Friction, OverscrollMode, SCROLL_TAU_MS, ScrollAccept, ScrollAxis, ScrollPhase,
+    ScrollPhysics, Simulation, SnapAlign, SnapGrid, Spring,
 };
 pub use pointer::{Button, Buttons, Modifiers, Phase, PointerEvent, PointerId, PointerKind};
 pub use protocol::ParagraphId;

@@ -11,14 +11,29 @@ export type ScrollPhysicsProps = {
   snapX?: { interval: number; align?: "start" | "center" | "end" };
   snapY?: { interval: number; align?: "start" | "center" | "end" };
   chain?: boolean;
+  /** `content` yields at the edge. `always` keeps the drag and can rubber-band. `never` passes the drag to a parent. */
+  accept?: "content" | "always" | "never";
 };
 
+function acceptCode(accept: ScrollPhysicsProps["accept"]): number {
+  if (accept === "always") {
+    return 1;
+  }
+  if (accept === "never") {
+    return 2;
+  }
+  return 0;
+}
+
 /**
- * A vertical-and-horizontal scroller. Drag, wheel, and clamp run on the
- * scroll controller. After release, `core` coasts.
+ * A scroller on one axis. The default is vertical, and `accept` is always, so
+ * an edge drag stays here and can rubber-band. Pass `horizontal` for a pager.
+ * `content` yields at the edge. Drag, wheel, and clamp run on the scroll
+ * controller. After release, `core` coasts on the declared axis.
  */
 export function ScrollArea(props: {
   children?: unknown;
+  axis?: "vertical" | "horizontal" | "both";
   onOffset?: (offset: { x: number; y: number }, viewport: number) => void;
   viewportRef?: (viewport: number) => void;
   contentRef?: (content: number) => void;
@@ -47,22 +62,21 @@ export function ScrollArea(props: {
     const physics = props.physics;
     const align = (name: "start" | "center" | "end" | undefined) =>
       name === "center" ? 1 : name === "end" ? 2 : 0;
-    if (physics !== undefined) {
-      host.setScrollPhysics(
-        node,
-        physics.frictionTau ?? 180,
-        physics.overscroll === "clamp" ? 1 : 0,
-        physics.stiffness ?? 170,
-        physics.damping ?? 26,
-        physics.factor ?? 0.55,
-        physics.snapX?.interval ?? 0,
-        align(physics.snapX?.align),
-        physics.snapY?.interval ?? 0,
-        align(physics.snapY?.align),
-      );
-      if (physics.chain !== undefined) {
-        host.setScrollChain(node, physics.chain);
-      }
+    host.setScrollPhysics(
+      node,
+      physics?.frictionTau ?? 180,
+      physics?.overscroll === "clamp" ? 1 : 0,
+      physics?.stiffness ?? 170,
+      physics?.damping ?? 26,
+      physics?.factor ?? 0.55,
+      physics?.snapX?.interval ?? 0,
+      align(physics?.snapX?.align),
+      physics?.snapY?.interval ?? 0,
+      align(physics?.snapY?.align),
+      acceptCode(physics?.accept ?? "always"),
+    );
+    if (physics?.chain !== undefined) {
+      host.setScrollChain(node, physics.chain);
     }
     ctrl.setRubber(physics?.overscroll === "rubber", physics?.factor ?? 0.55);
   }
@@ -73,6 +87,7 @@ export function ScrollArea(props: {
 
   return (
     <scroll
+      axis={props.axis ?? "vertical"}
       fill
       ref={(node) => {
         viewport = node.id;

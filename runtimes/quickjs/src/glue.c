@@ -59,7 +59,7 @@ typedef struct QjsFns {
     int (*set_text_direction)(void *session, uint64_t node, int rtl);
     int (*set_line_height)(void *session, uint64_t node, float height);
     int (*set_family)(void *session, uint64_t node, const char *utf8, size_t len);
-    int (*scroll)(void *session, uint64_t *out);
+    int (*scroll)(void *session, int axis, uint64_t *out);
     int (*set_scroll_offset)(void *session, uint64_t node, float dx, float dy);
     int (*scroll_offset)(void *session, uint64_t node, float *dx, float *dy);
     int (*rect)(void *session, uint64_t node, float *x, float *y, float *w, float *h);
@@ -179,7 +179,7 @@ typedef struct QjsFns {
     int (*viewport)(void *session, float *width, float *height);
     int (*set_scroll_physics)(void *session, uint64_t node, float tau, int mode, float stiffness,
                               float damping, float factor, float snap_x, int align_x, float snap_y,
-                              int align_y);
+                              int align_y, int accept);
     int (*set_scroll_chain)(void *session, uint64_t node, int chain);
     int (*overscroll)(void *session, uint64_t node, float *x, float *y);
     int (*arm_fling)(void *session, uint64_t node, float vx, float vy);
@@ -213,6 +213,7 @@ typedef struct QjsFns {
     int (*scroll_query)(void *session, uint32_t index, uint32_t generation, int cmd, float *x,
                         float *y);
     int (*scroll_consume)(void *session, uint32_t index, uint32_t generation, float ox, float oy);
+    int (*set_scroll_axis)(void *session, uint64_t node, int axis);
 } QjsFns;
 
 typedef struct BackHandler {
@@ -2984,11 +2985,13 @@ static JSValue js_set_family(JSContext *ctx, JSValueConst this_val, int argc, JS
 
 static JSValue js_scroll(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
-    (void)argc;
-    (void)argv;
     Host *host = host_of(ctx);
+    int32_t axis = 0;
+    if (argc >= 1 && JS_ToInt32(ctx, &axis, argv[0])) {
+        return JS_EXCEPTION;
+    }
     uint64_t id = 0;
-    int status = host->fns.scroll(host->fns.session, &id);
+    int status = host->fns.scroll(host->fns.session, axis, &id);
     return created(ctx, status, id, "scroll failed");
 }
 
@@ -3058,17 +3061,35 @@ static JSValue js_set_scroll_physics(JSContext *ctx, JSValueConst this_val, int 
     int32_t align_x = 0;
     double snap_y = 0;
     int32_t align_y = 0;
+    int32_t accept = 0;
     if (read_handle(ctx, argv[0], &node) || JS_ToFloat64(ctx, &tau, argv[1]) ||
         JS_ToInt32(ctx, &mode, argv[2]) || JS_ToFloat64(ctx, &stiffness, argv[3]) ||
         JS_ToFloat64(ctx, &damping, argv[4]) || JS_ToFloat64(ctx, &factor, argv[5]) ||
         JS_ToFloat64(ctx, &snap_x, argv[6]) || JS_ToInt32(ctx, &align_x, argv[7]) ||
-        JS_ToFloat64(ctx, &snap_y, argv[8]) || JS_ToInt32(ctx, &align_y, argv[9])) {
+        JS_ToFloat64(ctx, &snap_y, argv[8]) || JS_ToInt32(ctx, &align_y, argv[9]) ||
+        (argc >= 11 && JS_ToInt32(ctx, &accept, argv[10]))) {
         return JS_EXCEPTION;
     }
     int status = host->fns.set_scroll_physics(
         host->fns.session, node, (float)tau, mode, (float)stiffness, (float)damping, (float)factor,
-        (float)snap_x, align_x, (float)snap_y, align_y);
+        (float)snap_x, align_x, (float)snap_y, align_y, accept);
     return done(ctx, status, "setScrollPhysics failed");
+}
+
+static JSValue js_set_scroll_axis(JSContext *ctx, JSValueConst this_val, int argc,
+                                  JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2) {
+        return throw_msg(ctx, "setScrollAxis(node, axis)");
+    }
+    uint64_t node = 0;
+    int32_t axis = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToInt32(ctx, &axis, argv[1])) {
+        return JS_EXCEPTION;
+    }
+    int status = host->fns.set_scroll_axis(host->fns.session, node, axis);
+    return done(ctx, status, "setScrollAxis failed");
 }
 
 static JSValue js_set_scroll_chain(JSContext *ctx, JSValueConst this_val, int argc,
@@ -4441,8 +4462,9 @@ static int bind_core(Host *host) {
     failed |= bind_fn(ctx, core, "setTextDirection", js_set_text_direction, 2);
     failed |= bind_fn(ctx, core, "setLineHeight", js_set_line_height, 2);
     failed |= bind_fn(ctx, core, "setFamily", js_set_family, 2);
-    failed |= bind_fn(ctx, core, "scroll", js_scroll, 0);
+    failed |= bind_fn(ctx, core, "scroll", js_scroll, 1);
     failed |= bind_fn(ctx, core, "setScrollOffset", js_set_scroll_offset, 3);
+    failed |= bind_fn(ctx, core, "setScrollAxis", js_set_scroll_axis, 2);
     failed |= bind_fn(ctx, core, "setScrollPhysics", js_set_scroll_physics, 10);
     failed |= bind_fn(ctx, core, "setScrollChain", js_set_scroll_chain, 2);
     failed |= bind_fn(ctx, core, "overscroll", js_overscroll, 1);

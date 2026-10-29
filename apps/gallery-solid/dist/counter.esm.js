@@ -4066,6 +4066,15 @@ function parseGridLine(value) {
 function asNumber(value, fallback2) {
   return typeof value === "number" ? value : fallback2;
 }
+function axisCode(value) {
+  if (value === "vertical") {
+    return 1;
+  }
+  if (value === "horizontal") {
+    return 2;
+  }
+  return 0;
+}
 function alignName(value) {
   if (value === "center" || value === "end") {
     return value;
@@ -4412,6 +4421,9 @@ function hostRendererOptions(host2) {
           host2.setFill(node.id);
         }
         return;
+      case "axis":
+        host2.setScrollAxis(node.id, axisCode(value));
+        return;
       case "focusable":
         host2.setFocusable(node.id, value === true);
         return;
@@ -4586,7 +4598,7 @@ function hostRendererOptions(host2) {
           id = host2.opacity(asNumber(staticProps?.alpha, 255));
           break;
         case "scroll":
-          id = host2.scroll();
+          id = host2.scroll(axisCode(staticProps?.axis));
           break;
         case "sized": {
           const width = staticProps?.w === void 0 ? 0 : parseAxisSize(staticProps.w);
@@ -4616,7 +4628,7 @@ function hostRendererOptions(host2) {
       const node = wrap(id);
       if (staticProps !== void 0) {
         for (const [name, value] of Object.entries(staticProps)) {
-          if (name === "gap" || name === "edges" || name === "columns" || name === "rows" || name === "color" || name === "radius" || name === "alpha" || name === "source" || name === "w" || name === "h" || name === "mode" || name === "required") {
+          if (name === "gap" || name === "edges" || name === "columns" || name === "rows" || name === "color" || name === "radius" || name === "alpha" || name === "source" || name === "w" || name === "h" || name === "mode" || name === "required" || name === "axis") {
             continue;
           }
           setProperty(node, name, value);
@@ -7428,7 +7440,8 @@ function FieldShell(props) {
       h: minHeight()
     },
     n: blocked2() ? 102 : 255,
-    s: theme().space.l
+    s: theme().space.l,
+    h: multiline() ? "vertical" : "horizontal"
   }), ({
     e,
     t: t2,
@@ -7436,7 +7449,8 @@ function FieldShell(props) {
     o,
     i,
     n,
-    s
+    s,
+    h
   }, _p$) => {
     e !== _p$?.e && setProp(_el$, "gap", e, _p$?.e);
     t2 !== _p$?.t && setProp(_el$2, "min", t2, _p$?.t);
@@ -7445,6 +7459,7 @@ function FieldShell(props) {
     i !== _p$?.i && setProp(_el$3, "min", i, _p$?.i);
     n !== _p$?.n && setProp(_el$4, "alpha", n, _p$?.n);
     s !== _p$?.s && setProp(_el$5, "edges", s, _p$?.s);
+    h !== _p$?.h && setProp(_el$6, "axis", h, _p$?.h);
   });
   return _el$;
 }
@@ -7644,6 +7659,15 @@ function refreshListener(controller, fn2) {
 }
 
 // node_modules/.pnpm/@uifw+solid-ui@file+..+..+frameworks+solid-ui/node_modules/@uifw/solid-ui/src/ScrollArea.tsx
+function acceptCode(accept) {
+  if (accept === "always") {
+    return 1;
+  }
+  if (accept === "never") {
+    return 2;
+  }
+  return 0;
+}
 function ScrollArea(props) {
   const ctrl = props.controller ?? createScrollController();
   let viewport = 0;
@@ -7658,11 +7682,9 @@ function ScrollArea(props) {
   function applyPhysics(node) {
     const physics = props.physics;
     const align = (name) => name === "center" ? 1 : name === "end" ? 2 : 0;
-    if (physics !== void 0) {
-      host.setScrollPhysics(node, physics.frictionTau ?? 180, physics.overscroll === "clamp" ? 1 : 0, physics.stiffness ?? 170, physics.damping ?? 26, physics.factor ?? 0.55, physics.snapX?.interval ?? 0, align(physics.snapX?.align), physics.snapY?.interval ?? 0, align(physics.snapY?.align));
-      if (physics.chain !== void 0) {
-        host.setScrollChain(node, physics.chain);
-      }
+    host.setScrollPhysics(node, physics?.frictionTau ?? 180, physics?.overscroll === "clamp" ? 1 : 0, physics?.stiffness ?? 170, physics?.damping ?? 26, physics?.factor ?? 0.55, physics?.snapX?.interval ?? 0, align(physics?.snapX?.align), physics?.snapY?.interval ?? 0, align(physics?.snapY?.align), acceptCode(physics?.accept ?? "always"));
+    if (physics?.chain !== void 0) {
+      host.setScrollChain(node, physics.chain);
     }
     ctrl.setRubber(physics?.overscroll === "rubber", physics?.factor ?? 0.55);
   }
@@ -7706,6 +7728,9 @@ function ScrollArea(props) {
     props.contentRef?.(node.id);
   }, _el$2);
   insert(_el$2, () => props.children);
+  effect3(() => props.axis ?? "vertical", (_v$, _$p) => {
+    setProp(_el$, "axis", _v$, _$p);
+  });
   return _el$;
 }
 
@@ -7913,6 +7938,7 @@ function VirtualList(props) {
             fill: true
           });
           insert(_el$2, createComponent2(ScrollArea, {
+            axis: "vertical",
             get contentMin() {
               return extent();
             },
@@ -8360,7 +8386,19 @@ function ListPage(_props) {
         get children() {
           return memo2(() => refreshed() === 0)() ? "\u4E0B\u62C9\u5237\u65B0" : `\u5DF2\u5237\u65B0 ${refreshed()}`;
         }
+      }), createComponent2(Text, {
+        get fontSize() {
+          return theme().typography.caption.size;
+        },
+        get color() {
+          return theme().color.textMuted;
+        },
+        get direction() {
+          return directionFor(theme().locale);
+        },
+        children: "\u6A2A\u5411\u5206\u9875"
       }), createComponent2(ScrollArea, {
+        axis: "horizontal",
         physics: {
           snapX: {
             interval: 72,

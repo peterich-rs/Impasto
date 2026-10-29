@@ -9,6 +9,7 @@
 
 use super::node::{DragClaim, Hit, Kind};
 use super::{NodeId, Tree};
+use crate::{ScrollAccept, ScrollAxis};
 
 const SCALE_EPSILON: f32 = 1.0e-4;
 
@@ -303,10 +304,12 @@ impl Tree {
 
     /// Scroll that should take a drag or a wheel sample.
     ///
-    /// The dominant axis is the larger delta. A scroll at its edge in that
-    /// direction yields to an ancestor that can still move. A drag with nowhere
-    /// else to go still locks the innermost scroll that overflows, so the gesture
-    /// does not become a click. A wheel does not.
+    /// A declared axis looks only at its own component. `Both` still picks the
+    /// larger delta. `Never` is skipped. `Always` claims that axis even at the
+    /// edge. `Content` needs room in the drag direction. When nothing can move,
+    /// a drag still locks the innermost `Both` scroll that overflows, so the
+    /// gesture does not become a click. A declared axis does not use that
+    /// fallback: edge capture is `ScrollAccept::Always`. A wheel does not lock.
     pub(super) fn scroll_for(
         &self,
         start: NodeId,
@@ -315,20 +318,27 @@ impl Tree {
         pointer: Option<crate::PointerId>,
         lock_at_edge: bool,
     ) -> Option<NodeId> {
-        let horizontal = dx.abs() >= dy.abs();
         if dx == 0.0 && dy == 0.0 {
             return None;
         }
+        let horizontal = dx.abs() >= dy.abs();
         let mut id = start;
         let mut edge: Option<NodeId> = None;
         loop {
             let node = self.get(id)?;
             if node.kind == Kind::Scroll && !self.scroll_held_by_other(id, pointer) {
-                if self.can_consume(id, horizontal, dx, dy) {
-                    return Some(id);
-                }
-                if edge.is_none() && self.overflows(id, horizontal) {
-                    edge = Some(id);
+                let (axis, accept) = node
+                    .scroll_geom()
+                    .map(|geom| (geom.axis, geom.physics.accept))
+                    .unwrap_or((ScrollAxis::Both, ScrollAccept::Content));
+                if accept != ScrollAccept::Never {
+                    if self.can_consume(id, axis, accept, dx, dy) {
+                        return Some(id);
+                    }
+                    if edge.is_none() && axis == ScrollAxis::Both && self.overflows(id, horizontal)
+                    {
+                        edge = Some(id);
+                    }
                 }
             }
             let Some(parent) = node.parent else {
@@ -358,7 +368,39 @@ impl Tree {
     }
 
     /// `dx` and `dy` use drag sign: positive moves the content with the finger.
-    fn can_consume(&self, id: NodeId, horizontal: bool, dx: f32, dy: f32) -> bool {
+    fn can_consume(
+        &self,
+        id: NodeId,
+        axis: ScrollAxis,
+        accept: ScrollAccept,
+        dx: f32,
+        dy: f32,
+    ) -> bool {
+        match accept {
+            ScrollAccept::Never => false,
+            ScrollAccept::Always => match axis {
+                ScrollAxis::Vertical => dy != 0.0,
+                ScrollAxis::Horizontal => dx != 0.0,
+                ScrollAxis::Both => true,
+            },
+            ScrollAccept::Content => match axis {
+                ScrollAxis::Vertical => self.room_along(id, false, dy),
+                ScrollAxis::Horizontal => self.room_along(id, true, dx),
+                ScrollAxis::Both => {
+                    if dx.abs() >= dy.abs() {
+                        self.room_along(id, true, dx)
+                    } else {
+                        self.room_along(id, false, dy)
+                    }
+                }
+            },
+        }
+    }
+
+    fn room_along(&self, id: NodeId, horizontal: bool, delta: f32) -> bool {
+        if delta == 0.0 {
+            return false;
+        }
         let Some(node) = self.get(id) else {
             return false;
         };
@@ -370,20 +412,17 @@ impl Tree {
             if content_w <= node.w + 0.5 {
                 return false;
             }
-            if dx > 0.0 {
+            if delta > 0.0 {
                 offset_x > 0.5
             } else {
                 offset_x + node.w < content_w - 0.5
             }
+        } else if content_h <= node.h + 0.5 {
+            false
+        } else if delta > 0.0 {
+            offset_y > 0.5
         } else {
-            if content_h <= node.h + 0.5 {
-                return false;
-            }
-            if dy > 0.0 {
-                offset_y > 0.5
-            } else {
-                offset_y + node.h < content_h - 0.5
-            }
+            offset_y + node.h < content_h - 0.5
         }
     }
 

@@ -38,7 +38,8 @@ function mockHost() {
     pointerRegion: () => alloc("pointerRegion", []),
     clip: (radius) => alloc("clip", [radius]),
     opacity: (alpha) => alloc("opacity", [alpha]),
-    scroll: () => alloc("scroll", []),
+    scroll: (axis) => alloc("scroll", [axis]),
+    setScrollAxis: (node, axis) => note("setScrollAxis", [node, axis]),
     transform: () => alloc("transform", []),
     decorated: (color, radius) => alloc("decorated", [color, radius]),
     image: (source, width, height, mode, required) =>

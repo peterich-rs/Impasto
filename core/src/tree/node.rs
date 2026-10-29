@@ -389,6 +389,7 @@ pub(super) struct ScrollGeom {
     pub(super) physics: crate::ScrollPhysics,
     pub(super) chain: bool,
     pub(super) phase: crate::ScrollPhase,
+    pub(super) axis: crate::ScrollAxis,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -467,6 +468,7 @@ impl Node {
                 physics: crate::ScrollPhysics::default(),
                 chain: true,
                 phase: crate::ScrollPhase::Idle,
+                axis: crate::ScrollAxis::Both,
             }),
             Kind::Transform => Geom::Transform(TransformGeom::identity()),
             _ => Geom::None,

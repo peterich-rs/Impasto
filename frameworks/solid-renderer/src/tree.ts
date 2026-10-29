@@ -29,6 +29,17 @@ function asNumber(value: unknown, fallback: number): number {
   return typeof value === "number" ? value : fallback;
 }
 
+/** `0` both, `1` vertical, `2` horizontal. */
+function axisCode(value: unknown): number {
+  if (value === "vertical") {
+    return 1;
+  }
+  if (value === "horizontal") {
+    return 2;
+  }
+  return 0;
+}
+
 function alignName(value: unknown): "start" | "center" | "end" {
   if (value === "center" || value === "end") {
     return value;
@@ -334,6 +345,9 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
           host.setFill(node.id);
         }
         return;
+      case "axis":
+        host.setScrollAxis(node.id, axisCode(value));
+        return;
       case "focusable":
         host.setFocusable(node.id, value === true);
         return;
@@ -500,7 +514,7 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
           id = host.opacity(asNumber(staticProps?.alpha, 255));
           break;
         case "scroll":
-          id = host.scroll();
+          id = host.scroll(axisCode(staticProps?.axis));
           break;
         case "sized": {
           const width = staticProps?.w === undefined ? 0 : parseAxisSize(staticProps.w);
@@ -548,7 +562,8 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
             name === "w" ||
             name === "h" ||
             name === "mode" ||
-            name === "required"
+            name === "required" ||
+            name === "axis"
           ) {
             continue;
           }

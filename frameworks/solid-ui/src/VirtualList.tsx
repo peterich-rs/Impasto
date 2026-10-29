@@ -176,6 +176,7 @@ export function VirtualList<T>(props: {
       >
         <stack fill>
           <ScrollArea
+            axis="vertical"
             contentMin={extent()}
             initialOffset={initial}
             controller={scroll}

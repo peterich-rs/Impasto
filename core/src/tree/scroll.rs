@@ -34,6 +34,8 @@ impl Tree {
         if self.node(id)?.kind != Kind::Scroll {
             return Err(Error::WrongKind);
         }
+        let axis = self.axis_of(id);
+        let (dx, dy) = axis.filter(dx, dy);
         let (max_x, max_y) = self.scroll_limits(id);
         let (ox, oy) = rubber_band(dx, dy, max_x, max_y);
         let applying = self.applying_motion;
@@ -44,7 +46,7 @@ impl Tree {
                 crate::OverscrollMode::RubberBand => physics.overscroll_factor,
             })
             .unwrap_or(crate::motion::OVERSCROLL_FACTOR);
-        let overscroll = (!applying).then_some((factor * (dx - ox), factor * (dy - oy)));
+        let overscroll = (!applying).then_some(axis.filter(factor * (dx - ox), factor * (dy - oy)));
         {
             let node = self.node_mut(id)?;
             let Some(geom) = node.scroll_mut() else {
@@ -90,6 +92,7 @@ impl Tree {
         if self.node(id)?.kind != Kind::Scroll {
             return Err(Error::WrongKind);
         }
+        let axis = self.axis_of(id);
         self.motions.retain(|motion| {
             motion.node != id
                 || !matches!(
@@ -97,10 +100,39 @@ impl Tree {
                     crate::AnimProp::ScrollX | crate::AnimProp::ScrollY
                 )
         });
-        self.arm_scroll_axis(id, crate::AnimProp::ScrollX, vx);
-        self.arm_scroll_axis(id, crate::AnimProp::ScrollY, vy);
+        if axis.allows_x() {
+            self.arm_scroll_axis(id, crate::AnimProp::ScrollX, vx);
+        }
+        if axis.allows_y() {
+            self.arm_scroll_axis(id, crate::AnimProp::ScrollY, vy);
+        }
         self.sync_scroll_phase(id);
         Ok(())
+    }
+
+    /// Locks `id` to `axis`. The other component's offset, overscroll, and motions go to zero.
+    pub fn set_scroll_axis(&mut self, id: NodeId, axis: crate::ScrollAxis) -> Result<(), Error> {
+        if self.node(id)?.kind != Kind::Scroll {
+            return Err(Error::WrongKind);
+        }
+        if self.axis_of(id) == axis {
+            return Ok(());
+        }
+        let Some(geom) = self.node_mut(id)?.scroll_mut() else {
+            return Err(Error::WrongKind);
+        };
+        geom.axis = axis;
+        self.motions
+            .retain(|motion| motion.node != id || axis.allows(motion.prop));
+        let (x, y) = self.scroll_offset(id)?;
+        self.set_scroll_offset(id, x, y)
+    }
+
+    pub fn scroll_axis(&self, id: NodeId) -> Result<crate::ScrollAxis, Error> {
+        let node = self.node(id)?;
+        node.scroll_geom()
+            .map(|geom| geom.axis)
+            .ok_or(Error::WrongKind)
     }
 
     /// Stores physics on `id`. Unknown nodes and non-scrolls fail.
@@ -152,9 +184,18 @@ impl Tree {
             return Err(Error::WrongKind);
         }
         let (max_x, max_y) = self.scroll_limits(id);
-        let x = x.clamp(0.0, max_x.max(0.0));
-        let y = y.clamp(0.0, max_y.max(0.0));
         let (ox, oy) = self.scroll_offset(id)?;
+        let axis = self.axis_of(id);
+        let x = if axis.allows_x() {
+            x.clamp(0.0, max_x.max(0.0))
+        } else {
+            ox
+        };
+        let y = if axis.allows_y() {
+            y.clamp(0.0, max_y.max(0.0))
+        } else {
+            oy
+        };
         let physics = self.scroll_physics(id).unwrap_or_default();
         let stiffness = stiffness.unwrap_or(physics.overscroll_stiffness);
         let damping = damping.unwrap_or(physics.overscroll_damping);
@@ -259,8 +300,17 @@ impl Tree {
                 nearest_offset(oy, rel_y, rel_y + target.h, view.h),
             ),
         };
-        let nx = nx.clamp(0.0, max_x.max(0.0));
-        let ny = ny.clamp(0.0, max_y.max(0.0));
+        let axis = self.axis_of(scroll);
+        let nx = if axis.allows_x() {
+            nx.clamp(0.0, max_x.max(0.0))
+        } else {
+            ox
+        };
+        let ny = if axis.allows_y() {
+            ny.clamp(0.0, max_y.max(0.0))
+        } else {
+            oy
+        };
         self.spring_scroll(scroll, crate::AnimProp::ScrollX, ox, nx);
         self.spring_scroll(scroll, crate::AnimProp::ScrollY, oy, ny);
         Ok(())
@@ -341,6 +391,7 @@ impl Tree {
 
     /// Adds wheel speed into a coast already running on `id`.
     pub(super) fn merge_wheel(&mut self, id: NodeId, dx: f32, dy: f32) {
+        let (dx, dy) = self.axis_of(id).filter(dx, dy);
         self.kick_scroll(id, crate::AnimProp::ScrollX, dx);
         self.kick_scroll(id, crate::AnimProp::ScrollY, dy);
     }
@@ -399,6 +450,9 @@ impl Tree {
     }
 
     pub(super) fn apply_scroll(&mut self, id: NodeId, prop: crate::AnimProp, value: f32) -> bool {
+        if !self.axis_of(id).allows(prop) {
+            return true;
+        }
         let Ok((x, y)) = self.scroll_offset(id) else {
             return true;
         };
@@ -426,6 +480,9 @@ impl Tree {
         prop: crate::AnimProp,
         value: f32,
     ) -> bool {
+        if !self.axis_of(id).allows(prop) {
+            return true;
+        }
         {
             let Ok(node) = self.node_mut(id) else {
                 return true;
@@ -448,8 +505,9 @@ impl Tree {
         let Ok((x, y)) = self.node(id).map(|node| node.overscroll()) else {
             return;
         };
+        let axis = self.axis_of(id);
         let physics = self.scroll_physics(id).unwrap_or_default();
-        if x.abs() > f32::EPSILON {
+        if axis.allows_x() && x.abs() > f32::EPSILON {
             self.animate(
                 id,
                 crate::AnimProp::OverscrollX,
@@ -462,7 +520,7 @@ impl Tree {
                 }),
             );
         }
-        if y.abs() > f32::EPSILON {
+        if axis.allows_y() && y.abs() > f32::EPSILON {
             self.animate(
                 id,
                 crate::AnimProp::OverscrollY,
@@ -497,7 +555,16 @@ impl Tree {
             }
             child = next;
         }
-        ((content_w - width).max(0.0), (content_h - height).max(0.0))
+        self.axis_of(id)
+            .filter((content_w - width).max(0.0), (content_h - height).max(0.0))
+    }
+
+    pub(super) fn axis_of(&self, id: NodeId) -> crate::ScrollAxis {
+        self.node(id)
+            .ok()
+            .and_then(|node| node.scroll_geom())
+            .map(|geom| geom.axis)
+            .unwrap_or(crate::ScrollAxis::Both)
     }
 
     pub fn scroll_offset(&self, id: NodeId) -> Result<(f32, f32), Error> {
@@ -590,7 +657,7 @@ impl Tree {
 
     /// `sim_v` is the offset derivative. Positive moves toward the far edge.
     fn can_take_velocity(&self, id: NodeId, prop: crate::AnimProp, sim_v: f32) -> bool {
-        if sim_v.abs() < 0.02 {
+        if !self.axis_of(id).allows(prop) || sim_v.abs() < 0.02 {
             return false;
         }
         let Ok(node) = self.node(id) else {
@@ -704,6 +771,9 @@ impl Tree {
     }
 
     fn snap_target(&self, id: NodeId, prop: crate::AnimProp) -> Option<f32> {
+        if !self.axis_of(id).allows(prop) {
+            return None;
+        }
         let physics = self.scroll_physics(id)?;
         let grid = match prop {
             crate::AnimProp::ScrollX => physics.snap_x,

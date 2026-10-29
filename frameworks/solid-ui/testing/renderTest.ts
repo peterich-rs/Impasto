@@ -28,6 +28,25 @@ export function installMockHost(): MockHost {
   const frames: Array<(targetMs: number, intervalMs: number) => void> = [];
   const motionEnds: Array<{ token: number; fn: () => void }> = [];
   let motionToken = 1;
+  let driverNotify:
+    | ((
+        kind: number,
+        index: number,
+        generation: number,
+        tag: number,
+        i0: number,
+        i1: number,
+        f0: number,
+        f1: number,
+        f2: number,
+        f3: number,
+        f4: number,
+        f5: number,
+        s0: string,
+        s1: string,
+      ) => void)
+    | undefined;
+  let driverSerial = 1;
   let motionArmed = false;
   const backs: Array<() => boolean> = [];
   let next = 1;
@@ -96,7 +115,70 @@ export function installMockHost(): MockHost {
     pointerRegion: () => alloc("pointerRegion", []),
     clip: (radius: number) => alloc("clip", [radius]),
     opacity: (alpha: number) => alloc("opacity", [alpha]),
-    scroll: () => alloc("scroll", []),
+    scroll: (axis?: number) => alloc("scroll", [axis]),
+    setScrollAxis: (node: number, axis: number) => {
+      calls.push({ name: "setScrollAxis", args: [node, axis] });
+    },
+    onDriver: (
+      fn: (
+        kind: number,
+        index: number,
+        generation: number,
+        tag: number,
+        i0: number,
+        i1: number,
+        f0: number,
+        f1: number,
+        f2: number,
+        f3: number,
+        f4: number,
+        f5: number,
+        s0: string,
+        s1: string,
+      ) => void,
+    ) => {
+      driverNotify = fn;
+      calls.push({ name: "onDriver", args: ["function"] });
+    },
+    listDriver: () => {
+      const index = driverSerial++;
+      const generation = 1;
+      calls.push({ name: "listDriver", args: [index] });
+      return {
+        bind: () => {},
+        configure: () => {},
+        setItems: (rows: { key: string; type: string }[]) => {
+          const sample = rows.slice(0, 4);
+          for (let i = 0; i < sample.length; i++) {
+            const row = sample[i];
+            driverNotify?.(1, index, generation, 1, 2, i, 0, 0, 0, 0, 0, 0, row.key, row.type);
+          }
+          for (let i = 0; i < sample.length; i++) {
+            driverNotify?.(1, index, generation, 1, 4, 0, 0, 0, 0, 0, 0, 0, sample[i].key, "");
+          }
+        },
+        noteRow: () => {},
+        release: () => {},
+        id: () => ({ index, generation }),
+      };
+    },
+    scrollController: () => {
+      const index = driverSerial++;
+      const generation = 1;
+      calls.push({ name: "scrollController", args: [index] });
+      return {
+        bind: () => {},
+        configure: () => {},
+        dragBy: () => ({ ox: 0, oy: 0, overX: 0, overY: 0, pending: false }),
+        finishDrag: () => {},
+        dragEnd: () => {},
+        wheel: () => {},
+        query: () => ({ x: 0, y: 0 }),
+        consume: () => false,
+        release: () => {},
+        id: () => ({ index, generation }),
+      };
+    },
     transform: () => alloc("transform", []),
     decorated: (color: number[], radius = 0) => alloc("decorated", [color, radius]),
     image: (source: string, width: number, height: number) => alloc("image", [source, width, height]),

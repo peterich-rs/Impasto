@@ -6,7 +6,7 @@ use super::window::{
     window_range_for_offset,
 };
 use super::{DriverSet, ListItem, ListNodes, ListOp, PullMode};
-use crate::{MonoShaper, Tree};
+use crate::{MonoShaper, ScrollAxis, Tree};
 
 fn close(left: f32, right: f32) -> bool {
     (left - right).abs() < 1e-4
@@ -292,5 +292,51 @@ fn edge_pull_commits_on_drag_end_and_clamp_keeps_the_offset() -> Result<(), crat
             .iter()
             .any(|event| matches!(event, super::DriverEvent::Refresh { .. }))
     );
+    Ok(())
+}
+
+#[test]
+fn a_vertical_controller_discards_horizontal_drag() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    let scroll = tree.scroll_with(ScrollAxis::Vertical)?;
+    tree.set_max_size(scroll, 80.0, 40.0)?;
+    let body = tree.sized(400.0, 400.0)?;
+    tree.add_child(scroll, body)?;
+    tree.layout()?;
+    tree.set_scroll_offset(scroll, 0.0, 40.0)?;
+    let mut drivers = DriverSet::new();
+    let id = drivers.scroll_create();
+    assert!(drivers.scroll_bind(id, Some(scroll), Some(body), &tree));
+    assert!(drivers.scroll_configure(id, 0.0, PullMode::Off, 64.0, false, 0.0, None));
+    let Some(step) = drivers.scroll_drag_by(id, &mut tree, 30.0, 10.0) else {
+        return Err(crate::Error::UnknownNode);
+    };
+    assert_eq!(step.overflow_x, 0.0);
+    assert!(
+        !step.pending,
+        "cross-axis drag must not look like overflow: {step:?}"
+    );
+    let (x, y) = tree.scroll_offset(scroll)?;
+    assert_eq!(x, 0.0);
+    assert!(y < 39.0 && y > 1.0, "y moved, x did not: {x} {y}");
+
+    let mut tree = Tree::new(MonoShaper::default());
+    let both = tree.scroll()?;
+    tree.set_max_size(both, 80.0, 40.0)?;
+    let wide = tree.sized(400.0, 200.0)?;
+    tree.add_child(both, wide)?;
+    tree.layout()?;
+    tree.set_scroll_offset(both, 40.0, 40.0)?;
+    let mut drivers = DriverSet::new();
+    let both_id = drivers.scroll_create();
+    assert!(drivers.scroll_bind(both_id, Some(both), Some(wide), &tree));
+    assert!(drivers.scroll_configure(both_id, 0.0, PullMode::Off, 64.0, false, 0.0, None));
+    let Some(sideways) = drivers.scroll_drag_by(both_id, &mut tree, 10.0, 0.0) else {
+        return Err(crate::Error::UnknownNode);
+    };
+    assert_eq!(sideways.overflow_x, 0.0);
+    let (x, y) = tree.scroll_offset(both)?;
+    assert!(x < 39.0 && x > 1.0, "both still scrolls x: {x}");
+    assert!((y - 40.0).abs() < 0.5, "y stayed {y}");
     Ok(())
 }

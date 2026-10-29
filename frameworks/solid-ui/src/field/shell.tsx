@@ -443,7 +443,7 @@ export function FieldShell(props: FieldProps): NodeHandle {
         >
           <opacity alpha={blocked() ? 102 : 255}>
             <padding edges={theme().space.l} w="100%">
-              <scroll>
+              <scroll axis={multiline() ? "vertical" : "horizontal"}>
                   <padding right={2}>
                     <stack>
                       <Text

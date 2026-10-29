@@ -189,8 +189,18 @@ impl Tree {
     ///
     /// The border box is the viewport. `set_scroll_offset` moves paint and hit
     /// testing only, so a scroll frame does not invalidate Taffy's layout cache.
+    /// The axis is [`crate::ScrollAxis::Both`].
     pub fn scroll(&mut self) -> Result<NodeId, Error> {
-        self.container(Kind::Scroll, scroll_style())
+        self.scroll_with(crate::ScrollAxis::Both)
+    }
+
+    /// [`Tree::scroll`] locked to `axis` from the start.
+    pub fn scroll_with(&mut self, axis: crate::ScrollAxis) -> Result<NodeId, Error> {
+        let id = self.container(Kind::Scroll, scroll_style())?;
+        if let Some(geom) = self.node_mut(id)?.scroll_mut() {
+            geom.axis = axis;
+        }
+        Ok(id)
     }
 
     /// A paint transform around the current origin. Layout ignores it.

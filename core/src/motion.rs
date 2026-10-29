@@ -184,6 +184,94 @@ pub struct SnapGrid {
     pub align: SnapAlign,
 }
 
+/// Which axes a scroll is allowed to move.
+///
+/// `Both` is the historical default: the larger pointer delta picks the axis.
+/// A declared axis never moves the other component.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ScrollAxis {
+    Vertical,
+    Horizontal,
+    #[default]
+    Both,
+}
+
+impl ScrollAxis {
+    pub fn allows_x(self) -> bool {
+        matches!(self, Self::Horizontal | Self::Both)
+    }
+
+    pub fn allows_y(self) -> bool {
+        matches!(self, Self::Vertical | Self::Both)
+    }
+
+    /// Scroll and overscroll motions. Other props are not scroll axes.
+    pub fn allows(self, prop: AnimProp) -> bool {
+        match prop {
+            AnimProp::ScrollX | AnimProp::OverscrollX => self.allows_x(),
+            AnimProp::ScrollY | AnimProp::OverscrollY => self.allows_y(),
+            _ => false,
+        }
+    }
+
+    /// Drops the component this axis does not scroll.
+    pub fn filter(self, x: f32, y: f32) -> (f32, f32) {
+        (
+            if self.allows_x() { x } else { 0.0 },
+            if self.allows_y() { y } else { 0.0 },
+        )
+    }
+
+    /// `0` both, `1` vertical, `2` horizontal. Anything else is both.
+    pub fn from_code(code: i32) -> Self {
+        match code {
+            1 => Self::Vertical,
+            2 => Self::Horizontal,
+            _ => Self::Both,
+        }
+    }
+
+    pub fn code(self) -> i32 {
+        match self {
+            Self::Both => 0,
+            Self::Vertical => 1,
+            Self::Horizontal => 2,
+        }
+    }
+}
+
+/// Whether a drag on the declared axis is claimed.
+///
+/// `Content` needs room in the drag direction. `Always` claims even at the
+/// edge, so rubber-band and refresh can run. `Never` leaves the drag for an
+/// ancestor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ScrollAccept {
+    #[default]
+    Content,
+    Always,
+    Never,
+}
+
+impl ScrollAccept {
+    /// `0` content, `1` always, `2` never. Anything else is content.
+    pub fn from_code(code: i32) -> Self {
+        match code {
+            1 => Self::Always,
+            2 => Self::Never,
+            _ => Self::Content,
+        }
+    }
+
+    pub fn code(self) -> i32 {
+        match self {
+            Self::Content => 0,
+            Self::Always => 1,
+            Self::Never => 2,
+        }
+    }
+}
+
 /// Per-scroll motion parameters. Defaults match the historical constants.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScrollPhysics {
@@ -194,6 +282,7 @@ pub struct ScrollPhysics {
     pub overscroll_factor: f32,
     pub snap_x: Option<SnapGrid>,
     pub snap_y: Option<SnapGrid>,
+    pub accept: ScrollAccept,
 }
 
 impl Default for ScrollPhysics {
@@ -206,6 +295,7 @@ impl Default for ScrollPhysics {
             overscroll_factor: OVERSCROLL_FACTOR,
             snap_x: None,
             snap_y: None,
+            accept: ScrollAccept::Content,
         }
     }
 }

@@ -29,7 +29,8 @@ export interface CoreHost {
   decorated(color: number[], radius: number): NodeHandle;
   clip(radius: number): NodeHandle;
   opacity(alpha: number): NodeHandle;
-  scroll(): NodeHandle;
+  /** `0` both, `1` vertical, `2` horizontal. Omitted is both. */
+  scroll(axis?: number): NodeHandle;
   transform(): NodeHandle;
   image(source: string, width: number, height: number, mode?: string, required?: boolean): NodeHandle;
   setImageMode(node: NodeHandle, mode: string, required: boolean): void;
@@ -77,6 +78,8 @@ export interface CoreHost {
   setLineHeight(node: NodeHandle, height: number): void;
   setFamily(node: NodeHandle, family: string): void;
   setScrollOffset(node: NodeHandle, x: number, y: number): void;
+  /** `0` both, `1` vertical, `2` horizontal. */
+  setScrollAxis(node: NodeHandle, axis: number): void;
   overscroll(node: NodeHandle): { x: number; y: number };
   setScrollPhysics(
     node: NodeHandle,
@@ -89,6 +92,8 @@ export interface CoreHost {
     alignX: number,
     snapY: number,
     alignY: number,
+    /** `0` content, `1` always, `2` never. Omitted is content. */
+    accept?: number,
   ): void;
   setScrollChain(node: NodeHandle, chain: boolean): void;
   fling(node: NodeHandle, vx: number, vy: number): void;

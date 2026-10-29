@@ -66,7 +66,7 @@ struct QjsFns {
     set_text_direction: unsafe extern "C" fn(*mut c_void, u64, i32) -> i32,
     set_line_height: unsafe extern "C" fn(*mut c_void, u64, f32) -> i32,
     set_family: unsafe extern "C" fn(*mut c_void, u64, *const c_char, usize) -> i32,
-    scroll: unsafe extern "C" fn(*mut c_void, *mut u64) -> i32,
+    scroll: unsafe extern "C" fn(*mut c_void, i32, *mut u64) -> i32,
     set_scroll_offset: unsafe extern "C" fn(*mut c_void, u64, f32, f32) -> i32,
     scroll_offset: unsafe extern "C" fn(*mut c_void, u64, *mut f32, *mut f32) -> i32,
     rect: unsafe extern "C" fn(*mut c_void, u64, *mut f32, *mut f32, *mut f32, *mut f32) -> i32,
@@ -253,8 +253,20 @@ struct QjsFns {
     align: unsafe extern "C" fn(*mut c_void, u32, *mut u64) -> i32,
     set_cross: unsafe extern "C" fn(*mut c_void, u64, u32) -> i32,
     viewport: unsafe extern "C" fn(*mut c_void, *mut f32, *mut f32) -> i32,
-    set_scroll_physics:
-        unsafe extern "C" fn(*mut c_void, u64, f32, i32, f32, f32, f32, f32, i32, f32, i32) -> i32,
+    set_scroll_physics: unsafe extern "C" fn(
+        *mut c_void,
+        u64,
+        f32,
+        i32,
+        f32,
+        f32,
+        f32,
+        f32,
+        i32,
+        f32,
+        i32,
+        i32,
+    ) -> i32,
     set_scroll_chain: unsafe extern "C" fn(*mut c_void, u64, i32) -> i32,
     overscroll: unsafe extern "C" fn(*mut c_void, u64, *mut f32, *mut f32) -> i32,
     arm_fling: unsafe extern "C" fn(*mut c_void, u64, f32, f32) -> i32,
@@ -298,6 +310,7 @@ struct QjsFns {
     scroll_wheel: unsafe extern "C" fn(*mut c_void, u32, u32, f32, f32) -> i32,
     scroll_query: unsafe extern "C" fn(*mut c_void, u32, u32, i32, *mut f32, *mut f32) -> i32,
     scroll_consume: unsafe extern "C" fn(*mut c_void, u32, u32, f32, f32) -> i32,
+    set_scroll_axis: unsafe extern "C" fn(*mut c_void, u64, i32) -> i32,
 }
 
 unsafe extern "C" {
@@ -923,6 +936,7 @@ impl JsSession {
             scroll_wheel: driver::scroll_wheel,
             scroll_query: driver::scroll_query,
             scroll_consume: driver::scroll_consume,
+            set_scroll_axis,
         };
         // SAFETY: `inner` stays at this address until `Drop`. `qjs_open` copies
         // the function table. The copied session pointer is only used while
@@ -2183,9 +2197,25 @@ unsafe extern "C" fn set_family(
     )
 }
 
-unsafe extern "C" fn scroll(session: *mut c_void, out: *mut u64) -> i32 {
+unsafe extern "C" fn scroll(session: *mut c_void, axis: i32, out: *mut u64) -> i32 {
     let inner = unsafe { inner(session) };
-    created(inner.tree.borrow_mut().scroll(), out)
+    created(
+        inner
+            .tree
+            .borrow_mut()
+            .scroll_with(ui_core::ScrollAxis::from_code(axis)),
+        out,
+    )
+}
+
+unsafe extern "C" fn set_scroll_axis(session: *mut c_void, node: u64, axis: i32) -> i32 {
+    let inner = unsafe { inner(session) };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_scroll_axis(NodeId::from_raw(node), ui_core::ScrollAxis::from_code(axis)),
+    )
 }
 
 unsafe extern "C" fn set_scroll_offset(session: *mut c_void, node: u64, dx: f32, dy: f32) -> i32 {
@@ -2443,6 +2473,7 @@ unsafe extern "C" fn set_scroll_physics(
     align_x: i32,
     snap_y: f32,
     align_y: i32,
+    accept: i32,
 ) -> i32 {
     let inner = unsafe { inner(session) };
     let physics = ui_core::ScrollPhysics {
@@ -2457,6 +2488,7 @@ unsafe extern "C" fn set_scroll_physics(
         overscroll_factor: factor,
         snap_x: snap_grid(snap_x, align_x),
         snap_y: snap_grid(snap_y, align_y),
+        accept: ui_core::ScrollAccept::from_code(accept),
     };
     status(
         inner

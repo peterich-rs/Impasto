@@ -175,7 +175,17 @@ function ListPage(_props: { params: RouteParams }) {
             >
               {refreshed() === 0 ? "下拉刷新" : `已刷新 ${refreshed()}`}
             </Text>
-            <ScrollArea physics={{ snapX: { interval: 72, align: "start" }, overscroll: "clamp" }}>
+            <Text
+              fontSize={theme().typography.caption.size}
+              color={theme().color.textMuted}
+              direction={directionFor(theme().locale)}
+            >
+              横向分页
+            </Text>
+            <ScrollArea
+              axis="horizontal"
+              physics={{ snapX: { interval: 72, align: "start" }, overscroll: "clamp" }}
+            >
               <row gap={8}>
                 <sized w={72} h={36} />
                 <sized w={72} h={36} />

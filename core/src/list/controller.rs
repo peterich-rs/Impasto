@@ -72,6 +72,7 @@ pub struct ScrollController {
     armed: bool,
     pending: Option<PendingDrag>,
     pub parent: Option<ParentLink>,
+    axis: crate::ScrollAxis,
 }
 
 impl Default for ScrollController {
@@ -99,6 +100,7 @@ impl Default for ScrollController {
             armed: false,
             pending: None,
             parent: None,
+            axis: crate::ScrollAxis::Both,
         }
     }
 }
@@ -145,6 +147,7 @@ impl ScrollController {
             .max(0.0)
             .max(self.content_min - self.view_h)
             .max(0.0);
+        self.apply_axis_limits();
     }
 
     pub fn limits(&self) -> (f32, f32) {
@@ -165,11 +168,23 @@ impl ScrollController {
             self.body_w = body.w;
             self.body_h = body.h;
         }
+        if let Some(id) = self.viewport {
+            self.axis = tree.scroll_axis(id).unwrap_or(crate::ScrollAxis::Both);
+        }
         self.limits_x = (self.body_w - self.view_w).max(0.0);
         self.limits_y = (self.body_h - self.view_h)
             .max(0.0)
             .max(self.content_min - self.view_h)
             .max(0.0);
+        self.apply_axis_limits();
+    }
+
+    /// A declared axis drops its cross component. `Both` with a zero limit still
+    /// reports that component as overflow so a parent can take it.
+    fn apply_axis_limits(&mut self) {
+        let (x, y) = self.axis.filter(self.limits_x, self.limits_y);
+        self.limits_x = x;
+        self.limits_y = y;
     }
 
     fn clamp_pair(&self, x: f32, y: f32) -> (f32, f32) {
@@ -194,6 +209,7 @@ impl ScrollController {
     /// `true` when an overscroll refresh should commit.
     pub fn drag_by(&mut self, tree: &mut Tree, dx: f32, dy: f32) -> DragStep {
         self.refresh_boxes(tree);
+        let (dx, dy) = self.axis.filter(dx, dy);
         let (live_x, live_y) = self.live(tree);
         if !self.tracking {
             self.tracking = true;
@@ -272,6 +288,7 @@ impl ScrollController {
 
     pub fn wheel(&mut self, tree: &mut Tree, dx: f32, dy: f32) {
         self.refresh_boxes(tree);
+        let (dx, dy) = self.axis.filter(dx, dy);
         let (x, y) = self.live(tree);
         self.write_offset(tree, x + dx, y + dy, true);
     }
@@ -296,10 +313,11 @@ impl ScrollController {
 
     /// Nested remainder. Returns whether this scroll moved.
     pub fn consume(&mut self, tree: &mut Tree, overflow_x: f32, overflow_y: f32) -> bool {
+        self.refresh_boxes(tree);
+        let (overflow_x, overflow_y) = self.axis.filter(overflow_x, overflow_y);
         if overflow_x == 0.0 && overflow_y == 0.0 {
             return false;
         }
-        self.refresh_boxes(tree);
         let Some(id) = self.viewport else {
             return false;
         };
