@@ -106,15 +106,6 @@ public final class HostView extends FrameLayout {
         });
     }
 
-    public void setClipboard(String text) {
-        runOnUi(() -> {
-            ClipboardManager manager = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
-            if (manager != null) {
-                manager.setPrimaryClip(ClipData.newPlainText("uifw", text == null ? "" : text));
-            }
-        });
-    }
-
     public String documentDirectory() {
         return getContext().getFilesDir().getAbsolutePath();
     }

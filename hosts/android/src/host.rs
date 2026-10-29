@@ -87,19 +87,6 @@ impl Bridge {
         });
     }
 
-    fn write_clipboard_text(&self, text: &str) {
-        self.call(|env| {
-            let text = env.new_string(text)?;
-            env.call_method(
-                self.view.as_obj(),
-                jni::jni_str!("setClipboard"),
-                jni::jni_sig!("(Ljava/lang/String;)V"),
-                &[jni::objects::JValue::Object(&text)],
-            )?;
-            Ok(())
-        });
-    }
-
     fn write_clipboard_now(&self, text: &str) {
         self.call(|env| {
             let text = env.new_string(text)?;
@@ -391,10 +378,6 @@ impl Services for Shared {
 
     fn request_exit(&self) {
         self.0.finish();
-    }
-
-    fn set_clipboard(&self, text: &str) {
-        self.0.write_clipboard_text(text);
     }
 
     fn extra_fonts(&self) -> Vec<(String, Vec<u8>)> {

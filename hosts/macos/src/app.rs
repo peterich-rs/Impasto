@@ -854,11 +854,6 @@ impl Services for MacServices {
         }
     }
 
-    fn set_clipboard(&self, text: &str) {
-        let text = text.to_owned();
-        dispatch_main(Box::new(move || write_pasteboard(&text)));
-    }
-
     fn apply_ime(&self, update: &session::ImeUpdate) {
         let view = self.ime_view.load(Ordering::Acquire) as usize;
         if view == 0 {

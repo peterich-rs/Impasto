@@ -77,8 +77,6 @@ pub trait Services: Send {
     fn apply_ime(&self, update: &session::ImeUpdate);
     /// The session wants the process to leave. The default does nothing.
     fn request_exit(&self) {}
-    /// Writes text to the platform clipboard. The default drops it.
-    fn set_clipboard(&self, _text: &str) {}
     /// Extra font files registered after the primary family. The default is empty.
     fn extra_fonts(&self) -> Vec<(String, Vec<u8>)> {
         Vec::new()

@@ -293,7 +293,7 @@ Android 的 `uifw-surface-drop` 在 `DropWait` 上等到 `Acks::signal`，然后
 
 字体按注册名取字节，启动时交给 `register_font`。`UIFWSans` 和 `UIFWSansCJK` 是启动时的两张脸。脚本 `registerFont` 把字节放进会话队列，渲染线程在 `submit` 之前 `take_fonts` 再 `register_font`。同名替换字节。新名字加上已经交出的名字最多 8 个，那两张启动脸不占名额。失败只记 family 和状态，这一帧继续，缺的 family 退回第一次成功登记的脸。图片由 `ImageDecoder` 在 `uifw-io` 线程解码成紧排 RGBA，结果经 `Command::ImageReady` 回到渲染线程的 `ImageCache`。`submit` 只读这份缓存。必选缺图记一次日志并且这一帧不提交，已安装的显示列表留在引擎里。可选缺图跳过该命令。`https:` 图片在这条线程下载，正文最多 4 MiB，日志只记 scheme 和 host。脚本 `reload(source)` 把名字排进会话，渲染线程在读缓存之前排空。`reload_image` 删掉该键并再要一帧。日志从渲染线程调用：macOS 写 stderr，Android 写 logcat，iOS 写 `os_log`。`Services::semantics` 收到语义树后，宿主把它交给平台辅助功能。
 
-剪贴板已经是 `Services::set_clipboard`，由 `take_clipboard` 交出。触觉、系统音或打开 URL 再各加方法。不加字符串消息通道。
+编辑器 Copy / Cut 经 `take_clipboard` 交出文字，`hostshell` 在渲染线程上 `registry.call("Clipboard", "setString", …)`。Clipboard 未注册时记 `not linked`，不 panic。触觉、系统音再各加方法。不加字符串消息通道。
 
 ## 8. 资产
 
