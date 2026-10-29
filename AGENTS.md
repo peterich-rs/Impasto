@@ -227,12 +227,14 @@ just check
 
 `just check` 先 `cargo test --workspace`，再跑 Kotlin 的 `:library:jvmTest`，以及 Solid 的宿主树测试。它不会打开窗口。没有 quickjs-ng 源码时 QuickJS 测试走 `NotLinked`。有源码时会编译解释器并跑编译后的计数器。没有 SDK 时 `Engine` 返回 `NotLinked`，图形测试不编译；Kotlin 和 Solid 不需要 SDK。`just host` 需要 SDK。
 
-GitHub Actions 工作流是 `.github/workflows/check.yml`。它跑 `cargo fmt --all -- --check`、Linux 上的 `cargo test --workspace --exclude macos`、macOS 上的 `cargo test -p macos`，以及和 `just kotlin`、`just solid` 相同的检查。`macos` 这个 crate 只在 macOS 上编译。工作流不下载 Impeller SDK，也不下载 quickjs-ng，因此渲染引擎走 `NotLinked`，QuickJS 测试同样走 `NotLinked`。窗口、`just android` 和 `just solid-app` 不在这套检查里。
+GitHub Actions 工作流是 `.github/workflows/check.yml`。它跑 `cargo fmt --all -- --check`、Linux 上用 `RUSTFLAGS=-D warnings` 做 `cargo check --workspace --exclude macos`、Linux 上的 `cargo test --workspace --exclude macos`、macOS 上的 `cargo test -p macos`，以及和 `just kotlin`、`just solid` 相同的检查。`macos` 这个 crate 只在 macOS 上编译。工作流不下载 Impeller SDK，也不下载 quickjs-ng，因此渲染引擎走 `NotLinked`，QuickJS 测试同样走 `NotLinked`。工作流不装 crapper 和 dryer。窗口、`just android` 和 `just solid-app` 不在这套检查里。
 
 | 命令 | 作用 |
 |---|---|
 | `just check` | `cargo test`，然后 Kotlin 和 Solid。不启动 GUI |
 | `just test` | `cargo test --workspace` |
+| `just quality` | crapper、dryer，再用 `-D warnings` 做 `cargo check --workspace`。需要本机有 crapper 和 dryer；CRAP 读 `just coverage` 写下的 LCOV |
+| `just coverage` | `cargo llvm-cov` 把 LCOV 写到 `target/coverage/rust/lcov.info` |
 | `just kotlin` | Kotlin `:library:jvmTest` |
 | `just solid` | renderer、net、i18n，以及 solid-router、form、solid-ui 的单测 |
 | `just solid-app` | 安装依赖，重编 `dist/counter.js` 和 `dist/counter.esm.js`，再用 mock host 跑渲染 |

@@ -15,6 +15,17 @@ bench:
 test:
     cargo test --manifest-path "{{root}}/Cargo.toml" --workspace
 
+# CRAP and duplicate-form reports for the native product crates, then a
+# warning-free cargo check. crapper and dryer must be on PATH. CRAP reads
+# whatever `just coverage` last wrote; it does not rerun tests.
+quality:
+    crapper --use-existing-coverage protocol core engine session hosts/hostshell
+    dryer --threshold 0.8 protocol/src core/src engine/src session/src
+    RUSTFLAGS="-D warnings" cargo check --manifest-path "{{root}}/Cargo.toml" --workspace
+
+coverage:
+    cargo llvm-cov --manifest-path "{{root}}/Cargo.toml" --lcov --output-path "{{root}}/target/coverage/rust/lcov.info" --workspace
+
 kotlin:
     "{{root}}/frameworks/kotlin-ui/gradlew" -p "{{root}}/frameworks/kotlin-ui" :library:jvmTest
 

@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicBool;
 
 use protocol::Command;
 use session::{HttpError, HttpResponse, InputEvent, IoJob, Key, Metrics, PluginResult, Session};
-use ui_core::{Affinity, FocusDirection, Modifiers, NodeId, Rect, Shaper, Tree};
+use ui_core::{Affinity, FocusDirection, NodeId, Rect, Shaper, Tree};
 
 use crate::Error;
 
