@@ -140,6 +140,13 @@ typedef struct QjsFns {
     int (*set_reverse)(void *session, uint64_t node, int reverse);
     int (*set_axis_size)(void *session, uint64_t node, int width_tag, float width, int height_tag,
                          float height);
+    int (*set_min_axis)(void *session, uint64_t node, int width_tag, float width, int height_tag,
+                        float height);
+    int (*set_max_axis)(void *session, uint64_t node, int width_tag, float width, int height_tag,
+                        float height);
+    int (*measure_panel)(void *session, uint64_t node, int mode, float width, float height,
+                         float *out_w, float *out_h);
+    int (*set_panel)(void *session, uint64_t node);
     int (*set_aspect_ratio)(void *session, uint64_t node, int present, float ratio);
     int (*set_position)(void *session, uint64_t node, int absolute);
     int (*set_inset)(void *session, uint64_t node, int top_auto, float top, int right_auto, float right,
@@ -1734,6 +1741,90 @@ static JSValue js_set_axis_size(JSContext *ctx, JSValueConst this_val, int argc,
     return done(ctx,
                 host->fns.set_axis_size(host->fns.session, node, width_tag, width, height_tag, height),
                 "setAxisSize failed");
+}
+
+static JSValue js_set_min_axis(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 3) {
+        return throw_msg(ctx, "setMinAxis(node, width, height)");
+    }
+    uint64_t node = 0;
+    int width_tag = 0;
+    int height_tag = 0;
+    float width = 0;
+    float height = 0;
+    if (read_handle(ctx, argv[0], &node) || read_axis(ctx, argv[1], &width_tag, &width) ||
+        read_axis(ctx, argv[2], &height_tag, &height)) {
+        return JS_EXCEPTION;
+    }
+    return done(ctx,
+                host->fns.set_min_axis(host->fns.session, node, width_tag, width, height_tag, height),
+                "setMinAxis failed");
+}
+
+static JSValue js_set_max_axis(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 3) {
+        return throw_msg(ctx, "setMaxAxis(node, width, height)");
+    }
+    uint64_t node = 0;
+    int width_tag = 0;
+    int height_tag = 0;
+    float width = 0;
+    float height = 0;
+    if (read_handle(ctx, argv[0], &node) || read_axis(ctx, argv[1], &width_tag, &width) ||
+        read_axis(ctx, argv[2], &height_tag, &height)) {
+        return JS_EXCEPTION;
+    }
+    return done(ctx,
+                host->fns.set_max_axis(host->fns.session, node, width_tag, width, height_tag, height),
+                "setMaxAxis failed");
+}
+
+static JSValue js_set_panel(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "setPanel(node)");
+    }
+    uint64_t node = 0;
+    if (read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
+    return done(ctx, host->fns.set_panel(host->fns.session, node), "setPanel failed");
+}
+
+// measurePanel(node, mode, width, height) -> [w, h] or null.
+// mode 0 max-content, 1 capped-max (width is the cap), 2 definite (width, and
+// height unless NaN).
+static JSValue js_measure_panel(JSContext *ctx, JSValueConst this_val, int argc,
+                                JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 4) {
+        return throw_msg(ctx, "measurePanel(node, mode, width, height)");
+    }
+    uint64_t node = 0;
+    int32_t mode = 0;
+    double width = 0;
+    double height = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToInt32(ctx, &mode, argv[1]) ||
+        JS_ToFloat64(ctx, &width, argv[2]) || JS_ToFloat64(ctx, &height, argv[3])) {
+        return JS_EXCEPTION;
+    }
+    float out_w = 0;
+    float out_h = 0;
+    int status = host->fns.measure_panel(host->fns.session, node, mode, (float)width, (float)height,
+                                         &out_w, &out_h);
+    if (status != 0) {
+        return JS_NULL;
+    }
+    JSValue pair = JS_NewArray(ctx);
+    JS_DefinePropertyValueUint32(ctx, pair, 0, JS_NewFloat64(ctx, (double)out_w), JS_PROP_C_W_E);
+    JS_DefinePropertyValueUint32(ctx, pair, 1, JS_NewFloat64(ctx, (double)out_h), JS_PROP_C_W_E);
+    return pair;
 }
 
 static JSValue js_set_aspect_ratio(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -4569,6 +4660,10 @@ static int bind_core(Host *host) {
     failed |= bind_fn(ctx, core, "graphemeUnit", js_grapheme_unit, 2);
     failed |= bind_fn(ctx, core, "setReverse", js_set_reverse, 2);
     failed |= bind_fn(ctx, core, "setAxisSize", js_set_axis_size, 3);
+    failed |= bind_fn(ctx, core, "setMinAxis", js_set_min_axis, 3);
+    failed |= bind_fn(ctx, core, "setMaxAxis", js_set_max_axis, 3);
+    failed |= bind_fn(ctx, core, "setPanel", js_set_panel, 1);
+    failed |= bind_fn(ctx, core, "measurePanel", js_measure_panel, 4);
     failed |= bind_fn(ctx, core, "setAspectRatio", js_set_aspect_ratio, 2);
     failed |= bind_fn(ctx, core, "setPosition", js_set_position, 2);
     failed |= bind_fn(ctx, core, "setInset", js_set_inset, 5);

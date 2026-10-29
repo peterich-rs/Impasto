@@ -3,7 +3,7 @@
 use crate::tree::Affine;
 use crate::{
     AxisSize, Button, DragAxis, Edges, Gesture, MonoShaper, Phase, PointerEvent, PointerId,
-    RecognizerSet, Shaper, TrackSize, Tree,
+    RecognizerSet, Shaper, SubtreeSpace, TrackSize, Tree,
 };
 
 mod flex;

@@ -51,5 +51,6 @@ pub use text::{
 };
 pub use tree::{
     Alignment, AxisSize, Discarded, DragClaim, Edges, FocusDirection, Gesture, GridLine, Inset,
-    Justify, LayoutCause, LayoutTrace, NodeId, Rect, RowCrossAlign, ScrollEdge, TrackSize, Tree,
+    Justify, LayoutCause, LayoutTrace, NodeId, Rect, RowCrossAlign, ScrollEdge, SubtreeSpace,
+    TrackSize, Tree,
 };

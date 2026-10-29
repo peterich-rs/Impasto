@@ -182,6 +182,18 @@ impl Edges {
     }
 }
 
+/// Available space for a subtree measurement, the panel flavor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SubtreeSpace {
+    /// Natural size on both axes.
+    MaxContent,
+    /// Natural size, but when the width exceeds the cap, re-lay out with the
+    /// cap as a definite width.
+    CappedMax(f32),
+    /// A definite width; the height may stay natural.
+    Definite { width: f32, height: Option<f32> },
+}
+
 /// A main size written onto Taffy's `Style::size`.
 ///
 /// `Fraction(0.5)` is 50% of the parent. Values above 1 are allowed.

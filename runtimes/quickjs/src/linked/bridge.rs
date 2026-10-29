@@ -567,6 +567,11 @@ pub(super) fn grid_from_tag(tag: i32, value: i32) -> Result<GridLine, ui_core::E
     }
 }
 
+pub(super) unsafe extern "C" fn set_panel(session: *mut c_void, node: u64) -> i32 {
+    let inner = unsafe { inner(session) };
+    status(inner.tree.borrow_mut().set_panel(NodeId::from_raw(node)))
+}
+
 pub(super) unsafe extern "C" fn set_axis_size(
     session: *mut c_void,
     node: u64,
@@ -590,6 +595,93 @@ pub(super) unsafe extern "C" fn set_axis_size(
             .borrow_mut()
             .set_axis_size(NodeId::from_raw(node), width, height),
     )
+}
+
+pub(super) unsafe extern "C" fn set_min_axis(
+    session: *mut c_void,
+    node: u64,
+    width_tag: i32,
+    width: f32,
+    height_tag: i32,
+    height: f32,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    let Ok(width) = axis_from_tag(width_tag, width) else {
+        return -1;
+    };
+    let Ok(height) = axis_from_tag(height_tag, height) else {
+        return -1;
+    };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_min_axis(NodeId::from_raw(node), width, height),
+    )
+}
+
+pub(super) unsafe extern "C" fn set_max_axis(
+    session: *mut c_void,
+    node: u64,
+    width_tag: i32,
+    width: f32,
+    height_tag: i32,
+    height: f32,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    let Ok(width) = axis_from_tag(width_tag, width) else {
+        return -1;
+    };
+    let Ok(height) = axis_from_tag(height_tag, height) else {
+        return -1;
+    };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_max_axis(NodeId::from_raw(node), width, height),
+    )
+}
+
+/// `mode` 0 max-content, 1 capped-max, 2 definite width. `height` of `f32::NAN`
+/// under mode 2 leaves the height natural. Out parameters carry `(w, h)`.
+pub(super) unsafe extern "C" fn measure_panel(
+    session: *mut c_void,
+    node: u64,
+    mode: i32,
+    width: f32,
+    height: f32,
+    out_w: *mut f32,
+    out_h: *mut f32,
+) -> i32 {
+    if out_w.is_null() || out_h.is_null() {
+        return -1;
+    }
+    let space = match mode {
+        0 => ui_core::SubtreeSpace::MaxContent,
+        1 => ui_core::SubtreeSpace::CappedMax(width),
+        2 => ui_core::SubtreeSpace::Definite {
+            width,
+            height: (height.is_finite()).then_some(height),
+        },
+        _ => return -1,
+    };
+    let inner = unsafe { inner(session) };
+    // `set_panel` is a separate call so a caller can reuse a declared panel.
+    match inner
+        .tree
+        .borrow_mut()
+        .measure_panel(NodeId::from_raw(node), space)
+    {
+        Ok((w, h)) => {
+            unsafe {
+                *out_w = w;
+                *out_h = h;
+            }
+            0
+        }
+        Err(_) => -1,
+    }
 }
 
 pub(super) unsafe extern "C" fn set_aspect_ratio(

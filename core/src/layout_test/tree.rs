@@ -323,3 +323,61 @@ fn remove_then_discard_rejects_set_text() {
     tree.discard(label).unwrap();
     assert!(tree.set_text(label, "no").is_err());
 }
+
+#[test]
+fn a_panel_measures_its_natural_size_without_the_root() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 200.0, 100.0)?;
+    let root = tree.column(0.0)?;
+    let panel = tree.column(0.0)?;
+    let label = tree.text("menu", 10.0, [0, 0, 0, 255])?;
+    tree.add_child(panel, label)?;
+    tree.add_child(root, panel)?;
+    tree.layout()?;
+    tree.set_panel(panel)?;
+    let (w, h) = tree.measure_panel(panel, SubtreeSpace::MaxContent)?;
+    // Four clusters at half the font size: 4 * 5 = 20 wide, 10 tall.
+    assert!((w - 20.0).abs() < 0.5, "panel width {w}");
+    assert!((h - 10.0).abs() < 0.5, "panel height {h}");
+    // The measurement leaves the main tree clean: laying out again is a no-op.
+    assert!(tree.rect(root).is_ok());
+    Ok(())
+}
+
+#[test]
+fn a_capped_panel_remeasures_under_the_cap() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 400.0, 100.0)?;
+    let root = tree.column(0.0)?;
+    let panel = tree.column(0.0)?;
+    let label = tree.text("a much longer line of text", 10.0, [0, 0, 0, 255])?;
+    tree.add_child(panel, label)?;
+    tree.add_child(root, panel)?;
+    tree.layout()?;
+    tree.set_panel(panel)?;
+    // Natural width is 27 clusters * 5 = 135; the cap is 40, so the text
+    // wraps and the height grows past one line.
+    let (w, h) = tree.measure_panel(panel, SubtreeSpace::CappedMax(40.0))?;
+    assert!(w <= 40.5, "capped width {w}");
+    assert!(h > 10.0, "wrapped height {h}");
+    Ok(())
+}
+
+#[test]
+fn a_fraction_min_height_fills_half_the_parent() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 100.0, 100.0)?;
+    // The column needs a definite height of its own: a percentage min
+    // resolves against the parent's resolved size, and a content-sized
+    // column has none.
+    let root = tree.sized(100.0, 100.0)?;
+    let column = tree.column(0.0)?;
+    tree.add_child(root, column)?;
+    let block = tree.sized(50.0, 10.0)?;
+    tree.add_child(column, block)?;
+    tree.set_min_axis(block, AxisSize::Auto, AxisSize::Fraction(0.5))?;
+    tree.layout()?;
+    let height = tree.rect(block)?.h;
+    assert!((height - 50.0).abs() < 0.5, "min-height 50% gave {height}");
+    Ok(())
+}

@@ -200,6 +200,11 @@ pub(super) struct QjsFns {
     pub(super) grapheme_unit: unsafe extern "C" fn(*const c_char, usize, u32) -> u32,
     pub(super) set_reverse: unsafe extern "C" fn(*mut c_void, u64, i32) -> i32,
     pub(super) set_axis_size: unsafe extern "C" fn(*mut c_void, u64, i32, f32, i32, f32) -> i32,
+    pub(super) set_min_axis: unsafe extern "C" fn(*mut c_void, u64, i32, f32, i32, f32) -> i32,
+    pub(super) set_max_axis: unsafe extern "C" fn(*mut c_void, u64, i32, f32, i32, f32) -> i32,
+    pub(super) measure_panel:
+        unsafe extern "C" fn(*mut c_void, u64, i32, f32, f32, *mut f32, *mut f32) -> i32,
+    pub(super) set_panel: unsafe extern "C" fn(*mut c_void, u64) -> i32,
     pub(super) set_aspect_ratio: unsafe extern "C" fn(*mut c_void, u64, i32, f32) -> i32,
     pub(super) set_position: unsafe extern "C" fn(*mut c_void, u64, i32) -> i32,
     pub(super) set_inset:

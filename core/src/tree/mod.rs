@@ -15,7 +15,7 @@ pub(crate) use hit::Affine;
 pub use layout::{LayoutCause, LayoutTrace};
 pub use node::{
     Alignment, AxisSize, Discarded, DragClaim, Edges, FocusDirection, Gesture, GridLine, Inset,
-    Justify, NodeId, Rect, RowCrossAlign, ScrollEdge, TrackSize,
+    Justify, NodeId, Rect, RowCrossAlign, ScrollEdge, SubtreeSpace, TrackSize,
 };
 
 use crate::{AnimProp, Simulation};
