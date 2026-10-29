@@ -1,16 +1,25 @@
 import { transformAsync } from "@babel/core";
 import * as esbuild from "esbuild";
-import { copyFileSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
+const hostExternals = [
+  "@uifw/clipboard/host",
+  "@uifw/linking/host",
+  "@uifw/app-state/host",
+  "@uifw/file-system/host",
+  "@uifw/async-storage/host",
+  "@uifw/permissions/host",
+];
+
 const solid = {
   name: "solid-universal",
   setup(build) {
     build.onLoad({ filter: /\.tsx?$/ }, async (args) => {
-      if (args.path.endsWith(".d.ts")) {
+      if (args.path.endsWith(".d.ts") || args.path.endsWith(".gen.ts")) {
         return;
       }
       const source = readFileSync(args.path, "utf8");
@@ -33,7 +42,11 @@ const solid = {
       if (result?.code == null) {
         throw new Error(`babel produced no code for ${args.path}`);
       }
-      return { contents: result.code, loader: "js" };
+      const contents = result.code.replace(
+        /import\(\s*(["'])@uifw\/linking\1\s*\)/g,
+        'import("@uifw/linking/host").then((host) => ({ Linking: host }))',
+      );
+      return { contents, loader: "js" };
     });
   },
 };
@@ -43,13 +56,14 @@ const options = {
   entryPoints: ["counter.tsx"],
   outfile: "dist/counter.js",
   bundle: true,
-  format: "iife",
+  format: "esm",
   platform: "browser",
   conditions: ["browser"],
   target: "es2022",
   plugins: [solid],
   nodePaths: [join(here, "node_modules")],
   sourcemap: true,
+  external: hostExternals,
   define: {
     "process.env.NODE_ENV": '"production"',
   },
@@ -61,11 +75,4 @@ if (process.argv.includes("--watch")) {
   await ctx.watch();
 } else {
   await esbuild.build(options);
-  await esbuild.build({
-    ...options,
-    outfile: "dist/counter.esm.js",
-    format: "esm",
-    external: ["./util.js"],
-  });
-  copyFileSync(join(here, "util.js"), join(here, "dist/util.js"));
 }

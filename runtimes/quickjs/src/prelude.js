@@ -3,7 +3,6 @@
 
   var bridge = global.__uifw;
   var sockets = new Map();
-  var modules = new Map();
 
   function AbortSignal() {
     this.aborted = false;
@@ -535,18 +534,6 @@
     }
   };
 
-  function getModule(name) {
-    if (modules.has(name)) {
-      return modules.get(name);
-    }
-    var created = bridge.module(name);
-    if (!created) {
-      return null;
-    }
-    modules.set(name, created);
-    return created;
-  }
-
   global.AbortController = AbortController;
   global.AbortSignal = AbortSignal;
   global.TextEncoder = TextEncoder;
@@ -559,14 +546,4 @@
   global.fetch = fetch;
   global.fetchStream = fetchStream;
   global.WebSocket = WebSocket;
-  global.TurboModuleRegistry = {
-    get: getModule,
-    getEnforcing: function (name) {
-      var mod = getModule(name);
-      if (!mod) {
-        throw new Error("module \"" + name + "\" is not linked");
-      }
-      return mod;
-    },
-  };
 })(globalThis);

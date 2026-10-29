@@ -5,6 +5,7 @@ mod command;
 mod error;
 mod exec;
 mod files;
+mod host_stubs;
 mod http;
 mod images;
 mod ime;
@@ -28,6 +29,9 @@ use session::Metrics;
 pub use command::{Command, FrameToken, SurfaceId, SurfaceTarget};
 pub use error::{BootError, LogLevel, SessionError};
 pub use exec::{MainThreadPoster, RtExec, settle_factory};
+pub use host_stubs::{
+    first_party_modules, host_stub_path, host_stub_source, package_folder, write_host_stubs,
+};
 pub use http::{OpenWireClient, http_client};
 pub use images::{ImageDecoder, ImageError, ImageHandle, ImageReady};
 pub use modules::{
@@ -73,8 +77,6 @@ pub trait Services: Send {
     fn apply_ime(&self, update: &session::ImeUpdate);
     /// The session wants the process to leave. The default does nothing.
     fn request_exit(&self) {}
-    /// Writes text to the platform clipboard. The default drops it.
-    fn set_clipboard(&self, _text: &str) {}
     /// Extra font files registered after the primary family. The default is empty.
     fn extra_fonts(&self) -> Vec<(String, Vec<u8>)> {
         Vec::new()
@@ -99,6 +101,7 @@ pub struct Boot {
     pub decoder: Arc<dyn ImageDecoder>,
     pub modules: Vec<session::HostModule>,
     pub main_thread: Option<MainThreadPoster>,
+    /// Written before `start` so `Linking.getInitialURL` is visible during eval.
     pub launch_url: session::Shared<Option<String>>,
     /// Absent HTTP fails with `network is not linked`. Hosts inject [`http_client`].
     pub http: Option<Arc<dyn session::HttpClient>>,

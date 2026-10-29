@@ -7,7 +7,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@uifw/modules": "file:../modules",
+    "@uifw/linking": "file:../linking",
     "@uifw/solid-renderer": "file:../solid-renderer",
     "solid-js": "2.0.0-rc.17"
   }

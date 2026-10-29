@@ -700,20 +700,6 @@ static JSValue js_host_method(JSContext *ctx, JSValueConst this_val, int argc, J
     return result;
 }
 
-static JSValue js_current_state(JSContext *ctx, JSValueConst this_val, int argc,
-                                JSValueConst *argv) {
-    (void)this_val;
-    (void)argc;
-    (void)argv;
-    Host *host = host_of(ctx);
-    if (!host) {
-        return JS_EXCEPTION;
-    }
-    const char *name = "AppState";
-    const char *method = "getCurrentState";
-    return call_host_method(host, name, strlen(name), method, strlen(method), 0, NULL);
-}
-
 static char *dup_text(const char *text, size_t len) {
     char *copy = malloc(len + 1);
     if (!copy) {
@@ -724,18 +710,16 @@ static char *dup_text(const char *text, size_t len) {
     return copy;
 }
 
-static JSValue js_module_listen(JSContext *ctx, JSValueConst this_val, int argc,
-                                JSValueConst *argv, int remove) {
+static JSValue js_module_listen(JSContext *ctx, JSValueConst module, int argc, JSValueConst *argv,
+                                int remove) {
     Host *host = host_of(ctx);
     if (!host || argc < 2 || !JS_IsString(argv[0]) || !JS_IsFunction(ctx, argv[1])) {
         return JS_UNDEFINED;
     }
-    JSValue module = JS_GetPropertyStr(ctx, this_val, "__module");
     size_t module_len = 0;
     size_t event_len = 0;
     const char *module_text = JS_ToCStringLen(ctx, &module_len, module);
     const char *event_text = JS_ToCStringLen(ctx, &event_len, argv[0]);
-    JS_FreeValue(ctx, module);
     if (!module_text || !event_text) {
         if (module_text) {
             JS_FreeCString(ctx, module_text);
@@ -791,69 +775,136 @@ static JSValue js_module_listen(JSContext *ctx, JSValueConst this_val, int argc,
     return JS_UNDEFINED;
 }
 
-static JSValue js_module_add(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    return js_module_listen(ctx, this_val, argc, argv, 0);
-}
-
-static JSValue js_module_remove(JSContext *ctx, JSValueConst this_val, int argc,
-                                JSValueConst *argv) {
-    return js_module_listen(ctx, this_val, argc, argv, 1);
-}
-
-static JSValue js_host_module(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+static JSValue js_module_add_data(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv,
+                                  int magic, JSValueConst *func_data) {
     (void)this_val;
+    (void)magic;
+    if (!func_data) {
+        return JS_UNDEFINED;
+    }
+    return js_module_listen(ctx, func_data[0], argc, argv, 0);
+}
+
+static JSValue js_module_remove_data(JSContext *ctx, JSValueConst this_val, int argc,
+                                     JSValueConst *argv, int magic, JSValueConst *func_data) {
+    (void)this_val;
+    (void)magic;
+    if (!func_data) {
+        return JS_UNDEFINED;
+    }
+    return js_module_listen(ctx, func_data[0], argc, argv, 1);
+}
+
+static int export_host_method(JSContext *ctx, JSModuleDef *m, JSValueConst *data, const char *method,
+                              size_t method_len) {
+    char *method_name = dup_text(method, method_len);
+    if (!method_name) {
+        JS_ThrowOutOfMemory(ctx);
+        return -1;
+    }
+    data[1] = JS_NewStringLen(ctx, method, method_len);
+    JSValue fn = JS_NewCFunctionData(ctx, js_host_method, 0, 0, 2, data);
+    int failed = JS_SetModuleExport(ctx, m, method_name, fn);
+    JS_FreeValue(ctx, data[1]);
+    free(method_name);
+    return failed;
+}
+
+static int js_host_module_init(JSContext *ctx, JSModuleDef *m) {
     Host *host = host_of(ctx);
-    if (!host || argc < 1 || !host->fns.module_has) {
-        return JS_NULL;
+    JSAtom atom = JS_GetModuleName(ctx, m);
+    const char *specifier = JS_AtomToCString(ctx, atom);
+    JS_FreeAtom(ctx, atom);
+    if (!host || !specifier || !host->fns.module_count || !host->fns.module_method_at) {
+        if (specifier) {
+            JS_FreeCString(ctx, specifier);
+        }
+        return -1;
     }
+    JSValue name_val = JS_GetModulePrivateValue(ctx, m);
     size_t name_len = 0;
-    const char *name = JS_ToCStringLen(ctx, &name_len, argv[0]);
-    if (!name) {
-        return JS_EXCEPTION;
-    }
-    if (!host->fns.module_has(host->fns.session, name, name_len)) {
-        JS_FreeCString(ctx, name);
-        return JS_NULL;
-    }
-    JSValue object = JS_NewObject(ctx);
-    JS_DefinePropertyValueStr(ctx, object, "__module", JS_NewStringLen(ctx, name, name_len),
-                              JS_PROP_CONFIGURABLE);
-    if (strcmp(name, "AppState") == 0) {
-        JSAtom atom = JS_NewAtom(ctx, "currentState");
-        JSValue getter = JS_NewCFunction(ctx, js_current_state, "currentState", 0);
-        JS_DefinePropertyGetSet(ctx, object, atom, getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE);
-        JS_FreeAtom(ctx, atom);
+    const char *mod_name = JS_ToCStringLen(ctx, &name_len, name_val);
+    JS_FreeValue(ctx, name_val);
+    if (!mod_name) {
+        JS_FreeCString(ctx, specifier);
+        return -1;
     }
     JSValue data[2];
-    data[0] = JS_NewStringLen(ctx, name, name_len);
-    if (host->fns.module_count && host->fns.module_method_at) {
-        int count = host->fns.module_count(host->fns.session, name, name_len);
-        for (int index = 0; index < count; index++) {
-            size_t method_len = 0;
-            const char *method =
-                host->fns.module_method_at(host->fns.session, name, name_len, index, &method_len);
-            if (!method) {
-                continue;
-            }
-            data[1] = JS_NewStringLen(ctx, method, method_len);
-            JSValue fn = JS_NewCFunctionData(ctx, js_host_method, 0, 0, 2, data);
-            char *method_name = dup_text(method, method_len);
-            if (method_name) {
-                JS_DefinePropertyValueStr(ctx, object, method_name, fn, JS_PROP_CONFIGURABLE);
-                free(method_name);
-            } else {
-                JS_FreeValue(ctx, fn);
-            }
-            JS_FreeValue(ctx, data[1]);
+    data[0] = JS_NewStringLen(ctx, mod_name, name_len);
+    int count = host->fns.module_count(host->fns.session, specifier, strlen(specifier));
+    int failed = 0;
+    for (int index = 0; index < count && !failed; index++) {
+        size_t method_len = 0;
+        const char *method =
+            host->fns.module_method_at(host->fns.session, specifier, strlen(specifier), index,
+                                       &method_len);
+        if (!method) {
+            continue;
+        }
+        failed = export_host_method(ctx, m, data, method, method_len);
+    }
+    if (!failed) {
+        JSValue listen[1];
+        listen[0] = data[0];
+        failed = JS_SetModuleExport(ctx, m, "addEventListener",
+                                    JS_NewCFunctionData(ctx, js_module_add_data, 2, 0, 1, listen));
+        if (!failed) {
+            failed = JS_SetModuleExport(
+                ctx, m, "removeEventListener",
+                JS_NewCFunctionData(ctx, js_module_remove_data, 2, 0, 1, listen));
         }
     }
     JS_FreeValue(ctx, data[0]);
-    JS_SetPropertyStr(ctx, object, "addEventListener",
-                      JS_NewCFunction(ctx, js_module_add, "addEventListener", 2));
-    JS_SetPropertyStr(ctx, object, "removeEventListener",
-                      JS_NewCFunction(ctx, js_module_remove, "removeEventListener", 2));
-    JS_FreeCString(ctx, name);
-    return object;
+    JS_FreeCString(ctx, specifier);
+    JS_FreeCString(ctx, mod_name);
+    return failed;
+}
+
+static JSModuleDef *load_host_module(JSContext *ctx, Host *host, const char *name) {
+    if (!host->fns.module_count || !host->fns.module_method_at || !host->fns.module_name_of) {
+        JS_ThrowReferenceError(ctx, "module '%s' is not linked", name);
+        return NULL;
+    }
+    size_t name_len = strlen(name);
+    int count = host->fns.module_count(host->fns.session, name, name_len);
+    if (count < 0) {
+        JS_ThrowReferenceError(ctx, "module '%s' is not linked", name);
+        return NULL;
+    }
+    size_t host_len = 0;
+    const char *host_name = host->fns.module_name_of(host->fns.session, name, name_len, &host_len);
+    if (!host_name) {
+        JS_ThrowReferenceError(ctx, "module '%s' is not linked", name);
+        return NULL;
+    }
+    JSModuleDef *m = JS_NewCModule(ctx, name, js_host_module_init);
+    if (!m) {
+        return NULL;
+    }
+    JS_SetModulePrivateValue(ctx, m, JS_NewStringLen(ctx, host_name, host_len));
+    for (int index = 0; index < count; index++) {
+        size_t method_len = 0;
+        const char *method =
+            host->fns.module_method_at(host->fns.session, name, name_len, index, &method_len);
+        if (!method) {
+            continue;
+        }
+        char *method_name = dup_text(method, method_len);
+        if (!method_name) {
+            JS_ThrowOutOfMemory(ctx);
+            return NULL;
+        }
+        if (JS_AddModuleExport(ctx, m, method_name)) {
+            free(method_name);
+            return NULL;
+        }
+        free(method_name);
+    }
+    if (JS_AddModuleExport(ctx, m, "addEventListener") ||
+        JS_AddModuleExport(ctx, m, "removeEventListener")) {
+        return NULL;
+    }
+    return m;
 }
 
 static JSValue js_socket_open(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -953,7 +1004,6 @@ static int bind_host_globals(Host *host) {
     failed |= bind_fn(ctx, bridge, "httpStream", js_http_stream, 4);
     failed |= bind_fn(ctx, bridge, "abort", js_abort, 1);
     failed |= bind_fn(ctx, bridge, "hasModule", js_has_module, 1);
-    failed |= bind_fn(ctx, bridge, "module", js_host_module, 1);
     failed |= bind_fn(ctx, bridge, "socketOpen", js_socket_open, 1);
     failed |= bind_fn(ctx, bridge, "socketSend", js_socket_send, 2);
     failed |= bind_fn(ctx, bridge, "socketClose", js_socket_close, 1);

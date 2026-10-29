@@ -336,6 +336,7 @@ struct Runtime {
     typography: Rc<RefCell<engine::Typography>>,
     log: Rc<dyn Fn(LogLevel, &str)>,
     session: Option<Box<dyn session::Session>>,
+    registry: Arc<session::ModuleRegistry>,
     latest: Option<Arc<protocol::LayerTree>>,
     input: Input,
     surfaces: SurfaceHost,
@@ -405,8 +406,9 @@ fn render(
     let launch_url = boot.launch_url.clone();
     let mut modules = vec![crate::modules::app_state(Arc::clone(&app_state))];
     modules.extend(boot.modules);
+    let registry = Arc::new(session::ModuleRegistry::new(modules));
     let host = session::HostConfig {
-        registry: Arc::new(session::ModuleRegistry::new(modules)),
+        registry: Arc::clone(&registry),
         exec: Arc::new(crate::RtExec {
             rt,
             main: boot.main_thread.clone(),
@@ -447,6 +449,7 @@ fn render(
         engine,
         log,
         session,
+        registry,
         latest: None,
         input: Input::new(),
         surfaces: SurfaceHost::new(),
@@ -490,6 +493,7 @@ fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bo
         | Command::Settings(_)
         | Command::WindowFocus(_)
         | Command::SemanticsAction(_)
+        | Command::LaunchUrl(_)
         | Command::HttpDone { .. }
         | Command::HttpHead { .. }
         | Command::HttpChunk { .. }
@@ -607,7 +611,13 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                     layers_changed = true;
                 }
                 if let Some(text) = output.clipboard.take() {
-                    runtime.services.borrow().set_clipboard(&text);
+                    if let Err(message) = runtime.registry.call(
+                        "Clipboard",
+                        "setString",
+                        &[session::PluginValue::Str(text)],
+                    ) {
+                        (runtime.log)(LogLevel::Error, &message);
+                    }
                 }
                 if let Some(update) = output.ime.take() {
                     crate::ime::publish_update(&update, &runtime.services);
@@ -1062,7 +1072,7 @@ mod tests {
     use crate::images::{ImageHandle, ImageReady};
     use crate::scheduler::FrameScheduler;
     use crate::surface::{SURFACE_OPEN_ATTEMPTS, SurfaceHost};
-    use crate::{LogLevel, NativePtr, Presented, Surface, Vsync};
+    use crate::{ClipboardHost, LogLevel, NativePtr, Presented, Surface, Vsync};
 
     #[test]
     fn a_rejected_font_is_logged_without_its_bytes() {
@@ -1164,6 +1174,8 @@ mod tests {
         io: Vec<IoEvent>,
         frames: Vec<FrameTime>,
         wants: bool,
+        launch_urls: Vec<String>,
+        clipboard: Option<String>,
     }
 
     struct MockSession {
@@ -1176,8 +1188,11 @@ mod tests {
         fn pointer(&mut self, _: ui_core::PointerEvent) {}
 
         fn frame(&mut self, time: FrameTime) -> FrameOutput {
-            self.log.borrow_mut().frames.push(time);
-            FrameOutput::unchanged()
+            let mut log = self.log.borrow_mut();
+            log.frames.push(time);
+            let mut output = FrameOutput::unchanged();
+            output.clipboard = log.clipboard.take();
+            output
         }
 
         fn wants_frame(&mut self) -> bool {
@@ -1186,6 +1201,10 @@ mod tests {
 
         fn io_event(&mut self, event: IoEvent) {
             self.log.borrow_mut().io.push(event);
+        }
+
+        fn set_launch_url(&mut self, url: &str) {
+            self.log.borrow_mut().launch_urls.push(url.to_owned());
         }
     }
 
@@ -1205,6 +1224,8 @@ mod tests {
                 io: Vec::new(),
                 frames: Vec::new(),
                 wants: false,
+                launch_urls: Vec::new(),
+                clipboard: None,
             }));
             let (image_tx, _image_rx) = mpsc::channel();
             let (wake_tx, _wake_rx) = mpsc::channel();
@@ -1216,6 +1237,7 @@ mod tests {
                 session: Some(Box::new(MockSession {
                     log: Rc::clone(&log),
                 })),
+                registry: Arc::new(session::ModuleRegistry::new(Vec::new())),
                 latest: None,
                 input: crate::input::Input::new(),
                 surfaces: SurfaceHost::new(),
@@ -1272,6 +1294,23 @@ mod tests {
             interval_ms: 16.0,
             mono_ms: 1.0,
         }
+    }
+
+    #[test]
+    fn launch_url_reaches_the_session() {
+        let mut harness = TestHarness::new();
+        assert!(!harness.command(Command::LaunchUrl("https://app.example/item".into())));
+        assert_eq!(
+            harness.session.borrow().launch_urls.as_slice(),
+            ["https://app.example/item"]
+        );
+    }
+
+    #[test]
+    fn empty_launch_url_does_not_reach_the_session() {
+        let mut harness = TestHarness::new();
+        assert!(!harness.command(Command::LaunchUrl(String::new())));
+        assert!(harness.session.borrow().launch_urls.is_empty());
     }
 
     #[test]
@@ -1437,6 +1476,7 @@ mod tests {
         assert!(harness.runtime.needs_present);
         assert!(!harness.command(Command::Settings(session::PlatformSettings::default())));
         assert!(!harness.command(Command::WindowFocus(true)));
+        assert!(!harness.command(Command::LaunchUrl("https://app.example/item".into())));
         assert!(!harness.command(Command::SemanticsAction(
             ui_core::SemanticsAction::Activate(ui_core::SemanticsId(1))
         )));
@@ -1480,6 +1520,47 @@ mod tests {
         };
         assert!(!harness.command(Command::Frame { token, time: now() }));
         assert_eq!(harness.frame_count(), 1);
+    }
+
+    #[test]
+    fn editor_copy_calls_clipboard_set_string() {
+        let clip = crate::memory::MemoryClipboard::new("");
+        let mut harness = TestHarness::new();
+        harness.runtime.registry = Arc::new(session::ModuleRegistry::new(vec![crate::clipboard(
+            Arc::clone(&clip) as _,
+        )]));
+        harness.open_dummy();
+        harness.session.borrow_mut().clipboard = Some("copied".into());
+        let token = match harness.vsync.last_token() {
+            Some(token) => token,
+            None => panic!("SurfaceReady arms one vsync token"),
+        };
+        assert!(!harness.command(Command::Frame { token, time: now() }));
+        assert_eq!(clip.read_clipboard(), "copied");
+    }
+
+    #[test]
+    fn editor_copy_without_clipboard_logs_not_linked() {
+        let lines = Rc::new(RefCell::new(Vec::new()));
+        let mut harness = TestHarness::new();
+        let lines_log = Rc::clone(&lines);
+        harness.runtime.log = Rc::new(move |level, message| {
+            lines_log.borrow_mut().push((level, message.to_owned()));
+        });
+        harness.open_dummy();
+        harness.session.borrow_mut().clipboard = Some("copied".into());
+        let token = match harness.vsync.last_token() {
+            Some(token) => token,
+            None => panic!("SurfaceReady arms one vsync token"),
+        };
+        assert!(!harness.command(Command::Frame { token, time: now() }));
+        let lines = lines.borrow();
+        assert!(
+            lines
+                .iter()
+                .any(|(level, message)| *level == LogLevel::Error && message.contains("not linked")),
+            "{lines:?}"
+        );
     }
 
     #[test]

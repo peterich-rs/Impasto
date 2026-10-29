@@ -351,8 +351,8 @@ packages:
     peerDependencies:
       solid-js: ^2.0.0-rc.17
 
-  '@uifw/modules@file:../../frameworks/modules':
-    resolution: {directory: ../../frameworks/modules, type: directory}
+  '@uifw/linking@file:../../frameworks/linking':
+    resolution: {directory: ../../frameworks/linking, type: directory}
 
   '@uifw/solid-renderer@file:../../frameworks/solid-renderer':
     resolution: {directory: ../../frameworks/solid-renderer, type: directory}
@@ -755,7 +755,7 @@ snapshots:
     dependencies:
       solid-js: 2.0.0-rc.17
 
-  '@uifw/modules@file:../../frameworks/modules': {}
+  '@uifw/linking@file:../../frameworks/linking': {}
 
   '@uifw/solid-renderer@file:../../frameworks/solid-renderer':
     dependencies:
@@ -764,12 +764,13 @@ snapshots:
 
   '@uifw/solid-router@file:../../frameworks/solid-router':
     dependencies:
-      '@uifw/modules': file:../../frameworks/modules
+      '@uifw/linking': file:../../frameworks/linking
       '@uifw/solid-renderer': file:../../frameworks/solid-renderer
       solid-js: 2.0.0-rc.17
 
   '@uifw/solid-ui@file:../../frameworks/solid-ui':
     dependencies:
+      '@solidjs/universal': 2.0.0-rc.17(solid-js@2.0.0-rc.17)
       '@uifw/solid-renderer': file:../../frameworks/solid-renderer
       solid-js: 2.0.0-rc.17
 

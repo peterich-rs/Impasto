@@ -33,6 +33,7 @@ public final class HostActivity extends Activity {
                 view,
                 getAssets(),
                 scriptExtra(),
+                launchUrl(),
                 locale(),
                 textScale(),
                 dark(),
@@ -162,6 +163,18 @@ public final class HostActivity extends Activity {
         return getIntent().getStringExtra("uifw.script");
     }
 
+    private String launchUrl() {
+        if (getIntent() == null) {
+            return null;
+        }
+        android.net.Uri data = getIntent().getData();
+        if (data == null) {
+            return null;
+        }
+        String url = data.toString();
+        return url.isEmpty() ? null : url;
+    }
+
     private String locale() {
         return getResources().getConfiguration().getLocales().get(0).toLanguageTag();
     }
@@ -197,6 +210,7 @@ public final class HostActivity extends Activity {
             HostView view,
             android.content.res.AssetManager assets,
             String script,
+            String launchUrl,
             String locale,
             float textScale,
             boolean dark,

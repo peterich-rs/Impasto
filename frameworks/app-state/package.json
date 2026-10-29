@@ -1,0 +1,10 @@
+{
+  "name": "@uifw/app-state",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./host": "./src/host.gen.ts"
+  }
+}

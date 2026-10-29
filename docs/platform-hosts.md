@@ -125,12 +125,17 @@ pub enum SessionError {
 
 ```text
 平台线程                                      渲染线程
-读脚本 / 字体 / 图片字节
+读脚本 / 字体 / 图片字节 / `--url` 或 Intent
 创建窗口，主线程创建并挂上 CAMetalLayer
+把已知启动 URL 写入 Shared launch_url
 Shell::start(Boot) ──────────────────────►  创建 Engine，register_font(UIFWSans)
 返回 looper                                  调用闭包（含 Shaper 与 quickjs::open）
+                                             Linking.getInitialURL 读 Shared
 表面就绪，投递 SurfaceReady ──────────────►  创建 Surface，下发 metrics，强制出首帧
+运行中的 openURLs 投递 LaunchUrl ─────────►  Session::set_launch_url（emit url）
 ```
+
+启动 URL 在 `hostshell::start` 之前写入 Shared `launch_url`，脚本求值时 `Linking.getInitialURL()` 就能读到。macOS 来自 argv `--url`，Android 来自显式 Intent 的 `getData()`。没有 URL 时槽保持 `None`，不写入空字符串。进程已在跑时，macOS 的 `application:openURLs:` 投递 `LaunchUrl`。冷启动时若 Apple Event 与 `--url` 相同，只在 `applicationDidFinishLaunching` 之前跳过那一次；之后同一条 URL 再打开也会投递。平台线程不调用 `Session`。当前宿主没有注册 URL scheme（macOS 无 `CFBundleURLTypes`，Android 无 `ACTION_VIEW`），系统不会把隐式打开交给本进程。`--url` 和显式 Intent data 仍然有效。
 
 字体缺失、`create_metal` / `create_vulkan` 失败、会话闭包失败，都在渲染线程记日志并把退出码交回平台线程。不留下只建了一半的 `Engine`。macOS 随进程退出。Android 在 `onDestroy` 里等渲染线程结束再返回。`std::process::exit` 跳过这一步，`onDestroy` 仍停在等待上。
 
@@ -288,7 +293,7 @@ Android 的 `uifw-surface-drop` 在 `DropWait` 上等到 `Acks::signal`，然后
 
 字体按注册名取字节，启动时交给 `register_font`。`UIFWSans` 和 `UIFWSansCJK` 是启动时的两张脸。脚本 `registerFont` 把字节放进会话队列，渲染线程在 `submit` 之前 `take_fonts` 再 `register_font`。同名替换字节。新名字加上已经交出的名字最多 8 个，那两张启动脸不占名额。失败只记 family 和状态，这一帧继续，缺的 family 退回第一次成功登记的脸。图片由 `ImageDecoder` 在 `uifw-io` 线程解码成紧排 RGBA，结果经 `Command::ImageReady` 回到渲染线程的 `ImageCache`。`submit` 只读这份缓存。必选缺图记一次日志并且这一帧不提交，已安装的显示列表留在引擎里。可选缺图跳过该命令。`https:` 图片在这条线程下载，正文最多 4 MiB，日志只记 scheme 和 host。脚本 `reload(source)` 把名字排进会话，渲染线程在读缓存之前排空。`reload_image` 删掉该键并再要一帧。日志从渲染线程调用：macOS 写 stderr，Android 写 logcat，iOS 写 `os_log`。`Services::semantics` 收到语义树后，宿主把它交给平台辅助功能。
 
-剪贴板已经是 `Services::set_clipboard`，由 `take_clipboard` 交出。触觉、系统音或打开 URL 再各加方法。不加字符串消息通道。
+编辑器 Copy / Cut 经 `take_clipboard` 交出文字，`hostshell` 在渲染线程上 `registry.call("Clipboard", "setString", …)`。Clipboard 未注册时记 `not linked`，不 panic。触觉、系统音再各加方法。不加字符串消息通道。
 
 ## 8. 资产
 

@@ -25,7 +25,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{
     NSArray, NSAttributedString, NSDictionary, NSDistributedNotificationCenter, NSLocale,
     NSNotFound, NSNotification, NSNotificationSuspensionBehavior, NSPoint, NSRange, NSRect,
-    NSString, NSUInteger,
+    NSString, NSUInteger, NSURL,
 };
 use session::{InputEvent, Key};
 
@@ -479,10 +479,28 @@ fn selector_name(selector: Sel) -> String {
     selector.name().to_string_lossy().into_owned()
 }
 
+/// Trimmed launch URL. Empty is not a URL.
+pub(crate) fn nonempty_url(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_owned())
+    }
+}
+
+/// Cold-start `openURLs:` that duplicates `--url`. Later opens always post.
+fn skip_launch_duplicate(launched: bool, initial: Option<&str>, url: &str) -> bool {
+    !launched && initial == Some(url)
+}
+
 struct HostState {
     window: Retained<NSWindow>,
     layer: Retained<CAMetalLayer>,
     link: Link,
+    /// `--url` at process start. `set_launch_url` does not overwrite this copy.
+    initial_url: Option<String>,
+    launched: Cell<bool>,
 }
 
 define_class!(
@@ -496,7 +514,29 @@ define_class!(
     unsafe impl NSApplicationDelegate for Host {
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _notification: &NSNotification) {
+            self.ivars().launched.set(true);
             self.finish_launching();
+        }
+
+        #[unsafe(method(application:openURLs:))]
+        fn application_open_urls(&self, _application: &NSApplication, urls: &NSArray<NSURL>) {
+            for index in 0..urls.count() {
+                let Some(text) = urls.objectAtIndex(index).absoluteString() else {
+                    continue;
+                };
+                let Some(url) = nonempty_url(&text.to_string()) else {
+                    continue;
+                };
+                if skip_launch_duplicate(
+                    self.ivars().launched.get(),
+                    self.ivars().initial_url.as_deref(),
+                    url.as_str(),
+                ) {
+                    continue;
+                }
+                self.ivars().link.post(Command::LaunchUrl(url));
+                return;
+            }
         }
 
         #[unsafe(method(applicationWillTerminate:))]
@@ -814,11 +854,6 @@ impl Services for MacServices {
         }
     }
 
-    fn set_clipboard(&self, text: &str) {
-        let text = text.to_owned();
-        dispatch_main(Box::new(move || write_pasteboard(&text)));
-    }
-
     fn apply_ime(&self, update: &session::ImeUpdate) {
         let view = self.ime_view.load(Ordering::Acquire) as usize;
         if view == 0 {
@@ -863,7 +898,13 @@ pub fn exit_code(error: &RunError) -> u8 {
     }
 }
 
-pub fn run(launch: Launch, assets: PathBuf, font: &[u8], dump_list: bool) -> Result<(), RunError> {
+pub fn run(
+    launch: Launch,
+    assets: PathBuf,
+    font: &[u8],
+    dump_list: bool,
+    initial_url: Option<String>,
+) -> Result<(), RunError> {
     let Some(mtm) = MainThreadMarker::new() else {
         return Err(RunError::Window(anyhow::anyhow!(
             "AppKit must start on the main thread"
@@ -897,7 +938,7 @@ pub fn run(launch: Launch, assets: PathBuf, font: &[u8], dump_list: bool) -> Res
     let on_stop_for_surface = Arc::clone(&on_stop);
     let ime_view = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
     let decoder = Arc::new(PngDecoder { directory: assets });
-    let launch_url = session::shared(None);
+    let launch_url = session::shared(initial_url.clone());
     let mac = Arc::new(MacBridge);
     let link = hostshell::start(
         Boot {
@@ -926,7 +967,10 @@ pub fn run(launch: Launch, assets: PathBuf, font: &[u8], dump_list: bool) -> Res
             dump_list,
         }
         .with_module(hostshell::clipboard(Arc::clone(&mac) as _))
-        .with_module(hostshell::linking(Arc::clone(&mac) as _, launch_url))
+        .with_module(hostshell::linking(
+            Arc::clone(&mac) as _,
+            Arc::clone(&launch_url),
+        ))
         .with_module(hostshell::file_system(Arc::clone(&mac) as _))
         .with_module(hostshell::async_storage(Arc::clone(&mac) as _))
         .with_module(hostshell::permissions(mac as _)),
@@ -985,6 +1029,8 @@ pub fn run(launch: Launch, assets: PathBuf, font: &[u8], dump_list: bool) -> Res
             window: window.clone(),
             layer,
             link,
+            initial_url,
+            launched: Cell::new(false),
         },
     );
     host.ivars()
@@ -1116,6 +1162,47 @@ mod settings_tests {
         assert_eq!(back.key, Key::Tab);
         assert!(back.shift);
         assert!(command_key("copy:").is_none());
+    }
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::{nonempty_url, skip_launch_duplicate};
+
+    #[test]
+    fn empty_text_is_not_a_url() {
+        assert_eq!(nonempty_url(""), None);
+        assert_eq!(nonempty_url("  "), None);
+        assert_eq!(
+            nonempty_url("https://app.example/item"),
+            Some("https://app.example/item".into())
+        );
+        assert_eq!(nonempty_url(" myapp://open "), Some("myapp://open".into()));
+    }
+
+    #[test]
+    fn launch_duplicate_is_skipped_only_before_did_finish_launching() {
+        let initial = Some("https://app.example/item");
+        assert!(skip_launch_duplicate(
+            false,
+            initial,
+            "https://app.example/item"
+        ));
+        assert!(!skip_launch_duplicate(
+            false,
+            initial,
+            "https://app.example/other"
+        ));
+        assert!(!skip_launch_duplicate(
+            true,
+            initial,
+            "https://app.example/item"
+        ));
+        assert!(!skip_launch_duplicate(
+            false,
+            None,
+            "https://app.example/item"
+        ));
     }
 }
 

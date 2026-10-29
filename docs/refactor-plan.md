@@ -12,13 +12,13 @@ Kotlin 路线仍暂缓。`runtimes/quickjs/abi.yml` 维持现状。跨 picture �
 
 ### 现状
 
-平台通道已经是直接值封送。`module_prepare` / `module_push_*` / `module_finish` 把参数逐个拷成 `PluginValue`，`Sync` 方法直接返回 JS 值，`Platform` 方法经 promise token 走 `IoJob::Plugin`。`emit_value` 把结果递归建回 JS 值，≥4KB 的字节零拷贝（会话 slab + quickjs realloc 钩子回收）。`fetch` 整包，`fetchStream` 分块（`HttpHead` / `HttpChunk`），`HttpError.kind` 分类并在 reject 里给 DOMException 名。宿主方法表以 `session` 的 `HOST_METHODS` 为单一来源，`cargo run -p session --bin host-table` 生成 `frameworks/modules/src/host-table.gen.ts`，session 测试防漂移。`WebSocket` 接受子协议参数。权限库 `@uifw/permissions` 的类型在 `frameworks/modules` 与 `frameworks/permissions`。
+平台通道已经是直接值封送。`module_prepare` / `module_push_*` / `module_finish` 把参数逐个拷成 `PluginValue`。`Invoke::Sync` 在 JS 线程内联返回，`Invoke::Promise` 经 token 走 `IoEvent::Plugin`。`emit_value` 把结果递归建回 JS 值，≥4KB 的字节零拷贝（会话 slab + quickjs realloc 钩子回收）。`fetch` 整包，`fetchStream` 分块（`HttpHead` / `HttpChunk`），`HttpError.kind` 分类并在 reject 里给 DOMException 名。QuickJS 用 `JS_NewCModule` 物化 `@uifw/<pkg>/host`。一方模块的方法名和 kind 由 `cargo run -p hostshell --bin host-stubs` 写成各包 `host.gen.ts`，hostshell 测试防漂移。`WebSocket` 接受子协议参数。权限库 `@uifw/permissions` 从 `@uifw/permissions/host` 取五法。
 
 还差的只有宿主端的 `PlatformBridge` 实现面：macOS 的权限请求弹窗和 `openAppSettings`、Android 的运行时权限 Intent。`Camera` 仍未注册。
 
 ### 权限库
 
-包是 `frameworks/permissions`，包名 `@uifw/permissions`。只依赖 `@uifw/modules`。不依赖 `solid-renderer`、`solid-ui` 或 `solid-js`。
+包是 `frameworks/permissions`，包名 `@uifw/permissions`。五法从 `@uifw/permissions/host` 取。不依赖 `solid-renderer`、`solid-ui` 或 `solid-js`。
 
 应用看到的是 permission_handler 的调用形状：
 
@@ -49,27 +49,27 @@ export interface Permissions {
 
 权限包把 `Permission.camera.status` 映到 `checkPermissionStatus("camera")`。`onDeniedCallback` 一类链式回调留在权限包内，不进宿主。理由说明由应用自己画。权限包不导入 `solid-ui`。
 
-宿主用一个 match 把名字映射到系统 API，映射表跟着钉住的 permission_handler 版本。不认识的名字返回 `denied`，服务状态返回 `notApplicable`。macOS 与 Android 实现这五个方法。iOS 等 `hosts/ios` 存在再接。未实现的平台上，对象不注册，`getEnforcing` 抛出统一文案。
+宿主用一个 match 把名字映射到系统 API，映射表跟着钉住的 permission_handler 版本。不认识的名字返回 `denied`，服务状态返回 `notApplicable`。macOS 与 Android 实现这五个方法。iOS 等 `hosts/ios` 存在再接。未注册时静态 `import "@uifw/permissions/host"` 是链接期 `ReferenceError`。
 
 ### 文件、存储、相机
 
-`frameworks/modules` 里已有的 `FileSystem`、`AsyncStorage`、`Camera` 接口就是宿主对象的方法，不再另设计一套。
+`FileSystem`、`AsyncStorage` 的方法就是各包 `@uifw/<pkg>/host` 上的导出，不再另设计一套。
 
 - `FileSystem`：`documentDirectory`、`read`、`write`、`delete`、`pick`。路径拒绝 `..`、绝对路径和反斜杠，并限制在 document 目录内，校验与 `hosts/macos/src/assets.rs` 的 `asset_name` 相同。
 - `AsyncStorage`：`multiGet`、`multiSet`、`multiRemove`、`clear`。
-- `Camera`：接口保持 `capture` 与 `preview`。在有宿主实现之前不注册。
+- `Camera`：有宿主实现后再加 `@uifw/camera` 包。
 
-带 schema 或迁移的存储库不在这次写。它以后只依赖 `@uifw/modules`，不进 `solid-ui`。
+带 schema 或迁移的存储库不在这次写。它以后只依赖 `@uifw/file-system` 与 `@uifw/async-storage`，不进 `solid-ui`。
 
 ### 阶段
 
-1. 已落地：`session` 方法表、`bridge.module(name)` 生成宿主对象、`Sync` 直返、`Platform` 走 promise、`emit_value` 建值、`fetchStream` 分块、零拷贝字节、宿主表生成 `host-table.gen.ts`。macOS 的 `PlatformBridge` 覆盖权限五法。
+1. 已落地：`session` 的 `HostModule` / `Invoke`、`JS_NewCModule` 物化 `@uifw/<pkg>/host`、`Sync` 直返、`Promise` 走 `IoEvent::Plugin`、`emit_value` 建值、`fetchStream` 分块、零拷贝字节、`host-stubs` 生成各包 `host.gen.ts`。macOS 覆盖权限五法。
 2. 待做：Android 的 `Bridge` 覆盖 `permission_status` / `request_permissions` / `open_app_settings`（运行时权限 Intent 与设置页跳转）；`Camera` 注册。
 
 ### 文件
 
 - `hosts/android/src/host.rs` -- `Bridge` 实现权限方法，替代 trait 默认值
-- `frameworks/modules/src/camera.ts` -- 有宿主实现后再注册
+- `@uifw/camera` -- 有宿主实现后再加包
 
 路由、网络、表单和文案在 `frameworks/solid-router`、`frameworks/net`、`frameworks/form`、`frameworks/i18n`。权限在 `frameworks/permissions`。
 
@@ -86,7 +86,7 @@ export interface Permissions {
 - Picture 字节序列化，见 `docs/protocol-v2.md`。
 - `hosts/ios`。预构建矩阵出现 iOS 列之前不写。
 - 导航往返之后 `picture_writes` 只计仍在树上的页面 picture。路由表已经是 `/schedule`、`/nav/:depth`、`/list`。包拆分不实现这条断言。
-- 带 schema 或迁移的存储库。`AsyncStorage` 与 `FileSystem` 落地之后再写，只依赖 `@uifw/modules`。
+- 带 schema 或迁移的存储库。`AsyncStorage` 与 `FileSystem` 落地之后再写，只依赖 `@uifw/file-system` 与 `@uifw/async-storage`。
 - 把排版或 `submit_layers` 挪出渲染线程。现在的模块拆分仍然是 `uifw-render` 上的一个 `!Send` 所有者。按文件拆开不产生线程边界。
 
 ## 风险

@@ -42,6 +42,8 @@ pub enum Command {
     MemoryWarning,
     WindowFocus(bool),
     SemanticsAction(ui_core::SemanticsAction),
+    /// A URL that arrived after the session exists. The render thread calls `Session::set_launch_url`.
+    LaunchUrl(String),
     SurfaceReady(SurfaceTarget),
     SurfaceChanged {
         id: SurfaceId,

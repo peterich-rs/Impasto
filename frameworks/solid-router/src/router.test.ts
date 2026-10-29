@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { flush } from "solid-js";
 import { flushMotion, spring } from "@uifw/solid-renderer";
+import { state as linking } from "@uifw/linking/host";
 import { createRouter, type RouteDef } from "./stack.ts";
 
 const page = () => 0 as never;
@@ -12,8 +13,6 @@ const defs: RouteDef[] = [
 ];
 
 const backs: Array<() => boolean> = [];
-let urlListener: ((event: { url: string }) => void) | null = null;
-let initialUrl: string | null = null;
 (globalThis as { core: Record<string, unknown> }).core = {
   onBack: (fn: () => boolean) => {
     backs.push(fn);
@@ -22,25 +21,17 @@ let initialUrl: string | null = null;
   offBack: () => {},
   requestFrame: () => {},
 };
-(globalThis as { TurboModuleRegistry: { get(name: string): unknown } }).TurboModuleRegistry = {
-  get(name: string) {
-    if (name !== "Linking") {
-      return null;
-    }
-    return {
-      getInitialURL: () => initialUrl,
-      openURL: () => Promise.resolve(),
-      addEventListener: (_type: string, fn: (event: { url: string }) => void) => {
-        urlListener = fn;
-      },
-    };
-  },
-};
+
+async function settleLinking(): Promise<void> {
+  await import("@uifw/linking");
+  await Promise.resolve();
+}
 
 const router = createRouter(defs, {
   initial: "/schedule",
   onBack: () => false,
 });
+await settleLinking();
 assert.equal(backs.length, 1);
 assert.equal(router.stack()[0]?.path, "/schedule");
 assert.equal(router.stack()[0]?.phase, "live");
@@ -98,23 +89,26 @@ router.complete(router.stack()[1]?.key ?? "");
 flush();
 assert.equal(handler(), false);
 
-urlListener?.({ url: "/nav/4" });
+linking.urlListener?.({ url: "/nav/4" });
 flush();
 assert.equal(router.stack().at(-1)?.path, "/nav/4");
 assert.equal(router.stack().at(-1)?.phase, "enter");
 
-initialUrl = null;
+linking.initialUrl = null;
 const deep = createRouter(defs, { initial: "/schedule" });
+await settleLinking();
 flush();
 assert.equal(deep.stack()[0]?.path, "/schedule");
 
-initialUrl = "/list";
+linking.initialUrl = "/list";
 const linked = createRouter(defs, { initial: "/schedule" });
+await settleLinking();
 flush();
 assert.equal(linked.stack()[0]?.path, "/list");
 assert.equal(linked.stack()[0]?.phase, "live");
 
 const later = createRouter(defs, { initial: "/schedule" });
+await settleLinking();
 later.push("/nav/9");
 flush();
 assert.equal(handler(), true);

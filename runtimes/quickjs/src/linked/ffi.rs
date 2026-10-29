@@ -254,6 +254,8 @@ pub(super) struct QjsFns {
     pub(super) module_count: unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> i32,
     pub(super) module_method_at:
         unsafe extern "C" fn(*mut c_void, *const c_char, usize, i32, *mut usize) -> *const c_char,
+    pub(super) module_name_of:
+        unsafe extern "C" fn(*mut c_void, *const c_char, usize, *mut usize) -> *const c_char,
     pub(super) align: unsafe extern "C" fn(*mut c_void, u32, *mut u64) -> i32,
     pub(super) set_cross: unsafe extern "C" fn(*mut c_void, u64, u32) -> i32,
     pub(super) viewport: unsafe extern "C" fn(*mut c_void, *mut f32, *mut f32) -> i32,

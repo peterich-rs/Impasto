@@ -188,6 +188,7 @@ typedef struct QjsFns {
     int (*module_count)(void *session, const char *name, size_t len);
     const char *(*module_method_at)(void *session, const char *name, size_t name_len, int index,
                                     size_t *out_len);
+    const char *(*module_name_of)(void *session, const char *specifier, size_t len, size_t *out_len);
     int (*align)(void *session, uint32_t align, uint64_t *out);
     int (*set_cross)(void *session, uint64_t node, uint32_t align);
     int (*viewport)(void *session, float *width, float *height);
@@ -4693,6 +4694,42 @@ static void module_reject(JSContext *ctx) {
     JS_ThrowReferenceError(ctx, "module path is outside the app directory");
 }
 
+static JSModuleDef *load_host_module(JSContext *ctx, Host *host, const char *name);
+
+/* "@uifw/<pkg>/host" with one package segment. */
+static int is_host_specifier(const char *name) {
+    static const char prefix[] = "@uifw/";
+    static const char suffix[] = "/host";
+    size_t len;
+    size_t mid_len;
+    const char *mid;
+    size_t index;
+    if (!name) {
+        return 0;
+    }
+    len = strlen(name);
+    if (len <= sizeof(prefix) - 1 + sizeof(suffix) - 1) {
+        return 0;
+    }
+    if (strncmp(name, prefix, sizeof(prefix) - 1) != 0) {
+        return 0;
+    }
+    if (strcmp(name + len - (sizeof(suffix) - 1), suffix) != 0) {
+        return 0;
+    }
+    mid = name + sizeof(prefix) - 1;
+    mid_len = len - (sizeof(prefix) - 1) - (sizeof(suffix) - 1);
+    if (mid_len == 0) {
+        return 0;
+    }
+    for (index = 0; index < mid_len; index++) {
+        if (mid[index] == '/' || mid[index] == '\\') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int module_segment(const char *text, size_t len) {
     if (len == 0) {
         return 0;
@@ -4760,6 +4797,14 @@ static int module_canonicalize(char *path, size_t app_len) {
 
 static char *module_normalize(JSContext *ctx, const char *base_name, const char *name, void *opaque) {
     Host *host = opaque;
+    if (name && is_host_specifier(name)) {
+        return js_strdup(ctx, name);
+    }
+    if (name && strncmp(name, "@uifw/", 6) == 0) {
+        JS_ThrowReferenceError(ctx,
+                               "bare @uifw/* must be bundled; runtime only loads @uifw/<pkg>/host");
+        return NULL;
+    }
     if (!host || !host->app_dir || !name || !name[0] || strchr(name, '\\') || strstr(name, "://")) {
         module_reject(ctx);
         return NULL;
@@ -4802,6 +4847,9 @@ static char *module_normalize(JSContext *ctx, const char *base_name, const char 
 
 static JSModuleDef *module_loader(JSContext *ctx, const char *module_name, void *opaque) {
     Host *host = opaque;
+    if (host && module_name && is_host_specifier(module_name)) {
+        return load_host_module(ctx, host, module_name);
+    }
     if (!host || !host->app_dir || !module_name) {
         module_reject(ctx);
         return NULL;

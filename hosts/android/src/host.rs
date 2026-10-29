@@ -87,19 +87,6 @@ impl Bridge {
         });
     }
 
-    fn write_clipboard_text(&self, text: &str) {
-        self.call(|env| {
-            let text = env.new_string(text)?;
-            env.call_method(
-                self.view.as_obj(),
-                jni::jni_str!("setClipboard"),
-                jni::jni_sig!("(Ljava/lang/String;)V"),
-                &[jni::objects::JValue::Object(&text)],
-            )?;
-            Ok(())
-        });
-    }
-
     fn write_clipboard_now(&self, text: &str) {
         self.call(|env| {
             let text = env.new_string(text)?;
@@ -393,10 +380,6 @@ impl Services for Shared {
         self.0.finish();
     }
 
-    fn set_clipboard(&self, text: &str) {
-        self.0.write_clipboard_text(text);
-    }
-
     fn extra_fonts(&self) -> Vec<(String, Vec<u8>)> {
         const PATHS: &[&str] = &[
             "/system/fonts/NotoSansCJK-Regular.ttc",
@@ -576,6 +559,7 @@ struct Attach {
     view: Global<JObject<'static>>,
     assets: Arc<AssetManager>,
     script: Option<String>,
+    launch_url: Option<String>,
     settings: session::PlatformSettings,
 }
 
@@ -591,7 +575,7 @@ fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
     let clock = FrameClock::new(Arc::new(move || bridge_for_clock.schedule_frame()));
     let script_assets = Arc::clone(&request.assets);
     let requested = request.script;
-    let launch_url = session::shared(None);
+    let launch_url = session::shared(request.launch_url);
     let main_thread = {
         let bridge = Arc::clone(&bridge);
         Arc::new(move |work: Box<dyn FnOnce() + Send>| {
@@ -1029,6 +1013,7 @@ pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeAttach<'local>(
     view: JObject<'local>,
     assets: JObject<'local>,
     script: JString<'local>,
+    launch_url: JString<'local>,
     locale: JString<'local>,
     text_scale: f32,
     dark: jboolean,
@@ -1038,6 +1023,7 @@ pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeAttach<'local>(
 ) -> jint {
     with_env(&mut env, |env| {
         let script = java_string(env, &script)?;
+        let launch_url = crate::nonempty_url(java_string(env, &launch_url)?.as_deref());
         let locale = java_string(env, &locale)?.unwrap_or_default();
         let assets = match asset_manager(env, &assets) {
             Ok(assets) => assets,
@@ -1051,6 +1037,7 @@ pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeAttach<'local>(
             view,
             assets,
             script,
+            launch_url,
             settings: settings_from(
                 locale,
                 text_scale,

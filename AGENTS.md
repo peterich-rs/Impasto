@@ -66,7 +66,7 @@ Taffy 只算盒子的位置和大小，含 Grid。文字和图片用它的 measu
 
 | 路线 | 目录 | 运行时 | 现在的状态 |
 |---|---|---|---|
-| Solid 2.0 TSX + QuickJS | `frameworks/solid-renderer`、`frameworks/solid-ui`、`frameworks/solid-router` | QuickJS，脚本可下发 | `apps/gallery-solid/dist/counter.js` 是编译产物，由 QuickJS 会话驱动 `core` |
+| Solid 2.0 TSX + QuickJS | `frameworks/solid-renderer`、`frameworks/solid-ui`、`frameworks/solid-router` | QuickJS，脚本可下发 | `apps/gallery-solid/dist/counter.js` 是 ESM 编译产物，由 QuickJS 会话驱动 `core` |
 | Kotlin lambda DSL | `frameworks/kotlin-ui` | 目标是 Kotlin/Native AOT | 只有 JVM 上的 DSL 和编码器。信号和原生目标还没接 |
 
 Kotlin 路线的写法参考 KiteUI（`scene { layer { rect(...) } }`）。KiteUI 画的是各端原生控件。这里的 DSL 要重写，输出 `protocol/` 里的场景，不沿用它的 View / UIKit / DOM 后端。
@@ -81,7 +81,7 @@ Kotlin 路线的写法参考 KiteUI（`scene { layer { rect(...) } }`）。KiteU
 
 Impeller 的 C API 没有稳定 ABI。钉住的是一份 Flutter 框架提交，不是 engine 仓库的提交。创建 context 时传入该头文件里的 `IMPELLER_VERSION`。升级 pin 时一起改调用代码。
 
-`just host` 打开 360×640 的窗口并加载 `apps/gallery-solid/dist/counter.js`。`just host-js` 是同一条命令。`UIFW_DUMP` 把一帧 Metal 纹理写成 PNG 后退出，用来看画面。宿主把指针换成左上角的场景点放进队列，由会话出队。计数器的加减写在应用里，不写在宿主里。click 的验收是 `core` 里的 `Gesture`，以及 QuickJS 会话里减号把文字改成 `Count: -1`。按下和抬起另外分发 press 与 release。抬起仍在按下区域内时，焦点沿父链找到 `focusable` 节点，发出 `Blur` 再 `Focus`。滑出、取消、以及越过拖动阈值交给 `Scroll` 的手势不改焦点。
+`just host` 打开 360×640 的窗口并加载 ESM `apps/gallery-solid/dist/counter.js`。`just host-js` 是同一条命令。`UIFW_DUMP` 把一帧 Metal 纹理写成 PNG 后退出，用来看画面。宿主把指针换成左上角的场景点放进队列，由会话出队。计数器的加减写在应用里，不写在宿主里。click 的验收是 `core` 里的 `Gesture`，以及 QuickJS 会话里减号把文字改成 `Count: -1`。按下和抬起另外分发 press 与 release。抬起仍在按下区域内时，焦点沿父链找到 `focusable` 节点，发出 `Blur` 再 `Focus`。滑出、取消、以及越过拖动阈值交给 `Scroll` 的手势不改焦点。
 
 计数器加减是第一条应用，用来验收框架，不是把逻辑写进宿主。`count`、`onClick` 和按钮摆放都属于上层。
 
@@ -152,7 +152,11 @@ hosts/macos/               macOS 窗口。指针入队、CVDisplayLink、UIFW_DU
 hosts/android/             Android 宿主。`HostActivity`、`HostView`、Choreographer、Vulkan。`just android` 打 APK
 hosts/ios                  还没有。预构建矩阵没有 iOS 列之前不写；接口不按两台宿主收死
 runtimes/quickjs/          quickjs-ng 会话。包名 `quickjs`。没有源码时返回 NotLinked
-frameworks/modules/        宿主对象类型。Linking、FileSystem、AsyncStorage、Permissions
+frameworks/clipboard/      @uifw/clipboard
+frameworks/linking/        @uifw/linking
+frameworks/app-state/      @uifw/app-state
+frameworks/file-system/    @uifw/file-system
+frameworks/async-storage/  @uifw/async-storage
 frameworks/solid-renderer/ 接到 core 的运行时。不做布局
 frameworks/solid-ui/       Button、Field、Dialog、theme、overlay
 frameworks/solid-router/   路径、栈和 RouterView
@@ -161,7 +165,7 @@ frameworks/form/           createForm
 frameworks/i18n/           formatNumber、formatDate、plural
 frameworks/permissions/    permission_handler 形状的权限 API
 frameworks/kotlin-ui/      Kotlin Gradle 根。路线暂缓，见 docs/refactor-plan.md
-apps/gallery-solid/        Solid 应用。源码 counter.tsx，产物 dist/counter.js、dist/counter.esm.js
+apps/gallery-solid/        Solid 应用。源码 counter.tsx，产物是 ESM dist/counter.js
 third_party/solid          solidjs/solid，分支 next。本地检出，不进 git
 third_party/kiteui         lightningkite/kiteui，分支 version-8.3。本地检出，不进 git
 third_party/impeller-sdk/  本地 SDK，不进 git
@@ -237,8 +241,8 @@ GitHub Actions 工作流是 `.github/workflows/check.yml`。它跑 `cargo fmt --
 | `just coverage` | `cargo llvm-cov` 把 LCOV 写到 `target/coverage/rust/lcov.info` |
 | `just kotlin` | Kotlin `:library:jvmTest` |
 | `just solid` | renderer、net、i18n，以及 solid-router、form、solid-ui 的单测 |
-| `just solid-app` | 安装依赖，重编 `dist/counter.js` 和 `dist/counter.esm.js`，再用 mock host 跑渲染 |
-| `just host` | 打开 macOS 窗口并加载 `apps/gallery-solid/dist/counter.js`。需要 SDK、quickjs-ng 源码和 `hosts/macos/assets` |
+| `just solid-app` | 安装依赖，重编 ESM `dist/counter.js`，再用 mock host 跑渲染 |
+| `just host` | 打开 macOS 窗口并加载 ESM `apps/gallery-solid/dist/counter.js`。需要 SDK、quickjs-ng 源码和 `hosts/macos/assets` |
 | `just quickjs` | 按 `runtimes/quickjs/quickjs.pin` 下载 quickjs-ng 源码 |
 | `just host-js` | 同 `just host` |
 | `just android` | 编 `aarch64-linux-android` 的 `libuifw.so`，再打 APK。需要 NDK 和 `android-arm64` SDK |

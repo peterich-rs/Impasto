@@ -27,7 +27,7 @@ coverage:
     cargo llvm-cov --manifest-path "{{root}}/Cargo.toml" --lcov --output-path "{{root}}/target/coverage/rust/lcov.info" --workspace
 
 gen:
-    cargo run -p session --bin host-table > "{{root}}/frameworks/modules/src/host-table.gen.ts"
+    cargo run -p hostshell --bin host-stubs
 
 kotlin:
     "{{root}}/frameworks/kotlin-ui/gradlew" -p "{{root}}/frameworks/kotlin-ui" :library:jvmTest
@@ -47,7 +47,7 @@ solid:
     cd "{{root}}/frameworks/solid-ui" && pnpm install --frozen-lockfile && for test in src/*.test.ts src/field/*.test.ts; do node --conditions=browser --experimental-strip-types --import "{{root}}/frameworks/register.mjs" "$test"; done
 
 solid-app:
-    cd "{{root}}/apps/gallery-solid" && pnpm install && node build.mjs && node --experimental-strip-types counter.node.test.ts && node --experimental-strip-types counter.esm.test.ts
+    cd "{{root}}/apps/gallery-solid" && pnpm install && node build.mjs && node --experimental-strip-types --import "{{root}}/frameworks/register.mjs" counter.node.test.ts && node --experimental-strip-types --import "{{root}}/frameworks/register.mjs" counter.esm.test.ts
 
 host:
     cargo run --manifest-path "{{root}}/Cargo.toml" -p macos -- --js "{{root}}/apps/gallery-solid/dist/counter.js" "{{logo}}"
