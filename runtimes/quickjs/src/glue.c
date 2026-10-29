@@ -184,6 +184,7 @@ typedef struct QjsFns {
     void (*module_end_map)(void *session);
     void (*module_set_token)(void *session, uint64_t token);
     int (*module_finish)(void *session);
+    const char *(*module_error)(void *session, size_t *len);
     int (*module_count)(void *session, const char *name, size_t len);
     const char *(*module_method_at)(void *session, const char *name, size_t name_len, int index,
                                     size_t *out_len);

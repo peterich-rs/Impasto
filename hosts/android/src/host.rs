@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use hostshell::{
-    Boot, Command, DropWait, Launch, LogLevel, NativePtr, PlatformBridge, Services, SessionError,
-    SurfaceId, SurfaceTarget, Vsync,
+    Boot, ClipboardHost, Command, DropWait, Launch, LinkingHost, LogLevel, NativePtr, Services,
+    SessionError, StorageHost, SurfaceId, SurfaceTarget, Vsync,
 };
 use jni::objects::{Global, JObject, JString};
 use jni::sys::{jboolean, jint, jlong};
@@ -98,6 +98,38 @@ impl Bridge {
             )?;
             Ok(())
         });
+    }
+
+    fn write_clipboard_now(&self, text: &str) {
+        self.call(|env| {
+            let text = env.new_string(text)?;
+            env.call_method(
+                self.view.as_obj(),
+                jni::jni_str!("writeClipboardNow"),
+                jni::jni_sig!("(Ljava/lang/String;)V"),
+                &[jni::objects::JValue::Object(&text)],
+            )?;
+            Ok(())
+        });
+    }
+
+    fn post_work(&self, work: Box<dyn FnOnce() + Send>) {
+        let boxed = Box::into_raw(Box::new(work));
+        let mut posted = false;
+        self.call(|env| {
+            env.call_method(
+                self.view.as_obj(),
+                jni::jni_str!("postNative"),
+                jni::jni_sig!("(J)V"),
+                &[jni::objects::JValue::Long(boxed as jlong)],
+            )?;
+            posted = true;
+            Ok(())
+        });
+        if !posted {
+            // SAFETY: `boxed` came from `Box::into_raw` above and Java did not take it.
+            drop(unsafe { Box::from_raw(boxed) });
+        }
     }
 
     fn launch_view_url(&self, url: &str) -> Result<(), String> {
@@ -284,19 +316,23 @@ impl ImeCall {
     }
 }
 
-impl PlatformBridge for Bridge {
+impl ClipboardHost for Bridge {
     fn read_clipboard(&self) -> String {
         self.clipboard_text()
     }
 
     fn write_clipboard(&self, text: &str) {
-        self.write_clipboard_text(text);
+        self.write_clipboard_now(text);
     }
+}
 
+impl LinkingHost for Bridge {
     fn open_url(&self, url: &str) -> Result<(), String> {
         self.launch_view_url(url)
     }
+}
 
+impl StorageHost for Bridge {
     fn document_dir(&self) -> Result<String, String> {
         let mut copied = String::new();
         self.call(|env| {
@@ -319,6 +355,10 @@ impl PlatformBridge for Bridge {
         } else {
             Ok(copied)
         }
+    }
+
+    fn pick_document(&self) -> Result<Option<String>, String> {
+        Ok(None)
     }
 }
 
@@ -551,30 +591,49 @@ fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
     let clock = FrameClock::new(Arc::new(move || bridge_for_clock.schedule_frame()));
     let script_assets = Arc::clone(&request.assets);
     let requested = request.script;
+    let launch_url = session::shared(None);
+    let main_thread = {
+        let bridge = Arc::clone(&bridge);
+        Arc::new(move |work: Box<dyn FnOnce() + Send>| {
+            bridge.post_work(work);
+        }) as hostshell::MainThreadPoster
+    };
     let boot = Boot {
         font_family: FONT_FAMILY.to_string(),
-        launch: Launch::Session(Box::new(move |slot, io| {
+        launch: Launch::Session(Box::new(move |slot, io, host| {
             let (name, script) = load_script(&script_assets, requested.as_deref())?;
-            quickjs::open_with_io(&script, &name, slot.shaper(), slot.log_hook(), Some(io)).map_err(
-                |error| match error {
-                    quickjs::Error::NotLinked => SessionError::NotLinked,
-                    quickjs::Error::Runtime => SessionError::Runtime,
-                    quickjs::Error::Script(text) => SessionError::Script(text),
-                },
+            quickjs::open_with_io(
+                &script,
+                &name,
+                slot.shaper(),
+                slot.log_hook(),
+                Some(io),
+                host,
             )
+            .map_err(|error| match error {
+                quickjs::Error::NotLinked => SessionError::NotLinked,
+                quickjs::Error::Runtime => SessionError::Runtime,
+                quickjs::Error::Script(text) => SessionError::Script(text),
+            })
         })),
         services: Box::new(Shared(Arc::clone(&bridge))),
         vsync: Arc::clone(&clock) as Arc<dyn Vsync>,
         decoder: Arc::new(AssetDecoder {
             assets: request.assets,
         }),
-        bridge: Arc::clone(&bridge) as Arc<dyn PlatformBridge>,
+        modules: Vec::new(),
+        main_thread: Some(main_thread),
+        launch_url: Arc::clone(&launch_url),
         http: Some(hostshell::http_client()?),
         open_surface: Box::new(|engine, target| {
             Ok(Box::new(VulkanSurface::open(engine, target.layer)?))
         }),
         dump_list: false,
-    };
+    }
+    .with_module(hostshell::clipboard(Arc::clone(&bridge) as _))
+    .with_module(hostshell::linking(Arc::clone(&bridge) as _, launch_url))
+    .with_module(hostshell::file_system(Arc::clone(&bridge) as _))
+    .with_module(hostshell::async_storage(Arc::clone(&bridge) as _));
     let link = hostshell::start(boot).map_err(|error| error.to_string())?;
     link.post(Command::Settings(request.settings));
     *HOST.lock().unwrap_or_else(|error| error.into_inner()) = Some(Arc::new(Host {
@@ -1500,6 +1559,20 @@ pub extern "system" fn Java_dev_uifw_host_TextInput_nativeAccept<'local>(
         });
         Ok(accept)
     })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_uifw_host_HostView_nativeRunWork(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+    work: jlong,
+) {
+    if work == 0 {
+        return;
+    }
+    // SAFETY: `work` is the pointer `post_work` gave Java, and this is the only take.
+    let work = unsafe { Box::from_raw(work as *mut Box<dyn FnOnce() + Send>) };
+    work();
 }
 
 #[unsafe(no_mangle)]

@@ -7,8 +7,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
 use hostshell::{
-    Boot, BootError, Command, Launch as ShellLaunch, Link, LogLevel, NativePtr, PlatformBridge,
-    Poster, Services, SessionError, SurfaceTarget, metrics,
+    Boot, BootError, ClipboardHost, Command, Launch as ShellLaunch, Link, LinkingHost, LogLevel,
+    NativePtr, PermissionsHost, Poster, Services, SessionError, StorageHost, SurfaceTarget,
+    metrics,
 };
 use objc2::AnyThread;
 use objc2::rc::Retained;
@@ -877,42 +878,59 @@ pub fn run(launch: Launch, assets: PathBuf, font: &[u8], dump_list: bool) -> Res
         wake_main();
     });
     let Launch::Script { name, source } = launch;
-    let shell_launch = ShellLaunch::Session(Box::new(move |slot, io| {
-        quickjs::open_with_io(&source, &name, slot.shaper(), slot.log_hook(), Some(io)).map_err(
-            |error| match error {
-                quickjs::Error::NotLinked => SessionError::NotLinked,
-                quickjs::Error::Runtime => SessionError::Runtime,
-                quickjs::Error::Script(text) => SessionError::Script(text),
-            },
+    let shell_launch = ShellLaunch::Session(Box::new(move |slot, io, host| {
+        quickjs::open_with_io(
+            &source,
+            &name,
+            slot.shaper(),
+            slot.log_hook(),
+            Some(io),
+            host,
         )
+        .map_err(|error| match error {
+            quickjs::Error::NotLinked => SessionError::NotLinked,
+            quickjs::Error::Runtime => SessionError::Runtime,
+            quickjs::Error::Script(text) => SessionError::Script(text),
+        })
     }));
     let dump_for_surface = dump.clone();
     let on_stop_for_surface = Arc::clone(&on_stop);
     let ime_view = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
     let decoder = Arc::new(PngDecoder { directory: assets });
-    let link = hostshell::start(Boot {
-        font_family: FONT_FAMILY.to_string(),
-        launch: shell_launch,
-        services: Box::new(MacServices {
-            font: font.to_vec(),
-            ime_view: Arc::clone(&ime_view),
-        }),
-        vsync: Arc::new(vsync),
-        decoder,
-        bridge: Arc::new(MacBridge),
-        http: Some(
-            hostshell::http_client()
-                .map_err(|message| RunError::Window(anyhow::anyhow!(message)))?,
-        ),
-        open_surface: Box::new(move |_engine, target| {
-            Ok(Box::new(MetalSurface::new(
-                target.layer,
-                dump_for_surface.clone(),
-                Arc::clone(&on_stop_for_surface),
-            )))
-        }),
-        dump_list,
-    })
+    let launch_url = session::shared(None);
+    let mac = Arc::new(MacBridge);
+    let link = hostshell::start(
+        Boot {
+            font_family: FONT_FAMILY.to_string(),
+            launch: shell_launch,
+            services: Box::new(MacServices {
+                font: font.to_vec(),
+                ime_view: Arc::clone(&ime_view),
+            }),
+            vsync: Arc::new(vsync),
+            decoder,
+            modules: Vec::new(),
+            main_thread: Some(Arc::new(|work| dispatch_main(work))),
+            launch_url: Arc::clone(&launch_url),
+            http: Some(
+                hostshell::http_client()
+                    .map_err(|message| RunError::Window(anyhow::anyhow!(message)))?,
+            ),
+            open_surface: Box::new(move |_engine, target| {
+                Ok(Box::new(MetalSurface::new(
+                    target.layer,
+                    dump_for_surface.clone(),
+                    Arc::clone(&on_stop_for_surface),
+                )))
+            }),
+            dump_list,
+        }
+        .with_module(hostshell::clipboard(Arc::clone(&mac) as _))
+        .with_module(hostshell::linking(Arc::clone(&mac) as _, launch_url))
+        .with_module(hostshell::file_system(Arc::clone(&mac) as _))
+        .with_module(hostshell::async_storage(Arc::clone(&mac) as _))
+        .with_module(hostshell::permissions(mac as _)),
+    )
     .map_err(RunError::Boot)?;
 
     let app = NSApplication::sharedApplication(mtm);
@@ -1103,61 +1121,54 @@ mod settings_tests {
 
 struct MacBridge;
 
-impl PlatformBridge for MacBridge {
+impl ClipboardHost for MacBridge {
     fn read_clipboard(&self) -> String {
-        on_main_string(read_pasteboard)
+        read_pasteboard()
     }
 
     fn write_clipboard(&self, text: &str) {
-        let text = text.to_owned();
-        on_main_unit(move || write_pasteboard(&text));
+        write_pasteboard(text);
     }
+}
 
+impl LinkingHost for MacBridge {
     fn open_url(&self, url: &str) -> Result<(), String> {
-        let url = url.to_owned();
-        on_main_result(move || open_url_main(&url))
+        open_url_main(url)
     }
+}
 
+impl StorageHost for MacBridge {
     fn document_dir(&self) -> Result<String, String> {
-        on_main_result_string(document_dir_main)
+        document_dir_main()
     }
 
+    fn pick_document(&self) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+}
+
+impl PermissionsHost for MacBridge {
     fn permission_status(&self, name: &str) -> String {
-        let name = name.to_owned();
-        on_main_string(move || permission_status_main(&name))
+        permission_status_main(name)
     }
 
     fn request_permissions(&self, names: &[String]) -> Vec<(String, String)> {
         names
             .iter()
-            .map(|name| {
-                let owned = name.clone();
-                (
-                    name.clone(),
-                    on_main_string(move || permission_status_main(&owned)),
-                )
-            })
+            .map(|name| (name.clone(), permission_status_main(name)))
             .collect()
     }
 
-    fn open_app_settings(&self) -> bool {
-        on_main_result(open_settings_main).is_ok()
+    fn permission_rationale(&self, _name: &str) -> bool {
+        false
     }
-}
 
-fn on_main_result_string(
-    work: impl FnOnce() -> Result<String, String> + Send + 'static,
-) -> Result<String, String> {
-    if MainThreadMarker::new().is_some() {
-        return work();
+    fn service_status(&self, _name: &str) -> String {
+        "notApplicable".to_owned()
     }
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    dispatch_main(Box::new(move || {
-        let _ = tx.send(work());
-    }));
-    match rx.recv() {
-        Ok(result) => result,
-        Err(_) => Err("module \"FileSystem\" is not linked".to_owned()),
+
+    fn open_app_settings(&self) -> bool {
+        open_settings_main().is_ok()
     }
 }
 
@@ -1206,46 +1217,6 @@ fn media_status(name: &str) -> String {
 
 fn open_settings_main() -> Result<(), String> {
     open_url_main("x-apple.systempreferences:com.apple.preference.security?Privacy")
-}
-
-fn on_main_string(work: impl FnOnce() -> String + Send + 'static) -> String {
-    if MainThreadMarker::new().is_some() {
-        return work();
-    }
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    dispatch_main(Box::new(move || {
-        let _ = tx.send(work());
-    }));
-    rx.recv().unwrap_or_default()
-}
-
-fn on_main_unit(work: impl FnOnce() + Send + 'static) {
-    if MainThreadMarker::new().is_some() {
-        work();
-        return;
-    }
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    dispatch_main(Box::new(move || {
-        work();
-        let _ = tx.send(());
-    }));
-    let _ = rx.recv();
-}
-
-fn on_main_result(
-    work: impl FnOnce() -> Result<(), String> + Send + 'static,
-) -> Result<(), String> {
-    if MainThreadMarker::new().is_some() {
-        return work();
-    }
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    dispatch_main(Box::new(move || {
-        let _ = tx.send(work());
-    }));
-    match rx.recv() {
-        Ok(result) => result,
-        Err(_) => Err("openURL is not linked".to_owned()),
-    }
 }
 
 fn open_url_main(url: &str) -> Result<(), String> {

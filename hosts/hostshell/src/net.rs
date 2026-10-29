@@ -7,24 +7,19 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use session::{
-    HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, IoJob, PluginResult, PluginValue,
-    module_not_linked,
-};
+use session::{HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, IoJob};
 
 use crate::command::Command;
-use crate::platform::PlatformBridge;
 use crate::queue::Inbox;
 
 pub(crate) fn spawn(
     jobs: Receiver<IoJob>,
     inbox: Arc<Inbox>,
-    bridge: Arc<dyn PlatformBridge>,
     http: Option<Arc<dyn HttpClient>>,
 ) -> Option<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name("uifw-net".to_string())
-        .spawn(move || serve(jobs, inbox, bridge, http))
+        .spawn(move || serve(jobs, inbox, http))
         .ok()
 }
 
@@ -38,12 +33,7 @@ pub(crate) fn wake(
         .ok()
 }
 
-fn serve(
-    jobs: Receiver<IoJob>,
-    inbox: Arc<Inbox>,
-    bridge: Arc<dyn PlatformBridge>,
-    http: Option<Arc<dyn HttpClient>>,
-) {
+fn serve(jobs: Receiver<IoJob>, inbox: Arc<Inbox>, http: Option<Arc<dyn HttpClient>>) {
     let mut sockets: HashMap<u64, Sender<SocketCmd>> = HashMap::new();
     while let Ok(job) = jobs.recv() {
         match job {
@@ -103,15 +93,6 @@ fn serve(
                 }
             }
             IoJob::Abort { .. } => {}
-            IoJob::Plugin {
-                token,
-                name,
-                method,
-                args,
-            } => {
-                let result = plugin(&bridge, &name, &method, &args);
-                inbox.post(Command::PluginDone { token, result });
-            }
             IoJob::SocketOpen { id, url, protocols } => {
                 if sockets.len() >= 8 {
                     post_socket(&inbox, id, "error", true, b"too many sockets");
@@ -174,229 +155,6 @@ pub(crate) fn fetch_image_body(
         Ok(response) => Err(ImageError::Failed(format!("HTTP {}", response.status))),
         Err(error) => Err(ImageError::Failed(error.message)),
     }
-}
-
-/// One host method: parse args, call the bridge, wrap the result.
-type HostFn = fn(&dyn PlatformBridge, &[PluginValue]) -> PluginResult;
-
-fn host_functions() -> &'static [(&'static str, &'static str, HostFn)] {
-    &[
-        ("Clipboard", "getString", clipboard_get),
-        ("Clipboard", "setString", clipboard_set),
-        ("Linking", "openURL", linking_open),
-        ("FileSystem", "documentDirectory", fs_document_dir),
-        ("FileSystem", "read", fs_read),
-        ("FileSystem", "write", fs_write),
-        ("FileSystem", "delete", fs_delete),
-        ("FileSystem", "pick", fs_pick),
-        ("AsyncStorage", "multiGet", store_get),
-        ("AsyncStorage", "multiSet", store_set),
-        ("AsyncStorage", "multiRemove", store_remove),
-        ("AsyncStorage", "clear", store_clear),
-        ("Permissions", "checkPermissionStatus", perm_status),
-        ("Permissions", "requestPermissions", perm_request),
-        (
-            "Permissions",
-            "shouldShowRequestPermissionRationale",
-            perm_rationale,
-        ),
-        ("Permissions", "checkServiceStatus", perm_service),
-        ("Permissions", "openAppSettings", perm_settings),
-    ]
-}
-
-fn plugin(
-    bridge: &Arc<dyn PlatformBridge>,
-    name: &str,
-    method: &str,
-    args: &[PluginValue],
-) -> PluginResult {
-    host_functions()
-        .iter()
-        .find(|(n, m, _)| *n == name && *m == method)
-        .map(|(_, _, f)| f(bridge.as_ref(), args))
-        .unwrap_or_else(|| PluginResult::Failed {
-            message: module_not_linked(name, Some(method)),
-        })
-}
-
-fn str_arg(args: &[PluginValue]) -> &str {
-    match args.first() {
-        Some(PluginValue::Str(value)) => value.as_str(),
-        _ => "",
-    }
-}
-
-fn document_root(bridge: &dyn PlatformBridge) -> Result<std::path::PathBuf, String> {
-    bridge.document_dir().map(std::path::PathBuf::from)
-}
-
-fn done_null() -> PluginResult {
-    PluginResult::Done(PluginValue::Null)
-}
-
-fn clipboard_get(bridge: &dyn PlatformBridge, _: &[PluginValue]) -> PluginResult {
-    PluginResult::Done(PluginValue::Str(bridge.read_clipboard()))
-}
-
-fn clipboard_set(bridge: &dyn PlatformBridge, args: &[PluginValue]) -> PluginResult {
-    bridge.write_clipboard(str_arg(args));
-    done_null()
-}
-
-fn linking_open(bridge: &dyn PlatformBridge, args: &[PluginValue]) -> PluginResult {
-    match bridge.open_url(str_arg(args)) {
-        Ok(()) => done_null(),
-        Err(message) => PluginResult::Failed { message },
-    }
-}
-
-fn fs_document_dir(bridge: &dyn PlatformBridge, _: &[PluginValue]) -> PluginResult {
-    match bridge.document_dir() {
-        Ok(dir) => PluginResult::Done(PluginValue::Str(dir)),
-        Err(message) => PluginResult::Failed { message },
-    }
-}
-
-fn fs_read(bridge: &dyn PlatformBridge, args: &[PluginValue]) -> PluginResult {
-    match document_root(bridge).and_then(|dir| crate::files::read_document(&dir, str_arg(args))) {
-        Ok(bytes) => PluginResult::Done(PluginValue::Bytes(bytes)),
-        Err(message) => PluginResult::Failed { message },
-    }
-}
-
-fn fs_write(bridge: &dyn PlatformBridge, args: &[PluginValue]) -> PluginResult {
-    let bytes = match args.get(1) {
-        Some(PluginValue::Bytes(bytes)) => bytes.clone(),
-        Some(PluginValue::Str(value)) => value.as_bytes().to_vec(),
-        _ => Vec::new(),
-    };
-    match document_root(bridge)
-        .and_then(|dir| crate::files::write_document(&dir, str_arg(args), &bytes))
-    {
-        Ok(()) => done_null(),
-        Err(message) => PluginResult::Failed { message },
-    }
-}
-
-fn fs_delete(bridge: &dyn PlatformBridge, args: &[PluginValue]) -> PluginResult {
-    match document_root(bridge).and_then(|dir| crate::files::delete_document(&dir, str_arg(args))) {
-        Ok(()) => done_null(),
-        Err(message) => PluginResult::Failed { message },
-    }
-}
-
-fn fs_pick(bridge: &dyn PlatformBridge, _: &[PluginValue]) -> PluginResult {
-    match bridge.pick_document() {
-        Ok(Some(name)) => PluginResult::Done(PluginValue::Map(vec![(
-            "name".to_owned(),
-            PluginValue::Str(name),
-        )])),
-        Ok(None) => done_null(),
-        Err(message) => PluginResult::Failed { message },
-    }
-}
-
-fn store_get(bridge: &dyn PlatformBridge, args: &[PluginValue]) -> PluginResult {
-    match document_root(bridge)
-        .and_then(|dir| crate::files::store_get(&dir, &string_list(args.first())))
-    {
-        Ok(rows) => PluginResult::Done(PluginValue::List(
-            rows.into_iter()
-                .map(|(key, value)| {
-                    PluginValue::List(vec![
-                        PluginValue::Str(key),
-                        value.map(PluginValue::Str).unwrap_or(PluginValue::Null),
-                    ])
-                })
-                .collect(),
-        )),
-        Err(message) => PluginResult::Failed { message },
-    }
-}
-
-fn store_set(bridge: &dyn PlatformBridge, args: &[PluginValue]) -> PluginResult {
-    match document_root(bridge)
-        .and_then(|dir| crate::files::store_set(&dir, &string_pairs(args.first())))
-    {
-        Ok(()) => done_null(),
-        Err(message) => PluginResult::Failed { message },
-    }
-}
-
-fn store_remove(bridge: &dyn PlatformBridge, args: &[PluginValue]) -> PluginResult {
-    match document_root(bridge)
-        .and_then(|dir| crate::files::store_remove(&dir, &string_list(args.first())))
-    {
-        Ok(()) => done_null(),
-        Err(message) => PluginResult::Failed { message },
-    }
-}
-
-fn store_clear(bridge: &dyn PlatformBridge, _: &[PluginValue]) -> PluginResult {
-    match document_root(bridge).and_then(|dir| crate::files::store_clear(&dir)) {
-        Ok(()) => done_null(),
-        Err(message) => PluginResult::Failed { message },
-    }
-}
-
-fn perm_status(bridge: &dyn PlatformBridge, args: &[PluginValue]) -> PluginResult {
-    PluginResult::Done(PluginValue::Str(bridge.permission_status(str_arg(args))))
-}
-
-fn perm_request(bridge: &dyn PlatformBridge, args: &[PluginValue]) -> PluginResult {
-    let rows = bridge
-        .request_permissions(&string_list(args.first()))
-        .into_iter()
-        .map(|(name, status)| (name, PluginValue::Str(status)))
-        .collect();
-    PluginResult::Done(PluginValue::Map(rows))
-}
-
-fn perm_rationale(bridge: &dyn PlatformBridge, args: &[PluginValue]) -> PluginResult {
-    PluginResult::Done(PluginValue::Bool(
-        bridge.permission_rationale(str_arg(args)),
-    ))
-}
-
-fn perm_service(bridge: &dyn PlatformBridge, args: &[PluginValue]) -> PluginResult {
-    PluginResult::Done(PluginValue::Str(bridge.service_status(str_arg(args))))
-}
-
-fn perm_settings(bridge: &dyn PlatformBridge, _: &[PluginValue]) -> PluginResult {
-    PluginResult::Done(PluginValue::Bool(bridge.open_app_settings()))
-}
-
-fn string_list(value: Option<&PluginValue>) -> Vec<String> {
-    let Some(PluginValue::List(items)) = value else {
-        return Vec::new();
-    };
-    items
-        .iter()
-        .filter_map(|item| match item {
-            PluginValue::Str(text) => Some(text.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-fn string_pairs(value: Option<&PluginValue>) -> Vec<(String, String)> {
-    let Some(PluginValue::List(rows)) = value else {
-        return Vec::new();
-    };
-    rows.iter()
-        .filter_map(|row| {
-            let PluginValue::List(pair) = row else {
-                return None;
-            };
-            match (pair.first(), pair.get(1)) {
-                (Some(PluginValue::Str(key)), Some(PluginValue::Str(value))) => {
-                    Some((key.clone(), value.clone()))
-                }
-                _ => None,
-            }
-        })
-        .collect()
 }
 
 fn post_socket(inbox: &Inbox, id: u64, event: &str, text: bool, data: &[u8]) {
@@ -575,10 +333,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
-    use session::{HttpClient, HttpRequest, PluginResult, PluginValue};
+    use session::{HttpClient, HttpRequest};
 
     use crate::http::OpenWireClient;
-    use crate::platform::EmptyBridge;
 
     fn request(url: &str) -> HttpRequest {
         HttpRequest {
@@ -734,62 +491,5 @@ mod tests {
         // but the contract a real client honors is "stop when the sink says no".
         assert!(outcome.is_ok());
         assert_eq!(seen, 2);
-    }
-
-    fn test_bridge() -> Arc<dyn crate::PlatformBridge> {
-        Arc::new(EmptyBridge)
-    }
-
-    #[test]
-    fn unknown_module_is_not_linked() {
-        let result = super::plugin(&test_bridge(), "Camera", "take", &[]);
-        match result {
-            PluginResult::Failed { message } => {
-                assert!(message.contains("not linked"), "{message}");
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn clipboard_and_permissions_hit_the_host_table() {
-        let bridge = test_bridge();
-        match super::plugin(&bridge, "Clipboard", "getString", &[]) {
-            PluginResult::Done(PluginValue::Str(text)) => assert!(text.is_empty()),
-            other => panic!("{other:?}"),
-        }
-        match super::plugin(
-            &bridge,
-            "Clipboard",
-            "setString",
-            &[PluginValue::Str("hi".into())],
-        ) {
-            PluginResult::Done(PluginValue::Null) => {}
-            other => panic!("{other:?}"),
-        }
-        match super::plugin(
-            &bridge,
-            "Permissions",
-            "checkPermissionStatus",
-            &[PluginValue::Str("camera".into())],
-        ) {
-            PluginResult::Done(PluginValue::Str(status)) => assert_eq!(status, "denied"),
-            other => panic!("{other:?}"),
-        }
-        match super::plugin(&bridge, "Permissions", "openAppSettings", &[]) {
-            PluginResult::Done(PluginValue::Bool(false)) => {}
-            other => panic!("{other:?}"),
-        }
-        match super::plugin(
-            &bridge,
-            "Linking",
-            "openURL",
-            &[PluginValue::Str("https://example.test".into())],
-        ) {
-            PluginResult::Failed { message } => {
-                assert!(message.contains("not linked"), "{message}")
-            }
-            other => panic!("{other:?}"),
-        }
     }
 }

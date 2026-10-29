@@ -611,6 +611,18 @@ static int push_js_arg(Host *host, JSValueConst value) {
     return 0;
 }
 
+static const char *host_last_error(Host *host) {
+    if (!host->fns.module_error) {
+        return NULL;
+    }
+    size_t len = 0;
+    const char *text = host->fns.module_error(host->fns.session, &len);
+    if (!text || !text[0]) {
+        return NULL;
+    }
+    return text;
+}
+
 static JSValue call_host_method(Host *host, const char *name, size_t name_len, const char *method,
                                 size_t method_len, int argc, JSValueConst *argv) {
     if (!host->fns.module_prepare || !host->fns.module_finish) {
@@ -618,6 +630,10 @@ static JSValue call_host_method(Host *host, const char *name, size_t name_len, c
     }
     int kind = host->fns.module_prepare(host->fns.session, name, name_len, method, method_len);
     if (kind < 0) {
+        const char *err = host_last_error(host);
+        if (err) {
+            return throw_msg(host->ctx, err);
+        }
         char message[160];
         snprintf(message, sizeof(message), "module \"%.*s.%.*s\" is not linked", (int)name_len,
                  name, (int)method_len, method);
@@ -643,11 +659,13 @@ static JSValue call_host_method(Host *host, const char *name, size_t name_len, c
     }
     int finished = host->fns.module_finish(host->fns.session);
     if (finished < 0) {
+        const char *err = host_last_error(host);
+        const char *msg = err ? err : "module is not linked";
         if (kind == 1) {
-            settle(host, token, 0, JS_NewString(host->ctx, "module is not linked"));
+            settle(host, token, 0, JS_NewString(host->ctx, msg));
             return promise;
         }
-        return throw_msg(host->ctx, "module is not linked");
+        return throw_msg(host->ctx, msg);
     }
     if (kind == 0) {
         return pop_value(host);

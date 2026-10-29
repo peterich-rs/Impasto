@@ -3,16 +3,18 @@
 
 mod command;
 mod error;
+mod exec;
 mod files;
 mod http;
 mod images;
 mod ime;
 mod input;
+mod modules;
 mod net;
-mod platform;
 mod present;
 mod ptr;
 mod queue;
+mod rt;
 mod scheduler;
 mod shaper;
 mod shell;
@@ -25,9 +27,13 @@ use session::Metrics;
 
 pub use command::{Command, FrameToken, SurfaceId, SurfaceTarget};
 pub use error::{BootError, LogLevel, SessionError};
+pub use exec::{MainThreadPoster, RtExec, settle_factory};
 pub use http::{OpenWireClient, http_client};
 pub use images::{ImageDecoder, ImageError, ImageHandle, ImageReady};
-pub use platform::{EmptyBridge, PlatformBridge};
+pub use modules::{
+    ClipboardHost, LinkingHost, PermissionsHost, StorageHost, app_state, async_storage, clipboard,
+    file_system, linking, memory, permissions,
+};
 pub use present::{AfterPresent, after_present};
 pub use ptr::NativePtr;
 pub use session::{FrameTime, Lifecycle};
@@ -43,6 +49,7 @@ pub enum Launch {
             dyn FnOnce(
                     &EngineSlot,
                     Box<dyn Fn(session::IoJob) + Send>,
+                    session::HostConfig,
                 ) -> Result<Box<dyn session::Session>, SessionError>
                 + Send,
         >,
@@ -90,7 +97,9 @@ pub struct Boot {
     pub services: Box<dyn Services>,
     pub vsync: Arc<dyn Vsync>,
     pub decoder: Arc<dyn ImageDecoder>,
-    pub bridge: Arc<dyn PlatformBridge>,
+    pub modules: Vec<session::HostModule>,
+    pub main_thread: Option<MainThreadPoster>,
+    pub launch_url: session::Shared<Option<String>>,
     /// Absent HTTP fails with `network is not linked`. Hosts inject [`http_client`].
     pub http: Option<Arc<dyn session::HttpClient>>,
     pub open_surface: Box<
@@ -99,6 +108,13 @@ pub struct Boot {
     >,
     /// Log one line of layer-tree shape after a frame records new layers.
     pub dump_list: bool,
+}
+
+impl Boot {
+    pub fn with_module(mut self, module: session::HostModule) -> Self {
+        self.modules.push(module);
+        self
+    }
 }
 
 pub fn metrics(width: f32, height: f32, device_pixel_ratio: f32) -> Metrics {

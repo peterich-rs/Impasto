@@ -27,7 +27,14 @@ pub fn open(
     shaper: impl Shaper + 'static,
     log: Box<dyn Fn(u8, &str)>,
 ) -> Result<Box<dyn session::Session>, Error> {
-    open_with_io(script, name, shaper, log, None)
+    open_with_io(
+        script,
+        name,
+        shaper,
+        log,
+        None,
+        session::HostConfig::disconnected(),
+    )
 }
 
 /// Opens a session and installs the host sink for [`session::IoJob`].
@@ -37,15 +44,16 @@ pub fn open_with_io(
     shaper: impl Shaper + 'static,
     log: Box<dyn Fn(u8, &str)>,
     io: Option<Box<dyn Fn(session::IoJob) + Send>>,
+    host: session::HostConfig,
 ) -> Result<Box<dyn session::Session>, Error> {
     #[cfg(quickjs_missing)]
     {
-        let _ = (script, name, shaper, log, io);
+        let _ = (script, name, shaper, log, io, host);
         Err(Error::NotLinked)
     }
     #[cfg(quickjs)]
     {
-        let mut session = JsSession::open(script, name, shaper, log)?;
+        let mut session = JsSession::open_with(script, name, shaper, log, None, host)?;
         if let Some(io) = io {
             session.install_io(io);
         }
@@ -56,7 +64,12 @@ pub fn open_with_io(
 #[cfg(test)]
 mod tests {
     use protocol::Command;
-    use session::{InputEvent, Key, Metrics, Session};
+    #[cfg(quickjs)]
+    use session::{
+        HostConfig, HostMethod, HostModule, ImmediateExec, InputEvent, IoEvent, Key,
+        ModuleRegistry, PluginResult, PluginValue,
+    };
+    use session::{Metrics, Session};
     use ui_core::{Phase, PointerEvent};
 
     use super::{Error, open};
@@ -88,6 +101,105 @@ mod tests {
 
     fn no_log() -> Box<dyn Fn(u8, &str)> {
         Box::new(|_, _| {})
+    }
+
+    #[cfg(quickjs)]
+    fn test_host() -> (
+        HostConfig,
+        std::sync::Arc<std::sync::Mutex<Vec<(u64, PluginResult)>>>,
+    ) {
+        use std::sync::{Arc, Mutex};
+        let clipboard = Arc::new(Mutex::new(String::new()));
+        let app_state = session::shared("active".to_owned());
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        let settle = {
+            let pending = Arc::clone(&pending);
+            Arc::new(move |token: u64| {
+                let pending = Arc::clone(&pending);
+                session::Settle::new(move |result| {
+                    pending
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push((token, result));
+                })
+            }) as Arc<dyn Fn(u64) -> session::Settle + Send + Sync>
+        };
+        let config = HostConfig {
+            registry: Arc::new(ModuleRegistry::new(vec![
+                HostModule {
+                    name: "Clipboard",
+                    specifier: "@uifw/clipboard/host",
+                    methods: vec![
+                        HostMethod::sync("getString", {
+                            let clipboard = Arc::clone(&clipboard);
+                            move |_| {
+                                Ok(PluginValue::Str(
+                                    clipboard
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                        .clone(),
+                                ))
+                            }
+                        }),
+                        HostMethod::sync("setString", {
+                            let clipboard = Arc::clone(&clipboard);
+                            move |args| {
+                                let text = match args.first() {
+                                    Some(PluginValue::Str(text)) => text.clone(),
+                                    _ => String::new(),
+                                };
+                                *clipboard
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = text;
+                                Ok(PluginValue::Null)
+                            }
+                        }),
+                    ],
+                },
+                HostModule {
+                    name: "AppState",
+                    specifier: "@uifw/app-state/host",
+                    methods: vec![HostMethod::sync("getCurrentState", {
+                        let app_state = Arc::clone(&app_state);
+                        move |_| Ok(PluginValue::Str(session::shared_read(&app_state)))
+                    })],
+                },
+                HostModule {
+                    name: "Echo",
+                    specifier: "@uifw/echo/host",
+                    methods: vec![
+                        HostMethod::sync("fail", |_| Err("boom from host".into())),
+                        HostMethod::promise("later", |args, settle, exec| {
+                            let value = match args.first() {
+                                Some(PluginValue::Str(text)) => text.clone(),
+                                _ => String::new(),
+                            };
+                            exec.now(settle, PluginResult::Done(PluginValue::Str(value)));
+                        }),
+                    ],
+                },
+            ])),
+            exec: Arc::new(ImmediateExec),
+            settle,
+            app_state,
+            launch_url: session::shared(None),
+        };
+        (config, pending)
+    }
+
+    #[cfg(quickjs)]
+    fn drain_plugin(
+        session: &mut dyn Session,
+        pending: &std::sync::Mutex<Vec<(u64, PluginResult)>>,
+    ) {
+        let events: Vec<_> = pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain(..)
+            .collect();
+        for (token, result) in events {
+            session.io_event(IoEvent::Plugin { token, result });
+        }
     }
 
     fn metrics() -> Metrics {
@@ -1313,6 +1425,7 @@ mod tests {
         }
     }
 
+    #[cfg(quickjs)]
     fn rewritten_commands(
         before: &protocol::LayerTree,
         after: &protocol::LayerTree,
@@ -1718,16 +1831,19 @@ mod tests {
                 const app = TurboModuleRegistry.getEnforcing("AppState");
                 app.addEventListener("change", (state) => console.log("state:" + state));
                 const clip = TurboModuleRegistry.getEnforcing("Clipboard");
-                clip.setString("hi").then(() => clip.getString()).then((text) => console.log("clip:" + text));
+                clip.setString("hi");
+                console.log("clip:" + clip.getString());
                 const socket = new WebSocket("ws://example.test/socket");
                 socket.onerror = () => console.log("ws");
             "#;
+            let (host, _pending) = test_host();
             let mut session = match super::JsSession::open_with(
                 source,
                 "host.js",
                 ui_core::MonoShaper::default(),
                 log,
                 Some(Arc::new(FixedHttp)),
+                host,
             ) {
                 Ok(session) => session,
                 Err(error) => panic!("{error}"),
@@ -1749,6 +1865,94 @@ mod tests {
             assert!(text.contains("state:background"), "{text}");
             assert!(!text.contains("cleared"), "{text}");
             assert!(text.contains("later"), "{text}");
+        }
+    }
+
+    #[test]
+    fn sync_module_error_reaches_js() {
+        #[cfg(not(quickjs))]
+        {
+            return;
+        }
+        #[cfg(quickjs)]
+        {
+            let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let log_lines = std::sync::Arc::clone(&lines);
+            let log = Box::new(move |_level: u8, text: &str| {
+                log_lines
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(text.to_owned());
+            });
+            let source = r#"
+                const echo = TurboModuleRegistry.getEnforcing("Echo");
+                try {
+                    echo.fail();
+                    console.log("ok");
+                } catch (error) {
+                    console.log("err:" + error.message);
+                }
+            "#;
+            let (host, _pending) = test_host();
+            match super::JsSession::open_with(
+                source,
+                "error.js",
+                ui_core::MonoShaper::default(),
+                log,
+                None,
+                host,
+            ) {
+                Ok(_) => {}
+                Err(error) => panic!("{error}"),
+            }
+            let text = lines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .join("\n");
+            assert!(text.contains("err:boom from host"), "{text}");
+        }
+    }
+
+    #[test]
+    fn promise_module_settles_through_io_event() {
+        #[cfg(not(quickjs))]
+        {
+            return;
+        }
+        #[cfg(quickjs)]
+        {
+            let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let log_lines = std::sync::Arc::clone(&lines);
+            let log = Box::new(move |_level: u8, text: &str| {
+                log_lines
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(text.to_owned());
+            });
+            let source = r#"
+                const echo = TurboModuleRegistry.getEnforcing("Echo");
+                echo.later("ok").then((value) => console.log("later:" + value));
+            "#;
+            let (host, pending) = test_host();
+            let mut session = match super::JsSession::open_with(
+                source,
+                "promise.js",
+                ui_core::MonoShaper::default(),
+                log,
+                None,
+                host,
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
+            drain_plugin(&mut session, pending.as_ref());
+            session.metrics(&metrics());
+            let _ = session.frame(session::FrameTime::at(0.0));
+            let text = lines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .join("\n");
+            assert!(text.contains("later:ok"), "{text}");
         }
     }
 

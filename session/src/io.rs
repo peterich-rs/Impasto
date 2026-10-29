@@ -1,7 +1,7 @@
-//! Work that leaves the render thread and comes back as a [`PluginResult`].
+//! Work that leaves the render thread and comes back as an [`IoEvent`].
 //!
-//! Language globals such as `fetch` and framework modules such as `Clipboard`
-//! share this job list. The host decides which thread runs each job.
+//! Language globals such as `fetch` share this job list. Native module
+//! promises settle through [`crate::IoEvent::Plugin`], not [`IoJob`].
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -110,12 +110,6 @@ pub enum IoJob {
     Abort {
         token: u64,
     },
-    Plugin {
-        token: u64,
-        name: String,
-        method: String,
-        args: Vec<PluginValue>,
-    },
     SocketOpen {
         id: u64,
         url: String,
@@ -161,173 +155,6 @@ pub trait HttpClient: Send + Sync {
 /// Largest response body `fetch` will accept.
 pub const HTTP_BODY_LIMIT: usize = 4 * 1024 * 1024;
 
-/// Where a host-object method runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostPlace {
-    /// Reads session memory on the render thread.
-    Session,
-    /// Leaves the render thread. Always completes through a promise.
-    Platform,
-}
-
-/// Whether the script sees a return value or a promise.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostWait {
-    Sync,
-    Promise,
-}
-
-/// One method on a host object. The script calls it by name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HostMethod {
-    pub module: &'static str,
-    pub name: &'static str,
-    pub place: HostPlace,
-    pub wait: HostWait,
-}
-
-/// Every registered method, in table order. The `host-table` binary walks
-/// this to generate the TypeScript copy.
-pub fn all_host_methods() -> impl Iterator<Item = &'static HostMethod> {
-    HOST_METHODS.iter()
-}
-
-const HOST_METHODS: &[HostMethod] = &[
-    HostMethod {
-        module: "AppState",
-        name: "getCurrentState",
-        place: HostPlace::Session,
-        wait: HostWait::Sync,
-    },
-    HostMethod {
-        module: "Linking",
-        name: "getInitialURL",
-        place: HostPlace::Session,
-        wait: HostWait::Sync,
-    },
-    HostMethod {
-        module: "Linking",
-        name: "openURL",
-        place: HostPlace::Platform,
-        wait: HostWait::Promise,
-    },
-    HostMethod {
-        module: "Clipboard",
-        name: "getString",
-        place: HostPlace::Platform,
-        wait: HostWait::Promise,
-    },
-    HostMethod {
-        module: "Clipboard",
-        name: "setString",
-        place: HostPlace::Platform,
-        wait: HostWait::Promise,
-    },
-    HostMethod {
-        module: "FileSystem",
-        name: "documentDirectory",
-        place: HostPlace::Platform,
-        wait: HostWait::Promise,
-    },
-    HostMethod {
-        module: "FileSystem",
-        name: "read",
-        place: HostPlace::Platform,
-        wait: HostWait::Promise,
-    },
-    HostMethod {
-        module: "FileSystem",
-        name: "write",
-        place: HostPlace::Platform,
-        wait: HostWait::Promise,
-    },
-    HostMethod {
-        module: "FileSystem",
-        name: "delete",
-        place: HostPlace::Platform,
-        wait: HostWait::Promise,
-    },
-    HostMethod {
-        module: "FileSystem",
-        name: "pick",
-        place: HostPlace::Platform,
-        wait: HostWait::Promise,
-    },
-    HostMethod {
-        module: "AsyncStorage",
-        name: "multiGet",
-        place: HostPlace::Platform,
-        wait: HostWait::Promise,
-    },
-    HostMethod {
-        module: "AsyncStorage",
-        name: "multiSet",
-        place: HostPlace::Platform,
-        wait: HostWait::Promise,
-    },
-    HostMethod {
-        module: "AsyncStorage",
-        name: "multiRemove",
-        place: HostPlace::Platform,
-        wait: HostWait::Promise,
-    },
-    HostMethod {
-        module: "AsyncStorage",
-        name: "clear",
-        place: HostPlace::Platform,
-        wait: HostWait::Promise,
-    },
-    HostMethod {
-        module: "Permissions",
-        name: "checkPermissionStatus",
-        place: HostPlace::Platform,
-        wait: HostWait::Promise,
-    },
-    HostMethod {
-        module: "Permissions",
-        name: "requestPermissions",
-        place: HostPlace::Platform,
-        wait: HostWait::Promise,
-    },
-    HostMethod {
-        module: "Permissions",
-        name: "shouldShowRequestPermissionRationale",
-        place: HostPlace::Platform,
-        wait: HostWait::Promise,
-    },
-    HostMethod {
-        module: "Permissions",
-        name: "checkServiceStatus",
-        place: HostPlace::Platform,
-        wait: HostWait::Promise,
-    },
-    HostMethod {
-        module: "Permissions",
-        name: "openAppSettings",
-        place: HostPlace::Platform,
-        wait: HostWait::Promise,
-    },
-];
-
-/// The method row, if this module exposes `name`.
-pub fn host_method(module: &str, name: &str) -> Option<&'static HostMethod> {
-    HOST_METHODS
-        .iter()
-        .find(|method| method.module == module && method.name == name)
-}
-
-/// True when the module has at least one method. Camera stays unregistered.
-pub fn host_module_linked(module: &str) -> bool {
-    HOST_METHODS.iter().any(|method| method.module == module)
-}
-
-/// Methods of one module, in table order.
-pub fn host_module_methods(module: &str) -> impl Iterator<Item = &'static HostMethod> {
-    HOST_METHODS
-        .iter()
-        .filter(move |method| method.module == module)
-}
-
 /// `module "<name>" is not linked`, or with the method when the name exists but the method does not.
 pub fn module_not_linked(module: &str, method: Option<&str>) -> String {
     match method {
@@ -354,4 +181,31 @@ pub fn document_relative(path: &str) -> Result<String, String> {
         parts.push(part);
     }
     Ok(parts.join("/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::document_relative;
+
+    #[test]
+    fn document_relative_keeps_nested_files() {
+        match document_relative("a/b.bin") {
+            Ok(path) => assert_eq!(path, "a/b.bin"),
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    #[test]
+    fn document_relative_rejects_escape() {
+        for path in [
+            "", "/", "\\a", "a\\b", "C:foo", "..", "a/../b", "a/./b", "/abs",
+        ] {
+            match document_relative(path) {
+                Err(message) => {
+                    assert!(message.contains("outside"), "{path}: {message}");
+                }
+                Ok(ok) => panic!("{path} should fail, got {ok}"),
+            }
+        }
+    }
 }

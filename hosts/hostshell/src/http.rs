@@ -14,23 +14,18 @@ use session::{
     HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, HttpResponse,
 };
 
-/// openwire `Client` plus the tokio runtime that polls it.
+/// openwire `Client` plus a handle to the process tokio runtime.
 ///
-/// `client` and `runtime` stay reachable so a later call can use openwire's
+/// `client` and `handle` stay reachable so a later call can use openwire's
 /// own `Call` options without growing a second HTTP stack.
 pub struct OpenWireClient {
-    runtime: tokio::runtime::Runtime,
+    handle: tokio::runtime::Handle,
     client: Client,
 }
 
 impl OpenWireClient {
     pub fn new() -> Result<Self, String> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .thread_name("uifw-http")
-            .build()
-            .map_err(|error| error.to_string())?;
+        let handle = crate::rt::handle()?;
         let client = Client::builder()
             .call_timeout(Duration::from_secs(20))
             .connect_timeout(Duration::from_secs(20))
@@ -38,7 +33,7 @@ impl OpenWireClient {
             .max_decompressed_body_bytes(HTTP_BODY_LIMIT)
             .build()
             .map_err(|error| error.to_string())?;
-        Ok(Self { runtime, client })
+        Ok(Self { handle, client })
     }
 
     /// Build the openwire request, start the cancel watcher, and execute the
@@ -90,7 +85,7 @@ impl OpenWireClient {
         let call = self.client.new_call(built).call_timeout(call_timeout);
         let handle = call.handle();
         let cancel = Arc::clone(&request.cancel);
-        let watcher = self.runtime.spawn(async move {
+        let watcher = self.handle.spawn(async move {
             loop {
                 if cancel.load(Ordering::Acquire) {
                     handle.cancel();
@@ -99,7 +94,7 @@ impl OpenWireClient {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         });
-        let executed = self.runtime.block_on(call.execute()).map_err(|error| {
+        let executed = self.handle.block_on(call.execute()).map_err(|error| {
             watcher.abort();
             http_error(error)
         })?;
@@ -114,8 +109,8 @@ impl OpenWireClient {
         &self.client
     }
 
-    pub fn runtime(&self) -> &tokio::runtime::Runtime {
-        &self.runtime
+    pub fn runtime(&self) -> &tokio::runtime::Handle {
+        &self.handle
     }
 }
 
@@ -133,7 +128,7 @@ impl HttpClient for OpenWireClient {
                 )
             })
             .collect();
-        let payload = self.runtime.block_on(read_limited(response.into_body()));
+        let payload = self.handle.block_on(read_limited(response.into_body()));
         watcher.abort();
         Ok(HttpResponse {
             status,
@@ -167,7 +162,7 @@ impl HttpClient for OpenWireClient {
         let mut body = response.into_body();
         let mut failure: Option<HttpError> = None;
         loop {
-            let frame = self.runtime.block_on(body.frame());
+            let frame = self.handle.block_on(body.frame());
             let Some(frame) = frame else {
                 break;
             };
