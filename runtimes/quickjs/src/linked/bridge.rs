@@ -1,12 +1,10 @@
 //! Sized, animation, font, and host-module callbacks.
 
+use std::collections::HashSet;
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::Ordering;
 
-use session::{
-    HostPlace, HostWait, HttpError, HttpFailure, HttpRequest, IoJob, PluginResult, PluginValue,
-    host_method, host_module_linked, host_module_methods, module_not_linked,
-};
+use session::{HttpError, HttpFailure, HttpRequest, Invoke, IoJob, PluginResult, PluginValue};
 use ui_core::{AxisSize, DragClaim, FocusDirection, GridLine, Inset, NodeId};
 
 use super::ffi::*;
@@ -1233,13 +1231,6 @@ pub(super) fn submit_or_queue(inner: &Inner, job: IoJob, inline: impl FnOnce()) 
     }
 }
 
-pub(super) fn first_string(args: &[PluginValue]) -> String {
-    match args.first() {
-        Some(PluginValue::Str(text)) => text.clone(),
-        _ => String::new(),
-    }
-}
-
 pub(super) unsafe extern "C" fn http_call(
     session: *mut c_void,
     token: u64,
@@ -1423,16 +1414,20 @@ pub(super) fn push_prepared(inner: &Inner, value: PluginValue) {
     }
 }
 
+fn set_last_error(inner: &Inner, message: String) {
+    *inner.last_error.borrow_mut() = Some(cstring(&message));
+}
+
 pub(super) unsafe extern "C" fn module_has(
     session: *mut c_void,
     name: *const c_char,
     len: usize,
 ) -> i32 {
+    let inner = unsafe { inner(session) };
     let Some(name) = (unsafe { utf8_of(name, len) }) else {
         return 0;
     };
-    let _ = session;
-    i32::from(host_module_linked(name))
+    i32::from(inner.config.registry.module(name).is_some())
 }
 
 pub(super) unsafe extern "C" fn module_count(
@@ -1440,11 +1435,16 @@ pub(super) unsafe extern "C" fn module_count(
     name: *const c_char,
     len: usize,
 ) -> i32 {
-    let _ = session;
+    let inner = unsafe { inner(session) };
     let Some(name) = (unsafe { utf8_of(name, len) }) else {
         return 0;
     };
-    host_module_methods(name).count() as i32
+    inner
+        .config
+        .registry
+        .module(name)
+        .map(|module| module.methods.len() as i32)
+        .unwrap_or(0)
 }
 
 pub(super) unsafe extern "C" fn module_method_at(
@@ -1454,11 +1454,19 @@ pub(super) unsafe extern "C" fn module_method_at(
     index: i32,
     out_len: *mut usize,
 ) -> *const c_char {
-    let _ = session;
+    let inner = unsafe { inner(session) };
     let Some(name) = (unsafe { utf8_of(name, name_len) }) else {
         return ptr::null();
     };
-    let Some(method) = host_module_methods(name).nth(index as usize) else {
+    let Ok(index) = usize::try_from(index) else {
+        return ptr::null();
+    };
+    let Some(method) = inner
+        .config
+        .registry
+        .module(name)
+        .and_then(|module| module.methods.get(index))
+    else {
         return ptr::null();
     };
     if !out_len.is_null() {
@@ -1475,24 +1483,27 @@ pub(super) unsafe extern "C" fn module_prepare(
     method_len: usize,
 ) -> i32 {
     let inner = unsafe { inner(session) };
+    inner.last_error.borrow_mut().take();
     let Some(name) = (unsafe { utf8_of(name, name_len) }) else {
         return -1;
     };
     let Some(method) = (unsafe { utf8_of(method, method_len) }) else {
         return -1;
     };
-    let Some(spec) = host_method(name, method) else {
+    let Some(entry) = inner.config.registry.method(name, method) else {
+        set_last_error(inner, session::module_not_linked(name, Some(method)));
         return -1;
     };
+    let kind = match &entry.invoke {
+        Invoke::Sync(_) => 0,
+        Invoke::Promise(_) => 1,
+    };
     *inner.prepared.borrow_mut() = Some(PreparedCall {
-        module: name.to_owned(),
-        method: method.to_owned(),
-        place: spec.place,
-        wait: spec.wait,
+        invoke: entry.invoke.clone(),
         token: 0,
         args: ArgBuild::new(),
     });
-    i32::from(spec.wait == HostWait::Promise)
+    kind
 }
 
 pub(super) unsafe extern "C" fn module_push_null(session: *mut c_void) {
@@ -1578,178 +1589,39 @@ pub(super) unsafe extern "C" fn module_finish(session: *mut c_void) -> i32 {
         return -1;
     };
     let args = call.args.stack;
-    if call.wait == HostWait::Sync {
-        let result = session_call(inner, &call.module, &call.method);
-        if let PluginResult::Done(value) = result {
-            emit_value(inner, &value);
-            return 0;
-        }
-        return -1;
-    }
-    let token = call.token;
-    let module = call.module.clone();
-    let method = call.method.clone();
-    if call.place == HostPlace::Session {
-        let result = session_call(inner, &module, &method);
-        inner.pending.borrow_mut().plugin.push((token, result));
-        return 1;
-    }
-    submit_or_queue(
-        inner,
-        IoJob::Plugin {
-            token,
-            name: module.clone(),
-            method: method.clone(),
-            args: args.clone(),
+    match call.invoke {
+        Invoke::Sync(f) => match f(&args) {
+            Ok(value) => {
+                emit_value(inner, &value);
+                0
+            }
+            Err(message) => {
+                set_last_error(inner, message);
+                -1
+            }
         },
-        || {
-            let result = inline_platform(inner, &module, &method, &args);
-            inner.pending.borrow_mut().plugin.push((token, result));
-        },
-    );
-    1
-}
-
-pub(super) fn session_call(inner: &Inner, module: &str, method: &str) -> PluginResult {
-    match (module, method) {
-        ("AppState", "getCurrentState") => {
-            PluginResult::Done(PluginValue::Str(inner.app_state.borrow().clone()))
+        Invoke::Promise(f) => {
+            let settle = (inner.config.settle)(call.token);
+            f(&args, settle, inner.config.exec.as_ref());
+            1
         }
-        ("Linking", "getInitialURL") => {
-            let value = match inner.launch_url.borrow().clone() {
-                Some(url) => PluginValue::Str(url),
-                None => PluginValue::Null,
-            };
-            PluginResult::Done(value)
-        }
-        _ => PluginResult::Failed {
-            message: module_not_linked(module, Some(method)),
-        },
     }
 }
 
-pub(super) fn inline_platform(
-    inner: &Inner,
-    module: &str,
-    method: &str,
-    args: &[PluginValue],
-) -> PluginResult {
-    match (module, method) {
-        ("Clipboard", "getString") => {
-            PluginResult::Done(PluginValue::Str(inner.module_clipboard.borrow().clone()))
-        }
-        ("Clipboard", "setString") => {
-            *inner.module_clipboard.borrow_mut() = first_string(args);
-            PluginResult::Done(PluginValue::Null)
-        }
-        ("Linking", "openURL") => PluginResult::Done(PluginValue::Null),
-        ("FileSystem", "documentDirectory") => {
-            PluginResult::Done(PluginValue::Str("memory://documents".to_owned()))
-        }
-        ("FileSystem", "read") => match session::document_relative(&first_string(args)) {
-            Ok(path) => match inner.memory_files.borrow().get(&path) {
-                Some(bytes) => PluginResult::Done(PluginValue::Bytes(bytes.clone())),
-                None => PluginResult::Failed {
-                    message: "file is missing".to_owned(),
-                },
-            },
-            Err(message) => PluginResult::Failed { message },
-        },
-        ("FileSystem", "write") => match session::document_relative(&first_string(args)) {
-            Ok(path) => {
-                let bytes = match args.get(1) {
-                    Some(PluginValue::Bytes(bytes)) => bytes.clone(),
-                    Some(PluginValue::Str(text)) => text.as_bytes().to_vec(),
-                    _ => Vec::new(),
-                };
-                inner.memory_files.borrow_mut().insert(path, bytes);
-                PluginResult::Done(PluginValue::Null)
+pub(super) unsafe extern "C" fn module_error(
+    session: *mut c_void,
+    out_len: *mut usize,
+) -> *const c_char {
+    let inner = unsafe { inner(session) };
+    match inner.last_error.borrow().as_ref() {
+        Some(message) => {
+            if !out_len.is_null() {
+                unsafe { *out_len = message.as_bytes().len() };
             }
-            Err(message) => PluginResult::Failed { message },
-        },
-        ("FileSystem", "delete") => match session::document_relative(&first_string(args)) {
-            Ok(path) => {
-                inner.memory_files.borrow_mut().remove(&path);
-                PluginResult::Done(PluginValue::Null)
-            }
-            Err(message) => PluginResult::Failed { message },
-        },
-        ("FileSystem", "pick") => PluginResult::Done(PluginValue::Null),
-        ("AsyncStorage", "multiGet") => {
-            let keys = string_list(args.first());
-            let store = inner.memory_store.borrow();
-            let rows = keys
-                .into_iter()
-                .map(|key| {
-                    let value = store
-                        .get(&key)
-                        .cloned()
-                        .map(PluginValue::Str)
-                        .unwrap_or(PluginValue::Null);
-                    PluginValue::List(vec![PluginValue::Str(key), value])
-                })
-                .collect();
-            PluginResult::Done(PluginValue::List(rows))
+            message.as_ptr()
         }
-        ("AsyncStorage", "multiSet") => {
-            let mut store = inner.memory_store.borrow_mut();
-            if let Some(PluginValue::List(rows)) = args.first() {
-                for row in rows {
-                    if let PluginValue::List(pair) = row
-                        && let (Some(PluginValue::Str(key)), Some(PluginValue::Str(value))) =
-                            (pair.first(), pair.get(1))
-                    {
-                        store.insert(key.clone(), value.clone());
-                    }
-                }
-            }
-            PluginResult::Done(PluginValue::Null)
-        }
-        ("AsyncStorage", "multiRemove") => {
-            let mut store = inner.memory_store.borrow_mut();
-            for key in string_list(args.first()) {
-                store.remove(&key);
-            }
-            PluginResult::Done(PluginValue::Null)
-        }
-        ("AsyncStorage", "clear") => {
-            inner.memory_store.borrow_mut().clear();
-            PluginResult::Done(PluginValue::Null)
-        }
-        ("Permissions", "checkPermissionStatus") => {
-            PluginResult::Done(PluginValue::Str("denied".to_owned()))
-        }
-        ("Permissions", "requestPermissions") => {
-            let rows = string_list(args.first())
-                .into_iter()
-                .map(|name| (name, PluginValue::Str("denied".to_owned())))
-                .collect();
-            PluginResult::Done(PluginValue::Map(rows))
-        }
-        ("Permissions", "shouldShowRequestPermissionRationale") => {
-            PluginResult::Done(PluginValue::Bool(false))
-        }
-        ("Permissions", "checkServiceStatus") => {
-            PluginResult::Done(PluginValue::Str("notApplicable".to_owned()))
-        }
-        ("Permissions", "openAppSettings") => PluginResult::Done(PluginValue::Bool(false)),
-        _ => PluginResult::Failed {
-            message: module_not_linked(module, Some(method)),
-        },
+        None => ptr::null(),
     }
-}
-
-pub(super) fn string_list(value: Option<&PluginValue>) -> Vec<String> {
-    let Some(PluginValue::List(items)) = value else {
-        return Vec::new();
-    };
-    items
-        .iter()
-        .filter_map(|item| match item {
-            PluginValue::Str(text) => Some(text.clone()),
-            _ => None,
-        })
-        .collect()
 }
 
 pub(super) unsafe extern "C" fn socket_open(

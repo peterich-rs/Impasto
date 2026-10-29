@@ -237,8 +237,7 @@ pub fn start(boot: Boot) -> Result<Link, BootError> {
     let (net_tx, net_rx) = mpsc::channel();
     let (wake_tx, wake_rx) = mpsc::channel();
     let inbox_net = Arc::clone(&inbox);
-    let bridge = Arc::clone(&boot.bridge);
-    let _net = crate::net::spawn(net_rx, inbox_net, bridge, http);
+    let _net = crate::net::spawn(net_rx, inbox_net, http);
     let _time = crate::net::wake(wake_rx, Arc::clone(&inbox));
     let spawned = thread::Builder::new()
         .name("uifw-render".to_string())
@@ -393,6 +392,29 @@ fn render(
         typography: Rc::clone(&typography),
         log: Rc::clone(&log),
     };
+    let rt = match crate::rt::handle() {
+        Ok(handle) => handle,
+        Err(message) => {
+            log(LogLevel::Error, &message);
+            let error = BootError::Session(crate::SessionError::Runtime);
+            let _ = ready.send(Err(error.clone()));
+            return Err(error);
+        }
+    };
+    let app_state = session::shared("active".to_owned());
+    let launch_url = boot.launch_url.clone();
+    let mut modules = vec![crate::modules::app_state(Arc::clone(&app_state))];
+    modules.extend(boot.modules);
+    let host = session::HostConfig {
+        registry: Arc::new(session::ModuleRegistry::new(modules)),
+        exec: Arc::new(crate::RtExec {
+            rt,
+            main: boot.main_thread.clone(),
+        }),
+        settle: crate::settle_factory(Arc::clone(inbox)),
+        app_state,
+        launch_url,
+    };
     let session = match open(
         &slot,
         Box::new({
@@ -401,6 +423,7 @@ fn render(
                 let _ = submit.send(job);
             }
         }),
+        host,
     ) {
         Ok(opened) => Some(opened),
         Err(error) => {

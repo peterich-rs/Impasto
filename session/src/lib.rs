@@ -3,11 +3,15 @@
 use std::sync::Arc;
 
 mod io;
+mod modules;
 
 pub use io::{
-    HTTP_BODY_LIMIT, HostMethod, HostPlace, HostWait, HttpClient, HttpError, HttpFailure,
-    HttpPiece, HttpRequest, HttpResponse, IoJob, PluginResult, PluginValue, all_host_methods,
-    document_relative, host_method, host_module_linked, host_module_methods, module_not_linked,
+    HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, HttpResponse,
+    IoJob, PluginResult, PluginValue, document_relative, module_not_linked,
+};
+pub use modules::{
+    HostConfig, HostMethod, HostModule, ImmediateExec, Invoke, MethodExec, ModuleRegistry,
+    PromiseFn, Settle, Shared, SyncFn, Work, shared, shared_read, shared_write,
 };
 
 /// One edge of a window, in scene points.

@@ -21,9 +21,6 @@ import android.view.inputmethod.InputConnection;
 import android.widget.FrameLayout;
 
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * The content view. It receives pointers, keys, insets, and creates the
@@ -123,25 +120,6 @@ public final class HostView extends FrameLayout {
     }
 
     public String readClipboard() {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            return readClipboardOnUi();
-        }
-        AtomicReference<String> box = new AtomicReference<>("");
-        CountDownLatch latch = new CountDownLatch(1);
-        runOnUi(() -> {
-            box.set(readClipboardOnUi());
-            latch.countDown();
-        });
-        try {
-            latch.await(1, TimeUnit.SECONDS);
-        } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt();
-        }
-        String value = box.get();
-        return value == null ? "" : value;
-    }
-
-    private String readClipboardOnUi() {
         ClipboardManager manager = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
         if (manager == null || !manager.hasPrimaryClip() || manager.getPrimaryClip() == null) {
             return "";
@@ -149,6 +127,17 @@ public final class HostView extends FrameLayout {
         ClipData.Item item = manager.getPrimaryClip().getItemAt(0);
         CharSequence value = item.getText();
         return value == null ? "" : value.toString();
+    }
+
+    public void writeClipboardNow(String text) {
+        ClipboardManager manager = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+        if (manager != null) {
+            manager.setPrimaryClip(ClipData.newPlainText("uifw", text == null ? "" : text));
+        }
+    }
+
+    public void postNative(final long work) {
+        handler.post(() -> nativeRunWork(work));
     }
 
     public void publishSemantics(
@@ -504,4 +493,6 @@ public final class HostView extends FrameLayout {
     private static native void nativeZoom(float scale, float x, float y, long timeMs, float density);
 
     private static native void nativeKey(int action, int keyCode, int meta, int unicode);
+
+    private static native void nativeRunWork(long work);
 }

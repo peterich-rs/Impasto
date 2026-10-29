@@ -1,7 +1,7 @@
 //! Live QuickJS session. Tap handlers are JS values owned by the interpreter.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_void};
 use std::marker::PhantomData;
 use std::ptr;
@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use protocol::Command;
-use session::{HttpError, HttpResponse, InputEvent, IoJob, Key, Metrics, PluginResult, Session};
+use session::{
+    HostConfig, HttpError, HttpResponse, InputEvent, IoJob, Key, Metrics, PluginResult, Session,
+};
 use ui_core::{Affinity, FocusDirection, NodeId, Rect, Shaper, Tree};
 
 use crate::Error;
@@ -49,11 +51,10 @@ pub(super) struct Inner {
     pub(super) selection_rects: RefCell<Vec<f32>>,
     pub(super) io: RefCell<Option<Box<dyn Fn(IoJob) + Send>>>,
     pub(super) http: RefCell<Option<Arc<dyn session::HttpClient>>>,
-    pub(super) launch_url: RefCell<Option<String>>,
-    pub(super) app_state: RefCell<String>,
+    pub(super) config: HostConfig,
+    pub(super) last_error: RefCell<Option<CString>>,
     pub(super) paused: Cell<bool>,
     pub(super) cancels: RefCell<HashMap<u64, Arc<AtomicBool>>>,
-    pub(super) module_clipboard: RefCell<String>,
     pub(super) pending: RefCell<Pending>,
     /// Zero-copy payloads handed to QuickJS. The handle counter never repeats
     /// within a session, so a stale free from a freed view cannot drop live
@@ -64,8 +65,6 @@ pub(super) struct Inner {
     pub(super) reloads: RefCell<Vec<String>>,
     pub(super) mutations: RefCell<Vec<PendingMutation>>,
     pub(super) prepared: RefCell<Option<PreparedCall>>,
-    pub(super) memory_files: RefCell<HashMap<String, Vec<u8>>>,
-    pub(super) memory_store: RefCell<HashMap<String, String>>,
     pub(super) marks: FrameMarks,
     pub(super) drivers: RefCell<ui_core::DriverSet>,
     pub(super) driver_frame: Cell<bool>,
@@ -187,7 +186,7 @@ impl JsSession {
         shaper: impl Shaper + 'static,
         log: Box<dyn Fn(u8, &str)>,
     ) -> Result<Self, Error> {
-        Self::open_with(script, name, shaper, log, None)
+        Self::open_with(script, name, shaper, log, None, HostConfig::disconnected())
     }
 
     pub fn open_with(
@@ -196,6 +195,7 @@ impl JsSession {
         shaper: impl Shaper + 'static,
         log: Box<dyn Fn(u8, &str)>,
         http: Option<Arc<dyn session::HttpClient>>,
+        config: HostConfig,
     ) -> Result<Self, Error> {
         let inner = Box::into_raw(Box::new(Inner {
             tree: RefCell::new(Tree::new(shaper)),
@@ -211,19 +211,16 @@ impl JsSession {
             selection_rects: RefCell::new(Vec::new()),
             io: RefCell::new(None),
             http: RefCell::new(None),
-            launch_url: RefCell::new(None),
-            app_state: RefCell::new("unknown".to_owned()),
+            config,
+            last_error: RefCell::new(None),
             paused: Cell::new(false),
             cancels: RefCell::new(HashMap::new()),
-            module_clipboard: RefCell::new(String::new()),
             pending: RefCell::new(Pending::new()),
             out_bytes: RefCell::new((0, HashMap::new())),
             fonts: RefCell::new(FontBook::new()),
             reloads: RefCell::new(Vec::new()),
             mutations: RefCell::new(Vec::new()),
             prepared: RefCell::new(None),
-            memory_files: RefCell::new(HashMap::new()),
-            memory_store: RefCell::new(HashMap::new()),
             marks: FrameMarks::default(),
             drivers: RefCell::new(ui_core::DriverSet::new()),
             driver_frame: Cell::new(false),
@@ -360,6 +357,7 @@ impl JsSession {
             module_end_map,
             module_set_token,
             module_finish,
+            module_error,
             module_count,
             module_method_at,
             align,
@@ -1032,7 +1030,7 @@ impl Session for JsSession {
             session::Lifecycle::Detached => "detached",
         };
         let state = host::app_state(name);
-        *inner.app_state.borrow_mut() = state.to_owned();
+        session::shared_write(&inner.config.app_state, state.to_owned());
         emit_module(inner, "AppState", "change", 0, state);
     }
 
@@ -1087,7 +1085,7 @@ impl Session for JsSession {
 
     fn set_launch_url(&mut self, url: &str) {
         let inner = unsafe { &*self.inner };
-        *inner.launch_url.borrow_mut() = Some(url.to_owned());
+        session::shared_write(&inner.config.launch_url, Some(url.to_owned()));
         emit_module(inner, "Linking", "url", 1, url);
     }
 }

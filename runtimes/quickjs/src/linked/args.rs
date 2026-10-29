@@ -1,6 +1,6 @@
 //! PluginValue stack built from JS host calls.
 
-use session::{HostPlace, HostWait, PluginValue};
+use session::{Invoke, PluginValue};
 
 pub(super) struct ArgFrame {
     pub(super) map: bool,
@@ -57,10 +57,7 @@ impl ArgBuild {
 }
 
 pub(super) struct PreparedCall {
-    pub(super) module: String,
-    pub(super) method: String,
-    pub(super) place: HostPlace,
-    pub(super) wait: HostWait,
+    pub(super) invoke: Invoke,
     pub(super) token: u64,
     pub(super) args: ArgBuild,
 }

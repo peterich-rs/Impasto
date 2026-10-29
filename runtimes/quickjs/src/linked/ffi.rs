@@ -250,6 +250,7 @@ pub(super) struct QjsFns {
     pub(super) module_end_map: unsafe extern "C" fn(*mut c_void),
     pub(super) module_set_token: unsafe extern "C" fn(*mut c_void, u64),
     pub(super) module_finish: unsafe extern "C" fn(*mut c_void) -> i32,
+    pub(super) module_error: unsafe extern "C" fn(*mut c_void, *mut usize) -> *const c_char,
     pub(super) module_count: unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> i32,
     pub(super) module_method_at:
         unsafe extern "C" fn(*mut c_void, *const c_char, usize, i32, *mut usize) -> *const c_char,

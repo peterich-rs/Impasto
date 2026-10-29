@@ -1,5 +1,6 @@
-//! The generated host-method table in `frameworks/modules` must match
-//! `session`'s registry. `cargo run -p session --bin host-table` rewrites it.
+//! The generated host-method table in `frameworks/modules` must match the
+//! static contract snapshot in `host-table`.
+//! `cargo run -p session --bin host-table` rewrites it.
 
 use std::path::PathBuf;
 
