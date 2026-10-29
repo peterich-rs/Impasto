@@ -1,3 +1,4 @@
+use super::controller::ScrollController;
 use super::diff::{ShownRow, diff_rows};
 use super::prefix::PrefixHeights;
 use super::window::{
@@ -338,5 +339,47 @@ fn a_vertical_controller_discards_horizontal_drag() -> Result<(), crate::Error> 
     let (x, y) = tree.scroll_offset(both)?;
     assert!(x < 39.0 && x > 1.0, "both still scrolls x: {x}");
     assert!((y - 40.0).abs() < 0.5, "y stayed {y}");
+    Ok(())
+}
+
+#[test]
+fn consume_applies_overflow_when_the_axis_has_room() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    let scroll = tree.scroll()?;
+    tree.set_max_size(scroll, 80.0, 40.0)?;
+    let body = tree.sized(80.0, 400.0)?;
+    tree.add_child(scroll, body)?;
+    tree.layout()?;
+    let mut controller = ScrollController::default();
+    controller.bind(Some(scroll), Some(body), &tree);
+    controller.configure(0.0, PullMode::Off, 64.0, false, 0.0, None);
+    assert!(!controller.consume(&mut tree, 0.0, 0.0));
+    assert!(controller.consume(&mut tree, 0.0, 12.0));
+    assert!(tree.scroll_offset(scroll)?.1 > 11.0);
+    Ok(())
+}
+
+#[test]
+fn overscroll_pull_commits_when_the_scroll_returns_to_idle() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    let scroll = tree.scroll()?;
+    tree.set_max_size(scroll, 80.0, 40.0)?;
+    let body = tree.sized(80.0, 400.0)?;
+    tree.add_child(scroll, body)?;
+    tree.layout()?;
+    tree.set_scroll_offset(scroll, 0.0, -80.0)?;
+    let mut controller = ScrollController::default();
+    controller.bind(Some(scroll), Some(body), &tree);
+    controller.configure(0.0, PullMode::Overscroll, 1.0, true, 0.55, None);
+    let step = controller.drag_by(&mut tree, 0.0, 1.0);
+    if step.pending {
+        let _ = controller.finish_drag(&mut tree, false);
+    }
+    let _ = controller.drag_end();
+    assert!(
+        controller.tick(&mut tree),
+        "armed overscroll should commit on idle tick, overscroll {:?}",
+        tree.overscroll(scroll)
+    );
     Ok(())
 }

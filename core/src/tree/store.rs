@@ -325,31 +325,10 @@ impl Tree {
         child: NodeId,
         before: Option<NodeId>,
     ) -> Result<(), Error> {
-        if parent == child || self.is_under(parent, child)? {
-            return Err(Error::NotAChild);
-        }
-        if !can_parent(self.node(parent)?.kind) {
-            return Err(Error::NotAParent);
-        }
-        let _ = self.node(child)?;
-        // A sibling removed earlier in this turn is not a usable anchor.
-        // Appending keeps the insert from failing while that id is still live.
-        let before = match before {
-            Some(anchor) if anchor != child && self.pending_discard.contains(&anchor) => None,
-            other => other,
+        let before = match self.insert_target(parent, child, before)? {
+            InsertPlan::AlreadyHere => return Ok(()),
+            InsertPlan::Place { before } => before,
         };
-        if let Some(anchor) = before {
-            if anchor == child {
-                return if self.node(child)?.parent == Some(parent) {
-                    Ok(())
-                } else {
-                    Err(Error::NotAChild)
-                };
-            }
-            if self.node(anchor)?.parent != Some(parent) {
-                return Err(Error::NotAChild);
-            }
-        }
 
         if self.node(parent)?.taffy.is_none() {
             self.revive(parent)?;
@@ -382,6 +361,40 @@ impl Tree {
         self.mark_structure();
         self.pending_discard.retain(|id| *id != child);
         Ok(())
+    }
+
+    fn insert_target(
+        &self,
+        parent: NodeId,
+        child: NodeId,
+        before: Option<NodeId>,
+    ) -> Result<InsertPlan, Error> {
+        if parent == child || self.is_under(parent, child)? {
+            return Err(Error::NotAChild);
+        }
+        if !can_parent(self.node(parent)?.kind) {
+            return Err(Error::NotAParent);
+        }
+        let _ = self.node(child)?;
+        // A sibling removed earlier in this turn is not a usable anchor.
+        // Appending keeps the insert from failing while that id is still live.
+        let before = match before {
+            Some(anchor) if anchor != child && self.pending_discard.contains(&anchor) => None,
+            other => other,
+        };
+        if let Some(anchor) = before {
+            if anchor == child {
+                return if self.node(child)?.parent == Some(parent) {
+                    Ok(InsertPlan::AlreadyHere)
+                } else {
+                    Err(Error::NotAChild)
+                };
+            }
+            if self.node(anchor)?.parent != Some(parent) {
+                return Err(Error::NotAChild);
+            }
+        }
+        Ok(InsertPlan::Place { before })
     }
 
     /// Detaches `child` from `parent` and queues it for [`Tree::discard_detached`].
@@ -887,6 +900,11 @@ impl Drop for Tree {
             self.shaper.release_paint(id);
         }
     }
+}
+
+enum InsertPlan {
+    AlreadyHere,
+    Place { before: Option<NodeId> },
 }
 
 fn can_parent(kind: Kind) -> bool {

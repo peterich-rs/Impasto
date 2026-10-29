@@ -304,186 +304,31 @@ impl Tree {
         if node.kind != Kind::Transform && outside(clip, x, y, node.w, node.h) {
             return 1;
         }
-        let (fill, stroke_width, stroke_color, gradient, shadow, box_shadows) = rect_paint(node);
-        if node.w > 0.0
-            && node.h > 0.0
-            && (fill.is_some()
-                || stroke_width > 0.0
-                || gradient.is_some()
-                || shadow.is_some()
-                || !box_shadows.is_empty())
-        {
-            let mut color = fill.unwrap_or([0, 0, 0, 0]);
-            let gradient = match gradient.as_ref().map(prepared_gradient) {
-                Some(PreparedGradient::Paint(gradient)) => Some(gradient),
-                Some(PreparedGradient::Solid(stop)) => {
-                    color = stop;
-                    None
-                }
-                None | Some(PreparedGradient::Drop) => None,
-            };
-            commands.push(Command::Rect {
-                x,
-                y,
-                w: node.w,
-                h: node.h,
-                corner_radius: node.corner_radius(),
-                color,
-                stroke_width,
-                stroke_color,
-                gradient,
-                shadow,
-                box_shadows,
-            });
-        }
-        if let Some(text) = node.text()
-            && !text.utf8.is_empty()
-        {
-            let clip_overflow = text.style.overflow == protocol::TextOverflow::Clip
-                && !text.style.soft_wrap
-                && node.w > 0.0
-                && node.h > 0.0;
-            if clip_overflow {
-                commands.push(Command::PushClip {
-                    x,
-                    y,
-                    w: node.w,
-                    h: node.h,
-                    corner_radius: 0.0,
-                });
-            }
-            let utf8 = if text.spans.is_empty() {
-                Arc::clone(&text.utf8)
-            } else {
-                let joined: String = text.spans.iter().map(|span| span.utf8.as_str()).collect();
-                debug_assert_eq!(joined.as_str(), text.utf8.as_ref());
-                Arc::from(joined)
-            };
-            let paragraph = text.paragraph.unwrap_or(protocol::ParagraphId::NONE);
-            let style = Arc::clone(&text.style);
-            let spans = Arc::clone(&text.spans);
-            let links = Arc::clone(&text.links);
-            let color = text.color;
-            commands.push(Command::Text {
-                x,
-                y,
-                max_width: text.max_width.get(),
-                font_size: text.font_size * self.text_scale,
-                paragraph,
-                color,
-                utf8,
-                style,
-                spans,
-                links,
-            });
-            for (rect, mark) in &marks {
-                commands.push(Command::Rect {
-                    x: x + rect.x,
-                    y: y + rect.y,
-                    w: rect.w,
-                    h: rect.h,
-                    corner_radius: 0.0,
-                    color: *mark,
-                    stroke_width: 0.0,
-                    stroke_color: [0, 0, 0, 0],
-                    gradient: None,
-                    shadow: None,
-                    box_shadows: Arc::from([]),
-                });
-            }
-            if clip_overflow {
-                commands.push(Command::Pop);
-            }
-        }
-        if let Some(image) = node.image() {
-            commands.push(Command::Image {
-                x,
-                y,
-                w: node.w,
-                h: node.h,
-                source: Arc::clone(&image.source),
-                mode: image.mode,
-                required: image.required,
-            });
-        }
+        emit_rect(commands, node, x, y);
+        emit_text(self.text_scale, commands, node, x, y, &marks);
+        emit_image(commands, node, x, y);
         if !descend {
             return 1;
         }
-        let kind = node.kind;
-        let (w, h) = (node.w, node.h);
-        let corner_radius = node.corner_radius();
-        let alpha = node.alpha();
-        let scroll = node.scroll_paint();
-        let geom = node.transform();
-        let transform = (
-            geom.translate_x,
-            geom.translate_y,
-            geom.rotate_rad,
-            geom.scale_x,
-            geom.scale_y,
-        );
-        let blur = positive_sigma(node.blur());
-        let backdrop = positive_sigma(node.backdrop());
-        let blend = node.blend();
-        let blend = (blend != protocol::BlendMode::SrcOver).then_some(blend);
-        let mut child = node.first_child;
         // A settled opacity composites nothing: children draw straight into the
         // current picture. A zero alpha skips the subtree entirely.
-        if kind == Kind::Opacity && alpha == Some(0) {
+        if node.kind == Kind::Opacity && node.alpha() == Some(0) {
             return 1;
         }
-        let child_offset = if kind == Kind::Scroll {
+        let scroll = node.scroll_paint();
+        let child_offset = if node.kind == Kind::Scroll {
             (offset.0 + scroll.0, offset.1 + scroll.1)
         } else {
             offset
         };
-        let pushes_matrix = kind == Kind::Transform && !geom.is_identity();
-        let pushes_opacity = kind == Kind::Opacity && alpha.unwrap_or(255) != 255;
-        let child_clip = match kind {
+        let child_clip = match node.kind {
             Kind::Transform => None,
-            Kind::Scroll | Kind::Clip => intersect(clip, x, y, w, h),
+            Kind::Scroll | Kind::Clip => intersect(clip, x, y, node.w, node.h),
             _ => clip,
         };
-        match kind {
-            Kind::Clip => commands.push(Command::PushClip {
-                x,
-                y,
-                w,
-                h,
-                corner_radius,
-            }),
-            Kind::Opacity if pushes_opacity => commands.push(Command::PushOpacity {
-                x,
-                y,
-                w,
-                h,
-                alpha: alpha.unwrap_or(255),
-            }),
-            Kind::Scroll => commands.push(Command::PushClip {
-                x,
-                y,
-                w,
-                h,
-                corner_radius: 0.0,
-            }),
-            Kind::Transform if pushes_matrix => commands.push(Command::PushTransform {
-                translate_x: transform.0,
-                translate_y: transform.1,
-                rotate_rad: transform.2,
-                scale_x: transform.3,
-                scale_y: transform.4,
-            }),
-            _ => {}
-        }
-        if let Some(mode) = blend {
-            commands.push(Command::PushBlend { x, y, w, h, mode });
-        }
-        if let Some(sigma) = blur {
-            commands.push(Command::PushBlur { x, y, w, h, sigma });
-        }
-        if let Some(sigma) = backdrop {
-            commands.push(Command::PushBackdropBlur { x, y, w, h, sigma });
-        }
+        let mut child = node.first_child;
+        let frame = RecordFrame::capture(node, x, y);
+        frame.push(commands);
         let mut visits = 1;
         while let Some(current) = child {
             let next = self.get(current).and_then(|node| node.next);
@@ -498,21 +343,7 @@ impl Tree {
             );
             child = next;
         }
-        if backdrop.is_some() {
-            commands.push(Command::Pop);
-        }
-        if blur.is_some() {
-            commands.push(Command::Pop);
-        }
-        if blend.is_some() {
-            commands.push(Command::Pop);
-        }
-        if matches!(kind, Kind::Clip | Kind::Scroll)
-            || (kind == Kind::Opacity && pushes_opacity)
-            || (kind == Kind::Transform && pushes_matrix)
-        {
-            commands.push(Command::Pop);
-        }
+        frame.pop(commands);
         visits
     }
 
@@ -1283,6 +1114,250 @@ fn positive_sigma(sigma: f32) -> Option<f32> {
         Some(sigma)
     } else {
         None
+    }
+}
+
+fn emit_rect(commands: &mut Vec<Command>, node: &super::node::Node, x: f32, y: f32) {
+    let (fill, stroke_width, stroke_color, gradient, shadow, box_shadows) = rect_paint(node);
+    if node.w <= 0.0
+        || node.h <= 0.0
+        || (fill.is_none()
+            && stroke_width <= 0.0
+            && gradient.is_none()
+            && shadow.is_none()
+            && box_shadows.is_empty())
+    {
+        return;
+    }
+    let mut color = fill.unwrap_or([0, 0, 0, 0]);
+    let gradient = match gradient.as_ref().map(prepared_gradient) {
+        Some(PreparedGradient::Paint(gradient)) => Some(gradient),
+        Some(PreparedGradient::Solid(stop)) => {
+            color = stop;
+            None
+        }
+        None | Some(PreparedGradient::Drop) => None,
+    };
+    commands.push(Command::Rect {
+        x,
+        y,
+        w: node.w,
+        h: node.h,
+        corner_radius: node.corner_radius(),
+        color,
+        stroke_width,
+        stroke_color,
+        gradient,
+        shadow,
+        box_shadows,
+    });
+}
+
+fn emit_text(
+    text_scale: f32,
+    commands: &mut Vec<Command>,
+    node: &super::node::Node,
+    x: f32,
+    y: f32,
+    marks: &[(super::Rect, [u8; 4])],
+) {
+    let Some(text) = node.text() else {
+        return;
+    };
+    if text.utf8.is_empty() {
+        return;
+    }
+    let clip_overflow = text.style.overflow == protocol::TextOverflow::Clip
+        && !text.style.soft_wrap
+        && node.w > 0.0
+        && node.h > 0.0;
+    if clip_overflow {
+        commands.push(Command::PushClip {
+            x,
+            y,
+            w: node.w,
+            h: node.h,
+            corner_radius: 0.0,
+        });
+    }
+    let utf8 = if text.spans.is_empty() {
+        Arc::clone(&text.utf8)
+    } else {
+        let joined: String = text.spans.iter().map(|span| span.utf8.as_str()).collect();
+        debug_assert_eq!(joined.as_str(), text.utf8.as_ref());
+        Arc::from(joined)
+    };
+    commands.push(Command::Text {
+        x,
+        y,
+        max_width: text.max_width.get(),
+        font_size: text.font_size * text_scale,
+        paragraph: text.paragraph.unwrap_or(protocol::ParagraphId::NONE),
+        color: text.color,
+        utf8,
+        style: Arc::clone(&text.style),
+        spans: Arc::clone(&text.spans),
+        links: Arc::clone(&text.links),
+    });
+    for (rect, mark) in marks {
+        commands.push(Command::Rect {
+            x: x + rect.x,
+            y: y + rect.y,
+            w: rect.w,
+            h: rect.h,
+            corner_radius: 0.0,
+            color: *mark,
+            stroke_width: 0.0,
+            stroke_color: [0, 0, 0, 0],
+            gradient: None,
+            shadow: None,
+            box_shadows: Arc::from([]),
+        });
+    }
+    if clip_overflow {
+        commands.push(Command::Pop);
+    }
+}
+
+fn emit_image(commands: &mut Vec<Command>, node: &super::node::Node, x: f32, y: f32) {
+    let Some(image) = node.image() else {
+        return;
+    };
+    commands.push(Command::Image {
+        x,
+        y,
+        w: node.w,
+        h: node.h,
+        source: Arc::clone(&image.source),
+        mode: image.mode,
+        required: image.required,
+    });
+}
+
+struct RecordFrame {
+    kind: Kind,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    corner_radius: f32,
+    alpha: Option<u8>,
+    translate_x: f32,
+    translate_y: f32,
+    rotate_rad: f32,
+    scale_x: f32,
+    scale_y: f32,
+    pushes_matrix: bool,
+    pushes_opacity: bool,
+    blend: Option<protocol::BlendMode>,
+    blur: Option<f32>,
+    backdrop: Option<f32>,
+}
+
+impl RecordFrame {
+    fn capture(node: &super::node::Node, x: f32, y: f32) -> Self {
+        let geom = node.transform();
+        let alpha = node.alpha();
+        let kind = node.kind;
+        let blend = node.blend();
+        Self {
+            kind,
+            x,
+            y,
+            w: node.w,
+            h: node.h,
+            corner_radius: node.corner_radius(),
+            alpha,
+            translate_x: geom.translate_x,
+            translate_y: geom.translate_y,
+            rotate_rad: geom.rotate_rad,
+            scale_x: geom.scale_x,
+            scale_y: geom.scale_y,
+            pushes_matrix: kind == Kind::Transform && !geom.is_identity(),
+            pushes_opacity: kind == Kind::Opacity && alpha.unwrap_or(255) != 255,
+            blend: (blend != protocol::BlendMode::SrcOver).then_some(blend),
+            blur: positive_sigma(node.blur()),
+            backdrop: positive_sigma(node.backdrop()),
+        }
+    }
+
+    fn push(&self, commands: &mut Vec<Command>) {
+        match self.kind {
+            Kind::Clip => commands.push(Command::PushClip {
+                x: self.x,
+                y: self.y,
+                w: self.w,
+                h: self.h,
+                corner_radius: self.corner_radius,
+            }),
+            Kind::Opacity if self.pushes_opacity => commands.push(Command::PushOpacity {
+                x: self.x,
+                y: self.y,
+                w: self.w,
+                h: self.h,
+                alpha: self.alpha.unwrap_or(255),
+            }),
+            Kind::Scroll => commands.push(Command::PushClip {
+                x: self.x,
+                y: self.y,
+                w: self.w,
+                h: self.h,
+                corner_radius: 0.0,
+            }),
+            Kind::Transform if self.pushes_matrix => commands.push(Command::PushTransform {
+                translate_x: self.translate_x,
+                translate_y: self.translate_y,
+                rotate_rad: self.rotate_rad,
+                scale_x: self.scale_x,
+                scale_y: self.scale_y,
+            }),
+            _ => {}
+        }
+        if let Some(mode) = self.blend {
+            commands.push(Command::PushBlend {
+                x: self.x,
+                y: self.y,
+                w: self.w,
+                h: self.h,
+                mode,
+            });
+        }
+        if let Some(sigma) = self.blur {
+            commands.push(Command::PushBlur {
+                x: self.x,
+                y: self.y,
+                w: self.w,
+                h: self.h,
+                sigma,
+            });
+        }
+        if let Some(sigma) = self.backdrop {
+            commands.push(Command::PushBackdropBlur {
+                x: self.x,
+                y: self.y,
+                w: self.w,
+                h: self.h,
+                sigma,
+            });
+        }
+    }
+
+    fn pop(&self, commands: &mut Vec<Command>) {
+        if self.backdrop.is_some() {
+            commands.push(Command::Pop);
+        }
+        if self.blur.is_some() {
+            commands.push(Command::Pop);
+        }
+        if self.blend.is_some() {
+            commands.push(Command::Pop);
+        }
+        if matches!(self.kind, Kind::Clip | Kind::Scroll)
+            || (self.kind == Kind::Opacity && self.pushes_opacity)
+            || (self.kind == Kind::Transform && self.pushes_matrix)
+        {
+            commands.push(Command::Pop);
+        }
     }
 }
 

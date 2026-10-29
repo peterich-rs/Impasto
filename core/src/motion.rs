@@ -353,4 +353,17 @@ mod tests {
         assert!(spring.done(5_000.0));
         assert!((spring.x(5_000.0) - 10.0).abs() < 0.5);
     }
+
+    #[test]
+    fn script_name_matches_the_guard_keys() {
+        assert_eq!(AnimProp::ScrollX.script_name(), "scrollX");
+        assert_eq!(AnimProp::ScrollY.script_name(), "scrollY");
+        assert_eq!(AnimProp::Opacity.script_name(), "opacity");
+        assert_eq!(AnimProp::TranslateX.script_name(), "translateX");
+        assert_eq!(AnimProp::TranslateY.script_name(), "translateY");
+        assert_eq!(AnimProp::Rotate.script_name(), "rotate");
+        assert_eq!(AnimProp::Scale.script_name(), "scale");
+        assert_eq!(AnimProp::OverscrollX.script_name(), "overscrollX");
+        assert_eq!(AnimProp::OverscrollY.script_name(), "overscrollY");
+    }
 }

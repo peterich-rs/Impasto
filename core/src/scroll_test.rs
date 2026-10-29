@@ -436,3 +436,27 @@ fn scroll_into_view_on_a_vertical_scroll_leaves_x() -> Result<(), crate::Error> 
     assert!(y > 1.0, "revealed y {y}");
     Ok(())
 }
+
+#[test]
+fn scroll_to_springs_then_zero_stiffness_jumps() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(mono());
+    tree.set_viewport(0.0, 0.0, 100.0, 40.0)?;
+    let scroll = tree.scroll()?;
+    tree.set_axis_size(
+        scroll,
+        crate::AxisSize::Points(100.0),
+        crate::AxisSize::Points(40.0),
+    )?;
+    let body = tree.sized(80.0, 400.0)?;
+    tree.add_child(scroll, body)?;
+    tree.layout()?;
+    tree.scroll_to(scroll, 0.0, 80.0, None, None)?;
+    tree.tick_motions(800.0);
+    let y = tree.scroll_offset(scroll)?.1;
+    assert!(y > 1.0, "springed y {y}");
+    tree.scroll_to(scroll, 0.0, 0.0, Some(0.0), None)?;
+    assert_eq!(tree.scroll_offset(scroll)?.1, 0.0);
+    let text = tree.text("no", 16.0, [0, 0, 0, 255])?;
+    assert!(tree.scroll_to(text, 0.0, 0.0, None, None).is_err());
+    Ok(())
+}
