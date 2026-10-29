@@ -19,9 +19,14 @@ use crate::present::{self, AfterPresent, after_present};
 use crate::queue::Inbox;
 use crate::scheduler::{self, FrameScheduler, FrameStep, FrameView, VsyncOp};
 use crate::shaper::ImpellerShaper;
-use crate::surface::{Changed, Destroyed, OpenRetry, PendingMetrics, Ready, SurfaceHost};
+use crate::surface::{OpenRetry, Ready, SurfaceHost};
 use crate::timing::FrameTiming;
 use crate::{Boot, Launch, LogLevel, Services, Surface};
+
+mod cache_cmds;
+mod frame_cmds;
+mod session_cmds;
+mod surface_cmds;
 
 pub struct EngineSlot {
     typography: Rc<RefCell<engine::Typography>>,
@@ -451,207 +456,26 @@ fn render(
 fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bool, BootError> {
     match command {
         Command::Shutdown => Ok(true),
-        Command::SurfaceDestroyed { id } => {
-            runtime.surfaces.drop_pending(id);
-            if runtime.surfaces.destroyed(id) == Destroyed::Dropped {
-                let follow = scheduler::surface_lost();
-                runtime.installed = None;
-                runtime.needs_present = follow.needs_present;
-                runtime.scheduler.cancel();
-                runtime.vsync.cancel();
-            }
-            acks.signal(id);
-            Ok(false)
-        }
-        Command::SurfaceReady(target) => {
-            let attempts = runtime.surfaces.take_prior_attempts(target.id);
-            match open_surface_target(runtime, target, attempts, OpenPlace::Command)? {
-                OpenedSurface::Ready { replaced } => {
-                    if let Some(old) = replaced {
-                        acks.signal(old);
-                    }
-                }
-                OpenedSurface::Waiting => {}
-            }
-            Ok(false)
-        }
-        Command::SurfaceChanged { id, metrics } => {
-            if runtime.surfaces.changed(id, metrics) == Changed::Staged {
-                note_scale(runtime, metrics.device_pixel_ratio);
-                if runtime.input.set_metrics(metrics) {
-                    arm(runtime);
-                }
-            } else {
-                match runtime.surfaces.retarget(id, metrics) {
-                    PendingMetrics::Absent => {}
-                    PendingMetrics::Updated => note_scale(runtime, metrics.device_pixel_ratio),
-                    PendingMetrics::Rearm => {
-                        note_scale(runtime, metrics.device_pixel_ratio);
-                        arm(runtime);
-                    }
-                }
-            }
-            Ok(false)
-        }
-        Command::Pointer(event) => {
-            if runtime.input.push_pointer(event) {
-                arm(runtime);
-            }
-            Ok(false)
-        }
-        Command::Input(event) => {
-            if runtime.input.push_input(event) {
-                arm(runtime);
-            }
-            Ok(false)
-        }
-        Command::ImeDismissed => {
-            if runtime.input.dismiss_ime() {
-                arm(runtime);
-            }
-            Ok(false)
-        }
-        Command::Metrics(metrics) => {
-            note_scale(runtime, metrics.device_pixel_ratio);
-            if runtime.input.set_metrics(metrics) {
-                arm(runtime);
-            }
-            Ok(false)
-        }
-        Command::Lifecycle(state) => {
-            let deadline = runtime.session.as_mut().map(|session| {
-                session.lifecycle(state);
-                session.next_wake_ms().map(|ms| ms as i64)
-            });
-            if let Some(deadline) = deadline {
-                note_wake(runtime, deadline);
-            }
-            let arm_frame = match state {
-                session::Lifecycle::Hidden | session::Lifecycle::Paused => runtime.input.pause(),
-                session::Lifecycle::Resumed => {
-                    runtime.needs_present = true;
-                    runtime.present_failures = 0;
-                    runtime.present_logged = false;
-                    runtime.present_retry_at = None;
-                    runtime.surfaces.rearm_pending();
-                    runtime.input.resume()
-                }
-                session::Lifecycle::Inactive | session::Lifecycle::Detached => false,
-            };
-            if arm_frame {
-                arm(runtime);
-            }
-            Ok(false)
-        }
-        Command::Invalidate => {
-            runtime.needs_present = true;
-            runtime.present_retry_at = None;
-            arm(runtime);
-            Ok(false)
-        }
-        Command::MemoryWarning => {
-            runtime.installed = None;
-            runtime.present_retry_at = None;
-            runtime.images.trim();
-            arm(runtime);
-            Ok(false)
-        }
-        Command::Settings(settings) => {
-            if let Some(session) = runtime.session.as_mut() {
-                session.settings(&settings);
-                if session.wants_frame() {
-                    arm(runtime);
-                }
-            }
-            Ok(false)
-        }
-        Command::WindowFocus(focused) => {
-            if let Some(session) = runtime.session.as_mut() {
-                session.window_focus(focused);
-            }
-            Ok(false)
-        }
-        Command::SemanticsAction(action) => {
-            if let Some(session) = runtime.session.as_mut() {
-                session.semantics_action(action);
-                arm(runtime);
-            }
-            Ok(false)
-        }
-        Command::ImageReady(ready) => {
-            if let Some(message) = runtime.images.apply(ready) {
-                (runtime.log)(LogLevel::Error, &message);
-            }
-            arm(runtime);
-            Ok(false)
-        }
-        Command::ReloadImage(source) => {
-            runtime.images.reload(&source);
-            arm(runtime);
-            Ok(false)
-        }
-        Command::HttpDone { token, result } => {
-            if let Some(session) = runtime.session.as_mut() {
-                session.io_event(session::IoEvent::Http { token, result });
-                if session.wants_frame() {
-                    arm(runtime);
-                }
-            }
-            Ok(false)
-        }
-        Command::PluginDone { token, result } => {
-            if let Some(session) = runtime.session.as_mut() {
-                session.io_event(session::IoEvent::Plugin { token, result });
-                if session.wants_frame() {
-                    arm(runtime);
-                }
-            }
-            Ok(false)
-        }
-        Command::Socket {
-            id,
-            event,
-            text,
-            data,
-        } => {
-            if let Some(session) = runtime.session.as_mut() {
-                session.io_event(session::IoEvent::Socket {
-                    id,
-                    event,
-                    text,
-                    data,
-                });
-                if session.wants_frame() {
-                    arm(runtime);
-                }
-            }
-            Ok(false)
-        }
-        Command::Wake => {
-            if runtime.input.is_paused() {
-                return Ok(false);
-            }
-            if runtime.scheduler.busy() {
-                arm(runtime);
-                return Ok(false);
-            }
-            let now = crate::net::mono_ms();
-            on_frame(
-                runtime,
-                FrameTime {
-                    vsync_ms: now,
-                    target_ms: now,
-                    interval_ms: 16.0,
-                    mono_ms: now,
-                },
-                acks,
-            )
-        }
-        Command::Frame { token, time } => {
-            if !runtime.scheduler.accept(token) {
-                return Ok(false);
-            }
-            on_frame(runtime, time, acks)
+        command @ (Command::SurfaceDestroyed { .. }
+        | Command::SurfaceReady(_)
+        | Command::SurfaceChanged { .. }) => surface_cmds::handle(runtime, command, acks),
+        command @ (Command::Pointer(_)
+        | Command::Input(_)
+        | Command::ImeDismissed
+        | Command::Metrics(_)
+        | Command::Lifecycle(_)
+        | Command::Settings(_)
+        | Command::WindowFocus(_)
+        | Command::SemanticsAction(_)
+        | Command::HttpDone { .. }
+        | Command::PluginDone { .. }
+        | Command::Socket { .. }) => session_cmds::handle(runtime, command),
+        command @ (Command::Invalidate
+        | Command::MemoryWarning
+        | Command::ImageReady(_)
+        | Command::ReloadImage(_)) => cache_cmds::handle(runtime, command),
+        command @ (Command::Wake | Command::Frame { .. }) => {
+            frame_cmds::handle(runtime, command, acks)
         }
     }
 }
