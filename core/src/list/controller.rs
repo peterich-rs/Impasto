@@ -15,15 +15,7 @@ pub enum PullMode {
     Edge = 2,
 }
 
-impl PullMode {
-    pub fn from_code(code: i32) -> Self {
-        match code {
-            1 => Self::Overscroll,
-            2 => Self::Edge,
-            _ => Self::Off,
-        }
-    }
-}
+crate::motion::coded_trinary!(PullMode, Off, Overscroll, Edge);
 
 #[derive(Clone, Copy, Debug)]
 pub struct DragStep {

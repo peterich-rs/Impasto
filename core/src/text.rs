@@ -337,22 +337,35 @@ impl TextEditor {
         self.redo.clear();
     }
 
-    fn undo(&mut self) {
-        let Some(previous) = self.undo.pop() else {
+    fn step_history(
+        value: &mut TextEditingValue,
+        column_x: &mut Option<f32>,
+        from: &mut Vec<TextEditingValue>,
+        to: &mut Vec<TextEditingValue>,
+    ) {
+        let Some(previous) = from.pop() else {
             return;
         };
-        self.redo.push(self.value.clone());
-        self.value = previous;
-        self.column_x = None;
+        to.push(std::mem::replace(value, previous));
+        *column_x = None;
+    }
+
+    fn undo(&mut self) {
+        Self::step_history(
+            &mut self.value,
+            &mut self.column_x,
+            &mut self.undo,
+            &mut self.redo,
+        );
     }
 
     fn redo(&mut self) {
-        let Some(next) = self.redo.pop() else {
-            return;
-        };
-        self.undo.push(self.value.clone());
-        self.value = next;
-        self.column_x = None;
+        Self::step_history(
+            &mut self.value,
+            &mut self.column_x,
+            &mut self.redo,
+            &mut self.undo,
+        );
     }
 
     fn copy(&mut self) {

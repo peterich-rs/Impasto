@@ -1204,7 +1204,7 @@ pub(super) fn align_axes(alignment: Alignment) -> (AlignItems, JustifyContent) {
     }
 }
 
-fn edge_rect(edges: Edges) -> Result<taffy::Rect<LengthPercentage>, Error> {
+fn edges_rect<T: FromLength>(edges: Edges) -> Result<taffy::Rect<T>, Error> {
     finite_number(edges.top)?;
     finite_number(edges.right)?;
     finite_number(edges.bottom)?;
@@ -1217,17 +1217,12 @@ fn edge_rect(edges: Edges) -> Result<taffy::Rect<LengthPercentage>, Error> {
     })
 }
 
+fn edge_rect(edges: Edges) -> Result<taffy::Rect<LengthPercentage>, Error> {
+    edges_rect(edges)
+}
+
 fn margin_rect(edges: Edges) -> Result<taffy::Rect<LengthPercentageAuto>, Error> {
-    finite_number(edges.top)?;
-    finite_number(edges.right)?;
-    finite_number(edges.bottom)?;
-    finite_number(edges.left)?;
-    Ok(taffy::Rect {
-        left: length(edges.left),
-        right: length(edges.right),
-        top: length(edges.top),
-        bottom: length(edges.bottom),
-    })
+    edges_rect(edges)
 }
 
 fn align_self(alignment: Alignment) -> AlignSelf {

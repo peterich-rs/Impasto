@@ -1,3 +1,4 @@
+use crate::tree::Affine;
 use crate::{
     AxisSize, Button, DragAxis, Edges, Gesture, MonoShaper, Phase, PointerEvent, PointerId,
     RecognizerSet, Shaper, TrackSize, Tree,
@@ -2820,7 +2821,7 @@ fn record_writes(tree: &mut Tree) -> Result<usize, crate::Error> {
 
 fn agree_list(tree: &Tree, list: &protocol::DrawList) -> Result<(), crate::Error> {
     let layers = tree.layer_tree();
-    let flat = scene_marks_in_commands(&list.commands, Aff::identity(), &[]);
+    let flat = scene_marks_in_commands(&list.commands, Affine::identity(), &[]);
     let layered = scene_marks_in_layers(&layers);
     assert_eq!(
         flat.len(),
@@ -2837,76 +2838,6 @@ fn agree_list(tree: &Tree, list: &protocol::DrawList) -> Result<(), crate::Error
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-struct Aff {
-    a: f32,
-    b: f32,
-    c: f32,
-    d: f32,
-    e: f32,
-    f: f32,
-}
-
-impl Aff {
-    fn identity() -> Self {
-        Self {
-            a: 1.0,
-            b: 0.0,
-            c: 0.0,
-            d: 1.0,
-            e: 0.0,
-            f: 0.0,
-        }
-    }
-
-    fn translate(x: f32, y: f32) -> Self {
-        Self {
-            a: 1.0,
-            b: 0.0,
-            c: 0.0,
-            d: 1.0,
-            e: x,
-            f: y,
-        }
-    }
-
-    fn then(self, next: Self) -> Self {
-        Self {
-            a: self.a * next.a + self.c * next.b,
-            b: self.b * next.a + self.d * next.b,
-            c: self.a * next.c + self.c * next.d,
-            d: self.b * next.c + self.d * next.d,
-            e: self.a * next.e + self.c * next.f + self.e,
-            f: self.b * next.e + self.d * next.f + self.f,
-        }
-    }
-
-    fn transform(
-        translate_x: f32,
-        translate_y: f32,
-        rotate_rad: f32,
-        scale_x: f32,
-        scale_y: f32,
-    ) -> Self {
-        let (sin, cos) = rotate_rad.sin_cos();
-        Self {
-            a: scale_x * cos,
-            b: scale_x * sin,
-            c: -scale_y * sin,
-            d: scale_y * cos,
-            e: translate_x,
-            f: translate_y,
-        }
-    }
-
-    fn apply(self, x: f32, y: f32) -> (f32, f32) {
-        (
-            self.a * x + self.c * y + self.e,
-            self.b * x + self.d * y + self.f,
-        )
-    }
-}
-
 #[derive(Clone, Debug)]
 struct Mark {
     label: String,
@@ -2916,7 +2847,7 @@ struct Mark {
 
 #[derive(Clone, Copy)]
 struct SceneClip {
-    ctm: Aff,
+    ctm: Affine,
     x: f32,
     y: f32,
     w: f32,
@@ -2936,7 +2867,14 @@ fn inside_clips(point: (f32, f32), clips: &[SceneClip]) -> bool {
     })
 }
 
-fn push_mark(marks: &mut Vec<Mark>, label: String, x: f32, y: f32, ctm: Aff, clips: &[SceneClip]) {
+fn push_mark(
+    marks: &mut Vec<Mark>,
+    label: String,
+    x: f32,
+    y: f32,
+    ctm: Affine,
+    clips: &[SceneClip],
+) {
     let point = ctm.apply(x, y);
     if inside_clips(point, clips) {
         marks.push(Mark {
@@ -2949,7 +2887,7 @@ fn push_mark(marks: &mut Vec<Mark>, label: String, x: f32, y: f32, ctm: Aff, cli
 
 fn scene_marks_in_commands(
     commands: &[protocol::Command],
-    ctm: Aff,
+    ctm: Affine,
     clips: &[SceneClip],
 ) -> Vec<Mark> {
     let mut marks = Vec::new();
@@ -2985,13 +2923,8 @@ fn scene_marks_in_commands(
                 scale_y,
             } => {
                 stack.push((
-                    ctm.then(Aff::transform(
-                        *translate_x,
-                        *translate_y,
-                        *rotate_rad,
-                        *scale_x,
-                        *scale_y,
-                    )),
+                    Affine::paint(*translate_x, *translate_y, *rotate_rad, *scale_x, *scale_y)
+                        .around(ctm),
                     clips,
                 ));
             }
@@ -3014,7 +2947,7 @@ fn scene_marks_in_layers(tree: &protocol::LayerTree) -> Vec<Mark> {
     fn walk(
         tree: &protocol::LayerTree,
         id: protocol::LayerId,
-        ctm: Aff,
+        ctm: Affine,
         clips: &[SceneClip],
         marks: &mut Vec<Mark>,
     ) {
@@ -3028,7 +2961,13 @@ fn scene_marks_in_layers(tree: &protocol::LayerTree) -> Vec<Mark> {
             match layer.kind {
                 protocol::LayerKind::Offset { x, y } => {
                     if let Some(child) = child {
-                        walk(tree, child, ctm.then(Aff::translate(x, y)), clips, marks);
+                        walk(
+                            tree,
+                            child,
+                            Affine::translate(x, y).around(ctm),
+                            clips,
+                            marks,
+                        );
                     }
                 }
                 protocol::LayerKind::Transform {
@@ -3042,13 +2981,8 @@ fn scene_marks_in_layers(tree: &protocol::LayerTree) -> Vec<Mark> {
                         walk(
                             tree,
                             child,
-                            ctm.then(Aff::transform(
-                                translate_x,
-                                translate_y,
-                                rotate_rad,
-                                scale_x,
-                                scale_y,
-                            )),
+                            Affine::paint(translate_x, translate_y, rotate_rad, scale_x, scale_y)
+                                .around(ctm),
                             clips,
                             marks,
                         );
@@ -3071,7 +3005,8 @@ fn scene_marks_in_layers(tree: &protocol::LayerTree) -> Vec<Mark> {
                 }
                 protocol::LayerKind::Picture { picture } => {
                     if let Some(picture) = tree.picture(picture) {
-                        let local = ctm.then(Aff::translate(picture.origin.0, picture.origin.1));
+                        let local =
+                            Affine::translate(picture.origin.0, picture.origin.1).around(ctm);
                         marks.extend(scene_marks_in_commands(
                             picture.commands.as_ref(),
                             local,
@@ -3085,7 +3020,7 @@ fn scene_marks_in_layers(tree: &protocol::LayerTree) -> Vec<Mark> {
     }
     let mut marks = Vec::new();
     if !tree.layers.is_empty() {
-        walk(tree, tree.root, Aff::identity(), &[], &mut marks);
+        walk(tree, tree.root, Affine::identity(), &[], &mut marks);
     }
     marks
 }

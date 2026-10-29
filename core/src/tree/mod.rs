@@ -10,6 +10,7 @@ mod semantics;
 mod store;
 mod text;
 
+pub(crate) use hit::Affine;
 pub use layout::{LayoutCause, LayoutTrace};
 pub use node::{
     Alignment, AxisSize, Discarded, DragClaim, Edges, FocusDirection, Gesture, GridLine, Inset,
