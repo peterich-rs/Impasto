@@ -16,6 +16,13 @@ impl Engine {
         Err(Status::NotLinked)
     }
 
+    /// Engine that cannot submit or present. Hostshell tests use this when they do not draw.
+    pub fn inert() -> Self {
+        Self {
+            typography: std::rc::Rc::new(std::cell::RefCell::new(Typography)),
+        }
+    }
+
     pub fn register_font(&mut self, _data: &[u8], _family: &str) -> Result<(), Status> {
         Err(Status::NotLinked)
     }
@@ -54,6 +61,18 @@ impl Engine {
 
     pub fn typography(&self) -> std::rc::Rc<std::cell::RefCell<Typography>> {
         std::rc::Rc::clone(&self.typography)
+    }
+
+    pub fn picture_builds(&self) -> u64 {
+        0
+    }
+
+    pub fn cache_counts(&self) -> (usize, usize) {
+        (0, 0)
+    }
+
+    pub fn submit_stats(&self) -> crate::SubmitStats {
+        crate::SubmitStats::default()
     }
 }
 
@@ -202,18 +221,6 @@ impl Typography {
 
     pub fn text_paint_probe(&self) -> (bool, [u8; 4]) {
         (false, [0, 0, 0, 0])
-    }
-
-    pub fn picture_builds(&self) -> u64 {
-        0
-    }
-
-    pub fn cache_counts(&self) -> (usize, usize) {
-        (0, 0)
-    }
-
-    pub fn submit_stats(&self) -> crate::SubmitStats {
-        crate::SubmitStats::default()
     }
 }
 

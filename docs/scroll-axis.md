@@ -54,7 +54,7 @@
 - `Tree::scroll_for` — 认领。`lock_at_edge` 只记录 `Both`。
 - `Tree::pointer_wheel` — 手势里的滚轮增量已按轴裁过。
 - `ScrollController` — 夹紧和父级溢出。单轴不把跨轴增量报成 overflow。
-- `core.scroll(axis?)`、`core.setScrollAxis`、`core.setScrollPhysics(..., accept?)` — QuickJS。`glue.c` 与 `linked.rs` 的函数表一起改。
+- `core.scroll(axis?)`、`core.setScrollAxis`、`core.setScrollPhysics(..., accept?)` — QuickJS。`glue.c` 与 `linked/` 的函数表一起改。
 - `<scroll axis>`、`<ScrollArea axis>`、`VirtualList` 内部滚动、`Field` 里的滚动。
 
 ## 4. 设计
@@ -176,7 +176,7 @@ impl Tree {
 
 ### Phase 4：TS 表面与组件
 
-**File: `runtimes/quickjs/src/glue.c`**、**`runtimes/quickjs/src/linked.rs`**
+**File: `runtimes/quickjs/src/glue.c`**、**`runtimes/quickjs/src/linked/`**
 
 - `scroll(session, axis, out)`。`setScrollAxis`。`setScrollPhysics` 多一个 accept。
 
@@ -245,4 +245,4 @@ impl Tree {
 - `frameworks/solid-ui/src/field/shell.tsx` — 单行横向、多行纵向
 - `frameworks/solid-ui/testing/renderTest.ts` — mock
 - `runtimes/quickjs/src/glue.c` — `scroll` 轴参、`setScrollAxis`、accept
-- `runtimes/quickjs/src/linked.rs` — 同上，接到 `Tree`
+- `runtimes/quickjs/src/linked/` — 同上，接到 `Tree`

@@ -177,7 +177,7 @@ export interface Permissions {
 - `runtimes/quickjs/src/glue.c`、`runtime_host.inc` -- `__uifw.module`、`JS_NewCFunctionData`；`module_call` 接收 `PluginValue`；返回值按类型建 JS 值；事件用 `JS_Call`
 - `runtimes/quickjs/src/linked/host.rs` -- 删除 `parse_args`
 - `runtimes/quickjs/src/prelude.js` -- `get` 只缓存 `bridge.module`；删除 `createAppState`、`createLinking`、`createClipboard`、`_emit`
-- `runtimes/quickjs/src/linked.rs` -- `dispatch_module` 查方法表；`set_launch_url` 调用 `url` 监听
+- `runtimes/quickjs/src/linked/` -- `dispatch_module` 查方法表；`set_launch_url` 调用 `url` 监听
 - `hosts/hostshell/src/net.rs` -- `plugin` 按同一张表实现 `Platform` 方法
 - `hosts/macos`、`hosts/android` -- `FileSystem`、`AsyncStorage`、`Permissions`
 - `frameworks/modules/src/*.ts` -- 类型保持为宿主对象；`Linking.getInitialURL` 改为同步返回；补 `Permissions`
@@ -202,7 +202,6 @@ export interface Permissions {
 - 导航往返之后 `picture_writes` 只计仍在树上的页面 picture。路由表已经是 `/schedule`、`/nav/:depth`、`/list`。包拆分不实现这条断言。
 - 带 schema 或迁移的存储库。`AsyncStorage` 与 `FileSystem` 落地之后再写，只依赖 `@uifw/modules`。
 - 把排版或 `submit_layers` 挪出渲染线程。现在的模块拆分仍然是 `uifw-render` 上的一个 `!Send` 所有者。按文件拆开不产生线程边界。
-- `core/src/tree/record.rs`、`runtimes/quickjs/src/linked.rs`、`hosts/hostshell/src/shell.rs` 和 `core/src/layout_test.rs` 还没按主题拆文件。公有 API 不因此改变。
 
 ## 风险
 

@@ -10,6 +10,8 @@ mod semantics;
 mod store;
 mod text;
 
+#[cfg(test)]
+pub(crate) use hit::Affine;
 pub use layout::{LayoutCause, LayoutTrace};
 pub use node::{
     Alignment, AxisSize, Discarded, DragClaim, Edges, FocusDirection, Gesture, GridLine, Inset,
@@ -209,6 +211,23 @@ mod slot_tests {
         assert!(tree.free.is_empty());
         let next = tree.text("Yo", 16.0, [0, 0, 0, 255])?;
         assert_ne!(next.index, index);
+        Ok(())
+    }
+
+    #[test]
+    fn revive_rebuilds_taffy_after_release() -> Result<(), Error> {
+        let mut tree = Tree::new(MonoShaper::default());
+        let parent = tree.column(0.0)?;
+        let child = tree.text("Hi", 16.0, [0, 0, 0, 255])?;
+        tree.add_child(parent, child)?;
+        tree.layout()?;
+        tree.detach(parent, child)?;
+        tree.release_taffy(child)?;
+        assert!(tree.node(child)?.taffy.is_none());
+        tree.add_child(parent, child)?;
+        assert!(tree.node(child)?.taffy.is_some());
+        tree.layout()?;
+        assert!(tree.rect(child)?.w > 0.0);
         Ok(())
     }
 }

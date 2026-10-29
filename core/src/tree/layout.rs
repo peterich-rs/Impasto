@@ -3,13 +3,10 @@
 use std::cell::Cell;
 use std::sync::Arc;
 
-use protocol::{TextAlign, TextStyle};
 use taffy::prelude::*;
 
-use super::node::{Kind, NodeFlags, Slot, TextPayload};
-use super::{
-    Alignment, AxisSize, Edges, Gesture, GridLine, Inset, Justify, NodeId, Rect, TrackSize, Tree,
-};
+use super::node::{Kind, NodeFlags, Slot};
+use super::{Alignment, AxisSize, Edges, GridLine, Inset, Justify, NodeId, Rect, TrackSize, Tree};
 use crate::{Error, SINGLE_LINE_MAX, Shaper, TextSize};
 
 impl Tree {
@@ -439,12 +436,12 @@ impl Tree {
         let kind = self.node(id)?.kind;
         let mut style = self.node(id)?.style.clone();
         style.size = Size {
-            width: percent(1.0),
-            height: percent(1.0),
+            width: percent(1.0_f32),
+            height: percent(1.0_f32),
         };
         style.min_size = Size {
-            width: length(0.0),
-            height: length(0.0),
+            width: length(0.0_f32),
+            height: length(0.0_f32),
         };
         let parent_is_flex = self
             .node(id)?
@@ -454,14 +451,14 @@ impl Tree {
         if parent_is_flex {
             style.flex_grow = 1.0;
             style.flex_shrink = 1.0;
-            style.flex_basis = length(0.0);
+            style.flex_basis = length(0.0_f32);
         }
         if matches!(
             kind,
             Kind::Stack | Kind::Opacity | Kind::Transform | Kind::Clip
         ) {
-            style.grid_template_columns = vec![fr(1.0)];
-            style.grid_template_rows = vec![fr(1.0)];
+            style.grid_template_columns = vec![fr(1.0_f32)];
+            style.grid_template_rows = vec![fr(1.0_f32)];
         }
         self.write_style(id, style)
     }
@@ -1207,7 +1204,7 @@ pub(super) fn align_axes(alignment: Alignment) -> (AlignItems, JustifyContent) {
     }
 }
 
-fn edge_rect(edges: Edges) -> Result<taffy::Rect<LengthPercentage>, Error> {
+fn edges_rect<T: FromLength>(edges: Edges) -> Result<taffy::Rect<T>, Error> {
     finite_number(edges.top)?;
     finite_number(edges.right)?;
     finite_number(edges.bottom)?;
@@ -1220,17 +1217,12 @@ fn edge_rect(edges: Edges) -> Result<taffy::Rect<LengthPercentage>, Error> {
     })
 }
 
+fn edge_rect(edges: Edges) -> Result<taffy::Rect<LengthPercentage>, Error> {
+    edges_rect(edges)
+}
+
 fn margin_rect(edges: Edges) -> Result<taffy::Rect<LengthPercentageAuto>, Error> {
-    finite_number(edges.top)?;
-    finite_number(edges.right)?;
-    finite_number(edges.bottom)?;
-    finite_number(edges.left)?;
-    Ok(taffy::Rect {
-        left: length(edges.left),
-        right: length(edges.right),
-        top: length(edges.top),
-        bottom: length(edges.bottom),
-    })
+    edges_rect(edges)
 }
 
 fn align_self(alignment: Alignment) -> AlignSelf {
@@ -1286,8 +1278,8 @@ pub(super) fn scroll_style() -> Style {
         flex_grow: 1.0,
         flex_shrink: 1.0,
         min_size: Size {
-            width: length(0.0),
-            height: length(0.0),
+            width: length(0.0_f32),
+            height: length(0.0_f32),
         },
         overflow: taffy::Point {
             x: taffy::style::Overflow::Hidden,

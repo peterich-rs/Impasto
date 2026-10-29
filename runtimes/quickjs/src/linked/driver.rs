@@ -5,7 +5,8 @@ use std::ffi::{c_char, c_void};
 
 use ui_core::{Chrome, DriverEvent, DriverId, ListItem, ListNodes, ListOp, NodeId, PullMode};
 
-use super::{Inner, c_message, inner, qjs_driver, utf8_of};
+use super::ffi::qjs_driver;
+use super::{Inner, c_message, inner, utf8_of};
 
 fn driver_id(index: u32, generation: u32) -> DriverId {
     DriverId { index, generation }

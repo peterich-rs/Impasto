@@ -9,7 +9,6 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Instant;
 
-use engine::Surface as _;
 use session::FrameTime;
 
 use crate::command::{Command, SurfaceId, SurfaceTarget};
@@ -20,12 +19,16 @@ use crate::present::{self, AfterPresent, after_present};
 use crate::queue::Inbox;
 use crate::scheduler::{self, FrameScheduler, FrameStep, FrameView, VsyncOp};
 use crate::shaper::ImpellerShaper;
-use crate::surface::{Changed, Destroyed, OpenRetry, PendingMetrics, Ready, SurfaceHost};
+use crate::surface::{OpenRetry, Ready, SurfaceHost};
 use crate::timing::FrameTiming;
 use crate::{Boot, Launch, LogLevel, Services, Surface};
 
+mod cache_cmds;
+mod frame_cmds;
+mod session_cmds;
+mod surface_cmds;
+
 pub struct EngineSlot {
-    engine: Rc<RefCell<engine::Engine>>,
     typography: Rc<RefCell<engine::Typography>>,
     log: Rc<dyn Fn(LogLevel, &str)>,
 }
@@ -387,7 +390,6 @@ fn render(
     let Launch::Session(open) = boot.launch;
     let typography = engine.borrow().typography();
     let slot = EngineSlot {
-        engine: Rc::clone(&engine),
         typography: Rc::clone(&typography),
         log: Rc::clone(&log),
     };
@@ -454,207 +456,26 @@ fn render(
 fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bool, BootError> {
     match command {
         Command::Shutdown => Ok(true),
-        Command::SurfaceDestroyed { id } => {
-            runtime.surfaces.drop_pending(id);
-            if runtime.surfaces.destroyed(id) == Destroyed::Dropped {
-                let follow = scheduler::surface_lost();
-                runtime.installed = None;
-                runtime.needs_present = follow.needs_present;
-                runtime.scheduler.cancel();
-                runtime.vsync.cancel();
-            }
-            acks.signal(id);
-            Ok(false)
-        }
-        Command::SurfaceReady(target) => {
-            let attempts = runtime.surfaces.take_prior_attempts(target.id);
-            match open_surface_target(runtime, target, attempts, OpenPlace::Command)? {
-                OpenedSurface::Ready { replaced } => {
-                    if let Some(old) = replaced {
-                        acks.signal(old);
-                    }
-                }
-                OpenedSurface::Waiting => {}
-            }
-            Ok(false)
-        }
-        Command::SurfaceChanged { id, metrics } => {
-            if runtime.surfaces.changed(id, metrics) == Changed::Staged {
-                note_scale(runtime, metrics.device_pixel_ratio);
-                if runtime.input.set_metrics(metrics) {
-                    arm(runtime);
-                }
-            } else {
-                match runtime.surfaces.retarget(id, metrics) {
-                    PendingMetrics::Absent => {}
-                    PendingMetrics::Updated => note_scale(runtime, metrics.device_pixel_ratio),
-                    PendingMetrics::Rearm => {
-                        note_scale(runtime, metrics.device_pixel_ratio);
-                        arm(runtime);
-                    }
-                }
-            }
-            Ok(false)
-        }
-        Command::Pointer(event) => {
-            if runtime.input.push_pointer(event) {
-                arm(runtime);
-            }
-            Ok(false)
-        }
-        Command::Input(event) => {
-            if runtime.input.push_input(event) {
-                arm(runtime);
-            }
-            Ok(false)
-        }
-        Command::ImeDismissed => {
-            if runtime.input.dismiss_ime() {
-                arm(runtime);
-            }
-            Ok(false)
-        }
-        Command::Metrics(metrics) => {
-            note_scale(runtime, metrics.device_pixel_ratio);
-            if runtime.input.set_metrics(metrics) {
-                arm(runtime);
-            }
-            Ok(false)
-        }
-        Command::Lifecycle(state) => {
-            let deadline = runtime.session.as_mut().map(|session| {
-                session.lifecycle(state);
-                session.next_wake_ms().map(|ms| ms as i64)
-            });
-            if let Some(deadline) = deadline {
-                note_wake(runtime, deadline);
-            }
-            let arm_frame = match state {
-                session::Lifecycle::Hidden | session::Lifecycle::Paused => runtime.input.pause(),
-                session::Lifecycle::Resumed => {
-                    runtime.needs_present = true;
-                    runtime.present_failures = 0;
-                    runtime.present_logged = false;
-                    runtime.present_retry_at = None;
-                    runtime.surfaces.rearm_pending();
-                    runtime.input.resume()
-                }
-                session::Lifecycle::Inactive | session::Lifecycle::Detached => false,
-            };
-            if arm_frame {
-                arm(runtime);
-            }
-            Ok(false)
-        }
-        Command::Invalidate => {
-            runtime.needs_present = true;
-            runtime.present_retry_at = None;
-            arm(runtime);
-            Ok(false)
-        }
-        Command::MemoryWarning => {
-            runtime.installed = None;
-            runtime.present_retry_at = None;
-            runtime.images.trim();
-            arm(runtime);
-            Ok(false)
-        }
-        Command::Settings(settings) => {
-            if let Some(session) = runtime.session.as_mut() {
-                session.settings(&settings);
-                if session.wants_frame() {
-                    arm(runtime);
-                }
-            }
-            Ok(false)
-        }
-        Command::WindowFocus(focused) => {
-            if let Some(session) = runtime.session.as_mut() {
-                session.window_focus(focused);
-            }
-            Ok(false)
-        }
-        Command::SemanticsAction(action) => {
-            if let Some(session) = runtime.session.as_mut() {
-                session.semantics_action(action);
-                arm(runtime);
-            }
-            Ok(false)
-        }
-        Command::ImageReady(ready) => {
-            if let Some(message) = runtime.images.apply(ready) {
-                (runtime.log)(LogLevel::Error, &message);
-            }
-            arm(runtime);
-            Ok(false)
-        }
-        Command::ReloadImage(source) => {
-            runtime.images.reload(&source);
-            arm(runtime);
-            Ok(false)
-        }
-        Command::HttpDone { token, result } => {
-            if let Some(session) = runtime.session.as_mut() {
-                session.io_event(session::IoEvent::Http { token, result });
-                if session.wants_frame() {
-                    arm(runtime);
-                }
-            }
-            Ok(false)
-        }
-        Command::PluginDone { token, result } => {
-            if let Some(session) = runtime.session.as_mut() {
-                session.io_event(session::IoEvent::Plugin { token, result });
-                if session.wants_frame() {
-                    arm(runtime);
-                }
-            }
-            Ok(false)
-        }
-        Command::Socket {
-            id,
-            event,
-            text,
-            data,
-        } => {
-            if let Some(session) = runtime.session.as_mut() {
-                session.io_event(session::IoEvent::Socket {
-                    id,
-                    event,
-                    text,
-                    data,
-                });
-                if session.wants_frame() {
-                    arm(runtime);
-                }
-            }
-            Ok(false)
-        }
-        Command::Wake => {
-            if runtime.input.is_paused() {
-                return Ok(false);
-            }
-            if runtime.scheduler.busy() {
-                arm(runtime);
-                return Ok(false);
-            }
-            let now = crate::net::mono_ms();
-            on_frame(
-                runtime,
-                FrameTime {
-                    vsync_ms: now,
-                    target_ms: now,
-                    interval_ms: 16.0,
-                    mono_ms: now,
-                },
-                acks,
-            )
-        }
-        Command::Frame { token, time } => {
-            if !runtime.scheduler.accept(token) {
-                return Ok(false);
-            }
-            on_frame(runtime, time, acks)
+        command @ (Command::SurfaceDestroyed { .. }
+        | Command::SurfaceReady(_)
+        | Command::SurfaceChanged { .. }) => surface_cmds::handle(runtime, command, acks),
+        command @ (Command::Pointer(_)
+        | Command::Input(_)
+        | Command::ImeDismissed
+        | Command::Metrics(_)
+        | Command::Lifecycle(_)
+        | Command::Settings(_)
+        | Command::WindowFocus(_)
+        | Command::SemanticsAction(_)
+        | Command::HttpDone { .. }
+        | Command::PluginDone { .. }
+        | Command::Socket { .. }) => session_cmds::handle(runtime, command),
+        command @ (Command::Invalidate
+        | Command::MemoryWarning
+        | Command::ImageReady(_)
+        | Command::ReloadImage(_)) => cache_cmds::handle(runtime, command),
+        command @ (Command::Wake | Command::Frame { .. }) => {
+            frame_cmds::handle(runtime, command, acks)
         }
     }
 }
@@ -1203,10 +1024,20 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
+
+    use session::{FrameOutput, FrameTime, IoEvent, Metrics};
 
     use super::install_fonts;
-    use crate::LogLevel;
+    use super::{Acks, Installed, Runtime, lock, on_command};
+    use crate::command::{Command, FrameToken, SurfaceId, SurfaceTarget};
+    use crate::images::{ImageHandle, ImageReady};
+    use crate::scheduler::FrameScheduler;
+    use crate::surface::{SURFACE_OPEN_ATTEMPTS, SurfaceHost};
+    use crate::{LogLevel, NativePtr, Presented, Surface, Vsync};
 
     #[test]
     fn a_rejected_font_is_logged_without_its_bytes() {
@@ -1240,5 +1071,409 @@ mod tests {
         assert!(message.contains("Custom"), "{message}");
         assert!(message.contains("font "), "{message}");
         assert!(!message.contains("SECRET-FONT-BYTES"), "{message}");
+    }
+
+    struct NullServices;
+
+    impl crate::Services for NullServices {
+        fn font(&self, _: &str) -> Option<&[u8]> {
+            None
+        }
+
+        fn image(&self, _: &str) -> Option<engine::ImagePixels<'_>> {
+            None
+        }
+
+        fn log(&self, _: LogLevel, _: &str) {}
+
+        fn apply_ime(&self, _: &session::ImeUpdate) {}
+    }
+
+    struct NullSurface;
+
+    impl Surface for NullSurface {
+        fn present(&mut self, _: &mut engine::Engine) -> Result<Presented, engine::Status> {
+            Ok(Presented::Continue)
+        }
+    }
+
+    struct RecVsync {
+        tokens: Mutex<Vec<FrameToken>>,
+        cancels: Mutex<u32>,
+    }
+
+    impl RecVsync {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                tokens: Mutex::new(Vec::new()),
+                cancels: Mutex::new(0),
+            })
+        }
+
+        fn token_count(&self) -> usize {
+            lock(&self.tokens).len()
+        }
+
+        fn last_token(&self) -> Option<FrameToken> {
+            lock(&self.tokens).last().copied()
+        }
+
+        fn cancel_count(&self) -> u32 {
+            *lock(&self.cancels)
+        }
+    }
+
+    impl Vsync for RecVsync {
+        fn bind(&self, _: Arc<dyn Fn(FrameToken, FrameTime) + Send + Sync>) {}
+
+        fn request_frame(&self, token: FrameToken) {
+            lock(&self.tokens).push(token);
+        }
+
+        fn cancel(&self) {
+            *lock(&self.cancels) += 1;
+        }
+    }
+
+    struct SessionLog {
+        io: Vec<IoEvent>,
+        frames: Vec<FrameTime>,
+        wants: bool,
+    }
+
+    struct MockSession {
+        log: Rc<RefCell<SessionLog>>,
+    }
+
+    impl session::Session for MockSession {
+        fn metrics(&mut self, _: &Metrics) {}
+
+        fn pointer(&mut self, _: ui_core::PointerEvent) {}
+
+        fn frame(&mut self, time: FrameTime) -> FrameOutput {
+            self.log.borrow_mut().frames.push(time);
+            FrameOutput::unchanged()
+        }
+
+        fn wants_frame(&mut self) -> bool {
+            self.log.borrow().wants
+        }
+
+        fn io_event(&mut self, event: IoEvent) {
+            self.log.borrow_mut().io.push(event);
+        }
+    }
+
+    struct TestHarness {
+        runtime: Runtime,
+        acks: Acks,
+        vsync: Arc<RecVsync>,
+        session: Rc<RefCell<SessionLog>>,
+    }
+
+    impl TestHarness {
+        fn new() -> Self {
+            let engine = Rc::new(RefCell::new(engine::Engine::inert()));
+            let typography = engine.borrow().typography();
+            let vsync = RecVsync::new();
+            let log = Rc::new(RefCell::new(SessionLog {
+                io: Vec::new(),
+                frames: Vec::new(),
+                wants: false,
+            }));
+            let (image_tx, _image_rx) = mpsc::channel();
+            let (wake_tx, _wake_rx) = mpsc::channel();
+            let runtime = Runtime {
+                services: Rc::new(RefCell::new(Box::new(NullServices))),
+                engine,
+                typography,
+                log: Rc::new(|_, _| {}),
+                session: Some(Box::new(MockSession {
+                    log: Rc::clone(&log),
+                })),
+                latest: None,
+                input: crate::input::Input::new(),
+                surfaces: SurfaceHost::new(),
+                scheduler: FrameScheduler::new(),
+                vsync: Arc::clone(&vsync) as Arc<dyn Vsync>,
+                open_surface: Box::new(|_, _| Ok(Box::new(NullSurface))),
+                installed: None,
+                point_scale: 1.0,
+                needs_present: false,
+                images: crate::images::ImageCache::new(),
+                image_tx,
+                frame_number: 0,
+                semantics: None,
+                panic_streak: 0,
+                wake_tx,
+                dump_list: false,
+                present_failures: 0,
+                present_logged: false,
+                present_retry_at: None,
+            };
+            Self {
+                runtime,
+                acks: Acks::new(),
+                vsync,
+                session: log,
+            }
+        }
+
+        fn command(&mut self, command: Command) -> bool {
+            on_command(&mut self.runtime, command, &self.acks)
+                .unwrap_or_else(|error| panic!("{error}"))
+        }
+
+        fn open_dummy(&mut self) -> SurfaceId {
+            let id = SurfaceId::fresh();
+            assert!(!self.command(Command::SurfaceReady(SurfaceTarget {
+                id,
+                layer: NativePtr(std::ptr::null_mut()),
+                metrics: Metrics::new(360.0, 640.0, 2.0),
+            })));
+            assert!(self.runtime.surfaces.is_open());
+            id
+        }
+
+        fn frame_count(&self) -> usize {
+            self.session.borrow().frames.len()
+        }
+    }
+
+    fn now() -> FrameTime {
+        FrameTime {
+            vsync_ms: 1.0,
+            target_ms: 1.0,
+            interval_ms: 16.0,
+            mono_ms: 1.0,
+        }
+    }
+
+    #[test]
+    fn wake_while_paused_does_not_frame() {
+        let mut harness = TestHarness::new();
+        harness.open_dummy();
+        assert!(!harness.command(Command::Lifecycle(session::Lifecycle::Paused)));
+        assert!(harness.runtime.input.is_paused());
+        assert!(!harness.command(Command::Wake));
+        assert_eq!(harness.frame_count(), 0);
+    }
+
+    #[test]
+    fn resumed_clears_present_backoff_and_rearms() {
+        let mut harness = TestHarness::new();
+        let target = SurfaceTarget {
+            id: SurfaceId::fresh(),
+            layer: NativePtr(std::ptr::null_mut()),
+            metrics: Metrics::new(360.0, 640.0, 2.0),
+        };
+        harness
+            .runtime
+            .surfaces
+            .fail_attempt(target, SURFACE_OPEN_ATTEMPTS - 1);
+        assert!(harness.runtime.surfaces.take_attempt().is_none());
+        harness.runtime.needs_present = false;
+        harness.runtime.present_failures = 3;
+        harness.runtime.present_logged = true;
+        harness.runtime.present_retry_at = Some(1);
+        assert!(!harness.command(Command::Lifecycle(session::Lifecycle::Resumed)));
+        assert!(harness.runtime.needs_present);
+        assert_eq!(harness.runtime.present_failures, 0);
+        assert!(!harness.runtime.present_logged);
+        assert!(harness.runtime.present_retry_at.is_none());
+        assert!(harness.runtime.surfaces.take_attempt().is_some());
+    }
+
+    #[test]
+    fn memory_warning_drops_installed_list_and_trims_images() {
+        let mut harness = TestHarness::new();
+        let request = harness
+            .runtime
+            .images
+            .request("asset:logo", 1)
+            .expect("pending decode");
+        harness
+            .runtime
+            .images
+            .apply(ImageReady::Decoded(ImageHandle {
+                source: Arc::from("asset:logo"),
+                generation: request.generation,
+                size: [1, 1],
+                pixels: Arc::from([0u8, 0, 0, 0]),
+            }));
+        assert!(harness.runtime.images.contains("asset:logo", 1));
+        harness.runtime.installed = Some(Installed { scale: 2.0 });
+        let tokens_before = harness.vsync.token_count();
+        assert!(!harness.command(Command::MemoryWarning));
+        assert!(harness.runtime.installed.is_none());
+        assert!(!harness.runtime.images.contains("asset:logo", 1));
+        assert!(harness.vsync.token_count() > tokens_before);
+    }
+
+    #[test]
+    fn io_event_arms_only_when_session_wants_frame() {
+        let mut harness = TestHarness::new();
+        let tokens_before = harness.vsync.token_count();
+        assert!(!harness.command(Command::HttpDone {
+            token: 7,
+            result: Err(session::HttpError::new("offline")),
+        }));
+        assert!(
+            matches!(
+                harness.session.borrow().io.last(),
+                Some(IoEvent::Http { token: 7, .. })
+            ),
+            "http completion must reach the session"
+        );
+        assert_eq!(harness.vsync.token_count(), tokens_before);
+        harness.session.borrow_mut().wants = true;
+        assert!(!harness.command(Command::PluginDone {
+            token: 8,
+            result: session::PluginResult::Done(session::PluginValue::Null),
+        }));
+        assert!(
+            matches!(
+                harness.session.borrow().io.last(),
+                Some(IoEvent::Plugin { token: 8, .. })
+            ),
+            "plugin completion must reach the session"
+        );
+        assert!(!harness.command(Command::Socket {
+            id: 9,
+            event: "open".into(),
+            text: true,
+            data: Vec::new(),
+        }));
+        assert!(
+            matches!(
+                harness.session.borrow().io.last(),
+                Some(IoEvent::Socket { id: 9, .. })
+            ),
+            "socket completion must reach the session"
+        );
+        assert!(harness.vsync.token_count() > tokens_before);
+    }
+
+    #[test]
+    fn stale_frame_token_is_dropped() {
+        let mut harness = TestHarness::new();
+        harness.open_dummy();
+        let armed = harness
+            .vsync
+            .last_token()
+            .expect("SurfaceReady arms one vsync token");
+        assert!(!harness.command(Command::Frame {
+            token: FrameToken(armed.0.wrapping_add(1)),
+            time: now(),
+        }));
+        assert_eq!(harness.frame_count(), 0);
+    }
+
+    #[test]
+    fn dropped_surface_cancels_vsync_and_scheduler() {
+        let mut harness = TestHarness::new();
+        let id = harness.open_dummy();
+        harness.runtime.installed = Some(Installed { scale: 1.0 });
+        let cancels_before = harness.vsync.cancel_count();
+        assert!(!harness.command(Command::SurfaceDestroyed { id }));
+        assert!(harness.runtime.installed.is_none());
+        assert!(!harness.runtime.surfaces.is_open());
+        assert!(harness.vsync.cancel_count() > cancels_before);
+        assert!(
+            harness.runtime.scheduler.request().is_some(),
+            "cancel must drop the armed token so the next request is accepted"
+        );
+    }
+
+    #[test]
+    fn remaining_command_arms_are_reachable() {
+        let mut harness = TestHarness::new();
+        harness.session.borrow_mut().wants = true;
+        let id = harness.open_dummy();
+        assert!(!harness.command(Command::SurfaceChanged {
+            id,
+            metrics: Metrics::new(400.0, 800.0, 2.0),
+        }));
+        assert!(
+            !harness.command(Command::Pointer(ui_core::PointerEvent::new(
+                ui_core::Phase::Move,
+                1.0,
+                1.0,
+                0.0,
+            )))
+        );
+        assert!(!harness.command(Command::Input(session::InputEvent::Back)));
+        assert!(!harness.command(Command::ImeDismissed));
+        assert!(!harness.command(Command::Metrics(Metrics::new(360.0, 640.0, 3.0))));
+        assert!(!harness.command(Command::Invalidate));
+        assert!(harness.runtime.needs_present);
+        assert!(!harness.command(Command::Settings(session::PlatformSettings::default())));
+        assert!(!harness.command(Command::WindowFocus(true)));
+        assert!(!harness.command(Command::SemanticsAction(
+            ui_core::SemanticsAction::Activate(ui_core::SemanticsId(1))
+        )));
+        assert!(!harness.command(Command::ReloadImage("asset:logo".into())));
+        assert!(!harness.command(Command::ImageReady(ImageReady::Missing {
+            source: Arc::from("asset:missing"),
+            generation: 1,
+        })));
+        assert!(!harness.command(Command::HttpDone {
+            token: 11,
+            result: Err(session::HttpError::new("retry")),
+        }));
+        assert!(!harness.command(Command::Lifecycle(session::Lifecycle::Inactive)));
+        let replaced = SurfaceId::fresh();
+        assert!(!harness.command(Command::SurfaceReady(SurfaceTarget {
+            id: replaced,
+            layer: NativePtr(std::ptr::null_mut()),
+            metrics: Metrics::new(360.0, 640.0, 2.0),
+        })));
+        let frames_before = harness.frame_count();
+        assert!(!harness.command(Command::Wake));
+        assert!(
+            harness.frame_count() > frames_before,
+            "Wake on an open surface must run the session frame"
+        );
+        assert!(!harness.command(Command::Lifecycle(session::Lifecycle::Hidden)));
+        assert!(harness.runtime.input.is_paused());
+        assert!(harness.command(Command::Shutdown));
+    }
+
+    #[test]
+    fn accepted_frame_token_runs_the_session() {
+        let mut harness = TestHarness::new();
+        harness.open_dummy();
+        let token = match harness.vsync.last_token() {
+            Some(token) => token,
+            None => panic!("SurfaceReady arms one vsync token"),
+        };
+        assert!(!harness.command(Command::Frame { token, time: now() }));
+        assert_eq!(harness.frame_count(), 1);
+    }
+
+    #[test]
+    fn not_ready_surface_waits_and_a_gave_up_change_rearms() {
+        let mut harness = TestHarness::new();
+        harness.runtime.open_surface = Box::new(|_, _| Err(engine::Status::NotReady));
+        let id = SurfaceId::fresh();
+        assert!(!harness.command(Command::SurfaceReady(SurfaceTarget {
+            id,
+            layer: NativePtr(std::ptr::null_mut()),
+            metrics: Metrics::new(360.0, 640.0, 2.0),
+        })));
+        assert!(!harness.runtime.surfaces.is_open());
+        harness.runtime.surfaces.fail_attempt(
+            SurfaceTarget {
+                id,
+                layer: NativePtr(std::ptr::null_mut()),
+                metrics: Metrics::new(360.0, 640.0, 2.0),
+            },
+            SURFACE_OPEN_ATTEMPTS - 1,
+        );
+        assert!(!harness.command(Command::SurfaceChanged {
+            id,
+            metrics: Metrics::new(400.0, 800.0, 2.0),
+        }));
+        assert!(harness.runtime.surfaces.take_attempt().is_some());
     }
 }

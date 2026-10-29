@@ -32,6 +32,7 @@ pub struct VisibleNode {
 }
 
 /// AppKit role that a visible node maps to. Switch is CheckBox.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AxRole {
     Button,
@@ -45,12 +46,14 @@ pub enum AxRole {
 }
 
 /// Stable slot for one [`core::SemanticsId`]. Disappeared ids are dropped.
+#[cfg(test)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ElementCache {
     slots: HashMap<u64, u64>,
     next: u64,
 }
 
+#[cfg(test)]
 impl ElementCache {
     /// Reuse the slot for each still-live id. New ids get a fresh token.
     pub fn sync(&mut self, ids: &[u64]) -> Vec<u64> {
@@ -111,6 +114,7 @@ fn resolved_parent(
 }
 
 /// Button, Text, Image, TextField, Switch→CheckBox, Scroll. Generic is not an element.
+#[cfg(test)]
 pub fn ax_role(role: core::SemanticsRole) -> Option<AxRole> {
     match role {
         core::SemanticsRole::Generic => None,
@@ -131,6 +135,7 @@ pub fn checked_value(flags: core::SemanticsFlags) -> i32 {
 }
 
 /// Forward increment is positive. Vertical overflow wins even when both axes overflow.
+#[cfg(test)]
 pub fn scroll_step(
     viewport_w: f32,
     viewport_h: f32,
@@ -149,6 +154,7 @@ pub fn scroll_step(
 }
 
 /// Direct children of `scroll_id` in the original snapshot. No children → viewport.
+#[cfg(test)]
 pub fn content_extent(update: &core::SemanticsUpdate, scroll_id: core::SemanticsId) -> (f32, f32) {
     let Some(scroll) = update.nodes.iter().find(|node| node.id == scroll_id) else {
         return (0.0, 0.0);

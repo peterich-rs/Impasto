@@ -266,40 +266,52 @@ impl Recognizer for LongPressRecognizer {
     }
 }
 
-pub struct DragRecognizer {
-    pub target: NodeId,
+/// Shared axial drag: past slop, then vote by axis. Drag and text-select differ only in claim.
+struct AxisDragState {
     axis: DragAxis,
     origin_x: f32,
     origin_y: f32,
 }
 
-impl DragRecognizer {
-    pub fn new(target: NodeId, axis: DragAxis, x: f32, y: f32) -> Self {
+impl AxisDragState {
+    fn new(axis: DragAxis, x: f32, y: f32) -> Self {
         Self {
-            target,
             axis,
             origin_x: x,
             origin_y: y,
         }
     }
-}
 
-impl Recognizer for DragRecognizer {
-    fn claim(&self) -> RecognizerClaim {
-        RecognizerClaim::Drag { axis: self.axis }
-    }
-
-    fn on_pointer(&mut self, event: &PointerEvent, _path: &HitPath) -> Vote {
-        let dx = event.x - self.origin_x;
-        let dy = event.y - self.origin_y;
+    fn vote(&self, event: &PointerEvent) -> Vote {
         if !past_slop(self.origin_x, self.origin_y, event.x, event.y) {
             return Vote::Undecided;
         }
-        if self.axis.matches(dx, dy) {
+        if self
+            .axis
+            .matches(event.x - self.origin_x, event.y - self.origin_y)
+        {
             Vote::Accept
         } else {
             Vote::Reject
         }
+    }
+}
+
+pub struct DragRecognizer(AxisDragState);
+
+impl DragRecognizer {
+    pub fn new(_target: NodeId, axis: DragAxis, x: f32, y: f32) -> Self {
+        Self(AxisDragState::new(axis, x, y))
+    }
+}
+
+impl Recognizer for DragRecognizer {
+    fn claim(&self) -> RecognizerClaim {
+        RecognizerClaim::Drag { axis: self.0.axis }
+    }
+
+    fn on_pointer(&mut self, event: &PointerEvent, _path: &HitPath) -> Vote {
+        self.0.vote(event)
     }
 }
 
@@ -352,40 +364,21 @@ impl Recognizer for ScrollRecognizer {
     }
 }
 
-pub struct TextSelectRecognizer {
-    pub target: NodeId,
-    axis: DragAxis,
-    origin_x: f32,
-    origin_y: f32,
-}
+pub struct TextSelectRecognizer(AxisDragState);
 
 impl TextSelectRecognizer {
-    pub fn new(target: NodeId, axis: DragAxis, x: f32, y: f32) -> Self {
-        Self {
-            target,
-            axis,
-            origin_x: x,
-            origin_y: y,
-        }
+    pub fn new(_target: NodeId, axis: DragAxis, x: f32, y: f32) -> Self {
+        Self(AxisDragState::new(axis, x, y))
     }
 }
 
 impl Recognizer for TextSelectRecognizer {
     fn claim(&self) -> RecognizerClaim {
-        RecognizerClaim::TextSelect { axis: self.axis }
+        RecognizerClaim::TextSelect { axis: self.0.axis }
     }
 
     fn on_pointer(&mut self, event: &PointerEvent, _path: &HitPath) -> Vote {
-        let dx = event.x - self.origin_x;
-        let dy = event.y - self.origin_y;
-        if !past_slop(self.origin_x, self.origin_y, event.x, event.y) {
-            return Vote::Undecided;
-        }
-        if self.axis.matches(dx, dy) {
-            Vote::Accept
-        } else {
-            Vote::Reject
-        }
+        self.0.vote(event)
     }
 }
 

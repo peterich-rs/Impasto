@@ -534,7 +534,7 @@ fn transform_contains(node: &super::node::Node, abs_x: f32, abs_y: f32, query: &
 }
 
 #[derive(Clone, Copy)]
-struct Affine {
+pub(crate) struct Affine {
     a: f32,
     b: f32,
     c: f32,
@@ -544,7 +544,7 @@ struct Affine {
 }
 
 impl Affine {
-    fn identity() -> Self {
+    pub(crate) fn identity() -> Self {
         Self {
             a: 1.0,
             b: 0.0,
@@ -555,7 +555,12 @@ impl Affine {
         }
     }
 
-    fn paint(
+    #[cfg(test)]
+    pub(crate) fn translate(x: f32, y: f32) -> Self {
+        Self::paint(x, y, 0.0, 1.0, 1.0)
+    }
+
+    pub(crate) fn paint(
         translate_x: f32,
         translate_y: f32,
         rotate_rad: f32,
@@ -573,7 +578,7 @@ impl Affine {
         }
     }
 
-    fn apply(self, x: f32, y: f32) -> (f32, f32) {
+    pub(crate) fn apply(self, x: f32, y: f32) -> (f32, f32) {
         (
             self.a * x + self.b * y + self.c,
             self.d * x + self.e * y + self.f,
@@ -581,7 +586,7 @@ impl Affine {
     }
 
     /// `self` applied after `inner`.
-    fn around(self, inner: Self) -> Self {
+    pub(crate) fn around(self, inner: Self) -> Self {
         Self {
             a: self.a * inner.a + self.b * inner.d,
             b: self.a * inner.b + self.b * inner.e,

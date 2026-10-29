@@ -221,24 +221,33 @@ impl ScrollAxis {
             if self.allows_y() { y } else { 0.0 },
         )
     }
-
-    /// `0` both, `1` vertical, `2` horizontal. Anything else is both.
-    pub fn from_code(code: i32) -> Self {
-        match code {
-            1 => Self::Vertical,
-            2 => Self::Horizontal,
-            _ => Self::Both,
-        }
-    }
-
-    pub fn code(self) -> i32 {
-        match self {
-            Self::Both => 0,
-            Self::Vertical => 1,
-            Self::Horizontal => 2,
-        }
-    }
 }
+
+macro_rules! coded_trinary {
+    ($ty:ident, $default:ident, $one:ident, $two:ident) => {
+        impl $ty {
+            pub fn from_code(code: i32) -> Self {
+                match code {
+                    1 => Self::$one,
+                    2 => Self::$two,
+                    _ => Self::$default,
+                }
+            }
+
+            pub fn code(self) -> i32 {
+                match self {
+                    Self::$default => 0,
+                    Self::$one => 1,
+                    Self::$two => 2,
+                }
+            }
+        }
+    };
+}
+
+pub(crate) use coded_trinary;
+
+coded_trinary!(ScrollAxis, Both, Vertical, Horizontal);
 
 /// Whether a drag on the declared axis is claimed.
 ///
@@ -253,24 +262,7 @@ pub enum ScrollAccept {
     Never,
 }
 
-impl ScrollAccept {
-    /// `0` content, `1` always, `2` never. Anything else is content.
-    pub fn from_code(code: i32) -> Self {
-        match code {
-            1 => Self::Always,
-            2 => Self::Never,
-            _ => Self::Content,
-        }
-    }
-
-    pub fn code(self) -> i32 {
-        match self {
-            Self::Content => 0,
-            Self::Always => 1,
-            Self::Never => 2,
-        }
-    }
-}
+coded_trinary!(ScrollAccept, Content, Always, Never);
 
 /// Per-scroll motion parameters. Defaults match the historical constants.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -360,5 +352,18 @@ mod tests {
         };
         assert!(spring.done(5_000.0));
         assert!((spring.x(5_000.0) - 10.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn script_name_matches_the_guard_keys() {
+        assert_eq!(AnimProp::ScrollX.script_name(), "scrollX");
+        assert_eq!(AnimProp::ScrollY.script_name(), "scrollY");
+        assert_eq!(AnimProp::Opacity.script_name(), "opacity");
+        assert_eq!(AnimProp::TranslateX.script_name(), "translateX");
+        assert_eq!(AnimProp::TranslateY.script_name(), "translateY");
+        assert_eq!(AnimProp::Rotate.script_name(), "rotate");
+        assert_eq!(AnimProp::Scale.script_name(), "scale");
+        assert_eq!(AnimProp::OverscrollX.script_name(), "overscrollX");
+        assert_eq!(AnimProp::OverscrollY.script_name(), "overscrollY");
     }
 }

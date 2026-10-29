@@ -447,6 +447,24 @@ pub(super) struct Node {
     pub(super) semantics: Option<crate::SemanticsHint>,
 }
 
+macro_rules! payload_accessors {
+    ($name:ident, $name_mut:ident, $variant:ident, $ty:ty) => {
+        pub(super) fn $name(&self) -> Option<&$ty> {
+            match &self.payload {
+                Payload::$variant(value) => Some(value),
+                _ => None,
+            }
+        }
+
+        pub(super) fn $name_mut(&mut self) -> Option<&mut $ty> {
+            match &mut self.payload {
+                Payload::$variant(value) => Some(value),
+                _ => None,
+            }
+        }
+    };
+}
+
 impl Node {
     pub(super) fn new(kind: Kind, style: Style, taffy: TaffyId, payload: Payload) -> Self {
         let mut flags = NodeFlags::LAYOUT_DIRTY | NodeFlags::SEMANTICS_DIRTY;
@@ -496,33 +514,8 @@ impl Node {
         }
     }
 
-    pub(super) fn text(&self) -> Option<&TextPayload> {
-        match &self.payload {
-            Payload::Text(text) => Some(text),
-            Payload::Container | Payload::Image(_) => None,
-        }
-    }
-
-    pub(super) fn text_mut(&mut self) -> Option<&mut TextPayload> {
-        match &mut self.payload {
-            Payload::Text(text) => Some(text),
-            Payload::Container | Payload::Image(_) => None,
-        }
-    }
-
-    pub(super) fn image(&self) -> Option<&ImagePayload> {
-        match &self.payload {
-            Payload::Image(image) => Some(image),
-            Payload::Container | Payload::Text(_) => None,
-        }
-    }
-
-    pub(super) fn image_mut(&mut self) -> Option<&mut ImagePayload> {
-        match &mut self.payload {
-            Payload::Image(image) => Some(image),
-            Payload::Container | Payload::Text(_) => None,
-        }
-    }
+    payload_accessors!(text, text_mut, Text, TextPayload);
+    payload_accessors!(image, image_mut, Image, ImagePayload);
 
     /// True when this node's subtree must composite through its own layer.
     ///

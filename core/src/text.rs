@@ -217,11 +217,84 @@ impl TextEditor {
         C: Fn(u32, Affinity) -> Caret,
         H: Fn(f32, f32) -> Caret,
     {
+        if !self.apply_motion(&edit, lines, &word_at, &caret_at, &hit_at) {
+            self.apply_mutation(edit, lines, word_at);
+        }
+        self.revision = self.revision.saturating_add(1);
+    }
+
+    fn apply_motion<W, C, H>(
+        &mut self,
+        edit: &Edit,
+        lines: &[TextLine],
+        word_at: &W,
+        caret_at: &C,
+        hit_at: &H,
+    ) -> bool
+    where
+        W: Fn(&str, u32) -> (u32, u32),
+        C: Fn(u32, Affinity) -> Caret,
+        H: Fn(f32, f32) -> Caret,
+    {
         match edit {
-            Edit::Left => self.move_cluster(lines, -1, false),
-            Edit::Right => self.move_cluster(lines, 1, false),
-            Edit::ExtendLeft => self.move_cluster(lines, -1, true),
-            Edit::ExtendRight => self.move_cluster(lines, 1, true),
+            Edit::Left | Edit::Right | Edit::ExtendLeft | Edit::ExtendRight => {
+                let extend = matches!(edit, Edit::ExtendLeft | Edit::ExtendRight);
+                let dir = if matches!(edit, Edit::Left | Edit::ExtendLeft) {
+                    -1
+                } else {
+                    1
+                };
+                self.move_cluster(lines, dir, extend);
+            }
+            Edit::WordLeft | Edit::WordRight | Edit::ExtendWordLeft | Edit::ExtendWordRight => {
+                let extend = matches!(edit, Edit::ExtendWordLeft | Edit::ExtendWordRight);
+                let dir = if matches!(edit, Edit::WordLeft | Edit::ExtendWordLeft) {
+                    -1
+                } else {
+                    1
+                };
+                self.move_word(word_at, dir, extend);
+            }
+            Edit::LineStart | Edit::LineEnd | Edit::ExtendLineStart | Edit::ExtendLineEnd => {
+                let extend = matches!(edit, Edit::ExtendLineStart | Edit::ExtendLineEnd);
+                let dir = if matches!(edit, Edit::LineStart | Edit::ExtendLineStart) {
+                    -1
+                } else {
+                    1
+                };
+                self.move_line_edge(lines, dir, extend);
+            }
+            Edit::Up | Edit::Down | Edit::ExtendUp | Edit::ExtendDown => {
+                let extend = matches!(edit, Edit::ExtendUp | Edit::ExtendDown);
+                let dir = if matches!(edit, Edit::Up | Edit::ExtendUp) {
+                    -1
+                } else {
+                    1
+                };
+                self.move_vertical(lines, dir, extend, caret_at, hit_at);
+            }
+            Edit::DocumentStart => self.place(0, Affinity::Downstream, false),
+            Edit::DocumentEnd => {
+                let end = utf16_len(&self.value.text);
+                self.place(end, Affinity::Downstream, false);
+            }
+            Edit::ExtendDocumentStart => self.place(0, Affinity::Downstream, true),
+            Edit::ExtendDocumentEnd => {
+                let end = utf16_len(&self.value.text);
+                self.place(end, Affinity::Downstream, true);
+            }
+            Edit::SetCaret(unit) => self.place(*unit, Affinity::Downstream, false),
+            Edit::ExtendCaret(unit) => self.place(*unit, Affinity::Downstream, true),
+            _ => return false,
+        }
+        true
+    }
+
+    fn apply_mutation<W>(&mut self, edit: Edit, lines: &[TextLine], word_at: W)
+    where
+        W: Fn(&str, u32) -> (u32, u32),
+    {
+        match edit {
             Edit::Backspace => {
                 self.checkpoint();
                 self.delete_backward();
@@ -271,30 +344,6 @@ impl TextEditor {
                 self.clipboard = None;
                 self.column_x = None;
             }
-            Edit::SetCaret(unit) => self.place(unit, Affinity::Downstream, false),
-            Edit::ExtendCaret(unit) => self.place(unit, Affinity::Downstream, true),
-            Edit::WordLeft => self.move_word(&word_at, -1, false),
-            Edit::WordRight => self.move_word(&word_at, 1, false),
-            Edit::ExtendWordLeft => self.move_word(&word_at, -1, true),
-            Edit::ExtendWordRight => self.move_word(&word_at, 1, true),
-            Edit::LineStart => self.move_line_edge(lines, -1, false),
-            Edit::LineEnd => self.move_line_edge(lines, 1, false),
-            Edit::ExtendLineStart => self.move_line_edge(lines, -1, true),
-            Edit::ExtendLineEnd => self.move_line_edge(lines, 1, true),
-            Edit::DocumentStart => self.place(0, Affinity::Downstream, false),
-            Edit::DocumentEnd => {
-                let end = utf16_len(&self.value.text);
-                self.place(end, Affinity::Downstream, false);
-            }
-            Edit::ExtendDocumentStart => self.place(0, Affinity::Downstream, true),
-            Edit::ExtendDocumentEnd => {
-                let end = utf16_len(&self.value.text);
-                self.place(end, Affinity::Downstream, true);
-            }
-            Edit::Up => self.move_vertical(lines, -1, false, &caret_at, &hit_at),
-            Edit::Down => self.move_vertical(lines, 1, false, &caret_at, &hit_at),
-            Edit::ExtendUp => self.move_vertical(lines, -1, true, &caret_at, &hit_at),
-            Edit::ExtendDown => self.move_vertical(lines, 1, true, &caret_at, &hit_at),
             Edit::DeleteWordBackward => {
                 self.checkpoint();
                 self.delete_word(&word_at, -1);
@@ -325,8 +374,29 @@ impl TextEditor {
                 self.delete_composing_text();
                 self.insert(&text);
             }
+            Edit::Left
+            | Edit::Right
+            | Edit::ExtendLeft
+            | Edit::ExtendRight
+            | Edit::WordLeft
+            | Edit::WordRight
+            | Edit::ExtendWordLeft
+            | Edit::ExtendWordRight
+            | Edit::LineStart
+            | Edit::LineEnd
+            | Edit::ExtendLineStart
+            | Edit::ExtendLineEnd
+            | Edit::Up
+            | Edit::Down
+            | Edit::ExtendUp
+            | Edit::ExtendDown
+            | Edit::DocumentStart
+            | Edit::DocumentEnd
+            | Edit::ExtendDocumentStart
+            | Edit::ExtendDocumentEnd
+            | Edit::SetCaret(_)
+            | Edit::ExtendCaret(_) => {}
         }
-        self.revision = self.revision.saturating_add(1);
     }
 
     fn checkpoint(&mut self) {
@@ -337,22 +407,35 @@ impl TextEditor {
         self.redo.clear();
     }
 
-    fn undo(&mut self) {
-        let Some(previous) = self.undo.pop() else {
+    fn step_history(
+        value: &mut TextEditingValue,
+        column_x: &mut Option<f32>,
+        from: &mut Vec<TextEditingValue>,
+        to: &mut Vec<TextEditingValue>,
+    ) {
+        let Some(previous) = from.pop() else {
             return;
         };
-        self.redo.push(self.value.clone());
-        self.value = previous;
-        self.column_x = None;
+        to.push(std::mem::replace(value, previous));
+        *column_x = None;
+    }
+
+    fn undo(&mut self) {
+        Self::step_history(
+            &mut self.value,
+            &mut self.column_x,
+            &mut self.undo,
+            &mut self.redo,
+        );
     }
 
     fn redo(&mut self) {
-        let Some(next) = self.redo.pop() else {
-            return;
-        };
-        self.undo.push(self.value.clone());
-        self.value = next;
-        self.column_x = None;
+        Self::step_history(
+            &mut self.value,
+            &mut self.column_x,
+            &mut self.redo,
+            &mut self.undo,
+        );
     }
 
     fn copy(&mut self) {
@@ -847,5 +930,422 @@ mod tests {
         assert_eq!(editor.value().selection.extent, utf16_len("hello "));
         editor.apply(Edit::DeleteWordBackward);
         assert_eq!(editor.value().text, "hello ");
+    }
+
+    #[test]
+    fn every_edit_moves_or_changes_the_value_predictably() {
+        struct Case {
+            start: &'static str,
+            caret: u32,
+            base: Option<u32>,
+            edit: Edit,
+            text: &'static str,
+            expect_base: u32,
+            expect_extent: u32,
+        }
+        let cases = [
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Left,
+                text: "hello world",
+                expect_base: 10,
+                expect_extent: 10,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Right,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ExtendLeft,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 10,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ExtendRight,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Backspace,
+                text: "hello worl",
+                expect_base: 10,
+                expect_extent: 10,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ForwardDelete,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Insert("!".into()),
+                text: "hello world!",
+                expect_base: 12,
+                expect_extent: 12,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Newline,
+                text: "hello world\n",
+                expect_base: 12,
+                expect_extent: 12,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Paste("!".into()),
+                text: "hello world!",
+                expect_base: 12,
+                expect_extent: 12,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Composing(Some("x".into())),
+                text: "hello worldx",
+                expect_base: 12,
+                expect_extent: 12,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Composing(None),
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "ab",
+                caret: 2,
+                base: Some(0),
+                edit: Edit::Copy,
+                text: "ab",
+                expect_base: 0,
+                expect_extent: 2,
+            },
+            Case {
+                start: "ab",
+                caret: 2,
+                base: Some(0),
+                edit: Edit::Cut,
+                text: "",
+                expect_base: 0,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Undo,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Redo,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::SelectAll,
+                text: "hello world",
+                expect_base: 0,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Load("ab".into()),
+                text: "ab",
+                expect_base: 2,
+                expect_extent: 2,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::SetCaret(0),
+                text: "hello world",
+                expect_base: 0,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ExtendCaret(0),
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::WordLeft,
+                text: "hello world",
+                expect_base: 6,
+                expect_extent: 6,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::WordRight,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ExtendWordLeft,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 6,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ExtendWordRight,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::LineStart,
+                text: "hello world",
+                expect_base: 0,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 0,
+                base: None,
+                edit: Edit::LineEnd,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ExtendLineStart,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 0,
+                base: None,
+                edit: Edit::ExtendLineEnd,
+                text: "hello world",
+                expect_base: 0,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::DocumentStart,
+                text: "hello world",
+                expect_base: 0,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 0,
+                base: None,
+                edit: Edit::DocumentEnd,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ExtendDocumentStart,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 0,
+                base: None,
+                edit: Edit::ExtendDocumentEnd,
+                text: "hello world",
+                expect_base: 0,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Up,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Down,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ExtendUp,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ExtendDown,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::DeleteWordBackward,
+                text: "hello ",
+                expect_base: 6,
+                expect_extent: 6,
+            },
+            Case {
+                start: "hello world",
+                caret: 0,
+                base: None,
+                edit: Edit::DeleteWordForward,
+                text: " world",
+                expect_base: 0,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::DeleteToLineStart,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 0,
+                base: None,
+                edit: Edit::DeleteToLineEnd,
+                text: "hello world",
+                expect_base: 0,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::DeleteRange { start: 0, end: 6 },
+                text: "world",
+                expect_base: 0,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Commit("!".into()),
+                text: "hello world!",
+                expect_base: 12,
+                expect_extent: 12,
+            },
+        ];
+        for case in cases {
+            let mut editor = TextEditor::new(case.start);
+            editor.apply(Edit::SetCaret(case.caret));
+            if let Some(base) = case.base {
+                editor.apply(Edit::SetCaret(base));
+                editor.apply(Edit::ExtendCaret(case.caret));
+            }
+            editor.apply(case.edit.clone());
+            assert_eq!(editor.value().text, case.text, "text after {:?}", case.edit);
+            assert_eq!(
+                editor.value().selection.base,
+                case.expect_base,
+                "base after {:?}",
+                case.edit
+            );
+            assert_eq!(
+                editor.value().selection.extent,
+                case.expect_extent,
+                "extent after {:?}",
+                case.edit
+            );
+        }
+        let mut selected = TextEditor::new("ab");
+        selected.apply(Edit::SetCaret(0));
+        selected.apply(Edit::ExtendCaret(2));
+        selected.apply(Edit::Copy);
+        assert_eq!(selected.clipboard(), Some("ab"));
+        let mut undo = TextEditor::new("ab");
+        undo.apply(Edit::Backspace);
+        undo.apply(Edit::Undo);
+        assert_eq!(undo.value().text, "ab");
+        undo.apply(Edit::Redo);
+        assert_eq!(undo.value().text, "a");
     }
 }

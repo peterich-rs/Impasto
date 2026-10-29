@@ -1,19 +1,9 @@
-//! Taffy styles, measure, and the viewport.
-
-use std::sync::Arc;
-
-use protocol::{TextAlign, TextStyle};
-use taffy::prelude::*;
+//! Scroll offset, overscroll, fling, and snap.
 
 use super::layout::{finite_number, nearest_offset, rubber_band};
-use super::node::{Kind, NodeFlags, Slot, TextPayload};
-use super::{
-    Alignment, AxisSize, Edges, Gesture, GridLine, Inset, Justify, NodeId, Rect, TrackSize, Tree,
-};
-use crate::{Error, SINGLE_LINE_MAX, Shaper, TextSize};
-
-use super::ScrollEdge;
-use crate::AnimProp;
+use super::node::Kind;
+use super::{Gesture, NodeId, Tree};
+use crate::Error;
 
 impl Tree {
     pub fn overscroll(&self, id: NodeId) -> Result<(f32, f32), Error> {

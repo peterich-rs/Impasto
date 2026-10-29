@@ -36,13 +36,6 @@ impl Marked {
         !self.composing.is_empty()
     }
 
-    /// Replace the committed string and drop any composition. Used when a field
-    /// takes focus and the session sends the string it already has.
-    pub fn replace_committed(&mut self, text: String) {
-        self.committed = text;
-        self.composing.clear();
-    }
-
     pub fn insert(&mut self, text: &str) -> Vec<InputEvent> {
         let mut events = Vec::new();
         if self.has_marked() {

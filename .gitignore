@@ -1,6 +1,7 @@
 build/
 node_modules/
 target/
+.metrics/
 third_party/impeller-sdk/
 hosts/android/apk/.gradle/
 hosts/android/apk/build/
