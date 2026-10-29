@@ -62,6 +62,18 @@ impl Engine {
     pub fn typography(&self) -> std::rc::Rc<std::cell::RefCell<Typography>> {
         std::rc::Rc::clone(&self.typography)
     }
+
+    pub fn picture_builds(&self) -> u64 {
+        0
+    }
+
+    pub fn cache_counts(&self) -> (usize, usize) {
+        (0, 0)
+    }
+
+    pub fn submit_stats(&self) -> crate::SubmitStats {
+        crate::SubmitStats::default()
+    }
 }
 
 impl Typography {
@@ -209,18 +221,6 @@ impl Typography {
 
     pub fn text_paint_probe(&self) -> (bool, [u8; 4]) {
         (false, [0, 0, 0, 0])
-    }
-
-    pub fn picture_builds(&self) -> u64 {
-        0
-    }
-
-    pub fn cache_counts(&self) -> (usize, usize) {
-        (0, 0)
-    }
-
-    pub fn submit_stats(&self) -> crate::SubmitStats {
-        crate::SubmitStats::default()
     }
 }
 

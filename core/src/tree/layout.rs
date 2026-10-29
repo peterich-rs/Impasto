@@ -436,12 +436,12 @@ impl Tree {
         let kind = self.node(id)?.kind;
         let mut style = self.node(id)?.style.clone();
         style.size = Size {
-            width: percent(1.0),
-            height: percent(1.0),
+            width: percent(1.0_f32),
+            height: percent(1.0_f32),
         };
         style.min_size = Size {
-            width: length(0.0),
-            height: length(0.0),
+            width: length(0.0_f32),
+            height: length(0.0_f32),
         };
         let parent_is_flex = self
             .node(id)?
@@ -451,14 +451,14 @@ impl Tree {
         if parent_is_flex {
             style.flex_grow = 1.0;
             style.flex_shrink = 1.0;
-            style.flex_basis = length(0.0);
+            style.flex_basis = length(0.0_f32);
         }
         if matches!(
             kind,
             Kind::Stack | Kind::Opacity | Kind::Transform | Kind::Clip
         ) {
-            style.grid_template_columns = vec![fr(1.0)];
-            style.grid_template_rows = vec![fr(1.0)];
+            style.grid_template_columns = vec![fr(1.0_f32)];
+            style.grid_template_rows = vec![fr(1.0_f32)];
         }
         self.write_style(id, style)
     }
@@ -1278,8 +1278,8 @@ pub(super) fn scroll_style() -> Style {
         flex_grow: 1.0,
         flex_shrink: 1.0,
         min_size: Size {
-            width: length(0.0),
-            height: length(0.0),
+            width: length(0.0_f32),
+            height: length(0.0_f32),
         },
         overflow: taffy::Point {
             x: taffy::style::Overflow::Hidden,
