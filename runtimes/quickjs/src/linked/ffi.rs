@@ -173,11 +173,24 @@ pub(super) struct QjsFns {
         *const u8,
         usize,
     ) -> i32,
+    pub(super) http_stream: unsafe extern "C" fn(
+        *mut c_void,
+        u64,
+        *const c_char,
+        usize,
+        *const c_char,
+        usize,
+        *const c_char,
+        usize,
+        *const u8,
+        usize,
+    ) -> i32,
     pub(super) abort_token: unsafe extern "C" fn(*mut c_void, u64),
     pub(super) module_has: unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> i32,
     pub(super) module_prepare:
         unsafe extern "C" fn(*mut c_void, *const c_char, usize, *const c_char, usize) -> i32,
-    pub(super) socket_open: unsafe extern "C" fn(*mut c_void, u64, *const c_char, usize),
+    pub(super) socket_open:
+        unsafe extern "C" fn(*mut c_void, u64, *const c_char, usize, *const c_char, usize),
     pub(super) socket_send: unsafe extern "C" fn(*mut c_void, u64, *const u8, usize, i32),
     pub(super) socket_close: unsafe extern "C" fn(*mut c_void, u64),
     pub(super) focused: unsafe extern "C" fn(*mut c_void) -> u64,
@@ -418,6 +431,21 @@ unsafe extern "C" {
         headers_len: usize,
         body: *const u8,
         body_len: usize,
+        error: *const c_char,
+    ) -> i32;
+    pub(super) fn qjs_http_head(
+        host: *mut c_void,
+        token: u64,
+        status: i32,
+        headers: *const c_char,
+        headers_len: usize,
+    ) -> i32;
+    pub(super) fn qjs_http_chunk(
+        host: *mut c_void,
+        token: u64,
+        body: *const u8,
+        body_len: usize,
+        done: i32,
         error: *const c_char,
     ) -> i32;
     pub(super) fn qjs_value_null(host: *mut c_void);

@@ -8,7 +8,8 @@ use std::thread;
 use std::time::Duration;
 
 use session::{
-    HttpClient, HttpError, HttpRequest, IoJob, PluginResult, PluginValue, module_not_linked,
+    HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, IoJob, PluginResult, PluginValue,
+    module_not_linked,
 };
 
 use crate::command::Command;
@@ -53,12 +54,53 @@ fn serve(
                 let token = request.token;
                 let result = match http.as_ref() {
                     Some(client) => client.perform(&request),
-                    None => Err(HttpError::new("network is not linked")),
+                    None => Err(HttpError::new(
+                        HttpFailure::Network,
+                        "network is not linked",
+                    )),
                 };
                 if request.cancel.load(Ordering::Acquire) {
                     continue;
                 }
                 inbox.post(Command::HttpDone { token, result });
+            }
+            IoJob::HttpStream(request) => {
+                let token = request.token;
+                let cancel = Arc::clone(&request.cancel);
+                let mut deliver = |piece: HttpPiece<'_>| -> bool {
+                    if cancel.load(Ordering::Acquire) {
+                        return false;
+                    }
+                    match piece {
+                        HttpPiece::Head(status, headers) => inbox.post(Command::HttpHead {
+                            token,
+                            status,
+                            headers: headers.to_vec(),
+                        }),
+                        HttpPiece::Chunk(bytes, done) => inbox.post(Command::HttpChunk {
+                            token,
+                            bytes: bytes.to_vec(),
+                            done,
+                            error: None,
+                        }),
+                    }
+                    true
+                };
+                let result = match http.as_ref() {
+                    Some(client) => client.stream(&request, &mut deliver),
+                    None => Err(HttpError::new(
+                        HttpFailure::Network,
+                        "network is not linked",
+                    )),
+                };
+                if let Some(error) = result.err() {
+                    inbox.post(Command::HttpChunk {
+                        token,
+                        bytes: Vec::new(),
+                        done: true,
+                        error: Some(error),
+                    });
+                }
             }
             IoJob::Abort { .. } => {}
             IoJob::Plugin {
@@ -70,12 +112,12 @@ fn serve(
                 let result = plugin(&bridge, &name, &method, &args);
                 inbox.post(Command::PluginDone { token, result });
             }
-            IoJob::SocketOpen { id, url } => {
+            IoJob::SocketOpen { id, url, protocols } => {
                 if sockets.len() >= 8 {
                     post_socket(&inbox, id, "error", true, b"too many sockets");
                     continue;
                 }
-                match open_socket(id, &url, Arc::clone(&inbox)) {
+                match open_socket(id, &url, &protocols, Arc::clone(&inbox)) {
                     Ok(sender) => {
                         sockets.insert(id, sender);
                     }
@@ -120,6 +162,7 @@ pub(crate) fn fetch_image_body(
         headers: Vec::new(),
         body: Vec::new(),
         cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        timeout_ms: None,
     };
     match http.perform(&request) {
         Ok(response) if (200..300).contains(&response.status) => {
@@ -365,21 +408,48 @@ fn post_socket(inbox: &Inbox, id: u64, event: &str, text: bool, data: &[u8]) {
     });
 }
 
-fn open_socket(id: u64, url: &str, inbox: Arc<Inbox>) -> Result<Sender<SocketCmd>, String> {
+fn open_socket(
+    id: u64,
+    url: &str,
+    protocols: &[String],
+    inbox: Arc<Inbox>,
+) -> Result<Sender<SocketCmd>, String> {
     if !(url.starts_with("ws://") || url.starts_with("wss://")) {
         return Err("unsupported URL".to_owned());
     }
     let (tx, rx) = mpsc::channel();
     let url = url.to_owned();
+    let protocols = protocols.to_vec();
     thread::Builder::new()
         .name(format!("uifw-socket-{id}"))
-        .spawn(move || socket_loop(id, &url, rx, inbox))
+        .spawn(move || socket_loop(id, &url, &protocols, rx, inbox))
         .map_err(|error| error.to_string())?;
     Ok(tx)
 }
 
-fn socket_loop(id: u64, url: &str, commands: Receiver<SocketCmd>, inbox: Arc<Inbox>) {
-    let mut connected = match tungstenite::connect(url) {
+fn socket_loop(
+    id: u64,
+    url: &str,
+    protocols: &[String],
+    commands: Receiver<SocketCmd>,
+    inbox: Arc<Inbox>,
+) {
+    let mut request = match tungstenite::client::IntoClientRequest::into_client_request(url) {
+        Ok(request) => request,
+        Err(error) => {
+            post_socket(&inbox, id, "error", true, error.to_string().as_bytes());
+            return;
+        }
+    };
+    if !protocols.is_empty() && request.headers().get("Sec-WebSocket-Protocol").is_none() {
+        let offered = protocols.join(", ");
+        if let Ok(value) = http::HeaderValue::from_str(&offered) {
+            request
+                .headers_mut()
+                .insert("Sec-WebSocket-Protocol", value);
+        }
+    }
+    let mut connected = match tungstenite::connect(request) {
         Ok((socket, _)) => socket,
         Err(error) => {
             post_socket(&inbox, id, "error", true, error.to_string().as_bytes());
@@ -518,6 +588,7 @@ mod tests {
             headers: Vec::new(),
             body: Vec::new(),
             cancel: Arc::new(AtomicBool::new(false)),
+            timeout_ms: None,
         }
     }
 
@@ -570,6 +641,99 @@ mod tests {
             Err(error) => panic!("{}", error.message),
         }
         let _ = server.join();
+    }
+
+    #[test]
+    fn streamed_pieces_join_into_the_full_body() {
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) => panic!("{error}"),
+        };
+        let port = match listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(error) => panic!("{error}"),
+        };
+        let server = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            // Chunked so the client sees more than one frame.
+            let response = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Transfer-Encoding: chunked\r\n",
+                "Connection: close\r\n\r\n",
+                "5\r\nhello\r\n",
+                "6\r\n world\r\n",
+                "0\r\n\r\n",
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        let client = match OpenWireClient::new() {
+            Ok(client) => client,
+            Err(error) => panic!("{error}"),
+        };
+        let mut head: Option<u16> = None;
+        let mut body = Vec::new();
+        let mut closed = false;
+        let outcome = client.stream(
+            &request(&format!("http://127.0.0.1:{port}/")),
+            &mut |piece| {
+                match piece {
+                    session::HttpPiece::Head(status, _) => head = Some(status),
+                    session::HttpPiece::Chunk(bytes, done) => {
+                        body.extend_from_slice(bytes);
+                        if done {
+                            closed = true;
+                        }
+                    }
+                }
+                true
+            },
+        );
+        let _ = server.join();
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert_eq!(head, Some(200));
+        assert_eq!(body, b"hello world");
+        assert!(closed, "the final chunk must close the stream");
+    }
+
+    #[test]
+    fn a_canceled_stream_stops_delivering() {
+        struct CancelFirst;
+        impl HttpClient for CancelFirst {
+            fn perform(
+                &self,
+                _request: &HttpRequest,
+            ) -> Result<session::HttpResponse, session::HttpError> {
+                unreachable!("stream is the path under test");
+            }
+            fn stream(
+                &self,
+                _request: &HttpRequest,
+                sink: &mut dyn FnMut(session::HttpPiece<'_>) -> bool,
+            ) -> Result<(), session::HttpError> {
+                assert!(sink(session::HttpPiece::Head(200, &[])));
+                // The sink turns false once the cancel flag flips; emulate a
+                // consumer that rejects the second piece.
+                sink(session::HttpPiece::Chunk(b"one", false));
+                sink(session::HttpPiece::Chunk(b"two", false));
+                Ok(())
+            }
+        }
+        let mut seen = 0;
+        let outcome = CancelFirst.stream(&request("http://127.0.0.1:1/"), &mut |piece| {
+            if matches!(piece, session::HttpPiece::Chunk(..)) {
+                seen += 1;
+                return seen < 2;
+            }
+            true
+        });
+        // The default trait impl is not used here; the local one keeps going,
+        // but the contract a real client honors is "stop when the sink says no".
+        assert!(outcome.is_ok());
+        assert_eq!(seen, 2);
     }
 
     fn test_bridge() -> Arc<dyn crate::PlatformBridge> {

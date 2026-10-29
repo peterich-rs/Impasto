@@ -120,12 +120,16 @@ typedef struct QjsFns {
     int (*http)(void *session, uint64_t token, const char *method, size_t method_len,
                 const char *url, size_t url_len, const char *headers, size_t headers_len,
                 const uint8_t *body, size_t body_len);
+    int (*http_stream)(void *session, uint64_t token, const char *method, size_t method_len,
+                       const char *url, size_t url_len, const char *headers, size_t headers_len,
+                       const uint8_t *body, size_t body_len);
     void (*abort_token)(void *session, uint64_t token);
     int (*module_has)(void *session, const char *name, size_t len);
     /* 0 synchronous, 1 promise, -1 not linked. */
     int (*module_prepare)(void *session, const char *name, size_t name_len, const char *method,
                           size_t method_len);
-    void (*socket_open)(void *session, uint64_t id, const char *url, size_t url_len);
+    void (*socket_open)(void *session, uint64_t id, const char *url, size_t url_len,
+                        const char *protocols, size_t protocols_len);
     void (*socket_send)(void *session, uint64_t id, const uint8_t *data, size_t len, int is_text);
     void (*socket_close)(void *session, uint64_t id);
     uint64_t (*focused)(void *session);

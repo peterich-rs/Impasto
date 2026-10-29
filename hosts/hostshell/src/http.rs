@@ -10,7 +10,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use openwire::{Client, RequestBody, WireErrorKind};
-use session::{HTTP_BODY_LIMIT, HttpClient, HttpError, HttpRequest, HttpResponse};
+use session::{
+    HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, HttpResponse,
+};
 
 /// openwire `Client` plus the tokio runtime that polls it.
 ///
@@ -39,25 +41,27 @@ impl OpenWireClient {
         Ok(Self { runtime, client })
     }
 
-    pub fn client(&self) -> &Client {
-        &self.client
-    }
-
-    pub fn runtime(&self) -> &tokio::runtime::Runtime {
-        &self.runtime
-    }
-}
-
-impl HttpClient for OpenWireClient {
-    fn perform(&self, request: &HttpRequest) -> Result<HttpResponse, HttpError> {
+    /// Build the openwire request, start the cancel watcher, and execute the
+    /// call. Returns the raw response plus the watcher handle so the body can
+    /// keep streaming under the same cancellation.
+    fn execute(
+        &self,
+        request: &HttpRequest,
+    ) -> Result<
+        (
+            http::Response<openwire::ResponseBody>,
+            tokio::task::JoinHandle<()>,
+        ),
+        HttpError,
+    > {
         if request.cancel.load(Ordering::Acquire) {
-            return Err(HttpError::new("AbortError"));
+            return Err(HttpError::new(HttpFailure::Canceled, "AbortError"));
         }
         if !(request.url.starts_with("http://") || request.url.starts_with("https://")) {
-            return Err(HttpError::new("unsupported URL"));
+            return Err(HttpError::new(HttpFailure::BadUrl, "unsupported URL"));
         }
         let method = http::Method::from_bytes(request.method.as_bytes())
-            .map_err(|_| HttpError::new("unsupported URL"))?;
+            .map_err(|_| HttpError::new(HttpFailure::BadUrl, "unsupported URL"))?;
         let mut builder = http::Request::builder()
             .method(method.clone())
             .uri(&request.url);
@@ -78,8 +82,12 @@ impl HttpClient for OpenWireClient {
         };
         let built = builder
             .body(body)
-            .map_err(|error| HttpError::new(error.to_string()))?;
-        let call = self.client.new_call(built);
+            .map_err(|error| HttpError::new(HttpFailure::BadUrl, error.to_string()))?;
+        let call_timeout = request
+            .timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or_else(|| Duration::from_secs(20));
+        let call = self.client.new_call(built).call_timeout(call_timeout);
         let handle = call.handle();
         let cancel = Arc::clone(&request.cancel);
         let watcher = self.runtime.spawn(async move {
@@ -91,12 +99,29 @@ impl HttpClient for OpenWireClient {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         });
-        let executed = self.runtime.block_on(call.execute());
-        watcher.abort();
+        let executed = self.runtime.block_on(call.execute()).map_err(|error| {
+            watcher.abort();
+            http_error(error)
+        })?;
         if request.cancel.load(Ordering::Acquire) {
-            return Err(HttpError::new("AbortError"));
+            watcher.abort();
+            return Err(HttpError::new(HttpFailure::Canceled, "AbortError"));
         }
-        let response = executed.map_err(http_error)?;
+        Ok((executed, watcher))
+    }
+
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+
+    pub fn runtime(&self) -> &tokio::runtime::Runtime {
+        &self.runtime
+    }
+}
+
+impl HttpClient for OpenWireClient {
+    fn perform(&self, request: &HttpRequest) -> Result<HttpResponse, HttpError> {
+        let (response, watcher) = self.execute(request)?;
         let status = response.status().as_u16();
         let headers = response
             .headers()
@@ -108,12 +133,73 @@ impl HttpClient for OpenWireClient {
                 )
             })
             .collect();
-        let payload = self.runtime.block_on(read_limited(response.into_body()))?;
+        let payload = self.runtime.block_on(read_limited(response.into_body()));
+        watcher.abort();
         Ok(HttpResponse {
             status,
             headers,
-            body: payload,
+            body: payload?,
         })
+    }
+
+    fn stream(
+        &self,
+        request: &HttpRequest,
+        sink: &mut dyn FnMut(HttpPiece<'_>) -> bool,
+    ) -> Result<(), HttpError> {
+        let (response, watcher) = self.execute(request)?;
+        let status = response.status().as_u16();
+        let headers: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_owned(),
+                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                )
+            })
+            .collect();
+        if !sink(HttpPiece::Head(status, &headers)) {
+            watcher.abort();
+            return Err(HttpError::new(HttpFailure::Canceled, "AbortError"));
+        }
+        let mut received: usize = 0;
+        let mut body = response.into_body();
+        let mut failure: Option<HttpError> = None;
+        loop {
+            let frame = self.runtime.block_on(body.frame());
+            let Some(frame) = frame else {
+                break;
+            };
+            let frame = match frame {
+                Ok(frame) => frame,
+                Err(error) => {
+                    failure = Some(http_error(error));
+                    break;
+                }
+            };
+            let Some(data) = frame.data_ref() else {
+                continue;
+            };
+            received = received.saturating_add(data.len());
+            if received > HTTP_BODY_LIMIT {
+                failure = Some(HttpError::new(HttpFailure::TooLarge, "TypeError"));
+                break;
+            }
+            if !sink(HttpPiece::Chunk(data, false)) {
+                watcher.abort();
+                return Err(HttpError::new(HttpFailure::Canceled, "AbortError"));
+            }
+        }
+        watcher.abort();
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        if request.cancel.load(Ordering::Acquire) {
+            return Err(HttpError::new(HttpFailure::Canceled, "AbortError"));
+        }
+        sink(HttpPiece::Chunk(&[], true));
+        Ok(())
     }
 }
 
@@ -125,11 +211,13 @@ fn hop_by_hop(name: &str) -> bool {
 }
 
 fn http_error(error: openwire::WireError) -> HttpError {
-    if error.kind() == WireErrorKind::Canceled {
-        HttpError::new("AbortError")
-    } else {
-        HttpError::new(error.to_string())
-    }
+    let kind = match error.kind() {
+        WireErrorKind::Canceled => HttpFailure::Canceled,
+        WireErrorKind::Timeout => HttpFailure::Timeout,
+        WireErrorKind::InvalidRequest => HttpFailure::BadUrl,
+        _ => HttpFailure::Network,
+    };
+    HttpError::new(kind, error.to_string())
 }
 
 async fn read_limited(mut body: openwire::ResponseBody) -> Result<Vec<u8>, HttpError> {
@@ -140,7 +228,7 @@ async fn read_limited(mut body: openwire::ResponseBody) -> Result<Vec<u8>, HttpE
             continue;
         };
         if out.len().saturating_add(data.len()) > HTTP_BODY_LIMIT {
-            return Err(HttpError::new("TypeError"));
+            return Err(HttpError::new(HttpFailure::TooLarge, "TypeError"));
         }
         out.extend_from_slice(data);
     }

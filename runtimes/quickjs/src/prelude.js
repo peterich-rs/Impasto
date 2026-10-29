@@ -347,6 +347,88 @@
     });
   }
 
+  // ---- Streaming fetch -------------------------------------------------
+  // One open stream per token. The native side pushes pieces through
+  // `__uifw._httpStream(token, kind, payload)`; kind is "head", "chunk",
+  // or "done". A "done" with a string payload is an error name.
+
+  function Reader(queue, oncancel) {
+    this._queue = queue;
+    this._waiting = null;
+    this._done = false;
+    this._oncancel = oncancel || null;
+  }
+  Reader.prototype.cancel = function () {
+    if (this._done) {
+      return Promise.resolve();
+    }
+    this._done = true;
+    if (this._oncancel) {
+      this._oncancel();
+    }
+    return Promise.resolve();
+  };
+  Reader.prototype.read = function () {
+    var self = this;
+    if (self._queue.length > 0) {
+      return Promise.resolve(self._queue.shift());
+    }
+    if (self._done) {
+      return Promise.resolve({ value: undefined, done: true });
+    }
+    return new Promise(function (resolve) {
+      self._waiting = resolve;
+    });
+  };
+
+  function StreamResponse(queue, oncancel) {
+    this.status = 0;
+    this.headers = new Headers("");
+    this._reader = new Reader(queue, oncancel);
+  }
+  StreamResponse.prototype.getReader = function () {
+    return this._reader;
+  };
+
+  var streams = new Map();
+
+  function fetchStream(input, init) {
+    var request = new Request(input, init);
+    if (request.signal && request.signal.aborted) {
+      return Promise.reject(new Error("AbortError"));
+    }
+    var body = request._body;
+    if (body instanceof Uint8Array) {
+      body = body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength);
+    }
+    var queue = [];
+    var settle = { resolve: null, reject: null };
+    var token = 0;
+    var oncancel = function () {
+      bridge.abort(token);
+    };
+    var response = new StreamResponse(queue, oncancel);
+    var opened = new Promise(function (resolve, reject) {
+      settle.resolve = resolve;
+      settle.reject = reject;
+    });
+    var promise = bridge.httpStream(
+      request.method,
+      request.url,
+      headerBlock(request.headers),
+      body
+    );
+    token = promise.token;
+    response._token = token;
+    streams.set(token, { response: response, settle: settle });
+    if (request.signal) {
+      request.signal.addEventListener("abort", function () {
+        bridge.abort(token);
+      });
+    }
+    return opened;
+  }
+
   function WebSocket(url) {
     var parsed = new URL(url);
     if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
@@ -358,7 +440,14 @@
     this.onmessage = null;
     this.onerror = null;
     this.onclose = null;
-    this._id = bridge.socketOpen(parsed.href);
+    // The second argument is the sub-protocol offer, either a string or an
+    // array. The wire carries it comma-joined.
+    var protocols = "";
+    if (arguments.length > 1 && arguments[1] != null) {
+      protocols = Array.isArray(arguments[1]) ? arguments[1].join(", ") : String(arguments[1]);
+    }
+    this.protocol = "";
+    this._id = bridge.socketOpen(parsed.href, protocols);
     sockets.set(this._id, this);
   }
   WebSocket.prototype.send = function (data) {
@@ -403,6 +492,49 @@
     }
   };
 
+  // Native pushes one streamed piece here. The caller's promise resolves with
+  // the StreamResponse once the head lands; chunks fill the reader queue.
+  bridge._httpStream = function (token, kind, payload) {
+    var entry = streams.get(token);
+    if (!entry) {
+      return;
+    }
+    var response = entry.response;
+    var reader = response._reader;
+    if (kind === "head") {
+      response.status = payload.status;
+      response.headers = new Headers(payload.headers || "");
+      streams.set(token, entry);
+      entry.settle.resolve(response);
+      return;
+    }
+    if (kind === "done" && typeof payload === "string") {
+      streams.delete(token);
+      if (reader._waiting) {
+        reader._waiting({ value: undefined, done: true });
+        reader._waiting = null;
+      }
+      reader._done = true;
+      entry.settle.reject(new Error(payload));
+      return;
+    }
+    if (reader._waiting) {
+      var waiting = reader._waiting;
+      reader._waiting = null;
+      waiting({ value: new Uint8Array(payload), done: false });
+    } else {
+      reader._queue.push({ value: new Uint8Array(payload), done: false });
+    }
+    if (kind === "done") {
+      streams.delete(token);
+      reader._done = true;
+      if (reader._waiting) {
+        reader._waiting({ value: undefined, done: true });
+        reader._waiting = null;
+      }
+    }
+  };
+
   function getModule(name) {
     if (modules.has(name)) {
       return modules.get(name);
@@ -425,6 +557,7 @@
   global.Request = Request;
   global.Response = Response;
   global.fetch = fetch;
+  global.fetchStream = fetchStream;
   global.WebSocket = WebSocket;
   global.TurboModuleRegistry = {
     get: getModule,

@@ -309,6 +309,7 @@ impl JsSession {
             selection_rect_bytes,
             set_ime_config,
             http: http_call,
+            http_stream: http_stream_call,
             abort_token,
             module_has,
             module_prepare,
@@ -1036,6 +1037,17 @@ impl Session for JsSession {
         let inner = unsafe { &*self.inner };
         match event {
             session::IoEvent::Http { token, result } => settle_http(inner, token, &result),
+            session::IoEvent::HttpHead {
+                token,
+                status,
+                headers,
+            } => settle_http_head(inner, token, status, &headers),
+            session::IoEvent::HttpChunk {
+                token,
+                bytes,
+                done,
+                error,
+            } => settle_http_chunk(inner, token, &bytes, done, error.as_ref()),
             session::IoEvent::Plugin { token, result } => settle_plugin(inner, token, &result),
             session::IoEvent::Socket {
                 id,

@@ -4,8 +4,8 @@ use std::ffi::{c_char, c_void};
 use std::sync::atomic::Ordering;
 
 use session::{
-    HostPlace, HostWait, HttpError, HttpRequest, IoJob, PluginResult, PluginValue, host_method,
-    host_module_linked, host_module_methods, module_not_linked,
+    HostPlace, HostWait, HttpError, HttpFailure, HttpRequest, IoJob, PluginResult, PluginValue,
+    host_method, host_module_linked, host_module_methods, module_not_linked,
 };
 use ui_core::{AxisSize, DragClaim, FocusDirection, GridLine, Inset, NodeId};
 
@@ -949,6 +949,52 @@ pub(super) fn emit_value(host: *mut c_void, value: &PluginValue) {
     }
 }
 
+/// Streamed head: status and headers before any body bytes.
+pub(super) fn settle_http_head(
+    inner: &Inner,
+    token: u64,
+    status: u16,
+    headers: &[(String, String)],
+) {
+    let block = host::header_block(headers);
+    let header_bytes = cstring(&block);
+    let _ = unsafe {
+        qjs_http_head(
+            inner.host,
+            token,
+            i32::from(status),
+            header_bytes.as_ptr(),
+            block.len(),
+        )
+    };
+}
+
+/// One streamed body piece. `done` closes the stream; `error` fails it.
+pub(super) fn settle_http_chunk(
+    inner: &Inner,
+    token: u64,
+    bytes: &[u8],
+    done: bool,
+    error: Option<&HttpError>,
+) {
+    let message = error.map(|error| cstring(error.dom_name()));
+    let _ = unsafe {
+        qjs_http_chunk(
+            inner.host,
+            token,
+            bytes.as_ptr(),
+            bytes.len(),
+            i32::from(done),
+            message.as_ref().map_or(ptr::null(), |text| text.as_ptr()),
+        )
+    };
+}
+
+/// Fail a stream that never produced a head.
+pub(super) fn deliver_stream_error(inner: &Inner, token: u64, error: &HttpError) {
+    settle_http_chunk(inner, token, &[], true, Some(error));
+}
+
 pub(super) fn settle_plugin(inner: &Inner, token: u64, result: &PluginResult) {
     match result {
         PluginResult::Done(value) => {
@@ -997,7 +1043,9 @@ pub(super) fn settle_http(inner: &Inner, token: u64, result: &Result<HttpRespons
             };
         }
         Err(error) => {
-            let message = cstring(&error.message);
+            // The prelude rejects with the DOMException name so callers can
+            // match on it; the detail stays in the session log.
+            let message = cstring(error.dom_name());
             let _ = unsafe {
                 qjs_settle_http(
                     inner.host,
@@ -1079,6 +1127,67 @@ pub(super) unsafe extern "C" fn http_call(
     body: *const u8,
     body_len: usize,
 ) -> i32 {
+    unsafe {
+        http_call_impl(
+            session,
+            token,
+            method,
+            method_len,
+            url,
+            url_len,
+            headers,
+            headers_len,
+            body,
+            body_len,
+            false,
+        )
+    }
+}
+
+pub(super) unsafe extern "C" fn http_stream_call(
+    session: *mut c_void,
+    token: u64,
+    method: *const c_char,
+    method_len: usize,
+    url: *const c_char,
+    url_len: usize,
+    headers: *const c_char,
+    headers_len: usize,
+    body: *const u8,
+    body_len: usize,
+) -> i32 {
+    unsafe {
+        http_call_impl(
+            session,
+            token,
+            method,
+            method_len,
+            url,
+            url_len,
+            headers,
+            headers_len,
+            body,
+            body_len,
+            true,
+        )
+    }
+}
+
+/// Shared body of `http` and `httpStream`. `streaming` picks the job the host
+/// network thread runs; a session-local client always downloads whole bodies.
+unsafe fn http_call_impl(
+    session: *mut c_void,
+    token: u64,
+    method: *const c_char,
+    method_len: usize,
+    url: *const c_char,
+    url_len: usize,
+    headers: *const c_char,
+    headers_len: usize,
+    body: *const u8,
+    body_len: usize,
+    streaming: bool,
+) -> i32 {
     let inner = unsafe { inner(session) };
     let Some(method) = (unsafe { utf8_of(method, method_len) }) else {
         return -1;
@@ -1088,11 +1197,12 @@ pub(super) unsafe extern "C" fn http_call(
     };
     let headers = unsafe { utf8_of(headers, headers_len) }.unwrap_or("");
     if body_len > session::HTTP_BODY_LIMIT {
-        inner
-            .pending
-            .borrow_mut()
-            .http
-            .push((token, Err(HttpError::new("TypeError"))));
+        let error = HttpError::new(HttpFailure::TooLarge, "TypeError");
+        if streaming {
+            deliver_stream_error(inner, token, &error);
+        } else {
+            inner.pending.borrow_mut().http.push((token, Err(error)));
+        }
         return 0;
     }
     let bytes = if body.is_null() || body_len == 0 {
@@ -1112,17 +1222,43 @@ pub(super) unsafe extern "C" fn http_call(
         headers: host::header_pairs(headers),
         body: bytes,
         cancel,
+        timeout_ms: None,
     };
     if !request.url.starts_with("http://") && !request.url.starts_with("https://") {
-        inner
-            .pending
-            .borrow_mut()
-            .http
-            .push((token, Err(HttpError::new("unsupported URL"))));
+        let error = HttpError::new(HttpFailure::BadUrl, "unsupported URL");
+        if streaming {
+            deliver_stream_error(inner, token, &error);
+        } else {
+            inner.pending.borrow_mut().http.push((token, Err(error)));
+        }
         return 0;
     }
     if let Some(submit) = inner.io.borrow().as_ref() {
-        submit(IoJob::Http(request));
+        submit(if streaming {
+            IoJob::HttpStream(request)
+        } else {
+            IoJob::Http(request)
+        });
+        return 0;
+    }
+    if streaming {
+        // No host network thread: pull the whole body through the local
+        // client, then deliver it as one head plus one chunk.
+        if let Some(client) = inner.http.borrow().as_ref().cloned() {
+            match client.perform(&request) {
+                Ok(response) => {
+                    settle_http_head(inner, token, response.status, &response.headers);
+                    settle_http_chunk(inner, token, &response.body, true, None);
+                }
+                Err(error) => deliver_stream_error(inner, token, &error),
+            }
+            return 0;
+        }
+        deliver_stream_error(
+            inner,
+            token,
+            &HttpError::new(HttpFailure::Network, "network is not linked"),
+        );
         return 0;
     }
     if let Some(client) = inner.http.borrow().as_ref().cloned() {
@@ -1130,11 +1266,8 @@ pub(super) unsafe extern "C" fn http_call(
         inner.pending.borrow_mut().http.push((token, result));
         return 0;
     }
-    inner
-        .pending
-        .borrow_mut()
-        .http
-        .push((token, Err(HttpError::new("network is not linked"))));
+    let error = HttpError::new(HttpFailure::Network, "network is not linked");
+    inner.pending.borrow_mut().http.push((token, Err(error)));
     0
 }
 
@@ -1148,7 +1281,7 @@ pub(super) unsafe extern "C" fn abort_token(session: *mut c_void, token: u64) {
         .borrow_mut()
         .http
         .retain(|(pending, _)| *pending != token);
-    let aborted = Err(HttpError::new("AbortError"));
+    let aborted = Err(HttpError::new(HttpFailure::Canceled, "AbortError"));
     settle_http(inner, token, &aborted);
     if let Some(submit) = inner.io.borrow().as_ref() {
         submit(IoJob::Abort { token });
@@ -1499,17 +1632,30 @@ pub(super) unsafe extern "C" fn socket_open(
     id: u64,
     url: *const c_char,
     len: usize,
+    protocols: *const c_char,
+    protocols_len: usize,
 ) {
     let inner = unsafe { inner(session) };
     let Some(url) = (unsafe { utf8_of(url, len) }) else {
         return;
     };
     let url = url.to_owned();
+    // A comma-separated offer list, the wire form the header carries.
+    let protocols = unsafe { utf8_of(protocols, protocols_len) }
+        .map(|text| {
+            text.split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     submit_or_queue(
         inner,
         IoJob::SocketOpen {
             id,
             url: url.clone(),
+            protocols,
         },
         || {
             inner.pending.borrow_mut().socket.push((
