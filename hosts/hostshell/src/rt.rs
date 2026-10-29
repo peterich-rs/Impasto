@@ -1,4 +1,4 @@
-//! Process-wide tokio runtime. HTTP, sockets, and module workers share it.
+//! Process-wide tokio runtime. HTTP and module workers share it.
 
 use std::sync::OnceLock;
 

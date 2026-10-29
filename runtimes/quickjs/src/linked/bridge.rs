@@ -1,5 +1,6 @@
 //! Sized, animation, font, and host-module callbacks.
 
+use std::collections::HashSet;
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::Ordering;
 
