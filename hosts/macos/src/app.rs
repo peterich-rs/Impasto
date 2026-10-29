@@ -489,11 +489,18 @@ pub(crate) fn nonempty_url(text: &str) -> Option<String> {
     }
 }
 
+/// Cold-start `openURLs:` that duplicates `--url`. Later opens always post.
+fn skip_launch_duplicate(launched: bool, initial: Option<&str>, url: &str) -> bool {
+    !launched && initial == Some(url)
+}
+
 struct HostState {
     window: Retained<NSWindow>,
     layer: Retained<CAMetalLayer>,
     link: Link,
-    launch_url: session::Shared<Option<String>>,
+    /// `--url` at process start. `set_launch_url` does not overwrite this copy.
+    initial_url: Option<String>,
+    launched: Cell<bool>,
 }
 
 define_class!(
@@ -507,6 +514,7 @@ define_class!(
     unsafe impl NSApplicationDelegate for Host {
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _notification: &NSNotification) {
+            self.ivars().launched.set(true);
             self.finish_launching();
         }
 
@@ -519,7 +527,11 @@ define_class!(
                 let Some(url) = nonempty_url(&text.to_string()) else {
                     continue;
                 };
-                if session::shared_read(&self.ivars().launch_url).as_deref() == Some(url.as_str()) {
+                if skip_launch_duplicate(
+                    self.ivars().launched.get(),
+                    self.ivars().initial_url.as_deref(),
+                    url.as_str(),
+                ) {
                     continue;
                 }
                 self.ivars().link.post(Command::LaunchUrl(url));
@@ -931,7 +943,7 @@ pub fn run(
     let on_stop_for_surface = Arc::clone(&on_stop);
     let ime_view = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
     let decoder = Arc::new(PngDecoder { directory: assets });
-    let launch_url = session::shared(initial_url);
+    let launch_url = session::shared(initial_url.clone());
     let mac = Arc::new(MacBridge);
     let link = hostshell::start(
         Boot {
@@ -1022,7 +1034,8 @@ pub fn run(
             window: window.clone(),
             layer,
             link,
-            launch_url,
+            initial_url,
+            launched: Cell::new(false),
         },
     );
     host.ivars()
@@ -1159,7 +1172,7 @@ mod settings_tests {
 
 #[cfg(test)]
 mod url_tests {
-    use super::nonempty_url;
+    use super::{nonempty_url, skip_launch_duplicate};
 
     #[test]
     fn empty_text_is_not_a_url() {
@@ -1170,6 +1183,31 @@ mod url_tests {
             Some("https://app.example/item".into())
         );
         assert_eq!(nonempty_url(" myapp://open "), Some("myapp://open".into()));
+    }
+
+    #[test]
+    fn launch_duplicate_is_skipped_only_before_did_finish_launching() {
+        let initial = Some("https://app.example/item");
+        assert!(skip_launch_duplicate(
+            false,
+            initial,
+            "https://app.example/item"
+        ));
+        assert!(!skip_launch_duplicate(
+            false,
+            initial,
+            "https://app.example/other"
+        ));
+        assert!(!skip_launch_duplicate(
+            true,
+            initial,
+            "https://app.example/item"
+        ));
+        assert!(!skip_launch_duplicate(
+            false,
+            None,
+            "https://app.example/item"
+        ));
     }
 }
 

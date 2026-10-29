@@ -135,7 +135,7 @@ Shell::start(Boot) ────────────────────�
 运行中的 openURLs 投递 LaunchUrl ─────────►  Session::set_launch_url（emit url）
 ```
 
-启动 URL 在 `hostshell::start` 之前写入 Shared `launch_url`，脚本求值时 `Linking.getInitialURL()` 就能读到。macOS 来自 argv `--url`，Android 来自显式 Intent 的 `getData()`。没有 URL 时槽保持 `None`，不写入空字符串。进程已在跑时，macOS 的 `application:openURLs:` 再投递 `LaunchUrl`；与槽里已有字符串相同则跳过。平台线程不调用 `Session`。当前宿主没有注册 URL scheme（macOS 无 `CFBundleURLTypes`，Android 无 `ACTION_VIEW`），系统不会把隐式打开交给本进程。`--url` 和显式 Intent data 仍然有效。
+启动 URL 在 `hostshell::start` 之前写入 Shared `launch_url`，脚本求值时 `Linking.getInitialURL()` 就能读到。macOS 来自 argv `--url`，Android 来自显式 Intent 的 `getData()`。没有 URL 时槽保持 `None`，不写入空字符串。进程已在跑时，macOS 的 `application:openURLs:` 投递 `LaunchUrl`。冷启动时若 Apple Event 与 `--url` 相同，只在 `applicationDidFinishLaunching` 之前跳过那一次；之后同一条 URL 再打开也会投递。平台线程不调用 `Session`。当前宿主没有注册 URL scheme（macOS 无 `CFBundleURLTypes`，Android 无 `ACTION_VIEW`），系统不会把隐式打开交给本进程。`--url` 和显式 Intent data 仍然有效。
 
 字体缺失、`create_metal` / `create_vulkan` 失败、会话闭包失败，都在渲染线程记日志并把退出码交回平台线程。不留下只建了一半的 `Engine`。macOS 随进程退出。Android 在 `onDestroy` 里等渲染线程结束再返回。`std::process::exit` 跳过这一步，`onDestroy` 仍停在等待上。
 
