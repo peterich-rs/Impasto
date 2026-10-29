@@ -14,7 +14,7 @@
 
 原先仓库里没有 `list.rs`、也没有 `JS_NewClass`。已有的是 `qjs_scroll_state` 那种单槽加 id 的分发，以及 `Tree` 上的 `rect`、`scroll_offset`、`set_scroll_offset`、`fling_target`、`set_size`、`set_min_size`、`set_transform`。driver 用这些，不新增布局能力。读滚动相位加了 `Tree::scroll_phase`，给刷新状态机用。
 
-`linked.rs` 的帧顺序本来就是布局、布局回调、必要时再布局、录制。tick 插在布局之后、`onLayout` 之前，在 Rust 里跑完再通知脚本。帧语义不变。
+`linked/` 的帧顺序本来就是布局、布局回调、必要时再布局、录制。tick 插在布局之后、`onLayout` 之前，在 Rust 里跑完再通知脚本。帧语义不变。
 
 条目不在 tick 里回调 `count` / `keyAt` / `typeAt`。那会把每帧的 ABI 带回来。语言侧在 signal 变化时推一次 key 表。
 
@@ -76,7 +76,7 @@ core.scrollController() → ScrollController
 这些都已经在树里。
 
 1. `core/src/list/`：Fenwick、窗口、chrome、diff、`ListDriver`、`ScrollController`。`cargo test -p core --lib list::`。数学与原先 `list-window.ts` 的样例同输入同输出。
-2. `linked.rs` 在布局后 tick，再 `onLayout`。`glue.c` 注册两个 class。`cargo test -p quickjs --lib list_driver_methods_are_functions`。
+2. `linked/` 在布局后 tick，再 `onLayout`。`glue.c` 注册两个 class。`cargo test -p quickjs --lib list_driver_methods_are_functions`。
 3. `frameworks/solid-renderer/runtime/list-binding.ts` 把 ops 交给 Slot。`VirtualList.tsx` 只留模板和渲染回调。`list-window.ts` 已删。`node … list-binding.test.ts`。
 4. `ScrollArea` / `RefreshControl` 把夹紧和刷新读 controller。gallery 的 `/list` 滚动和下拉刷新由 `cargo test -p quickjs --lib` 里那三条列表测试覆盖。
 5. 本文、`docs/architecture.md` 和 `AGENTS.md` 的分层表与帧顺序按上面的事实写。
@@ -91,7 +91,7 @@ Rust 里没有组件、没有样式、没有条目数据。不生成通用绑定
 
 - `core/src/list/` — `ListDriver`、`ScrollController`、Fenwick、窗口、diff
 - `core/src/tree/scroll.rs` — `Tree::scroll_phase`
-- `runtimes/quickjs/src/linked.rs`、`linked/driver.rs` — 帧内 tick 和 class 方法
+- `runtimes/quickjs/src/linked/`、`linked/driver.rs` — 帧内 tick 和 class 方法
 - `runtimes/quickjs/src/glue.c` — 两个 class 和 `onDriver`
 - `frameworks/solid-renderer/runtime/driver.ts` — 单槽分发
 - `frameworks/solid-renderer/runtime/list-binding.ts` — ops 到 Slot

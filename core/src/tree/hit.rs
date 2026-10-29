@@ -555,6 +555,7 @@ impl Affine {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn translate(x: f32, y: f32) -> Self {
         Self::paint(x, y, 0.0, 1.0, 1.0)
     }

@@ -10,6 +10,7 @@ mod semantics;
 mod store;
 mod text;
 
+#[cfg(test)]
 pub(crate) use hit::Affine;
 pub use layout::{LayoutCause, LayoutTrace};
 pub use node::{
