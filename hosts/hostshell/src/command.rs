@@ -58,6 +58,19 @@ pub enum Command {
         token: u64,
         result: Result<session::HttpResponse, session::HttpError>,
     },
+    /// A streamed response produced its head on `uifw-net`.
+    HttpHead {
+        token: u64,
+        status: u16,
+        headers: Vec<(String, String)>,
+    },
+    /// A streamed response produced one body piece on `uifw-net`.
+    HttpChunk {
+        token: u64,
+        bytes: Vec<u8>,
+        done: bool,
+        error: Option<session::HttpError>,
+    },
     /// A framework module method finished on `uifw-net`.
     PluginDone {
         token: u64,

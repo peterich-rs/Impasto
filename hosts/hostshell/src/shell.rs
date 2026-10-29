@@ -468,6 +468,8 @@ fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bo
         | Command::WindowFocus(_)
         | Command::SemanticsAction(_)
         | Command::HttpDone { .. }
+        | Command::HttpHead { .. }
+        | Command::HttpChunk { .. }
         | Command::PluginDone { .. }
         | Command::Socket { .. }) => session_cmds::handle(runtime, command),
         command @ (Command::Invalidate
@@ -1316,7 +1318,10 @@ mod tests {
         let tokens_before = harness.vsync.token_count();
         assert!(!harness.command(Command::HttpDone {
             token: 7,
-            result: Err(session::HttpError::new("offline")),
+            result: Err(session::HttpError::new(
+                session::HttpFailure::Network,
+                "offline"
+            )),
         }));
         assert!(
             matches!(
@@ -1419,7 +1424,10 @@ mod tests {
         })));
         assert!(!harness.command(Command::HttpDone {
             token: 11,
-            result: Err(session::HttpError::new("retry")),
+            result: Err(session::HttpError::new(
+                session::HttpFailure::Network,
+                "retry"
+            )),
         }));
         assert!(!harness.command(Command::Lifecycle(session::Lifecycle::Inactive)));
         let replaced = SurfaceId::fresh();

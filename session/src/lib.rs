@@ -5,9 +5,9 @@ use std::sync::Arc;
 mod io;
 
 pub use io::{
-    HTTP_BODY_LIMIT, HostMethod, HostPlace, HostWait, HttpClient, HttpError, HttpRequest,
-    HttpResponse, IoJob, PluginResult, PluginValue, document_relative, host_method,
-    host_module_linked, host_module_methods, module_not_linked,
+    HTTP_BODY_LIMIT, HostMethod, HostPlace, HostWait, HttpClient, HttpError, HttpFailure,
+    HttpPiece, HttpRequest, HttpResponse, IoJob, PluginResult, PluginValue, all_host_methods,
+    document_relative, host_method, host_module_linked, host_module_methods, module_not_linked,
 };
 
 /// One edge of a window, in scene points.
@@ -318,6 +318,20 @@ pub enum IoEvent {
     Http {
         token: u64,
         result: Result<HttpResponse, HttpError>,
+    },
+    /// Streamed head: status and headers before any body bytes.
+    HttpHead {
+        token: u64,
+        status: u16,
+        headers: Vec<(String, String)>,
+    },
+    /// One streamed body piece. The final chunk carries `done: true`; a
+    /// failed stream ends with a chunk whose `error` is set.
+    HttpChunk {
+        token: u64,
+        bytes: Vec<u8>,
+        done: bool,
+        error: Option<HttpError>,
     },
     Plugin {
         token: u64,

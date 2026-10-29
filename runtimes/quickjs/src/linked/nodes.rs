@@ -844,10 +844,26 @@ pub(super) unsafe extern "C" fn set_scroll_physics(
     snap_y: f32,
     align_y: i32,
     accept: i32,
+    curve: i32,
+    snap_stiffness: f32,
+    snap_damping: f32,
 ) -> i32 {
     let inner = unsafe { inner(session) };
     let physics = ui_core::ScrollPhysics {
-        friction_tau_ms: tau,
+        decay: if curve == 2 {
+            // The caller spelled the coast as a deceleration rate; `tau`
+            // carries the rate and converts on construction.
+            ui_core::Decay::Rate(f64::from(tau))
+        } else {
+            ui_core::Decay::Tau(f64::from(tau))
+        },
+        band: if curve == 1 {
+            ui_core::Band::Curve {
+                c: f64::from(factor) as f32,
+            }
+        } else {
+            ui_core::Band::Linear { factor }
+        },
         overscroll: if mode == 1 {
             ui_core::OverscrollMode::Clamp
         } else {
@@ -856,6 +872,8 @@ pub(super) unsafe extern "C" fn set_scroll_physics(
         overscroll_stiffness: stiffness,
         overscroll_damping: damping,
         overscroll_factor: factor,
+        snap_stiffness,
+        snap_damping,
         snap_x: snap_grid(snap_x, align_x),
         snap_y: snap_grid(snap_y, align_y),
         accept: ui_core::ScrollAccept::from_code(accept),
@@ -970,9 +988,11 @@ pub(super) struct PendingMutation {
     op: u32,
     id: u64,
     parent: u64,
+    before: u64,
     field: u32,
     number: f64,
     number2: f64,
+    color: [u8; 4],
     text: String,
 }
 
@@ -1012,9 +1032,14 @@ pub(super) fn apply_mutation(
         return tree.set_text(id, mutation.text.clone());
     }
     if op == MutationOp::Create as u32 {
+        // field picks the primitive; number/number2 carry its sizes.
         let created = match mutation.field {
             1 => tree.column(mutation.number as f32)?,
+            2 => tree.row(mutation.number as f32)?,
+            3 => tree.stack()?,
+            4 => tree.padding(mutation.number as f32)?,
             5 => tree.sized(mutation.number as f32, mutation.number2 as f32)?,
+            6 => tree.scroll()?,
             _ => return Err(ui_core::Error::WrongKind),
         };
         if mutation.parent != 0 {
@@ -1022,36 +1047,122 @@ pub(super) fn apply_mutation(
         }
         return Ok(());
     }
+    if op == MutationOp::Insert as u32 {
+        let parent = NodeId::from_raw(mutation.parent);
+        let before = (mutation.before != 0).then_some(NodeId::from_raw(mutation.before));
+        return tree.insert(parent, id, before);
+    }
+    if op == MutationOp::Remove as u32 {
+        let gestures = tree.remove(NodeId::from_raw(mutation.parent), id)?;
+        let _ = gestures;
+        return Ok(());
+    }
+    if op == MutationOp::Discard as u32 {
+        let discarded = tree.discard(id)?;
+        let _ = discarded;
+        return Ok(());
+    }
+    if op == MutationOp::EditText as u32 {
+        // number picks the edit: 0 commit composition, 1 insert text, 2
+        // backspace, 3 forward delete. The buffer path mirrors the JS session.
+        let edit = match mutation.number as i32 {
+            0 => ui_core::Edit::Composing(None),
+            1 => ui_core::Edit::Insert(mutation.text.clone()),
+            2 => ui_core::Edit::Backspace,
+            3 => ui_core::Edit::ForwardDelete,
+            _ => return Err(ui_core::Error::BadNumber),
+        };
+        return tree.text_edit(id, edit).map(|_| ());
+    }
     if op != MutationOp::SetStyle as u32 {
         return Ok(());
     }
+    // Style mutations: field picks the target, number/number2/color/text the
+    // value. Edges pack top/right into number/number2; colors take all four
+    // channels.
+    let value = mutation.number as f32;
     match mutation.field {
-        value if value == StyleField::Width as u32 => {
-            let height = if mutation.number2 > 0.0 {
-                mutation.number2 as f32
-            } else {
-                1.0
-            };
-            tree.set_size(id, mutation.number as f32, height)
+        field if field == StyleField::Width as u32 => tree.set_axis_size(
+            id,
+            ui_core::AxisSize::Points(value),
+            ui_core::AxisSize::Auto,
+        ),
+        field if field == StyleField::Height as u32 => tree.set_axis_size(
+            id,
+            ui_core::AxisSize::Auto,
+            ui_core::AxisSize::Points(value),
+        ),
+        field if field == StyleField::Padding as u32 => {
+            tree.set_padding_edges(id, Edges::all(value))
         }
-        value if value == StyleField::Height as u32 => {
-            let width = if mutation.number2 > 0.0 {
-                mutation.number2 as f32
-            } else {
-                1.0
-            };
-            tree.set_size(id, width, mutation.number as f32)
+        field if field == StyleField::Margin as u32 => tree.set_margin(id, Edges::all(value)),
+        field if field == StyleField::Gap as u32 => tree.set_gap(id, value),
+        field if field == StyleField::Grow as u32 => tree.set_grow(id, value),
+        field if field == StyleField::Shrink as u32 => tree.set_shrink(id, value),
+        field if field == StyleField::Basis as u32 => tree.set_basis(id, value),
+        field if field == StyleField::MinSize as u32 => {
+            tree.set_min_size(id, value, mutation.number2 as f32)
         }
-        value if value == StyleField::Gap as u32 => tree.set_gap(id, mutation.number as f32),
-        value if value == StyleField::Grow as u32 => tree.set_grow(id, mutation.number as f32),
-        value if value == StyleField::FontSize as u32 => {
-            tree.set_font_size(id, mutation.number as f32)
+        field if field == StyleField::MaxSize as u32 => {
+            tree.set_max_size(id, value, mutation.number2 as f32)
         }
-        value if value == StyleField::Alpha as u32 => {
+        field if field == StyleField::Align as u32 => match alignment_of(mutation.number as u32) {
+            Some(alignment) => tree.set_align_self(id, alignment),
+            None => Err(ui_core::Error::BadNumber),
+        },
+        field if field == StyleField::Justify as u32 => match justify_of(mutation.number as u32) {
+            Some(justify) => tree.set_justify(id, justify),
+            None => Err(ui_core::Error::BadNumber),
+        },
+        field if field == StyleField::Wrap as u32 => tree.set_wrap(id, mutation.number > 0.5),
+        field if field == StyleField::Inset as u32 => tree.set_inset(
+            id,
+            ui_core::Inset {
+                top: (mutation.number > 0.0).then_some(mutation.number as f32),
+                right: (mutation.number2 > 0.0).then_some(mutation.number2 as f32),
+                bottom: (mutation.color[0] > 0).then_some(f32::from(mutation.color[0])),
+                left: (mutation.color[1] > 0).then_some(f32::from(mutation.color[1])),
+            },
+        ),
+        field if field == StyleField::Grid as u32 => {
+            // number/number2 are i16 line indices packed as two f32 lanes per
+            // axis is not enough; mutations keep Auto until the buffer grows.
+            tree.set_grid_placement(
+                id,
+                ui_core::GridLine::Auto,
+                ui_core::GridLine::Auto,
+                ui_core::GridLine::Auto,
+                ui_core::GridLine::Auto,
+            )
+        }
+        field if field == StyleField::FontSize as u32 => tree.set_font_size(id, value),
+        field if field == StyleField::TextAlign as u32 => {
+            tree.set_text_align(id, align_text(mutation.number as u32))
+        }
+        field if field == StyleField::Weight as u32 => {
+            tree.set_font_weight(id, value.round().clamp(0.0, 1000.0) as u16)
+        }
+        field if field == StyleField::MaxLines as u32 => tree.set_max_lines(
+            id,
+            (mutation.number > 0.0).then_some(mutation.number.round() as u32),
+        ),
+        field if field == StyleField::LineHeight as u32 => tree.set_line_height(id, value),
+        field if field == StyleField::Fill as u32 => tree.set_color(id, mutation.color),
+        field if field == StyleField::Radius as u32 => tree.set_radius(id, value),
+        field if field == StyleField::Stroke as u32 => tree.set_stroke(id, value, mutation.color),
+        field if field == StyleField::Alpha as u32 => {
             tree.set_alpha(id, mutation.number.round().clamp(0.0, 255.0) as u8)
         }
-        value if value == StyleField::Radius as u32 => tree.set_radius(id, mutation.number as f32),
+        field if field == StyleField::Blur as u32 => tree.set_blur(id, value),
         _ => Ok(()),
+    }
+}
+
+fn align_text(mode: u32) -> TextAlign {
+    match mode {
+        1 => TextAlign::Center,
+        2 => TextAlign::Right,
+        _ => TextAlign::Left,
     }
 }
 
@@ -1068,7 +1179,6 @@ pub(super) unsafe extern "C" fn push_mutation(
     text: *const c_char,
     text_len: usize,
 ) -> i32 {
-    let _ = (before, color);
     let inner = unsafe { inner(session) };
     let bytes = if text.is_null() {
         &[]
@@ -1076,13 +1186,20 @@ pub(super) unsafe extern "C" fn push_mutation(
         unsafe { std::slice::from_raw_parts(text.cast::<u8>(), text_len) }
     };
     let text = String::from_utf8_lossy(bytes).into_owned();
+    let mut channels = [0u8; 4];
+    if !color.is_null() {
+        let raw = unsafe { std::slice::from_raw_parts(color, 4) };
+        channels.copy_from_slice(raw);
+    }
     inner.mutations.borrow_mut().push(PendingMutation {
         op,
         id,
         parent,
+        before,
         field,
         number,
         number2,
+        color: channels,
         text,
     });
     0

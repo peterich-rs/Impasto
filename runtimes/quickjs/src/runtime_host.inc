@@ -384,6 +384,63 @@ static JSValue js_http(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     return promise;
 }
 
+static JSValue js_http_stream(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (!host || argc < 2) {
+        return throw_msg(ctx, "httpStream(method, url)");
+    }
+    uint64_t token = 0;
+    JSValue promise = make_promise(host, &token);
+    if (JS_IsException(promise)) {
+        return promise;
+    }
+    size_t method_len = 0;
+    size_t url_len = 0;
+    size_t headers_len = 0;
+    const char *method = JS_ToCStringLen(ctx, &method_len, argv[0]);
+    const char *url = JS_ToCStringLen(ctx, &url_len, argv[1]);
+    const char *headers = "";
+    if (argc >= 3 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2])) {
+        headers = JS_ToCStringLen(ctx, &headers_len, argv[2]);
+    }
+    const uint8_t *body = NULL;
+    size_t body_len = 0;
+    JSValue body_error = JS_UNDEFINED;
+    if (argc >= 4) {
+        body_error = read_body(ctx, argv[3], &body, &body_len);
+    }
+    if (!method || !url || !headers || JS_IsException(body_error)) {
+        if (method) {
+            JS_FreeCString(ctx, method);
+        }
+        if (url) {
+            JS_FreeCString(ctx, url);
+        }
+        if (headers && headers_len > 0) {
+            JS_FreeCString(ctx, headers);
+        }
+        JS_FreeValue(ctx, body_error);
+        settle(host, token, 0, JS_NewString(ctx, "http"));
+        return promise;
+    }
+    if (host->fns.http_stream) {
+        host->fns.http_stream(host->fns.session, token, method, method_len, url, url_len, headers,
+                              headers_len, body, body_len);
+    } else {
+        settle(host, token, 0, JS_NewString(ctx, "network is not linked"));
+    }
+    if (argc >= 4) {
+        release_body(ctx, argv[3], body);
+    }
+    JS_FreeCString(ctx, method);
+    JS_FreeCString(ctx, url);
+    if (headers_len > 0) {
+        JS_FreeCString(ctx, headers);
+    }
+    return promise;
+}
+
 static JSValue js_abort(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
     Host *host = host_of(ctx);
@@ -792,15 +849,23 @@ static JSValue js_socket_open(JSContext *ctx, JSValueConst this_val, int argc, J
     if (!url) {
         return JS_EXCEPTION;
     }
+    size_t protocols_len = 0;
+    const char *protocols = "";
+    if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]) && JS_IsString(argv[1])) {
+        protocols = JS_ToCStringLen(ctx, &protocols_len, argv[1]);
+    }
     host->socket_next++;
     if (host->socket_next == 0) {
         host->socket_next = 1;
     }
     uint64_t id = host->socket_next;
     if (host->fns.socket_open) {
-        host->fns.socket_open(host->fns.session, id, url, len);
+        host->fns.socket_open(host->fns.session, id, url, len, protocols, protocols_len);
     }
     JS_FreeCString(ctx, url);
+    if (protocols_len > 0) {
+        JS_FreeCString(ctx, protocols);
+    }
     return JS_NewFloat64(ctx, (double)id);
 }
 
@@ -867,6 +932,7 @@ static int bind_host_globals(Host *host) {
     failed |= JS_SetPropertyStr(ctx, global, "performance", performance) < 0;
     JSValue bridge = JS_NewObject(ctx);
     failed |= bind_fn(ctx, bridge, "http", js_http, 4);
+    failed |= bind_fn(ctx, bridge, "httpStream", js_http_stream, 4);
     failed |= bind_fn(ctx, bridge, "abort", js_abort, 1);
     failed |= bind_fn(ctx, bridge, "hasModule", js_has_module, 1);
     failed |= bind_fn(ctx, bridge, "module", js_host_module, 1);
@@ -1070,6 +1136,44 @@ void qjs_value_bytes(Host *host, const uint8_t *bytes, size_t len) {
     push_value(host, JS_NewUint8ArrayCopy(host->ctx, bytes, len));
 }
 
+// Large payloads avoid the copy: the bytes stay in the session's slab, and
+// quickjs calls the realloc hook with size zero when the buffer dies, which
+// forwards to `fns.release_bytes`.
+static void *slab_realloc(JSRuntime *rt, void *opaque, void *ptr, size_t size) {
+    (void)ptr;
+    (void)size;
+    Host *host = JS_GetRuntimeOpaque(rt);
+    if (host && host->fns.release_bytes) {
+        host->fns.release_bytes(host->fns.session, (uint64_t)(uintptr_t)opaque);
+    }
+    return NULL;
+}
+
+void qjs_value_bytes_external(Host *host, const uint8_t *bytes, size_t len, uint64_t handle) {
+    if (!host || !host->ctx) {
+        return;
+    }
+    if (!bytes || len == 0) {
+        // Nothing owns the empty payload; a copy is cheaper than a handle.
+        push_value(host, JS_NewUint8ArrayCopy(host->ctx, (const uint8_t *)"", 0));
+        return;
+    }
+    JSValue buffer = JS_NewArrayBuffer(host->ctx, (uint8_t *)bytes, len, 0, slab_realloc,
+                                       (void *)(uintptr_t)handle, 0);
+    if (JS_IsException(buffer)) {
+        // The caller still owns the bytes; release the slab entry so it does
+        // not leak when the view never materialized.
+        if (host->fns.release_bytes) {
+            host->fns.release_bytes(host->fns.session, handle);
+        }
+        push_value(host, JS_UNDEFINED);
+        return;
+    }
+    // The consumers of the module-value channel accept an ArrayBuffer the
+    // same way `fetch` body payloads arrive; no Uint8Array wrapper is needed.
+    push_value(host, buffer);
+}
+
 void qjs_value_list(Host *host, uint32_t count) {
     if (!host || !host->ctx || host->values_len < count) {
         return;
@@ -1162,6 +1266,64 @@ int qjs_settle_http(Host *host, uint64_t token, int status, const char *headers,
                       JS_NewStringLen(host->ctx, headers ? headers : "", headers_len));
     JS_SetPropertyStr(host->ctx, object, "body", JS_NewArrayBufferCopy(host->ctx, body, body_len));
     return settle(host, token, 1, object);
+}
+
+// Streamed responses keep the promise open until the final chunk. The head and
+// each chunk funnel through `__uifw._httpStream(token, kind, payload)`, which
+// the prelude wires into a ReadableStream and resolves the promise with it.
+static int deliver_stream(Host *host, uint64_t token, const char *kind, size_t kind_len,
+                          JSValue payload) {
+    JSValue global = JS_GetGlobalObject(host->ctx);
+    JSValue bridge = JS_GetPropertyStr(host->ctx, global, "__uifw");
+    JSValue hook = JS_GetPropertyStr(host->ctx, bridge, "_httpStream");
+    int failed = 0;
+    if (JS_IsFunction(host->ctx, hook)) {
+        JSValue args[3];
+        args[0] = JS_NewFloat64(host->ctx, (double)token);
+        args[1] = JS_NewStringLen(host->ctx, kind, kind_len);
+        args[2] = payload;
+        JSValue result = JS_Call(host->ctx, hook, JS_UNDEFINED, 3, args);
+        JS_FreeValue(host->ctx, args[0]);
+        JS_FreeValue(host->ctx, args[1]);
+        if (JS_IsException(result)) {
+            JSValue exception = JS_GetException(host->ctx);
+            JS_FreeValue(host->ctx, exception);
+            failed = -1;
+        } else {
+            JS_FreeValue(host->ctx, result);
+        }
+    } else {
+        JS_FreeValue(host->ctx, payload);
+    }
+    JS_FreeValue(host->ctx, hook);
+    JS_FreeValue(host->ctx, bridge);
+    JS_FreeValue(host->ctx, global);
+    return failed;
+}
+
+int qjs_http_head(Host *host, uint64_t token, int status, const char *headers, size_t headers_len) {
+    if (!host || !host->ctx) {
+        return -1;
+    }
+    JSValue head = JS_NewObject(host->ctx);
+    JS_SetPropertyStr(host->ctx, head, "status", JS_NewInt32(host->ctx, status));
+    JS_SetPropertyStr(host->ctx, head, "headers",
+                      JS_NewStringLen(host->ctx, headers ? headers : "", headers_len));
+    return deliver_stream(host, token, "head", 4, head);
+}
+
+int qjs_http_chunk(Host *host, uint64_t token, const uint8_t *body, size_t body_len, int done,
+                   const char *error) {
+    if (!host || !host->ctx) {
+        return -1;
+    }
+    if (error) {
+        JSValue message = JS_NewString(host->ctx, error);
+        return deliver_stream(host, token, done ? "done" : "chunk", 4, message);
+    }
+    JSValue bytes =
+        JS_NewArrayBufferCopy(host->ctx, body ? body : (const uint8_t *)"", body_len);
+    return deliver_stream(host, token, done ? "done" : "chunk", 4, bytes);
 }
 
 int qjs_motion_end(Host *host, uint64_t node, const char *prop, char *err, size_t err_len) {

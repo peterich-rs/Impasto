@@ -160,6 +160,70 @@ pub const OVERSCROLL_DAMPING: f32 = 26.0;
 /// Fraction of the distance past the scroll edge that becomes overscroll.
 pub const OVERSCROLL_FACTOR: f32 = 0.55;
 
+/// How a drag past the edge maps to overscroll.
+///
+/// `Linear` multiplies the overflow by a constant factor: the historical
+/// behavior. `Curve` is the UIScrollView asymptotic band: the stretch grows
+/// with the overflow but its slope shrinks, and the stretch never reaches
+/// `dimension / c`. `dimension` is the scroll's own extent on that axis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Band {
+    Linear { factor: f32 },
+    Curve { c: f32 },
+}
+
+impl Band {
+    /// Overscroll for `over` points past the edge of a `dimension`-sized scroll.
+    pub fn stretch(self, over: f32, dimension: f32) -> f32 {
+        // The sign travels with the overflow: pulling past the top edge
+        // reports negative overscroll, past the bottom edge positive.
+        let sign = if over < 0.0 { -1.0 } else { 1.0 };
+        let over = over.abs();
+        if over == 0.0 || !(over.is_finite() && dimension.is_finite()) {
+            return 0.0;
+        }
+        match self {
+            Self::Linear { factor } => sign * factor * over,
+            Self::Curve { c } => {
+                if !(c.is_finite() && c > 0.0) || dimension <= 0.0 {
+                    return 0.0;
+                }
+                // d(x) = D (1 - 1 / (c x / D + 1)); at x = D/c the stretch is
+                // half the ceiling and the slope keeps falling.
+                let ratio = c * over / dimension + 1.0;
+                sign * dimension * (1.0 - 1.0 / ratio)
+            }
+        }
+    }
+}
+
+/// How a coast loses speed.
+///
+/// `Tau` is the historical time constant. `Rate` is `decelerationRate`
+/// semantics: speed multiplies by `rate` each millisecond. `Rate(0.998)` is
+/// the iOS normal profile and equals a tau of about 500ms.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Decay {
+    Tau(f64),
+    Rate(f64),
+}
+
+impl Decay {
+    /// The time constant this decay is equivalent to, for `Friction`.
+    pub fn tau_ms(self) -> f64 {
+        match self {
+            Self::Tau(tau) => tau,
+            Self::Rate(rate) => {
+                if rate.is_finite() && (0.0..1.0).contains(&rate) {
+                    -1.0 / rate.ln()
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+}
+
 /// How a scroll treats a drag past its limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverscrollMode {
@@ -267,11 +331,19 @@ coded_trinary!(ScrollAccept, Content, Always, Never);
 /// Per-scroll motion parameters. Defaults match the historical constants.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScrollPhysics {
-    pub friction_tau_ms: f32,
+    /// How a coast decelerates. The default keeps the historical 180ms tau.
+    pub decay: Decay,
+    /// How a drag past the edge stretches. The default keeps the linear band.
+    pub band: Band,
     pub overscroll: OverscrollMode,
     pub overscroll_stiffness: f32,
     pub overscroll_damping: f32,
+    /// Only the `Linear` band reads this; `Curve` derives its slope from `c`.
     pub overscroll_factor: f32,
+    /// Spring that pulls a snapped or programmatic scroll to rest. Separate
+    /// from the overscroll spring so paging can feel firmer than the band.
+    pub snap_stiffness: f32,
+    pub snap_damping: f32,
     pub snap_x: Option<SnapGrid>,
     pub snap_y: Option<SnapGrid>,
     pub accept: ScrollAccept,
@@ -280,14 +352,51 @@ pub struct ScrollPhysics {
 impl Default for ScrollPhysics {
     fn default() -> Self {
         Self {
-            friction_tau_ms: SCROLL_TAU_MS,
+            decay: Decay::Tau(f64::from(SCROLL_TAU_MS)),
+            band: Band::Linear {
+                factor: OVERSCROLL_FACTOR,
+            },
             overscroll: OverscrollMode::RubberBand,
             overscroll_stiffness: OVERSCROLL_STIFFNESS,
             overscroll_damping: OVERSCROLL_DAMPING,
             overscroll_factor: OVERSCROLL_FACTOR,
+            snap_stiffness: OVERSCROLL_STIFFNESS,
+            snap_damping: OVERSCROLL_DAMPING,
             snap_x: None,
             snap_y: None,
             accept: ScrollAccept::Content,
+        }
+    }
+}
+
+impl ScrollPhysics {
+    /// The UIScrollView profile: a 0.998 deceleration rate, the asymptotic
+    /// band, and a firm paging spring. Flutter's `BouncingScrollPhysics`
+    /// users recognize the band; iOS users recognize all three.
+    pub const IOS: Self = Self {
+        decay: Decay::Rate(0.998),
+        band: Band::Curve { c: 0.55 },
+        overscroll: OverscrollMode::RubberBand,
+        overscroll_stiffness: OVERSCROLL_STIFFNESS,
+        overscroll_damping: OVERSCROLL_DAMPING,
+        overscroll_factor: OVERSCROLL_FACTOR,
+        snap_stiffness: 220.0,
+        snap_damping: 30.0,
+        snap_x: None,
+        snap_y: None,
+        accept: ScrollAccept::Content,
+    };
+
+    /// The tau the coasting friction uses, whichever decay spelling chose it.
+    pub fn tau_ms(self) -> f32 {
+        self.decay.tau_ms() as f32
+    }
+
+    /// Overscroll for `over` points past the edge of a `dimension`-sized scroll.
+    pub fn stretch(self, over: f32, dimension: f32) -> f32 {
+        match self.overscroll {
+            OverscrollMode::Clamp => 0.0,
+            OverscrollMode::RubberBand => self.band.stretch(over, dimension),
         }
     }
 }

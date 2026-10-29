@@ -173,11 +173,24 @@ pub(super) struct QjsFns {
         *const u8,
         usize,
     ) -> i32,
+    pub(super) http_stream: unsafe extern "C" fn(
+        *mut c_void,
+        u64,
+        *const c_char,
+        usize,
+        *const c_char,
+        usize,
+        *const c_char,
+        usize,
+        *const u8,
+        usize,
+    ) -> i32,
     pub(super) abort_token: unsafe extern "C" fn(*mut c_void, u64),
     pub(super) module_has: unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> i32,
     pub(super) module_prepare:
         unsafe extern "C" fn(*mut c_void, *const c_char, usize, *const c_char, usize) -> i32,
-    pub(super) socket_open: unsafe extern "C" fn(*mut c_void, u64, *const c_char, usize),
+    pub(super) socket_open:
+        unsafe extern "C" fn(*mut c_void, u64, *const c_char, usize, *const c_char, usize),
     pub(super) socket_send: unsafe extern "C" fn(*mut c_void, u64, *const u8, usize, i32),
     pub(super) socket_close: unsafe extern "C" fn(*mut c_void, u64),
     pub(super) focused: unsafe extern "C" fn(*mut c_void) -> u64,
@@ -187,6 +200,11 @@ pub(super) struct QjsFns {
     pub(super) grapheme_unit: unsafe extern "C" fn(*const c_char, usize, u32) -> u32,
     pub(super) set_reverse: unsafe extern "C" fn(*mut c_void, u64, i32) -> i32,
     pub(super) set_axis_size: unsafe extern "C" fn(*mut c_void, u64, i32, f32, i32, f32) -> i32,
+    pub(super) set_min_axis: unsafe extern "C" fn(*mut c_void, u64, i32, f32, i32, f32) -> i32,
+    pub(super) set_max_axis: unsafe extern "C" fn(*mut c_void, u64, i32, f32, i32, f32) -> i32,
+    pub(super) measure_panel:
+        unsafe extern "C" fn(*mut c_void, u64, i32, f32, f32, *mut f32, *mut f32) -> i32,
+    pub(super) set_panel: unsafe extern "C" fn(*mut c_void, u64) -> i32,
     pub(super) set_aspect_ratio: unsafe extern "C" fn(*mut c_void, u64, i32, f32) -> i32,
     pub(super) set_position: unsafe extern "C" fn(*mut c_void, u64, i32) -> i32,
     pub(super) set_inset:
@@ -211,6 +229,8 @@ pub(super) struct QjsFns {
         *const c_char,
         usize,
     ) -> i32,
+    /// Frees one zero-copy payload the session kept alive for QuickJS.
+    pub(super) release_bytes: unsafe extern "C" fn(*mut c_void, u64),
     pub(super) layer_stats: unsafe extern "C" fn(*mut c_void, *mut u64, *mut u32, *mut u32) -> i32,
     pub(super) scroll_into_view: unsafe extern "C" fn(*mut c_void, u64, i32) -> i32,
     pub(super) animate:
@@ -249,6 +269,9 @@ pub(super) struct QjsFns {
         f32,
         i32,
         i32,
+        i32,
+        f32,
+        f32,
     ) -> i32,
     pub(super) set_scroll_chain: unsafe extern "C" fn(*mut c_void, u64, i32) -> i32,
     pub(super) overscroll: unsafe extern "C" fn(*mut c_void, u64, *mut f32, *mut f32) -> i32,
@@ -420,11 +443,32 @@ unsafe extern "C" {
         body_len: usize,
         error: *const c_char,
     ) -> i32;
+    pub(super) fn qjs_http_head(
+        host: *mut c_void,
+        token: u64,
+        status: i32,
+        headers: *const c_char,
+        headers_len: usize,
+    ) -> i32;
+    pub(super) fn qjs_http_chunk(
+        host: *mut c_void,
+        token: u64,
+        body: *const u8,
+        body_len: usize,
+        done: i32,
+        error: *const c_char,
+    ) -> i32;
     pub(super) fn qjs_value_null(host: *mut c_void);
     pub(super) fn qjs_value_bool(host: *mut c_void, value: i32);
     pub(super) fn qjs_value_f64(host: *mut c_void, value: f64);
     pub(super) fn qjs_value_str(host: *mut c_void, text: *const c_char, len: usize);
     pub(super) fn qjs_value_bytes(host: *mut c_void, bytes: *const u8, len: usize);
+    pub(super) fn qjs_value_bytes_external(
+        host: *mut c_void,
+        bytes: *const u8,
+        len: usize,
+        handle: u64,
+    );
     pub(super) fn qjs_value_list(host: *mut c_void, count: u32);
     pub(super) fn qjs_value_map(host: *mut c_void, count: u32);
     pub(super) fn qjs_settle_top(host: *mut c_void, token: u64, ok: i32) -> i32;

@@ -15,7 +15,7 @@ pub(crate) use hit::Affine;
 pub use layout::{LayoutCause, LayoutTrace};
 pub use node::{
     Alignment, AxisSize, Discarded, DragClaim, Edges, FocusDirection, Gesture, GridLine, Inset,
-    Justify, NodeId, Rect, RowCrossAlign, ScrollEdge, TrackSize,
+    Justify, NodeId, Rect, RowCrossAlign, ScrollEdge, SubtreeSpace, TrackSize,
 };
 
 use crate::{AnimProp, Simulation};
@@ -129,6 +129,7 @@ pub struct Tree {
     sweep_children: Vec<NodeId>,
     /// Multiplier applied when measuring and recording text. `1.0` leaves sizes alone.
     text_scale: f32,
+    pixel_scale: f32,
     laid_out: bool,
     /// Content origin in scene points. Insets shift the root; `(0, 0)` is the surface origin.
     origin: (f32, f32),

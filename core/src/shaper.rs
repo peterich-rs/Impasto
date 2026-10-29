@@ -163,6 +163,33 @@ pub fn paint_key(
 pub trait Shaper {
     fn metrics(&self, key: &MetricsKey) -> Arc<ParagraphMetrics>;
     fn retain_paint(&self, key: &PaintKey) -> protocol::ParagraphId;
+    /// Width of the widest unbreakable word. This is the min-content
+    /// constraint: a grid `min_content()` track and a scroll's content floor
+    /// size to this. The default splits on whitespace and measures each word
+    /// unbounded; a real typesetter uses its own longest-word query.
+    fn min_content_width(&self, utf8: &str, font_size: f32) -> f32 {
+        let word = utf8
+            .split_whitespace()
+            .map(|word| self.measure_word(word, font_size))
+            .fold(0.0_f32, f32::max);
+        // An empty or whitespace-only text still reserves one cluster so a
+        // min-content column does not collapse to zero.
+        word.max(self.measure_word(" ", font_size))
+    }
+    /// Width of one unbounded word at `font_size`. Shared by the
+    /// min-content default; not part of the typesetting contract.
+    #[doc(hidden)]
+    fn measure_word(&self, word: &str, font_size: f32) -> f32 {
+        let key = MetricsKey {
+            text: Arc::from(word),
+            style: Arc::new(protocol::TextStyle::default()),
+            spans: Arc::from([]),
+            font_size: font_size.to_bits(),
+            max_width: f32::MAX.to_bits(),
+        };
+        self.metrics(&key).size.width
+    }
+
     /// Layout measurement. The default ignores color and uses [`Shaper::metrics`].
     fn measure_paint(&self, key: &PaintKey) -> TextSize {
         self.metrics(&key.metrics).size
@@ -231,6 +258,16 @@ impl Shaper for MonoShaper {
             Arc::from(laid.lines),
             baseline,
         ))
+    }
+
+    /// Monospace: the widest word is its cluster count times half the font
+    /// size, and no metrics lookup is needed.
+    fn min_content_width(&self, utf8: &str, font_size: f32) -> f32 {
+        let widest = utf8
+            .split_whitespace()
+            .map(|word| crate::text::grapheme_count(word) as f32 * font_size * 0.5)
+            .fold(0.0_f32, f32::max);
+        widest.max(font_size * 0.5)
     }
 
     fn retain_paint(&self, key: &PaintKey) -> protocol::ParagraphId {

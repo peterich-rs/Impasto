@@ -4,8 +4,8 @@ use std::ffi::{c_char, c_void};
 use std::sync::atomic::Ordering;
 
 use session::{
-    HostPlace, HostWait, HttpError, HttpRequest, IoJob, PluginResult, PluginValue, host_method,
-    host_module_linked, host_module_methods, module_not_linked,
+    HostPlace, HostWait, HttpError, HttpFailure, HttpRequest, IoJob, PluginResult, PluginValue,
+    host_method, host_module_linked, host_module_methods, module_not_linked,
 };
 use ui_core::{AxisSize, DragClaim, FocusDirection, GridLine, Inset, NodeId};
 
@@ -567,6 +567,11 @@ pub(super) fn grid_from_tag(tag: i32, value: i32) -> Result<GridLine, ui_core::E
     }
 }
 
+pub(super) unsafe extern "C" fn set_panel(session: *mut c_void, node: u64) -> i32 {
+    let inner = unsafe { inner(session) };
+    status(inner.tree.borrow_mut().set_panel(NodeId::from_raw(node)))
+}
+
 pub(super) unsafe extern "C" fn set_axis_size(
     session: *mut c_void,
     node: u64,
@@ -590,6 +595,93 @@ pub(super) unsafe extern "C" fn set_axis_size(
             .borrow_mut()
             .set_axis_size(NodeId::from_raw(node), width, height),
     )
+}
+
+pub(super) unsafe extern "C" fn set_min_axis(
+    session: *mut c_void,
+    node: u64,
+    width_tag: i32,
+    width: f32,
+    height_tag: i32,
+    height: f32,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    let Ok(width) = axis_from_tag(width_tag, width) else {
+        return -1;
+    };
+    let Ok(height) = axis_from_tag(height_tag, height) else {
+        return -1;
+    };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_min_axis(NodeId::from_raw(node), width, height),
+    )
+}
+
+pub(super) unsafe extern "C" fn set_max_axis(
+    session: *mut c_void,
+    node: u64,
+    width_tag: i32,
+    width: f32,
+    height_tag: i32,
+    height: f32,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    let Ok(width) = axis_from_tag(width_tag, width) else {
+        return -1;
+    };
+    let Ok(height) = axis_from_tag(height_tag, height) else {
+        return -1;
+    };
+    status(
+        inner
+            .tree
+            .borrow_mut()
+            .set_max_axis(NodeId::from_raw(node), width, height),
+    )
+}
+
+/// `mode` 0 max-content, 1 capped-max, 2 definite width. `height` of `f32::NAN`
+/// under mode 2 leaves the height natural. Out parameters carry `(w, h)`.
+pub(super) unsafe extern "C" fn measure_panel(
+    session: *mut c_void,
+    node: u64,
+    mode: i32,
+    width: f32,
+    height: f32,
+    out_w: *mut f32,
+    out_h: *mut f32,
+) -> i32 {
+    if out_w.is_null() || out_h.is_null() {
+        return -1;
+    }
+    let space = match mode {
+        0 => ui_core::SubtreeSpace::MaxContent,
+        1 => ui_core::SubtreeSpace::CappedMax(width),
+        2 => ui_core::SubtreeSpace::Definite {
+            width,
+            height: (height.is_finite()).then_some(height),
+        },
+        _ => return -1,
+    };
+    let inner = unsafe { inner(session) };
+    // `set_panel` is a separate call so a caller can reuse a declared panel.
+    match inner
+        .tree
+        .borrow_mut()
+        .measure_panel(NodeId::from_raw(node), space)
+    {
+        Ok((w, h)) => {
+            unsafe {
+                *out_w = w;
+                *out_h = h;
+            }
+            0
+        }
+        Err(_) => -1,
+    }
 }
 
 pub(super) unsafe extern "C" fn set_aspect_ratio(
@@ -915,7 +1007,34 @@ pub(super) fn emit_module(inner: &Inner, module: &str, event: &str, shape: i32, 
     };
 }
 
-pub(super) fn emit_value(host: *mut c_void, value: &PluginValue) {
+/// Payloads at or above this size travel zero-copy; smaller ones are cheaper
+/// to duplicate than to track.
+const EXTERNAL_BYTES_THRESHOLD: usize = 4096;
+
+/// Park `bytes` in the session slab and hand back `(handle, copy)` whose
+/// pointer stays valid until [`release_bytes_cb`] runs. `None` when the host
+/// pointer is not this session's.
+fn take_external_handle(inner: &Inner, bytes: &[u8]) -> Option<(u64, Vec<u8>)> {
+    let mut slab = inner.out_bytes.borrow_mut();
+    slab.0 = slab.0.wrapping_add(1).max(1);
+    let handle = slab.0;
+    let entry = slab.1.entry(handle).or_insert_with(|| bytes.to_vec());
+    // The Vec's heap buffer does not move while it sits in the map, so this
+    // pointer stays valid until release_bytes_cb removes the entry.
+    let stable = unsafe { std::slice::from_raw_parts(entry.as_ptr(), entry.len()).to_vec() };
+    Some((handle, stable))
+}
+
+/// `fns.release_bytes`: QuickJS freed the view; drop the slab entry, which is
+/// the last owner of that heap buffer.
+pub(super) unsafe extern "C" fn release_bytes_cb(session: *mut c_void, handle: u64) {
+    let inner = unsafe { inner(session) };
+    let mut slab = inner.out_bytes.borrow_mut();
+    drop(slab.1.remove(&handle));
+}
+
+pub(super) fn emit_value(inner: &Inner, value: &PluginValue) {
+    let host = inner.host;
     match value {
         PluginValue::Null => unsafe { qjs_value_null(host) },
         PluginValue::Bool(flag) => unsafe { qjs_value_bool(host, i32::from(*flag)) },
@@ -925,6 +1044,12 @@ pub(super) fn emit_value(host: *mut c_void, value: &PluginValue) {
             unsafe { qjs_value_str(host, bytes.as_ptr(), text.replace('\0', "").len()) };
         }
         PluginValue::Bytes(bytes) => unsafe {
+            if bytes.len() >= EXTERNAL_BYTES_THRESHOLD
+                && let Some((handle, stable)) = take_external_handle(inner, bytes)
+            {
+                qjs_value_bytes_external(host, stable.as_ptr(), stable.len(), handle);
+                return;
+            }
             let ptr = if bytes.is_empty() {
                 b"".as_ptr()
             } else {
@@ -934,7 +1059,7 @@ pub(super) fn emit_value(host: *mut c_void, value: &PluginValue) {
         },
         PluginValue::List(items) => {
             for item in items {
-                emit_value(host, item);
+                emit_value(inner, item);
             }
             unsafe { qjs_value_list(host, items.len() as u32) };
         }
@@ -942,21 +1067,67 @@ pub(super) fn emit_value(host: *mut c_void, value: &PluginValue) {
             for (key, item) in entries {
                 let bytes = cstring(key);
                 unsafe { qjs_value_str(host, bytes.as_ptr(), key.replace('\0', "").len()) };
-                emit_value(host, item);
+                emit_value(inner, item);
             }
             unsafe { qjs_value_map(host, entries.len() as u32) };
         }
     }
 }
 
+/// Streamed head: status and headers before any body bytes.
+pub(super) fn settle_http_head(
+    inner: &Inner,
+    token: u64,
+    status: u16,
+    headers: &[(String, String)],
+) {
+    let block = host::header_block(headers);
+    let header_bytes = cstring(&block);
+    let _ = unsafe {
+        qjs_http_head(
+            inner.host,
+            token,
+            i32::from(status),
+            header_bytes.as_ptr(),
+            block.len(),
+        )
+    };
+}
+
+/// One streamed body piece. `done` closes the stream; `error` fails it.
+pub(super) fn settle_http_chunk(
+    inner: &Inner,
+    token: u64,
+    bytes: &[u8],
+    done: bool,
+    error: Option<&HttpError>,
+) {
+    let message = error.map(|error| cstring(error.dom_name()));
+    let _ = unsafe {
+        qjs_http_chunk(
+            inner.host,
+            token,
+            bytes.as_ptr(),
+            bytes.len(),
+            i32::from(done),
+            message.as_ref().map_or(ptr::null(), |text| text.as_ptr()),
+        )
+    };
+}
+
+/// Fail a stream that never produced a head.
+pub(super) fn deliver_stream_error(inner: &Inner, token: u64, error: &HttpError) {
+    settle_http_chunk(inner, token, &[], true, Some(error));
+}
+
 pub(super) fn settle_plugin(inner: &Inner, token: u64, result: &PluginResult) {
     match result {
         PluginResult::Done(value) => {
-            emit_value(inner.host, value);
+            emit_value(inner, value);
             let _ = unsafe { qjs_settle_top(inner.host, token, 1) };
         }
         PluginResult::Failed { message } => {
-            emit_value(inner.host, &PluginValue::Str(message.clone()));
+            emit_value(inner, &PluginValue::Str(message.clone()));
             let _ = unsafe { qjs_settle_top(inner.host, token, 0) };
         }
     }
@@ -997,7 +1168,9 @@ pub(super) fn settle_http(inner: &Inner, token: u64, result: &Result<HttpRespons
             };
         }
         Err(error) => {
-            let message = cstring(&error.message);
+            // The prelude rejects with the DOMException name so callers can
+            // match on it; the detail stays in the session log.
+            let message = cstring(error.dom_name());
             let _ = unsafe {
                 qjs_settle_http(
                     inner.host,
@@ -1079,6 +1252,67 @@ pub(super) unsafe extern "C" fn http_call(
     body: *const u8,
     body_len: usize,
 ) -> i32 {
+    unsafe {
+        http_call_impl(
+            session,
+            token,
+            method,
+            method_len,
+            url,
+            url_len,
+            headers,
+            headers_len,
+            body,
+            body_len,
+            false,
+        )
+    }
+}
+
+pub(super) unsafe extern "C" fn http_stream_call(
+    session: *mut c_void,
+    token: u64,
+    method: *const c_char,
+    method_len: usize,
+    url: *const c_char,
+    url_len: usize,
+    headers: *const c_char,
+    headers_len: usize,
+    body: *const u8,
+    body_len: usize,
+) -> i32 {
+    unsafe {
+        http_call_impl(
+            session,
+            token,
+            method,
+            method_len,
+            url,
+            url_len,
+            headers,
+            headers_len,
+            body,
+            body_len,
+            true,
+        )
+    }
+}
+
+/// Shared body of `http` and `httpStream`. `streaming` picks the job the host
+/// network thread runs; a session-local client always downloads whole bodies.
+unsafe fn http_call_impl(
+    session: *mut c_void,
+    token: u64,
+    method: *const c_char,
+    method_len: usize,
+    url: *const c_char,
+    url_len: usize,
+    headers: *const c_char,
+    headers_len: usize,
+    body: *const u8,
+    body_len: usize,
+    streaming: bool,
+) -> i32 {
     let inner = unsafe { inner(session) };
     let Some(method) = (unsafe { utf8_of(method, method_len) }) else {
         return -1;
@@ -1088,11 +1322,12 @@ pub(super) unsafe extern "C" fn http_call(
     };
     let headers = unsafe { utf8_of(headers, headers_len) }.unwrap_or("");
     if body_len > session::HTTP_BODY_LIMIT {
-        inner
-            .pending
-            .borrow_mut()
-            .http
-            .push((token, Err(HttpError::new("TypeError"))));
+        let error = HttpError::new(HttpFailure::TooLarge, "TypeError");
+        if streaming {
+            deliver_stream_error(inner, token, &error);
+        } else {
+            inner.pending.borrow_mut().http.push((token, Err(error)));
+        }
         return 0;
     }
     let bytes = if body.is_null() || body_len == 0 {
@@ -1112,17 +1347,43 @@ pub(super) unsafe extern "C" fn http_call(
         headers: host::header_pairs(headers),
         body: bytes,
         cancel,
+        timeout_ms: None,
     };
     if !request.url.starts_with("http://") && !request.url.starts_with("https://") {
-        inner
-            .pending
-            .borrow_mut()
-            .http
-            .push((token, Err(HttpError::new("unsupported URL"))));
+        let error = HttpError::new(HttpFailure::BadUrl, "unsupported URL");
+        if streaming {
+            deliver_stream_error(inner, token, &error);
+        } else {
+            inner.pending.borrow_mut().http.push((token, Err(error)));
+        }
         return 0;
     }
     if let Some(submit) = inner.io.borrow().as_ref() {
-        submit(IoJob::Http(request));
+        submit(if streaming {
+            IoJob::HttpStream(request)
+        } else {
+            IoJob::Http(request)
+        });
+        return 0;
+    }
+    if streaming {
+        // No host network thread: pull the whole body through the local
+        // client, then deliver it as one head plus one chunk.
+        if let Some(client) = inner.http.borrow().as_ref().cloned() {
+            match client.perform(&request) {
+                Ok(response) => {
+                    settle_http_head(inner, token, response.status, &response.headers);
+                    settle_http_chunk(inner, token, &response.body, true, None);
+                }
+                Err(error) => deliver_stream_error(inner, token, &error),
+            }
+            return 0;
+        }
+        deliver_stream_error(
+            inner,
+            token,
+            &HttpError::new(HttpFailure::Network, "network is not linked"),
+        );
         return 0;
     }
     if let Some(client) = inner.http.borrow().as_ref().cloned() {
@@ -1130,11 +1391,8 @@ pub(super) unsafe extern "C" fn http_call(
         inner.pending.borrow_mut().http.push((token, result));
         return 0;
     }
-    inner
-        .pending
-        .borrow_mut()
-        .http
-        .push((token, Err(HttpError::new("network is not linked"))));
+    let error = HttpError::new(HttpFailure::Network, "network is not linked");
+    inner.pending.borrow_mut().http.push((token, Err(error)));
     0
 }
 
@@ -1148,7 +1406,7 @@ pub(super) unsafe extern "C" fn abort_token(session: *mut c_void, token: u64) {
         .borrow_mut()
         .http
         .retain(|(pending, _)| *pending != token);
-    let aborted = Err(HttpError::new("AbortError"));
+    let aborted = Err(HttpError::new(HttpFailure::Canceled, "AbortError"));
     settle_http(inner, token, &aborted);
     if let Some(submit) = inner.io.borrow().as_ref() {
         submit(IoJob::Abort { token });
@@ -1323,7 +1581,7 @@ pub(super) unsafe extern "C" fn module_finish(session: *mut c_void) -> i32 {
     if call.wait == HostWait::Sync {
         let result = session_call(inner, &call.module, &call.method);
         if let PluginResult::Done(value) = result {
-            emit_value(inner.host, &value);
+            emit_value(inner, &value);
             return 0;
         }
         return -1;
@@ -1499,17 +1757,30 @@ pub(super) unsafe extern "C" fn socket_open(
     id: u64,
     url: *const c_char,
     len: usize,
+    protocols: *const c_char,
+    protocols_len: usize,
 ) {
     let inner = unsafe { inner(session) };
     let Some(url) = (unsafe { utf8_of(url, len) }) else {
         return;
     };
     let url = url.to_owned();
+    // A comma-separated offer list, the wire form the header carries.
+    let protocols = unsafe { utf8_of(protocols, protocols_len) }
+        .map(|text| {
+            text.split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     submit_or_queue(
         inner,
         IoJob::SocketOpen {
             id,
             url: url.clone(),
+            protocols,
         },
         || {
             inner.pending.borrow_mut().socket.push((

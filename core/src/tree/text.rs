@@ -174,6 +174,27 @@ impl Tree {
         self.text_scale
     }
 
+    /// Device pixels per scene point. Scroll offsets snap to whole device
+    /// pixels when a motion settles, so text and hairlines land on texel
+    /// boundaries. The default of 1.0 keeps scene-point rounding.
+    pub fn set_pixel_scale(&mut self, scale: f32) -> Result<(), Error> {
+        finite_number(scale)?;
+        if scale <= 0.0 {
+            return Err(Error::BadNumber);
+        }
+        self.pixel_scale = scale;
+        Ok(())
+    }
+
+    pub fn pixel_scale(&self) -> f32 {
+        self.pixel_scale
+    }
+
+    /// `value` in scene points rounded to the nearest device pixel.
+    pub(crate) fn settle_pixels(&self, value: f32) -> f32 {
+        (value * self.pixel_scale).round() / self.pixel_scale
+    }
+
     /// Applies one edit to the editor stored on `id` and returns the new value.
     ///
     /// Line, word, and vertical motions use this node's paragraph when the

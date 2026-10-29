@@ -120,12 +120,16 @@ typedef struct QjsFns {
     int (*http)(void *session, uint64_t token, const char *method, size_t method_len,
                 const char *url, size_t url_len, const char *headers, size_t headers_len,
                 const uint8_t *body, size_t body_len);
+    int (*http_stream)(void *session, uint64_t token, const char *method, size_t method_len,
+                       const char *url, size_t url_len, const char *headers, size_t headers_len,
+                       const uint8_t *body, size_t body_len);
     void (*abort_token)(void *session, uint64_t token);
     int (*module_has)(void *session, const char *name, size_t len);
     /* 0 synchronous, 1 promise, -1 not linked. */
     int (*module_prepare)(void *session, const char *name, size_t name_len, const char *method,
                           size_t method_len);
-    void (*socket_open)(void *session, uint64_t id, const char *url, size_t url_len);
+    void (*socket_open)(void *session, uint64_t id, const char *url, size_t url_len,
+                        const char *protocols, size_t protocols_len);
     void (*socket_send)(void *session, uint64_t id, const uint8_t *data, size_t len, int is_text);
     void (*socket_close)(void *session, uint64_t id);
     uint64_t (*focused)(void *session);
@@ -136,6 +140,13 @@ typedef struct QjsFns {
     int (*set_reverse)(void *session, uint64_t node, int reverse);
     int (*set_axis_size)(void *session, uint64_t node, int width_tag, float width, int height_tag,
                          float height);
+    int (*set_min_axis)(void *session, uint64_t node, int width_tag, float width, int height_tag,
+                        float height);
+    int (*set_max_axis)(void *session, uint64_t node, int width_tag, float width, int height_tag,
+                        float height);
+    int (*measure_panel)(void *session, uint64_t node, int mode, float width, float height,
+                         float *out_w, float *out_h);
+    int (*set_panel)(void *session, uint64_t node);
     int (*set_aspect_ratio)(void *session, uint64_t node, int present, float ratio);
     int (*set_position)(void *session, uint64_t node, int absolute);
     int (*set_inset)(void *session, uint64_t node, int top_auto, float top, int right_auto, float right,
@@ -151,6 +162,8 @@ typedef struct QjsFns {
     int (*push_mutation)(void *session, uint32_t op, uint64_t id, uint64_t parent, uint64_t before,
                          uint32_t field, double number, double number2, const uint8_t color[4],
                          const char *text, size_t text_len);
+    /* Frees one zero-copy payload the session kept alive for QuickJS. */
+    void (*release_bytes)(void *session, uint64_t handle);
     int (*layer_stats)(void *session, uint64_t *epoch, uint32_t *layers, uint32_t *pictures);
     int (*scroll_into_view)(void *session, uint64_t node, int edge);
     int (*animate)(void *session, uint64_t node, const char *prop, size_t prop_len, double from,
@@ -179,7 +192,8 @@ typedef struct QjsFns {
     int (*viewport)(void *session, float *width, float *height);
     int (*set_scroll_physics)(void *session, uint64_t node, float tau, int mode, float stiffness,
                               float damping, float factor, float snap_x, int align_x, float snap_y,
-                              int align_y, int accept);
+                              int align_y, int accept, int curve, float snap_stiffness,
+                              float snap_damping);
     int (*set_scroll_chain)(void *session, uint64_t node, int chain);
     int (*overscroll)(void *session, uint64_t node, float *x, float *y);
     int (*arm_fling)(void *session, uint64_t node, float vx, float vy);
@@ -1731,6 +1745,90 @@ static JSValue js_set_axis_size(JSContext *ctx, JSValueConst this_val, int argc,
                 "setAxisSize failed");
 }
 
+static JSValue js_set_min_axis(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 3) {
+        return throw_msg(ctx, "setMinAxis(node, width, height)");
+    }
+    uint64_t node = 0;
+    int width_tag = 0;
+    int height_tag = 0;
+    float width = 0;
+    float height = 0;
+    if (read_handle(ctx, argv[0], &node) || read_axis(ctx, argv[1], &width_tag, &width) ||
+        read_axis(ctx, argv[2], &height_tag, &height)) {
+        return JS_EXCEPTION;
+    }
+    return done(ctx,
+                host->fns.set_min_axis(host->fns.session, node, width_tag, width, height_tag, height),
+                "setMinAxis failed");
+}
+
+static JSValue js_set_max_axis(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 3) {
+        return throw_msg(ctx, "setMaxAxis(node, width, height)");
+    }
+    uint64_t node = 0;
+    int width_tag = 0;
+    int height_tag = 0;
+    float width = 0;
+    float height = 0;
+    if (read_handle(ctx, argv[0], &node) || read_axis(ctx, argv[1], &width_tag, &width) ||
+        read_axis(ctx, argv[2], &height_tag, &height)) {
+        return JS_EXCEPTION;
+    }
+    return done(ctx,
+                host->fns.set_max_axis(host->fns.session, node, width_tag, width, height_tag, height),
+                "setMaxAxis failed");
+}
+
+static JSValue js_set_panel(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1) {
+        return throw_msg(ctx, "setPanel(node)");
+    }
+    uint64_t node = 0;
+    if (read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
+    return done(ctx, host->fns.set_panel(host->fns.session, node), "setPanel failed");
+}
+
+// measurePanel(node, mode, width, height) -> [w, h] or null.
+// mode 0 max-content, 1 capped-max (width is the cap), 2 definite (width, and
+// height unless NaN).
+static JSValue js_measure_panel(JSContext *ctx, JSValueConst this_val, int argc,
+                                JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 4) {
+        return throw_msg(ctx, "measurePanel(node, mode, width, height)");
+    }
+    uint64_t node = 0;
+    int32_t mode = 0;
+    double width = 0;
+    double height = 0;
+    if (read_handle(ctx, argv[0], &node) || JS_ToInt32(ctx, &mode, argv[1]) ||
+        JS_ToFloat64(ctx, &width, argv[2]) || JS_ToFloat64(ctx, &height, argv[3])) {
+        return JS_EXCEPTION;
+    }
+    float out_w = 0;
+    float out_h = 0;
+    int status = host->fns.measure_panel(host->fns.session, node, mode, (float)width, (float)height,
+                                         &out_w, &out_h);
+    if (status != 0) {
+        return JS_NULL;
+    }
+    JSValue pair = JS_NewArray(ctx);
+    JS_DefinePropertyValueUint32(ctx, pair, 0, JS_NewFloat64(ctx, (double)out_w), JS_PROP_C_W_E);
+    JS_DefinePropertyValueUint32(ctx, pair, 1, JS_NewFloat64(ctx, (double)out_h), JS_PROP_C_W_E);
+    return pair;
+}
+
 static JSValue js_set_aspect_ratio(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
     Host *host = host_of(ctx);
@@ -3062,17 +3160,24 @@ static JSValue js_set_scroll_physics(JSContext *ctx, JSValueConst this_val, int 
     double snap_y = 0;
     int32_t align_y = 0;
     int32_t accept = 0;
+    int32_t curve = 0;
+    double snap_stiffness = 0;
+    double snap_damping = 0;
     if (read_handle(ctx, argv[0], &node) || JS_ToFloat64(ctx, &tau, argv[1]) ||
         JS_ToInt32(ctx, &mode, argv[2]) || JS_ToFloat64(ctx, &stiffness, argv[3]) ||
         JS_ToFloat64(ctx, &damping, argv[4]) || JS_ToFloat64(ctx, &factor, argv[5]) ||
         JS_ToFloat64(ctx, &snap_x, argv[6]) || JS_ToInt32(ctx, &align_x, argv[7]) ||
         JS_ToFloat64(ctx, &snap_y, argv[8]) || JS_ToInt32(ctx, &align_y, argv[9]) ||
-        (argc >= 11 && JS_ToInt32(ctx, &accept, argv[10]))) {
+        (argc >= 11 && JS_ToInt32(ctx, &accept, argv[10])) ||
+        (argc >= 12 && JS_ToInt32(ctx, &curve, argv[11])) ||
+        (argc >= 13 && JS_ToFloat64(ctx, &snap_stiffness, argv[12])) ||
+        (argc >= 14 && JS_ToFloat64(ctx, &snap_damping, argv[13]))) {
         return JS_EXCEPTION;
     }
     int status = host->fns.set_scroll_physics(
         host->fns.session, node, (float)tau, mode, (float)stiffness, (float)damping, (float)factor,
-        (float)snap_x, align_x, (float)snap_y, align_y, accept);
+        (float)snap_x, align_x, (float)snap_y, align_y, accept, curve, (float)snap_stiffness,
+        (float)snap_damping);
     return done(ctx, status, "setScrollPhysics failed");
 }
 
@@ -4557,6 +4662,10 @@ static int bind_core(Host *host) {
     failed |= bind_fn(ctx, core, "graphemeUnit", js_grapheme_unit, 2);
     failed |= bind_fn(ctx, core, "setReverse", js_set_reverse, 2);
     failed |= bind_fn(ctx, core, "setAxisSize", js_set_axis_size, 3);
+    failed |= bind_fn(ctx, core, "setMinAxis", js_set_min_axis, 3);
+    failed |= bind_fn(ctx, core, "setMaxAxis", js_set_max_axis, 3);
+    failed |= bind_fn(ctx, core, "setPanel", js_set_panel, 1);
+    failed |= bind_fn(ctx, core, "measurePanel", js_measure_panel, 4);
     failed |= bind_fn(ctx, core, "setAspectRatio", js_set_aspect_ratio, 2);
     failed |= bind_fn(ctx, core, "setPosition", js_set_position, 2);
     failed |= bind_fn(ctx, core, "setInset", js_set_inset, 5);

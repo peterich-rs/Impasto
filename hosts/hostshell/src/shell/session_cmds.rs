@@ -15,6 +15,8 @@ pub(super) fn handle(runtime: &mut Runtime, command: Command) -> Result<bool, Bo
         | Command::WindowFocus(_)
         | Command::SemanticsAction(_)) => session(runtime, command),
         command @ (Command::HttpDone { .. }
+        | Command::HttpHead { .. }
+        | Command::HttpChunk { .. }
         | Command::PluginDone { .. }
         | Command::Socket { .. }) => io(runtime, command),
         _ => Ok(false),
@@ -67,6 +69,26 @@ fn session(runtime: &mut Runtime, command: Command) -> Result<bool, BootError> {
 fn io(runtime: &mut Runtime, command: Command) -> Result<bool, BootError> {
     let event = match command {
         Command::HttpDone { token, result } => IoEvent::Http { token, result },
+        Command::HttpHead {
+            token,
+            status,
+            headers,
+        } => IoEvent::HttpHead {
+            token,
+            status,
+            headers,
+        },
+        Command::HttpChunk {
+            token,
+            bytes,
+            done,
+            error,
+        } => IoEvent::HttpChunk {
+            token,
+            bytes,
+            done,
+            error,
+        },
         Command::PluginDone { token, result } => IoEvent::Plugin { token, result },
         Command::Socket {
             id,

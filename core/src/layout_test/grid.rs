@@ -37,3 +37,18 @@ fn grid_tracks_assign_fixed_and_fraction_columns() -> Result<(), crate::Error> {
     assert_eq!(second.w, 60.0);
     Ok(())
 }
+
+#[test]
+fn a_min_content_track_sizes_to_the_widest_word() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 200.0, 100.0)?;
+    let root = tree.grid(1)?;
+    let text = tree.text("hi there", 10.0, [0, 0, 0, 255])?;
+    tree.add_child(root, text)?;
+    tree.layout()?;
+    // Monospace at font size 10: each cluster is 5 wide. "there" is the
+    // widest word at 25 points, and the min-content track adopts it.
+    let width = tree.rect(text)?.w;
+    assert!((width - 25.0).abs() < 0.5, "min-content width {width}");
+    Ok(())
+}

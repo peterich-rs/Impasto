@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use taffy::prelude::*;
 
-use super::node::{Kind, NodeFlags, Slot};
+use super::node::{Kind, NodeFlags, Slot, SubtreeSpace};
 use super::{Alignment, AxisSize, Edges, GridLine, Inset, Justify, NodeId, Rect, TrackSize, Tree};
 use crate::{Error, SINGLE_LINE_MAX, Shaper, TextSize};
 
@@ -274,6 +274,42 @@ impl Tree {
             width: length(width),
             height: length(height),
         };
+        self.write_style(id, style)
+    }
+
+    /// Min size where either axis may be a percentage of the parent.
+    /// `Fraction(0.5)` is `min-width: 50%`; `Auto` leaves that axis alone.
+    pub fn set_min_axis(
+        &mut self,
+        id: NodeId,
+        width: AxisSize,
+        height: AxisSize,
+    ) -> Result<(), Error> {
+        let mut style = self.node(id)?.style.clone();
+        if width != AxisSize::Auto {
+            style.min_size.width = axis_dimension(width)?;
+        }
+        if height != AxisSize::Auto {
+            style.min_size.height = axis_dimension(height)?;
+        }
+        self.write_style(id, style)
+    }
+
+    /// Max size where either axis may be a percentage of the parent.
+    /// `Fraction(0.8)` is `max-width: 80%`; `Auto` leaves that axis alone.
+    pub fn set_max_axis(
+        &mut self,
+        id: NodeId,
+        width: AxisSize,
+        height: AxisSize,
+    ) -> Result<(), Error> {
+        let mut style = self.node(id)?.style.clone();
+        if width != AxisSize::Auto {
+            style.max_size.width = axis_dimension(width)?;
+        }
+        if height != AxisSize::Auto {
+            style.max_size.height = axis_dimension(height)?;
+        }
         self.write_style(id, style)
     }
 
@@ -663,6 +699,7 @@ impl Tree {
                 self.motion_ends.push((node, prop));
                 self.motions.remove(index);
                 if matches!(prop, crate::AnimProp::ScrollX | crate::AnimProp::ScrollY) {
+                    self.settle_scroll_pixels(node);
                     self.after_scroll_motion(node, prop, velocity, snap);
                 } else if matches!(
                     prop,
@@ -884,6 +921,91 @@ impl Tree {
     pub fn set_drag_claim(&mut self, id: NodeId, claim: super::DragClaim) -> Result<(), Error> {
         self.node_mut(id)?.drag_claim = claim;
         Ok(())
+    }
+
+    /// Mark `id` as a relayout boundary so its subtree lays out independently.
+    /// Popovers and dropdowns declare this before [`Tree::measure_panel`] so
+    /// the measurement does not dirty the rest of the tree.
+    pub fn set_panel(&mut self, id: NodeId) -> Result<(), Error> {
+        let mut style = self.node(id)?.style.clone();
+        // A boundary needs definite inputs on the panel itself; pin its own
+        // size so the subtree resolves against a stable box.
+        style.overflow = taffy::Point {
+            x: taffy::Overflow::Visible,
+            y: taffy::Overflow::Visible,
+        };
+        self.write_style(id, style)?;
+        if let Ok(node) = self.node_mut(id) {
+            node.flags.insert(NodeFlags::RELAYOUT_BOUNDARY);
+        }
+        Ok(())
+    }
+
+    /// Lay out `id`'s subtree under `space` and return the content size.
+    ///
+    /// The caller then pins the panel with [`Tree::set_axis_size`] so the
+    /// recorded frame uses the measured box. `MaxContent` measures naturally,
+    /// `CappedMax` re-lays out with the cap when the natural size exceeds it,
+    /// and `Definite` lays out with the given width.
+    pub fn measure_panel(&mut self, id: NodeId, space: SubtreeSpace) -> Result<(f32, f32), Error> {
+        let taffy_id = self.node(id)?.taffy.ok_or(Error::NoRoot)?;
+        let (first_width, recheck_cap) = match space {
+            SubtreeSpace::MaxContent | SubtreeSpace::CappedMax(_) => {
+                (AvailableSpace::MaxContent, None)
+            }
+            SubtreeSpace::Definite { width, .. } => (AvailableSpace::Definite(width), Some(width)),
+        };
+        let first_height = match space {
+            SubtreeSpace::Definite {
+                height: Some(h), ..
+            } => AvailableSpace::Definite(h),
+            _ => AvailableSpace::MaxContent,
+        };
+        let started = std::time::Instant::now();
+        let slots = &self.slots;
+        let shaper = self.shaper.as_ref();
+        let text_scale = self.text_scale;
+        let text_reused = &self.text_reused;
+        let text_shaped = &self.text_shaped;
+        let mut measured = Vec::new();
+        let mut run = |width: AvailableSpace, height: AvailableSpace| -> Result<Size<f32>, Error> {
+            self.taffy.compute_layout_with_measure(
+                taffy_id,
+                Size { width, height },
+                |known, available, _id, context, _style| {
+                    measure_leaf(
+                        slots,
+                        shaper,
+                        text_scale,
+                        known,
+                        available,
+                        context,
+                        &mut measured,
+                        text_reused,
+                        text_shaped,
+                    )
+                },
+            )?;
+            Ok(self.taffy.layout(taffy_id)?.size)
+        };
+        let natural = run(first_width, first_height)?;
+        let mut size = natural;
+        if let SubtreeSpace::CappedMax(cap) = space {
+            if natural.width > cap {
+                size = run(AvailableSpace::Definite(cap), AvailableSpace::MaxContent)?;
+            }
+        } else if let Some(cap) = recheck_cap {
+            let _ = cap;
+        }
+        for id in measured {
+            self.note_text(id);
+        }
+        if let Ok(node) = self.node_mut(id) {
+            node.flags.insert(NodeFlags::BOUNDARY_DIRTY);
+        }
+        self.place_boundary(id)?;
+        self.layout_work_ms += started.elapsed().as_secs_f64() * 1000.0;
+        Ok((size.width, size.height))
     }
 
     pub fn rect(&self, id: NodeId) -> Result<Rect, Error> {
@@ -1395,38 +1517,58 @@ fn measure_leaf(
         return Size::ZERO;
     };
     let size = if let Some(text) = node.text() {
-        let max_width = line_limit(available.width);
-        let font_size = text.font_size * text_scale;
-        if let Some(size) = reusable_text_size(text, font_size, max_width) {
-            text_reused.set(text_reused.get().saturating_add(1));
-            let paints_at = text
-                .cached
-                .as_ref()
-                .map(|key| key.metrics.max_width)
-                .unwrap_or(0);
-            if paints_at == max_width.to_bits() {
-                text.max_width.set(max_width);
+        // A min-content query sizes to the widest unbreakable word, not to
+        // the single-line maximum: a grid min-content track and a scroll's
+        // content floor use this to keep long words visible.
+        if matches!(available.width, AvailableSpace::MinContent) {
+            let font_size = text.font_size * text_scale;
+            TextSize {
+                width: shaper.min_content_width(&text.utf8, font_size),
+                height: shaper
+                    .measure_paint(&crate::paint_key(
+                        Arc::clone(&text.utf8),
+                        Arc::clone(&text.style),
+                        text.spans.as_ref(),
+                        font_size,
+                        f32::MAX,
+                        text.color,
+                    ))
+                    .height,
             }
-            size
         } else {
-            let previous = text.max_width.get();
-            text.max_width.set(max_width);
-            if previous != max_width {
-                measured.push(NodeId {
-                    index: index as u32,
-                    generation: slot.generation,
-                });
+            let max_width = line_limit(available.width);
+            let font_size = text.font_size * text_scale;
+            if let Some(size) = reusable_text_size(text, font_size, max_width) {
+                text_reused.set(text_reused.get().saturating_add(1));
+                let paints_at = text
+                    .cached
+                    .as_ref()
+                    .map(|key| key.metrics.max_width)
+                    .unwrap_or(0);
+                if paints_at == max_width.to_bits() {
+                    text.max_width.set(max_width);
+                }
+                size
+            } else {
+                let previous = text.max_width.get();
+                text.max_width.set(max_width);
+                if previous != max_width {
+                    measured.push(NodeId {
+                        index: index as u32,
+                        generation: slot.generation,
+                    });
+                }
+                let key = crate::paint_key(
+                    Arc::clone(&text.utf8),
+                    Arc::clone(&text.style),
+                    text.spans.as_ref(),
+                    font_size,
+                    max_width,
+                    text.color,
+                );
+                text_shaped.set(text_shaped.get().saturating_add(1));
+                shaper.measure_paint(&key)
             }
-            let key = crate::paint_key(
-                Arc::clone(&text.utf8),
-                Arc::clone(&text.style),
-                text.spans.as_ref(),
-                font_size,
-                max_width,
-                text.color,
-            );
-            text_shaped.set(text_shaped.get().saturating_add(1));
-            shaper.measure_paint(&key)
         }
     } else if let Some(image) = node.image() {
         TextSize {

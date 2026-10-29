@@ -55,6 +55,10 @@ pub(super) struct Inner {
     pub(super) cancels: RefCell<HashMap<u64, Arc<AtomicBool>>>,
     pub(super) module_clipboard: RefCell<String>,
     pub(super) pending: RefCell<Pending>,
+    /// Zero-copy payloads handed to QuickJS. The handle counter never repeats
+    /// within a session, so a stale free from a freed view cannot drop live
+    /// bytes.
+    pub(super) out_bytes: RefCell<(u64, HashMap<u64, Vec<u8>>)>,
     pub(super) fonts: RefCell<FontBook>,
     /// Sources passed to `reload` since the last [`Session::take_reloads`].
     pub(super) reloads: RefCell<Vec<String>>,
@@ -213,6 +217,7 @@ impl JsSession {
             cancels: RefCell::new(HashMap::new()),
             module_clipboard: RefCell::new(String::new()),
             pending: RefCell::new(Pending::new()),
+            out_bytes: RefCell::new((0, HashMap::new())),
             fonts: RefCell::new(FontBook::new()),
             reloads: RefCell::new(Vec::new()),
             mutations: RefCell::new(Vec::new()),
@@ -309,6 +314,7 @@ impl JsSession {
             selection_rect_bytes,
             set_ime_config,
             http: http_call,
+            http_stream: http_stream_call,
             abort_token,
             module_has,
             module_prepare,
@@ -322,6 +328,10 @@ impl JsSession {
             grapheme_unit: grapheme_unit_of,
             set_reverse,
             set_axis_size,
+            set_min_axis,
+            set_max_axis,
+            measure_panel,
+            set_panel,
             set_aspect_ratio,
             set_position,
             set_inset,
@@ -331,6 +341,7 @@ impl JsSession {
             set_image_mode,
             reload,
             push_mutation,
+            release_bytes: release_bytes_cb,
             layer_stats,
             scroll_into_view,
             animate,
@@ -540,12 +551,16 @@ impl Session for JsSession {
         let top = metrics.inset_top.max(0.0);
         let right = metrics.inset_right.max(0.0);
         let bottom = metrics.inset_bottom.max(0.0);
-        let _ = inner.tree.borrow_mut().set_viewport(
+        let mut tree = inner.tree.borrow_mut();
+        let _ = tree.set_viewport(
             left,
             top,
             (metrics.width - left - right).max(0.0),
             (metrics.height - top - bottom).max(0.0),
         );
+        if metrics.device_pixel_ratio.is_finite() && metrics.device_pixel_ratio > 0.0 {
+            let _ = tree.set_pixel_scale(metrics.device_pixel_ratio);
+        }
     }
 
     fn pointer(&mut self, event: ui_core::PointerEvent) {
@@ -1036,6 +1051,17 @@ impl Session for JsSession {
         let inner = unsafe { &*self.inner };
         match event {
             session::IoEvent::Http { token, result } => settle_http(inner, token, &result),
+            session::IoEvent::HttpHead {
+                token,
+                status,
+                headers,
+            } => settle_http_head(inner, token, status, &headers),
+            session::IoEvent::HttpChunk {
+                token,
+                bytes,
+                done,
+                error,
+            } => settle_http_chunk(inner, token, &bytes, done, error.as_ref()),
             session::IoEvent::Plugin { token, result } => settle_plugin(inner, token, &result),
             session::IoEvent::Socket {
                 id,
