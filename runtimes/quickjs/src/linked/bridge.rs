@@ -1437,14 +1437,14 @@ pub(super) unsafe extern "C" fn module_count(
 ) -> i32 {
     let inner = unsafe { inner(session) };
     let Some(name) = (unsafe { utf8_of(name, len) }) else {
-        return 0;
+        return -1;
     };
     inner
         .config
         .registry
-        .module(name)
+        .by_specifier(name)
         .map(|module| module.methods.len() as i32)
-        .unwrap_or(0)
+        .unwrap_or(-1)
 }
 
 pub(super) unsafe extern "C" fn module_method_at(
@@ -1464,7 +1464,7 @@ pub(super) unsafe extern "C" fn module_method_at(
     let Some(method) = inner
         .config
         .registry
-        .module(name)
+        .by_specifier(name)
         .and_then(|module| module.methods.get(index))
     else {
         return ptr::null();
@@ -1473,6 +1473,25 @@ pub(super) unsafe extern "C" fn module_method_at(
         unsafe { *out_len = method.name.len() };
     }
     method.name.as_ptr().cast()
+}
+
+pub(super) unsafe extern "C" fn module_name_of(
+    session: *mut c_void,
+    specifier: *const c_char,
+    len: usize,
+    out_len: *mut usize,
+) -> *const c_char {
+    let inner = unsafe { inner(session) };
+    let Some(specifier) = (unsafe { utf8_of(specifier, len) }) else {
+        return ptr::null();
+    };
+    let Some(module) = inner.config.registry.by_specifier(specifier) else {
+        return ptr::null();
+    };
+    if !out_len.is_null() {
+        unsafe { *out_len = module.name.len() };
+    }
+    module.name.as_ptr().cast()
 }
 
 pub(super) unsafe extern "C" fn module_prepare(

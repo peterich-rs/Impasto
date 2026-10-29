@@ -360,6 +360,7 @@ impl JsSession {
             module_error,
             module_count,
             module_method_at,
+            module_name_of,
             align,
             set_cross,
             viewport,

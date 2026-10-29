@@ -1,4 +1,10 @@
-import type { Permissions as PermissionsHost } from "@uifw/modules";
+import {
+  checkPermissionStatus,
+  checkServiceStatus,
+  openAppSettings as hostOpenAppSettings,
+  requestPermissions,
+  shouldShowRequestPermissionRationale,
+} from "@uifw/permissions/host";
 
 /** Names follow permission_handler 11.3.1. The host maps each name. */
 const NAMES = [
@@ -36,29 +42,17 @@ export type PermissionHandle = {
   request(): Promise<PermissionStatus>;
 };
 
-type Registry = {
-  getEnforcing<T>(name: string): T;
-};
-
-function host(): PermissionsHost {
-  const registry = (globalThis as { TurboModuleRegistry?: Registry }).TurboModuleRegistry;
-  if (!registry) {
-    throw new Error('module "Permissions" is not linked');
-  }
-  return registry.getEnforcing<PermissionsHost>("Permissions");
-}
-
 function bind(name: string): PermissionHandle {
   return {
     name,
     get status() {
-      return host().checkPermissionStatus(name) as Promise<PermissionStatus>;
+      return checkPermissionStatus(name) as Promise<PermissionStatus>;
     },
     get shouldShowRequestRationale() {
-      return host().shouldShowRequestPermissionRationale(name);
+      return shouldShowRequestPermissionRationale(name) as Promise<boolean>;
     },
     get serviceStatus() {
-      return host().checkServiceStatus(name) as Promise<ServiceStatus>;
+      return checkServiceStatus(name) as Promise<ServiceStatus>;
     },
     request() {
       return request([this]).then((result) => result[name] ?? "denied");
@@ -79,10 +73,10 @@ export const Permission = table();
 export async function request(
   permissions: readonly PermissionHandle[],
 ): Promise<Record<string, PermissionStatus>> {
-  const result = await host().requestPermissions(permissions.map((item) => item.name));
+  const result = await requestPermissions(permissions.map((item) => item.name));
   return result as Record<string, PermissionStatus>;
 }
 
 export function openAppSettings(): Promise<boolean> {
-  return host().openAppSettings();
+  return hostOpenAppSettings() as Promise<boolean>;
 }

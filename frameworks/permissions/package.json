@@ -4,9 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
-  },
-  "dependencies": {
-    "@uifw/modules": "file:../modules"
+    ".": "./src/index.ts",
+    "./host": "./src/host.gen.ts"
   }
 }

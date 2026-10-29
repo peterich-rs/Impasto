@@ -1,6 +1,5 @@
 import { createContext, createTrackedEffect, createSignal, getOwner, onCleanup, useContext, type Accessor } from "solid-js";
 import { onBack, onFrame, type NodeHandle } from "@uifw/solid-renderer";
-import type { Linking } from "@uifw/modules";
 import { matchPath, routePath } from "./path.ts";
 
 export type RouteParams = Record<string, string>;
@@ -211,19 +210,15 @@ export function createRouter(
     });
   }
 
-  const registry = (
-    globalThis as { TurboModuleRegistry?: { get(name: string): Linking | null } }
-  ).TurboModuleRegistry;
-  const linking = registry?.get("Linking") ?? null;
-  if (linking) {
-    const initialUrl = linking.getInitialURL();
-    if (initialUrl) {
-      reset(initialUrl);
-    }
-    linking.addEventListener("url", (event) => {
-      push(event.url);
+  void import("@uifw/linking")
+    .then(({ Linking }) => {
+      const initial = Linking.getInitialURL();
+      if (initial) reset(initial);
+      Linking.addEventListener("url", (event) => push(event.url));
+    })
+    .catch(() => {
+      /* unregistered: same as today's get() == null */
     });
-  }
 
   return router;
 }

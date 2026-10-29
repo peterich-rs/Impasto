@@ -5,6 +5,7 @@ mod command;
 mod error;
 mod exec;
 mod files;
+mod host_stubs;
 mod http;
 mod images;
 mod ime;
@@ -28,6 +29,9 @@ use session::Metrics;
 pub use command::{Command, FrameToken, SurfaceId, SurfaceTarget};
 pub use error::{BootError, LogLevel, SessionError};
 pub use exec::{MainThreadPoster, RtExec, settle_factory};
+pub use host_stubs::{
+    first_party_modules, host_stub_path, host_stub_source, package_folder, write_host_stubs,
+};
 pub use http::{OpenWireClient, http_client};
 pub use images::{ImageDecoder, ImageError, ImageHandle, ImageReady};
 pub use modules::{

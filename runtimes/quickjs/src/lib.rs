@@ -1818,6 +1818,8 @@ mod tests {
                     .push(text.to_owned());
             });
             let source = r#"
+                import { setString, getString } from "@uifw/clipboard/host";
+                import { addEventListener } from "@uifw/app-state/host";
                 console.log(new URL("https://example.test/a?q=1").searchParams.get("q"));
                 console.log(String(new TextEncoder().encode("A").length));
                 setTimeout(() => console.log("soon"), 0);
@@ -1828,11 +1830,9 @@ mod tests {
                 fetch("https://example.test/a", { method: "POST", body: "hi" })
                     .then((response) => response.text())
                     .then((text) => console.log("body:" + text));
-                const app = TurboModuleRegistry.getEnforcing("AppState");
-                app.addEventListener("change", (state) => console.log("state:" + state));
-                const clip = TurboModuleRegistry.getEnforcing("Clipboard");
-                clip.setString("hi");
-                console.log("clip:" + clip.getString());
+                addEventListener("change", (state) => console.log("state:" + state));
+                setString("hi");
+                console.log("clip:" + getString());
                 const socket = new WebSocket("ws://example.test/socket");
                 socket.onerror = () => console.log("ws");
             "#;
@@ -1885,9 +1885,9 @@ mod tests {
                     .push(text.to_owned());
             });
             let source = r#"
-                const echo = TurboModuleRegistry.getEnforcing("Echo");
+                import { fail } from "@uifw/echo/host";
                 try {
-                    echo.fail();
+                    fail();
                     console.log("ok");
                 } catch (error) {
                     console.log("err:" + error.message);
@@ -1930,8 +1930,8 @@ mod tests {
                     .push(text.to_owned());
             });
             let source = r#"
-                const echo = TurboModuleRegistry.getEnforcing("Echo");
-                echo.later("ok").then((value) => console.log("later:" + value));
+                import { later } from "@uifw/echo/host";
+                later("ok").then((value) => console.log("later:" + value));
             "#;
             let (host, pending) = test_host();
             let mut session = match super::JsSession::open_with(
@@ -1953,6 +1953,93 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .join("\n");
             assert!(text.contains("later:ok"), "{text}");
+        }
+    }
+
+    #[test]
+    fn unregistered_host_specifier_is_not_linked() {
+        #[cfg(not(quickjs))]
+        {
+            return;
+        }
+        #[cfg(quickjs)]
+        {
+            let (host, _pending) = test_host();
+            match super::JsSession::open_with(
+                r#"import { getString } from "@uifw/missing/host";"#,
+                "missing.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+                None,
+                host,
+            ) {
+                Err(Error::Script(message)) => {
+                    assert!(message.contains("is not linked"), "{message}");
+                }
+                Err(Error::NotLinked) => {}
+                Ok(_) => panic!("expected unregistered host specifier to fail"),
+                Err(error) => panic!("{error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn bare_uifw_specifier_must_be_bundled() {
+        #[cfg(not(quickjs))]
+        {
+            return;
+        }
+        #[cfg(quickjs)]
+        {
+            let (host, _pending) = test_host();
+            match super::JsSession::open_with(
+                r#"import { Clipboard } from "@uifw/clipboard";"#,
+                "bare.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+                None,
+                host,
+            ) {
+                Err(Error::Script(message)) => {
+                    assert!(
+                        message.contains("bare @uifw/* must be bundled"),
+                        "{message}"
+                    );
+                }
+                Err(Error::NotLinked) => {}
+                Ok(_) => panic!("expected bare @uifw specifier to fail"),
+                Err(error) => panic!("{error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn nested_uifw_host_path_must_be_bundled() {
+        #[cfg(not(quickjs))]
+        {
+            return;
+        }
+        #[cfg(quickjs)]
+        {
+            let (host, _pending) = test_host();
+            match super::JsSession::open_with(
+                r#"import { getString } from "@uifw/clipboard/extra/host";"#,
+                "nested.js",
+                ui_core::MonoShaper::default(),
+                no_log(),
+                None,
+                host,
+            ) {
+                Err(Error::Script(message)) => {
+                    assert!(
+                        message.contains("bare @uifw/* must be bundled"),
+                        "{message}"
+                    );
+                }
+                Err(Error::NotLinked) => {}
+                Ok(_) => panic!("expected nested @uifw host path to fail"),
+                Err(error) => panic!("{error}"),
+            }
         }
     }
 

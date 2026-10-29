@@ -18,17 +18,21 @@ hosts/hostshell/              命令队列、帧调度、渲染线程
 hosts/android/                `HostActivity`、`HostView`、Choreographer、Vulkan。库名 `uifw`
 hosts/ios                     还没有。预构建矩阵没有 iOS 列之前不建这个目录
 runtimes/quickjs/             quickjs-ng 会话。包名 quickjs
-frameworks/modules/           宿主对象类型。Linking、FileSystem、AsyncStorage、Permissions
+frameworks/clipboard/         @uifw/clipboard。host 由 QuickJS 物化
+frameworks/linking/           @uifw/linking
+frameworks/app-state/         @uifw/app-state。currentState 是门面上的 getter
+frameworks/file-system/       @uifw/file-system
+frameworks/async-storage/     @uifw/async-storage
 frameworks/solid-renderer/    接到 core 的 universal 运行时。directionFor、spring、onBack
 frameworks/solid-ui/          Button、Field、Dialog、theme、overlay
 frameworks/solid-router/      路径、栈和 RouterView
 frameworks/net/               createFetch
 frameworks/form/              createForm
 frameworks/i18n/              formatNumber、formatDate、plural
-frameworks/permissions/       permission_handler 形状的权限 API
+frameworks/permissions/       permission_handler 形状的权限 API。五法来自 @uifw/permissions/host
 frameworks/kotlin-ui/         Gradle 根。DSL、控件、以后的 cinterop
   library/
-apps/gallery-solid/           Solid 应用。源码 counter.tsx，产物 dist/counter.js、dist/counter.esm.js
+apps/gallery-solid/           Solid 应用。源码 counter.tsx，产物是 ESM dist/counter.js
 third_party/                  只读对照和本机 SDK
 ```
 
@@ -37,8 +41,7 @@ third_party/                  只读对照和本机 SDK
 ```text
 gallery-solid ──► solid-ui ──► solid-renderer ──► quickjs 会话 ──► core ──► protocol
 gallery-solid ──► solid-router ──► solid-renderer
-gallery-solid ──► solid-router ──► modules
-permissions ──► modules
+gallery-solid ──► solid-router ──► linking
 hosts/macos ──► hostshell ──► session ──► core ──► protocol
 hosts/macos ──► engine ──► protocol
 hosts/android ──► hostshell ──► engine ──► protocol
@@ -146,7 +149,7 @@ quickjs-ng 会话拥有 `JSRuntime`、一棵 `core::Tree` 和一份区域 id 到
 
 指针到达时，`Tree::pointer` 先返回被激活的区域，点击时再附上焦点转换。借用结束后会话调用全部匹配的 JS 函数。`Session::input` 只在 `focused()` 有值时派发到那个节点。监听器抛错时，文本留在 `take_script_error`，并经宿主日志打出，带上异常的 `stack`。页面 `Errored` 接住的渲染错误同样 `console.error` 到这条日志。`insert` 失败时宿主再记一行 `insert failed:` 和 `core` 的原因。这一帧不再派发其余区域。进程不退出。监听器只改树。会话不在这个回调里 `layout`。JS `remove` 先摘下子树，焦点若在这棵子树里先派发 `Blur`。同一轮脚本里这个 id 还能再插回去。脚本返回后，会话对仍没有父节点、且没有调用过 `detach` 的子树调用 `Tree::discard`，并按退掉的 id 释放监听。`detach` 把 id 移出这份名单，监听留着。`discard` 立刻退役，并立刻释放监听。
 
-vsync 时先排空 QuickJS job，再触发到期的 `setTimeout` / `setInterval`，再跑 `requestAnimationFrame`，然后跑 `core.onFrame(targetMs, intervalMs)`。更晚的计时器由 `uifw-time` 投递 `Wake`，不空转 vsync。`fetch` 整包下载，`fetchStream` 分块：`uifw-net` 先回 `HttpHead`（状态和响应头），再逐块回 `HttpChunk`，末块带 `done`，出错带 `HttpError`（`kind` 是 `Network` / `Timeout` / `Canceled` / `TooLarge` / `BadUrl` / `BodyNotUtf8`，reject 值是 DOMException 名）。prelude 把流接成最小 `ReadableStream`（`getReader` / `read` / `cancel`）。`WebSocket`、`fetch` 和框架模块的结果从 `uifw-net` 回到渲染线程，在下一帧排空。HTTP 走宿主注入的 `Boot.http`；macOS 与 Android 注入 openwire `Client`，没有注入时错误文本是 `network is not linked`。`boot` 注册的回调先 `flush`，再跑通过 `onFrame` 登记的监听。回调失败留在 `take_script_error` 并记日志，绘制仍用上一帧，并且这次失败不再登记下一帧。需要布局时才 `layout`。这次 `layout` 跑完才调用 `core.onLayout`，监听写进树之后同一帧再布局一次。需要绘制时才 `record`。`FramePhases.layout_cb_ms` 是这次回调的时间，不并进 `script_ms`。`requestFrame` 让宿主在 present 之后再登记恰好一帧。全局还有 `console`、`performance.now`、`URL`、`TextEncoder`、`fetch`、`fetchStream` 和 `TurboModuleRegistry`。`AppState`、`Linking`、`Clipboard` 由会话注册。文件、存储和相机不在这张表里。宿主方法表以 `session` 的 `HOST_METHODS` 为单一来源，`cargo run -p session --bin host-table` 生成 `frameworks/modules/src/host-table.gen.ts`，session 的测试在两者漂移时失败。插件返回的大字节（≥4KB）零拷贝进 JS：字节留在会话的 slab，quickjs 的 realloc 钩子以 size 0 释放时回调 `release_bytes` 回收。
+vsync 时先排空 QuickJS job，再触发到期的 `setTimeout` / `setInterval`，再跑 `requestAnimationFrame`，然后跑 `core.onFrame(targetMs, intervalMs)`。更晚的计时器由 `uifw-time` 投递 `Wake`，不空转 vsync。`fetch` 整包下载，`fetchStream` 分块：`uifw-net` 先回 `HttpHead`（状态和响应头），再逐块回 `HttpChunk`，末块带 `done`，出错带 `HttpError`（`kind` 是 `Network` / `Timeout` / `Canceled` / `TooLarge` / `BadUrl` / `BodyNotUtf8`，reject 值是 DOMException 名）。prelude 把流接成最小 `ReadableStream`（`getReader` / `read` / `cancel`）。`WebSocket`、`fetch` 和框架模块的结果从 `uifw-net` 回到渲染线程，在下一帧排空。HTTP 走宿主注入的 `Boot.http`；macOS 与 Android 注入 openwire `Client`，没有注入时错误文本是 `network is not linked`。`boot` 注册的回调先 `flush`，再跑通过 `onFrame` 登记的监听。回调失败留在 `take_script_error` 并记日志，绘制仍用上一帧，并且这次失败不再登记下一帧。需要布局时才 `layout`。这次 `layout` 跑完才调用 `core.onLayout`，监听写进树之后同一帧再布局一次。需要绘制时才 `record`。`FramePhases.layout_cb_ms` 是这次回调的时间，不并进 `script_ms`。`requestFrame` 让宿主在 present 之后再登记恰好一帧。全局还有 `console`、`performance.now`、`URL`、`TextEncoder`、`fetch`、`fetchStream`。`@uifw/<pkg>/host` 由 `glue.c` 用 `JS_NewCModule` 物化；查找走 `ModuleRegistry::by_specifier`。未注册抛 `module '%s' is not linked`。其它 `@uifw/*` 必须打进 bundle。一方模块的方法名和 kind 由 `cargo run -p hostshell --bin host-stubs` 写成各包的 `host.gen.ts`，hostshell 测试防漂移。公开参数和返回类型写在各包 `src/index.ts`。插件返回的大字节（≥4KB）零拷贝进 JS：字节留在会话的 slab，quickjs 的 realloc 钩子以 size 0 释放时回调 `release_bytes` 回收。
 
 会话加宿主的一帧超过 vsync 间隔时，宿主打一行 `frame`。`script` 再拆成 `motion`（采样动画并取出滚动通知）、`dispatch`（把通知交给脚本并排空由此排队的 job）、`timer`、`raf`、`callback`（`onFrame`）、`flush`（变更缓冲）。`layoutcb` 是布局之后的 `onLayout`。`laywork` 是这一帧每一次 `layout` 的合计，含脚本里 `rect` 触发的那次；后面的 `layout` 只计 `frame` 末尾那一次。`x` 是进入 Taffy 的次数，紧接着的词是第一次把树标脏的原因：`none`、`viewport`、`style`、`text`、`structure`。`reuse` 是直接复用已有行框的测量，`shaped` 是重新调用排版器的次数。`ptr`、`key`、`edit`、`ime`、`scroll`、`focus`、`blur`、`gesture` 是这一帧的指针、按键、文本编辑、输入法收起、滚动通知、焦点、失焦和手势总数。这些计数在打出日志后清零。
 
@@ -215,6 +218,6 @@ Scroll                 视口，PushClip
 
 ## 应用
 
-`apps/gallery-solid/counter.tsx` 用 `@uifw/solid-ui` 的 Button、Field、Dialog、VirtualList，并用 `@uifw/solid-router` 的 `createRouter` 与 `RouterView`。`/list` 的 200 行打开 `VirtualList` 的 `recycle`。页底色由 gallery 把 `theme().color.background` 传进 `RouterView`。路由是 `/schedule`、`/nav/:depth`、`/list`。`boot` 把根列撑满视口，登记 `flush` 并 `render`。`build.mjs` 用 `@solidjs/babel-plugin`（`moduleName: "@uifw/solid-renderer"`、`generate: "universal"`）再交给 esbuild 打成 IIFE `dist/counter.js`，并另打一份 `dist/counter.esm.js`，它按相对路径导入 `dist/util.js`。依赖是 npm 上的 `2.0.0-rc.17`。产物不包含 `third_party/solid`。QuickJS 会话加载 `dist/counter.js`。`cargo test` 不跑 node。
+`apps/gallery-solid/counter.tsx` 用 `@uifw/solid-ui` 的 Button、Field、Dialog、VirtualList，并用 `@uifw/solid-router` 的 `createRouter` 与 `RouterView`。`/list` 的 200 行打开 `VirtualList` 的 `recycle`。页底色由 gallery 把 `theme().color.background` 传进 `RouterView`。路由是 `/schedule`、`/nav/:depth`、`/list`。`boot` 把根列撑满视口，登记 `flush` 并 `render`。`build.mjs` 用 `@solidjs/babel-plugin`（`moduleName: "@uifw/solid-renderer"`、`generate: "universal"`）再交给 esbuild 打成 ESM `dist/counter.js`。门面打进 bundle，`@uifw/<pkg>/host` 按包枚举为 external，运行时由 QuickJS 物化。`util.js` 打进同一份产物。依赖是 npm 上的 `2.0.0-rc.17`。产物不包含 `third_party/solid`。`just host` 和 Android assets 加载这份 ESM。`cargo test` 不跑 node。
 
 应用代码里不出现约束、命中测试、Metal 或窗口。Kotlin 界面 DSL 还没写。信号准备用已发布的 `com.lightningkite:reactive`。

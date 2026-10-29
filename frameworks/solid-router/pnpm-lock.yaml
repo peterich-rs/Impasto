@@ -8,9 +8,9 @@ importers:
 
   .:
     dependencies:
-      '@uifw/modules':
-        specifier: file:../modules
-        version: file:../modules
+      '@uifw/linking':
+        specifier: file:../linking
+        version: file:../linking
       '@uifw/solid-renderer':
         specifier: file:../solid-renderer
         version: file:../solid-renderer
@@ -30,8 +30,8 @@ packages:
     peerDependencies:
       solid-js: ^2.0.0-rc.17
 
-  '@uifw/modules@file:../modules':
-    resolution: {directory: ../modules, type: directory}
+  '@uifw/linking@file:../linking':
+    resolution: {directory: ../linking, type: directory}
 
   '@uifw/solid-renderer@file:../solid-renderer':
     resolution: {directory: ../solid-renderer, type: directory}
@@ -61,7 +61,7 @@ snapshots:
     dependencies:
       solid-js: 2.0.0-rc.17
 
-  '@uifw/modules@file:../modules': {}
+  '@uifw/linking@file:../linking': {}
 
   '@uifw/solid-renderer@file:../solid-renderer':
     dependencies:
