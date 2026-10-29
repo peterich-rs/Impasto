@@ -6,8 +6,8 @@ mod io;
 
 pub use io::{
     HTTP_BODY_LIMIT, HostMethod, HostPlace, HostWait, HttpClient, HttpError, HttpFailure,
-    HttpPiece, HttpRequest, HttpResponse, IoJob, PluginResult, PluginValue, document_relative,
-    host_method, host_module_linked, host_module_methods, module_not_linked,
+    HttpPiece, HttpRequest, HttpResponse, IoJob, PluginResult, PluginValue, all_host_methods,
+    document_relative, host_method, host_module_linked, host_module_methods, module_not_linked,
 };
 
 /// One edge of a window, in scene points.

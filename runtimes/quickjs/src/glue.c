@@ -162,6 +162,8 @@ typedef struct QjsFns {
     int (*push_mutation)(void *session, uint32_t op, uint64_t id, uint64_t parent, uint64_t before,
                          uint32_t field, double number, double number2, const uint8_t color[4],
                          const char *text, size_t text_len);
+    /* Frees one zero-copy payload the session kept alive for QuickJS. */
+    void (*release_bytes)(void *session, uint64_t handle);
     int (*layer_stats)(void *session, uint64_t *epoch, uint32_t *layers, uint32_t *pictures);
     int (*scroll_into_view)(void *session, uint64_t node, int edge);
     int (*animate)(void *session, uint64_t node, const char *prop, size_t prop_len, double from,

@@ -229,6 +229,8 @@ pub(super) struct QjsFns {
         *const c_char,
         usize,
     ) -> i32,
+    /// Frees one zero-copy payload the session kept alive for QuickJS.
+    pub(super) release_bytes: unsafe extern "C" fn(*mut c_void, u64),
     pub(super) layer_stats: unsafe extern "C" fn(*mut c_void, *mut u64, *mut u32, *mut u32) -> i32,
     pub(super) scroll_into_view: unsafe extern "C" fn(*mut c_void, u64, i32) -> i32,
     pub(super) animate:
@@ -461,6 +463,12 @@ unsafe extern "C" {
     pub(super) fn qjs_value_f64(host: *mut c_void, value: f64);
     pub(super) fn qjs_value_str(host: *mut c_void, text: *const c_char, len: usize);
     pub(super) fn qjs_value_bytes(host: *mut c_void, bytes: *const u8, len: usize);
+    pub(super) fn qjs_value_bytes_external(
+        host: *mut c_void,
+        bytes: *const u8,
+        len: usize,
+        handle: u64,
+    );
     pub(super) fn qjs_value_list(host: *mut c_void, count: u32);
     pub(super) fn qjs_value_map(host: *mut c_void, count: u32);
     pub(super) fn qjs_settle_top(host: *mut c_void, token: u64, ok: i32) -> i32;

@@ -1007,7 +1007,34 @@ pub(super) fn emit_module(inner: &Inner, module: &str, event: &str, shape: i32, 
     };
 }
 
-pub(super) fn emit_value(host: *mut c_void, value: &PluginValue) {
+/// Payloads at or above this size travel zero-copy; smaller ones are cheaper
+/// to duplicate than to track.
+const EXTERNAL_BYTES_THRESHOLD: usize = 4096;
+
+/// Park `bytes` in the session slab and hand back `(handle, copy)` whose
+/// pointer stays valid until [`release_bytes_cb`] runs. `None` when the host
+/// pointer is not this session's.
+fn take_external_handle(inner: &Inner, bytes: &[u8]) -> Option<(u64, Vec<u8>)> {
+    let mut slab = inner.out_bytes.borrow_mut();
+    slab.0 = slab.0.wrapping_add(1).max(1);
+    let handle = slab.0;
+    let entry = slab.1.entry(handle).or_insert_with(|| bytes.to_vec());
+    // The Vec's heap buffer does not move while it sits in the map, so this
+    // pointer stays valid until release_bytes_cb removes the entry.
+    let stable = unsafe { std::slice::from_raw_parts(entry.as_ptr(), entry.len()).to_vec() };
+    Some((handle, stable))
+}
+
+/// `fns.release_bytes`: QuickJS freed the view; drop the slab entry, which is
+/// the last owner of that heap buffer.
+pub(super) unsafe extern "C" fn release_bytes_cb(session: *mut c_void, handle: u64) {
+    let inner = unsafe { inner(session) };
+    let mut slab = inner.out_bytes.borrow_mut();
+    drop(slab.1.remove(&handle));
+}
+
+pub(super) fn emit_value(inner: &Inner, value: &PluginValue) {
+    let host = inner.host;
     match value {
         PluginValue::Null => unsafe { qjs_value_null(host) },
         PluginValue::Bool(flag) => unsafe { qjs_value_bool(host, i32::from(*flag)) },
@@ -1017,6 +1044,12 @@ pub(super) fn emit_value(host: *mut c_void, value: &PluginValue) {
             unsafe { qjs_value_str(host, bytes.as_ptr(), text.replace('\0', "").len()) };
         }
         PluginValue::Bytes(bytes) => unsafe {
+            if bytes.len() >= EXTERNAL_BYTES_THRESHOLD
+                && let Some((handle, stable)) = take_external_handle(inner, bytes)
+            {
+                qjs_value_bytes_external(host, stable.as_ptr(), stable.len(), handle);
+                return;
+            }
             let ptr = if bytes.is_empty() {
                 b"".as_ptr()
             } else {
@@ -1026,7 +1059,7 @@ pub(super) fn emit_value(host: *mut c_void, value: &PluginValue) {
         },
         PluginValue::List(items) => {
             for item in items {
-                emit_value(host, item);
+                emit_value(inner, item);
             }
             unsafe { qjs_value_list(host, items.len() as u32) };
         }
@@ -1034,7 +1067,7 @@ pub(super) fn emit_value(host: *mut c_void, value: &PluginValue) {
             for (key, item) in entries {
                 let bytes = cstring(key);
                 unsafe { qjs_value_str(host, bytes.as_ptr(), key.replace('\0', "").len()) };
-                emit_value(host, item);
+                emit_value(inner, item);
             }
             unsafe { qjs_value_map(host, entries.len() as u32) };
         }
@@ -1090,11 +1123,11 @@ pub(super) fn deliver_stream_error(inner: &Inner, token: u64, error: &HttpError)
 pub(super) fn settle_plugin(inner: &Inner, token: u64, result: &PluginResult) {
     match result {
         PluginResult::Done(value) => {
-            emit_value(inner.host, value);
+            emit_value(inner, value);
             let _ = unsafe { qjs_settle_top(inner.host, token, 1) };
         }
         PluginResult::Failed { message } => {
-            emit_value(inner.host, &PluginValue::Str(message.clone()));
+            emit_value(inner, &PluginValue::Str(message.clone()));
             let _ = unsafe { qjs_settle_top(inner.host, token, 0) };
         }
     }
@@ -1548,7 +1581,7 @@ pub(super) unsafe extern "C" fn module_finish(session: *mut c_void) -> i32 {
     if call.wait == HostWait::Sync {
         let result = session_call(inner, &call.module, &call.method);
         if let PluginResult::Done(value) = result {
-            emit_value(inner.host, &value);
+            emit_value(inner, &value);
             return 0;
         }
         return -1;

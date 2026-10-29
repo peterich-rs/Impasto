@@ -186,6 +186,12 @@ pub struct HostMethod {
     pub wait: HostWait,
 }
 
+/// Every registered method, in table order. The `host-table` binary walks
+/// this to generate the TypeScript copy.
+pub fn all_host_methods() -> impl Iterator<Item = &'static HostMethod> {
+    HOST_METHODS.iter()
+}
+
 const HOST_METHODS: &[HostMethod] = &[
     HostMethod {
         module: "AppState",

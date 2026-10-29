@@ -1136,6 +1136,44 @@ void qjs_value_bytes(Host *host, const uint8_t *bytes, size_t len) {
     push_value(host, JS_NewUint8ArrayCopy(host->ctx, bytes, len));
 }
 
+// Large payloads avoid the copy: the bytes stay in the session's slab, and
+// quickjs calls the realloc hook with size zero when the buffer dies, which
+// forwards to `fns.release_bytes`.
+static void *slab_realloc(JSRuntime *rt, void *opaque, void *ptr, size_t size) {
+    (void)ptr;
+    (void)size;
+    Host *host = JS_GetRuntimeOpaque(rt);
+    if (host && host->fns.release_bytes) {
+        host->fns.release_bytes(host->fns.session, (uint64_t)(uintptr_t)opaque);
+    }
+    return NULL;
+}
+
+void qjs_value_bytes_external(Host *host, const uint8_t *bytes, size_t len, uint64_t handle) {
+    if (!host || !host->ctx) {
+        return;
+    }
+    if (!bytes || len == 0) {
+        // Nothing owns the empty payload; a copy is cheaper than a handle.
+        push_value(host, JS_NewUint8ArrayCopy(host->ctx, (const uint8_t *)"", 0));
+        return;
+    }
+    JSValue buffer = JS_NewArrayBuffer(host->ctx, (uint8_t *)bytes, len, 0, slab_realloc,
+                                       (void *)(uintptr_t)handle, 0);
+    if (JS_IsException(buffer)) {
+        // The caller still owns the bytes; release the slab entry so it does
+        // not leak when the view never materialized.
+        if (host->fns.release_bytes) {
+            host->fns.release_bytes(host->fns.session, handle);
+        }
+        push_value(host, JS_UNDEFINED);
+        return;
+    }
+    // The consumers of the module-value channel accept an ArrayBuffer the
+    // same way `fetch` body payloads arrive; no Uint8Array wrapper is needed.
+    push_value(host, buffer);
+}
+
 void qjs_value_list(Host *host, uint32_t count) {
     if (!host || !host->ctx || host->values_len < count) {
         return;
