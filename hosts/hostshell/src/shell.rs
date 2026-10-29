@@ -490,6 +490,7 @@ fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bo
         | Command::Settings(_)
         | Command::WindowFocus(_)
         | Command::SemanticsAction(_)
+        | Command::LaunchUrl(_)
         | Command::HttpDone { .. }
         | Command::HttpHead { .. }
         | Command::HttpChunk { .. }
@@ -1164,6 +1165,7 @@ mod tests {
         io: Vec<IoEvent>,
         frames: Vec<FrameTime>,
         wants: bool,
+        launch_urls: Vec<String>,
     }
 
     struct MockSession {
@@ -1187,6 +1189,10 @@ mod tests {
         fn io_event(&mut self, event: IoEvent) {
             self.log.borrow_mut().io.push(event);
         }
+
+        fn set_launch_url(&mut self, url: &str) {
+            self.log.borrow_mut().launch_urls.push(url.to_owned());
+        }
     }
 
     struct TestHarness {
@@ -1205,6 +1211,7 @@ mod tests {
                 io: Vec::new(),
                 frames: Vec::new(),
                 wants: false,
+                launch_urls: Vec::new(),
             }));
             let (image_tx, _image_rx) = mpsc::channel();
             let (wake_tx, _wake_rx) = mpsc::channel();
@@ -1272,6 +1279,23 @@ mod tests {
             interval_ms: 16.0,
             mono_ms: 1.0,
         }
+    }
+
+    #[test]
+    fn launch_url_reaches_the_session() {
+        let mut harness = TestHarness::new();
+        assert!(!harness.command(Command::LaunchUrl("https://app.example/item".into())));
+        assert_eq!(
+            harness.session.borrow().launch_urls.as_slice(),
+            ["https://app.example/item"]
+        );
+    }
+
+    #[test]
+    fn empty_launch_url_does_not_reach_the_session() {
+        let mut harness = TestHarness::new();
+        assert!(!harness.command(Command::LaunchUrl(String::new())));
+        assert!(harness.session.borrow().launch_urls.is_empty());
     }
 
     #[test]
@@ -1437,6 +1461,7 @@ mod tests {
         assert!(harness.runtime.needs_present);
         assert!(!harness.command(Command::Settings(session::PlatformSettings::default())));
         assert!(!harness.command(Command::WindowFocus(true)));
+        assert!(!harness.command(Command::LaunchUrl("https://app.example/item".into())));
         assert!(!harness.command(Command::SemanticsAction(
             ui_core::SemanticsAction::Activate(ui_core::SemanticsId(1))
         )));

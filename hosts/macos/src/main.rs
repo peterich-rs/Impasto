@@ -1,9 +1,11 @@
 //! macOS host. `--js <script>` loads that script in the QuickJS session.
+//! `--url` or a `scheme://` argument is the Linking launch URL.
 
 mod a11y;
 mod app;
 #[allow(dead_code)]
 mod assets;
+mod launch;
 mod pixels;
 mod pointer;
 mod surface;
@@ -69,6 +71,15 @@ impl Paths {
             }
             if arg == "--dump-list" {
                 dump_list = true;
+                continue;
+            }
+            if arg == "--url" {
+                if args.next().is_none() {
+                    anyhow::bail!("--url needs a URL");
+                }
+                continue;
+            }
+            if launch::looks_like_url(&arg) {
                 continue;
             }
             match positional {

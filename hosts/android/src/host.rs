@@ -576,6 +576,7 @@ struct Attach {
     view: Global<JObject<'static>>,
     assets: Arc<AssetManager>,
     script: Option<String>,
+    launch_url: Option<String>,
     settings: session::PlatformSettings,
 }
 
@@ -636,6 +637,9 @@ fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
     .with_module(hostshell::async_storage(Arc::clone(&bridge) as _));
     let link = hostshell::start(boot).map_err(|error| error.to_string())?;
     link.post(Command::Settings(request.settings));
+    if let Some(url) = request.launch_url {
+        link.post(Command::LaunchUrl(url));
+    }
     *HOST.lock().unwrap_or_else(|error| error.into_inner()) = Some(Arc::new(Host {
         link,
         clock,
@@ -1029,6 +1033,7 @@ pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeAttach<'local>(
     view: JObject<'local>,
     assets: JObject<'local>,
     script: JString<'local>,
+    launch_url: JString<'local>,
     locale: JString<'local>,
     text_scale: f32,
     dark: jboolean,
@@ -1038,6 +1043,7 @@ pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeAttach<'local>(
 ) -> jint {
     with_env(&mut env, |env| {
         let script = java_string(env, &script)?;
+        let launch_url = crate::launch::from_intent(java_string(env, &launch_url)?.as_deref());
         let locale = java_string(env, &locale)?.unwrap_or_default();
         let assets = match asset_manager(env, &assets) {
             Ok(assets) => assets,
@@ -1051,6 +1057,7 @@ pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeAttach<'local>(
             view,
             assets,
             script,
+            launch_url,
             settings: settings_from(
                 locale,
                 text_scale,

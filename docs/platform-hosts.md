@@ -130,7 +130,10 @@ pub enum SessionError {
 Shell::start(Boot) ──────────────────────►  创建 Engine，register_font(UIFWSans)
 返回 looper                                  调用闭包（含 Shaper 与 quickjs::open）
 表面就绪，投递 SurfaceReady ──────────────►  创建 Surface，下发 metrics，强制出首帧
+有启动 URL 时投递 LaunchUrl ─────────────►  Session::set_launch_url
 ```
+
+启动 URL 只在有值时入队：macOS 来自 `application:openURLs:`、`application:openFile:`，以及 argv 的 `--url` 或 `scheme://`；Android 来自 `Intent.getData()`。平台线程不调用 `Session`。没有 URL 时不投递空字符串。
 
 字体缺失、`create_metal` / `create_vulkan` 失败、会话闭包失败，都在渲染线程记日志并把退出码交回平台线程。不留下只建了一半的 `Engine`。macOS 随进程退出。Android 在 `onDestroy` 里等渲染线程结束再返回。`std::process::exit` 跳过这一步，`onDestroy` 仍停在等待上。
 

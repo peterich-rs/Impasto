@@ -25,7 +25,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{
     NSArray, NSAttributedString, NSDictionary, NSDistributedNotificationCenter, NSLocale,
     NSNotFound, NSNotification, NSNotificationSuspensionBehavior, NSPoint, NSRange, NSRect,
-    NSString, NSUInteger,
+    NSString, NSUInteger, NSURL,
 };
 use session::{InputEvent, Key};
 
@@ -499,6 +499,24 @@ define_class!(
             self.finish_launching();
         }
 
+        #[unsafe(method(application:openURLs:))]
+        fn application_open_urls(&self, _application: &NSApplication, urls: &NSArray<NSURL>) {
+            if let Some(url) = crate::launch::from_open_urls(urls) {
+                self.ivars().link.post(Command::LaunchUrl(url));
+            }
+        }
+
+        #[unsafe(method(application:openFile:))]
+        fn application_open_file(&self, _sender: &NSApplication, filename: &NSString) -> bool {
+            match crate::launch::from_file_path(&filename.to_string()) {
+                Some(url) => {
+                    self.ivars().link.post(Command::LaunchUrl(url));
+                    true
+                }
+                None => false,
+            }
+        }
+
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _notification: &NSNotification) {
             self.ivars()
@@ -932,6 +950,9 @@ pub fn run(launch: Launch, assets: PathBuf, font: &[u8], dump_list: bool) -> Res
         .with_module(hostshell::permissions(mac as _)),
     )
     .map_err(RunError::Boot)?;
+    if let Some(url) = crate::launch::from_args(std::env::args().skip(1)) {
+        link.post(Command::LaunchUrl(url));
+    }
 
     let app = NSApplication::sharedApplication(mtm);
     let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Regular);

@@ -4,6 +4,8 @@
 mod a11y;
 #[allow(dead_code)]
 mod assets;
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod launch;
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod insets;

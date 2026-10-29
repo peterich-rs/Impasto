@@ -13,7 +13,8 @@ pub(super) fn handle(runtime: &mut Runtime, command: Command) -> Result<bool, Bo
         command @ (Command::Lifecycle(_)
         | Command::Settings(_)
         | Command::WindowFocus(_)
-        | Command::SemanticsAction(_)) => session(runtime, command),
+        | Command::SemanticsAction(_)
+        | Command::LaunchUrl(_)) => session(runtime, command),
         command @ (Command::HttpDone { .. }
         | Command::HttpHead { .. }
         | Command::HttpChunk { .. }
@@ -61,6 +62,7 @@ fn session(runtime: &mut Runtime, command: Command) -> Result<bool, BootError> {
                 arm(runtime);
             }
         }
+        Command::LaunchUrl(url) => launch_url(runtime, url),
         _ => {}
     }
     Ok(false)
@@ -142,6 +144,18 @@ fn lifecycle(runtime: &mut Runtime, state: session::Lifecycle) {
 fn settings_cmd(runtime: &mut Runtime, settings: &PlatformSettings) {
     if let Some(session) = runtime.session.as_mut() {
         session.settings(settings);
+        if session.wants_frame() {
+            arm(runtime);
+        }
+    }
+}
+
+fn launch_url(runtime: &mut Runtime, url: String) {
+    if url.is_empty() {
+        return;
+    }
+    if let Some(session) = runtime.session.as_mut() {
+        session.set_launch_url(&url);
         if session.wants_frame() {
             arm(runtime);
         }
