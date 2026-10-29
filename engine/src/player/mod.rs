@@ -73,6 +73,12 @@ impl Engine {
         Ok(Self::blank(context, typography))
     }
 
+    /// Null Impeller handles. Hostshell tests use this when they do not draw.
+    /// `ImpellerContextRelease` is a no-op on null.
+    pub fn inert() -> Self {
+        Self::blank(ptr::null_mut(), ptr::null_mut())
+    }
+
     pub(crate) fn blank(
         context: ffi::ImpellerContext,
         typography: ffi::ImpellerTypographyContext,

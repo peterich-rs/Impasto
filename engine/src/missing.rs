@@ -16,6 +16,13 @@ impl Engine {
         Err(Status::NotLinked)
     }
 
+    /// Engine that cannot submit or present. Hostshell tests use this when they do not draw.
+    pub fn inert() -> Self {
+        Self {
+            typography: std::rc::Rc::new(std::cell::RefCell::new(Typography)),
+        }
+    }
+
     pub fn register_font(&mut self, _data: &[u8], _family: &str) -> Result<(), Status> {
         Err(Status::NotLinked)
     }
