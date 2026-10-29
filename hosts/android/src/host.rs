@@ -592,7 +592,7 @@ fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
     let clock = FrameClock::new(Arc::new(move || bridge_for_clock.schedule_frame()));
     let script_assets = Arc::clone(&request.assets);
     let requested = request.script;
-    let launch_url = session::shared(None);
+    let launch_url = session::shared(request.launch_url);
     let main_thread = {
         let bridge = Arc::clone(&bridge);
         Arc::new(move |work: Box<dyn FnOnce() + Send>| {
@@ -637,9 +637,6 @@ fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
     .with_module(hostshell::async_storage(Arc::clone(&bridge) as _));
     let link = hostshell::start(boot).map_err(|error| error.to_string())?;
     link.post(Command::Settings(request.settings));
-    if let Some(url) = request.launch_url {
-        link.post(Command::LaunchUrl(url));
-    }
     *HOST.lock().unwrap_or_else(|error| error.into_inner()) = Some(Arc::new(Host {
         link,
         clock,
@@ -1043,7 +1040,7 @@ pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeAttach<'local>(
 ) -> jint {
     with_env(&mut env, |env| {
         let script = java_string(env, &script)?;
-        let launch_url = crate::launch::from_intent(java_string(env, &launch_url)?.as_deref());
+        let launch_url = crate::nonempty_url(java_string(env, &launch_url)?.as_deref());
         let locale = java_string(env, &locale)?.unwrap_or_default();
         let assets = match asset_manager(env, &assets) {
             Ok(assets) => assets,

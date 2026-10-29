@@ -479,10 +479,21 @@ fn selector_name(selector: Sel) -> String {
     selector.name().to_string_lossy().into_owned()
 }
 
+/// Trimmed launch URL. Empty is not a URL.
+pub(crate) fn nonempty_url(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_owned())
+    }
+}
+
 struct HostState {
     window: Retained<NSWindow>,
     layer: Retained<CAMetalLayer>,
     link: Link,
+    launch_url: session::Shared<Option<String>>,
 }
 
 define_class!(
@@ -501,19 +512,18 @@ define_class!(
 
         #[unsafe(method(application:openURLs:))]
         fn application_open_urls(&self, _application: &NSApplication, urls: &NSArray<NSURL>) {
-            if let Some(url) = crate::launch::from_open_urls(urls) {
-                self.ivars().link.post(Command::LaunchUrl(url));
-            }
-        }
-
-        #[unsafe(method(application:openFile:))]
-        fn application_open_file(&self, _sender: &NSApplication, filename: &NSString) -> bool {
-            match crate::launch::from_file_path(&filename.to_string()) {
-                Some(url) => {
-                    self.ivars().link.post(Command::LaunchUrl(url));
-                    true
+            for index in 0..urls.count() {
+                let Some(text) = urls.objectAtIndex(index).absoluteString() else {
+                    continue;
+                };
+                let Some(url) = nonempty_url(&text.to_string()) else {
+                    continue;
+                };
+                if session::shared_read(&self.ivars().launch_url).as_deref() == Some(url.as_str()) {
+                    continue;
                 }
-                None => false,
+                self.ivars().link.post(Command::LaunchUrl(url));
+                return;
             }
         }
 
@@ -881,7 +891,13 @@ pub fn exit_code(error: &RunError) -> u8 {
     }
 }
 
-pub fn run(launch: Launch, assets: PathBuf, font: &[u8], dump_list: bool) -> Result<(), RunError> {
+pub fn run(
+    launch: Launch,
+    assets: PathBuf,
+    font: &[u8],
+    dump_list: bool,
+    initial_url: Option<String>,
+) -> Result<(), RunError> {
     let Some(mtm) = MainThreadMarker::new() else {
         return Err(RunError::Window(anyhow::anyhow!(
             "AppKit must start on the main thread"
@@ -915,7 +931,7 @@ pub fn run(launch: Launch, assets: PathBuf, font: &[u8], dump_list: bool) -> Res
     let on_stop_for_surface = Arc::clone(&on_stop);
     let ime_view = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
     let decoder = Arc::new(PngDecoder { directory: assets });
-    let launch_url = session::shared(None);
+    let launch_url = session::shared(initial_url);
     let mac = Arc::new(MacBridge);
     let link = hostshell::start(
         Boot {
@@ -944,15 +960,15 @@ pub fn run(launch: Launch, assets: PathBuf, font: &[u8], dump_list: bool) -> Res
             dump_list,
         }
         .with_module(hostshell::clipboard(Arc::clone(&mac) as _))
-        .with_module(hostshell::linking(Arc::clone(&mac) as _, launch_url))
+        .with_module(hostshell::linking(
+            Arc::clone(&mac) as _,
+            Arc::clone(&launch_url),
+        ))
         .with_module(hostshell::file_system(Arc::clone(&mac) as _))
         .with_module(hostshell::async_storage(Arc::clone(&mac) as _))
         .with_module(hostshell::permissions(mac as _)),
     )
     .map_err(RunError::Boot)?;
-    if let Some(url) = crate::launch::from_args(std::env::args().skip(1)) {
-        link.post(Command::LaunchUrl(url));
-    }
 
     let app = NSApplication::sharedApplication(mtm);
     let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
@@ -1006,6 +1022,7 @@ pub fn run(launch: Launch, assets: PathBuf, font: &[u8], dump_list: bool) -> Res
             window: window.clone(),
             layer,
             link,
+            launch_url,
         },
     );
     host.ivars()
@@ -1137,6 +1154,22 @@ mod settings_tests {
         assert_eq!(back.key, Key::Tab);
         assert!(back.shift);
         assert!(command_key("copy:").is_none());
+    }
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::nonempty_url;
+
+    #[test]
+    fn empty_text_is_not_a_url() {
+        assert_eq!(nonempty_url(""), None);
+        assert_eq!(nonempty_url("  "), None);
+        assert_eq!(
+            nonempty_url("https://app.example/item"),
+            Some("https://app.example/item".into())
+        );
+        assert_eq!(nonempty_url(" myapp://open "), Some("myapp://open".into()));
     }
 }
 

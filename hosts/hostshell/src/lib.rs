@@ -103,6 +103,7 @@ pub struct Boot {
     pub decoder: Arc<dyn ImageDecoder>,
     pub modules: Vec<session::HostModule>,
     pub main_thread: Option<MainThreadPoster>,
+    /// Written before `start` so `Linking.getInitialURL` is visible during eval.
     pub launch_url: session::Shared<Option<String>>,
     /// Absent HTTP fails with `network is not linked`. Hosts inject [`http_client`].
     pub http: Option<Arc<dyn session::HttpClient>>,

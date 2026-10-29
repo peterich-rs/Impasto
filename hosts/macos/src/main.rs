@@ -1,11 +1,10 @@
 //! macOS host. `--js <script>` loads that script in the QuickJS session.
-//! `--url` or a `scheme://` argument is the Linking launch URL.
+//! `--url` is the Linking launch URL, written before the script evaluates.
 
 mod a11y;
 mod app;
 #[allow(dead_code)]
 mod assets;
-mod launch;
 mod pixels;
 mod pointer;
 mod surface;
@@ -28,11 +27,11 @@ fn main() -> ExitCode {
 }
 
 fn launch() -> Result<(), app::RunError> {
-    let (launch, assets, font, dump_list) = load().map_err(app::RunError::Window)?;
-    objc2::rc::autoreleasepool(|_| app::run(launch, assets, &font, dump_list))
+    let (launch, assets, font, dump_list, url) = load().map_err(app::RunError::Window)?;
+    objc2::rc::autoreleasepool(|_| app::run(launch, assets, &font, dump_list, url))
 }
 
-fn load() -> anyhow::Result<(app::Launch, PathBuf, Vec<u8>, bool)> {
+fn load() -> anyhow::Result<(app::Launch, PathBuf, Vec<u8>, bool, Option<String>)> {
     let paths = Paths::from_args()?;
     let font = std::fs::read(&paths.font)
         .with_context(|| format!("failed to read font {}", paths.font.display()))?;
@@ -43,7 +42,7 @@ fn load() -> anyhow::Result<(app::Launch, PathBuf, Vec<u8>, bool)> {
         name: script.display().to_string(),
         source,
     };
-    Ok((launch, paths.assets, font, paths.dump_list))
+    Ok((launch, paths.assets, font, paths.dump_list, paths.url))
 }
 
 struct Paths {
@@ -51,6 +50,7 @@ struct Paths {
     font: PathBuf,
     script: Option<PathBuf>,
     dump_list: bool,
+    url: Option<String>,
 }
 
 impl Paths {
@@ -59,6 +59,7 @@ impl Paths {
         let mut font = PathBuf::from("/System/Library/Fonts/Supplemental/Arial.ttf");
         let mut script = None;
         let mut dump_list = false;
+        let mut url = None;
         let mut positional = 0u8;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -74,12 +75,10 @@ impl Paths {
                 continue;
             }
             if arg == "--url" {
-                if args.next().is_none() {
+                let Some(value) = args.next() else {
                     anyhow::bail!("--url needs a URL");
-                }
-                continue;
-            }
-            if launch::looks_like_url(&arg) {
+                };
+                url = app::nonempty_url(&value);
                 continue;
             }
             match positional {
@@ -93,6 +92,7 @@ impl Paths {
             font,
             script,
             dump_list,
+            url,
         })
     }
 }

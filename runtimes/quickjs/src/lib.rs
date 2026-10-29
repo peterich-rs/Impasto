@@ -108,9 +108,20 @@ mod tests {
         HostConfig,
         std::sync::Arc<std::sync::Mutex<Vec<(u64, PluginResult)>>>,
     ) {
+        test_host_with_launch_url(None)
+    }
+
+    #[cfg(quickjs)]
+    fn test_host_with_launch_url(
+        url: Option<String>,
+    ) -> (
+        HostConfig,
+        std::sync::Arc<std::sync::Mutex<Vec<(u64, PluginResult)>>>,
+    ) {
         use std::sync::{Arc, Mutex};
         let clipboard = Arc::new(Mutex::new(String::new()));
         let app_state = session::shared("active".to_owned());
+        let launch_url = session::shared(url);
         let pending = Arc::new(Mutex::new(Vec::new()));
         let settle = {
             let pending = Arc::clone(&pending);
@@ -178,11 +189,24 @@ mod tests {
                         }),
                     ],
                 },
+                HostModule {
+                    name: "Linking",
+                    specifier: "@uifw/linking/host",
+                    methods: vec![HostMethod::sync("getInitialURL", {
+                        let launch_url = Arc::clone(&launch_url);
+                        move |_| {
+                            Ok(match session::shared_read(&launch_url) {
+                                Some(url) => PluginValue::Str(url),
+                                None => PluginValue::Null,
+                            })
+                        }
+                    })],
+                },
             ])),
             exec: Arc::new(ImmediateExec),
             settle,
             app_state,
-            launch_url: session::shared(None),
+            launch_url,
         };
         (config, pending)
     }
@@ -1865,6 +1889,47 @@ mod tests {
             assert!(text.contains("state:background"), "{text}");
             assert!(!text.contains("cleared"), "{text}");
             assert!(text.contains("later"), "{text}");
+        }
+    }
+
+    #[test]
+    fn get_initial_url_is_visible_during_eval() {
+        #[cfg(not(quickjs))]
+        {
+            return;
+        }
+        #[cfg(quickjs)]
+        {
+            let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let log_lines = std::sync::Arc::clone(&lines);
+            let log = Box::new(move |_level: u8, text: &str| {
+                log_lines
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(text.to_owned());
+            });
+            let source = r#"
+                const linking = TurboModuleRegistry.getEnforcing("Linking");
+                console.log("initial:" + String(linking.getInitialURL()));
+            "#;
+            let (host, _pending) =
+                test_host_with_launch_url(Some("https://app.example/item".to_owned()));
+            match super::JsSession::open_with(
+                source,
+                "launch.js",
+                ui_core::MonoShaper::default(),
+                log,
+                None,
+                host,
+            ) {
+                Ok(_) => {}
+                Err(error) => panic!("{error}"),
+            }
+            let text = lines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .join("\n");
+            assert!(text.contains("initial:https://app.example/item"), "{text}");
         }
     }
 

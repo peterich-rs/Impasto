@@ -42,7 +42,7 @@ pub enum Command {
     MemoryWarning,
     WindowFocus(bool),
     SemanticsAction(ui_core::SemanticsAction),
-    /// The URL that opened this process. The render thread calls `Session::set_launch_url`.
+    /// A URL that arrived after the session exists. The render thread calls `Session::set_launch_url`.
     LaunchUrl(String),
     SurfaceReady(SurfaceTarget),
     SurfaceChanged {
