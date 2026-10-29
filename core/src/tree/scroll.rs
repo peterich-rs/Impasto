@@ -4,6 +4,16 @@ use super::layout::{finite_number, nearest_offset, rubber_band};
 use super::node::Kind;
 use super::{Gesture, NodeId, Tree};
 use crate::Error;
+use crate::motion::{Band, OVERSCROLL_FACTOR};
+
+/// Overscroll for a scroll that never had physics installed: the historical
+/// linear band.
+fn default_stretch(over: f32, _dimension: f32) -> f32 {
+    Band::Linear {
+        factor: OVERSCROLL_FACTOR,
+    }
+    .stretch(over, 0.0)
+}
 
 impl Tree {
     pub fn overscroll(&self, id: NodeId) -> Result<(f32, f32), Error> {
@@ -29,14 +39,22 @@ impl Tree {
         let (max_x, max_y) = self.scroll_limits(id);
         let (ox, oy) = rubber_band(dx, dy, max_x, max_y);
         let applying = self.applying_motion;
-        let factor = self
-            .scroll_physics(id)
-            .map(|physics| match physics.overscroll {
-                crate::OverscrollMode::Clamp => 0.0,
-                crate::OverscrollMode::RubberBand => physics.overscroll_factor,
-            })
-            .unwrap_or(crate::motion::OVERSCROLL_FACTOR);
-        let overscroll = (!applying).then_some(axis.filter(factor * (dx - ox), factor * (dy - oy)));
+        // The band stretches against the scroll's own viewport: the wider the
+        // scroll, the more the same overflow may pull.
+        let (view_w, view_h) = {
+            let node = self.node(id)?;
+            (node.w, node.h)
+        };
+        let physics = self.scroll_physics(id);
+        let stretch = |over: f32, dimension: f32| -> f32 {
+            match physics {
+                Some(physics) => physics.stretch(over, dimension),
+                None => default_stretch(over, dimension),
+            }
+        };
+        let overscroll =
+            (!applying).then_some((stretch(dx - ox, view_w), stretch(dy - oy, view_h)));
+        let overscroll = overscroll.map(|(sx, sy)| axis.filter(sx, sy));
         {
             let node = self.node_mut(id)?;
             let Some(geom) = node.scroll_mut() else {
@@ -187,8 +205,8 @@ impl Tree {
             oy
         };
         let physics = self.scroll_physics(id).unwrap_or_default();
-        let stiffness = stiffness.unwrap_or(physics.overscroll_stiffness);
-        let damping = damping.unwrap_or(physics.overscroll_damping);
+        let stiffness = stiffness.unwrap_or(physics.snap_stiffness);
+        let damping = damping.unwrap_or(physics.snap_damping);
         if (ox - x).abs() < f32::EPSILON && (oy - y).abs() < f32::EPSILON {
             return Ok(());
         }
@@ -316,8 +334,8 @@ impl Tree {
             prop,
             from,
             to,
-            physics.overscroll_stiffness,
-            physics.overscroll_damping,
+            physics.snap_stiffness,
+            physics.snap_damping,
             false,
         );
     }
@@ -579,7 +597,7 @@ impl Tree {
 
     fn scroll_tau(&self, id: NodeId) -> f32 {
         self.scroll_physics(id)
-            .map(|physics| physics.friction_tau_ms)
+            .map(|physics| physics.tau_ms())
             .filter(|tau| tau.is_finite() && *tau > 0.0)
             .unwrap_or(crate::SCROLL_TAU_MS)
     }
@@ -696,8 +714,8 @@ impl Tree {
                         prop,
                         current,
                         target,
-                        physics.overscroll_stiffness,
-                        physics.overscroll_damping,
+                        physics.snap_stiffness,
+                        physics.snap_damping,
                         true,
                     );
                     self.note_scroll_phase(id, crate::ScrollPhase::Settling, 0.0, 0.0);
@@ -869,4 +887,21 @@ fn is_scroll_motion(prop: crate::AnimProp) -> bool {
             | crate::AnimProp::OverscrollX
             | crate::AnimProp::OverscrollY
     )
+}
+
+impl Tree {
+    /// Snap a scroll's offsets to whole device pixels after its motion ends.
+    /// A no-op at the default pixel scale of one.
+    pub(super) fn settle_scroll_pixels(&mut self, id: NodeId) {
+        if (self.pixel_scale - 1.0).abs() <= f32::EPSILON {
+            return;
+        }
+        let Ok((x, y)) = self.scroll_offset(id) else {
+            return;
+        };
+        let snapped = (self.settle_pixels(x), self.settle_pixels(y));
+        if (snapped.0 - x).abs() > f32::EPSILON || (snapped.1 - y).abs() > f32::EPSILON {
+            let _ = self.set_scroll_offset(id, snapped.0, snapped.1);
+        }
+    }
 }

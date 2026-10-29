@@ -183,7 +183,8 @@ typedef struct QjsFns {
     int (*viewport)(void *session, float *width, float *height);
     int (*set_scroll_physics)(void *session, uint64_t node, float tau, int mode, float stiffness,
                               float damping, float factor, float snap_x, int align_x, float snap_y,
-                              int align_y, int accept);
+                              int align_y, int accept, int curve, float snap_stiffness,
+                              float snap_damping);
     int (*set_scroll_chain)(void *session, uint64_t node, int chain);
     int (*overscroll)(void *session, uint64_t node, float *x, float *y);
     int (*arm_fling)(void *session, uint64_t node, float vx, float vy);
@@ -3066,17 +3067,24 @@ static JSValue js_set_scroll_physics(JSContext *ctx, JSValueConst this_val, int 
     double snap_y = 0;
     int32_t align_y = 0;
     int32_t accept = 0;
+    int32_t curve = 0;
+    double snap_stiffness = 0;
+    double snap_damping = 0;
     if (read_handle(ctx, argv[0], &node) || JS_ToFloat64(ctx, &tau, argv[1]) ||
         JS_ToInt32(ctx, &mode, argv[2]) || JS_ToFloat64(ctx, &stiffness, argv[3]) ||
         JS_ToFloat64(ctx, &damping, argv[4]) || JS_ToFloat64(ctx, &factor, argv[5]) ||
         JS_ToFloat64(ctx, &snap_x, argv[6]) || JS_ToInt32(ctx, &align_x, argv[7]) ||
         JS_ToFloat64(ctx, &snap_y, argv[8]) || JS_ToInt32(ctx, &align_y, argv[9]) ||
-        (argc >= 11 && JS_ToInt32(ctx, &accept, argv[10]))) {
+        (argc >= 11 && JS_ToInt32(ctx, &accept, argv[10])) ||
+        (argc >= 12 && JS_ToInt32(ctx, &curve, argv[11])) ||
+        (argc >= 13 && JS_ToFloat64(ctx, &snap_stiffness, argv[12])) ||
+        (argc >= 14 && JS_ToFloat64(ctx, &snap_damping, argv[13]))) {
         return JS_EXCEPTION;
     }
     int status = host->fns.set_scroll_physics(
         host->fns.session, node, (float)tau, mode, (float)stiffness, (float)damping, (float)factor,
-        (float)snap_x, align_x, (float)snap_y, align_y, accept);
+        (float)snap_x, align_x, (float)snap_y, align_y, accept, curve, (float)snap_stiffness,
+        (float)snap_damping);
     return done(ctx, status, "setScrollPhysics failed");
 }
 

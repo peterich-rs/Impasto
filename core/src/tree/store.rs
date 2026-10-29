@@ -61,6 +61,7 @@ impl Tree {
             sweep_stack: Vec::new(),
             sweep_children: Vec::new(),
             text_scale: 1.0,
+            pixel_scale: 1.0,
             laid_out: false,
             origin: (0.0, 0.0),
             viewport: None,

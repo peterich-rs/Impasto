@@ -460,3 +460,88 @@ fn scroll_to_springs_then_zero_stiffness_jumps() -> Result<(), crate::Error> {
     assert!(tree.scroll_to(text, 0.0, 0.0, None, None).is_err());
     Ok(())
 }
+
+#[test]
+fn rate_decay_matches_its_tau_equivalent() {
+    use crate::motion::{Decay, Friction, Simulation};
+    // rate 0.998 per millisecond is tau = -1/ln(0.998) ≈ 499.5ms.
+    let decay = Decay::Rate(0.998);
+    let tau = decay.tau_ms();
+    assert!((tau - 499.5).abs() < 1.0, "tau {tau}");
+    let friction = Friction {
+        x0: 0.0,
+        v0: -1.0,
+        tau_ms: tau as f32,
+    };
+    let terminal = friction.terminal();
+    // v0 * tau with the converted tau: the coast travels the same distance.
+    assert!((terminal + tau as f32).abs() < 0.5, "terminal {terminal}");
+}
+
+#[test]
+fn curve_band_stretches_less_per_point_the_deeper_it_goes() {
+    use crate::motion::Band;
+    let band = Band::Curve { c: 0.55 };
+    let dimension = 400.0_f32;
+    let first = band.stretch(10.0, dimension);
+    let second = band.stretch(20.0, dimension);
+    // d(x) = D * c * x / (c * x + D)... the slope must shrink: the second
+    // ten points add less stretch than the first ten.
+    assert!(second - first < first, "{first} then {second}");
+    // The asymptote is D / c: any input stays under it.
+    let deep = band.stretch(10_000.0, dimension);
+    let ceiling = dimension / 0.55;
+    assert!(deep < ceiling, "{deep} must stay under {ceiling}");
+    // The linear band is unchanged behavior: factor * over.
+    let linear = Band::Linear { factor: 0.55 };
+    assert!((linear.stretch(20.0, dimension) - 11.0).abs() < 1e-4);
+}
+
+#[test]
+fn velocity_ring_drops_samples_outside_the_window() {
+    use crate::gesture::VelocityRing;
+    let mut ring = VelocityRing::new();
+    // A flick 200ms ago and a stall just now: the flick must not count.
+    ring.push(0.0, 0.0, 0.0);
+    ring.push(0.0, -60.0, 30.0);
+    ring.push(0.0, -60.0, 200.0);
+    ring.push(0.0, -60.0, 210.0);
+    let (vx, vy) = ring.velocity_at(210.0);
+    assert!(vy.abs() < 0.02, "stale flick leaked in: {vy}");
+    assert_eq!(vx, 0.0);
+    // Inside the window the time-weighted average still works.
+    let mut ring = VelocityRing::new();
+    ring.push(0.0, 0.0, 0.0);
+    ring.push(0.0, -30.0, 100.0);
+    let (_, vy) = ring.velocity_at(100.0);
+    assert!((vy + 0.3).abs() < 0.01, "{vy}");
+}
+
+#[test]
+fn a_settling_scroll_lands_on_whole_device_pixels() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(mono());
+    tree.set_viewport(0.0, 0.0, 100.0, 40.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let scroll = tree.scroll()?;
+    let body = tree.image("asset:a", 80.0, 400.0)?;
+    tree.add_child(scroll, body)?;
+    tree.add_child(root, scroll)?;
+    tree.layout()?;
+    // A 2x screen: scene points land on half-pixel boundaries when settled.
+    tree.set_pixel_scale(2.0)?;
+    tree.set_scroll_offset(scroll, 0.0, 10.3)?;
+    tree.tick_motions(16.0);
+    // A direct write is a finger write; the settle runs when a motion ends.
+    tree.scroll_to(scroll, 0.0, 33.3, None, None)?;
+    let mut now = 0.0f64;
+    while tree.tick_motions(now + 16.0) {
+        now += 16.0;
+    }
+    let y = tree.scroll_offset(scroll)?.1;
+    assert!(
+        (y * 2.0).fract().abs() < 1e-3,
+        "offset {y} is off the pixel grid"
+    );
+    Ok(())
+}

@@ -844,10 +844,26 @@ pub(super) unsafe extern "C" fn set_scroll_physics(
     snap_y: f32,
     align_y: i32,
     accept: i32,
+    curve: i32,
+    snap_stiffness: f32,
+    snap_damping: f32,
 ) -> i32 {
     let inner = unsafe { inner(session) };
     let physics = ui_core::ScrollPhysics {
-        friction_tau_ms: tau,
+        decay: if curve == 2 {
+            // The caller spelled the coast as a deceleration rate; `tau`
+            // carries the rate and converts on construction.
+            ui_core::Decay::Rate(f64::from(tau))
+        } else {
+            ui_core::Decay::Tau(f64::from(tau))
+        },
+        band: if curve == 1 {
+            ui_core::Band::Curve {
+                c: f64::from(factor) as f32,
+            }
+        } else {
+            ui_core::Band::Linear { factor }
+        },
         overscroll: if mode == 1 {
             ui_core::OverscrollMode::Clamp
         } else {
@@ -856,6 +872,8 @@ pub(super) unsafe extern "C" fn set_scroll_physics(
         overscroll_stiffness: stiffness,
         overscroll_damping: damping,
         overscroll_factor: factor,
+        snap_stiffness,
+        snap_damping,
         snap_x: snap_grid(snap_x, align_x),
         snap_y: snap_grid(snap_y, align_y),
         accept: ui_core::ScrollAccept::from_code(accept),

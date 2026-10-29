@@ -541,12 +541,16 @@ impl Session for JsSession {
         let top = metrics.inset_top.max(0.0);
         let right = metrics.inset_right.max(0.0);
         let bottom = metrics.inset_bottom.max(0.0);
-        let _ = inner.tree.borrow_mut().set_viewport(
+        let mut tree = inner.tree.borrow_mut();
+        let _ = tree.set_viewport(
             left,
             top,
             (metrics.width - left - right).max(0.0),
             (metrics.height - top - bottom).max(0.0),
         );
+        if metrics.device_pixel_ratio.is_finite() && metrics.device_pixel_ratio > 0.0 {
+            let _ = tree.set_pixel_scale(metrics.device_pixel_ratio);
+        }
     }
 
     fn pointer(&mut self, event: ui_core::PointerEvent) {

@@ -21,6 +21,7 @@ mod refactor_test;
 mod scroll_test;
 
 pub use error::Error;
+pub use gesture::VELOCITY_WINDOW_MS;
 pub use gesture::{
     DoubleTapConfig, DragAxis, DragRecognizer, HitEntry, HitPath, LongPressRecognizer, Recognizer,
     RecognizerClaim, RecognizerSet, ScrollRecognizer, TapRecognizer, TextSelectRecognizer,
@@ -31,8 +32,8 @@ pub use list::{
     Chrome, DragStep, DriverEvent, DriverId, DriverSet, ListItem, ListNodes, ListOp, PullMode,
 };
 pub use motion::{
-    AnimProp, Friction, OverscrollMode, SCROLL_TAU_MS, ScrollAccept, ScrollAxis, ScrollPhase,
-    ScrollPhysics, Simulation, SnapAlign, SnapGrid, Spring,
+    AnimProp, Band, Decay, Friction, OverscrollMode, SCROLL_TAU_MS, ScrollAccept, ScrollAxis,
+    ScrollPhase, ScrollPhysics, Simulation, SnapAlign, SnapGrid, Spring,
 };
 pub use pointer::{Button, Buttons, Modifiers, Phase, PointerEvent, PointerId, PointerKind};
 pub use protocol::ParagraphId;

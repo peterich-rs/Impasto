@@ -119,6 +119,8 @@ pub fn past_slop(origin_x: f32, origin_y: f32, x: f32, y: f32) -> bool {
 
 const LONG_PRESS_MS: f64 = 500.0;
 const VELOCITY_SAMPLES: usize = 8;
+/// Samples older than this window do not shape the fling velocity.
+pub const VELOCITY_WINDOW_MS: f64 = 120.0;
 
 #[derive(Clone, Copy)]
 struct Sample {
@@ -147,14 +149,20 @@ impl VelocityRing {
         self.samples.push(Sample { x, y, time_ms });
     }
 
-    pub fn velocity(&self) -> (f32, f32) {
-        if self.samples.len() < 2 {
-            return (0.0, 0.0);
-        }
+    /// Velocity over the samples inside `WINDOW_MS` of `now_ms`. Samples older
+    /// than the window do not count, so a flick followed by a stall reports
+    /// the stall. This is the weighting iOS gesture recognizers use.
+    pub fn velocity_at(&self, now_ms: f64) -> (f32, f32) {
+        let fresh: Vec<Sample> = self
+            .samples
+            .iter()
+            .copied()
+            .filter(|sample| now_ms - sample.time_ms <= VELOCITY_WINDOW_MS)
+            .collect();
         let mut dx = 0.0f64;
         let mut dy = 0.0f64;
         let mut dt = 0.0f64;
-        for pair in self.samples.windows(2) {
+        for pair in fresh.windows(2) {
             let step = pair[1].time_ms - pair[0].time_ms;
             if step.is_finite() && step > 0.0 {
                 dx += f64::from(pair[1].x - pair[0].x);
@@ -166,6 +174,13 @@ impl VelocityRing {
             return (0.0, 0.0);
         }
         ((dx / dt) as f32, (dy / dt) as f32)
+    }
+
+    pub fn velocity(&self) -> (f32, f32) {
+        match self.samples.last() {
+            Some(latest) => self.velocity_at(latest.time_ms),
+            None => (0.0, 0.0),
+        }
     }
 }
 

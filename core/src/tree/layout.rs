@@ -663,6 +663,7 @@ impl Tree {
                 self.motion_ends.push((node, prop));
                 self.motions.remove(index);
                 if matches!(prop, crate::AnimProp::ScrollX | crate::AnimProp::ScrollY) {
+                    self.settle_scroll_pixels(node);
                     self.after_scroll_motion(node, prop, velocity, snap);
                 } else if matches!(
                     prop,
