@@ -1,5 +1,6 @@
 //! Android host. The platform thread is the Java UI thread. The render thread owns the engine.
 
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod a11y;
 #[allow(dead_code)]
 mod assets;

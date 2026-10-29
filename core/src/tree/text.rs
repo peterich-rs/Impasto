@@ -1,18 +1,13 @@
-//! Taffy styles, measure, and the viewport.
+//! Text node setters, caret, and paragraph keys.
 
 use std::sync::Arc;
 
 use protocol::{TextAlign, TextStyle};
-use taffy::prelude::*;
 
 use super::layout::{finite_number, finite_positive, live_node};
-use super::node::{Kind, NodeFlags, Slot, TextPayload};
-use super::{
-    Alignment, AxisSize, Edges, Gesture, GridLine, Inset, Justify, NodeId, Rect, TrackSize, Tree,
-};
-use crate::{Error, SINGLE_LINE_MAX, Shaper, TextSize};
-
-use crate::{Affinity, Caret, TextEditingValue, TextLine};
+use super::node::{Kind, NodeFlags, TextPayload};
+use super::{NodeId, Rect, Tree};
+use crate::{Error, TextSize};
 
 impl Tree {
     pub fn is_text(&self, id: NodeId) -> Result<bool, Error> {

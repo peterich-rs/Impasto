@@ -2,6 +2,7 @@ use super::ffi;
 #[cfg(test)]
 use super::paint_trace;
 use super::*;
+use protocol::{BlendMode, Command, Shadow, TextSpan, TextStyle};
 
 impl<'a> crate::painter::Painter<'a> {
     pub(crate) fn play_commands<'pixels>(
@@ -744,17 +745,6 @@ impl<'a> crate::painter::Painter<'a> {
             unsafe { ffi::ImpellerDisplayListBuilderScale(builder, point_scale, point_scale) };
         }
         true
-    }
-
-    pub(crate) fn paint_color(&self, paint: ffi::ImpellerPaint, color: [u8; 4]) {
-        let color = ffi::ImpellerColor {
-            red: color[0] as f32 / 255.0,
-            green: color[1] as f32 / 255.0,
-            blue: color[2] as f32 / 255.0,
-            alpha: color[3] as f32 / 255.0,
-            color_space: ffi::ImpellerColorSpace::kImpellerColorSpaceSRGB,
-        };
-        unsafe { ffi::ImpellerPaintSetColor(paint, &color) };
     }
 
     pub(crate) fn draw_text(

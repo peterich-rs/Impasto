@@ -16,7 +16,6 @@ pub(crate) use paint_store::PaintStore;
 
 use fonts::Face;
 use key::ParagraphStore;
-use paint_store::PaintSlot;
 
 use crate::player::ffi;
 use crate::{ShapeStats, Status};
@@ -57,10 +56,6 @@ impl Typography {
             probe_color: [0, 0, 0, 0],
             render_thread: PhantomData,
         }))
-    }
-
-    pub(crate) fn context(&self) -> ffi::ImpellerTypographyContext {
-        self.context
     }
 
     pub(crate) fn generation(&self) -> u64 {

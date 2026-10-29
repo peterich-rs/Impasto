@@ -4,12 +4,12 @@ use std::ptr;
 use super::Typography;
 use super::key::{ParaKey, Shaped, hash_key, hash_query, key_matches, para_key};
 use super::paint_store::PaintSlot;
+use crate::Status;
 use crate::player::ffi;
 use crate::player::{
     apply_decoration, impeller_align, impeller_weight, paint_color, push_runs, read_lines,
     utf16_len,
 };
-use crate::{CaretHit, LineMetric, Status};
 use protocol::{TextSpan, TextStyle};
 
 impl Typography {
@@ -589,11 +589,7 @@ impl Typography {
         ))
     }
 
-    pub(crate) fn find_paint(
-        &self,
-        hash: u64,
-        matches: impl Fn(&ParaKey) -> bool,
-    ) -> Option<usize> {
+    fn find_paint(&self, hash: u64, matches: impl Fn(&ParaKey) -> bool) -> Option<usize> {
         let bucket = self.paints.index.get(&hash)?;
         bucket.iter().copied().find_map(|index| {
             let slot = self.paints.slots.get(index as usize)?;
@@ -852,7 +848,7 @@ impl Typography {
         }
     }
 
-    pub(crate) fn store_paragraph(&mut self, key: ParaKey, shaped: Shaped) {
+    fn store_paragraph(&mut self, key: ParaKey, shaped: Shaped) {
         if let Some(old) = self.measured.insert(key, shaped) {
             self.retire_paragraph(old.paragraph);
         }

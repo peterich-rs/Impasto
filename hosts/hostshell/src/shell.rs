@@ -9,7 +9,6 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Instant;
 
-use engine::Surface as _;
 use session::FrameTime;
 
 use crate::command::{Command, SurfaceId, SurfaceTarget};
@@ -25,7 +24,6 @@ use crate::timing::FrameTiming;
 use crate::{Boot, Launch, LogLevel, Services, Surface};
 
 pub struct EngineSlot {
-    engine: Rc<RefCell<engine::Engine>>,
     typography: Rc<RefCell<engine::Typography>>,
     log: Rc<dyn Fn(LogLevel, &str)>,
 }
@@ -387,7 +385,6 @@ fn render(
     let Launch::Session(open) = boot.launch;
     let typography = engine.borrow().typography();
     let slot = EngineSlot {
-        engine: Rc::clone(&engine),
         typography: Rc::clone(&typography),
         log: Rc::clone(&log),
     };

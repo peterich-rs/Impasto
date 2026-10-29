@@ -3,13 +3,10 @@
 use std::cell::Cell;
 use std::sync::Arc;
 
-use protocol::{TextAlign, TextStyle};
 use taffy::prelude::*;
 
-use super::node::{Kind, NodeFlags, Slot, TextPayload};
-use super::{
-    Alignment, AxisSize, Edges, Gesture, GridLine, Inset, Justify, NodeId, Rect, TrackSize, Tree,
-};
+use super::node::{Kind, NodeFlags, Slot};
+use super::{Alignment, AxisSize, Edges, GridLine, Inset, Justify, NodeId, Rect, TrackSize, Tree};
 use crate::{Error, SINGLE_LINE_MAX, Shaper, TextSize};
 
 impl Tree {

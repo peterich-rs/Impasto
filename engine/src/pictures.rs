@@ -34,6 +34,7 @@ impl PictureCache {
         self.builds
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.map.len()
     }
