@@ -30,7 +30,7 @@ gen:
     cargo run -p hostshell --bin host-stubs
 
 kotlin:
-    "{{root}}/frameworks/kotlin-ui/gradlew" -p "{{root}}/frameworks/kotlin-ui" :library:jvmTest
+    "{{root}}/kotlin/gradlew" -p "{{root}}/kotlin" :library:jvmTest
 
 solid:
     pnpm -C "{{root}}" install --frozen-lockfile

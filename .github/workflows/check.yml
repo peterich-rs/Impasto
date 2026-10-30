@@ -60,7 +60,7 @@ jobs:
           java-version: "21"
           cache: gradle
       - name: jvmTest and gallery
-        run: bash frameworks/kotlin-ui/gradlew -p frameworks/kotlin-ui :library:jvmTest
+        run: bash kotlin/gradlew -p kotlin :library:jvmTest
 
   solid:
     name: solid
