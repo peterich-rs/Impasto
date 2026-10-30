@@ -238,8 +238,11 @@ export function installMockHost(): MockHost {
       const index = children.indexOf(node);
       return children[index + 1] ?? 0;
     },
-    isText: (node: number) => texts.has(node),
+    isText: (node: number) => nodes.get(node)?.kind === "text",
     setText: (node: number, utf8: string) => {
+      if (nodes.get(node)?.kind !== "text") {
+        throw new Error("setText failed");
+      }
       texts.set(node, utf8);
       calls.push({ name: "setText", args: [node, utf8] });
     },
@@ -261,6 +264,19 @@ export function installMockHost(): MockHost {
     setGrow: (node: number, grow: number) => {
       calls.push({ name: "setGrow", args: [node, grow] });
     },
+    setShrink: () => {},
+    setBasis: () => {},
+    setMargin: () => {},
+    setScaleXY: (node: number, sx: number, sy: number) => {
+      calls.push({ name: "setScaleXY", args: [node, sx, sy] });
+    },
+    setReverse: () => {},
+    setMinAxis: () => {},
+    setMaxAxis: () => {},
+    setStroke: (node: number, width: number, color: number[]) => {
+      calls.push({ name: "setStroke", args: [node, width, color] });
+    },
+    setAspectRatio: () => {},
     setAlignSelf: (node: number, align: string) => {
       calls.push({ name: "setAlignSelf", args: [node, align] });
     },
@@ -441,6 +457,13 @@ export function installMockHost(): MockHost {
       calls.push({ name: "onLayout", args: [typeof fn] });
     },
     setDragClaim: () => {},
+    setPosition: (node: number, absolute: boolean) => {
+      calls.push({ name: "setPosition", args: [node, absolute] });
+    },
+    setInset: (node: number, top: number, right: number, bottom: number, left: number) => {
+      calls.push({ name: "setInset", args: [node, top, right, bottom, left] });
+    },
+    setGridPlacement: () => {},
     caretAt: () => ({ unit: 0, x: 0, y: 0, w: 1, h: 16 }),
     caretAtUnit: () => ({ x: 0, y: 0, w: 1, h: 16 }),
     selectionRects: () => [],

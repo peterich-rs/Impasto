@@ -27,7 +27,7 @@ use crate::vsync::FrameClock;
 
 const FONT_FAMILY: &str = "Sans";
 const FONT_PATH: &CStr = c"fonts/Sans.ttf";
-const SCRIPT_NAME: &str = "counter.js";
+const SCRIPT_NAME: &str = "quotes.js";
 const IME_SHOW: i32 = 1;
 const IME_UPDATE: i32 = 2;
 const IME_HIDE: i32 = 3;
