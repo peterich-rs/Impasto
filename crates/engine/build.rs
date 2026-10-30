@@ -50,7 +50,7 @@ fn main() {
 fn sdk_dir(manifest: &Path) -> PathBuf {
     let target = env::var("TARGET").unwrap_or_default();
     manifest
-        .join("../third_party/impeller-sdk")
+        .join("../../third_party/impeller-sdk")
         .join(platform_name(&target))
 }
 

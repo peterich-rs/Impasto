@@ -1,7 +1,7 @@
 set shell := ["bash", "-euc"]
 
 root := justfile_directory()
-logo := root / "hosts/macos/assets"
+logo := root / "crates/macos/assets"
 
 default:
     @just --list
@@ -19,8 +19,8 @@ test: gallery-dist
 # warning-free cargo check. crapper and dryer must be on PATH. CRAP reads
 # whatever `just coverage` last wrote; it does not rerun tests.
 quality:
-    crapper --use-existing-coverage protocol uicore engine session hosts/hostshell
-    dryer --threshold 0.8 protocol/src uicore/src engine/src session/src
+    crapper --use-existing-coverage protocol uicore engine session hostshell
+    dryer --threshold 0.8 crates/protocol/src crates/uicore/src crates/engine/src crates/session/src
     RUSTFLAGS="-D warnings" cargo check --manifest-path "{{root}}/Cargo.toml" --workspace
 
 coverage:
@@ -61,7 +61,7 @@ host: gallery-dist
     cargo run --manifest-path "{{root}}/Cargo.toml" -p macos -- --js "{{root}}/apps/gallery-solid/dist/counter.js" "{{logo}}"
 
 quickjs:
-    "{{root}}/runtimes/quickjs/fetch-quickjs.sh"
+    "{{root}}/crates/quickjs/fetch-quickjs.sh"
 
 host-js: host
 
@@ -82,13 +82,13 @@ android: gallery-dist
     export PATH="$prebuilt:$PATH"
     export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$prebuilt/aarch64-linux-android24-clang"
     cargo build --manifest-path "{{root}}/Cargo.toml" --release --target aarch64-linux-android -p android
-    assets="{{root}}/hosts/android/apk/app/src/main/assets"
-    jni="{{root}}/hosts/android/apk/app/src/main/jniLibs/arm64-v8a"
+    assets="{{root}}/crates/android/apk/app/src/main/assets"
+    jni="{{root}}/crates/android/apk/app/src/main/jniLibs/arm64-v8a"
     rm -rf "$assets" "$jni"
     mkdir -p "$assets/fonts" "$assets/images" "$jni"
-    cp "{{root}}/hosts/android/assets/fonts/Sans.ttf" "$assets/fonts/Sans.ttf"
-    cp "{{root}}/hosts/macos/assets/logo.png" "$assets/images/logo.png"
+    cp "{{root}}/crates/android/assets/fonts/Sans.ttf" "$assets/fonts/Sans.ttf"
+    cp "{{root}}/crates/macos/assets/logo.png" "$assets/images/logo.png"
     cp "{{root}}/apps/gallery-solid/dist/counter.js" "$assets/counter.js"
     cp "{{root}}/target/aarch64-linux-android/release/libhost.so" "$jni/libhost.so"
     cp "{{root}}/third_party/impeller-sdk/android-arm64/lib/libimpeller.so" "$jni/libimpeller.so"
-    "{{root}}/hosts/android/apk/gradlew" -p "{{root}}/hosts/android/apk" assembleDebug
+    "{{root}}/crates/android/apk/gradlew" -p "{{root}}/crates/android/apk" assembleDebug

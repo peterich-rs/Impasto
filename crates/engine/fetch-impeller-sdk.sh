@@ -4,8 +4,8 @@
 # Only headers, the dynamic library, and LICENSE.sdk.md are unpacked.
 set -euo pipefail
 
-root="$(cd "$(dirname "$0")/.." && pwd)"
-pin="$root/engine/engine.pin"
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+pin="$root/crates/engine/engine.pin"
 dest_root="$root/third_party/impeller-sdk"
 cache="$root/build/third_party"
 base="https://storage.googleapis.com/flutter_infra_release/flutter"

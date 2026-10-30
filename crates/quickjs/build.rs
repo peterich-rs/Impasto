@@ -13,7 +13,7 @@ fn main() {
         .and_then(|dir| dir.parent())
         .map(|root| root.join("third_party/quickjs"))
     else {
-        panic!("runtimes/quickjs sits two directories under the workspace root");
+        panic!("crates/quickjs sits two directories under the workspace root");
     };
     println!("cargo::rustc-check-cfg=cfg(quickjs)");
     println!("cargo::rustc-check-cfg=cfg(quickjs_missing)");
@@ -107,7 +107,7 @@ fn generate_abi(manifest: &Path, out_dir: &Path) {
         .parent()
         .and_then(|dir| dir.parent())
         .expect("workspace root")
-        .join("frameworks/solid-renderer/src/mutation.gen.ts");
+        .join("packages/solid-renderer/src/mutation.gen.ts");
     if std::fs::read_to_string(&ts_path).ok().as_deref() != Some(ts.as_str()) {
         std::fs::write(&ts_path, ts).expect("write mutation.gen.ts");
     }

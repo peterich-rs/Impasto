@@ -1,14 +1,14 @@
 [workspace]
 resolver = "3"
 members = [
-    "protocol",
-    "uicore",
-    "engine",
-    "session",
-    "hosts/hostshell",
-    "hosts/macos",
-    "hosts/android",
-    "runtimes/quickjs",
+    "crates/protocol",
+    "crates/uicore",
+    "crates/engine",
+    "crates/session",
+    "crates/hostshell",
+    "crates/macos",
+    "crates/android",
+    "crates/quickjs",
 ]
 
 [workspace.package]
@@ -18,12 +18,12 @@ publish = false
 
 [workspace.dependencies]
 thiserror = "2"
-protocol = { path = "protocol" }
-uicore = { path = "uicore" }
-engine = { path = "engine" }
-session = { path = "session" }
-hostshell = { path = "hosts/hostshell" }
-quickjs = { path = "runtimes/quickjs" }
+protocol = { path = "crates/protocol" }
+uicore = { path = "crates/uicore" }
+engine = { path = "crates/engine" }
+session = { path = "crates/session" }
+hostshell = { path = "crates/hostshell" }
+quickjs = { path = "crates/quickjs" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

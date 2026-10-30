@@ -55,7 +55,7 @@ struct Paths {
 
 impl Paths {
     fn from_args() -> anyhow::Result<Self> {
-        let mut assets = PathBuf::from("hosts/macos/assets");
+        let mut assets = PathBuf::from("crates/macos/assets");
         let mut font = PathBuf::from("/System/Library/Fonts/Supplemental/Arial.ttf");
         let mut script = None;
         let mut dump_list = false;
