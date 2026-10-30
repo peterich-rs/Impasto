@@ -1,4 +1,4 @@
-package dev.uifw.host;
+package dev.impasto.host;
 
 import android.app.Activity;
 import android.content.res.Configuration;
@@ -16,7 +16,7 @@ import android.window.OnBackInvokedDispatcher;
  */
 public final class HostActivity extends Activity {
     static {
-        System.loadLibrary("uifw");
+        System.loadLibrary("host");
     }
 
     private HostView view;
@@ -160,7 +160,7 @@ public final class HostActivity extends Activity {
         if (getIntent() == null) {
             return null;
         }
-        return getIntent().getStringExtra("uifw.script");
+        return getIntent().getStringExtra("script");
     }
 
     private String launchUrl() {

@@ -1,4 +1,4 @@
-package dev.uifw.host;
+package dev.impasto.host;
 
 import android.app.Activity;
 import android.content.ClipData;
@@ -123,7 +123,7 @@ public final class HostView extends FrameLayout {
     public void writeClipboardNow(String text) {
         ClipboardManager manager = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
         if (manager != null) {
-            manager.setPrimaryClip(ClipData.newPlainText("uifw", text == null ? "" : text));
+            manager.setPrimaryClip(ClipData.newPlainText("text", text == null ? "" : text));
         }
     }
 

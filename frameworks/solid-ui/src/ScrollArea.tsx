@@ -1,5 +1,5 @@
 import { createTrackedEffect } from "solid-js";
-import { host, type NodeHandle } from "@uifw/solid-renderer";
+import { host, type NodeHandle } from "@impasto/solid-renderer";
 import { createScrollController, type ScrollController } from "./ScrollController.ts";
 
 export type ScrollPhysicsProps = {

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use core::{SemanticsActions, SemanticsId, SemanticsNode, SemanticsRole, SemanticsUpdate};
+use uicore::{SemanticsActions, SemanticsId, SemanticsNode, SemanticsRole, SemanticsUpdate};
 
 pub const ROLE_GENERIC: i32 = 0;
 pub const ROLE_BUTTON: i32 = 1;
@@ -170,13 +170,13 @@ mod tests {
         ROLE_BUTTON, ROLE_SWITCH, ROLE_TEXT, ROLE_TEXT_FIELD, bridge_nodes, class_name,
         is_clickable, role_ordinal, scroll_action, scroll_step,
     };
-    use core::{
+    use uicore::{
         SemanticsActions, SemanticsFlags, SemanticsId, SemanticsNode, SemanticsRole,
         SemanticsUpdate,
     };
 
-    fn rect(w: f32, h: f32) -> core::Rect {
-        core::Rect {
+    fn rect(w: f32, h: f32) -> uicore::Rect {
+        uicore::Rect {
             x: 0.0,
             y: 0.0,
             w,

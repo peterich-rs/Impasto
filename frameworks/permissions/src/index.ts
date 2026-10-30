@@ -4,7 +4,7 @@ import {
   openAppSettings as hostOpenAppSettings,
   requestPermissions,
   shouldShowRequestPermissionRationale,
-} from "@uifw/permissions/host";
+} from "@impasto/permissions/host";
 
 /** Names follow permission_handler 11.3.1. The host maps each name. */
 const NAMES = [

@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use session::{FrameTime, InputEvent, Metrics, PlatformSettings};
-use ui_core::PointerEvent;
+use uicore::PointerEvent;
 
 use crate::Lifecycle;
 use crate::images::ImageReady;
@@ -41,7 +41,7 @@ pub enum Command {
     /// The platform asked the process to drop caches. The next frame resubmits.
     MemoryWarning,
     WindowFocus(bool),
-    SemanticsAction(ui_core::SemanticsAction),
+    SemanticsAction(uicore::SemanticsAction),
     /// A URL that arrived after the session exists. The render thread calls `Session::set_launch_url`.
     LaunchUrl(String),
     SurfaceReady(SurfaceTarget),
@@ -55,25 +55,25 @@ pub enum Command {
     ImageReady(ImageReady),
     /// Drop one cache key and ask the render thread for another frame.
     ReloadImage(String),
-    /// A `fetch` finished on `uifw-net`.
+    /// A `fetch` finished on `net`.
     HttpDone {
         token: u64,
         result: Result<session::HttpResponse, session::HttpError>,
     },
-    /// A streamed response produced its head on `uifw-net`.
+    /// A streamed response produced its head on `net`.
     HttpHead {
         token: u64,
         status: u16,
         headers: Vec<(String, String)>,
     },
-    /// A streamed response produced one body piece on `uifw-net`.
+    /// A streamed response produced one body piece on `net`.
     HttpChunk {
         token: u64,
         bytes: Vec<u8>,
         done: bool,
         error: Option<session::HttpError>,
     },
-    /// A framework module method finished on `uifw-net`.
+    /// A framework module method finished on `net`.
     PluginDone {
         token: u64,
         result: session::PluginResult,

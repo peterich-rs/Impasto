@@ -2,9 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use ui_core::{
-    Affinity, Caret, MetricsKey, PaintKey, ParagraphMetrics, Shaper, TextLine, TextSize,
-};
+use uicore::{Affinity, Caret, MetricsKey, PaintKey, ParagraphMetrics, Shaper, TextLine, TextSize};
 
 /// Measures with the same typography context the player draws with.
 ///

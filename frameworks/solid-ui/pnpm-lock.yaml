@@ -11,7 +11,7 @@ importers:
       '@solidjs/universal':
         specifier: 2.0.0-rc.17
         version: 2.0.0-rc.17(solid-js@2.0.0-rc.17)
-      '@uifw/solid-renderer':
+      '@impasto/solid-renderer':
         specifier: file:../solid-renderer
         version: file:../solid-renderer
       solid-js:
@@ -30,7 +30,7 @@ packages:
     peerDependencies:
       solid-js: ^2.0.0-rc.17
 
-  '@uifw/solid-renderer@file:../solid-renderer':
+  '@impasto/solid-renderer@file:../solid-renderer':
     resolution: {directory: ../solid-renderer, type: directory}
 
   csstype@3.2.3:
@@ -58,7 +58,7 @@ snapshots:
     dependencies:
       solid-js: 2.0.0-rc.17
 
-  '@uifw/solid-renderer@file:../solid-renderer':
+  '@impasto/solid-renderer@file:../solid-renderer':
     dependencies:
       '@solidjs/universal': 2.0.0-rc.17(solid-js@2.0.0-rc.17)
       solid-js: 2.0.0-rc.17

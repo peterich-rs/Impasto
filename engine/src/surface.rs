@@ -1,8 +1,9 @@
 //! Compile-time contract shared by the Impeller player and the `NotLinked` stub.
 
-use std::ffi::c_void;
-
 use protocol::LayerTree;
+
+#[cfg(not(target_os = "android"))]
+use std::ffi::c_void;
 
 use crate::{ImagePixels, Status, SubmitStats};
 
@@ -23,8 +24,6 @@ pub trait Surface {
     fn draw_metal(&mut self, metal_drawable: *mut c_void) -> Result<(), Status>;
 
     fn picture_builds(&self) -> u64;
-
-    fn cache_counts(&self) -> (usize, usize);
 
     fn submit_stats(&self) -> SubmitStats;
 }

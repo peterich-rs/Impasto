@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace = "dev.uifw.host"
+    namespace = "dev.impasto.host"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "dev.uifw.host"
+        applicationId = "dev.impasto.host"
         // libvulkan.so requires 24.
         minSdk = 24
         targetSdk = 35

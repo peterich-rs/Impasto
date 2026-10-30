@@ -1,5 +1,5 @@
 import { createTrackedEffect, createSignal } from "solid-js";
-import { Text, directionFor, host, type NodeHandle } from "@uifw/solid-renderer";
+import { Text, directionFor, host, type NodeHandle } from "@impasto/solid-renderer";
 import { bindFocusRing } from "./focus.ts";
 import { messagesFor } from "./i18n.ts";
 import { Role } from "./semantics.ts";

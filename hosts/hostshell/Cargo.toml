@@ -9,9 +9,7 @@ engine = { workspace = true }
 protocol = { workspace = true }
 session = { workspace = true }
 thiserror = { workspace = true }
-# The workspace crate is named `core`. Linking it under that name shadows
-# the standard library, and `thiserror` expands to `::core::fmt`.
-ui_core = { package = "core", path = "../../core" }
+uicore = { workspace = true }
 bytes = "1"
 http = "1"
 http-body-util = "0.1"

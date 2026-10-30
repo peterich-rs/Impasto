@@ -15,7 +15,7 @@ pub trait PermissionsHost: Send + Sync {
 pub fn module(host: Arc<dyn PermissionsHost>) -> HostModule {
     HostModule {
         name: "Permissions",
-        specifier: "@uifw/permissions/host",
+        specifier: "@impasto/permissions/host",
         methods: vec![
             HostMethod::promise("checkPermissionStatus", {
                 let host = Arc::clone(&host);

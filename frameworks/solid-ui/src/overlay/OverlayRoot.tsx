@@ -1,5 +1,5 @@
 import { type JSX, createContext, useContext } from "solid-js";
-import type { NodeHandle } from "@uifw/solid-renderer";
+import type { NodeHandle } from "@impasto/solid-renderer";
 import { closeTopModal, overlayEntries, registerOverlay, type OverlayEntry } from "./registry.ts";
 
 export type OverlayApi = {

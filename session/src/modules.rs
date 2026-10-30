@@ -258,21 +258,21 @@ mod tests {
     fn registry_first_wins_and_call_rejects_promise() {
         let first = HostModule {
             name: "Clipboard",
-            specifier: "@uifw/clipboard/host",
+            specifier: "@impasto/clipboard/host",
             methods: vec![HostMethod::sync("getString", |_| {
                 Ok(PluginValue::Str("one".into()))
             })],
         };
         let second = HostModule {
             name: "Clipboard",
-            specifier: "@uifw/other/host",
+            specifier: "@impasto/other/host",
             methods: vec![HostMethod::sync("getString", |_| {
                 Ok(PluginValue::Str("two".into()))
             })],
         };
         let maps = HostModule {
             name: "Maps",
-            specifier: "@uifw/maps/host",
+            specifier: "@impasto/maps/host",
             methods: vec![
                 HostMethod::sync("ping", |_| Ok(PluginValue::Str("pong".into()))),
                 HostMethod::promise("search", |_, settle, exec| {
@@ -287,7 +287,7 @@ mod tests {
         }
         assert_eq!(
             registry
-                .by_specifier("@uifw/clipboard/host")
+                .by_specifier("@impasto/clipboard/host")
                 .map(|module| module.name),
             Some("Clipboard")
         );

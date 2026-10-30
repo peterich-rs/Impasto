@@ -5,7 +5,7 @@ import {
   onScrollState,
   type NodeHandle,
   type ScrollPhaseName,
-} from "@uifw/solid-renderer";
+} from "@impasto/solid-renderer";
 import type { ScrollDriver } from "../../solid-renderer/src/host.ts";
 
 const natives = new WeakMap<ScrollController, ScrollDriver>();

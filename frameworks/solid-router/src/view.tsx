@@ -1,6 +1,6 @@
 import { For, createSignal, createTrackedEffect, onCleanup, type Accessor } from "solid-js";
 import { Errored } from "solid-js";
-import { Text, host, restoreFocus, spring, type NodeHandle } from "@uifw/solid-renderer";
+import { Text, host, restoreFocus, spring, type NodeHandle } from "@impasto/solid-renderer";
 import {
   PageActiveContext,
   PageKeepContext,

@@ -1,5 +1,5 @@
 import { onCleanup } from "solid-js";
-import { directionFor, host, onFrame, overlayParent, removeNode, type NodeHandle } from "@uifw/solid-renderer";
+import { directionFor, host, onFrame, overlayParent, removeNode, type NodeHandle } from "@impasto/solid-renderer";
 import { colorBytes } from "./colors.ts";
 import { nodeId } from "./host-ext.ts";
 import { transition } from "./motion.ts";

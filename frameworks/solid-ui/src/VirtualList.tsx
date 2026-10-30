@@ -6,7 +6,7 @@ import {
   directionFor,
   host,
   type NodeHandle,
-} from "@uifw/solid-renderer";
+} from "@impasto/solid-renderer";
 import { Button } from "./Button.tsx";
 import { ScrollArea, type ScrollPhysicsProps } from "./ScrollArea.tsx";
 import {

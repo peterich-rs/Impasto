@@ -139,10 +139,6 @@ impl Typography {
     pub(crate) fn note_paragraph_limit(&mut self) {
         if self.measured.len() > 1024 && !self.warned_paragraphs {
             self.warned_paragraphs = true;
-            eprintln!(
-                "engine cache: {} paragraphs exceeds 1024",
-                self.measured.len()
-            );
         }
     }
 

@@ -13,7 +13,7 @@ use protocol::Command;
 use session::{
     HostConfig, HttpError, HttpResponse, InputEvent, IoJob, Key, Metrics, PluginResult, Session,
 };
-use ui_core::{Affinity, FocusDirection, NodeId, Rect, Shaper, Tree};
+use uicore::{Affinity, FocusDirection, NodeId, Rect, Shaper, Tree};
 
 use crate::Error;
 
@@ -66,7 +66,7 @@ pub(super) struct Inner {
     pub(super) mutations: RefCell<Vec<PendingMutation>>,
     pub(super) prepared: RefCell<Option<PreparedCall>>,
     pub(super) marks: FrameMarks,
-    pub(super) drivers: RefCell<ui_core::DriverSet>,
+    pub(super) drivers: RefCell<uicore::DriverSet>,
     pub(super) driver_frame: Cell<bool>,
 }
 
@@ -222,7 +222,7 @@ impl JsSession {
             mutations: RefCell::new(Vec::new()),
             prepared: RefCell::new(None),
             marks: FrameMarks::default(),
-            drivers: RefCell::new(ui_core::DriverSet::new()),
+            drivers: RefCell::new(uicore::DriverSet::new()),
             driver_frame: Cell::new(false),
         }));
         let fns = QjsFns {
@@ -500,7 +500,7 @@ impl JsSession {
         *inner.io.borrow_mut() = Some(submit);
     }
 
-    pub fn semantics(&mut self) -> Option<ui_core::SemanticsUpdate> {
+    pub fn semantics(&mut self) -> Option<uicore::SemanticsUpdate> {
         let inner = unsafe { &*self.inner };
         inner.tree.borrow().semantics()
     }
@@ -562,7 +562,7 @@ impl Session for JsSession {
         }
     }
 
-    fn pointer(&mut self, event: ui_core::PointerEvent) {
+    fn pointer(&mut self, event: uicore::PointerEvent) {
         // SAFETY: the tree borrow ends before dispatch. JS handlers may call
         // back into the tree through the `RefCell`.
         let inner = unsafe { &*self.inner };
@@ -669,11 +669,11 @@ impl Session for JsSession {
                 // The focused control is the field chrome. The editor lives on
                 // its text child, so a buffer edit is delivered as a key or text.
                 let (kind, forwarded) = match edit {
-                    ui_core::Edit::DeleteRange { .. } | ui_core::Edit::Backspace => {
+                    uicore::Edit::DeleteRange { .. } | uicore::Edit::Backspace => {
                         (8, Some("Backspace".to_string()))
                     }
-                    ui_core::Edit::ForwardDelete => (8, Some("Delete".to_string())),
-                    ui_core::Edit::Insert(text) => (9, Some(text)),
+                    uicore::Edit::ForwardDelete => (8, Some("Delete".to_string())),
+                    uicore::Edit::Insert(text) => (9, Some(text)),
                     _ => return,
                 };
                 if let Err(message) = dispatch_input(inner, id, kind, forwarded.as_deref(), None) {
@@ -738,7 +738,7 @@ impl Session for JsSession {
         }
     }
 
-    fn semantics_action(&mut self, action: ui_core::SemanticsAction) {
+    fn semantics_action(&mut self, action: uicore::SemanticsAction) {
         let inner = unsafe { &*self.inner };
         let gestures = inner.tree.borrow_mut().semantics_action(action);
         if let Err(message) = dispatch_gestures(inner, gestures) {
@@ -1120,18 +1120,18 @@ pub(super) fn publish(out: *mut u64, id: u64) -> i32 {
     0
 }
 
-pub(super) fn created(result: Result<NodeId, ui_core::Error>, out: *mut u64) -> i32 {
+pub(super) fn created(result: Result<NodeId, uicore::Error>, out: *mut u64) -> i32 {
     match result {
         Ok(id) => publish(out, id.to_raw()),
         Err(_) => -1,
     }
 }
 
-pub(super) fn status(result: Result<(), ui_core::Error>) -> i32 {
+pub(super) fn status(result: Result<(), uicore::Error>) -> i32 {
     if result.is_ok() { 0 } else { -1 }
 }
 
-pub(super) fn queried(result: Result<Option<NodeId>, ui_core::Error>, out: *mut u64) -> i32 {
+pub(super) fn queried(result: Result<Option<NodeId>, uicore::Error>, out: *mut u64) -> i32 {
     match result {
         Ok(Some(id)) => publish(out, id.to_raw()),
         Ok(None) => publish(out, 0),

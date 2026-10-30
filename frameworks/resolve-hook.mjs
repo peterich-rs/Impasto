@@ -13,20 +13,20 @@ const hostPackages = [
 ];
 
 const files = {
-  "@uifw/solid-renderer": "solid-renderer/runtime/index.ts",
-  "@uifw/solid-renderer/defaults": "solid-renderer/src/defaults.ts",
-  "@uifw/solid-renderer/jsx": "solid-renderer/src/jsx.ts",
-  "@uifw/solid-renderer/palette": "solid-renderer/src/palette.ts",
-  "@uifw/solid-router": "solid-router/src/index.ts",
-  "@uifw/solid-ui": "solid-ui/src/index.tsx",
-  "@uifw/net": "net/src/index.ts",
-  "@uifw/form": "form/src/index.ts",
-  "@uifw/i18n": "i18n/src/index.ts",
+  "@impasto/solid-renderer": "solid-renderer/runtime/index.ts",
+  "@impasto/solid-renderer/defaults": "solid-renderer/src/defaults.ts",
+  "@impasto/solid-renderer/jsx": "solid-renderer/src/jsx.ts",
+  "@impasto/solid-renderer/palette": "solid-renderer/src/palette.ts",
+  "@impasto/solid-router": "solid-router/src/index.ts",
+  "@impasto/solid-ui": "solid-ui/src/index.tsx",
+  "@impasto/net": "net/src/index.ts",
+  "@impasto/form": "form/src/index.ts",
+  "@impasto/i18n": "i18n/src/index.ts",
 };
 
 for (const pkg of hostPackages) {
-  files[`@uifw/${pkg}`] = `${pkg}/src/index.ts`;
-  files[`@uifw/${pkg}/host`] = `${pkg}/src/host.stub.ts`;
+  files[`@impasto/${pkg}`] = `${pkg}/src/index.ts`;
+  files[`@impasto/${pkg}/host`] = `${pkg}/src/host.stub.ts`;
 }
 
 function hostPackageOf(parentURL) {

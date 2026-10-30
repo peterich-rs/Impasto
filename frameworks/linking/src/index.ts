@@ -1,4 +1,4 @@
-import * as host from "@uifw/linking/host";
+import * as host from "@impasto/linking/host";
 
 export interface Linking {
   getInitialURL(): string | null;

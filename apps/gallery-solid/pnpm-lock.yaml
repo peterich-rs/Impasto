@@ -8,18 +8,18 @@ importers:
 
   .:
     dependencies:
+      '@impasto/solid-renderer':
+        specifier: file:../../frameworks/solid-renderer
+        version: file:../../frameworks/solid-renderer
+      '@impasto/solid-router':
+        specifier: file:../../frameworks/solid-router
+        version: file:../../frameworks/solid-router
+      '@impasto/solid-ui':
+        specifier: file:../../frameworks/solid-ui
+        version: file:../../frameworks/solid-ui
       '@solidjs/universal':
         specifier: 2.0.0-rc.17
         version: 2.0.0-rc.17(solid-js@2.0.0-rc.17)
-      '@uifw/solid-renderer':
-        specifier: file:../../frameworks/solid-renderer
-        version: file:../../frameworks/solid-renderer
-      '@uifw/solid-router':
-        specifier: file:../../frameworks/solid-router
-        version: file:../../frameworks/solid-router
-      '@uifw/solid-ui':
-        specifier: file:../../frameworks/solid-ui
-        version: file:../../frameworks/solid-ui
       solid-js:
         specifier: 2.0.0-rc.17
         version: 2.0.0-rc.17
@@ -316,6 +316,18 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@impasto/linking@file:../../frameworks/linking':
+    resolution: {directory: ../../frameworks/linking, type: directory}
+
+  '@impasto/solid-renderer@file:../../frameworks/solid-renderer':
+    resolution: {directory: ../../frameworks/solid-renderer, type: directory}
+
+  '@impasto/solid-router@file:../../frameworks/solid-router':
+    resolution: {directory: ../../frameworks/solid-router, type: directory}
+
+  '@impasto/solid-ui@file:../../frameworks/solid-ui':
+    resolution: {directory: ../../frameworks/solid-ui, type: directory}
+
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
 
@@ -350,18 +362,6 @@ packages:
     engines: {node: '>=22.12.0'}
     peerDependencies:
       solid-js: ^2.0.0-rc.17
-
-  '@uifw/linking@file:../../frameworks/linking':
-    resolution: {directory: ../../frameworks/linking, type: directory}
-
-  '@uifw/solid-renderer@file:../../frameworks/solid-renderer':
-    resolution: {directory: ../../frameworks/solid-renderer, type: directory}
-
-  '@uifw/solid-router@file:../../frameworks/solid-router':
-    resolution: {directory: ../../frameworks/solid-router, type: directory}
-
-  '@uifw/solid-ui@file:../../frameworks/solid-ui':
-    resolution: {directory: ../../frameworks/solid-ui, type: directory}
 
   baseline-browser-mapping@2.11.30:
     resolution: {integrity: sha512-YJs6Pz17RMNv8HoyKREtCY38E3BV1nPkWVmIb+XN1uHC1Vqt3KZCH/uJH9ZKRoiKb/icZ6tvehyee6RZNbFfRA==}
@@ -721,6 +721,25 @@ snapshots:
   '@esbuild/win32-x64@0.25.12':
     optional: true
 
+  '@impasto/linking@file:../../frameworks/linking': {}
+
+  '@impasto/solid-renderer@file:../../frameworks/solid-renderer':
+    dependencies:
+      '@solidjs/universal': 2.0.0-rc.17(solid-js@2.0.0-rc.17)
+      solid-js: 2.0.0-rc.17
+
+  '@impasto/solid-router@file:../../frameworks/solid-router':
+    dependencies:
+      '@impasto/linking': file:../../frameworks/linking
+      '@impasto/solid-renderer': file:../../frameworks/solid-renderer
+      solid-js: 2.0.0-rc.17
+
+  '@impasto/solid-ui@file:../../frameworks/solid-ui':
+    dependencies:
+      '@impasto/solid-renderer': file:../../frameworks/solid-renderer
+      '@solidjs/universal': 2.0.0-rc.17(solid-js@2.0.0-rc.17)
+      solid-js: 2.0.0-rc.17
+
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
       '@jridgewell/sourcemap-codec': 1.6.0
@@ -753,25 +772,6 @@ snapshots:
 
   '@solidjs/universal@2.0.0-rc.17(solid-js@2.0.0-rc.17)':
     dependencies:
-      solid-js: 2.0.0-rc.17
-
-  '@uifw/linking@file:../../frameworks/linking': {}
-
-  '@uifw/solid-renderer@file:../../frameworks/solid-renderer':
-    dependencies:
-      '@solidjs/universal': 2.0.0-rc.17(solid-js@2.0.0-rc.17)
-      solid-js: 2.0.0-rc.17
-
-  '@uifw/solid-router@file:../../frameworks/solid-router':
-    dependencies:
-      '@uifw/linking': file:../../frameworks/linking
-      '@uifw/solid-renderer': file:../../frameworks/solid-renderer
-      solid-js: 2.0.0-rc.17
-
-  '@uifw/solid-ui@file:../../frameworks/solid-ui':
-    dependencies:
-      '@solidjs/universal': 2.0.0-rc.17(solid-js@2.0.0-rc.17)
-      '@uifw/solid-renderer': file:../../frameworks/solid-renderer
       solid-js: 2.0.0-rc.17
 
   baseline-browser-mapping@2.11.30: {}

@@ -5,11 +5,11 @@ license.workspace = true
 publish.workspace = true
 
 [lib]
-name = "uifw"
+name = "host"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-core = { workspace = true }
+uicore = { workspace = true }
 session = { workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]

@@ -1007,7 +1007,7 @@ static int bind_host_globals(Host *host) {
     failed |= bind_fn(ctx, bridge, "socketOpen", js_socket_open, 1);
     failed |= bind_fn(ctx, bridge, "socketSend", js_socket_send, 2);
     failed |= bind_fn(ctx, bridge, "socketClose", js_socket_close, 1);
-    failed |= JS_SetPropertyStr(ctx, global, "__uifw", bridge) < 0;
+    failed |= JS_SetPropertyStr(ctx, global, "__host", bridge) < 0;
     JS_FreeValue(ctx, global);
     return failed ? -1 : 0;
 }
@@ -1337,12 +1337,12 @@ int qjs_settle_http(Host *host, uint64_t token, int status, const char *headers,
 }
 
 // Streamed responses keep the promise open until the final chunk. The head and
-// each chunk funnel through `__uifw._httpStream(token, kind, payload)`, which
+// each chunk funnel through `__host._httpStream(token, kind, payload)`, which
 // the prelude wires into a ReadableStream and resolves the promise with it.
 static int deliver_stream(Host *host, uint64_t token, const char *kind, size_t kind_len,
                           JSValue payload) {
     JSValue global = JS_GetGlobalObject(host->ctx);
-    JSValue bridge = JS_GetPropertyStr(host->ctx, global, "__uifw");
+    JSValue bridge = JS_GetPropertyStr(host->ctx, global, "__host");
     JSValue hook = JS_GetPropertyStr(host->ctx, bridge, "_httpStream");
     int failed = 0;
     if (JS_IsFunction(host->ctx, hook)) {
@@ -1455,7 +1455,7 @@ int qjs_socket_event(Host *host, uint64_t id, const char *event, int is_text, co
         return -1;
     }
     JSValue global = JS_GetGlobalObject(host->ctx);
-    JSValue bridge = JS_GetPropertyStr(host->ctx, global, "__uifw");
+    JSValue bridge = JS_GetPropertyStr(host->ctx, global, "__host");
     JSValue hook = JS_GetPropertyStr(host->ctx, bridge, "_socket");
     int failed = 0;
     if (JS_IsFunction(host->ctx, hook)) {

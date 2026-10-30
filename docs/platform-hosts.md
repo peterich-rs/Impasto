@@ -2,7 +2,7 @@
 
 macOS 与 Android 已落地：平台线程入队，渲染线程创建 `Engine` 和会话并 present。SDK 按平台放在 `third_party/impeller-sdk/<平台>/`。iOS 预构建矩阵仍然没有这一列（`ios`、`ios-arm64`、`ios-arm64-x86_64-sim` 返回 404），所以还没有 `hosts/ios`。`Session` 和渲染线程约束按第三端也能实现来写，见 `docs/refactor-plan.md` 的暂缓一节。
 
-参照系是 Flutter embedder 和 React Native 的平台层：每个子系统先对上上游模块，再决定复刻接口形状、按发布版本链接，或只实现其中一部分。能链接的链接。对不上边界的只借鉴接口形状。硬边界：无 Dart VM，不引入 `embedder.h`。`protocol`、`core`、`engine`、`hosts/macos` 不手写 C。QuickJS 的胶水 C 只在 `runtimes/quickjs`。变更缓冲的生成头由 `runtimes/quickjs/abi.yml` 生成，不把现有 setter 逐个写成头文件。QuickJS 与 `Engine` 都是 `!Send`，排版上下文不离开持有它的那条线程。
+参照系是 Flutter embedder 和 React Native 的平台层：每个子系统先对上上游模块，再决定复刻接口形状、按发布版本链接，或只实现其中一部分。能链接的链接。对不上边界的只借鉴接口形状。硬边界：无 Dart VM，不引入 `embedder.h`。`protocol`、`uicore`、`engine`、`hosts/macos` 不手写 C。QuickJS 的胶水 C 只在 `runtimes/quickjs`。变更缓冲的生成头由 `runtimes/quickjs/abi.yml` 生成，不把现有 setter 逐个写成头文件。QuickJS 与 `Engine` 都是 `!Send`，排版上下文不离开持有它的那条线程。
 
 ## 现状
 
@@ -35,7 +35,7 @@ Vulkan 入口与 `example_vk.c` 一致，例子只提供调用顺序，不引入
 | 1 | 启动装配 | Flutter `Shell`、Android `FlutterActivityAndFragmentDelegate`；RN `ReactHost` | `hostshell` 编排启动。语言会话由宿主在渲染线程上打开后交进来 |
 | 2 | 线程 | `ThreadHost`；RN 无 ui/raster 流水线 | 平台线程 + 渲染线程。测量与绘制仍共用一个 typography，不做 ui/raster 重叠 |
 | 3 | 指针 | `pointer_data_dispatcher`、`PointerDataPacketConverter`；Android `MotionEventTracker` | 换算后入队，vsync 上排空再命中。有 hover、滚轮、按键和修饰键。每根手指一条 `PointerId`。没有 resampling |
-| 4 | 按键 / 输入法 | `TextInputPlugin`、`InputConnectionAdaptor` | `Session::input` 收 `InputEvent`。焦点和 `TextEditor` 在 `core`。macOS 用 `NSTextInputClient`。Android 的 `TextInput` 用 `InputConnection`，把 `commitText`、`setComposingText` 和 `deleteSurroundingText` 收成 `Text` / `Composing` |
+| 4 | 按键 / 输入法 | `TextInputPlugin`、`InputConnectionAdaptor` | `Session::input` 收 `InputEvent`。焦点和 `TextEditor` 在 `uicore`。macOS 用 `NSTextInputClient`。Android 的 `TextInput` 用 `InputConnection`，把 `commitText`、`setComposingText` 和 `deleteSurroundingText` 收成 `Text` / `Composing` |
 | 5 | 帧调度 | `Animator::RequestFrame`、`VsyncWaiter`；RN `ReactChoreographer` 槽位 | 指针、metrics、表面事件，或会话申请的下一帧，才登记。列表与上次相同则不 `submit`，除非会话还要这一帧 |
 | 6 | 表面 | `AndroidSurface`、`FlutterSurfaceController` | `Surface` 只负责 acquire 与 present。尺寸变化不丢 Vulkan 链；surface 销毁才丢 |
 | 7 | 平台能力 | platform channel、`PlatformPlugin` | `Services`。第一批是字体、已解码图片、日志 |
@@ -52,7 +52,7 @@ Vulkan 入口与 `example_vk.c` 一致，例子只提供调用顺序，不引入
 ## 分层
 
 ```text
-apps/gallery-solid/dist/counter.js
+apps/gallery-solid/dist/counter.js   (just gallery-dist 本地构建，不进 git)
         │
         ▼
 runtimes/quickjs          宿主在渲染线程上打开，得到 Box<dyn Session>
@@ -67,10 +67,10 @@ hostshell                 命令队列 · 指针过滤 · 帧调度 · 相同列
         │
         ▼
 engine::Engine            submit 在 `hostshell` 里；draw_metal / draw_vulkan 在各端 Surface 里
-core::Tree                会话持有。宿主与 `hostshell` 都不直接改树
+uicore::Tree              会话持有。宿主与 `hostshell` 都不直接改树
 ```
 
-依赖向下：`hosts/*` → `hostshell` → `session`、`core`、`protocol`、`engine`。`PointerEvent` 定义在 `core`，`hostshell` 会依赖整个 `core` crate。`hostshell` 不依赖 `quickjs`。`engine` 继续不依赖 `core`。
+依赖向下：`hosts/*` → `hostshell` → `session`、`uicore`、`protocol`、`engine`。`PointerEvent` 定义在 `uicore`，`hostshell` 会依赖整个 `uicore` crate。`hostshell` 不依赖 `quickjs`。`engine` 继续不依赖 `uicore`。
 
 宿主实现三个 trait，并交给 `hostshell` 一个 `Send` 闭包：
 
@@ -83,7 +83,7 @@ core::Tree                会话持有。宿主与 `hostshell` 都不直接改�
 
 ```rust
 pub trait Services: Send {
-    /// 注册名到字体字节。`UIFWSans` 是注册名，不是文件里的 name id。
+    /// 注册名到字体字节。`Sans` 是注册名，不是文件里的 name id。
     fn font(&self, family: &str) -> Option<&[u8]>;
     /// 已解码的紧排 RGBA。借用活到 `Engine::submit_layers` 返回。
     fn image<'a>(&'a self, source: &str) -> Option<engine::ImagePixels<'a>>;
@@ -128,7 +128,7 @@ pub enum SessionError {
 读脚本 / 字体 / 图片字节 / `--url` 或 Intent
 创建窗口，主线程创建并挂上 CAMetalLayer
 把已知启动 URL 写入 Shared launch_url
-Shell::start(Boot) ──────────────────────►  创建 Engine，register_font(UIFWSans)
+Shell::start(Boot) ──────────────────────►  创建 Engine，register_font(Sans)
 返回 looper                                  调用闭包（含 Shaper 与 quickjs::open）
                                              Linking.getInitialURL 读 Shared
 表面就绪，投递 SurfaceReady ──────────────►  创建 Surface，下发 metrics，强制出首帧
@@ -148,13 +148,13 @@ Shell::start(Boot) ────────────────────�
 | 3 | 解释器 `NotLinked` 或 `Runtime` |
 | 4 | 启动期 `qjs_eval` 失败，`SessionError::Script`。运行期 `console` 和监听器错误只记日志，进程继续 |
 
-`UIFW_DUMP` 在一帧画出后读回像素，再让主线程结束进程。它用来看画面。窗口重新变为可见时，macOS 投递 `Invalidate`，置 `needs_present`。列表和缩放都没变则 `PresentCached`。
+`IMPASTO_DUMP` 在一帧画出后读回像素，再让主线程结束进程。它用来看画面。窗口重新变为可见时，macOS 投递 `Invalidate`，置 `needs_present`。列表和缩放都没变则 `PresentCached`。
 
 ## 2. 线程
 
 渲染线程用来接住会阻塞的取表面。`draw_vulkan` 里的 `ImpellerVulkanSwapchainAcquireNextSurfaceNew` 可能等到下一张图像。macOS 的 `nextDrawable` 在渲染线程的 `MetalSurface::present` 里取。平台线程只做窗口、输入换算和 vsync 源。测量和绘制仍是同一条渲染线程上的同一个 typography，不各持一份排版上下文。渲染线程是 `std::thread` 上的同步循环，不进 async 运行时。
 
-平台线程到渲染线程是 `hosts/hostshell/src/command.rs` 里的 `Command` 队列。平台线程入队后立刻返回。渲染线程把本帧要用的指针拷出来之后，在锁外跑会话和 `Engine`。`SurfaceDestroyed` 由渲染线程立刻处理，先丢掉尚未打开的 `SurfaceTarget`，然后 `Acks::signal`。Android 的 `destroy_surface` 和 `open_surface` 把 `NativeWindow` 交给 `uifw-surface-drop`。该线程在 `DropWait` 上等待这条应答，然后 `ANativeWindow_release`。平台线程在 `spawn` 之后返回。渲染线程处理销毁时不再等平台线程。入队顺序仍是 `SurfaceDestroyed` 先于下一次 `SurfaceReady`。
+平台线程到渲染线程是 `hosts/hostshell/src/command.rs` 里的 `Command` 队列。平台线程入队后立刻返回。渲染线程把本帧要用的指针拷出来之后，在锁外跑会话和 `Engine`。`SurfaceDestroyed` 由渲染线程立刻处理，先丢掉尚未打开的 `SurfaceTarget`，然后 `Acks::signal`。Android 的 `destroy_surface` 和 `open_surface` 把 `NativeWindow` 交给 `surface-drop`。该线程在 `DropWait` 上等待这条应答，然后 `ANativeWindow_release`。平台线程在 `spawn` 之后返回。渲染线程处理销毁时不再等平台线程。入队顺序仍是 `SurfaceDestroyed` 先于下一次 `SurfaceReady`。
 
 相邻的 `Pointer(Move)` 合并成队尾那一个，避免渲染线程停住时 move 无限堆积。`Down`、`Up`、`Cancel` 不合并、不丢弃。metrics 不从指针中间抽走，避免重排。
 
@@ -178,11 +178,11 @@ vsync 源不在渲染线程上跑帧：
 
 `Vsync::request_frame` 由渲染线程调用。macOS 在该线程启动 `CVDisplayLink`，Android 在该线程经 JNI 调 `scheduleFrame`。`cancel` 同样由渲染线程在 `end_frame` 里执行。UI 线程不调用 `FrameClock::cancel`。渲染线程阻塞在命令队列上。`Pointer`、`Metrics`、`Lifecycle` 和表面尺寸变化只写入渲染线程的本地状态；调用 `session.pointer` 与 `frame` 的是随后的 `Frame`。当时若没有在途的帧，就 `request_frame` 一次。`SurfaceDestroyed` 与 `Shutdown` 收到即处理，不等下一帧。
 
-`UIFW_DUMP` 在渲染线程读回刚 present 的纹理并写 PNG，然后向主线程投递退出。不从渲染线程调用 `NSApplication::terminate`。
+`IMPASTO_DUMP` 在渲染线程读回刚 present 的纹理并写 PNG，然后向主线程投递退出。不从渲染线程调用 `NSApplication::terminate`。
 
 ## 3. 指针
 
-`core::PointerEvent` 带 `pointer`、`kind`、`button` 和 `buttons`。相位是 `Down`、`Move`、`Up`、`Cancel`、`Wheel`、`Zoom`。`Zoom` 的 `zoom` 是这次事件的相对缩放，其它相位为 0。macOS 来自 `magnifyWithEvent:`，Android 来自 `ScaleGestureDetector.onScale`。`Tree` 按 `PointerId` 各记一条按下和拖动。Android 按 `MotionEvent` 的 action index 展开每根手指。历史采样不入队。
+`uicore::PointerEvent` 带 `pointer`、`kind`、`button` 和 `buttons`。相位是 `Down`、`Move`、`Up`、`Cancel`、`Wheel`、`Zoom`。`Zoom` 的 `zoom` 是这次事件的相对缩放，其它相位为 0。macOS 来自 `magnifyWithEvent:`，Android 来自 `ScaleGestureDetector.onScale`。`Tree` 按 `PointerId` 各记一条按下和拖动。Android 按 `MotionEvent` 的 action index 展开每根手指。历史采样不入队。
 
 入队前各端把坐标换成场景点，原点在左上：
 
@@ -192,7 +192,7 @@ vsync 源不在渲染线程上跑帧：
 | Android | 物理像素除以 `DisplayMetrics.density`。density 不是有限正数就丢掉这次采样 |
 | iOS | `location(in:)` 已是点，原点在视图左上，不翻转、不除 scale |
 
-指针先进入 `hostshell` 的队列，渲染线程再交给 `core` 做命中和手势。三端共用这一份队列：
+指针先进入 `hostshell` 的队列，渲染线程再交给 `uicore` 做命中和手势。三端共用这一份队列：
 
 - 出队顺序与入队顺序一致。
 - 未按下时的 `Move` 保留，用来做 hover。相邻的 `Move` 合并成最后一笔。滚轮事件保持原顺序。
@@ -202,13 +202,13 @@ vsync 源不在渲染线程上跑帧：
 
 ## 4. 按键与输入法
 
-文本焦点在 `core::Tree`。点击（抬起且没有锁成拖动）才移动焦点。`Session::input` 把 `session::InputEvent` 交给当前焦点；没有焦点就丢掉。字符串、UTF-16 选区和组合区间在 `core` 的 `TextEditor`。复制、剪切、粘贴和方向键都走这里。声明了 `DragClaim` 的区域越过拖动阈值后锁成选区拖动。选区高亮和组合下划线由文本节点录进自己的 picture。
+文本焦点在 `uicore::Tree`。点击（抬起且没有锁成拖动）才移动焦点。`Session::input` 把 `session::InputEvent` 交给当前焦点；没有焦点就丢掉。字符串、UTF-16 选区和组合区间在 `uicore` 的 `TextEditor`。复制、剪切、粘贴和方向键都走这里。声明了 `DragClaim` 的区域越过拖动阈值后锁成选区拖动。选区高亮和组合下划线由文本节点录进自己的 picture。
 
 平台线程把 `Command::Input` 入队，和指针一样在下一帧排空，并登记这一帧。暂停时先留在队列里。`take_ime` 在输入派发之后和 `session.frame` 之后各读一次。`Show` 弹出键盘，`Update` 写入选区、组合区间和光标，`Hide` 收起键盘。组合过程中的 `InputEvent::Composing` 不另写一份缓冲。
 
 macOS：带 Command、Control 或 Option 的 `keyDown:` 投递 `Key::Char`，不再走 `insertText:`。其余 `keyDown:` 调用 `interpretKeyEvents:`。`magnifyWithEvent:` 投递 `Phase::Zoom`，`zoom` 是这次的相对缩放。`AppleInterfaceThemeChangedNotification` 和 `NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification` 再读外观、减弱动态效果、提高对比度和粗体。`insertText:` 是 `Text`，`setMarkedText:` / `unmarkText` 是 `Composing`，`doCommandBySelector:` 把回车、退格和方向键收成 `Key`，其余 selector 吞掉并打印。`selectedRange` 和 `markedRange` 读主线程上的镜像。`firstRectForCharacterRange:` 返回内容视图 bounds 换到屏幕坐标后的矩形。`set_ime(true)` 在主线程 `makeFirstResponder`。
 
-Android：`TextEvent` 的下标是 UTF-16。宿主先换成字节下标，再拆成已提交串和组合串。已提交串在末尾变长时用 `Text` 追加后缀。中间编辑取公共前缀，再 `DeleteRange` 加 `Insert`，映射成 `core::Edit`。组合区间变化用 `Composing`。
+Android：`TextEvent` 的下标是 UTF-16。宿主先换成字节下标，再拆成已提交串和组合串。已提交串在末尾变长时用 `Text` 追加后缀。中间编辑取公共前缀，再 `DeleteRange` 加 `Insert`，映射成 `uicore::Edit`。组合区间变化用 `Composing`。
 
 键盘类型和回车动作两端共用同一套序号。Android 再换成 `InputType` 和 `IME_ACTION`。
 
@@ -281,7 +281,7 @@ macOS 没有这套 `KeyboardType` 映射。粘贴同时读 `public.utf8-plain-te
 无 Surface（Engine、会话、typography 仍在）
 ```
 
-Android 的 `uifw-surface-drop` 在 `DropWait` 上等到 `Acks::signal`，然后才 `ANativeWindow_release`。平台线程不等待。渲染线程处理 `SurfaceDestroyed` 时不反过来等平台线程。macOS 不投递 `SurfaceDestroyed`。
+Android 的 `surface-drop` 在 `DropWait` 上等到 `Acks::signal`，然后才 `ANativeWindow_release`。平台线程不等待。渲染线程处理 `SurfaceDestroyed` 时不反过来等平台线程。macOS 不投递 `SurfaceDestroyed`。
 
 已经打开的表面上，`present` 返回 `NotReady`、`PresentFailed` 或 `BadScene` 时留着 `Surface` 和 swapchain，置 `needs_present`。打开表面得到 `NotReady` 时留下 `SurfaceTarget` 并再登记一帧，不取消调度，也不清 `needs_present`。同一目标最多尝试 120 次，到顶记一条 `surface open failed; stopping retry` 并停止自动登记。之后的 `Resumed`，或该 id 的 `SurfaceChanged`，把次数清零再试一轮。`SurfaceDestroyed` 在应答前丢掉这次未打开的目标。其它打开失败结束渲染线程。`Surface` 只在匹配的 `SurfaceDestroyed` 时丢掉。销毁按 `SurfaceId` 回 ack。
 
@@ -291,7 +291,7 @@ Android 的 `uifw-surface-drop` 在 `DropWait` 上等到 `Acks::signal`，然后
 
 `Services` 替代 platform channel。三端各一份实现，由 `hostshell` 在渲染线程调用。
 
-字体按注册名取字节，启动时交给 `register_font`。`UIFWSans` 和 `UIFWSansCJK` 是启动时的两张脸。脚本 `registerFont` 把字节放进会话队列，渲染线程在 `submit` 之前 `take_fonts` 再 `register_font`。同名替换字节。新名字加上已经交出的名字最多 8 个，那两张启动脸不占名额。失败只记 family 和状态，这一帧继续，缺的 family 退回第一次成功登记的脸。图片由 `ImageDecoder` 在 `uifw-io` 线程解码成紧排 RGBA，结果经 `Command::ImageReady` 回到渲染线程的 `ImageCache`。`submit` 只读这份缓存。必选缺图记一次日志并且这一帧不提交，已安装的显示列表留在引擎里。可选缺图跳过该命令。`https:` 图片在这条线程下载，正文最多 4 MiB，日志只记 scheme 和 host。脚本 `reload(source)` 把名字排进会话，渲染线程在读缓存之前排空。`reload_image` 删掉该键并再要一帧。日志从渲染线程调用：macOS 写 stderr，Android 写 logcat，iOS 写 `os_log`。`Services::semantics` 收到语义树后，宿主把它交给平台辅助功能。
+字体按注册名取字节，启动时交给 `register_font`。`Sans` 和 `SansCJK` 是启动时的两张脸。脚本 `registerFont` 把字节放进会话队列，渲染线程在 `submit` 之前 `take_fonts` 再 `register_font`。同名替换字节。新名字加上已经交出的名字最多 8 个，那两张启动脸不占名额。失败只记 family 和状态，这一帧继续，缺的 family 退回第一次成功登记的脸。图片由 `ImageDecoder` 在 `io` 线程解码成紧排 RGBA，结果经 `Command::ImageReady` 回到渲染线程的 `ImageCache`。`submit` 只读这份缓存。必选缺图记一次日志并且这一帧不提交，已安装的显示列表留在引擎里。可选缺图跳过该命令。`https:` 图片在这条线程下载，正文最多 4 MiB，日志只记 scheme 和 host。脚本 `reload(source)` 把名字排进会话，渲染线程在读缓存之前排空。`reload_image` 删掉该键并再要一帧。日志从渲染线程调用：macOS 写 stderr，Android 写 logcat，iOS 写 `os_log`。`Services::semantics` 收到语义树后，宿主把它交给平台辅助功能。
 
 编辑器 Copy / Cut 经 `take_clipboard` 交出文字，`hostshell` 在渲染线程上 `registry.call("Clipboard", "setString", …)`。Clipboard 未注册时记 `not linked`，不 panic。触觉、系统音再各加方法。不加字符串消息通道。
 
@@ -299,10 +299,10 @@ Android 的 `uifw-surface-drop` 在 `DropWait` 上等到 `Acks::signal`，然后
 
 | 键 | macOS | Android | iOS |
 |---|---|---|---|
-| 注册名 `UIFWSans` | `/System/Library/Fonts/Supplemental/Arial.ttf` | `assets/fonts/UIFWSans.ttf` | Bundle 内同名文件 |
+| 注册名 `Sans` | `/System/Library/Fonts/Supplemental/Arial.ttf` | `assets/fonts/Sans.ttf` | Bundle 内同名文件 |
 | `asset:<name>` | 资产目录按 scale 桶找 `name@3x`、`name@2x`、`name`，扩展名 `.png` `.jpg` `.jpeg` `.webp`，ImageIO | `assets/images/` 下同一组候选，`AImageDecoder` | 宿主还没写 |
 
-Android 与 iOS 的字体是可再分发的文件，注册名仍叫 `UIFWSans`。系统 Arial 不打进 APK 或 Bundle，字形度量和 macOS 上的 Arial 不同。
+Android 与 iOS 的字体是可再分发的文件，注册名仍叫 `Sans`。系统 Arial 不打进 APK 或 Bundle，字形度量和 macOS 上的 Arial 不同。
 
 `AssetManager` 在 `HostActivity` 启动时从 Java 取到。渲染线程第一次要字体或图片时读取并解码，结果留在 `Services` 里。
 
@@ -335,7 +335,7 @@ Android 与 iOS 的字体是可再分发的文件，注册名仍叫 `UIFWSans`�
 | 坐标 | 内容视图 + Y 翻转 | 像素 ÷ density | 已是点 |
 | metrics | 默认 360×640，可缩放，inset 0 | 窗口尺寸 ÷ density。inset 变成根偏移并缩小可用空间 | bounds 与 scale。inset 同样只采集 |
 | 生命周期 | `Inactive` / `Hidden` / `Resumed`；遮挡恢复投递 `Invalidate`；关闭即退出 | `onPause` → `Inactive`，`onStop` → `Hidden`，`onResume` → `Resumed` | 前后台 |
-| 读回 | `UIFW_DUMP` 把纹理写成 PNG | `adb screencap` 只作人工查看 | 与 macOS 相同的纹理读回 |
+| 读回 | `IMPASTO_DUMP` 把纹理写成 PNG | `adb screencap` 只作人工查看 | 与 macOS 相同的纹理读回 |
 
 ## 实现约束
 

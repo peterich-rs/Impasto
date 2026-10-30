@@ -2,7 +2,7 @@
 resolver = "3"
 members = [
     "protocol",
-    "core",
+    "uicore",
     "engine",
     "session",
     "hosts/hostshell",
@@ -19,7 +19,7 @@ publish = false
 [workspace.dependencies]
 thiserror = "2"
 protocol = { path = "protocol" }
-core = { path = "core" }
+uicore = { path = "uicore" }
 engine = { path = "engine" }
 session = { path = "session" }
 hostshell = { path = "hosts/hostshell" }

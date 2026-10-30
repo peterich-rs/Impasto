@@ -1,4 +1,4 @@
-package dev.uifw.host;
+package dev.impasto.host;
 
 import android.content.Context;
 import android.graphics.PixelFormat;

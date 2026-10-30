@@ -1,7 +1,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use session::{InputEvent, Metrics};
-use ui_core::{Button, Buttons, Phase, PointerEvent, PointerId, PointerKind};
+use uicore::{Button, Buttons, Phase, PointerEvent, PointerId, PointerKind};
 
 /// Pointer filtering and "should another frame be requested" for one shell.
 #[derive(Debug)]
@@ -144,7 +144,7 @@ fn cancel_event(pointer: PointerId) -> PointerEvent {
         time_ms: 0.0,
         button: Button::None,
         buttons: Buttons::empty(),
-        modifiers: ui_core::Modifiers::empty(),
+        modifiers: uicore::Modifiers::empty(),
         dx: 0.0,
         dy: 0.0,
         zoom: 0.0,
@@ -155,7 +155,7 @@ fn cancel_event(pointer: PointerId) -> PointerEvent {
 mod tests {
     use super::*;
     use session::InputEvent;
-    use ui_core::Phase;
+    use uicore::Phase;
 
     fn event(phase: Phase, x: f32) -> PointerEvent {
         PointerEvent::new(phase, x, 0.0, 0.0)

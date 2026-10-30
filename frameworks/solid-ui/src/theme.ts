@@ -4,7 +4,7 @@ import {
   HIGH_LIGHT,
   LIGHT,
   type Palette,
-} from "@uifw/solid-renderer/palette";
+} from "@impasto/solid-renderer/palette";
 
 export type PlatformSnapshot = {
   locale: string;

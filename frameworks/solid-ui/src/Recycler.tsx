@@ -1,5 +1,5 @@
 import { createRenderEffect, createSignal, onCleanup } from "solid-js";
-import { createSlot } from "@uifw/solid-renderer";
+import { createSlot } from "@impasto/solid-renderer";
 import {
   discardRecycler,
   syncRecycler,

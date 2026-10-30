@@ -1,4 +1,4 @@
-import "@uifw/solid-renderer/jsx";
+import "@impasto/solid-renderer/jsx";
 import "./theme-bind.ts";
 
 export { Button } from "./Button.tsx";

@@ -1,5 +1,5 @@
 import { createContext, createTrackedEffect, createSignal, getOwner, onCleanup, useContext, type Accessor } from "solid-js";
-import { onBack, onFrame, type NodeHandle } from "@uifw/solid-renderer";
+import { onBack, onFrame, type NodeHandle } from "@impasto/solid-renderer";
 import { matchPath, routePath } from "./path.ts";
 
 export type RouteParams = Record<string, string>;
@@ -210,7 +210,7 @@ export function createRouter(
     });
   }
 
-  void import("@uifw/linking")
+  void import("@impasto/linking")
     .then(({ Linking }) => {
       const initial = Linking.getInitialURL();
       if (initial) reset(initial);

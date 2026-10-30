@@ -1,4 +1,4 @@
-import { Text, directionFor, type NodeHandle } from "@uifw/solid-renderer";
+import { Text, directionFor, type NodeHandle } from "@impasto/solid-renderer";
 import { Button } from "./Button.tsx";
 import { t } from "./i18n.ts";
 import { useTheme } from "./use-theme.ts";

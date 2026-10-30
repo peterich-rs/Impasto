@@ -1,4 +1,4 @@
-import { log, setListenerErrorPolicy } from "@uifw/solid-renderer";
+import { log, setListenerErrorPolicy } from "@impasto/solid-renderer";
 
 /** Default listener policy. `freeze` is opt-in and keeps the host on the previous frame. */
 setListenerErrorPolicy("report");

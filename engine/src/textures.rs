@@ -51,7 +51,6 @@ impl TextureStore {
     pub(crate) fn note_limit(&mut self) {
         if self.map.len() > 256 && !self.warned {
             self.warned = true;
-            eprintln!("engine cache: {} textures exceeds 256", self.map.len());
         }
     }
 

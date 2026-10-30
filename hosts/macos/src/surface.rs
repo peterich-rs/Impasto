@@ -52,7 +52,7 @@ impl MetalSurface {
             (self.on_stop)(1);
             return Ok(Presented::Stop);
         }
-        println!("uifw frame dumped");
+        println!("frame dumped");
         let _ = std::io::Write::flush(&mut std::io::stdout());
         (self.on_stop)(0);
         Ok(Presented::Stop)

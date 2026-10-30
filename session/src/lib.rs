@@ -179,7 +179,7 @@ pub enum Key {
 pub struct KeyPress {
     pub key: Key,
     pub shift: bool,
-    pub modifiers: core::Modifiers,
+    pub modifiers: uicore::Modifiers,
 }
 
 impl KeyPress {
@@ -187,7 +187,7 @@ impl KeyPress {
         Self {
             key,
             shift: false,
-            modifiers: core::Modifiers::empty(),
+            modifiers: uicore::Modifiers::empty(),
         }
     }
 
@@ -195,14 +195,14 @@ impl KeyPress {
         Self {
             key,
             shift: true,
-            modifiers: core::Modifiers::empty(),
+            modifiers: uicore::Modifiers::empty(),
         }
     }
 
-    pub const fn with_modifiers(key: Key, modifiers: core::Modifiers) -> Self {
+    pub const fn with_modifiers(key: Key, modifiers: uicore::Modifiers) -> Self {
         Self {
             key,
-            shift: modifiers.contains(core::Modifiers::SHIFT),
+            shift: modifiers.contains(uicore::Modifiers::SHIFT),
             modifiers,
         }
     }
@@ -245,7 +245,7 @@ pub struct ImeState {
     pub text: String,
     pub selection: std::ops::Range<u32>,
     pub composing: Option<std::ops::Range<u32>>,
-    pub caret: core::Rect,
+    pub caret: uicore::Rect,
     pub action: TextInputAction,
     pub keyboard: KeyboardType,
 }
@@ -258,7 +258,7 @@ impl ImeState {
             text,
             selection: end..end,
             composing: None,
-            caret: core::Rect {
+            caret: uicore::Rect {
                 x: 0.0,
                 y: 0.0,
                 w: 1.0,
@@ -303,7 +303,7 @@ pub enum InputEvent {
     },
     SelectAll,
     /// A committed IME diff. The session applies it on the focused editor.
-    Edit(core::Edit),
+    Edit(uicore::Edit),
     /// The platform input connection's buffer, selection, and composing span.
     ///
     /// Indices are UTF-16. A composing start below zero means there is no span.
@@ -402,16 +402,16 @@ pub struct FrameTrace {
 pub struct FrameOutput {
     /// `Some` when the layer epoch changed. The host submits that tree.
     /// `None` means the host may present the installed tree again.
-    pub layers: Option<Arc<core::LayerTree>>,
+    pub layers: Option<Arc<uicore::LayerTree>>,
     pub again: bool,
     pub ime: Option<ImeUpdate>,
-    pub semantics: Option<core::SemanticsPatch>,
+    pub semantics: Option<uicore::SemanticsPatch>,
     pub fonts: Vec<(String, Vec<u8>)>,
     pub reloads: Vec<String>,
     pub clipboard: Option<String>,
     pub exit: bool,
     /// `None` means the image census generation did not change.
-    pub images: Option<Arc<core::ImageCensus>>,
+    pub images: Option<Arc<uicore::ImageCensus>>,
     /// `None` when the session did not time the frame.
     pub phases: Option<FramePhases>,
 }
@@ -433,14 +433,14 @@ impl FrameOutput {
     }
 }
 
-/// A language runtime bound to one [`core::Tree`].
+/// A language runtime bound to one [`uicore::Tree`].
 ///
 /// `frame` runs in this order: input has already been delivered through
 /// [`Session::pointer`] and [`Session::input`], due timers, animation callbacks,
 /// flush handlers, layout, record.
 pub trait Session {
     fn metrics(&mut self, metrics: &Metrics);
-    fn pointer(&mut self, event: core::PointerEvent);
+    fn pointer(&mut self, event: uicore::PointerEvent);
     fn frame(&mut self, time: FrameTime) -> FrameOutput;
     /// True after the session asked for another frame, until the host takes it.
     ///
@@ -470,7 +470,7 @@ pub trait Session {
         None
     }
     /// An accessibility action. The default ignores it.
-    fn semantics_action(&mut self, _action: core::SemanticsAction) {}
+    fn semantics_action(&mut self, _action: uicore::SemanticsAction) {}
     /// Font faces queued by the session since the last take.
     ///
     /// The host registers them on the render thread before `submit`. The default

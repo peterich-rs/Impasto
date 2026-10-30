@@ -1,4 +1,4 @@
-//! WebSocket work for `uifw-net`. HTTP is [`crate::http::OpenWireClient`].
+//! WebSocket work for `net`. HTTP is [`crate::http::OpenWireClient`].
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -18,7 +18,7 @@ pub(crate) fn spawn(
     http: Option<Arc<dyn HttpClient>>,
 ) -> Option<thread::JoinHandle<()>> {
     thread::Builder::new()
-        .name("uifw-net".to_string())
+        .name("net".to_string())
         .spawn(move || serve(jobs, inbox, http))
         .ok()
 }
@@ -28,7 +28,7 @@ pub(crate) fn wake(
     inbox: Arc<Inbox>,
 ) -> Option<thread::JoinHandle<()>> {
     thread::Builder::new()
-        .name("uifw-time".to_string())
+        .name("time".to_string())
         .spawn(move || wake_loop(deadlines, inbox))
         .ok()
 }
@@ -179,7 +179,7 @@ fn open_socket(
     let url = url.to_owned();
     let protocols = protocols.to_vec();
     thread::Builder::new()
-        .name(format!("uifw-socket-{id}"))
+        .name(format!("socket-{id}"))
         .spawn(move || socket_loop(id, &url, &protocols, rx, inbox))
         .map_err(|error| error.to_string())?;
     Ok(tx)

@@ -1,4 +1,4 @@
-import * as host from "@uifw/app-state/host";
+import * as host from "@impasto/app-state/host";
 
 export const AppState = {
   get currentState() {

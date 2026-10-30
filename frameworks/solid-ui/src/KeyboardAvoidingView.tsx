@@ -1,6 +1,6 @@
 import { createTrackedEffect, onCleanup } from "solid-js";
-import { onFrame, readMetrics, scrollIntoView, type NodeHandle } from "@uifw/solid-renderer";
-import { host } from "@uifw/solid-renderer";
+import { onFrame, readMetrics, scrollIntoView, type NodeHandle } from "@impasto/solid-renderer";
+import { host } from "@impasto/solid-renderer";
 
 /**
  * `padding` adds `metrics.viewInsets.bottom`.

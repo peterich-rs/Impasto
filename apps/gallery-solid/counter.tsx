@@ -1,6 +1,6 @@
 import { Show, createSignal } from "solid-js";
-import { Text, boot, directionFor, host } from "@uifw/solid-renderer";
-import { RouterView, createRouter, type RouteParams, type Router } from "@uifw/solid-router";
+import { Text, boot, directionFor, host } from "@impasto/solid-renderer";
+import { RouterView, createRouter, type RouteParams, type Router } from "@impasto/solid-router";
 import {
   Button,
   Dialog,
@@ -14,7 +14,7 @@ import {
   messageOf,
   stackOf,
   useTheme,
-} from "@uifw/solid-ui";
+} from "@impasto/solid-ui";
 import { kicker } from "./util.js";
 
 const GUTTER = 20;

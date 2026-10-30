@@ -1,4 +1,4 @@
-import { host } from "@uifw/solid-renderer";
+import { host } from "@impasto/solid-renderer";
 import type { PlatformSnapshot } from "./theme.ts";
 
 export type HostExt = typeof host & {

@@ -34,7 +34,6 @@ impl PictureCache {
         self.builds
     }
 
-    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.map.len()
     }
@@ -46,7 +45,6 @@ impl PictureCache {
     pub(crate) fn note_limit(&mut self) {
         if self.map.len() > 4096 && !self.warned {
             self.warned = true;
-            eprintln!("engine cache: {} pictures exceeds 4096", self.map.len());
         }
     }
 

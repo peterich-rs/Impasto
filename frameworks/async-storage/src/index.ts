@@ -1,4 +1,4 @@
-import * as host from "@uifw/async-storage/host";
+import * as host from "@impasto/async-storage/host";
 
 export interface AsyncStorage {
   multiGet(keys: string[]): Promise<[string, string | null][]>;

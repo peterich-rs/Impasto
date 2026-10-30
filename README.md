@@ -1,4 +1,4 @@
-# Future
+# Impasto
 
 跨平台 UI 框架。上层写细粒度响应式界面，下层用同一份场景描述，交给 Impeller 绘制，让各端像素一致。
 
@@ -6,12 +6,10 @@
 
 | 路线 | 代码 | 现状 |
 |---|---|---|
-| Solid 2.0 TSX + QuickJS | `frameworks/solid-renderer`、`frameworks/solid-ui`、`frameworks/solid-router` | QuickJS 会话直接改 `core` 的渲染树。编译产物是 ESM `apps/gallery-solid/dist/counter.js` |
+| Solid 2.0 TSX + QuickJS | `frameworks/solid-renderer`、`frameworks/solid-ui`、`frameworks/solid-router` | QuickJS 会话直接改 `uicore` 的渲染树。编译产物 ESM `apps/gallery-solid/dist/counter.js` 由 `just gallery-dist` 本地生成，不进 git |
 | Kotlin lambda DSL | `frameworks/kotlin-ui` | 暂缓。Gradle 工程还在，界面 DSL、信号和原生嵌入未接，见 `docs/refactor-plan.md` |
 
 macOS 宿主在 `hosts/macos`，用 Impeller standalone SDK 的 Metal 后端。Android 宿主在 `hosts/android`，用同一份 SDK 的 Vulkan 后端。没有 SDK 时渲染引擎返回 `NotLinked`，测试仍可通过。iOS 的预构建矩阵没有这一列，宿主还没写。未落地的迭代规划在 `docs/refactor-plan.md`。
-
-Kotlin 包名 `dev.uifw`、Solid 包名 `@uifw/solid-renderer` 仍是旧前缀，留到改这两层时再换。
 
 ## 文档
 
@@ -57,30 +55,30 @@ just check
 
 ```sh
 just host
-UIFW_DUMP=/tmp/uifw-frame.png just host
+IMPASTO_DUMP=/tmp/impasto-frame.png just host
 just host-js
 just android
 ```
 
-`just host` 打开默认 360×640 的窗口，加载 ESM `apps/gallery-solid/dist/counter.js`。`just host-js` 是同一条命令。`UIFW_DUMP` 把一帧 Metal 纹理写成 PNG 后退出，用来看画面。`just android` 打 APK。需要 SDK 和 quickjs-ng 源码。
+`just host` 打开默认 360×640 的窗口，加载 ESM `apps/gallery-solid/dist/counter.js`（`just gallery-dist` 从 TSX 源码本地构建，产物不提交）。`just host-js` 是同一条命令。`IMPASTO_DUMP` 把一帧 Metal 纹理写成 PNG 后退出，用来看画面。`IMPASTO_LOG` 过滤进程日志，取值 `error`、`warn`、`info`（缺省）、`debug`。`just android` 打 APK。需要 SDK 和 quickjs-ng 源码。
 
 ## 目录
 
 ```
 protocol/                  版本 1 场景字节，以及把它收成绘制列表
-core/                      渲染树。Taffy 布局、命中、click 和 drag
+uicore/                    渲染树。Taffy 布局、命中、click 和 drag
 engine/                    渲染引擎。读绘制列表，调用 Impeller
 session/                   会话。宿主每帧调用 metrics、pointer、frame、wants_frame、lifecycle
 hosts/hostshell/           壳。命令队列、帧调度、渲染线程
 hosts/macos/               macOS 窗口
 hosts/android/             Android 宿主。`HostActivity`、`HostView`、Choreographer、Vulkan
 runtimes/quickjs/          quickjs-ng 会话。没有源码时返回 NotLinked
-frameworks/clipboard/      @uifw/clipboard
-frameworks/linking/        @uifw/linking
-frameworks/app-state/      @uifw/app-state
-frameworks/file-system/    @uifw/file-system
-frameworks/async-storage/  @uifw/async-storage
-frameworks/solid-renderer/ 接到 core 的运行时
+frameworks/clipboard/      @impasto/clipboard
+frameworks/linking/        @impasto/linking
+frameworks/app-state/      @impasto/app-state
+frameworks/file-system/    @impasto/file-system
+frameworks/async-storage/  @impasto/async-storage
+frameworks/solid-renderer/ 接到 uicore 的运行时
 frameworks/solid-ui/       Button、Field、Dialog、theme、overlay
 frameworks/solid-router/   路径、栈和 RouterView
 frameworks/net/            createFetch
@@ -88,7 +86,7 @@ frameworks/form/           createForm
 frameworks/i18n/           formatNumber、formatDate、plural
 frameworks/permissions/    权限 API
 frameworks/kotlin-ui/      Kotlin DSL。目前只开了 JVM 目标
-apps/gallery-solid/        Solid 画廊。调度、导航、列表和对话框。产物是 ESM dist/counter.js
+apps/gallery-solid/        Solid 画廊。调度、导航、列表和对话框。ESM 产物 dist/counter.js 本地构建，不提交
 ```
 
 仓库根上的 `settings.gradle.kts` 没有 `include`，用来挡住 Gradle 往家目录继续找工程。Kotlin 工程在 `frameworks/kotlin-ui`。

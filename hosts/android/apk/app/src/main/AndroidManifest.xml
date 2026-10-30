@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
-        android:label="uifw counter"
+        android:label="impasto counter"
         android:hasCode="true">
         <activity
-            android:name="dev.uifw.host.HostActivity"
+            android:name="dev.impasto.host.HostActivity"
             android:exported="true"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
             android:hardwareAccelerated="true"

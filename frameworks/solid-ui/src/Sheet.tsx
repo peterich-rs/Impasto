@@ -1,5 +1,5 @@
 import { onCleanup } from "solid-js";
-import { directionFor, host, onFrame, overlayParent, removeNode, restoreFocus, spring, takeInitialFocus, type NodeHandle } from "@uifw/solid-renderer";
+import { directionFor, host, onFrame, overlayParent, removeNode, restoreFocus, spring, takeInitialFocus, type NodeHandle } from "@impasto/solid-renderer";
 import { colorBytes } from "./colors.ts";
 import { coreHost, nodeId } from "./host-ext.ts";
 import { registerOverlay } from "./overlay/registry.ts";

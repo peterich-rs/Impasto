@@ -3,7 +3,7 @@
 use std::ffi::{c_char, c_void};
 
 use protocol::TextAlign;
-use ui_core::{Alignment, Edges, Justify, NodeId, RowCrossAlign, TrackSize};
+use uicore::{Alignment, Edges, Justify, NodeId, RowCrossAlign, TrackSize};
 
 use super::ffi::*;
 use super::*;
@@ -88,7 +88,7 @@ pub(super) unsafe extern "C" fn append(session: *mut c_void, parent: u64, child:
     )
 }
 
-pub(super) fn logged_status(inner: &Inner, result: Result<(), ui_core::Error>, what: &str) -> i32 {
+pub(super) fn logged_status(inner: &Inner, result: Result<(), uicore::Error>, what: &str) -> i32 {
     match result {
         Ok(()) => 0,
         Err(error) => {
@@ -549,7 +549,7 @@ pub(super) unsafe extern "C" fn scroll(session: *mut c_void, axis: i32, out: *mu
         inner
             .tree
             .borrow_mut()
-            .scroll_with(ui_core::ScrollAxis::from_code(axis)),
+            .scroll_with(uicore::ScrollAxis::from_code(axis)),
         out,
     )
 }
@@ -560,7 +560,7 @@ pub(super) unsafe extern "C" fn set_scroll_axis(session: *mut c_void, node: u64,
         inner
             .tree
             .borrow_mut()
-            .set_scroll_axis(NodeId::from_raw(node), ui_core::ScrollAxis::from_code(axis)),
+            .set_scroll_axis(NodeId::from_raw(node), uicore::ScrollAxis::from_code(axis)),
     )
 }
 
@@ -601,45 +601,45 @@ pub(super) unsafe extern "C" fn text_edit(
         text.to_owned()
     };
     let edit = match op {
-        0 => ui_core::Edit::Load(extra),
-        1 => ui_core::Edit::Left,
-        2 => ui_core::Edit::Right,
-        3 => ui_core::Edit::Backspace,
-        4 => ui_core::Edit::Insert(extra),
-        5 => ui_core::Edit::Composing(if extra.is_empty() { None } else { Some(extra) }),
-        6 => ui_core::Edit::Paste(extra),
-        7 => ui_core::Edit::Undo,
-        8 => ui_core::Edit::Redo,
-        9 => ui_core::Edit::SelectAll,
-        10 => ui_core::Edit::Copy,
-        11 => ui_core::Edit::Cut,
-        12 => ui_core::Edit::SetCaret(extra.parse::<u32>().unwrap_or(0)),
-        13 => ui_core::Edit::ForwardDelete,
-        14 => ui_core::Edit::Newline,
-        15 => ui_core::Edit::WordLeft,
-        16 => ui_core::Edit::WordRight,
-        17 => ui_core::Edit::LineStart,
-        18 => ui_core::Edit::LineEnd,
-        19 => ui_core::Edit::ExtendLeft,
-        20 => ui_core::Edit::ExtendRight,
-        21 => ui_core::Edit::ExtendWordLeft,
-        22 => ui_core::Edit::ExtendWordRight,
-        23 => ui_core::Edit::ExtendLineStart,
-        24 => ui_core::Edit::ExtendLineEnd,
-        25 => ui_core::Edit::Up,
-        26 => ui_core::Edit::Down,
-        27 => ui_core::Edit::ExtendUp,
-        28 => ui_core::Edit::ExtendDown,
-        29 => ui_core::Edit::ExtendCaret(extra.parse::<u32>().unwrap_or(0)),
-        30 => ui_core::Edit::DeleteWordBackward,
-        31 => ui_core::Edit::DeleteWordForward,
-        32 => ui_core::Edit::DeleteToLineStart,
-        33 => ui_core::Edit::DeleteToLineEnd,
-        34 => ui_core::Edit::DocumentStart,
-        35 => ui_core::Edit::DocumentEnd,
-        36 => ui_core::Edit::ExtendDocumentStart,
-        37 => ui_core::Edit::ExtendDocumentEnd,
-        38 => ui_core::Edit::Commit(extra),
+        0 => uicore::Edit::Load(extra),
+        1 => uicore::Edit::Left,
+        2 => uicore::Edit::Right,
+        3 => uicore::Edit::Backspace,
+        4 => uicore::Edit::Insert(extra),
+        5 => uicore::Edit::Composing(if extra.is_empty() { None } else { Some(extra) }),
+        6 => uicore::Edit::Paste(extra),
+        7 => uicore::Edit::Undo,
+        8 => uicore::Edit::Redo,
+        9 => uicore::Edit::SelectAll,
+        10 => uicore::Edit::Copy,
+        11 => uicore::Edit::Cut,
+        12 => uicore::Edit::SetCaret(extra.parse::<u32>().unwrap_or(0)),
+        13 => uicore::Edit::ForwardDelete,
+        14 => uicore::Edit::Newline,
+        15 => uicore::Edit::WordLeft,
+        16 => uicore::Edit::WordRight,
+        17 => uicore::Edit::LineStart,
+        18 => uicore::Edit::LineEnd,
+        19 => uicore::Edit::ExtendLeft,
+        20 => uicore::Edit::ExtendRight,
+        21 => uicore::Edit::ExtendWordLeft,
+        22 => uicore::Edit::ExtendWordRight,
+        23 => uicore::Edit::ExtendLineStart,
+        24 => uicore::Edit::ExtendLineEnd,
+        25 => uicore::Edit::Up,
+        26 => uicore::Edit::Down,
+        27 => uicore::Edit::ExtendUp,
+        28 => uicore::Edit::ExtendDown,
+        29 => uicore::Edit::ExtendCaret(extra.parse::<u32>().unwrap_or(0)),
+        30 => uicore::Edit::DeleteWordBackward,
+        31 => uicore::Edit::DeleteWordForward,
+        32 => uicore::Edit::DeleteToLineStart,
+        33 => uicore::Edit::DeleteToLineEnd,
+        34 => uicore::Edit::DocumentStart,
+        35 => uicore::Edit::DocumentEnd,
+        36 => uicore::Edit::ExtendDocumentStart,
+        37 => uicore::Edit::ExtendDocumentEnd,
+        38 => uicore::Edit::Commit(extra),
         _ => return -1,
     };
     let Ok(value) = inner
@@ -819,16 +819,16 @@ pub(super) unsafe extern "C" fn text_edit_bytes(
     }
 }
 
-pub(super) fn snap_grid(interval: f32, align: i32) -> Option<ui_core::SnapGrid> {
+pub(super) fn snap_grid(interval: f32, align: i32) -> Option<uicore::SnapGrid> {
     if !(interval.is_finite() && interval > 0.5) {
         return None;
     }
     let align = match align {
-        1 => ui_core::SnapAlign::Center,
-        2 => ui_core::SnapAlign::End,
-        _ => ui_core::SnapAlign::Start,
+        1 => uicore::SnapAlign::Center,
+        2 => uicore::SnapAlign::End,
+        _ => uicore::SnapAlign::Start,
     };
-    Some(ui_core::SnapGrid { interval, align })
+    Some(uicore::SnapGrid { interval, align })
 }
 
 pub(super) unsafe extern "C" fn set_scroll_physics(
@@ -849,25 +849,25 @@ pub(super) unsafe extern "C" fn set_scroll_physics(
     snap_damping: f32,
 ) -> i32 {
     let inner = unsafe { inner(session) };
-    let physics = ui_core::ScrollPhysics {
+    let physics = uicore::ScrollPhysics {
         decay: if curve == 2 {
             // The caller spelled the coast as a deceleration rate; `tau`
             // carries the rate and converts on construction.
-            ui_core::Decay::Rate(f64::from(tau))
+            uicore::Decay::Rate(f64::from(tau))
         } else {
-            ui_core::Decay::Tau(f64::from(tau))
+            uicore::Decay::Tau(f64::from(tau))
         },
         band: if curve == 1 {
-            ui_core::Band::Curve {
+            uicore::Band::Curve {
                 c: f64::from(factor) as f32,
             }
         } else {
-            ui_core::Band::Linear { factor }
+            uicore::Band::Linear { factor }
         },
         overscroll: if mode == 1 {
-            ui_core::OverscrollMode::Clamp
+            uicore::OverscrollMode::Clamp
         } else {
-            ui_core::OverscrollMode::RubberBand
+            uicore::OverscrollMode::RubberBand
         },
         overscroll_stiffness: stiffness,
         overscroll_damping: damping,
@@ -876,7 +876,7 @@ pub(super) unsafe extern "C" fn set_scroll_physics(
         snap_damping,
         snap_x: snap_grid(snap_x, align_x),
         snap_y: snap_grid(snap_y, align_y),
-        accept: ui_core::ScrollAccept::from_code(accept),
+        accept: uicore::ScrollAccept::from_code(accept),
     };
     status(
         inner
@@ -1024,7 +1024,7 @@ pub(super) fn flush_mutations(inner: &Inner) -> bool {
 pub(super) fn apply_mutation(
     tree: &mut Tree,
     mutation: &PendingMutation,
-) -> Result<(), ui_core::Error> {
+) -> Result<(), uicore::Error> {
     use crate::abi::{MutationOp, StyleField};
     let op = mutation.op;
     let id = NodeId::from_raw(mutation.id);
@@ -1040,7 +1040,7 @@ pub(super) fn apply_mutation(
             4 => tree.padding(mutation.number as f32)?,
             5 => tree.sized(mutation.number as f32, mutation.number2 as f32)?,
             6 => tree.scroll()?,
-            _ => return Err(ui_core::Error::WrongKind),
+            _ => return Err(uicore::Error::WrongKind),
         };
         if mutation.parent != 0 {
             tree.add_child(NodeId::from_raw(mutation.parent), created)?;
@@ -1066,11 +1066,11 @@ pub(super) fn apply_mutation(
         // number picks the edit: 0 commit composition, 1 insert text, 2
         // backspace, 3 forward delete. The buffer path mirrors the JS session.
         let edit = match mutation.number as i32 {
-            0 => ui_core::Edit::Composing(None),
-            1 => ui_core::Edit::Insert(mutation.text.clone()),
-            2 => ui_core::Edit::Backspace,
-            3 => ui_core::Edit::ForwardDelete,
-            _ => return Err(ui_core::Error::BadNumber),
+            0 => uicore::Edit::Composing(None),
+            1 => uicore::Edit::Insert(mutation.text.clone()),
+            2 => uicore::Edit::Backspace,
+            3 => uicore::Edit::ForwardDelete,
+            _ => return Err(uicore::Error::BadNumber),
         };
         return tree.text_edit(id, edit).map(|_| ());
     }
@@ -1082,16 +1082,12 @@ pub(super) fn apply_mutation(
     // channels.
     let value = mutation.number as f32;
     match mutation.field {
-        field if field == StyleField::Width as u32 => tree.set_axis_size(
-            id,
-            ui_core::AxisSize::Points(value),
-            ui_core::AxisSize::Auto,
-        ),
-        field if field == StyleField::Height as u32 => tree.set_axis_size(
-            id,
-            ui_core::AxisSize::Auto,
-            ui_core::AxisSize::Points(value),
-        ),
+        field if field == StyleField::Width as u32 => {
+            tree.set_axis_size(id, uicore::AxisSize::Points(value), uicore::AxisSize::Auto)
+        }
+        field if field == StyleField::Height as u32 => {
+            tree.set_axis_size(id, uicore::AxisSize::Auto, uicore::AxisSize::Points(value))
+        }
         field if field == StyleField::Padding as u32 => {
             tree.set_padding_edges(id, Edges::all(value))
         }
@@ -1108,16 +1104,16 @@ pub(super) fn apply_mutation(
         }
         field if field == StyleField::Align as u32 => match alignment_of(mutation.number as u32) {
             Some(alignment) => tree.set_align_self(id, alignment),
-            None => Err(ui_core::Error::BadNumber),
+            None => Err(uicore::Error::BadNumber),
         },
         field if field == StyleField::Justify as u32 => match justify_of(mutation.number as u32) {
             Some(justify) => tree.set_justify(id, justify),
-            None => Err(ui_core::Error::BadNumber),
+            None => Err(uicore::Error::BadNumber),
         },
         field if field == StyleField::Wrap as u32 => tree.set_wrap(id, mutation.number > 0.5),
         field if field == StyleField::Inset as u32 => tree.set_inset(
             id,
-            ui_core::Inset {
+            uicore::Inset {
                 top: (mutation.number > 0.0).then_some(mutation.number as f32),
                 right: (mutation.number2 > 0.0).then_some(mutation.number2 as f32),
                 bottom: (mutation.color[0] > 0).then_some(f32::from(mutation.color[0])),
@@ -1129,10 +1125,10 @@ pub(super) fn apply_mutation(
             // axis is not enough; mutations keep Auto until the buffer grows.
             tree.set_grid_placement(
                 id,
-                ui_core::GridLine::Auto,
-                ui_core::GridLine::Auto,
-                ui_core::GridLine::Auto,
-                ui_core::GridLine::Auto,
+                uicore::GridLine::Auto,
+                uicore::GridLine::Auto,
+                uicore::GridLine::Auto,
+                uicore::GridLine::Auto,
             )
         }
         field if field == StyleField::FontSize as u32 => tree.set_font_size(id, value),
@@ -1288,33 +1284,29 @@ pub(super) unsafe extern "C" fn set_fill(session: *mut c_void, node: u64) -> i32
     status(inner.tree.borrow_mut().set_fill(NodeId::from_raw(node)))
 }
 
-pub(super) fn parse_tracks(text: &str) -> Result<Vec<TrackSize>, ui_core::Error> {
+pub(super) fn parse_tracks(text: &str) -> Result<Vec<TrackSize>, uicore::Error> {
     if text.is_empty() {
-        return Err(ui_core::Error::BadNumber);
+        return Err(uicore::Error::BadNumber);
     }
     text.split(',').map(parse_track).collect()
 }
 
-pub(super) fn parse_track(token: &str) -> Result<TrackSize, ui_core::Error> {
+pub(super) fn parse_track(token: &str) -> Result<TrackSize, uicore::Error> {
     let token = token.trim();
     match token {
         "min" => Ok(TrackSize::MinContent),
         "max" => Ok(TrackSize::MaxContent),
         other if let Some(value) = other.strip_suffix("fr") => {
-            let value = value
-                .parse::<f32>()
-                .map_err(|_| ui_core::Error::BadNumber)?;
+            let value = value.parse::<f32>().map_err(|_| uicore::Error::BadNumber)?;
             if !value.is_finite() || value < 0.0 {
-                return Err(ui_core::Error::BadNumber);
+                return Err(uicore::Error::BadNumber);
             }
             Ok(TrackSize::Fraction(value))
         }
         other => {
-            let value = other
-                .parse::<f32>()
-                .map_err(|_| ui_core::Error::BadNumber)?;
+            let value = other.parse::<f32>().map_err(|_| uicore::Error::BadNumber)?;
             if !value.is_finite() || value < 0.0 {
-                return Err(ui_core::Error::BadNumber);
+                return Err(uicore::Error::BadNumber);
             }
             Ok(TrackSize::Points(value))
         }
@@ -1481,47 +1473,47 @@ pub(super) unsafe extern "C" fn log_message(
     (inner.log)(level, text);
 }
 
-pub(super) fn gesture_parts(gesture: ui_core::Gesture) -> (NodeId, i32, f64, f64) {
+pub(super) fn gesture_parts(gesture: uicore::Gesture) -> (NodeId, i32, f64, f64) {
     match gesture {
-        ui_core::Gesture::Click(id) => (id, 0, 0.0, 0.0),
-        ui_core::Gesture::Press(id) => (id, 1, 0.0, 0.0),
-        ui_core::Gesture::Release(id) => (id, 2, 0.0, 0.0),
-        ui_core::Gesture::DragBegin(id) => (id, 3, 0.0, 0.0),
-        ui_core::Gesture::DragBy(id, dx, dy) => (id, 4, f64::from(dx), f64::from(dy)),
-        ui_core::Gesture::DragEnd(id, vx, vy) => (id, 5, f64::from(vx), f64::from(vy)),
-        ui_core::Gesture::Focus(id) => (id, 6, 0.0, 0.0),
-        ui_core::Gesture::Blur(id) => (id, 7, 0.0, 0.0),
-        ui_core::Gesture::Hover(id) => (id, 11, 0.0, 0.0),
-        ui_core::Gesture::Leave(id) => (id, 12, 0.0, 0.0),
-        ui_core::Gesture::Wheel(id, dx, dy) => (id, 13, f64::from(dx), f64::from(dy)),
-        ui_core::Gesture::SecondaryClick(id) => (id, 14, 0.0, 0.0),
-        ui_core::Gesture::Scroll(id, x, y) => (id, 15, f64::from(x), f64::from(y)),
-        ui_core::Gesture::TextReplaced(id) => (id, 16, 0.0, 0.0),
-        ui_core::Gesture::ActivateLink { id, link } => (id, 17, f64::from(link), 0.0),
-        ui_core::Gesture::LongPress(id) => (id, 18, 0.0, 0.0),
-        ui_core::Gesture::DoubleTap(id) => (id, 19, 0.0, 0.0),
-        ui_core::Gesture::Zoom { id, scale } => (id, 20, f64::from(scale), 0.0),
-        ui_core::Gesture::ScrollPhaseChanged { id, .. } => (id, 21, 0.0, 0.0),
+        uicore::Gesture::Click(id) => (id, 0, 0.0, 0.0),
+        uicore::Gesture::Press(id) => (id, 1, 0.0, 0.0),
+        uicore::Gesture::Release(id) => (id, 2, 0.0, 0.0),
+        uicore::Gesture::DragBegin(id) => (id, 3, 0.0, 0.0),
+        uicore::Gesture::DragBy(id, dx, dy) => (id, 4, f64::from(dx), f64::from(dy)),
+        uicore::Gesture::DragEnd(id, vx, vy) => (id, 5, f64::from(vx), f64::from(vy)),
+        uicore::Gesture::Focus(id) => (id, 6, 0.0, 0.0),
+        uicore::Gesture::Blur(id) => (id, 7, 0.0, 0.0),
+        uicore::Gesture::Hover(id) => (id, 11, 0.0, 0.0),
+        uicore::Gesture::Leave(id) => (id, 12, 0.0, 0.0),
+        uicore::Gesture::Wheel(id, dx, dy) => (id, 13, f64::from(dx), f64::from(dy)),
+        uicore::Gesture::SecondaryClick(id) => (id, 14, 0.0, 0.0),
+        uicore::Gesture::Scroll(id, x, y) => (id, 15, f64::from(x), f64::from(y)),
+        uicore::Gesture::TextReplaced(id) => (id, 16, 0.0, 0.0),
+        uicore::Gesture::ActivateLink { id, link } => (id, 17, f64::from(link), 0.0),
+        uicore::Gesture::LongPress(id) => (id, 18, 0.0, 0.0),
+        uicore::Gesture::DoubleTap(id) => (id, 19, 0.0, 0.0),
+        uicore::Gesture::Zoom { id, scale } => (id, 20, f64::from(scale), 0.0),
+        uicore::Gesture::ScrollPhaseChanged { id, .. } => (id, 21, 0.0, 0.0),
     }
 }
 
 pub(super) fn dispatch_gestures(
     inner: &Inner,
-    gestures: Vec<ui_core::Gesture>,
+    gestures: Vec<uicore::Gesture>,
 ) -> Result<(), String> {
     for gesture in gestures {
         note_gesture(&inner.marks, &gesture);
         match gesture {
-            ui_core::Gesture::TextReplaced(id) => {
+            uicore::Gesture::TextReplaced(id) => {
                 let text = inner.tree.borrow().editor_text(id).unwrap_or_default();
                 dispatch_text(inner, id, &text)?;
                 continue;
             }
-            ui_core::Gesture::ActivateLink { id, link } => {
+            uicore::Gesture::ActivateLink { id, link } => {
                 dispatch_kind(inner, id, 17, f64::from(link), 0.0)?;
                 continue;
             }
-            ui_core::Gesture::ScrollPhaseChanged {
+            uicore::Gesture::ScrollPhaseChanged {
                 id,
                 phase,
                 vx,
@@ -1544,7 +1536,7 @@ pub(super) fn dispatch_gestures(
 pub(super) fn dispatch_scroll_phase(
     inner: &Inner,
     id: NodeId,
-    phase: ui_core::ScrollPhase,
+    phase: uicore::ScrollPhase,
     vx: f32,
     vy: f32,
     ox: f32,

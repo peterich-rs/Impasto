@@ -45,14 +45,14 @@ pub(super) fn bump(cell: &Cell<u32>) {
     cell.set(cell.get().saturating_add(1));
 }
 
-pub(super) fn note_gesture(marks: &FrameMarks, gesture: &ui_core::Gesture) {
+pub(super) fn note_gesture(marks: &FrameMarks, gesture: &uicore::Gesture) {
     bump(&marks.gestures);
     match gesture {
-        ui_core::Gesture::Scroll(_, _, _) | ui_core::Gesture::ScrollPhaseChanged { .. } => {
+        uicore::Gesture::Scroll(_, _, _) | uicore::Gesture::ScrollPhaseChanged { .. } => {
             bump(&marks.scrolls);
         }
-        ui_core::Gesture::Focus(_) => bump(&marks.focus),
-        ui_core::Gesture::Blur(_) => bump(&marks.blur),
+        uicore::Gesture::Focus(_) => bump(&marks.focus),
+        uicore::Gesture::Blur(_) => bump(&marks.blur),
         _ => {}
     }
 }

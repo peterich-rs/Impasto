@@ -1,4 +1,4 @@
-import { onBack } from "@uifw/solid-renderer";
+import { onBack } from "@impasto/solid-renderer";
 
 export type OverlayEntry = {
   id: number;

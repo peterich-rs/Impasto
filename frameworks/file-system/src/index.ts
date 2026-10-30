@@ -1,4 +1,4 @@
-import * as host from "@uifw/file-system/host";
+import * as host from "@impasto/file-system/host";
 
 export interface FileSystem {
   documentDirectory(): string;

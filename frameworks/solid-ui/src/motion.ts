@@ -1,4 +1,4 @@
-import { onFrame, requestFrame } from "@uifw/solid-renderer";
+import { onFrame, requestFrame } from "@impasto/solid-renderer";
 import { animateOnClock, bindMotion, installMotionTestHooks, transition } from "./motion-clock.ts";
 
 const hooks = {

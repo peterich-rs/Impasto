@@ -11,7 +11,7 @@ impl Rt {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
-            .thread_name("uifw-rt")
+            .thread_name("rt")
             .build()
             .map_err(|error| error.to_string())?;
         Ok(Self { runtime })

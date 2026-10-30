@@ -1,5 +1,5 @@
 import { onCleanup } from "solid-js";
-import { host, onFrame, overlayParent, removeNode, spring, type NodeHandle } from "@uifw/solid-renderer";
+import { host, onFrame, overlayParent, removeNode, spring, type NodeHandle } from "@impasto/solid-renderer";
 import { colorBytes } from "./colors.ts";
 import { nodeId } from "./host-ext.ts";
 import { moveChildren } from "./overlay.ts";

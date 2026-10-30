@@ -1,5 +1,5 @@
 import { createTrackedEffect, createSignal, onCleanup, type Accessor } from "solid-js";
-import { host, onFrame, requestFrame, setStroke } from "@uifw/solid-renderer";
+import { host, onFrame, requestFrame, setStroke } from "@impasto/solid-renderer";
 import { colorBytes } from "./colors.ts";
 import { useTheme } from "./use-theme.ts";
 

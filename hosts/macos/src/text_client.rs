@@ -12,7 +12,7 @@ pub struct Marked {
     pub committed: String,
     pub composing: String,
     pub selection: std::ops::Range<u32>,
-    pub caret: core::Rect,
+    pub caret: uicore::Rect,
 }
 
 impl Default for Marked {
@@ -21,7 +21,7 @@ impl Default for Marked {
             committed: String::new(),
             composing: String::new(),
             selection: 0..0,
-            caret: core::Rect {
+            caret: uicore::Rect {
                 x: 0.0,
                 y: 0.0,
                 w: 0.0,

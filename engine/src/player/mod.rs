@@ -215,17 +215,15 @@ impl Engine {
         typography.note_paragraph_limit();
         self.textures.note_limit();
         self.pictures.note_limit();
+        self.last_submit.paragraphs = u32::try_from(typography.measured_len()).unwrap_or(u32::MAX);
+        self.last_submit.pictures = u32::try_from(self.pictures.len()).unwrap_or(u32::MAX);
+        self.last_submit.textures = u32::try_from(self.textures.len()).unwrap_or(u32::MAX);
         Ok(())
     }
 
     /// Pictures built since the engine was created. The cache key is picture id and generation.
     pub fn picture_builds(&self) -> u64 {
         self.pictures.builds()
-    }
-
-    /// Paragraph and texture entries retained after the last submit.
-    pub fn cache_counts(&self) -> (usize, usize) {
-        (self.typography.borrow().measured_len(), self.textures.len())
     }
 
     /// Counts from the last successful [`Engine::submit_layers`].
@@ -376,10 +374,6 @@ impl crate::Surface for Engine {
 
     fn picture_builds(&self) -> u64 {
         Engine::picture_builds(self)
-    }
-
-    fn cache_counts(&self) -> (usize, usize) {
-        Engine::cache_counts(self)
     }
 
     fn submit_stats(&self) -> crate::SubmitStats {
@@ -1078,9 +1072,7 @@ mod tests {
             Ok(font) => font,
             Err(_) => return,
         };
-        engine
-            .register_font(&font, "UIFWSans")
-            .expect("font registers");
+        engine.register_font(&font, "Sans").expect("font registers");
         let first = engine
             .typography()
             .borrow_mut()
@@ -1314,9 +1306,7 @@ mod tests {
     fn fonted() -> Option<Engine> {
         let mut engine = opened()?;
         let font = std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf").ok()?;
-        engine
-            .register_font(&font, "UIFWSans")
-            .expect("font registers");
+        engine.register_font(&font, "Sans").expect("font registers");
         Some(engine)
     }
 
@@ -1554,7 +1544,7 @@ mod tests {
                     weight: 400,
                     underline: false,
                     line_through: false,
-                    family: Some("UIFWSans".to_owned()),
+                    family: Some("Sans".to_owned()),
                 },
                 protocol::TextSpan {
                     utf8: "cd".to_owned(),
@@ -1580,7 +1570,7 @@ mod tests {
         engine
             .typography()
             .borrow_mut()
-            .measure_with_spans("abcd", 16.0, 200.0, color, &base, &spans("UIFWSans", 700))
+            .measure_with_spans("abcd", 16.0, 200.0, color, &base, &spans("Sans", 700))
             .expect("family changes the key");
         assert_eq!(engine.cached_paragraphs(), 2);
         engine
@@ -1667,7 +1657,7 @@ mod tests {
         let font =
             std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf").expect("font file");
         engine
-            .register_font(&font, "UIFWSans")
+            .register_font(&font, "Sans")
             .expect("font registers again");
         engine
             .submit_layers(&tree, 1.0, |_| None)

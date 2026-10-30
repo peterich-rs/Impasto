@@ -1,4 +1,4 @@
-//! Type stubs for `@uifw/<pkg>/host`. Names and kind only.
+//! Type stubs for `@impasto/<pkg>/host`. Names and kind only.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use crate::modules::{
 
 pub fn first_party_modules() -> Vec<HostModule> {
     let clipboard_host = MemoryClipboard::new("");
-    let storage = MemoryStorage::new("/tmp/uifw-docs");
+    let storage = MemoryStorage::new("/tmp/file-system");
     vec![
         app_state(session::shared("active".to_owned())),
         linking(Arc::new(NullLinking), session::shared(None)),
@@ -25,7 +25,7 @@ pub fn first_party_modules() -> Vec<HostModule> {
 }
 
 pub fn package_folder(specifier: &str) -> Option<&str> {
-    specifier.strip_prefix("@uifw/")?.strip_suffix("/host")
+    specifier.strip_prefix("@impasto/")?.strip_suffix("/host")
 }
 
 pub fn host_stub_source(module: &HostModule) -> String {

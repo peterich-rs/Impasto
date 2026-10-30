@@ -1,7 +1,7 @@
 (function (global) {
   "use strict";
 
-  var bridge = global.__uifw;
+  var bridge = global.__host;
   var sockets = new Map();
 
   function AbortSignal() {
@@ -348,7 +348,7 @@
 
   // ---- Streaming fetch -------------------------------------------------
   // One open stream per token. The native side pushes pieces through
-  // `__uifw._httpStream(token, kind, payload)`; kind is "head", "chunk",
+  // `__host._httpStream(token, kind, payload)`; kind is "head", "chunk",
   // or "done". A "done" with a string payload is an error name.
 
   function Reader(queue, oncancel) {

@@ -14,7 +14,7 @@ pub fn module(host: Arc<dyn StorageHost>) -> HostModule {
     let dir = host.document_dir();
     HostModule {
         name: "FileSystem",
-        specifier: "@uifw/file-system/host",
+        specifier: "@impasto/file-system/host",
         methods: vec![
             HostMethod::sync("documentDirectory", {
                 let dir = dir.clone();
@@ -126,7 +126,7 @@ pub fn async_storage(host: Arc<dyn StorageHost>) -> HostModule {
     let dir = host.document_dir();
     HostModule {
         name: "AsyncStorage",
-        specifier: "@uifw/async-storage/host",
+        specifier: "@impasto/async-storage/host",
         methods: vec![
             HostMethod::promise("multiGet", {
                 let dir = dir.clone();

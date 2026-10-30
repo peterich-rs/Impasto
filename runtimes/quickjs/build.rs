@@ -79,14 +79,14 @@ fn generate_abi(manifest: &Path, out_dir: &Path) {
     let mut header = String::from("/* Generated from abi.yml. */\n#pragma once\n");
     for (name, value) in &ops {
         header.push_str(&format!(
-            "#define UIFW_OP_{} {}\n",
+            "#define MUTATION_OP_{} {}\n",
             name.to_uppercase(),
             value
         ));
     }
     for (name, value) in &fields {
         header.push_str(&format!(
-            "#define UIFW_FIELD_{} {}\n",
+            "#define STYLE_FIELD_{} {}\n",
             name.to_uppercase(),
             value
         ));

@@ -71,7 +71,7 @@ pub trait Services: Send {
     fn image<'a>(&'a self, source: &str) -> Option<engine::ImagePixels<'a>>;
     fn log(&self, level: LogLevel, message: &str);
     /// A new semantics tree. The default ignores it. Called on the render thread.
-    fn semantics(&self, _update: &ui_core::SemanticsUpdate) {}
+    fn semantics(&self, _update: &uicore::SemanticsUpdate) {}
     /// Apply one keyboard update. Called on the render thread.
     /// The implementation posts the work to the platform thread.
     fn apply_ime(&self, update: &session::ImeUpdate);

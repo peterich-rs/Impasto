@@ -4,14 +4,14 @@
 
 ## 相对原稿的修正
 
-1. 轴住在 `ScrollGeom`，枚举在 `core/src/motion.rs`。节点 `Payload` 只有文本、图片和容器，没有 `ScrollPayload`。
+1. 轴住在 `ScrollGeom`，枚举在 `uicore/src/motion.rs`。节点 `Payload` 只有文本、图片和容器，没有 `ScrollPayload`。
 2. `set_scroll_physics` 本来就有。`ScrollAccept` 是 `ScrollPhysics` 的新字段。JS 的第 11 个参数可缺省，缺省 `Content`。
 3. `scroll_limits` 把跨轴收成 0，区分不了「`Both` 但这一轴没有内容（溢出交给父级）」和「声明了单轴（丢掉）」。`ScrollController` 读 `ScrollAxis`，单轴的跨轴增量不进拖动累积，也不进 overflow。
 4. 锁定之后不把丢掉的跨轴速度接力给垂直的父级。竖向 fling 不会推动横向 pager。纯跨轴拖动在锁定前就不认领，父级可以在自己的轴上赢下这次手势。锁定之后 `DragBy` 仍是原始增量，跨轴分量在 `set_scroll_offset` 丢掉。
 5. 裸 `scroll()` 缺省仍是 `Both` + `Content`，`lock_at_edge` 只留给它。`ScrollArea` / `VirtualList` 声明了单轴，不再走这个兜底，所以它们的 `accept` 缺省是 `Always`：到边仍认领，回弹和刷新还在。想在边上把拖拽让给父级时显式传 `content`。
 6. `Field` 的滚动按行数声明：单行 `horizontal`，多行 `vertical`。`scroll_into_view` 因此只弹该轴，不会和外面的列表抢另一轴。
 7. gallery 里原来那行横向 snap 必须传 `horizontal`。`ScrollArea` 改成缺省 vertical 之后，不传就会停住。
-8. Kotlin 还没有滚动 DSL。轴、accept 和过滤都在 `core`，以后的绑定只是属性名。
+8. Kotlin 还没有滚动 DSL。轴、accept 和过滤都在 `uicore`，以后的绑定只是属性名。
 
 ## 1. 破坏性变更说明
 
@@ -33,10 +33,10 @@
 
 改动集中在已有写入口，不新增识别器，不改 `protocol`。
 
-- `Tree::scroll_for`、`can_consume`、`overflows`（`core/src/tree/hit.rs`）只改认领。
-- `Tree::scroll_limits`、`set_scroll_offset`、`arm_fling`、`scroll_to`、`reveal`、`merge_wheel`、`snap_target`、`can_take_velocity`（`core/src/tree/scroll.rs`）按 `ScrollAxis::allows` 过滤。
-- `Tree::pointer_wheel`（`core/src/tree/gesture.rs`）只把声明轴上的滚轮分量交给上面的入口。
-- `ScrollController::drag_by`、`wheel`、`consume`（`core/src/list/controller.rs`）在写入前丢掉单轴的跨轴增量。`limits == 0` 仍表示「`Both` 且没有内容」，溢出交给父级。
+- `Tree::scroll_for`、`can_consume`、`overflows`（`uicore/src/tree/hit.rs`）只改认领。
+- `Tree::scroll_limits`、`set_scroll_offset`、`arm_fling`、`scroll_to`、`reveal`、`merge_wheel`、`snap_target`、`can_take_velocity`（`uicore/src/tree/scroll.rs`）按 `ScrollAxis::allows` 过滤。
+- `Tree::pointer_wheel`（`uicore/src/tree/gesture.rs`）只把声明轴上的滚轮分量交给上面的入口。
+- `ScrollController::drag_by`、`wheel`、`consume`（`uicore/src/list/controller.rs`）在写入前丢掉单轴的跨轴增量。`limits == 0` 仍表示「`Both` 且没有内容」，溢出交给父级。
 - `DragClaim` 与 `RecognizerSet.drag` 不改。
 - `Both` + `Content` 是缺省，既有 `cargo test` 里的双向滚动、贴边锁和同轴接力保持原样。
 
@@ -111,43 +111,43 @@ impl Tree {
 
 ## 5. 分阶段实施
 
-### Phase 1：core 轴语义
+### Phase 1：uicore 轴语义
 
-**File: `core/src/motion.rs`**
+**File: `uicore/src/motion.rs`**
 
 - `ScrollAxis`、`ScrollAccept`。`allows` / `filter` / `from_code`。
 - `ScrollPhysics.accept`，缺省 `Content`。
 
-**File: `core/src/tree/node.rs`**
+**File: `uicore/src/tree/node.rs`**
 
 - `ScrollGeom.axis`，新建为 `Both`。
 
-**File: `core/src/tree/store.rs`**
+**File: `uicore/src/tree/store.rs`**
 
 - `scroll()` 转到 `scroll_with(Both)`。
 
-**File: `core/src/tree/scroll.rs`**
+**File: `uicore/src/tree/scroll.rs`**
 
 - `scroll_limits`、`set_scroll_offset`、`arm_fling`、`scroll_to`、`reveal`、`merge_wheel`、`snap_target`、`can_take_velocity`、`apply_scroll`、`apply_overscroll`、`arm_overscroll_spring` 按轴过滤。
 - `set_scroll_axis` 清掉另一轴的运动，再写一次偏移，把跨轴 overscroll 收到 0。
 
-**File: `core/src/tree/hit.rs`**
+**File: `uicore/src/tree/hit.rs`**
 
 - `can_consume` 按轴和 accept。`dy == 0` 的竖向滚动不认领。
 - `lock_at_edge` 只记下 `Both` 且 accept 不是 `Never` 的溢出者。
 
-**File: `core/src/scroll_test.rs`**
+**File: `uicore/src/scroll_test.rs`**
 
 - `Both` 仍能两轴滚动、贴边仍锁。
 - vertical：超宽不横移、斜拖只留下 y、fling 不 arm x、跨轴 overscroll 为 0。
 
 ### Phase 2：physics accept
 
-**File: `core/src/tree/hit.rs`**
+**File: `uicore/src/tree/hit.rs`**
 
 - `Always` 在声明轴上有分量就认领。`Never` 整段跳过，不进入 `lock_at_edge`。
 
-**File: `core/src/scroll_test.rs`**
+**File: `uicore/src/scroll_test.rs`**
 
 - `Always` 在起点向下拖仍认领，随后的越界只出现在 y。
 - `Content` 的竖向滚动在起点不认领。
@@ -155,21 +155,21 @@ impl Tree {
 
 ### Phase 3：滚轮、接力、reveal、控制器
 
-**File: `core/src/tree/gesture.rs`**
+**File: `uicore/src/tree/gesture.rs`**
 
 - `pointer_wheel` 先认领，再 `filter`。竖向列表上的横向滚轮没有 `Wheel`。
 
-**File: `core/src/tree/scroll.rs`**
+**File: `uicore/src/tree/scroll.rs`**
 
 - 同轴 `chain` 保持。`can_take_velocity` 拒绝未声明轴，横向 pager 接不住竖向速度。
 - `reveal` 只弹簧声明轴。
 
-**File: `core/src/list/controller.rs`**
+**File: `uicore/src/list/controller.rs`**
 
 - `refresh_boxes` 记住轴，并把 limits 裁到声明轴。
 - `drag_by`、`wheel`、`consume` 先 `filter`。
 
-**File: `core/src/list/tests.rs`**
+**File: `uicore/src/list/tests.rs`**
 
 - 竖向控制器吃掉 dx，`overflow_x` 为 0，y 仍前进。
 - `Both` 控制器仍能横移。
@@ -206,7 +206,7 @@ impl Tree {
 
 - 轴、accept、跨轴丢弃、控制器与 `Both` 溢出的差别。手势段写明锁轴后跨轴增量在 `set_scroll_offset` 丢掉。
 
-验证：`cargo test -p core --lib` 里的滚动用例，`just solid`，以及 gallery 的 `counter.node.test.ts`。真机手势（竖、横、斜、到边、嵌套、滚轮）不在 `just check` 里，窗口路径仍用 `just host`。
+验证：`cargo test -p uicore --lib` 里的滚动用例，`just solid`，以及 gallery 的 `counter.node.test.ts`。真机手势（竖、横、斜、到边、嵌套、滚轮）不在 `just check` 里，窗口路径仍用 `just host`。
 
 ## 6. 架构说明
 
@@ -222,16 +222,16 @@ impl Tree {
 
 - `AGENTS.md` — Scroll 轴、accept、跨轴丢弃
 - `apps/gallery-solid/counter.tsx` — 横向分页声明 horizontal
-- `core/src/lib.rs` — 导出 `ScrollAxis`、`ScrollAccept`
-- `core/src/list/controller.rs` — 单轴增量不进 overflow
-- `core/src/list/tests.rs` — 控制器轴矩阵
-- `core/src/motion.rs` — `ScrollAxis`、`ScrollAccept`
-- `core/src/scroll_test.rs` — 等价基线与轴矩阵
-- `core/src/tree/gesture.rs` — 滚轮按轴路由
-- `core/src/tree/hit.rs` — 按声明轴认领
-- `core/src/tree/node.rs` — `ScrollGeom.axis`
-- `core/src/tree/scroll.rs` — 偏移、fling、reveal、接力按轴过滤
-- `core/src/tree/store.rs` — `scroll_with`
+- `uicore/src/lib.rs` — 导出 `ScrollAxis`、`ScrollAccept`
+- `uicore/src/list/controller.rs` — 单轴增量不进 overflow
+- `uicore/src/list/tests.rs` — 控制器轴矩阵
+- `uicore/src/motion.rs` — `ScrollAxis`、`ScrollAccept`
+- `uicore/src/scroll_test.rs` — 等价基线与轴矩阵
+- `uicore/src/tree/gesture.rs` — 滚轮按轴路由
+- `uicore/src/tree/hit.rs` — 按声明轴认领
+- `uicore/src/tree/node.rs` — `ScrollGeom.axis`
+- `uicore/src/tree/scroll.rs` — 偏移、fling、reveal、接力按轴过滤
+- `uicore/src/tree/store.rs` — `scroll_with`
 - `docs/architecture.md` — 当前滚动语义
 - `docs/driver.md` — 控制器丢掉单轴的跨轴增量
 - `docs/scroll-axis.md` — 本说明

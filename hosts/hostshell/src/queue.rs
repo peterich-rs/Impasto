@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex, MutexGuard};
 
-use ui_core::Phase;
+use uicore::Phase;
 
 use crate::command::Command;
 
@@ -65,7 +65,7 @@ fn lock(mutex: &Mutex<State>) -> MutexGuard<'_, State> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ui_core::{Phase, PointerEvent};
+    use uicore::{Phase, PointerEvent};
 
     fn move_event(x: f32, time_ms: f64) -> PointerEvent {
         PointerEvent::new(Phase::Move, x, 0.0, time_ms)

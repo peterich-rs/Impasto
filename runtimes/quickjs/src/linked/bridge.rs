@@ -5,7 +5,7 @@ use std::ffi::{c_char, c_void};
 use std::sync::atomic::Ordering;
 
 use session::{HttpError, HttpFailure, HttpRequest, Invoke, IoJob, PluginResult, PluginValue};
-use ui_core::{AxisSize, DragClaim, FocusDirection, GridLine, Inset, NodeId};
+use uicore::{AxisSize, DragClaim, FocusDirection, GridLine, Inset, NodeId};
 
 use super::ffi::*;
 use super::*;
@@ -196,12 +196,12 @@ pub(super) unsafe extern "C" fn grapheme_index_of(
     unit: u32,
 ) -> u32 {
     let text = unsafe { utf8_of(utf8, len) }.unwrap_or("");
-    ui_core::grapheme_index(text, unit)
+    uicore::grapheme_index(text, unit)
 }
 
 pub(super) unsafe extern "C" fn grapheme_count_of(utf8: *const c_char, len: usize) -> u32 {
     let text = unsafe { utf8_of(utf8, len) }.unwrap_or("");
-    ui_core::grapheme_count(text)
+    uicore::grapheme_count(text)
 }
 
 pub(super) unsafe extern "C" fn grapheme_unit_of(
@@ -210,7 +210,7 @@ pub(super) unsafe extern "C" fn grapheme_unit_of(
     index: u32,
 ) -> u32 {
     let text = unsafe { utf8_of(utf8, len) }.unwrap_or("");
-    ui_core::grapheme_unit(text, index)
+    uicore::grapheme_unit(text, index)
 }
 
 pub(super) unsafe extern "C" fn set_reverse(session: *mut c_void, node: u64, reverse: i32) -> i32 {
@@ -311,9 +311,9 @@ pub(super) unsafe extern "C" fn scroll_into_view(
 ) -> i32 {
     let inner = unsafe { inner(session) };
     let edge = match edge {
-        1 => ui_core::ScrollEdge::End,
-        2 => ui_core::ScrollEdge::Nearest,
-        _ => ui_core::ScrollEdge::Start,
+        1 => uicore::ScrollEdge::End,
+        2 => uicore::ScrollEdge::Nearest,
+        _ => uicore::ScrollEdge::Start,
     };
     match inner
         .tree
@@ -351,7 +351,7 @@ pub(super) unsafe extern "C" fn animate(
     inner.tree.borrow_mut().animate(
         NodeId::from_raw(node),
         prop,
-        Box::new(ui_core::Spring {
+        Box::new(uicore::Spring {
             x0: from as f32,
             v0: 0.0,
             target: to as f32,
@@ -362,17 +362,17 @@ pub(super) unsafe extern "C" fn animate(
     0
 }
 
-pub(super) fn anim_prop(name: &str) -> Option<ui_core::AnimProp> {
+pub(super) fn anim_prop(name: &str) -> Option<uicore::AnimProp> {
     Some(match name {
-        "scrollX" => ui_core::AnimProp::ScrollX,
-        "scrollY" => ui_core::AnimProp::ScrollY,
-        "opacity" => ui_core::AnimProp::Opacity,
-        "translateX" => ui_core::AnimProp::TranslateX,
-        "translateY" => ui_core::AnimProp::TranslateY,
-        "rotate" => ui_core::AnimProp::Rotate,
-        "scale" => ui_core::AnimProp::Scale,
-        "overscrollX" => ui_core::AnimProp::OverscrollX,
-        "overscrollY" => ui_core::AnimProp::OverscrollY,
+        "scrollX" => uicore::AnimProp::ScrollX,
+        "scrollY" => uicore::AnimProp::ScrollY,
+        "opacity" => uicore::AnimProp::Opacity,
+        "translateX" => uicore::AnimProp::TranslateX,
+        "translateY" => uicore::AnimProp::TranslateY,
+        "rotate" => uicore::AnimProp::Rotate,
+        "scale" => uicore::AnimProp::Scale,
+        "overscrollX" => uicore::AnimProp::OverscrollX,
+        "overscrollY" => uicore::AnimProp::OverscrollY,
         _ => return None,
     })
 }
@@ -409,19 +409,19 @@ pub(super) unsafe extern "C" fn set_recognizers(
 ) -> i32 {
     let inner = unsafe { inner(session) };
     let drag = match drag {
-        0 => Some(ui_core::DragAxis::Free),
-        1 => Some(ui_core::DragAxis::Horizontal),
-        2 => Some(ui_core::DragAxis::Vertical),
+        0 => Some(uicore::DragAxis::Free),
+        1 => Some(uicore::DragAxis::Horizontal),
+        2 => Some(uicore::DragAxis::Vertical),
         _ => None,
     };
     let double_tap = (double_tap_ms.is_finite() && double_tap_ms > 0.0).then(|| {
-        let mut config = ui_core::DoubleTapConfig::default();
+        let mut config = uicore::DoubleTapConfig::default();
         config.window_ms = double_tap_ms;
         config
     });
     status(inner.tree.borrow_mut().set_recognizers(
         NodeId::from_raw(node),
-        ui_core::RecognizerSet {
+        uicore::RecognizerSet {
             tap: tap != 0,
             long_press: long_press != 0,
             drag,
@@ -489,7 +489,7 @@ impl FontBook {
     }
 
     /// Queues one face. The same family replaces bytes and does not take another slot.
-    /// `UIFWSans` and `UIFWSansCJK` do not count toward the eight-name cap.
+    /// `Sans` and `SansCJK` do not count toward the eight-name cap.
     fn enqueue(&mut self, family: String, bytes: Vec<u8>) -> Result<(), ()> {
         if family.is_empty() || bytes.len() > FONT_BYTE_LIMIT {
             return Err(());
@@ -528,15 +528,15 @@ impl FontBook {
 }
 
 pub(super) fn startup_font(name: &str) -> bool {
-    name == "UIFWSans" || name == "UIFWSansCJK"
+    name == "Sans" || name == "SansCJK"
 }
 
-pub(super) fn axis_from_tag(tag: i32, value: f32) -> Result<AxisSize, ui_core::Error> {
+pub(super) fn axis_from_tag(tag: i32, value: f32) -> Result<AxisSize, uicore::Error> {
     match tag {
         0 => Ok(AxisSize::Auto),
         1 => Ok(AxisSize::Points(value)),
         2 => Ok(AxisSize::Fraction(value)),
-        _ => Err(ui_core::Error::BadNumber),
+        _ => Err(uicore::Error::BadNumber),
     }
 }
 
@@ -544,24 +544,24 @@ pub(super) fn inset_from_tag(is_auto: i32, value: f32) -> Option<f32> {
     if is_auto == 0 { Some(value) } else { None }
 }
 
-pub(super) fn grid_from_tag(tag: i32, value: i32) -> Result<GridLine, ui_core::Error> {
+pub(super) fn grid_from_tag(tag: i32, value: i32) -> Result<GridLine, uicore::Error> {
     match tag {
         0 => Ok(GridLine::Auto),
         1 => {
-            let index = i16::try_from(value).map_err(|_| ui_core::Error::BadNumber)?;
+            let index = i16::try_from(value).map_err(|_| uicore::Error::BadNumber)?;
             if index == 0 {
-                return Err(ui_core::Error::BadNumber);
+                return Err(uicore::Error::BadNumber);
             }
             Ok(GridLine::Line(index))
         }
         2 => {
-            let count = u16::try_from(value).map_err(|_| ui_core::Error::BadNumber)?;
+            let count = u16::try_from(value).map_err(|_| uicore::Error::BadNumber)?;
             if count == 0 {
-                return Err(ui_core::Error::BadNumber);
+                return Err(uicore::Error::BadNumber);
             }
             Ok(GridLine::Span(count))
         }
-        _ => Err(ui_core::Error::BadNumber),
+        _ => Err(uicore::Error::BadNumber),
     }
 }
 
@@ -656,9 +656,9 @@ pub(super) unsafe extern "C" fn measure_panel(
         return -1;
     }
     let space = match mode {
-        0 => ui_core::SubtreeSpace::MaxContent,
-        1 => ui_core::SubtreeSpace::CappedMax(width),
-        2 => ui_core::SubtreeSpace::Definite {
+        0 => uicore::SubtreeSpace::MaxContent,
+        1 => uicore::SubtreeSpace::CappedMax(width),
+        2 => uicore::SubtreeSpace::Definite {
             width,
             height: (height.is_finite()).then_some(height),
         },
@@ -896,7 +896,7 @@ pub(super) unsafe extern "C" fn set_semantics(
     let label = unsafe { utf8_of(label, label_len) }.map(str::to_owned);
     let value = unsafe { utf8_of(value, value_len) }.map(str::to_owned);
     let description = unsafe { utf8_of(description, description_len) }.map(str::to_owned);
-    let hint = ui_core::SemanticsHint {
+    let hint = uicore::SemanticsHint {
         role: role_of(role),
         label: label.filter(|text| !text.is_empty()),
         value: value.filter(|text| !text.is_empty()),
@@ -909,9 +909,9 @@ pub(super) unsafe extern "C" fn set_semantics(
         description: description.filter(|text| !text.is_empty()),
         order: (order_set != 0).then_some(order),
         live: match live {
-            0 => Some(ui_core::LiveRegion::Off),
-            1 => Some(ui_core::LiveRegion::Polite),
-            2 => Some(ui_core::LiveRegion::Assertive),
+            0 => Some(uicore::LiveRegion::Off),
+            1 => Some(uicore::LiveRegion::Polite),
+            2 => Some(uicore::LiveRegion::Assertive),
             _ => None,
         },
     };
@@ -922,16 +922,16 @@ pub(super) unsafe extern "C" fn set_semantics(
     if result.is_err() { -1 } else { 0 }
 }
 
-pub(super) fn role_of(role: i32) -> Option<ui_core::SemanticsRole> {
+pub(super) fn role_of(role: i32) -> Option<uicore::SemanticsRole> {
     Some(match role {
-        1 => ui_core::SemanticsRole::Button,
-        2 => ui_core::SemanticsRole::Text,
-        3 => ui_core::SemanticsRole::Image,
-        4 => ui_core::SemanticsRole::Scroll,
-        5 => ui_core::SemanticsRole::Switch,
-        6 => ui_core::SemanticsRole::TextField,
-        7 => ui_core::SemanticsRole::SearchField,
-        8 => ui_core::SemanticsRole::TextArea,
+        1 => uicore::SemanticsRole::Button,
+        2 => uicore::SemanticsRole::Text,
+        3 => uicore::SemanticsRole::Image,
+        4 => uicore::SemanticsRole::Scroll,
+        5 => uicore::SemanticsRole::Switch,
+        6 => uicore::SemanticsRole::TextField,
+        7 => uicore::SemanticsRole::SearchField,
+        8 => uicore::SemanticsRole::TextArea,
         _ => return None,
     })
 }

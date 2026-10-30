@@ -23,6 +23,11 @@ pub struct FrameTiming {
     pub picture_rebuilt: u32,
     pub picture_reused: u32,
     pub layer_count: u32,
+    /// Live engine cache entries after the submit: paragraphs, pictures,
+    /// textures.
+    pub paragraphs: u32,
+    pub pictures: u32,
+    pub textures: u32,
 }
 
 impl FrameTiming {

@@ -1,7 +1,7 @@
 //! Key names passed to JS shortcut and input callbacks.
 
 use session::Key;
-use ui_core::Modifiers;
+use uicore::Modifiers;
 
 pub(super) fn shortcut_spec(press: &session::KeyPress) -> String {
     let mut parts = Vec::new();

@@ -1,4 +1,4 @@
-//! Asset path lookup. Decoding stays on `uifw-io`.
+//! Asset path lookup. Decoding stays on `io`.
 
 use std::path::{Path, PathBuf};
 

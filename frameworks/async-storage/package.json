@@ -1,5 +1,5 @@
 {
-  "name": "@uifw/async-storage",
+  "name": "@impasto/async-storage",
   "version": "0.1.0",
   "private": true,
   "type": "module",

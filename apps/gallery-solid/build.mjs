@@ -7,12 +7,12 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 
 const hostExternals = [
-  "@uifw/clipboard/host",
-  "@uifw/linking/host",
-  "@uifw/app-state/host",
-  "@uifw/file-system/host",
-  "@uifw/async-storage/host",
-  "@uifw/permissions/host",
+  "@impasto/clipboard/host",
+  "@impasto/linking/host",
+  "@impasto/app-state/host",
+  "@impasto/file-system/host",
+  "@impasto/async-storage/host",
+  "@impasto/permissions/host",
 ];
 
 const solid = {
@@ -33,7 +33,7 @@ const solid = {
           [
             "@solidjs/babel-plugin",
             {
-              moduleName: "@uifw/solid-renderer",
+              moduleName: "@impasto/solid-renderer",
               generate: "universal",
             },
           ],
@@ -43,8 +43,8 @@ const solid = {
         throw new Error(`babel produced no code for ${args.path}`);
       }
       const contents = result.code.replace(
-        /import\(\s*(["'])@uifw\/linking\1\s*\)/g,
-        'import("@uifw/linking/host").then((host) => ({ Linking: host }))',
+        /import\(\s*(["'])@impasto\/linking\1\s*\)/g,
+        'import("@impasto/linking/host").then((host) => ({ Linking: host }))',
       );
       return { contents, loader: "js" };
     });

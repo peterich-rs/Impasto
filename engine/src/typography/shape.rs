@@ -809,7 +809,7 @@ impl Typography {
                 ffi::ImpellerParagraphStyleSetEllipsis(style, ellipsis.as_ptr());
             }
             apply_decoration(style, color, text_style.underline, text_style.line_through);
-            let fallback = CString::new("UIFWSansCJK").ok();
+            let fallback = CString::new("SansCJK").ok();
             let cjk = fallback.as_ref().filter(|name| self.has_family(name));
             if spans.is_empty() {
                 push_runs(style, paragraph_builder, family, cjk, utf8);

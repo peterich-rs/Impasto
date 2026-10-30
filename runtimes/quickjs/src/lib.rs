@@ -1,7 +1,7 @@
 //! QuickJS session. The interpreter calls `core` directly. A missing source tree
 //! compiles this crate as [`Error::NotLinked`].
 
-use ui_core::Shaper;
+use uicore::Shaper;
 
 mod error;
 
@@ -70,7 +70,7 @@ mod tests {
         ModuleRegistry, PluginResult, PluginValue,
     };
     use session::{Metrics, Session};
-    use ui_core::{Phase, PointerEvent};
+    use uicore::{Phase, PointerEvent};
 
     use super::{Error, open};
 
@@ -87,12 +87,7 @@ mod tests {
           d.setItems([{key:"a", type:"row", sticky:false}]);
           d.release();
         "#;
-        match open(
-            source,
-            "driver.js",
-            ui_core::MonoShaper::default(),
-            no_log(),
-        ) {
+        match open(source, "driver.js", uicore::MonoShaper::default(), no_log()) {
             Ok(_) => {}
             Err(Error::NotLinked) => {}
             Err(error) => panic!("{error}"),
@@ -101,6 +96,16 @@ mod tests {
 
     fn no_log() -> Box<dyn Fn(u8, &str)> {
         Box::new(|_, _| {})
+    }
+
+    /// The gallery bundle is a build artifact and not committed. Tests that
+    /// need it fail with instructions when it has not been built.
+    #[cfg(quickjs)]
+    fn gallery_source() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/gallery-solid/dist/counter.js");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|_| panic!("run `just gallery-dist` to build the gallery bundle"))
     }
 
     #[cfg(quickjs)]
@@ -139,7 +144,7 @@ mod tests {
             registry: Arc::new(ModuleRegistry::new(vec![
                 HostModule {
                     name: "Clipboard",
-                    specifier: "@uifw/clipboard/host",
+                    specifier: "@impasto/clipboard/host",
                     methods: vec![
                         HostMethod::sync("getString", {
                             let clipboard = Arc::clone(&clipboard);
@@ -169,7 +174,7 @@ mod tests {
                 },
                 HostModule {
                     name: "AppState",
-                    specifier: "@uifw/app-state/host",
+                    specifier: "@impasto/app-state/host",
                     methods: vec![HostMethod::sync("getCurrentState", {
                         let app_state = Arc::clone(&app_state);
                         move |_| Ok(PluginValue::Str(session::shared_read(&app_state)))
@@ -177,7 +182,7 @@ mod tests {
                 },
                 HostModule {
                     name: "Echo",
-                    specifier: "@uifw/echo/host",
+                    specifier: "@impasto/echo/host",
                     methods: vec![
                         HostMethod::sync("fail", |_| Err("boom from host".into())),
                         HostMethod::promise("later", |args, settle, exec| {
@@ -191,7 +196,7 @@ mod tests {
                 },
                 HostModule {
                     name: "Linking",
-                    specifier: "@uifw/linking/host",
+                    specifier: "@impasto/linking/host",
                     methods: vec![HostMethod::sync("getInitialURL", {
                         let launch_url = Arc::clone(&launch_url);
                         move |_| {
@@ -322,8 +327,8 @@ mod tests {
     }
 
     fn open_counter() -> Option<Box<dyn Session>> {
-        let source = include_str!("../../../apps/gallery-solid/dist/counter.js");
-        match open(source, "test.js", ui_core::MonoShaper::default(), no_log()) {
+        let source = gallery_source();
+        match open(&source, "test.js", uicore::MonoShaper::default(), no_log()) {
             Ok(session) => Some(session),
             Err(Error::NotLinked) => None,
             Err(error) => panic!("{error}"),
@@ -497,11 +502,11 @@ mod tests {
         }
         #[cfg(quickjs)]
         {
-            let source = include_str!("../../../apps/gallery-solid/dist/counter.js");
+            let source = gallery_source();
             let mut session = match super::JsSession::open(
-                source,
+                &source,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -543,7 +548,7 @@ mod tests {
             let session = match super::JsSession::open(
                 kept,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -561,7 +566,7 @@ mod tests {
             match super::JsSession::open(
                 dropped,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(_) => {}
@@ -588,7 +593,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 kept,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -606,7 +611,7 @@ mod tests {
             session = match super::JsSession::open(
                 dropped,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -672,7 +677,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -704,7 +709,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -723,7 +728,7 @@ mod tests {
 
     #[test]
     fn syntax_error_script_is_reported() {
-        match open("{", "test.js", ui_core::MonoShaper::default(), no_log()) {
+        match open("{", "test.js", uicore::MonoShaper::default(), no_log()) {
             Err(Error::NotLinked | Error::Script(_)) => {}
             Err(error) => panic!("{error}"),
             Ok(_) => panic!("expected a script error"),
@@ -751,7 +756,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -787,7 +792,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -825,7 +830,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "report.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -864,7 +869,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "shortcut.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -875,7 +880,7 @@ mod tests {
             session.input(InputEvent::Key(session::KeyPress {
                 key: Key::Char('k'),
                 shift: false,
-                modifiers: ui_core::Modifiers::empty().with(ui_core::Modifiers::META),
+                modifiers: uicore::Modifiers::empty().with(uicore::Modifiers::META),
             }));
             let frame = session.frame(session::FrameTime::at(16.0));
             assert!(texts(&frame).contains(&"cut"), "{:?}", texts(&frame));
@@ -909,7 +914,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "motion.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -961,7 +966,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "motion-end.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -1006,7 +1011,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "motion-end-throw.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -1069,7 +1074,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "align.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -1109,7 +1114,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -1153,7 +1158,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 Box::new(move |_level, message| {
                     logged_for_hook.borrow_mut().push_str(message);
                 }),
@@ -1190,7 +1195,7 @@ mod tests {
             let opened = super::JsSession::open(
                 "console.log('boot')",
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 Box::new(move |level, text| {
                     *record.borrow_mut() = Some((level, text.to_owned()));
                 }),
@@ -1226,7 +1231,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -1261,7 +1266,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -1296,7 +1301,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -1339,7 +1344,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -1369,11 +1374,11 @@ mod tests {
         }
         #[cfg(quickjs)]
         {
-            let source = include_str!("../../../apps/gallery-solid/dist/counter.js");
+            let source = gallery_source();
             let mut session = match super::JsSession::open(
-                source,
+                &source,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -1477,7 +1482,7 @@ mod tests {
         }
         #[cfg(quickjs)]
         {
-            let dir = std::env::temp_dir().join(format!("uifw-mod-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("quickjs-mod-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("temp app dir");
             std::fs::write(dir.join("util.js"), "export const label = \"from-util\";\n")
@@ -1493,7 +1498,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 &source,
                 &name,
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -1515,12 +1520,8 @@ mod tests {
                 "import { label } from \"./a\\\\b.js\";\n",
             ];
             for source in rejected {
-                match super::JsSession::open(
-                    source,
-                    &name,
-                    ui_core::MonoShaper::default(),
-                    no_log(),
-                ) {
+                match super::JsSession::open(source, &name, uicore::MonoShaper::default(), no_log())
+                {
                     Err(Error::Script(message)) => {
                         assert!(
                             message.contains("module")
@@ -1546,15 +1547,11 @@ mod tests {
         }
         #[cfg(quickjs)]
         {
-            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../apps/gallery-solid/dist/counter.js");
-            let Ok(source) = std::fs::read_to_string(&path) else {
-                return;
-            };
+            let source = gallery_source();
             let mut session = match super::JsSession::open(
                 &source,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -1718,7 +1715,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -1786,7 +1783,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "test.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -1842,8 +1839,8 @@ mod tests {
                     .push(text.to_owned());
             });
             let source = r#"
-                import { setString, getString } from "@uifw/clipboard/host";
-                import { addEventListener } from "@uifw/app-state/host";
+                import { setString, getString } from "@impasto/clipboard/host";
+                import { addEventListener } from "@impasto/app-state/host";
                 console.log(new URL("https://example.test/a?q=1").searchParams.get("q"));
                 console.log(String(new TextEncoder().encode("A").length));
                 setTimeout(() => console.log("soon"), 0);
@@ -1864,7 +1861,7 @@ mod tests {
             let mut session = match super::JsSession::open_with(
                 source,
                 "host.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 log,
                 Some(Arc::new(FixedHttp)),
                 host,
@@ -1909,15 +1906,15 @@ mod tests {
                     .push(text.to_owned());
             });
             let source = r#"
-                const linking = TurboModuleRegistry.getEnforcing("Linking");
-                console.log("initial:" + String(linking.getInitialURL()));
+                import { getInitialURL } from "@impasto/linking/host";
+                console.log("initial:" + String(getInitialURL()));
             "#;
             let (host, _pending) =
                 test_host_with_launch_url(Some("https://app.example/item".to_owned()));
             match super::JsSession::open_with(
                 source,
                 "launch.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 log,
                 None,
                 host,
@@ -1950,7 +1947,7 @@ mod tests {
                     .push(text.to_owned());
             });
             let source = r#"
-                import { fail } from "@uifw/echo/host";
+                import { fail } from "@impasto/echo/host";
                 try {
                     fail();
                     console.log("ok");
@@ -1962,7 +1959,7 @@ mod tests {
             match super::JsSession::open_with(
                 source,
                 "error.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 log,
                 None,
                 host,
@@ -1995,14 +1992,14 @@ mod tests {
                     .push(text.to_owned());
             });
             let source = r#"
-                import { later } from "@uifw/echo/host";
+                import { later } from "@impasto/echo/host";
                 later("ok").then((value) => console.log("later:" + value));
             "#;
             let (host, pending) = test_host();
             let mut session = match super::JsSession::open_with(
                 source,
                 "promise.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 log,
                 None,
                 host,
@@ -2031,9 +2028,9 @@ mod tests {
         {
             let (host, _pending) = test_host();
             match super::JsSession::open_with(
-                r#"import { getString } from "@uifw/missing/host";"#,
+                r#"import { getString } from "@impasto/missing/host";"#,
                 "missing.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
                 None,
                 host,
@@ -2049,7 +2046,7 @@ mod tests {
     }
 
     #[test]
-    fn bare_uifw_specifier_must_be_bundled() {
+    fn bare_scope_must_be_bundled() {
         #[cfg(not(quickjs))]
         {
             return;
@@ -2058,28 +2055,28 @@ mod tests {
         {
             let (host, _pending) = test_host();
             match super::JsSession::open_with(
-                r#"import { Clipboard } from "@uifw/clipboard";"#,
+                r#"import { Clipboard } from "@impasto/clipboard";"#,
                 "bare.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
                 None,
                 host,
             ) {
                 Err(Error::Script(message)) => {
                     assert!(
-                        message.contains("bare @uifw/* must be bundled"),
+                        message.contains("bare @impasto/* must be bundled"),
                         "{message}"
                     );
                 }
                 Err(Error::NotLinked) => {}
-                Ok(_) => panic!("expected bare @uifw specifier to fail"),
+                Ok(_) => panic!("expected bare @impasto specifier to fail"),
                 Err(error) => panic!("{error}"),
             }
         }
     }
 
     #[test]
-    fn nested_uifw_host_path_must_be_bundled() {
+    fn nested_host_path_must_be_bundled() {
         #[cfg(not(quickjs))]
         {
             return;
@@ -2088,21 +2085,21 @@ mod tests {
         {
             let (host, _pending) = test_host();
             match super::JsSession::open_with(
-                r#"import { getString } from "@uifw/clipboard/extra/host";"#,
+                r#"import { getString } from "@impasto/clipboard/extra/host";"#,
                 "nested.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
                 None,
                 host,
             ) {
                 Err(Error::Script(message)) => {
                     assert!(
-                        message.contains("bare @uifw/* must be bundled"),
+                        message.contains("bare @impasto/* must be bundled"),
                         "{message}"
                     );
                 }
                 Err(Error::NotLinked) => {}
-                Ok(_) => panic!("expected nested @uifw host path to fail"),
+                Ok(_) => panic!("expected nested @impasto host path to fail"),
                 Err(error) => panic!("{error}"),
             }
         }
@@ -2132,7 +2129,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "semantics.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -2145,10 +2142,10 @@ mod tests {
             let switch = update
                 .nodes
                 .iter()
-                .find(|node| node.role == ui_core::SemanticsRole::Switch)
+                .find(|node| node.role == uicore::SemanticsRole::Switch)
                 .expect("switch");
             assert_eq!(switch.value.as_deref(), Some("On"));
-            assert!(switch.flags.contains(ui_core::SemanticsFlags::CHECKED));
+            assert!(switch.flags.contains(uicore::SemanticsFlags::CHECKED));
         }
     }
 
@@ -2172,7 +2169,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "settings.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -2227,7 +2224,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "tab.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -2270,7 +2267,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "replaced.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -2282,9 +2279,9 @@ mod tests {
             let field = update
                 .nodes
                 .iter()
-                .find(|node| node.role == ui_core::SemanticsRole::TextField)
+                .find(|node| node.role == uicore::SemanticsRole::TextField)
                 .expect("field");
-            session.semantics_action(ui_core::SemanticsAction::SetText {
+            session.semantics_action(uicore::SemanticsAction::SetText {
                 id: field.id,
                 text: "Hello".to_owned(),
             });
@@ -2311,7 +2308,7 @@ mod tests {
                 const empty = core.text("empty-pending", 16, [0, 0, 0, 255]);
                 core.append(root, label);
                 core.append(root, empty);
-                core.registerFont("UIFWSans", new Uint8Array([1]));
+                core.registerFont("Sans", new Uint8Array([1]));
                 for (let i = 0; i < 8; i++) {
                     core.registerFont("F" + i, new Uint8Array([i + 1]));
                 }
@@ -2352,7 +2349,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "fonts.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -2364,7 +2361,7 @@ mod tests {
             assert!(session.take_fonts().is_empty());
             let replaced = queued.iter().find(|(name, _)| name == "F0").expect("F0");
             assert_eq!(replaced.1, vec![9, 9]);
-            assert!(queued.iter().any(|(name, _)| name == "UIFWSans"));
+            assert!(queued.iter().any(|(name, _)| name == "Sans"));
             assert!(queued.iter().all(|(name, _)| name != "Extra"));
             let listed = session.frame(session::FrameTime::at(0.0));
             assert!(
@@ -2407,7 +2404,7 @@ mod tests {
             let mut session = match super::JsSession::open(
                 source,
                 "bigfont.js",
-                ui_core::MonoShaper::default(),
+                uicore::MonoShaper::default(),
                 no_log(),
             ) {
                 Ok(session) => session,
@@ -2438,12 +2435,7 @@ mod tests {
                 core.setText(label, message.indexOf("reload(source)") >= 0 ? "rejected" : message);
             }
         "#;
-        let mut session = match open(
-            source,
-            "reload.js",
-            ui_core::MonoShaper::default(),
-            no_log(),
-        ) {
+        let mut session = match open(source, "reload.js", uicore::MonoShaper::default(), no_log()) {
             Ok(session) => session,
             Err(Error::NotLinked) => return,
             Err(error) => panic!("{error}"),
@@ -2474,7 +2466,7 @@ mod tests {
                 core.setText(label, message.indexOf("bad axis") >= 0 ? "bad-axis" : message);
             }
         "#;
-        let mut session = match open(source, "axis.js", ui_core::MonoShaper::default(), no_log()) {
+        let mut session = match open(source, "axis.js", uicore::MonoShaper::default(), no_log()) {
             Ok(session) => session,
             Err(Error::NotLinked) => return,
             Err(error) => panic!("{error}"),
@@ -2510,7 +2502,7 @@ mod tests {
                 core.setText(label, message.indexOf("bad image") >= 0 ? "bad-image" : message);
             }
         "#;
-        let mut session = match open(source, "image.js", ui_core::MonoShaper::default(), no_log()) {
+        let mut session = match open(source, "image.js", uicore::MonoShaper::default(), no_log()) {
             Ok(session) => session,
             Err(Error::NotLinked) => return,
             Err(error) => panic!("{error}"),
@@ -2543,12 +2535,7 @@ mod tests {
             const rect = core.rect(box);
             core.setText(label, rect.w === 30 ? "applied" : "stale");
         "#;
-        let mut session = match open(
-            source,
-            "mutate.js",
-            ui_core::MonoShaper::default(),
-            no_log(),
-        ) {
+        let mut session = match open(source, "mutate.js", uicore::MonoShaper::default(), no_log()) {
             Ok(session) => session,
             Err(Error::NotLinked) => return,
             Err(error) => panic!("{error}"),

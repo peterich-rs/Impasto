@@ -1,4 +1,4 @@
-import * as host from "@uifw/clipboard/host";
+import * as host from "@impasto/clipboard/host";
 
 export interface Clipboard {
   getString(): string;

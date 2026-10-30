@@ -1,5 +1,5 @@
 {
-  "name": "@uifw/solid-ui",
+  "name": "@impasto/solid-ui",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "@solidjs/universal": "2.0.0-rc.17",
-    "@uifw/solid-renderer": "file:../solid-renderer",
+    "@impasto/solid-renderer": "file:../solid-renderer",
     "solid-js": "2.0.0-rc.17"
   }
 }

@@ -1,4 +1,4 @@
-//! APK asset path candidates. Decoding stays on `uifw-io`.
+//! APK asset path candidates. Decoding stays on `io`.
 
 const EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
 

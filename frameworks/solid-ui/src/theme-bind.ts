@@ -1,4 +1,4 @@
-import { host } from "@uifw/solid-renderer";
+import { host } from "@impasto/solid-renderer";
 import { installThemePort, type PlatformSnapshot } from "./theme.ts";
 
 type SettingsHost = {

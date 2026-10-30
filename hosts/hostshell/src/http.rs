@@ -1,6 +1,6 @@
 //! HTTP through [openwire](https://crates.io/crates/openwire).
 //!
-//! macOS and Android share this client. `uifw-net` blocks on `Call::execute`.
+//! macOS and Android share this client. `net` blocks on `Call::execute`.
 //! WebSocket stays outside openwire.
 
 use std::sync::Arc;

@@ -67,10 +67,6 @@ impl Engine {
         0
     }
 
-    pub fn cache_counts(&self) -> (usize, usize) {
-        (0, 0)
-    }
-
     pub fn submit_stats(&self) -> crate::SubmitStats {
         crate::SubmitStats::default()
     }
@@ -248,10 +244,6 @@ impl crate::Surface for Engine {
 
     fn picture_builds(&self) -> u64 {
         Engine::picture_builds(self)
-    }
-
-    fn cache_counts(&self) -> (usize, usize) {
-        Engine::cache_counts(self)
     }
 
     fn submit_stats(&self) -> crate::SubmitStats {

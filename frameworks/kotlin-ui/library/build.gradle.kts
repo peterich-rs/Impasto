@@ -2,7 +2,7 @@ plugins {
     alias(libs.plugins.kotlin.multiplatform)
 }
 
-group = "dev.uifw"
+group = "dev.impasto"
 version = "0.1.0"
 
 kotlin {

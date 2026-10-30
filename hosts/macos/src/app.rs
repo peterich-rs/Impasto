@@ -36,11 +36,11 @@ use objc2_quartz_core::{CALayer, CAMetalLayer};
 use crate::pointer::pointer_event;
 use crate::surface::MetalSurface;
 use crate::vsync::DisplayLink;
-use core::{Button, Modifiers, Phase, PointerEvent};
+use uicore::{Button, Modifiers, Phase, PointerEvent};
 
 const CONTENT_WIDTH: f64 = 360.0;
 const CONTENT_HEIGHT: f64 = 640.0;
-const FONT_FAMILY: &str = "UIFWSans";
+const FONT_FAMILY: &str = "Sans";
 
 fn modifiers_of(event: &NSEvent) -> Modifiers {
     let flags = event.modifierFlags();
@@ -337,14 +337,14 @@ impl ContentView {
 
     fn post_outside(&self, event: &NSEvent) {
         self.ivars().poster.post(Command::Pointer(PointerEvent {
-            pointer: core::PointerId(0),
-            kind: core::PointerKind::Mouse,
+            pointer: uicore::PointerId(0),
+            kind: uicore::PointerKind::Mouse,
             phase: Phase::Move,
             x: -1.0,
             y: -1.0,
             time_ms: event.timestamp() * 1000.0,
             button: Button::None,
-            buttons: core::Buttons::empty(),
+            buttons: uicore::Buttons::empty(),
             modifiers: modifiers_of(event),
             dx: 0.0,
             dy: 0.0,
@@ -407,14 +407,14 @@ impl ContentView {
                 html: read_pasteboard_html(),
             }],
             _ => {
-                eprintln!("uifw text command ignored: {name}");
+                eprintln!("text command ignored: {name}");
                 return;
             }
         };
         self.post_edits(events);
     }
 
-    fn scene_rect_to_screen(&self, rect: core::Rect) -> NSRect {
+    fn scene_rect_to_screen(&self, rect: uicore::Rect) -> NSRect {
         let height = self.bounds().size.height;
         let local = NSRect::new(
             NSPoint::new(rect.x as f64, height - rect.y as f64 - rect.h as f64),
@@ -436,7 +436,7 @@ impl ContentView {
         }
     }
 
-    fn apply_semantics(&self, update: core::SemanticsUpdate) {
+    fn apply_semantics(&self, update: uicore::SemanticsUpdate) {
         self.ivars().a11y.apply(
             self.mtm(),
             &self.ivars().poster,
@@ -661,7 +661,7 @@ impl Host {
             metrics: metrics(CONTENT_WIDTH as f32, CONTENT_HEIGHT as f32, scale as f32),
         }));
         self.post_settings();
-        println!("uifw host ready");
+        println!("host ready");
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 
@@ -808,6 +808,18 @@ struct MacServices {
     ime_view: Arc<AtomicPtr<c_void>>,
 }
 
+impl MacServices {
+    /// Reads `IMPASTO_LOG` once. The default sink keeps `info`.
+    fn filter() -> LogLevel {
+        static FILTER: std::sync::OnceLock<LogLevel> = std::sync::OnceLock::new();
+        *FILTER.get_or_init(|| {
+            std::env::var("IMPASTO_LOG")
+                .map(|text| LogLevel::parse(&text))
+                .unwrap_or(LogLevel::Info)
+        })
+    }
+}
+
 impl Services for MacServices {
     fn font(&self, family: &str) -> Option<&[u8]> {
         (family == FONT_FAMILY).then_some(self.font.as_slice())
@@ -817,7 +829,7 @@ impl Services for MacServices {
         None
     }
 
-    fn semantics(&self, update: &core::SemanticsUpdate) {
+    fn semantics(&self, update: &uicore::SemanticsUpdate) {
         let view = self.ime_view.load(Ordering::Acquire) as usize;
         if view == 0 {
             return;
@@ -841,16 +853,25 @@ impl Services for MacServices {
             if let Ok(bytes) = std::fs::read(path)
                 && !bytes.is_empty()
             {
-                return vec![("UIFWSansCJK".to_string(), bytes)];
+                return vec![("SansCJK".to_string(), bytes)];
             }
         }
         Vec::new()
     }
 
     fn log(&self, level: LogLevel, message: &str) {
+        if level > Self::filter() {
+            return;
+        }
+        let prefix = match level {
+            LogLevel::Error => "error",
+            LogLevel::Warn => "warn",
+            LogLevel::Info => "info",
+            LogLevel::Debug => "debug",
+        };
         match level {
-            LogLevel::Error => eprintln!("{message}"),
-            LogLevel::Info => println!("{message}"),
+            LogLevel::Error | LogLevel::Warn => eprintln!("impasto {prefix}: {message}"),
+            LogLevel::Info | LogLevel::Debug => println!("impasto {prefix}: {message}"),
         }
     }
 
@@ -911,7 +932,7 @@ pub fn run(
         )));
     };
     let vsync = DisplayLink::new().map_err(RunError::Window)?;
-    let dump = std::env::var_os("UIFW_DUMP").map(PathBuf::from);
+    let dump = std::env::var_os("IMPASTO_DUMP").map(PathBuf::from);
     let exit_code = Arc::new(AtomicI32::new(0));
     let exit_for_stop = Arc::clone(&exit_code);
     let on_stop: Arc<dyn Fn(i32) + Send + Sync> = Arc::new(move |code| {
@@ -997,7 +1018,7 @@ pub fn run(
             false,
         )
     };
-    window.setTitle(&NSString::from_str("uifw counter"));
+    window.setTitle(&NSString::from_str("impasto counter"));
     window.setAcceptsMouseMovedEvents(true);
     // SAFETY: `HostState` keeps this window retained until the process leaves `run`.
     unsafe { window.setReleasedWhenClosed(false) };

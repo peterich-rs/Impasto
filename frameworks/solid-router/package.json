@@ -1,5 +1,5 @@
 {
-  "name": "@uifw/solid-router",
+  "name": "@impasto/solid-router",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,8 +7,8 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@uifw/linking": "file:../linking",
-    "@uifw/solid-renderer": "file:../solid-renderer",
+    "@impasto/linking": "file:../linking",
+    "@impasto/solid-renderer": "file:../solid-renderer",
     "solid-js": "2.0.0-rc.17"
   }
 }

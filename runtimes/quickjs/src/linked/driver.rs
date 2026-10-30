@@ -1,9 +1,9 @@
-//! QuickJS entry points for [`ui_core::DriverSet`]. The interpreter owns no
+//! QuickJS entry points for [`uicore::DriverSet`]. The interpreter owns no
 //! driver state: each class carries an index and a generation.
 
 use std::ffi::{c_char, c_void};
 
-use ui_core::{Chrome, DriverEvent, DriverId, ListItem, ListNodes, ListOp, NodeId, PullMode};
+use uicore::{Chrome, DriverEvent, DriverId, ListItem, ListNodes, ListOp, NodeId, PullMode};
 
 use super::ffi::qjs_driver;
 use super::{Inner, c_message, inner, utf8_of};

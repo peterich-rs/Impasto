@@ -1,9 +1,9 @@
 {
-  "name": "@uifw/solid-renderer",
+  "name": "@impasto/solid-renderer",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Solid universal renderer. The runtime drives core.",
+  "description": "Solid universal renderer. The runtime drives uicore.",
   "exports": {
     ".": "./runtime/index.ts",
     "./defaults": "./src/defaults.ts",

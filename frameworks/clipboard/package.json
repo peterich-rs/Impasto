@@ -1,5 +1,5 @@
 {
-  "name": "@uifw/clipboard",
+  "name": "@impasto/clipboard",
   "version": "0.1.0",
   "private": true,
   "type": "module",

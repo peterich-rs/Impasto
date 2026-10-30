@@ -41,10 +41,11 @@ impl EngineSlot {
     pub fn log_hook(&self) -> Box<dyn Fn(u8, &str)> {
         let log = Rc::clone(&self.log);
         Box::new(move |level, message| {
-            let level = if level == 3 {
-                LogLevel::Error
-            } else {
-                LogLevel::Info
+            // QuickJS console levels: 0 log, 1 info, 2 warn, 3 error.
+            let level = match level {
+                3 => LogLevel::Error,
+                2 => LogLevel::Warn,
+                _ => LogLevel::Info,
             };
             log(level, message);
         })
@@ -230,7 +231,7 @@ pub fn start(boot: Boot) -> Result<Link, BootError> {
     let inbox_images = Arc::clone(&inbox);
     let http_images = http.clone();
     let _io = thread::Builder::new()
-        .name("uifw-io".to_string())
+        .name("io".to_string())
         .spawn(move || {
             decode_loop(decoder, image_rx, &inbox_images, http_images);
         });
@@ -240,7 +241,7 @@ pub fn start(boot: Boot) -> Result<Link, BootError> {
     let _net = crate::net::spawn(net_rx, inbox_net, http);
     let _time = crate::net::wake(wake_rx, Arc::clone(&inbox));
     let spawned = thread::Builder::new()
-        .name("uifw-render".to_string())
+        .name("render".to_string())
         .spawn(move || {
             let guard = ExitGuard {
                 done: Some(done_tx),
@@ -352,7 +353,7 @@ struct Runtime {
     images: ImageCache,
     image_tx: Sender<ImageRequest>,
     frame_number: u64,
-    semantics: Option<ui_core::SemanticsUpdate>,
+    semantics: Option<uicore::SemanticsUpdate>,
     panic_streak: u32,
     wake_tx: Sender<Option<i64>>,
     dump_list: bool,
@@ -509,25 +510,22 @@ fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bo
     }
 }
 
-fn fold_semantics(
-    snapshot: &mut Option<ui_core::SemanticsUpdate>,
-    patch: &ui_core::SemanticsPatch,
-) {
-    let update = snapshot.get_or_insert_with(|| ui_core::SemanticsUpdate {
+fn fold_semantics(snapshot: &mut Option<uicore::SemanticsUpdate>, patch: &uicore::SemanticsPatch) {
+    let update = snapshot.get_or_insert_with(|| uicore::SemanticsUpdate {
         root: patch.root,
         nodes: Vec::new(),
     });
     update.root = patch.root;
     for op in &patch.ops {
         match op {
-            ui_core::SemanticsOp::Upsert(node) => {
+            uicore::SemanticsOp::Upsert(node) => {
                 if let Some(found) = update.nodes.iter_mut().find(|item| item.id == node.id) {
                     *found = node.clone();
                 } else {
                     update.nodes.push(node.clone());
                 }
             }
-            ui_core::SemanticsOp::Remove(id) => update.nodes.retain(|node| node.id != *id),
+            uicore::SemanticsOp::Remove(id) => update.nodes.retain(|node| node.id != *id),
         }
     }
 }
@@ -605,7 +603,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                 leave = output.exit;
                 if let Some(tree) = output.layers.take() {
                     if runtime.dump_list {
-                        (runtime.log)(LogLevel::Info, &layer_tree_line(&tree));
+                        (runtime.log)(LogLevel::Debug, &layer_tree_line(&tree));
                     }
                     runtime.latest = Some(tree);
                     layers_changed = true;
@@ -755,12 +753,15 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
         picture_rebuilt: stats.picture_rebuilt,
         picture_reused: stats.picture_reused,
         layer_count: stats.layer_count,
+        paragraphs: stats.paragraphs,
+        pictures: stats.pictures,
+        textures: stats.textures,
     };
     if timing.over_budget(time.interval_ms) {
         (runtime.log)(
-            LogLevel::Info,
+            LogLevel::Warn,
             &format!(
-                "frame {} gesture {:.2}ms script {:.2}ms layout {:.2}ms layoutcb {:.2}ms sync {:.2}ms record {:.2}ms semantics {:.2}ms session {:.2}ms submit {:.2}ms present {:.2}ms shapes b{} mh{} mm{} ph{} pm{} rebuilt {} reused {} layers {} js motion {:.2} dispatch {:.2} timer {:.2} raf {:.2} callback {:.2} flush {:.2} laywork {:.2} x{} {} reuse {} shaped {} ptr {} key {} edit {} ime {} scroll {} focus {} blur {} gesture {}",
+                "frame {} gesture {:.2}ms script {:.2}ms layout {:.2}ms layoutcb {:.2}ms sync {:.2}ms record {:.2}ms semantics {:.2}ms session {:.2}ms submit {:.2}ms present {:.2}ms shapes b{} mh{} mm{} ph{} pm{} rebuilt {} reused {} layers {} cache para {} pic {} tex {} js motion {:.2} dispatch {:.2} timer {:.2} raf {:.2} callback {:.2} flush {:.2} laywork {:.2} x{} {} reuse {} shaped {} ptr {} key {} edit {} ime {} scroll {} focus {} blur {} gesture {}",
                 timing.number,
                 timing.gesture_ms,
                 timing.script_ms,
@@ -780,6 +781,9 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                 timing.picture_rebuilt,
                 timing.picture_reused,
                 timing.layer_count,
+                timing.paragraphs,
+                timing.pictures,
+                timing.textures,
                 phase.script.motion_ms,
                 phase.script.dispatch_ms,
                 phase.script.timer_ms,
@@ -896,7 +900,7 @@ fn open_surface_target(
 fn images_ready(
     runtime: &mut Runtime,
     requirements: &[(Arc<str>, bool)],
-    census: Option<&ui_core::ImageCensus>,
+    census: Option<&uicore::ImageCensus>,
 ) -> bool {
     runtime.images.begin_frame();
     if let Some(census) = census {
@@ -1185,7 +1189,7 @@ mod tests {
     impl session::Session for MockSession {
         fn metrics(&mut self, _: &Metrics) {}
 
-        fn pointer(&mut self, _: ui_core::PointerEvent) {}
+        fn pointer(&mut self, _: uicore::PointerEvent) {}
 
         fn frame(&mut self, time: FrameTime) -> FrameOutput {
             let mut log = self.log.borrow_mut();
@@ -1461,14 +1465,12 @@ mod tests {
             id,
             metrics: Metrics::new(400.0, 800.0, 2.0),
         }));
-        assert!(
-            !harness.command(Command::Pointer(ui_core::PointerEvent::new(
-                ui_core::Phase::Move,
-                1.0,
-                1.0,
-                0.0,
-            )))
-        );
+        assert!(!harness.command(Command::Pointer(uicore::PointerEvent::new(
+            uicore::Phase::Move,
+            1.0,
+            1.0,
+            0.0,
+        ))));
         assert!(!harness.command(Command::Input(session::InputEvent::Back)));
         assert!(!harness.command(Command::ImeDismissed));
         assert!(!harness.command(Command::Metrics(Metrics::new(360.0, 640.0, 3.0))));
@@ -1477,9 +1479,11 @@ mod tests {
         assert!(!harness.command(Command::Settings(session::PlatformSettings::default())));
         assert!(!harness.command(Command::WindowFocus(true)));
         assert!(!harness.command(Command::LaunchUrl("https://app.example/item".into())));
-        assert!(!harness.command(Command::SemanticsAction(
-            ui_core::SemanticsAction::Activate(ui_core::SemanticsId(1))
-        )));
+        assert!(
+            !harness.command(Command::SemanticsAction(uicore::SemanticsAction::Activate(
+                uicore::SemanticsId(1)
+            )))
+        );
         assert!(!harness.command(Command::ReloadImage("asset:logo".into())));
         assert!(!harness.command(Command::ImageReady(ImageReady::Missing {
             source: Arc::from("asset:missing"),

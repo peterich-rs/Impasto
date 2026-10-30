@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "uifw-android"
+rootProject.name = "android"
 include(":app")

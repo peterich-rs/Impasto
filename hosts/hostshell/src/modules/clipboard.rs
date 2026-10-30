@@ -12,7 +12,7 @@ pub trait ClipboardHost: Send + Sync {
 pub fn module(host: Arc<dyn ClipboardHost>) -> HostModule {
     HostModule {
         name: "Clipboard",
-        specifier: "@uifw/clipboard/host",
+        specifier: "@impasto/clipboard/host",
         methods: vec![
             HostMethod::sync("getString", {
                 let host = Arc::clone(&host);

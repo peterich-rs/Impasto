@@ -19,14 +19,14 @@ use objc2_foundation::{NSArray, NSNumber, NSPoint, NSRange, NSRect, NSString};
 /// One non-Generic node after Generic ancestors have been skipped.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VisibleNode {
-    pub id: core::SemanticsId,
-    pub parent: Option<core::SemanticsId>,
-    pub rect: core::Rect,
-    pub role: core::SemanticsRole,
+    pub id: uicore::SemanticsId,
+    pub parent: Option<uicore::SemanticsId>,
+    pub rect: uicore::Rect,
+    pub role: uicore::SemanticsRole,
     pub label: String,
     pub help: String,
-    pub actions: core::SemanticsActions,
-    pub flags: core::SemanticsFlags,
+    pub actions: uicore::SemanticsActions,
+    pub flags: uicore::SemanticsFlags,
     /// Selection, or a collapsed caret. Empty when the node has neither.
     pub selection: Option<(u32, u32)>,
 }
@@ -45,7 +45,7 @@ pub enum AxRole {
     TextArea,
 }
 
-/// Stable slot for one [`core::SemanticsId`]. Disappeared ids are dropped.
+/// Stable slot for one [`uicore::SemanticsId`]. Disappeared ids are dropped.
 #[cfg(test)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ElementCache {
@@ -75,13 +75,13 @@ impl ElementCache {
 }
 
 /// Drop Generic nodes and hang their children on the nearest non-Generic ancestor.
-pub fn visible_nodes(update: &core::SemanticsUpdate) -> Vec<VisibleNode> {
-    let by_id: HashMap<core::SemanticsId, &core::SemanticsNode> =
+pub fn visible_nodes(update: &uicore::SemanticsUpdate) -> Vec<VisibleNode> {
+    let by_id: HashMap<uicore::SemanticsId, &uicore::SemanticsNode> =
         update.nodes.iter().map(|node| (node.id, node)).collect();
     update
         .nodes
         .iter()
-        .filter(|node| node.role != core::SemanticsRole::Generic)
+        .filter(|node| node.role != uicore::SemanticsRole::Generic)
         .map(|node| VisibleNode {
             id: node.id,
             parent: resolved_parent(node, &by_id),
@@ -99,13 +99,13 @@ pub fn visible_nodes(update: &core::SemanticsUpdate) -> Vec<VisibleNode> {
 }
 
 fn resolved_parent(
-    node: &core::SemanticsNode,
-    by_id: &HashMap<core::SemanticsId, &core::SemanticsNode>,
-) -> Option<core::SemanticsId> {
+    node: &uicore::SemanticsNode,
+    by_id: &HashMap<uicore::SemanticsId, &uicore::SemanticsNode>,
+) -> Option<uicore::SemanticsId> {
     let mut current = node.parent;
     while let Some(id) = current {
         match by_id.get(&id) {
-            Some(parent) if parent.role != core::SemanticsRole::Generic => return Some(id),
+            Some(parent) if parent.role != uicore::SemanticsRole::Generic => return Some(id),
             Some(parent) => current = parent.parent,
             None => return None,
         }
@@ -115,23 +115,23 @@ fn resolved_parent(
 
 /// Button, Text, Image, TextField, Switch→CheckBox, Scroll. Generic is not an element.
 #[cfg(test)]
-pub fn ax_role(role: core::SemanticsRole) -> Option<AxRole> {
+pub fn ax_role(role: uicore::SemanticsRole) -> Option<AxRole> {
     match role {
-        core::SemanticsRole::Generic => None,
-        core::SemanticsRole::Button => Some(AxRole::Button),
-        core::SemanticsRole::Text => Some(AxRole::StaticText),
-        core::SemanticsRole::Image => Some(AxRole::Image),
-        core::SemanticsRole::Scroll => Some(AxRole::ScrollArea),
-        core::SemanticsRole::Switch => Some(AxRole::CheckBox),
-        core::SemanticsRole::TextField => Some(AxRole::TextField),
-        core::SemanticsRole::SearchField => Some(AxRole::SearchField),
-        core::SemanticsRole::TextArea => Some(AxRole::TextArea),
+        uicore::SemanticsRole::Generic => None,
+        uicore::SemanticsRole::Button => Some(AxRole::Button),
+        uicore::SemanticsRole::Text => Some(AxRole::StaticText),
+        uicore::SemanticsRole::Image => Some(AxRole::Image),
+        uicore::SemanticsRole::Scroll => Some(AxRole::ScrollArea),
+        uicore::SemanticsRole::Switch => Some(AxRole::CheckBox),
+        uicore::SemanticsRole::TextField => Some(AxRole::TextField),
+        uicore::SemanticsRole::SearchField => Some(AxRole::SearchField),
+        uicore::SemanticsRole::TextArea => Some(AxRole::TextArea),
     }
 }
 
 /// `1` when `CHECKED` is set, otherwise `0`.
-pub fn checked_value(flags: core::SemanticsFlags) -> i32 {
-    i32::from(flags.contains(core::SemanticsFlags::CHECKED))
+pub fn checked_value(flags: uicore::SemanticsFlags) -> i32 {
+    i32::from(flags.contains(uicore::SemanticsFlags::CHECKED))
 }
 
 /// Forward increment is positive. Vertical overflow wins even when both axes overflow.
@@ -155,7 +155,10 @@ pub fn scroll_step(
 
 /// Direct children of `scroll_id` in the original snapshot. No children → viewport.
 #[cfg(test)]
-pub fn content_extent(update: &core::SemanticsUpdate, scroll_id: core::SemanticsId) -> (f32, f32) {
+pub fn content_extent(
+    update: &uicore::SemanticsUpdate,
+    scroll_id: uicore::SemanticsId,
+) -> (f32, f32) {
     let Some(scroll) = update.nodes.iter().find(|node| node.id == scroll_id) else {
         return (0.0, 0.0);
     };
@@ -176,7 +179,7 @@ pub fn content_extent(update: &core::SemanticsUpdate, scroll_id: core::Semantics
     }
 }
 
-pub fn scene_rect_to_screen(view: &NSView, rect: core::Rect) -> NSRect {
+pub fn scene_rect_to_screen(view: &NSView, rect: uicore::Rect) -> NSRect {
     let height = view.bounds().size.height;
     let local = NSRect::new(
         NSPoint::new(rect.x as f64, height - rect.y as f64 - rect.h as f64),
@@ -190,14 +193,14 @@ pub fn scene_rect_to_screen(view: &NSView, rect: core::Rect) -> NSRect {
 }
 
 pub(crate) struct A11yIvars {
-    id: core::SemanticsId,
+    id: uicore::SemanticsId,
     poster: Poster,
     host: Cell<*const NSView>,
     parent: Cell<*const AnyObject>,
     label: RefCell<String>,
     help: RefCell<String>,
-    role: Cell<core::SemanticsRole>,
-    rect: Cell<core::Rect>,
+    role: Cell<uicore::SemanticsRole>,
+    rect: Cell<uicore::Rect>,
     actions: Cell<u32>,
     flags: Cell<u32>,
     selected: Cell<Option<(u32, u32)>>,
@@ -233,18 +236,18 @@ define_class!(
             // SAFETY: AppKit role constants are immortal NSString objects.
             unsafe {
                 match self.ivars().role.get() {
-                    core::SemanticsRole::Button => Some(NSAccessibilityButtonRole.retain()),
-                    core::SemanticsRole::Text => Some(NSAccessibilityStaticTextRole.retain()),
-                    core::SemanticsRole::Image => Some(NSAccessibilityImageRole.retain()),
-                    core::SemanticsRole::Scroll => Some(NSAccessibilityScrollAreaRole.retain()),
-                    core::SemanticsRole::Switch => Some(NSAccessibilityCheckBoxRole.retain()),
-                    core::SemanticsRole::TextField
-                    | core::SemanticsRole::SearchField
-                    | core::SemanticsRole::TextArea => {
+                    uicore::SemanticsRole::Button => Some(NSAccessibilityButtonRole.retain()),
+                    uicore::SemanticsRole::Text => Some(NSAccessibilityStaticTextRole.retain()),
+                    uicore::SemanticsRole::Image => Some(NSAccessibilityImageRole.retain()),
+                    uicore::SemanticsRole::Scroll => Some(NSAccessibilityScrollAreaRole.retain()),
+                    uicore::SemanticsRole::Switch => Some(NSAccessibilityCheckBoxRole.retain()),
+                    uicore::SemanticsRole::TextField
+                    | uicore::SemanticsRole::SearchField
+                    | uicore::SemanticsRole::TextArea => {
                         // objc2 does not export the search-field or text-area role symbols.
                         Some(NSAccessibilityTextFieldRole.retain())
                     }
-                    core::SemanticsRole::Generic => None,
+                    uicore::SemanticsRole::Generic => None,
                 }
             }
         }
@@ -252,8 +255,8 @@ define_class!(
         #[unsafe(method_id(accessibilityValue))]
         fn accessibility_value(&self) -> Option<Retained<NSNumber>> {
             match self.ivars().role.get() {
-                core::SemanticsRole::Switch => Some(NSNumber::numberWithInt(checked_value(
-                    core::SemanticsFlags(self.ivars().flags.get()),
+                uicore::SemanticsRole::Switch => Some(NSNumber::numberWithInt(checked_value(
+                    uicore::SemanticsFlags(self.ivars().flags.get()),
                 ))),
                 _ => None,
             }
@@ -299,12 +302,12 @@ define_class!(
 
         #[unsafe(method(accessibilityPerformPress))]
         fn accessibility_perform_press(&self) -> bool {
-            let allowed = core::SemanticsActions(self.ivars().actions.get())
-                .contains(core::SemanticsActions::ACTIVATE);
+            let allowed = uicore::SemanticsActions(self.ivars().actions.get())
+                .contains(uicore::SemanticsActions::ACTIVATE);
             if allowed {
                 self.ivars()
                     .poster
-                    .post(Command::SemanticsAction(core::SemanticsAction::Activate(
+                    .post(Command::SemanticsAction(uicore::SemanticsAction::Activate(
                         self.ivars().id,
                     )));
             }
@@ -316,7 +319,7 @@ define_class!(
 impl A11yNode {
     fn new(
         mtm: MainThreadMarker,
-        id: core::SemanticsId,
+        id: uicore::SemanticsId,
         poster: Poster,
         host: *const NSView,
     ) -> Retained<Self> {
@@ -327,8 +330,8 @@ impl A11yNode {
             parent: Cell::new(std::ptr::null()),
             label: RefCell::new(String::new()),
             help: RefCell::new(String::new()),
-            role: Cell::new(core::SemanticsRole::Generic),
-            rect: Cell::new(core::Rect {
+            role: Cell::new(uicore::SemanticsRole::Generic),
+            rect: Cell::new(uicore::Rect {
                 x: 0.0,
                 y: 0.0,
                 w: 0.0,
@@ -359,7 +362,7 @@ impl A11yNode {
     }
 }
 
-/// Main-thread cache of AppKit elements, keyed by [`core::SemanticsId`].
+/// Main-thread cache of AppKit elements, keyed by [`uicore::SemanticsId`].
 pub(crate) struct A11yHost {
     elements: RefCell<HashMap<u64, Retained<A11yNode>>>,
     roots: RefCell<Vec<Retained<A11yNode>>>,
@@ -378,7 +381,7 @@ impl A11yHost {
         mtm: MainThreadMarker,
         poster: &Poster,
         host: *const NSView,
-        update: &core::SemanticsUpdate,
+        update: &uicore::SemanticsUpdate,
     ) {
         let visible = visible_nodes(update);
         let live: HashSet<u64> = visible.iter().map(|node| node.id.0).collect();
@@ -437,13 +440,13 @@ mod tests {
     use super::{
         AxRole, ElementCache, ax_role, checked_value, content_extent, scroll_step, visible_nodes,
     };
-    use core::{
+    use uicore::{
         SemanticsActions, SemanticsFlags, SemanticsId, SemanticsNode, SemanticsRole,
         SemanticsUpdate,
     };
 
-    fn rect(w: f32, h: f32) -> core::Rect {
-        core::Rect {
+    fn rect(w: f32, h: f32) -> uicore::Rect {
+        uicore::Rect {
             x: 0.0,
             y: 0.0,
             w,

@@ -1,4 +1,4 @@
-//! Image bytes decoded on `uifw-io` and installed on the render thread.
+//! Image bytes decoded on `io` and installed on the render thread.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -35,7 +35,7 @@ pub enum ImageError {
     Failed(String),
 }
 
-/// Reads one source. Called only on the `uifw-io` thread.
+/// Reads one source. Called only on the `io` thread.
 pub trait ImageDecoder: Send + Sync {
     fn decode(&self, source: &str) -> Result<ImageHandle, ImageError>;
 

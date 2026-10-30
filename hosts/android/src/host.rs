@@ -25,8 +25,8 @@ use crate::surface::VulkanSurface;
 use crate::textinput::{self, Client, Edit, KeyOutcome};
 use crate::vsync::FrameClock;
 
-const FONT_FAMILY: &str = "UIFWSans";
-const FONT_PATH: &CStr = c"fonts/UIFWSans.ttf";
+const FONT_FAMILY: &str = "Sans";
+const FONT_PATH: &CStr = c"fonts/Sans.ttf";
 const SCRIPT_NAME: &str = "counter.js";
 const IME_SHOW: i32 = 1;
 const IME_UPDATE: i32 = 2;
@@ -41,7 +41,7 @@ struct Bridge {
     view: Global<JObject<'static>>,
     assets: Arc<AssetManager>,
     font: OnceLock<Vec<u8>>,
-    semantics: Mutex<Option<core::SemanticsUpdate>>,
+    semantics: Mutex<Option<uicore::SemanticsUpdate>>,
 }
 
 impl Bridge {
@@ -153,7 +153,7 @@ impl Bridge {
         copied
     }
 
-    fn publish_semantics(&self, update: &core::SemanticsUpdate) {
+    fn publish_semantics(&self, update: &uicore::SemanticsUpdate) {
         let nodes = crate::a11y::bridge_nodes(update);
         self.call(|env| {
             let n = nodes.len();
@@ -363,7 +363,7 @@ impl Services for Shared {
         None
     }
 
-    fn semantics(&self, update: &core::SemanticsUpdate) {
+    fn semantics(&self, update: &uicore::SemanticsUpdate) {
         *self
             .0
             .semantics
@@ -373,6 +373,9 @@ impl Services for Shared {
     }
 
     fn log(&self, level: LogLevel, message: &str) {
+        if level > log_filter() {
+            return;
+        }
         log_line(level, message);
     }
 
@@ -390,7 +393,7 @@ impl Services for Shared {
             if let Ok(bytes) = std::fs::read(path)
                 && !bytes.is_empty()
             {
-                return vec![("UIFWSansCJK".to_string(), bytes)];
+                return vec![("SansCJK".to_string(), bytes)];
             }
         }
         Vec::new()
@@ -490,7 +493,7 @@ fn edit_event(edit: Edit, shift: bool) -> Option<EditEvent> {
         EditEvent::Key(session::KeyPress {
             key,
             shift,
-            modifiers: core::Modifiers::empty(),
+            modifiers: uicore::Modifiers::empty(),
         })
     };
     Some(match edit {
@@ -513,8 +516,10 @@ fn edit_event(edit: Edit, shift: bool) -> Option<EditEvent> {
         Edit::DeleteWordForward => press(Key::DeleteWordForward),
         Edit::SelectAll => EditEvent::SelectAll,
         Edit::Text(text) => EditEvent::Text(text),
-        Edit::DeleteRange { start, end } => EditEvent::Edit(core::Edit::DeleteRange { start, end }),
-        Edit::Insert(text) => EditEvent::Edit(core::Edit::Insert(text)),
+        Edit::DeleteRange { start, end } => {
+            EditEvent::Edit(uicore::Edit::DeleteRange { start, end })
+        }
+        Edit::Insert(text) => EditEvent::Edit(uicore::Edit::Insert(text)),
         Edit::Composing(text) => EditEvent::Composing(text),
     })
 }
@@ -672,7 +677,7 @@ impl Drop for HeldWindow {
 fn release_when_dropped(wait: DropWait, id: SurfaceId, window: NativeWindow) {
     let mut held = HeldWindow(Some(window));
     let spawned = thread::Builder::new()
-        .name("uifw-surface-drop".into())
+        .name("surface-drop".into())
         .spawn(move || {
             wait.wait(id);
             held.release();
@@ -988,13 +993,25 @@ fn flag(value: jboolean) -> bool {
 pub(crate) fn log_line(level: LogLevel, message: &str) {
     let priority = match level {
         LogLevel::Error => 6,
+        LogLevel::Warn => 5,
         LogLevel::Info => 4,
+        LogLevel::Debug => 3,
     };
     let mut bytes = message.replace('\0', " ").into_bytes();
     bytes.push(0);
     unsafe {
-        __android_log_write(priority, c"uifw".as_ptr(), bytes.as_ptr().cast());
+        __android_log_write(priority, c"impasto".as_ptr(), bytes.as_ptr().cast());
     }
+}
+
+/// Reads `IMPASTO_LOG` once. The default sink keeps `info`.
+fn log_filter() -> LogLevel {
+    static FILTER: OnceLock<LogLevel> = OnceLock::new();
+    *FILTER.get_or_init(|| {
+        std::env::var("IMPASTO_LOG")
+            .map(|text| LogLevel::parse(&text))
+            .unwrap_or(LogLevel::Info)
+    })
 }
 
 fn with_env<'local, T: Default>(
@@ -1006,7 +1023,7 @@ fn with_env<'local, T: Default>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeAttach<'local>(
+pub extern "system" fn Java_dev_impasto_host_HostActivity_nativeAttach<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
     _activity: JObject<'local>,
@@ -1058,7 +1075,7 @@ pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeAttach<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeDetach(
+pub extern "system" fn Java_dev_impasto_host_HostActivity_nativeDetach(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
 ) {
@@ -1066,7 +1083,7 @@ pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeDetach(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeResume(
+pub extern "system" fn Java_dev_impasto_host_HostActivity_nativeResume(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
 ) {
@@ -1078,7 +1095,7 @@ pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeResume(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeInactive(
+pub extern "system" fn Java_dev_impasto_host_HostActivity_nativeInactive(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
 ) {
@@ -1090,7 +1107,7 @@ pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeInactive(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeHidden(
+pub extern "system" fn Java_dev_impasto_host_HostActivity_nativeHidden(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
 ) {
@@ -1102,7 +1119,7 @@ pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeHidden(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeTrimMemory(
+pub extern "system" fn Java_dev_impasto_host_HostActivity_nativeTrimMemory(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
 ) {
@@ -1113,7 +1130,7 @@ pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeTrimMemory(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeFocus(
+pub extern "system" fn Java_dev_impasto_host_HostActivity_nativeFocus(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
     focused: jboolean,
@@ -1125,7 +1142,7 @@ pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeFocus(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeBack(
+pub extern "system" fn Java_dev_impasto_host_HostActivity_nativeBack(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
 ) {
@@ -1142,7 +1159,7 @@ pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeBack(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeSettings<'local>(
+pub extern "system" fn Java_dev_impasto_host_HostActivity_nativeSettings<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
     locale: JString<'local>,
@@ -1170,7 +1187,7 @@ pub extern "system" fn Java_dev_uifw_host_HostActivity_nativeSettings<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_HostSurfaceView_nativeSurfaceCreated<'local>(
+pub extern "system" fn Java_dev_impasto_host_HostSurfaceView_nativeSurfaceCreated<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
     surface: JObject<'local>,
@@ -1193,7 +1210,7 @@ pub extern "system" fn Java_dev_uifw_host_HostSurfaceView_nativeSurfaceCreated<'
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_HostSurfaceView_nativeSurfaceChanged(
+pub extern "system" fn Java_dev_impasto_host_HostSurfaceView_nativeSurfaceChanged(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
     _width: jint,
@@ -1211,7 +1228,7 @@ pub extern "system" fn Java_dev_uifw_host_HostSurfaceView_nativeSurfaceChanged(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_HostSurfaceView_nativeSurfaceDestroyed(
+pub extern "system" fn Java_dev_impasto_host_HostSurfaceView_nativeSurfaceDestroyed(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
 ) {
@@ -1222,7 +1239,7 @@ pub extern "system" fn Java_dev_uifw_host_HostSurfaceView_nativeSurfaceDestroyed
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_HostView_nativeMetrics(
+pub extern "system" fn Java_dev_impasto_host_HostView_nativeMetrics(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
     width: jint,
@@ -1259,7 +1276,7 @@ pub extern "system" fn Java_dev_uifw_host_HostView_nativeMetrics(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_HostView_nativePointer(
+pub extern "system" fn Java_dev_impasto_host_HostView_nativePointer(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
     phase: jint,
@@ -1282,21 +1299,21 @@ pub extern "system" fn Java_dev_uifw_host_HostView_nativePointer(
         return;
     };
     let kind = match kind {
-        1 => core::PointerKind::Mouse,
-        2 => core::PointerKind::Pen,
-        _ => core::PointerKind::Touch,
+        1 => uicore::PointerKind::Mouse,
+        2 => uicore::PointerKind::Pen,
+        _ => uicore::PointerKind::Touch,
     };
     let button = match button {
-        1 => core::Button::Primary,
-        2 => core::Button::Secondary,
-        3 => core::Button::Auxiliary,
-        _ => core::Button::None,
+        1 => uicore::Button::Primary,
+        2 => uicore::Button::Secondary,
+        3 => uicore::Button::Auxiliary,
+        _ => uicore::Button::None,
     };
     if phase == 5 {
         let Some((dx, dy)) = android_wheel(wheel_x, wheel_y) else {
             return;
         };
-        host.link.post(Command::Pointer(core::PointerEvent::wheel(
+        host.link.post(Command::Pointer(uicore::PointerEvent::wheel(
             x,
             y,
             time_ms as f64,
@@ -1306,29 +1323,29 @@ pub extern "system" fn Java_dev_uifw_host_HostView_nativePointer(
         return;
     }
     let phase = match phase {
-        0 => core::Phase::Down,
-        1 | 4 => core::Phase::Move,
-        2 => core::Phase::Up,
-        3 => core::Phase::Cancel,
+        0 => uicore::Phase::Down,
+        1 | 4 => uicore::Phase::Move,
+        2 => uicore::Phase::Up,
+        3 => uicore::Phase::Cancel,
         _ => return,
     };
-    let button = if phase == core::Phase::Cancel {
-        core::Button::None
-    } else if kind == core::PointerKind::Touch && button == core::Button::None {
-        core::Button::Primary
+    let button = if phase == uicore::Phase::Cancel {
+        uicore::Button::None
+    } else if kind == uicore::PointerKind::Touch && button == uicore::Button::None {
+        uicore::Button::Primary
     } else {
         button
     };
-    host.link.post(Command::Pointer(core::PointerEvent {
-        pointer: core::PointerId(u64::from(pointer_id as u32)),
+    host.link.post(Command::Pointer(uicore::PointerEvent {
+        pointer: uicore::PointerId(u64::from(pointer_id as u32)),
         kind,
         phase,
         x,
         y,
         time_ms: time_ms as f64,
         button,
-        buttons: core::Buttons::from_bits(buttons as u8),
-        modifiers: core::Modifiers::from_bits(modifiers as u8),
+        buttons: uicore::Buttons::from_bits(buttons as u8),
+        modifiers: uicore::Modifiers::from_bits(modifiers as u8),
         dx: 0.0,
         dy: 0.0,
         zoom: 0.0,
@@ -1336,7 +1353,7 @@ pub extern "system" fn Java_dev_uifw_host_HostView_nativePointer(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_HostView_nativeZoom(
+pub extern "system" fn Java_dev_impasto_host_HostView_nativeZoom(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
     scale: f32,
@@ -1354,7 +1371,7 @@ pub extern "system" fn Java_dev_uifw_host_HostView_nativeZoom(
     if !scale.is_finite() || scale <= 0.0 {
         return;
     }
-    host.link.post(Command::Pointer(core::PointerEvent::zoom(
+    host.link.post(Command::Pointer(uicore::PointerEvent::zoom(
         x,
         y,
         time_ms as f64,
@@ -1363,7 +1380,7 @@ pub extern "system" fn Java_dev_uifw_host_HostView_nativeZoom(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_HostView_nativeKey(
+pub extern "system" fn Java_dev_impasto_host_HostView_nativeKey(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
     action: jint,
@@ -1425,7 +1442,7 @@ pub extern "system" fn Java_dev_uifw_host_HostView_nativeKey(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_TextInput_nativeSync<'local>(
+pub extern "system" fn Java_dev_impasto_host_TextInput_nativeSync<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
     text: JString<'local>,
@@ -1463,7 +1480,7 @@ pub extern "system" fn Java_dev_uifw_host_TextInput_nativeSync<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_TextInput_nativeAction(
+pub extern "system" fn Java_dev_impasto_host_TextInput_nativeAction(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
 ) {
@@ -1478,7 +1495,7 @@ pub extern "system" fn Java_dev_uifw_host_TextInput_nativeAction(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_TextInput_nativeContext(
+pub extern "system" fn Java_dev_impasto_host_TextInput_nativeContext(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
     kind: jint,
@@ -1503,7 +1520,7 @@ pub extern "system" fn Java_dev_uifw_host_TextInput_nativeContext(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_TextInput_nativeAccept<'local>(
+pub extern "system" fn Java_dev_impasto_host_TextInput_nativeAccept<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
     op: jint,
@@ -1549,7 +1566,7 @@ pub extern "system" fn Java_dev_uifw_host_TextInput_nativeAccept<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_HostView_nativeRunWork(
+pub extern "system" fn Java_dev_impasto_host_HostView_nativeRunWork(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
     work: jlong,
@@ -1563,7 +1580,7 @@ pub extern "system" fn Java_dev_uifw_host_HostView_nativeRunWork(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_VsyncWaiter_nativeOnVsync(
+pub extern "system" fn Java_dev_impasto_host_VsyncWaiter_nativeOnVsync(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
     frame_time_nanos: jlong,
@@ -1578,7 +1595,7 @@ pub extern "system" fn Java_dev_uifw_host_VsyncWaiter_nativeOnVsync(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_AccessBridge_nativeActivate(
+pub extern "system" fn Java_dev_impasto_host_AccessBridge_nativeActivate(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
     id: jlong,
@@ -1587,13 +1604,13 @@ pub extern "system" fn Java_dev_uifw_host_AccessBridge_nativeActivate(
         return;
     };
     host.link
-        .post(Command::SemanticsAction(core::SemanticsAction::Activate(
-            core::SemanticsId(id as u64),
+        .post(Command::SemanticsAction(uicore::SemanticsAction::Activate(
+            uicore::SemanticsId(id as u64),
         )));
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_AccessBridge_nativeScroll(
+pub extern "system" fn Java_dev_impasto_host_AccessBridge_nativeScroll(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
     id: jlong,
@@ -1602,7 +1619,7 @@ pub extern "system" fn Java_dev_uifw_host_AccessBridge_nativeScroll(
     let Some(host) = host() else {
         return;
     };
-    let id = core::SemanticsId(id as u64);
+    let id = uicore::SemanticsId(id as u64);
     let (dx, dy) = {
         let update = host
             .bridge
@@ -1618,7 +1635,7 @@ pub extern "system" fn Java_dev_uifw_host_AccessBridge_nativeScroll(
         return;
     }
     host.link
-        .post(Command::SemanticsAction(core::SemanticsAction::Scroll {
+        .post(Command::SemanticsAction(uicore::SemanticsAction::Scroll {
             id,
             dx,
             dy,
@@ -1626,7 +1643,7 @@ pub extern "system" fn Java_dev_uifw_host_AccessBridge_nativeScroll(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_uifw_host_AccessBridge_nativeSetText<'local>(
+pub extern "system" fn Java_dev_impasto_host_AccessBridge_nativeSetText<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
     id: jlong,
@@ -1638,8 +1655,8 @@ pub extern "system" fn Java_dev_uifw_host_AccessBridge_nativeSetText<'local>(
         };
         let text = java_string(env, &text)?.unwrap_or_default();
         host.link
-            .post(Command::SemanticsAction(core::SemanticsAction::SetText {
-                id: core::SemanticsId(id as u64),
+            .post(Command::SemanticsAction(uicore::SemanticsAction::SetText {
+                id: uicore::SemanticsId(id as u64),
                 text,
             }));
         Ok(())

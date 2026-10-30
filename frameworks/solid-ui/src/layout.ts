@@ -1,4 +1,4 @@
-import { directionFor } from "@uifw/solid-renderer";
+import { directionFor } from "@impasto/solid-renderer";
 
 /** Map logical start/end padding to physical left/right. */
 export function resolvePadding(

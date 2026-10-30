@@ -113,11 +113,11 @@ mod tests {
     #[test]
     fn host_module_table_includes_unknown_names() {
         let clip = MemoryClipboard::new("");
-        let storage = MemoryStorage::new("/tmp/uifw-docs");
+        let storage = MemoryStorage::new("/tmp/file-system");
         let launch = session::shared(None);
         let maps = HostModule {
             name: "Maps",
-            specifier: "@uifw/maps/host",
+            specifier: "@impasto/maps/host",
             methods: vec![HostMethod::sync("ping", |_| {
                 Ok(PluginValue::Str("pong".into()))
             })],
@@ -145,7 +145,7 @@ mod tests {
         match registry.method("FileSystem", "documentDirectory") {
             Some(method) => match &method.invoke {
                 Invoke::Sync(f) => match f(&[]) {
-                    Ok(PluginValue::Str(path)) => assert_eq!(path, "/tmp/uifw-docs"),
+                    Ok(PluginValue::Str(path)) => assert_eq!(path, "/tmp/file-system"),
                     other => panic!("{other:?}"),
                 },
                 Invoke::Promise(_) => panic!("documentDirectory must be sync"),
@@ -160,7 +160,7 @@ mod tests {
         struct Probe(Arc<AtomicBool>);
         impl StorageHost for Probe {
             fn document_dir(&self) -> Result<String, String> {
-                Ok("/tmp/uifw-docs".into())
+                Ok("/tmp/file-system".into())
             }
             fn pick_document(&self) -> Result<Option<String>, String> {
                 self.0.store(true, Ordering::SeqCst);

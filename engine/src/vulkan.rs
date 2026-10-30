@@ -342,13 +342,13 @@ unsafe extern "C" fn create_swapchain(
 }
 
 fn log_swapchain(width: u32, height: u32, result: i32) {
-    log_uifw(
+    log(
         6,
         &format!("swapchain extent {width}x{height} refused ({result})"),
     );
 }
 
-fn log_uifw(priority: i32, message: &str) {
+fn log(priority: i32, message: &str) {
     let mut bytes = message.replace('\0', " ").into_bytes();
     bytes.push(0);
     unsafe extern "C" {
@@ -356,6 +356,6 @@ fn log_uifw(priority: i32, message: &str) {
     }
     // SAFETY: `bytes` is NUL-terminated and lives for this call. The tag is a literal.
     unsafe {
-        __android_log_write(priority, c"uifw".as_ptr(), bytes.as_ptr().cast());
+        __android_log_write(priority, c"impasto".as_ptr(), bytes.as_ptr().cast());
     }
 }

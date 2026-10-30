@@ -1,6 +1,6 @@
 //! Pointer samples stay in scene points. AppKit already reports those points.
 
-use core::{Button, Modifiers, Phase, PointerEvent};
+use uicore::{Button, Modifiers, Phase, PointerEvent};
 
 /// `local_x` and `local_y` are inside the content view, with the origin at the
 /// bottom left. The scene uses the same point size and puts the origin at the
@@ -23,14 +23,14 @@ pub fn pointer_event(
 ) -> PointerEvent {
     let (x, y) = scene_point(local_x, local_y, view_height);
     PointerEvent {
-        pointer: core::PointerId(0),
-        kind: core::PointerKind::Mouse,
+        pointer: uicore::PointerId(0),
+        kind: uicore::PointerKind::Mouse,
         phase,
         x,
         y,
         time_ms,
         button,
-        buttons: core::Buttons::from_button(button),
+        buttons: uicore::Buttons::from_button(button),
         modifiers,
         dx,
         dy,
@@ -41,7 +41,7 @@ pub fn pointer_event(
 #[cfg(test)]
 mod tests {
     use super::{pointer_event, scene_point};
-    use core::{Button, Modifiers, Phase};
+    use uicore::{Button, Modifiers, Phase};
 
     #[test]
     fn top_left_of_the_view_is_the_scene_origin() {

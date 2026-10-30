@@ -1,5 +1,5 @@
 import { createTrackedEffect, createSignal, onCleanup } from "solid-js";
-import { Text, directionFor, host, onFrame, requestFrame, scrollIntoView, setRecognizers, setStroke, type NodeHandle } from "@uifw/solid-renderer";
+import { Text, directionFor, host, onFrame, requestFrame, scrollIntoView, setRecognizers, setStroke, type NodeHandle } from "@impasto/solid-renderer";
 import { colorBytes } from "../colors.ts";
 import { coreHost } from "../host-ext.ts";
 import { bindFocusRing } from "../focus.ts";

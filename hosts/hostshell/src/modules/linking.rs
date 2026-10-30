@@ -11,7 +11,7 @@ pub trait LinkingHost: Send + Sync {
 pub fn module(host: Arc<dyn LinkingHost>, launch_url: Shared<Option<String>>) -> HostModule {
     HostModule {
         name: "Linking",
-        specifier: "@uifw/linking/host",
+        specifier: "@impasto/linking/host",
         methods: vec![
             HostMethod::sync("getInitialURL", move |_| {
                 Ok(match shared_read(&launch_url) {

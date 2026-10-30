@@ -385,12 +385,12 @@ typedef struct Host {
     uint64_t motion_next;
 } Host;
 
-#define UIFW_JS_MEMORY_LIMIT (16u << 20)
+#define QJS_MEMORY_LIMIT (16u << 20)
 /* Debug quickjs-ng takes about 44 ms to eval dist/counter.js. Mounting the
    gallery list does the same kind of host calls and also exceeds one frame.
    Crossing the limit throws InternalError: interrupted and discards the turn,
    so this is a runaway cutoff, not a frame budget. */
-#define UIFW_JS_TURN_MS 128
+#define QJS_TURN_MS 128
 
 static int64_t now_ms(void) {
     struct timespec ts;
@@ -401,11 +401,11 @@ static int64_t now_ms(void) {
 }
 
 static void arm_slice(Host *host) {
-    host->deadline_ms = now_ms() + UIFW_JS_TURN_MS;
+    host->deadline_ms = now_ms() + QJS_TURN_MS;
 }
 
 static void arm_eval(Host *host) {
-    host->deadline_ms = now_ms() + UIFW_JS_TURN_MS;
+    host->deadline_ms = now_ms() + QJS_TURN_MS;
 }
 
 static int interrupt_handler(JSRuntime *rt, void *opaque) {
@@ -4696,9 +4696,10 @@ static void module_reject(JSContext *ctx) {
 
 static JSModuleDef *load_host_module(JSContext *ctx, Host *host, const char *name);
 
-/* "@uifw/<pkg>/host" with one package segment. */
+/* "@impasto/<pkg>/host" with one package segment. */
+static const char HOST_SCOPE[] = "@impasto/";
+
 static int is_host_specifier(const char *name) {
-    static const char prefix[] = "@uifw/";
     static const char suffix[] = "/host";
     size_t len;
     size_t mid_len;
@@ -4708,17 +4709,17 @@ static int is_host_specifier(const char *name) {
         return 0;
     }
     len = strlen(name);
-    if (len <= sizeof(prefix) - 1 + sizeof(suffix) - 1) {
+    if (len <= sizeof(HOST_SCOPE) - 1 + sizeof(suffix) - 1) {
         return 0;
     }
-    if (strncmp(name, prefix, sizeof(prefix) - 1) != 0) {
+    if (strncmp(name, HOST_SCOPE, sizeof(HOST_SCOPE) - 1) != 0) {
         return 0;
     }
     if (strcmp(name + len - (sizeof(suffix) - 1), suffix) != 0) {
         return 0;
     }
-    mid = name + sizeof(prefix) - 1;
-    mid_len = len - (sizeof(prefix) - 1) - (sizeof(suffix) - 1);
+    mid = name + sizeof(HOST_SCOPE) - 1;
+    mid_len = len - (sizeof(HOST_SCOPE) - 1) - (sizeof(suffix) - 1);
     if (mid_len == 0) {
         return 0;
     }
@@ -4800,9 +4801,9 @@ static char *module_normalize(JSContext *ctx, const char *base_name, const char 
     if (name && is_host_specifier(name)) {
         return js_strdup(ctx, name);
     }
-    if (name && strncmp(name, "@uifw/", 6) == 0) {
+    if (name && strncmp(name, HOST_SCOPE, sizeof(HOST_SCOPE) - 1) == 0) {
         JS_ThrowReferenceError(ctx,
-                               "bare @uifw/* must be bundled; runtime only loads @uifw/<pkg>/host");
+                               "bare @impasto/* must be bundled; runtime only loads @impasto/<pkg>/host");
         return NULL;
     }
     if (!host || !host->app_dir || !name || !name[0] || strchr(name, '\\') || strstr(name, "://")) {
@@ -4944,7 +4945,7 @@ Host *qjs_open(const QjsFns *fns) {
     JS_SetContextOpaque(host->ctx, host);
     JS_SetRuntimeOpaque(host->rt, host);
     host->deadline_ms = INT64_MAX;
-    JS_SetMemoryLimit(host->rt, UIFW_JS_MEMORY_LIMIT);
+    JS_SetMemoryLimit(host->rt, QJS_MEMORY_LIMIT);
     /* Solid 2's render effects nest deeper than 1 MiB on the gallery page. */
     JS_SetMaxStackSize(host->rt, 8u << 20);
     JS_SetInterruptHandler(host->rt, interrupt_handler, host);
@@ -5084,13 +5085,13 @@ int qjs_dispatch_text(Host *host, uint64_t id, const char *utf8, size_t len, cha
     return qjs_dispatch_input(host, id, 16, utf8, len, 0, -1, -1, -1, -1, err, err_len);
 }
 
-#define UIFW_JOB_ROUND_LIMIT 32
+#define QJS_JOB_ROUND_LIMIT 32
 
 int qjs_drain_jobs(Host *host, char *err, size_t err_len) {
     arm_slice(host);
     int rounds = 0;
     while (JS_IsJobPending(host->rt)) {
-        if (rounds >= UIFW_JOB_ROUND_LIMIT) {
+        if (rounds >= QJS_JOB_ROUND_LIMIT) {
             if (err && err_len > 0) {
                 snprintf(err, err_len, "quickjs job round limit");
             }

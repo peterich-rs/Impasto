@@ -5,7 +5,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-core = { workspace = true }
+uicore = { workspace = true }
 protocol = { workspace = true }
 
 [lints]
