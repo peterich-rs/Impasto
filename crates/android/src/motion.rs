@@ -108,18 +108,15 @@ mod tests {
 
     #[test]
     fn script_paths_reject_parents_and_empty_segments() {
-        assert_eq!(
-            script_asset_path("counter.js").as_deref(),
-            Some("counter.js")
-        );
+        assert_eq!(script_asset_path("quotes.js").as_deref(), Some("quotes.js"));
         assert_eq!(
             script_asset_path("screens/main.js").as_deref(),
             Some("screens/main.js")
         );
         assert_eq!(script_asset_path(""), None);
-        assert_eq!(script_asset_path("../counter.js"), None);
+        assert_eq!(script_asset_path("../quotes.js"), None);
         assert_eq!(script_asset_path("a/../b.js"), None);
-        assert_eq!(script_asset_path("/counter.js"), None);
+        assert_eq!(script_asset_path("/quotes.js"), None);
         assert_eq!(script_asset_path("a\\b.js"), None);
         assert_eq!(script_asset_path("a//b.js"), None);
     }

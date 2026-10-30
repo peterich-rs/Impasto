@@ -32,7 +32,7 @@ packages/i18n/                formatNumber、formatDate、plural
 packages/permissions/         permission_handler 形状的权限 API。五法来自 @impasto/permissions/host
 kotlin/                       Gradle 根。DSL、控件、以后的 cinterop
   library/
-apps/gallery-solid/           Solid 应用。源码 counter.tsx；ESM 产物 dist/counter.js 由 `just gallery-dist` 本地生成，不进 git
+apps/gallery-solid/           Solid 应用。源码 src/quotes.tsx；ESM 产物 dist/quotes.js 由 `just gallery-dist` 本地生成，不进 git
 tools/                        node 测试的 register.mjs 和 resolve-hook.mjs
 third_party/                  只读对照和本机 SDK
 ```
@@ -46,8 +46,8 @@ gallery-solid ──► solid-router ──► linking
 crates/macos ──► hostshell ──► session ──► uicore ──► protocol
 crates/macos ──► engine ──► protocol
 crates/android ──► hostshell ──► engine ──► protocol
-crates/macos ──► quickjs 会话          `just host` 加载 `counter.js`
-crates/android ──► quickjs 会话        加载 assets 里的 `counter.js`
+crates/macos ──► quickjs 会话          `just host` 加载 `quotes.js`
+crates/android ──► quickjs 会话        加载 assets 里的 `quotes.js`
 ```
 
 `uicore` 不包含 QuickJS、Kotlin、AppKit 或 Impeller 的头文件。它通过 crates.io 依赖 Taffy。Impeller 排版由宿主实现 `Shaper` 并调用 `engine`，测试构建不链它。`engine` 不包含 `uicore`。语言包不实现测量和布局。选型表在 `AGENTS.md` 的「优先复用已有实现」。
@@ -136,7 +136,7 @@ Down 命中
 
 宿主做三件事：平台事件入队、vsync 上问会话要一帧、把 `LayerTree` 交给渲染引擎并上屏。会话边界是 Rust trait `session::Session`：`metrics`、`pointer`、`frame`、`wants_frame`、`lifecycle`。`wants_frame` 取走「再要一帧」的标志。`frame` 的顺序是处理已经入队的指针、`onFrame(targetMs, intervalMs)`、冲刷指针期间写过的状态、布局、driver tick、必要时再布局、`onLayout`、必要时再布局一次、录制，然后 `semantics`。
 
-macOS 宿主把 `NSEvent` 换成 `uicore::PointerEvent` 放进队列。先把窗口坐标换进内容视图，再把原点改到左上。AppKit 给出的已经是点，不除 `backingScaleFactor`。`just host` 和 `just host-js` 都加载 `apps/gallery-solid/dist/counter.js`，每帧出队并调用会话。宿主不做 click。字体文件字节和 PNG 解码在宿主里，图片像素活到 `submit` 返回。宿主实现 `uicore::Shaper`，测量时借用 `Engine` 交出去的 `Typography`。借用在 `session.frame()` 返回前结束。
+macOS 宿主把 `NSEvent` 换成 `uicore::PointerEvent` 放进队列。先把窗口坐标换进内容视图，再把原点改到左上。AppKit 给出的已经是点，不除 `backingScaleFactor`。`just host` 和 `just host-js` 都加载 `apps/gallery-solid/dist/quotes.js`，每帧出队并调用会话。宿主不做 click。字体文件字节和 PNG 解码在宿主里，图片像素活到 `submit` 返回。宿主实现 `uicore::Shaper`，测量时借用 `Engine` 交出去的 `Typography`。借用在 `session.frame()` 返回前结束。
 
 Android 宿主的平台线程是 Java 主线程。`HostActivity` 转发生命周期，`HostView` 接收指针、按键和 `InputConnection`，`HostSurfaceView` 把 `Surface` 交给渲染线程。坐标是物理像素除以 `DisplayMetrics.density`。每根手指一条指针。`onPause` 对应 `Lifecycle::Inactive`，`onStop` 对应 `Hidden`，`onResume` 对应 `Resumed`。UI 线程不调用 `FrameClock::cancel`。系统栏写进 `Metrics` 的 padding，键盘写进 `view_insets`。会话把它交给 `Tree::set_viewport`，根从左上 inset 排，可用空间扣掉四边。`destroy_surface` 与替换旧窗口的 `open_surface` 把 `NativeWindow` 交给 `surface-drop`。该线程在 `DropWait` 上等到渲染线程 `Acks::signal` 之后才 `ANativeWindow_release`。平台线程在 `spawn` 之后返回。
 
@@ -219,6 +219,6 @@ Scroll                 视口，PushClip
 
 ## 应用
 
-`apps/gallery-solid/counter.tsx` 用 `@impasto/solid-ui` 的 Button、Field、Dialog、VirtualList，并用 `@impasto/solid-router` 的 `createRouter` 与 `RouterView`。`/list` 的 200 行打开 `VirtualList` 的 `recycle`。页底色由 gallery 把 `theme().color.background` 传进 `RouterView`。路由是 `/schedule`、`/nav/:depth`、`/list`。`boot` 把根列撑满视口，登记 `flush` 并 `render`。`build.mjs` 用 `@solidjs/babel-plugin`（`moduleName: "@impasto/solid-renderer"`、`generate: "universal"`）再交给 esbuild 打成 ESM `dist/counter.js`。门面打进 bundle，`@impasto/<pkg>/host` 按包枚举为 external，运行时由 QuickJS 物化。`util.js` 打进同一份产物。依赖是 npm 上的 `2.0.0-rc.17`。产物不包含 `third_party/solid`，也不进 git：`just gallery-dist` 在源码更新后重编，`just test`、`just host` 和 `just android` 先走它。quickjs 测试在运行时读产物文件，缺失时直接失败并提示 `just gallery-dist`。`cargo test` 不跑 node。
+`apps/gallery-solid/src/quotes.tsx` 用 `@impasto/solid-ui` 的 Button、Dialog、Sheet、VirtualList，并用 `@impasto/solid-router` 的 `createRouter` 与 `RouterView`。自选列表打开 `VirtualList` 的 `recycle`。路由是 `/watchlist`、`/market`、`/trade`、`/profile`、`/search`、`/stock/:symbol`、`/order/:symbol`。`boot` 把根列撑满视口，登记 `flush` 并 `render`。`build.mjs` 用 `@solidjs/babel-plugin`（`moduleName: "@impasto/solid-renderer"`、`generate: "universal"`）再交给 esbuild 打成 ESM `dist/quotes.js`。门面打进 bundle，`@impasto/<pkg>/host` 按包枚举为 external，运行时由 QuickJS 物化。依赖是 npm 上的 `2.0.0-rc.17`。产物不包含 `third_party/solid`，也不进 git：`just gallery-dist` 在源码更新后重编，`just test`、`just host` 和 `just android` 先走它。quickjs 测试在运行时读产物文件，缺失时直接失败并提示 `just gallery-dist`。`cargo test` 不跑 node。设计见 `docs/quotes-app.md`。
 
 应用代码里不出现约束、命中测试、Metal 或窗口。Kotlin 界面 DSL 还没写。信号准备用已发布的 `com.lightningkite:reactive`。

@@ -75,7 +75,7 @@ Taffy 只算盒子的位置和大小，含 Grid。文字和图片用它的 measu
 
 | 路线 | 目录 | 运行时 | 现在的状态 |
 |---|---|---|---|
-| Solid 2.0 TSX + QuickJS | `packages/solid-renderer`、`packages/solid-ui`、`packages/solid-router` | QuickJS，脚本可下发 | `apps/gallery-solid/dist/counter.js` 是 ESM 编译产物，由 `just gallery-dist` 本地生成、不进 git，QuickJS 会话驱动 `uicore` |
+| Solid 2.0 TSX + QuickJS | `packages/solid-renderer`、`packages/solid-ui`、`packages/solid-router` | QuickJS，脚本可下发 | `apps/gallery-solid/dist/quotes.js` 是 ESM 编译产物，由 `just gallery-dist` 本地生成、不进 git，QuickJS 会话驱动 `uicore` |
 | Kotlin lambda DSL | `kotlin` | 目标是 Kotlin/Native AOT | 只有 JVM 上的 DSL 和编码器。信号和原生目标还没接 |
 
 Kotlin 路线的写法参考 KiteUI（`scene { layer { rect(...) } }`）。KiteUI 画的是各端原生控件。这里的 DSL 要重写，输出 `protocol/` 里的场景，不沿用它的 View / UIKit / DOM 后端。
@@ -90,9 +90,9 @@ Kotlin 路线的写法参考 KiteUI（`scene { layer { rect(...) } }`）。KiteU
 
 Impeller 的 C API 没有稳定 ABI。钉住的是一份 Flutter 框架提交，不是 engine 仓库的提交。创建 context 时传入该头文件里的 `IMPELLER_VERSION`。升级 pin 时一起改调用代码。
 
-`just host` 打开 360×640 的窗口并加载 ESM `apps/gallery-solid/dist/counter.js`（缺失或过期时先跑 `just gallery-dist` 构建）。`just host-js` 是同一条命令。`IMPASTO_DUMP` 把一帧 Metal 纹理写成 PNG 后退出，用来看画面。`IMPASTO_LOG` 过滤进程日志，取值 `error`、`warn`、`info`（缺省）、`debug`。宿主把指针换成左上角的场景点放进队列，由会话出队。计数器的加减写在应用里，不写在宿主里。click 的验收是 `uicore` 里的 `Gesture`，以及 QuickJS 会话里减号把文字改成 `Count: -1`。按下和抬起另外分发 press 与 release。抬起仍在按下区域内时，焦点沿父链找到 `focusable` 节点，发出 `Blur` 再 `Focus`。滑出、取消、以及越过拖动阈值交给 `Scroll` 的手势不改焦点。
+`just host` 打开 360×640 的窗口并加载 ESM `apps/gallery-solid/dist/quotes.js`（缺失或过期时先跑 `just gallery-dist` 构建）。`just host-js` 是同一条命令。`IMPASTO_DUMP` 把一帧 Metal 纹理写成 PNG 后退出，用来看画面。`IMPASTO_LOG` 过滤进程日志，取值 `error`、`warn`、`info`（缺省）、`debug`。宿主把指针换成左上角的场景点放进队列，由会话出队。行情、下单和账户写在应用里，不写在宿主里。click 的验收是 `uicore` 里的 `Gesture`，以及 QuickJS 会话里点「市场」把画面改成涨幅榜。按下和抬起另外分发 press 与 release。抬起仍在按下区域内时，焦点沿父链找到 `focusable` 节点，发出 `Blur` 再 `Focus`。滑出、取消、以及越过拖动阈值交给 `Scroll` 的手势不改焦点。
 
-计数器加减是第一条应用，用来验收框架，不是把逻辑写进宿主。`count`、`onClick` 和按钮摆放都属于上层。
+模拟盘是当前验收应用，用来压框架的高频写入和自绘图表，不是把逻辑写进宿主。`count`、`onClick` 和页面摆放都属于上层。
 
 仍然守住的外部约束：不要把 Flutter engine 源码克隆进本仓库。engine fork 是另一个仓库。预构建矩阵没有 iOS 列时不写 `crates/ios`；`Session` 和渲染线程约束不按只有 macOS 和 Android 来设计。不做场景 diff，增量绘制走已落地的合成层，见 `docs/architecture.md`。macOS 与 Android 都是平台线程入队，渲染线程绘制。
 
@@ -134,7 +134,7 @@ present 之后 wants_ime 变化才让平台弹出或收起键盘
 
 布局原语是 `Sized`、`Padding`、`Align`、`Stack`、`Row`、`Column`、`Grid`、`Text`、`Image`、`PointerRegion`、`Decorated`、`Clip`、`Opacity`、`Scroll`、`Transform`。任何节点都可以 `set_focusable`。几何交给 Taffy，含 flex grow 和 grid。`Stack`、`Clip`、`Opacity`、`Transform` 是一格的 grid，子节点放在第 1 行第 1 列。`Scroll` 也是一格 grid，轨道是 `max_content`：视口是边框盒，子节点按完整尺寸布局，可以高出视口。`set_scroll_offset` 不进 Taffy，只让下一帧的录制和命中平移。`Scroll` 的 `ScrollAxis` 缺省 `Both`。`Vertical` 和 `Horizontal` 只在该轴上认领、滚动和回弹；另一轴的 limits、offset、overscroll、fling、snap、滚轮和 `scroll_into_view` 恒为 0。`ScrollAccept` 缺省 `Content`（声明轴上还有余量才认领）。`Always` 到边也认领。`Never` 把这次拖拽让给祖先。`lock_at_edge` 只留给 `Both`。`Gesture::DragBy` 仍带原始两轴增量，跨轴分量在 `set_scroll_offset` 丢掉。`ScrollController` 对单轴滚动丢掉跨轴增量，不交给父级；`Both` 且该轴没有内容时，溢出仍交给父级。`ScrollArea` 缺省 vertical 和 Always，`VirtualList` 固定 vertical，横向分页显式传 horizontal。裸 `scroll()` 仍是 Both 加 Content。细节在 `docs/scroll-axis.md`。扁平列表减去 offset，picture 保留内容局部坐标，由 `Offset` 层平移。命中查询加上 offset，并用 `PushClip` 裁到视口。非单位 `Transform`（含纯平移）是 `Transform` 层，扁平列表里是 `PushTransform` … `Pop`。`set_justify` 和 `set_wrap` 写行或列的主轴对齐和换行。`Text` 和 `Image` 用 measure 回调报告尺寸。`Decorated` 按子节点定尺寸，命中交给子节点，并录一条盖住边框盒的矩形，圆角记在命令上。宽或高为 0 时不录矩形。扁平列表里，开层的节点以及写成命令的 `Clip` 仍在子节点前后成对 `Push` / `Pop`，盒子为 0 也成对。alpha 为 255 和单位 `Transform` 不推这组命令。
 
-当前行为以源码和 `docs/architecture.md` 为准。未落地的目标以 `docs/refactor-plan.md` 为准。进程内的 `crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 不手写 C 或 Objective-C。QuickJS 的胶水 C 只在 `crates/quickjs`。变更缓冲的 C 布局由 `crates/quickjs/abi.yml` 生成，不把现有 setter 逐个包成头文件。计数器的 Solid 产物由 QuickJS 加载。iOS 宿主等预构建矩阵有这一列再写。
+当前行为以源码和 `docs/architecture.md` 为准。未落地的目标以 `docs/refactor-plan.md` 为准。进程内的 `crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 不手写 C 或 Objective-C。QuickJS 的胶水 C 只在 `crates/quickjs`。变更缓冲的 C 布局由 `crates/quickjs/abi.yml` 生成，不把现有 setter 逐个包成头文件。Quotes 的 Solid 产物由 QuickJS 加载。iOS 宿主等预构建矩阵有这一列再写。
 
 不要在 `packages/solid-renderer` 或 `kotlin` 里实现第二套 measure / layout。
 
@@ -174,7 +174,7 @@ packages/form/              createForm
 packages/i18n/              formatNumber、formatDate、plural
 packages/permissions/       permission_handler 形状的权限 API
 kotlin/                      Kotlin Gradle 根。路线暂缓，见 docs/refactor-plan.md
-apps/gallery-solid/         Solid 应用。源码 counter.tsx；ESM 产物 dist/counter.js 本地构建，不进 git
+apps/gallery-solid/         Solid 应用。源码 src/quotes.tsx；ESM 产物 dist/quotes.js 本地构建，不进 git
 tools/                      node 测试的 register.mjs 和 resolve-hook.mjs
 third_party/solid           solidjs/solid，分支 next。本地检出，不进 git
 third_party/kiteui          lightningkite/kiteui，分支 version-8.3。本地检出，不进 git
@@ -184,6 +184,7 @@ third_party/quickjs/        quickjs-ng 源码，不进 git
 docs/architecture.md        当前仓库划分和各层结构
 docs/platform-hosts.md      macOS、Android、iOS 的平台差异。iOS 宿主还没写
 docs/refactor-plan.md       生产级迭代规划。未落地
+docs/quotes-app.md          Quotes 模拟盘。设计文档，实现以源码为准
 docs/protocol-v2.md         Picture 字节。未排期，只在 Rust 里做
 ```
 
@@ -200,7 +201,7 @@ solidPlugin({
 })
 ```
 
-依赖钉 `solid-js` 和 `@solidjs/universal` 的 `2.0.0-rc.17`。`just gallery-dist` 在产物缺失或源码更新时重编 `dist/counter.js`，产物不进 git。`just solid-app` 在此之上安装依赖并用 mock host 跑一遍。`just check` 不跑这一步。
+依赖钉 `solid-js` 和 `@solidjs/universal` 的 `2.0.0-rc.17`。`just gallery-dist` 在产物缺失或源码更新时重编 `dist/quotes.js`，产物不进 git。`just solid-app` 在此之上安装依赖并用 mock host 跑一遍。`just check` 不跑这一步。
 
 ## 绘制
 
@@ -239,7 +240,7 @@ crates/engine/fetch-impeller-sdk.sh
 just check
 ```
 
-`just check` 先 `cargo test --workspace`，再跑 Kotlin 的 `:library:jvmTest`，以及 Solid 的宿主树测试。它不会打开窗口。没有 quickjs-ng 源码时 QuickJS 测试走 `NotLinked`。有源码时会编译解释器并跑编译后的计数器。没有 SDK 时 `Engine` 返回 `NotLinked`，图形测试不编译；Kotlin 和 Solid 不需要 SDK。`just host` 需要 SDK。
+`just check` 先 `cargo test --workspace`，再跑 Kotlin 的 `:library:jvmTest`，以及 Solid 的宿主树测试。它不会打开窗口。没有 quickjs-ng 源码时 QuickJS 测试走 `NotLinked`。有源码时会编译解释器并跑编译后的 Quotes。没有 SDK 时 `Engine` 返回 `NotLinked`，图形测试不编译；Kotlin 和 Solid 不需要 SDK。`just host` 需要 SDK。
 
 GitHub Actions 工作流是 `.github/workflows/check.yml`。它跑 `cargo fmt --all -- --check`、Linux 上用 `RUSTFLAGS=-D warnings` 做 `cargo check --workspace --exclude macos`、Linux 上的 `cargo test --workspace --exclude macos`、macOS 上的 `cargo test -p macos`，以及和 `just kotlin`、`just solid` 相同的检查。`macos` 这个 crate 只在 macOS 上编译。工作流不下载 Impeller SDK，也不下载 quickjs-ng，因此渲染引擎走 `NotLinked`，QuickJS 测试同样走 `NotLinked`。工作流不装 crapper 和 dryer。窗口、`just android` 和 `just solid-app` 不在这套检查里。
 
@@ -251,9 +252,9 @@ GitHub Actions 工作流是 `.github/workflows/check.yml`。它跑 `cargo fmt --
 | `just coverage` | `cargo llvm-cov` 把 LCOV 写到 `target/coverage/rust/lcov.info` |
 | `just kotlin` | Kotlin `:library:jvmTest` |
 | `just solid` | renderer、net、i18n，以及 solid-router、form、solid-ui 的单测 |
-| `just gallery-dist` | 从 TSX 源码构建 ESM `dist/counter.js`。产物缺失或源码更新才重编，不进 git |
+| `just gallery-dist` | 从 TSX 源码构建 ESM `dist/quotes.js`。产物缺失或源码更新才重编，不进 git |
 | `just solid-app` | `gallery-dist` 之后安装依赖，再用 mock host 跑渲染 |
-| `just host` | 先走 `gallery-dist`，再打开 macOS 窗口并加载 ESM `apps/gallery-solid/dist/counter.js`。需要 SDK、quickjs-ng 源码和 `crates/macos/assets` |
+| `just host` | 先走 `gallery-dist`，再打开 macOS 窗口并加载 ESM `apps/gallery-solid/dist/quotes.js`。需要 SDK、quickjs-ng 源码和 `crates/macos/assets` |
 | `just quickjs` | 按 `crates/quickjs/quickjs.pin` 下载 quickjs-ng 源码 |
 | `just host-js` | 同 `just host` |
 | `just android` | 先走 `gallery-dist`，再编 `aarch64-linux-android` 的 `libhost.so` 并打 APK。需要 NDK 和 `android-arm64` SDK |
