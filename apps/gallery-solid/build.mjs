@@ -57,8 +57,8 @@ const solid = {
 
 const options = {
   absWorkingDir: here,
-  entryPoints: ["counter.tsx"],
-  outfile: "dist/counter.js",
+  entryPoints: ["src/quotes.tsx"],
+  outfile: "dist/quotes.js",
   bundle: true,
   format: "esm",
   platform: "browser",

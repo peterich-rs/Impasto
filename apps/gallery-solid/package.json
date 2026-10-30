@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "test:node": "node --experimental-strip-types --import ../../tools/register.mjs counter.node.test.ts",
-    "test:esm": "node --experimental-strip-types --import ../../tools/register.mjs counter.esm.test.ts"
+    "test": "node --experimental-strip-types --import ../../tools/register.mjs quotes.node.test.ts && node --experimental-strip-types --import ../../tools/register.mjs quotes.binder.test.ts && node --conditions=browser --experimental-strip-types --import ../../tools/register.mjs quotes.engine.test.ts && node --experimental-strip-types --import ../../tools/register.mjs quotes.esm.test.ts",
+    "test:node": "node --experimental-strip-types --import ../../tools/register.mjs quotes.node.test.ts && node --experimental-strip-types --import ../../tools/register.mjs quotes.binder.test.ts",
+    "test:engine": "node --conditions=browser --experimental-strip-types --import ../../tools/register.mjs quotes.engine.test.ts",
+    "test:esm": "node --experimental-strip-types --import ../../tools/register.mjs quotes.esm.test.ts"
   },
   "dependencies": {
     "@solidjs/universal": "2.0.0-rc.17",

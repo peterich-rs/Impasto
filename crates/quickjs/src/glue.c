@@ -391,6 +391,10 @@ typedef struct Host {
    Crossing the limit throws InternalError: interrupted and discards the turn,
    so this is a runaway cutoff, not a frame budget. */
 #define QJS_TURN_MS 128
+/* Evaluating the quotes bundle plus mounting its first screen is legitimate
+   one-shot work in debug builds, not a runaway turn. Slice interrupts keep
+   the 128 ms cutoff; evaluation gets a wider but still finite budget. */
+#define QJS_EVAL_MS 1000
 
 static int64_t now_ms(void) {
     struct timespec ts;
@@ -405,7 +409,7 @@ static void arm_slice(Host *host) {
 }
 
 static void arm_eval(Host *host) {
-    host->deadline_ms = now_ms() + QJS_TURN_MS;
+    host->deadline_ms = now_ms() + QJS_EVAL_MS;
 }
 
 static int interrupt_handler(JSRuntime *rt, void *opaque) {
