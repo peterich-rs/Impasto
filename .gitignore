@@ -1,13 +1,14 @@
 build/
 node_modules/
 target/
+apps/gallery-solid/dist/
 .metrics/
 third_party/impeller-sdk/
-hosts/android/apk/.gradle/
-hosts/android/apk/build/
-hosts/android/apk/app/build/
-hosts/android/apk/app/src/main/assets/
-hosts/android/apk/app/src/main/jniLibs/
+crates/android/apk/.gradle/
+crates/android/apk/build/
+crates/android/apk/app/build/
+crates/android/apk/app/src/main/assets/
+crates/android/apk/app/src/main/jniLibs/
 third_party/quickjs/
 third_party/solid/
 third_party/kiteui/
@@ -17,4 +18,3 @@ third_party/kiteui/
 cmake-build-*/
 compile_commands.json
 .vscode/
-apps/gallery-solid/dist/*.map

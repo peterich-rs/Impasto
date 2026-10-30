@@ -1,3 +1,3 @@
 export function kicker() {
-  return "Future";
+  return "Impasto";
 }

@@ -60,7 +60,7 @@ jobs:
           java-version: "21"
           cache: gradle
       - name: jvmTest and gallery
-        run: bash frameworks/kotlin-ui/gradlew -p frameworks/kotlin-ui :library:jvmTest
+        run: bash kotlin/gradlew -p kotlin :library:jvmTest
 
   solid:
     name: solid
@@ -75,16 +75,5 @@ jobs:
         run: corepack enable && corepack prepare pnpm@9.15.9 --activate
       - name: solid packages
         run: |
-          cd frameworks/solid-renderer && pnpm install --frozen-lockfile
-          node --conditions=browser --experimental-strip-types src/tree.test.ts
-          node --experimental-strip-types runtime/frame.test.ts
-          node --conditions=browser --experimental-strip-types runtime/slot.test.ts
-          node --experimental-strip-types runtime/list-binding.test.ts
-          node --experimental-strip-types runtime/motion.test.ts
-          node --experimental-strip-types src/direction.test.ts
-          cd ../..
-          node --experimental-strip-types frameworks/net/src/index.test.ts
-          node --experimental-strip-types frameworks/i18n/src/index.test.ts
-          cd frameworks/solid-router && pnpm install --frozen-lockfile && node --experimental-strip-types src/path.test.ts && node --experimental-strip-types src/transition.test.ts && node --conditions=browser --experimental-strip-types --import ../register.mjs src/router.test.ts
-          cd ../form && pnpm install --frozen-lockfile && node --conditions=browser --experimental-strip-types src/index.test.ts
-          cd ../solid-ui && pnpm install --frozen-lockfile && for test in src/*.test.ts src/field/*.test.ts; do node --conditions=browser --experimental-strip-types --import ../register.mjs "$test"; done
+          pnpm -C . install --frozen-lockfile
+          pnpm -C . -r test

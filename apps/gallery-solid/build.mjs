@@ -1,19 +1,23 @@
 import { transformAsync } from "@babel/core";
 import * as esbuild from "esbuild";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-const hostExternals = [
-  "@uifw/clipboard/host",
-  "@uifw/linking/host",
-  "@uifw/app-state/host",
-  "@uifw/file-system/host",
-  "@uifw/async-storage/host",
-  "@uifw/permissions/host",
-];
+// Host 桥包由各包 package.json 的 `./host` export 声明，不在清单里枚举。
+const hostExternals = [];
+const packagesRoot = join(here, "..", "..", "packages");
+for (const entry of readdirSync(packagesRoot, { withFileTypes: true })) {
+  if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+  const manifest = JSON.parse(
+    readFileSync(join(packagesRoot, entry.name, "package.json"), "utf8"),
+  );
+  if (manifest.exports?.["./host"]) {
+    hostExternals.push(`@impasto/${entry.name}/host`);
+  }
+}
 
 const solid = {
   name: "solid-universal",
@@ -33,7 +37,7 @@ const solid = {
           [
             "@solidjs/babel-plugin",
             {
-              moduleName: "@uifw/solid-renderer",
+              moduleName: "@impasto/solid-renderer",
               generate: "universal",
             },
           ],
@@ -43,8 +47,8 @@ const solid = {
         throw new Error(`babel produced no code for ${args.path}`);
       }
       const contents = result.code.replace(
-        /import\(\s*(["'])@uifw\/linking\1\s*\)/g,
-        'import("@uifw/linking/host").then((host) => ({ Linking: host }))',
+        /import\(\s*(["'])@impasto\/linking\1\s*\)/g,
+        'import("@impasto/linking/host").then((host) => ({ Linking: host }))',
       );
       return { contents, loader: "js" };
     });
@@ -61,7 +65,6 @@ const options = {
   conditions: ["browser"],
   target: "es2022",
   plugins: [solid],
-  nodePaths: [join(here, "node_modules")],
   sourcemap: true,
   external: hostExternals,
   define: {

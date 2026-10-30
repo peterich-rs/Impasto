@@ -1,0 +1,17 @@
+{
+  "name": "@impasto/solid-router",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types src/path.test.ts && node --experimental-strip-types src/transition.test.ts && node --conditions=browser --experimental-strip-types --import ../../tools/register.mjs src/router.test.ts"
+  },
+  "dependencies": {
+    "@impasto/linking": "workspace:*",
+    "@impasto/solid-renderer": "workspace:*",
+    "solid-js": "2.0.0-rc.17"
+  }
+}

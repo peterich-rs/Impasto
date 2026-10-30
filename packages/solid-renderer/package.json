@@ -1,0 +1,20 @@
+{
+  "name": "@impasto/solid-renderer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Solid universal renderer. The runtime drives uicore.",
+  "exports": {
+    ".": "./runtime/index.ts",
+    "./defaults": "./src/defaults.ts",
+    "./palette": "./src/palette.ts",
+    "./jsx": "./src/jsx.ts"
+  },
+  "scripts": {
+    "test": "node --conditions=browser --experimental-strip-types src/tree.test.ts && node --experimental-strip-types runtime/frame.test.ts && node --conditions=browser --experimental-strip-types runtime/slot.test.ts && node --experimental-strip-types runtime/list-binding.test.ts && node --experimental-strip-types runtime/motion.test.ts && node --conditions=browser --experimental-strip-types src/direction.test.ts"
+  },
+  "dependencies": {
+    "@solidjs/universal": "2.0.0-rc.17",
+    "solid-js": "2.0.0-rc.17"
+  }
+}

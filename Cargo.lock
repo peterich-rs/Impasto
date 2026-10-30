@@ -36,7 +36,6 @@ dependencies = [
 name = "android"
 version = "0.0.0"
 dependencies = [
- "core",
  "engine",
  "hostshell",
  "jni 0.22.4",
@@ -44,6 +43,7 @@ dependencies = [
  "ndk-sys",
  "quickjs",
  "session",
+ "uicore",
 ]
 
 [[package]]
@@ -258,17 +258,6 @@ dependencies = [
  "publicsuffix",
  "time",
  "url",
-]
-
-[[package]]
-name = "core"
-version = "0.0.0"
-dependencies = [
- "bitflags",
- "protocol",
- "taffy",
- "thiserror 2.0.21",
- "unicode-segmentation",
 ]
 
 [[package]]
@@ -565,7 +554,6 @@ name = "hostshell"
 version = "0.0.0"
 dependencies = [
  "bytes",
- "core",
  "engine",
  "http",
  "http-body-util",
@@ -575,6 +563,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tungstenite",
+ "uicore",
 ]
 
 [[package]]
@@ -895,7 +884,6 @@ name = "macos"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "core",
  "engine",
  "hostshell",
  "objc2",
@@ -910,6 +898,7 @@ dependencies = [
  "protocol",
  "quickjs",
  "session",
+ "uicore",
 ]
 
 [[package]]
@@ -1317,10 +1306,10 @@ name = "quickjs"
 version = "0.0.0"
 dependencies = [
  "cc",
- "core",
  "protocol",
  "session",
  "thiserror 2.0.21",
+ "uicore",
 ]
 
 [[package]]
@@ -1601,8 +1590,8 @@ dependencies = [
 name = "session"
 version = "0.0.0"
 dependencies = [
- "core",
  "protocol",
+ "uicore",
 ]
 
 [[package]]
@@ -1980,6 +1969,17 @@ name = "typenum"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
+
+[[package]]
+name = "uicore"
+version = "0.0.0"
+dependencies = [
+ "bitflags",
+ "protocol",
+ "taffy",
+ "thiserror 2.0.21",
+ "unicode-segmentation",
+]
 
 [[package]]
 name = "unicode-ident"
