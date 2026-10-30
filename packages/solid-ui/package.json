@@ -6,9 +6,12 @@
   "exports": {
     ".": "./src/index.tsx"
   },
+  "scripts": {
+    "test": "for t in src/*.test.ts src/field/*.test.ts; do node --conditions=browser --experimental-strip-types --import ../../tools/register.mjs \"$t\"; done"
+  },
   "dependencies": {
+    "@impasto/solid-renderer": "workspace:*",
     "@solidjs/universal": "2.0.0-rc.17",
-    "@impasto/solid-renderer": "file:../solid-renderer",
     "solid-js": "2.0.0-rc.17"
   }
 }

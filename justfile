@@ -33,21 +33,13 @@ kotlin:
     "{{root}}/frameworks/kotlin-ui/gradlew" -p "{{root}}/frameworks/kotlin-ui" :library:jvmTest
 
 solid:
-    cd "{{root}}/frameworks/solid-renderer" && pnpm install --frozen-lockfile
-    node --conditions=browser --experimental-strip-types "{{root}}/frameworks/solid-renderer/src/tree.test.ts"
-    node --experimental-strip-types "{{root}}/frameworks/solid-renderer/runtime/frame.test.ts"
-    node --conditions=browser --experimental-strip-types "{{root}}/frameworks/solid-renderer/runtime/slot.test.ts"
-    node --experimental-strip-types "{{root}}/frameworks/solid-renderer/runtime/list-binding.test.ts"
-    node --experimental-strip-types "{{root}}/frameworks/solid-renderer/runtime/motion.test.ts"
-    node --experimental-strip-types "{{root}}/frameworks/solid-renderer/src/direction.test.ts"
-    node --experimental-strip-types "{{root}}/frameworks/net/src/index.test.ts"
-    node --experimental-strip-types "{{root}}/frameworks/i18n/src/index.test.ts"
-    cd "{{root}}/frameworks/solid-router" && pnpm install --frozen-lockfile && node --experimental-strip-types src/path.test.ts && node --experimental-strip-types src/transition.test.ts && node --conditions=browser --experimental-strip-types --import "{{root}}/frameworks/register.mjs" src/router.test.ts
-    cd "{{root}}/frameworks/form" && pnpm install --frozen-lockfile && node --conditions=browser --experimental-strip-types src/index.test.ts
-    cd "{{root}}/frameworks/solid-ui" && pnpm install --frozen-lockfile && for test in src/*.test.ts src/field/*.test.ts; do node --conditions=browser --experimental-strip-types --import "{{root}}/frameworks/register.mjs" "$test"; done
+    pnpm -C "{{root}}" install --frozen-lockfile
+    pnpm -C "{{root}}" -r test
 
 solid-app:
-    cd "{{root}}/apps/gallery-solid" && pnpm install && node build.mjs && node --experimental-strip-types --import "{{root}}/frameworks/register.mjs" counter.node.test.ts && node --experimental-strip-types --import "{{root}}/frameworks/register.mjs" counter.esm.test.ts
+    pnpm -C "{{root}}" --filter @impasto/gallery-solid run build
+    pnpm -C "{{root}}" --filter @impasto/gallery-solid run test:node
+    pnpm -C "{{root}}" --filter @impasto/gallery-solid run test:esm
 
 # Build the gallery ESM bundle from the TSX sources when sources changed. The
 # bundle is not committed; quickjs tests fail with instructions when it is
@@ -58,12 +50,12 @@ gallery-dist:
     src="{{root}}/apps/gallery-solid"
     out="$src/dist/counter.js"
     if [[ -f "$out" ]]; then
-      newer=$(find "{{root}}/frameworks" "$src" -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.mjs' \) \
+      newer=$(find "{{root}}/packages" "{{root}}/tools" "$src" -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.mjs' \) \
         -not -path '*/node_modules/*' -not -path '*/dist/*' -not -name '*.test.ts' \
         -newer "$out" -print -quit)
       [[ -z "$newer" ]] && exit 0
     fi
-    cd "$src" && pnpm install && node build.mjs
+    pnpm -C "$src" install && pnpm -C "$src" run build
 
 host: gallery-dist
     cargo run --manifest-path "{{root}}/Cargo.toml" -p macos -- --js "{{root}}/apps/gallery-solid/dist/counter.js" "{{logo}}"

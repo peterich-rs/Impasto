@@ -140,7 +140,7 @@ fn push_declared_fn(out: &mut String, name: &str, signature: &str) {
 pub fn host_stub_path(root: &Path, specifier: &str) -> Option<PathBuf> {
     let folder = package_folder(specifier)?;
     Some(
-        root.join("frameworks")
+        root.join("packages")
             .join(folder)
             .join("src")
             .join("host.gen.ts"),

@@ -1,12 +1,12 @@
 {
-  "name": "@impasto/form",
+  "name": "@impasto/i18n",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
-  "dependencies": {
-    "solid-js": "2.0.0-rc.17"
+  "scripts": {
+    "test": "node --experimental-strip-types src/index.test.ts"
   }
 }

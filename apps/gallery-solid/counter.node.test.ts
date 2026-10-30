@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { installMockHost } from "../../frameworks/solid-ui/testing/renderTest.ts";
+import { installMockHost } from "../../packages/solid-ui/testing/renderTest.ts";
 
 const mock = installMockHost();
 

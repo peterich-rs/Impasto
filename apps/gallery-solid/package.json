@@ -3,17 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test:node": "node --experimental-strip-types --import ../../tools/register.mjs counter.node.test.ts",
+    "test:esm": "node --experimental-strip-types --import ../../tools/register.mjs counter.esm.test.ts"
+  },
   "dependencies": {
     "@solidjs/universal": "2.0.0-rc.17",
-    "@impasto/solid-renderer": "file:../../frameworks/solid-renderer",
-    "@impasto/solid-router": "file:../../frameworks/solid-router",
-    "@impasto/solid-ui": "file:../../frameworks/solid-ui",
+    "@impasto/solid-renderer": "workspace:*",
+    "@impasto/solid-router": "workspace:*",
+    "@impasto/solid-ui": "workspace:*",
     "solid-js": "2.0.0-rc.17"
-  },
-  "devDependencies": {
-    "@babel/core": "^7.28.0",
-    "@babel/plugin-transform-typescript": "^7.28.0",
-    "@solidjs/babel-plugin": "2.0.0-rc.17",
-    "esbuild": "^0.25.0"
   }
 }
