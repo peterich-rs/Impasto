@@ -46,7 +46,7 @@ JS 接到渲染树的全局对象是 `core`。默认字体注册名是 `Sans` �
 | 文字测量和绘制 | 已钉住的 Impeller Typography。测试用一份等宽的假排版器 | 再链一套 HarfBuzz / FreeType |
 | 光栅 | Impeller standalone SDK | `embedder.h`、Flutter shell、Skia、engine 源码。这三样都会带上 Dart VM，或等于把 engine 克隆进仓库 |
 | 宿主窗口 | 各端系统 API。macOS 用 objc2 调 AppKit。Android 用 `Activity` 与 `HostView`：`SurfaceView` 给出 `ANativeWindow`，vsync 用主线程 `Choreographer`，输入法用 `InputConnection`。图片解码用 `AImageDecoder`。`ndk` 0.9.0 只提供 NDK 绑定 | GLFW。Flutter embedding。这两样都会带进另一套窗口或 Dart VM |
-| JavaScript | [quickjs-ng](https://github.com/quickjs-ng/quickjs)（MIT）v0.17.0。`runtimes/quickjs/quickjs.pin` 钉 tag 和 sha256，`cc` 编进包名 `quickjs` 的 crate。源码在 `third_party/quickjs`，不进 git | bellard/quickjs（上游基本停更）、Hermes、V8、React Native JSI |
+| JavaScript | [quickjs-ng](https://github.com/quickjs-ng/quickjs)（MIT）v0.17.0。`crates/quickjs/quickjs.pin` 钉 tag 和 sha256，`cc` 编进包名 `quickjs` 的 crate。源码在 `third_party/quickjs`，不进 git | bellard/quickjs（上游基本停更）、Hermes、V8、React Native JSI |
 | Solid 状态 | `solid-js` 的 signal 和 `@solidjs/universal` | 改 `third_party/solid` |
 | Kotlin 状态 | 接到信号时依赖已发布的 `com.lightningkite:reactive`，版本那时再钉 | 把 KiteUI 或这份库的源码拷进仓库 |
 | 手势 | 点击写在 `uicore/`。没有独立、可嵌入、又不绑死某一套 UI 的库 | React Native Gesture Handler、Flutter gestures |
@@ -57,7 +57,7 @@ Taffy 只算盒子的位置和大小，含 Grid。文字和图片用它的 measu
 
 我们自己写的原生代码用 Rust：渲染树、场景格式、用 Impeller 绘制的渲染引擎、macOS 宿主。Rust 编码以 `.agents/skills/rust-best-practice` 为准，调用 `/rust-best-practice`。写本仓库的 Rust 时重点看其中的 trait、强类型、引用和泛型。布局和绘制在渲染线程上同步执行，不放进 async 运行时。异步留给以后的文件、网络和脚本加载。平台线程做窗口、输入换算和 vsync 登记。`Engine` 是 `!Send`。`register_font`、`submit_layers`、`draw_metal`、`draw_vulkan` 和 typography 只在渲染线程上调用，并且在该线程上创建和销毁。`CAMetalLayer` 在主线程创建并挂到视图上；渲染线程只用层指针取 drawable。Metal context 仍用 `MTLCreateSystemDefaultDevice()`。
 
-`protocol`、`uicore`、`engine`、`session`、`hosts/hostshell`、`hosts/macos`、`hosts/android`、`runtimes/quickjs` 是 Cargo workspace。`protocol`、`uicore`、`engine`、`hosts/macos` 在进程内部不经过 C。不要再给这四层加 C 或 Objective-C，也不要新增产品 C 头文件。QuickJS 的 C 只在 `runtimes/quickjs/src/glue.c`：解释器回调进 Rust 的 `Tree`，不把 Rust 类型漏出进程。没有 quickjs-ng 源码时这个 crate 返回 `NotLinked`。Kotlin 的 C ABI 留到 cinterop 有调用者时再写。工具链用 `rust-toolchain.toml` 钉住 stable。原生构建以 Cargo 为准。
+`crates/protocol`、`crates/uicore`、`crates/engine`、`crates/session`、`crates/hostshell`、`crates/macos`、`crates/android`、`crates/quickjs` 是 Cargo workspace。`crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 在进程内部不经过 C。不要再给这四层加 C 或 Objective-C，也不要新增产品 C 头文件。QuickJS 的 C 只在 `crates/quickjs/src/glue.c`：解释器回调进 Rust 的 `Tree`，不把 Rust 类型漏出进程。没有 quickjs-ng 源码时这个 crate 返回 `NotLinked`。Kotlin 的 C ABI 留到 cinterop 有调用者时再写。工具链用 `rust-toolchain.toml` 钉住 stable。原生构建以 Cargo 为准。
 
 ## 保持仓库干净
 
@@ -75,8 +75,8 @@ Taffy 只算盒子的位置和大小，含 Grid。文字和图片用它的 measu
 
 | 路线 | 目录 | 运行时 | 现在的状态 |
 |---|---|---|---|
-| Solid 2.0 TSX + QuickJS | `frameworks/solid-renderer`、`frameworks/solid-ui`、`frameworks/solid-router` | QuickJS，脚本可下发 | `apps/gallery-solid/dist/counter.js` 是 ESM 编译产物，由 `just gallery-dist` 本地生成、不进 git，QuickJS 会话驱动 `uicore` |
-| Kotlin lambda DSL | `frameworks/kotlin-ui` | 目标是 Kotlin/Native AOT | 只有 JVM 上的 DSL 和编码器。信号和原生目标还没接 |
+| Solid 2.0 TSX + QuickJS | `packages/solid-renderer`、`packages/solid-ui`、`packages/solid-router` | QuickJS，脚本可下发 | `apps/gallery-solid/dist/counter.js` 是 ESM 编译产物，由 `just gallery-dist` 本地生成、不进 git，QuickJS 会话驱动 `uicore` |
+| Kotlin lambda DSL | `kotlin` | 目标是 Kotlin/Native AOT | 只有 JVM 上的 DSL 和编码器。信号和原生目标还没接 |
 
 Kotlin 路线的写法参考 KiteUI（`scene { layer { rect(...) } }`）。KiteUI 画的是各端原生控件。这里的 DSL 要重写，输出 `protocol/` 里的场景，不沿用它的 View / UIKit / DOM 后端。
 
@@ -94,7 +94,7 @@ Impeller 的 C API 没有稳定 ABI。钉住的是一份 Flutter 框架提交，
 
 计数器加减是第一条应用，用来验收框架，不是把逻辑写进宿主。`count`、`onClick` 和按钮摆放都属于上层。
 
-仍然守住的外部约束：不要把 Flutter engine 源码克隆进本仓库。engine fork 是另一个仓库。预构建矩阵没有 iOS 列时不写 `hosts/ios`；`Session` 和渲染线程约束不按只有 macOS 和 Android 来设计。不做场景 diff，增量绘制走已落地的合成层，见 `docs/architecture.md`。macOS 与 Android 都是平台线程入队，渲染线程绘制。
+仍然守住的外部约束：不要把 Flutter engine 源码克隆进本仓库。engine fork 是另一个仓库。预构建矩阵没有 iOS 列时不写 `crates/ios`；`Session` 和渲染线程约束不按只有 macOS 和 Android 来设计。不做场景 diff，增量绘制走已落地的合成层，见 `docs/architecture.md`。macOS 与 Android 都是平台线程入队，渲染线程绘制。
 
 ## 框架分层
 
@@ -106,11 +106,11 @@ Solid 的 `@solidjs/universal` 只有 `createElement`、`insertNode`、`setPrope
 
 | 层 | 落点 | 职责 |
 |---|---|---|
-| 宿主 | `hosts/macos`、`hosts/android`。iOS 还没有预构建 SDK | 表面、vsync、视图尺寸、缩放、安全区、原始指针、按键和输入法、字体与图片字节、把 DisplayList 交出去并上屏 |
-| 运行时会话 | `runtimes/quickjs`，以后 Kotlin 绑定 | 把一种语言接到 `uicore/`。一帧里的顺序是：处理输入、冲刷信号、改元素树、布局、录制、提交。宿主不关心语言 |
-| UI 核心 | `uicore/` | Rust 渲染树。布局调用 Taffy。测试里的文字测量是等宽 `Shaper`。命中测试走这棵树。`record` 交出 `protocol::DrawList`。QuickJS 在会话 crate 里直接调这棵树。嵌入面走 `runtimes/quickjs/abi.yml` 生成的变更缓冲，不手写一套和 setter 一一对应的 C API |
+| 宿主 | `crates/macos`、`crates/android`。iOS 还没有预构建 SDK | 表面、vsync、视图尺寸、缩放、安全区、原始指针、按键和输入法、字体与图片字节、把 DisplayList 交出去并上屏 |
+| 运行时会话 | `crates/quickjs`，以后 Kotlin 绑定 | 把一种语言接到 `uicore/`。一帧里的顺序是：处理输入、冲刷信号、改元素树、布局、录制、提交。宿主不关心语言 |
+| UI 核心 | `uicore/` | Rust 渲染树。布局调用 Taffy。测试里的文字测量是等宽 `Shaper`。命中测试走这棵树。`record` 交出 `protocol::DrawList`。QuickJS 在会话 crate 里直接调这棵树。嵌入面走 `crates/quickjs/abi.yml` 生成的变更缓冲，不手写一套和 setter 一一对应的 C API |
 | 场景协议 | `protocol/` | 进程内的 `DrawList` 与 `LayerTree`（`draw_list.rs`、`layer.rs`）。绝对坐标。没有 flex，没有回调，没有应用状态，没有场景字节 |
-| 渲染器 | `frameworks/solid-renderer`，`frameworks/kotlin-ui` | 把 JSX 或 Kotlin DSL 变成对 `uicore/` 的增删改。只标脏，不算坐标 |
+| 渲染器 | `packages/solid-renderer`，`kotlin` | 把 JSX 或 Kotlin DSL 变成对 `uicore/` 的增删改。只标脏，不算坐标 |
 | 响应式 | Solid signal；Kotlin 侧以后的 signal | 应用和控件的状态。写信号会标脏对应元素并请求下一帧 |
 | 基础控件 | 布局原语和组合控件内核在 `uicore/`。语言包是皮：模板、信号和渲染回调 | `Text`、`Row`、`Column`、`Stack`、`Padding`、`Clip`、`Opacity`、`Scroll`、`Transform` 是渲染对象。`Button` 用它们加上手势组成。`Field` 绑定 `uicore` 的 `TextEditor`。`ListDriver` 做窗口、测量调度和可见集 diff。`ScrollController` 做夹紧、拖动续算和刷新阈值。`createSlot` 仍是语言侧的 owner。编辑按字形簇进行，偏移是 UTF-16 |
 | 应用 | `apps/gallery-solid` | 只写状态和控件组合 |
@@ -134,63 +134,64 @@ present 之后 wants_ime 变化才让平台弹出或收起键盘
 
 布局原语是 `Sized`、`Padding`、`Align`、`Stack`、`Row`、`Column`、`Grid`、`Text`、`Image`、`PointerRegion`、`Decorated`、`Clip`、`Opacity`、`Scroll`、`Transform`。任何节点都可以 `set_focusable`。几何交给 Taffy，含 flex grow 和 grid。`Stack`、`Clip`、`Opacity`、`Transform` 是一格的 grid，子节点放在第 1 行第 1 列。`Scroll` 也是一格 grid，轨道是 `max_content`：视口是边框盒，子节点按完整尺寸布局，可以高出视口。`set_scroll_offset` 不进 Taffy，只让下一帧的录制和命中平移。`Scroll` 的 `ScrollAxis` 缺省 `Both`。`Vertical` 和 `Horizontal` 只在该轴上认领、滚动和回弹；另一轴的 limits、offset、overscroll、fling、snap、滚轮和 `scroll_into_view` 恒为 0。`ScrollAccept` 缺省 `Content`（声明轴上还有余量才认领）。`Always` 到边也认领。`Never` 把这次拖拽让给祖先。`lock_at_edge` 只留给 `Both`。`Gesture::DragBy` 仍带原始两轴增量，跨轴分量在 `set_scroll_offset` 丢掉。`ScrollController` 对单轴滚动丢掉跨轴增量，不交给父级；`Both` 且该轴没有内容时，溢出仍交给父级。`ScrollArea` 缺省 vertical 和 Always，`VirtualList` 固定 vertical，横向分页显式传 horizontal。裸 `scroll()` 仍是 Both 加 Content。细节在 `docs/scroll-axis.md`。扁平列表减去 offset，picture 保留内容局部坐标，由 `Offset` 层平移。命中查询加上 offset，并用 `PushClip` 裁到视口。非单位 `Transform`（含纯平移）是 `Transform` 层，扁平列表里是 `PushTransform` … `Pop`。`set_justify` 和 `set_wrap` 写行或列的主轴对齐和换行。`Text` 和 `Image` 用 measure 回调报告尺寸。`Decorated` 按子节点定尺寸，命中交给子节点，并录一条盖住边框盒的矩形，圆角记在命令上。宽或高为 0 时不录矩形。扁平列表里，开层的节点以及写成命令的 `Clip` 仍在子节点前后成对 `Push` / `Pop`，盒子为 0 也成对。alpha 为 255 和单位 `Transform` 不推这组命令。
 
-当前行为以源码和 `docs/architecture.md` 为准。未落地的目标以 `docs/refactor-plan.md` 为准。进程内的 `protocol`、`uicore`、`engine`、`hosts/macos` 不手写 C 或 Objective-C。QuickJS 的胶水 C 只在 `runtimes/quickjs`。变更缓冲的 C 布局由 `runtimes/quickjs/abi.yml` 生成，不把现有 setter 逐个包成头文件。计数器的 Solid 产物由 QuickJS 加载。iOS 宿主等预构建矩阵有这一列再写。
+当前行为以源码和 `docs/architecture.md` 为准。未落地的目标以 `docs/refactor-plan.md` 为准。进程内的 `crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 不手写 C 或 Objective-C。QuickJS 的胶水 C 只在 `crates/quickjs`。变更缓冲的 C 布局由 `crates/quickjs/abi.yml` 生成，不把现有 setter 逐个包成头文件。计数器的 Solid 产物由 QuickJS 加载。iOS 宿主等预构建矩阵有这一列再写。
 
-不要在 `frameworks/solid-renderer` 或 `frameworks/kotlin-ui` 里实现第二套 measure / layout。
+不要在 `packages/solid-renderer` 或 `kotlin` 里实现第二套 measure / layout。
 
 ## 必须守住的边界
 
 - 产品代码只在 `third_party/` 以外。`third_party/solid` 和 `third_party/kiteui` 是本地的上游 git 检出，保持它们自己的历史，不提交进本仓库。克隆命令在 `third_party/README.md`。不在里面加功能，不把它们并进产品的构建。Solid 是 `next` 分支（Solid 2.0）。KiteUI 是 `version-8.3`。KiteUI 的 signal 在外部库 `com.lightningkite:reactive`，这里没有带进来。
 - `third_party/kiteui/AGENTS.md` 描述的是上游 KiteUI。它和本文件冲突时，产品决策以本文件为准。
-- 根目录 `settings.gradle.kts` 只有 `rootProject.name`，没有 `include`。它挡住 Gradle 从仓库根向上找到用户家目录里的工程。Kotlin 工程在 `frameworks/kotlin-ui`。始终用 `frameworks/kotlin-ui/gradlew -p frameworks/kotlin-ui`。不要把 Kotlin 模块写进根 settings，也不要做覆盖所有语言的单一 pnpm 或 Gradle 根。
+- 根目录 `settings.gradle.kts` 只有 `rootProject.name`，没有 `include`。它挡住 Gradle 从仓库根向上找到用户家目录里的工程。Kotlin 工程在 `kotlin`。始终用 `kotlin/gradlew -p kotlin`。不要把 Kotlin 模块写进根 settings，也不要做覆盖所有语言的单一 pnpm 或 Gradle 根。
 - 没有 Impeller SDK 时 `Engine::create_metal` 返回 `Status::NotLinked`。没有 C stub。
-- 不要提交 `third_party/impeller-sdk/`、`target/`，也不要解压约 1GB 的 `libimpeller.a`。`engine/fetch-impeller-sdk.sh` 按 `engine/engine.pin` 把每个平台解到 `third_party/impeller-sdk/<平台>/`，只留 `include/*`、动态库和 `LICENSE.sdk.md`。darwin 的 install name 是 `@rpath/libimpeller.dylib`。Android 的 SONAME 是 `libimpeller.so`。Cargo 的输出在 `target/`。
+- 不要提交 `third_party/impeller-sdk/`、`target/`，也不要解压约 1GB 的 `libimpeller.a`。`crates/engine/fetch-impeller-sdk.sh` 按 `crates/engine/engine.pin` 把每个平台解到 `third_party/impeller-sdk/<平台>/`，只留 `include/*`、动态库和 `LICENSE.sdk.md`。darwin 的 install name 是 `@rpath/libimpeller.dylib`。Android 的 SONAME 是 `libimpeller.so`。Cargo 的输出在 `target/`。
 - 节点的 `x, y` 是父相对坐标。`parent` 只表示结构，渲染引擎不加父节点变换。`Tree::rect` 返回场景坐标。`LAYER` 不产生绘制调用。
-- 宿主不保存 UI 状态，不创建按钮，不解释 `count`，也不做命中测试。它把指针入队，并把 `LayerTree` 交给渲染引擎。`just host` 每帧把队列交给会话。命中、手势和绘制录制在 `uicore`。场景格式在 `protocol`。Impeller 绘制在 `engine`。布局只调用 Taffy。Solid 渲染器和 Kotlin DSL 只改元素树。不要给 `protocol`、`uicore`、`engine`、`hosts/macos` 再加 C 或 Objective-C。QuickJS 的胶水 C 只留在 `runtimes/quickjs`。
+- 宿主不保存 UI 状态，不创建按钮，不解释 `count`，也不做命中测试。它把指针入队，并把 `LayerTree` 交给渲染引擎。`just host` 每帧把队列交给会话。命中、手势和绘制录制在 `uicore`。场景格式在 `protocol`。Impeller 绘制在 `engine`。布局只调用 Taffy。Solid 渲染器和 Kotlin DSL 只改元素树。不要给 `crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 再加 C 或 Objective-C。QuickJS 的胶水 C 只留在 `crates/quickjs`。
 - `register_font`、`submit_layers`、`draw_metal`、`draw_vulkan` 只在渲染线程上调用。`Engine` 是 `!Send`。Impeller 的 typography context 不能离开这条线程。`CAMetalLayer` 在主线程创建并挂到视图上；渲染线程只用层指针取 drawable。Metal context 仍用 `MTLCreateSystemDefaultDevice()`。Android 的 `ANativeWindow` 由平台线程持有，要等渲染线程应答 `SurfaceDropped` 之后才 `release`。等待在 `surface-drop` 上阻塞于 `DropWait`，平台线程不等待。
 
 ## Monorepo
 
 ```
-protocol/                  DrawList、LayerTree
-uicore/                     渲染树。Taffy、等宽排版、命中、click
-engine/                    渲染引擎。只读 DrawList，调用 impeller.h
-session/                   会话 trait。宿主只看见 metrics、pointer、frame、lifecycle
-hosts/hostshell/          命令队列、帧调度、渲染线程
-hosts/macos/               macOS 窗口。指针入队、CVDisplayLink、IMPASTO_DUMP
-hosts/android/             Android 宿主。`HostActivity`、`HostView`、Choreographer、Vulkan。`just android` 打 APK
-hosts/ios                  还没有。预构建矩阵没有 iOS 列之前不写；接口不按两台宿主收死
-runtimes/quickjs/          quickjs-ng 会话。包名 `quickjs`。没有源码时返回 NotLinked
-frameworks/clipboard/      @impasto/clipboard
-frameworks/linking/        @impasto/linking
-frameworks/app-state/      @impasto/app-state
-frameworks/file-system/    @impasto/file-system
-frameworks/async-storage/  @impasto/async-storage
-frameworks/solid-renderer/ 接到 uicore 的运行时。不做布局
-frameworks/solid-ui/       Button、Field、Dialog、theme、overlay
-frameworks/solid-router/   路径、栈和 RouterView
-frameworks/net/            createFetch
-frameworks/form/           createForm
-frameworks/i18n/           formatNumber、formatDate、plural
-frameworks/permissions/    permission_handler 形状的权限 API
-frameworks/kotlin-ui/      Kotlin Gradle 根。路线暂缓，见 docs/refactor-plan.md
-apps/gallery-solid/        Solid 应用。源码 counter.tsx；ESM 产物 dist/counter.js 本地构建，不进 git
-third_party/solid          solidjs/solid，分支 next。本地检出，不进 git
-third_party/kiteui         lightningkite/kiteui，分支 version-8.3。本地检出，不进 git
-third_party/impeller-sdk/  本地 SDK，不进 git
-third_party/quickjs/       quickjs-ng 源码，不进 git
+crates/protocol/            DrawList、LayerTree
+crates/uicore/               渲染树。Taffy、等宽排版、命中、click
+crates/engine/               渲染引擎。只读 DrawList，调用 impeller.h
+crates/session/              会话 trait。宿主只看见 metrics、pointer、frame、lifecycle
+crates/hostshell/            命令队列、帧调度、渲染线程
+crates/macos/                macOS 窗口。指针入队、CVDisplayLink、IMPASTO_DUMP
+crates/android/              Android 宿主。`HostActivity`、`HostView`、Choreographer、Vulkan。`just android` 打 APK
+crates/ios                   还没有。预构建矩阵没有 iOS 列之前不写；接口不按两台宿主收死
+crates/quickjs/              quickjs-ng 会话。包名 `quickjs`。没有源码时返回 NotLinked
+packages/clipboard/         @impasto/clipboard
+packages/linking/           @impasto/linking
+packages/app-state/         @impasto/app-state
+packages/file-system/       @impasto/file-system
+packages/async-storage/     @impasto/async-storage
+packages/solid-renderer/    接到 uicore 的运行时。不做布局
+packages/solid-ui/          Button、Field、Dialog、theme、overlay
+packages/solid-router/      路径、栈和 RouterView
+packages/net/               createFetch
+packages/form/              createForm
+packages/i18n/              formatNumber、formatDate、plural
+packages/permissions/       permission_handler 形状的权限 API
+kotlin/                      Kotlin Gradle 根。路线暂缓，见 docs/refactor-plan.md
+apps/gallery-solid/         Solid 应用。源码 counter.tsx；ESM 产物 dist/counter.js 本地构建，不进 git
+tools/                      node 测试的 register.mjs 和 resolve-hook.mjs
+third_party/solid           solidjs/solid，分支 next。本地检出，不进 git
+third_party/kiteui          lightningkite/kiteui，分支 version-8.3。本地检出，不进 git
+third_party/impeller-sdk/   本地 SDK，不进 git
+third_party/quickjs/        quickjs-ng 源码，不进 git
 .agents/skills/             跟随仓库的 agent skill。Rust 编码以 rust-best-practice 为准
-docs/architecture.md       当前仓库划分和各层结构
-docs/platform-hosts.md     macOS、Android、iOS 的平台差异。iOS 宿主还没写
-docs/refactor-plan.md      生产级迭代规划。未落地
-docs/protocol-v2.md        Picture 字节。未排期，只在 Rust 里做
+docs/architecture.md        当前仓库划分和各层结构
+docs/platform-hosts.md      macOS、Android、iOS 的平台差异。iOS 宿主还没写
+docs/refactor-plan.md       生产级迭代规划。未落地
+docs/protocol-v2.md         Picture 字节。未排期，只在 Rust 里做
 ```
 
-原生构建是 Cargo，输出在 `target/`。根上没有 CMake。`runtimes/quickjs` 在 workspace 里。没有 `third_party/quickjs` 时不编译解释器。`just quickjs` 按 pin 下载源码。
+原生构建是 Cargo，输出在 `target/`。根上没有 CMake。`crates/quickjs` 在 workspace 里。没有 `third_party/quickjs` 时不编译解释器。`just quickjs` 按 pin 下载源码。
 
 Kotlin：Kotlin 2.3.20，Gradle wrapper 9.2.1，JVM target 21，group `dev.impasto`。`settings.gradle.kts` 里只有 `include(":library")`。界面 DSL 还没写。
 
-Solid：包名 `@impasto/solid-renderer`，`type: module`。`just solid` 先在 `frameworks/solid-renderer` 里 `pnpm install --frozen-lockfile`，再跑 renderer、`net` 和 `i18n` 的测试。`solid-router`、`form`、`solid-ui` 在各自目录 `pnpm install --frozen-lockfile` 后跑单测，并用 `frameworks/register.mjs` 把包名指到仓库里的 TypeScript 源。`hostRendererOptions()` 对齐 `@solidjs/universal` 的 `RendererOptions`。宿主标签是 `row`、`column`、`stack`、`align`、`padding`、`decorated`、`pointer`、`clip`、`opacity`、`scroll`、`transform`、`image`、`sized`。`Text` 是组件。编译在 `apps/gallery-solid/build.mjs`：
+Solid：包名 `@impasto/solid-renderer`，`type: module`。JS 包是仓库根的 pnpm workspace（`pnpm-workspace.yaml` 收 `packages/*` 和 `apps/*`，根 `package.json` 提供共享 devDependencies，一份 `pnpm-lock.yaml`）。`just solid` 在根上 `pnpm install --frozen-lockfile` 后 `pnpm -r test` 跑全部包的单测，测试里用 `tools/register.mjs` 把包名指到仓库里的 TypeScript 源。`hostRendererOptions()` 对齐 `@solidjs/universal` 的 `RendererOptions`。宿主标签是 `row`、`column`、`stack`、`align`、`padding`、`decorated`、`pointer`、`clip`、`opacity`、`scroll`、`transform`、`image`、`sized`。`Text` 是组件。编译在 `apps/gallery-solid/build.mjs`：
 
 ```js
 solidPlugin({
@@ -221,7 +222,7 @@ Impeller 句柄的所有权以刚解压的 `impeller.h` 为准。绘制在 `engi
 
 升级 `engine/engine.pin` 时，对每个新返回的句柄再读一遍头文件，按前两条归类，再改绘制和文字模块。
 
-`Fill` 在缩放之前铺满画布。缩放只做一次，放在第一条非填充命令之前。渲染引擎使用命令里的 family、字号、字重、对齐、方向和 `max_width`，字号不乘 `point_scale`。左上角放在命令的 `(x, y)`。绘制用 paint 槽里带前景色的段落。布局测量命中同一槽。光标用度量缓存。相同文字、字号、宽度、颜色和样式跨帧复用，命中不复制整段文字。纹理按 `source` 跨帧复用，资产在进程内不可变。成功提交结束时只释放当前显示列表没有引用的纹理和段落，以及本帧没有 retain 的 `refs == 0` 测量槽。`register_font` 使旧段落在下一次提交释放显示列表之后失效。上屏失败是 `PresentFailed`，宿主保留表面并再要一帧。还没有表面或显示列表是 `NotReady`。图片要调用方给出紧排 RGBA8888。Impeller 不接受 PNG 或 JPEG。`source` 以 `asset:` 开头。macOS 把它映射成启动参数里的资产目录下的 `<name>.png`，默认目录是 `hosts/macos/assets`。Android 映射成 APK 里的 `assets/images/<name>.png`。缺图仍是 `BadScene`。
+`Fill` 在缩放之前铺满画布。缩放只做一次，放在第一条非填充命令之前。渲染引擎使用命令里的 family、字号、字重、对齐、方向和 `max_width`，字号不乘 `point_scale`。左上角放在命令的 `(x, y)`。绘制用 paint 槽里带前景色的段落。布局测量命中同一槽。光标用度量缓存。相同文字、字号、宽度、颜色和样式跨帧复用，命中不复制整段文字。纹理按 `source` 跨帧复用，资产在进程内不可变。成功提交结束时只释放当前显示列表没有引用的纹理和段落，以及本帧没有 retain 的 `refs == 0` 测量槽。`register_font` 使旧段落在下一次提交释放显示列表之后失效。上屏失败是 `PresentFailed`，宿主保留表面并再要一帧。还没有表面或显示列表是 `NotReady`。图片要调用方给出紧排 RGBA8888。Impeller 不接受 PNG 或 JPEG。`source` 以 `asset:` 开头。macOS 把它映射成启动参数里的资产目录下的 `<name>.png`，默认目录是 `crates/macos/assets`。Android 映射成 APK 里的 `assets/images/<name>.png`。缺图仍是 `BadScene`。
 
 窗口标题 `impasto counter`，内容默认 360×640，可关闭、可最小化、可缩放。缩放和改尺寸都投递 `Metrics`。`contentsScale` 和 `drawableSize` 来自窗口所在屏幕的 `backingScaleFactor`（取不到时用 2），尺寸变化时按内容视图重算。这一层 `framebufferOnly = NO`，这样 `IMPASTO_DUMP` 能读回纹理。
 
@@ -234,7 +235,7 @@ SDK pin 在 `engine/engine.pin`：Flutter `77f043bc63196b9979cc09c5b97bb6d9b00be
 新机器先取 SDK，再跑检查：
 
 ```sh
-engine/fetch-impeller-sdk.sh
+crates/engine/fetch-impeller-sdk.sh
 just check
 ```
 
@@ -252,8 +253,8 @@ GitHub Actions 工作流是 `.github/workflows/check.yml`。它跑 `cargo fmt --
 | `just solid` | renderer、net、i18n，以及 solid-router、form、solid-ui 的单测 |
 | `just gallery-dist` | 从 TSX 源码构建 ESM `dist/counter.js`。产物缺失或源码更新才重编，不进 git |
 | `just solid-app` | `gallery-dist` 之后安装依赖，再用 mock host 跑渲染 |
-| `just host` | 先走 `gallery-dist`，再打开 macOS 窗口并加载 ESM `apps/gallery-solid/dist/counter.js`。需要 SDK、quickjs-ng 源码和 `hosts/macos/assets` |
-| `just quickjs` | 按 `runtimes/quickjs/quickjs.pin` 下载 quickjs-ng 源码 |
+| `just host` | 先走 `gallery-dist`，再打开 macOS 窗口并加载 ESM `apps/gallery-solid/dist/counter.js`。需要 SDK、quickjs-ng 源码和 `crates/macos/assets` |
+| `just quickjs` | 按 `crates/quickjs/quickjs.pin` 下载 quickjs-ng 源码 |
 | `just host-js` | 同 `just host` |
 | `just android` | 先走 `gallery-dist`，再编 `aarch64-linux-android` 的 `libhost.so` 并打 APK。需要 NDK 和 `android-arm64` SDK |
 | `IMPASTO_DUMP=/tmp/impasto-frame.png just host` | 画出第一帧，写成 PNG，然后进程退出 |
@@ -261,14 +262,14 @@ GitHub Actions 工作流是 `.github/workflows/check.yml`。它跑 `cargo fmt --
 单独跑 Gradle 时也要钉住工程目录：
 
 ```sh
-frameworks/kotlin-ui/gradlew -p frameworks/kotlin-ui :library:jvmTest
+kotlin/gradlew -p kotlin :library:jvmTest
 ```
 
 看画面用 `IMPASTO_DUMP` 的读回。窗口进程用完要退出。dump 模式会自己终止；普通 `just host` 会留下窗口，验证完结束掉它。
 
 ## 改代码时
 
-- 渲染引擎调用在 `engine/src/painter.rs`、`engine/src/player/`、`engine/src/typography/`、`engine/src/pictures.rs` 和 `engine/src/textures.rs`，对照 `impeller.h`。没有 stub。没有 SDK 时走 `Status::NotLinked`。句柄按「绘制」里的 Impeller 规则释放：`New` 且写明 `Release` 的用完释放一次；缓存在段落上的 `ImpellerParagraphGetLineMetrics` 不要 `Release`；`register_font` 的 `on_release` 必须非空。
-- 动到 pin 或 `impeller.h` 的调用，保持 `IMPELLER_VERSION` 来自刚解压的那份头文件，并按「绘制」重新归类新句柄。fetch 脚本继续改 darwin 的 install name，并核对 Android 的 SONAME。`engine` 和 `hosts/macos` 的 `build.rs` 都要把 rpath 指到 `third_party/impeller-sdk/darwin-arm64/lib`。Android 目标链接 `third_party/impeller-sdk/android-arm64/lib`。
+- 渲染引擎调用在 `crates/engine/src/painter.rs`、`crates/engine/src/player/`、`crates/engine/src/typography/`、`crates/engine/src/pictures.rs` 和 `crates/engine/src/textures.rs`，对照 `impeller.h`。没有 stub。没有 SDK 时走 `Status::NotLinked`。句柄按「绘制」里的 Impeller 规则释放：`New` 且写明 `Release` 的用完释放一次；缓存在段落上的 `ImpellerParagraphGetLineMetrics` 不要 `Release`；`register_font` 的 `on_release` 必须非空。
+- 动到 pin 或 `impeller.h` 的调用，保持 `IMPELLER_VERSION` 来自刚解压的那份头文件，并按「绘制」重新归类新句柄。fetch 脚本继续改 darwin 的 install name，并核对 Android 的 SONAME。`crates/engine` 和 `crates/macos` 的 `build.rs` 都要把 rpath 指到 `third_party/impeller-sdk/darwin-arm64/lib`。Android 目标链接 `third_party/impeller-sdk/android-arm64/lib`。
 - 给宿主加第二种图片时，在解析回调里按 source 区分，并把像素保持到 `submit` 返回。
 - 渲染树存储父相对坐标，`Tree::rect` 返回场景坐标。不要为了对齐调试文本去改录制路径。

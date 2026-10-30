@@ -77,7 +77,7 @@ core.scrollController() → ScrollController
 
 1. `uicore/src/list/`：Fenwick、窗口、chrome、diff、`ListDriver`、`ScrollController`。`cargo test -p uicore --lib list::`。数学与原先 `list-window.ts` 的样例同输入同输出。
 2. `linked/` 在布局后 tick，再 `onLayout`。`glue.c` 注册两个 class。`cargo test -p quickjs --lib list_driver_methods_are_functions`。
-3. `frameworks/solid-renderer/runtime/list-binding.ts` 把 ops 交给 Slot。`VirtualList.tsx` 只留模板和渲染回调。`list-window.ts` 已删。`node … list-binding.test.ts`。
+3. `packages/solid-renderer/runtime/list-binding.ts` 把 ops 交给 Slot。`VirtualList.tsx` 只留模板和渲染回调。`list-window.ts` 已删。`node … list-binding.test.ts`。
 4. `ScrollArea` / `RefreshControl` 把夹紧和刷新读 controller。gallery 的 `/list` 滚动和下拉刷新由 `cargo test -p quickjs --lib` 里那三条列表测试覆盖。
 5. 本文、`docs/architecture.md` 和 `AGENTS.md` 的分层表与帧顺序按上面的事实写。
 
@@ -91,9 +91,9 @@ Rust 里没有组件、没有样式、没有条目数据。不生成通用绑定
 
 - `uicore/src/list/` — `ListDriver`、`ScrollController`、Fenwick、窗口、diff
 - `uicore/src/tree/scroll.rs` — `Tree::scroll_phase`
-- `runtimes/quickjs/src/linked/`、`linked/driver.rs` — 帧内 tick 和 class 方法
-- `runtimes/quickjs/src/glue.c` — 两个 class 和 `onDriver`
-- `frameworks/solid-renderer/runtime/driver.ts` — 单槽分发
-- `frameworks/solid-renderer/runtime/list-binding.ts` — ops 到 Slot
-- `frameworks/solid-ui/src/VirtualList.tsx`、`ScrollArea.tsx`、`RefreshControl.tsx`、`ScrollController.ts` — 皮
-- `frameworks/solid-ui/src/list-window.ts` — 已删除
+- `crates/quickjs/src/linked/`、`linked/driver.rs` — 帧内 tick 和 class 方法
+- `crates/quickjs/src/glue.c` — 两个 class 和 `onDriver`
+- `packages/solid-renderer/runtime/driver.ts` — 单槽分发
+- `packages/solid-renderer/runtime/list-binding.ts` — ops 到 Slot
+- `packages/solid-ui/src/VirtualList.tsx`、`ScrollArea.tsx`、`RefreshControl.tsx`、`ScrollController.ts` — 皮
+- `packages/solid-ui/src/list-window.ts` — 已删除

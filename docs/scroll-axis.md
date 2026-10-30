@@ -176,23 +176,23 @@ impl Tree {
 
 ### Phase 4：TS 表面与组件
 
-**File: `runtimes/quickjs/src/glue.c`**、**`runtimes/quickjs/src/linked/`**
+**File: `crates/quickjs/src/glue.c`**、**`crates/quickjs/src/linked/`**
 
 - `scroll(session, axis, out)`。`setScrollAxis`。`setScrollPhysics` 多一个 accept。
 
-**File: `frameworks/solid-renderer/src/host.ts`**、**`tree.ts`**、**`jsx.ts`**
+**File: `packages/solid-renderer/src/host.ts`**、**`tree.ts`**、**`jsx.ts`**
 
 - `scroll(axis?)`、`setScrollAxis`。`<scroll axis>`。
 
-**File: `frameworks/solid-ui/src/ScrollArea.tsx`**
+**File: `packages/solid-ui/src/ScrollArea.tsx`**
 
 - `axis` 缺省 vertical。`accept` 缺省 always。夹紧和 `onDragBy` 不改，核心已经裁过。
 
-**File: `frameworks/solid-ui/src/VirtualList.tsx`**
+**File: `packages/solid-ui/src/VirtualList.tsx`**
 
 - 传 `axis="vertical"`。
 
-**File: `frameworks/solid-ui/src/field/shell.tsx`**
+**File: `packages/solid-ui/src/field/shell.tsx`**
 
 - 单行 horizontal，多行 vertical。
 
@@ -215,7 +215,7 @@ impl Tree {
 - `DragClaim` 与 `RecognizerSet.drag` 不动。它们认领的是内容拖拽，和滚动轴无关。
 - `Both` 留下。画布类双向滚动与今天相同。
 - Kotlin 无新增文件。以后的属性名对着 `set_scroll_axis` 和 `ScrollPhysics.accept`。
-- QuickJS 的 C 仍只在 `runtimes/quickjs/src/glue.c`。函数表多一个 `set_scroll_axis`，`scroll` 与 `set_scroll_physics` 的参数在同一张表里一起改。
+- QuickJS 的 C 仍只在 `crates/quickjs/src/glue.c`。函数表多一个 `set_scroll_axis`，`scroll` 与 `set_scroll_physics` 的参数在同一张表里一起改。
 - 语义动作 `Scroll { dx, dy }` 走 `set_scroll_offset`，自动丢掉未声明轴。
 
 ## 7. 文件变更清单
@@ -235,14 +235,14 @@ impl Tree {
 - `docs/architecture.md` — 当前滚动语义
 - `docs/driver.md` — 控制器丢掉单轴的跨轴增量
 - `docs/scroll-axis.md` — 本说明
-- `frameworks/solid-renderer/src/host.ts` — `scroll` / `setScrollAxis` / accept
-- `frameworks/solid-renderer/src/jsx.ts` — `scroll` 的 `axis`
-- `frameworks/solid-renderer/src/tree.ts` — 属性写入
-- `frameworks/solid-renderer/src/tree.test.ts` — mock
-- `frameworks/solid-ui/src/ScrollArea.tsx` — 缺省 vertical 与 always
-- `frameworks/solid-ui/src/ScrollGroup.tsx` — 注释与控制器分工一致
-- `frameworks/solid-ui/src/VirtualList.tsx` — 固定 vertical
-- `frameworks/solid-ui/src/field/shell.tsx` — 单行横向、多行纵向
-- `frameworks/solid-ui/testing/renderTest.ts` — mock
-- `runtimes/quickjs/src/glue.c` — `scroll` 轴参、`setScrollAxis`、accept
-- `runtimes/quickjs/src/linked/` — 同上，接到 `Tree`
+- `packages/solid-renderer/src/host.ts` — `scroll` / `setScrollAxis` / accept
+- `packages/solid-renderer/src/jsx.ts` — `scroll` 的 `axis`
+- `packages/solid-renderer/src/tree.ts` — 属性写入
+- `packages/solid-renderer/src/tree.test.ts` — mock
+- `packages/solid-ui/src/ScrollArea.tsx` — 缺省 vertical 与 always
+- `packages/solid-ui/src/ScrollGroup.tsx` — 注释与控制器分工一致
+- `packages/solid-ui/src/VirtualList.tsx` — 固定 vertical
+- `packages/solid-ui/src/field/shell.tsx` — 单行横向、多行纵向
+- `packages/solid-ui/testing/renderTest.ts` — mock
+- `crates/quickjs/src/glue.c` — `scroll` 轴参、`setScrollAxis`、accept
+- `crates/quickjs/src/linked/` — 同上，接到 `Tree`

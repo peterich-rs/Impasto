@@ -1,8 +1,8 @@
 # 三端平台层（macOS / Android / iOS）
 
-macOS 与 Android 已落地：平台线程入队，渲染线程创建 `Engine` 和会话并 present。SDK 按平台放在 `third_party/impeller-sdk/<平台>/`。iOS 预构建矩阵仍然没有这一列（`ios`、`ios-arm64`、`ios-arm64-x86_64-sim` 返回 404），所以还没有 `hosts/ios`。`Session` 和渲染线程约束按第三端也能实现来写，见 `docs/refactor-plan.md` 的暂缓一节。
+macOS 与 Android 已落地：平台线程入队，渲染线程创建 `Engine` 和会话并 present。SDK 按平台放在 `third_party/impeller-sdk/<平台>/`。iOS 预构建矩阵仍然没有这一列（`ios`、`ios-arm64`、`ios-arm64-x86_64-sim` 返回 404），所以还没有 `crates/ios`。`Session` 和渲染线程约束按第三端也能实现来写，见 `docs/refactor-plan.md` 的暂缓一节。
 
-参照系是 Flutter embedder 和 React Native 的平台层：每个子系统先对上上游模块，再决定复刻接口形状、按发布版本链接，或只实现其中一部分。能链接的链接。对不上边界的只借鉴接口形状。硬边界：无 Dart VM，不引入 `embedder.h`。`protocol`、`uicore`、`engine`、`hosts/macos` 不手写 C。QuickJS 的胶水 C 只在 `runtimes/quickjs`。变更缓冲的生成头由 `runtimes/quickjs/abi.yml` 生成，不把现有 setter 逐个写成头文件。QuickJS 与 `Engine` 都是 `!Send`，排版上下文不离开持有它的那条线程。
+参照系是 Flutter embedder 和 React Native 的平台层：每个子系统先对上上游模块，再决定复刻接口形状、按发布版本链接，或只实现其中一部分。能链接的链接。对不上边界的只借鉴接口形状。硬边界：无 Dart VM，不引入 `embedder.h`。`protocol`、`uicore`、`engine`、`crates/macos` 不手写 C。QuickJS 的胶水 C 只在 `crates/quickjs`。变更缓冲的生成头由 `crates/quickjs/abi.yml` 生成，不把现有 setter 逐个写成头文件。QuickJS 与 `Engine` 都是 `!Send`，排版上下文不离开持有它的那条线程。
 
 ## 现状
 
@@ -55,22 +55,22 @@ Vulkan 入口与 `example_vk.c` 一致，例子只提供调用顺序，不引入
 apps/gallery-solid/dist/counter.js   (just gallery-dist 本地构建，不进 git)
         │
         ▼
-runtimes/quickjs          宿主在渲染线程上打开，得到 Box<dyn Session>
+crates/quickjs          宿主在渲染线程上打开，得到 Box<dyn Session>
         │
 session::Session          metrics · pointer · input · frame · wants_frame · take_ime · lifecycle · settings
         ▲
 hostshell                 命令队列 · 指针过滤 · 帧调度 · 相同列表不提交 · boot
         │
-        ├── hosts/macos        AppKit、CAMetalLayer、CVDisplayLink
-        ├── hosts/android      HostActivity、HostView、Choreographer、Vulkan surface
-        └── hosts/ios          还没写。预构建有 iOS 列之后接 UIKit、CAMetalLayer、CADisplayLink
+        ├── crates/macos        AppKit、CAMetalLayer、CVDisplayLink
+        ├── crates/android      HostActivity、HostView、Choreographer、Vulkan surface
+        └── crates/ios          还没写。预构建有 iOS 列之后接 UIKit、CAMetalLayer、CADisplayLink
         │
         ▼
 engine::Engine            submit 在 `hostshell` 里；draw_metal / draw_vulkan 在各端 Surface 里
 uicore::Tree              会话持有。宿主与 `hostshell` 都不直接改树
 ```
 
-依赖向下：`hosts/*` → `hostshell` → `session`、`uicore`、`protocol`、`engine`。`PointerEvent` 定义在 `uicore`，`hostshell` 会依赖整个 `uicore` crate。`hostshell` 不依赖 `quickjs`。`engine` 继续不依赖 `uicore`。
+依赖向下：`crates/macos`、`crates/android` → `hostshell` → `session`、`uicore`、`protocol`、`engine`。`PointerEvent` 定义在 `uicore`，`hostshell` 会依赖整个 `uicore` crate。`hostshell` 不依赖 `quickjs`。`engine` 继续不依赖 `uicore`。
 
 宿主实现三个 trait，并交给 `hostshell` 一个 `Send` 闭包：
 
@@ -154,7 +154,7 @@ Shell::start(Boot) ────────────────────�
 
 渲染线程用来接住会阻塞的取表面。`draw_vulkan` 里的 `ImpellerVulkanSwapchainAcquireNextSurfaceNew` 可能等到下一张图像。macOS 的 `nextDrawable` 在渲染线程的 `MetalSurface::present` 里取。平台线程只做窗口、输入换算和 vsync 源。测量和绘制仍是同一条渲染线程上的同一个 typography，不各持一份排版上下文。渲染线程是 `std::thread` 上的同步循环，不进 async 运行时。
 
-平台线程到渲染线程是 `hosts/hostshell/src/command.rs` 里的 `Command` 队列。平台线程入队后立刻返回。渲染线程把本帧要用的指针拷出来之后，在锁外跑会话和 `Engine`。`SurfaceDestroyed` 由渲染线程立刻处理，先丢掉尚未打开的 `SurfaceTarget`，然后 `Acks::signal`。Android 的 `destroy_surface` 和 `open_surface` 把 `NativeWindow` 交给 `surface-drop`。该线程在 `DropWait` 上等待这条应答，然后 `ANativeWindow_release`。平台线程在 `spawn` 之后返回。渲染线程处理销毁时不再等平台线程。入队顺序仍是 `SurfaceDestroyed` 先于下一次 `SurfaceReady`。
+平台线程到渲染线程是 `crates/hostshell/src/command.rs` 里的 `Command` 队列。平台线程入队后立刻返回。渲染线程把本帧要用的指针拷出来之后，在锁外跑会话和 `Engine`。`SurfaceDestroyed` 由渲染线程立刻处理，先丢掉尚未打开的 `SurfaceTarget`，然后 `Acks::signal`。Android 的 `destroy_surface` 和 `open_surface` 把 `NativeWindow` 交给 `surface-drop`。该线程在 `DropWait` 上等待这条应答，然后 `ANativeWindow_release`。平台线程在 `spawn` 之后返回。渲染线程处理销毁时不再等平台线程。入队顺序仍是 `SurfaceDestroyed` 先于下一次 `SurfaceReady`。
 
 相邻的 `Pointer(Move)` 合并成队尾那一个，避免渲染线程停住时 move 无限堆积。`Down`、`Up`、`Cancel` 不合并、不丢弃。metrics 不从指针中间抽走，避免重排。
 
@@ -341,6 +341,6 @@ Android 与 iOS 的字体是可再分发的文件，注册名仍叫 `Sans`。系
 
 - crate 均 `publish = false`。`Shell` 含有 `Engine` 和会话，因此不是 `Send`。跨线程的只有命令队列、`Vsync`，以及有意标记为 `Send` 的窗口指针 newtype。
 - `unsafe` 集中在 Vulkan 句柄、Android 窗口与 NDK 事件、objc2，以及那个 `Send` 指针。每处按 `engine/src/player/`、`engine/src/typography/` 和 `engine/src/vulkan.rs` 写 SAFETY 注释。workspace 的 `unsafe_code = deny` 仍有效。
-- `hostshell` 的队列、过滤、相同列表跳过提交，以及表面应答，用无窗口单测。各端坐标换算沿用 `hosts/macos/src/pointer.rs` 这种单测。端上验收是出帧和点击改字。
+- `hostshell` 的队列、过滤、相同列表跳过提交，以及表面应答，用无窗口单测。各端坐标换算沿用 `crates/macos/src/pointer.rs` 这种单测。端上验收是出帧和点击改字。
 - 场景格式保持版本 1。不做 GL 后备、轨迹重采样、平台视图和多窗口。不做显示列表的命令级 diff。`layer_epoch` 未变、缩放相同且 `needs_present` 为假则 `Skip`；`needs_present` 为真则 `PresentCached`。`Resumed` 与 `Invalidate` 置 `needs_present`。增量绘制走已落地的合成层，见 `docs/architecture.md`，不在这里另写一套禁令。
 - 新依赖在引入时钉版本。`ndk` 0.9.0 与 `jni` 0.22.4 已钉住。它们不带 UI 框架或 Dart VM。要裁 Impeller 后端时放到以后的 engine 仓库，不在本仓库编 engine。

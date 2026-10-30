@@ -4,35 +4,36 @@
 
 ## 仓库怎么切
 
-一种语言一个绑定，一套 UI 核心。我们写的原生代码用 Cargo 编成 Rust。Kotlin 只用 `frameworks/kotlin-ui` 里的 Gradle。JS 以后可以有只包含前端包的 `pnpm-workspace.yaml`，不把 Kotlin 和 `third_party/solid` 算进产品构建。根上的 `settings.gradle.kts` 继续保持没有 `include`。
+一种语言一个绑定，一套 UI 核心。我们写的原生代码用 Cargo 编成 Rust，全部在 `crates/` 下。Kotlin 只用 `kotlin` 里的 Gradle。JS 是仓库根的 `pnpm-workspace.yaml`（`packages/*` 和 `apps/*`），不把 Kotlin 和 `third_party/solid` 算进产品构建。根上的 `settings.gradle.kts` 继续保持没有 `include`。
 
-场景格式、渲染树、渲染引擎、会话、`hostshell`、macOS 宿主和 Android 宿主已经是 Rust。不要往 `protocol`、`uicore`、`engine`、`hosts/macos` 加手写的 C 或 Objective-C。Android 的 NDK 调用留在 `hosts/android`。QuickJS 的胶水 C 只在 `runtimes/quickjs`。嵌入用的变更缓冲由 `runtimes/quickjs/abi.yml` 生成。
+场景格式、渲染树、渲染引擎、会话、`hostshell`、macOS 宿主和 Android 宿主已经是 Rust。不要往 `crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 加手写的 C 或 Objective-C。Android 的 NDK 调用留在 `crates/android`。QuickJS 的胶水 C 只在 `crates/quickjs`。嵌入用的变更缓冲由 `crates/quickjs/abi.yml` 生成。
 
 ```
-protocol/                     DrawList、LayerTree
-uicore/                      渲染树。Taffy、等宽排版、命中、click、drag、焦点
-engine/                       渲染引擎。读 LayerTree，调用 impeller.h
-session/                      会话 trait。metrics、pointer、frame、wants_frame、lifecycle
-hosts/macos/                  macOS 窗口。指针入队、CVDisplayLink、IMPASTO_DUMP
-hosts/hostshell/              命令队列、帧调度、渲染线程
-hosts/android/                `HostActivity`、`HostView`、Choreographer、Vulkan。库名 `host`
-hosts/ios                     还没有。预构建矩阵没有 iOS 列之前不建这个目录
-runtimes/quickjs/             quickjs-ng 会话。包名 quickjs
-frameworks/clipboard/         @impasto/clipboard。host 由 QuickJS 物化
-frameworks/linking/           @impasto/linking
-frameworks/app-state/         @impasto/app-state。currentState 是门面上的 getter
-frameworks/file-system/       @impasto/file-system
-frameworks/async-storage/     @impasto/async-storage
-frameworks/solid-renderer/    接到 uicore 的 universal 运行时。directionFor、spring、onBack
-frameworks/solid-ui/          Button、Field、Dialog、theme、overlay
-frameworks/solid-router/      路径、栈和 RouterView
-frameworks/net/               createFetch
-frameworks/form/              createForm
-frameworks/i18n/              formatNumber、formatDate、plural
-frameworks/permissions/       permission_handler 形状的权限 API。五法来自 @impasto/permissions/host
-frameworks/kotlin-ui/         Gradle 根。DSL、控件、以后的 cinterop
+crates/protocol/              DrawList、LayerTree
+crates/uicore/                渲染树。Taffy、等宽排版、命中、click、drag、焦点
+crates/engine/                渲染引擎。读 LayerTree，调用 impeller.h
+crates/session/               会话 trait。metrics、pointer、frame、wants_frame、lifecycle
+crates/macos/                 macOS 窗口。指针入队、CVDisplayLink、IMPASTO_DUMP
+crates/hostshell/             命令队列、帧调度、渲染线程
+crates/android/               `HostActivity`、`HostView`、Choreographer、Vulkan。库名 `host`
+crates/ios                    还没有。预构建矩阵没有 iOS 列之前不建这个目录
+crates/quickjs/               quickjs-ng 会话。包名 quickjs
+packages/clipboard/           @impasto/clipboard。host 由 QuickJS 物化
+packages/linking/             @impasto/linking
+packages/app-state/           @impasto/app-state。currentState 是门面上的 getter
+packages/file-system/         @impasto/file-system
+packages/async-storage/       @impasto/async-storage
+packages/solid-renderer/      接到 uicore 的 universal 运行时。directionFor、spring、onBack
+packages/solid-ui/            Button、Field、Dialog、theme、overlay
+packages/solid-router/        路径、栈和 RouterView
+packages/net/                 createFetch
+packages/form/                createForm
+packages/i18n/                formatNumber、formatDate、plural
+packages/permissions/         permission_handler 形状的权限 API。五法来自 @impasto/permissions/host
+kotlin/                       Gradle 根。DSL、控件、以后的 cinterop
   library/
 apps/gallery-solid/           Solid 应用。源码 counter.tsx；ESM 产物 dist/counter.js 由 `just gallery-dist` 本地生成，不进 git
+tools/                        node 测试的 register.mjs 和 resolve-hook.mjs
 third_party/                  只读对照和本机 SDK
 ```
 
@@ -42,16 +43,16 @@ third_party/                  只读对照和本机 SDK
 gallery-solid ──► solid-ui ──► solid-renderer ──► quickjs 会话 ──► uicore ──► protocol
 gallery-solid ──► solid-router ──► solid-renderer
 gallery-solid ──► solid-router ──► linking
-hosts/macos ──► hostshell ──► session ──► uicore ──► protocol
-hosts/macos ──► engine ──► protocol
-hosts/android ──► hostshell ──► engine ──► protocol
-hosts/macos ──► quickjs 会话          `just host` 加载 `counter.js`
-hosts/android ──► quickjs 会话        加载 assets 里的 `counter.js`
+crates/macos ──► hostshell ──► session ──► uicore ──► protocol
+crates/macos ──► engine ──► protocol
+crates/android ──► hostshell ──► engine ──► protocol
+crates/macos ──► quickjs 会话          `just host` 加载 `counter.js`
+crates/android ──► quickjs 会话        加载 assets 里的 `counter.js`
 ```
 
 `uicore` 不包含 QuickJS、Kotlin、AppKit 或 Impeller 的头文件。它通过 crates.io 依赖 Taffy。Impeller 排版由宿主实现 `Shaper` 并调用 `engine`，测试构建不链它。`engine` 不包含 `uicore`。语言包不实现测量和布局。选型表在 `AGENTS.md` 的「优先复用已有实现」。
 
-两个产品二进制以后都链同一套 `uicore` 和 `engine`：macOS 上 QuickJS 宿主是 `hosts/macos`，Kotlin/Native 宿主是 `frameworks/kotlin-ui` 编出来的可执行文件。宿主按操作系统写，会话按语言写。一个可执行文件只链一种会话。
+两个产品二进制以后都链同一套 `uicore` 和 `engine`：macOS 上 QuickJS 宿主是 `crates/macos`，Kotlin/Native 宿主是 `kotlin` 编出来的可执行文件。宿主按操作系统写，会话按语言写。一个可执行文件只链一种会话。
 
 ## 一帧
 
@@ -145,7 +146,7 @@ macOS 的窗口和 `CAMetalLayer` 在主线程，`Engine`、会话和 present �
 
 ## 运行时会话
 
-quickjs-ng 会话拥有 `JSRuntime`、一棵 `uicore::Tree` 和一份区域 id 到 JS 函数的表。`glue.c` 注册全局 `core`。句柄是 `u64`，失败用返回码，`0` 只在这层表示没有节点。解释器按 `quickjs.pin` 的 tag 下载到 `third_party/quickjs`，不抄进 `runtimes/quickjs`。没有源码时 `open` 返回 `NotLinked`。
+quickjs-ng 会话拥有 `JSRuntime`、一棵 `uicore::Tree` 和一份区域 id 到 JS 函数的表。`glue.c` 注册全局 `core`。句柄是 `u64`，失败用返回码，`0` 只在这层表示没有节点。解释器按 `quickjs.pin` 的 tag 下载到 `third_party/quickjs`，不抄进 `crates/quickjs`。没有源码时 `open` 返回 `NotLinked`。
 
 指针到达时，`Tree::pointer` 先返回被激活的区域，点击时再附上焦点转换。借用结束后会话调用全部匹配的 JS 函数。`Session::input` 只在 `focused()` 有值时派发到那个节点。监听器抛错时，文本留在 `take_script_error`，并经宿主日志打出，带上异常的 `stack`。页面 `Errored` 接住的渲染错误同样 `console.error` 到这条日志。`insert` 失败时宿主再记一行 `insert failed:` 和 `uicore` 的原因。这一帧不再派发其余区域。进程不退出。监听器只改树。会话不在这个回调里 `layout`。JS `remove` 先摘下子树，焦点若在这棵子树里先派发 `Blur`。同一轮脚本里这个 id 还能再插回去。脚本返回后，会话对仍没有父节点、且没有调用过 `detach` 的子树调用 `Tree::discard`，并按退掉的 id 释放监听。`detach` 把 id 移出这份名单，监听留着。`discard` 立刻退役，并立刻释放监听。
 
@@ -155,7 +156,7 @@ vsync 时先排空 QuickJS job，再触发到期的 `setTimeout` / `setInterval`
 
 `uicore` 上的函数——JS 全局名仍是 `core`：`column`、`row`、`stack`、`align`、`padding`、`pointerRegion`、`decorated`、`clip`、`opacity`、`scroll`、`transform`、`image`、`text`、`append`、`insert`、`remove`、`detach`、`discard`、`parent`、`firstChild`、`nextSibling`、`isText`、`setText`、`setFontSize`、`setColor`、`setGap`、`setPadding`、`setGrow`、`setRadius`、`setAlpha`、`setAlign`、`setCross`、`metrics`、`setSize`、`setImage`、`setMaxLines`、`setEllipsis`、`setTextAlign`、`setFontWeight`、`setTextDirection`、`setLineHeight`、`setFamily`、`setScrollOffset`、`scrollOffset`、`rect`、`setTransform`、`setJustify`、`setWrap`、`setFill`、`requestFrame`、`onClick`、`onPress`、`onRelease`、`onDragBegin`、`onDragBy`、`onDragEnd`、`onFrame`、`onLayout`。`decorated` 的半径可以省略，省略时是 0。内建 `image` 的 `source`、宽和高在创建时读入。`setImage` 把这三项一起改掉。`onDragBy` 和 `onDragEnd` 收到两个数，分别是位移增量和速度。`onKey` 收到 `"Backspace"` 这类名字，`onText` 收到已提交串，`onComposing` 收到组合串或 `null`。`measureText` 返回 `{w, h}`，走 `Tree::measure_text`。`setImeEnabled` 和 `setImeText` 只改会话里的两个标志，由宿主在帧末投递给平台。同一张 tap 表保存 click、press、release、drag、focus、blur、key、text、composing，摘掉节点时一起释放。
 
-Kotlin 会话还没接上原生树。这条路线暂缓，见 `docs/refactor-plan.md`；重启时走 `runtimes/quickjs/abi.yml` 的变更缓冲，信号用已发布的 `com.lightningkite:reactive`。会话代码放在 `frameworks/kotlin-ui`，不放到 `runtimes/`，这样 Gradle 仍然只有一个根。
+Kotlin 会话还没接上原生树。这条路线暂缓，见 `docs/refactor-plan.md`；重启时走 `crates/quickjs/abi.yml` 的变更缓冲，信号用已发布的 `com.lightningkite:reactive`。会话代码放在 `kotlin`，不放回 `crates/`，这样 Gradle 仍然只有一个根。
 
 ## 渲染器
 
@@ -181,7 +182,7 @@ column {
 
 布局原语只有 `uicore` 里那一批。语言包给它们薄薄的函数或组件，参数是样式和子节点，不写尺寸计算。
 
-`Button` 写在 `frameworks/solid-ui`。结构是：
+`Button` 写在 `packages/solid-ui`。结构是：
 
 ```text
 PointerRegion      press / release / click
@@ -198,7 +199,7 @@ PointerRegion      press / release / click
 
 `VirtualList` 的窗口、Fenwick 行高、滑块、吸顶和可见集 diff 在 `uicore` 的 `ListDriver`。应用 props 不变。语言侧在条目变化时推入 key、类型和是否吸顶，不在 tick 里逐行回调。行节点用 `noteRow` 登记一次，之后 tick 直接读 `Tree::rect`。可见集没变时不调用脚本。变了才经 `onDriver` 交出 `Detach` / `Adopt` / `Set` / `Place`，由 `bindListRenderer` 交给 `createSlot`。`restoreKey` 仍是语言侧的一张表，卸载时读 `offset()`。空白、错误和骨架仍是 JSX。独立的 `Recycler` 仍在语言侧对调用方已经切好的 `each` 做池化，不走这台 driver。驱动的类边界和 ops 在 `docs/driver.md`。
 
-QuickJS 上这两个对象是 class：`core.listDriver` 和 `core.scrollController`。opaque 是序号和代，Rust 不保存 `JSValue`。事件是宿主上的一个 `onDriver` 回调，按 id 分发。终结器释放 driver。C 只在 `runtimes/quickjs/src/glue.c`。
+QuickJS 上这两个对象是 class：`core.listDriver` 和 `core.scrollController`。opaque 是序号和代，Rust 不保存 `JSValue`。事件是宿主上的一个 `onDriver` 回调，按 id 分发。终结器释放 driver。C 只在 `crates/quickjs/src/glue.c`。
 
 ```text
 Scroll                 视口，PushClip
@@ -206,7 +207,7 @@ Scroll                 视口，PushClip
     …行
 ```
 
-`Field` 也写在 `frameworks/solid-ui`。字符串、选择区和组合文本在 `uicore` 的 `TextEditor` 里。偏移是 UTF-16，移动和删除按字形簇。选择区记下 `base` 和 `extent`：方向键移动 `extent`，按着 Shift 则保持 `base`。软换行的同一个偏移有两个位置，`Affinity` 的 `Upstream` 画在上一行末尾，`Downstream` 画在下一行开头。硬换行是文本里的 `\n`，多行字段的回车插入它。
+`Field` 也写在 `packages/solid-ui`。字符串、选择区和组合文本在 `uicore` 的 `TextEditor` 里。偏移是 UTF-16，移动和删除按字形簇。选择区记下 `base` 和 `extent`：方向键移动 `extent`，按着 Shift 则保持 `base`。软换行的同一个偏移有两个位置，`Affinity` 的 `Upstream` 画在上一行末尾，`Downstream` 画在下一行开头。硬换行是文本里的 `\n`，多行字段的回车插入它。
 
 `TextStyle` 带 `soft_wrap` 和 `overflow`。`soft_wrap` 为真时，超过段落宽度的文字换到下一行，并尽量在空白后断开。为假时只认硬换行。`Clip` 丢掉超过 `max_lines` 的行。`Ellipsis` 在最后一行末尾换成省略号，缺省是 `…`。`Visible` 保留每一行，不换行时一行可以宽过约束。测试里的 `MonoShaper` 用同一套规则量尺寸和光标。宿主的排版器把这些字段交给 Impeller 的段落。
 
