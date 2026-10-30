@@ -100,7 +100,6 @@ mod tests {
 
     /// The gallery bundle is a build artifact and not committed. Tests that
     /// need it fail with instructions when it has not been built.
-    #[cfg(quickjs)]
     fn gallery_source() -> String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../apps/gallery-solid/dist/counter.js");
@@ -326,12 +325,22 @@ mod tests {
         session.pointer(PointerEvent::new(Phase::Up, x, y, 0.0));
     }
 
+    /// The gallery bundle is a build artifact and not committed. Tests that
+    /// need it fail with instructions when it has not been built. Returns
+    /// `None` when the interpreter is not linked; callers already early-return.
     fn open_counter() -> Option<Box<dyn Session>> {
-        let source = gallery_source();
-        match open(&source, "test.js", uicore::MonoShaper::default(), no_log()) {
-            Ok(session) => Some(session),
-            Err(Error::NotLinked) => None,
-            Err(error) => panic!("{error}"),
+        #[cfg(not(quickjs))]
+        {
+            return None;
+        }
+        #[cfg(quickjs)]
+        {
+            let source = gallery_source();
+            match open(&source, "test.js", uicore::MonoShaper::default(), no_log()) {
+                Ok(session) => Some(session),
+                Err(Error::NotLinked) => None,
+                Err(error) => panic!("{error}"),
+            }
         }
     }
 
