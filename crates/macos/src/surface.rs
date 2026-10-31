@@ -1,7 +1,7 @@
 //! Metal drawable present. The layer pointer stays owned by the main thread.
 
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
@@ -66,7 +66,7 @@ impl Surface for MetalSurface {
 
 fn read_drawable_png(
     drawable: &ProtocolObject<dyn CAMetalDrawable>,
-    path: &PathBuf,
+    path: &Path,
 ) -> anyhow::Result<()> {
     let texture = drawable.texture();
     let width = texture.width();

@@ -33,7 +33,7 @@ use crate::text_client::Marked;
 use objc2_metal::{MTLCreateSystemDefaultDevice, MTLPixelFormat};
 use objc2_quartz_core::{CALayer, CAMetalLayer};
 
-use crate::pointer::pointer_event;
+use crate::pointer::{PointerSample, pointer_event, scene_f32};
 use crate::surface::MetalSurface;
 use crate::vsync::DisplayLink;
 use uicore::{Button, Modifiers, Phase, PointerEvent};
@@ -248,7 +248,7 @@ define_class!(
                 x,
                 y,
                 event.timestamp() * 1000.0,
-                event.magnification() as f32,
+                scene_f32(event.magnification()),
             )));
         }
 
@@ -365,18 +365,20 @@ impl ContentView {
         let (dx, dy) = if phase == Phase::Wheel {
             // AppKit's positive delta Y points up. Scene Y grows downward.
             (
-                event.scrollingDeltaX() as f32,
-                -(event.scrollingDeltaY() as f32),
+                scene_f32(event.scrollingDeltaX()),
+                -scene_f32(event.scrollingDeltaY()),
             )
         } else {
             (0.0, 0.0)
         };
         self.ivars().poster.post(Command::Pointer(pointer_event(
-            phase,
-            local.x,
-            local.y,
-            height,
-            event.timestamp() * 1000.0,
+            PointerSample {
+                phase,
+                local_x: local.x,
+                local_y: local.y,
+                view_height: height,
+                time_ms: event.timestamp() * 1000.0,
+            },
             button,
             modifiers,
             dx,
@@ -670,7 +672,11 @@ impl Host {
         self.ivars().link.post(Command::SurfaceReady(SurfaceTarget {
             id: hostshell::SurfaceId::fresh(),
             layer: NativePtr(layer),
-            metrics: metrics(CONTENT_WIDTH as f32, CONTENT_HEIGHT as f32, scale as f32),
+            metrics: metrics(
+                scene_f32(CONTENT_WIDTH),
+                scene_f32(CONTENT_HEIGHT),
+                scene_f32(scale),
+            ),
         }));
         self.post_settings();
         println!("host ready");
@@ -702,9 +708,9 @@ impl Host {
         ));
         layer.setDrawableSize(CGSize::new(width * scale, height * scale));
         self.ivars().link.post(Command::Metrics(metrics(
-            width as f32,
-            height as f32,
-            scale as f32,
+            scene_f32(width),
+            scene_f32(height),
+            scene_f32(scale),
         )));
     }
 
@@ -768,7 +774,7 @@ pub(crate) fn text_scale_from_point_size(point_size: f64) -> f32 {
     if !point_size.is_finite() || point_size <= 0.0 {
         return 1.0;
     }
-    let scale = (point_size / 13.0) as f32;
+    let scale = scene_f32(point_size / 13.0);
     if !scale.is_finite() {
         return 1.0;
     }
@@ -967,7 +973,7 @@ pub fn run(
             quickjs::Error::Script(text) => SessionError::Script(text),
         })
     }));
-    let dump_for_surface = dump.clone();
+    let dump_for_surface = dump;
     let on_stop_for_surface = Arc::clone(&on_stop);
     let ime_view = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
     let decoder = Arc::new(PngDecoder { directory: assets });
@@ -984,7 +990,7 @@ pub fn run(
             vsync: Arc::new(vsync),
             decoder,
             modules: Vec::new(),
-            main_thread: Some(Arc::new(|work| dispatch_main(work))),
+            main_thread: Some(Arc::new(dispatch_main)),
             launch_url: Arc::clone(&launch_url),
             http: Some(
                 hostshell::http_client()
@@ -1058,7 +1064,7 @@ pub fn run(
     let host = Host::new(
         mtm,
         HostState {
-            window: window.clone(),
+            window,
             layer,
             link,
             initial_url,

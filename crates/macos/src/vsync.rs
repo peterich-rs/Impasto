@@ -16,8 +16,10 @@ use objc2_core_video::{
     kCVReturnSuccess,
 };
 
+type FrameSink = Arc<dyn Fn(FrameToken, FrameTime) + Send + Sync>;
+
 struct Callback {
-    post: Mutex<Option<Arc<dyn Fn(FrameToken, FrameTime) + Send + Sync>>>,
+    post: Mutex<Option<FrameSink>>,
     token: Mutex<Option<FrameToken>>,
 }
 

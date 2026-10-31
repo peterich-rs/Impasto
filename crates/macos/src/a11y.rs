@@ -390,13 +390,10 @@ impl A11yHost {
             let mut elements = self.elements.borrow_mut();
             elements.retain(|id, _| live.contains(id));
             for node in &visible {
-                if !elements.contains_key(&node.id.0) {
-                    let created = A11yNode::new(mtm, node.id, poster.clone(), host);
-                    elements.insert(node.id.0, created);
-                }
-                if let Some(element) = elements.get(&node.id.0) {
-                    element.apply(node);
-                }
+                elements
+                    .entry(node.id.0)
+                    .or_insert_with(|| A11yNode::new(mtm, node.id, poster.clone(), host))
+                    .apply(node);
             }
         }
         let elements = self.elements.borrow();
