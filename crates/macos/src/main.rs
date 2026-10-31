@@ -1,9 +1,17 @@
 //! macOS host. `--js <script>` loads that script in the QuickJS session.
 //! `--url` is the Linking launch URL, written before the script evaluates.
 
+#![allow(
+    unsafe_code,
+    reason = "AppKit and Metal are called through objc2 from this crate"
+)]
+
 mod a11y;
 mod app;
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "image bytes are read when the host resolves an asset"
+)]
 mod assets;
 mod pixels;
 mod pointer;
@@ -27,11 +35,27 @@ fn main() -> ExitCode {
 }
 
 fn launch() -> Result<(), app::RunError> {
-    let (launch, assets, font, dump_list, url) = load().map_err(app::RunError::Window)?;
-    objc2::rc::autoreleasepool(|_| app::run(launch, assets, &font, dump_list, url))
+    let loaded = load().map_err(app::RunError::Window)?;
+    objc2::rc::autoreleasepool(|_| {
+        app::run(
+            loaded.launch,
+            loaded.assets,
+            &loaded.font,
+            loaded.dump_list,
+            loaded.url,
+        )
+    })
 }
 
-fn load() -> anyhow::Result<(app::Launch, PathBuf, Vec<u8>, bool, Option<String>)> {
+struct Loaded {
+    launch: app::Launch,
+    assets: PathBuf,
+    font: Vec<u8>,
+    dump_list: bool,
+    url: Option<String>,
+}
+
+fn load() -> anyhow::Result<Loaded> {
     let paths = Paths::from_args()?;
     let font = std::fs::read(&paths.font)
         .with_context(|| format!("failed to read font {}", paths.font.display()))?;
@@ -42,7 +66,13 @@ fn load() -> anyhow::Result<(app::Launch, PathBuf, Vec<u8>, bool, Option<String>
         name: script.display().to_string(),
         source,
     };
-    Ok((launch, paths.assets, font, paths.dump_list, paths.url))
+    Ok(Loaded {
+        launch,
+        assets: paths.assets,
+        font,
+        dump_list: paths.dump_list,
+        url: paths.url,
+    })
 }
 
 struct Paths {

@@ -23,18 +23,23 @@ impl Tree {
             let Some(text) = node.text_mut() else {
                 return Err(Error::NotText);
             };
-            if text.editor.is_some() {
-                let (changed, stored) = {
-                    let editor = text.editor.as_mut().expect("editor");
-                    let changed = editor.replace_keeping_composition(next);
-                    (changed, editor.value().text.clone())
-                };
-                text.utf8 = Arc::from(stored);
-                changed
+            // The editor borrow has to end before `utf8` is replaced.
+            let pending = if let Some(editor) = text.editor.as_mut() {
+                let changed = editor.replace_keeping_composition(next);
+                Ok((changed, editor.value().text.clone()))
             } else {
-                let changed = text.utf8.as_ref() != next;
-                text.utf8 = Arc::from(next);
-                changed
+                Err(next)
+            };
+            match pending {
+                Ok((changed, stored)) => {
+                    text.utf8 = Arc::from(stored);
+                    changed
+                }
+                Err(next) => {
+                    let changed = text.utf8.as_ref() != next;
+                    text.utf8 = Arc::from(next);
+                    changed
+                }
             }
         };
         if !changed {
@@ -146,7 +151,7 @@ impl Tree {
                 let node = slot.node.as_ref()?;
                 node.text()?;
                 Some(NodeId {
-                    index: index as u32,
+                    index: crate::cast::u32_from_usize(index),
                     generation: slot.generation,
                 })
             })

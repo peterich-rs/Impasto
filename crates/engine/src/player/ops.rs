@@ -245,7 +245,10 @@ impl<'a> crate::painter::Painter<'a> {
             return false;
         };
         let origin = picture.origin;
-        let Some(retained) = self.picture_cache.unwrap().get(&id) else {
+        let Some(cache) = self.picture_cache else {
+            return false;
+        };
+        let Some(retained) = cache.get(&id) else {
             return false;
         };
         if retained.list.is_null()

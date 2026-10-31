@@ -11,6 +11,15 @@ use super::window::{
     sticky_translate, thumb_length, thumb_offset, window_covers, window_range_for_offset,
 };
 
+/// Scroll offset and viewport size sampled together for one placement.
+#[derive(Clone, Copy)]
+struct PlacedViewport {
+    offset_x: f32,
+    offset_y: f32,
+    w: f32,
+    h: f32,
+}
+
 #[derive(Clone, Debug)]
 pub struct ListItem {
     pub key: String,
@@ -213,23 +222,21 @@ impl ListDriver {
         }
         let fling_y = tree.fling_target(viewport).map(|pair| pair.1);
         let refresh_width = size_changed || self.force || self.content_w < 0.0;
+        let placed = PlacedViewport {
+            offset_x,
+            offset_y,
+            w: view.w,
+            h: view.h,
+        };
         let must_place = self.force
             || pending_measure
             || size_changed
             || !window_covers(&self.prefix, self.range, offset_y, view.h);
         if must_place {
-            self.place(
-                tree,
-                offset_x,
-                offset_y,
-                view.w,
-                view.h,
-                fling_y,
-                refresh_width,
-            );
+            self.place(tree, placed, fling_y, refresh_width);
         } else {
             self.previous_offset = offset_y;
-            self.write_chrome(tree, offset_x, offset_y, view.w, view.h, false);
+            self.write_chrome(tree, placed, false);
         }
         let ops = self.take_ops();
         let end = self.maybe_end(self.range.end);
@@ -321,13 +328,15 @@ impl ListDriver {
     fn place(
         &mut self,
         tree: &mut Tree,
-        offset_x: f32,
-        offset_y: f32,
-        view_w: f32,
-        view_h: f32,
+        view: PlacedViewport,
         fling_y: Option<f32>,
         refresh_width: bool,
     ) {
+        let PlacedViewport {
+            offset_y,
+            h: view_h,
+            ..
+        } = view;
         let delta = offset_y - self.previous_offset;
         self.previous_offset = offset_y;
         let lead = if delta == 0.0 || view_h <= 0.0 {
@@ -343,18 +352,16 @@ impl ListDriver {
         };
         let next = window_range_for_offset(&self.prefix, offset_y, view_h, self.overscan, far);
         self.range = stabilize_window(&self.prefix, self.range, next, self.overscan);
-        self.write_chrome(tree, offset_x, offset_y, view_w, view_h, refresh_width);
+        self.write_chrome(tree, view, refresh_width);
     }
 
-    fn write_chrome(
-        &mut self,
-        tree: &mut Tree,
-        offset_x: f32,
-        offset_y: f32,
-        view_w: f32,
-        view_h: f32,
-        refresh_width: bool,
-    ) {
+    fn write_chrome(&mut self, tree: &mut Tree, view: PlacedViewport, refresh_width: bool) {
+        let PlacedViewport {
+            offset_x,
+            offset_y,
+            w: view_w,
+            h: view_h,
+        } = view;
         let content = self.prefix.total();
         let overflow = content > view_h + HEIGHT_EPS && view_h > 0.0 && content > 0.0;
         if overflow {
@@ -395,7 +402,7 @@ impl ListDriver {
                 continue;
             }
             if self.prefix.item_start(index) <= offset_y {
-                current = index as i32;
+                current = crate::cast::i32_from_usize(index);
             } else {
                 break;
             }
@@ -462,7 +469,7 @@ impl ListDriver {
             next.push(ShownRow {
                 key: item.key.clone(),
                 ty: item.ty.clone(),
-                index: index as u32,
+                index: crate::cast::u32_from_usize(index),
             });
         }
         let force = self.force;
@@ -482,10 +489,10 @@ impl ListDriver {
         if !near_end(end, length, self.overscan) {
             return false;
         }
-        if self.end_length == length as i32 {
+        if self.end_length == crate::cast::i32_from_usize(length) {
             return false;
         }
-        self.end_length = length as i32;
+        self.end_length = crate::cast::i32_from_usize(length);
         true
     }
 

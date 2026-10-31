@@ -272,7 +272,7 @@ impl ImeState {
 
 /// UTF-16 length of `text`. A scalar above U+FFFF counts as two units.
 pub fn utf16_len(text: &str) -> u32 {
-    text.encode_utf16().count() as u32
+    u32::try_from(text.encode_utf16().count()).unwrap_or(u32::MAX)
 }
 
 /// One change of keyboard visibility or editing state.

@@ -125,5 +125,8 @@ impl PictureCache {
     }
 }
 
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "names the Save link so the type stays in this module"
+)]
 fn _save_link(_: &Save) {}

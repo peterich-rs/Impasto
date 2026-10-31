@@ -5,10 +5,17 @@ use std::sync::Arc;
 use protocol::Command;
 
 use super::super::node::{Kind, Node};
-use super::{PreparedGradient, positive_sigma, prepared_gradient, rect_paint};
+use super::{PreparedGradient, RectPaint, positive_sigma, prepared_gradient, rect_paint};
 
 pub(super) fn emit_rect(commands: &mut Vec<Command>, node: &Node, x: f32, y: f32) {
-    let (fill, stroke_width, stroke_color, gradient, shadow, box_shadows) = rect_paint(node);
+    let RectPaint {
+        fill,
+        stroke_width,
+        stroke_color,
+        gradient,
+        shadow,
+        box_shadows,
+    } = rect_paint(node);
     if node.w <= 0.0
         || node.h <= 0.0
         || (fill.is_none()

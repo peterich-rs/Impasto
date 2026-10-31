@@ -45,15 +45,14 @@ impl Inbox {
 }
 
 pub fn push_coalesced(commands: &mut VecDeque<Command>, command: Command) {
-    if let Command::Pointer(next) = command {
-        if next.phase == Phase::Move {
-            if let Some(Command::Pointer(previous)) = commands.back_mut() {
-                if previous.phase == Phase::Move && previous.pointer == next.pointer {
-                    *previous = next;
-                    return;
-                }
-            }
-        }
+    if let Command::Pointer(next) = command
+        && next.phase == Phase::Move
+        && let Some(Command::Pointer(previous)) = commands.back_mut()
+        && previous.phase == Phase::Move
+        && previous.pointer == next.pointer
+    {
+        *previous = next;
+        return;
     }
     commands.push_back(command);
 }

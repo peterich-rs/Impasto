@@ -26,7 +26,7 @@ impl Simulation for Friction {
         if !(self.tau_ms.is_finite() && self.tau_ms > 0.0) {
             return self.x0;
         }
-        let t = t_ms as f32;
+        let t = crate::cast::f32_from_f64(t_ms);
         self.x0 + self.v0 * self.tau_ms * (1.0 - (-t / self.tau_ms).exp())
     }
 
@@ -34,7 +34,7 @@ impl Simulation for Friction {
         if !(self.tau_ms.is_finite() && self.tau_ms > 0.0) {
             return 0.0;
         }
-        let t = t_ms as f32;
+        let t = crate::cast::f32_from_f64(t_ms);
         self.v0 * (-t / self.tau_ms).exp()
     }
 
@@ -62,15 +62,15 @@ pub struct Spring {
 
 impl Simulation for Spring {
     fn x(&self, t_ms: f64) -> f32 {
-        spring_sample(self, t_ms as f32).0
+        spring_sample(self, crate::cast::f32_from_f64(t_ms)).0
     }
 
     fn dx(&self, t_ms: f64) -> f32 {
-        spring_sample(self, t_ms as f32).1
+        spring_sample(self, crate::cast::f32_from_f64(t_ms)).1
     }
 
     fn done(&self, t_ms: f64) -> bool {
-        let (x, v) = spring_sample(self, t_ms as f32);
+        let (x, v) = spring_sample(self, crate::cast::f32_from_f64(t_ms));
         (x - self.target).abs() < 0.5 && v.abs() < 0.02
     }
 
@@ -389,7 +389,7 @@ impl ScrollPhysics {
 
     /// The tau the coasting friction uses, whichever decay spelling chose it.
     pub fn tau_ms(self) -> f32 {
-        self.decay.tau_ms() as f32
+        crate::cast::f32_from_f64(self.decay.tau_ms())
     }
 
     /// Overscroll for `over` points past the edge of a `dimension`-sized scroll.

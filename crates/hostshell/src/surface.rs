@@ -27,7 +27,10 @@ struct PendingOpen {
 
 pub enum Ready {
     Opened {
-        #[allow(dead_code)]
+        #[allow(
+            dead_code,
+            reason = "the opened id is part of the Ready value hosts match on"
+        )]
         id: SurfaceId,
         replaced: Option<SurfaceId>,
     },
@@ -144,7 +147,7 @@ impl SurfaceHost {
         self.current.is_some()
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "hosts read the current surface id")]
     pub fn id(&self) -> Option<SurfaceId> {
         self.current.as_ref().map(|open| open.id)
     }
@@ -153,10 +156,7 @@ impl SurfaceHost {
         &mut self,
         target: SurfaceTarget,
         engine: &mut engine::Engine,
-        open: &mut dyn FnMut(
-            &mut engine::Engine,
-            SurfaceTarget,
-        ) -> Result<Box<dyn Surface>, engine::Status>,
+        open: &mut crate::SurfaceOpener,
     ) -> Ready {
         let id = target.id;
         let metrics = target.metrics;
@@ -185,7 +185,10 @@ impl SurfaceHost {
         Changed::Staged
     }
 
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "hosts read the metrics stored with the open surface"
+    )]
     pub fn metrics(&self) -> Option<Metrics> {
         self.current.as_ref().map(|open| open.metrics)
     }

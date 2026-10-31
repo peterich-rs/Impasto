@@ -6,7 +6,7 @@ use super::window::{
     stabilize_window, sticky_translate, thumb_length, thumb_offset, window_range,
     window_range_for_offset,
 };
-use super::{DriverSet, ListItem, ListNodes, ListOp, PullMode};
+use super::{DriverSet, ListItem, ListNodes, ListOp, PullMode, ScrollConfig};
 use crate::{MonoShaper, ScrollAxis, Tree};
 
 fn close(left: f32, right: f32) -> bool {
@@ -119,10 +119,15 @@ fn window_thumb_and_pull_match_the_old_module() {
     long_rows.rebuild(&vec![10.0; 200]);
     let capped = window_range_for_offset(&long_rows, 0.0, 100.0, 2, Some(5000.0));
     assert!(close(FLING_VIEW_FACTOR, 3.0));
-    assert!(capped.end - capped.start <= (10.0 * FLING_VIEW_FACTOR) as usize + 4);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "10 * FLING_VIEW_FACTOR is 30 rows"
+    )]
+    let window = (10.0 * FLING_VIEW_FACTOR) as usize;
+    assert!(capped.end - capped.start <= window + 4);
     assert_eq!(capped.start, 0);
     let upward = window_range_for_offset(&long_rows, 1000.0, 100.0, 2, Some(0.0));
-    assert!(upward.end - upward.start <= (10.0 * FLING_VIEW_FACTOR) as usize + 4);
+    assert!(upward.end - upward.start <= window + 4);
     assert!(upward.start <= long_rows.find_index(1000.0));
 }
 
@@ -273,7 +278,17 @@ fn edge_pull_commits_on_drag_end_and_clamp_keeps_the_offset() -> Result<(), crat
     let mut drivers = DriverSet::new();
     let id = drivers.scroll_create();
     assert!(drivers.scroll_bind(id, Some(scroll), Some(body), &tree));
-    assert!(drivers.scroll_configure(id, 0.0, PullMode::Edge, 64.0, false, 0.0, None));
+    assert!(drivers.scroll_configure(
+        id,
+        ScrollConfig {
+            content_min: 0.0,
+            pull_mode: PullMode::Edge,
+            threshold: 64.0,
+            rubber: false,
+            factor: 0.0,
+        },
+        None,
+    ));
     let Some(step) = drivers.scroll_drag_by(id, &mut tree, 0.0, 80.0) else {
         return Err(crate::Error::UnknownNode);
     };
@@ -308,7 +323,17 @@ fn a_vertical_controller_discards_horizontal_drag() -> Result<(), crate::Error> 
     let mut drivers = DriverSet::new();
     let id = drivers.scroll_create();
     assert!(drivers.scroll_bind(id, Some(scroll), Some(body), &tree));
-    assert!(drivers.scroll_configure(id, 0.0, PullMode::Off, 64.0, false, 0.0, None));
+    assert!(drivers.scroll_configure(
+        id,
+        ScrollConfig {
+            content_min: 0.0,
+            pull_mode: PullMode::Off,
+            threshold: 64.0,
+            rubber: false,
+            factor: 0.0,
+        },
+        None,
+    ));
     let Some(step) = drivers.scroll_drag_by(id, &mut tree, 30.0, 10.0) else {
         return Err(crate::Error::UnknownNode);
     };
@@ -331,7 +356,17 @@ fn a_vertical_controller_discards_horizontal_drag() -> Result<(), crate::Error> 
     let mut drivers = DriverSet::new();
     let both_id = drivers.scroll_create();
     assert!(drivers.scroll_bind(both_id, Some(both), Some(wide), &tree));
-    assert!(drivers.scroll_configure(both_id, 0.0, PullMode::Off, 64.0, false, 0.0, None));
+    assert!(drivers.scroll_configure(
+        both_id,
+        ScrollConfig {
+            content_min: 0.0,
+            pull_mode: PullMode::Off,
+            threshold: 64.0,
+            rubber: false,
+            factor: 0.0,
+        },
+        None,
+    ));
     let Some(sideways) = drivers.scroll_drag_by(both_id, &mut tree, 10.0, 0.0) else {
         return Err(crate::Error::UnknownNode);
     };

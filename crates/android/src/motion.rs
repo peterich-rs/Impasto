@@ -3,7 +3,10 @@
 use uicore::Phase;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production callers are compiled only for Android")
+)]
 pub enum Action {
     Down,
     Move,
@@ -52,7 +55,10 @@ pub fn script_asset_path(extra: &str) -> Option<String> {
 
 /// `PointerDown` is another finger going down. `PointerUp` is that finger lifting.
 /// `Move` and `Cancel` apply to every pointer in the sample.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production callers are compiled only for Android")
+)]
 pub fn phase_for(action: Action) -> Option<Phase> {
     match action {
         Action::Down | Action::PointerDown => Some(Phase::Down),
@@ -64,7 +70,10 @@ pub fn phase_for(action: Action) -> Option<Phase> {
 }
 
 /// Indexes that carry `phase_for` for this action. Move and cancel report every pointer.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production callers are compiled only for Android")
+)]
 pub fn pointer_indexes(action: Action, count: usize, action_index: usize) -> Vec<usize> {
     match action {
         Action::Down | Action::Up if count > 0 => vec![0],

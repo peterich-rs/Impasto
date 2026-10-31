@@ -7,11 +7,18 @@
 //! transforms apply from the inside out. The inverse walks transforms from the
 //! outside in and adds the scroll offsets back.
 
-use super::node::{DragClaim, Hit, Kind};
+use super::node::{DragClaim, Hit, Kind, TransformGeom};
 use super::{NodeId, Tree};
 use crate::{ScrollAccept, ScrollAxis};
 
 const SCALE_EPSILON: f32 = 1.0e-4;
+
+/// Ancestor scroll sum, and transforms from the inside out.
+struct AncestorPaint {
+    scroll_x: f32,
+    scroll_y: f32,
+    transforms: Vec<TransformGeom>,
+}
 
 /// Point carried down the tree. Scroll sums and the ancestor transform matrix
 /// update as the walk enters those nodes, so a node does not revisit its parents.
@@ -201,14 +208,26 @@ impl Tree {
 
     /// Layout-space point for a scene point, undoing ancestor scrolls and transforms.
     pub(super) fn scene_to_layout(&self, id: NodeId, x: f32, y: f32) -> Option<(f32, f32)> {
-        let (scroll_x, scroll_y, mut transforms) = self.ancestor_paint(id)?;
+        let AncestorPaint {
+            scroll_x,
+            scroll_y,
+            mut transforms,
+        } = self.ancestor_paint(id)?;
         let mut x = x;
         let mut y = y;
-        while let Some((tx, ty, rotate, scale_x, scale_y)) = transforms.pop() {
-            if scale_x.abs() < SCALE_EPSILON || scale_y.abs() < SCALE_EPSILON {
+        while let Some(geom) = transforms.pop() {
+            if geom.scale_x.abs() < SCALE_EPSILON || geom.scale_y.abs() < SCALE_EPSILON {
                 return None;
             }
-            (x, y) = inverse_transform(x, y, tx, ty, rotate, scale_x, scale_y)?;
+            (x, y) = inverse_transform(
+                x,
+                y,
+                geom.translate_x,
+                geom.translate_y,
+                geom.rotate_rad,
+                geom.scale_x,
+                geom.scale_y,
+            )?;
         }
         Some((x + scroll_x, y + scroll_y))
     }
@@ -216,30 +235,31 @@ impl Tree {
     /// Scene point for a layout point on `id`, including `id`'s own transform.
     pub(super) fn layout_to_scene(&self, id: NodeId, x: f32, y: f32) -> Option<(f32, f32)> {
         let node = self.get(id)?;
-        let (scroll_x, scroll_y, mut transforms) = self.ancestor_paint(id)?;
+        let AncestorPaint {
+            scroll_x,
+            scroll_y,
+            mut transforms,
+        } = self.ancestor_paint(id)?;
         if node.kind == Kind::Transform {
-            let geom = node.transform();
-            transforms.insert(
-                0,
-                (
-                    geom.translate_x,
-                    geom.translate_y,
-                    geom.rotate_rad,
-                    geom.scale_x,
-                    geom.scale_y,
-                ),
-            );
+            transforms.insert(0, node.transform());
         }
         let mut x = x - scroll_x;
         let mut y = y - scroll_y;
-        for (tx, ty, rotate, scale_x, scale_y) in transforms {
-            (x, y) = forward_transform(x, y, tx, ty, rotate, scale_x, scale_y);
+        for geom in transforms {
+            (x, y) = forward_transform(
+                x,
+                y,
+                geom.translate_x,
+                geom.translate_y,
+                geom.rotate_rad,
+                geom.scale_x,
+                geom.scale_y,
+            );
         }
         Some((x, y))
     }
 
-    /// Ancestor scroll sum, and transforms from the inside out.
-    fn ancestor_paint(&self, id: NodeId) -> Option<(f32, f32, Vec<(f32, f32, f32, f32, f32)>)> {
+    fn ancestor_paint(&self, id: NodeId) -> Option<AncestorPaint> {
         let mut scroll_x = 0.0;
         let mut scroll_y = 0.0;
         let mut transforms = Vec::new();
@@ -252,18 +272,15 @@ impl Tree {
                 scroll_y += scroll.1;
             }
             if node.kind == Kind::Transform {
-                let geom = node.transform();
-                transforms.push((
-                    geom.translate_x,
-                    geom.translate_y,
-                    geom.rotate_rad,
-                    geom.scale_x,
-                    geom.scale_y,
-                ));
+                transforms.push(node.transform());
             }
             parent = node.parent;
         }
-        Some((scroll_x, scroll_y, transforms))
+        Some(AncestorPaint {
+            scroll_x,
+            scroll_y,
+            transforms,
+        })
     }
 
     fn transformed_box_contains(&self, id: NodeId, scene_x: f32, scene_y: f32) -> bool {

@@ -45,19 +45,32 @@ pub use shaper::ImpellerShaper;
 pub use shell::{DropWait, EngineSlot, Link, Poster, start};
 pub use timing::FrameTiming;
 
+/// QuickJS console callback. Level 3 is an error.
+pub type ConsoleLog = Box<dyn Fn(u8, &str)>;
+
+/// Host sink for one [`session::IoJob`].
+pub type IoSink = Box<dyn Fn(session::IoJob) + Send>;
+
+/// Builds the session on the render thread. The closure must not capture the engine.
+pub type SessionFactory = Box<
+    dyn FnOnce(
+            &EngineSlot,
+            IoSink,
+            session::HostConfig,
+        ) -> Result<Box<dyn session::Session>, SessionError>
+        + Send,
+>;
+
+/// Opens one platform surface. `Send` so the shell can hand it to the render thread.
+pub type SurfaceOpener = dyn FnMut(&mut engine::Engine, SurfaceTarget) -> Result<Box<dyn Surface>, engine::Status>
+    + Send;
+
+pub type OpenSurface = Box<SurfaceOpener>;
+
 pub enum Launch {
     /// Invoked on the render thread after the engine exists. The closure must
     /// not capture the engine; [`EngineSlot::shaper`] builds the shaper there.
-    Session(
-        Box<
-            dyn FnOnce(
-                    &EngineSlot,
-                    Box<dyn Fn(session::IoJob) + Send>,
-                    session::HostConfig,
-                ) -> Result<Box<dyn session::Session>, SessionError>
-                + Send,
-        >,
-    ),
+    Session(SessionFactory),
 }
 
 pub enum Presented {
@@ -105,10 +118,7 @@ pub struct Boot {
     pub launch_url: session::Shared<Option<String>>,
     /// Absent HTTP fails with `network is not linked`. Hosts inject [`http_client`].
     pub http: Option<Arc<dyn session::HttpClient>>,
-    pub open_surface: Box<
-        dyn FnMut(&mut engine::Engine, SurfaceTarget) -> Result<Box<dyn Surface>, engine::Status>
-            + Send,
-    >,
+    pub open_surface: OpenSurface,
     /// Log one line of layer-tree shape after a frame records new layers.
     pub dump_list: bool,
 }
