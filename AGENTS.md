@@ -180,12 +180,14 @@ third_party/solid           solidjs/solid，分支 next。本地检出，不进 
 third_party/kiteui          lightningkite/kiteui，分支 version-8.3。本地检出，不进 git
 third_party/impeller-sdk/   本地 SDK，不进 git
 third_party/quickjs/        quickjs-ng 源码，不进 git
-.agents/skills/             跟随仓库的 agent skill。Rust 编码以 rust-best-practice 为准
+.agents/skills/             跟随仓库的 agent skill。Rust 编码以 rust-best-practice 为准。Solid TSX 界面设计用 unslop
 docs/architecture.md        当前仓库划分和各层结构
 docs/platform-hosts.md      macOS、Android、iOS 的平台差异。iOS 宿主还没写
 docs/refactor-plan.md       生产级迭代规划。未落地
 docs/protocol-v2.md         Picture 字节。未排期，只在 Rust 里做
 ```
+
+设计 `packages/solid-ui` 的控件和 `apps/gallery-solid` 时用 `.agents/skills/unslop`。它的 Playwright 截图和 ffmpeg 故事视频脚本面向网页，不用于 Impasto 的原生绘制路径。
 
 原生构建是 Cargo，输出在 `target/`。根上没有 CMake。`crates/quickjs` 在 workspace 里。没有 `third_party/quickjs` 时不编译解释器。`just quickjs` 按 pin 下载源码。
 
