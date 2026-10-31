@@ -6,7 +6,11 @@ logo := root / "crates/macos/assets"
 default:
     @just --list
 
-check: test kotlin solid
+# Same gate as the Linux clippy job in `.github/workflows/check.yml`.
+clippy:
+    cargo clippy --manifest-path "{{root}}/Cargo.toml" --workspace --exclude macos --all-targets -- -D warnings
+
+check: clippy test kotlin solid
     @echo "check ok"
 
 bench:

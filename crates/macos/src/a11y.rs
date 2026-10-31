@@ -213,6 +213,7 @@ define_class!(
     #[ivars = A11yIvars]
     pub(crate) struct A11yNode;
 
+    // SAFETY: A11yNode is an NSAccessibilityElement and is created only on the main thread.
     unsafe impl NSObjectProtocol for A11yNode {}
 
     impl A11yNode {

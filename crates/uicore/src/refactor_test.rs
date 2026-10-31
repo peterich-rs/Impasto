@@ -213,7 +213,7 @@ fn scroll_into_view_arms_a_spring_toward_the_child() -> Result<(), crate::Error>
     let child = tree.sized(20.0, 200.0)?;
     tree.add_child(scroll, child)?;
     tree.layout()?;
-    assert_eq!(tree.scroll_into_view(child, ScrollEdge::End)?, true);
+    assert!(tree.scroll_into_view(child, ScrollEdge::End)?);
     tree.tick_motions(500.0);
     let (_, y) = tree.scroll_offset(scroll)?;
     assert!(y > 1.0, "scrolled {y}");

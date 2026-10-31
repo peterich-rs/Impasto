@@ -16,7 +16,7 @@ pub struct RtExec {
 
 impl MethodExec for RtExec {
     fn worker(&self, settle: Settle, work: Work) {
-        let _ = self.rt.spawn_blocking(move || settle.send(work()));
+        drop(self.rt.spawn_blocking(move || settle.send(work())));
     }
 
     fn main_thread(&self, settle: Settle, work: Work) {

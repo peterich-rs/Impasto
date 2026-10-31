@@ -161,7 +161,7 @@ impl Tree {
             .filter_map(|(index, slot)| {
                 slot.node.as_ref()?;
                 Some(NodeId {
-                    index: index as u32,
+                    index: crate::cast::u32_from_usize(index),
                     generation: slot.generation,
                 })
             })
@@ -229,7 +229,8 @@ impl Tree {
     /// Marks the tree dirty and keeps the previous geometry until the next `layout`.
     /// Free space exists when the flex parent has a definite main-axis size.
     pub fn set_grow(&mut self, id: NodeId, grow: f32) -> Result<(), Error> {
-        if !(grow >= 0.0) {
+        // NaN is not zero or positive. `+∞` stays legal.
+        if grow < 0.0 || grow.is_nan() {
             return Err(Error::NegativeGrow);
         }
         let mut style = self.node(id)?.style.clone();
@@ -764,7 +765,12 @@ impl Tree {
                 self.apply_scroll(id, prop, value)
             }
             crate::AnimProp::Opacity => {
-                let alpha = value.round().clamp(0.0, 255.0) as u8;
+                let rounded = value.round().clamp(0.0, 255.0);
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "rounded and clamped into the closed range 0..=255"
+                )]
+                let alpha = rounded as u8;
                 self.set_alpha(id, alpha).is_err()
             }
             crate::AnimProp::TranslateX
@@ -865,28 +871,20 @@ impl Tree {
             None => Size::MAX_CONTENT,
         };
         let started = std::time::Instant::now();
-        let slots = &self.slots;
-        let shaper = self.shaper.as_ref();
-        let text_scale = self.text_scale;
-        let text_reused = &self.text_reused;
-        let text_shaped = &self.text_shaped;
         let mut measured = Vec::new();
+        let env = MeasureEnv {
+            slots: &self.slots,
+            shaper: self.shaper.as_ref(),
+            text_scale: self.text_scale,
+            text_reused: &self.text_reused,
+            text_shaped: &self.text_shaped,
+        };
         let taffy_started = std::time::Instant::now();
         self.taffy.compute_layout_with_measure(
             root_taffy,
             available,
             |known, available, _id, context, _style| {
-                measure_leaf(
-                    slots,
-                    shaper,
-                    text_scale,
-                    known,
-                    available,
-                    context,
-                    &mut measured,
-                    text_reused,
-                    text_shaped,
-                )
+                measure_leaf(&env, known, available, context, &mut measured)
             },
         )?;
         self.taffy_ms = taffy_started.elapsed().as_secs_f64() * 1000.0;
@@ -962,28 +960,20 @@ impl Tree {
             _ => AvailableSpace::MaxContent,
         };
         let started = std::time::Instant::now();
-        let slots = &self.slots;
-        let shaper = self.shaper.as_ref();
-        let text_scale = self.text_scale;
-        let text_reused = &self.text_reused;
-        let text_shaped = &self.text_shaped;
         let mut measured = Vec::new();
+        let env = MeasureEnv {
+            slots: &self.slots,
+            shaper: self.shaper.as_ref(),
+            text_scale: self.text_scale,
+            text_reused: &self.text_reused,
+            text_shaped: &self.text_shaped,
+        };
         let mut run = |width: AvailableSpace, height: AvailableSpace| -> Result<Size<f32>, Error> {
             self.taffy.compute_layout_with_measure(
                 taffy_id,
                 Size { width, height },
                 |known, available, _id, context, _style| {
-                    measure_leaf(
-                        slots,
-                        shaper,
-                        text_scale,
-                        known,
-                        available,
-                        context,
-                        &mut measured,
-                        text_reused,
-                        text_shaped,
-                    )
+                    measure_leaf(&env, known, available, context, &mut measured)
                 },
             )?;
             Ok(self.taffy.layout(taffy_id)?.size)
@@ -1496,21 +1486,25 @@ fn line_limit(space: AvailableSpace) -> f32 {
     }
 }
 
-fn measure_leaf(
-    slots: &[Slot],
-    shaper: &dyn Shaper,
+struct MeasureEnv<'a> {
+    slots: &'a [Slot],
+    shaper: &'a dyn Shaper,
     text_scale: f32,
+    text_reused: &'a Cell<u32>,
+    text_shaped: &'a Cell<u32>,
+}
+
+fn measure_leaf(
+    env: &MeasureEnv<'_>,
     known: Size<Option<f32>>,
     available: Size<AvailableSpace>,
     context: Option<&mut usize>,
     measured: &mut Vec<NodeId>,
-    text_reused: &Cell<u32>,
-    text_shaped: &Cell<u32>,
 ) -> Size<f32> {
     let Some(index) = context.copied() else {
         return Size::ZERO;
     };
-    let Some(slot) = slots.get(index) else {
+    let Some(slot) = env.slots.get(index) else {
         return Size::ZERO;
     };
     let Some(node) = slot.node.as_ref() else {
@@ -1521,10 +1515,11 @@ fn measure_leaf(
         // the single-line maximum: a grid min-content track and a scroll's
         // content floor use this to keep long words visible.
         if matches!(available.width, AvailableSpace::MinContent) {
-            let font_size = text.font_size * text_scale;
+            let font_size = text.font_size * env.text_scale;
             TextSize {
-                width: shaper.min_content_width(&text.utf8, font_size),
-                height: shaper
+                width: env.shaper.min_content_width(&text.utf8, font_size),
+                height: env
+                    .shaper
                     .measure_paint(&crate::paint_key(
                         Arc::clone(&text.utf8),
                         Arc::clone(&text.style),
@@ -1537,9 +1532,9 @@ fn measure_leaf(
             }
         } else {
             let max_width = line_limit(available.width);
-            let font_size = text.font_size * text_scale;
+            let font_size = text.font_size * env.text_scale;
             if let Some(size) = reusable_text_size(text, font_size, max_width) {
-                text_reused.set(text_reused.get().saturating_add(1));
+                env.text_reused.set(env.text_reused.get().saturating_add(1));
                 let paints_at = text
                     .cached
                     .as_ref()
@@ -1554,7 +1549,7 @@ fn measure_leaf(
                 text.max_width.set(max_width);
                 if previous != max_width {
                     measured.push(NodeId {
-                        index: index as u32,
+                        index: crate::cast::u32_from_usize(index),
                         generation: slot.generation,
                     });
                 }
@@ -1566,8 +1561,8 @@ fn measure_leaf(
                     max_width,
                     text.color,
                 );
-                text_shaped.set(text_shaped.get().saturating_add(1));
-                shaper.measure_paint(&key)
+                env.text_shaped.set(env.text_shaped.get().saturating_add(1));
+                env.shaper.measure_paint(&key)
             }
         }
     } else if let Some(image) = node.image() {

@@ -214,7 +214,7 @@ impl ImageCache {
         }
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "hosts ask whether a decode is already cached")]
     pub fn contains(&self, source: &str, bucket: u8) -> bool {
         let key = CacheKey {
             source: Arc::from(source),

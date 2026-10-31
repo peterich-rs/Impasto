@@ -103,6 +103,7 @@ pub(super) struct DragState {
 }
 
 /// Press, drag, and right button for one [`crate::PointerId`].
+#[derive(Default)]
 pub(super) struct PointerRoute {
     pub(super) pressed: Option<NodeId>,
     pub(super) secondary: Option<SecondaryPress>,
@@ -122,18 +123,6 @@ impl PointerRoute {
                 .as_ref()
                 .is_none_or(|contest| contest.is_empty())
             && !self.consumed_double
-    }
-}
-
-impl Default for PointerRoute {
-    fn default() -> Self {
-        Self {
-            pressed: None,
-            secondary: None,
-            drag: None,
-            contest: None,
-            consumed_double: false,
-        }
     }
 }
 
@@ -564,7 +553,7 @@ impl Tree {
     }
 
     fn link_at(&self, id: NodeId, x: f32, y: f32) -> Option<u32> {
-        let links = self.get(id)?.text()?.links.clone();
+        let links = std::sync::Arc::clone(&self.get(id)?.text()?.links);
         if links.is_empty() {
             return None;
         }
@@ -871,7 +860,16 @@ impl Tree {
         let origin_mid_y = origin.y + origin.h * 0.5;
         let band_of = |rect: crate::Rect| -> i32 {
             let mid = rect.y + rect.h * 0.5;
-            ((mid - origin_mid_y) / band_h).round() as i32
+            {
+                let band = ((mid - origin_mid_y) / band_h).round();
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "a focus band is a small signed row distance"
+                )]
+                {
+                    band as i32
+                }
+            }
         };
         let others: Vec<(NodeId, crate::Rect)> = nodes
             .iter()
@@ -897,8 +895,7 @@ impl Tree {
                         .map(|(_, id)| id)
                 } else {
                     band.into_iter()
-                        .filter(|(x, _)| *x + 0.5 < origin.x)
-                        .next_back()
+                        .rfind(|(x, _)| *x + 0.5 < origin.x)
                         .map(|(_, id)| id)
                 }
             }
@@ -1012,8 +1009,8 @@ fn drag_velocity(drag: &DragState) -> (f32, f32) {
         return (0.0, 0.0);
     }
     (
-        (f64::from(latest.x - previous.x) / dt) as f32,
-        (f64::from(latest.y - previous.y) / dt) as f32,
+        crate::cast::f32_from_f64(f64::from(latest.x - previous.x) / dt),
+        crate::cast::f32_from_f64(f64::from(latest.y - previous.y) / dt),
     )
 }
 

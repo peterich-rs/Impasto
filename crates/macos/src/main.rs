@@ -1,9 +1,17 @@
 //! macOS host. `--js <script>` loads that script in the QuickJS session.
 //! `--url` is the Linking launch URL, written before the script evaluates.
 
+#![allow(
+    unsafe_code,
+    reason = "AppKit and Metal are called through objc2 from this crate"
+)]
+
 mod a11y;
 mod app;
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "image bytes are read when the host resolves an asset"
+)]
 mod assets;
 mod pixels;
 mod pointer;

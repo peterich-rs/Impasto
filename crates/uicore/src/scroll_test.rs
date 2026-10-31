@@ -47,8 +47,10 @@ fn clamp_mode_stores_no_overscroll() -> Result<(), crate::Error> {
     tree.add_child(scroll, body)?;
     tree.add_child(root, scroll)?;
     tree.layout()?;
-    let mut physics = ScrollPhysics::default();
-    physics.overscroll = OverscrollMode::Clamp;
+    let mut physics = ScrollPhysics {
+        overscroll: OverscrollMode::Clamp,
+        ..ScrollPhysics::default()
+    };
     tree.set_scroll_physics(scroll, physics)?;
     tree.set_scroll_offset(scroll, 0.0, -40.0)?;
     assert_eq!(tree.scroll_offset(scroll)?.1, 0.0);
@@ -72,11 +74,13 @@ fn snap_y_settles_on_the_interval() -> Result<(), crate::Error> {
     tree.add_child(scroll, body)?;
     tree.add_child(root, scroll)?;
     tree.layout()?;
-    let mut physics = ScrollPhysics::default();
-    physics.snap_y = Some(SnapGrid {
-        interval: 50.0,
-        align: SnapAlign::Start,
-    });
+    let physics = ScrollPhysics {
+        snap_y: Some(SnapGrid {
+            interval: 50.0,
+            align: SnapAlign::Start,
+        }),
+        ..ScrollPhysics::default()
+    };
     tree.set_scroll_physics(scroll, physics)?;
     tree.set_scroll_offset(scroll, 0.0, 40.0)?;
     tree.arm_fling(scroll, 0.0, 0.0)?;
@@ -292,8 +296,10 @@ fn declared_axis_edge_follows_accept_and_both_still_locks() -> Result<(), crate:
     );
 
     let (mut tree, scroll) = viewport_scroll(ScrollAxis::Vertical, 80.0, 400.0)?;
-    let mut physics = ScrollPhysics::default();
-    physics.accept = ScrollAccept::Always;
+    let physics = ScrollPhysics {
+        accept: ScrollAccept::Always,
+        ..ScrollPhysics::default()
+    };
     tree.set_scroll_physics(scroll, physics)?;
     let _ = tree.pointer(event(Phase::Down, 20.0, 20.0, 0.0));
     let always = tree.pointer(event(Phase::Move, 20.0, 44.0, 16.0));
@@ -353,8 +359,10 @@ fn never_yields_and_a_cross_axis_parent_can_win_before_lock() -> Result<(), crat
         "a pure horizontal drag falls through to the pager: {sideways:?}"
     );
 
-    let mut physics = ScrollPhysics::default();
-    physics.accept = ScrollAccept::Never;
+    let physics = ScrollPhysics {
+        accept: ScrollAccept::Never,
+        ..ScrollPhysics::default()
+    };
     tree.set_scroll_physics(inner, physics)?;
     tree.set_scroll_offset(outer, 20.0, 0.0)?;
     let _ = tree.pointer(event(Phase::Up, 2.0, 16.0, 80.0));
@@ -429,7 +437,7 @@ fn scroll_into_view_on_a_vertical_scroll_leaves_x() -> Result<(), crate::Error> 
     let child = tree.sized(240.0, 200.0)?;
     tree.add_child(scroll, child)?;
     tree.layout()?;
-    assert_eq!(tree.scroll_into_view(child, crate::ScrollEdge::End)?, true);
+    assert!(tree.scroll_into_view(child, crate::ScrollEdge::End)?);
     tree.tick_motions(800.0);
     let (x, y) = tree.scroll_offset(scroll)?;
     assert_eq!(x, 0.0);
@@ -471,11 +479,14 @@ fn rate_decay_matches_its_tau_equivalent() {
     let friction = Friction {
         x0: 0.0,
         v0: -1.0,
-        tau_ms: tau as f32,
+        tau_ms: crate::cast::f32_from_f64(tau),
     };
     let terminal = friction.terminal();
     // v0 * tau with the converted tau: the coast travels the same distance.
-    assert!((terminal + tau as f32).abs() < 0.5, "terminal {terminal}");
+    assert!(
+        (terminal + crate::cast::f32_from_f64(tau)).abs() < 0.5,
+        "terminal {terminal}"
+    );
 }
 
 #[test]

@@ -280,7 +280,7 @@ impl Shaper for MonoShaper {
             let slot = &mut table.slots[index];
             slot.refs = slot.refs.saturating_add(1);
             return protocol::ParagraphId {
-                index: index as u32,
+                index: crate::cast::u32_from_usize(index),
                 generation: slot.generation,
             };
         }
@@ -299,7 +299,7 @@ impl Shaper for MonoShaper {
         slot.refs = 1;
         slot.key = key.clone();
         protocol::ParagraphId {
-            index: index as u32,
+            index: crate::cast::u32_from_usize(index),
             generation: slot.generation,
         }
     }
@@ -426,10 +426,10 @@ fn clusters_of(text: &str, font_size: f32) -> Vec<Cluster> {
     let mut unit = 0u32;
     while let Some(ch) = chars.next() {
         if ch == '\r' || ch == '\n' {
-            let mut end = unit + ch.len_utf16() as u32;
+            let mut end = unit + crate::cast::u32_from_usize(ch.len_utf16());
             if ch == '\r' && chars.peek() == Some(&'\n') {
                 let next = chars.next().unwrap_or('\n');
-                end += next.len_utf16() as u32;
+                end += crate::cast::u32_from_usize(next.len_utf16());
             }
             clusters.push(Cluster {
                 start: unit,
@@ -441,7 +441,7 @@ fn clusters_of(text: &str, font_size: f32) -> Vec<Cluster> {
             unit = end;
             continue;
         }
-        let mut end = unit + ch.len_utf16() as u32;
+        let mut end = unit + crate::cast::u32_from_usize(ch.len_utf16());
         let mut advance = step;
         let space = ch.is_whitespace();
         while let Some(next) = chars.peek().copied() {
@@ -449,7 +449,7 @@ fn clusters_of(text: &str, font_size: f32) -> Vec<Cluster> {
                 break;
             }
             chars.next();
-            end += next.len_utf16() as u32;
+            end += crate::cast::u32_from_usize(next.len_utf16());
             advance += step;
         }
         clusters.push(Cluster {
@@ -685,11 +685,15 @@ fn caret_for_unit(laid: &MonoLayout, unit: u32, affinity: Affinity, font_size: f
         let prev = &laid.lines[index - 1];
         return caret_box(unit, prev.x + prev.w, prev, Affinity::Upstream);
     }
-    let line = laid
+    // `lines` is non-empty: the empty layout returned above.
+    let Some(line) = laid
         .lines
         .iter()
         .find(|line| unit < line.end_with_break)
-        .unwrap_or(laid.lines.last().unwrap());
+        .or(laid.lines.last())
+    else {
+        return empty_caret(font_size, affinity);
+    };
     let mut cursor = line.x;
     for cluster in line_clusters(&laid.clusters, line) {
         if unit <= cluster.start {

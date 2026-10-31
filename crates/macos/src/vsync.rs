@@ -1,5 +1,9 @@
-#![allow(deprecated)]
 //! CVDisplayLink posts one `Frame` command onto the render thread.
+
+#![allow(
+    deprecated,
+    reason = "CVDisplayLink is the vsync source this host already registers"
+)]
 
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
@@ -22,23 +26,26 @@ pub struct DisplayLink {
     callback: *mut Callback,
 }
 
-// SAFETY: `CVDisplayLinkStart` and `Stop` are safe to call from the render
-// thread. `Stop` returns only after an in-flight callback has finished, so
-// dropping the callback pointer does not race the callback.
-#[allow(unsafe_code)]
+#[allow(
+    unsafe_code,
+    reason = "Send follows the CVDisplayLink contract on the next line"
+)]
+// SAFETY: Start and Stop run on the render thread, and Stop waits until the callback returns.
 unsafe impl Send for DisplayLink {}
-// SAFETY: start and stop do not run at the same time as each other from this
-// process; the shell calls them on the render thread only.
-#[allow(unsafe_code)]
+#[allow(
+    unsafe_code,
+    reason = "Sync follows the CVDisplayLink contract on the next line"
+)]
+// SAFETY: The shell starts and stops the link on the render thread; the callback only locks the mutex.
 unsafe impl Sync for DisplayLink {}
 
 impl DisplayLink {
     pub fn new() -> anyhow::Result<Self> {
         let mut raw = ptr::null_mut();
-        // SAFETY: `raw` is a stack slot CoreVideo writes the new link into.
-        // A successful create returns an owned +1 reference.
-        let status =
-            unsafe { CVDisplayLink::create_with_active_cg_displays(NonNull::from(&mut raw)) };
+        let status = {
+            // SAFETY: `raw` is a stack slot CoreVideo writes; success returns one owned reference.
+            unsafe { CVDisplayLink::create_with_active_cg_displays(NonNull::from(&mut raw)) }
+        };
         if status != kCVReturnSuccess {
             anyhow::bail!("CVDisplayLink was not created: {status}");
         }
@@ -49,8 +56,7 @@ impl DisplayLink {
             post: Mutex::new(None),
             token: Mutex::new(None),
         }));
-        // SAFETY: `raw` is the link just created. The callback pointer stays
-        // alive until `Drop` stops the link and frees it.
+        // SAFETY: `raw` is the link just created, and `callback` lives until Drop stops the link.
         let set = unsafe {
             CVDisplayLink::set_output_callback(
                 raw.as_ref(),
@@ -59,10 +65,12 @@ impl DisplayLink {
             )
         };
         if set != kCVReturnSuccess {
+            // SAFETY: the callback was not installed, so CoreVideo does not hold this box.
             drop(unsafe { Box::from_raw(callback) });
             anyhow::bail!("CVDisplayLink callback was not set: {set}");
         }
         Ok(Self {
+            // SAFETY: `raw` is the +1 reference from a successful create and is not aliased.
             link: unsafe { CFRetained::from_raw(raw) },
             callback,
         })
@@ -71,6 +79,7 @@ impl DisplayLink {
 
 impl Vsync for DisplayLink {
     fn bind(&self, post_frame: Arc<dyn Fn(FrameToken, FrameTime) + Send + Sync>) {
+        // SAFETY: `callback` was allocated in `new` and is freed in `Drop` only after `stop`.
         let callback = unsafe { &*self.callback };
         *callback
             .post
@@ -79,6 +88,7 @@ impl Vsync for DisplayLink {
     }
 
     fn request_frame(&self, token: FrameToken) {
+        // SAFETY: `callback` was allocated in `new` and is freed in `Drop` only after `stop`.
         let callback = unsafe { &*self.callback };
         *callback
             .token
@@ -91,6 +101,7 @@ impl Vsync for DisplayLink {
     }
 
     fn cancel(&self) {
+        // SAFETY: `callback` was allocated in `new` and is freed in `Drop` only after `stop`.
         let callback = unsafe { &*self.callback };
         *callback
             .token
@@ -107,10 +118,12 @@ impl Drop for DisplayLink {
         if self.link.is_running() {
             let _ = self.link.stop();
         }
+        // SAFETY: `stop` has returned, so this is the only remaining owner of the callback box.
         drop(unsafe { Box::from_raw(self.callback) });
     }
 }
 
+// SAFETY: CoreVideo calls this with the pointer passed to `set_output_callback`.
 unsafe extern "C-unwind" fn on_frame(
     _link: NonNull<CVDisplayLink>,
     _now: NonNull<CVTimeStamp>,
@@ -119,6 +132,7 @@ unsafe extern "C-unwind" fn on_frame(
     _flags_out: NonNull<u64>,
     context: *mut c_void,
 ) -> i32 {
+    // SAFETY: `context` is the Callback box installed as the display-link output callback.
     let callback = unsafe { &*context.cast::<Callback>() };
     let token = callback
         .token
@@ -129,7 +143,9 @@ unsafe extern "C-unwind" fn on_frame(
         return kCVReturnSuccess;
     };
     let frequency = CVGetHostClockFrequency();
+    // SAFETY: CoreVideo passes live timestamps for this callback invocation.
     let now = unsafe { _now.as_ref() };
+    // SAFETY: `output` is the frame timestamp CoreVideo passes beside `_now`.
     let shown = unsafe { output.as_ref() };
     let time = FrameTime {
         vsync_ms: host_ms(now, frequency),

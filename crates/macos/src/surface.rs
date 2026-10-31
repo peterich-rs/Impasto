@@ -35,8 +35,7 @@ impl MetalSurface {
     }
 
     fn present_drawable(&mut self, engine: &mut Engine) -> Result<Presented, engine::Status> {
-        // SAFETY: the main thread retains this layer until the shell has shut
-        // down. `nextDrawable` is the render thread's only use of it.
+        // SAFETY: the main thread retains this layer until shutdown; this is the render thread's only use.
         let layer = unsafe { &*self.layer.0.cast::<CAMetalLayer>() };
         let Some(drawable) = layer.nextDrawable() else {
             return Err(engine::Status::PresentFailed);
@@ -93,8 +92,7 @@ fn read_drawable_png(
     // GPU has written a pixel, or until the wait expires for an empty frame.
     let start = std::time::Instant::now();
     loop {
-        // SAFETY: `pixels` holds `len` bytes and `row` is the stride. The layer is
-        // not framebuffer-only, so the texture can be read. The buffer stays alive.
+        // SAFETY: `pixels` has `len` bytes, `row` is the stride, and the texture is not framebuffer-only.
         unsafe { texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(bytes, row, region, 0) };
         let painted = pixels
             .chunks(4)

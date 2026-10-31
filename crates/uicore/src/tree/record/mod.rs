@@ -27,6 +27,16 @@ pub(super) struct PaintClip {
     h: f32,
 }
 
+/// Parent origin, scroll offset, and clip for one `record_node` visit.
+#[derive(Clone, Copy)]
+struct RecordAt {
+    parent: (f32, f32),
+    offset: (f32, f32),
+    space: (f32, f32),
+    clip: Option<PaintClip>,
+    descend: bool,
+}
+
 /// Coordinate frame of the run currently being captured.
 #[derive(Clone, Copy)]
 pub(super) struct RunScope {
@@ -160,11 +170,13 @@ impl Tree {
         Ok(self.record_node(
             self.root.ok_or(Error::NoRoot)?,
             &mut commands,
-            self.origin,
-            (0.0, 0.0),
-            (0.0, 0.0),
-            None,
-            true,
+            RecordAt {
+                parent: self.origin,
+                offset: (0.0, 0.0),
+                space: (0.0, 0.0),
+                clip: None,
+                descend: true,
+            },
         ))
     }
 
@@ -286,31 +298,22 @@ impl Tree {
         Ok(())
     }
 
-    pub(super) fn record_node(
-        &self,
-        id: NodeId,
-        commands: &mut Vec<Command>,
-        parent: (f32, f32),
-        offset: (f32, f32),
-        space: (f32, f32),
-        clip: Option<PaintClip>,
-        descend: bool,
-    ) -> usize {
+    fn record_node(&self, id: NodeId, commands: &mut Vec<Command>, at: RecordAt) -> usize {
         let marks = self.editor_mark_rects(id);
         let Some(node) = self.get(id) else {
             return 0;
         };
-        let abs_x = parent.0 + node.x;
-        let abs_y = parent.1 + node.y;
-        let x = abs_x - offset.0 - space.0;
-        let y = abs_y - offset.1 - space.1;
-        if node.kind != Kind::Transform && outside(clip, x, y, node.w, node.h) {
+        let abs_x = at.parent.0 + node.x;
+        let abs_y = at.parent.1 + node.y;
+        let x = abs_x - at.offset.0 - at.space.0;
+        let y = abs_y - at.offset.1 - at.space.1;
+        if node.kind != Kind::Transform && outside(at.clip, x, y, node.w, node.h) {
             return 1;
         }
         emit_rect(commands, node, x, y);
         emit_text(self.text_scale, commands, node, x, y, &marks);
         emit_image(commands, node, x, y);
-        if !descend {
+        if !at.descend {
             return 1;
         }
         // A settled opacity composites nothing: children draw straight into the
@@ -320,14 +323,14 @@ impl Tree {
         }
         let scroll = node.scroll_paint();
         let child_offset = if node.kind == Kind::Scroll {
-            (offset.0 + scroll.0, offset.1 + scroll.1)
+            (at.offset.0 + scroll.0, at.offset.1 + scroll.1)
         } else {
-            offset
+            at.offset
         };
         let child_clip = match node.kind {
             Kind::Transform => None,
-            Kind::Scroll | Kind::Clip => intersect(clip, x, y, node.w, node.h),
-            _ => clip,
+            Kind::Scroll | Kind::Clip => intersect(at.clip, x, y, node.w, node.h),
+            _ => at.clip,
         };
         let mut child = node.first_child;
         let frame = RecordFrame::capture(node, x, y);
@@ -338,11 +341,13 @@ impl Tree {
             visits += self.record_node(
                 current,
                 commands,
-                (abs_x, abs_y),
-                child_offset,
-                space,
-                child_clip,
-                true,
+                RecordAt {
+                    parent: (abs_x, abs_y),
+                    offset: child_offset,
+                    space: at.space,
+                    clip: child_clip,
+                    descend: true,
+                },
             );
             child = next;
         }
@@ -370,7 +375,7 @@ impl Tree {
             return;
         }
         if kind == Kind::Clip && !self.renders_layer_node(id) {
-            self.emit_settled_clip(id, out, parent_abs, ancestor_scroll, clip, abs, child);
+            self.emit_settled_clip(id, out, parent_abs, ancestor_scroll, clip, child);
             return;
         }
         if self.renders_layer_node(id) {
@@ -392,7 +397,6 @@ impl Tree {
         parent_abs: (f32, f32),
         ancestor_scroll: (f32, f32),
         clip: Option<PaintClip>,
-        abs: (f32, f32),
         mut child: Option<NodeId>,
     ) {
         let Some(node) = self.get(id) else {
@@ -400,6 +404,7 @@ impl Tree {
         };
         let (w, h) = (node.w, node.h);
         let radius = node.corner_radius();
+        let abs = (parent_abs.0 + node.x, parent_abs.1 + node.y);
         self.capture(id, parent_abs, out, clip);
         let paint = (abs.0 - ancestor_scroll.0, abs.1 - ancestor_scroll.1);
         let local = self.local_xy(abs);
@@ -647,7 +652,17 @@ impl Tree {
         let space = self.run.scope.map(|scope| scope.base).unwrap_or((0.0, 0.0));
         let mut buf = std::mem::take(&mut self.run.commands);
         let before = buf.len();
-        let _ = self.record_node(id, &mut buf, parent_abs, (0.0, 0.0), space, None, false);
+        let _ = self.record_node(
+            id,
+            &mut buf,
+            RecordAt {
+                parent: parent_abs,
+                offset: (0.0, 0.0),
+                space,
+                clip: None,
+                descend: false,
+            },
+        );
         if self.run.first.is_none() && buf.len() > before {
             self.run.first = Some(id);
         }
@@ -758,7 +773,17 @@ impl Tree {
         let mut child = self.get(id).and_then(|node| node.first_child);
         while let Some(current) = child {
             let next = self.get(current).and_then(|node| node.next);
-            let _ = self.record_node(current, &mut commands, abs, (0.0, 0.0), abs, None, true);
+            let _ = self.record_node(
+                current,
+                &mut commands,
+                RecordAt {
+                    parent: abs,
+                    offset: (0.0, 0.0),
+                    space: abs,
+                    clip: None,
+                    descend: true,
+                },
+            );
             child = next;
         }
         #[cfg(debug_assertions)]
@@ -767,7 +792,17 @@ impl Tree {
             let mut child = self.get(id).and_then(|node| node.first_child);
             while let Some(current) = child {
                 let next = self.get(current).and_then(|node| node.next);
-                let _ = self.record_node(current, &mut again, abs, (0.0, 0.0), abs, None, true);
+                let _ = self.record_node(
+                    current,
+                    &mut again,
+                    RecordAt {
+                        parent: abs,
+                        offset: (0.0, 0.0),
+                        space: abs,
+                        clip: None,
+                        descend: true,
+                    },
+                );
                 child = next;
             }
             debug_assert_eq!(commands, again);
@@ -801,7 +836,7 @@ impl Tree {
     }
 
     fn note_layer(&mut self, kind: crate::layer::LayerKind) -> crate::layer::LayerId {
-        let id = crate::layer::LayerId(self.layers.layers.len() as u32);
+        let id = crate::layer::LayerId(crate::cast::u32_from_usize(self.layers.layers.len()));
         let parent = self.layer_stack.last().copied();
         self.layers.layers.push(crate::layer::Layer {
             kind,
@@ -843,7 +878,10 @@ impl Tree {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each argument is one effect the layer stack may push for this node"
+    )]
     fn push_effect_layers(
         &mut self,
         kind: Kind,
@@ -1120,16 +1158,16 @@ pub(super) fn positive_sigma(sigma: f32) -> Option<f32> {
     }
 }
 
-pub(super) fn rect_paint(
-    node: &super::node::Node,
-) -> (
-    Option<[u8; 4]>,
-    f32,
-    [u8; 4],
-    Option<protocol::Gradient>,
-    Option<protocol::Shadow>,
-    Arc<[protocol::BoxShadow]>,
-) {
+pub(super) struct RectPaint {
+    fill: Option<[u8; 4]>,
+    stroke_width: f32,
+    stroke_color: [u8; 4],
+    gradient: Option<protocol::Gradient>,
+    shadow: Option<protocol::Shadow>,
+    box_shadows: Arc<[protocol::BoxShadow]>,
+}
+
+pub(super) fn rect_paint(node: &super::node::Node) -> RectPaint {
     let stroke_width = if node.stroke_width().is_finite() && node.stroke_width() > 0.0 {
         node.stroke_width()
     } else {
@@ -1138,14 +1176,14 @@ pub(super) fn rect_paint(
     let shadow = node
         .shadow()
         .filter(|shadow| shadow.elevation.is_finite() && shadow.elevation > 0.0);
-    (
-        node.fill(),
+    RectPaint {
+        fill: node.fill(),
         stroke_width,
-        node.stroke_color(),
-        node.gradient().cloned(),
+        stroke_color: node.stroke_color(),
+        gradient: node.gradient().cloned(),
         shadow,
-        node.box_shadows(),
-    )
+        box_shadows: node.box_shadows(),
+    }
 }
 
 pub(super) enum PreparedGradient {

@@ -58,7 +58,10 @@ pub enum Edit {
     DeleteWordForward,
     Escape,
     /// Select the whole buffer so the following [`Edit::Text`] replaces it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "production callers are compiled only for Android")
+    )]
     SelectAll,
     Text(String),
     /// Delete a UTF-16 range, then [`Edit::Insert`] the replacement.
@@ -195,8 +198,8 @@ fn committed_edits(old: &str, new: &str) -> Vec<Edit> {
     let prefix = common_prefix(old, new);
     let mut edits = Vec::new();
     if prefix < old.len() {
-        let start = utf16_len(&old[..prefix]) as u32;
-        let end = utf16_len(old) as u32;
+        let start = u32::try_from(utf16_len(&old[..prefix])).unwrap_or(u32::MAX);
+        let end = u32::try_from(utf16_len(old)).unwrap_or(u32::MAX);
         edits.push(Edit::DeleteRange { start, end });
     }
     if prefix < new.len() {
@@ -290,7 +293,10 @@ impl Client {
         self.buffer.text.clone()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "production callers are compiled only for Android")
+    )]
     pub fn begin(&mut self) {
         if self.depth == 0 {
             self.base = self.buffer.snapshot();
@@ -299,7 +305,10 @@ impl Client {
         self.depth += 1;
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "production callers are compiled only for Android")
+    )]
     pub fn end(&mut self) -> Vec<Edit> {
         if self.depth == 0 {
             return Vec::new();
@@ -323,7 +332,10 @@ impl Client {
     }
 
     /// `setComposingText`. An empty string clears the composition.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "production callers are compiled only for Android")
+    )]
     pub fn composing(&mut self, text: &str) -> Vec<Edit> {
         self.mutate(|buffer| {
             let (start, end) = buffer
@@ -334,7 +346,10 @@ impl Client {
     }
 
     /// `finishComposingText`. The marked characters stay and become committed.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "production callers are compiled only for Android")
+    )]
     pub fn finish(&mut self) -> Vec<Edit> {
         if self.buffer.compose.is_none() {
             return Vec::new();
@@ -345,7 +360,10 @@ impl Client {
     }
 
     /// `deleteSurroundingText`. Lengths are UTF-16 units outside the selection.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "production callers are compiled only for Android")
+    )]
     pub fn delete(&mut self, before: usize, after: usize) -> Vec<Edit> {
         if before == 0 && after == 0 {
             return Vec::new();
@@ -383,7 +401,10 @@ fn splice(buffer: &mut Buffer, start: usize, end: usize, insert: &str, composing
     buffer.compose = (composing && extra_len > 0).then_some((start, caret));
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production callers are compiled only for Android")
+)]
 fn delete_surrounding(buffer: &mut Buffer, before: usize, after: usize) {
     let mut units: Vec<u16> = buffer.text.encode_utf16().collect();
     let sel_lo = buffer
@@ -417,7 +438,10 @@ fn delete_surrounding(buffer: &mut Buffer, before: usize, after: usize) {
 }
 
 /// Map a UTF-16 index across a deletion of `[from, sel_lo)` and `[sel_hi, to)`.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "production callers are compiled only for Android")
+)]
 fn shift_index(
     index: usize,
     from: usize,

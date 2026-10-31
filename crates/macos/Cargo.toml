@@ -99,10 +99,5 @@ objc2-core-video = { version = "0.3.2", default-features = false, features = [
 ] }
 protocol = { workspace = true }
 
-[lints.rust]
-unsafe_code = "allow"
-unused_qualifications = "deny"
-
-[lints.clippy]
-unwrap_used = "deny"
-expect_used = "deny"
+[lints]
+workspace = true

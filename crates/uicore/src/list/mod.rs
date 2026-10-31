@@ -13,7 +13,7 @@ mod window;
 pub use controller::{DragStep, PullMode};
 pub use diff::ListOp;
 pub use driver::{Chrome, ListItem, ListNodes};
-pub use set::{DriverEvent, DriverId, DriverSet};
+pub use set::{DriverEvent, DriverId, DriverSet, ScrollConfig};
 
 #[cfg(test)]
 mod tests;

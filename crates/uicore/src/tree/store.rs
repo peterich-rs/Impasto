@@ -555,12 +555,12 @@ impl Tree {
         let id = NodeId { index, generation };
         if self.root.is_none() {
             self.root = Some(id);
-            self.slots[index as usize].node.as_mut().map(|node| {
+            if let Some(node) = self.slots[index as usize].node.as_mut() {
                 node.flags.insert(
                     super::node::NodeFlags::RELAYOUT_BOUNDARY
                         | super::node::NodeFlags::REPAINT_BOUNDARY,
                 );
-            });
+            }
         }
         id
     }
@@ -570,7 +570,7 @@ impl Tree {
             let generation = self.slots[index as usize].generation;
             (index, generation)
         } else {
-            let index = self.slots.len() as u32;
+            let index = crate::cast::u32_from_usize(self.slots.len());
             self.slots.push(Slot {
                 generation: 1,
                 node: None,
