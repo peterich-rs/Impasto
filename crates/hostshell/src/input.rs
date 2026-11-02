@@ -383,6 +383,7 @@ mod tests {
         assert_eq!(xs, vec![6.0, 6.0, -1.0]);
     }
 
+    #[test]
     fn pause_cancels_an_open_press() {
         let mut input = Input::new();
         input.push_pointer(event(Phase::Down, 1.0));

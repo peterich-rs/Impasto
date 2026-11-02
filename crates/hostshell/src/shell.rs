@@ -256,10 +256,12 @@ pub fn start(boot: Boot) -> Result<Link, BootError> {
                 &inbox_thread,
                 &ready_tx,
                 &acks_thread,
-                image_tx,
-                net_tx,
-                wake_tx,
-                upload,
+                RenderLinks {
+                    image_tx,
+                    net_tx,
+                    wake_tx,
+                    upload,
+                },
             );
             guard.finish(result);
         });
@@ -373,15 +375,19 @@ struct Runtime {
     inspect: Option<std::path::PathBuf>,
 }
 
+struct RenderLinks {
+    image_tx: Sender<ImageRequest>,
+    net_tx: Sender<session::IoJob>,
+    wake_tx: Sender<Option<i64>>,
+    upload: Arc<Mutex<Option<engine::TextureFactory>>>,
+}
+
 fn render(
     boot: Boot,
     inbox: &Arc<Inbox>,
     ready: &SyncSender<Result<(), BootError>>,
     acks: &Acks,
-    image_tx: Sender<ImageRequest>,
-    net_tx: Sender<session::IoJob>,
-    wake_tx: Sender<Option<i64>>,
-    upload: Arc<Mutex<Option<engine::TextureFactory>>>,
+    links: RenderLinks,
 ) -> Result<(), BootError> {
     let services = Rc::new(RefCell::new(boot.services));
     let engine = {
@@ -395,7 +401,7 @@ fn render(
         }
     };
     if let Some(factory) = engine.borrow().texture_factory() {
-        *lock(&upload) = Some(factory);
+        *lock(&links.upload) = Some(factory);
     }
     let log = {
         let services = Rc::clone(&services);
@@ -437,7 +443,7 @@ fn render(
         &slot,
         Box::new({
             move |job| {
-                let _ = net_tx.send(job);
+                let _ = links.net_tx.send(job);
             }
         }),
         host,
@@ -475,11 +481,11 @@ fn render(
         point_scale: 1.0,
         needs_present: false,
         images: ImageCache::new(),
-        image_tx,
+        image_tx: links.image_tx,
         frame_number: 0,
         panic_streak: 0,
         semantics: None,
-        wake_tx,
+        wake_tx: links.wake_tx,
         dump_list: boot.dump_list,
         present_failures: 0,
         present_logged: false,
