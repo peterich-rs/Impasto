@@ -1,0 +1,4 @@
+# `unwrap_used` and `expect_used` stay denied on production paths.
+# Tests may panic when a fixture is missing; that exception is the lint's own switch.
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true

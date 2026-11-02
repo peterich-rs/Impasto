@@ -1,5 +1,6 @@
 //! Render tree. Layout goes through Taffy. This crate does not link Impeller.
 
+mod cast;
 mod error;
 mod gesture;
 mod layer;
@@ -30,6 +31,7 @@ pub use gesture::{
 pub use layer::LayerTree;
 pub use list::{
     Chrome, DragStep, DriverEvent, DriverId, DriverSet, ListItem, ListNodes, ListOp, PullMode,
+    ScrollConfig,
 };
 pub use motion::{
     AnimProp, Band, Decay, Friction, OverscrollMode, SCROLL_TAU_MS, ScrollAccept, ScrollAxis,

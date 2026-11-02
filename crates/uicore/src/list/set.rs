@@ -6,6 +6,16 @@ use super::controller::{DragStep, ParentLink, PullMode, ScrollController};
 use super::diff::ListOp;
 use super::driver::{Chrome, ListDriver, ListItem, ListNodes};
 
+/// Pull threshold, rubber band, and content floor for one scroll driver.
+#[derive(Clone, Copy, Debug)]
+pub struct ScrollConfig {
+    pub content_min: f32,
+    pub pull_mode: PullMode,
+    pub threshold: f32,
+    pub rubber: bool,
+    pub factor: f32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DriverId {
     pub index: u32,
@@ -25,6 +35,7 @@ struct Entry<T> {
     value: Option<T>,
 }
 
+#[derive(Default)]
 pub struct DriverSet {
     lists: Vec<Entry<ListDriver>>,
     scrolls: Vec<Entry<ScrollController>>,
@@ -32,19 +43,6 @@ pub struct DriverSet {
     free_scrolls: Vec<u32>,
     events: Vec<DriverEvent>,
     pending: bool,
-}
-
-impl Default for DriverSet {
-    fn default() -> Self {
-        Self {
-            lists: Vec::new(),
-            scrolls: Vec::new(),
-            free_lists: Vec::new(),
-            free_scrolls: Vec::new(),
-            events: Vec::new(),
-            pending: false,
-        }
-    }
 }
 
 impl DriverSet {
@@ -155,11 +153,7 @@ impl DriverSet {
     pub fn scroll_configure(
         &mut self,
         id: DriverId,
-        content_min: f32,
-        pull_mode: PullMode,
-        threshold: f32,
-        rubber: bool,
-        factor: f32,
+        config: ScrollConfig,
         parent: Option<DriverId>,
     ) -> bool {
         let link = parent.filter(|parent| {
@@ -171,11 +165,11 @@ impl DriverSet {
             return false;
         };
         controller.configure(
-            content_min,
-            pull_mode,
-            threshold,
-            rubber,
-            factor,
+            config.content_min,
+            config.pull_mode,
+            config.threshold,
+            config.rubber,
+            config.factor,
             link.map(|parent| ParentLink {
                 index: parent.index,
                 generation: parent.generation,
@@ -268,7 +262,7 @@ impl DriverSet {
             };
             if controller.tick(tree) {
                 refresh.push(DriverId {
-                    index: index as u32,
+                    index: crate::cast::u32_from_usize(index),
                     generation,
                 });
             }
@@ -289,7 +283,7 @@ impl DriverSet {
             };
             let (ops, chrome, end, pending) = driver.tick(tree);
             let id = DriverId {
-                index: index as u32,
+                index: crate::cast::u32_from_usize(index),
                 generation,
             };
             listed.push((id, ops, chrome, end, pending));
@@ -328,7 +322,7 @@ fn alloc<T>(entries: &mut Vec<Entry<T>>, free: &mut Vec<u32>, value: T) -> Drive
             generation: entry.generation,
         };
     }
-    let index = entries.len() as u32;
+    let index = crate::cast::u32_from_usize(entries.len());
     entries.push(Entry {
         generation: 1,
         value: Some(value),

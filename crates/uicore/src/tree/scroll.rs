@@ -8,6 +8,16 @@ use crate::motion::{Band, OVERSCROLL_FACTOR};
 
 /// Overscroll for a scroll that never had physics installed: the historical
 /// linear band.
+fn resting_spring(from: f32, to: f32, stiffness: f32, damping: f32) -> crate::Spring {
+    crate::Spring {
+        x0: from,
+        v0: 0.0,
+        target: to,
+        stiffness,
+        damping,
+    }
+}
+
 fn default_stretch(over: f32, _dimension: f32) -> f32 {
     Band::Linear {
         factor: OVERSCROLL_FACTOR,
@@ -217,19 +227,13 @@ impl Tree {
         self.spring_axis(
             id,
             crate::AnimProp::ScrollX,
-            ox,
-            x,
-            stiffness,
-            damping,
+            resting_spring(ox, x, stiffness, damping),
             false,
         );
         self.spring_axis(
             id,
             crate::AnimProp::ScrollY,
-            oy,
-            y,
-            stiffness,
-            damping,
+            resting_spring(oy, y, stiffness, damping),
             false,
         );
         self.note_scroll_phase(id, crate::ScrollPhase::Settling, 0.0, 0.0);
@@ -332,10 +336,7 @@ impl Tree {
         self.spring_axis(
             id,
             prop,
-            from,
-            to,
-            physics.snap_stiffness,
-            physics.snap_damping,
+            resting_spring(from, to, physics.snap_stiffness, physics.snap_damping),
             false,
         );
     }
@@ -344,22 +345,13 @@ impl Tree {
         &mut self,
         id: NodeId,
         prop: crate::AnimProp,
-        from: f32,
-        to: f32,
-        stiffness: f32,
-        damping: f32,
+        spring: crate::Spring,
         snap: bool,
     ) {
-        if (from - to).abs() < f32::EPSILON {
+        if (spring.x0 - spring.target).abs() < f32::EPSILON {
             return;
         }
-        let simulation = Box::new(crate::Spring {
-            x0: from,
-            v0: 0.0,
-            target: to,
-            stiffness,
-            damping,
-        });
+        let simulation = Box::new(spring);
         if snap {
             self.animate_snap(id, prop, simulation);
         } else {
@@ -474,10 +466,10 @@ impl Tree {
             let next = value.clamp(0.0, limit);
             (x, next, value < -0.5 || value > limit + 0.5)
         };
-        if (nx - x).abs() > f32::EPSILON || (ny - y).abs() > f32::EPSILON {
-            if self.set_scroll_offset(id, nx, ny).is_ok() {
-                self.scroll_notices.push(Gesture::Scroll(id, nx, ny));
-            }
+        if ((nx - x).abs() > f32::EPSILON || (ny - y).abs() > f32::EPSILON)
+            && self.set_scroll_offset(id, nx, ny).is_ok()
+        {
+            self.scroll_notices.push(Gesture::Scroll(id, nx, ny));
         }
         hit
     }
@@ -698,29 +690,31 @@ impl Tree {
         velocity: f32,
         snap: bool,
     ) {
-        if !snap && velocity.abs() >= 0.02 && self.axis_blocked(id, prop, velocity) {
-            if self.handoff_fling(id, prop, velocity) {
-                self.note_scroll_phase(id, crate::ScrollPhase::Idle, 0.0, 0.0);
-                return;
-            }
+        if !snap
+            && velocity.abs() >= 0.02
+            && self.axis_blocked(id, prop, velocity)
+            && self.handoff_fling(id, prop, velocity)
+        {
+            self.note_scroll_phase(id, crate::ScrollPhase::Idle, 0.0, 0.0);
+            return;
         }
-        if !snap {
-            if let Some(target) = self.snap_target(id, prop) {
-                let current = self.axis_offset(id, prop);
-                if (target - current).abs() > 0.5 {
-                    let physics = self.scroll_physics(id).unwrap_or_default();
-                    self.spring_axis(
-                        id,
-                        prop,
+        if !snap && let Some(target) = self.snap_target(id, prop) {
+            let current = self.axis_offset(id, prop);
+            if (target - current).abs() > 0.5 {
+                let physics = self.scroll_physics(id).unwrap_or_default();
+                self.spring_axis(
+                    id,
+                    prop,
+                    resting_spring(
                         current,
                         target,
                         physics.snap_stiffness,
                         physics.snap_damping,
-                        true,
-                    );
-                    self.note_scroll_phase(id, crate::ScrollPhase::Settling, 0.0, 0.0);
-                    return;
-                }
+                    ),
+                    true,
+                );
+                self.note_scroll_phase(id, crate::ScrollPhase::Settling, 0.0, 0.0);
+                return;
             }
         }
         self.sync_scroll_phase(id);

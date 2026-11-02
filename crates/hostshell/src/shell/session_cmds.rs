@@ -119,7 +119,7 @@ fn metrics_cmd(runtime: &mut Runtime, metrics: Metrics) {
 fn lifecycle(runtime: &mut Runtime, state: session::Lifecycle) {
     let deadline = runtime.session.as_mut().map(|session| {
         session.lifecycle(state);
-        session.next_wake_ms().map(|ms| ms as i64)
+        session.next_wake_ms().map(crate::net::ms_i64)
     });
     if let Some(deadline) = deadline {
         note_wake(runtime, deadline);

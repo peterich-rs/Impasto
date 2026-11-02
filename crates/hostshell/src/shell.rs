@@ -21,16 +21,18 @@ use crate::scheduler::{self, FrameScheduler, FrameStep, FrameView, VsyncOp};
 use crate::shaper::ImpellerShaper;
 use crate::surface::{OpenRetry, Ready, SurfaceHost};
 use crate::timing::FrameTiming;
-use crate::{Boot, Launch, LogLevel, Services, Surface};
+use crate::{Boot, Launch, LogLevel, Services};
 
 mod cache_cmds;
 mod frame_cmds;
 mod session_cmds;
 mod surface_cmds;
 
+type HostLog = Rc<dyn Fn(LogLevel, &str)>;
+
 pub struct EngineSlot {
     typography: Rc<RefCell<engine::Typography>>,
-    log: Rc<dyn Fn(LogLevel, &str)>,
+    log: HostLog,
 }
 
 impl EngineSlot {
@@ -38,7 +40,7 @@ impl EngineSlot {
         ImpellerShaper::new(Rc::clone(&self.typography))
     }
 
-    pub fn log_hook(&self) -> Box<dyn Fn(u8, &str)> {
+    pub fn log_hook(&self) -> crate::ConsoleLog {
         let log = Rc::clone(&self.log);
         Box::new(move |level, message| {
             // QuickJS console levels: 0 log, 1 info, 2 warn, 3 error.
@@ -335,7 +337,7 @@ struct Runtime {
     services: Rc<RefCell<Box<dyn Services>>>,
     engine: Rc<RefCell<engine::Engine>>,
     typography: Rc<RefCell<engine::Typography>>,
-    log: Rc<dyn Fn(LogLevel, &str)>,
+    log: HostLog,
     session: Option<Box<dyn session::Session>>,
     registry: Arc<session::ModuleRegistry>,
     latest: Option<Arc<protocol::LayerTree>>,
@@ -343,10 +345,7 @@ struct Runtime {
     surfaces: SurfaceHost,
     scheduler: FrameScheduler,
     vsync: Arc<dyn crate::Vsync>,
-    open_surface: Box<
-        dyn FnMut(&mut engine::Engine, SurfaceTarget) -> Result<Box<dyn Surface>, engine::Status>
-            + Send,
-    >,
+    open_surface: crate::OpenSurface,
     installed: Option<Installed>,
     point_scale: f32,
     needs_present: bool,
@@ -386,7 +385,7 @@ fn render(
         let services = Rc::clone(&services);
         Rc::new(move |level: LogLevel, message: &str| {
             services.borrow().log(level, message);
-        }) as Rc<dyn Fn(LogLevel, &str)>
+        }) as HostLog
     };
     let Launch::Session(open) = boot.launch;
     let typography = engine.borrow().typography();
@@ -404,7 +403,7 @@ fn render(
         }
     };
     let app_state = session::shared("active".to_owned());
-    let launch_url = boot.launch_url.clone();
+    let launch_url = Arc::clone(&boot.launch_url);
     let mut modules = vec![crate::modules::app_state(Arc::clone(&app_state))];
     modules.extend(boot.modules);
     let registry = Arc::new(session::ModuleRegistry::new(modules));
@@ -421,9 +420,8 @@ fn render(
     let session = match open(
         &slot,
         Box::new({
-            let submit = net_tx.clone();
             move |job| {
-                let _ = submit.send(job);
+                let _ = net_tx.send(job);
             }
         }),
         host,
@@ -608,14 +606,14 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                     runtime.latest = Some(tree);
                     layers_changed = true;
                 }
-                if let Some(text) = output.clipboard.take() {
-                    if let Err(message) = runtime.registry.call(
+                if let Some(text) = output.clipboard.take()
+                    && let Err(message) = runtime.registry.call(
                         "Clipboard",
                         "setString",
                         &[session::PluginValue::Str(text)],
-                    ) {
-                        (runtime.log)(LogLevel::Error, &message);
-                    }
+                    )
+                {
+                    (runtime.log)(LogLevel::Error, &message);
                 }
                 if let Some(update) = output.ime.take() {
                     crate::ime::publish_update(&update, &runtime.services);
@@ -829,7 +827,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                 runtime.present_logged = true;
                 (runtime.log)(LogLevel::Error, "present failed; backing off");
             }
-            runtime.present_retry_at = Some(crate::net::mono_ms() as i64 + delay);
+            runtime.present_retry_at = Some(crate::net::ms_i64(crate::net::mono_ms()) + delay);
             again = false;
         } else {
             runtime.present_retry_at = None;
@@ -934,10 +932,10 @@ fn images_ready(
             }
             continue;
         }
-        if let Some(request) = runtime.images.request(source, bucket) {
-            if runtime.image_tx.send(request).is_err() {
-                (runtime.log)(LogLevel::Error, "image decoder stopped");
-            }
+        if let Some(request) = runtime.images.request(source, bucket)
+            && runtime.image_tx.send(request).is_err()
+        {
+            (runtime.log)(LogLevel::Error, "image decoder stopped");
         }
         if required {
             waiting = true;
@@ -960,7 +958,7 @@ fn end_frame(runtime: &mut Runtime, again: bool, stop: bool) -> bool {
         if runtime.input.is_paused() {
             None
         } else {
-            session.next_wake_ms().map(|ms| ms as i64)
+            session.next_wake_ms().map(crate::net::ms_i64)
         }
     });
     let deadline = if runtime.input.is_paused() {

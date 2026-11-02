@@ -98,11 +98,7 @@ impl Typography {
 
     pub fn caret_at_point(
         &mut self,
-        _utf8: &str,
-        _font_size: f32,
-        _max_width: f32,
-        _color: [u8; 4],
-        _style: &protocol::TextStyle,
+        _query: crate::ParagraphQuery<'_>,
         _x: f32,
         _y: f32,
     ) -> Result<crate::CaretHit, Status> {
@@ -186,11 +182,7 @@ impl Typography {
 
     pub fn caret_for(
         &mut self,
-        _utf8: &str,
-        _font_size: f32,
-        _max_width: f32,
-        _color: [u8; 4],
-        _style: &protocol::TextStyle,
+        _query: crate::ParagraphQuery<'_>,
         _unit: u32,
         _upstream: bool,
     ) -> Result<crate::CaretHit, Status> {

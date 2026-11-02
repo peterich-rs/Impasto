@@ -31,9 +31,11 @@ pub fn load_rgba_png(path: &Path) -> anyhow::Result<Rgba> {
 /// Decode PNG, JPEG, or WebP bytes the same way as a file: device RGB, premultiplied.
 pub fn load_rgba_bytes(bytes: &[u8]) -> anyhow::Result<Rgba> {
     let data = CFData::from_bytes(bytes);
-    // SAFETY: `data` retains `bytes` for the source. A null options dictionary is the default.
-    let source =
-        unsafe { CGImageSource::with_data(&data, None) }.context("image bytes were not decoded")?;
+    let source = {
+        // SAFETY: `data` retains `bytes`. A null options dictionary is the default.
+        unsafe { CGImageSource::with_data(&data, None) }
+    }
+    .context("image bytes were not decoded")?;
     rgba_from_source(&source, "image bytes")
 }
 

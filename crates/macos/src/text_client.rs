@@ -86,7 +86,10 @@ impl Marked {
     }
 
     fn selection_at_end(&mut self) {
-        let end = (Self::utf16_len(&self.committed) + Self::utf16_len(&self.composing)) as u32;
+        let end = u32::try_from(
+            Self::utf16_len(&self.committed).saturating_add(Self::utf16_len(&self.composing)),
+        )
+        .unwrap_or(u32::MAX);
         self.selection = end..end;
     }
 

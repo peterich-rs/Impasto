@@ -56,7 +56,7 @@ impl PrefixHeights {
         let mut cursor = index + 1;
         while cursor < self.tree.len() {
             self.tree[cursor] += delta;
-            cursor += cursor & cursor.wrapping_neg();
+            cursor += cursor.isolate_lowest_one();
         }
     }
 
@@ -65,7 +65,7 @@ impl PrefixHeights {
         let mut total = 0.0;
         while k > 0 {
             total += self.tree.get(k).copied().unwrap_or(0.0);
-            k -= k & k.wrapping_neg();
+            k -= k.isolate_lowest_one();
         }
         total
     }

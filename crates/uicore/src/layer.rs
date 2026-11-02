@@ -8,7 +8,10 @@ use crate::NodeId;
 pub const SELF_PICTURE: u64 = 1 << 63;
 
 /// Bit 62 is reserved for a future selection picture. It is unused.
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "reserved for a selection picture that is not recorded yet"
+)]
 pub const SELECTION_PICTURE: u64 = 1 << 62;
 
 pub fn child_picture_id(id: NodeId) -> PictureId {

@@ -24,7 +24,7 @@ impl NodeId {
 
     pub fn from_raw(raw: u64) -> Self {
         Self {
-            index: raw as u32,
+            index: u32::try_from(raw & 0xffff_ffff).unwrap_or(0),
             generation: (raw >> 32) as u32,
         }
     }

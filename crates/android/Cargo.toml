@@ -21,10 +21,5 @@ hostshell = { workspace = true }
 quickjs = { workspace = true }
 session = { workspace = true }
 
-[lints.rust]
-unsafe_code = "allow"
-unused_qualifications = "deny"
-
-[lints.clippy]
-unwrap_used = "deny"
-expect_used = "deny"
+[lints]
+workspace = true

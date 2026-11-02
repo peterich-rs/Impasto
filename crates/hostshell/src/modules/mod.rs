@@ -202,7 +202,7 @@ mod tests {
         }
         impl MethodExec for SlowExec {
             fn worker(&self, settle: Settle, work: Work) {
-                let _ = self.handle.spawn_blocking(move || settle.send(work()));
+                drop(self.handle.spawn_blocking(move || settle.send(work())));
             }
             fn main_thread(&self, settle: Settle, work: Work) {
                 settle.send(work());
@@ -216,9 +216,7 @@ mod tests {
             Ok(handle) => handle,
             Err(error) => panic!("{error}"),
         };
-        let exec = SlowExec {
-            handle: handle.clone(),
-        };
+        let exec = SlowExec { handle };
         let (tx, rx) = std::sync::mpsc::channel();
         exec.worker(
             Settle::new(move |result| {

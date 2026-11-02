@@ -123,14 +123,17 @@ impl Typography {
     /// [`Engine::measure_paragraph`] caches.
     pub fn caret_at_point(
         &mut self,
-        utf8: &str,
-        font_size: f32,
-        max_width: f32,
-        color: [u8; 4],
-        style: &TextStyle,
+        query: crate::ParagraphQuery<'_>,
         x: f32,
         y: f32,
     ) -> Result<crate::CaretHit, Status> {
+        let crate::ParagraphQuery {
+            utf8,
+            font_size,
+            max_width,
+            color,
+            style,
+        } = query;
         let paragraph = self.ensure_paragraph(utf8, font_size, max_width, color, style)?;
         // SAFETY: `paragraph` is a live cached paragraph owned by this engine.
         // The glyph info is released before return. Bounds are written by Impeller.
@@ -303,14 +306,17 @@ impl Typography {
     /// Caret at `unit`. `upstream` selects the previous line at a soft break.
     pub fn caret_for(
         &mut self,
-        utf8: &str,
-        font_size: f32,
-        max_width: f32,
-        color: [u8; 4],
-        style: &TextStyle,
+        query: crate::ParagraphQuery<'_>,
         unit: u32,
         upstream: bool,
     ) -> Result<crate::CaretHit, Status> {
+        let crate::ParagraphQuery {
+            utf8,
+            font_size,
+            max_width,
+            color,
+            style,
+        } = query;
         let lines = self.lines(utf8, font_size, max_width, color, style)?;
         if upstream
             && let Some((index, _)) = lines

@@ -554,7 +554,9 @@ impl TextEditor {
         let caret = caret_at(unit, affinity);
         let x = self.column_x.unwrap_or(caret.x);
         let index = line_index(lines, unit, affinity);
-        let next = (index as i32 + delta).clamp(0, lines.len() as i32 - 1) as usize;
+        let len = crate::cast::i32_from_usize(lines.len());
+        let next = (crate::cast::i32_from_usize(index) + delta).clamp(0, len - 1);
+        let next = usize::try_from(next).unwrap_or(0);
         let line = &lines[next];
         let hit = hit_at(x, line.y + line.h * 0.5);
         self.place(hit.unit, hit.affinity, extend);
@@ -759,7 +761,7 @@ fn line_for(lines: &[TextLine], unit: u32, affinity: Affinity) -> Option<&TextLi
 }
 
 pub fn utf16_len(text: &str) -> u32 {
-    text.encode_utf16().count() as u32
+    crate::cast::u32_from_usize(text.encode_utf16().count())
 }
 
 /// UTF-16 offset of the grapheme cluster that contains `utf16`.
@@ -770,7 +772,7 @@ pub fn grapheme_index(text: &str, utf16: u32) -> u32 {
     let mut index = 0u32;
     for (slot, bound) in bounds.iter().enumerate() {
         if *bound <= utf16 {
-            index = slot as u32;
+            index = crate::cast::u32_from_usize(slot);
         } else {
             break;
         }
@@ -780,7 +782,7 @@ pub fn grapheme_index(text: &str, utf16: u32) -> u32 {
 
 /// Number of grapheme clusters in `text`.
 pub fn grapheme_count(text: &str) -> u32 {
-    grapheme_bounds(text).len().saturating_sub(1) as u32
+    crate::cast::u32_from_usize(grapheme_bounds(text).len().saturating_sub(1))
 }
 
 /// UTF-16 start of grapheme `index`. Past the end clamps to [`utf16_len`].
@@ -794,7 +796,7 @@ fn grapheme_bounds(text: &str) -> Vec<u32> {
     let mut bounds = vec![0];
     let mut unit = 0u32;
     for grapheme in text.graphemes(true) {
-        unit = unit.saturating_add(grapheme.encode_utf16().count() as u32);
+        unit = unit.saturating_add(crate::cast::u32_from_usize(grapheme.encode_utf16().count()));
         bounds.push(unit);
     }
     bounds
@@ -827,7 +829,7 @@ fn byte_index(text: &str, unit: u32) -> usize {
         if seen >= unit {
             return byte;
         }
-        seen = seen.saturating_add(ch.len_utf16() as u32);
+        seen = seen.saturating_add(crate::cast::u32_from_usize(ch.len_utf16()));
     }
     text.len()
 }

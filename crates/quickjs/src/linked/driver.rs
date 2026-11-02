@@ -3,7 +3,9 @@
 
 use std::ffi::{c_char, c_void};
 
-use uicore::{Chrome, DriverEvent, DriverId, ListItem, ListNodes, ListOp, NodeId, PullMode};
+use uicore::{
+    Chrome, DriverEvent, DriverId, ListItem, ListNodes, ListOp, NodeId, PullMode, ScrollConfig,
+};
 
 use super::ffi::qjs_driver;
 use super::{Inner, c_message, inner, utf8_of};
@@ -376,11 +378,13 @@ pub unsafe extern "C" fn scroll_configure(
     let parent = (has_parent != 0).then_some(driver_id(parent_index, parent_generation));
     i32::from(!inner.drivers.borrow_mut().scroll_configure(
         driver_id(index, generation),
-        content_min,
-        PullMode::from_code(pull_mode),
-        threshold,
-        rubber != 0,
-        factor,
+        ScrollConfig {
+            content_min,
+            pull_mode: PullMode::from_code(pull_mode),
+            threshold,
+            rubber: rubber != 0,
+            factor,
+        },
         parent,
     ))
 }

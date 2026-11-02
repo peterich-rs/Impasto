@@ -1114,7 +1114,17 @@ mod tests {
         let caret = engine
             .typography()
             .borrow_mut()
-            .caret_for("Hi", 28.0, 280.0, color, &style, 2, false)
+            .caret_for(
+                crate::ParagraphQuery {
+                    utf8: "Hi",
+                    font_size: 28.0,
+                    max_width: 280.0,
+                    color,
+                    style: &style,
+                },
+                2,
+                false,
+            )
             .expect("caret at end");
         assert!(caret.x > 0.0);
         let list = DrawList {

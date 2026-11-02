@@ -33,11 +33,14 @@ use frame::*;
 use keys::*;
 use nodes::*;
 
-#[allow(private_interfaces)]
+#[allow(
+    private_interfaces,
+    reason = "Inner is the session state and is not part of the public API"
+)]
 pub(super) struct Inner {
     pub(super) tree: RefCell<Tree>,
     pub(super) host: *mut c_void,
-    pub(super) log: Box<dyn Fn(u8, &str)>,
+    pub(super) log: crate::ConsoleLog,
     pub(super) ime: RefCell<ImeSlot>,
     pub(super) text_scale: Cell<f32>,
     pub(super) reduce_motion: Cell<bool>,
@@ -184,7 +187,7 @@ impl JsSession {
         script: &str,
         name: &str,
         shaper: impl Shaper + 'static,
-        log: Box<dyn Fn(u8, &str)>,
+        log: crate::ConsoleLog,
     ) -> Result<Self, Error> {
         Self::open_with(script, name, shaper, log, None, HostConfig::disconnected())
     }
@@ -193,7 +196,7 @@ impl JsSession {
         script: &str,
         name: &str,
         shaper: impl Shaper + 'static,
-        log: Box<dyn Fn(u8, &str)>,
+        log: crate::ConsoleLog,
         http: Option<Arc<dyn session::HttpClient>>,
         config: HostConfig,
     ) -> Result<Self, Error> {

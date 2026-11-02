@@ -1,6 +1,8 @@
 //! QuickJS session. The interpreter calls `core` directly. A missing source tree
 //! compiles this crate as [`Error::NotLinked`].
 
+#![allow(unsafe_code, reason = "the QuickJS C API is called from this crate")]
+
 use uicore::Shaper;
 
 mod error;
@@ -17,6 +19,9 @@ pub use linked::JsSession;
 
 pub use error::Error;
 
+/// Console callback. Level 3 is an error. Other levels are informational.
+pub type ConsoleLog = Box<dyn Fn(u8, &str)>;
+
 /// Loads `script` and returns the session the host pumps each frame.
 ///
 /// `name` is the filename the interpreter reports for this script. `log` receives
@@ -25,7 +30,7 @@ pub fn open(
     script: &str,
     name: &str,
     shaper: impl Shaper + 'static,
-    log: Box<dyn Fn(u8, &str)>,
+    log: ConsoleLog,
 ) -> Result<Box<dyn session::Session>, Error> {
     open_with_io(
         script,
@@ -42,7 +47,7 @@ pub fn open_with_io(
     script: &str,
     name: &str,
     shaper: impl Shaper + 'static,
-    log: Box<dyn Fn(u8, &str)>,
+    log: ConsoleLog,
     io: Option<Box<dyn Fn(session::IoJob) + Send>>,
     host: session::HostConfig,
 ) -> Result<Box<dyn session::Session>, Error> {
@@ -94,12 +99,13 @@ mod tests {
         }
     }
 
-    fn no_log() -> Box<dyn Fn(u8, &str)> {
+    fn no_log() -> super::ConsoleLog {
         Box::new(|_, _| {})
     }
 
     /// The gallery bundle is a build artifact and not committed. Tests that
     /// need it fail with instructions when it has not been built.
+    #[cfg(quickjs)]
     fn gallery_source() -> String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../apps/gallery-solid/dist/counter.js");
@@ -331,7 +337,7 @@ mod tests {
     fn open_counter() -> Option<Box<dyn Session>> {
         #[cfg(not(quickjs))]
         {
-            return None;
+            None
         }
         #[cfg(quickjs)]
         {
@@ -506,9 +512,7 @@ mod tests {
     #[test]
     fn repeated_clicks_leave_no_pending_jobs() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = gallery_source();
@@ -540,9 +544,7 @@ mod tests {
     #[test]
     fn remove_discards_the_tap_and_the_id() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let kept = r#"
@@ -587,9 +589,7 @@ mod tests {
     #[test]
     fn detach_keeps_the_tap_until_discard() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let kept = r#"
@@ -666,9 +666,7 @@ mod tests {
     #[test]
     fn press_then_release_then_click_rewrites_the_label() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -707,9 +705,7 @@ mod tests {
     #[test]
     fn insets_shift_the_recorded_text() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -747,9 +743,7 @@ mod tests {
     #[test]
     fn an_infinite_frame_callback_keeps_the_previous_list() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -784,9 +778,7 @@ mod tests {
     #[test]
     fn listener_error_is_kept_as_script_error() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -822,9 +814,7 @@ mod tests {
     #[test]
     fn a_reported_listener_error_lets_the_next_listener_run() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -858,9 +848,7 @@ mod tests {
     #[test]
     fn a_shortcut_consumes_the_modified_key() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -899,9 +887,7 @@ mod tests {
     #[test]
     fn host_motion_and_semantics_hints_reach_core() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -941,9 +927,7 @@ mod tests {
     #[test]
     fn motion_end_survives_unregistering_its_own_callback() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -995,9 +979,7 @@ mod tests {
     #[test]
     fn motion_end_reports_a_throw_after_unregister() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -1040,9 +1022,7 @@ mod tests {
     #[test]
     fn align_rejects_a_column_and_metrics_report_the_viewport() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -1103,9 +1083,7 @@ mod tests {
     #[test]
     fn a_click_longer_than_one_frame_still_updates_the_label() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -1145,9 +1123,7 @@ mod tests {
     #[test]
     fn a_runaway_click_is_interrupted() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -1194,9 +1170,7 @@ mod tests {
     #[test]
     fn console_log_reaches_the_host() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
@@ -1223,9 +1197,7 @@ mod tests {
     #[test]
     fn request_frame_lasts_for_one_extra_frame() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -1259,9 +1231,7 @@ mod tests {
     #[test]
     fn microtask_set_text_paints_without_request_frame() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -1294,9 +1264,7 @@ mod tests {
     #[test]
     fn a_throwing_frame_callback_does_not_ask_for_another_frame() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -1327,9 +1295,7 @@ mod tests {
     #[test]
     fn a_drag_past_the_slop_does_not_click() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -1378,9 +1344,7 @@ mod tests {
     #[test]
     fn dragging_the_list_translates_a_visible_row() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = gallery_source();
@@ -1486,9 +1450,7 @@ mod tests {
     #[test]
     fn module_loader_accepts_a_sibling_script_and_rejects_escape() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let dir = std::env::temp_dir().join(format!("quickjs-mod-{}", std::process::id()));
@@ -1551,9 +1513,7 @@ mod tests {
     #[test]
     fn gallery_pages_scroll_without_picture_writes() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = gallery_source();
@@ -1673,9 +1633,7 @@ mod tests {
     #[test]
     fn text_input_follows_focus_and_clears_when_the_node_is_removed() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -1770,9 +1728,7 @@ mod tests {
     #[test]
     fn dismissing_the_keyboard_lets_blur_clear_ime_state() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -1815,9 +1771,7 @@ mod tests {
     #[test]
     fn timers_fetch_and_modules_run_inside_the_frame() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             use std::sync::{Arc, Mutex};
@@ -1901,9 +1855,7 @@ mod tests {
     #[test]
     fn get_initial_url_is_visible_during_eval() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1942,9 +1894,7 @@ mod tests {
     #[test]
     fn sync_module_error_reaches_js() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1987,9 +1937,7 @@ mod tests {
     #[test]
     fn promise_module_settles_through_io_event() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -2030,9 +1978,7 @@ mod tests {
     #[test]
     fn unregistered_host_specifier_is_not_linked() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let (host, _pending) = test_host();
@@ -2057,9 +2003,7 @@ mod tests {
     #[test]
     fn bare_scope_must_be_bundled() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let (host, _pending) = test_host();
@@ -2087,9 +2031,7 @@ mod tests {
     #[test]
     fn nested_host_path_must_be_bundled() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let (host, _pending) = test_host();
@@ -2117,9 +2059,7 @@ mod tests {
     #[test]
     fn an_object_handle_is_rejected_and_a_switch_hint_sticks() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -2161,9 +2101,7 @@ mod tests {
     #[test]
     fn settings_reach_the_script() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -2205,9 +2143,7 @@ mod tests {
     #[test]
     fn tab_moves_focus_and_escape_does_not_exit() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -2257,9 +2193,7 @@ mod tests {
     #[test]
     fn text_replaced_delivers_the_loaded_string() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -2306,9 +2240,7 @@ mod tests {
     #[test]
     fn register_font_queues_replaces_and_caps_names() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -2393,9 +2325,7 @@ mod tests {
     #[test]
     fn register_font_rejects_an_oversize_face_without_touching_the_queue() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"

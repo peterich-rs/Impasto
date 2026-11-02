@@ -33,7 +33,7 @@ use crate::text_client::Marked;
 use objc2_metal::{MTLCreateSystemDefaultDevice, MTLPixelFormat};
 use objc2_quartz_core::{CALayer, CAMetalLayer};
 
-use crate::pointer::pointer_event;
+use crate::pointer::{PointerSample, pointer_event, scene_f32};
 use crate::surface::MetalSurface;
 use crate::vsync::DisplayLink;
 use uicore::{Button, Modifiers, Phase, PointerEvent};
@@ -85,9 +85,14 @@ define_class!(
     #[ivars = ContentIvars]
     struct ContentView;
 
+    // SAFETY: ContentView is an NSView subclass created only on the main thread.
     unsafe impl NSObjectProtocol for ContentView {}
 
-    #[allow(non_snake_case)]
+    #[allow(
+        non_snake_case,
+        reason = "NSTextInputClient method names are the AppKit selectors"
+    )]
+    // SAFETY: The methods below are the NSTextInputClient selectors AppKit calls on the main thread.
     unsafe impl NSTextInputClient for ContentView {
         #[unsafe(method(insertText:replacementRange:))]
         unsafe fn insertText_replacementRange(
@@ -178,7 +183,7 @@ define_class!(
         ) -> NSRect {
             if !actual_range.is_null() {
                 let location = self.ivars().marked.borrow().caret_utf16() as NSUInteger;
-                // SAFETY: AppKit passes a writable range or null. The null case returned above.
+                // SAFETY: AppKit passes a writable range; the null pointer returned above.
                 unsafe {
                     *actual_range = NSRange {
                         location,
@@ -243,7 +248,7 @@ define_class!(
                 x,
                 y,
                 event.timestamp() * 1000.0,
-                event.magnification() as f32,
+                scene_f32(event.magnification()),
             )));
         }
 
@@ -289,6 +294,7 @@ define_class!(
 
         #[unsafe(method(updateTrackingAreas))]
         fn update_tracking_areas(&self) {
+            // SAFETY: this is NSView's updateTrackingAreas, called by AppKit on the main thread.
             unsafe { msg_send![super(self), updateTrackingAreas] }
             self.install_tracking_area();
         }
@@ -309,8 +315,7 @@ impl ContentView {
             tracking: RefCell::new(None),
             a11y: crate::a11y::A11yHost::new(),
         });
-        // SAFETY: `initWithFrame:` is NSView's designated initializer. The ivars are
-        // already installed, and `frame` is a finite content rectangle.
+        // SAFETY: initWithFrame: is NSView's designated initializer and the ivars are already installed.
         unsafe { msg_send![super(this), initWithFrame: frame] }
     }
 
@@ -322,6 +327,7 @@ impl ContentView {
             | NSTrackingAreaOptions::MouseMoved
             | NSTrackingAreaOptions::ActiveInKeyWindow
             | NSTrackingAreaOptions::InVisibleRect;
+        // SAFETY: the rect is this view's bounds, and `self` is the tracking owner on the main thread.
         let area = unsafe {
             NSTrackingArea::initWithRect_options_owner_userInfo(
                 NSTrackingArea::alloc(),
@@ -359,18 +365,20 @@ impl ContentView {
         let (dx, dy) = if phase == Phase::Wheel {
             // AppKit's positive delta Y points up. Scene Y grows downward.
             (
-                event.scrollingDeltaX() as f32,
-                -(event.scrollingDeltaY() as f32),
+                scene_f32(event.scrollingDeltaX()),
+                -scene_f32(event.scrollingDeltaY()),
             )
         } else {
             (0.0, 0.0)
         };
         self.ivars().poster.post(Command::Pointer(pointer_event(
-            phase,
-            local.x,
-            local.y,
-            height,
-            event.timestamp() * 1000.0,
+            PointerSample {
+                phase,
+                local_x: local.x,
+                local_y: local.y,
+                view_height: height,
+                time_ms: event.timestamp() * 1000.0,
+            },
             button,
             modifiers,
             dx,
@@ -509,8 +517,10 @@ define_class!(
     #[ivars = HostState]
     struct Host;
 
+    // SAFETY: Host is an NSObject created only on the main thread.
     unsafe impl NSObjectProtocol for Host {}
 
+    // SAFETY: These selectors are the NSApplicationDelegate methods AppKit calls on the main thread.
     unsafe impl NSApplicationDelegate for Host {
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _notification: &NSNotification) {
@@ -580,6 +590,7 @@ define_class!(
         }
     }
 
+    // SAFETY: These selectors are the NSWindowDelegate methods AppKit calls on the main thread.
     unsafe impl NSWindowDelegate for Host {
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _notification: &NSNotification) {
@@ -650,7 +661,10 @@ impl Host {
         if available!(macos = 14.0) {
             app.activate();
         } else {
-            #[allow(deprecated)]
+            #[allow(
+                deprecated,
+                reason = "activateIgnoringOtherApps is the pre-macOS 14 way to become active"
+            )]
             app.activateIgnoringOtherApps(true);
         }
         let scale = point_scale(window, self.mtm());
@@ -658,7 +672,11 @@ impl Host {
         self.ivars().link.post(Command::SurfaceReady(SurfaceTarget {
             id: hostshell::SurfaceId::fresh(),
             layer: NativePtr(layer),
-            metrics: metrics(CONTENT_WIDTH as f32, CONTENT_HEIGHT as f32, scale as f32),
+            metrics: metrics(
+                scene_f32(CONTENT_WIDTH),
+                scene_f32(CONTENT_HEIGHT),
+                scene_f32(scale),
+            ),
         }));
         self.post_settings();
         println!("host ready");
@@ -690,9 +708,9 @@ impl Host {
         ));
         layer.setDrawableSize(CGSize::new(width * scale, height * scale));
         self.ivars().link.post(Command::Metrics(metrics(
-            width as f32,
-            height as f32,
-            scale as f32,
+            scene_f32(width),
+            scene_f32(height),
+            scene_f32(scale),
         )));
     }
 
@@ -722,11 +740,14 @@ fn current_settings() -> session::PlatformSettings {
         let workspace = NSWorkspace::sharedWorkspace();
         reduce_motion = workspace.accessibilityDisplayShouldReduceMotion();
         high_contrast = workspace.accessibilityDisplayShouldIncreaseContrast();
+        // SAFETY: `accessibilityDisplayShouldPreferBoldText` is a boolean query on the shared workspace.
         bold_text = unsafe { msg_send![&*workspace, accessibilityDisplayShouldPreferBoldText] };
         let options: Retained<NSDictionary<objc2_app_kit::NSFontTextStyleOptionKey, AnyObject>> =
             NSDictionary::new();
-        let font =
-            unsafe { NSFont::preferredFontForTextStyle_options(NSFontTextStyleBody, &options) };
+        let font = {
+            // SAFETY: `options` is empty, the documented default for the body font.
+            unsafe { NSFont::preferredFontForTextStyle_options(NSFontTextStyleBody, &options) }
+        };
         text_scale = text_scale_from_point_size(font.pointSize());
     }
     session::PlatformSettings {
@@ -753,7 +774,7 @@ pub(crate) fn text_scale_from_point_size(point_size: f64) -> f32 {
     if !point_size.is_finite() || point_size <= 0.0 {
         return 1.0;
     }
-    let scale = (point_size / 13.0) as f32;
+    let scale = scene_f32(point_size / 13.0);
     if !scale.is_finite() {
         return 1.0;
     }
@@ -836,8 +857,7 @@ impl Services for MacServices {
         }
         let update = update.clone();
         dispatch_main(Box::new(move || {
-            // SAFETY: the address is the content view, stored on the main thread
-            // before the run loop, and this closure also runs on the main thread.
+            // SAFETY: the address is the content view stored on the main thread, and this closure runs there too.
             let view = unsafe { &*(view as *const ContentView) };
             view.apply_semantics(update);
         }));
@@ -882,9 +902,7 @@ impl Services for MacServices {
         }
         let update = update.clone();
         dispatch_main(Box::new(move || {
-            // SAFETY: the address is the content view, stored on the main thread before
-            // the run loop, and this closure also runs on the main thread. The window
-            // retains the view for the process lifetime.
+            // SAFETY: the address is the content view stored on the main thread, and this closure runs there too.
             let view = unsafe { &*(view as *const ContentView) };
             view.apply_ime_update(&update);
         }));
@@ -955,7 +973,7 @@ pub fn run(
             quickjs::Error::Script(text) => SessionError::Script(text),
         })
     }));
-    let dump_for_surface = dump.clone();
+    let dump_for_surface = dump;
     let on_stop_for_surface = Arc::clone(&on_stop);
     let ime_view = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
     let decoder = Arc::new(PngDecoder { directory: assets });
@@ -972,7 +990,7 @@ pub fn run(
             vsync: Arc::new(vsync),
             decoder,
             modules: Vec::new(),
-            main_thread: Some(Arc::new(|work| dispatch_main(work))),
+            main_thread: Some(Arc::new(dispatch_main)),
             launch_url: Arc::clone(&launch_url),
             http: Some(
                 hostshell::http_client()
@@ -1004,9 +1022,8 @@ pub fn run(
         CGPoint::new(0.0, 0.0),
         CGSize::new(CONTENT_WIDTH, CONTENT_HEIGHT),
     );
+    // SAFETY: the style is titled, closable, miniaturizable, and resizable, with buffered backing.
     let window = unsafe {
-        // SAFETY: the style is titled, closable, miniaturizable, and resizable. Buffered
-        // backing and `defer = false` create the window before this returns.
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
             frame,
@@ -1047,7 +1064,7 @@ pub fn run(
     let host = Host::new(
         mtm,
         HostState {
-            window: window.clone(),
+            window,
             layer,
             link,
             initial_url,
@@ -1068,6 +1085,7 @@ pub fn run(
 
 fn watch_appearance(host: &Host) {
     let name = NSString::from_str("AppleInterfaceThemeChangedNotification");
+    // SAFETY: the selector is `themeChanged:` on Host, and the notification name is a constant.
     unsafe {
         NSDistributedNotificationCenter::defaultCenter()
             .addObserver_selector_name_object_suspensionBehavior(
@@ -1284,20 +1302,24 @@ fn document_dir_main() -> Result<String, String> {
     let Some(manager) = objc2::runtime::AnyClass::get(c"NSFileManager") else {
         return Err("module \"FileSystem\" is not linked".to_owned());
     };
+    // SAFETY: `NSFileManager` was looked up; `defaultManager` returns the process-wide manager.
     let shared: *mut AnyObject = unsafe { msg_send![manager, defaultManager] };
     if shared.is_null() {
         return Err("module \"FileSystem\" is not linked".to_owned());
     }
+    // SAFETY: directory 9 domain 1 is the user document directory. A null error pointer reports failure as null.
     let url: *mut AnyObject = unsafe {
         msg_send![shared, URLForDirectory: 9usize, inDomain: 1usize, appropriateForURL: std::ptr::null::<AnyObject>(), create: true, error: std::ptr::null_mut::<*mut AnyObject>()]
     };
     if url.is_null() {
         return Err("module \"FileSystem\" is not linked".to_owned());
     }
+    // SAFETY: `url` is the non-null file URL from the previous call.
     let path: *mut AnyObject = unsafe { msg_send![url, path] };
     if path.is_null() {
         return Err("module \"FileSystem\" is not linked".to_owned());
     }
+    // SAFETY: `path` is the non-null NSString returned by NSURL.path.
     let text = unsafe { &*path.cast::<NSString>() };
     Ok(text.to_string())
 }
@@ -1314,6 +1336,7 @@ fn media_status(name: &str) -> String {
         return "denied".to_owned();
     };
     let media = NSString::from_str(if name == "camera" { "vide" } else { "soun" });
+    // SAFETY: `media` is `vide` or `soun`, the AVMediaType values this query accepts.
     let status: i64 = unsafe { msg_send![device, authorizationStatusForMediaType: &*media] };
     match status {
         3 => "granted".to_owned(),
@@ -1334,15 +1357,18 @@ fn open_url_main(url: &str) -> Result<(), String> {
     let Some(urls) = objc2::runtime::AnyClass::get(c"NSURL") else {
         return Err("openURL is not linked".to_owned());
     };
+    // SAFETY: `NSWorkspace` was looked up; `sharedWorkspace` returns the process-wide workspace.
     let shared: *mut AnyObject = unsafe { msg_send![workspace, sharedWorkspace] };
     if shared.is_null() {
         return Err("openURL is not linked".to_owned());
     }
     let text = NSString::from_str(url);
+    // SAFETY: `text` is the URL string, and `NSURL` was looked up above.
     let nsurl: *mut AnyObject = unsafe { msg_send![urls, URLWithString: &*text] };
     if nsurl.is_null() {
         return Err("unsupported URL".to_owned());
     }
+    // SAFETY: `shared` and `nsurl` are the non-null objects from the calls above.
     let opened: bool = unsafe { msg_send![shared, openURL: nsurl] };
     if opened {
         Ok(())
@@ -1355,13 +1381,16 @@ fn write_pasteboard(text: &str) {
     let Some(class) = objc2::runtime::AnyClass::get(c"NSPasteboard") else {
         return;
     };
+    // SAFETY: `NSPasteboard` was looked up; `generalPasteboard` returns the process pasteboard.
     let pasteboard: *mut AnyObject = unsafe { msg_send![class, generalPasteboard] };
     if pasteboard.is_null() {
         return;
     }
     let value = NSString::from_str(text);
     let kind = NSString::from_str("public.utf8-plain-text");
+    // SAFETY: `pasteboard` is the non-null general pasteboard.
     let _: () = unsafe { msg_send![pasteboard, clearContents] };
+    // SAFETY: `value` and `kind` are NSStrings that outlive this call.
     let _: bool = unsafe { msg_send![pasteboard, setString: &*value, forType: &*kind] };
 }
 
@@ -1378,15 +1407,18 @@ fn pasteboard_string(kind: &str) -> String {
     let Some(class) = objc2::runtime::AnyClass::get(c"NSPasteboard") else {
         return String::new();
     };
+    // SAFETY: `NSPasteboard` was looked up; `generalPasteboard` returns the process pasteboard.
     let pasteboard: *mut AnyObject = unsafe { msg_send![class, generalPasteboard] };
     if pasteboard.is_null() {
         return String::new();
     }
     let kind = NSString::from_str(kind);
+    // SAFETY: `pasteboard` is non-null and `kind` is the UTI string for this read.
     let value: *mut AnyObject = unsafe { msg_send![pasteboard, stringForType: &*kind] };
     if value.is_null() {
         return String::new();
     }
+    // SAFETY: `value` is the non-null NSString returned for this pasteboard type.
     unsafe { &*value.cast::<NSString>() }.to_string()
 }
 
@@ -1401,24 +1433,27 @@ fn wake_main() {
 
 fn dispatch_main(work: Box<dyn FnOnce() + Send>) {
     let context = Box::into_raw(Box::new(work));
-    // SAFETY: `_dispatch_main_q` is the queue behind `dispatch_get_main_queue()`.
-    // `context` is a boxed closure. The callback takes ownership of it.
+    // SAFETY: `_dispatch_main_q` is the main queue, and `context` is the boxed closure the callback frees.
     unsafe {
         let queue = std::ptr::addr_of!(_dispatch_main_q).cast_mut().cast();
         dispatch_async_f(queue, context.cast(), run_on_main);
     }
 }
 
+// SAFETY: `dispatch_async_f` calls this once with the pointer passed as `context`.
 unsafe extern "C" fn run_on_main(context: *mut c_void) {
+    // SAFETY: `context` is the boxed closure from `dispatch_main`, and this call takes it once.
     let work = unsafe { Box::from_raw(context.cast::<Box<dyn FnOnce() + Send>>()) };
     work();
 }
 
+// SAFETY: these are the libdispatch symbols used to hop to the main queue.
 unsafe extern "C" {
     static _dispatch_main_q: u8;
     fn dispatch_async_f(
         queue: *mut c_void,
         context: *mut c_void,
+        // SAFETY: the callback is `run_on_main`, which frees `context` exactly once.
         work: unsafe extern "C" fn(*mut c_void),
     );
 }

@@ -78,7 +78,6 @@ pub fn module(host: Arc<dyn StorageHost>) -> HostModule {
                 }
             }),
             HostMethod::promise("delete", {
-                let dir = dir.clone();
                 move |args, settle, exec| {
                     let path = str_arg(args);
                     match document_relative(&path) {
@@ -194,7 +193,6 @@ pub fn async_storage(host: Arc<dyn StorageHost>) -> HostModule {
                 }
             }),
             HostMethod::promise("clear", {
-                let dir = dir.clone();
                 move |_args, settle, exec| match dir.clone() {
                     Err(message) => exec.now(settle, PluginResult::Failed { message }),
                     Ok(root) => exec.worker(

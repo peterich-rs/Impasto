@@ -3,7 +3,10 @@
 use std::ffi::{c_char, c_void};
 
 #[repr(C)]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "the interpreter fills every field; Rust does not read each one"
+)]
 pub(super) struct QjsFns {
     pub(super) session: *mut c_void,
     pub(super) column: unsafe extern "C" fn(*mut c_void, f32, *mut u64) -> i32,

@@ -173,7 +173,10 @@ impl VelocityRing {
         if dt <= 0.0 {
             return (0.0, 0.0);
         }
-        ((dx / dt) as f32, (dy / dt) as f32)
+        (
+            crate::cast::f32_from_f64(dx / dt),
+            crate::cast::f32_from_f64(dy / dt),
+        )
     }
 
     pub fn velocity(&self) -> (f32, f32) {
@@ -415,7 +418,7 @@ impl PointerContest {
         self.members.is_empty()
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "the contest winner is part of the recognizer API")]
     pub fn winner(&self) -> Option<&dyn Recognizer> {
         self.winner.map(|index| self.members[index].as_ref())
     }
@@ -438,9 +441,7 @@ impl PointerContest {
                 Vote::Accept | Vote::Undecided => {}
             }
         }
-        let Some(index) = accepted else {
-            return None;
-        };
+        let index = accepted?;
         for (other, member) in self.members.iter_mut().enumerate() {
             if other != index {
                 member.on_reject();

@@ -454,7 +454,8 @@ fn tab_bar_merges_into_one_run() -> Result<(), crate::Error> {
         tree.set_viewport(0.0, 0.0, 360.0, 640.0)?;
         let root = tree.column(0.0)?;
         for index in 0..buttons {
-            let button = tree.decorated([index as u8, 0, 0, 255], 0.0)?;
+            let channel = u8::try_from(index).unwrap_or(u8::MAX);
+            let button = tree.decorated([channel, 0, 0, 255], 0.0)?;
             let label = tree.text(format!("tab{index}"), 16.0, [0, 0, 0, 255])?;
             tree.add_child(button, label)?;
             tree.add_child(root, button)?;
@@ -527,7 +528,7 @@ fn settled_clip_is_a_command() -> Result<(), crate::Error> {
             .all(|layer| !matches!(layer.kind, protocol::LayerKind::Clip { .. }))
     );
     assert_eq!(tree.picture_cache_len(), 1);
-    let picture = layers.pictures.iter().next().expect("picture");
+    let picture = layers.pictures.first().expect("picture");
     assert!(
         picture
             .commands
@@ -619,7 +620,7 @@ fn translate_transform_matches_flat() -> Result<(), crate::Error> {
             .iter()
             .any(|layer| matches!(layer.kind, protocol::LayerKind::Transform { .. }))
     );
-    let picture = layers.pictures.iter().next().expect("picture");
+    let picture = layers.pictures.first().expect("picture");
     let local = picture.commands.iter().find_map(|command| match command {
         protocol::Command::Text { x, .. } => Some(*x),
         _ => None,

@@ -153,11 +153,13 @@ impl Shaper for ImpellerShaper {
         self.typography
             .borrow_mut()
             .caret_for(
-                &key.text,
-                font_size,
-                f32::from_bits(key.max_width),
-                [0, 0, 0, 255],
-                key.style.as_ref(),
+                engine::ParagraphQuery {
+                    utf8: &key.text,
+                    font_size,
+                    max_width: f32::from_bits(key.max_width),
+                    color: [0, 0, 0, 255],
+                    style: key.style.as_ref(),
+                },
                 unit,
                 affinity == Affinity::Upstream,
             )
@@ -170,11 +172,13 @@ impl Shaper for ImpellerShaper {
         self.typography
             .borrow_mut()
             .caret_at_point(
-                &key.text,
-                font_size,
-                f32::from_bits(key.max_width),
-                [0, 0, 0, 255],
-                key.style.as_ref(),
+                engine::ParagraphQuery {
+                    utf8: &key.text,
+                    font_size,
+                    max_width: f32::from_bits(key.max_width),
+                    color: [0, 0, 0, 255],
+                    style: key.style.as_ref(),
+                },
                 x,
                 y,
             )

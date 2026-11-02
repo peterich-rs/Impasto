@@ -296,7 +296,7 @@ fn wake_loop(deadlines: Receiver<Option<i64>>, inbox: Arc<Inbox>) {
     loop {
         let wait = match deadline {
             Some(due) => {
-                let now = mono_ms() as i64;
+                let now = ms_i64(mono_ms());
                 if due <= now {
                     inbox.post(Command::Wake);
                     deadline = None;
@@ -315,6 +315,16 @@ fn wake_loop(deadlines: Receiver<Option<i64>>, inbox: Arc<Inbox>) {
             }
             Err(RecvTimeoutError::Disconnected) => break,
         }
+    }
+}
+
+pub(crate) fn ms_i64(ms: f64) -> i64 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "deadlines are millisecond timestamps and fit in i64"
+    )]
+    {
+        ms as i64
     }
 }
 

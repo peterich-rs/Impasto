@@ -1,5 +1,10 @@
 //! Impeller renderer. It paints a [`protocol::LayerTree`] and does not read scene bytes.
 
+#![allow(
+    unsafe_code,
+    reason = "Impeller FFI and the bindgen bindings live in this crate"
+)]
+
 mod script;
 mod status;
 
@@ -49,6 +54,16 @@ pub use missing::note_swapchain_extent;
 pub use player::VulkanSwapchain;
 #[cfg(all(impeller, target_os = "android"))]
 pub use player::note_swapchain_extent;
+
+/// Text, size, width, color, and style that identify one measured paragraph.
+#[derive(Clone, Copy)]
+pub struct ParagraphQuery<'a> {
+    pub utf8: &'a str,
+    pub font_size: f32,
+    pub max_width: f32,
+    pub color: [u8; 4],
+    pub style: &'a protocol::TextStyle,
+}
 
 /// A caret in paragraph space. `unit` is a UTF-16 index. `x` and `y` are
 /// relative to the paragraph origin.
