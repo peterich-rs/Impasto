@@ -77,7 +77,7 @@ export interface Permissions {
 
 日志管道已经分级：`hostshell::LogLevel` 是 `Error`、`Warn`、`Info`、`Debug`，`IMPASTO_LOG` 在宿主 sink 过滤，缺省 `info`。QuickJS 的 `console.*`（0 log、1 info、2 warn、3 error）映射进同一张表。engine 的段落、picture、纹理缓存计数不再往 stderr 打一次性警告，改由 `SubmitStats` 的 `paragraphs`、`pictures`、`textures` 字段随帧日志输出，超预算帧的计时行是 `Warn` 级。
 
-还没做的是帧报告。`IMPASTO_DUMP` 现在只写一帧 PNG。目标是 `IMPASTO_INSPECT=<dir>`：同一帧的纹理 PNG 加一份 `frame.json`（层树结构、每层命令数、picture owner、耗时分解 layout/record/submit/present、缓存计数）。它在渲染线程上写文件，不新开线程边界，也不做常驻 devtool 窗口——那是第二套 UI 栈。浏览器式面板等出现第二个真实应用再评估。
+`IMPASTO_INSPECT=<dir>` 已落地：渲染线程把已记录的 `FrameTiming` 和层树写成 `frame.json`。macOS 在没有 `IMPASTO_DUMP` 时把同一帧的 PNG 写到该目录的 `frame.png` 并退出。没有常驻 devtool 窗口。
 
 ## Gallery 能力面
 

@@ -1,5 +1,6 @@
 package dev.impasto.host;
 
+import android.graphics.Rect;
 import android.os.Bundle;
 import android.view.View;
 import android.view.accessibility.AccessibilityNodeInfo;
@@ -8,7 +9,8 @@ import android.view.accessibility.AccessibilityNodeProvider;
 /**
  * Virtual nodes for the semantics tree. Arrays come from
  * {@code publishSemantics}: id, role ordinal, label, value, flags, actions,
- * scroll (offsetX, offsetY, contentW, contentH), description, parent (0 is root).
+ * scroll (offsetX, offsetY, contentW, contentH), description, parent (0 is root),
+ * bounds (x, y, w, h in scene points).
  */
 public final class AccessBridge extends AccessibilityNodeProvider {
     static final int ROLE_BUTTON = 1;
@@ -38,6 +40,7 @@ public final class AccessBridge extends AccessibilityNodeProvider {
     private float[] scroll = new float[0];
     private String[] descriptions = new String[0];
     private long[] parents = new long[0];
+    private float[] bounds = new float[0];
     private View host;
 
     public void update(
@@ -49,7 +52,8 @@ public final class AccessBridge extends AccessibilityNodeProvider {
             int[] actions,
             float[] scroll,
             String[] descriptions,
-            long[] parents) {
+            long[] parents,
+            float[] bounds) {
         this.ids = ids == null ? new long[0] : ids;
         this.roles = roles == null ? new int[0] : roles;
         this.labels = labels == null ? new String[0] : labels;
@@ -59,6 +63,7 @@ public final class AccessBridge extends AccessibilityNodeProvider {
         this.scroll = scroll == null ? new float[0] : scroll;
         this.descriptions = descriptions == null ? new String[0] : descriptions;
         this.parents = parents == null ? new long[0] : parents;
+        this.bounds = bounds == null ? new float[0] : bounds;
     }
 
     @Override
@@ -129,7 +134,30 @@ public final class AccessBridge extends AccessibilityNodeProvider {
         } else {
             info.setParent(host);
         }
+        setBoundsInScreen(info, host, virtualViewId);
         return info;
+    }
+
+    private void setBoundsInScreen(AccessibilityNodeInfo info, View host, int index) {
+        int base = index * 4;
+        if (base < 0 || base + 3 >= bounds.length) {
+            return;
+        }
+        int[] origin = new int[2];
+        host.getLocationOnScreen(origin);
+        float density = host.getResources().getDisplayMetrics().density;
+        if (!(density > 0f)) {
+            density = 1f;
+        }
+        float x = bounds[base];
+        float y = bounds[base + 1];
+        float w = bounds[base + 2];
+        float h = bounds[base + 3];
+        int left = origin[0] + Math.round(x * density);
+        int top = origin[1] + Math.round(y * density);
+        int right = origin[0] + Math.round((x + w) * density);
+        int bottom = origin[1] + Math.round((y + h) * density);
+        info.setBoundsInScreen(new Rect(left, top, right, bottom));
     }
 
     @Override

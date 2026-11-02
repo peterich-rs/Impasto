@@ -675,7 +675,12 @@ impl<'a> crate::painter::Painter<'a> {
         mode: BlendMode,
     ) -> bool {
         let blend = match mode {
-            BlendMode::SrcOver => return false,
+            // SrcOver is the default composite. Recording omits it. If a command
+            // still arrives, balance Pop without a GPU save and without failing the frame.
+            BlendMode::SrcOver => {
+                self.saves.push(Save::Skipped);
+                return true;
+            }
             BlendMode::Multiply => ffi::ImpellerBlendMode::kImpellerBlendModeMultiply,
             BlendMode::Screen => ffi::ImpellerBlendMode::kImpellerBlendModeScreen,
         };
@@ -714,7 +719,8 @@ impl<'a> crate::painter::Painter<'a> {
                 }
                 true
             }
-            Some(_) => {
+            Some(Save::Skipped) => true,
+            Some(Save::Clip | Save::Transform) => {
                 unsafe { ffi::ImpellerDisplayListBuilderRestore(builder) };
                 true
             }
@@ -734,6 +740,7 @@ impl<'a> crate::painter::Painter<'a> {
                 Save::Clip | Save::Transform => {
                     unsafe { ffi::ImpellerDisplayListBuilderRestore(builder) };
                 }
+                Save::Skipped => {}
             }
         }
     }

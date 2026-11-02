@@ -6,16 +6,18 @@ use std::time::{Duration, Instant};
 
 use engine::ImagePixels;
 
-/// Owned RGBA8888. The render thread turns this into [`ImagePixels`] for `submit`.
-#[derive(Clone, Debug)]
+/// Decoded image. `gpu` is set when `io` already uploaded the texture.
+#[derive(Debug)]
 pub struct ImageHandle {
     pub source: Arc<str>,
     pub generation: u64,
     pub size: [u32; 2],
     pub pixels: Arc<[u8]>,
+    /// Present blits this. Empty pixels are fine once it is set.
+    pub gpu: Option<engine::GpuImage>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum ImageReady {
     Decoded(ImageHandle),
     Missing {
@@ -332,7 +334,13 @@ impl ImageCache {
                         source_log(&source)
                     ));
                 }
-                let bytes = handle.pixels.len();
+                let bytes = if handle.gpu.is_some() {
+                    handle.size[0]
+                        .saturating_mul(handle.size[1])
+                        .saturating_mul(4) as usize
+                } else {
+                    handle.pixels.len()
+                };
                 if !self.admit_ready(bytes) {
                     self.entries
                         .insert(key, Entry::Failed { at: Instant::now() });
@@ -419,6 +427,21 @@ impl ImageCache {
     }
 
     /// Drops decoded pixels and in-flight keys. A late decode for the old generation is ignored.
+    /// Retains uploaded textures into the engine cache for this scale bucket.
+    /// Submit then blits them and does not create textures on the render thread.
+    pub fn install_uploaded(&self, engine: &mut engine::Engine, bucket: u8) {
+        for (key, entry) in &self.entries {
+            if key.bucket != bucket {
+                continue;
+            }
+            if let Entry::Ready { handle, .. } = entry
+                && let Some(gpu) = &handle.gpu
+            {
+                engine.install_uploaded(key.source.as_ref(), gpu);
+            }
+        }
+    }
+
     pub fn trim(&mut self) {
         self.entries.clear();
         self.pending.clear();
@@ -472,6 +495,18 @@ impl ImageCache {
     }
 }
 
+/// Uploads `handle` when a factory is available, then drops the CPU copy.
+pub fn attach_upload(handle: &mut ImageHandle, factory: Option<&engine::TextureFactory>) {
+    let Some(factory) = factory else {
+        return;
+    };
+    let Some(gpu) = factory.upload_rgba(handle.size[0], handle.size[1], &handle.pixels) else {
+        return;
+    };
+    handle.gpu = Some(gpu);
+    handle.pixels = Arc::from([]);
+}
+
 pub fn pixel_count_ok(size: [u32; 2]) -> bool {
     u64::from(size[0]).saturating_mul(u64::from(size[1])) <= IMAGE_PIXEL_LIMIT
 }
@@ -486,6 +521,7 @@ mod tests {
             generation,
             size: [1, 1],
             pixels: Arc::from(vec![0u8; bytes.max(4)]),
+            gpu: None,
         }
     }
 

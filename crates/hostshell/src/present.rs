@@ -11,9 +11,12 @@ pub enum AfterPresent {
         again: bool,
     },
     Stop,
-    /// Drawable or display list was not ready, or the list was rejected.
-    /// The surface stays.
+    /// The drawable was not acquired, or present itself failed.
+    /// The surface stays. The shell backs off after repeated misses.
     Retry,
+    /// The list was rejected. The surface stays. This is not a lost drawable,
+    /// so it does not rebuild a swapchain or enter present backoff.
+    Rejected,
     /// The engine context is gone.
     Fatal,
 }
@@ -36,8 +39,9 @@ pub fn after_present(result: Result<Presented, engine::Status>, again: bool) -> 
         Ok(Presented::Continue) => AfterPresent::Shown { again },
         Ok(Presented::Stop) => AfterPresent::Stop,
         Err(
-            engine::Status::PresentFailed | engine::Status::NotReady | engine::Status::BadScene,
+            engine::Status::PresentFailed | engine::Status::NotReady | engine::Status::AcquireMiss,
         ) => AfterPresent::Retry,
+        Err(engine::Status::BadScene) => AfterPresent::Rejected,
         Err(engine::Status::NotLinked) => AfterPresent::Fatal,
     }
 }
@@ -59,6 +63,10 @@ mod tests {
         );
         assert_eq!(
             after_present(Err(engine::Status::BadScene), false),
+            AfterPresent::Rejected
+        );
+        assert_eq!(
+            after_present(Err(engine::Status::AcquireMiss), false),
             AfterPresent::Retry
         );
         assert_eq!(

@@ -163,12 +163,14 @@ impl Bridge {
             let actions = jni::objects::JIntArray::new(env, n)?;
             let parents = jni::objects::JLongArray::new(env, n)?;
             let scroll = jni::objects::JFloatArray::new(env, n.saturating_mul(4))?;
+            let bounds = jni::objects::JFloatArray::new(env, n.saturating_mul(4))?;
             let mut id_buf = vec![0i64; n];
             let mut role_buf = vec![0i32; n];
             let mut flag_buf = vec![0i32; n];
             let mut action_buf = vec![0i32; n];
             let mut parent_buf = vec![0i64; n];
             let mut scroll_buf = vec![0.0f32; n.saturating_mul(4)];
+            let mut bounds_buf = vec![0.0f32; n.saturating_mul(4)];
             for (index, node) in nodes.iter().enumerate() {
                 id_buf[index] = node.id as i64;
                 role_buf[index] = node.role;
@@ -180,6 +182,10 @@ impl Bridge {
                 scroll_buf[base + 1] = node.offset_y;
                 scroll_buf[base + 2] = node.content_w;
                 scroll_buf[base + 3] = node.content_h;
+                bounds_buf[base] = node.x;
+                bounds_buf[base + 1] = node.y;
+                bounds_buf[base + 2] = node.w;
+                bounds_buf[base + 3] = node.h;
             }
             ids.set_region(env, 0, &id_buf)?;
             roles.set_region(env, 0, &role_buf)?;
@@ -187,6 +193,7 @@ impl Bridge {
             actions.set_region(env, 0, &action_buf)?;
             parents.set_region(env, 0, &parent_buf)?;
             scroll.set_region(env, 0, &scroll_buf)?;
+            bounds.set_region(env, 0, &bounds_buf)?;
             let empty = env.new_string("")?;
             let labels = jni::objects::JObjectArray::<JString>::new(env, n, &empty)?;
             let values = jni::objects::JObjectArray::<JString>::new(env, n, &empty)?;
@@ -203,7 +210,7 @@ impl Bridge {
                 self.view.as_obj(),
                 jni::jni_str!("publishSemantics"),
                 jni::jni_sig!(
-                    "([J[I[Ljava/lang/String;[Ljava/lang/String;[I[I[F[Ljava/lang/String;[J)V"
+                    "([J[I[Ljava/lang/String;[Ljava/lang/String;[I[I[F[Ljava/lang/String;[J[F)V"
                 ),
                 &[
                     jni::objects::JValue::Object(ids.as_ref()),
@@ -215,6 +222,7 @@ impl Bridge {
                     jni::objects::JValue::Object(scroll.as_ref()),
                     jni::objects::JValue::Object(descriptions.as_ref()),
                     jni::objects::JValue::Object(parents.as_ref()),
+                    jni::objects::JValue::Object(bounds.as_ref()),
                 ],
             )?;
             Ok(())
@@ -357,10 +365,6 @@ impl Services for Shared {
             return None;
         }
         self.0.font_bytes()
-    }
-
-    fn image<'a>(&'a self, _source: &str) -> Option<engine::ImagePixels<'a>> {
-        None
     }
 
     fn semantics(&self, update: &uicore::SemanticsUpdate) {
@@ -615,9 +619,11 @@ fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
         launch_url: Arc::clone(&launch_url),
         http: Some(hostshell::http_client()?),
         open_surface: Box::new(|engine, target| {
-            Ok(Box::new(VulkanSurface::open(engine, target.layer)?))
+            let pixels = hostshell::pixel_size(target.metrics);
+            Ok(Box::new(VulkanSurface::open(engine, target.layer, pixels)?))
         }),
         dump_list: false,
+        inspect: std::env::var_os("IMPASTO_INSPECT").map(std::path::PathBuf::from),
     }
     .with_module(hostshell::clipboard(Arc::clone(&bridge) as _))
     .with_module(hostshell::linking(Arc::clone(&bridge) as _, launch_url))
@@ -730,6 +736,7 @@ fn post_ready(host: &Host) -> bool {
             id,
             layer: NativePtr(ptr),
             metrics,
+            pixels: window_pixels(window),
         })
     });
     if let Some(target) = ready {
@@ -760,7 +767,6 @@ fn configure_window_buffers(window: &NativeWindow) {
             &format!("buffer geometry {width}x{height}: {error}"),
         );
     }
-    engine::note_swapchain_extent(width as u32, height as u32);
 }
 
 fn metrics_of(viewport: &Viewport) -> Option<Metrics> {
@@ -806,12 +812,12 @@ fn publish_metrics(host: &Host) {
     if post_ready(host) {
         return;
     }
-    let (id, metrics, dismiss) = host.ui(|ui| {
+    let (id, metrics, pixels, dismiss) = host.ui(|ui| {
         let Some(window) = ui.window.as_ref() else {
-            return (None, None, false);
+            return (None, None, None, false);
         };
         let Some(viewport) = ui.viewport.as_ref() else {
-            return (None, None, false);
+            return (None, None, None, false);
         };
         let sized = Viewport {
             width_px: window.width(),
@@ -828,13 +834,29 @@ fn publish_metrics(host: &Host) {
         };
         let dismiss = ui.ime_bottom > 0 && sized.ime_bottom == 0;
         ui.ime_bottom = sized.ime_bottom;
-        (ui.surface_id, metrics_of(&sized), dismiss)
+        (
+            ui.surface_id,
+            metrics_of(&sized),
+            Some(window_pixels(window)),
+            dismiss,
+        )
     });
     if dismiss {
         host.link.post(Command::ImeDismissed);
     }
-    if let (Some(id), Some(metrics)) = (id, metrics) {
-        host.link.post(Command::SurfaceChanged { id, metrics });
+    if let (Some(id), Some(metrics), Some(pixels)) = (id, metrics, pixels) {
+        host.link.post(Command::SurfaceChanged {
+            id,
+            metrics,
+            pixels,
+        });
+    }
+}
+
+fn window_pixels(window: &NativeWindow) -> engine::PixelSize {
+    engine::PixelSize {
+        width: u32::try_from(window.width()).unwrap_or(0),
+        height: u32::try_from(window.height()).unwrap_or(0),
     }
 }
 
@@ -941,6 +963,7 @@ fn image_handle(source: &str, width: u32, height: u32, pixels: Vec<u8>) -> hosts
         generation: 0,
         size: [width, height],
         pixels: Arc::from(pixels),
+        gpu: None,
     }
 }
 
@@ -1313,13 +1336,10 @@ pub extern "system" fn Java_dev_impasto_host_HostView_nativePointer(
         let Some((dx, dy)) = android_wheel(wheel_x, wheel_y) else {
             return;
         };
-        host.link.post(Command::Pointer(uicore::PointerEvent::wheel(
-            x,
-            y,
-            time_ms as f64,
-            dx,
-            dy,
-        )));
+        let mut event = uicore::PointerEvent::wheel(x, y, time_ms as f64, dx, dy);
+        event.pointer = uicore::PointerId(u64::from(pointer_id as u32));
+        event.kind = kind;
+        host.link.post(Command::Pointer(event));
         return;
     }
     let phase = match phase {
@@ -1371,12 +1391,9 @@ pub extern "system" fn Java_dev_impasto_host_HostView_nativeZoom(
     if !scale.is_finite() || scale <= 0.0 {
         return;
     }
-    host.link.post(Command::Pointer(uicore::PointerEvent::zoom(
-        x,
-        y,
-        time_ms as f64,
-        scale,
-    )));
+    let mut event = uicore::PointerEvent::zoom(x, y, time_ms as f64, scale);
+    event.kind = uicore::PointerKind::Touch;
+    host.link.post(Command::Pointer(event));
 }
 
 #[unsafe(no_mangle)]

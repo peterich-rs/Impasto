@@ -226,26 +226,26 @@ impl Typography {
         if family.as_bytes().is_empty() {
             return Err(Status::BadScene);
         }
-        let owned = data.to_vec();
+        let lease = fonts::FontLease::new(data.to_vec());
         let mapping = ffi::ImpellerMapping {
-            data: owned.as_ptr(),
-            length: owned.len() as u64,
-            // Impeller invokes this even when registration fails. A null pointer crashes.
-            // The callback does not free `owned`.
-            on_release: Some(crate::player::keep_font_bytes),
+            data: fonts::FontLease::data(lease),
+            length: fonts::FontLease::len(lease),
+            // Impeller invokes this even when registration fails. A null callback crashes.
+            on_release: Some(fonts::release_font_lease),
         };
-        // SAFETY: `mapping.data` points at `owned` for this call. Failure drops the
-        // mapping inside Impeller before `owned` is stored. Success moves `owned` into
-        // `faces`, which outlives the typeface that borrowed it.
+        // SAFETY: `mapping.data` points at the lease until both references are released.
+        // The third argument is the callback baton. Failure still invokes the callback,
+        // which drops Impeller's reference; this function then drops the owner's.
         let registered = unsafe {
             ffi::ImpellerTypographyContextRegisterFont(
                 self.context,
                 &mapping,
-                ptr::null_mut(),
+                lease.cast(),
                 family.as_ptr(),
             )
         };
         if !registered {
+            fonts::FontLease::release(lease);
             return Err(Status::BadScene);
         }
         if self.fonts.default_family.is_none() {
@@ -257,13 +257,11 @@ impl Typography {
             .iter_mut()
             .find(|face| face.family.as_bytes() == family.as_bytes())
         {
-            face.bytes = owned;
+            fonts::FontLease::release(face.lease);
+            face.lease = lease;
             face.family = family;
         } else {
-            self.fonts.faces.push(Face {
-                bytes: owned,
-                family,
-            });
+            self.fonts.faces.push(Face { lease, family });
         }
         Ok(())
     }
@@ -273,7 +271,7 @@ impl Drop for Typography {
     fn drop(&mut self) {
         self.release_all_paragraphs();
         // SAFETY: the handle came from ImpellerTypographyContextNew. Release is a no-op on null.
-        // Face bytes drop with `fonts` after this returns, so they outlive the context.
+        // Face leases drop after this returns. A late mapping callback still holds its reference.
         unsafe { ffi::ImpellerTypographyContextRelease(self.context) };
     }
 }

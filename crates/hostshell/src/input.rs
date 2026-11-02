@@ -3,6 +3,166 @@ use std::collections::{HashSet, VecDeque};
 use session::{InputEvent, Metrics};
 use uicore::{Button, Buttons, Phase, PointerEvent, PointerId, PointerKind};
 
+/// Last sample for one pointer. Used to legalize the packet, not to resample it.
+#[derive(Clone, Copy, Debug)]
+struct Tracked {
+    kind: PointerKind,
+    x: f32,
+    y: f32,
+    time_ms: f64,
+    button: Button,
+    buttons: Buttons,
+    modifiers: uicore::Modifiers,
+    down: bool,
+    moved: bool,
+}
+
+/// Fills missing samples. Does not invent positions between two real samples.
+#[derive(Debug, Default)]
+struct PointerConverter {
+    tracked: std::collections::HashMap<PointerId, Tracked>,
+}
+
+impl PointerConverter {
+    fn accept(&mut self, event: PointerEvent) -> Vec<PointerEvent> {
+        let mut out = Vec::new();
+        match event.phase {
+            Phase::Move | Phase::Up | Phase::Cancel => {
+                if let Some(tracked) = self.tracked.get(&event.pointer).copied() {
+                    let leaving = event.x < 0.0 || event.y < 0.0;
+                    let missing_move = event.phase == Phase::Up && tracked.down && !tracked.moved;
+                    if leaving || missing_move {
+                        let synthesized = move_at(event.pointer, &tracked, event.time_ms);
+                        self.note(&synthesized);
+                        out.push(synthesized);
+                    }
+                } else if event.phase == Phase::Move && event.buttons.bits() != 0 {
+                    out.push(PointerEvent {
+                        phase: Phase::Down,
+                        ..event
+                    });
+                }
+            }
+            Phase::Down | Phase::Wheel | Phase::Zoom => {}
+        }
+        let event = if event.phase == Phase::Cancel {
+            self.cancel_from(event)
+        } else {
+            event
+        };
+        self.note(&event);
+        out.push(event);
+        out
+    }
+
+    fn cancel_from(&self, event: PointerEvent) -> PointerEvent {
+        let Some(tracked) = self.tracked.get(&event.pointer) else {
+            return event;
+        };
+        PointerEvent {
+            pointer: event.pointer,
+            kind: tracked.kind,
+            phase: Phase::Cancel,
+            x: tracked.x,
+            y: tracked.y,
+            time_ms: tracked.time_ms,
+            button: Button::None,
+            buttons: Buttons::empty(),
+            modifiers: tracked.modifiers,
+            dx: 0.0,
+            dy: 0.0,
+            zoom: 0.0,
+        }
+    }
+
+    fn note(&mut self, event: &PointerEvent) {
+        if matches!(event.phase, Phase::Wheel | Phase::Zoom) {
+            return;
+        }
+        let tracked = self.tracked.entry(event.pointer).or_insert(Tracked {
+            kind: event.kind,
+            x: event.x,
+            y: event.y,
+            time_ms: event.time_ms,
+            button: event.button,
+            buttons: event.buttons,
+            modifiers: event.modifiers,
+            down: false,
+            moved: false,
+        });
+        tracked.kind = event.kind;
+        if event.x >= 0.0 && event.y >= 0.0 {
+            tracked.x = event.x;
+            tracked.y = event.y;
+        }
+        tracked.time_ms = event.time_ms;
+        tracked.button = event.button;
+        tracked.buttons = event.buttons;
+        tracked.modifiers = event.modifiers;
+        match event.phase {
+            Phase::Down => {
+                tracked.down = true;
+                tracked.moved = false;
+            }
+            Phase::Move => tracked.moved = true,
+            Phase::Up | Phase::Cancel => {
+                tracked.down = false;
+            }
+            Phase::Wheel | Phase::Zoom => {}
+        }
+    }
+
+    fn cancel_event(&self, id: PointerId) -> PointerEvent {
+        self.tracked.get(&id).map_or_else(
+            || PointerEvent {
+                pointer: id,
+                kind: PointerKind::Mouse,
+                phase: Phase::Cancel,
+                x: 0.0,
+                y: 0.0,
+                time_ms: 0.0,
+                button: Button::None,
+                buttons: Buttons::empty(),
+                modifiers: uicore::Modifiers::empty(),
+                dx: 0.0,
+                dy: 0.0,
+                zoom: 0.0,
+            },
+            |tracked| PointerEvent {
+                pointer: id,
+                kind: tracked.kind,
+                phase: Phase::Cancel,
+                x: tracked.x,
+                y: tracked.y,
+                time_ms: tracked.time_ms,
+                button: Button::None,
+                buttons: Buttons::empty(),
+                modifiers: tracked.modifiers,
+                dx: 0.0,
+                dy: 0.0,
+                zoom: 0.0,
+            },
+        )
+    }
+}
+
+fn move_at(pointer: PointerId, tracked: &Tracked, time_ms: f64) -> PointerEvent {
+    PointerEvent {
+        pointer,
+        kind: tracked.kind,
+        phase: Phase::Move,
+        x: tracked.x,
+        y: tracked.y,
+        time_ms,
+        button: tracked.button,
+        buttons: tracked.buttons,
+        modifiers: tracked.modifiers,
+        dx: 0.0,
+        dy: 0.0,
+        zoom: 0.0,
+    }
+}
+
 /// Pointer filtering and "should another frame be requested" for one shell.
 #[derive(Debug)]
 pub struct Input {
@@ -12,6 +172,7 @@ pub struct Input {
     frozen: Option<VecDeque<PointerEvent>>,
     ime_dismissed: bool,
     active: HashSet<PointerId>,
+    converter: PointerConverter,
     paused: bool,
     pending_metrics: Option<Metrics>,
     sent_metrics: Option<Metrics>,
@@ -33,6 +194,7 @@ impl Input {
             frozen: None,
             ime_dismissed: false,
             active: HashSet::new(),
+            converter: PointerConverter::default(),
             paused: false,
             pending_metrics: None,
             sent_metrics: None,
@@ -41,16 +203,18 @@ impl Input {
 
     /// Returns whether the platform should arm the next vsync.
     pub fn push_pointer(&mut self, event: PointerEvent) -> bool {
-        match event.phase {
-            Phase::Down => {
-                self.active.insert(event.pointer);
+        for event in self.converter.accept(event) {
+            match event.phase {
+                Phase::Down => {
+                    self.active.insert(event.pointer);
+                }
+                Phase::Up | Phase::Cancel => {
+                    self.active.remove(&event.pointer);
+                }
+                Phase::Move | Phase::Wheel | Phase::Zoom => {}
             }
-            Phase::Up | Phase::Cancel => {
-                self.active.remove(&event.pointer);
-            }
-            Phase::Move | Phase::Wheel | Phase::Zoom => {}
+            self.pointers.push_back(event);
         }
-        self.pointers.push_back(event);
         !self.paused
     }
 
@@ -78,7 +242,7 @@ impl Input {
         let mut frozen = std::mem::take(&mut self.pointers);
         let ids: Vec<PointerId> = self.active.drain().collect();
         for id in ids {
-            frozen.push_back(cancel_event(id));
+            frozen.push_back(self.converter.cancel_event(id));
         }
         self.frozen = Some(frozen);
         true
@@ -134,23 +298,6 @@ impl Input {
     }
 }
 
-fn cancel_event(pointer: PointerId) -> PointerEvent {
-    PointerEvent {
-        pointer,
-        kind: PointerKind::Mouse,
-        phase: Phase::Cancel,
-        x: 0.0,
-        y: 0.0,
-        time_ms: 0.0,
-        button: Button::None,
-        buttons: Buttons::empty(),
-        modifiers: uicore::Modifiers::empty(),
-        dx: 0.0,
-        dy: 0.0,
-        zoom: 0.0,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +325,7 @@ mod tests {
         assert_eq!(
             phases(&input),
             vec![
+                Phase::Down,
                 Phase::Move,
                 Phase::Down,
                 Phase::Move,
@@ -198,6 +346,43 @@ mod tests {
     }
 
     #[test]
+    fn an_up_without_a_move_is_preceded_by_one_and_cancel_keeps_the_sample() {
+        let mut input = Input::new();
+        let mut down = event(Phase::Down, 4.0);
+        down.kind = PointerKind::Touch;
+        down.time_ms = 8.0;
+        input.push_pointer(down);
+        let mut up = event(Phase::Up, 9.0);
+        up.kind = PointerKind::Touch;
+        up.time_ms = 12.0;
+        input.push_pointer(up);
+        assert_eq!(phases(&input), vec![Phase::Down, Phase::Move, Phase::Up]);
+        let mut cancel = event(Phase::Cancel, 0.0);
+        cancel.kind = PointerKind::Mouse;
+        input.push_pointer(cancel);
+        let last = input.pointers.back().expect("cancel");
+        assert_eq!(last.phase, Phase::Cancel);
+        assert_eq!(last.kind, PointerKind::Touch);
+        assert_eq!((last.x, last.y), (9.0, 0.0));
+        assert_eq!(last.time_ms, 12.0);
+    }
+
+    #[test]
+    fn a_leave_is_preceded_by_the_last_in_view_move() {
+        let mut input = Input::new();
+        let mut hover = event(Phase::Move, 6.0);
+        hover.button = Button::None;
+        hover.buttons = Buttons::empty();
+        input.push_pointer(hover);
+        let mut leave = event(Phase::Move, -1.0);
+        leave.button = Button::None;
+        leave.buttons = Buttons::empty();
+        input.push_pointer(leave);
+        assert_eq!(phases(&input), vec![Phase::Move, Phase::Move, Phase::Move]);
+        let xs: Vec<f32> = input.pointers.iter().map(|event| event.x).collect();
+        assert_eq!(xs, vec![6.0, 6.0, -1.0]);
+    }
+
     fn pause_cancels_an_open_press() {
         let mut input = Input::new();
         input.push_pointer(event(Phase::Down, 1.0));

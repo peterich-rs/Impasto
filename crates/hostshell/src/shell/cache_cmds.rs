@@ -1,4 +1,4 @@
-use super::{Runtime, arm};
+use super::{Runtime, arm, flush_gpu};
 use crate::LogLevel;
 use crate::command::Command;
 use crate::error::BootError;
@@ -22,10 +22,11 @@ fn invalidate(runtime: &mut Runtime) {
 }
 
 fn memory_warning(runtime: &mut Runtime) {
-    runtime.installed = None;
-    runtime.present_retry_at = None;
+    flush_gpu(runtime);
     runtime.images.trim();
-    arm(runtime);
+    if !runtime.input.is_paused() {
+        arm(runtime);
+    }
 }
 
 fn image_ready(runtime: &mut Runtime, ready: ImageReady) {

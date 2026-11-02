@@ -669,15 +669,18 @@ impl Host {
         }
         let scale = point_scale(window, self.mtm());
         let layer = Retained::as_ptr(&self.ivars().layer) as *mut c_void;
-        self.ivars().link.post(Command::SurfaceReady(SurfaceTarget {
-            id: hostshell::SurfaceId::fresh(),
-            layer: NativePtr(layer),
-            metrics: metrics(
-                scene_f32(CONTENT_WIDTH),
-                scene_f32(CONTENT_HEIGHT),
-                scene_f32(scale),
-            ),
-        }));
+        let metrics = metrics(
+            scene_f32(CONTENT_WIDTH),
+            scene_f32(CONTENT_HEIGHT),
+            scene_f32(scale),
+        );
+        self.ivars()
+            .link
+            .post(Command::SurfaceReady(SurfaceTarget::new(
+                hostshell::SurfaceId::fresh(),
+                NativePtr(layer),
+                metrics,
+            )));
         self.post_settings();
         println!("host ready");
         let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -846,10 +849,6 @@ impl Services for MacServices {
         (family == FONT_FAMILY).then_some(self.font.as_slice())
     }
 
-    fn image<'a>(&'a self, _source: &str) -> Option<engine::ImagePixels<'a>> {
-        None
-    }
-
     fn semantics(&self, update: &uicore::SemanticsUpdate) {
         let view = self.ime_view.load(Ordering::Acquire) as usize;
         if view == 0 {
@@ -950,7 +949,10 @@ pub fn run(
         )));
     };
     let vsync = DisplayLink::new().map_err(RunError::Window)?;
-    let dump = std::env::var_os("IMPASTO_DUMP").map(PathBuf::from);
+    let inspect = std::env::var_os("IMPASTO_INSPECT").map(PathBuf::from);
+    let dump = std::env::var_os("IMPASTO_DUMP")
+        .map(PathBuf::from)
+        .or_else(|| inspect.as_ref().map(|dir| dir.join("frame.png")));
     let exit_code = Arc::new(AtomicI32::new(0));
     let exit_for_stop = Arc::clone(&exit_code);
     let on_stop: Arc<dyn Fn(i32) + Send + Sync> = Arc::new(move |code| {
@@ -1004,6 +1006,7 @@ pub fn run(
                 )))
             }),
             dump_list,
+            inspect,
         }
         .with_module(hostshell::clipboard(Arc::clone(&mac) as _))
         .with_module(hostshell::linking(
@@ -1146,6 +1149,7 @@ fn image_handle(source: &str, rgba: crate::pixels::Rgba) -> hostshell::ImageHand
         generation: 0,
         size: [rgba.width, rgba.height],
         pixels: Arc::from(rgba.pixels),
+        gpu: None,
     }
 }
 

@@ -13,7 +13,11 @@ pub(super) fn handle(
     match command {
         Command::SurfaceDestroyed { id } => destroyed(runtime, id, acks),
         Command::SurfaceReady(target) => ready(runtime, target, acks),
-        Command::SurfaceChanged { id, metrics } => changed(runtime, id, metrics),
+        Command::SurfaceChanged {
+            id,
+            metrics,
+            pixels,
+        } => changed(runtime, id, metrics, pixels),
         _ => Ok(false),
     }
 }
@@ -44,14 +48,19 @@ fn ready(runtime: &mut Runtime, target: SurfaceTarget, acks: &Acks) -> Result<bo
     Ok(false)
 }
 
-fn changed(runtime: &mut Runtime, id: SurfaceId, metrics: Metrics) -> Result<bool, BootError> {
-    if runtime.surfaces.changed(id, metrics) == Changed::Staged {
+fn changed(
+    runtime: &mut Runtime,
+    id: SurfaceId,
+    metrics: Metrics,
+    pixels: engine::PixelSize,
+) -> Result<bool, BootError> {
+    if runtime.surfaces.changed(id, metrics, pixels) == Changed::Staged {
         note_scale(runtime, metrics.device_pixel_ratio);
         if runtime.input.set_metrics(metrics) {
             arm(runtime);
         }
     } else {
-        match runtime.surfaces.retarget(id, metrics) {
+        match runtime.surfaces.retarget(id, metrics, pixels) {
             PendingMetrics::Absent => {}
             PendingMetrics::Updated => note_scale(runtime, metrics.device_pixel_ratio),
             PendingMetrics::Rearm => {

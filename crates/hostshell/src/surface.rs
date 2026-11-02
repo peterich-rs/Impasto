@@ -53,6 +53,7 @@ struct Open {
     id: SurfaceId,
     surface: Box<dyn Surface>,
     metrics: Metrics,
+    pixels: engine::PixelSize,
 }
 
 pub struct SurfaceHost {
@@ -125,8 +126,13 @@ impl SurfaceHost {
         }
     }
 
-    /// Writes metrics onto a pending open. A gave-up target starts another round.
-    pub fn retarget(&mut self, id: SurfaceId, metrics: Metrics) -> PendingMetrics {
+    /// Writes metrics and pixels onto a pending open. A gave-up target starts another round.
+    pub fn retarget(
+        &mut self,
+        id: SurfaceId,
+        metrics: Metrics,
+        pixels: engine::PixelSize,
+    ) -> PendingMetrics {
         let Some(pending) = self.pending.as_mut() else {
             return PendingMetrics::Absent;
         };
@@ -134,6 +140,9 @@ impl SurfaceHost {
             return PendingMetrics::Absent;
         }
         pending.target.metrics = metrics;
+        if pixels.is_usable() {
+            pending.target.pixels = pixels;
+        }
         if pending.gave_up {
             pending.attempts = 0;
             pending.gave_up = false;
@@ -160,6 +169,7 @@ impl SurfaceHost {
     ) -> Ready {
         let id = target.id;
         let metrics = target.metrics;
+        let pixels = target.pixels;
         match open(engine, target) {
             Ok(surface) => {
                 let replaced = self.current.as_ref().map(|open| open.id);
@@ -167,6 +177,7 @@ impl SurfaceHost {
                     id,
                     surface,
                     metrics,
+                    pixels,
                 });
                 Ready::Opened { id, replaced }
             }
@@ -174,7 +185,12 @@ impl SurfaceHost {
         }
     }
 
-    pub fn changed(&mut self, id: SurfaceId, metrics: Metrics) -> Changed {
+    pub fn changed(
+        &mut self,
+        id: SurfaceId,
+        metrics: Metrics,
+        pixels: engine::PixelSize,
+    ) -> Changed {
         let Some(open) = self.current.as_mut() else {
             return Changed::Ignored;
         };
@@ -182,6 +198,9 @@ impl SurfaceHost {
             return Changed::Ignored;
         }
         open.metrics = metrics;
+        if pixels.is_usable() {
+            open.pixels = pixels;
+        }
         Changed::Staged
     }
 
@@ -207,11 +226,41 @@ impl SurfaceHost {
         let Some(open) = self.current.as_mut() else {
             return Err(engine::Status::NotReady);
         };
-        open.surface.present(engine)
+        let pixels = open.pixels;
+        open.surface.present(engine, pixels)
     }
 
     pub fn clear(&mut self) {
         self.current = None;
+    }
+}
+
+/// Physical pixels for a surface. A non-positive or non-finite axis is zero,
+/// which tells Vulkan to keep the extent it already has.
+pub fn pixel_size(metrics: Metrics) -> engine::PixelSize {
+    engine::PixelSize {
+        width: points_to_pixels(metrics.width, metrics.device_pixel_ratio),
+        height: points_to_pixels(metrics.height, metrics.device_pixel_ratio),
+    }
+}
+
+fn points_to_pixels(points: f32, scale: f32) -> u32 {
+    if !points.is_finite() || !scale.is_finite() || points <= 0.0 || scale <= 0.0 {
+        return 0;
+    }
+    let pixels = points * scale;
+    if !pixels.is_finite() || pixels <= 1.0 {
+        return 0;
+    }
+    if pixels >= u32::MAX as f32 {
+        return u32::MAX;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the value was checked to fit in u32"
+    )]
+    {
+        pixels.round() as u32
     }
 }
 
@@ -223,12 +272,23 @@ mod tests {
     use crate::command::{SurfaceId, SurfaceTarget};
     use crate::ptr::NativePtr;
 
+    #[test]
+    fn pixel_size_is_points_times_scale_and_rejects_a_non_positive_axis() {
+        let metrics = Metrics::new(360.0, 640.0, 2.0);
+        assert_eq!(
+            super::pixel_size(metrics),
+            engine::PixelSize::new(720, 1280)
+        );
+        let broken = Metrics::new(0.0, 640.0, 2.0);
+        assert_eq!(super::pixel_size(broken).width, 0);
+    }
+
     fn target(id: u64) -> SurfaceTarget {
-        SurfaceTarget {
-            id: SurfaceId(id),
-            layer: NativePtr(std::ptr::null_mut()),
-            metrics: Metrics::new(10.0, 20.0, 2.0),
-        }
+        SurfaceTarget::new(
+            SurfaceId(id),
+            NativePtr(std::ptr::null_mut()),
+            Metrics::new(10.0, 20.0, 2.0),
+        )
     }
 
     #[test]
@@ -268,12 +328,15 @@ mod tests {
             OpenRetry::GaveUp
         ));
         let metrics = Metrics::new(11.0, 20.0, 2.0);
-        assert!(matches!(host.retarget(id, metrics), PendingMetrics::Rearm));
+        assert!(matches!(
+            host.retarget(id, metrics, engine::PixelSize::new(22, 40)),
+            PendingMetrics::Rearm
+        ));
         let (kept, attempts) = host.take_attempt().expect("rearmed");
         assert_eq!(attempts, 0);
         assert_eq!(kept.metrics.width, 11.0);
         assert!(matches!(
-            host.retarget(SurfaceId(9), metrics),
+            host.retarget(SurfaceId(9), metrics, engine::PixelSize::default()),
             PendingMetrics::Absent
         ));
     }

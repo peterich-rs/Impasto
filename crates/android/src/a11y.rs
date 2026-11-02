@@ -31,6 +31,11 @@ pub struct BridgeNode {
     pub content_w: f32,
     pub content_h: f32,
     pub description: String,
+    /// Scene-point box. The view converts it to screen pixels for TalkBack.
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
 }
 
 pub fn role_ordinal(role: SemanticsRole) -> i32 {
@@ -92,6 +97,10 @@ pub fn bridge_nodes(update: &SemanticsUpdate) -> Vec<BridgeNode> {
                 content_w,
                 content_h,
                 description: node.description.clone().unwrap_or_default(),
+                x: node.rect.x,
+                y: node.rect.y,
+                w: node.rect.w,
+                h: node.rect.h,
             }
         })
         .collect()
@@ -304,6 +313,10 @@ mod tests {
         assert_eq!(nodes[0].role, ROLE_BUTTON);
         assert_eq!(nodes[0].label, "Go");
         assert_eq!(nodes[0].parent, None);
+        assert_eq!(
+            (nodes[0].x, nodes[0].y, nodes[0].w, nodes[0].h),
+            (0.0, 0.0, 40.0, 20.0)
+        );
         assert!(nodes.iter().all(|node| node.role != super::ROLE_GENERIC));
         assert!(is_clickable(nodes[0].actions));
     }

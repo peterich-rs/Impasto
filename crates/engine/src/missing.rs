@@ -3,12 +3,37 @@ use protocol::LayerTree;
 
 pub struct Typography;
 
+/// No GPU texture. Upload is unavailable when Impeller is not linked.
+#[derive(Debug)]
+pub struct GpuImage {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Placeholder. [`Engine::texture_factory`] is always `None`.
+pub struct TextureFactory;
+
+impl TextureFactory {
+    pub fn upload_rgba(&self, _width: u32, _height: u32, _rgba: &[u8]) -> Option<GpuImage> {
+        None
+    }
+}
+
 pub struct Engine {
     typography: std::rc::Rc<std::cell::RefCell<Typography>>,
 }
 
 #[cfg(target_os = "android")]
 pub struct VulkanSwapchain;
+
+#[cfg(target_os = "android")]
+impl VulkanSwapchain {
+    pub fn extent(&self) -> crate::PixelSize {
+        crate::PixelSize::default()
+    }
+
+    pub fn set_extent(&mut self, _size: crate::PixelSize) {}
+}
 
 impl Engine {
     #[cfg(not(target_os = "android"))]
@@ -26,6 +51,15 @@ impl Engine {
     pub fn register_font(&mut self, _data: &[u8], _family: &str) -> Result<(), Status> {
         Err(Status::NotLinked)
     }
+
+    /// No GPU objects exist on the stub. Drawing stays [`Status::NotLinked`].
+    pub fn trim(&mut self) {}
+
+    pub fn texture_factory(&self) -> Option<TextureFactory> {
+        None
+    }
+
+    pub fn install_uploaded(&mut self, _source: &str, _image: &GpuImage) {}
 
     pub fn submit_layers<'pixels>(
         &mut self,
@@ -50,6 +84,7 @@ impl Engine {
     pub fn create_swapchain(
         &self,
         _native_window: *mut std::ffi::c_void,
+        _pixels: crate::PixelSize,
     ) -> Result<VulkanSwapchain, Status> {
         Err(Status::NotLinked)
     }
@@ -211,9 +246,6 @@ impl Typography {
         (false, [0, 0, 0, 0])
     }
 }
-
-#[cfg(target_os = "android")]
-pub fn note_swapchain_extent(_width: u32, _height: u32) {}
 
 impl crate::Surface for Engine {
     fn register_font(&mut self, data: &[u8], family: &str) -> Result<(), Status> {
