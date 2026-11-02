@@ -23,6 +23,8 @@ pub(crate) enum Save {
     Transform,
     /// Paint read by `Restore`. Released after that restore.
     Layer(ffi::ImpellerPaint),
+    /// SrcOver is not a layer. Pop balances the command without `Restore`.
+    Skipped,
 }
 
 pub struct Engine {
@@ -34,9 +36,9 @@ pub struct Engine {
     textures: crate::textures::TextureStore,
     typography: crate::typography::TypographyHandle,
     last_submit: crate::SubmitStats,
-    /// `dlopen` handle for `libvulkan.so`. Null until [`Engine::create_vulkan`].
+    /// Proc table for this context. Null until [`Engine::create_vulkan`].
     #[cfg(target_os = "android")]
-    vulkan_lib: *mut c_void,
+    vulkan_procs: *mut vulkan::VulkanProcs,
     /// Impeller objects are created and used on the render thread.
     render_thread: PhantomData<*mut ()>,
 }
@@ -47,16 +49,27 @@ mod vulkan;
 
 #[cfg(target_os = "android")]
 pub use vulkan::VulkanSwapchain;
-#[cfg(target_os = "android")]
-pub use vulkan::note_swapchain_extent;
+
+/// The linked Impeller library must match the header this crate was built against.
+fn impeller_version_matches() -> bool {
+    // SAFETY: ImpellerGetVersion takes no pointers and does not retain state.
+    let linked = unsafe { ffi::ImpellerGetVersion() };
+    linked == ffi::IMPELLER_VERSION
+}
 
 pub(crate) mod ffi;
 mod images;
 mod ops;
+mod upload;
+
+pub use upload::{GpuImage, TextureFactory};
 
 impl Engine {
     #[cfg(not(target_os = "android"))]
     pub fn create_metal() -> Result<Self, Status> {
+        if !impeller_version_matches() {
+            return Err(Status::NotLinked);
+        }
         // SAFETY: ImpellerContextCreateMetalNew and ImpellerTypographyContextNew are the
         // documented constructors. A null handle means this SDK cannot create Metal.
         // Release is a no-op on null, per impeller.h.
@@ -92,7 +105,7 @@ impl Engine {
             typography: std::mem::ManuallyDrop::new(crate::typography::Typography::new(typography)),
             last_submit: crate::SubmitStats::default(),
             #[cfg(target_os = "android")]
-            vulkan_lib: ptr::null_mut(),
+            vulkan_procs: ptr::null_mut(),
             render_thread: PhantomData,
         }
     }
@@ -237,7 +250,7 @@ impl Engine {
             return Err(Status::NotReady);
         }
         if metal_drawable.is_null() {
-            return Err(Status::PresentFailed);
+            return Err(Status::AcquireMiss);
         }
         // SAFETY: `metal_drawable` is a CAMetalDrawable from the system default device,
         // kept alive by the caller for this call. The context uses that same device.
@@ -284,6 +297,14 @@ impl Engine {
         let mut typography = typography.borrow_mut();
         typography.set_list_installed(false);
         typography.release_all_paragraphs();
+    }
+
+    /// Drops the installed display list, pictures, textures, and paragraphs.
+    /// The context and registered faces stay, so the next [`Self::submit_layers`]
+    /// can rebuild. Drawing returns [`Status::NotReady`] until that submit.
+    pub fn trim(&mut self) {
+        self.release_frame();
+        self.last_submit = crate::SubmitStats::default();
     }
 
     /// Test helper. Each call uses a new picture generation so the commands are rebuilt.
@@ -392,8 +413,12 @@ impl Drop for Engine {
             ffi::ImpellerContextRelease(self.context);
         }
         #[cfg(target_os = "android")]
-        if !self.vulkan_lib.is_null() {
-            vulkan::close_library(self.vulkan_lib);
+        if !self.vulkan_procs.is_null() {
+            // SAFETY: `vulkan_procs` came from `Box::into_raw` in `create_vulkan`.
+            // The context that used it as `user_data` was released above.
+            let procs = unsafe { Box::from_raw(self.vulkan_procs) };
+            self.vulkan_procs = ptr::null_mut();
+            vulkan::close_library(procs.library);
         }
     }
 }
@@ -936,9 +961,6 @@ pub(crate) fn clamped_radius(radius: f32, width: f32, height: f32) -> f32 {
     radius.min(width.min(height) * 0.5)
 }
 
-/// Impeller calls this when it drops a font mapping. The bytes stay in `Engine::faces`.
-pub(crate) unsafe extern "C" fn keep_font_bytes(_user_data: *mut c_void) {}
-
 /// Arguments passed into Impeller for units that must stay in scene points.
 #[cfg(test)]
 mod paint_trace {
@@ -1320,6 +1342,26 @@ mod tests {
         Some(engine)
     }
 
+    #[test]
+    fn an_uploaded_texture_is_blitted_without_resolving_pixels() {
+        let Some(mut engine) = opened() else {
+            return;
+        };
+        let Some(factory) = engine.texture_factory() else {
+            return;
+        };
+        let image = factory.upload_rgba(1, 1, &[0, 0, 0, 255]).expect("upload");
+        engine.install_uploaded("asset:logo", &image);
+        let mut calls = 0;
+        engine
+            .paint(&logo_list(), 1.0, |_| {
+                calls += 1;
+                None
+            })
+            .expect("blit installed texture");
+        assert_eq!(calls, 0);
+    }
+
     fn logo_list() -> DrawList {
         DrawList {
             commands: vec![protocol::Command::Image {
@@ -1332,6 +1374,52 @@ mod tests {
                 required: true,
             }],
         }
+    }
+
+    #[test]
+    fn trim_drops_the_list_and_the_next_submit_rebuilds() {
+        let Some(mut engine) = opened() else {
+            return;
+        };
+        let tree = protocol::LayerTree::empty();
+        engine
+            .submit_layers(&tree, 1.0, |_| None)
+            .expect("empty tree submits");
+        engine.trim();
+        assert_eq!(
+            engine.draw_metal(std::ptr::null_mut()),
+            Err(Status::NotReady)
+        );
+        engine
+            .submit_layers(&tree, 1.0, |_| None)
+            .expect("submit after trim");
+        assert_eq!(
+            engine.draw_metal(std::ptr::null_mut()),
+            Err(Status::AcquireMiss)
+        );
+    }
+
+    #[test]
+    fn src_over_blend_does_not_reject_the_frame() {
+        let Some(mut engine) = opened() else {
+            return;
+        };
+        let list = DrawList {
+            commands: vec![
+                protocol::Command::PushBlend {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 10.0,
+                    h: 8.0,
+                    mode: protocol::BlendMode::SrcOver,
+                },
+                solid_rect(0.0),
+                protocol::Command::Pop,
+            ],
+        };
+        engine
+            .paint(&list, 1.0, |_| None)
+            .expect("SrcOver is not a layer");
     }
 
     fn opened() -> Option<Engine> {

@@ -26,6 +26,21 @@ pub struct SurfaceTarget {
     pub id: SurfaceId,
     pub layer: NativePtr,
     pub metrics: Metrics,
+    /// Drawable size in physical pixels. Vulkan stores this on the swapchain.
+    pub pixels: engine::PixelSize,
+}
+
+impl SurfaceTarget {
+    /// `pixels` is derived from `metrics`. Hosts that know the window buffer
+    /// size should overwrite [`Self::pixels`] with that value.
+    pub fn new(id: SurfaceId, layer: NativePtr, metrics: Metrics) -> Self {
+        Self {
+            id,
+            layer,
+            metrics,
+            pixels: crate::pixel_size(metrics),
+        }
+    }
 }
 
 pub enum Command {
@@ -48,6 +63,7 @@ pub enum Command {
     SurfaceChanged {
         id: SurfaceId,
         metrics: Metrics,
+        pixels: engine::PixelSize,
     },
     SurfaceDestroyed {
         id: SurfaceId,

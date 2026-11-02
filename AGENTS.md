@@ -115,7 +115,7 @@ Solid 的 `@solidjs/universal` 只有 `createElement`、`insertNode`、`setPrope
 | 基础控件 | 布局原语和组合控件内核在 `uicore/`。语言包是皮：模板、信号和渲染回调 | `Text`、`Row`、`Column`、`Stack`、`Padding`、`Clip`、`Opacity`、`Scroll`、`Transform` 是渲染对象。`Button` 用它们加上手势组成。`Field` 绑定 `uicore` 的 `TextEditor`。`ListDriver` 做窗口、测量调度和可见集 diff。`ScrollController` 做夹紧、拖动续算和刷新阈值。`createSlot` 仍是语言侧的 owner。编辑按字形簇进行，偏移是 UTF-16 |
 | 应用 | `apps/gallery-solid` | 只写状态和控件组合 |
 
-一帧在渲染线程上完成。平台线程把指针、metrics 和生命周期放进命令队列后立即返回。命中测试用上一帧的几何，在渲染线程排空队列时做。监听器只写状态。接着才冲刷、布局、布局回调、录制。`layer_epoch` 未变且缩放相同则跳过 `submit_layers`。`needs_present` 为假时也跳过 `present`；为真时 `PresentCached`，把已安装的显示列表画进新 drawable。`Resumed`、`Invalidate` 和 present 失败会置 `needs_present`。`MemoryWarning` 清掉已安装的列表，下一帧重新 `submit_layers`。没有新的指针、metrics 或表面事件时不再登记下一帧，除非会话申请了恰好下一帧。这个申请在 present 之后被取走。动画要连续播放，就在每一帧里再申请。当前结构见 `docs/architecture.md`。三端差异见 `docs/platform-hosts.md`。迭代规划见 `docs/refactor-plan.md`。
+一帧在渲染线程上完成。平台线程把指针、metrics 和生命周期放进命令队列后立即返回。命中测试用上一帧的几何，在渲染线程排空队列时做。监听器只写状态。接着才冲刷、布局、布局回调、录制。`layer_epoch` 未变且缩放相同则跳过 `submit_layers`。`needs_present` 为假时也跳过 `present`；为真时 `PresentCached`，把已安装的显示列表画进新 drawable。`Resumed`、`Invalidate` 和 present 失败会置 `needs_present`。`Hidden` 与 `Paused` 调用 `Engine::trim`，GPU 进入 `Flush`：显示列表、picture、纹理和段落释放，上下文留下，这一态不 acquire。`Resumed` 后下一帧 `Submit` 重建。`MemoryWarning` 同样 `Flush`，并丢掉 `ImageCache` 的像素；窗口仍可见时下一帧重建后再 present。`Dead` 取消这一帧，不碰 GPU。没有新的指针、metrics 或表面事件时不再登记下一帧，除非会话申请了恰好下一帧。这个申请在 present 之后被取走。动画要连续播放，就在每一帧里再申请。当前结构见 `docs/architecture.md`。三端差异见 `docs/platform-hosts.md`。迭代规划见 `docs/refactor-plan.md`。
 
 ```
 pointer → hit-test（上一帧）→ 监听器写信号
@@ -220,11 +220,11 @@ Impeller 句柄的所有权以刚解压的 `impeller.h` 为准。绘制在 `engi
 
 - 函数名以 `New` 结尾，头文件写明用对应的 `Release` 释放：调用方持有一次引用，用完释放一次。context、typography、paint、path、texture、paragraph、display list、surface、swapchain、glyph info、color source、image filter 属于这一类。
 - 取得函数没有 `New`，头文件写明结果缓存在已有对象上：指针是借来的。读出数字后丢掉，不要 `Release`。`ImpellerParagraphGetLineMetrics` 的行高缓存在段落上，段落释放时由 Impeller 释放。`Engine::lines` 把基线、宽高和码元区间抄进 `LineMetric`。同一段再查一次仍用这份缓存。
-- `ImpellerMapping.on_release` 在头文件里可空。`register_font` 仍传入非空的 `keep_font_bytes`：创建字型失败时 Impeller 也会调用回调，空指针会崩溃。回调不释放字节。成功时字节留在 `Typography` 的 `FontRegistry`，typography context 在 `Typography::drop` 里释放，先于这些字节。纹理走 `ImpellerTextureCreateWithContentsNew`。没有回调时，头文件允许 Impeller 在调用返回前拷贝像素；像素活到这次调用返回，`on_release` 保持空。不要把调用方的缓冲交给一个会事后释放的回调。
+- `ImpellerMapping.on_release` 在头文件里可空。`register_font` 仍传入非空回调：创建字型失败时 Impeller 也会调用，空指针会崩溃。baton 是引用计数，宿主和回调各持一份，归零才释放字节。typography context 在 `Typography::drop` 里释放。纹理在 `io` 上走 `ImpellerTextureCreateWithContentsNew`，`on_release` 保持空，像素活到这次调用返回，句柄经 `ImageReady` 交回渲染线程。`submit_layers` 只 blit 已安装的纹理。没有图形 context 时仍把 RGBA 交到 `submit`。不要把调用方的缓冲交给一个会事后释放的回调。
 
 升级 `engine/engine.pin` 时，对每个新返回的句柄再读一遍头文件，按前两条归类，再改绘制和文字模块。
 
-`Fill` 在缩放之前铺满画布。缩放只做一次，放在第一条非填充命令之前。渲染引擎使用命令里的 family、字号、字重、对齐、方向和 `max_width`，字号不乘 `point_scale`。左上角放在命令的 `(x, y)`。绘制用 paint 槽里带前景色的段落。布局测量命中同一槽。光标用度量缓存。相同文字、字号、宽度、颜色和样式跨帧复用，命中不复制整段文字。纹理按 `source` 跨帧复用，资产在进程内不可变。成功提交结束时只释放当前显示列表没有引用的纹理和段落，以及本帧没有 retain 的 `refs == 0` 测量槽。`register_font` 使旧段落在下一次提交释放显示列表之后失效。上屏失败是 `PresentFailed`，宿主保留表面并再要一帧。还没有表面或显示列表是 `NotReady`。图片要调用方给出紧排 RGBA8888。Impeller 不接受 PNG 或 JPEG。`source` 以 `asset:` 开头。macOS 把它映射成启动参数里的资产目录下的 `<name>.png`，默认目录是 `crates/macos/assets`。Android 映射成 APK 里的 `assets/images/<name>.png`。缺图仍是 `BadScene`。
+`Fill` 在缩放之前铺满画布。缩放只做一次，放在第一条非填充命令之前。渲染引擎使用命令里的 family、字号、字重、对齐、方向和 `max_width`，字号不乘 `point_scale`。左上角放在命令的 `(x, y)`。绘制用 paint 槽里带前景色的段落。布局测量命中同一槽。光标用度量缓存。相同文字、字号、宽度、颜色和样式跨帧复用，命中不复制整段文字。纹理按 `source` 跨帧复用，资产在进程内不可变。成功提交结束时只释放当前显示列表没有引用的纹理和段落，以及本帧没有 retain 的 `refs == 0` 测量槽。`register_font` 使旧段落在下一次提交释放显示列表之后失效。上屏失败是 `PresentFailed`，宿主保留表面并再要一帧。空 acquire 是 `AcquireMiss`，同样留着表面；Vulkan 连续 3 次后丢掉链并用同一窗口重建。还没有表面或显示列表是 `NotReady`。`BadScene` 不进入这次退避，也不重建链。图片要调用方给出紧排 RGBA8888。Impeller 不接受 PNG 或 JPEG。`source` 以 `asset:` 开头。macOS 把它映射成启动参数里的资产目录下的 `<name>.png`，默认目录是 `crates/macos/assets`。Android 映射成 APK 里的 `assets/images/<name>.png`。缺图仍是 `BadScene`。
 
 窗口标题 `impasto counter`，内容默认 360×640，可关闭、可最小化、可缩放。缩放和改尺寸都投递 `Metrics`。`contentsScale` 和 `drawableSize` 来自窗口所在屏幕的 `backingScaleFactor`（取不到时用 2），尺寸变化时按内容视图重算。这一层 `framebufferOnly = NO`，这样 `IMPASTO_DUMP` 能读回纹理。
 

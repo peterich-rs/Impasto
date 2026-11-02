@@ -12,6 +12,7 @@ import android.view.Display;
 public final class VsyncWaiter {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final long intervalNanos;
+    private long lastFrameNanos;
     private boolean posted;
 
     public VsyncWaiter(Display display) {
@@ -35,18 +36,28 @@ public final class VsyncWaiter {
             Choreographer.getInstance().postVsyncCallback(data -> {
                 posted = false;
                 long frame = data.getFrameTimeNanos();
-                Choreographer.FrameTimeline[] lines = data.getFrameTimelines();
-                long target = lines.length == 0
-                        ? frame + intervalNanos
-                        : lines[0].getExpectedPresentationTimeNanos();
-                nativeOnVsync(frame, target, intervalNanos);
+                long target = data.getPreferredFrameTimeline().getExpectedPresentationTimeNanos();
+                nativeOnVsync(frame, target, frameInterval(frame));
             });
         } else {
             Choreographer.getInstance().postFrameCallback(frame -> {
                 posted = false;
-                nativeOnVsync(frame, frame + intervalNanos, intervalNanos);
+                long interval = frameInterval(frame);
+                nativeOnVsync(frame, frame + interval, interval);
             });
         }
+    }
+
+    private long frameInterval(long frame) {
+        long interval = intervalNanos;
+        if (lastFrameNanos > 0 && frame > lastFrameNanos) {
+            long delta = frame - lastFrameNanos;
+            if (delta > 1_000_000L && delta < 100_000_000L) {
+                interval = delta;
+            }
+        }
+        lastFrameNanos = frame;
+        return interval;
     }
 
     private static native void nativeOnVsync(long frameTimeNanos, long targetNanos, long intervalNanos);

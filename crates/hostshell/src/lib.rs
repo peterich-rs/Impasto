@@ -43,6 +43,7 @@ pub use ptr::NativePtr;
 pub use session::{FrameTime, Lifecycle};
 pub use shaper::ImpellerShaper;
 pub use shell::{DropWait, EngineSlot, Link, Poster, start};
+pub use surface::pixel_size;
 pub use timing::FrameTiming;
 
 /// QuickJS console callback. Level 3 is an error.
@@ -81,7 +82,6 @@ pub enum Presented {
 
 pub trait Services: Send {
     fn font(&self, family: &str) -> Option<&[u8]>;
-    fn image<'a>(&'a self, source: &str) -> Option<engine::ImagePixels<'a>>;
     fn log(&self, level: LogLevel, message: &str);
     /// A new semantics tree. The default ignores it. Called on the render thread.
     fn semantics(&self, _update: &uicore::SemanticsUpdate) {}
@@ -97,7 +97,16 @@ pub trait Services: Send {
 }
 
 pub trait Surface {
-    fn present(&mut self, engine: &mut engine::Engine) -> Result<Presented, engine::Status>;
+    /// Acquire, draw, and present.
+    ///
+    /// `pixels` is the drawable size the host posted with the surface. Vulkan
+    /// copies it onto the swapchain before acquire. Metal reads the size from
+    /// the layer.
+    fn present(
+        &mut self,
+        engine: &mut engine::Engine,
+        pixels: engine::PixelSize,
+    ) -> Result<Presented, engine::Status>;
 }
 
 pub trait Vsync: Send + Sync {
@@ -121,6 +130,8 @@ pub struct Boot {
     pub open_surface: OpenSurface,
     /// Log one line of layer-tree shape after a frame records new layers.
     pub dump_list: bool,
+    /// `IMPASTO_INSPECT` directory. The render thread writes `frame.json` there.
+    pub inspect: Option<std::path::PathBuf>,
 }
 
 impl Boot {

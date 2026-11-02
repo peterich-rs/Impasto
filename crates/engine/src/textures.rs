@@ -30,6 +30,10 @@ impl TextureStore {
         self.map.len()
     }
 
+    pub(crate) fn contains(&self, source: &str) -> bool {
+        self.map.contains_key(source)
+    }
+
     pub(crate) fn get_mut(&mut self, source: &str) -> Option<&mut CachedTexture> {
         self.map.get_mut(source)
     }

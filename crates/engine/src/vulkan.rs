@@ -1,10 +1,11 @@
 //! Vulkan context and swapchain. Compiled only for Android.
 
+use std::cell::Cell;
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
-use crate::Status;
+use crate::{PixelSize, Status};
 
 use super::ffi;
 
@@ -65,23 +66,84 @@ type CreateSwapchain = unsafe extern "C" fn(
 
 type GetDeviceProc = unsafe extern "C" fn(device: *mut c_void, name: *const c_char) -> *mut c_void;
 
-static DESIRED_WIDTH: AtomicU32 = AtomicU32::new(0);
-static DESIRED_HEIGHT: AtomicU32 = AtomicU32::new(0);
-static REAL_CREATE: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-static REAL_GET_DEVICE: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-
-/// Pixel size of the `ANativeWindow` the next `vkCreateSwapchainKHR` should use.
+/// Proc table and swapchain extent for one Vulkan context.
 ///
-/// The render thread is the only caller. The Vulkan proc callback has no other
-/// place to carry this size: it was fixed to the `libvulkan.so` handle when the
-/// context was created.
-pub fn note_swapchain_extent(width: u32, height: u32) {
-    DESIRED_WIDTH.store(width, Ordering::SeqCst);
-    DESIRED_HEIGHT.store(height, Ordering::SeqCst);
+/// `ImpellerContextCreateVulkanNew` stores this pointer as `user_data`.
+/// `vkCreateSwapchainKHR` has no user-data argument, so the render thread
+/// publishes this pointer on the calling thread for the duration of create
+/// and acquire. A second engine does not see this extent.
+pub(super) struct VulkanProcs {
+    pub(super) library: *mut c_void,
+    extent_width: AtomicU32,
+    extent_height: AtomicU32,
+    real_create: AtomicPtr<c_void>,
+    real_get_device: AtomicPtr<c_void>,
+}
+
+impl VulkanProcs {
+    fn new(library: *mut c_void) -> Self {
+        Self {
+            library,
+            extent_width: AtomicU32::new(0),
+            extent_height: AtomicU32::new(0),
+            real_create: AtomicPtr::new(ptr::null_mut()),
+            real_get_device: AtomicPtr::new(ptr::null_mut()),
+        }
+    }
+
+    fn set_extent(&self, size: PixelSize) {
+        if !size.is_usable() {
+            return;
+        }
+        self.extent_width.store(size.width, Ordering::Release);
+        self.extent_height.store(size.height, Ordering::Release);
+    }
+}
+
+thread_local! {
+    static CURRENT_PROCS: Cell<*mut VulkanProcs> = const { Cell::new(ptr::null_mut()) };
+}
+
+/// Publishes `procs` to the swapchain hook for this thread, then restores the
+/// previous pointer. The hook has no user-data argument of its own.
+struct CurrentProcs {
+    previous: *mut VulkanProcs,
+}
+
+impl CurrentProcs {
+    fn enter(procs: *mut VulkanProcs) -> Self {
+        let previous = CURRENT_PROCS.with(|cell| cell.replace(procs));
+        Self { previous }
+    }
+}
+
+impl Drop for CurrentProcs {
+    fn drop(&mut self) {
+        CURRENT_PROCS.with(|cell| cell.set(self.previous));
+    }
+}
+
+fn current_procs() -> *mut VulkanProcs {
+    CURRENT_PROCS.with(|cell| cell.get())
 }
 
 pub struct VulkanSwapchain {
     raw: ffi::ImpellerVulkanSwapchain,
+    extent: PixelSize,
+}
+
+impl VulkanSwapchain {
+    pub fn extent(&self) -> PixelSize {
+        self.extent
+    }
+
+    /// Remembers the drawable size. The next acquire copies it into this
+    /// engine's proc table. A non-usable size leaves the previous extent.
+    pub fn set_extent(&mut self, size: PixelSize) {
+        if size.is_usable() {
+            self.extent = size;
+        }
+    }
 }
 
 impl Drop for VulkanSwapchain {
@@ -101,42 +163,58 @@ pub(super) fn close_library(handle: *mut c_void) {
 
 impl super::Engine {
     pub fn create_vulkan() -> Result<Self, Status> {
+        if !super::impeller_version_matches() {
+            return Err(Status::NotLinked);
+        }
         // SAFETY: `libvulkan.so` is the platform loader. The handle stays in
-        // `vulkan_lib` until this engine is dropped, after the context is released.
+        // `VulkanProcs` until this engine is dropped, after the context is released.
         let vulkan_lib = unsafe { dlopen(c"libvulkan.so".as_ptr(), RTLD_NOW) };
         if vulkan_lib.is_null() {
             return Err(Status::NotLinked);
         }
+        let procs = Box::into_raw(Box::new(VulkanProcs::new(vulkan_lib)));
         let settings = ffi::ImpellerContextVulkanSettings {
-            user_data: vulkan_lib,
+            user_data: procs.cast(),
             proc_address_callback: Some(proc_address),
             enable_vulkan_validation: false,
         };
         // SAFETY: `settings.proc_address_callback` points at `proc_address`, and
-        // `user_data` is the library handle kept alive by this engine. A null
-        // context means this SDK cannot create Vulkan. Release is a no-op on null.
-        let (context, typography) = unsafe {
-            let context = ffi::ImpellerContextCreateVulkanNew(ffi::IMPELLER_VERSION, &settings);
-            let typography = ffi::ImpellerTypographyContextNew();
-            if context.is_null() || typography.is_null() {
+        // `user_data` is the `VulkanProcs` this engine frees after the context.
+        // The guard publishes that pointer for hooks that have no user data.
+        // A null context means this SDK cannot create Vulkan. Release is a no-op on null.
+        let guard = CurrentProcs::enter(procs);
+        let context =
+            unsafe { ffi::ImpellerContextCreateVulkanNew(ffi::IMPELLER_VERSION, &settings) };
+        let typography = unsafe { ffi::ImpellerTypographyContextNew() };
+        if context.is_null() || typography.is_null() {
+            unsafe {
                 ffi::ImpellerTypographyContextRelease(typography);
                 ffi::ImpellerContextRelease(context);
-                dlclose(vulkan_lib);
-                return Err(Status::NotLinked);
             }
-            (context, typography)
-        };
+            drop(guard);
+            // SAFETY: `procs` came from `Box::into_raw` above and is not stored elsewhere.
+            let procs = unsafe { Box::from_raw(procs) };
+            unsafe { dlclose(procs.library) };
+            return Err(Status::NotLinked);
+        }
+        drop(guard);
         let mut engine = Self::blank(context, typography);
-        engine.vulkan_lib = vulkan_lib;
+        engine.vulkan_procs = procs;
         Ok(engine)
     }
 
-    /// Builds a swapchain for `native_window`. Size changes keep this chain.
-    /// The caller drops it when the window itself is gone or acquire cannot recover.
-    pub fn create_swapchain(&self, native_window: *mut c_void) -> Result<VulkanSwapchain, Status> {
-        if native_window.is_null() || self.vulkan_lib.is_null() {
+    /// Builds a swapchain for `native_window` at `pixels`.
+    /// Size changes keep this chain. The caller drops it when the window is gone
+    /// or acquire cannot recover.
+    pub fn create_swapchain(
+        &self,
+        native_window: *mut c_void,
+        pixels: PixelSize,
+    ) -> Result<VulkanSwapchain, Status> {
+        if native_window.is_null() || self.vulkan_procs.is_null() {
             return Err(Status::NotReady);
         }
+        self.apply_extent(pixels);
         let mut info = ffi::ImpellerContextVulkanInfo {
             vk_instance: ptr::null_mut(),
             vk_physical_device: ptr::null_mut(),
@@ -150,9 +228,10 @@ impl super::Engine {
         if !found || info.vk_instance.is_null() {
             return Err(Status::NotReady);
         }
+        let library = unsafe { (*self.vulkan_procs).library };
         let create = proc_symbol::<CreateAndroidSurface>(
             info.vk_instance,
-            self.vulkan_lib,
+            library,
             c"vkCreateAndroidSurfaceKHR".as_ptr(),
         );
         let Some(create) = create else {
@@ -180,37 +259,46 @@ impl super::Engine {
         }
         // SAFETY: a successful create transfers the `VkSurfaceKHR` to Impeller.
         // On failure the surface is destroyed here so it is not leaked.
+        // The guard lets the extent hook see this engine's proc table.
+        let _guard = CurrentProcs::enter(self.vulkan_procs);
         let raw = unsafe {
             ffi::ImpellerVulkanSwapchainCreateNew(self.context, surface_khr as usize as *mut c_void)
         };
         if raw.is_null() {
             if let Some(destroy) = proc_symbol::<DestroySurface>(
                 info.vk_instance,
-                self.vulkan_lib,
+                library,
                 c"vkDestroySurfaceKHR".as_ptr(),
             ) {
                 unsafe { destroy(info.vk_instance, surface_khr, ptr::null()) };
             }
             return Err(Status::NotReady);
         }
-        Ok(VulkanSwapchain { raw })
+        Ok(VulkanSwapchain {
+            raw,
+            extent: pixels,
+        })
     }
 
     /// Acquires the next swapchain image, draws the current display list, and presents.
-    /// A null acquire is [`Status::PresentFailed`]. The caller keeps the swapchain
-    /// and tries the next frame. No display list is [`Status::NotReady`].
+    /// A null acquire is [`Status::AcquireMiss`]: skip this present. The caller
+    /// keeps the chain until consecutive misses ask it to rebuild.
+    /// No display list is [`Status::NotReady`].
     pub fn draw_vulkan(&mut self, swapchain: &VulkanSwapchain) -> Result<(), Status> {
         if self.context.is_null() || self.list.is_null() {
             return Err(Status::NotReady);
         }
         if swapchain.raw.is_null() {
-            return Err(Status::PresentFailed);
+            return Err(Status::AcquireMiss);
         }
+        self.apply_extent(swapchain.extent);
         // SAFETY: `swapchain.raw` is a live swapchain. Acquire may block until the
         // next image. The returned surface is released before this function returns.
+        // The guard publishes this engine's extent to the swapchain-size hook.
+        let _guard = CurrentProcs::enter(self.vulkan_procs);
         let surface = unsafe { ffi::ImpellerVulkanSwapchainAcquireNextSurfaceNew(swapchain.raw) };
         if surface.is_null() {
-            return Err(Status::PresentFailed);
+            return Err(Status::AcquireMiss);
         }
         let presented = unsafe {
             let drew = ffi::ImpellerSurfaceDrawDisplayList(surface, self.list);
@@ -224,11 +312,21 @@ impl super::Engine {
             Err(Status::PresentFailed)
         }
     }
+
+    fn apply_extent(&self, size: PixelSize) {
+        if self.vulkan_procs.is_null() {
+            return;
+        }
+        // SAFETY: `vulkan_procs` is the table created with this context. The
+        // render thread is the only caller. The hook reads the atomics.
+        unsafe { (*self.vulkan_procs).set_extent(size) };
+    }
 }
 
 fn proc_symbol<T>(instance: *mut c_void, library: *mut c_void, name: *const c_char) -> Option<T> {
     // SAFETY: `name` is a NUL-terminated literal. `library` is the `libvulkan.so` handle.
-    let address = unsafe { proc_address(instance, name, library) };
+    // This lookup does not install the swapchain hook; it only resolves a symbol.
+    let address = unsafe { resolve_proc(instance, name, library) };
     if address.is_null() {
         None
     } else {
@@ -246,38 +344,56 @@ unsafe extern "C" fn proc_address(
     if user_data.is_null() || name.is_null() {
         return ptr::null_mut();
     }
+    // SAFETY: `user_data` is the `VulkanProcs` passed to `ImpellerContextCreateVulkanNew`.
+    let procs = unsafe { &*(user_data.cast::<VulkanProcs>()) };
     // SAFETY: Vulkan passes a NUL-terminated entry-point name.
     let requested = unsafe { CStr::from_ptr(name) };
-    if instance.is_null() {
-        return unsafe { dlsym(user_data, name) };
-    }
-    let get_instance = unsafe { dlsym(user_data, c"vkGetInstanceProcAddr".as_ptr()) };
-    if get_instance.is_null() {
-        return ptr::null_mut();
-    }
-    // SAFETY: `vkGetInstanceProcAddr` is the loader entry point from `libvulkan.so`.
-    let get_instance: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void =
-        unsafe { std::mem::transmute(get_instance) };
-    let resolved = unsafe { get_instance(instance, name) };
+    let resolved = unsafe { resolve_proc(instance, name, procs.library) };
     if resolved.is_null() {
         return ptr::null_mut();
     }
     if requested == c"vkCreateSwapchainKHR" {
-        REAL_CREATE.store(resolved, Ordering::SeqCst);
+        procs.real_create.store(resolved, Ordering::Release);
         // SAFETY: `create_swapchain` has the same signature as `vkCreateSwapchainKHR`.
         return unsafe { std::mem::transmute(create_swapchain as CreateSwapchain) };
     }
     if requested == c"vkGetDeviceProcAddr" {
-        REAL_GET_DEVICE.store(resolved, Ordering::SeqCst);
+        procs.real_get_device.store(resolved, Ordering::Release);
         // SAFETY: `get_device_proc` has the same signature as `vkGetDeviceProcAddr`.
         return unsafe { std::mem::transmute(get_device_proc as GetDeviceProc) };
     }
     resolved
 }
 
+unsafe fn resolve_proc(
+    instance: *mut c_void,
+    name: *const c_char,
+    library: *mut c_void,
+) -> *mut c_void {
+    if library.is_null() || name.is_null() {
+        return ptr::null_mut();
+    }
+    if instance.is_null() {
+        return unsafe { dlsym(library, name) };
+    }
+    let get_instance = unsafe { dlsym(library, c"vkGetInstanceProcAddr".as_ptr()) };
+    if get_instance.is_null() {
+        return ptr::null_mut();
+    }
+    // SAFETY: `vkGetInstanceProcAddr` is the loader entry point from `libvulkan.so`.
+    let get_instance: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void =
+        unsafe { std::mem::transmute(get_instance) };
+    unsafe { get_instance(instance, name) }
+}
+
 unsafe extern "C" fn get_device_proc(device: *mut c_void, name: *const c_char) -> *mut c_void {
-    let get_device = REAL_GET_DEVICE.load(Ordering::SeqCst);
-    if get_device.is_null() || name.is_null() {
+    let procs = current_procs();
+    if procs.is_null() || name.is_null() {
+        return ptr::null_mut();
+    }
+    // SAFETY: `procs` was published by `CurrentProcs` for this call and outlives it.
+    let get_device = unsafe { (*procs).real_get_device.load(Ordering::Acquire) };
+    if get_device.is_null() {
         return ptr::null_mut();
     }
     // SAFETY: `get_device` is the real `vkGetDeviceProcAddr` stored by `proc_address`.
@@ -286,7 +402,7 @@ unsafe extern "C" fn get_device_proc(device: *mut c_void, name: *const c_char) -
     // SAFETY: Vulkan passes a NUL-terminated entry-point name.
     let requested = unsafe { CStr::from_ptr(name) };
     if requested == c"vkCreateSwapchainKHR" && !resolved.is_null() {
-        REAL_CREATE.store(resolved, Ordering::SeqCst);
+        unsafe { (*procs).real_create.store(resolved, Ordering::Release) };
         // SAFETY: `create_swapchain` has the same signature as `vkCreateSwapchainKHR`.
         return unsafe { std::mem::transmute(create_swapchain as CreateSwapchain) };
     }
@@ -299,12 +415,17 @@ unsafe extern "C" fn create_swapchain(
     allocator: *const c_void,
     swapchain: *mut u64,
 ) -> i32 {
-    let create = REAL_CREATE.load(Ordering::SeqCst);
+    let procs = current_procs();
+    if procs.is_null() {
+        return -1;
+    }
+    // SAFETY: `procs` was published by `CurrentProcs` for this call and outlives it.
+    let create = unsafe { (*procs).real_create.load(Ordering::Acquire) };
     if create.is_null() {
         return -1;
     }
-    let width = DESIRED_WIDTH.load(Ordering::SeqCst);
-    let height = DESIRED_HEIGHT.load(Ordering::SeqCst);
+    let width = unsafe { (*procs).extent_width.load(Ordering::Acquire) };
+    let height = unsafe { (*procs).extent_height.load(Ordering::Acquire) };
     // SAFETY: `info` is the `VkSwapchainCreateInfoKHR` Impeller built on the stack.
     // Only the extent fields are written, and only when the structure type matches.
     // The SDK asks for 1×1. Android does not replace that with the window size.

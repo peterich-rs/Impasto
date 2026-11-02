@@ -140,9 +140,11 @@ public final class HostView extends FrameLayout {
             int[] actions,
             float[] scroll,
             String[] descriptions,
-            long[] parents) {
+            long[] parents,
+            float[] bounds) {
         runOnUi(() -> {
-            access.update(ids, roles, labels, values, flags, actions, scroll, descriptions, parents);
+            access.update(
+                    ids, roles, labels, values, flags, actions, scroll, descriptions, parents, bounds);
             invalidate();
         });
     }
@@ -187,7 +189,9 @@ public final class HostView extends FrameLayout {
     @Override
     public boolean onHoverEvent(MotionEvent event) {
         int action = event.getActionMasked();
-        if (action == MotionEvent.ACTION_HOVER_ENTER || action == MotionEvent.ACTION_HOVER_MOVE) {
+        if (action == MotionEvent.ACTION_HOVER_ENTER
+                || action == MotionEvent.ACTION_HOVER_MOVE
+                || action == MotionEvent.ACTION_HOVER_EXIT) {
             emitOne(event, 0, 4);
             return true;
         }

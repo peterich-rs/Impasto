@@ -24,8 +24,29 @@ mod textures;
 #[cfg(impeller)]
 mod typography;
 
-pub use status::Status;
+pub use status::{AcquireFollowup, Status, acquire_followup};
 pub use surface::Surface;
+
+/// Drawable size in physical pixels.
+///
+/// The shell passes this into present. Vulkan stores it on the swapchain and
+/// applies it before acquire. A zero axis means the size is not known yet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PixelSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl PixelSize {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+
+    /// The standalone SDK asks for a 1×1 chain. A usable extent replaces that.
+    pub fn is_usable(&self) -> bool {
+        self.width > 1 && self.height > 1
+    }
+}
 
 /// Counts from paragraph build and cache lookup since the last [`Typography::take_shape_stats`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -40,20 +61,24 @@ pub struct ShapeStats {
 #[cfg(impeller_missing)]
 pub use missing::Engine;
 #[cfg(impeller_missing)]
+pub use missing::GpuImage;
+#[cfg(impeller_missing)]
+pub use missing::TextureFactory;
+#[cfg(impeller_missing)]
 pub use missing::Typography;
 #[cfg(impeller)]
 pub use player::Engine;
+#[cfg(impeller)]
+pub use player::GpuImage;
+#[cfg(impeller)]
+pub use player::TextureFactory;
 #[cfg(impeller)]
 pub use typography::Typography;
 
 #[cfg(all(impeller_missing, target_os = "android"))]
 pub use missing::VulkanSwapchain;
-#[cfg(all(impeller_missing, target_os = "android"))]
-pub use missing::note_swapchain_extent;
 #[cfg(all(impeller, target_os = "android"))]
 pub use player::VulkanSwapchain;
-#[cfg(all(impeller, target_os = "android"))]
-pub use player::note_swapchain_extent;
 
 /// Text, size, width, color, and style that identify one measured paragraph.
 #[derive(Clone, Copy)]

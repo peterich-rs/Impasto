@@ -17,7 +17,7 @@ use crate::images::{self, ImageCache, ImageDecoder, ImageError, ImageReady, Imag
 use crate::input::Input;
 use crate::present::{self, AfterPresent, after_present};
 use crate::queue::Inbox;
-use crate::scheduler::{self, FrameScheduler, FrameStep, FrameView, VsyncOp};
+use crate::scheduler::{self, FrameScheduler, FrameStep, FrameView, Gpu, VsyncOp};
 use crate::shaper::ImpellerShaper;
 use crate::surface::{OpenRetry, Ready, SurfaceHost};
 use crate::timing::FrameTiming;
@@ -228,14 +228,16 @@ pub fn start(boot: Boot) -> Result<Link, BootError> {
     let acks = Arc::new(Acks::new());
     let acks_thread = Arc::clone(&acks);
     let (image_tx, image_rx) = mpsc::channel();
+    let upload = Arc::new(Mutex::new(None));
     let http = boot.http.clone();
     let decoder = Arc::clone(&boot.decoder);
     let inbox_images = Arc::clone(&inbox);
     let http_images = http.clone();
+    let upload_io = Arc::clone(&upload);
     let _io = thread::Builder::new()
         .name("io".to_string())
         .spawn(move || {
-            decode_loop(decoder, image_rx, &inbox_images, http_images);
+            decode_loop(decoder, image_rx, &inbox_images, http_images, &upload_io);
         });
     let (net_tx, net_rx) = mpsc::channel();
     let (wake_tx, wake_rx) = mpsc::channel();
@@ -254,9 +256,12 @@ pub fn start(boot: Boot) -> Result<Link, BootError> {
                 &inbox_thread,
                 &ready_tx,
                 &acks_thread,
-                image_tx,
-                net_tx,
-                wake_tx,
+                RenderLinks {
+                    image_tx,
+                    net_tx,
+                    wake_tx,
+                    upload,
+                },
             );
             guard.finish(result);
         });
@@ -279,12 +284,14 @@ fn decode_loop(
     jobs: Receiver<ImageRequest>,
     inbox: &Inbox,
     http: Option<Arc<dyn session::HttpClient>>,
+    upload: &Mutex<Option<engine::TextureFactory>>,
 ) {
     while let Ok(request) = jobs.recv() {
         inbox.post(Command::ImageReady(decode_one(
             decoder.as_ref(),
             http.as_deref(),
             &request,
+            upload,
         )));
     }
 }
@@ -293,6 +300,7 @@ fn decode_one(
     decoder: &dyn ImageDecoder,
     http: Option<&dyn session::HttpClient>,
     request: &ImageRequest,
+    upload: &Mutex<Option<engine::TextureFactory>>,
 ) -> ImageReady {
     let result = if request.source.starts_with("https://") {
         match crate::net::fetch_image_body(http, &request.source) {
@@ -315,6 +323,10 @@ fn decode_one(
             }
             handle.source = Arc::clone(&request.source);
             handle.generation = request.generation;
+            {
+                let factory = lock(upload);
+                images::attach_upload(&mut handle, factory.as_ref());
+            }
             ImageReady::Decoded(handle)
         }
         Err(ImageError::Missing) => ImageReady::Missing {
@@ -359,6 +371,15 @@ struct Runtime {
     present_failures: u32,
     present_logged: bool,
     present_retry_at: Option<i64>,
+    gpu: Gpu,
+    inspect: Option<std::path::PathBuf>,
+}
+
+struct RenderLinks {
+    image_tx: Sender<ImageRequest>,
+    net_tx: Sender<session::IoJob>,
+    wake_tx: Sender<Option<i64>>,
+    upload: Arc<Mutex<Option<engine::TextureFactory>>>,
 }
 
 fn render(
@@ -366,9 +387,7 @@ fn render(
     inbox: &Arc<Inbox>,
     ready: &SyncSender<Result<(), BootError>>,
     acks: &Acks,
-    image_tx: Sender<ImageRequest>,
-    net_tx: Sender<session::IoJob>,
-    wake_tx: Sender<Option<i64>>,
+    links: RenderLinks,
 ) -> Result<(), BootError> {
     let services = Rc::new(RefCell::new(boot.services));
     let engine = {
@@ -381,6 +400,9 @@ fn render(
             }
         }
     };
+    if let Some(factory) = engine.borrow().texture_factory() {
+        *lock(&links.upload) = Some(factory);
+    }
     let log = {
         let services = Rc::clone(&services);
         Rc::new(move |level: LogLevel, message: &str| {
@@ -421,7 +443,7 @@ fn render(
         &slot,
         Box::new({
             move |job| {
-                let _ = net_tx.send(job);
+                let _ = links.net_tx.send(job);
             }
         }),
         host,
@@ -459,15 +481,17 @@ fn render(
         point_scale: 1.0,
         needs_present: false,
         images: ImageCache::new(),
-        image_tx,
+        image_tx: links.image_tx,
         frame_number: 0,
         panic_streak: 0,
         semantics: None,
-        wake_tx,
+        wake_tx: links.wake_tx,
         dump_list: boot.dump_list,
         present_failures: 0,
         present_logged: false,
         present_retry_at: None,
+        gpu: Gpu::Live,
+        inspect: boot.inspect,
     };
     while let Some(command) = inbox.recv() {
         if on_command(&mut runtime, command, acks)? {
@@ -679,6 +703,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
         unchanged,
         needs_present: runtime.needs_present,
         again,
+        gpu: runtime.gpu,
     }) {
         FrameStep::Cancel | FrameStep::Skip { again: false } => {
             return Ok(end_frame(runtime, false, false));
@@ -687,6 +712,10 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
             return Ok(end_frame(runtime, true, false));
         }
         FrameStep::Submit => {
+            runtime.images.install_uploaded(
+                &mut runtime.engine.borrow_mut(),
+                images::scale_bucket(runtime.point_scale),
+            );
             let started = Instant::now();
             let pixels = runtime
                 .images
@@ -712,13 +741,20 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                 if status == engine::Status::NotLinked {
                     return Err(BootError::Engine(status));
                 }
-                return Ok(end_frame(runtime, true, false));
+                // A rejected list is not a lost surface. Do not force another vsync.
+                return Ok(end_frame(runtime, again, false));
             }
             runtime.installed = Some(Installed {
                 scale: runtime.point_scale,
             });
+            if runtime.gpu == Gpu::Flush {
+                runtime.gpu = Gpu::Live;
+            }
         }
         FrameStep::PresentCached => {}
+    }
+    if runtime.gpu != Gpu::Live {
+        return Ok(end_frame(runtime, false, false));
     }
     let started = Instant::now();
     let presented = {
@@ -804,9 +840,18 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
             ),
         );
     }
+    if let Some(dir) = &runtime.inspect
+        && let Err(error) = crate::timing::write_inspect(dir, &timing, runtime.latest.as_deref())
+    {
+        (runtime.log)(LogLevel::Warn, &format!("inspect write failed: {error}"));
+    }
     let after = after_present(presented, again);
     if after == AfterPresent::Fatal {
         return Err(BootError::Engine(engine::Status::NotLinked));
+    }
+    if after == AfterPresent::Rejected {
+        runtime.needs_present = false;
+        return Ok(end_frame(runtime, again, false));
     }
     let follow = scheduler::present_followup(after);
     runtime.needs_present = follow.needs_present;
@@ -859,6 +904,7 @@ fn open_surface_target(
         id: target.id,
         layer: target.layer,
         metrics,
+        pixels: target.pixels,
     };
     let opened = {
         let mut engine = runtime.engine.borrow_mut();
@@ -989,6 +1035,18 @@ fn arm(runtime: &mut Runtime) {
     }
 }
 
+/// Releases GPU caches and refuses acquire until a later submit rebuilds them.
+fn flush_gpu(runtime: &mut Runtime) {
+    runtime.engine.borrow_mut().trim();
+    runtime.installed = None;
+    runtime.gpu = Gpu::Flush;
+    runtime.needs_present = false;
+    runtime.present_failures = 0;
+    runtime.present_logged = false;
+    runtime.present_retry_at = None;
+    note_wake(runtime, None);
+}
+
 fn note_scale(runtime: &mut Runtime, next: f32) {
     if (next - runtime.point_scale).abs() > f32::EPSILON && runtime.installed.is_some() {
         runtime.installed = None;
@@ -1063,16 +1121,18 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
 
     use session::{FrameOutput, FrameTime, IoEvent, Metrics};
 
     use super::install_fonts;
-    use super::{Acks, Installed, Runtime, lock, on_command};
+    use super::{Acks, Installed, Runtime, lock, on_command, on_frame};
     use crate::command::{Command, FrameToken, SurfaceId, SurfaceTarget};
     use crate::images::{ImageHandle, ImageReady};
     use crate::scheduler::FrameScheduler;
+    use crate::scheduler::Gpu;
     use crate::surface::{SURFACE_OPEN_ATTEMPTS, SurfaceHost};
     use crate::{ClipboardHost, LogLevel, NativePtr, Presented, Surface, Vsync};
 
@@ -1117,10 +1177,6 @@ mod tests {
             None
         }
 
-        fn image(&self, _: &str) -> Option<engine::ImagePixels<'_>> {
-            None
-        }
-
         fn log(&self, _: LogLevel, _: &str) {}
 
         fn apply_ime(&self, _: &session::ImeUpdate) {}
@@ -1129,7 +1185,28 @@ mod tests {
     struct NullSurface;
 
     impl Surface for NullSurface {
-        fn present(&mut self, _: &mut engine::Engine) -> Result<Presented, engine::Status> {
+        fn present(
+            &mut self,
+            _: &mut engine::Engine,
+            _: engine::PixelSize,
+        ) -> Result<Presented, engine::Status> {
+            Ok(Presented::Continue)
+        }
+    }
+
+    struct CountSurface {
+        presents: Arc<AtomicU32>,
+        pixels: Arc<Mutex<engine::PixelSize>>,
+    }
+
+    impl Surface for CountSurface {
+        fn present(
+            &mut self,
+            _: &mut engine::Engine,
+            pixels: engine::PixelSize,
+        ) -> Result<Presented, engine::Status> {
+            self.presents.fetch_add(1, Ordering::Relaxed);
+            *lock(&self.pixels) = pixels;
             Ok(Presented::Continue)
         }
     }
@@ -1259,6 +1336,8 @@ mod tests {
                 present_failures: 0,
                 present_logged: false,
                 present_retry_at: None,
+                gpu: Gpu::Live,
+                inspect: None,
             };
             Self {
                 runtime,
@@ -1275,11 +1354,11 @@ mod tests {
 
         fn open_dummy(&mut self) -> SurfaceId {
             let id = SurfaceId::fresh();
-            assert!(!self.command(Command::SurfaceReady(SurfaceTarget {
+            assert!(!self.command(Command::SurfaceReady(SurfaceTarget::new(
                 id,
-                layer: NativePtr(std::ptr::null_mut()),
-                metrics: Metrics::new(360.0, 640.0, 2.0),
-            })));
+                NativePtr(std::ptr::null_mut()),
+                Metrics::new(360.0, 640.0, 2.0),
+            ))));
             assert!(self.runtime.surfaces.is_open());
             id
         }
@@ -1328,11 +1407,11 @@ mod tests {
     #[test]
     fn resumed_clears_present_backoff_and_rearms() {
         let mut harness = TestHarness::new();
-        let target = SurfaceTarget {
-            id: SurfaceId::fresh(),
-            layer: NativePtr(std::ptr::null_mut()),
-            metrics: Metrics::new(360.0, 640.0, 2.0),
-        };
+        let target = SurfaceTarget::new(
+            SurfaceId::fresh(),
+            NativePtr(std::ptr::null_mut()),
+            Metrics::new(360.0, 640.0, 2.0),
+        );
         harness
             .runtime
             .surfaces
@@ -1366,6 +1445,7 @@ mod tests {
                 generation: request.generation,
                 size: [1, 1],
                 pixels: Arc::from([0u8, 0, 0, 0]),
+                gpu: None,
             }));
         assert!(harness.runtime.images.contains("asset:logo", 1));
         harness.runtime.installed = Some(Installed { scale: 2.0 });
@@ -1373,7 +1453,56 @@ mod tests {
         assert!(!harness.command(Command::MemoryWarning));
         assert!(harness.runtime.installed.is_none());
         assert!(!harness.runtime.images.contains("asset:logo", 1));
+        assert_eq!(harness.runtime.gpu, Gpu::Flush);
         assert!(harness.vsync.token_count() > tokens_before);
+    }
+
+    #[test]
+    fn hidden_flushes_the_gpu_and_does_not_acquire() {
+        let presents = Arc::new(AtomicU32::new(0));
+        let mut harness = TestHarness::new();
+        let counted = Arc::clone(&presents);
+        harness.runtime.open_surface = Box::new(move |_, _| {
+            let presents = Arc::clone(&counted);
+            Ok(Box::new(CountSurface {
+                presents,
+                pixels: Arc::new(Mutex::new(engine::PixelSize::default())),
+            }))
+        });
+        harness.open_dummy();
+        harness.runtime.latest = Some(Arc::new(protocol::LayerTree::empty()));
+        harness.runtime.installed = Some(Installed { scale: 2.0 });
+        harness.runtime.needs_present = true;
+        assert!(!harness.command(Command::Lifecycle(session::Lifecycle::Hidden)));
+        assert_eq!(harness.runtime.gpu, Gpu::Flush);
+        assert!(harness.runtime.installed.is_none());
+        assert!(harness.runtime.input.is_paused());
+        assert!(!on_frame(&mut harness.runtime, now(), &harness.acks).unwrap());
+        assert_eq!(presents.load(Ordering::Relaxed), 0);
+        harness.runtime.gpu = Gpu::Dead;
+        harness.runtime.input.resume();
+        assert!(!on_frame(&mut harness.runtime, now(), &harness.acks).unwrap());
+        assert_eq!(presents.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn present_passes_the_pixels_the_host_posted() {
+        let seen = Arc::new(Mutex::new(engine::PixelSize::default()));
+        let mut harness = TestHarness::new();
+        let seen_open = Arc::clone(&seen);
+        harness.runtime.open_surface = Box::new(move |_, _| {
+            Ok(Box::new(CountSurface {
+                presents: Arc::new(AtomicU32::new(0)),
+                pixels: Arc::clone(&seen_open),
+            }))
+        });
+        harness.open_dummy();
+        harness.runtime.latest = Some(Arc::new(protocol::LayerTree::empty()));
+        harness.runtime.installed = Some(Installed { scale: 2.0 });
+        harness.runtime.point_scale = 2.0;
+        harness.runtime.needs_present = true;
+        assert!(!on_frame(&mut harness.runtime, now(), &harness.acks).unwrap());
+        assert_eq!(*lock(&seen), engine::PixelSize::new(720, 1280));
     }
 
     #[test]
@@ -1462,6 +1591,7 @@ mod tests {
         assert!(!harness.command(Command::SurfaceChanged {
             id,
             metrics: Metrics::new(400.0, 800.0, 2.0),
+            pixels: engine::PixelSize::new(800, 1600),
         }));
         assert!(!harness.command(Command::Pointer(uicore::PointerEvent::new(
             uicore::Phase::Move,
@@ -1496,11 +1626,11 @@ mod tests {
         }));
         assert!(!harness.command(Command::Lifecycle(session::Lifecycle::Inactive)));
         let replaced = SurfaceId::fresh();
-        assert!(!harness.command(Command::SurfaceReady(SurfaceTarget {
-            id: replaced,
-            layer: NativePtr(std::ptr::null_mut()),
-            metrics: Metrics::new(360.0, 640.0, 2.0),
-        })));
+        assert!(!harness.command(Command::SurfaceReady(SurfaceTarget::new(
+            replaced,
+            NativePtr(std::ptr::null_mut()),
+            Metrics::new(360.0, 640.0, 2.0),
+        ))));
         let frames_before = harness.frame_count();
         assert!(!harness.command(Command::Wake));
         assert!(
@@ -1570,23 +1700,24 @@ mod tests {
         let mut harness = TestHarness::new();
         harness.runtime.open_surface = Box::new(|_, _| Err(engine::Status::NotReady));
         let id = SurfaceId::fresh();
-        assert!(!harness.command(Command::SurfaceReady(SurfaceTarget {
+        assert!(!harness.command(Command::SurfaceReady(SurfaceTarget::new(
             id,
-            layer: NativePtr(std::ptr::null_mut()),
-            metrics: Metrics::new(360.0, 640.0, 2.0),
-        })));
+            NativePtr(std::ptr::null_mut()),
+            Metrics::new(360.0, 640.0, 2.0),
+        ))));
         assert!(!harness.runtime.surfaces.is_open());
         harness.runtime.surfaces.fail_attempt(
-            SurfaceTarget {
+            SurfaceTarget::new(
                 id,
-                layer: NativePtr(std::ptr::null_mut()),
-                metrics: Metrics::new(360.0, 640.0, 2.0),
-            },
+                NativePtr(std::ptr::null_mut()),
+                Metrics::new(360.0, 640.0, 2.0),
+            ),
             SURFACE_OPEN_ATTEMPTS - 1,
         );
         assert!(!harness.command(Command::SurfaceChanged {
             id,
             metrics: Metrics::new(400.0, 800.0, 2.0),
+            pixels: engine::PixelSize::new(800, 1600),
         }));
         assert!(harness.runtime.surfaces.take_attempt().is_some());
     }

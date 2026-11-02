@@ -3,6 +3,17 @@
 use crate::command::FrameToken;
 use crate::present::AfterPresent;
 
+/// Whether this frame may touch the GPU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Gpu {
+    /// Context is usable. Present may acquire.
+    Live,
+    /// Caches were released. A visible frame must submit before it acquires.
+    Flush,
+    /// Do not touch the GPU. The frame is cancelled.
+    Dead,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FrameView {
     pub surface_open: bool,
@@ -10,6 +21,7 @@ pub(crate) struct FrameView {
     pub unchanged: bool,
     pub needs_present: bool,
     pub again: bool,
+    pub gpu: Gpu,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,8 +47,12 @@ pub(crate) enum VsyncOp {
 }
 
 pub(crate) fn frame_step(view: &FrameView) -> FrameStep {
-    if !view.surface_open || view.paused {
+    if !view.surface_open || view.paused || view.gpu == Gpu::Dead {
         return FrameStep::Cancel;
+    }
+    // The display list was released. Acquiring it would touch a cold GPU.
+    if view.gpu == Gpu::Flush {
+        return FrameStep::Submit;
     }
     if view.unchanged && !view.needs_present {
         return FrameStep::Skip { again: view.again };
@@ -68,6 +84,11 @@ pub(crate) fn present_followup(after: AfterPresent) -> PresentFollowup {
             needs_present: true,
             clear_surface: false,
             vsync: VsyncOp::Request,
+        },
+        AfterPresent::Rejected => PresentFollowup {
+            needs_present: false,
+            clear_surface: false,
+            vsync: VsyncOp::Cancel,
         },
         AfterPresent::Fatal => PresentFollowup {
             needs_present: false,
@@ -152,8 +173,8 @@ impl FrameScheduler {
 #[cfg(test)]
 mod tests {
     use super::{
-        AfterPresent, FrameScheduler, FrameStep, FrameView, VsyncOp, frame_step, present_followup,
-        surface_lost,
+        AfterPresent, FrameScheduler, FrameStep, FrameView, Gpu, VsyncOp, frame_step,
+        present_followup, surface_lost,
     };
 
     fn open_view() -> FrameView {
@@ -163,6 +184,7 @@ mod tests {
             unchanged: false,
             needs_present: false,
             again: false,
+            gpu: Gpu::Live,
         }
     }
 
@@ -210,6 +232,22 @@ mod tests {
             FrameStep::PresentCached
         );
         assert_eq!(frame_step(&open_view()), FrameStep::Submit);
+        assert_eq!(
+            frame_step(&FrameView {
+                unchanged: true,
+                needs_present: true,
+                gpu: Gpu::Flush,
+                ..open_view()
+            }),
+            FrameStep::Submit
+        );
+        assert_eq!(
+            frame_step(&FrameView {
+                gpu: Gpu::Dead,
+                ..open_view()
+            }),
+            FrameStep::Cancel
+        );
     }
 
     #[test]

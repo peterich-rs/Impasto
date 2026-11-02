@@ -122,13 +122,13 @@ Down 命中
   └─ Up 仍在 Press 内 ───────── Release，Click
 ```
 
-图片固有尺寸在创建 `Image` 节点时传入。宿主解码 RGBA，活到 `submit` 返回。降采样和色彩管理以后换宿主的解码，不改布局对象。
+图片固有尺寸在创建 `Image` 节点时传入。宿主在 `io` 线程解码 RGBA。有图形 context 时同一线程建纹理，句柄交回渲染线程，`submit` 只 blit。没有 context 时像素活到 `submit` 返回。降采样和色彩管理以后换宿主的解码，不改布局对象。
 
 ## 渲染引擎
 
 渲染引擎只做光栅，用 Rust 调用 `impeller.h`。会话帧交给它 `protocol::LayerTree`。它不读渲染树，也不处理指针。没有 SDK 时返回 `NotLinked`。命令以 `protocol/src/draw_list.rs` 为准，层树以 `protocol/src/layer.rs` 为准，失败码以 `engine/src/status.rs` 为准。`Engine` 编排提交。`Typography` 持有字体、度量缓存和真色 paint 槽。`PictureCache` 缓存子显示列表，`TextureStore` 缓存图片。一次 `submit_layers` 里的 builder 和 save 栈在 `Painter` 上，函数返回就结束。宿主壳通过 `engine::Surface` 调用 `register_font`、`submit_layers`、`draw_metal` 和统计；构造和 `draw_vulkan` 仍是 `Engine` 的固有方法。
 
-文字命令自带字号、行宽、颜色和段落样式。渲染引擎按这些字段画，不另设默认字号，也不把字号乘 `point_scale`。布局测量和绘制共用带前景色的 paint 槽。度量缓存另给光标和行框，键里仍有颜色。相同文字、字号、宽度、颜色和样式跨帧保留。查找用栈上的字段比较，命中不复制整段文字。成功提交结束时丢掉当前列表没有引用、且这一代没有再用的段落和纹理。`refs == 0` 的测量槽若本帧没有被 retain，也在这次提交之后经 `retire_paragraph` 释放。`register_font` 在下一次提交释放旧显示列表之后清掉段落缓存。上屏失败（`PresentFailed`）保留表面并再要一帧。`NotReady` 表示还没有表面或显示列表，壳层留着 `Surface` 再要一帧。`submit_layers` 在新的显示列表建完之前不放掉已经在屏幕上的那一份，并按 picture 缓存子显示列表。`point_scale` 只乘在根 builder 上。
+文字命令自带字号、行宽、颜色和段落样式。渲染引擎按这些字段画，不另设默认字号，也不把字号乘 `point_scale`。布局测量和绘制共用带前景色的 paint 槽。度量缓存另给光标和行框，键里仍有颜色。相同文字、字号、宽度、颜色和样式跨帧保留。查找用栈上的字段比较，命中不复制整段文字。成功提交结束时丢掉当前列表没有引用、且这一代没有再用的段落和纹理。`refs == 0` 的测量槽若本帧没有被 retain，也在这次提交之后经 `retire_paragraph` 释放。`register_font` 在下一次提交释放旧显示列表之后清掉段落缓存。上屏失败（`PresentFailed`）保留表面并再要一帧。空 acquire 是 `AcquireMiss`，同样留着表面。`NotReady` 表示还没有表面或显示列表，壳层留着 `Surface` 再要一帧。`BadScene` 不把表面当成丢失。`submit_layers` 在新的显示列表建完之前不放掉已经在屏幕上的那一份，并按 picture 缓存子显示列表。`point_scale` 只乘在根 builder 上。
 
 第一条非 `Fill` 命令之前做一次 `point_scale`。`PushClip`、`PushOpacity` 和 `PushTransform` 也算这类命令，所以 `Save` 记下的矩阵已经含缩放，`Restore` 回到的仍是这份矩阵。`Pop` 不再缩放。半径不大于 0 时矩形走 `DrawRect`、裁剪走 `ClipRect`；更大的半径钳到短边的一半，再走圆角接口。`PushOpacity` 为这一层单独建 paint，颜色是白、alpha 来自命令，`Restore` 之后才释放。`PushTransform` 在 `Save` 之后依次 `Translate`、`Rotate`、`Scale`，`Pop` 走同一个 `Restore`。渲染引擎只用自己的 save 栈：多出来的 `Pop` 不调用 `Restore`；结束时栈非空则整帧 `BadScene`，并且不创建显示列表。失败收尾在释放 builder 之前先 `Restore` 再释放残留的 layer paint。
 
@@ -136,11 +136,11 @@ Down 命中
 
 宿主做三件事：平台事件入队、vsync 上问会话要一帧、把 `LayerTree` 交给渲染引擎并上屏。会话边界是 Rust trait `session::Session`：`metrics`、`pointer`、`frame`、`wants_frame`、`lifecycle`。`wants_frame` 取走「再要一帧」的标志。`frame` 的顺序是处理已经入队的指针、`onFrame(targetMs, intervalMs)`、冲刷指针期间写过的状态、布局、driver tick、必要时再布局、`onLayout`、必要时再布局一次、录制，然后 `semantics`。
 
-macOS 宿主把 `NSEvent` 换成 `uicore::PointerEvent` 放进队列。先把窗口坐标换进内容视图，再把原点改到左上。AppKit 给出的已经是点，不除 `backingScaleFactor`。`just host` 和 `just host-js` 都加载 `apps/gallery-solid/dist/counter.js`，每帧出队并调用会话。宿主不做 click。字体文件字节和 PNG 解码在宿主里，图片像素活到 `submit` 返回。宿主实现 `uicore::Shaper`，测量时借用 `Engine` 交出去的 `Typography`。借用在 `session.frame()` 返回前结束。
+macOS 宿主把 `NSEvent` 换成 `uicore::PointerEvent` 放进队列。先把窗口坐标换进内容视图，再把原点改到左上。AppKit 给出的已经是点，不除 `backingScaleFactor`。`just host` 和 `just host-js` 都加载 `apps/gallery-solid/dist/counter.js`，每帧出队并调用会话。宿主不做 click。字体文件字节和 PNG 解码在宿主里。有图形 context 时 `io` 建纹理，`submit` 只 blit。宿主实现 `uicore::Shaper`，测量时借用 `Engine` 交出去的 `Typography`。借用在 `session.frame()` 返回前结束。
 
 Android 宿主的平台线程是 Java 主线程。`HostActivity` 转发生命周期，`HostView` 接收指针、按键和 `InputConnection`，`HostSurfaceView` 把 `Surface` 交给渲染线程。坐标是物理像素除以 `DisplayMetrics.density`。每根手指一条指针。`onPause` 对应 `Lifecycle::Inactive`，`onStop` 对应 `Hidden`，`onResume` 对应 `Resumed`。UI 线程不调用 `FrameClock::cancel`。系统栏写进 `Metrics` 的 padding，键盘写进 `view_insets`。会话把它交给 `Tree::set_viewport`，根从左上 inset 排，可用空间扣掉四边。`destroy_surface` 与替换旧窗口的 `open_surface` 把 `NativeWindow` 交给 `surface-drop`。该线程在 `DropWait` 上等到渲染线程 `Acks::signal` 之后才 `ANativeWindow_release`。平台线程在 `spawn` 之后返回。
 
-宿主不知道 `count`、`Button` 或信号。窗口尺寸变化只更新 metrics 并请求下一帧。`layer_epoch` 未变、缩放与 `installed` 相同、且 `needs_present` 为假时，跳过 `submit_layers` 和 `present`。`Resumed` 与 `Invalidate` 置 `needs_present` 并保留 `installed`，这一帧走 `PresentCached`：不重建显示列表，由 `draw_metal` 或 `draw_vulkan` 把已安装的列表画进新 drawable。present 返回 `PresentFailed`、`NotReady` 或 `BadScene` 时同样置 `needs_present`。连续失败未满 3 次时下一帧仍是 vsync；从第 3 次起记一条 `present failed; backing off`，改由 `Wake` 延迟重试，间隔从 16ms 翻倍，上限 1000ms，成功后计数归零。`MemoryWarning` 清掉 `installed` 并丢掉 `ImageCache` 里的像素，下一帧 `submit_layers`。会话申请了下一帧时，画面没变也再登记恰好一帧；`needs_present` 为假时这一帧仍可 `Skip`。
+宿主不知道 `count`、`Button` 或信号。窗口尺寸变化只更新 metrics 并请求下一帧。`layer_epoch` 未变、缩放与 `installed` 相同、且 `needs_present` 为假时，跳过 `submit_layers` 和 `present`。`Resumed` 与 `Invalidate` 置 `needs_present` 并保留 `installed`，这一帧走 `PresentCached`：不重建显示列表，由 `draw_metal` 或 `draw_vulkan` 把已安装的列表画进新 drawable。present 返回 `PresentFailed`、`NotReady` 或 `AcquireMiss` 时置 `needs_present`。连续失败未满 3 次时下一帧仍是 vsync；从第 3 次起记一条 `present failed; backing off`，改由 `Wake` 延迟重试，间隔从 16ms 翻倍，上限 1000ms，成功后计数归零。`BadScene` 不置 `needs_present`，也不进入这次退避。`Hidden` 与 `Paused` 调用 `Engine::trim`，GPU 进入 `Flush`：显示列表、picture、纹理和段落释放，上下文留下，这一态不 acquire。`Resumed` 后下一帧 `Submit` 重建。`MemoryWarning` 同样 `Flush`，并丢掉 `ImageCache` 的像素；窗口仍可见时下一帧重建后再 present。`Dead` 取消这一帧，不碰 GPU。坏层树是 `BadScene`，不进入 present 退避，也不重建 swapchain。空 acquire 是 `AcquireMiss`：丢掉这一帧；Vulkan 上连续 3 次后丢掉链，用同一窗口重建。会话申请了下一帧时，画面没变也再登记恰好一帧；`needs_present` 为假时这一帧仍可 `Skip`。
 
 macOS 的窗口和 `CAMetalLayer` 在主线程，`Engine`、会话和 present 在渲染线程。Android 的 `ANativeWindow` 由平台线程持有，Vulkan swapchain 在渲染线程创建和释放。iOS 宿主还没写，预构建矩阵没有这一列；线程模型不按两台宿主收死，见 `docs/refactor-plan.md` 的暂缓一节。
 

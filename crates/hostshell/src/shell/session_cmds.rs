@@ -1,6 +1,6 @@
 use session::{IoEvent, Metrics, PlatformSettings};
 
-use super::{Runtime, arm, note_wake};
+use super::{Runtime, arm, flush_gpu, note_wake};
 use crate::command::Command;
 use crate::error::BootError;
 
@@ -125,7 +125,10 @@ fn lifecycle(runtime: &mut Runtime, state: session::Lifecycle) {
         note_wake(runtime, deadline);
     }
     let arm_frame = match state {
-        session::Lifecycle::Hidden | session::Lifecycle::Paused => runtime.input.pause(),
+        session::Lifecycle::Hidden | session::Lifecycle::Paused => {
+            flush_gpu(runtime);
+            runtime.input.pause()
+        }
         session::Lifecycle::Resumed => {
             runtime.needs_present = true;
             runtime.present_failures = 0;
