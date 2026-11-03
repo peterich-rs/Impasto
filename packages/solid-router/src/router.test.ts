@@ -94,6 +94,20 @@ flush();
 assert.equal(router.stack().at(-1)?.path, "/nav/4");
 assert.equal(router.stack().at(-1)?.phase, "enter");
 
+// complete() must not overwrite a push that landed in the same flush.
+{
+  const race = createRouter(defs, { initial: "/schedule" });
+  race.push("/nav/1");
+  flush();
+  const covered = race.stack()[0];
+  assert.ok(covered);
+  race.complete(covered.key);
+  assert.equal(race.push("/list"), true);
+  flush();
+  assert.equal(race.stack().at(-1)?.path, "/list");
+  assert.equal(race.stack().length, 3);
+}
+
 linking.initialUrl = null;
 const deep = createRouter(defs, { initial: "/schedule" });
 await settleLinking();
