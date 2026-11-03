@@ -16,7 +16,12 @@ export function QuoteText(props: {
   align?: "left" | "right";
   binder: () => QuoteBinder;
 }): NodeHandle {
-  const node = Text({ fontSize: props.fontSize, children: "—" });
+  const node = Text({
+    fontSize: props.fontSize,
+    textAlign: props.align ?? "left",
+    weight: props.weight,
+    children: "—",
+  });
   createTrackedEffect(() => {
     const stop = props.binder().bind(props.symbol(), {
       [props.kind]: node.id,

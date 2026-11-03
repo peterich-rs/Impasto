@@ -34,6 +34,7 @@ export function WatchRow(props: {
 
   const pad = host.padding(0);
   host.setPaddingEdges(pad, 10, 16, 10, 16);
+  host.setGrow(pad, 1);
   host.append(region, pad);
 
   const line = host.row(10);
@@ -45,12 +46,15 @@ export function WatchRow(props: {
   host.append(line, mono.id);
 
   const nameCol = host.column(2);
-  host.setMinSize(nameCol, 108, 0);
+  host.setMinSize(nameCol, 0, 0);
+  host.setMaxSize(nameCol, 168, 80);
   host.setGrow(nameCol, 1);
   host.append(line, nameCol);
   const title = host.text(ins().name, 15, INK);
   host.setFontWeight(title, 600);
   host.setMaxLines(title, 1);
+  host.setOverflow(title, "ellipsis");
+  host.setEllipsis(title, "…");
   host.append(nameCol, title);
   const sub = host.text(`${ins().symbol} · ${labelMarket(ins().market)}`, 11, MUTED);
   host.append(nameCol, sub);
@@ -60,16 +64,29 @@ export function WatchRow(props: {
     engine: props.engine,
     binder: props.binder,
     updown: props.updown,
+    w: 56,
+    h: 22,
   });
   host.append(line, spark.id);
 
   const numCol = host.column(2);
-  host.setMinSize(numCol, 86, 0);
   host.append(line, numCol);
-  const lastCell = QuoteText({ symbol, kind: "last", fontSize: 15, binder: props.binder });
-  host.setFontWeight(lastCell.id, 600);
+  const lastCell = QuoteText({
+    symbol,
+    kind: "last",
+    fontSize: 15,
+    weight: 600,
+    align: "right",
+    binder: props.binder,
+  });
   host.append(numCol, lastCell.id);
-  const pctCell = QuoteText({ symbol, kind: "pct", fontSize: 11, binder: props.binder });
+  const pctCell = QuoteText({
+    symbol,
+    kind: "pct",
+    fontSize: 11,
+    align: "right",
+    binder: props.binder,
+  });
   host.append(numCol, pctCell.id);
 
   void GAIN;

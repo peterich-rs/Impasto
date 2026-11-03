@@ -303,6 +303,9 @@ impl Tree {
         let Some(node) = self.get(id) else {
             return 0;
         };
+        if node.flags.contains(super::node::NodeFlags::CULL_PAINT) {
+            return 1;
+        }
         let abs_x = at.parent.0 + node.x;
         let abs_y = at.parent.1 + node.y;
         let x = abs_x - at.offset.0 - at.space.0;
@@ -366,6 +369,9 @@ impl Tree {
         let Some(node) = self.get(id) else {
             return;
         };
+        if node.flags.contains(super::node::NodeFlags::CULL_PAINT) {
+            return;
+        }
         let kind = node.kind;
         let alpha = node.alpha();
         let abs = (parent_abs.0 + node.x, parent_abs.1 + node.y);

@@ -1,4 +1,4 @@
-import { createMemo, createSignal } from "solid-js";
+import { createMemo } from "solid-js";
 import { host, insert, type NodeHandle } from "@impasto/solid-renderer";
 import { VirtualList, createScrollController } from "@impasto/solid-ui";
 import { colorBytes } from "../colors.ts";
@@ -20,8 +20,6 @@ const PRIMARY = colorBytes("#C8102E");
 export function WatchlistPage(props: { router: Router }): NodeHandle {
   const { engine, binder } = useQuotes();
   const controller = createScrollController();
-  const [pinnedKey, setPinnedKey] = createSignal<string | null>(null);
-  const headers = new Map<string, number>();
 
   const items = createMemo<RowItem[]>(() => {
     const out: RowItem[] = [];
@@ -44,18 +42,22 @@ export function WatchlistPage(props: { router: Router }): NodeHandle {
   host.setPaddingEdges(header, 12, 16, 4, 16);
   host.append(page, header);
   const headerRow = host.row(8);
+  host.setCross(headerRow, "center");
   host.append(header, headerRow);
   const title = host.text(loc("自选", "Watchlist"), 26, INK);
   host.setFontWeight(title, 700);
   host.append(headerRow, title);
-  const grow = host.sized(0, 0);
-  host.setGrow(grow, 1);
-  host.append(headerRow, grow);
+  const spacer = host.column(0);
+  host.setGrow(spacer, 1);
+  host.append(headerRow, spacer);
   const search = host.pointerRegion();
   host.onClick(search, () => props.router.push("/search"));
   host.append(headerRow, search);
   const searchLabel = host.text(loc("搜索", "Search"), 14, PRIMARY);
-  host.append(search, searchLabel);
+  const searchAlign = host.align("center");
+  host.setGrow(searchAlign, 1);
+  host.append(searchAlign, searchLabel);
+  host.append(search, searchAlign);
 
   const stripHost = IndexStrip({
     symbols: () => watchlistSig(),
@@ -82,23 +84,6 @@ export function WatchlistPage(props: { router: Router }): NodeHandle {
     restoreKey: "watchlist",
     controller,
     sticky: (item) => item.firstOfGroup !== undefined,
-    onPin: (key) => {
-      const prev = pinnedKey();
-      if (prev && prev !== key) {
-        const node = headers.get(prev);
-        if (node !== undefined) {
-          host.setMaxSize(node, 4096, 4096);
-        }
-      }
-      if (key) {
-        const node = headers.get(key);
-        if (node !== undefined) {
-          // Clip paint only. Keep the measured height so prefix sums stay put.
-          host.setMaxSize(node, 4096, 0.01);
-        }
-      }
-      setPinnedKey(key);
-    },
     empty: () => emptyState(() => props.router.push("/search")),
     recycle: {
       typeOf: (item: RowItem) => (item.symbol.startsWith("group:") ? "header" : "row"),
@@ -110,20 +95,12 @@ export function WatchlistPage(props: { router: Router }): NodeHandle {
 
   function renderRow(item: RowItem, _index: number): NodeHandle {
     if (item.firstOfGroup !== undefined) {
-      const shell = host.column(0);
-      const clip = host.clip(0);
-      host.append(shell, clip);
-      headers.set(item.symbol, clip);
-      if (pinnedKey() === item.symbol) {
-        host.setMaxSize(clip, 4096, 0.01);
-      }
       const head = host.padding(0);
       host.setPaddingEdges(head, 12, 16, 4, 16);
       const labelText = host.text(groupLabel(item.firstOfGroup), 11, MUTED);
       host.setFontWeight(labelText, 600);
       host.append(head, labelText);
-      host.append(clip, head);
-      return { id: shell };
+      return { id: head };
     }
     return WatchRow({
       item: () => item,

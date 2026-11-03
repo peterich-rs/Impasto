@@ -276,6 +276,9 @@ bitflags::bitflags! {
         /// Text paint identity changed and [`super::layout::Tree::sync_paragraphs`]
         /// has not consumed it yet.
         const TEXT_DIRTY = 1 << 8;
+        /// Skip paint and hit testing. Layout size stays, so a pinned list row
+        /// does not change the prefix sums.
+        const CULL_PAINT = 1 << 9;
     }
 }
 

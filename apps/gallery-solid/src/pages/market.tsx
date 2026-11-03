@@ -2,7 +2,6 @@ import { createRenderEffect, createMemo, createSignal } from "solid-js";
 import { host, insert, type NodeHandle } from "@impasto/solid-renderer";
 import { VirtualList, createScrollController } from "@impasto/solid-ui";
 import { colorBytes } from "../colors.ts";
-import { padded } from "../widgets/palette.ts";
 import { useQuotes } from "../state/quotes-provider.tsx";
 import type { Router } from "@impasto/solid-router";
 import { QuoteText } from "../widgets/quote-text.tsx";
@@ -61,12 +60,14 @@ export function MarketPage(props: { router: Router }): NodeHandle {
     host.append(pills, cell);
     const pill = host.decorated(PANEL, 999);
     host.setStroke(pill, 1, HAIR);
-    host.setMinSize(pill, 0, 30);
+    host.setMinSize(pill, 0, 32);
+    host.setGrow(pill, 1);
     host.append(cell, pill);
     const label = host.text(labelOf(m), 12, MUTED);
     const align = host.align("center");
+    host.setGrow(align, 1);
     host.append(align, label);
-    host.append(pill, padded(align, 6, 0, 6, 0));
+    host.append(pill, align);
     createRenderEffect(
       () => market() === m,
       (active) => {
@@ -92,9 +93,11 @@ export function MarketPage(props: { router: Router }): NodeHandle {
     host.append(tabs, cell);
     const inner = host.padding(0);
     host.setPaddingEdges(inner, 8, 0, 8, 0);
+    host.setGrow(inner, 1);
     host.append(cell, inner);
     const label = host.text(boardLabel(b), 13, MUTED);
     const align = host.align("center");
+    host.setGrow(align, 1);
     host.append(align, label);
     host.append(inner, align);
     createRenderEffect(
@@ -150,9 +153,11 @@ export function MarketPage(props: { router: Router }): NodeHandle {
     host.onClick(row, () => props.router.push(`/stock/${item.symbol}`));
     const pad = host.padding(0);
     host.setPaddingEdges(pad, 10, 16, 10, 16);
+    host.setGrow(pad, 1);
     host.append(row, pad);
     const line = host.row(8);
     host.setMinSize(line, 0, 44);
+    host.setCross(line, "center");
     host.append(pad, line);
 
     const rank = host.text(String(index + 1), 12, MUTED);
@@ -171,20 +176,25 @@ export function MarketPage(props: { router: Router }): NodeHandle {
     const sym = host.text(ins.symbol, 10, MUTED);
     host.append(nameCol, sym);
 
+    const quoteCol = host.column(1);
+    host.setMinSize(quoteCol, 88, 0);
+    host.append(line, quoteCol);
     const lastCell = QuoteText({
       symbol: () => item.symbol,
       kind: "last",
       fontSize: 14,
+      align: "right",
       binder: () => binder,
     });
-    host.append(line, lastCell.id);
+    host.append(quoteCol, lastCell.id);
     const pctCell = QuoteText({
       symbol: () => item.symbol,
       kind: "pct",
       fontSize: 12,
+      align: "right",
       binder: () => binder,
     });
-    host.append(line, pctCell.id);
+    host.append(quoteCol, pctCell.id);
     return row;
   }
 

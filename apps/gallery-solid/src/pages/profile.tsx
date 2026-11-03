@@ -80,10 +80,12 @@ export function ProfilePage(props: { router: Router }): NodeHandle {
     host.append(updownRow, cell);
     const pill = host.decorated(PANEL, 8);
     host.setStroke(pill, 1, HAIR);
-    host.setMinSize(pill, 0, 34);
+    host.setMinSize(pill, 0, 36);
+    host.setGrow(pill, 1);
     host.append(cell, pill);
     const label = host.text(opt === "cn" ? loc("红涨绿跌", "Red up") : loc("绿涨红跌", "Green up"), 12, MUTED);
     const align = host.align("center");
+    host.setGrow(align, 1);
     host.append(align, label);
     host.append(pill, align);
     createTrackedEffect(() => {
@@ -110,10 +112,12 @@ export function ProfilePage(props: { router: Router }): NodeHandle {
     host.append(langRow, cell);
     const pill = host.decorated(PANEL, 8);
     host.setStroke(pill, 1, HAIR);
-    host.setMinSize(pill, 0, 34);
+    host.setMinSize(pill, 0, 36);
+    host.setGrow(pill, 1);
     host.append(cell, pill);
     const label = host.text(opt === "zh" ? "中文" : "English", 12, MUTED);
     const align = host.align("center");
+    host.setGrow(align, 1);
     host.append(align, label);
     host.append(pill, align);
     createTrackedEffect(() => {
@@ -140,10 +144,12 @@ export function ProfilePage(props: { router: Router }): NodeHandle {
     host.append(speedRow, cell);
     const pill = host.decorated(PANEL, 8);
     host.setStroke(pill, 1, HAIR);
-    host.setMinSize(pill, 0, 34);
+    host.setMinSize(pill, 0, 36);
+    host.setGrow(pill, 1);
     host.append(cell, pill);
     const label = host.text(speedLabel(opt), 12, MUTED);
     const align = host.align("center");
+    host.setGrow(align, 1);
     host.append(align, label);
     host.append(pill, align);
     createTrackedEffect(() => {

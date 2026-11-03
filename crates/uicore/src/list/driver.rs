@@ -391,8 +391,19 @@ impl ListDriver {
             self.chrome.h_off = 0.0;
         }
         self.write_sticky(offset_y);
+        self.cull_pinned_row(tree);
         self.chrome.extent = content;
         self.write_nodes(tree);
+    }
+
+    /// The pinned header is also mounted in the window. Hide that copy so it
+    /// does not paint twice. The measured height stays in the prefix.
+    fn cull_pinned_row(&self, tree: &mut Tree) {
+        let pin = self.chrome.pin_key.as_str();
+        for (key, mounted) in &self.mounted {
+            let cull = !pin.is_empty() && key == pin;
+            let _ = tree.set_cull_paint(mounted.node, cull);
+        }
     }
 
     fn write_sticky(&mut self, offset_y: f32) {

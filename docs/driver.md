@@ -69,7 +69,7 @@ core.scrollController() → ScrollController
   consume(ox, oy)
 ```
 
-`onDriver` 的 tag：`1` 是列表 op（`i0` 为 detach / adopt / set / place），`2` 是 chrome（滑块可见性和长度、吸顶下标、内容总高），`3` 是接近末尾，`5` 是刷新提交。滑块位移和吸顶平移直接写节点，不进这条回调。
+`onDriver` 的 tag：`1` 是列表 op（`i0` 为 detach / adopt / set / place），`2` 是 chrome（滑块可见性和长度、吸顶下标、内容总高），`3` 是接近末尾，`5` 是刷新提交。滑块位移和吸顶平移直接写节点，不进这条回调。当前吸顶的那一行如果还挂在窗口里，tick 只跳过它的绘制和命中，测量高度留在前缀里，应用不用再把最大高度压成 0。
 
 ## 分阶段
 

@@ -5,15 +5,15 @@ import type { QuoteBinder } from "../state/binder.ts";
 import type { QuoteEngine } from "../engine/engine.ts";
 import { toneFor, type Updown } from "../state/settings.ts";
 
-const COLS = 24;
+const COLS = 16;
 const BAR_W = 2;
-const GAP = 3;
+const GAP = 2;
 const UP: [number, number, number, number] = [235, 62, 62, 255];
 const DOWN: [number, number, number, number] = [34, 176, 95, 255];
 const FLAT: [number, number, number, number] = [138, 141, 145, 255];
 
 /**
- * 24-column sparkline. Each column is an absolute `decorated` bar. Height is
+ * 16-column sparkline. Each column is an absolute `decorated` bar. Height is
  * `setMinSize` so the bar grows from the top of its inset; `insetTop` keeps
  * the bottom on the floor. Refresh rides the binder's spark queue.
  */

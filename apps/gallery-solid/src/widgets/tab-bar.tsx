@@ -34,11 +34,13 @@ export function TabBar(props: { router: Router }): NodeHandle {
     host.append(row, cell);
 
     const pad = host.padding(0);
-    host.setPaddingEdges(pad, 8, 8, 8, 8);
+    host.setPaddingEdges(pad, 10, 0, 10, 0);
+    host.setGrow(pad, 1);
     host.append(cell, pad);
 
     const text = host.text(tab.label, 12, MUTED);
     const center = host.align("center");
+    host.setGrow(center, 1);
     host.append(center, text);
     host.append(pad, center);
     return { tab, text, center };

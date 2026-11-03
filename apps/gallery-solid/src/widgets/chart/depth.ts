@@ -1,4 +1,5 @@
-import { host, type NodeHandle } from "@impasto/solid-renderer";
+import { onCleanup } from "solid-js";
+import { host, onLayout, type NodeHandle } from "@impasto/solid-renderer";
 import { colorBytes } from "../../colors.ts";
 import type { QuoteEngine } from "../../engine/engine.ts";
 import { round2 } from "../../engine/universe.ts";
@@ -21,7 +22,8 @@ export function DepthLadder(props: {
   updown: () => Updown;
   onPick?: (price: number) => void;
 }): NodeHandle {
-  const root = host.column(0);
+  const root = host.column(2);
+  let lane = 240;
 
   const askRows: { price: number; vol: number; bar: number }[] = [];
   const bidRows: { price: number; vol: number; bar: number }[] = [];
@@ -52,7 +54,8 @@ export function DepthLadder(props: {
     const price = host.text("—", 12, INK);
     const vol = host.text("—", 11, MUTED);
     const pad = host.padding(0);
-    host.setPaddingEdges(pad, 6, 6, 4, 6);
+    host.setPaddingEdges(pad, 4, 8, 4, 8);
+    host.setGrow(pad, 1);
     host.append(row, pad);
     const line = host.row(4);
     host.append(pad, line);
@@ -76,7 +79,7 @@ export function DepthLadder(props: {
     const q = engine.quote(symbol);
     const rand = pseudoFor(symbol, q.revision);
     const step = Math.max(0.01, q.last * 0.001);
-    const maxBar = 110;
+    const maxBar = Math.max(72, Math.round(lane * 0.72));
     const spreadNow = round2(step * 2);
     host.setText(spreadLabel, fmtSpread(q.last));
     host.setText(spreadHint, `价差 ${spreadNow.toFixed(2)}`);
@@ -105,6 +108,15 @@ export function DepthLadder(props: {
   }
 
   refresh();
+  onCleanup(
+    onLayout(() => {
+      const box = host.rect(root);
+      if (box.w > 40 && Math.abs(box.w - lane) > 1) {
+        lane = box.w;
+        refresh();
+      }
+    }),
+  );
   return { id: root, refresh };
 }
 

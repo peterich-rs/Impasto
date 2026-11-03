@@ -36,6 +36,9 @@ export function Monogram(props: { ins: () => Instrument; size?: number; fontSize
   const box = host.decorated(brandOf(ins), size / 3);
   host.setMinSize(box, size, size);
   const label = host.text(labelOf(ins), font, [255, 255, 255, 255]);
-  host.append(box, label);
+  const align = host.align("center");
+  host.setGrow(align, 1);
+  host.append(align, label);
+  host.append(box, align);
   return { id: box };
 }

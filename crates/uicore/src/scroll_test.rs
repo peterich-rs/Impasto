@@ -12,6 +12,48 @@ fn event(phase: Phase, x: f32, y: f32, time: f64) -> PointerEvent {
 }
 
 #[test]
+fn horizontal_scroll_stays_the_viewport_width() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(mono());
+    tree.set_viewport(0.0, 0.0, 200.0, 100.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let scroll = tree.scroll_with(ScrollAxis::Horizontal)?;
+    tree.set_fill(scroll)?;
+    let row = tree.row(0.0)?;
+    for _ in 0..4 {
+        let card = tree.sized(80.0, 40.0)?;
+        tree.add_child(row, card)?;
+    }
+    tree.add_child(scroll, row)?;
+    tree.add_child(root, scroll)?;
+    tree.layout()?;
+    assert_eq!(tree.rect(root)?.w, 200.0, "page");
+    assert_eq!(tree.rect(scroll)?.w, 200.0, "viewport");
+    assert_eq!(tree.rect(row)?.w, 320.0, "content");
+    Ok(())
+}
+
+#[test]
+fn vertical_scroll_stretches_a_narrow_child_to_the_viewport() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(mono());
+    tree.set_viewport(0.0, 0.0, 200.0, 100.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let scroll = tree.scroll_with(ScrollAxis::Vertical)?;
+    tree.set_fill(scroll)?;
+    let content = tree.column(0.0)?;
+    let box_node = tree.sized(20.0, 400.0)?;
+    tree.add_child(content, box_node)?;
+    tree.add_child(scroll, content)?;
+    tree.add_child(root, scroll)?;
+    tree.layout()?;
+    assert_eq!(tree.rect(scroll)?.w, 200.0);
+    assert_eq!(tree.rect(content)?.w, 200.0);
+    assert_eq!(tree.rect(content)?.h, 400.0);
+    Ok(())
+}
+
+#[test]
 fn default_physics_keeps_the_friction_asymptote() -> Result<(), crate::Error> {
     let mut tree = Tree::new(mono());
     tree.set_viewport(0.0, 0.0, 100.0, 40.0)?;

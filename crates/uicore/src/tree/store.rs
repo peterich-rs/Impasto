@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use taffy::prelude::*;
 
-use super::layout::{align_axes, finite_number, flex_style, scroll_style, stack_style, tracks};
+use super::layout::{
+    align_axes, content_box, finite_number, flex_style, scroll_style_for, stack_style, tracks,
+};
 use super::node::{ImagePayload, Kind, MAX_GENERATION, Node, Payload, Slot, TextPayload};
 use super::{Alignment, Discarded, Gesture, NodeId, TrackSize, Tree};
 use crate::{Error, Shaper};
@@ -121,12 +123,17 @@ impl Tree {
         )
     }
 
+    /// Inset wrapper. A column, so several children stack and each one stretches
+    /// to the inner width. A row here laid siblings out sideways and left the
+    /// single child at its content width.
     pub fn padding(&mut self, edges: f32) -> Result<NodeId, Error> {
         let edge = length(edges);
         self.container(
             Kind::Padding,
             Style {
                 display: Display::Flex,
+                flex_direction: FlexDirection::Column,
+                flex_shrink: 0.0,
                 align_items: Some(AlignItems::Stretch),
                 padding: Rect {
                     left: edge,
@@ -145,6 +152,7 @@ impl Tree {
             Kind::Align,
             Style {
                 display: Display::Flex,
+                flex_shrink: 0.0,
                 align_items: Some(cross),
                 justify_content: Some(main),
                 ..Style::default()
@@ -156,6 +164,7 @@ impl Tree {
         self.container(
             Kind::Sized,
             Style {
+                flex_shrink: 0.0,
                 size: Size {
                     width: length(width),
                     height: length(height),
@@ -198,7 +207,7 @@ impl Tree {
 
     /// [`Tree::scroll`] locked to `axis` from the start.
     pub fn scroll_with(&mut self, axis: crate::ScrollAxis) -> Result<NodeId, Error> {
-        let id = self.container(Kind::Scroll, scroll_style())?;
+        let id = self.container(Kind::Scroll, scroll_style_for(axis))?;
         if let Some(geom) = self.node_mut(id)?.scroll_mut() {
             geom.axis = axis;
         }
@@ -222,7 +231,7 @@ impl Tree {
         color: [u8; 4],
     ) -> Result<NodeId, Error> {
         let utf8 = utf8.into();
-        let style = Style::default();
+        let style = content_box();
         let (index, generation) = self.reserve();
         let taffy = match self
             .taffy
@@ -254,7 +263,7 @@ impl Tree {
         width: f32,
         height: f32,
     ) -> Result<NodeId, Error> {
-        let style = Style::default();
+        let style = content_box();
         let (index, generation) = self.reserve();
         let taffy = match self
             .taffy
@@ -306,6 +315,7 @@ impl Tree {
             Kind::PointerRegion,
             Style {
                 display: Display::Flex,
+                flex_shrink: 0.0,
                 align_items: Some(AlignItems::Stretch),
                 justify_content: Some(JustifyContent::Start),
                 ..Style::default()
@@ -345,6 +355,7 @@ impl Tree {
         }
 
         self.pin_stack_child(parent, child)?;
+        self.fit_parent_cap(parent, child)?;
         let index = match before {
             Some(anchor) => self.child_index(parent, anchor)?,
             None => self.child_count(parent)?,
@@ -794,6 +805,38 @@ impl Tree {
         Ok(())
     }
 
+    /// Keep a row or column inside its parent, except along a scroll axis.
+    ///
+    /// [`super::layout::flex_style`] caps both axes at 100%. That stops a page
+    /// column from growing past the screen. The same cap on a scroll's content
+    /// would clamp the content to the viewport, so that axis goes back to auto.
+    /// A length or other percentage set by the caller is left alone. Moving the
+    /// child out of a scroll restores the cap.
+    pub(super) fn fit_parent_cap(&mut self, parent: NodeId, child: NodeId) -> Result<(), Error> {
+        let child_kind = self.node(child)?.kind;
+        if !matches!(child_kind, Kind::Row | Kind::Column | Kind::Decorated) {
+            return Ok(());
+        }
+        let (cap_width, cap_height) = if self.node(parent)?.kind == Kind::Scroll {
+            match self.axis_of(parent) {
+                crate::ScrollAxis::Vertical => (true, false),
+                crate::ScrollAxis::Horizontal => (false, true),
+                crate::ScrollAxis::Both => (false, false),
+            }
+        } else {
+            (true, true)
+        };
+        let mut style = self.node(child)?.style.clone();
+        let width = capped_axis(style.max_size.width, cap_width);
+        let height = capped_axis(style.max_size.height, cap_height);
+        if style.max_size.width == width && style.max_size.height == height {
+            return Ok(());
+        }
+        style.max_size.width = width;
+        style.max_size.height = height;
+        self.write_style(child, style)
+    }
+
     pub(super) fn pin_stack_child(&mut self, parent: NodeId, child: NodeId) -> Result<(), Error> {
         if !pins_children(self.node(parent)?.kind) {
             return Ok(());
@@ -918,4 +961,16 @@ fn pins_children(kind: Kind) -> bool {
         kind,
         Kind::Stack | Kind::Clip | Kind::Opacity | Kind::Scroll | Kind::Transform
     )
+}
+
+/// `cap` restores the 100% parent cap. The scrolling axis clears only that default.
+fn capped_axis(dim: Dimension, cap: bool) -> Dimension {
+    let parent = percent(1.0_f32);
+    if cap && dim == Dimension::AUTO {
+        parent
+    } else if !cap && dim == parent {
+        Dimension::AUTO
+    } else {
+        dim
+    }
 }

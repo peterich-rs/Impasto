@@ -29,7 +29,7 @@ export function StockPage(props: { router: Router; symbol: string }): NodeHandle
   const page = host.column(0);
   host.setGrow(page, 1);
 
-  const body = host.column(0);
+  const body = host.column(10);
 
   const header = host.column(6);
   const headerPad = host.padding(0);
@@ -89,6 +89,7 @@ export function StockPage(props: { router: Router; symbol: string }): NodeHandle
   const statLow = buildStat(loc("最低", "Low"), () => fmtPrice(engine.quote(symbol()).low));
   const statVol = buildStat(loc("成交量", "Volume"), () => fmtVolumeCN(engine.quote(symbol()).volume));
   for (const s of [statOpen, statHigh, statLow, statVol]) {
+    host.setGrow(s, 1);
     host.append(statLine, s);
   }
 
@@ -118,10 +119,12 @@ export function StockPage(props: { router: Router; symbol: string }): NodeHandle
     host.onClick(cell, () => setMode(m));
     host.append(modeRow, cell);
     const inner = host.padding(0);
-    host.setPaddingEdges(inner, 6, 0, 6, 0);
+    host.setPaddingEdges(inner, 8, 0, 8, 0);
+    host.setGrow(inner, 1);
     host.append(cell, inner);
     const label = host.text(m === "minutes" ? loc("分时", "Intraday") : loc("日K", "Daily"), 13, MUTED);
     const align = host.align("center");
+    host.setGrow(align, 1);
     host.append(align, label);
     host.append(inner, align);
     createRenderEffect(
@@ -137,7 +140,10 @@ export function StockPage(props: { router: Router; symbol: string }): NodeHandle
   host.setStroke(chartPanel, 1, HAIR);
   const chartInner = host.padding(0);
   host.setPaddingEdges(chartInner, 12, 12, 12, 12);
-  host.append(body, chartPanel);
+  const chartPad = host.padding(0);
+  host.setPaddingEdges(chartPad, 0, 16, 0, 16);
+  host.append(chartPad, chartPanel);
+  host.append(body, chartPad);
   host.append(chartPanel, chartInner);
 
   const chartStack = host.stack();
@@ -192,11 +198,16 @@ export function StockPage(props: { router: Router; symbol: string }): NodeHandle
   host.setStroke(depthPanel, 1, HAIR);
   const depthInner = host.padding(0);
   host.setPaddingEdges(depthInner, 12, 16, 12, 16);
-  host.append(body, depthPanel);
+  const depthPad = host.padding(0);
+  host.setPaddingEdges(depthPad, 0, 16, 0, 16);
+  host.append(depthPad, depthPanel);
+  host.append(body, depthPad);
   host.append(depthPanel, depthInner);
+  const depthCol = host.column(8);
+  host.append(depthInner, depthCol);
   const depthTitle = host.text(loc("盘口 五档", "Order book"), 13, INK);
   host.setFontWeight(depthTitle, 600);
-  host.append(depthInner, depthTitle);
+  host.append(depthCol, depthTitle);
   const depth = DepthLadder({
     symbol,
     engine: () => engine,
@@ -206,7 +217,7 @@ export function StockPage(props: { router: Router; symbol: string }): NodeHandle
       props.router.push(`/order/${symbol()}`);
     },
   });
-  host.append(depthInner, depth.id);
+  host.append(depthCol, depth.id);
 
   const scroller = ScrollArea({
     axis: "vertical",
@@ -235,12 +246,14 @@ export function StockPage(props: { router: Router; symbol: string }): NodeHandle
     const cell = host.pointerRegion();
     host.setGrow(cell, 1);
     host.onClick(cell, onClick);
-    const pill = host.decorated(colorBytes(color), 999);
+    const pill = host.decorated(colorBytes(color), 8);
     host.setMinSize(pill, 0, 44);
+    host.setGrow(pill, 1);
     host.append(cell, pill);
     const label = host.text(labelText, 15, colorBytes("#FFFFFF"));
     host.setFontWeight(label, 600);
     const align = host.align("center");
+    host.setGrow(align, 1);
     host.append(align, label);
     host.append(pill, align);
     return cell;

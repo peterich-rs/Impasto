@@ -161,9 +161,11 @@ export function SearchPage(props: { router: Router }): NodeHandle {
       host.onClick(row, () => props.router.push(`/stock/${ins.symbol}`));
       const pad = host.padding(0);
       host.setPaddingEdges(pad, 8, 0, 8, 0);
+      host.setGrow(pad, 1);
       host.append(row, pad);
       const line = host.row(8);
-      host.setMinSize(line, 0, 36);
+      host.setMinSize(line, 0, 40);
+      host.setCross(line, "center");
       host.append(pad, line);
       const name = host.text(ins.name, 14, INK);
       host.append(line, name);

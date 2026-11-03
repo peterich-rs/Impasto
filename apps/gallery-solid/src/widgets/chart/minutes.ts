@@ -67,6 +67,8 @@ export function MinutesChart(props: {
             ? colorBytes("#22B05F")
             : MUTED;
       const plotW = Math.max(2, props.viewW());
+      host.setMinSize(root, plotW, h);
+      const barW = Math.max(1, Math.floor(plotW / COLS) - 1);
       const baseY = h * (1 - (q.prevClose - lo) / (hi - lo));
       host.setInset(base, 0, Math.round(baseY), 0, 0);
       host.setMinSize(base, 0, 1);
@@ -76,7 +78,7 @@ export function MinutesChart(props: {
         const top = Math.min(y, baseY);
         const bottom = Math.max(y, baseY);
         host.setInset(cols[i]!, 0, Math.round(top), 0, Math.round((i * plotW) / (COLS - 1)));
-        host.setMinSize(cols[i]!, 2, Math.max(2, Math.round(bottom - top)));
+        host.setMinSize(cols[i]!, barW, Math.max(2, Math.round(bottom - top)));
         host.setColor(cols[i]!, color);
       }
     });

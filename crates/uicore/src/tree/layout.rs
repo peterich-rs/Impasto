@@ -361,6 +361,21 @@ impl Tree {
         Ok(())
     }
 
+    /// When `cull` is set, record and hit testing skip this subtree.
+    /// The laid-out box does not change.
+    pub fn set_cull_paint(&mut self, id: NodeId, cull: bool) -> Result<(), Error> {
+        {
+            let node = self.node_mut(id)?;
+            if node.flags.contains(NodeFlags::CULL_PAINT) == cull {
+                return Ok(());
+            }
+            node.flags.set(NodeFlags::CULL_PAINT, cull);
+        }
+        self.dirty_picture(id);
+        self.mark_paint();
+        Ok(())
+    }
+
     /// Layer alpha, 0–255. Geometry stays until the next layout.
     pub fn set_alpha(&mut self, id: NodeId, alpha: u8) -> Result<(), Error> {
         if self.node(id)?.kind != Kind::Opacity {
@@ -463,12 +478,13 @@ impl Tree {
 
     /// Width and height become 100% of the parent, or of the viewport when this is the root.
     ///
-    /// The minimum size is zero so a flex parent can shrink this node.
-    /// Inside a row or column, `flex-basis` is zero and `flex-grow` is one,
-    /// so the node takes the space left after its siblings. A filled stack,
-    /// clip, opacity, or transform uses one fraction track, so its child uses
-    /// that box instead of growing with the content. A scroll in that child
-    /// then keeps the box as its viewport.
+    /// Minimum size is zero and both flex factors are one. A row or column can
+    /// shrink this node to the space left after siblings, which is what keeps a
+    /// tab bar on screen. The factors are stored even when `fill` runs before
+    /// insert: JSX sets the prop at creation. An indefinite parent treats the
+    /// percentage as auto, so the node still sizes to its content. A filled
+    /// stack, clip, opacity, or transform uses `minmax(0, 1fr)`. A plain `1fr`
+    /// track is `minmax(auto, 1fr)` and grows with the child past the box.
     pub fn set_fill(&mut self, id: NodeId) -> Result<(), Error> {
         let kind = self.node(id)?.kind;
         let mut style = self.node(id)?.style.clone();
@@ -480,22 +496,14 @@ impl Tree {
             width: length(0.0_f32),
             height: length(0.0_f32),
         };
-        let parent_is_flex = self
-            .node(id)?
-            .parent
-            .and_then(|parent| self.node(parent).ok())
-            .is_some_and(|parent| matches!(parent.kind, Kind::Column | Kind::Row));
-        if parent_is_flex {
-            style.flex_grow = 1.0;
-            style.flex_shrink = 1.0;
-            style.flex_basis = length(0.0_f32);
-        }
+        style.flex_grow = 1.0;
+        style.flex_shrink = 1.0;
         if matches!(
             kind,
             Kind::Stack | Kind::Opacity | Kind::Transform | Kind::Clip
         ) {
-            style.grid_template_columns = vec![fr(1.0_f32)];
-            style.grid_template_rows = vec![fr(1.0_f32)];
+            style.grid_template_columns = vec![GridTemplateComponent::Single(fill_track())];
+            style.grid_template_rows = vec![GridTemplateComponent::Single(fill_track())];
         }
         self.write_style(id, style)
     }
@@ -1384,11 +1392,29 @@ fn justify_content(justify: Justify) -> JustifyContent {
     }
 }
 
-pub(super) fn scroll_style() -> Style {
+/// The scroll axis stays `max_content` so the child can be longer than the
+/// viewport. The cross axis is `minmax(0, 1fr)`, so a vertical list is as wide
+/// as the viewport and a horizontal strip is as tall. A plain `1fr` is
+/// `minmax(auto, 1fr)` and the child's min content widens the track past the
+/// box. `Both` keeps both axes at `max_content`.
+pub(super) fn scroll_style_for(axis: crate::ScrollAxis) -> Style {
+    let (columns, rows) = match axis {
+        crate::ScrollAxis::Vertical => (
+            vec![GridTemplateComponent::Single(fill_track())],
+            vec![max_content()],
+        ),
+        crate::ScrollAxis::Horizontal => (
+            vec![max_content()],
+            vec![GridTemplateComponent::Single(fill_track())],
+        ),
+        crate::ScrollAxis::Both => (vec![max_content()], vec![max_content()]),
+    };
     Style {
         display: Display::Grid,
-        grid_template_columns: vec![max_content()],
-        grid_template_rows: vec![max_content()],
+        grid_template_columns: columns,
+        grid_template_rows: rows,
+        align_items: Some(AlignItems::Stretch),
+        justify_items: Some(AlignItems::Stretch),
         align_self: Some(AlignSelf::Stretch),
         flex_grow: 1.0,
         flex_shrink: 1.0,
@@ -1407,16 +1433,48 @@ pub(super) fn scroll_style() -> Style {
 pub(super) fn stack_style() -> Style {
     Style {
         display: Display::Grid,
+        flex_shrink: 0.0,
         grid_template_columns: vec![min_content()],
         grid_template_rows: vec![min_content()],
         ..Style::default()
     }
 }
 
+/// A node that keeps its intrinsic size. Taffy defaults `flex_shrink` to 1,
+/// so a tight row collapses the last child to 0. Flutter does not shrink a
+/// child unless it is flexible. Call `set_shrink` when a child should yield.
+pub(super) fn content_box() -> Style {
+    Style {
+        flex_shrink: 0.0,
+        ..Style::default()
+    }
+}
+
+/// One grid track that fills its box and cannot grow past it.
+///
+/// `fr(1)` alone is `minmax(auto, 1fr)`. The auto minimum is the child's
+/// min-content size, so a list or a row of cards stretches the track past the
+/// screen. `0` lets the track stay on the parent's definite size.
+pub(super) fn fill_track() -> TrackSizingFunction {
+    minmax(length(0.0_f32), fr(1.0_f32))
+}
+
+/// Row or column.
+///
+/// `flex_shrink` stays at 1 so a definite parent can pull the box back onto
+/// the screen. `max_size` is 100% of that parent: content may overflow inside
+/// the box, but the box does not grow past it. A direct child of a scroll
+/// clears the scrolling axis in [`super::store`] so the content can be longer
+/// than the viewport. Leaves use [`content_box`] and do not shrink.
 pub(super) fn flex_style(direction: FlexDirection, gap: f32) -> Style {
     Style {
         display: Display::Flex,
         flex_direction: direction,
+        flex_shrink: 1.0,
+        max_size: Size {
+            width: percent(1.0_f32),
+            height: percent(1.0_f32),
+        },
         gap: Size {
             width: length(gap),
             height: length(gap),

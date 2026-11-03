@@ -56,6 +56,9 @@ export function IndexStrip(props: {
     axis: "horizontal",
     children: { id: row },
   });
-  host.setMinSize(scroller.id, 0, 64);
+  // `fill` would grow this strip on the page column. Keep it one card tall.
+  host.setGrow(scroller.id, 0);
+  host.setMinSize(scroller.id, 0, 72);
+  host.setMaxSize(scroller.id, 4096, 72);
   return scroller;
 }

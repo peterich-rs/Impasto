@@ -44,7 +44,7 @@ export function TradePage(props: { router: Router }): NodeHandle {
   host.setFontWeight(equity, 700);
   host.append(equityRow, equity);
 
-  const statRow = host.row(0);
+  const statRow = host.row(12);
   host.append(cardInner, statRow);
   const cashStat = cardStat(loc("可用资金", "Cash"));
   const mvStat = cardStat(loc("持仓市值", "Market value"));
@@ -96,10 +96,12 @@ export function TradePage(props: { router: Router }): NodeHandle {
     host.onClick(cell, () => setTab(t));
     host.append(tabs, cell);
     const inner = host.padding(0);
-    host.setPaddingEdges(inner, 6, 0, 6, 0);
+    host.setPaddingEdges(inner, 8, 0, 8, 0);
+    host.setGrow(inner, 1);
     host.append(cell, inner);
     const label = host.text(tabLabel(t), 13, MUTED);
     const align = host.align("center");
+    host.setGrow(align, 1);
     host.append(align, label);
     host.append(inner, align);
     createTrackedEffect(() => {
@@ -172,9 +174,11 @@ export function TradePage(props: { router: Router }): NodeHandle {
     host.onClick(row, () => props.router.push(`/stock/${symbol}`));
     const pad = host.padding(0);
     host.setPaddingEdges(pad, 10, 0, 10, 0);
+    host.setGrow(pad, 1);
     host.append(row, pad);
     const line = host.row(10);
     host.setMinSize(line, 0, 48);
+    host.setCross(line, "center");
     host.append(pad, line);
 
     const mono = Monogram({ ins: () => ins });
@@ -228,9 +232,11 @@ export function TradePage(props: { router: Router }): NodeHandle {
     const row = host.pointerRegion();
     const pad = host.padding(0);
     host.setPaddingEdges(pad, 10, 0, 10, 0);
+    host.setGrow(pad, 1);
     host.append(row, pad);
     const line = host.row(10);
     host.setMinSize(line, 0, 40);
+    host.setCross(line, "center");
     host.append(pad, line);
 
     const sideBadge = host.decorated(side === "buy" ? colorBytes("#EB3E3E") : colorBytes("#22B05F"), 4);

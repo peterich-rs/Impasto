@@ -53,9 +53,11 @@ export function OrderSheet(props: {
     const pill = host.decorated(PANEL, 8);
     host.setStroke(pill, 1, HAIR);
     host.setMinSize(pill, 0, 36);
+    host.setGrow(pill, 1);
     host.append(cell, pill);
     const label = host.text(s === "buy" ? loc("买入", "Buy") : loc("卖出", "Sell"), 14, MUTED);
     const align = host.align("center");
+    host.setGrow(align, 1);
     host.append(align, label);
     host.append(pill, align);
     createTrackedEffect(() => {
@@ -74,6 +76,7 @@ export function OrderSheet(props: {
     host.append(typeRow, cell);
     const label = host.text(t === "market" ? loc("市价", "Market") : loc("限价", "Limit"), 13, MUTED);
     const align = host.align("center");
+    host.setGrow(align, 1);
     host.append(align, label);
     host.append(cell, align);
     createTrackedEffect(() => {
@@ -158,10 +161,12 @@ export function OrderSheet(props: {
     host.append(pctRow, cell);
     const pill = host.decorated(colorBytes("#F2F3F5"), 6);
     host.setStroke(pill, 1, HAIR);
-    host.setMinSize(pill, 0, 26);
+    host.setMinSize(pill, 0, 28);
+    host.setGrow(pill, 1);
     host.append(cell, pill);
     const label = host.text(`${pct}%`, 11, MUTED);
     const align = host.align("center");
+    host.setGrow(align, 1);
     host.append(align, label);
     host.append(pill, align);
   }
@@ -200,12 +205,14 @@ export function OrderSheet(props: {
     showToast(loc("已提交", "Submitted"));
     props.onClose();
   });
-  const submitPill = host.decorated(UP, 999);
+  const submitPill = host.decorated(UP, 8);
   host.setMinSize(submitPill, 0, 44);
+  host.setGrow(submitPill, 1);
   host.append(submit, submitPill);
   const submitLabel = host.text(loc("提交订单", "Submit"), 15, colorBytes("#FFFFFF"));
   host.setFontWeight(submitLabel, 600);
   const submitAlign = host.align("center");
+  host.setGrow(submitAlign, 1);
   host.append(submitAlign, submitLabel);
   host.append(submitPill, submitAlign);
   createTrackedEffect(() => {
@@ -221,6 +228,7 @@ export function OrderSheet(props: {
     host.append(cell, box);
     const label = host.text(glyph, 18, INK);
     const align = host.align("center");
+    host.setGrow(align, 1);
     host.append(align, label);
     host.append(box, align);
     return cell;
