@@ -546,4 +546,36 @@
   global.fetch = fetch;
   global.fetchStream = fetchStream;
   global.WebSocket = WebSocket;
+
+  var consoleTimers = new Map();
+  var now =
+    typeof performance === "object" && performance && typeof performance.now === "function"
+      ? function () {
+          return performance.now();
+        }
+      : function () {
+          return Date.now();
+        };
+  console.time = function (label) {
+    consoleTimers.set(label === undefined ? "default" : String(label), now());
+  };
+  console.timeLog = function (label) {
+    var key = label === undefined ? "default" : String(label);
+    var start = consoleTimers.get(key);
+    if (start === undefined) {
+      console.warn('Timer "' + key + '" does not exist');
+      return;
+    }
+    console.info(key + ": " + (now() - start).toFixed(1) + " ms");
+  };
+  console.timeEnd = function (label) {
+    var key = label === undefined ? "default" : String(label);
+    var start = consoleTimers.get(key);
+    if (start === undefined) {
+      console.warn('Timer "' + key + '" does not exist');
+      return;
+    }
+    consoleTimers.delete(key);
+    console.info(key + ": " + (now() - start).toFixed(1) + " ms");
+  };
 })(globalThis);

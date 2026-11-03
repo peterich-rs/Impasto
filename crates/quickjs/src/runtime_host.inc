@@ -267,6 +267,10 @@ static int settle(Host *host, uint64_t token, int ok, JSValue value) {
     JS_FreeValue(host->ctx, fn);
     JS_FreeValue(host->ctx, other);
     if (JS_IsException(result)) {
+        /* The drain loop reports unhandled rejections; a handler throw that
+           reaches here already failed its listener call. Keep the reason out
+           of the cleared pending-exception state so the next call starts
+           clean, matching the old free-only behavior. */
         JSValue exception = JS_GetException(host->ctx);
         JS_FreeValue(host->ctx, exception);
         return -1;

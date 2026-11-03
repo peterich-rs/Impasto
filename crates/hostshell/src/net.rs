@@ -16,10 +16,11 @@ pub(crate) fn spawn(
     jobs: Receiver<IoJob>,
     inbox: Arc<Inbox>,
     http: Option<Arc<dyn HttpClient>>,
+    hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
 ) -> Option<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name("net".to_string())
-        .spawn(move || serve(jobs, inbox, http))
+        .spawn(move || serve(jobs, inbox, http, hub))
         .ok()
 }
 
@@ -33,8 +34,13 @@ pub(crate) fn wake(
         .ok()
 }
 
-fn serve(jobs: Receiver<IoJob>, inbox: Arc<Inbox>, http: Option<Arc<dyn HttpClient>>) {
-    let mut sockets: HashMap<u64, Sender<SocketCmd>> = HashMap::new();
+fn serve(
+    jobs: Receiver<IoJob>,
+    inbox: Arc<Inbox>,
+    http: Option<Arc<dyn HttpClient>>,
+    hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
+) {
+    let mut sockets: HashMap<u64, (Sender<SocketCmd>, String)> = HashMap::new();
     while let Ok(job) = jobs.recv() {
         match job {
             IoJob::Http(request) => {
@@ -51,6 +57,9 @@ fn serve(jobs: Receiver<IoJob>, inbox: Arc<Inbox>, http: Option<Arc<dyn HttpClie
                 };
                 if request.cancel.load(Ordering::Acquire) {
                     continue;
+                }
+                if let (Some(hub), Err(error)) = (hub.as_ref(), result.as_ref()) {
+                    hub.log(3, crate::diagnostics::LogSource::Net, &error.message);
                 }
                 inbox.post(Command::HttpDone { token, result });
             }
@@ -95,24 +104,41 @@ fn serve(jobs: Receiver<IoJob>, inbox: Arc<Inbox>, http: Option<Arc<dyn HttpClie
             IoJob::Abort { .. } => {}
             IoJob::SocketOpen { id, url, protocols } => {
                 if sockets.len() >= 8 {
-                    post_socket(&inbox, id, "error", true, b"too many sockets");
+                    post_socket(
+                        &inbox,
+                        id,
+                        "error",
+                        true,
+                        b"too many sockets",
+                        hub.as_ref(),
+                        &url,
+                    );
                     continue;
                 }
-                match open_socket(id, &url, &protocols, Arc::clone(&inbox)) {
+                match open_socket(id, &url, &protocols, Arc::clone(&inbox), hub.clone()) {
                     Ok(sender) => {
-                        sockets.insert(id, sender);
+                        sockets.insert(id, (sender, url));
                     }
-                    Err(message) => post_socket(&inbox, id, "error", true, message.as_bytes()),
+                    Err(message) => post_socket(
+                        &inbox,
+                        id,
+                        "error",
+                        true,
+                        message.as_bytes(),
+                        hub.as_ref(),
+                        &url,
+                    ),
                 }
             }
             IoJob::SocketSend { id, text, data } => {
-                if let Some(sender) = sockets.get(&id) {
+                if let Some((sender, _url)) = sockets.get(&id) {
                     let _ = sender.send(SocketCmd::Send { text, data });
                 }
             }
             IoJob::SocketClose { id } => {
-                if let Some(sender) = sockets.remove(&id) {
+                if let Some((sender, url)) = sockets.remove(&id) {
                     let _ = sender.send(SocketCmd::Close);
+                    drop(url);
                 }
             }
         }
@@ -157,7 +183,34 @@ pub(crate) fn fetch_image_body(
     }
 }
 
-fn post_socket(inbox: &Inbox, id: u64, event: &str, text: bool, data: &[u8]) {
+fn post_socket(
+    inbox: &Inbox,
+    id: u64,
+    event: &str,
+    text: bool,
+    data: &[u8],
+    hub: Option<&Arc<crate::diagnostics::DiagnosticsHub>>,
+    url: &str,
+) {
+    if let Some(hub) = hub {
+        use crate::diagnostics::{NetEntry, NetKind};
+        hub.record_net(NetEntry {
+            seq: 0,
+            at_ms: mono_ms(),
+            kind: NetKind::Socket,
+            token: id,
+            method: event.to_owned(),
+            url: url.to_owned(),
+            request_headers: Vec::new(),
+            request_body: None,
+            status: None,
+            response_headers: Vec::new(),
+            response_bytes: Some(data.len()),
+            response_preview: (!data.is_empty()).then(|| data.to_vec()),
+            error: (event == "error").then(|| String::from_utf8_lossy(data).to_string()),
+            done_ms: Some(mono_ms()),
+        });
+    }
     inbox.post(Command::Socket {
         id,
         event: event.to_owned(),
@@ -171,6 +224,7 @@ fn open_socket(
     url: &str,
     protocols: &[String],
     inbox: Arc<Inbox>,
+    hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
 ) -> Result<Sender<SocketCmd>, String> {
     if !(url.starts_with("ws://") || url.starts_with("wss://")) {
         return Err("unsupported URL".to_owned());
@@ -180,7 +234,7 @@ fn open_socket(
     let protocols = protocols.to_vec();
     thread::Builder::new()
         .name(format!("socket-{id}"))
-        .spawn(move || socket_loop(id, &url, &protocols, rx, inbox))
+        .spawn(move || socket_loop(id, &url, &protocols, rx, inbox, hub))
         .map_err(|error| error.to_string())?;
     Ok(tx)
 }
@@ -191,11 +245,21 @@ fn socket_loop(
     protocols: &[String],
     commands: Receiver<SocketCmd>,
     inbox: Arc<Inbox>,
+    hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
 ) {
+    let hub_ref = hub.as_ref();
     let mut request = match tungstenite::client::IntoClientRequest::into_client_request(url) {
         Ok(request) => request,
         Err(error) => {
-            post_socket(&inbox, id, "error", true, error.to_string().as_bytes());
+            post_socket(
+                &inbox,
+                id,
+                "error",
+                true,
+                error.to_string().as_bytes(),
+                hub_ref,
+                url,
+            );
             return;
         }
     };
@@ -210,11 +274,19 @@ fn socket_loop(
     let mut connected = match tungstenite::connect(request) {
         Ok((socket, _)) => socket,
         Err(error) => {
-            post_socket(&inbox, id, "error", true, error.to_string().as_bytes());
+            post_socket(
+                &inbox,
+                id,
+                "error",
+                true,
+                error.to_string().as_bytes(),
+                hub_ref,
+                url,
+            );
             return;
         }
     };
-    post_socket(&inbox, id, "open", true, b"");
+    post_socket(&inbox, id, "open", true, b"", hub_ref, url);
     set_socket_timeout(&mut connected);
     let socket = Mutex::new(connected);
     loop {
@@ -225,7 +297,7 @@ fn socket_loop(
                     match String::from_utf8(data) {
                         Ok(text) => tungstenite::Message::Text(text.into()),
                         Err(_) => {
-                            post_socket(&inbox, id, "error", true, b"invalid text");
+                            post_socket(&inbox, id, "error", true, b"invalid text", hub_ref, url);
                             continue;
                         }
                     }
@@ -233,27 +305,35 @@ fn socket_loop(
                     tungstenite::Message::Binary(data.into())
                 };
                 if let Err(error) = guard.send(message) {
-                    post_socket(&inbox, id, "error", true, error.to_string().as_bytes());
+                    post_socket(
+                        &inbox,
+                        id,
+                        "error",
+                        true,
+                        error.to_string().as_bytes(),
+                        hub_ref,
+                        url,
+                    );
                     break;
                 }
             }
             Ok(SocketCmd::Close) | Err(RecvTimeoutError::Disconnected) => {
                 let mut guard = lock_socket(&socket);
                 let _ = guard.close(None);
-                post_socket(&inbox, id, "close", true, b"");
+                post_socket(&inbox, id, "close", true, b"", hub_ref, url);
                 break;
             }
             Err(RecvTimeoutError::Timeout) => {
                 let mut guard = lock_socket(&socket);
                 match guard.read() {
                     Ok(tungstenite::Message::Text(text)) => {
-                        post_socket(&inbox, id, "message", true, text.as_bytes());
+                        post_socket(&inbox, id, "message", true, text.as_bytes(), hub_ref, url);
                     }
                     Ok(tungstenite::Message::Binary(data)) => {
-                        post_socket(&inbox, id, "message", false, &data);
+                        post_socket(&inbox, id, "message", false, &data, hub_ref, url);
                     }
                     Ok(tungstenite::Message::Close(_)) => {
-                        post_socket(&inbox, id, "close", true, b"");
+                        post_socket(&inbox, id, "close", true, b"", hub_ref, url);
                         break;
                     }
                     Ok(tungstenite::Message::Ping(data)) => {
@@ -264,7 +344,7 @@ fn socket_loop(
                         if error.kind() == std::io::ErrorKind::WouldBlock
                             || error.kind() == std::io::ErrorKind::TimedOut => {}
                     Err(tungstenite::Error::ConnectionClosed) => {
-                        post_socket(&inbox, id, "close", true, b"");
+                        post_socket(&inbox, id, "close", true, b"", hub_ref, url);
                         break;
                     }
                     Err(_) => {}

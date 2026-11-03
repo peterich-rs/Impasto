@@ -25,6 +25,7 @@ packages/file-system/         @impasto/file-system
 packages/async-storage/       @impasto/async-storage
 packages/solid-renderer/      接到 uicore 的 universal 运行时。directionFor、spring、onBack
 packages/solid-ui/            Button、Field、Dialog、theme、overlay
+packages/devtools/            应用内调试面板。@impasto/devtools，数据来自 hostshell 的 DiagnosticsHub
 packages/solid-router/        路径、栈和 RouterView
 packages/net/                 createFetch
 packages/form/                createForm
@@ -56,7 +57,7 @@ crates/android ──► quickjs 会话        加载 assets 里的 `quotes.js`
 
 ## 一帧
 
-平台线程入队，渲染线程做命中、冲刷、布局、录制和上屏。macOS 与 Android 都走这条路径。命中测试用上一帧已经算好的几何。监听器里不布局。布局、录制、上屏都在 vsync 上。
+平台线程入队，渲染线程做命中、冲刷、布局、录制和上屏。macOS 与 Android 都走这条路径。命中测试用上一帧已经算好的几何。监听器里不布局。布局、录制、上屏都在 vsync 上。`IMPASTO_DEVTOOLS=1` 时，帧末在渲染线程多一次 O(n) 盒子扫描，并把日志、错误、网络和帧计时写入 hostshell 的环形缓冲；关掉时这些步骤不跑。面板是 `packages/devtools` 里的普通层，经 `registerTopLayer` 挂在渲染器根 stack 上，不往 `DrawList` 里加调试命令。
 
 ```text
 Host            Session           Core              Engine

@@ -912,6 +912,9 @@ impl Tree {
         self.laid_out = true;
         self.sync_paragraphs();
         self.layout_work_ms += started.elapsed().as_secs_f64() * 1000.0;
+        if self.debug.scan_overflow {
+            self.scan_overflow();
+        }
         Ok(())
     }
 

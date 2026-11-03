@@ -270,6 +270,15 @@ export interface CoreHost {
   ): void;
   setStroke?(node: NodeHandle, width: number, color: number[]): void;
   log?(level: string, message: string): void;
+  /** Overflow report JSON. Present when the host linked the debug bindings. */
+  debugLayoutIssues?(): string | null;
+  debugSnapshot?(): string | null;
+  debugProbe?(x: number, y: number): string | null;
+  debugLastPointer?(): string | null;
+  debugSetScan?(on: boolean): void;
+  debugSetPointerTrace?(on: boolean, suppress: boolean): void;
+  debugSetOwned?(node: NodeHandle, on: boolean): void;
+  debugMemory?(): string | null;
   metrics?(): {
     width: number;
     height: number;

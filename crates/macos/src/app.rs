@@ -830,6 +830,7 @@ fn command_key(selector: &str) -> Option<session::KeyPress> {
 struct MacServices {
     font: Vec<u8>,
     ime_view: Arc<AtomicPtr<c_void>>,
+    on_stop: Arc<dyn Fn(i32) + Send + Sync>,
 }
 
 impl MacServices {
@@ -842,6 +843,28 @@ impl MacServices {
                 .unwrap_or(LogLevel::Info)
         })
     }
+}
+
+/// Source maps larger than this stay off the panel. The bundle's map is small.
+const SOURCE_MAP_CAP: u64 = 512 * 1024;
+
+fn load_source_map(script: &str) -> Option<Arc<String>> {
+    let path = std::path::Path::new(script).with_extension("js.map");
+    let meta = std::fs::metadata(&path).ok()?;
+    if meta.len() > SOURCE_MAP_CAP {
+        return None;
+    }
+    std::fs::read_to_string(path).ok().map(Arc::new)
+}
+
+/// `IMPASTO_DEVTOOLS=1` turns on the in-app devtools panel. Default off.
+fn devtools_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("IMPASTO_DEVTOOLS")
+            .map(|text| text.trim() == "1" || text.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
 }
 
 impl Services for MacServices {
@@ -906,6 +929,10 @@ impl Services for MacServices {
             view.apply_ime_update(&update);
         }));
     }
+
+    fn inspect_finished(&self) {
+        (self.on_stop)(0);
+    }
 }
 
 /// A script session. The shell paints the layer tree that session records.
@@ -960,6 +987,8 @@ pub fn run(
         wake_main();
     });
     let Launch::Script { name, source } = launch;
+    let devtools_source_map = devtools_enabled().then(|| load_source_map(&name)).flatten();
+    let inspect_dir = std::env::var_os("IMPASTO_INSPECT").map(PathBuf::from);
     let shell_launch = ShellLaunch::Session(Box::new(move |slot, io, host| {
         quickjs::open_with_io(
             &source,
@@ -981,6 +1010,9 @@ pub fn run(
     let decoder = Arc::new(PngDecoder { directory: assets });
     let launch_url = session::shared(initial_url.clone());
     let mac = Arc::new(MacBridge);
+    let devtools = devtools_enabled()
+        .then(hostshell::DiagnosticsHub::new)
+        .map(Arc::new);
     let link = hostshell::start(
         Boot {
             font_family: FONT_FAMILY.to_string(),
@@ -988,6 +1020,7 @@ pub fn run(
             services: Box::new(MacServices {
                 font: font.to_vec(),
                 ime_view: Arc::clone(&ime_view),
+                on_stop: Arc::clone(&on_stop),
             }),
             vsync: Arc::new(vsync),
             decoder,
@@ -1007,6 +1040,9 @@ pub fn run(
             }),
             dump_list,
             inspect,
+            devtools,
+            devtools_source_map,
+            inspect_dir,
         }
         .with_module(hostshell::clipboard(Arc::clone(&mac) as _))
         .with_module(hostshell::linking(

@@ -6,6 +6,7 @@ use crate::{
     RecognizerSet, Shaper, SubtreeSpace, TrackSize, Tree,
 };
 
+mod debug;
 mod flex;
 mod grid;
 mod picture;

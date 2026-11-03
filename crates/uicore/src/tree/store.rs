@@ -65,6 +65,7 @@ impl Tree {
             laid_out: false,
             origin: (0.0, 0.0),
             viewport: None,
+            debug: super::debug::DebugState::default(),
         }
     }
 

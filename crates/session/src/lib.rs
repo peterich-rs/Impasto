@@ -414,6 +414,8 @@ pub struct FrameOutput {
     pub images: Option<Arc<uicore::ImageCensus>>,
     /// `None` when the session did not time the frame.
     pub phases: Option<FramePhases>,
+    /// Current overflow report as JSON, when the debug scan is on.
+    pub layout_report: Option<String>,
 }
 
 impl FrameOutput {
@@ -429,6 +431,7 @@ impl FrameOutput {
             exit: false,
             images: None,
             phases: None,
+            layout_report: None,
         }
     }
 }
@@ -447,6 +450,11 @@ pub trait Session {
     /// Animation asks again inside each `frame`. One request schedules one frame.
     fn wants_frame(&mut self) -> bool {
         false
+    }
+    /// The most recent script failure, if the session recorded one and nobody
+    /// took it yet. The host consumes this for diagnostics each frame.
+    fn take_script_error(&mut self) -> Option<String> {
+        None
     }
     fn lifecycle(&mut self, _event: Lifecycle) {}
     fn settings(&mut self, _settings: &PlatformSettings) {}

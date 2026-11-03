@@ -1,7 +1,8 @@
 //! Sized, animation, font, and host-module callbacks.
 
 use std::collections::HashSet;
-use std::ffi::{c_char, c_void};
+use std::ffi::{CString, c_char, c_void};
+use std::ptr;
 use std::sync::atomic::Ordering;
 
 use session::{HttpError, HttpFailure, HttpRequest, Invoke, IoJob, PluginResult, PluginValue};
@@ -1711,4 +1712,80 @@ pub(super) unsafe extern "C" fn socket_close(session: *mut c_void, id: u64) {
     if let Some(submit) = inner.io.borrow().as_ref() {
         submit(IoJob::SocketClose { id });
     }
+}
+
+// ---- devtools debug surface -------------------------------------------------
+
+/// What `debug_json` should produce. Numbers match the glue constants.
+pub(super) const DEBUG_LAYOUT_ISSUES: i32 = 0;
+pub(super) const DEBUG_SNAPSHOT: i32 = 1;
+pub(super) const DEBUG_PROBE: i32 = 2;
+pub(super) const DEBUG_LAST_POINTER: i32 = 3;
+
+/// Writes one debug JSON document into the session slot. Returns 0 on
+/// success; the glue reads it back with [`debug_json_bytes`].
+pub(super) unsafe extern "C" fn debug_json(
+    session: *mut c_void,
+    what: i32,
+    _node: u64,
+    x: f32,
+    y: f32,
+) -> i32 {
+    let inner = unsafe { inner(session) };
+    let tree = inner.tree.borrow();
+    let text = match what {
+        DEBUG_LAYOUT_ISSUES => tree.layout_issues_json(),
+        DEBUG_SNAPSHOT => tree.debug_snapshot(),
+        DEBUG_PROBE => tree.debug_probe(x, y),
+        DEBUG_LAST_POINTER => match tree.debug_last_pointer() {
+            Some((px, py, phase)) => {
+                format!("{{\"x\":{px:.2},\"y\":{py:.2},\"phase\":\"{phase}\"}}")
+            }
+            None => "null".to_owned(),
+        },
+        _ => return -1,
+    };
+    match CString::new(text) {
+        Ok(c) => {
+            *inner.debug_json.borrow_mut() = Some(c);
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+/// Pointer to the NUL-terminated JSON from the last successful
+/// [`debug_json`]. Null until then.
+pub(super) unsafe extern "C" fn debug_json_bytes(session: *mut c_void) -> *const c_char {
+    let inner = unsafe { inner(session) };
+    inner
+        .debug_json
+        .borrow()
+        .as_ref()
+        .map_or(ptr::null(), |text| text.as_ptr())
+}
+
+pub(super) unsafe extern "C" fn debug_set_scan(session: *mut c_void, on: i32) {
+    let inner = unsafe { inner(session) };
+    inner.tree.borrow_mut().set_debug_scan(on != 0);
+}
+
+pub(super) unsafe extern "C" fn debug_set_pointer_trace(
+    session: *mut c_void,
+    on: i32,
+    suppress: i32,
+) {
+    let inner = unsafe { inner(session) };
+    inner
+        .tree
+        .borrow_mut()
+        .set_pointer_trace(on != 0, suppress != 0);
+}
+
+pub(super) unsafe extern "C" fn debug_set_owned(session: *mut c_void, node: u64, on: i32) {
+    let inner = unsafe { inner(session) };
+    inner
+        .tree
+        .borrow_mut()
+        .set_debug_owned(NodeId::from_raw(node), on != 0);
 }

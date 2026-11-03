@@ -521,6 +521,15 @@ export function installMockHost(): MockHost {
     log: (level: string, message: string) => {
       calls.push({ name: "log", args: [level, message] });
     },
+    debugLayoutIssues: () => "{\"issues\":[]}",
+    debugSnapshot: () => "null",
+    debugProbe: () => "{\"chain\":[]}",
+    debugLastPointer: () => "null",
+    debugSetScan: () => undefined,
+    debugSetPointerTrace: () => undefined,
+    debugSetOwned: () => undefined,
+    debugMemory: () => "{\"mallocBytes\":0,\"objects\":0}",
+    rect: () => ({ x: 0, y: 0, w: 0, h: 0 }),
     getInitialURL: () => Promise.resolve(null),
     onURL: () => {},
     settings: () => light,

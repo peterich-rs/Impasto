@@ -325,6 +325,11 @@ pub(super) struct QjsFns {
         unsafe extern "C" fn(*mut c_void, u32, u32, i32, *mut f32, *mut f32) -> i32,
     pub(super) scroll_consume: unsafe extern "C" fn(*mut c_void, u32, u32, f32, f32) -> i32,
     pub(super) set_scroll_axis: unsafe extern "C" fn(*mut c_void, u64, i32) -> i32,
+    pub(super) debug_json: unsafe extern "C" fn(*mut c_void, i32, u64, f32, f32) -> i32,
+    pub(super) debug_json_bytes: unsafe extern "C" fn(*mut c_void) -> *const c_char,
+    pub(super) debug_set_scan: unsafe extern "C" fn(*mut c_void, i32),
+    pub(super) debug_set_pointer_trace: unsafe extern "C" fn(*mut c_void, i32, i32),
+    pub(super) debug_set_owned: unsafe extern "C" fn(*mut c_void, u64, i32),
 }
 
 unsafe extern "C" {

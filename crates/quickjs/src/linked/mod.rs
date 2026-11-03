@@ -56,6 +56,8 @@ pub(super) struct Inner {
     pub(super) http: RefCell<Option<Arc<dyn session::HttpClient>>>,
     pub(super) config: HostConfig,
     pub(super) last_error: RefCell<Option<CString>>,
+    /// Debug JSON from the latest `debug_json` call, as NUL-terminated UTF-8.
+    pub(super) debug_json: RefCell<Option<CString>>,
     pub(super) paused: Cell<bool>,
     pub(super) cancels: RefCell<HashMap<u64, Arc<AtomicBool>>>,
     pub(super) pending: RefCell<Pending>,
@@ -216,6 +218,7 @@ impl JsSession {
             http: RefCell::new(None),
             config,
             last_error: RefCell::new(None),
+            debug_json: RefCell::new(None),
             paused: Cell::new(false),
             cancels: RefCell::new(HashMap::new()),
             pending: RefCell::new(Pending::new()),
@@ -392,6 +395,11 @@ impl JsSession {
             scroll_query: driver::scroll_query,
             scroll_consume: driver::scroll_consume,
             set_scroll_axis,
+            debug_json,
+            debug_json_bytes,
+            debug_set_scan,
+            debug_set_pointer_trace,
+            debug_set_owned,
         };
         // SAFETY: `inner` stays at this address until `Drop`. `qjs_open` copies
         // the function table. The copied session pointer is only used while
@@ -492,7 +500,6 @@ impl JsSession {
     }
 
     #[cfg(test)]
-    #[cfg(test)]
     pub(crate) fn picture_writes(&self) -> usize {
         let inner = unsafe { &*self.inner };
         inner.tree.borrow().picture_writes()
@@ -511,7 +518,6 @@ impl JsSession {
     pub fn take_script_error(&self) -> Option<String> {
         self.script_error.borrow_mut().take()
     }
-
     fn note_script_error(&self, message: String) {
         // SAFETY: `inner` is owned by this session. The log hook does not re-enter it.
         let inner = unsafe { &*self.inner };
@@ -546,6 +552,10 @@ impl Drop for JsSession {
 }
 
 impl Session for JsSession {
+    fn take_script_error(&mut self) -> Option<String> {
+        JsSession::take_script_error(self)
+    }
+
     fn metrics(&mut self, metrics: &Metrics) {
         // SAFETY: `inner` is owned by this session and is not aliased by a Rust reference.
         let inner = unsafe { &*self.inner };
@@ -932,6 +942,11 @@ impl Session for JsSession {
                 self.paint_commands = commands;
                 tree.clear_paint();
             }
+            // Fresh overflow findings go to the host log as warnings; the
+            // devtools layout page reads the full report on demand.
+            for issue in tree.take_layout_issues() {
+                (inner.log)(2, &issue.log_line());
+            }
             let record_ms = elapsed_ms(record_started);
             let epoch = tree.layer_epoch();
             let layers = if epoch != self.layer_epoch {
@@ -947,6 +962,7 @@ impl Session for JsSession {
             } else {
                 None
             };
+            let layout_report = tree.debug_scan_enabled().then(|| tree.layout_issues_json());
             let semantics_started = std::time::Instant::now();
             let semantics = tree.semantics_patch();
             let semantics_ms = elapsed_ms(semantics_started);
@@ -996,6 +1012,7 @@ impl Session for JsSession {
                     },
                     trace,
                 }),
+                layout_report,
             };
         }
     }

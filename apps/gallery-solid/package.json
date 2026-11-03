@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@solidjs/universal": "2.0.0-rc.17",
+    "@impasto/devtools": "workspace:*",
     "@impasto/solid-renderer": "workspace:*",
     "@impasto/solid-router": "workspace:*",
     "@impasto/solid-ui": "workspace:*",

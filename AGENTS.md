@@ -147,6 +147,7 @@ present 之后 wants_ime 变化才让平台弹出或收起键盘
 - 不要提交 `third_party/impeller-sdk/`、`target/`，也不要解压约 1GB 的 `libimpeller.a`。`crates/engine/fetch-impeller-sdk.sh` 按 `crates/engine/engine.pin` 把每个平台解到 `third_party/impeller-sdk/<平台>/`，只留 `include/*`、动态库和 `LICENSE.sdk.md`。darwin 的 install name 是 `@rpath/libimpeller.dylib`。Android 的 SONAME 是 `libimpeller.so`。Cargo 的输出在 `target/`。
 - 节点的 `x, y` 是父相对坐标。`parent` 只表示结构，渲染引擎不加父节点变换。`Tree::rect` 返回场景坐标。`LAYER` 不产生绘制调用。
 - 宿主不保存 UI 状态，不创建按钮，不解释 `count`，也不做命中测试。它把指针入队，并把 `LayerTree` 交给渲染引擎。`just host` 每帧把队列交给会话。命中、手势和绘制录制在 `uicore`。场景格式在 `protocol`。Impeller 绘制在 `engine`。布局只调用 Taffy。Solid 渲染器和 Kotlin DSL 只改元素树。不要给 `crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 再加 C 或 Objective-C。QuickJS 的胶水 C 只留在 `crates/quickjs`。
+- devtool 面板只准用现有布局原语渲染，不准往 `uicore` 或 `engine` 里加调试绘制命令。高亮框是 `packages/devtools` 自己的盒子。
 - `register_font`、`submit_layers`、`draw_metal`、`draw_vulkan` 只在渲染线程上调用。`Engine` 是 `!Send`。Impeller 的 typography context 不能离开这条线程。`CAMetalLayer` 在主线程创建并挂到视图上；渲染线程只用层指针取 drawable。Metal context 仍用 `MTLCreateSystemDefaultDevice()`。Android 的 `ANativeWindow` 由平台线程持有，要等渲染线程应答 `SurfaceDropped` 之后才 `release`。等待在 `surface-drop` 上阻塞于 `DropWait`，平台线程不等待。
 
 ## Monorepo
@@ -168,6 +169,7 @@ packages/file-system/       @impasto/file-system
 packages/async-storage/     @impasto/async-storage
 packages/solid-renderer/    接到 uicore 的运行时。不做布局
 packages/solid-ui/          Button、Field、Dialog、theme、overlay
+packages/devtools/          应用内调试面板。数据来自 hostshell 环形缓冲
 packages/solid-router/      路径、栈和 RouterView
 packages/net/               createFetch
 packages/form/              createForm

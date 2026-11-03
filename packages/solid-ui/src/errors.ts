@@ -41,14 +41,27 @@ export function installErrorHooks(): () => void {
   const onRejection = (event: PromiseRejectionEvent) => {
     reportError(event.reason);
   };
-  if (typeof globalThis.addEventListener === "function") {
-    globalThis.addEventListener("error", onError as EventListener);
-    globalThis.addEventListener("unhandledrejection", onRejection as EventListener);
+  const global = globalThis as {
+    addEventListener?: typeof globalThis.addEventListener;
+    removeEventListener?: typeof globalThis.removeEventListener;
+    __reportUnhandled?: (text: string) => void;
+  };
+  if (typeof global.addEventListener === "function") {
+    global.addEventListener("error", onError as EventListener);
+    global.addEventListener("unhandledrejection", onRejection as EventListener);
+  } else {
+    // QuickJS: the glue-layer rejection checker calls this hook with the
+    // formatted reason and stack instead of a DOM event.
+    global.__reportUnhandled = (text: string) => {
+      log("error", text);
+    };
   }
   return () => {
-    if (typeof globalThis.removeEventListener === "function") {
-      globalThis.removeEventListener("error", onError as EventListener);
-      globalThis.removeEventListener("unhandledrejection", onRejection as EventListener);
+    if (typeof global.removeEventListener === "function") {
+      global.removeEventListener("error", onError as EventListener);
+      global.removeEventListener("unhandledrejection", onRejection as EventListener);
+    } else {
+      delete global.__reportUnhandled;
     }
   };
 }

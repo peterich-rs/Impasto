@@ -83,6 +83,25 @@ export function overlayParent(): number {
   return overlayId;
 }
 
+type TopLayerFactory = () => HostNode;
+
+const topLayers: TopLayerFactory[] = [];
+
+/**
+ * Mounts a layer above the app column and the overlay stack. Devtools uses
+ * this so applications never change their JSX to show the debug panel. The
+ * factory runs inside `boot`'s root stack.
+ */
+export function registerTopLayer(factory: TopLayerFactory): () => void {
+  topLayers.push(factory);
+  return () => {
+    const index = topLayers.indexOf(factory);
+    if (index >= 0) {
+      topLayers.splice(index, 1);
+    }
+  };
+}
+
 /** Drops `node` from its parent and forgets the renderer tables for that subtree. */
 export function removeNode(node: HostNode): void {
   const parent = scene.getParentNode(node);
@@ -103,6 +122,9 @@ export function boot(component: () => HostNode) {
   const overlay = scene.createElement("stack", { fill: true });
   scene.insertNode(root, content);
   scene.insertNode(root, overlay);
+  for (const factory of topLayers) {
+    scene.insertNode(root, factory());
+  }
   overlayId = overlay.id;
   host.onFrame((targetMs: number, intervalMs: number) => {
     flush();
@@ -155,7 +177,7 @@ export const core = {
 };
 
 // builtIns import these names from moduleName. rc.17 calls the boundary Errored.
-export { Errored, Errored as ErrorBoundary, For, Match, Show, Switch } from "solid-js";
+export { Errored, Errored as ErrorBoundary, For, Match, Show, Switch, onCleanup } from "solid-js";
 
 export function Dynamic(props: {
   component?: ((props: Record<string, unknown>) => HostNode) | null;
