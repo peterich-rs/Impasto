@@ -766,7 +766,8 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                 if let Some(patch) = output.semantics.take() {
                     fold_semantics(&mut runtime.semantics, &patch);
                     if let Some(update) = runtime.semantics.as_ref() {
-                        runtime.services.borrow().semantics(update);
+                        let projected = crate::semantics::project(update);
+                        runtime.services.borrow().semantics(&projected);
                     }
                 }
                 reloads = std::mem::take(&mut output.reloads);

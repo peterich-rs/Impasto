@@ -49,7 +49,7 @@ struct Bridge {
     view: Global<JObject<'static>>,
     assets: Arc<AssetManager>,
     font: OnceLock<Vec<u8>>,
-    semantics: Mutex<Option<uicore::SemanticsUpdate>>,
+    semantics: Mutex<Vec<hostshell::ProjectedNode>>,
 }
 
 impl Bridge {
@@ -161,8 +161,8 @@ impl Bridge {
         copied
     }
 
-    fn publish_semantics(&self, update: &uicore::SemanticsUpdate) {
-        let nodes = crate::a11y::bridge_nodes(update);
+    fn publish_semantics(&self, nodes: &[hostshell::ProjectedNode]) {
+        let nodes = crate::a11y::bridge_nodes(nodes);
         self.call(|env| {
             let n = nodes.len();
             let ids = jni::objects::JLongArray::new(env, n)?;
@@ -375,12 +375,12 @@ impl Services for Shared {
         self.0.font_bytes()
     }
 
-    fn semantics(&self, update: &uicore::SemanticsUpdate) {
+    fn semantics(&self, update: &[hostshell::ProjectedNode]) {
         *self
             .0
             .semantics
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(update.clone());
+            .unwrap_or_else(|error| error.into_inner()) = update.to_vec();
         self.0.publish_semantics(update);
     }
 
@@ -586,7 +586,7 @@ fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
         view: request.view,
         assets: Arc::clone(&request.assets),
         font: OnceLock::new(),
-        semantics: Mutex::new(None),
+        semantics: Mutex::new(Vec::new()),
     });
     let bridge_for_clock = Arc::clone(&bridge);
     let clock = FrameClock::new(Arc::new(move || bridge_for_clock.schedule_frame()));
@@ -1649,15 +1649,19 @@ pub extern "system" fn Java_dev_impasto_host_AccessBridge_nativeScroll(
     };
     let id = uicore::SemanticsId(id as u64);
     let (dx, dy) = {
-        let update = host
+        let nodes = host
             .bridge
             .semantics
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let Some(update) = update.as_ref() else {
+        let Some(node) = nodes.iter().find(|node| node.id == id) else {
             return;
         };
-        crate::a11y::scroll_action(update, id, forward)
+        if forward != 0 {
+            node.scroll_forward
+        } else {
+            node.scroll_backward
+        }
     };
     if dx == 0.0 && dy == 0.0 {
         return;
