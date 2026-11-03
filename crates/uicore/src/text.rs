@@ -90,8 +90,13 @@ pub enum Edit {
     Undo,
     Redo,
     SelectAll,
-    /// Replace the value. Used when a control binds a new string.
+    /// Replace the value and clear undo. Used when a control loads a fresh buffer.
     Load(String),
+    /// Programmatic replace. `record_undo` pushes the previous value; it does not clear the stack.
+    Replace {
+        text: String,
+        record_undo: bool,
+    },
     /// Delete the composing range, then insert `String`. Does not clear composing
     /// by the insert path, so a following insert cannot delete the same range again.
     Commit(String),
@@ -137,6 +142,8 @@ pub struct TextEditor {
     /// Horizontal anchor for a run of vertical motions.
     column_x: Option<f32>,
     revision: u64,
+    /// UTF-16 limit. `None` does not reject. An over-limit edit is returned unchanged.
+    max_length: Option<u32>,
 }
 
 impl TextEditor {
@@ -148,7 +155,13 @@ impl TextEditor {
             clipboard: None,
             column_x: None,
             revision: 0,
+            max_length: None,
         }
+    }
+
+    /// Rejects an edit whose UTF-16 length would pass `limit`. `None` clears the cap.
+    pub fn set_max_length(&mut self, limit: Option<u32>) {
+        self.max_length = limit;
     }
 
     pub fn revision(&self) -> u64 {
@@ -217,8 +230,17 @@ impl TextEditor {
         C: Fn(u32, Affinity) -> Caret,
         H: Fn(f32, f32) -> Caret,
     {
+        let saved = self.max_length.map(|_| self.clone());
         if !self.apply_motion(&edit, lines, &word_at, &caret_at, &hit_at) {
             self.apply_mutation(edit, lines, word_at);
+        }
+        if let Some(limit) = self.max_length
+            && utf16_len(&self.value.text) > limit
+        {
+            if let Some(saved) = saved {
+                *self = saved;
+            }
+            return;
         }
         self.revision = self.revision.saturating_add(1);
     }
@@ -342,6 +364,21 @@ impl TextEditor {
                 self.redo.clear();
                 self.value = TextEditingValue::at_end(text);
                 self.clipboard = None;
+                self.column_x = None;
+            }
+            Edit::Replace { text, record_undo } => {
+                if record_undo {
+                    self.checkpoint();
+                }
+                let limit = utf16_len(&text);
+                self.value.text = text;
+                self.value.selection.base = self.value.selection.base.min(limit);
+                self.value.selection.extent = self.value.selection.extent.min(limit);
+                if let Some(range) = self.value.composing.as_mut() {
+                    let start = range.start.min(limit);
+                    let end = range.end.min(limit);
+                    *range = start..end;
+                }
                 self.column_x = None;
             }
             Edit::DeleteWordBackward => {
@@ -1349,5 +1386,22 @@ mod tests {
         assert_eq!(undo.value().text, "ab");
         undo.apply(Edit::Redo);
         assert_eq!(undo.value().text, "a");
+    }
+
+    #[test]
+    fn max_length_rejects_without_touching_undo() {
+        let mut editor = TextEditor::new("ab");
+        editor.set_max_length(Some(2));
+        editor.apply(Edit::Insert("c".into()));
+        assert_eq!(editor.value().text, "ab");
+        editor.apply(Edit::Undo);
+        assert_eq!(editor.value().text, "ab");
+        editor.apply(Edit::Replace {
+            text: "z".into(),
+            record_undo: false,
+        });
+        assert_eq!(editor.value().text, "z");
+        editor.apply(Edit::Undo);
+        assert_eq!(editor.value().text, "z");
     }
 }

@@ -8,9 +8,9 @@ use super::node::Kind;
 use super::{FocusDirection, Gesture, NodeId, Tree};
 use crate::{Button, Error, Phase, PointerEvent, PointerId};
 
-/// Routes captured at pointer down. A later structure change does not drop them
-/// unless the target node itself is removed.
-pub(super) struct GestureArena {
+/// Routes captured at pointer down. Not a gesture contest: one pointer has one route.
+/// A later structure change does not drop a route unless the target node itself is removed.
+pub(super) struct PointerTable {
     pub(super) routes: HashMap<PointerId, PointerRoute>,
     /// Scroll nodes that already have a locked pointer. A second finger does not join.
     pub(super) scroll_locks: HashMap<NodeId, PointerId>,
@@ -23,7 +23,7 @@ pub(super) struct GestureArena {
     pub(super) pointer_at: (f32, f32),
 }
 
-impl Default for GestureArena {
+impl Default for PointerTable {
     fn default() -> Self {
         Self {
             routes: HashMap::new(),
@@ -48,7 +48,7 @@ pub(super) struct PendingTap {
     slop: f32,
 }
 
-impl GestureArena {
+impl PointerTable {
     pub(super) fn clear_index(&mut self, index: u32) {
         self.routes.retain(|_, route| {
             if route.pressed.is_some_and(|pressed| pressed.index == index) {
@@ -68,6 +68,13 @@ impl GestureArena {
             {
                 route.drag = None;
             }
+            if route
+                .long_press
+                .as_ref()
+                .is_some_and(|watch| watch.target.index == index)
+            {
+                route.long_press = None;
+            }
             !route.is_empty()
         });
         self.scroll_locks.retain(|node, _| node.index != index);
@@ -75,8 +82,8 @@ impl GestureArena {
 }
 
 /// Distance from the pointer-down point that a move must exceed before a scroll
-/// wins the gesture. The same length as Flutter's `kTouchSlop`.
-const DRAG_SLOP: f32 = 8.0;
+/// wins the gesture. Kept at 8; Flutter's current `kTouchSlop` is 18.
+const DRAG_SLOP: f32 = crate::DRAG_SLOP;
 
 #[derive(Clone, Copy)]
 pub(super) struct Sample {
@@ -91,8 +98,11 @@ pub(super) struct DragState {
     /// Scroll or selection target after the gesture locks.
     pub(super) scroll: Option<NodeId>,
     pub(super) locked: bool,
-    /// The long-press recognizer already won. Lift releases without a click.
+    /// The long-press watch already won. Lift releases without a click.
     pub(super) long_press: bool,
+    /// Unclamped content position for a locked scroll. Later samples continue from here.
+    pub(super) desired_x: f32,
+    pub(super) desired_y: f32,
     pub(super) origin_x: f32,
     pub(super) origin_y: f32,
     pub(super) last_x: f32,
@@ -108,9 +118,18 @@ pub(super) struct PointerRoute {
     pub(super) pressed: Option<NodeId>,
     pub(super) secondary: Option<SecondaryPress>,
     pub(super) drag: Option<DragState>,
-    pub(super) contest: Option<crate::gesture::PointerContest>,
+    /// Still-finger long press. Cleared when the drag locks or the finger leaves the slop.
+    pub(super) long_press: Option<LongPressWatch>,
     /// The down that produced [`Gesture::DoubleTap`] must not also click.
     pub(super) consumed_double: bool,
+}
+
+/// Time and slop for one long press. The duration is [`crate::LONG_PRESS_MS`].
+pub(super) struct LongPressWatch {
+    pub(super) target: NodeId,
+    pub(super) down_ms: f64,
+    pub(super) cancelled: bool,
+    pub(super) fired: bool,
 }
 
 impl PointerRoute {
@@ -118,10 +137,7 @@ impl PointerRoute {
         self.pressed.is_none()
             && self.secondary.is_none()
             && self.drag.is_none()
-            && self
-                .contest
-                .as_ref()
-                .is_none_or(|contest| contest.is_empty())
+            && self.long_press.is_none()
             && !self.consumed_double
     }
 }
@@ -231,6 +247,7 @@ impl Tree {
     ) -> Vec<Gesture> {
         route.drag = None;
         route.pressed = None;
+        route.long_press = None;
         route.consumed_double = false;
         let mut early = self.take_second_tap(&event);
         let hit = self.hit_root(event.x, event.y);
@@ -243,6 +260,8 @@ impl Tree {
                 scroll,
                 locked: false,
                 long_press: false,
+                desired_x: 0.0,
+                desired_y: 0.0,
                 origin_x: event.x,
                 origin_y: event.y,
                 last_x: event.x,
@@ -252,7 +271,7 @@ impl Tree {
                 velocity: crate::VelocityRing::new(),
             });
         }
-        route.contest = Some(self.contest_for(&event));
+        route.long_press = self.long_press_watch(hit, &event);
         if early
             .iter()
             .any(|gesture| matches!(gesture, Gesture::DoubleTap(_)))
@@ -282,24 +301,36 @@ impl Tree {
         Vec::new()
     }
 
-    /// Click scheduled by a tap that was waiting for a double tap.
+    /// Click scheduled by a tap that was waiting for a double tap, and a still-finger long press.
     pub fn tick(&mut self, now_ms: f64) -> Vec<Gesture> {
+        let mut gestures = self.tick_long_press(now_ms);
         let Some(pending) = self.arena.pending_tap.take() else {
-            return Vec::new();
+            return gestures;
         };
         if pending
             .deadline_ms
             .is_some_and(|deadline| now_ms >= deadline)
         {
-            let mut gestures = vec![Gesture::Click(pending.node)];
+            gestures.push(Gesture::Click(pending.node));
             gestures.extend(self.move_focus(pending.focus));
             return gestures;
         }
         if pending.deadline_ms.is_none() && now_ms - pending.time_ms > pending.window_ms {
-            return Vec::new();
+            return gestures;
         }
         self.arena.pending_tap = Some(pending);
-        Vec::new()
+        gestures
+    }
+
+    /// True while a finger is waiting out [`crate::LONG_PRESS_MS`]. The session asks for another frame.
+    pub fn pending_long_press(&self) -> bool {
+        self.arena.routes.values().any(|route| {
+            route.long_press.as_ref().is_some_and(|watch| {
+                !watch.cancelled
+                    && !watch.fired
+                    && !route.drag.as_ref().is_some_and(|drag| drag.locked)
+            })
+        })
     }
 
     fn pointer_zoom(&mut self, event: PointerEvent) -> Vec<Gesture> {
@@ -327,55 +358,60 @@ impl Tree {
         }
     }
 
-    fn contest_for(&self, event: &PointerEvent) -> crate::gesture::PointerContest {
-        use crate::{
-            DragRecognizer, LongPressRecognizer, Recognizer, ScrollRecognizer, TapRecognizer,
-            TextSelectRecognizer,
-        };
-        let mut path = crate::HitPath::default();
-        self.hit_path(event.x, event.y, &mut path);
-        let mut members: Vec<Box<dyn Recognizer>> = Vec::new();
-        for entry in path.entries() {
-            let Some(node) = self.get(entry.id) else {
+    fn long_press_watch(
+        &self,
+        hit: Option<NodeId>,
+        event: &PointerEvent,
+    ) -> Option<LongPressWatch> {
+        let mut id = hit?;
+        loop {
+            let node = self.get(id)?;
+            if node.recognizers.long_press {
+                return Some(LongPressWatch {
+                    target: id,
+                    down_ms: event.time_ms,
+                    cancelled: false,
+                    fired: false,
+                });
+            }
+            id = node.parent?;
+        }
+    }
+
+    fn tick_long_press(&mut self, now_ms: f64) -> Vec<Gesture> {
+        let pointers: Vec<_> = self.arena.routes.keys().copied().collect();
+        let mut gestures = Vec::new();
+        for pointer in pointers {
+            let Some(route) = self.arena.routes.get_mut(&pointer) else {
                 continue;
             };
-            if node.kind == Kind::Scroll {
-                let held = ScrollRecognizer::locked_by_other(
-                    &self.arena.scroll_locks,
-                    entry.id,
-                    Some(event.pointer),
-                );
-                members.push(Box::new(ScrollRecognizer::new(
-                    entry.id,
-                    event.pointer,
-                    event.x,
-                    event.y,
-                    held,
-                )));
+            if route
+                .drag
+                .as_ref()
+                .is_some_and(|drag| drag.locked || drag.long_press)
+            {
+                if let Some(watch) = route.long_press.as_mut() {
+                    watch.cancelled = true;
+                }
+                continue;
             }
-            if let Some(axis) = text_select_axis(node) {
-                members.push(Box::new(TextSelectRecognizer::new(
-                    entry.id, axis, event.x, event.y,
-                )));
+            let Some(watch) = route.long_press.as_mut() else {
+                continue;
+            };
+            if watch.cancelled || watch.fired {
+                continue;
             }
-            if node.recognizers.tap || node.hit_role() == super::node::Hit::Region {
-                members.push(Box::new(TapRecognizer::new(entry.id, event.x, event.y)));
+            if !now_ms.is_finite() || now_ms - watch.down_ms < crate::LONG_PRESS_MS {
+                continue;
             }
-            if node.recognizers.long_press {
-                members.push(Box::new(LongPressRecognizer::new(
-                    entry.id,
-                    event.x,
-                    event.y,
-                    event.time_ms,
-                )));
+            watch.fired = true;
+            let target = watch.target;
+            if let Some(drag) = route.drag.as_mut() {
+                drag.long_press = true;
             }
-            if let Some(axis) = node.recognizers.drag {
-                members.push(Box::new(DragRecognizer::new(
-                    entry.id, axis, event.x, event.y,
-                )));
-            }
+            gestures.push(Gesture::LongPress(target));
         }
-        crate::gesture::PointerContest::new(members)
+        gestures
     }
 
     pub fn set_recognizers(&mut self, id: NodeId, set: crate::RecognizerSet) -> Result<(), Error> {
@@ -399,7 +435,11 @@ impl Tree {
             return self.update_hover(event.x, event.y);
         };
         let past = past_slop(origin_x, origin_y, event.x, event.y);
-        if let Some(target) = self.long_press_winner(route, &event) {
+        if past {
+            if let Some(watch) = route.long_press.as_mut() {
+                watch.cancelled = true;
+            }
+        } else if let Some(target) = fire_long_press(route, event.time_ms) {
             return vec![Gesture::LongPress(target)];
         }
         if !past {
@@ -433,6 +473,19 @@ impl Tree {
             return Vec::new();
         };
         let (dx, dy) = note_move(drag, event);
+        let scroll_kind = self
+            .get(scroll)
+            .is_some_and(|node| node.kind == Kind::Scroll);
+        if scroll_kind {
+            drag.desired_x -= dx;
+            drag.desired_y -= dy;
+            let desired_x = drag.desired_x;
+            let desired_y = drag.desired_y;
+            if let Ok(sample) = self.apply_drag_desired(scroll, desired_x, desired_y) {
+                self.note_edge_pull(scroll, desired_y, sample.offset_y);
+                self.note_overscroll_pull(scroll);
+            }
+        }
         vec![Gesture::DragBy(scroll, dx, dy)]
     }
 
@@ -448,6 +501,18 @@ impl Tree {
         let (dx, dy) = note_move(drag, event);
         drag.locked = true;
         drag.scroll = Some(scroll);
+        if let Some(watch) = route.long_press.as_mut() {
+            watch.cancelled = true;
+        }
+        let (ox, oy) = self.scroll_offset(scroll).unwrap_or((0.0, 0.0));
+        drag.desired_x = ox - dx;
+        drag.desired_y = oy - dy;
+        let desired_x = drag.desired_x;
+        let desired_y = drag.desired_y;
+        if let Ok(sample) = self.apply_drag_desired(scroll, desired_x, desired_y) {
+            self.note_edge_pull(scroll, desired_y, sample.offset_y);
+            self.note_overscroll_pull(scroll);
+        }
         self.cancel_scroll_motion(scroll);
         self.note_scroll_phase(scroll, crate::ScrollPhase::Dragging, 0.0, 0.0);
         let mut gestures = Vec::new();
@@ -472,6 +537,9 @@ impl Tree {
         let (dx, dy) = note_move(drag, event);
         drag.locked = true;
         drag.scroll = Some(target);
+        if let Some(watch) = route.long_press.as_mut() {
+            watch.cancelled = true;
+        }
         vec![Gesture::DragBegin(target), Gesture::DragBy(target, dx, dy)]
     }
 
@@ -501,10 +569,16 @@ impl Tree {
         route: &mut PointerRoute,
         event: PointerEvent,
     ) -> Vec<Gesture> {
+        if let Some(target) = fire_long_press(route, event.time_ms) {
+            route.drag = None;
+            route.pressed = None;
+            route.long_press = None;
+            return vec![Gesture::LongPress(target), Gesture::Release(target)];
+        }
         if route.drag.as_ref().is_some_and(|drag| drag.long_press) {
             let target = route.pressed.take();
             route.drag = None;
-            route.contest = None;
+            route.long_press = None;
             return target.map(Gesture::Release).into_iter().collect();
         }
         if route.drag.as_ref().is_some_and(|drag| drag.locked) {
@@ -512,11 +586,12 @@ impl Tree {
             let speed = route.drag.as_ref().map(drag_velocity).unwrap_or((0.0, 0.0));
             route.drag = None;
             route.pressed = None;
-            route.contest = None;
+            route.long_press = None;
             self.unlock_pointer(event.pointer);
             return scroll
                 .map(|id| {
                     if self.get(id).is_some_and(|node| node.kind == Kind::Scroll) {
+                        self.commit_edge_pull(id);
                         let _ = self.arm_fling(id, speed.0, speed.1);
                         self.arm_overscroll_spring(id);
                         self.sync_scroll_phase(id);
@@ -527,7 +602,7 @@ impl Tree {
         }
         let hit = route.drag.as_ref().and_then(|drag| drag.hit);
         route.drag = None;
-        route.contest = None;
+        route.long_press = None;
         let Some(target) = route.pressed.take() else {
             return Vec::new();
         };
@@ -638,31 +713,9 @@ impl Tree {
             self.arm_overscroll_spring(scroll);
         }
         route.drag = None;
-        route.contest = None;
+        route.long_press = None;
         self.unlock_pointer(pointer);
         gestures
-    }
-
-    fn long_press_winner(
-        &mut self,
-        route: &mut PointerRoute,
-        event: &PointerEvent,
-    ) -> Option<NodeId> {
-        let claim = {
-            let contest = route.contest.as_mut()?;
-            let mut path = crate::HitPath::default();
-            self.hit_path(event.x, event.y, &mut path);
-            contest.on_pointer(event, &path)?
-        };
-        if !matches!(claim, crate::RecognizerClaim::LongPress) {
-            return None;
-        }
-        let drag = route.drag.as_mut()?;
-        if drag.long_press || drag.locked {
-            return None;
-        }
-        drag.long_press = true;
-        route.pressed
     }
 
     pub(super) fn unlock_pointer(&mut self, pointer: PointerId) {
@@ -682,8 +735,23 @@ impl Tree {
         if dx == 0.0 && dy == 0.0 {
             return Vec::new();
         }
+        let (x, y) = self.scroll_offset(id).unwrap_or((0.0, 0.0));
+        let _ = self.resolve_scroll(id, x + dx, y + dy);
         self.merge_wheel(id, dx, dy);
         vec![Gesture::Wheel(id, dx, dy)]
+    }
+
+    /// A programmatic write during a drag continues from the requested position.
+    pub(super) fn rebase_drag_desired(&mut self, id: NodeId, x: f32, y: f32) {
+        for route in self.arena.routes.values_mut() {
+            let Some(drag) = route.drag.as_mut() else {
+                continue;
+            };
+            if drag.locked && drag.scroll == Some(id) {
+                drag.desired_x = x;
+                drag.desired_y = y;
+            }
+        }
     }
 
     /// Drops pointer routes whose target sits in `root`'s subtree.
@@ -994,6 +1062,29 @@ fn past_slop(origin_x: f32, origin_y: f32, x: f32, y: f32) -> bool {
     dx * dx + dy * dy > DRAG_SLOP * DRAG_SLOP
 }
 
+/// Same predicate as the old long-press recognizer: 500ms, still inside the slop, not locked.
+fn fire_long_press(route: &mut PointerRoute, now_ms: f64) -> Option<NodeId> {
+    if route
+        .drag
+        .as_ref()
+        .is_some_and(|drag| drag.locked || drag.long_press)
+    {
+        return None;
+    }
+    let watch = route.long_press.as_mut()?;
+    if watch.cancelled || watch.fired {
+        return None;
+    }
+    if !now_ms.is_finite() || now_ms - watch.down_ms < crate::LONG_PRESS_MS {
+        return None;
+    }
+    watch.fired = true;
+    if let Some(drag) = route.drag.as_mut() {
+        drag.long_press = true;
+    }
+    Some(watch.target)
+}
+
 fn note_move(drag: &mut DragState, event: PointerEvent) -> (f32, f32) {
     let dx = event.x - drag.last_x;
     let dy = event.y - drag.last_y;
@@ -1025,17 +1116,6 @@ fn drag_velocity(drag: &DragState) -> (f32, f32) {
         crate::cast::f32_from_f64(f64::from(latest.x - previous.x) / dt),
         crate::cast::f32_from_f64(f64::from(latest.y - previous.y) / dt),
     )
-}
-
-fn text_select_axis(node: &super::node::Node) -> Option<crate::DragAxis> {
-    let editing = node.text().is_some_and(|text| text.editor.is_some());
-    if node.drag_claim == super::DragClaim::None && !editing {
-        return None;
-    }
-    Some(match node.drag_claim {
-        super::DragClaim::Horizontal => crate::DragAxis::Horizontal,
-        super::DragClaim::Free | super::DragClaim::None => crate::DragAxis::Free,
-    })
 }
 
 /// Debug label for [`crate::PointerEvent::phase`].

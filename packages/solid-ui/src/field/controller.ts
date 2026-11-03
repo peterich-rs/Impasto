@@ -92,6 +92,7 @@ function utf16Len(value: string): number {
 
 export function createFieldController(options: {
   textEdit: (op: number, extra: string) => TextEditResult;
+  textCommand?: (name: string, extra: string, recordUndo?: boolean) => TextEditResult;
   onChange?: (value: string) => void;
   validate?: (value: string) => string | null | undefined;
   maxLength?: () => number | undefined;
@@ -144,14 +145,6 @@ export function createFieldController(options: {
     }
     const before = text();
     const next = options.textEdit(op, extra);
-    const limit = options.maxLength?.();
-    if (kind !== "load" && limit !== undefined && utf16Len(next.text) > limit) {
-      const reverted = options.textEdit(EDIT_LOAD, before);
-      setText(reverted.text);
-      setStart(reverted.start);
-      setEnd(reverted.end);
-      return;
-    }
     setText(next.text);
     setStart(next.start);
     setEnd(next.end);
@@ -268,10 +261,17 @@ export function createFieldController(options: {
         commitFormatted(value);
         return;
       }
-      setText(value);
-      const caret = utf16Len(value);
-      setStart(caret);
-      setEnd(caret);
+      if (options.textCommand) {
+        const next = options.textCommand("replace", value, false);
+        setText(next.text);
+        setStart(next.start);
+        setEnd(next.end);
+      } else {
+        setText(value);
+        const caret = utf16Len(value);
+        setStart(caret);
+        setEnd(caret);
+      }
       options.onChange?.(value);
     },
     load(value: string) {

@@ -261,6 +261,34 @@ export function installMockHost(): MockHost {
     setPaddingEdges: (node: number, top: number, right: number, bottom: number, left: number) => {
       calls.push({ name: "setPaddingEdges", args: [node, top, right, bottom, left] });
     },
+    setPaddingEdge: (node: number, edge: number, value: number) => {
+      calls.push({ name: "setPaddingEdge", args: [node, edge, value] });
+    },
+    setInsetEdge: (node: number, edge: number, value: number | null) => {
+      calls.push({ name: "setInsetEdge", args: [node, edge, value] });
+    },
+    setTransformComponent: (node: number, component: number, value: number) => {
+      calls.push({ name: "setTransformComponent", args: [node, component, value] });
+    },
+    setSizeAxis: (node: number, axis: number, kind: number, value: number) => {
+      calls.push({ name: "setSizeAxis", args: [node, axis, kind, value] });
+    },
+    setGridLine: (node: number, edge: number, kind: number, value: number) => {
+      calls.push({ name: "setGridLine", args: [node, edge, kind, value] });
+    },
+    placePanel: (panel: number, anchor: number, align: number) => {
+      calls.push({ name: "placePanel", args: [panel, anchor, align] });
+    },
+    reparentChildren: (from: number, to: number) => {
+      calls.push({ name: "reparentChildren", args: [from, to] });
+    },
+    textCommand: (node: number, name: string, extra?: string) => {
+      calls.push({ name: "textCommand", args: [node, name, extra] });
+      return { text: extra ?? "", start: 0, end: 0 };
+    },
+    setTextLimit: (node: number, limit: number) => {
+      calls.push({ name: "setTextLimit", args: [node, limit] });
+    },
     setGrow: (node: number, grow: number) => {
       calls.push({ name: "setGrow", args: [node, grow] });
     },

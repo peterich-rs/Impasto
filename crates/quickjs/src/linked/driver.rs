@@ -376,7 +376,9 @@ pub unsafe extern "C" fn scroll_configure(
 ) -> i32 {
     let inner = unsafe { inner(session) };
     let parent = (has_parent != 0).then_some(driver_id(parent_index, parent_generation));
-    i32::from(!inner.drivers.borrow_mut().scroll_configure(
+    let mut drivers = inner.drivers.borrow_mut();
+    let mut tree = inner.tree.borrow_mut();
+    i32::from(!drivers.scroll_configure(
         driver_id(index, generation),
         ScrollConfig {
             content_min,
@@ -386,6 +388,7 @@ pub unsafe extern "C" fn scroll_configure(
             factor,
         },
         parent,
+        &mut tree,
     ))
 }
 

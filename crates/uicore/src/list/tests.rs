@@ -1,4 +1,3 @@
-use super::controller::ScrollController;
 use super::diff::{ShownRow, diff_rows};
 use super::prefix::PrefixHeights;
 use super::window::{
@@ -6,8 +5,8 @@ use super::window::{
     stabilize_window, sticky_translate, thumb_length, thumb_offset, window_range,
     window_range_for_offset,
 };
-use super::{DriverSet, ListItem, ListNodes, ListOp, PullMode, ScrollConfig};
-use crate::{MonoShaper, ScrollAxis, Tree};
+use super::{DriverSet, ListItem, ListNodes, ListOp};
+use crate::{MonoShaper, Tree};
 
 fn close(left: f32, right: f32) -> bool {
     (left - right).abs() < 1e-4
@@ -264,158 +263,6 @@ fn driver_tick_mounts_a_window_and_measures_rows() -> Result<(), crate::Error> {
     assert!(top_box.h >= 0.0);
     assert!(tree.rect(content)?.h >= 20.0);
     let _ = nodes;
-    Ok(())
-}
-
-#[test]
-fn edge_pull_commits_on_drag_end_and_clamp_keeps_the_offset() -> Result<(), crate::Error> {
-    let mut tree = Tree::new(MonoShaper::default());
-    let scroll = tree.scroll()?;
-    tree.set_max_size(scroll, 40.0, 40.0)?;
-    let body = tree.sized(20.0, 200.0)?;
-    tree.add_child(scroll, body)?;
-    tree.layout()?;
-    let mut drivers = DriverSet::new();
-    let id = drivers.scroll_create();
-    assert!(drivers.scroll_bind(id, Some(scroll), Some(body), &tree));
-    assert!(drivers.scroll_configure(
-        id,
-        ScrollConfig {
-            content_min: 0.0,
-            pull_mode: PullMode::Edge,
-            threshold: 64.0,
-            rubber: false,
-            factor: 0.0,
-        },
-        None,
-    ));
-    let Some(step) = drivers.scroll_drag_by(id, &mut tree, 0.0, 80.0) else {
-        return Err(crate::Error::UnknownNode);
-    };
-    if step.pending {
-        let _ = drivers.scroll_finish(id, &mut tree, false);
-    }
-    let offset = tree.scroll_offset(scroll)?;
-    assert!(offset.1 >= 0.0);
-    assert!(offset.1 <= 160.0 + 1.0);
-    let Some(fired) = drivers.scroll_drag_end(id) else {
-        return Err(crate::Error::UnknownNode);
-    };
-    assert!(fired, "top-edge pull of 80 passes the threshold");
-    let events = drivers.take_events();
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, super::DriverEvent::Refresh { .. }))
-    );
-    Ok(())
-}
-
-#[test]
-fn a_vertical_controller_discards_horizontal_drag() -> Result<(), crate::Error> {
-    let mut tree = Tree::new(MonoShaper::default());
-    let scroll = tree.scroll_with(ScrollAxis::Vertical)?;
-    tree.set_max_size(scroll, 80.0, 40.0)?;
-    let body = tree.sized(400.0, 400.0)?;
-    tree.add_child(scroll, body)?;
-    tree.layout()?;
-    tree.set_scroll_offset(scroll, 0.0, 40.0)?;
-    let mut drivers = DriverSet::new();
-    let id = drivers.scroll_create();
-    assert!(drivers.scroll_bind(id, Some(scroll), Some(body), &tree));
-    assert!(drivers.scroll_configure(
-        id,
-        ScrollConfig {
-            content_min: 0.0,
-            pull_mode: PullMode::Off,
-            threshold: 64.0,
-            rubber: false,
-            factor: 0.0,
-        },
-        None,
-    ));
-    let Some(step) = drivers.scroll_drag_by(id, &mut tree, 30.0, 10.0) else {
-        return Err(crate::Error::UnknownNode);
-    };
-    assert_eq!(step.overflow_x, 0.0);
-    assert!(
-        !step.pending,
-        "cross-axis drag must not look like overflow: {step:?}"
-    );
-    let (x, y) = tree.scroll_offset(scroll)?;
-    assert_eq!(x, 0.0);
-    assert!(y < 39.0 && y > 1.0, "y moved, x did not: {x} {y}");
-
-    let mut tree = Tree::new(MonoShaper::default());
-    let both = tree.scroll()?;
-    tree.set_max_size(both, 80.0, 40.0)?;
-    let wide = tree.sized(400.0, 200.0)?;
-    tree.add_child(both, wide)?;
-    tree.layout()?;
-    tree.set_scroll_offset(both, 40.0, 40.0)?;
-    let mut drivers = DriverSet::new();
-    let both_id = drivers.scroll_create();
-    assert!(drivers.scroll_bind(both_id, Some(both), Some(wide), &tree));
-    assert!(drivers.scroll_configure(
-        both_id,
-        ScrollConfig {
-            content_min: 0.0,
-            pull_mode: PullMode::Off,
-            threshold: 64.0,
-            rubber: false,
-            factor: 0.0,
-        },
-        None,
-    ));
-    let Some(sideways) = drivers.scroll_drag_by(both_id, &mut tree, 10.0, 0.0) else {
-        return Err(crate::Error::UnknownNode);
-    };
-    assert_eq!(sideways.overflow_x, 0.0);
-    let (x, y) = tree.scroll_offset(both)?;
-    assert!(x < 39.0 && x > 1.0, "both still scrolls x: {x}");
-    assert!((y - 40.0).abs() < 0.5, "y stayed {y}");
-    Ok(())
-}
-
-#[test]
-fn consume_applies_overflow_when_the_axis_has_room() -> Result<(), crate::Error> {
-    let mut tree = Tree::new(MonoShaper::default());
-    let scroll = tree.scroll()?;
-    tree.set_max_size(scroll, 80.0, 40.0)?;
-    let body = tree.sized(80.0, 400.0)?;
-    tree.add_child(scroll, body)?;
-    tree.layout()?;
-    let mut controller = ScrollController::default();
-    controller.bind(Some(scroll), Some(body), &tree);
-    controller.configure(0.0, PullMode::Off, 64.0, false, 0.0, None);
-    assert!(!controller.consume(&mut tree, 0.0, 0.0));
-    assert!(controller.consume(&mut tree, 0.0, 12.0));
-    assert!(tree.scroll_offset(scroll)?.1 > 11.0);
-    Ok(())
-}
-
-#[test]
-fn overscroll_pull_commits_when_the_scroll_returns_to_idle() -> Result<(), crate::Error> {
-    let mut tree = Tree::new(MonoShaper::default());
-    let scroll = tree.scroll()?;
-    tree.set_max_size(scroll, 80.0, 40.0)?;
-    let body = tree.sized(80.0, 400.0)?;
-    tree.add_child(scroll, body)?;
-    tree.layout()?;
-    tree.set_scroll_offset(scroll, 0.0, -80.0)?;
-    let mut controller = ScrollController::default();
-    controller.bind(Some(scroll), Some(body), &tree);
-    controller.configure(0.0, PullMode::Overscroll, 1.0, true, 0.55, None);
-    let step = controller.drag_by(&mut tree, 0.0, 1.0);
-    if step.pending {
-        let _ = controller.finish_drag(&mut tree, false);
-    }
-    let _ = controller.drag_end();
-    assert!(
-        controller.tick(&mut tree),
-        "armed overscroll should commit on idle tick, overscroll {:?}",
-        tree.overscroll(scroll)
-    );
     Ok(())
 }
 

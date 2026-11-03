@@ -10,10 +10,10 @@ mod prefix;
 mod set;
 mod window;
 
-pub use controller::{DragStep, PullMode};
 pub use diff::ListOp;
 pub use driver::{Chrome, ListItem, ListNodes};
 pub use set::{DriverEvent, DriverId, DriverSet, ScrollConfig};
+pub(crate) use window::pull_delta;
 
 #[cfg(test)]
 mod tests;

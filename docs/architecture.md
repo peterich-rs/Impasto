@@ -147,7 +147,7 @@ macOS 的窗口和 `CAMetalLayer` 在主线程，`Engine`、会话和 present �
 
 ## 运行时会话
 
-quickjs-ng 会话拥有 `JSRuntime`、一棵 `uicore::Tree` 和一份区域 id 到 JS 函数的表。`glue.c` 注册全局 `core`。句柄是 `u64`，失败用返回码，`0` 只在这层表示没有节点。解释器按 `quickjs.pin` 的 tag 下载到 `third_party/quickjs`，不抄进 `crates/quickjs`。没有源码时 `open` 返回 `NotLinked`。
+quickjs-ng 会话拥有 `JSRuntime`、一棵 `uicore::Tree` 和一份区域 id 到 JS 函数的表。`glue.c` 注册全局 `core` 的底层入口 `_mutate`、`_query`、`_effect`，以及监听、driver、宿主模块和计时器。具名的树方法在 `core.js`，常量来自 `abi.yml`。树写入走 `Mutation`，读走 `QueryKind`，立刻生效的命令走 `EffectKind`。加一个样式字段只改 `abi.yml` 和 `StyleChange`。句柄是 `u64`，失败用返回码，`0` 只在这层表示没有节点。解释器按 `quickjs.pin` 的 tag 下载到 `third_party/quickjs`，不抄进 `crates/quickjs`。没有源码时 `open` 返回 `NotLinked`。C 仍只在 `crates/quickjs`，入口是 `glue.c`，计时器和模块完成在 `runtime_host.inc`，编进同一个翻译单元，不另加产品头文件。
 
 指针到达时，`Tree::pointer` 先返回被激活的区域，点击时再附上焦点转换。借用结束后会话调用全部匹配的 JS 函数。`Session::input` 只在 `focused()` 有值时派发到那个节点。监听器抛错时，文本留在 `take_script_error`，并经宿主日志打出，带上异常的 `stack`。页面 `Errored` 接住的渲染错误同样 `console.error` 到这条日志。`insert` 失败时宿主再记一行 `insert failed:` 和 `uicore` 的原因。这一帧不再派发其余区域。进程不退出。监听器只改树。会话不在这个回调里 `layout`。JS `remove` 先摘下子树，焦点若在这棵子树里先派发 `Blur`。同一轮脚本里这个 id 还能再插回去。脚本返回后，会话对仍没有父节点、且没有调用过 `detach` 的子树调用 `Tree::discard`，并按退掉的 id 释放监听。`detach` 把 id 移出这份名单，监听留着。`discard` 立刻退役，并立刻释放监听。
 

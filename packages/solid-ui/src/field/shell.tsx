@@ -82,6 +82,13 @@ export function FieldShell(props: FieldProps): NodeHandle {
       }
       return host.textEdit(id, op, extra);
     },
+    textCommand: (name, extra, recordUndo) => {
+      const id = leaf();
+      if (id === 0) {
+        return { text: extra, start: 0, end: 0 };
+      }
+      return host.textCommand(id, name, extra, recordUndo);
+    },
     onChange: (value) => props.onChange?.(value),
     validate: props.validate,
     maxLength: () => props.maxLength,
@@ -96,6 +103,12 @@ export function FieldShell(props: FieldProps): NodeHandle {
     allowChange: () => !frozen(),
   });
   props.controller?.(controller);
+  createTrackedEffect(() => {
+    const id = leaf();
+    if (id !== 0) {
+      host.setTextLimit(id, props.maxLength ?? -1);
+    }
+  });
 
   const password = () => props.keyboard === "password";
   const multiline = () => !password() && !!props.multiline;
@@ -191,18 +204,9 @@ export function FieldShell(props: FieldProps): NodeHandle {
     const to = controller.composeEnd();
     const composingStart = from >= 0 && to > from ? from : -1;
     const composingEnd = from >= 0 && to > from ? to : -1;
-    const id = leaf();
-    let x = caretX();
-    let y = caretY();
-    let h = caretH();
-    if (id !== 0) {
-      const textBox = host.rect(id);
-      x = textBox.x + caretX();
-      y = textBox.y + caretY();
-    }
     const config = imeConfig(props.keyboard, props.action, multiline());
     host.setImeConfig(config.keyboard, config.action);
-    host.setImeState(full, anchor, caret, composingStart, composingEnd, x, y, 1, h || LINE);
+    host.setImeState(full, anchor, caret, composingStart, composingEnd, 0, 0, 1, caretH() || LINE);
   }
 
   /** Scroll the caret's text node into the nearest scroll ancestor. */

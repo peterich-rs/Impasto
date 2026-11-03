@@ -32,6 +32,29 @@ impl Tree {
         Ok(())
     }
 
+    /// Always-on safe area and the full window, in scene points.
+    ///
+    /// `place_panel` clamps to this rect. Keyboard insets are not included.
+    pub fn set_safe_area(
+        &mut self,
+        window_w: f32,
+        window_h: f32,
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+    ) -> Result<(), Error> {
+        finite_number(window_w)?;
+        finite_number(window_h)?;
+        finite_number(left)?;
+        finite_number(top)?;
+        finite_number(right)?;
+        finite_number(bottom)?;
+        self.window = (window_w.max(0.0), window_h.max(0.0));
+        self.safe = (left.max(0.0), top.max(0.0), right.max(0.0), bottom.max(0.0));
+        Ok(())
+    }
+
     /// True when the next `layout` must run Taffy.
     pub fn is_dirty(&self) -> bool {
         self.needs_layout
@@ -251,6 +274,90 @@ impl Tree {
         let mut style = self.node(id)?.style.clone();
         style.padding = padding;
         self.write_style(id, style)
+    }
+
+    /// Replaces one padding edge. The other three stay as stored on the node.
+    pub fn set_padding_edge(
+        &mut self,
+        id: NodeId,
+        edge: super::BoxEdge,
+        value: f32,
+    ) -> Result<(), Error> {
+        finite_number(value)?;
+        let current = self.node(id)?.style.padding;
+        let mut edges = Edges {
+            top: points_of(current.top),
+            right: points_of(current.right),
+            bottom: points_of(current.bottom),
+            left: points_of(current.left),
+        };
+        match edge {
+            super::BoxEdge::Top => edges.top = value,
+            super::BoxEdge::Right => edges.right = value,
+            super::BoxEdge::Bottom => edges.bottom = value,
+            super::BoxEdge::Left => edges.left = value,
+        }
+        self.set_padding_edges(id, edges)
+    }
+
+    /// Replaces one inset edge. `None` is auto.
+    pub fn set_inset_edge(
+        &mut self,
+        id: NodeId,
+        edge: super::BoxEdge,
+        value: Option<f32>,
+    ) -> Result<(), Error> {
+        let current = self.node(id)?.style.inset;
+        let mut inset = Inset {
+            top: auto_points(current.top),
+            right: auto_points(current.right),
+            bottom: auto_points(current.bottom),
+            left: auto_points(current.left),
+        };
+        match edge {
+            super::BoxEdge::Top => inset.top = value,
+            super::BoxEdge::Right => inset.right = value,
+            super::BoxEdge::Bottom => inset.bottom = value,
+            super::BoxEdge::Left => inset.left = value,
+        }
+        self.set_inset(id, inset)
+    }
+
+    /// Replaces one transform component. Scale stays uniform.
+    pub fn set_transform_component(
+        &mut self,
+        id: NodeId,
+        component: u8,
+        value: f32,
+    ) -> Result<(), Error> {
+        let current = self.node(id)?.transform();
+        let (x, y, rotate, scale) = match component {
+            0 => (
+                value,
+                current.translate_y,
+                current.rotate_rad,
+                current.scale_x,
+            ),
+            1 => (
+                current.translate_x,
+                value,
+                current.rotate_rad,
+                current.scale_x,
+            ),
+            2 => (
+                current.translate_x,
+                current.translate_y,
+                value,
+                current.scale_x,
+            ),
+            _ => (
+                current.translate_x,
+                current.translate_y,
+                current.rotate_rad,
+                value,
+            ),
+        };
+        self.set_transform(id, x, y, rotate, scale)
     }
 
     /// Margin on any node, in scene points.
@@ -547,6 +654,22 @@ impl Tree {
         self.write_style(id, style)
     }
 
+    /// Replaces one size axis. The other axis stays as stored on the node.
+    pub fn set_size_axis(&mut self, id: NodeId, axis: u8, size: AxisSize) -> Result<(), Error> {
+        let current = self.node(id)?.style.size;
+        let width = if axis == 0 {
+            size
+        } else {
+            axis_size_of(current.width)
+        };
+        let height = if axis == 0 {
+            axis_size_of(current.height)
+        } else {
+            size
+        };
+        self.set_axis_size(id, width, height)
+    }
+
     /// Width divided by height. `None` clears it. Zero is not a clear.
     pub fn set_aspect_ratio(&mut self, id: NodeId, ratio: Option<f32>) -> Result<(), Error> {
         if let Some(ratio) = ratio
@@ -615,6 +738,22 @@ impl Tree {
             end: end_row,
         };
         self.write_style(id, style)
+    }
+
+    /// Replaces one grid line. The other three stay as stored on the node.
+    pub fn set_grid_line(&mut self, id: NodeId, edge: u8, line: GridLine) -> Result<(), Error> {
+        let style = self.node(id)?.style.clone();
+        let mut column_start = grid_line_of(style.grid_column.start);
+        let mut column_end = grid_line_of(style.grid_column.end);
+        let mut row_start = grid_line_of(style.grid_row.start);
+        let mut row_end = grid_line_of(style.grid_row.end);
+        match edge {
+            0 => column_start = line,
+            1 => column_end = line,
+            2 => row_start = line,
+            _ => row_end = line,
+        }
+        self.set_grid_placement(id, column_start, column_end, row_start, row_end)
     }
 
     pub fn set_image(
@@ -1020,6 +1159,51 @@ impl Tree {
         })
     }
 
+    /// Measures `panel` and writes only its transform so it sits outside `anchor`.
+    ///
+    /// The anchor is read with [`Tree::scene_rect`]. Width is capped to the window
+    /// minus the always-on safe area. A panel that does not fit below flips above.
+    pub fn place_panel(
+        &mut self,
+        panel: NodeId,
+        anchor: NodeId,
+        align: super::PanelAlign,
+    ) -> Result<(), Error> {
+        let (safe_l, safe_t, safe_r, safe_b) = self.safe;
+        let (win_w, win_h) = if self.window.0 > 0.0 && self.window.1 > 0.0 {
+            self.window
+        } else {
+            let (vw, vh) = self.viewport.unwrap_or((0.0, 0.0));
+            (self.origin.0 + vw, self.origin.1 + vh)
+        };
+        let cap = (win_w - safe_l - safe_r).max(1.0);
+        let (_, ph) = self.measure_panel(panel, SubtreeSpace::CappedMax(cap))?;
+        let pw = self.node(panel)?.w;
+        let anchor_box = self.scene_rect(anchor)?;
+        let (mut x, mut y) = match align {
+            super::PanelAlign::BelowStart => (anchor_box.x, anchor_box.y + anchor_box.h),
+            super::PanelAlign::BelowEnd => (
+                anchor_box.x + anchor_box.w - pw,
+                anchor_box.y + anchor_box.h,
+            ),
+            super::PanelAlign::BelowCenter => (
+                anchor_box.x + (anchor_box.w - pw) * 0.5,
+                anchor_box.y + anchor_box.h,
+            ),
+            super::PanelAlign::AboveStart => (anchor_box.x, anchor_box.y - ph),
+        };
+        let right = win_w - safe_r;
+        let bottom = win_h - safe_b;
+        if y + ph > bottom && anchor_box.y - ph >= safe_t {
+            y = anchor_box.y - ph;
+        }
+        let max_x = (right - pw).max(safe_l);
+        let max_y = (bottom - ph).max(safe_t);
+        x = x.clamp(safe_l, max_x);
+        y = y.clamp(safe_t, max_y);
+        self.set_transform(panel, x, y, 0.0, 1.0)
+    }
+
     /// Scene position of the border box. Scroll and transform stay out of this sum.
     pub(super) fn layout_point(&self, id: NodeId) -> Result<(f32, f32), Error> {
         let mut x = 0.0;
@@ -1342,6 +1526,45 @@ fn edges_rect<T: FromLength>(edges: Edges) -> Result<taffy::Rect<T>, Error> {
 
 fn edge_rect(edges: Edges) -> Result<taffy::Rect<LengthPercentage>, Error> {
     edges_rect(edges)
+}
+
+fn points_of(value: LengthPercentage) -> f32 {
+    let raw = value.into_raw();
+    if raw.tag() == CompactLength::LENGTH_TAG {
+        raw.value()
+    } else {
+        0.0
+    }
+}
+
+fn auto_points(value: LengthPercentageAuto) -> Option<f32> {
+    let raw = value.into_raw();
+    if raw.tag() == CompactLength::AUTO_TAG {
+        None
+    } else if raw.tag() == CompactLength::LENGTH_TAG {
+        Some(raw.value())
+    } else {
+        None
+    }
+}
+
+fn axis_size_of(value: Dimension) -> AxisSize {
+    let raw = value.into_raw();
+    if raw.tag() == CompactLength::LENGTH_TAG {
+        AxisSize::Points(raw.value())
+    } else if raw.tag() == CompactLength::PERCENT_TAG {
+        AxisSize::Fraction(raw.value())
+    } else {
+        AxisSize::Auto
+    }
+}
+
+fn grid_line_of(value: GridPlacement) -> GridLine {
+    match value {
+        GridPlacement::Line(line) => GridLine::Line(line.as_i16()),
+        GridPlacement::Span(count) => GridLine::Span(count),
+        _ => GridLine::Auto,
+    }
 }
 
 fn margin_rect(edges: Edges) -> Result<taffy::Rect<LengthPercentageAuto>, Error> {

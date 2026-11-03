@@ -6,6 +6,15 @@ use super::{Gesture, NodeId, Tree};
 use crate::Error;
 use crate::motion::{Band, OVERSCROLL_FACTOR};
 
+/// Offset and overscroll after [`Tree::resolve_scroll`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollSample {
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub overscroll_x: f32,
+    pub overscroll_y: f32,
+}
+
 /// Overscroll for a scroll that never had physics installed: the historical
 /// linear band.
 fn resting_spring(from: f32, to: f32, stiffness: f32, damping: f32) -> crate::Spring {
@@ -37,20 +46,35 @@ impl Tree {
     /// Scroll paint offset in scene points. Does not run Taffy.
     ///
     /// Hit testing and `record` apply the offset. A later `layout` keeps the
-    /// cached boxes when this was the only change.
+    /// cached boxes when this was the only change. The value is resolved by
+    /// [`Tree::resolve_scroll`]. A locked drag on this node continues from the
+    /// requested position, not from the clamped offset.
     pub fn set_scroll_offset(&mut self, id: NodeId, dx: f32, dy: f32) -> Result<(), Error> {
-        finite_number(dx)?;
-        finite_number(dy)?;
+        let _ = self.resolve_scroll(id, dx, dy)?;
+        self.rebase_drag_desired(id, dx, dy);
+        Ok(())
+    }
+
+    /// The only clamp. Drag, wheel, and [`Tree::set_scroll_offset`] all call this.
+    ///
+    /// Offset stays inside the limits. Overscroll is the stretch of whatever
+    /// this call did not clamp away. Motion samples do not stretch again.
+    pub fn resolve_scroll(
+        &mut self,
+        id: NodeId,
+        desired_x: f32,
+        desired_y: f32,
+    ) -> Result<ScrollSample, Error> {
+        finite_number(desired_x)?;
+        finite_number(desired_y)?;
         if self.node(id)?.kind != Kind::Scroll {
             return Err(Error::WrongKind);
         }
         let axis = self.axis_of(id);
-        let (dx, dy) = axis.filter(dx, dy);
+        let (desired_x, desired_y) = axis.filter(desired_x, desired_y);
         let (max_x, max_y) = self.scroll_limits(id);
-        let (ox, oy) = rubber_band(dx, dy, max_x, max_y);
+        let (ox, oy) = rubber_band(desired_x, desired_y, max_x, max_y);
         let applying = self.applying_motion;
-        // The band stretches against the scroll's own viewport: the wider the
-        // scroll, the more the same overflow may pull.
         let (view_w, view_h) = {
             let node = self.node(id)?;
             (node.w, node.h)
@@ -62,35 +86,206 @@ impl Tree {
                 None => default_stretch(over, dimension),
             }
         };
-        let overscroll =
-            (!applying).then_some((stretch(dx - ox, view_w), stretch(dy - oy, view_h)));
-        let overscroll = overscroll.map(|(sx, sy)| axis.filter(sx, sy));
-        {
+        let overscroll = if applying {
+            None
+        } else {
+            Some(axis.filter(
+                stretch(desired_x - ox, view_w),
+                stretch(desired_y - oy, view_h),
+            ))
+        };
+        let wrote = {
             let node = self.node_mut(id)?;
             let Some(geom) = node.scroll_mut() else {
                 return Err(Error::WrongKind);
             };
-            let same_over = match overscroll {
-                None => true,
-                Some((sx, sy)) => geom.overscroll_x == sx && geom.overscroll_y == sy,
-            };
-            if geom.offset_x == ox && geom.offset_y == oy && same_over {
-                return Ok(());
+            let (sx, sy) = overscroll.unwrap_or((geom.overscroll_x, geom.overscroll_y));
+            let same = geom.offset_x == ox
+                && geom.offset_y == oy
+                && geom.overscroll_x == sx
+                && geom.overscroll_y == sy;
+            if !same {
+                geom.offset_x = ox;
+                geom.offset_y = oy;
+                if overscroll.is_some() {
+                    geom.overscroll_x = sx;
+                    geom.overscroll_y = sy;
+                }
             }
-            geom.offset_x = ox;
-            geom.offset_y = oy;
-            if let Some((sx, sy)) = overscroll {
-                geom.overscroll_x = sx;
-                geom.overscroll_y = sy;
+            !same
+        };
+        if wrote {
+            self.layer_epoch = self.layer_epoch.wrapping_add(1);
+            self.mark_paint();
+            self.scroll_semantics.push(id);
+            if !applying {
+                self.rebase_scroll(id, desired_x, desired_y);
+                self.scroll_notices.push(Gesture::Scroll(id, ox, oy));
             }
         }
-        self.layer_epoch = self.layer_epoch.wrapping_add(1);
-        self.mark_paint();
-        self.scroll_semantics.push(id);
-        if !self.applying_motion {
-            self.rebase_scroll(id, dx, dy);
+        let (sx, sy) = self.node(id)?.overscroll();
+        Ok(ScrollSample {
+            offset_x: ox,
+            offset_y: oy,
+            overscroll_x: sx,
+            overscroll_y: sy,
+        })
+    }
+
+    /// Writes a finger's unclamped desired offset. Ancestors on the fling chain
+    /// take the remainder. What nobody takes stretches on the end of that chain.
+    pub(super) fn apply_drag_desired(
+        &mut self,
+        id: NodeId,
+        desired_x: f32,
+        desired_y: f32,
+    ) -> Result<ScrollSample, Error> {
+        let (ox, oy) = self.scroll_offset(id)?;
+        let axis = self.axis_of(id);
+        let (desired_x, desired_y) = axis.filter(desired_x, desired_y);
+        let (max_x, max_y) = self.scroll_limits(id);
+        let (cx, cy) = rubber_band(desired_x, desired_y, max_x, max_y);
+        let rem_x = desired_x - cx;
+        let rem_y = desired_y - cy;
+        let mut kept_x = rem_x;
+        let mut kept_y = rem_y;
+        if self.chain_enabled(id)
+            && let Some(parent) = self.scroll_parent(id)
+        {
+            self.give_remainder(parent, rem_x, rem_y);
+            kept_x = 0.0;
+            kept_y = 0.0;
         }
+        let _ = (ox, oy);
+        self.resolve_scroll(id, cx + kept_x, cy + kept_y)
+    }
+
+    /// Parent chain absorbs `rem`. The node that cannot pass it further stretches.
+    fn give_remainder(&mut self, id: NodeId, rem_x: f32, rem_y: f32) {
+        let Ok((ox, oy)) = self.scroll_offset(id) else {
+            return;
+        };
+        let axis = self.axis_of(id);
+        let (pass_x, pass_y) = axis.filter(rem_x, rem_y);
+        let (max_x, max_y) = self.scroll_limits(id);
+        let (cx, cy) = rubber_band(ox + pass_x, oy + pass_y, max_x, max_y);
+        let rest_x = ox + pass_x - cx;
+        let rest_y = oy + pass_y - cy;
+        let end = !self.chain_enabled(id) || self.scroll_parent(id).is_none();
+        if !end && let Some(parent) = self.scroll_parent(id) {
+            self.give_remainder(parent, rest_x, rest_y);
+            let _ = self.resolve_scroll(id, cx, cy);
+            return;
+        }
+        let _ = self.resolve_scroll(id, cx + rest_x, cy + rest_y);
+    }
+
+    /// Floor used by [`Tree::scroll_limits`]. Does not run layout.
+    pub fn set_content_min(&mut self, id: NodeId, min: f32) -> Result<(), Error> {
+        finite_number(min)?;
+        let Some(geom) = self.node_mut(id)?.scroll_mut() else {
+            return Err(Error::WrongKind);
+        };
+        geom.content_min = min.max(0.0);
         Ok(())
+    }
+
+    /// Refresh threshold. `Overscroll` commits at idle. `Edge` commits on drag end.
+    pub fn set_scroll_pull(
+        &mut self,
+        id: NodeId,
+        mode: crate::PullMode,
+        threshold: f32,
+    ) -> Result<(), Error> {
+        if !threshold.is_finite() || threshold < 0.0 {
+            return Err(Error::BadNumber);
+        }
+        let Some(geom) = self.node_mut(id)?.scroll_mut() else {
+            return Err(Error::WrongKind);
+        };
+        geom.pull_mode = mode;
+        geom.pull_threshold = threshold;
+        Ok(())
+    }
+
+    pub fn take_refresh(&mut self) -> Vec<NodeId> {
+        std::mem::take(&mut self.refresh_pending)
+    }
+
+    /// Edge-mode loss at the top. Called with the unclamped desired and the clamp.
+    pub(super) fn note_edge_pull(&mut self, id: NodeId, raw_y: f32, next_y: f32) {
+        let Ok(node) = self.node(id) else {
+            return;
+        };
+        let Some(geom) = node.scroll_geom() else {
+            return;
+        };
+        if geom.pull_mode != crate::PullMode::Edge {
+            return;
+        }
+        let live_y = geom.offset_y;
+        let delta = crate::list::pull_delta(live_y, raw_y, next_y);
+        if delta <= 0.0 {
+            return;
+        }
+        let Some(geom) = self.node_mut(id).ok().and_then(|node| node.scroll_mut()) else {
+            return;
+        };
+        geom.pull += delta;
+    }
+
+    pub(super) fn note_overscroll_pull(&mut self, id: NodeId) {
+        let Ok((_, oy)) = self.overscroll(id) else {
+            return;
+        };
+        let Some(geom) = self.node_mut(id).ok().and_then(|node| node.scroll_mut()) else {
+            return;
+        };
+        if geom.pull_mode != crate::PullMode::Overscroll {
+            return;
+        }
+        let distance = (-oy).max(0.0);
+        if geom.pull_threshold > 0.0 && distance >= geom.pull_threshold {
+            geom.pull_armed = true;
+        }
+    }
+
+    pub(super) fn commit_edge_pull(&mut self, id: NodeId) {
+        let fire = {
+            let Ok(node) = self.node(id) else {
+                return;
+            };
+            let Some(geom) = node.scroll_geom() else {
+                return;
+            };
+            geom.pull_mode == crate::PullMode::Edge && geom.pull > geom.pull_threshold
+        };
+        if let Some(geom) = self.node_mut(id).ok().and_then(|node| node.scroll_mut()) {
+            geom.pull = 0.0;
+        }
+        if fire {
+            self.refresh_pending.push(id);
+        }
+    }
+
+    fn commit_overscroll_pull(&mut self, id: NodeId) {
+        let fire = {
+            let Ok(node) = self.node(id) else {
+                return;
+            };
+            let Some(geom) = node.scroll_geom() else {
+                return;
+            };
+            geom.pull_armed && geom.pull_mode == crate::PullMode::Overscroll
+        };
+        if let Some(geom) = self.node_mut(id).ok().and_then(|node| node.scroll_mut())
+            && geom.pull_mode == crate::PullMode::Overscroll
+        {
+            geom.pull_armed = false;
+        }
+        if fire {
+            self.refresh_pending.push(id);
+        }
     }
 
     pub fn fling_active(&self) -> bool {
@@ -578,8 +773,16 @@ impl Tree {
             }
             child = next;
         }
+        let content_min = node
+            .scroll_geom()
+            .map(|geom| geom.content_min)
+            .unwrap_or(0.0);
+        let limit_y = (content_h - height)
+            .max(0.0)
+            .max(content_min - height)
+            .max(0.0);
         self.axis_of(id)
-            .filter((content_w - width).max(0.0), (content_h - height).max(0.0))
+            .filter((content_w - width).max(0.0), limit_y)
     }
 
     pub(super) fn axis_of(&self, id: NodeId) -> crate::ScrollAxis {
@@ -892,6 +1095,9 @@ impl Tree {
                 ox,
                 oy,
             });
+            if phase == crate::ScrollPhase::Idle {
+                self.commit_overscroll_pull(id);
+            }
         }
     }
 }

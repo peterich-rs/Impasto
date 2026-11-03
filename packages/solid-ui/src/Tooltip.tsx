@@ -64,8 +64,7 @@ export function Tooltip(props: { open: boolean; anchor: number; text: string }):
     }
     host.setText(label, props.text);
     host.setTextDirection(label, directionFor(theme().locale));
-    const box = host.rect(props.anchor);
-    host.setTransform(panel, box.x, box.y + box.h, 0, 1);
+    host.placePanel(panel, props.anchor, 0);
   }
 
   const stop = onFrame(() => {

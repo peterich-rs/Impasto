@@ -483,7 +483,7 @@ fn programmatic_focus_remove_and_insert() -> Result<(), crate::Error> {
 }
 
 #[test]
-fn hover_enters_and_leaves_and_a_wheel_does_not_scroll() -> Result<(), crate::Error> {
+fn hover_enters_and_leaves_and_a_wheel_writes_the_offset() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper::default());
     let scroll = tree.scroll()?;
     let child = tree.image("asset:a", 40.0, 80.0)?;
@@ -503,7 +503,7 @@ fn hover_enters_and_leaves_and_a_wheel_does_not_scroll() -> Result<(), crate::Er
         tree.pointer(PointerEvent::wheel(10.0, 10.0, 0.0, 0.0, 12.0)),
         vec![Gesture::Wheel(scroll, 0.0, 12.0)]
     );
-    assert_eq!(tree.scroll_offset(scroll)?, (0.0, 0.0));
+    assert_eq!(tree.scroll_offset(scroll)?, (0.0, 12.0));
     Ok(())
 }
 

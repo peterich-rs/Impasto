@@ -47,7 +47,6 @@ export function VirtualList<T>(props: {
   onRefresh?: () => void;
   controller?: ScrollController;
   physics?: ScrollPhysicsProps;
-  onDragOverflow?: (overflowX: number, overflowY: number) => boolean;
 }): NodeHandle {
   const theme = useTheme();
   const scroll = props.controller ?? createScrollController();
@@ -185,7 +184,6 @@ export function VirtualList<T>(props: {
             initialOffset={initial}
             controller={scroll}
             physics={props.physics}
-            onDragOverflow={props.onDragOverflow}
             viewportRef={(id) => {
               viewport = id;
               syncNodes();

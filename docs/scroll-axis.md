@@ -53,7 +53,7 @@
 - `Tree::arm_fling` / `fling_target` / `scroll_to` / `scroll_into_view` — 只动声明轴。
 - `Tree::scroll_for` — 认领。`lock_at_edge` 只记录 `Both`。
 - `Tree::pointer_wheel` — 手势里的滚轮增量已按轴裁过。
-- `ScrollController` — 夹紧和父级溢出。单轴不把跨轴增量报成 overflow。
+- `resolve_scroll` — 唯一夹紧。单轴丢掉跨轴，不交给父级。`Both` 且该轴没有内容时，溢出沿父链交给祖先。
 - `core.scroll(axis?)`、`core.setScrollAxis`、`core.setScrollPhysics(..., accept?)` — QuickJS。`glue.c` 与 `linked/` 的函数表一起改。
 - `<scroll axis>`、`<ScrollArea axis>`、`VirtualList` 内部滚动、`Field` 里的滚动。
 
@@ -77,7 +77,7 @@
 2. 三值轴，缺省 `Both`。`ScrollAxis::{Vertical, Horizontal, Both}`。双向画布继续用 `Both`，行为与今天相同。`ScrollArea` 缺省 vertical，对齐常见列表；横向调用方显式传 horizontal。被拒绝的做法是把缺省改成 vertical，那会改掉裸 `scroll()` 和现有测试。
 3. `ScrollAccept::{Content, Always, Never}`，缺省 `Content`。`Content` 是今天的「有余量才认领」。`Always` 在声明轴上到边也认领，橡胶带和刷新靠它。`Never` 不认领，父链继续。被拒绝的做法是用 `lock_at_edge` 表达到边回弹：那个兜底没有回弹语义，而且会锁住不该锁的兄弟。
 4. 单轴不用 `lock_at_edge`。`ScrollArea` 和 `VirtualList` 因此缺省 `Always`，否则列表滑到底会变成点击，下拉刷新也没有 overscroll。想嵌套让位时传 `content`。被拒绝的做法是单轴也走 `lock_at_edge`，那会让 `accept` 失去「到边认不认」的唯一来源。
-5. 控制器单独读轴。`limits == 0` 对 `Both` 仍是「没有内容，溢出给父级」。单轴的跨轴增量在 `drag_by` / `wheel` / `consume` 里先变成 0，所以不会变成 overflow。被拒绝的做法是只改 `scroll_limits` 就当控制器自动正确。
+5. 轴过滤在 `resolve_scroll`。`limits == 0` 对 `Both` 仍是「没有内容，溢出给父级」。单轴的跨轴增量在解析时变成 0，不交给父级。被拒绝的做法是在监听器里再夹一次。
 6. 接力不跨轴。`can_take_velocity` 先看 `ScrollAxis::allows`。被拒绝的做法是松手时把竖向列表丢掉的 vx 送给横向 pager：列表中段的斜向松手也会带动 pager，和「锁定后 pager 不参与」矛盾。
 7. `Field` 按单行 / 多行声明轴。被拒绝的做法是让输入框继续 `Both`：一行比视口宽时，斜向拖动会横滚输入框，`scroll_into_view` 也会去弹不该动的那一轴。
 
@@ -186,7 +186,7 @@ impl Tree {
 
 **File: `packages/solid-ui/src/ScrollArea.tsx`**
 
-- `axis` 缺省 vertical。`accept` 缺省 always。夹紧和 `onDragBy` 不改，核心已经裁过。
+- `axis` 缺省 vertical。`accept` 缺省 always。拖动在 `Tree::pointer` 里写完，`onDragBy` 不再移动滚动。
 
 **File: `packages/solid-ui/src/VirtualList.tsx`**
 

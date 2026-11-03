@@ -83,9 +83,6 @@ function justifyName(
   return "start";
 }
 
-type TransformValue = { x: number; y: number; rotate: number; scale: number };
-type EdgeValue = { top: number; right: number; bottom: number; left: number };
-
 function trackList(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
@@ -106,9 +103,6 @@ function sizePair(value: unknown): { w: number; h: number } {
 
 export type RetainedCounts = {
   nodes: number;
-  transforms: number;
-  paddings: number;
-  sizes: number;
 };
 
 export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
@@ -116,14 +110,6 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
   forget(id: number): void;
 } {
   const nodes = new Map<number, HostNode>();
-  const transforms = new Map<number, TransformValue>();
-  const paddings = new Map<number, EdgeValue>();
-  const sizes = new Map<number, { w: AxisSize; h: AxisSize }>();
-  const insets = new Map<number, { top: InsetEdge; right: InsetEdge; bottom: InsetEdge; left: InsetEdge }>();
-  const lines = new Map<
-    number,
-    { columnStart: GridLine; columnEnd: GridLine; rowStart: GridLine; rowEnd: GridLine }
-  >();
 
   function forget(id: number, seen = new Set<number>()): void {
     if (id === 0 || seen.has(id)) {
@@ -142,53 +128,27 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
       forget(kid, seen);
     }
     nodes.delete(id);
-    transforms.delete(id);
-    paddings.delete(id);
-    sizes.delete(id);
-    insets.delete(id);
-    lines.delete(id);
   }
-  function writeSize(id: number, patch: Partial<{ w: AxisSize; h: AxisSize }>): void {
-    const prev = sizes.get(id) ?? { w: 0, h: 0 };
-    const next = { ...prev, ...patch };
-    sizes.set(id, next);
-    if (typeof next.w === "number" && typeof next.h === "number") {
-      host.setSize(id, next.w, next.h);
-      return;
+  function insetValue(value: InsetEdge): number | null {
+    return value === "auto" ? null : value;
+  }
+  function sizeCode(value: AxisSize): { kind: number; value: number } {
+    if (value === "auto") {
+      return { kind: 0, value: 0 };
     }
-    host.setAxisSize(id, next.w, next.h);
+    if (typeof value === "number") {
+      return { kind: 1, value };
+    }
+    return { kind: 2, value: Number(value.slice(0, -1)) / 100 };
   }
-  function writeInset(id: number, patch: Partial<{ top: InsetEdge; right: InsetEdge; bottom: InsetEdge; left: InsetEdge }>): void {
-    const prev = insets.get(id) ?? { top: "auto", right: "auto", bottom: "auto", left: "auto" };
-    const next = { ...prev, ...patch };
-    insets.set(id, next);
-    host.setInset(id, next.top, next.right, next.bottom, next.left);
-  }
-  function writeLines(
-    id: number,
-    patch: Partial<{ columnStart: GridLine; columnEnd: GridLine; rowStart: GridLine; rowEnd: GridLine }>,
-  ): void {
-    const prev = lines.get(id) ?? {
-      columnStart: "auto",
-      columnEnd: "auto",
-      rowStart: "auto",
-      rowEnd: "auto",
-    };
-    const next = { ...prev, ...patch };
-    lines.set(id, next);
-    host.setGridPlacement(id, next.columnStart, next.columnEnd, next.rowStart, next.rowEnd);
-  }
-  function writeTransform(id: number, patch: Partial<TransformValue>): void {
-    const prev = transforms.get(id) ?? { x: 0, y: 0, rotate: 0, scale: 1 };
-    const next = { ...prev, ...patch };
-    transforms.set(id, next);
-    host.setTransform(id, next.x, next.y, next.rotate, next.scale);
-  }
-  function writePadding(id: number, patch: Partial<EdgeValue>): void {
-    const prev = paddings.get(id) ?? { top: 0, right: 0, bottom: 0, left: 0 };
-    const next = { ...prev, ...patch };
-    paddings.set(id, next);
-    host.setPaddingEdges(id, next.top, next.right, next.bottom, next.left);
+  function lineCode(value: GridLine): { kind: number; value: number } {
+    if (value === "auto") {
+      return { kind: 0, value: 0 };
+    }
+    if ("line" in value) {
+      return { kind: 1, value: value.line };
+    }
+    return { kind: 2, value: value.span };
   }
   function wrap(id: number): HostNode {
     let node = nodes.get(id);
@@ -207,23 +167,20 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
       case "gap":
         host.setGap(node.id, asNumber(value, 0));
         return;
-      case "edges": {
-        const edge = asNumber(value, 0);
-        host.setPadding(node.id, edge);
-        paddings.set(node.id, { top: edge, right: edge, bottom: edge, left: edge });
+      case "edges":
+        host.setPadding(node.id, asNumber(value, 0));
         return;
-      }
       case "top":
-        writePadding(node.id, { top: asNumber(value, 0) });
+        host.setPaddingEdge(node.id, 0, asNumber(value, 0));
         return;
       case "right":
-        writePadding(node.id, { right: asNumber(value, 0) });
+        host.setPaddingEdge(node.id, 1, asNumber(value, 0));
         return;
       case "bottom":
-        writePadding(node.id, { bottom: asNumber(value, 0) });
+        host.setPaddingEdge(node.id, 2, asNumber(value, 0));
         return;
       case "left":
-        writePadding(node.id, { left: asNumber(value, 0) });
+        host.setPaddingEdge(node.id, 3, asNumber(value, 0));
         return;
       case "margin":
         if (typeof value === "number") {
@@ -285,12 +242,16 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
       case "lineHeight":
         host.setLineHeight(node.id, asNumber(value, 0));
         return;
-      case "w":
-        writeSize(node.id, { w: parseAxisSize(value) });
+      case "w": {
+        const size = sizeCode(parseAxisSize(value));
+        host.setSizeAxis(node.id, 0, size.kind, size.value);
         return;
-      case "h":
-        writeSize(node.id, { h: parseAxisSize(value) });
+      }
+      case "h": {
+        const size = sizeCode(parseAxisSize(value));
+        host.setSizeAxis(node.id, 1, size.kind, size.value);
         return;
+      }
       case "aspect":
         if (value === null) {
           host.setAspectRatio(node.id, null);
@@ -305,29 +266,37 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
         host.setPosition(node.id, value === true);
         return;
       case "insetTop":
-        writeInset(node.id, { top: parseInsetEdge(value) });
+        host.setInsetEdge(node.id, 0, insetValue(parseInsetEdge(value)));
         return;
       case "insetRight":
-        writeInset(node.id, { right: parseInsetEdge(value) });
+        host.setInsetEdge(node.id, 1, insetValue(parseInsetEdge(value)));
         return;
       case "insetBottom":
-        writeInset(node.id, { bottom: parseInsetEdge(value) });
+        host.setInsetEdge(node.id, 2, insetValue(parseInsetEdge(value)));
         return;
       case "insetLeft":
-        writeInset(node.id, { left: parseInsetEdge(value) });
+        host.setInsetEdge(node.id, 3, insetValue(parseInsetEdge(value)));
         return;
-      case "columnStart":
-        writeLines(node.id, { columnStart: parseGridLine(value) });
+      case "columnStart": {
+        const line = lineCode(parseGridLine(value));
+        host.setGridLine(node.id, 0, line.kind, line.value);
         return;
-      case "columnEnd":
-        writeLines(node.id, { columnEnd: parseGridLine(value) });
+      }
+      case "columnEnd": {
+        const line = lineCode(parseGridLine(value));
+        host.setGridLine(node.id, 1, line.kind, line.value);
         return;
-      case "rowStart":
-        writeLines(node.id, { rowStart: parseGridLine(value) });
+      }
+      case "rowStart": {
+        const line = lineCode(parseGridLine(value));
+        host.setGridLine(node.id, 2, line.kind, line.value);
         return;
-      case "rowEnd":
-        writeLines(node.id, { rowEnd: parseGridLine(value) });
+      }
+      case "rowEnd": {
+        const line = lineCode(parseGridLine(value));
+        host.setGridLine(node.id, 3, line.kind, line.value);
         return;
+      }
       case "family":
         host.setFamily(node.id, value == null ? "" : String(value));
         return;
@@ -352,16 +321,16 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
         host.setFocusable(node.id, value === true);
         return;
       case "x":
-        writeTransform(node.id, { x: asNumber(value, 0) });
+        host.setTransformComponent(node.id, 0, asNumber(value, 0));
         return;
       case "y":
-        writeTransform(node.id, { y: asNumber(value, 0) });
+        host.setTransformComponent(node.id, 1, asNumber(value, 0));
         return;
       case "rotate":
-        writeTransform(node.id, { rotate: asNumber(value, 0) });
+        host.setTransformComponent(node.id, 2, asNumber(value, 0));
         return;
       case "scale":
-        writeTransform(node.id, { scale: asNumber(value, 1) });
+        host.setTransformComponent(node.id, 3, asNumber(value, 1));
         return;
       case "fontSize":
         host.setFontSize(node.id, asNumber(value, FONT_SIZE));
@@ -494,7 +463,6 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
         case "padding": {
           const edge = asNumber(staticProps?.edges, 0);
           id = host.padding(edge);
-          paddings.set(id, { top: edge, right: edge, bottom: edge, left: edge });
           break;
         }
         case "grid":
@@ -520,7 +488,6 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
           const width = staticProps?.w === undefined ? 0 : parseAxisSize(staticProps.w);
           const height = staticProps?.h === undefined ? 0 : parseAxisSize(staticProps.h);
           id = host.sized(typeof width === "number" ? width : 0, typeof height === "number" ? height : 0);
-          sizes.set(id, { w: width, h: height });
           if (typeof width !== "number" || typeof height !== "number") {
             host.setAxisSize(id, width, height);
           }
@@ -601,12 +568,7 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
       return defined(host.nextSibling(node.id));
     },
     retainedCounts() {
-      return {
-        nodes: nodes.size,
-        transforms: transforms.size,
-        paddings: paddings.size,
-        sizes: sizes.size,
-      };
+      return { nodes: nodes.size };
     },
     forget(id: number) {
       forget(id);

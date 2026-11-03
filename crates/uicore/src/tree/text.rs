@@ -200,6 +200,15 @@ impl Tree {
         (value * self.pixel_scale).round() / self.pixel_scale
     }
 
+    /// UTF-16 cap for later edits. `None` clears it. An over-limit edit is rejected.
+    pub fn set_text_limit(&mut self, id: NodeId, limit: Option<u32>) -> Result<(), Error> {
+        let text = self.node_mut(id)?.text_mut().ok_or(Error::NotText)?;
+        text.editor
+            .get_or_insert_with(|| crate::TextEditor::new(""))
+            .set_max_length(limit);
+        Ok(())
+    }
+
     /// Applies one edit to the editor stored on `id` and returns the new value.
     ///
     /// Line, word, and vertical motions use this node's paragraph when the

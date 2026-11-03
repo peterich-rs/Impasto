@@ -1,6 +1,6 @@
 use crate::{
-    Gesture, OverscrollMode, Phase, PointerEvent, ScrollAccept, ScrollAxis, ScrollPhase,
-    ScrollPhysics, SnapAlign, SnapGrid, Tree,
+    Gesture, OverscrollMode, Phase, PointerEvent, PullMode, RecognizerSet, ScrollAccept,
+    ScrollAxis, ScrollPhase, ScrollPhysics, SnapAlign, SnapGrid, Tree,
 };
 
 fn mono() -> crate::MonoShaper {
@@ -595,6 +595,144 @@ fn a_settling_scroll_lands_on_whole_device_pixels() -> Result<(), crate::Error> 
     assert!(
         (y * 2.0).fract().abs() < 1e-3,
         "offset {y} is off the pixel grid"
+    );
+    Ok(())
+}
+
+fn filled_scroll(height: f32) -> Result<(Tree, crate::NodeId), crate::Error> {
+    let mut tree = Tree::new(mono());
+    tree.set_viewport(0.0, 0.0, 80.0, 40.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let scroll = tree.scroll_with(ScrollAxis::Vertical)?;
+    tree.set_fill(scroll)?;
+    tree.set_scroll_physics(
+        scroll,
+        ScrollPhysics {
+            accept: ScrollAccept::Always,
+            ..ScrollPhysics::default()
+        },
+    )?;
+    let body = tree.sized(80.0, height)?;
+    tree.add_child(scroll, body)?;
+    tree.add_child(root, scroll)?;
+    tree.layout()?;
+    Ok((tree, scroll))
+}
+
+#[test]
+fn resolve_scroll_stretches_past_the_edge() -> Result<(), crate::Error> {
+    let (mut tree, scroll) = filled_scroll(200.0)?;
+    let sample = tree.resolve_scroll(scroll, 0.0, -40.0)?;
+    assert_eq!(sample.offset_y, 0.0);
+    assert!(sample.overscroll_y < 0.0, "stretch {:?}", sample);
+    Ok(())
+}
+
+#[test]
+fn a_drag_continues_from_the_unclamped_desired_position() -> Result<(), crate::Error> {
+    let (mut tree, scroll) = filled_scroll(200.0)?;
+    tree.pointer(event(Phase::Down, 10.0, 20.0, 0.0));
+    tree.pointer(event(Phase::Move, 10.0, 36.0, 16.0));
+    let first = tree.overscroll(scroll)?.1;
+    tree.pointer(event(Phase::Move, 10.0, 56.0, 32.0));
+    let second = tree.overscroll(scroll)?.1;
+    assert!(second < first, "stretch should grow: {first} -> {second}");
+    assert_eq!(tree.scroll_offset(scroll)?.1, 0.0);
+    Ok(())
+}
+
+#[test]
+fn a_vertical_drag_drops_the_cross_axis() -> Result<(), crate::Error> {
+    let (mut tree, scroll) = filled_scroll(200.0)?;
+    tree.set_scroll_offset(scroll, 0.0, 40.0)?;
+    tree.pointer(event(Phase::Down, 10.0, 20.0, 0.0));
+    tree.pointer(event(Phase::Move, 40.0, 4.0, 16.0));
+    let (x, y) = tree.scroll_offset(scroll)?;
+    assert_eq!(x, 0.0);
+    assert!(
+        y > 40.0,
+        "vertical component moved, horizontal did not: {x} {y}"
+    );
+    Ok(())
+}
+
+#[test]
+fn both_with_no_horizontal_content_hands_x_to_the_parent() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(mono());
+    tree.set_viewport(0.0, 0.0, 80.0, 80.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let outer = tree.scroll_with(ScrollAxis::Horizontal)?;
+    tree.set_fill(outer)?;
+    let wide = tree.sized(240.0, 80.0)?;
+    let inner = tree.scroll()?;
+    tree.set_max_size(inner, 80.0, 80.0)?;
+    let tall = tree.sized(80.0, 80.0)?;
+    tree.add_child(inner, tall)?;
+    tree.add_child(wide, inner)?;
+    tree.add_child(outer, wide)?;
+    tree.add_child(root, outer)?;
+    tree.layout()?;
+    tree.set_scroll_offset(outer, 40.0, 0.0)?;
+    tree.pointer(event(Phase::Down, 10.0, 10.0, 0.0));
+    tree.pointer(event(Phase::Move, 30.0, 10.0, 16.0));
+    let (x, _) = tree.scroll_offset(outer)?;
+    assert!(x < 40.0, "parent took the horizontal remainder: {x}");
+    Ok(())
+}
+
+#[test]
+fn edge_pull_commits_on_drag_end() -> Result<(), crate::Error> {
+    let (mut tree, scroll) = filled_scroll(200.0)?;
+    tree.set_scroll_pull(scroll, PullMode::Edge, 8.0)?;
+    tree.pointer(event(Phase::Down, 10.0, 10.0, 0.0));
+    tree.pointer(event(Phase::Move, 10.0, 40.0, 16.0));
+    tree.pointer(event(Phase::Up, 10.0, 40.0, 32.0));
+    assert!(tree.take_refresh().contains(&scroll));
+    Ok(())
+}
+
+#[test]
+fn overscroll_pull_commits_when_the_phase_returns_to_idle() -> Result<(), crate::Error> {
+    let (mut tree, scroll) = filled_scroll(200.0)?;
+    tree.set_scroll_pull(scroll, PullMode::Overscroll, 1.0)?;
+    tree.pointer(event(Phase::Down, 10.0, 10.0, 0.0));
+    tree.pointer(event(Phase::Move, 10.0, 40.0, 16.0));
+    assert!(tree.overscroll(scroll)?.1 < 0.0);
+    tree.pointer(event(Phase::Up, 10.0, 40.0, 32.0));
+    let mut now = 32.0;
+    for _ in 0..80 {
+        now += 16.0;
+        tree.tick_motions(now);
+        if tree.scroll_phase(scroll)? == ScrollPhase::Idle {
+            break;
+        }
+    }
+    assert!(tree.take_refresh().contains(&scroll));
+    Ok(())
+}
+
+#[test]
+fn a_still_finger_long_press_fires_from_tick() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(mono());
+    let region = tree.pointer_region()?;
+    tree.set_recognizers(
+        region,
+        RecognizerSet {
+            long_press: true,
+            ..RecognizerSet::default()
+        },
+    )?;
+    let child = tree.sized(40.0, 40.0)?;
+    tree.add_child(region, child)?;
+    tree.layout()?;
+    tree.pointer(event(Phase::Down, 8.0, 8.0, 0.0));
+    assert!(tree.tick(400.0).is_empty());
+    assert_eq!(tree.tick(500.0), vec![Gesture::LongPress(region)]);
+    assert_eq!(
+        tree.pointer(event(Phase::Up, 8.0, 8.0, 520.0)),
+        vec![Gesture::Release(region)]
     );
     Ok(())
 }
