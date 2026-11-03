@@ -111,6 +111,9 @@ impl Tree {
         path: &mut crate::HitPath,
     ) -> Option<NodeId> {
         let node = self.get(id)?;
+        if node.flags.contains(super::node::NodeFlags::CULL_PAINT) {
+            return None;
+        }
         // An empty text can be stretched across a stack cell. It is not drawn
         // and must not sit in front of the scroll underneath it.
         if node.kind == Kind::Text && node.text().is_none_or(|text| text.utf8.is_empty()) {

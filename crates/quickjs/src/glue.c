@@ -230,6 +230,11 @@ typedef struct QjsFns {
                         float *y);
     int (*scroll_consume)(void *session, uint32_t index, uint32_t generation, float ox, float oy);
     int (*set_scroll_axis)(void *session, uint64_t node, int axis);
+    int (*debug_json)(void *session, int what, uint64_t node, float x, float y);
+    const char *(*debug_json_bytes)(void *session);
+    void (*debug_set_scan)(void *session, int on);
+    void (*debug_set_pointer_trace)(void *session, int on, int suppress);
+    void (*debug_set_owned)(void *session, uint64_t node, int on);
 } QjsFns;
 
 typedef struct BackHandler {
@@ -383,6 +388,9 @@ typedef struct Host {
     size_t motion_len;
     size_t motion_cap;
     uint64_t motion_next;
+    /* Promises already reported by the rejection checker this job round. */
+    JSValue reject_seen[64];
+    size_t reject_seen_len;
 } Host;
 
 #define QJS_MEMORY_LIMIT (16u << 20)
@@ -391,6 +399,10 @@ typedef struct Host {
    Crossing the limit throws InternalError: interrupted and discards the turn,
    so this is a runaway cutoff, not a frame budget. */
 #define QJS_TURN_MS 128
+/* Evaluating the quotes bundle plus mounting its first screen is legitimate
+   one-shot work in debug builds, not a runaway turn. Slice interrupts keep
+   the 128 ms cutoff; evaluation gets a wider but still finite budget. */
+#define QJS_EVAL_MS 1000
 
 static int64_t now_ms(void) {
     struct timespec ts;
@@ -405,7 +417,7 @@ static void arm_slice(Host *host) {
 }
 
 static void arm_eval(Host *host) {
-    host->deadline_ms = now_ms() + QJS_TURN_MS;
+    host->deadline_ms = now_ms() + QJS_EVAL_MS;
 }
 
 static int interrupt_handler(JSRuntime *rt, void *opaque) {
@@ -462,6 +474,100 @@ static void listener_failed(Host *host, char *err, size_t err_len, int *failed) 
         JS_FreeValue(host->ctx, exception);
     }
     *failed = 1;
+}
+
+/* Text of a rejection reason with its stack, prefixed like a console line.
+   Returns a malloc'd string the caller frees with js_free. */
+static char *format_rejection(JSContext *ctx, JSValueConst reason) {
+    const char *text = JS_ToCString(ctx, reason);
+    JSValue stack_val = JS_GetPropertyStr(ctx, reason, "stack");
+    const char *stack = NULL;
+    if (!JS_IsException(stack_val) && !JS_IsUndefined(stack_val)) {
+        stack = JS_ToCString(ctx, stack_val);
+    }
+    size_t len = 32 + (text ? strlen(text) : 0) + (stack ? strlen(stack) : 0);
+    char *out = js_malloc(ctx, len + 1);
+    if (out) {
+        snprintf(out, len + 1, "unhandled rejection: %s%s%s",
+                 text ? text : "quickjs error", stack ? "\n" : "", stack ? stack : "");
+    }
+    if (stack) {
+        JS_FreeCString(ctx, stack);
+    }
+    JS_FreeValue(ctx, stack_val);
+    if (text) {
+        JS_FreeCString(ctx, text);
+    }
+    return out;
+}
+
+static void report_rejection(Host *host, JSValueConst reason) {
+    JSContext *ctx = host->ctx;
+    char *text = format_rejection(ctx, reason);
+    if (!text) {
+        return;
+    }
+    /* The language packs install `globalThis.__reportUnhandled` when the host
+       has no DOM events; it formats through the same reportError path. */
+    int delivered = 0;
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue hook = JS_GetPropertyStr(ctx, global, "__reportUnhandled");
+    if (JS_IsFunction(ctx, hook)) {
+        JSValue arg = JS_NewStringLen(ctx, text, strlen(text));
+        JSValue result = JS_Call(ctx, hook, JS_UNDEFINED, 1, &arg);
+        JS_FreeValue(ctx, arg);
+        JS_FreeValue(ctx, result);
+        delivered = 1;
+    }
+    JS_FreeValue(ctx, hook);
+    JS_FreeValue(ctx, global);
+    if (!delivered && host->fns.log) {
+        host->fns.log(host->fns.session, text, strlen(text), 3);
+    }
+    js_free(ctx, text);
+}
+
+/* The runtime calls the checker the moment a promise rejects with no
+   reactions, and again once a handler attaches. A late `.catch` in the same
+   tick must not report, so candidates collect here and only promises still
+   unhandled when the job queue drains are reported. */
+static void promise_rejection_checker(JSContext *ctx, JSValueConst promise,
+                                      JSValueConst reason, bool is_handled, void *opaque) {
+    (void)reason;
+    Host *host = opaque;
+    if (!host) {
+        return;
+    }
+    if (is_handled) {
+        for (size_t i = 0; i < host->reject_seen_len; i++) {
+            if (JS_VALUE_GET_PTR(host->reject_seen[i]) == JS_VALUE_GET_PTR(promise)) {
+                JS_FreeValue(ctx, host->reject_seen[i]);
+                host->reject_seen[i] = host->reject_seen[--host->reject_seen_len];
+                return;
+            }
+        }
+        return;
+    }
+    for (size_t i = 0; i < host->reject_seen_len; i++) {
+        if (JS_VALUE_GET_PTR(host->reject_seen[i]) == JS_VALUE_GET_PTR(promise)) {
+            return;
+        }
+    }
+    if (host->reject_seen_len < sizeof(host->reject_seen) / sizeof(host->reject_seen[0])) {
+        host->reject_seen[host->reject_seen_len++] = JS_DupValue(ctx, promise);
+    }
+}
+
+static void flush_rejections(Host *host) {
+    while (host->reject_seen_len > 0) {
+        JSValue promise = host->reject_seen[--host->reject_seen_len];
+        JSValue reason = JS_PromiseResult(host->ctx, promise);
+        if (!JS_IsException(reason) && !JS_IsUndefined(reason)) {
+            report_rejection(host, reason);
+        }
+        JS_FreeValue(host->ctx, reason);
+        JS_FreeValue(host->ctx, promise);
+    }
 }
 
 /* raw < 2^53, so the double is an exact integer. 0 is a valid "none". */
@@ -3989,6 +4095,65 @@ static JSValue js_console_error(JSContext *ctx, JSValueConst this_val, int argc,
     return console_call(ctx, argc, argv, 3);
 }
 
+static JSValue js_console_debug(JSContext *ctx, JSValueConst this_val, int argc,
+                                JSValueConst *argv) {
+    (void)this_val;
+    return console_call(ctx, argc, argv, 4);
+}
+
+/* `core.log(level, message)` mirrors console levels by name so error
+   reporting in the language packs has one entry point. */
+static JSValue js_core_log(JSContext *ctx, JSValueConst this_val, int argc,
+                           JSValueConst *argv);
+static JSValue js_debug_layout_issues(JSContext *ctx, JSValueConst this_val, int argc,
+                                      JSValueConst *argv);
+static JSValue js_debug_snapshot(JSContext *ctx, JSValueConst this_val, int argc,
+                                 JSValueConst *argv);
+static JSValue js_debug_probe(JSContext *ctx, JSValueConst this_val, int argc,
+                              JSValueConst *argv);
+static JSValue js_debug_last_pointer(JSContext *ctx, JSValueConst this_val, int argc,
+                                     JSValueConst *argv);
+static JSValue js_debug_set_scan(JSContext *ctx, JSValueConst this_val, int argc,
+                                 JSValueConst *argv);
+static JSValue js_debug_set_pointer_trace(JSContext *ctx, JSValueConst this_val, int argc,
+                                          JSValueConst *argv);
+static JSValue js_debug_set_owned(JSContext *ctx, JSValueConst this_val, int argc,
+                                  JSValueConst *argv);
+static JSValue js_debug_memory(JSContext *ctx, JSValueConst this_val, int argc,
+                               JSValueConst *argv);
+
+static JSValue js_core_log(JSContext *ctx, JSValueConst this_val, int argc,
+                           JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2 || !host->fns.log) {
+        return JS_UNDEFINED;
+    }
+    const char *name = JS_ToCString(ctx, argv[0]);
+    const char *text = JS_ToCString(ctx, argv[1]);
+    if (!name || !text) {
+        if (name) {
+            JS_FreeCString(ctx, name);
+        }
+        if (text) {
+            JS_FreeCString(ctx, text);
+        }
+        return JS_EXCEPTION;
+    }
+    int level = 1;
+    if (strcmp(name, "error") == 0) {
+        level = 3;
+    } else if (strcmp(name, "warn") == 0) {
+        level = 2;
+    } else if (strcmp(name, "debug") == 0) {
+        level = 4;
+    }
+    host->fns.log(host->fns.session, text, strlen(text), level);
+    JS_FreeCString(ctx, name);
+    JS_FreeCString(ctx, text);
+    return JS_UNDEFINED;
+}
+
 static int bind_fn(JSContext *ctx, JSValue core, const char *name, JSCFunction *fn, int length);
 
 static int bind_console(Host *host) {
@@ -3999,6 +4164,7 @@ static int bind_console(Host *host) {
     failed |= bind_fn(ctx, console, "info", js_console_info, 0);
     failed |= bind_fn(ctx, console, "warn", js_console_warn, 0);
     failed |= bind_fn(ctx, console, "error", js_console_error, 0);
+    failed |= bind_fn(ctx, console, "debug", js_console_debug, 0);
     failed |= JS_SetPropertyStr(ctx, global, "console", console) < 0;
     JS_FreeValue(ctx, global);
     return failed ? -1 : 0;
@@ -4648,6 +4814,15 @@ static int bind_core(Host *host) {
     failed |= bind_fn(ctx, core, "offBack", js_off_back, 1);
     failed |= bind_fn(ctx, core, "onShortcut", js_on_shortcut, 2);
     failed |= bind_fn(ctx, core, "setListenerErrorPolicy", js_set_listener_error_policy, 1);
+    failed |= bind_fn(ctx, core, "log", js_core_log, 2);
+    failed |= bind_fn(ctx, core, "debugLayoutIssues", js_debug_layout_issues, 0);
+    failed |= bind_fn(ctx, core, "debugSnapshot", js_debug_snapshot, 0);
+    failed |= bind_fn(ctx, core, "debugProbe", js_debug_probe, 2);
+    failed |= bind_fn(ctx, core, "debugLastPointer", js_debug_last_pointer, 0);
+    failed |= bind_fn(ctx, core, "debugSetScan", js_debug_set_scan, 1);
+    failed |= bind_fn(ctx, core, "debugSetPointerTrace", js_debug_set_pointer_trace, 2);
+    failed |= bind_fn(ctx, core, "debugSetOwned", js_debug_set_owned, 2);
+    failed |= bind_fn(ctx, core, "debugMemory", js_debug_memory, 0);
     failed |= bind_fn(ctx, core, "layerTreeStats", js_layer_tree_stats, 0);
     failed |= bind_fn(ctx, core, "scrollIntoView", js_scroll_into_view, 2);
     failed |= bind_fn(ctx, core, "animate", js_animate, 6);
@@ -4949,6 +5124,7 @@ Host *qjs_open(const QjsFns *fns) {
     /* Solid 2's render effects nest deeper than 1 MiB on the gallery page. */
     JS_SetMaxStackSize(host->rt, 8u << 20);
     JS_SetInterruptHandler(host->rt, interrupt_handler, host);
+    JS_SetHostPromiseRejectionTracker(host->rt, promise_rejection_checker, host);
     JS_SetModuleLoaderFunc(host->rt, module_normalize, module_loader, host);
     if (bind_core(host) || bind_console(host) || bind_host_globals(host)) {
         JS_FreeContext(host->ctx);
@@ -5104,11 +5280,22 @@ int qjs_drain_jobs(Host *host, char *err, size_t err_len) {
             return -1;
         }
         if (ran == 0) {
+            flush_rejections(host);
             return 0;
         }
         rounds++;
     }
+    /* Only rejections that survived the whole queue without a handler are
+       worth a log line. */
+    flush_rejections(host);
     return 0;
+}
+
+void qjs_reset_rejections(Host *host) {
+    for (size_t i = 0; i < host->reject_seen_len; i++) {
+        JS_FreeValue(host->ctx, host->reject_seen[i]);
+    }
+    host->reject_seen_len = 0;
 }
 
 int qjs_jobs_pending(Host *host) {
@@ -5343,6 +5530,10 @@ void qjs_close(Host *host) {
         JS_FreeValue(host->ctx, host->values[index]);
     }
     free(host->values);
+    for (size_t index = 0; index < host->reject_seen_len; index++) {
+        JS_FreeValue(host->ctx, host->reject_seen[index]);
+    }
+    host->reject_seen_len = 0;
     free(host->locale);
     free(host->app_dir);
     if (host->has_frame) {
@@ -5366,4 +5557,123 @@ void qjs_close(Host *host) {
         JS_FreeRuntime(host->rt);
     }
     free(host);
+}
+
+/* ---- devtools debug surface ---- */
+
+#define DEBUG_LAYOUT_ISSUES 0
+#define DEBUG_SNAPSHOT 1
+#define DEBUG_PROBE 2
+#define DEBUG_LAST_POINTER 3
+
+static JSValue js_debug_json(JSContext *ctx, JSValueConst this_val, int argc,
+                             JSValueConst *argv, int what) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (!host->fns.debug_json) {
+        return JS_UNDEFINED;
+    }
+    uint64_t node = 0;
+    double x = 0;
+    double y = 0;
+    if (argc >= 1 && read_handle(ctx, argv[0], &node)) {
+        return JS_EXCEPTION;
+    }
+    if (argc >= 2 && JS_ToFloat64(ctx, &x, argv[1])) {
+        return JS_EXCEPTION;
+    }
+    if (argc >= 3 && JS_ToFloat64(ctx, &y, argv[2])) {
+        return JS_EXCEPTION;
+    }
+    if (host->fns.debug_json(host->fns.session, what, node, (float)x, (float)y)) {
+        return JS_NULL;
+    }
+    const char *text = host->fns.debug_json_bytes(host->fns.session);
+    if (!text) {
+        return JS_NULL;
+    }
+    return JS_NewString(ctx, text);
+}
+
+static JSValue js_debug_layout_issues(JSContext *ctx, JSValueConst this_val, int argc,
+                                      JSValueConst *argv) {
+    return js_debug_json(ctx, this_val, argc, argv, DEBUG_LAYOUT_ISSUES);
+}
+
+static JSValue js_debug_snapshot(JSContext *ctx, JSValueConst this_val, int argc,
+                                 JSValueConst *argv) {
+    return js_debug_json(ctx, this_val, argc, argv, DEBUG_SNAPSHOT);
+}
+
+static JSValue js_debug_probe(JSContext *ctx, JSValueConst this_val, int argc,
+                              JSValueConst *argv) {
+    return js_debug_json(ctx, this_val, argc, argv, DEBUG_PROBE);
+}
+
+static JSValue js_debug_last_pointer(JSContext *ctx, JSValueConst this_val, int argc,
+                                     JSValueConst *argv) {
+    return js_debug_json(ctx, this_val, argc, argv, DEBUG_LAST_POINTER);
+}
+
+static JSValue js_debug_set_scan(JSContext *ctx, JSValueConst this_val, int argc,
+                                 JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 1 || !host->fns.debug_set_scan) {
+        return JS_UNDEFINED;
+    }
+    int on = JS_ToBool(ctx, argv[0]);
+    if (on < 0) {
+        return JS_EXCEPTION;
+    }
+    host->fns.debug_set_scan(host->fns.session, on);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_debug_set_pointer_trace(JSContext *ctx, JSValueConst this_val, int argc,
+                                          JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2 || !host->fns.debug_set_pointer_trace) {
+        return JS_UNDEFINED;
+    }
+    int on = JS_ToBool(ctx, argv[0]);
+    int suppress = JS_ToBool(ctx, argv[1]);
+    if (on < 0 || suppress < 0) {
+        return JS_EXCEPTION;
+    }
+    host->fns.debug_set_pointer_trace(host->fns.session, on, suppress);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_debug_memory(JSContext *ctx, JSValueConst this_val, int argc,
+                                JSValueConst *argv) {
+    (void)this_val;
+    (void)argc;
+    (void)argv;
+    Host *host = host_of(ctx);
+    JSMemoryUsage usage;
+    memset(&usage, 0, sizeof(usage));
+    JS_ComputeMemoryUsage(host->rt, &usage);
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "{\"mallocBytes\":%lld,\"objects\":%lld,\"atoms\":%lld,\"strings\":%lld}",
+             (long long)usage.malloc_size, (long long)usage.memory_used_count,
+             (long long)usage.atom_count, (long long)usage.str_count);
+    return JS_NewString(ctx, buf);
+}
+
+static JSValue js_debug_set_owned(JSContext *ctx, JSValueConst this_val, int argc,
+                                  JSValueConst *argv) {
+    (void)this_val;
+    Host *host = host_of(ctx);
+    if (argc < 2 || !host->fns.debug_set_owned) {
+        return JS_UNDEFINED;
+    }
+    uint64_t node = 0;
+    if (read_handle(ctx, argv[0], &node) || !JS_IsBool(argv[1])) {
+        return JS_EXCEPTION;
+    }
+    host->fns.debug_set_owned(host->fns.session, node, JS_ToBool(ctx, argv[1]));
+    return JS_UNDEFINED;
 }

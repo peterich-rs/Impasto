@@ -33,6 +33,7 @@ type HostLog = Rc<dyn Fn(LogLevel, &str)>;
 pub struct EngineSlot {
     typography: Rc<RefCell<engine::Typography>>,
     log: HostLog,
+    hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
 }
 
 impl EngineSlot {
@@ -42,11 +43,23 @@ impl EngineSlot {
 
     pub fn log_hook(&self) -> crate::ConsoleLog {
         let log = Rc::clone(&self.log);
+        let hub = self.hub.clone();
         Box::new(move |level, message| {
-            // QuickJS console levels: 0 log, 1 info, 2 warn, 3 error.
+            // QuickJS console levels: 0 log, 1 info, 2 warn, 3 error, 4 debug.
+            if let Some(hub) = hub.as_ref() {
+                let source = if message.starts_with("horizontal overflow ")
+                    || message.starts_with("vertical overflow ")
+                {
+                    crate::diagnostics::LogSource::Layout
+                } else {
+                    crate::diagnostics::LogSource::Script
+                };
+                hub.log(level, source, message);
+            }
             let level = match level {
                 3 => LogLevel::Error,
                 2 => LogLevel::Warn,
+                4 => LogLevel::Debug,
                 _ => LogLevel::Info,
             };
             log(level, message);
@@ -220,6 +233,81 @@ impl Drop for ExitGuard {
     }
 }
 
+/// Panics reach the hub before the default hook so Android logcat and the
+/// devtools panel keep the payload. The first hub installed wins; there is
+/// one hub per process.
+fn install_panic_hook(hub: Arc<crate::diagnostics::DiagnosticsHub>) {
+    static INSTALLED: std::sync::OnceLock<Option<Arc<crate::diagnostics::DiagnosticsHub>>> =
+        std::sync::OnceLock::new();
+    if INSTALLED.set(Some(Arc::clone(&hub))).is_err() {
+        return;
+    }
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(hub) = INSTALLED.get().and_then(|slot| slot.as_ref()) {
+            let payload = format!("{info}");
+            let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+            hub.error(
+                "host",
+                &format!("panic: {payload}"),
+                Some(backtrace.trim()),
+                None,
+            );
+        }
+        default(info);
+    }));
+}
+
+fn host_os_version() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("/usr/bin/sw_vers")
+            .arg("-productVersion")
+            .output()
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|text| text.trim().to_owned())
+            .filter(|text| !text.is_empty())
+            .unwrap_or_default()
+    }
+    #[cfg(not(target_os = "macos"))]
+    String::new()
+}
+
+/// Writes `frame.json` once, then asks the host to leave. A missing directory
+/// or a failed write is logged and not retried.
+fn issue_list(report: &str) -> &str {
+    report
+        .strip_prefix("{\"issues\":")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .unwrap_or("[]")
+}
+
+fn write_inspect(
+    runtime: &mut Runtime,
+    tree: &uicore::LayerTree,
+    timing: &FrameTiming,
+    phases: &session::FramePhases,
+    issues: &str,
+) {
+    if runtime.inspect_written {
+        return;
+    }
+    let Some(dir) = runtime.inspect_dir.clone() else {
+        return;
+    };
+    match crate::diagnostics::write_frame(&dir, tree, timing, Some(phases), issues) {
+        Ok(()) => {
+            runtime.inspect_written = true;
+            runtime.services.borrow().inspect_finished();
+        }
+        Err(error) => {
+            runtime.inspect_written = true;
+            (runtime.log)(LogLevel::Error, &format!("inspect write failed: {error}"));
+        }
+    }
+}
+
 pub fn start(boot: Boot) -> Result<Link, BootError> {
     let inbox = Arc::new(Inbox::new());
     let inbox_thread = Arc::clone(&inbox);
@@ -229,7 +317,13 @@ pub fn start(boot: Boot) -> Result<Link, BootError> {
     let acks_thread = Arc::clone(&acks);
     let (image_tx, image_rx) = mpsc::channel();
     let upload = Arc::new(Mutex::new(None));
-    let http = boot.http.clone();
+    if let Some(hub) = boot.devtools.as_ref() {
+        install_panic_hook(Arc::clone(hub));
+    }
+    let http = boot
+        .http
+        .clone()
+        .map(|inner| crate::diagnostics::wrap_if_devtools(inner, boot.devtools.clone()));
     let decoder = Arc::clone(&boot.decoder);
     let inbox_images = Arc::clone(&inbox);
     let http_images = http.clone();
@@ -242,7 +336,7 @@ pub fn start(boot: Boot) -> Result<Link, BootError> {
     let (net_tx, net_rx) = mpsc::channel();
     let (wake_tx, wake_rx) = mpsc::channel();
     let inbox_net = Arc::clone(&inbox);
-    let _net = crate::net::spawn(net_rx, inbox_net, http);
+    let _net = crate::net::spawn(net_rx, inbox_net, http, boot.devtools.clone());
     let _time = crate::net::wake(wake_rx, Arc::clone(&inbox));
     let spawned = thread::Builder::new()
         .name("render".to_string())
@@ -373,6 +467,9 @@ struct Runtime {
     present_retry_at: Option<i64>,
     gpu: Gpu,
     inspect: Option<std::path::PathBuf>,
+    hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
+    inspect_dir: Option<std::path::PathBuf>,
+    inspect_written: bool,
 }
 
 struct RenderLinks {
@@ -414,6 +511,7 @@ fn render(
     let slot = EngineSlot {
         typography: Rc::clone(&typography),
         log: Rc::clone(&log),
+        hub: boot.devtools.clone(),
     };
     let rt = match crate::rt::handle() {
         Ok(handle) => handle,
@@ -427,6 +525,20 @@ fn render(
     let app_state = session::shared("active".to_owned());
     let launch_url = Arc::clone(&boot.launch_url);
     let mut modules = vec![crate::modules::app_state(Arc::clone(&app_state))];
+    if let Some(hub) = boot.devtools.as_ref() {
+        modules.push(crate::diagnostics::module(
+            Arc::clone(hub),
+            crate::diagnostics::DevtoolsContext {
+                enabled: true,
+                source_map: boot.devtools_source_map.clone(),
+                app_state: Arc::clone(&app_state),
+                os: std::env::consts::OS,
+                os_version: host_os_version(),
+                log_level: std::env::var("IMPASTO_LOG").unwrap_or_else(|_| "info".to_owned()),
+                dump: std::env::var("IMPASTO_DUMP").ok(),
+            },
+        ));
+    }
     modules.extend(boot.modules);
     let registry = Arc::new(session::ModuleRegistry::new(modules));
     let host = session::HostConfig {
@@ -492,6 +604,9 @@ fn render(
         present_retry_at: None,
         gpu: Gpu::Live,
         inspect: boot.inspect,
+        hub: boot.devtools.clone(),
+        inspect_dir: boot.inspect_dir,
+        inspect_written: false,
     };
     while let Some(command) = inbox.recv() {
         if on_command(&mut runtime, command, acks)? {
@@ -616,6 +731,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     let mut census = None;
     let mut layers_changed = false;
     let mut phases = None;
+    let mut layout_report = None;
     if let Some(session) = runtime.session.as_mut() {
         let framed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.frame(time)));
         match framed {
@@ -623,6 +739,11 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                 runtime.panic_streak = 0;
                 again = output.again;
                 leave = output.exit;
+                if let Some(hub) = runtime.hub.as_ref()
+                    && let Some(message) = session.take_script_error()
+                {
+                    hub.error("listener", &message, None, Some(runtime.frame_number));
+                }
                 if let Some(tree) = output.layers.take() {
                     if runtime.dump_list {
                         (runtime.log)(LogLevel::Debug, &layer_tree_line(&tree));
@@ -652,6 +773,12 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                 fonts = std::mem::take(&mut output.fonts);
                 census = output.images.take();
                 phases = output.phases.take();
+                layout_report = output.layout_report.take();
+                if let Some(hub) = runtime.hub.as_ref()
+                    && let Some(report) = layout_report.as_deref()
+                {
+                    hub.set_layout_report(report);
+                }
             }
             Err(_) => {
                 (runtime.log)(
@@ -738,6 +865,14 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
             submit_ms = elapsed_ms(started);
             if let Err(status) = submitted {
                 (runtime.log)(LogLevel::Error, &format!("scene submit failed: {status}"));
+                if let Some(hub) = runtime.hub.as_ref() {
+                    hub.error(
+                        "engine",
+                        &format!("scene submit failed: {status}"),
+                        None,
+                        Some(runtime.frame_number),
+                    );
+                }
                 if status == engine::Status::NotLinked {
                     return Err(BootError::Engine(status));
                 }
@@ -791,6 +926,47 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
         pictures: stats.pictures,
         textures: stats.textures,
     };
+    if let Some(hub) = runtime.hub.as_ref() {
+        hub.push_frame(crate::diagnostics::FrameSample {
+            seq: 0,
+            number: timing.number,
+            at_ms: crate::net::mono_ms(),
+            session_ms: timing.session_ms,
+            gesture_ms: timing.gesture_ms,
+            script_ms: timing.script_ms,
+            layout_ms: timing.layout_ms,
+            record_ms: timing.record_ms,
+            submit_ms: timing.submit_ms,
+            present_ms: timing.present_ms,
+            layers: timing.layer_count,
+            paragraphs: timing.paragraphs,
+            pictures: timing.pictures,
+            textures: timing.textures,
+            over_budget: timing.over_budget(time.interval_ms),
+            phases: crate::diagnostics::PhaseSample {
+                motion_ms: phase.script.motion_ms,
+                dispatch_ms: phase.script.dispatch_ms,
+                timer_ms: phase.script.timer_ms,
+                raf_ms: phase.script.raf_ms,
+                callback_ms: phase.script.callback_ms,
+                flush_ms: phase.script.flush_ms,
+                layout_cb_ms: phase.layout_cb_ms,
+                sync_ms: phase.sync_ms,
+                semantics_ms: phase.semantics_ms,
+                laywork_ms: phase.trace.laywork_ms,
+                layout_passes: phase.trace.layout_passes,
+                text_reused: phase.trace.text_reused,
+                text_shaped: phase.trace.text_shaped,
+                pointers: phase.trace.pointers,
+                keys: phase.trace.keys,
+                edits: phase.trace.edits,
+                ime: phase.trace.ime,
+                scrolls: phase.trace.scrolls,
+                focus: phase.trace.focus,
+                blur: phase.trace.blur,
+            },
+        });
+    }
     if timing.over_budget(time.interval_ms) {
         (runtime.log)(
             LogLevel::Warn,
@@ -840,7 +1016,9 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
             ),
         );
     }
-    if let Some(dir) = &runtime.inspect
+    // The richer `inspect_dir` writer owns `frame.json` when both are set.
+    if runtime.inspect_dir.is_none()
+        && let Some(dir) = &runtime.inspect
         && let Err(error) = crate::timing::write_inspect(dir, &timing, runtime.latest.as_deref())
     {
         (runtime.log)(LogLevel::Warn, &format!("inspect write failed: {error}"));
@@ -863,6 +1041,15 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
         runtime.present_failures = 0;
         runtime.present_logged = false;
         runtime.present_retry_at = None;
+        if let Some(tree) = runtime.latest.clone() {
+            write_inspect(
+                runtime,
+                &tree,
+                &timing,
+                &phase,
+                issue_list(layout_report.as_deref().unwrap_or("[]")),
+            );
+        }
     }
     let mut again = follow.vsync == VsyncOp::Request;
     if after == AfterPresent::Retry {
@@ -871,6 +1058,14 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
             if !runtime.present_logged {
                 runtime.present_logged = true;
                 (runtime.log)(LogLevel::Error, "present failed; backing off");
+                if let Some(hub) = runtime.hub.as_ref() {
+                    hub.error(
+                        "engine",
+                        "present failed; backing off",
+                        None,
+                        Some(runtime.frame_number),
+                    );
+                }
             }
             runtime.present_retry_at = Some(crate::net::ms_i64(crate::net::mono_ms()) + delay);
             again = false;
@@ -1338,6 +1533,9 @@ mod tests {
                 present_retry_at: None,
                 gpu: Gpu::Live,
                 inspect: None,
+                hub: None,
+                inspect_dir: None,
+                inspect_written: false,
             };
             Self {
                 runtime,

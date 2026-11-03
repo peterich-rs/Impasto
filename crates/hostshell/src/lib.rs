@@ -2,6 +2,7 @@
 //! the engine, the session, and the surface.
 
 mod command;
+mod diagnostics;
 mod error;
 mod exec;
 mod files;
@@ -27,6 +28,7 @@ use std::sync::Arc;
 use session::Metrics;
 
 pub use command::{Command, FrameToken, SurfaceId, SurfaceTarget};
+pub use diagnostics::DiagnosticsHub;
 pub use error::{BootError, LogLevel, SessionError};
 pub use exec::{MainThreadPoster, RtExec, settle_factory};
 pub use host_stubs::{
@@ -90,6 +92,8 @@ pub trait Services: Send {
     fn apply_ime(&self, update: &session::ImeUpdate);
     /// The session wants the process to leave. The default does nothing.
     fn request_exit(&self) {}
+    /// `IMPASTO_INSPECT` wrote `frame.json`. The host should leave, like a dump.
+    fn inspect_finished(&self) {}
     /// Extra font files registered after the primary family. The default is empty.
     fn extra_fonts(&self) -> Vec<(String, Vec<u8>)> {
         Vec::new()
@@ -130,14 +134,30 @@ pub struct Boot {
     pub open_surface: OpenSurface,
     /// Log one line of layer-tree shape after a frame records new layers.
     pub dump_list: bool,
-    /// `IMPASTO_INSPECT` directory. The render thread writes `frame.json` there.
+    /// `IMPASTO_INSPECT` directory. The render thread writes timing `frame.json` there.
     pub inspect: Option<std::path::PathBuf>,
+    /// Enable the in-app devtools: hub, network recording, and the panic
+    /// hook. `None` leaves the process with zero diagnostics overhead.
+    pub devtools: Option<Arc<DiagnosticsHub>>,
+    /// Bundle source map text for the devtools error page.
+    pub devtools_source_map: Option<Arc<String>>,
+    /// Directory for one richer `frame.json` after the first successful present.
+    /// `IMPASTO_INSPECT`. `None` writes nothing.
+    pub inspect_dir: Option<std::path::PathBuf>,
 }
 
 impl Boot {
     pub fn with_module(mut self, module: session::HostModule) -> Self {
         self.modules.push(module);
         self
+    }
+
+    /// Turns devtools on. The caller keeps the hub to register the module
+    /// on its own; `start` wires recording and the panic hook.
+    pub fn with_devtools(mut self) -> Arc<DiagnosticsHub> {
+        let hub = Arc::new(DiagnosticsHub::new());
+        self.devtools = Some(Arc::clone(&hub));
+        hub
     }
 }
 

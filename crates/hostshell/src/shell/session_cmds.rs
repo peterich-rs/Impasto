@@ -111,6 +111,9 @@ fn io(runtime: &mut Runtime, command: Command) -> Result<bool, BootError> {
 
 fn metrics_cmd(runtime: &mut Runtime, metrics: Metrics) {
     super::note_scale(runtime, metrics.device_pixel_ratio);
+    if let Some(hub) = runtime.hub.as_ref() {
+        hub.note_metrics(metrics);
+    }
     if runtime.input.set_metrics(metrics) {
         arm(runtime);
     }

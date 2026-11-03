@@ -6,7 +6,7 @@ macOS 与 Android 已落地：平台线程入队，渲染线程创建 `Engine` �
 
 ## 现状
 
-macOS 上 `session::Session` 由 QuickJS 实现。`just host` 加载 `counter.js`，每帧调用会话并 `submit_layers`。
+macOS 上 `session::Session` 由 QuickJS 实现。`just host` 加载 `quotes.js`，每帧调用会话并 `submit_layers`。
 
 当前 pin `77f043bc63196b9979cc09c5b97bb6d9b00be34d` 作为 URL 里的框架提交，下面这些产物返回 200：
 
@@ -52,7 +52,7 @@ Vulkan 入口与 `example_vk.c` 一致，例子只提供调用顺序，不引入
 ## 分层
 
 ```text
-apps/gallery-solid/dist/counter.js   (just gallery-dist 本地构建，不进 git)
+apps/gallery-solid/dist/quotes.js   (just gallery-dist 本地构建，不进 git)
         │
         ▼
 crates/quickjs          宿主在渲染线程上打开，得到 Box<dyn Session>

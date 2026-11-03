@@ -1,5 +1,6 @@
 //! Render tree. Layout goes through Taffy. Positions, hits, and gestures stay on this type.
 
+mod debug;
 mod gesture;
 mod hit;
 mod layout;
@@ -10,6 +11,7 @@ mod semantics;
 mod store;
 mod text;
 
+pub use debug::{DebugAxis, LayoutIssue};
 #[cfg(test)]
 pub(crate) use hit::Affine;
 pub use layout::{LayoutCause, LayoutTrace};
@@ -134,6 +136,8 @@ pub struct Tree {
     /// Content origin in scene points. Insets shift the root; `(0, 0)` is the surface origin.
     origin: (f32, f32),
     viewport: Option<(f32, f32)>,
+    /// Developer diagnostics. Off by default; see `tree/debug.rs`.
+    debug: debug::DebugState,
 }
 
 #[cfg(test)]

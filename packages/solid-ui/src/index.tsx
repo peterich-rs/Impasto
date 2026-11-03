@@ -5,6 +5,8 @@ export { Button } from "./Button.tsx";
 export { Dialog } from "./Dialog.tsx";
 export { ErrorPage, installErrorHooks, messageOf, reportError, stackOf, useErrorHandler } from "./errors.tsx";
 export { Field } from "./Field.tsx";
+export type { FieldController } from "./field/controller.ts";
+export { Text } from "@impasto/solid-renderer";
 export { TextArea } from "./TextArea.tsx";
 export { Icon } from "./Icon.tsx";
 export { KeyboardAvoidingView } from "./KeyboardAvoidingView.tsx";

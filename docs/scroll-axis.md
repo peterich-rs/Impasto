@@ -196,9 +196,9 @@ impl Tree {
 
 - 单行 horizontal，多行 vertical。
 
-**File: `apps/gallery-solid/counter.tsx`**
+**File: `apps/gallery-solid/src/widgets/chart/candles.ts`**
 
-- 列表页的横向 snap 行标成 `axis="horizontal"`，标题「横向分页」。
+- 日K 窗口用 `ScrollArea` 的 `axis: "horizontal"`。
 
 ### Phase 5：文档
 
@@ -206,7 +206,7 @@ impl Tree {
 
 - 轴、accept、跨轴丢弃、控制器与 `Both` 溢出的差别。手势段写明锁轴后跨轴增量在 `set_scroll_offset` 丢掉。
 
-验证：`cargo test -p uicore --lib` 里的滚动用例，`just solid`，以及 gallery 的 `counter.node.test.ts`。真机手势（竖、横、斜、到边、嵌套、滚轮）不在 `just check` 里，窗口路径仍用 `just host`。
+验证：`cargo test -p uicore --lib` 里的滚动用例，`just solid`，以及 gallery 的 `quotes.node.test.ts`。真机手势（竖、横、斜、到边、嵌套、滚轮）不在 `just check` 里，窗口路径仍用 `just host`。
 
 ## 6. 架构说明
 
@@ -221,7 +221,7 @@ impl Tree {
 ## 7. 文件变更清单
 
 - `AGENTS.md` — Scroll 轴、accept、跨轴丢弃
-- `apps/gallery-solid/counter.tsx` — 横向分页声明 horizontal
+- `apps/gallery-solid/src/widgets/chart/candles.ts` — 日K 横向窗口声明 horizontal
 - `uicore/src/lib.rs` — 导出 `ScrollAxis`、`ScrollAccept`
 - `uicore/src/list/controller.rs` — 单轴增量不进 overflow
 - `uicore/src/list/tests.rs` — 控制器轴矩阵

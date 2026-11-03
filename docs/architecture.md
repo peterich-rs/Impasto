@@ -25,6 +25,7 @@ packages/file-system/         @impasto/file-system
 packages/async-storage/       @impasto/async-storage
 packages/solid-renderer/      接到 uicore 的 universal 运行时。directionFor、spring、onBack
 packages/solid-ui/            Button、Field、Dialog、theme、overlay
+packages/devtools/            应用内调试面板。@impasto/devtools，数据来自 hostshell 的 DiagnosticsHub
 packages/solid-router/        路径、栈和 RouterView
 packages/net/                 createFetch
 packages/form/                createForm
@@ -32,7 +33,7 @@ packages/i18n/                formatNumber、formatDate、plural
 packages/permissions/         permission_handler 形状的权限 API。五法来自 @impasto/permissions/host
 kotlin/                       Gradle 根。DSL、控件、以后的 cinterop
   library/
-apps/gallery-solid/           Solid 应用。源码 counter.tsx；ESM 产物 dist/counter.js 由 `just gallery-dist` 本地生成，不进 git
+apps/gallery-solid/           Solid 应用。源码 src/quotes.tsx；ESM 产物 dist/quotes.js 由 `just gallery-dist` 本地生成，不进 git
 tools/                        node 测试的 register.mjs 和 resolve-hook.mjs
 third_party/                  只读对照和本机 SDK
 ```
@@ -46,8 +47,8 @@ gallery-solid ──► solid-router ──► linking
 crates/macos ──► hostshell ──► session ──► uicore ──► protocol
 crates/macos ──► engine ──► protocol
 crates/android ──► hostshell ──► engine ──► protocol
-crates/macos ──► quickjs 会话          `just host` 加载 `counter.js`
-crates/android ──► quickjs 会话        加载 assets 里的 `counter.js`
+crates/macos ──► quickjs 会话          `just host` 加载 `quotes.js`
+crates/android ──► quickjs 会话        加载 assets 里的 `quotes.js`
 ```
 
 `uicore` 不包含 QuickJS、Kotlin、AppKit 或 Impeller 的头文件。它通过 crates.io 依赖 Taffy。Impeller 排版由宿主实现 `Shaper` 并调用 `engine`，测试构建不链它。`engine` 不包含 `uicore`。语言包不实现测量和布局。选型表在 `AGENTS.md` 的「优先复用已有实现」。
@@ -56,7 +57,7 @@ crates/android ──► quickjs 会话        加载 assets 里的 `counter.js`
 
 ## 一帧
 
-平台线程入队，渲染线程做命中、冲刷、布局、录制和上屏。macOS 与 Android 都走这条路径。命中测试用上一帧已经算好的几何。监听器里不布局。布局、录制、上屏都在 vsync 上。
+平台线程入队，渲染线程做命中、冲刷、布局、录制和上屏。macOS 与 Android 都走这条路径。命中测试用上一帧已经算好的几何。监听器里不布局。布局、录制、上屏都在 vsync 上。`IMPASTO_DEVTOOLS=1` 时，帧末在渲染线程多一次 O(n) 盒子扫描，并把日志、错误、网络和帧计时写入 hostshell 的环形缓冲；关掉时这些步骤不跑。面板是 `packages/devtools` 里的普通层，经 `registerTopLayer` 挂在渲染器根 stack 上，不往 `DrawList` 里加调试命令。
 
 ```text
 Host            Session           Core              Engine
@@ -94,7 +95,7 @@ Host            Session           Core              Engine
 
 内部是 Rust 渲染对象，类型是 `uicore::Tree`。节点 id 是槽位加代数，`to_raw` 是 `u64`，高位代数从 1 起、不超过 `2^21 - 1`，这样 JS 的 Number 还能精确表示。删掉的槽位代数对不上，旧 id 得到 `UnknownNode`。代数到顶的槽位不再复用。根是显式的：第一棵挂上的树，或第一个创建的节点；`layout`、`record`、命中都读这个根。`remove` 摘掉子树，Taffy 节点、段落槽和 picture 都留着，并把 id 放进待销毁名单。同一轮里再 `insert` 会把 id 从名单拿掉，Taffy 还在，所以不 `revive`。轮末仍没有父节点的，`discard_detached` 才释放 Taffy 并退役 id。`detach` 同样摘链，但不进名单，壳可以跨帧再挂上。`discard` 要求节点没有父节点，后序退掉子树槽位，旧 id 变成 `UnknownNode`。摘链时，落在这棵子树里的焦点范围会从栈里去掉。空字符串不进 `DrawList`。`layout` 调用 `TaffyTree::compute_layout_with_measure`。Taffy 的 `location` 相对父节点，`place` 把它累加成场景绝对坐标写进 `x, y`。`record` 用这些绝对坐标。扁平列表减去滚动偏移。picture 里的命令相对 `origin`，滚动由 `Offset` 层平移。渲染引擎不解释父节点变换。`record` 同时交出扁平 `DrawList` 和 `LayerTree`。`set_viewport` 和样式、文字的 setter 只标脏，不丢掉已经算好的几何。挂上或摘下节点会让几何失效。摘掉子树只取消落在该子树里的指针路由。
 
-`Row`、`Column`、`Grid`、`Padding`、`Align`、`Sized`、`Stack`、`Clip`、`Opacity`、`Scroll`、`Transform` 只是 `taffy::Style` 的不同设值：`Display::Flex`、`Display::Grid`、padding、对齐、宽高、gap、flex grow、grid template。`Stack`、`Clip`、`Opacity`、`Transform` 是一格的 grid，子节点放在第 1 行第 1 列。`Scroll` 的轨道是 `max_content`，`overflow` 是 hidden，最小尺寸是 0，这样父约束可以把视口压得比内容矮，子节点仍按完整尺寸布局。`set_scroll_offset` 只标绘制，不进入 Taffy。`layout` 在只有绘制变更时直接返回。`record` 和命中应用 offset。松手后的惯性由 `Tree::tick_motions` 采样 `Friction`，并在 offset 变化时发出 `Gesture::Scroll`。每个 `Scroll` 有一份 `ScrollPhysics`（衰减 `Decay`：`Tau` 时间常数或 `Rate` 减速率，`Rate(0.998)` 等价约 500ms；拉伸 `Band`：`Linear` 线性系数或 `Curve` 渐近带 `D(1 − 1/(cx/D + 1))`，拉伸永远到不了 `D/c`；回弹或夹紧；分轴吸附；吸附弹簧 `snap_stiffness` / `snap_damping` 独立于回弹弹簧；`accept`）和 `chain`，以及 `ScrollAxis`（`Vertical`、`Horizontal`、`Both`）。`ScrollPhysics::IOS` 是一个预设：`Rate(0.998)`、`Curve(0.55)`、偏硬的分页弹簧。轴缺省 `Both`，`accept` 缺省 `Content`。缺省值与原先的 180ms、线性系数 0.55 相同。速度环只取松手前 120ms 内的样本，早前的甩动不参与。`set_pixel_scale` 记录设备像素比，滚动 motion 结束时把 offset 吸附到整设备像素；会话从 `Metrics.device_pixel_ratio` 转发。`scroll_limits` 把未声明的轴收成 0。`set_scroll_offset` 丢掉该轴的偏移和 overscroll。fling、snap、滚轮和 `scroll_into_view` 只动声明轴。`chain` 缺省为真：惯性只沿同一轴交给还能吃下这段速度的祖先；竖向 fling 不会推动横向祖先。`chain` 为假时停在自己的边上。认领在 `Tree::scroll_for`：声明轴只看自己的分量，`Content` 要有余量，`Always` 到边也认领，`Never` 跳过。`Both` 仍用较大的分量当主轴，无人能消费时 `lock_at_edge` 锁最内层溢出者。单轴不用这个兜底。取舍见 `docs/scroll-axis.md`。中途顶到边的剩余位移由 `consumeScrollOverflow` 交给父控制器，父级吃不下时内层继续回弹。吸附在摩擦结束后用弹簧落到最近一格，这颗弹簧自己的结束不再吸附。相位只在 `Idle`、`Dragging`、`Coasting`、`Settling` 切换时发 `Gesture::ScrollPhaseChanged`。`set_justify` 写行或列的 `justify_content`，`set_wrap` 写 `flex_wrap`。`set_fill` 把宽高设成父级或视口的 100%，最小尺寸为 0。`set_grow` 写子节点的 `flex_grow`，值必须非负，并标脏。flex 父节点有确定的主轴尺寸时，正的 grow 分到剩余空间。仅有 viewport 时，宽度为 auto 的 flex 根仍按内容收缩，不会出现剩余空间。`Text` 和 `Image` 走 measure 回调。文字回调调用 `Shaper`；`AvailableSpace::MinContent` 时改调 `Shaper::min_content_width`，按最宽不可断词计宽，grid 的 `min_content` 轨道和滚动内容下限因此是真值。图片回调返回固有尺寸。`set_min_axis` / `set_max_axis` 接受 `AxisSize`，`Fraction` 写百分比的最小或最大尺寸；百分比解析要父容器在该轴有确定尺寸，内容自适应的列解析不了子项的百分比最小高度。`set_panel` 把节点标成独立重排边界，`measure_panel` 用与 `layout` 同一条 Taffy 路径在 `SubtreeSpace`（自然尺寸、带帽自然尺寸、确定宽度）下单独排子树并返回内容盒，弹层先量后摆，不再渲染一帧再读 rect。Taffy 不绘制，也不做命中测试。
+`Row`、`Column`、`Grid`、`Padding`、`Align`、`Sized`、`Stack`、`Clip`、`Opacity`、`Scroll`、`Transform` 只是 `taffy::Style` 的不同设值：`Display::Flex`、`Display::Grid`、padding、对齐、宽高、gap、flex grow、grid template。`Stack`、`Clip`、`Opacity`、`Transform` 是一格的 grid，子节点放在第 1 行第 1 列。`Padding` 是纵向 flex，交叉轴拉伸：多个子节点上下排列，单个子节点拉到内宽。`Scroll` 的滚动轴轨道是 `max_content`，交叉轴是 `minmax(0, 1fr)`（竖向内容与视口同宽，横向内容与视口同高，`Both` 两轴都是 `max_content`）。裸 `1fr` 是 `minmax(auto, 1fr)`，子节点的最小内容会把轨道撑过视口。`overflow` 是 hidden，最小尺寸是 0，这样父约束可以把视口压得比内容矮，子节点在滚动轴上仍按完整尺寸布局。`set_scroll_offset` 只标绘制，不进入 Taffy。`layout` 在只有绘制变更时直接返回。`record` 和命中应用 offset。松手后的惯性由 `Tree::tick_motions` 采样 `Friction`，并在 offset 变化时发出 `Gesture::Scroll`。每个 `Scroll` 有一份 `ScrollPhysics`（衰减 `Decay`：`Tau` 时间常数或 `Rate` 减速率，`Rate(0.998)` 等价约 500ms；拉伸 `Band`：`Linear` 线性系数或 `Curve` 渐近带 `D(1 − 1/(cx/D + 1))`，拉伸永远到不了 `D/c`；回弹或夹紧；分轴吸附；吸附弹簧 `snap_stiffness` / `snap_damping` 独立于回弹弹簧；`accept`）和 `chain`，以及 `ScrollAxis`（`Vertical`、`Horizontal`、`Both`）。`ScrollPhysics::IOS` 是一个预设：`Rate(0.998)`、`Curve(0.55)`、偏硬的分页弹簧。轴缺省 `Both`，`accept` 缺省 `Content`。缺省值与原先的 180ms、线性系数 0.55 相同。速度环只取松手前 120ms 内的样本，早前的甩动不参与。`set_pixel_scale` 记录设备像素比，滚动 motion 结束时把 offset 吸附到整设备像素；会话从 `Metrics.device_pixel_ratio` 转发。`scroll_limits` 把未声明的轴收成 0。`set_scroll_offset` 丢掉该轴的偏移和 overscroll。fling、snap、滚轮和 `scroll_into_view` 只动声明轴。`chain` 缺省为真：惯性只沿同一轴交给还能吃下这段速度的祖先；竖向 fling 不会推动横向祖先。`chain` 为假时停在自己的边上。认领在 `Tree::scroll_for`：声明轴只看自己的分量，`Content` 要有余量，`Always` 到边也认领，`Never` 跳过。`Both` 仍用较大的分量当主轴，无人能消费时 `lock_at_edge` 锁最内层溢出者。单轴不用这个兜底。取舍见 `docs/scroll-axis.md`。中途顶到边的剩余位移由 `consumeScrollOverflow` 交给父控制器，父级吃不下时内层继续回弹。吸附在摩擦结束后用弹簧落到最近一格，这颗弹簧自己的结束不再吸附。相位只在 `Idle`、`Dragging`、`Coasting`、`Settling` 切换时发 `Gesture::ScrollPhaseChanged`。`set_justify` 写行或列的 `justify_content`，`set_wrap` 写 `flex_wrap`。`set_fill` 把宽高设成父级或视口的 100%，最小尺寸为 0，并把 `flex_grow` 和 `flex_shrink` 都写成 1。这两项在插入前就写上，因为 JSX 在创建时设 `fill`。父级主轴有确定尺寸时，这个节点给同级的固有尺寸让位，例如底栏。父级尺寸不确定时百分比当 auto，节点仍按内容尺寸。填满的 `Stack`、`Clip`、`Opacity`、`Transform` 用 `minmax(0, 1fr)`。`set_grow` 只写 `flex_grow`，值必须非负，并标脏。`Row` 和 `Column` 的 `flex_shrink` 是 1，`max_size` 是父级的 100%：盒子不超过父级或视口。`Scroll` 的直接子节点在滚动轴上把这道 100% 上限改回 auto，内容才能高过视口。`Text`、`Image` 和 `Sized` 的 `flex_shrink` 仍是 0，紧的一行不会把末项收成 0。`Align` 自己仍是内容尺寸，居中只发生在它被拉大之后；拉大靠父级的拉伸或 `set_grow`，不靠最小宽高。仅有 viewport 且内容更小时，宽度为 auto 的 flex 根仍按内容收缩，不会出现剩余空间；内容更大时，行和列的 100% 上限把它收在视口里。`Text` 和 `Image` 走 measure 回调。文字回调调用 `Shaper`；`AvailableSpace::MinContent` 时改调 `Shaper::min_content_width`，按最宽不可断词计宽，grid 的 `min_content` 轨道和滚动内容下限因此是真值。图片回调返回固有尺寸。`set_min_axis` / `set_max_axis` 接受 `AxisSize`，`Fraction` 写百分比的最小或最大尺寸；百分比解析要父容器在该轴有确定尺寸，内容自适应的列解析不了子项的百分比最小高度。`set_panel` 把节点标成独立重排边界，`measure_panel` 用与 `layout` 同一条 Taffy 路径在 `SubtreeSpace`（自然尺寸、带帽自然尺寸、确定宽度）下单独排子树并返回内容盒，弹层先量后摆，不再渲染一帧再读 rect。Taffy 不绘制，也不做命中测试。
 
 | 对象 | Taffy 负责 | 绘制 |
 |---|---|---|
@@ -102,7 +103,7 @@ Host            Session           Core              Engine
 | `Decorated` | 一列子节点，间距 0 | 边框盒一条矩形，圆角记在命令上。命中交给子节点 |
 | `Clip` | 与 `Stack` 相同的一格 grid | 子树开层时是 `Clip` 层，否则 `PushClip` … 子节点 … `Pop` 在父 picture 里。盒子为 0 也成对 |
 | `Opacity` | 与 `Stack` 相同的一格 grid | alpha 在 1 到 254 时是 `Opacity` 层。255 并入父 picture。0 跳过子树 |
-| `Scroll` | 一格 `max_content` grid。边框盒是视口 | `Clip` 层、`Offset` 层，和一张 child picture。扁平列表是 `PushClip` … 按 offset 平移的子命令 … `Pop`。offset 不进布局 |
+| `Scroll` | 滚动轴 `max_content`，交叉轴 `minmax(0, 1fr)`。边框盒是视口 | `Clip` 层、`Offset` 层，和一张 child picture。扁平列表是 `PushClip` … 按 offset 平移的子命令 … `Pop`。offset 不进布局 |
 | `Transform` | 与 `Stack` 相同的一格 grid | 非单位变换（含纯平移）是 `Transform` 层。单位变换并入父 picture。命中把查询点按平移、顺时针旋转、等比缩放的逆变换送进子节点 |
 | `Text` | measure 回调给出段落宽高 | `DrawParagraph`。命令带字号、行宽约束、颜色和段落样式 |
 | `Image` | measure 回调给出固有尺寸 | `DrawImage` |
@@ -136,7 +137,7 @@ Down 命中
 
 宿主做三件事：平台事件入队、vsync 上问会话要一帧、把 `LayerTree` 交给渲染引擎并上屏。会话边界是 Rust trait `session::Session`：`metrics`、`pointer`、`frame`、`wants_frame`、`lifecycle`。`wants_frame` 取走「再要一帧」的标志。`frame` 的顺序是处理已经入队的指针、`onFrame(targetMs, intervalMs)`、冲刷指针期间写过的状态、布局、driver tick、必要时再布局、`onLayout`、必要时再布局一次、录制，然后 `semantics`。
 
-macOS 宿主把 `NSEvent` 换成 `uicore::PointerEvent` 放进队列。先把窗口坐标换进内容视图，再把原点改到左上。AppKit 给出的已经是点，不除 `backingScaleFactor`。`just host` 和 `just host-js` 都加载 `apps/gallery-solid/dist/counter.js`，每帧出队并调用会话。宿主不做 click。字体文件字节和 PNG 解码在宿主里。有图形 context 时 `io` 建纹理，`submit` 只 blit。宿主实现 `uicore::Shaper`，测量时借用 `Engine` 交出去的 `Typography`。借用在 `session.frame()` 返回前结束。
+macOS 宿主把 `NSEvent` 换成 `uicore::PointerEvent` 放进队列。先把窗口坐标换进内容视图，再把原点改到左上。AppKit 给出的已经是点，不除 `backingScaleFactor`。`just host` 和 `just host-js` 都加载 `apps/gallery-solid/dist/quotes.js`，每帧出队并调用会话。宿主不做 click。字体文件字节和 PNG 解码在宿主里。有图形 context 时 `io` 建纹理，`submit` 只 blit。宿主实现 `uicore::Shaper`，测量时借用 `Engine` 交出去的 `Typography`。借用在 `session.frame()` 返回前结束。
 
 Android 宿主的平台线程是 Java 主线程。`HostActivity` 转发生命周期，`HostView` 接收指针、按键和 `InputConnection`，`HostSurfaceView` 把 `Surface` 交给渲染线程。坐标是物理像素除以 `DisplayMetrics.density`。每根手指一条指针。`onPause` 对应 `Lifecycle::Inactive`，`onStop` 对应 `Hidden`，`onResume` 对应 `Resumed`。UI 线程不调用 `FrameClock::cancel`。系统栏写进 `Metrics` 的 padding，键盘写进 `view_insets`。会话把它交给 `Tree::set_viewport`，根从左上 inset 排，可用空间扣掉四边。`destroy_surface` 与替换旧窗口的 `open_surface` 把 `NativeWindow` 交给 `surface-drop`。该线程在 `DropWait` 上等到渲染线程 `Acks::signal` 之后才 `ANativeWindow_release`。平台线程在 `spawn` 之后返回。
 
@@ -219,6 +220,6 @@ Scroll                 视口，PushClip
 
 ## 应用
 
-`apps/gallery-solid/counter.tsx` 用 `@impasto/solid-ui` 的 Button、Field、Dialog、VirtualList，并用 `@impasto/solid-router` 的 `createRouter` 与 `RouterView`。`/list` 的 200 行打开 `VirtualList` 的 `recycle`。页底色由 gallery 把 `theme().color.background` 传进 `RouterView`。路由是 `/schedule`、`/nav/:depth`、`/list`。`boot` 把根列撑满视口，登记 `flush` 并 `render`。`build.mjs` 用 `@solidjs/babel-plugin`（`moduleName: "@impasto/solid-renderer"`、`generate: "universal"`）再交给 esbuild 打成 ESM `dist/counter.js`。门面打进 bundle，`@impasto/<pkg>/host` 按包枚举为 external，运行时由 QuickJS 物化。`util.js` 打进同一份产物。依赖是 npm 上的 `2.0.0-rc.17`。产物不包含 `third_party/solid`，也不进 git：`just gallery-dist` 在源码更新后重编，`just test`、`just host` 和 `just android` 先走它。quickjs 测试在运行时读产物文件，缺失时直接失败并提示 `just gallery-dist`。`cargo test` 不跑 node。
+`apps/gallery-solid/src/quotes.tsx` 用 `@impasto/solid-ui` 的 Button、Dialog、Sheet、VirtualList，并用 `@impasto/solid-router` 的 `createRouter` 与 `RouterView`。自选列表打开 `VirtualList` 的 `recycle`。路由是 `/watchlist`、`/market`、`/trade`、`/profile`、`/search`、`/stock/:symbol`、`/order/:symbol`。`boot` 把根列撑满视口，登记 `flush` 并 `render`。`build.mjs` 用 `@solidjs/babel-plugin`（`moduleName: "@impasto/solid-renderer"`、`generate: "universal"`）再交给 esbuild 打成 ESM `dist/quotes.js`。门面打进 bundle，`@impasto/<pkg>/host` 按包枚举为 external，运行时由 QuickJS 物化。依赖是 npm 上的 `2.0.0-rc.17`。产物不包含 `third_party/solid`，也不进 git。`just gallery-dist` 在源码更新后重编，`just test`、`just host` 和 `just android` 先走它。`apps/gallery-solid` 的 `test` 脚本先跑 `build.mjs`，再跑 node 与 esm 检查，所以 `pnpm -r test`（`just solid` 和 CI 的 solid job）不依赖事先的 `just gallery-dist`。quickjs 测试在运行时读产物文件，缺失时直接失败并提示 `just gallery-dist`。`cargo test` 不跑 node。设计见 `docs/quotes-app.md`。
 
 应用代码里不出现约束、命中测试、Metal 或窗口。Kotlin 界面 DSL 还没写。信号准备用已发布的 `com.lightningkite:reactive`。

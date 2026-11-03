@@ -23,6 +23,9 @@ importers:
 
   apps/gallery-solid:
     dependencies:
+      '@impasto/devtools':
+        specifier: workspace:*
+        version: link:../../packages/devtools
       '@impasto/solid-renderer':
         specifier: workspace:*
         version: link:../../packages/solid-renderer
@@ -44,6 +47,21 @@ importers:
   packages/async-storage: {}
 
   packages/clipboard: {}
+
+  packages/devtools:
+    dependencies:
+      '@impasto/clipboard':
+        specifier: workspace:*
+        version: link:../clipboard
+      '@impasto/solid-renderer':
+        specifier: workspace:*
+        version: link:../solid-renderer
+      '@impasto/solid-ui':
+        specifier: workspace:*
+        version: link:../solid-ui
+      solid-js:
+        specifier: 2.0.0-rc.17
+        version: 2.0.0-rc.17
 
   packages/file-system: {}
 

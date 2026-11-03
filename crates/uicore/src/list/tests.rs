@@ -418,3 +418,85 @@ fn overscroll_pull_commits_when_the_scroll_returns_to_idle() -> Result<(), crate
     );
     Ok(())
 }
+
+#[test]
+fn a_pinned_header_is_not_painted_and_keeps_its_height() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    let scroll = tree.scroll()?;
+    tree.set_max_size(scroll, 120.0, 40.0)?;
+    let content = tree.column(0.0)?;
+    let top = tree.sized(1.0, 0.0)?;
+    let rows = tree.column(0.0)?;
+    let bottom = tree.sized(1.0, 0.0)?;
+    tree.add_child(scroll, content)?;
+    tree.add_child(content, top)?;
+    tree.add_child(content, rows)?;
+    tree.add_child(content, bottom)?;
+
+    let mut drivers = DriverSet::new();
+    let id = drivers.list_create(1, 20.0);
+    assert!(drivers.list_bind(
+        id,
+        ListNodes {
+            viewport: Some(scroll),
+            content: Some(content),
+            top: Some(top),
+            bottom: Some(bottom),
+            rows: Some(rows),
+            ..ListNodes::default()
+        }
+    ));
+    assert!(drivers.list_begin(id));
+    assert!(drivers.list_item(
+        id,
+        ListItem {
+            key: "h".to_owned(),
+            ty: "header".to_owned(),
+            sticky: true,
+        }
+    ));
+    for index in 0..6 {
+        assert!(drivers.list_item(
+            id,
+            ListItem {
+                key: index.to_string(),
+                ty: "row".to_owned(),
+                sticky: false,
+            }
+        ));
+    }
+    assert!(drivers.list_end(id));
+
+    let header = tree.column(0.0)?;
+    let label = tree.text("Group", 16.0, [0, 0, 0, 255])?;
+    tree.add_child(header, label)?;
+    tree.add_child(rows, header)?;
+    assert!(drivers.list_note_row(id, "h", Some(header)));
+    tree.layout()?;
+    let height = tree.rect(header)?.h;
+    assert!(
+        paints_group(&mut tree),
+        "the header paints before it sticks"
+    );
+    drivers.tick(&mut tree);
+    assert!(
+        (tree.rect(header)?.h - height).abs() < 0.5,
+        "cull changed the height from {height}"
+    );
+    assert!(
+        !paints_group(&mut tree),
+        "the in-window copy is hidden while the overlay shows it"
+    );
+    Ok(())
+}
+
+fn paints_group(tree: &mut Tree) -> bool {
+    let Ok(_) = tree.record() else {
+        return false;
+    };
+    tree.layer_tree().pictures.iter().any(|picture| {
+        picture.commands.iter().any(|command| {
+            matches!(command, protocol::Command::Text { utf8, .. } if utf8.as_ref() == "Group")
+        })
+    })
+}

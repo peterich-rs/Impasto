@@ -515,3 +515,94 @@ fn a_filled_root_paints_before_its_scroll() -> Result<(), crate::Error> {
     assert_eq!(reachable(&layers), layers.layers.len());
     Ok(())
 }
+
+/// Mirrors the Quotes shell: fill is applied before insert, the page only
+/// grows, and the tab bar is a sibling of the router clip.
+#[test]
+fn quotes_shell_stays_inside_the_viewport() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 360.0, 640.0)?;
+    let root = tree.stack()?;
+    tree.set_fill(root)?;
+    let boot = tree.column(0.0)?;
+    tree.set_fill(boot)?;
+    let shell = tree.column(0.0)?;
+    tree.set_grow(shell, 1.0)?;
+    let app = tree.column(0.0)?;
+    tree.set_grow(app, 1.0)?;
+    let router = tree.clip(0.0)?;
+    tree.set_fill(router)?;
+    let route = tree.stack()?;
+    tree.set_fill(route)?;
+    let fade = tree.opacity(255)?;
+    tree.set_fill(fade)?;
+    let mover = tree.transform()?;
+    tree.set_fill(mover)?;
+    let backdrop = tree.decorated([245, 246, 248, 255], 0.0)?;
+    tree.set_fill(backdrop)?;
+    let page_pointer = tree.pointer_region()?;
+    tree.set_fill(page_pointer)?;
+    let page = tree.column(0.0)?;
+    tree.set_grow(page, 1.0)?;
+    let header = tree.sized(200.0, 44.0)?;
+    let strip = tree.scroll_with(crate::ScrollAxis::Horizontal)?;
+    tree.set_fill(strip)?;
+    tree.set_grow(strip, 0.0)?;
+    tree.set_min_size(strip, 0.0, 72.0)?;
+    tree.set_max_size(strip, 4096.0, 72.0)?;
+    let cards = tree.row(8.0)?;
+    let mut last = header;
+    for _ in 0..5 {
+        let card = tree.sized(96.0, 56.0)?;
+        tree.add_child(cards, card)?;
+        last = card;
+    }
+    let panel = tree.decorated([255, 255, 255, 255], 12.0)?;
+    tree.set_grow(panel, 1.0)?;
+    let list = tree.stack()?;
+    tree.set_fill(list)?;
+    let scroll = tree.scroll_with(crate::ScrollAxis::Vertical)?;
+    tree.set_fill(scroll)?;
+    let body = tree.column(0.0)?;
+    tree.set_min_size(body, 0.0, 2000.0)?;
+    let item = tree.sized(320.0, 56.0)?;
+    tree.add_child(body, item)?;
+    tree.add_child(scroll, body)?;
+    tree.add_child(list, scroll)?;
+    tree.add_child(panel, list)?;
+    tree.add_child(page, header)?;
+    tree.add_child(strip, cards)?;
+    tree.add_child(page, strip)?;
+    tree.add_child(page, panel)?;
+    tree.add_child(page_pointer, page)?;
+    tree.add_child(backdrop, page_pointer)?;
+    tree.add_child(mover, backdrop)?;
+    tree.add_child(fade, mover)?;
+    tree.add_child(route, fade)?;
+    tree.add_child(router, route)?;
+    let bar = tree.sized(360.0, 56.0)?;
+    tree.add_child(app, router)?;
+    tree.add_child(app, bar)?;
+    tree.add_child(shell, app)?;
+    tree.add_child(boot, shell)?;
+    tree.add_child(root, boot)?;
+    tree.layout()?;
+    let bar_box = tree.rect(bar)?;
+    let scroll_box = tree.rect(scroll)?;
+    let body_box = tree.rect(body)?;
+    let strip_box = tree.rect(strip)?;
+    let last_box = tree.rect(last)?;
+    let page_box = tree.rect(page)?;
+    let app_box = tree.rect(app)?;
+    let cards_box = tree.rect(cards)?;
+    assert!(
+        bar_box.y + bar_box.h <= 640.5
+            && scroll_box.h + 1.0 < body_box.h
+            && strip_box.w <= 360.5
+            && cards_box.w > strip_box.w + 1.0
+            && page_box.w <= 360.5
+            && app_box.h <= 640.5,
+        "bar {bar_box:?} scroll {scroll_box:?} body {body_box:?} strip {strip_box:?} cards {cards_box:?} last {last_box:?} page {page_box:?} app {app_box:?}"
+    );
+    Ok(())
+}

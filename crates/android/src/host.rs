@@ -27,13 +27,21 @@ use crate::vsync::FrameClock;
 
 const FONT_FAMILY: &str = "Sans";
 const FONT_PATH: &CStr = c"fonts/Sans.ttf";
-const SCRIPT_NAME: &str = "counter.js";
+const SCRIPT_NAME: &str = "quotes.js";
 const IME_SHOW: i32 = 1;
 const IME_UPDATE: i32 = 2;
 const IME_HIDE: i32 = 3;
 
 unsafe extern "C" {
     fn __android_log_write(priority: i32, tag: *const c_char, text: *const c_char) -> i32;
+}
+
+/// `IMPASTO_DEVTOOLS=1` turns on the in-app devtools panel. Default off.
+fn devtools_hub() -> Option<Arc<hostshell::DiagnosticsHub>> {
+    let enabled = std::env::var("IMPASTO_DEVTOOLS")
+        .map(|text| text.trim() == "1" || text.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    enabled.then(|| Arc::new(hostshell::DiagnosticsHub::new()))
 }
 
 struct Bridge {
@@ -624,6 +632,9 @@ fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
         }),
         dump_list: false,
         inspect: std::env::var_os("IMPASTO_INSPECT").map(std::path::PathBuf::from),
+        devtools: devtools_hub(),
+        devtools_source_map: None,
+        inspect_dir: None,
     }
     .with_module(hostshell::clipboard(Arc::clone(&bridge) as _))
     .with_module(hostshell::linking(Arc::clone(&bridge) as _, launch_url))

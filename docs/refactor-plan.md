@@ -77,13 +77,13 @@ export interface Permissions {
 
 日志管道已经分级：`hostshell::LogLevel` 是 `Error`、`Warn`、`Info`、`Debug`，`IMPASTO_LOG` 在宿主 sink 过滤，缺省 `info`。QuickJS 的 `console.*`（0 log、1 info、2 warn、3 error）映射进同一张表。engine 的段落、picture、纹理缓存计数不再往 stderr 打一次性警告，改由 `SubmitStats` 的 `paragraphs`、`pictures`、`textures` 字段随帧日志输出，超预算帧的计时行是 `Warn` 级。
 
-`IMPASTO_INSPECT=<dir>` 已落地：渲染线程把已记录的 `FrameTiming` 和层树写成 `frame.json`。macOS 在没有 `IMPASTO_DUMP` 时把同一帧的 PNG 写到该目录的 `frame.png` 并退出。没有常驻 devtool 窗口。
+`IMPASTO_INSPECT=<dir>` 已落地。macOS 在 present 成功后写一份 `frame.json`（层树、命令数、picture、耗时和布局问题）并退出；没有 `IMPASTO_DUMP` 时同一帧的 PNG 写到该目录的 `frame.png`。Android 把已记录的 `FrameTiming` 和层树写成 `frame.json`，不退出。应用内面板见 `docs/devtools-plan.md`。
 
 ## Gallery 能力面
 
-gallery 是当前唯一的验收载体，像素金样跟着它的画面走。现在的三页（`/schedule`、`/nav/:depth`、`/list`）只覆盖了框架能力的一部分，`packages/solid-ui` 的 Menu、Sheet、Switch、Tabs、Toast、Tooltip、TextArea、Icon、NavigationBar、KeyboardAvoidingView、Recycler、ScrollGroup、Field 掩码，`packages/net` 的 `createFetch`，`packages/form` 的 `createForm`，`packages/i18n`，以及 `@impasto/clipboard`、`@impasto/linking`、`@impasto/app-state`、`@impasto/async-storage`、`@impasto/file-system`、`@impasto/permissions` 都没有消费点。
+gallery 是当前唯一的验收载体，像素金样跟着它的画面走。Quotes 模拟盘覆盖自选、市场、个股、交易，见 `docs/quotes-app.md`。`packages/solid-ui` 的 Menu、Switch、Tabs、Toast、Tooltip、TextArea、Icon、NavigationBar、KeyboardAvoidingView、Recycler、ScrollGroup、Field 掩码，`packages/net` 的 `createFetch`，`packages/form` 的 `createForm`，`packages/i18n`，以及 `@impasto/clipboard`、`@impasto/linking`、`@impasto/app-state`、`@impasto/file-system`、`@impasto/permissions` 都没有消费点。
 
-验收标准是页面数加能力映射：每个框架包在 gallery 至少有一个真实消费点，`counter.node.test.ts` 断言关键交互，像素金样跟着新画面重钉（容差每通道 2 不变）。已确认的页面划分：
+验收标准是页面数加能力映射：每个框架包在 gallery 至少有一个真实消费点，`quotes.node.test.ts` 断言关键交互，像素金样跟着新画面重钉（容差每通道 2 不变）。已确认的页面划分：
 
 | 页面 | 消费 | 验证 |
 |---|---|---|
@@ -95,7 +95,7 @@ gallery 是当前唯一的验收载体，像素金样跟着它的画面走。现
 | `/device` | clipboard、linking、app-state、permissions | 宿主桥、权限五法、生命周期 |
 | `/i18n` | packages/i18n | directionFor、复数、格式化 |
 
-保留现有三页作回归基准。每页走一条路由，`TabBar` 相应扩展。不做 API 地图页——能力映射由测试断言承载，不生成第二份要维护的清单。
+Quotes 的现有路由作回归基准。能力页另走开路由，不挤进模拟盘。不做 API 地图页——能力映射由测试断言承载，不生成第二份要维护的清单。
 
 ## 顺序
 
@@ -106,7 +106,7 @@ gallery 是当前唯一的验收载体，像素金样跟着它的画面走。现
 ## 暂缓
 
 - 跨 picture 选区。触发条件是出现阅读序和「两端点之间的节点集合」，并且选区 picture 挂在与文本相同的 `Offset` / `Clip` 下面。
-- 常驻 devtool 窗口或 devtools 协议服务。触发条件是出现第二个真实应用；在那之前只有 `IMPASTO_INSPECT` 帧报告和 `IMPASTO_LOG` 日志。
+- 外接 devtools 面板（协议服务）。触发条件是出现第二个真实应用；应用内面板已落地，见 `docs/devtools-plan.md`。
 - Kotlin 全部。触发条件是 Solid 侧框架被第二个真实应用消费。重启时走 `crates/quickjs/abi.yml` 的变更缓冲。
 - Picture 字节序列化，见 `docs/protocol-v2.md`。
 - `crates/ios`。预构建矩阵出现 iOS 列之前不写。

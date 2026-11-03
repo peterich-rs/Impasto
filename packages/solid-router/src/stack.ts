@@ -91,14 +91,14 @@ export function createRouter(
     if (!match) {
       return false;
     }
-    const list = entries();
     const next = { ...match, key: nextKey(), phase: "enter" as const };
-    const top = list[list.length - 1];
-    if (!top) {
-      setEntries([{ ...next, phase: "live" }]);
-      return true;
-    }
-    setEntries([...list.slice(0, -1), { ...top, phase: "cover" }, next]);
+    setEntries((list) => {
+      const top = list[list.length - 1];
+      if (!top) {
+        return [{ ...next, phase: "live" }];
+      }
+      return [...list.slice(0, -1), { ...top, phase: "cover" }, next];
+    });
     return true;
   }
 
@@ -107,14 +107,14 @@ export function createRouter(
     if (!match) {
       return false;
     }
-    const list = entries();
-    const top = list[list.length - 1];
     const next = { ...match, key: nextKey(), phase: "enter" as const };
-    if (!top) {
-      setEntries([{ ...next, phase: "live" }]);
-      return true;
-    }
-    setEntries([...list.slice(0, -1), { ...top, phase: "exit" }, next]);
+    setEntries((list) => {
+      const top = list[list.length - 1];
+      if (!top) {
+        return [{ ...next, phase: "live" }];
+      }
+      return [...list.slice(0, -1), { ...top, phase: "exit" }, next];
+    });
     return true;
   }
 
@@ -130,38 +130,41 @@ export function createRouter(
     if (top.phase === "exit") {
       return true;
     }
-    setEntries(
-      list.map((entry, index) => {
-        if (index === list.length - 1) {
+    setEntries((current) => {
+      if (current.length <= 1) {
+        return current;
+      }
+      return current.map((entry, index) => {
+        if (index === current.length - 1) {
           return { ...entry, phase: "exit" as const };
         }
         if (entry.phase === "cover") {
           return { ...entry, phase: "live" as const };
         }
         return entry;
-      }),
-    );
+      });
+    });
     return true;
   }
 
   function popTo(path: string): boolean {
     const pathname = routePath(path);
-    const list = entries();
-    let index = -1;
-    for (let cursor = list.length - 1; cursor >= 0; cursor -= 1) {
-      if (list[cursor]?.path === pathname && list[cursor]?.phase !== "exit") {
-        index = cursor;
-        break;
+    let found = false;
+    setEntries((list) => {
+      let index = -1;
+      for (let cursor = list.length - 1; cursor >= 0; cursor -= 1) {
+        if (list[cursor]?.path === pathname && list[cursor]?.phase !== "exit") {
+          index = cursor;
+          break;
+        }
       }
-    }
-    if (index < 0) {
-      return false;
-    }
-    if (index === list.length - 1) {
-      return false;
-    }
-    setEntries(list.map((entry, cursor) => (cursor > index ? { ...entry, phase: "exit" } : entry)));
-    return true;
+      if (index < 0 || index === list.length - 1) {
+        return list;
+      }
+      found = true;
+      return list.map((entry, cursor) => (cursor > index ? { ...entry, phase: "exit" as const } : entry));
+    });
+    return found;
   }
 
   function reset(path: string): boolean {
@@ -174,8 +177,8 @@ export function createRouter(
   }
 
   function complete(key: string): void {
-    setEntries(
-      entries().flatMap((entry) => {
+    setEntries((list) =>
+      list.flatMap((entry) => {
         if (entry.key !== key) {
           return [entry];
         }

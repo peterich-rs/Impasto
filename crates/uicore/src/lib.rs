@@ -52,7 +52,7 @@ pub use text::{
     grapheme_unit,
 };
 pub use tree::{
-    Alignment, AxisSize, Discarded, DragClaim, Edges, FocusDirection, Gesture, GridLine, Inset,
-    Justify, LayoutCause, LayoutTrace, NodeId, Rect, RowCrossAlign, ScrollEdge, SubtreeSpace,
-    TrackSize, Tree,
+    Alignment, AxisSize, DebugAxis, Discarded, DragClaim, Edges, FocusDirection, Gesture, GridLine,
+    Inset, Justify, LayoutCause, LayoutIssue, LayoutTrace, NodeId, Rect, RowCrossAlign, ScrollEdge,
+    SubtreeSpace, TrackSize, Tree,
 };

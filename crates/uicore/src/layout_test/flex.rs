@@ -14,6 +14,29 @@ fn column_places_the_second_child_after_the_gap() -> Result<(), crate::Error> {
 }
 
 #[test]
+fn padding_stacks_children_and_stretches_the_inner_row() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 120.0, 80.0)?;
+    let column = tree.column(0.0)?;
+    tree.set_fill(column)?;
+    let pad = tree.padding(0.0)?;
+    let row = tree.row(0.0)?;
+    let cell = tree.sized(10.0, 10.0)?;
+    tree.set_grow(cell, 1.0)?;
+    tree.add_child(row, cell)?;
+    tree.add_child(pad, row)?;
+    let below = tree.sized(10.0, 8.0)?;
+    tree.add_child(pad, below)?;
+    tree.add_child(column, pad)?;
+    tree.layout()?;
+    assert_eq!(tree.rect(row)?.w, 120.0);
+    assert_eq!(tree.rect(cell)?.w, 120.0);
+    assert_eq!(tree.rect(below)?.y, 10.0);
+    assert_eq!(tree.rect(below)?.x, 0.0);
+    Ok(())
+}
+
+#[test]
 fn padding_offsets_the_child_and_grows_the_parent() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper::default());
     let pad = tree.padding(8.0)?;

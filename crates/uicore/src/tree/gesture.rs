@@ -184,8 +184,11 @@ impl Tree {
     pub fn pointer(&mut self, event: PointerEvent) -> Vec<Gesture> {
         self.arena.pointer_at = (event.x, event.y);
         let mut gestures = self.drain_pending();
+        if self.debug.pointer_trace {
+            self.note_pointer(event.x, event.y, phase_name(event.phase));
+        }
         if !self.laid_out {
-            return gestures;
+            return self.finish_pointer(gestures);
         }
         let mut route = self.arena.routes.remove(&event.pointer).unwrap_or_default();
         let produced = match event.phase {
@@ -207,7 +210,17 @@ impl Tree {
             self.arena.routes.insert(event.pointer, route);
         }
         gestures.extend(produced);
-        gestures
+        self.finish_pointer(gestures)
+    }
+
+    /// The inspector's probe mode still runs hit-testing. Listeners must not
+    /// see the gestures, or picking an element would click the app.
+    fn finish_pointer(&self, gestures: Vec<Gesture>) -> Vec<Gesture> {
+        if self.debug.suppress_dispatch {
+            Vec::new()
+        } else {
+            gestures
+        }
     }
 
     /// Primary press only. Callers keep other buttons out of this path.
@@ -1023,4 +1036,16 @@ fn text_select_axis(node: &super::node::Node) -> Option<crate::DragAxis> {
         super::DragClaim::Horizontal => crate::DragAxis::Horizontal,
         super::DragClaim::Free | super::DragClaim::None => crate::DragAxis::Free,
     })
+}
+
+/// Debug label for [`crate::PointerEvent::phase`].
+fn phase_name(phase: Phase) -> &'static str {
+    match phase {
+        Phase::Down => "down",
+        Phase::Move => "move",
+        Phase::Up => "up",
+        Phase::Cancel => "cancel",
+        Phase::Wheel => "wheel",
+        Phase::Zoom => "zoom",
+    }
 }

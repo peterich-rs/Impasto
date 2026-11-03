@@ -31,6 +31,12 @@ impl Tree {
         parent: Option<SemanticsId>,
         out: &mut Vec<SemanticsNode>,
     ) {
+        if self
+            .get(id)
+            .is_some_and(|node| node.flags.contains(super::node::NodeFlags::CULL_PAINT))
+        {
+            return;
+        }
         let Some(snapshot) = self.semantics_snapshot(id) else {
             return;
         };

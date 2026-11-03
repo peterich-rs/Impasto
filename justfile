@@ -52,7 +52,7 @@ gallery-dist:
     #!/usr/bin/env bash
     set -euo pipefail
     src="{{root}}/apps/gallery-solid"
-    out="$src/dist/counter.js"
+    out="$src/dist/quotes.js"
     if [[ -f "$out" ]]; then
       newer=$(find "{{root}}/packages" "{{root}}/tools" "$src" -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.mjs' \) \
         -not -path '*/node_modules/*' -not -path '*/dist/*' -not -name '*.test.ts' \
@@ -62,7 +62,7 @@ gallery-dist:
     pnpm -C "$src" install && pnpm -C "$src" run build
 
 host: gallery-dist
-    cargo run --manifest-path "{{root}}/Cargo.toml" -p macos -- --js "{{root}}/apps/gallery-solid/dist/counter.js" "{{logo}}"
+    IMPASTO_DEVTOOLS="${IMPASTO_DEVTOOLS:-1}" cargo run --manifest-path "{{root}}/Cargo.toml" -p macos -- --js "{{root}}/apps/gallery-solid/dist/quotes.js" "{{logo}}"
 
 quickjs:
     "{{root}}/crates/quickjs/fetch-quickjs.sh"
@@ -70,6 +70,7 @@ quickjs:
 host-js: host
 
 # Cargo cdylib, then the APK. Needs the Android NDK and the arm64 Impeller SDK.
+# Debug runs turn the panel on with IMPASTO_DEVTOOLS=1; the host defaults off.
 android: gallery-dist
     #!/usr/bin/env bash
     set -euo pipefail
@@ -92,7 +93,7 @@ android: gallery-dist
     mkdir -p "$assets/fonts" "$assets/images" "$jni"
     cp "{{root}}/crates/android/assets/fonts/Sans.ttf" "$assets/fonts/Sans.ttf"
     cp "{{root}}/crates/macos/assets/logo.png" "$assets/images/logo.png"
-    cp "{{root}}/apps/gallery-solid/dist/counter.js" "$assets/counter.js"
+    cp "{{root}}/apps/gallery-solid/dist/quotes.js" "$assets/quotes.js"
     cp "{{root}}/target/aarch64-linux-android/release/libhost.so" "$jni/libhost.so"
     cp "{{root}}/third_party/impeller-sdk/android-arm64/lib/libimpeller.so" "$jni/libimpeller.so"
     "{{root}}/crates/android/apk/gradlew" -p "{{root}}/crates/android/apk" assembleDebug

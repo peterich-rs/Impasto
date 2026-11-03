@@ -142,8 +142,31 @@ impl Tree {
         geom.axis = axis;
         self.motions
             .retain(|motion| motion.node != id || axis.allows(motion.prop));
+        self.sync_scroll_tracks(id)?;
+        self.refit_scroll_children(id)?;
         let (x, y) = self.scroll_offset(id)?;
         self.set_scroll_offset(id, x, y)
+    }
+
+    fn refit_scroll_children(&mut self, id: NodeId) -> Result<(), Error> {
+        let mut child = self.node(id)?.first_child;
+        while let Some(current) = child {
+            let next = self.node(current)?.next;
+            self.fit_parent_cap(id, current)?;
+            child = next;
+        }
+        Ok(())
+    }
+
+    /// Match the grid tracks to the axis. See [`super::layout::scroll_style_for`].
+    fn sync_scroll_tracks(&mut self, id: NodeId) -> Result<(), Error> {
+        let next = super::layout::scroll_style_for(self.axis_of(id));
+        let mut style = self.node(id)?.style.clone();
+        style.grid_template_columns = next.grid_template_columns;
+        style.grid_template_rows = next.grid_template_rows;
+        style.align_items = next.align_items;
+        style.justify_items = next.justify_items;
+        self.write_style(id, style)
     }
 
     pub fn scroll_axis(&self, id: NodeId) -> Result<crate::ScrollAxis, Error> {

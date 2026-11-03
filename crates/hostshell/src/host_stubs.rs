@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use session::{HostModule, Invoke};
 
+use crate::diagnostics::{self, DevtoolsContext, DiagnosticsHub};
 use crate::modules::{
     app_state, async_storage, clipboard, file_system, linking,
     memory::{DeniedPermissions, MemoryClipboard, MemoryStorage, NullLinking},
@@ -21,6 +22,18 @@ pub fn first_party_modules() -> Vec<HostModule> {
         file_system(Arc::clone(&storage) as _),
         async_storage(storage),
         permissions(Arc::new(DeniedPermissions)),
+        diagnostics::module(
+            Arc::new(DiagnosticsHub::new()),
+            DevtoolsContext {
+                enabled: true,
+                source_map: None,
+                app_state: session::shared("active".to_owned()),
+                os: "test",
+                os_version: String::new(),
+                log_level: "info".to_owned(),
+                dump: None,
+            },
+        ),
     ]
 }
 
