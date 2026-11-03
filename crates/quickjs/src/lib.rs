@@ -431,21 +431,6 @@ mod tests {
         rows
     }
 
-    const WATCH_SYMBOLS: &[&str] = &[
-        "HSI.HK",
-        "HSTECH.HK",
-        "SPX.US",
-        "NDX.US",
-        "CSI300.CN",
-        "00700.HK",
-        "AAPL.US",
-        "NVDA.US",
-        "600519.CN",
-        "300750.CN",
-        "TSLA.US",
-        "09988.HK",
-    ];
-
     const IN_WATCHLIST_NAMES: &[&str] = &[
         "恒生指数",
         "恒生科技",
@@ -1243,9 +1228,7 @@ mod tests {
     #[test]
     fn console_debug_logs_at_level_four() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
@@ -1272,9 +1255,7 @@ mod tests {
     #[test]
     fn core_log_routes_level_names() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -1305,9 +1286,7 @@ mod tests {
     #[test]
     fn an_unhandled_rejection_is_logged_with_its_stack() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -1344,9 +1323,7 @@ mod tests {
     #[test]
     fn a_late_catch_is_not_reported() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -1380,9 +1357,7 @@ mod tests {
     #[test]
     fn debug_bindings_report_overflow_and_snapshot() {
         #[cfg(not(quickjs))]
-        {
-            return;
-        }
+        {}
         #[cfg(quickjs)]
         {
             let source = r#"
@@ -1616,7 +1591,7 @@ mod tests {
             let mut row = None;
             visit_commands(&first, &mut |command, origin_x, origin_y| {
                 if let Command::Text { utf8, x, y, .. } = command
-                    && WATCH_SYMBOLS.contains(&&**utf8)
+                    && IN_WATCHLIST_NAMES.contains(&&**utf8)
                 {
                     let scene_y = *y + origin_y;
                     if scene_y >= clip_y && scene_y < clip_y + clip_h {
@@ -1795,7 +1770,7 @@ mod tests {
             let mut row = None;
             visit_commands(&shown, &mut |command, origin_x, origin_y| {
                 if let Command::Text { utf8, x, y, .. } = command
-                    && WATCH_SYMBOLS.contains(&&**utf8)
+                    && IN_WATCHLIST_NAMES.contains(&&**utf8)
                 {
                     let scene_y = *y + origin_y;
                     if scene_y >= clip_y && scene_y < clip_y + clip_h {
@@ -1826,7 +1801,7 @@ mod tests {
             assert!(
                 texts(&scrolled)
                     .iter()
-                    .any(|text| WATCH_SYMBOLS.contains(&text)),
+                    .any(|text| IN_WATCHLIST_NAMES.contains(text)),
                 "list rows left after scrolling {:?}",
                 texts(&scrolled)
             );
