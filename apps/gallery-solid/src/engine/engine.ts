@@ -102,6 +102,12 @@ export class QuoteEngine {
     return this.#simNow;
   }
 
+  setTimeScale(scale: number): void {
+    if (Number.isFinite(scale) && scale > 0) {
+      this.#timeScale = scale;
+    }
+  }
+
   nextId(prefix: string): string {
     this.#orderSeq += 1;
     return `${prefix}-${this.#orderSeq}`;

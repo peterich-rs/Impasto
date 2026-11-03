@@ -1,4 +1,4 @@
-import { host } from "@impasto/solid-renderer";
+import { host, log } from "@impasto/solid-renderer";
 import type { QuoteEngine } from "../engine/engine.ts";
 import type { Quote } from "../engine/types.ts";
 import { toneFor, type Updown } from "./settings.ts";
@@ -133,7 +133,9 @@ export class QuoteBinder {
     try {
       this.#writeOne(entry.cells, q);
       entry.revision = q.revision;
-    } catch {
+    } catch (error) {
+      /* Expected when the row scrolled out; debug only. */
+      log("debug", `binder cell dropped: ${String(error)}`);
       this.#dropCells(entry);
     }
   }
@@ -141,7 +143,8 @@ export class QuoteBinder {
   #runSpark(entry: SparkBinding): void {
     try {
       entry.refresh();
-    } catch {
+    } catch (error) {
+      log("debug", `binder spark dropped: ${String(error)}`);
       const i = this.#sparks.indexOf(entry);
       if (i >= 0) {
         this.#sparks.splice(i, 1);

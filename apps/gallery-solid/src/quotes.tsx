@@ -4,7 +4,14 @@ import { OverlayRoot } from "@impasto/solid-ui";
 import { wireQuotes } from "./state/quotes-provider.tsx";
 import { createAccount } from "./state/account.ts";
 import { setAccount } from "./state/account-ref.ts";
+import { loadSettings } from "./state/settings.ts";
+import { loadWatchlist } from "./state/watchlist.ts";
+import { loadSearchHistory } from "./state/search-history.ts";
 import { App } from "./app.tsx";
+
+void loadSettings();
+void loadWatchlist();
+void loadSearchHistory();
 
 const { engine } = wireQuotes();
 setAccount(createAccount(engine));

@@ -41,6 +41,8 @@ export function VirtualList<T>(props: {
   skeleton?: () => NodeHandle;
   onEndReached?: () => void;
   sticky?: (item: T, index: number) => boolean;
+  /** Hide the in-window copy of a header while the overlay pins it. */
+  onPin?: (key: string | null) => void;
   restoreKey?: string;
   onRefresh?: () => void;
   controller?: ScrollController;
@@ -114,8 +116,10 @@ export function VirtualList<T>(props: {
         setHThumbW(chrome.hThumbLen);
         if (chrome.pinIndex >= 0) {
           setPin({ index: chrome.pinIndex, key: chrome.pinKey });
+          props.onPin?.(chrome.pinKey);
         } else {
           setPin(null);
+          props.onPin?.(null);
         }
       },
       onEnd() {

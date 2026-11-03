@@ -9,11 +9,11 @@ import { toneFor, type Updown } from "../../state/settings.ts";
 const MUTED = colorBytes("#8A8D91");
 const LINE = colorBytes("#C9CBD1");
 const COLS = 80;
-const PLOT_W = 320;
 
 /**
  * Intraday chart: 80 aggregated columns from the tick ring, refreshed on the
  * binder's ~1Hz spark queue. The previous close runs as a dashed baseline.
+ * Column spacing uses `viewW()` from the parent box.
  */
 export function MinutesChart(props: {
   symbol: () => string;
@@ -21,6 +21,7 @@ export function MinutesChart(props: {
   binder: () => QuoteBinder;
   updown: () => Updown;
   h: number;
+  viewW: () => number;
   onExtents?: (lo: number, hi: number) => void;
 }): NodeHandle {
   const h = props.h;
@@ -44,6 +45,7 @@ export function MinutesChart(props: {
   createTrackedEffect(() => {
     const symbol = props.symbol();
     const engine = props.engine();
+    props.viewW();
     const stop = props.binder().bindSpark(symbol, () => {
       const q = engine.quote(symbol);
       const ring = engine.ring(symbol);
@@ -64,6 +66,7 @@ export function MinutesChart(props: {
           : tone === "down"
             ? colorBytes("#22B05F")
             : MUTED;
+      const plotW = Math.max(2, props.viewW());
       const baseY = h * (1 - (q.prevClose - lo) / (hi - lo));
       host.setInset(base, 0, Math.round(baseY), 0, 0);
       host.setMinSize(base, 0, 1);
@@ -72,7 +75,7 @@ export function MinutesChart(props: {
         const y = h * (1 - (p - lo) / (hi - lo));
         const top = Math.min(y, baseY);
         const bottom = Math.max(y, baseY);
-        host.setInset(cols[i]!, 0, Math.round(top), 0, Math.round((i * PLOT_W) / (COLS - 1)));
+        host.setInset(cols[i]!, 0, Math.round(top), 0, Math.round((i * plotW) / (COLS - 1)));
         host.setMinSize(cols[i]!, 2, Math.max(2, Math.round(bottom - top)));
         host.setColor(cols[i]!, color);
       }

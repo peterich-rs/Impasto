@@ -1,12 +1,14 @@
 import { createRenderEffect, createMemo, createSignal } from "solid-js";
-import { host, type NodeHandle } from "@impasto/solid-renderer";
+import { host, insert, type NodeHandle } from "@impasto/solid-renderer";
+import { VirtualList, createScrollController } from "@impasto/solid-ui";
 import { colorBytes } from "../colors.ts";
-import { clearChildren, padded } from "../widgets/palette.ts";
+import { padded } from "../widgets/palette.ts";
 import { useQuotes } from "../state/quotes-provider.tsx";
-import { settingsSig } from "../state/settings.ts";
 import type { Router } from "@impasto/solid-router";
 import { QuoteText } from "../widgets/quote-text.tsx";
 import { Monogram } from "../widgets/monogram.tsx";
+import { IndexStrip } from "../widgets/index-strip.tsx";
+import { loc } from "../copy.ts";
 
 const INK = colorBytes("#1F2430");
 const MUTED = colorBytes("#8A8D91");
@@ -20,17 +22,28 @@ export function MarketPage(props: { router: Router }): NodeHandle {
   const { engine, binder } = useQuotes();
   const [tab, setTab] = createSignal<Board>("gainers");
   const [market, setMarket] = createSignal<"hk" | "us" | "cn">("hk");
-  void settingsSig;
+  const controller = createScrollController();
 
   const page = host.column(10);
   host.setGrow(page, 1);
 
-  const title = host.text("市场", 26, INK);
+  const title = host.text(loc("市场", "Market"), 26, INK);
   host.setFontWeight(title, 700);
   const titlePad = host.padding(0);
   host.setPaddingEdges(titlePad, 12, 16, 0, 16);
   host.append(titlePad, title);
   host.append(page, titlePad);
+
+  const stripHost = IndexStrip({
+    symbols: () => engine.instruments().filter((ins) => ins.index).map((ins) => ins.symbol),
+    engine: () => engine,
+    binder: () => binder,
+    onClick: (symbol) => props.router.push(`/stock/${symbol}`),
+  });
+  const stripPad = host.padding(0);
+  host.setPaddingEdges(stripPad, 8, 16, 0, 16);
+  host.append(stripPad, stripHost.id);
+  host.append(page, stripPad);
 
   const pills = host.row(6);
   const pillPad = host.padding(0);
@@ -43,6 +56,7 @@ export function MarketPage(props: { router: Router }): NodeHandle {
 
   function buildPill(m: "hk" | "us" | "cn"): void {
     const cell = host.pointerRegion();
+    host.setGrow(cell, 1);
     host.onClick(cell, () => setMarket(m));
     host.append(pills, cell);
     const pill = host.decorated(PANEL, 999);
@@ -50,7 +64,9 @@ export function MarketPage(props: { router: Router }): NodeHandle {
     host.setMinSize(pill, 0, 30);
     host.append(cell, pill);
     const label = host.text(labelOf(m), 12, MUTED);
-    host.append(pill, padded(label, 12, 14, 6, 14));
+    const align = host.align("center");
+    host.append(align, label);
+    host.append(pill, padded(align, 6, 0, 6, 0));
     createRenderEffect(
       () => market() === m,
       (active) => {
@@ -91,9 +107,7 @@ export function MarketPage(props: { router: Router }): NodeHandle {
   }
 
   const items = createMemo<BoardItem[]>(() => {
-    const all = engine
-      .instruments()
-      .filter((ins) => ins.market === market() && !ins.index);
+    const all = engine.instruments().filter((ins) => ins.market === market() && !ins.index);
     const pct = (s: string) => {
       const q = engine.quote(s);
       return (q.last - q.prevClose) / q.prevClose;
@@ -115,18 +129,20 @@ export function MarketPage(props: { router: Router }): NodeHandle {
   host.setGrow(panel, 1);
   host.append(page, panel);
 
-  const board = host.column(0);
-  host.append(panel, board);
-
-  createRenderEffect(
-    () => items(),
-    (list) => {
-      clearChildren(board);
-      for (const [i, item] of list.entries()) {
-        host.append(board, buildBoardRow(item, i));
-      }
+  const list = VirtualList({
+    get items() {
+      return items();
     },
-  );
+    itemKey: (item: BoardItem) => item.symbol,
+    estimatedHeight: 64,
+    restoreKey: "market",
+    controller,
+    recycle: {
+      typeOf: () => "row",
+      render: (item, index) => ({ id: buildBoardRow(item(), index()) }),
+    },
+  });
+  insert({ id: panel } as NodeHandle, list);
 
   function buildBoardRow(item: BoardItem, index: number): number {
     const ins = engine.ins(item.symbol);
@@ -155,9 +171,19 @@ export function MarketPage(props: { router: Router }): NodeHandle {
     const sym = host.text(ins.symbol, 10, MUTED);
     host.append(nameCol, sym);
 
-    const lastCell = QuoteText({ symbol: () => item.symbol, kind: "last", fontSize: 14, binder: () => binder });
+    const lastCell = QuoteText({
+      symbol: () => item.symbol,
+      kind: "last",
+      fontSize: 14,
+      binder: () => binder,
+    });
     host.append(line, lastCell.id);
-    const pctCell = QuoteText({ symbol: () => item.symbol, kind: "pct", fontSize: 12, binder: () => binder });
+    const pctCell = QuoteText({
+      symbol: () => item.symbol,
+      kind: "pct",
+      fontSize: 12,
+      binder: () => binder,
+    });
     host.append(line, pctCell.id);
     return row;
   }
@@ -166,9 +192,9 @@ export function MarketPage(props: { router: Router }): NodeHandle {
 }
 
 function labelOf(m: "hk" | "us" | "cn"): string {
-  return m === "hk" ? "港股" : m === "us" ? "美股" : "A股";
+  return m === "hk" ? loc("港股", "HK") : m === "us" ? loc("美股", "US") : loc("A股", "CN");
 }
 
 function boardLabel(b: Board): string {
-  return b === "gainers" ? "涨幅榜" : b === "losers" ? "跌幅榜" : "成交额";
+  return b === "gainers" ? loc("涨幅榜", "Gainers") : b === "losers" ? loc("跌幅榜", "Losers") : loc("成交额", "Turnover");
 }

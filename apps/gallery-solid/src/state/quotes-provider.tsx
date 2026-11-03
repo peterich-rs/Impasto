@@ -41,6 +41,7 @@ export function wireQuotes(): QuotesApi {
         const dt = lastTarget === 0 ? 16 : Math.min(100, targetMs - lastTarget);
         lastTarget = targetMs;
         if (untrack(refs) > 0) {
+          engine!.setTimeScale(untrack(() => settingsSig().timeScale));
           engine!.step(dt);
           binder!.flush();
           requestFrame();

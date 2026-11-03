@@ -1,10 +1,13 @@
 import { createSignal, createTrackedEffect } from "solid-js";
 import { host, type NodeHandle } from "@impasto/solid-renderer";
-import { Button, Dialog, Sheet } from "@impasto/solid-ui";
+import { Sheet } from "@impasto/solid-ui";
 import { colorBytes } from "../colors.ts";
 import { useQuotes } from "../state/quotes-provider.tsx";
 import { accountRef } from "../state/account-ref.ts";
+import { showToast } from "../state/toast.ts";
 import { fmtPrice, fmtQty } from "../format.ts";
+import { loc } from "../copy.ts";
+import { takeOrderTicket } from "../state/order-ticket.ts";
 import type { Router } from "@impasto/solid-router";
 
 const INK = colorBytes("#1F2430");
@@ -16,7 +19,6 @@ const DOWN = colorBytes("#22B05F");
 
 /** Order ticket sheet: side toggle, price, qty stepper, percent quick bars. */
 export function OrderSheet(props: {
-  router: Router;
   symbol: string;
   query: Record<string, string>;
   onClose: () => void;
@@ -25,15 +27,10 @@ export function OrderSheet(props: {
   const account = accountRef();
   const symbol = () => props.symbol;
   const q = () => engine.quote(symbol());
-  const [side, setSide] = createSignal<"buy" | "sell">(
-    props.query.side === "sell" ? "sell" : "buy",
-  );
+  const [side, setSide] = createSignal<"buy" | "sell">(props.query.side === "sell" ? "sell" : "buy");
   const [type, setType] = createSignal<"market" | "limit">("limit");
-  const [price, setPrice] = createSignal(
-    props.query.price ? Number(props.query.price) : q().last,
-  );
+  const [price, setPrice] = createSignal(props.query.price ? Number(props.query.price) : q().last);
   const [qty, setQty] = createSignal(100);
-  const [confirming, setConfirming] = createSignal(false);
   const [error, setError] = createSignal("");
 
   const ins = engine.ins(symbol());
@@ -42,12 +39,10 @@ export function OrderSheet(props: {
   host.setPaddingEdges(page, 16, 16, 16, 16);
   host.append(page, pageInner);
 
-  // title
-  const title = host.text(`${ins.name} 下单`, 17, INK);
+  const title = host.text(`${ins.name} ${loc("下单", "Order")}`, 17, INK);
   host.setFontWeight(title, 700);
   host.append(pageInner, title);
 
-  // side toggle
   const sideRow = host.row(0);
   host.append(pageInner, sideRow);
   for (const s of ["buy", "sell"] as const) {
@@ -59,7 +54,7 @@ export function OrderSheet(props: {
     host.setStroke(pill, 1, HAIR);
     host.setMinSize(pill, 0, 36);
     host.append(cell, pill);
-    const label = host.text(s === "buy" ? "买入" : "卖出", 14, MUTED);
+    const label = host.text(s === "buy" ? loc("买入", "Buy") : loc("卖出", "Sell"), 14, MUTED);
     const align = host.align("center");
     host.append(align, label);
     host.append(pill, align);
@@ -70,7 +65,6 @@ export function OrderSheet(props: {
     });
   }
 
-  // order type
   const typeRow = host.row(0);
   host.append(pageInner, typeRow);
   for (const t of ["market", "limit"] as const) {
@@ -78,7 +72,7 @@ export function OrderSheet(props: {
     host.setGrow(cell, 1);
     host.onClick(cell, () => setType(t));
     host.append(typeRow, cell);
-    const label = host.text(t === "market" ? "市价" : "限价", 13, MUTED);
+    const label = host.text(t === "market" ? loc("市价", "Market") : loc("限价", "Limit"), 13, MUTED);
     const align = host.align("center");
     host.append(align, label);
     host.append(cell, align);
@@ -89,10 +83,9 @@ export function OrderSheet(props: {
     });
   }
 
-  // price row (limit only)
   const priceBox = host.column(4);
   host.append(pageInner, priceBox);
-  const priceLabel = host.text("价格", 12, MUTED);
+  const priceLabel = host.text(loc("价格", "Price"), 12, MUTED);
   host.append(priceBox, priceLabel);
   const priceRow = host.row(6);
   host.append(priceBox, priceRow);
@@ -100,15 +93,14 @@ export function OrderSheet(props: {
   host.append(priceRow, priceDown);
   const priceValue = host.text(fmtPrice(price()), 16, INK);
   host.setFontWeight(priceValue, 600);
-  host.setGrow(priceValue, 0);
+  host.append(priceRow, priceValue);
   const priceGrow = host.sized(0, 0);
   host.setGrow(priceGrow, 1);
-  host.append(priceRow, priceValue);
   host.append(priceRow, priceGrow);
   const priceUp = stepperBtn("+", () => setPrice((p) => round2(p + tick())));
   host.append(priceRow, priceUp);
   createTrackedEffect(() => {
-    host.setText(priceValue, type() === "market" ? "市价成交" : fmtPrice(price()));
+    host.setText(priceValue, type() === "market" ? loc("市价成交", "Market fill") : fmtPrice(price()));
   });
   createTrackedEffect(() => {
     const hide = type() === "market";
@@ -120,11 +112,13 @@ export function OrderSheet(props: {
     return ins.market === "cn" ? 0.01 : q().last > 100 ? 0.05 : 0.01;
   }
 
-  // qty stepper
   const qtyBox = host.column(4);
   host.append(pageInner, qtyBox);
   const qtyLabel = host.text(
-    `数量（${ins.lot === 100 ? "按手，1手=100股" : "股数"}）`,
+    loc(
+      `数量（${ins.lot === 100 ? "按手，1手=100股" : "股数"}）`,
+      `Qty (${ins.lot === 100 ? "lots of 100" : "shares"})`,
+    ),
     12,
     MUTED,
   );
@@ -145,7 +139,6 @@ export function OrderSheet(props: {
     host.setText(qtyValue, fmtQty(qty()));
   });
 
-  // percent quick bars (based on cash or holding)
   const pctRow = host.row(6);
   host.append(pageInner, pctRow);
   for (const pct of [25, 50, 75, 100]) {
@@ -173,23 +166,26 @@ export function OrderSheet(props: {
     host.append(pill, align);
   }
 
-  // estimated amount
   const amount = host.text("", 12, MUTED);
   host.append(pageInner, amount);
   createTrackedEffect(() => {
     const eff = type() === "market" ? q().last : price();
     const total = eff * qty();
-    host.setText(amount, `约 ${fmtPrice(total)} · 手续费 ${fmtPrice(account.feeOf(total))} · 可用 ${fmtPrice(account.cash())}`);
+    host.setText(
+      amount,
+      loc(
+        `约 ${fmtPrice(total)} · 手续费 ${fmtPrice(account.feeOf(total))} · 可用 ${fmtPrice(account.cash())}`,
+        `≈ ${fmtPrice(total)} · fee ${fmtPrice(account.feeOf(total))} · cash ${fmtPrice(account.cash())}`,
+      ),
+    );
   });
 
-  // error line
   const errText = host.text("", 12, UP);
   host.append(pageInner, errText);
   createTrackedEffect(() => {
     host.setText(errText, error());
   });
 
-  // submit
   const submit = host.pointerRegion();
   host.setGrow(submit, 1);
   host.onClick(submit, () => {
@@ -197,15 +193,17 @@ export function OrderSheet(props: {
     const result = account.submit(symbol(), side(), type(), eff, qty());
     if (!result.ok) {
       setError(result.reason);
+      showToast(result.reason);
       return;
     }
     setError("");
-    setConfirming(true);
+    showToast(loc("已提交", "Submitted"));
+    props.onClose();
   });
   const submitPill = host.decorated(UP, 999);
   host.setMinSize(submitPill, 0, 44);
   host.append(submit, submitPill);
-  const submitLabel = host.text("提交订单", 15, colorBytes("#FFFFFF"));
+  const submitLabel = host.text(loc("提交订单", "Submit"), 15, colorBytes("#FFFFFF"));
   host.setFontWeight(submitLabel, 600);
   const submitAlign = host.align("center");
   host.append(submitAlign, submitLabel);
@@ -228,32 +226,27 @@ export function OrderSheet(props: {
     return cell;
   }
 
-  return {
-    id: page,
-    open: () => setConfirming(true),
-    closeConfirm: () => setConfirming(false),
-  };
+  return { id: page };
 }
 
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
-export function OrderSheetHost(props: {
-  router: Router;
-  symbol: string;
-  query: Record<string, string>;
-}): NodeHandle {
+export function OrderSheetHost(props: { router: Router; symbol: string }): NodeHandle {
+  const query = takeOrderTicket();
   const [open, setOpen] = createSignal(true);
-  return Sheet({
-    open: open(),
-    onClose: () => {
-      setOpen(false);
-      props.router.pop();
-    },
-    title: "",
-    children: [],
-  });
+  const close = () => {
+    setOpen(false);
+    props.router.pop();
+  };
+  return (
+    <Sheet open={open()} onClose={close}>
+      {OrderSheet({
+        symbol: props.symbol,
+        query,
+        onClose: close,
+      })}
+    </Sheet>
+  );
 }
-
-export { Dialog, Button };

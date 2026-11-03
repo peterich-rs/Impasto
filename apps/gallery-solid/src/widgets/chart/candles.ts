@@ -4,7 +4,7 @@ import { ScrollArea } from "@impasto/solid-ui";
 import type { ScrollController } from "@impasto/solid-ui";
 import { colorBytes } from "../../colors.ts";
 import { fmtVolumeCN } from "../../format.ts";
-import type { QuoteEngine } from "../../../engine/engine.ts";
+import type { QuoteEngine } from "../../engine/engine.ts";
 import { geomFor, yOf, type ChartGeom } from "./geometry.ts";
 import { ChartWindow } from "./window.ts";
 import { PriceAxis } from "./price-axis.ts";

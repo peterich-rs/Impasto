@@ -8,6 +8,9 @@ const FEE_RATE = 0.0003;
 const MIN_FEE = 5;
 /** Orders above this many shares fill in two clips. */
 const SPLIT_QTY = 4000;
+const KEY = "impasto.quotes.account.v1";
+
+type Snapshot = { cash: number; positions: Position[]; orders: Order[] };
 
 export type SubmitResult = { ok: true; order: Order } | { ok: false; reason: string };
 
@@ -73,6 +76,7 @@ export function createAccount(engine: QuoteEngine) {
     if (type === "market") {
       fill(order, engine.quote(symbol).last);
     }
+    void persist();
     return { ok: true, order };
   }
 
@@ -120,6 +124,7 @@ export function createAccount(engine: QuoteEngine) {
         };
       }),
     );
+    void persist();
   }
 
   // Matching runs inside the engine tick so a limit fill and its UI land together.
@@ -139,7 +144,49 @@ export function createAccount(engine: QuoteEngine) {
     setOrders((list) =>
       list.map((o) => (o.id === id && o.status === "pending" ? { ...o, status: "cancelled" } : o)),
     );
+    void persist();
   }
+
+  function reset(): void {
+    setCash(START_CASH);
+    setPositions([]);
+    setOrders([]);
+    void persist();
+  }
+
+  async function persist(): Promise<void> {
+    try {
+      const { AsyncStorage } = await import("@impasto/async-storage");
+      const snap: Snapshot = { cash: cash(), positions: positions(), orders: orders() };
+      await AsyncStorage.multiSet([[KEY, JSON.stringify(snap)]]);
+    } catch {
+      /* unlinked host */
+    }
+  }
+
+  async function hydrate(): Promise<void> {
+    try {
+      const { AsyncStorage } = await import("@impasto/async-storage");
+      const [[, raw]] = await AsyncStorage.multiGet([KEY]);
+      if (!raw) {
+        return;
+      }
+      const parsed = JSON.parse(raw) as Partial<Snapshot>;
+      if (typeof parsed.cash === "number" && Number.isFinite(parsed.cash)) {
+        setCash(parsed.cash);
+      }
+      if (Array.isArray(parsed.positions)) {
+        setPositions(parsed.positions.filter(isPosition));
+      }
+      if (Array.isArray(parsed.orders)) {
+        setOrders(parsed.orders.filter(isOrder));
+      }
+    } catch {
+      /* unlinked host */
+    }
+  }
+
+  void hydrate();
 
   function flatten(symbol: string): SubmitResult {
     const qty = holding(symbol);
@@ -154,7 +201,30 @@ export function createAccount(engine: QuoteEngine) {
     return round2(positions().reduce((sum, p) => sum + p.qty * engine.quote(p.symbol).last, 0));
   }
 
-  return { cash, positions, orders, submit, cancel, flatten, holding, feeOf, marketValue, limitBand };
+  return { cash, positions, orders, submit, cancel, flatten, reset, holding, feeOf, marketValue, limitBand };
+}
+
+function isPosition(value: unknown): value is Position {
+  if (value === null || typeof value !== "object") {
+    return false;
+  }
+  const row = value as Position;
+  return typeof row.symbol === "string" && Number.isFinite(row.qty) && Number.isFinite(row.avgCost);
+}
+
+function isOrder(value: unknown): value is Order {
+  if (value === null || typeof value !== "object") {
+    return false;
+  }
+  const row = value as Order;
+  return (
+    typeof row.id === "string" &&
+    typeof row.symbol === "string" &&
+    (row.side === "buy" || row.side === "sell") &&
+    (row.type === "market" || row.type === "limit") &&
+    Number.isFinite(row.price) &&
+    Number.isInteger(row.qty)
+  );
 }
 
 export type Account = ReturnType<typeof createAccount>;

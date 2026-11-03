@@ -1,4 +1,4 @@
-import { host } from "@impasto/solid-renderer";
+import { host, log } from "@impasto/solid-renderer";
 
 type RGBA = [number, number, number, number];
 
@@ -46,7 +46,9 @@ class FlashClock {
       const eased = 1 - Math.pow(1 - p, 3); // easeOutCubic
       try {
         host.setColor(node, mix(f.from, base, eased));
-      } catch {
+      } catch (error) {
+        /* Expected when the row left the tree mid-decay; debug only. */
+        log("debug", `flash setColor dropped: ${String(error)}`);
         this.#active.delete(node);
         continue;
       }

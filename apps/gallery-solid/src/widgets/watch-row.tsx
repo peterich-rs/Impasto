@@ -38,13 +38,14 @@ export function WatchRow(props: {
 
   const line = host.row(10);
   host.setMinSize(line, 0, 56);
+  host.setCross(line, "center");
   host.append(pad, line);
 
   const mono = Monogram({ ins });
   host.append(line, mono.id);
 
   const nameCol = host.column(2);
-  host.setMinSize(nameCol, 148, 0);
+  host.setMinSize(nameCol, 108, 0);
   host.setGrow(nameCol, 1);
   host.append(line, nameCol);
   const title = host.text(ins().name, 15, INK);
@@ -64,7 +65,6 @@ export function WatchRow(props: {
 
   const numCol = host.column(2);
   host.setMinSize(numCol, 86, 0);
-  host.setCross(line, "end");
   host.append(line, numCol);
   const lastCell = QuoteText({ symbol, kind: "last", fontSize: 15, binder: props.binder });
   host.setFontWeight(lastCell.id, 600);

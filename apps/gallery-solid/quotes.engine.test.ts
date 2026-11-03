@@ -74,6 +74,9 @@ import { TickRing } from "./src/engine/types.ts";
   const e = new QuoteEngine({ timeScale: 60, seed: 1 });
   e.step(1000);
   assert.equal(e.simNow(), 60_000);
+  e.setTimeScale(1);
+  e.step(1000);
+  assert.equal(e.simNow(), 61_000);
 }
 
 // mulberry32 reproducibility and gauss spare usage.

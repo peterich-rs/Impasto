@@ -1,35 +1,32 @@
 import { createSignal, createTrackedEffect, onCleanup } from "solid-js";
-import { host, onFrame, type NodeHandle } from "@impasto/solid-renderer";
-import { Button } from "@impasto/solid-ui";
+import { host, insert, onFrame, type NodeHandle } from "@impasto/solid-renderer";
+import { Button, Dialog } from "@impasto/solid-ui";
 import { colorBytes } from "../colors.ts";
 import { clearChildren } from "../widgets/palette.ts";
 import { useQuotes } from "../state/quotes-provider.tsx";
 import { accountRef } from "../state/account-ref.ts";
-import { settingsSig } from "../state/settings.ts";
+import { showToast } from "../state/toast.ts";
 import { fmtPrice, fmtQty } from "../format.ts";
+import { loc } from "../copy.ts";
 import type { Router } from "@impasto/solid-router";
-import type { QuoteBinder } from "../state/binder.ts";
-import type { QuoteEngine } from "../engine/engine.ts";
-import { QuoteText } from "../widgets/quote-text.tsx";
 import { Monogram } from "../widgets/monogram.tsx";
 
 const INK = colorBytes("#1F2430");
 const MUTED = colorBytes("#8A8D91");
 const PANEL = colorBytes("#FFFFFF");
 const HAIR = colorBytes("#E8E8EC");
-const PRIMARY = colorBytes("#C8102E");
 
-type Tab = "positions" | "pending" | "done";
+type Tab = "positions" | "pending" | "filled";
 
 export function TradePage(props: { router: Router }): NodeHandle {
   const { engine, binder } = useQuotes();
   const account = accountRef();
   const [tab, setTab] = createSignal<Tab>("positions");
+  const [closing, setClosing] = createSignal<string | null>(null);
 
   const page = host.column(8);
   host.setGrow(page, 1);
 
-  // === equity card ===
   const card = host.decorated(colorBytes("#171B26"), 16);
   const cardInner = host.padding(0);
   host.setPaddingEdges(cardInner, 16, 16, 16, 16);
@@ -39,27 +36,24 @@ export function TradePage(props: { router: Router }): NodeHandle {
   host.append(cardPad, card);
   host.append(page, cardPad);
 
-  const cardTitle = host.text("总资产 (模拟)", 12, colorBytes("#9AA0A6"));
+  const cardTitle = host.text(loc("总资产 (模拟)", "Equity (paper)"), 12, colorBytes("#9AA0A6"));
   host.append(cardInner, cardTitle);
   const equityRow = host.row(8);
   host.append(cardInner, equityRow);
   const equity = host.text("—", 30, colorBytes("#FFFFFF"));
   host.setFontWeight(equity, 700);
   host.append(equityRow, equity);
-  const dayDelta = host.text("", 13, colorBytes("#9AA0A6"));
-  host.append(equityRow, dayDelta);
 
   const statRow = host.row(0);
   host.append(cardInner, statRow);
-  const cashStat = cardStat("可用资金");
-  const mvStat = cardStat("持仓市值");
-  const pnlStat = cardStat("浮动盈亏");
+  const cashStat = cardStat(loc("可用资金", "Cash"));
+  const mvStat = cardStat(loc("持仓市值", "Market value"));
+  const pnlStat = cardStat(loc("浮动盈亏", "Unrealized"));
   for (const s of [cashStat, mvStat, pnlStat]) {
     host.setGrow(s.root, 1);
     host.append(statRow, s.root);
   }
 
-  // refresh equity at 2Hz off the frame clock (not the per-tick path)
   let lastPaint = -1;
   onCleanup(
     onFrame((targetMs) => {
@@ -74,7 +68,10 @@ export function TradePage(props: { router: Router }): NodeHandle {
       host.setText(cashStat.value, fmtPrice(account.cash()));
       host.setText(mvStat.value, fmtPrice(mv));
       host.setText(pnlStat.value, fmtPrice(pnl));
-      host.setColor(pnlStat.value, pnl > 0 ? colorBytes("#FF7B72") : pnl < 0 ? colorBytes("#3FB950") : colorBytes("#9AA0A6"));
+      host.setColor(
+        pnlStat.value,
+        pnl > 0 ? colorBytes("#FF7B72") : pnl < 0 ? colorBytes("#3FB950") : colorBytes("#9AA0A6"),
+      );
     }),
   );
 
@@ -88,13 +85,12 @@ export function TradePage(props: { router: Router }): NodeHandle {
     return { root: col, value };
   }
 
-  // === tabs ===
   const tabs = host.row(0);
   const tabPad = host.padding(0);
   host.setPaddingEdges(tabPad, 12, 16, 0, 16);
   host.append(tabPad, tabs);
   host.append(page, tabPad);
-  for (const t of ["positions", "pending", "done"] as const) {
+  for (const t of ["positions", "pending", "filled"] as const) {
     const cell = host.pointerRegion();
     host.setGrow(cell, 1);
     host.onClick(cell, () => setTab(t));
@@ -113,7 +109,6 @@ export function TradePage(props: { router: Router }): NodeHandle {
     });
   }
 
-  // === list panel ===
   const panel = host.decorated(PANEL, 12);
   host.setStroke(panel, 1, HAIR);
   host.setGrow(panel, 1);
@@ -130,14 +125,14 @@ export function TradePage(props: { router: Router }): NodeHandle {
     if (tab() === "positions") {
       renderPositions();
     } else {
-      renderOrders(tab() === "pending" ? "pending" : "history");
+      renderOrders(tab());
     }
   });
 
   function renderPositions(): void {
     const positions = account.positions();
     if (positions.length === 0) {
-      host.append(list, emptyHint("暂无持仓，去行情页买入"));
+      host.append(list, emptyHint(loc("暂无持仓，去行情页买入", "No positions yet")));
       return;
     }
     for (const pos of positions) {
@@ -145,12 +140,15 @@ export function TradePage(props: { router: Router }): NodeHandle {
     }
   }
 
-  function renderOrders(kind: "pending" | "history"): void {
+  function renderOrders(kind: "pending" | "filled"): void {
     const orders = account.orders().filter((o) =>
-      kind === "pending" ? o.status === "pending" : o.status !== "pending",
+      kind === "pending" ? o.status === "pending" : o.status === "filled",
     );
     if (orders.length === 0) {
-      host.append(list, emptyHint(kind === "pending" ? "没有待成交委托" : "暂无历史委托"));
+      host.append(
+        list,
+        emptyHint(kind === "pending" ? loc("没有待成交委托", "No open orders") : loc("暂无已成交", "No fills yet")),
+      );
       return;
     }
     for (const o of orders) {
@@ -160,7 +158,7 @@ export function TradePage(props: { router: Router }): NodeHandle {
 
   function emptyHint(text: string): number {
     const pad = host.padding(0);
-    host.setPaddingEdges(pad, 0, 0, 24, 0);
+    host.setPaddingEdges(pad, 24, 0, 24, 0);
     const label = host.text(text, 13, MUTED);
     const align = host.align("center");
     host.append(align, label);
@@ -186,7 +184,7 @@ export function TradePage(props: { router: Router }): NodeHandle {
     host.append(line, nameCol);
     const name = host.text(ins.name, 14, INK);
     host.append(nameCol, name);
-    const meta = host.text(`${fmtQty(qty)}股 · 成本 ${fmtPrice(avgCost)}`, 11, MUTED);
+    const meta = host.text(`${fmtQty(qty)}${loc("股", " sh")} · ${loc("成本", "cost")} ${fmtPrice(avgCost)}`, 11, MUTED);
     host.append(nameCol, meta);
 
     const pnlCol = host.column(2);
@@ -196,6 +194,14 @@ export function TradePage(props: { router: Router }): NodeHandle {
     host.append(pnlCol, market);
     const pnl = host.text("—", 11, MUTED);
     host.append(pnlCol, pnl);
+
+    const closeBtn = Button({
+      label: loc("平仓", "Close"),
+      onClick: () => setClosing(symbol),
+      variant: "quiet",
+      size: "compact",
+    });
+    host.append(line, closeBtn.id);
 
     onCleanup(binder.bind(symbol, { last: market, flashNode: market }));
     onCleanup(
@@ -233,10 +239,10 @@ export function TradePage(props: { router: Router }): NodeHandle {
     const nameCol = host.column(1);
     host.setGrow(nameCol, 1);
     host.append(line, nameCol);
-    const name = host.text(`${ins.name} ${side === "buy" ? "买" : "卖"}`, 13, INK);
+    const name = host.text(`${ins.name} ${side === "buy" ? loc("买", "Buy") : loc("卖", "Sell")}`, 13, INK);
     host.append(nameCol, name);
     const meta = host.text(
-      `${type === "market" ? "市价" : "限价 " + fmtPrice(price)} · ${fmtQty(qty)}股 · ${statusLabel(status)}`,
+      `${type === "market" ? loc("市价", "Mkt") : loc("限价", "Lmt") + " " + fmtPrice(price)} · ${fmtQty(qty)}${loc("股", " sh")} · ${statusLabel(status)}`,
       11,
       MUTED,
     );
@@ -244,8 +250,11 @@ export function TradePage(props: { router: Router }): NodeHandle {
 
     if (status === "pending") {
       const cancelBtn = Button({
-        label: "撤单",
-        onClick: () => account.cancel(id),
+        label: loc("撤单", "Cancel"),
+        onClick: () => {
+          account.cancel(id);
+          showToast(loc("已撤单", "Cancelled"));
+        },
         variant: "quiet",
         size: "compact",
       });
@@ -254,28 +263,71 @@ export function TradePage(props: { router: Router }): NodeHandle {
     return row;
   }
 
-  void settingsSig;
-  void QuoteText;
-  void PRIMARY;
-  void binder;
+  const confirmBody = host.column(8);
+  const confirmText = host.text("", 14, INK);
+  host.append(confirmBody, confirmText);
+  createTrackedEffect(() => {
+    const symbol = closing();
+    host.setText(
+      confirmText,
+      symbol ? loc(`确认平掉 ${engine.ins(symbol).name} 全部持仓？`, `Close all ${engine.ins(symbol).name}?`) : "",
+    );
+  });
+  const confirmRow = host.row(8);
+  host.append(confirmBody, confirmRow);
+  const cancelClose = Button({
+    label: loc("取消", "Cancel"),
+    onClick: () => setClosing(null),
+    variant: "quiet",
+    size: "compact",
+  });
+  host.append(confirmRow, cancelClose.id);
+  const okClose = Button({
+    label: loc("确认平仓", "Close"),
+    onClick: () => {
+      const symbol = closing();
+      setClosing(null);
+      if (!symbol) {
+        return;
+      }
+      const result = account.flatten(symbol);
+      if (!result.ok) {
+        showToast(result.reason);
+        return;
+      }
+      showToast(loc("已平仓", "Closed"));
+    },
+    variant: "primary",
+    size: "compact",
+  });
+  host.append(confirmRow, okClose.id);
+
+  const dialog = Dialog({
+    get open() {
+      return closing() !== null;
+    },
+    onClose: () => setClosing(null),
+    title: loc("平仓", "Close position"),
+    children: { id: confirmBody },
+  });
+  insert({ id: page } as NodeHandle, dialog);
+
   return { id: page };
 }
 
 function tabLabel(t: Tab): string {
-  return t === "positions" ? "持仓" : t === "pending" ? "待成交" : "历史";
+  return t === "positions" ? loc("持仓", "Positions") : t === "pending" ? loc("待成交", "Open") : loc("已成交", "Filled");
 }
 
 function statusLabel(status: string): string {
   if (status === "pending") {
-    return "待成交";
+    return loc("待成交", "Open");
   }
   if (status === "filled") {
-    return "已成交";
+    return loc("已成交", "Filled");
   }
   if (status === "cancelled") {
-    return "已撤单";
+    return loc("已撤单", "Cancelled");
   }
-  return "已拒绝";
+  return loc("已拒绝", "Rejected");
 }
-
-export type { QuoteBinder, QuoteEngine };
