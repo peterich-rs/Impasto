@@ -105,8 +105,7 @@ function Floating(props: {
 
 export function Menu(props: {
   open: boolean;
-  x: number;
-  y: number;
+  anchor: number;
   onClose: () => void;
   children?: NodeHandle;
 }): NodeHandle {
@@ -115,7 +114,7 @@ export function Menu(props: {
       open={props.open}
       onClose={props.onClose}
       place={(panel) => {
-        host.setTransform(panel, props.x, props.y, 0, 1);
+        host.placePanel(panel, props.anchor, 0);
       }}
     >
       {props.children}
@@ -134,8 +133,7 @@ export function Popover(props: {
       open={props.open}
       onClose={props.onClose}
       place={(panel) => {
-        const box = host.rect(props.anchor);
-        host.setTransform(panel, box.x, box.y + box.h, 0, 1);
+        host.placePanel(panel, props.anchor, 0);
       }}
     >
       {props.children}

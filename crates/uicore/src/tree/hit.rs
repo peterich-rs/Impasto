@@ -286,15 +286,14 @@ impl Tree {
         })
     }
 
-    fn transformed_box_contains(&self, id: NodeId, scene_x: f32, scene_y: f32) -> bool {
-        let Some(node) = self.get(id) else {
-            return false;
-        };
+    /// Visual scene box. Layout box plus ancestor scroll and transform.
+    ///
+    /// [`Tree::rect`] is the layout box and must not be used to place a panel
+    /// or a caret. A rotated node returns the axis-aligned bounds of its corners.
+    pub fn scene_rect(&self, id: NodeId) -> Result<super::Rect, crate::Error> {
+        let node = self.node(id)?;
+        let (bx, by) = self.layout_point(id)?;
         let (w, h) = (node.w, node.h);
-        let _ = node;
-        let Ok((bx, by)) = self.layout_point(id) else {
-            return false;
-        };
         let corners = [(bx, by), (bx + w, by), (bx + w, by + h), (bx, by + h)];
         let mut min_x = f32::MAX;
         let mut min_y = f32::MAX;
@@ -302,14 +301,29 @@ impl Tree {
         let mut max_y = f32::MIN;
         for (x, y) in corners {
             let Some((sx, sy)) = self.layout_to_scene(id, x, y) else {
-                return false;
+                return self.rect(id);
             };
             min_x = min_x.min(sx);
             min_y = min_y.min(sy);
             max_x = max_x.max(sx);
             max_y = max_y.max(sy);
         }
-        scene_x >= min_x && scene_y >= min_y && scene_x < max_x && scene_y < max_y
+        Ok(super::Rect {
+            x: min_x,
+            y: min_y,
+            w: (max_x - min_x).max(0.0),
+            h: (max_y - min_y).max(0.0),
+        })
+    }
+
+    fn transformed_box_contains(&self, id: NodeId, scene_x: f32, scene_y: f32) -> bool {
+        let Ok(box_) = self.scene_rect(id) else {
+            return false;
+        };
+        scene_x >= box_.x
+            && scene_y >= box_.y
+            && scene_x < box_.x + box_.w
+            && scene_y < box_.y + box_.h
     }
 
     pub(super) fn drag_of(&self, mut id: NodeId) -> Option<NodeId> {
@@ -370,7 +384,7 @@ impl Tree {
     }
 
     fn scroll_held_by_other(&self, id: NodeId, pointer: Option<crate::PointerId>) -> bool {
-        crate::ScrollRecognizer::locked_by_other(&self.arena.scroll_locks, id, pointer)
+        crate::gesture::scroll_locked_by_other(&self.arena.scroll_locks, id, pointer)
     }
 
     fn overflows(&self, id: NodeId, horizontal: bool) -> bool {

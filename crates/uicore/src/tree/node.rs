@@ -162,6 +162,24 @@ pub enum ScrollEdge {
     Nearest,
 }
 
+/// One side of a box. Used by the edge setters so a partial update does not need a second store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoxEdge {
+    Top,
+    Right,
+    Bottom,
+    Left,
+}
+
+/// Where [`Tree::place_panel`] puts a measured panel relative to its anchor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelAlign {
+    BelowStart,
+    BelowEnd,
+    BelowCenter,
+    AboveStart,
+}
+
 /// Four edges in scene points. [`Edges::all`] is the uniform padding the older API writes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Edges {
@@ -405,6 +423,13 @@ pub(super) struct ScrollGeom {
     pub(super) chain: bool,
     pub(super) phase: crate::ScrollPhase,
     pub(super) axis: crate::ScrollAxis,
+    /// Floor added to the content height when computing limits.
+    pub(super) content_min: f32,
+    pub(super) pull_mode: crate::PullMode,
+    pub(super) pull_threshold: f32,
+    /// Edge-mode accumulator. Overscroll mode uses [`ScrollGeom::pull_armed`].
+    pub(super) pull: f32,
+    pub(super) pull_armed: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -502,6 +527,11 @@ impl Node {
                 chain: true,
                 phase: crate::ScrollPhase::Idle,
                 axis: crate::ScrollAxis::Both,
+                content_min: 0.0,
+                pull_mode: crate::PullMode::Off,
+                pull_threshold: 64.0,
+                pull: 0.0,
+                pull_armed: false,
             }),
             Kind::Transform => Geom::Transform(TransformGeom::identity()),
             _ => Geom::None,

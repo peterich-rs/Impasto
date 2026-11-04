@@ -6,37 +6,10 @@ use std::ptr;
 use std::sync::atomic::Ordering;
 
 use session::{HttpError, HttpFailure, HttpRequest, Invoke, IoJob, PluginResult, PluginValue};
-use uicore::{AxisSize, DragClaim, FocusDirection, GridLine, Inset, NodeId};
+use uicore::{FocusDirection, NodeId};
 
 use super::ffi::*;
 use super::*;
-
-pub(super) unsafe extern "C" fn sized(
-    session: *mut c_void,
-    width: f32,
-    height: f32,
-    out: *mut u64,
-) -> i32 {
-    let inner = unsafe { inner(session) };
-    created(inner.tree.borrow_mut().sized(width, height), out)
-}
-
-pub(super) unsafe extern "C" fn set_drag_claim(session: *mut c_void, node: u64, claim: i32) -> i32 {
-    let inner = unsafe { inner(session) };
-    let claim = match claim {
-        1 => DragClaim::Horizontal,
-        2 => DragClaim::Free,
-        _ => DragClaim::None,
-    };
-    match inner
-        .tree
-        .borrow_mut()
-        .set_drag_claim(NodeId::from_raw(node), claim)
-    {
-        Ok(()) => 0,
-        Err(_) => -1,
-    }
-}
 
 pub(super) unsafe extern "C" fn caret_at(
     session: *mut c_void,
@@ -140,26 +113,6 @@ pub(super) unsafe extern "C" fn pointer_position(
     0
 }
 
-pub(super) unsafe extern "C" fn set_focusable(
-    session: *mut c_void,
-    node: u64,
-    enabled: i32,
-) -> i32 {
-    let inner = unsafe { inner(session) };
-    let gestures = match inner
-        .tree
-        .borrow_mut()
-        .set_focusable(NodeId::from_raw(node), enabled != 0)
-    {
-        Ok(gestures) => gestures,
-        Err(_) => return -1,
-    };
-    if dispatch_gestures(inner, gestures).is_err() {
-        return -1;
-    }
-    0
-}
-
 pub(super) unsafe extern "C" fn focus_node(session: *mut c_void, node: u64) -> i32 {
     let inner = unsafe { inner(session) };
     let gestures = match inner.tree.borrow_mut().focus(NodeId::from_raw(node)) {
@@ -189,54 +142,6 @@ pub(super) unsafe extern "C" fn is_focusable(session: *mut c_void, node: u64) ->
         Ok(false) => 0,
         Err(_) => -1,
     }
-}
-
-pub(super) unsafe extern "C" fn grapheme_index_of(
-    utf8: *const c_char,
-    len: usize,
-    unit: u32,
-) -> u32 {
-    let text = unsafe { utf8_of(utf8, len) }.unwrap_or("");
-    uicore::grapheme_index(text, unit)
-}
-
-pub(super) unsafe extern "C" fn grapheme_count_of(utf8: *const c_char, len: usize) -> u32 {
-    let text = unsafe { utf8_of(utf8, len) }.unwrap_or("");
-    uicore::grapheme_count(text)
-}
-
-pub(super) unsafe extern "C" fn grapheme_unit_of(
-    utf8: *const c_char,
-    len: usize,
-    index: u32,
-) -> u32 {
-    let text = unsafe { utf8_of(utf8, len) }.unwrap_or("");
-    uicore::grapheme_unit(text, index)
-}
-
-pub(super) unsafe extern "C" fn set_reverse(session: *mut c_void, node: u64, reverse: i32) -> i32 {
-    let inner = unsafe { inner(session) };
-    status(
-        inner
-            .tree
-            .borrow_mut()
-            .set_reverse(NodeId::from_raw(node), reverse != 0),
-    )
-}
-
-pub(super) unsafe extern "C" fn set_scale_xy(
-    session: *mut c_void,
-    node: u64,
-    scale_x: f32,
-    scale_y: f32,
-) -> i32 {
-    let inner = unsafe { inner(session) };
-    status(
-        inner
-            .tree
-            .borrow_mut()
-            .set_scale_xy(NodeId::from_raw(node), scale_x, scale_y),
-    )
 }
 
 pub(super) unsafe extern "C" fn register_font(
@@ -431,48 +336,6 @@ pub(super) unsafe extern "C" fn set_recognizers(
     ))
 }
 
-pub(super) unsafe extern "C" fn set_stroke(
-    session: *mut c_void,
-    node: u64,
-    width: f32,
-    color: *const u8,
-) -> i32 {
-    let Some(color) = (unsafe { rgba(color) }) else {
-        return -1;
-    };
-    let inner = unsafe { inner(session) };
-    status(
-        inner
-            .tree
-            .borrow_mut()
-            .set_stroke(NodeId::from_raw(node), width, color),
-    )
-}
-
-pub(super) unsafe extern "C" fn set_image_mode(
-    session: *mut c_void,
-    node: u64,
-    mode: i32,
-    required: i32,
-) -> i32 {
-    let mode = match mode {
-        0 => protocol::ContentMode::Fill,
-        1 => protocol::ContentMode::Fit,
-        2 => protocol::ContentMode::Crop,
-        _ => return -1,
-    };
-    if required != 0 && required != 1 {
-        return -1;
-    }
-    let inner = unsafe { inner(session) };
-    status(
-        inner
-            .tree
-            .borrow_mut()
-            .set_image_mode(NodeId::from_raw(node), mode, required != 0),
-    )
-}
-
 const FONT_LIMIT: usize = 8;
 const FONT_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 
@@ -532,116 +395,6 @@ pub(super) fn startup_font(name: &str) -> bool {
     name == "Sans" || name == "SansCJK"
 }
 
-pub(super) fn axis_from_tag(tag: i32, value: f32) -> Result<AxisSize, uicore::Error> {
-    match tag {
-        0 => Ok(AxisSize::Auto),
-        1 => Ok(AxisSize::Points(value)),
-        2 => Ok(AxisSize::Fraction(value)),
-        _ => Err(uicore::Error::BadNumber),
-    }
-}
-
-pub(super) fn inset_from_tag(is_auto: i32, value: f32) -> Option<f32> {
-    if is_auto == 0 { Some(value) } else { None }
-}
-
-pub(super) fn grid_from_tag(tag: i32, value: i32) -> Result<GridLine, uicore::Error> {
-    match tag {
-        0 => Ok(GridLine::Auto),
-        1 => {
-            let index = i16::try_from(value).map_err(|_| uicore::Error::BadNumber)?;
-            if index == 0 {
-                return Err(uicore::Error::BadNumber);
-            }
-            Ok(GridLine::Line(index))
-        }
-        2 => {
-            let count = u16::try_from(value).map_err(|_| uicore::Error::BadNumber)?;
-            if count == 0 {
-                return Err(uicore::Error::BadNumber);
-            }
-            Ok(GridLine::Span(count))
-        }
-        _ => Err(uicore::Error::BadNumber),
-    }
-}
-
-pub(super) unsafe extern "C" fn set_panel(session: *mut c_void, node: u64) -> i32 {
-    let inner = unsafe { inner(session) };
-    status(inner.tree.borrow_mut().set_panel(NodeId::from_raw(node)))
-}
-
-pub(super) unsafe extern "C" fn set_axis_size(
-    session: *mut c_void,
-    node: u64,
-    width_tag: i32,
-    width: f32,
-    height_tag: i32,
-    height: f32,
-) -> i32 {
-    let inner = unsafe { inner(session) };
-    let width = match axis_from_tag(width_tag, width) {
-        Ok(size) => size,
-        Err(_) => return -1,
-    };
-    let height = match axis_from_tag(height_tag, height) {
-        Ok(size) => size,
-        Err(_) => return -1,
-    };
-    status(
-        inner
-            .tree
-            .borrow_mut()
-            .set_axis_size(NodeId::from_raw(node), width, height),
-    )
-}
-
-pub(super) unsafe extern "C" fn set_min_axis(
-    session: *mut c_void,
-    node: u64,
-    width_tag: i32,
-    width: f32,
-    height_tag: i32,
-    height: f32,
-) -> i32 {
-    let inner = unsafe { inner(session) };
-    let Ok(width) = axis_from_tag(width_tag, width) else {
-        return -1;
-    };
-    let Ok(height) = axis_from_tag(height_tag, height) else {
-        return -1;
-    };
-    status(
-        inner
-            .tree
-            .borrow_mut()
-            .set_min_axis(NodeId::from_raw(node), width, height),
-    )
-}
-
-pub(super) unsafe extern "C" fn set_max_axis(
-    session: *mut c_void,
-    node: u64,
-    width_tag: i32,
-    width: f32,
-    height_tag: i32,
-    height: f32,
-) -> i32 {
-    let inner = unsafe { inner(session) };
-    let Ok(width) = axis_from_tag(width_tag, width) else {
-        return -1;
-    };
-    let Ok(height) = axis_from_tag(height_tag, height) else {
-        return -1;
-    };
-    status(
-        inner
-            .tree
-            .borrow_mut()
-            .set_max_axis(NodeId::from_raw(node), width, height),
-    )
-}
-
 /// `mode` 0 max-content, 1 capped-max, 2 definite width. `height` of `f32::NAN`
 /// under mode 2 leaves the height natural. Out parameters carry `(w, h)`.
 pub(super) unsafe extern "C" fn measure_panel(
@@ -681,98 +434,6 @@ pub(super) unsafe extern "C" fn measure_panel(
         }
         Err(_) => -1,
     }
-}
-
-pub(super) unsafe extern "C" fn set_aspect_ratio(
-    session: *mut c_void,
-    node: u64,
-    present: i32,
-    ratio: f32,
-) -> i32 {
-    let inner = unsafe { inner(session) };
-    let ratio = if present == 0 { None } else { Some(ratio) };
-    status(
-        inner
-            .tree
-            .borrow_mut()
-            .set_aspect_ratio(NodeId::from_raw(node), ratio),
-    )
-}
-
-pub(super) unsafe extern "C" fn set_position(
-    session: *mut c_void,
-    node: u64,
-    absolute: i32,
-) -> i32 {
-    let inner = unsafe { inner(session) };
-    status(
-        inner
-            .tree
-            .borrow_mut()
-            .set_position(NodeId::from_raw(node), absolute != 0),
-    )
-}
-
-pub(super) unsafe extern "C" fn set_inset(
-    session: *mut c_void,
-    node: u64,
-    top_auto: i32,
-    top: f32,
-    right_auto: i32,
-    right: f32,
-    bottom_auto: i32,
-    bottom: f32,
-    left_auto: i32,
-    left: f32,
-) -> i32 {
-    let inner = unsafe { inner(session) };
-    status(inner.tree.borrow_mut().set_inset(
-        NodeId::from_raw(node),
-        Inset {
-            top: inset_from_tag(top_auto, top),
-            right: inset_from_tag(right_auto, right),
-            bottom: inset_from_tag(bottom_auto, bottom),
-            left: inset_from_tag(left_auto, left),
-        },
-    ))
-}
-
-pub(super) unsafe extern "C" fn set_grid_placement(
-    session: *mut c_void,
-    node: u64,
-    column_start_tag: i32,
-    column_start: i32,
-    column_end_tag: i32,
-    column_end: i32,
-    row_start_tag: i32,
-    row_start: i32,
-    row_end_tag: i32,
-    row_end: i32,
-) -> i32 {
-    let inner = unsafe { inner(session) };
-    let column_start = match grid_from_tag(column_start_tag, column_start) {
-        Ok(line) => line,
-        Err(_) => return -1,
-    };
-    let column_end = match grid_from_tag(column_end_tag, column_end) {
-        Ok(line) => line,
-        Err(_) => return -1,
-    };
-    let row_start = match grid_from_tag(row_start_tag, row_start) {
-        Ok(line) => line,
-        Err(_) => return -1,
-    };
-    let row_end = match grid_from_tag(row_end_tag, row_end) {
-        Ok(line) => line,
-        Err(_) => return -1,
-    };
-    status(inner.tree.borrow_mut().set_grid_placement(
-        NodeId::from_raw(node),
-        column_start,
-        column_end,
-        row_start,
-        row_end,
-    ))
 }
 
 pub(super) unsafe extern "C" fn blur_node(session: *mut c_void) -> i32 {

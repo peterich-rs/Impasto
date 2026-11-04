@@ -309,8 +309,6 @@ macro_rules! coded_trinary {
     };
 }
 
-pub(crate) use coded_trinary;
-
 coded_trinary!(ScrollAxis, Both, Vertical, Horizontal);
 
 /// Whether a drag on the declared axis is claimed.
@@ -327,6 +325,19 @@ pub enum ScrollAccept {
 }
 
 coded_trinary!(ScrollAccept, Content, Always, Never);
+
+/// Which distance arms a refresh. The threshold lives on the scroll node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PullMode {
+    #[default]
+    Off,
+    /// `max(0, -overscroll.y)` while dragging. Commit when the phase returns to idle.
+    Overscroll,
+    /// Sum of top-edge clamp loss. Commit on drag end.
+    Edge,
+}
+
+coded_trinary!(PullMode, Off, Overscroll, Edge);
 
 /// Per-scroll motion parameters. Defaults match the historical constants.
 #[derive(Clone, Copy, Debug, PartialEq)]

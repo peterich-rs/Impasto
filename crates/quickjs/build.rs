@@ -35,69 +35,92 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn enum_name(section: &str) -> &'static str {
+    match section {
+        "ops" => "MutationOp",
+        "fields" => "StyleField",
+        "creates" => "CreateKind",
+        "queries" => "QueryKind",
+        "effects" => "EffectKind",
+        _ => "AbiValue",
+    }
+}
+
 fn generate_abi(manifest: &Path, out_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let yml = std::fs::read_to_string(manifest.join("abi.yml"))?;
-    let mut section = "";
-    let mut ops = Vec::new();
-    let mut fields = Vec::new();
+    let mut section = String::new();
+    let mut sections: Vec<(String, Vec<(String, String)>)> = Vec::new();
     for line in yml.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         if let Some(name) = line.strip_suffix(':') {
-            section = if name == "ops" { "ops" } else { "fields" };
+            section = name.to_string();
+            sections.push((section.clone(), Vec::new()));
             continue;
         }
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
-        let pair = (name.trim().to_string(), value.trim().to_string());
-        if section == "ops" {
-            ops.push(pair);
-        } else {
-            fields.push(pair);
-        }
+        let Some((_, items)) = sections.iter_mut().find(|(key, _)| key == &section) else {
+            continue;
+        };
+        items.push((name.trim().to_string(), value.trim().to_string()));
     }
     let mut rust = String::from("// Generated from abi.yml. Do not edit.\n\n");
-    rust.push_str("#[repr(u32)]\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n#[allow(dead_code, reason = \"generated from abi.yml\")]\npub enum MutationOp {\n");
-    for (name, value) in &ops {
-        rust.push_str(&format!("    {name} = {value},\n"));
-    }
-    rust.push_str("}\n\n#[repr(u32)]\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n#[allow(dead_code, reason = \"generated from abi.yml\")]\npub enum StyleField {\n");
-    for (name, value) in &fields {
-        rust.push_str(&format!("    {name} = {value},\n"));
-    }
-    rust.push_str("}\n");
-    std::fs::write(out_dir.join("abi.rs"), &rust)?;
-
     let mut header = String::from("/* Generated from abi.yml. */\n#pragma once\n");
-    for (name, value) in &ops {
-        header.push_str(&format!(
-            "#define MUTATION_OP_{} {}\n",
-            name.to_uppercase(),
-            value
-        ));
-    }
-    for (name, value) in &fields {
-        header.push_str(&format!(
-            "#define STYLE_FIELD_{} {}\n",
-            name.to_uppercase(),
-            value
-        ));
-    }
-    std::fs::write(out_dir.join("mutation.h"), header)?;
-
     let mut ts = String::from("// Generated from abi.yml. Do not edit.\n");
-    ts.push_str("export const MutationOp = {\n");
-    for (name, value) in &ops {
-        ts.push_str(&format!("  {name}: {value},\n"));
+    let mut js = String::from("/* Generated from abi.yml. */\nglobalThis.__abi = {\n");
+    for (index, (section, items)) in sections.iter().enumerate() {
+        let enum_name = enum_name(section);
+        rust.push_str("#[repr(u32)]\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n#[allow(dead_code, reason = \"generated from abi.yml\")]\n");
+        rust.push_str(&format!("pub enum {enum_name} {{\n"));
+        for (name, value) in items {
+            rust.push_str(&format!("    {name} = {value},\n"));
+            let prefix = enum_name
+                .chars()
+                .flat_map(|ch| {
+                    if ch.is_uppercase() {
+                        vec!['_', ch]
+                    } else {
+                        vec![ch.to_ascii_uppercase()]
+                    }
+                })
+                .collect::<String>();
+            let prefix = prefix.trim_start_matches('_');
+            header.push_str(&format!(
+                "#define {}_{} {}\n",
+                prefix,
+                name.to_uppercase(),
+                value
+            ));
+        }
+        rust.push_str("}\n\n");
+        let export = if section == "ops" {
+            "MutationOp"
+        } else if section == "fields" {
+            "StyleField"
+        } else {
+            enum_name
+        };
+        ts.push_str(&format!("export const {export} = {{\n"));
+        js.push_str(&format!("  {export}: {{\n"));
+        for (name, value) in items {
+            ts.push_str(&format!("  {name}: {value},\n"));
+            js.push_str(&format!("    {name}: {value},\n"));
+        }
+        ts.push_str("} as const;\n");
+        js.push_str("  }");
+        if index + 1 != sections.len() {
+            ts.push('\n');
+            js.push_str(",\n");
+        }
     }
-    ts.push_str("} as const;\n\nexport const StyleField = {\n");
-    for (name, value) in &fields {
-        ts.push_str(&format!("  {name}: {value},\n"));
-    }
-    ts.push_str("} as const;\n");
+    js.push_str("\n};\n");
+    std::fs::write(out_dir.join("abi.rs"), rust)?;
+    std::fs::write(out_dir.join("mutation.h"), header)?;
+    std::fs::write(out_dir.join("abi.js"), js)?;
     let ts_path = manifest
         .parent()
         .and_then(|dir| dir.parent())

@@ -18,6 +18,7 @@ mod ptr;
 mod queue;
 mod rt;
 mod scheduler;
+mod semantics;
 mod shaper;
 mod shell;
 mod surface;
@@ -42,6 +43,7 @@ pub use modules::{
 };
 pub use present::{AfterPresent, after_present};
 pub use ptr::NativePtr;
+pub use semantics::{ProjectedNode, content_extent, project, scroll_step};
 pub use session::{FrameTime, Lifecycle};
 pub use shaper::ImpellerShaper;
 pub use shell::{DropWait, EngineSlot, Link, Poster, start};
@@ -85,8 +87,8 @@ pub enum Presented {
 pub trait Services: Send {
     fn font(&self, family: &str) -> Option<&[u8]>;
     fn log(&self, level: LogLevel, message: &str);
-    /// A new semantics tree. The default ignores it. Called on the render thread.
-    fn semantics(&self, _update: &uicore::SemanticsUpdate) {}
+    /// Projected semantics nodes. The default ignores them. Called on the render thread.
+    fn semantics(&self, _nodes: &[ProjectedNode]) {}
     /// Apply one keyboard update. Called on the render thread.
     /// The implementation posts the work to the platform thread.
     fn apply_ime(&self, update: &session::ImeUpdate);

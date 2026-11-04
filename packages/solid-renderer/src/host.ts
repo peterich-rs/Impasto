@@ -52,6 +52,20 @@ export interface CoreHost {
   setGap(node: NodeHandle, gap: number): void;
   setPadding(node: NodeHandle, edges: number): void;
   setPaddingEdges(node: NodeHandle, top: number, right: number, bottom: number, left: number): void;
+  setPaddingEdge(node: NodeHandle, edge: number, value: number): void;
+  setInsetEdge(node: NodeHandle, edge: number, value: number | null): void;
+  setTransformComponent(node: NodeHandle, component: number, value: number): void;
+  setSizeAxis(node: NodeHandle, axis: number, kind: number, value: number): void;
+  setGridLine(node: NodeHandle, edge: number, kind: number, value: number): void;
+  placePanel(panel: NodeHandle, anchor: NodeHandle, align: number): void;
+  reparentChildren(from: NodeHandle, to: NodeHandle): void;
+  textCommand(
+    node: NodeHandle,
+    name: string,
+    extra?: string,
+    recordUndo?: boolean,
+  ): { text: string; start: number; end: number };
+  setTextLimit(node: NodeHandle, limit: number): void;
   setMargin(node: NodeHandle, top: number, right: number, bottom: number, left: number): void;
   setMinSize(node: NodeHandle, width: number, height: number): void;
   setMaxSize(node: NodeHandle, width: number, height: number): void;

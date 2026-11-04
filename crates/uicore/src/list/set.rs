@@ -2,9 +2,10 @@
 
 use crate::tree::{NodeId, Tree};
 
-use super::controller::{DragStep, ParentLink, PullMode, ScrollController};
+use super::controller::{DragStep, ParentLink, ScrollController};
 use super::diff::ListOp;
 use super::driver::{Chrome, ListDriver, ListItem, ListNodes};
+use crate::PullMode;
 
 /// Pull threshold, rubber band, and content floor for one scroll driver.
 #[derive(Clone, Copy, Debug)]
@@ -155,6 +156,7 @@ impl DriverSet {
         id: DriverId,
         config: ScrollConfig,
         parent: Option<DriverId>,
+        tree: &mut Tree,
     ) -> bool {
         let link = parent.filter(|parent| {
             self.scrolls
@@ -175,6 +177,11 @@ impl DriverSet {
                 generation: parent.generation,
             }),
         );
+        let Some(viewport) = controller.viewport() else {
+            return true;
+        };
+        let _ = tree.set_content_min(viewport, config.content_min);
+        let _ = tree.set_scroll_pull(viewport, config.pull_mode, config.threshold);
         true
     }
 
@@ -251,7 +258,13 @@ impl DriverSet {
     }
 
     pub fn tick(&mut self, tree: &mut Tree) {
+        let pending = tree.take_refresh();
         let mut refresh = Vec::new();
+        for id in pending {
+            if let Some(driver) = self.driver_for_scroll(id) {
+                refresh.push(driver);
+            }
+        }
         for index in 0..self.scrolls.len() {
             let Some(entry) = self.scrolls.get_mut(index) else {
                 continue;
@@ -302,6 +315,16 @@ impl DriverSet {
                 self.events.push(DriverEvent::EndReached { id });
             }
         }
+    }
+
+    fn driver_for_scroll(&self, node: NodeId) -> Option<DriverId> {
+        self.scrolls.iter().enumerate().find_map(|(index, entry)| {
+            let controller = entry.value.as_ref()?;
+            (controller.viewport() == Some(node)).then_some(DriverId {
+                index: crate::cast::u32_from_usize(index),
+                generation: entry.generation,
+            })
+        })
     }
 
     fn consume_at(&mut self, parent: ParentLink, tree: &mut Tree, ox: f32, oy: f32) -> bool {

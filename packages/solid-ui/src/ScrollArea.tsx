@@ -43,8 +43,6 @@ export function ScrollArea(props: {
   contentMin?: number;
   controller?: ScrollController;
   physics?: ScrollPhysicsProps;
-  /** Remainder after this scroll clamped a drag it already owns. Return true if a parent took it. */
-  onDragOverflow?: (overflowX: number, overflowY: number) => boolean;
 }): NodeHandle {
   const ctrl = props.controller ?? createScrollController();
   let viewport = 0;
@@ -78,7 +76,6 @@ export function ScrollArea(props: {
     if (physics?.chain !== undefined) {
       host.setScrollChain(node, physics.chain);
     }
-    ctrl.setRubber(physics?.overscroll === "rubber", physics?.factor ?? 0.55);
   }
 
   createTrackedEffect(() => {
@@ -100,20 +97,8 @@ export function ScrollArea(props: {
         }
         props.viewportRef?.(node.id);
       }}
-      onDragBy={(dx, dy) => {
-        const step = ctrl.dragBy(dx, dy);
-        if (!step.pending) {
-          return;
-        }
-        const taken = props.onDragOverflow?.(step.ox, step.oy) === true;
-        ctrl.finishDrag(taken);
-      }}
       onDragEnd={() => {
-        ctrl.dragEnd();
         props.onDragEnd?.();
-      }}
-      onWheel={(dx, dy) => {
-        ctrl.wheel(dx, dy);
       }}
     >
       <column

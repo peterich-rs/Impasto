@@ -16,9 +16,10 @@ pub use debug::{DebugAxis, LayoutIssue};
 pub(crate) use hit::Affine;
 pub use layout::{LayoutCause, LayoutTrace};
 pub use node::{
-    Alignment, AxisSize, Discarded, DragClaim, Edges, FocusDirection, Gesture, GridLine, Inset,
-    Justify, NodeId, Rect, RowCrossAlign, ScrollEdge, SubtreeSpace, TrackSize,
+    Alignment, AxisSize, BoxEdge, Discarded, DragClaim, Edges, FocusDirection, Gesture, GridLine,
+    Inset, Justify, NodeId, PanelAlign, Rect, RowCrossAlign, ScrollEdge, SubtreeSpace, TrackSize,
 };
+pub use scroll::ScrollSample;
 
 use crate::{AnimProp, Simulation};
 
@@ -58,7 +59,7 @@ pub struct Tree {
     /// the ones that are still parentless.
     pending_discard: Vec<NodeId>,
     /// Press, drag, and hover routes. Structure edits do not clear this.
-    arena: gesture::GestureArena,
+    arena: gesture::PointerTable,
     focused: Option<NodeId>,
     /// Innermost focus scope. Empty means the whole tree.
     scopes: Vec<NodeId>,
@@ -136,6 +137,12 @@ pub struct Tree {
     /// Content origin in scene points. Insets shift the root; `(0, 0)` is the surface origin.
     origin: (f32, f32),
     viewport: Option<(f32, f32)>,
+    /// Full window size in scene points. Zero until the session applies metrics.
+    window: (f32, f32),
+    /// Always-on safe area. Keyboard insets stay out of this rect.
+    safe: (f32, f32, f32, f32),
+    /// Scroll nodes whose pull threshold committed since the last take.
+    refresh_pending: Vec<NodeId>,
     /// Developer diagnostics. Off by default; see `tree/debug.rs`.
     debug: debug::DebugState,
 }

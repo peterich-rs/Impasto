@@ -1,6 +1,8 @@
 //! Header helpers for the QuickJS host globals.
 
+pub(super) const ABI_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/abi.js"));
 pub(super) const PRELUDE: &str = include_str!("../prelude.js");
+pub(super) const CORE_JS: &str = include_str!("../core.js");
 
 pub(super) fn header_pairs(block: &str) -> Vec<(String, String)> {
     let mut pairs = Vec::new();

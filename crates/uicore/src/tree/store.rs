@@ -21,7 +21,7 @@ impl Tree {
             shaper: Box::new(shaper),
             root: None,
             pending_discard: Vec::new(),
-            arena: super::gesture::GestureArena::default(),
+            arena: super::gesture::PointerTable::default(),
             focused: None,
             scopes: Vec::new(),
             motions: Vec::new(),
@@ -67,6 +67,9 @@ impl Tree {
             laid_out: false,
             origin: (0.0, 0.0),
             viewport: None,
+            window: (0.0, 0.0),
+            safe: (0.0, 0.0, 0.0, 0.0),
+            refresh_pending: Vec::new(),
             debug: super::debug::DebugState::default(),
         }
     }
@@ -321,6 +324,22 @@ impl Tree {
                 ..Style::default()
             },
         )
+    }
+
+    /// Moves every child of `from` onto `to`. The placeholder stays put.
+    pub fn reparent_children(&mut self, from: NodeId, to: NodeId) -> Result<(), Error> {
+        self.node(from)?;
+        self.node(to)?;
+        let mut child = self.node(from)?.first_child;
+        let mut kids = Vec::new();
+        while let Some(current) = child {
+            kids.push(current);
+            child = self.node(current)?.next;
+        }
+        for id in kids {
+            self.insert(to, id, None)?;
+        }
+        Ok(())
     }
 
     pub fn add_child(&mut self, parent: NodeId, child: NodeId) -> Result<(), Error> {

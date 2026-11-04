@@ -22,9 +22,11 @@ mod host;
 
 mod args;
 mod bridge;
+mod call;
 mod ffi;
 mod frame;
 mod keys;
+mod mutation;
 mod nodes;
 use args::*;
 use bridge::*;
@@ -68,7 +70,7 @@ pub(super) struct Inner {
     pub(super) fonts: RefCell<FontBook>,
     /// Sources passed to `reload` since the last [`Session::take_reloads`].
     pub(super) reloads: RefCell<Vec<String>>,
-    pub(super) mutations: RefCell<Vec<PendingMutation>>,
+    pub(super) mutations: RefCell<Vec<mutation::OwnedRec>>,
     pub(super) prepared: RefCell<Option<PreparedCall>>,
     pub(super) marks: FrameMarks,
     pub(super) drivers: RefCell<uicore::DriverSet>,
@@ -119,31 +121,38 @@ impl ImeSlot {
         let Some((revision, value)) = tree.editor_snapshot(id) else {
             return;
         };
-        if revision == self.revision {
-            return;
-        }
-        self.revision = revision;
         let (start, end) = value.selection.ordered();
         let caret = tree
             .caret_for(id, value.selection.extent, Affinity::Downstream)
             .ok();
-        let origin = tree.rect(id).unwrap_or(Rect {
+        let origin = tree.scene_rect(id).unwrap_or(Rect {
             x: 0.0,
             y: 0.0,
             w: 0.0,
             h: 0.0,
         });
-        self.state.text = value.text;
-        self.state.selection = start..end;
-        self.state.composing = value.composing.map(|range| range.start..range.end);
-        if let Some(caret) = caret {
-            self.state.caret = Rect {
+        let caret_rect = caret
+            .map(|caret| Rect {
                 x: origin.x + caret.x,
                 y: origin.y + caret.y,
                 w: caret.w,
                 h: caret.h,
-            };
+            })
+            .unwrap_or(self.state.caret);
+        let composing = value.composing.map(|range| range.start..range.end);
+        let changed = revision != self.revision
+            || self.state.text != value.text
+            || self.state.selection != (start..end)
+            || self.state.composing != composing
+            || self.state.caret != caret_rect;
+        if !changed {
+            return;
         }
+        self.revision = revision;
+        self.state.text = value.text;
+        self.state.selection = start..end;
+        self.state.composing = composing;
+        self.state.caret = caret_rect;
         self.dirty = true;
     }
 
@@ -233,89 +242,7 @@ impl JsSession {
         }));
         let fns = QjsFns {
             session: inner.cast(),
-            column,
-            row,
-            stack,
-            padding,
-            pointer_region,
-            decorated,
-            text,
-            append,
-            insert,
-            remove,
-            detach,
-            discard,
-            free_ids,
-            parent,
-            first_child,
-            next_sibling,
-            is_text,
-            set_text,
-            set_font_size,
-            set_color,
-            set_gap,
-            set_padding,
-            clip,
-            opacity,
-            set_grow,
-            image,
-            set_radius,
-            set_alpha,
-            set_align,
-            set_size,
-            set_image,
-            set_max_lines,
-            set_ellipsis,
-            set_text_align,
-            set_font_weight,
-            set_text_direction,
-            set_line_height,
-            set_family,
-            scroll,
-            set_scroll_offset,
-            scroll_offset,
-            rect,
-            transform,
-            set_transform,
-            set_justify,
-            set_wrap,
-            set_fill,
             log: log_message,
-            sized,
-            set_focusable,
-            focus: focus_node,
-            blur: blur_node,
-            set_ime_enabled,
-            set_ime_text,
-            set_ime_state,
-            set_semantics,
-            text_scale,
-            reduce_motion,
-            measure_text,
-            grid,
-            set_padding_edges,
-            set_margin,
-            set_min_size,
-            set_max_size,
-            set_shrink,
-            set_basis,
-            set_align_self,
-            set_drag_claim,
-            caret_at,
-            word_range,
-            focus_step,
-            push_focus_scope,
-            pop_focus_scope,
-            pointer_position,
-            text_edit,
-            text_edit_bytes,
-            set_text_scale,
-            set_soft_wrap,
-            set_overflow,
-            caret_at_unit,
-            selection_rects,
-            selection_rect_bytes,
-            set_ime_config,
             http: http_call,
             http_stream: http_stream_call,
             abort_token,
@@ -324,33 +251,8 @@ impl JsSession {
             socket_open,
             socket_send,
             socket_close,
-            focused: focused_id,
-            is_focusable,
-            grapheme_index: grapheme_index_of,
-            grapheme_count: grapheme_count_of,
-            grapheme_unit: grapheme_unit_of,
-            set_reverse,
-            set_axis_size,
-            set_min_axis,
-            set_max_axis,
-            measure_panel,
-            set_panel,
-            set_aspect_ratio,
-            set_position,
-            set_inset,
-            set_grid_placement,
-            set_scale_xy,
-            register_font,
-            set_image_mode,
-            reload,
-            push_mutation,
+            push_mutation: mutation::push_mutation,
             release_bytes: release_bytes_cb,
-            layer_stats,
-            scroll_into_view,
-            animate,
-            fling_target,
-            set_recognizers,
-            set_stroke,
             module_push_null,
             module_push_bool,
             module_push_f64,
@@ -367,15 +269,6 @@ impl JsSession {
             module_count,
             module_method_at,
             module_name_of,
-            align,
-            set_cross,
-            viewport,
-            set_scroll_physics,
-            set_scroll_chain,
-            overscroll,
-            arm_fling,
-            stop_scroll,
-            scroll_to,
             list_create: driver::list_create,
             list_release: driver::list_release,
             list_bind: driver::list_bind,
@@ -394,12 +287,14 @@ impl JsSession {
             scroll_wheel: driver::scroll_wheel,
             scroll_query: driver::scroll_query,
             scroll_consume: driver::scroll_consume,
-            set_scroll_axis,
             debug_json,
             debug_json_bytes,
             debug_set_scan,
             debug_set_pointer_trace,
             debug_set_owned,
+            mutate: mutation::mutate,
+            query: call::query,
+            effect: call::effect,
         };
         // SAFETY: `inner` stays at this address until `Drop`. `qjs_open` copies
         // the function table. The copied session pointer is only used while
@@ -416,7 +311,45 @@ impl JsSession {
             unsafe { (*inner).http = RefCell::new(Some(client)) };
         }
         let mut error = [0u8; 512];
+        let abi_name = CString::new("abi.js").map_err(|_| Error::Runtime)?;
+        let abi_failed = unsafe {
+            qjs_eval(
+                host,
+                host::ABI_JS.as_ptr().cast(),
+                host::ABI_JS.len(),
+                abi_name.as_ptr(),
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        };
+        if abi_failed != 0 {
+            let message = c_message(&error);
+            unsafe { qjs_close(host) };
+            unsafe { (*inner).host = ptr::null_mut() };
+            unsafe { drop(Box::from_raw(inner)) };
+            return Err(Error::Script(message));
+        }
+        let core_name = CString::new("core.js").map_err(|_| Error::Runtime)?;
+        error = [0u8; 512];
+        let core_failed = unsafe {
+            qjs_eval(
+                host,
+                host::CORE_JS.as_ptr().cast(),
+                host::CORE_JS.len(),
+                core_name.as_ptr(),
+                error.as_mut_ptr().cast(),
+                error.len(),
+            )
+        };
+        if core_failed != 0 {
+            let message = c_message(&error);
+            unsafe { qjs_close(host) };
+            unsafe { (*inner).host = ptr::null_mut() };
+            unsafe { drop(Box::from_raw(inner)) };
+            return Err(Error::Script(message));
+        }
         let prelude_name = CString::new("prelude.js").map_err(|_| Error::Runtime)?;
+        error = [0u8; 512];
         let prelude_failed = unsafe {
             qjs_eval(
                 host,
@@ -569,6 +502,14 @@ impl Session for JsSession {
             top,
             (metrics.width - left - right).max(0.0),
             (metrics.height - top - bottom).max(0.0),
+        );
+        let _ = tree.set_safe_area(
+            metrics.width,
+            metrics.height,
+            metrics.padding.left,
+            metrics.padding.top,
+            metrics.padding.right,
+            metrics.padding.bottom,
         );
         if metrics.device_pixel_ratio.is_finite() && metrics.device_pixel_ratio > 0.0 {
             let _ = tree.set_pixel_scale(metrics.device_pixel_ratio);
@@ -881,7 +822,9 @@ impl Session for JsSession {
                 return self.hold_frame(message);
             }
             let flush_started = std::time::Instant::now();
-            flush_mutations(inner);
+            if let Err(error) = mutation::flush_mutations(inner) {
+                return self.hold_frame(error.to_string());
+            }
             let flush_ms = elapsed_ms(flush_started);
             sweep_detached(inner);
             let script_ms = elapsed_ms(script_started);
@@ -901,7 +844,9 @@ impl Session for JsSession {
                     self.note_script_error(message);
                 }
             }
-            flush_mutations(inner);
+            if let Err(error) = mutation::flush_mutations(inner) {
+                return self.hold_frame(error.to_string());
+            }
             {
                 let mut tree = inner.tree.borrow_mut();
                 if tree.needs_layout() {
@@ -923,7 +868,9 @@ impl Session for JsSession {
                 if failed != 0 {
                     return self.hold_frame(c_message(&error));
                 }
-                flush_mutations(inner);
+                if let Err(error) = mutation::flush_mutations(inner) {
+                    return self.hold_frame(error.to_string());
+                }
             }
             let mut tree = inner.tree.borrow_mut();
             if ran_layout && tree.needs_layout() {
@@ -968,6 +915,7 @@ impl Session for JsSession {
             let semantics_ms = elapsed_ms(semantics_started);
             let (layout_ms, sync_ms) = tree.layout_timing();
             let layout_trace = tree.take_layout_trace();
+            inner.ime.borrow_mut().sync_editor(&tree);
             drop(tree);
             let trace = session::FrameTrace {
                 laywork_ms: layout_trace.laywork_ms,
@@ -1026,7 +974,10 @@ impl Session for JsSession {
         }
         let visual = {
             let tree = inner.tree.borrow();
-            tree.needs_layout() || tree.needs_paint() || tree.fling_active()
+            tree.needs_layout()
+                || tree.needs_paint()
+                || tree.fling_active()
+                || tree.pending_long_press()
         };
         let jobs = unsafe { qjs_jobs_pending(inner.host) != 0 };
         let soon = unsafe { qjs_needs_frame(inner.host) != 0 };
@@ -1138,13 +1089,6 @@ pub(super) fn publish(out: *mut u64, id: u64) -> i32 {
     // SAFETY: glue passes a writable `uint64_t` that lives for this call.
     unsafe { *out = id };
     0
-}
-
-pub(super) fn created(result: Result<NodeId, uicore::Error>, out: *mut u64) -> i32 {
-    match result {
-        Ok(id) => publish(out, id.to_raw()),
-        Err(_) => -1,
-    }
 }
 
 pub(super) fn status(result: Result<(), uicore::Error>) -> i32 {

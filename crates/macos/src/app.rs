@@ -444,12 +444,12 @@ impl ContentView {
         }
     }
 
-    fn apply_semantics(&self, update: uicore::SemanticsUpdate) {
+    fn apply_semantics(&self, nodes: &[hostshell::ProjectedNode]) {
         self.ivars().a11y.apply(
             self.mtm(),
             &self.ivars().poster,
             self as *const ContentView as *const NSView,
-            &update,
+            nodes,
         );
     }
 
@@ -872,16 +872,16 @@ impl Services for MacServices {
         (family == FONT_FAMILY).then_some(self.font.as_slice())
     }
 
-    fn semantics(&self, update: &uicore::SemanticsUpdate) {
+    fn semantics(&self, nodes: &[hostshell::ProjectedNode]) {
         let view = self.ime_view.load(Ordering::Acquire) as usize;
         if view == 0 {
             return;
         }
-        let update = update.clone();
+        let nodes = nodes.to_vec();
         dispatch_main(Box::new(move || {
             // SAFETY: the address is the content view stored on the main thread, and this closure runs there too.
             let view = unsafe { &*(view as *const ContentView) };
-            view.apply_semantics(update);
+            view.apply_semantics(&nodes);
         }));
     }
 

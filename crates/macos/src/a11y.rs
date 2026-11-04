@@ -74,43 +74,22 @@ impl ElementCache {
     }
 }
 
-/// Drop Generic nodes and hang their children on the nearest non-Generic ancestor.
-pub fn visible_nodes(update: &uicore::SemanticsUpdate) -> Vec<VisibleNode> {
-    let by_id: HashMap<uicore::SemanticsId, &uicore::SemanticsNode> =
-        update.nodes.iter().map(|node| (node.id, node)).collect();
-    update
-        .nodes
+/// Map already-projected nodes onto the AppKit element shape. Parent chain is not recomputed.
+pub fn visible_nodes(nodes: &[hostshell::ProjectedNode]) -> Vec<VisibleNode> {
+    nodes
         .iter()
-        .filter(|node| node.role != uicore::SemanticsRole::Generic)
         .map(|node| VisibleNode {
             id: node.id,
-            parent: resolved_parent(node, &by_id),
+            parent: node.parent,
             rect: node.rect,
             role: node.role,
             label: node.label.clone(),
-            help: node.description.clone().unwrap_or_default(),
+            help: node.help.clone(),
             actions: node.actions,
             flags: node.flags,
-            selection: node
-                .selection
-                .or_else(|| node.caret.map(|unit| (unit, unit))),
+            selection: node.selection,
         })
         .collect()
-}
-
-fn resolved_parent(
-    node: &uicore::SemanticsNode,
-    by_id: &HashMap<uicore::SemanticsId, &uicore::SemanticsNode>,
-) -> Option<uicore::SemanticsId> {
-    let mut current = node.parent;
-    while let Some(id) = current {
-        match by_id.get(&id) {
-            Some(parent) if parent.role != uicore::SemanticsRole::Generic => return Some(id),
-            Some(parent) => current = parent.parent,
-            None => return None,
-        }
-    }
-    None
 }
 
 /// Button, Text, Image, TextField, Switch→CheckBox, Scroll. Generic is not an element.
@@ -132,51 +111,6 @@ pub fn ax_role(role: uicore::SemanticsRole) -> Option<AxRole> {
 /// `1` when `CHECKED` is set, otherwise `0`.
 pub fn checked_value(flags: uicore::SemanticsFlags) -> i32 {
     i32::from(flags.contains(uicore::SemanticsFlags::CHECKED))
-}
-
-/// Forward increment is positive. Vertical overflow wins even when both axes overflow.
-#[cfg(test)]
-pub fn scroll_step(
-    viewport_w: f32,
-    viewport_h: f32,
-    content_w: f32,
-    content_h: f32,
-    forward: bool,
-) -> (f32, f32) {
-    let (dx, dy) = if content_h > viewport_h {
-        (0.0, viewport_h)
-    } else if content_w > viewport_w {
-        (viewport_w, 0.0)
-    } else {
-        (0.0, 0.0)
-    };
-    if forward { (dx, dy) } else { (-dx, -dy) }
-}
-
-/// Direct children of `scroll_id` in the original snapshot. No children → viewport.
-#[cfg(test)]
-pub fn content_extent(
-    update: &uicore::SemanticsUpdate,
-    scroll_id: uicore::SemanticsId,
-) -> (f32, f32) {
-    let Some(scroll) = update.nodes.iter().find(|node| node.id == scroll_id) else {
-        return (0.0, 0.0);
-    };
-    let mut width: f32 = 0.0;
-    let mut height: f32 = 0.0;
-    let mut any = false;
-    for child in &update.nodes {
-        if child.parent == Some(scroll_id) {
-            any = true;
-            width = width.max(child.rect.w);
-            height = height.max(child.rect.h);
-        }
-    }
-    if any {
-        (width, height)
-    } else {
-        (scroll.rect.w, scroll.rect.h)
-    }
 }
 
 pub fn scene_rect_to_screen(view: &NSView, rect: uicore::Rect) -> NSRect {
@@ -382,9 +316,9 @@ impl A11yHost {
         mtm: MainThreadMarker,
         poster: &Poster,
         host: *const NSView,
-        update: &uicore::SemanticsUpdate,
+        nodes: &[hostshell::ProjectedNode],
     ) {
-        let visible = visible_nodes(update);
+        let visible = visible_nodes(nodes);
         let live: HashSet<u64> = visible.iter().map(|node| node.id.0).collect();
         {
             let mut elements = self.elements.borrow_mut();
@@ -435,9 +369,7 @@ impl A11yHost {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AxRole, ElementCache, ax_role, checked_value, content_extent, scroll_step, visible_nodes,
-    };
+    use super::{AxRole, ElementCache, ax_role, checked_value, visible_nodes};
     use uicore::{
         SemanticsActions, SemanticsFlags, SemanticsId, SemanticsNode, SemanticsRole,
         SemanticsUpdate,
@@ -479,7 +411,7 @@ mod tests {
             ],
             root: SemanticsId(1),
         };
-        let visible = visible_nodes(&update);
+        let visible = visible_nodes(&hostshell::project(&update));
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].label, "Minus");
         assert_eq!(visible[1].label, "Plus");
@@ -497,7 +429,7 @@ mod tests {
             ],
             root: SemanticsId(1),
         };
-        let visible = visible_nodes(&update);
+        let visible = visible_nodes(&hostshell::project(&update));
         assert_eq!(visible.len(), 2);
         assert!(
             visible
@@ -535,7 +467,7 @@ mod tests {
             nodes: vec![node(1, None, SemanticsRole::Generic, ""), field],
             root: SemanticsId(1),
         };
-        let visible = visible_nodes(&update);
+        let visible = visible_nodes(&hostshell::project(&update));
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].label, "Name");
         assert_eq!(visible[0].help, "Required");
@@ -544,9 +476,18 @@ mod tests {
 
     #[test]
     fn vertical_overflow_uses_viewport_height() {
-        assert_eq!(scroll_step(200.0, 100.0, 200.0, 250.0, true), (0.0, 100.0));
-        assert_eq!(scroll_step(100.0, 100.0, 250.0, 250.0, true), (0.0, 100.0));
-        assert_eq!(scroll_step(100.0, 100.0, 100.0, 100.0, true), (0.0, 0.0));
+        assert_eq!(
+            hostshell::scroll_step(200.0, 100.0, 200.0, 250.0, true),
+            (0.0, 100.0)
+        );
+        assert_eq!(
+            hostshell::scroll_step(100.0, 100.0, 250.0, 250.0, true),
+            (0.0, 100.0)
+        );
+        assert_eq!(
+            hostshell::scroll_step(100.0, 100.0, 100.0, 100.0, true),
+            (0.0, 0.0)
+        );
         let update = SemanticsUpdate {
             nodes: vec![
                 SemanticsNode {
@@ -580,7 +521,10 @@ mod tests {
             ],
             root: SemanticsId(1),
         };
-        assert_eq!(content_extent(&update, SemanticsId(1)), (200.0, 250.0));
+        assert_eq!(
+            hostshell::content_extent(&update, SemanticsId(1)),
+            (200.0, 250.0)
+        );
     }
 
     #[test]

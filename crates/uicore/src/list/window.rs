@@ -40,6 +40,10 @@ pub fn sticky_translate(next_start: Option<f32>, offset: f32, header_height: f32
 }
 
 /// Finger position, including distance already past the edge.
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "window arithmetic covered by list tests")
+)]
 pub fn drag_origin(
     offset_x: f32,
     offset_y: f32,

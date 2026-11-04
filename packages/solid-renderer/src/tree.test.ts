@@ -62,6 +62,18 @@ function mockHost() {
     setPadding: (node, edges) => note("setPadding", [node, edges]),
     setPaddingEdges: (node, top, right, bottom, left) =>
       note("setPaddingEdges", [node, top, right, bottom, left]),
+    setPaddingEdge: (node, edge, value) => note("setPaddingEdge", [node, edge, value]),
+    setInsetEdge: (node, edge, value) => note("setInsetEdge", [node, edge, value]),
+    setTransformComponent: (node, component, value) => note("setTransformComponent", [node, component, value]),
+    setSizeAxis: (node, axis, kind, value) => note("setSizeAxis", [node, axis, kind, value]),
+    setGridLine: (node, edge, kind, value) => note("setGridLine", [node, edge, kind, value]),
+    placePanel: (panel, anchor, align) => note("placePanel", [panel, anchor, align]),
+    reparentChildren: (from, to) => note("reparentChildren", [from, to]),
+    textCommand: (node, name, extra) => {
+      note("textCommand", [node, name, extra]);
+      return { text: extra ?? "", start: 0, end: 0 };
+    },
+    setTextLimit: (node, limit) => note("setTextLimit", [node, limit]),
     setMargin: (node, top, right, bottom, left) => note("setMargin", [node, top, right, bottom, left]),
     setMinSize: (node, width, height) => note("setMinSize", [node, width, height]),
     setMaxSize: (node, width, height) => note("setMaxSize", [node, width, height]),
@@ -305,9 +317,9 @@ const shifted = options.createElement("transform", { x: 4, scale: 2 });
 const spread = options.createElement("row", { gap: 0, justify: "space-between", wrap: true, fill: true });
 if (!find(mock.calls, "scroll")) fail("scroll");
 if (find(mock.calls, "onDragBy")?.args[0] !== scroller.id) fail("onDragBy");
-const transforms = mock.calls.filter((call) => call.name === "setTransform" && call.args[0] === shifted.id);
-const shiftedTransform = transforms[transforms.length - 1];
-if (shiftedTransform?.args[1] !== 4 || shiftedTransform.args[4] !== 2) fail("transform");
+const transforms = mock.calls.filter((call) => call.name === "setTransformComponent" && call.args[0] === shifted.id);
+if (!transforms.some((call) => call.args[1] === 0 && call.args[2] === 4)) fail("transform x");
+if (!transforms.some((call) => call.args[1] === 3 && call.args[2] === 2)) fail("transform scale");
 if (find(mock.calls, "setJustify")?.args[0] !== spread.id || find(mock.calls, "setJustify")?.args[1] !== "space-between") {
   fail("justify");
 }
@@ -338,9 +350,10 @@ if (JSON.stringify(gridCall?.args[0]) !== JSON.stringify(["40", "1fr"])) fail("g
 if (JSON.stringify(gridCall?.args[1]) !== JSON.stringify(["min"])) fail("grid rows");
 if (gridCall?.args[2] !== 0 || tracks.id === 0) fail("grid");
 const inset = options.createElement("padding", { edges: 4, left: 4, top: 6 });
-const edgeCall = mock.calls.filter((call) => call.name === "setPaddingEdges" && call.args[0] === inset.id);
-const lastEdge = edgeCall[edgeCall.length - 1];
-if (lastEdge?.args[1] !== 6 || lastEdge.args[4] !== 4) fail("padding edges");
+const edgeCall = mock.calls.filter((call) => call.name === "setPaddingEdge" && call.args[0] === inset.id);
+if (!edgeCall.some((call) => call.args[1] === 0 && call.args[2] === 6)) fail("padding top");
+if (!edgeCall.some((call) => call.args[1] === 3 && call.args[2] === 4)) fail("padding left");
+if (mock.calls.some((call) => String(call.name).includes("mutation"))) fail("mutation file");
 options.setProperty(row, "margin", 8);
 options.setProperty(row, "shrink", 0);
 options.setProperty(row, "alignSelf", "center");
@@ -357,13 +370,13 @@ options.setProperty(pointer, "onZoom", (scale: number) => scale);
 if (find(mock.calls, "onZoom")?.args[0] !== pointer.id) fail("onZoom");
 
 options.setProperty(box, "w", "50%");
-const axisCalls = mock.calls.filter((call) => call.name === "setAxisSize" && call.args[0] === box.id);
+const axisCalls = mock.calls.filter((call) => call.name === "setSizeAxis" && call.args[0] === box.id);
 const half = axisCalls[axisCalls.length - 1];
-if (half?.args[1] !== "50%" || half.args[2] !== 22) fail("axis percent");
+if (half?.args[1] !== 0 || half.args[2] !== 2 || half.args[3] !== 0.5) fail("axis percent");
 options.setProperty(box, "h", "auto");
-const autoHeight = mock.calls.filter((call) => call.name === "setAxisSize" && call.args[0] === box.id);
+const autoHeight = mock.calls.filter((call) => call.name === "setSizeAxis" && call.args[0] === box.id);
 const autoCall = autoHeight[autoHeight.length - 1];
-if (autoCall?.args[1] !== "50%" || autoCall.args[2] !== "auto") fail("axis auto");
+if (autoCall?.args[1] !== 1 || autoCall.args[2] !== 0) fail("axis auto");
 options.setProperty(box, "aspect", null);
 options.setProperty(box, "absolute", true);
 options.setProperty(box, "insetTop", 10);
@@ -374,14 +387,12 @@ if (find(mock.calls, "setAspectRatio")?.args[0] !== box.id || find(mock.calls, "
   fail("aspect");
 }
 if (find(mock.calls, "setPosition")?.args[1] !== true) fail("absolute");
-const insetCalls = mock.calls.filter((call) => call.name === "setInset" && call.args[0] === box.id);
-const lastInset = insetCalls[insetCalls.length - 1];
-if (lastInset?.args[1] !== 10 || lastInset.args[4] !== 4) fail("inset");
-const placement = mock.calls.filter((call) => call.name === "setGridPlacement" && call.args[0] === box.id);
-const lastPlacement = placement[placement.length - 1];
-if (JSON.stringify(lastPlacement?.args[1]) !== JSON.stringify({ span: 2 }) || lastPlacement?.args[2] !== "auto") {
-  fail("grid line");
-}
+const insetCalls = mock.calls.filter((call) => call.name === "setInsetEdge" && call.args[0] === box.id);
+if (!insetCalls.some((call) => call.args[1] === 0 && call.args[2] === 10)) fail("inset");
+if (!insetCalls.some((call) => call.args[1] === 3 && call.args[2] === 4)) fail("inset");
+const placement = mock.calls.filter((call) => call.name === "setGridLine" && call.args[0] === box.id);
+if (!placement.some((call) => call.args[1] === 0 && call.args[2] === 2 && call.args[3] === 2)) fail("grid line");
+if (!placement.some((call) => call.args[1] === 1 && call.args[2] === 0)) fail("grid line");
 let badAxis = false;
 try {
   options.setProperty(box, "w", "fill");
