@@ -799,30 +799,18 @@ impl<'a> crate::painter::Painter<'a> {
             unsafe { ffi::ImpellerDisplayListBuilderDrawParagraph(builder, paragraph, &point) };
             return true;
         }
-        let Ok(shaped) = self
+        let Ok((paragraph, slot)) = self
             .typography
-            .build_paragraph(utf8, font_size, max_width, color, text_style, spans)
+            .acquire_draw(utf8, font_size, max_width, color, text_style, spans)
         else {
             return false;
         };
         self.typography.store_text_probe(true, color);
         let point = ffi::ImpellerPoint { x, y };
-        let paragraph = shaped.paragraph;
-        // SAFETY: `paragraph` is owned by this engine. A matching stale slot takes it
-        // over; otherwise it stays in `pending` until the display list that
-        // references it is released.
+        // SAFETY: `paragraph` is an extra retain of the cache slot. `release_draw`
+        // drops the cache's live count when this display list is released.
         unsafe { ffi::ImpellerDisplayListBuilderDrawParagraph(builder, paragraph, &point) };
-        let replaced = if self.typography.stale() {
-            self.typography
-                .replace_retained(paragraph_id, color, paragraph)
-        } else {
-            None
-        };
-        match replaced {
-            Some(old) if !old.is_null() => self.typography.retire_paragraph(old),
-            Some(_) => {}
-            None => self.pending.push(paragraph),
-        }
+        self.pending.push(HeldParagraph { paragraph, slot });
         true
     }
 }

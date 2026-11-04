@@ -1,6 +1,7 @@
 //! Taffy styles, measure, and the viewport.
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use taffy::prelude::*;
@@ -146,7 +147,7 @@ impl Tree {
                 Ok(node) => node.parent,
                 Err(_) => return,
             };
-            let stop = parent.is_none() || self.renders_layer_node(id);
+            let stop = parent.is_none() || self.renders_layer_node(id) || self.is_picture_owner(id);
             if stop {
                 if let Ok(node) = self.node_mut(id) {
                     node.flags.insert(NodeFlags::REPAINT_DIRTY);
@@ -158,6 +159,28 @@ impl Tree {
             };
             id = parent;
         }
+    }
+
+    pub(super) fn is_picture_owner(&self, id: NodeId) -> bool {
+        self.get(id)
+            .is_some_and(|node| node.flags.contains(NodeFlags::PICTURE_OWNER))
+    }
+
+    /// Records the subtree of `id` as its own picture. The first transition
+    /// dirties `id` and its parent owner so the parent run drops the old commands.
+    /// A repeat call does not.
+    pub(crate) fn set_picture_owner(&mut self, id: NodeId, on: bool) -> Result<(), Error> {
+        if self.node(id)?.flags.contains(NodeFlags::PICTURE_OWNER) == on {
+            return Ok(());
+        }
+        self.node_mut(id)?.flags.set(NodeFlags::PICTURE_OWNER, on);
+        self.dirty_picture(id);
+        if let Some(parent) = self.get(id).and_then(|node| node.parent) {
+            self.dirty_picture(parent);
+        }
+        self.layer_epoch = self.layer_epoch.wrapping_add(1);
+        self.mark_paint();
+        Ok(())
     }
 
     pub(super) fn renders_layer_node(&self, id: NodeId) -> bool {
@@ -836,12 +859,31 @@ impl Tree {
         while index < self.motions.len() {
             let started = self.motions[index].started_ms;
             let t = (target_ms - started).max(0.0);
-            let value = self.motions[index].simulation.x(t);
-            let finished = self.motions[index].simulation.done(t);
+            let mut value = self.motions[index].simulation.x(t);
+            let mut finished = self.motions[index].simulation.done(t);
             let velocity = self.motions[index].simulation.dx(t);
             let node = self.motions[index].node;
             let prop = self.motions[index].prop;
             let snap = self.motions[index].snap;
+            if matches!(
+                prop,
+                crate::AnimProp::OverscrollX | crate::AnimProp::OverscrollY
+            ) {
+                let previous = self
+                    .node(node)
+                    .ok()
+                    .map(|sampled| sampled.overscroll())
+                    .unwrap_or((0.0, 0.0));
+                let previous = if prop == crate::AnimProp::OverscrollX {
+                    previous.0
+                } else {
+                    previous.1
+                };
+                if previous * value < 0.0 {
+                    value = 0.0;
+                    finished = true;
+                }
+            }
             let stop = self.apply_motion(node, prop, value) || finished;
             if stop {
                 self.motion_ends.push((node, prop));
@@ -1019,21 +1061,26 @@ impl Tree {
         };
         let started = std::time::Instant::now();
         let mut measured = Vec::new();
-        let env = MeasureEnv {
-            slots: &self.slots,
-            shaper: self.shaper.as_ref(),
-            text_scale: self.text_scale,
-            text_reused: &self.text_reused,
-            text_shaped: &self.text_shaped,
-        };
+        self.open_measure();
         let taffy_started = std::time::Instant::now();
-        self.taffy.compute_layout_with_measure(
-            root_taffy,
-            available,
-            |known, available, _id, context, _style| {
-                measure_leaf(&env, known, available, context, &mut measured)
-            },
-        )?;
+        {
+            let shaper = &mut *self.shaper;
+            let mut env = MeasureEnv {
+                slots: &self.slots,
+                shaper,
+                text_scale: self.text_scale,
+                text_reused: &self.text_reused,
+                text_shaped: &self.text_shaped,
+                provisional: HashMap::new(),
+            };
+            self.taffy.compute_layout_with_measure(
+                root_taffy,
+                available,
+                |known, available, _id, context, _style| {
+                    measure_leaf(&mut env, known, available, context, &mut measured)
+                },
+            )?;
+        }
         self.taffy_ms = taffy_started.elapsed().as_secs_f64() * 1000.0;
         for id in measured {
             self.note_text(id);
@@ -1057,7 +1104,7 @@ impl Tree {
         self.needs_layout = false;
         self.needs_paint = true;
         self.laid_out = true;
-        self.sync_paragraphs();
+        self.sync_metrics();
         self.layout_work_ms += started.elapsed().as_secs_f64() * 1000.0;
         if self.debug.scan_overflow {
             self.scan_overflow();
@@ -1089,6 +1136,48 @@ impl Tree {
         Ok(())
     }
 
+    pub(super) fn open_measure(&mut self) {
+        if self.measure_open {
+            return;
+        }
+        self.shaper.begin_frame();
+        self.measure_open = true;
+    }
+
+    pub(super) fn finish_measure(&mut self) {
+        if !self.measure_open {
+            return;
+        }
+        self.shaper.end_frame();
+        self.measure_open = false;
+    }
+
+    fn measure_subtree(
+        &mut self,
+        taffy_id: taffy::NodeId,
+        width: AvailableSpace,
+        height: AvailableSpace,
+        measured: &mut Vec<NodeId>,
+    ) -> Result<Size<f32>, Error> {
+        let shaper = &mut *self.shaper;
+        let mut env = MeasureEnv {
+            slots: &self.slots,
+            shaper,
+            text_scale: self.text_scale,
+            text_reused: &self.text_reused,
+            text_shaped: &self.text_shaped,
+            provisional: HashMap::new(),
+        };
+        self.taffy.compute_layout_with_measure(
+            taffy_id,
+            Size { width, height },
+            |known, available, _id, context, _style| {
+                measure_leaf(&mut env, known, available, context, measured)
+            },
+        )?;
+        Ok(self.taffy.layout(taffy_id)?.size)
+    }
+
     /// Lay out `id`'s subtree under `space` and return the content size.
     ///
     /// The caller then pins the panel with [`Tree::set_axis_size`] so the
@@ -1111,28 +1200,17 @@ impl Tree {
         };
         let started = std::time::Instant::now();
         let mut measured = Vec::new();
-        let env = MeasureEnv {
-            slots: &self.slots,
-            shaper: self.shaper.as_ref(),
-            text_scale: self.text_scale,
-            text_reused: &self.text_reused,
-            text_shaped: &self.text_shaped,
-        };
-        let mut run = |width: AvailableSpace, height: AvailableSpace| -> Result<Size<f32>, Error> {
-            self.taffy.compute_layout_with_measure(
-                taffy_id,
-                Size { width, height },
-                |known, available, _id, context, _style| {
-                    measure_leaf(&env, known, available, context, &mut measured)
-                },
-            )?;
-            Ok(self.taffy.layout(taffy_id)?.size)
-        };
-        let natural = run(first_width, first_height)?;
+        self.open_measure();
+        let natural = self.measure_subtree(taffy_id, first_width, first_height, &mut measured)?;
         let mut size = natural;
         if let SubtreeSpace::CappedMax(cap) = space {
             if natural.width > cap {
-                size = run(AvailableSpace::Definite(cap), AvailableSpace::MaxContent)?;
+                size = self.measure_subtree(
+                    taffy_id,
+                    AvailableSpace::Definite(cap),
+                    AvailableSpace::MaxContent,
+                    &mut measured,
+                )?;
             }
         } else if let Some(cap) = recheck_cap {
             let _ = cap;
@@ -1350,7 +1428,7 @@ impl Tree {
         Ok(())
     }
 
-    pub(super) fn node_baseline(&self, id: NodeId) -> f32 {
+    pub(super) fn node_baseline(&mut self, id: NodeId) -> f32 {
         let Ok(node) = self.node(id) else {
             return 0.0;
         };
@@ -1725,7 +1803,7 @@ fn reusable_text_size(
     if key.font_size != font_size.to_bits() || key.text.as_ref() != text.utf8.as_ref() {
         return None;
     }
-    if key.style.as_ref() != text.style.as_ref() || cached.color != text.color {
+    if key.style.as_ref() != text.style.as_ref() {
         return None;
     }
     if !spans_match(text, cached) {
@@ -1772,14 +1850,31 @@ fn line_limit(space: AvailableSpace) -> f32 {
 
 struct MeasureEnv<'a> {
     slots: &'a [Slot],
-    shaper: &'a dyn Shaper,
+    shaper: &'a mut dyn Shaper,
     text_scale: f32,
     text_reused: &'a Cell<u32>,
     text_shaped: &'a Cell<u32>,
+    /// Sizes already shaped in this Taffy pass, keyed by node index.
+    provisional: HashMap<usize, (u32, TextSize)>,
+}
+
+fn recall(
+    provisional: &HashMap<usize, (u32, TextSize)>,
+    index: usize,
+    width_bits: u32,
+) -> Option<TextSize> {
+    let (old_bits, size) = *provisional.get(&index)?;
+    let old = f32::from_bits(old_bits);
+    let width = f32::from_bits(width_bits);
+    if old_bits == width_bits || (size.width + 0.5 < old && size.width <= width + 0.5) {
+        Some(size)
+    } else {
+        None
+    }
 }
 
 fn measure_leaf(
-    env: &MeasureEnv<'_>,
+    env: &mut MeasureEnv<'_>,
     known: Size<Option<f32>>,
     available: Size<AvailableSpace>,
     context: Option<&mut usize>,
@@ -1809,7 +1904,7 @@ fn measure_leaf(
                         Arc::clone(&text.style),
                         text.spans.as_ref(),
                         font_size,
-                        f32::MAX,
+                        SINGLE_LINE_MAX,
                         text.color,
                     ))
                     .height,
@@ -1817,14 +1912,21 @@ fn measure_leaf(
         } else {
             let max_width = line_limit(available.width);
             let font_size = text.font_size * env.text_scale;
+            let width_bits = max_width.to_bits();
             if let Some(size) = reusable_text_size(text, font_size, max_width) {
                 env.text_reused.set(env.text_reused.get().saturating_add(1));
-                let paints_at = text
-                    .cached
-                    .as_ref()
-                    .map(|key| key.metrics.max_width)
-                    .unwrap_or(0);
-                if paints_at == max_width.to_bits() {
+                let cached = text.cached.as_ref();
+                let paints_at = cached.map(|key| key.metrics.max_width).unwrap_or(0);
+                if paints_at == width_bits {
+                    text.max_width.set(max_width);
+                }
+                if let Some(cached) = cached {
+                    env.shaper.touch(cached);
+                }
+                size
+            } else if let Some(size) = recall(&env.provisional, index, width_bits) {
+                env.text_reused.set(env.text_reused.get().saturating_add(1));
+                if max_width != SINGLE_LINE_MAX {
                     text.max_width.set(max_width);
                 }
                 size
@@ -1846,7 +1948,9 @@ fn measure_leaf(
                     text.color,
                 );
                 env.text_shaped.set(env.text_shaped.get().saturating_add(1));
-                env.shaper.measure_paint(&key)
+                let size = env.shaper.measure_paint(&key);
+                env.provisional.insert(index, (width_bits, size));
+                size
             }
         }
     } else if let Some(image) = node.image() {
@@ -1959,5 +2063,76 @@ fn relayout_boundary_moves_siblings_and_skips_a_clean_scroll() -> Result<(), Err
     assert_eq!(tree.node(right)?.x, right_local);
     let (scene_x, scene_y) = tree.layout_point(left)?;
     assert_eq!((tree.rect(left)?.x, tree.rect(left)?.y), (scene_x, scene_y));
+    Ok(())
+}
+
+#[test]
+fn second_layout_touches_cached_text_and_color_reshapes() -> Result<(), Error> {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct Count {
+        inner: crate::MonoShaper,
+        paints: Rc<Cell<u32>>,
+        touches: Rc<Cell<u32>>,
+        color: Rc<Cell<[u8; 4]>>,
+    }
+
+    impl Shaper for Count {
+        fn metrics(&mut self, key: &crate::MetricsKey) -> Arc<crate::ParagraphMetrics> {
+            self.inner.metrics(key)
+        }
+        fn measure_paint(&mut self, key: &crate::PaintKey) -> TextSize {
+            self.paints.set(self.paints.get().saturating_add(1));
+            self.color.set(key.color);
+            self.inner.measure_paint(key)
+        }
+        fn metrics_paint(&mut self, key: &crate::PaintKey) -> Arc<crate::ParagraphMetrics> {
+            self.paints.set(self.paints.get().saturating_add(1));
+            self.color.set(key.color);
+            self.inner.metrics_paint(key)
+        }
+        fn touch(&mut self, key: &crate::PaintKey) {
+            self.touches.set(self.touches.get().saturating_add(1));
+            self.color.set(key.color);
+        }
+        fn caret_at_unit(
+            &mut self,
+            key: &crate::MetricsKey,
+            unit: u32,
+            affinity: crate::Affinity,
+        ) -> crate::Caret {
+            self.inner.caret_at_unit(key, unit, affinity)
+        }
+        fn caret_at_point(&mut self, key: &crate::MetricsKey, x: f32, y: f32) -> crate::Caret {
+            self.inner.caret_at_point(key, x, y)
+        }
+        fn word_range(&mut self, key: &crate::MetricsKey, unit: u32) -> (u32, u32) {
+            self.inner.word_range(key, unit)
+        }
+    }
+
+    let paints = Rc::new(Cell::new(0));
+    let touches = Rc::new(Cell::new(0));
+    let color = Rc::new(Cell::new([0, 0, 0, 0]));
+    let mut tree = Tree::new(Count {
+        inner: crate::MonoShaper::new(),
+        paints: Rc::clone(&paints),
+        touches: Rc::clone(&touches),
+        color: Rc::clone(&color),
+    });
+    tree.set_viewport(0.0, 0.0, 200.0, 400.0)?;
+    let text = tree.text("Hi", 16.0, [0, 0, 0, 255])?;
+    tree.layout()?;
+    let first = paints.get();
+    assert!(first > 0);
+    tree.touch_measure(text)?;
+    tree.layout()?;
+    assert!(touches.get() >= 1);
+    assert_eq!(paints.get(), first);
+    tree.set_color(text, [255, 0, 0, 255])?;
+    tree.layout()?;
+    assert_eq!(color.get(), [255, 0, 0, 255]);
+    assert!(paints.get() > first);
     Ok(())
 }

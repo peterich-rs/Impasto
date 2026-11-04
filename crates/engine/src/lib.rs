@@ -56,6 +56,8 @@ pub struct ShapeStats {
     pub measure_miss: u32,
     pub paint_hit: u32,
     pub paint_miss: u32,
+    /// Measured paragraphs moved into a paint slot instead of built again.
+    pub bridged: u32,
 }
 
 #[cfg(impeller_missing)]

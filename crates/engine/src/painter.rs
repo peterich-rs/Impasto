@@ -6,7 +6,7 @@ use protocol::Picture;
 
 use crate::pictures::PictureCache;
 use crate::player::ffi;
-use crate::player::{RetainedPicture, Save};
+use crate::player::{HeldParagraph, RetainedPicture, Save};
 use crate::textures::TextureStore;
 use crate::typography::Typography;
 use crate::{ImagePixels, Status};
@@ -15,7 +15,7 @@ pub(crate) struct Painter<'a> {
     pub(crate) typography: &'a mut Typography,
     pub(crate) textures: &'a mut TextureStore,
     pub(crate) picture_cache: Option<&'a PictureCache>,
-    pub(crate) pending: &'a mut Vec<ffi::ImpellerParagraph>,
+    pub(crate) pending: &'a mut Vec<HeldParagraph>,
     pub(crate) saves: Vec<Save>,
     pub(crate) impeller: ffi::ImpellerContext,
 }
@@ -26,7 +26,7 @@ pub(crate) fn build_picture<'pixels>(
     resolve: &mut impl FnMut(&str) -> Option<ImagePixels<'pixels>>,
     typography: &mut Typography,
     textures: &mut TextureStore,
-    pending: &mut Vec<ffi::ImpellerParagraph>,
+    pending: &mut Vec<HeldParagraph>,
     impeller: ffi::ImpellerContext,
 ) -> Result<RetainedPicture, Status> {
     let saved = std::mem::take(pending);
@@ -70,8 +70,10 @@ pub(crate) fn build_picture<'pixels>(
     let held = std::mem::take(painter.pending);
     *painter.pending = saved;
     if list.is_null() {
-        for paragraph in held {
-            unsafe { ffi::ImpellerParagraphRelease(paragraph) };
+        for item in held {
+            painter.typography.release_draw(item.slot);
+            // SAFETY: this retain was taken for a display list that was not installed.
+            unsafe { ffi::ImpellerParagraphRelease(item.paragraph) };
         }
         return Err(Status::BadScene);
     }
@@ -82,9 +84,10 @@ pub(crate) fn build_picture<'pixels>(
     })
 }
 
-pub(crate) fn release_pending(pending: &mut Vec<ffi::ImpellerParagraph>) {
-    for paragraph in pending.drain(..) {
-        // SAFETY: the failed builder never installed a display list for these.
-        unsafe { ffi::ImpellerParagraphRelease(paragraph) };
+pub(crate) fn release_pending(pending: &mut Vec<HeldParagraph>, typography: &mut Typography) {
+    for item in pending.drain(..) {
+        typography.release_draw(item.slot);
+        // SAFETY: the failed builder never installed a display list for this retain.
+        unsafe { ffi::ImpellerParagraphRelease(item.paragraph) };
     }
 }

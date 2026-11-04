@@ -20,7 +20,7 @@ struct PlacedViewport {
     h: f32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ListItem {
     pub key: String,
     pub ty: String,
@@ -164,8 +164,12 @@ impl ListDriver {
     }
 
     pub fn configure(&mut self, estimate: f32, overscan: i32, blocked: bool) {
+        let overscan = overscan.max(0) as usize;
+        if self.estimate == estimate && self.overscan == overscan && self.blocked == blocked {
+            return;
+        }
         self.estimate = estimate;
-        self.overscan = overscan.max(0) as usize;
+        self.overscan = overscan;
         self.blocked = blocked;
         self.force = true;
     }
@@ -182,10 +186,20 @@ impl ListDriver {
     }
 
     pub fn end_items(&mut self) {
+        if self.staging == self.items {
+            self.staging.clear();
+            return;
+        }
         self.items = std::mem::take(&mut self.staging);
         self.retain_cache();
         self.rebuild_prefix();
         self.force = true;
+    }
+
+    fn own_rows(&self, tree: &mut Tree) {
+        for mounted in self.mounted.values() {
+            let _ = tree.set_picture_owner(mounted.node, true);
+        }
     }
 
     pub fn note_row(&mut self, key: &str, node: Option<NodeId>) {
@@ -205,6 +219,7 @@ impl ListDriver {
         let Some(viewport) = self.nodes.viewport else {
             return (Vec::new(), None, false, false);
         };
+        self.own_rows(tree);
         let Ok(view) = tree.rect(viewport) else {
             return (Vec::new(), None, false, false);
         };

@@ -35,21 +35,6 @@ pub struct LayoutIssue {
     pub worst_child: NodeId,
 }
 
-impl LayoutIssue {
-    /// One line for a host log, e.g. `row overflow 12.5pt: parent 42 child 43`.
-    pub fn log_line(&self) -> String {
-        format!(
-            "{} overflow {:.1}pt: parent {} used {:.1} of {:.1}, child {}",
-            self.axis.name(),
-            self.excess,
-            self.parent.to_raw(),
-            self.used,
-            self.parent_size,
-            self.worst_child.to_raw()
-        )
-    }
-}
-
 /// Debug-only state on [`Tree`]. All fields default off/empty.
 #[derive(Default)]
 pub(crate) struct DebugState {

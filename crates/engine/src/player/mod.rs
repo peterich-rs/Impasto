@@ -1,19 +1,28 @@
 //! Paints a layer tree. Text uses the font size and paragraph width stored on each command.
 
+use std::cell::RefCell;
+#[cfg(not(target_os = "android"))]
 use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::ptr;
+use std::rc::Rc;
 
 use protocol::{ContentMode, Gradient, LayerId, LayerKind, LayerTree, PictureId};
 
 use crate::{ImagePixels, Status};
 
+pub(crate) struct HeldParagraph {
+    pub(crate) paragraph: ffi::ImpellerParagraph,
+    /// Paint-slot index that owns the cache reference.
+    pub(crate) slot: u32,
+}
+
 pub(crate) struct RetainedPicture {
     pub(crate) generation: u64,
     pub(crate) list: ffi::ImpellerDisplayList,
-    /// Paragraphs this display list draws. Released only with the display list,
-    /// after any root list that flattened it.
-    pub(crate) held: Vec<ffi::ImpellerParagraph>,
+    /// Extra retains for paragraphs this display list draws. Released only with
+    /// the display list, after any root list that flattened it.
+    pub(crate) held: Vec<HeldParagraph>,
 }
 
 pub(crate) enum Save {
@@ -29,7 +38,7 @@ pub struct Engine {
     context: ffi::ImpellerContext,
     list: ffi::ImpellerDisplayList,
     /// Temporaries the installed root display list still references.
-    held: Vec<ffi::ImpellerParagraph>,
+    held: Vec<HeldParagraph>,
     pictures: crate::pictures::PictureCache,
     textures: crate::textures::TextureStore,
     typography: crate::typography::TypographyHandle,
@@ -105,7 +114,9 @@ impl Engine {
             held: Vec::new(),
             pictures: crate::pictures::PictureCache::new(),
             textures: crate::textures::TextureStore::new(),
-            typography: std::mem::ManuallyDrop::new(crate::typography::Typography::new(typography)),
+            typography: std::mem::ManuallyDrop::new(Rc::new(RefCell::new(
+                crate::typography::Typography::new(typography),
+            ))),
             last_submit: crate::SubmitStats::default(),
             #[cfg(target_os = "android")]
             vulkan_procs: ptr::null_mut(),
@@ -113,15 +124,29 @@ impl Engine {
         }
     }
 
-    /// Shared with the shaper. The engine keeps one clone so the context outlives display lists.
-    pub fn typography(&self) -> std::rc::Rc<std::cell::RefCell<crate::typography::Typography>> {
-        std::rc::Rc::clone(&self.typography)
+    /// Shared with the session shaper. Measurement and drawing use one context.
+    pub fn typography(&self) -> Rc<RefCell<crate::typography::Typography>> {
+        Rc::clone(&self.typography)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn typography_mut(
+        &mut self,
+    ) -> std::cell::RefMut<'_, crate::typography::Typography> {
+        self.typography.borrow_mut()
+    }
+
+    pub fn take_shape_stats(&mut self) -> crate::ShapeStats {
+        self.typography.borrow_mut().take_shape_stats()
     }
 
     pub fn register_font(&mut self, data: &[u8], family: &str) -> Result<(), Status> {
         let installed = !self.list.is_null();
         let mut typography = self.typography.borrow_mut();
-        typography.register_face(data, family)?;
+        let changed = typography.register_face(data, family)?;
+        if !changed {
+            return Ok(());
+        }
         if installed {
             typography.mark_stale();
         } else {
@@ -144,12 +169,11 @@ impl Engine {
         if point_scale <= 0.0 {
             return Err(Status::BadScene);
         }
-        let typography = std::rc::Rc::clone(&self.typography);
-        let mut typography = typography.borrow_mut();
+        let mut typography = self.typography.borrow_mut();
         typography.begin_submit();
         self.last_submit = crate::SubmitStats::default();
         let mut swap = crate::pictures::PictureSwap::default();
-        let mut pending = Vec::new();
+        let mut pending: Vec<HeldParagraph> = Vec::new();
         if let Err(status) = self.pictures.prepare(
             tree,
             point_scale,
@@ -162,8 +186,8 @@ impl Engine {
             self.context,
         ) {
             self.last_submit = crate::SubmitStats::default();
-            self.pictures.rollback(swap);
-            crate::painter::release_pending(&mut pending);
+            self.pictures.rollback(swap, &mut typography);
+            crate::painter::release_pending(&mut pending, &mut typography);
             return Err(status);
         }
         let builder = unsafe { ffi::ImpellerDisplayListBuilderNew(ptr::null()) };
@@ -173,8 +197,8 @@ impl Engine {
                 ffi::ImpellerDisplayListBuilderRelease(builder);
                 ffi::ImpellerPaintRelease(paint);
             }
-            self.pictures.rollback(swap);
-            crate::painter::release_pending(&mut pending);
+            self.pictures.rollback(swap, &mut typography);
+            crate::painter::release_pending(&mut pending, &mut typography);
             return Err(Status::BadScene);
         }
         let display = {
@@ -206,18 +230,26 @@ impl Engine {
         }
         if display.is_null() {
             self.last_submit = crate::SubmitStats::default();
-            crate::painter::release_pending(&mut pending);
-            self.pictures.rollback(swap);
+            crate::painter::release_pending(&mut pending, &mut typography);
+            self.pictures.rollback(swap, &mut typography);
             return Err(Status::BadScene);
         }
-        self.release_display();
+        unsafe {
+            ffi::ImpellerDisplayListRelease(self.list);
+            self.list = ptr::null_mut();
+        }
         typography.set_list_installed(false);
         for (_, picture) in swap.replaced {
-            release_retained(picture);
+            release_retained(picture, &mut typography);
         }
-        self.pictures.evict_except(tree);
+        self.pictures.evict_except(tree, &mut typography);
         typography.reap_retired();
-        self.release_held();
+        let previous = std::mem::take(&mut self.held);
+        for item in previous {
+            typography.release_draw(item.slot);
+            // SAFETY: the root display list that referenced this retain was just released.
+            unsafe { ffi::ImpellerParagraphRelease(item.paragraph) };
+        }
         self.held = std::mem::take(&mut pending);
         typography.clear_stale();
         typography.set_list_installed(true);
@@ -285,19 +317,21 @@ impl Engine {
     }
 
     pub(crate) fn release_held(&mut self) {
-        for paragraph in self.held.drain(..) {
-            // SAFETY: the display list that referenced these temporaries was just released.
-            unsafe { ffi::ImpellerParagraphRelease(paragraph) };
+        let held = std::mem::take(&mut self.held);
+        let mut typography = self.typography.borrow_mut();
+        for item in held {
+            typography.release_draw(item.slot);
+            // SAFETY: the display list that referenced this retain was just released.
+            unsafe { ffi::ImpellerParagraphRelease(item.paragraph) };
         }
     }
 
     pub(crate) fn release_frame(&mut self) {
         self.release_display();
-        self.pictures.release_all();
         self.release_held();
+        let mut typography = self.typography.borrow_mut();
+        self.pictures.release_all(&mut typography);
         self.textures.release_all();
-        let typography = std::rc::Rc::clone(&self.typography);
-        let mut typography = typography.borrow_mut();
         typography.set_list_installed(false);
         typography.release_all_paragraphs();
     }
@@ -358,10 +392,16 @@ impl Engine {
     }
 }
 
-pub(crate) fn release_retained(picture: RetainedPicture) {
+pub(crate) fn release_retained(
+    picture: RetainedPicture,
+    typography: &mut crate::typography::Typography,
+) {
+    // SAFETY: `list` is the display list this picture owns. Release is a no-op on null.
     unsafe { ffi::ImpellerDisplayListRelease(picture.list) };
-    for paragraph in picture.held {
-        unsafe { ffi::ImpellerParagraphRelease(paragraph) };
+    for item in picture.held {
+        typography.release_draw(item.slot);
+        // SAFETY: this is the picture's extra retain, released with its display list.
+        unsafe { ffi::ImpellerParagraphRelease(item.paragraph) };
     }
 }
 
@@ -408,15 +448,19 @@ impl crate::Surface for Engine {
 impl Drop for Engine {
     fn drop(&mut self) {
         self.release_frame();
-        // Drop the typography context (and face bytes) before the Impeller context when this
-        // engine holds the last `Rc`. A shaper clone keeps the context until it drops.
-        // SAFETY: `context` came from the context constructor. Release is a no-op on null.
-        unsafe {
-            std::mem::ManuallyDrop::drop(&mut self.typography);
-            ffi::ImpellerContextRelease(self.context);
+        let last = Rc::strong_count(&self.typography) == 1;
+        // SAFETY: the wrapper stays valid. This drops our `Rc` before the graphics context.
+        // Paragraph pointers are already null, so `Typography::drop` does not release them twice.
+        unsafe { std::mem::ManuallyDrop::drop(&mut self.typography) };
+        if last {
+            // SAFETY: `context` came from the context constructor. Release is a no-op on null.
+            unsafe { ffi::ImpellerContextRelease(self.context) };
+            self.context = ptr::null_mut();
+        } else {
+            debug_assert!(false, "shaper dropped after Engine");
         }
         #[cfg(target_os = "android")]
-        if !self.vulkan_procs.is_null() {
+        if last && !self.vulkan_procs.is_null() {
             // SAFETY: `vulkan_procs` came from `Box::into_raw` in `create_vulkan`.
             // The context that used it as `user_data` was released above.
             let procs = unsafe { Box::from_raw(self.vulkan_procs) };
@@ -501,8 +545,7 @@ mod tests {
         };
         engine.register_font(&font, "Sans").expect("font registers");
         let first = engine
-            .typography()
-            .borrow_mut()
+            .typography_mut()
             .measure_paragraph(
                 "Hi",
                 28.0,
@@ -512,8 +555,7 @@ mod tests {
             )
             .expect("measure");
         let second = engine
-            .typography()
-            .borrow_mut()
+            .typography_mut()
             .measure_paragraph(
                 "Hi",
                 28.0,
@@ -527,20 +569,17 @@ mod tests {
         let style = protocol::TextStyle::default();
         let color = [255, 255, 255, 255];
         let lines = engine
-            .typography()
-            .borrow_mut()
+            .typography_mut()
             .lines("Hi", 28.0, 280.0, color, &style)
             .expect("lines");
         let again = engine
-            .typography()
-            .borrow_mut()
+            .typography_mut()
             .lines("Hi", 28.0, 280.0, color, &style)
             .expect("cached lines");
         assert_eq!(lines.len(), again.len());
         assert!(!lines.is_empty());
         let caret = engine
-            .typography()
-            .borrow_mut()
+            .typography_mut()
             .caret_for(
                 crate::ParagraphQuery {
                     utf8: "Hi",
@@ -645,8 +684,7 @@ mod tests {
         };
         let style = protocol::TextStyle::default();
         let first = engine
-            .typography()
-            .borrow_mut()
+            .typography_mut()
             .measure_paragraph("Hi", 28.0, 280.0, [255, 255, 255, 255], &style)
             .expect("measure");
         let list = DrawList {
@@ -665,8 +703,7 @@ mod tests {
         };
         engine.paint(&list, 1.0, |_| None).expect("submit");
         let second = engine
-            .typography()
-            .borrow_mut()
+            .typography_mut()
             .measure_paragraph("Hi", 28.0, 280.0, [255, 255, 255, 255], &style)
             .expect("cached");
         assert_eq!(first, second);
@@ -682,20 +719,18 @@ mod tests {
         let red = [255, 0, 0, 255];
         let green = [0, 255, 0, 255];
         let old = engine
-            .typography()
-            .borrow_mut()
+            .typography_mut()
             .retain_paragraph("Hi", 28.0, 280.0, red, &style, &[])
             .expect("retain red");
-        engine.typography().borrow_mut().release_paragraph(old);
-        assert!(!engine.typography().borrow().paragraph_live(old));
+        engine.typography_mut().release_paragraph(old);
+        assert!(!engine.typography_mut().paragraph_live(old));
         let next = engine
-            .typography()
-            .borrow_mut()
+            .typography_mut()
             .retain_paragraph("Hi", 28.0, 280.0, green, &style, &[])
             .expect("retain green");
         assert_eq!(old.index, next.index);
         assert_ne!(old.generation, next.generation);
-        assert!(engine.typography().borrow().paragraph_live(next));
+        assert!(engine.typography_mut().paragraph_live(next));
         let list = DrawList {
             commands: vec![protocol::Command::Text {
                 x: 0.0,
@@ -713,8 +748,8 @@ mod tests {
         engine
             .paint(&list, 1.0, |_| None)
             .expect("stale id rebuilds");
-        assert_eq!(engine.typography().borrow().text_paint_probe(), (true, red));
-        assert!(engine.typography().borrow().paragraph_live(next));
+        assert_eq!(engine.typography_mut().text_paint_probe(), (true, red));
+        assert!(engine.typography_mut().paragraph_live(next));
     }
 
     #[test]
@@ -723,8 +758,7 @@ mod tests {
             return;
         };
         engine
-            .typography()
-            .borrow_mut()
+            .typography_mut()
             .measure_paragraph(
                 "A",
                 28.0,
@@ -737,6 +771,9 @@ mod tests {
             commands: Vec::new(),
         };
         engine.paint(&list, 1.0, |_| None).expect("empty");
+        assert_eq!(engine.cached_paragraphs(), 1);
+        engine.typography_mut().begin_measure();
+        engine.typography_mut().end_measure();
         assert_eq!(engine.cached_paragraphs(), 0);
     }
 
@@ -1033,7 +1070,7 @@ mod tests {
 
     #[test]
     fn span_family_weight_and_line_through_split_the_paragraph_key() {
-        let Some(engine) = fonted() else {
+        let Some(mut engine) = fonted() else {
             return;
         };
         super::paint_trace::clear();
@@ -1060,33 +1097,28 @@ mod tests {
             ]
         };
         engine
-            .typography()
-            .borrow_mut()
+            .typography_mut()
             .measure_with_spans("abcd", 16.0, 200.0, color, &base, &spans("Other", 700))
             .expect("first span key");
         engine
-            .typography()
-            .borrow_mut()
+            .typography_mut()
             .measure_with_spans("abcd", 16.0, 200.0, color, &base, &spans("Other", 700))
             .expect("same span key");
         assert_eq!(engine.cached_paragraphs(), 1);
         engine
-            .typography()
-            .borrow_mut()
+            .typography_mut()
             .measure_with_spans("abcd", 16.0, 200.0, color, &base, &spans("Sans", 700))
             .expect("family changes the key");
         assert_eq!(engine.cached_paragraphs(), 2);
         engine
-            .typography()
-            .borrow_mut()
+            .typography_mut()
             .measure_with_spans("abcd", 16.0, 200.0, color, &base, &spans("Other", 400))
             .expect("weight changes the key");
         assert_eq!(engine.cached_paragraphs(), 3);
         let mut struck = base.clone();
         struck.line_through = true;
         engine
-            .typography()
-            .borrow_mut()
+            .typography_mut()
             .measure_paragraph("Hi", 16.0, 200.0, color, &struck)
             .expect("line through");
         let line_through =
@@ -1164,8 +1196,8 @@ mod tests {
             .expect("font registers again");
         engine
             .submit_layers(&tree, 1.0, |_| None)
-            .expect("picture after font");
-        assert_eq!(engine.picture_builds(), 2);
+            .expect("picture after the same font");
+        assert_eq!(engine.picture_builds(), 1);
     }
 
     #[test]

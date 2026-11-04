@@ -2,12 +2,13 @@ import { createTrackedEffect } from "solid-js";
 import { host, type NodeHandle } from "@impasto/solid-renderer";
 import { createScrollController, type ScrollController } from "./ScrollController.ts";
 
-export type ScrollPhysicsProps = {
-  frictionTau?: number;
-  overscroll?: "rubber" | "clamp";
-  stiffness?: number;
-  damping?: number;
-  factor?: number;
+/** One scroll's motion. Presets are values of this type, not platform names. */
+export type ScrollPhysics = {
+  decay: { tau: number } | { rate: number };
+  band: { linear: number } | { curve: number };
+  overscroll: "rubber" | "clamp";
+  spring: { stiffness: number; damping: number };
+  snap: { stiffness: number; damping: number };
   snapX?: { interval: number; align?: "start" | "center" | "end" };
   snapY?: { interval: number; align?: "start" | "center" | "end" };
   chain?: boolean;
@@ -15,7 +16,22 @@ export type ScrollPhysicsProps = {
   accept?: "content" | "always" | "never";
 };
 
-function acceptCode(accept: ScrollPhysicsProps["accept"]): number {
+/** Asymptotic band, 500ms coast, 80ms return. `accept` is left unset. */
+export const bouncing: ScrollPhysics = {
+  decay: { tau: 500 },
+  band: { curve: 0.55 },
+  overscroll: "rubber",
+  spring: { stiffness: 2500, damping: 100 },
+  snap: { stiffness: 220, damping: 30 },
+};
+
+/** Offset stops at the limit. Overscroll stays zero. */
+export const clamping: ScrollPhysics = {
+  ...bouncing,
+  overscroll: "clamp",
+};
+
+function acceptCode(accept: ScrollPhysics["accept"]): number {
   if (accept === "always") {
     return 1;
   }
@@ -42,7 +58,7 @@ export function ScrollArea(props: {
   /** Minimum content height. Keeps the viewport scrollable when row layout lags the window. */
   contentMin?: number;
   controller?: ScrollController;
-  physics?: ScrollPhysicsProps;
+  physics?: ScrollPhysics;
 }): NodeHandle {
   const ctrl = props.controller ?? createScrollController();
   let viewport = 0;
@@ -57,23 +73,31 @@ export function ScrollArea(props: {
   }
 
   function applyPhysics(node: number): void {
-    const physics = props.physics;
+    const physics = props.physics ?? bouncing;
     const align = (name: "start" | "center" | "end" | undefined) =>
       name === "center" ? 1 : name === "end" ? 2 : 0;
+    const decayKind = "rate" in physics.decay ? 1 : 0;
+    const decayValue = "rate" in physics.decay ? physics.decay.rate : physics.decay.tau;
+    const bandKind = "curve" in physics.band ? 1 : 0;
+    const bandValue = "curve" in physics.band ? physics.band.curve : physics.band.linear;
     host.setScrollPhysics(
       node,
-      physics?.frictionTau ?? 180,
-      physics?.overscroll === "clamp" ? 1 : 0,
-      physics?.stiffness ?? 170,
-      physics?.damping ?? 26,
-      physics?.factor ?? 0.55,
-      physics?.snapX?.interval ?? 0,
-      align(physics?.snapX?.align),
-      physics?.snapY?.interval ?? 0,
-      align(physics?.snapY?.align),
-      acceptCode(physics?.accept ?? "always"),
+      decayValue,
+      physics.overscroll === "clamp" ? 1 : 0,
+      physics.spring.stiffness,
+      physics.spring.damping,
+      bandValue,
+      physics.snapX?.interval ?? 0,
+      align(physics.snapX?.align),
+      physics.snapY?.interval ?? 0,
+      align(physics.snapY?.align),
+      acceptCode(physics.accept ?? "always"),
+      decayKind,
+      physics.snap.stiffness,
+      physics.snap.damping,
+      bandKind,
     );
-    if (physics?.chain !== undefined) {
+    if (physics.chain !== undefined) {
       host.setScrollChain(node, physics.chain);
     }
   }

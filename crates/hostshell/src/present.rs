@@ -21,8 +21,8 @@ pub enum AfterPresent {
     Fatal,
 }
 
-/// Failures before this count retry on the next vsync. At and after it, the shell
-/// waits [`present_retry_delay_ms`] and logs once until a present succeeds.
+/// Failures before this count retry on the next vsync. At this count the shell
+/// waits [`present_retry_delay_ms`] and logs the backoff edge.
 pub const PRESENT_BACKOFF_AFTER: u32 = 3;
 
 /// Delay before the next present attempt. `None` means the next vsync.

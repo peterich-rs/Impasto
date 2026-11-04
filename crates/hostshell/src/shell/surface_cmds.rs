@@ -25,6 +25,7 @@ pub(super) fn handle(
 fn destroyed(runtime: &mut Runtime, id: SurfaceId, acks: &Acks) -> Result<bool, BootError> {
     runtime.surfaces.drop_pending(id);
     if runtime.surfaces.destroyed(id) == Destroyed::Dropped {
+        tracing::info!(target: "impasto::render::surface", surface = id.0, "surface destroyed");
         let follow = crate::scheduler::surface_lost();
         runtime.installed = None;
         runtime.needs_present = follow.needs_present;

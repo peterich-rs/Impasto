@@ -609,11 +609,11 @@
     else if (spec.drag === "vertical") drag = 2;
     mustEffect(effect(EFFECT.SetRecognizers, handle(node), [spec.tap ? 1 : 0, spec.longPress ? 1 : 0, drag, spec.doubleTapMs || 0]), "setRecognizers");
   };
-  core.setScrollPhysics = function (node, tau, mode, stiffness, damping, factor, snapX, alignX, snapY, alignY, accept, curve, snapStiffness, snapDamping) {
+  core.setScrollPhysics = function (node, tau, mode, stiffness, damping, factor, snapX, alignX, snapY, alignY, accept, decayKind, snapStiffness, snapDamping, bandKind) {
     if (arguments.length < 10) {
       throw new Error("setScrollPhysics(node, tau, mode, stiffness, damping, factor, snapX, alignX, snapY, alignY)");
     }
-    mustEffect(effect(EFFECT.SetScrollPhysics, handle(node), [+tau, mode | 0, +stiffness, +damping, +factor, +snapX, alignX | 0, +snapY, alignY | 0, accept || 0, curve || 0, snapStiffness || 0, snapDamping || 0]), "setScrollPhysics failed");
+    mustEffect(effect(EFFECT.SetScrollPhysics, handle(node), [+tau, mode | 0, +stiffness, +damping, +factor, +snapX, alignX | 0, +snapY, alignY | 0, accept || 0, decayKind || 0, snapStiffness || 0, snapDamping || 0, bandKind || 0]), "setScrollPhysics failed");
   };
   core.registerFont = function (family, bytes) {
     if (arguments.length < 2) throw new Error("registerFont(family, bytes)");

@@ -1,3 +1,4 @@
+import type { RecognizerSpec } from "./guard.ts";
 import type { AxisSize, GridLine, InsetEdge } from "./layout-values.ts";
 import type { HostNode } from "./tree.ts";
 
@@ -29,6 +30,7 @@ type Drag = {
 type Hover = { onHover?: () => void; onLeave?: () => void };
 type Secondary = { onSecondaryClick?: () => void };
 type Zoom = { onZoom?: (scale: number) => void };
+type GestureOpts = { recognizers?: RecognizerSpec; onLongPress?: () => void };
 type Wheel = { onWheel?: (dx: number, dy: number) => void };
 type Place = {
   aspect?: number | null;
@@ -62,7 +64,7 @@ declare module "solid-js" {
       align: Children & Grow & Box & Fill & { align?: "start" | "center" | "end" };
       grid: Children & Grow & Flex & Box & Tracks;
       padding: Children & Grow & Fill & Box & PaddingEdges;
-      pointer: Children & Click & Focusable & Grow & Hover & Secondary & Zoom & Box & Fill;
+      pointer: Children & Click & Focusable & Grow & Hover & Secondary & Zoom & GestureOpts & Drag & Box & Fill;
       sized: { w?: AxisSize; h?: AxisSize } & Place;
       clip: Children & Grow & Box & { radius?: number };
       opacity: Children & Grow & Fill & { alpha?: number };
@@ -82,7 +84,7 @@ declare module "solid-js" {
         mode?: "fill" | "fit" | "crop";
         required?: boolean;
       };
-      decorated: Children & Grow & Fill & { color?: string; radius?: number };
+      decorated: Children & Grow & Fill & { color?: string; radius?: number; w?: number; h?: number };
     }
     type Element = HostNode;
   }

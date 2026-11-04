@@ -29,7 +29,10 @@ pub struct Typography {
     measured: ParagraphStore,
     paints: PaintStore,
     retired: Vec<ffi::ImpellerParagraph>,
+    /// Submit generation. Paint slots and textures stamp this.
     generation: u64,
+    /// Layout generation. Measured paragraphs stamp this, not [`Self::generation`].
+    measure_generation: u64,
     list_installed: bool,
     stale: bool,
     stats: ShapeStats,
@@ -40,14 +43,15 @@ pub struct Typography {
 }
 
 impl Typography {
-    pub(crate) fn new(context: ffi::ImpellerTypographyContext) -> Rc<RefCell<Self>> {
-        Rc::new(RefCell::new(Self {
+    pub(crate) fn new(context: ffi::ImpellerTypographyContext) -> Self {
+        Self {
             context,
             fonts: FontRegistry::new(),
             measured: ParagraphStore::new(),
             paints: PaintStore::new(),
             retired: Vec::new(),
             generation: 0,
+            measure_generation: 0,
             list_installed: false,
             stale: false,
             stats: ShapeStats::default(),
@@ -55,7 +59,20 @@ impl Typography {
             probe_rebuilt: false,
             probe_color: [0, 0, 0, 0],
             render_thread: PhantomData,
-        }))
+        }
+    }
+
+    /// Bumps the measure generation. Does not mean a display list is being built.
+    pub fn begin_measure(&mut self) -> u64 {
+        self.measure_generation = self.measure_generation.wrapping_add(1);
+        self.measure_generation
+    }
+
+    /// Drops measure-cache paragraphs that this layout did not touch.
+    pub fn end_measure(&mut self) {
+        let generation = self.measure_generation;
+        self.evict_measured(|used| used != generation);
+        self.reap_retired();
     }
 
     pub(crate) fn generation(&self) -> u64 {
@@ -110,6 +127,10 @@ impl Typography {
 
     /// Swaps the paragraph a retained slot draws. The previous pointer is returned
     /// so the caller can retire it.
+    #[allow(
+        dead_code,
+        reason = "stale retained ids still swap a paragraph without allocating a new slot"
+    )]
     pub(crate) fn replace_retained(
         &mut self,
         id: protocol::ParagraphId,
@@ -142,14 +163,14 @@ impl Typography {
         }
     }
 
+    /// Drops paint slots nobody retained. Measured paragraphs stay until
+    /// [`Self::end_measure`] or [`Self::evict_over_cap`].
     pub(crate) fn evict(&mut self) {
-        let generation = self.generation;
-        self.evict_measured(|used| used != generation);
         self.evict_provisional_paints();
     }
 
     pub(crate) fn evict_over_cap(&mut self) {
-        let generation = self.generation;
+        let generation = self.measure_generation;
         if self.measured.len() > 1024 {
             self.evict_measured(|used| used != generation);
         }
@@ -172,7 +193,11 @@ impl Typography {
             .iter()
             .enumerate()
             .filter_map(|(index, slot)| {
-                if slot.refs == 0 && !slot.paragraph.is_null() && slot.used != generation {
+                if slot.refs == 0
+                    && slot.live == 0
+                    && !slot.paragraph.is_null()
+                    && slot.used != generation
+                {
                     Some(index as u32)
                 } else {
                     None
@@ -217,14 +242,25 @@ impl Typography {
         self.reap_retired();
     }
 
-    /// Registers face bytes. Does not decide whether pictures are stale.
-    pub(crate) fn register_face(&mut self, data: &[u8], family: &str) -> Result<(), Status> {
+    /// Registers face bytes. `Ok(false)` means this family already has these bytes.
+    ///
+    /// Does not mark pictures stale. The engine does that only when the bytes change.
+    pub fn register_face(&mut self, data: &[u8], family: &str) -> Result<bool, Status> {
         if data.is_empty() {
             return Err(Status::BadScene);
         }
         let family = std::ffi::CString::new(family).map_err(|_| Status::BadScene)?;
         if family.as_bytes().is_empty() {
             return Err(Status::BadScene);
+        }
+        if let Some(face) = self
+            .fonts
+            .faces
+            .iter()
+            .find(|face| face.family.as_bytes() == family.as_bytes())
+            && fonts::FontLease::same(face.lease, data)
+        {
+            return Ok(false);
         }
         let lease = fonts::FontLease::new(data.to_vec());
         let mapping = ffi::ImpellerMapping {
@@ -263,7 +299,7 @@ impl Typography {
         } else {
             self.fonts.faces.push(Face { lease, family });
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -273,9 +309,9 @@ impl Drop for Typography {
         // SAFETY: the handle came from ImpellerTypographyContextNew. Release is a no-op on null.
         // Face leases drop after this returns. A late mapping callback still holds its reference.
         unsafe { ffi::ImpellerTypographyContextRelease(self.context) };
+        self.context = ptr::null_mut();
     }
 }
 
-/// Keeps the `Rc` from being dropped by `Engine`'s field drop. `Engine::drop` drops it
-/// after display lists are released and before the Impeller context.
+/// Dropped by [`Engine`] after display lists and before the graphics context.
 pub(crate) type TypographyHandle = ManuallyDrop<Rc<RefCell<Typography>>>;

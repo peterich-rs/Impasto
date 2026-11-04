@@ -18,53 +18,30 @@ use crate::input::Input;
 use crate::present::{self, AfterPresent, after_present};
 use crate::queue::Inbox;
 use crate::scheduler::{self, FrameScheduler, FrameStep, FrameView, Gpu, VsyncOp};
-use crate::shaper::ImpellerShaper;
+
 use crate::surface::{OpenRetry, Ready, SurfaceHost};
 use crate::timing::FrameTiming;
-use crate::{Boot, Launch, LogLevel, Services};
+use crate::{Boot, Launch, Services};
 
 mod cache_cmds;
 mod frame_cmds;
 mod session_cmds;
 mod surface_cmds;
 
-type HostLog = Rc<dyn Fn(LogLevel, &str)>;
-
-pub struct EngineSlot {
-    typography: Rc<RefCell<engine::Typography>>,
-    log: HostLog,
-    hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
-}
-
-impl EngineSlot {
-    pub fn shaper(&self) -> ImpellerShaper {
-        ImpellerShaper::new(Rc::clone(&self.typography))
-    }
-
-    pub fn log_hook(&self) -> crate::ConsoleLog {
-        let log = Rc::clone(&self.log);
-        let hub = self.hub.clone();
-        Box::new(move |level, message| {
-            // QuickJS console levels: 0 log, 1 info, 2 warn, 3 error, 4 debug.
-            if let Some(hub) = hub.as_ref() {
-                let source = if message.starts_with("horizontal overflow ")
-                    || message.starts_with("vertical overflow ")
-                {
-                    crate::diagnostics::LogSource::Layout
-                } else {
-                    crate::diagnostics::LogSource::Script
-                };
-                hub.log(level, source, message);
-            }
-            let level = match level {
-                3 => LogLevel::Error,
-                2 => LogLevel::Warn,
-                4 => LogLevel::Debug,
-                _ => LogLevel::Info,
-            };
-            log(level, message);
-        })
-    }
+pub fn console_log() -> crate::ConsoleLog {
+    Box::new(|level, message| {
+        // QuickJS console levels: 0 log, 1 info, 2 warn, 3 error, 4 debug.
+        if message.starts_with("unhandled rejection:") {
+            tracing::error!(target: "impasto::script::promise", "{message}");
+            return;
+        }
+        match level {
+            3 => tracing::error!(target: "impasto::script::console", "{message}"),
+            2 => tracing::warn!(target: "impasto::script::console", "{message}"),
+            4 => tracing::debug!(target: "impasto::script::console", "{message}"),
+            _ => tracing::info!(target: "impasto::script::console", "{message}"),
+        }
+    })
 }
 
 #[derive(Clone)]
@@ -303,12 +280,13 @@ fn write_inspect(
         }
         Err(error) => {
             runtime.inspect_written = true;
-            (runtime.log)(LogLevel::Error, &format!("inspect write failed: {error}"));
+            tracing::error!(target: "impasto::host", %error, "inspect write failed");
         }
     }
 }
 
 pub fn start(boot: Boot) -> Result<Link, BootError> {
+    crate::log_sub::install(boot.log_dir.as_deref(), boot.devtools.clone());
     let inbox = Arc::new(Inbox::new());
     let inbox_thread = Arc::clone(&inbox);
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -442,8 +420,6 @@ struct Installed {
 struct Runtime {
     services: Rc<RefCell<Box<dyn Services>>>,
     engine: Rc<RefCell<engine::Engine>>,
-    typography: Rc<RefCell<engine::Typography>>,
-    log: HostLog,
     session: Option<Box<dyn session::Session>>,
     registry: Arc<session::ModuleRegistry>,
     latest: Option<Arc<protocol::LayerTree>>,
@@ -463,13 +439,21 @@ struct Runtime {
     wake_tx: Sender<Option<i64>>,
     dump_list: bool,
     present_failures: u32,
-    present_logged: bool,
     present_retry_at: Option<i64>,
     gpu: Gpu,
+    last_step: Option<(FrameStep, Gpu)>,
+    listeners: Vec<Box<dyn crate::timing::FrameListener>>,
     inspect: Option<std::path::PathBuf>,
     hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
     inspect_dir: Option<std::path::PathBuf>,
     inspect_written: bool,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        // The shaper shares the engine typography context. Drop it before the engine.
+        self.session.take();
+    }
 }
 
 struct RenderLinks {
@@ -500,23 +484,15 @@ fn render(
     if let Some(factory) = engine.borrow().texture_factory() {
         *lock(&links.upload) = Some(factory);
     }
-    let log = {
-        let services = Rc::clone(&services);
-        Rc::new(move |level: LogLevel, message: &str| {
-            services.borrow().log(level, message);
-        }) as HostLog
-    };
     let Launch::Session(open) = boot.launch;
-    let typography = engine.borrow().typography();
-    let slot = EngineSlot {
-        typography: Rc::clone(&typography),
-        log: Rc::clone(&log),
-        hub: boot.devtools.clone(),
+    let parts = crate::SessionOpen {
+        shaper: Box::new(crate::ImpellerShaper::new(engine.borrow().typography())),
+        log: console_log(),
     };
     let rt = match crate::rt::handle() {
         Ok(handle) => handle,
         Err(message) => {
-            log(LogLevel::Error, &message);
+            tracing::error!(target: "impasto::session", "{message}");
             let error = BootError::Session(crate::SessionError::Runtime);
             let _ = ready.send(Err(error.clone()));
             return Err(error);
@@ -534,7 +510,6 @@ fn render(
                 app_state: Arc::clone(&app_state),
                 os: std::env::consts::OS,
                 os_version: host_os_version(),
-                log_level: std::env::var("IMPASTO_LOG").unwrap_or_else(|_| "info".to_owned()),
                 dump: std::env::var("IMPASTO_DUMP").ok(),
             },
         ));
@@ -552,7 +527,7 @@ fn render(
         launch_url,
     };
     let session = match open(
-        &slot,
+        parts,
         Box::new({
             move |job| {
                 let _ = links.net_tx.send(job);
@@ -563,7 +538,7 @@ fn render(
         Ok(opened) => Some(opened),
         Err(error) => {
             let error = BootError::Session(error);
-            log(LogLevel::Error, &error.to_string());
+            tracing::error!(target: "impasto::session", %error, "session did not open");
             let _ = ready.send(Err(error.clone()));
             return Err(error);
         }
@@ -578,9 +553,7 @@ fn render(
     }));
     let mut runtime = Runtime {
         services,
-        typography,
         engine,
-        log,
         session,
         registry,
         latest: None,
@@ -600,9 +573,10 @@ fn render(
         wake_tx: links.wake_tx,
         dump_list: boot.dump_list,
         present_failures: 0,
-        present_logged: false,
         present_retry_at: None,
         gpu: Gpu::Live,
+        last_step: None,
+        listeners: frame_listeners(boot.devtools.clone()),
         inspect: boot.inspect,
         hub: boot.devtools.clone(),
         inspect_dir: boot.inspect_dir,
@@ -713,17 +687,32 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     let mut leave = false;
     if let Some(session) = runtime.session.as_mut() {
         for event in frame.pointers {
+            tracing::trace!(
+                target: "impasto::host",
+                kind = phase_name(event.phase),
+                x = event.x,
+                y = event.y,
+                "pointer"
+            );
             session.pointer(event);
         }
         for event in frame.inputs {
+            tracing::trace!(target: "impasto::host", kind = input_kind(&event), "input");
             session.input(event);
         }
         if frame.ime_dismissed {
+            tracing::trace!(target: "impasto::host", "ime dismissed");
             session.ime_dismissed();
         }
     }
     let gesture_ms = gesture_started.elapsed().as_secs_f64() * 1000.0;
     runtime.frame_number = runtime.frame_number.wrapping_add(1);
+    let frame_span = tracing::error_span!(
+        target: "impasto::render",
+        "frame",
+        frame = runtime.frame_number
+    );
+    let _entered = frame_span.enter();
     let session_started = Instant::now();
     let mut again;
     let mut reloads = Vec::new();
@@ -746,7 +735,11 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                 }
                 if let Some(tree) = output.layers.take() {
                     if runtime.dump_list {
-                        (runtime.log)(LogLevel::Debug, &layer_tree_line(&tree));
+                        tracing::debug!(
+                            target: "impasto::render",
+                            "{}",
+                            layer_tree_line(&tree)
+                        );
                     }
                     runtime.latest = Some(tree);
                     layers_changed = true;
@@ -758,7 +751,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                         &[session::PluginValue::Str(text)],
                     )
                 {
-                    (runtime.log)(LogLevel::Error, &message);
+                    tracing::error!(target: "impasto::host", "{message}");
                 }
                 if let Some(update) = output.ime.take() {
                     crate::ime::publish_update(&update, &runtime.services);
@@ -782,9 +775,9 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                 }
             }
             Err(_) => {
-                (runtime.log)(
-                    LogLevel::Error,
-                    "render thread panicked; keeping the previous frame",
+                tracing::error!(
+                    target: "impasto::render",
+                    "render thread panicked; keeping the previous frame"
                 );
                 again = false;
                 runtime.panic_streak = runtime.panic_streak.saturating_add(1);
@@ -806,11 +799,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     }
     again |= reloaded;
     if !fonts.is_empty() {
-        install_fonts(
-            &mut runtime.engine.borrow_mut(),
-            fonts,
-            runtime.log.as_ref(),
-        );
+        install_fonts(&mut runtime.engine.borrow_mut(), fonts);
     }
     let Some(tree) = runtime.latest.clone() else {
         return Ok(end_frame(runtime, again, false));
@@ -825,14 +814,16 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
             .as_ref()
             .is_some_and(|installed| installed.scale == runtime.point_scale);
     let mut submit_ms = 0.0;
-    match scheduler::frame_step(&FrameView {
+    let step = scheduler::frame_step(&FrameView {
         surface_open: runtime.surfaces.is_open(),
         paused: frame.paused,
         unchanged,
         needs_present: runtime.needs_present,
         again,
         gpu: runtime.gpu,
-    }) {
+    });
+    note_step(runtime, step);
+    match step {
         FrameStep::Cancel | FrameStep::Skip { again: false } => {
             return Ok(end_frame(runtime, false, false));
         }
@@ -865,7 +856,11 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                     .submit_layers(&tree, runtime.point_scale, resolve);
             submit_ms = elapsed_ms(started);
             if let Err(status) = submitted {
-                (runtime.log)(LogLevel::Error, &format!("scene submit failed: {status}"));
+                tracing::error!(
+                    target: "impasto::render::present",
+                    %status,
+                    "scene submit failed"
+                );
                 if let Some(hub) = runtime.hub.as_ref() {
                     hub.error(
                         "engine",
@@ -885,6 +880,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
             });
             if runtime.gpu == Gpu::Flush {
                 runtime.gpu = Gpu::Live;
+                tracing::info!(target: "impasto::render::gpu", reason = "resume", "gpu live");
             }
         }
         FrameStep::PresentCached => {}
@@ -899,12 +895,13 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     };
     let present_ms = elapsed_ms(started);
     let stats = runtime.engine.borrow().submit_stats();
-    let shapes = runtime.typography.borrow_mut().take_shape_stats();
+    let shapes = runtime.engine.borrow_mut().take_shape_stats();
     let phase = phases.unwrap_or_default();
     let timing = FrameTiming {
         number: runtime.frame_number,
         vsync_ms: time.vsync_ms,
         target_ms: time.target_ms,
+        interval_ms: time.interval_ms,
         session_ms,
         gesture_ms,
         script_ms: phase.script_ms,
@@ -920,6 +917,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
         shapes_measure_miss: shapes.measure_miss,
         shapes_paint_hit: shapes.paint_hit,
         shapes_paint_miss: shapes.paint_miss,
+        shapes_bridged: shapes.bridged,
         picture_rebuilt: stats.picture_rebuilt,
         picture_reused: stats.picture_reused,
         layer_count: stats.layer_count,
@@ -927,102 +925,15 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
         pictures: stats.pictures,
         textures: stats.textures,
     };
-    if let Some(hub) = runtime.hub.as_ref() {
-        hub.push_frame(crate::diagnostics::FrameSample {
-            seq: 0,
-            number: timing.number,
-            at_ms: crate::net::mono_ms(),
-            session_ms: timing.session_ms,
-            gesture_ms: timing.gesture_ms,
-            script_ms: timing.script_ms,
-            layout_ms: timing.layout_ms,
-            record_ms: timing.record_ms,
-            submit_ms: timing.submit_ms,
-            present_ms: timing.present_ms,
-            layers: timing.layer_count,
-            paragraphs: timing.paragraphs,
-            pictures: timing.pictures,
-            textures: timing.textures,
-            over_budget: timing.over_budget(time.interval_ms),
-            phases: crate::diagnostics::PhaseSample {
-                motion_ms: phase.script.motion_ms,
-                dispatch_ms: phase.script.dispatch_ms,
-                timer_ms: phase.script.timer_ms,
-                raf_ms: phase.script.raf_ms,
-                callback_ms: phase.script.callback_ms,
-                flush_ms: phase.script.flush_ms,
-                layout_cb_ms: phase.layout_cb_ms,
-                sync_ms: phase.sync_ms,
-                semantics_ms: phase.semantics_ms,
-                laywork_ms: phase.trace.laywork_ms,
-                layout_passes: phase.trace.layout_passes,
-                text_reused: phase.trace.text_reused,
-                text_shaped: phase.trace.text_shaped,
-                pointers: phase.trace.pointers,
-                keys: phase.trace.keys,
-                edits: phase.trace.edits,
-                ime: phase.trace.ime,
-                scrolls: phase.trace.scrolls,
-                focus: phase.trace.focus,
-                blur: phase.trace.blur,
-            },
-        });
-    }
-    if timing.over_budget(time.interval_ms) {
-        (runtime.log)(
-            LogLevel::Warn,
-            &format!(
-                "frame {} gesture {:.2}ms script {:.2}ms layout {:.2}ms layoutcb {:.2}ms sync {:.2}ms record {:.2}ms semantics {:.2}ms session {:.2}ms submit {:.2}ms present {:.2}ms shapes b{} mh{} mm{} ph{} pm{} rebuilt {} reused {} layers {} cache para {} pic {} tex {} js motion {:.2} dispatch {:.2} timer {:.2} raf {:.2} callback {:.2} flush {:.2} laywork {:.2} x{} {} reuse {} shaped {} ptr {} key {} edit {} ime {} scroll {} focus {} blur {} gesture {}",
-                timing.number,
-                timing.gesture_ms,
-                timing.script_ms,
-                timing.layout_ms,
-                timing.layout_cb_ms,
-                timing.sync_ms,
-                timing.record_ms,
-                timing.semantics_ms,
-                timing.session_ms,
-                timing.submit_ms,
-                timing.present_ms,
-                timing.shapes_built,
-                timing.shapes_measure_hit,
-                timing.shapes_measure_miss,
-                timing.shapes_paint_hit,
-                timing.shapes_paint_miss,
-                timing.picture_rebuilt,
-                timing.picture_reused,
-                timing.layer_count,
-                timing.paragraphs,
-                timing.pictures,
-                timing.textures,
-                phase.script.motion_ms,
-                phase.script.dispatch_ms,
-                phase.script.timer_ms,
-                phase.script.raf_ms,
-                phase.script.callback_ms,
-                phase.script.flush_ms,
-                phase.trace.laywork_ms,
-                phase.trace.layout_passes,
-                phase.trace.layout_cause,
-                phase.trace.text_reused,
-                phase.trace.text_shaped,
-                phase.trace.pointers,
-                phase.trace.keys,
-                phase.trace.edits,
-                phase.trace.ime,
-                phase.trace.scrolls,
-                phase.trace.focus,
-                phase.trace.blur,
-                phase.trace.gestures
-            ),
-        );
+    for listener in &mut runtime.listeners {
+        listener.on_frame(&timing, &phase);
     }
     // The richer `inspect_dir` writer owns `frame.json` when both are set.
     if runtime.inspect_dir.is_none()
         && let Some(dir) = &runtime.inspect
         && let Err(error) = crate::timing::write_inspect(dir, &timing, runtime.latest.as_deref())
     {
-        (runtime.log)(LogLevel::Warn, &format!("inspect write failed: {error}"));
+        tracing::warn!(target: "impasto::host", %error, "inspect write failed");
     }
     let after = after_present(presented, again);
     if after == AfterPresent::Fatal {
@@ -1039,8 +950,10 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
         runtime.installed = None;
     }
     if matches!(after, AfterPresent::Shown { .. } | AfterPresent::Stop) {
+        if runtime.present_failures >= present::PRESENT_BACKOFF_AFTER {
+            tracing::info!(target: "impasto::render::present", "present recovered");
+        }
         runtime.present_failures = 0;
-        runtime.present_logged = false;
         runtime.present_retry_at = None;
         if let Some(tree) = runtime.latest.clone() {
             write_inspect(
@@ -1056,9 +969,13 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     if after == AfterPresent::Retry {
         runtime.present_failures = runtime.present_failures.saturating_add(1);
         if let Some(delay) = present::present_retry_delay_ms(runtime.present_failures) {
-            if !runtime.present_logged {
-                runtime.present_logged = true;
-                (runtime.log)(LogLevel::Error, "present failed; backing off");
+            if runtime.present_failures == present::PRESENT_BACKOFF_AFTER {
+                tracing::warn!(
+                    target: "impasto::render::present",
+                    failures = runtime.present_failures,
+                    retry_in_ms = delay,
+                    "present failed; backing off"
+                );
                 if let Some(hub) = runtime.hub.as_ref() {
                     hub.error(
                         "engine",
@@ -1118,20 +1035,33 @@ fn open_surface_target(
             } else {
                 runtime.input.set_metrics(metrics);
             }
+            tracing::info!(
+                target: "impasto::render::surface",
+                surface = kept.id.0,
+                "surface opened"
+            );
             Ok(OpenedSurface::Ready { replaced })
         }
         Ready::Failed(engine::Status::NotReady) => {
             let retry = runtime.surfaces.fail_attempt(kept, attempts);
             if matches!(retry, OpenRetry::GaveUp) {
-                (runtime.log)(LogLevel::Error, "surface open failed; stopping retry");
+                tracing::error!(
+                    target: "impasto::render::surface",
+                    "surface open failed; stopping retry"
+                );
             } else {
+                tracing::warn!(
+                    target: "impasto::render::surface",
+                    attempts,
+                    "surface open not ready"
+                );
                 arm(runtime);
             }
             Ok(OpenedSurface::Waiting)
         }
         Ready::Failed(status) => {
             let error = BootError::Engine(status);
-            (runtime.log)(LogLevel::Error, &error.to_string());
+            tracing::error!(target: "impasto::render::surface", %status, "surface open failed");
             Err(error)
         }
     }
@@ -1169,7 +1099,7 @@ fn images_ready(
             if required {
                 blocked = true;
                 if let Some(message) = runtime.images.take_required_log(source, bucket) {
-                    (runtime.log)(LogLevel::Error, &message);
+                    tracing::error!(target: "impasto::render::image", "{message}");
                 }
             }
             continue;
@@ -1177,7 +1107,7 @@ fn images_ready(
         if let Some(request) = runtime.images.request(source, bucket)
             && runtime.image_tx.send(request).is_err()
         {
-            (runtime.log)(LogLevel::Error, "image decoder stopped");
+            tracing::error!(target: "impasto::render::image", "image decoder stopped");
         }
         if required {
             waiting = true;
@@ -1231,14 +1161,60 @@ fn arm(runtime: &mut Runtime) {
     }
 }
 
+fn phase_name(phase: uicore::Phase) -> &'static str {
+    match phase {
+        uicore::Phase::Down => "down",
+        uicore::Phase::Move => "move",
+        uicore::Phase::Up => "up",
+        uicore::Phase::Cancel => "cancel",
+        uicore::Phase::Wheel => "wheel",
+        uicore::Phase::Zoom => "zoom",
+    }
+}
+
+fn input_kind(event: &session::InputEvent) -> &'static str {
+    match event {
+        session::InputEvent::Key(_) | session::InputEvent::Back => "key",
+        session::InputEvent::Text(_) | session::InputEvent::Paste { .. } => "text",
+        session::InputEvent::Composing(_) => "ime",
+        session::InputEvent::Copy
+        | session::InputEvent::Cut
+        | session::InputEvent::SelectAll
+        | session::InputEvent::Edit(_)
+        | session::InputEvent::Replace { .. } => "edit",
+    }
+}
+
+fn note_step(runtime: &mut Runtime, step: FrameStep) {
+    let gpu = runtime.gpu;
+    if runtime.last_step == Some((step, gpu)) {
+        return;
+    }
+    runtime.last_step = Some((step, gpu));
+    tracing::debug!(target: "impasto::render", ?step, ?gpu, "frame step");
+}
+
+fn frame_listeners(
+    devtools: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
+) -> Vec<Box<dyn crate::timing::FrameListener>> {
+    let mut listeners: Vec<Box<dyn crate::timing::FrameListener>> = vec![
+        Box::new(crate::timing::BudgetEdge::default()),
+        Box::new(crate::timing::WorkEdge::default()),
+    ];
+    if let Some(devtools) = devtools {
+        listeners.push(Box::new(crate::timing::DevtoolFrames::new(devtools)));
+    }
+    listeners
+}
+
 /// Releases GPU caches and refuses acquire until a later submit rebuilds them.
-fn flush_gpu(runtime: &mut Runtime) {
+fn flush_gpu(runtime: &mut Runtime, reason: &'static str) {
+    tracing::info!(target: "impasto::render::gpu", reason, "gpu flush");
     runtime.engine.borrow_mut().trim();
     runtime.installed = None;
     runtime.gpu = Gpu::Flush;
     runtime.needs_present = false;
     runtime.present_failures = 0;
-    runtime.present_logged = false;
     runtime.present_retry_at = None;
     note_wake(runtime, None);
 }
@@ -1267,14 +1243,12 @@ fn open_engine() -> Result<engine::Engine, engine::Status> {
 
 /// Registers queued faces before `submit`. A failure logs the family and status
 /// only, then the frame continues with the faces already on the engine.
-fn install_fonts(
-    engine: &mut engine::Engine,
-    fonts: Vec<(String, Vec<u8>)>,
-    log: &dyn Fn(LogLevel, &str),
-) {
+fn install_fonts(engine: &mut engine::Engine, fonts: Vec<(String, Vec<u8>)>) {
     for (family, bytes) in fonts {
         if let Err(status) = engine.register_font(&bytes, &family) {
-            log(LogLevel::Error, &format!("font {family}: {status}"));
+            tracing::warn!(target: "impasto::host", %family, %status, "font registration failed");
+        } else {
+            tracing::info!(target: "impasto::host", %family, "font registered");
         }
     }
 }
@@ -1287,23 +1261,26 @@ fn prepare_engine(
         Ok(engine) => engine,
         Err(status) => {
             let error = BootError::Engine(status);
-            services.log(LogLevel::Error, &error.to_string());
+            tracing::error!(target: "impasto::host", %status, "engine was not created");
             return Err(error);
         }
     };
     let Some(font) = services.font(family) else {
         let error = BootError::Font(family.to_owned());
-        services.log(LogLevel::Error, &error.to_string());
+        tracing::error!(target: "impasto::host", %family, "font was not provided");
         return Err(error);
     };
     if let Err(status) = engine.register_font(font, family) {
         let error = BootError::Engine(status);
-        services.log(LogLevel::Error, &error.to_string());
+        tracing::error!(target: "impasto::host", %family, %status, "font registration failed");
         return Err(error);
     }
+    tracing::info!(target: "impasto::host", %family, "font registered");
     for (name, bytes) in services.extra_fonts() {
         if let Err(status) = engine.register_font(&bytes, &name) {
-            services.log(LogLevel::Error, &format!("font {name}: {status}"));
+            tracing::warn!(target: "impasto::host", %name, %status, "font registration failed");
+        } else {
+            tracing::info!(target: "impasto::host", %name, "font registered");
         }
     }
     Ok(Rc::new(RefCell::new(engine)))
@@ -1330,39 +1307,32 @@ mod tests {
     use crate::scheduler::FrameScheduler;
     use crate::scheduler::Gpu;
     use crate::surface::{SURFACE_OPEN_ATTEMPTS, SurfaceHost};
-    use crate::{ClipboardHost, LogLevel, NativePtr, Presented, Surface, Vsync};
+    use crate::{ClipboardHost, NativePtr, Presented, Surface, Vsync};
 
     #[test]
     fn a_rejected_font_is_logged_without_its_bytes() {
         let secret = b"SECRET-FONT-BYTES-DO-NOT-LOG";
-        let lines = Mutex::new(Vec::new());
-        let log = |level: LogLevel, message: &str| {
-            lines
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .push((level, message.to_owned()));
-        };
-        match engine::Engine::create_metal() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let capture = Capture(Arc::clone(&lines));
+        tracing::subscriber::with_default(capture, || match engine::Engine::create_metal() {
             Ok(mut engine) => {
-                install_fonts(
-                    &mut engine,
-                    vec![("Custom".to_owned(), secret.to_vec())],
-                    &log,
-                );
+                install_fonts(&mut engine, vec![("Custom".to_owned(), secret.to_vec())]);
             }
             Err(engine::Status::NotLinked) => {
-                log(
-                    LogLevel::Error,
-                    &format!("font Custom: {}", engine::Status::NotLinked),
+                tracing::warn!(
+                    target: "impasto::host",
+                    family = "Custom",
+                    status = "not linked",
+                    "font registration failed"
                 );
             }
             Err(status) => panic!("{status}"),
-        }
+        });
         let lines = lines.lock().unwrap_or_else(|error| error.into_inner());
         assert!(!lines.is_empty(), "a bad face must be reported");
-        let message = &lines[0].1;
+        let message = &lines[0];
         assert!(message.contains("Custom"), "{message}");
-        assert!(message.contains("font "), "{message}");
+        assert!(message.contains("font"), "{message}");
         assert!(!message.contains("SECRET-FONT-BYTES"), "{message}");
     }
 
@@ -1372,8 +1342,6 @@ mod tests {
         fn font(&self, _: &str) -> Option<&[u8]> {
             None
         }
-
-        fn log(&self, _: LogLevel, _: &str) {}
 
         fn apply_ime(&self, _: &session::ImeUpdate) {}
     }
@@ -1493,7 +1461,6 @@ mod tests {
     impl TestHarness {
         fn new() -> Self {
             let engine = Rc::new(RefCell::new(engine::Engine::inert()));
-            let typography = engine.borrow().typography();
             let vsync = RecVsync::new();
             let log = Rc::new(RefCell::new(SessionLog {
                 io: Vec::new(),
@@ -1507,8 +1474,6 @@ mod tests {
             let runtime = Runtime {
                 services: Rc::new(RefCell::new(Box::new(NullServices))),
                 engine,
-                typography,
-                log: Rc::new(|_, _| {}),
                 session: Some(Box::new(MockSession {
                     log: Rc::clone(&log),
                 })),
@@ -1530,9 +1495,10 @@ mod tests {
                 wake_tx,
                 dump_list: false,
                 present_failures: 0,
-                present_logged: false,
                 present_retry_at: None,
                 gpu: Gpu::Live,
+                last_step: None,
+                listeners: Vec::new(),
                 inspect: None,
                 hub: None,
                 inspect_dir: None,
@@ -1618,12 +1584,10 @@ mod tests {
         assert!(harness.runtime.surfaces.take_attempt().is_none());
         harness.runtime.needs_present = false;
         harness.runtime.present_failures = 3;
-        harness.runtime.present_logged = true;
         harness.runtime.present_retry_at = Some(1);
         assert!(!harness.command(Command::Lifecycle(session::Lifecycle::Resumed)));
         assert!(harness.runtime.needs_present);
         assert_eq!(harness.runtime.present_failures, 0);
-        assert!(!harness.runtime.present_logged);
         assert!(harness.runtime.present_retry_at.is_none());
         assert!(harness.runtime.surfaces.take_attempt().is_some());
     }
@@ -1870,26 +1834,80 @@ mod tests {
         assert_eq!(clip.read_clipboard(), "copied");
     }
 
+    struct Capture(Arc<Mutex<Vec<String>>>);
+
+    struct MessageVisit<'a>(&'a mut String);
+
+    impl tracing::field::Visit for MessageVisit<'_> {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "message" {
+                *self.0 = value.to_owned();
+            } else {
+                self.0.push(' ');
+                self.0.push_str(field.name());
+                self.0.push('=');
+                self.0.push_str(value);
+            }
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                *self.0 = format!("{value:?}");
+            } else {
+                self.0.push(' ');
+                self.0.push_str(field.name());
+                self.0.push('=');
+                self.0.push_str(&format!("{value:?}"));
+            }
+        }
+    }
+
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut message = String::new();
+            event.record(&mut MessageVisit(&mut message));
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(message);
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
     #[test]
     fn editor_copy_without_clipboard_logs_not_linked() {
-        let lines = Rc::new(RefCell::new(Vec::new()));
+        let lines = Arc::new(Mutex::new(Vec::new()));
         let mut harness = TestHarness::new();
-        let lines_log = Rc::clone(&lines);
-        harness.runtime.log = Rc::new(move |level, message| {
-            lines_log.borrow_mut().push((level, message.to_owned()));
-        });
         harness.open_dummy();
         harness.session.borrow_mut().clipboard = Some("copied".into());
         let token = match harness.vsync.last_token() {
             Some(token) => token,
             None => panic!("SurfaceReady arms one vsync token"),
         };
-        assert!(!harness.command(Command::Frame { token, time: now() }));
-        let lines = lines.borrow();
+        let capture = Capture(Arc::clone(&lines));
+        tracing::subscriber::with_default(capture, || {
+            assert!(!harness.command(Command::Frame { token, time: now() }));
+        });
+        let lines = lines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(
-            lines
-                .iter()
-                .any(|(level, message)| *level == LogLevel::Error && message.contains("not linked")),
+            lines.iter().any(|message| message.contains("not linked")),
             "{lines:?}"
         );
     }

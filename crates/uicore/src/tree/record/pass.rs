@@ -89,7 +89,7 @@ pub(super) fn emit_text(
         y,
         max_width: text.max_width.get(),
         font_size: text.font_size * text_scale,
-        paragraph: text.paragraph.unwrap_or(protocol::ParagraphId::NONE),
+        paragraph: protocol::ParagraphId::NONE,
         color: text.color,
         utf8,
         style: Arc::clone(&text.style),

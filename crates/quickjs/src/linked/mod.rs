@@ -114,7 +114,7 @@ impl ImeSlot {
     }
 
     /// Recomputes the platform keyboard state when the focused editor moved.
-    fn sync_editor(&mut self, tree: &Tree) {
+    fn sync_editor(&mut self, tree: &mut Tree) {
         let Some(id) = tree.focused() else {
             return;
         };
@@ -190,6 +190,8 @@ pub struct JsSession {
     exit: Cell<bool>,
     /// A failed frame must not schedule another frame by itself.
     suppress_demand: Cell<bool>,
+    record_failing: bool,
+    record_frames: u32,
     _thread: PhantomData<Rc<()>>,
 }
 
@@ -419,6 +421,8 @@ impl JsSession {
             script_error: RefCell::new(None),
             exit: Cell::new(false),
             suppress_demand: Cell::new(false),
+            record_failing: false,
+            record_frames: 0,
             _thread: PhantomData,
         })
     }
@@ -452,10 +456,35 @@ impl JsSession {
         self.script_error.borrow_mut().take()
     }
     fn note_script_error(&self, message: String) {
-        // SAFETY: `inner` is owned by this session. The log hook does not re-enter it.
-        let inner = unsafe { &*self.inner };
-        (inner.log)(3, &message);
+        tracing::error!(target: "impasto::script", "{message}");
         *self.script_error.borrow_mut() = Some(message);
+    }
+
+    fn note_record_ok(&mut self) {
+        if !self.record_failing {
+            return;
+        }
+        tracing::info!(
+            target: "impasto::render::record",
+            frames = self.record_frames,
+            "record recovered"
+        );
+        self.record_failing = false;
+        self.record_frames = 0;
+    }
+
+    fn hold_layout(&mut self, message: String) -> session::FrameOutput {
+        tracing::error!(target: "impasto::layout", error = %message, "layout failed");
+        self.hold_frame(message)
+    }
+
+    fn note_record_err(&mut self, message: &str) {
+        self.record_frames = self.record_frames.saturating_add(1);
+        if self.record_failing {
+            return;
+        }
+        self.record_failing = true;
+        tracing::error!(target: "impasto::render::record", error = message, "record failed");
     }
 
     pub fn jobs_pending(&self) -> bool {
@@ -743,7 +772,7 @@ impl Session for JsSession {
         let stamp = std::time::Instant::now();
         {
             let mut tree = inner.tree.borrow_mut();
-            inner.ime.borrow_mut().sync_editor(&tree);
+            inner.ime.borrow_mut().sync_editor(&mut tree);
             if inner.reduce_motion.get() {
                 tree.finish_motions();
             } else {
@@ -828,14 +857,18 @@ impl Session for JsSession {
             let flush_ms = elapsed_ms(flush_started);
             sweep_detached(inner);
             let script_ms = elapsed_ms(script_started);
+            let queued = inner.fonts.borrow().snapshot();
             let mut tree = inner.tree.borrow_mut();
+            for (family, bytes) in &queued {
+                let _ = tree.register_font(family, bytes);
+            }
             tree.prepare_sync_stats();
             let mut ran_layout = tree.needs_layout();
             if ran_layout {
                 if let Err(error) = tree.layout() {
                     let message = error.to_string();
                     drop(tree);
-                    return self.hold_frame(message);
+                    return self.hold_layout(message);
                 }
             }
             drop(tree);
@@ -853,7 +886,7 @@ impl Session for JsSession {
                     if let Err(error) = tree.layout() {
                         let message = error.to_string();
                         drop(tree);
-                        return self.hold_frame(message);
+                        return self.hold_layout(message);
                     }
                     ran_layout = true;
                 }
@@ -877,22 +910,36 @@ impl Session for JsSession {
                 if let Err(error) = tree.layout() {
                     let message = error.to_string();
                     drop(tree);
-                    return self.hold_frame(message);
+                    return self.hold_layout(message);
                 }
             }
             let record_started = std::time::Instant::now();
             if tree.needs_paint() {
                 let mut commands = std::mem::take(&mut self.paint_commands);
-                if tree.record_into(&mut commands).is_err() {
-                    commands.clear();
+                match tree.record_into(&mut commands) {
+                    Ok(()) => self.note_record_ok(),
+                    Err(error) => {
+                        commands.clear();
+                        let message = error.to_string();
+                        self.note_record_err(&message);
+                    }
                 }
                 self.paint_commands = commands;
                 tree.clear_paint();
             }
-            // Fresh overflow findings go to the host log as warnings; the
+            // Fresh overflow findings go to the log as warnings; the
             // devtools layout page reads the full report on demand.
             for issue in tree.take_layout_issues() {
-                (inner.log)(2, &issue.log_line());
+                tracing::warn!(
+                    target: "impasto::layout",
+                    axis = issue.axis.name(),
+                    parent = issue.parent.to_raw(),
+                    parent_size = issue.parent_size,
+                    used = issue.used,
+                    excess = issue.excess,
+                    child = issue.worst_child.to_raw(),
+                    "overflow"
+                );
             }
             let record_ms = elapsed_ms(record_started);
             let epoch = tree.layer_epoch();
@@ -915,7 +962,7 @@ impl Session for JsSession {
             let semantics_ms = elapsed_ms(semantics_started);
             let (layout_ms, sync_ms) = tree.layout_timing();
             let layout_trace = tree.take_layout_trace();
-            inner.ime.borrow_mut().sync_editor(&tree);
+            inner.ime.borrow_mut().sync_editor(&mut tree);
             drop(tree);
             let trace = session::FrameTrace {
                 laywork_ms: layout_trace.laywork_ms,

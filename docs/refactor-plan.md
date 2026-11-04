@@ -75,7 +75,7 @@ export interface Permissions {
 
 ## 诊断与日志
 
-日志管道已经分级：`hostshell::LogLevel` 是 `Error`、`Warn`、`Info`、`Debug`，`IMPASTO_LOG` 在宿主 sink 过滤，缺省 `info`。QuickJS 的 `console.*`（0 log、1 info、2 warn、3 error）映射进同一张表。engine 的段落、picture、纹理缓存计数不再往 stderr 打一次性警告，改由 `SubmitStats` 的 `paragraphs`、`pictures`、`textures` 字段随帧日志输出，超预算帧的计时行是 `Warn` 级。
+日志是调用点上的 `tracing` 事件。过滤是 `hostshell` 里的一份 `Targets`。debug 构建缺省 `trace`，release 构建缺省 `info`。`set_log_targets` 整份替换后重建 callsite 兴趣缓存。同一条事件分发到控制台、`mars-xlog` 文件（有日志目录时）和 devtools 的 `DevtoolSink`。超预算只在进入和恢复各打一条；进入行带分段原因，全量数字仍在 `FrameSample`。
 
 `IMPASTO_INSPECT=<dir>` 已落地。macOS 在 present 成功后写一份 `frame.json`（层树、命令数、picture、耗时和布局问题）并退出；没有 `IMPASTO_DUMP` 时同一帧的 PNG 写到该目录的 `frame.png`。Android 把已记录的 `FrameTiming` 和层树写成 `frame.json`，不退出。应用内面板见 `docs/devtools-plan.md`。
 
@@ -99,7 +99,7 @@ Quotes 的现有路由作回归基准。能力页另走开路由，不挤进模�
 
 ## 顺序
 
-平台通道一节里的方法表、包拆分、脚本加载、`submit_bench`、列表滚动的 picture 记账、直接值封送、分块 HTTP、零拷贝字节和宿主表生成已经在代码里。恢复前台的 present、表面重试、销毁等待、`Invalidate` 和 `MemoryWarning` 也已经在代码里。gallery 产物出库（`just gallery-dist` 门面，quickjs 测试读文件并在缺产物时失败）和日志分级（`LogLevel` 四级、`IMPASTO_LOG`、缓存计数进 `SubmitStats`）也已落地。
+平台通道一节里的方法表、包拆分、脚本加载、`submit_bench`、列表滚动的 picture 记账、直接值封送、分块 HTTP、零拷贝字节和宿主表生成已经在代码里。恢复前台的 present、表面重试、销毁等待、`Invalidate` 和 `MemoryWarning` 也已经在代码里。gallery 产物出库（`just gallery-dist` 门面，quickjs 测试读文件并在缺产物时失败）和调用点日志（`tracing`、`Targets`、计时进 `FrameSample`）也已落地。
 
 计时基准只在 `just bench`。质量门在 `just quality`，覆盖率在 `just coverage`，生成物在 `just gen`。
 
@@ -112,7 +112,7 @@ Quotes 的现有路由作回归基准。能力页另走开路由，不挤进模�
 - `crates/ios`。预构建矩阵出现 iOS 列之前不写。
 - 导航往返之后 `picture_writes` 只计仍在树上的页面 picture。路由表已经是 `/schedule`、`/nav/:depth`、`/list`。包拆分不实现这条断言。
 - 带 schema 或迁移的存储库。`AsyncStorage` 与 `FileSystem` 落地之后再写，只依赖 `@impasto/file-system` 与 `@impasto/async-storage`。
-- 把排版或 `submit_layers` 挪出渲染线程。现在的模块拆分仍然是 `render` 上的一个 `!Send` 所有者。按文件拆开不产生线程边界。
+- 把 `submit_layers` 挪到单独的 gpu 线程。测量上下文和绘制上下文已经分开，层树是 `Send` 的。线程拆分还没做：`Engine` 仍和会话一起待在 `render` 线程上。
 
 ## 风险
 

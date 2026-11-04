@@ -12,6 +12,8 @@ pub(super) struct PaintSlot {
     pub(super) height: f32,
     /// `generation` when this slot was last measured or retained.
     pub(super) used: u64,
+    /// Pictures and the root list that still draw this paragraph.
+    pub(super) live: u32,
     pub(super) paragraph: ffi::ImpellerParagraph,
     pub(super) key: Option<ParaKey>,
 }
@@ -25,6 +27,7 @@ impl PaintSlot {
             width: 0.0,
             height: 0.0,
             used: 0,
+            live: 0,
             paragraph: ptr::null_mut(),
             key: None,
         }

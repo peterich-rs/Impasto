@@ -108,6 +108,12 @@ export interface CoreHost {
     alignY: number,
     /** `0` content, `1` always, `2` never. Omitted is content. */
     accept?: number,
+    /** `0` tau in milliseconds, `1` deceleration rate per millisecond. */
+    decayKind?: number,
+    snapStiffness?: number,
+    snapDamping?: number,
+    /** `0` linear factor, `1` asymptotic curve. */
+    bandKind?: number,
   ): void;
   setScrollChain(node: NodeHandle, chain: boolean): void;
   fling(node: NodeHandle, vx: number, vy: number): void;
@@ -224,6 +230,7 @@ export interface CoreHost {
     ) => void,
   ): void;
   onSecondaryClick(node: NodeHandle, fn: () => void): void;
+  onLongPress(node: NodeHandle, fn: () => void): void;
   textEdit(node: NodeHandle, op: number, text?: string): { text: string; start: number; end: number };
   onFrame(fn: (targetMs: number, intervalMs: number) => void): void;
   /** One callback, installed by `boot`, run after layout. */

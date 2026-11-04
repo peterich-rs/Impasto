@@ -228,12 +228,14 @@ mod tests {
             shapes_measure_miss: 0,
             shapes_paint_hit: 0,
             shapes_paint_miss: 0,
+            shapes_bridged: 0,
             picture_rebuilt: 0,
             picture_reused: 0,
             layer_count: 3,
             paragraphs: 1,
             pictures: 1,
             textures: 0,
+            interval_ms: 0.0,
         }
     }
 

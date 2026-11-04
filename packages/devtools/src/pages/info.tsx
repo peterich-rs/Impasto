@@ -2,7 +2,7 @@
 import { createRenderEffect, createSignal, For, Show } from "solid-js";
 import { Text, useTheme } from "@impasto/solid-ui";
 import { host, readMetrics } from "@impasto/solid-renderer";
-import * as raw from "../host.gen.ts";
+import * as raw from "@impasto/devtools/host";
 
 type Row = [string, string];
 
@@ -25,7 +25,7 @@ function textOf(value: unknown): string {
 export function InfoPage() {
   const theme = useTheme();
   const [rows, setRows] = createSignal<Row[]>([]);
-  createRenderEffect(() => {
+  createRenderEffect(() => true, () => {
     const metrics = readMetrics();
     let memory = "-";
     try {

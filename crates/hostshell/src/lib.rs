@@ -11,6 +11,7 @@ mod http;
 mod images;
 mod ime;
 mod input;
+mod log_sub;
 mod modules;
 mod net;
 mod present;
@@ -30,13 +31,15 @@ use session::Metrics;
 
 pub use command::{Command, FrameToken, SurfaceId, SurfaceTarget};
 pub use diagnostics::DiagnosticsHub;
-pub use error::{BootError, LogLevel, SessionError};
+pub use error::{BootError, SessionError};
 pub use exec::{MainThreadPoster, RtExec, settle_factory};
 pub use host_stubs::{
     first_party_modules, host_stub_path, host_stub_source, package_folder, write_host_stubs,
 };
 pub use http::{OpenWireClient, http_client};
 pub use images::{ImageDecoder, ImageError, ImageHandle, ImageReady};
+pub use log_sub::install as install_log;
+pub use log_sub::set_log_targets;
 pub use modules::{
     ClipboardHost, LinkingHost, PermissionsHost, StorageHost, app_state, async_storage, clipboard,
     file_system, linking, memory, permissions,
@@ -46,9 +49,10 @@ pub use ptr::NativePtr;
 pub use semantics::{ProjectedNode, content_extent, project, scroll_step};
 pub use session::{FrameTime, Lifecycle};
 pub use shaper::ImpellerShaper;
-pub use shell::{DropWait, EngineSlot, Link, Poster, start};
+pub use shell::{DropWait, Link, Poster, console_log, start};
 pub use surface::pixel_size;
 pub use timing::FrameTiming;
+pub use tracing_subscriber::filter::{LevelFilter, Targets};
 
 /// QuickJS console callback. Level 3 is an error.
 pub type ConsoleLog = Box<dyn Fn(u8, &str)>;
@@ -57,9 +61,14 @@ pub type ConsoleLog = Box<dyn Fn(u8, &str)>;
 pub type IoSink = Box<dyn Fn(session::IoJob) + Send>;
 
 /// Builds the session on the render thread. The closure must not capture the engine.
+pub struct SessionOpen {
+    pub shaper: Box<dyn uicore::Shaper>,
+    pub log: ConsoleLog,
+}
+
 pub type SessionFactory = Box<
     dyn FnOnce(
-            &EngineSlot,
+            SessionOpen,
             IoSink,
             session::HostConfig,
         ) -> Result<Box<dyn session::Session>, SessionError>
@@ -73,8 +82,7 @@ pub type SurfaceOpener = dyn FnMut(&mut engine::Engine, SurfaceTarget) -> Result
 pub type OpenSurface = Box<SurfaceOpener>;
 
 pub enum Launch {
-    /// Invoked on the render thread after the engine exists. The closure must
-    /// not capture the engine; [`EngineSlot::shaper`] builds the shaper there.
+    /// Invoked on the ui thread. The shaper is created on that thread.
     Session(SessionFactory),
 }
 
@@ -86,7 +94,6 @@ pub enum Presented {
 
 pub trait Services: Send {
     fn font(&self, family: &str) -> Option<&[u8]>;
-    fn log(&self, level: LogLevel, message: &str);
     /// Projected semantics nodes. The default ignores them. Called on the render thread.
     fn semantics(&self, _nodes: &[ProjectedNode]) {}
     /// Apply one keyboard update. Called on the render thread.
@@ -138,6 +145,8 @@ pub struct Boot {
     pub dump_list: bool,
     /// `IMPASTO_INSPECT` directory. The render thread writes timing `frame.json` there.
     pub inspect: Option<std::path::PathBuf>,
+    /// Directory for the xlog file sink. `None` keeps console and devtools only.
+    pub log_dir: Option<std::path::PathBuf>,
     /// Enable the in-app devtools: hub, network recording, and the panic
     /// hook. `None` leaves the process with zero diagnostics overhead.
     pub devtools: Option<Arc<DiagnosticsHub>>,

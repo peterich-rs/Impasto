@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
 use hostshell::{
-    Boot, BootError, ClipboardHost, Command, Launch as ShellLaunch, Link, LinkingHost, LogLevel,
+    Boot, BootError, ClipboardHost, Command, Launch as ShellLaunch, Link, LinkingHost,
     NativePtr, PermissionsHost, Poster, Services, SessionError, StorageHost, SurfaceTarget,
     metrics,
 };
@@ -415,7 +415,7 @@ impl ContentView {
                 html: read_pasteboard_html(),
             }],
             _ => {
-                eprintln!("text command ignored: {name}");
+                tracing::debug!(target: "impasto::host", %name, "text command ignored");
                 return;
             }
         };
@@ -682,7 +682,7 @@ impl Host {
                 metrics,
             )));
         self.post_settings();
-        println!("host ready");
+        tracing::info!(target: "impasto::host", "host ready");
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 
@@ -833,18 +833,6 @@ struct MacServices {
     on_stop: Arc<dyn Fn(i32) + Send + Sync>,
 }
 
-impl MacServices {
-    /// Reads `IMPASTO_LOG` once. The default sink keeps `info`.
-    fn filter() -> LogLevel {
-        static FILTER: std::sync::OnceLock<LogLevel> = std::sync::OnceLock::new();
-        *FILTER.get_or_init(|| {
-            std::env::var("IMPASTO_LOG")
-                .map(|text| LogLevel::parse(&text))
-                .unwrap_or(LogLevel::Info)
-        })
-    }
-}
-
 /// Source maps larger than this stay off the panel. The bundle's map is small.
 const SOURCE_MAP_CAP: u64 = 512 * 1024;
 
@@ -855,16 +843,6 @@ fn load_source_map(script: &str) -> Option<Arc<String>> {
         return None;
     }
     std::fs::read_to_string(path).ok().map(Arc::new)
-}
-
-/// `IMPASTO_DEVTOOLS=1` turns on the in-app devtools panel. Default off.
-fn devtools_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("IMPASTO_DEVTOOLS")
-            .map(|text| text.trim() == "1" || text.trim().eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    })
 }
 
 impl Services for MacServices {
@@ -899,22 +877,6 @@ impl Services for MacServices {
             }
         }
         Vec::new()
-    }
-
-    fn log(&self, level: LogLevel, message: &str) {
-        if level > Self::filter() {
-            return;
-        }
-        let prefix = match level {
-            LogLevel::Error => "error",
-            LogLevel::Warn => "warn",
-            LogLevel::Info => "info",
-            LogLevel::Debug => "debug",
-        };
-        match level {
-            LogLevel::Error | LogLevel::Warn => eprintln!("impasto {prefix}: {message}"),
-            LogLevel::Info | LogLevel::Debug => println!("impasto {prefix}: {message}"),
-        }
     }
 
     fn apply_ime(&self, update: &session::ImeUpdate) {
@@ -987,14 +949,14 @@ pub fn run(
         wake_main();
     });
     let Launch::Script { name, source } = launch;
-    let devtools_source_map = devtools_enabled().then(|| load_source_map(&name)).flatten();
+    let devtools_source_map = load_source_map(&name);
     let inspect_dir = std::env::var_os("IMPASTO_INSPECT").map(PathBuf::from);
-    let shell_launch = ShellLaunch::Session(Box::new(move |slot, io, host| {
+    let shell_launch = ShellLaunch::Session(Box::new(move |open, io, host| {
         quickjs::open_with_io(
             &source,
             &name,
-            slot.shaper(),
-            slot.log_hook(),
+            open.shaper,
+            open.log,
             Some(io),
             host,
         )
@@ -1010,9 +972,13 @@ pub fn run(
     let decoder = Arc::new(PngDecoder { directory: assets });
     let launch_url = session::shared(initial_url.clone());
     let mac = Arc::new(MacBridge);
-    let devtools = devtools_enabled()
-        .then(hostshell::DiagnosticsHub::new)
-        .map(Arc::new);
+    let devtools = Some(Arc::new(hostshell::DiagnosticsHub::new()));
+    fn log_directory() -> Option<PathBuf> {
+        let home = std::env::var_os("HOME")?;
+        let dir = PathBuf::from(home).join("Library/Logs/impasto");
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(dir)
+    }
     let link = hostshell::start(
         Boot {
             font_family: FONT_FAMILY.to_string(),
@@ -1043,6 +1009,7 @@ pub fn run(
             devtools,
             devtools_source_map,
             inspect_dir,
+            log_dir: log_directory(),
         }
         .with_module(hostshell::clipboard(Arc::clone(&mac) as _))
         .with_module(hostshell::linking(

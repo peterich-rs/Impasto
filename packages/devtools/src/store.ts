@@ -7,9 +7,9 @@ import { createSignal, onCleanup } from "solid-js";
 import { onFrame } from "@impasto/solid-renderer";
 import { appendCapped } from "./cursor.ts";
 import type { HighlightBox } from "./highlight.tsx";
-import * as raw from "./host.gen.ts";
+import * as raw from "@impasto/devtools/host";
 
-export type LogLevel = 0 | 1 | 2 | 3 | 4;
+export type LogLevel = "ERROR" | "WARN" | "INFO" | "DEBUG" | "TRACE";
 export type LogSource = "script" | "layout" | "host" | "net";
 
 export type LogLine = {
@@ -17,7 +17,9 @@ export type LogLine = {
   at: number;
   level: LogLevel;
   source: LogSource;
+  target: string;
   text: string;
+  frame: number | null;
 };
 
 export type DiagError = {
@@ -84,6 +86,13 @@ export type FrameSample = {
   paragraphs: number;
   pictures: number;
   textures: number;
+  shapesBuilt?: number;
+  shapesBridged?: number;
+  paintHit?: number;
+  paintMiss?: number;
+  pictureRebuilt?: number;
+  pictureReused?: number;
+  layoutCause?: string;
   overBudget: boolean;
   phases?: PhaseSample;
 };

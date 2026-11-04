@@ -9,22 +9,22 @@ use session::document_relative;
 const STORE_NAME: &str = "async-storage.tsv";
 
 pub fn read_document(root: &Path, path: &str) -> Result<Vec<u8>, String> {
-    let full = joined(root, path)?;
-    fs::read(&full).map_err(|error| error.to_string())
+    let full = joined(root, path).map_err(|error| io_fail("read", path, error))?;
+    fs::read(&full).map_err(|error| io_fail("read", path, error.to_string()))
 }
 
 pub fn write_document(root: &Path, path: &str, bytes: &[u8]) -> Result<(), String> {
-    let full = joined(root, path)?;
+    let full = joined(root, path).map_err(|error| io_fail("write", path, error))?;
     if let Some(parent) = full.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        fs::create_dir_all(parent).map_err(|error| io_fail("write", path, error.to_string()))?;
     }
-    fs::write(&full, bytes).map_err(|error| error.to_string())
+    fs::write(&full, bytes).map_err(|error| io_fail("write", path, error.to_string()))
 }
 
 pub fn delete_document(root: &Path, path: &str) -> Result<(), String> {
-    let full = joined(root, path)?;
+    let full = joined(root, path).map_err(|error| io_fail("delete", path, error))?;
     if full.exists() {
-        fs::remove_file(&full).map_err(|error| error.to_string())?;
+        fs::remove_file(&full).map_err(|error| io_fail("delete", path, error.to_string()))?;
     }
     Ok(())
 }
@@ -41,27 +41,33 @@ pub fn store_get(root: &Path, keys: &[String]) -> Result<Vec<(String, Option<Str
 }
 
 pub fn store_set(root: &Path, rows: &[(String, String)]) -> Result<(), String> {
-    let mut map = load_store(root)?;
+    let mut map = load_store(root).map_err(|error| io_fail("store-set", STORE_NAME, error))?;
     for (key, value) in rows {
         map.insert(key.clone(), value.clone());
     }
-    save_store(root, &map)
+    save_store(root, &map).map_err(|error| io_fail("store-set", STORE_NAME, error))
 }
 
 pub fn store_remove(root: &Path, keys: &[String]) -> Result<(), String> {
-    let mut map = load_store(root)?;
+    let mut map = load_store(root).map_err(|error| io_fail("store-remove", STORE_NAME, error))?;
     for key in keys {
         map.remove(key);
     }
-    save_store(root, &map)
+    save_store(root, &map).map_err(|error| io_fail("store-remove", STORE_NAME, error))
 }
 
 pub fn store_clear(root: &Path) -> Result<(), String> {
     let path = root.join(STORE_NAME);
     if path.exists() {
-        fs::remove_file(path).map_err(|error| error.to_string())?;
+        fs::remove_file(path)
+            .map_err(|error| io_fail("store-clear", STORE_NAME, error.to_string()))?;
     }
     Ok(())
+}
+
+fn io_fail(op: &'static str, path: &str, error: String) -> String {
+    tracing::warn!(target: "impasto::io", op, path, error = %error, "file io failed");
+    error
 }
 
 fn joined(root: &Path, path: &str) -> Result<PathBuf, String> {

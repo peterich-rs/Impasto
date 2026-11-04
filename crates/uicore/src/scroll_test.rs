@@ -736,3 +736,138 @@ fn a_still_finger_long_press_fires_from_tick() -> Result<(), crate::Error> {
     );
     Ok(())
 }
+
+#[test]
+fn release_velocity_keeps_pulling_the_band() -> Result<(), crate::Error> {
+    let (mut tree, scroll) = filled_scroll(200.0)?;
+    tree.tick_motions(32.0);
+    tree.pointer(event(Phase::Down, 10.0, 20.0, 0.0));
+    tree.pointer(event(Phase::Move, 10.0, 40.0, 16.0));
+    tree.pointer(event(Phase::Move, 10.0, 70.0, 32.0));
+    let pulled = tree.overscroll(scroll)?.1;
+    assert!(pulled < -1.0, "{pulled}");
+    tree.pointer(event(Phase::Up, 10.0, 70.0, 36.0));
+    tree.tick_motions(48.0);
+    let next = tree.overscroll(scroll)?.1;
+    assert!(next < pulled, "band should keep going {pulled} -> {next}");
+    Ok(())
+}
+
+#[test]
+fn the_rubber_band_does_not_cross_zero() -> Result<(), crate::Error> {
+    let (mut tree, scroll) = filled_scroll(200.0)?;
+    tree.pointer(event(Phase::Down, 10.0, 20.0, 0.0));
+    tree.pointer(event(Phase::Move, 10.0, 50.0, 16.0));
+    tree.pointer(event(Phase::Move, 10.0, 50.0, 200.0));
+    tree.pointer(event(Phase::Up, 10.0, 50.0, 210.0));
+    assert!(tree.overscroll(scroll)?.1 < -1.0);
+    let mut now = 210.0;
+    for _ in 0..40 {
+        now += 16.0;
+        tree.tick_motions(now);
+        assert!(tree.overscroll(scroll)?.1 <= 0.5, "crossed zero at {now}");
+    }
+    assert!(tree.overscroll(scroll)?.1.abs() < 0.5);
+    Ok(())
+}
+
+#[test]
+fn scroll_offset_publishes_a_layer_tree_without_rebuilding_pictures() -> Result<(), crate::Error> {
+    let (mut tree, scroll) = filled_scroll(400.0)?;
+    tree.set_scroll_offset(scroll, 0.0, 20.0)?;
+    tree.layout()?;
+    tree.record()?;
+    let epoch = tree.layer_epoch();
+    let generations: Vec<u64> = tree
+        .layer_tree()
+        .pictures
+        .iter()
+        .map(|picture| picture.generation)
+        .collect();
+    assert!(!generations.is_empty());
+    tree.set_scroll_offset(scroll, 0.0, 28.0)?;
+    assert!(tree.layer_epoch() > epoch);
+    tree.record()?;
+    assert_eq!(tree.picture_writes(), 0);
+    let next: Vec<u64> = tree
+        .layer_tree()
+        .pictures
+        .iter()
+        .map(|picture| picture.generation)
+        .collect();
+    assert_eq!(generations, next);
+    Ok(())
+}
+
+#[test]
+fn a_row_picture_rebuilds_without_the_rest_of_the_scroll() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(mono());
+    tree.set_viewport(0.0, 0.0, 100.0, 80.0)?;
+    let scroll = tree.scroll_with(ScrollAxis::Vertical)?;
+    tree.set_axis_size(
+        scroll,
+        crate::AxisSize::Points(100.0),
+        crate::AxisSize::Points(80.0),
+    )?;
+    let column = tree.column(0.0)?;
+    let top = tree.sized(1.0, 10.0)?;
+    let row = tree.column(0.0)?;
+    let text = tree.text("one", 16.0, [0, 0, 0, 255])?;
+    tree.add_child(row, text)?;
+    tree.add_child(column, top)?;
+    tree.add_child(column, row)?;
+    tree.add_child(scroll, column)?;
+    let epoch = tree.layer_epoch();
+    tree.set_picture_owner(row, true)?;
+    assert!(tree.layer_epoch() > epoch);
+    let pinned = tree.layer_epoch();
+    tree.set_picture_owner(row, true)?;
+    assert_eq!(tree.layer_epoch(), pinned);
+    tree.layout()?;
+    let list = tree.record()?;
+    let copies = list
+        .commands
+        .iter()
+        .filter(|command| matches!(command, protocol::Command::Text { utf8, .. } if utf8.as_ref() == "one"))
+        .count();
+    assert_eq!(copies, 1, "the row must not paint twice");
+    let row_picture = crate::layer::child_picture_id(row);
+    let generation = tree
+        .layer_tree()
+        .pictures
+        .iter()
+        .find(|picture| picture.id == row_picture)
+        .map(|picture| picture.generation)
+        .expect("row picture");
+    let scroll_picture = crate::layer::child_picture_id(scroll);
+    assert!(
+        tree.layer_tree()
+            .pictures
+            .iter()
+            .all(|picture| picture.id != scroll_picture),
+        "a scroll with row owners does not keep one child picture"
+    );
+    tree.set_text(text, "two")?;
+    tree.layout()?;
+    tree.record()?;
+    let rebuilt = tree
+        .layer_tree()
+        .pictures
+        .iter()
+        .find(|picture| picture.id == row_picture)
+        .map(|picture| picture.generation)
+        .expect("row picture");
+    assert_ne!(generation, rebuilt);
+    tree.set_size(top, 1.0, 30.0)?;
+    tree.layout()?;
+    tree.record()?;
+    let held = tree
+        .layer_tree()
+        .pictures
+        .iter()
+        .find(|picture| picture.id == row_picture)
+        .map(|picture| picture.generation)
+        .expect("row picture");
+    assert_eq!(rebuilt, held, "moving the spacer must reuse the row");
+    Ok(())
+}

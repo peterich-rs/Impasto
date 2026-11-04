@@ -488,6 +488,7 @@ pub(super) unsafe extern "C" fn effect(
             num(10) as i32,
             num(11) as f32,
             num(12) as f32,
+            num(13) as i32,
         )
     } else if kind == EffectKind::RegisterFont as i32 {
         bridge::register_font(session, text, text_len, bytes, byte_len)

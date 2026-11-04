@@ -61,7 +61,7 @@ just host-js
 just android
 ```
 
-`just host` 打开默认 360×640 的窗口，加载 ESM `apps/gallery-solid/dist/quotes.js`（`just gallery-dist` 从 TSX 源码本地构建，产物不提交）。`just host-js` 是同一条命令。`IMPASTO_DUMP` 把一帧 Metal 纹理写成 PNG 后退出，用来看画面。`IMPASTO_LOG` 过滤进程日志，取值 `error`、`warn`、`info`（缺省）、`debug`。`just android` 打 APK。需要 SDK 和 quickjs-ng 源码。
+`just host` 打开默认 360×640 的窗口，加载 ESM `apps/gallery-solid/dist/quotes.js`（`just gallery-dist` 从 TSX 源码本地构建，产物不提交）。`just host-js` 是同一条命令。`IMPASTO_DUMP` 把一帧 Metal 纹理写成 PNG 后退出，用来看画面。日志过滤是 `hostshell` 的 `Targets`。debug 构建缺省 `trace`，release 构建缺省 `info`，由 `set_log_targets` 整份替换。`just android` 打 APK。需要 SDK 和 quickjs-ng 源码。
 
 ## 目录
 

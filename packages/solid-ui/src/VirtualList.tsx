@@ -8,7 +8,7 @@ import {
   type NodeHandle,
 } from "@impasto/solid-renderer";
 import { Button } from "./Button.tsx";
-import { ScrollArea, type ScrollPhysicsProps } from "./ScrollArea.tsx";
+import { ScrollArea, type ScrollPhysics } from "./ScrollArea.tsx";
 import {
   createScrollController,
   refreshListener,
@@ -46,7 +46,7 @@ export function VirtualList<T>(props: {
   restoreKey?: string;
   onRefresh?: () => void;
   controller?: ScrollController;
-  physics?: ScrollPhysicsProps;
+  physics?: ScrollPhysics;
 }): NodeHandle {
   const theme = useTheme();
   const scroll = props.controller ?? createScrollController();

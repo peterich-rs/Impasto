@@ -1,5 +1,4 @@
 use super::{Runtime, arm, flush_gpu};
-use crate::LogLevel;
 use crate::command::Command;
 use crate::error::BootError;
 use crate::images::ImageReady;
@@ -16,13 +15,14 @@ pub(super) fn handle(runtime: &mut Runtime, command: Command) -> Result<bool, Bo
 }
 
 fn invalidate(runtime: &mut Runtime) {
+    tracing::debug!(target: "impasto::render::gpu", "invalidate");
     runtime.needs_present = true;
     runtime.present_retry_at = None;
     arm(runtime);
 }
 
 fn memory_warning(runtime: &mut Runtime) {
-    flush_gpu(runtime);
+    flush_gpu(runtime, "memory");
     runtime.images.trim();
     if !runtime.input.is_paused() {
         arm(runtime);
@@ -31,12 +31,13 @@ fn memory_warning(runtime: &mut Runtime) {
 
 fn image_ready(runtime: &mut Runtime, ready: ImageReady) {
     if let Some(message) = runtime.images.apply(ready) {
-        (runtime.log)(LogLevel::Error, &message);
+        tracing::error!(target: "impasto::render::image", "{message}");
     }
     arm(runtime);
 }
 
 fn reload(runtime: &mut Runtime, source: &str) {
+    tracing::debug!(target: "impasto::render::image", source, "image reload");
     runtime.images.reload(source);
     arm(runtime);
 }

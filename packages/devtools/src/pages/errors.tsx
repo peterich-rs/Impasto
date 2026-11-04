@@ -4,7 +4,7 @@ import { Clipboard } from "@impasto/clipboard";
 import { Text, useTheme } from "@impasto/solid-ui";
 import { errors, setUnseenErrors } from "../store.ts";
 import { SourceMap } from "../source-map.ts";
-import * as raw from "../host.gen.ts";
+import * as raw from "@impasto/devtools/host";
 
 /** QuickJS stack frames look like `at fn (file.js:12:34)`. */
 const FRAME = /at\s+(?:(\S+)\s+)?\(?(.+?):(\d+):(\d+)\)?/g;
@@ -13,7 +13,10 @@ export function ErrorsPage() {
   const theme = useTheme();
   const [selected, setSelected] = createSignal<number>(-1);
   const [map, setMap] = createSignal<SourceMap | null>(null);
-  createRenderEffect(() => setUnseenErrors(0));
+  createRenderEffect(
+    () => errors().length,
+    () => setUnseenErrors(0),
+  );
   const current = () => errors().find((entry) => entry.seq === selected());
   const select = (seq: number) => {
     setSelected(seq);
@@ -70,7 +73,7 @@ export function ErrorsPage() {
           )}
         </For>
       </column>
-      <Show when={current() !== undefined} keyed>
+      <Show when={current()} keyed>
         {(error) => (
           <column gap={2}>
             <row gap={8}>

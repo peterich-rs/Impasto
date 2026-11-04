@@ -99,7 +99,7 @@ impl Typography {
                 )
             })
         {
-            found.used = self.generation;
+            found.used = self.measure_generation;
             let size = (found.width, found.height);
             self.stats.measure_hit = self.stats.measure_hit.saturating_add(1);
             return Ok(size);
@@ -110,7 +110,7 @@ impl Typography {
         };
         let mut shaped = self.build_paragraph(utf8, font_size, max_width, color, style, spans)?;
         self.stats.built = self.stats.built.saturating_add(1);
-        shaped.used = self.generation;
+        shaped.used = self.measure_generation;
         if style.overflow != protocol::TextOverflow::Visible {
             shaped.width = shaped.width.min(max_width);
         }
@@ -419,8 +419,49 @@ impl Typography {
         style: &TextStyle,
         spans: &[TextSpan],
     ) -> Result<protocol::ParagraphId, Status> {
-        self.paint_slot(utf8, font_size, max_width, color, style, spans, true)
+        self.paint_slot(utf8, font_size, max_width, color, style, spans, true, false)
             .map(|(id, _, _)| id)
+    }
+
+    /// A paragraph for one draw, plus an extra [`ffi::ImpellerParagraphRetain`].
+    ///
+    /// The cache keeps its own reference. `slot` is passed to [`Self::release_draw`]
+    /// when the display list that drew this pointer is released.
+    pub(crate) fn acquire_draw(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+        spans: &[TextSpan],
+    ) -> Result<(ffi::ImpellerParagraph, u32), Status> {
+        let (id, _, _) =
+            self.paint_slot(utf8, font_size, max_width, color, style, spans, false, true)?;
+        let slot = self
+            .paints
+            .slots
+            .get_mut(id.index as usize)
+            .ok_or(Status::BadScene)?;
+        if slot.paragraph.is_null() {
+            return Err(Status::BadScene);
+        }
+        slot.live = slot.live.saturating_add(1);
+        slot.used = self.generation;
+        let paragraph = slot.paragraph;
+        // SAFETY: `paragraph` is the live slot object. The extra retain is released
+        // with the display list that draws it. Retain is a no-op on null, and the
+        // null check above already returned.
+        unsafe { ffi::ImpellerParagraphRetain(paragraph) };
+        Ok((paragraph, id.index))
+    }
+
+    /// Drops one display-list reference. The cache object stays until it is unused.
+    pub(crate) fn release_draw(&mut self, slot: u32) {
+        let Some(slot) = self.paints.slots.get_mut(slot as usize) else {
+            return;
+        };
+        slot.live = slot.live.saturating_sub(1);
     }
 
     /// Measures with the real foreground. A miss builds the paint slot at `refs == 0`.
@@ -433,8 +474,10 @@ impl Typography {
         style: &TextStyle,
         spans: &[TextSpan],
     ) -> Result<(f32, f32), Status> {
-        self.paint_slot(utf8, font_size, max_width, color, style, spans, false)
-            .map(|(_, width, height)| (width, height))
+        self.paint_slot(
+            utf8, font_size, max_width, color, style, spans, false, false,
+        )
+        .map(|(_, width, height)| (width, height))
     }
 
     /// Retains the paint slot, including one just built by [`Engine::measure_paint`].
@@ -448,7 +491,7 @@ impl Typography {
         spans: &[TextSpan],
     ) -> Result<(protocol::ParagraphId, f32, f32, Vec<crate::LineMetric>, f32), Status> {
         let (id, width, height) =
-            self.paint_slot(utf8, font_size, max_width, color, style, spans, true)?;
+            self.paint_slot(utf8, font_size, max_width, color, style, spans, true, false)?;
         let Some(paragraph) = self.live_paint(id) else {
             return Err(Status::BadScene);
         };
@@ -463,7 +506,129 @@ impl Typography {
         std::mem::take(&mut self.stats)
     }
 
-    /// `retain` increments `refs`. Measurement leaves a new slot at `refs == 0`.
+    /// Marks a measured paragraph as used by this layout. Does not build one.
+    pub fn touch_measure(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+        spans: &[TextSpan],
+    ) -> bool {
+        if self.stale || utf8.is_empty() {
+            return false;
+        }
+        let Some(family) = self.resolved_family(style.family.as_deref()) else {
+            return false;
+        };
+        let font_bits = font_size.to_bits();
+        let width_bits = max_width.to_bits();
+        let ellipsis = style.ellipsis.as_deref().unwrap_or("");
+        let hash = hash_query(
+            utf8,
+            font_bits,
+            width_bits,
+            color,
+            &family,
+            style.max_lines.unwrap_or(0),
+            ellipsis,
+            style.align,
+            style.weight,
+            style.direction_rtl,
+            style.height.to_bits(),
+            style.underline,
+            style.line_through,
+            style.soft_wrap,
+            style.overflow,
+            spans,
+        );
+        let Some(found) = self.measured.get_mut(hash, |key| {
+            key_matches(
+                key,
+                utf8,
+                font_bits,
+                width_bits,
+                color,
+                &family,
+                style.max_lines.unwrap_or(0),
+                ellipsis,
+                style.align,
+                style.weight,
+                style.direction_rtl,
+                style.height.to_bits(),
+                style.underline,
+                style.line_through,
+                style.soft_wrap,
+                style.overflow,
+                spans,
+            )
+        }) else {
+            return false;
+        };
+        found.used = self.measure_generation;
+        true
+    }
+
+    /// Moves a measured paragraph into the caller. `None` when the font changed.
+    fn take_measured(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+        spans: &[TextSpan],
+    ) -> Option<(ParaKey, Shaped)> {
+        if self.stale {
+            return None;
+        }
+        let family = self.resolved_family(style.family.as_deref())?;
+        let font_bits = font_size.to_bits();
+        let width_bits = max_width.to_bits();
+        let ellipsis = style.ellipsis.as_deref().unwrap_or("");
+        let hash = hash_query(
+            utf8,
+            font_bits,
+            width_bits,
+            color,
+            &family,
+            style.max_lines.unwrap_or(0),
+            ellipsis,
+            style.align,
+            style.weight,
+            style.direction_rtl,
+            style.height.to_bits(),
+            style.underline,
+            style.line_through,
+            style.soft_wrap,
+            style.overflow,
+            spans,
+        );
+        self.measured.remove(hash, |key| {
+            key_matches(
+                key,
+                utf8,
+                font_bits,
+                width_bits,
+                color,
+                &family,
+                style.max_lines.unwrap_or(0),
+                ellipsis,
+                style.align,
+                style.weight,
+                style.direction_rtl,
+                style.height.to_bits(),
+                style.underline,
+                style.line_through,
+                style.soft_wrap,
+                style.overflow,
+                spans,
+            )
+        })
+    }
+
+    /// `retain` increments `refs`. `draw` counts paint hits and may take a measured paragraph.
     pub(crate) fn paint_slot(
         &mut self,
         utf8: &str,
@@ -473,6 +638,7 @@ impl Typography {
         style: &TextStyle,
         spans: &[TextSpan],
         retain: bool,
+        draw: bool,
     ) -> Result<(protocol::ParagraphId, f32, f32), Status> {
         let owned;
         let utf8 = if spans.is_empty() {
@@ -542,14 +708,26 @@ impl Typography {
                 index: index as u32,
                 generation: slot.generation,
             };
-            if retain {
+            if draw {
                 self.stats.paint_hit = self.stats.paint_hit.saturating_add(1);
             } else {
                 self.stats.measure_hit = self.stats.measure_hit.saturating_add(1);
             }
             return Ok((id, size.0, size.1));
         }
-        if retain {
+        if draw
+            && let Some((key, shaped)) =
+                self.take_measured(utf8, font_size, max_width, color, style, spans)
+        {
+            self.stats.bridged = self.stats.bridged.saturating_add(1);
+            let width = if style.overflow != protocol::TextOverflow::Visible {
+                shaped.width.min(max_width)
+            } else {
+                shaped.width
+            };
+            return self.install_paint(key, color, width, shaped.height, shaped.paragraph, retain);
+        }
+        if draw {
             self.stats.paint_miss = self.stats.paint_miss.saturating_add(1);
         } else {
             self.stats.measure_miss = self.stats.measure_miss.saturating_add(1);
@@ -592,6 +770,46 @@ impl Typography {
             },
             width,
             shaped.height,
+        ))
+    }
+
+    fn install_paint(
+        &mut self,
+        key: ParaKey,
+        color: [u8; 4],
+        width: f32,
+        height: f32,
+        paragraph: ffi::ImpellerParagraph,
+        retain: bool,
+    ) -> Result<(protocol::ParagraphId, f32, f32), Status> {
+        let index = if let Some(index) = self.paints.free.pop() {
+            index as usize
+        } else {
+            self.paints.slots.push(PaintSlot::empty());
+            self.paints.slots.len() - 1
+        };
+        let hash = hash_key(&key);
+        let slot = &mut self.paints.slots[index];
+        slot.generation = slot.generation.wrapping_add(1).max(1);
+        slot.refs = u32::from(retain);
+        slot.color = color;
+        slot.width = width;
+        slot.height = height;
+        slot.used = self.generation;
+        slot.paragraph = paragraph;
+        slot.key = Some(key);
+        self.paints
+            .index
+            .entry(hash)
+            .or_default()
+            .push(index as u32);
+        Ok((
+            protocol::ParagraphId {
+                index: index as u32,
+                generation: self.paints.slots[index].generation,
+            },
+            width,
+            height,
         ))
     }
 
@@ -716,7 +934,7 @@ impl Typography {
             width,
             height,
             paragraph,
-            used: self.generation,
+            used: self.measure_generation,
         })
     }
 

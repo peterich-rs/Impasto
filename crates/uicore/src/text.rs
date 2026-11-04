@@ -146,6 +146,16 @@ pub struct TextEditor {
     max_length: Option<u32>,
 }
 
+/// Word, caret, and hit queries used while applying one edit.
+///
+/// One object keeps the mutable borrow. Three closures would each need it
+/// for the whole call.
+pub trait EditQuery {
+    fn word_at(&mut self, text: &str, unit: u32) -> (u32, u32);
+    fn caret_at(&mut self, unit: u32, affinity: Affinity) -> Caret;
+    fn hit_at(&mut self, x: f32, y: f32) -> Caret;
+}
+
 impl TextEditor {
     pub fn new(text: impl Into<String>) -> Self {
         Self {
@@ -206,33 +216,27 @@ impl TextEditor {
     }
 
     pub fn apply(&mut self, edit: Edit) {
-        let lines: &[TextLine] = &[];
-        self.apply_in(
-            edit,
-            lines,
-            crate::shaper::whitespace_word,
-            |_, _| empty_caret(),
-            |_, _| empty_caret(),
-        );
+        struct Plain;
+        impl EditQuery for Plain {
+            fn word_at(&mut self, text: &str, unit: u32) -> (u32, u32) {
+                crate::shaper::whitespace_word(text, unit)
+            }
+            fn caret_at(&mut self, _unit: u32, _affinity: Affinity) -> Caret {
+                empty_caret()
+            }
+            fn hit_at(&mut self, _x: f32, _y: f32) -> Caret {
+                empty_caret()
+            }
+        }
+        self.apply_in(edit, &[], &mut Plain);
     }
 
     /// `lines` is the paragraph the text currently occupies. An empty slice
     /// falls back to grapheme steps, which is what a single unwrapped line does.
-    pub fn apply_in<W, C, H>(
-        &mut self,
-        edit: Edit,
-        lines: &[TextLine],
-        word_at: W,
-        caret_at: C,
-        hit_at: H,
-    ) where
-        W: Fn(&str, u32) -> (u32, u32),
-        C: Fn(u32, Affinity) -> Caret,
-        H: Fn(f32, f32) -> Caret,
-    {
+    pub fn apply_in<Q: EditQuery>(&mut self, edit: Edit, lines: &[TextLine], query: &mut Q) {
         let saved = self.max_length.map(|_| self.clone());
-        if !self.apply_motion(&edit, lines, &word_at, &caret_at, &hit_at) {
-            self.apply_mutation(edit, lines, word_at);
+        if !self.apply_motion(&edit, lines, query) {
+            self.apply_mutation(edit, lines, query);
         }
         if let Some(limit) = self.max_length
             && utf16_len(&self.value.text) > limit
@@ -245,19 +249,12 @@ impl TextEditor {
         self.revision = self.revision.saturating_add(1);
     }
 
-    fn apply_motion<W, C, H>(
+    fn apply_motion<Q: EditQuery>(
         &mut self,
         edit: &Edit,
         lines: &[TextLine],
-        word_at: &W,
-        caret_at: &C,
-        hit_at: &H,
-    ) -> bool
-    where
-        W: Fn(&str, u32) -> (u32, u32),
-        C: Fn(u32, Affinity) -> Caret,
-        H: Fn(f32, f32) -> Caret,
-    {
+        query: &mut Q,
+    ) -> bool {
         match edit {
             Edit::Left | Edit::Right | Edit::ExtendLeft | Edit::ExtendRight => {
                 let extend = matches!(edit, Edit::ExtendLeft | Edit::ExtendRight);
@@ -275,7 +272,7 @@ impl TextEditor {
                 } else {
                     1
                 };
-                self.move_word(word_at, dir, extend);
+                self.move_word(query, dir, extend);
             }
             Edit::LineStart | Edit::LineEnd | Edit::ExtendLineStart | Edit::ExtendLineEnd => {
                 let extend = matches!(edit, Edit::ExtendLineStart | Edit::ExtendLineEnd);
@@ -293,7 +290,7 @@ impl TextEditor {
                 } else {
                     1
                 };
-                self.move_vertical(lines, dir, extend, caret_at, hit_at);
+                self.move_vertical(lines, dir, extend, query);
             }
             Edit::DocumentStart => self.place(0, Affinity::Downstream, false),
             Edit::DocumentEnd => {
@@ -312,10 +309,7 @@ impl TextEditor {
         true
     }
 
-    fn apply_mutation<W>(&mut self, edit: Edit, lines: &[TextLine], word_at: W)
-    where
-        W: Fn(&str, u32) -> (u32, u32),
-    {
+    fn apply_mutation<Q: EditQuery>(&mut self, edit: Edit, lines: &[TextLine], query: &mut Q) {
         match edit {
             Edit::Backspace => {
                 self.checkpoint();
@@ -383,11 +377,11 @@ impl TextEditor {
             }
             Edit::DeleteWordBackward => {
                 self.checkpoint();
-                self.delete_word(&word_at, -1);
+                self.delete_word(query, -1);
             }
             Edit::DeleteWordForward => {
                 self.checkpoint();
-                self.delete_word(&word_at, 1);
+                self.delete_word(query, 1);
             }
             Edit::DeleteToLineStart => {
                 self.checkpoint();
@@ -525,28 +519,25 @@ impl TextEditor {
         self.place(next, Affinity::Downstream, extend);
     }
 
-    fn move_word<W>(&mut self, word_at: &W, delta: i32, extend: bool)
-    where
-        W: Fn(&str, u32) -> (u32, u32),
-    {
+    fn move_word<Q: EditQuery>(&mut self, query: &mut Q, delta: i32, extend: bool) {
         self.commit_composing();
         let unit = self.value.selection.extent;
         let end = utf16_len(&self.value.text);
-        let (start, stop) = word_at(&self.value.text, unit.min(end));
+        let (start, stop) = query.word_at(&self.value.text, unit.min(end));
         let next = if delta < 0 {
             if unit > start {
                 start
             } else if unit == 0 {
                 0
             } else {
-                word_at(&self.value.text, unit - 1).0
+                query.word_at(&self.value.text, unit - 1).0
             }
         } else if unit < stop {
             stop
         } else if unit >= end {
             end
         } else {
-            word_at(&self.value.text, unit + 1).1
+            query.word_at(&self.value.text, unit + 1).1
         };
         self.place(next, Affinity::Downstream, extend);
     }
@@ -571,31 +562,27 @@ impl TextEditor {
         }
     }
 
-    fn move_vertical<C, H>(
+    fn move_vertical<Q: EditQuery>(
         &mut self,
         lines: &[TextLine],
         delta: i32,
         extend: bool,
-        caret_at: &C,
-        hit_at: &H,
-    ) where
-        C: Fn(u32, Affinity) -> Caret,
-        H: Fn(f32, f32) -> Caret,
-    {
+        query: &mut Q,
+    ) {
         if lines.is_empty() {
             return;
         }
         self.commit_composing();
         let unit = self.value.selection.extent;
         let affinity = self.value.selection.affinity;
-        let caret = caret_at(unit, affinity);
+        let caret = query.caret_at(unit, affinity);
         let x = self.column_x.unwrap_or(caret.x);
         let index = line_index(lines, unit, affinity);
         let len = crate::cast::i32_from_usize(lines.len());
         let next = (crate::cast::i32_from_usize(index) + delta).clamp(0, len - 1);
         let next = usize::try_from(next).unwrap_or(0);
         let line = &lines[next];
-        let hit = hit_at(x, line.y + line.h * 0.5);
+        let hit = query.hit_at(x, line.y + line.h * 0.5);
         self.place(hit.unit, hit.affinity, extend);
         self.column_x = Some(x);
     }
@@ -632,10 +619,7 @@ impl TextEditor {
         self.value.selection = TextSelection::collapsed(caret);
     }
 
-    fn delete_word<W>(&mut self, word_at: &W, delta: i32)
-    where
-        W: Fn(&str, u32) -> (u32, u32),
-    {
+    fn delete_word<Q: EditQuery>(&mut self, query: &mut Q, delta: i32) {
         self.commit_composing();
         if !self.value.selection.is_collapsed() {
             self.delete_selection();
@@ -643,21 +627,21 @@ impl TextEditor {
         }
         let unit = self.value.selection.extent;
         let end = utf16_len(&self.value.text);
-        let (start, stop) = word_at(&self.value.text, unit.min(end));
+        let (start, stop) = query.word_at(&self.value.text, unit.min(end));
         let (from, to) = if delta < 0 {
             if unit > start {
                 (start, unit)
             } else if unit == 0 {
                 return;
             } else {
-                (word_at(&self.value.text, unit - 1).0, unit)
+                (query.word_at(&self.value.text, unit - 1).0, unit)
             }
         } else if unit < stop {
             (unit, stop)
         } else if unit >= end {
             return;
         } else {
-            (unit, word_at(&self.value.text, unit + 1).1)
+            (unit, query.word_at(&self.value.text, unit + 1).1)
         };
         if from == to {
             return;

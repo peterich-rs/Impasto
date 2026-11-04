@@ -226,31 +226,41 @@ impl Tree {
             .editor
             .take()
             .unwrap_or_else(|| crate::TextEditor::new(""));
-        editor.apply_in(
-            edit,
-            &lines,
-            |text, unit| self.word_at(id, text, unit),
-            |unit, affinity| {
-                self.caret_for(id, unit, affinity).unwrap_or(crate::Caret {
-                    unit,
-                    x: 0.0,
-                    y: 0.0,
-                    w: 1.0,
-                    h: 0.0,
-                    affinity,
-                })
-            },
-            |x, y| {
-                self.caret_at_local(id, x, y).unwrap_or(crate::Caret {
-                    unit: 0,
-                    x,
-                    y,
-                    w: 1.0,
-                    h: 0.0,
-                    affinity: crate::Affinity::Downstream,
-                })
-            },
-        );
+        struct Query<'a> {
+            tree: &'a mut Tree,
+            id: NodeId,
+        }
+        impl crate::EditQuery for Query<'_> {
+            fn word_at(&mut self, text: &str, unit: u32) -> (u32, u32) {
+                self.tree.word_at(self.id, text, unit)
+            }
+            fn caret_at(&mut self, unit: u32, affinity: crate::Affinity) -> crate::Caret {
+                self.tree
+                    .caret_for(self.id, unit, affinity)
+                    .unwrap_or(crate::Caret {
+                        unit,
+                        x: 0.0,
+                        y: 0.0,
+                        w: 1.0,
+                        h: 0.0,
+                        affinity,
+                    })
+            }
+            fn hit_at(&mut self, x: f32, y: f32) -> crate::Caret {
+                self.tree
+                    .caret_at_local(self.id, x, y)
+                    .unwrap_or(crate::Caret {
+                        unit: 0,
+                        x,
+                        y,
+                        w: 1.0,
+                        h: 0.0,
+                        affinity: crate::Affinity::Downstream,
+                    })
+            }
+        }
+        let mut query = Query { tree: self, id };
+        editor.apply_in(edit, &lines, &mut query);
         let value = editor.value().clone();
         let changed = {
             let text = self.node_mut(id)?.text_mut().ok_or(Error::NotText)?;
@@ -284,7 +294,12 @@ impl Tree {
     }
 
     /// Rectangles covering a UTF-16 selection, in paragraph space.
-    pub fn selection_rects(&self, id: NodeId, start: u32, end: u32) -> Result<Vec<Rect>, Error> {
+    pub fn selection_rects(
+        &mut self,
+        id: NodeId,
+        start: u32,
+        end: u32,
+    ) -> Result<Vec<Rect>, Error> {
         let (start, end) = if start <= end {
             (start, end)
         } else {
@@ -321,7 +336,7 @@ impl Tree {
         Ok(rects)
     }
 
-    pub(super) fn editor_lines(&self, id: NodeId) -> Vec<crate::TextLine> {
+    pub(super) fn editor_lines(&mut self, id: NodeId) -> Vec<crate::TextLine> {
         let matches = live_node(&self.slots, id).ok().is_some_and(|node| {
             node.text().is_some_and(|text| {
                 text.editor
@@ -338,7 +353,7 @@ impl Tree {
         self.shaper.metrics(&key.metrics).lines.to_vec()
     }
 
-    pub(super) fn word_at(&self, id: NodeId, text: &str, unit: u32) -> (u32, u32) {
+    pub(super) fn word_at(&mut self, id: NodeId, text: &str, unit: u32) -> (u32, u32) {
         if let Ok(key) = self.text_key(id)
             && key.metrics.text.as_ref() == text
         {
@@ -348,7 +363,7 @@ impl Tree {
     }
 
     pub fn caret_for(
-        &self,
+        &mut self,
         id: NodeId,
         unit: u32,
         affinity: crate::Affinity,
@@ -357,7 +372,12 @@ impl Tree {
         Ok(self.shaper.caret_at_unit(&key.metrics, unit, affinity))
     }
 
-    pub(super) fn caret_at_local(&self, id: NodeId, x: f32, y: f32) -> Result<crate::Caret, Error> {
+    pub(super) fn caret_at_local(
+        &mut self,
+        id: NodeId,
+        x: f32,
+        y: f32,
+    ) -> Result<crate::Caret, Error> {
         let key = self.text_key(id)?;
         Ok(self.shaper.caret_at_point(&key.metrics, x, y))
     }
@@ -403,7 +423,7 @@ impl Tree {
 
     /// Caret for a scene point over a text node. The returned `x` and `y` are
     /// relative to the paragraph origin.
-    pub fn caret_at(&self, id: NodeId, x: f32, y: f32) -> Result<crate::Caret, Error> {
+    pub fn caret_at(&mut self, id: NodeId, x: f32, y: f32) -> Result<crate::Caret, Error> {
         let (local_x, local_y) = self.scene_to_layout(id, x, y).ok_or(Error::BadNumber)?;
         let (abs_x, abs_y) = self.layout_point(id)?;
         let key = self.text_key(id)?;
@@ -413,19 +433,19 @@ impl Tree {
     }
 
     /// Caret rectangle for a UTF-16 index in a text node.
-    pub fn caret_at_unit(&self, id: NodeId, unit: u32) -> Result<crate::Caret, Error> {
+    pub fn caret_at_unit(&mut self, id: NodeId, unit: u32) -> Result<crate::Caret, Error> {
         self.caret_for(id, unit, crate::Affinity::Downstream)
     }
 
     /// UTF-16 word range around `unit` in a text node.
-    pub fn word_range(&self, id: NodeId, unit: u32) -> Result<(u32, u32), Error> {
+    pub fn word_range(&mut self, id: NodeId, unit: u32) -> Result<(u32, u32), Error> {
         let key = self.text_key(id)?;
         Ok(self.shaper.word_range(&key.metrics, unit))
     }
 
     /// Same shaper `layout` used for this tree.
     pub fn measure_text(
-        &self,
+        &mut self,
         utf8: &str,
         font_size: f32,
         max_width: f32,
@@ -456,7 +476,13 @@ impl Tree {
         ))
     }
 
-    pub(super) fn sync_paragraphs(&mut self) {
+    /// Registers a face for later measurement. Drawing registers the same bytes
+    /// on the gpu context.
+    pub fn register_font(&mut self, family: &str, bytes: &[u8]) -> bool {
+        self.shaper.register_font(family, bytes)
+    }
+
+    pub(super) fn sync_metrics(&mut self) {
         let started = std::time::Instant::now();
         let ids = std::mem::take(&mut self.pending_text);
         for id in ids {
@@ -469,60 +495,54 @@ impl Tree {
                 continue;
             }
             self.sync_visited = self.sync_visited.saturating_add(1);
-            if self.sync_paragraph(id) {
+            if self.sync_metrics_one(id) {
                 self.sync_synced = self.sync_synced.saturating_add(1);
             }
         }
         self.sync_ms += started.elapsed().as_secs_f64() * 1000.0;
     }
 
-    pub(super) fn sync_paragraph(&mut self, id: NodeId) -> bool {
+    pub(super) fn sync_metrics_one(&mut self, id: NodeId) -> bool {
         let Ok(key) = self.text_key(id) else {
             return false;
         };
         if key.metrics.text.is_empty() {
-            self.release_paragraph(id);
+            self.clear_metrics(id);
             return false;
         }
         let same = self
             .node(id)
             .ok()
             .and_then(|node| node.text())
-            .and_then(|text| text.cached.as_ref())
-            .is_some_and(|cached| cached == &key);
+            .is_some_and(|text| {
+                text.cached.as_ref().is_some_and(|cached| {
+                    cached.metrics == key.metrics
+                        && cached.color == key.color
+                        && cached.span_colors.as_ref() == key.span_colors.as_ref()
+                })
+            });
         if same {
+            self.shaper.touch(&key);
             return false;
         }
-        let old = self
-            .node_mut(id)
-            .ok()
-            .and_then(|node| node.text_mut().and_then(|text| text.paragraph.take()));
-        if let Some(old) = old {
-            self.shaper.release_paint(old);
-        }
-        let (paragraph, metrics) = self.shaper.retain_measured(&key);
+        let metrics = self.shaper.metrics_paint(&key);
+        let Ok(node) = self.node_mut(id) else {
+            return false;
+        };
+        let Some(text) = node.text_mut() else {
+            return false;
+        };
+        text.metrics = Some(metrics);
+        text.cached = Some(key);
+        true
+    }
+
+    pub(super) fn clear_metrics(&mut self, id: NodeId) {
         if let Ok(node) = self.node_mut(id)
             && let Some(text) = node.text_mut()
         {
-            text.metrics = Some(metrics);
-            text.paragraph = Some(paragraph);
-            text.cached = Some(key);
-            return true;
-        }
-        self.shaper.release_paint(paragraph);
-        false
-    }
-
-    pub(super) fn release_paragraph(&mut self, id: NodeId) {
-        let old = self.node_mut(id).ok().and_then(|node| {
-            node.text_mut().and_then(|text| {
-                text.metrics = None;
-                text.cached = None;
-                text.paragraph.take()
-            })
-        });
-        if let Some(old) = old {
-            self.shaper.release_paint(old);
+            text.metrics = None;
+            text.cached = None;
         }
     }
 

@@ -54,6 +54,8 @@ pub struct Tree {
     free: Vec<u32>,
     taffy: TaffyTree<usize>,
     shaper: Box<dyn Shaper>,
+    /// [`Shaper::begin_frame`] stays open until [`Tree::record_into`] closes it.
+    pub(super) measure_open: bool,
     root: Option<NodeId>,
     /// Subtrees [`Tree::remove`] detached. [`Tree::discard_detached`] retires
     /// the ones that are still parentless.
@@ -83,6 +85,8 @@ pub struct Tree {
     finished_owners: Vec<NodeId>,
     /// Strict descendants that open layers. Recomputed at the start of each record.
     subtree_layers: HashMap<NodeId, bool>,
+    /// Strict descendants marked [`super::node::NodeFlags::PICTURE_OWNER`].
+    subtree_owners: HashMap<NodeId, bool>,
     /// Parent layer while `record` is linking the layer tree.
     layer_stack: Vec<protocol::LayerId>,
     /// Last sibling linked under each layer, indexed by [`protocol::LayerId`].
@@ -194,7 +198,7 @@ mod slot_tests {
     }
 
     #[test]
-    fn remove_keeps_taffy_and_the_paragraph() -> Result<(), Error> {
+    fn remove_keeps_taffy_and_the_metrics() -> Result<(), Error> {
         let mut tree = Tree::new(MonoShaper::default());
         let parent = tree.column(0.0)?;
         let child = tree.text("Hi", 16.0, [0, 0, 0, 255])?;
@@ -203,7 +207,7 @@ mod slot_tests {
         tree.remove(parent, child)?;
         let node = tree.node(child)?;
         assert!(node.taffy.is_some());
-        assert!(node.text().and_then(|text| text.paragraph).is_some());
+        assert!(node.text().and_then(|text| text.metrics.as_ref()).is_some());
         assert!(tree.detach(parent, child)?.is_empty());
         assert!(tree.pending_discard.is_empty());
         assert!(tree.node(child)?.taffy.is_some());

@@ -593,7 +593,7 @@ impl Tree {
                     if self.get(id).is_some_and(|node| node.kind == Kind::Scroll) {
                         self.commit_edge_pull(id);
                         let _ = self.arm_fling(id, speed.0, speed.1);
-                        self.arm_overscroll_spring(id);
+                        self.arm_overscroll_spring(id, speed.0, speed.1);
                         self.sync_scroll_phase(id);
                     }
                     vec![Gesture::DragEnd(id, speed.0, speed.1)]
@@ -640,7 +640,7 @@ impl Tree {
         gestures
     }
 
-    fn link_at(&self, id: NodeId, x: f32, y: f32) -> Option<u32> {
+    fn link_at(&mut self, id: NodeId, x: f32, y: f32) -> Option<u32> {
         let links = std::sync::Arc::clone(&self.get(id)?.text()?.links);
         if links.is_empty() {
             return None;
@@ -710,7 +710,7 @@ impl Tree {
             && let Some(scroll) = route.drag.as_ref().and_then(|drag| drag.scroll)
         {
             gestures.push(Gesture::DragEnd(scroll, 0.0, 0.0));
-            self.arm_overscroll_spring(scroll);
+            self.arm_overscroll_spring(scroll, 0.0, 0.0);
         }
         route.drag = None;
         route.long_press = None;
