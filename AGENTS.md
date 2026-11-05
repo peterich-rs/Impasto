@@ -30,7 +30,7 @@ C 符号没有模块，所以前缀用层名，不用产品名：
 | npm | `@impasto/solid-renderer`，宿主模块 `@impasto/<pkg>/host` |
 | Kotlin | `dev.impasto` |
 | Android 应用 | `dev.impasto.host`。cdylib 是 `host`（`libhost.so`），crate 仍是 `android` |
-| 环境变量 | `IMPASTO_DUMP`、`IMPASTO_LOG` |
+| 环境变量 | `IMPASTO_DUMP` |
 
 JS 接到渲染树的全局对象是 `core`。默认字体注册名是 `Sans` 和 `SansCJK`，不是产品名。
 
@@ -90,7 +90,7 @@ Kotlin 路线的写法参考 KiteUI（`scene { layer { rect(...) } }`）。KiteU
 
 Impeller 的 C API 没有稳定 ABI。钉住的是一份 Flutter 框架提交，不是 engine 仓库的提交。创建 context 时传入该头文件里的 `IMPELLER_VERSION`。升级 pin 时一起改调用代码。
 
-`just host` 打开 360×640 的窗口并加载 ESM `apps/gallery-solid/dist/quotes.js`（缺失或过期时先跑 `just gallery-dist` 构建）。`just host-js` 是同一条命令。`IMPASTO_DUMP` 把一帧 Metal 纹理写成 PNG 后退出，用来看画面。`IMPASTO_LOG` 过滤进程日志，取值 `error`、`warn`、`info`（缺省）、`debug`。宿主把指针换成左上角的场景点放进队列，由会话出队。行情、下单和账户写在应用里，不写在宿主里。click 的验收是 `uicore` 里的 `Gesture`，以及 QuickJS 会话里点「市场」把画面改成涨幅榜。按下和抬起另外分发 press 与 release。抬起仍在按下区域内时，焦点沿父链找到 `focusable` 节点，发出 `Blur` 再 `Focus`。滑出、取消、以及越过拖动阈值交给 `Scroll` 的手势不改焦点。
+`just host` 打开 360×640 的窗口并加载 ESM `apps/gallery-solid/dist/quotes.js`（缺失或过期时先跑 `just gallery-dist` 构建）。`just host-js` 是同一条命令。`IMPASTO_DUMP` 把一帧 Metal 纹理写成 PNG 后退出，用来看画面。日志过滤是 `hostshell` 的 `Targets`。debug 构建缺省 `trace`，release 构建缺省 `info`，由 `set_log_targets` 整份替换。宿主把指针换成左上角的场景点放进队列，由会话出队。行情、下单和账户写在应用里，不写在宿主里。click 的验收是 `uicore` 里的 `Gesture`，以及 QuickJS 会话里点「市场」把画面改成涨幅榜。按下和抬起另外分发 press 与 release。抬起仍在按下区域内时，焦点沿父链找到 `focusable` 节点，发出 `Blur` 再 `Focus`。滑出、取消、以及越过拖动阈值交给 `Scroll` 的手势不改焦点。
 
 模拟盘是当前验收应用，用来压框架的高频写入和自绘图表，不是把逻辑写进宿主。`count`、`onClick` 和页面摆放都属于上层。
 
@@ -128,9 +128,9 @@ present 之后 wants_ime 变化才让平台弹出或收起键盘
 
 按键和输入法的事件类型在 `session::InputEvent`，以 `session/src/lib.rs` 为准。无焦点时会话丢掉事件。编辑状态在 `uicore` 的 `TextEditor`。有焦点时，借用结束后把事件派发给该节点的监听器。`Tree::measure_text` 用这棵树的 `Shaper`，参数与 `Shaper::measure` 相同。键盘状态由 `Session::take_ime` 交出 `ImeUpdate`（`Show` / `Update` / `Hide`），宿主在 `frame` 之后经 `Services::apply_ime` 投递给平台，`Update` 携带完整 `ImeState`（文本、UTF-16 选区、组合区间和光标矩形）。用户把键盘收起时，宿主投递 `ImeDismissed`，会话失焦。光标闪烁只在聚焦时 `requestFrame`。
 
-运行中的界面由 `uicore::Tree::record` 组出 `LayerTree`，picture 里的命令坐标相对该 picture 的原点。一段 picture 属于一个 owner：根，或本帧开层的 `Scroll`、`Opacity`、`Transform`、`Clip` 与效果节点。没有开层后代的 `Clip` 把 `PushClip` 留在父 picture 里。`Scroll` 的内容是单独一张 child picture，滚动偏移在 `Offset` 层上。平移、旋转、缩放和半透明记在层上。圆角、裁剪、透明度在层上。文字命令还带段落样式：对齐、字重、方向、最大行数、省略号、行高倍数，以及可选的 family。缺省是左对齐、字重 400、从左到右、不限制行数，行高用字体自己的。family 缺省时用渲染引擎注册的那一份字体。`PushTransform` 把随后的命令平移、顺时针旋转再等比缩放，直到配对的 `Pop`。旋转单位是弧度。命中把查询点按这条变换的逆矩阵送进子节点。圆角裁剪按圆角拒绝角上的点。布局样式留在渲染树上，不进 `DrawList`。
+运行中的界面由 `uicore::Tree::record` 组出 `LayerTree`，picture 里的命令坐标相对该 picture 的原点。一段 picture 属于一个 owner：根，或本帧开层的 `Scroll`、`Opacity`、`Transform`、`Clip` 与效果节点。没有开层后代的 `Clip` 把 `PushClip` 留在父 picture 里。`Scroll` 没有行 owner 时，内容是单独一张 child picture；`ListDriver` 把挂上的行标成 picture owner 后，每行单独一张。滚动偏移在 `Offset` 层上，不因此重建这些 picture。平移、旋转、缩放和半透明记在层上。圆角、裁剪、透明度在层上。文字命令还带段落样式：对齐、字重、方向、最大行数、省略号、行高倍数，以及可选的 family。缺省是左对齐、字重 400、从左到右、不限制行数，行高用字体自己的。family 缺省时用渲染引擎注册的那一份字体。`PushTransform` 把随后的命令平移、顺时针旋转再等比缩放，直到配对的 `Pop`。旋转单位是弧度。命中把查询点按这条变换的逆矩阵送进子节点。圆角裁剪按圆角拒绝角上的点。布局样式留在渲染树上，不进 `DrawList`。
 
-文字测量的实现必须和渲染引擎绘制文字的实现是同一个排版器。`DrawList` 的文字命令带 `font_size`、`max_width` 和颜色。渲染引擎按命令里的字号绘制，不乘 `point_scale`。布局测量走 `Typography::measure_paint`，`sync_paragraphs` 用 `retain_measured` 复用同一带前景色的槽。光标仍走 `Typography::measure_paragraph` 的度量缓存。测试用 `MonoShaper`。不要往渲染引擎里加布局。
+文字测量和绘制共用渲染引擎那一份 Impeller 排版上下文。测量结果在 `measured`，绘制结果在 `paints`。每轮布局 `begin_measure` / `end_measure` 只回收本轮没有 `touch` 到的测量段落；提交世代不清这份缓存。`record` 仍写 `ParagraphId::NONE`。绘制未命中 paint 槽时先按同一键（含颜色和宽度）从 `measured` 过户，`stale` 时不过户，再否则才新建。picture 对过户或新建的段落再 `Retain` 一次，和显示列表一起释放。`DrawList` 的文字命令带 `font_size`、`max_width` 和颜色。渲染引擎按命令里的字号绘制，不乘 `point_scale`。光标仍走测量缓存。测试用 `MonoShaper`。不要往渲染引擎里加布局。会话和 `submit_layers` 仍在同一条渲染线程上。
 
 布局原语是 `Sized`、`Padding`、`Align`、`Stack`、`Row`、`Column`、`Grid`、`Text`、`Image`、`PointerRegion`、`Decorated`、`Clip`、`Opacity`、`Scroll`、`Transform`。任何节点都可以 `set_focusable`。几何交给 Taffy，含 flex grow 和 grid。`Stack`、`Clip`、`Opacity`、`Transform` 是一格的 grid，子节点放在第 1 行第 1 列。`Scroll` 也是一格 grid，轨道是 `max_content`：视口是边框盒，子节点按完整尺寸布局，可以高出视口。`set_scroll_offset` 不进 Taffy，只让下一帧的录制和命中平移。`Scroll` 的 `ScrollAxis` 缺省 `Both`。`Vertical` 和 `Horizontal` 只在该轴上认领、滚动和回弹；另一轴的 limits、offset、overscroll、fling、snap、滚轮和 `scroll_into_view` 恒为 0。`ScrollAccept` 缺省 `Content`（声明轴上还有余量才认领）。`Always` 到边也认领。`Never` 把这次拖拽让给祖先。`lock_at_edge` 只留给 `Both`。`Gesture::DragBy` 仍带原始两轴增量，跨轴分量在 `set_scroll_offset` 丢掉。`ScrollController` 对单轴滚动丢掉跨轴增量，不交给父级；`Both` 且该轴没有内容时，溢出仍交给父级。`ScrollArea` 缺省 vertical 和 Always，`VirtualList` 固定 vertical，横向分页显式传 horizontal。裸 `scroll()` 仍是 Both 加 Content。细节在 `docs/scroll-axis.md`。扁平列表减去 offset，picture 保留内容局部坐标，由 `Offset` 层平移。命中查询加上 offset，并用 `PushClip` 裁到视口。非单位 `Transform`（含纯平移）是 `Transform` 层，扁平列表里是 `PushTransform` … `Pop`。`set_justify` 和 `set_wrap` 写行或列的主轴对齐和换行。`Text` 和 `Image` 用 measure 回调报告尺寸。`Decorated` 按子节点定尺寸，命中交给子节点，并录一条盖住边框盒的矩形，圆角记在命令上。宽或高为 0 时不录矩形。扁平列表里，开层的节点以及写成命令的 `Clip` 仍在子节点前后成对 `Push` / `Pop`，盒子为 0 也成对。alpha 为 255 和单位 `Transform` 不推这组命令。
 

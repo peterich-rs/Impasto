@@ -19,6 +19,10 @@ function rowsOf(frame: FrameSample): [string, string][] {
     ["present", `${frame.presentMs.toFixed(2)}ms`],
     ["layers", String(frame.layers)],
     ["para/pic/tex", `${frame.paragraphs}/${frame.pictures}/${frame.textures}`],
+    ["built/bridged", `${frame.shapesBuilt ?? 0}/${frame.shapesBridged ?? 0}`],
+    ["paint hit/miss", `${frame.paintHit ?? 0}/${frame.paintMiss ?? 0}`],
+    ["picture", `${frame.pictureRebuilt ?? 0}/${frame.pictureReused ?? 0}`],
+    ["cause", frame.layoutCause ?? ""],
   ];
   if (phase) {
     rows.push(
@@ -67,7 +71,7 @@ export function PerformancePage() {
           }}
         </For>
       </row>
-      <Show when={current() !== undefined} keyed>
+      <Show when={current()} keyed>
         {(frame) => (
           <column gap={1} grow>
             <For each={rowsOf(frame)}>

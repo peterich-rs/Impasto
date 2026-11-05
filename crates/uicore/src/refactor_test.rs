@@ -117,7 +117,8 @@ fn caret_is_reported_only_for_the_focused_editor() -> Result<(), crate::Error> {
 }
 
 #[test]
-fn overscroll_of_50_is_27_5_and_does_not_rewrite_pictures() -> Result<(), crate::Error> {
+fn overscroll_past_the_edge_uses_the_curve_and_does_not_rewrite_pictures()
+-> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper::default());
     tree.set_viewport(0.0, 0.0, 100.0, 40.0)?;
     let scroll = tree.scroll()?;
@@ -127,7 +128,11 @@ fn overscroll_of_50_is_27_5_and_does_not_rewrite_pictures() -> Result<(), crate:
     tree.record()?;
     tree.set_scroll_offset(scroll, 0.0, 50.0)?;
     let (_, overscroll) = tree.overscroll(scroll)?;
-    assert!((overscroll - 27.5).abs() < 0.01, "overscroll={overscroll}");
+    let expected = crate::Band::Curve { c: 0.55 }.stretch(50.0, tree.rect(scroll)?.h);
+    assert!(
+        (overscroll - expected).abs() < 0.01,
+        "overscroll={overscroll} expected={expected}"
+    );
     tree.record()?;
     assert_eq!(tree.picture_writes(), 0);
     Ok(())

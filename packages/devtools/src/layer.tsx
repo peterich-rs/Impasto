@@ -15,11 +15,12 @@ import { HighlightLayer } from "./highlight.tsx";
 import { bannerError, highlights, store, unseenErrors } from "./store.ts";
 import { devtoolPages, type DevtoolPage } from "./registry.ts";
 
-const BUTTON_SIZE = 44;
+const BUTTON_SIZE = 56;
+const BUTTON_MARGIN = 12;
 
 type ButtonSpot = { x: number; y: number };
 
-function clampSpot(spot: ButtonSpot): ButtonSpot {
+function viewport(): { width: number; height: number } {
   let width = 360;
   let height = 640;
   try {
@@ -31,18 +32,30 @@ function clampSpot(spot: ButtonSpot): ButtonSpot {
   } catch {
     /* host without metrics keeps the phone default */
   }
-  const margin = 8;
-  const maxX = Math.max(margin, width - BUTTON_SIZE - margin);
-  const maxY = Math.max(margin, height - BUTTON_SIZE - margin);
+  return { width, height };
+}
+
+function clampSpot(spot: ButtonSpot): ButtonSpot {
+  const { width, height } = viewport();
+  const maxX = Math.max(BUTTON_MARGIN, width - BUTTON_SIZE - BUTTON_MARGIN);
+  const maxY = Math.max(BUTTON_MARGIN, height - BUTTON_SIZE - BUTTON_MARGIN);
   return {
-    x: Math.min(Math.max(spot.x, margin), maxX),
-    y: Math.min(Math.max(spot.y, margin), maxY),
+    x: Math.min(Math.max(spot.x, BUTTON_MARGIN), maxX),
+    y: Math.min(Math.max(spot.y, BUTTON_MARGIN), maxY),
   };
+}
+
+/** Release sticks the button to the nearer vertical edge. */
+function snapSpot(spot: ButtonSpot): ButtonSpot {
+  const { width } = viewport();
+  const center = spot.x + BUTTON_SIZE / 2;
+  const x = center < width / 2 ? BUTTON_MARGIN : width - BUTTON_SIZE - BUTTON_MARGIN;
+  return clampSpot({ x, y: spot.y });
 }
 
 function DevtoolsButton(props: { open(): void }) {
   const theme = useTheme();
-  const [spot, setSpot] = createSignal<ButtonSpot>(clampSpot({ x: 316, y: 588 }));
+  const [spot, setSpot] = createSignal<ButtonSpot>(clampSpot({ x: 1e6, y: 1e6 }));
   const [hidden, setHidden] = createSignal(false);
   return (
     <Show when={!hidden()}>
@@ -53,11 +66,17 @@ function DevtoolsButton(props: { open(): void }) {
           onDragBy={(dx: number, dy: number) =>
             setSpot((prev) => clampSpot({ x: prev.x + dx, y: prev.y + dy }))
           }
+          onDragEnd={() => setSpot((prev) => snapSpot(prev))}
           onLongPress={() => setHidden(true)}
         >
-          <decorated color={theme().color.primary} radius={22}>
-            <column align="center" justify="center" fill>
-              <Text fontSize={18} color={theme().color.onPrimary}>
+          <decorated
+            color={theme().color.primary}
+            radius={BUTTON_SIZE / 2}
+            w={BUTTON_SIZE}
+            h={BUTTON_SIZE}
+          >
+            <column cross="center" justify="center" fill>
+              <Text fontSize={22} color={theme().color.onPrimary}>
                 ◈
               </Text>
             </column>
@@ -66,7 +85,7 @@ function DevtoolsButton(props: { open(): void }) {
         <Show when={unseenErrors() > 0}>
           <transform x={BUTTON_SIZE - 18} y={-2}>
             <decorated color={theme().color.danger} radius={9}>
-              <column align="center" justify="center" w={18} h={18}>
+              <column cross="center" justify="center" w={18} h={18}>
                 <Text fontSize={10} color="#ffffff">
                   {unseenErrors() > 9 ? "9+" : String(unseenErrors())}
                 </Text>
@@ -107,7 +126,7 @@ function ErrorBanner(props: { open(): void }) {
         }}
       >
         <decorated color="#c0392b">
-          <column align="center" justify="center" fill h={36}>
+          <column cross="center" justify="center" fill h={36}>
             <Text fontSize={12} color="#ffffff" maxLines={1} ellipsis="…">
               {message()}
             </Text>
@@ -149,7 +168,7 @@ function Panel(props: { close(): void }) {
                 )}
               </For>
             </row>
-            <Show when={current() !== undefined} keyed>
+            <Show when={current()} keyed>
               {(entry) => <ScrollArea axis="vertical">{entry.render()}</ScrollArea>}
             </Show>
           </column>

@@ -129,13 +129,12 @@ fn lifecycle(runtime: &mut Runtime, state: session::Lifecycle) {
     }
     let arm_frame = match state {
         session::Lifecycle::Hidden | session::Lifecycle::Paused => {
-            flush_gpu(runtime);
+            flush_gpu(runtime, "trim");
             runtime.input.pause()
         }
         session::Lifecycle::Resumed => {
             runtime.needs_present = true;
             runtime.present_failures = 0;
-            runtime.present_logged = false;
             runtime.present_retry_at = None;
             runtime.surfaces.rearm_pending();
             runtime.input.resume()

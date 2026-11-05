@@ -14,7 +14,10 @@ bytes = "1"
 http = "1"
 http-body-util = "0.1"
 openwire = "0.1.2"
+mars-xlog = { git = "https://github.com/peterich-rs/xlog-rs", rev = "cdedbdf40868f3e1673755ec045dbf373f028fc2" }
 tokio = { version = "1", features = ["io-util", "net", "rt-multi-thread", "sync", "time"] }
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std"] }
 tungstenite = { version = "0.26", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 
 [lints]

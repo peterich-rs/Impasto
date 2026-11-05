@@ -6,15 +6,17 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// One console line or host log line. Level 0 log, 1 info, 2 warn, 3 error,
-/// 4 debug; the numbering matches the QuickJS console binding.
+/// One filtered log event copied for the devtools console.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LogEntry {
     pub seq: u64,
     pub at_ms: f64,
-    pub level: u8,
+    pub level: tracing::Level,
     pub source: LogSource,
-    pub text: String,
+    pub target: &'static str,
+    pub message: String,
+    pub fields: Vec<(&'static str, String)>,
+    pub frame: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +34,19 @@ impl LogSource {
             Self::Layout => "layout",
             Self::Host => "host",
             Self::Net => "net",
+        }
+    }
+
+    /// Target prefix from the call site. Unknown targets stay on the host page.
+    pub fn from_target(target: &str) -> Self {
+        if target.starts_with("impasto::script") {
+            Self::Script
+        } else if target.starts_with("impasto::layout") {
+            Self::Layout
+        } else if target.starts_with("impasto::net") {
+            Self::Net
+        } else {
+            Self::Host
         }
     }
 }
@@ -111,7 +126,7 @@ pub struct PhaseSample {
 }
 
 /// Per-frame timing sample, trimmed from [`crate::FrameTiming`].
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrameSample {
     pub seq: u64,
     pub number: u64,
@@ -127,8 +142,51 @@ pub struct FrameSample {
     pub paragraphs: u32,
     pub pictures: u32,
     pub textures: u32,
+    pub shapes_built: u32,
+    pub shapes_measure_hit: u32,
+    pub shapes_measure_miss: u32,
+    pub shapes_paint_hit: u32,
+    pub shapes_paint_miss: u32,
+    pub shapes_bridged: u32,
+    pub picture_rebuilt: u32,
+    pub picture_reused: u32,
+    pub layout_cause: &'static str,
+    pub gestures: u32,
     pub over_budget: bool,
     pub phases: PhaseSample,
+}
+
+impl Default for FrameSample {
+    fn default() -> Self {
+        Self {
+            seq: 0,
+            number: 0,
+            at_ms: 0.0,
+            session_ms: 0.0,
+            gesture_ms: 0.0,
+            script_ms: 0.0,
+            layout_ms: 0.0,
+            record_ms: 0.0,
+            submit_ms: 0.0,
+            present_ms: 0.0,
+            layers: 0,
+            paragraphs: 0,
+            pictures: 0,
+            textures: 0,
+            shapes_built: 0,
+            shapes_measure_hit: 0,
+            shapes_measure_miss: 0,
+            shapes_paint_hit: 0,
+            shapes_paint_miss: 0,
+            shapes_bridged: 0,
+            picture_rebuilt: 0,
+            picture_reused: 0,
+            layout_cause: "none",
+            gestures: 0,
+            over_budget: false,
+            phases: PhaseSample::default(),
+        }
+    }
 }
 
 /// Runtime knobs shared with the session bindings.
@@ -277,20 +335,12 @@ impl DiagnosticsHub {
         *lock(&self.flags) = flags;
     }
 
-    pub fn log(&self, level: u8, source: LogSource, text: &str) {
-        let at = crate::net::mono_ms();
-        lock(&self.logs).push(|seq| LogEntry {
-            seq,
-            at_ms: at,
-            level,
-            source,
-            text: text.to_owned(),
-        });
+    pub fn push_log(&self, entry: LogEntry) {
+        lock(&self.logs).push(|seq| LogEntry { seq, ..entry });
         self.bump();
     }
 
-    /// Errors also land in the log channel so the console page shows them
-    /// without a second subscription.
+    /// Surfaced failure with a stack. The console line, if any, is a separate event.
     pub fn error(
         &self,
         source: &'static str,
@@ -306,13 +356,6 @@ impl DiagnosticsHub {
             message: message.to_owned(),
             stack: stack.map(str::to_owned),
             frame,
-        });
-        lock(&self.logs).push(|seq| LogEntry {
-            seq,
-            at_ms: at,
-            level: 3,
-            source: LogSource::Host,
-            text: message.to_owned(),
         });
         self.bump();
     }
@@ -334,43 +377,36 @@ impl DiagnosticsHub {
 mod tests {
     use super::*;
 
+    fn entry(seq: u64, message: &str) -> LogEntry {
+        LogEntry {
+            seq,
+            at_ms: 0.0,
+            level: tracing::Level::INFO,
+            source: LogSource::Script,
+            target: "impasto::script",
+            message: message.to_owned(),
+            fields: Vec::new(),
+            frame: None,
+        }
+    }
+
     #[test]
     fn rings_drop_the_oldest_entry() {
         let mut ring: Ring<LogEntry> = Ring::new(2);
-        ring.push(|seq| LogEntry {
-            seq,
-            at_ms: 0.0,
-            level: 0,
-            source: LogSource::Script,
-            text: "a".into(),
-        });
-        ring.push(|seq| LogEntry {
-            seq,
-            at_ms: 0.0,
-            level: 0,
-            source: LogSource::Script,
-            text: "b".into(),
-        });
-        ring.push(|seq| LogEntry {
-            seq,
-            at_ms: 0.0,
-            level: 0,
-            source: LogSource::Script,
-            text: "c".into(),
-        });
+        ring.push(|seq| entry(seq, "a"));
+        ring.push(|seq| entry(seq, "b"));
+        ring.push(|seq| entry(seq, "c"));
         assert_eq!(ring.revision(), 3);
-        let texts: Vec<&str> = ring.tail(0).map(|e| e.text.as_str()).collect();
+        let texts: Vec<&str> = ring.tail(0).map(|e| e.message.as_str()).collect();
         assert_eq!(texts, ["b", "c"]);
     }
 
     #[test]
-    fn error_entries_also_land_in_the_log_channel() {
+    fn error_entries_stay_off_the_log_channel() {
         let hub = DiagnosticsHub::new();
         hub.error("listener", "boom", Some("at f"), Some(12));
         assert_eq!(lock(&hub.errors).revision(), 1);
-        assert_eq!(lock(&hub.logs).revision(), 1);
-        let logs: Vec<String> = lock(&hub.logs).tail(0).map(|e| e.text.clone()).collect();
-        assert_eq!(logs, ["boom"]);
+        assert_eq!(lock(&hub.logs).revision(), 0);
         let errors = lock(&hub.errors);
         let reported: Vec<&DiagError> = errors.tail(0).collect();
         assert_eq!(reported[0].stack.as_deref(), Some("at f"));
@@ -381,18 +417,18 @@ mod tests {
     #[test]
     fn tail_returns_only_new_entries() {
         let hub = DiagnosticsHub::new();
-        hub.log(1, LogSource::Script, "one");
-        hub.log(2, LogSource::Host, "two");
+        hub.push_log(entry(0, "one"));
+        hub.push_log(entry(0, "two"));
         let first = {
             let guard = lock(&hub.logs);
-            let texts: Vec<String> = guard.tail(0).map(|e| e.text.clone()).collect();
+            let texts: Vec<String> = guard.tail(0).map(|e| e.message.clone()).collect();
             drop(guard);
             texts
         };
         assert_eq!(first, ["one", "two"]);
         let seen = lock(&hub.logs).revision();
         let guard = lock(&hub.logs);
-        let second: Vec<&str> = guard.tail(seen).map(|e| e.text.as_str()).collect();
+        let second: Vec<&str> = guard.tail(seen).map(|e| e.message.as_str()).collect();
         assert!(second.is_empty());
         drop(guard);
     }
@@ -401,7 +437,7 @@ mod tests {
     fn revision_only_grows() {
         let hub = DiagnosticsHub::new();
         let start = hub.revision();
-        hub.log(0, LogSource::Script, "x");
+        hub.push_log(entry(0, "x"));
         hub.push_frame(FrameSample::default());
         let after = hub.revision();
         assert!(after > start);

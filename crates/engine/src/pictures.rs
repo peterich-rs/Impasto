@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use protocol::{LayerTree, PictureId};
 
-use crate::player::{RetainedPicture, Save, release_retained};
+use crate::player::{HeldParagraph, RetainedPicture, Save, release_retained};
 use crate::textures::TextureStore;
 use crate::typography::Typography;
 use crate::{ImagePixels, Status, SubmitStats};
@@ -56,7 +56,7 @@ impl PictureCache {
         swap: &mut PictureSwap,
         typography: &mut Typography,
         textures: &mut TextureStore,
-        pending: &mut Vec<crate::player::ffi::ImpellerParagraph>,
+        pending: &mut Vec<HeldParagraph>,
         last_submit: &mut SubmitStats,
         impeller: crate::player::ffi::ImpellerContext,
     ) -> Result<(), Status> {
@@ -90,20 +90,20 @@ impl PictureCache {
         Ok(())
     }
 
-    pub(crate) fn rollback(&mut self, swap: PictureSwap) {
+    pub(crate) fn rollback(&mut self, swap: PictureSwap, typography: &mut Typography) {
         for id in swap.installed {
             if let Some(fresh) = self.map.remove(&id) {
-                release_retained(fresh);
+                release_retained(fresh, typography);
             }
         }
         for (id, previous) in swap.replaced {
             if let Some(fresh) = self.map.insert(id, previous) {
-                release_retained(fresh);
+                release_retained(fresh, typography);
             }
         }
     }
 
-    pub(crate) fn evict_except(&mut self, tree: &LayerTree) {
+    pub(crate) fn evict_except(&mut self, tree: &LayerTree, typography: &mut Typography) {
         let stale: Vec<PictureId> = self
             .map
             .keys()
@@ -112,15 +112,15 @@ impl PictureCache {
             .collect();
         for id in stale {
             if let Some(picture) = self.map.remove(&id) {
-                release_retained(picture);
+                release_retained(picture, typography);
             }
         }
     }
 
-    pub(crate) fn release_all(&mut self) {
+    pub(crate) fn release_all(&mut self, typography: &mut Typography) {
         let pictures = std::mem::take(&mut self.map);
         for (_, picture) in pictures {
-            release_retained(picture);
+            release_retained(picture, typography);
         }
     }
 }

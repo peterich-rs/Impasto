@@ -19,6 +19,7 @@ jni = { version = "=0.22.4" }
 engine = { workspace = true }
 hostshell = { workspace = true }
 quickjs = { workspace = true }
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 session = { workspace = true }
 
 [lints]

@@ -47,11 +47,11 @@ impl MetalSurface {
             return Ok(Presented::Continue);
         };
         if let Err(error) = read_drawable_png(&drawable, path) {
-            eprintln!("failed to write {}: {error:#}", path.display());
+            tracing::error!(target: "impasto::host", %error, path = %path.display(), "dump write failed");
             (self.on_stop)(1);
             return Ok(Presented::Stop);
         }
-        println!("frame dumped");
+        tracing::info!(target: "impasto::host", "frame dumped");
         let _ = std::io::Write::flush(&mut std::io::stdout());
         (self.on_stop)(0);
         Ok(Presented::Stop)

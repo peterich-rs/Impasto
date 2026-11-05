@@ -32,8 +32,7 @@ installThemePort({
 const { engine } = wireQuotes();
 setAccount(createAccount(engine));
 
-// The host no-ops this when IMPASTO_DEVTOOLS is off. The panel stays out of
-// the app's JSX and mounts through registerTopLayer.
+// The panel stays out of the app's JSX and mounts through registerTopLayer.
 installDevtools();
 
 boot(() => (

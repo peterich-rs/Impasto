@@ -45,7 +45,7 @@ pub use shaper::{
     SpanMetrics, TextLine, TextSize, paint_key, resolved_line_height,
 };
 pub use text::{
-    Edit, TextEditingValue, TextEditor, TextSelection, grapheme_count, grapheme_index,
+    Edit, EditQuery, TextEditingValue, TextEditor, TextSelection, grapheme_count, grapheme_index,
     grapheme_unit,
 };
 pub use tree::{

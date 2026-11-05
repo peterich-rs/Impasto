@@ -19,9 +19,7 @@ impl TextureFactory {
     }
 }
 
-pub struct Engine {
-    typography: std::rc::Rc<std::cell::RefCell<Typography>>,
-}
+pub struct Engine;
 
 #[cfg(target_os = "android")]
 pub struct VulkanSwapchain;
@@ -43,9 +41,7 @@ impl Engine {
 
     /// Engine that cannot submit or present. Hostshell tests use this when they do not draw.
     pub fn inert() -> Self {
-        Self {
-            typography: std::rc::Rc::new(std::cell::RefCell::new(Typography)),
-        }
+        Self
     }
 
     pub fn register_font(&mut self, _data: &[u8], _family: &str) -> Result<(), Status> {
@@ -57,6 +53,10 @@ impl Engine {
 
     pub fn texture_factory(&self) -> Option<TextureFactory> {
         None
+    }
+
+    pub fn typography(&self) -> std::rc::Rc<std::cell::RefCell<Typography>> {
+        std::rc::Rc::new(std::cell::RefCell::new(Typography))
     }
 
     pub fn install_uploaded(&mut self, _source: &str, _image: &GpuImage) {}
@@ -94,8 +94,8 @@ impl Engine {
         Err(Status::NotLinked)
     }
 
-    pub fn typography(&self) -> std::rc::Rc<std::cell::RefCell<Typography>> {
-        std::rc::Rc::clone(&self.typography)
+    pub fn take_shape_stats(&mut self) -> crate::ShapeStats {
+        crate::ShapeStats::default()
     }
 
     pub fn picture_builds(&self) -> u64 {
@@ -108,6 +108,28 @@ impl Engine {
 }
 
 impl Typography {
+    pub fn begin_measure(&mut self) -> u64 {
+        0
+    }
+
+    pub fn end_measure(&mut self) {}
+
+    pub fn register_face(&mut self, _data: &[u8], _family: &str) -> Result<bool, Status> {
+        Err(Status::NotLinked)
+    }
+
+    pub fn touch_measure(
+        &mut self,
+        _utf8: &str,
+        _font_size: f32,
+        _max_width: f32,
+        _color: [u8; 4],
+        _style: &protocol::TextStyle,
+        _spans: &[protocol::TextSpan],
+    ) -> bool {
+        false
+    }
+
     pub fn measure_paragraph(
         &mut self,
         utf8: &str,

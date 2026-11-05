@@ -74,6 +74,22 @@ impl ParagraphStore {
             .map(|(_, shaped)| shaped)
     }
 
+    /// Removes one match. The caller owns the paragraph pointer after this returns.
+    pub(super) fn remove(
+        &mut self,
+        hash: u64,
+        matches: impl Fn(&ParaKey) -> bool,
+    ) -> Option<(ParaKey, Shaped)> {
+        let bucket = self.buckets.get_mut(&hash)?;
+        let index = bucket.iter().position(|(key, _)| matches(key))?;
+        let removed = bucket.swap_remove(index);
+        self.len = self.len.saturating_sub(1);
+        if bucket.is_empty() {
+            self.buckets.remove(&hash);
+        }
+        Some(removed)
+    }
+
     pub(super) fn insert(&mut self, key: ParaKey, shaped: Shaped) -> Option<Shaped> {
         let hash = hash_key(&key);
         let bucket = self.buckets.entry(hash).or_default();

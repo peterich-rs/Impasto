@@ -71,7 +71,8 @@ impl Tree {
     /// still keeps one child picture.
     pub fn record_into(&mut self, commands: &mut Vec<Command>) -> Result<(), Error> {
         commands.clear();
-        self.sync_paragraphs();
+        self.sync_metrics();
+        self.finish_measure();
         self.picture_writes = 0;
         self.layers.layers.clear();
         self.layers.pictures.clear();
@@ -80,6 +81,7 @@ impl Tree {
         self.layer_top = None;
         self.finished_owners.clear();
         self.subtree_layers.clear();
+        self.subtree_owners.clear();
         let root = self.root.ok_or(Error::NoRoot)?;
         let _ = self.sweep_subtree_layers(root);
         self.run = RunState {
@@ -102,7 +104,7 @@ impl Tree {
     }
 
     /// Selection fill and composing underline, in paragraph space.
-    fn editor_mark_rects(&self, id: NodeId) -> Vec<(super::Rect, [u8; 4])> {
+    fn editor_mark_rects(&mut self, id: NodeId) -> Vec<(super::Rect, [u8; 4])> {
         let snapshot = self.get(id).and_then(|node| {
             let text = node.text()?;
             let editor = text.editor.as_ref()?;
@@ -165,7 +167,7 @@ impl Tree {
     }
 
     /// Nodes `record` walks, including rows whose clipped children are skipped.
-    pub fn record_visit_count(&self) -> Result<usize, Error> {
+    pub fn record_visit_count(&mut self) -> Result<usize, Error> {
         let mut commands = Vec::new();
         Ok(self.record_node(
             self.root.ok_or(Error::NoRoot)?,
@@ -298,7 +300,7 @@ impl Tree {
         Ok(())
     }
 
-    fn record_node(&self, id: NodeId, commands: &mut Vec<Command>, at: RecordAt) -> usize {
+    fn record_node(&mut self, id: NodeId, commands: &mut Vec<Command>, at: RecordAt) -> usize {
         let marks = self.editor_mark_rects(id);
         let Some(node) = self.get(id) else {
             return 0;
@@ -386,6 +388,10 @@ impl Tree {
         }
         if self.renders_layer_node(id) {
             self.emit_layer(id, out, parent_abs, ancestor_scroll, clip);
+            return;
+        }
+        if self.is_picture_owner(id) {
+            self.emit_picture_owner(id, out, parent_abs, ancestor_scroll, clip);
             return;
         }
         self.capture(id, parent_abs, out, clip);
@@ -552,7 +558,8 @@ impl Tree {
         let pushed = self.push_effect_layers(
             kind, abs, w, h, radius, alpha, scroll, transform, blur, backdrop, blend,
         );
-        if caches && (self.picture_fresh(id) || self.subtree_flat(id)) {
+        let hosts_rows = self.subtree_owners.get(&id).copied().unwrap_or(false);
+        if caches && !hosts_rows && (self.picture_fresh(id) || self.subtree_flat(id)) {
             if !self.picture_fresh(id) {
                 self.fill_children(id, abs);
             } else if let Some(picture) = self.pictures.get(&id).cloned() {
@@ -622,6 +629,7 @@ impl Tree {
                 continue;
             }
             let mut any = false;
+            let mut owners = false;
             let mut child = self.get(frame.id).and_then(|node| node.first_child);
             while let Some(current) = child {
                 let stored = self.subtree_layers.get(&current).copied().unwrap_or(false);
@@ -629,12 +637,18 @@ impl Tree {
                     .get(current)
                     .is_some_and(|node| node.renders_layers(stored));
                 any |= stored || renders;
+                let child_owner = self.subtree_owners.get(&current).copied().unwrap_or(false);
+                let marked = self
+                    .get(current)
+                    .is_some_and(|node| node.flags.contains(super::node::NodeFlags::PICTURE_OWNER));
+                owners |= child_owner || marked;
                 child = self.get(current).and_then(|node| node.next);
             }
             let renders = self
                 .get(frame.id)
                 .is_some_and(|node| node.renders_layers(any));
             self.subtree_layers.insert(frame.id, any);
+            self.subtree_owners.insert(frame.id, owners);
             root_result = any || renders;
         }
         root_result
@@ -816,7 +830,64 @@ impl Tree {
         self.store_picture(id, commands, abs);
     }
 
+    fn emit_picture_owner(
+        &mut self,
+        id: NodeId,
+        out: &mut Vec<Command>,
+        parent_abs: (f32, f32),
+        ancestor_scroll: (f32, f32),
+        clip: Option<PaintClip>,
+    ) {
+        let Some((x, y)) = self.get(id).map(|node| (node.x, node.y)) else {
+            return;
+        };
+        let abs = (parent_abs.0 + x, parent_abs.1 + y);
+        let local = self.local_xy(abs);
+        self.push_layer(crate::layer::LayerKind::Offset {
+            x: local.0,
+            y: local.1,
+        });
+        if !self.picture_fresh(id) {
+            self.fill_owner(id, abs);
+        } else if let Some(picture) = self.pictures.get(&id).cloned() {
+            self.adopt_picture(picture);
+        }
+        let dx = abs.0 - ancestor_scroll.0;
+        let dy = abs.1 - ancestor_scroll.1;
+        self.blit(id, out, dx, dy, clip);
+        self.pop_layers(1);
+    }
+
+    /// Row-local commands. The caller's `Offset` layer places the picture.
+    fn fill_owner(&mut self, id: NodeId, abs: (f32, f32)) {
+        let Some((x, y)) = self.get(id).map(|node| (node.x, node.y)) else {
+            return;
+        };
+        let parent = (abs.0 - x, abs.1 - y);
+        let mut commands = Vec::new();
+        let _ = self.record_node(
+            id,
+            &mut commands,
+            RecordAt {
+                parent,
+                offset: (0.0, 0.0),
+                space: abs,
+                clip: None,
+                descend: true,
+            },
+        );
+        self.store_picture(id, commands, abs);
+    }
+
     fn store_picture(&mut self, id: NodeId, commands: Vec<Command>, origin: (f32, f32)) {
+        if let Some(previous) = self.pictures.get(&id)
+            && previous.origin == origin
+            && previous.commands.as_ref() == commands.as_slice()
+        {
+            self.adopt_picture(Arc::clone(previous));
+            self.clear_repaint(id);
+            return;
+        }
         self.picture_writes = self.picture_writes.saturating_add(commands.len());
         let picture = Arc::new(protocol::Picture {
             id: crate::layer::child_picture_id(id),

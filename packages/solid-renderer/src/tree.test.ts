@@ -181,7 +181,9 @@ function mockHost() {
     onScroll: (node, fn) => note("onScroll", [node, typeof fn]),
     onScrollState: (fn) => note("onScrollState", [typeof fn]),
     onSecondaryClick: (node, fn) => note("onSecondaryClick", [node, typeof fn]),
+    onLongPress: (node, fn) => note("onLongPress", [node, typeof fn]),
     onZoom: (node, fn) => note("onZoom", [node, typeof fn]),
+    setRecognizers: (node, spec) => note("setRecognizers", [node, spec]),
     textEdit: (node, op, text) => {
       note("textEdit", [node, op, text]);
       return { text: text ?? "", start: 0, end: 0 };
@@ -368,6 +370,14 @@ options.setProperty(field, "onSecondaryClick", secondary);
 if (find(mock.calls, "onSecondaryClick")?.args[0] !== field.id) fail("onSecondaryClick");
 options.setProperty(pointer, "onZoom", (scale: number) => scale);
 if (find(mock.calls, "onZoom")?.args[0] !== pointer.id) fail("onZoom");
+const held = () => {};
+options.setProperty(pointer, "onLongPress", held);
+options.setProperty(pointer, "recognizers", { drag: "free", longPress: true });
+if (find(mock.calls, "onLongPress")?.args[0] !== pointer.id) fail("onLongPress");
+const recognizers = find(mock.calls, "setRecognizers");
+if (recognizers?.args[0] !== pointer.id || (recognizers.args[1] as { drag?: string }).drag !== "free") {
+  fail("recognizers");
+}
 
 options.setProperty(box, "w", "50%");
 const axisCalls = mock.calls.filter((call) => call.name === "setSizeAxis" && call.args[0] === box.id);

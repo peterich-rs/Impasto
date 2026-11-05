@@ -16,8 +16,6 @@ pub struct DevtoolsContext {
     pub app_state: session::Shared<String>,
     pub os: &'static str,
     pub os_version: String,
-    /// `IMPASTO_LOG` as the process saw it. Empty means the default `info`.
-    pub log_level: String,
     /// `IMPASTO_DUMP` path, when set.
     pub dump: Option<String>,
 }
@@ -89,9 +87,11 @@ fn logs_channel(hub: &Arc<DiagnosticsHub>) -> HostMethod {
                 map(vec![
                     ("seq", num(entry.seq)),
                     ("at", fnum(entry.at_ms)),
-                    ("level", num(u64::from(entry.level))),
+                    ("level", PluginValue::Str(entry.level.as_str().to_owned())),
                     ("source", PluginValue::Str(entry.source.name().to_owned())),
-                    ("text", PluginValue::Str(entry.text.clone())),
+                    ("target", PluginValue::Str(entry.target.to_owned())),
+                    ("text", PluginValue::Str(entry.message.clone())),
+                    ("frame", entry.frame.map(num).unwrap_or(PluginValue::Null)),
                 ])
             })
             .collect();
@@ -237,6 +237,17 @@ fn frames_channel(hub: &Arc<DiagnosticsHub>) -> HostMethod {
                     ("paragraphs", num(u64::from(frame.paragraphs))),
                     ("pictures", num(u64::from(frame.pictures))),
                     ("textures", num(u64::from(frame.textures))),
+                    ("shapesBuilt", num(u64::from(frame.shapes_built))),
+                    ("shapesBridged", num(u64::from(frame.shapes_bridged))),
+                    ("paintHit", num(u64::from(frame.shapes_paint_hit))),
+                    ("paintMiss", num(u64::from(frame.shapes_paint_miss))),
+                    ("pictureRebuilt", num(u64::from(frame.picture_rebuilt))),
+                    ("pictureReused", num(u64::from(frame.picture_reused))),
+                    (
+                        "layoutCause",
+                        PluginValue::Str(frame.layout_cause.to_owned()),
+                    ),
+                    ("gestures", num(u64::from(frame.gestures))),
                     ("overBudget", PluginValue::Bool(frame.over_budget)),
                     ("phases", phase_map(frame.phases)),
                 ])
@@ -304,7 +315,7 @@ fn platform_method(hub: &Arc<DiagnosticsHub>, context: &DevtoolsContext) -> Host
                 ),
             ),
             ("appState", PluginValue::Str(app_state)),
-            ("log", PluginValue::Str(context.log_level.clone())),
+            ("log", PluginValue::Str(crate::log_sub::log_filter_text())),
             ("devtools", PluginValue::Bool(context.enabled)),
             (
                 "dump",
@@ -486,7 +497,6 @@ mod tests {
             app_state: session::shared("active".to_owned()),
             os: "test",
             os_version: "0".to_owned(),
-            log_level: "info".to_owned(),
             dump: None,
         }
     }
@@ -494,7 +504,16 @@ mod tests {
     #[test]
     fn log_entries_come_back_as_maps() {
         let hub = Arc::new(DiagnosticsHub::new());
-        hub.log(2, LogSource::Script, "warm");
+        hub.push_log(LogEntry {
+            seq: 0,
+            at_ms: 0.0,
+            level: tracing::Level::WARN,
+            source: LogSource::Script,
+            target: "impasto::script",
+            message: "warm".to_owned(),
+            fields: Vec::new(),
+            frame: None,
+        });
         let module = module(Arc::clone(&hub), sample_context());
         let method = module.methods.iter().find(|m| m.name == "logs").unwrap();
         let result = match &method.invoke {

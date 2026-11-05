@@ -719,19 +719,28 @@ impl Tree {
         value.abs() < 0.5
     }
 
-    pub(super) fn arm_overscroll_spring(&mut self, id: NodeId) {
+    /// `finger_vx` and `finger_vy` are scene points per millisecond, the same
+    /// sign as pointer movement. A positive finger speed decreases offset, so
+    /// the overscroll derivative is the negation times the band slope.
+    pub(super) fn arm_overscroll_spring(&mut self, id: NodeId, finger_vx: f32, finger_vy: f32) {
         let Ok((x, y)) = self.node(id).map(|node| node.overscroll()) else {
             return;
         };
         let axis = self.axis_of(id);
         let physics = self.scroll_physics(id).unwrap_or_default();
+        let (view_w, view_h) = {
+            let Ok(node) = self.node(id) else {
+                return;
+            };
+            (node.w, node.h)
+        };
         if axis.allows_x() && x.abs() > f32::EPSILON {
             self.animate(
                 id,
                 crate::AnimProp::OverscrollX,
                 Box::new(crate::Spring {
                     x0: x,
-                    v0: 0.0,
+                    v0: -finger_vx * physics.band.slope(x, view_w),
                     target: 0.0,
                     stiffness: physics.overscroll_stiffness,
                     damping: physics.overscroll_damping,
@@ -744,7 +753,7 @@ impl Tree {
                 crate::AnimProp::OverscrollY,
                 Box::new(crate::Spring {
                     x0: y,
-                    v0: 0.0,
+                    v0: -finger_vy * physics.band.slope(y, view_h),
                     target: 0.0,
                     stiffness: physics.overscroll_stiffness,
                     damping: physics.overscroll_damping,

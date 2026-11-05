@@ -344,6 +344,35 @@ mod tests {
         session.pointer(PointerEvent::new(Phase::Up, x, y, 0.0));
     }
 
+    /// Host modules the gallery bundle imports. Devtools stays off so the
+    /// panel does not change the page the assertions read.
+    #[cfg(quickjs)]
+    fn gallery_host() -> HostConfig {
+        HostConfig {
+            registry: std::sync::Arc::new(ModuleRegistry::new(vec![
+                HostModule {
+                    name: "Clipboard",
+                    specifier: "@impasto/clipboard/host",
+                    methods: vec![
+                        HostMethod::sync("getString", |_| Ok(PluginValue::Str(String::new()))),
+                        HostMethod::sync("setString", |_| Ok(PluginValue::Null)),
+                    ],
+                },
+                HostModule {
+                    name: "Devtools",
+                    specifier: "@impasto/devtools/host",
+                    methods: vec![HostMethod::sync("enabled", |_| {
+                        Ok(PluginValue::Bool(false))
+                    })],
+                },
+            ])),
+            exec: std::sync::Arc::new(ImmediateExec),
+            settle: std::sync::Arc::new(|_token| session::Settle::new(|_result| {})),
+            app_state: session::shared("active".to_owned()),
+            launch_url: session::shared(None),
+        }
+    }
+
     /// The gallery bundle is a build artifact and not committed. Tests that
     /// need it fail with instructions when it has not been built. Returns
     /// `None` when the interpreter is not linked; callers already early-return.
@@ -355,7 +384,14 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = gallery_source();
-            match open(&source, "test.js", uicore::MonoShaper::default(), no_log()) {
+            match super::open_with_io(
+                &source,
+                "test.js",
+                uicore::MonoShaper::default(),
+                no_log(),
+                None,
+                gallery_host(),
+            ) {
                 Ok(session) => Some(session),
                 Err(Error::NotLinked) => None,
                 Err(error) => panic!("{error}"),

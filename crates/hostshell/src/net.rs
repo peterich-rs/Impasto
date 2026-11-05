@@ -58,8 +58,8 @@ fn serve(
                 if request.cancel.load(Ordering::Acquire) {
                     continue;
                 }
-                if let (Some(hub), Err(error)) = (hub.as_ref(), result.as_ref()) {
-                    hub.log(3, crate::diagnostics::LogSource::Net, &error.message);
+                if let Err(error) = result.as_ref() {
+                    log_http(&request.method, &request.url, error);
                 }
                 inbox.post(Command::HttpDone { token, result });
             }
@@ -93,6 +93,7 @@ fn serve(
                     )),
                 };
                 if let Some(error) = result.err() {
+                    log_http(&request.method, &request.url, &error);
                     inbox.post(Command::HttpChunk {
                         token,
                         bytes: Vec::new(),
@@ -183,6 +184,32 @@ pub(crate) fn fetch_image_body(
     }
 }
 
+fn log_http(method: &str, url: &str, error: &HttpError) {
+    match error.kind {
+        HttpFailure::Network | HttpFailure::Timeout => {
+            tracing::warn!(
+                target: "impasto::net",
+                method,
+                url,
+                kind = error.kind.dom_name(),
+                "{}",
+                error.message
+            );
+        }
+        HttpFailure::Canceled => {}
+        _ => {
+            tracing::error!(
+                target: "impasto::net",
+                method,
+                url,
+                kind = error.kind.dom_name(),
+                "{}",
+                error.message
+            );
+        }
+    }
+}
+
 fn post_socket(
     inbox: &Inbox,
     id: u64,
@@ -192,6 +219,14 @@ fn post_socket(
     hub: Option<&Arc<crate::diagnostics::DiagnosticsHub>>,
     url: &str,
 ) {
+    if event == "error" {
+        tracing::warn!(
+            target: "impasto::net",
+            url,
+            error = %String::from_utf8_lossy(data),
+            "socket error"
+        );
+    }
     if let Some(hub) = hub {
         use crate::diagnostics::{NetEntry, NetKind};
         hub.record_net(NetEntry {

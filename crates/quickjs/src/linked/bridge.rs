@@ -23,7 +23,11 @@ pub(super) unsafe extern "C" fn caret_at(
     out_h: *mut f32,
 ) -> i32 {
     let inner = unsafe { inner(session) };
-    match inner.tree.borrow().caret_at(NodeId::from_raw(node), x, y) {
+    match inner
+        .tree
+        .borrow_mut()
+        .caret_at(NodeId::from_raw(node), x, y)
+    {
         Ok(caret) => {
             // SAFETY: the pointers are local out-params from `js_caret_at`.
             unsafe {
@@ -47,7 +51,11 @@ pub(super) unsafe extern "C" fn word_range(
     end: *mut u32,
 ) -> i32 {
     let inner = unsafe { inner(session) };
-    match inner.tree.borrow().word_range(NodeId::from_raw(node), unit) {
+    match inner
+        .tree
+        .borrow_mut()
+        .word_range(NodeId::from_raw(node), unit)
+    {
         Ok((word_start, word_end)) => {
             unsafe {
                 *start = word_start;
@@ -370,6 +378,10 @@ impl FontBook {
         Ok(())
     }
 
+    pub(super) fn snapshot(&self) -> Vec<(String, Vec<u8>)> {
+        self.queued.clone()
+    }
+
     pub(super) fn take(&mut self) -> Vec<(String, Vec<u8>)> {
         let taken = std::mem::take(&mut self.queued);
         for (name, _) in &taken {
@@ -625,7 +637,7 @@ pub(super) unsafe extern "C" fn measure_text(
     let (Some(utf8), Some(color)) = (unsafe { utf8_of(utf8, len) }, unsafe { rgba(color) }) else {
         return -1;
     };
-    let size = inner.tree.borrow().measure_text(
+    let size = inner.tree.borrow_mut().measure_text(
         utf8,
         font_size,
         max_width,

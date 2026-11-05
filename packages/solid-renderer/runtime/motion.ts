@@ -2,7 +2,7 @@ import { animate, type NodeHandle } from "../src/guard.ts";
 import { onFrame } from "./frames.ts";
 import { host } from "./host.ts";
 
-/** Same pair as `core::motion::OVERSCROLL_STIFFNESS` and `OVERSCROLL_DAMPING`. */
+/** Per-second UI spring. Not the list rubber band (`2500` / `100`). */
 export const SPRING = { stiffness: 170, damping: 26 };
 
 const pending: Array<() => void> = [];

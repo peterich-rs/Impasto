@@ -62,7 +62,7 @@ export function NetworkPage() {
           )}
         </For>
       </column>
-      <Show when={current() !== undefined} keyed>
+      <Show when={current()} keyed>
         {(entry) => (
           <column gap={2}>
             <Text fontSize={11} color={theme().color.text}>

@@ -14,7 +14,7 @@ export { Menu, Popover } from "./Menu.tsx";
 export { NavigationBar } from "./NavigationBar.tsx";
 export { OverlayRoot, useOverlay } from "./overlay/OverlayRoot.tsx";
 export { Row } from "./Row.tsx";
-export { ScrollArea } from "./ScrollArea.tsx";
+export { ScrollArea, bouncing, clamping, type ScrollPhysics } from "./ScrollArea.tsx";
 export { createScrollController, createScrollLink } from "./ScrollController.ts";
 export type { ScrollController } from "./ScrollController.ts";
 export { consumeScrollOverflow } from "./ScrollGroup.tsx";

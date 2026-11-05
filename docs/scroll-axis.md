@@ -17,7 +17,7 @@
 
 - `Tree::scroll()` 与 `host.scroll()` 不传轴时仍是 `Both`。存量裸滚动零改动。
 - `host.scroll(axis)` 与 `setScrollAxis` 的编码是 `0` both、`1` vertical、`2` horizontal。未知编码按 both。
-- `setScrollPhysics` 增加可选的 accept：`0` content、`1` always、`2` never。不传仍是 content。
+- `setScrollPhysics` 的 accept：`0` content、`1` always、`2` never。不传仍是 content。第 11 个数是衰减种类（`0` tau、`1` rate），第 14 个数是拉伸种类（`0` linear、`1` curve）。缺省惯性是 500ms。
 - `ScrollArea` 增加 `axis`（缺省 `vertical`）和 `physics.accept`（缺省 `always`）。这是行为修正：竖向列表不再因为内容比视口宽就横滚。
 - `VirtualList` 内部滚动固定 `vertical`。
 - `set_scroll_offset`、`scroll_limits`、fling、overscroll、snap、滚轮、`scroll_into_view` 对未声明的轴恒为当前值或 0。消费端读到的跨轴余量是 0。

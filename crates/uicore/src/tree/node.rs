@@ -291,12 +291,15 @@ bitflags::bitflags! {
         const FOCUSABLE = 1 << 6;
         /// Row children share a text baseline. Column ignores this flag.
         const BASELINE_CROSS = 1 << 7;
-        /// Text paint identity changed and [`super::layout::Tree::sync_paragraphs`]
+        /// Text metrics changed and [`super::text::Tree::sync_metrics`]
         /// has not consumed it yet.
         const TEXT_DIRTY = 1 << 8;
         /// Skip paint and hit testing. Layout size stays, so a pinned list row
         /// does not change the prefix sums.
         const CULL_PAINT = 1 << 9;
+        /// This node's subtree is one picture. A scroll does not fold it into
+        /// the single child picture, so a text edit rebuilds only the row.
+        const PICTURE_OWNER = 1 << 10;
     }
 }
 
@@ -321,9 +324,7 @@ pub(super) struct TextPayload {
     pub(super) editor: Option<crate::TextEditor>,
     /// Line boxes for the current metrics key. Color changes leave this in place.
     pub(super) metrics: Option<Arc<crate::ParagraphMetrics>>,
-    /// Retained paint paragraph. Released when the paint key changes or the node is retired.
-    pub(super) paragraph: Option<protocol::ParagraphId>,
-    /// Last key passed to `retain_paint`.
+    /// Last key measured for this node. Color is not part of the hit.
     pub(super) cached: Option<crate::PaintKey>,
 }
 
@@ -339,7 +340,6 @@ impl TextPayload {
             links: Arc::from([]),
             editor: None,
             metrics: None,
-            paragraph: None,
             cached: None,
         }
     }

@@ -50,7 +50,9 @@ impl Simulation for Friction {
     }
 }
 
-/// Damped spring toward `target`. `stiffness` and `damping` are per millisecond.
+/// Damped spring toward `target`. `stiffness` is per second squared and
+/// `damping` is per second. `v0` and [`Simulation::dx`] stay in scene points
+/// per millisecond, matching [`Friction`].
 #[derive(Clone, Copy, Debug)]
 pub struct Spring {
     pub x0: f32,
@@ -79,27 +81,35 @@ impl Simulation for Spring {
     }
 }
 
-fn spring_sample(spring: &Spring, t: f32) -> (f32, f32) {
-    if !(spring.stiffness.is_finite() && spring.stiffness > 0.0) || !t.is_finite() || t <= 0.0 {
+fn spring_sample(spring: &Spring, t_ms: f32) -> (f32, f32) {
+    if !(spring.stiffness.is_finite() && spring.stiffness > 0.0) || !t_ms.is_finite() || t_ms <= 0.0
+    {
         return (spring.x0, spring.v0);
     }
+    let t = t_ms / 1000.0;
+    let v0 = spring.v0 * 1000.0;
+    let (x, v_per_sec) = spring_sample_seconds(spring, t, v0);
+    (x, v_per_sec / 1000.0)
+}
+
+fn spring_sample_seconds(spring: &Spring, t: f32, v0: f32) -> (f32, f32) {
     let omega = spring.stiffness.sqrt();
     let zeta = spring.damping / (2.0 * omega);
     let offset = spring.x0 - spring.target;
     if !zeta.is_finite() {
-        return (spring.x0, spring.v0);
+        return (spring.x0, v0);
     }
     if (zeta - 1.0).abs() < 1.0e-3 {
         let decay = (-omega * t).exp();
-        let x = spring.target + (offset + (spring.v0 + omega * offset) * t) * decay;
-        let v = (spring.v0 + omega * offset) * decay
-            + (offset + (spring.v0 + omega * offset) * t) * (-omega) * decay;
+        let x = spring.target + (offset + (v0 + omega * offset) * t) * decay;
+        let v =
+            (v0 + omega * offset) * decay + (offset + (v0 + omega * offset) * t) * (-omega) * decay;
         (x, v)
     } else if zeta < 1.0 {
         let omega_d = omega * (1.0 - zeta * zeta).sqrt();
         let decay = (-zeta * omega * t).exp();
         let a = offset;
-        let b = (spring.v0 + zeta * omega * a) / omega_d;
+        let b = (v0 + zeta * omega * a) / omega_d;
         let cos = (omega_d * t).cos();
         let sin = (omega_d * t).sin();
         let x = spring.target + decay * (a * cos + b * sin);
@@ -110,7 +120,7 @@ fn spring_sample(spring: &Spring, t: f32) -> (f32, f32) {
         let disc = (zeta * zeta - 1.0).sqrt();
         let r1 = -omega * (zeta - disc);
         let r2 = -omega * (zeta + disc);
-        let b = (spring.v0 - r1 * offset) / (r2 - r1);
+        let b = (v0 - r1 * offset) / (r2 - r1);
         let a = offset - b;
         let e1 = (r1 * t).exp();
         let e2 = (r2 * t).exp();
@@ -121,7 +131,7 @@ fn spring_sample(spring: &Spring, t: f32) -> (f32, f32) {
 }
 
 /// Scroll friction time constant, in milliseconds.
-pub const SCROLL_TAU_MS: f32 = 180.0;
+pub const SCROLL_TAU_MS: f32 = 500.0;
 
 /// Property a motion writes on each sample.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,9 +164,13 @@ impl AnimProp {
     }
 }
 
-/// Rubber-band spring that returns overscroll to zero.
-pub const OVERSCROLL_STIFFNESS: f32 = 170.0;
-pub const OVERSCROLL_DAMPING: f32 = 26.0;
+/// Rubber-band spring that returns overscroll to zero, per second.
+/// Critical damping at ω = 50 settles to about 2% in 80ms.
+pub const OVERSCROLL_STIFFNESS: f32 = 2500.0;
+pub const OVERSCROLL_DAMPING: f32 = 100.0;
+/// Paging spring, per second. Slower than the rubber band.
+pub const SNAP_STIFFNESS: f32 = 220.0;
+pub const SNAP_DAMPING: f32 = 30.0;
 /// Fraction of the distance past the scroll edge that becomes overscroll.
 pub const OVERSCROLL_FACTOR: f32 = 0.55;
 
@@ -192,6 +206,33 @@ impl Band {
                 // half the ceiling and the slope keeps falling.
                 let ratio = c * over / dimension + 1.0;
                 sign * dimension * (1.0 - 1.0 / ratio)
+            }
+        }
+    }
+
+    /// Derivative of [`Band::stretch`] with respect to overflow.
+    ///
+    /// Release velocity is multiplied by this so the band keeps the finger's
+    /// speed. `Linear` is the constant factor. `Curve` is `c D² / (c|over| + D)²`,
+    /// which is `c` at the edge and falls as the pull deepens.
+    pub fn slope(self, over: f32, dimension: f32) -> f32 {
+        if !over.is_finite() || !dimension.is_finite() || dimension <= 0.0 {
+            return 0.0;
+        }
+        match self {
+            Self::Linear { factor } => {
+                if factor.is_finite() && factor > 0.0 {
+                    factor
+                } else {
+                    0.0
+                }
+            }
+            Self::Curve { c } => {
+                if !(c.is_finite() && c > 0.0) {
+                    return 0.0;
+                }
+                let denom = c * over.abs() + dimension;
+                c * dimension * dimension / (denom * denom)
             }
         }
     }
@@ -339,12 +380,12 @@ pub enum PullMode {
 
 coded_trinary!(PullMode, Off, Overscroll, Edge);
 
-/// Per-scroll motion parameters. Defaults match the historical constants.
+/// Per-scroll motion parameters. [`Default`] is [`ScrollPhysics::BOUNCING`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScrollPhysics {
-    /// How a coast decelerates. The default keeps the historical 180ms tau.
+    /// How a coast decelerates. The default is a 500ms time constant.
     pub decay: Decay,
-    /// How a drag past the edge stretches. The default keeps the linear band.
+    /// How a drag past the edge stretches. The default is the asymptotic band.
     pub band: Band,
     pub overscroll: OverscrollMode,
     pub overscroll_stiffness: f32,
@@ -362,40 +403,31 @@ pub struct ScrollPhysics {
 
 impl Default for ScrollPhysics {
     fn default() -> Self {
-        Self {
-            decay: Decay::Tau(f64::from(SCROLL_TAU_MS)),
-            band: Band::Linear {
-                factor: OVERSCROLL_FACTOR,
-            },
-            overscroll: OverscrollMode::RubberBand,
-            overscroll_stiffness: OVERSCROLL_STIFFNESS,
-            overscroll_damping: OVERSCROLL_DAMPING,
-            overscroll_factor: OVERSCROLL_FACTOR,
-            snap_stiffness: OVERSCROLL_STIFFNESS,
-            snap_damping: OVERSCROLL_DAMPING,
-            snap_x: None,
-            snap_y: None,
-            accept: ScrollAccept::Content,
-        }
+        Self::BOUNCING
     }
 }
 
 impl ScrollPhysics {
-    /// The UIScrollView profile: a 0.998 deceleration rate, the asymptotic
-    /// band, and a firm paging spring. Flutter's `BouncingScrollPhysics`
-    /// users recognize the band; iOS users recognize all three.
-    pub const IOS: Self = Self {
-        decay: Decay::Rate(0.998),
+    /// Asymptotic rubber band, 500ms coast, and an 80ms return spring.
+    /// A behavior preset, not a platform. `accept` stays [`ScrollAccept::Content`].
+    pub const BOUNCING: Self = Self {
+        decay: Decay::Tau(500.0),
         band: Band::Curve { c: 0.55 },
         overscroll: OverscrollMode::RubberBand,
         overscroll_stiffness: OVERSCROLL_STIFFNESS,
         overscroll_damping: OVERSCROLL_DAMPING,
         overscroll_factor: OVERSCROLL_FACTOR,
-        snap_stiffness: 220.0,
-        snap_damping: 30.0,
+        snap_stiffness: SNAP_STIFFNESS,
+        snap_damping: SNAP_DAMPING,
         snap_x: None,
         snap_y: None,
         accept: ScrollAccept::Content,
+    };
+
+    /// Offset stops at the limit. Overscroll stays zero.
+    pub const CLAMPING: Self = Self {
+        overscroll: OverscrollMode::Clamp,
+        ..Self::BOUNCING
     };
 
     /// The tau the coasting friction uses, whichever decay spelling chose it.
@@ -467,11 +499,25 @@ mod tests {
             x0: 0.0,
             v0: 0.0,
             target: 10.0,
-            stiffness: 0.01,
-            damping: 0.2,
+            stiffness: OVERSCROLL_STIFFNESS,
+            damping: OVERSCROLL_DAMPING,
         };
-        assert!(spring.done(5_000.0));
-        assert!((spring.x(5_000.0) - 10.0).abs() < 0.5);
+        assert!(
+            (spring.x(16.0) - 10.0).abs() > 1.0,
+            "16ms should still be in flight, got {}",
+            spring.x(16.0)
+        );
+        assert!(spring.done(120.0));
+        assert!((spring.x(120.0) - 10.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn bouncing_is_the_default_and_clamping_drops_the_band() {
+        assert_eq!(ScrollPhysics::default(), ScrollPhysics::BOUNCING);
+        assert_eq!(ScrollPhysics::CLAMPING.overscroll, OverscrollMode::Clamp);
+        assert_eq!(ScrollPhysics::CLAMPING.stretch(40.0, 80.0), 0.0);
+        let band = ScrollPhysics::BOUNCING.band;
+        assert!((band.slope(0.0, 80.0) - 0.55).abs() < 1.0e-4);
     }
 
     #[test]

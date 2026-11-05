@@ -155,6 +155,7 @@ typedef struct Tap {
     JSValue text_replaced;
     JSValue link;
     JSValue zoom;
+    JSValue long_press;
     int has_click;
     int has_press;
     int has_release;
@@ -174,6 +175,7 @@ typedef struct Tap {
     int has_text_replaced;
     int has_link;
     int has_zoom;
+    int has_long_press;
 } Tap;
 
 typedef struct Timer {
@@ -396,7 +398,6 @@ static void report_rejection(Host *host, JSValueConst reason) {
     }
     /* The language packs install `globalThis.__reportUnhandled` when the host
        has no DOM events; it formats through the same reportError path. */
-    int delivered = 0;
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue hook = JS_GetPropertyStr(ctx, global, "__reportUnhandled");
     if (JS_IsFunction(ctx, hook)) {
@@ -404,11 +405,10 @@ static void report_rejection(Host *host, JSValueConst reason) {
         JSValue result = JS_Call(ctx, hook, JS_UNDEFINED, 1, &arg);
         JS_FreeValue(ctx, arg);
         JS_FreeValue(ctx, result);
-        delivered = 1;
     }
     JS_FreeValue(ctx, hook);
     JS_FreeValue(ctx, global);
-    if (!delivered && host->fns.log) {
+    if (host->fns.log) {
         host->fns.log(host->fns.session, text, strlen(text), 3);
     }
     js_free(ctx, text);
@@ -652,6 +652,9 @@ static void free_tap(Host *host, Tap *tap) {
     if (tap->has_zoom) {
         JS_FreeValue(host->ctx, tap->zoom);
     }
+    if (tap->has_long_press) {
+        JS_FreeValue(host->ctx, tap->long_press);
+    }
 }
 
 static int tap_slot(Tap *tap, int kind, JSValue **slot, int **has) {
@@ -727,6 +730,10 @@ static int tap_slot(Tap *tap, int kind, JSValue **slot, int **has) {
     case 17:
         *slot = &tap->link;
         *has = &tap->has_link;
+        return 0;
+    case 18:
+        *slot = &tap->long_press;
+        *has = &tap->has_long_press;
         return 0;
     case 20:
         *slot = &tap->zoom;
@@ -1769,6 +1776,11 @@ static JSValue js_on_zoom(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     return bind_gesture(ctx, argc, argv, 20, "onZoom(node, fn)");
 }
 
+static JSValue js_on_long_press(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    return bind_gesture(ctx, argc, argv, 18, "onLongPress(node, fn)");
+}
+
 
 
 
@@ -2712,6 +2724,7 @@ static int bind_core(Host *host) {
     failed |= bind_fn(ctx, core, "onSecondaryClick", js_on_secondary_click, 2);
     failed |= bind_fn(ctx, core, "onScroll", js_on_scroll, 2);
     failed |= bind_fn(ctx, core, "onZoom", js_on_zoom, 2);
+    failed |= bind_fn(ctx, core, "onLongPress", js_on_long_press, 2);
     failed |= bind_fn(ctx, core, "requestFrame", js_request_frame, 0);
     failed |= bind_fn(ctx, core, "onClick", js_on_click, 2);
     failed |= bind_fn(ctx, core, "onPress", js_on_press, 2);

@@ -30,7 +30,6 @@ pub fn first_party_modules() -> Vec<HostModule> {
                 app_state: session::shared("active".to_owned()),
                 os: "test",
                 os_version: String::new(),
-                log_level: "info".to_owned(),
                 dump: None,
             },
         ),

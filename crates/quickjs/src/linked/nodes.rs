@@ -158,7 +158,7 @@ pub(super) unsafe extern "C" fn caret_at_unit(
     let inner = unsafe { inner(session) };
     match inner
         .tree
-        .borrow()
+        .borrow_mut()
         .caret_at_unit(NodeId::from_raw(node), unit)
     {
         Ok(caret) => {
@@ -183,7 +183,7 @@ pub(super) unsafe extern "C" fn selection_rects(
     let inner = unsafe { inner(session) };
     let Ok(rects) = inner
         .tree
-        .borrow()
+        .borrow_mut()
         .selection_rects(NodeId::from_raw(node), start, end)
     else {
         return -1;
@@ -291,23 +291,20 @@ pub(super) unsafe extern "C" fn set_scroll_physics(
     snap_y: f32,
     align_y: i32,
     accept: i32,
-    curve: i32,
+    decay_kind: i32,
     snap_stiffness: f32,
     snap_damping: f32,
+    band_kind: i32,
 ) -> i32 {
     let inner = unsafe { inner(session) };
     let physics = uicore::ScrollPhysics {
-        decay: if curve == 2 {
-            // The caller spelled the coast as a deceleration rate; `tau`
-            // carries the rate and converts on construction.
+        decay: if decay_kind == 1 {
             uicore::Decay::Rate(f64::from(tau))
         } else {
             uicore::Decay::Tau(f64::from(tau))
         },
-        band: if curve == 1 {
-            uicore::Band::Curve {
-                c: f64::from(factor) as f32,
-            }
+        band: if band_kind == 1 {
+            uicore::Band::Curve { c: factor }
         } else {
             uicore::Band::Linear { factor }
         },
@@ -531,6 +528,16 @@ pub(in crate::linked) fn dispatch_gestures(
     inner: &Inner,
     gestures: Vec<uicore::Gesture>,
 ) -> Result<(), String> {
+    match dispatch_gesture_list(inner, gestures) {
+        Ok(()) => Ok(()),
+        Err(message) => {
+            tracing::error!(target: "impasto::gesture", "{message}");
+            Err(message)
+        }
+    }
+}
+
+fn dispatch_gesture_list(inner: &Inner, gestures: Vec<uicore::Gesture>) -> Result<(), String> {
     for gesture in gestures {
         note_gesture(&inner.marks, &gesture);
         match gesture {
@@ -543,6 +550,16 @@ pub(in crate::linked) fn dispatch_gestures(
                 dispatch_kind(inner, id, 17, f64::from(link), 0.0)?;
                 continue;
             }
+            uicore::Gesture::DragBegin(id) => {
+                tracing::debug!(target: "impasto::gesture", kind = "drag-begin", "gesture");
+                dispatch_kind(inner, id, 3, 0.0, 0.0)?;
+                continue;
+            }
+            uicore::Gesture::DragEnd(id, vx, vy) => {
+                tracing::debug!(target: "impasto::gesture", kind = "drag-end", "gesture");
+                dispatch_kind(inner, id, 5, f64::from(vx), f64::from(vy))?;
+                continue;
+            }
             uicore::Gesture::ScrollPhaseChanged {
                 id,
                 phase,
@@ -551,6 +568,11 @@ pub(in crate::linked) fn dispatch_gestures(
                 ox,
                 oy,
             } => {
+                tracing::debug!(
+                    target: "impasto::gesture",
+                    phase = phase.name(),
+                    "scroll phase"
+                );
                 dispatch_scroll_phase(inner, id, phase, vx, vy, ox, oy)?;
                 continue;
             }

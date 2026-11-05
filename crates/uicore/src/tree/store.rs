@@ -19,6 +19,7 @@ impl Tree {
             free: Vec::new(),
             taffy: TaffyTree::new(),
             shaper: Box::new(shaper),
+            measure_open: false,
             root: None,
             pending_discard: Vec::new(),
             arena: super::gesture::PointerTable::default(),
@@ -34,6 +35,7 @@ impl Tree {
             run: super::record::RunState::default(),
             finished_owners: Vec::new(),
             subtree_layers: HashMap::new(),
+            subtree_owners: HashMap::new(),
             layer_stack: Vec::new(),
             layer_tail: Vec::new(),
             layer_top: None,
@@ -612,17 +614,12 @@ impl Tree {
 
     /// Drops whatever occupies `index` and recycles it until the generation cap.
     pub(super) fn retire(&mut self, index: u32) {
-        let paint = self.slots.get_mut(index as usize).and_then(|slot| {
-            slot.node.as_mut().and_then(|node| {
-                node.text_mut().and_then(|text| {
-                    text.metrics = None;
-                    text.cached = None;
-                    text.paragraph.take()
-                })
-            })
-        });
-        if let Some(id) = paint {
-            self.shaper.release_paint(id);
+        if let Some(slot) = self.slots.get_mut(index as usize)
+            && let Some(node) = slot.node.as_mut()
+            && let Some(text) = node.text_mut()
+        {
+            text.metrics = None;
+            text.cached = None;
         }
         if let Some(source) = self
             .slots
@@ -947,22 +944,7 @@ impl Tree {
 
 impl Drop for Tree {
     fn drop(&mut self) {
-        let paints: Vec<protocol::ParagraphId> = self
-            .slots
-            .iter_mut()
-            .filter_map(|slot| {
-                slot.node.as_mut().and_then(|node| {
-                    node.text_mut().and_then(|text| {
-                        text.metrics = None;
-                        text.cached = None;
-                        text.paragraph.take()
-                    })
-                })
-            })
-            .collect();
-        for id in paints {
-            self.shaper.release_paint(id);
-        }
+        self.finish_measure();
     }
 }
 

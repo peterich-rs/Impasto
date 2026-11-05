@@ -170,7 +170,7 @@ fn viewport_origin_shifts_hit_testing() -> Result<(), crate::Error> {
 
 #[test]
 fn mono_shaper_counts_scalars() {
-    let shaper = MonoShaper::default();
+    let mut shaper = MonoShaper::default();
     let size = shaper
         .metrics(
             &crate::paint_key(

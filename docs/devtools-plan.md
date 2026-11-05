@@ -66,7 +66,7 @@
   - `Tree::layout`（854 行）调 `compute_layout_with_measure`；`write_box_from_taffy`（1132 行）把 Taffy 结果抄进 `node.x/y/w/h`（父相对）。**没有任何溢出检测**；盒子几何不做像素取整（仅滚动 `settle_pixels`）。
   - `take_layout_trace`（59 行）、`layout_timing`（1067 行）：已有 per-frame 计数。
 - `crates/macos/src/app.rs`
-  - `IMPASTO_LOG` 读取（813 行）、`IMPASTO_DUMP`（935 行）、`MacServices::log`（862 行）。
+  - `IMPASTO_DUMP`（935 行）、`MacServices::log`（862 行）。
 - `apps/gallery-solid/build.mjs`
   - `sourcemap: true`：`dist/quotes.js.map` 已产出，无人消费。
 - `packages/solid-renderer/runtime/index.ts`
@@ -89,7 +89,7 @@
 3. **溢出可见**：`Row`/`Column` 主轴溢出在布局后被扫描出来，进面板的布局页与 Warn 日志，可在检查器里高亮父子盒子——对齐 Flutter `RenderFlex` 条纹的语义，但不往 `DrawList` 里塞调试命令。
 4. **日志与网络**：`console.*` 分级入环形缓冲，面板可过滤、搜索；HTTP/流式/WS 请求有列表和详情（含脱敏头、body 预览、耗时）。
 5. **帧可见**：每帧 `FrameTiming` + `FramePhases` 入环形缓冲，面板画最近 120 帧的条形图与相位分解。
-6. **环境开关**：`IMPASTO_DEVTOOLS` 控制，关闭时代价严格为零（不扫描、不记录、不注册 UI）。
+6. **面板**：macOS 与 Android 宿主始终构造 hub 并注册模块，不读环境变量。测试会话仍可以传 `devtools: None`。
 7. **可扩展**：Rust 侧通道与 JS 侧页面都有注册口子，后续（存储、权限、路由、Kotlin）加页面不改面板骨架。
 
 ### 非目标
@@ -129,7 +129,7 @@
 ┌─ 聚合：hostshell::diagnostics::DiagnosticsHub（Arc，进程一份）─────────┐
 │  logs[] errors[] network[] frames[]  + revision 计数 + 环形上限        │
 └──────┬───────────────────────────────────────────────┬───────────────┘
-       │ 消费一：Services::log（现状不变，IMPASTO_LOG 过滤）│ 消费二：
+       │ 消费一：订阅者按 Targets 过滤后写出           │ 消费二：
        ▼                                               ▼
    stderr / logcat                    @impasto/devtools/host 宿主模块
                                       （HostModule::sync，PluginValue 快照，
@@ -149,7 +149,7 @@
 
 1. **单线程归属不变**。hub 用 `Mutex` 只因为 net 线程和渲染线程都写；模块方法是 `Sync` 调用，在渲染线程（JS 线程）上锁一下、克隆快照、立刻放锁，无跨线程对象。
 2. **面板是普通 UI**。devtool 组件只用 `stack`/`column`/`scroll`/`decorated`/`pointer`/`Text`，不新增布局原语，不做第二套命中。
-3. **关闭即零成本**。`IMPASTO_DEVTOOLS=0` 时：`Boot` 不构造 hub、不包 http 记录器、不注册模块；session 不开布局扫描；`installDevtools()` 读到 `enabled()==false` 直接返回禁用句柄。
+3. **宿主常开**。macOS 与 Android 总是构造 hub、包 http 记录器、注册模块。`devtools: None` 的测试会话不扫描、不记录；`installDevtools()` 读到 `enabled()==false` 直接返回禁用句柄。
 
 ### 数据面：`DiagnosticsHub`
 
@@ -1020,7 +1020,7 @@ VLQ 解码约 40 行（标准 base64 字符表 + 连续位），完整实现写�
 
 **布局页**：`debugLayoutIssues()` 列表，每行 `row 溢出 12.5pt`（父节点 id、尺寸、最远子节点 id），点行通过 `core.rect(parent)` 与 `core.rect(worstChild)` 在高亮层同时框出父（红）子（黄）两个盒子。「说明」折叠块写三类合法溢出的排除规则，让使用者知道为什么某处没报。
 
-**信息页**：`platform()`（os、版本、缩放、viewport、insets、`app_state` 当前值）、`versions()`（hostshell 版本、engine pin 提交、quickjs pin tag）、`debugMemory()`（quickjs malloc 字节数与对象计数）、`metrics()`。留一个「环境变量」块：`IMPASTO_LOG`/`IMPASTO_DEVTOOLS`/`IMPASTO_DUMP` 当前生效值（宿主读 env 后回填进 `platform()`）。
+**信息页**：`platform()`（os、版本、缩放、viewport、insets、`app_state` 当前值）、`versions()`（hostshell 版本、engine pin 提交、quickjs pin tag）、`debugMemory()`（quickjs malloc 字节数与对象计数）、`metrics()`。`log` 是当前 `Targets` 的文本。`dump` 是 `IMPASTO_DUMP`。
 
 ### 控制台能力补齐（console 面）
 
@@ -1068,8 +1068,8 @@ pub fn write_frame(
 
 | 环节 | 行为 |
 |---|---|
-| `IMPASTO_DEVTOOLS=0` 或未设 | macos/android 宿主不构造 hub、不注册模块、不包 http 记录器；`enabled()` 恒 false；JS 层不挂载。发布 APK 构建脚本显式置 0 |
-| `IMPASTO_DEVTOOLS=1` | 全链路开启。`just host` 与 debug APK 缺省传 1 |
+| 产品宿主 | macOS 与 Android 始终构造 hub 并注册模块。不读 `IMPASTO_DEVTOOLS` |
+| `devtools: None` | 测试会话不扫描、不记录、不注册模块；`enabled()` 为 false；JS 层不挂载 |
 | 头脱敏 | `authorization`/`cookie`/`set-cookie`/`proxy-authorization` 值替换 `***`，面板里「显示原值」仅对当前会话生效且不写回 hub |
 | body 预览 | 2KiB 上限，UTF-8 失败显示 `<N bytes>` |
 | 环形上限 | 日志 400 / 错误 100 / 网络 150 / 帧 240，溢出丢最旧 |

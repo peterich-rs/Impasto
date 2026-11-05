@@ -62,7 +62,7 @@ gallery-dist:
     pnpm -C "$src" install && pnpm -C "$src" run build
 
 host: gallery-dist
-    IMPASTO_DEVTOOLS="${IMPASTO_DEVTOOLS:-1}" cargo run --manifest-path "{{root}}/Cargo.toml" -p macos -- --js "{{root}}/apps/gallery-solid/dist/quotes.js" "{{logo}}"
+    cargo run --manifest-path "{{root}}/Cargo.toml" -p macos -- --js "{{root}}/apps/gallery-solid/dist/quotes.js" "{{logo}}"
 
 quickjs:
     "{{root}}/crates/quickjs/fetch-quickjs.sh"
@@ -70,7 +70,7 @@ quickjs:
 host-js: host
 
 # Cargo cdylib, then the APK. Needs the Android NDK and the arm64 Impeller SDK.
-# Debug runs turn the panel on with IMPASTO_DEVTOOLS=1; the host defaults off.
+# The in-app devtools panel is on in the host; it is not an environment switch.
 android: gallery-dist
     #!/usr/bin/env bash
     set -euo pipefail

@@ -1,5 +1,6 @@
 import { colorBytes } from "./colors.ts";
 import { BUTTON_FILL, FONT_SIZE, TEXT_COLOR } from "./defaults.ts";
+import type { RecognizerSpec } from "./guard.ts";
 import type { AxisSize, CoreHost, GridLine, InsetEdge } from "./host.ts";
 import { parseAxisSize, parseGridLine, parseInsetEdge } from "./layout-values.ts";
 
@@ -434,6 +435,16 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
       case "onZoom":
         if (typeof value === "function" && typeof host.onZoom === "function") {
           host.onZoom(node.id, value as (scale: number) => void);
+        }
+        return;
+      case "onLongPress":
+        if (typeof value === "function") {
+          host.onLongPress(node.id, value as () => void);
+        }
+        return;
+      case "recognizers":
+        if (value && typeof value === "object" && typeof host.setRecognizers === "function") {
+          host.setRecognizers(node.id, value as RecognizerSpec);
         }
         return;
       case "children":

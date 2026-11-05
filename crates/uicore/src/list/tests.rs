@@ -193,6 +193,55 @@ fn rows(items: &[(u32, &str)]) -> Vec<ShownRow> {
 }
 
 #[test]
+fn repeating_the_same_items_does_not_force_another_window() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    let scroll = tree.scroll()?;
+    tree.set_max_size(scroll, 120.0, 80.0)?;
+    let content = tree.column(0.0)?;
+    tree.add_child(scroll, content)?;
+    tree.layout()?;
+    let mut drivers = DriverSet::new();
+    let id = drivers.list_create(1, 20.0);
+    assert!(drivers.list_bind(
+        id,
+        ListNodes {
+            viewport: Some(scroll),
+            content: Some(content),
+            ..ListNodes::default()
+        }
+    ));
+    let submit = |drivers: &mut DriverSet| {
+        assert!(drivers.list_begin(id));
+        assert!(drivers.list_item(
+            id,
+            ListItem {
+                key: "a".to_owned(),
+                ty: "row".to_owned(),
+                sticky: false,
+            }
+        ));
+        assert!(drivers.list_end(id));
+    };
+    submit(&mut drivers);
+    drivers.tick(&mut tree);
+    let _ = drivers.take_events();
+    submit(&mut drivers);
+    drivers.tick(&mut tree);
+    let again = drivers.take_events();
+    assert!(
+        again.iter().all(|event| !matches!(
+            event,
+            super::DriverEvent::ListOp {
+                op: ListOp::Adopt { .. } | ListOp::Set { .. } | ListOp::Detach { .. },
+                ..
+            }
+        )),
+        "same keys replayed the window: {again:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn driver_tick_mounts_a_window_and_measures_rows() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper::default());
     let scroll = tree.scroll()?;

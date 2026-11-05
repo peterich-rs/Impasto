@@ -30,6 +30,14 @@ impl FontLease {
         unsafe { (*ptr).bytes.len() as u64 }
     }
 
+    pub(super) fn same(ptr: *mut Self, data: &[u8]) -> bool {
+        if ptr.is_null() {
+            return false;
+        }
+        // SAFETY: `ptr` is a live lease held by a registered face.
+        unsafe { (*ptr).bytes.as_slice() == data }
+    }
+
     pub(super) fn release(ptr: *mut Self) {
         if ptr.is_null() {
             return;

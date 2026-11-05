@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use hostshell::{
-    Boot, ClipboardHost, Command, DropWait, Launch, LinkingHost, LogLevel, NativePtr, Services,
-    SessionError, StorageHost, SurfaceId, SurfaceTarget, Vsync,
+    Boot, ClipboardHost, Command, DropWait, Launch, LinkingHost, NativePtr, Services, SessionError,
+    StorageHost, SurfaceId, SurfaceTarget, Vsync,
 };
 use jni::objects::{Global, JObject, JString};
 use jni::sys::{jboolean, jint, jlong};
@@ -36,14 +36,6 @@ unsafe extern "C" {
     fn __android_log_write(priority: i32, tag: *const c_char, text: *const c_char) -> i32;
 }
 
-/// `IMPASTO_DEVTOOLS=1` turns on the in-app devtools panel. Default off.
-fn devtools_hub() -> Option<Arc<hostshell::DiagnosticsHub>> {
-    let enabled = std::env::var("IMPASTO_DEVTOOLS")
-        .map(|text| text.trim() == "1" || text.trim().eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    enabled.then(|| Arc::new(hostshell::DiagnosticsHub::new()))
-}
-
 struct Bridge {
     vm: jni::JavaVM,
     view: Global<JObject<'static>>,
@@ -67,7 +59,7 @@ impl Bridge {
     fn call(&self, body: impl FnOnce(&mut Env) -> jni::errors::Result<()>) {
         let result = self.vm.attach_current_thread(|env| body(env));
         if let Err(error) = result {
-            log_line(LogLevel::Error, &format!("jni: {error}"));
+            tracing::error!(target: "impasto::host", %error, "jni attach failed");
         }
     }
 
@@ -384,13 +376,6 @@ impl Services for Shared {
         self.0.publish_semantics(update);
     }
 
-    fn log(&self, level: LogLevel, message: &str) {
-        if level > log_filter() {
-            return;
-        }
-        log_line(level, message);
-    }
-
     fn request_exit(&self) {
         self.0.finish();
     }
@@ -580,7 +565,46 @@ struct Attach {
     settings: session::PlatformSettings,
 }
 
+fn cache_log_dir(env: &mut Env, view: &JObject<'_>) -> Option<std::path::PathBuf> {
+    let context = env
+        .call_method(
+            view,
+            jni::jni_str!("getContext"),
+            jni::jni_sig!("()Landroid/content/Context;"),
+            &[],
+        )
+        .ok()?
+        .l()
+        .ok()?;
+    let file = env
+        .call_method(
+            &context,
+            jni::jni_str!("getCacheDir"),
+            jni::jni_sig!("()Ljava/io/File;"),
+            &[],
+        )
+        .ok()?
+        .l()
+        .ok()?;
+    let path = env
+        .call_method(
+            &file,
+            jni::jni_str!("getAbsolutePath"),
+            jni::jni_sig!("()Ljava/lang/String;"),
+            &[],
+        )
+        .ok()?
+        .l()
+        .ok()?;
+    let string = unsafe { JString::from_raw(env, path.as_raw()) };
+    let text = string.try_to_string(env).ok()?;
+    let dir = std::path::PathBuf::from(text.as_str()).join("logs");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
 fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
+    let log_dir = cache_log_dir(env, request.view.as_obj());
     let bridge = Arc::new(Bridge {
         vm: env.get_java_vm().map_err(|error| error.to_string())?,
         view: request.view,
@@ -601,21 +625,15 @@ fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
     };
     let boot = Boot {
         font_family: FONT_FAMILY.to_string(),
-        launch: Launch::Session(Box::new(move |slot, io, host| {
+        launch: Launch::Session(Box::new(move |open, io, host| {
             let (name, script) = load_script(&script_assets, requested.as_deref())?;
-            quickjs::open_with_io(
-                &script,
-                &name,
-                slot.shaper(),
-                slot.log_hook(),
-                Some(io),
-                host,
+            quickjs::open_with_io(&script, &name, open.shaper, open.log, Some(io), host).map_err(
+                |error| match error {
+                    quickjs::Error::NotLinked => SessionError::NotLinked,
+                    quickjs::Error::Runtime => SessionError::Runtime,
+                    quickjs::Error::Script(text) => SessionError::Script(text),
+                },
             )
-            .map_err(|error| match error {
-                quickjs::Error::NotLinked => SessionError::NotLinked,
-                quickjs::Error::Runtime => SessionError::Runtime,
-                quickjs::Error::Script(text) => SessionError::Script(text),
-            })
         })),
         services: Box::new(Shared(Arc::clone(&bridge))),
         vsync: Arc::clone(&clock) as Arc<dyn Vsync>,
@@ -632,9 +650,10 @@ fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
         }),
         dump_list: false,
         inspect: std::env::var_os("IMPASTO_INSPECT").map(std::path::PathBuf::from),
-        devtools: devtools_hub(),
+        devtools: Some(Arc::new(hostshell::DiagnosticsHub::new())),
         devtools_source_map: None,
         inspect_dir: None,
+        log_dir,
     }
     .with_module(hostshell::clipboard(Arc::clone(&bridge) as _))
     .with_module(hostshell::linking(Arc::clone(&bridge) as _, launch_url))
@@ -661,7 +680,7 @@ fn detach() {
     };
     destroy_surface(&host);
     if let Err(error) = host.link.shutdown_and_join() {
-        log_line(LogLevel::Error, &error.to_string());
+        tracing::error!(target: "impasto::host", %error, "host shutdown failed");
     }
 }
 
@@ -700,9 +719,9 @@ fn release_when_dropped(wait: DropWait, id: SurfaceId, window: NativeWindow) {
             held.release();
         });
     if spawned.is_err() {
-        log_line(
-            LogLevel::Error,
-            "surface drop thread did not start; keeping the window",
+        tracing::error!(
+            target: "impasto::host",
+            "surface drop thread did not start; keeping the window"
         );
     }
 }
@@ -762,9 +781,11 @@ fn configure_window_buffers(window: &NativeWindow) {
     let width = window.width();
     let height = window.height();
     if width <= 1 || height <= 1 {
-        log_line(
-            LogLevel::Error,
-            &format!("window buffer is {width}x{height}"),
+        tracing::error!(
+            target: "impasto::host",
+            width,
+            height,
+            "window buffer is too small"
         );
         return;
     }
@@ -773,9 +794,12 @@ fn configure_window_buffers(window: &NativeWindow) {
         height,
         Some(ndk::hardware_buffer_format::HardwareBufferFormat::R8G8B8A8_UNORM),
     ) {
-        log_line(
-            LogLevel::Error,
-            &format!("buffer geometry {width}x{height}: {error}"),
+        tracing::error!(
+            target: "impasto::host",
+            width,
+            height,
+            %error,
+            "buffer geometry failed"
         );
     }
 }
@@ -1024,28 +1048,13 @@ fn flag(value: jboolean) -> bool {
     value
 }
 
-pub(crate) fn log_line(level: LogLevel, message: &str) {
-    let priority = match level {
-        LogLevel::Error => 6,
-        LogLevel::Warn => 5,
-        LogLevel::Info => 4,
-        LogLevel::Debug => 3,
-    };
+/// Logcat before the process subscriber is installed. Later logs go through `tracing`.
+fn early_log(message: &str) {
     let mut bytes = message.replace('\0', " ").into_bytes();
     bytes.push(0);
     unsafe {
-        __android_log_write(priority, c"impasto".as_ptr(), bytes.as_ptr().cast());
+        __android_log_write(6, c"impasto".as_ptr(), bytes.as_ptr().cast());
     }
-}
-
-/// Reads `IMPASTO_LOG` once. The default sink keeps `info`.
-fn log_filter() -> LogLevel {
-    static FILTER: OnceLock<LogLevel> = OnceLock::new();
-    *FILTER.get_or_init(|| {
-        std::env::var("IMPASTO_LOG")
-            .map(|text| LogLevel::parse(&text))
-            .unwrap_or(LogLevel::Info)
-    })
 }
 
 fn with_env<'local, T: Default>(
@@ -1079,7 +1088,7 @@ pub extern "system" fn Java_dev_impasto_host_HostActivity_nativeAttach<'local>(
         let assets = match asset_manager(env, &assets) {
             Ok(assets) => assets,
             Err(message) => {
-                log_line(LogLevel::Error, &message);
+                early_log(&message);
                 return Ok(1);
             }
         };
@@ -1101,7 +1110,7 @@ pub extern "system" fn Java_dev_impasto_host_HostActivity_nativeAttach<'local>(
         match attach(env, request) {
             Ok(()) => Ok(0),
             Err(message) => {
-                log_line(LogLevel::Error, &message);
+                early_log(&message);
                 Ok(1)
             }
         }
@@ -1233,7 +1242,7 @@ pub extern "system" fn Java_dev_impasto_host_HostSurfaceView_nativeSurfaceCreate
         let raw =
             unsafe { ndk_sys::ANativeWindow_fromSurface(env.get_raw().cast(), surface.as_raw()) };
         let Some(ptr) = NonNull::new(raw) else {
-            log_line(LogLevel::Error, "surface produced no native window");
+            tracing::error!(target: "impasto::host", "surface produced no native window");
             return Ok(());
         };
         let window = unsafe { NativeWindow::from_ptr(ptr) };
@@ -1657,7 +1666,7 @@ pub extern "system" fn Java_dev_impasto_host_AccessBridge_nativeScroll(
         let Some(node) = nodes.iter().find(|node| node.id == id) else {
             return;
         };
-        if forward != 0 {
+        if forward {
             node.scroll_forward
         } else {
             node.scroll_backward
