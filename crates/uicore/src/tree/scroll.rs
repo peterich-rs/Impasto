@@ -288,15 +288,6 @@ impl Tree {
         }
     }
 
-    pub fn fling_active(&self) -> bool {
-        self.motions.iter().any(|motion| {
-            matches!(
-                motion.prop,
-                crate::AnimProp::ScrollX | crate::AnimProp::ScrollY
-            )
-        })
-    }
-
     /// Starts coasting. Speeds are scene points per millisecond.
     ///
     /// The finger velocity is negated: a positive drag speed decreases the offset,

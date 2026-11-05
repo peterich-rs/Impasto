@@ -1023,7 +1023,7 @@ impl Session for JsSession {
             let tree = inner.tree.borrow();
             tree.needs_layout()
                 || tree.needs_paint()
-                || tree.fling_active()
+                || tree.motion_active()
                 || tree.pending_long_press()
         };
         let jobs = unsafe { qjs_jobs_pending(inner.host) != 0 };
