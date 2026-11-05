@@ -3,7 +3,7 @@ import { directionFor, host, onFrame, overlayParent, removeNode, restoreFocus, s
 import { colorBytes } from "./colors.ts";
 import { coreHost, nodeId } from "./host-ext.ts";
 import { registerOverlay } from "./overlay/registry.ts";
-import { moveChildren } from "./overlay.ts";
+import { moveChildren, readFirstChild, restoreChildren } from "./overlay.ts";
 import { Role } from "./semantics.ts";
 import { useTheme } from "./use-theme.ts";
 
@@ -32,7 +32,7 @@ export function Sheet(props: {
     layer = null;
     closing = false;
     try {
-      moveChildren(current.slot, placeholder);
+      restoreChildren(current.slot, placeholder);
       if (current.focused) {
         host.popFocusScope();
         restoreFocus(current.previous);
@@ -166,7 +166,13 @@ export function Sheet(props: {
     if (current.titleId !== 0) {
       host.setTextDirection(current.titleId, directionFor(theme().locale));
     }
-    if (host.firstChild(placeholder) !== 0) {
+    const parked = readFirstChild(placeholder);
+    if (parked === null) {
+      placeholder = 0;
+      closeLayer();
+      return;
+    }
+    if (parked !== 0) {
       moveChildren(placeholder, current.slot);
     }
     if (created) {
