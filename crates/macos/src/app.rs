@@ -7,9 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
 use hostshell::{
-    Boot, BootError, ClipboardHost, Command, Launch as ShellLaunch, Link, LinkingHost,
-    NativePtr, PermissionsHost, Poster, Services, SessionError, StorageHost, SurfaceTarget,
-    metrics,
+    Boot, BootError, ClipboardHost, Command, Launch as ShellLaunch, Link, LinkingHost, NativePtr,
+    PermissionsHost, Poster, Services, SessionError, StorageHost, SurfaceTarget, metrics,
 };
 use objc2::AnyThread;
 use objc2::rc::Retained;
@@ -952,19 +951,13 @@ pub fn run(
     let devtools_source_map = load_source_map(&name);
     let inspect_dir = std::env::var_os("IMPASTO_INSPECT").map(PathBuf::from);
     let shell_launch = ShellLaunch::Session(Box::new(move |open, io, host| {
-        quickjs::open_with_io(
-            &source,
-            &name,
-            open.shaper,
-            open.log,
-            Some(io),
-            host,
+        quickjs::open_with_io(&source, &name, open.shaper, open.log, Some(io), host).map_err(
+            |error| match error {
+                quickjs::Error::NotLinked => SessionError::NotLinked,
+                quickjs::Error::Runtime => SessionError::Runtime,
+                quickjs::Error::Script(text) => SessionError::Script(text),
+            },
         )
-        .map_err(|error| match error {
-            quickjs::Error::NotLinked => SessionError::NotLinked,
-            quickjs::Error::Runtime => SessionError::Runtime,
-            quickjs::Error::Script(text) => SessionError::Script(text),
-        })
     }));
     let dump_for_surface = dump;
     let on_stop_for_surface = Arc::clone(&on_stop);

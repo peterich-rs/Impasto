@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -289,10 +290,13 @@ impl WordCache {
     }
 
     fn insert(&mut self, key: WordKey, width: f32) {
-        if self.map.contains_key(&key) {
-            self.map.insert(key, width);
-            return;
-        }
+        let key = match self.map.entry(key) {
+            Entry::Occupied(mut occupied) => {
+                occupied.insert(width);
+                return;
+            }
+            Entry::Vacant(vacant) => vacant.into_key(),
+        };
         if self.order.len() >= WORD_CAP
             && let Some(old) = self.order.pop_front()
         {

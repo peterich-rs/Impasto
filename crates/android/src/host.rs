@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use hostshell::{
-    Boot, ClipboardHost, Command, DropWait, Launch, LinkingHost, NativePtr, Services,
-    SessionError, StorageHost, SurfaceId, SurfaceTarget, Vsync,
+    Boot, ClipboardHost, Command, DropWait, Launch, LinkingHost, NativePtr, Services, SessionError,
+    StorageHost, SurfaceId, SurfaceTarget, Vsync,
 };
 use jni::objects::{Global, JObject, JString};
 use jni::sys::{jboolean, jint, jlong};
@@ -627,19 +627,13 @@ fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
         font_family: FONT_FAMILY.to_string(),
         launch: Launch::Session(Box::new(move |open, io, host| {
             let (name, script) = load_script(&script_assets, requested.as_deref())?;
-            quickjs::open_with_io(
-                &script,
-                &name,
-                open.shaper,
-                open.log,
-                Some(io),
-                host,
+            quickjs::open_with_io(&script, &name, open.shaper, open.log, Some(io), host).map_err(
+                |error| match error {
+                    quickjs::Error::NotLinked => SessionError::NotLinked,
+                    quickjs::Error::Runtime => SessionError::Runtime,
+                    quickjs::Error::Script(text) => SessionError::Script(text),
+                },
             )
-            .map_err(|error| match error {
-                quickjs::Error::NotLinked => SessionError::NotLinked,
-                quickjs::Error::Runtime => SessionError::Runtime,
-                quickjs::Error::Script(text) => SessionError::Script(text),
-            })
         })),
         services: Box::new(Shared(Arc::clone(&bridge))),
         vsync: Arc::clone(&clock) as Arc<dyn Vsync>,
