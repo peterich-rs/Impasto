@@ -1474,6 +1474,38 @@ mod tests {
     }
 
     #[test]
+    fn an_opacity_spring_asks_for_another_frame() {
+        #[cfg(not(quickjs))]
+        {}
+        #[cfg(quickjs)]
+        {
+            let source = r#"
+                const root = core.column(0);
+                const fading = core.opacity(255);
+                core.append(root, fading);
+                core.animate(fading, "opacity", 255, 0, 170, 26);
+            "#;
+            let mut session = match super::JsSession::open(
+                source,
+                "spring.js",
+                uicore::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
+            session.metrics(&metrics());
+            let first = session.frame(session::FrameTime::at(0.0));
+            assert!(
+                first.again,
+                "a running spring has to sample on the next frame"
+            );
+            let landed = session.frame(session::FrameTime::at(5_000.0));
+            assert!(!landed.again, "the spring has landed");
+        }
+    }
+
+    #[test]
     fn microtask_set_text_paints_without_request_frame() {
         #[cfg(not(quickjs))]
         {}

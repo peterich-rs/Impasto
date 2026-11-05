@@ -1,6 +1,38 @@
 use super::*;
 
 #[test]
+fn collapsed_clip_records_no_text() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 360.0, 640.0)?;
+    let page = tree.column(0.0)?;
+    tree.set_max_size(page, 360.0, 640.0)?;
+    let clip = tree.clip(0.0)?;
+    tree.set_min_size(clip, 0.0, 0.0)?;
+    tree.set_max_size(clip, 0.0, 0.0)?;
+    let text = tree.text("Reset the paper account", 14.0, [0, 0, 0, 255])?;
+    tree.add_child(clip, text)?;
+    tree.add_child(page, clip)?;
+    tree.layout()?;
+    let list = tree.record()?;
+    let texts: Vec<_> = list
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            protocol::Command::Text {
+                utf8, max_width, ..
+            } => Some((utf8.as_ref().to_string(), *max_width)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts.is_empty(),
+        "collapsed text {texts:?} box {:?}",
+        tree.rect(text)
+    );
+    Ok(())
+}
+
+#[test]
 fn recorded_text_uses_the_ancestor_origin() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper::default());
     let pad = tree.padding(8.0)?;

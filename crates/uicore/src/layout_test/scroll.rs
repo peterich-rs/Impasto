@@ -606,3 +606,165 @@ fn quotes_shell_stays_inside_the_viewport() -> Result<(), crate::Error> {
     );
     Ok(())
 }
+
+#[test]
+fn watch_row_slot_is_one_row_tall() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 360.0, 640.0)?;
+    let scroll = tree.scroll_with(crate::ScrollAxis::Vertical)?;
+    tree.set_fill(scroll)?;
+    let content = tree.column(0.0)?;
+    let rows = tree.column(0.0)?;
+    let mut slots = Vec::new();
+    for _ in 0..2 {
+        let slot = tree.column(0.0)?;
+        let pointer = tree.pointer_region()?;
+        let pad = tree.padding(0.0)?;
+        tree.set_padding_edges(
+            pad,
+            Edges {
+                top: 10.0,
+                right: 16.0,
+                bottom: 10.0,
+                left: 16.0,
+            },
+        )?;
+        tree.set_grow(pad, 1.0)?;
+        let line = tree.row(10.0)?;
+        tree.set_min_size(line, 0.0, 56.0)?;
+        let mono = tree.sized(36.0, 36.0)?;
+        tree.add_child(line, mono)?;
+        let spark = tree.stack()?;
+        tree.set_min_size(spark, 56.0, 22.0)?;
+        tree.set_max_size(spark, 56.0, 22.0)?;
+        for i in 0..16 {
+            let bar = tree.decorated([0, 0, 0, 255], 0.0)?;
+            tree.set_position(bar, true)?;
+            tree.set_size_axis(bar, 0, AxisSize::Points(2.0))?;
+            tree.set_size_axis(bar, 1, AxisSize::Points(12.0))?;
+            tree.set_inset(
+                bar,
+                crate::Inset {
+                    top: Some(10.0),
+                    right: None,
+                    bottom: None,
+                    left: Some(i as f32 * 4.0),
+                },
+            )?;
+            tree.add_child(spark, bar)?;
+        }
+        tree.add_child(line, spark)?;
+        tree.add_child(pad, line)?;
+        tree.add_child(pointer, pad)?;
+        tree.add_child(slot, pointer)?;
+        tree.add_child(rows, slot)?;
+        slots.push(slot);
+    }
+    let top = tree.sized(1.0, 0.0)?;
+    let bottom = tree.sized(1.0, 0.0)?;
+    tree.add_child(content, top)?;
+    tree.add_child(content, rows)?;
+    tree.add_child(content, bottom)?;
+    tree.set_min_size(content, 0.0, 8.0 * 76.0)?;
+    tree.add_child(scroll, content)?;
+    let host = tree.column(0.0)?;
+    tree.set_min_size(host, 360.0, 500.0)?;
+    tree.set_max_size(host, 360.0, 500.0)?;
+    tree.set_grow(scroll, 1.0)?;
+    tree.add_child(host, scroll)?;
+    tree.layout()?;
+    let first = tree.rect(slots[0])?;
+    let second = tree.rect(slots[1])?;
+    tree.set_picture_owner(slots[0], true)?;
+    tree.set_picture_owner(slots[1], true)?;
+    tree.record()?;
+    let offsets: Vec<(f32, f32)> = tree
+        .layer_tree()
+        .layers
+        .iter()
+        .filter_map(|layer| match layer.kind {
+            protocol::LayerKind::Offset { x, y } => Some((x, y)),
+            _ => None,
+        })
+        .collect();
+    let origins: Vec<(f32, f32)> = tree
+        .layer_tree()
+        .pictures
+        .iter()
+        .map(|picture| picture.origin)
+        .collect();
+    assert!(
+        (70.0..90.0).contains(&first.h)
+            && (second.y - first.y - first.h).abs() < 1.0
+            && offsets
+                .windows(2)
+                .any(|pair| (pair[1].1 - pair[0].1 - first.h).abs() < 1.0)
+            && origins
+                .iter()
+                .all(|origin| origin.0 == 0.0 && origin.1 == 0.0),
+        "slot {first:?} next {second:?} offsets {offsets:?} origins {origins:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_row_picture_below_chrome_stays_inside_the_scroll() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 360.0, 640.0)?;
+    let page = tree.column(0.0)?;
+    tree.set_min_size(page, 360.0, 640.0)?;
+    tree.set_max_size(page, 360.0, 640.0)?;
+    let chrome = tree.sized(360.0, 160.0)?;
+    tree.add_child(page, chrome)?;
+    let scroll = tree.scroll_with(crate::ScrollAxis::Vertical)?;
+    tree.set_grow(scroll, 1.0)?;
+    let content = tree.column(0.0)?;
+    let lead = tree.sized(1.0, 40.0)?;
+    tree.add_child(content, lead)?;
+    let mut rows = Vec::new();
+    for label in ["one", "two"] {
+        let row = tree.column(0.0)?;
+        let text = tree.text(label, 16.0, [0, 0, 0, 255])?;
+        tree.add_child(row, text)?;
+        tree.add_child(content, row)?;
+        tree.set_picture_owner(row, true)?;
+        rows.push((row, text));
+    }
+    let tail = tree.sized(1.0, 800.0)?;
+    tree.add_child(content, tail)?;
+    tree.add_child(scroll, content)?;
+    tree.add_child(page, scroll)?;
+    tree.layout()?;
+    tree.record()?;
+    let marks = scene_marks_in_layers(&tree.layer_tree());
+    let painted = |label: &str| {
+        marks
+            .iter()
+            .find(|mark| mark.label == label)
+            .map(|mark| mark.y)
+    };
+    let first = tree.rect(rows[0].1)?;
+    let second = tree.rect(rows[1].1)?;
+    let one = painted("one").expect("first row inside the scroll clip");
+    let two = painted("two").expect("second row inside the scroll clip");
+    assert!(
+        (one - first.y).abs() < 1.0 && (two - second.y).abs() < 1.0,
+        "painted ({one}, {two}) layout ({}, {})",
+        first.y,
+        second.y
+    );
+    tree.set_scroll_offset(scroll, 0.0, 24.0)?;
+    tree.record()?;
+    let marks = scene_marks_in_layers(&tree.layer_tree());
+    let scrolled = marks
+        .iter()
+        .find(|mark| mark.label == "two")
+        .map(|mark| mark.y)
+        .expect("scrolled row stays inside the clip");
+    assert!(
+        (scrolled - (second.y - 24.0)).abs() < 1.0,
+        "scrolled {scrolled} layout {}",
+        second.y
+    );
+    Ok(())
+}

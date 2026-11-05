@@ -15,12 +15,10 @@ macOS 宿主在 `crates/macos`，用 Impeller standalone SDK 的 Metal 后端。
 
 | 文档 | 内容 |
 |---|---|
-| `docs/architecture.md` | 当前仓库分层、一帧、渲染器和控件 |
-| `docs/platform-hosts.md` | macOS、Android、iOS 的线程、表面和输入 |
-| `docs/refactor-plan.md` | 生产级迭代规划。未落地 |
-| `docs/quotes-app.md` | Quotes 模拟盘。设计文档，实现以源码为准 |
-| `docs/protocol-v2.md` | Picture 字节。未排期 |
-| `AGENTS.md` | 改代码时的边界。当前行为以源码为准，目标以规划为准 |
+| `docs/architecture.md` | 当前仓库分层和一帧 |
+| `docs/platform-hosts.md` | macOS、Android 的线程、表面和输入。iOS 还没写 |
+| `docs/refactor-plan.md` | 还没做的事 |
+| `AGENTS.md` | 改代码时的边界。当前行为以源码为准 |
 
 ## 环境
 

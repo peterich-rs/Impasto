@@ -92,7 +92,7 @@ export function OrderSheet(props: {
   host.append(priceBox, priceLabel);
   const priceRow = host.row(6);
   host.append(priceBox, priceRow);
-  const priceDown = stepperBtn("−", () => setPrice((p) => Math.max(0.01, round2(p - tick()))));
+  const priceDown = faded(stepperBtn("−", () => setPrice((p) => Math.max(0.01, round2(p - tick())))));
   host.append(priceRow, priceDown);
   const priceValue = host.text(fmtPrice(price()), 16, INK);
   host.setFontWeight(priceValue, 600);
@@ -100,7 +100,7 @@ export function OrderSheet(props: {
   const priceGrow = host.sized(0, 0);
   host.setGrow(priceGrow, 1);
   host.append(priceRow, priceGrow);
-  const priceUp = stepperBtn("+", () => setPrice((p) => round2(p + tick())));
+  const priceUp = faded(stepperBtn("+", () => setPrice((p) => round2(p + tick()))));
   host.append(priceRow, priceUp);
   createTrackedEffect(() => {
     host.setText(priceValue, type() === "market" ? loc("市价成交", "Market fill") : fmtPrice(price()));
@@ -219,6 +219,13 @@ export function OrderSheet(props: {
     host.setColor(submitPill, side() === "buy" ? UP : DOWN);
   });
   host.append(pageInner, submit);
+
+  // setAlpha only accepts an opacity node. The stepper itself is a pointer.
+  function faded(child: number): number {
+    const fade = host.opacity(255);
+    host.append(fade, child);
+    return fade;
+  }
 
   function stepperBtn(glyph: string, onClick: () => void): number {
     const cell = host.pointerRegion();

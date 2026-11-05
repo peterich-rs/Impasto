@@ -849,6 +849,14 @@ impl Tree {
         }
     }
 
+    /// A spring, coast, or overscroll return is still sampling.
+    ///
+    /// The session asks for another frame while this is true. Scroll coast is
+    /// not the only motion that has to keep moving on a static page.
+    pub fn motion_active(&self) -> bool {
+        !self.motions.is_empty()
+    }
+
     /// Samples every active motion at `target_ms`. Returns whether any remain.
     pub fn tick_motions(&mut self, target_ms: f64) -> bool {
         if !target_ms.is_finite() {

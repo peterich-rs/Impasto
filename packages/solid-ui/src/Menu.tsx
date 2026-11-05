@@ -2,7 +2,7 @@ import { onCleanup } from "solid-js";
 import { host, onFrame, overlayParent, removeNode, spring, type NodeHandle } from "@impasto/solid-renderer";
 import { colorBytes } from "./colors.ts";
 import { nodeId } from "./host-ext.ts";
-import { moveChildren } from "./overlay.ts";
+import { moveChildren, readFirstChild, restoreChildren } from "./overlay.ts";
 import { useTheme } from "./use-theme.ts";
 
 /**
@@ -23,9 +23,7 @@ function Floating(props: {
   let slot = 0;
 
   function closeLayer(): void {
-    if (slot !== 0 && placeholder !== 0) {
-      moveChildren(slot, placeholder);
-    }
+    restoreChildren(slot, placeholder);
     if (shell !== 0) {
       removeNode({ id: shell } as NodeHandle);
     }
@@ -72,7 +70,13 @@ function Floating(props: {
     if (shell === 0) {
       return;
     }
-    if (host.firstChild(placeholder) !== 0) {
+    const parked = readFirstChild(placeholder);
+    if (parked === null) {
+      placeholder = 0;
+      closeLayer();
+      return;
+    }
+    if (parked !== 0) {
       moveChildren(placeholder, slot);
     }
     props.place(panel);

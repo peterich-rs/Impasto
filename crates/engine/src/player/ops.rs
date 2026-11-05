@@ -131,6 +131,11 @@ impl<'a> crate::painter::Painter<'a> {
                 Command::Pop => self.pop_save(builder),
             };
             if !drawn {
+                tracing::error!(
+                    target: "impasto::render::present",
+                    command = command_label(command),
+                    "draw command failed"
+                );
                 return false;
             }
         }
@@ -242,13 +247,19 @@ impl<'a> crate::painter::Painter<'a> {
         opacity: f32,
     ) -> bool {
         let Some(picture) = tree.picture(id) else {
+            tracing::error!(
+                target: "impasto::render::present",
+                "picture missing"
+            );
             return false;
         };
         let origin = picture.origin;
         let Some(cache) = self.picture_cache else {
+            tracing::error!(target: "impasto::render::present", "picture cache missing");
             return false;
         };
         let Some(retained) = cache.get(&id) else {
+            tracing::error!(target: "impasto::render::present", "picture not retained");
             return false;
         };
         if retained.list.is_null()
@@ -256,6 +267,14 @@ impl<'a> crate::painter::Painter<'a> {
             || !origin.1.is_finite()
             || !opacity.is_finite()
         {
+            tracing::error!(
+                target: "impasto::render::present",
+                null_list = retained.list.is_null(),
+                x = origin.0,
+                y = origin.1,
+                opacity,
+                "picture not drawable"
+            );
             return false;
         }
         let list = retained.list;
@@ -785,6 +804,15 @@ impl<'a> crate::painter::Painter<'a> {
         if utf8.is_empty() {
             return false;
         }
+        // A collapsed soft-wrapped run has no line to draw. Failing the whole
+        // frame hides the page that contains it, such as a closed dialog.
+        // `!(max_width > 0)` also covers NaN, which has no line either.
+        let collapsed = max_width
+            .partial_cmp(&0.0)
+            .is_none_or(|order| order != std::cmp::Ordering::Greater);
+        if text_style.soft_wrap && collapsed {
+            return true;
+        }
         if !self.typography.stale()
             && let Some(paragraph) = self.typography.live_paint(paragraph_id)
         {
@@ -803,6 +831,14 @@ impl<'a> crate::painter::Painter<'a> {
             .typography
             .acquire_draw(utf8, font_size, max_width, color, text_style, spans)
         else {
+            let preview: String = utf8.chars().take(32).collect();
+            tracing::error!(
+                target: "impasto::render::present",
+                font_size,
+                max_width,
+                text = %preview,
+                "text shape failed"
+            );
             return false;
         };
         self.typography.store_text_probe(true, color);
@@ -812,5 +848,21 @@ impl<'a> crate::painter::Painter<'a> {
         unsafe { ffi::ImpellerDisplayListBuilderDrawParagraph(builder, paragraph, &point) };
         self.pending.push(HeldParagraph { paragraph, slot });
         true
+    }
+}
+
+fn command_label(command: &Command) -> &'static str {
+    match command {
+        Command::Fill { .. } => "fill",
+        Command::Rect { .. } => "rect",
+        Command::Text { .. } => "text",
+        Command::Image { .. } => "image",
+        Command::PushClip { .. } => "clip",
+        Command::PushOpacity { .. } => "opacity",
+        Command::PushTransform { .. } => "transform",
+        Command::PushBlur { .. } => "blur",
+        Command::PushBackdropBlur { .. } => "backdrop",
+        Command::PushBlend { .. } => "blend",
+        Command::Pop => "pop",
     }
 }

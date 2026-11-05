@@ -842,11 +842,10 @@ impl Tree {
             return;
         };
         let abs = (parent_abs.0 + x, parent_abs.1 + y);
-        let local = self.local_xy(abs);
-        self.push_layer(crate::layer::LayerKind::Offset {
-            x: local.0,
-            y: local.1,
-        });
+        // Scroll clips in scene space and only translates by the scroll offset.
+        // `local_xy` is relative to that scroll, so using it parks the row above
+        // the clip by whatever chrome sits over the list.
+        self.push_layer(crate::layer::LayerKind::Offset { x: abs.0, y: abs.1 });
         if !self.picture_fresh(id) {
             self.fill_owner(id, abs);
         } else if let Some(picture) = self.pictures.get(&id).cloned() {
@@ -876,7 +875,9 @@ impl Tree {
                 descend: true,
             },
         );
-        self.store_picture(id, commands, abs);
+        // Commands are local to the row. The Offset layer above is already the
+        // scene position, so a non-zero origin would double the gap between rows.
+        self.store_picture(id, commands, (0.0, 0.0));
     }
 
     fn store_picture(&mut self, id: NodeId, commands: Vec<Command>, origin: (f32, f32)) {
