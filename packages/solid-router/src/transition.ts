@@ -1,4 +1,4 @@
-/** Exit alpha in the stack transition is 0.6, written to core as 0–255. */
+/** Cover alpha while a new page sits on top, written to core as 0–255. */
 export const STACK_EXIT_ALPHA = Math.round(0.6 * 255);
 
 /** Page travel when layout has not measured the mover yet. */
@@ -20,6 +20,12 @@ export function stackMotion(
   const travel = Number.isFinite(distance) && distance > 0 ? distance : 100;
   if (phase === "enter") {
     return [{ prop: "translateX", from: travel, to: 0 }];
+  }
+  if (phase === "exit") {
+    return [
+      { prop: "translateX", from: 0, to: travel },
+      { prop: "opacity", from: 255, to: 0 },
+    ];
   }
   return [
     { prop: "translateX", from: 0, to: -Math.round(travel * 0.3) },
