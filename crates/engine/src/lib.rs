@@ -6,6 +6,9 @@
 )]
 
 mod script;
+// Glyph boxes for span gradients. Callers are in typography, which needs the SDK.
+// Unit tests still build this module when the SDK is absent.
+#[cfg(any(impeller, test))]
 mod span_box;
 mod status;
 

@@ -6,6 +6,9 @@
 use uicore::Shaper;
 
 mod error;
+// Run parser for `setTextRuns`. The interpreter calls it from `linked`.
+// Unit tests still build this module when quickjs-ng is absent.
+#[cfg(any(quickjs, test))]
 mod text_runs;
 
 mod abi {
