@@ -70,6 +70,8 @@ macOS 与 Android 宿主始终打开应用内 devtools。面板经 `registerTopL
 
 `Scroll` 的轴、认领、overscroll 和 fling 以 `uicore/src/tree/scroll.rs`、`uicore/src/motion.rs` 为准。缺省 `Both` + `Content`。`ScrollArea` 缺省 vertical + `Always`。`VirtualList` 固定 vertical。单轴丢掉跨轴增量。`Row` / `Column` 的 `max_size` 是父级 100%；`Scroll` 的直接子节点在滚动轴上把这道上限改回 auto。`Text`、`Image`、`Sized` 不收缩。
 
+脚本能读到的滚动数据：跟手后的 offset、`onDragBegin` / `onDragBy` / `onDragEnd`、`onScrollState` 的相位与速度、`overscroll`、`scrollOffset`、`limits`、`rect`、`flingTarget`。`stopScroll` 摘掉惯性越界弹簧，不把越界量写成 0。`animate` 的 `overscrollY` 可以把越界量收到 0。拖动锁定时摘掉该节点正在跑的越界弹簧。越界弹簧的静止位置仍是 0，结束时写成 0。负的 `overscroll.y` 是视口顶部的缝：录制用 offset 加 overscroll，内容下移后缝是透明的。`PullMode` 的 Edge / Overscroll 提交仍在 `uicore`，它不把缝停住。惯性样本夹到极限且没有父级接着滚时，剩余速度装上越界弹簧；像素对齐只改 offset。tau 仍是 500。
+
 命中从最后一个子节点往前。宽或高为 0 跳过。`Text` 和 `Image` 命中盒子就收下。容器把命中交给子节点。点必须落在每个祖先盒子内。点击和拖拽在 `Tree::pointer`：8 点以内抬起是 click，超过则锁定声明了拖动的区域，否则锁定还能滚的 `Scroll`。
 
 测试排版是 `MonoShaper`。宿主测量和绘制共用 `Engine` 的 `Typography`。
@@ -102,7 +104,7 @@ Kotlin 会话还没接上原生树。见 `docs/refactor-plan.md`。
 
 ## 控件
 
-语言包只包模板、信号和渲染回调。`Button` 是 `PointerRegion`、`Padding`、`Decorated`、`Text`。`ScrollArea` 和 `VirtualList` 的窗口、夹紧、刷新在 `uicore` 的 `ListDriver` 和 `ScrollController`。语言侧在条目变化时推 `{ key, type, sticky }`，用 `noteRow` 登记行节点。可见集变了才经 `onDriver` 交出 `Detach` / `Adopt` / `Set` / `Place`。`createSlot` 仍是语言侧的 owner。`Field` 绑定 `uicore` 的 `TextEditor`，偏移是 UTF-16，编辑按字形簇。
+语言包只包模板、信号和渲染回调。`Button` 是 `PointerRegion`、`Padding`、`Decorated`、`Text`。`ScrollArea` 和 `VirtualList` 的窗口与夹紧在 `uicore` 的 `ListDriver` 和 `ScrollController`。把下拉缝停在阈值高度、等业务结束再收回，是 `solid-ui` 的 `RefreshControl`：它读 `overscroll`，过阈值时先 `stopScroll` 再把缝 `animate` 到阈值，结束后 `animate` 到 0。指示器是滚动内容列里绝对定位的第一个孩子，`inset` 顶在内容原点之上；视口把它裁掉，负的 `overscroll` 把整段内容下移后才露出来。`VirtualList` 的 `onRefresh` 仍走 `PullMode::Edge`。语言侧在条目变化时推 `{ key, type, sticky }`，用 `noteRow` 登记行节点。可见集变了才经 `onDriver` 交出 `Detach` / `Adopt` / `Set` / `Place`。`createSlot` 仍是语言侧的 owner。`Field` 绑定 `uicore` 的 `TextEditor`，偏移是 UTF-16，编辑按字形簇。
 
 ## 应用
 

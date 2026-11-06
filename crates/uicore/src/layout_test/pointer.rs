@@ -229,6 +229,178 @@ fn passing_the_slop_over_a_scroll_locks_a_drag() -> Result<(), crate::Error> {
 }
 
 #[test]
+fn leaving_a_short_row_before_the_slop_still_scrolls() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 100.0, 80.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let scroll = tree.scroll()?;
+    let content = tree.column(0.0)?;
+    let region = tree.pointer_region()?;
+    let head = tree.sized(80.0, 12.0)?;
+    let tail = tree.sized(80.0, 400.0)?;
+    tree.add_child(region, head)?;
+    tree.add_child(content, region)?;
+    tree.add_child(content, tail)?;
+    tree.add_child(scroll, content)?;
+    tree.add_child(root, scroll)?;
+    tree.layout()?;
+
+    assert_eq!(
+        tree.pointer(timed(Phase::Down, 10.0, 6.0, 0.0)),
+        vec![Gesture::Press(region)]
+    );
+    assert_eq!(
+        tree.pointer(timed(Phase::Move, 10.0, 13.0, 8.0)),
+        vec![Gesture::Release(region)]
+    );
+    let locked = tree.pointer(timed(Phase::Move, 10.0, 20.0, 16.0));
+    assert!(
+        locked
+            .iter()
+            .any(|gesture| matches!(gesture, Gesture::DragBegin(id) if *id == scroll)),
+        "short row must not eat the scroll: {locked:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn leaving_the_list_before_the_slop_drops_the_drag() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 100.0, 80.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let scroll = tree.scroll()?;
+    let content = tree.column(0.0)?;
+    let region = tree.pointer_region()?;
+    let head = tree.sized(80.0, 12.0)?;
+    let tail = tree.sized(80.0, 400.0)?;
+    tree.add_child(region, head)?;
+    tree.add_child(content, region)?;
+    tree.add_child(content, tail)?;
+    tree.add_child(scroll, content)?;
+    tree.add_child(root, scroll)?;
+    tree.layout()?;
+
+    assert_eq!(
+        tree.pointer(timed(Phase::Down, 10.0, 6.0, 0.0)),
+        vec![Gesture::Press(region)]
+    );
+    assert_eq!(
+        tree.pointer(timed(Phase::Move, 10.0, -1.0, 8.0)),
+        vec![Gesture::Release(region)]
+    );
+    let later = tree.pointer(timed(Phase::Move, 10.0, -20.0, 24.0));
+    assert!(
+        later
+            .iter()
+            .all(|gesture| !matches!(gesture, Gesture::DragBegin(_))),
+        "left the scroller: {later:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn leaving_a_row_inside_the_list_does_not_click() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 100.0, 80.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let scroll = tree.scroll()?;
+    let content = tree.column(0.0)?;
+    let region = tree.pointer_region()?;
+    let head = tree.sized(80.0, 12.0)?;
+    let tail = tree.sized(80.0, 400.0)?;
+    tree.add_child(region, head)?;
+    tree.add_child(content, region)?;
+    tree.add_child(content, tail)?;
+    tree.add_child(scroll, content)?;
+    tree.add_child(root, scroll)?;
+    tree.layout()?;
+
+    assert_eq!(
+        tree.pointer(timed(Phase::Down, 10.0, 6.0, 0.0)),
+        vec![Gesture::Press(region)]
+    );
+    assert_eq!(
+        tree.pointer(timed(Phase::Move, 10.0, 13.0, 8.0)),
+        vec![Gesture::Release(region)]
+    );
+    let up = tree.pointer(timed(Phase::Up, 10.0, 13.0, 16.0));
+    assert!(
+        up.iter()
+            .all(|gesture| !matches!(gesture, Gesture::Click(_))),
+        "lift after leaving the row must not click: {up:?}"
+    );
+    let _ = scroll;
+    Ok(())
+}
+
+#[test]
+fn detaching_the_pressed_row_still_locks_the_scroll() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 100.0, 80.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let scroll = tree.scroll()?;
+    let content = tree.column(0.0)?;
+    let region = tree.pointer_region()?;
+    let head = tree.sized(80.0, 12.0)?;
+    let tail = tree.sized(80.0, 400.0)?;
+    tree.add_child(region, head)?;
+    tree.add_child(content, region)?;
+    tree.add_child(content, tail)?;
+    tree.add_child(scroll, content)?;
+    tree.add_child(root, scroll)?;
+    tree.layout()?;
+
+    assert_eq!(
+        tree.pointer(timed(Phase::Down, 10.0, 6.0, 0.0)),
+        vec![Gesture::Press(region)]
+    );
+    assert_eq!(
+        tree.pointer(timed(Phase::Move, 10.0, 13.0, 8.0)),
+        vec![Gesture::Release(region)]
+    );
+    let _ = tree.detach(content, region)?;
+    tree.layout()?;
+    let locked = tree.pointer(timed(Phase::Move, 10.0, 20.0, 16.0));
+    assert!(
+        locked
+            .iter()
+            .any(|gesture| matches!(gesture, Gesture::DragBegin(id) if *id == scroll)),
+        "recycled row must not eat the scroll: {locked:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_press_during_coast_locks_the_scroll() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 100.0, 80.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let scroll = tree.scroll()?;
+    let body = tree.sized(80.0, 400.0)?;
+    tree.add_child(scroll, body)?;
+    tree.add_child(root, scroll)?;
+    tree.layout()?;
+    tree.set_scroll_offset(scroll, 0.0, 40.0)?;
+    tree.arm_fling(scroll, 0.0, -1.0)?;
+    assert_eq!(tree.scroll_phase(scroll)?, crate::ScrollPhase::Coasting);
+    assert!(tree.pointer(timed(Phase::Down, 10.0, 20.0, 0.0)).is_empty());
+    let locked = tree.pointer(timed(Phase::Move, 10.0, 40.0, 16.0));
+    assert!(
+        locked
+            .iter()
+            .any(|gesture| matches!(gesture, Gesture::DragBegin(id) if *id == scroll)),
+        "coast interrupt must lock: {locked:?}"
+    );
+    assert_eq!(tree.scroll_phase(scroll)?, crate::ScrollPhase::Dragging);
+    Ok(())
+}
+
+#[test]
 fn cancel_during_a_drag_ends_with_zero_velocity() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper::default());
     tree.set_viewport(0.0, 0.0, 100.0, 40.0)?;

@@ -8,6 +8,7 @@ import {
   type NodeHandle,
 } from "@impasto/solid-renderer";
 import { Button } from "./Button.tsx";
+import { RefreshControl } from "./RefreshControl.tsx";
 import { ScrollArea, type ScrollPhysics } from "./ScrollArea.tsx";
 import {
   createScrollController,
@@ -45,6 +46,14 @@ export function VirtualList<T>(props: {
   onPin?: (key: string | null) => void;
   restoreKey?: string;
   onRefresh?: () => void;
+  refresh?: {
+    threshold?: number;
+    onRefresh: () => void | Promise<void>;
+    indicator: (state: {
+      progress: () => number;
+      busy: () => boolean;
+    }) => NodeHandle;
+  };
   controller?: ScrollController;
   physics?: ScrollPhysics;
 }): NodeHandle {
@@ -71,6 +80,8 @@ export function VirtualList<T>(props: {
   let pinNode = 0;
   let vSize = 0;
   let hSize = 0;
+  let dragBy = () => {};
+  let dragEnd = () => {};
 
   function syncNodes(): void {
     native.bind(viewport, contentId, top, bottom, rows, vThumb, hThumb, pinNode, vSize, hSize);
@@ -83,7 +94,9 @@ export function VirtualList<T>(props: {
       props.overscan ?? 4,
       (props.error ?? "").length > 0,
     );
-    if (props.onRefresh) {
+    if (props.refresh) {
+      scroll.setPull(0, props.refresh.threshold ?? 64);
+    } else if (props.onRefresh) {
       scroll.setPull(2, 64);
     }
     native.setItems(
@@ -129,7 +142,9 @@ export function VirtualList<T>(props: {
       },
     }),
   );
-  onCleanup(refreshListener(scroll, () => props.onRefresh?.()));
+  onCleanup(
+    props.refresh ? () => {} : refreshListener(scroll, () => props.onRefresh?.()),
+  );
   onCleanup(() => {
     const key = props.restoreKey;
     if (key) {
@@ -184,6 +199,8 @@ export function VirtualList<T>(props: {
             initialOffset={initial}
             controller={scroll}
             physics={props.physics}
+            onDragBy={() => dragBy()}
+            onDragEnd={() => dragEnd()}
             viewportRef={(id) => {
               viewport = id;
               syncNodes();
@@ -193,6 +210,22 @@ export function VirtualList<T>(props: {
               syncNodes();
             }}
           >
+            {props.refresh ? (
+              <RefreshControl
+                controller={scroll}
+                threshold={props.refresh.threshold}
+                onRefresh={() => props.refresh?.onRefresh()}
+                gesture={(handlers) => {
+                  dragBy = handlers.onDragBy;
+                  dragEnd = handlers.onDragEnd;
+                }}
+              >
+                {(state) =>
+                  props.refresh?.indicator(state) ??
+                  ((<sized w={0} h={0} />) as unknown as NodeHandle)
+                }
+              </RefreshControl>
+            ) : null}
             <sized
               w={1}
               h={0}

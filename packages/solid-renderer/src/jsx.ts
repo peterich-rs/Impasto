@@ -58,7 +58,7 @@ type PaddingEdges = { edges?: number; top?: number; right?: number; bottom?: num
 declare module "solid-js" {
   namespace JSX {
     interface IntrinsicElements {
-      column: Children & Grow & Flex & Box & { gap?: number };
+      column: Children & Grow & Flex & Box & { gap?: number; w?: AxisSize; h?: AxisSize };
       row: Children & Grow & Flex & Box & { gap?: number; w?: AxisSize; h?: AxisSize };
       stack: Children & Grow & Box & Fill;
       align: Children & Grow & Box & Fill & { align?: "start" | "center" | "end" };
@@ -66,7 +66,7 @@ declare module "solid-js" {
       padding: Children & Grow & Fill & Box & PaddingEdges;
       pointer: Children & Click & Focusable & Grow & Hover & Secondary & Zoom & GestureOpts & Drag & Box & Fill;
       sized: { w?: AxisSize; h?: AxisSize } & Place;
-      clip: Children & Grow & Box & { radius?: number };
+      clip: Children & Grow & Box & { radius?: number; w?: AxisSize; h?: AxisSize };
       opacity: Children & Grow & Fill & { alpha?: number };
       scroll: Children &
         Drag &

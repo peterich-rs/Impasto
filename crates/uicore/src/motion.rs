@@ -13,7 +13,7 @@ pub trait Simulation {
     fn terminal(&self) -> f32;
 }
 
-/// Exponential decay. `tau_ms` is the time constant. Scroll uses 180.
+/// Exponential decay. `tau_ms` is the time constant. Scroll uses 500.
 #[derive(Clone, Copy, Debug)]
 pub struct Friction {
     pub x0: f32,

@@ -113,6 +113,12 @@ pub struct ListDriver {
     signaled: Chrome,
     force: bool,
     placed: bool,
+    /// Consecutive ticks that corrected a measured row. Reset when a tick does not.
+    measure_burst: u32,
+    /// Leading rows whose laid-out height is still zero.
+    zero_rows: u32,
+    /// The blank-top warning is edge-triggered.
+    gap_open: bool,
 }
 
 impl ListDriver {
@@ -140,6 +146,9 @@ impl ListDriver {
             signaled: Chrome::default(),
             force: true,
             placed: false,
+            measure_burst: 0,
+            zero_rows: 0,
+            gap_open: false,
         }
     }
 
@@ -250,10 +259,37 @@ impl ListDriver {
         if must_place {
             self.place(tree, placed, fling_y, refresh_width);
         } else {
+            let delta = offset_y - self.previous_offset;
             self.previous_offset = offset_y;
             self.write_chrome(tree, placed, false);
+            if view.h > 0.0 && delta.abs() > view.h * 0.5 {
+                tracing::info!(
+                    target: "impasto::list",
+                    offset = offset_y,
+                    delta,
+                    start = self.range.start,
+                    end = self.range.end,
+                    top = self.range.top,
+                    "list hold"
+                );
+            }
         }
+        self.note_gap(offset_y, view.h);
         let ops = self.take_ops();
+        if !ops.is_empty() {
+            let (detach, adopt, set, order) = count_ops(&ops);
+            tracing::info!(
+                target: "impasto::list",
+                start = self.range.start,
+                end = self.range.end,
+                detach,
+                adopt,
+                set,
+                order,
+                mounted = self.mounted.len(),
+                "list ops"
+            );
+        }
         let end = self.maybe_end(self.range.end);
         let chrome = self.changed_chrome();
         let pending = !self.blocked
@@ -302,6 +338,9 @@ impl ListDriver {
     fn measure(&mut self, tree: &Tree) -> bool {
         let mut pending = false;
         let mut changed = false;
+        let mut changed_rows = 0u32;
+        let mut shift = 0.0f32;
+        let mut zeros = 0u32;
         let keys: Vec<String> = self.mounted.keys().cloned().collect();
         let mut dead = Vec::new();
         for key in keys {
@@ -314,6 +353,7 @@ impl ListDriver {
             };
             if box_rect.h == 0.0 {
                 pending = true;
+                zeros += 1;
                 continue;
             }
             let index = self
@@ -326,16 +366,40 @@ impl ListDriver {
             }
             let prev = self.prefix.height_at(index);
             self.cache.insert(key, box_rect.h);
-            if (box_rect.h - prev).abs() > HEIGHT_EPS && index < self.prefix.len() {
+            let delta = (box_rect.h - prev).abs();
+            if delta > HEIGHT_EPS && index < self.prefix.len() {
                 self.prefix.add(index, box_rect.h - prev);
                 changed = true;
+                changed_rows += 1;
+                shift += delta;
             }
         }
         for key in dead {
             self.mounted.remove(&key);
         }
+        if zeros != self.zero_rows {
+            tracing::warn!(
+                target: "impasto::list",
+                rows = zeros,
+                mounted = self.mounted.len(),
+                "list zero-height rows"
+            );
+            self.zero_rows = zeros;
+        }
         if changed {
             self.force = true;
+            self.measure_burst = self.measure_burst.saturating_add(1);
+            if self.measure_burst == 1 || self.measure_burst.is_multiple_of(10) {
+                tracing::info!(
+                    target: "impasto::list",
+                    rows = changed_rows,
+                    shift,
+                    burst = self.measure_burst,
+                    "list measure"
+                );
+            }
+        } else {
+            self.measure_burst = 0;
         }
         pending
     }
@@ -366,8 +430,60 @@ impl ListDriver {
             (None, _) => lead,
         };
         let next = window_range_for_offset(&self.prefix, offset_y, view_h, self.overscan, far);
+        let previous = self.range;
         self.range = stabilize_window(&self.prefix, self.range, next, self.overscan);
+        let top_changed = (self.range.top - previous.top).abs() > HEIGHT_EPS
+            || (self.range.bottom - previous.bottom).abs() > HEIGHT_EPS;
+        if self.range.start != previous.start || self.range.end != previous.end || top_changed {
+            tracing::info!(
+                target: "impasto::list",
+                offset = offset_y,
+                view = view_h,
+                start = self.range.start,
+                end = self.range.end,
+                next_start = next.start,
+                next_end = next.end,
+                top = self.range.top,
+                bottom = self.range.bottom,
+                items = self.items.len(),
+                mounted = self.mounted.len(),
+                prefix = self.prefix.total(),
+                lead = far.unwrap_or(-1.0),
+                delta,
+                "list window"
+            );
+        }
         self.write_chrome(tree, view, refresh_width);
+    }
+
+    /// Viewport starts in the top spacer, or the leading rows were collapsed out of the window.
+    fn note_gap(&mut self, offset_y: f32, view_h: f32) {
+        let collapsed = self.range.start > 0
+            && offset_y <= 1.0
+            && self.prefix.item_start(self.range.start) <= offset_y + 1.0;
+        let blank = self.range.start > 0 && offset_y + 1.0 < self.range.top;
+        let gap = collapsed || blank;
+        if gap && !self.gap_open {
+            let head = self.range.start.min(self.prefix.len()).min(4);
+            let heights = (0..head)
+                .map(|index| format!("{:.1}", self.prefix.height_at(index)))
+                .collect::<Vec<_>>()
+                .join(",");
+            tracing::warn!(
+                target: "impasto::list",
+                offset = offset_y,
+                view = view_h,
+                start = self.range.start,
+                end = self.range.end,
+                top = self.range.top,
+                prefix = self.prefix.total(),
+                heights = heights.as_str(),
+                collapsed,
+                blank,
+                "list top gap"
+            );
+        }
+        self.gap_open = gap;
     }
 
     fn write_chrome(&mut self, tree: &mut Tree, view: PlacedViewport, refresh_width: bool) {
@@ -542,4 +658,20 @@ impl ListDriver {
             None
         }
     }
+}
+
+fn count_ops(ops: &[ListOp]) -> (usize, usize, usize, usize) {
+    let mut detach = 0;
+    let mut adopt = 0;
+    let mut set = 0;
+    let mut order = 0;
+    for op in ops {
+        match op {
+            ListOp::Detach { .. } => detach += 1,
+            ListOp::Adopt { .. } => adopt += 1,
+            ListOp::Set { .. } => set += 1,
+            ListOp::Place { .. } => order += 1,
+        }
+    }
+    (detach, adopt, set, order)
 }
