@@ -22,25 +22,27 @@ pub(super) unsafe extern "C" fn caret_at(
     out_w: *mut f32,
     out_h: *mut f32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    match inner
-        .tree
-        .borrow_mut()
-        .caret_at(NodeId::from_raw(node), x, y)
-    {
-        Ok(caret) => {
-            // SAFETY: the pointers are local out-params from `js_caret_at`.
-            unsafe {
-                *unit = caret.unit;
-                *out_x = caret.x;
-                *out_y = caret.y;
-                *out_w = caret.w;
-                *out_h = caret.h;
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        match inner
+            .tree
+            .borrow_mut()
+            .caret_at(NodeId::from_raw(node), x, y)
+        {
+            Ok(caret) => {
+                // SAFETY: the pointers are local out-params from `js_caret_at`.
+                unsafe {
+                    *unit = caret.unit;
+                    *out_x = caret.x;
+                    *out_y = caret.y;
+                    *out_w = caret.w;
+                    *out_h = caret.h;
+                }
+                0
             }
-            0
+            Err(_) => -1,
         }
-        Err(_) => -1,
-    }
+    })
 }
 
 pub(super) unsafe extern "C" fn word_range(
@@ -50,61 +52,69 @@ pub(super) unsafe extern "C" fn word_range(
     start: *mut u32,
     end: *mut u32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    match inner
-        .tree
-        .borrow_mut()
-        .word_range(NodeId::from_raw(node), unit)
-    {
-        Ok((word_start, word_end)) => {
-            unsafe {
-                *start = word_start;
-                *end = word_end;
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        match inner
+            .tree
+            .borrow_mut()
+            .word_range(NodeId::from_raw(node), unit)
+        {
+            Ok((word_start, word_end)) => {
+                unsafe {
+                    *start = word_start;
+                    *end = word_end;
+                }
+                0
             }
-            0
+            Err(_) => -1,
         }
-        Err(_) => -1,
-    }
+    })
 }
 
 pub(super) unsafe extern "C" fn focus_step(session: *mut c_void, direction: i32) -> i32 {
-    let inner = unsafe { inner(session) };
-    let direction = match direction {
-        0 => FocusDirection::Next,
-        1 => FocusDirection::Previous,
-        2 => FocusDirection::Left,
-        3 => FocusDirection::Right,
-        4 => FocusDirection::Up,
-        5 => FocusDirection::Down,
-        _ => return -1,
-    };
-    let gestures = inner.tree.borrow_mut().focus_step(direction);
-    if dispatch_gestures(inner, gestures).is_err() {
-        return -1;
-    }
-    0
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let direction = match direction {
+            0 => FocusDirection::Next,
+            1 => FocusDirection::Previous,
+            2 => FocusDirection::Left,
+            3 => FocusDirection::Right,
+            4 => FocusDirection::Up,
+            5 => FocusDirection::Down,
+            _ => return -1,
+        };
+        let gestures = inner.tree.borrow_mut().focus_step(direction);
+        if dispatch_gestures(inner, gestures).is_err() {
+            return -1;
+        }
+        0
+    })
 }
 
 pub(super) unsafe extern "C" fn push_focus_scope(session: *mut c_void, node: u64) -> i32 {
-    let inner = unsafe { inner(session) };
-    let gestures = match inner
-        .tree
-        .borrow_mut()
-        .push_focus_scope(NodeId::from_raw(node))
-    {
-        Ok(gestures) => gestures,
-        Err(_) => return -1,
-    };
-    if dispatch_gestures(inner, gestures).is_err() {
-        return -1;
-    }
-    0
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let gestures = match inner
+            .tree
+            .borrow_mut()
+            .push_focus_scope(NodeId::from_raw(node))
+        {
+            Ok(gestures) => gestures,
+            Err(_) => return -1,
+        };
+        if dispatch_gestures(inner, gestures).is_err() {
+            return -1;
+        }
+        0
+    })
 }
 
 pub(super) unsafe extern "C" fn pop_focus_scope(session: *mut c_void) -> i32 {
-    let inner = unsafe { inner(session) };
-    inner.tree.borrow_mut().pop_focus_scope();
-    0
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        inner.tree.borrow_mut().pop_focus_scope();
+        0
+    })
 }
 
 pub(super) unsafe extern "C" fn pointer_position(
@@ -112,44 +122,52 @@ pub(super) unsafe extern "C" fn pointer_position(
     x: *mut f32,
     y: *mut f32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let (px, py) = inner.tree.borrow().pointer_position();
-    unsafe {
-        *x = px;
-        *y = py;
-    }
-    0
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let (px, py) = inner.tree.borrow().pointer_position();
+        unsafe {
+            *x = px;
+            *y = py;
+        }
+        0
+    })
 }
 
 pub(super) unsafe extern "C" fn focus_node(session: *mut c_void, node: u64) -> i32 {
-    let inner = unsafe { inner(session) };
-    let gestures = match inner.tree.borrow_mut().focus(NodeId::from_raw(node)) {
-        Ok(gestures) => gestures,
-        Err(_) => return -1,
-    };
-    if dispatch_gestures(inner, gestures).is_err() {
-        return -1;
-    }
-    0
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let gestures = match inner.tree.borrow_mut().focus(NodeId::from_raw(node)) {
+            Ok(gestures) => gestures,
+            Err(_) => return -1,
+        };
+        if dispatch_gestures(inner, gestures).is_err() {
+            return -1;
+        }
+        0
+    })
 }
 
 pub(super) unsafe extern "C" fn focused_id(session: *mut c_void) -> u64 {
-    let inner = unsafe { inner(session) };
-    inner
-        .tree
-        .borrow()
-        .focused()
-        .map(NodeId::to_raw)
-        .unwrap_or(0)
+    super::qjs_entry!(0, {
+        let inner = unsafe { inner(session) };
+        inner
+            .tree
+            .borrow()
+            .focused()
+            .map(NodeId::to_raw)
+            .unwrap_or(0)
+    })
 }
 
 pub(super) unsafe extern "C" fn is_focusable(session: *mut c_void, node: u64) -> i32 {
-    let inner = unsafe { inner(session) };
-    match inner.tree.borrow().is_focusable(NodeId::from_raw(node)) {
-        Ok(true) => 1,
-        Ok(false) => 0,
-        Err(_) => -1,
-    }
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        match inner.tree.borrow().is_focusable(NodeId::from_raw(node)) {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(_) => -1,
+        }
+    })
 }
 
 pub(super) unsafe extern "C" fn register_font(
@@ -159,28 +177,30 @@ pub(super) unsafe extern "C" fn register_font(
     bytes: *const u8,
     byte_len: usize,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let Some(family) = (unsafe { utf8_of(utf8, len) }) else {
-        return -1;
-    };
-    if byte_len > 0 && bytes.is_null() {
-        return -1;
-    }
-    let data = if byte_len == 0 {
-        Vec::new()
-    } else {
-        // SAFETY: `bytes` points at `byte_len` initialized octets for this call.
-        unsafe { std::slice::from_raw_parts(bytes, byte_len) }.to_vec()
-    };
-    if inner
-        .fonts
-        .borrow_mut()
-        .enqueue(family.to_owned(), data)
-        .is_err()
-    {
-        return -1;
-    }
-    0
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let Some(family) = (unsafe { utf8_of(utf8, len) }) else {
+            return -1;
+        };
+        if byte_len > 0 && bytes.is_null() {
+            return -1;
+        }
+        let data = if byte_len == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: `bytes` points at `byte_len` initialized octets for this call.
+            unsafe { std::slice::from_raw_parts(bytes, byte_len) }.to_vec()
+        };
+        if inner
+            .fonts
+            .borrow_mut()
+            .enqueue(family.to_owned(), data)
+            .is_err()
+        {
+            return -1;
+        }
+        0
+    })
 }
 
 pub(super) unsafe extern "C" fn reload(
@@ -188,15 +208,17 @@ pub(super) unsafe extern "C" fn reload(
     utf8: *const c_char,
     len: usize,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let Some(source) = (unsafe { utf8_of(utf8, len) }) else {
-        return -1;
-    };
-    if source.is_empty() {
-        return -1;
-    }
-    inner.reloads.borrow_mut().push(source.to_owned());
-    0
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let Some(source) = (unsafe { utf8_of(utf8, len) }) else {
+            return -1;
+        };
+        if source.is_empty() {
+            return -1;
+        }
+        inner.reloads.borrow_mut().push(source.to_owned());
+        0
+    })
 }
 
 pub(super) unsafe extern "C" fn layer_stats(
@@ -205,17 +227,19 @@ pub(super) unsafe extern "C" fn layer_stats(
     layers: *mut u32,
     pictures: *mut u32,
 ) -> i32 {
-    if epoch.is_null() || layers.is_null() || pictures.is_null() {
-        return -1;
-    }
-    let inner = unsafe { inner(session) };
-    let (epoch_value, layer_count, picture_count) = inner.tree.borrow().layer_tree_stats();
-    unsafe {
-        *epoch = epoch_value;
-        *layers = u32::try_from(layer_count).unwrap_or(u32::MAX);
-        *pictures = u32::try_from(picture_count).unwrap_or(u32::MAX);
-    }
-    0
+    super::qjs_entry!(-1, {
+        if epoch.is_null() || layers.is_null() || pictures.is_null() {
+            return -1;
+        }
+        let inner = unsafe { inner(session) };
+        let (epoch_value, layer_count, picture_count) = inner.tree.borrow().layer_tree_stats();
+        unsafe {
+            *epoch = epoch_value;
+            *layers = u32::try_from(layer_count).unwrap_or(u32::MAX);
+            *pictures = u32::try_from(picture_count).unwrap_or(u32::MAX);
+        }
+        0
+    })
 }
 
 pub(super) unsafe extern "C" fn scroll_into_view(
@@ -223,20 +247,22 @@ pub(super) unsafe extern "C" fn scroll_into_view(
     node: u64,
     edge: i32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let edge = match edge {
-        1 => uicore::ScrollEdge::End,
-        2 => uicore::ScrollEdge::Nearest,
-        _ => uicore::ScrollEdge::Start,
-    };
-    match inner
-        .tree
-        .borrow_mut()
-        .scroll_into_view(NodeId::from_raw(node), edge)
-    {
-        Ok(_) => 0,
-        Err(_) => -1,
-    }
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let edge = match edge {
+            1 => uicore::ScrollEdge::End,
+            2 => uicore::ScrollEdge::Nearest,
+            _ => uicore::ScrollEdge::Start,
+        };
+        match inner
+            .tree
+            .borrow_mut()
+            .scroll_into_view(NodeId::from_raw(node), edge)
+        {
+            Ok(_) => 0,
+            Err(_) => -1,
+        }
+    })
 }
 
 pub(super) unsafe extern "C" fn animate(
@@ -249,31 +275,33 @@ pub(super) unsafe extern "C" fn animate(
     stiffness: f64,
     damping: f64,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let Some(name) = (unsafe { utf8_of(prop, prop_len) }) else {
-        return -1;
-    };
-    let Some(prop) = anim_prop(name) else {
-        return -1;
-    };
-    if ![from, to, stiffness, damping]
-        .into_iter()
-        .all(f64::is_finite)
-    {
-        return -1;
-    }
-    inner.tree.borrow_mut().animate(
-        NodeId::from_raw(node),
-        prop,
-        Box::new(uicore::Spring {
-            x0: from as f32,
-            v0: 0.0,
-            target: to as f32,
-            stiffness: stiffness as f32,
-            damping: damping as f32,
-        }),
-    );
-    0
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let Some(name) = (unsafe { utf8_of(prop, prop_len) }) else {
+            return -1;
+        };
+        let Some(prop) = anim_prop(name) else {
+            return -1;
+        };
+        if ![from, to, stiffness, damping]
+            .into_iter()
+            .all(f64::is_finite)
+        {
+            return -1;
+        }
+        inner.tree.borrow_mut().animate(
+            NodeId::from_raw(node),
+            prop,
+            Box::new(uicore::Spring {
+                x0: from as f32,
+                v0: 0.0,
+                target: to as f32,
+                stiffness: stiffness as f32,
+                damping: damping as f32,
+            }),
+        );
+        0
+    })
 }
 
 pub(super) fn anim_prop(name: &str) -> Option<uicore::AnimProp> {
@@ -297,20 +325,22 @@ pub(super) unsafe extern "C" fn fling_target(
     out_x: *mut f32,
     out_y: *mut f32,
 ) -> i32 {
-    if out_x.is_null() || out_y.is_null() {
-        return -1;
-    }
-    let inner = unsafe { inner(session) };
-    match inner.tree.borrow().fling_target(NodeId::from_raw(node)) {
-        Some((x, y)) => {
-            unsafe {
-                *out_x = x;
-                *out_y = y;
-            }
-            0
+    super::qjs_entry!(-1, {
+        if out_x.is_null() || out_y.is_null() {
+            return -1;
         }
-        None => 1,
-    }
+        let inner = unsafe { inner(session) };
+        match inner.tree.borrow().fling_target(NodeId::from_raw(node)) {
+            Some((x, y)) => {
+                unsafe {
+                    *out_x = x;
+                    *out_y = y;
+                }
+                0
+            }
+            None => 1,
+        }
+    })
 }
 
 pub(super) unsafe extern "C" fn set_recognizers(
@@ -321,27 +351,29 @@ pub(super) unsafe extern "C" fn set_recognizers(
     drag: i32,
     double_tap_ms: f64,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let drag = match drag {
-        0 => Some(uicore::DragAxis::Free),
-        1 => Some(uicore::DragAxis::Horizontal),
-        2 => Some(uicore::DragAxis::Vertical),
-        _ => None,
-    };
-    let double_tap = (double_tap_ms.is_finite() && double_tap_ms > 0.0).then(|| {
-        let mut config = uicore::DoubleTapConfig::default();
-        config.window_ms = double_tap_ms;
-        config
-    });
-    status(inner.tree.borrow_mut().set_recognizers(
-        NodeId::from_raw(node),
-        uicore::RecognizerSet {
-            tap: tap != 0,
-            long_press: long_press != 0,
-            drag,
-            double_tap,
-        },
-    ))
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let drag = match drag {
+            0 => Some(uicore::DragAxis::Free),
+            1 => Some(uicore::DragAxis::Horizontal),
+            2 => Some(uicore::DragAxis::Vertical),
+            _ => None,
+        };
+        let double_tap = (double_tap_ms.is_finite() && double_tap_ms > 0.0).then(|| {
+            let mut config = uicore::DoubleTapConfig::default();
+            config.window_ms = double_tap_ms;
+            config
+        });
+        status(inner.tree.borrow_mut().set_recognizers(
+            NodeId::from_raw(node),
+            uicore::RecognizerSet {
+                tap: tap != 0,
+                long_press: long_press != 0,
+                drag,
+                double_tap,
+            },
+        ))
+    })
 }
 
 const FONT_LIMIT: usize = 8;
@@ -418,51 +450,57 @@ pub(super) unsafe extern "C" fn measure_panel(
     out_w: *mut f32,
     out_h: *mut f32,
 ) -> i32 {
-    if out_w.is_null() || out_h.is_null() {
-        return -1;
-    }
-    let space = match mode {
-        0 => uicore::SubtreeSpace::MaxContent,
-        1 => uicore::SubtreeSpace::CappedMax(width),
-        2 => uicore::SubtreeSpace::Definite {
-            width,
-            height: (height.is_finite()).then_some(height),
-        },
-        _ => return -1,
-    };
-    let inner = unsafe { inner(session) };
-    // `set_panel` is a separate call so a caller can reuse a declared panel.
-    match inner
-        .tree
-        .borrow_mut()
-        .measure_panel(NodeId::from_raw(node), space)
-    {
-        Ok((w, h)) => {
-            unsafe {
-                *out_w = w;
-                *out_h = h;
-            }
-            0
+    super::qjs_entry!(-1, {
+        if out_w.is_null() || out_h.is_null() {
+            return -1;
         }
-        Err(_) => -1,
-    }
+        let space = match mode {
+            0 => uicore::SubtreeSpace::MaxContent,
+            1 => uicore::SubtreeSpace::CappedMax(width),
+            2 => uicore::SubtreeSpace::Definite {
+                width,
+                height: (height.is_finite()).then_some(height),
+            },
+            _ => return -1,
+        };
+        let inner = unsafe { inner(session) };
+        // `set_panel` is a separate call so a caller can reuse a declared panel.
+        match inner
+            .tree
+            .borrow_mut()
+            .measure_panel(NodeId::from_raw(node), space)
+        {
+            Ok((w, h)) => {
+                unsafe {
+                    *out_w = w;
+                    *out_h = h;
+                }
+                0
+            }
+            Err(_) => -1,
+        }
+    })
 }
 
 pub(super) unsafe extern "C" fn blur_node(session: *mut c_void) -> i32 {
-    let inner = unsafe { inner(session) };
-    let gestures = inner.tree.borrow_mut().blur();
-    if dispatch_gestures(inner, gestures).is_err() {
-        return -1;
-    }
-    0
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let gestures = inner.tree.borrow_mut().blur();
+        if dispatch_gestures(inner, gestures).is_err() {
+            return -1;
+        }
+        0
+    })
 }
 
 pub(super) unsafe extern "C" fn set_ime_enabled(session: *mut c_void, enabled: i32) -> i32 {
-    let inner = unsafe { inner(session) };
-    let mut ime = inner.ime.borrow_mut();
-    ime.shown = enabled != 0;
-    ime.dirty = true;
-    0
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let mut ime = inner.ime.borrow_mut();
+        ime.shown = enabled != 0;
+        ime.dirty = true;
+        0
+    })
 }
 
 pub(super) unsafe extern "C" fn set_ime_text(
@@ -470,14 +508,16 @@ pub(super) unsafe extern "C" fn set_ime_text(
     utf8: *const c_char,
     len: usize,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let Some(text) = (unsafe { utf8_of(utf8, len) }) else {
-        return -1;
-    };
-    let mut ime = inner.ime.borrow_mut();
-    ime.state = session::ImeState::at_end(text);
-    ime.dirty = true;
-    0
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let Some(text) = (unsafe { utf8_of(utf8, len) }) else {
+            return -1;
+        };
+        let mut ime = inner.ime.borrow_mut();
+        ime.state = session::ImeState::at_end(text);
+        ime.dirty = true;
+        0
+    })
 }
 
 pub(super) unsafe extern "C" fn set_ime_state(
@@ -494,48 +534,50 @@ pub(super) unsafe extern "C" fn set_ime_state(
     w: f32,
     h: f32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let mut ime = inner.ime.borrow_mut();
-    if shown == 0 {
-        ime.shown = false;
-        ime.dirty = true;
-        return 0;
-    }
-    let Some(text) = (unsafe { utf8_of(utf8, len) }) else {
-        return -1;
-    };
-    let text_len = session::utf16_len(text);
-    let (sel_start, sel_end) = if sel_start <= sel_end {
-        (sel_start, sel_end)
-    } else {
-        (sel_end, sel_start)
-    };
-    if sel_end > text_len {
-        return -1;
-    }
-    let action = ime.state.action;
-    let keyboard = ime.state.keyboard;
-    let composing = if comp_start < 0 {
-        None
-    } else {
-        let start = comp_start as u32;
-        let end = comp_end as u32;
-        if start > end || end > text_len {
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let mut ime = inner.ime.borrow_mut();
+        if shown == 0 {
+            ime.shown = false;
+            ime.dirty = true;
+            return 0;
+        }
+        let Some(text) = (unsafe { utf8_of(utf8, len) }) else {
+            return -1;
+        };
+        let text_len = session::utf16_len(text);
+        let (sel_start, sel_end) = if sel_start <= sel_end {
+            (sel_start, sel_end)
+        } else {
+            (sel_end, sel_start)
+        };
+        if sel_end > text_len {
             return -1;
         }
-        Some(start..end)
-    };
-    ime.shown = true;
-    ime.dirty = true;
-    ime.state = session::ImeState {
-        text: text.to_owned(),
-        selection: sel_start..sel_end,
-        composing,
-        caret: Rect { x, y, w, h },
-        action,
-        keyboard,
-    };
-    0
+        let action = ime.state.action;
+        let keyboard = ime.state.keyboard;
+        let composing = if comp_start < 0 {
+            None
+        } else {
+            let start = comp_start as u32;
+            let end = comp_end as u32;
+            if start > end || end > text_len {
+                return -1;
+            }
+            Some(start..end)
+        };
+        ime.shown = true;
+        ime.dirty = true;
+        ime.state = session::ImeState {
+            text: text.to_owned(),
+            selection: sel_start..sel_end,
+            composing,
+            caret: Rect { x, y, w, h },
+            action,
+            keyboard,
+        };
+        0
+    })
 }
 
 pub(super) fn tri_state(value: i32) -> Option<bool> {
@@ -566,34 +608,36 @@ pub(super) unsafe extern "C" fn set_semantics(
     order: i32,
     live: i32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let label = unsafe { utf8_of(label, label_len) }.map(str::to_owned);
-    let value = unsafe { utf8_of(value, value_len) }.map(str::to_owned);
-    let description = unsafe { utf8_of(description, description_len) }.map(str::to_owned);
-    let hint = uicore::SemanticsHint {
-        role: role_of(role),
-        label: label.filter(|text| !text.is_empty()),
-        value: value.filter(|text| !text.is_empty()),
-        checked: tri_state(checked),
-        selection: (sel_start >= 0 && sel_end >= sel_start)
-            .then_some((sel_start as u32, sel_end as u32)),
-        disabled: tri_state(disabled),
-        editable: tri_state(editable),
-        read_only: tri_state(read_only),
-        description: description.filter(|text| !text.is_empty()),
-        order: (order_set != 0).then_some(order),
-        live: match live {
-            0 => Some(uicore::LiveRegion::Off),
-            1 => Some(uicore::LiveRegion::Polite),
-            2 => Some(uicore::LiveRegion::Assertive),
-            _ => None,
-        },
-    };
-    let result = inner
-        .tree
-        .borrow_mut()
-        .set_semantics(NodeId::from_raw(node), hint);
-    if result.is_err() { -1 } else { 0 }
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let label = unsafe { utf8_of(label, label_len) }.map(str::to_owned);
+        let value = unsafe { utf8_of(value, value_len) }.map(str::to_owned);
+        let description = unsafe { utf8_of(description, description_len) }.map(str::to_owned);
+        let hint = uicore::SemanticsHint {
+            role: role_of(role),
+            label: label.filter(|text| !text.is_empty()),
+            value: value.filter(|text| !text.is_empty()),
+            checked: tri_state(checked),
+            selection: (sel_start >= 0 && sel_end >= sel_start)
+                .then_some((sel_start as u32, sel_end as u32)),
+            disabled: tri_state(disabled),
+            editable: tri_state(editable),
+            read_only: tri_state(read_only),
+            description: description.filter(|text| !text.is_empty()),
+            order: (order_set != 0).then_some(order),
+            live: match live {
+                0 => Some(uicore::LiveRegion::Off),
+                1 => Some(uicore::LiveRegion::Polite),
+                2 => Some(uicore::LiveRegion::Assertive),
+                _ => None,
+            },
+        };
+        let result = inner
+            .tree
+            .borrow_mut()
+            .set_semantics(NodeId::from_raw(node), hint);
+        if result.is_err() { -1 } else { 0 }
+    })
 }
 
 pub(super) fn role_of(role: i32) -> Option<uicore::SemanticsRole> {
@@ -611,13 +655,17 @@ pub(super) fn role_of(role: i32) -> Option<uicore::SemanticsRole> {
 }
 
 pub(super) unsafe extern "C" fn text_scale(session: *mut c_void) -> f64 {
-    let inner = unsafe { inner(session) };
-    f64::from(inner.text_scale.get())
+    super::qjs_entry!(0.0, {
+        let inner = unsafe { inner(session) };
+        f64::from(inner.text_scale.get())
+    })
 }
 
 pub(super) unsafe extern "C" fn reduce_motion(session: *mut c_void) -> i32 {
-    let inner = unsafe { inner(session) };
-    i32::from(inner.reduce_motion.get())
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        i32::from(inner.reduce_motion.get())
+    })
 }
 
 pub(super) unsafe extern "C" fn measure_text(
@@ -630,26 +678,29 @@ pub(super) unsafe extern "C" fn measure_text(
     out_w: *mut f32,
     out_h: *mut f32,
 ) -> i32 {
-    if out_w.is_null() || out_h.is_null() {
-        return -1;
-    }
-    let inner = unsafe { inner(session) };
-    let (Some(utf8), Some(color)) = (unsafe { utf8_of(utf8, len) }, unsafe { rgba(color) }) else {
-        return -1;
-    };
-    let size = inner.tree.borrow_mut().measure_text(
-        utf8,
-        font_size,
-        max_width,
-        color,
-        &protocol::TextStyle::default(),
-    );
-    // SAFETY: the caller passes writable floats that live for this call.
-    unsafe {
-        *out_w = size.width;
-        *out_h = size.height;
-    }
-    0
+    super::qjs_entry!(-1, {
+        if out_w.is_null() || out_h.is_null() {
+            return -1;
+        }
+        let inner = unsafe { inner(session) };
+        let (Some(utf8), Some(color)) = (unsafe { utf8_of(utf8, len) }, unsafe { rgba(color) })
+        else {
+            return -1;
+        };
+        let size = inner.tree.borrow_mut().measure_text(
+            utf8,
+            font_size,
+            max_width,
+            color,
+            &protocol::TextStyle::default(),
+        );
+        // SAFETY: the caller passes writable floats that live for this call.
+        unsafe {
+            *out_w = size.width;
+            *out_h = size.height;
+        }
+        0
+    })
 }
 
 pub(super) fn self_paused(inner: &Inner) -> bool {
@@ -700,9 +751,11 @@ fn take_external_handle(inner: &Inner, bytes: &[u8]) -> Option<(u64, Vec<u8>)> {
 /// `fns.release_bytes`: QuickJS freed the view; drop the slab entry, which is
 /// the last owner of that heap buffer.
 pub(super) unsafe extern "C" fn release_bytes_cb(session: *mut c_void, handle: u64) {
-    let inner = unsafe { inner(session) };
-    let mut slab = inner.out_bytes.borrow_mut();
-    drop(slab.1.remove(&handle));
+    super::qjs_entry!((), {
+        let inner = unsafe { inner(session) };
+        let mut slab = inner.out_bytes.borrow_mut();
+        drop(slab.1.remove(&handle));
+    })
 }
 
 pub(super) fn emit_value(inner: &Inner, value: &PluginValue) {
@@ -917,21 +970,23 @@ pub(super) unsafe extern "C" fn http_call(
     body: *const u8,
     body_len: usize,
 ) -> i32 {
-    unsafe {
-        http_call_impl(
-            session,
-            token,
-            method,
-            method_len,
-            url,
-            url_len,
-            headers,
-            headers_len,
-            body,
-            body_len,
-            false,
-        )
-    }
+    super::qjs_entry!(-1, {
+        unsafe {
+            http_call_impl(
+                session,
+                token,
+                method,
+                method_len,
+                url,
+                url_len,
+                headers,
+                headers_len,
+                body,
+                body_len,
+                false,
+            )
+        }
+    })
 }
 
 pub(super) unsafe extern "C" fn http_stream_call(
@@ -946,21 +1001,23 @@ pub(super) unsafe extern "C" fn http_stream_call(
     body: *const u8,
     body_len: usize,
 ) -> i32 {
-    unsafe {
-        http_call_impl(
-            session,
-            token,
-            method,
-            method_len,
-            url,
-            url_len,
-            headers,
-            headers_len,
-            body,
-            body_len,
-            true,
-        )
-    }
+    super::qjs_entry!(-1, {
+        unsafe {
+            http_call_impl(
+                session,
+                token,
+                method,
+                method_len,
+                url,
+                url_len,
+                headers,
+                headers_len,
+                body,
+                body_len,
+                true,
+            )
+        }
+    })
 }
 
 /// Shared body of `http` and `httpStream`. `streaming` picks the job the host
@@ -1062,20 +1119,22 @@ unsafe fn http_call_impl(
 }
 
 pub(super) unsafe extern "C" fn abort_token(session: *mut c_void, token: u64) {
-    let inner = unsafe { inner(session) };
-    if let Some(flag) = inner.cancels.borrow().get(&token) {
-        flag.store(true, Ordering::Release);
-    }
-    inner
-        .pending
-        .borrow_mut()
-        .http
-        .retain(|(pending, _)| *pending != token);
-    let aborted = Err(HttpError::new(HttpFailure::Canceled, "AbortError"));
-    settle_http(inner, token, &aborted);
-    if let Some(submit) = inner.io.borrow().as_ref() {
-        submit(IoJob::Abort { token });
-    }
+    super::qjs_entry!((), {
+        let inner = unsafe { inner(session) };
+        if let Some(flag) = inner.cancels.borrow().get(&token) {
+            flag.store(true, Ordering::Release);
+        }
+        inner
+            .pending
+            .borrow_mut()
+            .http
+            .retain(|(pending, _)| *pending != token);
+        let aborted = Err(HttpError::new(HttpFailure::Canceled, "AbortError"));
+        settle_http(inner, token, &aborted);
+        if let Some(submit) = inner.io.borrow().as_ref() {
+            submit(IoJob::Abort { token });
+        }
+    })
 }
 
 pub(super) fn prepared_mut(inner: &Inner) -> std::cell::RefMut<'_, Option<PreparedCall>> {
@@ -1097,11 +1156,13 @@ pub(super) unsafe extern "C" fn module_has(
     name: *const c_char,
     len: usize,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let Some(name) = (unsafe { utf8_of(name, len) }) else {
-        return 0;
-    };
-    i32::from(inner.config.registry.module(name).is_some())
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let Some(name) = (unsafe { utf8_of(name, len) }) else {
+            return 0;
+        };
+        i32::from(inner.config.registry.module(name).is_some())
+    })
 }
 
 pub(super) unsafe extern "C" fn module_count(
@@ -1109,16 +1170,18 @@ pub(super) unsafe extern "C" fn module_count(
     name: *const c_char,
     len: usize,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let Some(name) = (unsafe { utf8_of(name, len) }) else {
-        return -1;
-    };
-    inner
-        .config
-        .registry
-        .by_specifier(name)
-        .map(|module| module.methods.len() as i32)
-        .unwrap_or(-1)
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let Some(name) = (unsafe { utf8_of(name, len) }) else {
+            return -1;
+        };
+        inner
+            .config
+            .registry
+            .by_specifier(name)
+            .map(|module| module.methods.len() as i32)
+            .unwrap_or(-1)
+    })
 }
 
 pub(super) unsafe extern "C" fn module_method_at(
@@ -1128,25 +1191,27 @@ pub(super) unsafe extern "C" fn module_method_at(
     index: i32,
     out_len: *mut usize,
 ) -> *const c_char {
-    let inner = unsafe { inner(session) };
-    let Some(name) = (unsafe { utf8_of(name, name_len) }) else {
-        return ptr::null();
-    };
-    let Ok(index) = usize::try_from(index) else {
-        return ptr::null();
-    };
-    let Some(method) = inner
-        .config
-        .registry
-        .by_specifier(name)
-        .and_then(|module| module.methods.get(index))
-    else {
-        return ptr::null();
-    };
-    if !out_len.is_null() {
-        unsafe { *out_len = method.name.len() };
-    }
-    method.name.as_ptr().cast()
+    super::qjs_entry!(std::ptr::null(), {
+        let inner = unsafe { inner(session) };
+        let Some(name) = (unsafe { utf8_of(name, name_len) }) else {
+            return ptr::null();
+        };
+        let Ok(index) = usize::try_from(index) else {
+            return ptr::null();
+        };
+        let Some(method) = inner
+            .config
+            .registry
+            .by_specifier(name)
+            .and_then(|module| module.methods.get(index))
+        else {
+            return ptr::null();
+        };
+        if !out_len.is_null() {
+            unsafe { *out_len = method.name.len() };
+        }
+        method.name.as_ptr().cast()
+    })
 }
 
 pub(super) unsafe extern "C" fn module_name_of(
@@ -1155,17 +1220,19 @@ pub(super) unsafe extern "C" fn module_name_of(
     len: usize,
     out_len: *mut usize,
 ) -> *const c_char {
-    let inner = unsafe { inner(session) };
-    let Some(specifier) = (unsafe { utf8_of(specifier, len) }) else {
-        return ptr::null();
-    };
-    let Some(module) = inner.config.registry.by_specifier(specifier) else {
-        return ptr::null();
-    };
-    if !out_len.is_null() {
-        unsafe { *out_len = module.name.len() };
-    }
-    module.name.as_ptr().cast()
+    super::qjs_entry!(std::ptr::null(), {
+        let inner = unsafe { inner(session) };
+        let Some(specifier) = (unsafe { utf8_of(specifier, len) }) else {
+            return ptr::null();
+        };
+        let Some(module) = inner.config.registry.by_specifier(specifier) else {
+            return ptr::null();
+        };
+        if !out_len.is_null() {
+            unsafe { *out_len = module.name.len() };
+        }
+        module.name.as_ptr().cast()
+    })
 }
 
 pub(super) unsafe extern "C" fn module_prepare(
@@ -1175,40 +1242,48 @@ pub(super) unsafe extern "C" fn module_prepare(
     method: *const c_char,
     method_len: usize,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    inner.last_error.borrow_mut().take();
-    let Some(name) = (unsafe { utf8_of(name, name_len) }) else {
-        return -1;
-    };
-    let Some(method) = (unsafe { utf8_of(method, method_len) }) else {
-        return -1;
-    };
-    let Some(entry) = inner.config.registry.method(name, method) else {
-        set_last_error(inner, session::module_not_linked(name, Some(method)));
-        return -1;
-    };
-    let kind = match &entry.invoke {
-        Invoke::Sync(_) => 0,
-        Invoke::Promise(_) => 1,
-    };
-    *inner.prepared.borrow_mut() = Some(PreparedCall {
-        invoke: entry.invoke.clone(),
-        token: 0,
-        args: ArgBuild::new(),
-    });
-    kind
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        inner.last_error.borrow_mut().take();
+        let Some(name) = (unsafe { utf8_of(name, name_len) }) else {
+            return -1;
+        };
+        let Some(method) = (unsafe { utf8_of(method, method_len) }) else {
+            return -1;
+        };
+        let Some(entry) = inner.config.registry.method(name, method) else {
+            set_last_error(inner, session::module_not_linked(name, Some(method)));
+            return -1;
+        };
+        let kind = match &entry.invoke {
+            Invoke::Sync(_) => 0,
+            Invoke::Promise(_) => 1,
+        };
+        *inner.prepared.borrow_mut() = Some(PreparedCall {
+            invoke: entry.invoke.clone(),
+            token: 0,
+            args: ArgBuild::new(),
+        });
+        kind
+    })
 }
 
 pub(super) unsafe extern "C" fn module_push_null(session: *mut c_void) {
-    push_prepared(unsafe { inner(session) }, PluginValue::Null);
+    super::qjs_entry!((), {
+        push_prepared(unsafe { inner(session) }, PluginValue::Null);
+    })
 }
 
 pub(super) unsafe extern "C" fn module_push_bool(session: *mut c_void, value: i32) {
-    push_prepared(unsafe { inner(session) }, PluginValue::Bool(value != 0));
+    super::qjs_entry!((), {
+        push_prepared(unsafe { inner(session) }, PluginValue::Bool(value != 0));
+    })
 }
 
 pub(super) unsafe extern "C" fn module_push_f64(session: *mut c_void, value: f64) {
-    push_prepared(unsafe { inner(session) }, PluginValue::F64(value));
+    super::qjs_entry!((), {
+        push_prepared(unsafe { inner(session) }, PluginValue::F64(value));
+    })
 }
 
 pub(super) unsafe extern "C" fn module_push_str(
@@ -1216,8 +1291,10 @@ pub(super) unsafe extern "C" fn module_push_str(
     text: *const c_char,
     len: usize,
 ) {
-    let text = unsafe { utf8_of(text, len) }.unwrap_or("").to_owned();
-    push_prepared(unsafe { inner(session) }, PluginValue::Str(text));
+    super::qjs_entry!((), {
+        let text = unsafe { utf8_of(text, len) }.unwrap_or("").to_owned();
+        push_prepared(unsafe { inner(session) }, PluginValue::Str(text));
+    })
 }
 
 pub(super) unsafe extern "C" fn module_push_bytes(
@@ -1225,30 +1302,38 @@ pub(super) unsafe extern "C" fn module_push_bytes(
     bytes: *const u8,
     len: usize,
 ) {
-    let bytes = if bytes.is_null() {
-        Vec::new()
-    } else {
-        unsafe { std::slice::from_raw_parts(bytes, len).to_vec() }
-    };
-    push_prepared(unsafe { inner(session) }, PluginValue::Bytes(bytes));
+    super::qjs_entry!((), {
+        let bytes = if bytes.is_null() {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(bytes, len).to_vec() }
+        };
+        push_prepared(unsafe { inner(session) }, PluginValue::Bytes(bytes));
+    })
 }
 
 pub(super) unsafe extern "C" fn module_begin_list(session: *mut c_void) {
-    if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
-        call.args.begin(false);
-    }
+    super::qjs_entry!((), {
+        if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
+            call.args.begin(false);
+        }
+    })
 }
 
 pub(super) unsafe extern "C" fn module_end_list(session: *mut c_void) {
-    if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
-        call.args.end();
-    }
+    super::qjs_entry!((), {
+        if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
+            call.args.end();
+        }
+    })
 }
 
 pub(super) unsafe extern "C" fn module_begin_map(session: *mut c_void) {
-    if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
-        call.args.begin(true);
-    }
+    super::qjs_entry!((), {
+        if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
+            call.args.begin(true);
+        }
+    })
 }
 
 pub(super) unsafe extern "C" fn module_map_key(
@@ -1256,65 +1341,75 @@ pub(super) unsafe extern "C" fn module_map_key(
     text: *const c_char,
     len: usize,
 ) {
-    let text = unsafe { utf8_of(text, len) }.unwrap_or("").to_owned();
-    if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut()
-        && let Some(frame) = call.args.frames.last_mut()
-    {
-        frame.pending_key = Some(text);
-    }
+    super::qjs_entry!((), {
+        let text = unsafe { utf8_of(text, len) }.unwrap_or("").to_owned();
+        if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut()
+            && let Some(frame) = call.args.frames.last_mut()
+        {
+            frame.pending_key = Some(text);
+        }
+    })
 }
 
 pub(super) unsafe extern "C" fn module_end_map(session: *mut c_void) {
-    if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
-        call.args.end();
-    }
+    super::qjs_entry!((), {
+        if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
+            call.args.end();
+        }
+    })
 }
 
 pub(super) unsafe extern "C" fn module_set_token(session: *mut c_void, token: u64) {
-    if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
-        call.token = token;
-    }
+    super::qjs_entry!((), {
+        if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
+            call.token = token;
+        }
+    })
 }
 
 pub(super) unsafe extern "C" fn module_finish(session: *mut c_void) -> i32 {
-    let inner = unsafe { inner(session) };
-    let Some(call) = inner.prepared.borrow_mut().take() else {
-        return -1;
-    };
-    let args = call.args.stack;
-    match call.invoke {
-        Invoke::Sync(f) => match f(&args) {
-            Ok(value) => {
-                emit_value(inner, &value);
-                0
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let Some(call) = inner.prepared.borrow_mut().take() else {
+            return -1;
+        };
+        let args = call.args.stack;
+        match call.invoke {
+            Invoke::Sync(f) => match f(&args) {
+                Ok(value) => {
+                    emit_value(inner, &value);
+                    0
+                }
+                Err(message) => {
+                    set_last_error(inner, message);
+                    -1
+                }
+            },
+            Invoke::Promise(f) => {
+                let settle = (inner.config.settle)(call.token);
+                f(&args, settle, inner.config.exec.as_ref());
+                1
             }
-            Err(message) => {
-                set_last_error(inner, message);
-                -1
-            }
-        },
-        Invoke::Promise(f) => {
-            let settle = (inner.config.settle)(call.token);
-            f(&args, settle, inner.config.exec.as_ref());
-            1
         }
-    }
+    })
 }
 
 pub(super) unsafe extern "C" fn module_error(
     session: *mut c_void,
     out_len: *mut usize,
 ) -> *const c_char {
-    let inner = unsafe { inner(session) };
-    match inner.last_error.borrow().as_ref() {
-        Some(message) => {
-            if !out_len.is_null() {
-                unsafe { *out_len = message.as_bytes().len() };
+    super::qjs_entry!(std::ptr::null(), {
+        let inner = unsafe { inner(session) };
+        match inner.last_error.borrow().as_ref() {
+            Some(message) => {
+                if !out_len.is_null() {
+                    unsafe { *out_len = message.as_bytes().len() };
+                }
+                message.as_ptr()
             }
-            message.as_ptr()
+            None => ptr::null(),
         }
-        None => ptr::null(),
-    }
+    })
 }
 
 pub(super) unsafe extern "C" fn socket_open(
@@ -1325,37 +1420,39 @@ pub(super) unsafe extern "C" fn socket_open(
     protocols: *const c_char,
     protocols_len: usize,
 ) {
-    let inner = unsafe { inner(session) };
-    let Some(url) = (unsafe { utf8_of(url, len) }) else {
-        return;
-    };
-    let url = url.to_owned();
-    // A comma-separated offer list, the wire form the header carries.
-    let protocols = unsafe { utf8_of(protocols, protocols_len) }
-        .map(|text| {
-            text.split(',')
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    submit_or_queue(
-        inner,
-        IoJob::SocketOpen {
-            id,
-            url: url.clone(),
-            protocols,
-        },
-        || {
-            inner.pending.borrow_mut().socket.push((
+    super::qjs_entry!((), {
+        let inner = unsafe { inner(session) };
+        let Some(url) = (unsafe { utf8_of(url, len) }) else {
+            return;
+        };
+        let url = url.to_owned();
+        // A comma-separated offer list, the wire form the header carries.
+        let protocols = unsafe { utf8_of(protocols, protocols_len) }
+            .map(|text| {
+                text.split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        submit_or_queue(
+            inner,
+            IoJob::SocketOpen {
                 id,
-                "error".to_owned(),
-                true,
-                b"socket is not linked".to_vec(),
-            ));
-        },
-    );
+                url: url.clone(),
+                protocols,
+            },
+            || {
+                inner.pending.borrow_mut().socket.push((
+                    id,
+                    "error".to_owned(),
+                    true,
+                    b"socket is not linked".to_vec(),
+                ));
+            },
+        );
+    })
 }
 
 pub(super) unsafe extern "C" fn socket_send(
@@ -1365,26 +1462,30 @@ pub(super) unsafe extern "C" fn socket_send(
     len: usize,
     is_text: i32,
 ) {
-    let inner = unsafe { inner(session) };
-    let bytes = if data.is_null() || len == 0 {
-        Vec::new()
-    } else {
-        unsafe { std::slice::from_raw_parts(data, len).to_vec() }
-    };
-    if let Some(submit) = inner.io.borrow().as_ref() {
-        submit(IoJob::SocketSend {
-            id,
-            text: is_text != 0,
-            data: bytes,
-        });
-    }
+    super::qjs_entry!((), {
+        let inner = unsafe { inner(session) };
+        let bytes = if data.is_null() || len == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(data, len).to_vec() }
+        };
+        if let Some(submit) = inner.io.borrow().as_ref() {
+            submit(IoJob::SocketSend {
+                id,
+                text: is_text != 0,
+                data: bytes,
+            });
+        }
+    })
 }
 
 pub(super) unsafe extern "C" fn socket_close(session: *mut c_void, id: u64) {
-    let inner = unsafe { inner(session) };
-    if let Some(submit) = inner.io.borrow().as_ref() {
-        submit(IoJob::SocketClose { id });
-    }
+    super::qjs_entry!((), {
+        let inner = unsafe { inner(session) };
+        if let Some(submit) = inner.io.borrow().as_ref() {
+            submit(IoJob::SocketClose { id });
+        }
+    })
 }
 
 // ---- devtools debug surface -------------------------------------------------
@@ -1404,43 +1505,49 @@ pub(super) unsafe extern "C" fn debug_json(
     x: f32,
     y: f32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let tree = inner.tree.borrow();
-    let text = match what {
-        DEBUG_LAYOUT_ISSUES => tree.layout_issues_json(),
-        DEBUG_SNAPSHOT => tree.debug_snapshot(),
-        DEBUG_PROBE => tree.debug_probe(x, y),
-        DEBUG_LAST_POINTER => match tree.debug_last_pointer() {
-            Some((px, py, phase)) => {
-                format!("{{\"x\":{px:.2},\"y\":{py:.2},\"phase\":\"{phase}\"}}")
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let tree = inner.tree.borrow();
+        let text = match what {
+            DEBUG_LAYOUT_ISSUES => tree.layout_issues_json(),
+            DEBUG_SNAPSHOT => tree.debug_snapshot(),
+            DEBUG_PROBE => tree.debug_probe(x, y),
+            DEBUG_LAST_POINTER => match tree.debug_last_pointer() {
+                Some((px, py, phase)) => {
+                    format!("{{\"x\":{px:.2},\"y\":{py:.2},\"phase\":\"{phase}\"}}")
+                }
+                None => "null".to_owned(),
+            },
+            _ => return -1,
+        };
+        match CString::new(text) {
+            Ok(c) => {
+                *inner.debug_json.borrow_mut() = Some(c);
+                0
             }
-            None => "null".to_owned(),
-        },
-        _ => return -1,
-    };
-    match CString::new(text) {
-        Ok(c) => {
-            *inner.debug_json.borrow_mut() = Some(c);
-            0
+            Err(_) => -1,
         }
-        Err(_) => -1,
-    }
+    })
 }
 
 /// Pointer to the NUL-terminated JSON from the last successful
 /// [`debug_json`]. Null until then.
 pub(super) unsafe extern "C" fn debug_json_bytes(session: *mut c_void) -> *const c_char {
-    let inner = unsafe { inner(session) };
-    inner
-        .debug_json
-        .borrow()
-        .as_ref()
-        .map_or(ptr::null(), |text| text.as_ptr())
+    super::qjs_entry!(std::ptr::null(), {
+        let inner = unsafe { inner(session) };
+        inner
+            .debug_json
+            .borrow()
+            .as_ref()
+            .map_or(ptr::null(), |text| text.as_ptr())
+    })
 }
 
 pub(super) unsafe extern "C" fn debug_set_scan(session: *mut c_void, on: i32) {
-    let inner = unsafe { inner(session) };
-    inner.tree.borrow_mut().set_debug_scan(on != 0);
+    super::qjs_entry!((), {
+        let inner = unsafe { inner(session) };
+        inner.tree.borrow_mut().set_debug_scan(on != 0);
+    })
 }
 
 pub(super) unsafe extern "C" fn debug_set_pointer_trace(
@@ -1448,17 +1555,21 @@ pub(super) unsafe extern "C" fn debug_set_pointer_trace(
     on: i32,
     suppress: i32,
 ) {
-    let inner = unsafe { inner(session) };
-    inner
-        .tree
-        .borrow_mut()
-        .set_pointer_trace(on != 0, suppress != 0);
+    super::qjs_entry!((), {
+        let inner = unsafe { inner(session) };
+        inner
+            .tree
+            .borrow_mut()
+            .set_pointer_trace(on != 0, suppress != 0);
+    })
 }
 
 pub(super) unsafe extern "C" fn debug_set_owned(session: *mut c_void, node: u64, on: i32) {
-    let inner = unsafe { inner(session) };
-    inner
-        .tree
-        .borrow_mut()
-        .set_debug_owned(NodeId::from_raw(node), on != 0);
+    super::qjs_entry!((), {
+        let inner = unsafe { inner(session) };
+        inner
+            .tree
+            .borrow_mut()
+            .set_debug_owned(NodeId::from_raw(node), on != 0);
+    })
 }

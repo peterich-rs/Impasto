@@ -28,6 +28,15 @@ type SparkBinding = {
   refresh: SparkRefresh;
 };
 
+/** One frame writes at most this many price cells. The rest keep the old revision. */
+const FLUSH_CELLS = 8;
+
+function cellCount(cells: QuoteCells): number {
+  return (cells.last !== undefined ? 1 : 0)
+    + (cells.pct !== undefined ? 1 : 0)
+    + (cells.chg !== undefined ? 1 : 0);
+}
+
 /**
  * Registry of mounted quote cells. The hot path never touches Solid: each
  * vsync, for every mounted row whose `revision` moved, write text and colors
@@ -98,11 +107,17 @@ export class QuoteBinder {
 
   /** Called once per vsync after `engine.step`. */
   flush(): void {
+    let written = 0;
     for (const entry of [...this.#bindings]) {
       if (entry.revision === this.#engine.quote(entry.symbol).revision) {
         continue;
       }
+      const n = cellCount(entry.cells);
+      if (written + n > FLUSH_CELLS) {
+        break;
+      }
       this.#sync(entry);
+      written += n;
     }
     flash.tick(this.#base);
   }

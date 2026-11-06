@@ -1,7 +1,7 @@
 import { colorBytes } from "./colors.ts";
 import { BUTTON_FILL, FONT_SIZE, TEXT_COLOR } from "./defaults.ts";
 import type { RecognizerSpec } from "./guard.ts";
-import type { AxisSize, CoreHost, GridLine, InsetEdge } from "./host.ts";
+import type { AxisSize, CoreHost, GridLine, HostTextRun, InsetEdge } from "./host.ts";
 import { parseAxisSize, parseGridLine, parseInsetEdge } from "./layout-values.ts";
 
 /**
@@ -67,6 +67,63 @@ function textAlignName(value: unknown): "left" | "center" | "right" {
     return value;
   }
   return "left";
+}
+
+function runColor(value: unknown): [number, number, number, number] {
+  if (Array.isArray(value) && value.length === 4) {
+    return [value[0] | 0, value[1] | 0, value[2] | 0, value[3] | 0];
+  }
+  return colorBytes(value ?? "#000000");
+}
+
+function normalizeRuns(value: unknown): HostTextRun[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item) => {
+    const run = item as {
+      text?: unknown;
+      color?: unknown;
+      weight?: number;
+      family?: string;
+      underline?: boolean;
+      lineThrough?: boolean;
+      gradient?: {
+        kind?: "linear" | "radial" | "sweep";
+        from?: [number, number];
+        to?: [number, number];
+        center?: [number, number];
+        radius?: number;
+        startAngle?: number;
+        endAngle?: number;
+        stops?: { offset: number; color: unknown }[];
+      };
+    };
+    const gradient = run.gradient;
+    return {
+      text: run.text == null ? "" : String(run.text),
+      color: runColor(run.color),
+      weight: run.weight,
+      family: run.family,
+      underline: run.underline,
+      lineThrough: run.lineThrough,
+      gradient: gradient
+        ? {
+            kind: gradient.kind ?? "linear",
+            from: gradient.from,
+            to: gradient.to,
+            center: gradient.center,
+            radius: gradient.radius,
+            startAngle: gradient.startAngle,
+            endAngle: gradient.endAngle,
+            stops: (gradient.stops ?? []).map((stop) => ({
+              offset: stop.offset,
+              color: runColor(stop.color),
+            })),
+          }
+        : undefined,
+    };
+  });
 }
 
 function justifyName(
@@ -338,6 +395,9 @@ export function hostRendererOptions(host: CoreHost): HostRendererOptions & {
         return;
       case "color":
         host.setColor(node.id, colorBytes(value));
+        return;
+      case "runs":
+        host.setTextRuns(node.id, normalizeRuns(value));
         return;
       case "value":
         host.setText(node.id, value == null ? "" : String(value));

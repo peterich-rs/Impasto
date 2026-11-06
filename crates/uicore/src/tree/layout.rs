@@ -1829,22 +1829,18 @@ fn reusable_text_size(
 }
 
 fn spans_match(text: &super::node::TextPayload, cached: &crate::PaintKey) -> bool {
-    if text.spans.len() != cached.metrics.spans.len()
-        || text.spans.len() != cached.span_colors.len()
-    {
+    if text.spans.len() != cached.metrics.spans.len() {
         return false;
     }
     text.spans
         .iter()
         .zip(cached.metrics.spans.iter())
-        .zip(cached.span_colors.iter())
-        .all(|((span, metric), color)| {
+        .all(|(span, metric)| {
             span.utf8 == metric.utf8.as_ref()
                 && span.weight == metric.weight
                 && span.underline == metric.underline
                 && span.line_through == metric.line_through
                 && span.family.as_deref().unwrap_or("") == metric.family.as_ref()
-                && span.color == *color
         })
 }
 

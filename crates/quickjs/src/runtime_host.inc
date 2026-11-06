@@ -1053,7 +1053,7 @@ static int call_timer(Host *host, Timer *timer, char *err, size_t err_len) {
         return 0;
     }
     if (err && err_len > 0 && err[0] == 0) {
-        write_exception(host->ctx, err, err_len);
+        stash_exception(host, host->ctx, err, err_len);
     } else {
         JSValue exception = JS_GetException(host->ctx);
         JS_FreeValue(host->ctx, exception);
@@ -1078,6 +1078,9 @@ int qjs_fire_timers(Host *host, char *err, size_t err_len) {
     if (!host || host->paused) {
         return 0;
     }
+    arm_slice(host, "timer", 0);
+    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    (void)armed;
     if (err && err_len > 0) {
         err[0] = 0;
     }
@@ -1120,6 +1123,9 @@ int qjs_fire_raf(Host *host, char *err, size_t err_len) {
     if (!host || host->paused) {
         return 0;
     }
+    arm_slice(host, "raf", 0);
+    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    (void)armed;
     if (err && err_len > 0) {
         err[0] = 0;
     }
@@ -1402,6 +1408,9 @@ int qjs_motion_end(Host *host, uint64_t node, const char *prop, char *err, size_
     if (!host || !host->ctx || !prop) {
         return 0;
     }
+    arm_slice(host, "motion", node);
+    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    (void)armed;
     size_t count = 0;
     for (size_t index = 0; index < host->motion_len; index++) {
         MotionHandler *handler = &host->motions[index];
@@ -1439,7 +1448,7 @@ int qjs_motion_end(Host *host, uint64_t node, const char *prop, char *err, size_
             continue;
         }
         if (!failed) {
-            write_exception(host->ctx, err, err_len);
+            stash_exception(host, host->ctx, err, err_len);
             failed = 1;
         } else {
             JSValue exception = JS_GetException(host->ctx);

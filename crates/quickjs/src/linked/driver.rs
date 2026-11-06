@@ -44,7 +44,7 @@ pub(super) fn emit_driver(inner: &Inner, event: &DriverEvent) -> Result<(), Stri
     if failed == 0 {
         Ok(())
     } else {
-        Err(c_message(&error))
+        Err(super::pull_error(inner, "driver", &c_message(&error)))
     }
 }
 
@@ -172,28 +172,32 @@ pub unsafe extern "C" fn list_create(
     index: *mut u32,
     generation: *mut u32,
 ) -> i32 {
-    if index.is_null() || generation.is_null() {
-        return -1;
-    }
-    let inner = unsafe { inner(session) };
-    let id = inner.drivers.borrow_mut().list_create(overscan, estimate);
-    unsafe {
-        *index = id.index;
-        *generation = id.generation;
-    }
-    0
+    super::qjs_entry!(-1, {
+        if index.is_null() || generation.is_null() {
+            return -1;
+        }
+        let inner = unsafe { inner(session) };
+        let id = inner.drivers.borrow_mut().list_create(overscan, estimate);
+        unsafe {
+            *index = id.index;
+            *generation = id.generation;
+        }
+        0
+    })
 }
 
 /// # Safety
 /// `session` is the live `Inner`.
 pub unsafe extern "C" fn list_release(session: *mut c_void, index: u32, generation: u32) -> i32 {
-    let inner = unsafe { inner(session) };
-    i32::from(
-        !inner
-            .drivers
-            .borrow_mut()
-            .list_release(driver_id(index, generation)),
-    )
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        i32::from(
+            !inner
+                .drivers
+                .borrow_mut()
+                .list_release(driver_id(index, generation)),
+        )
+    })
 }
 
 /// # Safety
@@ -205,14 +209,16 @@ pub unsafe extern "C" fn list_bind(
     nodes: *const u64,
     count: i32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let bound = unsafe { read_nodes(nodes, count) };
-    i32::from(
-        !inner
-            .drivers
-            .borrow_mut()
-            .list_bind(driver_id(index, generation), bound),
-    )
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let bound = unsafe { read_nodes(nodes, count) };
+        i32::from(
+            !inner
+                .drivers
+                .borrow_mut()
+                .list_bind(driver_id(index, generation), bound),
+        )
+    })
 }
 
 /// # Safety
@@ -225,25 +231,29 @@ pub unsafe extern "C" fn list_configure(
     overscan: i32,
     blocked: i32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    i32::from(!inner.drivers.borrow_mut().list_configure(
-        driver_id(index, generation),
-        estimate,
-        overscan,
-        blocked != 0,
-    ))
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        i32::from(!inner.drivers.borrow_mut().list_configure(
+            driver_id(index, generation),
+            estimate,
+            overscan,
+            blocked != 0,
+        ))
+    })
 }
 
 /// # Safety
 /// `session` is the live `Inner`.
 pub unsafe extern "C" fn list_begin(session: *mut c_void, index: u32, generation: u32) -> i32 {
-    let inner = unsafe { inner(session) };
-    i32::from(
-        !inner
-            .drivers
-            .borrow_mut()
-            .list_begin(driver_id(index, generation)),
-    )
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        i32::from(
+            !inner
+                .drivers
+                .borrow_mut()
+                .list_begin(driver_id(index, generation)),
+        )
+    })
 }
 
 /// # Safety
@@ -258,33 +268,37 @@ pub unsafe extern "C" fn list_item(
     ty_len: usize,
     sticky: i32,
 ) -> i32 {
-    let Some(key) = (unsafe { utf8_of(key, key_len) }) else {
-        return -1;
-    };
-    let Some(ty) = (unsafe { utf8_of(ty, ty_len) }) else {
-        return -1;
-    };
-    let inner = unsafe { inner(session) };
-    i32::from(!inner.drivers.borrow_mut().list_item(
-        driver_id(index, generation),
-        ListItem {
-            key: key.to_owned(),
-            ty: ty.to_owned(),
-            sticky: sticky != 0,
-        },
-    ))
+    super::qjs_entry!(-1, {
+        let Some(key) = (unsafe { utf8_of(key, key_len) }) else {
+            return -1;
+        };
+        let Some(ty) = (unsafe { utf8_of(ty, ty_len) }) else {
+            return -1;
+        };
+        let inner = unsafe { inner(session) };
+        i32::from(!inner.drivers.borrow_mut().list_item(
+            driver_id(index, generation),
+            ListItem {
+                key: key.to_owned(),
+                ty: ty.to_owned(),
+                sticky: sticky != 0,
+            },
+        ))
+    })
 }
 
 /// # Safety
 /// `session` is the live `Inner`.
 pub unsafe extern "C" fn list_end(session: *mut c_void, index: u32, generation: u32) -> i32 {
-    let inner = unsafe { inner(session) };
-    i32::from(
-        !inner
-            .drivers
-            .borrow_mut()
-            .list_end(driver_id(index, generation)),
-    )
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        i32::from(
+            !inner
+                .drivers
+                .borrow_mut()
+                .list_end(driver_id(index, generation)),
+        )
+    })
 }
 
 /// # Safety
@@ -297,15 +311,17 @@ pub unsafe extern "C" fn list_note_row(
     key_len: usize,
     node: u64,
 ) -> i32 {
-    let Some(key) = (unsafe { utf8_of(key, key_len) }) else {
-        return -1;
-    };
-    let inner = unsafe { inner(session) };
-    i32::from(!inner.drivers.borrow_mut().list_note_row(
-        driver_id(index, generation),
-        key,
-        node_of(node),
-    ))
+    super::qjs_entry!(-1, {
+        let Some(key) = (unsafe { utf8_of(key, key_len) }) else {
+            return -1;
+        };
+        let inner = unsafe { inner(session) };
+        i32::from(!inner.drivers.borrow_mut().list_note_row(
+            driver_id(index, generation),
+            key,
+            node_of(node),
+        ))
+    })
 }
 
 /// # Safety
@@ -315,28 +331,32 @@ pub unsafe extern "C" fn scroll_create(
     index: *mut u32,
     generation: *mut u32,
 ) -> i32 {
-    if index.is_null() || generation.is_null() {
-        return -1;
-    }
-    let inner = unsafe { inner(session) };
-    let id = inner.drivers.borrow_mut().scroll_create();
-    unsafe {
-        *index = id.index;
-        *generation = id.generation;
-    }
-    0
+    super::qjs_entry!(-1, {
+        if index.is_null() || generation.is_null() {
+            return -1;
+        }
+        let inner = unsafe { inner(session) };
+        let id = inner.drivers.borrow_mut().scroll_create();
+        unsafe {
+            *index = id.index;
+            *generation = id.generation;
+        }
+        0
+    })
 }
 
 /// # Safety
 /// `session` is the live `Inner`.
 pub unsafe extern "C" fn scroll_release(session: *mut c_void, index: u32, generation: u32) -> i32 {
-    let inner = unsafe { inner(session) };
-    i32::from(
-        !inner
-            .drivers
-            .borrow_mut()
-            .scroll_release(driver_id(index, generation)),
-    )
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        i32::from(
+            !inner
+                .drivers
+                .borrow_mut()
+                .scroll_release(driver_id(index, generation)),
+        )
+    })
 }
 
 /// # Safety
@@ -348,15 +368,17 @@ pub unsafe extern "C" fn scroll_bind(
     viewport: u64,
     content: u64,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let mut drivers = inner.drivers.borrow_mut();
-    let tree = inner.tree.borrow();
-    i32::from(!drivers.scroll_bind(
-        driver_id(index, generation),
-        node_of(viewport),
-        node_of(content),
-        &tree,
-    ))
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let mut drivers = inner.drivers.borrow_mut();
+        let tree = inner.tree.borrow();
+        i32::from(!drivers.scroll_bind(
+            driver_id(index, generation),
+            node_of(viewport),
+            node_of(content),
+            &tree,
+        ))
+    })
 }
 
 /// # Safety
@@ -374,22 +396,24 @@ pub unsafe extern "C" fn scroll_configure(
     parent_generation: u32,
     has_parent: i32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let parent = (has_parent != 0).then_some(driver_id(parent_index, parent_generation));
-    let mut drivers = inner.drivers.borrow_mut();
-    let mut tree = inner.tree.borrow_mut();
-    i32::from(!drivers.scroll_configure(
-        driver_id(index, generation),
-        ScrollConfig {
-            content_min,
-            pull_mode: PullMode::from_code(pull_mode),
-            threshold,
-            rubber: rubber != 0,
-            factor,
-        },
-        parent,
-        &mut tree,
-    ))
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let parent = (has_parent != 0).then_some(driver_id(parent_index, parent_generation));
+        let mut drivers = inner.drivers.borrow_mut();
+        let mut tree = inner.tree.borrow_mut();
+        i32::from(!drivers.scroll_configure(
+            driver_id(index, generation),
+            ScrollConfig {
+                content_min,
+                pull_mode: PullMode::from_code(pull_mode),
+                threshold,
+                rubber: rubber != 0,
+                factor,
+            },
+            parent,
+            &mut tree,
+        ))
+    })
 }
 
 /// # Safety
@@ -405,22 +429,25 @@ pub unsafe extern "C" fn scroll_drag_by(
     over_x: *mut f32,
     over_y: *mut f32,
 ) -> i32 {
-    if overflow_x.is_null() || overflow_y.is_null() || over_x.is_null() || over_y.is_null() {
-        return -1;
-    }
-    let inner = unsafe { inner(session) };
-    let mut drivers = inner.drivers.borrow_mut();
-    let mut tree = inner.tree.borrow_mut();
-    let Some(step) = drivers.scroll_drag_by(driver_id(index, generation), &mut tree, dx, dy) else {
-        return -1;
-    };
-    unsafe {
-        *overflow_x = step.overflow_x;
-        *overflow_y = step.overflow_y;
-        *over_x = step.over_x;
-        *over_y = step.over_y;
-    }
-    i32::from(step.pending)
+    super::qjs_entry!(-1, {
+        if overflow_x.is_null() || overflow_y.is_null() || over_x.is_null() || over_y.is_null() {
+            return -1;
+        }
+        let inner = unsafe { inner(session) };
+        let mut drivers = inner.drivers.borrow_mut();
+        let mut tree = inner.tree.borrow_mut();
+        let Some(step) = drivers.scroll_drag_by(driver_id(index, generation), &mut tree, dx, dy)
+        else {
+            return -1;
+        };
+        unsafe {
+            *overflow_x = step.overflow_x;
+            *overflow_y = step.overflow_y;
+            *over_x = step.over_x;
+            *over_y = step.over_y;
+        }
+        i32::from(step.pending)
+    })
 }
 
 /// # Safety
@@ -431,31 +458,35 @@ pub unsafe extern "C" fn scroll_finish(
     generation: u32,
     taken: i32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let mut drivers = inner.drivers.borrow_mut();
-    let mut tree = inner.tree.borrow_mut();
-    if drivers
-        .scroll_finish(driver_id(index, generation), &mut tree, taken != 0)
-        .is_none()
-    {
-        return -1;
-    }
-    0
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let mut drivers = inner.drivers.borrow_mut();
+        let mut tree = inner.tree.borrow_mut();
+        if drivers
+            .scroll_finish(driver_id(index, generation), &mut tree, taken != 0)
+            .is_none()
+        {
+            return -1;
+        }
+        0
+    })
 }
 
 /// # Safety
 /// `session` is the live `Inner`.
 pub unsafe extern "C" fn scroll_drag_end(session: *mut c_void, index: u32, generation: u32) -> i32 {
-    let inner = unsafe { inner(session) };
-    if inner
-        .drivers
-        .borrow_mut()
-        .scroll_drag_end(driver_id(index, generation))
-        .is_none()
-    {
-        return -1;
-    }
-    0
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        if inner
+            .drivers
+            .borrow_mut()
+            .scroll_drag_end(driver_id(index, generation))
+            .is_none()
+        {
+            return -1;
+        }
+        0
+    })
 }
 
 /// # Safety
@@ -467,10 +498,12 @@ pub unsafe extern "C" fn scroll_wheel(
     dx: f32,
     dy: f32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let mut drivers = inner.drivers.borrow_mut();
-    let mut tree = inner.tree.borrow_mut();
-    i32::from(!drivers.scroll_wheel(driver_id(index, generation), &mut tree, dx, dy))
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let mut drivers = inner.drivers.borrow_mut();
+        let mut tree = inner.tree.borrow_mut();
+        i32::from(!drivers.scroll_wheel(driver_id(index, generation), &mut tree, dx, dy))
+    })
 }
 
 /// # Safety
@@ -483,20 +516,22 @@ pub unsafe extern "C" fn scroll_query(
     x: *mut f32,
     y: *mut f32,
 ) -> i32 {
-    if x.is_null() || y.is_null() {
-        return -1;
-    }
-    let inner = unsafe { inner(session) };
-    let drivers = inner.drivers.borrow();
-    let tree = inner.tree.borrow();
-    let Some((qx, qy)) = drivers.scroll_query(driver_id(index, generation), &tree, cmd) else {
-        return -1;
-    };
-    unsafe {
-        *x = qx;
-        *y = qy;
-    }
-    0
+    super::qjs_entry!(-1, {
+        if x.is_null() || y.is_null() {
+            return -1;
+        }
+        let inner = unsafe { inner(session) };
+        let drivers = inner.drivers.borrow();
+        let tree = inner.tree.borrow();
+        let Some((qx, qy)) = drivers.scroll_query(driver_id(index, generation), &tree, cmd) else {
+            return -1;
+        };
+        unsafe {
+            *x = qx;
+            *y = qy;
+        }
+        0
+    })
 }
 
 /// # Safety
@@ -508,14 +543,16 @@ pub unsafe extern "C" fn scroll_consume(
     ox: f32,
     oy: f32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let mut drivers = inner.drivers.borrow_mut();
-    let mut tree = inner.tree.borrow_mut();
-    match drivers.scroll_consume(driver_id(index, generation), &mut tree, ox, oy) {
-        Some(true) => 1,
-        Some(false) => 0,
-        None => -1,
-    }
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let mut drivers = inner.drivers.borrow_mut();
+        let mut tree = inner.tree.borrow_mut();
+        match drivers.scroll_consume(driver_id(index, generation), &mut tree, ox, oy) {
+            Some(true) => 1,
+            Some(false) => 0,
+            None => -1,
+        }
+    })
 }
 
 /// # Safety

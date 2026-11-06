@@ -24,6 +24,18 @@ fn wake(runtime: &mut Runtime, acks: &Acks) -> Result<bool, BootError> {
         arm(runtime);
         return Ok(false);
     }
+    // A posted vsync already owns the next frame. Stealing it without `accept`
+    // used to cancel that callback and leave the scheduler holding a token the
+    // platform can never echo, so later `arm` calls freeze until resume.
+    if runtime.scheduler.token_armed() {
+        return Ok(false);
+    }
+    let Some(token) = runtime.scheduler.request() else {
+        return Ok(false);
+    };
+    if !runtime.scheduler.accept(token) {
+        return Ok(false);
+    }
     let now = crate::net::mono_ms();
     on_frame(
         runtime,

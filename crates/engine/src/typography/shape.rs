@@ -7,9 +7,10 @@ use super::paint_store::PaintSlot;
 use crate::Status;
 use crate::player::ffi;
 use crate::player::{
-    apply_decoration, impeller_align, impeller_weight, paint_color, push_runs, read_lines,
-    utf16_len,
+    apply_decoration, color_source, impeller_align, impeller_weight, paint_color, push_runs,
+    read_lines, utf16_len,
 };
+use crate::span_box::{SpanBox, span_bounds};
 use protocol::{TextSpan, TextStyle};
 
 impl Typography {
@@ -980,6 +981,38 @@ impl Typography {
         text_style: &TextStyle,
         spans: &[TextSpan],
     ) -> Option<ffi::ImpellerParagraph> {
+        let shaped = self.shape_once(
+            paint, utf8, font_size, max_width, color, text_style, spans, None,
+        )?;
+        if !spans.iter().any(|span| span.gradient.is_some()) {
+            return Some(shaped);
+        }
+        let boxes = gradient_boxes(shaped, spans);
+        // SAFETY: `shaped` is the probe paragraph and is not stored.
+        unsafe { ffi::ImpellerParagraphRelease(shaped) };
+        self.shape_once(
+            paint,
+            utf8,
+            font_size,
+            max_width,
+            color,
+            text_style,
+            spans,
+            Some(&boxes),
+        )
+    }
+
+    fn shape_once(
+        &self,
+        paint: Option<ffi::ImpellerPaint>,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        text_style: &TextStyle,
+        spans: &[TextSpan],
+        boxes: Option<&[Option<SpanBox>]>,
+    ) -> Option<ffi::ImpellerParagraph> {
         let family = self.resolved_face(text_style.family.as_deref())?;
         let family = family.as_ptr();
         let ellipsis = text_style
@@ -1038,7 +1071,7 @@ impl Typography {
             if spans.is_empty() {
                 push_runs(style, paragraph_builder, family, cjk, utf8);
             } else {
-                for span in spans {
+                for (index, span) in spans.iter().enumerate() {
                     if span.utf8.is_empty() {
                         continue;
                     }
@@ -1049,6 +1082,14 @@ impl Typography {
                         return None;
                     }
                     paint_color(span_paint, span.color);
+                    if let Some(gradient) = &span.gradient
+                        && let Some(SpanBox { x, y, w, h }) =
+                            boxes.and_then(|all| all.get(index)).copied().flatten()
+                        && let Some(source) = color_source(Some(gradient), x, y, w, h)
+                    {
+                        ffi::ImpellerPaintSetColorSource(span_paint, source);
+                        ffi::ImpellerColorSourceRelease(source);
+                    }
                     ffi::ImpellerParagraphStyleSetForeground(style, span_paint);
                     ffi::ImpellerParagraphStyleSetFontWeight(style, impeller_weight(span.weight));
                     apply_decoration(style, span.color, span.underline, span.line_through);
@@ -1085,5 +1126,48 @@ impl Typography {
         } else {
             self.retired.push(paragraph);
         }
+    }
+}
+
+fn gradient_boxes(paragraph: ffi::ImpellerParagraph, spans: &[TextSpan]) -> Vec<Option<SpanBox>> {
+    // SAFETY: `paragraph` is the live probe built just above. `read_lines` only
+    // reads metrics cached on that paragraph.
+    let lines = unsafe { read_lines(paragraph) }.unwrap_or_default();
+    let mut unit = 0u32;
+    let mut boxes = Vec::with_capacity(spans.len());
+    for span in spans {
+        let len = utf16_len(&span.utf8);
+        let start = unit;
+        unit = unit.saturating_add(len);
+        if span.gradient.is_none() || span.utf8.is_empty() {
+            boxes.push(None);
+            continue;
+        }
+        let end = unit;
+        boxes.push(span_bounds(&lines, start, end, |code| {
+            cluster_edges(paragraph, code)
+        }));
+    }
+    boxes
+}
+
+/// Left and right edges of the glyph cluster at `unit`, in paragraph space.
+fn cluster_edges(paragraph: ffi::ImpellerParagraph, unit: u32) -> Option<(f32, f32)> {
+    // SAFETY: `paragraph` is the live probe. The glyph info is released here.
+    unsafe {
+        let index = usize::try_from(unit).unwrap_or(0);
+        let info = ffi::ImpellerParagraphCreateGlyphInfoAtCodeUnitIndexNew(paragraph, index);
+        if info.is_null() {
+            return None;
+        }
+        let mut bounds = ffi::ImpellerRect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        };
+        ffi::ImpellerGlyphInfoGetGraphemeClusterBounds(info, &mut bounds);
+        ffi::ImpellerGlyphInfoRelease(info);
+        Some((bounds.x, bounds.x + bounds.width))
     }
 }

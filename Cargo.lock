@@ -2354,6 +2354,7 @@ dependencies = [
  "protocol",
  "taffy",
  "thiserror 2.0.21",
+ "tracing",
  "unicode-segmentation",
 ]
 

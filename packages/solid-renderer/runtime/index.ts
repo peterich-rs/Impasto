@@ -32,7 +32,7 @@ export const {
   insertNode,
 } = renderer;
 
-export { Text } from "./text.ts";
+export { Text, type TextGradient, type TextRun } from "./text.ts";
 export { Image } from "./image.ts";
 export { host } from "./host.ts";
 export {

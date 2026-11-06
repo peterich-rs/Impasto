@@ -588,14 +588,10 @@ impl Tree {
         self.tick_motions(self.clock_ms + dt)
     }
 
+    /// Drops coast and overscroll springs on `id`. A locked drag owns both.
     pub(super) fn cancel_scroll_motion(&mut self, id: NodeId) {
-        self.motions.retain(|motion| {
-            motion.node != id
-                || !matches!(
-                    motion.prop,
-                    crate::AnimProp::ScrollX | crate::AnimProp::ScrollY
-                )
-        });
+        self.motions
+            .retain(|motion| motion.node != id || !is_scroll_motion(motion.prop));
     }
 
     /// Adds wheel speed into a coast already running on `id`.
@@ -707,7 +703,11 @@ impl Tree {
         }
         self.layer_epoch = self.layer_epoch.wrapping_add(1);
         self.mark_paint();
-        value.abs() < 0.5
+        // A coast that hits the wall starts an overscroll spring at x0 = 0
+        // with leftover velocity. Stopping at |value| < 0.5 would kill that
+        // spring on the first sample. `done` and the sign-cross in
+        // `tick_motions` land it.
+        false
     }
 
     /// `finger_vx` and `finger_vy` are scene points per millisecond, the same
@@ -726,31 +726,50 @@ impl Tree {
             (node.w, node.h)
         };
         if axis.allows_x() && x.abs() > f32::EPSILON {
-            self.animate(
+            self.arm_overscroll_axis(
                 id,
                 crate::AnimProp::OverscrollX,
-                Box::new(crate::Spring {
-                    x0: x,
-                    v0: -finger_vx * physics.band.slope(x, view_w),
-                    target: 0.0,
-                    stiffness: physics.overscroll_stiffness,
-                    damping: physics.overscroll_damping,
-                }),
+                x,
+                -finger_vx * physics.band.slope(x, view_w),
+                physics,
             );
         }
         if axis.allows_y() && y.abs() > f32::EPSILON {
-            self.animate(
+            self.arm_overscroll_axis(
                 id,
                 crate::AnimProp::OverscrollY,
-                Box::new(crate::Spring {
-                    x0: y,
-                    v0: -finger_vy * physics.band.slope(y, view_h),
-                    target: 0.0,
-                    stiffness: physics.overscroll_stiffness,
-                    damping: physics.overscroll_damping,
-                }),
+                y,
+                -finger_vy * physics.band.slope(y, view_h),
+                physics,
             );
         }
+    }
+
+    fn arm_overscroll_axis(
+        &mut self,
+        id: NodeId,
+        prop: crate::AnimProp,
+        x0: f32,
+        v0: f32,
+        physics: crate::ScrollPhysics,
+    ) {
+        if physics.overscroll == crate::OverscrollMode::Clamp {
+            return;
+        }
+        if x0.abs() <= f32::EPSILON && v0.abs() < 0.02 {
+            return;
+        }
+        self.animate(
+            id,
+            prop,
+            Box::new(crate::Spring {
+                x0,
+                v0,
+                target: 0.0,
+                stiffness: physics.overscroll_stiffness,
+                damping: physics.overscroll_damping,
+            }),
+        );
     }
 
     pub fn take_scroll_notices(&mut self) -> Vec<Gesture> {
@@ -916,13 +935,15 @@ impl Tree {
         velocity: f32,
         snap: bool,
     ) {
-        if !snap
-            && velocity.abs() >= 0.02
-            && self.axis_blocked(id, prop, velocity)
-            && self.handoff_fling(id, prop, velocity)
-        {
-            self.note_scroll_phase(id, crate::ScrollPhase::Idle, 0.0, 0.0);
-            return;
+        if !snap && velocity.abs() >= 0.02 && self.axis_blocked(id, prop, velocity) {
+            if self.handoff_fling(id, prop, velocity) {
+                self.note_scroll_phase(id, crate::ScrollPhase::Idle, 0.0, 0.0);
+                return;
+            }
+            if self.bounce_fling(id, prop, velocity) {
+                self.note_scroll_phase(id, crate::ScrollPhase::Settling, 0.0, 0.0);
+                return;
+            }
         }
         if !snap && let Some(target) = self.snap_target(id, prop) {
             let current = self.axis_offset(id, prop);
@@ -944,6 +965,48 @@ impl Tree {
             }
         }
         self.sync_scroll_phase(id);
+    }
+
+    /// Leftover coast velocity becomes an overscroll spring at the wall.
+    /// `sim_v` is the offset derivative, the same sign `Friction` used.
+    fn bounce_fling(&mut self, id: NodeId, prop: crate::AnimProp, sim_v: f32) -> bool {
+        let physics = self.scroll_physics(id).unwrap_or_default();
+        if physics.overscroll == crate::OverscrollMode::Clamp {
+            return false;
+        }
+        let (ox, oy) = self
+            .node(id)
+            .ok()
+            .map(|node| node.overscroll())
+            .unwrap_or((0.0, 0.0));
+        let (view_w, view_h) = self
+            .node(id)
+            .ok()
+            .map(|node| (node.w, node.h))
+            .unwrap_or((0.0, 0.0));
+        let (over_prop, x0, dimension) = if prop == crate::AnimProp::ScrollX {
+            (crate::AnimProp::OverscrollX, ox, view_w)
+        } else {
+            (crate::AnimProp::OverscrollY, oy, view_h)
+        };
+        let v0 = sim_v * physics.band.slope(x0, dimension);
+        if x0.abs() > f32::EPSILON {
+            // Already past the wall. Pointer-up armed the return spring;
+            // restarting it here would freeze the stretch on this sample.
+            return false;
+        }
+        if v0.abs() < 0.02 {
+            return false;
+        }
+        if self
+            .motions
+            .iter()
+            .any(|motion| motion.node == id && motion.prop == over_prop)
+        {
+            return true;
+        }
+        self.arm_overscroll_axis(id, over_prop, x0, v0, physics);
+        true
     }
 
     fn handoff_fling(&mut self, id: NodeId, prop: crate::AnimProp, sim_v: f32) -> bool {
@@ -1087,6 +1150,17 @@ impl Tree {
             (geom.overscroll_x, geom.overscroll_y, true)
         };
         if changed {
+            let offset_y = self.scroll_offset(id).map(|pair| pair.1).unwrap_or(0.0);
+            tracing::info!(
+                target: "impasto::gesture",
+                scroll = id.to_raw(),
+                phase = phase.name(),
+                vx,
+                vy,
+                offset_y,
+                overscroll_y = oy,
+                "scroll phase"
+            );
             self.scroll_notices.push(Gesture::ScrollPhaseChanged {
                 id,
                 phase,
@@ -1114,7 +1188,8 @@ fn is_scroll_motion(prop: crate::AnimProp) -> bool {
 
 impl Tree {
     /// Snap a scroll's offsets to whole device pixels after its motion ends.
-    /// A no-op at the default pixel scale of one.
+    /// A no-op at the default pixel scale of one. Overscroll stays; a fling
+    /// that just hit the wall still has leftover velocity to bounce.
     pub(super) fn settle_scroll_pixels(&mut self, id: NodeId) {
         if (self.pixel_scale - 1.0).abs() <= f32::EPSILON {
             return;
@@ -1122,9 +1197,27 @@ impl Tree {
         let Ok((x, y)) = self.scroll_offset(id) else {
             return;
         };
-        let snapped = (self.settle_pixels(x), self.settle_pixels(y));
-        if (snapped.0 - x).abs() > f32::EPSILON || (snapped.1 - y).abs() > f32::EPSILON {
-            let _ = self.set_scroll_offset(id, snapped.0, snapped.1);
+        let (max_x, max_y) = self.scroll_limits(id);
+        let axis = self.axis_of(id);
+        let nx = if axis.allows_x() {
+            self.settle_pixels(x).clamp(0.0, max_x.max(0.0))
+        } else {
+            x
+        };
+        let ny = if axis.allows_y() {
+            self.settle_pixels(y).clamp(0.0, max_y.max(0.0))
+        } else {
+            y
+        };
+        if (nx - x).abs() <= f32::EPSILON && (ny - y).abs() <= f32::EPSILON {
+            return;
         }
+        let Some(geom) = self.node_mut(id).ok().and_then(|node| node.scroll_mut()) else {
+            return;
+        };
+        geom.offset_x = nx;
+        geom.offset_y = ny;
+        self.layer_epoch = self.layer_epoch.wrapping_add(1);
+        self.mark_paint();
     }
 }

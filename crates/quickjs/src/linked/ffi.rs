@@ -146,6 +146,14 @@ pub(super) struct QjsFns {
         usize,
         *mut super::call::CallOut,
     ) -> i32,
+    pub(super) fault: unsafe extern "C" fn(
+        *mut c_void,
+        *const c_char,
+        *const c_char,
+        usize,
+        *const c_char,
+        usize,
+    ),
 }
 
 unsafe extern "C" {
@@ -236,6 +244,12 @@ unsafe extern "C" {
     pub(super) fn qjs_jobs_pending(host: *mut c_void) -> i32;
     pub(super) fn qjs_tap_count(host: *mut c_void) -> i32;
     pub(super) fn qjs_close(host: *mut c_void);
+    pub(super) fn qjs_take_error(
+        host: *mut c_void,
+        message: *mut *mut c_char,
+        stack: *mut *mut c_char,
+    );
+    pub(super) fn qjs_free(ptr: *mut c_void);
     pub(super) fn qjs_dispatch_back(host: *mut c_void, err: *mut c_char, err_len: usize) -> i32;
     pub(super) fn qjs_try_shortcut(
         host: *mut c_void,

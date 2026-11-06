@@ -56,6 +56,7 @@ function mockHost() {
     nextSibling: () => sibling,
     isText: (node) => texts.has(node),
     setText: (node, utf8) => note("setText", [node, utf8]),
+    setTextRuns: (node, runs) => note("setTextRuns", [node, runs]),
     setFontSize: (node, fontSize) => note("setFontSize", [node, fontSize]),
     setColor: (node, color) => note("setColor", [node, color]),
     setGap: (node, gap) => note("setGap", [node, gap]),
@@ -421,6 +422,7 @@ if (!threw) fail("unknown tag");
 
 await reorderFor();
 await colorStaysPut();
+await runsAreSent();
 
 console.log("solid-renderer host tree ok");
 
@@ -576,5 +578,56 @@ async function colorStaysPut(): Promise<void> {
   }
   if (!names.includes("setColor")) {
     fail(`expected setColor, saw ${names.join(",")}`);
+  }
+}
+
+async function runsAreSent(): Promise<void> {
+  const solid = await import("solid-js");
+  const universal = await import("@solidjs/universal");
+  const { Text, bindText } = await import("../runtime/text.ts");
+  const mock = mockHost();
+  const options = hostRendererOptions(mock.host);
+  bindText(options);
+  const renderer = universal.createRenderer(options);
+  const parent = options.createElement("column");
+  solid.createRoot(() => {
+    renderer.render(
+      () =>
+        Text({
+          fontSize: 16,
+          runs: [
+            {
+              text: "Im",
+              color: "#112233",
+              gradient: {
+                kind: "linear",
+                from: [0, 0],
+                to: [1, 0],
+                stops: [
+                  { offset: 0, color: "#111111" },
+                  { offset: 1, color: [255, 0, 0, 255] },
+                ],
+              },
+            },
+          ],
+        }),
+      parent,
+    );
+  });
+  solid.flush();
+  const call = mock.calls.find((entry) => entry.name === "setTextRuns");
+  if (call === undefined) {
+    fail("missing setTextRuns");
+  }
+  const runs = call.args[1] as {
+    text: string;
+    color: number[];
+    gradient?: { kind: string; stops: { color: number[] }[] };
+  }[];
+  if (runs[0]?.text !== "Im" || runs[0].color[0] !== 0x11) {
+    fail(`runs ${JSON.stringify(runs)}`);
+  }
+  if (runs[0].gradient?.kind !== "linear" || runs[0].gradient.stops[1]?.color[0] !== 255) {
+    fail(`gradient ${JSON.stringify(runs[0].gradient)}`);
   }
 }

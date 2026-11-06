@@ -11,6 +11,89 @@ fn event(phase: Phase, x: f32, y: f32, time: f64) -> PointerEvent {
     PointerEvent::new(phase, x, y, time)
 }
 
+/// A refresh header sits above the in-flow content. The viewport clips it until
+/// overscroll translates the whole scroll subtree down.
+#[test]
+fn an_absolute_header_above_the_content_is_clipped_until_overscroll() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(mono());
+    tree.set_viewport(0.0, 0.0, 80.0, 40.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let scroll = tree.scroll_with(ScrollAxis::Vertical)?;
+    tree.set_fill(scroll)?;
+    tree.set_scroll_physics(
+        scroll,
+        ScrollPhysics {
+            accept: ScrollAccept::Always,
+            ..ScrollPhysics::default()
+        },
+    )?;
+    let content = tree.column(0.0)?;
+    let header = tree.decorated([9, 0, 0, 255], 0.0)?;
+    tree.set_axis_size(
+        header,
+        crate::AxisSize::Points(80.0),
+        crate::AxisSize::Points(16.0),
+    )?;
+    tree.set_position(header, true)?;
+    tree.set_inset(
+        header,
+        crate::Inset {
+            top: Some(-16.0),
+            right: None,
+            bottom: None,
+            left: Some(0.0),
+        },
+    )?;
+    let body = tree.sized(80.0, 200.0)?;
+    tree.add_child(content, header)?;
+    tree.add_child(content, body)?;
+    tree.add_child(scroll, content)?;
+    tree.add_child(root, scroll)?;
+    tree.layout()?;
+
+    let content_box = tree.rect(content)?;
+    let header_box = tree.rect(header)?;
+    assert!(
+        (content_box.h - 200.0).abs() < 0.5,
+        "header must not lengthen the content, h={}",
+        content_box.h
+    );
+    assert!(
+        (header_box.y - (content_box.y - 16.0)).abs() < 0.5,
+        "header y {} content y {}",
+        header_box.y,
+        content_box.y
+    );
+
+    let resting = tree.record()?;
+    assert!(
+        !resting.commands.iter().any(|command| matches!(
+            command,
+            protocol::Command::Rect {
+                color: [9, 0, 0, 255],
+                ..
+            }
+        )),
+        "resting frame painted the header"
+    );
+
+    let pulled = tree.resolve_scroll(scroll, 0.0, -40.0)?;
+    assert!(pulled.overscroll_y < -8.0, "pull {:?}", pulled);
+    let revealed = tree.record()?;
+    assert!(
+        revealed.commands.iter().any(|command| matches!(
+            command,
+            protocol::Command::Rect {
+                color: [9, 0, 0, 255],
+                ..
+            }
+        )),
+        "overscroll should bring the header into the viewport"
+    );
+    Ok(())
+}
+
 #[test]
 fn horizontal_scroll_stays_the_viewport_width() -> Result<(), crate::Error> {
     let mut tree = Tree::new(mono());
@@ -188,8 +271,14 @@ fn a_coast_that_hits_the_inner_edge_continues_on_the_parent() -> Result<(), crat
     tree.stop_scroll(inner)?;
     tree.stop_scroll(outer)?;
     tree.arm_fling(inner, 0.0, -1.5)?;
+    let mut bounced = false;
     for step in 0..120 {
         tree.tick_motions(f64::from(step) * 16.0);
+        if tree.overscroll(inner)?.1.abs() > 1.0
+            || tree.scroll_phase(inner)? == ScrollPhase::Settling
+        {
+            bounced = true;
+        }
     }
     assert!(
         tree.scroll_offset(outer)?.1 < 0.5,
@@ -197,8 +286,7 @@ fn a_coast_that_hits_the_inner_edge_continues_on_the_parent() -> Result<(), crat
         tree.scroll_offset(outer)
     );
     assert!(tree.scroll_offset(inner)?.1 > 100.0);
-    let _ = ScrollPhase::Idle;
-    let _ = event;
+    assert!(bounced, "chain off should bounce the inner, not idle");
     Ok(())
 }
 
@@ -234,6 +322,36 @@ fn overscroll_spring_returns_to_idle_at_zero() -> Result<(), crate::Error> {
     }
     assert!(idle, "spring never returned to idle");
     assert!(tree.overscroll(scroll)?.1.abs() < 0.5);
+    Ok(())
+}
+
+#[test]
+fn a_new_drag_takes_the_overscroll_spring() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(mono());
+    tree.set_viewport(0.0, 0.0, 100.0, 80.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let scroll = tree.scroll()?;
+    let body = tree.image("asset:a", 80.0, 400.0)?;
+    tree.add_child(scroll, body)?;
+    tree.add_child(root, scroll)?;
+    tree.layout()?;
+    tree.pointer(event(Phase::Down, 20.0, 20.0, 0.0));
+    tree.pointer(event(Phase::Move, 20.0, 40.0, 20.0));
+    tree.set_scroll_offset(scroll, 0.0, -80.0)?;
+    tree.pointer(event(Phase::Up, 20.0, 40.0, 40.0));
+    assert_eq!(tree.scroll_phase(scroll)?, ScrollPhase::Settling);
+    tree.tick_motions(56.0);
+    tree.pointer(event(Phase::Down, 20.0, 40.0, 80.0));
+    tree.pointer(event(Phase::Move, 20.0, 60.0, 100.0));
+    let held = tree.overscroll(scroll)?.1;
+    assert_eq!(tree.scroll_phase(scroll)?, ScrollPhase::Dragging);
+    tree.tick_motions(500.0);
+    let after = tree.overscroll(scroll)?.1;
+    assert!(
+        (after - held).abs() < 0.01,
+        "spring kept running {held} -> {after}"
+    );
     Ok(())
 }
 
@@ -599,6 +717,43 @@ fn a_settling_scroll_lands_on_whole_device_pixels() -> Result<(), crate::Error> 
     Ok(())
 }
 
+#[test]
+fn pixel_settle_keeps_overscroll() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(mono());
+    tree.set_viewport(0.0, 0.0, 100.0, 40.0)?;
+    let root = tree.column(0.0)?;
+    tree.set_fill(root)?;
+    let scroll = tree.scroll()?;
+    let body = tree.image("asset:a", 80.0, 400.0)?;
+    tree.add_child(scroll, body)?;
+    tree.add_child(root, scroll)?;
+    tree.layout()?;
+    tree.set_pixel_scale(2.625)?;
+    tree.set_scroll_offset(scroll, 0.0, -40.0)?;
+    let held = tree.overscroll(scroll)?.1;
+    assert!(held < -1.0, "pull {held}");
+    tree.scroll_to(scroll, 0.0, 33.3, None, None)?;
+    let mut now = 0.0f64;
+    while tree.tick_motions(now + 16.0) {
+        now += 16.0;
+        if now > 2_000.0 {
+            break;
+        }
+    }
+    let y = tree.scroll_offset(scroll)?.1;
+    let snapped = (y * 2.625).round() / 2.625;
+    assert!(
+        (snapped - y).abs() < 1e-3,
+        "offset {y} is off the pixel grid"
+    );
+    assert!(
+        (tree.overscroll(scroll)?.1 - held).abs() < 0.01,
+        "settle cleared overscroll {held} -> {:?}",
+        tree.overscroll(scroll)
+    );
+    Ok(())
+}
+
 fn filled_scroll(height: f32) -> Result<(Tree, crate::NodeId), crate::Error> {
     let mut tree = Tree::new(mono());
     tree.set_viewport(0.0, 0.0, 80.0, 40.0)?;
@@ -626,6 +781,103 @@ fn resolve_scroll_stretches_past_the_edge() -> Result<(), crate::Error> {
     let sample = tree.resolve_scroll(scroll, 0.0, -40.0)?;
     assert_eq!(sample.offset_y, 0.0);
     assert!(sample.overscroll_y < 0.0, "stretch {:?}", sample);
+    Ok(())
+}
+
+fn tick_until_bounce(
+    tree: &mut Tree,
+    scroll: crate::NodeId,
+) -> Result<(f32, ScrollPhase), crate::Error> {
+    let mut peak = 0.0f32;
+    let mut now = 0.0f64;
+    for _ in 0..80 {
+        now += 16.0;
+        tree.tick_motions(now);
+        let over = tree.overscroll(scroll)?.1;
+        peak = if over.abs() > peak.abs() { over } else { peak };
+        let phase = tree.scroll_phase(scroll)?;
+        if peak.abs() > 1.0 && phase == ScrollPhase::Settling {
+            return Ok((peak, phase));
+        }
+        if phase == ScrollPhase::Idle && peak.abs() > 1.0 {
+            return Ok((peak, phase));
+        }
+    }
+    Ok((peak, tree.scroll_phase(scroll)?))
+}
+
+#[test]
+fn a_coast_that_hits_the_far_edge_bounces() -> Result<(), crate::Error> {
+    let (mut tree, scroll) = filled_scroll(200.0)?;
+    tree.set_scroll_offset(scroll, 0.0, 40.0)?;
+    tree.arm_fling(scroll, 0.0, -2.0)?;
+    let (peak, phase) = tick_until_bounce(&mut tree, scroll)?;
+    assert!(
+        peak > 1.0,
+        "far-edge bounce never stretched: peak {peak} phase {phase:?} offset {:?}",
+        tree.scroll_offset(scroll)
+    );
+    let limit = tree.scroll_offset(scroll)?.1;
+    assert!(limit > 100.0, "should rest on the far edge, offset {limit}");
+    let mut now = 1_280.0;
+    for _ in 0..40 {
+        now += 16.0;
+        tree.tick_motions(now);
+    }
+    assert_eq!(tree.scroll_phase(scroll)?, ScrollPhase::Idle);
+    assert!(tree.overscroll(scroll)?.1.abs() < 0.5);
+    Ok(())
+}
+
+#[test]
+fn a_coast_that_hits_the_near_edge_bounces() -> Result<(), crate::Error> {
+    let (mut tree, scroll) = filled_scroll(200.0)?;
+    tree.set_scroll_offset(scroll, 0.0, 40.0)?;
+    tree.arm_fling(scroll, 0.0, 2.0)?;
+    let (peak, phase) = tick_until_bounce(&mut tree, scroll)?;
+    assert!(
+        peak < -1.0,
+        "near-edge bounce never stretched: peak {peak} phase {phase:?} offset {:?}",
+        tree.scroll_offset(scroll)
+    );
+    assert!(tree.scroll_offset(scroll)?.1.abs() < 0.5);
+    Ok(())
+}
+
+#[test]
+fn clamp_mode_does_not_bounce_at_the_wall() -> Result<(), crate::Error> {
+    let (mut tree, scroll) = filled_scroll(200.0)?;
+    tree.set_scroll_physics(
+        scroll,
+        ScrollPhysics {
+            overscroll: OverscrollMode::Clamp,
+            accept: ScrollAccept::Always,
+            ..ScrollPhysics::default()
+        },
+    )?;
+    tree.set_scroll_offset(scroll, 0.0, 40.0)?;
+    tree.arm_fling(scroll, 0.0, -2.0)?;
+    let mut now = 0.0f64;
+    for _ in 0..80 {
+        now += 16.0;
+        tree.tick_motions(now);
+    }
+    assert_eq!(tree.overscroll(scroll)?.1, 0.0);
+    assert_eq!(tree.scroll_phase(scroll)?, ScrollPhase::Idle);
+    Ok(())
+}
+
+#[test]
+fn leftover_velocity_not_the_asymptote_seeds_the_bounce() -> Result<(), crate::Error> {
+    let (mut tree, scroll) = filled_scroll(120.0)?;
+    tree.set_scroll_offset(scroll, 0.0, 20.0)?;
+    tree.arm_fling(scroll, 0.0, -2.0)?;
+    let (peak, _) = tick_until_bounce(&mut tree, scroll)?;
+    let asymptote = 2.0 * crate::SCROLL_TAU_MS;
+    assert!(
+        peak.abs() > 1.0 && peak.abs() < asymptote * 0.2,
+        "bounce used the destination leftover, peak {peak} asymptote {asymptote}"
+    );
     Ok(())
 }
 

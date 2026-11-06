@@ -24,16 +24,22 @@ impl ImpellerShaper {
         }
     }
 
-    fn fill_spans(&mut self, key: &MetricsKey, color: [u8; 4], span_colors: Option<&[[u8; 4]]>) {
+    fn fill_spans(
+        &mut self,
+        key: &MetricsKey,
+        color: [u8; 4],
+        span_paints: Option<&[protocol::SpanPaint]>,
+    ) {
         self.spans.clear();
         for (index, span) in key.spans.iter().enumerate() {
-            let span_color = span_colors
-                .and_then(|colors| colors.get(index))
-                .copied()
-                .unwrap_or(color);
+            let span_color = match span_paints.and_then(|paints| paints.get(index)) {
+                Some(protocol::SpanPaint::Color(paint)) => *paint,
+                Some(protocol::SpanPaint::Gradient(_)) | None => color,
+            };
             self.spans.push(protocol::TextSpan {
                 utf8: span.utf8.to_string(),
                 color: span_color,
+                gradient: None,
                 weight: span.weight,
                 underline: span.underline,
                 line_through: span.line_through,
@@ -50,10 +56,10 @@ impl ImpellerShaper {
         &mut self,
         key: &MetricsKey,
         color: [u8; 4],
-        span_colors: Option<&[[u8; 4]]>,
+        span_paints: Option<&[protocol::SpanPaint]>,
         body: impl FnOnce(&mut engine::Typography, &[protocol::TextSpan]) -> T,
     ) -> T {
-        self.fill_spans(key, color, span_colors);
+        self.fill_spans(key, color, span_paints);
         let spans = std::mem::take(&mut self.spans);
         let value = {
             let mut typography = self.typography.borrow_mut();
@@ -93,7 +99,7 @@ impl Shaper for ImpellerShaper {
         self.with_spans(
             &key.metrics,
             key.color,
-            Some(key.span_colors.as_ref()),
+            Some(key.span_paints.as_ref()),
             |typography, spans| {
                 typography
                     .measure_with_spans(
@@ -114,14 +120,14 @@ impl Shaper for ImpellerShaper {
     }
 
     fn metrics_paint(&mut self, key: &PaintKey) -> Arc<ParagraphMetrics> {
-        self.paint_metrics(&key.metrics, key.color, Some(key.span_colors.as_ref()))
+        self.paint_metrics(&key.metrics, key.color, Some(key.span_paints.as_ref()))
     }
 
     fn touch(&mut self, key: &PaintKey) {
         self.with_spans(
             &key.metrics,
             key.color,
-            Some(key.span_colors.as_ref()),
+            Some(key.span_paints.as_ref()),
             |typography, spans| {
                 typography.touch_measure(
                     &key.metrics.text,
@@ -202,9 +208,9 @@ impl ImpellerShaper {
         &mut self,
         key: &MetricsKey,
         color: [u8; 4],
-        span_colors: Option<&[[u8; 4]]>,
+        span_paints: Option<&[protocol::SpanPaint]>,
     ) -> Arc<ParagraphMetrics> {
-        self.with_spans(key, color, span_colors, |typography, spans| {
+        self.with_spans(key, color, span_paints, |typography, spans| {
             let style = key.style.as_ref();
             let font_size = f32::from_bits(key.font_size);
             let max_width = f32::from_bits(key.max_width);

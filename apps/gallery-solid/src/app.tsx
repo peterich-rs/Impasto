@@ -11,7 +11,6 @@ import { ProfilePage } from "./pages/profile.tsx";
 import { SearchPage } from "./pages/search.tsx";
 import { OrderSheetHost } from "./pages/order.tsx";
 import { closeToast, toastOpen, toastText } from "./state/toast.ts";
-import type { Router } from "@impasto/solid-router";
 
 export function App(): NodeHandle {
   const router = createRouter(
@@ -64,7 +63,9 @@ export function App(): NodeHandle {
   host.append(content, barWrap);
 
   createTrackedEffect(() => {
-    const hidden = liveDepth(router) > 1;
+    // Keep the bar clamped until the exiting page unmounts. Unhiding it on the
+    // first pop frame relayouts both stacked pages and hitchs the transition.
+    const hidden = router.depth() > 1;
     host.setAxisSize(barWrap, "auto", hidden ? 0 : "auto");
     host.setMinSize(barWrap, 0, 0);
     host.setMaxSize(barWrap, 4096, hidden ? 0 : 4096);
@@ -84,9 +85,3 @@ export function App(): NodeHandle {
 
   return { id: shell };
 }
-
-/** Stack entries still exiting or covering do not count as a pushed page. */
-function liveDepth(router: Router): number {
-  return router.stack().filter((entry) => entry.phase !== "exit").length;
-}
-

@@ -1081,6 +1081,7 @@ mod tests {
                 protocol::TextSpan {
                     utf8: "ab".to_owned(),
                     color,
+                    gradient: None,
                     weight: 400,
                     underline: false,
                     line_through: false,
@@ -1089,6 +1090,7 @@ mod tests {
                 protocol::TextSpan {
                     utf8: "cd".to_owned(),
                     color,
+                    gradient: None,
                     weight,
                     underline: false,
                     line_through: false,

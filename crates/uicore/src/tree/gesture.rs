@@ -110,6 +110,10 @@ pub(super) struct DragState {
     pub(super) previous_move: Option<Sample>,
     pub(super) latest_move: Option<Sample>,
     pub(super) velocity: crate::VelocityRing,
+    /// One "scroll not claimed" note per press. Later moves stay quiet.
+    miss_noted: bool,
+    /// Last time a locked drag logged an offset rebase.
+    noted_ms: f64,
 }
 
 /// Press, drag, and right button for one [`crate::PointerId`].
@@ -269,7 +273,25 @@ impl Tree {
                 previous_move: None,
                 latest_move: None,
                 velocity: crate::VelocityRing::new(),
+                miss_noted: false,
+                noted_ms: f64::NEG_INFINITY,
             });
+        }
+        if let Some(scroll) = scroll {
+            let phase = self
+                .scroll_phase(scroll)
+                .map(|phase| phase.name())
+                .unwrap_or("none");
+            let offset_y = self.scroll_offset(scroll).map(|pair| pair.1).unwrap_or(0.0);
+            tracing::info!(
+                target: "impasto::gesture",
+                pointer = event.pointer.0,
+                pressed = pressed.map(NodeId::to_raw).unwrap_or(0),
+                scroll = scroll.to_raw(),
+                phase,
+                offset_y,
+                "pointer down"
+            );
         }
         route.long_press = self.long_press_watch(hit, &event);
         if early
@@ -452,13 +474,51 @@ impl Tree {
         {
             return self.lock_select(route, event, target);
         }
-        if let Some(scroll) =
-            hit.and_then(|id| self.scroll_for(id, dx, dy, Some(event.pointer), true))
-        {
+        let from_hit = hit
+            .filter(|id| self.get(*id).is_some())
+            .and_then(|id| self.scroll_for(id, dx, dy, Some(event.pointer), true));
+        let from_scroll = route
+            .drag
+            .as_ref()
+            .and_then(|drag| drag.scroll)
+            .and_then(|id| self.scroll_for(id, dx, dy, Some(event.pointer), true));
+        if let Some(scroll) = from_hit.or(from_scroll) {
             self.arena.scroll_locks.insert(scroll, event.pointer);
             return self.lock_drag(route, event, scroll);
         }
+        if route.drag.as_ref().is_some_and(|drag| !drag.miss_noted) {
+            let reason = self.claim_miss_reason(hit, event.pointer);
+            let scroll = hit.and_then(|id| self.drag_of(id)).map(NodeId::to_raw);
+            if let Some(drag) = route.drag.as_mut() {
+                drag.miss_noted = true;
+            }
+            tracing::warn!(
+                target: "impasto::gesture",
+                reason,
+                pointer = event.pointer.0,
+                scroll = scroll.unwrap_or(0),
+                dx,
+                dy,
+                "scroll not claimed"
+            );
+        }
         self.move_pressed(route, event)
+    }
+
+    /// Why [`Tree::scroll_for`] declined this drag. The innermost scroll is enough
+    /// to tell a stuck lock from an edge or a miss.
+    fn claim_miss_reason(&self, hit: Option<NodeId>, pointer: PointerId) -> &'static str {
+        let Some(hit) = hit else {
+            return "no-hit";
+        };
+        let Some(scroll) = self.drag_of(hit) else {
+            return "no-scroll";
+        };
+        if crate::gesture::scroll_locked_by_other(&self.arena.scroll_locks, scroll, Some(pointer)) {
+            "locked-by-other"
+        } else {
+            "not-claimed"
+        }
     }
 
     pub(super) fn drag_by(
@@ -505,6 +565,20 @@ impl Tree {
             watch.cancelled = true;
         }
         let (ox, oy) = self.scroll_offset(scroll).unwrap_or((0.0, 0.0));
+        let phase = self
+            .scroll_phase(scroll)
+            .map(|phase| phase.name())
+            .unwrap_or("none");
+        tracing::info!(
+            target: "impasto::gesture",
+            pointer = event.pointer.0,
+            scroll = scroll.to_raw(),
+            phase,
+            dx,
+            dy,
+            offset_y = oy,
+            "scroll locked"
+        );
         drag.desired_x = ox - dx;
         drag.desired_y = oy - dy;
         let desired_x = drag.desired_x;
@@ -556,12 +630,63 @@ impl Tree {
         };
         let still = self.point_hits_node(target, event.x, event.y);
         if still {
-            Vec::new()
-        } else {
-            route.pressed = None;
-            route.drag = None;
-            vec![Gesture::Release(target)]
+            return Vec::new();
         }
+        // The row can be shorter than the slop. Releasing it must not throw away
+        // the scroll while the finger is still inside the scroller from pointer down.
+        let tracked = route
+            .drag
+            .as_ref()
+            .filter(|drag| !drag.locked)
+            .and_then(|drag| drag.scroll);
+        let keep = tracked.is_some_and(|scroll| self.point_hits_node(scroll, event.x, event.y));
+        if let Some(drag) = route.drag.as_ref().filter(|drag| !drag.locked) {
+            let dx = event.x - drag.origin_x;
+            let dy = event.y - drag.origin_y;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let scroll = tracked.or_else(|| self.drag_of(target));
+            let phase = scroll
+                .and_then(|id| self.scroll_phase(id).ok())
+                .map(|phase| phase.name())
+                .unwrap_or("none");
+            let reason = if dist < DRAG_SLOP {
+                "left-before-slop"
+            } else {
+                "left-after-miss"
+            };
+            if keep {
+                tracing::info!(
+                    target: "impasto::gesture",
+                    reason,
+                    pointer = event.pointer.0,
+                    pressed = target.to_raw(),
+                    scroll = scroll.map(NodeId::to_raw).unwrap_or(0),
+                    phase,
+                    dist,
+                    dx,
+                    dy,
+                    "press released"
+                );
+            } else {
+                tracing::warn!(
+                    target: "impasto::gesture",
+                    reason,
+                    pointer = event.pointer.0,
+                    pressed = target.to_raw(),
+                    scroll = scroll.map(NodeId::to_raw).unwrap_or(0),
+                    phase,
+                    dist,
+                    dx,
+                    dy,
+                    "gesture dropped"
+                );
+            }
+        }
+        route.pressed = None;
+        if !keep {
+            route.drag = None;
+        }
+        vec![Gesture::Release(target)]
     }
 
     pub(super) fn pointer_up(
@@ -588,6 +713,18 @@ impl Tree {
             route.pressed = None;
             route.long_press = None;
             self.unlock_pointer(event.pointer);
+            if let Some(id) = scroll {
+                let offset_y = self.scroll_offset(id).map(|pair| pair.1).unwrap_or(0.0);
+                tracing::info!(
+                    target: "impasto::gesture",
+                    pointer = event.pointer.0,
+                    scroll = id.to_raw(),
+                    vx = speed.0,
+                    vy = speed.1,
+                    offset_y,
+                    "pointer up"
+                );
+            }
             return scroll
                 .map(|id| {
                     if self.get(id).is_some_and(|node| node.kind == Kind::Scroll) {
@@ -701,6 +838,15 @@ impl Tree {
         route: &mut PointerRoute,
         pointer: PointerId,
     ) -> Vec<Gesture> {
+        if let Some(drag) = route.drag.as_ref() {
+            tracing::info!(
+                target: "impasto::gesture",
+                pointer = pointer.0,
+                scroll = drag.scroll.map(NodeId::to_raw).unwrap_or(0),
+                locked = drag.locked,
+                "pointer cancel"
+            );
+        }
         route.secondary = None;
         let mut gestures = Vec::new();
         if let Some(target) = route.pressed.take() {
@@ -743,11 +889,26 @@ impl Tree {
 
     /// A programmatic write during a drag continues from the requested position.
     pub(super) fn rebase_drag_desired(&mut self, id: NodeId, x: f32, y: f32) {
+        let now = self.clock_ms;
         for route in self.arena.routes.values_mut() {
             let Some(drag) = route.drag.as_mut() else {
                 continue;
             };
             if drag.locked && drag.scroll == Some(id) {
+                let jump_x = (drag.desired_x - x).abs();
+                let jump_y = (drag.desired_y - y).abs();
+                if (jump_x > 0.5 || jump_y > 0.5) && now - drag.noted_ms > 200.0 {
+                    drag.noted_ms = now;
+                    tracing::warn!(
+                        target: "impasto::gesture",
+                        reason = "offset-rebase",
+                        scroll = id.to_raw(),
+                        from_y = drag.desired_y,
+                        to_y = y,
+                        jump_y,
+                        "drag desired overwritten"
+                    );
+                }
                 drag.desired_x = x;
                 drag.desired_y = y;
             }
@@ -757,7 +918,8 @@ impl Tree {
     /// Drops pointer routes whose target sits in `root`'s subtree.
     ///
     /// Inserting a row must not cancel a drag on the surrounding scroll.
-    /// Removing that scroll, or the pressed region, does.
+    /// Removing that scroll does. Removing the pressed row only cancels the
+    /// click; the drag stays if the scroll is still in the tree.
     pub(super) fn drop_routes_in(&mut self, root: NodeId) {
         let pointers: Vec<_> = self.arena.routes.keys().copied().collect();
         for pointer in pointers {
@@ -767,20 +929,26 @@ impl Tree {
             let pressed = route.pressed;
             let secondary = route.secondary.as_ref().map(|press| press.target);
             let drag_scroll = route.drag.as_ref().and_then(|drag| drag.scroll);
-            let drag_hit = route.drag.as_ref().and_then(|drag| drag.hit);
             let drag_locked = route.drag.as_ref().is_some_and(|drag| drag.locked);
             let drop_press = pressed.is_some_and(|id| self.contains(root, id));
             let drop_secondary = secondary.is_some_and(|id| self.contains(root, id));
-            let drop_drag = drag_scroll.is_some_and(|id| self.contains(root, id))
-                || (!drag_locked && drag_hit.is_some_and(|id| self.contains(root, id)));
+            let drop_drag = drag_scroll.is_some_and(|id| self.contains(root, id));
+            if drop_drag && route.drag.is_some() {
+                tracing::warn!(
+                    target: "impasto::gesture",
+                    reason = "row-detached",
+                    pointer = pointer.0,
+                    pressed = pressed.map(NodeId::to_raw).unwrap_or(0),
+                    scroll = drag_scroll.map(NodeId::to_raw).unwrap_or(0),
+                    locked = drag_locked,
+                    "gesture dropped"
+                );
+            }
             let Some(route) = self.arena.routes.get_mut(&pointer) else {
                 continue;
             };
             if drop_press {
                 route.pressed = None;
-                if route.drag.as_ref().is_some_and(|drag| !drag.locked) {
-                    route.drag = None;
-                }
             }
             if drop_secondary {
                 route.secondary = None;

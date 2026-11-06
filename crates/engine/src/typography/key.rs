@@ -38,7 +38,7 @@ pub(super) struct SpanKey {
     pub(super) utf8: String,
     pub(super) family: String,
     pub(super) weight: u16,
-    pub(super) color: [u8; 4],
+    pub(super) paint: protocol::SpanPaint,
     pub(super) underline: bool,
     pub(super) line_through: bool,
 }
@@ -174,7 +174,7 @@ pub(super) fn hash_query(
         span.utf8.hash(&mut hasher);
         span.family.as_deref().unwrap_or("").hash(&mut hasher);
         span.weight.hash(&mut hasher);
-        span.color.hash(&mut hasher);
+        span.paint().hash(&mut hasher);
         span.underline.hash(&mut hasher);
         span.line_through.hash(&mut hasher);
     }
@@ -220,7 +220,7 @@ pub(super) fn key_matches(
             stored.utf8 == span.utf8
                 && stored.family == span.family.as_deref().unwrap_or("")
                 && stored.weight == span.weight
-                && stored.color == span.color
+                && stored.paint == span.paint()
                 && stored.underline == span.underline
                 && stored.line_through == span.line_through
         })
@@ -260,7 +260,7 @@ pub(super) fn para_key(
                 utf8: span.utf8.clone(),
                 family: span.family.clone().unwrap_or_default(),
                 weight: span.weight,
-                color: span.color,
+                paint: span.paint(),
                 underline: span.underline,
                 line_through: span.line_through,
             })
@@ -279,6 +279,7 @@ mod key_tests {
         let spans = [TextSpan {
             utf8: "ab".into(),
             color: [1, 2, 3, 4],
+            gradient: None,
             weight: 700,
             underline: true,
             line_through: false,

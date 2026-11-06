@@ -39,7 +39,7 @@ vsync → 冲刷 → layout → driver tick → 脏了再 layout → onLayout �
 
 `frame` 里先排空 job，再 `onFrame`，再扫掉本轮摘下且没有挂回的子树，然后布局。`ListDriver` 和 `ScrollController` 的 tick 在布局之后、`onLayout` 之前。树不脏且可见集没变时，沿用上一份层树，不调用 `onLayout`。driver 还有未测完的行高，或树上还有运动，会话再要一帧。`requestFrame` 只再要恰好一帧。脚本错误清掉这一次的再要帧。
 
-`layer_epoch` 未变、缩放相同、`needs_present` 为假则跳过 `submit_layers` 和 `present`。为真则 `PresentCached`。`Resumed` 与 `Invalidate` 置 `needs_present`。`Hidden`、`Paused`、`MemoryWarning` 调用 `Engine::trim`，GPU 进入 `Flush`。`Dead` 取消这一帧。present 连续失败从第 3 次起退避。`BadScene` 不进退避，也不重建 Vulkan 链。
+`layer_epoch` 未变、缩放相同、`needs_present` 为假则跳过 `submit_layers` 和 `present`。为真则 `PresentCached`。`Resumed` 与 `Invalidate` 置 `needs_present`。`Hidden`、`Paused`、`MemoryWarning` 调用 `Engine::trim`，GPU 进入 `Flush`。`Dead` 取消这一帧。present 连续失败从第 3 次起退避。`BadScene` 不进退避，也不重建 Vulkan 链。定时器 `Wake` 在已有 vsync token 时不抢跑这一帧，也不取消那次回调；`Resumed` 会丢掉卡住的 token 再武装一次。
 
 macOS 与 Android 宿主始终打开应用内 devtools。面板经 `registerTopLayer` 挂在渲染器根 stack 上，不往 `DrawList` 加调试命令。日志是调用点上的 `tracing` 事件，由 `hostshell` 过滤后分发到控制台、xlog 和 devtools。超预算只在进入和恢复各打一条。全量计时在 `FrameSample`。
 
@@ -49,7 +49,7 @@ macOS 与 Android 宿主始终打开应用内 devtools。面板经 `registerTopL
 
 `Tree::record` 交出扁平 `DrawList`（场景坐标）和 `LayerTree`。picture 内坐标相对该 picture 的原点。一段 picture 属于一个 owner：根，或本帧开层的 `Scroll`、半透明 `Opacity`、非单位 `Transform`、子树里还有开层节点的 `Clip`，以及 blur、backdrop、非 `SrcOver` 的 blend。没有这些的 `Clip` 把 `PushClip` 留在父 picture 里。`ListDriver` 把行标成 picture owner 后，每行单独一张 picture。滚动偏移在 `Offset` 层上，不因此重建 picture。行 picture 的 `Offset` 是场景坐标，命令原点是 `(0, 0)`。
 
-文字命令带字号、`max_width`、颜色和段落样式。渲染引擎按命令里的字号绘制，不乘 `point_scale`。`point_scale` 只乘在根 builder 上。
+文字命令带字号、`max_width`、颜色、段落样式，以及可选的 spans。每个 span 有自己的颜色、字重、字体、下划线和删除线。`gradient` 存在时前景用 `protocol::Gradient`，unit square 映射到该 span 在段落局部坐标里的行盒并集；下划线和删除线仍用 `color`。只改颜色或渐变时标绘制，不重新测量。渲染引擎按命令里的字号绘制，不乘 `point_scale`。`point_scale` 只乘在根 builder 上。
 
 ## UI 核心
 
@@ -70,6 +70,8 @@ macOS 与 Android 宿主始终打开应用内 devtools。面板经 `registerTopL
 
 `Scroll` 的轴、认领、overscroll 和 fling 以 `uicore/src/tree/scroll.rs`、`uicore/src/motion.rs` 为准。缺省 `Both` + `Content`。`ScrollArea` 缺省 vertical + `Always`。`VirtualList` 固定 vertical。单轴丢掉跨轴增量。`Row` / `Column` 的 `max_size` 是父级 100%；`Scroll` 的直接子节点在滚动轴上把这道上限改回 auto。`Text`、`Image`、`Sized` 不收缩。
 
+脚本能读到的滚动数据：跟手后的 offset、`onDragBegin` / `onDragBy` / `onDragEnd`、`onScrollState` 的相位与速度、`overscroll`、`scrollOffset`、`limits`、`rect`、`flingTarget`。`stopScroll` 摘掉惯性越界弹簧，不把越界量写成 0。`animate` 的 `overscrollY` 可以把越界量收到 0。拖动锁定时摘掉该节点正在跑的越界弹簧。越界弹簧的静止位置仍是 0，结束时写成 0。负的 `overscroll.y` 是视口顶部的缝：录制用 offset 加 overscroll，内容下移后缝是透明的。`PullMode` 的 Edge / Overscroll 提交仍在 `uicore`，它不把缝停住。惯性样本夹到极限且没有父级接着滚时，剩余速度装上越界弹簧；像素对齐只改 offset。tau 仍是 500。
+
 命中从最后一个子节点往前。宽或高为 0 跳过。`Text` 和 `Image` 命中盒子就收下。容器把命中交给子节点。点必须落在每个祖先盒子内。点击和拖拽在 `Tree::pointer`：8 点以内抬起是 click，超过则锁定声明了拖动的区域，否则锁定还能滚的 `Scroll`。
 
 测试排版是 `MonoShaper`。宿主测量和绘制共用 `Engine` 的 `Typography`。
@@ -86,7 +88,7 @@ macOS 与 Android 宿主始终打开应用内 devtools。面板经 `registerTopL
 
 ## 运行时会话
 
-quickjs-ng 持有 `JSRuntime` 和一棵 `Tree`。`glue.c` 注册 `core._mutate`、`_query`、`_effect`，以及监听、driver 和宿主模块。具名方法在 `core.js`，编号在 `abi.yml`。句柄是 `u64`，`0` 表示没有节点。没有源码时 `open` 返回 `NotLinked`。
+quickjs-ng 持有 `JSRuntime` 和一棵 `Tree`。`glue.c` 注册 `core._mutate`、`_query`、`_effect`，以及监听、driver 和宿主模块。具名方法在 `core.js`，编号在 `abi.yml`。句柄是 `u64`，`0` 表示没有节点。没有源码时 `open` 返回 `NotLinked`。脚本异常的 message 和 stack 分开进入 `DiagnosticsHub` 的 errors ring。JS 回调里的 panic 在 `extern "C"` 内接住，不退出进程。渲染线程一条命令超过 5 秒时，`impasto::watchdog` 记一条错误。
 
 `@impasto/<pkg>/host` 由 `JS_NewCModule` 物化。未注册是链接期错误。大字节（≥4KB）进会话 slab，由 quickjs 的 realloc 钩子回收。
 
@@ -102,7 +104,7 @@ Kotlin 会话还没接上原生树。见 `docs/refactor-plan.md`。
 
 ## 控件
 
-语言包只包模板、信号和渲染回调。`Button` 是 `PointerRegion`、`Padding`、`Decorated`、`Text`。`ScrollArea` 和 `VirtualList` 的窗口、夹紧、刷新在 `uicore` 的 `ListDriver` 和 `ScrollController`。语言侧在条目变化时推 `{ key, type, sticky }`，用 `noteRow` 登记行节点。可见集变了才经 `onDriver` 交出 `Detach` / `Adopt` / `Set` / `Place`。`createSlot` 仍是语言侧的 owner。`Field` 绑定 `uicore` 的 `TextEditor`，偏移是 UTF-16，编辑按字形簇。
+语言包只包模板、信号和渲染回调。`Button` 是 `PointerRegion`、`Padding`、`Decorated`、`Text`。`ScrollArea` 和 `VirtualList` 的窗口与夹紧在 `uicore` 的 `ListDriver` 和 `ScrollController`。把下拉缝停在阈值高度、等业务结束再收回，是 `solid-ui` 的 `RefreshControl`：它读 `overscroll`，过阈值时先 `stopScroll` 再把缝 `animate` 到阈值，结束后 `animate` 到 0。指示器是滚动内容列里绝对定位的第一个孩子，`inset` 顶在内容原点之上；视口把它裁掉，负的 `overscroll` 把整段内容下移后才露出来。`VirtualList` 的 `onRefresh` 仍走 `PullMode::Edge`。语言侧在条目变化时推 `{ key, type, sticky }`，用 `noteRow` 登记行节点。可见集变了才经 `onDriver` 交出 `Detach` / `Adopt` / `Set` / `Place`。`createSlot` 仍是语言侧的 owner。`Field` 绑定 `uicore` 的 `TextEditor`，偏移是 UTF-16，编辑按字形簇。
 
 ## 应用
 

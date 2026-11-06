@@ -435,7 +435,6 @@ struct Runtime {
     image_tx: Sender<ImageRequest>,
     frame_number: u64,
     semantics: Option<uicore::SemanticsUpdate>,
-    panic_streak: u32,
     wake_tx: Sender<Option<i64>>,
     dump_list: bool,
     present_failures: u32,
@@ -447,6 +446,9 @@ struct Runtime {
     hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
     inspect_dir: Option<std::path::PathBuf>,
     inspect_written: bool,
+    busy: Arc<crate::watchdog::Busy>,
+    /// One extra frame was already armed for the latest script fault.
+    diag_armed: bool,
 }
 
 impl Drop for Runtime {
@@ -551,6 +553,8 @@ fn render(
         time.mono_ms = crate::net::mono_ms();
         inbox_frames.post(Command::Frame { token, time });
     }));
+    let busy = Arc::new(crate::watchdog::Busy::new());
+    crate::watchdog::spawn(Arc::clone(&busy), boot.devtools.clone());
     let mut runtime = Runtime {
         services,
         engine,
@@ -568,7 +572,6 @@ fn render(
         images: ImageCache::new(),
         image_tx: links.image_tx,
         frame_number: 0,
-        panic_streak: 0,
         semantics: None,
         wake_tx: links.wake_tx,
         dump_list: boot.dump_list,
@@ -581,6 +584,8 @@ fn render(
         hub: boot.devtools.clone(),
         inspect_dir: boot.inspect_dir,
         inspect_written: false,
+        busy,
+        diag_armed: false,
     };
     while let Some(command) = inbox.recv() {
         if on_command(&mut runtime, command, acks)? {
@@ -591,7 +596,56 @@ fn render(
     Ok(())
 }
 
+pub(super) fn session_call(body: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err() {
+        tracing::error!(target: "impasto::script", "session call panicked");
+    }
+}
+
+struct FaultPlan {
+    diag_armed: bool,
+    arm_extra: bool,
+    stop_again: bool,
+}
+
+fn fault_followup(diag_armed: bool, faults: &[session::ScriptFault]) -> FaultPlan {
+    if faults.is_empty() {
+        return FaultPlan {
+            diag_armed: false,
+            arm_extra: false,
+            stop_again: false,
+        };
+    }
+    let held = faults
+        .iter()
+        .any(|fault| fault.source != "listener" && fault.source != "rejection");
+    if !diag_armed {
+        FaultPlan {
+            diag_armed: true,
+            arm_extra: true,
+            stop_again: false,
+        }
+    } else {
+        FaultPlan {
+            diag_armed: true,
+            arm_extra: false,
+            stop_again: held,
+        }
+    }
+}
+
 fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bool, BootError> {
+    runtime.busy.enter(crate::command::command_tag(&command));
+    let result = dispatch_command(runtime, command, acks);
+    runtime.busy.leave();
+    result
+}
+
+fn dispatch_command(
+    runtime: &mut Runtime,
+    command: Command,
+    acks: &Acks,
+) -> Result<bool, BootError> {
     match command {
         Command::Shutdown => Ok(true),
         command @ (Command::SurfaceDestroyed { .. }
@@ -680,7 +734,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     if let Some(metrics) = frame.metrics {
         runtime.point_scale = metrics.device_pixel_ratio;
         if let Some(session) = runtime.session.as_mut() {
-            session.metrics(&metrics);
+            session_call(|| session.metrics(&metrics));
         }
     }
     let gesture_started = Instant::now();
@@ -694,15 +748,15 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                 y = event.y,
                 "pointer"
             );
-            session.pointer(event);
+            session_call(|| session.pointer(event));
         }
         for event in frame.inputs {
             tracing::trace!(target: "impasto::host", kind = input_kind(&event), "input");
-            session.input(event);
+            session_call(|| session.input(event));
         }
         if frame.ime_dismissed {
             tracing::trace!(target: "impasto::host", "ime dismissed");
-            session.ime_dismissed();
+            session_call(|| session.ime_dismissed());
         }
     }
     let gesture_ms = gesture_started.elapsed().as_secs_f64() * 1000.0;
@@ -725,13 +779,26 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
         let framed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.frame(time)));
         match framed {
             Ok(mut output) => {
-                runtime.panic_streak = 0;
                 again = output.again;
                 leave = output.exit;
-                if let Some(hub) = runtime.hub.as_ref()
-                    && let Some(message) = session.take_script_error()
-                {
-                    hub.error("listener", &message, None, Some(runtime.frame_number));
+                let faults = session.take_faults();
+                let plan = fault_followup(runtime.diag_armed, &faults);
+                runtime.diag_armed = plan.diag_armed;
+                if plan.stop_again {
+                    again = false;
+                }
+                if let Some(hub) = runtime.hub.as_ref() {
+                    for fault in &faults {
+                        hub.error(
+                            fault.source,
+                            &fault.message,
+                            (!fault.stack.is_empty()).then_some(fault.stack.as_str()),
+                            Some(runtime.frame_number),
+                        );
+                    }
+                }
+                if plan.arm_extra {
+                    arm(runtime);
                 }
                 if let Some(tree) = output.layers.take() {
                     if runtime.dump_list {
@@ -776,14 +843,10 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
             }
             Err(_) => {
                 tracing::error!(
-                    target: "impasto::render",
-                    "render thread panicked; keeping the previous frame"
+                    target: "impasto::script",
+                    "session call panicked"
                 );
                 again = false;
-                runtime.panic_streak = runtime.panic_streak.saturating_add(1);
-                if runtime.panic_streak >= 3 {
-                    leave = true;
-                }
             }
         }
     } else {
@@ -950,6 +1013,9 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
         runtime.installed = None;
     }
     if matches!(after, AfterPresent::Shown { .. } | AfterPresent::Stop) {
+        if matches!(after, AfterPresent::Shown { .. }) {
+            runtime.busy.arm();
+        }
         if runtime.present_failures >= present::PRESENT_BACKOFF_AFTER {
             tracing::info!(target: "impasto::render::present", "present recovered");
         }
@@ -1145,6 +1211,8 @@ fn end_frame(runtime: &mut Runtime, again: bool, stop: bool) -> bool {
     note_wake(runtime, deadline);
     if let Some(token) = runtime.scheduler.finish(again) {
         runtime.vsync.request_frame(token);
+    } else if runtime.scheduler.token_armed() {
+        // A posted vsync still owns this token. Cancelling it would freeze input.
     } else {
         runtime.vsync.cancel();
     }
@@ -1301,7 +1369,7 @@ mod tests {
     use session::{FrameOutput, FrameTime, IoEvent, Metrics};
 
     use super::install_fonts;
-    use super::{Acks, Installed, Runtime, lock, on_command, on_frame};
+    use super::{Acks, Installed, Runtime, fault_followup, lock, on_command, on_frame};
     use crate::command::{Command, FrameToken, SurfaceId, SurfaceTarget};
     use crate::images::{ImageHandle, ImageReady};
     use crate::scheduler::FrameScheduler;
@@ -1491,7 +1559,6 @@ mod tests {
                 image_tx,
                 frame_number: 0,
                 semantics: None,
-                panic_streak: 0,
                 wake_tx,
                 dump_list: false,
                 present_failures: 0,
@@ -1503,6 +1570,8 @@ mod tests {
                 hub: None,
                 inspect_dir: None,
                 inspect_written: false,
+                busy: Arc::new(crate::watchdog::Busy::new()),
+                diag_armed: false,
             };
             Self {
                 runtime,
@@ -1567,6 +1636,65 @@ mod tests {
         assert!(harness.runtime.input.is_paused());
         assert!(!harness.command(Command::Wake));
         assert_eq!(harness.frame_count(), 0);
+    }
+
+    #[test]
+    fn wake_does_not_cancel_an_armed_vsync() {
+        let mut harness = TestHarness::new();
+        harness.open_dummy();
+        let token = harness
+            .vsync
+            .last_token()
+            .expect("SurfaceReady arms one vsync token");
+        let cancels_before = harness.vsync.cancel_count();
+        assert!(!harness.command(Command::Wake));
+        assert_eq!(harness.frame_count(), 0);
+        assert_eq!(harness.vsync.cancel_count(), cancels_before);
+        assert!(!harness.command(Command::Frame { token, time: now() }));
+        assert_eq!(harness.frame_count(), 1);
+    }
+
+    #[test]
+    fn wake_without_an_armed_token_runs_a_frame() {
+        let mut harness = TestHarness::new();
+        harness.open_dummy();
+        let token = harness
+            .vsync
+            .last_token()
+            .expect("SurfaceReady arms one vsync token");
+        assert!(!harness.command(Command::Frame { token, time: now() }));
+        // SurfaceReady arms twice; the leftover pending token is not a timer wake.
+        harness.runtime.scheduler.cancel();
+        harness.runtime.vsync.cancel();
+        let frames_before = harness.frame_count();
+        assert!(!harness.command(Command::Wake));
+        assert!(
+            harness.frame_count() > frames_before,
+            "an idle surface must still run a timer wake"
+        );
+    }
+
+    #[test]
+    fn resumed_replaces_a_stuck_armed_token() {
+        let mut harness = TestHarness::new();
+        harness.open_dummy();
+        let stuck = harness
+            .vsync
+            .last_token()
+            .expect("SurfaceReady arms one vsync token");
+        assert!(
+            harness.runtime.scheduler.request().is_none(),
+            "an armed token must block the next request"
+        );
+        let cancels_before = harness.vsync.cancel_count();
+        assert!(!harness.command(Command::Lifecycle(session::Lifecycle::Resumed)));
+        assert!(harness.vsync.cancel_count() > cancels_before);
+        let next = harness
+            .vsync
+            .last_token()
+            .expect("Resumed arms a replacement token");
+        assert_ne!(next, stuck);
+        assert!(harness.runtime.scheduler.accept(next));
     }
 
     #[test]
@@ -1716,6 +1844,49 @@ mod tests {
     }
 
     #[test]
+    fn faults_arm_one_extra_frame_then_stop_when_held() {
+        let listener = session::ScriptFault {
+            source: "listener",
+            message: "boom".into(),
+            stack: "at f".into(),
+        };
+        let frame = session::ScriptFault {
+            source: "frame",
+            message: "interrupted (frame)".into(),
+            stack: String::new(),
+        };
+        let first = fault_followup(false, std::slice::from_ref(&listener));
+        assert!(first.arm_extra);
+        assert!(!first.stop_again);
+        assert!(first.diag_armed);
+        let second = fault_followup(true, &[frame]);
+        assert!(!second.arm_extra);
+        assert!(second.stop_again);
+        let quiet = fault_followup(true, &[]);
+        assert!(!quiet.diag_armed);
+    }
+
+    #[test]
+    fn a_panicking_frame_stays_on_the_render_thread() {
+        struct PanicSession;
+        impl session::Session for PanicSession {
+            fn metrics(&mut self, _: &Metrics) {}
+            fn pointer(&mut self, _: uicore::PointerEvent) {}
+            fn frame(&mut self, _: FrameTime) -> FrameOutput {
+                panic!("js host");
+            }
+        }
+        let mut harness = TestHarness::new();
+        harness.open_dummy();
+        harness.runtime.session = Some(Box::new(PanicSession));
+        let token = harness
+            .vsync
+            .last_token()
+            .expect("SurfaceReady arms one vsync token");
+        assert!(!harness.command(Command::Frame { token, time: now() }));
+    }
+
+    #[test]
     fn stale_frame_token_is_dropped() {
         let mut harness = TestHarness::new();
         harness.open_dummy();
@@ -1796,9 +1967,10 @@ mod tests {
         ))));
         let frames_before = harness.frame_count();
         assert!(!harness.command(Command::Wake));
-        assert!(
-            harness.frame_count() > frames_before,
-            "Wake on an open surface must run the session frame"
+        assert_eq!(
+            harness.frame_count(),
+            frames_before,
+            "Wake must not steal the vsync token SurfaceReady just armed"
         );
         assert!(!harness.command(Command::Lifecycle(session::Lifecycle::Hidden)));
         assert!(harness.runtime.input.is_paused());

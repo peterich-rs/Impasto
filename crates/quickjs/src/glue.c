@@ -121,7 +121,9 @@ typedef struct QjsFns {
                  size_t text_len, const uint8_t color[4], CallOut *out);
     int (*effect)(void *session, int kind, uint64_t node, const double *nums, int nnums,
                   const uint8_t color[4], const char *text, size_t text_len, const uint8_t *bytes,
-                  size_t byte_len, CallOut *out)
+                  size_t byte_len, CallOut *out);
+    void (*fault)(void *session, const char *source, const char *message, size_t message_len,
+                  const char *stack, size_t stack_len);
 } QjsFns;
 
 typedef struct BackHandler {
@@ -233,6 +235,10 @@ typedef struct Host {
     JSClassID scroll_class;
     int wants_frame;
     int64_t deadline_ms;
+    char *exc_message;
+    char *exc_stack;
+    const char *entry_kind;
+    uint64_t entry_id;
     BackHandler *backs;
     size_t back_len;
     size_t back_cap;
@@ -301,12 +307,130 @@ static int64_t now_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + (int64_t)ts.tv_nsec / 1000000;
 }
 
-static void arm_slice(Host *host) {
+static void disarm_entry_ptr(Host **slot) {
+    Host *host = slot ? *slot : NULL;
+    if (!host) {
+        return;
+    }
+    host->entry_kind = NULL;
+    host->entry_id = 0;
+}
+
+static void arm_slice(Host *host, const char *kind, uint64_t id) {
+    host->entry_kind = kind;
+    host->entry_id = id;
     host->deadline_ms = now_ms() + QJS_TURN_MS;
 }
 
 static void arm_eval(Host *host) {
+    host->entry_kind = "eval";
+    host->entry_id = 0;
     host->deadline_ms = now_ms() + QJS_EVAL_MS;
+}
+
+static const char *dispatch_kind_name(int kind) {
+    switch (kind) {
+    case 0:
+        return "click";
+    case 1:
+        return "press";
+    case 2:
+        return "release";
+    case 3:
+        return "dragBegin";
+    case 4:
+        return "dragBy";
+    case 5:
+        return "dragEnd";
+    case 6:
+        return "focus";
+    case 7:
+        return "blur";
+    case 8:
+        return "key";
+    case 9:
+        return "text";
+    case 10:
+        return "composing";
+    case 11:
+        return "hover";
+    case 12:
+        return "leave";
+    case 13:
+        return "wheel";
+    case 14:
+        return "secondaryClick";
+    case 15:
+        return "scroll";
+    case 16:
+        return "textReplaced";
+    case 17:
+        return "link";
+    case 18:
+        return "longPress";
+    case 19:
+        return "doubleTap";
+    case 20:
+        return "zoom";
+    case 21:
+        return "scrollPhase";
+    default:
+        return "tap";
+    }
+}
+
+static char *dup_cstr(const char *text) {
+    size_t len;
+    char *out;
+    if (!text) {
+        return NULL;
+    }
+    len = strlen(text);
+    out = malloc(len + 1);
+    if (!out) {
+        return NULL;
+    }
+    memcpy(out, text, len + 1);
+    return out;
+}
+
+static int should_annotate(const char *message) {
+    return message &&
+           (strstr(message, "interrupted") != NULL || strcmp(message, "quickjs job round limit") == 0);
+}
+
+static char *annotate_message(Host *host, const char *message) {
+    const char *body = message ? message : "quickjs error";
+    size_t len;
+    char *out;
+    if (!host->entry_kind || !should_annotate(body)) {
+        return dup_cstr(body);
+    }
+    len = strlen(body) + strlen(host->entry_kind) + 64;
+    out = malloc(len);
+    if (!out) {
+        return dup_cstr(body);
+    }
+    if (host->entry_id != 0) {
+        snprintf(out, len, "%s (%s node %llu)", body, host->entry_kind,
+                 (unsigned long long)host->entry_id);
+    } else {
+        snprintf(out, len, "%s (%s)", body, host->entry_kind);
+    }
+    return out;
+}
+
+static void release_stash(Host *host) {
+    free(host->exc_message);
+    free(host->exc_stack);
+    host->exc_message = NULL;
+    host->exc_stack = NULL;
+}
+
+static void stash_plain(Host *host, const char *message) {
+    release_stash(host);
+    host->exc_message = annotate_message(host, message);
+    host->exc_stack = NULL;
 }
 
 static int interrupt_handler(JSRuntime *rt, void *opaque) {
@@ -323,7 +447,7 @@ static Host *host_of(JSContext *ctx) {
     return JS_GetContextOpaque(ctx);
 }
 
-static void write_exception(JSContext *ctx, char *err, size_t err_len) {
+static void stash_exception(Host *host, JSContext *ctx, char *err, size_t err_len) {
     JSValue exception = JS_GetException(ctx);
     const char *text = JS_ToCString(ctx, exception);
     JSValue stack_val = JS_GetPropertyStr(ctx, exception, "stack");
@@ -331,9 +455,11 @@ static void write_exception(JSContext *ctx, char *err, size_t err_len) {
     if (!JS_IsException(stack_val) && !JS_IsUndefined(stack_val)) {
         stack = JS_ToCString(ctx, stack_val);
     }
+    release_stash(host);
+    host->exc_message = annotate_message(host, text ? text : "quickjs error");
+    host->exc_stack = stack ? dup_cstr(stack) : NULL;
     if (err && err_len > 0) {
-        snprintf(err, err_len, "%s%s%s", text ? text : "quickjs error", stack ? "\n" : "",
-                 stack ? stack : "");
+        snprintf(err, err_len, "%s", host->exc_message ? host->exc_message : "quickjs error");
     }
     if (stack) {
         JS_FreeCString(ctx, stack);
@@ -345,19 +471,51 @@ static void write_exception(JSContext *ctx, char *err, size_t err_len) {
     JS_FreeValue(ctx, exception);
 }
 
+static void publish_fault(Host *host, const char *source) {
+    if (!host->fns.fault || !host->exc_message) {
+        return;
+    }
+    host->fns.fault(host->fns.session, source, host->exc_message, strlen(host->exc_message),
+                    host->exc_stack, host->exc_stack ? strlen(host->exc_stack) : 0);
+}
+
+static void log_stashed(Host *host, int level) {
+    size_t mlen;
+    size_t slen;
+    size_t total;
+    char *line;
+    if (!host->fns.log || !host->exc_message) {
+        return;
+    }
+    mlen = strlen(host->exc_message);
+    slen = host->exc_stack ? strlen(host->exc_stack) : 0;
+    total = mlen + (slen ? 1 + slen : 0);
+    line = malloc(total + 1);
+    if (!line) {
+        host->fns.log(host->fns.session, host->exc_message, mlen, level);
+        return;
+    }
+    memcpy(line, host->exc_message, mlen);
+    if (slen) {
+        line[mlen] = '\n';
+        memcpy(line + mlen + 1, host->exc_stack, slen);
+    }
+    line[total] = 0;
+    host->fns.log(host->fns.session, line, total, level);
+    free(line);
+}
+
 /* `report` logs and keeps dispatching. `freeze` fails the call so the frame holds. */
 static void listener_failed(Host *host, char *err, size_t err_len, int *failed) {
     if (!host->listener_freeze) {
-        char local[512];
-        local[0] = 0;
-        write_exception(host->ctx, local, sizeof(local));
-        if (host->fns.log) {
-            host->fns.log(host->fns.session, local, strlen(local), 3);
-        }
+        stash_exception(host, host->ctx, NULL, 0);
+        publish_fault(host, "listener");
+        log_stashed(host, 3);
+        release_stash(host);
         return;
     }
     if (!*failed) {
-        write_exception(host->ctx, err, err_len);
+        stash_exception(host, host->ctx, err, err_len);
     } else {
         JSValue exception = JS_GetException(host->ctx);
         JS_FreeValue(host->ctx, exception);
@@ -390,12 +548,40 @@ static char *format_rejection(JSContext *ctx, JSValueConst reason) {
     return out;
 }
 
+static void rejection_fault(Host *host, JSValueConst reason) {
+    JSContext *ctx = host->ctx;
+    const char *text = JS_ToCString(ctx, reason);
+    JSValue stack_val = JS_GetPropertyStr(ctx, reason, "stack");
+    const char *stack = NULL;
+    char *message;
+    size_t len;
+    if (!JS_IsException(stack_val) && !JS_IsUndefined(stack_val)) {
+        stack = JS_ToCString(ctx, stack_val);
+    }
+    len = 32 + (text ? strlen(text) : 0);
+    message = malloc(len + 1);
+    if (message && host->fns.fault) {
+        snprintf(message, len + 1, "unhandled rejection: %s", text ? text : "quickjs error");
+        host->fns.fault(host->fns.session, "rejection", message, strlen(message), stack,
+                        stack ? strlen(stack) : 0);
+    }
+    free(message);
+    if (stack) {
+        JS_FreeCString(ctx, stack);
+    }
+    JS_FreeValue(ctx, stack_val);
+    if (text) {
+        JS_FreeCString(ctx, text);
+    }
+}
+
 static void report_rejection(Host *host, JSValueConst reason) {
     JSContext *ctx = host->ctx;
     char *text = format_rejection(ctx, reason);
     if (!text) {
         return;
     }
+    rejection_fault(host, reason);
     /* The language packs install `globalThis.__reportUnhandled` when the host
        has no DOM events; it formats through the same reportError path. */
     JSValue global = JS_GetGlobalObject(ctx);
@@ -3046,6 +3232,8 @@ Host *qjs_open(const QjsFns *fns) {
 
 int qjs_eval(Host *host, const char *src, size_t len, const char *name, char *err, size_t err_len) {
     arm_eval(host);
+    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    (void)armed;
     /* QuickJS reads input[input_len] and requires it to be 0. */
     char *owned = malloc(len + 1);
     if (!owned) {
@@ -3084,12 +3272,14 @@ int qjs_eval(Host *host, const char *src, size_t len, const char *name, char *er
         JS_FreeValue(host->ctx, result);
         return 0;
     }
-    write_exception(host->ctx, err, err_len);
+    stash_exception(host, host->ctx, err, err_len);
     return -1;
 }
 
 int qjs_dispatch(Host *host, uint64_t id, int kind, double a, double b, char *err, size_t err_len) {
-    arm_slice(host);
+    arm_slice(host, dispatch_kind_name(kind), id);
+    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    (void)armed;
     int failed = 0;
     for (size_t index = 0; index < host->tap_len; index++) {
         JSValue *slot = NULL;
@@ -3126,7 +3316,9 @@ int qjs_dispatch(Host *host, uint64_t id, int kind, double a, double b, char *er
 int qjs_dispatch_input(Host *host, uint64_t id, int kind, const char *utf8, size_t len,
                        int with_span, int sel_start, int sel_end, int compose_start,
                        int compose_end, char *err, size_t err_len) {
-    arm_slice(host);
+    arm_slice(host, dispatch_kind_name(kind), id);
+    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    (void)armed;
     int failed = 0;
     for (size_t index = 0; index < host->tap_len; index++) {
         JSValue *slot = NULL;
@@ -3172,19 +3364,22 @@ int qjs_dispatch_text(Host *host, uint64_t id, const char *utf8, size_t len, cha
 #define QJS_JOB_ROUND_LIMIT 32
 
 int qjs_drain_jobs(Host *host, char *err, size_t err_len) {
-    arm_slice(host);
+    arm_slice(host, "jobs", 0);
+    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    (void)armed;
     int rounds = 0;
     while (JS_IsJobPending(host->rt)) {
         if (rounds >= QJS_JOB_ROUND_LIMIT) {
+            stash_plain(host, "quickjs job round limit");
             if (err && err_len > 0) {
-                snprintf(err, err_len, "quickjs job round limit");
+                snprintf(err, err_len, "%s", host->exc_message ? host->exc_message : "quickjs job round limit");
             }
             return -1;
         }
         JSContext *ctx = NULL;
         int ran = JS_ExecutePendingJob(host->rt, &ctx);
         if (ran < 0) {
-            write_exception(ctx ? ctx : host->ctx, err, err_len);
+            stash_exception(host, ctx ? ctx : host->ctx, err, err_len);
             return -1;
         }
         if (ran == 0) {
@@ -3219,7 +3414,9 @@ int qjs_scroll_state(Host *host, uint64_t id, int phase, float vx, float vy, flo
     if (!host || !host->has_scroll_state) {
         return 0;
     }
-    arm_slice(host);
+    arm_slice(host, "scroll", id);
+    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    (void)armed;
     JSValue args[6];
     args[0] = handle_value(host->ctx, id);
     args[1] = JS_NewInt32(host->ctx, phase);
@@ -3235,7 +3432,7 @@ int qjs_scroll_state(Host *host, uint64_t id, int phase, float vx, float vy, flo
         JS_FreeValue(host->ctx, result);
         return 0;
     }
-    write_exception(host->ctx, err, err_len);
+    stash_exception(host, host->ctx, err, err_len);
     return -1;
 }
 
@@ -3245,7 +3442,9 @@ int qjs_driver(Host *host, int kind, uint32_t index, uint32_t generation, int ta
     if (!host || !host->has_driver) {
         return 0;
     }
-    arm_slice(host);
+    arm_slice(host, "driver", 0);
+    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    (void)armed;
     JSValue args[14];
     args[0] = JS_NewInt32(host->ctx, kind);
     args[1] = JS_NewUint32(host->ctx, index);
@@ -3269,7 +3468,7 @@ int qjs_driver(Host *host, int kind, uint32_t index, uint32_t generation, int ta
         JS_FreeValue(host->ctx, result);
         return 0;
     }
-    write_exception(host->ctx, err, err_len);
+    stash_exception(host, host->ctx, err, err_len);
     return -1;
 }
 
@@ -3277,18 +3476,22 @@ int qjs_layout(Host *host, char *err, size_t err_len) {
     if (!host || !host->has_layout) {
         return 0;
     }
-    arm_slice(host);
+    arm_slice(host, "layout", 0);
+    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    (void)armed;
     JSValue result = JS_Call(host->ctx, host->layout_cb, JS_UNDEFINED, 0, NULL);
     if (!JS_IsException(result)) {
         JS_FreeValue(host->ctx, result);
         return 0;
     }
-    write_exception(host->ctx, err, err_len);
+    stash_exception(host, host->ctx, err, err_len);
     return -1;
 }
 
 int qjs_frame(Host *host, double target_ms, double interval_ms, char *err, size_t err_len) {
-    arm_slice(host);
+    arm_slice(host, "frame", 0);
+    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    (void)armed;
     if (!host->has_frame) {
         return 0;
     }
@@ -3302,7 +3505,7 @@ int qjs_frame(Host *host, double target_ms, double interval_ms, char *err, size_
         JS_FreeValue(host->ctx, result);
         return 0;
     }
-    write_exception(host->ctx, err, err_len);
+    stash_exception(host, host->ctx, err, err_len);
     return -1;
 }
 
@@ -3342,14 +3545,16 @@ int qjs_apply_settings(Host *host, const char *locale, size_t locale_len, double
     if (host->settings_len == 0) {
         return 0;
     }
-    arm_slice(host);
+    arm_slice(host, "settings", 0);
+    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    (void)armed;
     JSValue object = settings_object(host->ctx, host);
     for (size_t index = 0; index < host->settings_len; index++) {
         JSValue fn = host->settings_handlers[index].fn;
         JSValue result = JS_Call(host->ctx, fn, JS_UNDEFINED, 1, &object);
         if (JS_IsException(result)) {
             JS_FreeValue(host->ctx, object);
-            write_exception(host->ctx, err, err_len);
+            stash_exception(host, host->ctx, err, err_len);
             return -1;
         }
         JS_FreeValue(host->ctx, result);
@@ -3362,12 +3567,14 @@ int qjs_dispatch_back(Host *host, char *err, size_t err_len) {
     if (!host || host->back_len == 0) {
         return 0;
     }
-    arm_slice(host);
+    arm_slice(host, "back", 0);
+    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    (void)armed;
     for (size_t index = host->back_len; index > 0; index--) {
         JSValue fn = host->backs[index - 1].fn;
         JSValue result = JS_Call(host->ctx, fn, JS_UNDEFINED, 0, NULL);
         if (JS_IsException(result)) {
-            write_exception(host->ctx, err, err_len);
+            stash_exception(host, host->ctx, err, err_len);
             return -1;
         }
         int handled = JS_ToBool(host->ctx, result);
@@ -3387,7 +3594,10 @@ int qjs_try_shortcut(Host *host, const char *spec, char *err, size_t err_len) {
         if (strcmp(host->shortcuts[index].spec, spec) != 0) {
             continue;
         }
-        arm_slice(host);
+        arm_slice(host, "shortcut", 0);
+        Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+        (void)armed;
+    (void)armed;
         JSValue result = JS_Call(host->ctx, host->shortcuts[index].fn, JS_UNDEFINED, 0, NULL);
         if (JS_IsException(result)) {
             int failed = 0;
@@ -3402,10 +3612,42 @@ int qjs_try_shortcut(Host *host, const char *spec, char *err, size_t err_len) {
 
 #include "runtime_host.inc"
 
+void qjs_take_error(Host *host, char **message, char **stack) {
+    if (!host) {
+        if (message) {
+            *message = NULL;
+        }
+        if (stack) {
+            *stack = NULL;
+        }
+        return;
+    }
+    if (message) {
+        *message = host->exc_message;
+    } else {
+        free(host->exc_message);
+    }
+    if (stack) {
+        *stack = host->exc_stack;
+    } else {
+        free(host->exc_stack);
+    }
+    host->exc_message = NULL;
+    host->exc_stack = NULL;
+}
+
+void qjs_free(void *ptr) {
+    free(ptr);
+}
+
 void qjs_close(Host *host) {
     if (!host) {
         return;
     }
+    free(host->exc_message);
+    free(host->exc_stack);
+    host->exc_message = NULL;
+    host->exc_stack = NULL;
     for (size_t index = 0; index < host->tap_len; index++) {
         free_tap(host, &host->taps[index]);
     }

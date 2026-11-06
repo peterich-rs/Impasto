@@ -5,7 +5,7 @@ license.workspace = true
 publish.workspace = true
 
 [lib]
-name = "host"
+name = "impasto"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]

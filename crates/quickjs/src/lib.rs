@@ -6,6 +6,10 @@
 use uicore::Shaper;
 
 mod error;
+// Run parser for `setTextRuns`. The interpreter calls it from `linked`.
+// Unit tests still build this module when quickjs-ng is absent.
+#[cfg(any(quickjs, test))]
+mod text_runs;
 
 mod abi {
     include!(concat!(env!("OUT_DIR"), "/abi.rs"));
@@ -838,7 +842,8 @@ mod tests {
             let second = session.frame(session::FrameTime::at(16.0));
             assert!(first.layers.is_some());
             assert!(second.layers.is_none());
-            assert!(session.take_script_error().is_some());
+            let message = session.take_script_error().unwrap_or_default();
+            assert!(message.contains("(frame)"), "script error was {message:?}");
         }
     }
 
@@ -1225,12 +1230,53 @@ mod tests {
             assert!(session.take_script_error().is_none());
             let message = logged.borrow().clone();
             assert!(
-                message.contains("interrupted"),
+                message.contains("interrupted") && message.contains("(click"),
                 "script error was {message:?}"
+            );
+            let faults = session.take_faults();
+            assert!(
+                faults
+                    .iter()
+                    .any(|fault| fault.source == "listener" && !fault.stack.is_empty()),
+                "faults were {faults:?}"
             );
             let second = session.frame(session::FrameTime::at(16.0));
             assert!(second.layers.is_none());
             assert!(texts(&first).contains(&"Go"));
+        }
+    }
+
+    #[test]
+    fn a_runaway_timer_names_its_entry() {
+        #[cfg(not(quickjs))]
+        {}
+        #[cfg(quickjs)]
+        {
+            let source = r#"
+                const label = core.text("idle", 16, [0, 0, 0, 255]);
+                setTimeout(() => {
+                    const start = Date.now();
+                    while (Date.now() - start < 400) {}
+                }, 0);
+            "#;
+            let mut session = match super::JsSession::open(
+                source,
+                "timer.js",
+                uicore::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
+            session.metrics(&metrics());
+            let _ = session.frame(session::FrameTime::at(0.0));
+            let message = session.take_script_error().unwrap_or_default();
+            assert!(message.contains("(timer)"), "script error was {message:?}");
+            let faults = session.take_faults();
+            assert!(
+                faults.iter().any(|fault| fault.source == "timer"),
+                "faults were {faults:?}"
+            );
         }
     }
 
@@ -1352,6 +1398,13 @@ mod tests {
             assert!(
                 line.contains("unhandled rejection") && line.contains("boom"),
                 "rejection log was {logged:?}"
+            );
+            let faults = session.take_faults();
+            assert!(
+                faults
+                    .iter()
+                    .any(|fault| { fault.source == "rejection" && fault.message.contains("boom") }),
+                "faults were {faults:?}"
             );
         }
     }
@@ -1615,6 +1668,102 @@ mod tests {
             session.pointer(PointerEvent::new(Phase::Up, x, y + 24.0, 50.0));
             let dragged = session.frame(session::FrameTime::at(32.0));
             assert_eq!(texts(&dragged), ["CBME"]);
+        }
+    }
+
+    #[test]
+    fn stop_scroll_on_drag_end_reports_idle() {
+        #[cfg(not(quickjs))]
+        {}
+        #[cfg(quickjs)]
+        {
+            let source = r#"
+                const root = core.column(0);
+                core.setFill(root);
+                const label = core.text("idle", 16, [0, 0, 0, 255]);
+                core.append(root, label);
+                const scroll = core.scroll();
+                core.setGrow(scroll, 1);
+                core.append(scroll, core.sized(80, 800));
+                core.append(root, scroll);
+                core.onScrollState((_, phase) => core.setText(label, String(phase)));
+                core.onDragBy(scroll, () => core.setScrollOffset(scroll, 0, -48));
+                core.onDragEnd(scroll, () => core.stopScroll(scroll));
+            "#;
+            let mut session = match super::JsSession::open(
+                source,
+                "test.js",
+                uicore::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
+            session.metrics(&metrics());
+            session.frame(session::FrameTime::at(0.0));
+            session.pointer(PointerEvent::new(Phase::Down, 40.0, 80.0, 0.0));
+            session.pointer(PointerEvent::new(Phase::Move, 40.0, 120.0, 20.0));
+            session.pointer(PointerEvent::new(Phase::Up, 40.0, 120.0, 40.0));
+            let frame = session.frame(session::FrameTime::at(16.0));
+            assert!(session.take_script_error().is_none());
+            assert_eq!(texts(&frame), ["0"]);
+        }
+    }
+
+    #[test]
+    fn set_text_runs_reaches_the_draw_command() {
+        #[cfg(not(quickjs))]
+        {}
+        #[cfg(quickjs)]
+        {
+            let source = r#"
+                const root = core.column(0);
+                core.setFill(root);
+                const label = core.text("x", 16, [0, 0, 0, 255]);
+                core.append(root, label);
+                core.setTextRuns(label, [
+                    { text: "ab", color: [1, 2, 3, 255], weight: 700 },
+                    {
+                        text: "c",
+                        color: [4, 5, 6, 255],
+                        gradient: {
+                            kind: "linear",
+                            from: [0, 0],
+                            to: [1, 0],
+                            stops: [
+                                { offset: 0, color: [9, 0, 0, 255] },
+                                { offset: 1, color: [0, 9, 0, 255] }
+                            ]
+                        }
+                    }
+                ]);
+            "#;
+            let mut session = match super::JsSession::open(
+                source,
+                "runs.js",
+                uicore::MonoShaper::default(),
+                no_log(),
+            ) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
+            session.metrics(&metrics());
+            let frame = session.frame(session::FrameTime::at(0.0));
+            assert!(session.take_script_error().is_none());
+            let mut found = false;
+            visit_commands(&frame, &mut |command, _, _| {
+                let Command::Text { utf8, spans, .. } = command else {
+                    return;
+                };
+                if utf8.as_ref() != "abc" {
+                    return;
+                }
+                found = spans.len() == 2
+                    && spans[0].color == [1, 2, 3, 255]
+                    && spans[0].gradient.is_none()
+                    && spans[1].gradient.is_some();
+            });
+            assert!(found, "styled runs were not recorded");
         }
     }
 

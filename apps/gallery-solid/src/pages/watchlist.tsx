@@ -6,6 +6,7 @@ import { watchlistSig } from "../state/watchlist.ts";
 import { settingsSig } from "../state/settings.ts";
 import { useQuotes } from "../state/quotes-provider.tsx";
 import { showToast } from "../state/toast.ts";
+import { PullLabel } from "../widgets/pull-label.tsx";
 import { WatchRow, type RowItem } from "../widgets/watch-row.tsx";
 import { IndexStrip } from "../widgets/index-strip.tsx";
 import { loc } from "../copy.ts";
@@ -89,7 +90,17 @@ export function WatchlistPage(props: { router: Router }): NodeHandle {
       typeOf: (item: RowItem) => (item.symbol.startsWith("group:") ? "header" : "row"),
       render: (item, index) => renderRow(item(), index()),
     },
-    onRefresh: () => showToast(loc("已刷新", "Refreshed")),
+    refresh: {
+      threshold: 64,
+      onRefresh: () =>
+        new Promise<void>((resolve) => {
+          setTimeout(() => {
+            showToast(loc("已刷新", "Refreshed"));
+            resolve();
+          }, 600);
+        }),
+      indicator: ({ progress }) => PullLabel({ progress }),
+    },
   });
   insert({ id: panel } as NodeHandle, list);
 

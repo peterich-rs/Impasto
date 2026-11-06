@@ -35,6 +35,19 @@ use frame::*;
 use keys::*;
 use nodes::*;
 
+macro_rules! qjs_entry {
+    ($fallback:expr, $body:block) => {{
+        match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| $body)) {
+            Ok(value) => value,
+            Err(_) => {
+                tracing::error!(target: "impasto::script", "host callback panicked");
+                $fallback
+            }
+        }
+    }};
+}
+pub(super) use qjs_entry;
+
 #[allow(
     private_interfaces,
     reason = "Inner is the session state and is not part of the public API"
@@ -75,6 +88,8 @@ pub(super) struct Inner {
     pub(super) marks: FrameMarks,
     pub(super) drivers: RefCell<uicore::DriverSet>,
     pub(super) driver_frame: Cell<bool>,
+    /// Script failures waiting for [`session::Session::take_faults`].
+    pub(super) faults: RefCell<Vec<session::ScriptFault>>,
 }
 
 pub(super) struct Pending {
@@ -241,6 +256,7 @@ impl JsSession {
             marks: FrameMarks::default(),
             drivers: RefCell::new(uicore::DriverSet::new()),
             driver_frame: Cell::new(false),
+            faults: RefCell::new(Vec::new()),
         }));
         let fns = QjsFns {
             session: inner.cast(),
@@ -297,6 +313,7 @@ impl JsSession {
             mutate: mutation::mutate,
             query: call::query,
             effect: call::effect,
+            fault: fault_message,
         };
         // SAFETY: `inner` stays at this address until `Drop`. `qjs_open` copies
         // the function table. The copied session pointer is only used while
@@ -325,11 +342,7 @@ impl JsSession {
             )
         };
         if abi_failed != 0 {
-            let message = c_message(&error);
-            unsafe { qjs_close(host) };
-            unsafe { (*inner).host = ptr::null_mut() };
-            unsafe { drop(Box::from_raw(inner)) };
-            return Err(Error::Script(message));
+            return Err(script_failure(host, inner, &error));
         }
         let core_name = CString::new("core.js").map_err(|_| Error::Runtime)?;
         error = [0u8; 512];
@@ -344,11 +357,7 @@ impl JsSession {
             )
         };
         if core_failed != 0 {
-            let message = c_message(&error);
-            unsafe { qjs_close(host) };
-            unsafe { (*inner).host = ptr::null_mut() };
-            unsafe { drop(Box::from_raw(inner)) };
-            return Err(Error::Script(message));
+            return Err(script_failure(host, inner, &error));
         }
         let prelude_name = CString::new("prelude.js").map_err(|_| Error::Runtime)?;
         error = [0u8; 512];
@@ -363,11 +372,7 @@ impl JsSession {
             )
         };
         if prelude_failed != 0 {
-            let message = c_message(&error);
-            unsafe { qjs_close(host) };
-            unsafe { (*inner).host = ptr::null_mut() };
-            unsafe { drop(Box::from_raw(inner)) };
-            return Err(Error::Script(message));
+            return Err(script_failure(host, inner, &error));
         }
         error = [0u8; 512];
         if let Some(dir) = app_directory(name) {
@@ -404,11 +409,7 @@ impl JsSession {
             )
         };
         if failed != 0 {
-            let message = c_message(&error);
-            unsafe { qjs_close(host) };
-            unsafe { (*inner).host = ptr::null_mut() };
-            unsafe { drop(Box::from_raw(inner)) };
-            return Err(Error::Script(message));
+            return Err(script_failure(host, inner, &error));
         }
         // SAFETY: `inner` is the session just opened. Eval has returned, so ids
         // removed and not inserted again can be retired before the caller observes them.
@@ -455,6 +456,12 @@ impl JsSession {
     pub fn take_script_error(&self) -> Option<String> {
         self.script_error.borrow_mut().take()
     }
+
+    pub fn take_faults(&mut self) -> Vec<session::ScriptFault> {
+        let inner = unsafe { &*self.inner };
+        std::mem::take(&mut *inner.faults.borrow_mut())
+    }
+
     fn note_script_error(&self, message: String) {
         tracing::error!(target: "impasto::script", "{message}");
         *self.script_error.borrow_mut() = Some(message);
@@ -473,8 +480,18 @@ impl JsSession {
         self.record_frames = 0;
     }
 
+    fn push_fault(&self, source: &'static str, message: &str) {
+        let inner = unsafe { &*self.inner };
+        inner.faults.borrow_mut().push(session::ScriptFault {
+            source,
+            message: message.to_owned(),
+            stack: String::new(),
+        });
+    }
+
     fn hold_layout(&mut self, message: String) -> session::FrameOutput {
         tracing::error!(target: "impasto::layout", error = %message, "layout failed");
+        self.push_fault("layout", &message);
         self.hold_frame(message)
     }
 
@@ -518,6 +535,10 @@ impl Session for JsSession {
         JsSession::take_script_error(self)
     }
 
+    fn take_faults(&mut self) -> Vec<session::ScriptFault> {
+        JsSession::take_faults(self)
+    }
+
     fn metrics(&mut self, metrics: &Metrics) {
         // SAFETY: `inner` is owned by this session and is not aliased by a Rust reference.
         let inner = unsafe { &*self.inner };
@@ -549,10 +570,9 @@ impl Session for JsSession {
         // SAFETY: the tree borrow ends before dispatch. JS handlers may call
         // back into the tree through the `RefCell`.
         let inner = unsafe { &*self.inner };
-        let mut gestures = inner.tree.borrow_mut().pointer(event);
-        gestures.extend(inner.tree.borrow_mut().take_scroll_notices());
+        let gestures = inner.tree.borrow_mut().pointer(event);
         bump(&inner.marks.pointers);
-        if let Err(message) = dispatch_gestures(inner, gestures) {
+        if let Err(message) = dispatch_pointer(inner, gestures) {
             self.note_script_error(message);
         }
     }
@@ -586,7 +606,7 @@ impl Session for JsSession {
                     )
                 };
                 if hit < 0 {
-                    self.note_script_error(c_message(&error));
+                    self.note_script_error(pull_error(inner, "listener", &c_message(&error)));
                     return;
                 }
                 if hit > 0 {
@@ -600,7 +620,7 @@ impl Session for JsSession {
             let handled =
                 unsafe { qjs_dispatch_back(inner.host, error.as_mut_ptr().cast(), error.len()) };
             if handled < 0 {
-                self.note_script_error(c_message(&error));
+                self.note_script_error(pull_error(inner, "input", &c_message(&error)));
             } else if handled == 0 && !escape {
                 self.exit.set(true);
             }
@@ -717,7 +737,7 @@ impl Session for JsSession {
             )
         };
         if failed < 0 {
-            self.note_script_error(c_message(&error));
+            self.note_script_error(pull_error(inner, "input", &c_message(&error)));
         }
     }
 
@@ -786,7 +806,7 @@ impl Session for JsSession {
             if let Err(message) = dispatch_gestures(inner, notices) {
                 return self.hold_frame(message);
             }
-            if let Err(message) = drain_jobs(inner.host) {
+            if let Err(message) = drain_jobs(inner) {
                 return self.hold_frame(message);
             }
             let dispatch_ms = elapsed_ms(stamp);
@@ -798,10 +818,10 @@ impl Session for JsSession {
             let timer_failed =
                 unsafe { qjs_fire_timers(inner.host, error.as_mut_ptr().cast(), error.len()) };
             if timer_failed != 0 {
-                self.note_script_error(c_message(&error));
+                self.note_script_error(pull_error(inner, "timer", &c_message(&error)));
             }
             let timer_ms = elapsed_ms(timer_started);
-            if let Err(message) = drain_jobs(inner.host) {
+            if let Err(message) = drain_jobs(inner) {
                 return self.hold_frame(message);
             }
             error = [0u8; 512];
@@ -809,10 +829,10 @@ impl Session for JsSession {
             let raf_failed =
                 unsafe { qjs_fire_raf(inner.host, error.as_mut_ptr().cast(), error.len()) };
             if raf_failed != 0 {
-                self.note_script_error(c_message(&error));
+                self.note_script_error(pull_error(inner, "timer", &c_message(&error)));
             }
             let raf_ms = elapsed_ms(raf_started);
-            if let Err(message) = drain_jobs(inner.host) {
+            if let Err(message) = drain_jobs(inner) {
                 return self.hold_frame(message);
             }
             let ends = inner.tree.borrow_mut().take_motion_ends();
@@ -829,7 +849,7 @@ impl Session for JsSession {
                     )
                 };
                 if failed != 0 {
-                    self.note_script_error(c_message(&error));
+                    self.note_script_error(pull_error(inner, "motion", &c_message(&error)));
                 }
             }
             error = [0u8; 512];
@@ -844,15 +864,17 @@ impl Session for JsSession {
                 )
             };
             if failed != 0 {
-                return self.hold_frame(c_message(&error));
+                return self.hold_frame(pull_error(inner, "frame", &c_message(&error)));
             }
             let callback_ms = elapsed_ms(callback_started);
-            if let Err(message) = drain_jobs(inner.host) {
+            if let Err(message) = drain_jobs(inner) {
                 return self.hold_frame(message);
             }
             let flush_started = std::time::Instant::now();
             if let Err(error) = mutation::flush_mutations(inner) {
-                return self.hold_frame(error.to_string());
+                let message = error.to_string();
+                self.push_fault("frame", &message);
+                return self.hold_frame(message);
             }
             let flush_ms = elapsed_ms(flush_started);
             sweep_detached(inner);
@@ -878,7 +900,9 @@ impl Session for JsSession {
                 }
             }
             if let Err(error) = mutation::flush_mutations(inner) {
-                return self.hold_frame(error.to_string());
+                let message = error.to_string();
+                self.push_fault("frame", &message);
+                return self.hold_frame(message);
             }
             {
                 let mut tree = inner.tree.borrow_mut();
@@ -899,10 +923,12 @@ impl Session for JsSession {
                     unsafe { qjs_layout(inner.host, error.as_mut_ptr().cast(), error.len()) };
                 layout_cb_ms = elapsed_ms(callback_started);
                 if failed != 0 {
-                    return self.hold_frame(c_message(&error));
+                    return self.hold_frame(pull_error(inner, "layout", &c_message(&error)));
                 }
                 if let Err(error) = mutation::flush_mutations(inner) {
-                    return self.hold_frame(error.to_string());
+                    let message = error.to_string();
+                    self.push_fault("frame", &message);
+                    return self.hold_frame(message);
                 }
             }
             let mut tree = inner.tree.borrow_mut();
@@ -1109,15 +1135,15 @@ impl Session for JsSession {
     }
 }
 
-pub(super) fn drain_jobs(host: *mut c_void) -> Result<(), String> {
+pub(super) fn drain_jobs(inner: &Inner) -> Result<(), String> {
     let mut error = [0u8; 512];
     // SAFETY: `host` is the interpreter for this session. `error` is writable
     // for the length we pass. Drain runs on the render thread, with the engine.
-    let failed = unsafe { qjs_drain_jobs(host, error.as_mut_ptr().cast(), error.len()) };
+    let failed = unsafe { qjs_drain_jobs(inner.host, error.as_mut_ptr().cast(), error.len()) };
     if failed == 0 {
         Ok(())
     } else {
-        Err(c_message(&error))
+        Err(pull_error(inner, "jobs", &c_message(&error)))
     }
 }
 
@@ -1127,6 +1153,75 @@ pub(super) fn c_message(bytes: &[u8]) -> String {
         .position(|byte| *byte == 0)
         .unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+/// Message and stack stashed by `glue.c`, then freed with `qjs_free`.
+pub(super) fn take_stashed(host: *mut c_void) -> (String, String) {
+    let mut message = ptr::null_mut();
+    let mut stack = ptr::null_mut();
+    if host.is_null() {
+        return (String::new(), String::new());
+    }
+    // SAFETY: `host` is the live interpreter. The two out-pointers are local.
+    unsafe { qjs_take_error(host, &mut message, &mut stack) };
+    (owned_c(message), owned_c(stack))
+}
+
+fn owned_c(raw: *mut c_char) -> String {
+    if raw.is_null() {
+        return String::new();
+    }
+    // SAFETY: `raw` came from `qjs_take_error` and is a NUL-terminated malloc string.
+    let text = unsafe { std::ffi::CStr::from_ptr(raw) }
+        .to_string_lossy()
+        .into_owned();
+    // SAFETY: the same pointer is freed with the allocator `glue.c` used.
+    unsafe { qjs_free(raw.cast()) };
+    text
+}
+
+fn display_fault(message: &str, stack: &str) -> String {
+    if stack.is_empty() {
+        message.to_owned()
+    } else {
+        format!("{message}\n{stack}")
+    }
+}
+
+/// Reads the stashed exception, records a [`session::ScriptFault`], and returns
+/// the text `take_script_error` keeps.
+pub(super) fn pull_error(inner: &Inner, source: &'static str, fallback: &str) -> String {
+    let (message, stack) = take_stashed(inner.host);
+    let message = if message.is_empty() {
+        fallback.to_owned()
+    } else {
+        message
+    };
+    let display = display_fault(&message, &stack);
+    inner.faults.borrow_mut().push(session::ScriptFault {
+        source,
+        message,
+        stack,
+    });
+    display
+}
+
+fn script_failure(host: *mut c_void, inner: *mut Inner, fallback: &[u8]) -> Error {
+    let (message, stack) = take_stashed(host);
+    let message = if message.is_empty() {
+        c_message(fallback)
+    } else {
+        message
+    };
+    let text = display_fault(&message, &stack);
+    // SAFETY: `host` was opened for `inner` and has not been closed. `inner` is the
+    // `Box::into_raw` allocation from `open_with` and is dropped here on failure.
+    unsafe {
+        qjs_close(host);
+        (*inner).host = ptr::null_mut();
+        drop(Box::from_raw(inner));
+    }
+    Error::Script(text)
 }
 
 pub(super) fn publish(out: *mut u64, id: u64) -> i32 {

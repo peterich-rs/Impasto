@@ -54,6 +54,7 @@ export function ScrollArea(props: {
   viewportRef?: (viewport: number) => void;
   contentRef?: (content: number) => void;
   onDragEnd?: () => void;
+  onDragBy?: () => void;
   initialOffset?: { x: number; y: number };
   /** Minimum content height. Keeps the viewport scrollable when row layout lags the window. */
   contentMin?: number;
@@ -121,9 +122,8 @@ export function ScrollArea(props: {
         }
         props.viewportRef?.(node.id);
       }}
-      onDragEnd={() => {
-        props.onDragEnd?.();
-      }}
+      onDragBy={props.onDragBy === undefined ? undefined : () => props.onDragBy?.()}
+      onDragEnd={props.onDragEnd === undefined ? undefined : () => props.onDragEnd?.()}
     >
       <column
         ref={(node) => {

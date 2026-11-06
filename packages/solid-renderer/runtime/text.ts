@@ -2,6 +2,27 @@ import { children, createRenderEffect, createTrackedEffect } from "solid-js";
 
 import type { HostNode, HostRendererOptions } from "../src/tree.ts";
 
+export type TextGradient = {
+  kind: "linear" | "radial" | "sweep";
+  from?: [number, number];
+  to?: [number, number];
+  center?: [number, number];
+  radius?: number;
+  startAngle?: number;
+  endAngle?: number;
+  stops: { offset: number; color: string | [number, number, number, number] }[];
+};
+
+export type TextRun = {
+  text: string;
+  color?: string | [number, number, number, number];
+  weight?: number;
+  family?: string;
+  underline?: boolean;
+  lineThrough?: boolean;
+  gradient?: TextGradient;
+};
+
 function textContent(value: unknown): string {
   if (typeof value === "function") {
     return textContent((value as () => unknown)());
@@ -37,14 +58,25 @@ export function Text(props: {
   direction?: "ltr" | "rtl";
   lineHeight?: number;
   family?: string;
+  runs?: TextRun[];
   children?: unknown;
 }): HostNode {
   const resolved = children(() => props.children as never);
   const node = options.createTextNode("");
   createRenderEffect(
-    () => textContent(resolved()),
+    () => props.runs,
+    (runs) => {
+      if (runs !== undefined) {
+        options.setProperty(node, "runs", runs);
+      }
+    },
+  );
+  createRenderEffect(
+    () => (props.runs === undefined ? textContent(resolved()) : undefined),
     (value) => {
-      options.replaceText(node, value);
+      if (value !== undefined) {
+        options.replaceText(node, value);
+      }
     },
   );
   createRenderEffect(

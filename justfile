@@ -69,31 +69,11 @@ quickjs:
 
 host-js: host
 
-# Cargo cdylib, then the APK. Needs the Android NDK and the arm64 Impeller SDK.
-# The in-app devtools panel is on in the host; it is not an environment switch.
+# Debug APK. Gradle runs cargo build without --release.
+# Needs the Android NDK, the arm64 Impeller SDK, and cargo on PATH.
 android: gallery-dist
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
-    if [[ -z "$ndk" && -n "${ANDROID_HOME:-}" && -d "${ANDROID_HOME}/ndk" ]]; then
-      ndk="$(find "${ANDROID_HOME}/ndk" -mindepth 1 -maxdepth 1 -type d | sort | tail -1)"
-    fi
-    if [[ -z "$ndk" ]]; then
-      echo "ANDROID_NDK_HOME is not set" >&2
-      exit 1
-    fi
-    export ANDROID_NDK_HOME="$ndk"
-    prebuilt="$(find "$ndk/toolchains/llvm/prebuilt" -mindepth 2 -maxdepth 2 -type d -name bin | head -1)"
-    export PATH="$prebuilt:$PATH"
-    export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$prebuilt/aarch64-linux-android24-clang"
-    cargo build --manifest-path "{{root}}/Cargo.toml" --release --target aarch64-linux-android -p android
-    assets="{{root}}/crates/android/apk/app/src/main/assets"
-    jni="{{root}}/crates/android/apk/app/src/main/jniLibs/arm64-v8a"
-    rm -rf "$assets" "$jni"
-    mkdir -p "$assets/fonts" "$assets/images" "$jni"
-    cp "{{root}}/crates/android/assets/fonts/Sans.ttf" "$assets/fonts/Sans.ttf"
-    cp "{{root}}/crates/macos/assets/logo.png" "$assets/images/logo.png"
-    cp "{{root}}/apps/gallery-solid/dist/quotes.js" "$assets/quotes.js"
-    cp "{{root}}/target/aarch64-linux-android/release/libhost.so" "$jni/libhost.so"
-    cp "{{root}}/third_party/impeller-sdk/android-arm64/lib/libimpeller.so" "$jni/libimpeller.so"
     "{{root}}/crates/android/apk/gradlew" -p "{{root}}/crates/android/apk" assembleDebug
+
+# Release APK. Gradle runs cargo build --release. Signed with the debug keystore.
+android-release: gallery-dist
+    "{{root}}/crates/android/apk/gradlew" -p "{{root}}/crates/android/apk" assembleRelease

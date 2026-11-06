@@ -12,6 +12,7 @@ bitflags = "2"
 protocol = { workspace = true }
 taffy = "0.9"
 thiserror = { workspace = true }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 unicode-segmentation = "1"
 
 [lints]

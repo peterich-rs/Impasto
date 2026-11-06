@@ -5,7 +5,7 @@
 
 use std::ffi::{c_char, c_void};
 
-use protocol::TextAlign;
+use protocol::{TextAlign, TextSpan};
 use uicore::{
     Alignment, AxisSize, Edges, GridLine, Inset, Justify, NodeId, RowCrossAlign, TrackSize,
 };
@@ -178,6 +178,7 @@ pub(super) enum StyleChange {
     DragClaim(i32),
     TextLimit(Option<u32>),
     Panel,
+    TextRuns(Vec<TextSpan>),
 }
 
 pub(super) enum Mutation {
@@ -672,6 +673,9 @@ fn parse_style(rec: &OwnedRec) -> Result<StyleChange, uicore::Error> {
     if field == StyleField::Panel as u32 {
         return Ok(StyleChange::Panel);
     }
+    if field == StyleField::TextRuns as u32 {
+        return Ok(StyleChange::TextRuns(crate::text_runs::parse(&rec.text)?));
+    }
     Err(uicore::Error::BadNumber)
 }
 
@@ -846,6 +850,7 @@ fn apply_style(
         StyleChange::DragClaim(claim) => tree.set_drag_claim(id, drag_claim(claim)),
         StyleChange::TextLimit(limit) => tree.set_text_limit(id, limit),
         StyleChange::Panel => tree.set_panel(id),
+        StyleChange::TextRuns(spans) => tree.set_text_spans(id, spans),
     }
 }
 
@@ -912,30 +917,32 @@ pub(super) unsafe extern "C" fn mutate(
     rec: *const MutRec,
     out_id: *mut u64,
 ) -> i32 {
-    if rec.is_null() {
-        return -1;
-    }
-    let inner = unsafe { inner(session) };
-    // SAFETY: glue passes a `MutRec` that lives for this call.
-    let owned = match owned_from_ptr(unsafe { &*rec }) {
-        Ok(owned) => owned,
-        Err(()) => return -1,
-    };
-    let mutation = match parse(&owned) {
-        Ok(mutation) => mutation,
-        Err(_) => return -1,
-    };
-    match apply_now(inner, mutation) {
-        Ok(applied) => {
-            if !out_id.is_null() {
-                let raw = applied.id.map(NodeId::to_raw).unwrap_or(0);
-                // SAFETY: glue passes a writable `uint64_t` when it wants the id.
-                unsafe { *out_id = raw };
-            }
-            0
+    super::qjs_entry!(-1, {
+        if rec.is_null() {
+            return -1;
         }
-        Err(_) => -1,
-    }
+        let inner = unsafe { inner(session) };
+        // SAFETY: glue passes a `MutRec` that lives for this call.
+        let owned = match owned_from_ptr(unsafe { &*rec }) {
+            Ok(owned) => owned,
+            Err(()) => return -1,
+        };
+        let mutation = match parse(&owned) {
+            Ok(mutation) => mutation,
+            Err(_) => return -1,
+        };
+        match apply_now(inner, mutation) {
+            Ok(applied) => {
+                if !out_id.is_null() {
+                    let raw = applied.id.map(NodeId::to_raw).unwrap_or(0);
+                    // SAFETY: glue passes a writable `uint64_t` when it wants the id.
+                    unsafe { *out_id = raw };
+                }
+                0
+            }
+            Err(_) => -1,
+        }
+    })
 }
 
 pub(super) unsafe extern "C" fn push_mutation(
@@ -951,22 +958,25 @@ pub(super) unsafe extern "C" fn push_mutation(
     text: *const c_char,
     text_len: usize,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let text = if text.is_null() {
-        String::new()
-    } else {
-        let Some(text) = (unsafe { utf8_of(text, text_len) }) else {
-            return -1;
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let text = if text.is_null() {
+            String::new()
+        } else {
+            let Some(text) = (unsafe { utf8_of(text, text_len) }) else {
+                return -1;
+            };
+            text.to_owned()
         };
-        text.to_owned()
-    };
-    let color = unsafe { super::rgba(color) }.unwrap_or([0, 0, 0, 0]);
-    let rec = OwnedRec::from_queued(op, id, parent, before, field, number, number2, color, text);
-    if parse(&rec).is_err() {
-        return -1;
-    }
-    inner.mutations.borrow_mut().push(rec);
-    0
+        let color = unsafe { super::rgba(color) }.unwrap_or([0, 0, 0, 0]);
+        let rec =
+            OwnedRec::from_queued(op, id, parent, before, field, number, number2, color, text);
+        if parse(&rec).is_err() {
+            return -1;
+        }
+        inner.mutations.borrow_mut().push(rec);
+        0
+    })
 }
 
 /// `rect` reads geometry, so a queued style write has to land first.

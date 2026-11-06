@@ -8,13 +8,17 @@ use super::ffi::*;
 use super::*;
 
 pub(super) unsafe extern "C" fn parent(session: *mut c_void, node: u64, out: *mut u64) -> i32 {
-    let inner = unsafe { inner(session) };
-    queried(inner.tree.borrow().parent(NodeId::from_raw(node)), out)
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        queried(inner.tree.borrow().parent(NodeId::from_raw(node)), out)
+    })
 }
 
 pub(super) unsafe extern "C" fn first_child(session: *mut c_void, node: u64, out: *mut u64) -> i32 {
-    let inner = unsafe { inner(session) };
-    queried(inner.tree.borrow().first_child(NodeId::from_raw(node)), out)
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        queried(inner.tree.borrow().first_child(NodeId::from_raw(node)), out)
+    })
 }
 
 pub(super) unsafe extern "C" fn next_sibling(
@@ -22,20 +26,24 @@ pub(super) unsafe extern "C" fn next_sibling(
     node: u64,
     out: *mut u64,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    queried(
-        inner.tree.borrow().next_sibling(NodeId::from_raw(node)),
-        out,
-    )
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        queried(
+            inner.tree.borrow().next_sibling(NodeId::from_raw(node)),
+            out,
+        )
+    })
 }
 
 pub(super) unsafe extern "C" fn is_text(session: *mut c_void, node: u64) -> i32 {
-    let inner = unsafe { inner(session) };
-    match inner.tree.borrow().is_text(NodeId::from_raw(node)) {
-        Ok(true) => 1,
-        Ok(false) => 0,
-        Err(_) => -1,
-    }
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        match inner.tree.borrow().is_text(NodeId::from_raw(node)) {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(_) => -1,
+        }
+    })
 }
 
 pub(super) unsafe extern "C" fn viewport(
@@ -43,16 +51,18 @@ pub(super) unsafe extern "C" fn viewport(
     width: *mut f32,
     height: *mut f32,
 ) -> i32 {
-    if width.is_null() || height.is_null() {
-        return -1;
-    }
-    let inner = unsafe { inner(session) };
-    let (w, h) = inner.tree.borrow().viewport_size();
-    unsafe {
-        *width = w;
-        *height = h;
-    }
-    0
+    super::qjs_entry!(-1, {
+        if width.is_null() || height.is_null() {
+            return -1;
+        }
+        let inner = unsafe { inner(session) };
+        let (w, h) = inner.tree.borrow().viewport_size();
+        unsafe {
+            *width = w;
+            *height = h;
+        }
+        0
+    })
 }
 
 pub(super) unsafe extern "C" fn text_edit(
@@ -64,83 +74,85 @@ pub(super) unsafe extern "C" fn text_edit(
     sel_start: *mut u32,
     sel_end: *mut u32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    if sel_start.is_null() || sel_end.is_null() {
-        return -1;
-    }
-    let extra = if utf8.is_null() {
-        String::new()
-    } else {
-        let Some(text) = (unsafe { utf8_of(utf8, len) }) else {
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        if sel_start.is_null() || sel_end.is_null() {
+            return -1;
+        }
+        let extra = if utf8.is_null() {
+            String::new()
+        } else {
+            let Some(text) = (unsafe { utf8_of(utf8, len) }) else {
+                return -1;
+            };
+            text.to_owned()
+        };
+        let edit = match op {
+            0 => uicore::Edit::Load(extra),
+            1 => uicore::Edit::Left,
+            2 => uicore::Edit::Right,
+            3 => uicore::Edit::Backspace,
+            4 => uicore::Edit::Insert(extra),
+            5 => uicore::Edit::Composing(if extra.is_empty() { None } else { Some(extra) }),
+            6 => uicore::Edit::Paste(extra),
+            7 => uicore::Edit::Undo,
+            8 => uicore::Edit::Redo,
+            9 => uicore::Edit::SelectAll,
+            10 => uicore::Edit::Copy,
+            11 => uicore::Edit::Cut,
+            12 => uicore::Edit::SetCaret(extra.parse::<u32>().unwrap_or(0)),
+            13 => uicore::Edit::ForwardDelete,
+            14 => uicore::Edit::Newline,
+            15 => uicore::Edit::WordLeft,
+            16 => uicore::Edit::WordRight,
+            17 => uicore::Edit::LineStart,
+            18 => uicore::Edit::LineEnd,
+            19 => uicore::Edit::ExtendLeft,
+            20 => uicore::Edit::ExtendRight,
+            21 => uicore::Edit::ExtendWordLeft,
+            22 => uicore::Edit::ExtendWordRight,
+            23 => uicore::Edit::ExtendLineStart,
+            24 => uicore::Edit::ExtendLineEnd,
+            25 => uicore::Edit::Up,
+            26 => uicore::Edit::Down,
+            27 => uicore::Edit::ExtendUp,
+            28 => uicore::Edit::ExtendDown,
+            29 => uicore::Edit::ExtendCaret(extra.parse::<u32>().unwrap_or(0)),
+            30 => uicore::Edit::DeleteWordBackward,
+            31 => uicore::Edit::DeleteWordForward,
+            32 => uicore::Edit::DeleteToLineStart,
+            33 => uicore::Edit::DeleteToLineEnd,
+            34 => uicore::Edit::DocumentStart,
+            35 => uicore::Edit::DocumentEnd,
+            36 => uicore::Edit::ExtendDocumentStart,
+            37 => uicore::Edit::ExtendDocumentEnd,
+            38 => uicore::Edit::Commit(extra),
+            _ => return -1,
+        };
+        let Ok(value) = inner
+            .tree
+            .borrow_mut()
+            .text_edit(NodeId::from_raw(node), edit)
+        else {
             return -1;
         };
-        text.to_owned()
-    };
-    let edit = match op {
-        0 => uicore::Edit::Load(extra),
-        1 => uicore::Edit::Left,
-        2 => uicore::Edit::Right,
-        3 => uicore::Edit::Backspace,
-        4 => uicore::Edit::Insert(extra),
-        5 => uicore::Edit::Composing(if extra.is_empty() { None } else { Some(extra) }),
-        6 => uicore::Edit::Paste(extra),
-        7 => uicore::Edit::Undo,
-        8 => uicore::Edit::Redo,
-        9 => uicore::Edit::SelectAll,
-        10 => uicore::Edit::Copy,
-        11 => uicore::Edit::Cut,
-        12 => uicore::Edit::SetCaret(extra.parse::<u32>().unwrap_or(0)),
-        13 => uicore::Edit::ForwardDelete,
-        14 => uicore::Edit::Newline,
-        15 => uicore::Edit::WordLeft,
-        16 => uicore::Edit::WordRight,
-        17 => uicore::Edit::LineStart,
-        18 => uicore::Edit::LineEnd,
-        19 => uicore::Edit::ExtendLeft,
-        20 => uicore::Edit::ExtendRight,
-        21 => uicore::Edit::ExtendWordLeft,
-        22 => uicore::Edit::ExtendWordRight,
-        23 => uicore::Edit::ExtendLineStart,
-        24 => uicore::Edit::ExtendLineEnd,
-        25 => uicore::Edit::Up,
-        26 => uicore::Edit::Down,
-        27 => uicore::Edit::ExtendUp,
-        28 => uicore::Edit::ExtendDown,
-        29 => uicore::Edit::ExtendCaret(extra.parse::<u32>().unwrap_or(0)),
-        30 => uicore::Edit::DeleteWordBackward,
-        31 => uicore::Edit::DeleteWordForward,
-        32 => uicore::Edit::DeleteToLineStart,
-        33 => uicore::Edit::DeleteToLineEnd,
-        34 => uicore::Edit::DocumentStart,
-        35 => uicore::Edit::DocumentEnd,
-        36 => uicore::Edit::ExtendDocumentStart,
-        37 => uicore::Edit::ExtendDocumentEnd,
-        38 => uicore::Edit::Commit(extra),
-        _ => return -1,
-    };
-    let Ok(value) = inner
-        .tree
-        .borrow_mut()
-        .text_edit(NodeId::from_raw(node), edit)
-    else {
-        return -1;
-    };
-    let start = value.selection.base;
-    let end = value.selection.extent;
-    *inner.edit_bytes.borrow_mut() = value.text.into_bytes();
-    if matches!(op, 10 | 11) {
-        *inner.clipboard.borrow_mut() = inner
-            .tree
-            .borrow()
-            .text_clipboard(NodeId::from_raw(node))
-            .ok()
-            .flatten();
-    }
-    unsafe {
-        *sel_start = start;
-        *sel_end = end;
-    }
-    0
+        let start = value.selection.base;
+        let end = value.selection.extent;
+        *inner.edit_bytes.borrow_mut() = value.text.into_bytes();
+        if matches!(op, 10 | 11) {
+            *inner.clipboard.borrow_mut() = inner
+                .tree
+                .borrow()
+                .text_clipboard(NodeId::from_raw(node))
+                .ok()
+                .flatten();
+        }
+        unsafe {
+            *sel_start = start;
+            *sel_end = end;
+        }
+        0
+    })
 }
 
 pub(super) unsafe extern "C" fn caret_at_unit(
@@ -152,26 +164,28 @@ pub(super) unsafe extern "C" fn caret_at_unit(
     w: *mut f32,
     h: *mut f32,
 ) -> i32 {
-    if x.is_null() || y.is_null() || w.is_null() || h.is_null() {
-        return -1;
-    }
-    let inner = unsafe { inner(session) };
-    match inner
-        .tree
-        .borrow_mut()
-        .caret_at_unit(NodeId::from_raw(node), unit)
-    {
-        Ok(caret) => {
-            unsafe {
-                *x = caret.x;
-                *y = caret.y;
-                *w = caret.w;
-                *h = caret.h;
-            }
-            0
+    super::qjs_entry!(-1, {
+        if x.is_null() || y.is_null() || w.is_null() || h.is_null() {
+            return -1;
         }
-        Err(_) => -1,
-    }
+        let inner = unsafe { inner(session) };
+        match inner
+            .tree
+            .borrow_mut()
+            .caret_at_unit(NodeId::from_raw(node), unit)
+        {
+            Ok(caret) => {
+                unsafe {
+                    *x = caret.x;
+                    *y = caret.y;
+                    *w = caret.w;
+                    *h = caret.h;
+                }
+                0
+            }
+            Err(_) => -1,
+        }
+    })
 }
 
 pub(super) unsafe extern "C" fn selection_rects(
@@ -180,37 +194,41 @@ pub(super) unsafe extern "C" fn selection_rects(
     start: u32,
     end: u32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let Ok(rects) = inner
-        .tree
-        .borrow_mut()
-        .selection_rects(NodeId::from_raw(node), start, end)
-    else {
-        return -1;
-    };
-    let mut packed = Vec::with_capacity(rects.len() * 4);
-    for rect in rects {
-        packed.extend([rect.x, rect.y, rect.w, rect.h]);
-    }
-    let count = i32::try_from(packed.len() / 4).unwrap_or(0);
-    *inner.selection_rects.borrow_mut() = packed;
-    count
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let Ok(rects) = inner
+            .tree
+            .borrow_mut()
+            .selection_rects(NodeId::from_raw(node), start, end)
+        else {
+            return -1;
+        };
+        let mut packed = Vec::with_capacity(rects.len() * 4);
+        for rect in rects {
+            packed.extend([rect.x, rect.y, rect.w, rect.h]);
+        }
+        let count = i32::try_from(packed.len() / 4).unwrap_or(0);
+        *inner.selection_rects.borrow_mut() = packed;
+        count
+    })
 }
 
 pub(super) unsafe extern "C" fn selection_rect_bytes(
     session: *mut c_void,
     out_len: *mut usize,
 ) -> *const u8 {
-    let inner = unsafe { inner(session) };
-    let bytes = inner.selection_rects.borrow();
-    if !out_len.is_null() {
-        unsafe { *out_len = bytes.len() * 4 };
-    }
-    if bytes.is_empty() {
-        b"\0".as_ptr()
-    } else {
-        bytes.as_ptr().cast()
-    }
+    super::qjs_entry!(ptr::null(), {
+        let inner = unsafe { inner(session) };
+        let bytes = inner.selection_rects.borrow();
+        if !out_len.is_null() {
+            unsafe { *out_len = bytes.len() * 4 };
+        }
+        if bytes.is_empty() {
+            b"\0".as_ptr()
+        } else {
+            bytes.as_ptr().cast()
+        }
+    })
 }
 
 pub(super) unsafe extern "C" fn set_ime_config(
@@ -218,52 +236,58 @@ pub(super) unsafe extern "C" fn set_ime_config(
     keyboard: i32,
     action: i32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let mut ime = inner.ime.borrow_mut();
-    ime.state.keyboard = match keyboard {
-        1 => session::KeyboardType::Multiline,
-        2 => session::KeyboardType::Number,
-        3 => session::KeyboardType::Phone,
-        4 => session::KeyboardType::Email,
-        5 => session::KeyboardType::Url,
-        6 => session::KeyboardType::Name,
-        7 => session::KeyboardType::Password,
-        _ => session::KeyboardType::Text,
-    };
-    ime.state.action = match action {
-        1 => session::TextInputAction::Done,
-        2 => session::TextInputAction::Next,
-        3 => session::TextInputAction::Search,
-        4 => session::TextInputAction::Go,
-        5 => session::TextInputAction::Send,
-        6 => session::TextInputAction::Previous,
-        7 => session::TextInputAction::Newline,
-        _ => session::TextInputAction::None,
-    };
-    ime.dirty = true;
-    0
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let mut ime = inner.ime.borrow_mut();
+        ime.state.keyboard = match keyboard {
+            1 => session::KeyboardType::Multiline,
+            2 => session::KeyboardType::Number,
+            3 => session::KeyboardType::Phone,
+            4 => session::KeyboardType::Email,
+            5 => session::KeyboardType::Url,
+            6 => session::KeyboardType::Name,
+            7 => session::KeyboardType::Password,
+            _ => session::KeyboardType::Text,
+        };
+        ime.state.action = match action {
+            1 => session::TextInputAction::Done,
+            2 => session::TextInputAction::Next,
+            3 => session::TextInputAction::Search,
+            4 => session::TextInputAction::Go,
+            5 => session::TextInputAction::Send,
+            6 => session::TextInputAction::Previous,
+            7 => session::TextInputAction::Newline,
+            _ => session::TextInputAction::None,
+        };
+        ime.dirty = true;
+        0
+    })
 }
 
 pub(super) unsafe extern "C" fn set_text_scale(session: *mut c_void, scale: f32) -> i32 {
-    let inner = unsafe { inner(session) };
-    inner.text_scale.set(scale);
-    status(inner.tree.borrow_mut().set_text_scale(scale))
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        inner.text_scale.set(scale);
+        status(inner.tree.borrow_mut().set_text_scale(scale))
+    })
 }
 
 pub(super) unsafe extern "C" fn text_edit_bytes(
     session: *mut c_void,
     out_len: *mut usize,
 ) -> *const u8 {
-    let inner = unsafe { inner(session) };
-    let bytes = inner.edit_bytes.borrow();
-    if !out_len.is_null() {
-        unsafe { *out_len = bytes.len() };
-    }
-    if bytes.is_empty() {
-        b"\0".as_ptr()
-    } else {
-        bytes.as_ptr()
-    }
+    super::qjs_entry!(ptr::null(), {
+        let inner = unsafe { inner(session) };
+        let bytes = inner.edit_bytes.borrow();
+        if !out_len.is_null() {
+            unsafe { *out_len = bytes.len() };
+        }
+        if bytes.is_empty() {
+            b"\0".as_ptr()
+        } else {
+            bytes.as_ptr()
+        }
+    })
 }
 
 pub(super) fn snap_grid(interval: f32, align: i32) -> Option<uicore::SnapGrid> {
@@ -296,38 +320,40 @@ pub(super) unsafe extern "C" fn set_scroll_physics(
     snap_damping: f32,
     band_kind: i32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let physics = uicore::ScrollPhysics {
-        decay: if decay_kind == 1 {
-            uicore::Decay::Rate(f64::from(tau))
-        } else {
-            uicore::Decay::Tau(f64::from(tau))
-        },
-        band: if band_kind == 1 {
-            uicore::Band::Curve { c: factor }
-        } else {
-            uicore::Band::Linear { factor }
-        },
-        overscroll: if mode == 1 {
-            uicore::OverscrollMode::Clamp
-        } else {
-            uicore::OverscrollMode::RubberBand
-        },
-        overscroll_stiffness: stiffness,
-        overscroll_damping: damping,
-        overscroll_factor: factor,
-        snap_stiffness,
-        snap_damping,
-        snap_x: snap_grid(snap_x, align_x),
-        snap_y: snap_grid(snap_y, align_y),
-        accept: uicore::ScrollAccept::from_code(accept),
-    };
-    status(
-        inner
-            .tree
-            .borrow_mut()
-            .set_scroll_physics(NodeId::from_raw(node), physics),
-    )
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let physics = uicore::ScrollPhysics {
+            decay: if decay_kind == 1 {
+                uicore::Decay::Rate(f64::from(tau))
+            } else {
+                uicore::Decay::Tau(f64::from(tau))
+            },
+            band: if band_kind == 1 {
+                uicore::Band::Curve { c: factor }
+            } else {
+                uicore::Band::Linear { factor }
+            },
+            overscroll: if mode == 1 {
+                uicore::OverscrollMode::Clamp
+            } else {
+                uicore::OverscrollMode::RubberBand
+            },
+            overscroll_stiffness: stiffness,
+            overscroll_damping: damping,
+            overscroll_factor: factor,
+            snap_stiffness,
+            snap_damping,
+            snap_x: snap_grid(snap_x, align_x),
+            snap_y: snap_grid(snap_y, align_y),
+            accept: uicore::ScrollAccept::from_code(accept),
+        };
+        status(
+            inner
+                .tree
+                .borrow_mut()
+                .set_scroll_physics(NodeId::from_raw(node), physics),
+        )
+    })
 }
 
 pub(super) unsafe extern "C" fn overscroll(
@@ -336,20 +362,22 @@ pub(super) unsafe extern "C" fn overscroll(
     x: *mut f32,
     y: *mut f32,
 ) -> i32 {
-    if x.is_null() || y.is_null() {
-        return -1;
-    }
-    let inner = unsafe { inner(session) };
-    match inner.tree.borrow().overscroll(NodeId::from_raw(node)) {
-        Ok((ox, oy)) => {
-            unsafe {
-                *x = ox;
-                *y = oy;
-            }
-            0
+    super::qjs_entry!(-1, {
+        if x.is_null() || y.is_null() {
+            return -1;
         }
-        Err(_) => -1,
-    }
+        let inner = unsafe { inner(session) };
+        match inner.tree.borrow().overscroll(NodeId::from_raw(node)) {
+            Ok((ox, oy)) => {
+                unsafe {
+                    *x = ox;
+                    *y = oy;
+                }
+                0
+            }
+            Err(_) => -1,
+        }
+    })
 }
 
 pub(super) unsafe extern "C" fn arm_fling(
@@ -358,18 +386,22 @@ pub(super) unsafe extern "C" fn arm_fling(
     vx: f32,
     vy: f32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    status(
-        inner
-            .tree
-            .borrow_mut()
-            .arm_fling(NodeId::from_raw(node), vx, vy),
-    )
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        status(
+            inner
+                .tree
+                .borrow_mut()
+                .arm_fling(NodeId::from_raw(node), vx, vy),
+        )
+    })
 }
 
 pub(super) unsafe extern "C" fn stop_scroll(session: *mut c_void, node: u64) -> i32 {
-    let inner = unsafe { inner(session) };
-    status(inner.tree.borrow_mut().stop_scroll(NodeId::from_raw(node)))
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        status(inner.tree.borrow_mut().stop_scroll(NodeId::from_raw(node)))
+    })
 }
 
 pub(super) unsafe extern "C" fn scroll_to(
@@ -380,15 +412,17 @@ pub(super) unsafe extern "C" fn scroll_to(
     stiffness: f32,
     damping: f32,
 ) -> i32 {
-    let inner = unsafe { inner(session) };
-    let stiffness = (stiffness > 0.0).then_some(stiffness);
-    let damping = (damping > 0.0).then_some(damping);
-    status(
-        inner
-            .tree
-            .borrow_mut()
-            .scroll_to(NodeId::from_raw(node), x, y, stiffness, damping),
-    )
+    super::qjs_entry!(-1, {
+        let inner = unsafe { inner(session) };
+        let stiffness = (stiffness > 0.0).then_some(stiffness);
+        let damping = (damping > 0.0).then_some(damping);
+        status(
+            inner
+                .tree
+                .borrow_mut()
+                .scroll_to(NodeId::from_raw(node), x, y, stiffness, damping),
+        )
+    })
 }
 
 pub(super) unsafe extern "C" fn scroll_offset(
@@ -397,21 +431,23 @@ pub(super) unsafe extern "C" fn scroll_offset(
     dx: *mut f32,
     dy: *mut f32,
 ) -> i32 {
-    if dx.is_null() || dy.is_null() {
-        return -1;
-    }
-    let inner = unsafe { inner(session) };
-    match inner.tree.borrow().scroll_offset(NodeId::from_raw(node)) {
-        Ok((x, y)) => {
-            // SAFETY: glue passes two writable floats that live for this call.
-            unsafe {
-                *dx = x;
-                *dy = y;
-            }
-            0
+    super::qjs_entry!(-1, {
+        if dx.is_null() || dy.is_null() {
+            return -1;
         }
-        Err(_) => -1,
-    }
+        let inner = unsafe { inner(session) };
+        match inner.tree.borrow().scroll_offset(NodeId::from_raw(node)) {
+            Ok((x, y)) => {
+                // SAFETY: glue passes two writable floats that live for this call.
+                unsafe {
+                    *dx = x;
+                    *dy = y;
+                }
+                0
+            }
+            Err(_) => -1,
+        }
+    })
 }
 
 pub(super) fn sweep_detached(inner: &Inner) {
@@ -435,26 +471,28 @@ pub(super) unsafe extern "C" fn rect(
     w: *mut f32,
     h: *mut f32,
 ) -> i32 {
-    if x.is_null() || y.is_null() || w.is_null() || h.is_null() {
-        return -1;
-    }
-    let inner = unsafe { inner(session) };
-    if mutation::flush_for_read(inner) != 0 {
-        return -1;
-    }
-    match inner.tree.borrow().rect(NodeId::from_raw(node)) {
-        Ok(rect) => {
-            // SAFETY: glue passes four writable floats that live for this call.
-            unsafe {
-                *x = rect.x;
-                *y = rect.y;
-                *w = rect.w;
-                *h = rect.h;
-            }
-            0
+    super::qjs_entry!(-1, {
+        if x.is_null() || y.is_null() || w.is_null() || h.is_null() {
+            return -1;
         }
-        Err(_) => -1,
-    }
+        let inner = unsafe { inner(session) };
+        if mutation::flush_for_read(inner) != 0 {
+            return -1;
+        }
+        match inner.tree.borrow().rect(NodeId::from_raw(node)) {
+            Ok(rect) => {
+                // SAFETY: glue passes four writable floats that live for this call.
+                unsafe {
+                    *x = rect.x;
+                    *y = rect.y;
+                    *w = rect.w;
+                    *h = rect.h;
+                }
+                0
+            }
+            Err(_) => -1,
+        }
+    })
 }
 
 pub(in crate::linked) fn parse_tracks(text: &str) -> Result<Vec<TrackSize>, uicore::Error> {
@@ -492,12 +530,68 @@ pub(super) unsafe extern "C" fn log_message(
     len: usize,
     level: i32,
 ) {
-    let inner = unsafe { inner(session) };
-    let Some(text) = (unsafe { utf8_of(utf8, len) }) else {
-        return;
-    };
-    let level = u8::try_from(level).unwrap_or(0);
-    (inner.log)(level, text);
+    super::qjs_entry!((), {
+        let inner = unsafe { inner(session) };
+        let Some(text) = (unsafe { utf8_of(utf8, len) }) else {
+            return;
+        };
+        let level = u8::try_from(level).unwrap_or(0);
+        (inner.log)(level, text);
+    })
+}
+
+pub(super) unsafe extern "C" fn fault_message(
+    session: *mut c_void,
+    source: *const c_char,
+    message: *const c_char,
+    message_len: usize,
+    stack: *const c_char,
+    stack_len: usize,
+) {
+    super::qjs_entry!((), {
+        // SAFETY: `session` is the live `Inner` installed by `qjs_open`.
+        let inner = unsafe { inner(session) };
+        let source = source_name(source);
+        // SAFETY: glue passes `message_len` bytes that live for this call.
+        let message = unsafe { utf8_of(message, message_len) }
+            .unwrap_or("")
+            .to_owned();
+        let stack = if stack.is_null() {
+            String::new()
+        } else {
+            // SAFETY: glue passes `stack_len` bytes that live for this call.
+            unsafe { utf8_of(stack, stack_len) }
+                .unwrap_or("")
+                .to_owned()
+        };
+        inner.faults.borrow_mut().push(session::ScriptFault {
+            source,
+            message,
+            stack,
+        });
+    })
+}
+
+fn source_name(source: *const c_char) -> &'static str {
+    if source.is_null() {
+        return "listener";
+    }
+    // SAFETY: `source` is a NUL-terminated literal from `glue.c`.
+    let text = unsafe { std::ffi::CStr::from_ptr(source) }
+        .to_str()
+        .unwrap_or("");
+    match text {
+        "rejection" => "rejection",
+        "frame" => "frame",
+        "layout" => "layout",
+        "timer" => "timer",
+        "jobs" => "jobs",
+        "driver" => "driver",
+        "scroll" => "scroll",
+        "input" => "input",
+        "motion" => "motion",
+        _ => "listener",
+    }
 }
 
 pub(super) fn gesture_parts(gesture: uicore::Gesture) -> (NodeId, i32, f64, f64) {
@@ -522,6 +616,55 @@ pub(super) fn gesture_parts(gesture: uicore::Gesture) -> (NodeId, i32, f64, f64)
         uicore::Gesture::Zoom { id, scale } => (id, 20, f64::from(scale), 0.0),
         uicore::Gesture::ScrollPhaseChanged { id, .. } => (id, 21, 0.0, 0.0),
     }
+}
+
+/// `DragEnd` runs before scroll-phase notices so a handler can replace the spring.
+///
+/// One node keeps only its latest phase from this pointer.
+pub(super) fn dispatch_pointer(
+    inner: &Inner,
+    gestures: Vec<uicore::Gesture>,
+) -> Result<(), String> {
+    let notices = inner.tree.borrow_mut().take_scroll_notices();
+    let (lead, early) = split_phases(gestures);
+    dispatch_gestures(inner, lead)?;
+    let mut queued = inner.tree.borrow_mut().take_scroll_notices();
+    queued.splice(0..0, notices);
+    let (more, late) = split_phases(queued);
+    dispatch_gestures(inner, more)?;
+    let mut phases = early;
+    phases.extend(late);
+    dispatch_gestures(inner, latest_phases(phases))
+}
+
+fn split_phases(gestures: Vec<uicore::Gesture>) -> (Vec<uicore::Gesture>, Vec<uicore::Gesture>) {
+    let mut lead = Vec::new();
+    let mut phases = Vec::new();
+    for gesture in gestures {
+        if matches!(gesture, uicore::Gesture::ScrollPhaseChanged { .. }) {
+            phases.push(gesture);
+        } else {
+            lead.push(gesture);
+        }
+    }
+    (lead, phases)
+}
+
+fn latest_phases(phases: Vec<uicore::Gesture>) -> Vec<uicore::Gesture> {
+    let mut kept = Vec::new();
+    for phase in phases {
+        let uicore::Gesture::ScrollPhaseChanged { id, .. } = phase else {
+            continue;
+        };
+        if let Some(slot) = kept.iter_mut().find(|item| {
+            matches!(item, uicore::Gesture::ScrollPhaseChanged { id: kept_id, .. } if *kept_id == id)
+        }) {
+            *slot = phase;
+        } else {
+            kept.push(phase);
+        }
+    }
+    kept
 }
 
 pub(in crate::linked) fn dispatch_gestures(
@@ -611,7 +754,7 @@ pub(super) fn dispatch_scroll_phase(
     if failed == 0 {
         Ok(())
     } else {
-        Err(c_message(&error))
+        Err(pull_error(inner, "scroll", &c_message(&error)))
     }
 }
 
@@ -637,7 +780,7 @@ pub(super) fn dispatch_kind(
         )
     };
     if failed != 0 {
-        Err(c_message(&error))
+        Err(pull_error(inner, "listener", &c_message(&error)))
     } else {
         Ok(())
     }
@@ -660,7 +803,7 @@ pub(super) fn dispatch_text(inner: &Inner, id: NodeId, text: &str) -> Result<(),
     if failed == 0 {
         Ok(())
     } else {
-        Err(c_message(&error))
+        Err(pull_error(inner, "input", &c_message(&error)))
     }
 }
 
@@ -705,7 +848,7 @@ pub(super) fn dispatch_input(
     if failed == 0 {
         Ok(())
     } else {
-        Err(c_message(&error))
+        Err(pull_error(inner, "input", &c_message(&error)))
     }
 }
 
@@ -770,37 +913,39 @@ pub(super) unsafe extern "C" fn text_command(
     sel_start: *mut u32,
     sel_end: *mut u32,
 ) -> i32 {
-    if sel_start.is_null() || sel_end.is_null() {
-        return -1;
-    }
-    let Some(name) = (unsafe { utf8_of(name, name_len) }) else {
-        return -1;
-    };
-    let extra = if extra_ptr.is_null() {
-        String::new()
-    } else {
-        let Some(text) = (unsafe { utf8_of(extra_ptr, extra_len) }) else {
+    super::qjs_entry!(-1, {
+        if sel_start.is_null() || sel_end.is_null() {
+            return -1;
+        }
+        let Some(name) = (unsafe { utf8_of(name, name_len) }) else {
             return -1;
         };
-        text.to_owned()
-    };
-    let Some(edit) = named_edit(name, extra, record_undo != 0) else {
-        return -1;
-    };
-    let inner = unsafe { inner(session) };
-    let Ok(value) = inner
-        .tree
-        .borrow_mut()
-        .text_edit(NodeId::from_raw(node), edit)
-    else {
-        return -1;
-    };
-    unsafe {
-        *sel_start = value.selection.base;
-        *sel_end = value.selection.extent;
-    }
-    *inner.edit_bytes.borrow_mut() = value.text.into_bytes();
-    0
+        let extra = if extra_ptr.is_null() {
+            String::new()
+        } else {
+            let Some(text) = (unsafe { utf8_of(extra_ptr, extra_len) }) else {
+                return -1;
+            };
+            text.to_owned()
+        };
+        let Some(edit) = named_edit(name, extra, record_undo != 0) else {
+            return -1;
+        };
+        let inner = unsafe { inner(session) };
+        let Ok(value) = inner
+            .tree
+            .borrow_mut()
+            .text_edit(NodeId::from_raw(node), edit)
+        else {
+            return -1;
+        };
+        unsafe {
+            *sel_start = value.selection.base;
+            *sel_end = value.selection.extent;
+        }
+        *inner.edit_bytes.borrow_mut() = value.text.into_bytes();
+        0
+    })
 }
 
 pub(super) unsafe extern "C" fn place_panel(
@@ -809,16 +954,18 @@ pub(super) unsafe extern "C" fn place_panel(
     anchor: u64,
     align: i32,
 ) -> i32 {
-    let align = match align {
-        1 => uicore::PanelAlign::BelowEnd,
-        2 => uicore::PanelAlign::BelowCenter,
-        3 => uicore::PanelAlign::AboveStart,
-        _ => uicore::PanelAlign::BelowStart,
-    };
-    let inner = unsafe { inner(session) };
-    status(inner.tree.borrow_mut().place_panel(
-        NodeId::from_raw(panel),
-        NodeId::from_raw(anchor),
-        align,
-    ))
+    super::qjs_entry!(-1, {
+        let align = match align {
+            1 => uicore::PanelAlign::BelowEnd,
+            2 => uicore::PanelAlign::BelowCenter,
+            3 => uicore::PanelAlign::AboveStart,
+            _ => uicore::PanelAlign::BelowStart,
+        };
+        let inner = unsafe { inner(session) };
+        status(inner.tree.borrow_mut().place_panel(
+            NodeId::from_raw(panel),
+            NodeId::from_raw(anchor),
+            align,
+        ))
+    })
 }
