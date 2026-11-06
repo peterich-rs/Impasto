@@ -6,6 +6,7 @@
 )]
 
 mod script;
+mod span_box;
 mod status;
 
 pub use script::split_scripts;

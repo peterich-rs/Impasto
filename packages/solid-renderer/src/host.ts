@@ -14,6 +14,33 @@ export type PlatformSnapshot = {
   highContrast: boolean;
 };
 
+export type HostGradientStop = {
+  offset: number;
+  color: [number, number, number, number];
+};
+
+export type HostTextGradient = {
+  kind: "linear" | "radial" | "sweep";
+  from?: [number, number];
+  to?: [number, number];
+  center?: [number, number];
+  radius?: number;
+  startAngle?: number;
+  endAngle?: number;
+  stops: HostGradientStop[];
+};
+
+/** One run after color strings have been turned into bytes. */
+export type HostTextRun = {
+  text: string;
+  color: [number, number, number, number];
+  weight?: number;
+  family?: string;
+  underline?: boolean;
+  lineThrough?: boolean;
+  gradient?: HostTextGradient;
+};
+
 /**
  * The `core` object QuickJS installs. Method names match `glue.c`.
  * Handles are JS numbers. A live id is never 0.
@@ -47,6 +74,7 @@ export interface CoreHost {
   nextSibling(node: NodeHandle): NodeHandle;
   isText(node: NodeHandle): boolean;
   setText(node: NodeHandle, utf8: string): void;
+  setTextRuns(node: NodeHandle, runs: HostTextRun[]): void;
   setFontSize(node: NodeHandle, fontSize: number): void;
   setColor(node: NodeHandle, color: number[]): void;
   setGap(node: NodeHandle, gap: number): void;

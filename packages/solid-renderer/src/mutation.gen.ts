@@ -72,6 +72,7 @@ export const StyleField = {
   PaddingEdges: 55,
   Size: 56,
   Panel: 57,
+  TextRuns: 58,
 } as const;
 
 export const CreateKind = {

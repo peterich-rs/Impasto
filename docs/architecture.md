@@ -49,7 +49,7 @@ macOS 与 Android 宿主始终打开应用内 devtools。面板经 `registerTopL
 
 `Tree::record` 交出扁平 `DrawList`（场景坐标）和 `LayerTree`。picture 内坐标相对该 picture 的原点。一段 picture 属于一个 owner：根，或本帧开层的 `Scroll`、半透明 `Opacity`、非单位 `Transform`、子树里还有开层节点的 `Clip`，以及 blur、backdrop、非 `SrcOver` 的 blend。没有这些的 `Clip` 把 `PushClip` 留在父 picture 里。`ListDriver` 把行标成 picture owner 后，每行单独一张 picture。滚动偏移在 `Offset` 层上，不因此重建 picture。行 picture 的 `Offset` 是场景坐标，命令原点是 `(0, 0)`。
 
-文字命令带字号、`max_width`、颜色和段落样式。渲染引擎按命令里的字号绘制，不乘 `point_scale`。`point_scale` 只乘在根 builder 上。
+文字命令带字号、`max_width`、颜色、段落样式，以及可选的 spans。每个 span 有自己的颜色、字重、字体、下划线和删除线。`gradient` 存在时前景用 `protocol::Gradient`，unit square 映射到该 span 在段落局部坐标里的行盒并集；下划线和删除线仍用 `color`。只改颜色或渐变时标绘制，不重新测量。渲染引擎按命令里的字号绘制，不乘 `point_scale`。`point_scale` 只乘在根 builder 上。
 
 ## UI 核心
 

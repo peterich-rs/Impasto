@@ -142,10 +142,13 @@ impl TextStyle {
 }
 
 /// One styled run. A text command with spans uses their concatenation as `utf8`.
+///
+/// `gradient` replaces `color` as the foreground. Underline and strike stay on `color`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextSpan {
     pub utf8: String,
     pub color: [u8; 4],
+    pub gradient: Option<Gradient>,
     pub weight: u16,
     pub underline: bool,
     pub line_through: bool,
@@ -179,7 +182,7 @@ pub enum ContentMode {
 }
 
 /// Color space of one gradient stop. Only sRGB is defined.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum ColorSpace {
     #[default]
     Srgb,
@@ -223,6 +226,166 @@ pub enum Gradient {
         end_angle_rad: f32,
         stops: Vec<ColorStop>,
     },
+}
+
+/// Foreground of one span. `Eq` and `Hash` fold `-0.0` into `0.0`.
+#[derive(Clone, Debug)]
+pub enum SpanPaint {
+    Color([u8; 4]),
+    Gradient(Gradient),
+}
+
+impl TextSpan {
+    /// Foreground used for caching and drawing. A gradient wins over `color`.
+    pub fn paint(&self) -> SpanPaint {
+        match &self.gradient {
+            Some(gradient) => SpanPaint::Gradient(gradient.clone()),
+            None => SpanPaint::Color(self.color),
+        }
+    }
+}
+
+fn num_bits(value: f32) -> u32 {
+    let bits = value.to_bits();
+    if bits == (-0.0f32).to_bits() { 0 } else { bits }
+}
+
+fn pair_eq(left: [f32; 2], right: [f32; 2]) -> bool {
+    num_bits(left[0]) == num_bits(right[0]) && num_bits(left[1]) == num_bits(right[1])
+}
+
+fn stops_eq(left: &[ColorStop], right: &[ColorStop]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(a, b)| {
+            num_bits(a.offset) == num_bits(b.offset) && a.color == b.color && a.space == b.space
+        })
+}
+
+fn gradient_eq(left: &Gradient, right: &Gradient) -> bool {
+    match (left, right) {
+        (
+            Gradient::Linear {
+                start: a,
+                end: b,
+                stops: s,
+            },
+            Gradient::Linear {
+                start: c,
+                end: d,
+                stops: t,
+            },
+        ) => pair_eq(*a, *c) && pair_eq(*b, *d) && stops_eq(s, t),
+        (
+            Gradient::Radial {
+                center: a,
+                radius: b,
+                stops: s,
+            },
+            Gradient::Radial {
+                center: c,
+                radius: d,
+                stops: t,
+            },
+        ) => pair_eq(*a, *c) && num_bits(*b) == num_bits(*d) && stops_eq(s, t),
+        (
+            Gradient::Sweep {
+                center: a,
+                start_angle_rad: b0,
+                end_angle_rad: b1,
+                stops: s,
+            },
+            Gradient::Sweep {
+                center: c,
+                start_angle_rad: d0,
+                end_angle_rad: d1,
+                stops: t,
+            },
+        ) => {
+            pair_eq(*a, *c)
+                && num_bits(*b0) == num_bits(*d0)
+                && num_bits(*b1) == num_bits(*d1)
+                && stops_eq(s, t)
+        }
+        _ => false,
+    }
+}
+
+fn hash_num<H: Hasher>(value: f32, state: &mut H) {
+    num_bits(value).hash(state);
+}
+
+fn hash_pair<H: Hasher>(value: [f32; 2], state: &mut H) {
+    hash_num(value[0], state);
+    hash_num(value[1], state);
+}
+
+fn hash_stops<H: Hasher>(stops: &[ColorStop], state: &mut H) {
+    stops.len().hash(state);
+    for stop in stops {
+        hash_num(stop.offset, state);
+        stop.color.hash(state);
+        stop.space.hash(state);
+    }
+}
+
+fn hash_gradient<H: Hasher>(gradient: &Gradient, state: &mut H) {
+    match gradient {
+        Gradient::Linear { start, end, stops } => {
+            1u8.hash(state);
+            hash_pair(*start, state);
+            hash_pair(*end, state);
+            hash_stops(stops, state);
+        }
+        Gradient::Radial {
+            center,
+            radius,
+            stops,
+        } => {
+            2u8.hash(state);
+            hash_pair(*center, state);
+            hash_num(*radius, state);
+            hash_stops(stops, state);
+        }
+        Gradient::Sweep {
+            center,
+            start_angle_rad,
+            end_angle_rad,
+            stops,
+        } => {
+            3u8.hash(state);
+            hash_pair(*center, state);
+            hash_num(*start_angle_rad, state);
+            hash_num(*end_angle_rad, state);
+            hash_stops(stops, state);
+        }
+    }
+}
+
+impl PartialEq for SpanPaint {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Color(left), Self::Color(right)) => left == right,
+            (Self::Gradient(left), Self::Gradient(right)) => gradient_eq(left, right),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for SpanPaint {}
+
+impl Hash for SpanPaint {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Color(color) => {
+                0u8.hash(state);
+                color.hash(state);
+            }
+            Self::Gradient(gradient) => {
+                1u8.hash(state);
+                hash_gradient(gradient, state);
+            }
+        }
+    }
 }
 
 /// Material shadow. `elevation` is scene points.
@@ -396,7 +559,10 @@ impl DrawList {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, DrawList};
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    use super::{ColorStop, Command, DrawList, Gradient, SpanPaint, TextSpan};
 
     #[test]
     fn an_unbalanced_pop_is_stored_as_data() {
@@ -404,5 +570,47 @@ mod tests {
             commands: vec![Command::Pop],
         };
         assert_eq!(list.commands, vec![Command::Pop]);
+    }
+
+    fn bits(paint: &SpanPaint) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        paint.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn a_gradient_span_hashes_negative_zero_with_zero() {
+        let stops = vec![
+            ColorStop::srgb(0.0, [0, 0, 0, 255]),
+            ColorStop::srgb(1.0, [255, 0, 0, 255]),
+        ];
+        let left = TextSpan {
+            utf8: "A".into(),
+            color: [1, 2, 3, 4],
+            gradient: Some(Gradient::Linear {
+                start: [-0.0, 0.0],
+                end: [1.0, 0.0],
+                stops: stops.clone(),
+            }),
+            weight: 400,
+            underline: false,
+            line_through: false,
+            family: None,
+        };
+        let right = TextSpan {
+            gradient: Some(Gradient::Linear {
+                start: [0.0, 0.0],
+                end: [1.0, -0.0],
+                stops,
+            }),
+            ..left.clone()
+        };
+        assert_eq!(left.paint(), right.paint());
+        assert_eq!(bits(&left.paint()), bits(&right.paint()));
+        let solid = TextSpan {
+            gradient: None,
+            ..left
+        };
+        assert_ne!(solid.paint(), right.paint());
     }
 }

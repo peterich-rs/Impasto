@@ -9,16 +9,40 @@ use super::node::{Kind, NodeFlags, TextPayload};
 use super::{NodeId, Rect, Tree};
 use crate::{Error, TextSize};
 
+enum RunDirty {
+    Paint,
+    Measure,
+}
+
+fn span_geometry_changed(old: &[protocol::TextSpan], new: &[protocol::TextSpan]) -> bool {
+    old.len() != new.len()
+        || old.iter().zip(new).any(|(left, right)| {
+            left.utf8 != right.utf8
+                || left.weight != right.weight
+                || left.underline != right.underline
+                || left.line_through != right.line_through
+                || left.family != right.family
+        })
+}
+
+fn span_paint_changed(old: &[protocol::TextSpan], new: &[protocol::TextSpan]) -> bool {
+    old.len() != new.len()
+        || old
+            .iter()
+            .zip(new)
+            .any(|(left, right)| left.paint() != right.paint())
+}
+
 impl Tree {
     pub fn is_text(&self, id: NodeId) -> Result<bool, Error> {
         Ok(self.node(id)?.kind == Kind::Text)
     }
 
-    /// Replaces the text. The previous geometry stays valid for hit testing
-    /// until the next `layout`.
+    /// Replaces the text and clears styled runs. The previous geometry stays
+    /// valid for hit testing until the next `layout`.
     pub fn set_text(&mut self, id: NodeId, utf8: impl Into<String>) -> Result<(), Error> {
         let next = utf8.into();
-        let changed = {
+        let (text_changed, cleared_runs) = {
             let node = self.node_mut(id)?;
             let Some(text) = node.text_mut() else {
                 return Err(Error::NotText);
@@ -30,7 +54,7 @@ impl Tree {
             } else {
                 Err(next)
             };
-            match pending {
+            let text_changed = match pending {
                 Ok((changed, stored)) => {
                     text.utf8 = Arc::from(stored);
                     changed
@@ -40,9 +64,15 @@ impl Tree {
                     text.utf8 = Arc::from(next);
                     changed
                 }
+            };
+            let cleared_runs = !text.spans.is_empty() || !text.links.is_empty();
+            if cleared_runs {
+                text.spans = Arc::from([]);
+                text.links = Arc::from([]);
             }
+            (text_changed, cleared_runs)
         };
-        if !changed {
+        if !text_changed && !cleared_runs {
             return Ok(());
         }
         self.mark_semantics_chain(id);
@@ -65,20 +95,75 @@ impl Tree {
     }
 
     /// Styled runs and UTF-16 links. Non-empty spans replace `utf8` with their concatenation.
+    ///
+    /// A color or gradient change repaints. A change to the text, weight, family,
+    /// or decoration measures again.
     pub fn set_text_runs(
         &mut self,
         id: NodeId,
         spans: Vec<protocol::TextSpan>,
         links: Vec<protocol::TextLink>,
     ) -> Result<(), Error> {
-        self.edit_text(id, |text| {
-            if !spans.is_empty() {
-                let joined: String = spans.iter().map(|span| span.utf8.as_str()).collect();
+        let dirty = {
+            let node = self.node_mut(id)?;
+            let Some(text) = node.text_mut() else {
+                return Err(Error::NotText);
+            };
+            let geometry = span_geometry_changed(text.spans.as_ref(), &spans);
+            let paint = span_paint_changed(text.spans.as_ref(), &spans)
+                || text.links.as_ref() != links.as_slice();
+            let joined = if spans.is_empty() {
+                None
+            } else {
+                Some(
+                    spans
+                        .iter()
+                        .map(|span| span.utf8.as_str())
+                        .collect::<String>(),
+                )
+            };
+            let utf8_changed = joined
+                .as_deref()
+                .is_some_and(|joined| text.utf8.as_ref() != joined);
+            if !geometry && !paint && !utf8_changed {
+                return Ok(());
+            }
+            if let Some(joined) = joined
+                && utf8_changed
+            {
                 text.utf8 = Arc::from(joined);
             }
             text.spans = Arc::from(spans);
             text.links = Arc::from(links);
-        })
+            if geometry || utf8_changed {
+                RunDirty::Measure
+            } else {
+                RunDirty::Paint
+            }
+        };
+        match dirty {
+            RunDirty::Paint => {
+                self.mark_repaint(id);
+                Ok(())
+            }
+            RunDirty::Measure => {
+                self.mark_semantics_chain(id);
+                self.touch_measure(id)
+            }
+        }
+    }
+
+    /// Replaces spans and keeps the links already stored on `id`.
+    pub fn set_text_spans(
+        &mut self,
+        id: NodeId,
+        spans: Vec<protocol::TextSpan>,
+    ) -> Result<(), Error> {
+        let links = {
+            let text = self.node(id)?.text().ok_or(Error::NotText)?;
+            text.links.to_vec()
+        };
+        self.set_text_runs(id, spans, links)
     }
 
     pub fn set_max_lines(&mut self, id: NodeId, max_lines: Option<u32>) -> Result<(), Error> {
@@ -518,7 +603,7 @@ impl Tree {
                 text.cached.as_ref().is_some_and(|cached| {
                     cached.metrics == key.metrics
                         && cached.color == key.color
-                        && cached.span_colors.as_ref() == key.span_colors.as_ref()
+                        && cached.span_paints.as_ref() == key.span_paints.as_ref()
                 })
             });
         if same {

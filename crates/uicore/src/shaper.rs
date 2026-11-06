@@ -118,7 +118,7 @@ pub fn resolved_line_height(style: &protocol::TextStyle, font_size: f32, font_li
 pub struct PaintKey {
     pub metrics: MetricsKey,
     pub color: [u8; 4],
-    pub span_colors: Arc<[[u8; 4]]>,
+    pub span_paints: Arc<[protocol::SpanPaint]>,
 }
 
 /// Builds the keys a text node retains. Empty span slices are a single run.
@@ -140,7 +140,8 @@ pub fn paint_key(
             line_through: span.line_through,
         })
         .collect();
-    let span_colors: Vec<[u8; 4]> = spans.iter().map(|span| span.color).collect();
+    let span_paints: Vec<protocol::SpanPaint> =
+        spans.iter().map(protocol::TextSpan::paint).collect();
     PaintKey {
         metrics: MetricsKey {
             text,
@@ -150,7 +151,7 @@ pub fn paint_key(
             max_width: max_width.to_bits(),
         },
         color,
-        span_colors: Arc::from(span_colors),
+        span_paints: Arc::from(span_paints),
     }
 }
 
@@ -832,12 +833,12 @@ mod tests {
         let red = PaintKey {
             metrics: metrics.clone(),
             color: [255, 0, 0, 255],
-            span_colors: Arc::from([]),
+            span_paints: Arc::from([]),
         };
         let green = PaintKey {
             metrics,
             color: [0, 255, 0, 255],
-            span_colors: Arc::from([]),
+            span_paints: Arc::from([]),
         };
         let before = shaper.metrics(&red.metrics);
         assert_eq!(before.size, shaper.metrics(&green.metrics).size);

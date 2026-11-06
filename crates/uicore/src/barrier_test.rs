@@ -392,6 +392,7 @@ fn a_click_inside_a_link_range_activates_it() -> Result<(), crate::Error> {
             protocol::TextSpan {
                 utf8: "he".into(),
                 color: [0, 0, 255, 255],
+                gradient: None,
                 weight: 700,
                 underline: true,
                 line_through: false,
@@ -400,6 +401,7 @@ fn a_click_inside_a_link_range_activates_it() -> Result<(), crate::Error> {
             protocol::TextSpan {
                 utf8: "llo".into(),
                 color: [0, 0, 0, 255],
+                gradient: None,
                 weight: 400,
                 underline: false,
                 line_through: false,
@@ -595,6 +597,36 @@ fn short_gradients_blur_and_src_over_stay_out_of_the_list() -> Result<(), crate:
             ..
         }
     )));
+    Ok(())
+}
+
+#[test]
+fn a_span_color_change_repaints_without_layout() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    let text = tree.text("abc", 16.0, [0, 0, 0, 255])?;
+    let runs = |color: [u8; 4]| {
+        vec![protocol::TextSpan {
+            utf8: "abc".into(),
+            color,
+            gradient: None,
+            weight: 400,
+            underline: false,
+            line_through: false,
+            family: None,
+        }]
+    };
+    tree.set_text_runs(text, runs([0, 0, 0, 255]), Vec::new())?;
+    tree.layout()?;
+    tree.clear_paint();
+    tree.set_text_runs(text, runs([255, 0, 0, 255]), Vec::new())?;
+    assert!(!tree.needs_layout());
+    assert!(tree.needs_paint());
+    tree.set_text(text, "abc")?;
+    let painted = tree.record()?;
+    let cleared = painted.commands.iter().any(
+        |command| matches!(command, protocol::Command::Text { spans, .. } if spans.is_empty()),
+    );
+    assert!(cleared);
     Ok(())
 }
 
