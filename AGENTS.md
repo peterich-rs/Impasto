@@ -29,7 +29,7 @@ C 符号没有模块，所以前缀用层名，不用产品名：
 |---|---|
 | npm | `@impasto/solid-renderer`，宿主模块 `@impasto/<pkg>/host` |
 | Kotlin | `dev.impasto` |
-| Android 应用 | `dev.impasto.host`。cdylib 是 `host`（`libhost.so`），crate 仍是 `android` |
+| Android 应用 | `dev.impasto.host`。cdylib 是 `impasto`（`libimpasto.so`），crate 仍是 `android` |
 | 环境变量 | `IMPASTO_DUMP` |
 
 JS 接到渲染树的全局对象是 `core`。默认字体注册名是 `Sans` 和 `SansCJK`，不是产品名。
@@ -260,7 +260,7 @@ GitHub Actions 工作流是 `.github/workflows/check.yml`。它跑 `cargo fmt --
 | `just host` | 先走 `gallery-dist`，再打开 macOS 窗口并加载 ESM `apps/gallery-solid/dist/quotes.js`。需要 SDK、quickjs-ng 源码和 `crates/macos/assets` |
 | `just quickjs` | 按 `crates/quickjs/quickjs.pin` 下载 quickjs-ng 源码 |
 | `just host-js` | 同 `just host` |
-| `just android` | 先走 `gallery-dist`，再编 `aarch64-linux-android` 的 `libhost.so` 并打 APK。需要 NDK 和 `android-arm64` SDK |
+| `just android` | 先走 `gallery-dist`，再由 Gradle 按 debug 变体调 `cargo build`（不带 `--release`）编 `libimpasto.so` 并打 APK。`just android-release` 用 `--release`。需要 NDK 和 `android-arm64` SDK |
 | `IMPASTO_DUMP=/tmp/impasto-frame.png just host` | 画出第一帧，写成 PNG，然后进程退出 |
 
 单独跑 Gradle 时也要钉住工程目录：

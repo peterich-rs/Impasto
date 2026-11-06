@@ -16,7 +16,7 @@ import android.window.OnBackInvokedDispatcher;
  */
 public final class HostActivity extends Activity {
     static {
-        System.loadLibrary("host");
+        System.loadLibrary("impasto");
     }
 
     private HostView view;
