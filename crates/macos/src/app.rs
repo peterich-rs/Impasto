@@ -955,7 +955,10 @@ pub fn run(
             |error| match error {
                 quickjs::Error::NotLinked => SessionError::NotLinked,
                 quickjs::Error::Runtime => SessionError::Runtime,
-                quickjs::Error::Script(text) => SessionError::Script(text),
+                quickjs::Error::Script(text) => {
+                    tracing::error!(target: "impasto::script", "{text}");
+                    SessionError::Script(text)
+                }
             },
         )
     }));

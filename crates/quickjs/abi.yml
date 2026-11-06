@@ -72,6 +72,7 @@ fields:
   PaddingEdges: 55
   Size: 56
   Panel: 57
+  TextRuns: 58
 
 creates:
   Column: 1

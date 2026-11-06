@@ -436,6 +436,16 @@ impl FrameOutput {
     }
 }
 
+/// One script failure, with the stack kept apart from the message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScriptFault {
+    /// `listener`, `rejection`, `frame`, `layout`, `timer`, `jobs`, `driver`,
+    /// `scroll`, `input`, or `motion`.
+    pub source: &'static str,
+    pub message: String,
+    pub stack: String,
+}
+
 /// A language runtime bound to one [`uicore::Tree`].
 ///
 /// `frame` runs in this order: input has already been delivered through
@@ -455,6 +465,12 @@ pub trait Session {
     /// took it yet. The host consumes this for diagnostics each frame.
     fn take_script_error(&mut self) -> Option<String> {
         None
+    }
+    /// Script failures since the last take, message and stack kept separate.
+    /// Report-mode listener errors land here and leave [`Session::take_script_error`]
+    /// empty.
+    fn take_faults(&mut self) -> Vec<ScriptFault> {
+        Vec::new()
     }
     fn lifecycle(&mut self, _event: Lifecycle) {}
     fn settings(&mut self, _settings: &PlatformSettings) {}

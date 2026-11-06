@@ -84,7 +84,7 @@ Android 的 `TextEvent` 下标是 UTF-16，宿主先换成字节下标。键盘�
 
 ## 生命周期
 
-`session::Lifecycle`：`Detached`、`Resumed`、`Inactive`、`Hidden`、`Paused`。`Hidden` 和 `Paused` 冻结指针，并给未结束的按下补 `Cancel`。
+`session::Lifecycle`：`Detached`、`Resumed`、`Inactive`、`Hidden`、`Paused`。`Hidden` 和 `Paused` 冻结指针，并给未结束的按下补 `Cancel`。`Resumed` 丢掉卡住的 vsync token 再武装一次。定时器 `Wake` 在已有 vsync token 时不抢跑这一帧。
 
 | | macOS | Android |
 |---|---|---|

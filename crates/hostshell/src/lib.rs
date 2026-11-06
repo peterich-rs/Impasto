@@ -24,6 +24,7 @@ mod shaper;
 mod shell;
 mod surface;
 mod timing;
+mod watchdog;
 
 use std::sync::Arc;
 

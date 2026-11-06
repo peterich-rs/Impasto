@@ -39,7 +39,7 @@ vsync → 冲刷 → layout → driver tick → 脏了再 layout → onLayout �
 
 `frame` 里先排空 job，再 `onFrame`，再扫掉本轮摘下且没有挂回的子树，然后布局。`ListDriver` 和 `ScrollController` 的 tick 在布局之后、`onLayout` 之前。树不脏且可见集没变时，沿用上一份层树，不调用 `onLayout`。driver 还有未测完的行高，或树上还有运动，会话再要一帧。`requestFrame` 只再要恰好一帧。脚本错误清掉这一次的再要帧。
 
-`layer_epoch` 未变、缩放相同、`needs_present` 为假则跳过 `submit_layers` 和 `present`。为真则 `PresentCached`。`Resumed` 与 `Invalidate` 置 `needs_present`。`Hidden`、`Paused`、`MemoryWarning` 调用 `Engine::trim`，GPU 进入 `Flush`。`Dead` 取消这一帧。present 连续失败从第 3 次起退避。`BadScene` 不进退避，也不重建 Vulkan 链。
+`layer_epoch` 未变、缩放相同、`needs_present` 为假则跳过 `submit_layers` 和 `present`。为真则 `PresentCached`。`Resumed` 与 `Invalidate` 置 `needs_present`。`Hidden`、`Paused`、`MemoryWarning` 调用 `Engine::trim`，GPU 进入 `Flush`。`Dead` 取消这一帧。present 连续失败从第 3 次起退避。`BadScene` 不进退避，也不重建 Vulkan 链。定时器 `Wake` 在已有 vsync token 时不抢跑这一帧，也不取消那次回调；`Resumed` 会丢掉卡住的 token 再武装一次。
 
 macOS 与 Android 宿主始终打开应用内 devtools。面板经 `registerTopLayer` 挂在渲染器根 stack 上，不往 `DrawList` 加调试命令。日志是调用点上的 `tracing` 事件，由 `hostshell` 过滤后分发到控制台、xlog 和 devtools。超预算只在进入和恢复各打一条。全量计时在 `FrameSample`。
 
@@ -88,7 +88,7 @@ macOS 与 Android 宿主始终打开应用内 devtools。面板经 `registerTopL
 
 ## 运行时会话
 
-quickjs-ng 持有 `JSRuntime` 和一棵 `Tree`。`glue.c` 注册 `core._mutate`、`_query`、`_effect`，以及监听、driver 和宿主模块。具名方法在 `core.js`，编号在 `abi.yml`。句柄是 `u64`，`0` 表示没有节点。没有源码时 `open` 返回 `NotLinked`。
+quickjs-ng 持有 `JSRuntime` 和一棵 `Tree`。`glue.c` 注册 `core._mutate`、`_query`、`_effect`，以及监听、driver 和宿主模块。具名方法在 `core.js`，编号在 `abi.yml`。句柄是 `u64`，`0` 表示没有节点。没有源码时 `open` 返回 `NotLinked`。脚本异常的 message 和 stack 分开进入 `DiagnosticsHub` 的 errors ring。JS 回调里的 panic 在 `extern "C"` 内接住，不退出进程。渲染线程一条命令超过 5 秒时，`impasto::watchdog` 记一条错误。
 
 `@impasto/<pkg>/host` 由 `JS_NewCModule` 物化。未注册是链接期错误。大字节（≥4KB）进会话 slab，由 quickjs 的 realloc 钩子回收。
 

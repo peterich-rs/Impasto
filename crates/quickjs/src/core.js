@@ -224,6 +224,55 @@
     if (arguments.length < 2) throw new Error("setText(node, string)");
     write(OP.SetText, handle(node), 0, 0, 0, 0, 0, 0, 0, null, String(utf8), "setText failed");
   };
+  function utf8Len(value) {
+    return new TextEncoder().encode(String(value)).length;
+  }
+  function encodeGradient(gradient) {
+    var kind = gradient.kind === "radial" ? 2 : gradient.kind === "sweep" ? 3 : 1;
+    var coords;
+    if (kind === 2) {
+      var radial = gradient.center || [0.5, 0.5];
+      coords = radial[0] + "," + radial[1] + "," + (gradient.radius == null ? 0.5 : gradient.radius);
+    } else if (kind === 3) {
+      var sweep = gradient.center || [0.5, 0.5];
+      var end = gradient.endAngle == null ? 6.283185307179586 : gradient.endAngle;
+      coords = sweep[0] + "," + sweep[1] + "," + (gradient.startAngle || 0) + "," + end;
+    } else {
+      var from = gradient.from || [0, 0];
+      var to = gradient.to || [1, 0];
+      coords = from[0] + "," + from[1] + "," + to[0] + "," + to[1];
+    }
+    var stops = gradient.stops || [];
+    var out = " " + kind + " " + coords + " " + stops.length;
+    for (var stopIndex = 0; stopIndex < stops.length; stopIndex++) {
+      var stop = stops[stopIndex];
+      var stopColor = colorOf(stop.color);
+      out += " " + stop.offset + "," + stopColor[0] + "," + stopColor[1] + "," + stopColor[2] + "," + stopColor[3];
+    }
+    return out;
+  }
+  function encodeRun(run) {
+    var text = run.text == null ? "" : String(run.text);
+    var family = run.family ? String(run.family) : "";
+    var flags = (run.underline ? 1 : 0) + (run.lineThrough ? 2 : 0);
+    var color = colorOf(run.color || [0, 0, 0, 255]);
+    var weight = run.weight == null ? 400 : run.weight | 0;
+    var body = utf8Len(text) + " " + text + weight + " " + flags + " " + utf8Len(family) + " " + family;
+    body += color[0] + "," + color[1] + "," + color[2] + "," + color[3];
+    if (!run.gradient) {
+      return body + " 0\n";
+    }
+    return body + " 1" + encodeGradient(run.gradient) + "\n";
+  }
+  core.setTextRuns = function (node, runs) {
+    if (arguments.length < 2) throw new Error("setTextRuns(node, runs)");
+    var list = runs || [];
+    var payload = String(list.length) + "\n";
+    for (var index = 0; index < list.length; index++) {
+      payload += encodeRun(list[index]);
+    }
+    style(node, FIELD.TextRuns, 0, 0, 0, 0, null, payload, "setTextRuns failed");
+  };
   core.setImage = function (node, source, width, height) {
     write(OP.SetImage, handle(node), 0, 0, 0, +width, +height, 0, 0, null, String(source), "setImage failed");
   };

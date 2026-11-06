@@ -1,5 +1,6 @@
 (function (global) {
   "use strict";
+  Error.stackTraceLimit = 50;
 
   var bridge = global.__host;
   var sockets = new Map();

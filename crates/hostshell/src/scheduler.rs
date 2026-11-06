@@ -168,6 +168,11 @@ impl FrameScheduler {
     pub(crate) fn busy(&self) -> bool {
         self.in_flight
     }
+
+    /// A platform vsync is already carrying a token. Wake must not steal it.
+    pub(crate) fn token_armed(&self) -> bool {
+        self.armed.is_some()
+    }
 }
 
 #[cfg(test)]
@@ -280,5 +285,19 @@ mod tests {
         let token = scheduler.request().expect("token");
         scheduler.cancel();
         assert!(!scheduler.accept(token));
+    }
+
+    #[test]
+    fn finish_without_accept_keeps_the_armed_token() {
+        let mut scheduler = FrameScheduler::new();
+        let token = scheduler.request().expect("token");
+        assert!(scheduler.token_armed());
+        assert!(scheduler.finish(true).is_none());
+        assert!(scheduler.token_armed());
+        assert!(scheduler.accept(token));
+        let next = scheduler
+            .finish(false)
+            .expect("again left a pending request");
+        assert_ne!(next, token);
     }
 }

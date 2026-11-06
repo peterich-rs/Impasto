@@ -109,3 +109,49 @@ pub enum Command {
     },
     Shutdown,
 }
+
+/// Short name for the watchdog. Every variant is named so a new command fails to compile.
+pub(crate) fn command_tag(command: &Command) -> &'static str {
+    match command {
+        Command::Pointer(_) => "pointer",
+        Command::Input(_) => "input",
+        Command::ImeDismissed => "ime",
+        Command::Metrics(_) => "metrics",
+        Command::Settings(_) => "settings",
+        Command::Lifecycle(_) => "lifecycle",
+        Command::Invalidate => "invalidate",
+        Command::MemoryWarning => "memory",
+        Command::WindowFocus(_) => "focus",
+        Command::SemanticsAction(_) => "semantics",
+        Command::LaunchUrl(_) => "launch",
+        Command::SurfaceReady(_)
+        | Command::SurfaceChanged { .. }
+        | Command::SurfaceDestroyed { .. } => "surface",
+        Command::ImageReady(_) => "image",
+        Command::ReloadImage(_) => "reload",
+        Command::HttpDone { .. } | Command::HttpHead { .. } | Command::HttpChunk { .. } => "http",
+        Command::PluginDone { .. } => "plugin",
+        Command::Socket { .. } => "socket",
+        Command::Wake => "wake",
+        Command::Frame { .. } => "frame",
+        Command::Shutdown => "shutdown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wake_and_frame_have_stable_tags() {
+        assert_eq!(command_tag(&Command::Wake), "wake");
+        assert_eq!(
+            command_tag(&Command::Frame {
+                token: FrameToken(1),
+                time: FrameTime::at(0.0),
+            }),
+            "frame"
+        );
+        assert_eq!(command_tag(&Command::Shutdown), "shutdown");
+    }
+}
