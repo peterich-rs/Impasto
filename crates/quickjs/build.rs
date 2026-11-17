@@ -159,7 +159,7 @@ fn generate_abi(manifest: &Path, out_dir: &Path) -> Result<(), Box<dyn std::erro
         }
     }
     js.push_str("\n};\n");
-    rust.push_str("#[repr(C)]\n#[derive(Clone, Copy)]\npub struct StyleValueRecord { pub tag: u32, pub children: u32, pub number: f64, pub key: *const std::ffi::c_char, pub key_len: usize, pub text: *const std::ffi::c_char, pub text_len: usize }\n");
+    rust.push_str("#[repr(C)]\n#[derive(Clone, Copy)]\n#[allow(dead_code, reason = \"generated from abi.yml; constructed when quickjs-ng is linked\")]\npub struct StyleValueRecord { pub tag: u32, pub children: u32, pub number: f64, pub key: *const std::ffi::c_char, pub key_len: usize, pub text: *const std::ffi::c_char, pub text_len: usize }\n");
     header.push_str("typedef struct StyleValueRecord { uint32_t tag; uint32_t children; double number; const char *key; size_t key_len; const char *text; size_t text_len; } StyleValueRecord;\n");
     std::fs::write(out_dir.join("abi.rs"), rust)?;
     std::fs::write(out_dir.join("mutation.h"), header)?;
