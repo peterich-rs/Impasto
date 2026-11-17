@@ -1,0 +1,12 @@
+{
+  "name": "@impasto/reactive",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "devDependencies": {
+    "solid-js": "2.0.0-rc.17"
+  }
+}

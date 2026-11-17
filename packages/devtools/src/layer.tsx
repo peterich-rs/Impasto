@@ -5,7 +5,7 @@
 import { createSignal, For, Show } from "solid-js";
 import {
   callVoid,
-  host,
+  scene,
   onFrame,
   registerTopLayer,
   type NodeHandle,
@@ -14,27 +14,32 @@ import { ScrollArea, Text, useTheme } from "@impasto/solid-ui";
 import { HighlightLayer } from "./highlight.tsx";
 import { bannerError, highlights, store, unseenErrors } from "./store.ts";
 import { devtoolPages, type DevtoolPage } from "./registry.ts";
-
 const BUTTON_SIZE = 56;
 const BUTTON_MARGIN = 12;
-
-type ButtonSpot = { x: number; y: number };
-
-function viewport(): { width: number; height: number } {
+type ButtonSpot = {
+  x: number;
+  y: number;
+};
+function viewport(): {
+  width: number;
+  height: number;
+} {
   let width = 360;
   let height = 640;
   try {
-    const metrics = host.metrics();
-    if (metrics) {
+    const metrics = scene.metrics();
+    if (metrics && metrics.width > 0 && metrics.height > 0) {
       width = metrics.width;
       height = metrics.height;
     }
   } catch {
-    /* host without metrics keeps the phone default */
+    /* scene without metrics keeps the phone default */
   }
-  return { width, height };
+  return {
+    width,
+    height,
+  };
 }
-
 function clampSpot(spot: ButtonSpot): ButtonSpot {
   const { width, height } = viewport();
   const maxX = Math.max(BUTTON_MARGIN, width - BUTTON_SIZE - BUTTON_MARGIN);
@@ -49,55 +54,101 @@ function clampSpot(spot: ButtonSpot): ButtonSpot {
 function snapSpot(spot: ButtonSpot): ButtonSpot {
   const { width } = viewport();
   const center = spot.x + BUTTON_SIZE / 2;
-  const x = center < width / 2 ? BUTTON_MARGIN : width - BUTTON_SIZE - BUTTON_MARGIN;
-  return clampSpot({ x, y: spot.y });
+  const x =
+    center < width / 2 ? BUTTON_MARGIN : width - BUTTON_SIZE - BUTTON_MARGIN;
+  return clampSpot({
+    x,
+    y: spot.y,
+  });
 }
-
 function DevtoolsButton(props: { open(): void }) {
   const theme = useTheme();
-  const [spot, setSpot] = createSignal<ButtonSpot>(clampSpot({ x: 1e6, y: 1e6 }));
+  const [spot, setSpot] = createSignal<ButtonSpot>(
+    clampSpot({
+      x: 1e6,
+      y: 1e6,
+    }),
+  );
   const [hidden, setHidden] = createSignal(false);
   return (
     <Show when={!hidden()}>
-      <transform x={spot().x} y={spot().y}>
-        <pointer
+      <stack
+        style={{
+          translateX: spot().x,
+          translateY: spot().y,
+        }}
+      >
+        <view
+          style={{
+            backgroundColor: theme().color.primary,
+            borderRadius: BUTTON_SIZE / 2,
+            width: BUTTON_SIZE,
+            height: BUTTON_SIZE,
+            alignItems: "center",
+            justifyContent: "center",
+          }}
           onClick={() => props.open()}
-          recognizers={{ drag: "free", longPress: true }}
+          recognizers={{
+            drag: "free",
+            longPress: true,
+          }}
           onDragBy={(dx: number, dy: number) =>
-            setSpot((prev) => clampSpot({ x: prev.x + dx, y: prev.y + dy }))
+            setSpot((prev) =>
+              clampSpot({
+                x: prev.x + dx,
+                y: prev.y + dy,
+              }),
+            )
           }
           onDragEnd={() => setSpot((prev) => snapSpot(prev))}
           onLongPress={() => setHidden(true)}
         >
-          <decorated
-            color={theme().color.primary}
-            radius={BUTTON_SIZE / 2}
-            w={BUTTON_SIZE}
-            h={BUTTON_SIZE}
+          <Text
+            style={{
+              fontSize: 22,
+              color: theme().color.onPrimary,
+            }}
           >
-            <column cross="center" justify="center" fill>
-              <Text fontSize={22} color={theme().color.onPrimary}>
-                ◈
-              </Text>
-            </column>
-          </decorated>
-        </pointer>
+            ◈
+          </Text>
+        </view>
         <Show when={unseenErrors() > 0}>
-          <transform x={BUTTON_SIZE - 18} y={-2}>
-            <decorated color={theme().color.danger} radius={9}>
-              <column cross="center" justify="center" w={18} h={18}>
-                <Text fontSize={10} color="#ffffff">
+          <stack
+            style={{
+              translateX: BUTTON_SIZE - 18,
+              translateY: -2,
+            }}
+          >
+            <view
+              style={{
+                backgroundColor: theme().color.danger,
+                borderRadius: 9,
+              }}
+            >
+              <view
+                style={{
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: 18,
+                  height: 18,
+                }}
+              >
+                <Text
+                  style={{
+                    fontSize: 10,
+                    color: "#ffffff",
+                  }}
+                >
                   {unseenErrors() > 9 ? "9+" : String(unseenErrors())}
                 </Text>
-              </column>
-            </decorated>
-          </transform>
+              </view>
+            </view>
+          </stack>
         </Show>
-      </transform>
+      </stack>
     </Show>
   );
 }
-
 function ErrorBanner(props: { open(): void }) {
   const [message, setMessage] = createSignal<string | null>(null);
   let seenSeq = -1;
@@ -119,61 +170,148 @@ function ErrorBanner(props: { open(): void }) {
   });
   return (
     <Show when={message() !== null}>
-      <pointer
+      <view
         onClick={() => {
           setMessage(null);
           props.open();
         }}
       >
-        <decorated color="#c0392b">
-          <column cross="center" justify="center" fill h={36}>
-            <Text fontSize={12} color="#ffffff" maxLines={1} ellipsis="…">
+        <view
+          style={{
+            backgroundColor: "#c0392b",
+          }}
+        >
+          <view
+            style={{
+              width: "100%",
+              flex: 1,
+              flexShrink: 1,
+              minWidth: 0,
+              minHeight: 0,
+              alignItems: "center",
+              justifyContent: "center",
+              height: 36,
+            }}
+          >
+            <Text
+              style={{
+                fontSize: 12,
+                color: "#ffffff",
+                maxLines: 1,
+                ellipsis: "…",
+              }}
+            >
               {message()}
             </Text>
-          </column>
-        </decorated>
-      </pointer>
+          </view>
+        </view>
+      </view>
     </Show>
   );
 }
-
 function Panel(props: { close(): void }) {
   const theme = useTheme();
   const [page, setPage] = createSignal("console");
   const pages = devtoolPages();
   const current = () => pages.find((entry) => entry.id === page()) ?? pages[0];
   return (
-    <stack fill>
-      <pointer onClick={() => props.close()}>
-        <decorated color={theme().color.scrim} fill />
-      </pointer>
-      <padding edges={24}>
-        <decorated color={theme().color.background} radius={12} grow>
-          <column fill>
-            <row gap={4}>
+    <stack
+      ref={(node) => {
+        if (node === null) return;
+        scene.setComponentStyle(node, {
+          gridTemplateColumns: "minmax(0, 1fr)",
+          gridTemplateRows: "minmax(0, 1fr)",
+        });
+      }}
+      style={{
+        width: "100%",
+        height: "100%",
+        flex: 1,
+        flexShrink: 1,
+        minWidth: 0,
+        minHeight: 0,
+      }}
+    >
+      <view onClick={() => props.close()}>
+        <view
+          style={{
+            width: "100%",
+            height: "100%",
+            flex: 1,
+            flexShrink: 1,
+            minWidth: 0,
+            minHeight: 0,
+            backgroundColor: theme().color.scrim,
+          }}
+        />
+      </view>
+      <view
+        style={{
+          padding: 24,
+        }}
+      >
+        <view
+          style={{
+            backgroundColor: theme().color.background,
+            borderRadius: 12,
+            flex: 1,
+          }}
+        >
+          <view
+            style={{
+              width: "100%",
+              height: "100%",
+              flex: 1,
+              flexShrink: 1,
+              minWidth: 0,
+              minHeight: 0,
+            }}
+          >
+            <view
+              style={{
+                flexDirection: "row",
+                gap: 4,
+              }}
+            >
               <For each={pages}>
                 {(entry: DevtoolPage) => (
-                  <pointer onClick={() => setPage(entry.id)} focusable>
-                    <decorated
-                      color={page() === entry.id ? theme().color.primary : theme().color.surface}
-                      radius={6}
+                  <view onClick={() => setPage(entry.id)} focusable>
+                    <view
+                      style={{
+                        backgroundColor:
+                          page() === entry.id
+                            ? theme().color.primary
+                            : theme().color.surface,
+                        borderRadius: 6,
+                      }}
                     >
-                      <padding edges={6}>
-                        <Text fontSize={11} color={theme().color.text}>
+                      <view
+                        style={{
+                          padding: 6,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 11,
+                            color: theme().color.text,
+                          }}
+                        >
                           {entry.title}
                         </Text>
-                      </padding>
-                    </decorated>
-                  </pointer>
+                      </view>
+                    </view>
+                  </view>
                 )}
               </For>
-            </row>
+            </view>
             <Show when={current()} keyed>
-              {(entry) => <ScrollArea axis="vertical">{entry.render()}</ScrollArea>}
+              {(entry) => (
+                <ScrollArea axis="vertical">{entry.render()}</ScrollArea>
+              )}
             </Show>
-          </column>
-        </decorated>
-      </padding>
+          </view>
+        </view>
+      </view>
     </stack>
   );
 }
@@ -181,9 +319,25 @@ function Panel(props: { close(): void }) {
 /** The whole devtools layer: button + banner + panel, mounted on top. */
 export function DevtoolsLayer(): NodeHandle {
   store.attach();
-  host.debugSetScan?.(true);
+  scene.debugSetScan?.(true);
   const root = (
-    <stack fill>
+    <stack
+      ref={(node) => {
+        if (node === null) return;
+        scene.setComponentStyle(node, {
+          gridTemplateColumns: "minmax(0, 1fr)",
+          gridTemplateRows: "minmax(0, 1fr)",
+        });
+      }}
+      style={{
+        width: "100%",
+        height: "100%",
+        flex: 1,
+        flexShrink: 1,
+        minWidth: 0,
+        minHeight: 0,
+      }}
+    >
       <Show when={!store.pageOpen()}>
         <ErrorBanner open={() => store.open()} />
       </Show>
@@ -196,7 +350,7 @@ export function DevtoolsLayer(): NodeHandle {
       <HighlightLayer boxes={highlights()} />
     </stack>
   );
-  host.debugSetOwned?.(root.id, true);
+  scene.debugSetOwned?.(root, true);
   return root;
 }
 

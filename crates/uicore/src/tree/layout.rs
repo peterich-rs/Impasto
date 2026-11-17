@@ -5,10 +5,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use taffy::prelude::*;
+use taffy::style::{ExpandedDimension, ExpandedLengthPercentage, ExpandedLengthPercentageAuto};
 
 use super::node::{Kind, NodeFlags, Slot, SubtreeSpace};
 use super::{Alignment, AxisSize, Edges, GridLine, Inset, Justify, NodeId, Rect, TrackSize, Tree};
 use crate::{Error, SINGLE_LINE_MAX, Shaper, TextSize};
+
+pub(super) use crate::style::defaults::{
+    content_box, fill_track, flex_style, scroll_style_for, stack_style,
+};
 
 impl Tree {
     /// Content box for the next `layout`, in scene points.
@@ -23,6 +28,15 @@ impl Tree {
         finite_number(height)?;
         self.origin = (x, y);
         self.viewport = Some((width.max(0.0), height.max(0.0)));
+        let next_width = width.max(0.0);
+        let next_height = height.max(0.0);
+        let window_changed = self.style_env.window_width != next_width
+            || self.style_env.window_height != next_height;
+        self.style_env.window_width = next_width;
+        self.style_env.window_height = next_height;
+        if window_changed {
+            self.invalidate_style_deps(crate::style::DepMask::WINDOW);
+        }
         self.note_layout(LayoutCause::Viewport);
         if let Some(root) = self.root {
             self.mark_layout_from(root);
@@ -66,7 +80,7 @@ impl Tree {
     }
 
     pub fn needs_paint(&self) -> bool {
-        self.needs_paint
+        self.needs_paint || !self.style_queue.is_empty()
     }
 
     pub fn layout_passes(&self) -> u64 {
@@ -230,36 +244,41 @@ impl Tree {
         self.needs_paint = false;
     }
 
+    /// The foreground of text or the fill of a decorated box.
+    pub fn color(&self, id: NodeId) -> Result<Option<[u8; 4]>, Error> {
+        let node = self.node(id)?;
+        Ok(node.text().map(|text| text.color).or_else(|| node.fill()))
+    }
+
     /// Foreground for text, fill for a decorated box.
     pub fn set_color(&mut self, id: NodeId, color: [u8; 4]) -> Result<(), Error> {
-        let kind = self.node(id)?.kind;
-        match kind {
-            Kind::Text => {
-                {
-                    let node = self.node_mut(id)?;
-                    let Some(text) = node.text_mut() else {
-                        return Err(Error::NotText);
-                    };
-                    if text.color == color {
-                        return Ok(());
-                    }
-                    text.color = color;
+        if self.node(id)?.is_text() {
+            {
+                let node = self.node_mut(id)?;
+                let Some(text) = node.text_mut() else {
+                    return Err(Error::NotText);
+                };
+                if text.color == color {
+                    return Ok(());
                 }
-                self.touch_measure(id)
+                text.color = color;
             }
-            Kind::Decorated => {
-                self.node_mut(id)?
-                    .write_paint(|paint| paint.fill = Some(color));
-                self.mark_repaint(id);
-                Ok(())
-            }
-            _ => Err(Error::WrongKind),
+            // Color is paint. The measure key ignores it.
+            self.mark_repaint(id);
+            return Ok(());
         }
+        if self.node(id)?.fill().is_some() {
+            self.node_mut(id)?
+                .write_paint(|paint| paint.fill = Some(color));
+            self.mark_repaint(id);
+            return Ok(());
+        }
+        Err(Error::WrongKind)
     }
 
     pub fn set_gap(&mut self, id: NodeId, gap: f32) -> Result<(), Error> {
         finite_number(gap)?;
-        if !matches!(self.node(id)?.kind, Kind::Row | Kind::Column) {
+        if !self.node(id)?.is_flex_line() || !self.node(id)?.is_box() {
             return Err(Error::WrongKind);
         }
         let mut style = self.node(id)?.style.clone();
@@ -288,10 +307,10 @@ impl Tree {
         self.set_padding_edges(id, Edges::all(edges))
     }
 
-    /// Padding on a [`Kind::Padding`] node. A non-finite edge leaves the style unchanged.
+    /// Padding on a container. A non-finite edge leaves the style unchanged.
     pub fn set_padding_edges(&mut self, id: NodeId, edges: Edges) -> Result<(), Error> {
         let padding = edge_rect(edges)?;
-        if self.node(id)?.kind != Kind::Padding {
+        if !self.node(id)?.is_box() {
             return Err(Error::WrongKind);
         }
         let mut style = self.node(id)?.style.clone();
@@ -441,7 +460,8 @@ impl Tree {
         if height != AxisSize::Auto {
             style.max_size.height = axis_dimension(height)?;
         }
-        self.write_style(id, style)
+        self.write_style(id, style)?;
+        Ok(())
     }
 
     pub fn set_max_size(&mut self, id: NodeId, width: f32, height: f32) -> Result<(), Error> {
@@ -452,7 +472,8 @@ impl Tree {
             width: length(width),
             height: length(height),
         };
-        self.write_style(id, style)
+        self.write_style(id, style)?;
+        Ok(())
     }
 
     pub fn set_shrink(&mut self, id: NodeId, shrink: f32) -> Result<(), Error> {
@@ -482,7 +503,7 @@ impl Tree {
     pub fn set_radius(&mut self, id: NodeId, radius: f32) -> Result<(), Error> {
         let radius = finite_positive(radius)?;
         let node = self.node_mut(id)?;
-        if !matches!(node.kind, Kind::Decorated | Kind::Clip) {
+        if !node.is_box() {
             return Err(Error::WrongKind);
         }
         node.write_paint(|paint| paint.corner_radius = radius);
@@ -506,9 +527,9 @@ impl Tree {
         Ok(())
     }
 
-    /// Layer alpha, 0–255. Geometry stays until the next layout.
+    /// Alpha of an opacity container, 0–255. Does not invalidate layout.
     pub fn set_alpha(&mut self, id: NodeId, alpha: u8) -> Result<(), Error> {
-        if self.node(id)?.kind != Kind::Opacity {
+        if self.node(id)?.alpha().is_none() {
             return Err(Error::WrongKind);
         }
         let previous = alpha_bucket(self.node(id)?.alpha());
@@ -524,26 +545,29 @@ impl Tree {
     }
 
     pub fn set_align(&mut self, id: NodeId, alignment: Alignment) -> Result<(), Error> {
-        if self.node(id)?.kind != Kind::Align {
+        if !self.node(id)?.is_box() {
             return Err(Error::WrongKind);
         }
         let (cross, main) = align_axes(alignment);
         let mut style = self.node(id)?.style.clone();
-        style.align_items = Some(cross);
-        style.justify_content = Some(main);
+        style.align_items = cross;
+        style.justify_content = main;
         self.write_style(id, style)
     }
 
-    /// `true` writes `RowReverse`. Only a row accepts this.
+    /// `true` writes the reverse direction of a row or a column.
     pub fn set_reverse(&mut self, id: NodeId, reverse: bool) -> Result<(), Error> {
-        if self.node(id)?.kind != Kind::Row {
+        let node = self.node(id)?;
+        if !node.is_box() || !node.is_flex_line() {
             return Err(Error::WrongKind);
         }
-        let mut style = self.node(id)?.style.clone();
-        style.flex_direction = if reverse {
-            FlexDirection::RowReverse
-        } else {
-            FlexDirection::Row
+        let column = node.is_column_flex();
+        let mut style = node.style.clone();
+        style.flex_direction = match (column, reverse) {
+            (true, true) => FlexDirection::ColumnReverse,
+            (true, false) => FlexDirection::Column,
+            (false, true) => FlexDirection::RowReverse,
+            (false, false) => FlexDirection::Row,
         };
         self.write_style(id, style)
     }
@@ -557,44 +581,41 @@ impl Tree {
 
     /// Cross-axis alignment of a row or column.
     ///
-    /// [`RowCrossAlign::Baseline`] on a column returns `Ok` and leaves the style
-    /// alone. [`RowCrossAlign::Stretch`] writes `AlignItems::Stretch`.
+    /// [`crate::RowCrossAlign::Baseline`] on a column returns `Ok` and leaves the style
+    /// alone. [`crate::RowCrossAlign::Stretch`] writes `AlignItems::STRETCH`.
     pub fn set_row_cross(&mut self, id: NodeId, align: super::RowCrossAlign) -> Result<(), Error> {
-        let kind = self.node(id)?.kind;
-        if !matches!(kind, Kind::Row | Kind::Column) {
+        let node = self.node(id)?;
+        if !node.is_box() || !node.is_flex_line() {
             return Err(Error::WrongKind);
         }
-        if kind == Kind::Column && align == super::RowCrossAlign::Baseline {
+        if node.is_column_flex() && align == super::RowCrossAlign::Baseline {
             return Ok(());
         }
         let cross = match align {
-            super::RowCrossAlign::Start | super::RowCrossAlign::Baseline => AlignItems::Start,
-            super::RowCrossAlign::Center => AlignItems::Center,
-            super::RowCrossAlign::End => AlignItems::End,
-            super::RowCrossAlign::Stretch => AlignItems::Stretch,
+            super::RowCrossAlign::Start => AlignItems::START,
+            super::RowCrossAlign::Baseline => AlignItems::BASELINE,
+            super::RowCrossAlign::Center => AlignItems::CENTER,
+            super::RowCrossAlign::End => AlignItems::END,
+            super::RowCrossAlign::Stretch => AlignItems::STRETCH,
         };
-        self.node_mut(id)?.flags.set(
-            NodeFlags::BASELINE_CROSS,
-            align == super::RowCrossAlign::Baseline,
-        );
         let mut style = self.node(id)?.style.clone();
-        style.align_items = Some(cross);
+        style.align_items = cross;
         self.write_style(id, style)
     }
 
     /// Main-axis alignment of a row or column.
     pub fn set_justify(&mut self, id: NodeId, justify: Justify) -> Result<(), Error> {
-        if !matches!(self.node(id)?.kind, Kind::Row | Kind::Column) {
+        if !self.node(id)?.is_box() || !self.node(id)?.is_flex_line() {
             return Err(Error::WrongKind);
         }
         let mut style = self.node(id)?.style.clone();
-        style.justify_content = Some(justify_content(justify));
+        style.justify_content = justify_content(justify);
         self.write_style(id, style)
     }
 
     /// `true` lets a row or column wrap onto another line.
     pub fn set_wrap(&mut self, id: NodeId, wrap: bool) -> Result<(), Error> {
-        if !matches!(self.node(id)?.kind, Kind::Row | Kind::Column) {
+        if !self.node(id)?.is_box() || !self.node(id)?.is_flex_line() {
             return Err(Error::WrongKind);
         }
         let mut style = self.node(id)?.style.clone();
@@ -616,7 +637,6 @@ impl Tree {
     /// stack, clip, opacity, or transform uses `minmax(0, 1fr)`. A plain `1fr`
     /// track is `minmax(auto, 1fr)` and grows with the child past the box.
     pub fn set_fill(&mut self, id: NodeId) -> Result<(), Error> {
-        let kind = self.node(id)?.kind;
         let mut style = self.node(id)?.style.clone();
         style.size = Size {
             width: percent(1.0_f32),
@@ -628,10 +648,7 @@ impl Tree {
         };
         style.flex_grow = 1.0;
         style.flex_shrink = 1.0;
-        if matches!(
-            kind,
-            Kind::Stack | Kind::Opacity | Kind::Transform | Kind::Clip
-        ) {
+        if self.node(id)?.is_stack() {
             style.grid_template_columns = vec![GridTemplateComponent::Single(fill_track())];
             style.grid_template_rows = vec![GridTemplateComponent::Single(fill_track())];
         }
@@ -639,7 +656,7 @@ impl Tree {
     }
 
     pub fn set_size(&mut self, id: NodeId, width: f32, height: f32) -> Result<(), Error> {
-        if self.node(id)?.kind != Kind::Sized {
+        if !self.node(id)?.is_box() {
             return Err(Error::WrongKind);
         }
         let width = finite_positive(width)?;
@@ -732,7 +749,7 @@ impl Tree {
         self.write_style(id, style)
     }
 
-    /// Places a child of a [`Kind::Grid`]. Other parents, including stack-like grids, return [`Error::WrongKind`].
+    /// Places a child of an author grid. Stack-like grids return [`Error::WrongKind`].
     pub fn set_grid_placement(
         &mut self,
         id: NodeId,
@@ -744,7 +761,7 @@ impl Tree {
         let Some(parent) = self.node(id)?.parent else {
             return Err(Error::WrongKind);
         };
-        if self.node(parent)?.kind != Kind::Grid {
+        if !self.node(parent)?.is_author_grid() {
             return Err(Error::WrongKind);
         }
         let start_column = grid_placement(column_start)?;
@@ -779,15 +796,21 @@ impl Tree {
         self.set_grid_placement(id, column_start, column_end, row_start, row_end)
     }
 
+    /// Replace the image resource. `intrinsic` is the measure fallback only.
+    ///
+    /// `None` leaves the stored intrinsic size alone, including the zero
+    /// placeholder used before a resource is known. Author width and height
+    /// stay on the style sources.
     pub fn set_image(
         &mut self,
         id: NodeId,
         source: &str,
-        width: f32,
-        height: f32,
+        intrinsic: Option<(f32, f32)>,
     ) -> Result<(), Error> {
-        let width = finite_positive(width)?;
-        let height = finite_positive(height)?;
+        if let Some((width, height)) = intrinsic {
+            let _ = finite_positive(width)?;
+            let _ = finite_positive(height)?;
+        }
         let previous = {
             let node = self.node_mut(id)?;
             let Some(image) = node.image_mut() else {
@@ -795,14 +818,17 @@ impl Tree {
             };
             let previous = Arc::clone(&image.source);
             image.source = Arc::from(source);
-            image.width = width;
-            image.height = height;
+            if let Some((width, height)) = intrinsic {
+                image.width = width;
+                image.height = height;
+            }
             previous
         };
         if previous.as_ref() != source {
             self.note_image(&previous, -1);
             self.note_image(&Arc::from(source), 1);
         }
+        self.mark_repaint(id);
         self.touch_measure(id)
     }
 
@@ -846,6 +872,7 @@ impl Tree {
                 _ => motion.simulation.terminal(),
             };
             let _ = self.apply_motion(motion.node, motion.prop, value);
+            self.settle_style_motion(motion.node, motion.prop, value);
         }
     }
 
@@ -894,6 +921,7 @@ impl Tree {
             }
             let stop = self.apply_motion(node, prop, value) || finished;
             if stop {
+                self.settle_style_motion(node, prop, value);
                 self.motion_ends.push((node, prop));
                 self.motions.remove(index);
                 if matches!(prop, crate::AnimProp::ScrollX | crate::AnimProp::ScrollY) {
@@ -1022,7 +1050,7 @@ impl Tree {
         finite_number(translate_y)?;
         finite_number(rotate_rad)?;
         finite_number(scale)?;
-        if self.node(id)?.kind == Kind::Transform {
+        if self.node(id)?.role.contains(super::node::Role::TRANSFORM) {
             let geom = self.node(id)?.transform();
             if geom.translate_x == translate_x
                 && geom.translate_y == translate_y
@@ -1055,6 +1083,7 @@ impl Tree {
     }
 
     pub fn layout(&mut self) -> Result<(), Error> {
+        self.flush_styles()?;
         if !self.needs_layout && self.laid_out {
             return Ok(());
         }
@@ -1084,8 +1113,10 @@ impl Tree {
             self.taffy.compute_layout_with_measure(
                 root_taffy,
                 available,
-                |known, available, _id, context, _style| {
-                    measure_leaf(&mut env, known, available, context, &mut measured)
+                |inputs, _id, context, style| {
+                    leaf_output(inputs, style, |known, available| {
+                        measure_leaf(&mut env, known, available, context, &mut measured)
+                    })
                 },
             )?;
         }
@@ -1179,8 +1210,10 @@ impl Tree {
         self.taffy.compute_layout_with_measure(
             taffy_id,
             Size { width, height },
-            |known, available, _id, context, _style| {
-                measure_leaf(&mut env, known, available, context, measured)
+            |inputs, _id, context, style| {
+                leaf_output(inputs, style, |known, available| {
+                    measure_leaf(&mut env, known, available, context, measured)
+                })
             },
         )?;
         Ok(self.taffy.layout(taffy_id)?.size)
@@ -1314,11 +1347,20 @@ impl Tree {
             let points = is_length(style.size.width) && is_length(style.size.height);
             node.flags.set(
                 NodeFlags::RELAYOUT_BOUNDARY,
-                kind == Kind::Scroll || is_root || points,
+                kind == Kind::Scroll || is_root || points, // scroll, root, or a definite box
             );
         }
         if let Some(taffy_id) = taffy_id {
             self.taffy.set_style(taffy_id, style)?;
+        }
+        if !self.style_applying {
+            let preset = self.node(id)?.style.clone();
+            let generation = id.generation;
+            if let Some(slot) = self.style_nodes.get_mut(&id.index)
+                && slot.generation == generation
+            {
+                slot.preset = preset;
+            }
         }
         self.note_layout(LayoutCause::Style);
         self.mark_layout_from(id);
@@ -1391,24 +1433,24 @@ impl Tree {
             }
             child = next;
         }
-        if self.node(id)?.flags.contains(NodeFlags::BASELINE_CROSS)
-            && self.node(id)?.kind == Kind::Row
-        {
-            self.shift_baseline(id)?;
-        }
         self.clear_layout_flags(id);
         Ok(())
     }
 
     pub(super) fn write_box_from_taffy(&mut self, id: NodeId) -> Result<(), Error> {
         let taffy_id = self.node(id)?.taffy.ok_or(Error::UnknownNode)?;
-        let (x, y, w, h) = {
+        let (x, y, w, h, content_x, content_y, content_w, content_h) = {
             let layout = self.taffy.layout(taffy_id)?;
+            let (content_x, content_y, content_w, content_h) = super::geometry::content_box(layout);
             (
                 layout.location.x,
                 layout.location.y,
                 layout.size.width,
                 layout.size.height,
+                content_x,
+                content_y,
+                content_w,
+                content_h,
             )
         };
         let node = self.node_mut(id)?;
@@ -1416,39 +1458,11 @@ impl Tree {
         node.y = y;
         node.w = w;
         node.h = h;
+        node.content_x = content_x;
+        node.content_y = content_y;
+        node.content_w = content_w;
+        node.content_h = content_h;
         Ok(())
-    }
-
-    pub(super) fn shift_baseline(&mut self, row: NodeId) -> Result<(), Error> {
-        let mut child = self.node(row)?.first_child;
-        let mut samples = Vec::new();
-        let mut max_baseline = 0.0f32;
-        while let Some(current) = child {
-            let next = self.node(current)?.next;
-            let baseline = self.node_baseline(current);
-            max_baseline = max_baseline.max(baseline);
-            samples.push((current, baseline));
-            child = next;
-        }
-        for (id, baseline) in samples {
-            self.node_mut(id)?.y += max_baseline - baseline;
-        }
-        Ok(())
-    }
-
-    pub(super) fn node_baseline(&mut self, id: NodeId) -> f32 {
-        let Ok(node) = self.node(id) else {
-            return 0.0;
-        };
-        if node.kind == Kind::Text {
-            if let Some(metrics) = node.text().and_then(|text| text.metrics.as_ref()) {
-                return metrics.first_baseline();
-            }
-            if let Ok(key) = self.text_key(id) {
-                return self.shaper.metrics(&key.metrics).first_baseline();
-            }
-        }
-        node.h
     }
 
     pub(super) fn clear_layout_flags(&mut self, id: NodeId) {
@@ -1481,7 +1495,7 @@ pub(super) fn nearest_offset(current: f32, start: f32, end: f32, view: f32) -> f
 }
 
 fn is_length(size: Dimension) -> bool {
-    size.tag() == CompactLength::LENGTH_TAG
+    matches!(size.expand(), ExpandedDimension::Length(_))
 }
 
 pub(super) fn live_node(slots: &[Slot], id: NodeId) -> Result<&super::node::Node, Error> {
@@ -1550,7 +1564,7 @@ pub(super) fn finite_positive(value: f32) -> Result<f32, Error> {
     }
 }
 
-fn axis_dimension(size: AxisSize) -> Result<Dimension, Error> {
+fn axis_dimension<T: TaffyAuto + FromLength + FromPercent>(size: AxisSize) -> Result<T, Error> {
     match size {
         AxisSize::Auto => Ok(auto()),
         AxisSize::Points(value) => Ok(length(finite_positive(value)?)),
@@ -1591,9 +1605,9 @@ fn grid_placement(slot: GridLine) -> Result<GridPlacement, Error> {
 
 pub(super) fn align_axes(alignment: Alignment) -> (AlignItems, JustifyContent) {
     match alignment {
-        Alignment::Start => (AlignItems::Start, JustifyContent::Start),
-        Alignment::Center => (AlignItems::Center, JustifyContent::Center),
-        Alignment::End => (AlignItems::End, JustifyContent::End),
+        Alignment::Start => (AlignItems::START, JustifyContent::START),
+        Alignment::Center => (AlignItems::CENTER, JustifyContent::CENTER),
+        Alignment::End => (AlignItems::END, JustifyContent::END),
     }
 }
 
@@ -1615,33 +1629,24 @@ fn edge_rect(edges: Edges) -> Result<taffy::Rect<LengthPercentage>, Error> {
 }
 
 fn points_of(value: LengthPercentage) -> f32 {
-    let raw = value.into_raw();
-    if raw.tag() == CompactLength::LENGTH_TAG {
-        raw.value()
-    } else {
-        0.0
+    match value.expand() {
+        ExpandedLengthPercentage::Length(points) => points,
+        ExpandedLengthPercentage::Percent(_) => 0.0,
     }
 }
 
 fn auto_points(value: LengthPercentageAuto) -> Option<f32> {
-    let raw = value.into_raw();
-    if raw.tag() == CompactLength::AUTO_TAG {
-        None
-    } else if raw.tag() == CompactLength::LENGTH_TAG {
-        Some(raw.value())
-    } else {
-        None
+    match value.expand() {
+        ExpandedLengthPercentageAuto::Length(points) => Some(points),
+        ExpandedLengthPercentageAuto::Auto | ExpandedLengthPercentageAuto::Percent(_) => None,
     }
 }
 
 fn axis_size_of(value: Dimension) -> AxisSize {
-    let raw = value.into_raw();
-    if raw.tag() == CompactLength::LENGTH_TAG {
-        AxisSize::Points(raw.value())
-    } else if raw.tag() == CompactLength::PERCENT_TAG {
-        AxisSize::Fraction(raw.value())
-    } else {
-        AxisSize::Auto
+    match value.expand() {
+        ExpandedDimension::Length(points) => AxisSize::Points(points),
+        ExpandedDimension::Percent(fraction) => AxisSize::Fraction(fraction),
+        _ => AxisSize::Auto,
     }
 }
 
@@ -1659,9 +1664,9 @@ fn margin_rect(edges: Edges) -> Result<taffy::Rect<LengthPercentageAuto>, Error>
 
 fn align_self(alignment: Alignment) -> AlignSelf {
     match alignment {
-        Alignment::Start => AlignSelf::Start,
-        Alignment::Center => AlignSelf::Center,
-        Alignment::End => AlignSelf::End,
+        Alignment::Start => AlignSelf::START,
+        Alignment::Center => AlignSelf::CENTER,
+        Alignment::End => AlignSelf::END,
     }
 }
 
@@ -1692,105 +1697,12 @@ where
 
 fn justify_content(justify: Justify) -> JustifyContent {
     match justify {
-        Justify::Start => JustifyContent::Start,
-        Justify::Center => JustifyContent::Center,
-        Justify::End => JustifyContent::End,
-        Justify::SpaceBetween => JustifyContent::SpaceBetween,
-        Justify::SpaceAround => JustifyContent::SpaceAround,
-        Justify::SpaceEvenly => JustifyContent::SpaceEvenly,
-    }
-}
-
-/// The scroll axis stays `max_content` so the child can be longer than the
-/// viewport. The cross axis is `minmax(0, 1fr)`, so a vertical list is as wide
-/// as the viewport and a horizontal strip is as tall. A plain `1fr` is
-/// `minmax(auto, 1fr)` and the child's min content widens the track past the
-/// box. `Both` keeps both axes at `max_content`.
-pub(super) fn scroll_style_for(axis: crate::ScrollAxis) -> Style {
-    let (columns, rows) = match axis {
-        crate::ScrollAxis::Vertical => (
-            vec![GridTemplateComponent::Single(fill_track())],
-            vec![max_content()],
-        ),
-        crate::ScrollAxis::Horizontal => (
-            vec![max_content()],
-            vec![GridTemplateComponent::Single(fill_track())],
-        ),
-        crate::ScrollAxis::Both => (vec![max_content()], vec![max_content()]),
-    };
-    Style {
-        display: Display::Grid,
-        grid_template_columns: columns,
-        grid_template_rows: rows,
-        align_items: Some(AlignItems::Stretch),
-        justify_items: Some(AlignItems::Stretch),
-        align_self: Some(AlignSelf::Stretch),
-        flex_grow: 1.0,
-        flex_shrink: 1.0,
-        min_size: Size {
-            width: length(0.0_f32),
-            height: length(0.0_f32),
-        },
-        overflow: taffy::Point {
-            x: taffy::style::Overflow::Hidden,
-            y: taffy::style::Overflow::Hidden,
-        },
-        ..Style::default()
-    }
-}
-
-pub(super) fn stack_style() -> Style {
-    Style {
-        display: Display::Grid,
-        flex_shrink: 0.0,
-        grid_template_columns: vec![min_content()],
-        grid_template_rows: vec![min_content()],
-        ..Style::default()
-    }
-}
-
-/// A node that keeps its intrinsic size. Taffy defaults `flex_shrink` to 1,
-/// so a tight row collapses the last child to 0. Flutter does not shrink a
-/// child unless it is flexible. Call `set_shrink` when a child should yield.
-pub(super) fn content_box() -> Style {
-    Style {
-        flex_shrink: 0.0,
-        ..Style::default()
-    }
-}
-
-/// One grid track that fills its box and cannot grow past it.
-///
-/// `fr(1)` alone is `minmax(auto, 1fr)`. The auto minimum is the child's
-/// min-content size, so a list or a row of cards stretches the track past the
-/// screen. `0` lets the track stay on the parent's definite size.
-pub(super) fn fill_track() -> TrackSizingFunction {
-    minmax(length(0.0_f32), fr(1.0_f32))
-}
-
-/// Row or column.
-///
-/// `flex_shrink` stays at 1 so a definite parent can pull the box back onto
-/// the screen. `max_size` is 100% of that parent: content may overflow inside
-/// the box, but the box does not grow past it. A direct child of a scroll
-/// clears the scrolling axis in [`super::store`] so the content can be longer
-/// than the viewport. Leaves use [`content_box`] and do not shrink.
-pub(super) fn flex_style(direction: FlexDirection, gap: f32) -> Style {
-    Style {
-        display: Display::Flex,
-        flex_direction: direction,
-        flex_shrink: 1.0,
-        max_size: Size {
-            width: percent(1.0_f32),
-            height: percent(1.0_f32),
-        },
-        gap: Size {
-            width: length(gap),
-            height: length(gap),
-        },
-        align_items: Some(AlignItems::Stretch),
-        justify_content: Some(JustifyContent::Start),
-        ..Style::default()
+        Justify::Start => JustifyContent::START,
+        Justify::Center => JustifyContent::CENTER,
+        Justify::End => JustifyContent::END,
+        Justify::SpaceBetween => JustifyContent::SPACE_BETWEEN,
+        Justify::SpaceAround => JustifyContent::SPACE_AROUND,
+        Justify::SpaceEvenly => JustifyContent::SPACE_EVENLY,
     }
 }
 
@@ -1877,41 +1789,75 @@ fn recall(
     }
 }
 
+fn leaf_output(
+    inputs: taffy::LayoutInput,
+    style: &Style,
+    measure: impl FnOnce(Size<Option<f32>>, Size<AvailableSpace>) -> (Size<f32>, Option<f32>),
+) -> taffy::LayoutOutput {
+    let found = Cell::new(None);
+    let mut output = taffy::compute_leaf_layout(
+        inputs,
+        style,
+        |_, _| 0.0,
+        |known, available| {
+            let (size, baseline) = measure(known, available);
+            found.set(baseline);
+            size
+        },
+    );
+    if let Some(baseline) = found.get() {
+        use taffy::util::ResolveOrZero;
+        let width = inputs.parent_size.width;
+        let padding = style.padding.resolve_or_zero(width, |_, _| 0.0);
+        let border = style.border.resolve_or_zero(width, |_, _| 0.0);
+        output.baselines.first = Some(baseline + padding.top + border.top);
+    }
+    output
+}
+
 fn measure_leaf(
     env: &mut MeasureEnv<'_>,
     known: Size<Option<f32>>,
     available: Size<AvailableSpace>,
     context: Option<&mut usize>,
     measured: &mut Vec<NodeId>,
-) -> Size<f32> {
+) -> (Size<f32>, Option<f32>) {
     let Some(index) = context.copied() else {
-        return Size::ZERO;
+        return (Size::ZERO, None);
     };
     let Some(slot) = env.slots.get(index) else {
-        return Size::ZERO;
+        return (Size::ZERO, None);
     };
     let Some(node) = slot.node.as_ref() else {
-        return Size::ZERO;
+        return (Size::ZERO, None);
     };
+    let mut baseline = None;
     let size = if let Some(text) = node.text() {
-        // A min-content query sizes to the widest unbreakable word, not to
-        // the single-line maximum: a grid min-content track and a scroll's
-        // content floor use this to keep long words visible.
-        if matches!(available.width, AvailableSpace::MinContent) {
+        // A min-content query uses the shaper's intrinsic width for the full
+        // metrics key: family, weight, and runs, not a whitespace split alone.
+        let measured_size = if matches!(available.width, AvailableSpace::MinContent) {
             let font_size = text.font_size * env.text_scale;
+            let paint = crate::paint_key(
+                Arc::clone(&text.utf8),
+                Arc::clone(&text.style),
+                text.spans.as_ref(),
+                font_size,
+                0.0,
+                text.color,
+            );
+            let width = env.shaper.intrinsic_width(&paint.metrics);
+            let metrics = env.shaper.metrics_paint(&crate::paint_key(
+                Arc::clone(&text.utf8),
+                Arc::clone(&text.style),
+                text.spans.as_ref(),
+                font_size,
+                SINGLE_LINE_MAX,
+                text.color,
+            ));
+            baseline = Some(metrics.first_baseline());
             TextSize {
-                width: env.shaper.min_content_width(&text.utf8, font_size),
-                height: env
-                    .shaper
-                    .measure_paint(&crate::paint_key(
-                        Arc::clone(&text.utf8),
-                        Arc::clone(&text.style),
-                        text.spans.as_ref(),
-                        font_size,
-                        SINGLE_LINE_MAX,
-                        text.color,
-                    ))
-                    .height,
+                width,
+                height: metrics.size.height,
             }
         } else {
             let max_width = line_limit(available.width);
@@ -1952,11 +1898,26 @@ fn measure_leaf(
                     text.color,
                 );
                 env.text_shaped.set(env.text_shaped.get().saturating_add(1));
-                let size = env.shaper.measure_paint(&key);
+                let metrics = env.shaper.metrics_paint(&key);
+                baseline = Some(metrics.first_baseline());
+                let size = metrics.size;
                 env.provisional.insert(index, (width_bits, size));
                 size
             }
+        };
+        if baseline.is_none() {
+            let font_size = text.font_size * env.text_scale;
+            let key = crate::paint_key(
+                Arc::clone(&text.utf8),
+                Arc::clone(&text.style),
+                text.spans.as_ref(),
+                font_size,
+                text.max_width.get(),
+                text.color,
+            );
+            baseline = Some(env.shaper.metrics(&key.metrics).first_baseline());
         }
+        measured_size
     } else if let Some(image) = node.image() {
         TextSize {
             width: image.width,
@@ -1968,10 +1929,13 @@ fn measure_leaf(
             height: 0.0,
         }
     };
-    Size {
-        width: known.width.unwrap_or(size.width),
-        height: known.height.unwrap_or(size.height),
-    }
+    (
+        Size {
+            width: known.width.unwrap_or(size.width),
+            height: known.height.unwrap_or(size.height),
+        },
+        baseline,
+    )
 }
 
 #[cfg(test)]
@@ -2071,7 +2035,7 @@ fn relayout_boundary_moves_siblings_and_skips_a_clean_scroll() -> Result<(), Err
 }
 
 #[test]
-fn second_layout_touches_cached_text_and_color_reshapes() -> Result<(), Error> {
+fn second_layout_touches_cached_text_and_color_only_repaints() -> Result<(), Error> {
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -2134,9 +2098,19 @@ fn second_layout_touches_cached_text_and_color_reshapes() -> Result<(), Error> {
     tree.layout()?;
     assert!(touches.get() >= 1);
     assert_eq!(paints.get(), first);
+    let passes = tree.layout_passes();
     tree.set_color(text, [255, 0, 0, 255])?;
+    assert!(!tree.needs_layout());
     tree.layout()?;
-    assert_eq!(color.get(), [255, 0, 0, 255]);
-    assert!(paints.get() > first);
+    assert_eq!(tree.layout_passes(), passes);
+    assert_eq!(paints.get(), first);
+    let list = tree.record()?;
+    assert!(list.commands.iter().any(|command| matches!(
+        command,
+        protocol::Command::Text {
+            color: [255, 0, 0, 255],
+            ..
+        }
+    )));
     Ok(())
 }

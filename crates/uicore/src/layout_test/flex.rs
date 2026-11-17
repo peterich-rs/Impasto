@@ -225,8 +225,10 @@ fn justify_and_wrap_use_the_flex_line() -> Result<(), crate::Error> {
         (right_x - 80.0).abs() < 0.5,
         "space-between right edge landed at {right_x}"
     );
+    tree.set_justify(left, crate::Justify::Center)?;
+    let text = tree.text("leaf", 16.0, [0, 0, 0, 255])?;
     assert!(matches!(
-        tree.set_justify(left, crate::Justify::Center),
+        tree.set_justify(text, crate::Justify::Center),
         Err(crate::Error::WrongKind)
     ));
 

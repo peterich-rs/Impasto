@@ -1,6 +1,10 @@
-import { children, createRenderEffect, createTrackedEffect } from "solid-js";
+import { bindStyleTo } from "./style.ts";
+import { bindNodeRef } from "./ref.ts";
+import type { NodeRef } from "../src/jsx.ts";
+import type { StyleProps } from "../src/style.ts";
+import { children, createRenderEffect } from "solid-js";
 
-import type { HostNode, HostRendererOptions } from "../src/tree.ts";
+import type { Node, SceneOptions } from "../src/tree.ts";
 
 export type TextGradient = {
   kind: "linear" | "radial" | "sweep";
@@ -39,30 +43,23 @@ function textContent(value: unknown): string {
   return "";
 }
 
-let options: HostRendererOptions;
+let options: SceneOptions;
 
-export function bindText(next: HostRendererOptions): void {
+export function bindText(next: SceneOptions): void {
   options = next;
 }
 
-/** A text leaf. Strings cannot be host children: core text nodes are not parents. */
-export function Text(props: {
-  fontSize?: number;
-  color?: string;
-  maxLines?: number;
-  ellipsis?: string;
-  softWrap?: boolean;
-  overflow?: "clip" | "ellipsis" | "visible";
-  textAlign?: "left" | "center" | "right";
-  weight?: number;
-  direction?: "ltr" | "rtl";
-  lineHeight?: number;
-  family?: string;
+export type TextProps = StyleProps & {
+  ref?: NodeRef;
   runs?: TextRun[];
   children?: unknown;
-}): HostNode {
+};
+
+/** A text leaf. Strings cannot be scene children: core text nodes are not parents. */
+export function Text(props: TextProps): Node {
   const resolved = children(() => props.children as never);
   const node = options.createTextNode("");
+  bindNodeRef(node, () => props.ref);
   createRenderEffect(
     () => props.runs,
     (runs) => {
@@ -79,45 +76,6 @@ export function Text(props: {
       }
     },
   );
-  createRenderEffect(
-    () => props.color,
-    (color) => {
-      if (color !== undefined) {
-        options.setProperty(node, "color", color);
-      }
-    },
-  );
-  createTrackedEffect(() => {
-    if (props.fontSize !== undefined) {
-      options.setProperty(node, "fontSize", props.fontSize);
-    }
-    if (props.maxLines !== undefined) {
-      options.setProperty(node, "maxLines", props.maxLines);
-    }
-    if (props.ellipsis !== undefined) {
-      options.setProperty(node, "ellipsis", props.ellipsis);
-    }
-    if (props.softWrap !== undefined) {
-      options.setProperty(node, "softWrap", props.softWrap);
-    }
-    if (props.overflow !== undefined) {
-      options.setProperty(node, "overflow", props.overflow);
-    }
-    if (props.textAlign !== undefined) {
-      options.setProperty(node, "textAlign", props.textAlign);
-    }
-    if (props.weight !== undefined) {
-      options.setProperty(node, "weight", props.weight);
-    }
-    if (props.direction !== undefined) {
-      options.setProperty(node, "direction", props.direction);
-    }
-    if (props.lineHeight !== undefined) {
-      options.setProperty(node, "lineHeight", props.lineHeight);
-    }
-    if (props.family !== undefined) {
-      options.setProperty(node, "family", props.family);
-    }
-  });
+  bindStyleTo(options.styles, node, props);
   return node;
 }

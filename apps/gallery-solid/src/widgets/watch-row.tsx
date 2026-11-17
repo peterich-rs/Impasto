@@ -1,4 +1,4 @@
-import { host, type NodeHandle } from "@impasto/solid-renderer";
+import { scene, type NodeHandle } from "@impasto/solid-renderer";
 import { colorBytes } from "../colors.ts";
 import type { QuoteBinder } from "../state/binder.ts";
 import type { QuoteEngine } from "../engine/engine.ts";
@@ -6,13 +6,14 @@ import { Monogram } from "./monogram.tsx";
 import { QuoteText } from "./quote-text.tsx";
 import { Sparkline } from "./sparkline.tsx";
 import type { Updown } from "../state/settings.ts";
-
 const INK = colorBytes("#1F2430");
 const MUTED = colorBytes("#8A8D91");
 const GAIN = colorBytes("#EB3E3E");
 const LOSS = colorBytes("#22B05F");
-
-export type RowItem = { symbol: string; firstOfGroup?: string };
+export type RowItem = {
+  symbol: string;
+  firstOfGroup?: string;
+};
 
 /**
  * One watchlist / market row. Left: monogram + names. Right: sparkline and
@@ -28,37 +29,88 @@ export function WatchRow(props: {
 }): NodeHandle {
   const symbol = () => props.item().symbol;
   const ins = () => props.engine().ins(symbol());
-
-  const region = host.pointerRegion();
-  host.onClick(region, () => props.onClick?.(symbol()));
-
-  const pad = host.padding(0);
-  host.setPaddingEdges(pad, 10, 16, 10, 16);
-  host.setGrow(pad, 1);
-  host.append(region, pad);
-
-  const line = host.row(10);
-  host.setMinSize(line, 0, 56);
-  host.setCross(line, "center");
-  host.append(pad, line);
-
-  const mono = Monogram({ ins });
-  host.append(line, mono.id);
-
-  const nameCol = host.column(2);
-  host.setMinSize(nameCol, 0, 0);
-  host.setMaxSize(nameCol, 168, 80);
-  host.setGrow(nameCol, 1);
-  host.append(line, nameCol);
-  const title = host.text(ins().name, 15, INK);
-  host.setFontWeight(title, 600);
-  host.setMaxLines(title, 1);
-  host.setOverflow(title, "ellipsis");
-  host.setEllipsis(title, "…");
-  host.append(nameCol, title);
-  const sub = host.text(`${ins().symbol} · ${labelMarket(ins().market)}`, 11, MUTED);
-  host.append(nameCol, sub);
-
+  const region = scene.createElement("view", {
+    style: {},
+  });
+  scene.onClick(region, () => props.onClick?.(symbol()));
+  const pad = scene.createElement("view", {
+    style: {
+      padding: 0,
+    },
+  });
+  scene.patchStyle(pad, {
+    paddingTop: 10,
+    paddingRight: 16,
+    paddingBottom: 10,
+    paddingLeft: 16,
+  });
+  scene.patchStyle(pad, {
+    flex: 1,
+  });
+  scene.append(region, pad);
+  const line = scene.createElement("view", {
+    style: {
+      flexDirection: "row",
+      gap: 10,
+    },
+  });
+  scene.patchStyle(line, {
+    minWidth: 0,
+    minHeight: 56,
+  });
+  scene.patchStyle(line, {
+    alignItems: "center",
+  });
+  scene.append(pad, line);
+  const mono = Monogram({
+    ins,
+  });
+  scene.append(line, mono);
+  const nameCol = scene.createElement("view", {
+    style: {
+      gap: 2,
+    },
+  });
+  scene.patchStyle(nameCol, {
+    minWidth: 0,
+    minHeight: 0,
+  });
+  scene.patchStyle(nameCol, {
+    maxWidth: 168,
+    maxHeight: 80,
+  });
+  scene.patchStyle(nameCol, {
+    flex: 1,
+  });
+  scene.append(line, nameCol);
+  const title = scene.createElement("text", {
+    value: ins().name,
+    style: {
+      fontSize: 15,
+      color: INK,
+    },
+  });
+  scene.patchStyle(title, {
+    fontWeight: 600,
+  });
+  scene.patchStyle(title, {
+    maxLines: 1,
+  });
+  scene.patchStyle(title, {
+    textOverflow: "ellipsis",
+  });
+  scene.patchStyle(title, {
+    ellipsis: "…",
+  });
+  scene.append(nameCol, title);
+  const sub = scene.createElement("text", {
+    value: `${ins().symbol} · ${labelMarket(ins().market)}`,
+    style: {
+      fontSize: 11,
+      color: MUTED,
+    },
+  });
+  scene.append(nameCol, sub);
   const spark = Sparkline({
     symbol,
     engine: props.engine,
@@ -67,10 +119,13 @@ export function WatchRow(props: {
     w: 56,
     h: 22,
   });
-  host.append(line, spark.id);
-
-  const numCol = host.column(2);
-  host.append(line, numCol);
+  scene.append(line, spark);
+  const numCol = scene.createElement("view", {
+    style: {
+      gap: 2,
+    },
+  });
+  scene.append(line, numCol);
   const lastCell = QuoteText({
     symbol,
     kind: "last",
@@ -79,7 +134,7 @@ export function WatchRow(props: {
     align: "right",
     binder: props.binder,
   });
-  host.append(numCol, lastCell.id);
+  scene.append(numCol, lastCell);
   const pctCell = QuoteText({
     symbol,
     kind: "pct",
@@ -87,13 +142,11 @@ export function WatchRow(props: {
     align: "right",
     binder: props.binder,
   });
-  host.append(numCol, pctCell.id);
-
+  scene.append(numCol, pctCell);
   void GAIN;
   void LOSS;
-  return { id: region };
+  return region;
 }
-
 function labelMarket(market: string): string {
   if (market === "hk") {
     return "HK";

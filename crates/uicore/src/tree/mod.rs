@@ -1,6 +1,7 @@
 //! Render tree. Layout goes through Taffy. Positions, hits, and gestures stay on this type.
 
 mod debug;
+mod geometry;
 mod gesture;
 mod hit;
 mod layout;
@@ -9,6 +10,7 @@ mod record;
 mod scroll;
 mod semantics;
 mod store;
+mod style;
 mod text;
 
 pub use debug::{DebugAxis, LayoutIssue};
@@ -149,6 +151,14 @@ pub struct Tree {
     refresh_pending: Vec<NodeId>,
     /// Developer diagnostics. Off by default; see `tree/debug.rs`.
     debug: debug::DebugState,
+    style_nodes: HashMap<u32, style::NodeStyle>,
+    style_queue: Vec<NodeId>,
+    style_source_owners: HashMap<crate::style::StyleSourceId, NodeId>,
+    next_style_source: u32,
+    style_applying: bool,
+    style_env: crate::style::Environment,
+    class_cache: crate::style::ClassCache,
+    style_gestures: Vec<Gesture>,
 }
 
 #[cfg(test)]

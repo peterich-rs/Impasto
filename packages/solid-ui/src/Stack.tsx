@@ -1,0 +1,12 @@
+import type { NodeHandle } from "@impasto/solid-renderer";
+import { bindBox, eventsOf } from "./element.tsx";
+import type { StackProps } from "./props.ts";
+
+/** One-cell stack. Track templates stay on the native preset. */
+export function Stack(props: StackProps): NodeHandle {
+  return (
+    <stack {...eventsOf(props)} ref={(node) => bindBox(node, props)}>
+      {props.children}
+    </stack>
+  );
+}

@@ -3,8 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./host": "./src/host.gen.ts"
+    ".": "./src/index.ts"
   },
   "scripts": {
     "test": "node --conditions=browser --experimental-strip-types src/store.test.ts && node --experimental-strip-types src/source-map.test.ts"
@@ -12,7 +11,9 @@
   "dependencies": {
     "@impasto/clipboard": "workspace:*",
     "@impasto/solid-renderer": "workspace:*",
-    "@impasto/solid-ui": "workspace:*",
+    "@impasto/solid-ui": "workspace:*"
+  },
+  "devDependencies": {
     "solid-js": "2.0.0-rc.17"
   }
 }

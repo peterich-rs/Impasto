@@ -12,6 +12,15 @@ export const MutationOp = {
   EditText: 10,
   Detach: 11,
   Reparent: 12,
+  StyleSnapshot: 27,
+  StyleSourceCreate: 28,
+  StyleSourceRemove: 29,
+  StyleSourceSnapshot: 30,
+  StyleClear: 31,
+  PointerTarget: 32,
+  ClassSnapshot: 33,
+  StyleSurface: 34,
+  StyleEnvironment: 35,
 } as const;
 
 export const StyleField = {
@@ -91,6 +100,7 @@ export const CreateKind = {
   Transform: 13,
   Image: 14,
   Text: 15,
+  View: 16,
 } as const;
 
 export const QueryKind = {
@@ -145,4 +155,14 @@ export const EffectKind = {
   Reload: 22,
   MeasurePanel: 23,
   SetTextScale: 24,
+} as const;
+
+export const StyleValueTag = {
+  Null: 0,
+  Number: 1,
+  String: 2,
+  Bool: 3,
+  Array: 4,
+  Object: 5,
+  Undefined: 6,
 } as const;

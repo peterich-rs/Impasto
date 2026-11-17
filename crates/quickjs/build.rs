@@ -4,6 +4,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
     let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
     generate_abi(&manifest, &out_dir)?;
+    let scene = std::fs::read_to_string(manifest.join("src/scene.js"))?;
+    let glue = std::fs::read_to_string(manifest.join("src/glue.c"))?;
+    let mut exports = std::collections::BTreeSet::new();
+    for line in scene.lines() {
+        if let Some(rest) = line.trim().strip_prefix("core.")
+            && let Some((name, _)) = rest.split_once(" = function")
+        {
+            exports.insert(name.to_owned());
+        }
+    }
+    for line in glue
+        .lines()
+        .filter(|line| line.contains("bind_fn(ctx, core,"))
+    {
+        if let Some(name) = line.split('"').nth(1).filter(|name| !name.starts_with('_')) {
+            exports.insert(name.to_owned());
+        }
+    }
+    for name in [
+        "scene",
+        "createElement",
+        "createTextNode",
+        "insertNode",
+        "setProp",
+        "effect",
+        "memo",
+        "createComponent",
+    ] {
+        exports.insert(name.to_owned());
+    }
+    let names = exports
+        .iter()
+        .map(|name| format!("\"{name}\",\n"))
+        .collect::<String>();
+    std::fs::write(out_dir.join("scene_exports.inc"), names)?;
+    for file in ["src/scene.js", "src/reactive.js"] {
+        println!("cargo:rerun-if-changed={file}");
+    }
+
     let source = manifest
         .parent()
         .and_then(|dir| dir.parent())
@@ -14,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=abi.yml");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/glue.c");
-    println!("cargo:rerun-if-changed=src/runtime_host.inc");
+    println!("cargo:rerun-if-changed=src/modules.inc");
     println!("cargo:rerun-if-changed={}", source.display());
     if !source.join("quickjs.c").is_file() {
         println!("cargo:rustc-cfg=quickjs_missing");
@@ -23,6 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rustc-cfg=quickjs");
     cc::Build::new()
         .include(&source)
+        .include(&out_dir)
         .define("_GNU_SOURCE", None)
         .file(source.join("dtoa.c"))
         .file(source.join("libregexp.c"))
@@ -38,6 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn enum_name(section: &str) -> &'static str {
     match section {
         "ops" => "MutationOp",
+        "style_value_tags" => "StyleValueTag",
         "fields" => "StyleField",
         "creates" => "CreateKind",
         "queries" => "QueryKind",
@@ -118,6 +159,8 @@ fn generate_abi(manifest: &Path, out_dir: &Path) -> Result<(), Box<dyn std::erro
         }
     }
     js.push_str("\n};\n");
+    rust.push_str("#[repr(C)]\n#[derive(Clone, Copy)]\n#[allow(dead_code, reason = \"generated from abi.yml; constructed when quickjs-ng is linked\")]\npub struct StyleValueRecord { pub tag: u32, pub children: u32, pub number: f64, pub key: *const std::ffi::c_char, pub key_len: usize, pub text: *const std::ffi::c_char, pub text_len: usize }\n");
+    header.push_str("typedef struct StyleValueRecord { uint32_t tag; uint32_t children; double number; const char *key; size_t key_len; const char *text; size_t text_len; } StyleValueRecord;\n");
     std::fs::write(out_dir.join("abi.rs"), rust)?;
     std::fs::write(out_dir.join("mutation.h"), header)?;
     std::fs::write(out_dir.join("abi.js"), js)?;

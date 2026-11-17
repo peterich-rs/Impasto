@@ -1,4 +1,4 @@
-import * as host from "@impasto/linking/host";
+import * as scene from "./linking.ts";
 
 export interface Linking {
   getInitialURL(): string | null;
@@ -7,4 +7,4 @@ export interface Linking {
   removeEventListener(type: "url", listener: (event: { url: string }) => void): void;
 }
 
-export const Linking = host as unknown as Linking;
+export const Linking = scene as unknown as Linking;

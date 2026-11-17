@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 
-import { applyListOp, type ListBindingSlot, type ListBindingState } from "./list-binding.ts";
+import {
+  applyListOp,
+  type ListBindingSlot,
+  type ListBindingState,
+} from "./list-binding.ts";
 
 type Row = { n: number };
 
@@ -11,7 +15,12 @@ function harness(poolSize = 1) {
   const state: ListBindingState<Row> = { live: new Map(), pools: new Map() };
   const items = new Map<number, Row>();
 
-  function make(type: string, item: Row, index: number, key: string): ListBindingSlot<Row> {
+  function make(
+    type: string,
+    item: Row,
+    index: number,
+    key: string,
+  ): ListBindingSlot<Row> {
     const node = next++;
     created.push(type);
     const slot: ListBindingSlot<Row> = {
@@ -36,10 +45,7 @@ function harness(poolSize = 1) {
     created,
     discarded,
     state,
-    op(
-      op: Parameters<typeof applyListOp<Row>>[1],
-      limit = poolSize,
-    ) {
+    op(op: Parameters<typeof applyListOp<Row>>[1], limit = poolSize) {
       applyListOp(state, op, {
         parent: () => 1,
         poolSize: () => limit,

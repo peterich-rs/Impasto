@@ -1,13 +1,12 @@
 import { log, setListenerErrorPolicy } from "@impasto/solid-renderer";
 
-/** Default listener policy. `freeze` is opt-in and keeps the host on the previous frame. */
+/** Default listener policy. `freeze` is opt-in and keeps the scene on the previous frame. */
 setListenerErrorPolicy("report");
-
 export function reportError(error: unknown): void {
   log("error", formatError(error));
 }
 
-/** Message plus stack, so a host log line can be copied without the error page. */
+/** Message plus stack, so a scene log line can be copied without the error page. */
 export function formatError(error: unknown): string {
   if (!(error instanceof Error)) {
     return String(error);
@@ -18,14 +17,12 @@ export function formatError(error: unknown): string {
   }
   return stack.includes(error.message) ? stack : `${error.message}\n${stack}`;
 }
-
 export function messageOf(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
   }
   return String(error);
 }
-
 export function stackOf(error: unknown): string {
   if (error instanceof Error && typeof error.stack === "string") {
     return error.stack;
@@ -59,13 +56,15 @@ export function installErrorHooks(): () => void {
   return () => {
     if (typeof global.removeEventListener === "function") {
       global.removeEventListener("error", onError as EventListener);
-      global.removeEventListener("unhandledrejection", onRejection as EventListener);
+      global.removeEventListener(
+        "unhandledrejection",
+        onRejection as EventListener,
+      );
     } else {
       delete global.__reportUnhandled;
     }
   };
 }
-
 export function useErrorHandler(): (error: unknown) => void {
   return (error: unknown) => {
     reportError(error);

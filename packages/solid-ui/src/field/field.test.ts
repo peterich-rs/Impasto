@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { flush } from "solid-js";
 import { createFieldController } from "./controller.ts";
-import { EDIT_CARET, EDIT_COMMIT, EDIT_EXTEND_CARET, EDIT_LOAD, EDIT_NEWLINE } from "./keyboard.ts";
+import {
+  EDIT_CARET,
+  EDIT_COMMIT,
+  EDIT_EXTEND_CARET,
+  EDIT_LOAD,
+  EDIT_NEWLINE,
+} from "./keyboard.ts";
 import { currency, decimal, phone } from "./mask.ts";
 
 assert.equal(decimal().format("-12.3.4"), "-12.34");

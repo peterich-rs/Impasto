@@ -1,6 +1,5 @@
-import { host, type NodeHandle } from "@impasto/solid-renderer";
+import { scene, type NodeHandle } from "@impasto/solid-renderer";
 import { colorBytes } from "../colors.ts";
-
 const INK = colorBytes("#1F2430");
 const MUTED = colorBytes("#8A8D91");
 const SURFACE = colorBytes("#FFFFFF");
@@ -21,48 +20,77 @@ export const palette = {
     return HAIR;
   },
 };
-
 export function bgColor(): [number, number, number, number] {
   return colorBytes("#F5F6F8");
 }
-
 export function panelColor(): [number, number, number, number] {
   return SURFACE;
 }
-
-export function label(text: string, size: number, color: [number, number, number, number], weight?: number): number {
-  const node = host.text(text, size, color);
+export function label(
+  text: string,
+  size: number,
+  color: [number, number, number, number],
+  weight?: number,
+): number {
+  const node = scene.createElement("text", {
+    value: text,
+    style: {
+      fontSize: size,
+      color: color,
+    },
+  });
   if (weight !== undefined) {
-    host.setFontWeight(node, weight);
+    scene.patchStyle(node, {
+      fontWeight: weight,
+    });
   }
   return node;
 }
-
 export type Palette = typeof palette;
 export type RGBA = [number, number, number, number];
 export type NodeRef = NodeHandle;
-export { host };
+export { scene };
 export { colorBytes };
 export function clearChildren(node: number): void {
   for (;;) {
-    const first = host.firstChild(node);
+    const first = scene.firstChild(node);
     if (first === 0) {
       return;
     }
-    host.remove(node, first);
+    scene.remove(node, first);
   }
 }
 
 /** Real `padding` node with explicit edges; content is appended by the caller. */
-export function padNode(top: number, right: number, bottom: number, left: number): number {
-  const node = host.padding(0);
-  host.setPaddingEdges(node, top, right, bottom, left);
+export function padNode(
+  top: number,
+  right: number,
+  bottom: number,
+  left: number,
+): number {
+  const node = scene.createElement("view", {
+    style: {
+      padding: 0,
+    },
+  });
+  scene.patchStyle(node, {
+    paddingTop: top,
+    paddingRight: right,
+    paddingBottom: bottom,
+    paddingLeft: left,
+  });
   return node;
 }
 
 /** Wraps `child` into a padding node with the given edges. */
-export function padded(child: number, top: number, right: number, bottom: number, left: number): number {
+export function padded(
+  child: number,
+  top: number,
+  right: number,
+  bottom: number,
+  left: number,
+): number {
   const node = padNode(top, right, bottom, left);
-  host.append(node, child);
+  scene.append(node, child);
   return node;
 }

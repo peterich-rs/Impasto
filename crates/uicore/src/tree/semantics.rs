@@ -31,17 +31,17 @@ impl Tree {
         parent: Option<SemanticsId>,
         out: &mut Vec<SemanticsNode>,
     ) {
-        if self
-            .get(id)
-            .is_some_and(|node| node.flags.contains(super::node::NodeFlags::CULL_PAINT))
-        {
+        if self.get(id).is_some_and(|node| {
+            node.flags.contains(super::node::NodeFlags::CULL_PAINT)
+                || node.flags.contains(super::node::NodeFlags::HIDDEN)
+        }) {
             return;
         }
         let Some(snapshot) = self.semantics_snapshot(id) else {
             return;
         };
         let label = snapshot.hint_label.unwrap_or_else(|| {
-            if snapshot.kind == Kind::PointerRegion {
+            if snapshot.pointer {
                 self.descendant_text(id)
             } else {
                 snapshot.text
@@ -61,7 +61,7 @@ impl Tree {
             caret: self.focused_caret(id),
             description: snapshot.description,
         });
-        if snapshot.kind == Kind::Clip && (snapshot.rect.w == 0.0 || snapshot.rect.h == 0.0) {
+        if snapshot.clip && (snapshot.rect.w == 0.0 || snapshot.rect.h == 0.0) {
             return;
         }
         for child in snapshot.children {
@@ -76,11 +76,10 @@ impl Tree {
             .as_ref()
             .and_then(|hint| hint.role)
             .unwrap_or(match node.kind {
-                Kind::PointerRegion => SemanticsRole::Button,
                 Kind::Text => SemanticsRole::Text,
                 Kind::Image => SemanticsRole::Image,
                 Kind::Scroll => SemanticsRole::Scroll,
-                _ => SemanticsRole::Generic,
+                Kind::View | Kind::Stack => SemanticsRole::Generic,
             });
         let disabled = hint
             .as_ref()
@@ -89,10 +88,10 @@ impl Tree {
             .as_ref()
             .is_some_and(|hint| hint.read_only == Some(true));
         let mut actions = SemanticsActions(0);
-        if node.kind == Kind::PointerRegion && !disabled {
+        if node.is_pointer() && !disabled {
             actions.0 |= SemanticsActions::ACTIVATE;
         }
-        if node.kind == Kind::Scroll {
+        if node.is_scroll() {
             actions.0 |= SemanticsActions::SCROLL;
         }
         let mut flags = SemanticsFlags(0);
@@ -117,8 +116,10 @@ impl Tree {
         if flags.contains(SemanticsFlags::EDITABLE) {
             actions.0 |= SemanticsActions::SET_TEXT;
         }
-        let scroll = (node.kind == Kind::Scroll).then_some(node.scroll_offset());
+        let scroll = node.is_scroll().then_some(node.scroll_offset());
         let kind = node.kind;
+        let pointer = node.is_pointer();
+        let clip = node.role.contains(super::node::Role::CLIP);
         let text = node
             .text()
             .map(|text| text.utf8.as_ref().to_owned())
@@ -130,6 +131,8 @@ impl Tree {
         let rect = Rect { x, y, w, h };
         Some(Snapshot {
             kind,
+            pointer,
+            clip,
             role,
             hint_label: hint.as_ref().and_then(|hint| hint.label.clone()),
             value: hint.as_ref().and_then(|hint| hint.value.clone()),
@@ -188,7 +191,7 @@ impl Tree {
 
 struct BuiltSemantics {
     id: SemanticsId,
-    kind: Kind,
+    clip: bool,
     rect: Rect,
     children: Vec<NodeId>,
     node: SemanticsNode,
@@ -196,6 +199,8 @@ struct BuiltSemantics {
 
 struct Snapshot {
     kind: Kind,
+    pointer: bool,
+    clip: bool,
     role: SemanticsRole,
     text: String,
     hint_label: Option<String>,
@@ -216,6 +221,7 @@ impl Tree {
         hint: crate::SemanticsHint,
     ) -> Result<(), crate::Error> {
         self.node_mut(id)?.semantics = Some(hint);
+        self.invalidate_style_deps(crate::style::DepMask::DISABLED);
         self.mark_semantics_chain(id);
         Ok(())
     }
@@ -326,7 +332,7 @@ impl Tree {
             return;
         };
         let children = node.children.clone();
-        let skip_children = node.kind == Kind::Clip && (node.rect.w == 0.0 || node.rect.h == 0.0);
+        let skip_children = node.clip && (node.rect.w == 0.0 || node.rect.h == 0.0);
         out.push(node.node);
         if skip_children {
             return;
@@ -358,7 +364,7 @@ impl Tree {
             cached.label.clone()
         } else {
             snapshot.hint_label.clone().unwrap_or_else(|| {
-                if snapshot.kind == Kind::PointerRegion {
+                if snapshot.pointer {
                     self.descendant_text(id)
                 } else {
                     snapshot.text.clone()
@@ -375,7 +381,7 @@ impl Tree {
             .unwrap_or_else(|| snapshot.description.clone());
         Some(BuiltSemantics {
             id: sid,
-            kind: snapshot.kind,
+            clip: snapshot.clip,
             rect: snapshot.rect,
             children: snapshot.children,
             node: SemanticsNode {

@@ -30,6 +30,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: rustfmt
         run: cargo fmt --all -- --check
+      - name: generated style contracts
+        run: cargo run --locked -p uicore --bin style-types -- --check --root .
       - name: check (deny warnings)
         run: cargo check --workspace --exclude macos
         env:

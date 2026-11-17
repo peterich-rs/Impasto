@@ -2,11 +2,9 @@ export type InputMask = {
   /** Format a committed string. Not applied while a composition is open. */
   format(value: string): string;
 };
-
 function digitsOnly(value: string): string {
   return value.replace(/\D/g, "");
 }
-
 function groupThousands(whole: string): string {
   const digits = whole.replace("-", "");
   let out = "";
@@ -26,7 +24,10 @@ export function decimal(): InputMask {
       const negative = value.trim().startsWith("-");
       const cleaned = value.replace(/[^\d.]/g, "");
       const dot = cleaned.indexOf(".");
-      const whole = (dot < 0 ? cleaned : cleaned.slice(0, dot)).replace(/^0+(?=\d)/, "");
+      const whole = (dot < 0 ? cleaned : cleaned.slice(0, dot)).replace(
+        /^0+(?=\d)/,
+        "",
+      );
       const fraction = dot < 0 ? "" : cleaned.slice(dot + 1).replace(/\./g, "");
       const body = dot < 0 ? whole : `${whole || "0"}.${fraction}`;
       if (body.length === 0) {
@@ -64,7 +65,8 @@ export function currency(): InputMask {
       const cleaned = value.replace(/[^\d.]/g, "");
       const dot = cleaned.indexOf(".");
       const wholeDigits = (dot < 0 ? cleaned : cleaned.slice(0, dot)) || "0";
-      const fraction = (dot < 0 ? "" : cleaned.slice(dot + 1).replace(/\./g, "")) + "00";
+      const fraction =
+        (dot < 0 ? "" : cleaned.slice(dot + 1).replace(/\./g, "")) + "00";
       const whole = groupThousands(wholeDigits.replace(/^0+(?=\d)/, "") || "0");
       return `${negative ? "-" : ""}$${whole}.${fraction.slice(0, 2)}`;
     },

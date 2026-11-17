@@ -22,9 +22,11 @@ fn baseline_row_shifts_16_28_40_and_a_column_is_unchanged() -> Result<(), crate:
     let small = tree.rect(small)?;
     let mid = tree.rect(mid)?;
     let large = tree.rect(large)?;
-    assert!((small.y - 19.2).abs() < 0.05, "y={}", small.y);
-    assert!((mid.y - 9.6).abs() < 0.05, "y={}", mid.y);
-    assert!(large.y.abs() < 0.05, "y={}", large.y);
+    // Taffy aligns on the first baseline and then rounds. The offsets are the
+    // rounded form of 19.2 / 9.6 / 0.
+    assert!((small.y - 19.0).abs() < 0.05, "small {}", small.y);
+    assert!((mid.y - 10.0).abs() < 0.05, "mid {}", mid.y);
+    assert!(large.y.abs() < 0.05, "large {}", large.y);
 
     let mut plain = Tree::new(MonoShaper::default());
     let column = plain.column(0.0)?;

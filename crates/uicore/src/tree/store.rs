@@ -8,7 +8,10 @@ use taffy::prelude::*;
 use super::layout::{
     align_axes, content_box, finite_number, flex_style, scroll_style_for, stack_style, tracks,
 };
-use super::node::{ImagePayload, Kind, MAX_GENERATION, Node, Payload, Slot, TextPayload};
+use super::node::{
+    ImagePayload, Kind, MAX_GENERATION, Node, NodeFlags, Payload, Role, Slot, TextPayload,
+    TransformGeom,
+};
 use super::{Alignment, Discarded, Gesture, NodeId, TrackSize, Tree};
 use crate::{Error, Shaper};
 
@@ -73,28 +76,44 @@ impl Tree {
             safe: (0.0, 0.0, 0.0, 0.0),
             refresh_pending: Vec::new(),
             debug: super::debug::DebugState::default(),
+            style_nodes: HashMap::new(),
+            style_queue: Vec::new(),
+            style_source_owners: HashMap::new(),
+            next_style_source: 0,
+            style_applying: false,
+            style_env: crate::style::Environment::default(),
+            class_cache: crate::style::ClassCache::default(),
+            style_gestures: Vec::new(),
         }
     }
 
     pub fn row(&mut self, gap: f32) -> Result<NodeId, Error> {
-        self.container(Kind::Row, flex_style(FlexDirection::Row, gap))
+        self.container(Kind::View, flex_style(FlexDirection::Row, gap))
     }
 
     pub fn column(&mut self, gap: f32) -> Result<NodeId, Error> {
-        self.container(Kind::Column, flex_style(FlexDirection::Column, gap))
+        self.container(Kind::View, flex_style(FlexDirection::Column, gap))
+    }
+
+    /// Column with min 0, shrink 0, and no parent max. Older constructors keep
+    /// all constructors use the same sizing defaults.
+    pub fn view(&mut self) -> Result<NodeId, Error> {
+        self.container(Kind::View, crate::style::defaults::view_style())
     }
 
     pub fn grid(&mut self, columns: u16) -> Result<NodeId, Error> {
         let tracks = (0..columns).map(|_| min_content()).collect();
-        self.container(
-            Kind::Grid,
+        self.view_with_role(
             Style {
                 display: Display::Grid,
                 grid_template_columns: tracks,
-                align_items: Some(AlignItems::Start),
-                justify_items: Some(AlignItems::Start),
-                ..Style::default()
+                align_items: AlignItems::START,
+                justify_items: AlignItems::START,
+                flex_shrink: 0.0,
+                min_size: crate::style::defaults::zero_min(),
+                ..content_box()
             },
+            Role::GRID,
         )
     }
 
@@ -111,8 +130,7 @@ impl Tree {
         }
         let columns = tracks(columns)?;
         let rows = tracks(rows)?;
-        self.container(
-            Kind::Grid,
+        self.view_with_role(
             Style {
                 display: Display::Grid,
                 grid_template_columns: columns,
@@ -121,10 +139,13 @@ impl Tree {
                     width: length(gap),
                     height: length(gap),
                 },
-                align_items: Some(AlignItems::Stretch),
-                justify_items: Some(AlignItems::Stretch),
-                ..Style::default()
+                align_items: AlignItems::STRETCH,
+                justify_items: AlignItems::STRETCH,
+                flex_shrink: 0.0,
+                min_size: crate::style::defaults::zero_min(),
+                ..content_box()
             },
+            Role::GRID,
         )
     }
 
@@ -134,19 +155,20 @@ impl Tree {
     pub fn padding(&mut self, edges: f32) -> Result<NodeId, Error> {
         let edge = length(edges);
         self.container(
-            Kind::Padding,
+            Kind::View,
             Style {
                 display: Display::Flex,
                 flex_direction: FlexDirection::Column,
                 flex_shrink: 0.0,
-                align_items: Some(AlignItems::Stretch),
+                min_size: crate::style::defaults::zero_min(),
+                align_items: AlignItems::STRETCH,
                 padding: Rect {
                     left: edge,
                     right: edge,
                     top: edge,
                     bottom: edge,
                 },
-                ..Style::default()
+                ..content_box()
             },
         )
     }
@@ -154,29 +176,35 @@ impl Tree {
     pub fn align(&mut self, alignment: Alignment) -> Result<NodeId, Error> {
         let (cross, main) = align_axes(alignment);
         self.container(
-            Kind::Align,
+            Kind::View,
             Style {
                 display: Display::Flex,
                 flex_shrink: 0.0,
-                align_items: Some(cross),
-                justify_content: Some(main),
-                ..Style::default()
+                min_size: crate::style::defaults::zero_min(),
+                align_items: cross,
+                justify_content: main,
+                ..content_box()
             },
         )
     }
 
     pub fn sized(&mut self, width: f32, height: f32) -> Result<NodeId, Error> {
-        self.container(
-            Kind::Sized,
+        let id = self.container(
+            Kind::View,
             Style {
                 flex_shrink: 0.0,
+                min_size: crate::style::defaults::zero_min(),
                 size: Size {
                     width: length(width),
                     height: length(height),
                 },
-                ..Style::default()
+                ..content_box()
             },
-        )
+        )?;
+        self.node_mut(id)?
+            .flags
+            .insert(NodeFlags::RELAYOUT_BOUNDARY);
+        Ok(id)
     }
 
     pub fn stack(&mut self) -> Result<NodeId, Error> {
@@ -187,17 +215,20 @@ impl Tree {
     ///
     /// Hit testing uses the rounded outline. A point in the corner does not reach a child.
     pub fn clip(&mut self, corner_radius: f32) -> Result<NodeId, Error> {
-        let id = self.container(Kind::Clip, stack_style())?;
-        self.node_mut(id)?
-            .write_paint(|paint| paint.corner_radius = corner_radius);
+        let id = self.container(Kind::Stack, stack_style())?;
+        let node = self.node_mut(id)?;
+        node.role.insert(Role::CLIP);
+        node.flags.insert(NodeFlags::REPAINT_BOUNDARY);
+        node.write_paint(|paint| paint.corner_radius = corner_radius);
         Ok(id)
     }
 
     /// Composites descendants as one layer. `alpha` is 0–255.
     pub fn opacity(&mut self, alpha: u8) -> Result<NodeId, Error> {
-        let id = self.container(Kind::Opacity, stack_style())?;
-        self.node_mut(id)?
-            .write_paint(|paint| paint.alpha = Some(alpha));
+        let id = self.container(Kind::Stack, stack_style())?;
+        let node = self.node_mut(id)?;
+        node.flags.insert(NodeFlags::REPAINT_BOUNDARY);
+        node.write_paint(|paint| paint.alpha = Some(alpha));
         Ok(id)
     }
 
@@ -226,7 +257,12 @@ impl Tree {
     ///
     /// The initial transform is identity: no translation, no rotation, scale 1.
     pub fn transform(&mut self) -> Result<NodeId, Error> {
-        self.container(Kind::Transform, stack_style())
+        let id = self.container(Kind::Stack, stack_style())?;
+        let node = self.node_mut(id)?;
+        node.role.insert(Role::TRANSFORM);
+        node.flags.insert(NodeFlags::REPAINT_BOUNDARY);
+        node.transform = Some(Box::new(TransformGeom::identity()));
+        Ok(id)
     }
 
     pub fn text(
@@ -306,7 +342,7 @@ impl Tree {
     /// `corner_radius` is in scene points. Zero paints a sharp rectangle and does not
     /// change hit testing.
     pub fn decorated(&mut self, color: [u8; 4], corner_radius: f32) -> Result<NodeId, Error> {
-        let id = self.container(Kind::Decorated, flex_style(FlexDirection::Column, 0.0))?;
+        let id = self.container(Kind::View, flex_style(FlexDirection::Column, 0.0))?;
         let node = self.node_mut(id)?;
         node.write_paint(|paint| {
             paint.fill = Some(color);
@@ -315,17 +351,30 @@ impl Tree {
         Ok(id)
     }
 
+    /// A view with pointer listeners participates in target selection.
+    pub fn set_pointer_target(&mut self, id: NodeId) -> Result<(), Error> {
+        self.node_mut(id)?.role.insert(Role::POINTER);
+        Ok(())
+    }
+
     pub fn pointer_region(&mut self) -> Result<NodeId, Error> {
-        self.container(
-            Kind::PointerRegion,
+        self.view_with_role(
             Style {
                 display: Display::Flex,
                 flex_shrink: 0.0,
-                align_items: Some(AlignItems::Stretch),
-                justify_content: Some(JustifyContent::Start),
-                ..Style::default()
+                min_size: crate::style::defaults::zero_min(),
+                align_items: AlignItems::STRETCH,
+                justify_content: JustifyContent::START,
+                ..content_box()
             },
+            Role::POINTER,
         )
+    }
+
+    fn view_with_role(&mut self, style: Style, role: Role) -> Result<NodeId, Error> {
+        let id = self.container(Kind::View, style)?;
+        self.node_mut(id)?.role.insert(role);
+        Ok(id)
     }
 
     /// Moves every child of `from` onto `to`. The placeholder stays put.
@@ -376,7 +425,6 @@ impl Tree {
         }
 
         self.pin_stack_child(parent, child)?;
-        self.fit_parent_cap(parent, child)?;
         let index = match before {
             Some(anchor) => self.child_index(parent, anchor)?,
             None => self.child_count(parent)?,
@@ -387,7 +435,7 @@ impl Tree {
             .insert_child_at_index(parent_taffy, index, child_taffy)?;
         self.attach_links(parent, child, before)?;
         if let Ok(node) = self.node_mut(child) {
-            node.flags.insert(super::node::NodeFlags::LAYOUT_DIRTY);
+            node.flags.insert(NodeFlags::LAYOUT_DIRTY);
         }
         self.note_text_tree(child);
         self.mark_layout_from(parent);
@@ -589,10 +637,8 @@ impl Tree {
         if self.root.is_none() {
             self.root = Some(id);
             if let Some(node) = self.slots[index as usize].node.as_mut() {
-                node.flags.insert(
-                    super::node::NodeFlags::RELAYOUT_BOUNDARY
-                        | super::node::NodeFlags::REPAINT_BOUNDARY,
-                );
+                node.flags
+                    .insert(NodeFlags::RELAYOUT_BOUNDARY | NodeFlags::REPAINT_BOUNDARY);
             }
         }
         id
@@ -633,6 +679,7 @@ impl Tree {
         if self.root.is_some_and(|root| root.index == index) {
             self.root = None;
         }
+        self.drop_style(index);
         let generation = self.slots.get(index as usize).map(|slot| slot.generation);
         if let Some(generation) = generation {
             let id = NodeId { index, generation };
@@ -711,6 +758,35 @@ impl Tree {
             }
         }
         self.image_generation = self.image_generation.wrapping_add(1);
+    }
+
+    /// Siblings with a non-zero `z_index`, in paint order. `hit` reverses that
+    /// order. `None` means every sibling is zero and the linked list is enough.
+    pub(super) fn ordered_children(&self, id: NodeId, hit: bool) -> Option<Vec<NodeId>> {
+        let mut child = self.get(id).and_then(|node| node.first_child);
+        let mut rows = Vec::new();
+        let mut any = false;
+        let mut order = 0i32;
+        while let Some(current) = child {
+            let Some(node) = self.get(current) else {
+                break;
+            };
+            if node.z_index != 0 {
+                any = true;
+            }
+            rows.push((node.z_index, order, current));
+            order += 1;
+            child = node.next;
+        }
+        if !any {
+            return None;
+        }
+        rows.sort_by_key(|(z, order, _)| (*z, *order));
+        let mut ids: Vec<NodeId> = rows.into_iter().map(|(_, _, id)| id).collect();
+        if hit {
+            ids.reverse();
+        }
+        Some(ids)
     }
 
     pub(super) fn is_under(&self, mut node: NodeId, ancestor: NodeId) -> Result<bool, Error> {
@@ -821,38 +897,6 @@ impl Tree {
         Ok(())
     }
 
-    /// Keep a row or column inside its parent, except along a scroll axis.
-    ///
-    /// [`super::layout::flex_style`] caps both axes at 100%. That stops a page
-    /// column from growing past the screen. The same cap on a scroll's content
-    /// would clamp the content to the viewport, so that axis goes back to auto.
-    /// A length or other percentage set by the caller is left alone. Moving the
-    /// child out of a scroll restores the cap.
-    pub(super) fn fit_parent_cap(&mut self, parent: NodeId, child: NodeId) -> Result<(), Error> {
-        let child_kind = self.node(child)?.kind;
-        if !matches!(child_kind, Kind::Row | Kind::Column | Kind::Decorated) {
-            return Ok(());
-        }
-        let (cap_width, cap_height) = if self.node(parent)?.kind == Kind::Scroll {
-            match self.axis_of(parent) {
-                crate::ScrollAxis::Vertical => (true, false),
-                crate::ScrollAxis::Horizontal => (false, true),
-                crate::ScrollAxis::Both => (false, false),
-            }
-        } else {
-            (true, true)
-        };
-        let mut style = self.node(child)?.style.clone();
-        let width = capped_axis(style.max_size.width, cap_width);
-        let height = capped_axis(style.max_size.height, cap_height);
-        if style.max_size.width == width && style.max_size.height == height {
-            return Ok(());
-        }
-        style.max_size.width = width;
-        style.max_size.height = height;
-        self.write_style(child, style)
-    }
-
     pub(super) fn pin_stack_child(&mut self, parent: NodeId, child: NodeId) -> Result<(), Error> {
         if !pins_children(self.node(parent)?.kind) {
             return Ok(());
@@ -958,20 +1002,5 @@ fn can_parent(kind: Kind) -> bool {
 }
 
 fn pins_children(kind: Kind) -> bool {
-    matches!(
-        kind,
-        Kind::Stack | Kind::Clip | Kind::Opacity | Kind::Scroll | Kind::Transform
-    )
-}
-
-/// `cap` restores the 100% parent cap. The scrolling axis clears only that default.
-fn capped_axis(dim: Dimension, cap: bool) -> Dimension {
-    let parent = percent(1.0_f32);
-    if cap && dim == Dimension::AUTO {
-        parent
-    } else if !cap && dim == parent {
-        Dimension::AUTO
-    } else {
-        dim
-    }
+    matches!(kind, Kind::Stack | Kind::Scroll)
 }

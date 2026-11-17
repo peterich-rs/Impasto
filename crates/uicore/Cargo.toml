@@ -7,10 +7,15 @@ publish.workspace = true
 [lib]
 doctest = false
 
+[[bin]]
+name = "style-types"
+path = "src/bin/style-types.rs"
+
 [dependencies]
 bitflags = "2"
 protocol = { workspace = true }
-taffy = "0.9"
+taffy = { version = "0.15.1", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid", "block_layout", "content_size", "parse"] }
+lru = { version = "0.18.5", default-features = false }
 thiserror = { workspace = true }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 unicode-segmentation = "1"

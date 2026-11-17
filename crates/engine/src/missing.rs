@@ -153,6 +153,16 @@ impl Typography {
         Err(Status::NotLinked)
     }
 
+    pub fn min_intrinsic_width(
+        &self,
+        _utf8: &str,
+        _font_size: f32,
+        _text_style: &protocol::TextStyle,
+        _spans: &[protocol::TextSpan],
+    ) -> Result<f32, Status> {
+        Err(Status::NotLinked)
+    }
+
     pub fn caret_at_point(
         &mut self,
         _query: crate::ParagraphQuery<'_>,

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use protocol::{Command, DrawList};
 
-use super::node::Kind;
+use super::node::{Node, Role};
 use super::{NodeId, Tree};
 use crate::Error;
 
@@ -70,6 +70,10 @@ impl Tree {
     /// node that opens those layers. A clean owner adopts its cached runs. Scroll
     /// still keeps one child picture.
     pub fn record_into(&mut self, commands: &mut Vec<Command>) -> Result<(), Error> {
+        self.flush_styles()?;
+        if self.needs_layout() {
+            return Err(Error::LayoutRequired);
+        }
         commands.clear();
         self.sync_metrics();
         self.finish_measure();
@@ -305,58 +309,84 @@ impl Tree {
         let Some(node) = self.get(id) else {
             return 0;
         };
-        if node.flags.contains(super::node::NodeFlags::CULL_PAINT) {
+        if node.flags.contains(super::node::NodeFlags::CULL_PAINT)
+            || node.flags.contains(super::node::NodeFlags::HIDDEN)
+            || node.alpha() == Some(0)
+        {
             return 1;
         }
         let abs_x = at.parent.0 + node.x;
         let abs_y = at.parent.1 + node.y;
         let x = abs_x - at.offset.0 - at.space.0;
         let y = abs_y - at.offset.1 - at.space.1;
-        if node.kind != Kind::Transform && outside(at.clip, x, y, node.w, node.h) {
+        let paint = paint_kind(node);
+        if !paint.transform && outside(at.clip, x, y, node.w, node.h) {
             return 1;
         }
+        let frame = RecordFrame::capture(node, x, y);
+        if at.descend {
+            frame.push_outer(commands);
+        }
         emit_rect(commands, node, x, y);
+        pass::emit_outline(commands, node, x, y);
+        if at.descend {
+            frame.push_content(commands);
+        }
         emit_text(self.text_scale, commands, node, x, y, &marks);
         emit_image(commands, node, x, y);
         if !at.descend {
             return 1;
         }
-        // A settled opacity composites nothing: children draw straight into the
-        // current picture. A zero alpha skips the subtree entirely.
-        if node.kind == Kind::Opacity && node.alpha() == Some(0) {
-            return 1;
-        }
         let scroll = node.scroll_paint();
-        let child_offset = if node.kind == Kind::Scroll {
+        let child_offset = if paint.scroll {
             (at.offset.0 + scroll.0, at.offset.1 + scroll.1)
         } else {
             at.offset
         };
-        let child_clip = match node.kind {
-            Kind::Transform => None,
-            Kind::Scroll | Kind::Clip => intersect(at.clip, x, y, node.w, node.h),
-            _ => at.clip,
+        let child_clip = if paint.scroll || paint.clip {
+            intersect(at.clip, x, y, node.w, node.h)
+        } else if paint.transform {
+            None
+        } else {
+            at.clip
         };
-        let mut child = node.first_child;
-        let frame = RecordFrame::capture(node, x, y);
-        frame.push(commands);
+        let first = node.first_child;
+        let ordered = self.ordered_children(id, false);
         let mut visits = 1;
-        while let Some(current) = child {
-            let next = self.get(current).and_then(|node| node.next);
-            visits += self.record_node(
-                current,
-                commands,
-                RecordAt {
-                    parent: (abs_x, abs_y),
-                    offset: child_offset,
-                    space: at.space,
-                    clip: child_clip,
-                    descend: true,
-                },
-            );
-            child = next;
+        if let Some(list) = ordered {
+            for current in list {
+                visits += self.record_node(
+                    current,
+                    commands,
+                    RecordAt {
+                        parent: (abs_x, abs_y),
+                        offset: child_offset,
+                        space: at.space,
+                        clip: child_clip,
+                        descend: true,
+                    },
+                );
+            }
+        } else {
+            let mut child = first;
+            while let Some(current) = child {
+                let next = self.get(current).and_then(|node| node.next);
+                visits += self.record_node(
+                    current,
+                    commands,
+                    RecordAt {
+                        parent: (abs_x, abs_y),
+                        offset: child_offset,
+                        space: at.space,
+                        clip: child_clip,
+                        descend: true,
+                    },
+                );
+                child = next;
+            }
         }
-        frame.pop(commands);
+        frame.pop_content(commands);
+        frame.pop_outer(commands);
         visits
     }
 
@@ -371,18 +401,21 @@ impl Tree {
         let Some(node) = self.get(id) else {
             return;
         };
-        if node.flags.contains(super::node::NodeFlags::CULL_PAINT) {
+        if node.flags.contains(super::node::NodeFlags::CULL_PAINT)
+            || node.flags.contains(super::node::NodeFlags::HIDDEN)
+            || node.alpha() == Some(0)
+        {
             return;
         }
-        let kind = node.kind;
+        let paint = paint_kind(node);
         let alpha = node.alpha();
         let abs = (parent_abs.0 + node.x, parent_abs.1 + node.y);
-        let mut child = node.first_child;
-        if kind == Kind::Opacity && alpha == Some(0) {
+        let child = node.first_child;
+        if paint.opacity && alpha == Some(0) {
             self.capture(id, parent_abs, out, clip);
             return;
         }
-        if kind == Kind::Clip && !self.renders_layer_node(id) {
+        if paint.clip && !self.renders_layer_node(id) {
             self.emit_settled_clip(id, out, parent_abs, ancestor_scroll, clip, child);
             return;
         }
@@ -395,10 +428,27 @@ impl Tree {
             return;
         }
         self.capture(id, parent_abs, out, clip);
-        while let Some(current) = child {
-            let next = self.get(current).and_then(|node| node.next);
-            self.emit_node(current, out, abs, ancestor_scroll, clip);
-            child = next;
+        self.emit_children(id, out, abs, ancestor_scroll, clip);
+    }
+
+    fn emit_children(
+        &mut self,
+        id: NodeId,
+        out: &mut Vec<Command>,
+        abs: (f32, f32),
+        scroll: (f32, f32),
+        clip: Option<PaintClip>,
+    ) {
+        if let Some(children) = self.ordered_children(id, false) {
+            for child in children {
+                self.emit_node(child, out, abs, scroll, clip);
+            }
+        } else {
+            let mut child = self.get(id).and_then(|node| node.first_child);
+            while let Some(current) = child {
+                child = self.get(current).and_then(|node| node.next);
+                self.emit_node(current, out, abs, scroll, clip);
+            }
         }
     }
 
@@ -409,7 +459,7 @@ impl Tree {
         parent_abs: (f32, f32),
         ancestor_scroll: (f32, f32),
         clip: Option<PaintClip>,
-        mut child: Option<NodeId>,
+        _child: Option<NodeId>,
     ) {
         let Some(node) = self.get(id) else {
             return;
@@ -432,11 +482,7 @@ impl Tree {
             out,
         );
         let child_clip = intersect(clip, paint.0, paint.1, w, h);
-        while let Some(current) = child {
-            let next = self.get(current).and_then(|node| node.next);
-            self.emit_node(current, out, abs, ancestor_scroll, child_clip);
-            child = next;
-        }
+        self.emit_children(id, out, abs, ancestor_scroll, child_clip);
         self.push_run_bracket(None, Command::Pop, out);
     }
 
@@ -452,12 +498,13 @@ impl Tree {
             return;
         };
         let abs = (parent_abs.0 + node.x, parent_abs.1 + node.y);
-        let paint = (abs.0 - ancestor_scroll.0, abs.1 - ancestor_scroll.1);
-        let (w, h, kind) = (node.w, node.h, node.kind);
+        let at = (abs.0 - ancestor_scroll.0, abs.1 - ancestor_scroll.1);
+        let (w, h) = (node.w, node.h);
+        let effect = paint_kind(node);
         let radius = node.corner_radius();
         let alpha = node.alpha();
         let scroll = node.scroll_paint();
-        let geom = node.transform();
+        let geom = node.transform().placed(abs.0, abs.1, w, h);
         let transform = (
             geom.translate_x,
             geom.translate_y,
@@ -469,95 +516,94 @@ impl Tree {
         let backdrop = positive_sigma(node.backdrop());
         let blend = node.blend();
         let blend = (blend != protocol::BlendMode::SrcOver).then_some(blend);
-        let mut child = node.first_child;
         let caches = node.caches_picture();
-        self.capture(id, parent_abs, out, clip);
-        let pushes_opacity = kind == Kind::Opacity && alpha.unwrap_or(255) != 255;
-        let pushes_matrix = kind == Kind::Transform && !geom.is_identity();
-        match kind {
-            Kind::Clip => out.push(Command::PushClip {
-                x: paint.0,
-                y: paint.1,
-                w,
-                h,
-                corner_radius: radius,
-            }),
-            Kind::Opacity if pushes_opacity => out.push(Command::PushOpacity {
-                x: paint.0,
-                y: paint.1,
-                w,
-                h,
-                alpha: alpha.unwrap_or(255),
-            }),
-            Kind::Scroll => out.push(Command::PushClip {
-                x: paint.0,
-                y: paint.1,
-                w,
-                h,
-                corner_radius: 0.0,
-            }),
-            Kind::Transform if pushes_matrix => out.push(Command::PushTransform {
+        let pushes_opacity = effect.opacity && alpha.unwrap_or(255) != 255;
+        let pushes_matrix = effect.transform && !geom.is_identity();
+        self.close_run();
+        let Some(saved) = self.run.scope else {
+            return;
+        };
+        self.run.scope = Some(RunScope {
+            owner: id,
+            base: abs,
+            mirror: at,
+            segment: if saved.owner == id { saved.segment } else { 0 },
+        });
+        let mut pushed = self.push_effect_layers(
+            effect, abs, w, h, radius, alpha, scroll, transform, blur, backdrop, blend,
+        );
+        if pushes_matrix {
+            out.push(Command::PushTransform {
                 translate_x: transform.0,
                 translate_y: transform.1,
                 rotate_rad: transform.2,
                 scale_x: transform.3,
                 scale_y: transform.4,
-            }),
-            _ => {}
+            });
+        }
+        if pushes_opacity {
+            out.push(Command::PushOpacity {
+                x: at.0,
+                y: at.1,
+                w,
+                h,
+                alpha: alpha.unwrap_or(255),
+            });
         }
         if let Some(mode) = blend {
             out.push(Command::PushBlend {
-                x: paint.0,
-                y: paint.1,
+                x: at.0,
+                y: at.1,
                 w,
                 h,
                 mode,
             });
         }
-        if let Some(sigma) = blur {
-            out.push(Command::PushBlur {
-                x: paint.0,
-                y: paint.1,
+        if let Some(sigma) = backdrop {
+            out.push(Command::PushBackdropBlur {
+                x: at.0,
+                y: at.1,
                 w,
                 h,
                 sigma,
             });
         }
-        if let Some(sigma) = backdrop {
-            out.push(Command::PushBackdropBlur {
-                x: paint.0,
-                y: paint.1,
+        if let Some(sigma) = blur {
+            out.push(Command::PushBlur {
+                x: at.0,
+                y: at.1,
                 w,
                 h,
                 sigma,
+            });
+        }
+        self.capture(id, parent_abs, out, clip);
+        if effect.clip || effect.scroll {
+            out.push(Command::PushClip {
+                x: at.0,
+                y: at.1,
+                w,
+                h,
+                corner_radius: if effect.scroll { 0.0 } else { radius },
             });
         }
         self.close_run();
-        let Some(saved) = self.run.scope else {
-            debug_assert!(false, "record scope");
-            return;
-        };
-        let next_scroll = if kind == Kind::Scroll {
+        let next_scroll = if effect.scroll {
             (ancestor_scroll.0 + scroll.0, ancestor_scroll.1 + scroll.1)
         } else {
             ancestor_scroll
         };
-        let child_clip = match kind {
-            Kind::Transform => None,
-            Kind::Scroll | Kind::Clip => intersect(clip, paint.0, paint.1, w, h),
-            _ => clip,
+        let child_clip = if effect.scroll || effect.clip {
+            intersect(clip, at.0, at.1, w, h)
+        } else if effect.transform {
+            None
+        } else {
+            clip
         };
-        self.run.scope = Some(RunScope {
-            owner: id,
-            base: abs,
-            mirror: (abs.0 - next_scroll.0, abs.1 - next_scroll.1),
-            segment: if saved.owner == id { saved.segment } else { 0 },
-        });
-        self.run.commands.clear();
-        self.run.first = None;
-        let pushed = self.push_effect_layers(
-            kind, abs, w, h, radius, alpha, scroll, transform, blur, backdrop, blend,
-        );
+        if let Some(scope) = self.run.scope.as_mut() {
+            scope.mirror = (abs.0 - next_scroll.0, abs.1 - next_scroll.1);
+        }
+        pushed += self.push_content_layers(effect, abs, w, h, radius, scroll);
         let hosts_rows = self.subtree_owners.get(&id).copied().unwrap_or(false);
         if caches && !hosts_rows && (self.picture_fresh(id) || self.subtree_flat(id)) {
             if !self.picture_fresh(id) {
@@ -570,11 +616,7 @@ impl Tree {
             self.blit(id, out, dx, dy, child_clip);
         } else {
             self.pictures.remove(&id);
-            while let Some(current) = child {
-                let next = self.get(current).and_then(|node| node.next);
-                self.emit_node(current, out, abs, next_scroll, child_clip);
-                child = next;
-            }
+            self.emit_children(id, out, abs, next_scroll, child_clip);
         }
         self.close_run();
         if saved.owner != id {
@@ -587,16 +629,22 @@ impl Tree {
         self.run.commands.clear();
         self.run.first = None;
         self.pop_layers(pushed);
-        if backdrop.is_some() {
+        if effect.clip || effect.scroll {
             out.push(Command::Pop);
         }
         if blur.is_some() {
             out.push(Command::Pop);
         }
+        if backdrop.is_some() {
+            out.push(Command::Pop);
+        }
         if blend.is_some() {
             out.push(Command::Pop);
         }
-        if matches!(kind, Kind::Clip | Kind::Scroll) || pushes_opacity || pushes_matrix {
+        if pushes_opacity {
+            out.push(Command::Pop);
+        }
+        if pushes_matrix {
             out.push(Command::Pop);
         }
     }
@@ -962,75 +1010,43 @@ impl Tree {
     )]
     fn push_effect_layers(
         &mut self,
-        kind: Kind,
+        effect: PaintKind,
         abs: (f32, f32),
         w: f32,
         h: f32,
-        radius: f32,
+        _radius: f32,
         alpha: Option<u8>,
-        scroll: (f32, f32),
+        _scroll: (f32, f32),
         transform: (f32, f32, f32, f32, f32),
         blur: Option<f32>,
         backdrop: Option<f32>,
         blend: Option<protocol::BlendMode>,
     ) -> usize {
         let mut pushed = 0;
-        let identity = kind == Kind::Transform
-            && transform.0 == 0.0
+        let identity = transform.0 == 0.0
             && transform.1 == 0.0
             && transform.2 == 0.0
             && transform.3 == 1.0
             && transform.4 == 1.0;
-        match kind {
-            Kind::Scroll => {
-                self.push_layer(crate::layer::LayerKind::Clip {
-                    x: abs.0,
-                    y: abs.1,
-                    w,
-                    h,
-                    corner_radius: 0.0,
-                });
-                self.push_layer(crate::layer::LayerKind::Offset {
-                    x: -scroll.0,
-                    y: -scroll.1,
-                });
-                pushed += 2;
-            }
-            Kind::Transform => {
-                if !identity {
-                    self.push_layer(crate::layer::LayerKind::Transform {
-                        translate_x: transform.0,
-                        translate_y: transform.1,
-                        rotate_rad: transform.2,
-                        scale_x: transform.3,
-                        scale_y: transform.4,
-                    });
-                    pushed += 1;
-                }
-            }
-            Kind::Opacity => {
-                if alpha.unwrap_or(255) != 255 {
-                    self.push_layer(crate::layer::LayerKind::Opacity {
-                        alpha: alpha.unwrap_or(255),
-                        x: abs.0,
-                        y: abs.1,
-                        w,
-                        h,
-                    });
-                    pushed += 1;
-                }
-            }
-            Kind::Clip => {
-                self.push_layer(crate::layer::LayerKind::Clip {
-                    x: abs.0,
-                    y: abs.1,
-                    w,
-                    h,
-                    corner_radius: radius,
-                });
-                pushed += 1;
-            }
-            _ => {}
+        if !identity && effect.transform {
+            self.push_layer(crate::layer::LayerKind::Transform {
+                translate_x: transform.0,
+                translate_y: transform.1,
+                rotate_rad: transform.2,
+                scale_x: transform.3,
+                scale_y: transform.4,
+            });
+            pushed += 1;
+        }
+        if effect.opacity && alpha.unwrap_or(255) != 255 {
+            self.push_layer(crate::layer::LayerKind::Opacity {
+                alpha: alpha.unwrap_or(255),
+                x: abs.0,
+                y: abs.1,
+                w,
+                h,
+            });
+            pushed += 1;
         }
         if let Some(mode) = blend {
             self.push_layer(crate::layer::LayerKind::Blend {
@@ -1039,6 +1055,16 @@ impl Tree {
                 w,
                 h,
                 mode,
+            });
+            pushed += 1;
+        }
+        if let Some(sigma) = backdrop {
+            self.push_layer(crate::layer::LayerKind::BackdropBlur {
+                x: abs.0,
+                y: abs.1,
+                w,
+                h,
+                sigma,
             });
             pushed += 1;
         }
@@ -1052,13 +1078,39 @@ impl Tree {
             });
             pushed += 1;
         }
-        if let Some(sigma) = backdrop {
-            self.push_layer(crate::layer::LayerKind::BackdropBlur {
+        pushed
+    }
+
+    fn push_content_layers(
+        &mut self,
+        effect: PaintKind,
+        abs: (f32, f32),
+        w: f32,
+        h: f32,
+        radius: f32,
+        scroll: (f32, f32),
+    ) -> usize {
+        let mut pushed = 0;
+        if effect.scroll {
+            self.push_layer(crate::layer::LayerKind::Clip {
                 x: abs.0,
                 y: abs.1,
                 w,
                 h,
-                sigma,
+                corner_radius: 0.0,
+            });
+            self.push_layer(crate::layer::LayerKind::Offset {
+                x: -scroll.0,
+                y: -scroll.1,
+            });
+            pushed += 2;
+        } else if effect.clip {
+            self.push_layer(crate::layer::LayerKind::Clip {
+                x: abs.0,
+                y: abs.1,
+                w,
+                h,
+                corner_radius: radius,
             });
             pushed += 1;
         }
@@ -1087,6 +1139,24 @@ impl Tree {
             }
             out.push(moved);
         }
+    }
+}
+
+/// Effects that can sit on one node together.
+#[derive(Clone, Copy)]
+struct PaintKind {
+    scroll: bool,
+    clip: bool,
+    opacity: bool,
+    transform: bool,
+}
+
+fn paint_kind(node: &Node) -> PaintKind {
+    PaintKind {
+        scroll: node.is_scroll(),
+        clip: node.role.contains(Role::CLIP),
+        opacity: node.pushes_opacity(),
+        transform: node.paints_transform(),
     }
 }
 
@@ -1245,7 +1315,7 @@ pub(super) struct RectPaint {
     box_shadows: Arc<[protocol::BoxShadow]>,
 }
 
-pub(super) fn rect_paint(node: &super::node::Node) -> RectPaint {
+pub(super) fn rect_paint(node: &Node) -> RectPaint {
     let stroke_width = if node.stroke_width().is_finite() && node.stroke_width() > 0.0 {
         node.stroke_width()
     } else {

@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { animateOnClock, installMotionTestHooks, transition } from "./motion-clock.ts";
+import {
+  animateOnClock,
+  installMotionTestHooks,
+  transition,
+} from "./motion-clock.ts";
 
 let frames = 0;
 let writes: number[] = [];
@@ -53,7 +57,11 @@ const hooks = {
   requestFrame: () => {
     frames += 1;
   },
-  animate: (target: number, durationMs: number, write: (value: number) => void) => {
+  animate: (
+    target: number,
+    durationMs: number,
+    write: (value: number) => void,
+  ) => {
     animated.push([target, durationMs]);
     return animateOnClock(hooks, target, durationMs, write);
   },

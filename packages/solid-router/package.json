@@ -11,7 +11,9 @@
   },
   "dependencies": {
     "@impasto/linking": "workspace:*",
-    "@impasto/solid-renderer": "workspace:*",
+    "@impasto/solid-renderer": "workspace:*"
+  },
+  "devDependencies": {
     "solid-js": "2.0.0-rc.17"
   }
 }

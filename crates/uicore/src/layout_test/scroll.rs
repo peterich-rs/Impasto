@@ -527,9 +527,9 @@ fn quotes_shell_stays_inside_the_viewport() -> Result<(), crate::Error> {
     let boot = tree.column(0.0)?;
     tree.set_fill(boot)?;
     let shell = tree.column(0.0)?;
-    tree.set_grow(shell, 1.0)?;
+    tree.set_fill(shell)?;
     let app = tree.column(0.0)?;
-    tree.set_grow(app, 1.0)?;
+    tree.set_fill(app)?;
     let router = tree.clip(0.0)?;
     tree.set_fill(router)?;
     let route = tree.stack()?;
@@ -543,7 +543,7 @@ fn quotes_shell_stays_inside_the_viewport() -> Result<(), crate::Error> {
     let page_pointer = tree.pointer_region()?;
     tree.set_fill(page_pointer)?;
     let page = tree.column(0.0)?;
-    tree.set_grow(page, 1.0)?;
+    tree.set_fill(page)?;
     let header = tree.sized(200.0, 44.0)?;
     let strip = tree.scroll_with(crate::ScrollAxis::Horizontal)?;
     tree.set_fill(strip)?;
@@ -558,7 +558,7 @@ fn quotes_shell_stays_inside_the_viewport() -> Result<(), crate::Error> {
         last = card;
     }
     let panel = tree.decorated([255, 255, 255, 255], 12.0)?;
-    tree.set_grow(panel, 1.0)?;
+    tree.set_fill(panel)?;
     let list = tree.stack()?;
     tree.set_fill(list)?;
     let scroll = tree.scroll_with(crate::ScrollAxis::Vertical)?;

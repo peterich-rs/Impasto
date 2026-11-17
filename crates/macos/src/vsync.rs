@@ -9,12 +9,12 @@ use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::{Arc, Mutex};
 
-use hostshell::{FrameTime, FrameToken, Vsync};
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{
     CVDisplayLink, CVDisplayLinkOutputCallback, CVGetHostClockFrequency, CVTimeStamp,
     kCVReturnSuccess,
 };
+use shell::{FrameTime, FrameToken, Vsync};
 
 type FrameSink = Arc<dyn Fn(FrameToken, FrameTime) + Send + Sync>;
 

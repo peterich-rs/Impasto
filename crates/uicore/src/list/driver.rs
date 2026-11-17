@@ -256,6 +256,34 @@ impl ListDriver {
             || pending_measure
             || size_changed
             || !window_covers(&self.prefix, self.range, offset_y, view.h);
+        if std::env::var("IMPASTO_TEST_LOG").is_ok() {
+            let mut chain = String::new();
+            let mut cursor = Some(viewport);
+            for _ in 0..8 {
+                let Some(id) = cursor else { break };
+                let rect = tree.rect(id).ok();
+                chain.push_str(&format!(
+                    " #{:x} {:?}",
+                    id.to_raw(),
+                    rect.map(|r| (r.w, r.h))
+                ));
+                cursor = tree.parent(id).ok().flatten();
+            }
+            if let Some(top) = tree.parent(viewport).ok().flatten() {
+                let mut child = tree.first_child(top).ok().flatten();
+                chain.push_str(" | children");
+                while let Some(id) = child {
+                    let rect = tree.rect(id).ok();
+                    chain.push_str(&format!(
+                        " #{:x}{:?}",
+                        id.to_raw(),
+                        rect.map(|r| (r.w, r.h))
+                    ));
+                    child = tree.next_sibling(id).ok().flatten();
+                }
+            }
+            eprintln!("[probe] list chain{chain} items={}", self.prefix.len());
+        }
         if must_place {
             self.place(tree, placed, fling_y, refresh_width);
         } else {
@@ -606,8 +634,7 @@ impl ListDriver {
         let mut next = Vec::new();
         let end = self.range.end.min(self.items.len());
         let start = self.range.start.min(end);
-        for index in start..end {
-            let item = &self.items[index];
+        for (index, item) in self.items.iter().enumerate().take(end).skip(start) {
             next.push(ShownRow {
                 key: item.key.clone(),
                 ty: item.ty.clone(),

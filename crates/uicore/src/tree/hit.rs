@@ -7,7 +7,7 @@
 //! transforms apply from the inside out. The inverse walks transforms from the
 //! outside in and adds the scroll offsets back.
 
-use super::node::{DragClaim, Hit, Kind, TransformGeom};
+use super::node::{DragClaim, Hit, TransformGeom};
 use super::{NodeId, Tree};
 use crate::{ScrollAccept, ScrollAxis};
 
@@ -24,8 +24,6 @@ struct AncestorPaint {
 /// update as the walk enters those nodes, so a node does not revisit its parents.
 #[derive(Clone, Copy)]
 struct HitQuery {
-    scene_x: f32,
-    scene_y: f32,
     /// Scene point after ancestor transform inverses, applied outside-in.
     x: f32,
     y: f32,
@@ -38,8 +36,6 @@ struct HitQuery {
 impl HitQuery {
     fn at_scene(x: f32, y: f32) -> Self {
         Self {
-            scene_x: x,
-            scene_y: y,
             x,
             y,
             scroll_x: 0.0,
@@ -57,20 +53,23 @@ impl Tree {
     /// True when the scene point lies in `id`'s own box, including a transform's
     /// scene bounds. Does not walk the rest of the tree.
     pub(super) fn point_hits_node(&self, id: NodeId, scene_x: f32, scene_y: f32) -> bool {
-        let Some((kind, w, h, radius, scale_x, scale_y)) = self.get(id).map(|node| {
-            let geom = node.transform();
-            (
-                node.kind,
-                node.w,
-                node.h,
-                node.corner_radius(),
-                geom.scale_x,
-                geom.scale_y,
-            )
-        }) else {
+        let Some((transformed, shaped, w, h, radius, scale_x, scale_y)) =
+            self.get(id).map(|node| {
+                let geom = node.transform();
+                (
+                    node.role.contains(super::node::Role::TRANSFORM),
+                    radius_shapes_hit(node),
+                    node.w,
+                    node.h,
+                    node.corner_radius(),
+                    geom.scale_x,
+                    geom.scale_y,
+                )
+            })
+        else {
             return false;
         };
-        if kind == Kind::Transform {
+        if transformed {
             return scale_x.abs() >= SCALE_EPSILON
                 && scale_y.abs() >= SCALE_EPSILON
                 && self.transformed_box_contains(id, scene_x, scene_y);
@@ -84,7 +83,7 @@ impl Tree {
         if x < bx || y < by || x >= bx + w || y >= by + h {
             return false;
         }
-        !radius_shapes_hit(kind) || rounded_contains(bx, by, w, h, radius, x, y)
+        !shaped || rounded_contains(bx, by, w, h, radius, x, y)
     }
 
     /// Fills `out` from the root to the leaf under the scene point. The buffer is cleared first.
@@ -111,97 +110,95 @@ impl Tree {
         path: &mut crate::HitPath,
     ) -> Option<NodeId> {
         let node = self.get(id)?;
-        if node.flags.contains(super::node::NodeFlags::CULL_PAINT) {
+        if node.flags.contains(super::node::NodeFlags::CULL_PAINT)
+            || node.flags.contains(super::node::NodeFlags::HIDDEN)
+        {
             return None;
         }
         // An empty text can be stretched across a stack cell. It is not drawn
         // and must not sit in front of the scroll underneath it.
-        if node.kind == Kind::Text && node.text().is_none_or(|text| text.utf8.is_empty()) {
+        if node.is_text() && node.text().is_none_or(|text| text.utf8.is_empty()) {
             return None;
         }
         let abs_x = parent_x + node.x;
         let abs_y = parent_y + node.y;
-        if node.w == 0.0 || node.h == 0.0 {
+        let mut child_query = query;
+        if node.role.contains(super::node::Role::TRANSFORM) {
+            let geom = node.transform().placed(abs_x, abs_y, node.w, node.h);
+            if geom.scale_x.abs() < SCALE_EPSILON || geom.scale_y.abs() < SCALE_EPSILON {
+                return None;
+            }
+            let (x, y) = inverse_transform(
+                query.x,
+                query.y,
+                geom.translate_x,
+                geom.translate_y,
+                geom.rotate_rad,
+                geom.scale_x,
+                geom.scale_y,
+            )?;
+            child_query.x = x;
+            child_query.y = y;
+            child_query.to_scene = query.to_scene.around(Affine::paint(
+                geom.translate_x,
+                geom.translate_y,
+                geom.rotate_rad,
+                geom.scale_x,
+                geom.scale_y,
+            ));
+        }
+        let (x, y) = child_query.layout_point();
+        let inside = node.w > 0.0
+            && node.h > 0.0
+            && x >= abs_x
+            && y >= abs_y
+            && x < abs_x + node.w
+            && y < abs_y + node.h
+            && (!radius_shapes_hit(node)
+                || rounded_contains(abs_x, abs_y, node.w, node.h, node.corner_radius(), x, y));
+        if !inside && (node.is_scroll() || node.role.contains(super::node::Role::CLIP)) {
             return None;
         }
-        if node.kind == Kind::Transform {
-            let geom = node.transform();
-            let (scale_x, scale_y) = (geom.scale_x, geom.scale_y);
-            if scale_x.abs() < SCALE_EPSILON || scale_y.abs() < SCALE_EPSILON {
-                return None;
-            }
-            if !transform_contains(node, abs_x, abs_y, &query) {
-                return None;
-            }
-        } else {
-            let (x, y) = query.layout_point();
-            if x < abs_x || y < abs_y || x >= abs_x + node.w || y >= abs_y + node.h {
-                return None;
-            }
-            if radius_shapes_hit(node.kind)
-                && !rounded_contains(abs_x, abs_y, node.w, node.h, node.corner_radius(), x, y)
-            {
-                return None;
-            }
-        }
-        let (local_x, local_y) = query.layout_point();
         path.push(crate::HitEntry {
             id,
-            x: local_x - abs_x,
-            y: local_y - abs_y,
+            x: x - abs_x,
+            y: y - abs_y,
         });
-        let child_query = match node.kind {
-            Kind::Scroll => {
-                let scroll = node.scroll_paint();
-                HitQuery {
-                    scroll_x: query.scroll_x + scroll.0,
-                    scroll_y: query.scroll_y + scroll.1,
-                    ..query
-                }
-            }
-            Kind::Transform => {
-                let geom = node.transform();
-                let (x, y) = inverse_transform(
-                    query.x,
-                    query.y,
-                    geom.translate_x,
-                    geom.translate_y,
-                    geom.rotate_rad,
-                    geom.scale_x,
-                    geom.scale_y,
-                )?;
-                HitQuery {
-                    x,
-                    y,
-                    to_scene: query.to_scene.around(Affine::paint(
-                        geom.translate_x,
-                        geom.translate_y,
-                        geom.rotate_rad,
-                        geom.scale_x,
-                        geom.scale_y,
-                    )),
-                    ..query
-                }
-            }
-            _ => query,
-        };
-        let mut child = node.last_child;
+        if node.is_scroll() {
+            let scroll = node.scroll_paint();
+            child_query.scroll_x += scroll.0;
+            child_query.scroll_y += scroll.1;
+        }
         let role = node.hit_role();
         let kind = node.kind;
+        let fallback = node.last_child;
         let _ = node;
-        while let Some(current) = child {
-            let prev = self.get(current)?.prev;
-            if let Some(hit) = self.hit(current, child_query, abs_x, abs_y, path) {
-                return Some(hit);
+        if let Some(list) = self.ordered_children(id, true) {
+            for current in list {
+                if let Some(hit) = self.hit(current, child_query, abs_x, abs_y, path) {
+                    return Some(hit);
+                }
             }
-            child = prev;
+        } else {
+            let mut child = fallback;
+            while let Some(current) = child {
+                let prev = self.get(current)?.prev;
+                if let Some(hit) = self.hit(current, child_query, abs_x, abs_y, path) {
+                    return Some(hit);
+                }
+                child = prev;
+            }
+        }
+        if !inside {
+            path.pop();
+            return None;
         }
         match role {
             Hit::Opaque | Hit::Region => Some(id),
             // The viewport is the drag target. A point in the box with no child
             // still starts a scroll, and does not become a press: the role stays
             // defer, so `region_of` walks through it.
-            Hit::Defer if kind == Kind::Scroll => Some(id),
+            Hit::Defer if kind == super::node::Kind::Scroll => Some(id),
             Hit::Defer => {
                 path.pop();
                 None
@@ -243,8 +240,9 @@ impl Tree {
             scroll_y,
             mut transforms,
         } = self.ancestor_paint(id)?;
-        if node.kind == Kind::Transform {
-            transforms.insert(0, node.transform());
+        if node.role.contains(super::node::Role::TRANSFORM) {
+            let (px, py) = self.layout_point(id).unwrap_or((0.0, 0.0));
+            transforms.insert(0, node.transform().placed(px, py, node.w, node.h));
         }
         let mut x = x - scroll_x;
         let mut y = y - scroll_y;
@@ -269,13 +267,14 @@ impl Tree {
         let mut parent = self.get(id)?.parent;
         while let Some(pid) = parent {
             let node = self.get(pid)?;
-            if node.kind == Kind::Scroll {
+            if node.is_scroll() {
                 let scroll = node.scroll_paint();
                 scroll_x += scroll.0;
                 scroll_y += scroll.1;
             }
-            if node.kind == Kind::Transform {
-                transforms.push(node.transform());
+            if node.role.contains(super::node::Role::TRANSFORM) {
+                let (px, py) = self.layout_point(pid).unwrap_or((0.0, 0.0));
+                transforms.push(node.transform().placed(px, py, node.w, node.h));
             }
             parent = node.parent;
         }
@@ -329,7 +328,7 @@ impl Tree {
     pub(super) fn drag_of(&self, mut id: NodeId) -> Option<NodeId> {
         loop {
             let node = self.get(id)?;
-            if node.kind == Kind::Scroll {
+            if node.is_scroll() {
                 return Some(id);
             }
             id = node.parent?;
@@ -360,7 +359,7 @@ impl Tree {
         let mut edge: Option<NodeId> = None;
         loop {
             let node = self.get(id)?;
-            if node.kind == Kind::Scroll && !self.scroll_held_by_other(id, pointer) {
+            if node.is_scroll() && !self.scroll_held_by_other(id, pointer) {
                 let (axis, accept) = node
                     .scroll_geom()
                     .map(|geom| (geom.axis, geom.physics.accept))
@@ -535,38 +534,6 @@ impl Tree {
     }
 }
 
-fn transform_contains(node: &super::node::Node, abs_x: f32, abs_y: f32, query: &HitQuery) -> bool {
-    let geom = node.transform();
-    let map = query.to_scene.around(Affine::paint(
-        geom.translate_x,
-        geom.translate_y,
-        geom.rotate_rad,
-        geom.scale_x,
-        geom.scale_y,
-    ));
-    let corners = [
-        (abs_x, abs_y),
-        (abs_x + node.w, abs_y),
-        (abs_x + node.w, abs_y + node.h),
-        (abs_x, abs_y + node.h),
-    ];
-    let mut min_x = f32::MAX;
-    let mut min_y = f32::MAX;
-    let mut max_x = f32::MIN;
-    let mut max_y = f32::MIN;
-    for (x, y) in corners {
-        let (sx, sy) = map.apply(x - query.scroll_x, y - query.scroll_y);
-        min_x = min_x.min(sx);
-        min_y = min_y.min(sy);
-        max_x = max_x.max(sx);
-        max_y = max_y.max(sy);
-    }
-    query.scene_x >= min_x
-        && query.scene_y >= min_y
-        && query.scene_x < max_x
-        && query.scene_y < max_y
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct Affine {
     a: f32,
@@ -612,6 +579,7 @@ impl Affine {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn apply(self, x: f32, y: f32) -> (f32, f32) {
         (
             self.a * x + self.b * y + self.c,
@@ -632,11 +600,11 @@ impl Affine {
     }
 }
 
-fn radius_shapes_hit(kind: Kind) -> bool {
-    matches!(
-        kind,
-        Kind::Clip | Kind::Text | Kind::Image | Kind::PointerRegion
-    )
+fn radius_shapes_hit(node: &super::node::Node) -> bool {
+    node.role.contains(super::node::Role::CLIP)
+        || node.is_text()
+        || node.is_image()
+        || node.is_pointer()
 }
 
 fn rounded_contains(x: f32, y: f32, w: f32, h: f32, radius: f32, px: f32, py: f32) -> bool {

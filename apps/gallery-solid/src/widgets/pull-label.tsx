@@ -1,5 +1,4 @@
 import { Text, type NodeHandle } from "@impasto/solid-renderer";
-
 const STOPS: [number, number, number, number][] = [
   [0xe2, 0x4b, 0x4b, 255],
   [0xe0, 0x7a, 0x2f, 255],

@@ -1,9 +1,16 @@
+import { installStyleMock } from "../testing/style.ts";
 import assert from "node:assert/strict";
-import { children, createComponent, createRenderEffect, createSignal, createTrackedEffect, flush } from "solid-js";
-import { createRenderer } from "@solidjs/universal";
-
-import type { CoreHost } from "../src/host.ts";
-import { hostRendererOptions } from "../src/tree.ts";
+import {
+  children,
+  createComponent,
+  createRenderEffect,
+  createSignal,
+  createTrackedEffect,
+  flush,
+} from "solid-js";
+import type { SceneModule } from "../src/scene.ts";
+import { testScene } from "../testing/scene.ts";
+import { createSceneRenderer } from "../testing/render.ts";
 import { bindSlot } from "./slot.ts";
 import { bindText, Text } from "./text.ts";
 
@@ -13,7 +20,7 @@ const calls: string[] = [];
 const nodes = new Map<number, Node>();
 const texts = new Map<number, string>();
 const textIds = new Set<number>();
-let next = 1;
+let next = 4294967296;
 
 function alloc(name: string): number {
   const id = next++;
@@ -38,6 +45,8 @@ function unlink(child: number): void {
 }
 
 const host = {
+  view: () => alloc("view"),
+  setStyle: () => {},
   column: () => alloc("column"),
   text: (value?: string) => {
     const id = alloc("text");
@@ -106,11 +115,12 @@ const host = {
     calls.push("setText");
   },
   isText: (id: number) => textIds.has(id),
-} as unknown as CoreHost;
+} as unknown as SceneModule;
 
-const scene = hostRendererOptions(host);
+installStyleMock(host, []);
+const scene = testScene(host);
 bindText(scene);
-const { insert } = createRenderer(scene);
+const { insert } = createSceneRenderer(scene);
 const createSlot = bindSlot({
   createElement: scene.createElement,
   insert: (parent, accessor) => {
@@ -119,7 +129,7 @@ const createSlot = bindSlot({
   forget: (id) => {
     scene.forget(id);
   },
-  host,
+  scene: { ...host, insertNode: host.insert },
 });
 
 const seen = { flag: false, reads: 0 };
@@ -136,13 +146,18 @@ const slot = createSlot(1, 0, (item) => {
   return text;
 });
 flush();
-const created = calls.filter((name) => name === "column" || name === "text").length;
+const created = calls.filter(
+  (name) => name === "view" || name === "text",
+).length;
 assert.equal(created, 2);
 setFlag(true);
 slot.set(2, 1);
 flush();
 assert.equal(seen.flag, true);
-assert.equal(calls.filter((name) => name === "column" || name === "text").length, created);
+assert.equal(
+  calls.filter((name) => name === "view" || name === "text").length,
+  created,
+);
 assert.ok(seen.reads >= 2);
 
 const list = alloc("column");

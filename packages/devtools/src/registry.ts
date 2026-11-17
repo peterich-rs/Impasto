@@ -8,22 +8,49 @@ import { PerformancePage } from "./pages/performance.tsx";
 import { InspectorPage } from "./pages/inspector.tsx";
 import { LayoutPage } from "./pages/layout.tsx";
 import { InfoPage } from "./pages/info.tsx";
-
 export type DevtoolPage = {
   id: string;
   title: string;
   badge?: () => number;
   render: () => JSX.Element;
 };
-
 const pages: DevtoolPage[] = [
-  { id: "console", title: "日志", render: () => ConsolePage() },
-  { id: "errors", title: "错误", badge: unseenErrors, render: () => ErrorsPage() },
-  { id: "network", title: "网络", render: () => NetworkPage() },
-  { id: "performance", title: "性能", render: () => PerformancePage() },
-  { id: "inspector", title: "检查", render: () => InspectorPage() },
-  { id: "layout", title: "布局", render: () => LayoutPage() },
-  { id: "info", title: "信息", render: () => InfoPage() },
+  {
+    id: "console",
+    title: "日志",
+    render: () => ConsolePage(),
+  },
+  {
+    id: "errors",
+    title: "错误",
+    badge: unseenErrors,
+    render: () => ErrorsPage(),
+  },
+  {
+    id: "network",
+    title: "网络",
+    render: () => NetworkPage(),
+  },
+  {
+    id: "performance",
+    title: "性能",
+    render: () => PerformancePage(),
+  },
+  {
+    id: "inspector",
+    title: "检查",
+    render: () => InspectorPage(),
+  },
+  {
+    id: "layout",
+    title: "布局",
+    render: () => LayoutPage(),
+  },
+  {
+    id: "info",
+    title: "信息",
+    render: () => InfoPage(),
+  },
 ];
 
 /** Third-party pages append after the built-ins. */
@@ -36,7 +63,6 @@ export function registerDevtoolPage(page: DevtoolPage): () => void {
     }
   };
 }
-
 export function devtoolPages(): readonly DevtoolPage[] {
   return pages;
 }

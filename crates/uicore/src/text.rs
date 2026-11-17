@@ -806,7 +806,7 @@ pub fn grapheme_count(text: &str) -> u32 {
     crate::cast::u32_from_usize(grapheme_bounds(text).len().saturating_sub(1))
 }
 
-/// UTF-16 start of grapheme `index`. Past the end clamps to [`utf16_len`].
+/// UTF-16 start of grapheme `index`. Past the end clamps to `utf16_len`.
 pub fn grapheme_unit(text: &str, index: u32) -> u32 {
     let bounds = grapheme_bounds(text);
     let slot = (index as usize).min(bounds.len().saturating_sub(1));

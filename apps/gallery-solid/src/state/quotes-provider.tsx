@@ -4,7 +4,6 @@ import { QuoteEngine } from "../engine/engine.ts";
 import { QuoteBinder } from "./binder.ts";
 import { flash } from "./flash.ts";
 import { settingsSig } from "./settings.ts";
-
 const UP = [235, 62, 62, 255] as [number, number, number, number];
 const DOWN = [34, 176, 95, 255] as [number, number, number, number];
 const FLAT = [138, 141, 145, 255] as [number, number, number, number];
@@ -22,7 +21,6 @@ let engine: QuoteEngine | null = null;
 let binder: QuoteBinder | null = null;
 const [refs, setRefs] = createSignal(0);
 let frameHooked = false;
-
 export type QuotesApi = {
   engine: QuoteEngine;
   binder: QuoteBinder;
@@ -31,8 +29,19 @@ export type QuotesApi = {
 /** Creates the market. Called once by the app shell before pages mount. */
 export function wireQuotes(): QuotesApi {
   if (engine === null) {
-    engine = new QuoteEngine({ timeScale: untrack(() => settingsSig().timeScale) });
-    binder = new QuoteBinder(engine, { up: UP, down: DOWN, flat: FLAT, base: BASE }, () => settingsSig().updown);
+    engine = new QuoteEngine({
+      timeScale: untrack(() => settingsSig().timeScale),
+    });
+    binder = new QuoteBinder(
+      engine,
+      {
+        up: UP,
+        down: DOWN,
+        flat: FLAT,
+        base: BASE,
+      },
+      () => settingsSig().updown,
+    );
     let lastTarget = 0;
     if (!frameHooked) {
       frameHooked = true;
@@ -49,7 +58,10 @@ export function wireQuotes(): QuotesApi {
       });
     }
   }
-  return { engine, binder };
+  return {
+    engine: engine!,
+    binder: binder!,
+  };
 }
 
 /** Marks this page as a live quote consumer; the market runs while any page needs it. */

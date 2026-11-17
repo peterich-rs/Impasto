@@ -1,8 +1,10 @@
 const ticks = new Map<number, (targetMs: number, intervalMs: number) => void>();
 let nextTick = 1;
 
-/** Runs after Solid flushes, once per frame the host delivers. */
-export function onFrame(fn: (targetMs: number, intervalMs: number) => void): () => void {
+/** Runs after Solid flushes, once per frame the scene delivers. */
+export function onFrame(
+  fn: (targetMs: number, intervalMs: number) => void,
+): () => void {
   const id = nextTick;
   nextTick += 1;
   ticks.set(id, fn);

@@ -1,5 +1,5 @@
 # The only mutation table. build.rs generates Rust, the C header, and the JS constants.
-# A new style field is a line here plus one StyleChange arm. It does not add a C function.
+# View styles use StyleValueRecord; their property registry is in uicore::style.
 ops:
   Create: 1
   Insert: 2
@@ -13,6 +13,15 @@ ops:
   EditText: 10
   Detach: 11
   Reparent: 12
+  StyleSnapshot: 27
+  StyleSourceCreate: 28
+  StyleSourceRemove: 29
+  StyleSourceSnapshot: 30
+  StyleClear: 31
+  PointerTarget: 32
+  ClassSnapshot: 33
+  StyleSurface: 34
+  StyleEnvironment: 35
 
 fields:
   Width: 1
@@ -90,6 +99,7 @@ creates:
   Transform: 13
   Image: 14
   Text: 15
+  View: 16
 
 queries:
   Parent: 1
@@ -142,3 +152,12 @@ effects:
   Reload: 22
   MeasurePanel: 23
   SetTextScale: 24
+
+style_value_tags:
+  Null: 0
+  Number: 1
+  String: 2
+  Bool: 3
+  Array: 4
+  Object: 5
+  Undefined: 6

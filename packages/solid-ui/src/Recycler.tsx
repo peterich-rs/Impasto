@@ -1,22 +1,17 @@
 import { createRenderEffect, createSignal, onCleanup } from "solid-js";
-import { createSlot } from "@impasto/solid-renderer";
+import { bindNodeRef, bindStyle, createSlot } from "@impasto/solid-renderer";
+import type { RecyclerProps } from "./props.ts";
 import {
   discardRecycler,
   syncRecycler,
   type RecyclerSlot,
   type RecyclerState,
 } from "./recycler.ts";
-
-export function Recycler<T>(props: {
-  each: readonly T[];
-  keyOf: (item: T) => string | number;
-  typeOf: (item: T) => string;
-  render: (item: () => T, index: () => number) => unknown;
-  start?: number;
-  poolSize?: number;
-  onMounted?: (rows: { key: string; id: number; index: number }[]) => void;
-}) {
-  const state: RecyclerState<T> = { live: new Map(), pools: new Map() };
+export function Recycler<T>(props: RecyclerProps<T>) {
+  const state: RecyclerState<T> = {
+    live: new Map(),
+    pools: new Map(),
+  };
   const [parent, setParent] = createSignal(0);
 
   // The sync callback must not run inside this effect's recomputation.
@@ -66,27 +61,46 @@ export function Recycler<T>(props: {
       if (column === 0) {
         return;
       }
-      const rows: { key: string; id: number; index: number }[] = [];
+      const rows: {
+        key: string;
+        id: number;
+        index: number;
+      }[] = [];
       for (const entry of entries) {
         const slot = state.live.get(entry.key);
         if (slot !== undefined) {
-          rows.push({ key: entry.key, id: slot.node, index: entry.index });
+          rows.push({
+            key: entry.key,
+            id: slot.node,
+            index: entry.index,
+          });
         }
       }
       props.onMounted?.(rows);
     },
   );
-
   onCleanup(() => {
     discardRecycler(state);
   });
-
   return (
-    <column
+    <view
       ref={(node) => {
-        setParent(node.id);
+        if (node === null) return;
+        setParent(node);
+        bindStyle(node, {
+          defaults: { gap: 0 },
+          get class() {
+            return props.class;
+          },
+          get classList() {
+            return props.classList;
+          },
+          get style() {
+            return props.style;
+          },
+        });
+        bindNodeRef(node, () => props.ref);
       }}
-      gap={0}
     />
   );
 }

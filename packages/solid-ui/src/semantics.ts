@@ -9,5 +9,4 @@ export const Role = {
   SearchField: 7,
   TextArea: 8,
 } as const;
-
 export type Role = (typeof Role)[keyof typeof Role];

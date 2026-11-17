@@ -5,10 +5,12 @@ members = [
     "crates/uicore",
     "crates/engine",
     "crates/session",
-    "crates/hostshell",
+    "crates/shell",
     "crates/macos",
     "crates/android",
     "crates/quickjs",
+    "crates/cli",
+    "crates/reactive",
 ]
 
 [workspace.package]
@@ -22,7 +24,7 @@ protocol = { path = "crates/protocol" }
 uicore = { path = "crates/uicore" }
 engine = { path = "crates/engine" }
 session = { path = "crates/session" }
-hostshell = { path = "crates/hostshell" }
+shell = { path = "crates/shell" }
 quickjs = { path = "crates/quickjs" }
 
 [workspace.lints.rust]

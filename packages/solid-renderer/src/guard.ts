@@ -1,4 +1,4 @@
-import type { CoreHost, NodeHandle } from "./host.ts";
+import type { SceneModule, NodeHandle } from "./scene.ts";
 
 export type AnimPropName =
   | "scrollX"
@@ -17,7 +17,7 @@ export type RecognizerSpec = {
   tap?: boolean;
   longPress?: boolean;
   drag?: "none" | "free" | "horizontal" | "vertical";
-  /** Double-tap window in milliseconds. Omitted means the host default. */
+  /** Double-tap window in milliseconds. Omitted means the scene default. */
   doubleTapMs?: number;
 };
 
@@ -32,19 +32,16 @@ export type ViewMetrics = {
   viewInsets: { top: number; right: number; bottom: number; left: number };
 };
 
-type CoreBag = Partial<CoreHost> & Record<string, unknown>;
-
-function bag(): CoreBag {
-  const core = (globalThis as { core?: CoreBag }).core;
-  return core ?? {};
-}
+import { scene } from "../runtime/scene.ts";
+type SceneBag = Partial<SceneModule> & Record<string, unknown>;
+function bag(): SceneBag { return scene as unknown as SceneBag; }
 
 function fn(name: string): ((...args: unknown[]) => unknown) | null {
   const value = bag()[name];
   return typeof value === "function" ? (value as (...args: unknown[]) => unknown) : null;
 }
 
-/** Missing host functions no-op. Present functions still throw their own errors. */
+/** Missing scene functions no-op. Present functions still throw their own errors. */
 export function callVoid(name: string, args: unknown[]): void {
   const impl = fn(name);
   if (impl === null) {
@@ -53,7 +50,7 @@ export function callVoid(name: string, args: unknown[]): void {
   impl.apply(bag(), args);
 }
 
-/** Missing async host functions reject. They do not throw synchronously. */
+/** Missing async scene functions reject. They do not throw synchronously. */
 export function callAsync(name: string, args: unknown[]): Promise<unknown> {
   const impl = fn(name);
   if (impl === null) {
@@ -120,10 +117,6 @@ export function onShortcut(spec: string, cb: () => void): void {
 
 export function setRecognizers(node: NodeHandle, spec: RecognizerSpec): void {
   callVoid("setRecognizers", [node, spec]);
-}
-
-export function setStroke(node: NodeHandle, width: number, color: number[]): void {
-  callVoid("setStroke", [node, width, color]);
 }
 
 export function log(level: string, message: string): void {

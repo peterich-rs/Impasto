@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use hostshell::{FrameTime, FrameToken, Vsync};
+use shell::{FrameTime, FrameToken, Vsync};
 
 type FrameSink = Arc<dyn Fn(FrameToken, FrameTime) + Send + Sync>;
 

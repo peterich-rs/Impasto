@@ -1,17 +1,17 @@
 import { createSignal, onCleanup, type Accessor } from "solid-js";
 import {
-  host,
+  scene,
   listenRefresh,
   onScrollState,
   type NodeHandle,
   type ScrollPhaseName,
 } from "@impasto/solid-renderer";
-import type { ScrollDriver } from "../../solid-renderer/src/host.ts";
-
+import type { ScrollDriver } from "../../solid-renderer/src/scene.ts";
 const natives = new WeakMap<ScrollController, ScrollDriver>();
-
-export type ScrollOffset = { x: number; y: number };
-
+export type ScrollOffset = {
+  x: number;
+  y: number;
+};
 export type DragStep = {
   ox: number;
   oy: number;
@@ -36,7 +36,14 @@ export type ScrollController = {
   setOverscroll(next: ScrollOffset): void;
   limits(): ScrollOffset;
   setLimits(next: ScrollOffset): void;
-  scrollTo(x: number, y: number, animate?: { stiffness?: number; damping?: number }): void;
+  scrollTo(
+    x: number,
+    y: number,
+    animate?: {
+      stiffness?: number;
+      damping?: number;
+    },
+  ): void;
   fling(vx: number, vy: number): void;
   stop(): void;
   dragBy(dx: number, dy: number): DragStep;
@@ -48,17 +55,18 @@ export type ScrollController = {
   setRubber(rubber: boolean, factor: number): void;
   setParent(parent: ScrollController | null): void;
   consume(overflowX: number, overflowY: number): boolean;
-  nativeId(): { index: number; generation: number };
+  nativeId(): {
+    index: number;
+    generation: number;
+  };
 };
-
 export function createScrollController(): ScrollController {
-  const native = host.scrollController?.();
+  const native = scene.scrollController?.();
   if (native === undefined) {
     throw new Error("scrollController is not linked");
   }
   return wrapScroll(native);
 }
-
 function wrapScroll(native: ScrollDriver): ScrollController {
   let viewport = 0;
   let content = 0;
@@ -69,19 +77,22 @@ function wrapScroll(native: ScrollDriver): ScrollController {
   let factor = 0.55;
   let parent: ScrollDriver | null = null;
   const [phase, setPhase] = createSignal<ScrollPhaseName>("idle");
-  const [overscroll, setOverscroll] = createSignal<ScrollOffset>({ x: 0, y: 0 });
+  const [overscroll, setOverscroll] = createSignal<ScrollOffset>({
+    x: 0,
+    y: 0,
+  });
   const offsetListeners = new Set<(offset: ScrollOffset) => void>();
   let stopState = () => {};
-
   function push(): void {
     native.configure(contentMin, pullMode, threshold, rubber, factor, parent);
   }
-
   function readOver(): void {
     const sample = native.query(2);
-    setOverscroll({ x: sample.x, y: sample.y });
+    setOverscroll({
+      x: sample.x,
+      y: sample.y,
+    });
   }
-
   const controller: ScrollController = {
     node: () => viewport,
     bind(next) {
@@ -91,7 +102,10 @@ function wrapScroll(native: ScrollDriver): ScrollController {
         native.bind(next, content);
         stopState = onScrollState(next, (sample) => {
           setPhase(sample.phase);
-          setOverscroll({ x: sample.ox, y: sample.oy });
+          setOverscroll({
+            x: sample.ox,
+            y: sample.oy,
+          });
         });
       }
     },
@@ -105,7 +119,10 @@ function wrapScroll(native: ScrollDriver): ScrollController {
     overscroll,
     offset() {
       const sample = native.query(0);
-      return { x: sample.x, y: sample.y };
+      return {
+        x: sample.x,
+        y: sample.y,
+      };
     },
     onOffset(fn) {
       offsetListeners.add(fn);
@@ -123,26 +140,35 @@ function wrapScroll(native: ScrollDriver): ScrollController {
     },
     limits() {
       const sample = native.query(1);
-      return { x: sample.x, y: sample.y };
+      return {
+        x: sample.x,
+        y: sample.y,
+      };
     },
     setLimits(_next) {},
     scrollTo(x, y, animate) {
       if (viewport === 0) {
         return;
       }
-      host.scrollTo(viewport, x, y, animate?.stiffness ?? 0, animate?.damping ?? 0);
+      scene.scrollTo(
+        viewport,
+        x,
+        y,
+        animate?.stiffness ?? 0,
+        animate?.damping ?? 0,
+      );
     },
     fling(vx, vy) {
       if (viewport === 0) {
         return;
       }
-      host.fling(viewport, vx, vy);
+      scene.fling(viewport, vx, vy);
     },
     stop() {
       if (viewport === 0) {
         return;
       }
-      host.stopScroll(viewport);
+      scene.stopScroll(viewport);
     },
     dragBy(dx, dy) {
       const step = native.dragBy(dx, dy);
@@ -183,7 +209,10 @@ function wrapScroll(native: ScrollDriver): ScrollController {
       const taken = native.consume(overflowX, overflowY);
       if (taken) {
         const sample = native.query(0);
-        controller.noteOffset({ x: sample.x, y: sample.y });
+        controller.noteOffset({
+          x: sample.x,
+          y: sample.y,
+        });
       }
       return taken;
     },
@@ -198,7 +227,6 @@ function wrapScroll(native: ScrollDriver): ScrollController {
   });
   return controller;
 }
-
 export function createScrollLink(
   source: ScrollController,
   target: ScrollController,
@@ -210,10 +238,12 @@ export function createScrollLink(
     if (node === 0) {
       return;
     }
-    host.setScrollOffset(node, next.x, next.y);
+    scene.setScrollOffset(node, next.x, next.y);
   });
 }
-
-export function refreshListener(controller: ScrollController, fn: () => void): () => void {
+export function refreshListener(
+  controller: ScrollController,
+  fn: () => void,
+): () => void {
   return listenRefresh(controller.nativeId(), fn);
 }

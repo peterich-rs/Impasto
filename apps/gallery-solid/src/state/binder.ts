@@ -1,10 +1,9 @@
-import { host, log } from "@impasto/solid-renderer";
+import { scene, log } from "@impasto/solid-renderer";
 import type { QuoteEngine } from "../engine/engine.ts";
 import type { Quote } from "../engine/types.ts";
 import { toneFor, type Updown } from "./settings.ts";
 import { fmtPct, fmtPrice } from "../format.ts";
 import { flash } from "./flash.ts";
-
 type RGBA = [number, number, number, number];
 
 /** Cell node ids one mounted row hands to the binder. */
@@ -14,15 +13,12 @@ export type QuoteCells = {
   chg?: number;
   flashNode?: number;
 };
-
 export type SparkRefresh = () => void;
-
 type CellBinding = {
   symbol: string;
   cells: QuoteCells;
   revision: number;
 };
-
 type SparkBinding = {
   symbol: string;
   refresh: SparkRefresh;
@@ -30,17 +26,18 @@ type SparkBinding = {
 
 /** One frame writes at most this many price cells. The rest keep the old revision. */
 const FLUSH_CELLS = 8;
-
 function cellCount(cells: QuoteCells): number {
-  return (cells.last !== undefined ? 1 : 0)
-    + (cells.pct !== undefined ? 1 : 0)
-    + (cells.chg !== undefined ? 1 : 0);
+  return (
+    (cells.last !== undefined ? 1 : 0) +
+    (cells.pct !== undefined ? 1 : 0) +
+    (cells.chg !== undefined ? 1 : 0)
+  );
 }
 
 /**
  * Registry of mounted quote cells. The hot path never touches Solid: each
  * vsync, for every mounted row whose `revision` moved, write text and colors
- * straight through `host`. One symbol may have several bindings (index strip
+ * straight through `scene`. One symbol may have several bindings (index strip
  * and a list row). Unbind is by entry identity, so last and pct do not
  * overwrite each other. Rows that scrolled out are simply absent.
  */
@@ -53,10 +50,14 @@ export class QuoteBinder {
   #flat: RGBA;
   #base: RGBA;
   #updown: () => Updown;
-
   constructor(
     engine: QuoteEngine,
-    colors: { up: RGBA; down: RGBA; flat: RGBA; base: RGBA },
+    colors: {
+      up: RGBA;
+      down: RGBA;
+      flat: RGBA;
+      base: RGBA;
+    },
     updown: () => Updown,
   ) {
     this.#engine = engine;
@@ -66,7 +67,6 @@ export class QuoteBinder {
     this.#base = colors.base;
     this.#updown = updown;
   }
-
   setColors(colors: { up: RGBA; down: RGBA; flat: RGBA; base: RGBA }): void {
     this.#up = colors.up;
     this.#down = colors.down;
@@ -85,16 +85,21 @@ export class QuoteBinder {
       this.#runSpark(spark);
     }
   }
-
   bind(symbol: string, cells: QuoteCells): () => void {
-    const entry: CellBinding = { symbol, cells, revision: 0 };
+    const entry: CellBinding = {
+      symbol,
+      cells,
+      revision: 0,
+    };
     this.#bindings.push(entry);
     this.#sync(entry);
     return () => this.#dropCells(entry);
   }
-
   bindSpark(symbol: string, refresh: SparkRefresh): () => void {
-    const entry: SparkBinding = { symbol, refresh };
+    const entry: SparkBinding = {
+      symbol,
+      refresh,
+    };
     this.#sparks.push(entry);
     this.#runSpark(entry);
     return () => {
@@ -121,7 +126,6 @@ export class QuoteBinder {
     }
     flash.tick(this.#base);
   }
-
   #dropCells(entry: CellBinding): void {
     const i = this.#bindings.indexOf(entry);
     if (i >= 0) {
@@ -154,7 +158,6 @@ export class QuoteBinder {
       this.#dropCells(entry);
     }
   }
-
   #runSpark(entry: SparkBinding): void {
     try {
       entry.refresh();
@@ -166,22 +169,24 @@ export class QuoteBinder {
       }
     }
   }
-
   #writeOne(c: QuoteCells, q: Quote): void {
     const tone = toneFor(q.last, q.prevClose, this.#updown());
-    const color = tone === "up" ? this.#up : tone === "down" ? this.#down : this.#flat;
+    const color =
+      tone === "up" ? this.#up : tone === "down" ? this.#down : this.#flat;
     if (c.last !== undefined) {
-      host.setText(c.last, fmtPrice(q.last));
+      scene.setText(c.last, fmtPrice(q.last));
     }
     if (c.pct !== undefined) {
-      host.setText(c.pct, fmtPct(q.last, q.prevClose));
+      scene.setText(c.pct, fmtPct(q.last, q.prevClose));
     }
     if (c.chg !== undefined) {
-      host.setText(c.chg, fmtPrice(q.last - q.prevClose));
+      scene.setText(c.chg, fmtPrice(q.last - q.prevClose));
     }
     if (c.flashNode !== undefined) {
       if (c.last !== undefined) {
-        host.setColor(c.flashNode, color);
+        scene.patchStyle(c.flashNode, {
+          color: color,
+        });
       }
       if (tone !== "flat") {
         flash.restart(c.flashNode, color);

@@ -2,6 +2,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("layout must complete before recording")]
+    LayoutRequired,
     #[error(transparent)]
     Layout(#[from] taffy::TaffyError),
     #[error("node is not in this tree")]
@@ -22,4 +24,6 @@ pub enum Error {
     NegativeGrow,
     #[error("numeric value is not usable")]
     BadNumber,
+    #[error(transparent)]
+    Style(#[from] crate::style::StyleError),
 }

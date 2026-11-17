@@ -1,9 +1,9 @@
-import * as host from "@impasto/app-state/host";
+import * as scene from "./app-state.ts";
 
 export const AppState = {
   get currentState() {
-    return host.getCurrentState();
+    return scene.getCurrentState();
   },
-  addEventListener: host.addEventListener,
-  removeEventListener: host.removeEventListener,
+  addEventListener: scene.addEventListener,
+  removeEventListener: scene.removeEventListener,
 };

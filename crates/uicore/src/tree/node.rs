@@ -9,7 +9,7 @@ use taffy::prelude::*;
 
 pub(super) const MAX_GENERATION: u32 = (1 << 21) - 1;
 
-/// A node in one [`Tree`]. The slot index is stable. `generation` changes when
+/// A node in one [`crate::Tree`]. The slot index is stable. `generation` changes when
 /// the slot is recycled, so a stale id cannot address the node that replaced it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NodeId {
@@ -34,7 +34,7 @@ impl NodeId {
     }
 }
 
-/// How a pointer event changed a [`Tree::pointer_region`], a scroll, or focus.
+/// How a pointer event changed a [`crate::Tree::pointer_region`], a scroll, or focus.
 ///
 /// `DragBy` is a scene-point delta. `DragEnd`'s pair is velocity in scene points
 /// per millisecond. A locked drag emits `Release` for the pressed region, then
@@ -98,7 +98,7 @@ pub enum DragClaim {
     Free,
 }
 
-/// Where [`Tree::focus_step`] moves the text focus.
+/// Where [`crate::Tree::focus_step`] moves the text focus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FocusDirection {
     Next,
@@ -109,7 +109,7 @@ pub enum FocusDirection {
     Down,
 }
 
-/// Ids retired by [`Tree::discard`], children before their parent, plus any
+/// Ids retired by [`crate::Tree::discard`], children before their parent, plus any
 /// focus gesture that retirement produced.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Discarded {
@@ -135,7 +135,7 @@ pub struct Rect {
     pub h: f32,
 }
 
-/// How a child sits inside an [`Tree::align`] node.
+/// How a child sits inside an [`crate::Tree::align`] node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Alignment {
     Start,
@@ -153,7 +153,7 @@ pub enum RowCrossAlign {
     Baseline,
 }
 
-/// Which edge [`Tree::scroll_into_view`] aligns to.
+/// Which edge [`crate::Tree::scroll_into_view`] aligns to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScrollEdge {
     Start,
@@ -171,7 +171,7 @@ pub enum BoxEdge {
     Left,
 }
 
-/// Where [`Tree::place_panel`] puts a measured panel relative to its anchor.
+/// Where [`crate::Tree::place_panel`] puts a measured panel relative to its anchor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelAlign {
     BelowStart,
@@ -250,23 +250,29 @@ pub enum TrackSize {
     Fraction(f32),
 }
 
+/// Layout identity. Row, column, padding, and the other old tags are presets
+/// of [`Kind::View`]. Clip, opacity, and transform are a [`Kind::Stack`] plus
+/// a [`Role`] flag or a paint field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Kind {
-    Row,
-    Column,
-    Grid,
-    Padding,
-    Align,
-    Sized,
+    View,
     Stack,
-    Clip,
-    Opacity,
     Scroll,
-    Transform,
     Text,
     Image,
-    PointerRegion,
-    Decorated,
+}
+
+bitflags::bitflags! {
+    /// Capabilities that used to be their own node kind.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub(super) struct Role: u32 {
+        const CLIP = 1 << 0;
+        const POINTER = 1 << 1;
+        /// The node was created as a transform, even while the matrix is identity.
+        const TRANSFORM = 1 << 2;
+        /// Author grid. A stack's single cell does not set this.
+        const GRID = 1 << 3;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -289,8 +295,6 @@ bitflags::bitflags! {
         const RELAYOUT_BOUNDARY = 1 << 4;
         const REPAINT_BOUNDARY = 1 << 5;
         const FOCUSABLE = 1 << 6;
-        /// Row children share a text baseline. Column ignores this flag.
-        const BASELINE_CROSS = 1 << 7;
         /// Text metrics changed and [`super::text::Tree::sync_metrics`]
         /// has not consumed it yet.
         const TEXT_DIRTY = 1 << 8;
@@ -300,6 +304,8 @@ bitflags::bitflags! {
         /// This node's subtree is one picture. A scroll does not fold it into
         /// the single child picture, so a text edit rebuilds only the row.
         const PICTURE_OWNER = 1 << 10;
+        /// `display: none`. Layout, paint, hit, and semantics skip the subtree.
+        const HIDDEN = 1 << 13;
     }
 }
 
@@ -359,12 +365,14 @@ pub(super) struct ImagePayload {
 }
 
 /// Absent when the node has no fill, stroke, shadow, blur, radius, alpha, or blend.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct PaintProps {
     pub(super) fill: Option<[u8; 4]>,
     pub(super) corner_radius: f32,
     pub(super) stroke_width: f32,
     pub(super) stroke_color: [u8; 4],
+    pub(super) outline_width: f32,
+    pub(super) outline_color: [u8; 4],
     pub(super) gradient: Option<protocol::Gradient>,
     pub(super) shadow: Option<protocol::Shadow>,
     pub(super) box_shadows: Arc<[protocol::BoxShadow]>,
@@ -379,6 +387,7 @@ impl PaintProps {
         self.fill.is_none()
             && self.corner_radius == 0.0
             && self.stroke_width <= 0.0
+            && self.outline_width <= 0.0
             && self.gradient.is_none()
             && self.shadow.is_none()
             && self.box_shadows.is_empty()
@@ -396,6 +405,8 @@ impl Default for PaintProps {
             corner_radius: 0.0,
             stroke_width: 0.0,
             stroke_color: [0, 0, 0, 0],
+            outline_width: 0.0,
+            outline_color: [0, 0, 0, 0],
             gradient: None,
             shadow: None,
             box_shadows: Arc::from([]),
@@ -405,12 +416,6 @@ impl Default for PaintProps {
             alpha: None,
         }
     }
-}
-
-pub(super) enum Geom {
-    None,
-    Scroll(ScrollGeom),
-    Transform(TransformGeom),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -432,23 +437,71 @@ pub(super) struct ScrollGeom {
     pub(super) pull_armed: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct TransformGeom {
     pub(super) translate_x: f32,
     pub(super) translate_y: f32,
     pub(super) rotate_rad: f32,
     pub(super) scale_x: f32,
     pub(super) scale_y: f32,
+    /// Scene pivot. `None` keeps the constructor origin at the canvas origin.
+    /// `Some((points_x, points_y, ratio_x, ratio_y))` is the node border box.
+    pub(super) pivot: Option<(f32, f32, f32, f32)>,
+}
+
+impl ScrollGeom {
+    pub(super) fn fresh(axis: crate::ScrollAxis) -> Self {
+        Self {
+            offset_x: 0.0,
+            offset_y: 0.0,
+            overscroll_x: 0.0,
+            overscroll_y: 0.0,
+            physics: crate::ScrollPhysics::default(),
+            chain: true,
+            phase: crate::ScrollPhase::Idle,
+            axis,
+            content_min: 0.0,
+            pull_mode: crate::PullMode::Off,
+            pull_threshold: 64.0,
+            pull: 0.0,
+            pull_armed: false,
+        }
+    }
 }
 
 impl TransformGeom {
-    fn identity() -> Self {
+    pub(super) fn identity() -> Self {
         Self {
             translate_x: 0.0,
             translate_y: 0.0,
             rotate_rad: 0.0,
             scale_x: 1.0,
             scale_y: 1.0,
+            pivot: None,
+        }
+    }
+
+    /// Fold `pivot` into the single translate the draw command can carry.
+    ///
+    /// A missing pivot leaves the constructor matrix alone. Ratios are of this
+    /// node's border box, whose top-left is `(x, y)` in the same space as the
+    /// commands being transformed.
+    pub(super) fn placed(&self, x: f32, y: f32, w: f32, h: f32) -> Self {
+        let Some((ox, oy, rx, ry)) = self.pivot else {
+            return *self;
+        };
+        let px = x + ox + rx * w;
+        let py = y + oy + ry * h;
+        let (sin, cos) = self.rotate_rad.sin_cos();
+        let scaled_x = px * self.scale_x;
+        let scaled_y = py * self.scale_y;
+        let rotated_x = scaled_x * cos - scaled_y * sin;
+        let rotated_y = scaled_x * sin + scaled_y * cos;
+        Self {
+            translate_x: self.translate_x + px - rotated_x,
+            translate_y: self.translate_y + py - rotated_y,
+            pivot: None,
+            ..*self
         }
     }
 
@@ -463,9 +516,12 @@ impl TransformGeom {
 
 pub(super) struct Node {
     pub(super) kind: Kind,
+    pub(super) role: Role,
     pub(super) payload: Payload,
     pub(super) paint: Option<Box<PaintProps>>,
-    pub(super) geom: Geom,
+    /// Scroll state. Independent of [`Node::transform`], so a scroller can move.
+    pub(super) scroll: Option<Box<ScrollGeom>>,
+    pub(super) transform: Option<Box<TransformGeom>>,
     /// Copied at creation. Revive and the setters read this, not the live Taffy style.
     pub(super) style: Style,
     /// `None` after the subtree's Taffy nodes were released. The scene node stays.
@@ -480,7 +536,14 @@ pub(super) struct Node {
     pub(super) y: f32,
     pub(super) w: f32,
     pub(super) h: f32,
+    /// Border plus padding, so text and images share the content box.
+    pub(super) content_x: f32,
+    pub(super) content_y: f32,
+    pub(super) content_w: f32,
+    pub(super) content_h: f32,
     pub(super) flags: NodeFlags,
+    /// Paint and hit order among siblings. Zero keeps the tree order.
+    pub(super) z_index: i32,
     /// Wins a drag from this region before the scroll chain does.
     pub(super) drag_claim: DragClaim,
     pub(super) recognizers: crate::RecognizerSet,
@@ -508,39 +571,19 @@ macro_rules! payload_accessors {
 impl Node {
     pub(super) fn new(kind: Kind, style: Style, taffy: TaffyId, payload: Payload) -> Self {
         let mut flags = NodeFlags::LAYOUT_DIRTY | NodeFlags::SEMANTICS_DIRTY;
-        if matches!(kind, Kind::Scroll | Kind::Sized) {
-            flags.insert(NodeFlags::RELAYOUT_BOUNDARY);
-        }
-        if matches!(
-            kind,
-            Kind::Scroll | Kind::Transform | Kind::Opacity | Kind::Clip
-        ) {
-            flags.insert(NodeFlags::REPAINT_BOUNDARY);
-        }
-        let geom = match kind {
-            Kind::Scroll => Geom::Scroll(ScrollGeom {
-                offset_x: 0.0,
-                offset_y: 0.0,
-                overscroll_x: 0.0,
-                overscroll_y: 0.0,
-                physics: crate::ScrollPhysics::default(),
-                chain: true,
-                phase: crate::ScrollPhase::Idle,
-                axis: crate::ScrollAxis::Both,
-                content_min: 0.0,
-                pull_mode: crate::PullMode::Off,
-                pull_threshold: 64.0,
-                pull: 0.0,
-                pull_armed: false,
-            }),
-            Kind::Transform => Geom::Transform(TransformGeom::identity()),
-            _ => Geom::None,
+        let scroll = if kind == Kind::Scroll {
+            flags.insert(NodeFlags::RELAYOUT_BOUNDARY | NodeFlags::REPAINT_BOUNDARY);
+            Some(Box::new(ScrollGeom::fresh(crate::ScrollAxis::Both)))
+        } else {
+            None
         };
         Self {
             kind,
+            role: Role::empty(),
             payload,
             paint: None,
-            geom,
+            scroll,
+            transform: None,
             style,
             taffy: Some(taffy),
             parent: None,
@@ -552,10 +595,97 @@ impl Node {
             y: 0.0,
             w: 0.0,
             h: 0.0,
+            content_x: 0.0,
+            content_y: 0.0,
+            content_w: 0.0,
+            content_h: 0.0,
             flags,
+            z_index: 0,
             drag_claim: DragClaim::None,
             recognizers: crate::RecognizerSet::default(),
             semantics: None,
+        }
+    }
+
+    pub(super) fn is_text(&self) -> bool {
+        self.kind == Kind::Text
+    }
+
+    pub(super) fn is_image(&self) -> bool {
+        self.kind == Kind::Image
+    }
+
+    pub(super) fn is_scroll(&self) -> bool {
+        self.kind == Kind::Scroll
+    }
+
+    pub(super) fn is_stack(&self) -> bool {
+        self.kind == Kind::Stack
+    }
+
+    pub(super) fn is_view(&self) -> bool {
+        self.kind == Kind::View
+    }
+
+    /// Text and image measure themselves. Every other kind is a box.
+    pub(super) fn is_box(&self) -> bool {
+        self.is_view() || self.is_stack() || self.is_scroll()
+    }
+
+    pub(super) fn is_pointer(&self) -> bool {
+        self.role.contains(Role::POINTER)
+    }
+
+    pub(super) fn is_author_grid(&self) -> bool {
+        self.role.contains(Role::GRID)
+    }
+
+    pub(super) fn pushes_opacity(&self) -> bool {
+        self.alpha().is_some_and(|alpha| alpha != 255)
+    }
+
+    pub(super) fn paints_transform(&self) -> bool {
+        self.transform
+            .as_ref()
+            .is_some_and(|geom| !geom.is_identity())
+    }
+
+    pub(super) fn is_row_flex(&self) -> bool {
+        self.style.display == Display::Flex
+            && matches!(
+                self.style.flex_direction,
+                FlexDirection::Row | FlexDirection::RowReverse
+            )
+    }
+
+    pub(super) fn is_column_flex(&self) -> bool {
+        self.style.display == Display::Flex
+            && matches!(
+                self.style.flex_direction,
+                FlexDirection::Column | FlexDirection::ColumnReverse
+            )
+    }
+
+    pub(super) fn is_flex_line(&self) -> bool {
+        self.is_row_flex() || self.is_column_flex()
+    }
+
+    /// Debug label. Padding, align, and sized are views, so the name follows
+    /// the computed flex direction rather than the constructor that made them.
+    pub(super) fn kind_name(&self) -> &'static str {
+        match self.kind {
+            Kind::Text => "text",
+            Kind::Image => "image",
+            Kind::Scroll => "scroll",
+            Kind::Stack if self.role.contains(Role::CLIP) => "clip",
+            Kind::Stack if self.role.contains(Role::TRANSFORM) => "transform",
+            Kind::Stack if self.alpha().is_some() => "opacity",
+            Kind::Stack => "stack",
+            Kind::View if self.is_author_grid() => "grid",
+            Kind::View if self.is_pointer() => "pointer",
+            Kind::View if self.is_row_flex() => "row",
+            Kind::View if self.is_column_flex() => "column",
+            Kind::View => "view",
         }
     }
 
@@ -567,18 +697,13 @@ impl Node {
     /// A full-alpha opacity and an identity transform draw straight into the
     /// parent picture, the way a settled `FadeTransition` or a parked page does.
     pub(super) fn composites(&self) -> bool {
-        let live = |sigma: f32| sigma.is_finite() && sigma > 0.0;
-        match self.kind {
-            Kind::Scroll => true,
-            Kind::Transform => !self.transform().is_identity(),
-            Kind::Opacity => self.alpha().unwrap_or(255) != 255,
-            Kind::Clip => false,
-            _ => {
-                live(self.blur())
-                    || live(self.backdrop())
-                    || self.blend() != protocol::BlendMode::SrcOver
-            }
+        if self.is_scroll() || self.paints_transform() || self.pushes_opacity() {
+            return true;
         }
+        if self.role.contains(Role::CLIP) {
+            return false;
+        }
+        self.paints_effect()
     }
 
     /// Blur, backdrop blur, or a blend other than [`protocol::BlendMode::SrcOver`].
@@ -594,17 +719,10 @@ impl Node {
     /// Alpha 0 and a full alpha do not open an opacity layer. An identity transform
     /// does not open a transform layer. Effects do, on any kind.
     pub(super) fn renders_layers(&self, subtree: bool) -> bool {
-        if self.paints_effect() {
-            return true;
-        }
-        if self.kind == Kind::Clip {
-            return subtree;
-        }
-        // Alpha 0 skips the subtree. It does not open an opacity layer.
-        if self.kind == Kind::Opacity && self.alpha() == Some(0) {
+        if self.alpha() == Some(0) {
             return false;
         }
-        self.composites()
+        self.paints_effect() || self.composites() || (self.role.contains(Role::CLIP) && subtree)
     }
 
     /// Scroll keeps one child picture. Other layers keep runs.
@@ -613,21 +731,12 @@ impl Node {
     }
 
     pub(super) fn hit_role(&self) -> Hit {
-        match self.kind {
-            Kind::Text | Kind::Image => Hit::Opaque,
-            Kind::PointerRegion => Hit::Region,
-            Kind::Row
-            | Kind::Column
-            | Kind::Grid
-            | Kind::Padding
-            | Kind::Align
-            | Kind::Sized
-            | Kind::Stack
-            | Kind::Clip
-            | Kind::Opacity
-            | Kind::Scroll
-            | Kind::Transform
-            | Kind::Decorated => Hit::Defer,
+        if self.is_text() || self.is_image() {
+            Hit::Opaque
+        } else if self.is_pointer() {
+            Hit::Region
+        } else {
+            Hit::Defer
         }
     }
 
@@ -714,56 +823,49 @@ impl Node {
     }
 
     pub(super) fn scroll_offset(&self) -> (f32, f32) {
-        match self.geom {
-            Geom::Scroll(geom) => (geom.offset_x, geom.offset_y),
-            Geom::None | Geom::Transform(_) => (0.0, 0.0),
-        }
+        self.scroll
+            .as_ref()
+            .map(|geom| (geom.offset_x, geom.offset_y))
+            .unwrap_or((0.0, 0.0))
     }
 
     /// Offset plus rubber-band. Record and hit testing use this pair.
     pub(super) fn scroll_paint(&self) -> (f32, f32) {
-        match self.geom {
-            Geom::Scroll(geom) => (
-                geom.offset_x + geom.overscroll_x,
-                geom.offset_y + geom.overscroll_y,
-            ),
-            Geom::None | Geom::Transform(_) => (0.0, 0.0),
-        }
+        self.scroll
+            .as_ref()
+            .map(|geom| {
+                (
+                    geom.offset_x + geom.overscroll_x,
+                    geom.offset_y + geom.overscroll_y,
+                )
+            })
+            .unwrap_or((0.0, 0.0))
     }
 
     pub(super) fn overscroll(&self) -> (f32, f32) {
-        match self.geom {
-            Geom::Scroll(geom) => (geom.overscroll_x, geom.overscroll_y),
-            Geom::None | Geom::Transform(_) => (0.0, 0.0),
-        }
+        self.scroll
+            .as_ref()
+            .map(|geom| (geom.overscroll_x, geom.overscroll_y))
+            .unwrap_or((0.0, 0.0))
     }
 
     pub(super) fn scroll_geom(&self) -> Option<&ScrollGeom> {
-        match &self.geom {
-            Geom::Scroll(geom) => Some(geom),
-            Geom::None | Geom::Transform(_) => None,
-        }
+        self.scroll.as_deref()
     }
 
     pub(super) fn scroll_mut(&mut self) -> Option<&mut ScrollGeom> {
-        match &mut self.geom {
-            Geom::Scroll(geom) => Some(geom),
-            Geom::None | Geom::Transform(_) => None,
-        }
+        self.scroll.as_deref_mut()
     }
 
     pub(super) fn transform(&self) -> TransformGeom {
-        match self.geom {
-            Geom::Transform(geom) => geom,
-            Geom::None | Geom::Scroll(_) => TransformGeom::identity(),
-        }
+        self.transform
+            .as_deref()
+            .copied()
+            .unwrap_or_else(TransformGeom::identity)
     }
 
     pub(super) fn transform_mut(&mut self) -> Option<&mut TransformGeom> {
-        match &mut self.geom {
-            Geom::Transform(geom) => Some(geom),
-            Geom::None | Geom::Scroll(_) => None,
-        }
+        self.transform.as_deref_mut()
     }
 }
 

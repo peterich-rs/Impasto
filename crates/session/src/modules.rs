@@ -67,12 +67,13 @@ pub enum Invoke {
     Promise(PromiseFn),
 }
 
-pub struct HostMethod {
+#[derive(Clone)]
+pub struct Method {
     pub name: &'static str,
     pub invoke: Invoke,
 }
 
-impl HostMethod {
+impl Method {
     pub fn sync(
         name: &'static str,
         f: impl Fn(&[PluginValue]) -> Result<PluginValue, String> + Send + Sync + 'static,
@@ -94,34 +95,49 @@ impl HostMethod {
     }
 }
 
-pub struct HostModule {
+#[derive(Clone)]
+pub struct Module {
     pub name: &'static str,
     pub specifier: &'static str,
-    pub methods: Vec<HostMethod>,
+    pub methods: Vec<Method>,
 }
 
 pub struct ModuleRegistry {
-    modules: Arc<[HostModule]>,
+    modules: Arc<[Module]>,
 }
 
 impl ModuleRegistry {
-    pub fn new(modules: Vec<HostModule>) -> Self {
+    pub fn new(modules: Vec<Module>) -> Self {
         Self {
             modules: modules.into(),
         }
     }
 
-    pub fn module(&self, name: &str) -> Option<&HostModule> {
+    pub fn restricted(&self, packages: &[String]) -> Self {
+        Self::new(
+            self.modules
+                .iter()
+                .filter(|module| {
+                    packages.iter().any(|package| {
+                        module.specifier.strip_prefix("@impasto/") == Some(package.as_str())
+                    })
+                })
+                .cloned()
+                .collect(),
+        )
+    }
+
+    pub fn module(&self, name: &str) -> Option<&Module> {
         self.modules.iter().find(|module| module.name == name)
     }
 
-    pub fn by_specifier(&self, specifier: &str) -> Option<&HostModule> {
+    pub fn by_specifier(&self, specifier: &str) -> Option<&Module> {
         self.modules
             .iter()
             .find(|module| module.specifier == specifier)
     }
 
-    pub fn method(&self, module: &str, method: &str) -> Option<&HostMethod> {
+    pub fn method(&self, module: &str, method: &str) -> Option<&Method> {
         self.module(module)?
             .methods
             .iter()
@@ -144,7 +160,7 @@ impl ModuleRegistry {
 
 /// Registry, executor, and shared slots installed on a language session.
 #[derive(Clone)]
-pub struct HostConfig {
+pub struct ModuleConfig {
     pub registry: Arc<ModuleRegistry>,
     pub exec: Arc<dyn MethodExec>,
     pub settle: Arc<dyn Fn(u64) -> Settle + Send + Sync>,
@@ -152,7 +168,12 @@ pub struct HostConfig {
     pub launch_url: Shared<Option<String>>,
 }
 
-impl HostConfig {
+impl ModuleConfig {
+    pub fn restrict(mut self, packages: &[String]) -> Self {
+        self.registry = Arc::new(self.registry.restricted(packages));
+        self
+    }
+
     /// Empty registry. Promise results are discarded.
     pub fn disconnected() -> Self {
         Self {
@@ -256,26 +277,26 @@ mod tests {
 
     #[test]
     fn registry_first_wins_and_call_rejects_promise() {
-        let first = HostModule {
+        let first = Module {
             name: "Clipboard",
-            specifier: "@impasto/clipboard/host",
-            methods: vec![HostMethod::sync("getString", |_| {
+            specifier: "@impasto/clipboard",
+            methods: vec![Method::sync("getString", |_| {
                 Ok(PluginValue::Str("one".into()))
             })],
         };
-        let second = HostModule {
+        let second = Module {
             name: "Clipboard",
-            specifier: "@impasto/other/host",
-            methods: vec![HostMethod::sync("getString", |_| {
+            specifier: "@impasto/other",
+            methods: vec![Method::sync("getString", |_| {
                 Ok(PluginValue::Str("two".into()))
             })],
         };
-        let maps = HostModule {
+        let maps = Module {
             name: "Maps",
-            specifier: "@impasto/maps/host",
+            specifier: "@impasto/maps",
             methods: vec![
-                HostMethod::sync("ping", |_| Ok(PluginValue::Str("pong".into()))),
-                HostMethod::promise("search", |_, settle, exec| {
+                Method::sync("ping", |_| Ok(PluginValue::Str("pong".into()))),
+                Method::promise("search", |_, settle, exec| {
                     exec.now(settle, PluginResult::Done(PluginValue::Null));
                 }),
             ],
@@ -287,7 +308,7 @@ mod tests {
         }
         assert_eq!(
             registry
-                .by_specifier("@impasto/clipboard/host")
+                .by_specifier("@impasto/clipboard")
                 .map(|module| module.name),
             Some("Clipboard")
         );

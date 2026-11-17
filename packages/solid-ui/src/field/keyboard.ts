@@ -38,7 +38,6 @@ export const EDIT_DOCUMENT_END = 35;
 export const EDIT_EXTEND_DOCUMENT_START = 36;
 export const EDIT_EXTEND_DOCUMENT_END = 37;
 export const EDIT_COMMIT = 38;
-
 export const KEYBOARD: Record<string, number> = {
   text: 0,
   multiline: 1,
@@ -49,7 +48,6 @@ export const KEYBOARD: Record<string, number> = {
   name: 6,
   password: 7,
 };
-
 export const ACTION: Record<string, number> = {
   none: 0,
   done: 1,
@@ -60,30 +58,57 @@ export const ACTION: Record<string, number> = {
   previous: 6,
   newline: 7,
 };
-
 export const SUBMIT_ACTIONS = new Set(["done", "search", "go", "send", "next"]);
-
-export type KeyboardName = "text" | "number" | "phone" | "email" | "url" | "name" | "password";
-export type ActionName = "none" | "done" | "next" | "search" | "go" | "send" | "previous" | "newline";
+export type KeyboardName =
+  | "text"
+  | "number"
+  | "phone"
+  | "email"
+  | "url"
+  | "name"
+  | "password";
+export type ActionName =
+  | "none"
+  | "done"
+  | "next"
+  | "search"
+  | "go"
+  | "send"
+  | "previous"
+  | "newline";
 
 /** keyboard × action codes passed to `setImeConfig`. Multiline defaults to the newline action. */
 export function imeConfig(
   keyboard: KeyboardName | undefined,
   action: ActionName | undefined,
   multiline: boolean,
-): { keyboard: number; action: number } {
-  const keyboardCode = keyboard && keyboard !== "text" ? (KEYBOARD[keyboard] ?? 0) : multiline ? 1 : 0;
+): {
+  keyboard: number;
+  action: number;
+} {
+  const keyboardCode =
+    keyboard && keyboard !== "text"
+      ? (KEYBOARD[keyboard] ?? 0)
+      : multiline
+        ? 1
+        : 0;
   let actionCode: number;
   if (action) {
     actionCode = ACTION[action] ?? 0;
   } else {
     actionCode = multiline ? ACTION.newline : ACTION.done;
   }
-  return { keyboard: keyboardCode ?? 0, action: actionCode ?? 0 };
+  return {
+    keyboard: keyboardCode ?? 0,
+    action: actionCode ?? 0,
+  };
 }
 
 /** Enter inserts a newline only for a multiline field whose action is not a submit action. */
-export function enterInsertsNewline(multiline: boolean, action: ActionName | undefined): boolean {
+export function enterInsertsNewline(
+  multiline: boolean,
+  action: ActionName | undefined,
+): boolean {
   if (!multiline) {
     return false;
   }

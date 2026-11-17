@@ -1,8 +1,8 @@
-import { host } from "@impasto/solid-renderer";
+import { scene } from "@impasto/solid-renderer";
 
 /** Moves every child. The tree does the walk; the language side does not skip nodes. */
 export function moveChildren(from: number, to: number): void {
-  host.reparentChildren(from, to);
+  scene.reparentChildren(from, to);
 }
 
 /**
@@ -14,7 +14,7 @@ export function restoreChildren(from: number, to: number): void {
     return;
   }
   try {
-    host.reparentChildren(from, to);
+    scene.reparentChildren(from, to);
   } catch {
     // The clip or the slot was already discarded.
   }
@@ -23,7 +23,7 @@ export function restoreChildren(from: number, to: number): void {
 /** `null` when `node` is already gone. `0` means the node is live and empty. */
 export function readFirstChild(node: number): number | null {
   try {
-    return host.firstChild(node);
+    return scene.firstChild(node);
   } catch {
     return null;
   }

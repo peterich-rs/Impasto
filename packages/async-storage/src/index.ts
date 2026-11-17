@@ -1,4 +1,4 @@
-import * as host from "@impasto/async-storage/host";
+import * as scene from "./storage.ts";
 
 export interface AsyncStorage {
   multiGet(keys: string[]): Promise<[string, string | null][]>;
@@ -9,4 +9,4 @@ export interface AsyncStorage {
   removeEventListener(type: string, listener: (e: unknown) => void): void;
 }
 
-export const AsyncStorage = host as unknown as AsyncStorage;
+export const AsyncStorage = scene as unknown as AsyncStorage;

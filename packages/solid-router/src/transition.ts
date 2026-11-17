@@ -16,19 +16,45 @@ export function travelDistance(measured: number, viewport: number): number {
 export function stackMotion(
   phase: "enter" | "exit" | "cover",
   distance = 100,
-): Array<{ prop: string; from: number; to: number }> {
+): Array<{
+  prop: string;
+  from: number;
+  to: number;
+}> {
   const travel = Number.isFinite(distance) && distance > 0 ? distance : 100;
   if (phase === "enter") {
-    return [{ prop: "translateX", from: travel, to: 0 }];
+    return [
+      {
+        prop: "translateX",
+        from: travel,
+        to: 0,
+      },
+    ];
   }
   if (phase === "exit") {
     return [
-      { prop: "translateX", from: 0, to: travel },
-      { prop: "opacity", from: 255, to: 0 },
+      {
+        prop: "translateX",
+        from: 0,
+        to: travel,
+      },
+      {
+        prop: "opacity",
+        from: 255,
+        to: 0,
+      },
     ];
   }
   return [
-    { prop: "translateX", from: 0, to: -Math.round(travel * 0.3) },
-    { prop: "opacity", from: 255, to: STACK_EXIT_ALPHA },
+    {
+      prop: "translateX",
+      from: 0,
+      to: -Math.round(travel * 0.3),
+    },
+    {
+      prop: "opacity",
+      from: 255,
+      to: STACK_EXIT_ALPHA,
+    },
   ];
 }

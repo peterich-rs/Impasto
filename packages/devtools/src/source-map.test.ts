@@ -20,9 +20,15 @@ test("maps a known position back to the source", () => {
   const map = SourceMap.load(MAP);
   assert.ok(map);
   const first = map.original(0, 0);
-  assert.deepEqual([first?.source, first?.line, first?.col], ["src/app.tsx", 0, 0]);
+  assert.deepEqual(
+    [first?.source, first?.line, first?.col],
+    ["src/app.tsx", 0, 0],
+  );
   const second = map.original(0, 6);
-  assert.deepEqual([second?.source, second?.line, second?.col], ["src/app.tsx", 1, 2]);
+  assert.deepEqual(
+    [second?.source, second?.line, second?.col],
+    ["src/app.tsx", 1, 2],
+  );
 });
 
 test("a column before the first segment falls back to it", () => {

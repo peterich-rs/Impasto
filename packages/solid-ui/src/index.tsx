@@ -1,12 +1,30 @@
 import "@impasto/solid-renderer/jsx";
 import "./theme-bind.ts";
-
 export { Button } from "./Button.tsx";
+export type { ButtonProps } from "./props.ts";
+export { Column } from "./Column.tsx";
+export type { ColumnProps } from "./props.ts";
+export { View } from "./View.tsx";
+export type { ViewProps } from "./props.ts";
+export { Stack } from "./Stack.tsx";
+export type { StackProps } from "./props.ts";
+export { Grid } from "./Grid.tsx";
+export type { GridProps } from "./props.ts";
+export { Pressable } from "./Pressable.tsx";
+export type { PressableProps } from "./props.ts";
+export { Image, type ImageProps } from "@impasto/solid-renderer";
 export { Dialog } from "./Dialog.tsx";
-export { ErrorPage, installErrorHooks, messageOf, reportError, stackOf, useErrorHandler } from "./errors.tsx";
+export {
+  ErrorPage,
+  installErrorHooks,
+  messageOf,
+  reportError,
+  stackOf,
+  useErrorHandler,
+} from "./errors.tsx";
 export { Field } from "./Field.tsx";
 export type { FieldController } from "./field/controller.ts";
-export { Text } from "@impasto/solid-renderer";
+export { Text, type TextProps } from "@impasto/solid-renderer";
 export { TextArea } from "./TextArea.tsx";
 export { Icon } from "./Icon.tsx";
 export { KeyboardAvoidingView } from "./KeyboardAvoidingView.tsx";
@@ -14,8 +32,39 @@ export { Menu, Popover } from "./Menu.tsx";
 export { NavigationBar } from "./NavigationBar.tsx";
 export { OverlayRoot, useOverlay } from "./overlay/OverlayRoot.tsx";
 export { Row } from "./Row.tsx";
-export { ScrollArea, bouncing, clamping, type ScrollPhysics } from "./ScrollArea.tsx";
-export { createScrollController, createScrollLink } from "./ScrollController.ts";
+export type {
+  DialogProps,
+  ElementProps,
+  ErrorPageProps,
+  FieldProps,
+  IconProps,
+  KeyboardAvoidingProps,
+  MenuProps,
+  NavigationBarProps,
+  OverlayRootProps,
+  PopoverProps,
+  RecyclerProps,
+  RefreshControlProps,
+  RowProps,
+  ScrollAreaProps,
+  SheetProps,
+  SwitchProps,
+  TabsProps,
+  TextAreaProps,
+  ToastProps,
+  TooltipProps,
+  VirtualListProps,
+} from "./props.ts";
+export {
+  ScrollArea,
+  bouncing,
+  clamping,
+  type ScrollPhysics,
+} from "./ScrollArea.tsx";
+export {
+  createScrollController,
+  createScrollLink,
+} from "./ScrollController.ts";
 export type { ScrollController } from "./ScrollController.ts";
 export { consumeScrollOverflow } from "./ScrollGroup.tsx";
 export { RefreshControl } from "./RefreshControl.tsx";
@@ -36,10 +85,8 @@ export {
   currentLocale,
   installThemePort,
   minTarget,
-  resetThemeForTests,
   resolveTheme,
   setDensity,
-  setDensityForTests,
   type ButtonSize,
   type ButtonVariant,
   type Density,
@@ -50,3 +97,5 @@ export {
   type ThemePort,
   type Typography,
 } from "./theme.ts";
+
+export type { NodeRef, UIChildren, ViewEvents, StyleProps, StyleInput, ViewStyle } from "@impasto/solid-renderer";

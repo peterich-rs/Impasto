@@ -1,3 +1,5 @@
+import {installStyleMock} from "../../solid-renderer/testing/style.ts";
+import { flush } from "solid-js";
 export type Call = { name: string; args: unknown[] };
 
 export type MockHost = {
@@ -49,7 +51,7 @@ export function installMockHost(): MockHost {
   let driverSerial = 1;
   let motionArmed = false;
   const backs: Array<() => boolean> = [];
-  let next = 1;
+  let next = 4294967296;
 
   function alloc(name: string, args: unknown[]) {
     const id = next++;
@@ -239,6 +241,10 @@ export function installMockHost(): MockHost {
       return children[index + 1] ?? 0;
     },
     isText: (node: number) => nodes.get(node)?.kind === "text",
+    setTextRuns: (node: number, runs: { text: string }[]) => {
+      texts.set(node, runs.map(run => run.text).join(""));
+      calls.push({ name: "setTextRuns", args: [node, runs] });
+    },
     setText: (node: number, utf8: string) => {
       if (nodes.get(node)?.kind !== "text") {
         throw new Error("setText failed");
@@ -248,6 +254,25 @@ export function installMockHost(): MockHost {
     },
     setFontSize: (node: number, fontSize: number) => {
       calls.push({ name: "setFontSize", args: [node, fontSize] });
+    },
+    view: () => alloc("view", []),
+    setStyle: (node: number, style: unknown) => {
+      calls.push({ name: "setStyle", args: [node, style] });
+    },
+    patchStyle: (node: number, style: unknown) => {
+      calls.push({ name: "patchStyle", args: [node, style] });
+    },
+    clearStyle: (node: number, keys?: unknown) => {
+      calls.push({ name: "clearStyle", args: [node, keys] });
+    },
+    setClass: (node: number, text: string) => {
+      calls.push({ name: "setClass", args: [node, text] });
+    },
+    setStyleSurface: (node: number, surface: string) => {
+      calls.push({ name: "setStyleSurface", args: [node, surface] });
+    },
+    setComponentStyle: (node: number, style: unknown) => {
+      calls.push({ name: "setComponentStyle", args: [node, style] });
     },
     setColor: (node: number, color: number[]) => {
       calls.push({ name: "setColor", args: [node, color] });
@@ -295,15 +320,8 @@ export function installMockHost(): MockHost {
     setShrink: () => {},
     setBasis: () => {},
     setMargin: () => {},
-    setScaleXY: (node: number, sx: number, sy: number) => {
-      calls.push({ name: "setScaleXY", args: [node, sx, sy] });
-    },
-    setReverse: () => {},
     setMinAxis: () => {},
     setMaxAxis: () => {},
-    setStroke: (node: number, width: number, color: number[]) => {
-      calls.push({ name: "setStroke", args: [node, width, color] });
-    },
     setAspectRatio: () => {},
     setAlignSelf: (node: number, align: string) => {
       calls.push({ name: "setAlignSelf", args: [node, align] });
@@ -543,9 +561,6 @@ export function installMockHost(): MockHost {
     setRecognizers: (node: number, spec: unknown) => {
       calls.push({ name: "setRecognizers", args: [node, spec] });
     },
-    setStroke: (node: number, width: number, color: number[]) => {
-      calls.push({ name: "setStroke", args: [node, width, color] });
-    },
     log: (level: string, message: string) => {
       calls.push({ name: "log", args: [level, message] });
     },
@@ -561,6 +576,9 @@ export function installMockHost(): MockHost {
     getInitialURL: () => Promise.resolve(null),
     onURL: () => {},
     settings: () => light,
+    setStyleEnvironment: (environment: unknown) => {
+      calls.push({ name: "setStyleEnvironment", args: [environment] });
+    },
     onSettings: () => 1,
     offSettings: () => {},
     metrics: () => ({
@@ -570,7 +588,8 @@ export function installMockHost(): MockHost {
     }),
   };
 
-  (globalThis as { core: typeof host }).core = host;
+  installStyleMock(host,calls);
+  (globalThis as unknown as { core: typeof host }).core = host;
 
   function ancestors(label: string): string[] {
     const lines: string[] = [];
@@ -590,6 +609,7 @@ export function installMockHost(): MockHost {
   }
 
   function liveTexts(): string[] {
+    flush();
     const values: string[] = [];
     for (const [id, value] of texts) {
       if ((nodes.get(id)?.parent ?? 0) !== 0 && shown(id) && value.length > 0) {
@@ -618,6 +638,7 @@ export function installMockHost(): MockHost {
   }
 
   function flushHostFrame(targetMs = 0): void {
+    flush();
     if (motionArmed) {
       motionArmed = false;
       const batch = motionEnds.splice(0);
@@ -627,6 +648,7 @@ export function installMockHost(): MockHost {
     }
     for (const fn of [...frames]) {
       fn(targetMs, 16);
+      flush();
     }
   }
 

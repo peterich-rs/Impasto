@@ -86,8 +86,13 @@ if (!stock.some((t) => t.includes("返回")) || !stock.includes("盘口 五档")
 if (!stock.includes("买入") || !stock.includes("卖出")) {
   fail(`stock trade buttons: ${stock.join(",")}`);
 }
-if (!mock.calls.some((call) => call.name === "setAxisSize" && call.args[2] === 0)) {
-  fail("tab bar was not clamped to height 0 on a pushed route");
+if (
+  !mock.calls.some((call) => {
+    const style = call.args[1] as { display?: unknown } | undefined;
+    return call.name === "patchStyle" && style?.display === "none";
+  })
+) {
+  fail("tab bar was not hidden on a pushed route");
 }
 
 mock.clickByLabel("买入");

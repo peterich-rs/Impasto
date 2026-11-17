@@ -157,6 +157,15 @@ pub(super) struct QjsFns {
 }
 
 unsafe extern "C" {
+    pub(super) fn qjs_eval_bytecode(
+        host: *mut c_void,
+        bytes: *const u8,
+        len: usize,
+        error: *mut c_char,
+        error_len: usize,
+    ) -> i32;
+    pub(super) fn qjs_run_updates(host: *mut c_void, error: *mut c_char, error_len: usize) -> i32;
+    pub(super) fn qjs_capture_reactive(host: *mut c_void);
     pub(super) fn qjs_open(fns: *const QjsFns) -> *mut c_void;
     pub(super) fn qjs_eval(
         host: *mut c_void,
@@ -166,6 +175,19 @@ unsafe extern "C" {
         err: *mut c_char,
         err_len: usize,
     ) -> i32;
+    /// Compile `src` to quickjs-ng bytecode with a throwaway runtime. `module`
+    /// selects module or script mode. The returned buffer is freed with
+    /// [`qjs_free_bytes`].
+    pub(super) fn qjs_compile(
+        src: *const c_char,
+        len: usize,
+        name: *const c_char,
+        module: i32,
+        out_len: *mut usize,
+        err: *mut c_char,
+        err_len: usize,
+    ) -> *mut u8;
+    pub(super) fn qjs_free_bytes(bytes: *mut u8);
     pub(super) fn qjs_set_app_dir(host: *mut c_void, dir: *const c_char);
     pub(super) fn qjs_dispatch(
         host: *mut c_void,

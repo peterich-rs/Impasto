@@ -68,7 +68,7 @@ pub fn is_clickable(actions: u32) -> bool {
 
 /// Map already-projected nodes onto the Android bridge shape. Parent chain is not recomputed.
 #[cfg(target_os = "android")]
-pub fn bridge_nodes(nodes: &[hostshell::ProjectedNode]) -> Vec<BridgeNode> {
+pub fn bridge_nodes(nodes: &[shell::ProjectedNode]) -> Vec<BridgeNode> {
     nodes
         .iter()
         .map(|node| BridgeNode {

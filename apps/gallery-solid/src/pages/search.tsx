@@ -1,5 +1,11 @@
 import { createSignal, createTrackedEffect, onCleanup } from "solid-js";
-import { host, insert, onFrame, requestFrame, type NodeHandle } from "@impasto/solid-renderer";
+import {
+  scene,
+  insert,
+  onFrame,
+  requestFrame,
+  type NodeHandle,
+} from "@impasto/solid-renderer";
 import { Field, type FieldController } from "@impasto/solid-ui";
 import { colorBytes } from "../colors.ts";
 import { clearChildren, padded } from "../widgets/palette.ts";
@@ -13,43 +19,82 @@ import {
 } from "../state/search-history.ts";
 import { loc } from "../copy.ts";
 import type { Router } from "@impasto/solid-router";
-
 const INK = colorBytes("#1F2430");
 const MUTED = colorBytes("#8A8D91");
 const PANEL = colorBytes("#FFFFFF");
 const HAIR = colorBytes("#E8E8EC");
 const PRIMARY = colorBytes("#C8102E");
 const DEBOUNCE_MS = 200;
-
 export function SearchPage(props: { router: Router }): NodeHandle {
   const { engine, binder } = useBinder();
   const [term, setTerm] = createSignal("");
   let pending = "";
   let dueAt = 0;
   let fieldCtl: FieldController | null = null;
-
   void loadSearchHistory();
-
-  const page = host.column(8);
-  host.setGrow(page, 1);
-
-  const nav = host.row(8);
-  const navPad = host.padding(0);
-  host.setPaddingEdges(navPad, 12, 16, 0, 16);
-  host.append(navPad, nav);
-  host.append(page, navPad);
-  const back = host.pointerRegion();
-  host.onClick(back, () => props.router.pop());
-  host.append(nav, back);
-  const backLabel = host.text(loc("‹ 返回", "‹ Back"), 14, PRIMARY);
-  host.append(back, backLabel);
-  const title = host.text(loc("搜索", "Search"), 20, INK);
-  host.setFontWeight(title, 700);
-  host.append(nav, title);
-
-  const fieldPad = host.padding(0);
-  host.setPaddingEdges(fieldPad, 0, 16, 0, 16);
-  host.append(page, fieldPad);
+  const page = scene.createElement("view", {
+    style: {
+      gap: 8,
+    },
+  });
+  scene.patchStyle(page, {
+    flex: 1,
+  });
+  const nav = scene.createElement("view", {
+    style: {
+      flexDirection: "row",
+      gap: 8,
+    },
+  });
+  const navPad = scene.createElement("view", {
+    style: {
+      padding: 0,
+    },
+  });
+  scene.patchStyle(navPad, {
+    paddingTop: 12,
+    paddingRight: 16,
+    paddingBottom: 0,
+    paddingLeft: 16,
+  });
+  scene.append(navPad, nav);
+  scene.append(page, navPad);
+  const back = scene.createElement("view", {
+    style: {},
+  });
+  scene.onClick(back, () => props.router.pop());
+  scene.append(nav, back);
+  const backLabel = scene.createElement("text", {
+    value: loc("‹ 返回", "‹ Back"),
+    style: {
+      fontSize: 14,
+      color: PRIMARY,
+    },
+  });
+  scene.append(back, backLabel);
+  const title = scene.createElement("text", {
+    value: loc("搜索", "Search"),
+    style: {
+      fontSize: 20,
+      color: INK,
+    },
+  });
+  scene.patchStyle(title, {
+    fontWeight: 700,
+  });
+  scene.append(nav, title);
+  const fieldPad = scene.createElement("view", {
+    style: {
+      padding: 0,
+    },
+  });
+  scene.patchStyle(fieldPad, {
+    paddingTop: 0,
+    paddingRight: 16,
+    paddingBottom: 0,
+    paddingLeft: 16,
+  });
+  scene.append(page, fieldPad);
   const field = Field({
     placeholder: loc("代码或名称", "Symbol or name"),
     action: "search",
@@ -68,8 +113,7 @@ export function SearchPage(props: { router: Router }): NodeHandle {
       applyTerm(value, true);
     },
   });
-  insert({ id: fieldPad } as NodeHandle, field);
-
+  insert(fieldPad, field);
   onCleanup(
     onFrame((targetMs) => {
       if (dueAt < 0) {
@@ -85,7 +129,6 @@ export function SearchPage(props: { router: Router }): NodeHandle {
       }
     }),
   );
-
   function applyTerm(value: string, remember: boolean): void {
     const next = value.trim();
     setTerm(next);
@@ -93,14 +136,27 @@ export function SearchPage(props: { router: Router }): NodeHandle {
       pushSearchHistory(next);
     }
   }
-
-  const body = host.column(10);
-  host.setGrow(body, 1);
-  const bodyPad = host.padding(0);
-  host.setPaddingEdges(bodyPad, 0, 16, 16, 16);
-  host.append(bodyPad, body);
-  host.append(page, bodyPad);
-
+  const body = scene.createElement("view", {
+    style: {
+      gap: 10,
+    },
+  });
+  scene.patchStyle(body, {
+    flex: 1,
+  });
+  const bodyPad = scene.createElement("view", {
+    style: {
+      padding: 0,
+    },
+  });
+  scene.patchStyle(bodyPad, {
+    paddingTop: 0,
+    paddingRight: 16,
+    paddingBottom: 16,
+    paddingLeft: 16,
+  });
+  scene.append(bodyPad, body);
+  scene.append(page, bodyPad);
   createTrackedEffect(() => {
     const stops: Array<() => void> = [];
     onCleanup(() => {
@@ -111,98 +167,225 @@ export function SearchPage(props: { router: Router }): NodeHandle {
     clearChildren(body);
     const t = term().trim().toLowerCase();
     if (t.length === 0) {
-      host.append(body, sectionTitle(loc("热门", "Hot")));
-      host.append(body, chipRow(HOT_SYMBOLS, (symbol) => {
-        pending = symbol;
-        dueAt = 0;
-        fieldCtl?.load(symbol);
-        applyTerm(symbol, true);
-        props.router.push(`/stock/${symbol}`);
-      }));
+      scene.append(body, sectionTitle(loc("热门", "Hot")));
+      scene.append(
+        body,
+        chipRow(HOT_SYMBOLS, (symbol) => {
+          pending = symbol;
+          dueAt = 0;
+          fieldCtl?.load(symbol);
+          applyTerm(symbol, true);
+          props.router.push(`/stock/${symbol}`);
+        }),
+      );
       const hist = searchHistorySig();
       if (hist.length > 0) {
-        const head = host.row(8);
-        host.append(body, head);
-        const cap = host.text(loc("历史", "History"), 13, INK);
-        host.setFontWeight(cap, 600);
-        host.append(head, cap);
-        const grow = host.sized(0, 0);
-        host.setGrow(grow, 1);
-        host.append(head, grow);
-        const clear = host.pointerRegion();
-        host.onClick(clear, () => clearSearchHistory());
-        host.append(head, clear);
-        const clearLabel = host.text(loc("清除", "Clear"), 12, PRIMARY);
-        host.append(clear, clearLabel);
-        host.append(body, chipRow(hist, (item) => {
-          pending = item;
-          dueAt = 0;
-          fieldCtl?.load(item);
-          applyTerm(item, true);
-        }));
+        const head = scene.createElement("view", {
+          style: {
+            flexDirection: "row",
+            gap: 8,
+          },
+        });
+        scene.append(body, head);
+        const cap = scene.createElement("text", {
+          value: loc("历史", "History"),
+          style: {
+            fontSize: 13,
+            color: INK,
+          },
+        });
+        scene.patchStyle(cap, {
+          fontWeight: 600,
+        });
+        scene.append(head, cap);
+        const grow = scene.createElement("view", {
+          style: {
+            width: 0,
+            height: 0,
+          },
+        });
+        scene.patchStyle(grow, {
+          flex: 1,
+        });
+        scene.append(head, grow);
+        const clear = scene.createElement("view", {
+          style: {},
+        });
+        scene.onClick(clear, () => clearSearchHistory());
+        scene.append(head, clear);
+        const clearLabel = scene.createElement("text", {
+          value: loc("清除", "Clear"),
+          style: {
+            fontSize: 12,
+            color: PRIMARY,
+          },
+        });
+        scene.append(clear, clearLabel);
+        scene.append(
+          body,
+          chipRow(hist, (item) => {
+            pending = item;
+            dueAt = 0;
+            fieldCtl?.load(item);
+            applyTerm(item, true);
+          }),
+        );
       }
       return;
     }
-
     const hits = engine
       .instruments()
       .filter(
         (ins) =>
-          ins.symbol.toLowerCase().includes(t) || ins.name.toLowerCase().includes(t),
+          ins.symbol.toLowerCase().includes(t) ||
+          ins.name.toLowerCase().includes(t),
       )
       .slice(0, 16);
     if (hits.length === 0) {
-      const empty = host.text(loc("没有匹配的标的", "No matching symbols"), 13, MUTED);
-      host.append(body, padded(empty, 16, 0, 0, 0));
+      const empty = scene.createElement("text", {
+        value: loc("没有匹配的标的", "No matching symbols"),
+        style: {
+          fontSize: 13,
+          color: MUTED,
+        },
+      });
+      scene.append(body, padded(empty, 16, 0, 0, 0));
       return;
     }
     for (const ins of hits) {
-      const row = host.pointerRegion();
-      host.onClick(row, () => props.router.push(`/stock/${ins.symbol}`));
-      const pad = host.padding(0);
-      host.setPaddingEdges(pad, 8, 0, 8, 0);
-      host.setGrow(pad, 1);
-      host.append(row, pad);
-      const line = host.row(8);
-      host.setMinSize(line, 0, 40);
-      host.setCross(line, "center");
-      host.append(pad, line);
-      const name = host.text(ins.name, 14, INK);
-      host.append(line, name);
-      const sym = host.text(ins.symbol, 11, MUTED);
-      host.append(line, sym);
-      const spacer = host.sized(0, 0);
-      host.setGrow(spacer, 1);
-      host.append(line, spacer);
-      const last = host.text("—", 13, INK);
-      host.append(line, last);
-      stops.push(binder.bind(ins.symbol, { last, flashNode: last }));
-      host.append(body, row);
+      const row = scene.createElement("view", {
+        style: {},
+      });
+      scene.onClick(row, () => props.router.push(`/stock/${ins.symbol}`));
+      const pad = scene.createElement("view", {
+        style: {
+          padding: 0,
+        },
+      });
+      scene.patchStyle(pad, {
+        paddingTop: 8,
+        paddingRight: 0,
+        paddingBottom: 8,
+        paddingLeft: 0,
+      });
+      scene.patchStyle(pad, {
+        flex: 1,
+      });
+      scene.append(row, pad);
+      const line = scene.createElement("view", {
+        style: {
+          flexDirection: "row",
+          gap: 8,
+        },
+      });
+      scene.patchStyle(line, {
+        minWidth: 0,
+        minHeight: 40,
+      });
+      scene.patchStyle(line, {
+        alignItems: "center",
+      });
+      scene.append(pad, line);
+      const name = scene.createElement("text", {
+        value: ins.name,
+        style: {
+          fontSize: 14,
+          color: INK,
+        },
+      });
+      scene.append(line, name);
+      const sym = scene.createElement("text", {
+        value: ins.symbol,
+        style: {
+          fontSize: 11,
+          color: MUTED,
+        },
+      });
+      scene.append(line, sym);
+      const spacer = scene.createElement("view", {
+        style: {
+          width: 0,
+          height: 0,
+        },
+      });
+      scene.patchStyle(spacer, {
+        flex: 1,
+      });
+      scene.append(line, spacer);
+      const last = scene.createElement("text", {
+        value: "—",
+        style: {
+          fontSize: 13,
+          color: INK,
+        },
+      });
+      scene.append(line, last);
+      stops.push(
+        binder.bind(ins.symbol, {
+          last,
+          flashNode: last,
+        }),
+      );
+      scene.append(body, row);
     }
   });
-
-  return { id: page };
+  return page;
 }
-
 function sectionTitle(text: string): number {
-  const label = host.text(text, 13, INK);
-  host.setFontWeight(label, 600);
+  const label = scene.createElement("text", {
+    value: text,
+    style: {
+      fontSize: 13,
+      color: INK,
+    },
+  });
+  scene.patchStyle(label, {
+    fontWeight: 600,
+  });
   return label;
 }
-
-function chipRow(items: readonly string[], onClick: (item: string) => void): number {
-  const row = host.row(8);
-  host.setWrap(row, true);
+function chipRow(
+  items: readonly string[],
+  onClick: (item: string) => void,
+): number {
+  const row = scene.createElement("view", {
+    style: {
+      flexDirection: "row",
+      gap: 8,
+    },
+  });
+  scene.patchStyle(row, {
+    flexWrap: true ? "wrap" : "nowrap",
+  });
   for (const item of items) {
-    const cell = host.pointerRegion();
-    host.onClick(cell, () => onClick(item));
-    host.append(row, cell);
-    const pill = host.decorated(PANEL, 999);
-    host.setStroke(pill, 1, HAIR);
-    host.setMinSize(pill, 0, 28);
-    host.append(cell, pill);
-    const label = host.text(item, 11, INK);
-    host.append(pill, padded(label, 6, 12, 6, 12));
+    const cell = scene.createElement("view", {
+      style: {},
+    });
+    scene.onClick(cell, () => onClick(item));
+    scene.append(row, cell);
+    const pill = scene.createElement("view", {
+      style: {
+        backgroundColor: PANEL,
+        borderRadius: 999,
+      },
+    });
+    scene.patchStyle(pill, {
+      outlineWidth: 1,
+      outlineColor: HAIR,
+    });
+    scene.patchStyle(pill, {
+      minWidth: 0,
+      minHeight: 28,
+    });
+    scene.append(cell, pill);
+    const label = scene.createElement("text", {
+      value: item,
+      style: {
+        fontSize: 11,
+        color: INK,
+      },
+    });
+    scene.append(pill, padded(label, 6, 12, 6, 12));
   }
   return row;
 }

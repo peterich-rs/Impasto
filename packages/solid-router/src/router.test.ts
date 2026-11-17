@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { flush } from "solid-js";
 import { flushMotion, spring } from "@impasto/solid-renderer";
-import { state as linking } from "@impasto/linking/host";
+import { state as linking } from "../../linking/src/native.stub.ts";
 import { createRouter, type RouteDef } from "./stack.ts";
 
 const page = () => 0 as never;

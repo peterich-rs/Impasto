@@ -1,7 +1,8 @@
+import {installStyleMock} from "../testing/style.ts";
 import { BUTTON_FILL, FONT_SIZE, TEXT_COLOR } from "./defaults.ts";
-import type { CoreHost } from "./host.ts";
+import type { SceneModule } from "./scene.ts";
 import { colorBytes } from "./colors.ts";
-import { hostRendererOptions } from "./tree.ts";
+import { testScene } from "../testing/scene.ts";
 
 function fail(message: string): never {
   console.error(message);
@@ -12,7 +13,7 @@ type Call = { name: string; args: unknown[] };
 
 function mockHost() {
   const calls: Call[] = [];
-  let next = 1;
+  let next = 4294967296;
   const texts = new Set<number>();
   let parentOf = 0;
   let first = 0;
@@ -28,8 +29,14 @@ function mockHost() {
     }
     return id;
   };
-  const host: CoreHost = {
+  const host: SceneModule = {
     column: (gap) => alloc("column", [gap]),
+    view: () => alloc("view", []),
+    setStyle: (node, style) => note("setStyle", [node, style]),
+    patchStyle: (node, style) => note("patchStyle", [node, style]),
+    clearStyle: (node, keys) => note("clearStyle", [node, keys]),
+    setClass: (node, text) => note("setClass", [node, text]),
+    setComponentStyle: (node, style) => note("setComponentStyle", [node, style]),
     row: (gap) => alloc("row", [gap]),
     stack: () => alloc("stack", []),
     align: (align) => alloc("align", [align]),
@@ -148,8 +155,7 @@ function mockHost() {
     graphemeIndex: () => 0,
     graphemeCount: () => 0,
     graphemeUnit: () => 0,
-    setReverse: (node, reverse) => note("setReverse", [node, reverse]),
-    setScaleXY: (node, scaleX, scaleY) => note("setScaleXY", [node, scaleX, scaleY]),
+
     registerFont: (family, bytes) => note("registerFont", [family, bytes.length]),
     reload: (source) => note("reload", [source]),
     setAxisSize: (node, width, height) => note("setAxisSize", [node, width, height]),
@@ -192,6 +198,8 @@ function mockHost() {
     onFrame: (fn) => note("onFrame", [typeof fn]),
     onLayout: (fn) => note("onLayout", [typeof fn]),
   };
+  installStyleMock(host,calls);
+  (globalThis as unknown as {core:SceneModule}).core=host;
   return {
     host,
     calls,
@@ -212,7 +220,7 @@ function find(calls: Call[], name: string): Call | undefined {
 }
 
 const mock = mockHost();
-const options = hostRendererOptions(mock.host);
+const options = testScene(mock.host);
 const column = options.createElement("column", { gap: 8 });
 const row = options.createElement("row", { gap: 4 });
 const stack = options.createElement("stack");
@@ -243,24 +251,24 @@ const imageCall = find(mock.calls, "image");
 if (imageCall?.args[0] !== "asset:logo" || imageCall.args[1] !== 56 || imageCall.args[2] !== 56) {
   fail("image");
 }
-if (logo.id === 0) fail("image id");
-if (find(mock.calls, "setGrow")?.args[0] !== grown.id || find(mock.calls, "setGrow")?.args[1] !== 3) {
+if (logo === 0) fail("image id");
+if (find(mock.calls, "setGrow")?.args[0] !== grown || find(mock.calls, "setGrow")?.args[1] !== 3) {
   fail("grow");
 }
 const textCall = find(mock.calls, "text");
 if (textCall?.args[0] !== "Hi" || textCall.args[1] !== FONT_SIZE) fail("text node");
 if (JSON.stringify(textCall?.args[2]) !== JSON.stringify(colorBytes(TEXT_COLOR))) fail("text color");
-if (!mock.host.isText(label.id) || options.isTextNode(column)) fail("isText");
+if (!mock.host.isText(label) || options.isTextNode(column)) fail("isText");
 
 options.insertNode(column, row);
 options.insertNode(column, padding, row);
 const inserted = mock.calls.filter((call) => call.name === "insert");
-if (inserted[0]?.args[0] !== column.id || inserted[0]?.args[1] !== row.id || inserted[0]?.args[2] !== 0) {
+if (inserted[0]?.args[0] !== column || inserted[0]?.args[1] !== row || inserted[0]?.args[2] !== 0) {
   fail("insert without anchor");
 }
-if (inserted[1]?.args[2] !== row.id) fail("insert with anchor");
+if (inserted[1]?.args[2] !== row) fail("insert with anchor");
 options.removeNode(column, padding);
-if (find(mock.calls, "remove")?.args[0] !== column.id || find(mock.calls, "remove")?.args[1] !== padding.id) {
+if (find(mock.calls, "remove")?.args[0] !== column || find(mock.calls, "remove")?.args[1] !== padding) {
   fail("remove");
 }
 
@@ -282,22 +290,22 @@ if (JSON.stringify(find(mock.calls, "setColor")?.args[1]) !== JSON.stringify([0x
 }
 const setTexts = mock.calls.filter((call) => call.name === "setText").map((call) => call.args[1]);
 if (setTexts[0] !== "Yo" || setTexts[1] !== "Next") fail("setText");
-if (find(mock.calls, "onClick")?.args[0] !== pointer.id) fail("onClick");
-if (find(mock.calls, "onPress")?.args[0] !== pointer.id) fail("onPress");
-if (find(mock.calls, "onRelease")?.args[0] !== pointer.id) fail("onRelease");
+if (find(mock.calls, "onClick")?.args[0] !== pointer) fail("onClick");
+if (find(mock.calls, "onPress")?.args[0] !== pointer) fail("onPress");
+if (find(mock.calls, "onRelease")?.args[0] !== pointer) fail("onRelease");
 options.setProperty(fade, "alpha", 40);
 options.setProperty(rounded, "radius", 4);
 options.setProperty(label, "maxLines", 2);
 options.setProperty(label, "textAlign", "center");
-if (find(mock.calls, "setAlpha")?.args[0] !== fade.id || find(mock.calls, "setAlpha")?.args[1] !== 40) {
+if (find(mock.calls, "setAlpha")?.args[0] !== fade || find(mock.calls, "setAlpha")?.args[1] !== 40) {
   fail("setAlpha");
 }
-if (find(mock.calls, "setRadius")?.args[0] !== rounded.id || find(mock.calls, "setRadius")?.args[1] !== 4) {
+if (find(mock.calls, "setRadius")?.args[0] !== rounded || find(mock.calls, "setRadius")?.args[1] !== 4) {
   fail("setRadius");
 }
 if (find(mock.calls, "setMaxLines")?.args[1] !== 2) fail("setMaxLines");
 if (find(mock.calls, "setTextAlign")?.args[1] !== "center") fail("setTextAlign");
-mock.host.setImage(logo.id, "asset:mark", 12, 8);
+mock.host.setImage(logo, "asset:mark", 12, 8);
 const imageUpdates = mock.calls.filter((call) => call.name === "setImage");
 if (imageUpdates.length !== 1 || imageUpdates[0]?.args[1] !== "asset:mark") fail("setImage");
 
@@ -307,9 +315,9 @@ mock.setSibling(0);
 if (options.getParentNode(row) !== undefined) fail("parent 0");
 if (options.getFirstChild(column) !== undefined) fail("first 0");
 if (options.getNextSibling(row) !== undefined) fail("sibling 0");
-mock.setParent(stack.id);
-mock.setFirst(decorated.id);
-mock.setSibling(pointer.id);
+mock.setParent(stack);
+mock.setFirst(decorated);
+mock.setSibling(pointer);
 if (options.getParentNode(row) !== stack) fail("parent");
 if (options.getFirstChild(column) !== decorated) fail("first");
 if (options.getNextSibling(row) !== pointer) fail("sibling");
@@ -319,41 +327,41 @@ const scroller = options.createElement("scroll", { onDragBy: dragged });
 const shifted = options.createElement("transform", { x: 4, scale: 2 });
 const spread = options.createElement("row", { gap: 0, justify: "space-between", wrap: true, fill: true });
 if (!find(mock.calls, "scroll")) fail("scroll");
-if (find(mock.calls, "onDragBy")?.args[0] !== scroller.id) fail("onDragBy");
-const transforms = mock.calls.filter((call) => call.name === "setTransformComponent" && call.args[0] === shifted.id);
+if (find(mock.calls, "onDragBy")?.args[0] !== scroller) fail("onDragBy");
+const transforms = mock.calls.filter((call) => call.name === "setTransformComponent" && call.args[0] === shifted);
 if (!transforms.some((call) => call.args[1] === 0 && call.args[2] === 4)) fail("transform x");
 if (!transforms.some((call) => call.args[1] === 3 && call.args[2] === 2)) fail("transform scale");
-if (find(mock.calls, "setJustify")?.args[0] !== spread.id || find(mock.calls, "setJustify")?.args[1] !== "space-between") {
+if (find(mock.calls, "setJustify")?.args[0] !== spread || find(mock.calls, "setJustify")?.args[1] !== "space-between") {
   fail("justify");
 }
-if (find(mock.calls, "setWrap")?.args[0] !== spread.id || find(mock.calls, "setWrap")?.args[1] !== true) {
+if (find(mock.calls, "setWrap")?.args[0] !== spread || find(mock.calls, "setWrap")?.args[1] !== true) {
   fail("wrap");
 }
-if (find(mock.calls, "setFill")?.args[0] !== spread.id) fail("fill");
+if (find(mock.calls, "setFill")?.args[0] !== spread) fail("fill");
 const centered = options.createElement("align", { align: "center", fill: true });
 const alignCall = find(mock.calls, "align");
-if (alignCall?.args[0] !== "center" || centered.id === 0) fail("align");
-if (!mock.calls.some((call) => call.name === "setFill" && call.args[0] === centered.id)) fail("align fill");
+if (alignCall?.args[0] !== "center" || centered === 0) fail("align");
+if (!mock.calls.some((call) => call.name === "setFill" && call.args[0] === centered)) fail("align fill");
 options.setProperty(spread, "cross", "center");
-if (find(mock.calls, "setCross")?.args[0] !== spread.id || find(mock.calls, "setCross")?.args[1] !== "center") {
+if (find(mock.calls, "setCross")?.args[0] !== spread || find(mock.calls, "setCross")?.args[1] !== "center") {
   fail("cross");
 }
 const field = options.createElement("pointer", { focusable: true, onFocus: clicked });
 const box = options.createElement("sized", { w: 1, h: 22 });
-if (find(mock.calls, "setFocusable")?.args[0] !== field.id || find(mock.calls, "setFocusable")?.args[1] !== true) {
+if (find(mock.calls, "setFocusable")?.args[0] !== field || find(mock.calls, "setFocusable")?.args[1] !== true) {
   fail("focusable");
 }
-if (find(mock.calls, "onFocus")?.args[0] !== field.id) fail("onFocus");
+if (find(mock.calls, "onFocus")?.args[0] !== field) fail("onFocus");
 if (find(mock.calls, "sized")?.args[0] !== 1 || find(mock.calls, "sized")?.args[1] !== 22) fail("sized");
-if (box.id === 0) fail("sized id");
+if (box === 0) fail("sized id");
 
 const tracks = options.createElement("grid", { columns: ["40", "1fr"], rows: ["min"], gap: 0 });
 const gridCall = find(mock.calls, "grid");
 if (JSON.stringify(gridCall?.args[0]) !== JSON.stringify(["40", "1fr"])) fail("grid columns");
 if (JSON.stringify(gridCall?.args[1]) !== JSON.stringify(["min"])) fail("grid rows");
-if (gridCall?.args[2] !== 0 || tracks.id === 0) fail("grid");
+if (gridCall?.args[2] !== 0 || tracks === 0) fail("grid");
 const inset = options.createElement("padding", { edges: 4, left: 4, top: 6 });
-const edgeCall = mock.calls.filter((call) => call.name === "setPaddingEdge" && call.args[0] === inset.id);
+const edgeCall = mock.calls.filter((call) => call.name === "setPaddingEdge" && call.args[0] === inset);
 if (!edgeCall.some((call) => call.args[1] === 0 && call.args[2] === 6)) fail("padding top");
 if (!edgeCall.some((call) => call.args[1] === 3 && call.args[2] === 4)) fail("padding left");
 if (mock.calls.some((call) => String(call.name).includes("mutation"))) fail("mutation file");
@@ -365,27 +373,27 @@ options.setProperty(scroller, "onWheel", wheeled);
 if (find(mock.calls, "setMargin")?.args[1] !== 8) fail("margin");
 if (find(mock.calls, "setShrink")?.args[1] !== 0) fail("shrink");
 if (find(mock.calls, "setAlignSelf")?.args[1] !== "center") fail("alignSelf");
-if (find(mock.calls, "onWheel")?.args[0] !== scroller.id) fail("onWheel");
+if (find(mock.calls, "onWheel")?.args[0] !== scroller) fail("onWheel");
 const secondary = () => {};
 options.setProperty(field, "onSecondaryClick", secondary);
-if (find(mock.calls, "onSecondaryClick")?.args[0] !== field.id) fail("onSecondaryClick");
+if (find(mock.calls, "onSecondaryClick")?.args[0] !== field) fail("onSecondaryClick");
 options.setProperty(pointer, "onZoom", (scale: number) => scale);
-if (find(mock.calls, "onZoom")?.args[0] !== pointer.id) fail("onZoom");
+if (find(mock.calls, "onZoom")?.args[0] !== pointer) fail("onZoom");
 const held = () => {};
 options.setProperty(pointer, "onLongPress", held);
 options.setProperty(pointer, "recognizers", { drag: "free", longPress: true });
-if (find(mock.calls, "onLongPress")?.args[0] !== pointer.id) fail("onLongPress");
+if (find(mock.calls, "onLongPress")?.args[0] !== pointer) fail("onLongPress");
 const recognizers = find(mock.calls, "setRecognizers");
-if (recognizers?.args[0] !== pointer.id || (recognizers.args[1] as { drag?: string }).drag !== "free") {
+if (recognizers?.args[0] !== pointer || (recognizers.args[1] as { drag?: string }).drag !== "free") {
   fail("recognizers");
 }
 
 options.setProperty(box, "w", "50%");
-const axisCalls = mock.calls.filter((call) => call.name === "setSizeAxis" && call.args[0] === box.id);
+const axisCalls = mock.calls.filter((call) => call.name === "setSizeAxis" && call.args[0] === box);
 const half = axisCalls[axisCalls.length - 1];
 if (half?.args[1] !== 0 || half.args[2] !== 2 || half.args[3] !== 0.5) fail("axis percent");
 options.setProperty(box, "h", "auto");
-const autoHeight = mock.calls.filter((call) => call.name === "setSizeAxis" && call.args[0] === box.id);
+const autoHeight = mock.calls.filter((call) => call.name === "setSizeAxis" && call.args[0] === box);
 const autoCall = autoHeight[autoHeight.length - 1];
 if (autoCall?.args[1] !== 1 || autoCall.args[2] !== 0) fail("axis auto");
 options.setProperty(box, "aspect", null);
@@ -394,14 +402,14 @@ options.setProperty(box, "insetTop", 10);
 options.setProperty(box, "insetLeft", 4);
 options.setProperty(box, "columnStart", { span: 2 });
 options.setProperty(box, "columnEnd", "auto");
-if (find(mock.calls, "setAspectRatio")?.args[0] !== box.id || find(mock.calls, "setAspectRatio")?.args[1] !== null) {
+if (find(mock.calls, "setAspectRatio")?.args[0] !== box || find(mock.calls, "setAspectRatio")?.args[1] !== null) {
   fail("aspect");
 }
 if (find(mock.calls, "setPosition")?.args[1] !== true) fail("absolute");
-const insetCalls = mock.calls.filter((call) => call.name === "setInsetEdge" && call.args[0] === box.id);
+const insetCalls = mock.calls.filter((call) => call.name === "setInsetEdge" && call.args[0] === box);
 if (!insetCalls.some((call) => call.args[1] === 0 && call.args[2] === 10)) fail("inset");
 if (!insetCalls.some((call) => call.args[1] === 3 && call.args[2] === 4)) fail("inset");
-const placement = mock.calls.filter((call) => call.name === "setGridLine" && call.args[0] === box.id);
+const placement = mock.calls.filter((call) => call.name === "setGridLine" && call.args[0] === box);
 if (!placement.some((call) => call.args[1] === 0 && call.args[2] === 2 && call.args[3] === 2)) fail("grid line");
 if (!placement.some((call) => call.args[1] === 1 && call.args[2] === 0)) fail("grid line");
 let badAxis = false;
@@ -430,10 +438,10 @@ console.log("solid-renderer host tree ok");
 // `node --conditions=browser` loads the client build, where `<For>` reorders.
 async function reorderFor(): Promise<void> {
   let solid: typeof import("solid-js");
-  let universal: typeof import("@solidjs/universal");
+  let rendererApi: typeof import("../testing/render.ts");
   try {
     solid = await import("solid-js");
-    universal = await import("@solidjs/universal");
+    rendererApi = await import("../testing/render.ts");
   } catch (error) {
     const code = error !== null && typeof error === "object" && "code" in error ? error.code : "";
     if (code === "ERR_MODULE_NOT_FOUND") {
@@ -446,7 +454,7 @@ async function reorderFor(): Promise<void> {
     return;
   }
 
-  let next = 1;
+  let next = 4294967296;
   const texts = new Map<number, string>();
   const children = new Map<number, number[]>();
   const parentOf = new Map<number, number>();
@@ -516,8 +524,8 @@ async function reorderFor(): Promise<void> {
       };
     },
   });
-  const options = hostRendererOptions(host);
-  const renderer = universal.createRenderer(options);
+  const options = testScene(host);
+  const renderer = rendererApi.createSceneRenderer(options);
   const root = options.createElement("column");
   const [items, setItems] = solid.createSignal([
     { id: "a", label: "Alpha" },
@@ -531,7 +539,7 @@ async function reorderFor(): Promise<void> {
       children: (item) => options.createTextNode(item.label),
     }),
   );
-  const labels = () => kids(root.id).map((id) => texts.get(id));
+  const labels = () => kids(root).map((id) => texts.get(id));
   if (labels().join(",") !== "Alpha,Beta") {
     fail(`For first order ${labels().join(",")}`);
   }
@@ -545,22 +553,19 @@ async function reorderFor(): Promise<void> {
 
 async function colorStaysPut(): Promise<void> {
   const solid = await import("solid-js");
-  const universal = await import("@solidjs/universal");
+  const { createSceneRenderer } = await import("../testing/render.ts");
   const { Text, bindText } = await import("../runtime/text.ts");
   const mock = mockHost();
-  const options = hostRendererOptions(mock.host);
+  const options = testScene(mock.host);
   bindText(options);
-  const renderer = universal.createRenderer(options);
+  const renderer = createSceneRenderer(options);
   const parent = options.createElement("column");
   const [color, setColor] = solid.createSignal("#111111");
   solid.createRoot(() => {
     renderer.render(
       () =>
         Text({
-          get color() {
-            return color();
-          },
-          fontSize: 16,
+          get style() { return {color:color(),fontSize:16}; },
           children: "Hi",
         }),
       parent,
@@ -570,31 +575,25 @@ async function colorStaysPut(): Promise<void> {
   mock.calls.length = 0;
   setColor("#ffffff");
   solid.flush();
-  const names = [...new Set(mock.calls.map((call) => call.name))];
-  for (const name of names) {
-    if (name !== "setColor" && name !== "setStroke" && name !== "setAlpha") {
-      fail(`color change called ${name}`);
-    }
-  }
-  if (!names.includes("setColor")) {
-    fail(`expected setColor, saw ${names.join(",")}`);
-  }
+  const updates=mock.calls.filter(call=>call.name==="setStyleSource" && call.args[1]==="inline");
+  if (!updates.some(call=>(call.args[2] as {color?:string})?.color==="#ffffff")) fail("missing inline color update");
+  if (mock.calls.some(call=>call.name==="setText")) fail("color update rewrote text");
 }
 
 async function runsAreSent(): Promise<void> {
   const solid = await import("solid-js");
-  const universal = await import("@solidjs/universal");
+  const { createSceneRenderer } = await import("../testing/render.ts");
   const { Text, bindText } = await import("../runtime/text.ts");
   const mock = mockHost();
-  const options = hostRendererOptions(mock.host);
+  const options = testScene(mock.host);
   bindText(options);
-  const renderer = universal.createRenderer(options);
+  const renderer = createSceneRenderer(options);
   const parent = options.createElement("column");
   solid.createRoot(() => {
     renderer.render(
       () =>
         Text({
-          fontSize: 16,
+          style: {fontSize:16},
           runs: [
             {
               text: "Im",

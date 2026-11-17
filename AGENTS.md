@@ -27,12 +27,12 @@ C 符号没有模块，所以前缀用层名，不用产品名：
 
 | 位置 | 形式 |
 |---|---|
-| npm | `@impasto/solid-renderer`，宿主模块 `@impasto/<pkg>/host` |
+| npm | `@impasto/solid-renderer`，能力包 `@impasto/<pkg>` |
 | Kotlin | `dev.impasto` |
 | Android 应用 | `dev.impasto.host`。cdylib 是 `impasto`（`libimpasto.so`），crate 仍是 `android` |
 | 环境变量 | `IMPASTO_DUMP` |
 
-JS 接到渲染树的全局对象是 `core`。默认字体注册名是 `Sans` 和 `SansCJK`，不是产品名。
+QuickJS 通过具名模块 `scene` 和 `reactive` 接到渲染树与响应式图，不安装全局 `core`。默认字体注册名是 `Sans` 和 `SansCJK`，不是产品名。
 
 ## 优先复用已有实现
 
@@ -42,22 +42,23 @@ JS 接到渲染树的全局对象是 `core`。默认字体注册名是 `Sans` �
 
 | 层 | 使用 | 不引入 |
 |---|---|---|
-| 布局 | [Taffy](https://github.com/DioxusLabs/taffy)（MIT，Rust crate）。`uicore` 直接调它的 Rust API，覆盖 Flexbox、Grid、Block | 自研 flex。Yoga。Flutter 的 RenderObject（在 Dart 里，拆不出来）。Taffy 未完成的 C 绑定 |
+| 布局 | [Taffy](https://github.com/DioxusLabs/taffy) 0.15.1（MIT）。`uicore` 直接调它的 Rust API，覆盖 Flexbox、Grid、Block，并打开 `parse` 解析有限的网格轨道语法 | 自研 flex。Yoga。Flutter 的 RenderObject（在 Dart 里，拆不出来）。Taffy 未完成的 C 绑定。`calc` 与 `float` |
+| 类名缓存 | [lru](https://github.com/jeromefroe/lru-rs) 0.18.5（MIT，`default-features = false`）。`uicore` 的 `ClassCache` 用它保存已解析的工具类规则 | 自制链表缓存 |
 | 文字测量和绘制 | 已钉住的 Impeller Typography。测试用一份等宽的假排版器 | 再链一套 HarfBuzz / FreeType |
 | 光栅 | Impeller standalone SDK | `embedder.h`、Flutter shell、Skia、engine 源码。这三样都会带上 Dart VM，或等于把 engine 克隆进仓库 |
 | 宿主窗口 | 各端系统 API。macOS 用 objc2 调 AppKit。Android 用 `Activity` 与 `HostView`：`SurfaceView` 给出 `ANativeWindow`，vsync 用主线程 `Choreographer`，输入法用 `InputConnection`。图片解码用 `AImageDecoder`。`ndk` 0.9.0 只提供 NDK 绑定 | GLFW。Flutter embedding。这两样都会带进另一套窗口或 Dart VM |
 | JavaScript | [quickjs-ng](https://github.com/quickjs-ng/quickjs)（MIT）v0.17.0。`crates/quickjs/quickjs.pin` 钉 tag 和 sha256，`cc` 编进包名 `quickjs` 的 crate。源码在 `third_party/quickjs`，不进 git | bellard/quickjs（上游基本停更）、Hermes、V8、React Native JSI |
-| Solid 状态 | `solid-js` 的 signal 和 `@solidjs/universal` | 改 `third_party/solid` |
+| Solid 状态 | `crates/reactive`，`packages/reactive` 保留作者 API；以 `solid-js` 2.0.0-rc.17 做对照 | 在应用 bundle 中引入 Solid 的调度或 `@solidjs/universal`。改 `third_party/solid` |
 | Kotlin 状态 | 接到信号时依赖已发布的 `com.lightningkite:reactive`，版本那时再钉 | 把 KiteUI 或这份库的源码拷进仓库 |
 | 手势 | 点击写在 `uicore/`。没有独立、可嵌入、又不绑死某一套 UI 的库 | React Native Gesture Handler、Flutter gestures |
 | 图片解码 | 宿主平台的解码器，现在是 ImageIO。像素以 RGBA 交给 Impeller | Flutter 的 `dart:ui` 图片栈。没有平台解码器的宿主再考虑 `stb_image` |
 | 场景字节和显示列表 | 自己的薄 ABI。Impeller 的 C API 不稳定，也不能当序列化格式 | 把 Impeller 的内部 DisplayList 类型暴露成产品 ABI |
 
-Taffy 只算盒子的位置和大小，含 Grid。文字和图片用它的 measure 回调把尺寸交回去，排版仍走 Impeller。命中测试、手势和绘制仍在 `uicore/`。
+Taffy 只算盒子的位置和大小，含 Grid。文字和图片用它的 measure 回调把尺寸交回去，并把第一基线写进 `LayoutOutput`。滚动范围读 `scroll_width` / `scroll_height`。排版仍走 Impeller。命中测试、手势和绘制仍在 `uicore/`。`Tree::set_style`、`patch_style`、`clear_style` 和 `set_class` 在 `layout` 前把声明提交到 Taffy；颜色不因此标布局脏。
 
 我们自己写的原生代码用 Rust：渲染树、场景格式、用 Impeller 绘制的渲染引擎、macOS 宿主。Rust 编码以 `.agents/skills/rust-best-practice` 为准，调用 `/rust-best-practice`。写本仓库的 Rust 时重点看其中的 trait、强类型、引用和泛型。布局和绘制在渲染线程上同步执行，不放进 async 运行时。异步留给以后的文件、网络和脚本加载。平台线程做窗口、输入换算和 vsync 登记。`Engine` 是 `!Send`。`register_font`、`submit_layers`、`draw_metal`、`draw_vulkan` 和 typography 只在渲染线程上调用，并且在该线程上创建和销毁。`CAMetalLayer` 在主线程创建并挂到视图上；渲染线程只用层指针取 drawable。Metal context 仍用 `MTLCreateSystemDefaultDevice()`。
 
-`crates/protocol`、`crates/uicore`、`crates/engine`、`crates/session`、`crates/hostshell`、`crates/macos`、`crates/android`、`crates/quickjs` 是 Cargo workspace。`crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 在进程内部不经过 C。不要再给这四层加 C 或 Objective-C，也不要新增产品 C 头文件。QuickJS 的 C 只在 `crates/quickjs/src/glue.c`：解释器回调进 Rust 的 `Tree`，不把 Rust 类型漏出进程。没有 quickjs-ng 源码时这个 crate 返回 `NotLinked`。Kotlin 的 C ABI 留到 cinterop 有调用者时再写。工具链用 `rust-toolchain.toml` 钉住 stable。原生构建以 Cargo 为准。
+`crates/protocol`、`crates/uicore`、`crates/engine`、`crates/session`、`crates/shell`、`crates/macos`、`crates/android`、`crates/quickjs`、`crates/reactive`、`crates/cli` 是 Cargo workspace。`crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 在进程内部不经过 C。不要再给这四层加 C 或 Objective-C，也不要新增产品 C 头文件。QuickJS 的 C 只在 `crates/quickjs/src/glue.c`：解释器回调进 Rust 的 `Tree`，不把 Rust 类型漏出进程。没有 quickjs-ng 源码时这个 crate 返回 `NotLinked`。Kotlin 的 C ABI 留到 cinterop 有调用者时再写。工具链用 `rust-toolchain.toml` 钉住 stable。原生构建以 Cargo 为准。
 
 ## 保持仓库干净
 
@@ -90,7 +91,7 @@ Kotlin 路线的写法参考 KiteUI（`scene { layer { rect(...) } }`）。KiteU
 
 Impeller 的 C API 没有稳定 ABI。钉住的是一份 Flutter 框架提交，不是 engine 仓库的提交。创建 context 时传入该头文件里的 `IMPELLER_VERSION`。升级 pin 时一起改调用代码。
 
-`just host` 打开 360×640 的窗口并加载 ESM `apps/gallery-solid/dist/quotes.js`（缺失或过期时先跑 `just gallery-dist` 构建）。`just host-js` 是同一条命令。`IMPASTO_DUMP` 把一帧 Metal 纹理写成 PNG 后退出，用来看画面。日志过滤是 `hostshell` 的 `Targets`。debug 构建缺省 `trace`，release 构建缺省 `info`，由 `set_log_targets` 整份替换。宿主把指针换成左上角的场景点放进队列，由会话出队。行情、下单和账户写在应用里，不写在宿主里。click 的验收是 `uicore` 里的 `Gesture`，以及 QuickJS 会话里点「市场」把画面改成涨幅榜。按下和抬起另外分发 press 与 release。抬起仍在按下区域内时，焦点沿父链找到 `focusable` 节点，发出 `Blur` 再 `Focus`。滑出、取消、以及越过拖动阈值交给 `Scroll` 的手势不改焦点。
+`just host` 打开 360×640 的窗口并加载 ESM `apps/gallery-solid/dist/quotes.js`（缺失或过期时先跑 `just gallery-dist` 构建）。`just host-js` 是同一条命令。`IMPASTO_DUMP` 把一帧 Metal 纹理写成 PNG 后退出，用来看画面。日志过滤是 `shell` 的 `Targets`。debug 构建缺省 `trace`，release 构建缺省 `info`，由 `set_log_targets` 整份替换。宿主把指针换成左上角的场景点放进队列，由会话出队。行情、下单和账户写在应用里，不写在宿主里。click 的验收是 `uicore` 里的 `Gesture`，以及 QuickJS 会话里点「市场」把画面改成涨幅榜。按下和抬起另外分发 press 与 release。抬起仍在按下区域内时，焦点沿父链找到 `focusable` 节点，发出 `Blur` 再 `Focus`。滑出、取消、以及越过拖动阈值交给 `Scroll` 的手势不改焦点。
 
 模拟盘是当前验收应用，用来压框架的高频写入和自绘图表，不是把逻辑写进宿主。`count`、`onClick` 和页面摆放都属于上层。
 
@@ -111,8 +112,8 @@ Solid 的 `@solidjs/universal` 只有 `createElement`、`insertNode`、`setPrope
 | UI 核心 | `uicore/` | Rust 渲染树。布局调用 Taffy。测试里的文字测量是等宽 `Shaper`。命中测试走这棵树。`record` 交出 `protocol::DrawList`。QuickJS 在会话 crate 里直接调这棵树。嵌入面走 `crates/quickjs/abi.yml` 生成的变更缓冲，不手写一套和 setter 一一对应的 C API |
 | 场景协议 | `protocol/` | 进程内的 `DrawList` 与 `LayerTree`（`draw_list.rs`、`layer.rs`）。绝对坐标。没有 flex，没有回调，没有应用状态，没有场景字节 |
 | 渲染器 | `packages/solid-renderer`，`kotlin` | 把 JSX 或 Kotlin DSL 变成对 `uicore/` 的增删改。只标脏，不算坐标 |
-| 响应式 | Solid signal；Kotlin 侧以后的 signal | 应用和控件的状态。写信号会标脏对应元素并请求下一帧 |
-| 基础控件 | 布局原语和组合控件内核在 `uicore/`。语言包是皮：模板、信号和渲染回调 | `Text`、`Row`、`Column`、`Stack`、`Padding`、`Clip`、`Opacity`、`Scroll`、`Transform` 是渲染对象。`Button` 用它们加上手势组成。`Field` 绑定 `uicore` 的 `TextEditor`。`ListDriver` 做窗口、测量调度和可见集 diff。`ScrollController` 做夹紧、拖动续算和刷新阈值。`createSlot` 仍是语言侧的 owner。编辑按字形簇进行，偏移是 UTF-16 |
+| 响应式 | `crates/reactive` 的图与 `packages/reactive` 的 Solid API 垫片；Kotlin 侧以后的 signal | 应用和控件的状态。写信号会标脏对应元素并请求下一帧 |
+| 基础控件 | 布局原语和组合控件内核在 `uicore/`。语言包是皮：模板、信号和渲染回调 | `Text`、`Row`、`Column`、`Stack`、`Padding`、`Clip`、`Opacity`、`Scroll`、`Transform` 是渲染对象。`Button` 用一个 View 承载布局、背景、手势、焦点和语义，内部是 Text 与可选图标。`Field` 绑定 `uicore` 的 `TextEditor`。`ListDriver` 做窗口、测量调度和可见集 diff。`ScrollController` 做夹紧、拖动续算和刷新阈值。`createSlot` 仍是语言侧的 owner。编辑按字形簇进行，偏移是 UTF-16 |
 | 应用 | `apps/gallery-solid` | 只写状态和控件组合 |
 
 一帧在渲染线程上完成。平台线程把指针、metrics 和生命周期放进命令队列后立即返回。命中测试用上一帧的几何，在渲染线程排空队列时做。监听器只写状态。接着才冲刷、布局、布局回调、录制。`layer_epoch` 未变且缩放相同则跳过 `submit_layers`。`needs_present` 为假时也跳过 `present`；为真时 `PresentCached`，把已安装的显示列表画进新 drawable。`Resumed`、`Invalidate` 和 present 失败会置 `needs_present`。`Hidden` 与 `Paused` 调用 `Engine::trim`，GPU 进入 `Flush`：显示列表、picture、纹理和段落释放，上下文留下，这一态不 acquire。`Resumed` 丢掉卡住的 vsync token 再武装一次，下一帧 `Submit` 重建。定时器 `Wake` 在已有 vsync token 时不抢跑这一帧，也不取消那次回调。`MemoryWarning` 同样 `Flush`，并丢掉 `ImageCache` 的像素；窗口仍可见时下一帧重建后再 present。`Dead` 取消这一帧，不碰 GPU。没有新的指针、metrics 或表面事件时不再登记下一帧，除非会话申请了恰好下一帧。这个申请在 present 之后被取走。动画要连续播放，就在每一帧里再申请。当前结构见 `docs/architecture.md`。三端差异见 `docs/platform-hosts.md`。迭代规划见 `docs/refactor-plan.md`。
@@ -132,7 +133,9 @@ present 之后 wants_ime 变化才让平台弹出或收起键盘
 
 文字测量和绘制共用渲染引擎那一份 Impeller 排版上下文。测量结果在 `measured`，绘制结果在 `paints`。每轮布局 `begin_measure` / `end_measure` 只回收本轮没有 `touch` 到的测量段落；提交世代不清这份缓存。`record` 仍写 `ParagraphId::NONE`。绘制未命中 paint 槽时先按同一键（含颜色和宽度）从 `measured` 过户，`stale` 时不过户，再否则才新建。picture 对过户或新建的段落再 `Retain` 一次，和显示列表一起释放。`DrawList` 的文字命令带 `font_size`、`max_width` 和颜色。渲染引擎按命令里的字号绘制，不乘 `point_scale`。光标仍走测量缓存。测试用 `MonoShaper`。不要往渲染引擎里加布局。会话和 `submit_layers` 仍在同一条渲染线程上。
 
-布局原语是 `Sized`、`Padding`、`Align`、`Stack`、`Row`、`Column`、`Grid`、`Text`、`Image`、`PointerRegion`、`Decorated`、`Clip`、`Opacity`、`Scroll`、`Transform`。任何节点都可以 `set_focusable`。几何交给 Taffy，含 flex grow 和 grid。`Stack`、`Clip`、`Opacity`、`Transform` 是一格的 grid，子节点放在第 1 行第 1 列。`Scroll` 也是一格 grid，轨道是 `max_content`：视口是边框盒，子节点按完整尺寸布局，可以高出视口。`set_scroll_offset` 不进 Taffy，只让下一帧的录制和命中平移。拖动锁定摘掉该节点的越界弹簧。`stopScroll` 留下当前越界量。`animate` 的 `overscrollY` 可以把它收回 0。惯性夹到极限且没有父级接着滚时，剩余速度装上越界弹簧；像素对齐只改 offset。负的 `overscroll.y` 是顶部的缝。`PullMode` 只做阈值提交，不把缝停住；停住和收回在 `solid-ui`。`Scroll` 的 `ScrollAxis` 缺省 `Both`。`Vertical` 和 `Horizontal` 只在该轴上认领、滚动和回弹；另一轴的 limits、offset、overscroll、fling、snap、滚轮和 `scroll_into_view` 恒为 0。`ScrollAccept` 缺省 `Content`（声明轴上还有余量才认领）。`Always` 到边也认领。`Never` 把这次拖拽让给祖先。`lock_at_edge` 只留给 `Both`。`Gesture::DragBy` 仍带原始两轴增量，跨轴分量在 `set_scroll_offset` 丢掉。`ScrollController` 对单轴滚动丢掉跨轴增量，不交给父级；`Both` 且该轴没有内容时，溢出仍交给父级。`ScrollArea` 缺省 vertical 和 Always，`VirtualList` 固定 vertical，横向分页显式传 horizontal。裸 `scroll()` 仍是 Both 加 Content。扁平列表减去 offset，picture 保留内容局部坐标，由 `Offset` 层平移。命中查询加上 offset，并用 `PushClip` 裁到视口。非单位 `Transform`（含纯平移）是 `Transform` 层，扁平列表里是 `PushTransform` … `Pop`。`set_justify` 和 `set_wrap` 写行或列的主轴对齐和换行。`Text` 和 `Image` 用 measure 回调报告尺寸。`Decorated` 按子节点定尺寸，命中交给子节点，并录一条盖住边框盒的矩形，圆角记在命令上。宽或高为 0 时不录矩形。扁平列表里，开层的节点以及写成命令的 `Clip` 仍在子节点前后成对 `Push` / `Pop`，盒子为 0 也成对。alpha 为 255 和单位 `Transform` 不推这组命令。
+普通 View 的默认值是 column、min 0、grow 0、shrink 0、basis auto、无隐式 max。根、视口与剩余空间的填充由消费者显式声明。样式来源先完整校验再提交，clear 撤销来源，null 恢复初始值并阻断继承。`bindStyle` 的每个 owner 只清理自己的来源。
+
+`tree::node::Kind` 是 `View`、`Stack`、`Scroll`、`Text`、`Image`；`Sized`、`Padding`、`Align`、`Row`、`Column`、`Grid`、`PointerRegion`、`Decorated`、`Clip`、`Opacity`、`Transform` 是构造预设，由布局样式、`Role` 与可选状态区分。任何节点都可以 `set_focusable`。几何交给 Taffy，含 flex grow 和 grid。`Stack`、`Clip`、`Opacity`、`Transform` 是一格的 grid，子节点放在第 1 行第 1 列。`Scroll` 也是一格 grid，轨道是 `max_content`：视口是边框盒，子节点按完整尺寸布局，可以高出视口。`set_scroll_offset` 不进 Taffy，只让下一帧的录制和命中平移。拖动锁定摘掉该节点的越界弹簧。`stopScroll` 留下当前越界量。`animate` 的 `overscrollY` 可以把它收回 0。惯性夹到极限且没有父级接着滚时，剩余速度装上越界弹簧；像素对齐只改 offset。负的 `overscroll.y` 是顶部的缝。`PullMode` 只做阈值提交，不把缝停住；停住和收回在 `solid-ui`。`Scroll` 的 `ScrollAxis` 缺省 `Both`。`Vertical` 和 `Horizontal` 只在该轴上认领、滚动和回弹；另一轴的 limits、offset、overscroll、fling、snap、滚轮和 `scroll_into_view` 恒为 0。`ScrollAccept` 缺省 `Content`（声明轴上还有余量才认领）。`Always` 到边也认领。`Never` 把这次拖拽让给祖先。`lock_at_edge` 只留给 `Both`。`Gesture::DragBy` 仍带原始两轴增量，跨轴分量在 `set_scroll_offset` 丢掉。`ScrollController` 对单轴滚动丢掉跨轴增量，不交给父级；`Both` 且该轴没有内容时，溢出仍交给父级。`ScrollArea` 缺省 vertical 和 Always，`VirtualList` 固定 vertical，横向分页显式传 horizontal。裸 `scroll()` 仍是 Both 加 Content。扁平列表减去 offset，picture 保留内容局部坐标，由 `Offset` 层平移。命中查询加上 offset，并用 `PushClip` 裁到视口。非单位 `Transform`（含纯平移）是 `Transform` 层，扁平列表里是 `PushTransform` … `Pop`。`set_justify` 和 `set_wrap` 写行或列的主轴对齐和换行。`Text` 和 `Image` 用 measure 回调报告尺寸。`Decorated` 按子节点定尺寸，命中交给子节点，并录一条盖住边框盒的矩形，圆角记在命令上。宽或高为 0 时不录矩形。扁平列表里，开层的节点以及写成命令的 `Clip` 仍在子节点前后成对 `Push` / `Pop`，盒子为 0 也成对。alpha 为 255 和单位 `Transform` 不推这组命令。
 
 当前行为以源码和 `docs/architecture.md` 为准。未落地的目标以 `docs/refactor-plan.md` 为准。进程内的 `crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 不手写 C 或 Objective-C。QuickJS 的胶水 C 只在 `crates/quickjs`。变更缓冲的 C 布局由 `crates/quickjs/abi.yml` 生成，不把现有 setter 逐个包成头文件。Quotes 的 Solid 产物由 QuickJS 加载。iOS 宿主等预构建矩阵有这一列再写。
 
@@ -157,19 +160,22 @@ crates/protocol/            DrawList、LayerTree
 crates/uicore/               渲染树。Taffy、等宽排版、命中、click
 crates/engine/               渲染引擎。只读 DrawList，调用 impeller.h
 crates/session/              会话 trait。宿主只看见 metrics、pointer、frame、lifecycle
-crates/hostshell/            命令队列、帧调度、渲染线程
+crates/shell/            命令队列、帧调度、渲染线程
 crates/macos/                macOS 窗口。指针入队、CVDisplayLink、IMPASTO_DUMP
 crates/android/              Android 宿主。`HostActivity`、`HostView`、Choreographer、Vulkan。`just android` 打 APK
 crates/ios                   还没有。预构建矩阵没有 iOS 列之前不写；接口不按两台宿主收死
-crates/quickjs/              quickjs-ng 会话。包名 `quickjs`。没有源码时返回 NotLinked
+crates/quickjs/              quickjs-ng 会话。scene 与 reactive 原生模块。没有源码时返回 NotLinked
+crates/reactive/             渲染线程上的 arena 图、双向依赖、owner 与调度
+crates/cli/                  impasto 应用命令、ESM / 字节码和平台工程生成
 packages/clipboard/         @impasto/clipboard
 packages/linking/           @impasto/linking
 packages/app-state/         @impasto/app-state
 packages/file-system/       @impasto/file-system
 packages/async-storage/     @impasto/async-storage
+packages/reactive/          Solid 作者 API 垫片和薄控制流组件
 packages/solid-renderer/    接到 uicore 的运行时。不做布局
-packages/solid-ui/          Button、Field、Dialog、theme、overlay
-packages/devtools/          应用内调试面板。数据来自 hostshell 环形缓冲
+packages/solid-ui/          应用组件入口。View、Row、Column、Stack、Grid、Text、Image、Button、Field、Dialog 等。展示走 style/class；测试重置在 `@impasto/solid-ui/testing`
+packages/devtools/          应用内调试面板。数据来自 shell 环形缓冲
 packages/solid-router/      路径、栈和 RouterView
 packages/net/               createFetch
 packages/form/              createForm
@@ -194,7 +200,7 @@ docs/refactor-plan.md       还没做的事
 
 Kotlin：Kotlin 2.3.20，Gradle wrapper 9.2.1，JVM target 21，group `dev.impasto`。`settings.gradle.kts` 里只有 `include(":library")`。界面 DSL 还没写。
 
-Solid：包名 `@impasto/solid-renderer`，`type: module`。JS 包是仓库根的 pnpm workspace（`pnpm-workspace.yaml` 收 `packages/*` 和 `apps/*`，根 `package.json` 提供共享 devDependencies，一份 `pnpm-lock.yaml`）。`just solid` 在根上 `pnpm install --frozen-lockfile` 后 `pnpm -r test` 跑全部包的单测，测试里用 `tools/register.mjs` 把包名指到仓库里的 TypeScript 源。`hostRendererOptions()` 对齐 `@solidjs/universal` 的 `RendererOptions`。宿主标签是 `row`、`column`、`stack`、`align`、`padding`、`decorated`、`pointer`、`clip`、`opacity`、`scroll`、`transform`、`image`、`sized`。`Text` 是组件。编译在 `apps/gallery-solid/build.mjs`：
+Solid：包名 `@impasto/solid-renderer`，`type: module`。JS 包是仓库根的 pnpm workspace（`pnpm-workspace.yaml` 收 `packages/*` 和 `apps/*`，根 `package.json` 提供共享 devDependencies，一份 `pnpm-lock.yaml`）。`just solid` 在根上 `pnpm install --frozen-lockfile` 后 `pnpm -r test` 跑全部包的单测，测试里用 `tools/register.mjs` 把包名指到仓库里的 TypeScript 源。Babel 的 universal 输出直接调用 `scene` 的原生 `insert`、`setProp`、`effect`、`memo`、`createElement` 和 `createComponent`，节点是 `NodeId::to_raw` 对应的数字。作者标签是 `view`、`stack`、`scroll`、`image`，展示属性统一放入 `style`、`class`、`classList`。`Text` 是组件。编译在 `apps/gallery-solid/build.mjs`：
 
 ```js
 solidPlugin({
@@ -203,7 +209,7 @@ solidPlugin({
 })
 ```
 
-依赖钉 `solid-js` 和 `@solidjs/universal` 的 `2.0.0-rc.17`。`just gallery-dist` 在产物缺失或源码更新时重编 `dist/quotes.js`，产物不进 git。`just solid-app` 在此之上安装依赖并用 mock host 跑一遍。`just check` 不跑这一步。
+`solid-js` 2.0.0-rc.17 只用于开发时的语义对照，应用打包时 alias 到 `@impasto/reactive`，调度实现不进入 bundle。`just gallery-dist` 在产物缺失或源码更新时重编 `dist/quotes.js`，产物不进 git。`just solid-app` 在此之上安装依赖并用 mock host 跑一遍。`just check` 不跑这一步。
 
 ## 绘制
 

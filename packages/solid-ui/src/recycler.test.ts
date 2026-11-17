@@ -19,14 +19,22 @@ function harness() {
   const state: RecyclerState<Row> = { live: new Map(), pools: new Map() };
 
   function place(node: number, parent: number, anchor: number) {
-    if (parents.get(node) === parent && (nextSibling.get(node) ?? 0) === anchor) {
+    if (
+      parents.get(node) === parent &&
+      (nextSibling.get(node) ?? 0) === anchor
+    ) {
       return;
     }
     parents.set(node, parent);
     nextSibling.set(node, anchor);
   }
 
-  function make(type: string, item: Row, index: number, key: string): RecyclerSlot<Row> {
+  function make(
+    type: string,
+    item: Row,
+    index: number,
+    key: string,
+  ): RecyclerSlot<Row> {
     const node = next++;
     created.push(type);
     let current = item;
@@ -59,7 +67,9 @@ function harness() {
   }
 
   function visual(): number[] {
-    const kids = [...parents.entries()].filter(([, parent]) => parent === 1).map(([node]) => node);
+    const kids = [...parents.entries()]
+      .filter(([, parent]) => parent === 1)
+      .map(([node]) => node);
     const incoming = new Set<number>();
     for (const node of kids) {
       const sibling = nextSibling.get(node) ?? 0;
@@ -113,24 +123,42 @@ assert.equal(first.created.length, createdAfterFirst);
 assert.equal(first.discarded.length, 0);
 
 const slide = harness();
-slide.sync([0, 1, 2].map((n) => ({ n })), 1);
-slide.sync([1, 2, 3].map((n) => ({ n })), 1);
+slide.sync(
+  [0, 1, 2].map((n) => ({ n })),
+  1,
+);
+slide.sync(
+  [1, 2, 3].map((n) => ({ n })),
+  1,
+);
 assert.equal(slide.created.length, 4);
 assert.equal(slide.state.live.has("0"), false);
 assert.equal(slide.state.live.has("3"), true);
 assert.equal(slide.discarded.length, 0);
 
 const again = harness();
-again.sync([0, 1].map((n) => ({ n })), 2);
+again.sync(
+  [0, 1].map((n) => ({ n })),
+  2,
+);
 again.sync([], 2);
 const beforeReturn = again.created.length;
-again.sync([0, 1].map((n) => ({ n })), 2);
+again.sync(
+  [0, 1].map((n) => ({ n })),
+  2,
+);
 assert.equal(again.created.length, beforeReturn);
 assert.equal(again.discarded.length, 0);
 
 const capped = harness();
-capped.sync([0].map((n) => ({ n })), 0);
-capped.sync([2].map((n) => ({ n })), 0);
+capped.sync(
+  [0].map((n) => ({ n })),
+  0,
+);
+capped.sync(
+  [2].map((n) => ({ n })),
+  0,
+);
 assert.equal(capped.discarded.length, 1);
 
 const mixed = harness();
@@ -148,13 +176,25 @@ assert.equal(mixed.state.live.size, 0);
 assert.ok(mixed.discarded.length >= 2);
 
 const order = harness();
-order.sync([0, 1, 2, 3].map((n) => ({ n })), 8);
+order.sync(
+  [0, 1, 2, 3].map((n) => ({ n })),
+  8,
+);
 assert.deepEqual(order.visual(), [0, 1, 2, 3]);
-order.sync([2, 3, 4, 5].map((n) => ({ n })), 8);
+order.sync(
+  [2, 3, 4, 5].map((n) => ({ n })),
+  8,
+);
 assert.deepEqual(order.visual(), [2, 3, 4, 5]);
-order.sync([5, 6, 7].map((n) => ({ n })), 8);
+order.sync(
+  [5, 6, 7].map((n) => ({ n })),
+  8,
+);
 assert.deepEqual(order.visual(), [5, 6, 7]);
-order.sync([0, 1].map((n) => ({ n })), 8);
+order.sync(
+  [0, 1].map((n) => ({ n })),
+  8,
+);
 assert.deepEqual(order.visual(), [0, 1]);
 
 console.log("recycler.test.ts ok");

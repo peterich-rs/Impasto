@@ -17,6 +17,8 @@ macOS 宿主在 `crates/macos`，用 Impeller standalone SDK 的 Metal 后端。
 |---|---|
 | `docs/architecture.md` | 当前仓库分层和一帧 |
 | `docs/platform-hosts.md` | macOS、Android 的线程、表面和输入。iOS 还没写 |
+| `docs/toolchain-design.md` | 工具链与原生响应式设计 |
+| `docs/toolchain-baseline.md` | gallery 点击和滚动的对照数据 |
 | `docs/refactor-plan.md` | 还没做的事 |
 | `AGENTS.md` | 改代码时的边界。当前行为以源码为准 |
 
@@ -44,11 +46,33 @@ macOS 宿主在 `crates/macos`，用 Impeller standalone SDK 的 Metal 后端。
 just check
 ```
 
-依次跑 `cargo test --workspace`、Kotlin 的 `:library:jvmTest`、Solid 的宿主树测试。不打开窗口。
+依次跑 `cargo test --workspace`、Kotlin 的 `:library:jvmTest`、Solid 的组件测试与原生响应式对照。不打开窗口。
 
 没有 quickjs-ng 源码时，QuickJS 测试走 `NotLinked`。没有 SDK 时，渲染引擎的图形测试不编译。
 
 推到 GitHub 后，[`.github/workflows/check.yml`](.github/workflows/check.yml) 跑同一组检查，并多一步 `cargo fmt --all -- --check`。`crates/macos` 只在 macOS runner 上编译。工作流不下载 SDK 和解释器源码，也不打 Android 包，也不打开窗口。
+
+## 应用命令
+
+```sh
+cargo run -p cli -- create my-app
+cd my-app
+/path/to/impasto analyze
+/path/to/impasto run
+/path/to/impasto run -d android
+/path/to/impasto build bundle
+/path/to/impasto build macos
+/path/to/impasto build apk --debug
+/path/to/impasto test
+/path/to/impasto clean
+/path/to/impasto packages get
+```
+
+在框架仓库根执行 `cargo run -p cli -- run` 会打开 gallery。`run` 默认 debug，`build` 默认 release；`--debug` 和 `--release` 可显式选择。release bundle 是 QuickJS 字节码。生成的平台工程和包在应用的 `build/`；`create` 不生成可提交的平台目录。`app.toml` 的 `[permissions]` 缺省关闭能力模块，可写 `clipboard = ["macos"]` 或 `linking = true`。iOS 没有宿主，构建会返回非零。
+
+`just cli-dist` 在 `target/cli-dist` 生成完整 CLI 发布目录，须将 `impasto` 与旁边的 `impasto-tools/` 一起移动。发布包的打包、检查和无头测试使用内置 Node；原生构建还需要 Cargo 和对应平台工具链。源码开发仍使用本机 Node。`--verbose` 打印工具链路径，`run --trace` 输出帧计数。
+
+Android 构建缺省使用生成工程里的 Gradle wrapper。需要使用本机已安装的 Gradle 时，显式设置 `GRADLE_HOME`；`run -d <设备号>` 使用 adb 安装并启动应用。APK 的 release 变体使用本地调试签名，供真机安装验证。
 
 ## 窗口
 
@@ -60,7 +84,7 @@ just android
 just android-release
 ```
 
-`just host` 打开默认 360×640 的窗口，加载 ESM `apps/gallery-solid/dist/quotes.js`（`just gallery-dist` 从 TSX 源码本地构建，产物不提交）。`just host-js` 是同一条命令。`IMPASTO_DUMP` 把一帧 Metal 纹理写成 PNG 后退出，用来看画面。日志过滤是 `hostshell` 的 `Targets`。debug 构建缺省 `trace`，release 构建缺省 `info`，由 `set_log_targets` 整份替换。`just android` 打 debug APK，`just android-release` 打 release APK；Gradle 按这个变体调 `cargo build`，产物是 `libimpasto.so`。需要 NDK、`android-arm64` SDK 和 quickjs-ng 源码。
+`just host` 打开默认 360×640 的窗口，加载 ESM `apps/gallery-solid/dist/quotes.js`（`just gallery-dist` 从 TSX 源码本地构建，产物不提交）。`just host-js` 是同一条命令。`IMPASTO_DUMP` 把一帧 Metal 纹理写成 PNG 后退出，用来看画面。日志过滤是 `shell` 的 `Targets`。debug 构建缺省 `trace`，release 构建缺省 `info`，由 `set_log_targets` 整份替换。`just android` 打 debug APK，`just android-release` 打 release APK；Gradle 按这个变体调 `cargo build`，产物是 `libimpasto.so`。需要 NDK、`android-arm64` SDK 和 quickjs-ng 源码。
 
 ## 目录
 
@@ -69,7 +93,7 @@ crates/protocol/            DrawList、LayerTree
 crates/uicore/              渲染树。Taffy 布局、命中、click 和 drag
 crates/engine/              渲染引擎。读绘制列表，调用 Impeller
 crates/session/             会话。宿主每帧调用 metrics、pointer、frame、wants_frame、lifecycle
-crates/hostshell/           壳。命令队列、帧调度、渲染线程
+crates/shell/           壳。命令队列、帧调度、渲染线程
 crates/macos/               macOS 窗口
 crates/android/             Android 宿主。`HostActivity`、`HostView`、Choreographer、Vulkan
 crates/quickjs/             quickjs-ng 会话。没有源码时返回 NotLinked

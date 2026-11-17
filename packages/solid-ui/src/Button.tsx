@@ -1,8 +1,18 @@
 import { createTrackedEffect, createSignal } from "solid-js";
-import { Text, directionFor, host, type NodeHandle } from "@impasto/solid-renderer";
+import {
+  Text,
+  bindNodeRef,
+  bindStyle,
+  scene,
+  type NodeHandle,
+  type ViewStyle,
+} from "@impasto/solid-renderer";
+import { eventsOf } from "./element.tsx";
 import { bindFocusRing } from "./focus.ts";
+import { bindPressable } from "./pressable.ts";
+import type { ButtonProps } from "./props.ts";
 import { Role } from "./semantics.ts";
-import { minTarget, type ButtonSize, type ButtonVariant } from "./theme.ts";
+import { minTarget } from "./theme.ts";
 import { useTheme } from "./use-theme.ts";
 
 function faded(hex: string, blocked: boolean): string {
@@ -13,17 +23,7 @@ function faded(hex: string, blocked: boolean): string {
   return `#${body.slice(0, 6)}66`;
 }
 
-export function Button(props: {
-  label: string;
-  onClick: () => void;
-  disabled?: boolean;
-  loading?: boolean;
-  variant?: ButtonVariant;
-  size?: ButtonSize;
-  icon?: NodeHandle;
-  /** Span the parent's width. Row siblings share that width. */
-  wide?: boolean;
-}): NodeHandle {
+export function Button(props: ButtonProps): NodeHandle {
   const theme = useTheme();
   const [pressed, setPressed] = createSignal(false);
   const [focused, setFocused] = createSignal(false);
@@ -31,14 +31,13 @@ export function Button(props: {
   const size = () => props.size ?? "regular";
   const variant = () => props.variant ?? "quiet";
   let node = 0;
-  let box = 0;
-  bindFocusRing(() => box, focused);
-
+  bindFocusRing(() => node, focused);
   const scale = () => theme().textScale;
-  const padX = () => (size() === "compact" ? theme().space.m : theme().space.l) * scale();
-  const padY = () => (size() === "compact" ? theme().space.s : theme().space.l) * scale();
+  const padX = () =>
+    (size() === "compact" ? theme().space.m : theme().space.l) * scale();
+  const padY = () =>
+    (size() === "compact" ? theme().space.s : theme().space.l) * scale();
   const target = () => minTarget(size(), theme().density) * scale();
-
   function face(): string {
     const color = pressed()
       ? variant() === "primary"
@@ -49,7 +48,6 @@ export function Button(props: {
         : theme().color.surface;
     return faded(color, blocked());
   }
-
   function labelColor(): string {
     const color =
       variant() === "primary"
@@ -59,93 +57,92 @@ export function Button(props: {
         : theme().color.text;
     return faded(color, blocked());
   }
-
-  function activate(): void {
-    if (blocked()) {
-      return;
-    }
-    props.onClick();
-  }
-
+  const press = bindPressable({
+    node: () => node,
+    disabled: blocked,
+    focused,
+    setPressed,
+    setFocused,
+    onActivate: () => props.onClick(),
+    events: props,
+  });
   function writeSemantics(): void {
     if (node === 0) {
       return;
     }
-    host.setFocusable(node, !blocked());
-    host.setSemantics(
+    scene.setFocusable(node, !blocked());
+    scene.setSemantics(
       node,
       Role.Button,
-      props.label,
+      props.accessibilityLabel ?? props.label,
       undefined,
       undefined,
       undefined,
       undefined,
       blocked() ? 1 : 0,
+      undefined,
+      undefined,
+      props.accessibilityHint,
     );
-    const edge = target();
-    host.setMinSize(node, edge, edge);
   }
-
   createTrackedEffect(() => {
     writeSemantics();
   });
-
   return (
-    <pointer
+    <view
+      {...eventsOf(props)}
       ref={(handle) => {
-        node = handle.id;
+        if (handle === null) return;
+        node = handle;
+        bindStyle(handle, {
+          get defaults(): ViewStyle {
+            return {
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: theme().space.s,
+              minWidth: target(),
+              minHeight: target(),
+              paddingLeft: padX(),
+              paddingRight: padX(),
+              paddingTop: padY(),
+              paddingBottom: padY(),
+              backgroundColor: face(),
+              borderRadius: theme().shape.full,
+              color: labelColor(),
+              fontSize: theme().typography.label.size,
+              fontWeight: theme().typography.label.weight,
+            };
+          },
+          get class() {
+            return props.class;
+          },
+          get classList() {
+            return props.classList;
+          },
+          get style() {
+            return props.style;
+          },
+        });
+        bindNodeRef(handle, () => props.ref);
         writeSemantics();
       }}
-      w={props.wide ? "100%" : undefined}
-      onPress={() => {
-        if (!blocked()) {
-          setPressed(true);
-        }
-      }}
-      onRelease={() => setPressed(false)}
-      onClick={activate}
-      onFocus={() => setFocused(true)}
-      onBlur={() => setFocused(false)}
-      onKey={(key) => {
-        if (key === "Enter") {
-          activate();
-        }
-      }}
-      onText={(value) => {
-        if (value === " ") {
-          activate();
-        }
-      }}
+      onPress={press.onPress}
+      onRelease={press.onRelease}
+      onClick={press.onClick}
+      onFocus={press.onFocus}
+      onBlur={press.onBlur}
+      onKey={press.onKey}
+      onText={press.onText}
     >
-      <decorated
-        ref={(handle) => {
-          box = handle.id;
-        }}
-        w={props.wide ? "100%" : undefined}
-        color={face()}
-        radius={theme().shape.full}
-        min={{ h: target() }}
+      {props.icon}
+      <Text
+        class={props.labelProps?.class}
+        classList={props.labelProps?.classList}
+        style={props.labelProps?.style}
       >
-        <padding
-          left={padX()}
-          right={padX()}
-          top={padY()}
-          bottom={padY()}
-          w={props.wide ? "100%" : undefined}
-        >
-          <row gap={theme().space.s} justify="center" w={props.wide ? "100%" : undefined}>
-            {props.icon}
-            <Text
-              fontSize={theme().typography.label.size}
-              color={labelColor()}
-              weight={theme().typography.label.weight}
-              direction={directionFor(theme().locale)}
-            >
-              {props.label}
-            </Text>
-          </row>
-        </padding>
-      </decorated>
-    </pointer>
+        {props.label}
+      </Text>
+    </view>
   );
 }

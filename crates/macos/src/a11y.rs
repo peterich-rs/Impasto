@@ -4,7 +4,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
-use hostshell::{Command, Poster};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
@@ -15,6 +14,7 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::CGSize;
 use objc2_foundation::{NSArray, NSNumber, NSPoint, NSRange, NSRect, NSString};
+use shell::{Command, Poster};
 
 /// One non-Generic node after Generic ancestors have been skipped.
 #[derive(Clone, Debug, PartialEq)]
@@ -75,7 +75,7 @@ impl ElementCache {
 }
 
 /// Map already-projected nodes onto the AppKit element shape. Parent chain is not recomputed.
-pub fn visible_nodes(nodes: &[hostshell::ProjectedNode]) -> Vec<VisibleNode> {
+pub fn visible_nodes(nodes: &[shell::ProjectedNode]) -> Vec<VisibleNode> {
     nodes
         .iter()
         .map(|node| VisibleNode {
@@ -316,7 +316,7 @@ impl A11yHost {
         mtm: MainThreadMarker,
         poster: &Poster,
         host: *const NSView,
-        nodes: &[hostshell::ProjectedNode],
+        nodes: &[shell::ProjectedNode],
     ) {
         let visible = visible_nodes(nodes);
         let live: HashSet<u64> = visible.iter().map(|node| node.id.0).collect();
@@ -411,7 +411,7 @@ mod tests {
             ],
             root: SemanticsId(1),
         };
-        let visible = visible_nodes(&hostshell::project(&update));
+        let visible = visible_nodes(&shell::project(&update));
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].label, "Minus");
         assert_eq!(visible[1].label, "Plus");
@@ -429,7 +429,7 @@ mod tests {
             ],
             root: SemanticsId(1),
         };
-        let visible = visible_nodes(&hostshell::project(&update));
+        let visible = visible_nodes(&shell::project(&update));
         assert_eq!(visible.len(), 2);
         assert!(
             visible
@@ -467,7 +467,7 @@ mod tests {
             nodes: vec![node(1, None, SemanticsRole::Generic, ""), field],
             root: SemanticsId(1),
         };
-        let visible = visible_nodes(&hostshell::project(&update));
+        let visible = visible_nodes(&shell::project(&update));
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].label, "Name");
         assert_eq!(visible[0].help, "Required");
@@ -477,15 +477,15 @@ mod tests {
     #[test]
     fn vertical_overflow_uses_viewport_height() {
         assert_eq!(
-            hostshell::scroll_step(200.0, 100.0, 200.0, 250.0, true),
+            shell::scroll_step(200.0, 100.0, 200.0, 250.0, true),
             (0.0, 100.0)
         );
         assert_eq!(
-            hostshell::scroll_step(100.0, 100.0, 250.0, 250.0, true),
+            shell::scroll_step(100.0, 100.0, 250.0, 250.0, true),
             (0.0, 100.0)
         );
         assert_eq!(
-            hostshell::scroll_step(100.0, 100.0, 100.0, 100.0, true),
+            shell::scroll_step(100.0, 100.0, 100.0, 100.0, true),
             (0.0, 0.0)
         );
         let update = SemanticsUpdate {
@@ -522,7 +522,7 @@ mod tests {
             root: SemanticsId(1),
         };
         assert_eq!(
-            hostshell::content_extent(&update, SemanticsId(1)),
+            shell::content_extent(&update, SemanticsId(1)),
             (200.0, 250.0)
         );
     }

@@ -24,8 +24,8 @@ export function QuoteText(props: {
   });
   createTrackedEffect(() => {
     const stop = props.binder().bind(props.symbol(), {
-      [props.kind]: node.id,
-      flashNode: node.id,
+      [props.kind]: node,
+      flashNode: node,
     });
     onCleanup(stop);
   });

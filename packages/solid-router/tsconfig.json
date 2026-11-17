@@ -8,5 +8,12 @@
     "jsx": "preserve",
     "allowImportingTsExtensions": true
   },
-  "include": ["src", "../solid-renderer/src/jsx.ts"]
+  "include": [
+    "src",
+    "../solid-renderer/src/jsx.ts",
+    "../reactive/src/modules.d.ts"
+  ],
+  "exclude": [
+    "**/*.test.ts"
+  ]
 }

@@ -5,12 +5,10 @@
 import { registerTopLayer, type NodeHandle } from "@impasto/solid-renderer";
 import { DevtoolsLayer } from "./layer.tsx";
 import { store } from "./store.ts";
-
 export type DevtoolsHandle = {
   readonly available: boolean;
   uninstall(): void;
 };
-
 export function installDevtools(): DevtoolsHandle {
   const handle: DevtoolsHandle = {
     available: store.available(),

@@ -1,6 +1,13 @@
 import { createTrackedEffect } from "solid-js";
-import { host, insert, type NodeHandle } from "@impasto/solid-renderer";
-import { ErrorPage as UiErrorPage, Toast, messageOf as uiMessageOf, stackOf as uiStackOf } from "@impasto/solid-ui";
+import { directionFor, scene, insert, type NodeHandle } from "@impasto/solid-renderer";
+import {
+  Column,
+  ErrorPage as UiErrorPage,
+  Toast,
+  messageOf as uiMessageOf,
+  stackOf as uiStackOf,
+} from "@impasto/solid-ui";
+import { settingsSig } from "./state/settings.ts";
 import { RouterView, createRouter } from "@impasto/solid-router";
 import { TabBar } from "./widgets/tab-bar.tsx";
 import { WatchlistPage } from "./pages/watchlist.tsx";
@@ -11,38 +18,88 @@ import { ProfilePage } from "./pages/profile.tsx";
 import { SearchPage } from "./pages/search.tsx";
 import { OrderSheetHost } from "./pages/order.tsx";
 import { closeToast, toastOpen, toastText } from "./state/toast.ts";
-
 export function App(): NodeHandle {
   const router = createRouter(
     [
       {
         path: "/watchlist",
-        component: () => WatchlistPage({ router }),
+        component: () =>
+          WatchlistPage({
+            router,
+          }),
         keepAlive: true,
       },
-      { path: "/market", component: () => MarketPage({ router }), keepAlive: true },
-      { path: "/trade", component: () => TradePage({ router }), keepAlive: true },
-      { path: "/profile", component: () => ProfilePage({ router }) },
-      { path: "/search", component: () => SearchPage({ router }) },
+      {
+        path: "/market",
+        component: () =>
+          MarketPage({
+            router,
+          }),
+        keepAlive: true,
+      },
+      {
+        path: "/trade",
+        component: () =>
+          TradePage({
+            router,
+          }),
+        keepAlive: true,
+      },
+      {
+        path: "/profile",
+        component: () =>
+          ProfilePage({
+            router,
+          }),
+      },
+      {
+        path: "/search",
+        component: () =>
+          SearchPage({
+            router,
+          }),
+      },
       {
         path: "/stock/:symbol",
-        component: (p) => StockPage({ router, symbol: p.params.symbol ?? "" }),
+        component: (p) =>
+          StockPage({
+            router,
+            symbol: p.params.symbol ?? "",
+          }),
       },
       {
         path: "/order/:symbol",
-        component: (p) => OrderSheetHost({ router, symbol: p.params.symbol ?? "" }),
+        component: (p) =>
+          OrderSheetHost({
+            router,
+            symbol: p.params.symbol ?? "",
+          }),
       },
     ],
-    { initial: "/watchlist" },
+    {
+      initial: "/watchlist",
+    },
   );
-
-  const shell = host.column(0);
-  host.setGrow(shell, 1);
-
-  const content = host.column(0);
-  host.setGrow(content, 1);
-  host.append(shell, content);
-
+  const shell = Column({
+    style: {
+      gap: 0,
+      flex: 1,
+      width: "100%",
+      height: "100%",
+      minWidth: 0,
+      minHeight: 0,
+      layoutDirection: directionFor(settingsSig().locale) === "rtl" ? "rtl" : "ltr",
+    },
+  });
+  const content = scene.createElement("view", {
+    style: {
+      gap: 0,
+    },
+  });
+  scene.patchStyle(content, {
+    flex: 1,
+  });
+  scene.append(shell, content);
   const view = RouterView({
     router,
     background: "#F5F6F8",
@@ -54,24 +111,24 @@ export function App(): NodeHandle {
         onBack: () => router.pop(),
       }),
   });
-  host.append(content, view.id);
-
-  const bar = TabBar({ router });
-  // Non-decorated wrap: hide by clamping axis + min + max to 0. Never setAlpha on Decorated.
-  const barWrap = host.column(0);
-  host.append(barWrap, bar.id);
-  host.append(content, barWrap);
-
+  scene.append(content, view);
+  const bar = TabBar({
+    router,
+  });
+  const barWrap = scene.createElement("view", {
+    style: {
+      gap: 0,
+    },
+  });
+  scene.append(barWrap, bar.node);
+  scene.append(content, barWrap);
   createTrackedEffect(() => {
     // Keep the bar clamped until the exiting page unmounts. Unhiding it on the
     // first pop frame relayouts both stacked pages and hitchs the transition.
     const hidden = router.depth() > 1;
-    host.setAxisSize(barWrap, "auto", hidden ? 0 : "auto");
-    host.setMinSize(barWrap, 0, 0);
-    host.setMaxSize(barWrap, 4096, hidden ? 0 : 4096);
+    scene.patchStyle(barWrap, { display: hidden ? "none" : "flex" });
     bar.sync();
   });
-
   const toast = Toast({
     get open() {
       return toastOpen();
@@ -81,7 +138,6 @@ export function App(): NodeHandle {
     },
     onClose: closeToast,
   });
-  insert({ id: shell } as NodeHandle, toast);
-
-  return { id: shell };
+  insert(shell, toast);
+  return shell;
 }

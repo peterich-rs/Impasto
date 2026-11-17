@@ -10,7 +10,7 @@ uicore = { workspace = true }
 engine = { workspace = true }
 quickjs = { workspace = true }
 session = { workspace = true }
-hostshell = { workspace = true }
+shell = { workspace = true }
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [

@@ -1,7 +1,6 @@
 /** Hot-path number formatting. Pre-built tables keep allocation off the vsync path. */
 
 const GROUPS = [8, 16, 24, 32];
-
 function integerDigits(value: number): string {
   const s = String(Math.trunc(Math.abs(value)));
   return s;
@@ -46,7 +45,6 @@ export function fmtPct(last: number, prevClose: number): string {
   const sign = pct > 0.0001 ? "+" : "";
   return `${sign}${pct.toFixed(2)}%`;
 }
-
 export function fmtSigned(value: number): string {
   const sign = value > 0.0001 ? "+" : "";
   return sign + fmtPrice(value);
@@ -62,9 +60,7 @@ export function fmtVolumeCN(volume: number): string {
   }
   return String(Math.round(volume));
 }
-
 export function fmtQty(qty: number): string {
   return grouped(qty);
 }
-
 void GROUPS;

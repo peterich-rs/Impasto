@@ -117,6 +117,70 @@ fn horizontal_scroll_stays_the_viewport_width() -> Result<(), crate::Error> {
 }
 
 #[test]
+fn scroll_axis_and_reparenting_preserve_explicit_sizes_without_implicit_caps()
+-> Result<(), crate::Error> {
+    let mut tree = Tree::new(mono());
+    tree.set_viewport(0.0, 0.0, 200.0, 100.0)?;
+    let root = tree.stack()?;
+    tree.set_fill(root)?;
+    let scroll = tree.scroll_with(ScrollAxis::Horizontal)?;
+    tree.set_fill(scroll)?;
+    let holder = tree.sized(200.0, 100.0)?;
+    tree.add_child(root, holder)?;
+    tree.add_child(root, scroll)?;
+    let row = tree.row(0.0)?;
+    for _ in 0..4 {
+        let card = tree.sized(80.0, 40.0)?;
+        tree.add_child(row, card)?;
+    }
+    tree.add_child(scroll, row)?;
+    tree.layout()?;
+    assert_eq!(tree.rect(row)?.w, 320.0);
+
+    tree.set_scroll_axis(scroll, ScrollAxis::Vertical)?;
+    tree.layout()?;
+    assert_eq!(tree.rect(row)?.w, 200.0);
+    tree.set_scroll_axis(scroll, ScrollAxis::Horizontal)?;
+    tree.layout()?;
+    assert_eq!(tree.rect(row)?.w, 320.0);
+
+    tree.insert(holder, row, None)?;
+    tree.layout()?;
+    assert_eq!(tree.rect(row)?.w, 320.0);
+    tree.insert(scroll, row, None)?;
+    tree.layout()?;
+    assert_eq!(tree.rect(row)?.w, 320.0);
+
+    tree.set_max_size(row, 120.0, 100.0)?;
+    tree.insert(holder, row, None)?;
+    tree.layout()?;
+    assert_eq!(tree.rect(row)?.w, 120.0);
+    tree.insert(scroll, row, None)?;
+    tree.layout()?;
+    assert_eq!(tree.rect(row)?.w, 120.0);
+
+    let percent_row = tree.row(0.0)?;
+    let card = tree.sized(320.0, 40.0)?;
+    tree.add_child(percent_row, card)?;
+    tree.set_max_axis(
+        percent_row,
+        crate::AxisSize::Fraction(0.5),
+        crate::AxisSize::Auto,
+    )?;
+    tree.add_child(scroll, percent_row)?;
+    tree.set_scroll_axis(scroll, ScrollAxis::Both)?;
+    tree.layout()?;
+    assert_eq!(tree.rect(percent_row)?.w, 160.0);
+    tree.insert(holder, percent_row, None)?;
+    tree.layout()?;
+    assert_eq!(tree.rect(percent_row)?.w, 100.0);
+    tree.insert(scroll, percent_row, None)?;
+    tree.layout()?;
+    assert_eq!(tree.rect(percent_row)?.w, 160.0);
+    Ok(())
+}
+
+#[test]
 fn vertical_scroll_stretches_a_narrow_child_to_the_viewport() -> Result<(), crate::Error> {
     let mut tree = Tree::new(mono());
     tree.set_viewport(0.0, 0.0, 200.0, 100.0)?;
