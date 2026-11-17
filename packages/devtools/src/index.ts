@@ -1,5 +1,9 @@
 export { installDevtools, type DevtoolsHandle } from "./install.ts";
-export { registerDevtoolPage, devtoolPages, type DevtoolPage } from "./registry.ts";
+export {
+  registerDevtoolPage,
+  devtoolPages,
+  type DevtoolPage,
+} from "./registry.ts";
 export {
   logs,
   errors,

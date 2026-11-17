@@ -180,7 +180,7 @@ impl Tree {
         let _ = self.resolve_scroll(id, cx + rest_x, cy + rest_y);
     }
 
-    /// Floor used by [`Tree::scroll_limits`]. Does not run layout.
+    /// Floor used by `Tree::scroll_limits`. Does not run layout.
     pub fn set_content_min(&mut self, id: NodeId, min: f32) -> Result<(), Error> {
         finite_number(min)?;
         let Some(geom) = self.node_mut(id)?.scroll_mut() else {
@@ -329,19 +329,8 @@ impl Tree {
         self.motions
             .retain(|motion| motion.node != id || axis.allows(motion.prop));
         self.sync_scroll_tracks(id)?;
-        self.refit_scroll_children(id)?;
         let (x, y) = self.scroll_offset(id)?;
         self.set_scroll_offset(id, x, y)
-    }
-
-    fn refit_scroll_children(&mut self, id: NodeId) -> Result<(), Error> {
-        let mut child = self.node(id)?.first_child;
-        while let Some(current) = child {
-            let next = self.node(current)?.next;
-            self.fit_parent_cap(id, current)?;
-            child = next;
-        }
-        Ok(())
     }
 
     /// Match the grid tracks to the axis. See [`super::layout::scroll_style_for`].
@@ -780,28 +769,19 @@ impl Tree {
         let Ok(node) = self.node(id) else {
             return (0.0, 0.0);
         };
-        let (width, height) = (node.w, node.h);
-        let mut child = node.first_child;
-        let mut content_w: f32 = 0.0;
-        let mut content_h: f32 = 0.0;
-        while let Some(current) = child {
-            let next = self.node(current).ok().and_then(|node| node.next);
-            if let Ok(child) = self.node(current) {
-                content_w = content_w.max(child.w);
-                content_h = content_h.max(child.h);
-            }
-            child = next;
-        }
+        let height = node.h;
+        let taffy_id = node.taffy;
         let content_min = node
             .scroll_geom()
             .map(|geom| geom.content_min)
             .unwrap_or(0.0);
-        let limit_y = (content_h - height)
-            .max(0.0)
-            .max(content_min - height)
-            .max(0.0);
-        self.axis_of(id)
-            .filter((content_w - width).max(0.0), limit_y)
+        let (scroll_x, scroll_y) = taffy_id
+            .and_then(|taffy_id| self.taffy.layout(taffy_id).ok())
+            .map(|layout| (layout.scroll_width(), layout.scroll_height()))
+            .unwrap_or((0.0, 0.0));
+        // `scroll_width` / `scroll_height` are already the maximum offsets.
+        let limit_y = scroll_y.max((content_min - height).max(0.0));
+        self.axis_of(id).filter(scroll_x, limit_y)
     }
 
     pub(super) fn axis_of(&self, id: NodeId) -> crate::ScrollAxis {

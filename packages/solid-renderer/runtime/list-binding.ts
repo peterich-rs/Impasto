@@ -1,5 +1,5 @@
-import type { ListDriver } from "../src/host.ts";
-import type { HostNode } from "../src/tree.ts";
+import type { ListDriver } from "../src/scene.ts";
+import type { UIChildren } from "../src/jsx.ts";
 import { listenList, type ListChrome, type ListOp } from "./driver.ts";
 import type { Slot } from "./slot.ts";
 
@@ -27,7 +27,11 @@ type ApplyHooks<T> = {
 };
 
 /** Applies one driver op to the language-side slot pool. */
-export function applyListOp<T>(state: ListBindingState<T>, op: ListOp, hooks: ApplyHooks<T>): void {
+export function applyListOp<T>(
+  state: ListBindingState<T>,
+  op: ListOp,
+  hooks: ApplyHooks<T>,
+): void {
   if (op.kind === "detach") {
     const slot = state.live.get(op.key);
     if (slot === undefined) {
@@ -69,11 +73,16 @@ export function applyListOp<T>(state: ListBindingState<T>, op: ListOp, hooks: Ap
   if (slot === undefined || parent === 0) {
     return;
   }
-  const before = op.before.length === 0 ? 0 : (state.live.get(op.before)?.node ?? 0);
+  const before =
+    op.before.length === 0 ? 0 : (state.live.get(op.before)?.node ?? 0);
   slot.place(parent, before);
 }
 
-function park<T>(state: ListBindingState<T>, slot: ListBindingSlot<T>, poolSize: number): void {
+function park<T>(
+  state: ListBindingState<T>,
+  slot: ListBindingSlot<T>,
+  poolSize: number,
+): void {
   slot.detach();
   const pooled = state.pools.get(slot.type) ?? [];
   pooled.push(slot);
@@ -107,11 +116,11 @@ export function bindListRenderer<T>(
     parent(): number;
     poolSize(): number;
     itemAt(index: number): T;
-    render(item: () => T, index: () => number): HostNode;
+    render(item: () => T, index: () => number): UIChildren;
     createSlot(
       initial: T,
       at: number,
-      render: (item: () => T, index: () => number) => HostNode,
+      render: (item: () => T, index: () => number) => UIChildren,
     ): Slot<T>;
     onChrome(chrome: ListChrome): void;
     onEnd(): void;

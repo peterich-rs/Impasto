@@ -9,7 +9,6 @@ export function hashString(value: string): number {
   }
   return h >>> 0;
 }
-
 export function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
@@ -19,8 +18,9 @@ export function mulberry32(seed: number): () => number {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-
-export type GaussState = { spare: number | null };
+export type GaussState = {
+  spare: number | null;
+};
 
 /** Marsaglia polar method. Uses one draw for two samples. */
 export function gauss(rand: () => number, state: GaussState): number {

@@ -23,7 +23,7 @@ function phaseName(code: number): ScrollPhaseName {
   return "idle";
 }
 
-/** Fans one host callback out to the scroll nodes that asked for it. */
+/** Fans one scene callback out to the scroll nodes that asked for it. */
 export function deliverScrollState(
   node: number,
   phase: number,
@@ -38,7 +38,10 @@ export function deliverScrollState(
   }
 }
 
-export function onScrollState(node: number, fn: (sample: ScrollSample) => void): () => void {
+export function onScrollState(
+  node: number,
+  fn: (sample: ScrollSample) => void,
+): () => void {
   const set = listeners.get(node) ?? new Set();
   set.add(fn);
   listeners.set(node, set);

@@ -36,9 +36,9 @@ mod motion;
 mod textinput;
 
 #[cfg(target_os = "android")]
-mod decode;
+mod app;
 #[cfg(target_os = "android")]
-mod host;
+mod decode;
 #[cfg(target_os = "android")]
 mod surface;
 #[cfg(target_os = "android")]

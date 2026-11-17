@@ -2,7 +2,6 @@
 import { createSignal, For, Show } from "solid-js";
 import { Text, useTheme } from "@impasto/solid-ui";
 import { frames, type FrameSample } from "../store.ts";
-
 const BAR_MAX = 96;
 
 /** Focused frame facts; each phase row is one line of the table. */
@@ -39,51 +38,93 @@ function rowsOf(frame: FrameSample): [string, string][] {
   }
   return rows;
 }
-
 export function PerformancePage() {
   const theme = useTheme();
   const [selected, setSelected] = createSignal<number>(-1);
   const window = () => frames().slice(-120);
   const peak = () =>
-    window().reduce((max, frame) => Math.max(max, frame.sessionMs + frame.submitMs + frame.presentMs), 0.01);
+    window().reduce(
+      (max, frame) =>
+        Math.max(max, frame.sessionMs + frame.submitMs + frame.presentMs),
+      0.01,
+    );
   const current = () => window().find((frame) => frame.seq === selected());
   const overCount = () => window().filter((frame) => frame.overBudget).length;
   return (
-    <column fill>
-      <Text fontSize={11} color={theme().color.textMuted}>
+    <view
+      style={{
+        width: "100%",
+        height: "100%",
+        flex: 1,
+        flexShrink: 1,
+        minWidth: 0,
+        minHeight: 0,
+      }}
+    >
+      <Text
+        style={{
+          fontSize: 11,
+          color: theme().color.textMuted,
+        }}
+      >
         {window().length} 帧 · 超预算 {overCount()} · 峰值 {peak().toFixed(1)}ms
       </Text>
-      <row gap={1} cross="start">
+      <view
+        style={{
+          flexDirection: "row",
+          gap: 1,
+          alignItems: "start",
+        }}
+      >
         <For each={window()}>
           {(frame) => {
             const total = frame.sessionMs + frame.submitMs + frame.presentMs;
             const height = Math.max(2, Math.round((total / peak()) * BAR_MAX));
             return (
-              <pointer onClick={() => setSelected(frame.seq)} focusable={false}>
-                <decorated
-                  color={frame.overBudget ? theme().color.danger : theme().color.success}
-                  radius={1}
+              <view onClick={() => setSelected(frame.seq)} focusable={false}>
+                <view
+                  style={{
+                    backgroundColor: frame.overBudget
+                      ? theme().color.danger
+                      : theme().color.success,
+                    borderRadius: 1,
+                  }}
                 >
-                  <column w={4} h={height} />
-                </decorated>
-              </pointer>
+                  <view
+                    style={{
+                      width: 4,
+                      height: height,
+                    }}
+                  />
+                </view>
+              </view>
             );
           }}
         </For>
-      </row>
+      </view>
       <Show when={current()} keyed>
         {(frame) => (
-          <column gap={1} grow>
+          <view
+            style={{
+              gap: 1,
+              flex: 1,
+            }}
+          >
             <For each={rowsOf(frame)}>
               {(row) => (
-                <Text fontSize={10} color={theme().color.text}>
+                <Text
+                  style={{
+                    fontSize: 10,
+                    color: theme().color.text,
+                  }}
+                >
                   {row[0]}: {row[1]}
                 </Text>
               )}
             </For>
-          </column>
+          </view>
         )}
       </Show>
-    </column>
+    </view>
   );
 }

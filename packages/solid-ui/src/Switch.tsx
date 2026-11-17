@@ -1,7 +1,15 @@
 import { createTrackedEffect, createSignal } from "solid-js";
-import { Text, directionFor, host, type NodeHandle } from "@impasto/solid-renderer";
+import {
+  Text,
+  bindStyle,
+  scene,
+  type NodeHandle,
+} from "@impasto/solid-renderer";
+import { bindBox } from "./element.tsx";
 import { bindFocusRing } from "./focus.ts";
+import { bindPressable } from "./pressable.ts";
 import { messagesFor } from "./i18n.ts";
+import type { SwitchProps } from "./props.ts";
 import { Role } from "./semantics.ts";
 import { useTheme } from "./use-theme.ts";
 
@@ -9,14 +17,7 @@ import { useTheme } from "./use-theme.ts";
  * A boolean control. Pass `checked` to control it, or omit it and the switch
  * keeps its own signal. `onChange` hears the next value.
  */
-export function Switch(props: {
-  checked?: boolean;
-  onChange?: (checked: boolean) => void;
-  disabled?: boolean;
-  onLabel?: string;
-  offLabel?: string;
-  label?: string;
-}): NodeHandle {
+export function Switch(props: SwitchProps): NodeHandle {
   const theme = useTheme();
   const [local, setLocal] = createSignal(false);
   const on = () => (props.checked === undefined ? local() : props.checked);
@@ -33,7 +34,6 @@ export function Switch(props: {
   let node = 0;
   let box = 0;
   bindFocusRing(() => box, focused);
-
   function toggle(): void {
     if (blocked()) {
       return;
@@ -44,13 +44,21 @@ export function Switch(props: {
     }
     props.onChange?.(next);
   }
-
+  const press = bindPressable({
+    events: {},
+    node: () => node,
+    disabled: blocked,
+    focused,
+    setPressed: () => {},
+    setFocused,
+    onActivate: toggle,
+  });
   function writeSemantics(): void {
     if (node === 0) {
       return;
     }
-    host.setFocusable(node, !blocked());
-    host.setSemantics(
+    scene.setFocusable(node, !blocked());
+    scene.setSemantics(
       node,
       Role.Switch,
       label(),
@@ -61,51 +69,62 @@ export function Switch(props: {
       blocked() ? 1 : 0,
     );
   }
-
   createTrackedEffect(() => {
     writeSemantics();
   });
-
   return (
-    <opacity alpha={blocked() ? 102 : 255}>
-      <pointer
+    <view
+      ref={(handle) => {
+        if (handle === null) return;
+        node = handle;
+        bindBox(handle, props, () => ({
+          padding: theme().space.s,
+          opacity: blocked() ? 0.4 : 1,
+          color: on() ? theme().color.bg : theme().color.text,
+          fontSize: theme().fontSize.body,
+          fontWeight: theme().weight.body,
+        }));
+        writeSemantics();
+      }}
+      onClick={press.onClick}
+      onFocus={press.onFocus}
+      onBlur={press.onBlur}
+      onKey={press.onKey}
+      onText={press.onText}
+    >
+      <view
         ref={(handle) => {
-          node = handle.id;
-          writeSemantics();
-        }}
-        onClick={toggle}
-        onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
-        onKey={(key) => {
-          if (key === "Enter") {
-            toggle();
-          }
-        }}
-        onText={(value) => {
-          if (value === " ") {
-            toggle();
-          }
+          if (handle === null) return;
+          box = handle;
+          bindStyle(handle, {
+            get defaults() {
+              return {
+                backgroundColor: on()
+                  ? theme().color.accent
+                  : theme().color.surface,
+                borderRadius: theme().shape.m,
+              };
+            },
+            get class() {
+              return props.trackProps?.class;
+            },
+            get classList() {
+              return props.trackProps?.classList;
+            },
+            get style() {
+              return props.trackProps?.style;
+            },
+          });
         }}
       >
-        <padding edges={theme().space.s}>
-          <decorated
-            ref={(handle) => {
-              box = handle.id;
-            }}
-            color={on() ? theme().color.accent : theme().color.surface}
-            radius={theme().shape.m}
-          >
-            <Text
-              fontSize={theme().fontSize.body}
-              color={on() ? theme().color.bg : theme().color.text}
-              weight={theme().weight.body}
-              direction={directionFor(theme().locale)}
-            >
-              {phrase()}
-            </Text>
-          </decorated>
-        </padding>
-      </pointer>
-    </opacity>
+        <Text
+          class={props.labelProps?.class}
+          classList={props.labelProps?.classList}
+          style={props.labelProps?.style}
+        >
+          {phrase()}
+        </Text>
+      </view>
+    </view>
   );
 }

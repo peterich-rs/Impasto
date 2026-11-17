@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 
-import { frameListenerCount, layoutListenerCount, onFrame, onLayout, runFrames, runLayouts } from "./frames.ts";
+import {
+  frameListenerCount,
+  layoutListenerCount,
+  onFrame,
+  onLayout,
+  runFrames,
+  runLayouts,
+} from "./frames.ts";
 
 const baseline = frameListenerCount();
 const stops: Array<() => void> = [];

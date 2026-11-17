@@ -8,19 +8,16 @@ export type RecyclerSlot<T> = {
   discard(): void;
   place(parent: number, anchor: number): void;
 };
-
 export type RecyclerState<T> = {
   live: Map<string, RecyclerSlot<T>>;
   pools: Map<string, RecyclerSlot<T>[]>;
 };
-
 export type RecyclerEntry<T> = {
   key: string;
   type: string;
   item: T;
   index: number;
 };
-
 export function syncRecycler<T>(options: {
   state: RecyclerState<T>;
   parent: number;
@@ -69,8 +66,11 @@ export function syncRecycler<T>(options: {
     placed[index].place(parent, anchor);
   }
 }
-
-function park<T>(state: RecyclerState<T>, slot: RecyclerSlot<T>, poolSize: number): void {
+function park<T>(
+  state: RecyclerState<T>,
+  slot: RecyclerSlot<T>,
+  poolSize: number,
+): void {
   slot.detach();
   const pooled = state.pools.get(slot.type) ?? [];
   pooled.push(slot);
@@ -79,7 +79,6 @@ function park<T>(state: RecyclerState<T>, slot: RecyclerSlot<T>, poolSize: numbe
     pooled.shift()?.discard();
   }
 }
-
 function take<T>(
   state: RecyclerState<T>,
   wanted: RecyclerEntry<T>,
@@ -94,7 +93,6 @@ function take<T>(
   slot.set(wanted.item, wanted.index);
   return slot;
 }
-
 export function discardRecycler<T>(state: RecyclerState<T>): void {
   for (const slot of state.live.values()) {
     slot.discard();

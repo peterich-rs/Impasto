@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["type-tests/**/*.tsx", "../solid-renderer/src/jsx.ts", "../reactive/src/modules.d.ts"],
+  "exclude": []
+}

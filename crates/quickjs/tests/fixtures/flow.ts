@@ -1,0 +1,40 @@
+import { batch, createRoot, createSignal, createTrackedEffect, Errored, For, Show, Switch, Match } from "solid-js";
+import { scene } from "@impasto/solid-renderer";
+const assert=(ok:unknown,message:string)=>{if(!ok)throw new Error(message);};
+createRoot(dispose=>{
+  const root=scene.createElement("column");
+  const [items,setItems]=createSignal([{id:"a"},{id:"b"}]);
+  let created=0;
+  const list=For({get each(){return items();},keyed:item=>item.id,children:()=>{created++;return scene.createElement("sized",{w:10,h:10});}});
+  scene.insert(root,list);
+  const first=scene.firstChild(root),second=scene.nextSibling(first);
+  batch(()=>setItems([{id:"b"},{id:"a"}]));
+  assert(created===2,"keyed rows rebuilt");
+  assert(scene.firstChild(root)===second && scene.nextSibling(second)===first,"keyed order");
+  batch(()=>setItems([{id:"b"}]));
+  assert(created===2 && scene.firstChild(root)===second && scene.nextSibling(second)===0,"remove keyed row");
+  const [when,setWhen]=createSignal(1);
+  let shows=0;
+  const shown=Show({get when(){return when();},children:(_item)=>{shows++;return scene.createElement("sized");}}) as unknown as ()=>number;
+  shown();batch(()=>setWhen(2));shown();assert(shows===1,"non-keyed Show remounted");
+  batch(()=>setWhen(0));assert(!shown(),"Show hide");
+  const chosen=Switch({children:[Match({when:false,children:1}),Match({when:true,children:2})] as never}) as unknown as ()=>number;
+  assert(chosen()===2,"Switch match");
+  const [choice,setChoice]=createSignal(1);let matched=0;let value:(()=>number)|undefined;
+  const switching=Switch({children:Match({get when(){return choice();},children:(item:()=>number)=>{matched++;value=item;return scene.createElement("sized");}})}) as unknown as ()=>number;
+  const matchNode=switching();batch(()=>setChoice(2));
+  assert(switching()===matchNode && matched===1 && value?.()===2,"non-keyed Match remounted");
+  batch(()=>setChoice(0));switching();let stale=false;try{value?.();}catch{stale=true;}assert(stale,"stale Match accessor");
+  dispose();
+});
+createRoot(dispose=>{
+  const [fail,setFail]=createSignal(false);
+  const boundary=Errored({fallback:()=>scene.createElement("sized",{w:42}),get children(){
+    createTrackedEffect(()=>{if(fail())throw new Error("owned error");});
+    return scene.createElement("sized",{w:12});
+  }});
+  const root=scene.createElement("column");scene.insert(root,boundary);
+  batch(()=>setFail(true));
+  assert(scene.firstChild(root)!==0,"error fallback");
+  dispose();
+});

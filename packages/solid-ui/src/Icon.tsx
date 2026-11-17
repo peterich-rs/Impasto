@@ -1,29 +1,21 @@
-import { createTrackedEffect, createSignal } from "solid-js";
 import { directionFor, type NodeHandle } from "@impasto/solid-renderer";
-import { coreHost } from "./host-ext.ts";
+import { bindBox, eventsOf } from "./element.tsx";
+import type { IconProps } from "./props.ts";
 import { useTheme } from "./use-theme.ts";
 
-/**
- * A transform whose horizontal scale mirrors in RTL when `mirror` is set.
- */
-export function Icon(props: { mirror?: boolean; children?: unknown }): NodeHandle {
+/** Graphic container. `mirror` flips the horizontal scale in RTL; it does not load an icon font. */
+export function Icon(props: IconProps): NodeHandle {
   const theme = useTheme();
-  const [iconId, setIconId] = createSignal(0);
-  createTrackedEffect(() => {
-    const icon = iconId();
-    const locale = theme().locale;
-    const mirror = !!props.mirror;
-    if (icon !== 0) {
-      coreHost.setScaleXY(icon, directionFor(locale) === "rtl" && mirror ? -1 : 1, 1);
-    }
-  });
   return (
-    <transform
-      ref={(handle) => {
-        setIconId(handle.id);
-      }}
+    <stack
+      {...eventsOf(props)}
+      ref={(node) =>
+        bindBox(node, props, () => ({
+          scaleX: directionFor(theme().locale) === "rtl" && props.mirror ? -1 : 1,
+        }))
+      }
     >
       {props.children}
-    </transform>
+    </stack>
   );
 }

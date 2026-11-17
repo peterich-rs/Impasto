@@ -1,4 +1,4 @@
-import * as host from "@impasto/file-system/host";
+import * as scene from "./files.ts";
 
 export interface FileSystem {
   documentDirectory(): string;
@@ -10,4 +10,4 @@ export interface FileSystem {
   removeEventListener(type: string, listener: (e: unknown) => void): void;
 }
 
-export const FileSystem = host as unknown as FileSystem;
+export const FileSystem = scene as unknown as FileSystem;

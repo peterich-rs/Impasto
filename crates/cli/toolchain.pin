@@ -1,0 +1,7 @@
+# Published Node runtime carried by the CLI distribution. Babel, esbuild and
+# TypeScript versions are pinned by pnpm-lock.yaml.
+version 24.11.0
+platform darwin-arm64 30bbe12b71f5b89ba44e15dc0cfaf3c733538d46ee375691534b7bbe622225cc
+platform linux-arm64 33a6673b2c7bffeae9deec7f9f8b31aad9119b08f13d49b2ca3ee3bebfe8260f
+platform linux-x64 46da9a098973ab7ba4fca76945581ecb2eaf468de347173897044382f10e0a0a
+platform darwin-x64 20e7138957b665ecfad519b656ad2a4e1d1b46c41c67f9a68842089a960c58be

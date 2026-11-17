@@ -1,8 +1,7 @@
-import type { FieldProps } from "./field/shell.tsx";
 import { FieldShell } from "./field/shell.tsx";
 import type { NodeHandle } from "@impasto/solid-renderer";
-
-export type { FieldProps };
+import type { FieldProps } from "./props.ts";
+export type { FieldProps } from "./props.ts";
 
 /**
  * A text field. The string, selection, and composing range live in `core`'s

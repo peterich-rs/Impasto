@@ -1,9 +1,13 @@
 /** Inspector page: tree snapshot plus pointer probe with breadcrumbs. */
 import { createSignal, For, Show } from "solid-js";
 import { Text, useTheme } from "@impasto/solid-ui";
-import { host, onCleanup, onFrame, requestFrame } from "@impasto/solid-renderer";
+import {
+  scene,
+  onCleanup,
+  onFrame,
+  requestFrame,
+} from "@impasto/solid-renderer";
 import { setHighlights } from "../store.ts";
-
 type SnapshotNode = {
   id: number;
   kind: string;
@@ -16,19 +20,27 @@ type SnapshotNode = {
   debugOwned: boolean;
   children: (SnapshotNode | null)[];
 };
-
-type FlatRow = { depth: number; node: SnapshotNode };
-
-function flatten(node: SnapshotNode | null, depth: number, out: FlatRow[], limit: number): void {
+type FlatRow = {
+  depth: number;
+  node: SnapshotNode;
+};
+function flatten(
+  node: SnapshotNode | null,
+  depth: number,
+  out: FlatRow[],
+  limit: number,
+): void {
   if (node === null || out.length >= limit) {
     return;
   }
-  out.push({ depth, node });
+  out.push({
+    depth,
+    node,
+  });
   for (const child of node.children) {
     flatten(child, depth + 1, out, limit);
   }
 }
-
 export function InspectorPage() {
   const theme = useTheme();
   const [rows, setRows] = createSignal<FlatRow[]>([]);
@@ -37,15 +49,17 @@ export function InspectorPage() {
   const [chain, setChain] = createSignal<string>("");
   const stopProbe = () => {
     if (probing()) {
-      host.debugSetPointerTrace?.(false, false);
+      scene.debugSetPointerTrace?.(false, false);
       setProbing(false);
     }
   };
   onCleanup(stopProbe);
   const refresh = () => {
-    const text = host.debugSnapshot?.() ?? "null";
+    const text = scene.debugSnapshot?.() ?? "null";
     try {
-      const parsed = JSON.parse(text) as { root: SnapshotNode | null };
+      const parsed = JSON.parse(text) as {
+        root: SnapshotNode | null;
+      };
       const out: FlatRow[] = [];
       flatten(parsed.root ?? null, 0, out, 300);
       setRows(out);
@@ -55,29 +69,46 @@ export function InspectorPage() {
   };
   const boxOf = (id: number, color: string) => {
     try {
-      const rect = host.rect(id);
+      const rect = scene.rect(id);
       if (!rect) {
         return;
       }
-      setHighlights([{ x: rect.x, y: rect.y, w: rect.w, h: rect.h, color }]);
+      setHighlights([
+        {
+          x: rect.x,
+          y: rect.y,
+          w: rect.w,
+          h: rect.h,
+          color,
+        },
+      ]);
     } catch {
       setHighlights([]);
     }
   };
   const startProbe = () => {
-    host.debugSetPointerTrace?.(true, true);
+    scene.debugSetPointerTrace?.(true, true);
     setProbing(true);
     setChain("");
     const stop = onFrame(() => {
-      const last = host.debugLastPointer?.() ?? "null";
+      const last = scene.debugLastPointer?.() ?? "null";
       if (typeof last !== "string") {
         return;
       }
       try {
-        const parsed = JSON.parse(last) as { x: number; y: number; phase: string };
+        const parsed = JSON.parse(last) as {
+          x: number;
+          y: number;
+          phase: string;
+        };
         if (parsed.phase === "up") {
-          const probe = host.debugProbe?.(parsed.x, parsed.y) ?? "{}";
-          const walked = JSON.parse(probe) as { chain?: { id: number; kind: string }[] };
+          const probe = scene.debugProbe?.(parsed.x, parsed.y) ?? "{}";
+          const walked = JSON.parse(probe) as {
+            chain?: {
+              id: number;
+              kind: string;
+            }[];
+          };
           const chainNodes = walked.chain ?? [];
           setChain(chainNodes.map((item) => item.kind).join(" → "));
           const leaf = chainNodes[chainNodes.length - 1];
@@ -93,63 +124,148 @@ export function InspectorPage() {
     });
     onCleanup(stop);
   };
-  const current = () => rows().find((row) => row.node.id === selected()) ?? null;
+  const current = () =>
+    rows().find((row) => row.node.id === selected()) ?? null;
   return (
-    <column fill>
-      <row gap={8}>
-        <pointer onClick={refresh} focusable>
-          <decorated color={theme().color.primary} radius={6}>
-            <padding edges={6}>
-              <Text fontSize={11} color={theme().color.onPrimary}>
+    <view
+      style={{
+        width: "100%",
+        height: "100%",
+        flex: 1,
+        flexShrink: 1,
+        minWidth: 0,
+        minHeight: 0,
+      }}
+    >
+      <view
+        style={{
+          flexDirection: "row",
+          gap: 8,
+        }}
+      >
+        <view onClick={refresh} focusable>
+          <view
+            style={{
+              backgroundColor: theme().color.primary,
+              borderRadius: 6,
+            }}
+          >
+            <view
+              style={{
+                padding: 6,
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 11,
+                  color: theme().color.onPrimary,
+                }}
+              >
                 树
               </Text>
-            </padding>
-          </decorated>
-        </pointer>
-        <pointer onClick={() => (probing() ? stopProbe() : startProbe())} focusable>
-          <decorated color={probing() ? theme().color.danger : theme().color.surface} radius={6}>
-            <padding edges={6}>
-              <Text fontSize={11} color={probing() ? theme().color.onPrimary : theme().color.text}>
+            </view>
+          </view>
+        </view>
+        <view
+          onClick={() => (probing() ? stopProbe() : startProbe())}
+          focusable
+        >
+          <view
+            style={{
+              backgroundColor: probing()
+                ? theme().color.danger
+                : theme().color.surface,
+              borderRadius: 6,
+            }}
+          >
+            <view
+              style={{
+                padding: 6,
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 11,
+                  color: probing()
+                    ? theme().color.onPrimary
+                    : theme().color.text,
+                }}
+              >
                 {probing() ? "点屏幕…" : "选点"}
               </Text>
-            </padding>
-          </decorated>
-        </pointer>
-      </row>
+            </view>
+          </view>
+        </view>
+      </view>
       <Show when={chain() !== ""}>
-        <Text fontSize={10} color={theme().color.text}>
+        <Text
+          style={{
+            fontSize: 10,
+            color: theme().color.text,
+          }}
+        >
           {chain()}
         </Text>
       </Show>
-      <column gap={1} grow>
+      <view
+        style={{
+          gap: 1,
+          flex: 1,
+        }}
+      >
         <For each={rows().slice(0, 200)}>
           {(row) => (
-            <pointer onClick={() => {
-              setSelected(row.node.id);
-              boxOf(row.node.id, "#ff3b30");
-            }}>
-              <decorated
-                color={selected() === row.node.id ? theme().color.primary : theme().color.surface}
-                radius={4}
+            <view
+              onClick={() => {
+                setSelected(row.node.id);
+                boxOf(row.node.id, "#ff3b30");
+              }}
+            >
+              <view
+                style={{
+                  backgroundColor:
+                    selected() === row.node.id
+                      ? theme().color.primary
+                      : theme().color.surface,
+                  borderRadius: 4,
+                }}
               >
-                <padding edges={4}>
-                  <Text fontSize={10} color={theme().color.text} maxLines={1} ellipsis="…">
+                <view
+                  style={{
+                    padding: 4,
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 10,
+                      color: theme().color.text,
+                      maxLines: 1,
+                      ellipsis: "…",
+                    }}
+                  >
                     {"  ".repeat(row.depth)}
-                    {row.node.kind} {row.node.w.toFixed(0)}×{row.node.h.toFixed(0)}
+                    {row.node.kind} {row.node.w.toFixed(0)}×
+                    {row.node.h.toFixed(0)}
                     {row.node.text !== undefined ? ` "${row.node.text}"` : ""}
                   </Text>
-                </padding>
-              </decorated>
-            </pointer>
+                </view>
+              </view>
+            </view>
           )}
         </For>
-      </column>
+      </view>
       <Show when={current() !== null}>
-        <Text fontSize={9} color={theme().color.textMuted}>
-          id {current()!.node.id} · ({current()!.node.x.toFixed(0)}, {current()!.node.y.toFixed(0)}) ·{" "}
+        <Text
+          style={{
+            fontSize: 9,
+            color: theme().color.textMuted,
+          }}
+        >
+          id {current()!.node.id} · ({current()!.node.x.toFixed(0)},{" "}
+          {current()!.node.y.toFixed(0)}) ·{" "}
           {current()!.node.focusable ? "focusable" : "not focusable"}
         </Text>
       </Show>
-    </column>
+    </view>
   );
 }

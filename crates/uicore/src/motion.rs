@@ -268,7 +268,7 @@ impl Decay {
 /// How a scroll treats a drag past its limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverscrollMode {
-    /// Offset stays on the limit. The leftover times [`OVERSCROLL_FACTOR`] is overscroll.
+    /// Offset stays on the limit. The leftover times `OVERSCROLL_FACTOR` is overscroll.
     RubberBand,
     /// Offset stays on the limit and overscroll stays zero.
     Clamp,

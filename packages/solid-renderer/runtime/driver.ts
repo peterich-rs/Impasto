@@ -1,4 +1,4 @@
-import type { ListDriver } from "../src/host.ts";
+import type { ListDriver } from "../src/scene.ts";
 
 export type DriverId = { index: number; generation: number };
 
@@ -37,7 +37,7 @@ function same(id: DriverId, index: number, generation: number): boolean {
   return id.index === index && id.generation === generation;
 }
 
-/** Fans the single host callback out to the drivers that asked for it. */
+/** Fans the single scene callback out to the drivers that asked for it. */
 export function deliverDriver(
   kind: number,
   index: number,

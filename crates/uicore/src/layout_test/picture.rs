@@ -91,6 +91,8 @@ fn remove_detaches_the_subtree_from_record_and_hit() -> Result<(), crate::Error>
     let spot_y = tree.rect(label)?.y + 1.0;
     assert!(texts(&mut tree)?.contains(&"-".to_string()));
     tree.remove(column, region)?;
+    assert!(matches!(tree.record(), Err(crate::Error::LayoutRequired)));
+    tree.layout()?;
     assert!(!texts(&mut tree)?.contains(&"-".to_string()));
     assert!(tree.pointer(event(Phase::Down, spot_x, spot_y)).is_empty());
     tree.layout()?;

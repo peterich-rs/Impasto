@@ -7,15 +7,29 @@ use crate::{
 };
 
 #[test]
-fn reverse_is_only_for_a_row() -> Result<(), crate::Error> {
+fn reverse_preserves_a_row_or_column_axis() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper::default());
     let row = tree.row(0.0)?;
+    let first = tree.sized(10.0, 12.0)?;
+    let second = tree.sized(20.0, 24.0)?;
+    tree.add_child(row, first)?;
+    tree.add_child(row, second)?;
     tree.set_reverse(row, true)?;
+    tree.layout()?;
+    assert!(tree.rect(first)?.x > tree.rect(second)?.x);
+
+    let mut tree = Tree::new(MonoShaper::default());
     let column = tree.column(0.0)?;
-    assert!(matches!(
-        tree.set_reverse(column, true),
-        Err(crate::Error::WrongKind)
-    ));
+    let first = tree.sized(10.0, 12.0)?;
+    let second = tree.sized(20.0, 24.0)?;
+    tree.add_child(column, first)?;
+    tree.add_child(column, second)?;
+    tree.set_reverse(column, true)?;
+    tree.layout()?;
+    assert!(tree.rect(first)?.y > tree.rect(second)?.y);
+    tree.set_reverse(column, false)?;
+    tree.layout()?;
+    assert!(tree.rect(first)?.y < tree.rect(second)?.y);
     let text = tree.text("a", 16.0, [0, 0, 0, 255])?;
     assert!(matches!(
         tree.set_reverse(text, true),
@@ -35,6 +49,13 @@ fn a_zero_clip_hides_its_focusable_child() -> Result<(), crate::Error> {
     tree.set_min_size(clip, 0.0, 0.0)?;
     tree.set_max_size(clip, 0.0, 0.0)?;
     let button = tree.pointer_region()?;
+    tree.set_semantics(
+        button,
+        SemanticsHint {
+            role: Some(SemanticsRole::Button),
+            ..SemanticsHint::default()
+        },
+    )?;
     let box_ = tree.sized(40.0, 24.0)?;
     tree.add_child(button, box_)?;
     tree.add_child(clip, button)?;
@@ -69,6 +90,13 @@ fn a_positive_clip_keeps_its_focusable_child() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper::default());
     let clip = tree.clip(0.0)?;
     let button = tree.pointer_region()?;
+    tree.set_semantics(
+        button,
+        SemanticsHint {
+            role: Some(SemanticsRole::Button),
+            ..SemanticsHint::default()
+        },
+    )?;
     let box_ = tree.sized(40.0, 24.0)?;
     tree.add_child(button, box_)?;
     tree.add_child(clip, button)?;
@@ -84,6 +112,24 @@ fn a_positive_clip_keeps_its_focusable_child() -> Result<(), crate::Error> {
             .iter()
             .any(|node| node.role == SemanticsRole::Button)
     );
+    Ok(())
+}
+
+#[test]
+fn a_pointer_region_keeps_a_generic_role_and_an_activate_action() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    let region = tree.pointer_region()?;
+    let child = tree.sized(40.0, 24.0)?;
+    tree.add_child(region, child)?;
+    tree.layout()?;
+    let snapshot = tree.semantics().expect("snapshot");
+    let node = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.id == crate::SemanticsId::from_node(region))
+        .expect("pointer region");
+    assert_eq!(node.role, SemanticsRole::Generic);
+    assert!(node.actions.contains(SemanticsActions::ACTIVATE));
     Ok(())
 }
 
@@ -224,6 +270,38 @@ fn absolute_inset_offsets_from_the_stack_and_later_sibling_paints_after() -> Res
         ),
         Err(crate::Error::WrongKind)
     ));
+    Ok(())
+}
+
+#[test]
+fn nested_absolute_insets_resolve_against_the_immediate_parent() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    let root = tree.column(0.0)?;
+    let spacer = tree.sized(200.0, 30.0)?;
+    let parent = tree.sized(80.0, 60.0)?;
+    let child = tree.sized(10.0, 12.0)?;
+    tree.add_child(root, spacer)?;
+    tree.add_child(root, parent)?;
+    tree.add_child(parent, child)?;
+    tree.set_position(child, true)?;
+    tree.set_inset(
+        child,
+        Inset {
+            top: Some(7.0),
+            left: Some(4.0),
+            right: None,
+            bottom: None,
+        },
+    )?;
+    tree.set_viewport(13.0, 17.0, 200.0, 200.0)?;
+    tree.layout()?;
+    assert_eq!(tree.rect(parent)?.y, 47.0);
+    assert_eq!((tree.rect(child)?.x, tree.rect(child)?.y), (17.0, 54.0));
+
+    // Relative insets also remain active with Taffy's static-position default.
+    tree.set_position(child, false)?;
+    tree.layout()?;
+    assert_eq!((tree.rect(child)?.x, tree.rect(child)?.y), (17.0, 54.0));
     Ok(())
 }
 
@@ -622,6 +700,8 @@ fn a_span_color_change_repaints_without_layout() -> Result<(), crate::Error> {
     assert!(!tree.needs_layout());
     assert!(tree.needs_paint());
     tree.set_text(text, "abc")?;
+    assert!(matches!(tree.record(), Err(crate::Error::LayoutRequired)));
+    tree.layout()?;
     let painted = tree.record()?;
     let cleared = painted.commands.iter().any(
         |command| matches!(command, protocol::Command::Text { spans, .. } if spans.is_empty()),

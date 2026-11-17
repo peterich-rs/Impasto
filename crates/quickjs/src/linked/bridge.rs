@@ -806,7 +806,7 @@ pub(super) fn settle_http_head(
     status: u16,
     headers: &[(String, String)],
 ) {
-    let block = host::header_block(headers);
+    let block = bootstrap::header_block(headers);
     let header_bytes = cstring(&block);
     let _ = unsafe {
         qjs_http_head(
@@ -877,7 +877,7 @@ pub(super) fn settle_http(inner: &Inner, token: u64, result: &Result<HttpRespons
                 };
                 return;
             }
-            let headers = host::header_block(&response.headers);
+            let headers = bootstrap::header_block(&response.headers);
             let header_bytes = cstring(&headers);
             let _ = unsafe {
                 qjs_settle_http(
@@ -1066,7 +1066,7 @@ unsafe fn http_call_impl(
         token,
         method: method.to_owned(),
         url: url.to_owned(),
-        headers: host::header_pairs(headers),
+        headers: bootstrap::header_pairs(headers),
         body: bytes,
         cancel,
         timeout_ms: None,

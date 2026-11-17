@@ -1,5 +1,5 @@
 /** `#RRGGBB` or `#RRGGBBAA` to 0–255 channels. */
-export function colorBytes(hex: string): number[] {
+export function colorBytes(hex: string): [number, number, number, number] {
   const h = hex.startsWith("#") ? hex.slice(1) : hex;
   if (h.length === 8) {
     return [

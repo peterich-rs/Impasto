@@ -1,32 +1,45 @@
 import { createRenderEffect } from "solid-js";
 
-import type { HostNode, HostRendererOptions } from "../src/tree.ts";
-import { host } from "./host.ts";
+import type { NodeRef } from "../src/jsx.ts";
+import type { StyleProps } from "../src/style.ts";
+import type { Node, SceneOptions } from "../src/tree.ts";
+import { scene } from "./scene.ts";
+import { bindNodeRef } from "./ref.ts";
+import { bindStyleTo } from "./style.ts";
 
-let options: HostRendererOptions;
+let options: SceneOptions;
 
-export function bindImage(next: HostRendererOptions): void {
+export function bindImage(next: SceneOptions): void {
   options = next;
 }
 
-/** An image leaf. `source`, `w`, and `h` update together. */
-export function Image(props: { source?: string; w?: number; h?: number; alt?: string }): HostNode {
+export type ImageProps = StyleProps & {
+  ref?: NodeRef;
+  source?: string;
+  intrinsicSize?: { width: number; height: number };
+  alt?: string;
+  required?: boolean;
+};
+
+/** An image leaf. Author size lives on `style`; `intrinsicSize` is only the measure fallback. */
+export function Image(props: ImageProps): Node {
   const node = options.createElement("image", {
     source: props.source ?? "",
-    w: props.w ?? 0,
-    h: props.h ?? 0,
+    required: props.required === true,
   });
+  bindNodeRef(node, () => props.ref);
+  bindStyleTo(options.styles, node, props);
   createRenderEffect(
     () => ({
       source: props.source ?? "",
-      w: props.w ?? 0,
-      h: props.h ?? 0,
+      width: props.intrinsicSize?.width,
+      height: props.intrinsicSize?.height,
       alt: props.alt ?? "",
     }),
     (next) => {
-      host.setImage(node.id, next.source, next.w, next.h);
+      scene.setImage(node, next.source, next.width, next.height);
       if (next.alt !== "") {
-        host.setSemantics(node.id, 3, next.alt);
+        scene.setSemantics(node, 3, next.alt);
       }
     },
   );

@@ -1,7 +1,6 @@
 //! Developer-only layout diagnostics. Everything here is gated behind
 //! [`Tree::set_debug_scan`] and costs nothing when the flag is off.
 
-use super::node::Kind;
 use super::{NodeId, Tree};
 
 /// Which main axis an overflow was measured on.
@@ -103,9 +102,8 @@ impl Tree {
                 }
             };
             frame.next = child.next;
-            let kind = child.kind;
-            let tolerant = frame.tolerant || self.subtree_is_tolerant(child_id, kind);
-            if !tolerant && let Some(issue) = self.main_axis_overflow(child_id, kind) {
+            let tolerant = frame.tolerant || self.subtree_is_tolerant(child_id);
+            if !tolerant && let Some(issue) = self.main_axis_overflow(child_id) {
                 found.push(issue);
             }
             stack.push(WalkFrame {
@@ -116,14 +114,10 @@ impl Tree {
         self.debug.walk_stack = stack;
         // The root itself is a layout container too.
         if let Some(root) = self.root
-            && let Ok(node) = self.node(root)
+            && !self.subtree_is_tolerant(root)
+            && let Some(issue) = self.main_axis_overflow(root)
         {
-            let kind = node.kind;
-            if !self.subtree_is_tolerant(root, kind)
-                && let Some(issue) = self.main_axis_overflow(root, kind)
-            {
-                found.push(issue);
-            }
+            found.push(issue);
         }
         let seen = &mut self.debug.seen_issues;
         let fresh: Vec<LayoutIssue> = found
@@ -137,26 +131,32 @@ impl Tree {
     }
 
     /// Whether overflow inside this node is by design.
-    fn subtree_is_tolerant(&self, id: NodeId, kind: Kind) -> bool {
-        match kind {
-            Kind::Scroll | Kind::Clip => true,
-            Kind::Text => self
-                .node(id)
-                .ok()
-                .and_then(|node| node.text())
-                .is_some_and(|text| text.style.overflow == protocol::TextOverflow::Visible),
-            _ => false,
+    fn subtree_is_tolerant(&self, id: NodeId) -> bool {
+        let Ok(node) = self.node(id) else {
+            return false;
+        };
+        if node.is_scroll() || node.role.contains(super::node::Role::CLIP) {
+            return true;
         }
+        node.is_text()
+            && node
+                .text()
+                .is_some_and(|text| text.style.overflow == protocol::TextOverflow::Visible)
     }
 
-    /// The overflow of one Row/Column, if any.
-    fn main_axis_overflow(&self, id: NodeId, kind: Kind) -> Option<LayoutIssue> {
-        let axis = match kind {
-            Kind::Row => DebugAxis::Horizontal,
-            Kind::Column => DebugAxis::Vertical,
-            _ => return None,
-        };
+    /// The overflow of one row or column, if any.
+    fn main_axis_overflow(&self, id: NodeId) -> Option<LayoutIssue> {
         let parent = self.node(id).ok()?;
+        if !parent.is_box() {
+            return None;
+        }
+        let axis = if parent.is_row_flex() {
+            DebugAxis::Horizontal
+        } else if parent.is_column_flex() {
+            DebugAxis::Vertical
+        } else {
+            return None;
+        };
         let (limit, used) = match axis {
             DebugAxis::Horizontal => (parent.w, self.extent(id, true)),
             DebugAxis::Vertical => (parent.h, self.extent(id, false)),
@@ -318,7 +318,7 @@ impl Tree {
         out.push_str("{\"id\":");
         push_u64(out, id.to_raw());
         out.push_str(",\"kind\":\"");
-        out.push_str(kind_name(node.kind));
+        out.push_str(node.kind_name());
         out.push_str("\",\"x\":");
         push_f32(out, rect.x);
         out.push_str(",\"y\":");
@@ -388,7 +388,7 @@ impl Tree {
             out.push_str("{\"id\":");
             push_u64(&mut out, id.to_raw());
             out.push_str(",\"kind\":\"");
-            out.push_str(kind_name(node.kind));
+            out.push_str(node.kind_name());
             out.push_str("\"}");
         }
         out.push_str("]}");
@@ -420,26 +420,6 @@ impl Tree {
             child = self.node(cid).ok().and_then(|n| n.prev);
         }
         true
-    }
-}
-
-fn kind_name(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Row => "row",
-        Kind::Column => "column",
-        Kind::Grid => "grid",
-        Kind::Padding => "padding",
-        Kind::Align => "align",
-        Kind::Sized => "sized",
-        Kind::Stack => "stack",
-        Kind::Clip => "clip",
-        Kind::Opacity => "opacity",
-        Kind::Scroll => "scroll",
-        Kind::Transform => "transform",
-        Kind::Text => "text",
-        Kind::Image => "image",
-        Kind::PointerRegion => "pointer",
-        Kind::Decorated => "decorated",
     }
 }
 

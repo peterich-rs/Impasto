@@ -6,6 +6,8 @@
 #include <time.h>
 
 #include "quickjs.h"
+#include "mutation.h"
+#include "style.gen.h"
 
 /*
  * Handles are raw NodeIds. Generation lives in the high bits, so a live id is
@@ -31,6 +33,8 @@ typedef struct MutRec {
     uint32_t _pad;
     const char *text;
     size_t text_len;
+    const StyleValueRecord *values;
+    size_t value_count;
 } MutRec;
 
 /* Numbers and an optional session-owned string. Layout must match `linked/call.rs`. */
@@ -216,13 +220,16 @@ typedef struct MotionHandler {
     JSValue fn;
 } MotionHandler;
 
-typedef struct Host {
+typedef struct Runtime {
     JSRuntime *rt;
     JSContext *ctx;
     QjsFns fns;
     Tap *taps;
     size_t tap_len;
     size_t tap_cap;
+    int reactive_failed;
+    JSValue scene_api;
+    JSValue reactive_api;
     JSValue frame_cb;
     int has_frame;
     JSValue layout_cb;
@@ -286,7 +293,7 @@ typedef struct Host {
     /* Promises already reported by the rejection checker this job round. */
     JSValue reject_seen[64];
     size_t reject_seen_len;
-} Host;
+} Runtime;
 
 #define QJS_MEMORY_LIMIT (16u << 20)
 /* Debug quickjs-ng takes about 44 ms to eval dist/counter.js. Mounting the
@@ -307,8 +314,8 @@ static int64_t now_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + (int64_t)ts.tv_nsec / 1000000;
 }
 
-static void disarm_entry_ptr(Host **slot) {
-    Host *host = slot ? *slot : NULL;
+static void disarm_entry_ptr(Runtime **slot) {
+    Runtime *host = slot ? *slot : NULL;
     if (!host) {
         return;
     }
@@ -316,13 +323,13 @@ static void disarm_entry_ptr(Host **slot) {
     host->entry_id = 0;
 }
 
-static void arm_slice(Host *host, const char *kind, uint64_t id) {
+static void arm_slice(Runtime *host, const char *kind, uint64_t id) {
     host->entry_kind = kind;
     host->entry_id = id;
     host->deadline_ms = now_ms() + QJS_TURN_MS;
 }
 
-static void arm_eval(Host *host) {
+static void arm_eval(Runtime *host) {
     host->entry_kind = "eval";
     host->entry_id = 0;
     host->deadline_ms = now_ms() + QJS_EVAL_MS;
@@ -399,7 +406,7 @@ static int should_annotate(const char *message) {
            (strstr(message, "interrupted") != NULL || strcmp(message, "quickjs job round limit") == 0);
 }
 
-static char *annotate_message(Host *host, const char *message) {
+static char *annotate_message(Runtime *host, const char *message) {
     const char *body = message ? message : "quickjs error";
     size_t len;
     char *out;
@@ -420,14 +427,14 @@ static char *annotate_message(Host *host, const char *message) {
     return out;
 }
 
-static void release_stash(Host *host) {
+static void release_stash(Runtime *host) {
     free(host->exc_message);
     free(host->exc_stack);
     host->exc_message = NULL;
     host->exc_stack = NULL;
 }
 
-static void stash_plain(Host *host, const char *message) {
+static void stash_plain(Runtime *host, const char *message) {
     release_stash(host);
     host->exc_message = annotate_message(host, message);
     host->exc_stack = NULL;
@@ -435,7 +442,7 @@ static void stash_plain(Host *host, const char *message) {
 
 static int interrupt_handler(JSRuntime *rt, void *opaque) {
     (void)rt;
-    Host *host = opaque;
+    Runtime *host = opaque;
     return now_ms() > host->deadline_ms;
 }
 
@@ -443,11 +450,11 @@ static JSValue throw_msg(JSContext *ctx, const char *msg) {
     return JS_ThrowTypeError(ctx, "%s", msg);
 }
 
-static Host *host_of(JSContext *ctx) {
+static Runtime *runtime_of(JSContext *ctx) {
     return JS_GetContextOpaque(ctx);
 }
 
-static void stash_exception(Host *host, JSContext *ctx, char *err, size_t err_len) {
+static void stash_exception(Runtime *host, JSContext *ctx, char *err, size_t err_len) {
     JSValue exception = JS_GetException(ctx);
     const char *text = JS_ToCString(ctx, exception);
     JSValue stack_val = JS_GetPropertyStr(ctx, exception, "stack");
@@ -471,7 +478,7 @@ static void stash_exception(Host *host, JSContext *ctx, char *err, size_t err_le
     JS_FreeValue(ctx, exception);
 }
 
-static void publish_fault(Host *host, const char *source) {
+static void publish_fault(Runtime *host, const char *source) {
     if (!host->fns.fault || !host->exc_message) {
         return;
     }
@@ -479,7 +486,7 @@ static void publish_fault(Host *host, const char *source) {
                     host->exc_stack, host->exc_stack ? strlen(host->exc_stack) : 0);
 }
 
-static void log_stashed(Host *host, int level) {
+static void log_stashed(Runtime *host, int level) {
     size_t mlen;
     size_t slen;
     size_t total;
@@ -506,7 +513,7 @@ static void log_stashed(Host *host, int level) {
 }
 
 /* `report` logs and keeps dispatching. `freeze` fails the call so the frame holds. */
-static void listener_failed(Host *host, char *err, size_t err_len, int *failed) {
+static void listener_failed(Runtime *host, char *err, size_t err_len, int *failed) {
     if (!host->listener_freeze) {
         stash_exception(host, host->ctx, NULL, 0);
         publish_fault(host, "listener");
@@ -548,7 +555,7 @@ static char *format_rejection(JSContext *ctx, JSValueConst reason) {
     return out;
 }
 
-static void rejection_fault(Host *host, JSValueConst reason) {
+static void rejection_fault(Runtime *host, JSValueConst reason) {
     JSContext *ctx = host->ctx;
     const char *text = JS_ToCString(ctx, reason);
     JSValue stack_val = JS_GetPropertyStr(ctx, reason, "stack");
@@ -558,10 +565,11 @@ static void rejection_fault(Host *host, JSValueConst reason) {
     if (!JS_IsException(stack_val) && !JS_IsUndefined(stack_val)) {
         stack = JS_ToCString(ctx, stack_val);
     }
-    len = 32 + (text ? strlen(text) : 0);
+    len = 32 + (text ? strlen(text) : 0) + (stack ? strlen(stack) : 0);
     message = malloc(len + 1);
     if (message && host->fns.fault) {
-        snprintf(message, len + 1, "unhandled rejection: %s", text ? text : "quickjs error");
+        snprintf(message, len + 1, "unhandled rejection: %s%s%s", text ? text : "quickjs error",
+                 stack ? "\n" : "", stack ? stack : "");
         host->fns.fault(host->fns.session, "rejection", message, strlen(message), stack,
                         stack ? strlen(stack) : 0);
     }
@@ -575,7 +583,7 @@ static void rejection_fault(Host *host, JSValueConst reason) {
     }
 }
 
-static void report_rejection(Host *host, JSValueConst reason) {
+static void report_rejection(Runtime *host, JSValueConst reason) {
     JSContext *ctx = host->ctx;
     char *text = format_rejection(ctx, reason);
     if (!text) {
@@ -607,7 +615,7 @@ static void report_rejection(Host *host, JSValueConst reason) {
 static void promise_rejection_checker(JSContext *ctx, JSValueConst promise,
                                       JSValueConst reason, bool is_handled, void *opaque) {
     (void)reason;
-    Host *host = opaque;
+    Runtime *host = opaque;
     if (!host) {
         return;
     }
@@ -631,7 +639,7 @@ static void promise_rejection_checker(JSContext *ctx, JSValueConst promise,
     }
 }
 
-static void flush_rejections(Host *host) {
+static void flush_rejections(Runtime *host) {
     while (host->reject_seen_len > 0) {
         JSValue promise = host->reject_seen[--host->reject_seen_len];
         JSValue reason = JS_PromiseResult(host->ctx, promise);
@@ -726,9 +734,9 @@ static int read_color(JSContext *ctx, JSValueConst value, uint8_t out[4]) {
 
 
 
-static void free_tap(Host *host, Tap *tap);
+static void free_tap(Runtime *host, Tap *tap);
 
-static void forget_taps(Host *host, const uint64_t *ids, size_t len) {
+static void forget_taps(Runtime *host, const uint64_t *ids, size_t len) {
     for (size_t id_index = 0; id_index < len; id_index++) {
         size_t index = 0;
         while (index < host->tap_len) {
@@ -749,7 +757,7 @@ static void forget_taps(Host *host, const uint64_t *ids, size_t len) {
 
 
 
-void qjs_forget_ids(Host *host, const uint64_t *ids, size_t len) {
+void qjs_forget_ids(Runtime *host, const uint64_t *ids, size_t len) {
     if (!host || !ids) {
         return;
     }
@@ -780,7 +788,7 @@ void qjs_forget_ids(Host *host, const uint64_t *ids, size_t len) {
 
 
 
-static void free_tap(Host *host, Tap *tap) {
+static void free_tap(Runtime *host, Tap *tap) {
     if (tap->has_click) {
         JS_FreeValue(host->ctx, tap->click);
     }
@@ -930,7 +938,7 @@ static int tap_slot(Tap *tap, int kind, JSValue **slot, int **has) {
     }
 }
 
-static Tap *tap_for(Host *host, uint64_t id) {
+static Tap *tap_for(Runtime *host, uint64_t id) {
     for (size_t index = 0; index < host->tap_len; index++) {
         if (host->taps[index].id == id) {
             return &host->taps[index];
@@ -951,7 +959,7 @@ static Tap *tap_for(Host *host, uint64_t id) {
     return tap;
 }
 
-static int store_callback(Host *host, uint64_t id, JSValue func, int kind) {
+static int store_callback(Runtime *host, uint64_t id, JSValue func, int kind) {
     Tap *tap = tap_for(host, id);
     JSValue *slot;
     int *has;
@@ -967,7 +975,7 @@ static int store_callback(Host *host, uint64_t id, JSValue func, int kind) {
 }
 
 static JSValue bind_gesture(JSContext *ctx, int argc, JSValueConst *argv, int kind, const char *name) {
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 2) {
         return throw_msg(ctx, name);
     }
@@ -975,9 +983,16 @@ static JSValue bind_gesture(JSContext *ctx, int argc, JSValueConst *argv, int ki
     if (read_handle(ctx, argv[0], &id)) {
         return JS_EXCEPTION;
     }
+    if (JS_IsNull(argv[1]) || JS_IsUndefined(argv[1])) {
+        Tap *tap=tap_for(host,id);JSValue *slot=NULL;int *has=NULL;
+        if(tap && !tap_slot(tap,kind,&slot,&has) && *has) {JS_FreeValue(ctx,*slot);*slot=JS_UNDEFINED;*has=0;}
+        return JS_UNDEFINED;
+    }
     if (!JS_IsFunction(ctx, argv[1])) {
         return throw_msg(ctx, name);
     }
+    MutRec rec={0};rec.op=MUTATION_OP_POINTERTARGET;rec.id=id;
+    if(host->fns.mutate(host->fns.session,&rec,NULL)) return JS_ThrowTypeError(ctx,"invalid event target");
     JSValue func = JS_DupValue(ctx, argv[1]);
     if (store_callback(host, id, func, kind)) {
         JS_FreeValue(ctx, func);
@@ -1098,7 +1113,7 @@ static int focus_direction(const char *name) {
 
 
 
-static JSValue settings_object(JSContext *ctx, Host *host) {
+static JSValue settings_object(JSContext *ctx, Runtime *host) {
     JSValue object = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, object, "locale",
                       JS_NewStringLen(ctx, host->locale ? host->locale : "", host->locale_len));
@@ -1115,12 +1130,12 @@ static JSValue js_settings(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     (void)this_val;
     (void)argc;
     (void)argv;
-    return settings_object(ctx, host_of(ctx));
+    return settings_object(ctx, runtime_of(ctx));
 }
 
 static JSValue js_on_settings(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 1 || !JS_IsFunction(ctx, argv[0])) {
         return throw_msg(ctx, "onSettings(function)");
     }
@@ -1142,7 +1157,7 @@ static JSValue js_on_settings(JSContext *ctx, JSValueConst this_val, int argc, J
 
 static JSValue js_off_settings(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 1) {
         return throw_msg(ctx, "offSettings(id)");
     }
@@ -1339,7 +1354,7 @@ static int read_grid_line(JSContext *ctx, JSValueConst value, int *tag, int *num
 
 static JSValue js_on_back(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 1 || !JS_IsFunction(ctx, argv[0])) {
         return throw_msg(ctx, "onBack(function)");
     }
@@ -1361,7 +1376,7 @@ static JSValue js_on_back(JSContext *ctx, JSValueConst this_val, int argc, JSVal
 
 static JSValue js_on_motion_end(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 3 || !JS_IsString(argv[1]) || !JS_IsFunction(ctx, argv[2])) {
         return throw_msg(ctx, "onMotionEnd(id, prop, function)");
     }
@@ -1405,7 +1420,7 @@ static JSValue js_on_motion_end(JSContext *ctx, JSValueConst this_val, int argc,
 
 static JSValue js_off_motion_end(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 1) {
         return JS_UNDEFINED;
     }
@@ -1429,7 +1444,7 @@ static JSValue js_off_motion_end(JSContext *ctx, JSValueConst this_val, int argc
 
 static JSValue js_off_back(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 1) {
         return throw_msg(ctx, "offBack(id)");
     }
@@ -1475,7 +1490,7 @@ static char *shortcut_spec(JSContext *ctx, JSValueConst value) {
 
 static JSValue js_on_shortcut(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 2 || !JS_IsFunction(ctx, argv[1])) {
         return throw_msg(ctx, "onShortcut(spec, function)");
     }
@@ -1512,7 +1527,7 @@ static JSValue js_on_shortcut(JSContext *ctx, JSValueConst this_val, int argc, J
 static JSValue js_set_listener_error_policy(JSContext *ctx, JSValueConst this_val, int argc,
                                             JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 1) {
         return throw_msg(ctx, "setListenerErrorPolicy(policy)");
     }
@@ -1594,7 +1609,7 @@ static JSValue js_on_composing(JSContext *ctx, JSValueConst this_val, int argc, 
 
 static JSValue js_on_frame(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 1) {
         return throw_msg(ctx, "onFrame(function)");
     }
@@ -1611,7 +1626,7 @@ static JSValue js_on_frame(JSContext *ctx, JSValueConst this_val, int argc, JSVa
 
 static JSValue js_on_layout(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 1) {
         return throw_msg(ctx, "onLayout(function)");
     }
@@ -1739,7 +1754,7 @@ static JSValue point_object(JSContext *ctx, float x, float y, float w, float h, 
 static JSValue js_on_scroll_state(JSContext *ctx, JSValueConst this_val, int argc,
                                   JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 1) {
         return throw_msg(ctx, "onScrollState(function)");
     }
@@ -1758,7 +1773,7 @@ static JSValue js_on_scroll_state(JSContext *ctx, JSValueConst this_val, int arg
 
 static JSValue js_apply_mutation(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 8) {
         return throw_msg(ctx, "applyMutation(op, id, parent, before, field, number, number2, color, text)");
     }
@@ -2004,12 +2019,12 @@ static JSValue js_request_frame(JSContext *ctx, JSValueConst this_val, int argc,
     (void)this_val;
     (void)argc;
     (void)argv;
-    host_of(ctx)->wants_frame = 1;
+    runtime_of(ctx)->wants_frame = 1;
     return JS_UNDEFINED;
 }
 
 static JSValue console_call(JSContext *ctx, int argc, JSValueConst *argv, int level) {
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     char *buf = NULL;
     size_t len = 0;
     size_t cap = 0;
@@ -2107,7 +2122,7 @@ static JSValue js_debug_memory(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_core_log(JSContext *ctx, JSValueConst this_val, int argc,
                            JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 2 || !host->fns.log) {
         return JS_UNDEFINED;
     }
@@ -2138,7 +2153,7 @@ static JSValue js_core_log(JSContext *ctx, JSValueConst this_val, int argc,
 
 static int bind_fn(JSContext *ctx, JSValue core, const char *name, JSCFunction *fn, int length);
 
-static int bind_console(Host *host) {
+static int bind_console(Runtime *host) {
     JSContext *ctx = host->ctx;
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue console = JS_NewObject(ctx);
@@ -2166,7 +2181,7 @@ typedef struct DriverBox {
     uint32_t generation;
 } DriverBox;
 
-static DriverBox *driver_box(Host *host, JSValueConst value, JSClassID class_id) {
+static DriverBox *driver_box(Runtime *host, JSValueConst value, JSClassID class_id) {
     if (!host) {
         return NULL;
     }
@@ -2174,7 +2189,7 @@ static DriverBox *driver_box(Host *host, JSValueConst value, JSClassID class_id)
 }
 
 static void release_box(JSRuntime *rt, JSValueConst val, JSClassID class_id, int list) {
-    Host *host = JS_GetRuntimeOpaque(rt);
+    Runtime *host = JS_GetRuntimeOpaque(rt);
     if (!host) {
         return;
     }
@@ -2191,7 +2206,7 @@ static void release_box(JSRuntime *rt, JSValueConst val, JSClassID class_id, int
 }
 
 static void list_finalizer(JSRuntime *rt, JSValueConst val) {
-    Host *host = JS_GetRuntimeOpaque(rt);
+    Runtime *host = JS_GetRuntimeOpaque(rt);
     if (!host) {
         return;
     }
@@ -2199,7 +2214,7 @@ static void list_finalizer(JSRuntime *rt, JSValueConst val) {
 }
 
 static void scroll_finalizer(JSRuntime *rt, JSValueConst val) {
-    Host *host = JS_GetRuntimeOpaque(rt);
+    Runtime *host = JS_GetRuntimeOpaque(rt);
     if (!host) {
         return;
     }
@@ -2231,7 +2246,7 @@ static JSValue driver_id_value(JSContext *ctx, DriverBox *box) {
 
 static JSValue js_list_driver(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     int32_t overscan = 4;
     double estimate = 1;
     if (argc >= 1 && JS_ToInt32(ctx, &overscan, argv[0])) {
@@ -2253,7 +2268,7 @@ static JSValue js_scroll_controller(JSContext *ctx, JSValueConst this_val, int a
     (void)this_val;
     (void)argc;
     (void)argv;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     uint32_t index = 0;
     uint32_t generation = 0;
     if (host->fns.scroll_create(host->fns.session, &index, &generation)) {
@@ -2265,7 +2280,7 @@ static JSValue js_scroll_controller(JSContext *ctx, JSValueConst this_val, int a
 static JSValue js_list_id(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)argc;
     (void)argv;
-    DriverBox *box = driver_box(host_of(ctx), this_val, host_of(ctx)->list_class);
+    DriverBox *box = driver_box(runtime_of(ctx), this_val, runtime_of(ctx)->list_class);
     if (!box) {
         return throw_msg(ctx, "listDriver");
     }
@@ -2275,7 +2290,7 @@ static JSValue js_list_id(JSContext *ctx, JSValueConst this_val, int argc, JSVal
 static JSValue js_scroll_id(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)argc;
     (void)argv;
-    DriverBox *box = driver_box(host_of(ctx), this_val, host_of(ctx)->scroll_class);
+    DriverBox *box = driver_box(runtime_of(ctx), this_val, runtime_of(ctx)->scroll_class);
     if (!box) {
         return throw_msg(ctx, "scrollController");
     }
@@ -2285,7 +2300,7 @@ static JSValue js_scroll_id(JSContext *ctx, JSValueConst this_val, int argc, JSV
 static JSValue js_list_release(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)argc;
     (void)argv;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     DriverBox *box = driver_box(host, this_val, host->list_class);
     if (!box) {
         return JS_UNDEFINED;
@@ -2300,7 +2315,7 @@ static JSValue js_scroll_release(JSContext *ctx, JSValueConst this_val, int argc
                                  JSValueConst *argv) {
     (void)argc;
     (void)argv;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     DriverBox *box = driver_box(host, this_val, host->scroll_class);
     if (!box) {
         return JS_UNDEFINED;
@@ -2312,7 +2327,7 @@ static JSValue js_scroll_release(JSContext *ctx, JSValueConst this_val, int argc
 }
 
 static JSValue js_list_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     DriverBox *box = driver_box(host, this_val, host->list_class);
     if (!box) {
         return throw_msg(ctx, "listDriver");
@@ -2335,7 +2350,7 @@ static JSValue js_list_bind(JSContext *ctx, JSValueConst this_val, int argc, JSV
 
 static JSValue js_list_configure(JSContext *ctx, JSValueConst this_val, int argc,
                                  JSValueConst *argv) {
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     DriverBox *box = driver_box(host, this_val, host->list_class);
     if (!box || argc < 3) {
         return throw_msg(ctx, "listDriver.configure");
@@ -2358,7 +2373,7 @@ static JSValue js_list_configure(JSContext *ctx, JSValueConst this_val, int argc
 
 static JSValue js_list_set_items(JSContext *ctx, JSValueConst this_val, int argc,
                                  JSValueConst *argv) {
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     DriverBox *box = driver_box(host, this_val, host->list_class);
     if (!box || argc < 1 || !JS_IsArray(argv[0])) {
         return throw_msg(ctx, "listDriver.setItems");
@@ -2407,7 +2422,7 @@ static JSValue js_list_set_items(JSContext *ctx, JSValueConst this_val, int argc
 
 static JSValue js_list_note_row(JSContext *ctx, JSValueConst this_val, int argc,
                                 JSValueConst *argv) {
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     DriverBox *box = driver_box(host, this_val, host->list_class);
     if (!box || argc < 2) {
         return throw_msg(ctx, "listDriver.noteRow");
@@ -2431,7 +2446,7 @@ static JSValue js_list_note_row(JSContext *ctx, JSValueConst this_val, int argc,
 }
 
 static JSValue js_scroll_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     DriverBox *box = driver_box(host, this_val, host->scroll_class);
     if (!box || argc < 2) {
         return throw_msg(ctx, "scrollController.bind");
@@ -2449,7 +2464,7 @@ static JSValue js_scroll_bind(JSContext *ctx, JSValueConst this_val, int argc, J
 
 static JSValue js_scroll_configure(JSContext *ctx, JSValueConst this_val, int argc,
                                    JSValueConst *argv) {
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     DriverBox *box = driver_box(host, this_val, host->scroll_class);
     if (!box || argc < 5) {
         return throw_msg(ctx, "scrollController.configure");
@@ -2499,7 +2514,7 @@ static JSValue drag_object(JSContext *ctx, float ox, float oy, float over_x, flo
 
 static JSValue js_scroll_drag_by(JSContext *ctx, JSValueConst this_val, int argc,
                                  JSValueConst *argv) {
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     DriverBox *box = driver_box(host, this_val, host->scroll_class);
     if (!box || argc < 2) {
         return throw_msg(ctx, "scrollController.dragBy");
@@ -2523,7 +2538,7 @@ static JSValue js_scroll_drag_by(JSContext *ctx, JSValueConst this_val, int argc
 
 static JSValue js_scroll_finish(JSContext *ctx, JSValueConst this_val, int argc,
                                 JSValueConst *argv) {
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     DriverBox *box = driver_box(host, this_val, host->scroll_class);
     if (!box || argc < 1) {
         return throw_msg(ctx, "scrollController.finishDrag");
@@ -2542,7 +2557,7 @@ static JSValue js_scroll_drag_end(JSContext *ctx, JSValueConst this_val, int arg
                                   JSValueConst *argv) {
     (void)argc;
     (void)argv;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     DriverBox *box = driver_box(host, this_val, host->scroll_class);
     if (!box) {
         return throw_msg(ctx, "scrollController.dragEnd");
@@ -2554,7 +2569,7 @@ static JSValue js_scroll_drag_end(JSContext *ctx, JSValueConst this_val, int arg
 }
 
 static JSValue js_scroll_wheel(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     DriverBox *box = driver_box(host, this_val, host->scroll_class);
     if (!box || argc < 2) {
         return throw_msg(ctx, "scrollController.wheel");
@@ -2571,7 +2586,7 @@ static JSValue js_scroll_wheel(JSContext *ctx, JSValueConst this_val, int argc, 
 }
 
 static JSValue js_scroll_query(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     DriverBox *box = driver_box(host, this_val, host->scroll_class);
     if (!box || argc < 1) {
         return throw_msg(ctx, "scrollController.query");
@@ -2590,7 +2605,7 @@ static JSValue js_scroll_query(JSContext *ctx, JSValueConst this_val, int argc, 
 
 static JSValue js_scroll_consume(JSContext *ctx, JSValueConst this_val, int argc,
                                  JSValueConst *argv) {
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     DriverBox *box = driver_box(host, this_val, host->scroll_class);
     if (!box || argc < 2) {
         return throw_msg(ctx, "scrollController.consume");
@@ -2610,7 +2625,7 @@ static JSValue js_scroll_consume(JSContext *ctx, JSValueConst this_val, int argc
 
 static JSValue js_on_driver(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 1 || !JS_IsFunction(ctx, argv[0])) {
         return throw_msg(ctx, "onDriver(function)");
     }
@@ -2702,7 +2717,7 @@ static int read_number_list(JSContext *ctx, JSValueConst value, double *nums, in
 
 static JSValue js_mutate(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 11) {
         return throw_msg(ctx, "mutate");
     }
@@ -2748,7 +2763,7 @@ static JSValue js_mutate(JSContext *ctx, JSValueConst this_val, int argc, JSValu
 
 static JSValue js_query(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 1) {
         return throw_msg(ctx, "query");
     }
@@ -2794,7 +2809,7 @@ static JSValue js_query(JSContext *ctx, JSValueConst this_val, int argc, JSValue
 
 static JSValue js_effect(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 1) {
         return throw_msg(ctx, "effect");
     }
@@ -2866,7 +2881,7 @@ static JSValue js_effect(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     return call_object(ctx, &out);
 }
 
-static int bind_driver_classes(Host *host) {
+static int bind_driver_classes(Runtime *host) {
     JS_NewClassID(host->rt, &host->list_class);
     JS_NewClassID(host->rt, &host->scroll_class);
     JSClassDef list_def;
@@ -2892,7 +2907,916 @@ static int bind_driver_classes(Host *host) {
     return 0;
 }
 
-static int bind_core(Host *host) {
+/* The reactive graph lives in Rust. A JSValue crosses the ABI as its raw
+ * bytes; on this target that is the 16-byte non-NaN-boxed layout. */
+extern uint64_t reactive_entry(void *session, JSContext *ctx, uint32_t op, const uint64_t *args,
+                                       uint32_t argc);
+
+static JSValue bytes_to_value(const uint8_t *bytes) {
+    JSValue value;
+    memcpy(&value, bytes, sizeof(value));
+    return value;
+}
+
+static void value_to_bytes(JSValue value, uint8_t *out) {
+    memcpy(out, &value, sizeof(value));
+}
+
+
+void qjs_reactive_dup(JSContext *ctx, const uint8_t *bytes, uint8_t *out) {
+    value_to_bytes(JS_DupValue(ctx, bytes_to_value(bytes)), out);
+}
+
+void qjs_reactive_free(JSContext *ctx, const uint8_t *bytes) {
+    JS_FreeValue(ctx, bytes_to_value(bytes));
+}
+
+int qjs_reactive_call(JSContext *ctx, const uint8_t *func, const uint8_t *arg, uint8_t *out) {
+    JSValue fn = bytes_to_value(func);
+    JSValue argument = arg ? bytes_to_value(arg) : JS_UNDEFINED;
+    int argc = arg ? 1 : 0;
+    JSValue result = JS_Call(ctx, fn, JS_UNDEFINED, argc, argc ? &argument : NULL);
+    if (JS_IsException(result)) {
+        return -1;
+    }
+    value_to_bytes(result, out);
+    return 0;
+}
+
+int qjs_reactive_handle_error(JSContext *ctx, uint64_t owner) {
+    Runtime *host=runtime_of(ctx);
+    JSValue error=JS_GetException(ctx);
+    JSValue handler=JS_GetPropertyStr(ctx,host->reactive_api,"handleError");
+    JSValue args[2]={error,JS_NewFloat64(ctx,(double)owner)};
+    JSValue result=JS_Call(ctx,handler,JS_UNDEFINED,2,args);
+    int handled=!JS_IsException(result) && JS_ToBool(ctx,result);
+    JS_FreeValue(ctx,handler);JS_FreeValue(ctx,result);
+    if(!handled) { JS_Throw(ctx,JS_DupValue(ctx,error)); stash_exception(host,ctx,NULL,0); publish_fault(host,"reactive"); log_stashed(host,3);host->reactive_failed=1; }
+    JS_FreeValue(ctx,error);return handled;
+}
+
+int qjs_reactive_same(JSContext *ctx, const uint8_t *a, const uint8_t *b) {
+    JSValue left = bytes_to_value(a);
+    JSValue right = bytes_to_value(b);
+    return JS_IsStrictEqual(ctx, left, right) ? 1 : 0;
+}
+
+int qjs_reactive_is_fn(JSContext *ctx, const uint8_t *bytes) {
+    (void)ctx;
+    JSValue value = bytes_to_value(bytes);
+    return JS_IsFunction(ctx, value) ? 1 : 0;
+}
+
+extern uint64_t reactive_hold(void *session, JSContext *ctx, const uint8_t *bytes);
+extern int reactive_take(void *session, uint64_t handle, uint8_t *out);
+
+static JSValue js_reactive_op(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic) {
+    (void)this_val;
+    Runtime *host = runtime_of(ctx);
+    uint64_t args[8];
+    int count = argc > 8 ? 8 : argc;
+    for (int index = 0; index < count; index++) {
+        /* Ids are numbers. Values and functions are stored and passed as a slot
+         * handle. `get` and `set` take an id first; `set`'s second argument is a
+         * value. Everything else's arguments are values. */
+        int is_id = (magic == 2) || (magic == 3 && index == 0) || (magic == 8) ||
+                    (magic == 7) || (magic == 13) || (magic == 17) || (magic == 18) || (magic == 5 && index == 2);
+        if (is_id && JS_IsNumber(argv[index])) {
+            double number = 0;
+            JS_ToFloat64(ctx, &number, argv[index]);
+            args[index] = (uint64_t)number;
+            continue;
+        }
+        uint8_t bytes[16];
+        value_to_bytes(JS_DupValue(ctx, argv[index]), bytes);
+        args[index] = reactive_hold(host->fns.session, ctx, bytes);
+    }
+    uint64_t result = reactive_entry(host->fns.session, ctx, (uint32_t)magic, args, (uint32_t)count);
+    /* createSignal and createMemo return an id. Slot 0 is a live id and is not a
+     * value handle, so a zero result there is the id, not "nothing". */
+    if (result == 0 && magic != 1 && magic != 4 && magic != 7 && magic != 9 && magic != 12) {
+        return JS_UNDEFINED;
+    }
+    /* The high bit marks a raw id or count. Anything else is a slot handle. */
+    if (result & ((uint64_t)1 << 63)) {
+        return JS_NewFloat64(ctx, (double)(result & (((uint64_t)1 << 63) - 1)));
+    }
+    uint8_t bytes[16];
+    if (reactive_take(host->fns.session, result, bytes)) {
+        return JS_NewFloat64(ctx, -1);
+    }
+    return bytes_to_value(bytes);
+}
+
+int qjs_run_updates(Runtime *host,char *error,size_t error_len) {
+    arm_slice(host,"reactive",0);
+    Runtime *armed __attribute__((cleanup(disarm_entry_ptr)))=host;(void)armed;
+    host->reactive_failed=0;
+    reactive_entry(host->fns.session,host->ctx,14,NULL,0);
+    if(host->reactive_failed) {
+        if(error && error_len) snprintf(error,error_len,"%s",host->exc_message ? host->exc_message : "reactive computation failed");
+        return -1;
+    }
+    return 0;
+}
+
+static const char *REACTIVE_NAMES[] = {
+    "createSignal", "get", "set", "createMemo", "createRenderEffect", "createTrackedEffect",
+    "pushOwner", "dispose", "owner", "root", "onCleanup", "pushUntrack", "popUntrack", "runUpdates",
+    "pushBatch", "popBatch", "parentOwner", "isLive",
+};
+
+static int js_reactive_init(JSContext *ctx, JSModuleDef *module);
+
+static JSModuleDef *load_reactive_module(JSContext *ctx, Runtime *host) {
+    (void)host;
+    JSModuleDef *module = JS_NewCModule(ctx, "#reactive", js_reactive_init);
+    if (!module) {
+        return NULL;
+    }
+    for (int index = 0; index < (int)(sizeof(REACTIVE_NAMES) / sizeof(REACTIVE_NAMES[0])); index++) {
+        if (JS_AddModuleExport(ctx, module, REACTIVE_NAMES[index])) {
+            return NULL;
+        }
+    }
+    return module;
+}
+
+static int bind_reactive(Runtime *host) {
+    /* The module is built on its first import. Nothing to do at startup. */
+    (void)host;
+    return 0;
+}
+
+/* scene: the node operations Babel generates. Each one fills a MutRec and calls
+ * the same mutate the old core._mutate used, so the write reaches Tree without
+ * the named wrappers in scene.js. */
+static uint64_t scene_mutate(JSContext *ctx, uint32_t op, uint64_t id, uint64_t parent, uint64_t before,
+                             uint32_t field, double n, double n2, double n3, double n4, JSValueConst color,
+                             JSValueConst text) {
+    Runtime *host = runtime_of(ctx);
+    MutRec rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.op = op;
+    rec.field = field;
+    rec.id = id;
+    rec.parent = parent;
+    rec.before = before;
+    rec.number = n;
+    rec.number2 = n2;
+    rec.number3 = n3;
+    rec.number4 = n4;
+    if (!JS_IsUndefined(color) && JS_IsArray(color)) {
+        read_color(ctx, color, rec.color);
+    }
+    if (!JS_IsUndefined(text) && JS_IsString(text)) {
+        rec.text = JS_ToCStringLen(ctx, &rec.text_len, text);
+    }
+    uint64_t created = 0;
+    if(host->fns.mutate(host->fns.session, &rec, &created)) JS_ThrowTypeError(ctx,"invalid scene mutation");
+    if (rec.text != NULL) {
+        JS_FreeCString(ctx, rec.text);
+    }
+    return created;
+}
+
+static const char *SCENE_CREATES[16];
+static int scene_hex(const char *text, uint8_t out[4]);
+static JSValue js_scene_create(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic);
+static JSValue js_scene_text_node(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv);
+static JSValue js_scene_set_prop(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+static JSValue scene_api_call(JSContext *ctx, const char *name, int argc, JSValueConst *args);
+
+static double scene_num(JSContext *ctx, JSValueConst value) {
+    double number = 0;
+    if (JS_IsNumber(value)) {
+        JS_ToFloat64(ctx, &number, value);
+    }
+    return number;
+}
+
+/* The first prop each tag consumes at creation. The rest are applied afterwards
+ * through setProp, matching the CREATED table in the renderer. */
+static const char *scene_first_prop(const char *tag) {
+    if (!strcmp(tag, "column") || !strcmp(tag, "row")) return "gap";
+    if (!strcmp(tag, "padding")) return "edges";
+    if (!strcmp(tag, "sized")) return "w";
+    if (!strcmp(tag, "scroll")) return "axis";
+    if (!strcmp(tag, "clip")) return "radius";
+    if (!strcmp(tag, "opacity")) return "alpha";
+    if (!strcmp(tag, "text")) return "fontSize";
+    if (!strcmp(tag, "align")) return "align";
+    return NULL;
+}
+
+static int scene_create_magic(const char *tag) {
+    for (int index = 0; index < (int)(sizeof(SCENE_CREATES) / sizeof(SCENE_CREATES[0])); index++) {
+        if (!strcmp(tag, SCENE_CREATES[index])) return index + 1;
+    }
+    return 0;
+}
+
+/* createElement(tag, props) returns the raw id. The renderer wraps it as { id }
+ * because the reconciler addresses nodes by object identity. */
+static JSValue js_scene_element(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if(argc<1) return JS_ThrowTypeError(ctx,"createElement(tag, props)");
+    const char *tag=JS_ToCString(ctx,argv[0]); if(!tag) return JS_EXCEPTION;
+    JSValue props=argc>1 && JS_IsObject(argv[1]) ? JS_DupValue(ctx,argv[1]) : JS_NewObject(ctx);
+    JSValue args[5]={JS_UNDEFINED,JS_UNDEFINED,JS_UNDEFINED,JS_UNDEFINED,JS_UNDEFINED};
+    const char *keys[5]={NULL,NULL,NULL,NULL,NULL};
+    const char *method=tag;
+    if(!strcmp(tag,"text")) keys[0]="value";
+    if(!strcmp(tag,"pointer")) method="pointerRegion";
+    if(!strcmp(tag,"column") || !strcmp(tag,"row")) keys[0]="gap";
+    else if(!strcmp(tag,"padding")) keys[0]="edges";
+    else if(!strcmp(tag,"align")) keys[0]="align";
+    else if(!strcmp(tag,"sized")) { /* axes are set below, preserving auto/percent */ }
+    else if(!strcmp(tag,"grid")) { keys[0]="columns";keys[1]="rows";keys[2]="gap"; }
+    else if(!strcmp(tag,"clip")) keys[0]="radius";
+    else if(!strcmp(tag,"opacity")) keys[0]="alpha";
+    else if(!strcmp(tag,"decorated")) { keys[0]="color";keys[1]="radius"; }
+    else if(!strcmp(tag,"scroll")) keys[0]="axis";
+    else if(!strcmp(tag,"image")) { keys[0]="source";keys[1]="w";keys[2]="h";keys[3]="mode";keys[4]="required"; }
+    for(int i=0;i<5;i++) if(keys[i]) args[i]=JS_GetPropertyStr(ctx,props,keys[i]);
+    if(!strcmp(tag,"decorated")) {
+        JSValue source=JS_IsUndefined(args[0]) ? JS_NewString(ctx,"#e4e4e7") : JS_DupValue(ctx,args[0]);
+        if(JS_IsString(source)) {
+            const char *word=JS_ToCString(ctx,source); uint8_t rgba[4]={0,0,0,255};
+            if(word) scene_hex(word,rgba);
+            JS_FreeValue(ctx,args[0]);args[0]=JS_NewArray(ctx);
+            for(int i=0;i<4;i++) JS_SetPropertyUint32(ctx,args[0],i,JS_NewInt32(ctx,rgba[i]));
+            if(word) JS_FreeCString(ctx,word);
+        }
+        JS_FreeValue(ctx,source);
+    }
+
+    for(int i=0;i<5;i++) {
+        if(JS_IsUndefined(args[i])) {
+            if(!strcmp(tag,"grid") && i<2) args[i]=JS_NewArray(ctx);
+            else if(!strcmp(tag,"align") && i==0) args[i]=JS_NewString(ctx,"start");
+            else if(!strcmp(tag,"image") && i==0) args[i]=JS_NewString(ctx,"");
+            else if(!strcmp(tag,"opacity") && i==0) args[i]=JS_NewInt32(ctx,255);
+            else args[i]=JS_NewInt32(ctx,0);
+        }
+    }
+    if(!strcmp(tag,"scroll") && JS_IsString(args[0])) {
+        const char *axis=JS_ToCString(ctx,args[0]); int code=axis && !strcmp(axis,"vertical") ? 1 : axis && !strcmp(axis,"horizontal") ? 2 : 0;
+        if(axis) JS_FreeCString(ctx,axis);JS_FreeValue(ctx,args[0]);args[0]=JS_NewInt32(ctx,code);
+    }
+    JSValue id=!strcmp(tag,"text") ? js_scene_text_node(ctx,JS_UNDEFINED,1,args) : scene_api_call(ctx,method,5,args);
+    for(int i=0;i<5;i++) JS_FreeValue(ctx,args[i]);
+    if(!JS_IsException(id)) {
+        JSPropertyEnum *names=NULL;uint32_t count=0;
+        if(JS_GetOwnPropertyNames(ctx,&names,&count,props,JS_GPN_STRING_MASK|JS_GPN_ENUM_ONLY)) { JS_FreeValue(ctx,id);id=JS_EXCEPTION; }
+        else {
+            for(uint32_t i=0;i<count;i++) {
+                JSValue name=JS_AtomToString(ctx,names[i].atom);
+                const char *word=JS_ToCString(ctx,name);
+                int consumed=0;
+                for(int k=0;k<5;k++) if(keys[k] && word && !strcmp(keys[k],word)) consumed=1;
+                if(!JS_IsException(id) && !consumed) {
+                    JSValue value=JS_GetProperty(ctx,props,names[i].atom);JSValue set[3]={id,name,value};
+                    JSValue result=js_scene_set_prop(ctx,JS_UNDEFINED,3,set);
+                    JS_FreeValue(ctx,value);
+                    if(JS_IsException(result)) { JS_FreeValue(ctx,id);id=JS_EXCEPTION; } else JS_FreeValue(ctx,result);
+                }
+                if(word) JS_FreeCString(ctx,word);JS_FreeValue(ctx,name);JS_FreeAtom(ctx,names[i].atom);
+            }
+            js_free(ctx,names);
+        }
+    }
+    JS_FreeValue(ctx,props);JS_FreeCString(ctx,tag);return id;
+}
+
+static JSValue js_scene_create(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic) {
+    (void)this_val;
+    double n = argc > 0 ? scene_num(ctx, argv[0]) : 0;
+    double n2 = argc > 1 ? scene_num(ctx, argv[1]) : 0;
+    JSValueConst color = argc > 2 ? argv[2] : JS_UNDEFINED;
+    JSValueConst text = argc > 3 ? argv[3] : JS_UNDEFINED;
+    uint64_t id = scene_mutate(ctx, 1, 0, 0, 0, (uint32_t)magic, n, n2, 0, 0, color, text);
+    return JS_HasException(ctx) ? JS_EXCEPTION : JS_NewFloat64(ctx, (double)id);
+}
+
+static JSValue js_scene_insert(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    uint64_t parent = (uint64_t)scene_num(ctx, argv[0]);
+    uint64_t child = (uint64_t)scene_num(ctx, argv[1]);
+    uint64_t before = argc > 2 ? (uint64_t)scene_num(ctx, argv[2]) : 0;
+    scene_mutate(ctx, 2, child, parent, before, 0, 0, 0, 0, 0, JS_UNDEFINED, JS_UNDEFINED);
+    return JS_HasException(ctx) ? JS_EXCEPTION : JS_UNDEFINED;
+}
+
+static JSValue js_scene_remove(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    scene_mutate(ctx, 3, (uint64_t)scene_num(ctx, argv[1]), (uint64_t)scene_num(ctx, argv[0]), 0, 0, 0, 0, 0, 0,
+                 JS_UNDEFINED, JS_UNDEFINED);
+    return JS_HasException(ctx) ? JS_EXCEPTION : JS_UNDEFINED;
+}
+
+/* Property name to the StyleField number in abi.yml. A name that is not a style
+ * field returns 0 and the caller leaves it for the gesture path. */
+extern uint32_t scene_field(const char *name);
+
+/* A size is a number, "auto", or a percent string. Tag 0 is auto, 1 is points,
+ * 2 is a fraction. Mirrors `axisTag` in the JS dispatcher. */
+static int scene_axis(JSContext *ctx, JSValueConst value, double *out_tag, double *out_value) {
+    if (JS_IsString(value)) {
+        const char *word = JS_ToCString(ctx, value);
+        if (!word) return 0;
+        int percent = word[0] && word[strlen(word) - 1] == '%';
+        if (!strcmp(word, "auto")) {
+            *out_tag = 0;
+            *out_value = 0;
+        } else if (percent) {
+            char *end=NULL;
+            double number=strtod(word,&end);
+            if(end==word || end!=word+strlen(word)-1 || !isfinite(number) || number<0) {JS_FreeCString(ctx,word);return 0;}
+            *out_tag = 2;
+            *out_value = number / 100.0;
+        } else {
+            JS_FreeCString(ctx, word);
+            return 0;
+        }
+        JS_FreeCString(ctx, word);
+        return 1;
+    }
+    if (JS_IsNumber(value)) {
+        *out_tag = 1;
+        *out_value = scene_num(ctx, value);
+        return isfinite(*out_value) && *out_value>=0;
+    }
+    if(JS_IsUndefined(value)) {*out_tag=0;*out_value=0;return 1;}
+    return 0;
+}
+
+/* An inset is a number or "auto". `number3` is 1 when the edge is auto, which is
+ * how `InsetEdge` tells a missing value from zero. */
+static int scene_inset(JSContext *ctx, JSValueConst value, double *out_value, double *out_auto) {
+    if (JS_IsNull(value) || JS_IsString(value)) {
+        const char *word = JS_IsString(value) ? JS_ToCString(ctx, value) : NULL;
+        int automatic = JS_IsNull(value) || (word && !strcmp(word, "auto"));
+        if (word) JS_FreeCString(ctx, word);
+        if (!automatic) return 0;
+        *out_value = 0;
+        *out_auto = 1;
+        return 1;
+    }
+    if (JS_IsNumber(value)) {
+        *out_value = scene_num(ctx, value);
+        *out_auto = 0;
+        return 1;
+    }
+    return 0;
+}
+
+static int scene_hex_digit(char ch);
+static int scene_hex(const char *text, uint8_t out[4]);
+
+static double scene_named(const char *name, const char *const *table, int count) {
+    for (int index = 0; index < count; index++) {
+        if (!strcmp(name, table[index])) return (double)index;
+    }
+    return 0;
+}
+
+/* Prefix records own their copied strings until the single Rust call returns.
+ * Property getters finish before Rust borrows the tree. */
+typedef struct StyleValues { StyleValueRecord *items; size_t len; size_t cap; } StyleValues;
+static void style_values_free(JSContext *ctx, StyleValues *values) {
+    for(size_t i=0;i<values->len;i++) {
+        if(values->items[i].key) JS_FreeCString(ctx,values->items[i].key);
+        if(values->items[i].text) JS_FreeCString(ctx,values->items[i].text);
+    }
+    js_free(ctx,values->items);
+}
+static int style_value(JSContext *ctx, StyleValues *values, JSValueConst value, const char *key, size_t key_len, int depth) {
+    if(depth>64 || values->len>=65536) { if(key) JS_FreeCString(ctx,key); JS_ThrowRangeError(ctx,"style value is too large");return -1; }
+    if(values->len==values->cap) {
+        size_t cap=values->cap ? values->cap*2 : 32;
+        void *next=js_realloc(ctx,values->items,cap*sizeof(StyleValueRecord));
+        if(!next) {if(key) JS_FreeCString(ctx,key);return -1;}
+        values->items=next;values->cap=cap;
+    }
+    size_t at=values->len++;
+    StyleValueRecord record={0};record.key=key;record.key_len=key_len;
+    values->items[at]=record;
+    if(JS_IsUndefined(value)) record.tag=STYLE_VALUE_TAG_UNDEFINED;
+    else if(JS_IsNull(value)) record.tag=STYLE_VALUE_TAG_NULL;
+    else if(JS_IsNumber(value)) {record.tag=STYLE_VALUE_TAG_NUMBER;if(JS_ToFloat64(ctx,&record.number,value))return -1;}
+    else if(JS_IsBool(value)) {record.tag=STYLE_VALUE_TAG_BOOL;record.number=JS_ToBool(ctx,value);}
+    else if(JS_IsString(value)) {record.tag=STYLE_VALUE_TAG_STRING;record.text=JS_ToCStringLen(ctx,&record.text_len,value);if(!record.text)return -1;}
+    else if(JS_IsArray(value)) {
+        record.tag=STYLE_VALUE_TAG_ARRAY;int64_t len=0;
+        if(JS_GetLength(ctx,value,&len) || len<0 || len>65536)return -1;
+        record.children=(uint32_t)len;values->items[at]=record;
+        for(uint32_t i=0;i<(uint32_t)len;i++) {
+            JSValue item=JS_GetPropertyUint32(ctx,value,i);
+            int failed=JS_IsException(item) || style_value(ctx,values,item,NULL,0,depth+1);
+            JS_FreeValue(ctx,item);if(failed)return -1;
+        }
+    } else if(JS_IsObject(value) && !JS_IsFunction(ctx,value)) {
+        record.tag=STYLE_VALUE_TAG_OBJECT;JSPropertyEnum *props=NULL;uint32_t count=0;
+        if(JS_GetOwnPropertyNames(ctx,&props,&count,value,JS_GPN_STRING_MASK|JS_GPN_ENUM_ONLY))return -1;
+        record.children=count;values->items[at]=record;int failed=0;
+        for(uint32_t i=0;i<count;i++) {
+            if(!failed) {
+                JSValue name=JS_AtomToString(ctx,props[i].atom);size_t len=0;
+                const char *word=JS_ToCStringLen(ctx,&len,name);JS_FreeValue(ctx,name);
+                JSValue item=JS_GetProperty(ctx,value,props[i].atom);
+                if(!word || JS_IsException(item)) {if(word)JS_FreeCString(ctx,word);failed=1;}
+                else failed=style_value(ctx,values,item,word,len,depth+1)!=0;
+                JS_FreeValue(ctx,item);
+            }
+            JS_FreeAtom(ctx,props[i].atom);
+        }
+        js_free(ctx,props);if(failed)return -1;
+    } else {JS_ThrowTypeError(ctx,"unsupported style value");return -1;}
+    values->items[at]=record;return 0;
+}
+static JSValue style_commit_object_op(JSContext *ctx,uint32_t op,uint64_t id,uint32_t origin,int replace,JSValueConst value) {
+    StyleValues values={0};
+    if(style_value(ctx,&values,value,NULL,0,0)) {style_values_free(ctx,&values);return JS_EXCEPTION;}
+    MutRec rec={0};rec.op=op;rec.id=id;rec.parent=origin;rec.number=replace;rec.values=values.items;rec.value_count=values.len;
+    Runtime *host=runtime_of(ctx);uint64_t out=0;
+    int failed=host->fns.mutate(host->fns.session,&rec,&out);
+    style_values_free(ctx,&values);
+    return failed ? JS_ThrowTypeError(ctx,"invalid style snapshot") : JS_UNDEFINED;
+}
+static JSValue style_commit_object(JSContext *ctx,uint64_t id,uint32_t origin,int replace,JSValueConst value) {
+    return style_commit_object_op(ctx,MUTATION_OP_STYLESNAPSHOT,id,origin,replace,value);
+}
+
+static JSValue style_commit_class(JSContext *ctx,uint64_t id,int list,JSValueConst value) {
+    return style_commit_object_op(ctx,MUTATION_OP_CLASSSNAPSHOT,id,list,1,value);
+}
+static JSValue js_set_class(JSContext *ctx,JSValueConst self,int argc,JSValueConst *argv) {
+    (void)self;if(argc<2)return JS_ThrowTypeError(ctx,"setClass(node,text)");
+    return style_commit_class(ctx,(uint64_t)scene_num(ctx,argv[0]),0,argv[1]);
+}
+
+static JSValue js_scene_set_prop(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 3 || !JS_IsString(argv[1])) return JS_UNDEFINED;
+    const char *name = JS_ToCString(ctx, argv[1]);
+    if (!name) return JS_EXCEPTION;
+    if (!strcmp(name, "style") || !strcmp(name, "class") || !strcmp(name, "classList")) {
+        uint64_t id = (uint64_t)scene_num(ctx, argv[0]);
+        JSValueConst value = argv[2];
+        JSValue result;
+        if (!strcmp(name, "style")) result = style_commit_object(ctx, id, 2, 1, value);
+        else if (!strcmp(name, "classList")) result = style_commit_class(ctx, id, 1, value);
+        else result = style_commit_class(ctx, id, 0, value);
+        JS_FreeCString(ctx, name);
+        if (JS_IsException(result)) return result;
+        JS_FreeValue(ctx, result);
+        return JS_DupValue(ctx, value);
+    }
+    uint32_t field = scene_field(name);
+    uint64_t id = (uint64_t)scene_num(ctx, argv[0]);
+    JSValueConst value = argv[2];
+    if(argc>3 && JS_IsStrictEqual(ctx,value,argv[3])) {JS_FreeCString(ctx,name);return JS_DupValue(ctx,value);}
+    if (field == 0) {
+        if(!strcmp(name,"children") || !strcmp(name,"ref")) { JS_FreeCString(ctx,name);return JS_UNDEFINED; }
+        const char *method=NULL;
+        if(!strcmp(name,"value")) method="setText";
+        else if(!strcmp(name,"runs")) method="setTextRuns";
+        else if(!strcmp(name,"recognizers")) method="setRecognizers";
+        else if(!strncmp(name,"on",2)) method=name;
+        if(!method) { JS_FreeCString(ctx,name);return JS_ThrowTypeError(ctx,"unknown JSX property"); }
+        JSValue args[2]={argv[0],value};
+        JSValue result=scene_api_call(ctx,method,2,args);
+        JS_FreeCString(ctx,name);if(JS_IsException(result)) return result;JS_FreeValue(ctx,result);return JS_DupValue(ctx,value);
+    }
+    double n = 0;
+    double n2 = 0;
+    double n3 = 0;
+    JSValue owned_color = JS_UNDEFINED;
+    JSValueConst color = JS_UNDEFINED;
+    JSValueConst text = JS_UNDEFINED;
+    /* Fields that pack more than one number. The rest fall through to the
+     * single-number path below. */
+    if (field == 9 || field == 10) {
+        JSValue width = JS_IsObject(value) ? JS_GetPropertyStr(ctx, value, "w") : JS_UNDEFINED;
+        JSValue height = JS_IsObject(value) ? JS_GetPropertyStr(ctx, value, "h") : JS_UNDEFINED;
+        if (JS_IsNumber(value)) {
+            n = scene_num(ctx, value);
+            n2 = n;
+        } else {
+            n = scene_num(ctx, width);
+            n2 = scene_num(ctx, height);
+        }
+        JS_FreeValue(ctx, width);
+        JS_FreeValue(ctx, height);
+    } else if (field == 4) {
+        n = scene_num(ctx, value);
+        n2 = n;
+        n3 = n;
+    } else if (field == 48) {
+        if (!strcmp(name, "right")) n = 1;
+        else if (!strcmp(name, "bottom")) n = 2;
+        else if (!strcmp(name, "left")) n = 3;
+        n2 = scene_num(ctx, value);
+    } else if (field == 49) {
+        if (!strcmp(name, "insetRight")) n = 1;
+        else if (!strcmp(name, "insetBottom")) n = 2;
+        else if (!strcmp(name, "insetLeft")) n = 3;
+        if(JS_IsUndefined(value)) n3=1;
+        else if (!scene_inset(ctx, value, &n2, &n3)) {JS_FreeCString(ctx,name);return JS_ThrowTypeError(ctx,"bad inset");}
+    } else if (field == 50) {
+        if (!strcmp(name, "columnEnd")) n = 1;
+        else if (!strcmp(name, "rowStart")) n = 2;
+        else if (!strcmp(name, "rowEnd")) n = 3;
+        if (JS_IsString(value)) {
+            n2 = 0;
+        } else {
+            JSValue line = JS_GetPropertyStr(ctx, value, "line");
+            JSValue span = JS_GetPropertyStr(ctx, value, "span");
+            if (JS_IsNumber(line)) {
+                n2 = 1;
+                n3 = scene_num(ctx, line);
+            } else if (JS_IsNumber(span)) {
+                n2 = 2;
+                n3 = scene_num(ctx, span);
+            }
+            JS_FreeValue(ctx, line);
+            JS_FreeValue(ctx, span);
+        }
+    } else if (field == 44) {
+        n = !strcmp(name, "h");
+        if (!scene_axis(ctx, value, &n2, &n3)) {
+            JS_FreeCString(ctx,name);return JS_ThrowTypeError(ctx,"bad axis");
+        }
+    } else if (field == 43) {
+        if (!strcmp(name, "y")) n = 1;
+        else if (!strcmp(name, "rotate")) n = 2;
+        else if (!strcmp(name, "scale")) n = 3;
+        n2 = scene_num(ctx, value);
+    } else if (field == 34) {
+        if (JS_IsNull(value) || JS_IsUndefined(value)) {
+            n = 0;
+        } else {
+            n = 1;
+            n2 = scene_num(ctx, value);
+        }
+    } else if (field == 26 && JS_IsArray(value)) {
+        color = value;
+    } else if (field == 26 && JS_IsString(value)) {
+        /* Apps pass "#RRGGBB" or "#RRGGBBAA". `colorBytes` in the renderer parses the
+         * same forms; the mutation buffer only carries four bytes, so parse here. */
+        const char *hex = JS_ToCString(ctx, value);
+        uint8_t bytes[4] = {0, 0, 0, 255};
+        if (hex && scene_hex(hex, bytes)) {
+            owned_color = JS_NewArray(ctx);
+            for (int channel = 0; channel < 4; channel++) {
+                JS_SetPropertyUint32(ctx, owned_color, channel, JS_NewInt32(ctx, bytes[channel]));
+            }
+            color = owned_color;
+        }
+        if (hex) JS_FreeCString(ctx, hex);
+    } else if (JS_IsString(value)) {
+        const char *word = JS_ToCString(ctx, value);
+        if (word) {
+            if (field == 17) {
+                const char *table[] = {"left", "center", "right"};
+                n = scene_named(word, table, 3);
+            } else if (field == 11 || field == 54) {
+                const char *table[] = {"start", "center", "end"};
+                n = scene_named(word, table, 3);
+            } else if (field == 12) {
+                const char *table[] = {"start", "center", "end", "space-between", "space-around", "space-evenly"};
+                n = scene_named(word, table, 6);
+            } else if (field == 35) {
+                const char *table[] = {"start", "center", "end", "stretch", "baseline"};
+                n = scene_named(word, table, 5);
+            } else if(field==38) {
+                n=!strcmp(word,"vertical") ? 1 : !strcmp(word,"horizontal") ? 2 : 0;
+            } else if(field==30) {
+                n=!strcmp(word,"ellipsis") ? 1 : !strcmp(word,"visible") ? 2 : 0;
+            } else if(field==31) {
+                n=!strcmp(word,"rtl");
+            } else {
+                text = value;
+            }
+            JS_FreeCString(ctx, word);
+        }
+    } else if (JS_IsBool(value)) {
+        n = JS_ToBool(ctx, value) ? 1 : 0;
+    } else {
+        n = scene_num(ctx, value);
+    }
+    if (field == 36 && !JS_ToBool(ctx,value)) { JS_FreeCString(ctx,name);return JS_UNDEFINED; }
+    if (field == 4) {
+        /* `number4` carries the fourth edge. The call below takes it as n4. */
+    }
+    scene_mutate(ctx, 7, id, 0, 0, field, n, n2, n3, field == 4 ? n : 0, color, text);
+    JS_FreeValue(ctx, owned_color);
+    JS_FreeCString(ctx, name);
+    return JS_HasException(ctx) ? JS_EXCEPTION : JS_DupValue(ctx,value);
+}
+
+/* "#RRGGBB" or "#RRGGBBAA", with or without the leading '#'. Returns 0 when the
+ * text is not one of those lengths or holds a non-hex digit. */
+static int scene_hex(const char *text, uint8_t out[4]) {
+    if (text[0] == '#') text++;
+    size_t len = strlen(text);
+    if (len != 6 && len != 8) return 0;
+    for (size_t index = 0; index < len; index += 2) {
+        int high = scene_hex_digit(text[index]);
+        int low = scene_hex_digit(text[index + 1]);
+        if (high < 0 || low < 0) return 0;
+        out[index / 2] = (uint8_t)((high << 4) | low);
+    }
+    return 1;
+}
+
+static int scene_hex_digit(char ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+static JSValue js_scene_text(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    scene_mutate(ctx, 5, (uint64_t)scene_num(ctx, argv[0]), 0, 0, 0, 0, 0, 0, 0, JS_UNDEFINED, argv[1]);
+    return JS_HasException(ctx) ? JS_EXCEPTION : JS_UNDEFINED;
+}
+
+static const char *SCENE_CREATES[] = {
+    "column", "row", "stack", "padding", "sized", "scroll", "align", "grid", "pointer", "decorated", "clip",
+    "opacity", "transform", "image", "text", "view",
+};
+
+/* Native renderer primitives. The only retained child list is an insertion
+ * range; structural queries always read uicore::Tree. */
+static JSValue scene_api_call(JSContext *ctx, const char *name, int argc, JSValueConst *args) {
+    Runtime *host = runtime_of(ctx);
+    JSValue fn = JS_GetPropertyStr(ctx, host->scene_api, name);
+    JSValue result = JS_Call(ctx, fn, JS_UNDEFINED, argc, args);
+    JS_FreeValue(ctx, fn);
+    return result;
+}
+static JSValue reactive_api_call(JSContext *ctx, const char *name, int argc, JSValueConst *args) {
+    Runtime *host = runtime_of(ctx);
+    JSValue fn = JS_GetPropertyStr(ctx, host->reactive_api, name);
+    JSValue result = JS_Call(ctx, fn, JS_UNDEFINED, argc, args);
+    JS_FreeValue(ctx, fn);
+    return result;
+}
+static uint64_t scene_relation(JSContext *ctx, int kind, uint64_t node) {
+    Runtime *host = runtime_of(ctx);
+    CallOut out = {0};
+    if (host->fns.query(host->fns.session, kind, node, 0, 0, NULL, 0, NULL, &out)) return 0;
+    return out.handle;
+}
+static int scene_is_node(JSContext *ctx, JSValueConst value) {
+    if (!JS_IsNumber(value)) return 0;
+    double n = scene_num(ctx, value);
+    if (n < 4294967296.0 || n >= 9007199254740992.0 || floor(n) != n) return 0;
+    CallOut out = {0}; Runtime *host = runtime_of(ctx);
+    return host->fns.query(host->fns.session, QUERY_KIND_ISTEXT, (uint64_t)n, 0, 0, NULL, 0, NULL, &out) == 0;
+}
+static JSValue js_scene_text_node(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv) {
+    (void)self;
+    JSValue text = argc ? JS_ToString(ctx, argv[0]) : JS_NewString(ctx, "");
+    JSValue color = JS_NewArray(ctx);
+    const int rgba[] = {24, 24, 27, 255};
+    for (int i=0;i<4;i++) JS_SetPropertyUint32(ctx,color,i,JS_NewInt32(ctx,rgba[i]));
+    uint64_t id = scene_mutate(ctx, MUTATION_OP_CREATE, 0,0,0, CREATE_KIND_TEXT,16,0,0,0,color,text);
+    JS_FreeValue(ctx,text); JS_FreeValue(ctx,color);
+    if (!id) return JS_EXCEPTION;
+    return JS_NewFloat64(ctx,(double)id);
+}
+static uint32_t scene_length(JSContext *ctx, JSValueConst array) {
+    JSValue length = JS_GetPropertyStr(ctx,array,"length"); uint32_t n=0;
+    JS_ToUint32(ctx,&n,length); JS_FreeValue(ctx,length); return n;
+}
+static int scene_normalize(JSContext *ctx, JSValueConst value, JSValue out, uint32_t *length, int depth, JSValueConst previous, JSValueConst previous_kinds, JSValue kinds) {
+    if (depth > 256) return JS_ThrowRangeError(ctx,"recursive JSX children"), -1;
+    if (JS_IsFunction(ctx,value)) {
+        JSValue result=JS_Call(ctx,value,JS_UNDEFINED,0,NULL);
+        if (JS_IsException(result)) return -1;
+        int status=scene_normalize(ctx,result,out,length,depth+1,previous,previous_kinds,kinds);
+        JS_FreeValue(ctx,result); return status;
+    }
+    if (JS_IsArray(value)) {
+        uint32_t n=scene_length(ctx,value);
+        for (uint32_t i=0;i<n;i++) {
+            JSValue item=JS_GetPropertyUint32(ctx,value,i);
+            int status=scene_normalize(ctx,item,out,length,depth+1,previous,previous_kinds,kinds);
+            JS_FreeValue(ctx,item); if(status) return -1;
+        }
+    } else if (!JS_IsUndefined(value) && !JS_IsNull(value) && !JS_IsBool(value)) {
+        int native=scene_is_node(ctx,value);
+        JSValue node=JS_UNDEFINED;
+        if(native) node=JS_DupValue(ctx,value);
+        else {
+            JSValue old_kind=JS_GetPropertyUint32(ctx,previous_kinds,*length);
+            JSValue old_node=JS_GetPropertyUint32(ctx,previous,*length);
+            if(JS_ToBool(ctx,old_kind) && scene_is_node(ctx,old_node)) {
+                JSValue text=JS_ToString(ctx,value);JSValue args[2]={old_node,text};
+                JSValue result=js_scene_text(ctx,JS_UNDEFINED,2,args);JS_FreeValue(ctx,text);
+                if(JS_IsException(result)) {JS_FreeValue(ctx,old_kind);JS_FreeValue(ctx,old_node);return -1;}
+                JS_FreeValue(ctx,result);node=JS_DupValue(ctx,old_node);
+            } else node=js_scene_text_node(ctx,JS_UNDEFINED,1,&value);
+            JS_FreeValue(ctx,old_kind);JS_FreeValue(ctx,old_node);
+        }
+        if(JS_IsException(node)) return -1;
+        JS_SetPropertyUint32(ctx,kinds,*length,JS_NewBool(ctx,!native));
+        if(JS_SetPropertyUint32(ctx,out,(*length)++,node)<0) return -1;
+    }
+    return 0;
+}
+static JSValue js_scene_compute(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv, int magic, JSValue *data) {
+    (void)self;(void)argc;(void)argv;(void)magic;
+    JSValue out=JS_NewArray(ctx), kinds=JS_NewArray(ctx); uint32_t length=0;
+    JSValue previous=JS_GetPropertyStr(ctx,data[1],"current");
+    JSValue previous_kinds=JS_GetPropertyStr(ctx,data[1],"texts");
+    int failed=scene_normalize(ctx,data[0],out,&length,0,previous,previous_kinds,kinds);
+    JS_FreeValue(ctx,previous);JS_FreeValue(ctx,previous_kinds);
+    if(failed) {JS_FreeValue(ctx,kinds);JS_FreeValue(ctx,out);return JS_EXCEPTION;}
+    JS_SetPropertyStr(ctx,data[1],"texts",kinds);
+    return out;
+}
+static int scene_array_has(JSContext *ctx, JSValueConst array, JSValueConst needle) {
+    uint32_t n=scene_length(ctx,array);
+    for(uint32_t i=0;i<n;i++) { JSValue item=JS_GetPropertyUint32(ctx,array,i); int equal=JS_IsStrictEqual(ctx,item,needle); JS_FreeValue(ctx,item); if(equal) return 1; }
+    return 0;
+}
+static JSValue js_scene_apply(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv, int magic, JSValue *data) {
+    (void)self;(void)magic;
+    if(!argc) return JS_UNDEFINED;
+    uint64_t parent=(uint64_t)scene_num(ctx,data[0]);
+    uint64_t before=(uint64_t)scene_num(ctx,data[1]);
+    JSValue old=JS_GetPropertyStr(ctx,data[2],"current");
+    uint32_t n=scene_length(ctx,old);
+    for(uint32_t i=0;i<n;i++) {
+        JSValue node=JS_GetPropertyUint32(ctx,old,i);
+        uint64_t id=(uint64_t)scene_num(ctx,node);
+        if(!scene_array_has(ctx,argv[0],node) && scene_relation(ctx,QUERY_KIND_PARENT,id)==parent)
+            scene_mutate(ctx,MUTATION_OP_REMOVE,id,parent,0,0,0,0,0,0,JS_UNDEFINED,JS_UNDEFINED);
+        JS_FreeValue(ctx,node);
+    }
+    n=scene_length(ctx,argv[0]);
+    while(n) {
+        JSValue node=JS_GetPropertyUint32(ctx,argv[0],--n); uint64_t id=(uint64_t)scene_num(ctx,node);
+        if(scene_relation(ctx,QUERY_KIND_PARENT,id)!=parent || scene_relation(ctx,QUERY_KIND_NEXTSIBLING,id)!=before)
+            scene_mutate(ctx,MUTATION_OP_INSERT,id,parent,before,0,0,0,0,0,JS_UNDEFINED,JS_UNDEFINED);
+        before=id; JS_FreeValue(ctx,node);
+    }
+    JS_SetPropertyStr(ctx,data[2],"current",JS_DupValue(ctx,argv[0]));
+    JS_FreeValue(ctx,old);return JS_HasException(ctx) ? JS_EXCEPTION : JS_UNDEFINED;
+}
+static JSValue js_scene_range(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv) {
+    (void)self;
+    if(argc<2) return JS_ThrowTypeError(ctx,"insert(parent, children, marker?)");
+    if(argc>2 && scene_is_node(ctx,argv[1])) return js_scene_insert(ctx,self,argc,argv);
+    JSValue state=JS_NewObject(ctx);
+    JSValue current=JS_NewArray(ctx);
+    JS_SetPropertyStr(ctx,state,"current",current);
+    JS_SetPropertyStr(ctx,state,"texts",JS_NewArray(ctx));
+    JSValue input[2]={argv[1],state};
+    JSValue compute=JS_NewCFunctionData(ctx,js_scene_compute,0,0,2,input);
+    JSValue output[3]={argv[0],argc>2 ? argv[2] : JS_UNDEFINED,state};
+    JSValue apply=JS_NewCFunctionData(ctx,js_scene_apply,1,0,3,output);
+    JSValue args[2]={compute,apply};
+    JSValue result=reactive_api_call(ctx,"createRenderEffect",2,args);
+    JS_FreeValue(ctx,compute);JS_FreeValue(ctx,apply);JS_FreeValue(ctx,state); return result;
+}
+static JSValue js_scene_append(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv) {
+    if(argc<2) return JS_ThrowTypeError(ctx,"append(parent, child)");
+    if(scene_is_node(ctx,argv[1])) return js_scene_insert(ctx,self,argc,argv);
+    JSValue args[3]={argv[0],argv[1],JS_NewInt32(ctx,0)};
+    return js_scene_range(ctx,self,3,args);
+}
+static JSValue js_scene_reactive(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv, int magic) {
+    (void)self;
+    return reactive_api_call(ctx,magic ? "createMemo" : "createRenderEffect",argc,argv);
+}
+static JSValue js_scene_component(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv) {
+    (void)self;
+    if(!argc || !JS_IsFunction(ctx,argv[0])) return JS_ThrowTypeError(ctx,"component must be callable");
+    JSValue props=argc>1 ? JS_DupValue(ctx,argv[1]) : JS_NewObject(ctx);
+    Runtime *host=runtime_of(ctx);
+    uint64_t reader=reactive_entry(host->fns.session,ctx,12,NULL,0) & ~((uint64_t)1<<63);
+    JSValue result=JS_Call(ctx,argv[0],JS_UNDEFINED,1,&props);
+    reactive_entry(host->fns.session,ctx,13,&reader,1);
+    JS_FreeValue(ctx,props);return result;
+}
+
+static const char *SCENE_EXPORTS[] = {
+#include "scene_exports.inc"
+};
+static int js_scene_init(JSContext *ctx, JSModuleDef *module) {
+    Runtime *host=runtime_of(ctx);
+    JSValue api=JS_NewObject(ctx);
+    for(size_t i=0;i<sizeof(SCENE_EXPORTS)/sizeof(*SCENE_EXPORTS);i++) {
+        const char *name=SCENE_EXPORTS[i];
+        JSValue value;
+        if(!strcmp(name,"scene")) continue;
+        if(!strcmp(name,"createElement")) value=JS_NewCFunction(ctx,js_scene_element,name,2);
+        else if(!strcmp(name,"createTextNode")) value=JS_NewCFunction(ctx,js_scene_text_node,name,1);
+        else if(!strcmp(name,"setProp")) value=JS_NewCFunction(ctx,js_scene_set_prop,name,3);
+        else if(!strcmp(name,"insert")) value=JS_NewCFunction(ctx,js_scene_range,name,3);
+        else if(!strcmp(name,"append")) value=JS_NewCFunction(ctx,js_scene_append,name,2);
+        else if(!strcmp(name,"insertNode")) value=JS_NewCFunction(ctx,js_scene_insert,name,3);
+        else if(!strcmp(name,"effect") || !strcmp(name,"memo")) value=JS_NewCFunctionMagic(ctx,js_scene_reactive,name,2,JS_CFUNC_generic_magic,!strcmp(name,"memo"));
+        else if(!strcmp(name,"createComponent")) value=JS_NewCFunction(ctx,js_scene_component,name,2);
+        else value=JS_GetPropertyStr(ctx,host->scene_api,name);
+        JS_SetPropertyStr(ctx,api,name,JS_DupValue(ctx,value));
+        if(JS_SetModuleExport(ctx,module,name,value)) {JS_FreeValue(ctx,api);return -1;}
+    }
+    return JS_SetModuleExport(ctx,module,"scene",api);
+}
+static JSModuleDef *load_scene_module(JSContext *ctx, Runtime *host) {
+    (void)host;
+    JSModuleDef *module=JS_NewCModule(ctx,"scene",js_scene_init);
+    if(!module) return NULL;
+    for(size_t i=0;i<sizeof(SCENE_EXPORTS)/sizeof(*SCENE_EXPORTS);i++) if(JS_AddModuleExport(ctx,module,SCENE_EXPORTS[i])) return NULL;
+    return module;
+}
+static const char *REACTIVE_EXPORTS[]={"createSignal","createMemo","createRenderEffect","createTrackedEffect","createRoot","getOwner","runWithOwner","onCleanup","untrack","batch","createContext","useContext","children","catchError"};
+static int js_reactive_api_init(JSContext *ctx,JSModuleDef *module) {
+    Runtime *host=runtime_of(ctx);
+    for(size_t i=0;i<sizeof(REACTIVE_EXPORTS)/sizeof(*REACTIVE_EXPORTS);i++) if(JS_SetModuleExport(ctx,module,REACTIVE_EXPORTS[i],JS_GetPropertyStr(ctx,host->reactive_api,REACTIVE_EXPORTS[i]))) return -1;
+    return 0;
+}
+static JSModuleDef *load_reactive_api(JSContext *ctx) {
+    JSModuleDef *module=JS_NewCModule(ctx,"reactive",js_reactive_api_init);
+    if(!module) return NULL;
+    for(size_t i=0;i<sizeof(REACTIVE_EXPORTS)/sizeof(*REACTIVE_EXPORTS);i++) if(JS_AddModuleExport(ctx,module,REACTIVE_EXPORTS[i])) return NULL;
+    return module;
+}
+void qjs_capture_reactive(Runtime *host) {
+    JSValue global=JS_GetGlobalObject(host->ctx);
+    host->reactive_api=JS_GetPropertyStr(host->ctx,global,"__reactive");
+    JSAtom key=JS_NewAtom(host->ctx,"__reactive");
+    JS_DeleteProperty(host->ctx,global,key,0);JS_FreeAtom(host->ctx,key);JS_FreeValue(host->ctx,global);
+}
+
+static int js_reactive_init(JSContext *ctx, JSModuleDef *module) {
+    for (int index = 0; index < (int)(sizeof(REACTIVE_NAMES) / sizeof(REACTIVE_NAMES[0])); index++) {
+        const char *name = REACTIVE_NAMES[index];
+        JSValue fn = JS_NewCFunctionMagic(ctx, js_reactive_op, name, 0, JS_CFUNC_generic_magic, index + 1);
+        if (JS_SetModuleExport(ctx, module, name, fn)) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static JSValue js_component_style(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "setComponentStyle(node, style)");
+    return style_commit_object(ctx, (uint64_t)scene_num(ctx, argv[0]), 0, 1, argv[1]);
+}
+
+static JSValue js_set_style(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "setStyle(node, style)");
+    return style_commit_object(ctx, (uint64_t)scene_num(ctx, argv[0]), 3, 1, argv[1]);
+}
+
+static JSValue js_patch_style(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "patchStyle(node, style)");
+    return style_commit_object(ctx, (uint64_t)scene_num(ctx, argv[0]), 3, 0, argv[1]);
+}
+
+static JSValue js_clear_style(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv) {
+    (void)self;if(argc<1)return JS_ThrowTypeError(ctx,"clearStyle(node,keys?)");
+    return style_commit_object_op(ctx,MUTATION_OP_STYLECLEAR,(uint64_t)scene_num(ctx,argv[0]),0,0,argc>1?argv[1]:JS_NULL);
+}
+static JSValue js_style_environment(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv) {
+    (void)self;
+    if (!argc) return JS_ThrowTypeError(ctx, "setStyleEnvironment(environment)");
+    return style_commit_object_op(ctx, MUTATION_OP_STYLEENVIRONMENT, 0, 0, 1, argv[0]);
+}
+static JSValue js_create_style_source(JSContext *ctx,JSValueConst self,int argc,JSValueConst *argv) {
+    (void)self;if(argc<2)return JS_ThrowTypeError(ctx,"createStyleSource(node,origin)");
+    const char *name=JS_ToCString(ctx,argv[1]);int origin=-1;
+    const char *names[]={"component","classes","inline","imperative","animation"};
+    for(int i=0;i<5;i++)if(name && !strcmp(name,names[i]))origin=i;
+    if(name)JS_FreeCString(ctx,name);if(origin<0)return JS_ThrowTypeError(ctx,"unknown style origin");
+    uint64_t source=scene_mutate(ctx,MUTATION_OP_STYLESOURCECREATE,(uint64_t)scene_num(ctx,argv[0]),origin,0,0,0,0,0,0,JS_UNDEFINED,JS_UNDEFINED);
+    return JS_HasException(ctx)?JS_EXCEPTION:JS_NewFloat64(ctx,(double)source);
+}
+static JSValue js_set_style_source(JSContext *ctx,JSValueConst self,int argc,JSValueConst *argv) {
+    (void)self;if(argc<2)return JS_ThrowTypeError(ctx,"setStyleSource(source,style)");
+    return style_commit_object_op(ctx,MUTATION_OP_STYLESOURCESNAPSHOT,(uint64_t)scene_num(ctx,argv[0]),0,1,argv[1]);
+}
+static JSValue js_remove_style_source(JSContext *ctx,JSValueConst self,int argc,JSValueConst *argv) {
+    (void)self;if(argc<1)return JS_ThrowTypeError(ctx,"removeStyleSource(source)");
+    scene_mutate(ctx,MUTATION_OP_STYLESOURCEREMOVE,(uint64_t)scene_num(ctx,argv[0]),0,0,0,0,0,0,0,JS_UNDEFINED,JS_UNDEFINED);
+    return JS_HasException(ctx)?JS_EXCEPTION:JS_UNDEFINED;
+}
+
+static int bind_core(Runtime *host) {
     if (bind_driver_classes(host)) {
         return -1;
     }
@@ -2900,6 +3824,16 @@ static int bind_core(Host *host) {
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue core = JS_NewObject(ctx);
     int failed = bind_fn(ctx, core, "_mutate", js_mutate, 11);
+    failed |= bind_fn(ctx, core, "setStyleEnvironment", js_style_environment, 1);
+    failed |= bind_fn(ctx, core,"createStyleSource",js_create_style_source,2);
+    failed |= bind_fn(ctx, core,"setStyleSource",js_set_style_source,2);
+    failed |= bind_fn(ctx, core,"removeStyleSource",js_remove_style_source,1);
+    failed |= bind_fn(ctx, core, "setClass",js_set_class,2);
+    failed |= bind_fn(ctx, core, "setStyle", js_set_style, 2);
+    failed |= bind_fn(ctx, core, "patchStyle", js_patch_style, 2);
+    failed |= bind_fn(ctx, core, "clearStyle", js_clear_style, 2);
+    failed |= bind_fn(ctx, core, "setComponentStyle", js_component_style, 2);
+    (void)impasto_style_key;
     failed |= bind_fn(ctx, core, "_query", js_query, 1);
     failed |= bind_fn(ctx, core, "_effect", js_effect, 1);
     failed |= bind_fn(ctx, core, "onScrollState", js_on_scroll_state, 1);
@@ -2949,50 +3883,45 @@ static int bind_core(Host *host) {
     failed |= bind_fn(ctx, core, "scrollController", js_scroll_controller, 0);
     failed |= bind_fn(ctx, core, "onDriver", js_on_driver, 1);
     /* JS_SetPropertyStr takes ownership of `core`. Success is 1, not 0. */
-    failed |= JS_SetPropertyStr(ctx, global, "core", core) < 0;
+    host->scene_api=JS_DupValue(ctx,core);
+    failed |= JS_SetPropertyStr(ctx, global, "__scene", core) < 0;
     JS_FreeValue(ctx, global);
     return failed ? -1 : 0;
 }
 
-static int bind_host_globals(Host *host);
-int qjs_drain_jobs(Host *host, char *err, size_t err_len);
-static void free_timers(Host *host);
-static void free_promises(Host *host);
+static int bind_host_globals(Runtime *host);
+int qjs_drain_jobs(Runtime *host, char *err, size_t err_len);
+static void free_timers(Runtime *host);
+static void free_promises(Runtime *host);
 
 static void module_reject(JSContext *ctx) {
     JS_ThrowReferenceError(ctx, "module path is outside the app directory");
 }
 
-static JSModuleDef *load_host_module(JSContext *ctx, Host *host, const char *name);
+static JSModuleDef *load_host_module(JSContext *ctx, Runtime *host, const char *name);
 
-/* "@impasto/<pkg>/host" with one package segment. */
+/* "@impasto/<pkg>" with one package segment. The package is the module. */
 static const char HOST_SCOPE[] = "@impasto/";
 
 static int is_host_specifier(const char *name) {
-    static const char suffix[] = "/host";
     size_t len;
-    size_t mid_len;
     const char *mid;
     size_t index;
     if (!name) {
         return 0;
     }
     len = strlen(name);
-    if (len <= sizeof(HOST_SCOPE) - 1 + sizeof(suffix) - 1) {
+    if (len <= sizeof(HOST_SCOPE) - 1) {
         return 0;
     }
     if (strncmp(name, HOST_SCOPE, sizeof(HOST_SCOPE) - 1) != 0) {
         return 0;
     }
-    if (strcmp(name + len - (sizeof(suffix) - 1), suffix) != 0) {
-        return 0;
-    }
     mid = name + sizeof(HOST_SCOPE) - 1;
-    mid_len = len - (sizeof(HOST_SCOPE) - 1) - (sizeof(suffix) - 1);
-    if (mid_len == 0) {
+    if (mid[0] == 0) {
         return 0;
     }
-    for (index = 0; index < mid_len; index++) {
+    for (index = 0; mid[index] != 0; index++) {
         if (mid[index] == '/' || mid[index] == '\\') {
             return 0;
         }
@@ -3066,13 +3995,13 @@ static int module_canonicalize(char *path, size_t app_len) {
 }
 
 static char *module_normalize(JSContext *ctx, const char *base_name, const char *name, void *opaque) {
-    Host *host = opaque;
-    if (name && is_host_specifier(name)) {
+    Runtime *host = opaque;
+    if (name && (is_host_specifier(name) || strcmp(name, "reactive") == 0 || strcmp(name, "#reactive") == 0 || strcmp(name, "scene") == 0)) {
         return js_strdup(ctx, name);
     }
     if (name && strncmp(name, HOST_SCOPE, sizeof(HOST_SCOPE) - 1) == 0) {
         JS_ThrowReferenceError(ctx,
-                               "bare @impasto/* must be bundled; runtime only loads @impasto/<pkg>/host");
+                               "bare @impasto/* must be bundled; runtime only loads @impasto/<pkg>");
         return NULL;
     }
     if (!host || !host->app_dir || !name || !name[0] || strchr(name, '\\') || strstr(name, "://")) {
@@ -3116,7 +4045,14 @@ static char *module_normalize(JSContext *ctx, const char *base_name, const char 
 }
 
 static JSModuleDef *module_loader(JSContext *ctx, const char *module_name, void *opaque) {
-    Host *host = opaque;
+    Runtime *host = opaque;
+    if (host && module_name && strcmp(module_name, "#reactive") == 0) {
+        return load_reactive_module(ctx, host);
+    }
+    if (host && module_name && strcmp(module_name, "reactive") == 0) return load_reactive_api(ctx);
+    if (host && module_name && strcmp(module_name, "scene") == 0) {
+        return load_scene_module(ctx, host);
+    }
     if (host && module_name && is_host_specifier(module_name)) {
         return load_host_module(ctx, host, module_name);
     }
@@ -3174,7 +4110,7 @@ static JSModuleDef *module_loader(JSContext *ctx, const char *module_name, void 
     return mod;
 }
 
-void qjs_set_app_dir(Host *host, const char *dir) {
+void qjs_set_app_dir(Runtime *host, const char *dir) {
     if (!host) {
         return;
     }
@@ -3195,8 +4131,8 @@ void qjs_set_app_dir(Host *host, const char *dir) {
     host->app_dir[len] = 0;
 }
 
-Host *qjs_open(const QjsFns *fns) {
-    Host *host = calloc(1, sizeof(Host));
+Runtime *qjs_open(const QjsFns *fns) {
+    Runtime *host = calloc(1, sizeof(Runtime));
     if (!host) {
         return NULL;
     }
@@ -3220,7 +4156,7 @@ Host *qjs_open(const QjsFns *fns) {
     JS_SetInterruptHandler(host->rt, interrupt_handler, host);
     JS_SetHostPromiseRejectionTracker(host->rt, promise_rejection_checker, host);
     JS_SetModuleLoaderFunc(host->rt, module_normalize, module_loader, host);
-    if (bind_core(host) || bind_console(host) || bind_host_globals(host)) {
+    if (bind_core(host) || bind_console(host) || bind_host_globals(host) || bind_reactive(host)) {
         JS_FreeContext(host->ctx);
         JS_FreeRuntime(host->rt);
         free(host->taps);
@@ -3230,9 +4166,110 @@ Host *qjs_open(const QjsFns *fns) {
     return host;
 }
 
-int qjs_eval(Host *host, const char *src, size_t len, const char *name, char *err, size_t err_len) {
+/* Compile `src` to quickjs-ng bytecode. The blob starts with the BC_VERSION byte,
+ * so a runtime built from a different quickjs-ng refuses it. `out_len` receives
+ * the size. Returns a malloc'd buffer the caller frees, or NULL on failure. */
+/* A runtime with nothing bound. Bytecode does not need `core` or the modules,
+ * and binding them would require a session this call does not have. */
+static char *compile_normalize(JSContext *ctx,const char *base,const char *name,void *opaque) {
+    (void)base;(void)opaque;return js_strdup(ctx,name);
+}
+static int compile_module_init(JSContext *ctx,JSModuleDef *module) { (void)ctx;(void)module;return 0; }
+static JSModuleDef *compile_module_loader(JSContext *ctx,const char *name,void *opaque) {
+    (void)opaque;
+    if(!strcmp(name,"scene")) return load_scene_module(ctx,NULL);
+    if(!strcmp(name,"reactive")) return load_reactive_api(ctx);
+    if(is_host_specifier(name)) return JS_NewCModule(ctx,name,compile_module_init);
+    JS_ThrowReferenceError(ctx,"bundle has an unresolved module: %s",name);return NULL;
+}
+static Runtime *bare_runtime(void) {
+    Runtime *host = calloc(1, sizeof(Runtime));
+    if (!host) {
+        return NULL;
+    }
+    host->rt = JS_NewRuntime();
+    host->ctx = host->rt ? JS_NewContext(host->rt) : NULL;
+    if (!host->ctx) {
+        if (host->rt) {
+            JS_FreeRuntime(host->rt);
+        }
+        free(host);
+        return NULL;
+    }
+    JS_SetModuleLoaderFunc(host->rt,compile_normalize,compile_module_loader,NULL);
+    return host;
+}
+
+static void close_bare(Runtime *host) {
+    JS_FreeContext(host->ctx);
+    JS_FreeRuntime(host->rt);
+    free(host);
+}
+
+uint8_t *qjs_compile(const char *src, size_t len, const char *name, int module, size_t *out_len,
+                     char *err, size_t err_len) {
+    Runtime *host = bare_runtime();
+    if (!host) {
+        if (err && err_len > 0) {
+            snprintf(err, err_len, "runtime was not created");
+        }
+        return NULL;
+    }
+    char *owned = malloc(len + 1);
+    if (!owned) {
+        if (err && err_len > 0) {
+            snprintf(err, err_len, "out of memory");
+        }
+        return NULL;
+    }
+    memcpy(owned, src, len);
+    owned[len] = 0;
+    int flags = JS_EVAL_FLAG_COMPILE_ONLY;
+    flags |= module ? JS_EVAL_TYPE_MODULE : JS_EVAL_TYPE_GLOBAL;
+    JSValue compiled = JS_Eval(host->ctx, owned, len, name, flags);
+    free(owned);
+    if (JS_IsException(compiled)) {
+        stash_exception(host, host->ctx, err, err_len);
+        close_bare(host);
+        return NULL;
+    }
+    int write_flags = JS_WRITE_OBJ_BYTECODE | JS_WRITE_OBJ_STRIP_SOURCE;
+    size_t size = 0;
+    uint8_t *bytes = JS_WriteObject(host->ctx, &size, compiled, write_flags);
+    JS_FreeValue(host->ctx, compiled);
+    if (!bytes) {
+        if (err && err_len > 0) {
+            snprintf(err, err_len, "bytecode write failed");
+        }
+        close_bare(host);
+        return NULL;
+    }
+    /* `JS_WriteObject` allocates with the runtime. Copy out before it is freed. */
+    uint8_t *copy = malloc(size);
+    if (!copy) {
+        js_free_rt(host->rt, bytes);
+        close_bare(host);
+        if (err && err_len > 0) {
+            snprintf(err, err_len, "out of memory");
+        }
+        return NULL;
+    }
+    memcpy(copy, bytes, size);
+    js_free_rt(host->rt, bytes);
+    close_bare(host);
+    if (out_len) {
+        *out_len = size;
+    }
+    return copy;
+}
+
+void qjs_free_bytes(uint8_t *bytes) {
+    free(bytes);
+}
+
+int qjs_eval(Runtime *host, const char *src, size_t len, const char *name, char *err, size_t err_len) {
     arm_eval(host);
-    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    Runtime *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
     (void)armed;
     /* QuickJS reads input[input_len] and requires it to be 0. */
     char *owned = malloc(len + 1);
@@ -3276,9 +4313,24 @@ int qjs_eval(Host *host, const char *src, size_t len, const char *name, char *er
     return -1;
 }
 
-int qjs_dispatch(Host *host, uint64_t id, int kind, double a, double b, char *err, size_t err_len) {
+int qjs_eval_bytecode(Runtime *host, const uint8_t *bytes, size_t len, char *err, size_t err_len) {
+    arm_eval(host);
+    Runtime *armed __attribute__((cleanup(disarm_entry_ptr))) = host; (void)armed;
+    JSValue object=JS_ReadObject(host->ctx,bytes,len,JS_READ_OBJ_BYTECODE);
+    if(JS_IsException(object)) { stash_exception(host,host->ctx,err,err_len);return -1; }
+    if(JS_ResolveModule(host->ctx,object)<0) { JS_FreeValue(host->ctx,object);stash_exception(host,host->ctx,err,err_len);return -1; }
+    JSValue result=JS_EvalFunction(host->ctx,object);
+    if(JS_IsException(result)) { stash_exception(host,host->ctx,err,err_len);return -1; }
+    int failed=qjs_drain_jobs(host,err,err_len);
+    if(!failed && JS_PromiseState(host->ctx,result)==JS_PROMISE_REJECTED) {
+        JS_Throw(host->ctx,JS_PromiseResult(host->ctx,result));stash_exception(host,host->ctx,err,err_len);failed=-1;
+    }
+    JS_FreeValue(host->ctx,result);return failed;
+}
+
+int qjs_dispatch(Runtime *host, uint64_t id, int kind, double a, double b, char *err, size_t err_len) {
     arm_slice(host, dispatch_kind_name(kind), id);
-    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    Runtime *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
     (void)armed;
     int failed = 0;
     for (size_t index = 0; index < host->tap_len; index++) {
@@ -3313,11 +4365,11 @@ int qjs_dispatch(Host *host, uint64_t id, int kind, double a, double b, char *er
     return failed ? -1 : 0;
 }
 
-int qjs_dispatch_input(Host *host, uint64_t id, int kind, const char *utf8, size_t len,
+int qjs_dispatch_input(Runtime *host, uint64_t id, int kind, const char *utf8, size_t len,
                        int with_span, int sel_start, int sel_end, int compose_start,
                        int compose_end, char *err, size_t err_len) {
     arm_slice(host, dispatch_kind_name(kind), id);
-    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    Runtime *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
     (void)armed;
     int failed = 0;
     for (size_t index = 0; index < host->tap_len; index++) {
@@ -3356,16 +4408,16 @@ int qjs_dispatch_input(Host *host, uint64_t id, int kind, const char *utf8, size
     return failed ? -1 : 0;
 }
 
-int qjs_dispatch_text(Host *host, uint64_t id, const char *utf8, size_t len, char *err,
+int qjs_dispatch_text(Runtime *host, uint64_t id, const char *utf8, size_t len, char *err,
                       size_t err_len) {
     return qjs_dispatch_input(host, id, 16, utf8, len, 0, -1, -1, -1, -1, err, err_len);
 }
 
 #define QJS_JOB_ROUND_LIMIT 32
 
-int qjs_drain_jobs(Host *host, char *err, size_t err_len) {
+int qjs_drain_jobs(Runtime *host, char *err, size_t err_len) {
     arm_slice(host, "jobs", 0);
-    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    Runtime *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
     (void)armed;
     int rounds = 0;
     while (JS_IsJobPending(host->rt)) {
@@ -3394,28 +4446,28 @@ int qjs_drain_jobs(Host *host, char *err, size_t err_len) {
     return 0;
 }
 
-void qjs_reset_rejections(Host *host) {
+void qjs_reset_rejections(Runtime *host) {
     for (size_t i = 0; i < host->reject_seen_len; i++) {
         JS_FreeValue(host->ctx, host->reject_seen[i]);
     }
     host->reject_seen_len = 0;
 }
 
-int qjs_jobs_pending(Host *host) {
+int qjs_jobs_pending(Runtime *host) {
     return host && JS_IsJobPending(host->rt) ? 1 : 0;
 }
 
-int qjs_tap_count(Host *host) {
+int qjs_tap_count(Runtime *host) {
     return host ? (int)host->tap_len : 0;
 }
 
-int qjs_scroll_state(Host *host, uint64_t id, int phase, float vx, float vy, float ox, float oy,
+int qjs_scroll_state(Runtime *host, uint64_t id, int phase, float vx, float vy, float ox, float oy,
                       char *err, size_t err_len) {
     if (!host || !host->has_scroll_state) {
         return 0;
     }
     arm_slice(host, "scroll", id);
-    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    Runtime *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
     (void)armed;
     JSValue args[6];
     args[0] = handle_value(host->ctx, id);
@@ -3436,14 +4488,14 @@ int qjs_scroll_state(Host *host, uint64_t id, int phase, float vx, float vy, flo
     return -1;
 }
 
-int qjs_driver(Host *host, int kind, uint32_t index, uint32_t generation, int tag, int i0, int i1,
+int qjs_driver(Runtime *host, int kind, uint32_t index, uint32_t generation, int tag, int i0, int i1,
                float f0, float f1, float f2, float f3, float f4, float f5, const char *s0, size_t n0,
                const char *s1, size_t n1, char *err, size_t err_len) {
     if (!host || !host->has_driver) {
         return 0;
     }
     arm_slice(host, "driver", 0);
-    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    Runtime *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
     (void)armed;
     JSValue args[14];
     args[0] = JS_NewInt32(host->ctx, kind);
@@ -3472,12 +4524,12 @@ int qjs_driver(Host *host, int kind, uint32_t index, uint32_t generation, int ta
     return -1;
 }
 
-int qjs_layout(Host *host, char *err, size_t err_len) {
+int qjs_layout(Runtime *host, char *err, size_t err_len) {
     if (!host || !host->has_layout) {
         return 0;
     }
     arm_slice(host, "layout", 0);
-    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    Runtime *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
     (void)armed;
     JSValue result = JS_Call(host->ctx, host->layout_cb, JS_UNDEFINED, 0, NULL);
     if (!JS_IsException(result)) {
@@ -3488,9 +4540,9 @@ int qjs_layout(Host *host, char *err, size_t err_len) {
     return -1;
 }
 
-int qjs_frame(Host *host, double target_ms, double interval_ms, char *err, size_t err_len) {
+int qjs_frame(Runtime *host, double target_ms, double interval_ms, char *err, size_t err_len) {
     arm_slice(host, "frame", 0);
-    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    Runtime *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
     (void)armed;
     if (!host->has_frame) {
         return 0;
@@ -3509,7 +4561,7 @@ int qjs_frame(Host *host, double target_ms, double interval_ms, char *err, size_
     return -1;
 }
 
-int qjs_take_wants_frame(Host *host) {
+int qjs_take_wants_frame(Runtime *host) {
     if (!host) {
         return 0;
     }
@@ -3518,7 +4570,7 @@ int qjs_take_wants_frame(Host *host) {
     return value;
 }
 
-int qjs_apply_settings(Host *host, const char *locale, size_t locale_len, double text_scale, int dark,
+int qjs_apply_settings(Runtime *host, const char *locale, size_t locale_len, double text_scale, int dark,
                        int reduce_motion, int bold_text, int high_contrast, char *err,
                        size_t err_len) {
     if (!host) {
@@ -3546,7 +4598,7 @@ int qjs_apply_settings(Host *host, const char *locale, size_t locale_len, double
         return 0;
     }
     arm_slice(host, "settings", 0);
-    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    Runtime *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
     (void)armed;
     JSValue object = settings_object(host->ctx, host);
     for (size_t index = 0; index < host->settings_len; index++) {
@@ -3563,12 +4615,12 @@ int qjs_apply_settings(Host *host, const char *locale, size_t locale_len, double
     return 0;
 }
 
-int qjs_dispatch_back(Host *host, char *err, size_t err_len) {
+int qjs_dispatch_back(Runtime *host, char *err, size_t err_len) {
     if (!host || host->back_len == 0) {
         return 0;
     }
     arm_slice(host, "back", 0);
-    Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+    Runtime *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
     (void)armed;
     for (size_t index = host->back_len; index > 0; index--) {
         JSValue fn = host->backs[index - 1].fn;
@@ -3586,7 +4638,7 @@ int qjs_dispatch_back(Host *host, char *err, size_t err_len) {
     return 0;
 }
 
-int qjs_try_shortcut(Host *host, const char *spec, char *err, size_t err_len) {
+int qjs_try_shortcut(Runtime *host, const char *spec, char *err, size_t err_len) {
     if (!host || !spec) {
         return 0;
     }
@@ -3595,7 +4647,7 @@ int qjs_try_shortcut(Host *host, const char *spec, char *err, size_t err_len) {
             continue;
         }
         arm_slice(host, "shortcut", 0);
-        Host *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
+        Runtime *armed __attribute__((cleanup(disarm_entry_ptr))) = host;
         (void)armed;
     (void)armed;
         JSValue result = JS_Call(host->ctx, host->shortcuts[index].fn, JS_UNDEFINED, 0, NULL);
@@ -3610,9 +4662,9 @@ int qjs_try_shortcut(Host *host, const char *spec, char *err, size_t err_len) {
     return 0;
 }
 
-#include "runtime_host.inc"
+#include "modules.inc"
 
-void qjs_take_error(Host *host, char **message, char **stack) {
+void qjs_take_error(Runtime *host, char **message, char **stack) {
     if (!host) {
         if (message) {
             *message = NULL;
@@ -3640,7 +4692,8 @@ void qjs_free(void *ptr) {
     free(ptr);
 }
 
-void qjs_close(Host *host) {
+void qjs_close(Runtime *host) {
+    if(host) { JS_FreeValue(host->ctx,host->scene_api); JS_FreeValue(host->ctx,host->reactive_api); }
     if (!host) {
         return;
     }
@@ -3719,7 +4772,7 @@ void qjs_close(Host *host) {
 static JSValue js_debug_json(JSContext *ctx, JSValueConst this_val, int argc,
                              JSValueConst *argv, int what) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (!host->fns.debug_json) {
         return JS_UNDEFINED;
     }
@@ -3768,7 +4821,7 @@ static JSValue js_debug_last_pointer(JSContext *ctx, JSValueConst this_val, int 
 static JSValue js_debug_set_scan(JSContext *ctx, JSValueConst this_val, int argc,
                                  JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 1 || !host->fns.debug_set_scan) {
         return JS_UNDEFINED;
     }
@@ -3783,7 +4836,7 @@ static JSValue js_debug_set_scan(JSContext *ctx, JSValueConst this_val, int argc
 static JSValue js_debug_set_pointer_trace(JSContext *ctx, JSValueConst this_val, int argc,
                                           JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 2 || !host->fns.debug_set_pointer_trace) {
         return JS_UNDEFINED;
     }
@@ -3801,7 +4854,7 @@ static JSValue js_debug_memory(JSContext *ctx, JSValueConst this_val, int argc,
     (void)this_val;
     (void)argc;
     (void)argv;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     JSMemoryUsage usage;
     memset(&usage, 0, sizeof(usage));
     JS_ComputeMemoryUsage(host->rt, &usage);
@@ -3816,7 +4869,7 @@ static JSValue js_debug_memory(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_debug_set_owned(JSContext *ctx, JSValueConst this_val, int argc,
                                   JSValueConst *argv) {
     (void)this_val;
-    Host *host = host_of(ctx);
+    Runtime *host = runtime_of(ctx);
     if (argc < 2 || !host->fns.debug_set_owned) {
         return JS_UNDEFINED;
     }

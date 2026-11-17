@@ -1,11 +1,9 @@
-import { host, type NodeHandle } from "@impasto/solid-renderer";
+import { scene, type NodeHandle } from "@impasto/solid-renderer";
 import { colorBytes } from "../../colors.ts";
 import { fmtPrice } from "../../format.ts";
-
 const WHITE = colorBytes("#FFFFFF");
 const PANEL = colorBytes("#2A2F3A");
 const HAIR = colorBytes("#E8E8EC");
-
 export type CrosshairState = {
   show(x: number, y: number): void;
   hide(): void;
@@ -21,55 +19,142 @@ export function Crosshair(props: {
   plotH: () => number;
   priceAt: (y: number) => number;
   labelAt: (x: number) => string;
-}): NodeHandle {
-  const root = host.stack();
-  host.setPosition(root, true);
-  host.setInset(root, 0, 0, 0, 0);
-
+}) {
+  const root = scene.stack();
+  scene.patchStyle(root, {
+    position: "absolute",
+  });
+  scene.patchStyle(root, {
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  });
   const vLine = fadedPaint(HAIR, 0);
   const hLine = fadedPaint(HAIR, 0);
   const bubble = fadedPaint(PANEL, 4);
-  const bubbleText = host.text("", 11, WHITE);
-  host.append(bubble.paint, bubbleText);
+  const bubbleText = scene.createElement("text", {
+    value: "",
+    style: {
+      fontSize: 11,
+      color: WHITE,
+    },
+  });
+  scene.append(bubble.paint, bubbleText);
   const timeBubble = fadedPaint(PANEL, 4);
-  const timeText = host.text("", 11, WHITE);
-  host.append(timeBubble.paint, timeText);
-
+  const timeText = scene.createElement("text", {
+    value: "",
+    style: {
+      fontSize: 11,
+      color: WHITE,
+    },
+  });
+  scene.append(timeBubble.paint, timeText);
   function show(x: number, y: number): void {
     const w = props.plotW();
     const h = props.plotH();
     const cx = Math.max(0, Math.min(w, x));
     const cy = Math.max(0, Math.min(h, y));
-    host.setAlpha(vLine.fade, 255);
-    host.setAlpha(hLine.fade, 255);
-    host.setAlpha(bubble.fade, 255);
-    host.setAlpha(timeBubble.fade, 255);
-    host.setInset(vLine.fade, 0, 0, 0, Math.round(cx));
-    host.setMinSize(vLine.fade, 1, Math.round(h));
-    host.setInset(hLine.fade, 0, Math.round(cy), 0, 0);
-    host.setMinSize(hLine.fade, Math.round(w), 1);
-    host.setInset(bubble.fade, 0, Math.round(cy) - 10, 0, Math.round(w) - 56);
-    host.setText(bubbleText, fmtPrice(props.priceAt(cy)));
-    host.setInset(timeBubble.fade, 0, Math.round(h) + 2, 0, Math.round(cx) - 32);
-    host.setText(timeText, props.labelAt(cx));
+    scene.patchStyle(vLine.fade, {
+      opacity: 255 / 255,
+    });
+    scene.patchStyle(hLine.fade, {
+      opacity: 255 / 255,
+    });
+    scene.patchStyle(bubble.fade, {
+      opacity: 255 / 255,
+    });
+    scene.patchStyle(timeBubble.fade, {
+      opacity: 255 / 255,
+    });
+    scene.patchStyle(vLine.fade, {
+      top: 0,
+      right: 0,
+      bottom: 0,
+      left: Math.round(cx),
+    });
+    scene.patchStyle(vLine.fade, {
+      minWidth: 1,
+      minHeight: Math.round(h),
+    });
+    scene.patchStyle(hLine.fade, {
+      top: 0,
+      right: Math.round(cy),
+      bottom: 0,
+      left: 0,
+    });
+    scene.patchStyle(hLine.fade, {
+      minWidth: Math.round(w),
+      minHeight: 1,
+    });
+    scene.patchStyle(bubble.fade, {
+      top: 0,
+      right: Math.round(cy) - 10,
+      bottom: 0,
+      left: Math.round(w) - 56,
+    });
+    scene.setText(bubbleText, fmtPrice(props.priceAt(cy)));
+    scene.patchStyle(timeBubble.fade, {
+      top: 0,
+      right: Math.round(h) + 2,
+      bottom: 0,
+      left: Math.round(cx) - 32,
+    });
+    scene.setText(timeText, props.labelAt(cx));
   }
-
   function hide(): void {
-    host.setAlpha(vLine.fade, 0);
-    host.setAlpha(hLine.fade, 0);
-    host.setAlpha(bubble.fade, 0);
-    host.setAlpha(timeBubble.fade, 0);
+    scene.patchStyle(vLine.fade, {
+      opacity: 0 / 255,
+    });
+    scene.patchStyle(hLine.fade, {
+      opacity: 0 / 255,
+    });
+    scene.patchStyle(bubble.fade, {
+      opacity: 0 / 255,
+    });
+    scene.patchStyle(timeBubble.fade, {
+      opacity: 0 / 255,
+    });
   }
-
-  function fadedPaint(color: number[], radius: number): { fade: number; paint: number } {
-    const fade = host.opacity(0);
-    host.setPosition(fade, true);
-    const paint = host.decorated(color, radius);
-    host.setFill(paint);
-    host.append(fade, paint);
-    host.append(root, fade);
-    return { fade, paint };
+  function fadedPaint(
+    color: number[],
+    radius: number,
+  ): {
+    fade: number;
+    paint: number;
+  } {
+    const fade = scene.createElement("stack", {
+      style: {
+        opacity: 0 / 255,
+      },
+    });
+    scene.patchStyle(fade, {
+      position: "absolute",
+    });
+    const paint = scene.createElement("view", {
+      style: {
+        backgroundColor: color,
+        borderRadius: radius,
+      },
+    });
+    scene.patchStyle(paint, {
+      width: "100%",
+      height: "100%",
+      minWidth: 0,
+      minHeight: 0,
+      flex: 1,
+      flexShrink: 1,
+    });
+    scene.append(fade, paint);
+    scene.append(root, fade);
+    return {
+      fade,
+      paint,
+    };
   }
-
-  return { id: root, show, hide };
+  return {
+    node: root,
+    show,
+    hide,
+  };
 }

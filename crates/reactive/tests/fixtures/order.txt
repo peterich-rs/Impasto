@@ -1,0 +1,21 @@
+render 1
+--- created ---
+render 2
+tracked 2
+--- flushed ---
+memo reads 1
+memo after write 2
+untrack 11
+untrack ignored 11
+untrack tracked 102
+second
+first
+--- disposed ---
+run 1
+--- effect created ---
+cleanup 1
+run 2
+batch 0
+--- batch created ---
+batch 2
+--- batch flushed ---

@@ -60,11 +60,24 @@ fn load() -> anyhow::Result<Loaded> {
     let font = std::fs::read(&paths.font)
         .with_context(|| format!("failed to read font {}", paths.font.display()))?;
     let script = paths.script.as_ref().context("--js needs a script path")?;
-    let source = std::fs::read_to_string(script)
+    let source = std::fs::read(script)
         .with_context(|| format!("failed to read script {}", script.display()))?;
     let launch = app::Launch::Script {
         name: script.display().to_string(),
         source,
+        modules: script
+            .parent()
+            .map(|dir| dir.join("app.modules"))
+            .filter(|path| path.is_file())
+            .map(std::fs::read_to_string)
+            .transpose()?
+            .map(|text| {
+                text.split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            }),
+        bytecode: script.extension().is_some_and(|ext| ext == "bin"),
     };
     Ok(Loaded {
         launch,
@@ -85,9 +98,25 @@ struct Paths {
 
 impl Paths {
     fn from_args() -> anyhow::Result<Self> {
-        let mut assets = PathBuf::from("crates/macos/assets");
+        let resources = std::env::current_exe()?
+            .parent()
+            .and_then(|dir| dir.parent())
+            .map(|dir| dir.join("Resources"));
+        let resources =
+            resources.filter(|dir| dir.join("app.bin").is_file() || dir.join("app.js").is_file());
+        let mut assets = resources.as_ref().map_or_else(
+            || PathBuf::from("crates/macos/assets"),
+            |dir| dir.join("assets"),
+        );
         let mut font = PathBuf::from("/System/Library/Fonts/Supplemental/Arial.ttf");
-        let mut script = None;
+        let mut script = resources.map(|dir| {
+            let bin = dir.join("app.bin");
+            if bin.is_file() {
+                bin
+            } else {
+                dir.join("app.js")
+            }
+        });
         let mut dump_list = false;
         let mut url = None;
         let mut positional = 0u8;

@@ -1,7 +1,8 @@
 import { createRoot, createSignal, runWithOwner, untrack } from "solid-js";
 
-import type { CoreHost, NodeHandle } from "../src/host.ts";
-import type { HostNode } from "../src/tree.ts";
+import type { SceneModule, NodeHandle } from "../src/scene.ts";
+import type { UIChildren } from "../src/jsx.ts";
+import type { Node } from "../src/tree.ts";
 
 /** A shell that survives leaving its parent. `render` runs once. */
 export type Slot<T> = {
@@ -14,30 +15,33 @@ export type Slot<T> = {
 };
 
 export type SlotDeps = {
-  createElement(tag: string, staticProps?: Record<string, unknown>): HostNode;
-  insert(parent: HostNode, accessor: () => HostNode): void;
+  createElement(tag: string, staticProps?: Record<string, unknown>): Node;
+  insert(parent: Node, accessor: () => UIChildren): void;
   forget(id: number): void;
-  host: CoreHost;
+  scene: SceneModule;
 };
 
 export function bindSlot(deps: SlotDeps) {
   return function createSlot<T>(
     initial: T,
     at: number,
-    render: (item: () => T, index: () => number) => HostNode,
+    render: (item: () => T, index: () => number) => UIChildren,
   ): Slot<T> {
-    let root!: HostNode;
+    let root!: Node;
     let setItem!: (value: T) => void;
     let setIndex!: (value: number) => void;
     // Detach from the caller. A tracked effect disposes its child owners on
     // every update, which would drop the subscription that rewrites this shell.
     const dispose = runWithOwner(null, () =>
       createRoot((done) => {
-        const [item, writeItem] = createSignal(initial);
+        const [state, writeItem] = createSignal({ value: initial });
+        const item = () => state().value;
         const [index, writeIndex] = createSignal(at);
-        setItem = writeItem;
+        setItem = (value) => {
+          writeItem({ value });
+        };
         setIndex = writeIndex;
-        root = deps.createElement("column", { gap: 0 });
+        root = deps.createElement("view", { style: { gap: 0 } });
         // `untrack` keeps `item` reads inside `render` from rebuilding this shell.
         deps.insert(root, () => untrack(() => render(item, index)));
         return done;
@@ -45,35 +49,38 @@ export function bindSlot(deps: SlotDeps) {
     );
     return {
       get node() {
-        return root.id;
+        return root;
       },
       set(next, index) {
         setItem(next);
         setIndex(index);
       },
       attach(parent, anchor) {
-        deps.host.insert(parent, root.id, anchor ?? 0);
+        deps.scene.insertNode(parent, root, anchor ?? 0);
       },
       detach() {
-        const parent = deps.host.parent(root.id);
+        const parent = deps.scene.parent(root);
         if (parent !== 0) {
-          deps.host.detach(parent, root.id);
+          deps.scene.detach(parent, root);
         }
       },
       place(parent, anchor = 0) {
-        if (deps.host.parent(root.id) === parent && deps.host.nextSibling(root.id) === anchor) {
+        if (
+          deps.scene.parent(root) === parent &&
+          deps.scene.nextSibling(root) === anchor
+        ) {
           return;
         }
-        deps.host.insert(parent, root.id, anchor);
+        deps.scene.insertNode(parent, root, anchor);
       },
       discard() {
-        const parent = deps.host.parent(root.id);
+        const parent = deps.scene.parent(root);
         if (parent !== 0) {
-          deps.host.detach(parent, root.id);
+          deps.scene.detach(parent, root);
         }
         dispose();
-        deps.forget(root.id);
-        deps.host.discard(root.id);
+        deps.forget(root);
+        deps.scene.discard(root);
       },
     };
   };

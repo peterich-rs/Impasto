@@ -1,4 +1,4 @@
-import * as host from "@impasto/clipboard/host";
+import * as scene from "./clipboard.ts";
 
 export interface Clipboard {
   getString(): string;
@@ -7,4 +7,4 @@ export interface Clipboard {
   removeEventListener(type: string, listener: (e: unknown) => void): void;
 }
 
-export const Clipboard = host as unknown as Clipboard;
+export const Clipboard = scene as unknown as Clipboard;

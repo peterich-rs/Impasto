@@ -1,5 +1,4 @@
 import { currentLocale } from "./theme.ts";
-
 export type Messages = {
   switchOn: string;
   switchOff: string;
@@ -7,7 +6,6 @@ export type Messages = {
   back: string;
   errorTitle: string;
 };
-
 const ZH: Messages = {
   switchOn: "开",
   switchOff: "关",
@@ -22,7 +20,6 @@ const EN: Messages = {
   back: "Back",
   errorTitle: "Something went wrong",
 };
-
 export function messagesFor(locale: string): Messages {
   return locale.startsWith("zh") ? ZH : EN;
 }

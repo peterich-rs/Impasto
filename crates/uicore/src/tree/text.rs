@@ -38,6 +38,13 @@ impl Tree {
         Ok(self.node(id)?.kind == Kind::Text)
     }
 
+    /// Current plain text, borrowed from this tree. Styled text has no plain
+    /// replacement equivalent because replacing it also clears spans and links.
+    pub fn plain_text(&self, id: NodeId) -> Result<Option<&str>, Error> {
+        let text = self.node(id)?.text().ok_or(Error::NotText)?;
+        Ok((text.spans.is_empty() && text.links.is_empty()).then_some(text.utf8.as_ref()))
+    }
+
     /// Replaces the text and clears styled runs. The previous geometry stays
     /// valid for hit testing until the next `layout`.
     pub fn set_text(&mut self, id: NodeId, utf8: impl Into<String>) -> Result<(), Error> {

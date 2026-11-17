@@ -1,13 +1,14 @@
-import { animate, type NodeHandle } from "../src/guard.ts";
+import { animate } from "../src/guard.ts";
+import type { NodeHandle } from "../src/scene.ts";
 import { onFrame } from "./frames.ts";
-import { host } from "./host.ts";
+import { scene } from "./scene.ts";
 
 /** Per-second UI spring. Not the list rubber band (`2500` / `100`). */
 export const SPRING = { stiffness: 170, damping: 26 };
 
 const pending: Array<() => void> = [];
 
-/** Runs completions queued by a spring that has no host `animate`. */
+/** Runs completions queued by a spring that has no scene `animate`. */
 export function flushMotion(): void {
   const batch = pending.splice(0);
   for (const done of batch) {
@@ -16,14 +17,16 @@ export function flushMotion(): void {
 }
 
 function reduced(): boolean {
-  if (typeof host.reduceMotion !== "function") {
+  if (typeof scene.reduceMotion !== "function") {
     return false;
   }
-  return host.reduceMotion();
+  return scene.reduceMotion();
 }
 
 function motionEnd(id: number, prop: string, fn: () => void): number {
-  const core = host as { onMotionEnd?: (id: number, prop: string, fn: () => void) => number };
+  const core = scene as {
+    onMotionEnd?: (id: number, prop: string, fn: () => void) => number;
+  };
   if (typeof core.onMotionEnd !== "function") {
     return 0;
   }
@@ -31,7 +34,7 @@ function motionEnd(id: number, prop: string, fn: () => void): number {
 }
 
 function motionOff(id: number): void {
-  const core = host as { offMotionEnd?: (id: number) => void };
+  const core = scene as { offMotionEnd?: (id: number) => void };
   if (typeof core.offMotionEnd === "function" && id !== 0) {
     core.offMotionEnd(id);
   }
@@ -54,7 +57,7 @@ export function spring(options: {
   const stiffness = options.stiffness ?? SPRING.stiffness;
   const damping = options.damping ?? SPRING.damping;
   const finish = () => options.onDone?.();
-  const linked = typeof host.animate === "function";
+  const linked = typeof scene.animate === "function";
   if (reduced() || !linked) {
     options.write?.(options.to);
     if (options.onDone) {
@@ -64,10 +67,17 @@ export function spring(options: {
       stop();
       flushMotion();
     });
-    host.requestFrame();
+    scene.requestFrame();
     return;
   }
-  animate(options.id, options.prop, options.from, options.to, stiffness, damping);
+  animate(
+    options.id,
+    options.prop,
+    options.from,
+    options.to,
+    stiffness,
+    damping,
+  );
   let token = 0;
   token = motionEnd(options.id, options.prop, () => {
     motionOff(token);

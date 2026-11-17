@@ -40,11 +40,15 @@ import {
   EDIT_DELETE_WORD_FORWARD,
 } from "./keyboard.ts";
 import type { InputMask } from "./mask.ts";
-
-export type TextEditResult = { text: string; start: number; end: number };
-
-export type Selection = { start: number; end: number };
-
+export type TextEditResult = {
+  text: string;
+  start: number;
+  end: number;
+};
+export type Selection = {
+  start: number;
+  end: number;
+};
 export type FieldController = {
   text: Accessor<string>;
   selection: Accessor<Selection>;
@@ -70,18 +74,28 @@ export type FieldController = {
   load(value: string): void;
   move(collapsed: number, extend: number, shift: boolean): void;
   apply(op: number, extra: string, kind: EditKind): void;
-  handleKey(key: string, multiline: boolean, password: boolean, submitEnter: boolean, onSubmit: () => void): void;
+  handleKey(
+    key: string,
+    multiline: boolean,
+    password: boolean,
+    submitEnter: boolean,
+    onSubmit: () => void,
+  ): void;
   caretAt(unit: number): void;
   extendCaret(unit: number): void;
   /**
    * Install the input connection's buffer.
    * `anchor` and `caret` are UTF-16. A composing start below zero clears the span.
    */
-  replace(text: string, anchor: number, caret: number, composeFrom: number, composeTo: number): void;
+  replace(
+    text: string,
+    anchor: number,
+    caret: number,
+    composeFrom: number,
+    composeTo: number,
+  ): void;
 };
-
 export type EditKind = "load" | "motion" | "change" | "compose";
-
 function utf16Len(value: string): number {
   let count = 0;
   for (const char of value) {
@@ -89,10 +103,13 @@ function utf16Len(value: string): number {
   }
   return count;
 }
-
 export function createFieldController(options: {
   textEdit: (op: number, extra: string) => TextEditResult;
-  textCommand?: (name: string, extra: string, recordUndo?: boolean) => TextEditResult;
+  textCommand?: (
+    name: string,
+    extra: string,
+    recordUndo?: boolean,
+  ) => TextEditResult;
   onChange?: (value: string) => void;
   validate?: (value: string) => string | null | undefined;
   maxLength?: () => number | undefined;
@@ -109,9 +126,10 @@ export function createFieldController(options: {
   const [validError, setValidError] = createSignal("");
   let mask: InputMask | null = null;
   let transform: ((value: string) => string) | null = null;
-
-  const selection = (): Selection => ({ start: start(), end: end() });
-
+  const selection = (): Selection => ({
+    start: start(),
+    end: end(),
+  });
   function formatted(value: string): string {
     let next = value;
     if (mask) {
@@ -122,11 +140,9 @@ export function createFieldController(options: {
     }
     return next;
   }
-
   function usesFormat(): boolean {
     return mask !== null || transform !== null;
   }
-
   function publishChange(before: string, next: string): void {
     if (next === before) {
       return;
@@ -138,9 +154,12 @@ export function createFieldController(options: {
       setValidError("");
     }
   }
-
   function apply(op: number, extra: string, kind: EditKind): void {
-    if ((kind === "change" || kind === "compose") && options.allowChange && !options.allowChange()) {
+    if (
+      (kind === "change" || kind === "compose") &&
+      options.allowChange &&
+      !options.allowChange()
+    ) {
       return;
     }
     const before = text();
@@ -152,12 +171,10 @@ export function createFieldController(options: {
       publishChange(before, next.text);
     }
   }
-
   function commitFormatted(raw: string): void {
     const next = formatted(raw);
     apply(EDIT_COMMIT, next, "change");
   }
-
   function rawBase(): string {
     const full = text();
     const extra = composing();
@@ -169,7 +186,6 @@ export function createFieldController(options: {
     }
     return full;
   }
-
   const controller: FieldController = {
     text,
     selection,
@@ -291,7 +307,13 @@ export function createFieldController(options: {
     caretAt(unit: number) {
       apply(EDIT_CARET, String(unit), "motion");
     },
-    replace(next: string, anchor: number, caret: number, composeFrom: number, composeTo: number) {
+    replace(
+      next: string,
+      anchor: number,
+      caret: number,
+      composeFrom: number,
+      composeTo: number,
+    ) {
       const before = text();
       const limit = utf16Len(next);
       const marked =
@@ -324,7 +346,13 @@ export function createFieldController(options: {
     extendCaret(unit: number) {
       apply(EDIT_EXTEND_CARET, String(unit), "motion");
     },
-    handleKey(key: string, multiline: boolean, password: boolean, submitEnter: boolean, onSubmit: () => void) {
+    handleKey(
+      key: string,
+      multiline: boolean,
+      password: boolean,
+      submitEnter: boolean,
+      onSubmit: () => void,
+    ) {
       const shift = key.startsWith("Shift+");
       const name = shift ? key.slice("Shift+".length) : key;
       if (name === "Left") {
@@ -424,13 +452,15 @@ export function createFieldController(options: {
       }
     },
   };
-
   return controller;
 }
-
-export function fieldError(controllerError: string, override: string | undefined): string {
+export function fieldError(
+  controllerError: string,
+  override: string | undefined,
+): string {
   if (override !== undefined && override.length > 0) {
     return override;
   }
   return controllerError;
 }
+export type { InputMask } from "./mask.ts";

@@ -2,7 +2,7 @@
 
 macOS 与 Android 已落地：平台线程入队，渲染线程创建 `Engine` 和会话并 present。SDK 在 `third_party/impeller-sdk/<平台>/`。iOS 预构建矩阵没有这一列，所以没有 `crates/ios`。线程模型不按只有两台宿主来收死。
 
-`hostshell` 不依赖 `quickjs`。一个可执行文件只链一种会话。`protocol`、`uicore`、`engine`、`crates/macos` 不手写 C。QuickJS 的 C 只在 `crates/quickjs`。`Engine` 与 QuickJS 都是 `!Send`。
+`shell` 不依赖 `quickjs`。一个可执行文件只链一种会话。`protocol`、`uicore`、`engine`、`crates/macos` 不手写 C。QuickJS 的 C 只在 `crates/quickjs`。`Engine` 与 QuickJS 都是 `!Send`。
 
 ## 分层
 
@@ -10,18 +10,18 @@ macOS 与 Android 已落地：平台线程入队，渲染线程创建 `Engine` �
 quotes.js
   → quickjs 会话（渲染线程打开）
   → session::Session
-  → hostshell（队列、帧调度、submit）
+  → shell（队列、帧调度、submit）
   → macos / android
   → engine::Engine
 ```
 
-宿主实现 `Services`、`Surface`、`Vsync`，并交给 `hostshell` 一个 `Send` 闭包，在渲染线程上打开会话。`Engine` 的所有权留在 `hostshell`。`Surface` 的公开接口不出现 `CAMetalLayer` 或 `VulkanSwapchain`。
+宿主实现 `Services`、`Surface`、`Vsync`，并交给 `shell` 一个 `Send` 闭包，在渲染线程上打开会话。`Engine` 的所有权留在 `shell`。`Surface` 的公开接口不出现 `CAMetalLayer` 或 `VulkanSwapchain`。
 
 ## 启动
 
 平台线程准备脚本、字体、图片和窗口，然后回到事件循环。渲染线程创建 `Engine`、`register_font`、调用会话闭包。平台线程不在启动函数里等待表面。
 
-启动 URL 在 `hostshell::start` 之前写入 Shared `launch_url`。macOS 来自 argv `--url`，Android 来自显式 Intent 的 `getData()`。当前宿主没有注册 URL scheme。
+启动 URL 在 `shell::start` 之前写入 Shared `launch_url`。macOS 来自 argv `--url`，Android 来自显式 Intent 的 `getData()`。当前宿主没有注册 URL scheme。
 
 退出码：`0` 正常，`2` 引擎不可用，`3` 解释器 `NotLinked` 或 `Runtime`，`4` 启动期脚本失败。运行期脚本错误只记日志。
 
@@ -65,7 +65,7 @@ Android 的 `TextEvent` 下标是 UTF-16，宿主先换成字节下标。键盘�
 → 没有新事件且会话不要下一帧，就不再 request_frame
 ```
 
-`hostshell` 只看 `wants_frame`，不读树。会话在这一位里并上未布局、未绘制、未排空的 job，以及还没结束的运动。脚本错误清掉这一次的需求。
+`shell` 只看 `wants_frame`，不读树。会话在这一位里并上未布局、未绘制、未排空的 job，以及还没结束的运动。脚本错误清掉这一次的需求。
 
 `Hidden`、`Paused`、`MemoryWarning` 调用 `Engine::trim` 进入 `Flush`。连续 `PresentFailed`、`NotReady` 或 `AcquireMiss` 从第 3 次起退避，16ms 起翻倍，上限 1000ms。`BadScene` 不计入。同一表面打开 `NotReady` 最多再试 120 次。
 

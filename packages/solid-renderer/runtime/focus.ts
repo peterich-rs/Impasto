@@ -1,4 +1,4 @@
-import { host } from "./host.ts";
+import { scene } from "./scene.ts";
 
 type FocusHost = {
   focused?: () => number;
@@ -10,7 +10,7 @@ type FocusHost = {
 };
 
 function focusHost(): FocusHost {
-  return host as FocusHost;
+  return scene as FocusHost;
 }
 
 export function firstFocusable(id: number): number {

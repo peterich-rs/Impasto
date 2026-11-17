@@ -1,5 +1,10 @@
-import { createTrackedEffect, createSignal, onCleanup, type Accessor } from "solid-js";
-import { host, onFrame, requestFrame, setStroke } from "@impasto/solid-renderer";
+import {
+  createTrackedEffect,
+  createSignal,
+  onCleanup,
+  type Accessor,
+} from "solid-js";
+import { scene, onFrame, requestFrame } from "@impasto/solid-renderer";
 import { colorBytes } from "./colors.ts";
 import { useTheme } from "./use-theme.ts";
 
@@ -18,7 +23,6 @@ export type FocusModel = {
   focused: number;
   scopes: number[][];
 };
-
 export function tabInScope(model: FocusModel): FocusModel {
   const scope = model.scopes[model.scopes.length - 1] ?? [];
   if (scope.length <= 1) {
@@ -26,16 +30,17 @@ export function tabInScope(model: FocusModel): FocusModel {
   }
   const index = Math.max(0, scope.indexOf(model.focused));
   const next = scope[(index + 1) % scope.length] ?? model.focused;
-  return { ...model, focused: next };
+  return {
+    ...model,
+    focused: next,
+  };
 }
-
 export function popFocusModel(model: FocusModel, restore: number): FocusModel {
   return {
     focused: restore,
     scopes: model.scopes.slice(0, -1),
   };
 }
-
 export function useFocus(id: Accessor<number>): {
   focused: Accessor<boolean>;
   focus: () => void;
@@ -49,11 +54,11 @@ export function useFocus(id: Accessor<number>): {
     focus: () => {
       const node = id();
       if (node !== 0) {
-        host.focus(node);
+        scene.focus(node);
       }
     },
     blur: () => {
-      host.blur();
+      scene.blur();
     },
     onFocus: () => setFocused(true),
     onBlur: () => setFocused(false),
@@ -78,7 +83,7 @@ export function autoFocus(id: Accessor<number>): void {
       return;
     }
     try {
-      host.focus(node);
+      scene.focus(node);
     } catch {
       // Unknown ids throw. Leave focus unchanged.
     }
@@ -87,16 +92,40 @@ export function autoFocus(id: Accessor<number>): void {
   requestFrame();
 }
 
-/** Stroke uses `theme.focusRing` only while focused, and only the stroke setter. */
-export function bindFocusRing(id: Accessor<number>, focused: Accessor<boolean>): void {
+/** A focus outline owns its source; blur reveals the underlying outline. */
+export function bindFocusRing(
+  id: Accessor<number>,
+  focused: Accessor<boolean>,
+): void {
   const theme = useTheme();
+  let target = 0;
+  let source = 0;
+  const release = () => {
+    if (source !== 0) scene.removeStyleSource(source);
+    source = 0;
+    target = 0;
+  };
+  onCleanup(release);
   createTrackedEffect(() => {
     const node = id();
+    const on = focused();
+    const color = on ? theme().color.focusRing : theme().color.transparent;
+    if (target !== node) release();
     if (node === 0) {
       return;
     }
-    const on = focused();
-    const color = on ? theme().color.focusRing : theme().color.transparent;
-    setStroke(node, on ? 2 : 0, colorBytes(color));
+    if (source === 0) {
+      target = node;
+      source = scene.createStyleSource(node, "component");
+    }
+    scene.setStyleSource(
+      source,
+      on
+        ? {
+            outlineWidth: 2,
+            outlineColor: colorBytes(color),
+          }
+        : null,
+    );
   });
 }

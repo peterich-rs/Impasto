@@ -14,8 +14,8 @@ type Segment = {
   sourceCol: number;
   name?: number;
 };
-
-const BASE64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const BASE64 =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const CHAR_TO_VALUE = new Map<string, number>();
 for (let index = 0; index < BASE64.length; index += 1) {
   CHAR_TO_VALUE.set(BASE64[index]!, index);
@@ -46,14 +46,12 @@ function decodeVlq(text: string, at: number): [number, number] {
   value >>= 1;
   return [negative ? -value : value, index];
 }
-
 export type OriginalPosition = {
   source: string;
   line: number;
   col: number;
   name?: string;
 };
-
 export class SourceMap {
   private readonly lines = new Map<number, Segment[]>();
   private decodedThrough = -1;
@@ -61,7 +59,6 @@ export class SourceMap {
   readonly sourcesContent: (string | null)[];
   private readonly mappings: string;
   private readonly names: string[];
-
   private constructor(
     sources: string[],
     sourcesContent: (string | null)[],
@@ -73,7 +70,6 @@ export class SourceMap {
     this.mappings = mappings;
     this.names = names;
   }
-
   static load(text: string): SourceMap | null {
     let raw: unknown;
     try {
@@ -95,9 +91,13 @@ export class SourceMap {
     }
     const sources = map.sources.map((item) => String(item));
     const sourcesContent = Array.isArray(map.sourcesContent)
-      ? map.sourcesContent.map((item) => (typeof item === "string" ? item : null))
+      ? map.sourcesContent.map((item) =>
+          typeof item === "string" ? item : null,
+        )
       : sources.map(() => null);
-    const names = Array.isArray(map.names) ? map.names.map((item) => String(item)) : [];
+    const names = Array.isArray(map.names)
+      ? map.names.map((item) => String(item))
+      : [];
     return new SourceMap(sources, sourcesContent, map.mappings, names);
   }
 
@@ -176,16 +176,33 @@ export class SourceMap {
           sourceLine += value;
           [value, index] = decodeVlq(text, index);
           sourceCol += value;
-          const hasName = index < text.length && text[index] !== "," && text[index] !== ";";
+          const hasName =
+            index < text.length && text[index] !== "," && text[index] !== ";";
           if (hasName) {
             [value, index] = decodeVlq(text, index);
             name += value;
-            segments.push({ col, source, sourceLine, sourceCol, name });
+            segments.push({
+              col,
+              source,
+              sourceLine,
+              sourceCol,
+              name,
+            });
           } else {
-            segments.push({ col, source, sourceLine, sourceCol });
+            segments.push({
+              col,
+              source,
+              sourceLine,
+              sourceCol,
+            });
           }
         } else {
-          segments.push({ col, source: -1, sourceLine: 0, sourceCol: 0 });
+          segments.push({
+            col,
+            source: -1,
+            sourceLine: 0,
+            sourceCol: 0,
+          });
         }
         if (text[index] === ",") {
           index += 1;

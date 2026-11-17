@@ -173,10 +173,12 @@ pub trait Shaper {
         false
     }
     fn metrics(&mut self, key: &MetricsKey) -> Arc<ParagraphMetrics>;
-    /// Width of the widest unbreakable word. This is the min-content
-    /// constraint: a grid `min_content()` track and a scroll's content floor
-    /// size to this. The default splits on whitespace and measures each word
-    /// unbounded; a real typesetter uses its own longest-word query.
+    /// Min-content width for this metrics identity. Color and the layout width
+    /// are ignored. The default splits on whitespace.
+    fn intrinsic_width(&mut self, key: &MetricsKey) -> f32 {
+        self.min_content_width(&key.text, f32::from_bits(key.font_size))
+    }
+    /// Width of the widest unbreakable word. Prefer [`Shaper::intrinsic_width`].
     fn min_content_width(&mut self, utf8: &str, font_size: f32) -> f32 {
         let word = utf8
             .split_whitespace()
@@ -227,6 +229,9 @@ impl Shaper for Box<dyn Shaper> {
     }
     fn metrics(&mut self, key: &MetricsKey) -> Arc<ParagraphMetrics> {
         (**self).metrics(key)
+    }
+    fn intrinsic_width(&mut self, key: &MetricsKey) -> f32 {
+        (**self).intrinsic_width(key)
     }
     fn min_content_width(&mut self, utf8: &str, font_size: f32) -> f32 {
         (**self).min_content_width(utf8, font_size)

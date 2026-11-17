@@ -2,9 +2,11 @@ import { Show, createSignal, createTrackedEffect, onCleanup } from "solid-js";
 import {
   Text,
   bindListRenderer,
+  bindNodeRef,
+  bindStyle,
   createSlot,
   directionFor,
-  host,
+  scene,
   type NodeHandle,
 } from "@impasto/solid-renderer";
 import { Button } from "./Button.tsx";
@@ -15,55 +17,34 @@ import {
   refreshListener,
   type ScrollController,
 } from "./ScrollController.ts";
+import type { VirtualListProps } from "./props.ts";
 import { useTheme } from "./use-theme.ts";
-
-const restoredOffsets = new Map<string, { x: number; y: number }>();
-
-type Pin = { index: number; key: string };
+const restoredOffsets = new Map<
+  string,
+  {
+    x: number;
+    y: number;
+  }
+>();
+type Pin = {
+  index: number;
+  key: string;
+};
 
 /**
  * Mounts only the rows near the viewport. Window, measurement, and chrome
  * live on `ListDriver`. This component is the template and the render callback.
  */
-export function VirtualList<T>(props: {
-  items: readonly T[];
-  itemKey: (item: T) => string | number;
-  estimatedHeight: number;
-  overscan?: number;
-  children?: (item: T, index: number) => NodeHandle;
-  recycle?: {
-    typeOf: (item: T) => string;
-    render: (item: () => T, index: () => number) => NodeHandle;
-    poolSize?: number;
-  };
-  empty?: () => NodeHandle;
-  error?: string;
-  onRetry?: () => void;
-  skeleton?: () => NodeHandle;
-  onEndReached?: () => void;
-  sticky?: (item: T, index: number) => boolean;
-  /** Hide the in-window copy of a header while the overlay pins it. */
-  onPin?: (key: string | null) => void;
-  restoreKey?: string;
-  onRefresh?: () => void;
-  refresh?: {
-    threshold?: number;
-    onRefresh: () => void | Promise<void>;
-    indicator: (state: {
-      progress: () => number;
-      busy: () => boolean;
-    }) => NodeHandle;
-  };
-  controller?: ScrollController;
-  physics?: ScrollPhysics;
-}): NodeHandle {
+export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
   const theme = useTheme();
   const scroll = props.controller ?? createScrollController();
-  const native = host.listDriver?.(props.overscan ?? 4, props.estimatedHeight);
+  const native = scene.listDriver?.(props.overscan ?? 4, props.estimatedHeight);
   if (native === undefined) {
     throw new Error("listDriver is not linked");
   }
-  const initial = props.restoreKey ? restoredOffsets.get(props.restoreKey) : undefined;
+  const initial = props.restoreKey
+    ? restoredOffsets.get(props.restoreKey)
+    : undefined;
   const [extent, setExtent] = createSignal(0);
   const [thumbOn, setThumbOn] = createSignal(false);
   const [thumbH, setThumbH] = createSignal(24);
@@ -82,11 +63,20 @@ export function VirtualList<T>(props: {
   let hSize = 0;
   let dragBy = () => {};
   let dragEnd = () => {};
-
   function syncNodes(): void {
-    native.bind(viewport, contentId, top, bottom, rows, vThumb, hThumb, pinNode, vSize, hSize);
+    native.bind(
+      viewport,
+      contentId,
+      top,
+      bottom,
+      rows,
+      vThumb,
+      hThumb,
+      pinNode,
+      vSize,
+      hSize,
+    );
   }
-
   createTrackedEffect(() => {
     const items = props.items;
     native.configure(
@@ -107,7 +97,6 @@ export function VirtualList<T>(props: {
       })),
     );
   });
-
   onCleanup(
     bindListRenderer(native, {
       parent: () => rows,
@@ -117,7 +106,17 @@ export function VirtualList<T>(props: {
         if (props.recycle) {
           return props.recycle.render(item, index);
         }
-        return props.children?.(item(), index()) ?? (<sized w={0} h={0} /> as unknown as NodeHandle);
+        return (
+          props.children?.(item(), index()) ??
+          (
+            <view
+              style={{
+                width: 0,
+                height: 0,
+              }}
+            />
+          )
+        );
       },
       createSlot,
       onChrome(chrome) {
@@ -127,7 +126,10 @@ export function VirtualList<T>(props: {
         setHThumbOn(chrome.hThumbOn);
         setHThumbW(chrome.hThumbLen);
         if (chrome.pinIndex >= 0) {
-          setPin({ index: chrome.pinIndex, key: chrome.pinKey });
+          setPin({
+            index: chrome.pinIndex,
+            key: chrome.pinKey,
+          });
           props.onPin?.(chrome.pinKey);
         } else {
           setPin(null);
@@ -143,7 +145,9 @@ export function VirtualList<T>(props: {
     }),
   );
   onCleanup(
-    props.refresh ? () => {} : refreshListener(scroll, () => props.onRefresh?.()),
+    props.refresh
+      ? () => {}
+      : refreshListener(scroll, () => props.onRefresh?.()),
   );
   onCleanup(() => {
     const key = props.restoreKey;
@@ -152,7 +156,6 @@ export function VirtualList<T>(props: {
     }
     native.release();
   });
-
   const errored = () => (props.error ?? "").length > 0;
   const pinned = () => {
     const box = pin();
@@ -161,52 +164,91 @@ export function VirtualList<T>(props: {
     }
     return props.items[box.index] === undefined ? null : box;
   };
-
   return (
     <Show
       when={!errored()}
       fallback={
-        <column gap={theme().space.s}>
+        <view
+          style={{
+            gap: theme().space.s,
+          }}
+        >
           <Text
-            fontSize={theme().fontSize.body}
-            color={theme().color.danger}
-            direction={directionFor(theme().locale)}
+            style={{
+              fontSize: theme().fontSize.body,
+              color: theme().color.danger,
+              writingDirection: directionFor(theme().locale),
+            }}
           >
             {props.error ?? ""}
           </Text>
           <Show when={props.onRetry}>
             <Button label="Retry" onClick={() => props.onRetry?.()} />
           </Show>
-        </column>
+        </view>
       }
     >
       <Show
         when={props.items.length > 0}
         fallback={
           props.skeleton ? (
-            props.skeleton()
+            <view>{props.skeleton()}</view>
           ) : props.empty ? (
-            props.empty()
+            <view>{props.empty()}</view>
           ) : (
-            <sized w={0} h={0} />
+            <view
+              style={{
+                width: 0,
+                height: 0,
+              }}
+            />
           )
         }
       >
-        <stack fill>
+        <stack
+          ref={(node) => {
+            if (node === null) return;
+            bindStyle(node, {
+              defaults: {
+                width: "100%",
+                height: "100%",
+                flex: 1,
+                flexShrink: 1,
+                minWidth: 0,
+                minHeight: 0,
+                gridTemplateColumns: "minmax(0, 1fr)",
+                gridTemplateRows: "minmax(0, 1fr)",
+              },
+              get class() {
+                return props.class;
+              },
+              get classList() {
+                return props.classList;
+              },
+              get style() {
+                return props.style;
+              },
+            });
+            bindNodeRef(node, () => props.ref);
+          }}
+        >
           <ScrollArea
             axis="vertical"
             contentMin={extent()}
             initialOffset={initial}
             controller={scroll}
             physics={props.physics}
+            class={props.viewportProps?.class}
+            classList={props.viewportProps?.classList}
+            style={props.viewportProps?.style}
             onDragBy={() => dragBy()}
             onDragEnd={() => dragEnd()}
             viewportRef={(id) => {
-              viewport = id;
+              viewport = id ?? 0;
               syncNodes();
             }}
             contentRef={(id) => {
-              contentId = id;
+              contentId = id ?? 0;
               syncNodes();
             }}
           >
@@ -222,38 +264,65 @@ export function VirtualList<T>(props: {
               >
                 {(state) =>
                   props.refresh?.indicator(state) ??
-                  ((<sized w={0} h={0} />) as unknown as NodeHandle)
+                  (
+                    <view
+                      style={{
+                        width: 0,
+                        height: 0,
+                      }}
+                    />
+                  )
                 }
               </RefreshControl>
             ) : null}
-            <sized
-              w={1}
-              h={0}
+            <view
               ref={(node) => {
-                top = node.id;
+                if (node === null) return;
+                top = node;
+                syncNodes();
+              }}
+              style={{
+                width: 1,
+                height: 0,
+              }}
+            />
+            <view
+              ref={(node) => {
+                if (node === null) return;
+                rows = node;
+                scene.setStyleSurface(node, "list-content");
+                bindStyle(node, {
+                  get class() {
+                    return props.contentProps?.class;
+                  },
+                  get classList() {
+                    return props.contentProps?.classList;
+                  },
+                  get style() {
+                    return props.contentProps?.style;
+                  },
+                });
                 syncNodes();
               }}
             />
-            <column
+            <view
               ref={(node) => {
-                rows = node.id;
+                if (node === null) return;
+                bottom = node;
                 syncNodes();
               }}
-            />
-            <sized
-              w={1}
-              h={0}
-              ref={(node) => {
-                bottom = node.id;
-                syncNodes();
+              style={{
+                width: 1,
+                height: 0,
               }}
             />
           </ScrollArea>
           <Show when={pinned()} keyed>
             {(box) => (
-              <transform
+              <stack
                 ref={(node) => {
-                  pinNode = node.id;
+                  if (node === null) return;
+                  pinNode = node;
                   syncNodes();
                 }}
               >
@@ -263,57 +332,104 @@ export function VirtualList<T>(props: {
                       () => box.index,
                     )
                   : props.children?.(props.items[box.index] as T, box.index)}
-              </transform>
+              </stack>
             )}
           </Show>
           <Show when={thumbOn()}>
-            <row fill justify="end">
-              <padding right={theme().space.s}>
-                <transform
+            <view
+              style={{
+                width: "100%",
+                height: "100%",
+                flex: 1,
+                flexShrink: 1,
+                minWidth: 0,
+                minHeight: 0,
+                flexDirection: "row",
+                justifyContent: "end",
+              }}
+            >
+              <view
+                style={{
+                  paddingRight: theme().space.s,
+                }}
+              >
+                <stack
                   ref={(node) => {
-                    vThumb = node.id;
+                    if (node === null) return;
+                    vThumb = node;
                     syncNodes();
                   }}
                 >
-                  <decorated color={theme().color.textMuted} radius={theme().radius.s}>
-                    <sized
-                      w={3}
-                      h={thumbH()}
+                  <view
+                    style={{
+                      backgroundColor: theme().color.textMuted,
+                      borderRadius: theme().radius.s,
+                    }}
+                  >
+                    <view
                       ref={(node) => {
-                        vSize = node.id;
+                        if (node === null) return;
+                        vSize = node;
                         syncNodes();
                       }}
+                      style={{
+                        width: 3,
+                        height: thumbH(),
+                      }}
                     />
-                  </decorated>
-                </transform>
-              </padding>
-            </row>
+                  </view>
+                </stack>
+              </view>
+            </view>
           </Show>
           <Show when={hThumbOn()}>
-            <column fill justify="end">
-              <padding bottom={theme().space.s}>
-                <transform
+            <view
+              style={{
+                width: "100%",
+                height: "100%",
+                flex: 1,
+                flexShrink: 1,
+                minWidth: 0,
+                minHeight: 0,
+                justifyContent: "end",
+              }}
+            >
+              <view
+                style={{
+                  paddingBottom: theme().space.s,
+                }}
+              >
+                <stack
                   ref={(node) => {
-                    hThumb = node.id;
+                    if (node === null) return;
+                    hThumb = node;
                     syncNodes();
                   }}
                 >
-                  <decorated color={theme().color.textMuted} radius={theme().radius.s}>
-                    <sized
-                      w={hThumbW()}
-                      h={3}
+                  <view
+                    style={{
+                      backgroundColor: theme().color.textMuted,
+                      borderRadius: theme().radius.s,
+                    }}
+                  >
+                    <view
                       ref={(node) => {
-                        hSize = node.id;
+                        if (node === null) return;
+                        hSize = node;
                         syncNodes();
                       }}
+                      style={{
+                        width: hThumbW(),
+                        height: 3,
+                      }}
                     />
-                  </decorated>
-                </transform>
-              </padding>
-            </column>
+                  </view>
+                </stack>
+              </view>
+            </view>
           </Show>
         </stack>
       </Show>
     </Show>
-    );
+  );
 }

@@ -19,6 +19,7 @@ use crate::abi::{CreateKind, MutationOp, StyleField};
 /// What a successful write produced. Gestures are dispatched before JS continues.
 pub(super) struct Applied {
     pub id: Option<NodeId>,
+    pub source: Option<uicore::style::StyleSourceId>,
     pub gestures: Vec<uicore::Gesture>,
     pub retired: Vec<NodeId>,
 }
@@ -69,6 +70,7 @@ pub(super) enum Create {
         font_size: f32,
         color: [u8; 4],
     },
+    View,
 }
 
 pub(super) enum StyleChange {
@@ -182,6 +184,7 @@ pub(super) enum StyleChange {
 }
 
 pub(super) enum Mutation {
+    StyleEnvironment(uicore::style::codec::Value),
     Create(Create),
     Insert {
         parent: NodeId,
@@ -204,8 +207,11 @@ pub(super) enum Mutation {
     SetImage {
         id: NodeId,
         source: String,
-        width: f32,
-        height: f32,
+        intrinsic: Option<(f32, f32)>,
+    },
+    SetStyleSurface {
+        id: NodeId,
+        surface: String,
     },
     EditText {
         id: NodeId,
@@ -226,6 +232,35 @@ pub(super) enum Mutation {
         drag: i32,
         window_ms: f64,
     },
+    ClassSnapshot {
+        id: NodeId,
+        text: String,
+        list: bool,
+    },
+    PointerTarget(NodeId),
+    ClearStyle {
+        id: NodeId,
+        keys: Option<Vec<uicore::style::Key>>,
+    },
+    SourceClass {
+        source: uicore::style::StyleSourceId,
+        text: String,
+    },
+    StyleSnapshot {
+        id: NodeId,
+        origin: uicore::style::StyleOrigin,
+        replace: bool,
+        style: uicore::style::Style,
+    },
+    SourceCreate {
+        id: NodeId,
+        origin: uicore::style::StyleOrigin,
+    },
+    SourceRemove(uicore::style::StyleSourceId),
+    SourceSnapshot {
+        source: uicore::style::StyleSourceId,
+        style: uicore::style::Style,
+    },
 }
 
 /// Wire record shared with `glue.c`. Field order is the C layout.
@@ -244,6 +279,8 @@ pub(in crate::linked) struct MutRec {
     pub _pad: u32,
     pub text: *const c_char,
     pub text_len: usize,
+    pub values: *const crate::abi::StyleValueRecord,
+    pub value_count: usize,
 }
 
 pub(super) struct OwnedRec {
@@ -258,6 +295,7 @@ pub(super) struct OwnedRec {
     pub number4: f64,
     pub color: [u8; 4],
     pub text: String,
+    pub style_value: Option<uicore::style::codec::Value>,
 }
 
 impl OwnedRec {
@@ -284,6 +322,7 @@ impl OwnedRec {
             number4: 0.0,
             color,
             text,
+            style_value: None,
         }
     }
 }
@@ -291,6 +330,96 @@ impl OwnedRec {
 pub(super) fn parse(rec: &OwnedRec) -> Result<Mutation, uicore::Error> {
     let id = NodeId::from_raw(rec.id);
     let op = rec.op;
+    if op == MutationOp::StyleEnvironment as u32 {
+        return Ok(Mutation::StyleEnvironment(
+            rec.style_value.clone().ok_or(uicore::Error::BadNumber)?,
+        ));
+    }
+    if op == MutationOp::ClassSnapshot as u32 {
+        use uicore::style::codec::Value as V;
+        let list = rec.parent != 0;
+        let text = match rec.style_value.as_ref() {
+            Some(V::Null | V::Undefined) => String::new(),
+            Some(V::String(text)) if !list => text.clone(),
+            Some(V::Object(fields)) if list => {
+                let mut names = Vec::new();
+                for (key, value) in fields {
+                    match value {
+                        V::Bool(true) => names.push(key.as_str()),
+                        V::Bool(false) | V::Undefined => {}
+                        _ => return Err(uicore::Error::BadNumber),
+                    }
+                }
+                names.join(" ")
+            }
+            _ => return Err(uicore::Error::BadNumber),
+        };
+        return Ok(Mutation::ClassSnapshot { id, text, list });
+    }
+
+    if op == MutationOp::PointerTarget as u32 {
+        return Ok(Mutation::PointerTarget(id));
+    }
+    if op == MutationOp::StyleClear as u32 {
+        use uicore::style::codec::Value as V;
+        let keys = match rec.style_value.as_ref() {
+            Some(V::Null | V::Undefined) => None,
+            Some(V::Array(items)) => {
+                let mut keys = Vec::new();
+                for item in items {
+                    let V::String(name) = item else {
+                        return Err(uicore::Error::BadNumber);
+                    };
+                    keys.extend(
+                        uicore::style::codec::declarations(name, &V::Null)?
+                            .into_iter()
+                            .map(|declaration| declaration.key()),
+                    );
+                }
+                Some(keys)
+            }
+            _ => return Err(uicore::Error::BadNumber),
+        };
+        return Ok(Mutation::ClearStyle { id, keys });
+    }
+    if op == MutationOp::StyleSourceSnapshot as u32
+        && let Some(uicore::style::codec::Value::String(text)) = &rec.style_value
+    {
+        return Ok(Mutation::SourceClass {
+            source: uicore::style::StyleSourceId::from_raw(rec.id),
+            text: text.clone(),
+        });
+    }
+    if op == MutationOp::StyleSnapshot as u32 || op == MutationOp::StyleSourceSnapshot as u32 {
+        let style = uicore::style::codec::from_value(
+            rec.style_value.as_ref().ok_or(uicore::Error::BadNumber)?,
+        )?;
+        return Ok(if op == MutationOp::StyleSourceSnapshot as u32 {
+            Mutation::SourceSnapshot {
+                source: uicore::style::StyleSourceId::from_raw(rec.id),
+                style,
+            }
+        } else {
+            Mutation::StyleSnapshot {
+                id,
+                origin: style_origin(rec.parent)?,
+                replace: rec.number > 0.5,
+                style,
+            }
+        });
+    }
+    if op == MutationOp::StyleSourceCreate as u32 {
+        return Ok(Mutation::SourceCreate {
+            id,
+            origin: style_origin(rec.parent)?,
+        });
+    }
+    if op == MutationOp::StyleSourceRemove as u32 {
+        return Ok(Mutation::SourceRemove(
+            uicore::style::StyleSourceId::from_raw(rec.id),
+        ));
+    }
+
     if op == MutationOp::Create as u32 {
         return Ok(Mutation::Create(parse_create(rec)?));
     }
@@ -323,11 +452,21 @@ pub(super) fn parse(rec: &OwnedRec) -> Result<Mutation, uicore::Error> {
         });
     }
     if op == MutationOp::SetImage as u32 {
+        let intrinsic = if rec.number < 0.0 || rec.number2 < 0.0 {
+            None
+        } else {
+            Some((rec.number as f32, rec.number2 as f32))
+        };
         return Ok(Mutation::SetImage {
             id,
             source: rec.text.clone(),
-            width: rec.number as f32,
-            height: rec.number2 as f32,
+            intrinsic,
+        });
+    }
+    if op == MutationOp::StyleSurface as u32 {
+        return Ok(Mutation::SetStyleSurface {
+            id,
+            surface: rec.text.clone(),
         });
     }
     if op == MutationOp::EditText as u32 {
@@ -437,6 +576,9 @@ fn parse_create(rec: &OwnedRec) -> Result<Create, uicore::Error> {
             width: rec.number as f32,
             height: rec.number2 as f32,
         });
+    }
+    if kind == CreateKind::View as u32 {
+        return Ok(Create::View);
     }
     if kind == CreateKind::Text as u32 {
         return Ok(Create::Text {
@@ -682,10 +824,35 @@ fn parse_style(rec: &OwnedRec) -> Result<StyleChange, uicore::Error> {
 pub(super) fn apply(tree: &mut uicore::Tree, mutation: Mutation) -> Result<Applied, uicore::Error> {
     let mut applied = Applied {
         id: None,
+        source: None,
         gestures: Vec::new(),
         retired: Vec::new(),
     };
     match mutation {
+        Mutation::StyleEnvironment(value) => super::environment::apply(tree, &value)?,
+        Mutation::ClassSnapshot { id, text, list } => {
+            if list {
+                tree.set_class_list(id, &text)?
+            } else {
+                tree.set_class(id, &text)?
+            }
+        }
+        Mutation::PointerTarget(id) => tree.set_pointer_target(id)?,
+        Mutation::ClearStyle { id, keys } => tree.clear_style(id, keys.as_deref())?,
+        Mutation::SourceClass { source, text } => tree.replace_style_source_class(source, &text)?,
+        Mutation::StyleSnapshot {
+            id,
+            origin,
+            replace,
+            style,
+        } => {
+            tree.commit_style_snapshot(id, origin, style, replace)?;
+        }
+        Mutation::SourceCreate { id, origin } => {
+            applied.source = Some(tree.create_style_source(id, origin)?)
+        }
+        Mutation::SourceRemove(source) => tree.remove_style_source(source)?,
+        Mutation::SourceSnapshot { source, style } => tree.replace_style_source(source, style)?,
         Mutation::Create(create) => {
             applied.id = Some(create_node(tree, create)?);
         }
@@ -709,10 +876,13 @@ pub(super) fn apply(tree: &mut uicore::Tree, mutation: Mutation) -> Result<Appli
         Mutation::SetImage {
             id,
             source,
-            width,
-            height,
+            intrinsic,
         } => {
-            tree.set_image(id, &source, width, height)?;
+            tree.set_image(id, &source, intrinsic)?;
+        }
+        Mutation::SetStyleSurface { id, surface } => {
+            let surface = uicore::StyleSurface::parse(&surface).ok_or(uicore::Error::BadNumber)?;
+            tree.set_style_surface(id, surface)?;
         }
         Mutation::EditText { id, edit } => {
             tree.text_edit(id, edit)?;
@@ -734,7 +904,19 @@ pub(super) fn apply(tree: &mut uicore::Tree, mutation: Mutation) -> Result<Appli
             change => apply_style(tree, id, change)?,
         },
     }
+    applied.gestures.extend(tree.take_style_gestures());
     Ok(applied)
+}
+
+fn style_origin(raw: u64) -> Result<uicore::style::StyleOrigin, uicore::Error> {
+    Ok(match raw {
+        0 => uicore::style::StyleOrigin::Component,
+        1 => uicore::style::StyleOrigin::Classes,
+        2 => uicore::style::StyleOrigin::Inline,
+        3 => uicore::style::StyleOrigin::Imperative,
+        4 => uicore::style::StyleOrigin::Animation,
+        _ => return Err(uicore::Error::BadNumber),
+    })
 }
 
 fn create_node(tree: &mut uicore::Tree, create: Create) -> Result<NodeId, uicore::Error> {
@@ -762,6 +944,7 @@ fn create_node(tree: &mut uicore::Tree, create: Create) -> Result<NodeId, uicore
             font_size,
             color,
         } => tree.text(utf8, font_size, color),
+        Create::View => tree.view(),
     }
 }
 
@@ -855,10 +1038,42 @@ fn apply_style(
 }
 
 pub(super) fn apply_now(inner: &Inner, mutation: Mutation) -> Result<Applied, uicore::Error> {
+    // Read the authoritative node before invoking a setter. Equal writes do
+    // not cross into Tree::set_*. No JS property cache or second tree is kept.
+    let unchanged = {
+        let tree = inner.tree.borrow();
+        match &mutation {
+            Mutation::SetText { id, text } => tree.plain_text(*id)? == Some(text.as_str()),
+            Mutation::Style {
+                id,
+                change: StyleChange::Color(color),
+            } => tree.color(*id)? == Some(*color),
+            _ => false,
+        }
+    };
+    if unchanged {
+        return Ok(Applied {
+            id: None,
+            source: None,
+            gestures: Vec::new(),
+            retired: Vec::new(),
+        });
+    }
+    let styled = matches!(
+        mutation,
+        Mutation::Style { .. }
+            | Mutation::SetText { .. }
+            | Mutation::SetImage { .. }
+            | Mutation::SetStyleSurface { .. }
+            | Mutation::Recognizers { .. }
+    );
     let applied = {
         let mut tree = inner.tree.borrow_mut();
         apply(&mut tree, mutation)?
     };
+    if styled {
+        super::frame::bump(&inner.marks.sets);
+    }
     if let Err(message) = dispatch_gestures(inner, applied.gestures.clone()) {
         (inner.log)(3, &message);
     }
@@ -909,6 +1124,7 @@ pub(super) fn owned_from_ptr(rec: &MutRec) -> Result<OwnedRec, ()> {
         number4: rec.number4,
         color: rec.color,
         text,
+        style_value: read_style_value(rec)?,
     })
 }
 
@@ -934,7 +1150,11 @@ pub(super) unsafe extern "C" fn mutate(
         match apply_now(inner, mutation) {
             Ok(applied) => {
                 if !out_id.is_null() {
-                    let raw = applied.id.map(NodeId::to_raw).unwrap_or(0);
+                    let raw = applied
+                        .id
+                        .map(NodeId::to_raw)
+                        .or_else(|| applied.source.map(uicore::style::StyleSourceId::to_raw))
+                        .unwrap_or(0);
                     // SAFETY: glue passes a writable `uint64_t` when it wants the id.
                     unsafe { *out_id = raw };
                 }
@@ -981,17 +1201,23 @@ pub(super) unsafe extern "C" fn push_mutation(
 
 /// `rect` reads geometry, so a queued style write has to land first.
 pub(super) fn flush_for_read(inner: &Inner) -> i32 {
-    match flush_mutations(inner) {
-        Ok(true) => {
-            let mut tree = inner.tree.borrow_mut();
-            if tree.needs_layout() && tree.layout().is_err() {
-                return -1;
-            }
-            0
-        }
-        Ok(false) => 0,
-        Err(_) => -1,
+    if flush_mutations(inner).is_err() {
+        return -1;
     }
+    let mut tree = inner.tree.borrow_mut();
+    if tree.flush_styles().is_err() {
+        return -1;
+    }
+    let notices = tree.take_style_gestures();
+    drop(tree);
+    if dispatch_gestures(inner, notices).is_err() {
+        return -1;
+    }
+    let mut tree = inner.tree.borrow_mut();
+    if tree.needs_layout() && tree.layout().is_err() {
+        return -1;
+    }
+    0
 }
 
 fn edges_of(rec: &OwnedRec) -> Edges {
@@ -1140,4 +1366,61 @@ fn recognizers(tap: i32, long_press: i32, drag: i32, window_ms: f64) -> uicore::
         });
     }
     set
+}
+
+fn read_style_value(rec: &MutRec) -> Result<Option<uicore::style::codec::Value>, ()> {
+    use crate::abi::{StyleValueRecord, StyleValueTag as T};
+    use uicore::style::codec::Value as V;
+    if rec.value_count == 0 {
+        return Ok(None);
+    }
+    if rec.values.is_null() || rec.value_count > 65536 {
+        return Err(());
+    }
+    // SAFETY: glue owns this aligned array for the duration of mutate; count is bounded.
+    let records = unsafe { std::slice::from_raw_parts(rec.values, rec.value_count) };
+    fn string(ptr: *const c_char, len: usize) -> Result<String, ()> {
+        if ptr.is_null() {
+            return if len == 0 { Ok(String::new()) } else { Err(()) };
+        }
+        // SAFETY: each string is retained by glue through the mutate call.
+        unsafe { utf8_of(ptr, len) }.map(str::to_owned).ok_or(())
+    }
+    fn read(records: &[StyleValueRecord], at: &mut usize, depth: usize) -> Result<V, ()> {
+        if depth > 64 {
+            return Err(());
+        }
+        let record = records.get(*at).ok_or(())?;
+        *at += 1;
+        Ok(match record.tag {
+            tag if tag == T::Null as u32 => V::Null,
+            tag if tag == T::Undefined as u32 => V::Undefined,
+            tag if tag == T::Number as u32 => V::Number(record.number),
+            tag if tag == T::Bool as u32 => V::Bool(record.number != 0.0),
+            tag if tag == T::String as u32 => V::String(string(record.text, record.text_len)?),
+            tag if tag == T::Array as u32 => {
+                let mut items = Vec::new();
+                for _ in 0..record.children {
+                    items.push(read(records, at, depth + 1)?);
+                }
+                V::Array(items)
+            }
+            tag if tag == T::Object as u32 => {
+                let mut fields = Vec::new();
+                for _ in 0..record.children {
+                    let child = records.get(*at).ok_or(())?;
+                    let key = string(child.key, child.key_len)?;
+                    fields.push((key, read(records, at, depth + 1)?));
+                }
+                V::Object(fields)
+            }
+            _ => return Err(()),
+        })
+    }
+    let mut at = 0;
+    let value = read(records, &mut at, 0)?;
+    if at != records.len() {
+        return Err(());
+    }
+    Ok(Some(value))
 }

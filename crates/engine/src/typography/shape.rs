@@ -939,6 +939,36 @@ impl Typography {
         })
     }
 
+    /// Min-content width from the paragraph's intrinsic query.
+    ///
+    /// The paragraph is released before this returns. The float is a copy, not a new handle.
+    pub fn min_intrinsic_width(
+        &self,
+        utf8: &str,
+        font_size: f32,
+        text_style: &TextStyle,
+        spans: &[TextSpan],
+    ) -> Result<f32, Status> {
+        let shaped = self.build_paragraph(
+            utf8,
+            font_size,
+            1_000_000.0,
+            [0, 0, 0, 255],
+            text_style,
+            spans,
+        )?;
+        // SAFETY: `shaped.paragraph` is a live paragraph from `build_paragraph`.
+        // `GetMinIntrinsicWidth` returns a float cached on that paragraph.
+        let width = unsafe { ffi::ImpellerParagraphGetMinIntrinsicWidth(shaped.paragraph) };
+        // SAFETY: this function owns the only retain from `build_paragraph`.
+        unsafe { ffi::ImpellerParagraphRelease(shaped.paragraph) };
+        if width.is_finite() && width >= 0.0 {
+            Ok(width)
+        } else {
+            Err(Status::BadScene)
+        }
+    }
+
     /// Family actually passed to Impeller. A missing name falls back to the first
     /// registered face so a typo does not fail the whole frame.
     pub(crate) fn resolved_family(&self, requested: Option<&str>) -> Option<String> {

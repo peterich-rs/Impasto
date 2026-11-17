@@ -1,50 +1,72 @@
 import { onCleanup } from "solid-js";
-import { directionFor, host, onFrame, overlayParent, removeNode, restoreFocus, spring, takeInitialFocus, type NodeHandle } from "@impasto/solid-renderer";
+import {
+  directionFor,
+  scene,
+  onFrame,
+  overlayParent,
+  removeNode,
+  restoreFocus,
+  spring,
+  takeInitialFocus,
+  type NodeHandle,
+} from "@impasto/solid-renderer";
 import { colorBytes } from "./colors.ts";
-import { coreHost, nodeId } from "./host-ext.ts";
+import { sceneApi, nodeId } from "./scene-ext.ts";
 import { registerOverlay } from "./overlay/registry.ts";
 import { moveChildren, readFirstChild, restoreChildren } from "./overlay.ts";
+import type { SheetProps } from "./props.ts";
 import { Role } from "./semantics.ts";
+import { createNodeRef, createStyleTarget } from "./target.ts";
 import { useTheme } from "./use-theme.ts";
 
 /**
  * Bottom sheet with a scrim and a focus scope. Children park in a 0×0 clip.
  * Enter and leave slide; reduce-motion skips the in-between frames.
  */
-export function Sheet(props: {
-  open: boolean;
-  onClose: () => void;
-  title?: string;
-  initialFocus?: number;
-  children?: NodeHandle;
-}): NodeHandle {
+export function Sheet(props: SheetProps): NodeHandle {
   const theme = useTheme();
+  const panelStyle = createStyleTarget(() => props, () => ({
+    backgroundColor: colorBytes(theme().color.surface), borderRadius: theme().radius.m,
+  }));
+  const scrimStyle = createStyleTarget(() => props.scrimProps, () => ({
+    width: "100%", height: "100%", minWidth: 0, minHeight: 0, flex: 1, flexShrink: 1,
+    backgroundColor: colorBytes(theme().color.scrim), borderRadius: 0,
+  }));
+  const contentStyle = createStyleTarget(() => props.contentProps, () => ({ gap: theme().space.s }));
+  const titleStyle = createStyleTarget(() => props.titleProps, () => ({
+    fontSize: theme().fontSize.title, color: colorBytes(theme().color.text),
+    fontWeight: theme().weight.emphasis, writingDirection: directionFor(theme().locale),
+  }));
+  const panelRef = createNodeRef(() => props.ref);
   let placeholder = 0;
   let layer: Layer | null = null;
   let closing = false;
   let epoch = 0;
-
   function closeLayer(): void {
     if (layer === null) {
       return;
     }
+    panelRef.clear();
+    panelStyle.detach();
+    scrimStyle.detach();
+    contentStyle.detach();
+    titleStyle.detach();
     const current = layer;
     layer = null;
     closing = false;
     try {
       restoreChildren(current.slot, placeholder);
       if (current.focused) {
-        host.popFocusScope();
+        scene.popFocusScope();
         restoreFocus(current.previous);
       }
     } finally {
       if (current.unregister) {
         current.unregister();
       }
-      removeNode({ id: current.shell } as NodeHandle);
+      removeNode(current.shell);
     }
   }
-
   function play(leaving: boolean, onDone?: () => void): void {
     if (layer === null) {
       return;
@@ -63,7 +85,10 @@ export function Sheet(props: {
       prop: "opacity",
       from: leaving ? 255 : 0,
       to: leaving ? 0 : 255,
-      write: (value) => host.setAlpha(fade, Math.round(value)),
+      write: (value) =>
+        scene.patchStyle(fade, {
+          opacity: Math.round(value) / 255,
+        }),
       onDone: done,
     });
     spring({
@@ -71,15 +96,20 @@ export function Sheet(props: {
       prop: "translateY",
       from: leaving ? 0 : 48,
       to: leaving ? 48 : 0,
-      write: (value) => host.setTransform(panel, 0, value, 0, 1),
+      write: (value) =>
+        scene.patchStyle(panel, {
+          translateX: 0,
+          translateY: value,
+          rotate: 0,
+          scaleX: 1,
+          scaleY: 1,
+        }),
       onDone: done,
     });
   }
-
   function armEnter(): void {
     play(false);
   }
-
   function beginClose(): void {
     if (layer === null || closing) {
       return;
@@ -94,7 +124,6 @@ export function Sheet(props: {
       }
     });
   }
-
   function ensureLayer(): Layer | null {
     if (layer !== null) {
       return layer;
@@ -103,48 +132,98 @@ export function Sheet(props: {
       return null;
     }
     const overlay = nodeId(overlayParent());
-    const shell = host.stack();
-    host.setFill(shell);
-    host.insert(overlay, shell, 0);
-
-    const scrim = host.pointerRegion();
-    host.setFill(scrim);
-    host.onClick(scrim, () => props.onClose());
-    host.insert(shell, scrim, 0);
-    const scrimPaint = host.decorated(colorBytes(theme().color.scrim), 0);
-    host.setFill(scrimPaint);
-    host.insert(scrim, scrimPaint, 0);
-
-    const column = host.column(0);
-    host.setFill(column);
-    host.setJustify(column, "end");
-    host.insert(shell, column, 0);
-
-    const fade = host.opacity(0);
-    host.insert(column, fade, 0);
-    const panel = host.transform();
-    host.insert(fade, panel, 0);
-    const surface = host.decorated(colorBytes(theme().color.surface), theme().radius.m);
-    host.insert(panel, surface, 0);
-    const inner = host.column(theme().space.m);
-    host.insert(surface, inner, 0);
-
+    const shell = scene.stack();
+    scene.setComponentStyle(shell, {
+      gridTemplateColumns: "minmax(0, 1fr)",
+      gridTemplateRows: "minmax(0, 1fr)",
+    });
+    scene.patchStyle(shell, {
+      width: "100%",
+      height: "100%",
+      minWidth: 0,
+      minHeight: 0,
+      flex: 1,
+      flexShrink: 1,
+    });
+    scene.insert(overlay, shell, 0);
+    const scrim = scene.createElement("view", {
+      style: {},
+    });
+    scene.patchStyle(scrim, {
+      width: "100%",
+      height: "100%",
+      minWidth: 0,
+      minHeight: 0,
+      flex: 1,
+      flexShrink: 1,
+    });
+    scene.onClick(scrim, () => props.onClose());
+    scene.insert(shell, scrim, 0);
+    const scrimPaint = scene.createElement("view");
+    scene.insert(scrim, scrimPaint, 0);
+    const column = scene.createElement("view", {
+      style: {
+        gap: 0,
+      },
+    });
+    scene.patchStyle(column, {
+      width: "100%",
+      height: "100%",
+      minWidth: 0,
+      minHeight: 0,
+      flex: 1,
+      flexShrink: 1,
+    });
+    scene.patchStyle(column, {
+      justifyContent: "end",
+    });
+    scene.insert(shell, column, 0);
+    const fade = scene.createElement("stack", {
+      style: {
+        opacity: 0 / 255,
+      },
+    });
+    scene.insert(column, fade, 0);
+    const panel = scene.createElement("stack", {
+      style: {},
+    });
+    scene.insert(fade, panel, 0);
+    const inner = scene.createElement("view", {
+      style: {
+        gap: theme().space.m,
+      },
+    });
+    scene.insert(panel, inner, 0);
     const title = props.title ?? "";
     let titleId = 0;
     if (title.length > 0) {
-      titleId = host.text(title, theme().fontSize.title, colorBytes(theme().color.text));
-      host.setFontWeight(titleId, theme().weight.emphasis);
-      host.setTextDirection(titleId, directionFor(theme().locale));
-      host.insert(inner, titleId, 0);
+      titleId = scene.createElement("text", { value: title });
+      scene.insert(inner, titleId, 0);
     }
-    host.setSemantics(shell, Role.Generic, title.length > 0 ? title : undefined);
-
-    const slot = host.column(theme().space.s);
-    host.insert(inner, slot, 0);
-    layer = { shell, slot, panel, fade, titleId, previous: 0, focused: false, unregister: null };
+    scene.setSemantics(
+      shell,
+      Role.Generic,
+      title.length > 0 ? title : undefined,
+    );
+    const slot = scene.createElement("view");
+    scene.insert(inner, slot, 0);
+    panelStyle.attach(panel);
+    scrimStyle.attach(scrimPaint);
+    contentStyle.attach(slot);
+    panelRef.attach(panel);
+    if (titleId !== 0) titleStyle.attach(titleId);
+    layer = {
+      shell,
+      slot,
+      panel,
+      fade,
+      titleId,
+      previous: 0,
+      focused: false,
+      unregister: null,
+    };
     return layer;
   }
-
   function sync(): void {
     if (placeholder === 0) {
       return;
@@ -163,9 +242,6 @@ export function Sheet(props: {
     if (current === null) {
       return;
     }
-    if (current.titleId !== 0) {
-      host.setTextDirection(current.titleId, directionFor(theme().locale));
-    }
     const parked = readFirstChild(placeholder);
     if (parked === null) {
       placeholder = 0;
@@ -177,8 +253,8 @@ export function Sheet(props: {
     }
     if (created) {
       try {
-        const previous = coreHost.focused();
-        host.pushFocusScope(current.shell);
+        const previous = sceneApi.focused();
+        scene.pushFocusScope(current.shell);
         current.previous = previous;
         current.unregister = registerOverlay({
           modal: true,
@@ -194,7 +270,6 @@ export function Sheet(props: {
       armEnter();
     }
   }
-
   const stop = onFrame(() => {
     sync();
   });
@@ -202,22 +277,32 @@ export function Sheet(props: {
     stop();
     closeLayer();
   });
-
   return (
-    <clip
-      min={{ w: 0, h: 0 }}
-      max={{ w: 0, h: 0 }}
+    <stack
       ref={(node) => {
-        placeholder = node.id;
-        host.setMinSize(node.id, 0, 0);
-        host.setMaxSize(node.id, 0, 0);
+        if (node === null) return;
+        placeholder = node;
+        scene.patchStyle(node, {
+          minWidth: 0,
+          minHeight: 0,
+        });
+        scene.patchStyle(node, {
+          maxWidth: 0,
+          maxHeight: 0,
+        });
+      }}
+      style={{
+        overflow: "clip",
+        minWidth: 0,
+        minHeight: 0,
+        maxWidth: 0,
+        maxHeight: 0,
       }}
     >
       {props.children}
-    </clip>
+    </stack>
   );
 }
-
 type Layer = {
   shell: number;
   slot: number;

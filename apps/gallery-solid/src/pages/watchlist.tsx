@@ -1,6 +1,6 @@
 import { createMemo } from "solid-js";
-import { host, insert, type NodeHandle } from "@impasto/solid-renderer";
-import { VirtualList, createScrollController } from "@impasto/solid-ui";
+import { scene, insert, type NodeHandle } from "@impasto/solid-renderer";
+import { Column, Row, VirtualList, createScrollController } from "@impasto/solid-ui";
 import { colorBytes } from "../colors.ts";
 import { watchlistSig } from "../state/watchlist.ts";
 import { settingsSig } from "../state/settings.ts";
@@ -11,17 +11,14 @@ import { WatchRow, type RowItem } from "../widgets/watch-row.tsx";
 import { IndexStrip } from "../widgets/index-strip.tsx";
 import { loc } from "../copy.ts";
 import type { Router } from "@impasto/solid-router";
-
 const PANEL = colorBytes("#FFFFFF");
 const HAIR = colorBytes("#E8E8EC");
 const MUTED = colorBytes("#8A8D91");
 const INK = colorBytes("#1F2430");
 const PRIMARY = colorBytes("#C8102E");
-
 export function WatchlistPage(props: { router: Router }): NodeHandle {
   const { engine, binder } = useQuotes();
   const controller = createScrollController();
-
   const items = createMemo<RowItem[]>(() => {
     const out: RowItem[] = [];
     let lastGroup = "";
@@ -29,53 +26,122 @@ export function WatchlistPage(props: { router: Router }): NodeHandle {
       const market = engine.ins(symbol).market;
       if (market !== lastGroup) {
         lastGroup = market;
-        out.push({ symbol: `group:${market}`, firstOfGroup: market });
+        out.push({
+          symbol: `group:${market}`,
+          firstOfGroup: market,
+        });
       }
-      out.push({ symbol });
+      out.push({
+        symbol,
+      });
     }
     return out;
   });
-
-  const page = host.column(0);
-  host.setGrow(page, 1);
-
-  const header = host.padding(0);
-  host.setPaddingEdges(header, 12, 16, 4, 16);
-  host.append(page, header);
-  const headerRow = host.row(8);
-  host.setCross(headerRow, "center");
-  host.append(header, headerRow);
-  const title = host.text(loc("自选", "Watchlist"), 26, INK);
-  host.setFontWeight(title, 700);
-  host.append(headerRow, title);
-  const spacer = host.column(0);
-  host.setGrow(spacer, 1);
-  host.append(headerRow, spacer);
-  const search = host.pointerRegion();
-  host.onClick(search, () => props.router.push("/search"));
-  host.append(headerRow, search);
-  const searchLabel = host.text(loc("搜索", "Search"), 14, PRIMARY);
-  const searchAlign = host.align("center");
-  host.setGrow(searchAlign, 1);
-  host.append(searchAlign, searchLabel);
-  host.append(search, searchAlign);
-
+  const page = Column({
+    style: {
+      gap: 0,
+      flex: 1,
+      width: "100%",
+      height: "100%",
+      minWidth: 0,
+      minHeight: 0,
+    },
+  });
+  const header = scene.createElement("view", {
+    style: {
+      padding: 0,
+    },
+  });
+  scene.patchStyle(header, {
+    paddingTop: 12,
+    paddingRight: 16,
+    paddingBottom: 4,
+    paddingLeft: 16,
+  });
+  scene.append(page, header);
+  const headerRow = Row({
+    style: {
+      gap: 8,
+      alignItems: "center",
+    },
+  });
+  scene.append(header, headerRow);
+  const title = scene.createElement("text", {
+    value: loc("自选", "Watchlist"),
+    style: {
+      fontSize: 26,
+      color: INK,
+    },
+  });
+  scene.patchStyle(title, {
+    fontWeight: 700,
+  });
+  scene.append(headerRow, title);
+  const spacer = scene.createElement("view", {
+    style: {
+      gap: 0,
+    },
+  });
+  scene.patchStyle(spacer, {
+    flex: 1,
+  });
+  scene.append(headerRow, spacer);
+  const search = scene.createElement("view", {
+    style: {},
+  });
+  scene.onClick(search, () => props.router.push("/search"));
+  scene.append(headerRow, search);
+  const searchLabel = scene.createElement("text", {
+    value: loc("搜索", "Search"),
+    style: {
+      fontSize: 14,
+      color: PRIMARY,
+    },
+  });
+  const searchAlign = scene.createElement("view", {
+    style: {
+      alignItems: "center",
+      justifyContent: "center",
+    },
+  });
+  scene.patchStyle(searchAlign, {
+    flex: 1,
+  });
+  scene.append(searchAlign, searchLabel);
+  scene.append(search, searchAlign);
   const stripHost = IndexStrip({
     symbols: () => watchlistSig(),
     engine: () => engine,
     binder: () => binder,
     onClick: (symbol) => props.router.push(`/stock/${symbol}`),
   });
-  const stripPad = host.padding(0);
-  host.setPaddingEdges(stripPad, 8, 16, 8, 16);
-  host.append(stripPad, stripHost.id);
-  host.append(page, stripPad);
-
-  const panel = host.decorated(PANEL, 12);
-  host.setStroke(panel, 1, HAIR);
-  host.setGrow(panel, 1);
-  host.append(page, panel);
-
+  const stripPad = scene.createElement("view", {
+    style: {
+      padding: 0,
+    },
+  });
+  scene.patchStyle(stripPad, {
+    paddingTop: 8,
+    paddingRight: 16,
+    paddingBottom: 8,
+    paddingLeft: 16,
+  });
+  scene.append(stripPad, stripHost);
+  scene.append(page, stripPad);
+  const panel = scene.createElement("view", {
+    style: {
+      backgroundColor: PANEL,
+      borderRadius: 12,
+    },
+  });
+  scene.patchStyle(panel, {
+    outlineWidth: 1,
+    outlineColor: HAIR,
+  });
+  scene.patchStyle(panel, {
+    flex: 1,
+  });
+  scene.append(page, panel);
   const list = VirtualList({
     get items() {
       return items();
@@ -87,7 +153,8 @@ export function WatchlistPage(props: { router: Router }): NodeHandle {
     sticky: (item) => item.firstOfGroup !== undefined,
     empty: () => emptyState(() => props.router.push("/search")),
     recycle: {
-      typeOf: (item: RowItem) => (item.symbol.startsWith("group:") ? "header" : "row"),
+      typeOf: (item: RowItem) =>
+        item.symbol.startsWith("group:") ? "header" : "row",
       render: (item, index) => renderRow(item(), index()),
     },
     refresh: {
@@ -99,19 +166,38 @@ export function WatchlistPage(props: { router: Router }): NodeHandle {
             resolve();
           }, 600);
         }),
-      indicator: ({ progress }) => PullLabel({ progress }),
+      indicator: ({ progress }) =>
+        PullLabel({
+          progress,
+        }),
     },
   });
-  insert({ id: panel } as NodeHandle, list);
-
+  insert(panel, list);
   function renderRow(item: RowItem, _index: number): NodeHandle {
     if (item.firstOfGroup !== undefined) {
-      const head = host.padding(0);
-      host.setPaddingEdges(head, 12, 16, 4, 16);
-      const labelText = host.text(groupLabel(item.firstOfGroup), 11, MUTED);
-      host.setFontWeight(labelText, 600);
-      host.append(head, labelText);
-      return { id: head };
+      const head = scene.createElement("view", {
+        style: {
+          padding: 0,
+        },
+      });
+      scene.patchStyle(head, {
+        paddingTop: 12,
+        paddingRight: 16,
+        paddingBottom: 4,
+        paddingLeft: 16,
+      });
+      const labelText = scene.createElement("text", {
+        value: groupLabel(item.firstOfGroup),
+        style: {
+          fontSize: 11,
+          color: MUTED,
+        },
+      });
+      scene.patchStyle(labelText, {
+        fontWeight: 600,
+      });
+      scene.append(head, labelText);
+      return head;
     }
     return WatchRow({
       item: () => item,
@@ -121,32 +207,74 @@ export function WatchlistPage(props: { router: Router }): NodeHandle {
       onClick: (symbol) => props.router.push(`/stock/${symbol}`),
     });
   }
-
-  return { id: page };
+  return page;
 }
-
 function emptyState(onSearch: () => void): NodeHandle {
-  const col = host.column(10);
-  const pad = host.padding(0);
-  host.setPaddingEdges(pad, 32, 16, 32, 16);
-  host.append(pad, col);
-  const hint = host.text(loc("还没有自选", "Watchlist is empty"), 14, MUTED);
-  const align = host.align("center");
-  host.append(align, hint);
-  host.append(col, align);
-  const cta = host.pointerRegion();
-  host.onClick(cta, onSearch);
-  host.append(col, cta);
-  const pill = host.decorated(PRIMARY, 999);
-  host.setMinSize(pill, 0, 36);
-  host.append(cta, pill);
-  const label = host.text(loc("去搜索", "Search"), 13, colorBytes("#FFFFFF"));
-  const center = host.align("center");
-  host.append(center, label);
-  host.append(pill, center);
-  return { id: pad };
+  const col = scene.createElement("view", {
+    style: {
+      gap: 10,
+    },
+  });
+  const pad = scene.createElement("view", {
+    style: {
+      padding: 0,
+    },
+  });
+  scene.patchStyle(pad, {
+    paddingTop: 32,
+    paddingRight: 16,
+    paddingBottom: 32,
+    paddingLeft: 16,
+  });
+  scene.append(pad, col);
+  const hint = scene.createElement("text", {
+    value: loc("还没有自选", "Watchlist is empty"),
+    style: {
+      fontSize: 14,
+      color: MUTED,
+    },
+  });
+  const align = scene.createElement("view", {
+    style: {
+      alignItems: "center",
+      justifyContent: "center",
+    },
+  });
+  scene.append(align, hint);
+  scene.append(col, align);
+  const cta = scene.createElement("view", {
+    style: {},
+  });
+  scene.onClick(cta, onSearch);
+  scene.append(col, cta);
+  const pill = scene.createElement("view", {
+    style: {
+      backgroundColor: PRIMARY,
+      borderRadius: 999,
+    },
+  });
+  scene.patchStyle(pill, {
+    minWidth: 0,
+    minHeight: 36,
+  });
+  scene.append(cta, pill);
+  const label = scene.createElement("text", {
+    value: loc("去搜索", "Search"),
+    style: {
+      fontSize: 13,
+      color: colorBytes("#FFFFFF"),
+    },
+  });
+  const center = scene.createElement("view", {
+    style: {
+      alignItems: "center",
+      justifyContent: "center",
+    },
+  });
+  scene.append(center, label);
+  scene.append(pill, center);
+  return pad;
 }
-
 function groupLabel(market: string): string {
   if (market === "hk") {
     return loc("港股", "HK");

@@ -1,6 +1,18 @@
-import { For, createSignal, createTrackedEffect, onCleanup, type Accessor } from "solid-js";
+import {
+  For,
+  createSignal,
+  createTrackedEffect,
+  onCleanup,
+  type Accessor,
+} from "solid-js";
 import { Errored } from "solid-js";
-import { Text, host, restoreFocus, spring, type NodeHandle } from "@impasto/solid-renderer";
+import {
+  Text,
+  scene,
+  restoreFocus,
+  spring,
+  type NodeHandle,
+} from "@impasto/solid-renderer";
 import {
   PageActiveContext,
   PageKeepContext,
@@ -9,45 +21,43 @@ import {
   type Router,
 } from "./stack.ts";
 import { stackMotion, travelDistance } from "./transition.ts";
-
 export type TransitionProps = {
   phase: RoutePhase;
   onDone: () => void;
   children?: NodeHandle;
 };
-
 export type RouterViewProps = {
   router: Router;
   /** Default stack slide, including clip, pointer, and pageDistance. */
   transition?: (props: TransitionProps) => NodeHandle;
-  /** Page color for the default transition. Omitted draws no decorated box. */
+  /** Page color for the default transition. Omitted leaves the background transparent. */
   background?: string;
   /** Default is the package's plain error page. */
   errorFallback?: (error: unknown, reset: () => void) => NodeHandle;
 };
-
 function pageDistance(mover: number): number {
-  const measured = host.rect(mover).w;
-  const width = host.metrics?.().width ?? 0;
+  const measured = scene.rect(mover).w;
+  const width = scene.metrics?.().width ?? 0;
   return travelDistance(measured, width);
 }
-
 function plainError(error: unknown, reset: () => void): NodeHandle {
   const message = error instanceof Error ? error.message : String(error);
   return (
-    <column gap={8}>
+    <view
+      style={{
+        gap: 8,
+      }}
+    >
       <Text>{message}</Text>
-      <pointer onClick={() => reset()}>
+      <view onClick={() => reset()}>
         <Text>retry</Text>
-      </pointer>
-    </column>
+      </view>
+    </view>
   );
 }
-
 function unwrapError(error: unknown): unknown {
   return typeof error === "function" ? (error as () => unknown)() : error;
 }
-
 function loggedError(error: unknown): string {
   if (!(error instanceof Error)) {
     return String(error);
@@ -58,8 +68,11 @@ function loggedError(error: unknown): string {
   }
   return stack.includes(error.message) ? stack : `${error.message}\n${stack}`;
 }
-
-export function StackTransition(props: TransitionProps & { background?: string }): NodeHandle {
+export function StackTransition(
+  props: TransitionProps & {
+    background?: string;
+  },
+): NodeHandle {
   let mover = 0;
   let fade = 0;
   let played = "";
@@ -71,17 +84,36 @@ export function StackTransition(props: TransitionProps & { background?: string }
     }
     played = phase;
     if (phase === "live") {
-      host.setTransform(mover, 0, 0, 0, 1);
-      host.setAlpha(fade, 255);
+      scene.patchStyle(mover, {
+        translateX: 0,
+        translateY: 0,
+        rotate: 0,
+        scaleX: 1,
+        scaleY: 1,
+      });
+      scene.patchStyle(fade, {
+        opacity: 255 / 255,
+      });
       return;
     }
-    const steps = stackMotion(phase === "cover" ? "cover" : phase, pageDistance(mover));
+    const steps = stackMotion(
+      phase === "cover" ? "cover" : phase,
+      pageDistance(mover),
+    );
     let left = steps.length;
     for (const step of steps) {
       if (step.prop === "opacity") {
-        host.setAlpha(fade, Math.round(step.from));
+        scene.patchStyle(fade, {
+          opacity: Math.round(step.from) / 255,
+        });
       } else {
-        host.setTransform(mover, step.from, 0, 0, 1);
+        scene.patchStyle(mover, {
+          translateX: step.from,
+          translateY: 0,
+          rotate: 0,
+          scaleX: 1,
+          scaleY: 1,
+        });
       }
       spring({
         id: step.prop === "opacity" ? fade : mover,
@@ -90,9 +122,17 @@ export function StackTransition(props: TransitionProps & { background?: string }
         to: step.to,
         write: (value) => {
           if (step.prop === "opacity") {
-            host.setAlpha(fade, Math.round(value));
+            scene.patchStyle(fade, {
+              opacity: Math.round(value) / 255,
+            });
           } else {
-            host.setTransform(mover, value, 0, 0, 1);
+            scene.patchStyle(mover, {
+              translateX: value,
+              translateY: 0,
+              rotate: 0,
+              scaleX: 1,
+              scaleY: 1,
+            });
           }
         },
         onDone: () => {
@@ -104,33 +144,80 @@ export function StackTransition(props: TransitionProps & { background?: string }
       });
     }
   });
-  const body = <pointer fill>{props.children}</pointer>;
-  return (
-    <opacity
-      fill
-      ref={(node) => {
-        fade = node.id;
-        setMounted(node.id);
+  const body = (
+    <view
+      style={{
+        width: "100%",
+        height: "100%",
+        flex: 1,
+        flexShrink: 1,
+        minWidth: 0,
+        minHeight: 0,
       }}
     >
-      <transform
-        fill
+      {props.children}
+    </view>
+  );
+  return (
+    <stack
+      ref={(node) => {
+        if (node === null) return;
+        scene.setComponentStyle(node, {
+          gridTemplateColumns: "minmax(0, 1fr)",
+          gridTemplateRows: "minmax(0, 1fr)",
+        });
+        fade = node;
+        setMounted(node);
+      }}
+      style={{
+        width: "100%",
+        height: "100%",
+        flex: 1,
+        flexShrink: 1,
+        minWidth: 0,
+        minHeight: 0,
+        opacity: 1,
+      }}
+    >
+      <stack
         ref={(node) => {
-          mover = node.id;
+          if (node === null) return;
+        scene.setComponentStyle(node, {
+          gridTemplateColumns: "minmax(0, 1fr)",
+          gridTemplateRows: "minmax(0, 1fr)",
+        });
+        mover = node;
+        }}
+        style={{
+          width: "100%",
+          height: "100%",
+          flex: 1,
+          flexShrink: 1,
+          minWidth: 0,
+          minHeight: 0,
         }}
       >
         {props.background === undefined ? (
           body
         ) : (
-          <decorated color={props.background} fill>
+          <view
+            style={{
+              width: "100%",
+              height: "100%",
+              flex: 1,
+              flexShrink: 1,
+              minWidth: 0,
+              minHeight: 0,
+              backgroundColor: props.background,
+            }}
+          >
             {body}
-          </decorated>
+          </view>
         )}
-      </transform>
-    </opacity>
+      </stack>
+    </stack>
   );
 }
-
 function RouteHost(props: {
   router: Router;
   entry: Accessor<RouteEntry>;
@@ -151,30 +238,49 @@ function RouteHost(props: {
   };
   onCleanup(() => {
     try {
-      host.popFocusScope();
+      scene.popFocusScope();
     } catch {
       // core owns the scope stack. This pop matches the ref's push.
     }
     restoreFocus(previous);
   });
   const Page = props.entry().component;
-  const transition = props.transition ?? ((step: TransitionProps) => (
-    <StackTransition phase={step.phase} onDone={step.onDone} background={props.background}>
-      {step.children}
-    </StackTransition>
-  ));
+  const transition =
+    props.transition ??
+    ((step: TransitionProps) => (
+      <StackTransition
+        phase={step.phase}
+        onDone={step.onDone}
+        background={props.background}
+      >
+        {step.children}
+      </StackTransition>
+    ));
   return (
     <PageActiveContext value={active}>
       <PageKeepContext value={() => props.entry().keepAlive}>
         <stack
-          fill
           ref={(node) => {
-            previous = typeof host.focused === "function" ? host.focused() : 0;
+            if (node === null) return;
+            scene.setComponentStyle(node, {
+              gridTemplateColumns: "minmax(0, 1fr)",
+              gridTemplateRows: "minmax(0, 1fr)",
+            });
+            previous =
+              typeof scene.focused === "function" ? scene.focused() : 0;
             try {
-              host.pushFocusScope(node.id);
+              scene.pushFocusScope(node);
             } catch {
               // Mock hosts without a scope stack still mount the page.
             }
+          }}
+          style={{
+            width: "100%",
+            height: "100%",
+            flex: 1,
+            flexShrink: 1,
+            minWidth: 0,
+            minHeight: 0,
           }}
         >
           {transition({
@@ -198,10 +304,26 @@ function RouteHost(props: {
     </PageActiveContext>
   );
 }
-
 export function RouterView(props: RouterViewProps): NodeHandle {
   return (
-    <clip fill>
+    <stack
+      ref={(node) => {
+        if (node === null) return;
+        scene.setComponentStyle(node, {
+          gridTemplateColumns: "minmax(0, 1fr)",
+          gridTemplateRows: "minmax(0, 1fr)",
+        });
+      }}
+      style={{
+        width: "100%",
+        height: "100%",
+        flex: 1,
+        flexShrink: 1,
+        minWidth: 0,
+        minHeight: 0,
+        overflow: "clip",
+      }}
+    >
       <For each={props.router.stack()} keyed={(entry) => entry.key}>
         {(entry) => (
           <RouteHost
@@ -213,6 +335,6 @@ export function RouterView(props: RouterViewProps): NodeHandle {
           />
         )}
       </For>
-    </clip>
+    </stack>
   );
 }

@@ -4,9 +4,9 @@ import {
   openAppSettings as hostOpenAppSettings,
   requestPermissions,
   shouldShowRequestPermissionRationale,
-} from "@impasto/permissions/host";
+} from "./permissions.ts";
 
-/** Names follow permission_handler 11.3.1. The host maps each name. */
+/** Names follow permission_handler 11.3.1. The scene maps each name. */
 const NAMES = [
   "camera",
   "microphone",

@@ -8,13 +8,16 @@
     ".": "./runtime/index.ts",
     "./defaults": "./src/defaults.ts",
     "./palette": "./src/palette.ts",
-    "./jsx": "./src/jsx.ts"
+    "./jsx": "./src/jsx.ts",
+    "./style": "./src/style.ts"
   },
   "scripts": {
-    "test": "node --conditions=browser --experimental-strip-types src/tree.test.ts && node --experimental-strip-types runtime/frame.test.ts && node --conditions=browser --experimental-strip-types runtime/slot.test.ts && node --experimental-strip-types runtime/list-binding.test.ts && node --experimental-strip-types runtime/motion.test.ts && node --conditions=browser --experimental-strip-types src/direction.test.ts"
+    "test": "node --import ../../tools/register.mjs --conditions=browser --experimental-strip-types src/tree.test.ts && node --import ../../tools/register.mjs --experimental-strip-types runtime/frame.test.ts && node --import ../../tools/register.mjs --conditions=browser --experimental-strip-types runtime/slot.test.ts && node --import ../../tools/register.mjs --experimental-strip-types runtime/list-binding.test.ts && node --import ../../tools/register.mjs --experimental-strip-types runtime/motion.test.ts && node --import ../../tools/register.mjs --conditions=browser --experimental-strip-types src/direction.test.ts"
   },
   "dependencies": {
-    "@solidjs/universal": "2.0.0-rc.17",
+    "@impasto/reactive": "workspace:*"
+  },
+  "devDependencies": {
     "solid-js": "2.0.0-rc.17"
   }
 }

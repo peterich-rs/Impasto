@@ -1,38 +1,43 @@
 import { createTrackedEffect, onCleanup } from "solid-js";
-import { onFrame, readMetrics, scrollIntoView, type NodeHandle } from "@impasto/solid-renderer";
-import { host } from "@impasto/solid-renderer";
+import {
+  onFrame,
+  readMetrics,
+  scrollIntoView,
+  type NodeHandle,
+} from "@impasto/solid-renderer";
+import { scene } from "@impasto/solid-renderer";
+import { bindBox } from "./element.tsx";
+import type { KeyboardAvoidingProps } from "./props.ts";
 
 /**
  * `padding` adds `metrics.viewInsets.bottom`.
  * `scroll` calls `scrollIntoView` on the focused node when the inset is positive.
  */
-export function KeyboardAvoidingView(props: {
-  behavior?: "padding" | "scroll";
-  target?: number;
-  children?: NodeHandle;
-}): NodeHandle {
+export function KeyboardAvoidingView(props: KeyboardAvoidingProps): NodeHandle {
   let bottom = 0;
   let pad = 0;
   const behavior = () => props.behavior ?? "padding";
-
   function apply(next: number): void {
     bottom = next;
     if (pad !== 0 && behavior() === "padding") {
-      host.setPaddingEdges(pad, 0, 0, next, 0);
+      scene.patchStyle(pad, {
+        paddingTop: 0,
+        paddingRight: 0,
+        paddingBottom: next,
+        paddingLeft: 0,
+      });
     }
     if (behavior() === "scroll" && next > 0) {
-      const id = props.target || host.focused();
+      const id = props.target || scene.focused();
       if (id !== 0) {
         scrollIntoView(id, 0);
       }
     }
   }
-
   createTrackedEffect(() => {
     behavior();
     apply(bottom);
   });
-
   onCleanup(
     onFrame(() => {
       const metrics = readMetrics();
@@ -42,15 +47,16 @@ export function KeyboardAvoidingView(props: {
       }
     }),
   );
-
   return (
-    <padding
+    <view
       ref={(node) => {
-        pad = node.id;
+        if (node === null) return;
+        pad = node;
+        bindBox(node, props);
         apply(bottom);
       }}
     >
       {props.children}
-    </padding>
+    </view>
   );
 }

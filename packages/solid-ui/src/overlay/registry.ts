@@ -1,22 +1,26 @@
 import { onBack } from "@impasto/solid-renderer";
-
 export type OverlayEntry = {
   id: number;
   modal: boolean;
   close: () => void;
 };
-
 let nextId = 1;
 const entries: OverlayEntry[] = [];
 let releaseBack: (() => void) | null = null;
-
 export function overlayEntries(): readonly OverlayEntry[] {
   return entries;
 }
 
 /** Dialog and Sheet pass `modal: true`. Toast and Tooltip do not register. */
-export function registerOverlay(entry: { modal: boolean; close: () => void }): () => void {
-  const spec: OverlayEntry = { id: nextId, modal: entry.modal, close: entry.close };
+export function registerOverlay(entry: {
+  modal: boolean;
+  close: () => void;
+}): () => void {
+  const spec: OverlayEntry = {
+    id: nextId,
+    modal: entry.modal,
+    close: entry.close,
+  };
   nextId += 1;
   entries.push(spec);
   if (releaseBack === null) {
@@ -41,7 +45,6 @@ export function closeTopModal(): boolean {
   }
   return false;
 }
-
 export function resetOverlaysForTests(): void {
   entries.length = 0;
   nextId = 1;

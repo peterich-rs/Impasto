@@ -14,10 +14,14 @@ export function routePath(url: string): string {
   }
   return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
 }
-
-export function matchPath(pattern: string, path: string): Record<string, string> | null {
+export function matchPath(
+  pattern: string,
+  path: string,
+): Record<string, string> | null {
   const tokens = pattern.split("/").filter((part) => part.length > 0);
-  const parts = routePath(path).split("/").filter((part) => part.length > 0);
+  const parts = routePath(path)
+    .split("/")
+    .filter((part) => part.length > 0);
   const params: Record<string, string> = {};
   let index = 0;
   for (; index < tokens.length; index += 1) {

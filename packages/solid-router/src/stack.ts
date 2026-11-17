@@ -1,17 +1,21 @@
-import { createContext, createTrackedEffect, createSignal, getOwner, onCleanup, useContext, type Accessor } from "solid-js";
+import {
+  createContext,
+  createTrackedEffect,
+  createSignal,
+  getOwner,
+  onCleanup,
+  useContext,
+  type Accessor,
+} from "solid-js";
 import { onBack, onFrame, type NodeHandle } from "@impasto/solid-renderer";
 import { matchPath, routePath } from "./path.ts";
-
 export type RouteParams = Record<string, string>;
-
 export type RouteDef = {
   path: string;
   component: (props: { params: RouteParams }) => NodeHandle;
   keepAlive?: boolean;
 };
-
 export type RoutePhase = "enter" | "live" | "exit" | "cover";
-
 export type RouteEntry = {
   key: string;
   path: string;
@@ -21,7 +25,6 @@ export type RouteEntry = {
   keepAlive: boolean;
   component: RouteDef["component"];
 };
-
 export type Router = {
   stack: Accessor<RouteEntry[]>;
   depth: Accessor<number>;
@@ -32,7 +35,6 @@ export type Router = {
   reset: (path: string) => boolean;
   complete: (key: string) => void;
 };
-
 export const PageActiveContext = createContext<Accessor<boolean>>(() => true);
 export const PageKeepContext = createContext<Accessor<boolean>>(() => false);
 
@@ -40,7 +42,9 @@ export const PageKeepContext = createContext<Accessor<boolean>>(() => false);
  * keepAlive pages do not register `onFrame` while they are not the focused route.
  * Other pages keep their listener.
  */
-export function usePageFrame(fn: (targetMs: number, intervalMs: number) => void): void {
+export function usePageFrame(
+  fn: (targetMs: number, intervalMs: number) => void,
+): void {
   const active = useContext(PageActiveContext);
   const keepAlive = useContext(PageKeepContext);
   createTrackedEffect(() => {
@@ -51,8 +55,10 @@ export function usePageFrame(fn: (targetMs: number, intervalMs: number) => void)
     onCleanup(stop);
   });
 }
-
-function resolved(defs: readonly RouteDef[], path: string): Omit<RouteEntry, "key" | "phase"> | null {
+function resolved(
+  defs: readonly RouteDef[],
+  path: string,
+): Omit<RouteEntry, "key" | "phase"> | null {
   const pathname = routePath(path);
   for (const def of defs) {
     const params = matchPath(def.path, pathname);
@@ -68,56 +74,94 @@ function resolved(defs: readonly RouteDef[], path: string): Omit<RouteEntry, "ke
   }
   return null;
 }
-
 let keySeq = 1;
 function nextKey(): string {
   const key = `route-${keySeq}`;
   keySeq += 1;
   return key;
 }
-
 export function createRouter(
   defs: readonly RouteDef[],
-  options: { initial?: string; onBack?: () => boolean } = {},
+  options: {
+    initial?: string;
+    onBack?: () => boolean;
+  } = {},
 ): Router {
   const initialPath = options.initial ?? "/";
   const first = resolved(defs, initialPath);
   const [entries, setEntries] = createSignal<RouteEntry[]>(
-    first ? [{ ...first, key: nextKey(), phase: "live" }] : [],
+    first
+      ? [
+          {
+            ...first,
+            key: nextKey(),
+            phase: "live",
+          },
+        ]
+      : [],
   );
-
   function push(path: string): boolean {
     const match = resolved(defs, path);
     if (!match) {
       return false;
     }
-    const next = { ...match, key: nextKey(), phase: "enter" as const };
+    const next = {
+      ...match,
+      key: nextKey(),
+      phase: "enter" as const,
+    };
     setEntries((list) => {
       const top = list[list.length - 1];
       if (!top) {
-        return [{ ...next, phase: "live" }];
+        return [
+          {
+            ...next,
+            phase: "live",
+          },
+        ];
       }
-      return [...list.slice(0, -1), { ...top, phase: "cover" }, next];
+      return [
+        ...list.slice(0, -1),
+        {
+          ...top,
+          phase: "cover",
+        },
+        next,
+      ];
     });
     return true;
   }
-
   function replace(path: string): boolean {
     const match = resolved(defs, path);
     if (!match) {
       return false;
     }
-    const next = { ...match, key: nextKey(), phase: "enter" as const };
+    const next = {
+      ...match,
+      key: nextKey(),
+      phase: "enter" as const,
+    };
     setEntries((list) => {
       const top = list[list.length - 1];
       if (!top) {
-        return [{ ...next, phase: "live" }];
+        return [
+          {
+            ...next,
+            phase: "live",
+          },
+        ];
       }
-      return [...list.slice(0, -1), { ...top, phase: "exit" }, next];
+      return [
+        ...list.slice(0, -1),
+        {
+          ...top,
+          phase: "exit",
+        },
+        next,
+      ];
     });
     return true;
   }
-
   function pop(): boolean {
     const list = entries();
     if (list.length <= 1) {
@@ -136,17 +180,22 @@ export function createRouter(
       }
       return current.map((entry, index) => {
         if (index === current.length - 1) {
-          return { ...entry, phase: "exit" as const };
+          return {
+            ...entry,
+            phase: "exit" as const,
+          };
         }
         if (entry.phase === "cover") {
-          return { ...entry, phase: "live" as const };
+          return {
+            ...entry,
+            phase: "live" as const,
+          };
         }
         return entry;
       });
     });
     return true;
   }
-
   function popTo(path: string): boolean {
     const pathname = routePath(path);
     let found = false;
@@ -162,20 +211,31 @@ export function createRouter(
         return list;
       }
       found = true;
-      return list.map((entry, cursor) => (cursor > index ? { ...entry, phase: "exit" as const } : entry));
+      return list.map((entry, cursor) =>
+        cursor > index
+          ? {
+              ...entry,
+              phase: "exit" as const,
+            }
+          : entry,
+      );
     });
     return found;
   }
-
   function reset(path: string): boolean {
     const match = resolved(defs, path);
     if (!match) {
       return false;
     }
-    setEntries([{ ...match, key: nextKey(), phase: "live" }]);
+    setEntries([
+      {
+        ...match,
+        key: nextKey(),
+        phase: "live",
+      },
+    ]);
     return true;
   }
-
   function complete(key: string): void {
     setEntries((list) =>
       list.flatMap((entry) => {
@@ -186,13 +246,17 @@ export function createRouter(
           return [];
         }
         if (entry.phase === "enter" || entry.phase === "cover") {
-          return [{ ...entry, phase: "live" as const }];
+          return [
+            {
+              ...entry,
+              phase: "live" as const,
+            },
+          ];
         }
         return [entry];
       }),
     );
   }
-
   const router: Router = {
     stack: entries,
     depth: () => entries().length,
@@ -203,7 +267,6 @@ export function createRouter(
     reset,
     complete,
   };
-
   const releasePop = onBack(200, () => pop());
   const releaseApp = options.onBack ? onBack(100, options.onBack) : () => {};
   if (getOwner()) {
@@ -212,7 +275,6 @@ export function createRouter(
       releaseApp();
     });
   }
-
   void import("@impasto/linking")
     .then(({ Linking }) => {
       const initial = Linking.getInitialURL();
@@ -222,6 +284,5 @@ export function createRouter(
     .catch(() => {
       /* unregistered: same as today's get() == null */
     });
-
   return router;
 }

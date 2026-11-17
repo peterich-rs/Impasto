@@ -194,7 +194,7 @@ impl Tree {
     /// Hit-tests the previous layout and updates the press, drag, and focus gestures.
     ///
     /// A hit on the way down is [`Gesture::Press`]. A move that stays within
-    /// [`DRAG_SLOP`] keeps that press. Past the slop, a region that
+    /// `DRAG_SLOP` keeps that press. Past the slop, a region that
     /// [`Tree::set_drag_claim`]s the dominant axis locks as a selection drag.
     /// Otherwise the scroll chain does: a scroll at its edge yields to an
     /// ancestor that can still move on that axis. One scroll keeps one locked
@@ -230,6 +230,7 @@ impl Tree {
             self.arena.routes.insert(event.pointer, route);
         }
         gestures.extend(produced);
+        self.invalidate_style_deps(crate::style::DepMask::HOVER | crate::style::DepMask::ACTIVE);
         self.finish_pointer(gestures)
     }
 
@@ -372,7 +373,7 @@ impl Tree {
         loop {
             if self
                 .get(id)
-                .is_some_and(|node| node.kind == Kind::Transform)
+                .is_some_and(|node| node.role.contains(super::node::Role::TRANSFORM))
             {
                 return Some(id);
             }
@@ -753,7 +754,7 @@ impl Tree {
         if let Some(config) = self.double_tap_config(target) {
             let waits = self
                 .get(target)
-                .is_some_and(|node| node.recognizers.tap || node.kind == Kind::PointerRegion);
+                .is_some_and(|node| node.recognizers.tap || node.is_pointer());
             self.arena.pending_tap = Some(PendingTap {
                 node: target,
                 x: event.x,
@@ -1004,6 +1005,7 @@ impl Tree {
             self.focused = Some(id);
             gestures.push(Gesture::Focus(id));
         }
+        self.invalidate_style_deps(crate::style::DepMask::FOCUS);
         gestures
     }
 
@@ -1079,7 +1081,7 @@ impl Tree {
         if node.is_focusable() && node.w > 0.0 && node.h > 0.0 {
             out.push(id);
         }
-        if node.kind == Kind::Clip && (node.w == 0.0 || node.h == 0.0) {
+        if node.role.contains(super::node::Role::CLIP) && (node.w == 0.0 || node.h == 0.0) {
             return;
         }
         let mut child = node.first_child;
@@ -1184,6 +1186,49 @@ impl Tree {
             }
             FocusDirection::Next | FocusDirection::Previous => None,
         }
+    }
+
+    /// Drop press, drag, hover, and focus inside a `display: none` subtree.
+    pub(super) fn conceal(&mut self, id: NodeId) -> Vec<Gesture> {
+        let mut out = self.blur_contained(id);
+        if let Some(hovered) = self.arena.hovered
+            && self.is_under(hovered, id).unwrap_or(false)
+        {
+            self.arena.hovered = None;
+            out.push(Gesture::Leave(hovered));
+        }
+        let pointers: Vec<_> = self.arena.routes.keys().copied().collect();
+        for pointer in pointers {
+            let pressed = self
+                .arena
+                .routes
+                .get(&pointer)
+                .and_then(|route| route.pressed);
+            if let Some(pressed) = pressed
+                && self.is_under(pressed, id).unwrap_or(false)
+            {
+                if let Some(route) = self.arena.routes.get_mut(&pointer) {
+                    route.pressed = None;
+                    route.long_press = None;
+                }
+                out.push(Gesture::Release(pressed));
+            }
+            let drag = self.arena.routes.get(&pointer).and_then(|route| {
+                route
+                    .drag
+                    .as_ref()
+                    .and_then(|drag| drag.scroll.or(drag.hit))
+            });
+            if let Some(target) = drag
+                && self.is_under(target, id).unwrap_or(false)
+            {
+                if let Some(route) = self.arena.routes.get_mut(&pointer) {
+                    route.drag = None;
+                }
+                out.push(Gesture::DragEnd(target, 0.0, 0.0));
+            }
+        }
+        out
     }
 
     pub(super) fn blur_contained(&mut self, root: NodeId) -> Vec<Gesture> {

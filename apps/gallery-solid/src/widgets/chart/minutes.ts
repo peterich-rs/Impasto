@@ -1,11 +1,10 @@
 import { onCleanup, createTrackedEffect } from "solid-js";
-import { host, type NodeHandle } from "@impasto/solid-renderer";
+import { scene, type NodeHandle } from "@impasto/solid-renderer";
 import { colorBytes } from "../../colors.ts";
 import type { QuoteBinder } from "../../state/binder.ts";
 import type { QuoteEngine } from "../../engine/engine.ts";
 import { downsampleTicks } from "../../engine/universe.ts";
 import { toneFor, type Updown } from "../../state/settings.ts";
-
 const MUTED = colorBytes("#8A8D91");
 const LINE = colorBytes("#C9CBD1");
 const COLS = 80;
@@ -25,23 +24,43 @@ export function MinutesChart(props: {
   onExtents?: (lo: number, hi: number) => void;
 }): NodeHandle {
   const h = props.h;
-  const root = host.stack();
-  host.setMinSize(root, 0, h);
-
-  const base = host.decorated(LINE, 0);
-  host.setMinSize(base, 0, 1);
-  host.setPosition(base, true);
-  host.append(root, base);
-
+  const root = scene.stack();
+  scene.patchStyle(root, {
+    minWidth: 0,
+    minHeight: h,
+  });
+  const base = scene.createElement("view", {
+    style: {
+      backgroundColor: LINE,
+      borderRadius: 0,
+    },
+  });
+  scene.patchStyle(base, {
+    minWidth: 0,
+    minHeight: 1,
+  });
+  scene.patchStyle(base, {
+    position: "absolute",
+  });
+  scene.append(root, base);
   const cols: number[] = [];
   for (let i = 0; i < COLS; i++) {
-    const bar = host.decorated(MUTED, 0);
-    host.setMinSize(bar, 2, 2);
-    host.setPosition(bar, true);
-    host.append(root, bar);
+    const bar = scene.createElement("view", {
+      style: {
+        backgroundColor: MUTED,
+        borderRadius: 0,
+      },
+    });
+    scene.patchStyle(bar, {
+      minWidth: 2,
+      minHeight: 2,
+    });
+    scene.patchStyle(bar, {
+      position: "absolute",
+    });
+    scene.append(root, bar);
     cols.push(bar);
   }
-
   createTrackedEffect(() => {
     const symbol = props.symbol();
     const engine = props.engine();
@@ -67,23 +86,43 @@ export function MinutesChart(props: {
             ? colorBytes("#22B05F")
             : MUTED;
       const plotW = Math.max(2, props.viewW());
-      host.setMinSize(root, plotW, h);
+      scene.patchStyle(root, {
+        minWidth: plotW,
+        minHeight: h,
+      });
       const barW = Math.max(1, Math.floor(plotW / COLS) - 1);
       const baseY = h * (1 - (q.prevClose - lo) / (hi - lo));
-      host.setInset(base, 0, Math.round(baseY), 0, 0);
-      host.setMinSize(base, 0, 1);
+      scene.patchStyle(base, {
+        top: 0,
+        right: Math.round(baseY),
+        bottom: 0,
+        left: 0,
+      });
+      scene.patchStyle(base, {
+        minWidth: 0,
+        minHeight: 1,
+      });
       for (let i = 0; i < cols.length; i++) {
         const p = series[Math.min(i, series.length - 1)]!;
         const y = h * (1 - (p - lo) / (hi - lo));
         const top = Math.min(y, baseY);
         const bottom = Math.max(y, baseY);
-        host.setInset(cols[i]!, 0, Math.round(top), 0, Math.round((i * plotW) / (COLS - 1)));
-        host.setMinSize(cols[i]!, barW, Math.max(2, Math.round(bottom - top)));
-        host.setColor(cols[i]!, color);
+        scene.patchStyle(cols[i]!, {
+          top: 0,
+          right: Math.round(top),
+          bottom: 0,
+          left: Math.round((i * plotW) / (COLS - 1)),
+        });
+        scene.patchStyle(cols[i]!, {
+          minWidth: barW,
+          minHeight: Math.max(2, Math.round(bottom - top)),
+        });
+        scene.patchStyle(cols[i]!, {
+          backgroundColor: color,
+        });
       }
     });
     onCleanup(stop);
   });
-
-  return { id: root };
+  return root;
 }

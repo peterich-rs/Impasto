@@ -11,6 +11,8 @@ pub(super) struct FrameMarks {
     pub(super) focus: Cell<u32>,
     pub(super) blur: Cell<u32>,
     pub(super) gestures: Cell<u32>,
+    /// Scene setter calls since the last reset.
+    pub(super) sets: Cell<u32>,
 }
 
 impl FrameMarks {
@@ -23,6 +25,7 @@ impl FrameMarks {
         self.focus.set(0);
         self.blur.set(0);
         self.gestures.set(0);
+        self.sets.set(0);
     }
 }
 
@@ -37,6 +40,7 @@ impl Default for FrameMarks {
             focus: Cell::new(0),
             blur: Cell::new(0),
             gestures: Cell::new(0),
+            sets: Cell::new(0),
         }
     }
 }

@@ -7,11 +7,11 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use engine::Engine;
-use hostshell::{NativePtr, Presented, Surface};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLOrigin, MTLRegion, MTLSize, MTLTexture};
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
+use shell::{NativePtr, Presented, Surface};
 
 use crate::pixels::write_bgra_png;
 
@@ -47,11 +47,11 @@ impl MetalSurface {
             return Ok(Presented::Continue);
         };
         if let Err(error) = read_drawable_png(&drawable, path) {
-            tracing::error!(target: "impasto::host", %error, path = %path.display(), "dump write failed");
+            tracing::error!(target: "impasto::shell", %error, path = %path.display(), "dump write failed");
             (self.on_stop)(1);
             return Ok(Presented::Stop);
         }
-        tracing::info!(target: "impasto::host", "frame dumped");
+        tracing::info!(target: "impasto::shell", "frame dumped");
         let _ = std::io::Write::flush(&mut std::io::stdout());
         (self.on_stop)(0);
         Ok(Presented::Stop)

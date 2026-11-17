@@ -1,7 +1,6 @@
 /** Data shapes shared by the engine, the trading store, and the UI. */
 
 export type Market = "hk" | "us" | "cn";
-
 export type Instrument = {
   symbol: string;
   name: string;
@@ -18,11 +17,19 @@ export type Instrument = {
   lot: number;
   index?: boolean;
 };
-
-export type Bar = { t: number; o: number; h: number; l: number; c: number; v: number };
-
-export type Tick = { t: number; price: number; volume: number };
-
+export type Bar = {
+  t: number;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+};
+export type Tick = {
+  t: number;
+  price: number;
+  volume: number;
+};
 export type Quote = {
   symbol: string;
   last: number;
@@ -36,11 +43,9 @@ export type Quote = {
   /** Bumped on every tick. The write layer skips rows whose revision is stale. */
   revision: number;
 };
-
 export type OrderSide = "buy" | "sell";
 export type OrderType = "market" | "limit";
 export type OrderStatus = "pending" | "filled" | "cancelled" | "rejected";
-
 export type Order = {
   id: string;
   symbol: string;
@@ -53,8 +58,11 @@ export type Order = {
   status: OrderStatus;
   createdAt: number;
 };
-
-export type Position = { symbol: string; qty: number; avgCost: number };
+export type Position = {
+  symbol: string;
+  qty: number;
+  avgCost: number;
+};
 
 /** Fixed-capacity ring buffer of ticks. Push is O(1); no array shifting. */
 export class TickRing {
@@ -64,18 +72,15 @@ export class TickRing {
   readonly v: Float64Array;
   #head = 0;
   #len = 0;
-
   constructor(capacity = 240) {
     this.cap = capacity;
     this.t = new Float64Array(capacity);
     this.p = new Float64Array(capacity);
     this.v = new Float64Array(capacity);
   }
-
   get length(): number {
     return this.#len;
   }
-
   push(tick: Tick): void {
     const at = (this.#head + this.#len) % this.cap;
     this.t[at] = tick.t;
@@ -94,9 +99,12 @@ export class TickRing {
       throw new Error(`tick ${i} of ${this.#len}`);
     }
     const at = (this.#head + i) % this.cap;
-    return { t: this.t[at], price: this.p[at], volume: this.v[at] };
+    return {
+      t: this.t[at],
+      price: this.p[at],
+      volume: this.v[at],
+    };
   }
-
   clear(): void {
     this.#head = 0;
     this.#len = 0;

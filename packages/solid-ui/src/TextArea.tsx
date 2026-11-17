@@ -1,13 +1,13 @@
 import type { NodeHandle } from "@impasto/solid-renderer";
-import type { FieldProps } from "./field/shell.tsx";
 import { FieldShell } from "./field/shell.tsx";
+import type { TextAreaProps } from "./props.ts";
 
 /**
  * Multiline field. Enter inserts a newline when the action is `newline`.
  * The outer control is a scroll. A vertical drag is left for a parent list;
- * a long press asks the host for text selection.
+ * a long press asks the scene for text selection.
  */
-export function TextArea(props: Omit<FieldProps, "multiline">): NodeHandle {
+export function TextArea(props: TextAreaProps): NodeHandle {
   return (
     <FieldShell
       {...props}

@@ -10,8 +10,8 @@ pub use io::{
     IoJob, PluginResult, PluginValue, document_relative, module_not_linked,
 };
 pub use modules::{
-    HostConfig, HostMethod, HostModule, ImmediateExec, Invoke, MethodExec, ModuleRegistry,
-    PromiseFn, Settle, Shared, SyncFn, Work, shared, shared_read, shared_write,
+    ImmediateExec, Invoke, Method, MethodExec, Module, ModuleConfig, ModuleRegistry, PromiseFn,
+    Settle, Shared, SyncFn, Work, shared, shared_read, shared_write,
 };
 
 /// One edge of a window, in scene points.
@@ -395,6 +395,10 @@ pub struct FrameTrace {
     pub focus: u32,
     pub blur: u32,
     pub gestures: u32,
+    /// Nonempty reactive update passes this frame.
+    pub updates: u32,
+    /// Scene setter calls (style, text, image and recognizers) this frame.
+    pub sets: u32,
 }
 
 /// What one `frame` produced. `layers == None` means the host may `PresentCached`.
@@ -452,6 +456,8 @@ pub struct ScriptFault {
 /// [`Session::pointer`] and [`Session::input`], due timers, animation callbacks,
 /// flush handlers, layout, record.
 pub trait Session {
+    /// Enable opt-in per-frame script counters on this render-thread session.
+    fn set_trace(&mut self, _enabled: bool) {}
     fn metrics(&mut self, metrics: &Metrics);
     fn pointer(&mut self, event: uicore::PointerEvent);
     fn frame(&mut self, time: FrameTime) -> FrameOutput;

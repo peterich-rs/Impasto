@@ -1,4 +1,4 @@
-//! QuickJS session. The interpreter calls `core` directly. A missing source tree
+//! QuickJS session. The `scene` module writes directly into `uicore::Tree`. A missing source tree
 //! compiles this crate as [`Error::NotLinked`].
 
 #![allow(unsafe_code, reason = "the QuickJS C API is called from this crate")]
@@ -42,8 +42,25 @@ pub fn open(
         shaper,
         log,
         None,
-        session::HostConfig::disconnected(),
+        session::ModuleConfig::disconnected(),
     )
+}
+
+/// Compiles `source` to quickjs-ng bytecode.
+///
+/// The blob carries the bytecode version, so a runtime built from a different
+/// quickjs-ng rejects it. `module` selects module mode; a script uses `false`.
+/// Returns [`Error::NotLinked`] when the quickjs-ng source tree is absent.
+pub fn compile(source: &str, name: &str, module: bool) -> Result<Vec<u8>, Error> {
+    #[cfg(quickjs_missing)]
+    {
+        let _ = (source, name, module);
+        Err(Error::NotLinked)
+    }
+    #[cfg(quickjs)]
+    {
+        linked::compile_bytecode(source, name, module)
+    }
 }
 
 /// Opens a session and installs the host sink for [`session::IoJob`].
@@ -53,7 +70,7 @@ pub fn open_with_io(
     shaper: impl Shaper + 'static,
     log: ConsoleLog,
     io: Option<Box<dyn Fn(session::IoJob) + Send>>,
-    host: session::HostConfig,
+    host: session::ModuleConfig,
 ) -> Result<Box<dyn session::Session>, Error> {
     #[cfg(quickjs_missing)]
     {
@@ -70,22 +87,398 @@ pub fn open_with_io(
     }
 }
 
+/// Load either UTF-8 ESM or bytecode produced by this pinned QuickJS toolchain.
+/// Bytecode is a trusted build artifact, never network/user supplied input.
+pub fn open_program_with_io(
+    bytes: &[u8],
+    bytecode: bool,
+    name: &str,
+    shaper: impl Shaper + 'static,
+    log: ConsoleLog,
+    io: Option<Box<dyn Fn(session::IoJob) + Send>>,
+    config: session::ModuleConfig,
+) -> Result<Box<dyn session::Session>, Error> {
+    #[cfg(quickjs_missing)]
+    {
+        let _ = (bytes, bytecode, name, shaper, log, io, config);
+        Err(Error::NotLinked)
+    }
+    #[cfg(quickjs)]
+    {
+        let mut session =
+            JsSession::open_program_with(bytes, bytecode, name, shaper, log, None, config)?;
+        if let Some(io) = io {
+            session.install_io(io);
+        }
+        Ok(Box::new(session))
+    }
+}
+
+#[cfg(all(test, quickjs))]
+mod component_tests;
+
 #[cfg(test)]
 mod tests {
     use protocol::Command;
     #[cfg(quickjs)]
     use session::{
-        HostConfig, HostMethod, HostModule, ImmediateExec, InputEvent, IoEvent, Key,
-        ModuleRegistry, PluginResult, PluginValue,
+        ImmediateExec, InputEvent, IoEvent, Key, Method, Module, ModuleConfig, ModuleRegistry,
+        PluginResult, PluginValue,
     };
     use session::{Metrics, Session};
     use uicore::{Phase, PointerEvent};
 
     use super::{Error, open};
 
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/toolchain-benchmark.rs"
+    ));
+
+    #[test]
+    fn native_style_contracts_and_single_view_button() {
+        #[cfg(quickjs)]
+        {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let output = root.join("target/native-style.js");
+            let status = std::process::Command::new("node")
+                .arg(root.join("tools/pack.mjs"))
+                .arg(root.join("crates/quickjs/tests/fixtures/style.tsx"))
+                .arg(&output)
+                .status()
+                .expect("pack style fixture");
+            assert!(status.success());
+            let source = std::fs::read_to_string(output).expect("read style fixture");
+            let mut session = open(&source, "style.js", uicore::MonoShaper::default(), no_log())
+                .expect("native style contracts");
+            session.metrics(&metrics());
+            session.frame(session::FrameTime::at(0.0));
+            assert!(session.take_faults().is_empty());
+        }
+    }
+
+    #[test]
+    fn native_component_contracts() {
+        #[cfg(quickjs)]
+        {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let output = root.join("target/native-components.js");
+            let status = std::process::Command::new("node")
+                .arg(root.join("tools/pack.mjs"))
+                .arg(root.join("crates/quickjs/tests/fixtures/components.tsx"))
+                .arg(&output)
+                .status()
+                .expect("pack components fixture");
+            assert!(status.success());
+            let source = std::fs::read_to_string(output).expect("read components fixture");
+            let mut session = open(
+                &source,
+                "components.js",
+                uicore::MonoShaper::default(),
+                no_log(),
+            )
+            .expect("native component contracts");
+            session.metrics(&metrics());
+            session.frame(session::FrameTime::at(0.0));
+            let faults = session.take_faults();
+            assert!(faults.is_empty(), "{faults:?}");
+        }
+    }
+
+    #[test]
+    fn native_control_flow_preserves_owned_rows_and_catches_effect_errors() {
+        #[cfg(quickjs)]
+        {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let output = root.join("target/native-flow.js");
+            let status = std::process::Command::new("node")
+                .arg(root.join("tools/pack.mjs"))
+                .arg(root.join("crates/quickjs/tests/fixtures/flow.ts"))
+                .arg(&output)
+                .status()
+                .expect("build native fixture");
+            assert!(status.success());
+            let source = std::fs::read_to_string(&output).expect("native fixture");
+            let mut session = open(&source, "flow.js", uicore::MonoShaper::default(), no_log())
+                .expect("native flow");
+            assert!(
+                session.take_faults().is_empty(),
+                "{:?}",
+                session.take_faults()
+            );
+            session.metrics(&metrics());
+            session.frame(session::FrameTime::at(0.0));
+            assert!(session.take_faults().is_empty());
+        }
+    }
+
+    #[test]
+    fn native_reactive_matches_the_solid_fixture() {
+        #[cfg(quickjs)]
+        {
+            let probe = include_str!("../../reactive/tests/fixtures/probe.mjs")
+                .replace("export function", "function");
+            let source = format!(
+                "import * as reactive from 'reactive';\n{probe}\nrunProbe(line=>console.log(line), {{...reactive, flush: fn=>reactive.batch(fn || (()=>{{}}))}});"
+            );
+            let lines = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let output = std::rc::Rc::clone(&lines);
+            let mut session = open(
+                &source,
+                "reference.js",
+                uicore::MonoShaper::default(),
+                Box::new(move |_, line| output.borrow_mut().push(line.to_owned())),
+            )
+            .expect("native reference");
+            assert!(session.take_faults().is_empty());
+            assert_eq!(
+                lines.borrow().join("\n") + "\n",
+                include_str!("../../reactive/tests/fixtures/order.txt")
+            );
+        }
+    }
+
+    #[test]
+    fn bytecode_round_trip_uses_the_native_modules() {
+        #[cfg(quickjs)]
+        {
+            let source = "import {createSignal,batch} from 'reactive'; import {createElement,insert,setProp} from 'scene'; const [get,set]=createSignal('first'); const root=createElement('column',{gap:8}); insert(root,get); batch(()=>set('compiled')); setProp(root,'gap',16);";
+            let bytes = super::compile(source, "compiled.js", true).expect("compile module");
+            let mut session = super::open_program_with_io(
+                &bytes,
+                true,
+                "compiled.bin",
+                uicore::MonoShaper::default(),
+                no_log(),
+                None,
+                ModuleConfig::disconnected(),
+            )
+            .expect("load bytecode");
+            session.metrics(&metrics());
+            let frame = session.frame(session::FrameTime::at(0.0));
+            assert!(texts(&frame).contains(&"compiled"), "{:?}", texts(&frame));
+            assert!(session.take_faults().is_empty());
+        }
+    }
+
+    #[test]
+    fn context_is_owned_and_children_unwrap_accessors() {
+        let source = r#"
+            import * as r from 'reactive';
+            const assert=(ok,message)=>{if(!ok)throw new Error(message);};
+            const Context=r.createContext('default');
+            let outside,inside,stop;
+            r.createRoot(dispose=>{
+                stop=dispose;
+                const owner=r.getOwner();
+                Context({value:'provided',get children(){inside=r.getOwner();return 'child';}})();
+                outside=r.runWithOwner(null,()=>r.createRoot(()=>r.getOwner()));
+                assert(r.runWithOwner(inside,()=>r.useContext(Context))==='provided','owned context');
+                assert(r.runWithOwner(outside,()=>r.useContext(Context))==='default','sibling context');
+                assert(r.useContext(Context)==='default','provider leaked into parent');
+                const c=r.children(()=>[1,()=>[2,null,false,()=>3]]);
+                assert(c.toArray().join(',')==='1,2,3','children');
+                const fn=()=>42;const memo=r.createMemo(()=>fn);
+                assert(memo()===fn,'function is a memo value');
+            });
+            stop();
+            assert(r.runWithOwner(inside,()=>r.getOwner())===null,'stale owner');
+            assert(typeof globalThis.core==='undefined','core global');
+            assert(typeof globalThis.reactive==='undefined','reactive global');
+        "#;
+        match open(
+            source,
+            "context.js",
+            uicore::MonoShaper::default(),
+            no_log(),
+        ) {
+            Ok(_) => {}
+            Err(Error::NotLinked) => {}
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    #[test]
+    fn native_insert_reuses_text_and_reports_invalid_properties() {
+        let source = r#"
+            import {createSignal,batch} from 'reactive';
+            import {scene} from 'scene';
+            const assert=(ok,label)=>{if(!ok)throw new Error(label);};
+            const root=scene.createElement('column');
+            const [text,setText]=createSignal('first');
+            scene.insert(root,text);
+            const id=scene.firstChild(root);
+            batch(()=>setText('second'));
+            assert(scene.firstChild(root)===id,'text node replaced');
+            for(const [name,value] of [['w','invalid'],['h',Infinity],['insetLeft','bad']]) {
+                let caught=false;
+                try{scene.setProp(root,name,value);}catch{caught=true;}
+                assert(caught,'invalid '+name+' accepted');
+            }
+            const removed=scene.createElement('sized');scene.discard(removed);
+            let caught=false;
+            try{scene.insertNode(root,removed);}catch{caught=true;}
+            assert(caught,'stale node accepted');
+        "#;
+        match open(
+            source,
+            "native-insert.js",
+            uicore::MonoShaper::default(),
+            no_log(),
+        ) {
+            Ok(_) | Err(Error::NotLinked) => {}
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    #[test]
+    fn a_runaway_reactive_computation_is_interrupted() {
+        let source = r#"
+            import {createSignal,createRenderEffect} from 'reactive';
+            import {scene} from 'scene';
+            const [read,write]=createSignal(false);
+            createRenderEffect(()=>{if(read()){while(true){}}return read();},()=>{});
+            const root=scene.column(0),region=scene.pointerRegion();
+            scene.append(region,scene.text('Run',16,[255,255,255,255]));
+            scene.append(root,region);
+            scene.onClick(region,()=>write(true));
+        "#;
+        let mut session = match open(
+            source,
+            "reactive-budget.js",
+            uicore::MonoShaper::default(),
+            no_log(),
+        ) {
+            Ok(session) => session,
+            Err(Error::NotLinked) => return,
+            Err(error) => panic!("{error}"),
+        };
+        session.metrics(&metrics());
+        let first = session.frame(session::FrameTime::at(0.0));
+        let (x, y) = text_spot(&first, "Run");
+        click(session.as_mut(), x, y);
+        let frame = session.frame(session::FrameTime::at(16.0));
+        assert!(frame.layers.is_none());
+        assert!(
+            session
+                .take_faults()
+                .iter()
+                .any(|fault| fault.message.contains("interrupted"))
+        );
+    }
+
+    #[test]
+    fn reactive_module_reads_and_writes_a_signal() {
+        let source = r#"
+          import * as graph from '#reactive';
+          if (!graph || typeof graph.createSignal !== "function") {
+            throw new Error("reactive module missing");
+          }
+          var id = graph.createSignal(1);
+          if (graph.get(id) !== 1) {
+            throw new Error("read " + graph.get(id));
+          }
+          graph.set(id, 2);
+          if (graph.get(id) !== 2) {
+            throw new Error("write " + graph.get(id));
+          }
+        "#;
+        match open(
+            source,
+            "reactive.js",
+            uicore::MonoShaper::default(),
+            no_log(),
+        ) {
+            Ok(_) => {}
+            Err(Error::NotLinked) => {}
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    #[test]
+    fn reactive_module_reruns_a_memo_after_a_write() {
+        let source = r#"
+          import * as graph from '#reactive';
+          import * as core from "scene";
+          var source = graph.createSignal(1);
+          if (source < 4294967296) {
+            throw new Error("allocated " + source);
+          }
+          var seen = 0;
+          var memo = graph.createMemo(function () {
+            seen = graph.get(source);
+            return seen + 1;
+          });
+          var first = graph.get(memo);
+          if (first !== 2) {
+            throw new Error("memo " + first + " type " + typeof first + " seen " + seen);
+          }
+          graph.set(source, 4);
+          graph.runUpdates();
+          if (graph.get(memo) !== 5) {
+            throw new Error("memo after write " + graph.get(memo) + " mem " + core.debugMemory());
+          }
+        "#;
+        match open(source, "memo.js", uicore::MonoShaper::default(), no_log()) {
+            Ok(_) => {}
+            Err(Error::NotLinked) => {}
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    #[test]
+    fn reactive_author_api_orders_effects_like_solid() {
+        let source = r#"
+          import * as reactive from "reactive";
+          var lines = [];
+          reactive.createRoot(function () {
+            var pair = reactive.createSignal(1);
+            var get = pair[0];
+            var set = pair[1];
+            reactive.createTrackedEffect(function () { lines.push("tracked " + get()); });
+            reactive.createRenderEffect(function () { return get(); }, function (value) { lines.push("render " + value); });
+            set(2);
+            reactive.batch(function () {});
+          });
+          var text = lines.join(",");
+          if (text !== "render 1,render 2,tracked 2") {
+            throw new Error("order [" + text + "]");
+          }
+        "#;
+        match open(source, "order.js", uicore::MonoShaper::default(), no_log()) {
+            Ok(_) => {}
+            Err(Error::NotLinked) => {}
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    #[test]
+    fn scene_module_creates_and_styles_a_node() {
+        let source = r#"
+          import * as scene from "scene";
+          if (!scene || typeof scene.column !== "function") {
+            throw new Error("scene module missing");
+          }
+          var id = scene.column(8);
+          if (!(id > 0)) {
+            throw new Error("column id " + id);
+          }
+          scene.setProp(id, "gap", 16);
+          var child = scene.text("hi", 14, [0, 0, 0, 255]);
+          scene.insert(id, child, 0);
+        "#;
+        match open(source, "scene.js", uicore::MonoShaper::default(), no_log()) {
+            Ok(_) => {}
+            Err(Error::NotLinked) => {}
+            Err(error) => panic!("{error}"),
+        }
+    }
+
     #[test]
     fn list_driver_methods_are_functions() {
         let source = r#"
+import * as core from "scene";
+
           var d = core.listDriver(2, 20);
           var proto = Object.getPrototypeOf(d);
           var names = Object.getOwnPropertyNames(proto).join(",");
@@ -104,7 +497,11 @@ mod tests {
     }
 
     fn no_log() -> super::ConsoleLog {
-        Box::new(|_, _| {})
+        Box::new(|level, line| {
+            if std::env::var("IMPASTO_TEST_LOG").is_ok() {
+                eprintln!("[js {level}] {line}");
+            }
+        })
     }
 
     /// The gallery bundle is a build artifact and not committed. Tests that
@@ -119,7 +516,7 @@ mod tests {
 
     #[cfg(quickjs)]
     fn test_host() -> (
-        HostConfig,
+        ModuleConfig,
         std::sync::Arc<std::sync::Mutex<Vec<(u64, PluginResult)>>>,
     ) {
         test_host_with_launch_url(None)
@@ -129,7 +526,7 @@ mod tests {
     fn test_host_with_launch_url(
         url: Option<String>,
     ) -> (
-        HostConfig,
+        ModuleConfig,
         std::sync::Arc<std::sync::Mutex<Vec<(u64, PluginResult)>>>,
     ) {
         use std::sync::{Arc, Mutex};
@@ -149,13 +546,13 @@ mod tests {
                 })
             }) as Arc<dyn Fn(u64) -> session::Settle + Send + Sync>
         };
-        let config = HostConfig {
+        let config = ModuleConfig {
             registry: Arc::new(ModuleRegistry::new(vec![
-                HostModule {
+                Module {
                     name: "Clipboard",
-                    specifier: "@impasto/clipboard/host",
+                    specifier: "@impasto/clipboard",
                     methods: vec![
-                        HostMethod::sync("getString", {
+                        Method::sync("getString", {
                             let clipboard = Arc::clone(&clipboard);
                             move |_| {
                                 Ok(PluginValue::Str(
@@ -166,7 +563,7 @@ mod tests {
                                 ))
                             }
                         }),
-                        HostMethod::sync("setString", {
+                        Method::sync("setString", {
                             let clipboard = Arc::clone(&clipboard);
                             move |args| {
                                 let text = match args.first() {
@@ -181,20 +578,20 @@ mod tests {
                         }),
                     ],
                 },
-                HostModule {
+                Module {
                     name: "AppState",
-                    specifier: "@impasto/app-state/host",
-                    methods: vec![HostMethod::sync("getCurrentState", {
+                    specifier: "@impasto/app-state",
+                    methods: vec![Method::sync("getCurrentState", {
                         let app_state = Arc::clone(&app_state);
                         move |_| Ok(PluginValue::Str(session::shared_read(&app_state)))
                     })],
                 },
-                HostModule {
+                Module {
                     name: "Echo",
-                    specifier: "@impasto/echo/host",
+                    specifier: "@impasto/echo",
                     methods: vec![
-                        HostMethod::sync("fail", |_| Err("boom from host".into())),
-                        HostMethod::promise("later", |args, settle, exec| {
+                        Method::sync("fail", |_| Err("boom from host".into())),
+                        Method::promise("later", |args, settle, exec| {
                             let value = match args.first() {
                                 Some(PluginValue::Str(text)) => text.clone(),
                                 _ => String::new(),
@@ -203,10 +600,10 @@ mod tests {
                         }),
                     ],
                 },
-                HostModule {
+                Module {
                     name: "Linking",
-                    specifier: "@impasto/linking/host",
-                    methods: vec![HostMethod::sync("getInitialURL", {
+                    specifier: "@impasto/linking",
+                    methods: vec![Method::sync("getInitialURL", {
                         let launch_url = Arc::clone(&launch_url);
                         move |_| {
                             Ok(match session::shared_read(&launch_url) {
@@ -351,23 +748,39 @@ mod tests {
     /// Host modules the gallery bundle imports. Devtools stays off so the
     /// panel does not change the page the assertions read.
     #[cfg(quickjs)]
-    fn gallery_host() -> HostConfig {
-        HostConfig {
+    fn gallery_host() -> ModuleConfig {
+        ModuleConfig {
             registry: std::sync::Arc::new(ModuleRegistry::new(vec![
-                HostModule {
-                    name: "Clipboard",
-                    specifier: "@impasto/clipboard/host",
+                Module {
+                    name: "Storage",
+                    specifier: "@impasto/async-storage",
                     methods: vec![
-                        HostMethod::sync("getString", |_| Ok(PluginValue::Str(String::new()))),
-                        HostMethod::sync("setString", |_| Ok(PluginValue::Null)),
+                        Method::sync("getItem", |_| Ok(PluginValue::Null)),
+                        Method::sync("setItem", |_| Ok(PluginValue::Null)),
+                        Method::sync("removeItem", |_| Ok(PluginValue::Null)),
                     ],
                 },
-                HostModule {
+                Module {
+                    name: "Linking",
+                    specifier: "@impasto/linking",
+                    methods: vec![
+                        Method::sync("getInitialURL", |_| Ok(PluginValue::Null)),
+                        Method::sync("openURL", |_| Ok(PluginValue::Null)),
+                        Method::sync("canOpenURL", |_| Ok(PluginValue::Bool(false))),
+                    ],
+                },
+                Module {
+                    name: "Clipboard",
+                    specifier: "@impasto/clipboard",
+                    methods: vec![
+                        Method::sync("getString", |_| Ok(PluginValue::Str(String::new()))),
+                        Method::sync("setString", |_| Ok(PluginValue::Null)),
+                    ],
+                },
+                Module {
                     name: "Devtools",
-                    specifier: "@impasto/devtools/host",
-                    methods: vec![HostMethod::sync("enabled", |_| {
-                        Ok(PluginValue::Bool(false))
-                    })],
+                    specifier: "@impasto/devtools",
+                    methods: vec![Method::sync("enabled", |_| Ok(PluginValue::Bool(false)))],
                 },
             ])),
             exec: std::sync::Arc::new(ImmediateExec),
@@ -387,12 +800,13 @@ mod tests {
         }
         #[cfg(quickjs)]
         {
-            let source = gallery_source();
+            let body = gallery_source();
+            let source = body;
             match super::open_with_io(
                 &source,
                 "test.js",
                 uicore::MonoShaper::default(),
-                no_log(),
+                Box::new(|level, line| eprintln!("[js {level}] {line}")),
                 None,
                 gallery_host(),
             ) {
@@ -418,7 +832,12 @@ mod tests {
             first = session.frame(session::FrameTime::at(f64::from(step) * 16.0));
         }
         let shown = texts(&first);
-        assert!(shown.contains(&"自选"), "{shown:?}");
+        assert!(
+            shown.contains(&"自选"),
+            "{shown:?} error={:?} faults={:?}",
+            session.take_script_error(),
+            session.take_faults()
+        );
         assert!(shown.contains(&"腾讯控股"), "{shown:?}");
         // Binder write-on-bind: price cells carry formatted numbers already.
         assert!(
@@ -606,6 +1025,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let kept = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 const region = core.pointerRegion();
                 const label = core.text("Go", 16, [255, 255, 255, 255]);
@@ -625,6 +1046,8 @@ mod tests {
             };
             assert_eq!(session.tap_count(), 0);
             let dropped = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 const label = core.text("Go", 16, [255, 255, 255, 255]);
                 core.append(root, label);
@@ -651,6 +1074,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let kept = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 const region = core.pointerRegion();
                 core.append(root, region);
@@ -668,6 +1093,8 @@ mod tests {
             };
             assert_eq!(session.tap_count(), 1);
             let dropped = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 const region = core.pointerRegion();
                 core.append(root, region);
@@ -741,6 +1168,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 let log = "";
                 const root = core.column(0);
                 const region = core.pointerRegion();
@@ -780,6 +1209,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const label = core.text("Hi", 16, [0, 0, 0, 255]);
             "#;
             let mut session = match super::JsSession::open(
@@ -818,6 +1249,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 let ticks = 0;
                 core.onFrame(() => {
@@ -854,6 +1287,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 const region = core.pointerRegion();
                 const label = core.text("Go", 16, [255, 255, 255, 255]);
@@ -890,6 +1325,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 const region = core.pointerRegion();
                 const label = core.text("Go", 16, [255, 255, 255, 255]);
@@ -924,6 +1361,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 const label = core.text("none", 16, [0, 0, 0, 255]);
                 const field = core.pointerRegion();
@@ -963,6 +1402,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 const scroll = core.scroll();
                 const label = core.text("row", 16, [0, 0, 0, 255]);
@@ -971,7 +1412,7 @@ mod tests {
                 core.setSemantics(label, 2, "row", undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, { live: "polite", order: 3 });
                 core.scrollIntoView(label, 0);
                 core.animate(label, "opacity", 255, 0, 170, 26);
-                core.setStroke(label, 2, [0, 0, 0, 255]);
+                core.patchStyle(label, { outlineWidth: 2, outlineColor: [0, 0, 0, 255] });
                 core.setRecognizers(label, { tap: true, doubleTapMs: 280, drag: "horizontal" });
                 const flung = core.flingTarget(scroll);
                 if (flung !== null) {
@@ -1003,6 +1444,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 const fading = core.opacity(255);
                 core.append(root, fading);
@@ -1039,8 +1482,14 @@ mod tests {
             };
             session.metrics(&metrics());
             let _ = session.frame(session::FrameTime::at(0.0));
-            let _ = session.frame(session::FrameTime::at(48.0));
-            let message = session.take_script_error().unwrap_or_default();
+            let mut message = String::new();
+            for step in 1..180 {
+                let _ = session.frame(session::FrameTime::at(f64::from(step) * 16.0));
+                if let Some(error) = session.take_script_error() {
+                    message = error;
+                    break;
+                }
+            }
             assert!(
                 message.contains("both"),
                 "both listeners should run, got {message:?}"
@@ -1055,6 +1504,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 const fading = core.opacity(255);
                 const label = core.text("idle", 16, [0, 0, 0, 255]);
@@ -1082,8 +1533,14 @@ mod tests {
             };
             session.metrics(&metrics());
             let _ = session.frame(session::FrameTime::at(0.0));
-            let _ = session.frame(session::FrameTime::at(48.0));
-            let message = session.take_script_error().unwrap_or_default();
+            let mut message = String::new();
+            for step in 1..180 {
+                let _ = session.frame(session::FrameTime::at(f64::from(step) * 16.0));
+                if let Some(error) = session.take_script_error() {
+                    message = error;
+                    break;
+                }
+            }
             assert!(
                 message.contains("not a function"),
                 "script error was {message:?}"
@@ -1092,24 +1549,18 @@ mod tests {
     }
 
     #[test]
-    fn align_rejects_a_column_and_metrics_report_the_viewport() {
+    fn align_accepts_a_column_and_metrics_report_the_viewport() {
         #[cfg(not(quickjs))]
         {}
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const frame = core.align("center");
                 core.setAlign(frame, "end");
                 const column = core.column(0);
-                let rejected = false;
-                try {
-                    core.setAlign(column, "center");
-                } catch (error) {
-                    rejected = true;
-                }
-                if (!rejected) {
-                    throw new Error("column accepted setAlign");
-                }
+                core.setAlign(column, "center");
                 core.setCross(column, "center");
                 let stackRejected = false;
                 try {
@@ -1159,6 +1610,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 const region = core.pointerRegion();
                 const label = core.text("Go", 16, [255, 255, 255, 255]);
@@ -1199,6 +1652,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 const region = core.pointerRegion();
                 const label = core.text("Go", 16, [255, 255, 255, 255]);
@@ -1253,6 +1708,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const label = core.text("idle", 16, [0, 0, 0, 255]);
                 setTimeout(() => {
                     const start = Date.now();
@@ -1343,7 +1800,7 @@ mod tests {
             let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
             let record = std::rc::Rc::clone(&seen);
             let opened = super::JsSession::open(
-                "core.log('warn', 'warm'); core.log('error', 'bad'); core.log('debug', 'fine'); core.log('info', 'plain')",
+                "import * as core from 'scene'; core.log('warn', 'warm'); core.log('error', 'bad'); core.log('debug', 'fine'); core.log('info', 'plain')",
                 "test.js",
                 uicore::MonoShaper::default(),
                 Box::new(move |level, text| {
@@ -1450,6 +1907,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 core.setAxisSize(root, 40, 20);
                 const a = core.text("hello", 16, [0, 0, 0, 255]);
@@ -1499,6 +1958,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const label = core.text("0", 16, [0, 0, 0, 255]);
                 let n = 0;
                 core.onFrame(() => {
@@ -1533,6 +1994,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 const fading = core.opacity(255);
                 core.append(root, fading);
@@ -1565,6 +2028,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const label = core.text("old", 16, [0, 0, 0, 255]);
                 const region = core.pointerRegion();
                 core.append(region, label);
@@ -1598,6 +2063,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const label = core.text("stay", 16, [0, 0, 0, 255]);
                 core.onFrame(() => {
                     core.requestFrame();
@@ -1629,6 +2096,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 let log = "";
                 const root = core.column(0);
                 core.setFill(root);
@@ -1678,6 +2147,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 core.setFill(root);
                 const label = core.text("idle", 16, [0, 0, 0, 255]);
@@ -1717,6 +2188,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 core.setFill(root);
                 const label = core.text("x", 16, [0, 0, 0, 255]);
@@ -1886,7 +2359,7 @@ mod tests {
             let app = dir.join("app.js");
             std::fs::write(
                 &app,
-                "import { label } from \"./util.js\";\ncore.text(label, 16, [0, 0, 0, 255]);\n",
+                "import * as core from 'scene'; import { label } from \"./util.js\";\ncore.text(label, 16, [0, 0, 0, 255]);\n",
             )
             .expect("app");
             let name = app.to_string_lossy().into_owned();
@@ -1910,10 +2383,10 @@ mod tests {
                 session.take_script_error().unwrap_or_default()
             );
             let rejected = [
-                "import { label } from \"../util.js\";\n",
-                "import { label } from \"/tmp/util.js\";\n",
-                "import { label } from \"./util.txt\";\n",
-                "import { label } from \"./a\\\\b.js\";\n",
+                "import * as core from 'scene'; import { label } from \"../util.js\";\n",
+                "import * as core from 'scene'; import { label } from \"/tmp/util.js\";\n",
+                "import * as core from 'scene'; import { label } from \"./util.txt\";\n",
+                "import * as core from 'scene'; import { label } from \"./a\\\\b.js\";\n",
             ];
             for source in rejected {
                 match super::JsSession::open(source, &name, uicore::MonoShaper::default(), no_log())
@@ -2050,7 +2523,7 @@ mod tests {
                 "picture writes {changed} unchanged pictures {unchanged}"
             );
             assert!(changed > 0, "the flip wrote no commands");
-            assert!(unchanged >= 0);
+            assert_eq!(unchanged, 0);
         }
     }
 
@@ -2061,6 +2534,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 let value = "";
                 let composing = "";
                 const root = core.column(0);
@@ -2156,6 +2631,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 const field = core.pointerRegion();
                 const label = core.text("field", 16, [255, 255, 255, 255]);
@@ -2226,8 +2703,8 @@ mod tests {
                     .push(text.to_owned());
             });
             let source = r#"
-                import { setString, getString } from "@impasto/clipboard/host";
-                import { addEventListener } from "@impasto/app-state/host";
+                import { setString, getString } from "@impasto/clipboard";
+                import { addEventListener } from "@impasto/app-state";
                 console.log(new URL("https://example.test/a?q=1").searchParams.get("q"));
                 console.log(String(new TextEncoder().encode("A").length));
                 setTimeout(() => console.log("soon"), 0);
@@ -2291,7 +2768,7 @@ mod tests {
                     .push(text.to_owned());
             });
             let source = r#"
-                import { getInitialURL } from "@impasto/linking/host";
+                import { getInitialURL } from "@impasto/linking";
                 console.log("initial:" + String(getInitialURL()));
             "#;
             let (host, _pending) =
@@ -2330,7 +2807,7 @@ mod tests {
                     .push(text.to_owned());
             });
             let source = r#"
-                import { fail } from "@impasto/echo/host";
+                import { fail } from "@impasto/echo";
                 try {
                     fail();
                     console.log("ok");
@@ -2373,7 +2850,7 @@ mod tests {
                     .push(text.to_owned());
             });
             let source = r#"
-                import { later } from "@impasto/echo/host";
+                import { later } from "@impasto/echo";
                 later("ok").then((value) => console.log("later:" + value));
             "#;
             let (host, pending) = test_host();
@@ -2407,7 +2884,7 @@ mod tests {
         {
             let (host, _pending) = test_host();
             match super::JsSession::open_with(
-                r#"import { getString } from "@impasto/missing/host";"#,
+                r#"import { getString } from "@impasto/missing";"#,
                 "missing.js",
                 uicore::MonoShaper::default(),
                 no_log(),
@@ -2432,7 +2909,7 @@ mod tests {
         {
             let (host, _pending) = test_host();
             match super::JsSession::open_with(
-                r#"import { Clipboard } from "@impasto/clipboard";"#,
+                r#"import { Clipboard } from "@impasto/clipboard/extra/deep";"#,
                 "bare.js",
                 uicore::MonoShaper::default(),
                 no_log(),
@@ -2487,6 +2964,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const region = core.pointerRegion();
                 const label = core.text("idle", 16, [0, 0, 0, 255]);
                 core.append(region, label);
@@ -2529,6 +3008,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const label = core.text("boot", 16, [0, 0, 0, 255]);
                 core.onSettings((next) => {
                     core.setText(
@@ -2571,6 +3052,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const column = core.column(0);
                 const label = core.text("none", 16, [0, 0, 0, 255]);
                 const first = core.pointerRegion();
@@ -2621,6 +3104,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 const label = core.text("idle", 16, [0, 0, 0, 255]);
                 const field = core.text("old", 16, [0, 0, 0, 255]);
@@ -2668,6 +3153,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const root = core.column(0);
                 const label = core.text("boot", 16, [0, 0, 0, 255]);
                 const empty = core.text("empty-pending", 16, [0, 0, 0, 255]);
@@ -2753,6 +3240,8 @@ mod tests {
         #[cfg(quickjs)]
         {
             let source = r#"
+import * as core from "scene";
+
                 const label = core.text("boot", 16, [0, 0, 0, 255]);
                 core.registerFont("Keep", new Uint8Array([7]));
                 const big = new Uint8Array(4 * 1024 * 1024 + 1);
@@ -2786,6 +3275,8 @@ mod tests {
     #[test]
     fn reload_queues_a_source_and_rejects_an_empty_one() {
         let source = r#"
+import * as core from "scene";
+
             const root = core.column(0);
             const label = core.text("boot", 16, [0, 0, 0, 255]);
             core.append(root, label);
@@ -2814,6 +3305,8 @@ mod tests {
     #[test]
     fn axis_percent_sizes_the_child_and_fill_is_rejected() {
         let source = r#"
+import * as core from "scene";
+
             const parent = core.column(0);
             const child = core.decorated([0, 9, 0, 255]);
             const label = core.text("boot", 16, [0, 0, 0, 255]);
@@ -2851,6 +3344,8 @@ mod tests {
     #[test]
     fn image_mode_is_recorded_and_a_bad_mode_is_rejected() {
         let source = r#"
+import * as core from "scene";
+
             const root = core.column(0);
             const picture = core.image("asset:logo", 40, 20, "fit", false);
             const label = core.text("boot", 16, [0, 0, 0, 255]);
@@ -2889,6 +3384,8 @@ mod tests {
     #[test]
     fn rect_flushes_a_buffered_style_mutation() {
         let source = r#"
+import * as core from "scene";
+
             const root = core.column(0);
             const box = core.sized(8, 8);
             core.append(root, box);

@@ -6,10 +6,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
-use hostshell::{
-    Boot, BootError, ClipboardHost, Command, Launch as ShellLaunch, Link, LinkingHost, NativePtr,
-    PermissionsHost, Poster, Services, SessionError, StorageHost, SurfaceTarget, metrics,
-};
 use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
@@ -27,6 +23,10 @@ use objc2_foundation::{
     NSString, NSUInteger, NSURL,
 };
 use session::{InputEvent, Key};
+use shell::{
+    Boot, BootError, ClipboardHost, Command, Launch as ShellLaunch, Link, LinkingHost, NativePtr,
+    PermissionsHost, Poster, Services, SessionError, StorageHost, SurfaceTarget, metrics,
+};
 
 use crate::text_client::Marked;
 use objc2_metal::{MTLCreateSystemDefaultDevice, MTLPixelFormat};
@@ -414,7 +414,7 @@ impl ContentView {
                 html: read_pasteboard_html(),
             }],
             _ => {
-                tracing::debug!(target: "impasto::host", %name, "text command ignored");
+                tracing::debug!(target: "impasto::shell", %name, "text command ignored");
                 return;
             }
         };
@@ -443,7 +443,7 @@ impl ContentView {
         }
     }
 
-    fn apply_semantics(&self, nodes: &[hostshell::ProjectedNode]) {
+    fn apply_semantics(&self, nodes: &[shell::ProjectedNode]) {
         self.ivars().a11y.apply(
             self.mtm(),
             &self.ivars().poster,
@@ -564,11 +564,6 @@ define_class!(
             self.post_settings();
         }
 
-        #[unsafe(method(themeChanged:))]
-        fn theme_changed(&self, _notification: &NSNotification) {
-            self.post_settings();
-        }
-
         #[unsafe(method(applicationWillResignActive:))]
         fn will_resign_active(&self, _notification: &NSNotification) {
             self.ivars()
@@ -581,6 +576,15 @@ define_class!(
             self.ivars()
                 .link
                 .post(Command::Lifecycle(session::Lifecycle::Hidden));
+        }
+
+
+    }
+
+    impl Host {
+        #[unsafe(method(themeChanged:))]
+        fn theme_changed(&self, _notification: &NSNotification) {
+            self.post_settings();
         }
 
         #[unsafe(method(applicationDidReceiveMemoryWarning:))]
@@ -676,12 +680,12 @@ impl Host {
         self.ivars()
             .link
             .post(Command::SurfaceReady(SurfaceTarget::new(
-                hostshell::SurfaceId::fresh(),
+                shell::SurfaceId::fresh(),
                 NativePtr(layer),
                 metrics,
             )));
         self.post_settings();
-        tracing::info!(target: "impasto::host", "host ready");
+        tracing::info!(target: "impasto::shell", "host ready");
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 
@@ -742,8 +746,11 @@ fn current_settings() -> session::PlatformSettings {
         let workspace = NSWorkspace::sharedWorkspace();
         reduce_motion = workspace.accessibilityDisplayShouldReduceMotion();
         high_contrast = workspace.accessibilityDisplayShouldIncreaseContrast();
-        // SAFETY: `accessibilityDisplayShouldPreferBoldText` is a boolean query on the shared workspace.
-        bold_text = unsafe { msg_send![&*workspace, accessibilityDisplayShouldPreferBoldText] };
+        let bold_selector = objc2::sel!(accessibilityDisplayShouldPreferBoldText);
+        if workspace.respondsToSelector(bold_selector) {
+            // SAFETY: the runtime confirmed this optional selector is implemented.
+            bold_text = unsafe { msg_send![&*workspace, accessibilityDisplayShouldPreferBoldText] };
+        }
         let options: Retained<NSDictionary<objc2_app_kit::NSFontTextStyleOptionKey, AnyObject>> =
             NSDictionary::new();
         let font = {
@@ -849,7 +856,7 @@ impl Services for MacServices {
         (family == FONT_FAMILY).then_some(self.font.as_slice())
     }
 
-    fn semantics(&self, nodes: &[hostshell::ProjectedNode]) {
+    fn semantics(&self, nodes: &[shell::ProjectedNode]) {
         let view = self.ime_view.load(Ordering::Acquire) as usize;
         if view == 0 {
             return;
@@ -898,7 +905,12 @@ impl Services for MacServices {
 
 /// A script session. The shell paints the layer tree that session records.
 pub enum Launch {
-    Script { name: String, source: String },
+    Script {
+        name: String,
+        source: Vec<u8>,
+        bytecode: bool,
+        modules: Option<Vec<String>>,
+    },
 }
 
 pub enum RunError {
@@ -947,20 +959,35 @@ pub fn run(
         exit_for_stop.store(code, Ordering::SeqCst);
         wake_main();
     });
-    let Launch::Script { name, source } = launch;
+    let Launch::Script {
+        name,
+        source,
+        bytecode,
+        modules,
+    } = launch;
     let devtools_source_map = load_source_map(&name);
     let inspect_dir = std::env::var_os("IMPASTO_INSPECT").map(PathBuf::from);
     let shell_launch = ShellLaunch::Session(Box::new(move |open, io, host| {
-        quickjs::open_with_io(&source, &name, open.shaper, open.log, Some(io), host).map_err(
-            |error| match error {
-                quickjs::Error::NotLinked => SessionError::NotLinked,
-                quickjs::Error::Runtime => SessionError::Runtime,
-                quickjs::Error::Script(text) => {
-                    tracing::error!(target: "impasto::script", "{text}");
-                    SessionError::Script(text)
-                }
-            },
+        let host = modules
+            .as_ref()
+            .map_or_else(|| host.clone(), |modules| host.clone().restrict(modules));
+        quickjs::open_program_with_io(
+            &source,
+            bytecode,
+            &name,
+            open.shaper,
+            open.log,
+            Some(io),
+            host,
         )
+        .map_err(|error| match error {
+            quickjs::Error::NotLinked => SessionError::NotLinked,
+            quickjs::Error::Runtime => SessionError::Runtime,
+            quickjs::Error::Script(text) => {
+                tracing::error!(target: "impasto::script", "{text}");
+                SessionError::Script(text)
+            }
+        })
     }));
     let dump_for_surface = dump;
     let on_stop_for_surface = Arc::clone(&on_stop);
@@ -968,14 +995,14 @@ pub fn run(
     let decoder = Arc::new(PngDecoder { directory: assets });
     let launch_url = session::shared(initial_url.clone());
     let mac = Arc::new(MacBridge);
-    let devtools = Some(Arc::new(hostshell::DiagnosticsHub::new()));
+    let devtools = Some(Arc::new(shell::DiagnosticsHub::new()));
     fn log_directory() -> Option<PathBuf> {
         let home = std::env::var_os("HOME")?;
         let dir = PathBuf::from(home).join("Library/Logs/impasto");
         std::fs::create_dir_all(&dir).ok()?;
         Some(dir)
     }
-    let link = hostshell::start(
+    let link = shell::start(
         Boot {
             font_family: FONT_FAMILY.to_string(),
             launch: shell_launch,
@@ -990,7 +1017,7 @@ pub fn run(
             main_thread: Some(Arc::new(dispatch_main)),
             launch_url: Arc::clone(&launch_url),
             http: Some(
-                hostshell::http_client()
+                shell::http_client()
                     .map_err(|message| RunError::Window(anyhow::anyhow!(message)))?,
             ),
             open_surface: Box::new(move |_engine, target| {
@@ -1007,14 +1034,14 @@ pub fn run(
             inspect_dir,
             log_dir: log_directory(),
         }
-        .with_module(hostshell::clipboard(Arc::clone(&mac) as _))
-        .with_module(hostshell::linking(
+        .with_module(shell::clipboard(Arc::clone(&mac) as _))
+        .with_module(shell::linking(
             Arc::clone(&mac) as _,
             Arc::clone(&launch_url),
         ))
-        .with_module(hostshell::file_system(Arc::clone(&mac) as _))
-        .with_module(hostshell::async_storage(Arc::clone(&mac) as _))
-        .with_module(hostshell::permissions(mac as _)),
+        .with_module(shell::file_system(Arc::clone(&mac) as _))
+        .with_module(shell::async_storage(Arc::clone(&mac) as _))
+        .with_module(shell::permissions(mac as _)),
     )
     .map_err(RunError::Boot)?;
 
@@ -1112,8 +1139,8 @@ struct PngDecoder {
     directory: PathBuf,
 }
 
-impl hostshell::ImageDecoder for PngDecoder {
-    fn decode(&self, source: &str) -> Result<hostshell::ImageHandle, hostshell::ImageError> {
+impl shell::ImageDecoder for PngDecoder {
+    fn decode(&self, source: &str) -> Result<shell::ImageHandle, shell::ImageError> {
         self.decode_at(source, 1)
     }
 
@@ -1121,13 +1148,13 @@ impl hostshell::ImageDecoder for PngDecoder {
         &self,
         source: &str,
         scale_bucket: u8,
-    ) -> Result<hostshell::ImageHandle, hostshell::ImageError> {
+    ) -> Result<shell::ImageHandle, shell::ImageError> {
         let scale = f32::from(scale_bucket.max(1));
         let Some(path) = crate::assets::resolve_asset_path(&self.directory, source, scale) else {
-            return Err(hostshell::ImageError::Missing);
+            return Err(shell::ImageError::Missing);
         };
         let rgba = crate::pixels::load_rgba_png(&path)
-            .map_err(|error| hostshell::ImageError::Failed(error.to_string()))?;
+            .map_err(|error| shell::ImageError::Failed(error.to_string()))?;
         Ok(image_handle(source, rgba))
     }
 
@@ -1135,15 +1162,15 @@ impl hostshell::ImageDecoder for PngDecoder {
         &self,
         source: &str,
         bytes: &[u8],
-    ) -> Result<hostshell::ImageHandle, hostshell::ImageError> {
+    ) -> Result<shell::ImageHandle, shell::ImageError> {
         let rgba = crate::pixels::load_rgba_bytes(bytes)
-            .map_err(|error| hostshell::ImageError::Failed(error.to_string()))?;
+            .map_err(|error| shell::ImageError::Failed(error.to_string()))?;
         Ok(image_handle(source, rgba))
     }
 }
 
-fn image_handle(source: &str, rgba: crate::pixels::Rgba) -> hostshell::ImageHandle {
-    hostshell::ImageHandle {
+fn image_handle(source: &str, rgba: crate::pixels::Rgba) -> shell::ImageHandle {
+    shell::ImageHandle {
         source: Arc::from(source),
         generation: 0,
         size: [rgba.width, rgba.height],

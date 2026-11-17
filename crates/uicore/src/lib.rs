@@ -9,6 +9,7 @@ mod motion;
 mod pointer;
 mod semantics;
 mod shaper;
+pub mod style;
 mod text;
 mod tree;
 
@@ -44,6 +45,7 @@ pub use shaper::{
     Affinity, Caret, MetricsKey, MonoShaper, PaintKey, ParagraphMetrics, SINGLE_LINE_MAX, Shaper,
     SpanMetrics, TextLine, TextSize, paint_key, resolved_line_height,
 };
+pub use style::{Patch, Style, StyleError, StyleSurface};
 pub use text::{
     Edit, EditQuery, TextEditingValue, TextEditor, TextSelection, grapheme_count, grapheme_index,
     grapheme_unit,
@@ -53,3 +55,6 @@ pub use tree::{
     GridLine, Inset, Justify, LayoutCause, LayoutIssue, LayoutTrace, NodeId, PanelAlign, Rect,
     RowCrossAlign, ScrollEdge, ScrollSample, SubtreeSpace, TrackSize, Tree,
 };
+
+#[cfg(test)]
+mod style_contract_test;

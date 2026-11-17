@@ -45,7 +45,10 @@ assert.equal(resolveTheme(light, "regular").space.s, 4);
 assert.equal(minTarget("compact", "compact"), 32);
 assert.equal(minTarget("compact", "comfortable"), 48);
 assert.equal(minTarget("regular", "regular"), 44);
-assert.equal(scaled.typography.body.size, resolveTheme(light, "regular").typography.body.size);
+assert.equal(
+  scaled.typography.body.size,
+  resolveTheme(light, "regular").typography.body.size,
+);
 
 resetThemeForTests();
 let settingsCalls = 0;

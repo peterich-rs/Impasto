@@ -1,0 +1,66 @@
+//! JSX property lookup. Field numbers are generated from abi.yml.
+use crate::abi::StyleField;
+use std::ffi::{CStr, c_char};
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn scene_field(name: *const c_char) -> u32 {
+    if name.is_null() {
+        return 0;
+    }
+    // SAFETY: glue supplies a NUL-terminated property name for this call.
+    let Ok(name) = (unsafe { CStr::from_ptr(name) }).to_str() else {
+        return 0;
+    };
+    let field = match name {
+        "gap" => StyleField::Gap,
+        "grow" => StyleField::Grow,
+        "shrink" => StyleField::Shrink,
+        "basis" => StyleField::Basis,
+        "min" => StyleField::MinSize,
+        "max" => StyleField::MaxSize,
+        "alignSelf" => StyleField::Align,
+        "justify" => StyleField::Justify,
+        "wrap" => StyleField::Wrap,
+        "fontSize" => StyleField::FontSize,
+        "textAlign" => StyleField::TextAlign,
+        "weight" => StyleField::Weight,
+        "maxLines" => StyleField::MaxLines,
+        "lineHeight" => StyleField::LineHeight,
+        "fill" => StyleField::FlexFill,
+        "radius" => StyleField::Radius,
+        "alpha" => StyleField::Alpha,
+        "color" => StyleField::Color,
+        "family" => StyleField::Family,
+        "ellipsis" => StyleField::Ellipsis,
+        "softWrap" => StyleField::SoftWrap,
+        "overflow" => StyleField::Overflow,
+        "direction" => StyleField::Direction,
+        "absolute" => StyleField::Position,
+        "aspect" => StyleField::Aspect,
+        "cross" => StyleField::Cross,
+        "align" => StyleField::ContainerAlign,
+        "edges" => StyleField::Padding,
+        "margin" => StyleField::Margin,
+        "axis" => StyleField::ScrollAxis,
+        "focusable" => StyleField::Focusable,
+        "top" => StyleField::PaddingEdge,
+        "right" => StyleField::PaddingEdge,
+        "bottom" => StyleField::PaddingEdge,
+        "left" => StyleField::PaddingEdge,
+        "insetTop" => StyleField::InsetEdge,
+        "insetRight" => StyleField::InsetEdge,
+        "insetBottom" => StyleField::InsetEdge,
+        "insetLeft" => StyleField::InsetEdge,
+        "columnStart" => StyleField::GridLine,
+        "columnEnd" => StyleField::GridLine,
+        "rowStart" => StyleField::GridLine,
+        "rowEnd" => StyleField::GridLine,
+        "w" => StyleField::SizeAxis,
+        "h" => StyleField::SizeAxis,
+        "x" => StyleField::TransformPart,
+        "y" => StyleField::TransformPart,
+        "rotate" => StyleField::TransformPart,
+        "scale" => StyleField::TransformPart,
+        _ => return 0,
+    };
+    field as u32
+}

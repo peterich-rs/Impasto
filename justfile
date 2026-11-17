@@ -10,7 +10,7 @@ default:
 clippy:
     cargo clippy --manifest-path "{{root}}/Cargo.toml" --workspace --exclude macos --all-targets -- -D warnings
 
-check: clippy test kotlin solid
+check: style-check clippy test kotlin solid
     @echo "check ok"
 
 bench:
@@ -23,7 +23,7 @@ test: gallery-dist
 # warning-free cargo check. crapper and dryer must be on PATH. CRAP reads
 # whatever `just coverage` last wrote; it does not rerun tests.
 quality:
-    crapper --use-existing-coverage protocol uicore engine session hostshell
+    crapper --use-existing-coverage protocol uicore engine session shell
     dryer --threshold 0.8 crates/protocol/src crates/uicore/src crates/engine/src crates/session/src
     RUSTFLAGS="-D warnings" cargo check --manifest-path "{{root}}/Cargo.toml" --workspace
 
@@ -31,7 +31,12 @@ coverage:
     cargo llvm-cov --manifest-path "{{root}}/Cargo.toml" --lcov --output-path "{{root}}/target/coverage/rust/lcov.info" --workspace
 
 gen:
-    cargo run -p hostshell --bin host-stubs
+    cargo run -p shell --bin module-stubs
+    cargo run -p uicore --bin style-types -- --root "{{root}}"
+
+# Fail when generated style types, the C key table, or the utility list drift.
+style-check:
+    cargo run -p uicore --bin style-types -- --check --root "{{root}}"
 
 kotlin:
     "{{root}}/kotlin/gradlew" -p "{{root}}/kotlin" :library:jvmTest
@@ -77,3 +82,11 @@ android: gallery-dist
 # Release APK. Gradle runs cargo build --release. Signed with the debug keystore.
 android-release: gallery-dist
     "{{root}}/crates/android/apk/gradlew" -p "{{root}}/crates/android/apk" assembleRelease
+
+# Relocatable CLI distribution, including the pinned Node/compiler toolchain.
+cli-dist:
+    node "{{root}}/tools/distribute.mjs"
+
+# Identical gallery click and wheel scenarios before/after the native toolchain.
+toolchain-baseline: gallery-dist
+    python3 "{{root}}/tools/toolchain-baseline.py"

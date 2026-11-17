@@ -1,17 +1,21 @@
 import assert from "node:assert/strict";
 import { createComponent, createRoot, flush } from "solid-js";
 import { Errored } from "solid-js";
-import { createRenderer } from "@solidjs/universal";
-import type { CoreHost } from "../../solid-renderer/src/host.ts";
-import { hostRendererOptions } from "../../solid-renderer/src/tree.ts";
+import type { SceneModule } from "../../solid-renderer/src/scene.ts";
+import { testScene } from "../../solid-renderer/testing/scene.ts";
+import { createSceneRenderer } from "../../solid-renderer/testing/render.ts";
 import { installMockHost } from "../testing/renderTest.ts";
 import { bindFocusRing } from "./focus.ts";
-import { installThemePort, resetThemeForTests, type PlatformSnapshot } from "./theme.ts";
+import {
+  installThemePort,
+  resetThemeForTests,
+  type PlatformSnapshot,
+} from "./theme.ts";
 import { useTheme } from "./use-theme.ts";
 
 const mock = installMockHost();
-const options = hostRendererOptions(mock.host as unknown as CoreHost);
-const { render } = createRenderer(options);
+const options = testScene(mock.host as unknown as SceneModule);
+const { render } = createSceneRenderer(options);
 
 let sawFallback = false;
 createRoot(() => {
@@ -32,7 +36,9 @@ createRoot(() => {
 });
 assert.equal(sawFallback, true);
 assert.equal(
-  mock.calls.some((call) => call.name === "text" && call.args[0] === "fallback"),
+  mock.calls.some(
+    (call) => call.name === "text" && call.args[0] === "fallback",
+  ),
   true,
 );
 
@@ -59,7 +65,7 @@ createRoot(() => {
   const theme = useTheme();
   const parent = options.createElement("column");
   bindFocusRing(
-    () => parent.id,
+    () => parent,
     () => theme().brightness === "dark",
   );
   render(() => options.createTextNode(""), parent);
@@ -69,11 +75,19 @@ mock.calls.length = 0;
 apply?.({ ...light, brightness: "dark" });
 flush();
 const names = [...new Set(mock.calls.map((call) => call.name))];
-for (const name of names) {
-  assert.ok(name === "setColor" || name === "setStroke" || name === "setAlpha", names.join(","));
-}
 assert.equal(names.includes("setText"), false);
-assert.equal(names.includes("setStroke"), true, names.join(","));
+assert.equal(
+  mock.calls.some((call) => {
+    const style = call.args[2] as { outlineWidth?: number } | undefined;
+    return (
+      call.name === "setStyleSource" &&
+      call.args[1] === "component" &&
+      style?.outlineWidth === 2
+    );
+  }),
+  true,
+  names.join(","),
+);
 resetThemeForTests();
 
 console.log("boundary.test.ts ok");

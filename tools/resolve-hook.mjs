@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -7,9 +7,10 @@ const packagesRoot = join(root, "packages");
 
 // @impasto/<pkg>/<sub> -> packages/<pkg>/<exports 值>，数据源是各包自己的 package.json
 const files = {};
-const hostPackages = [];
+const capabilityPackages = [];
 for (const entry of readdirSync(packagesRoot, { withFileTypes: true })) {
   if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+  if (!existsSync(join(packagesRoot, entry.name, "package.json"))) continue;
   const manifest = JSON.parse(
     readFileSync(join(packagesRoot, entry.name, "package.json"), "utf8"),
   );
@@ -17,19 +18,23 @@ for (const entry of readdirSync(packagesRoot, { withFileTypes: true })) {
     const subpath = key === "." ? "" : key.replace(/^\.\//, "");
     files[`@impasto/${entry.name}${subpath ? `/${subpath}` : ""}`] = `${entry.name}/${value}`;
   }
-  // `./host` 在 node 测试里落到 stub；exports 指向的 host.gen.ts 只是声明。
-  if (files[`@impasto/${entry.name}/host`]) {
-    files[`@impasto/${entry.name}/host`] = `${entry.name}/src/host.stub.ts`;
-    hostPackages.push(entry.name);
+  // The package entry is a typed wrapper. Node tests have no native module, so
+  // they load the stub instead. The declaration file next to it is types only.
+  const stub = join(packagesRoot, entry.name, "src", "native.stub.ts");
+  if (existsSync(stub)) {
+
+    capabilityPackages.push(entry.name);
   }
 }
 
-function hostPackageOf(parentURL) {
+files["@impasto/reactive"]="reactive/testing/reference.ts";
+
+function capabilityPackageOf(parentURL) {
   if (!parentURL) {
     return null;
   }
   const parent = fileURLToPath(parentURL);
-  for (const pkg of hostPackages) {
+  for (const pkg of capabilityPackages) {
     const prefix = join(packagesRoot, pkg, "src");
     if (parent === prefix || parent.startsWith(`${prefix}/`)) {
       return pkg;
@@ -39,6 +44,10 @@ function hostPackageOf(parentURL) {
 }
 
 export function resolve(specifier, context, nextResolve) {
+  if (specifier === "solid-js" && !context.parentURL?.endsWith("/reactive/testing/reference.ts")) return { url: pathToFileURL(join(packagesRoot, "reactive/testing/reference.ts")).href, shortCircuit: true };
+  if (specifier === "scene") return { url: pathToFileURL(join(packagesRoot,"solid-renderer/testing/native.ts")).href, shortCircuit:true };
+  if (specifier === "reactive") return { url:pathToFileURL(join(packagesRoot,"reactive/testing/reference.ts")).href,shortCircuit:true };
+  if (context.parentURL?.includes("/dist/") && /^@impasto\/(clipboard|linking|async-storage|app-state|permissions|file-system|devtools)$/.test(specifier)) return {url:pathToFileURL(join(packagesRoot,specifier.slice(9),"src/native.stub.ts")).href,shortCircuit:true};
   const relative = files[specifier];
   if (relative) {
     return {
@@ -46,18 +55,8 @@ export function resolve(specifier, context, nextResolve) {
       shortCircuit: true,
     };
   }
-  if (
-    specifier === "./host" ||
-    specifier === "./host.ts" ||
-    specifier === "./host.gen.ts"
-  ) {
-    const pkg = hostPackageOf(context.parentURL);
-    if (pkg) {
-      return {
-        url: pathToFileURL(join(packagesRoot, pkg, "src", "host.stub.ts")).href,
-        shortCircuit: true,
-      };
-    }
-  }
+  // A package's own index imports its declaration file. Tests load the stub.
+  const pkg = capabilityPackageOf(context.parentURL);
+  if (pkg && /(?:devtools|clipboard|linking|files|storage|app-state|permissions)\.ts$/.test(specifier)) return { url:pathToFileURL(join(packagesRoot,pkg,"src/native.stub.ts")).href,shortCircuit:true };
   return nextResolve(specifier, context);
 }

@@ -13,11 +13,11 @@ const toast = source("Toast.tsx");
 const button = source("Button.tsx");
 
 assert.equal(dialog.includes("setAlign("), false);
-assert.ok(dialog.includes('align("center")'));
+assert.ok(dialog.includes('justifyContent: "center"'));
 assert.equal(sheet.includes("setAlign("), false);
-assert.ok(sheet.includes('setJustify(column, "end")'));
+assert.ok(sheet.includes('justifyContent: "end"'));
 assert.equal(toast.includes("setAlign("), false);
-assert.ok(toast.includes('align("end")'));
+assert.ok(toast.includes('alignItems: "end"'));
 assert.ok(button.includes("minTarget(size(), theme().density) * scale()"));
 
 const mock = installMockHost();
@@ -26,10 +26,18 @@ assert.throws(() => mock.host.setAlign(column, "center"), /setAlign failed/);
 const frame = mock.host.align("center");
 mock.host.setAlign(frame, "end");
 assert.ok(
-  mock.calls.some((call) => call.name === "setAlign" && call.args[0] === frame && call.args[1] === "end"),
+  mock.calls.some(
+    (call) =>
+      call.name === "setAlign" &&
+      call.args[0] === frame &&
+      call.args[1] === "end",
+  ),
 );
 
-const reparent = mock.host.reparentChildren as (from: number, to: number) => void;
+const reparent = mock.host.reparentChildren as (
+  from: number,
+  to: number,
+) => void;
 mock.host.reparentChildren = () => {
   throw new Error("reparentChildren failed");
 };

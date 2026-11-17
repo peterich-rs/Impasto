@@ -104,6 +104,8 @@ fn removed_subtree_can_be_inserted_again() -> Result<(), crate::Error> {
     tree.add_child(column, text)?;
     tree.layout()?;
     tree.remove(column, text)?;
+    assert!(matches!(tree.record(), Err(crate::Error::LayoutRequired)));
+    tree.layout()?;
     assert!(!texts(&mut tree)?.contains(&"Hi".to_string()));
     tree.insert(column, text, None)?;
     tree.layout()?;
@@ -132,10 +134,10 @@ fn setters_relayout_on_the_next_frame() -> Result<(), crate::Error> {
         tree.set_font_size(column, 12.0),
         Err(crate::Error::NotText)
     ));
-    assert!(matches!(
-        tree.set_padding(column, 1.0),
-        Err(crate::Error::WrongKind)
-    ));
+    tree.set_padding(column, 1.0)?;
+    tree.layout()?;
+    assert_eq!((tree.rect(top)?.x, tree.rect(top)?.y), (1.0, 1.0));
+    assert_eq!(tree.rect(bottom)?.y, 17.0);
 
     let mut tree = Tree::new(MonoShaper::default());
     let pad = tree.padding(0.0)?;
@@ -217,10 +219,10 @@ fn setters_update_paint_without_moving_the_previous_box() -> Result<(), crate::E
         list.commands.first(),
         Some(protocol::Command::PushClip { corner_radius, .. }) if *corner_radius == 6.0
     ));
-    assert!(matches!(
-        tree.set_radius(child, 1.0),
-        Err(crate::Error::WrongKind)
-    ));
+    tree.set_radius(child, 1.0)?;
+    assert!(!tree.needs_layout());
+    assert_eq!(tree.rect(child)?.w, before.w);
+    assert_eq!(tree.rect(child)?.h, before.h);
 
     let mut tree = Tree::new(MonoShaper::default());
     let fade = tree.opacity(255)?;
@@ -241,6 +243,8 @@ fn setters_update_paint_without_moving_the_previous_box() -> Result<(), crate::E
         tree.set_alpha(box_, 1),
         Err(crate::Error::WrongKind)
     ));
+    assert!(!tree.needs_layout());
+    assert_eq!(tree.rect(box_)?.w, width);
 
     let mut tree = Tree::new(MonoShaper::default());
     let frame = tree.align(crate::Alignment::Start)?;
@@ -251,10 +255,9 @@ fn setters_update_paint_without_moving_the_previous_box() -> Result<(), crate::E
     assert!(tree.is_dirty());
     tree.layout()?;
     assert!(!tree.is_dirty());
-    assert!(matches!(
-        tree.set_align(inner, crate::Alignment::Center),
-        Err(crate::Error::WrongKind)
-    ));
+    tree.set_align(inner, crate::Alignment::Center)?;
+    tree.layout()?;
+    assert_eq!((tree.rect(inner)?.w, tree.rect(inner)?.h), (4.0, 4.0));
 
     let mut tree = Tree::new(MonoShaper::default());
     let box_ = tree.sized(10.0, 12.0)?;
@@ -274,7 +277,7 @@ fn setters_update_paint_without_moving_the_previous_box() -> Result<(), crate::E
     let image = tree.image("asset:logo", 10.0, 10.0)?;
     tree.layout()?;
     let hit = tree.rect(image)?;
-    tree.set_image(image, "asset:mark", 24.0, 18.0)?;
+    tree.set_image(image, "asset:mark", Some((24.0, 18.0)))?;
     assert!(tree.is_dirty());
     assert_eq!((tree.rect(image)?.w, tree.rect(image)?.h), (hit.w, hit.h));
     tree.layout()?;
@@ -286,7 +289,7 @@ fn setters_update_paint_without_moving_the_previous_box() -> Result<(), crate::E
     ));
     let plain = tree.sized(1.0, 1.0)?;
     assert!(matches!(
-        tree.set_image(plain, "asset:x", 1.0, 1.0),
+        tree.set_image(plain, "asset:x", Some((1.0, 1.0))),
         Err(crate::Error::WrongKind)
     ));
     Ok(())

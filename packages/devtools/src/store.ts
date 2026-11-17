@@ -1,5 +1,5 @@
 /**
- * Devtools state: Solid signals over the `@impasto/devtools/host` module.
+ * Devtools state: Solid signals over the `@impasto/devtools` module.
  * Pulls are cursor-based (each channel tracks the last `seq` it saw) and
  * gated on the hub revision so a closed panel costs one atomic read.
  */
@@ -7,11 +7,9 @@ import { createSignal, onCleanup } from "solid-js";
 import { onFrame } from "@impasto/solid-renderer";
 import { appendCapped } from "./cursor.ts";
 import type { HighlightBox } from "./highlight.tsx";
-import * as raw from "@impasto/devtools/host";
-
+import * as raw from "./devtools.ts";
 export type LogLevel = "ERROR" | "WARN" | "INFO" | "DEBUG" | "TRACE";
-export type LogSource = "script" | "layout" | "host" | "net";
-
+export type LogSource = "script" | "layout" | "scene" | "net";
 export type LogLine = {
   seq: number;
   at: number;
@@ -21,7 +19,6 @@ export type LogLine = {
   text: string;
   frame: number | null;
 };
-
 export type DiagError = {
   seq: number;
   at: number;
@@ -30,7 +27,6 @@ export type DiagError = {
   stack: string | null;
   frame: number | null;
 };
-
 export type NetEntry = {
   seq: number;
   at: number;
@@ -47,7 +43,6 @@ export type NetEntry = {
   error: string | null;
   doneAt: number | null;
 };
-
 export type PhaseSample = {
   motionMs: number;
   dispatchMs: number;
@@ -70,7 +65,6 @@ export type PhaseSample = {
   focus: number;
   blur: number;
 };
-
 export type FrameSample = {
   seq: number;
   number: number;
@@ -96,7 +90,6 @@ export type FrameSample = {
   overBudget: boolean;
   phases?: PhaseSample;
 };
-
 export const [logs, setLogs] = createSignal<LogLine[]>([]);
 export const [errors, setErrors] = createSignal<DiagError[]>([]);
 export const [network, setNetwork] = createSignal<NetEntry[]>([]);
@@ -104,26 +97,39 @@ export const [frames, setFrames] = createSignal<FrameSample[]>([]);
 export const [unseenErrors, setUnseenErrors] = createSignal(0);
 export const [pageOpen, setPageOpen] = createSignal(false);
 export const [highlights, setHighlights] = createSignal<HighlightBox[]>([]);
-
 type Channel = "logs" | "errors" | "network" | "frames";
-const cursors: Record<Channel, number> = { logs: 0, errors: 0, network: 0, frames: 0 };
+const cursors: Record<Channel, number> = {
+  logs: 0,
+  errors: 0,
+  network: 0,
+  frames: 0,
+};
 let lastRevision = -1;
 let attached = false;
 /** Error source names the banner reacts to. */
-const BANNER_SOURCES = new Set(["listener", "rejection", "host"]);
-
-function entriesOf<T extends { seq: number }>(payload: unknown): T[] {
+const BANNER_SOURCES = new Set(["listener", "rejection", "scene"]);
+function entriesOf<
+  T extends {
+    seq: number;
+  },
+>(payload: unknown): T[] {
   if (!payload || typeof payload !== "object") {
     return [];
   }
-  const entries = (payload as { entries?: unknown }).entries;
+  const entries = (
+    payload as {
+      entries?: unknown;
+    }
+  ).entries;
   return Array.isArray(entries) ? (entries as T[]) : [];
 }
-
-function tailOf<T extends { seq: number }>(current: T[], fresh: T[], cap = 400): T[] {
+function tailOf<
+  T extends {
+    seq: number;
+  },
+>(current: T[], fresh: T[], cap = 400): T[] {
   return appendCapped(current, fresh, cap);
 }
-
 function pull(): void {
   const revision = raw.revision() as number;
   if (revision === lastRevision) {
@@ -164,7 +170,6 @@ export function bannerError(): DiagError | null {
   }
   return null;
 }
-
 export const store = {
   pageOpen,
   open(): void {
@@ -181,7 +186,7 @@ export const store = {
     setErrors([]);
     setUnseenErrors(0);
   },
-  /** True when the host registered the devtools module. */
+  /** True when the scene registered the devtools module. */
   available(): boolean {
     try {
       const value = raw.enabled() as boolean | undefined;

@@ -1,6 +1,6 @@
 import { LIGHT } from "./palette.ts";
 
-/** Default text size for host text nodes and the Text component. */
+/** Default text size for scene text nodes and the Text component. */
 export const FONT_SIZE = 16;
 
 /** Default text color. The light palette `text`. */

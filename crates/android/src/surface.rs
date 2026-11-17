@@ -1,7 +1,7 @@
 //! Vulkan present. The swapchain stays across resizes and drops with this surface.
 
 use engine::{AcquireFollowup, Engine, PixelSize, VulkanSwapchain, acquire_followup};
-use hostshell::{NativePtr, Presented, Surface};
+use shell::{NativePtr, Presented, Surface};
 
 pub struct VulkanSurface {
     window: NativePtr,
