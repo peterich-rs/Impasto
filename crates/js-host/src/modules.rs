@@ -101,3 +101,11 @@ pub struct Module {
     pub specifier: &'static str,
     pub methods: Vec<Method>,
 }
+
+/// `module "<name>" is not linked`, or with the method when the name exists but the method does not.
+pub fn module_not_linked(module: &str, method: Option<&str>) -> String {
+    match method {
+        Some(method) => format!("module \"{module}.{method}\" is not linked"),
+        None => format!("module \"{module}\" is not linked"),
+    }
+}

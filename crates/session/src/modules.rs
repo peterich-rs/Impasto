@@ -2,52 +2,47 @@
 
 use std::sync::{Arc, RwLock};
 
-use crate::io::{PluginValue, module_not_linked};
+use crate::io::PluginValue;
 
 pub use js_host::{
     ImmediateExec, Invoke, Method, MethodExec, Module, PromiseFn, Settle, SyncFn, Work,
 };
 
+/// Compatibility registry. The modules live in one [`js_host::ModuleRegistry`].
+///
+/// `restricted` is the `@impasto/` package filter. The generic registry has no
+/// such policy, and this wrapper does not implement `Deref`.
 pub struct ModuleRegistry {
-    modules: Arc<[Module]>,
+    inner: js_host::ModuleRegistry,
 }
 
 impl ModuleRegistry {
     pub fn new(modules: Vec<Module>) -> Self {
         Self {
-            modules: modules.into(),
+            inner: js_host::ModuleRegistry::new(modules),
         }
     }
 
     pub fn restricted(&self, packages: &[String]) -> Self {
-        Self::new(
-            self.modules
-                .iter()
-                .filter(|module| {
-                    packages.iter().any(|package| {
-                        module.specifier.strip_prefix("@impasto/") == Some(package.as_str())
-                    })
+        Self {
+            inner: self.inner.filtered(|module| {
+                packages.iter().any(|package| {
+                    module.specifier.strip_prefix("@impasto/") == Some(package.as_str())
                 })
-                .cloned()
-                .collect(),
-        )
+            }),
+        }
     }
 
     pub fn module(&self, name: &str) -> Option<&Module> {
-        self.modules.iter().find(|module| module.name == name)
+        self.inner.module(name)
     }
 
     pub fn by_specifier(&self, specifier: &str) -> Option<&Module> {
-        self.modules
-            .iter()
-            .find(|module| module.specifier == specifier)
+        self.inner.by_specifier(specifier)
     }
 
     pub fn method(&self, module: &str, method: &str) -> Option<&Method> {
-        self.module(module)?
-            .methods
-            .iter()
-            .find(|entry| entry.name == method)
+        self.inner.method(module, method)
     }
 
     pub fn call(
@@ -56,11 +51,11 @@ impl ModuleRegistry {
         method: &str,
         args: &[PluginValue],
     ) -> Result<PluginValue, String> {
-        match &self.method(module, method).map(|entry| &entry.invoke) {
-            Some(Invoke::Sync(f)) => f(args),
-            Some(Invoke::Promise(_)) => Err(format!("module \"{module}.{method}\" is not sync")),
-            None => Err(module_not_linked(module, Some(method))),
-        }
+        self.inner.call(module, method, args)
+    }
+
+    pub fn as_host_registry(&self) -> &js_host::ModuleRegistry {
+        &self.inner
     }
 }
 

@@ -138,13 +138,7 @@ pub trait HttpClient: Send + Sync {
 /// Largest response body `fetch` will accept.
 pub const HTTP_BODY_LIMIT: usize = 4 * 1024 * 1024;
 
-/// `module "<name>" is not linked`, or with the method when the name exists but the method does not.
-pub fn module_not_linked(module: &str, method: Option<&str>) -> String {
-    match method {
-        Some(method) => format!("module \"{module}.{method}\" is not linked"),
-        None => format!("module \"{module}\" is not linked"),
-    }
-}
+pub use js_host::module_not_linked;
 
 /// A path relative to the document directory. Rejects `..`, absolute paths, and backslashes.
 pub fn document_relative(path: &str) -> Result<String, String> {
