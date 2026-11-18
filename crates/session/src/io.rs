@@ -6,24 +6,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-/// JSON-like value exchanged with one native module method.
-#[derive(Clone, Debug, PartialEq)]
-pub enum PluginValue {
-    Null,
-    Bool(bool),
-    F64(f64),
-    Str(String),
-    Bytes(Vec<u8>),
-    List(Vec<PluginValue>),
-    Map(Vec<(String, PluginValue)>),
-}
-
-/// Completion of one token allocated for a promise.
-#[derive(Clone, Debug, PartialEq)]
-pub enum PluginResult {
-    Done(PluginValue),
-    Failed { message: String },
-}
+pub use js_host::{PluginResult, PluginValue};
 
 /// One HTTP call. `cancel` becomes true when the script aborts it.
 /// `timeout_ms` of `None` leaves the client default in charge.

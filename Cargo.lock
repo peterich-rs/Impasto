@@ -2260,6 +2260,7 @@ dependencies = [
 name = "session"
 version = "0.0.0"
 dependencies = [
+ "js-host",
  "protocol",
  "uicore",
 ]
