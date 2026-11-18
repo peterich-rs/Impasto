@@ -38,6 +38,8 @@ jobs:
           RUSTFLAGS: "-D warnings"
       - name: clippy
         run: cargo clippy --workspace --exclude macos --all-targets -- -D warnings
+      - name: js-host dependency boundary
+        run: python3 tools/check-js-host-boundary.py
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

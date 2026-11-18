@@ -682,6 +682,103 @@ fn module_config_literal_and_shared_slots_keep_their_defaults() {
 fn assert_send<T: Send>() {}
 fn assert_sync<T: Sync>() {}
 
+trait DistinctRegistry {}
+impl DistinctRegistry for ModuleRegistry {}
+impl DistinctRegistry for js_host::ModuleRegistry {}
+
+fn registry_types_differ() {
+    fn hold<T: DistinctRegistry>() {}
+    hold::<ModuleRegistry>();
+    hold::<js_host::ModuleRegistry>();
+}
+
+#[test]
+#[allow(
+    unused_qualifications,
+    reason = "the js_host path is the proof that session reexports the same type"
+)]
+fn session_types_are_host_types() {
+    fn same<T>(left: T, right: T) -> (T, T) {
+        (left, right)
+    }
+    let (value, _) = same(PluginValue::Bytes(vec![1]), js_host::PluginValue::Null);
+    assert_eq!(value, PluginValue::Bytes(vec![1]));
+    let (result, _) = same(
+        PluginResult::Failed {
+            message: "x".into(),
+        },
+        js_host::PluginResult::Done(js_host::PluginValue::Null),
+    );
+    assert!(matches!(result, PluginResult::Failed { .. }));
+    let (event, _host_event) = same(
+        IoEvent::Socket {
+            id: 3,
+            event: "open".into(),
+            text: true,
+            data: vec![9],
+        },
+        js_host::IoEvent::Http {
+            token: 1,
+            result: Ok(js_host::HttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: Vec::new(),
+            }),
+        },
+    );
+    fn into_host(event: IoEvent) -> js_host::IoEvent {
+        event
+    }
+    fn into_session(event: js_host::IoEvent) -> IoEvent {
+        event
+    }
+    let event = into_session(into_host(event));
+    match event {
+        IoEvent::Socket { id: 3, data, .. } => assert_eq!(data, vec![9]),
+        _ => panic!("socket event"),
+    }
+    registry_types_differ();
+}
+
+#[test]
+fn session_registry_shares_callback_arcs() {
+    let method = Method::sync("ping", |_| Ok(PluginValue::Str("pong".into())));
+    let Invoke::Sync(original) = method.invoke.clone() else {
+        panic!("sync callback");
+    };
+    let registry = ModuleRegistry::new(vec![Module {
+        name: "Ping",
+        specifier: "app:ping",
+        methods: vec![method],
+    }]);
+    let host = registry.as_host_registry();
+    let Invoke::Sync(found) = &host
+        .method("Ping", "ping")
+        .unwrap_or_else(|| panic!("ping"))
+        .invoke
+    else {
+        panic!("sync callback");
+    };
+    assert!(Arc::ptr_eq(&original, found));
+    let filtered = host.filtered(|module| module.specifier == "app:ping");
+    let Invoke::Sync(kept) = &filtered
+        .method("Ping", "ping")
+        .unwrap_or_else(|| panic!("filtered ping"))
+        .invoke
+    else {
+        panic!("sync callback");
+    };
+    assert!(Arc::ptr_eq(&original, kept));
+    let config = ModuleConfig {
+        registry: Arc::new(registry),
+        ..ModuleConfig::disconnected()
+    };
+    match config.registry.call("Ping", "ping", &[]) {
+        Ok(PluginValue::Str(text)) => assert_eq!(text, "pong"),
+        _ => panic!("unexpected contract value"),
+    }
+}
+
 #[test]
 fn moved_contracts_keep_their_thread_bounds() {
     assert_send::<PluginValue>();
