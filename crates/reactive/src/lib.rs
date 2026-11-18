@@ -83,6 +83,12 @@ enum State {
     Dirty,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Update,
+    Paint,
+}
+
 pub struct Node<V, F, C> {
     pub kind: Kind,
     pub generation: u32,
@@ -95,6 +101,7 @@ pub struct Node<V, F, C> {
     pub cleanups: Vec<C>,
     children: Vec<Id>,
     state: State,
+    phase: Phase,
     running: bool,
     effect_pending: bool,
     effect_cleanup: Option<C>,
@@ -111,6 +118,8 @@ pub struct Graph<E: Eval> {
     depth: Cell<u32>,
     batch_depth: Cell<u32>,
     updates: Cell<u32>,
+    phase: Cell<Phase>,
+    paint_blocked: Cell<bool>,
     // Both the graph and the embedding's values are confined to the render thread.
     thread: PhantomData<Rc<()>>,
 }
@@ -131,6 +140,8 @@ impl<E: Eval> Graph<E> {
             depth: Cell::new(0),
             batch_depth: Cell::new(0),
             updates: Cell::new(0),
+            phase: Cell::new(Phase::Update),
+            paint_blocked: Cell::new(false),
             thread: PhantomData,
         }
     }
@@ -224,17 +235,26 @@ impl<E: Eval> Graph<E> {
             node.effect = Some(effect);
             node.state = State::Dirty;
         }
-        if !scheduled {
+        if !scheduled && !self.is_painting() {
             self.update(eval, id);
             self.effect(eval, id);
         }
     }
     pub fn create_tracked_effect(&self, func: E::Func) {
+        self.tracked_effect(func, Phase::Update);
+    }
+    /// Creates an owned, tracked effect that first runs during `run_paints`.
+    pub fn create_paint_effect(&self, func: E::Func) -> Id {
+        self.tracked_effect(func, Phase::Paint)
+    }
+    fn tracked_effect(&self, func: E::Func, phase: Phase) -> Id {
         let id = self.alloc(Kind::TrackedEffect);
         let mut arena = self.arena.borrow_mut();
         let node = &mut arena.nodes[id.index as usize];
         node.func = Some(func);
         node.state = State::Dirty;
+        node.phase = phase;
+        id
     }
     pub fn get(&self, eval: E, id: Id) -> Option<E::Value> {
         if !self.live(id) {
@@ -253,7 +273,13 @@ impl<E: Eval> Graph<E> {
             .map(|v| eval.dup(v))
     }
     /// A setter only invalidates. Shell owns the two frame flush points.
+    /// During paint it frees the incoming value and records a rejected write.
     pub fn set(&self, eval: E, id: Id, next: E::Value) -> bool {
+        if self.is_painting() {
+            self.paint_blocked.set(true);
+            eval.free(next);
+            return false;
+        }
         if !self.live(id) {
             eval.free(next);
             return false;
@@ -292,8 +318,24 @@ impl<E: Eval> Graph<E> {
         self.pop_batch(eval);
     }
     pub fn has_updates(&self) -> bool {
+        self.has_work(Phase::Update)
+    }
+    /// Reports dirty or pending paint effects, including their first run.
+    pub fn has_paints(&self) -> bool {
+        self.has_work(Phase::Paint)
+    }
+    /// Reports whether the graph is currently flushing paint effects.
+    pub fn is_painting(&self) -> bool {
+        self.phase.get() == Phase::Paint
+    }
+    /// Takes and clears the rejected paint-write flag.
+    pub fn take_paint_blocked(&self) -> bool {
+        self.paint_blocked.replace(false)
+    }
+    fn has_work(&self, phase: Phase) -> bool {
         self.arena.borrow().nodes.iter().any(|n| {
             matches!(n.kind, Kind::RenderEffect | Kind::TrackedEffect)
+                && n.phase == phase
                 && (n.state != State::Clean || n.effect_pending)
         })
     }
@@ -301,37 +343,40 @@ impl<E: Eval> Graph<E> {
         self.updates.replace(0)
     }
     pub fn run_updates(&self, eval: E) {
+        self.run_effects(eval, Phase::Update);
+    }
+    /// Flushes only paint effects through the existing effect execution order.
+    /// Reentrant flushes and flushes inside a batch wait for a later call.
+    pub fn run_paints(&self, eval: E) {
+        self.run_effects(eval, Phase::Paint);
+    }
+    fn run_effects(&self, eval: E, phase: Phase) {
         if self.depth.get() > 0 || self.batch_depth.get() > 0 {
             return;
         }
-        if !self.has_updates() {
+        if !self.has_work(phase) {
             return;
         }
-        self.updates.set(self.updates.get().saturating_add(1));
+        if phase == Phase::Update {
+            self.updates.set(self.updates.get().saturating_add(1));
+        }
         self.depth.set(1);
-        let _depth = Depth(&self.depth);
-        while self.has_updates() {
+        self.phase.set(phase);
+        let _depth = Depth(&self.depth, &self.phase);
+        while self.has_work(phase) {
             // Newly created render work preempts tracked work.
-            for id in self.ids(Kind::RenderEffect) {
+            for id in self.work_ids(Kind::RenderEffect, phase) {
                 self.update(eval, id);
             }
-            for id in self.ids(Kind::RenderEffect) {
+            for id in self.work_ids(Kind::RenderEffect, phase) {
                 self.effect(eval, id);
             }
-            if self
-                .ids(Kind::RenderEffect)
-                .iter()
-                .any(|id| self.dirty(*id))
-            {
+            if self.has_dirty_render_effects(phase) {
                 continue;
             }
-            for id in self.ids(Kind::TrackedEffect) {
+            for id in self.work_ids(Kind::TrackedEffect, phase) {
                 self.update(eval, id);
-                if self
-                    .ids(Kind::RenderEffect)
-                    .iter()
-                    .any(|id| self.dirty(*id))
-                {
+                if self.has_dirty_render_effects(phase) {
                     break;
                 }
             }
@@ -397,21 +442,27 @@ impl<E: Eval> Graph<E> {
         if !self.live(id) {
             return;
         }
-        let (state, running, sources) = {
+        let (state, sources) = {
             let arena = self.arena.borrow();
             let node = &arena.nodes[id.index as usize];
-            (
-                node.state,
-                node.running,
+            if matches!(node.kind, Kind::RenderEffect | Kind::TrackedEffect)
+                && node.phase != self.phase.get()
+            {
+                return;
+            }
+            if node.state == State::Clean || node.running {
+                return;
+            }
+            let sources = if node.state == State::Check {
                 node.sources
                     .iter()
                     .filter_map(|e| arena.id(e.node))
-                    .collect::<Vec<_>>(),
-            )
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            (node.state, sources)
         };
-        if state == State::Clean || running {
-            return;
-        }
         if state == State::Check {
             for source in sources {
                 self.update(eval, source);
@@ -512,7 +563,7 @@ impl<E: Eval> Graph<E> {
         let (func, value, cleanup) = {
             let mut arena = self.arena.borrow_mut();
             let node = &mut arena.nodes[id.index as usize];
-            if !node.effect_pending {
+            if node.phase != self.phase.get() || !node.effect_pending {
                 return;
             }
             node.effect_pending = false;
@@ -543,24 +594,27 @@ impl<E: Eval> Graph<E> {
             }
         }
     }
-    fn ids(&self, kind: Kind) -> Vec<Id> {
+    fn work_ids(&self, kind: Kind, phase: Phase) -> Vec<Id> {
         let arena = self.arena.borrow();
         arena
             .nodes
             .iter()
             .enumerate()
-            .filter(|(_, n)| n.kind == kind)
+            .filter(|(_, n)| {
+                n.kind == kind && n.phase == phase && (n.state != State::Clean || n.effect_pending)
+            })
             .map(|(i, n)| Id {
                 index: arena_index(i),
                 generation: n.generation,
             })
             .collect()
     }
-    fn dirty(&self, id: Id) -> bool {
-        let arena = self.arena.borrow();
-        arena.live(id)
-            && (arena.nodes[id.index as usize].state != State::Clean
-                || arena.nodes[id.index as usize].effect_pending)
+    fn has_dirty_render_effects(&self, phase: Phase) -> bool {
+        self.arena.borrow().nodes.iter().any(|node| {
+            node.kind == Kind::RenderEffect
+                && node.phase == phase
+                && (node.state != State::Clean || node.effect_pending)
+        })
     }
     fn live(&self, id: Id) -> bool {
         self.arena.borrow().live(id)
@@ -581,6 +635,7 @@ impl<E: Eval> Graph<E> {
                 cleanups: vec![],
                 children: vec![],
                 state: State::Clean,
+                phase: Phase::Update,
                 running: false,
                 effect_pending: false,
                 effect_cleanup: None,
@@ -593,6 +648,7 @@ impl<E: Eval> Graph<E> {
         node.owner = owner.map_or(NONE, |id| id.index);
         node.running = false;
         node.state = State::Clean;
+        node.phase = Phase::Update;
         let id = Id {
             index,
             generation: node.generation,
@@ -685,10 +741,11 @@ impl<E: Eval> Drop for Scope<'_, E> {
         self.graph.reader.set(self.reader);
     }
 }
-struct Depth<'a>(&'a Cell<u32>);
+struct Depth<'a>(&'a Cell<u32>, &'a Cell<Phase>);
 impl Drop for Depth<'_> {
     fn drop(&mut self) {
         self.0.set(0);
+        self.1.set(Phase::Update);
     }
 }
 

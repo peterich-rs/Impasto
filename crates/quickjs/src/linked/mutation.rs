@@ -1,7 +1,7 @@
 //! Tree writes. One record, applied immediately or from the frame queue.
 //!
 //! Adding a style field is a [`StyleChange`] arm plus a line in `abi.yml`.
-//! The C function table does not grow.
+//! The VM decodes complete values before applying a record.
 
 use std::ffi::{c_char, c_void};
 
@@ -10,8 +10,8 @@ use uicore::{
     Alignment, AxisSize, Edges, GridLine, Inset, Justify, NodeId, RowCrossAlign, TrackSize,
 };
 
-use super::ffi::qjs_forget_ids;
 use super::nodes::{dispatch_gestures, parse_tracks};
+use super::rt::vm_forget_ids;
 use super::{Inner, inner, utf8_of};
 
 use crate::abi::{CreateKind, MutationOp, StyleField};
@@ -261,26 +261,10 @@ pub(super) enum Mutation {
         source: uicore::style::StyleSourceId,
         style: uicore::style::Style,
     },
-}
-
-/// Wire record shared with `glue.c`. Field order is the C layout.
-#[repr(C)]
-pub(in crate::linked) struct MutRec {
-    pub op: u32,
-    pub field: u32,
-    pub id: u64,
-    pub parent: u64,
-    pub before: u64,
-    pub number: f64,
-    pub number2: f64,
-    pub number3: f64,
-    pub number4: f64,
-    pub color: [u8; 4],
-    pub _pad: u32,
-    pub text: *const c_char,
-    pub text_len: usize,
-    pub values: *const crate::abi::StyleValueRecord,
-    pub value_count: usize,
+    SetCanvas {
+        id: NodeId,
+        list: Option<protocol::CanvasList>,
+    },
 }
 
 pub(super) struct OwnedRec {
@@ -296,9 +280,14 @@ pub(super) struct OwnedRec {
     pub color: [u8; 4],
     pub text: String,
     pub style_value: Option<uicore::style::codec::Value>,
+    pub canvas: Option<protocol::CanvasList>,
 }
 
 impl OwnedRec {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the existing callback record carries separate scalar fields"
+    )]
     pub(super) fn from_queued(
         op: u32,
         id: u64,
@@ -323,10 +312,15 @@ impl OwnedRec {
             color,
             text,
             style_value: None,
+            canvas: None,
         }
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "JavaScript f64 values convert to the existing fixed-width callback record and f32 geometry"
+)]
 pub(super) fn parse(rec: &OwnedRec) -> Result<Mutation, uicore::Error> {
     let id = NodeId::from_raw(rec.id);
     let op = rec.op;
@@ -497,6 +491,12 @@ pub(super) fn parse(rec: &OwnedRec) -> Result<Mutation, uicore::Error> {
     if op == MutationOp::SetSemantics as u32 {
         return Err(uicore::Error::BadNumber);
     }
+    if op == MutationOp::SetCanvas as u32 {
+        return Ok(Mutation::SetCanvas {
+            id,
+            list: rec.canvas.clone(),
+        });
+    }
     if op != MutationOp::SetStyle as u32 {
         return Err(uicore::Error::BadNumber);
     }
@@ -506,6 +506,10 @@ pub(super) fn parse(rec: &OwnedRec) -> Result<Mutation, uicore::Error> {
     })
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "JavaScript f64 values convert to the existing fixed-width callback record and f32 geometry"
+)]
 fn parse_create(rec: &OwnedRec) -> Result<Create, uicore::Error> {
     let kind = rec.field;
     if kind == CreateKind::Column as u32 {
@@ -590,6 +594,10 @@ fn parse_create(rec: &OwnedRec) -> Result<Create, uicore::Error> {
     Err(uicore::Error::BadNumber)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "JavaScript f64 values convert to the existing fixed-width callback record and f32 geometry"
+)]
 fn parse_style(rec: &OwnedRec) -> Result<StyleChange, uicore::Error> {
     let field = rec.field;
     let value = rec.number as f32;
@@ -897,6 +905,13 @@ pub(super) fn apply(tree: &mut uicore::Tree, mutation: Mutation) -> Result<Appli
         } => {
             tree.set_recognizers(id, recognizers(tap, long_press, drag, window_ms))?;
         }
+        Mutation::SetCanvas { id, list } => {
+            let clearing = list.is_none();
+            match tree.set_canvas(id, list) {
+                Err(uicore::Error::UnknownNode) if clearing => {}
+                other => other?,
+            }
+        }
         Mutation::Style { id, change } => match change {
             StyleChange::Focusable(enabled) => {
                 applied.gestures = tree.set_focusable(id, enabled)?;
@@ -1099,73 +1114,23 @@ fn forget(inner: &Inner, ids: &[NodeId]) {
     }
     let raw: Vec<u64> = ids.iter().copied().map(NodeId::to_raw).collect();
     // SAFETY: `raw` lives until this call returns. `host` is the open interpreter.
-    unsafe { qjs_forget_ids(inner.host, raw.as_ptr(), raw.len()) };
+    unsafe { vm_forget_ids(inner.host, raw.as_ptr(), raw.len()) };
 }
 
-pub(super) fn owned_from_ptr(rec: &MutRec) -> Result<OwnedRec, ()> {
-    let text = if rec.text.is_null() {
-        String::new()
-    } else {
-        // SAFETY: `text` and `text_len` describe the bytes of this call.
-        let Some(text) = (unsafe { utf8_of(rec.text, rec.text_len) }) else {
-            return Err(());
-        };
-        text.to_owned()
-    };
-    Ok(OwnedRec {
-        op: rec.op,
-        field: rec.field,
-        id: rec.id,
-        parent: rec.parent,
-        before: rec.before,
-        number: rec.number,
-        number2: rec.number2,
-        number3: rec.number3,
-        number4: rec.number4,
-        color: rec.color,
-        text,
-        style_value: read_style_value(rec)?,
-    })
+pub(super) fn mutate(inner: &Inner, owned: &OwnedRec) -> Result<u64, uicore::Error> {
+    let applied = apply_now(inner, parse(owned)?)?;
+    Ok(applied
+        .id
+        .map(NodeId::to_raw)
+        .or_else(|| applied.source.map(uicore::style::StyleSourceId::to_raw))
+        .unwrap_or(0))
 }
 
-pub(super) unsafe extern "C" fn mutate(
-    session: *mut c_void,
-    rec: *const MutRec,
-    out_id: *mut u64,
-) -> i32 {
-    super::qjs_entry!(-1, {
-        if rec.is_null() {
-            return -1;
-        }
-        let inner = unsafe { inner(session) };
-        // SAFETY: glue passes a `MutRec` that lives for this call.
-        let owned = match owned_from_ptr(unsafe { &*rec }) {
-            Ok(owned) => owned,
-            Err(()) => return -1,
-        };
-        let mutation = match parse(&owned) {
-            Ok(mutation) => mutation,
-            Err(_) => return -1,
-        };
-        match apply_now(inner, mutation) {
-            Ok(applied) => {
-                if !out_id.is_null() {
-                    let raw = applied
-                        .id
-                        .map(NodeId::to_raw)
-                        .or_else(|| applied.source.map(uicore::style::StyleSourceId::to_raw))
-                        .unwrap_or(0);
-                    // SAFETY: glue passes a writable `uint64_t` when it wants the id.
-                    unsafe { *out_id = raw };
-                }
-                0
-            }
-            Err(_) => -1,
-        }
-    })
-}
-
-pub(super) unsafe extern "C" fn push_mutation(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the existing callback record carries separate scalar fields"
+)]
+pub(super) unsafe fn push_mutation(
     session: *mut c_void,
     op: u32,
     id: u64,
@@ -1178,16 +1143,19 @@ pub(super) unsafe extern "C" fn push_mutation(
     text: *const c_char,
     text_len: usize,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let text = if text.is_null() {
             String::new()
         } else {
+            // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
             let Some(text) = (unsafe { utf8_of(text, text_len) }) else {
                 return -1;
             };
             text.to_owned()
         };
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let color = unsafe { super::rgba(color) }.unwrap_or([0, 0, 0, 0]);
         let rec =
             OwnedRec::from_queued(op, id, parent, before, field, number, number2, color, text);
@@ -1220,6 +1188,10 @@ pub(super) fn flush_for_read(inner: &Inner) -> i32 {
     0
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "JavaScript f64 values convert to the existing fixed-width callback record and f32 geometry"
+)]
 fn edges_of(rec: &OwnedRec) -> Edges {
     Edges {
         top: rec.number as f32,
@@ -1229,6 +1201,10 @@ fn edges_of(rec: &OwnedRec) -> Edges {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "JavaScript f64 values convert to the existing fixed-width callback record and f32 geometry"
+)]
 fn inset_of(rec: &OwnedRec) -> Inset {
     Inset {
         top: edge_auto(rec.color[0], rec.number as f32),
@@ -1317,6 +1293,10 @@ fn grid_line(kind: i32, value: i32) -> Result<GridLine, uicore::Error> {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "JavaScript f64 values convert to the existing fixed-width callback record and f32 geometry"
+)]
 fn alpha_byte(value: f64) -> Result<u8, uicore::Error> {
     if !(0.0..=255.0).contains(&value) || value.fract() != 0.0 {
         return Err(uicore::Error::BadNumber);
@@ -1350,14 +1330,16 @@ fn drag_claim(claim: i32) -> uicore::DragClaim {
 }
 
 fn recognizers(tap: i32, long_press: i32, drag: i32, window_ms: f64) -> uicore::RecognizerSet {
-    let mut set = uicore::RecognizerSet::default();
-    set.tap = tap != 0;
-    set.long_press = long_press != 0;
-    set.drag = match drag {
-        0 => Some(uicore::DragAxis::Free),
-        1 => Some(uicore::DragAxis::Horizontal),
-        2 => Some(uicore::DragAxis::Vertical),
-        _ => None,
+    let mut set = uicore::RecognizerSet {
+        tap: tap != 0,
+        long_press: long_press != 0,
+        drag: match drag {
+            0 => Some(uicore::DragAxis::Free),
+            1 => Some(uicore::DragAxis::Horizontal),
+            2 => Some(uicore::DragAxis::Vertical),
+            _ => None,
+        },
+        ..uicore::RecognizerSet::default()
     };
     if window_ms > 0.0 {
         set.double_tap = Some(uicore::DoubleTapConfig {
@@ -1366,61 +1348,4 @@ fn recognizers(tap: i32, long_press: i32, drag: i32, window_ms: f64) -> uicore::
         });
     }
     set
-}
-
-fn read_style_value(rec: &MutRec) -> Result<Option<uicore::style::codec::Value>, ()> {
-    use crate::abi::{StyleValueRecord, StyleValueTag as T};
-    use uicore::style::codec::Value as V;
-    if rec.value_count == 0 {
-        return Ok(None);
-    }
-    if rec.values.is_null() || rec.value_count > 65536 {
-        return Err(());
-    }
-    // SAFETY: glue owns this aligned array for the duration of mutate; count is bounded.
-    let records = unsafe { std::slice::from_raw_parts(rec.values, rec.value_count) };
-    fn string(ptr: *const c_char, len: usize) -> Result<String, ()> {
-        if ptr.is_null() {
-            return if len == 0 { Ok(String::new()) } else { Err(()) };
-        }
-        // SAFETY: each string is retained by glue through the mutate call.
-        unsafe { utf8_of(ptr, len) }.map(str::to_owned).ok_or(())
-    }
-    fn read(records: &[StyleValueRecord], at: &mut usize, depth: usize) -> Result<V, ()> {
-        if depth > 64 {
-            return Err(());
-        }
-        let record = records.get(*at).ok_or(())?;
-        *at += 1;
-        Ok(match record.tag {
-            tag if tag == T::Null as u32 => V::Null,
-            tag if tag == T::Undefined as u32 => V::Undefined,
-            tag if tag == T::Number as u32 => V::Number(record.number),
-            tag if tag == T::Bool as u32 => V::Bool(record.number != 0.0),
-            tag if tag == T::String as u32 => V::String(string(record.text, record.text_len)?),
-            tag if tag == T::Array as u32 => {
-                let mut items = Vec::new();
-                for _ in 0..record.children {
-                    items.push(read(records, at, depth + 1)?);
-                }
-                V::Array(items)
-            }
-            tag if tag == T::Object as u32 => {
-                let mut fields = Vec::new();
-                for _ in 0..record.children {
-                    let child = records.get(*at).ok_or(())?;
-                    let key = string(child.key, child.key_len)?;
-                    fields.push((key, read(records, at, depth + 1)?));
-                }
-                V::Object(fields)
-            }
-            _ => return Err(()),
-        })
-    }
-    let mut at = 0;
-    let value = read(records, &mut at, 0)?;
-    if at != records.len() {
-        return Err(());
-    }
-    Ok(Some(value))
 }

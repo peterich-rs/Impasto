@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use uicore::{Affinity, Caret, MetricsKey, PaintKey, ParagraphMetrics, Shaper, TextLine, TextSize};
+use uicore::{
+    Affinity, CanvasMetrics, Caret, MetricsKey, PaintKey, ParagraphMetrics, Shaper, TextLine,
+    TextSize,
+};
 
 const INTRINSIC_CAP: usize = 4096;
 
@@ -235,6 +238,49 @@ impl Shaper for ImpellerShaper {
             )
             .unwrap_or((0, 0))
     }
+
+    fn canvas_metrics(
+        &mut self,
+        text: &str,
+        style: &protocol::TextStyle,
+        font_size: f32,
+    ) -> Option<CanvasMetrics> {
+        if !font_size.is_finite() || font_size <= 0.0 {
+            return None;
+        }
+        // Same single-line style the player draws, so italic stays on the key
+        // and an empty run still has a font box. Do not scale the font size.
+        let style = single_line_style(style);
+        let probe = if text.is_empty() { " " } else { text };
+        let lines = self
+            .typography
+            .borrow_mut()
+            .lines(probe, font_size, 1_000_000.0, [0, 0, 0, 255], &style)
+            .ok()?;
+        let first = lines.first()?;
+        let width = if text.is_empty() {
+            0.0
+        } else {
+            lines
+                .iter()
+                .fold(0.0_f32, |widest, line| widest.max(line.w))
+        };
+        Some(CanvasMetrics {
+            width,
+            ascent: first.baseline,
+            descent: first.h - first.baseline,
+        })
+    }
+}
+
+fn single_line_style(style: &protocol::TextStyle) -> protocol::TextStyle {
+    let mut style = style.clone();
+    style.soft_wrap = false;
+    style.ellipsis = None;
+    style.overflow = protocol::TextOverflow::Visible;
+    style.max_lines = None;
+    style.align = protocol::TextAlign::Left;
+    style
 }
 
 impl ImpellerShaper {
@@ -304,5 +350,50 @@ fn empty_caret(font_size: f32) -> Caret {
         w: 1.0,
         h: font_size.max(0.0),
         affinity: Affinity::Downstream,
+    }
+}
+
+#[cfg(test)]
+mod canvas_metrics_tests {
+    use super::ImpellerShaper;
+    use uicore::Shaper;
+
+    #[test]
+    fn empty_text_keeps_the_font_box_and_italic_measures() {
+        let engine = match engine::Engine::create_metal() {
+            Ok(engine) => engine,
+            Err(engine::Status::NotLinked) => return,
+            Err(status) => panic!("create_metal: {status}"),
+        };
+        let Ok(font) = std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf") else {
+            return;
+        };
+        let mut engine = engine;
+        if engine.register_font(&font, "Sans").is_err() {
+            return;
+        }
+        let mut shaper = ImpellerShaper::new(engine.typography());
+        let style = protocol::TextStyle::default();
+        let Some(empty) = shaper.canvas_metrics("", &style, 16.0) else {
+            panic!("empty metrics");
+        };
+        let Some(letter) = shaper.canvas_metrics("M", &style, 16.0) else {
+            panic!("letter metrics");
+        };
+        assert_eq!(empty.width, 0.0);
+        assert!(empty.ascent > 0.0);
+        assert!(letter.width > 0.0);
+        assert_eq!(empty.ascent, letter.ascent);
+        assert_eq!(empty.descent, letter.descent);
+        let italic = protocol::TextStyle {
+            slant: protocol::FontSlant::Italic,
+            ..protocol::TextStyle::default()
+        };
+        let Some(slanted) = shaper.canvas_metrics("M", &italic, 16.0) else {
+            panic!("italic metrics");
+        };
+        assert!(slanted.width > 0.0);
+        assert!(shaper.canvas_metrics("M", &style, 0.0).is_none());
+        assert!(shaper.canvas_metrics("M", &style, f32::NAN).is_none());
     }
 }

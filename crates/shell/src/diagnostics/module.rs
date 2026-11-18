@@ -211,6 +211,12 @@ fn phase_map(phase: PhaseSample) -> PluginValue {
         ("scrolls", num(u64::from(phase.scrolls))),
         ("focus", num(u64::from(phase.focus))),
         ("blur", num(u64::from(phase.blur))),
+        ("canvasRecordMs", fnum(phase.canvas_record_ms)),
+        ("canvasPrepareMs", fnum(phase.canvas_prepare_ms)),
+        ("canvasOps", num(u64::from(phase.canvas_ops))),
+        ("canvasSegments", num(u64::from(phase.canvas_segments))),
+        ("canvasRedraws", num(u64::from(phase.canvas_redraws))),
+        ("canvasReused", num(u64::from(phase.canvas_reused))),
     ])
 }
 
@@ -350,12 +356,7 @@ fn engine_pin() -> &'static str {
 }
 
 fn quickjs_pin() -> &'static str {
-    const PIN: &str = include_str!("../../../quickjs/quickjs.pin");
-    PIN.lines()
-        .find_map(|line| line.trim().strip_prefix("tag:"))
-        .map(str::trim)
-        .filter(|tag| !tag.is_empty())
-        .unwrap_or("unknown")
+    "quickjs-jit-0.14.2"
 }
 
 fn flags_pair(hub: &Arc<DiagnosticsHub>) -> Method {

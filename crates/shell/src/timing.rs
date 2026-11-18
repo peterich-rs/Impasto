@@ -283,6 +283,12 @@ impl FrameListener for DevtoolFrames {
                 scrolls: phases.trace.scrolls,
                 focus: phases.trace.focus,
                 blur: phases.trace.blur,
+                canvas_record_ms: phases.trace.canvas_record_ms,
+                canvas_prepare_ms: phases.trace.canvas_prepare_ms,
+                canvas_ops: phases.trace.canvas_ops,
+                canvas_segments: phases.trace.canvas_segments,
+                canvas_redraws: phases.trace.canvas_redraws,
+                canvas_reused: phases.trace.canvas_reused,
             },
         });
     }

@@ -5,7 +5,6 @@ import { round2 } from "../engine/universe.ts";
 const START_CASH = 1_000_000;
 const FEE_RATE = 0.0003;
 const MIN_FEE = 5;
-/** Orders above this many shares fill in two clips. */
 const SPLIT_QTY = 4000;
 const KEY = "impasto.quotes.account.v1";
 type Snapshot = {
@@ -24,7 +23,7 @@ export type SubmitResult =
     };
 
 /**
- * Mock brokerage. Market orders fill at the latest price on the next drain;
+ * Mock brokerage. Market orders fill at the latest price;
  * limit orders sit in the book until a tick crosses them.
  */
 export function createAccount(engine: QuoteEngine) {
@@ -35,6 +34,29 @@ export function createAccount(engine: QuoteEngine) {
     Math.max(MIN_FEE, round2(amount * FEE_RATE));
   function holding(symbol: string): number {
     return positions().find((p) => p.symbol === symbol)?.qty ?? 0;
+  }
+  function clipSize(remaining: number, lot: number): number {
+    return remaining > SPLIT_QTY ? Math.max(lot, Math.floor(remaining / (2 * lot)) * lot) : remaining;
+  }
+  function reservedCost(price: number, qty: number, lot: number): number {
+    let total = price * qty;
+    for (let remaining = qty; remaining > 0;) {
+      const clip = clipSize(remaining, lot);
+      total += feeOf(clip * price);
+      remaining -= clip;
+    }
+    return round2(total);
+  }
+  function availableCash(): number {
+    return Math.max(0, round2(cash() - orders().reduce((total, order) =>
+      order.status === "pending" && order.side === "buy"
+        ? total + reservedCost(order.price, order.qty - order.filled, engine.ins(order.symbol).lot)
+        : total, 0)));
+  }
+  function availableHolding(symbol: string): number {
+    return Math.max(0, holding(symbol) - orders().reduce((total, order) =>
+      order.status === "pending" && order.side === "sell" && order.symbol === symbol
+        ? total + order.qty - order.filled : total, 0));
   }
   function limitBand(symbol: string): {
     lo: number;
@@ -61,11 +83,13 @@ export function createAccount(engine: QuoteEngine) {
     price: number,
     qty: number,
   ): SubmitResult {
+    const lot = engine.ins(symbol).lot;
+    price = type === "market" ? engine.quote(symbol).last : round2(price);
     if (
       !Number.isFinite(price) ||
       price <= 0 ||
-      !Number.isInteger(qty) ||
-      qty <= 0
+      !Number.isSafeInteger(qty) ||
+      qty <= 0 || qty % lot !== 0
     ) {
       return {
         ok: false,
@@ -80,20 +104,22 @@ export function createAccount(engine: QuoteEngine) {
       };
     }
     const amount = price * qty;
-    if (side === "buy" && amount + feeOf(amount) > cash()) {
+    if (side === "buy" && (type === "market" ? amount + feeOf(amount) : reservedCost(price, qty, lot)) > availableCash()) {
       return {
         ok: false,
         reason: "资金不足",
       };
     }
-    if (side === "sell" && holding(symbol) < qty) {
+    if (side === "sell" && availableHolding(symbol) < qty) {
       return {
         ok: false,
         reason: "持仓不足",
       };
     }
+    let id = engine.nextId("o");
+    while (orders().some((order) => order.id === id)) id = engine.nextId("o");
     const order: Order = {
-      id: engine.nextId("o"),
+      id,
       symbol,
       side,
       type,
@@ -104,23 +130,15 @@ export function createAccount(engine: QuoteEngine) {
       status: "pending",
       createdAt: engine.simNow(),
     };
-    setOrders((list) => [order, ...list]);
-    if (type === "market") {
-      fill(order, engine.quote(symbol).last);
-    }
+    const submitted = type === "market" ? applyFill(order, price, qty) : order;
+    setOrders((list) => [submitted, ...list]);
     void persist();
     return {
       ok: true,
-      order,
+      order: submitted,
     };
   }
-  function fill(order: Order, price: number): void {
-    const live = orders().find((o) => o.id === order.id);
-    if (live === undefined || live.status !== "pending") {
-      return;
-    }
-    const remaining = live.qty - live.filled;
-    const clip = remaining > SPLIT_QTY ? Math.floor(remaining / 2) : remaining;
+  function applyFill(live: Order, price: number, clip: number): Order {
     const amount = clip * price;
     const fee = feeOf(amount);
     setCash((c) =>
@@ -151,22 +169,18 @@ export function createAccount(engine: QuoteEngine) {
       }
       return next;
     });
-    setOrders((list) =>
-      list.map((o) => {
-        if (o.id !== live.id) {
-          return o;
-        }
-        const filled = o.filled + clip;
-        const avgFill =
-          (o.avgFill * o.filled + price * clip) / Math.max(1, filled);
-        return {
-          ...o,
-          filled,
-          avgFill: round2(avgFill),
-          status: filled >= o.qty ? "filled" : "pending",
-        };
-      }),
-    );
+    const filled = live.filled + clip;
+    return {
+      ...live,
+      filled,
+      avgFill: round2((live.avgFill * live.filled + price * clip) / filled),
+      status: filled >= live.qty ? "filled" : "pending",
+    };
+  }
+  function fill(order: Order, price: number): void {
+    const clip = clipSize(order.qty - order.filled, engine.ins(order.symbol).lot);
+    const filled = applyFill(order, price, clip);
+    setOrders((list) => list.map((item) => item.id === order.id ? filled : item));
     void persist();
   }
 
@@ -178,7 +192,7 @@ export function createAccount(engine: QuoteEngine) {
       }
       const crossed = o.side === "buy" ? price <= o.price : price >= o.price;
       if (crossed) {
-        fill(o, Math.min(price, o.side === "buy" ? o.price : price));
+        fill(o, price);
       }
     }
   });
@@ -237,7 +251,7 @@ export function createAccount(engine: QuoteEngine) {
   }
   void hydrate();
   function flatten(symbol: string): SubmitResult {
-    const qty = holding(symbol);
+    const qty = availableHolding(symbol);
     if (qty <= 0) {
       return {
         ok: false,
@@ -265,6 +279,8 @@ export function createAccount(engine: QuoteEngine) {
     flatten,
     reset,
     holding,
+    availableCash,
+    availableHolding,
     feeOf,
     marketValue,
     limitBand,

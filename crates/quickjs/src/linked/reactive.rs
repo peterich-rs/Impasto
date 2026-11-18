@@ -1,38 +1,37 @@
-//! QuickJS references owned by the render-thread arena. Re-entry borrows no
-//! mutable session/arena state. Each JSValue has exactly one owning `Value`.
-use super::Inner;
+//! Persistent references owned by the render-thread reactive graph.
+use super::{Inner, rt::Host};
 use reactive::{CallResult, Eval, Graph as Arena, Id};
+use rquickjs::{Ctx, Persistent, Value as JsValue};
 use std::cell::RefCell;
-use std::ffi::c_void;
 
-type Bytes = [u8; 16];
+#[derive(Clone)]
 pub(super) struct Value {
-    ctx: *mut c_void,
-    bytes: Bytes,
+    host: *mut Host,
+    saved: Persistent<JsValue<'static>>,
 }
-impl Clone for Value {
-    fn clone(&self) -> Self {
-        let mut bytes = [0; 16];
-        // SAFETY: Value owns a live reference; its interpreter outlives the graph.
-        unsafe { qjs_reactive_dup(self.ctx, self.bytes.as_ptr(), bytes.as_mut_ptr()) };
+impl Value {
+    pub(super) fn save<'js>(ctx: &Ctx<'js>, host: *mut Host, value: JsValue<'js>) -> Self {
         Self {
-            ctx: self.ctx,
-            bytes,
+            host,
+            saved: Persistent::save(ctx, value),
         }
     }
-}
-impl Drop for Value {
-    fn drop(&mut self) {
-        // SAFETY: session clears the graph and transfer slots before qjs_close.
-        unsafe { qjs_reactive_free(self.ctx, self.bytes.as_ptr()) };
+    pub(super) fn restore<'js>(self, ctx: &Ctx<'js>) -> rquickjs::Result<JsValue<'js>> {
+        self.saved.restore(ctx)
     }
 }
 #[derive(Clone, Copy)]
 pub(super) struct JsEval;
+
+pub(super) enum Cleanup {
+    Script(Value),
+    UnattachedNode(*mut Host, uicore::NodeId),
+}
+
 impl Eval for JsEval {
     type Value = Value;
     type Func = Value;
-    type Cleanup = Value;
+    type Cleanup = Cleanup;
     fn dup(self, value: &Value) -> Value {
         value.clone()
     }
@@ -44,66 +43,76 @@ impl Eval for JsEval {
         graph: &Arena<Self>,
         func: &Value,
         prev: Option<Value>,
-    ) -> CallResult<Value, Value> {
-        let mut bytes = [0; 16];
-        // SAFETY: C borrows both references for JS_Call; the returned reference
-        // transfers to Value. JS callbacks may freely re-enter the graph.
-        let failed = unsafe {
-            qjs_reactive_call(
-                func.ctx,
-                func.bytes.as_ptr(),
-                prev.as_ref().map_or(std::ptr::null(), |v| v.bytes.as_ptr()),
-                bytes.as_mut_ptr(),
-            )
-        };
-        if failed != 0 {
-            // SAFETY: the failed JS_Call left an exception in the same context.
-            unsafe { qjs_reactive_handle_error(func.ctx, graph.owner().map_or(0, Id::to_raw)) };
-            CallResult::Failed
-        } else {
-            CallResult::Value {
-                value: Some(Value {
-                    ctx: func.ctx,
-                    bytes,
-                }),
-                cleanup: None,
+    ) -> CallResult<Value, Cleanup> {
+        // SAFETY: the session clears the graph while Host and the VM are alive.
+        let host = unsafe { &*func.host };
+        host.with(|ctx| {
+            let result = (|| {
+                let function = rquickjs::Function::from_value(func.saved.clone().restore(&ctx)?)?;
+                let mut args =
+                    rquickjs::function::Args::new(ctx.clone(), usize::from(prev.is_some()));
+                if let Some(prev) = prev {
+                    args.push_arg(prev.restore(&ctx)?)?;
+                }
+                function.call_arg::<JsValue>(args)
+            })();
+            match result {
+                Ok(value) => CallResult::Value {
+                    value: Some(Value::save(&ctx, func.host, value)),
+                    cleanup: None,
+                },
+                Err(error) => {
+                    if !error.is_exception() {
+                        rquickjs::Exception::throw_type(&ctx, &error.to_string());
+                    }
+                    host.reactive_error(&ctx, graph.owner().map_or(0, Id::to_raw));
+                    CallResult::Failed
+                }
             }
-        }
+        })
     }
     fn effect(
         self,
         graph: &Arena<Self>,
         func: &Value,
         prev: Option<Value>,
-    ) -> CallResult<Value, Value> {
+    ) -> CallResult<Value, Cleanup> {
         match self.call(graph, func, prev) {
             CallResult::Value {
                 value: Some(value), ..
             } => {
-                // SAFETY: value is a live JSValue in this context.
-                if unsafe { qjs_reactive_is_fn(value.ctx, value.bytes.as_ptr()) } != 0 {
-                    CallResult::Value {
-                        value: None,
-                        cleanup: Some(value),
-                    }
-                } else {
-                    drop(value);
-                    CallResult::Value {
-                        value: None,
-                        cleanup: None,
-                    }
+                // SAFETY: the graph is owned by this live Host.
+                let is_function = unsafe { &*value.host }.with(|ctx| {
+                    value
+                        .saved
+                        .clone()
+                        .restore(&ctx)
+                        .is_ok_and(|v| v.is_function())
+                });
+                CallResult::Value {
+                    value: None,
+                    cleanup: is_function.then_some(Cleanup::Script(value)),
                 }
             }
             result => result,
         }
     }
     fn same(self, a: &Value, b: &Value) -> bool {
-        // SAFETY: both values belong to this session and stay alive for the call.
-        unsafe { qjs_reactive_same(a.ctx, a.bytes.as_ptr(), b.bytes.as_ptr()) != 0 }
+        // SAFETY: graph values belong to this Host, whose active VM entry holds its lock.
+        unsafe { &*a.host }.same_saved(&a.saved, &b.saved)
     }
-    fn run_cleanup(self, graph: &Arena<Self>, cleanup: Value) {
-        let result = graph.untrack(|graph| self.call(graph, &cleanup, None));
-        drop(result);
+
+    fn run_cleanup(self, graph: &Arena<Self>, cleanup: Cleanup) {
+        match cleanup {
+            Cleanup::Script(cleanup) => {
+                drop(graph.untrack(|graph| self.call(graph, &cleanup, None)));
+            }
+            Cleanup::UnattachedNode(host, id) => {
+                // SAFETY: the session clears the graph before releasing Host.
+                let host = unsafe { &*host };
+                host.discard_if_unattached(id);
+            }
+        }
     }
 }
 
@@ -120,7 +129,7 @@ impl Graph {
             free: RefCell::new(vec![]),
         }
     }
-    fn hold(&self, value: Value) -> u64 {
+    pub(super) fn hold(&self, value: Value) -> u64 {
         let index = self.free.borrow_mut().pop();
         let mut slots = self.slots.borrow_mut();
         let index = index.unwrap_or_else(|| {
@@ -130,14 +139,17 @@ impl Graph {
         slots[index] = Some(value);
         index as u64 + 1
     }
-    fn take(&self, handle: u64) -> Option<Value> {
+    pub(super) fn take(&self, handle: u64) -> Option<Value> {
         let index = usize::try_from(handle.checked_sub(1)?).ok()?;
         let value = self.slots.borrow_mut().get_mut(index)?.take()?;
         self.free.borrow_mut().push(index);
         Some(value)
     }
     pub(super) fn clear(&self) {
-        self.arena.clear(JsEval);
+        // A cleanup may allocate another root. Retire it before releasing the VM.
+        while self.arena.node_count() != 0 {
+            self.arena.clear(JsEval);
+        }
         self.slots.borrow_mut().clear();
         self.free.borrow_mut().clear();
     }
@@ -147,136 +159,70 @@ fn raw(value: u64) -> u64 {
     RAW | value
 }
 
-// These functions are private to glue.c; no Rust type crosses the ABI.
-#[unsafe(no_mangle)]
-pub(super) unsafe extern "C" fn reactive_hold(
-    session: *mut c_void,
-    ctx: *mut c_void,
-    bytes: *const u8,
-) -> u64 {
-    super::qjs_entry!(0, {
-        if session.is_null() || ctx.is_null() || bytes.is_null() {
-            return 0;
+pub(super) fn reactive_entry(inner: &Inner, op: u32, args: &[u64]) -> u64 {
+    let arg = |i| args.get(i).copied().unwrap_or(0);
+    let graph = &inner.graph.arena;
+    let value = |i| inner.graph.take(arg(i));
+    match op {
+        1 => value(0).map_or(0, |v| raw(graph.create_signal(v).to_raw())),
+        2 => graph
+            .get(JsEval, Id::from_raw(arg(0)))
+            .map_or(0, |v| inner.graph.hold(v)),
+        3 => value(1).map_or(0, |v| {
+            raw(u64::from(graph.set(JsEval, Id::from_raw(arg(0)), v)))
+        }),
+        4 => value(0).map_or(0, |f| raw(graph.create_memo(f).to_raw())),
+        5 => {
+            if let (Some(compute), Some(effect)) = (value(0), value(1)) {
+                graph.render_effect(JsEval, compute, effect, arg(2) != 0);
+            }
+            0
         }
-        let mut copied = [0; 16];
-        // SAFETY: glue supplies one JSValue in a 16-byte buffer and transfers ownership.
-        unsafe { std::ptr::copy_nonoverlapping(bytes, copied.as_mut_ptr(), 16) };
-        let inner = unsafe { &*session.cast::<Inner>() };
-        inner.graph.hold(Value { ctx, bytes: copied })
-    })
-}
-#[unsafe(no_mangle)]
-pub(super) unsafe extern "C" fn reactive_take(
-    session: *mut c_void,
-    handle: u64,
-    out: *mut u8,
-) -> i32 {
-    super::qjs_entry!(-1, {
-        if session.is_null() || out.is_null() {
-            return -1;
+        6 => {
+            if let Some(f) = value(0) {
+                graph.create_tracked_effect(f);
+            }
+            0
         }
-        // SAFETY: session is the live Inner supplied in QjsFns.
-        let inner = unsafe { &*session.cast::<Inner>() };
-        let Some(value) = inner.graph.take(handle) else {
-            return -1;
-        };
-        // SAFETY: out has 16 bytes. Ownership transfers to C and then QuickJS.
-        unsafe { std::ptr::copy_nonoverlapping(value.bytes.as_ptr(), out, 16) };
-        std::mem::forget(value);
-        0
-    })
-}
-#[unsafe(no_mangle)]
-pub(super) unsafe extern "C" fn reactive_entry(
-    session: *mut c_void,
-    _ctx: *mut c_void,
-    op: u32,
-    args: *const u64,
-    argc: u32,
-) -> u64 {
-    super::qjs_entry!(0, {
-        if session.is_null() {
-            return 0;
+        7 => raw(graph
+            .push_owner((arg(0) != 0).then(|| Id::from_raw(arg(0))))
+            .map_or(0, Id::to_raw)),
+        8 => {
+            graph.dispose(JsEval, Id::from_raw(arg(0)));
+            0
         }
-        // SAFETY: Inner lives until qjs_close; args is a stack array in glue.c.
-        let inner = unsafe { &*session.cast::<Inner>() };
-        let args = if args.is_null() {
-            &[][..]
-        } else {
-            unsafe { std::slice::from_raw_parts(args, argc as usize) }
-        };
-        let arg = |i| args.get(i).copied().unwrap_or(0);
-        let graph = &inner.graph.arena;
-        let value = |i| inner.graph.take(arg(i));
-        match op {
-            1 => value(0).map_or(0, |v| raw(graph.create_signal(v).to_raw())),
-            2 => graph
-                .get(JsEval, Id::from_raw(arg(0)))
-                .map_or(0, |v| inner.graph.hold(v)),
-            3 => value(1).map_or(0, |v| {
-                raw(u64::from(graph.set(JsEval, Id::from_raw(arg(0)), v)))
-            }),
-            4 => value(0).map_or(0, |f| raw(graph.create_memo(f).to_raw())),
-            5 => {
-                if let (Some(compute), Some(effect)) = (value(0), value(1)) {
-                    graph.render_effect(JsEval, compute, effect, arg(2) != 0);
-                }
-                0
+        9 => raw(graph.owner().map_or(0, Id::to_raw)),
+        10 => raw(graph.open_root().to_raw()),
+        11 => {
+            if let Some(f) = value(0) {
+                graph.on_cleanup(Cleanup::Script(f));
             }
-            6 => {
-                if let Some(f) = value(0) {
-                    graph.create_tracked_effect(f);
-                }
-                0
-            }
-            7 => raw(graph
-                .push_owner((arg(0) != 0).then(|| Id::from_raw(arg(0))))
-                .map_or(0, Id::to_raw)),
-            8 => {
-                graph.dispose(JsEval, Id::from_raw(arg(0)));
-                0
-            }
-            9 => raw(graph.owner().map_or(0, Id::to_raw)),
-            10 => raw(graph.open_root().to_raw()),
-            11 => {
-                if let Some(f) = value(0) {
-                    graph.on_cleanup(f);
-                }
-                0
-            }
-            12 => raw(graph.push_untrack().map_or(0, Id::to_raw)),
-            13 => {
-                graph.pop_reader((arg(0) != 0).then(|| Id::from_raw(arg(0))));
-                0
-            }
-            14 => {
-                graph.run_updates(JsEval);
-                0
-            }
-            15 => {
-                graph.push_batch();
-                0
-            }
-            16 => {
-                graph.pop_batch(JsEval);
-                0
-            }
-            17 => raw(graph
-                .owner_parent(Id::from_raw(arg(0)))
-                .map_or(0, Id::to_raw)),
-            18 => raw(u64::from(graph.is_live(Id::from_raw(arg(0))))),
-            _ => 0,
+            0
         }
-    })
+        12 => raw(graph.push_untrack().map_or(0, Id::to_raw)),
+        13 => {
+            graph.pop_reader((arg(0) != 0).then(|| Id::from_raw(arg(0))));
+            0
+        }
+        14 => {
+            graph.run_updates(JsEval);
+            0
+        }
+        15 => {
+            graph.push_batch();
+            0
+        }
+        16 => {
+            graph.pop_batch(JsEval);
+            0
+        }
+        17 => raw(graph
+            .owner_parent(Id::from_raw(arg(0)))
+            .map_or(0, Id::to_raw)),
+        18 => raw(u64::from(graph.is_live(Id::from_raw(arg(0))))),
+        _ => 0,
+    }
 }
 pub(super) fn release_all(inner: &Inner) {
     inner.graph.clear();
-}
-unsafe extern "C" {
-    fn qjs_reactive_handle_error(ctx: *mut c_void, owner: u64) -> i32;
-    fn qjs_reactive_dup(ctx: *mut c_void, bytes: *const u8, out: *mut u8);
-    fn qjs_reactive_free(ctx: *mut c_void, bytes: *const u8);
-    fn qjs_reactive_call(ctx: *mut c_void, func: *const u8, arg: *const u8, out: *mut u8) -> i32;
-    fn qjs_reactive_same(ctx: *mut c_void, a: *const u8, b: *const u8) -> i32;
-    fn qjs_reactive_is_fn(ctx: *mut c_void, bytes: *const u8) -> i32;
 }

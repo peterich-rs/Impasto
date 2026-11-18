@@ -23,6 +23,8 @@ pub(crate) struct RetainedPicture {
     /// Extra retains for paragraphs this display list draws. Released only with
     /// the display list, after any root list that flattened it.
     pub(crate) held: Vec<HeldParagraph>,
+    /// Canvas images that were not ready. Reuse fails once any of them is cached.
+    pub(crate) waiting: Vec<std::sync::Arc<str>>,
 }
 
 pub(crate) enum Save {
@@ -64,6 +66,7 @@ fn impeller_version_matches() -> bool {
     linked == ffi::IMPELLER_VERSION
 }
 
+mod canvas;
 pub(crate) mod ffi;
 mod images;
 mod ops;
@@ -208,6 +211,7 @@ impl Engine {
                 picture_cache: Some(&self.pictures),
                 pending: &mut pending,
                 saves: Vec::new(),
+                waiting: Vec::new(),
                 impeller: self.context,
             };
             if !tree.layers.is_empty() {
@@ -1350,6 +1354,309 @@ mod tests {
             pictures,
             root: LayerId(0),
             epoch: generation,
+        }
+    }
+
+    #[test]
+    fn canvas_paths_submit_and_a_missing_image_does_not_fail() {
+        let Some(mut engine) = opened() else {
+            return;
+        };
+        let list = DrawList {
+            commands: vec![
+                canvas_command(0.0, 0.0, 0.0, 10.0, protocol::CanvasList::empty()),
+                canvas_command(1.0, 2.0, 20.0, 16.0, shared_canvas()),
+                canvas_command(0.0, 0.0, 12.0, 12.0, isolated_canvas()),
+                canvas_command(0.0, 0.0, 8.0, 8.0, glyph_canvas()),
+            ],
+        };
+        assert!(engine.paint(&list, 2.0, |_| None).is_ok());
+        assert_eq!(engine.cached_textures(), 0);
+        let Ok(font) = std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf") else {
+            return;
+        };
+        if engine.register_font(&font, "Sans").is_err() {
+            return;
+        }
+        let text = DrawList {
+            commands: vec![canvas_command(0.0, 0.0, 40.0, 24.0, text_canvas())],
+        };
+        assert!(engine.paint(&text, 1.0, |_| None).is_ok());
+    }
+
+    #[test]
+    fn canvas_picture_rebuilds_when_a_waiting_image_is_cached() {
+        let Some(mut engine) = opened() else {
+            return;
+        };
+        let commands = std::sync::Arc::from([canvas_command(0.0, 0.0, 16.0, 16.0, glyph_canvas())]);
+        let tree = picture_tree(0.0, 1, std::sync::Arc::clone(&commands));
+        assert!(engine.submit_layers(&tree, 1.0, |_| None).is_ok());
+        assert_eq!(engine.picture_builds(), 1);
+        assert_eq!(engine.cached_textures(), 0);
+        assert!(engine.submit_layers(&tree, 1.0, |_| None).is_ok());
+        assert_eq!(engine.picture_builds(), 1);
+
+        let rgba = [9u8, 8, 7, 255, 1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255];
+        let image = std::sync::Arc::from([protocol::Command::Image {
+            x: 0.0,
+            y: 0.0,
+            w: 2.0,
+            h: 2.0,
+            source: std::sync::Arc::from("asset:glyph"),
+            mode: protocol::ContentMode::Fill,
+            required: true,
+        }]);
+        let both = image_then_canvas(image, std::sync::Arc::clone(&commands));
+        let mut calls = 0u32;
+        assert!(
+            engine
+                .submit_layers(&both, 1.0, |_| {
+                    calls += 1;
+                    Some(ImagePixels {
+                        width: 2,
+                        height: 2,
+                        rgba: &rgba,
+                    })
+                })
+                .is_ok()
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(engine.picture_builds(), 3);
+        assert_eq!(engine.cached_textures(), 1);
+
+        assert!(
+            engine
+                .submit_layers(&tree, 1.0, |_| {
+                    calls += 1;
+                    None
+                })
+                .is_ok()
+        );
+        assert_eq!(engine.picture_builds(), 3);
+        assert_eq!(calls, 1);
+        assert_eq!(engine.cached_textures(), 1);
+    }
+
+    fn canvas_command(
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        list: protocol::CanvasList,
+    ) -> protocol::Command {
+        protocol::Command::Canvas {
+            x,
+            y,
+            width,
+            height,
+            list,
+        }
+    }
+
+    fn canvas_list(
+        ops: Vec<protocol::CanvasOp>,
+        images: Vec<protocol::CanvasImageRef>,
+        isolation: protocol::CanvasIsolation,
+    ) -> protocol::CanvasList {
+        protocol::CanvasList {
+            body: std::sync::Arc::new(protocol::CanvasBody {
+                ops: ops.into_boxed_slice(),
+                images: images.into_boxed_slice(),
+                isolation,
+                bytes: 1,
+            }),
+        }
+    }
+
+    fn sample_path() -> protocol::CanvasPath {
+        protocol::CanvasPath {
+            verbs: std::sync::Arc::from([
+                protocol::PathVerb::Move(1.0, 1.0),
+                protocol::PathVerb::Line(8.0, 1.0),
+                protocol::PathVerb::Quad(9.0, 2.0, 8.0, 6.0),
+                protocol::PathVerb::Cubic(4.0, 8.0, 2.0, 8.0, 1.0, 6.0),
+                protocol::PathVerb::Close,
+            ]),
+            fill: protocol::FillRule::EvenOdd,
+        }
+    }
+
+    fn stops() -> std::sync::Arc<[protocol::ColorStop]> {
+        std::sync::Arc::from([
+            protocol::ColorStop::srgb(0.0, [255, 0, 0, 255]),
+            protocol::ColorStop::srgb(1.0, [0, 0, 255, 128]),
+        ])
+    }
+
+    fn shared_canvas() -> protocol::CanvasList {
+        let path = sample_path();
+        canvas_list(
+            vec![
+                protocol::CanvasOp::Save,
+                protocol::CanvasOp::Clip { path: path.clone() },
+                protocol::CanvasOp::Fill {
+                    path,
+                    paint: protocol::CanvasPaint {
+                        brush: protocol::CanvasBrush::Color([9, 8, 7, 255]),
+                        alpha: 200,
+                        composite: protocol::CanvasComposite::SourceOver,
+                    },
+                },
+                protocol::CanvasOp::Restore,
+                protocol::CanvasOp::Save,
+            ],
+            Vec::new(),
+            protocol::CanvasIsolation::Shared,
+        )
+    }
+
+    fn isolated_canvas() -> protocol::CanvasList {
+        let path = sample_path();
+        let stops = stops();
+        canvas_list(
+            vec![
+                protocol::CanvasOp::Clear {
+                    x: 1.0,
+                    y: 1.0,
+                    w: 4.0,
+                    h: -4.0,
+                    ctm: [0.0, 1.0, -1.0, 0.0, 2.0, 3.0],
+                },
+                protocol::CanvasOp::Fill {
+                    path: path.clone(),
+                    paint: protocol::CanvasPaint {
+                        brush: protocol::CanvasBrush::Linear {
+                            start: [0.0, 0.0],
+                            end: [10.0, 0.0],
+                            stops: std::sync::Arc::clone(&stops),
+                        },
+                        alpha: 255,
+                        composite: protocol::CanvasComposite::Multiply,
+                    },
+                },
+                protocol::CanvasOp::Fill {
+                    path: path.clone(),
+                    paint: protocol::CanvasPaint {
+                        brush: protocol::CanvasBrush::Radial {
+                            start: [4.0, 4.0],
+                            start_radius: 0.0,
+                            end: [4.0, 4.0],
+                            end_radius: 6.0,
+                            stops: std::sync::Arc::clone(&stops),
+                        },
+                        alpha: 128,
+                        composite: protocol::CanvasComposite::Screen,
+                    },
+                },
+                protocol::CanvasOp::Fill {
+                    path,
+                    paint: protocol::CanvasPaint {
+                        brush: protocol::CanvasBrush::Conic {
+                            center: [4.0, 4.0],
+                            angle: 0.5,
+                            stops,
+                        },
+                        alpha: 255,
+                        composite: protocol::CanvasComposite::Xor,
+                    },
+                },
+            ],
+            Vec::new(),
+            protocol::CanvasIsolation::Isolated,
+        )
+    }
+
+    fn glyph_canvas() -> protocol::CanvasList {
+        let source: std::sync::Arc<str> = std::sync::Arc::from("asset:glyph");
+        canvas_list(
+            vec![protocol::CanvasOp::Image(protocol::CanvasImageOp {
+                source: std::sync::Arc::clone(&source),
+                src: Some([-2.0, 0.0, 6.0, 4.0]),
+                x: 1.0,
+                y: 2.0,
+                w: Some(8.0),
+                h: None,
+                smoothing: false,
+                alpha: 255,
+                composite: protocol::CanvasComposite::DestinationOut,
+                ctm: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            })],
+            vec![protocol::CanvasImageRef { source }],
+            protocol::CanvasIsolation::Isolated,
+        )
+    }
+
+    fn text_canvas() -> protocol::CanvasList {
+        canvas_list(
+            vec![protocol::CanvasOp::Text(protocol::CanvasTextOp {
+                x: 1.0,
+                y: 2.0,
+                anchor_x: 4.0,
+                utf8: std::sync::Arc::from("Hi"),
+                font_size: 16.0,
+                max_width: 0.0,
+                compress: 0.5,
+                ctm: [1.0, 0.0, 0.0, 1.0, 1.0, 2.0],
+                style: std::sync::Arc::new(protocol::TextStyle {
+                    slant: protocol::FontSlant::Italic,
+                    ..protocol::TextStyle::default()
+                }),
+                paint: protocol::CanvasPaint {
+                    brush: protocol::CanvasBrush::Color([0, 0, 0, 220]),
+                    alpha: 255,
+                    composite: protocol::CanvasComposite::SourceOver,
+                },
+            })],
+            Vec::new(),
+            protocol::CanvasIsolation::Shared,
+        )
+    }
+
+    fn image_then_canvas(
+        image: std::sync::Arc<[protocol::Command]>,
+        canvas: std::sync::Arc<[protocol::Command]>,
+    ) -> protocol::LayerTree {
+        use protocol::{Layer, LayerId, LayerKind, Picture, PictureId};
+        let image_id = PictureId(8);
+        let canvas_id = PictureId(7);
+        protocol::LayerTree {
+            layers: vec![
+                Layer {
+                    kind: LayerKind::Offset { x: 0.0, y: 0.0 },
+                    parent: None,
+                    first_child: Some(LayerId(1)),
+                    next: None,
+                },
+                Layer {
+                    kind: LayerKind::Picture { picture: image_id },
+                    parent: Some(LayerId(0)),
+                    first_child: None,
+                    next: Some(LayerId(2)),
+                },
+                Layer {
+                    kind: LayerKind::Picture { picture: canvas_id },
+                    parent: Some(LayerId(0)),
+                    first_child: None,
+                    next: None,
+                },
+            ],
+            pictures: vec![
+                std::sync::Arc::new(Picture {
+                    id: image_id,
+                    generation: 1,
+                    origin: (0.0, 0.0),
+                    commands: image,
+                }),
+                std::sync::Arc::new(Picture {
+                    id: canvas_id,
+                    generation: 1,
+                    origin: (0.0, 0.0),
+                    commands: canvas,
+                }),
+            ],
+            root: LayerId(0),
+            epoch: 1,
         }
     }
 }

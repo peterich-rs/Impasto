@@ -133,16 +133,29 @@ impl FrameScheduler {
             self.pending = true;
             return None;
         }
+        Some(self.arm())
+    }
+
+    fn arm(&mut self) -> FrameToken {
         self.pending = false;
         self.next = self.next.wrapping_add(1);
         let token = FrameToken(self.next);
         self.armed = Some(token);
-        Some(token)
+        token
+    }
+
+    /// Posts the next callback while present is in progress. The render thread
+    /// accepts the token after the current frame has ended.
+    pub(crate) fn prepare_next(&mut self) -> Option<FrameToken> {
+        if self.in_flight && self.armed.is_none() {
+            return Some(self.arm());
+        }
+        None
     }
 
     /// Accepts the token the platform echoed. A stale token does not open a frame.
     pub fn accept(&mut self, token: FrameToken) -> bool {
-        if self.armed != Some(token) {
+        if self.in_flight || self.armed != Some(token) {
             return false;
         }
         self.armed = None;
@@ -152,7 +165,14 @@ impl FrameScheduler {
 
     /// Ends the in-flight frame. `again` is the session's request for one more.
     pub fn finish(&mut self, again: bool) -> Option<FrameToken> {
-        self.in_flight = false;
+        let was_in_flight = std::mem::replace(&mut self.in_flight, false);
+        if was_in_flight && self.armed.is_some() {
+            if !again && !self.pending {
+                self.armed = None;
+            }
+            self.pending = false;
+            return None;
+        }
         if again || self.pending {
             self.request()
         } else {
@@ -191,6 +211,27 @@ mod tests {
             again: false,
             gpu: Gpu::Live,
         }
+    }
+
+    #[test]
+    fn prearmed_callback_waits_for_finish_and_can_be_cancelled() {
+        let mut scheduler = FrameScheduler::new();
+        let first = scheduler.request().expect("the first frame needs a token");
+        assert!(scheduler.accept(first));
+        let next = scheduler
+            .prepare_next()
+            .expect("present can prearm one callback");
+        assert!(scheduler.prepare_next().is_none());
+        assert!(!scheduler.accept(next));
+        assert!(scheduler.finish(true).is_none());
+        assert!(scheduler.accept(next));
+
+        let cancelled = scheduler
+            .prepare_next()
+            .expect("prearm before present failure");
+        assert!(scheduler.finish(false).is_none());
+        assert!(!scheduler.token_armed());
+        assert!(!scheduler.accept(cancelled));
     }
 
     #[test]

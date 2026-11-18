@@ -197,7 +197,7 @@ pub(super) fn scene_marks_in_commands(
             protocol::Command::Pop => {
                 stack.pop();
             }
-            protocol::Command::Fill { .. } => {}
+            protocol::Command::Fill { .. } | protocol::Command::Canvas { .. } => {}
         }
     }
     marks

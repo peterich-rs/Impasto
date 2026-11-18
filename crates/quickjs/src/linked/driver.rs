@@ -7,7 +7,7 @@ use uicore::{
     Chrome, DriverEvent, DriverId, ListItem, ListNodes, ListOp, NodeId, PullMode, ScrollConfig,
 };
 
-use super::ffi::qjs_driver;
+use super::rt::vm_driver;
 use super::{Inner, c_message, inner, utf8_of};
 
 fn driver_id(index: u32, generation: u32) -> DriverId {
@@ -120,6 +120,10 @@ fn emit_chrome(inner: &Inner, id: DriverId, chrome: &Chrome, error: &mut [u8]) -
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the existing callback record carries separate scalar fields"
+)]
 fn call(
     inner: &Inner,
     kind: i32,
@@ -139,7 +143,7 @@ fn call(
 ) -> i32 {
     // SAFETY: `inner.host` is the open interpreter. The strings live for this call.
     unsafe {
-        qjs_driver(
+        vm_driver(
             inner.host,
             kind,
             id.index,
@@ -165,19 +169,21 @@ fn call(
 
 /// # Safety
 /// `session` is the live `Inner`. `index` and `generation` are writable.
-pub unsafe extern "C" fn list_create(
+pub unsafe fn list_create(
     session: *mut c_void,
     overscan: i32,
     estimate: f32,
     index: *mut u32,
     generation: *mut u32,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
         if index.is_null() || generation.is_null() {
             return -1;
         }
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let id = inner.drivers.borrow_mut().list_create(overscan, estimate);
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         unsafe {
             *index = id.index;
             *generation = id.generation;
@@ -188,8 +194,9 @@ pub unsafe extern "C" fn list_create(
 
 /// # Safety
 /// `session` is the live `Inner`.
-pub unsafe extern "C" fn list_release(session: *mut c_void, index: u32, generation: u32) -> i32 {
-    super::qjs_entry!(-1, {
+pub unsafe fn list_release(session: *mut c_void, index: u32, generation: u32) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         i32::from(
             !inner
@@ -202,15 +209,17 @@ pub unsafe extern "C" fn list_release(session: *mut c_void, index: u32, generati
 
 /// # Safety
 /// `nodes` points at `count` ids when `count > 0`.
-pub unsafe extern "C" fn list_bind(
+pub unsafe fn list_bind(
     session: *mut c_void,
     index: u32,
     generation: u32,
     nodes: *const u64,
     count: i32,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let bound = unsafe { read_nodes(nodes, count) };
         i32::from(
             !inner
@@ -223,7 +232,7 @@ pub unsafe extern "C" fn list_bind(
 
 /// # Safety
 /// `session` is the live `Inner`.
-pub unsafe extern "C" fn list_configure(
+pub unsafe fn list_configure(
     session: *mut c_void,
     index: u32,
     generation: u32,
@@ -231,7 +240,8 @@ pub unsafe extern "C" fn list_configure(
     overscan: i32,
     blocked: i32,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         i32::from(!inner.drivers.borrow_mut().list_configure(
             driver_id(index, generation),
@@ -244,8 +254,9 @@ pub unsafe extern "C" fn list_configure(
 
 /// # Safety
 /// `session` is the live `Inner`.
-pub unsafe extern "C" fn list_begin(session: *mut c_void, index: u32, generation: u32) -> i32 {
-    super::qjs_entry!(-1, {
+pub unsafe fn list_begin(session: *mut c_void, index: u32, generation: u32) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         i32::from(
             !inner
@@ -258,7 +269,11 @@ pub unsafe extern "C" fn list_begin(session: *mut c_void, index: u32, generation
 
 /// # Safety
 /// `key` and `ty` address `key_len` and `ty_len` bytes for this call.
-pub unsafe extern "C" fn list_item(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the existing callback record carries separate scalar fields"
+)]
+pub unsafe fn list_item(
     session: *mut c_void,
     index: u32,
     generation: u32,
@@ -268,13 +283,16 @@ pub unsafe extern "C" fn list_item(
     ty_len: usize,
     sticky: i32,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let Some(key) = (unsafe { utf8_of(key, key_len) }) else {
             return -1;
         };
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let Some(ty) = (unsafe { utf8_of(ty, ty_len) }) else {
             return -1;
         };
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         i32::from(!inner.drivers.borrow_mut().list_item(
             driver_id(index, generation),
@@ -289,8 +307,9 @@ pub unsafe extern "C" fn list_item(
 
 /// # Safety
 /// `session` is the live `Inner`.
-pub unsafe extern "C" fn list_end(session: *mut c_void, index: u32, generation: u32) -> i32 {
-    super::qjs_entry!(-1, {
+pub unsafe fn list_end(session: *mut c_void, index: u32, generation: u32) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         i32::from(
             !inner
@@ -303,7 +322,7 @@ pub unsafe extern "C" fn list_end(session: *mut c_void, index: u32, generation: 
 
 /// # Safety
 /// `key` addresses `key_len` bytes for this call.
-pub unsafe extern "C" fn list_note_row(
+pub unsafe fn list_note_row(
     session: *mut c_void,
     index: u32,
     generation: u32,
@@ -311,10 +330,12 @@ pub unsafe extern "C" fn list_note_row(
     key_len: usize,
     node: u64,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let Some(key) = (unsafe { utf8_of(key, key_len) }) else {
             return -1;
         };
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         i32::from(!inner.drivers.borrow_mut().list_note_row(
             driver_id(index, generation),
@@ -326,17 +347,15 @@ pub unsafe extern "C" fn list_note_row(
 
 /// # Safety
 /// `index` and `generation` are writable.
-pub unsafe extern "C" fn scroll_create(
-    session: *mut c_void,
-    index: *mut u32,
-    generation: *mut u32,
-) -> i32 {
-    super::qjs_entry!(-1, {
+pub unsafe fn scroll_create(session: *mut c_void, index: *mut u32, generation: *mut u32) -> i32 {
+    super::vm_entry!(-1, {
         if index.is_null() || generation.is_null() {
             return -1;
         }
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let id = inner.drivers.borrow_mut().scroll_create();
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         unsafe {
             *index = id.index;
             *generation = id.generation;
@@ -347,8 +366,9 @@ pub unsafe extern "C" fn scroll_create(
 
 /// # Safety
 /// `session` is the live `Inner`.
-pub unsafe extern "C" fn scroll_release(session: *mut c_void, index: u32, generation: u32) -> i32 {
-    super::qjs_entry!(-1, {
+pub unsafe fn scroll_release(session: *mut c_void, index: u32, generation: u32) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         i32::from(
             !inner
@@ -361,14 +381,15 @@ pub unsafe extern "C" fn scroll_release(session: *mut c_void, index: u32, genera
 
 /// # Safety
 /// `session` is the live `Inner`.
-pub unsafe extern "C" fn scroll_bind(
+pub unsafe fn scroll_bind(
     session: *mut c_void,
     index: u32,
     generation: u32,
     viewport: u64,
     content: u64,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let mut drivers = inner.drivers.borrow_mut();
         let tree = inner.tree.borrow();
@@ -383,7 +404,11 @@ pub unsafe extern "C" fn scroll_bind(
 
 /// # Safety
 /// `session` is the live `Inner`.
-pub unsafe extern "C" fn scroll_configure(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the existing callback record carries separate scalar fields"
+)]
+pub unsafe fn scroll_configure(
     session: *mut c_void,
     index: u32,
     generation: u32,
@@ -396,7 +421,8 @@ pub unsafe extern "C" fn scroll_configure(
     parent_generation: u32,
     has_parent: i32,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let parent = (has_parent != 0).then_some(driver_id(parent_index, parent_generation));
         let mut drivers = inner.drivers.borrow_mut();
@@ -418,7 +444,11 @@ pub unsafe extern "C" fn scroll_configure(
 
 /// # Safety
 /// The four float pointers are writable.
-pub unsafe extern "C" fn scroll_drag_by(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the existing callback record carries separate scalar fields"
+)]
+pub unsafe fn scroll_drag_by(
     session: *mut c_void,
     index: u32,
     generation: u32,
@@ -429,10 +459,11 @@ pub unsafe extern "C" fn scroll_drag_by(
     over_x: *mut f32,
     over_y: *mut f32,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
         if overflow_x.is_null() || overflow_y.is_null() || over_x.is_null() || over_y.is_null() {
             return -1;
         }
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let mut drivers = inner.drivers.borrow_mut();
         let mut tree = inner.tree.borrow_mut();
@@ -440,6 +471,7 @@ pub unsafe extern "C" fn scroll_drag_by(
         else {
             return -1;
         };
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         unsafe {
             *overflow_x = step.overflow_x;
             *overflow_y = step.overflow_y;
@@ -452,13 +484,9 @@ pub unsafe extern "C" fn scroll_drag_by(
 
 /// # Safety
 /// `session` is the live `Inner`.
-pub unsafe extern "C" fn scroll_finish(
-    session: *mut c_void,
-    index: u32,
-    generation: u32,
-    taken: i32,
-) -> i32 {
-    super::qjs_entry!(-1, {
+pub unsafe fn scroll_finish(session: *mut c_void, index: u32, generation: u32, taken: i32) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let mut drivers = inner.drivers.borrow_mut();
         let mut tree = inner.tree.borrow_mut();
@@ -474,8 +502,9 @@ pub unsafe extern "C" fn scroll_finish(
 
 /// # Safety
 /// `session` is the live `Inner`.
-pub unsafe extern "C" fn scroll_drag_end(session: *mut c_void, index: u32, generation: u32) -> i32 {
-    super::qjs_entry!(-1, {
+pub unsafe fn scroll_drag_end(session: *mut c_void, index: u32, generation: u32) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         if inner
             .drivers
@@ -491,14 +520,15 @@ pub unsafe extern "C" fn scroll_drag_end(session: *mut c_void, index: u32, gener
 
 /// # Safety
 /// `session` is the live `Inner`.
-pub unsafe extern "C" fn scroll_wheel(
+pub unsafe fn scroll_wheel(
     session: *mut c_void,
     index: u32,
     generation: u32,
     dx: f32,
     dy: f32,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let mut drivers = inner.drivers.borrow_mut();
         let mut tree = inner.tree.borrow_mut();
@@ -508,7 +538,7 @@ pub unsafe extern "C" fn scroll_wheel(
 
 /// # Safety
 /// `x` and `y` are writable.
-pub unsafe extern "C" fn scroll_query(
+pub unsafe fn scroll_query(
     session: *mut c_void,
     index: u32,
     generation: u32,
@@ -516,16 +546,18 @@ pub unsafe extern "C" fn scroll_query(
     x: *mut f32,
     y: *mut f32,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
         if x.is_null() || y.is_null() {
             return -1;
         }
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let drivers = inner.drivers.borrow();
         let tree = inner.tree.borrow();
         let Some((qx, qy)) = drivers.scroll_query(driver_id(index, generation), &tree, cmd) else {
             return -1;
         };
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         unsafe {
             *x = qx;
             *y = qy;
@@ -536,14 +568,15 @@ pub unsafe extern "C" fn scroll_query(
 
 /// # Safety
 /// `session` is the live `Inner`.
-pub unsafe extern "C" fn scroll_consume(
+pub unsafe fn scroll_consume(
     session: *mut c_void,
     index: u32,
     generation: u32,
     ox: f32,
     oy: f32,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let mut drivers = inner.drivers.borrow_mut();
         let mut tree = inner.tree.borrow_mut();
@@ -561,6 +594,7 @@ unsafe fn read_nodes(nodes: *const u64, count: i32) -> ListNodes {
     let mut raw = [0u64; 10];
     let len = usize::try_from(count).unwrap_or(0).min(raw.len());
     if !nodes.is_null() && len > 0 {
+        // SAFETY: the Rust caller supplies the stated number of initialized elements for this call.
         raw[..len].copy_from_slice(unsafe { std::slice::from_raw_parts(nodes, len) });
     }
     ListNodes {

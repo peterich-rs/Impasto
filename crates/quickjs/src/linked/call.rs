@@ -15,9 +15,8 @@ use super::utf8_of;
 
 use crate::abi::{EffectKind, QueryKind};
 
-/// Result buffer shared with `glue.c`. `text` points at session storage and is
+/// Result buffer returned to the VM bindings. `text` points at session storage and is
 /// only valid until the next query or effect on this session.
-#[repr(C)]
 pub(in crate::linked) struct CallOut {
     pub status: i32,
     pub nnums: i32,
@@ -38,7 +37,11 @@ impl CallOut {
     }
 }
 
-pub(super) unsafe extern "C" fn query(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the existing callback record carries separate scalar fields"
+)]
+pub(super) unsafe fn query(
     session: *mut c_void,
     kind: i32,
     node: u64,
@@ -49,11 +52,11 @@ pub(super) unsafe extern "C" fn query(
     color: *const u8,
     out: *mut CallOut,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
         if out.is_null() {
             return -1;
         }
-        // SAFETY: glue passes a writable `CallOut` that lives for this call.
+        // SAFETY: the VM binding passes a writable `CallOut` that lives for this call.
         let out = unsafe { &mut *out };
         out.clear();
         let failed = if kind == QueryKind::Parent as i32 {
@@ -230,6 +233,7 @@ pub(super) unsafe extern "C" fn query(
                 -1
             }
         } else if kind == QueryKind::GraphemeIndex as i32 {
+            // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
             let Some(text) = (unsafe { utf8_of(text, text_len) }) else {
                 return -1;
             };
@@ -237,6 +241,7 @@ pub(super) unsafe extern "C" fn query(
             out.nnums = 1;
             0
         } else if kind == QueryKind::GraphemeCount as i32 {
+            // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
             let Some(text) = (unsafe { utf8_of(text, text_len) }) else {
                 return -1;
             };
@@ -244,6 +249,7 @@ pub(super) unsafe extern "C" fn query(
             out.nnums = 1;
             0
         } else if kind == QueryKind::GraphemeUnit as i32 {
+            // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
             let Some(text) = (unsafe { utf8_of(text, text_len) }) else {
                 return -1;
             };
@@ -262,7 +268,7 @@ pub(super) unsafe extern "C" fn query(
                 if !raw.is_null() && n > 0 {
                     // SAFETY: `selection_rect_bytes` returns `len` bytes of f32s owned by the session.
                     let bytes = unsafe { std::slice::from_raw_parts(raw, n * 4) };
-                    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+                    for (index, chunk) in bytes.as_chunks::<4>().0.iter().enumerate() {
                         let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                         out.nums[index] = f64::from(value);
                     }
@@ -278,7 +284,11 @@ pub(super) unsafe extern "C" fn query(
     })
 }
 
-pub(super) unsafe extern "C" fn effect(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the existing callback record carries separate scalar fields"
+)]
+pub(super) unsafe fn effect(
     session: *mut c_void,
     kind: i32,
     node: u64,
@@ -291,16 +301,18 @@ pub(super) unsafe extern "C" fn effect(
     byte_len: usize,
     out: *mut CallOut,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
         if out.is_null() {
             return -1;
         }
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let out = unsafe { &mut *out };
         out.clear();
         let num = |index: usize| -> f64 {
             if nums.is_null() || index >= nnums as usize {
                 0.0
             } else {
+                // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
                 unsafe { *nums.add(index) }
             }
         };
@@ -372,6 +384,7 @@ pub(super) unsafe extern "C" fn effect(
             }
             status
         } else if kind == EffectKind::TextCommand as i32 {
+            // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
             let raw = unsafe { utf8_of(text, text_len) }.unwrap_or("");
             let (name, extra) = raw.split_once('\0').unwrap_or((raw, ""));
             let name_ptr = text;
@@ -379,6 +392,7 @@ pub(super) unsafe extern "C" fn effect(
             let extra_ptr = if extra.is_empty() || text.is_null() {
                 std::ptr::null()
             } else {
+                // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
                 unsafe { text.add(name_len + 1) }
             };
             let extra_len = extra.len();
@@ -428,6 +442,7 @@ pub(super) unsafe extern "C" fn effect(
         } else if kind == EffectKind::SetImeConfig as i32 {
             nodes::set_ime_config(session, num(0) as i32, num(1) as i32)
         } else if kind == EffectKind::SetSemantics as i32 {
+            // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
             let raw = unsafe { utf8_of(text, text_len) }.unwrap_or("");
             let mut parts = raw.split('\0');
             let label = parts.next().unwrap_or("");
@@ -439,11 +454,13 @@ pub(super) unsafe extern "C" fn effect(
             let value = if text.is_null() {
                 std::ptr::null()
             } else {
+                // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
                 unsafe { text.add(label_len + 1) }
             };
             let description = if text.is_null() {
                 std::ptr::null()
             } else {
+                // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
                 unsafe { text.add(label_len + 1 + value_len + 1) }
             };
             bridge::set_semantics(

@@ -2,105 +2,99 @@ import assert from "node:assert/strict";
 import { installMockHost } from "../../packages/solid-ui/testing/renderTest.ts";
 
 const mock = installMockHost();
-
 await import(new URL("./dist/quotes.js", import.meta.url).href);
 
-function fail(message: string): never {
-  console.error(message);
-  console.error(mock.liveTexts().join(", "));
-  process.exit(1);
+let time = 0;
+function frame(): void {
+  mock.flushHostFrame(time += 250);
 }
-
-const initial = mock.liveTexts();
-for (const label of ["自选", "市场", "交易", "我的"]) {
-  if (!initial.includes(label)) {
-    fail(`missing tab ${label}`);
+function click(label: string): void {
+  try {
+    mock.clickByLabel(label);
+    frame();
+    frame();
+  } catch (cause) {
+    throw new Error(`Click ${label} failed`, { cause });
   }
 }
-if (!initial.includes("恒生指数")) {
-  fail("missing index strip");
-}
-if (!initial.includes("搜索")) {
-  fail("missing watchlist search entry");
-}
-if (!initial.some((t) => t === "恒生指数" || t === "腾讯控股" || t === "Apple")) {
-  fail("missing watchlist row name");
+function shown(...labels: string[]): void {
+  const texts = mock.liveTexts();
+  for (const label of labels) assert.ok(texts.includes(label), `missing ${label}: ${texts.join(", ")}`);
 }
 
-// Binder wrote real prices on bind (write-on-bind): price cells show numbers.
-const priced = initial.filter((t) => /^\d{1,3}(,\d{3})*(\.\d{2})$/.test(t));
-if (priced.length < 4) {
-  fail(`expected formatted prices, got ${priced.join(",")}`);
-}
+frame();
+shown("综合指数", "全部", "上涨", "下跌", "活跃", "腾讯控股");
+assert.ok(mock.calls.some((call) => call.name === "bindCanvas"), "visible rows bind a native Canvas");
+const listDrivers = () => mock.calls.filter((call) => call.name === "listDriver").length;
+const initialDrivers = listDrivers();
 
-// Market tab renders a board
-mock.clickByLabel("市场");
-mock.flushHostFrame(16);
-const market = mock.liveTexts();
-if (!market.includes("涨幅榜") || !market.some((t) => t.includes("榜"))) {
-  fail(`market page: ${market.join(",")}`);
-}
+click("综合指数");
+shown("科技", "消费", "工业");
+click("综合指数");
+assert.ok(!mock.liveTexts().includes("科技"));
 
-// Trade tab renders the equity card
-mock.clickByLabel("交易");
-mock.flushHostFrame(32);
-const trade = mock.liveTexts();
-if (!trade.includes("总资产 (模拟)") || !trade.includes("持仓") || !trade.includes("待成交") || !trade.includes("已成交")) {
-  fail(`trade page: ${trade.join(",")}`);
-}
+click("上涨");
+click("下跌");
+click("活跃");
+click("全部");
 
-// Profile tab renders settings
-mock.clickByLabel("我的");
-mock.flushHostFrame(48);
-const profile = mock.liveTexts();
-if (
-  !profile.includes("涨跌配色") ||
-  !profile.includes("行情速度") ||
-  !profile.includes("语言") ||
-  !profile.includes("重置模拟账户") ||
-  !profile.includes("账户")
-) {
-  fail(`profile page: ${profile.join(",")}`);
-}
+click("Ⅱ");
+shown("▶");
+const paused = mock.liveTexts().find((text) => /^\d\d:\d\d:\d\d$/.test(text));
+assert.ok(paused);
+for (let index = 0; index < 10; index++) frame();
+shown(paused);
+click("▶");
+shown("Ⅱ");
 
-// Back to watchlist, search is its own page
-mock.clickByLabel("自选");
-mock.flushHostFrame(64);
-mock.clickByLabel("搜索");
-mock.flushHostFrame(80);
-const search = mock.liveTexts();
-if (!search.includes("热门") || !search.includes("00700.HK")) {
-  fail(`search page: ${search.join(",")}`);
-}
+click("腾讯控股");
+shown("‹ 返回", "买入", "卖出");
+for (let index = 0; index < 8; index++) frame();
+shown("‹ 返回", "分时", "盘口", "逐笔成交", "深度", "成交方向", "价格区间", "买入", "卖出");
+click("★");
+shown("☆");
+click("☆");
+shown("★");
+click("5m");
+shown("MA5", "MA10", "MA20");
+click("分时");
+shown("均价");
+click("5 → 10");
+shown("A10", "B10", "10 → 5");
+click("10 → 5");
+assert.ok(!mock.liveTexts().includes("A10"));
 
+click("A1");
+for (let index = 0; index < 5; index++) frame();
+shown("买入 00700", "模拟下单", "复核订单");
+click("市价");
+click("100");
+click("复核订单");
+shown("修改", "确认订单");
+click("修改");
+shown("限价", "市价");
+click("复核订单");
+click("确认订单");
+assert.ok(mock.liveTexts().some((text) => text.includes("已提交模拟订单")), mock.liveTexts().join(", "));
+
+click("‹ 返回");
+shown("综合指数");
+assert.equal(listDrivers(), initialDrivers, "cover and exit phases preserve the original list driver");
+click("⋯");
+click("市场");
+shown("涨幅榜");
+click("交易");
+shown("总资产 (模拟)", "持仓", "待成交", "已成交");
+click("我的");
+shown("涨跌配色", "行情速度", "语言", "重置模拟账户", "账户");
+click("自选");
+shown("恒生指数", "搜索");
+click("搜索");
+shown("热门", "00700.HK");
 mock.pressBack();
-mock.flushHostFrame(96);
-mock.clickByLabel("自选");
-mock.flushHostFrame(112);
-mock.clickByLabel("恒生指数");
-mock.flushHostFrame(128);
-const stock = mock.liveTexts();
-if (!stock.some((t) => t.includes("返回")) || !stock.includes("盘口 五档")) {
-  fail(`stock page: ${stock.join(",")}`);
-}
-if (!stock.includes("买入") || !stock.includes("卖出")) {
-  fail(`stock trade buttons: ${stock.join(",")}`);
-}
-if (
-  !mock.calls.some((call) => {
-    const style = call.args[1] as { display?: unknown } | undefined;
-    return call.name === "patchStyle" && style?.display === "none";
-  })
-) {
-  fail("tab bar was not hidden on a pushed route");
-}
+frame();
+frame();
+click("行情");
+shown("综合指数");
 
-mock.clickByLabel("买入");
-mock.flushHostFrame(144);
-mock.flushHostFrame(160);
-const order = mock.liveTexts();
-if (!order.some((t) => t.includes("下单")) || !order.includes("提交订单")) {
-  fail(`order sheet: ${order.join(",")}`);
-}
-
-console.log("quotes app render ok");
+console.log("stocks app interactions ok");

@@ -399,6 +399,14 @@ pub struct FrameTrace {
     pub updates: u32,
     /// Scene setter calls (style, text, image and recognizers) this frame.
     pub sets: u32,
+    /// Time spent recording canvas commands this frame.
+    pub canvas_record_ms: f64,
+    /// Time spent preparing canvas lists this frame.
+    pub canvas_prepare_ms: f64,
+    pub canvas_ops: u32,
+    pub canvas_segments: u32,
+    pub canvas_redraws: u32,
+    pub canvas_reused: u32,
 }
 
 /// What one `frame` produced. `layers == None` means the host may `PresentCached`.
@@ -444,7 +452,7 @@ impl FrameOutput {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScriptFault {
     /// `listener`, `rejection`, `frame`, `layout`, `timer`, `jobs`, `driver`,
-    /// `scroll`, `input`, or `motion`.
+    /// `scroll`, `input`, `motion`, or `canvas`.
     pub source: &'static str,
     pub message: String,
     pub stack: String,

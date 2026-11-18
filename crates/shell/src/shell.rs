@@ -886,6 +886,12 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
         gpu: runtime.gpu,
     });
     note_step(runtime, step);
+    if again
+        && matches!(step, FrameStep::Submit | FrameStep::PresentCached)
+        && let Some(token) = runtime.scheduler.prepare_next()
+    {
+        runtime.vsync.request_frame(token);
+    }
     match step {
         FrameStep::Cancel | FrameStep::Skip { again: false } => {
             return Ok(end_frame(runtime, false, false));

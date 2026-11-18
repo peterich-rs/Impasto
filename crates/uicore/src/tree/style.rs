@@ -465,6 +465,29 @@ impl Tree {
         let _ = self.patch_style(id, patch);
     }
 
+    /// Layout direction for canvas text. A flushed declaration wins. Otherwise
+    /// an explicit `rtl` on this node or an ancestor wins, and the rest inherit
+    /// the style environment. `None` means the node or an ancestor is gone.
+    pub(super) fn layout_direction_rtl(&self, id: NodeId) -> Option<bool> {
+        let mut cursor = Some(id);
+        while let Some(current) = cursor {
+            let node = self.get(current)?;
+            if let Some(slot) = self.style_nodes.get(&current.index)
+                && slot.generation == current.generation
+                && slot.computed_ready
+                && let Some(Property::LayoutDirection(mode)) =
+                    slot.computed.property(Key::LayoutDirection)
+            {
+                return Some(*mode == crate::style::DirectionMode::Rtl);
+            }
+            if node.style.direction == taffy::style::Direction::Rtl {
+                return Some(true);
+            }
+            cursor = node.parent;
+        }
+        Some(self.style_env.direction == crate::style::DirectionMode::Rtl)
+    }
+
     /// The session environment, including current window dimensions.
     pub fn style_environment(&self) -> &crate::style::Environment {
         &self.style_env

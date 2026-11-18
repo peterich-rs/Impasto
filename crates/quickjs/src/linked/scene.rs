@@ -1,15 +1,6 @@
 //! JSX property lookup. Field numbers are generated from abi.yml.
 use crate::abi::StyleField;
-use std::ffi::{CStr, c_char};
-#[unsafe(no_mangle)]
-pub(super) unsafe extern "C" fn scene_field(name: *const c_char) -> u32 {
-    if name.is_null() {
-        return 0;
-    }
-    // SAFETY: glue supplies a NUL-terminated property name for this call.
-    let Ok(name) = (unsafe { CStr::from_ptr(name) }).to_str() else {
-        return 0;
-    };
+pub(super) fn scene_field(name: &str) -> u32 {
     let field = match name {
         "gap" => StyleField::Gap,
         "grow" => StyleField::Grow,

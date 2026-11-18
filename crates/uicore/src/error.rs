@@ -26,4 +26,6 @@ pub enum Error {
     BadNumber,
     #[error(transparent)]
     Style(#[from] crate::style::StyleError),
+    #[error(transparent)]
+    Canvas(#[from] crate::canvas::CanvasError),
 }

@@ -2,6 +2,10 @@
 
 已落地的行为以代码和 `docs/architecture.md` 为准。这里只留还没做的。
 
+## Impeller 与桌面渲染
+
+Flutter 3.50.0 配套 SDK 的构建、打包、CI 以及桌面渲染后端的边界见 [接入 Flutter 3.50.0 的 Impeller SDK 并分离桌面渲染后端](rendering-design.md)。
+
 ## 样式与布局
 
 设计与剩余验收见 [基于 Taffy 0.15.1 重构样式对象与工具类](style-design.md)。后续工作：
@@ -17,6 +21,15 @@
 
 对外组件、公共 Props、样式目标和 ref 见 [统一对外组件与属性接口](components-design.md)。主题作用域的原生索引仍在样式一节。
 
+## Canvas
+
+屏幕 Canvas 已落地，见 [为 Impasto 增加 Canvas 2D](canvas-design.md)。还没做的：
+
+- OffscreenCanvas、像素读回与导出
+- pattern、阴影、滤镜、strokeText
+- 路径布尔运算
+- copy、source-in、destination-in
+
 ## 平台通道
 
 macOS 已实现权限五法。还差：
@@ -27,6 +40,8 @@ macOS 已实现权限五法。还差：
 `FileSystem` 与 `AsyncStorage` 的方法就是各包 `@impasto/<pkg>/host` 上的导出。路径拒绝 `..`、绝对路径和反斜杠。带 schema 的存储库以后只依赖这两个包，不进 `solid-ui`。
 
 ## Gallery
+
+`/stocks`、`/stock/:symbol`、模拟订单与现有路由的分工见 [证券模拟盘](stock-app-design.md)。`/canvas` 是独立的绘图能力页。
 
 每个框架包在 gallery 里至少有一个真实消费点。Quotes 现有路由作回归。能力页另开，不挤进模拟盘：
 

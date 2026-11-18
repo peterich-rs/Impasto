@@ -62,7 +62,11 @@ fn collect(path: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
     out.sort();
     Ok(())
 }
-pub fn run_bundle(bundle: &Path, app: &App) -> Result<()> {
+#[expect(
+    unsafe_code,
+    reason = "loads a trusted local build artifact selected by the caller"
+)]
+fn run_bundle(bundle: &Path, app: &App) -> Result<()> {
     let bytes = fs::read(bundle)?;
     let modules = app
         .modules("macos")
@@ -74,19 +78,36 @@ pub fn run_bundle(bundle: &Path, app: &App) -> Result<()> {
         ..session::ModuleConfig::disconnected()
     }
     .restrict(&modules);
-    let mut session = quickjs::open_program_with_io(
-        &bytes,
-        bundle.extension().is_some_and(|ext| ext == "bin"),
-        &bundle.to_string_lossy(),
-        uicore::MonoShaper::default(),
-        Box::new(|level, line| {
-            if level >= 3 {
-                eprintln!("{line}");
-            }
-        }),
-        None,
-        config,
-    )?;
+    let name = bundle.to_string_lossy();
+    let log: quickjs::ConsoleLog = Box::new(|level, line| {
+        if level >= 3 {
+            eprintln!("{line}");
+        }
+    });
+    let mut session = if bundle.extension().is_some_and(|ext| ext == "bin") {
+        // SAFETY: `impasto test` loads a path the user passed. A `.bin` file is
+        // treated as an envelope from this toolchain's `compile` (`impasto build`).
+        // The envelope does not prove the payload is valid bytecode.
+        unsafe {
+            quickjs::open_trusted_bytecode_with_io(
+                &bytes,
+                &name,
+                uicore::MonoShaper::default(),
+                log,
+                None,
+                config,
+            )
+        }
+    } else {
+        quickjs::open_program_with_io(
+            &bytes,
+            &name,
+            uicore::MonoShaper::default(),
+            log,
+            None,
+            config,
+        )
+    }?;
     session.metrics(&session::Metrics::new(360.0, 640.0, 2.0));
     for step in 0..4 {
         session.frame(session::FrameTime::at(f64::from(step) * 16.0));

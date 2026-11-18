@@ -1,5 +1,5 @@
 # 与 just check 对齐，并检查 rustfmt。
-# 不下载 Impeller SDK，也不下载 quickjs-ng。
+# 不下载 Impeller SDK。
 # macos crate 只在 macOS 上编译。
 
 name: check
@@ -21,7 +21,7 @@ jobs:
   rust:
     name: cargo test (linux)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -38,6 +38,16 @@ jobs:
           RUSTFLAGS: "-D warnings"
       - name: clippy
         run: cargo clippy --workspace --exclude macos --all-targets -- -D warnings
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: enable pnpm
+        run: corepack enable && corepack prepare pnpm@9.15.9 --activate
+      - uses: extractions/setup-just@v2
+      - name: gallery bundle
+        run: |
+          pnpm install --frozen-lockfile
+          just gallery-dist
       - name: test
         run: cargo test --workspace --exclude macos
 

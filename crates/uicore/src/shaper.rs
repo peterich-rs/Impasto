@@ -78,6 +78,17 @@ pub struct SpanMetrics {
     pub line_through: bool,
 }
 
+/// Width and font box for one canvas text run.
+///
+/// `ascent` and `descent` are the font bounding box around the alphabetic
+/// baseline. An empty run still reports the box and a width of zero.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanvasMetrics {
+    pub width: f32,
+    pub ascent: f32,
+    pub descent: f32,
+}
+
 /// Laid-out size and lines. Shared by every color of the same [`MetricsKey`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParagraphMetrics {
@@ -215,6 +226,16 @@ pub trait Shaper {
     fn caret_at_unit(&mut self, key: &MetricsKey, unit: u32, affinity: Affinity) -> Caret;
     fn caret_at_point(&mut self, key: &MetricsKey, x: f32, y: f32) -> Caret;
     fn word_range(&mut self, key: &MetricsKey, unit: u32) -> (u32, u32);
+    /// Single-line canvas metrics. The default reports that this shaper has
+    /// no font box, so canvas text fails instead of inventing a zero box.
+    fn canvas_metrics(
+        &mut self,
+        _text: &str,
+        _style: &protocol::TextStyle,
+        _font_size: f32,
+    ) -> Option<CanvasMetrics> {
+        None
+    }
 }
 
 impl Shaper for Box<dyn Shaper> {
@@ -253,6 +274,14 @@ impl Shaper for Box<dyn Shaper> {
     }
     fn word_range(&mut self, key: &MetricsKey, unit: u32) -> (u32, u32) {
         (**self).word_range(key, unit)
+    }
+    fn canvas_metrics(
+        &mut self,
+        text: &str,
+        style: &protocol::TextStyle,
+        font_size: f32,
+    ) -> Option<CanvasMetrics> {
+        (**self).canvas_metrics(text, style, font_size)
     }
 }
 
@@ -324,6 +353,26 @@ impl Shaper for MonoShaper {
 
     fn word_range(&mut self, key: &MetricsKey, unit: u32) -> (u32, u32) {
         whitespace_word(&key.text, unit)
+    }
+
+    fn canvas_metrics(
+        &mut self,
+        text: &str,
+        style: &protocol::TextStyle,
+        font_size: f32,
+    ) -> Option<CanvasMetrics> {
+        let _ = style.slant;
+        let size = if font_size.is_finite() {
+            font_size.max(0.0)
+        } else {
+            0.0
+        };
+        let width = text.chars().count() as f32 * size * 0.5;
+        Some(CanvasMetrics {
+            width,
+            ascent: size * 0.8,
+            descent: size * 0.2,
+        })
     }
 }
 

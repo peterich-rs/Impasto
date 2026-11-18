@@ -30,6 +30,7 @@ pub(super) struct ParaKey {
     pub(super) line_through: bool,
     pub(super) soft_wrap: bool,
     pub(super) overflow: protocol::TextOverflow,
+    pub(super) slant: protocol::FontSlant,
     pub(super) spans: Vec<SpanKey>,
 }
 
@@ -151,6 +152,7 @@ pub(super) fn hash_query(
     line_through: bool,
     soft_wrap: bool,
     overflow: protocol::TextOverflow,
+    slant: protocol::FontSlant,
     spans: &[TextSpan],
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -169,6 +171,7 @@ pub(super) fn hash_query(
     line_through.hash(&mut hasher);
     soft_wrap.hash(&mut hasher);
     overflow.hash(&mut hasher);
+    slant.hash(&mut hasher);
     spans.len().hash(&mut hasher);
     for span in spans {
         span.utf8.hash(&mut hasher);
@@ -198,6 +201,7 @@ pub(super) fn key_matches(
     line_through: bool,
     soft_wrap: bool,
     overflow: protocol::TextOverflow,
+    slant: protocol::FontSlant,
     spans: &[TextSpan],
 ) -> bool {
     key.utf8 == utf8
@@ -215,6 +219,7 @@ pub(super) fn key_matches(
         && key.line_through == line_through
         && key.soft_wrap == soft_wrap
         && key.overflow == overflow
+        && key.slant == slant
         && key.spans.len() == spans.len()
         && key.spans.iter().zip(spans).all(|(stored, span)| {
             stored.utf8 == span.utf8
@@ -254,6 +259,7 @@ pub(super) fn para_key(
         line_through: style.line_through,
         soft_wrap: style.soft_wrap,
         overflow: style.overflow,
+        slant: style.slant,
         spans: spans
             .iter()
             .map(|span| SpanKey {
@@ -302,6 +308,7 @@ mod key_tests {
             style.line_through,
             style.soft_wrap,
             style.overflow,
+            style.slant,
             &spans,
         );
         assert_eq!(hash, hash_key(&key));
@@ -322,7 +329,44 @@ mod key_tests {
             style.line_through,
             style.soft_wrap,
             style.overflow,
+            style.slant,
             &spans,
+        ));
+    }
+
+    #[test]
+    fn italic_changes_the_paragraph_key() {
+        let upright = TextStyle::default();
+        let italic = TextStyle {
+            slant: protocol::FontSlant::Italic,
+            ..TextStyle::default()
+        };
+        let Some(left) = para_key("ab", 16.0, 100.0, [0, 0, 0, 255], "Sans", &upright, &[]) else {
+            panic!("upright key");
+        };
+        let Some(right) = para_key("ab", 16.0, 100.0, [0, 0, 0, 255], "Sans", &italic, &[]) else {
+            panic!("italic key");
+        };
+        assert_ne!(hash_key(&left), hash_key(&right));
+        assert!(!key_matches(
+            &left,
+            "ab",
+            16.0f32.to_bits(),
+            100.0f32.to_bits(),
+            [0, 0, 0, 255],
+            "Sans",
+            italic.max_lines.unwrap_or(0),
+            italic.ellipsis.as_deref().unwrap_or(""),
+            italic.align,
+            italic.weight,
+            italic.direction_rtl,
+            italic.height.to_bits(),
+            italic.underline,
+            italic.line_through,
+            italic.soft_wrap,
+            italic.overflow,
+            italic.slant,
+            &[],
         ));
     }
 }

@@ -128,7 +128,7 @@ export function bindListRenderer<T>(
 ): () => void {
   const state: ListBindingState<T> = { live: new Map(), pools: new Map() };
   const id = driver.id();
-  return listenList({
+  const unlisten = listenList({
     id,
     onOp(op) {
       applyListOp(state, op, {
@@ -165,4 +165,13 @@ export function bindListRenderer<T>(
     onChrome: options.onChrome,
     onEnd: options.onEnd,
   });
+  return () => {
+    unlisten();
+    for (const slot of state.live.values()) slot.discard();
+    for (const pool of state.pools.values()) {
+      for (const slot of pool) slot.discard();
+    }
+    state.live.clear();
+    state.pools.clear();
+  };
 }

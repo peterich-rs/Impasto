@@ -68,8 +68,6 @@ export function Dialog(props: DialogProps): NodeHandle {
       return;
     }
     closing = true;
-    layer.unregister?.();
-    layer.unregister = null;
     const fade = layer.fade;
     const token = ++epoch;
     spring({
@@ -84,6 +82,7 @@ export function Dialog(props: DialogProps): NodeHandle {
       onDone: () => {
         if (token === epoch) {
           closeLayer();
+          props.onClosed?.();
         }
       },
     });
@@ -184,17 +183,19 @@ export function Dialog(props: DialogProps): NodeHandle {
       focused: false,
       unregister: null,
     };
+    return layer;
+  }
+  function armEnter(current: Layer): void {
     spring({
-      id: fade,
+      id: current.fade,
       prop: "opacity",
       from: 0,
       to: 255,
       write: (value) =>
-        scene.patchStyle(fade, {
+        scene.patchStyle(current.fade, {
           opacity: Math.round(value) / 255,
         }),
     });
-    return layer;
   }
   function sync(): void {
     if (placeholder === 0) {
@@ -204,10 +205,12 @@ export function Dialog(props: DialogProps): NodeHandle {
       beginClose();
       return;
     }
-    if (closing) {
+    const reopening = closing;
+    if (reopening) {
       epoch += 1;
       closing = false;
     }
+    const created = layer === null;
     const current = ensureLayer();
     if (current === null) {
       return;
@@ -221,6 +224,7 @@ export function Dialog(props: DialogProps): NodeHandle {
     if (parked !== 0) {
       moveChildren(placeholder, current.slot);
     }
+    if (created || reopening) armEnter(current);
     if (current.focused) {
       return;
     }

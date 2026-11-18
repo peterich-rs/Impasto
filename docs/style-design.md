@@ -30,7 +30,7 @@
 - `crates/uicore/src/style/defaults.rs`：普通 View 使用 column、min 0、shrink 0、无隐式 max；Scroll 保留视口预设。
 - `crates/uicore/src/tree/{layout,scroll,hit}.rs`：Taffy 测量与几何、内容溢出、命中。真实固有文字度量和 RTL 滚动仍需后续验收。
 - `crates/uicore/src/tree/record/`：同节点背景、内容与组合效果，扁平 DrawList 和 LayerTree 共用作用域。
-- `crates/quickjs/{abi.yml,build.rs}`、`src/{glue.c,linked/mutation.rs}`：生成类型记录，复制 JS 输入后借用 Tree，一次提交完整来源。同步读强制冲刷样式和所需布局。
+- `crates/quickjs/{abi.yml,build.rs}`、`src/linked/{rt/bindings,mutation}.rs`：生成类型记录，复制 JS 输入后借用 Tree，一次提交完整来源。同步读强制冲刷样式和所需布局。
 - `packages/solid-renderer/runtime/{style,text}.ts`：响应式独立样式来源与清理，文字样式统一输入；Image 的资源尺寸接口仍待拆分。
 - `packages/solid-ui/src/Button.tsx`：单 View 承载布局、手势、焦点与语义，组件默认来源允许 class/inline 覆盖。
 - `packages/solid-ui`、`packages/solid-router`、`packages/devtools`、`apps/gallery-solid`：产品 TSX 使用 view/stack/scroll/image，文本展示字段位于 style。
@@ -459,19 +459,19 @@ Tree 持有类型化环境。Session 将 metrics/settings 的变化转发给 Tre
 
 ### 9. QuickJS、生成与冲刷
 
-**目标文件：`crates/quickjs/abi.yml`、`build.rs`、`src/glue.c`、`linked/{scene,mutation,mod,frame}.rs`，生成器与 renderer。**
+**目标文件：`crates/quickjs/abi.yml`、`build.rs`、`src/linked/rt/bindings.rs`、`linked/{scene,mutation,mod,frame}.rs`，生成器与 renderer。**
 
-- C 只读取 JS 值并产生类型化记录，不做长度求值、工具类展开或布局；进入 Tree 借用前完成值复制，不让 JS getter/回调发生在树的可变借用内。
-- 增加来源快照、patch、clear、class 快照及环境更新等批量操作，操作编号和 C 布局继续由 abi.yml 生成；不新增逐属性 C 函数。
-- Key/值领域的 C 描述表和 TS 类型由 Rust 注册表生成；ABI 的操作编号与属性身份是不同命名空间，不在 C 手工写第二份属性表。
+- Rust 绑定读取 JS 值并产生拥有型 codec 值，不做长度求值、工具类展开或布局；进入 Tree 借用前完成值复制，不让 JS getter/回调发生在树的可变借用内。
+- 增加来源快照、patch、clear、class 快照及环境更新等批量操作，操作编号由 abi.yml 生成 Rust、JavaScript 与 TypeScript 常量；不新增产品 C 头文件。
+- Key/值领域由 Rust 注册表提供，TS 类型由同一注册表生成；ABI 操作编号与属性身份是不同命名空间。
 - StyleError 保留 node、source、field、类名 token/跨度和结构化原因。语法、类型、未知字段及当前环境求值错误在接受来源前返回；后续主题更新先校验受影响 token 的可解析性，失败保留该作用域的上一份有效快照。
-- 批量载荷区分片段边界、Set/Reset/Inherit/Remove、数字、长度、枚举、字符串和复杂数组/对象；长度带 tag。字符串使用显式长度，不依赖换行分隔。生成的 value records 使用偏移/长度表达嵌套 payload，Rust 校验后拥有数据。
+- 批量载荷区分片段边界、Set/Reset/Inherit/Remove、数字、长度、枚举、字符串和复杂数组/对象；长度带 tag。字符串使用显式长度，不依赖换行分隔。rquickjs 绑定先完整遍历嵌套对象，再把拥有型 `style::codec::Value` 交给现有 mutation 路径。
 - grid/gradient/shadow/runs 等复杂值复用现有领域类型和已有转换，不让 TS 先计算坐标。未使用的换行 decode.rs 随新边界测试落地删除，不保留备用协议。
 - `setProp("style")` 替换 inline 来源；setStyle/patchStyle 作用于命令式来源。class、classList 交由一个绑定合成一个快照，避免单个 prop 更新清空另一个。
 - 引入 bindStyle 聚合组件默认值和作者输入，一次 effect 提交来源快照；稳定对象不会每帧重新读取全部 key。不得再为每条样式建一个 setter effect。
 - 同步查询在排空 mutation 后冲刷样式，再按需要 layout；采用现有 flush_for_read 路径。driver 和布局回调之后的样式也在现有的下一次有限布局前提交。
 - 结构、行为与样式操作的先后保持明确；跨 insert/discard/query 不做全帧无条件“最后写入胜出”合并。
-- just gen 生成 `packages/solid-renderer/src/style.gen.ts`、`crates/quickjs/src/style.gen.h` 属性描述表和 `docs/style-utilities.gen.md` 语法能力清单；增加 check 模式，不在普通 Cargo build 修改源码。CI 明确编译新 fixture 并运行真实 QuickJS，缺少解释器时不能将样式原生验收记成通过。
+- just gen 生成 `packages/solid-renderer/src/style.gen.ts` 属性描述表和 `docs/style-utilities.gen.md` 语法能力清单；增加 check 模式，不在普通 Cargo build 修改源码。CI 明确编译新 fixture 并运行真实 QuickJS，测试始终运行 Cargo 构建的 quickjs-jit 0.14.2。
 
 ### 10. 迁移与性能合同
 
@@ -479,7 +479,7 @@ Tree 持有类型化环境。Session 将 metrics/settings 的变化转发给 Tre
 - ScrollArea 分开 viewport style 和 contentStyle；VirtualList/Recycler 保留视口、内容、行 owner 和 createSlot 生命周期，不能为减少节点合并这些身份。
 - Field/TextArea 的外盒样式与文本编辑样式分别归属，caret/selection/composing 使用统一内容坐标；动画与 owner 清理不能取消仍在退出的页面。
 - RouterView、Dialog/Menu/Sheet/Tooltip 保留显式效果作用域与 panel 测量边界；普通 padding/background 迁入同一节点。
-- Quotes 的 chart/window、binder 和 flash 更新用 patchStyle 写所需 key，不重建 class 字符串；高频内容仍走 setText。
+- Quotes 的 binder 和 flash 更新用 patchStyle 写所需 key，不重建 class 字符串；图表用 Canvas 录制。
 - Devtools 用现有 View/文字渲染；展示指定声明、来源、有效值、Taffy 盒子和样式计数，不能在 engine 添加调试绘制命令。
 - 迁移前固定 dirty 工作树的可重放基线、SDK/font/toolchain、数据种子和采样场景。不能用 HEAD 的另一套架构作对照。
 - 当前 5000 节点录制基准 p95 约 2.40ms，未达原有 2ms 门槛；该测试布局已命中缓存，不是 Taffy 布局性能证明。重构分别报告冷布局、增量布局、脚本、样式提交、录制和上屏。
@@ -546,7 +546,7 @@ Tree 持有类型化环境。Session 将 metrics/settings 的变化转发给 Tre
 
 ## 阶段 5：贯通 QuickJS 与 TypeScript
 
-**文件：`crates/quickjs/{abi.yml,build.rs,README.md}`、`src/glue.c`、`src/scene.js`、`src/style.gen.h`（新增）、`src/linked/{scene,mutation,mod,frame}.rs`、`src/lib.rs`、`tests/fixtures/style.tsx`。**
+**文件：`crates/quickjs/{abi.yml,build.rs,README.md}`、`src/linked/rt/bindings.rs`、`src/scene.js`、`src/linked/{scene,mutation,mod,frame}.rs`、`src/lib.rs`、`tests/fixtures/style.tsx`。**
 
 - 生成类型化批量记录，加入来源/class/environment 命令与 View 创建。
 - 接入 flush_for_read 和帧内冲刷；移除未被消费的换行样式 codec。
@@ -601,7 +601,7 @@ Tree 持有类型化环境。Session 将 metrics/settings 的变化转发给 Tre
 
 ```sh
 just gen
-# 使用生成器 check 模式核对 TS、C 描述表与能力清单
+# 使用生成器 check 模式核对 TS 类型与能力清单
 just gallery-dist
 cargo fmt --all -- --check
 cargo clippy -p uicore --all-targets --all-features -- -D warnings
@@ -648,12 +648,6 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p uicore --no-deps
 - `apps/gallery-solid/src/pages/watchlist.tsx` -- 迁移 TSX/命令式样式，显式声明尺寸与覆盖归属
 - `apps/gallery-solid/src/state/binder.ts` -- 迁移 TSX/命令式样式，显式声明尺寸与覆盖归属
 - `apps/gallery-solid/src/state/flash.ts` -- 迁移 TSX/命令式样式，显式声明尺寸与覆盖归属
-- `apps/gallery-solid/src/widgets/chart/candles.ts` -- 迁移 TSX/命令式样式，显式声明尺寸与覆盖归属
-- `apps/gallery-solid/src/widgets/chart/crosshair.ts` -- 迁移 TSX/命令式样式，显式声明尺寸与覆盖归属
-- `apps/gallery-solid/src/widgets/chart/depth.ts` -- 迁移 TSX/命令式样式，显式声明尺寸与覆盖归属
-- `apps/gallery-solid/src/widgets/chart/minutes.ts` -- 迁移 TSX/命令式样式，显式声明尺寸与覆盖归属
-- `apps/gallery-solid/src/widgets/chart/price-axis.ts` -- 迁移 TSX/命令式样式，显式声明尺寸与覆盖归属
-- `apps/gallery-solid/src/widgets/chart/window.ts` -- 迁移 TSX/命令式样式，显式声明尺寸与覆盖归属
 - `apps/gallery-solid/src/widgets/index-strip.tsx` -- 迁移 TSX/命令式样式，显式声明尺寸与覆盖归属
 - `apps/gallery-solid/src/widgets/monogram.tsx` -- 迁移 TSX/命令式样式，显式声明尺寸与覆盖归属
 - `apps/gallery-solid/src/widgets/palette.ts` -- 迁移 TSX/命令式样式，显式声明尺寸与覆盖归属
@@ -669,7 +663,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p uicore --no-deps
 - `crates/quickjs/README.md` -- 说明批量 style/class 的语言边界
 - `crates/quickjs/abi.yml` -- 增加批量样式操作并删除已无消费者的旧字段
 - `crates/quickjs/build.rs` -- 生成配套样式记录及原生入口所需定义
-- `crates/quickjs/src/glue.c` -- 统一解码静态和动态 style/class，不添加逐属性 C API
+- `crates/quickjs/src/linked/rt/bindings.rs` -- 统一解码静态和动态 style/class，不添加逐属性 C API
 - `crates/quickjs/src/lib.rs` -- 真实 QuickJS、生命周期和字节码回归
 - `crates/quickjs/src/linked/frame.rs` -- 把待解析样式接入现有冲刷顺序和计数
 - `crates/quickjs/src/linked/mod.rs` -- 转发环境变化、衔接帧内冲刷与诊断
@@ -677,7 +671,6 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p uicore --no-deps
 - `crates/quickjs/src/linked/nodes.rs` -- 轨道类型化后移除无引用的字符串解析
 - `crates/quickjs/src/linked/scene.rs` -- 新增 style/class 属性分发与错误转换
 - `crates/quickjs/src/scene.js` -- 统一命令式样式操作，清理旧包装
-- `crates/quickjs/src/style.gen.h` -- 由注册表生成属性身份与值领域描述，不手写 C 属性表
 - `crates/quickjs/tests/fixtures/style.tsx` -- 新增静态和动态 TSX 样式原生 fixture
 - `crates/session/src/lib.rs` -- 按需扩展 FrameTrace 的样式诊断字段
 - `crates/shell/src/diagnostics/hub.rs` -- 接收新增样式性能计数

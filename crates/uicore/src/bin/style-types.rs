@@ -1,7 +1,7 @@
 //! Write or check the generated style types.
 //!
-//! `cargo run -p uicore --bin style-types` writes the TypeScript module, the C
-//! key table, and the utility list. `--check` fails when a file differs.
+//! `cargo run -p uicore --bin style-types` writes the TypeScript module
+//! and the utility list. `--check` fails when a file differs.
 //! Cargo builds do not rewrite those sources.
 
 use std::path::{Path, PathBuf};
@@ -29,10 +29,6 @@ fn main() {
         (
             root.join("packages/solid-renderer/src/style.gen.ts"),
             uicore::style::emit_typescript(),
-        ),
-        (
-            root.join("crates/quickjs/src/style.gen.h"),
-            uicore::style::emit_c_header(),
         ),
         (
             root.join("docs/style-utilities.gen.md"),

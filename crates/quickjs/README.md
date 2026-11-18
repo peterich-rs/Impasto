@@ -1,14 +1,17 @@
 # QuickJS 会话
 
-包名是 `quickjs`。它拥有一个 quickjs-ng 运行时和一棵 `uicore::Tree`。宿主只通过 `session::Session` 看见它。`JsSession::take_script_error` 取出监听器或 `onFrame` 留下的异常文本。
+包名是 `quickjs`。根 `Cargo.toml` 以依赖名 `rquickjs` 钉住 quickjs-jit 0.14.2，Cargo 构建唯一解释器。`linked/rt::Engine` 拥有 `Runtime`、`Context` 与 `Host`，并持有 `uicore::Tree` 和 `reactive::Graph` 的会话状态。所有调用与销毁都在渲染线程。宿主通过 `session::Session` 泵帧，`JsSession::take_script_error` 取出异常文本。
 
-`src/glue.c` 注册具名模块 `scene`、`reactive` 和能力模块。场景属性名在 `src/linked/scene.rs` 映射到 `abi.yml` 的字段号，原生渲染原语直接调用 `uicore::Tree`。`src/scene.js` 包装查询与命令。节点是数字 `NodeId::to_raw()`，`0` 表示没有节点；没有全局 `core`。响应式 arena 在 `crates/reactive`，QuickJS 的引用计数适配在 `src/linked/reactive.rs`。帧监听前和布局监听后由会话冲刷非空队列，滚动弹簧仍由 `Tree` 采样。
+`src/linked/rt` 注册 `scene`、`reactive`、`#reactive`、console、定时器与 `__host`。启动先安装原生绑定，再依次以脚本执行 `abi.js`、`scene.js`、`prelude.js`，以 ESM 执行 `reactive.js`，捕获并删除 `__reactive`，最后执行应用并排空 jobs。`prelude.js` 安装 fetch、WebSocket、URL、编码器和 AbortController。没有全局 `core`。
 
-`compile` 生成字节码；`open_program_with_io` 加载 ESM 或同一工具链生成的可信字节码。`IMPASTO_TRACE` 或 `Session::set_trace` 开启帧计数。实际的 Solid 对照、控制流和字节码往返测试在 `src/lib.rs`。
-版本钉在 `quickjs.pin`，现在是 quickjs-ng v0.17.0。`just quickjs` 把源码解到 `third_party/quickjs`，不进 git。没有这份源码时 `open` 返回 `NotLinked`，crate 仍然能编译。
+节点是数字 `NodeId::to_raw()`，`0` 表示没有节点。场景属性在 `src/linked/scene.rs` 映射到 `abi.yml` 字段号，树更新继续通过 `src/linked/mutation.rs`。`src/scene.js` 提供查询、命令和插入范围归一化。布局和样式应用仍由 `uicore` 负责。Rust 绑定先完整解码 JS 样式为拥有型 `uicore::style::codec::Value`，再校验与提交；getter 抛错不提交部分来源。`build.rs` 只生成 `abi.rs`、`abi.js` 和 `packages/solid-renderer/src/mutation.gen.ts`。同步 `rect` 等查询冲刷 mutation、样式和所需布局。
 
-Gallery 产物是 `apps/gallery-solid/dist/quotes.js`，由 `just gallery-dist` 从 TSX 本地构建，不进 git。链了 quickjs 源码时，gallery 测试要求这份产物存在，缺失即失败并提示构建命令。无窗口测试用 `MonoShaper`：首屏出现「自选」和价格，点「市场」后出现涨幅榜。
+响应式值与回调使用 `Persistent`。`ListDriver` 和 `ScrollController` 是 rquickjs class，持有 index 与 generation，析构调用现有驱动释放函数。`Engine::shutdown` 在 VM 存活时先 `reactive::release_all`，再清空全部定时器、监听器、HTTP 与其他 Persistent，移除 userdata，最后释放 Context 和 Runtime。失败启动与正常 Drop 共用此路径。
 
-样式使用 `abi.yml` 生成的 `StyleValueRecord` 传输，不序列化成换行文本。C 端先遍历并复制完整 JS 值，Rust 再转换成拥有型 `style::codec::Value`，最后借用 Tree 校验与提交。getter 抛错不会提交部分来源。支持片段数组、undefined、网格轨道及绘制效果对象。同步 `rect` 等查询冲刷待处理 mutation、样式和布局。
+内存上限为 16 MiB，栈上限为 8 MiB。`scene.debugMemory()` 查询时采样 VM 内存。中断使用 `CLOCK_MONOTONIC`，eval 预算 1000 ms，其余 turn 128 ms；错误保留入口类型。job drain 最多 32 轮，定时器每次最多触发 64 个。模块文件先按应用根做词法归一化，`..` 留在根内则接受，越出根才拒绝；`AppLoader` 再检查符号链接解析后的真实路径。单个文件不超过 16 MiB。`@impasto/<单段包名>` 从宿主注册表加载。
 
-`createStyleSource`、`setStyleSource`、`removeStyleSource` 使用 Tree 分配的来源句柄。`runtime/style.ts` 的 bindStyle 用它们隔离组件默认、class 与 inline 的 owner。原生回归入口是 `tests/fixtures/style.tsx`。
+`compile` 对脚本和模块均生成 IQJS envelope，并返回只有它能构造的 `CompiledBytecode`。`bytecode.rs` 检查 magic、引擎版本、模式标签和非空载荷。这些检查不能证明载荷是对应类型的字节码。进程内用 `open_compiled_with_io`。磁盘文件用 `unsafe` 的 `open_trusted_bytecode_with_io`，调用者保证字节来自本工具链的 `compile`。脚本走 `JS_ReadObject` / `JS_EvalFunction`，模块走 `Module::load`。`open_program_with_io` 只接受源码。`IMPASTO_TRACE` 或 `Session::set_trace` 开启帧计数。
+
+`createStyleSource`、`setStyleSource`、`removeStyleSource` 使用 Tree 分配的来源句柄。`runtime/style.ts` 的 bindStyle 隔离组件默认、class 与 inline 的 owner。原生样式 fixture 在 `tests/fixtures/style.tsx`。
+
+测试始终运行真实解释器。Gallery 产物 `apps/gallery-solid/dist/quotes.js` 由 `just gallery-dist` 本地构建，不进 git。测试使用 `MonoShaper`，验证首屏、市场页、实际组件、控制流、字节码和销毁行为。

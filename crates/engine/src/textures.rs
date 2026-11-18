@@ -44,11 +44,21 @@ impl TextureStore {
 
     pub(crate) fn touch_commands(&mut self, commands: &[Command], generation: u64) {
         for command in commands {
-            if let Command::Image { source, .. } = command
-                && let Some(cached) = self.map.get_mut(source.as_ref())
-            {
-                cached.used = generation;
+            match command {
+                Command::Image { source, .. } => self.touch_source(source, generation),
+                Command::Canvas { list, .. } => {
+                    for image in list.images() {
+                        self.touch_source(&image.source, generation);
+                    }
+                }
+                _ => {}
             }
+        }
+    }
+
+    fn touch_source(&mut self, source: &str, generation: u64) {
+        if let Some(cached) = self.map.get_mut(source) {
+            cached.used = generation;
         }
     }
 

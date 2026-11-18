@@ -34,6 +34,9 @@ function rowsOf(frame: FrameSample): [string, string][] {
       ["layoutcb", `${phase.layoutCbMs.toFixed(2)}ms`],
       ["laywork", `${phase.layworkMs.toFixed(2)}ms x${phase.passes}`],
       ["reuse/shaped", `${phase.reuse}/${phase.shaped}`],
+      ["canvas", `${phase.canvasRecordMs.toFixed(2)}/${phase.canvasPrepareMs.toFixed(2)}ms`],
+      ["ops/seg", `${phase.canvasOps}/${phase.canvasSegments}`],
+      ["redraw/reused", `${phase.canvasRedraws}/${phase.canvasReused}`],
     );
   }
   return rows;

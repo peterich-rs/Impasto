@@ -12,7 +12,7 @@ import { matchPath, routePath } from "./path.ts";
 export type RouteParams = Record<string, string>;
 export type RouteDef = {
   path: string;
-  component: (props: { params: RouteParams }) => NodeHandle;
+  component: (props: { params: RouteParams; phase: RoutePhase }) => NodeHandle;
   keepAlive?: boolean;
 };
 export type RoutePhase = "enter" | "live" | "exit" | "cover";

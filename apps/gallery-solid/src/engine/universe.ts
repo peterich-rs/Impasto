@@ -485,15 +485,6 @@ export const MARKET_LABEL: Record<string, string> = {
   cn: "A股",
 };
 
-/** Five price levels around `last` for the depth ladder. */
-export function depthFor(symbol: string, last: number, step: number): number[] {
-  const out: number[] = [];
-  for (let i = 1; i <= 5; i++) {
-    out.push(round2(last - step * i), round2(last + step * i));
-  }
-  void symbol;
-  return out;
-}
 export function round2(value: number): number {
   return Math.round(value * 100) / 100;
 }

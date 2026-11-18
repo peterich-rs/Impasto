@@ -45,6 +45,5 @@ for(const platform of ["darwin-arm64","android-arm64","android-x64"]){
   const sdk=join(root,"third_party/impeller-sdk",platform);
   if(existsSync(sdk))copy(sdk,join(framework,"third_party/impeller-sdk",platform));
 }
-if(existsSync(join(root,"third_party/quickjs")))copy(join(root,"third_party/quickjs"),join(framework,"third_party/quickjs"));
 if(process.platform==="darwin") {mkdirSync(join(framework,"target/release"),{recursive:true});copyFileSync(join(root,"target/release/macos"),join(framework,"target/release/macos"));}
 console.log(output);

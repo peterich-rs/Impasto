@@ -1,5 +1,5 @@
-# The only mutation table. build.rs generates Rust, the C header, and the JS constants.
-# View styles use StyleValueRecord; their property registry is in uicore::style.
+# The only mutation table. build.rs generates Rust, JavaScript and TypeScript constants.
+# View styles use owned codec values; their property registry is in uicore::style.
 ops:
   Create: 1
   Insert: 2
@@ -22,6 +22,7 @@ ops:
   ClassSnapshot: 33
   StyleSurface: 34
   StyleEnvironment: 35
+  SetCanvas: 36
 
 fields:
   Width: 1

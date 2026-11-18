@@ -13,14 +13,21 @@ import { TabBar } from "./widgets/tab-bar.tsx";
 import { WatchlistPage } from "./pages/watchlist.tsx";
 import { MarketPage } from "./pages/market.tsx";
 import { StockPage } from "./pages/stock.tsx";
+import { StocksPage } from "./pages/stocks.tsx";
 import { TradePage } from "./pages/trade.tsx";
 import { ProfilePage } from "./pages/profile.tsx";
 import { SearchPage } from "./pages/search.tsx";
 import { OrderSheetHost } from "./pages/order.tsx";
+import { CanvasPage } from "./pages/canvas.tsx";
 import { closeToast, toastOpen, toastText } from "./state/toast.ts";
 export function App(): NodeHandle {
   const router = createRouter(
     [
+      {
+        path: "/stocks",
+        component: () => StocksPage({ router }),
+        keepAlive: true,
+      },
       {
         path: "/watchlist",
         component: () =>
@@ -65,6 +72,9 @@ export function App(): NodeHandle {
           StockPage({
             router,
             symbol: p.params.symbol ?? "",
+            get transitioning() {
+              return p.phase !== "live";
+            },
           }),
       },
       {
@@ -75,9 +85,13 @@ export function App(): NodeHandle {
             symbol: p.params.symbol ?? "",
           }),
       },
+      {
+        path: "/canvas",
+        component: () => CanvasPage(),
+      },
     ],
     {
-      initial: "/watchlist",
+      initial: "/stocks",
     },
   );
   const shell = Column({
@@ -103,6 +117,7 @@ export function App(): NodeHandle {
   const view = RouterView({
     router,
     background: "#F5F6F8",
+    opaque: true,
     errorFallback: (err, reset) =>
       UiErrorPage({
         message: uiMessageOf(typeof err === "function" ? err() : err),
@@ -125,7 +140,8 @@ export function App(): NodeHandle {
   createTrackedEffect(() => {
     // Keep the bar clamped until the exiting page unmounts. Unhiding it on the
     // first pop frame relayouts both stacked pages and hitchs the transition.
-    const hidden = router.depth() > 1;
+    const path = router.stack().at(-1)?.path ?? "";
+    const hidden = router.depth() > 1 || path === "/stocks" || path.startsWith("/stock/") || path.startsWith("/order/");
     scene.patchStyle(barWrap, { display: hidden ? "none" : "flex" });
     bar.sync();
   });

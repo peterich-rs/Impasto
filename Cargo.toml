@@ -26,6 +26,21 @@ engine = { path = "crates/engine" }
 session = { path = "crates/session" }
 shell = { path = "crates/shell" }
 quickjs = { path = "crates/quickjs" }
+rquickjs = { package = "quickjs-jit", version = "=0.14.2", default-features = false, features = ["std", "loader", "macro", "bindgen"] }
+
+[profile.dev.package.quickjs-jit-sys]
+opt-level = 3
+
+# Keep Android debug builds debuggable without running the per-frame graph and
+# scene bridge unoptimized against the same wall-clock budget as release.
+[profile.dev.package.reactive]
+opt-level = 2
+
+[profile.dev.package.quickjs]
+opt-level = 2
+
+[profile.dev.package.uicore]
+opt-level = 2
 
 [workspace.lints.rust]
 unsafe_code = "deny"

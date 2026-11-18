@@ -17,6 +17,8 @@ pub(crate) struct Painter<'a> {
     pub(crate) picture_cache: Option<&'a PictureCache>,
     pub(crate) pending: &'a mut Vec<HeldParagraph>,
     pub(crate) saves: Vec<Save>,
+    /// Canvas image sources skipped because the texture was not ready.
+    pub(crate) waiting: Vec<std::sync::Arc<str>>,
     pub(crate) impeller: ffi::ImpellerContext,
 }
 
@@ -46,6 +48,7 @@ pub(crate) fn build_picture<'pixels>(
         picture_cache: None,
         pending,
         saves: Vec::new(),
+        waiting: Vec::new(),
         impeller,
     };
     let drawn = painter.play_commands(
@@ -81,6 +84,7 @@ pub(crate) fn build_picture<'pixels>(
         generation: picture.generation,
         list,
         held,
+        waiting: painter.waiting,
     })
 }
 

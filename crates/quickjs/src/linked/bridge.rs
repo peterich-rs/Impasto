@@ -8,10 +8,14 @@ use std::sync::atomic::Ordering;
 use session::{HttpError, HttpFailure, HttpRequest, Invoke, IoJob, PluginResult, PluginValue};
 use uicore::{FocusDirection, NodeId};
 
-use super::ffi::*;
+use super::rt::*;
 use super::*;
 
-pub(super) unsafe extern "C" fn caret_at(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the existing callback record carries separate scalar fields"
+)]
+pub(super) unsafe fn caret_at(
     session: *mut c_void,
     node: u64,
     x: f32,
@@ -22,7 +26,8 @@ pub(super) unsafe extern "C" fn caret_at(
     out_w: *mut f32,
     out_h: *mut f32,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         match inner
             .tree
@@ -45,14 +50,15 @@ pub(super) unsafe extern "C" fn caret_at(
     })
 }
 
-pub(super) unsafe extern "C" fn word_range(
+pub(super) unsafe fn word_range(
     session: *mut c_void,
     node: u64,
     unit: u32,
     start: *mut u32,
     end: *mut u32,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         match inner
             .tree
@@ -60,6 +66,7 @@ pub(super) unsafe extern "C" fn word_range(
             .word_range(NodeId::from_raw(node), unit)
         {
             Ok((word_start, word_end)) => {
+                // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
                 unsafe {
                     *start = word_start;
                     *end = word_end;
@@ -71,8 +78,9 @@ pub(super) unsafe extern "C" fn word_range(
     })
 }
 
-pub(super) unsafe extern "C" fn focus_step(session: *mut c_void, direction: i32) -> i32 {
-    super::qjs_entry!(-1, {
+pub(super) unsafe fn focus_step(session: *mut c_void, direction: i32) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let direction = match direction {
             0 => FocusDirection::Next,
@@ -91,8 +99,9 @@ pub(super) unsafe extern "C" fn focus_step(session: *mut c_void, direction: i32)
     })
 }
 
-pub(super) unsafe extern "C" fn push_focus_scope(session: *mut c_void, node: u64) -> i32 {
-    super::qjs_entry!(-1, {
+pub(super) unsafe fn push_focus_scope(session: *mut c_void, node: u64) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let gestures = match inner
             .tree
@@ -109,22 +118,21 @@ pub(super) unsafe extern "C" fn push_focus_scope(session: *mut c_void, node: u64
     })
 }
 
-pub(super) unsafe extern "C" fn pop_focus_scope(session: *mut c_void) -> i32 {
-    super::qjs_entry!(-1, {
+pub(super) unsafe fn pop_focus_scope(session: *mut c_void) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         inner.tree.borrow_mut().pop_focus_scope();
         0
     })
 }
 
-pub(super) unsafe extern "C" fn pointer_position(
-    session: *mut c_void,
-    x: *mut f32,
-    y: *mut f32,
-) -> i32 {
-    super::qjs_entry!(-1, {
+pub(super) unsafe fn pointer_position(session: *mut c_void, x: *mut f32, y: *mut f32) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let (px, py) = inner.tree.borrow().pointer_position();
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         unsafe {
             *x = px;
             *y = py;
@@ -133,8 +141,9 @@ pub(super) unsafe extern "C" fn pointer_position(
     })
 }
 
-pub(super) unsafe extern "C" fn focus_node(session: *mut c_void, node: u64) -> i32 {
-    super::qjs_entry!(-1, {
+pub(super) unsafe fn focus_node(session: *mut c_void, node: u64) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let gestures = match inner.tree.borrow_mut().focus(NodeId::from_raw(node)) {
             Ok(gestures) => gestures,
@@ -147,8 +156,9 @@ pub(super) unsafe extern "C" fn focus_node(session: *mut c_void, node: u64) -> i
     })
 }
 
-pub(super) unsafe extern "C" fn focused_id(session: *mut c_void) -> u64 {
-    super::qjs_entry!(0, {
+pub(super) unsafe fn focused_id(session: *mut c_void) -> u64 {
+    super::vm_entry!(0, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         inner
             .tree
@@ -159,8 +169,9 @@ pub(super) unsafe extern "C" fn focused_id(session: *mut c_void) -> u64 {
     })
 }
 
-pub(super) unsafe extern "C" fn is_focusable(session: *mut c_void, node: u64) -> i32 {
-    super::qjs_entry!(-1, {
+pub(super) unsafe fn is_focusable(session: *mut c_void, node: u64) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         match inner.tree.borrow().is_focusable(NodeId::from_raw(node)) {
             Ok(true) => 1,
@@ -170,15 +181,17 @@ pub(super) unsafe extern "C" fn is_focusable(session: *mut c_void, node: u64) ->
     })
 }
 
-pub(super) unsafe extern "C" fn register_font(
+pub(super) unsafe fn register_font(
     session: *mut c_void,
     utf8: *const c_char,
     len: usize,
     bytes: *const u8,
     byte_len: usize,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let Some(family) = (unsafe { utf8_of(utf8, len) }) else {
             return -1;
         };
@@ -203,13 +216,11 @@ pub(super) unsafe extern "C" fn register_font(
     })
 }
 
-pub(super) unsafe extern "C" fn reload(
-    session: *mut c_void,
-    utf8: *const c_char,
-    len: usize,
-) -> i32 {
-    super::qjs_entry!(-1, {
+pub(super) unsafe fn reload(session: *mut c_void, utf8: *const c_char, len: usize) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let Some(source) = (unsafe { utf8_of(utf8, len) }) else {
             return -1;
         };
@@ -221,18 +232,20 @@ pub(super) unsafe extern "C" fn reload(
     })
 }
 
-pub(super) unsafe extern "C" fn layer_stats(
+pub(super) unsafe fn layer_stats(
     session: *mut c_void,
     epoch: *mut u64,
     layers: *mut u32,
     pictures: *mut u32,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
         if epoch.is_null() || layers.is_null() || pictures.is_null() {
             return -1;
         }
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let (epoch_value, layer_count, picture_count) = inner.tree.borrow().layer_tree_stats();
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         unsafe {
             *epoch = epoch_value;
             *layers = u32::try_from(layer_count).unwrap_or(u32::MAX);
@@ -242,12 +255,9 @@ pub(super) unsafe extern "C" fn layer_stats(
     })
 }
 
-pub(super) unsafe extern "C" fn scroll_into_view(
-    session: *mut c_void,
-    node: u64,
-    edge: i32,
-) -> i32 {
-    super::qjs_entry!(-1, {
+pub(super) unsafe fn scroll_into_view(session: *mut c_void, node: u64, edge: i32) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let edge = match edge {
             1 => uicore::ScrollEdge::End,
@@ -265,7 +275,12 @@ pub(super) unsafe extern "C" fn scroll_into_view(
     })
 }
 
-pub(super) unsafe extern "C" fn animate(
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::too_many_arguments,
+    reason = "JavaScript f64 values convert to the existing fixed-width callback record and f32 geometry"
+)]
+pub(super) unsafe fn animate(
     session: *mut c_void,
     node: u64,
     prop: *const c_char,
@@ -275,8 +290,10 @@ pub(super) unsafe extern "C" fn animate(
     stiffness: f64,
     damping: f64,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let Some(name) = (unsafe { utf8_of(prop, prop_len) }) else {
             return -1;
         };
@@ -319,19 +336,21 @@ pub(super) fn anim_prop(name: &str) -> Option<uicore::AnimProp> {
     })
 }
 
-pub(super) unsafe extern "C" fn fling_target(
+pub(super) unsafe fn fling_target(
     session: *mut c_void,
     node: u64,
     out_x: *mut f32,
     out_y: *mut f32,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
         if out_x.is_null() || out_y.is_null() {
             return -1;
         }
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         match inner.tree.borrow().fling_target(NodeId::from_raw(node)) {
             Some((x, y)) => {
+                // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
                 unsafe {
                     *out_x = x;
                     *out_y = y;
@@ -343,7 +362,7 @@ pub(super) unsafe extern "C" fn fling_target(
     })
 }
 
-pub(super) unsafe extern "C" fn set_recognizers(
+pub(super) unsafe fn set_recognizers(
     session: *mut c_void,
     node: u64,
     tap: i32,
@@ -351,7 +370,8 @@ pub(super) unsafe extern "C" fn set_recognizers(
     drag: i32,
     double_tap_ms: f64,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let drag = match drag {
             0 => Some(uicore::DragAxis::Free),
@@ -359,11 +379,11 @@ pub(super) unsafe extern "C" fn set_recognizers(
             2 => Some(uicore::DragAxis::Vertical),
             _ => None,
         };
-        let double_tap = (double_tap_ms.is_finite() && double_tap_ms > 0.0).then(|| {
-            let mut config = uicore::DoubleTapConfig::default();
-            config.window_ms = double_tap_ms;
-            config
-        });
+        let double_tap =
+            (double_tap_ms.is_finite() && double_tap_ms > 0.0).then(|| uicore::DoubleTapConfig {
+                window_ms: double_tap_ms,
+                ..uicore::DoubleTapConfig::default()
+            });
         status(inner.tree.borrow_mut().set_recognizers(
             NodeId::from_raw(node),
             uicore::RecognizerSet {
@@ -441,7 +461,7 @@ pub(super) fn startup_font(name: &str) -> bool {
 
 /// `mode` 0 max-content, 1 capped-max, 2 definite width. `height` of `f32::NAN`
 /// under mode 2 leaves the height natural. Out parameters carry `(w, h)`.
-pub(super) unsafe extern "C" fn measure_panel(
+pub(super) unsafe fn measure_panel(
     session: *mut c_void,
     node: u64,
     mode: i32,
@@ -450,7 +470,7 @@ pub(super) unsafe extern "C" fn measure_panel(
     out_w: *mut f32,
     out_h: *mut f32,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
         if out_w.is_null() || out_h.is_null() {
             return -1;
         }
@@ -463,6 +483,7 @@ pub(super) unsafe extern "C" fn measure_panel(
             },
             _ => return -1,
         };
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         // `set_panel` is a separate call so a caller can reuse a declared panel.
         match inner
@@ -471,6 +492,7 @@ pub(super) unsafe extern "C" fn measure_panel(
             .measure_panel(NodeId::from_raw(node), space)
         {
             Ok((w, h)) => {
+                // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
                 unsafe {
                     *out_w = w;
                     *out_h = h;
@@ -482,8 +504,9 @@ pub(super) unsafe extern "C" fn measure_panel(
     })
 }
 
-pub(super) unsafe extern "C" fn blur_node(session: *mut c_void) -> i32 {
-    super::qjs_entry!(-1, {
+pub(super) unsafe fn blur_node(session: *mut c_void) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let gestures = inner.tree.borrow_mut().blur();
         if dispatch_gestures(inner, gestures).is_err() {
@@ -493,8 +516,9 @@ pub(super) unsafe extern "C" fn blur_node(session: *mut c_void) -> i32 {
     })
 }
 
-pub(super) unsafe extern "C" fn set_ime_enabled(session: *mut c_void, enabled: i32) -> i32 {
-    super::qjs_entry!(-1, {
+pub(super) unsafe fn set_ime_enabled(session: *mut c_void, enabled: i32) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let mut ime = inner.ime.borrow_mut();
         ime.shown = enabled != 0;
@@ -503,13 +527,11 @@ pub(super) unsafe extern "C" fn set_ime_enabled(session: *mut c_void, enabled: i
     })
 }
 
-pub(super) unsafe extern "C" fn set_ime_text(
-    session: *mut c_void,
-    utf8: *const c_char,
-    len: usize,
-) -> i32 {
-    super::qjs_entry!(-1, {
+pub(super) unsafe fn set_ime_text(session: *mut c_void, utf8: *const c_char, len: usize) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let Some(text) = (unsafe { utf8_of(utf8, len) }) else {
             return -1;
         };
@@ -520,7 +542,11 @@ pub(super) unsafe extern "C" fn set_ime_text(
     })
 }
 
-pub(super) unsafe extern "C" fn set_ime_state(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the existing callback record carries separate scalar fields"
+)]
+pub(super) unsafe fn set_ime_state(
     session: *mut c_void,
     shown: i32,
     utf8: *const c_char,
@@ -534,7 +560,8 @@ pub(super) unsafe extern "C" fn set_ime_state(
     w: f32,
     h: f32,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let mut ime = inner.ime.borrow_mut();
         if shown == 0 {
@@ -542,6 +569,7 @@ pub(super) unsafe extern "C" fn set_ime_state(
             ime.dirty = true;
             return 0;
         }
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let Some(text) = (unsafe { utf8_of(utf8, len) }) else {
             return -1;
         };
@@ -588,7 +616,11 @@ pub(super) fn tri_state(value: i32) -> Option<bool> {
     }
 }
 
-pub(super) unsafe extern "C" fn set_semantics(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the existing callback record carries separate scalar fields"
+)]
+pub(super) unsafe fn set_semantics(
     session: *mut c_void,
     node: u64,
     role: i32,
@@ -608,10 +640,14 @@ pub(super) unsafe extern "C" fn set_semantics(
     order: i32,
     live: i32,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let label = unsafe { utf8_of(label, label_len) }.map(str::to_owned);
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let value = unsafe { utf8_of(value, value_len) }.map(str::to_owned);
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let description = unsafe { utf8_of(description, description_len) }.map(str::to_owned);
         let hint = uicore::SemanticsHint {
             role: role_of(role),
@@ -654,21 +690,27 @@ pub(super) fn role_of(role: i32) -> Option<uicore::SemanticsRole> {
     })
 }
 
-pub(super) unsafe extern "C" fn text_scale(session: *mut c_void) -> f64 {
-    super::qjs_entry!(0.0, {
+pub(super) unsafe fn text_scale(session: *mut c_void) -> f64 {
+    super::vm_entry!(0.0, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         f64::from(inner.text_scale.get())
     })
 }
 
-pub(super) unsafe extern "C" fn reduce_motion(session: *mut c_void) -> i32 {
-    super::qjs_entry!(-1, {
+pub(super) unsafe fn reduce_motion(session: *mut c_void) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         i32::from(inner.reduce_motion.get())
     })
 }
 
-pub(super) unsafe extern "C" fn measure_text(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the existing callback record carries separate scalar fields"
+)]
+pub(super) unsafe fn measure_text(
     session: *mut c_void,
     utf8: *const c_char,
     len: usize,
@@ -678,11 +720,13 @@ pub(super) unsafe extern "C" fn measure_text(
     out_w: *mut f32,
     out_h: *mut f32,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
         if out_w.is_null() || out_h.is_null() {
             return -1;
         }
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let (Some(utf8), Some(color)) = (unsafe { utf8_of(utf8, len) }, unsafe { rgba(color) })
         else {
             return -1;
@@ -718,8 +762,9 @@ pub(super) fn emit_module(inner: &Inner, module: &str, event: &str, shape: i32, 
     let module = cstring(module);
     let event = cstring(event);
     let body = cstring(text);
+    // SAFETY: the session owns Host; all borrowed input and output buffers live through this call.
     let _ = unsafe {
-        qjs_module_event(
+        vm_module_event(
             inner.host,
             module.as_ptr(),
             event.as_ptr(),
@@ -730,73 +775,8 @@ pub(super) fn emit_module(inner: &Inner, module: &str, event: &str, shape: i32, 
     };
 }
 
-/// Payloads at or above this size travel zero-copy; smaller ones are cheaper
-/// to duplicate than to track.
-const EXTERNAL_BYTES_THRESHOLD: usize = 4096;
-
-/// Park `bytes` in the session slab and hand back `(handle, copy)` whose
-/// pointer stays valid until [`release_bytes_cb`] runs. `None` when the host
-/// pointer is not this session's.
-fn take_external_handle(inner: &Inner, bytes: &[u8]) -> Option<(u64, Vec<u8>)> {
-    let mut slab = inner.out_bytes.borrow_mut();
-    slab.0 = slab.0.wrapping_add(1).max(1);
-    let handle = slab.0;
-    let entry = slab.1.entry(handle).or_insert_with(|| bytes.to_vec());
-    // The Vec's heap buffer does not move while it sits in the map, so this
-    // pointer stays valid until release_bytes_cb removes the entry.
-    let stable = unsafe { std::slice::from_raw_parts(entry.as_ptr(), entry.len()).to_vec() };
-    Some((handle, stable))
-}
-
-/// `fns.release_bytes`: QuickJS freed the view; drop the slab entry, which is
-/// the last owner of that heap buffer.
-pub(super) unsafe extern "C" fn release_bytes_cb(session: *mut c_void, handle: u64) {
-    super::qjs_entry!((), {
-        let inner = unsafe { inner(session) };
-        let mut slab = inner.out_bytes.borrow_mut();
-        drop(slab.1.remove(&handle));
-    })
-}
-
 pub(super) fn emit_value(inner: &Inner, value: &PluginValue) {
-    let host = inner.host;
-    match value {
-        PluginValue::Null => unsafe { qjs_value_null(host) },
-        PluginValue::Bool(flag) => unsafe { qjs_value_bool(host, i32::from(*flag)) },
-        PluginValue::F64(number) => unsafe { qjs_value_f64(host, *number) },
-        PluginValue::Str(text) => {
-            let bytes = cstring(text);
-            unsafe { qjs_value_str(host, bytes.as_ptr(), text.replace('\0', "").len()) };
-        }
-        PluginValue::Bytes(bytes) => unsafe {
-            if bytes.len() >= EXTERNAL_BYTES_THRESHOLD
-                && let Some((handle, stable)) = take_external_handle(inner, bytes)
-            {
-                qjs_value_bytes_external(host, stable.as_ptr(), stable.len(), handle);
-                return;
-            }
-            let ptr = if bytes.is_empty() {
-                b"".as_ptr()
-            } else {
-                bytes.as_ptr()
-            };
-            qjs_value_bytes(host, ptr, bytes.len());
-        },
-        PluginValue::List(items) => {
-            for item in items {
-                emit_value(inner, item);
-            }
-            unsafe { qjs_value_list(host, items.len() as u32) };
-        }
-        PluginValue::Map(entries) => {
-            for (key, item) in entries {
-                let bytes = cstring(key);
-                unsafe { qjs_value_str(host, bytes.as_ptr(), key.replace('\0', "").len()) };
-                emit_value(inner, item);
-            }
-            unsafe { qjs_value_map(host, entries.len() as u32) };
-        }
-    }
+    push_plugin(inner.host, value);
 }
 
 /// Streamed head: status and headers before any body bytes.
@@ -808,8 +788,9 @@ pub(super) fn settle_http_head(
 ) {
     let block = bootstrap::header_block(headers);
     let header_bytes = cstring(&block);
+    // SAFETY: the session owns Host; all borrowed input and output buffers live through this call.
     let _ = unsafe {
-        qjs_http_head(
+        vm_http_head(
             inner.host,
             token,
             i32::from(status),
@@ -828,8 +809,9 @@ pub(super) fn settle_http_chunk(
     error: Option<&HttpError>,
 ) {
     let message = error.map(|error| cstring(error.dom_name()));
+    // SAFETY: the session owns Host; all borrowed input and output buffers live through this call.
     let _ = unsafe {
-        qjs_http_chunk(
+        vm_http_chunk(
             inner.host,
             token,
             bytes.as_ptr(),
@@ -849,11 +831,13 @@ pub(super) fn settle_plugin(inner: &Inner, token: u64, result: &PluginResult) {
     match result {
         PluginResult::Done(value) => {
             emit_value(inner, value);
-            let _ = unsafe { qjs_settle_top(inner.host, token, 1) };
+            // SAFETY: the session owns Host; all borrowed input and output buffers live through this call.
+            let _ = unsafe { vm_settle_top(inner.host, token, 1) };
         }
         PluginResult::Failed { message } => {
             emit_value(inner, &PluginValue::Str(message.clone()));
-            let _ = unsafe { qjs_settle_top(inner.host, token, 0) };
+            // SAFETY: the session owns Host; all borrowed input and output buffers live through this call.
+            let _ = unsafe { vm_settle_top(inner.host, token, 0) };
         }
     }
 }
@@ -863,8 +847,9 @@ pub(super) fn settle_http(inner: &Inner, token: u64, result: &Result<HttpRespons
         Ok(response) => {
             if response.body.len() > session::HTTP_BODY_LIMIT {
                 let message = cstring("TypeError");
+                // SAFETY: the session owns Host; all borrowed input and output buffers live through this call.
                 let _ = unsafe {
-                    qjs_settle_http(
+                    vm_settle_http(
                         inner.host,
                         token,
                         0,
@@ -879,8 +864,9 @@ pub(super) fn settle_http(inner: &Inner, token: u64, result: &Result<HttpRespons
             }
             let headers = bootstrap::header_block(&response.headers);
             let header_bytes = cstring(&headers);
+            // SAFETY: the session owns Host; all borrowed input and output buffers live through this call.
             let _ = unsafe {
-                qjs_settle_http(
+                vm_settle_http(
                     inner.host,
                     token,
                     i32::from(response.status),
@@ -896,8 +882,9 @@ pub(super) fn settle_http(inner: &Inner, token: u64, result: &Result<HttpRespons
             // The prelude rejects with the DOMException name so callers can
             // match on it; the detail stays in the session log.
             let message = cstring(error.dom_name());
+            // SAFETY: the session owns Host; all borrowed input and output buffers live through this call.
             let _ = unsafe {
-                qjs_settle_http(
+                vm_settle_http(
                     inner.host,
                     token,
                     0,
@@ -938,8 +925,9 @@ pub(super) fn cancelled(inner: &Inner, token: u64) -> bool {
 
 pub(super) fn deliver_socket(inner: &Inner, id: u64, event: &str, text: bool, data: &[u8]) {
     let event = cstring(event);
+    // SAFETY: the session owns Host; all borrowed input and output buffers live through this call.
     let _ = unsafe {
-        qjs_socket_event(
+        vm_socket_event(
             inner.host,
             id,
             event.as_ptr(),
@@ -958,7 +946,11 @@ pub(super) fn submit_or_queue(inner: &Inner, job: IoJob, inline: impl FnOnce()) 
     }
 }
 
-pub(super) unsafe extern "C" fn http_call(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the existing callback record carries separate scalar fields"
+)]
+pub(super) unsafe fn http_call(
     session: *mut c_void,
     token: u64,
     method: *const c_char,
@@ -970,7 +962,8 @@ pub(super) unsafe extern "C" fn http_call(
     body: *const u8,
     body_len: usize,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         unsafe {
             http_call_impl(
                 session,
@@ -989,7 +982,11 @@ pub(super) unsafe extern "C" fn http_call(
     })
 }
 
-pub(super) unsafe extern "C" fn http_stream_call(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the existing callback record carries separate scalar fields"
+)]
+pub(super) unsafe fn http_stream_call(
     session: *mut c_void,
     token: u64,
     method: *const c_char,
@@ -1001,7 +998,8 @@ pub(super) unsafe extern "C" fn http_stream_call(
     body: *const u8,
     body_len: usize,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         unsafe {
             http_call_impl(
                 session,
@@ -1022,6 +1020,10 @@ pub(super) unsafe extern "C" fn http_stream_call(
 
 /// Shared body of `http` and `httpStream`. `streaming` picks the job the host
 /// network thread runs; a session-local client always downloads whole bodies.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the existing callback record carries separate scalar fields"
+)]
 unsafe fn http_call_impl(
     session: *mut c_void,
     token: u64,
@@ -1035,13 +1037,17 @@ unsafe fn http_call_impl(
     body_len: usize,
     streaming: bool,
 ) -> i32 {
+    // SAFETY: session is captured from the live Host and used only on the render thread.
     let inner = unsafe { inner(session) };
+    // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
     let Some(method) = (unsafe { utf8_of(method, method_len) }) else {
         return -1;
     };
+    // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
     let Some(url) = (unsafe { utf8_of(url, url_len) }) else {
         return -1;
     };
+    // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
     let headers = unsafe { utf8_of(headers, headers_len) }.unwrap_or("");
     if body_len > session::HTTP_BODY_LIMIT {
         let error = HttpError::new(HttpFailure::TooLarge, "TypeError");
@@ -1055,6 +1061,7 @@ unsafe fn http_call_impl(
     let bytes = if body.is_null() || body_len == 0 {
         Vec::new()
     } else {
+        // SAFETY: the Rust caller supplies the stated number of initialized elements for this call.
         unsafe { std::slice::from_raw_parts(body, body_len).to_vec() }
     };
     let cancel = Arc::new(AtomicBool::new(false));
@@ -1118,8 +1125,9 @@ unsafe fn http_call_impl(
     0
 }
 
-pub(super) unsafe extern "C" fn abort_token(session: *mut c_void, token: u64) {
-    super::qjs_entry!((), {
+pub(super) unsafe fn abort_token(session: *mut c_void, token: u64) {
+    super::vm_entry!((), {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         if let Some(flag) = inner.cancels.borrow().get(&token) {
             flag.store(true, Ordering::Release);
@@ -1151,103 +1159,22 @@ fn set_last_error(inner: &Inner, message: String) {
     *inner.last_error.borrow_mut() = Some(cstring(&message));
 }
 
-pub(super) unsafe extern "C" fn module_has(
-    session: *mut c_void,
-    name: *const c_char,
-    len: usize,
-) -> i32 {
-    super::qjs_entry!(-1, {
-        let inner = unsafe { inner(session) };
-        let Some(name) = (unsafe { utf8_of(name, len) }) else {
-            return 0;
-        };
-        i32::from(inner.config.registry.module(name).is_some())
-    })
-}
-
-pub(super) unsafe extern "C" fn module_count(
-    session: *mut c_void,
-    name: *const c_char,
-    len: usize,
-) -> i32 {
-    super::qjs_entry!(-1, {
-        let inner = unsafe { inner(session) };
-        let Some(name) = (unsafe { utf8_of(name, len) }) else {
-            return -1;
-        };
-        inner
-            .config
-            .registry
-            .by_specifier(name)
-            .map(|module| module.methods.len() as i32)
-            .unwrap_or(-1)
-    })
-}
-
-pub(super) unsafe extern "C" fn module_method_at(
-    session: *mut c_void,
-    name: *const c_char,
-    name_len: usize,
-    index: i32,
-    out_len: *mut usize,
-) -> *const c_char {
-    super::qjs_entry!(std::ptr::null(), {
-        let inner = unsafe { inner(session) };
-        let Some(name) = (unsafe { utf8_of(name, name_len) }) else {
-            return ptr::null();
-        };
-        let Ok(index) = usize::try_from(index) else {
-            return ptr::null();
-        };
-        let Some(method) = inner
-            .config
-            .registry
-            .by_specifier(name)
-            .and_then(|module| module.methods.get(index))
-        else {
-            return ptr::null();
-        };
-        if !out_len.is_null() {
-            unsafe { *out_len = method.name.len() };
-        }
-        method.name.as_ptr().cast()
-    })
-}
-
-pub(super) unsafe extern "C" fn module_name_of(
-    session: *mut c_void,
-    specifier: *const c_char,
-    len: usize,
-    out_len: *mut usize,
-) -> *const c_char {
-    super::qjs_entry!(std::ptr::null(), {
-        let inner = unsafe { inner(session) };
-        let Some(specifier) = (unsafe { utf8_of(specifier, len) }) else {
-            return ptr::null();
-        };
-        let Some(module) = inner.config.registry.by_specifier(specifier) else {
-            return ptr::null();
-        };
-        if !out_len.is_null() {
-            unsafe { *out_len = module.name.len() };
-        }
-        module.name.as_ptr().cast()
-    })
-}
-
-pub(super) unsafe extern "C" fn module_prepare(
+pub(super) unsafe fn module_prepare(
     session: *mut c_void,
     name: *const c_char,
     name_len: usize,
     method: *const c_char,
     method_len: usize,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         inner.last_error.borrow_mut().take();
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let Some(name) = (unsafe { utf8_of(name, name_len) }) else {
             return -1;
         };
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let Some(method) = (unsafe { utf8_of(method, method_len) }) else {
             return -1;
         };
@@ -1262,118 +1189,29 @@ pub(super) unsafe extern "C" fn module_prepare(
         *inner.prepared.borrow_mut() = Some(PreparedCall {
             invoke: entry.invoke.clone(),
             token: 0,
-            args: ArgBuild::new(),
+            args: Vec::new(),
         });
         kind
     })
 }
 
-pub(super) unsafe extern "C" fn module_push_null(session: *mut c_void) {
-    super::qjs_entry!((), {
-        push_prepared(unsafe { inner(session) }, PluginValue::Null);
-    })
-}
-
-pub(super) unsafe extern "C" fn module_push_bool(session: *mut c_void, value: i32) {
-    super::qjs_entry!((), {
-        push_prepared(unsafe { inner(session) }, PluginValue::Bool(value != 0));
-    })
-}
-
-pub(super) unsafe extern "C" fn module_push_f64(session: *mut c_void, value: f64) {
-    super::qjs_entry!((), {
-        push_prepared(unsafe { inner(session) }, PluginValue::F64(value));
-    })
-}
-
-pub(super) unsafe extern "C" fn module_push_str(
-    session: *mut c_void,
-    text: *const c_char,
-    len: usize,
-) {
-    super::qjs_entry!((), {
-        let text = unsafe { utf8_of(text, len) }.unwrap_or("").to_owned();
-        push_prepared(unsafe { inner(session) }, PluginValue::Str(text));
-    })
-}
-
-pub(super) unsafe extern "C" fn module_push_bytes(
-    session: *mut c_void,
-    bytes: *const u8,
-    len: usize,
-) {
-    super::qjs_entry!((), {
-        let bytes = if bytes.is_null() {
-            Vec::new()
-        } else {
-            unsafe { std::slice::from_raw_parts(bytes, len).to_vec() }
-        };
-        push_prepared(unsafe { inner(session) }, PluginValue::Bytes(bytes));
-    })
-}
-
-pub(super) unsafe extern "C" fn module_begin_list(session: *mut c_void) {
-    super::qjs_entry!((), {
-        if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
-            call.args.begin(false);
-        }
-    })
-}
-
-pub(super) unsafe extern "C" fn module_end_list(session: *mut c_void) {
-    super::qjs_entry!((), {
-        if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
-            call.args.end();
-        }
-    })
-}
-
-pub(super) unsafe extern "C" fn module_begin_map(session: *mut c_void) {
-    super::qjs_entry!((), {
-        if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
-            call.args.begin(true);
-        }
-    })
-}
-
-pub(super) unsafe extern "C" fn module_map_key(
-    session: *mut c_void,
-    text: *const c_char,
-    len: usize,
-) {
-    super::qjs_entry!((), {
-        let text = unsafe { utf8_of(text, len) }.unwrap_or("").to_owned();
-        if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut()
-            && let Some(frame) = call.args.frames.last_mut()
-        {
-            frame.pending_key = Some(text);
-        }
-    })
-}
-
-pub(super) unsafe extern "C" fn module_end_map(session: *mut c_void) {
-    super::qjs_entry!((), {
-        if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
-            call.args.end();
-        }
-    })
-}
-
-pub(super) unsafe extern "C" fn module_set_token(session: *mut c_void, token: u64) {
-    super::qjs_entry!((), {
+pub(super) unsafe fn module_set_token(session: *mut c_void, token: u64) {
+    super::vm_entry!((), {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         if let Some(call) = prepared_mut(unsafe { inner(session) }).as_mut() {
             call.token = token;
         }
     })
 }
 
-pub(super) unsafe extern "C" fn module_finish(session: *mut c_void) -> i32 {
-    super::qjs_entry!(-1, {
+pub(super) unsafe fn module_finish(session: *mut c_void) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let Some(call) = inner.prepared.borrow_mut().take() else {
             return -1;
         };
-        let args = call.args.stack;
+        let args = call.args;
         match call.invoke {
             Invoke::Sync(f) => match f(&args) {
                 Ok(value) => {
@@ -1394,25 +1232,7 @@ pub(super) unsafe extern "C" fn module_finish(session: *mut c_void) -> i32 {
     })
 }
 
-pub(super) unsafe extern "C" fn module_error(
-    session: *mut c_void,
-    out_len: *mut usize,
-) -> *const c_char {
-    super::qjs_entry!(std::ptr::null(), {
-        let inner = unsafe { inner(session) };
-        match inner.last_error.borrow().as_ref() {
-            Some(message) => {
-                if !out_len.is_null() {
-                    unsafe { *out_len = message.as_bytes().len() };
-                }
-                message.as_ptr()
-            }
-            None => ptr::null(),
-        }
-    })
-}
-
-pub(super) unsafe extern "C" fn socket_open(
+pub(super) unsafe fn socket_open(
     session: *mut c_void,
     id: u64,
     url: *const c_char,
@@ -1420,13 +1240,16 @@ pub(super) unsafe extern "C" fn socket_open(
     protocols: *const c_char,
     protocols_len: usize,
 ) {
-    super::qjs_entry!((), {
+    super::vm_entry!((), {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let Some(url) = (unsafe { utf8_of(url, len) }) else {
             return;
         };
         let url = url.to_owned();
         // A comma-separated offer list, the wire form the header carries.
+        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
         let protocols = unsafe { utf8_of(protocols, protocols_len) }
             .map(|text| {
                 text.split(',')
@@ -1436,37 +1259,31 @@ pub(super) unsafe extern "C" fn socket_open(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        submit_or_queue(
-            inner,
-            IoJob::SocketOpen {
+        submit_or_queue(inner, IoJob::SocketOpen { id, url, protocols }, || {
+            inner.pending.borrow_mut().socket.push((
                 id,
-                url: url.clone(),
-                protocols,
-            },
-            || {
-                inner.pending.borrow_mut().socket.push((
-                    id,
-                    "error".to_owned(),
-                    true,
-                    b"socket is not linked".to_vec(),
-                ));
-            },
-        );
+                "error".to_owned(),
+                true,
+                b"socket is not linked".to_vec(),
+            ));
+        });
     })
 }
 
-pub(super) unsafe extern "C" fn socket_send(
+pub(super) unsafe fn socket_send(
     session: *mut c_void,
     id: u64,
     data: *const u8,
     len: usize,
     is_text: i32,
 ) {
-    super::qjs_entry!((), {
+    super::vm_entry!((), {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let bytes = if data.is_null() || len == 0 {
             Vec::new()
         } else {
+            // SAFETY: the Rust caller supplies the stated number of initialized elements for this call.
             unsafe { std::slice::from_raw_parts(data, len).to_vec() }
         };
         if let Some(submit) = inner.io.borrow().as_ref() {
@@ -1479,8 +1296,9 @@ pub(super) unsafe extern "C" fn socket_send(
     })
 }
 
-pub(super) unsafe extern "C" fn socket_close(session: *mut c_void, id: u64) {
-    super::qjs_entry!((), {
+pub(super) unsafe fn socket_close(session: *mut c_void, id: u64) {
+    super::vm_entry!((), {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         if let Some(submit) = inner.io.borrow().as_ref() {
             submit(IoJob::SocketClose { id });
@@ -1490,22 +1308,23 @@ pub(super) unsafe extern "C" fn socket_close(session: *mut c_void, id: u64) {
 
 // ---- devtools debug surface -------------------------------------------------
 
-/// What `debug_json` should produce. Numbers match the glue constants.
+/// What `debug_json` should produce. Numbers match the VM bindings.
 pub(super) const DEBUG_LAYOUT_ISSUES: i32 = 0;
 pub(super) const DEBUG_SNAPSHOT: i32 = 1;
 pub(super) const DEBUG_PROBE: i32 = 2;
 pub(super) const DEBUG_LAST_POINTER: i32 = 3;
 
 /// Writes one debug JSON document into the session slot. Returns 0 on
-/// success; the glue reads it back with [`debug_json_bytes`].
-pub(super) unsafe extern "C" fn debug_json(
+/// success; the VM bindings copy it before returning.
+pub(super) unsafe fn debug_json(
     session: *mut c_void,
     what: i32,
     _node: u64,
     x: f32,
     y: f32,
 ) -> i32 {
-    super::qjs_entry!(-1, {
+    super::vm_entry!(-1, {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         let tree = inner.tree.borrow();
         let text = match what {
@@ -1530,32 +1349,17 @@ pub(super) unsafe extern "C" fn debug_json(
     })
 }
 
-/// Pointer to the NUL-terminated JSON from the last successful
-/// [`debug_json`]. Null until then.
-pub(super) unsafe extern "C" fn debug_json_bytes(session: *mut c_void) -> *const c_char {
-    super::qjs_entry!(std::ptr::null(), {
-        let inner = unsafe { inner(session) };
-        inner
-            .debug_json
-            .borrow()
-            .as_ref()
-            .map_or(ptr::null(), |text| text.as_ptr())
-    })
-}
-
-pub(super) unsafe extern "C" fn debug_set_scan(session: *mut c_void, on: i32) {
-    super::qjs_entry!((), {
+pub(super) unsafe fn debug_set_scan(session: *mut c_void, on: i32) {
+    super::vm_entry!((), {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         inner.tree.borrow_mut().set_debug_scan(on != 0);
     })
 }
 
-pub(super) unsafe extern "C" fn debug_set_pointer_trace(
-    session: *mut c_void,
-    on: i32,
-    suppress: i32,
-) {
-    super::qjs_entry!((), {
+pub(super) unsafe fn debug_set_pointer_trace(session: *mut c_void, on: i32, suppress: i32) {
+    super::vm_entry!((), {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         inner
             .tree
@@ -1564,8 +1368,9 @@ pub(super) unsafe extern "C" fn debug_set_pointer_trace(
     })
 }
 
-pub(super) unsafe extern "C" fn debug_set_owned(session: *mut c_void, node: u64, on: i32) {
-    super::qjs_entry!((), {
+pub(super) unsafe fn debug_set_owned(session: *mut c_void, node: u64, on: i32) {
+    super::vm_entry!((), {
+        // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
         inner
             .tree

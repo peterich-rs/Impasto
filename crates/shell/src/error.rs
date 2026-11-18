@@ -2,8 +2,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error, Clone)]
 pub enum SessionError {
-    #[error("quickjs is not linked")]
-    NotLinked,
     #[error("quickjs runtime was not created")]
     Runtime,
     #[error("quickjs: {0}")]
@@ -27,7 +25,7 @@ impl BootError {
     pub fn code(&self) -> u8 {
         match self {
             Self::Engine(_) | Self::Font(_) | Self::Panicked => 2,
-            Self::Session(SessionError::NotLinked | SessionError::Runtime) => 3,
+            Self::Session(SessionError::Runtime) => 3,
             Self::Session(SessionError::Script(_)) => 4,
         }
     }
@@ -41,7 +39,6 @@ mod tests {
     fn startup_failures_use_the_process_status_table() {
         assert_eq!(BootError::Font("Sans".to_string()).code(), 2);
         assert_eq!(BootError::Engine(engine::Status::NotLinked).code(), 2);
-        assert_eq!(BootError::Session(SessionError::NotLinked).code(), 3);
         assert_eq!(BootError::Session(SessionError::Runtime).code(), 3);
         assert_eq!(
             BootError::Session(SessionError::Script("bad".to_string())).code(),

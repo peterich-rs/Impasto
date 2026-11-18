@@ -63,10 +63,12 @@ impl PictureCache {
         let stale = typography.stale();
         let generation = typography.generation();
         for picture in &tree.pictures {
-            if let Some(cached) = self.map.get(&picture.id)
-                && cached.generation == picture.generation
-                && !stale
-            {
+            let reuse = self.map.get(&picture.id).is_some_and(|cached| {
+                cached.generation == picture.generation
+                    && !stale
+                    && !waiting_blocks_reuse(&cached.waiting, |source| textures.contains(source))
+            });
+            if reuse {
                 textures.touch_commands(&picture.commands, generation);
                 last_submit.picture_reused = last_submit.picture_reused.saturating_add(1);
                 continue;
@@ -130,3 +132,25 @@ impl PictureCache {
     reason = "names the Save link so the type stays in this module"
 )]
 fn _save_link(_: &Save) {}
+
+pub(crate) fn waiting_blocks_reuse(
+    waiting: &[std::sync::Arc<str>],
+    ready: impl Fn(&str) -> bool,
+) -> bool {
+    waiting.iter().any(|source| ready(source.as_ref()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::waiting_blocks_reuse;
+
+    #[test]
+    fn a_ready_canvas_image_blocks_picture_reuse() {
+        let waiting = [Arc::<str>::from("asset:a"), Arc::<str>::from("asset:b")];
+        assert!(!waiting_blocks_reuse(&waiting, |source| source == "asset:c"));
+        assert!(waiting_blocks_reuse(&waiting, |source| source == "asset:b"));
+        assert!(!waiting_blocks_reuse(&[], |_| true));
+    }
+}

@@ -56,6 +56,7 @@
 | 内容 | Text | 已有，补 Props/ref | 原生 Text 叶节点，支持继承、runs 与文字样式 |
 | 内容 | Image | renderer 已有，改造后重导出 | 原生 Image 叶节点，分离资源与作者尺寸 |
 | 内容 | Icon | 已有，统一属性 | 带镜像能力的图形容器；当前不是 SVG 或图标库加载器 |
+| 内容 | Canvas | 已落地，见 [Canvas 2D 设计](canvas-design.md) | 普通 View 的绘图内容；尺寸走 style，draw 在最终布局后录制 |
 | 交互 | Pressable | 新增 | 单 View 的无皮肤交互入口，提供键盘、禁用与焦点合同 |
 | 控件 | Button | 已有 | 单个交互 View 加文字/图标，variant/size 产生默认样式 |
 | 控件 | Switch | 已有 | 受控或本地布尔状态，样式目标为交互根、track 与 label |
@@ -260,7 +261,7 @@ import { Button, Column, Grid, Image, Row, ScrollArea, Text } from "@impasto/sol
 
 - 明确面板/遮罩/提示/内容目标与 ref；保留焦点恢复和退出 owner。导出各自 XxxProps。
 
-**文件：`crates/uicore/src/tree/style.rs`、`style/{mod,property}.rs`、`crates/quickjs/{abi.yml,src/glue.c,src/linked/mutation.rs}`、`packages/solid-renderer/src/scene.ts`。**
+**文件：`crates/uicore/src/tree/style.rs`、`style/{mod,property}.rs`、`crates/quickjs/{abi.yml,src/linked/rt/bindings.rs,src/linked/mutation.rs}`、`packages/solid-renderer/src/scene.ts`。**
 
 - 对 Stack/Scroll 与列表内部目标记录允许的样式域，完整候选解析后按 Key 校验；class 和 style 一视同仁。拒绝必须保留来源、几何与驱动状态，不能静默忽略属性。
 
@@ -272,7 +273,7 @@ import { Button, Column, Grid, Image, Row, ScrollArea, Text } from "@impasto/sol
 
 - Image 接入 StyleProps/ref 与 intrinsicSize；补 solid-ui 的 Image/样式类型重导出。
 
-**文件：`crates/uicore/src/tree/{layout,store}.rs`、`crates/quickjs/{abi.yml,src/glue.c,src/linked/mutation.rs}`。**
+**文件：`crates/uicore/src/tree/{layout,store}.rs`、`crates/quickjs/{abi.yml,src/linked/rt/bindings.rs,src/linked/mutation.rs}`。**
 
 - 图片资源命令不写入作者尺寸；派生解码尺寸仍通过原有资源就绪与测量链进入 Taffy，不扩展图片缓存项目范围。
 
@@ -324,7 +325,7 @@ import { Button, Column, Grid, Image, Row, ScrollArea, Text } from "@impasto/sol
 - `apps/gallery-solid/src/app.tsx` -- 页面根与方向的明确声明。
 - `apps/gallery-solid/src/pages/watchlist.tsx` -- Column/Row 与滚动组合消费。
 - `crates/quickjs/abi.yml` -- 图片资源更新所需领域命令。
-- `crates/quickjs/src/glue.c` -- 图片资源与固有尺寸输入。
+- `crates/quickjs/src/linked/rt/bindings.rs` -- 图片资源与固有尺寸输入。
 - `crates/quickjs/src/lib.rs` -- 注册真实组件 fixture。
 - `crates/quickjs/src/linked/mutation.rs` -- 样式目标校验与资源命令分发。
 - `crates/quickjs/tests/fixtures/components.tsx` -- 公共组件原生合同。
