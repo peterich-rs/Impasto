@@ -10,7 +10,8 @@ const packagesRoot = join(root, "packages");
 
 // @impasto/<pkg>/<sub> -> packages/<pkg>/<exports 值>，数据源是各包自己的 package.json
 const files = {};
-const capabilityPackages = [];
+const nativeStubs = new Map();
+const nativeImports = new Map();
 for (const entry of readdirSync(packagesRoot, { withFileTypes: true })) {
   if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
   if (!existsSync(join(packagesRoot, entry.name, "package.json"))) continue;
@@ -21,46 +22,36 @@ for (const entry of readdirSync(packagesRoot, { withFileTypes: true })) {
     const subpath = key === "." ? "" : key.replace(/^\.\//, "");
     files[`@impasto/${entry.name}${subpath ? `/${subpath}` : ""}`] = `${entry.name}/${value}`;
   }
-  // The package entry is a typed wrapper. Node tests have no native module, so
-  // they load the stub instead. The declaration file next to it is types only.
-  const stub = join(packagesRoot, entry.name, "src", "native.stub.ts");
+  const source = join(packagesRoot, entry.name, "src");
+  const stub = join(source, "native.stub.ts");
   if (existsSync(stub)) {
-
-    capabilityPackages.push(entry.name);
+    const stubURL = pathToFileURL(stub).href;
+    nativeStubs.set(manifest.name, stubURL);
+    nativeImports.set(pathToFileURL(join(source, "native.js")).href, stubURL);
   }
 }
 
 files["@impasto/reactive"]="reactive/testing/reference.ts";
 
-function capabilityPackageOf(parentURL) {
-  if (!parentURL) {
-    return null;
-  }
-  const parent = fileURLToPath(parentURL);
-  for (const pkg of capabilityPackages) {
-    const prefix = join(packagesRoot, pkg, "src");
-    if (parent === prefix || parent.startsWith(`${prefix}/`)) {
-      return pkg;
-    }
-  }
-  return null;
-}
-
 export function resolve(specifier, context, nextResolve) {
   if (specifier === "solid-js" && !context.parentURL?.endsWith("/reactive/testing/reference.ts")) return { url: pathToFileURL(join(packagesRoot, "reactive/testing/reference.ts")).href, shortCircuit: true };
   if (specifier === "scene") return { url: pathToFileURL(join(packagesRoot,"solid-renderer/testing/native.ts")).href, shortCircuit:true };
   if (specifier === "reactive") return { url:pathToFileURL(join(packagesRoot,"reactive/testing/reference.ts")).href,shortCircuit:true };
-  if (context.parentURL?.includes("/dist/") && /^@impasto\/(clipboard|linking|async-storage|app-state|permissions|file-system|devtools)$/.test(specifier)) return {url:pathToFileURL(join(packagesRoot,specifier.slice(9),"src/native.stub.ts")).href,shortCircuit:true};
   const relative = files[specifier];
+  const stub = nativeStubs.get(specifier);
+  if (stub && (relative?.endsWith("/src/native.d.ts") || context.parentURL?.includes("/dist/"))) {
+    return { url: stub, shortCircuit: true };
+  }
   if (relative) {
     return {
       url: pathToFileURL(join(packagesRoot, relative)).href,
       shortCircuit: true,
     };
   }
-  // A package's own index imports its declaration file. Tests load the stub.
-  const pkg = capabilityPackageOf(context.parentURL);
-  if (pkg && /(?:devtools|clipboard|linking|files|storage|app-state|permissions)\.ts$/.test(specifier)) return { url:pathToFileURL(join(packagesRoot,pkg,"src/native.stub.ts")).href,shortCircuit:true };
+  if (context.parentURL?.startsWith("file:") && specifier.startsWith(".") && specifier.endsWith("/native.js")) {
+    const url = nativeImports.get(new URL(specifier, context.parentURL).href);
+    if (url) return { url, shortCircuit: true };
+  }
   return nextResolve(specifier, context);
 }
 

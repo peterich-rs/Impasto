@@ -2278,6 +2278,7 @@ name = "session"
 version = "0.0.0"
 dependencies = [
  "js-host",
+ "ndk-sys",
  "protocol",
  "uicore",
 ]

@@ -1317,9 +1317,9 @@ pub(super) unsafe fn debug_json(
     super::vm_entry!(-1, {
         // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
-        let tree = inner.tree.borrow();
+        let mut tree = inner.tree.borrow_mut();
         let text = match what {
-            DEBUG_LAYOUT_ISSUES => tree.layout_issues_json(),
+            DEBUG_LAYOUT_ISSUES => tree.inspect_layout_issues(),
             DEBUG_SNAPSHOT => tree.debug_snapshot(),
             DEBUG_PROBE => tree.debug_probe(x, y),
             DEBUG_LAST_POINTER => match tree.debug_last_pointer() {

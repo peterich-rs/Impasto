@@ -560,22 +560,28 @@ impl DrawList {
     ///
     /// Canvas images are optional: a missing decode skips that primitive.
     pub fn image_requirements(&self) -> Vec<(Arc<str>, bool)> {
-        let mut out: Vec<(Arc<str>, bool)> = Vec::new();
-        for command in &self.commands {
-            match command {
-                Command::Image {
-                    source, required, ..
-                } => note_image(&mut out, source, *required),
-                Command::Canvas { list, .. } => {
-                    for image in list.images() {
-                        note_image(&mut out, &image.source, false);
-                    }
-                }
-                _ => {}
-            }
-        }
-        out
+        image_requirements(self.commands.iter())
     }
+}
+
+pub(crate) fn image_requirements<'a>(
+    commands: impl Iterator<Item = &'a Command>,
+) -> Vec<(Arc<str>, bool)> {
+    let mut out: Vec<(Arc<str>, bool)> = Vec::new();
+    for command in commands {
+        match command {
+            Command::Image {
+                source, required, ..
+            } => note_image(&mut out, source, *required),
+            Command::Canvas { list, .. } => {
+                for image in list.images() {
+                    note_image(&mut out, &image.source, false);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn note_image(out: &mut Vec<(Arc<str>, bool)>, source: &Arc<str>, required: bool) {

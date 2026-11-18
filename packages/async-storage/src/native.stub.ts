@@ -1,3 +1,5 @@
+import type { AsyncStorage as AsyncStorageApi } from "./native.js";
+
 export function multiGet(_keys: string[]): Promise<[string, string | null][]> {
   return Promise.resolve([]);
 }
@@ -14,12 +16,9 @@ export function clear(): Promise<void> {
   return Promise.resolve();
 }
 
-export function addEventListener(
-  _type: string,
-  _listener: (e: unknown) => void,
-): void {}
-
-export function removeEventListener(
-  _type: string,
-  _listener: (e: unknown) => void,
-): void {}
+export const AsyncStorage: AsyncStorageApi = Object.freeze({
+  multiGet,
+  multiSet,
+  multiRemove,
+  clear,
+});

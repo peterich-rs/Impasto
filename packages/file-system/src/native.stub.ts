@@ -19,13 +19,3 @@ export { deletePath as delete };
 export function pick(): Promise<{ name: string } | null> {
   return Promise.resolve(null);
 }
-
-export function addEventListener(
-  _type: string,
-  _listener: (e: unknown) => void,
-): void {}
-
-export function removeEventListener(
-  _type: string,
-  _listener: (e: unknown) => void,
-): void {}

@@ -221,6 +221,11 @@ pub trait Shaper {
     fn metrics_paint(&mut self, key: &PaintKey) -> Arc<ParagraphMetrics> {
         self.metrics(&key.metrics)
     }
+    /// Intrinsic width and the metrics of the unbounded paragraph. The caller
+    /// supplies an unbounded paint key so the same paragraph can serve both.
+    fn min_content_metrics(&mut self, key: &PaintKey) -> (f32, Arc<ParagraphMetrics>) {
+        (self.intrinsic_width(&key.metrics), self.metrics_paint(key))
+    }
     /// The node still displays this key. Default does nothing.
     fn touch(&mut self, _key: &PaintKey) {}
     fn caret_at_unit(&mut self, key: &MetricsKey, unit: u32, affinity: Affinity) -> Caret;
@@ -262,6 +267,9 @@ impl Shaper for Box<dyn Shaper> {
     }
     fn metrics_paint(&mut self, key: &PaintKey) -> Arc<ParagraphMetrics> {
         (**self).metrics_paint(key)
+    }
+    fn min_content_metrics(&mut self, key: &PaintKey) -> (f32, Arc<ParagraphMetrics>) {
+        (**self).min_content_metrics(key)
     }
     fn touch(&mut self, key: &PaintKey) {
         (**self).touch(key);

@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use rquickjs::class::Trace;
 use rquickjs::function::{Opt, Rest};
-use rquickjs::{Array, Class, Ctx, Function, IntoJs, JsLifetime, Object, Persistent, Value};
+use rquickjs::{
+    Array, Class, Ctx, Function, IntoJs, JsLifetime, Object, Persistent, TypedArray, Value,
+};
 
 use protocol::{CanvasComposite, CanvasOp};
 use reactive::Id;
@@ -44,6 +46,8 @@ pub(in crate::linked) struct CanvasStats {
     pub(in crate::linked) ops: u32,
     pub(in crate::linked) segments: u32,
     pub(in crate::linked) redraws: u32,
+    pub(in crate::linked) callbacks: u32,
+    pub(in crate::linked) preparations: u32,
     pub(in crate::linked) reused: u32,
 }
 
@@ -57,6 +61,7 @@ struct Snap {
     rtl: bool,
     hidden: bool,
     present: bool,
+    offscreen: bool,
 }
 
 struct Binding {
@@ -66,7 +71,8 @@ struct Binding {
     revision: u64,
     alive: bool,
     pending: bool,
-    seen: bool,
+    geometry_epoch: Option<u64>,
+    defer_when_offscreen: bool,
     snap: Snap,
     serial: f64,
     draw: Option<Persistent<Value<'static>>>,
@@ -118,7 +124,6 @@ struct Bump {
     generation: u32,
     revision: u64,
     serial: f64,
-    snap: Snap,
 }
 
 pub(in crate::linked) struct CanvasSession {
@@ -270,16 +275,15 @@ fn js_string(value: &Value<'_>) -> Option<String> {
     value.as_string().and_then(|text| text.to_string().ok())
 }
 
-fn numbers(args: &[Value<'_>], count: usize, api: &'static str) -> Result<Vec<f64>, CanvasError> {
-    if args.len() < count {
-        return Err(CanvasError::argument(api, "missing argument"));
+fn numbers<const N: usize>(args: &[Value<'_>], api: &'static str) -> Result<[f64; N], CanvasError> {
+    if args.len() < N {
+        return Err(CanvasError::argument(api, "missing numeric argument"));
     }
-    let mut out = Vec::with_capacity(count);
-    for arg in args.iter().take(count) {
-        let Some(number) = arg.as_number() else {
-            return Err(CanvasError::argument(api, "expected a number"));
-        };
-        out.push(number);
+    let mut out = [0.0; N];
+    for (output, value) in out.iter_mut().zip(args) {
+        *output = value
+            .as_number()
+            .ok_or_else(|| CanvasError::argument(api, "expected a number"))?;
     }
     Ok(out)
 }
@@ -356,7 +360,7 @@ fn pixel_ratio(ratio: f32) -> f64 {
 }
 
 fn is_drawable(snap: Snap) -> bool {
-    snap.present && !snap.hidden && snap.width > 0.0 && snap.height > 0.0
+    snap.present && !snap.hidden && !snap.offscreen && snap.width > 0.0 && snap.height > 0.0
 }
 
 fn binding_at(session: &CanvasSession, index: u32, generation: u32) -> Option<&Binding> {
@@ -377,30 +381,30 @@ fn binding_at_mut(
         .filter(|binding| binding.generation == generation)
 }
 
-fn read_snap(inner: &super::super::Inner, tree: &uicore::Tree, node: u64) -> Snap {
-    let ratio = tree.pixel_scale();
-    let scale = inner.text_scale.get();
-    let reduce = inner.reduce_motion.get();
-    match tree.canvas_surface(NodeId::from_raw(node)) {
-        Some(surface) => Snap {
-            width: surface.width,
-            height: surface.height,
-            ratio,
-            scale,
-            reduce,
-            rtl: surface.rtl,
-            hidden: surface.hidden,
-            present: true,
-        },
-        None => Snap {
-            ratio,
-            scale,
-            reduce,
-            hidden: true,
-            present: false,
-            ..Snap::default()
-        },
+fn read_snap(inner: &super::super::Inner, tree: &uicore::Tree, binding: &Binding) -> Snap {
+    let mut snap = binding.snap;
+    if binding.geometry_epoch != Some(tree.canvas_geometry_epoch()) {
+        let node = NodeId::from_raw(binding.node);
+        snap = match tree.canvas_surface(node) {
+            Some(surface) => Snap {
+                width: surface.width,
+                height: surface.height,
+                rtl: surface.rtl,
+                hidden: surface.hidden,
+                present: true,
+                offscreen: binding.defer_when_offscreen && tree.canvas_is_offscreen(node),
+                ..Snap::default()
+            },
+            None => Snap {
+                hidden: true,
+                ..Snap::default()
+            },
+        };
     }
+    snap.ratio = tree.pixel_scale();
+    snap.scale = inner.text_scale.get();
+    snap.reduce = inner.reduce_motion.get();
+    snap
 }
 
 fn dispose_id(inner: &super::super::Inner, raw: u64) {
@@ -590,7 +594,11 @@ impl Drop for SlotGuard<'_> {
     }
 }
 
-fn allocate_slot(inner: &super::super::Inner, node: u64) -> Result<SlotGuard<'_>, CanvasError> {
+fn allocate_slot(
+    inner: &super::super::Inner,
+    node: u64,
+    defer_when_offscreen: bool,
+) -> Result<SlotGuard<'_>, CanvasError> {
     let (index, leftover) = {
         let mut session = inner.canvas.borrow_mut();
         if let Some(index) = session.free.pop() {
@@ -605,7 +613,8 @@ fn allocate_slot(inner: &super::super::Inner, node: u64) -> Result<SlotGuard<'_>
             binding.revision = 0;
             binding.alive = false;
             binding.pending = false;
-            binding.seen = false;
+            binding.geometry_epoch = None;
+            binding.defer_when_offscreen = defer_when_offscreen;
             binding.snap = Snap::default();
             binding.serial = 0.0;
             (index, (draw, on_error))
@@ -619,7 +628,8 @@ fn allocate_slot(inner: &super::super::Inner, node: u64) -> Result<SlotGuard<'_>
                 revision: 0,
                 alive: false,
                 pending: false,
-                seen: false,
+                geometry_epoch: None,
+                defer_when_offscreen,
                 snap: Snap::default(),
                 serial: 0.0,
                 draw: None,
@@ -637,15 +647,27 @@ fn allocate_slot(inner: &super::super::Inner, node: u64) -> Result<SlotGuard<'_>
 }
 
 fn plan_sync(host: &Host) -> Vec<Bump> {
-    let session = host.inner().canvas.borrow();
+    let mut session = host.inner().canvas.borrow_mut();
     let tree = host.inner().tree.borrow();
+    let epoch = tree.canvas_geometry_epoch();
     let mut planned = Vec::new();
-    for (index, binding) in session.bindings.iter().enumerate() {
+    for (index, binding) in session.bindings.iter_mut().enumerate() {
         if !binding.alive || binding.revision == 0 {
             continue;
         }
-        let snap = read_snap(host.inner(), &tree, binding.node);
-        if binding.seen && !binding.pending && binding.snap == snap {
+        let first = binding.geometry_epoch.is_none();
+        let before = binding.snap;
+        let snap = read_snap(host.inner(), &tree, binding);
+        binding.geometry_epoch = Some(epoch);
+        binding.snap = snap;
+        let needs_paint = if is_drawable(snap) {
+            first || binding.pending || before != snap
+        } else {
+            // Run the effect once on exit so it drops the author's
+            // dependencies and keeps only the internal revision.
+            first || is_drawable(before)
+        };
+        if !needs_paint {
             continue;
         }
         let Ok(index) = u32::try_from(index) else {
@@ -656,7 +678,6 @@ fn plan_sync(host: &Host) -> Vec<Bump> {
             generation: binding.generation,
             revision: binding.revision,
             serial: binding.serial + 1.0,
-            snap,
         });
     }
     planned
@@ -680,8 +701,6 @@ fn sync_revisions(host: &Host, ctx: &Ctx<'_>) {
             && binding.alive
         {
             binding.serial = bump.serial;
-            binding.snap = bump.snap;
-            binding.seen = true;
             binding.pending = false;
         }
     }
@@ -743,11 +762,14 @@ fn commit(host: &Host, index: u32, generation: u32) {
     let recording = active.recorder.finish();
     note_record(host, elapsed_ms(started));
     let started = std::time::Instant::now();
+    host.inner().canvas.borrow_mut().stats.preparations += 1;
+    let prepare_trace = session::trace::Section::begin(c"Impasto Canvas prepare");
     let prepared = host
         .inner()
         .tree
         .borrow_mut()
         .prepare_canvas(recording, &deadline);
+    drop(prepare_trace);
     note_prepare(host, elapsed_ms(started));
     match prepared {
         Ok(list) => {
@@ -756,7 +778,16 @@ fn commit(host: &Host, index: u32, generation: u32) {
             record.id = node;
             record.canvas = Some(list);
             match mutation::mutate(host.inner(), &record) {
-                Ok(_) => note_redraw(host, ops, segments),
+                Ok(_) => {
+                    note_redraw(host, ops, segments);
+                    session::trace::Section::event(|| {
+                        let tree = host.inner().tree.borrow();
+                        let height = tree
+                            .canvas_surface(NodeId::from_raw(node))
+                            .map_or(0.0, |surface| surface.height);
+                        format!("Impasto Canvas commit node={node} h={height} ops={ops}")
+                    });
+                }
                 Err(error) => queue_parts(
                     host,
                     index,
@@ -867,6 +898,8 @@ fn paint_binding(host: &Host, ctx: &Ctx<'_>, index: u32, generation: u32) {
     let _ = host.inner().graph.arena.take_paint_blocked();
     host.retarget("canvas", node);
     let started = std::time::Instant::now();
+    host.inner().canvas.borrow_mut().stats.callbacks += 1;
+    let draw_trace = session::trace::Section::begin(c"Impasto Canvas draw");
     let called = (|| -> rquickjs::Result<Value<'_>> {
         let function = Function::from_value(draw.restore(ctx)?)?;
         let context = Class::instance(
@@ -886,6 +919,7 @@ fn paint_binding(host: &Host, ctx: &Ctx<'_>, index: u32, generation: u32) {
         size.set("reduceMotion", snap.reduce)?;
         function.call((context, size))
     })();
+    drop(draw_trace);
     note_record(host, elapsed_ms(started));
     let blocked =
         host.inner().canvas.borrow().blocked || host.inner().graph.arena.take_paint_blocked();
@@ -1216,7 +1250,10 @@ fn bind_canvas<'js>(
             ));
         }
     };
-    let mut guard = allocate_slot(host.inner(), node).map_err(|error| raise(ctx, &error))?;
+    let defer_when_offscreen =
+        optional_bool(args.get(3), "bindCanvas").map_err(|error| raise(ctx, &error))?;
+    let mut guard = allocate_slot(host.inner(), node, defer_when_offscreen)
+        .map_err(|error| raise(ctx, &error))?;
     let index = guard.index;
     let generation = {
         let session = host.inner().canvas.borrow();
@@ -1346,6 +1383,27 @@ impl DrawContext {
             }
         };
         outcome.map_err(|error| raise(ctx, &error))
+    }
+
+    fn batch(
+        &self,
+        ctx: &Ctx<'_>,
+        array: &TypedArray<'_, f64>,
+        api: &'static str,
+        edit: impl FnOnce(&mut Recorder<'_>, &[f64]) -> Result<(), CanvasError>,
+    ) -> rquickjs::Result<()> {
+        self.edit(ctx, |active| {
+            let raw = array
+                .as_raw()
+                .ok_or_else(|| CanvasError::argument(api, "detached coordinate buffer"))?;
+            #[allow(unsafe_code, reason = "synchronous read from a native Float64Array")]
+            // SAFETY: QuickJS provides the typed and aligned memory for `array`.
+            // The draw recorder is pure Rust and does not call back into QuickJS.
+            let values = unsafe {
+                std::slice::from_raw_parts(raw.cast::<f64>().as_ptr(), raw.len() / size_of::<f64>())
+            };
+            edit(&mut active.recorder, values)
+        })
     }
 
     fn view<T>(&self, ctx: &Ctx<'_>, body: impl FnOnce(&ActiveDraw) -> T) -> rquickjs::Result<T> {
@@ -1699,13 +1757,35 @@ impl DrawContext {
     }
 
     fn move_to<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 2, "moveTo").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<2>(&args.0, "moveTo").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |active| active.recorder.move_to(nums[0], nums[1]))
     }
 
     fn line_to<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 2, "lineTo").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<2>(&args.0, "lineTo").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |active| active.recorder.line_to(nums[0], nums[1]))
+    }
+
+    fn polyline<'js>(&self, ctx: Ctx<'js>, points: TypedArray<'js, f64>) -> rquickjs::Result<()> {
+        self.batch(&ctx, &points, "polyline", |recorder, values| {
+            recorder.polyline(values)
+        })
+    }
+
+    fn line_segments<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        points: TypedArray<'js, f64>,
+    ) -> rquickjs::Result<()> {
+        self.batch(&ctx, &points, "lineSegments", |recorder, values| {
+            recorder.line_segments(values)
+        })
+    }
+
+    fn fill_rects<'js>(&self, ctx: Ctx<'js>, rects: TypedArray<'js, f64>) -> rquickjs::Result<()> {
+        self.batch(&ctx, &rects, "fillRects", |recorder, values| {
+            recorder.fill_rects(values)
+        })
     }
 
     fn quadratic_curve_to<'js>(
@@ -1713,14 +1793,15 @@ impl DrawContext {
         ctx: Ctx<'js>,
         args: Rest<Value<'js>>,
     ) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 4, "quadraticCurveTo").map_err(|error| raise(&ctx, &error))?;
+        let nums =
+            numbers::<4>(&args.0, "quadraticCurveTo").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |active| {
             active.recorder.quad_to(nums[0], nums[1], nums[2], nums[3])
         })
     }
 
     fn bezier_curve_to<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 6, "bezierCurveTo").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<6>(&args.0, "bezierCurveTo").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |active| {
             active
                 .recorder
@@ -1729,7 +1810,7 @@ impl DrawContext {
     }
 
     fn arc_to<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 5, "arcTo").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<5>(&args.0, "arcTo").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |active| {
             active
                 .recorder
@@ -1738,14 +1819,14 @@ impl DrawContext {
     }
 
     fn rect<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 4, "rect").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<4>(&args.0, "rect").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |active| {
             active.recorder.rect(nums[0], nums[1], nums[2], nums[3])
         })
     }
 
     fn round_rect<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 4, "roundRect").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<4>(&args.0, "roundRect").map_err(|error| raise(&ctx, &error))?;
         let radii = radii_of(&ctx, args.0.get(4))?;
         self.edit(&ctx, |active| {
             active
@@ -1755,7 +1836,7 @@ impl DrawContext {
     }
 
     fn arc<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 5, "arc").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<5>(&args.0, "arc").map_err(|error| raise(&ctx, &error))?;
         let ccw = optional_bool(args.0.get(5), "arc").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |active| {
             active
@@ -1765,7 +1846,7 @@ impl DrawContext {
     }
 
     fn ellipse<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 7, "ellipse").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<7>(&args.0, "ellipse").map_err(|error| raise(&ctx, &error))?;
         let ccw = optional_bool(args.0.get(7), "ellipse").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |active| {
             active.recorder.ellipse(
@@ -1775,7 +1856,7 @@ impl DrawContext {
     }
 
     fn translate<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 2, "translate").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<2>(&args.0, "translate").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |active| {
             active.recorder.translate(nums[0], nums[1]);
             Ok(())
@@ -1783,7 +1864,7 @@ impl DrawContext {
     }
 
     fn rotate<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 1, "rotate").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<1>(&args.0, "rotate").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |active| {
             active.recorder.rotate(nums[0]);
             Ok(())
@@ -1791,7 +1872,7 @@ impl DrawContext {
     }
 
     fn scale<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 2, "scale").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<2>(&args.0, "scale").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |active| {
             active.recorder.scale(nums[0], nums[1]);
             Ok(())
@@ -1799,7 +1880,7 @@ impl DrawContext {
     }
 
     fn transform<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 6, "transform").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<6>(&args.0, "transform").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |active| {
             active
                 .recorder
@@ -1809,7 +1890,7 @@ impl DrawContext {
     }
 
     fn set_transform<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 6, "setTransform").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<6>(&args.0, "setTransform").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |active| {
             active
                 .recorder
@@ -1927,7 +2008,7 @@ impl DrawContext {
     }
 
     fn fill_rect<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 4, "fillRect").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<4>(&args.0, "fillRect").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |active| {
             active
                 .recorder
@@ -1936,7 +2017,7 @@ impl DrawContext {
     }
 
     fn stroke_rect<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 4, "strokeRect").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<4>(&args.0, "strokeRect").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |active| {
             active
                 .recorder
@@ -1945,7 +2026,7 @@ impl DrawContext {
     }
 
     fn clear_rect<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 4, "clearRect").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<4>(&args.0, "clearRect").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |active| {
             active
                 .recorder
@@ -1960,7 +2041,7 @@ impl DrawContext {
                 &CanvasError::argument("fillText", "expected a string"),
             ));
         };
-        let nums = numbers(&args.0[1..], 2, "fillText").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<2>(&args.0[1..], "fillText").map_err(|error| raise(&ctx, &error))?;
         let max_width = match args.0.get(3) {
             None => None,
             Some(value) if value.is_undefined() => None,
@@ -2027,7 +2108,7 @@ impl DrawContext {
         args: Rest<Value<'js>>,
     ) -> rquickjs::Result<Value<'js>> {
         let nums =
-            numbers(&args.0, 4, "createLinearGradient").map_err(|error| raise(&ctx, &error))?;
+            numbers::<4>(&args.0, "createLinearGradient").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |_| Ok(()))?;
         let gradient = Gradient::linear(nums[0], nums[1], nums[2], nums[3])
             .map_err(|error| raise(&ctx, &error))?;
@@ -2040,7 +2121,7 @@ impl DrawContext {
         args: Rest<Value<'js>>,
     ) -> rquickjs::Result<Value<'js>> {
         let nums =
-            numbers(&args.0, 6, "createRadialGradient").map_err(|error| raise(&ctx, &error))?;
+            numbers::<6>(&args.0, "createRadialGradient").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |_| Ok(()))?;
         let gradient = Gradient::radial(nums[0], nums[1], nums[2], nums[3], nums[4], nums[5])
             .map_err(|error| raise(&ctx, &error))?;
@@ -2053,7 +2134,7 @@ impl DrawContext {
         args: Rest<Value<'js>>,
     ) -> rquickjs::Result<Value<'js>> {
         let nums =
-            numbers(&args.0, 3, "createConicGradient").map_err(|error| raise(&ctx, &error))?;
+            numbers::<3>(&args.0, "createConicGradient").map_err(|error| raise(&ctx, &error))?;
         self.edit(&ctx, |_| Ok(()))?;
         let gradient =
             Gradient::conic(nums[0], nums[1], nums[2]).map_err(|error| raise(&ctx, &error))?;
@@ -2073,7 +2154,7 @@ impl DrawContext {
                 ));
             };
             let nums =
-                numbers(&args.0[1..], 2, "isPointInPath").map_err(|error| raise(&ctx, &error))?;
+                numbers::<2>(&args.0[1..], "isPointInPath").map_err(|error| raise(&ctx, &error))?;
             let rule = rule_at(&args.0, 3, "isPointInPath").map_err(|error| raise(&ctx, &error))?;
             self.view(&ctx, |active| {
                 active
@@ -2081,7 +2162,8 @@ impl DrawContext {
                     .is_point_in_path_of(&path, nums[0], nums[1], rule)
             })
         } else {
-            let nums = numbers(&args.0, 2, "isPointInPath").map_err(|error| raise(&ctx, &error))?;
+            let nums =
+                numbers::<2>(&args.0, "isPointInPath").map_err(|error| raise(&ctx, &error))?;
             let rule = rule_at(&args.0, 2, "isPointInPath").map_err(|error| raise(&ctx, &error))?;
             self.view(&ctx, |active| {
                 active.recorder.is_point_in_path(nums[0], nums[1], rule)
@@ -2103,8 +2185,8 @@ impl DrawContext {
                     &CanvasError::argument("isPointInStroke", "expected a path"),
                 ));
             };
-            let nums =
-                numbers(&args.0[1..], 2, "isPointInStroke").map_err(|error| raise(&ctx, &error))?;
+            let nums = numbers::<2>(&args.0[1..], "isPointInStroke")
+                .map_err(|error| raise(&ctx, &error))?;
             self.edit(&ctx, |active| {
                 active
                     .recorder
@@ -2112,7 +2194,7 @@ impl DrawContext {
             })
         } else {
             let nums =
-                numbers(&args.0, 2, "isPointInStroke").map_err(|error| raise(&ctx, &error))?;
+                numbers::<2>(&args.0, "isPointInStroke").map_err(|error| raise(&ctx, &error))?;
             self.edit(&ctx, |active| {
                 active
                     .recorder
@@ -2133,7 +2215,7 @@ struct ImageArgs {
 fn parse_image(args: &[Value<'_>], _source: &str) -> Result<ImageArgs, CanvasError> {
     match args.len() {
         3 => {
-            let nums = numbers(&args[1..], 2, "drawImage")?;
+            let nums = numbers::<2>(&args[1..], "drawImage")?;
             Ok(ImageArgs {
                 src: None,
                 x: nums[0],
@@ -2143,7 +2225,7 @@ fn parse_image(args: &[Value<'_>], _source: &str) -> Result<ImageArgs, CanvasErr
             })
         }
         5 => {
-            let nums = numbers(&args[1..], 4, "drawImage")?;
+            let nums = numbers::<4>(&args[1..], "drawImage")?;
             Ok(ImageArgs {
                 src: None,
                 x: nums[0],
@@ -2153,7 +2235,7 @@ fn parse_image(args: &[Value<'_>], _source: &str) -> Result<ImageArgs, CanvasErr
             })
         }
         9 => {
-            let nums = numbers(&args[1..], 8, "drawImage")?;
+            let nums = numbers::<8>(&args[1..], "drawImage")?;
             Ok(ImageArgs {
                 src: Some([nums[0], nums[1], nums[2], nums[3]]),
                 x: nums[4],
@@ -2478,12 +2560,12 @@ impl JsPath {
     }
 
     fn move_to<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 2, "moveTo").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<2>(&args.0, "moveTo").map_err(|error| raise(&ctx, &error))?;
         self.change(&ctx, |path| path.move_to(nums[0], nums[1]))
     }
 
     fn line_to<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 2, "lineTo").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<2>(&args.0, "lineTo").map_err(|error| raise(&ctx, &error))?;
         self.change(&ctx, |path| path.line_to(nums[0], nums[1]))
     }
 
@@ -2492,26 +2574,27 @@ impl JsPath {
         ctx: Ctx<'js>,
         args: Rest<Value<'js>>,
     ) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 4, "quadraticCurveTo").map_err(|error| raise(&ctx, &error))?;
+        let nums =
+            numbers::<4>(&args.0, "quadraticCurveTo").map_err(|error| raise(&ctx, &error))?;
         self.change(&ctx, |path| {
             path.quad_to(nums[0], nums[1], nums[2], nums[3])
         })
     }
 
     fn bezier_curve_to<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 6, "bezierCurveTo").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<6>(&args.0, "bezierCurveTo").map_err(|error| raise(&ctx, &error))?;
         self.change(&ctx, |path| {
             path.cubic_to(nums[0], nums[1], nums[2], nums[3], nums[4], nums[5])
         })
     }
 
     fn rect<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 4, "rect").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<4>(&args.0, "rect").map_err(|error| raise(&ctx, &error))?;
         self.change(&ctx, |path| path.rect(nums[0], nums[1], nums[2], nums[3]))
     }
 
     fn round_rect<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 4, "roundRect").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<4>(&args.0, "roundRect").map_err(|error| raise(&ctx, &error))?;
         let radii = radii_of(&ctx, args.0.get(4))?;
         self.change(&ctx, |path| {
             path.round_rect(nums[0], nums[1], nums[2], nums[3], &radii)
@@ -2519,7 +2602,7 @@ impl JsPath {
     }
 
     fn arc<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 5, "arc").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<5>(&args.0, "arc").map_err(|error| raise(&ctx, &error))?;
         let ccw = optional_bool(args.0.get(5), "arc").map_err(|error| raise(&ctx, &error))?;
         self.change(&ctx, |path| {
             path.arc(nums[0], nums[1], nums[2], nums[3], nums[4], ccw)
@@ -2527,14 +2610,14 @@ impl JsPath {
     }
 
     fn arc_to<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 5, "arcTo").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<5>(&args.0, "arcTo").map_err(|error| raise(&ctx, &error))?;
         self.change(&ctx, |path| {
             path.arc_to(nums[0], nums[1], nums[2], nums[3], nums[4])
         })
     }
 
     fn ellipse<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
-        let nums = numbers(&args.0, 7, "ellipse").map_err(|error| raise(&ctx, &error))?;
+        let nums = numbers::<7>(&args.0, "ellipse").map_err(|error| raise(&ctx, &error))?;
         let ccw = optional_bool(args.0.get(7), "ellipse").map_err(|error| raise(&ctx, &error))?;
         self.change(&ctx, |path| {
             path.ellipse(
@@ -2659,15 +2742,18 @@ impl Controller {
             host.inner().canvas.borrow_mut().blocked = true;
             return Err(raise(&ctx, &side_effect_error()));
         }
-        {
+        let request = {
             let mut session = host.inner().canvas.borrow_mut();
             if let Some(binding) = binding_at_mut(&mut session, self.index, self.generation)
                 && binding.alive
             {
                 binding.pending = true;
+                !binding.snap.offscreen
+            } else {
+                false
             }
-        }
-        if !host.paused.get() && !host.inner().paused.get() {
+        };
+        if request && !host.paused.get() && !host.inner().paused.get() {
             host.wants_frame.set(true);
         }
         Ok(())

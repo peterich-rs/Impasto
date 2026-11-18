@@ -423,6 +423,7 @@ struct Runtime {
     session: Option<Box<dyn session::Session>>,
     registry: Arc<session::ModuleRegistry>,
     latest: Option<Arc<protocol::LayerTree>>,
+    image_requirements: Vec<(Arc<str>, bool)>,
     input: Input,
     surfaces: SurfaceHost,
     scheduler: FrameScheduler,
@@ -561,6 +562,7 @@ fn render(
         session,
         registry,
         latest: None,
+        image_requirements: Vec::new(),
         input: Input::new(),
         surfaces: SurfaceHost::new(),
         scheduler: FrameScheduler::new(),
@@ -658,6 +660,7 @@ fn dispatch_command(
         | Command::Lifecycle(_)
         | Command::Settings(_)
         | Command::WindowFocus(_)
+        | Command::SemanticsEnabled(_)
         | Command::SemanticsAction(_)
         | Command::LaunchUrl(_)
         | Command::HttpDone { .. }
@@ -717,6 +720,10 @@ fn layer_tree_line(tree: &protocol::LayerTree) -> String {
 }
 
 fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool, BootError> {
+    use session::trace::Section;
+
+    let _frame_trace = Section::begin(c"Impasto frame");
+    let frame_started = Instant::now();
     if let Some((target, attempts)) = runtime.surfaces.take_attempt() {
         match open_surface_target(runtime, target, attempts, OpenPlace::Frame)? {
             OpenedSurface::Ready { replaced } => {
@@ -738,6 +745,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
         }
     }
     let gesture_started = Instant::now();
+    let input_trace = Section::begin(c"Impasto input");
     let mut leave = false;
     if let Some(session) = runtime.session.as_mut() {
         for event in frame.pointers {
@@ -760,6 +768,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
         }
     }
     let gesture_ms = gesture_started.elapsed().as_secs_f64() * 1000.0;
+    drop(input_trace);
     runtime.frame_number = runtime.frame_number.wrapping_add(1);
     let frame_span = tracing::error_span!(
         target: "impasto::render",
@@ -776,7 +785,10 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     let mut phases = None;
     let mut layout_report = None;
     if let Some(session) = runtime.session.as_mut() {
-        let framed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.frame(time)));
+        let framed = {
+            let _trace = Section::begin(c"Impasto session");
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.frame(time)))
+        };
         match framed {
             Ok(mut output) => {
                 again = output.again;
@@ -808,6 +820,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                             layer_tree_line(&tree)
                         );
                     }
+                    runtime.image_requirements = tree.image_requirements();
                     runtime.latest = Some(tree);
                     layers_changed = true;
                 }
@@ -824,6 +837,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                     crate::ime::publish_update(&update, &runtime.services);
                 }
                 if let Some(patch) = output.semantics.take() {
+                    let _trace = Section::begin(c"Impasto accessibility");
                     fold_semantics(&mut runtime.semantics, &patch);
                     if let Some(update) = runtime.semantics.as_ref() {
                         let projected = crate::semantics::project(update);
@@ -867,8 +881,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     let Some(tree) = runtime.latest.clone() else {
         return Ok(end_frame(runtime, again, false));
     };
-    let requirements = tree.image_requirements();
-    if !images_ready(runtime, &requirements, census.as_deref()) {
+    if !images_ready(runtime, census.as_deref()) {
         return Ok(end_frame(runtime, reloaded, false));
     }
     let unchanged = !layers_changed
@@ -894,20 +907,24 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     }
     match step {
         FrameStep::Cancel | FrameStep::Skip { again: false } => {
+            let _trace = Section::begin(c"Impasto skip present");
             return Ok(end_frame(runtime, false, false));
         }
         FrameStep::Skip { again: true } => {
+            let _trace = Section::begin(c"Impasto skip present");
             return Ok(end_frame(runtime, true, false));
         }
         FrameStep::Submit => {
+            let _trace = Section::begin(c"Impasto submit");
             runtime.images.install_uploaded(
                 &mut runtime.engine.borrow_mut(),
                 images::scale_bucket(runtime.point_scale),
             );
             let started = Instant::now();
-            let pixels = runtime
-                .images
-                .snapshot_requirements(&requirements, images::scale_bucket(runtime.point_scale));
+            let pixels = runtime.images.snapshot_requirements(
+                &runtime.image_requirements,
+                images::scale_bucket(runtime.point_scale),
+            );
             let resolve = |source: &str| {
                 pixels
                     .iter()
@@ -959,11 +976,31 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     }
     let started = Instant::now();
     let presented = {
+        let _trace = Section::begin(c"Impasto present");
         let mut engine = runtime.engine.borrow_mut();
         runtime.surfaces.present(&mut engine)
     };
+    if presented.is_ok() {
+        let _trace = Section::begin(c"Impasto presented");
+    }
     let present_ms = elapsed_ms(started);
+    let work_ms = elapsed_ms(frame_started);
     let stats = runtime.engine.borrow().submit_stats();
+    Section::event(|| {
+        format!(
+            "Impasto pictures rebuilt={} reused={}",
+            if matches!(step, FrameStep::Submit) {
+                stats.picture_rebuilt
+            } else {
+                0
+            },
+            if matches!(step, FrameStep::Submit) {
+                stats.picture_reused
+            } else {
+                0
+            },
+        )
+    });
     let shapes = runtime.engine.borrow_mut().take_shape_stats();
     let phase = phases.unwrap_or_default();
     let timing = FrameTiming {
@@ -971,6 +1008,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
         vsync_ms: time.vsync_ms,
         target_ms: time.target_ms,
         interval_ms: time.interval_ms,
+        work_ms,
         session_ms,
         gesture_ms,
         script_ms: phase.script_ms,
@@ -1139,11 +1177,8 @@ fn open_surface_target(
     }
 }
 
-fn images_ready(
-    runtime: &mut Runtime,
-    requirements: &[(Arc<str>, bool)],
-    census: Option<&uicore::ImageCensus>,
-) -> bool {
+fn images_ready(runtime: &mut Runtime, census: Option<&uicore::ImageCensus>) -> bool {
+    let requirements = &runtime.image_requirements;
     runtime.images.begin_frame();
     if let Some(census) = census {
         runtime.images.sync_counts(census.counts.as_ref());
@@ -1553,6 +1588,7 @@ mod tests {
                 })),
                 registry: Arc::new(session::ModuleRegistry::new(Vec::new())),
                 latest: None,
+                image_requirements: Vec::new(),
                 input: crate::input::Input::new(),
                 surfaces: SurfaceHost::new(),
                 scheduler: FrameScheduler::new(),

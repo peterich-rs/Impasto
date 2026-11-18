@@ -1,6 +1,5 @@
-// The sequences `solid_rc17.rs` pins. `solid` is the module under test, so the
-// Node fixture passes `solid-js` and a native check can pass the graph's shim.
-// The printed lines are the fixture. The Rust tests assert the same lines.
+// The Node fixture passes official Solid 2.0.0 and the QuickJS test passes the
+// native graph's adapter. Both compare the printed lines with order.txt.
 export function runProbe(log, solid) {
   const {
     createMemo,

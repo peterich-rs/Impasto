@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use session::{Method, Module, PluginResult, PluginValue};
+use session::{Method, Module, ModuleExports, PluginResult, PluginValue};
 
 use super::{str_arg, string_list};
 
@@ -16,6 +16,18 @@ pub fn module(host: Arc<dyn PermissionsHost>) -> Module {
     Module {
         name: "Permissions",
         specifier: "@impasto/permissions",
+        exports: ModuleExports {
+            typescript: r#"export type PermissionStatus =
+  | "granted"
+  | "denied"
+  | "restricted"
+  | "permanentlyDenied"
+  | "limited"
+  | "provisional";
+
+export type ServiceStatus = "enabled" | "disabled" | "notApplicable";"#,
+            ..Default::default()
+        },
         methods: vec![
             Method::promise("checkPermissionStatus", {
                 let host = Arc::clone(&host);
@@ -29,7 +41,8 @@ pub fn module(host: Arc<dyn PermissionsHost>) -> Module {
                         }),
                     );
                 }
-            }),
+            })
+            .with_types("permission: string", "PermissionStatus"),
             Method::promise("requestPermissions", {
                 let host = Arc::clone(&host);
                 move |args, settle, exec| {
@@ -47,7 +60,8 @@ pub fn module(host: Arc<dyn PermissionsHost>) -> Module {
                         }),
                     );
                 }
-            }),
+            })
+            .with_types("permissions: string[]", "Record<string, PermissionStatus>"),
             Method::promise("shouldShowRequestPermissionRationale", {
                 let host = Arc::clone(&host);
                 move |args, settle, exec| {
@@ -60,7 +74,8 @@ pub fn module(host: Arc<dyn PermissionsHost>) -> Module {
                         }),
                     );
                 }
-            }),
+            })
+            .with_types("permission: string", "boolean"),
             Method::promise("checkServiceStatus", {
                 let host = Arc::clone(&host);
                 move |args, settle, exec| {
@@ -73,7 +88,8 @@ pub fn module(host: Arc<dyn PermissionsHost>) -> Module {
                         }),
                     );
                 }
-            }),
+            })
+            .with_types("permission: string", "ServiceStatus"),
             Method::promise("openAppSettings", {
                 let host = Arc::clone(&host);
                 move |_args, settle, exec| {
@@ -85,7 +101,8 @@ pub fn module(host: Arc<dyn PermissionsHost>) -> Module {
                         }),
                     );
                 }
-            }),
+            })
+            .with_types("", "boolean"),
         ],
     }
 }

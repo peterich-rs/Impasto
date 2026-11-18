@@ -4,7 +4,7 @@
 
 `pages/stocks.tsx` 按场景宽度组合页面。小于 800 点时，点证券进入 `/stock/:symbol`，返回保留列表筛选和位置。800 点起为列表和详情两栏；1240 点起，盘口和逐笔成交移到右栏，详情原地切换证券。`pages/stock.tsx` 共用行情摘要、图表、盘口、深度、成交方向和价格区间。详情星标可加入或移出自选，买卖栏固定在底部。
 
-- `widgets/stocks/chart.tsx` 用 Canvas 画分时、1m、5m、15m、1D、成交量和均线。图表处理悬停、触点十字线、横向滚轮和缩放，坐标由 `CanvasController.toLocal` 换算。
+- `widgets/stocks/chart.tsx` 用 Canvas 画分时、1m、5m、15m、1D、成交量和均线。主图节点与选中状态独立。十字线、圆点和提示框通过覆盖层的变换、透明度和文本更新。按下、拖动和结束用 `CanvasController.toLocal` 取坐标，方向键和前后选点按钮更新同一份选中时间。横向拖动留在图表上，纵向拖动交给页面滚动。
 - `widgets/stocks/order-book.tsx` 显示五档或十档盘口；点击卖盘档位打开买入单，点击买盘打开卖出单，初始限价取档位价。深度图使用同一份十二档数据。
 - `engine/analytics.ts` 从模拟成交累计分钟 OHLC、成交量、均价、成交额和分档买卖量。逐笔从 `TickRing` 读取；盘口是围绕最新价生成的模拟档位，与挂单成交分别计算。
 - `pages/order.tsx` 在窄屏使用 `Sheet`，宽屏使用 `Dialog`。订单支持市价与限价、整手数量、费用预估和复核确认；状态、可用现金、持仓和订单保存在 `state/account.ts`。

@@ -713,6 +713,8 @@ fn length_property(name: &str, length: Length) -> Result<Property, StyleError> {
         "outlineWidth" => Property::OutlineWidth(length),
         "translateX" => Property::TranslateX(length),
         "translateY" => Property::TranslateY(length),
+        "transformOriginX" => Property::TransformOriginX(length),
+        "transformOriginY" => Property::TransformOriginY(length),
         _ => return Err(unknown(name)),
     })
 }

@@ -9,6 +9,7 @@ const DOWN = [34, 176, 95, 255] as [number, number, number, number];
 const FLAT = [138, 141, 145, 255] as [number, number, number, number];
 const BASE = [30, 34, 40, 255] as [number, number, number, number];
 const SIMULATION_TICK_MS = 1000 / 30;
+const PUBLICATION_MS = 200;
 
 /**
  * App-scope engine and binder. One instance per boot; the gallery app is a
@@ -73,13 +74,17 @@ export function wireQuotes(): QuotesApi {
         flash.stamp(targetMs);
         if (untrack(refs) > 0 && untrack(running)) {
           const elapsed = lastTarget === undefined ? SIMULATION_TICK_MS : targetMs - lastTarget;
-          if (elapsed >= SIMULATION_TICK_MS - 0.25) {
+          const step = elapsed >= SIMULATION_TICK_MS - 0.25;
+          if (step) {
             lastTarget = targetMs;
             engine!.setTimeScale(untrack(() => settingsSig().timeScale));
             engine!.step(Math.min(100, elapsed));
             binder!.flush();
           }
-          if (targetMs - lastPublish >= 200) {
+          const age = targetMs - lastPublish;
+          // Leave a frame for publication between simulation ticks. A slow
+          // display can step on every frame, so bound the deferral.
+          if (age >= PUBLICATION_MS && (!step || age >= PUBLICATION_MS + SIMULATION_TICK_MS)) {
             lastPublish = targetMs;
             setPulse((value) => value + 1);
           }

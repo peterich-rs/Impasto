@@ -71,6 +71,14 @@ pub enum Invoke {
 pub struct Method {
     pub name: &'static str,
     pub invoke: Invoke,
+    pub types: Option<MethodTypes>,
+}
+
+/// The JavaScript parameters and resolved return type of a native method.
+#[derive(Clone, Copy)]
+pub struct MethodTypes {
+    pub parameters: &'static str,
+    pub returns: &'static str,
 }
 
 impl Method {
@@ -81,6 +89,7 @@ impl Method {
         Self {
             name,
             invoke: Invoke::Sync(Arc::new(f)),
+            types: None,
         }
     }
 
@@ -91,8 +100,35 @@ impl Method {
         Self {
             name,
             invoke: Invoke::Promise(Arc::new(f)),
+            types: None,
         }
     }
+
+    /// Describes the JavaScript signature. Promise methods specify the resolved value.
+    #[must_use]
+    pub fn with_types(mut self, parameters: &'static str, returns: &'static str) -> Self {
+        self.types = Some(MethodTypes {
+            parameters,
+            returns,
+        });
+        self
+    }
+}
+
+/// A native module event and the TypeScript type of its payload.
+#[derive(Clone, Copy)]
+pub struct EventType {
+    pub name: &'static str,
+    pub payload: &'static str,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct ModuleExports {
+    /// Also export an object named after the module, with the same functions.
+    pub object: bool,
+    pub typescript: &'static str,
+    /// The events available to JS listeners. An empty list exports no listeners.
+    pub events: &'static [EventType],
 }
 
 #[derive(Clone)]
@@ -100,6 +136,7 @@ pub struct Module {
     pub name: &'static str,
     pub specifier: &'static str,
     pub methods: Vec<Method>,
+    pub exports: ModuleExports,
 }
 
 /// `module "<name>" is not linked`, or with the method when the name exists but the method does not.

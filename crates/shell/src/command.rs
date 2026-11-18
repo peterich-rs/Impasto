@@ -56,6 +56,7 @@ pub enum Command {
     /// The platform asked the process to drop caches. The next frame resubmits.
     MemoryWarning,
     WindowFocus(bool),
+    SemanticsEnabled(bool),
     SemanticsAction(uicore::SemanticsAction),
     /// A URL that arrived after the session exists. The render thread calls `Session::set_launch_url`.
     LaunchUrl(String),
@@ -122,7 +123,7 @@ pub(crate) fn command_tag(command: &Command) -> &'static str {
         Command::Invalidate => "invalidate",
         Command::MemoryWarning => "memory",
         Command::WindowFocus(_) => "focus",
-        Command::SemanticsAction(_) => "semantics",
+        Command::SemanticsEnabled(_) | Command::SemanticsAction(_) => "semantics",
         Command::LaunchUrl(_) => "launch",
         Command::SurfaceReady(_)
         | Command::SurfaceChanged { .. }

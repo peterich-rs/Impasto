@@ -4,14 +4,16 @@ use std::sync::Arc;
 
 mod io;
 mod modules;
+pub mod trace;
 
 pub use io::{
     HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, HttpResponse,
     IoEvent, IoJob, PluginResult, PluginValue, document_relative, module_not_linked,
 };
 pub use modules::{
-    ImmediateExec, Invoke, Method, MethodExec, Module, ModuleConfig, ModuleRegistry, PromiseFn,
-    Settle, Shared, SyncFn, Work, shared, shared_read, shared_write,
+    EventType, ImmediateExec, Invoke, Method, MethodExec, MethodTypes, Module, ModuleConfig,
+    ModuleExports, ModuleRegistry, PromiseFn, Settle, Shared, SyncFn, Work, shared, shared_read,
+    shared_write,
 };
 
 /// One edge of a window, in scene points.
@@ -351,6 +353,10 @@ pub struct FrameTrace {
     /// All `layout` calls this frame, including those made from script.
     pub laywork_ms: f64,
     pub layout_passes: u32,
+    pub root_layouts: u32,
+    pub local_layouts: u32,
+    pub same_text_layouts: u32,
+    pub list_ops: u32,
     pub text_reused: u32,
     pub text_shaped: u32,
     /// `none` when nothing marked layout.
@@ -374,6 +380,8 @@ pub struct FrameTrace {
     pub canvas_ops: u32,
     pub canvas_segments: u32,
     pub canvas_redraws: u32,
+    pub canvas_callbacks: u32,
+    pub canvas_preparations: u32,
     pub canvas_reused: u32,
 }
 
@@ -477,6 +485,8 @@ pub trait Session {
     }
     /// An accessibility action. The default ignores it.
     fn semantics_action(&mut self, _action: uicore::SemanticsAction) {}
+    /// Whether the host currently needs semantics. Re-enabling must publish a fresh snapshot.
+    fn set_semantics_enabled(&mut self, _enabled: bool) {}
     /// Font faces queued by the session since the last take.
     ///
     /// The host registers them on the render thread before `submit`. The default

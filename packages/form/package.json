@@ -10,6 +10,6 @@
     "test": "node --experimental-strip-types src/index.test.ts"
   },
   "devDependencies": {
-    "solid-js": "2.0.0-rc.17"
+    "solid-js": "2.0.0"
   }
 }

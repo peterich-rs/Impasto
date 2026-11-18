@@ -1,13 +1,8 @@
+import type * as native from "./native.js";
+
 export function getCurrentState(): string {
   return "active";
 }
 
-export function addEventListener(
-  _type: string,
-  _listener: (e: unknown) => void,
-): void {}
-
-export function removeEventListener(
-  _type: string,
-  _listener: (e: unknown) => void,
-): void {}
+export const addEventListener: typeof native.addEventListener = () => {};
+export const removeEventListener: typeof native.removeEventListener = () => {};

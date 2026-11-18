@@ -979,6 +979,29 @@ impl Typography {
         }
     }
 
+    /// Reads the intrinsic width from a paragraph already measured with this key.
+    pub fn measured_min_intrinsic_width(
+        &mut self,
+        query: crate::ParagraphQuery<'_>,
+        spans: &[TextSpan],
+    ) -> Result<f32, Status> {
+        let paragraph = self.cached_paragraph(
+            query.utf8,
+            query.font_size,
+            query.max_width,
+            query.color,
+            query.style,
+            spans,
+        )?;
+        // SAFETY: the measured store owns a live paragraph until the borrow ends.
+        let width = unsafe { ffi::ImpellerParagraphGetMinIntrinsicWidth(paragraph) };
+        if width.is_finite() && width >= 0.0 {
+            Ok(width)
+        } else {
+            Err(Status::BadScene)
+        }
+    }
+
     /// Family actually passed to Impeller. A missing name falls back to the first
     /// registered face so a typo does not fail the whole frame.
     pub(crate) fn resolved_family(&self, requested: Option<&str>) -> Option<String> {

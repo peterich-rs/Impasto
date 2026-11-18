@@ -1,11 +1,13 @@
-export function checkPermissionStatus(_permission: string): Promise<string> {
+import type { PermissionStatus, ServiceStatus } from "./native.js";
+
+export function checkPermissionStatus(_permission: string): Promise<PermissionStatus> {
   return Promise.resolve("denied");
 }
 
 export function requestPermissions(
   permissions: string[],
-): Promise<Record<string, string>> {
-  const result: Record<string, string> = {};
+): Promise<Record<string, PermissionStatus>> {
+  const result: Record<string, PermissionStatus> = {};
   for (const name of permissions) {
     result[name] = "denied";
   }
@@ -18,20 +20,10 @@ export function shouldShowRequestPermissionRationale(
   return Promise.resolve(false);
 }
 
-export function checkServiceStatus(_permission: string): Promise<string> {
+export function checkServiceStatus(_permission: string): Promise<ServiceStatus> {
   return Promise.resolve("notApplicable");
 }
 
 export function openAppSettings(): Promise<boolean> {
   return Promise.resolve(false);
 }
-
-export function addEventListener(
-  _type: string,
-  _listener: (e: unknown) => void,
-): void {}
-
-export function removeEventListener(
-  _type: string,
-  _listener: (e: unknown) => void,
-): void {}

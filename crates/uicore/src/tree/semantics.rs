@@ -227,6 +227,9 @@ impl Tree {
     }
 
     pub(super) fn mark_semantics_chain(&mut self, mut id: NodeId) {
+        if !self.semantics_enabled {
+            return;
+        }
         self.semantics_full = true;
         loop {
             let parent = {
@@ -243,11 +246,25 @@ impl Tree {
         }
     }
 
+    /// Hosts with an on-demand accessibility tree can suspend its snapshots.
+    pub fn set_semantics_enabled(&mut self, enabled: bool) {
+        if self.semantics_enabled == enabled {
+            return;
+        }
+        self.semantics_enabled = enabled;
+        if enabled {
+            self.semantics_full = true;
+        } else {
+            self.semantics_cache.clear();
+            self.scroll_semantics.clear();
+        }
+    }
+
     /// Diff against the previous patch. Clean nodes keep their strings and only
     /// refresh `rect` and scroll. `None` means nothing changed.
     pub fn semantics_patch(&mut self) -> Option<SemanticsPatch> {
         let root = self.root?;
-        if !self.laid_out {
+        if !self.semantics_enabled || !self.laid_out {
             return None;
         }
         if self.layout_passes != self.semantics_layout_seen || self.semantics_full {
@@ -448,5 +465,32 @@ impl Tree {
     fn lookup(&self, id: SemanticsId) -> Option<NodeId> {
         let node = NodeId::from_raw(id.0);
         self.node(node).ok().map(|_| node)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restoring_semantics_publishes_current_labels_without_another_layout()
+    -> Result<(), crate::Error> {
+        let mut tree = Tree::new(crate::MonoShaper::new());
+        let text = tree.text("before", 16.0, [0, 0, 0, 255])?;
+        tree.layout()?;
+        assert!(tree.semantics_patch().is_some());
+
+        tree.set_semantics_enabled(false);
+        tree.set_text(text, "after")?;
+        tree.layout()?;
+        assert!(tree.semantics_patch().is_none());
+
+        tree.set_semantics_enabled(true);
+        let patch = tree.semantics_patch().expect("restored snapshot");
+        assert!(patch.ops.iter().any(|op| matches!(
+            op, SemanticsOp::Upsert(node) if node.id == SemanticsId::from_node(text) && node.label == "after"
+        )));
+        assert!(tree.semantics_patch().is_none());
+        Ok(())
     }
 }

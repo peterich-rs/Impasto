@@ -126,6 +126,28 @@ impl Shaper for ImpellerShaper {
         self.paint_metrics(&key.metrics, key.color, Some(key.span_paints.as_ref()))
     }
 
+    fn min_content_metrics(&mut self, key: &PaintKey) -> (f32, Arc<ParagraphMetrics>) {
+        let metrics = self.metrics_paint(key);
+        let query = engine::ParagraphQuery {
+            utf8: &key.metrics.text,
+            font_size: f32::from_bits(key.metrics.font_size),
+            max_width: f32::from_bits(key.metrics.max_width),
+            color: key.color,
+            style: &key.metrics.style,
+        };
+        let width = self.with_spans(
+            &key.metrics,
+            key.color,
+            Some(key.span_paints.as_ref()),
+            |typography, spans| {
+                typography
+                    .measured_min_intrinsic_width(query, spans)
+                    .unwrap_or(0.0)
+            },
+        );
+        (width, metrics)
+    }
+
     fn touch(&mut self, key: &PaintKey) {
         self.with_spans(
             &key.metrics,
@@ -395,5 +417,61 @@ mod canvas_metrics_tests {
         assert!(slanted.width > 0.0);
         assert!(shaper.canvas_metrics("M", &style, 0.0).is_none());
         assert!(shaper.canvas_metrics("M", &style, f32::NAN).is_none());
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn real_quote_layout_matches_a_full_pass_for_digits_signs_and_cjk() -> Result<(), uicore::Error>
+    {
+        let mut engine = match engine::Engine::create_metal() {
+            Ok(engine) => engine,
+            Err(engine::Status::NotLinked) => return Ok(()),
+            Err(status) => panic!("create_metal: {status}"),
+        };
+        let latin = std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf").expect("Arial");
+        let cjk = std::fs::read("/System/Library/Fonts/Hiragino Sans GB.ttc").expect("CJK font");
+        engine
+            .register_font(&latin, "Sans")
+            .expect("register Arial");
+        engine.register_font(&cjk, "SansCJK").expect("register CJK");
+
+        let fixture = || -> Result<_, uicore::Error> {
+            let mut tree = uicore::Tree::new(ImpellerShaper::new(engine.typography()));
+            tree.set_viewport(0.0, 0.0, 122.0, 250.0)?;
+            let root = tree.row(0.0)?;
+            tree.set_size(root, 122.0, 220.0)?;
+            tree.set_row_cross(root, uicore::RowCrossAlign::Baseline)?;
+            let price = tree.text("43.12", 16.0, [255; 4])?;
+            let label = tree.text("港股 12.4", 12.0, [255; 4])?;
+            tree.set_max_axis(
+                label,
+                uicore::AxisSize::Points(46.0),
+                uicore::AxisSize::Auto,
+            )?;
+            tree.add_child(root, price)?;
+            tree.add_child(root, label)?;
+            tree.layout()?;
+            tree.record()?;
+            Ok((tree, price, label))
+        };
+        let (mut optimized, price, label) = fixture()?;
+        let (mut reference, ref_price, ref_label) = fixture()?;
+        for (value, name) in [
+            ("35.24", "港股 23.5"),
+            ("-35.24", "港股报价 23.5"),
+            ("-3.5", "港股报价−100.00"),
+        ] {
+            optimized.set_text(price, value)?;
+            optimized.set_text(label, name)?;
+            reference.set_text(ref_price, value)?;
+            reference.set_text(ref_label, name)?;
+            reference.set_viewport(0.0, 0.0, 122.0, 250.0)?;
+            optimized.layout()?;
+            reference.layout()?;
+            assert_eq!(optimized.rect(price)?, reference.rect(ref_price)?);
+            assert_eq!(optimized.rect(label)?, reference.rect(ref_label)?);
+            assert_eq!(optimized.record()?, reference.record()?);
+        }
+        Ok(())
     }
 }

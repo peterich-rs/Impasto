@@ -9,5 +9,8 @@ js-host = { workspace = true }
 uicore = { workspace = true }
 protocol = { workspace = true }
 
+[target.'cfg(target_os = "android")'.dependencies]
+ndk-sys = { version = "=0.6.0" }
+
 [lints]
 workspace = true

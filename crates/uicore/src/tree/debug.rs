@@ -79,8 +79,21 @@ impl Tree {
     /// Scroll viewports, Text with `Visible` overflow, and Clip subtrees are
     /// intentional overflow and are skipped.
     pub(crate) fn scan_overflow(&mut self) {
+        let found = self.collect_overflow();
+        let seen = &mut self.debug.seen_issues;
+        self.debug.new_issues.extend(
+            found
+                .iter()
+                .filter(|issue| !seen.contains(&(issue.parent, issue.axis)))
+                .copied(),
+        );
+        self.debug.seen_issues = found.iter().map(|i| (i.parent, i.axis)).collect();
+        self.debug.issues = found;
+    }
+
+    fn collect_overflow(&mut self) -> Vec<LayoutIssue> {
         let Some(root) = self.root else {
-            return;
+            return Vec::new();
         };
         let mut found: Vec<LayoutIssue> = Vec::new();
         let mut stack = std::mem::take(&mut self.debug.walk_stack);
@@ -119,15 +132,7 @@ impl Tree {
         {
             found.push(issue);
         }
-        let seen = &mut self.debug.seen_issues;
-        let fresh: Vec<LayoutIssue> = found
-            .iter()
-            .filter(|issue| !seen.contains(&(issue.parent, issue.axis)))
-            .copied()
-            .collect();
-        self.debug.seen_issues = found.iter().map(|i| (i.parent, i.axis)).collect();
-        self.debug.issues = found;
-        self.debug.new_issues.extend(fresh);
+        found
     }
 
     /// Whether overflow inside this node is by design.
@@ -231,8 +236,20 @@ impl Tree {
 
     /// JSON object `{"issues":[...]}` for the layout page and `frame.json`.
     pub fn layout_issues_json(&self) -> String {
+        Self::issues_json(&self.debug.issues)
+    }
+
+    /// Inspects the last completed layout without enabling per-frame scans.
+    pub fn inspect_layout_issues(&mut self) -> String {
+        if !self.laid_out {
+            return Self::issues_json(&[]);
+        }
+        Self::issues_json(&self.collect_overflow())
+    }
+
+    fn issues_json(issues: &[LayoutIssue]) -> String {
         let mut out = String::from("{\"issues\":[");
-        for (index, issue) in self.debug.issues.iter().enumerate() {
+        for (index, issue) in issues.iter().enumerate() {
             if index > 0 {
                 out.push(',');
             }

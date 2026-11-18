@@ -42,13 +42,15 @@ vsync → 冲刷 → layout → driver tick → 脏了再 layout → onLayout �
 
 `layer_epoch` 未变、缩放相同、`needs_present` 为假则跳过 `submit_layers` 和 `present`。为真则 `PresentCached`。`Resumed` 与 `Invalidate` 置 `needs_present`。`Hidden`、`Paused`、`MemoryWarning` 调用 `Engine::trim`，GPU 进入 `Flush`。`Dead` 取消这一帧。present 连续失败从第 3 次起退避。`BadScene` 不进退避，也不重建 Vulkan 链。定时器 `Wake` 在已有 vsync token 时不抢跑这一帧，也不取消那次回调；`Resumed` 会丢掉卡住的 token 再武装一次。
 
-macOS 与 Android 宿主始终打开应用内 devtools。面板经 `registerTopLayer` 挂在渲染器根 stack 上，不往 `DrawList` 加调试命令。日志是调用点上的 `tracing` 事件，由 `shell` 过滤后分发到控制台、xlog 和 devtools。超预算只在进入和恢复各打一条。全量计时在 `FrameSample`。
+macOS 与 Android 宿主打开应用内 devtools。面板经 `registerTopLayer` 挂在渲染器根 stack 上，复用现有布局和绘制。日志经 `shell` 过滤并分发到控制台、xlog 和 devtools。性能页进入时读取一次最近帧，之后由「刷新快照」更新。布局页按需扫描上一轮布局。连续溢出扫描由 `debugSetScan` 显式开启。
+
+`FrameSample.workMs` 是渲染线程进入当帧至 `present` 返回的墙钟时间，`budgetMs` 是显示刷新间隔。子阶段可嵌套，例如 `scriptMs` 和 `layoutMs` 都包含在会话耗时中。Android 系统 trace 同时记录调用和跳过 `present` 的帧。采集入口见 [Android 帧性能](platform-hosts.md#android-帧性能)。
 
 ## 绘制
 
-进程内没有场景字节。命令是 `Fill`、`Rect`、`Text`、`Image`、`Canvas`，以及成对的 `PushClip` / `PushOpacity` / `PushTransform` / `Pop`。不平衡是 `BadScene`。`protocol` 不校验。`Command::Canvas` 携带 `CanvasList`，坐标相对该节点的内容盒。
+进程内没有场景字节。命令是 `Fill`、`Rect`、`Text`、`Image`、`Canvas`，以及成对的 `PushClip` / `PushOpacity` / `PushTransform` / `Pop`。不平衡是 `BadScene`。`protocol` 不校验。`Command::Canvas` 携带 `CanvasList`，坐标相对该节点的内容盒。Canvas 可在挂载时启用 `deferWhenOffscreen`。`uicore` 结合视口、祖先裁剪、滚动与越界判断内容盒是否完全在外。旋转、缩放和会扩展绘制范围的效果使用保守判断。QuickJS 在离开视口后仅订阅内部 revision，保留上一张成功录制的 picture，回到视口再用最新数据录制。
 
-运行时用 `Tree::record_layers` 组出 `LayerTree`。`Tree::record` 同时生成扁平 `DrawList`，使用场景坐标。picture 内坐标相对该 picture 的原点。一段 picture 属于一个 owner：根，或本帧开层的 `Scroll`、半透明 `Opacity`、非单位 `Transform`、子树里还有开层节点的 `Clip`，以及 blur、backdrop、非 `SrcOver` 的 blend。没有这些的 `Clip` 把 `PushClip` 留在父 picture 里。`ListDriver` 把行标成 picture owner 后，每行单独一张 picture。滚动偏移在 `Offset` 层上，不因此重建 picture。行 picture 的 `Offset` 是场景坐标，命令原点是 `(0, 0)`。
+运行时用 `Tree::record_layers` 组出完整的 `LayerTree`。层拓扑变化、重新挂载和 picture owner 变化沿祖先链使记录摘要失效。其余子树复用层与 picture owner 摘要及已有 picture。`Tree::record` 同时生成扁平 `DrawList`，使用场景坐标。picture 内坐标相对该 picture 的原点。一段 picture 属于一个 owner：根，或本帧开层的 `Scroll`、半透明 `Opacity`、非单位 `Transform`、子树里还有开层节点的 `Clip`，以及 blur、backdrop、非 `SrcOver` 的 blend。没有这些的 `Clip` 把 `PushClip` 留在父 picture 里。`ListDriver` 把行标成 picture owner 后，每行单独一张 picture。滚动偏移在 `Offset` 层上，不因此重建 picture。行 picture 的 `Offset` 是场景坐标，命令原点是 `(0, 0)`。
 
 文字命令带字号、`max_width`、颜色、段落样式，以及可选的 spans。每个 span 有自己的颜色、字重、字体、下划线和删除线。`gradient` 存在时前景用 `protocol::Gradient`，unit square 映射到该 span 在段落局部坐标里的行盒并集；下划线和删除线仍用 `color`。只改颜色或渐变时标绘制，不重新测量。渲染引擎按命令里的字号绘制，不乘 `point_scale`。`point_scale` 只乘在根 builder 上。
 
@@ -56,7 +58,7 @@ macOS 与 Android 宿主始终打开应用内 devtools。面板经 `registerTopL
 
 `uicore::Tree`。节点 id 是槽位加代数，`to_raw` 是 `u64`。`remove` 摘子树但留着 Taffy，同一轮再 `insert` 不 `revive`。轮末仍无父节点才 `discard_detached`。`detach` 不进销毁名单。`discard` 要求没有父节点。
 
-几何交给 Taffy 0.15.1，启用 Flexbox、Grid、Block、内容溢出尺寸和 `TaffyTree`。测量回调经 `compute_leaf_layout` 调用文字与图片测量。节点显式使用相对定位，绝对定位的参照仍是直接父节点。`layout_point` 是场景坐标，不含滚动和变换。`set_scroll_offset` 只标绘制。
+几何交给 Taffy 0.15.1 的低层接口，布局和像素舍入仍由 Taffy 执行。测量回调经 `compute_leaf_layout` 调用文字与图片测量。已布局的固定宽高绝对定位盒，以及固定宽高、basis auto、shrink 0 且无需基线对齐的 flex 子盒，可以重放父布局给过的 `LayoutInput`。局部输出保持一致时只回写这棵子树。尺寸、基线、滚动溢出和定位输出变化时从根重算。纯文字变化先用已记录的查询重新测量，输出相同时沿用祖先几何，更新文字内容与绘制。节点显式使用相对定位，绝对定位的参照仍是直接父节点。`layout_point` 是场景坐标，不含滚动和变换。`set_scroll_offset` 只标绘制和 Canvas 可见性。
 
 `tree::node::Kind` 是 `View`、`Stack`、`Scroll`、`Text`、`Image`。构造预设集中在 `style::defaults`。普通 View 默认 column、min 0、grow 0、shrink 0、basis auto、无隐式 max；填满视口和剩余空间由应用显式声明。Rust 的 row、column、padding 等构造方法仍提供预设，不再夹紧到父级的 100%。
 
@@ -84,6 +86,7 @@ macOS 与 Android 宿主始终打开应用内 devtools。面板经 `registerTopL
 `PointerRegion` 缺省语义角色是 `Generic`；未禁用时提供 `Activate` 动作。按钮角色由 `SemanticsHint` 显式声明。
 
 测试排版是 `MonoShaper`。宿主测量和绘制共用 `Engine` 的 `Typography`。
+Taffy 复用既有文字尺寸时，也复用同一份测量的第一基线。Min-content 用同一无界段落读取固有宽度、行高和基线。
 
 ## 渲染引擎
 
@@ -94,14 +97,17 @@ macOS 与 Android 宿主始终打开应用内 devtools。面板经 `registerTopL
 ## 宿主
 
 宿主入队、在 vsync 上要帧、把 `LayerTree` 交给引擎并上屏。不做命中，不保存 UI 状态。会话 trait 在 `crates/session`。三端差异在 `docs/platform-hosts.md`。iOS 宿主还没写。
+Android 用 `AccessibilityManager` 的监听通知会话启停语义快照。重新开启时会发布当前树的快照。
 
 ## 运行时会话
 
 `crates/quickjs` 使用根 `Cargo.toml` 钉住的 quickjs-jit 0.14.2，依赖名是 `rquickjs`。`linked/rt::Engine` 拥有唯一的 `Runtime`、`Context` 和 `Host`；`uicore::Tree`、`reactive::Graph` 与 VM 都留在渲染线程。Rust 绑定注册 `scene`、`reactive`、`#reactive` 和能力模块。`linked/scene.rs` 把属性名映射到 `abi.yml` 的字段号，`linked/mutation.rs` 应用树更新。`scene.js` 提供具名查询、命令与插入范围归一化。节点是 `NodeId::to_raw()`，`0` 表示没有节点，没有全局 `core`。启动先绑定原生入口，再依次执行 `abi.js`、`scene.js`、`prelude.js` 和 ESM `reactive.js`，捕获并删除 `__reactive` 后执行应用并排空 jobs。
 
-`reactive::Graph` 使用带 generation 的 arena 和双向边。进入用户闭包和 cleanup 前结束 arena 借用，JS 值由 `linked/reactive.rs` 的 `Persistent` 持有和释放。signal 写入只标脏；`batch` 同步冲刷。`JsSession::frame` 在帧监听前、布局监听后各有一个 `run_updates` 调用点，空队列跳过。`tick_motions` 保持在这些调用之前。`boot` 只分发帧与布局监听。抛错的帧监听会从监听表摘掉。`Show`、`Switch`、`Match`、`For` 和 `Errored` 在 `packages/reactive`，调用同一张原生图。
+`reactive::Graph` 使用带 generation 的 arena 和双向边。进入用户闭包和 cleanup 前结束 arena 借用，JS 值由 `linked/reactive.rs` 的 `Persistent` 持有和释放。signal 写入只标脏，`batch` 同步冲刷。`JsSession::frame` 在帧监听前、帧监听后和布局监听后冲刷图，空队列跳过。帧监听写入的信号在第一次布局前提交。`tick_motions` 在这些调用之前。`boot` 分发帧与布局监听。抛错的帧监听会从监听表摘掉。`Show`、`Switch`、`Match`、`For` 和 `Errored` 在 `packages/reactive`，调用同一张原生图。
 
-能力模块的运行时 specifier 是包入口 `@impasto/clipboard`、`@impasto/linking`、`@impasto/file-system`、`@impasto/async-storage`、`@impasto/app-state`、`@impasto/permissions` 和 `@impasto/devtools`，由 rquickjs 的 `ModuleDef` 注册。未注册是链接期错误。CLI 按 `app.toml` 的目标权限生成 `app.modules`，宿主据此限制会话的 `ModuleRegistry`。返回的大字节（≥4KB）由 `ArrayBuffer` 持有 Rust 的 `Vec<u8>`，较小字节使用 `Uint8Array`。
+能力模块的运行时 specifier 是包入口 `@impasto/clipboard`、`@impasto/linking`、`@impasto/file-system`、`@impasto/async-storage`、`@impasto/app-state`、`@impasto/permissions` 和 `@impasto/devtools`。`ModuleDef` 从 Rust 的 `Module` 方法表注册导出，`cargo run -p shell --bin module-stubs` 从同一份表和方法签名生成各包的 `src/native.d.ts`。只有在 `ModuleExports::events` 声明事件的模块才导出 `addEventListener` 和 `removeEventListener`，监听方法只接受声明的事件名。`Linking` 声明 `url`，`AppState` 声明 `change` 和 `focus`。`Clipboard`、`Linking` 和 `AsyncStorage` 是 QuickJS 直接注册的具名对象。其余能力包的 TypeScript 入口使用生成的声明组合公开 API。Node 测试统一用同目录的 `native.stub.ts`。
+
+CLI 按 `app.toml` 的目标权限生成 `app.modules`，宿主据此限制会话的 `ModuleRegistry`。未注册的能力在链接时报错。原生绑定用 `ArrayBuffer` 持有大字节（≥4KB）的 Rust `Vec<u8>`，较小字节使用 `Uint8Array`。公开的 `FileSystem.read` 总是返回 `Uint8Array`，对大字节创建共享同一缓冲区的视图。
 
 `quickjs::compile` 的脚本和模块路径都生成 IQJS envelope，包含引擎版本与模式，返回只有 `compile` 能构造的 `CompiledBytecode`。`bytecode.rs` 在加载前检查 magic、版本、模式标签和非空载荷；这些检查不能证明载荷是对应类型的字节码。进程内加载走 `open_compiled_with_io`。磁盘上的 `app.bin` 走 `open_trusted_bytecode_with_io`，调用者保证字节来自本工具链的 `compile`，该入口是 `unsafe`。脚本用 `JS_ReadObject` 与 `JS_EvalFunction`，模块用 `Module::load`。`open_program_with_io` 只加载源码。macOS 的 `.app` 和 Android 的资产都可携带 `app.bin`。内存上限 16 MiB，栈上限 8 MiB，eval 限时 1000 ms，其余 turn 为 128 ms，job drain 最多 32 轮。文件模块先按应用根做词法归一化，`..` 留在根内则接受，越出根才拒绝；`AppLoader` 再检查符号化后的真实路径。单个文件上限 16 MiB。脚本异常的 message 和 stack 分开进入 `DiagnosticsHub`。`Engine::shutdown` 在 VM 存活时先释放响应式图，再清空定时器、监听器及 HTTP 等 Persistent，移除 userdata，最后依次释放 Context 和 Runtime；正常 Drop 与启动失败共用此路径。`run --trace` 输出帧内脚本微秒、非空更新轮次和场景 setter 次数。
 
@@ -111,7 +117,7 @@ Kotlin 会话还没接上原生树。见 `docs/refactor-plan.md`。
 
 `packages/solid-renderer/runtime/index.ts` 再导出 `scene` 的渲染原语。`src/tree.ts` 只定义数字节点句柄和叶组件的接口。作者标签是 `view`、`stack`、`scroll` 和 `image`，展示属性统一放进 `style`、`class`、`classList`。`Text` 是组件。渲染器不算坐标，也不做命中。Node 组件测试的替身留在 `testing/`；QuickJS 测试验证实际的原生插入、属性写入和控制流。
 
-`tools/pack.mjs` 是应用和 gallery 共用的 Babel/esbuild 配置。`@solidjs/babel-plugin` 使用 `moduleName: "@impasto/solid-renderer"`、`generate: "universal"`。`solid-js` 解析到 `@impasto/reactive`，`scene` 和 `reactive` 保留为运行时模块。构建检查 metafile 和产物，拒绝混入 Solid 调度器与 `@solidjs/universal`。官方 `solid-js` 的 `2.0.0-rc.17` 只作为开发、类型与对照测试依赖。
+`tools/pack.mjs` 是应用和 gallery 共用的 Babel/esbuild 配置。`@solidjs/babel-plugin` 2.0.0 使用 `moduleName: "@impasto/solid-renderer"`、`generate: "universal"`。`solid-js` 解析到 `@impasto/reactive`，`scene` 和 `reactive` 保留为运行时模块。构建检查 metafile 和产物，拒绝混入 Solid 调度器与 `@solidjs/universal`。官方 `solid-js` 和 `@solidjs/signals` 2.0.0 用于开发与对照测试。应用可用的 API 见 [@impasto/reactive](../packages/reactive/README.md)。
 
 ## 应用命令
 
@@ -125,4 +131,4 @@ Kotlin 会话还没接上原生树。见 `docs/refactor-plan.md`。
 
 ## 应用
 
-`apps/gallery-solid/src/quotes.tsx`。路由是 `/watchlist`、`/market`、`/trade`、`/profile`、`/search`、`/stock/:symbol`、`/order/:symbol`。自选列表打开 `VirtualList` 的 `recycle`。`just gallery-dist` 在源码更新后重编 `dist/quotes.js`。`quickjs` 的原生组件测试用 Node 编译 TSX fixture，再在真实会话中检查。Gallery 测试消费本地 ESM 产物，缺失时直接失败。
+`apps/gallery-solid/src/quotes.tsx`。路由包含 `/stocks`、`/watchlist`、`/market`、`/trade`、`/profile`、`/search`、`/stock/:symbol`、`/order/:symbol`。行情推进和发布频率由应用管理。首页通过稳定的证券分组把行更新分摊到多个帧，并将迷你图错开发布。自选列表打开 `VirtualList` 的 `recycle`。`just gallery-dist` 在源码更新后重编 `dist/quotes.js`。`quickjs` 的原生组件测试用 Node 编译 TSX fixture，再在真实会话中检查。Gallery 测试消费本地 ESM 产物，缺失时直接失败。

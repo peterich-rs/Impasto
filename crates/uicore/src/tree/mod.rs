@@ -5,6 +5,7 @@ mod geometry;
 mod gesture;
 mod hit;
 mod layout;
+mod layout_store;
 mod node;
 mod record;
 mod scroll;
@@ -38,8 +39,8 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use layout_store::LayoutStore;
 use node::Slot;
-use taffy::TaffyTree;
 
 #[cfg(test)]
 use node::MAX_GENERATION;
@@ -54,7 +55,7 @@ use crate::Shaper;
 pub struct Tree {
     slots: Vec<Slot>,
     free: Vec<u32>,
-    taffy: TaffyTree<usize>,
+    taffy: LayoutStore,
     shaper: Box<dyn Shaper>,
     /// [`Shaper::begin_frame`] stays open until [`Tree::record_into`] closes it.
     pub(super) measure_open: bool,
@@ -75,8 +76,6 @@ pub struct Tree {
     clock_ms: f64,
     /// Set while a sample writes a property, so that write does not rebase itself.
     applying_motion: bool,
-    /// Relayout boundaries whose children must be read back from Taffy.
-    dirty_boundaries: Vec<NodeId>,
     /// Child picture of a scroll. Keyed by the scroll node.
     pictures: HashMap<NodeId, Arc<protocol::Picture>>,
     /// Runs keyed by the owner that closed them, in paint order.
@@ -85,10 +84,8 @@ pub struct Tree {
     run: record::RunState,
     /// Owners whose runs were sealed by the current `record_into`.
     finished_owners: Vec<NodeId>,
-    /// Strict descendants that open layers. Recomputed at the start of each record.
-    subtree_layers: HashMap<NodeId, bool>,
-    /// Strict descendants that own a picture, from a list row or a canvas.
-    subtree_owners: HashMap<NodeId, bool>,
+    /// Layer and picture ownership summaries, invalidated along changed paths.
+    subtree_layers: HashMap<NodeId, record::SubtreeLayers>,
     /// Parent layer while `record` is linking the layer tree.
     layer_stack: Vec<protocol::LayerId>,
     /// Last sibling linked under each layer, indexed by [`protocol::LayerId`].
@@ -99,6 +96,7 @@ pub struct Tree {
     picture_writes: usize,
     /// Bumps when a picture is rebuilt or a layer property changes.
     layer_epoch: u64,
+    canvas_geometry_epoch: u64,
     layers: crate::layer::LayerTree,
     /// Last semantics nodes. A clean node reuses its strings.
     semantics_cache: HashMap<crate::SemanticsId, crate::SemanticsNode>,
@@ -115,6 +113,7 @@ pub struct Tree {
     layout_passes: u64,
     /// Text nodes whose paint key must be retained before the next record.
     pending_text: Vec<NodeId>,
+    changed_text: Vec<NodeId>,
     sync_visited: u32,
     sync_synced: u32,
     sync_ms: f64,
@@ -123,6 +122,9 @@ pub struct Tree {
     layout_work_ms: f64,
     /// `layout` calls that entered Taffy since the last trace.
     layout_entries: u32,
+    root_layouts: u32,
+    local_layouts: u32,
+    same_text_layouts: u32,
     /// First reason `needs_layout` became true since the last trace.
     layout_cause: LayoutCause,
     text_reused: Cell<u32>,
@@ -133,6 +135,7 @@ pub struct Tree {
     scroll_semantics: Vec<NodeId>,
     /// Hint or structure changed. The next patch walks the whole tree.
     semantics_full: bool,
+    semantics_enabled: bool,
     /// Reused by [`Tree::sweep_subtree_layers`].
     sweep_stack: Vec<record::SweepFrame>,
     sweep_children: Vec<NodeId>,
@@ -318,7 +321,12 @@ mod canvas_tests {
         assert_eq!(tree.layout_passes(), passes);
         tree.record()?;
         assert!(tree.pictures.contains_key(&row));
-        assert_eq!(tree.subtree_owners.get(&parent).copied(), Some(true));
+        assert_eq!(
+            tree.subtree_layers
+                .get(&parent)
+                .map(|summary| summary.picture_owners),
+            Some(true)
+        );
 
         // Replacing the list does not clear the list-row bit or dirty the parent
         // again: this node was already a picture owner.
@@ -572,6 +580,58 @@ mod canvas_tests {
             )
             .is_none()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn canvas_culling_tracks_nested_clips_scroll_and_resize() -> Result<(), Error> {
+        let mut tree = Tree::new(MonoShaper::default());
+        tree.set_viewport(0.0, 0.0, 140.0, 100.0)?;
+        let outer = tree.scroll()?;
+        let page = tree.column(0.0)?;
+        let clip = tree.clip(12.0)?;
+        let inner = tree.scroll()?;
+        let stack = tree.column(0.0)?;
+        let spacer = tree.sized(80.0, 130.0)?;
+        let canvas = tree.sized(80.0, 40.0)?;
+        let tail = tree.sized(80.0, 100.0)?;
+        let below = tree.sized(80.0, 200.0)?;
+        tree.set_size(outer, 100.0, 80.0)?;
+        tree.set_size(clip, 100.0, 80.0)?;
+        tree.set_size(inner, 100.0, 80.0)?;
+        tree.add_child(outer, page)?;
+        tree.add_child(page, clip)?;
+        tree.add_child(page, below)?;
+        tree.add_child(clip, inner)?;
+        tree.add_child(inner, stack)?;
+        for child in [spacer, canvas, tail] {
+            tree.add_child(stack, child)?;
+        }
+        tree.layout()?;
+        assert!(tree.canvas_is_offscreen(canvas));
+        let epoch = tree.canvas_geometry_epoch();
+        tree.set_scroll_offset(inner, 0.0, 140.0)?;
+        assert_ne!(tree.canvas_geometry_epoch(), epoch);
+        assert!(!tree.canvas_is_offscreen(canvas));
+        tree.set_scroll_offset(outer, 0.0, 100.0)?;
+        assert!(tree.canvas_is_offscreen(canvas));
+
+        tree.set_scroll_offset(outer, 0.0, 0.0)?;
+        assert!(!tree.canvas_is_offscreen(canvas));
+        tree.apply_overscroll(inner, crate::AnimProp::OverscrollY, -100.0);
+        assert!(tree.canvas_is_offscreen(canvas));
+        tree.apply_overscroll(inner, crate::AnimProp::OverscrollY, 0.0);
+        assert!(!tree.canvas_is_offscreen(canvas));
+
+        tree.set_viewport(0.0, 0.0, 40.0, 8.0)?;
+        tree.set_scroll_offset(inner, 0.0, 110.0)?;
+        tree.layout()?;
+        assert!(tree.canvas_is_offscreen(canvas));
+        tree.set_viewport(0.0, 0.0, 140.0, 100.0)?;
+        tree.layout()?;
+        assert!(!tree.canvas_is_offscreen(canvas));
+        tree.remove(stack, canvas)?;
+        assert!(tree.canvas_is_offscreen(canvas));
         Ok(())
     }
 

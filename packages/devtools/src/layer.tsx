@@ -319,7 +319,6 @@ function Panel(props: { close(): void }) {
 /** The whole devtools layer: button + banner + panel, mounted on top. */
 export function DevtoolsLayer(props: { launcher?: boolean } = {}): NodeHandle {
   store.attach();
-  scene.debugSetScan?.(true);
   const root = (
     <stack
       ref={(node) => {

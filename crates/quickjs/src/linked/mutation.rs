@@ -1169,6 +1169,7 @@ pub(super) unsafe fn push_mutation(
 
 /// `rect` reads geometry, so a queued style write has to land first.
 pub(super) fn flush_for_read(inner: &Inner) -> i32 {
+    let _trace = session::trace::Section::begin(c"Impasto synchronous geometry");
     if flush_mutations(inner).is_err() {
         return -1;
     }

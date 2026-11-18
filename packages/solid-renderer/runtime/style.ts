@@ -27,6 +27,9 @@ export function bindStyleTo(
     port.removeStyleSource(classes);
     port.removeStyleSource(inline);
   });
+  let hasDefaults = false;
+  let lastClasses = "";
+  let hasInline = false;
   createRenderEffect(
     () => ({
       defaults: spec.defaults,
@@ -41,9 +44,18 @@ export function bindStyleTo(
       style: spec.style,
     }),
     (value) => {
-      port.setStyleSource(defaults, value.defaults);
-      port.setStyleSource(classes, value.classes);
-      port.setStyleSource(inline, value.style);
+      if (hasDefaults || value.defaults != null) {
+        port.setStyleSource(defaults, value.defaults);
+        hasDefaults = value.defaults != null;
+      }
+      if (lastClasses !== value.classes) {
+        port.setStyleSource(classes, value.classes);
+        lastClasses = value.classes;
+      }
+      if (hasInline || value.style != null) {
+        port.setStyleSource(inline, value.style);
+        hasInline = value.style != null;
+      }
     },
   );
 }

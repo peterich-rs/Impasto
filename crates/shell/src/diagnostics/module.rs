@@ -2,9 +2,127 @@
 
 use std::sync::Arc;
 
-use session::{Method, Module, PluginValue};
+use session::{Method, Module, ModuleExports, PluginValue};
 
 use super::hub::{DiagnosticsHub, LogSource, PhaseSample};
+
+const TYPESCRIPT: &str = r#"export type LogLevel = "ERROR" | "WARN" | "INFO" | "DEBUG" | "TRACE";
+export type LogSource = "script" | "layout" | "host" | "net";
+export type LogLine = {
+  seq: number;
+  at: number;
+  level: LogLevel;
+  source: LogSource;
+  target: string;
+  text: string;
+  frame: number | null;
+};
+export type DiagError = {
+  seq: number;
+  at: number;
+  source: string;
+  message: string;
+  stack: string | null;
+  frame: number | null;
+};
+export type NetEntry = {
+  seq: number;
+  at: number;
+  kind: "http" | "stream" | "socket";
+  token: number;
+  method: string;
+  url: string;
+  requestHeaders: [string, string][];
+  requestBody: string | null;
+  status: number | null;
+  responseHeaders: [string, string][];
+  responseBytes: number | null;
+  responsePreview: string | null;
+  error: string | null;
+  doneAt: number | null;
+};
+export type PhaseSample = {
+  motionMs: number;
+  dispatchMs: number;
+  timerMs: number;
+  rafMs: number;
+  callbackMs: number;
+  flushMs: number;
+  layoutCbMs: number;
+  syncMs: number;
+  semanticsMs: number;
+  layworkMs: number;
+  passes: number;
+  reuse: number;
+  shaped: number;
+  pointers: number;
+  keys: number;
+  edits: number;
+  ime: number;
+  scrolls: number;
+  focus: number;
+  blur: number;
+  canvasRecordMs: number;
+  canvasPrepareMs: number;
+  canvasOps: number;
+  canvasSegments: number;
+  canvasRedraws: number;
+  canvasReused: number;
+};
+export type FrameSample = {
+  seq: number;
+  number: number;
+  at: number;
+  workMs: number;
+  budgetMs: number;
+  sessionMs: number;
+  gestureMs: number;
+  scriptMs: number;
+  layoutMs: number;
+  recordMs: number;
+  submitMs: number;
+  presentMs: number;
+  layers: number;
+  paragraphs: number;
+  pictures: number;
+  textures: number;
+  shapesBuilt?: number;
+  shapesBridged?: number;
+  paintHit?: number;
+  paintMiss?: number;
+  pictureRebuilt?: number;
+  pictureReused?: number;
+  layoutCause?: string;
+  gestures?: number;
+  overBudget: boolean;
+  phases?: PhaseSample;
+};
+
+export type Page<T> = { revision: number; entries: T[] };
+
+export type Flags = {
+  layoutScan: boolean;
+  pointerTrace: boolean;
+  suppressDispatch: boolean;
+};
+
+type Insets = { left: number; top: number; right: number; bottom: number };
+
+export type Platform = {
+  os: string;
+  osVersion: string;
+  scale: number;
+  viewport: { w: number; h: number; dpr: number };
+  insets: Insets;
+  padding: Insets;
+  viewInsets: Insets;
+  appState: string;
+  log: string;
+  devtools: boolean;
+  dump: string | null;
+};
+
+export type Versions = { shell: string; enginePin: string; quickjsPin: string };"#;
 
 /// Extra host facts the hub does not own.
 #[derive(Clone)]
@@ -100,6 +218,7 @@ fn logs_channel(hub: &Arc<DiagnosticsHub>) -> Method {
             ("entries", PluginValue::List(entries)),
         ]))
     })
+    .with_types("since?: number", "Page<LogLine>")
 }
 
 fn errors_channel(hub: &Arc<DiagnosticsHub>) -> Method {
@@ -132,6 +251,7 @@ fn errors_channel(hub: &Arc<DiagnosticsHub>) -> Method {
             ("entries", PluginValue::List(entries)),
         ]))
     })
+    .with_types("since?: number", "Page<DiagError>")
 }
 
 fn network_channel(hub: &Arc<DiagnosticsHub>) -> Method {
@@ -187,6 +307,7 @@ fn network_channel(hub: &Arc<DiagnosticsHub>) -> Method {
             ("entries", PluginValue::List(entries)),
         ]))
     })
+    .with_types("since?: number", "Page<NetEntry>")
 }
 
 fn phase_map(phase: PhaseSample) -> PluginValue {
@@ -233,6 +354,8 @@ fn frames_channel(hub: &Arc<DiagnosticsHub>) -> Method {
                     ("number", num(frame.number)),
                     ("at", fnum(frame.at_ms)),
                     ("sessionMs", fnum(frame.session_ms)),
+                    ("workMs", fnum(frame.work_ms)),
+                    ("budgetMs", fnum(frame.budget_ms)),
                     ("gestureMs", fnum(frame.gesture_ms)),
                     ("scriptMs", fnum(frame.script_ms)),
                     ("layoutMs", fnum(frame.layout_ms)),
@@ -264,6 +387,7 @@ fn frames_channel(hub: &Arc<DiagnosticsHub>) -> Method {
             ("entries", PluginValue::List(entries)),
         ]))
     })
+    .with_types("since?: number", "Page<FrameSample>")
 }
 
 fn edge_map(left: f32, top: f32, right: f32, bottom: f32) -> PluginValue {
@@ -333,6 +457,7 @@ fn platform_method(hub: &Arc<DiagnosticsHub>, context: &DevtoolsContext) -> Meth
             ),
         ]))
     })
+    .with_types("", "Platform")
 }
 
 fn versions_method() -> Method {
@@ -346,6 +471,7 @@ fn versions_method() -> Method {
             ("quickjsPin", PluginValue::Str(quickjs_pin().to_owned())),
         ]))
     })
+    .with_types("", "Versions")
 }
 
 fn engine_pin() -> &'static str {
@@ -372,6 +498,7 @@ fn flags_pair(hub: &Arc<DiagnosticsHub>) -> Method {
             ),
         ]))
     })
+    .with_types("", "Flags")
 }
 
 fn set_flags(hub: &Arc<DiagnosticsHub>) -> Method {
@@ -400,6 +527,7 @@ fn set_flags(hub: &Arc<DiagnosticsHub>) -> Method {
         hub.set_flags(flags);
         Ok(PluginValue::Null)
     })
+    .with_types("flags?: Partial<Flags>", "void")
 }
 
 fn clear_logs(hub: &Arc<DiagnosticsHub>) -> Method {
@@ -409,6 +537,7 @@ fn clear_logs(hub: &Arc<DiagnosticsHub>) -> Method {
         hub.errors.lock().unwrap_or_else(|p| p.into_inner()).clear();
         Ok(PluginValue::Null)
     })
+    .with_types("", "void")
 }
 
 /// Builds `@impasto/devtools`. Every method is a sync clone over the
@@ -417,11 +546,16 @@ pub fn module(hub: Arc<DiagnosticsHub>, context: DevtoolsContext) -> Module {
     Module {
         name: "Devtools",
         specifier: "@impasto/devtools",
+        exports: ModuleExports {
+            typescript: TYPESCRIPT,
+            ..Default::default()
+        },
         methods: vec![
             Method::sync("enabled", {
                 let enabled = context.enabled;
                 move |_| Ok(PluginValue::Bool(enabled))
-            }),
+            })
+            .with_types("", "boolean"),
             Method::sync("sourceMap", {
                 let context = context.clone();
                 move |_| {
@@ -430,11 +564,13 @@ pub fn module(hub: Arc<DiagnosticsHub>, context: DevtoolsContext) -> Module {
                         None => PluginValue::Null,
                     })
                 }
-            }),
+            })
+            .with_types("", "string | null"),
             Method::sync("revision", {
                 let hub = Arc::clone(&hub);
                 move |_| Ok(num(hub.revision()))
-            }),
+            })
+            .with_types("", "number"),
             logs_channel(&hub),
             errors_channel(&hub),
             network_channel(&hub),
@@ -456,7 +592,8 @@ pub fn module(hub: Arc<DiagnosticsHub>, context: DevtoolsContext) -> Module {
                 .map(|s| PluginValue::Str(s.name().to_owned()))
                 .collect();
                 Ok(PluginValue::List(names))
-            }),
+            })
+            .with_types("", "LogSource[]"),
         ],
     }
 }

@@ -9,7 +9,11 @@ import { stroke } from "./chart.tsx";
 type Book = ReturnType<typeof book>;
 type Levels = 5 | 10;
 const indices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-const right = { textAlign: "right", width: 58 } as const;
+function QuoteColumn(props: { value: string; height?: number; size?: number; color?: string }) {
+  return <Column style={{ width: 58, height: props.height ?? 24, justifyContent: "center" }}>
+    <Label style={{ width: "100%", textAlign: "right" }} size={props.size} color={props.color}>{props.value}</Label>
+  </Column>;
+}
 
 export function OrderBook(props: { book: Book; count: Levels; previous: number; onToggle: () => void; onLevel: (side: "buy" | "sell", price: number) => void }) {
   const levels = () => indices.slice(0, props.count);
@@ -20,19 +24,19 @@ export function OrderBook(props: { book: Book; count: Levels; previous: number; 
     <Pressable role={Role.Button} onClick={() => props.onLevel(side === "bid" ? "sell" : "buy", read().price)}
       style={{ height: 24, flexDirection: "row", alignItems: "center", gap: 8 }}>
       <View style={{ position: "absolute", top: 1, bottom: 1, right: 0,
-        width: `${read().total / Math.max(bids(), asks()) * 57}%`,
+        width: "57%", scaleX: read().total / Math.max(1, bids(), asks()), transformOriginX: "100%",
         backgroundColor: `${side === "bid" ? colors.up : colors.down}17` }} />
       <Label style={{ width: 28 }} size={11} color={colors.faint}>{`${side === "bid" ? "B" : "A"}${number}`}</Label>
       <Label style={{ flex: 1 }} color={tone(read().price - props.previous)}>{fmtPrice(read().price)}</Label>
-      <Label style={right}>{compact(read().size)}</Label>
-      <Label style={right} size={11} color={colors.faint}>{compact(read().total)}</Label>
+      <QuoteColumn value={compact(read().size)} />
+      <QuoteColumn value={compact(read().total)} size={11} color={colors.faint} />
     </Pressable>
   );
   return <Section title={loc("盘口", "Order book")} action={<Action label={props.count === 5 ? "5 → 10" : "10 → 5"}
     title={props.count === 5 ? loc("显示十档", "Show ten levels") : loc("显示五档", "Show five levels")} onClick={props.onToggle} />}>
     <Column style={{ gap: 5 }}>
       <Row style={{ height: 6, backgroundColor: colors.down, borderRadius: 3, overflow: "hidden" }}>
-        <View style={{ width: `${share()}%`, height: 6, backgroundColor: colors.up }} />
+        <View style={{ width: "100%", height: 6, scaleX: share() / 100, transformOriginX: 0, backgroundColor: colors.up }} />
       </Row>
       <Row style={{ justifyContent: "space-between", gap: 4 }}>
         <Label size={11} color={colors.up}>{loc(`委买 ${share()}%`, `BID ${share()}%`)}</Label>
@@ -44,8 +48,8 @@ export function OrderBook(props: { book: Book; count: Levels; previous: number; 
       <Row style={{ height: 22, gap: 8 }}>
         <Label style={{ width: 28 }} size={10} color={colors.faint}>{loc("档位", "LVL")}</Label>
         <Label style={{ flex: 1 }} size={10} color={colors.faint}>{loc("价格", "PRICE")}</Label>
-        <Label style={right} size={10} color={colors.faint}>{loc("数量", "SIZE")}</Label>
-        <Label style={right} size={10} color={colors.faint}>{loc("累计", "TOTAL")}</Label>
+        <QuoteColumn value={loc("数量", "SIZE")} height={22} size={10} color={colors.faint} />
+        <QuoteColumn value={loc("累计", "TOTAL")} height={22} size={10} color={colors.faint} />
       </Row>
       <For each={levels().reverse()}>{(index) => levelRow(() => props.book.asks[index]!, "ask", index + 1)}</For>
       <Rule />
@@ -58,7 +62,7 @@ export function Depth(props: { book: Book }) {
   const totalBid = () => props.book.bids.at(-1)!.total;
   const totalAsk = () => props.book.asks.at(-1)!.total;
   return <Section title={loc("深度", "Depth")} note={loc("±12 档 · 累计", "±12 ticks · cumulative")}>
-    <Canvas style={{ width: "100%", height: 115 }} accessibilityLabel={loc("累计深度图", "Cumulative depth chart")}
+    <Canvas deferWhenOffscreen style={{ width: "100%", height: 115 }} accessibilityLabel={loc("累计深度图", "Cumulative depth chart")}
       draw={(ctx, { width, height }) => {
         if (width < 40) return;
         const bottom = height - 17;

@@ -86,6 +86,14 @@ pub use missing::VulkanSwapchain;
 #[cfg(all(impeller, target_os = "android"))]
 pub use player::VulkanSwapchain;
 
+#[cfg(target_os = "android")]
+#[derive(Clone, Copy, Debug)]
+pub enum VulkanPhase {
+    Acquire,
+    Draw,
+    Present,
+}
+
 /// Text, size, width, color, and style that identify one measured paragraph.
 #[derive(Clone, Copy)]
 pub struct ParagraphQuery<'a> {

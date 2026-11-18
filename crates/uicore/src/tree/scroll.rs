@@ -115,9 +115,12 @@ impl Tree {
             !same
         };
         if wrote {
+            self.canvas_geometry_changed();
             self.layer_epoch = self.layer_epoch.wrapping_add(1);
             self.mark_paint();
-            self.scroll_semantics.push(id);
+            if self.semantics_enabled {
+                self.scroll_semantics.push(id);
+            }
             if !applying {
                 self.rebase_scroll(id, desired_x, desired_y);
                 self.scroll_notices.push(Gesture::Scroll(id, ox, oy));
@@ -690,6 +693,7 @@ impl Tree {
                 geom.overscroll_y = value;
             }
         }
+        self.canvas_geometry_changed();
         self.layer_epoch = self.layer_epoch.wrapping_add(1);
         self.mark_paint();
         // A coast that hits the wall starts an overscroll spring at x0 = 0
@@ -1197,6 +1201,7 @@ impl Tree {
         };
         geom.offset_x = nx;
         geom.offset_y = ny;
+        self.canvas_geometry_changed();
         self.layer_epoch = self.layer_epoch.wrapping_add(1);
         self.mark_paint();
     }

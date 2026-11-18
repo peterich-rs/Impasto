@@ -69,6 +69,45 @@ Android 的 `TextEvent` 下标是 UTF-16，宿主先换成字节下标。键盘�
 
 `Hidden`、`Paused`、`MemoryWarning` 调用 `Engine::trim` 进入 `Flush`。连续 `PresentFailed`、`NotReady` 或 `AcquireMiss` 从第 3 次起退避，16ms 起翻倍，上限 1000ms。`BadScene` 不计入。同一表面打开 `NotReady` 最多再试 120 次。
 
+### Android 帧性能
+
+Gallery 的 release 构建可通过 `-PimpastoProfile=true` 生成可由 adb 采样的 `dev.impasto.host.profile`。它有独立的应用数据。回放使用竖屏，性能面板关闭，详情固定为 00700。脚本采集冷启动、详情入场、首页行情、分时、日 K、行情开启和暂停的光标拖动，以及列表纵向拖动。
+
+```sh
+just gallery-dist
+crates/android/apk/gradlew -p crates/android/apk -PimpastoProfile=true assembleRelease
+adb install -r crates/android/apk/app/build/outputs/apk/release/app-release.apk
+FRAME_REFRESH=120 tools/android-frame-replay.sh target/android-perf/120 3
+FRAME_REFRESH=60 tools/android-frame-replay.sh target/android-perf/60 1
+python3 tools/android-frame-report.py target/android-perf/120 --hz 120
+python3 tools/android-frame-report.py target/android-perf/60 --hz 60
+```
+
+报告脚本使用 Python 的 `perfetto` 包。回放结束恢复原刷新率设置。单条手动采集可用 `tools/android-frame-trace.sh OUTPUT`。
+
+`Impasto frame` 覆盖渲染线程处理一帧的完整区间。报告按发起呈现的帧计算 P50、P95、峰值和超预算比例，另计跳过呈现与新层树提交次数。`Impasto work` 记录根布局、局部布局、同输出文字、输入、响应式更新和 Canvas 次数；`Impasto Canvas commit` 记录节点、内容盒高度和绘制命令数。Pixel 9 竖屏详情页的主图高度是 204 点。Vulkan 的 acquire、draw 和 present 各有独立区间。
+
+SurfaceFlinger 的 `--latency` 记录提供实际呈现时间。报告将对应的 `queueBuffer` 与送达应用的触摸事件配对，保留配对样本数。首屏统计从启动到首页首个走势 Canvas 实际呈现，详情入场统计从点击到详情主图实际呈现。提交帧 CPU 耗时、实际呈现间隔与输入到呈现延迟分别汇报。
+
+#### Pixel 9 回放
+
+同一 release profile APK 在 120 Hz 复跑三轮，60 Hz 回归一轮。下表为 120 Hz，单位是毫秒。基线取同一回放脚本的优化前 APK。预算为 8.33 ms。
+
+| 场景 | 基线 P95 | 提交帧 | P50 | P95 | 峰值 | 超预算 | 实际呈现间隔 P95 | 输入到呈现 P95 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 首页行情 | 18.93 | 729 | 5.83 | 18.43 | 26.00 | 20.58% | 141.80 | — |
+| 00700 分时 | 58.02 | 84 | 42.24 | 49.16 | 50.47 | 100% | 216.97 | — |
+| 00700 日 K | 62.64 | 87 | 45.39 | 50.71 | 53.52 | 100% | 225.22 | — |
+| 暂停行情拖光标 | 17.47 | 665 | 11.85 | 15.27 | 20.89 | 95.94% | 25.07 | 39.08 |
+| 行情开启拖光标 | 31.10 | 718 | 10.91 | 27.20 | 50.75 | 85.10% | 41.73 | 42.63 |
+| 列表纵向拖动 | 8.85 | 1628 | 4.88 | 8.25 | 34.19 | 4.85% | 16.73 | 34.24 |
+
+冷启动到首屏走势呈现的 P50 为 432.63 ms，配对两轮。点入 00700 到主图呈现的 P50 为 116.17 ms，配对三轮。60 Hz 下列表 P95 为 14.02 ms，超预算比例 2.54%。首页 P95 为 17.15 ms，分时和日 K 的 P95 分别为 45.91 和 51.39 ms。
+
+暂停行情的 665 次提交中，Canvas 回调、准备和提交均为 0。日 K 静置只录制主图和页头行情标尺。首页记录 2950 次同输出文字复用。固定盒零根布局由自动化对照验证，详情页回放仍在行情更新和光标拖动帧进入根布局。
+
+日 K 提交帧的响应式冲刷、布局和 Vulkan draw 的 P95 分别为 18.97、15.71、7.36 ms。Vulkan acquire 和 present 的 P95 分别为 0.28、1.06 ms。完整呈现策略继续以这些分段数据与 SurfaceFlinger 记录为依据。
+
 ## 表面
 
 `SurfaceChanged` 只更新尺寸，Vulkan 链保留。`SurfaceDestroyed` 由渲染线程丢掉 `Surface` 并应答。Android 的 `surface-drop` 等到应答后才 `ANativeWindow_release`。macOS 不投递 `SurfaceDestroyed`。尺寸变化不丢链。空 acquire 是 `AcquireMiss`；Vulkan 连续 3 次后用同一窗口重建。

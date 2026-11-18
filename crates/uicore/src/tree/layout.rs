@@ -39,6 +39,9 @@ impl Tree {
         }
         self.note_layout(LayoutCause::Viewport);
         if let Some(root) = self.root {
+            if let Some(taffy) = self.node(root)?.taffy {
+                self.taffy.dirty_root(taffy);
+            }
             self.mark_layout_from(root);
             self.dirty_every_picture();
         } else {
@@ -65,7 +68,11 @@ impl Tree {
         finite_number(top)?;
         finite_number(right)?;
         finite_number(bottom)?;
-        self.window = (window_w.max(0.0), window_h.max(0.0));
+        let window = (window_w.max(0.0), window_h.max(0.0));
+        if self.window != window {
+            self.window = window;
+            self.canvas_geometry_changed();
+        }
         self.safe = (left.max(0.0), top.max(0.0), right.max(0.0), bottom.max(0.0));
         Ok(())
     }
@@ -98,12 +105,18 @@ impl Tree {
         let trace = LayoutTrace {
             laywork_ms: self.layout_work_ms,
             passes: self.layout_entries,
+            root_layouts: self.root_layouts,
+            local_layouts: self.local_layouts,
+            same_text_layouts: self.same_text_layouts,
             text_reused: self.text_reused.take(),
             text_shaped: self.text_shaped.take(),
             cause: self.layout_cause,
         };
         self.layout_work_ms = 0.0;
         self.layout_entries = 0;
+        self.root_layouts = 0;
+        self.local_layouts = 0;
+        self.same_text_layouts = 0;
         self.layout_cause = LayoutCause::None;
         trace
     }
@@ -131,19 +144,17 @@ impl Tree {
 
     /// A layer property changed and the run commands did not.
     pub(super) fn paint_layer_value(&mut self) {
+        self.canvas_geometry_changed();
         self.layer_epoch = self.layer_epoch.wrapping_add(1);
         self.mark_paint();
     }
 
     /// The open-layer bracket flipped. Dirty every ancestor so outer runs rebuild.
     ///
-    /// Recomputes `subtree_layers` first. A clip's layer bit depends on descendants,
-    /// and the map from the previous frame would stop the walk too early.
+    /// A clip's layer bit depends on descendants, so its summary is invalidated.
     pub(super) fn repaint_ancestors(&mut self, id: NodeId) {
-        if let Some(root) = self.root {
-            self.subtree_layers.clear();
-            let _ = self.sweep_subtree_layers(root);
-        }
+        self.canvas_geometry_changed();
+        self.invalidate_subtree_layers(id);
         let mut current = Some(id);
         while let Some(node_id) = current {
             if let Ok(node) = self.node_mut(node_id) {
@@ -191,6 +202,7 @@ impl Tree {
             return Ok(());
         }
         self.node_mut(id)?.flags.set(NodeFlags::PICTURE_OWNER, on);
+        self.invalidate_subtree_layers(id);
         self.dirty_picture(id);
         if let Some(parent) = self.get(id).and_then(|node| node.parent) {
             self.dirty_picture(parent);
@@ -234,6 +246,7 @@ impl Tree {
         if was_owner == self.is_picture_owner(id) {
             self.mark_repaint(id);
         } else {
+            self.invalidate_subtree_layers(id);
             self.dirty_picture(id);
             if let Some(parent) = self.get(id).and_then(|node| node.parent) {
                 self.dirty_picture(parent);
@@ -245,7 +258,10 @@ impl Tree {
     }
 
     pub(super) fn renders_layer_node(&self, id: NodeId) -> bool {
-        let subtree = self.subtree_layers.get(&id).copied().unwrap_or(false);
+        let subtree = self
+            .subtree_layers
+            .get(&id)
+            .is_some_and(|value| value.effects);
         self.get(id)
             .is_some_and(|node| node.renders_layers(subtree))
     }
@@ -259,7 +275,6 @@ impl Tree {
         let Some(root) = self.root else {
             return;
         };
-        self.subtree_layers.clear();
         let _ = self.sweep_subtree_layers(root);
         let ids: Vec<NodeId> = self
             .slots
@@ -1146,47 +1161,50 @@ impl Tree {
         let started = std::time::Instant::now();
         let mut measured = Vec::new();
         self.open_measure();
+        self.check_changed_text()?;
+        self.taffy.begin_layout();
         let taffy_started = std::time::Instant::now();
-        {
-            let shaper = &mut *self.shaper;
+        let (root_pass, local) = {
             let mut env = MeasureEnv {
                 slots: &self.slots,
-                shaper,
+                shaper: &mut *self.shaper,
                 text_scale: self.text_scale,
                 text_reused: &self.text_reused,
                 text_shaped: &self.text_shaped,
                 provisional: HashMap::new(),
             };
-            self.taffy.compute_layout_with_measure(
-                root_taffy,
-                available,
-                |inputs, _id, context, style| {
-                    leaf_output(inputs, style, |known, available| {
-                        measure_leaf(&mut env, known, available, context, &mut measured)
-                    })
-                },
-            )?;
-        }
-        self.taffy_ms = taffy_started.elapsed().as_secs_f64() * 1000.0;
+            let mut measure = |inputs, context, style: &Style| {
+                leaf_output(inputs, style, |known, available| {
+                    measure_leaf(&mut env, known, available, context, &mut measured)
+                })
+            };
+            let (root_pass, local) = self.taffy.relayout(!self.laid_out, &mut measure);
+            if root_pass {
+                self.taffy
+                    .compute_layout_with_measure(root_taffy, available, &mut measure);
+            }
+            (root_pass, local)
+        };
+        self.taffy_ms += taffy_started.elapsed().as_secs_f64() * 1000.0;
         for id in measured {
             self.note_text(id);
         }
-        let boundaries = std::mem::take(&mut self.dirty_boundaries);
-        if boundaries.is_empty() {
+        if root_pass {
             self.place_boundary(root)?;
+            self.root_layouts = self.root_layouts.saturating_add(1);
         } else {
-            for id in boundaries {
-                let dirty = self
-                    .node(id)
-                    .ok()
-                    .is_some_and(|node| node.flags.contains(NodeFlags::BOUNDARY_DIRTY));
-                if dirty {
-                    self.place_boundary(id)?;
-                }
+            for &id in &local {
+                self.place_boundary(id)?;
             }
         }
-        self.layout_passes = self.layout_passes.saturating_add(1);
-        self.layout_entries = self.layout_entries.saturating_add(1);
+        self.local_layouts = self
+            .local_layouts
+            .saturating_add(crate::cast::u32_from_usize(local.len()));
+        if root_pass || !local.is_empty() {
+            self.layout_passes = self.layout_passes.saturating_add(1);
+            self.layout_entries = self.layout_entries.saturating_add(1);
+            self.canvas_geometry_changed();
+        }
         self.needs_layout = false;
         self.needs_paint = true;
         self.laid_out = true;
@@ -1194,6 +1212,67 @@ impl Tree {
         self.layout_work_ms += started.elapsed().as_secs_f64() * 1000.0;
         if self.debug.scan_overflow {
             self.scan_overflow();
+        }
+        Ok(())
+    }
+
+    pub(super) fn queue_text_measure(&mut self, id: NodeId) {
+        self.note_layout(LayoutCause::Text);
+        self.note_text(id);
+        if !self.changed_text.contains(&id) {
+            self.changed_text.push(id);
+        }
+        self.mark_layout();
+        self.mark_repaint(id);
+    }
+
+    fn check_changed_text(&mut self) -> Result<(), Error> {
+        for id in std::mem::take(&mut self.changed_text) {
+            let Some(slot) = self
+                .slots
+                .get(id.index as usize)
+                .filter(|slot| slot.generation == id.generation)
+            else {
+                continue;
+            };
+            let Some(node) = &slot.node else {
+                continue;
+            };
+            let Some(taffy) = node.taffy else {
+                continue;
+            };
+            let reuse = if let Some(text) = node.text()
+                && self.laid_out
+                && self.taffy.can_probe_text(taffy)
+            {
+                let width = text.max_width.get();
+                let mut env = MeasureEnv {
+                    slots: &self.slots,
+                    shaper: &mut *self.shaper,
+                    text_scale: self.text_scale,
+                    text_reused: &self.text_reused,
+                    text_shaped: &self.text_shaped,
+                    provisional: HashMap::new(),
+                };
+                let same = self
+                    .taffy
+                    .text_outputs_match(taffy, |inputs, context, style| {
+                        env.provisional.clear();
+                        leaf_output(inputs, style, |known, available| {
+                            measure_leaf(&mut env, known, available, context, &mut Vec::new())
+                        })
+                    });
+                text.max_width.set(width);
+                same
+            } else {
+                false
+            };
+            if reuse {
+                self.same_text_layouts = self.same_text_layouts.saturating_add(1);
+            } else {
+                self.taffy.mark_dirty(taffy)?;
+                self.mark_layout_from(id);
+            }
         }
         Ok(())
     }
@@ -1257,12 +1336,13 @@ impl Tree {
         self.taffy.compute_layout_with_measure(
             taffy_id,
             Size { width, height },
-            |inputs, _id, context, style| {
+            |inputs, context, style| {
                 leaf_output(inputs, style, |known, available| {
                     measure_leaf(&mut env, known, available, context, measured)
                 })
             },
-        )?;
+        );
+        self.taffy.forget_parent_input(taffy_id);
         Ok(self.taffy.layout(taffy_id)?.size)
     }
 
@@ -1310,6 +1390,7 @@ impl Tree {
             node.flags.insert(NodeFlags::BOUNDARY_DIRTY);
         }
         self.place_boundary(id)?;
+        self.canvas_geometry_changed();
         self.layout_work_ms += started.elapsed().as_secs_f64() * 1000.0;
         Ok((size.width, size.height))
     }
@@ -1399,6 +1480,9 @@ impl Tree {
         }
         if let Some(taffy_id) = taffy_id {
             self.taffy.set_style(taffy_id, style)?;
+            if is_root {
+                self.taffy.dirty_root(taffy_id);
+            }
         }
         if !self.style_applying {
             let preset = self.node(id)?.style.clone();
@@ -1454,9 +1538,6 @@ impl Tree {
                         node.flags.insert(NodeFlags::RELAYOUT_BOUNDARY);
                     }
                 }
-                if !self.dirty_boundaries.contains(&id) {
-                    self.dirty_boundaries.push(id);
-                }
                 return;
             }
             let Some(parent) = parent else {
@@ -1471,12 +1552,18 @@ impl Tree {
         let mut child = self.node(id)?.first_child;
         while let Some(current) = child {
             let next = self.node(current)?.next;
-            self.write_box_from_taffy(current)?;
             let flags = self.node(current)?.flags;
-            let descend = flags.contains(NodeFlags::LAYOUT_DIRTY)
+            let changed = self
+                .node(current)?
+                .taffy
+                .is_some_and(|taffy| self.taffy.subtree_changed(taffy));
+            let descend = changed
+                || flags.intersects(NodeFlags::LAYOUT_DIRTY | NodeFlags::BOUNDARY_DIRTY)
                 || !flags.contains(NodeFlags::RELAYOUT_BOUNDARY);
             if descend {
                 self.place_boundary(current)?;
+            } else {
+                self.write_box_from_taffy(current)?;
             }
             child = next;
         }
@@ -1517,7 +1604,6 @@ impl Tree {
             node.flags
                 .remove(NodeFlags::LAYOUT_DIRTY | NodeFlags::BOUNDARY_DIRTY);
         }
-        self.dirty_boundaries.retain(|boundary| *boundary != id);
     }
 }
 
@@ -1598,6 +1684,9 @@ impl LayoutCause {
 pub struct LayoutTrace {
     pub laywork_ms: f64,
     pub passes: u32,
+    pub root_layouts: u32,
+    pub local_layouts: u32,
+    pub same_text_layouts: u32,
     pub text_reused: u32,
     pub text_shaped: u32,
     pub cause: LayoutCause,
@@ -1759,11 +1848,11 @@ fn justify_content(justify: Justify) -> JustifyContent {
 /// pass uses a million-point constraint, which misses the paint slot and builds a
 /// paragraph that is thrown away. A result that already fits inside its old
 /// constraint is the same at any wider limit, including that probe.
-fn reusable_text_size(
+fn reusable_text_metrics(
     text: &super::node::TextPayload,
     font_size: f32,
     max_width: f32,
-) -> Option<TextSize> {
+) -> Option<&crate::ParagraphMetrics> {
     let cached = text.cached.as_ref()?;
     let metrics = text.metrics.as_ref()?;
     let key = &cached.metrics;
@@ -1779,10 +1868,10 @@ fn reusable_text_size(
     let old = f32::from_bits(key.max_width);
     let size = metrics.size;
     if key.max_width == max_width.to_bits() {
-        return Some(size);
+        return Some(metrics);
     }
     if size.width + 0.5 < old && size.width <= max_width + 0.5 {
-        return Some(size);
+        return Some(metrics);
     }
     None
 }
@@ -1817,23 +1906,8 @@ struct MeasureEnv<'a> {
     text_scale: f32,
     text_reused: &'a Cell<u32>,
     text_shaped: &'a Cell<u32>,
-    /// Sizes already shaped in this Taffy pass, keyed by node index.
-    provisional: HashMap<usize, (u32, TextSize)>,
-}
-
-fn recall(
-    provisional: &HashMap<usize, (u32, TextSize)>,
-    index: usize,
-    width_bits: u32,
-) -> Option<TextSize> {
-    let (old_bits, size) = *provisional.get(&index)?;
-    let old = f32::from_bits(old_bits);
-    let width = f32::from_bits(width_bits);
-    if old_bits == width_bits || (size.width + 0.5 < old && size.width <= width + 0.5) {
-        Some(size)
-    } else {
-        None
-    }
+    /// Measurements already shaped in this Taffy pass, keyed by node index.
+    provisional: HashMap<usize, (f32, Arc<crate::ParagraphMetrics>)>,
 }
 
 fn leaf_output(
@@ -1866,10 +1940,10 @@ fn measure_leaf(
     env: &mut MeasureEnv<'_>,
     known: Size<Option<f32>>,
     available: Size<AvailableSpace>,
-    context: Option<&mut usize>,
+    context: Option<usize>,
     measured: &mut Vec<NodeId>,
 ) -> (Size<f32>, Option<f32>) {
-    let Some(index) = context.copied() else {
+    let Some(index) = context else {
         return (Size::ZERO, None);
     };
     let Some(slot) = env.slots.get(index) else {
@@ -1882,35 +1956,31 @@ fn measure_leaf(
     let size = if let Some(text) = node.text() {
         // A min-content query uses the shaper's intrinsic width for the full
         // metrics key: family, weight, and runs, not a whitespace split alone.
-        let measured_size = if matches!(available.width, AvailableSpace::MinContent) {
+        if matches!(available.width, AvailableSpace::MinContent) {
             let font_size = text.font_size * env.text_scale;
             let paint = crate::paint_key(
                 Arc::clone(&text.utf8),
                 Arc::clone(&text.style),
                 text.spans.as_ref(),
                 font_size,
-                0.0,
-                text.color,
-            );
-            let width = env.shaper.intrinsic_width(&paint.metrics);
-            let metrics = env.shaper.metrics_paint(&crate::paint_key(
-                Arc::clone(&text.utf8),
-                Arc::clone(&text.style),
-                text.spans.as_ref(),
-                font_size,
                 SINGLE_LINE_MAX,
                 text.color,
-            ));
+            );
+            let (width, metrics) = env.shaper.min_content_metrics(&paint);
             baseline = Some(metrics.first_baseline());
-            TextSize {
+            let size = TextSize {
                 width,
                 height: metrics.size.height,
-            }
+            };
+            env.provisional
+                .entry(index)
+                .or_insert((SINGLE_LINE_MAX, metrics));
+            size
         } else {
             let max_width = line_limit(available.width);
             let font_size = text.font_size * env.text_scale;
             let width_bits = max_width.to_bits();
-            if let Some(size) = reusable_text_size(text, font_size, max_width) {
+            if let Some(metrics) = reusable_text_metrics(text, font_size, max_width) {
                 env.text_reused.set(env.text_reused.get().saturating_add(1));
                 let cached = text.cached.as_ref();
                 let paints_at = cached.map(|key| key.metrics.max_width).unwrap_or(0);
@@ -1920,13 +1990,24 @@ fn measure_leaf(
                 if let Some(cached) = cached {
                     env.shaper.touch(cached);
                 }
-                size
-            } else if let Some(size) = recall(&env.provisional, index, width_bits) {
+                baseline = Some(metrics.first_baseline());
+                metrics.size
+            } else if let Some((_, metrics)) =
+                env.provisional.get(&index).filter(|(width, metrics)| {
+                    *width == max_width
+                        || (metrics.size.width + 0.5 < *width
+                            && metrics.size.width <= max_width + 0.5)
+                })
+            {
                 env.text_reused.set(env.text_reused.get().saturating_add(1));
-                if max_width != SINGLE_LINE_MAX {
-                    text.max_width.set(max_width);
+                if max_width != SINGLE_LINE_MAX && text.max_width.replace(max_width) != max_width {
+                    measured.push(NodeId {
+                        index: crate::cast::u32_from_usize(index),
+                        generation: slot.generation,
+                    });
                 }
-                size
+                baseline = Some(metrics.first_baseline());
+                metrics.size
             } else {
                 let previous = text.max_width.get();
                 text.max_width.set(max_width);
@@ -1948,23 +2029,10 @@ fn measure_leaf(
                 let metrics = env.shaper.metrics_paint(&key);
                 baseline = Some(metrics.first_baseline());
                 let size = metrics.size;
-                env.provisional.insert(index, (width_bits, size));
+                env.provisional.insert(index, (max_width, metrics));
                 size
             }
-        };
-        if baseline.is_none() {
-            let font_size = text.font_size * env.text_scale;
-            let key = crate::paint_key(
-                Arc::clone(&text.utf8),
-                Arc::clone(&text.style),
-                text.spans.as_ref(),
-                font_size,
-                text.max_width.get(),
-                text.color,
-            );
-            baseline = Some(env.shaper.metrics(&key.metrics).first_baseline());
         }
-        measured_size
     } else if let Some(image) = node.image() {
         TextSize {
             width: image.width,
@@ -2025,11 +2093,11 @@ fn short_line_reuses_a_wider_constraint() {
         Arc::from([]),
         12.0,
     )));
-    let exact = reusable_text_size(&text, 16.0, 200.0).expect("same width");
-    assert_eq!(exact.width, 48.0);
-    let wider = reusable_text_size(&text, 16.0, SINGLE_LINE_MAX).expect("max content");
-    assert_eq!(wider.width, 48.0);
-    assert!(reusable_text_size(&text, 16.0, 20.0).is_none());
+    let exact = reusable_text_metrics(&text, 16.0, 200.0).expect("same width");
+    assert_eq!(exact.size.width, 48.0);
+    let wider = reusable_text_metrics(&text, 16.0, SINGLE_LINE_MAX).expect("max content");
+    assert_eq!(wider.size.width, 48.0);
+    assert!(reusable_text_metrics(&text, 16.0, 20.0).is_none());
 
     text.metrics = Some(Arc::new(crate::ParagraphMetrics::with_baseline(
         TextSize {
@@ -2039,8 +2107,8 @@ fn short_line_reuses_a_wider_constraint() {
         Arc::from([]),
         12.0,
     )));
-    assert!(reusable_text_size(&text, 16.0, SINGLE_LINE_MAX).is_none());
-    assert!(reusable_text_size(&text, 16.0, 200.0).is_some());
+    assert!(reusable_text_metrics(&text, 16.0, SINGLE_LINE_MAX).is_none());
+    assert!(reusable_text_metrics(&text, 16.0, 200.0).is_some());
 }
 
 #[test]
@@ -2082,6 +2150,129 @@ fn relayout_boundary_moves_siblings_and_skips_a_clean_scroll() -> Result<(), Err
 }
 
 #[test]
+fn fixed_boxes_relayout_with_their_parent_input_and_match_a_root_pass() -> Result<(), Error> {
+    fn fixture(absolute: bool) -> Result<(Tree, [NodeId; 4]), Error> {
+        let mut tree = Tree::new(crate::MonoShaper::default());
+        tree.set_viewport(0.0, 0.0, 161.75, 90.5)?;
+        let root = tree.column(0.0)?;
+        tree.set_size(root, 160.5, 90.5)?;
+        tree.set_padding(root, 2.25)?;
+        let fixed = tree.sized(96.5, 72.5)?;
+        if absolute {
+            tree.set_position(fixed, true)?;
+            tree.set_inset(
+                fixed,
+                Inset {
+                    left: Some(3.25),
+                    top: Some(5.5),
+                    right: None,
+                    bottom: None,
+                },
+            )?;
+        }
+        let moveable = tree.decorated([50, 140, 220, 255], 0.0)?;
+        tree.set_size(moveable, 20.0, 24.0)?;
+        tree.set_pointer_target(moveable)?;
+        tree.set_position(moveable, true)?;
+        let full = tree.sized(96.5, 72.5)?;
+        tree.add_child(root, fixed)?;
+        tree.add_child(fixed, full)?;
+        tree.add_child(fixed, moveable)?;
+        tree.layout()?;
+        tree.record_layers()?;
+        let _ = tree.take_layout_trace();
+        Ok((tree, [root, fixed, full, moveable]))
+    }
+    for absolute in [false, true] {
+        let (mut local, ids) = fixture(absolute)?;
+        let (mut reference, reference_ids) = fixture(absolute)?;
+        assert_eq!(ids, reference_ids);
+        for tree in [&mut local, &mut reference] {
+            tree.set_inset(
+                ids[3],
+                Inset {
+                    left: Some(29.5),
+                    top: Some(1.25),
+                    right: None,
+                    bottom: None,
+                },
+            )?;
+        }
+        let root_taffy = reference.node(ids[0])?.taffy.ok_or(Error::NoRoot)?;
+        reference.taffy.dirty_root(root_taffy);
+        for tree in [&mut local, &mut reference] {
+            tree.layout()?;
+            tree.record_layers()?;
+        }
+        let trace = local.take_layout_trace();
+        assert_eq!(
+            (trace.root_layouts, trace.local_layouts),
+            (0, 1),
+            "absolute={absolute}"
+        );
+        assert_eq!(reference.take_layout_trace().root_layouts, 1);
+        for id in ids {
+            assert_eq!(local.rect(id)?, reference.rect(id)?);
+            let local_layout = local
+                .taffy
+                .layout(local.node(id)?.taffy.ok_or(Error::UnknownNode)?)?;
+            let reference_layout = reference
+                .taffy
+                .layout(reference.node(id)?.taffy.ok_or(Error::UnknownNode)?)?;
+            assert_eq!(local_layout, reference_layout);
+        }
+        assert_eq!(local.record()?, reference.record()?);
+        assert_eq!(local.hit_root(38.0, 15.0), Some(ids[3]));
+        assert_eq!(local.hit_root(38.0, 15.0), reference.hit_root(38.0, 15.0));
+
+        for tree in [&mut local, &mut reference] {
+            tree.set_size(ids[3], 233.0, 24.0)?;
+        }
+        reference.taffy.dirty_root(root_taffy);
+        local.layout()?;
+        reference.layout()?;
+        assert_eq!(local.take_layout_trace().root_layouts, 1);
+        assert_eq!(local.rect(ids[3])?, reference.rect(ids[3])?);
+        assert_eq!(local.record()?, reference.record()?);
+    }
+    Ok(())
+}
+
+#[test]
+fn same_output_text_reuses_layout_until_width_or_baseline_changes() -> Result<(), Error> {
+    let mut tree = Tree::new(crate::MonoShaper::default());
+    let row = tree.row(0.0)?;
+    tree.set_row_cross(row, super::RowCrossAlign::Baseline)?;
+    let quote = tree.text("43.12", 16.0, [255; 4])?;
+    let label = tree.text("last", 11.0, [255; 4])?;
+    tree.add_child(row, quote)?;
+    tree.add_child(row, label)?;
+    tree.layout()?;
+    let before = (tree.rect(quote)?, tree.rect(label)?);
+    let _ = tree.take_layout_trace();
+
+    tree.set_text(quote, "35.24")?;
+    tree.layout()?;
+    let trace = tree.take_layout_trace();
+    assert_eq!((trace.same_text_layouts, trace.root_layouts), (1, 0));
+    assert_eq!((tree.rect(quote)?, tree.rect(label)?), before);
+    assert!(tree.record()?.commands.iter().any(|command| {
+        matches!(command, protocol::Command::Text { utf8, .. } if utf8.as_ref() == "35.24")
+    }));
+
+    tree.set_text(quote, "-123.45")?;
+    tree.layout()?;
+    assert_eq!(tree.take_layout_trace().root_layouts, 1);
+    assert!(tree.rect(label)?.x > before.1.x);
+
+    tree.set_font_size(quote, 28.0)?;
+    tree.layout()?;
+    assert_eq!(tree.take_layout_trace().root_layouts, 1);
+    assert!(tree.rect(label)?.y > before.1.y);
+    Ok(())
+}
+
+#[test]
 fn second_layout_touches_cached_text_and_color_only_repaints() -> Result<(), Error> {
     use std::cell::Cell;
     use std::rc::Rc;
@@ -2091,10 +2282,12 @@ fn second_layout_touches_cached_text_and_color_only_repaints() -> Result<(), Err
         paints: Rc<Cell<u32>>,
         touches: Rc<Cell<u32>>,
         color: Rc<Cell<[u8; 4]>>,
+        metrics: Rc<Cell<u32>>,
     }
 
     impl Shaper for Count {
         fn metrics(&mut self, key: &crate::MetricsKey) -> Arc<crate::ParagraphMetrics> {
+            self.metrics.set(self.metrics.get().saturating_add(1));
             self.inner.metrics(key)
         }
         fn measure_paint(&mut self, key: &crate::PaintKey) -> TextSize {
@@ -2130,21 +2323,25 @@ fn second_layout_touches_cached_text_and_color_only_repaints() -> Result<(), Err
     let paints = Rc::new(Cell::new(0));
     let touches = Rc::new(Cell::new(0));
     let color = Rc::new(Cell::new([0, 0, 0, 0]));
+    let metrics = Rc::new(Cell::new(0));
     let mut tree = Tree::new(Count {
         inner: crate::MonoShaper::new(),
         paints: Rc::clone(&paints),
         touches: Rc::clone(&touches),
         color: Rc::clone(&color),
+        metrics: Rc::clone(&metrics),
     });
     tree.set_viewport(0.0, 0.0, 200.0, 400.0)?;
     let text = tree.text("Hi", 16.0, [0, 0, 0, 255])?;
     tree.layout()?;
     let first = paints.get();
     assert!(first > 0);
+    let unpainted = metrics.get();
     tree.touch_measure(text)?;
     tree.layout()?;
     assert!(touches.get() >= 1);
     assert_eq!(paints.get(), first);
+    assert_eq!(metrics.get(), unpainted);
     let passes = tree.layout_passes();
     tree.set_color(text, [255, 0, 0, 255])?;
     assert!(!tree.needs_layout());

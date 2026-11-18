@@ -1,4 +1,4 @@
-//! Observable behavior of the APIs Solid `2.0.0-rc.17` exposes.
+//! Observable behavior of the synchronous Solid 2.0.0 APIs Impasto supports.
 //!
 //! The fixture is a small Node script, `fixtures/order.mjs`, run once against
 //! the installed `solid-js`. It prints the order of memo, render-effect, and
@@ -316,7 +316,7 @@ fn pinned_node_reference_matches_the_fixture() {
         .join("packages/reactive/node_modules/solid-js")
         .exists()
     {
-        eprintln!("run pnpm install to compare the saved fixture with Solid rc.17");
+        eprintln!("run pnpm install to compare the saved fixture with Solid 2.0.0");
         return;
     }
     let output = std::process::Command::new("node")

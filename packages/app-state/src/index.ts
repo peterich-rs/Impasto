@@ -1,9 +1,9 @@
-import * as scene from "./app-state.ts";
+import * as native from "./native.js";
 
 export const AppState = {
   get currentState() {
-    return scene.getCurrentState();
+    return native.getCurrentState();
   },
-  addEventListener: scene.addEventListener,
-  removeEventListener: scene.removeEventListener,
+  addEventListener: native.addEventListener,
+  removeEventListener: native.removeEventListener,
 };

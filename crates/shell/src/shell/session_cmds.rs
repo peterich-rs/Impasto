@@ -13,6 +13,7 @@ pub(super) fn handle(runtime: &mut Runtime, command: Command) -> Result<bool, Bo
         command @ (Command::Lifecycle(_)
         | Command::Settings(_)
         | Command::WindowFocus(_)
+        | Command::SemanticsEnabled(_)
         | Command::SemanticsAction(_)
         | Command::LaunchUrl(_)) => session(runtime, command),
         command @ (Command::HttpDone { .. }
@@ -54,6 +55,16 @@ fn session(runtime: &mut Runtime, command: Command) -> Result<bool, BootError> {
         Command::WindowFocus(focused) => {
             if let Some(session) = runtime.session.as_mut() {
                 session_call(|| session.window_focus(focused));
+            }
+        }
+        Command::SemanticsEnabled(enabled) => {
+            if let Some(session) = runtime.session.as_mut() {
+                session_call(|| session.set_semantics_enabled(enabled));
+                if enabled {
+                    arm(runtime);
+                } else if runtime.semantics.take().is_some() {
+                    runtime.services.borrow().semantics(&[]);
+                }
             }
         }
         Command::SemanticsAction(action) => {

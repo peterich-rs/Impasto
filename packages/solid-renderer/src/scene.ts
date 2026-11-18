@@ -457,6 +457,7 @@ export interface SceneModule {
     node: NodeHandle,
     draw: (context: CanvasRenderingContext2D, size: CanvasSize) => unknown,
     onDrawError?: (error: CanvasError) => void,
+    deferWhenOffscreen?: boolean,
   ): CanvasBinding;
   Path2D: Path2DConstructor;
 }

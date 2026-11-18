@@ -1,8 +1,18 @@
-// Node stand-in for `@impasto/devtools/scene`. The panel stays off.
+// Node stand-in for the native `@impasto/devtools` module. The panel stays off.
+import type {
+  DiagError,
+  Flags,
+  FrameSample,
+  LogLine,
+  LogSource,
+  NetEntry,
+  Page,
+  Platform,
+} from "./native.js";
 
-const emptyPage = () => ({
-  entries: [] as unknown[],
-});
+function emptyPage<T>(): Page<T> {
+  return { revision: 0, entries: [] };
+}
 export function enabled(): boolean {
   return false;
 }
@@ -13,27 +23,27 @@ export function revision(): number {
   return 0;
 }
 export function logs(_since?: number) {
-  return emptyPage();
+  return emptyPage<LogLine>();
 }
 export function errors(_since?: number) {
-  return emptyPage();
+  return emptyPage<DiagError>();
 }
 export function network(_since?: number) {
-  return emptyPage();
+  return emptyPage<NetEntry>();
 }
 export function frames(_since?: number) {
-  return emptyPage();
+  return emptyPage<FrameSample>();
 }
-export function flags() {
+export function flags(): Flags {
   return {
     layoutScan: false,
     pointerTrace: false,
     suppressDispatch: false,
   };
 }
-export function setFlags(_flags?: Record<string, boolean>): void {}
+export function setFlags(_flags?: Partial<Flags>): void {}
 export function clear(): void {}
-export function platform() {
+export function platform(): Platform {
   return {
     os: "test",
     osVersion: "",
@@ -74,14 +84,6 @@ export function versions() {
     quickjsPin: "",
   };
 }
-export function logSource(): string[] {
-  return ["script", "layout", "scene", "net"];
+export function logSource(): LogSource[] {
+  return ["script", "layout", "host", "net"];
 }
-export function addEventListener(
-  _type: string,
-  _listener: (e: unknown) => void,
-): void {}
-export function removeEventListener(
-  _type: string,
-  _listener: (e: unknown) => void,
-): void {}

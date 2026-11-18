@@ -1,13 +1,13 @@
-import * as scene from "./files.ts";
+import * as native from "./native.js";
 
-export interface FileSystem {
-  documentDirectory(): string;
-  read(path: string): Promise<Uint8Array>;
-  write(path: string, bytes: Uint8Array): Promise<void>;
-  delete(path: string): Promise<void>;
-  pick(): Promise<{ name: string } | null>;
-  addEventListener(type: string, listener: (e: unknown) => void): void;
-  removeEventListener(type: string, listener: (e: unknown) => void): void;
+export interface FileSystem extends Omit<typeof native, "read"> {
+  read(...args: Parameters<typeof native.read>): Promise<Uint8Array>;
 }
 
-export const FileSystem = scene as unknown as FileSystem;
+export const FileSystem: FileSystem = {
+  ...native,
+  async read(path) {
+    const bytes = await native.read(path);
+    return bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : bytes;
+  },
+};
