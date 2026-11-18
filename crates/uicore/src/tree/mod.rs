@@ -388,16 +388,23 @@ mod canvas_tests {
             panic!("parent background should be the first picture");
         };
         let background = layers.picture(picture).expect("background picture");
-        assert!(matches!(background.commands.first(), Some(protocol::Command::Rect {
-            color: [10, 20, 30, 255], ..
-        })));
+        assert!(matches!(
+            background.commands.first(),
+            Some(protocol::Command::Rect {
+                color: [10, 20, 30, 255],
+                ..
+            })
+        ));
         let owner = &layers.layers[root.next.expect("canvas offset").0 as usize];
         let child = &layers.layers[owner.first_child.expect("canvas picture").0 as usize];
         let crate::layer::LayerKind::Picture { picture } = child.kind else {
             panic!("canvas owner should contain its picture");
         };
         let canvas = layers.picture(picture).expect("canvas picture");
-        assert!(matches!(canvas.commands.first(), Some(protocol::Command::Canvas { .. })));
+        assert!(matches!(
+            canvas.commands.first(),
+            Some(protocol::Command::Canvas { .. })
+        ));
         Ok(())
     }
 

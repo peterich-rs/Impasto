@@ -1159,16 +1159,25 @@ import * as core from "scene";
         let mut time = 0.0;
         let first = wait_for_text(session.as_mut(), &mut time, "价格区间");
         let shown = texts(&first);
-        assert!(shown.contains(&"综合指数") && shown.contains(&"盘口"), "{shown:?}");
+        assert!(
+            shown.contains(&"综合指数") && shown.contains(&"盘口"),
+            "{shown:?}"
+        );
         let (chart_x, _) = text_spot(&first, "分时");
         let (book_x, _) = text_spot(&first, "盘口");
-        assert!(chart_x > 300.0 && book_x > chart_x + 400.0, "chart {chart_x}, book {book_x}");
+        assert!(
+            chart_x > 300.0 && book_x > chart_x + 400.0,
+            "chart {chart_x}, book {book_x}"
+        );
 
         let (x, y) = text_spot(&first, "阿里巴巴");
         click(session.as_mut(), x, y);
         let changed = wait_for_text(session.as_mut(), &mut time, "阿里巴巴");
         assert_eq!(
-            texts(&changed).iter().filter(|text| **text == "09988").count(),
+            texts(&changed)
+                .iter()
+                .filter(|text| **text == "09988")
+                .count(),
             2,
             "selected symbol should appear in both panes"
         );
