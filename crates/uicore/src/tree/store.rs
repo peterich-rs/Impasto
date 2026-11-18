@@ -545,6 +545,7 @@ impl Tree {
         if self.node(id)?.parent.is_some() {
             return Err(Error::NotAChild);
         }
+        let was_root = self.root == Some(id);
         self.pending_discard.retain(|pending| *pending != id);
         self.drop_scopes_under(id);
         let gestures = self.blur_contained(id);
@@ -557,7 +558,9 @@ impl Tree {
         for id in &ids {
             self.motions.retain(|motion| motion.node != *id);
         }
-        self.mark_structure();
+        if was_root {
+            self.mark_structure();
+        }
         let mut gestures = gestures;
         gestures.extend(self.drain_pending());
         Ok(Discarded { ids, gestures })
@@ -583,6 +586,13 @@ impl Tree {
             gestures.extend(retired.gestures);
         }
         Discarded { ids, gestures }
+    }
+
+    /// Queues a parentless non-root node for retirement unless it is inserted again.
+    pub fn discard_if_unattached(&mut self, id: NodeId) {
+        if self.root != Some(id) && self.node(id).is_ok_and(|node| node.parent.is_none()) {
+            self.pending_discard.push(id);
+        }
     }
 
     pub(super) fn retire_postorder(
@@ -676,6 +686,14 @@ impl Tree {
         {
             self.note_image(&source, -1);
         }
+        if let Some(list) = self
+            .slots
+            .get_mut(index as usize)
+            .and_then(|slot| slot.node.as_mut())
+            .and_then(|node| node.canvas.take())
+        {
+            self.note_canvas_images(&list, -1);
+        }
         if self.root.is_some_and(|root| root.index == index) {
             self.root = None;
         }
@@ -743,6 +761,12 @@ impl Tree {
 
     pub fn layer_tree(&self) -> crate::LayerTree {
         self.layers.clone()
+    }
+
+    pub(super) fn note_canvas_images(&mut self, list: &protocol::CanvasList, delta: i32) {
+        for image in list.images() {
+            self.note_image(&image.source, delta);
+        }
     }
 
     pub(super) fn note_image(&mut self, source: &Arc<str>, delta: i32) {

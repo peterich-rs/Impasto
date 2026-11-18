@@ -145,6 +145,32 @@ fn phases_json(out: &mut String, phases: &session::FramePhases) {
     field_u64(out, "shaped", u64::from(phases.trace.text_shaped), false);
     field_u64(out, "pointers", u64::from(phases.trace.pointers), false);
     field_u64(out, "keys", u64::from(phases.trace.keys), false);
+    field_f64(out, "canvasRecordMs", phases.trace.canvas_record_ms, false);
+    field_f64(
+        out,
+        "canvasPrepareMs",
+        phases.trace.canvas_prepare_ms,
+        false,
+    );
+    field_u64(out, "canvasOps", u64::from(phases.trace.canvas_ops), false);
+    field_u64(
+        out,
+        "canvasSegments",
+        u64::from(phases.trace.canvas_segments),
+        false,
+    );
+    field_u64(
+        out,
+        "canvasRedraws",
+        u64::from(phases.trace.canvas_redraws),
+        false,
+    );
+    field_u64(
+        out,
+        "canvasReused",
+        u64::from(phases.trace.canvas_reused),
+        false,
+    );
     out.push('}');
 }
 

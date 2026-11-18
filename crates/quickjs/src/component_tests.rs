@@ -35,6 +35,22 @@ fn frame(app: &mut dyn Session, at: f64) -> FrameOutput {
     output
 }
 
+#[test]
+fn component_canvas_records_sync_draw_and_reports_async_draw() {
+    let mut app = fixture("canvas", Box::new(|_, _| {}));
+    let output = frame(app.as_mut(), 0.0);
+    let painted = commands(&output)
+        .filter(|command| matches!(command, Command::Canvas { .. }))
+        .count();
+    assert_eq!(painted, 1, "only the synchronous Canvas commits");
+    app.frame(FrameTime::at(16.0));
+    assert!(
+        app.take_faults()
+            .iter()
+            .any(|fault| fault.source == "canvas" && fault.message.contains("AsyncDraw"))
+    );
+}
+
 fn commands(frame: &FrameOutput) -> impl Iterator<Item = &Command> {
     frame
         .layers

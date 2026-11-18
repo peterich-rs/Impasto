@@ -34,7 +34,7 @@ gen:
     cargo run -p shell --bin module-stubs
     cargo run -p uicore --bin style-types -- --root "{{root}}"
 
-# Fail when generated style types, the C key table, or the utility list drift.
+# Fail when generated style types or the utility list drift.
 style-check:
     cargo run -p uicore --bin style-types -- --check --root "{{root}}"
 
@@ -68,9 +68,6 @@ gallery-dist:
 
 host: gallery-dist
     cargo run --manifest-path "{{root}}/Cargo.toml" -p macos -- --js "{{root}}/apps/gallery-solid/dist/quotes.js" "{{logo}}"
-
-quickjs:
-    "{{root}}/crates/quickjs/fetch-quickjs.sh"
 
 host-js: host
 

@@ -7,7 +7,7 @@ export type Settings = {
 };
 const KEY = "impasto.quotes.settings.v1";
 const [settings, setSettings] = createSignal<Settings>({
-  updown: "cn",
+  updown: "intl",
   locale: "zh",
   timeScale: 60,
 });
@@ -41,7 +41,7 @@ export async function loadSettings(): Promise<void> {
       const parsed = JSON.parse(raw) as Partial<Settings>;
       setSettings((prev) => ({
         ...prev,
-        updown: parsed.updown === "intl" ? "intl" : "cn",
+        updown: parsed.updown === "intl" || parsed.updown === "cn" ? parsed.updown : prev.updown,
         locale: parsed.locale === "en" ? "en" : "zh",
         timeScale:
           parsed.timeScale && parsed.timeScale > 0

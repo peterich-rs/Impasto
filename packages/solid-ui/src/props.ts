@@ -1,4 +1,7 @@
 import type {
+  CanvasError,
+  CanvasRenderingContext2D,
+  CanvasSize,
   ImageProps,
   NodeRef,
   StyleProps,
@@ -15,6 +18,19 @@ import type { ScrollController } from "./ScrollController.ts";
 import type { ButtonSize, ButtonVariant } from "./theme.ts";
 
 export type { ImageProps, TextProps, NodeRef, UIChildren, ViewEvents };
+export type { CanvasError, CanvasRenderingContext2D, CanvasSize };
+
+export interface CanvasController {
+  invalidate(): void;
+  toLocal(point: { x: number; y: number }): { x: number; y: number } | null;
+}
+
+export type CanvasProps = Omit<ViewProps, "children"> & {
+  children?: never;
+  draw: (context: CanvasRenderingContext2D, size: CanvasSize) => unknown;
+  controller?: (controller: CanvasController | null) => void;
+  onDrawError?: (error: CanvasError) => void;
+};
 
 export interface ElementProps extends StyleProps {
   ref?: NodeRef;
@@ -191,6 +207,8 @@ export interface RefreshControlProps extends ElementProps {
 export interface DialogProps extends ElementProps {
   open: boolean;
   onClose: () => void;
+  /** Runs after the closing animation has removed the overlay. */
+  onClosed?: () => void;
   title?: string;
   initialFocus?: number;
   children?: UIChildren;

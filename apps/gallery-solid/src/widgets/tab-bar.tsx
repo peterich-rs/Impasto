@@ -12,6 +12,11 @@ type Tab = {
 };
 const TABS: Tab[] = [
   {
+    key: "stocks",
+    label: "行情",
+    path: "/stocks",
+  },
+  {
     key: "watchlist",
     label: "自选",
     path: "/watchlist",

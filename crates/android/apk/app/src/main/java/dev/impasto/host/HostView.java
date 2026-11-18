@@ -43,11 +43,7 @@ public final class HostView extends FrameLayout {
         density = context.getResources().getDisplayMetrics().density;
         surface = new HostSurfaceView(context);
         text = new TextInput(this);
-        android.view.Display display = null;
-        if (Build.VERSION.SDK_INT >= 30 && context instanceof Activity activity) {
-            display = activity.getDisplay();
-        }
-        vsync = new VsyncWaiter(display);
+        vsync = new VsyncWaiter(this);
         scale = new ScaleGestureDetector(context, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
             @Override
             public boolean onScale(ScaleGestureDetector detector) {
@@ -142,11 +138,10 @@ public final class HostView extends FrameLayout {
             String[] descriptions,
             long[] parents,
             float[] bounds) {
-        runOnUi(() -> {
-            access.update(
-                    ids, roles, labels, values, flags, actions, scroll, descriptions, parents, bounds);
-            invalidate();
-        });
+        // The provider reads these arrays directly. Invalidating the view would
+        // also schedule a framework draw alongside the Vulkan frame on scroll.
+        runOnUi(() -> access.update(
+                ids, roles, labels, values, flags, actions, scroll, descriptions, parents, bounds));
     }
 
     public void applyIme(

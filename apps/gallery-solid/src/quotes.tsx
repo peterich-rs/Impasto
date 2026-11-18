@@ -37,7 +37,7 @@ const { engine } = wireQuotes();
 setAccount(createAccount(engine));
 
 // The panel stays out of the app's JSX and mounts through registerTopLayer.
-installDevtools();
+installDevtools({ launcher: false });
 boot(() => (
   <OverlayRoot>
     <App />

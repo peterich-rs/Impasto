@@ -21,6 +21,7 @@ export const MutationOp = {
   ClassSnapshot: 33,
   StyleSurface: 34,
   StyleEnvironment: 35,
+  SetCanvas: 36,
 } as const;
 
 export const StyleField = {

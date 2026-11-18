@@ -29,6 +29,7 @@ export type Tick = {
   t: number;
   price: number;
   volume: number;
+  side?: OrderSide;
 };
 export type Quote = {
   symbol: string;
@@ -70,6 +71,7 @@ export class TickRing {
   readonly t: Float64Array;
   readonly p: Float64Array;
   readonly v: Float64Array;
+  readonly #sides: Uint8Array;
   #head = 0;
   #len = 0;
   constructor(capacity = 240) {
@@ -77,6 +79,7 @@ export class TickRing {
     this.t = new Float64Array(capacity);
     this.p = new Float64Array(capacity);
     this.v = new Float64Array(capacity);
+    this.#sides = new Uint8Array(capacity);
   }
   get length(): number {
     return this.#len;
@@ -86,6 +89,7 @@ export class TickRing {
     this.t[at] = tick.t;
     this.p[at] = tick.price;
     this.v[at] = tick.volume;
+    this.#sides[at] = tick.side === "buy" ? 1 : tick.side === "sell" ? 2 : 0;
     if (this.#len < this.cap) {
       this.#len += 1;
     } else {
@@ -103,6 +107,7 @@ export class TickRing {
       t: this.t[at],
       price: this.p[at],
       volume: this.v[at],
+      side: this.#sides[at] === 1 ? "buy" : this.#sides[at] === 2 ? "sell" : undefined,
     };
   }
   clear(): void {

@@ -115,12 +115,11 @@ export function Sheet(props: SheetProps): NodeHandle {
       return;
     }
     closing = true;
-    layer.unregister?.();
-    layer.unregister = null;
     const token = ++epoch;
     play(true, () => {
       if (token === epoch) {
         closeLayer();
+        props.onClosed?.();
       }
     });
   }

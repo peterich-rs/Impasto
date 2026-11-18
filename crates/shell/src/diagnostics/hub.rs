@@ -123,6 +123,12 @@ pub struct PhaseSample {
     pub scrolls: u32,
     pub focus: u32,
     pub blur: u32,
+    pub canvas_record_ms: f64,
+    pub canvas_prepare_ms: f64,
+    pub canvas_ops: u32,
+    pub canvas_segments: u32,
+    pub canvas_redraws: u32,
+    pub canvas_reused: u32,
 }
 
 /// Per-frame timing sample, trimmed from [`crate::FrameTiming`].

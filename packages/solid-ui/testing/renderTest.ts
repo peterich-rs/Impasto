@@ -27,6 +27,7 @@ export function installMockHost(): MockHost {
   const nodes = new Map<number, { parent: number; children: number[]; kind: string; detached: boolean }>();
   const texts = new Map<number, string>();
   const clicks = new Map<number, () => void>();
+  const pendingRemoval = new Set<number>();
   const frames: Array<(targetMs: number, intervalMs: number) => void> = [];
   const motionEnds: Array<{ token: number; fn: () => void }> = [];
   let motionToken = 1;
@@ -142,21 +143,51 @@ export function installMockHost(): MockHost {
       driverNotify = fn;
       calls.push({ name: "onDriver", args: ["function"] });
     },
+    bindCanvas: (node: number) => {
+      calls.push({ name: "bindCanvas", args: [node] });
+      return {
+        invalidate: () => {},
+        toLocal: () => null,
+        release: () => {},
+      };
+    },
+    Path2D: class {
+      closePath() {}
+      moveTo() {}
+      lineTo() {}
+      quadraticCurveTo() {}
+      bezierCurveTo() {}
+      rect() {}
+      roundRect() {}
+      arc() {}
+      arcTo() {}
+      ellipse() {}
+      addPath() {}
+    },
     listDriver: () => {
       const index = driverSerial++;
       const generation = 1;
+      let visible: { key: string; type: string }[] = [];
       calls.push({ name: "listDriver", args: [index] });
       return {
         bind: () => {},
         configure: () => {},
         setItems: (rows: { key: string; type: string }[]) => {
           const sample = rows.slice(0, 4);
-          for (let i = 0; i < sample.length; i++) {
-            const row = sample[i];
-            driverNotify?.(1, index, generation, 1, 2, i, 0, 0, 0, 0, 0, 0, row.key, row.type);
+          const previous = visible;
+          visible = sample;
+          for (const row of previous) {
+            if (!sample.some((next) => next.key === row.key)) {
+              driverNotify?.(1, index, generation, 1, 1, 0, 0, 0, 0, 0, 0, 0, row.key, "");
+            }
           }
           for (let i = 0; i < sample.length; i++) {
-            driverNotify?.(1, index, generation, 1, 4, 0, 0, 0, 0, 0, 0, 0, sample[i].key, "");
+            const row = sample[i];
+            const op = previous.some((old) => old.key === row.key && old.type === row.type) ? 3 : 2;
+            driverNotify?.(1, index, generation, 1, op, i, 0, 0, 0, 0, 0, 0, row.key, row.type);
+          }
+          for (let i = sample.length - 1; i >= 0; i--) {
+            driverNotify?.(1, index, generation, 1, 4, 0, 0, 0, 0, 0, 0, 0, sample[i].key, sample[i + 1]?.key ?? "");
           }
         },
         noteRow: () => {},
@@ -197,6 +228,7 @@ export function installMockHost(): MockHost {
       unlink(child);
       childNode.parent = parent;
       childNode.detached = false;
+      pendingRemoval.delete(child);
       if (before === 0) {
         parentNode.children.push(child);
       } else {
@@ -226,7 +258,7 @@ export function installMockHost(): MockHost {
         throw new Error("not a child");
       }
       unlink(child);
-      dropNode(child);
+      pendingRemoval.add(child);
       calls.push({ name: "remove", args: [parent, child] });
     },
     parent: (node: number) => nodes.get(node)?.parent ?? 0,
@@ -247,7 +279,7 @@ export function installMockHost(): MockHost {
     },
     setText: (node: number, utf8: string) => {
       if (nodes.get(node)?.kind !== "text") {
-        throw new Error("setText failed");
+        throw new Error(`setText failed: ${node} ${utf8}`);
       }
       texts.set(node, utf8);
       calls.push({ name: "setText", args: [node, utf8] });
@@ -650,6 +682,8 @@ export function installMockHost(): MockHost {
       fn(targetMs, 16);
       flush();
     }
+    for (const id of pendingRemoval) dropNode(id);
+    pendingRemoval.clear();
   }
 
   function pressBack(): boolean {

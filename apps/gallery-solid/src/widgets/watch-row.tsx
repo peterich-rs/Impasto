@@ -116,8 +116,6 @@ export function WatchRow(props: {
     engine: props.engine,
     binder: props.binder,
     updown: props.updown,
-    w: 56,
-    h: 22,
   });
   scene.append(line, spark);
   const numCol = scene.createElement("view", {

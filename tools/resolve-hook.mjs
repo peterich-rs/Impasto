@@ -1,6 +1,9 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+const require = createRequire(import.meta.url);
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const packagesRoot = join(root, "packages");
@@ -59,4 +62,14 @@ export function resolve(specifier, context, nextResolve) {
   const pkg = capabilityPackageOf(context.parentURL);
   if (pkg && /(?:devtools|clipboard|linking|files|storage|app-state|permissions)\.ts$/.test(specifier)) return { url:pathToFileURL(join(packagesRoot,pkg,"src/native.stub.ts")).href,shortCircuit:true };
   return nextResolve(specifier, context);
+}
+
+// Node's type stripper loads `.ts` only, so `.tsx` sources are stripped here.
+export function load(url, context, nextLoad) {
+  if (!url.startsWith("file:") || !url.endsWith(".tsx")) {
+    return nextLoad(url, context);
+  }
+  const { stripTypeScriptTypes } = require("node:module");
+  const source = stripTypeScriptTypes(readFileSync(fileURLToPath(url), "utf8"), { mode: "strip" });
+  return { format: "module", source, shortCircuit: true };
 }

@@ -1,6 +1,7 @@
 import { gauss, hashString, mulberry32, type GaussState } from "./rng.ts";
 import { UNIVERSE, clampLimits, dailyHistory, round2 } from "./universe.ts";
 import { TickRing, type Bar, type Instrument, type Quote } from "./types.ts";
+import { Analytics, minute } from "./analytics.ts";
 const DAY_MS = 24 * 3600 * 1000;
 /** Each engine tick represents one second of market time. */
 const TICK_SIM_MS = 1000;
@@ -9,6 +10,7 @@ type Sym = {
   quote: Quote;
   ring: TickRing;
   bars: Bar[];
+  analytics: Analytics;
   rand: () => number;
   st: GaussState;
   nextTickAt: number;
@@ -27,16 +29,21 @@ export class QuoteEngine {
   #simNow = 0;
   #timeScale: number;
   #dayMs: number;
+  #nextDay: number;
   #orderSeq = 0;
   constructor(
     opts: {
       timeScale?: number;
       seed?: number;
       dayMs?: number;
+      warmupMinutes?: number;
     } = {},
   ) {
     this.#timeScale = opts.timeScale ?? 60;
     this.#dayMs = opts.dayMs ?? DAY_MS;
+    const warmup = opts.warmupMinutes ?? 0;
+    const start = -warmup * minute;
+    this.#nextDay = this.#dayMs + start;
     const master = opts.seed ?? 0;
     for (const ins of UNIVERSE) {
       const rand = mulberry32((master ^ hashString(ins.symbol)) >>> 0);
@@ -58,7 +65,7 @@ export class QuoteEngine {
         high: open,
         low: open,
         volume: 0,
-        dayStart: 0,
+        dayStart: start,
         revision: 1,
       };
       const interval = 100 + Math.floor(rand() * 400);
@@ -67,16 +74,19 @@ export class QuoteEngine {
         quote: q,
         ring: new TickRing(240),
         bars,
+        analytics: new Analytics(),
         rand,
         st,
         nextTickAt: Math.floor(rand() * interval),
         interval,
       };
-      s.ring.push({
-        t: 0,
-        price: open,
-        volume: 0,
-      });
+      this.#record(s, start, open, 0);
+      for (let index = 1; index <= warmup; index += 1) {
+        for (let part = 0; part < 4; part += 1) {
+          const t = start + index * minute - (3 - part) * minute / 4;
+          this.#trade(s, t, minute / 4);
+        }
+      }
       this.#syms.set(ins.symbol, s);
     }
   }
@@ -95,11 +105,17 @@ export class QuoteEngine {
   ring(symbol: string): TickRing {
     return this.#sym(symbol).ring;
   }
+  analytics(symbol: string): Analytics {
+    return this.#sym(symbol).analytics;
+  }
   bars(symbol: string): readonly Bar[] {
     return this.#sym(symbol).bars;
   }
   simNow(): number {
     return this.#simNow;
+  }
+  dayStart(): number {
+    return this.#nextDay - this.#dayMs;
   }
   setTimeScale(scale: number): void {
     if (Number.isFinite(scale) && scale > 0) {
@@ -143,13 +159,20 @@ export class QuoteEngine {
         ticked = true;
       }
     }
-    if (this.#simNow >= this.#dayMs) {
+    if (this.#simNow >= this.#nextDay) {
       this.#settleAndReopen();
+      ticked = true;
     }
     return ticked;
   }
   #advanceOne(s: Sym): void {
-    const dtYear = TICK_SIM_MS / (1000 * 3600 * 24 * 252);
+    this.#trade(s, this.#simNow, TICK_SIM_MS);
+    for (const fn of this.#listeners) {
+      fn(s.ins.symbol, s.quote.last, this.#simNow);
+    }
+  }
+  #trade(s: Sym, t: number, dt: number): void {
+    const dtYear = dt / (6.5 * 3_600_000 * 252);
     const z = gauss(s.rand, s.st);
     const next = round2(
       clampLimits(
@@ -162,23 +185,20 @@ export class QuoteEngine {
         s.ins,
       ),
     );
-    s.quote.last = next;
-    s.quote.high = Math.max(s.quote.high, next);
-    s.quote.low = Math.min(s.quote.low, next);
-    const lot = s.ins.lot === 1 ? 1 : 100;
-    const volume = Math.floor(
-      (30 + s.rand() * 160) * lot * (s.ins.index ? 40 : 1),
-    );
+    const sizeRoll = s.rand();
+    const volume = Math.ceil((sizeRoll > 0.98 ? 80 + sizeRoll * 80 : 1 + sizeRoll ** 3 * 55)) * Math.max(100, s.ins.lot);
+    const side = next > s.quote.last || (next === s.quote.last && sizeRoll < 0.5) ? "buy" : "sell";
+    this.#record(s, t, next, volume, side);
+  }
+  #record(s: Sym, t: number, price: number, volume: number, side?: "buy" | "sell"): void {
+    const tick = { t, price, volume, side };
+    s.quote.last = price;
+    s.quote.high = Math.max(s.quote.high, price);
+    s.quote.low = Math.min(s.quote.low, price);
     s.quote.volume += volume;
-    s.ring.push({
-      t: this.#simNow,
-      price: next,
-      volume,
-    });
     s.quote.revision += 1;
-    for (const fn of this.#listeners) {
-      fn(s.ins.symbol, next, this.#simNow);
-    }
+    s.ring.push(tick);
+    s.analytics.add(tick, s.quote.dayStart);
   }
   #settleAndReopen(): void {
     for (const s of this.#syms.values()) {
@@ -201,25 +221,21 @@ export class QuoteEngine {
         s.ins,
       );
       s.ring.clear();
-      s.ring.push({
-        t: 0,
-        price: open,
-        volume: 0,
-      });
+      s.analytics.reset();
       q.prevClose = prevClose;
       q.open = open;
       q.last = open;
       q.high = open;
       q.low = open;
       q.volume = 0;
-      q.dayStart += this.#dayMs;
-      q.revision += 1;
+      q.dayStart = this.#nextDay;
+      this.#record(s, q.dayStart, open, 0);
       s.nextTickAt = this.#simNow + Math.floor(s.rand() * s.interval);
       for (const fn of this.#listeners) {
         fn(s.ins.symbol, open, this.#simNow);
       }
     }
-    this.#simNow -= DAY_MS;
+    this.#nextDay += this.#dayMs;
   }
   #sym(symbol: string): Sym {
     const s = this.#syms.get(symbol);

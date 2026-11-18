@@ -301,9 +301,12 @@ bitflags::bitflags! {
         /// Skip paint and hit testing. Layout size stays, so a pinned list row
         /// does not change the prefix sums.
         const CULL_PAINT = 1 << 9;
-        /// This node's subtree is one picture. A scroll does not fold it into
-        /// the single child picture, so a text edit rebuilds only the row.
+        /// List-row picture. A scroll does not fold this subtree into its child
+        /// picture, so a text edit rebuilds only the row. Canvas ownership is
+        /// [`Self::PICTURE_FROM_CANVAS`]; either bit makes a picture owner.
         const PICTURE_OWNER = 1 << 10;
+        /// Canvas list installed on this node. Independent of [`Self::PICTURE_OWNER`].
+        const PICTURE_FROM_CANVAS = 1 << 11;
         /// `display: none`. Layout, paint, hit, and semantics skip the subtree.
         const HIDDEN = 1 << 13;
     }
@@ -519,6 +522,8 @@ pub(super) struct Node {
     pub(super) role: Role,
     pub(super) payload: Payload,
     pub(super) paint: Option<Box<PaintProps>>,
+    /// Installed canvas. Picture ownership is [`NodeFlags::PICTURE_FROM_CANVAS`].
+    pub(super) canvas: Option<protocol::CanvasList>,
     /// Scroll state. Independent of [`Node::transform`], so a scroller can move.
     pub(super) scroll: Option<Box<ScrollGeom>>,
     pub(super) transform: Option<Box<TransformGeom>>,
@@ -582,6 +587,7 @@ impl Node {
             role: Role::empty(),
             payload,
             paint: None,
+            canvas: None,
             scroll,
             transform: None,
             style,

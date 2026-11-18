@@ -1,4 +1,4 @@
-import { createSignal, onCleanup, untrack } from "solid-js";
+import { createSignal, createTrackedEffect, onCleanup, untrack } from "solid-js";
 import { onFrame, requestFrame } from "@impasto/solid-renderer";
 import { QuoteEngine } from "../engine/engine.ts";
 import { QuoteBinder } from "./binder.ts";
@@ -8,6 +8,7 @@ const UP = [235, 62, 62, 255] as [number, number, number, number];
 const DOWN = [34, 176, 95, 255] as [number, number, number, number];
 const FLAT = [138, 141, 145, 255] as [number, number, number, number];
 const BASE = [30, 34, 40, 255] as [number, number, number, number];
+const SIMULATION_TICK_MS = 1000 / 30;
 
 /**
  * App-scope engine and binder. One instance per boot; the gallery app is a
@@ -20,6 +21,26 @@ const BASE = [30, 34, 40, 255] as [number, number, number, number];
 let engine: QuoteEngine | null = null;
 let binder: QuoteBinder | null = null;
 const [refs, setRefs] = createSignal(0);
+const [running, setRunning] = createSignal(true);
+const [pulse, setPulse] = createSignal(0);
+export const marketRunning = running;
+export const marketPulse = pulse;
+
+/** Resumes at the next market publication so ending a gesture does not repaint every quote. */
+export function useMarketPulse(active: () => boolean): () => number {
+  const [revision, setRevision] = createSignal(untrack(marketPulse));
+  createTrackedEffect(() => {
+    const next = marketPulse();
+    if (untrack(active)) setRevision(next);
+  });
+  return revision;
+}
+
+export function toggleMarket(): void {
+  setPulse((value) => value + 1);
+  setRunning((value) => !value);
+  requestFrame();
+}
 let frameHooked = false;
 export type QuotesApi = {
   engine: QuoteEngine;
@@ -31,6 +52,8 @@ export function wireQuotes(): QuotesApi {
   if (engine === null) {
     engine = new QuoteEngine({
       timeScale: untrack(() => settingsSig().timeScale),
+      warmupMinutes: 50,
+      dayMs: 6.5 * 3_600_000,
     });
     binder = new QuoteBinder(
       engine,
@@ -42,18 +65,27 @@ export function wireQuotes(): QuotesApi {
       },
       () => settingsSig().updown,
     );
-    let lastTarget = 0;
+    let lastTarget: number | undefined;
+    let lastPublish = -Infinity;
     if (!frameHooked) {
       frameHooked = true;
       onFrame((targetMs) => {
         flash.stamp(targetMs);
-        const dt = lastTarget === 0 ? 16 : Math.min(100, targetMs - lastTarget);
-        lastTarget = targetMs;
-        if (untrack(refs) > 0) {
-          engine!.setTimeScale(untrack(() => settingsSig().timeScale));
-          engine!.step(dt);
-          binder!.flush();
+        if (untrack(refs) > 0 && untrack(running)) {
+          const elapsed = lastTarget === undefined ? SIMULATION_TICK_MS : targetMs - lastTarget;
+          if (elapsed >= SIMULATION_TICK_MS - 0.25) {
+            lastTarget = targetMs;
+            engine!.setTimeScale(untrack(() => settingsSig().timeScale));
+            engine!.step(Math.min(100, elapsed));
+            binder!.flush();
+          }
+          if (targetMs - lastPublish >= 200) {
+            lastPublish = targetMs;
+            setPulse((value) => value + 1);
+          }
           requestFrame();
+        } else {
+          lastTarget = undefined;
         }
       });
     }

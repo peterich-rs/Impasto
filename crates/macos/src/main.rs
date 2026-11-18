@@ -1,4 +1,4 @@
-//! macOS host. `--js <script>` loads that script in the QuickJS session.
+//! macOS host. `--js <script>` loads source or trusted `.bin` output from `impasto build`.
 //! `--url` is the Linking launch URL, written before the script evaluates.
 
 #![allow(

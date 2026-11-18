@@ -11,9 +11,8 @@ protocol = { workspace = true }
 session = { workspace = true }
 thiserror = { workspace = true }
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
-
-[build-dependencies]
-cc = "1"
+rquickjs = { workspace = true }
+libc = "0.2"
 
 [lints]
 workspace = true

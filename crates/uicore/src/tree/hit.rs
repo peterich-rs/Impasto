@@ -260,6 +260,47 @@ impl Tree {
         Some((x, y))
     }
 
+    /// Canvas content-box point for a scene point.
+    ///
+    /// Undoes this node's transform, then ancestor transforms outside-in, then
+    /// ancestor scroll. Does not undo the canvas CTM. `None` when `id` is
+    /// missing, hidden, or a transform on that path is singular.
+    pub fn canvas_local(&self, id: NodeId, scene_x: f32, scene_y: f32) -> Option<(f32, f32)> {
+        let node = self.get(id)?;
+        if node.flags.contains(super::node::NodeFlags::HIDDEN) {
+            return None;
+        }
+        let content_x = node.content_x;
+        let content_y = node.content_y;
+        let AncestorPaint {
+            scroll_x,
+            scroll_y,
+            mut transforms,
+        } = self.ancestor_paint(id)?;
+        if node.role.contains(super::node::Role::TRANSFORM) {
+            let (px, py) = self.layout_point(id).ok()?;
+            transforms.insert(0, node.transform().placed(px, py, node.w, node.h));
+        }
+        let mut x = scene_x;
+        let mut y = scene_y;
+        while let Some(geom) = transforms.pop() {
+            (x, y) = inverse_transform(
+                x,
+                y,
+                geom.translate_x,
+                geom.translate_y,
+                geom.rotate_rad,
+                geom.scale_x,
+                geom.scale_y,
+            )?;
+        }
+        let (origin_x, origin_y) = self.layout_point(id).ok()?;
+        Some((
+            x + scroll_x - origin_x - content_x,
+            y + scroll_y - origin_y - content_y,
+        ))
+    }
+
     fn ancestor_paint(&self, id: NodeId) -> Option<AncestorPaint> {
         let mut scroll_x = 0.0;
         let mut scroll_y = 0.0;

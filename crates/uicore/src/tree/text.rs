@@ -535,6 +535,55 @@ impl Tree {
         Ok(self.shaper.word_range(&key.metrics, unit))
     }
 
+    /// Content box, hidden ancestors, and inherited layout direction.
+    ///
+    /// `None` means the node is gone or an ancestor id does not resolve.
+    pub fn canvas_surface(&self, id: NodeId) -> Option<crate::canvas::CanvasSurface> {
+        let (width, height, mut hidden, mut cursor) = {
+            let node = self.get(id)?;
+            (
+                node.content_w,
+                node.content_h,
+                node.flags.contains(NodeFlags::HIDDEN),
+                node.parent,
+            )
+        };
+        let rtl = self.layout_direction_rtl(id)?;
+        while let Some(parent) = cursor {
+            let parent_node = self.get(parent)?;
+            hidden |= parent_node.flags.contains(NodeFlags::HIDDEN);
+            cursor = parent_node.parent;
+        }
+        Some(crate::canvas::CanvasSurface {
+            width,
+            height,
+            hidden,
+            rtl,
+        })
+    }
+
+    /// Canvas `measureText`. Font size is scene points and is not multiplied by `text_scale`.
+    pub fn canvas_text_metrics(
+        &mut self,
+        text: &str,
+        font: &crate::canvas::CanvasFont,
+        direction_rtl: bool,
+    ) -> Result<crate::canvas::TextMetrics, crate::canvas::CanvasError> {
+        self.open_measure();
+        crate::canvas::measure_font(text, font, direction_rtl, &mut *self.shaper)
+    }
+
+    /// Prepare one recording with this tree's shaper. Opens the measure window
+    /// when the frame has not laid out.
+    pub fn prepare_canvas(
+        &mut self,
+        recording: crate::canvas::Recording<'_>,
+        deadline: &crate::canvas::Deadline,
+    ) -> Result<protocol::CanvasList, crate::canvas::CanvasError> {
+        self.open_measure();
+        crate::canvas::prepare(recording, &mut *self.shaper, deadline)
+    }
+
     /// Same shaper `layout` used for this tree.
     pub fn measure_text(
         &mut self,

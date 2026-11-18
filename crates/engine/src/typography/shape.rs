@@ -7,8 +7,8 @@ use super::paint_store::PaintSlot;
 use crate::Status;
 use crate::player::ffi;
 use crate::player::{
-    apply_decoration, color_source, impeller_align, impeller_weight, paint_color, push_runs,
-    read_lines, utf16_len,
+    apply_decoration, color_source, impeller_align, impeller_slant, impeller_weight, paint_color,
+    push_runs, read_lines, utf16_len,
 };
 use crate::span_box::{SpanBox, span_bounds};
 use protocol::{TextSpan, TextStyle};
@@ -75,6 +75,7 @@ impl Typography {
             style.line_through,
             style.soft_wrap,
             style.overflow,
+            style.slant,
             spans,
         );
         if !self.stale
@@ -96,6 +97,7 @@ impl Typography {
                     style.line_through,
                     style.soft_wrap,
                     style.overflow,
+                    style.slant,
                     spans,
                 )
             })
@@ -381,6 +383,7 @@ impl Typography {
             style.line_through,
             style.soft_wrap,
             style.overflow,
+            style.slant,
             spans,
         );
         self.measured
@@ -402,6 +405,7 @@ impl Typography {
                     style.line_through,
                     style.soft_wrap,
                     style.overflow,
+                    style.slant,
                     spans,
                 )
             })
@@ -542,6 +546,7 @@ impl Typography {
             style.line_through,
             style.soft_wrap,
             style.overflow,
+            style.slant,
             spans,
         );
         let Some(found) = self.measured.get_mut(hash, |key| {
@@ -562,6 +567,7 @@ impl Typography {
                 style.line_through,
                 style.soft_wrap,
                 style.overflow,
+                style.slant,
                 spans,
             )
         }) else {
@@ -604,6 +610,7 @@ impl Typography {
             style.line_through,
             style.soft_wrap,
             style.overflow,
+            style.slant,
             spans,
         );
         self.measured.remove(hash, |key| {
@@ -624,6 +631,7 @@ impl Typography {
                 style.line_through,
                 style.soft_wrap,
                 style.overflow,
+                style.slant,
                 spans,
             )
         })
@@ -673,6 +681,7 @@ impl Typography {
             style.line_through,
             style.soft_wrap,
             style.overflow,
+            style.slant,
             spans,
         );
         let matches = |key: &ParaKey| {
@@ -693,6 +702,7 @@ impl Typography {
                 style.line_through,
                 style.soft_wrap,
                 style.overflow,
+                style.slant,
                 spans,
             )
         };
@@ -1071,10 +1081,7 @@ impl Typography {
             ffi::ImpellerParagraphStyleSetFontFamily(style, family);
             ffi::ImpellerParagraphStyleSetFontSize(style, font_size);
             ffi::ImpellerParagraphStyleSetFontWeight(style, impeller_weight(text_style.weight));
-            ffi::ImpellerParagraphStyleSetFontStyle(
-                style,
-                ffi::ImpellerFontStyle::kImpellerFontStyleNormal,
-            );
+            ffi::ImpellerParagraphStyleSetFontStyle(style, impeller_slant(text_style.slant));
             ffi::ImpellerParagraphStyleSetTextAlignment(style, impeller_align(text_style.align));
             ffi::ImpellerParagraphStyleSetTextDirection(
                 style,

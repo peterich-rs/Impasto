@@ -971,17 +971,25 @@ pub fn run(
         let host = modules
             .as_ref()
             .map_or_else(|| host.clone(), |modules| host.clone().restrict(modules));
-        quickjs::open_program_with_io(
-            &source,
-            bytecode,
-            &name,
-            open.shaper,
-            open.log,
-            Some(io),
-            host,
-        )
+        if bytecode {
+            // SAFETY: `source` is the app file the host selected. A bytecode
+            // launch is `app.bin` written by `impasto build` with this
+            // toolchain's `compile`. It is not network input. The envelope
+            // does not prove the payload is valid bytecode.
+            unsafe {
+                quickjs::open_trusted_bytecode_with_io(
+                    &source,
+                    &name,
+                    open.shaper,
+                    open.log,
+                    Some(io),
+                    host,
+                )
+            }
+        } else {
+            quickjs::open_program_with_io(&source, &name, open.shaper, open.log, Some(io), host)
+        }
         .map_err(|error| match error {
-            quickjs::Error::NotLinked => SessionError::NotLinked,
             quickjs::Error::Runtime => SessionError::Runtime,
             quickjs::Error::Script(text) => {
                 tracing::error!(target: "impasto::script", "{text}");

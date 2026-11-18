@@ -129,6 +129,16 @@ impl<'a> crate::painter::Painter<'a> {
                     self.push_blend(builder, *x, *y, *w, *h, *mode)
                 }
                 Command::Pop => self.pop_save(builder),
+                Command::Canvas {
+                    x,
+                    y,
+                    width,
+                    height,
+                    list,
+                } => {
+                    scaled = self.scale_once(builder, point_scale, scaled);
+                    self.play_canvas(builder, paint, *x, *y, *width, *height, list, resolve)
+                }
             };
             if !drawn {
                 tracing::error!(
@@ -864,5 +874,6 @@ fn command_label(command: &Command) -> &'static str {
         Command::PushBackdropBlur { .. } => "backdrop",
         Command::PushBlend { .. } => "blend",
         Command::Pop => "pop",
+        Command::Canvas { .. } => "canvas",
     }
 }

@@ -15,7 +15,7 @@
 
 ## Feasibility Assessment
 
-做得到，有三处边界。场景树已经在 Rust：`uicore::Tree`（`crates/uicore/src/tree/mod.rs:52`）持有槽位、代数、Taffy、命中和弹簧，`NodeId` 已是槽位加 generation（`crates/uicore/src/tree/node.rs:15`）。QuickJS 今天经 `core._mutate` 写它（`crates/quickjs/src/core.js:26`），glue 里的 `mutate` 会立刻 `apply_now`，帧末再 `flush_mutations` 排空队列（`crates/quickjs/src/linked/mod.rs:874`）。缺的是命令、订阅图、以及把 `insert` / `setProp` 从 JS 分发里拿掉。nsh 的 `Graph`（`nsh/crates/nsh-core/src/reactive.rs:1`）证明 arena、双向边、值留在运行时里这条路能撑住 Solid 的调度；Impasto 要对齐的是 `2.0.0-rc.17` 的上述 API，不是 nsh 写下的 Solid 1.9，也不把 nsh 的 `Host` 名字带过来。iOS 宿主不存在（`docs/refactor-plan.md:33`），`impasto build ios` 在 `crates/ios` 落地前只能生成工程、不能打出安装包。打包器换成 Rust 是后续的事，这条链路先把 Babel 和 esbuild 编进 CLI 发布包。
+做得到，有三处边界。场景树已经在 Rust：`uicore::Tree`（`crates/uicore/src/tree/mod.rs:52`）持有槽位、代数、Taffy、命中和弹簧，`NodeId` 已是槽位加 generation（`crates/uicore/src/tree/node.rs:15`）。QuickJS 使用 Cargo 钉住的 quickjs-jit 0.14.2；`linked/rt` 的 Rust 绑定把参数交给现有 `mutate` / `apply_now`，帧末由 `flush_mutations` 排空队列。`Runtime` 与 `Context` 由 `Engine` 持有，启动失败和 Drop 共用显式 shutdown，先释放图、定时器与 Persistent，再释放 Context 与 Runtime。nsh 的 `Graph`（`nsh/crates/nsh-core/src/reactive.rs:1`）证明 arena、双向边、值留在运行时里这条路能撑住 Solid 的调度；Impasto 要对齐的是 `2.0.0-rc.17` 的上述 API，不是 nsh 写下的 Solid 1.9，也不把 nsh 的 `Host` 名字带过来。iOS 宿主不存在（`docs/refactor-plan.md:33`），`impasto build ios` 在 `crates/ios` 落地前只能生成工程、不能打出安装包。打包器换成 Rust 是后续的事，这条链路先把 Babel 和 esbuild 编进 CLI 发布包。
 
 Feasible with caveats: iOS 包要等宿主；应用机器不装 Node 要等 CLI 把打包器打进发布物；阶段 2 完成前不能删 `solid-js`。
 
@@ -41,15 +41,15 @@ Feasible with caveats: iOS 包要等宿主；应用机器不装 Node 要等 CLI 
 - `packages/solid-renderer/src/tree.ts:11` — `HostNode` 是 `{ id }`。裸 number 会被 universal 当成文本。
 - `packages/solid-renderer/src/tree.ts:166` — `hostRendererOptions` 按属性名分发，最终进 `CoreHost`。
 - `packages/solid-renderer/runtime/host.ts:8` — 读全局 `core`。
-- `crates/quickjs/src/core.js:26` — `core._mutate(op, …)`。`setGap` 这类具名方法写在这份 JS 里。
+- `crates/quickjs/src/scene.js` — `core._mutate(op, …)`。`setGap` 这类具名方法写在这份 JS 里。
 - `crates/uicore/src/tree/layout.rs` 的 `Tree::set_gap` — 真正的写入。编号在 `crates/quickjs/abi.yml`。
 
 帧。`flush()` 不在 `shell.rs`，在 QuickJS 会话里，而且有两次：
 
 - `crates/hostshell/src/shell.rs:719` — `on_frame` 把指针交给 session，再 `session.frame`。它不调用 `flush`。
-- `crates/quickjs/src/linked/mod.rs:787` — `JsSession::frame` 的顺序是：`tick_motions`（799 行，在任何 JS 冲刷之前）→ 手势 → job → 定时器 → rAF → `qjs_frame`（858 行，即 `boot` 的 `flush()` 再 `runFrames`）→ `flush_mutations`（874 行）→ `layout` → driver tick → 可能再 `layout` → `qjs_layout`（923 行，即 `runLayouts()` 再 `flush()`）→ `flush_mutations` → 脏了再 `layout` 一次 → `record_into`。
+- `crates/quickjs/src/linked/mod.rs:787` — `JsSession::frame` 的顺序是：`tick_motions`（799 行，在任何 JS 冲刷之前）→ 手势 → job → 定时器 → rAF → `vm_frame`（858 行，即 `boot` 的 `flush()` 再 `runFrames`）→ `flush_mutations`（874 行）→ `layout` → driver tick → 可能再 `layout` → `vm_layout`（923 行，即 `runLayouts()` 再 `flush()`）→ `flush_mutations` → 脏了再 `layout` 一次 → `record_into`。
 - `crates/uicore/src/tree/mod.rs:68` — 滚动摩擦和弹簧在 `motions`，`set_scroll_offset` 只标绘制（`tree/scroll.rs:52`）。
-- `runtime/index.ts:152` 的 `export const core` 是渲染器里的辅助函数（`column` / `row` / `onFrame`），不是 glue 装到全局的那个 `core`。两份都要退场，不能只删全局。
+- `runtime/index.ts:152` 的 `export const core` 是渲染器里的辅助函数（`column` / `row` / `onFrame`），不再读取全局 `core`。两份都要退场，不能只删全局。
 
 要改掉的名字：
 
@@ -117,7 +117,7 @@ nsh 只贡献所有权：视图节点在 Rust（`nsh_core::Core` 收 `Op`，`Nod
   shell 在 layout 前调用 run_updates ★
 ```
 
-一帧。调用点是 `JsSession::frame`，不是 `shell.rs` 的 `on_frame`。`on_frame` 只入队再调 `session.frame`。弹簧保持在第一次 `run_updates` 之前，和现在 `tick_motions` 先于 `qjs_frame` 一样。两次冲刷都留着：第一次在帧监听之前，第二次在 layout 监听之后、可能的再布局之前。监听器仍然只写 signal。
+一帧。调用点是 `JsSession::frame`，不是 `shell.rs` 的 `on_frame`。`on_frame` 只入队再调 `session.frame`。弹簧保持在第一次 `run_updates` 之前，和现在 `tick_motions` 先于 `vm_frame` 一样。两次冲刷都留着：第一次在帧监听之前，第二次在 layout 监听之后、可能的再布局之前。监听器仍然只写 signal。
 
 ```text
 shell.on_frame
@@ -153,7 +153,7 @@ Legend: `──►` 同步调用，`★` 本设计新增。`tick_motions`、`lay
 
 3. **不新建第二棵视图树。** nsh 的 `Core` 是影子树，平台视图才是画出来的那棵，帧末交 `MountBatch`。Impasto 的 `Tree` 已经是画出来的那棵：槽位、代数、Taffy、picture、弹簧都在上面。`insert` / `setProp` 直接调 `Tree` 的方法。否决把 `MountBatch` 或 Flutter 的 Element/RenderObject 再夹一层。`{ id: number }` 这个包装只为了骗过 `@solidjs/universal`（`tree.ts:8`）。universal 删掉之后，JS 拿 `NodeId::to_raw` 的 `u64`。id 只由 Rust 分配，槽位回收时 generation 加一，这是现在的 `NodeId`。否决 nsh 的两套号：JS 发偶数、core 发奇数，以及 `NodeId = u32` 只增不回收、再配一张 `IdTable`。那是因为 nsh 的 id 由 JS 渲染器分配、等 GC 才 `Release`。Impasto 没有第二条分配器。
 
-4. **响应式图复制 nsh 的结构，不复制 `Host` 这个名字，也不复制 Solid 的源码。** 新 crate `reactive`。节点在 arena 里，槽位复用时 generation 加一，依赖是双向整数边，解开用 swap-remove。图不持有跨进用户闭包的借用：闭包可能重入。值类型叫 `Value`。QuickJS 实现把 `JSValue` 存在节点里，读的时候 `JS_DupValue`，不把对象序列化成 JSON。trait 叫 `Eval`，对应 nsh 的 `Host`（`reactive.rs:83`），方法是 `dup`、`free`、`call`、`same`。否决继续把 `solid-js` 的调度打进 bundle：那是现状，订阅和标脏留在 JS。否决把 nsh 的实现搬过来当依赖：它的队列对齐 Solid 1.9，本仓库测的是 `2.0.0-rc.17` 里上面那张 API 清单。
+4. **响应式图复制 nsh 的结构，不复制 `Host` 这个名字，也不复制 Solid 的源码。** 新 crate `reactive`。节点在 arena 里，槽位复用时 generation 加一，依赖是双向整数边，解开用 swap-remove。图不持有跨进用户闭包的借用：闭包可能重入。值类型叫 `Value`。QuickJS 实现把 `Persistent<Value>` 存在节点里，读取时克隆 Persistent，不把对象序列化成 JSON。trait 叫 `Eval`，对应 nsh 的 `Host`（`reactive.rs:83`），方法是 `dup`、`free`、`call`、`same`。否决继续把 `solid-js` 的调度打进 bundle：那是现状，订阅和标脏留在 JS。否决把 nsh 的实现搬过来当依赖：它的队列对齐 Solid 1.9，本仓库测的是 `2.0.0-rc.17` 里上面那张 API 清单。
 
 5. **滚动偏移和弹簧留在 `uicore` 的 `motions`，并且仍在渲染线程上、仍在 `run_updates` 之前采样。** 现在 `tick_motions` 是 `JsSession::frame` 的第一步（`linked/mod.rs:799`），`set_scroll_offset` 只标绘制。监听器可以读 offset、写别的 signal。禁止每帧 `set()` 一个滚动 signal。否决 nsh 的另一半：它的 offset 由平台视图报进 core，弹簧在 UI 线程的第二张动画图上采样。Impasto 的滚动是 `Tree` 自己算的，没有 UIKit 滚动视图。把弹簧搬去平台线程会拆掉「macos / android 只提供窗口、输入、帧」。`For` 只服务短列表。可见集继续由 `ListDriver` 决定，不把 nsh 的 `Each` 行协调搬进 `reactive`。
 
@@ -233,7 +233,7 @@ pub struct Edge {
     pub index: u32,
 }
 
-/// 图存的值、跑的闭包、怎么比较。QuickJS 的 `V` 是 `JSValue`。
+/// 图存的值、跑的闭包、怎么比较。QuickJS 的 `V` 持有 `Persistent<Value>`。
 ///
 /// 实现必须保证：`graph` 交出的借用在下一次进入用户闭包之前结束。
 pub trait Eval: Copy + 'static {
@@ -378,7 +378,7 @@ export default function Main() {
 
 **File: `justfile`**
 
-- 保留 `gallery-dist`、`host`、`test`、`quickjs`。框架仓库继续用它们跑测试和取 SDK。
+- 保留 `gallery-dist`、`host`、`test`。JavaScript 解释器由 Cargo 的 quickjs-jit 0.14.2 构建。
 - 不把 justfile 写进 `create` 的模板。
 
 **File: `apps/gallery-solid/build.mjs`**
@@ -404,9 +404,9 @@ export default function Main() {
 - 用一个 Rust `Eval`（值是 `i32` / 字符串，不是 `JSValue`）覆盖清单里的语义：`createSignal` 的读写、memo 缓存、render effect 先于 tracked effect、`untrack` 不订阅、`batch` 合并通知、`onCleanup` 在 owner 销毁和 effect 重跑时触发、`createRoot` 销毁子节点、`getOwner` / `runWithOwner`、`createContext` / `useContext`、`children` 的扁平化。
 - 对照物是同一版本 Solid 的可观察行为，用小脚本在测试里跑一次 Node，把结果钉成夹具。不把 Solid 源码拷进 crate。
 
-**File: `crates/quickjs/src/reactive.rs`**（新）
+**File: `crates/quickjs/src/linked/reactive.rs`**（新）
 
-- `Eval` 的 QuickJS 实现。`Value` 是 `JSValue`，`dup` 是 `JS_DupValue`，`free` 是 `JS_FreeValue`。
+- `Eval` 的 QuickJS 实现。`Value` 持有 rquickjs 的 `Persistent`，`dup` 克隆引用，`free` 释放引用；销毁图必须先于 VM。
 - 注册模块 `reactive`，导出设计一节的函数。`batch` 调 `Graph::run_updates`。
 
 **File: `crates/quickjs/src/lib.rs`**
@@ -435,7 +435,7 @@ export default function Main() {
 
 `insert`、`setProp` 直接进 `uicore`。删掉 `createRenderer` 和 JS 的 `flush`。renderer 测试先两边跑，再删旧路径。
 
-**File: `crates/quickjs/src/scene.rs`**（新）
+**File: `crates/quickjs/src/linked/rt/renderer.rs`**（新）
 
 - 模块 `scene`。`createElement` 调 `Tree` 的创建。`insert` 调插入。`setProp` 用 `abi.yml` 的字段号找到现有的 `Tree::set_*`，不经过 `core.js`。
 - 返回给 JS 的是 `NodeId::to_raw()`。JS 不再为了 universal 包一层 `{ id }`。
@@ -455,17 +455,17 @@ export default function Main() {
 
 - 删除。`CoreHost` 的场景方法没有了。还没改名的能力调用先临时从模块 `scene` 以外的现有入口走，阶段 4 再收。
 
-**File: `crates/quickjs/src/core.js`**
+**File: `crates/quickjs/src/scene.js`**
 
 - 具名 `setGap` 一类退出热路径。`_mutate` 如果 Rust 侧已经直接调 `Tree`，这份包装不再被 `setProp` 调用。编号表 `abi.yml` 留下。
 
 **File: `crates/quickjs/src/linked/mod.rs`**（`JsSession::frame`，787 行起）
 
 - 不在 `shell.rs` 的 `on_frame` 里刷图。`on_frame` 仍然只是入队和调用 `session.frame`。
-- 第一次 `run_updates` 放在现在 `qjs_frame` 的位置（858 行）之前，也就是 `tick_motions`、手势、定时器、rAF 之后。这代替 `boot` 在 `onFrame` 开头调的 `flush()`。
-- 第二次放在 `qjs_layout`（923 行）返回之后、`flush_mutations` 和「脏了再 layout」之前。这代替 `boot` 在 `onLayout` 末尾调的 `flush()`。
+- 第一次 `run_updates` 放在现在 `vm_frame` 的位置（858 行）之前，也就是 `tick_motions`、手势、定时器、rAF 之后。这代替 `boot` 在 `onFrame` 开头调的 `flush()`。
+- 第二次放在 `vm_layout`（923 行）返回之后、`flush_mutations` 和「脏了再 layout」之前。这代替 `boot` 在 `onLayout` 末尾调的 `flush()`。
 - `tick_motions`（799 行）保持第一步。不要把它移到 `run_updates` 之后，也不要把它挪进 `reactive`。
-- 监听器仍然只写 signal。`qjs_frame` / `qjs_layout` 继续跑现有的帧监听和 layout 监听，只是回调里不再进入图。
+- 监听器仍然只写 signal。`vm_frame` / `vm_layout` 继续跑现有的帧监听和 layout 监听，只是回调里不再进入图。
 
 **File: `packages/solid-renderer/package.json`**
 
@@ -519,7 +519,7 @@ export default function Main() {
 
 **File: `crates/cli/src/build.rs`**（新）
 
-- `build bundle`：release 打包，再把 ESM 交给 QuickJS 打字节码。`--debug` 时仍写 ESM。
+- `build bundle`：release 打包，再把 ESM 交给 `quickjs::compile` 生成 IQJS envelope 字节码。`--debug` 时仍写 ESM。
 - `build apk`：在应用的 `build/android` 生成 Gradle 工程，链 `crates/android` 的引擎，跑 `assembleRelease`。逻辑从 `just android-release` 抬过来，路径改到应用目录，不假定框架仓库布局。
 - `build macos`：同样在 `build/macos` 生成工程并链 `crates/macos`。
 - `build ios`：只生成工程骨架时必须失败并写明 `crates/ios` 不存在。不要打出一个不能安装的包还返回零。`docs/refactor-plan.md` 的暂缓仍然有效。
@@ -586,11 +586,11 @@ export default function Main() {
 - `crates/cli/src/test.rs` — 阶段 5 无头测试
 - `crates/cli/src/toolchain.rs` — 阶段 5 把 Babel 和 esbuild 打进发布包
 - `crates/hostshell/**` — 阶段 4 整 crate 改名 `shell`。`on_frame` 不刷图
-- `crates/quickjs/src/linked/mod.rs` — 阶段 3 在 `qjs_frame` 前和 `qjs_layout` 后各调用一次 `run_updates`；`tick_motions` 仍是第一步
-- `crates/quickjs/src/core.js` — 阶段 3 具名属性桥退出热路径
+- `crates/quickjs/src/linked/mod.rs` — 阶段 3 在 `vm_frame` 前和 `vm_layout` 后各调用一次 `run_updates`；`tick_motions` 仍是第一步
+- `crates/quickjs/src/scene.js` — 阶段 3 具名属性桥退出热路径
 - `crates/quickjs/src/lib.rs` — 注册 `reactive`、`scene`；阶段 6 计数
-- `crates/quickjs/src/reactive.rs` — QuickJS 的 `Eval`，`JSValue` 加引用
-- `crates/quickjs/src/scene.rs` — native `insert` / `setProp` 直达 `Tree`
+- `crates/quickjs/src/linked/reactive.rs` — QuickJS 的 `Eval`，`Persistent` 持有 JS 值
+- `crates/quickjs/src/linked/rt/renderer.rs` — native `insert` / `setProp` 直达 `Tree`
 - `crates/reactive/Cargo.toml` — 新 crate
 - `crates/reactive/src/lib.rs` — arena 图、`Eval`、`run_updates`
 - `crates/reactive/tests/solid_rc17.rs` — 按 `2.0.0-rc.17` 的可观察行为钉夹具

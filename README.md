@@ -36,7 +36,6 @@ macOS 宿主在 `crates/macos`，用 Impeller standalone SDK 的 Metal 后端。
 | 路径 | 取法 |
 |---|---|
 | `third_party/impeller-sdk/` | `engine/fetch-impeller-sdk.sh` |
-| `third_party/quickjs/` | `just quickjs` |
 | `third_party/solid/`、`third_party/kiteui/` | 见 `third_party/README.md`。`just check` 不读它们 |
 | `build/` | 下载缓存。脚本自己创建 |
 
@@ -48,9 +47,9 @@ just check
 
 依次跑 `cargo test --workspace`、Kotlin 的 `:library:jvmTest`、Solid 的组件测试与原生响应式对照。不打开窗口。
 
-没有 quickjs-ng 源码时，QuickJS 测试走 `NotLinked`。没有 SDK 时，渲染引擎的图形测试不编译。
+QuickJS 测试始终运行 Cargo 构建的 quickjs-jit 0.14.2。没有 SDK 时，渲染引擎的图形测试不编译。
 
-推到 GitHub 后，[`.github/workflows/check.yml`](.github/workflows/check.yml) 跑同一组检查，并多一步 `cargo fmt --all -- --check`。`crates/macos` 只在 macOS runner 上编译。工作流不下载 SDK 和解释器源码，也不打 Android 包，也不打开窗口。
+推到 GitHub 后，[`.github/workflows/check.yml`](.github/workflows/check.yml) 跑同一组检查，并多一步 `cargo fmt --all -- --check`。`crates/macos` 只在 macOS runner 上编译。Linux 工作流在测试前用 Node 22、pnpm 9.15.9 安装依赖并构建 gallery；解释器由 Cargo 构建。工作流不下载 Impeller SDK，也不打 Android 包，也不打开窗口。
 
 ## 应用命令
 
@@ -84,7 +83,7 @@ just android
 just android-release
 ```
 
-`just host` 打开默认 360×640 的窗口，加载 ESM `apps/gallery-solid/dist/quotes.js`（`just gallery-dist` 从 TSX 源码本地构建，产物不提交）。`just host-js` 是同一条命令。`IMPASTO_DUMP` 把一帧 Metal 纹理写成 PNG 后退出，用来看画面。日志过滤是 `shell` 的 `Targets`。debug 构建缺省 `trace`，release 构建缺省 `info`，由 `set_log_targets` 整份替换。`just android` 打 debug APK，`just android-release` 打 release APK；Gradle 按这个变体调 `cargo build`，产物是 `libimpasto.so`。需要 NDK、`android-arm64` SDK 和 quickjs-ng 源码。
+`just host` 打开默认 360×640 的窗口，加载 ESM `apps/gallery-solid/dist/quotes.js`（`just gallery-dist` 从 TSX 源码本地构建，产物不提交）。`just host-js` 是同一条命令。`IMPASTO_DUMP` 把一帧 Metal 纹理写成 PNG 后退出，用来看画面。日志过滤是 `shell` 的 `Targets`。debug 构建缺省 `trace`，release 构建缺省 `info`，由 `set_log_targets` 整份替换。`just android` 打 debug APK，`just android-release` 打 release APK；Gradle 按这个变体调 `cargo build`，产物是 `libimpasto.so`。需要 NDK 和 `android-arm64` SDK。
 
 ## 目录
 
@@ -96,7 +95,7 @@ crates/session/             会话。宿主每帧调用 metrics、pointer、fram
 crates/shell/           壳。命令队列、帧调度、渲染线程
 crates/macos/               macOS 窗口
 crates/android/             Android 宿主。`HostActivity`、`HostView`、Choreographer、Vulkan
-crates/quickjs/             quickjs-ng 会话。没有源码时返回 NotLinked
+crates/quickjs/             quickjs-jit 0.14.2 会话
 packages/clipboard/         @impasto/clipboard
 packages/linking/           @impasto/linking
 packages/app-state/         @impasto/app-state
@@ -110,7 +109,7 @@ packages/form/              createForm
 packages/i18n/              formatNumber、formatDate、plural
 packages/permissions/       权限 API
 kotlin/                     Kotlin DSL。目前只开了 JVM 目标
-apps/gallery-solid/         Solid 模拟盘。自选、市场、个股和交易。ESM 产物 dist/quotes.js 本地构建，不提交
+apps/gallery-solid/         Solid 模拟盘。行情工作台、Canvas 图表、自选和模拟交易。ESM 产物 dist/quotes.js 本地构建，不提交
 tools/                      node 测试的 register.mjs 和 resolve-hook.mjs
 ```
 

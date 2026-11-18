@@ -58,7 +58,10 @@ enum Command {
     /// Type-check the app.
     Analyze,
     /// Run tests without opening a window.
-    Test { bundle: Option<PathBuf> },
+    Test {
+        /// Source file or trusted bytecode produced by this version of `impasto build`.
+        bundle: Option<PathBuf>,
+    },
     /// Delete `build/` and pack output. Leaves `lib/`, `assets/`, and `app.toml`.
     Clean,
     /// Package-manager commands. Only `get` is implemented.

@@ -1,26 +1,23 @@
-//! QuickJS session. The `scene` module writes directly into `uicore::Tree`. A missing source tree
-//! compiles this crate as [`Error::NotLinked`].
+//! QuickJS session. The `scene` module writes directly into `uicore::Tree`.
 
 #![allow(unsafe_code, reason = "the QuickJS C API is called from this crate")]
 
 use uicore::Shaper;
 
+mod bytecode;
 mod error;
 // Run parser for `setTextRuns`. The interpreter calls it from `linked`.
-// Unit tests still build this module when quickjs-ng is absent.
-#[cfg(any(quickjs, test))]
 mod text_runs;
 
 mod abi {
     include!(concat!(env!("OUT_DIR"), "/abi.rs"));
 }
 
-#[cfg(quickjs)]
 mod linked;
 
-#[cfg(quickjs)]
 pub use linked::JsSession;
 
+pub use bytecode::{CompiledBytecode, compile};
 pub use error::Error;
 
 /// Console callback. Level 3 is an error. Other levels are informational.
@@ -46,23 +43,6 @@ pub fn open(
     )
 }
 
-/// Compiles `source` to quickjs-ng bytecode.
-///
-/// The blob carries the bytecode version, so a runtime built from a different
-/// quickjs-ng rejects it. `module` selects module mode; a script uses `false`.
-/// Returns [`Error::NotLinked`] when the quickjs-ng source tree is absent.
-pub fn compile(source: &str, name: &str, module: bool) -> Result<Vec<u8>, Error> {
-    #[cfg(quickjs_missing)]
-    {
-        let _ = (source, name, module);
-        Err(Error::NotLinked)
-    }
-    #[cfg(quickjs)]
-    {
-        linked::compile_bytecode(source, name, module)
-    }
-}
-
 /// Opens a session and installs the host sink for [`session::IoJob`].
 pub fn open_with_io(
     script: &str,
@@ -72,12 +52,6 @@ pub fn open_with_io(
     io: Option<Box<dyn Fn(session::IoJob) + Send>>,
     host: session::ModuleConfig,
 ) -> Result<Box<dyn session::Session>, Error> {
-    #[cfg(quickjs_missing)]
-    {
-        let _ = (script, name, shaper, log, io, host);
-        Err(Error::NotLinked)
-    }
-    #[cfg(quickjs)]
     {
         let mut session = JsSession::open_with(script, name, shaper, log, None, host)?;
         if let Some(io) = io {
@@ -87,40 +61,75 @@ pub fn open_with_io(
     }
 }
 
-/// Load either UTF-8 ESM or bytecode produced by this pinned QuickJS toolchain.
-/// Bytecode is a trusted build artifact, never network/user supplied input.
+/// Loads UTF-8 source. Bytecode uses [`open_compiled_with_io`] or
+/// [`open_trusted_bytecode_with_io`].
 pub fn open_program_with_io(
-    bytes: &[u8],
-    bytecode: bool,
+    source: &[u8],
     name: &str,
     shaper: impl Shaper + 'static,
     log: ConsoleLog,
     io: Option<Box<dyn Fn(session::IoJob) + Send>>,
     config: session::ModuleConfig,
 ) -> Result<Box<dyn session::Session>, Error> {
-    #[cfg(quickjs_missing)]
-    {
-        let _ = (bytes, bytecode, name, shaper, log, io, config);
-        Err(Error::NotLinked)
-    }
-    #[cfg(quickjs)]
-    {
-        let mut session =
-            JsSession::open_program_with(bytes, bytecode, name, shaper, log, None, config)?;
-        if let Some(io) = io {
-            session.install_io(io);
-        }
-        Ok(Box::new(session))
-    }
+    finish_session(
+        JsSession::open_source(source, name, shaper, log, None, config)?,
+        io,
+    )
 }
 
-#[cfg(all(test, quickjs))]
+/// Loads an envelope that [`compile`] just produced in this process.
+pub fn open_compiled_with_io(
+    program: &CompiledBytecode,
+    name: &str,
+    shaper: impl Shaper + 'static,
+    log: ConsoleLog,
+    io: Option<Box<dyn Fn(session::IoJob) + Send>>,
+    config: session::ModuleConfig,
+) -> Result<Box<dyn session::Session>, Error> {
+    // SAFETY: `CompiledBytecode` is only constructed by `compile`.
+    unsafe { open_trusted_bytecode_with_io(program.as_bytes(), name, shaper, log, io, config) }
+}
+
+/// Loads an IQJS envelope from a trusted file.
+///
+/// # Safety
+/// `bytes` must be an unmodified envelope written by this toolchain's `compile`,
+/// such as `impasto build`. The envelope checks the pin, the mode tag, and that
+/// the payload is non-empty. It does not prove the payload is valid bytecode.
+/// Untrusted bytes may cause undefined behavior in `Module::load` and `JS_ReadObject`.
+pub unsafe fn open_trusted_bytecode_with_io(
+    bytes: &[u8],
+    name: &str,
+    shaper: impl Shaper + 'static,
+    log: ConsoleLog,
+    io: Option<Box<dyn Fn(session::IoJob) + Send>>,
+    config: session::ModuleConfig,
+) -> Result<Box<dyn session::Session>, Error> {
+    // SAFETY: the caller guarantees these bytes came from this toolchain's `compile`.
+    let program = unsafe { bytecode::TrustedBytecode::from_bytes(bytes) };
+    finish_session(
+        JsSession::open_trusted(program, name, shaper, log, None, config)?,
+        io,
+    )
+}
+
+fn finish_session(
+    mut session: JsSession,
+    io: Option<Box<dyn Fn(session::IoJob) + Send>>,
+) -> Result<Box<dyn session::Session>, Error> {
+    if let Some(io) = io {
+        session.install_io(io);
+    }
+    Ok(Box::new(session))
+}
+
+#[cfg(test)]
 mod component_tests;
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "engine behavior assertions")]
 mod tests {
     use protocol::Command;
-    #[cfg(quickjs)]
     use session::{
         ImmediateExec, InputEvent, IoEvent, Key, Method, Module, ModuleConfig, ModuleRegistry,
         PluginResult, PluginValue,
@@ -137,7 +146,6 @@ mod tests {
 
     #[test]
     fn native_style_contracts_and_single_view_button() {
-        #[cfg(quickjs)]
         {
             let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
             let output = root.join("target/native-style.js");
@@ -159,7 +167,6 @@ mod tests {
 
     #[test]
     fn native_component_contracts() {
-        #[cfg(quickjs)]
         {
             let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
             let output = root.join("target/native-components.js");
@@ -187,7 +194,6 @@ mod tests {
 
     #[test]
     fn native_control_flow_preserves_owned_rows_and_catches_effect_errors() {
-        #[cfg(quickjs)]
         {
             let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
             let output = root.join("target/native-flow.js");
@@ -214,7 +220,6 @@ mod tests {
 
     #[test]
     fn native_reactive_matches_the_solid_fixture() {
-        #[cfg(quickjs)]
         {
             let probe = include_str!("../../reactive/tests/fixtures/probe.mjs")
                 .replace("export function", "function");
@@ -240,13 +245,11 @@ mod tests {
 
     #[test]
     fn bytecode_round_trip_uses_the_native_modules() {
-        #[cfg(quickjs)]
         {
             let source = "import {createSignal,batch} from 'reactive'; import {createElement,insert,setProp} from 'scene'; const [get,set]=createSignal('first'); const root=createElement('column',{gap:8}); insert(root,get); batch(()=>set('compiled')); setProp(root,'gap',16);";
             let bytes = super::compile(source, "compiled.js", true).expect("compile module");
-            let mut session = super::open_program_with_io(
+            let mut session = super::open_compiled_with_io(
                 &bytes,
-                true,
                 "compiled.bin",
                 uicore::MonoShaper::default(),
                 no_log(),
@@ -293,7 +296,6 @@ mod tests {
             no_log(),
         ) {
             Ok(_) => {}
-            Err(Error::NotLinked) => {}
             Err(error) => panic!("{error}"),
         }
     }
@@ -326,7 +328,7 @@ mod tests {
             uicore::MonoShaper::default(),
             no_log(),
         ) {
-            Ok(_) | Err(Error::NotLinked) => {}
+            Ok(_) => {}
             Err(error) => panic!("{error}"),
         }
     }
@@ -350,7 +352,6 @@ mod tests {
             no_log(),
         ) {
             Ok(session) => session,
-            Err(Error::NotLinked) => return,
             Err(error) => panic!("{error}"),
         };
         session.metrics(&metrics());
@@ -390,7 +391,6 @@ mod tests {
             no_log(),
         ) {
             Ok(_) => {}
-            Err(Error::NotLinked) => {}
             Err(error) => panic!("{error}"),
         }
     }
@@ -421,7 +421,6 @@ mod tests {
         "#;
         match open(source, "memo.js", uicore::MonoShaper::default(), no_log()) {
             Ok(_) => {}
-            Err(Error::NotLinked) => {}
             Err(error) => panic!("{error}"),
         }
     }
@@ -447,7 +446,6 @@ mod tests {
         "#;
         match open(source, "order.js", uicore::MonoShaper::default(), no_log()) {
             Ok(_) => {}
-            Err(Error::NotLinked) => {}
             Err(error) => panic!("{error}"),
         }
     }
@@ -469,7 +467,6 @@ mod tests {
         "#;
         match open(source, "scene.js", uicore::MonoShaper::default(), no_log()) {
             Ok(_) => {}
-            Err(Error::NotLinked) => {}
             Err(error) => panic!("{error}"),
         }
     }
@@ -491,9 +488,165 @@ import * as core from "scene";
         "#;
         match open(source, "driver.js", uicore::MonoShaper::default(), no_log()) {
             Ok(_) => {}
-            Err(Error::NotLinked) => {}
             Err(error) => panic!("{error}"),
         }
+    }
+
+    #[test]
+    fn drop_releases_unfired_timer() {
+        let session = open(
+            "const captured = { text: 'held' }; setTimeout(() => console.log(captured.text), 60000); setInterval(() => {}, 60000); requestAnimationFrame(() => {});",
+            "drop-timer.js", uicore::MonoShaper::default(), no_log(),
+        ).expect("open timers");
+        drop(session);
+    }
+
+    #[test]
+    fn drop_releases_reactive_cleanup() {
+        let seen = std::rc::Rc::new(std::cell::Cell::new(0));
+        let record = std::rc::Rc::clone(&seen);
+        let session = open(
+            "import {createRoot,createSignal,onCleanup} from 'reactive'; createRoot(() => onCleanup(() => { console.log('cleanup'); setTimeout(() => {}, 60000); createRoot(() => { createSignal({held: true}); onCleanup(() => console.log('nested cleanup')); }); }));",
+            "drop-cleanup.js", uicore::MonoShaper::default(), Box::new(move |_, text| { if text == "cleanup" { record.set(record.get() + 1); } }),
+        ).expect("open cleanup");
+        drop(session);
+        assert_eq!(seen.get(), 1);
+    }
+
+    #[test]
+    fn failed_open_after_prelude_does_not_abort() {
+        let seen = std::rc::Rc::new(std::cell::Cell::new(0));
+        let record = std::rc::Rc::clone(&seen);
+        let result = open(
+            "import {createRoot,onCleanup} from 'reactive'; if (typeof fetch !== 'function' || typeof AbortController !== 'function') throw new Error('prelude missing'); createRoot(() => onCleanup(() => console.log('cleanup'))); setTimeout(() => {}, 60000); fetch('https://example.test/pending'); throw new Error('failed after prelude');",
+            "failed-open.js",
+            uicore::MonoShaper::default(),
+            Box::new(move |_, text| {
+                if text == "cleanup" {
+                    record.set(record.get() + 1);
+                }
+            }),
+        );
+        assert!(
+            matches!(result, Err(Error::Script(ref message)) if message.contains("failed after prelude"))
+        );
+        assert_eq!(seen.get(), 1);
+    }
+
+    #[test]
+    fn script_bytecode_round_trip_uses_the_envelope() {
+        let bytes = super::compile(
+            "globalThis.answer = 42; console.log(answer)",
+            "script.js",
+            false,
+        )
+        .expect("compile script");
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let record = std::rc::Rc::clone(&seen);
+        let session = super::open_compiled_with_io(
+            &bytes,
+            "script.bin",
+            uicore::MonoShaper::default(),
+            Box::new(move |_, text| record.borrow_mut().push_str(text)),
+            None,
+            ModuleConfig::disconnected(),
+        )
+        .expect("load script envelope");
+        assert_eq!(&*seen.borrow(), "42");
+        drop(session);
+    }
+
+    #[test]
+    fn debug_memory_samples_the_active_runtime() {
+        let source = r#"
+            import { debugMemory } from 'scene';
+            const { mallocBytes, objects, atoms, strings } = JSON.parse(debugMemory());
+            if (!(mallocBytes > 0 && objects > 0 && atoms > 0 && strings >= 0)) {
+                throw new Error('missing memory counters');
+            }
+        "#;
+        assert!(open(source, "memory.js", uicore::MonoShaper::default(), no_log()).is_ok());
+    }
+
+    #[test]
+    fn reactive_values_use_javascript_strict_equality() {
+        let source = r#"
+            import * as g from '#reactive';
+            const n = g.createSignal(123456789012345678901234n);
+            if (g.set(n, BigInt('123456789012345678901234')) !== 0) throw new Error('BigInt equality');
+            const text = g.createSignal('repeated text value');
+            if (g.set(text, ['repeated', 'text', 'value'].join(' ')) !== 0) throw new Error('string equality');
+        "#;
+        drop(
+            open(
+                source,
+                "equality.js",
+                uicore::MonoShaper::default(),
+                no_log(),
+            )
+            .expect("strict equality"),
+        );
+    }
+
+    #[test]
+    fn host_module_bytes_preserve_typed_array_views() {
+        let mut config = ModuleConfig::disconnected();
+        config.registry = std::sync::Arc::new(ModuleRegistry::new(vec![Module {
+            name: "Echo",
+            specifier: "@impasto/echo",
+            methods: vec![Method::sync("echo", |args| {
+                Ok(args.first().cloned().unwrap_or(PluginValue::Null))
+            })],
+        }]));
+        let source = r#"
+            import {echo} from '@impasto/echo';
+            const source = new Int16Array([1, 258, -3]);
+            const view = source.subarray(1, 2);
+            const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+            const returned = echo(view);
+            if (!(returned instanceof Uint8Array) || returned.length !== bytes.length || returned.some((b,i) => b !== bytes[i])) throw new Error('typed view bytes');
+            const clamped = echo(new Uint8ClampedArray([300, -1]));
+            if (clamped[0] !== 255 || clamped[1] !== 0) throw new Error('clamped bytes');
+            const large = echo(new Uint8Array(4096).fill(7));
+            if (!(large instanceof ArrayBuffer) || new Uint8Array(large)[4095] !== 7) throw new Error('owned buffer');
+        "#;
+        drop(
+            super::JsSession::open_with(
+                source,
+                "bytes.js",
+                uicore::MonoShaper::default(),
+                no_log(),
+                None,
+                config,
+            )
+            .expect("module bytes"),
+        );
+    }
+
+    #[test]
+    fn runaway_module_eval_reports_its_entry_and_shuts_down() {
+        let result = open(
+            "export {}; while (true) {}",
+            "eval-budget.js",
+            uicore::MonoShaper::default(),
+            no_log(),
+        );
+        assert!(
+            matches!(result, Err(Error::Script(ref message)) if message.contains("interrupted") && message.contains("(eval)"))
+        );
+    }
+
+    #[test]
+    fn recursive_jobs_hit_the_round_limit_and_shut_down() {
+        let result = open(
+            "function again() { Promise.resolve().then(again); } again();",
+            "job-limit.js",
+            uicore::MonoShaper::default(),
+            no_log(),
+        );
+        assert!(
+            matches!(result, Err(Error::Script(ref message)) if message.contains("quickjs job round limit") && message.contains("(jobs)"))
+        );
     }
 
     fn no_log() -> super::ConsoleLog {
@@ -506,7 +659,6 @@ import * as core from "scene";
 
     /// The gallery bundle is a build artifact and not committed. Tests that
     /// need it fail with instructions when it has not been built.
-    #[cfg(quickjs)]
     fn gallery_source() -> String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../apps/gallery-solid/dist/quotes.js");
@@ -514,21 +666,13 @@ import * as core from "scene";
             .unwrap_or_else(|_| panic!("run `just gallery-dist` to build the gallery bundle"))
     }
 
-    #[cfg(quickjs)]
-    fn test_host() -> (
-        ModuleConfig,
-        std::sync::Arc<std::sync::Mutex<Vec<(u64, PluginResult)>>>,
-    ) {
+    type PluginCompletions = std::sync::Arc<std::sync::Mutex<Vec<(u64, PluginResult)>>>;
+
+    fn test_host() -> (ModuleConfig, PluginCompletions) {
         test_host_with_launch_url(None)
     }
 
-    #[cfg(quickjs)]
-    fn test_host_with_launch_url(
-        url: Option<String>,
-    ) -> (
-        ModuleConfig,
-        std::sync::Arc<std::sync::Mutex<Vec<(u64, PluginResult)>>>,
-    ) {
+    fn test_host_with_launch_url(url: Option<String>) -> (ModuleConfig, PluginCompletions) {
         use std::sync::{Arc, Mutex};
         let clipboard = Arc::new(Mutex::new(String::new()));
         let app_state = session::shared("active".to_owned());
@@ -622,7 +766,6 @@ import * as core from "scene";
         (config, pending)
     }
 
-    #[cfg(quickjs)]
     fn drain_plugin(
         session: &mut dyn Session,
         pending: &std::sync::Mutex<Vec<(u64, PluginResult)>>,
@@ -745,9 +888,30 @@ import * as core from "scene";
         session.pointer(PointerEvent::new(Phase::Up, x, y, 0.0));
     }
 
+    fn wait_for_text(
+        session: &mut dyn Session,
+        time: &mut f64,
+        expected: &str,
+    ) -> session::FrameOutput {
+        let mut seen = Vec::new();
+        for _ in 0..48 {
+            *time += 16.0;
+            let frame = session.frame(session::FrameTime::at(*time));
+            let errors = session.take_faults();
+            assert!(errors.is_empty(), "waiting for {expected}: {errors:?}");
+            if frame.layers.is_some() {
+                let labels = texts(&frame);
+                if labels.contains(&expected) {
+                    return frame;
+                }
+                seen = labels.into_iter().map(str::to_owned).collect();
+            }
+        }
+        panic!("missing {expected} in {seen:?}");
+    }
+
     /// Host modules the gallery bundle imports. Devtools stays off so the
     /// panel does not change the page the assertions read.
-    #[cfg(quickjs)]
     fn gallery_host() -> ModuleConfig {
         ModuleConfig {
             registry: std::sync::Arc::new(ModuleRegistry::new(vec![
@@ -794,11 +958,6 @@ import * as core from "scene";
     /// need it fail with instructions when it has not been built. Returns
     /// `None` when the interpreter is not linked; callers already early-return.
     fn open_gallery() -> Option<Box<dyn Session>> {
-        #[cfg(not(quickjs))]
-        {
-            None
-        }
-        #[cfg(quickjs)]
         {
             let body = gallery_source();
             let source = body;
@@ -811,7 +970,6 @@ import * as core from "scene";
                 gallery_host(),
             ) {
                 Ok(session) => Some(session),
-                Err(Error::NotLinked) => None,
                 Err(error) => panic!("{error}"),
             }
         }
@@ -833,12 +991,19 @@ import * as core from "scene";
         }
         let shown = texts(&first);
         assert!(
-            shown.contains(&"自选"),
+            shown.contains(&"综合指数"),
             "{shown:?} error={:?} faults={:?}",
             session.take_script_error(),
             session.take_faults()
         );
         assert!(shown.contains(&"腾讯控股"), "{shown:?}");
+        let mut sparks = 0;
+        visit_commands(&first, &mut |command, _, _| {
+            if matches!(command, Command::Canvas { list, .. } if !list.ops().is_empty()) {
+                sparks += 1;
+            }
+        });
+        assert!(sparks > 0, "no sparklines: {:?}", session.take_faults());
         // Binder write-on-bind: price cells carry formatted numbers already.
         assert!(
             shown.iter().any(|text| text.ends_with(".00")
@@ -858,7 +1023,7 @@ import * as core from "scene";
         };
         session.metrics(&phone());
         let first = pump_first(session.as_mut());
-        assert!(texts(&first).contains(&"自选"), "{:?}", texts(&first));
+        assert!(texts(&first).contains(&"综合指数"), "{:?}", texts(&first));
         assert!(
             !texts(&first)
                 .iter()
@@ -866,9 +1031,12 @@ import * as core from "scene";
             "{:?}",
             texts(&first)
         );
-        let (x, y) = text_spot(&first, "市场");
+        let (x, y) = text_spot(&first, "⋯");
         click(session.as_mut(), x, y);
-        let second = session.frame(session::FrameTime::at(16.0));
+        let menu = session.frame(session::FrameTime::at(16.0));
+        let (x, y) = text_spot(&menu, "市场");
+        click(session.as_mut(), x, y);
+        let second = session.frame(session::FrameTime::at(32.0));
         let shown = texts(&second);
         assert!(
             shown.contains(&"涨幅榜"),
@@ -891,18 +1059,21 @@ import * as core from "scene";
     }
 
     const IN_WATCHLIST_NAMES: &[&str] = &[
-        "恒生指数",
-        "恒生科技",
-        "标普500",
-        "纳斯达克100",
-        "沪深300",
         "腾讯控股",
+        "阿里巴巴",
+        "美团",
+        "中国移动",
+        "小米集团",
+        "中国平安",
+        "友邦保险",
+        "理想汽车",
+        "小鹏汽车",
+        "京东集团",
         "Apple",
         "NVIDIA",
         "贵州茅台",
         "宁德时代",
         "Tesla",
-        "阿里巴巴",
     ];
 
     #[test]
@@ -955,11 +1126,14 @@ import * as core from "scene";
         };
         session.metrics(&phone());
         let first = pump_first(session.as_mut());
-        let (x, y) = text_spot(&first, "交易");
+        let (x, y) = text_spot(&first, "⋯");
         click(session.as_mut(), x, y);
-        let mut shown = session.frame(session::FrameTime::at(16.0));
+        let menu = session.frame(session::FrameTime::at(16.0));
+        let (x, y) = text_spot(&menu, "交易");
+        click(session.as_mut(), x, y);
+        let mut shown = session.frame(session::FrameTime::at(32.0));
         for step in 0..4 {
-            let next = session.frame(session::FrameTime::at(32.0 + f64::from(step) * 16.0));
+            let next = session.frame(session::FrameTime::at(48.0 + f64::from(step) * 16.0));
             if next.layers.is_some() {
                 shown = next;
             }
@@ -977,14 +1151,92 @@ import * as core from "scene";
     }
 
     #[test]
+    fn stocks_desktop_switches_symbols_and_keeps_chart_and_book_inline() {
+        let Some(mut session) = open_gallery() else {
+            return;
+        };
+        session.metrics(&Metrics::new(1360.0, 820.0, 1.0));
+        let mut time = 0.0;
+        let first = wait_for_text(session.as_mut(), &mut time, "价格区间");
+        let shown = texts(&first);
+        assert!(shown.contains(&"综合指数") && shown.contains(&"盘口"), "{shown:?}");
+        let (chart_x, _) = text_spot(&first, "分时");
+        let (book_x, _) = text_spot(&first, "盘口");
+        assert!(chart_x > 300.0 && book_x > chart_x + 400.0, "chart {chart_x}, book {book_x}");
+
+        let (x, y) = text_spot(&first, "阿里巴巴");
+        click(session.as_mut(), x, y);
+        let changed = wait_for_text(session.as_mut(), &mut time, "阿里巴巴");
+        assert_eq!(
+            texts(&changed).iter().filter(|text| **text == "09988").count(),
+            2,
+            "selected symbol should appear in both panes"
+        );
+        let (x, y) = text_spot(&changed, "5 → 10");
+        click(session.as_mut(), x, y);
+        let ten = wait_for_text(session.as_mut(), &mut time, "A10");
+        assert!(texts(&ten).contains(&"A10") && texts(&ten).contains(&"B10"));
+        let (x, y) = text_spot(&ten, "1D");
+        click(session.as_mut(), x, y);
+        let candles = wait_for_text(session.as_mut(), &mut time, "MA20");
+        let mut plot = None;
+        visit_commands(&candles, &mut |command, tx, ty| {
+            if let Command::Canvas { x, y, height, .. } = command
+                && *height == 320.0
+            {
+                plot = Some((tx + *x, ty + *y));
+            }
+        });
+        let (x, y) = plot.expect("daily candle plot");
+        session.pointer(PointerEvent::new(Phase::Move, x + 120.0, y + 40.0, time));
+        let focus = session.frame(session::FrameTime::at(time + 16.0));
+        let mut readout = false;
+        visit_commands(&focus, &mut |command, _, _| {
+            if let Command::Canvas { list, .. } = command {
+                readout |= list.ops().iter().any(|op| {
+                    matches!(op, protocol::CanvasOp::Text(text) if text.utf8.starts_with("成交量 "))
+                });
+            }
+        });
+        assert!(readout, "hover should draw a candle readout");
+        let errors = session.take_faults();
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn stocks_phone_opens_detail_and_order_ticket() {
+        let Some(mut session) = open_gallery() else {
+            return;
+        };
+        session.metrics(&phone());
+        let mut time = 0.0;
+        let first = wait_for_text(session.as_mut(), &mut time, "腾讯控股");
+        let (x, y) = text_spot(&first, "腾讯控股");
+        click(session.as_mut(), x, y);
+        let opening = wait_for_text(session.as_mut(), &mut time, "‹ 返回");
+        assert!(texts(&opening).contains(&"买入"));
+        assert!(!texts(&opening).contains(&"盘口"));
+        let mut detail = wait_for_text(session.as_mut(), &mut time, "价格区间");
+        for _ in 0..20 {
+            time += 16.0;
+            let next = session.frame(session::FrameTime::at(time));
+            let faults = session.take_faults();
+            assert!(faults.is_empty(), "{faults:?}");
+            if next.layers.is_some() {
+                detail = next;
+            }
+        }
+        let (x, y) = text_spot(&detail, "买入");
+        click(session.as_mut(), x, y);
+        wait_for_text(session.as_mut(), &mut time, "模拟下单");
+    }
+
+    #[test]
     // Broken by the gallery rewrite in b48bb8a, which shipped without a
     // compiling quickjs test build. Re-pin these once the watchlist click
     // path is verified against the real tree again.
     #[ignore = "gallery behavior drifted in b48bb8a; re-pin expectations"]
     fn repeated_clicks_leave_no_pending_jobs() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = gallery_source();
             let mut session = match super::JsSession::open(
@@ -1020,9 +1272,6 @@ import * as core from "scene";
 
     #[test]
     fn remove_discards_the_tap_and_the_id() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let kept = r#"
 import * as core from "scene";
@@ -1068,10 +1317,38 @@ import * as core from "scene";
     }
 
     #[test]
+    fn discarded_jsx_branch_releases_unattached_listeners() -> Result<(), Error> {
+        let source = r#"
+import * as scene from "scene";
+import { createMemo, createRoot, createSignal } from "reactive";
+
+const root = scene.column(0);
+const surviving = scene.pointerRegion();
+scene.onClick(surviving, () => {});
+scene.append(root, surviving);
+createRoot(dispose => {
+    const [visible, show] = createSignal(true);
+    const branch = createMemo(() => visible() && scene.createElement("view", {
+        onClick() {},
+    }));
+    branch();
+    show(false);
+    branch();
+    dispose();
+});
+"#;
+        let session = super::JsSession::open(
+            source,
+            "unattached.js",
+            uicore::MonoShaper::default(),
+            no_log(),
+        )?;
+        assert_eq!(session.tap_count(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn detach_keeps_the_tap_until_discard() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let kept = r#"
 import * as core from "scene";
@@ -1163,9 +1440,6 @@ import * as core from "scene";
 
     #[test]
     fn press_then_release_then_click_rewrites_the_label() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -1204,9 +1478,6 @@ import * as core from "scene";
 
     #[test]
     fn insets_shift_the_recorded_text() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -1236,7 +1507,7 @@ import * as core from "scene";
     #[test]
     fn syntax_error_script_is_reported() {
         match open("{", "test.js", uicore::MonoShaper::default(), no_log()) {
-            Err(Error::NotLinked | Error::Script(_)) => {}
+            Err(Error::Script(_)) => {}
             Err(error) => panic!("{error}"),
             Ok(_) => panic!("expected a script error"),
         }
@@ -1244,9 +1515,6 @@ import * as core from "scene";
 
     #[test]
     fn an_infinite_frame_callback_keeps_the_previous_list() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -1282,9 +1550,6 @@ import * as core from "scene";
 
     #[test]
     fn listener_error_is_kept_as_script_error() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -1320,9 +1585,6 @@ import * as core from "scene";
 
     #[test]
     fn a_reported_listener_error_lets_the_next_listener_run() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -1356,9 +1618,6 @@ import * as core from "scene";
 
     #[test]
     fn a_shortcut_consumes_the_modified_key() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -1397,9 +1656,6 @@ import * as core from "scene";
 
     #[test]
     fn host_motion_and_semantics_hints_reach_core() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -1439,9 +1695,6 @@ import * as core from "scene";
 
     #[test]
     fn motion_end_survives_unregistering_its_own_callback() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -1499,9 +1752,6 @@ import * as core from "scene";
 
     #[test]
     fn motion_end_reports_a_throw_after_unregister() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -1550,9 +1800,6 @@ import * as core from "scene";
 
     #[test]
     fn align_accepts_a_column_and_metrics_report_the_viewport() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -1605,9 +1852,6 @@ import * as core from "scene";
 
     #[test]
     fn a_click_longer_than_one_frame_still_updates_the_label() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -1647,9 +1891,6 @@ import * as core from "scene";
 
     #[test]
     fn a_runaway_click_is_interrupted() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -1703,9 +1944,6 @@ import * as core from "scene";
 
     #[test]
     fn a_runaway_timer_names_its_entry() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -1739,9 +1977,6 @@ import * as core from "scene";
 
     #[test]
     fn console_log_reaches_the_host() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
             let record = std::rc::Rc::clone(&seen);
@@ -1766,9 +2001,6 @@ import * as core from "scene";
 
     #[test]
     fn console_debug_logs_at_level_four() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
             let record = std::rc::Rc::clone(&seen);
@@ -1793,9 +2025,6 @@ import * as core from "scene";
 
     #[test]
     fn core_log_routes_level_names() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
             let record = std::rc::Rc::clone(&seen);
@@ -1824,9 +2053,6 @@ import * as core from "scene";
 
     #[test]
     fn an_unhandled_rejection_is_logged_with_its_stack() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
             let record = std::rc::Rc::clone(&seen);
@@ -1868,9 +2094,6 @@ import * as core from "scene";
 
     #[test]
     fn a_late_catch_is_not_reported() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
             let record = std::rc::Rc::clone(&seen);
@@ -1902,9 +2125,6 @@ import * as core from "scene";
 
     #[test]
     fn debug_bindings_report_overflow_and_snapshot() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -1953,9 +2173,6 @@ import * as core from "scene";
 
     #[test]
     fn request_frame_lasts_for_one_extra_frame() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -1989,9 +2206,6 @@ import * as core from "scene";
 
     #[test]
     fn an_opacity_spring_asks_for_another_frame() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -2023,9 +2237,6 @@ import * as core from "scene";
 
     #[test]
     fn microtask_set_text_paints_without_request_frame() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -2058,9 +2269,6 @@ import * as core from "scene";
 
     #[test]
     fn a_throwing_frame_callback_does_not_ask_for_another_frame() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -2091,9 +2299,6 @@ import * as core from "scene";
 
     #[test]
     fn a_drag_past_the_slop_does_not_click() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -2142,9 +2347,6 @@ import * as core from "scene";
 
     #[test]
     fn stop_scroll_on_drag_end_reports_idle() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -2183,9 +2385,6 @@ import * as core from "scene";
 
     #[test]
     fn set_text_runs_reaches_the_draw_command() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -2246,9 +2445,6 @@ import * as core from "scene";
     // path is verified against the real tree again.
     #[ignore = "gallery behavior drifted in b48bb8a; re-pin expectations"]
     fn dragging_the_list_translates_a_visible_row() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = gallery_source();
             let mut session = match super::JsSession::open(
@@ -2285,7 +2481,7 @@ import * as core from "scene";
                 {
                     let scene_y = *y + origin_y;
                     if scene_y >= clip_y && scene_y < clip_y + clip_h {
-                        row = Some((utf8.clone(), *x + origin_x + 1.0, scene_y));
+                        row = Some((std::sync::Arc::clone(utf8), *x + origin_x + 1.0, scene_y));
                     }
                 }
             });
@@ -2325,7 +2521,6 @@ import * as core from "scene";
         }
     }
 
-    #[cfg(quickjs)]
     fn rewritten_commands(
         before: &protocol::LayerTree,
         after: &protocol::LayerTree,
@@ -2347,9 +2542,6 @@ import * as core from "scene";
 
     #[test]
     fn module_loader_accepts_a_sibling_script_and_rejects_escape() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let dir = std::env::temp_dir().join(format!("quickjs-mod-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
@@ -2371,7 +2563,6 @@ import * as core from "scene";
                 no_log(),
             ) {
                 Ok(session) => session,
-                Err(Error::NotLinked) => return,
                 Err(error) => panic!("{error}"),
             };
             session.metrics(&metrics());
@@ -2399,7 +2590,6 @@ import * as core from "scene";
                             "{message}"
                         );
                     }
-                    Err(Error::NotLinked) => return,
                     Ok(_) => panic!("expected a rejected import"),
                     Err(error) => panic!("{error}"),
                 }
@@ -2408,15 +2598,72 @@ import * as core from "scene";
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn module_loader_rejects_symlinks_outside_the_app() {
+        let temp = std::env::temp_dir().join(format!("quickjs-symlink-{}", std::process::id()));
+        let dir = temp.join("app");
+        std::fs::create_dir_all(&dir).expect("app dir");
+        let outside = temp.join("outside.js");
+        std::fs::write(&outside, "export const label = 'outside';").expect("outside module");
+        std::os::unix::fs::symlink(outside, dir.join("link.js")).expect("link to outside module");
+        let result = super::JsSession::open(
+            "import { label } from './link.js';",
+            &dir.join("app.js").to_string_lossy(),
+            uicore::MonoShaper::default(),
+            no_log(),
+        );
+        std::fs::remove_dir_all(&temp).expect("remove test directory");
+        assert!(
+            matches!(result, Err(Error::Script(message)) if message.contains("outside the app directory"))
+        );
+    }
+
+    #[test]
+    fn module_loader_accepts_parent_segments_inside_the_app() {
+        let dir = std::env::temp_dir().join(format!("quickjs-parent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("panels")).expect("panels");
+        std::fs::write(
+            dir.join("shared.js"),
+            "export const label = \"shared-ok\";\n",
+        )
+        .expect("shared");
+        std::fs::write(
+            dir.join("panels/page.js"),
+            "export { label } from \"../shared.js\";\n",
+        )
+        .expect("page");
+        let app = dir.join("app.js");
+        std::fs::write(
+            &app,
+            "import * as core from 'scene'; import { label } from \"./panels/page.js\";\ncore.text(label, 16, [0, 0, 0, 255]);\n",
+        )
+        .expect("app");
+        let name = app.to_string_lossy().into_owned();
+        let source = std::fs::read_to_string(&app).expect("read app");
+        let mut session =
+            match super::JsSession::open(&source, &name, uicore::MonoShaper::default(), no_log()) {
+                Ok(session) => session,
+                Err(error) => panic!("{error}"),
+            };
+        session.metrics(&metrics());
+        let frame = session.frame(session::FrameTime::at(0.0));
+        assert!(
+            texts(&frame).contains(&"shared-ok"),
+            "{:?} {}",
+            texts(&frame),
+            session.take_script_error().unwrap_or_default()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     // Broken by the gallery rewrite in b48bb8a, which shipped without a
     // compiling quickjs test build. Re-pin these once the watchlist click
     // path is verified against the real tree again.
     #[ignore = "gallery behavior drifted in b48bb8a; re-pin expectations"]
     fn gallery_pages_scroll_without_picture_writes() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = gallery_source();
             let mut session = match super::JsSession::open(
@@ -2426,7 +2673,6 @@ import * as core from "scene";
                 no_log(),
             ) {
                 Ok(session) => session,
-                Err(Error::NotLinked) => return,
                 Err(error) => panic!("{error}"),
             };
             session.metrics(&phone());
@@ -2464,14 +2710,14 @@ import * as core from "scene";
                 {
                     let scene_y = *y + origin_y;
                     if scene_y >= clip_y && scene_y < clip_y + clip_h {
-                        row = Some((utf8.clone(), *x + origin_x + 1.0, scene_y));
+                        row = Some((std::sync::Arc::clone(utf8), *x + origin_x + 1.0, scene_y));
                     }
                 }
             });
             let Some((_label, x, before)) = row else {
                 panic!("a row inside the viewport");
             };
-            let before_tree = shown.layers.clone().expect("list tree");
+            let before_tree = shown.layers.expect("list tree");
             session.pointer(PointerEvent::wheel(x, before + 1.0, 200.0, 0.0, clip_h));
             let scrolled = session.frame(session::FrameTime::at(200.0));
             assert!(
@@ -2498,7 +2744,7 @@ import * as core from "scene";
             let mut baseline = scrolled.layers.clone().expect("scroll tree");
             for step in 0..6 {
                 let next = session.frame(session::FrameTime::at(216.0 + f64::from(step) * 16.0));
-                if let Some(layers) = next.layers.clone() {
+                if let Some(layers) = next.layers {
                     baseline = layers;
                 }
             }
@@ -2529,9 +2775,6 @@ import * as core from "scene";
 
     #[test]
     fn text_input_follows_focus_and_clears_when_the_node_is_removed() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -2626,9 +2869,6 @@ import * as core from "scene";
 
     #[test]
     fn dismissing_the_keyboard_lets_blur_clear_ime_state() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -2671,9 +2911,6 @@ import * as core from "scene";
 
     #[test]
     fn timers_fetch_and_modules_run_inside_the_frame() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             use std::sync::{Arc, Mutex};
 
@@ -2755,9 +2992,6 @@ import * as core from "scene";
 
     #[test]
     fn get_initial_url_is_visible_during_eval() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let log_lines = std::sync::Arc::clone(&lines);
@@ -2794,9 +3028,6 @@ import * as core from "scene";
 
     #[test]
     fn sync_module_error_reaches_js() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let log_lines = std::sync::Arc::clone(&lines);
@@ -2837,9 +3068,6 @@ import * as core from "scene";
 
     #[test]
     fn promise_module_settles_through_io_event() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let log_lines = std::sync::Arc::clone(&lines);
@@ -2878,9 +3106,6 @@ import * as core from "scene";
 
     #[test]
     fn unregistered_host_specifier_is_not_linked() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let (host, _pending) = test_host();
             match super::JsSession::open_with(
@@ -2894,7 +3119,6 @@ import * as core from "scene";
                 Err(Error::Script(message)) => {
                     assert!(message.contains("is not linked"), "{message}");
                 }
-                Err(Error::NotLinked) => {}
                 Ok(_) => panic!("expected unregistered host specifier to fail"),
                 Err(error) => panic!("{error}"),
             }
@@ -2903,9 +3127,6 @@ import * as core from "scene";
 
     #[test]
     fn bare_scope_must_be_bundled() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let (host, _pending) = test_host();
             match super::JsSession::open_with(
@@ -2922,7 +3143,6 @@ import * as core from "scene";
                         "{message}"
                     );
                 }
-                Err(Error::NotLinked) => {}
                 Ok(_) => panic!("expected bare @impasto specifier to fail"),
                 Err(error) => panic!("{error}"),
             }
@@ -2931,9 +3151,6 @@ import * as core from "scene";
 
     #[test]
     fn nested_host_path_must_be_bundled() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let (host, _pending) = test_host();
             match super::JsSession::open_with(
@@ -2950,7 +3167,6 @@ import * as core from "scene";
                         "{message}"
                     );
                 }
-                Err(Error::NotLinked) => {}
                 Ok(_) => panic!("expected nested @impasto host path to fail"),
                 Err(error) => panic!("{error}"),
             }
@@ -2959,9 +3175,6 @@ import * as core from "scene";
 
     #[test]
     fn an_object_handle_is_rejected_and_a_switch_hint_sticks() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -3003,9 +3216,6 @@ import * as core from "scene";
 
     #[test]
     fn settings_reach_the_script() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -3047,9 +3257,6 @@ import * as core from "scene";
 
     #[test]
     fn tab_moves_focus_and_escape_does_not_exit() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -3099,9 +3306,6 @@ import * as core from "scene";
 
     #[test]
     fn text_replaced_delivers_the_loaded_string() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -3148,9 +3352,6 @@ import * as core from "scene";
 
     #[test]
     fn register_font_queues_replaces_and_caps_names() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -3235,9 +3436,6 @@ import * as core from "scene";
 
     #[test]
     fn register_font_rejects_an_oversize_face_without_touching_the_queue() {
-        #[cfg(not(quickjs))]
-        {}
-        #[cfg(quickjs)]
         {
             let source = r#"
 import * as core from "scene";
@@ -3291,7 +3489,6 @@ import * as core from "scene";
         "#;
         let mut session = match open(source, "reload.js", uicore::MonoShaper::default(), no_log()) {
             Ok(session) => session,
-            Err(Error::NotLinked) => return,
             Err(error) => panic!("{error}"),
         };
         let queued = session.take_reloads();
@@ -3324,7 +3521,6 @@ import * as core from "scene";
         "#;
         let mut session = match open(source, "axis.js", uicore::MonoShaper::default(), no_log()) {
             Ok(session) => session,
-            Err(Error::NotLinked) => return,
             Err(error) => panic!("{error}"),
         };
         session.metrics(&metrics());
@@ -3362,7 +3558,6 @@ import * as core from "scene";
         "#;
         let mut session = match open(source, "image.js", uicore::MonoShaper::default(), no_log()) {
             Ok(session) => session,
-            Err(Error::NotLinked) => return,
             Err(error) => panic!("{error}"),
         };
         session.metrics(&metrics());
@@ -3397,11 +3592,492 @@ import * as core from "scene";
         "#;
         let mut session = match open(source, "mutate.js", uicore::MonoShaper::default(), no_log()) {
             Ok(session) => session,
-            Err(Error::NotLinked) => return,
             Err(error) => panic!("{error}"),
         };
         session.metrics(&metrics());
         let frame = session.frame(session::FrameTime::at(0.0));
         assert!(texts(&frame).contains(&"applied"), "{:?}", texts(&frame));
+    }
+
+    fn canvas_fills(frame: &session::FrameOutput) -> usize {
+        let mut count = 0;
+        visit_commands(frame, &mut |command, _, _| {
+            if let Command::Canvas { list, .. } = command {
+                count += list
+                    .ops()
+                    .iter()
+                    .filter(|op| matches!(op, protocol::CanvasOp::Fill { .. }))
+                    .count();
+            }
+        });
+        count
+    }
+
+    fn open_canvas(source: &str, name: &str) -> Box<dyn Session> {
+        match open(source, name, uicore::MonoShaper::default(), no_log()) {
+            Ok(session) => session,
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    #[test]
+    fn canvas_fill_is_recorded_in_the_content_box() {
+        let source = r#"
+import * as core from "scene";
+
+            const root = core.column(0);
+            const box = core.view();
+            core.setSize(box, 80, 40);
+            core.append(root, box);
+            core.bindCanvas(box, (ctx) => {
+                ctx.fillStyle = '#112233';
+                ctx.fillRect(0, 0, 8, 6);
+            });
+        "#;
+        let mut session = open_canvas(source, "canvas-fill.js");
+        session.metrics(&metrics());
+        let frame = session.frame(session::FrameTime::at(0.0));
+        assert!(session.take_script_error().is_none(), "draw failed");
+        assert!(canvas_fills(&frame) >= 1, "missing canvas fill");
+        assert!(
+            !frame.again,
+            "a static canvas must not request another frame"
+        );
+    }
+
+    #[test]
+    fn canvas_side_effect_keeps_the_picture_and_reports_next_frame() {
+        let source = r#"
+import * as core from "scene";
+import { createSignal } from "reactive";
+
+            const root = core.column(0);
+            const box = core.view();
+            core.setSize(box, 80, 40);
+            const label = core.text("ready", 16, [0, 0, 0, 255]);
+            core.append(root, box);
+            core.append(root, label);
+            const [step, setStep] = createSignal(0);
+            let passed = 0;
+            core.onFrame(() => {
+                passed += 1;
+                if (passed === 2) setStep(1);
+                if (passed < 3) core.requestFrame();
+            });
+            core.bindCanvas(box, (ctx) => {
+                if (step() === 0) {
+                    ctx.fillStyle = '#112233';
+                    ctx.fillRect(0, 0, 8, 6);
+                    return;
+                }
+                core.setText(label, "mutated");
+            }, (error) => {
+                core.setText(label, error.code);
+            });
+        "#;
+        let mut session = open_canvas(source, "canvas-effect.js");
+        session.metrics(&metrics());
+        let first = session.frame(session::FrameTime::at(0.0));
+        assert!(session.take_script_error().is_none());
+        assert!(canvas_fills(&first) >= 1);
+        assert!(first.again);
+        let second = session.frame(session::FrameTime::at(16.0));
+        assert!(session.take_script_error().is_none());
+        // An unchanged epoch omits the layer tree. A new tree would still say "ready".
+        assert!(
+            second.layers.is_none() || texts(&second) == ["ready"],
+            "side effect changed the picture: layers={} texts={:?}",
+            second.layers.is_some(),
+            texts(&second)
+        );
+        assert!(second.again);
+        let third = session.frame(session::FrameTime::at(32.0));
+        assert!(session.take_script_error().is_none());
+        assert_eq!(texts(&third), ["DrawSideEffect"]);
+        if third.layers.is_some() {
+            assert!(
+                canvas_fills(&third) >= 1,
+                "the failed draw replaced the picture"
+            );
+        }
+    }
+
+    #[test]
+    fn canvas_context_closes_after_the_callback() {
+        let source = r#"
+import * as core from "scene";
+
+            const root = core.column(0);
+            const box = core.view();
+            core.setSize(box, 40, 40);
+            const label = core.text("wait", 16, [0, 0, 0, 255]);
+            core.append(root, box);
+            core.append(root, label);
+            let ctx = null;
+            let armed = false;
+            core.onFrame(() => {
+                if (!armed) {
+                    armed = true;
+                    core.requestFrame();
+                    return;
+                }
+                try {
+                    ctx.fillRect(0, 0, 1, 1);
+                    core.setText(label, "open");
+                } catch (error) {
+                    core.setText(label, error && error.code ? error.code : "thrown");
+                }
+            });
+            core.bindCanvas(box, (context) => {
+                ctx = context;
+                context.fillRect(0, 0, 4, 4);
+            });
+        "#;
+        let mut session = open_canvas(source, "canvas-closed.js");
+        session.metrics(&metrics());
+        let first = session.frame(session::FrameTime::at(0.0));
+        assert!(session.take_script_error().is_none());
+        assert!(canvas_fills(&first) >= 1);
+        let second = session.frame(session::FrameTime::at(16.0));
+        assert!(session.take_script_error().is_none());
+        assert_eq!(texts(&second), ["ContextClosed"]);
+    }
+
+    #[test]
+    fn canvas_path_outlives_the_draw() {
+        let source = r#"
+import * as core from "scene";
+
+            const root = core.column(0);
+            const box = core.view();
+            core.setSize(box, 40, 40);
+            const label = core.text("wait", 16, [0, 0, 0, 255]);
+            core.append(root, box);
+            core.append(root, label);
+            const path = new core.Path2D();
+            path.rect(0, 0, 8, 8);
+            let armed = false;
+            core.onFrame(() => {
+                if (!armed) {
+                    armed = true;
+                    core.requestFrame();
+                    return;
+                }
+                try {
+                    path.lineTo(1, 1);
+                    core.setText(label, "alive");
+                } catch (error) {
+                    core.setText(label, "dead");
+                }
+            });
+            core.bindCanvas(box, (ctx) => {
+                ctx.fill(path);
+            });
+        "#;
+        let mut session = open_canvas(source, "canvas-path.js");
+        session.metrics(&metrics());
+        let first = session.frame(session::FrameTime::at(0.0));
+        assert!(session.take_script_error().is_none());
+        assert!(canvas_fills(&first) >= 1);
+        let second = session.frame(session::FrameTime::at(16.0));
+        assert!(session.take_script_error().is_none());
+        assert_eq!(texts(&second), ["alive"]);
+    }
+
+    #[test]
+    fn canvas_empty_subpath_does_not_panic() {
+        let source = r#"
+import * as core from "scene";
+            const root = core.column(0);
+            const box = core.view();
+            core.setSize(box, 40, 40);
+            core.append(root, box);
+            core.bindCanvas(box, (ctx) => {
+                ctx.beginPath();
+                ctx.closePath();
+                const path = new core.Path2D();
+                path.lineTo(4, 4);
+                path.quadraticCurveTo(1, 2, 3, 4);
+                path.bezierCurveTo(0, 0, 1, 1, 2, 2);
+                ctx.fillRect(0, 0, 4, 4);
+            });
+        "#;
+        let mut session = open_canvas(source, "canvas-empty-path.js");
+        session.metrics(&metrics());
+        let frame = session.frame(session::FrameTime::at(0.0));
+        assert!(session.take_script_error().is_none());
+        assert!(canvas_fills(&frame) >= 1);
+    }
+
+    #[test]
+    fn canvas_checks_array_lengths_before_reading_elements() {
+        let source = r#"
+            import * as core from "scene";
+            const root = core.view();
+            core.setSize(root, 40, 40);
+            core.bindCanvas(root, (ctx) => {
+                const segments = new Array(2 ** 31);
+                Object.defineProperty(segments, "0", {
+                    get() { throw new Error("read oversized array"); },
+                });
+                const check = (action, code) => {
+                    try { action(); }
+                    catch (error) { if (error.code === code) return; throw error; }
+                    throw new Error("array length was accepted");
+                };
+                check(() => ctx.setLineDash(segments), "LimitExceeded");
+                check(() => ctx.roundRect(0, 0, 8, 8, segments), "InvalidArgument");
+                ctx.fillRect(0, 0, 8, 8);
+            });
+        "#;
+        let mut session = open_canvas(source, "canvas-array-length.js");
+        session.metrics(&metrics());
+        let frame = session.frame(session::FrameTime::at(0.0));
+        assert_eq!(canvas_fills(&frame), 1);
+    }
+
+    #[test]
+    fn canvas_gradient_stops_apply_on_the_next_draw() {
+        let source = r##"
+import * as core from "scene";
+            const root = core.column(0);
+            const box = core.view();
+            core.setSize(box, 40, 40);
+            core.append(root, box);
+            core.bindCanvas(box, (ctx) => {
+                const gradient = ctx.createLinearGradient(0, 0, 10, 0);
+                ctx.fillStyle = gradient;
+                gradient.addColorStop(0, "#f00");
+                ctx.fillRect(0, 0, 4, 4);
+                gradient.addColorStop(1, "#00f");
+                ctx.fillRect(4, 0, 4, 4);
+            });
+        "##;
+        let mut session = open_canvas(source, "canvas-gradient.js");
+        session.metrics(&metrics());
+        let frame = session.frame(session::FrameTime::at(0.0));
+        assert!(session.take_script_error().is_none());
+        let mut counts = Vec::new();
+        visit_commands(&frame, &mut |command, _, _| {
+            if let Command::Canvas { list, .. } = command {
+                for op in list.ops() {
+                    if let protocol::CanvasOp::Fill { paint, .. } = op
+                        && let protocol::CanvasBrush::Linear { stops, .. } = &paint.brush
+                    {
+                        counts.push(stops.len());
+                    }
+                }
+            }
+        });
+        assert_eq!(counts, [1, 2]);
+    }
+
+    #[test]
+    fn canvas_empty_clip_remains_in_the_list() {
+        let source = r#"
+import * as core from "scene";
+            const root = core.column(0);
+            const box = core.view();
+            core.setSize(box, 40, 40);
+            core.append(root, box);
+            core.bindCanvas(box, (ctx) => {
+                ctx.save();
+                ctx.beginPath();
+                ctx.clip();
+                ctx.fillRect(0, 0, 8, 8);
+                ctx.restore();
+            });
+        "#;
+        let mut session = open_canvas(source, "canvas-clip.js");
+        session.metrics(&metrics());
+        let frame = session.frame(session::FrameTime::at(0.0));
+        assert!(session.take_script_error().is_none());
+        let mut saw_clip = false;
+        let mut fill_after = false;
+        visit_commands(&frame, &mut |command, _, _| {
+            if let Command::Canvas { list, .. } = command {
+                for op in list.ops() {
+                    match op {
+                        protocol::CanvasOp::Clip { path } if path.verbs.is_empty() => {
+                            saw_clip = true;
+                        }
+                        protocol::CanvasOp::Fill { .. } if saw_clip => fill_after = true,
+                        _ => {}
+                    }
+                }
+            }
+        });
+        assert!(saw_clip, "empty clip was dropped");
+        assert!(fill_after, "fill after the empty clip was dropped");
+    }
+
+    #[test]
+    fn canvas_async_draw_is_rejected_and_not_committed() {
+        let source = r#"
+import * as core from "scene";
+            const root = core.column(0);
+            const box = core.view();
+            core.setSize(box, 40, 40);
+            core.append(root, box);
+            core.bindCanvas(box, async (ctx) => {
+                ctx.fillRect(0, 0, 8, 6);
+                await Promise.resolve();
+            });
+        "#;
+        let mut session = open_canvas(source, "canvas-async.js");
+        session.metrics(&metrics());
+        let first = session.frame(session::FrameTime::at(0.0));
+        assert_eq!(canvas_fills(&first), 0);
+        let second = session.frame(session::FrameTime::at(16.0));
+        let _ = second;
+        let error = session.take_script_error().unwrap_or_default();
+        assert!(error.contains("AsyncDraw"), "{error}");
+        assert!(
+            session
+                .take_faults()
+                .iter()
+                .any(|fault| fault.source == "canvas" && fault.message.contains("AsyncDraw"))
+        );
+    }
+
+    #[test]
+    fn canvas_default_error_reaches_diagnostics() {
+        let source = r#"
+import * as core from "scene";
+            const root = core.column(0);
+            const box = core.view();
+            core.setSize(box, 40, 40);
+            core.append(root, box);
+            let once = false;
+            core.bindCanvas(box, () => {
+                if (once) return;
+                once = true;
+                throw new Error("missing handler");
+            });
+        "#;
+        let mut session = open_canvas(source, "canvas-default-error.js");
+        session.metrics(&metrics());
+        let _ = session.frame(session::FrameTime::at(0.0));
+        assert!(session.take_faults().is_empty());
+        let _ = session.frame(session::FrameTime::at(16.0));
+        let error = session.take_script_error().unwrap_or_default();
+        assert!(error.contains("missing handler"), "{error}");
+        assert!(
+            session
+                .take_faults()
+                .iter()
+                .any(|fault| fault.source == "canvas")
+        );
+    }
+
+    #[test]
+    fn canvas_error_delivery_shares_one_budget() {
+        let source = r#"
+import * as core from "scene";
+            const root = core.column(0);
+            const label = core.text("ready", 16, [0, 0, 0, 255]);
+            const a = core.view();
+            const b = core.view();
+            core.setSize(a, 40, 40);
+            core.setSize(b, 40, 40);
+            core.append(root, a);
+            core.append(root, b);
+            core.append(root, label);
+            let aDone = false;
+            let bDone = false;
+            core.bindCanvas(a, (ctx) => {
+                if (aDone) return;
+                aDone = true;
+                ctx.fillRect(0, 0, 4, 4);
+                throw new Error("one");
+            }, () => {
+                core.setText(label, "first");
+                const start = Date.now();
+                while (Date.now() - start < 250) {}
+            });
+            core.bindCanvas(b, () => {
+                if (bDone) return;
+                bDone = true;
+                throw new Error("two");
+            }, () => {
+                core.setText(label, "second");
+            });
+        "#;
+        let mut session = open_canvas(source, "canvas-error-budget.js");
+        session.metrics(&metrics());
+        let _ = session.frame(session::FrameTime::at(0.0));
+        let delivered = session.frame(session::FrameTime::at(16.0));
+        assert_eq!(texts(&delivered), ["first"]);
+        assert!(delivered.again);
+        let faults = session.take_faults();
+        assert_eq!(faults.len(), 1, "{faults:?}");
+        assert!(faults[0].message.starts_with("canvas node "));
+        assert!(faults[0].message.contains("Interrupted: onDrawError"));
+        let next = session.frame(session::FrameTime::at(32.0));
+        assert_eq!(texts(&next), ["second"]);
+    }
+
+    #[test]
+    fn canvas_draw_blocks_host_module_writes() {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let config = ModuleConfig {
+            registry: std::sync::Arc::new(ModuleRegistry::new(vec![Module {
+                name: "Mark",
+                specifier: "@impasto/mark",
+                methods: vec![Method::sync("write", {
+                    let flag = std::sync::Arc::clone(&flag);
+                    move |_| {
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Ok(PluginValue::Null)
+                    }
+                })],
+            }])),
+            ..ModuleConfig::disconnected()
+        };
+        let source = r#"
+import * as core from "scene";
+import { write, addEventListener } from "@impasto/mark";
+import { createSignal } from "reactive";
+            const root = core.column(0);
+            const box = core.view();
+            core.setSize(box, 40, 40);
+            const label = core.text("ready", 16, [0, 0, 0, 255]);
+            core.append(root, box);
+            core.append(root, label);
+            const [passed, setPassed] = createSignal(0);
+            core.onFrame(() => {
+                const next = passed() + 1;
+                setPassed(next);
+                if (next < 3) core.requestFrame();
+            });
+            core.bindCanvas(box, (ctx) => {
+                ctx.fillRect(0, 0, 8, 8);
+                if (passed() === 1) write();
+                if (passed() === 2) addEventListener("tick", () => {});
+            }, (error) => {
+                core.setText(label, error.code);
+            });
+        "#;
+        let mut session = match super::JsSession::open_with(
+            source,
+            "canvas-host.js",
+            uicore::MonoShaper::default(),
+            no_log(),
+            None,
+            config,
+        ) {
+            Ok(session) => session,
+            Err(error) => panic!("{error}"),
+        };
+        session.metrics(&metrics());
+        let first = session.frame(session::FrameTime::at(0.0));
+        assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(canvas_fills(&first), 0);
+        let second = session.frame(session::FrameTime::at(16.0));
+        assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(canvas_fills(&second), 0);
+        let third = session.frame(session::FrameTime::at(32.0));
+        assert_eq!(texts(&third), ["DrawSideEffect"]);
+        assert!(canvas_fills(&third) >= 1);
     }
 }

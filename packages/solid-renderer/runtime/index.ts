@@ -98,7 +98,25 @@ export { Text, type TextGradient, type TextProps, type TextRun } from "./text.ts
 export { Image, type ImageProps } from "./image.ts";
 export { bindNodeRef } from "./ref.ts";
 export type { NodeRef, UIChildren, ViewEvents } from "../src/jsx.ts";
+import type { Path2DConstructor } from "../src/canvas/types.ts";
+
 export { scene } from "./scene.ts";
+export const Path2D: Path2DConstructor = scene.Path2D;
+export type Path2D = InstanceType<Path2DConstructor>;
+export type {
+  CanvasBinding,
+  CanvasComposite,
+  CanvasError,
+  CanvasGradient,
+  CanvasPaint,
+  CanvasPath,
+  CanvasRenderingContext2D,
+  CanvasSize,
+  FillRule,
+  Matrix2D,
+  Path2DConstructor,
+  TextMetrics,
+} from "../src/canvas/types.ts";
 export {
   animate,
   callAsync,

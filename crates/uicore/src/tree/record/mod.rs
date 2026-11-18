@@ -57,6 +57,16 @@ pub(super) struct RunState {
     first: Option<NodeId>,
 }
 
+struct FlatList<'a>(Option<&'a mut Vec<Command>>);
+
+impl FlatList<'_> {
+    fn push(&mut self, command: Command) {
+        if let Some(out) = self.0.as_mut() {
+            out.push(command);
+        }
+    }
+}
+
 impl Tree {
     pub fn record(&mut self) -> Result<DrawList, Error> {
         let mut commands = Vec::new();
@@ -70,11 +80,22 @@ impl Tree {
     /// node that opens those layers. A clean owner adopts its cached runs. Scroll
     /// still keeps one child picture.
     pub fn record_into(&mut self, commands: &mut Vec<Command>) -> Result<(), Error> {
+        self.record_scene(FlatList(Some(commands)))
+    }
+
+    /// Records the layer tree without also translating its commands into a flat draw list.
+    pub fn record_layers(&mut self) -> Result<(), Error> {
+        self.record_scene(FlatList(None))
+    }
+
+    fn record_scene(&mut self, mut out: FlatList<'_>) -> Result<(), Error> {
         self.flush_styles()?;
         if self.needs_layout() {
             return Err(Error::LayoutRequired);
         }
-        commands.clear();
+        if let Some(commands) = out.0.as_mut() {
+            commands.clear();
+        }
         self.sync_metrics();
         self.finish_measure();
         self.picture_writes = 0;
@@ -98,7 +119,7 @@ impl Tree {
             commands: Vec::new(),
             first: None,
         };
-        self.emit_node(root, commands, self.origin, (0.0, 0.0), None);
+        self.emit_node(root, &mut out, self.origin, (0.0, 0.0), None);
         self.close_run();
         self.leave_owner(root);
         self.runs.retain(|id, _| self.finished_owners.contains(id));
@@ -332,6 +353,18 @@ impl Tree {
         if at.descend {
             frame.push_content(commands);
         }
+        if node.content_w > 0.0
+            && node.content_h > 0.0
+            && let Some(list) = node.canvas.clone()
+        {
+            commands.push(Command::Canvas {
+                x: x + node.content_x,
+                y: y + node.content_y,
+                width: node.content_w,
+                height: node.content_h,
+                list,
+            });
+        }
         emit_text(self.text_scale, commands, node, x, y, &marks);
         emit_image(commands, node, x, y);
         if !at.descend {
@@ -393,7 +426,7 @@ impl Tree {
     fn emit_node(
         &mut self,
         id: NodeId,
-        out: &mut Vec<Command>,
+        out: &mut FlatList<'_>,
         parent_abs: (f32, f32),
         ancestor_scroll: (f32, f32),
         clip: Option<PaintClip>,
@@ -434,7 +467,7 @@ impl Tree {
     fn emit_children(
         &mut self,
         id: NodeId,
-        out: &mut Vec<Command>,
+        out: &mut FlatList<'_>,
         abs: (f32, f32),
         scroll: (f32, f32),
         clip: Option<PaintClip>,
@@ -455,7 +488,7 @@ impl Tree {
     fn emit_settled_clip(
         &mut self,
         id: NodeId,
-        out: &mut Vec<Command>,
+        out: &mut FlatList<'_>,
         parent_abs: (f32, f32),
         ancestor_scroll: (f32, f32),
         clip: Option<PaintClip>,
@@ -489,7 +522,7 @@ impl Tree {
     fn emit_layer(
         &mut self,
         id: NodeId,
-        out: &mut Vec<Command>,
+        out: &mut FlatList<'_>,
         parent_abs: (f32, f32),
         ancestor_scroll: (f32, f32),
         clip: Option<PaintClip>,
@@ -686,9 +719,7 @@ impl Tree {
                     .is_some_and(|node| node.renders_layers(stored));
                 any |= stored || renders;
                 let child_owner = self.subtree_owners.get(&current).copied().unwrap_or(false);
-                let marked = self
-                    .get(current)
-                    .is_some_and(|node| node.flags.contains(super::node::NodeFlags::PICTURE_OWNER));
+                let marked = self.is_picture_owner(current);
                 owners |= child_owner || marked;
                 child = self.get(current).and_then(|node| node.next);
             }
@@ -714,7 +745,7 @@ impl Tree {
         &mut self,
         id: NodeId,
         parent_abs: (f32, f32),
-        out: &mut Vec<Command>,
+        out: &mut FlatList<'_>,
         clip: Option<PaintClip>,
     ) {
         let space = self.run.scope.map(|scope| scope.base).unwrap_or((0.0, 0.0));
@@ -742,10 +773,10 @@ impl Tree {
         &self,
         before: usize,
         buf: &[Command],
-        out: &mut Vec<Command>,
+        out: &mut FlatList<'_>,
         clip: Option<PaintClip>,
     ) {
-        let Some(scope) = self.run.scope.as_ref() else {
+        let (Some(scope), Some(out)) = (self.run.scope.as_ref(), out.0.as_deref_mut()) else {
             return;
         };
         self.replay_commands(&buf[before..], scope.mirror.0, scope.mirror.1, clip, out);
@@ -760,21 +791,18 @@ impl Tree {
         &mut self,
         source: Option<NodeId>,
         command: Command,
-        out: &mut Vec<Command>,
+        out: &mut FlatList<'_>,
     ) {
         if self.run.first.is_none()
             && let Some(source) = source
         {
             self.run.first = Some(source);
         }
-        let mirror = self
-            .run
-            .scope
-            .map(|scope| scope.mirror)
-            .unwrap_or((0.0, 0.0));
-        let flat = translate_command(&command, mirror.0, mirror.1);
+        if let Some(out) = out.0.as_mut() {
+            let mirror = self.run.scope.map_or((0.0, 0.0), |scope| scope.mirror);
+            out.push(translate_command(&command, mirror.0, mirror.1));
+        }
         self.run.commands.push(command);
-        out.push(flat);
     }
 
     fn close_run(&mut self) {
@@ -881,7 +909,7 @@ impl Tree {
     fn emit_picture_owner(
         &mut self,
         id: NodeId,
-        out: &mut Vec<Command>,
+        out: &mut FlatList<'_>,
         parent_abs: (f32, f32),
         ancestor_scroll: (f32, f32),
         clip: Option<PaintClip>,
@@ -890,6 +918,8 @@ impl Tree {
             return;
         };
         let abs = (parent_abs.0 + x, parent_abs.1 + y);
+        // The parent's commands before this owner must stay below its picture.
+        self.close_run();
         // Scroll clips in scene space and only translates by the scroll offset.
         // `local_xy` is relative to that scroll, so using it parks the row above
         // the clip by whatever chrome sits over the list.
@@ -1117,8 +1147,8 @@ impl Tree {
         pushed
     }
 
-    fn blit(&self, id: NodeId, out: &mut Vec<Command>, dx: f32, dy: f32, clip: Option<PaintClip>) {
-        let Some(picture) = self.pictures.get(&id) else {
+    fn blit(&self, id: NodeId, out: &mut FlatList<'_>, dx: f32, dy: f32, clip: Option<PaintClip>) {
+        let (Some(out), Some(picture)) = (out.0.as_deref_mut(), self.pictures.get(&id)) else {
             return;
         };
         self.replay_commands(picture.commands.as_ref(), dx, dy, clip, out);
@@ -1271,6 +1301,19 @@ fn translate_command(command: &Command, dx: f32, dy: f32) -> Command {
             h,
             mode,
         },
+        Command::Canvas {
+            x,
+            y,
+            width,
+            height,
+            list,
+        } => Command::Canvas {
+            x: x + dx,
+            y: y + dy,
+            width,
+            height,
+            list,
+        },
         other => other,
     }
 }
@@ -1278,7 +1321,10 @@ fn translate_command(command: &Command, dx: f32, dy: f32) -> Command {
 fn is_leaf_paint(command: &Command) -> bool {
     matches!(
         command,
-        Command::Rect { .. } | Command::Text { .. } | Command::Image { .. }
+        Command::Rect { .. }
+            | Command::Text { .. }
+            | Command::Image { .. }
+            | Command::Canvas { .. }
     )
 }
 
@@ -1294,6 +1340,13 @@ fn command_outside(command: &Command, clip: Option<PaintClip>) -> bool {
         Command::Text {
             x, y, font_size, ..
         } => outside(clip, *x, *y, font_size.max(1.0), *font_size),
+        Command::Canvas {
+            x,
+            y,
+            width,
+            height,
+            ..
+        } => outside(clip, *x, *y, *width, *height),
         Command::Fill { .. } | Command::PushTransform { .. } | Command::Pop => false,
     }
 }

@@ -1,5 +1,6 @@
 //! Render tree. Layout goes through Taffy. This crate does not link Impeller.
 
+pub mod canvas;
 mod cast;
 mod error;
 mod gesture;
@@ -42,8 +43,8 @@ pub use semantics::{
     SemanticsId, SemanticsNode, SemanticsOp, SemanticsPatch, SemanticsRole, SemanticsUpdate,
 };
 pub use shaper::{
-    Affinity, Caret, MetricsKey, MonoShaper, PaintKey, ParagraphMetrics, SINGLE_LINE_MAX, Shaper,
-    SpanMetrics, TextLine, TextSize, paint_key, resolved_line_height,
+    Affinity, CanvasMetrics, Caret, MetricsKey, MonoShaper, PaintKey, ParagraphMetrics,
+    SINGLE_LINE_MAX, Shaper, SpanMetrics, TextLine, TextSize, paint_key, resolved_line_height,
 };
 pub use style::{Patch, Style, StyleError, StyleSurface};
 pub use text::{

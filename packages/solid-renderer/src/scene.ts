@@ -1,3 +1,10 @@
+import type {
+  CanvasBinding,
+  CanvasError,
+  CanvasRenderingContext2D,
+  CanvasSize,
+  Path2DConstructor,
+} from "./canvas/types.ts";
 import type { StyleInput } from "./style.ts";
 /** Stable scene-node handle. 0 means none, at the QuickJS boundary only. */
 export type NodeHandle = number;
@@ -43,7 +50,7 @@ export type TextSpanData = {
 };
 
 /**
- * The `core` object QuickJS installs. Method names match `glue.c`.
+ * The named `scene` module exposed by the Rust QuickJS bindings.
  * Handles are JS numbers. A live id is never 0.
  */
 export interface SceneModule {
@@ -445,6 +452,13 @@ export interface SceneModule {
       s1: string,
     ) => void,
   ): void;
+  /** Records the content box. A thenable is AsyncDraw. An error handler can return false to use diagnostics. */
+  bindCanvas(
+    node: NodeHandle,
+    draw: (context: CanvasRenderingContext2D, size: CanvasSize) => unknown,
+    onDrawError?: (error: CanvasError) => void,
+  ): CanvasBinding;
+  Path2D: Path2DConstructor;
 }
 
 /** Handle for `core.listDriver`. Methods stay on the QuickJS class. */

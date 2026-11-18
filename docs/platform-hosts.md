@@ -2,7 +2,7 @@
 
 macOS 与 Android 已落地：平台线程入队，渲染线程创建 `Engine` 和会话并 present。SDK 在 `third_party/impeller-sdk/<平台>/`。iOS 预构建矩阵没有这一列，所以没有 `crates/ios`。线程模型不按只有两台宿主来收死。
 
-`shell` 不依赖 `quickjs`。一个可执行文件只链一种会话。`protocol`、`uicore`、`engine`、`crates/macos` 不手写 C。QuickJS 的 C 只在 `crates/quickjs`。`Engine` 与 QuickJS 都是 `!Send`。
+`shell` 不依赖 `quickjs`。一个可执行文件只链一种会话。`protocol`、`uicore`、`engine`、`crates/macos` 不手写 C。QuickJS 使用 Cargo 构建的 quickjs-jit 0.14.2，Rust 绑定在 `crates/quickjs/src/linked/rt`。`Engine` 与 QuickJS 都是 `!Send`。
 
 ## 分层
 
@@ -23,7 +23,7 @@ quotes.js
 
 启动 URL 在 `shell::start` 之前写入 Shared `launch_url`。macOS 来自 argv `--url`，Android 来自显式 Intent 的 `getData()`。当前宿主没有注册 URL scheme。
 
-退出码：`0` 正常，`2` 引擎不可用，`3` 解释器 `NotLinked` 或 `Runtime`，`4` 启动期脚本失败。运行期脚本错误只记日志。
+退出码：`0` 正常，`2` 引擎不可用，`3` 解释器 `Runtime`，`4` 启动期脚本失败。运行期脚本错误只记日志。
 
 ## 线程
 
@@ -65,7 +65,7 @@ Android 的 `TextEvent` 下标是 UTF-16，宿主先换成字节下标。键盘�
 → 没有新事件且会话不要下一帧，就不再 request_frame
 ```
 
-`shell` 只看 `wants_frame`，不读树。会话在这一位里并上未布局、未绘制、未排空的 job，以及还没结束的运动。脚本错误清掉这一次的需求。
+`shell` 只看 `wants_frame`，不读树。会话在这一位里并上未布局、未绘制、未排空的 job，以及还没结束的运动。`FrameScheduler` 在提交或呈现前即可登记会话请求的下一次 vsync，回调入队后由渲染线程串行处理。失败进入退避时作废这次登记。Android 的 `VsyncWaiter` 用当前显示器的刷新率计算帧预算，呈现时间取自 `Choreographer` 的首选 timeline（API 33 及以上）。脚本错误清掉这一次的需求。
 
 `Hidden`、`Paused`、`MemoryWarning` 调用 `Engine::trim` 进入 `Flush`。连续 `PresentFailed`、`NotReady` 或 `AcquireMiss` 从第 3 次起退避，16ms 起翻倍，上限 1000ms。`BadScene` 不计入。同一表面打开 `NotReady` 最多再试 120 次。
 

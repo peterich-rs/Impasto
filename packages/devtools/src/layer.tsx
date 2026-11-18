@@ -317,7 +317,7 @@ function Panel(props: { close(): void }) {
 }
 
 /** The whole devtools layer: button + banner + panel, mounted on top. */
-export function DevtoolsLayer(): NodeHandle {
+export function DevtoolsLayer(props: { launcher?: boolean } = {}): NodeHandle {
   store.attach();
   scene.debugSetScan?.(true);
   const root = (
@@ -341,7 +341,7 @@ export function DevtoolsLayer(): NodeHandle {
       <Show when={!store.pageOpen()}>
         <ErrorBanner open={() => store.open()} />
       </Show>
-      <Show when={!store.pageOpen()}>
+      <Show when={props.launcher !== false && !store.pageOpen()}>
         <DevtoolsButton open={() => store.open()} />
       </Show>
       <Show when={store.pageOpen()}>

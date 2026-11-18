@@ -9,7 +9,7 @@ export type DevtoolsHandle = {
   readonly available: boolean;
   uninstall(): void;
 };
-export function installDevtools(): DevtoolsHandle {
+export function installDevtools(options: { launcher?: boolean } = {}): DevtoolsHandle {
   const handle: DevtoolsHandle = {
     available: store.available(),
     uninstall() {},
@@ -17,7 +17,7 @@ export function installDevtools(): DevtoolsHandle {
   if (!handle.available) {
     return handle;
   }
-  const release = registerTopLayer(() => DevtoolsLayer() as NodeHandle);
+  const release = registerTopLayer(() => DevtoolsLayer({ launcher: options.launcher !== false }) as NodeHandle);
   handle.uninstall = () => {
     release();
   };

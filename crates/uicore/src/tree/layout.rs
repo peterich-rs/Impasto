@@ -176,11 +176,14 @@ impl Tree {
     }
 
     pub(super) fn is_picture_owner(&self, id: NodeId) -> bool {
-        self.get(id)
-            .is_some_and(|node| node.flags.contains(NodeFlags::PICTURE_OWNER))
+        self.get(id).is_some_and(|node| {
+            node.flags
+                .intersects(NodeFlags::PICTURE_OWNER | NodeFlags::PICTURE_FROM_CANVAS)
+        })
     }
 
-    /// Records the subtree of `id` as its own picture. The first transition
+    /// Records the subtree of `id` as its own picture. Toggles only the list-row
+    /// bit, so a canvas on the same node stays installed. The first transition
     /// dirties `id` and its parent owner so the parent run drops the old commands.
     /// A repeat call does not.
     pub(crate) fn set_picture_owner(&mut self, id: NodeId, on: bool) -> Result<(), Error> {
@@ -194,6 +197,50 @@ impl Tree {
         }
         self.layer_epoch = self.layer_epoch.wrapping_add(1);
         self.mark_paint();
+        Ok(())
+    }
+
+    /// Installs or clears the canvas on `id`.
+    ///
+    /// An empty op list still owns a picture. Repaint only; layout stays put.
+    /// Sources in the list join [`Tree::image_census`] until the canvas is cleared
+    /// or the node is retired. The list-row picture bit is left alone.
+    pub fn set_canvas(
+        &mut self,
+        id: NodeId,
+        list: Option<protocol::CanvasList>,
+    ) -> Result<(), Error> {
+        let was_owner = self.is_picture_owner(id);
+        let previous = self.node_mut(id)?.canvas.take();
+        if previous.is_none() && list.is_none() {
+            return Ok(());
+        }
+        if let Some(previous) = previous.as_ref() {
+            self.note_canvas_images(previous, -1);
+        }
+        if let Some(next) = list.as_ref() {
+            self.note_canvas_images(next, 1);
+        }
+        {
+            let node = self.node_mut(id)?;
+            match list {
+                Some(next) => {
+                    node.flags.insert(NodeFlags::PICTURE_FROM_CANVAS);
+                    node.canvas = Some(next);
+                }
+                None => node.flags.remove(NodeFlags::PICTURE_FROM_CANVAS),
+            }
+        }
+        if was_owner == self.is_picture_owner(id) {
+            self.mark_repaint(id);
+        } else {
+            self.dirty_picture(id);
+            if let Some(parent) = self.get(id).and_then(|node| node.parent) {
+                self.dirty_picture(parent);
+            }
+            self.layer_epoch = self.layer_epoch.wrapping_add(1);
+            self.mark_paint();
+        }
         Ok(())
     }
 

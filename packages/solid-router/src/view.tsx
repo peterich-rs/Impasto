@@ -1,8 +1,10 @@
 import {
   For,
+  createMemo,
   createSignal,
   createTrackedEffect,
   onCleanup,
+  untrack,
   type Accessor,
 } from "solid-js";
 import { Errored } from "solid-js";
@@ -32,6 +34,8 @@ export type RouterViewProps = {
   transition?: (props: TransitionProps) => NodeHandle;
   /** Page color for the default transition. Omitted leaves the background transparent. */
   background?: string;
+  /** Slide fully opaque pages without blending either page during the transition. */
+  opaque?: boolean;
   /** Default is the package's plain error page. */
   errorFallback?: (error: unknown, reset: () => void) => NodeHandle;
 };
@@ -71,6 +75,7 @@ function loggedError(error: unknown): string {
 export function StackTransition(
   props: TransitionProps & {
     background?: string;
+    opaque?: boolean;
   },
 ): NodeHandle {
   let mover = 0;
@@ -99,7 +104,7 @@ export function StackTransition(
     const steps = stackMotion(
       phase === "cover" ? "cover" : phase,
       pageDistance(mover),
-    );
+    ).filter((step) => !props.opaque || step.prop !== "opacity");
     let left = steps.length;
     for (const step of steps) {
       if (step.prop === "opacity") {
@@ -223,6 +228,7 @@ function RouteHost(props: {
   entry: Accessor<RouteEntry>;
   transition?: RouterViewProps["transition"];
   background?: string;
+  opaque?: boolean;
   errorFallback?: RouterViewProps["errorFallback"];
 }): NodeHandle {
   let previous = 0;
@@ -244,7 +250,8 @@ function RouteHost(props: {
     }
     restoreFocus(previous);
   });
-  const Page = props.entry().component;
+  const { component: Page, key, keepAlive } = untrack(props.entry);
+  const params = createMemo(() => props.entry().params);
   const transition =
     props.transition ??
     ((step: TransitionProps) => (
@@ -252,13 +259,14 @@ function RouteHost(props: {
         phase={step.phase}
         onDone={step.onDone}
         background={props.background}
+        opaque={props.opaque}
       >
         {step.children}
       </StackTransition>
     ));
   return (
     <PageActiveContext value={active}>
-      <PageKeepContext value={() => props.entry().keepAlive}>
+      <PageKeepContext value={() => keepAlive}>
         <stack
           ref={(node) => {
             if (node === null) return;
@@ -284,20 +292,25 @@ function RouteHost(props: {
           }}
         >
           {transition({
-            phase: props.entry().phase,
-            onDone: () => props.router.complete(props.entry().key),
-            children: (
-              <Errored
-                fallback={(err, reset) => {
-                  const error = unwrapError(err);
-                  console.error(loggedError(error));
-                  const fallback = props.errorFallback ?? plainError;
-                  return fallback(error, () => reset());
-                }}
-              >
-                <Page params={props.entry().params} />
-              </Errored>
-            ),
+            // The transition tracks its phase; the route's content keeps its owner.
+            get phase() {
+              return props.entry().phase;
+            },
+            onDone: () => props.router.complete(key),
+            get children() {
+              return (
+                <Errored
+                  fallback={(err, reset) => {
+                    const error = unwrapError(err);
+                    console.error(loggedError(error));
+                    const fallback = props.errorFallback ?? plainError;
+                    return fallback(error, () => reset());
+                  }}
+                >
+                  <Page params={params()} phase={props.entry().phase} />
+                </Errored>
+              );
+            },
           })}
         </stack>
       </PageKeepContext>
@@ -331,6 +344,7 @@ export function RouterView(props: RouterViewProps): NodeHandle {
             entry={entry}
             transition={props.transition}
             background={props.background}
+            opaque={props.opaque}
             errorFallback={props.errorFallback}
           />
         )}

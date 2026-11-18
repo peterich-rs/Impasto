@@ -1,5 +1,18 @@
 import "@impasto/solid-renderer/jsx";
 import "./theme-bind.ts";
+export { Canvas } from "./Canvas.tsx";
+export type { CanvasController, CanvasProps } from "./props.ts";
+export type {
+  CanvasComposite,
+  CanvasError,
+  CanvasGradient,
+  CanvasRenderingContext2D,
+  CanvasSize,
+  FillRule,
+  Matrix2D,
+  TextMetrics,
+} from "@impasto/solid-renderer";
+export { Path2D } from "@impasto/solid-renderer";
 export { Button } from "./Button.tsx";
 export type { ButtonProps } from "./props.ts";
 export { Column } from "./Column.tsx";

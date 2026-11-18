@@ -16,4 +16,15 @@ declare module "scene" {
   export function setProp(node: Node, name: string, value: unknown): void;
   export { createRenderEffect as effect, createMemo as memo } from "reactive";
   export function createComponent<P, T>(component: (props: P) => T, props: P): T;
+  export const Path2D: import("../../solid-renderer/src/canvas/types.ts").Path2DConstructor;
+  export function bindCanvas(
+    node: import("../../solid-renderer/src/tree.ts").Node,
+    draw: (
+      context: import("../../solid-renderer/src/canvas/types.ts").CanvasRenderingContext2D,
+      size: import("../../solid-renderer/src/canvas/types.ts").CanvasSize,
+    ) => unknown,
+    onDrawError?: (
+      error: import("../../solid-renderer/src/canvas/types.ts").CanvasError,
+    ) => void,
+  ): import("../../solid-renderer/src/canvas/types.ts").CanvasBinding;
 }

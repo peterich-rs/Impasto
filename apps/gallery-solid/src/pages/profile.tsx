@@ -377,6 +377,16 @@ export function ProfilePage(props: { router: Router }): NodeHandle {
   scene.append(cardReset.body, resetHint);
   const card3 = sectionCard();
   scene.append(page, card3.root);
+  const canvasBtn = scene.createElement("view", {
+    style: { paddingBottom: 10 },
+  });
+  scene.onClick(canvasBtn, () => props.router.push("/canvas"));
+  const canvasLabel = scene.createElement("text", {
+    value: loc("绘图", "Canvas"),
+    style: { fontSize: 14, color: INK },
+  });
+  scene.append(canvasBtn, canvasLabel);
+  scene.append(card3.body, canvasBtn);
   const about = scene.createElement("text", {
     value: loc(
       "Impasto Quotes · 模拟盘 · 数据均为虚构",

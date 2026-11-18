@@ -31,6 +31,14 @@ pub enum TextAlign {
     Right,
 }
 
+/// Upright or italic. Oblique angles are not a separate style.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum FontSlant {
+    #[default]
+    Normal,
+    Italic,
+}
+
 /// What happens to text that does not fit the paragraph box.
 ///
 /// `Clip` drops the extra lines. `Ellipsis` replaces the tail of the last
@@ -72,6 +80,8 @@ pub struct TextStyle {
     /// when this is false.
     pub soft_wrap: bool,
     pub overflow: TextOverflow,
+    /// Default is upright. Italic is part of the measurement key.
+    pub slant: FontSlant,
 }
 
 impl Default for TextStyle {
@@ -88,6 +98,7 @@ impl Default for TextStyle {
             line_through: false,
             soft_wrap: true,
             overflow: TextOverflow::Clip,
+            slant: FontSlant::Normal,
         }
     }
 }
@@ -105,6 +116,7 @@ impl PartialEq for TextStyle {
             && self.line_through == other.line_through
             && self.soft_wrap == other.soft_wrap
             && self.overflow == other.overflow
+            && self.slant == other.slant
     }
 }
 
@@ -123,6 +135,7 @@ impl Hash for TextStyle {
         self.line_through.hash(state);
         self.soft_wrap.hash(state);
         self.overflow.hash(state);
+        self.slant.hash(state);
     }
 }
 
@@ -521,6 +534,15 @@ pub enum Command {
     /// Closes the most recent push. Invalid blur and SrcOver blend do not push,
     /// so they also do not consume a pop at record time.
     Pop,
+    /// A canvas content box. `x` and `y` are the picture origin of that box.
+    /// Verbs inside `list` stay in canvas-local coordinates.
+    Canvas {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        list: crate::CanvasList,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -531,29 +553,60 @@ pub struct DrawList {
 impl DrawList {
     /// Image sources in paint order.
     pub fn image_sources(&self) -> impl Iterator<Item = &str> {
-        self.commands.iter().filter_map(|command| match command {
-            Command::Image { source, .. } => Some(source.as_ref()),
-            _ => None,
-        })
+        self.commands.iter().flat_map(command_sources)
     }
 
     /// Unique image sources. A source that is both required and optional is required.
+    ///
+    /// Canvas images are optional: a missing decode skips that primitive.
     pub fn image_requirements(&self) -> Vec<(Arc<str>, bool)> {
         let mut out: Vec<(Arc<str>, bool)> = Vec::new();
         for command in &self.commands {
-            let Command::Image {
-                source, required, ..
-            } = command
-            else {
-                continue;
-            };
-            if let Some((_, was)) = out.iter_mut().find(|(name, _)| name == source) {
-                *was |= *required;
-            } else {
-                out.push((Arc::clone(source), *required));
+            match command {
+                Command::Image {
+                    source, required, ..
+                } => note_image(&mut out, source, *required),
+                Command::Canvas { list, .. } => {
+                    for image in list.images() {
+                        note_image(&mut out, &image.source, false);
+                    }
+                }
+                _ => {}
             }
         }
         out
+    }
+}
+
+fn note_image(out: &mut Vec<(Arc<str>, bool)>, source: &Arc<str>, required: bool) {
+    if let Some((_, was)) = out.iter_mut().find(|(name, _)| name == source) {
+        *was |= required;
+    } else {
+        out.push((Arc::clone(source), required));
+    }
+}
+
+fn command_sources(command: &Command) -> CommandSources<'_> {
+    match command {
+        Command::Image { source, .. } => CommandSources::One(Some(source.as_ref())),
+        Command::Canvas { list, .. } => CommandSources::Many(list.images().iter()),
+        _ => CommandSources::One(None),
+    }
+}
+
+enum CommandSources<'a> {
+    One(Option<&'a str>),
+    Many(std::slice::Iter<'a, crate::CanvasImageRef>),
+}
+
+impl<'a> Iterator for CommandSources<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::One(slot) => slot.take(),
+            Self::Many(iter) => iter.next().map(|image| image.source.as_ref()),
+        }
     }
 }
 

@@ -14,7 +14,7 @@ crates/session/          会话 trait
 crates/shell/        命令队列、帧调度、渲染线程
 crates/macos/            macOS 窗口
 crates/android/          HostActivity、HostView、Choreographer、Vulkan
-crates/quickjs/          quickjs-ng 会话。没有源码时 NotLinked
+crates/quickjs/          quickjs-jit 0.14.2 会话
 packages/solid-renderer/ 接到 scene 与 reactive 的运行时。不做布局
 packages/solid-ui/       View、Row、Column、Stack、Grid、Text、Image、Button、Field、Dialog 等作者组件
 packages/devtools/       应用内调试面板。数据来自 shell 的 DiagnosticsHub
@@ -26,7 +26,7 @@ apps/gallery-solid/      Solid 应用。dist/quotes.js 由 just gallery-dist 本
 
 依赖只向下：gallery → solid-ui / solid-router → solid-renderer → quickjs 会话 → uicore → protocol。宿主 → shell → session、engine。`engine` 不依赖 `uicore`。`uicore` 不包含 QuickJS、AppKit 或 Impeller 头文件。语言包不算坐标。选型表在 `AGENTS.md`。一个可执行文件只链一种会话。
 
-`crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 不手写 C 或 Objective-C。QuickJS 的 C 只在 `crates/quickjs`。变更缓冲由 `crates/quickjs/abi.yml` 生成。
+`crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 不手写 C 或 Objective-C。QuickJS 的 Rust 绑定在 `crates/quickjs/src/linked/rt`。`abi.yml` 生成 Rust、JavaScript 与 TypeScript 常量。
 
 ## 一帧
 
@@ -34,10 +34,10 @@ apps/gallery-solid/      Solid 应用。dist/quotes.js 由 just gallery-dist 本
 
 ```text
 pointer → hit-test → 监听器写信号
-vsync → 冲刷 → layout → driver tick → 脏了再 layout → onLayout → 脏了再 layout 一次 → record → present
+vsync → 冲刷 → layout → driver tick → 脏了再 layout → onLayout → 脏了再 layout 一次 → Canvas paint → record → present
 ```
 
-`frame` 里先排空 job，再 `onFrame`，再扫掉本轮摘下且没有挂回的子树，然后布局。`ListDriver` 和 `ScrollController` 的 tick 在布局之后、`onLayout` 之前。树不脏且可见集没变时，沿用上一份层树，不调用 `onLayout`。driver 还有未测完的行高，或树上还有运动，会话再要一帧。`requestFrame` 只再要恰好一帧。脚本错误清掉这一次的再要帧。
+`frame` 里先排空 job，再 `onFrame`，再扫掉本轮摘下且没有挂回的子树，然后布局。`scene.createElement` 创建的节点在 owner 清理时仍未挂载，也加入这次回收。`ListDriver` 和 `ScrollController` 的 tick 在布局之后、`onLayout` 之前。树不脏且可见集没变时，沿用上一份层树，不调用 `onLayout`。Canvas paint 在最终布局之后、`Tree::record_layers` 之前。driver 还有未测完的行高，或树上还有运动，会话再要一帧。`requestFrame` 只再要恰好一帧。脚本错误清掉这一次的再要帧。
 
 `layer_epoch` 未变、缩放相同、`needs_present` 为假则跳过 `submit_layers` 和 `present`。为真则 `PresentCached`。`Resumed` 与 `Invalidate` 置 `needs_present`。`Hidden`、`Paused`、`MemoryWarning` 调用 `Engine::trim`，GPU 进入 `Flush`。`Dead` 取消这一帧。present 连续失败从第 3 次起退避。`BadScene` 不进退避，也不重建 Vulkan 链。定时器 `Wake` 在已有 vsync token 时不抢跑这一帧，也不取消那次回调；`Resumed` 会丢掉卡住的 token 再武装一次。
 
@@ -45,9 +45,9 @@ macOS 与 Android 宿主始终打开应用内 devtools。面板经 `registerTopL
 
 ## 绘制
 
-进程内没有场景字节。命令是 `Fill`、`Rect`、`Text`、`Image`，以及成对的 `PushClip` / `PushOpacity` / `PushTransform` / `Pop`。不平衡是 `BadScene`。`protocol` 不校验。
+进程内没有场景字节。命令是 `Fill`、`Rect`、`Text`、`Image`、`Canvas`，以及成对的 `PushClip` / `PushOpacity` / `PushTransform` / `Pop`。不平衡是 `BadScene`。`protocol` 不校验。`Command::Canvas` 携带 `CanvasList`，坐标相对该节点的内容盒。
 
-`Tree::record` 交出扁平 `DrawList`（场景坐标）和 `LayerTree`。picture 内坐标相对该 picture 的原点。一段 picture 属于一个 owner：根，或本帧开层的 `Scroll`、半透明 `Opacity`、非单位 `Transform`、子树里还有开层节点的 `Clip`，以及 blur、backdrop、非 `SrcOver` 的 blend。没有这些的 `Clip` 把 `PushClip` 留在父 picture 里。`ListDriver` 把行标成 picture owner 后，每行单独一张 picture。滚动偏移在 `Offset` 层上，不因此重建 picture。行 picture 的 `Offset` 是场景坐标，命令原点是 `(0, 0)`。
+运行时用 `Tree::record_layers` 组出 `LayerTree`。`Tree::record` 同时生成扁平 `DrawList`，使用场景坐标。picture 内坐标相对该 picture 的原点。一段 picture 属于一个 owner：根，或本帧开层的 `Scroll`、半透明 `Opacity`、非单位 `Transform`、子树里还有开层节点的 `Clip`，以及 blur、backdrop、非 `SrcOver` 的 blend。没有这些的 `Clip` 把 `PushClip` 留在父 picture 里。`ListDriver` 把行标成 picture owner 后，每行单独一张 picture。滚动偏移在 `Offset` 层上，不因此重建 picture。行 picture 的 `Offset` 是场景坐标，命令原点是 `(0, 0)`。
 
 文字命令带字号、`max_width`、颜色、段落样式，以及可选的 spans。每个 span 有自己的颜色、字重、字体、下划线和删除线。`gradient` 存在时前景用 `protocol::Gradient`，unit square 映射到该 span 在段落局部坐标里的行盒并集；下划线和删除线仍用 `color`。只改颜色或渐变时标绘制，不重新测量。渲染引擎按命令里的字号绘制，不乘 `point_scale`。`point_scale` 只乘在根 builder 上。
 
@@ -96,13 +96,13 @@ macOS 与 Android 宿主始终打开应用内 devtools。面板经 `registerTopL
 
 ## 运行时会话
 
-`crates/quickjs` 持有 `JSRuntime`、`uicore::Tree` 和 `reactive::Graph`，都留在渲染线程。`glue.c` 注册具名模块 `scene` 和 `reactive`。`scene` 的 `createElement`、`insert`、`setProp`、`effect`、`memo` 和 `createComponent` 是原生函数；属性名在 `linked/scene.rs` 映射到 `abi.yml` 生成的字段号。节点直接使用 `NodeId::to_raw()`，`0` 表示没有节点。`scene.js` 提供控件使用的查询、命令和 ABI 包装。全局没有 `core`。没有 QuickJS 源码时 `open`、`compile`、`open_program_with_io` 返回 `NotLinked`。
+`crates/quickjs` 使用根 `Cargo.toml` 钉住的 quickjs-jit 0.14.2，依赖名是 `rquickjs`。`linked/rt::Engine` 拥有唯一的 `Runtime`、`Context` 和 `Host`；`uicore::Tree`、`reactive::Graph` 与 VM 都留在渲染线程。Rust 绑定注册 `scene`、`reactive`、`#reactive` 和能力模块。`linked/scene.rs` 把属性名映射到 `abi.yml` 的字段号，`linked/mutation.rs` 应用树更新。`scene.js` 提供具名查询、命令与插入范围归一化。节点是 `NodeId::to_raw()`，`0` 表示没有节点，没有全局 `core`。启动先绑定原生入口，再依次执行 `abi.js`、`scene.js`、`prelude.js` 和 ESM `reactive.js`，捕获并删除 `__reactive` 后执行应用并排空 jobs。
 
-`reactive::Graph` 使用带 generation 的 arena 和双向边。进入用户闭包和 cleanup 前结束 arena 借用，`JSValue` 由 `linked/reactive.rs` 持有和释放。signal 写入只标脏；`batch` 同步冲刷。`JsSession::frame` 在帧监听前、布局监听后各有一个 `run_updates` 调用点，空队列跳过。`tick_motions` 保持在这些调用之前。`boot` 只分发帧与布局监听。抛错的帧监听会从监听表摘掉。`Show`、`Switch`、`Match`、`For` 和 `Errored` 在 `packages/reactive`，调用同一张原生图。
+`reactive::Graph` 使用带 generation 的 arena 和双向边。进入用户闭包和 cleanup 前结束 arena 借用，JS 值由 `linked/reactive.rs` 的 `Persistent` 持有和释放。signal 写入只标脏；`batch` 同步冲刷。`JsSession::frame` 在帧监听前、布局监听后各有一个 `run_updates` 调用点，空队列跳过。`tick_motions` 保持在这些调用之前。`boot` 只分发帧与布局监听。抛错的帧监听会从监听表摘掉。`Show`、`Switch`、`Match`、`For` 和 `Errored` 在 `packages/reactive`，调用同一张原生图。
 
-能力模块的运行时 specifier 是包入口 `@impasto/clipboard`、`@impasto/linking`、`@impasto/file-system`、`@impasto/async-storage`、`@impasto/app-state`、`@impasto/permissions` 和 `@impasto/devtools`，由 `JS_NewCModule` 物化。未注册是链接期错误。CLI 按 `app.toml` 的目标权限生成 `app.modules`，宿主据此限制会话的 `ModuleRegistry`。大字节（≥4KB）进会话 slab，由 QuickJS 的 realloc 钩子回收。
+能力模块的运行时 specifier 是包入口 `@impasto/clipboard`、`@impasto/linking`、`@impasto/file-system`、`@impasto/async-storage`、`@impasto/app-state`、`@impasto/permissions` 和 `@impasto/devtools`，由 rquickjs 的 `ModuleDef` 注册。未注册是链接期错误。CLI 按 `app.toml` 的目标权限生成 `app.modules`，宿主据此限制会话的 `ModuleRegistry`。返回的大字节（≥4KB）由 `ArrayBuffer` 持有 Rust 的 `Vec<u8>`，较小字节使用 `Uint8Array`。
 
-`quickjs::compile` 生成与钉住的 QuickJS 版本对应的字节码。`open_program_with_io` 加载 ESM 或本机工具链生成的可信字节码；macOS 的 `.app` 和 Android 的资产都可携带 `app.bin`。脚本异常的 message 和 stack 分开进入 `DiagnosticsHub`。回调里的 panic 在 C 边界接住。`run --trace` 才输出帧内脚本微秒、非空更新轮次和场景 setter 次数。
+`quickjs::compile` 的脚本和模块路径都生成 IQJS envelope，包含引擎版本与模式，返回只有 `compile` 能构造的 `CompiledBytecode`。`bytecode.rs` 在加载前检查 magic、版本、模式标签和非空载荷；这些检查不能证明载荷是对应类型的字节码。进程内加载走 `open_compiled_with_io`。磁盘上的 `app.bin` 走 `open_trusted_bytecode_with_io`，调用者保证字节来自本工具链的 `compile`，该入口是 `unsafe`。脚本用 `JS_ReadObject` 与 `JS_EvalFunction`，模块用 `Module::load`。`open_program_with_io` 只加载源码。macOS 的 `.app` 和 Android 的资产都可携带 `app.bin`。内存上限 16 MiB，栈上限 8 MiB，eval 限时 1000 ms，其余 turn 为 128 ms，job drain 最多 32 轮。文件模块先按应用根做词法归一化，`..` 留在根内则接受，越出根才拒绝；`AppLoader` 再检查符号化后的真实路径。单个文件上限 16 MiB。脚本异常的 message 和 stack 分开进入 `DiagnosticsHub`。`Engine::shutdown` 在 VM 存活时先释放响应式图，再清空定时器、监听器及 HTTP 等 Persistent，移除 userdata，最后依次释放 Context 和 Runtime；正常 Drop 与启动失败共用此路径。`run --trace` 输出帧内脚本微秒、非空更新轮次和场景 setter 次数。
 
 Kotlin 会话还没接上原生树。见 `docs/refactor-plan.md`。
 

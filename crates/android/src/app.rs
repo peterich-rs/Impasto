@@ -639,17 +639,25 @@ fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
             } else {
                 host
             };
-            let mut session = quickjs::open_program_with_io(
-                &script,
-                name.ends_with(".bin"),
-                &name,
-                open.shaper,
-                open.log,
-                Some(io),
-                host,
-            )
+            let mut session = if name.ends_with(".bin") {
+                // SAFETY: `script` is an asset named `*.bin`. The host packages
+                // that file from `impasto build`, which writes this toolchain's
+                // `compile` output. It is not network input. The envelope does
+                // not prove the payload is valid bytecode.
+                unsafe {
+                    quickjs::open_trusted_bytecode_with_io(
+                        &script,
+                        &name,
+                        open.shaper,
+                        open.log,
+                        Some(io),
+                        host,
+                    )
+                }
+            } else {
+                quickjs::open_program_with_io(&script, &name, open.shaper, open.log, Some(io), host)
+            }
             .map_err(|error| match error {
-                quickjs::Error::NotLinked => SessionError::NotLinked,
                 quickjs::Error::Runtime => SessionError::Runtime,
                 quickjs::Error::Script(text) => {
                     tracing::error!(target: "impasto::script", "{text}");

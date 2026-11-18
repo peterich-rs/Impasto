@@ -1,43 +1,38 @@
 use super::ffi;
 use super::*;
 
+pub(crate) enum TextureLoad {
+    Ready(ffi::ImpellerTexture, f32, f32),
+    Missing,
+    /// Decoded size is zero. Nothing is cached and nothing is drawn.
+    Empty,
+    Failed,
+}
+
 impl<'a> crate::painter::Painter<'a> {
-    pub(crate) fn draw_image<'pixels>(
+    pub(crate) fn load_texture<'pixels>(
         &mut self,
-        builder: ffi::ImpellerDisplayListBuilder,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
         source: &str,
-        mode: ContentMode,
-        required: bool,
         resolve: &mut impl FnMut(&str) -> Option<ImagePixels<'pixels>>,
-    ) -> bool {
+    ) -> TextureLoad {
         if let Some(cached) = self.textures.get_mut(source) {
             cached.used = self.typography.generation();
-            let texture = cached.texture;
-            let width = cached.width;
-            let height = cached.height;
-            return self.blit_texture(builder, texture, x, y, w, h, width, height, mode);
+            return TextureLoad::Ready(cached.texture, cached.width, cached.height);
         }
         let Some(image) = resolve(source) else {
-            if required {
-                return false;
-            }
-            return self.paint_missing_image(builder, x, y, w, h);
+            return TextureLoad::Missing;
         };
         if image.width == 0 || image.height == 0 {
-            return true;
+            return TextureLoad::Empty;
         }
         let Some(bytes) = (image.width as usize)
             .checked_mul(image.height as usize)
             .and_then(|pixels| pixels.checked_mul(4))
         else {
-            return false;
+            return TextureLoad::Failed;
         };
         if image.rgba.len() < bytes {
-            return false;
+            return TextureLoad::Failed;
         }
         let descriptor = ffi::ImpellerTextureDescriptor {
             pixel_format: ffi::ImpellerPixelFormat::kImpellerPixelFormatRGBA8888,
@@ -63,7 +58,7 @@ impl<'a> crate::painter::Painter<'a> {
             )
         };
         if texture.is_null() {
-            return false;
+            return TextureLoad::Failed;
         }
         let width = image.width as f32;
         let height = image.height as f32;
@@ -76,7 +71,35 @@ impl<'a> crate::painter::Painter<'a> {
                 used: self.typography.generation(),
             },
         );
-        self.blit_texture(builder, texture, x, y, w, h, width, height, mode)
+        TextureLoad::Ready(texture, width, height)
+    }
+
+    pub(crate) fn draw_image<'pixels>(
+        &mut self,
+        builder: ffi::ImpellerDisplayListBuilder,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        source: &str,
+        mode: ContentMode,
+        required: bool,
+        resolve: &mut impl FnMut(&str) -> Option<ImagePixels<'pixels>>,
+    ) -> bool {
+        match self.load_texture(source, resolve) {
+            TextureLoad::Ready(texture, width, height) => {
+                self.blit_texture(builder, texture, x, y, w, h, width, height, mode)
+            }
+            TextureLoad::Missing => {
+                if required {
+                    false
+                } else {
+                    self.paint_missing_image(builder, x, y, w, h)
+                }
+            }
+            TextureLoad::Empty => true,
+            TextureLoad::Failed => false,
+        }
     }
 
     /// A visible stand-in for an optional image whose bytes are not available.

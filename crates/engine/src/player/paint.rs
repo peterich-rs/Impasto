@@ -531,6 +531,13 @@ pub(crate) fn impeller_weight(weight: u16) -> ffi::ImpellerFontWeight::Type {
     }
 }
 
+pub(crate) fn impeller_slant(slant: protocol::FontSlant) -> ffi::ImpellerFontStyle::Type {
+    match slant {
+        protocol::FontSlant::Italic => ffi::ImpellerFontStyle::kImpellerFontStyleItalic,
+        protocol::FontSlant::Normal => ffi::ImpellerFontStyle::kImpellerFontStyleNormal,
+    }
+}
+
 pub(crate) fn impeller_align(align: TextAlign) -> ffi::ImpellerTextAlignment::Type {
     match align {
         TextAlign::Left => ffi::ImpellerTextAlignment::kImpellerTextAlignmentLeft,

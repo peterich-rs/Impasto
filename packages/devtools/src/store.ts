@@ -64,6 +64,12 @@ export type PhaseSample = {
   scrolls: number;
   focus: number;
   blur: number;
+  canvasRecordMs: number;
+  canvasPrepareMs: number;
+  canvasOps: number;
+  canvasSegments: number;
+  canvasRedraws: number;
+  canvasReused: number;
 };
 export type FrameSample = {
   seq: number;
