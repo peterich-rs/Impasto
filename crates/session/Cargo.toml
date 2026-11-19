@@ -5,6 +5,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+js-host = { workspace = true }
 uicore = { workspace = true }
 protocol = { workspace = true }
 

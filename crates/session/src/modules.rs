@@ -2,146 +2,47 @@
 
 use std::sync::{Arc, RwLock};
 
-use crate::io::{PluginResult, PluginValue, module_not_linked};
+use crate::io::PluginValue;
 
-pub type Work = Box<dyn FnOnce() -> PluginResult + Send>;
+pub use js_host::{
+    ImmediateExec, Invoke, Method, MethodExec, Module, PromiseFn, Settle, SyncFn, Work,
+};
 
-/// One-shot completion. Drop without [`Settle::send`] fails the promise.
-pub struct Settle {
-    send: Option<Box<dyn FnOnce(PluginResult) + Send>>,
-}
-
-impl Settle {
-    pub fn new(send: impl FnOnce(PluginResult) + Send + 'static) -> Self {
-        Self {
-            send: Some(Box::new(send)),
-        }
-    }
-
-    pub fn send(mut self, result: PluginResult) {
-        if let Some(send) = self.send.take() {
-            send(result);
-        }
-    }
-}
-
-impl Drop for Settle {
-    fn drop(&mut self) {
-        if let Some(send) = self.send.take() {
-            send(PluginResult::Failed {
-                message: "settle dropped".into(),
-            });
-        }
-    }
-}
-
-pub trait MethodExec: Send + Sync {
-    fn worker(&self, settle: Settle, work: Work);
-    fn main_thread(&self, settle: Settle, work: Work);
-    fn now(&self, settle: Settle, result: PluginResult);
-}
-
-/// Test executor. `worker` and `main_thread` run `work` on the caller.
-pub struct ImmediateExec;
-
-impl MethodExec for ImmediateExec {
-    fn worker(&self, settle: Settle, work: Work) {
-        settle.send(work());
-    }
-
-    fn main_thread(&self, settle: Settle, work: Work) {
-        settle.send(work());
-    }
-
-    fn now(&self, settle: Settle, result: PluginResult) {
-        settle.send(result);
-    }
-}
-
-pub type SyncFn = Arc<dyn Fn(&[PluginValue]) -> Result<PluginValue, String> + Send + Sync>;
-pub type PromiseFn = Arc<dyn Fn(&[PluginValue], Settle, &dyn MethodExec) + Send + Sync>;
-
-#[derive(Clone)]
-pub enum Invoke {
-    Sync(SyncFn),
-    Promise(PromiseFn),
-}
-
-#[derive(Clone)]
-pub struct Method {
-    pub name: &'static str,
-    pub invoke: Invoke,
-}
-
-impl Method {
-    pub fn sync(
-        name: &'static str,
-        f: impl Fn(&[PluginValue]) -> Result<PluginValue, String> + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            name,
-            invoke: Invoke::Sync(Arc::new(f)),
-        }
-    }
-
-    pub fn promise(
-        name: &'static str,
-        f: impl Fn(&[PluginValue], Settle, &dyn MethodExec) + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            name,
-            invoke: Invoke::Promise(Arc::new(f)),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct Module {
-    pub name: &'static str,
-    pub specifier: &'static str,
-    pub methods: Vec<Method>,
-}
-
+/// Compatibility registry. The modules live in one [`js_host::ModuleRegistry`].
+///
+/// `restricted` is the `@impasto/` package filter. The generic registry has no
+/// such policy, and this wrapper does not implement `Deref`.
 pub struct ModuleRegistry {
-    modules: Arc<[Module]>,
+    inner: js_host::ModuleRegistry,
 }
 
 impl ModuleRegistry {
     pub fn new(modules: Vec<Module>) -> Self {
         Self {
-            modules: modules.into(),
+            inner: js_host::ModuleRegistry::new(modules),
         }
     }
 
     pub fn restricted(&self, packages: &[String]) -> Self {
-        Self::new(
-            self.modules
-                .iter()
-                .filter(|module| {
-                    packages.iter().any(|package| {
-                        module.specifier.strip_prefix("@impasto/") == Some(package.as_str())
-                    })
+        Self {
+            inner: self.inner.filtered(|module| {
+                packages.iter().any(|package| {
+                    module.specifier.strip_prefix("@impasto/") == Some(package.as_str())
                 })
-                .cloned()
-                .collect(),
-        )
+            }),
+        }
     }
 
     pub fn module(&self, name: &str) -> Option<&Module> {
-        self.modules.iter().find(|module| module.name == name)
+        self.inner.module(name)
     }
 
     pub fn by_specifier(&self, specifier: &str) -> Option<&Module> {
-        self.modules
-            .iter()
-            .find(|module| module.specifier == specifier)
+        self.inner.by_specifier(specifier)
     }
 
     pub fn method(&self, module: &str, method: &str) -> Option<&Method> {
-        self.module(module)?
-            .methods
-            .iter()
-            .find(|entry| entry.name == method)
+        self.inner.method(module, method)
     }
 
     pub fn call(
@@ -150,11 +51,11 @@ impl ModuleRegistry {
         method: &str,
         args: &[PluginValue],
     ) -> Result<PluginValue, String> {
-        match &self.method(module, method).map(|entry| &entry.invoke) {
-            Some(Invoke::Sync(f)) => f(args),
-            Some(Invoke::Promise(_)) => Err(format!("module \"{module}.{method}\" is not sync")),
-            None => Err(module_not_linked(module, Some(method))),
-        }
+        self.inner.call(module, method, args)
+    }
+
+    pub fn as_host_registry(&self) -> &js_host::ModuleRegistry {
+        &self.inner
     }
 }
 

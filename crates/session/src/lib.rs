@@ -7,7 +7,7 @@ mod modules;
 
 pub use io::{
     HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, HttpResponse,
-    IoJob, PluginResult, PluginValue, document_relative, module_not_linked,
+    IoEvent, IoJob, PluginResult, PluginValue, document_relative, module_not_linked,
 };
 pub use modules::{
     ImmediateExec, Invoke, Method, MethodExec, Module, ModuleConfig, ModuleRegistry, PromiseFn,
@@ -314,38 +314,6 @@ pub enum InputEvent {
         end: u32,
         compose_start: i32,
         compose_end: i32,
-    },
-}
-
-/// One IO completion delivered on the render thread.
-pub enum IoEvent {
-    Http {
-        token: u64,
-        result: Result<HttpResponse, HttpError>,
-    },
-    /// Streamed head: status and headers before any body bytes.
-    HttpHead {
-        token: u64,
-        status: u16,
-        headers: Vec<(String, String)>,
-    },
-    /// One streamed body piece. The final chunk carries `done: true`; a
-    /// failed stream ends with a chunk whose `error` is set.
-    HttpChunk {
-        token: u64,
-        bytes: Vec<u8>,
-        done: bool,
-        error: Option<HttpError>,
-    },
-    Plugin {
-        token: u64,
-        result: PluginResult,
-    },
-    Socket {
-        id: u64,
-        event: String,
-        text: bool,
-        data: Vec<u8>,
     },
 }
 

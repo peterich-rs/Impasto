@@ -533,6 +533,110 @@ import * as core from "scene";
         assert_eq!(seen.get(), 1);
     }
 
+    /// Locks the current open sequence. The host sink is installed after the
+    /// entry script, so a top-level `fetch` / socket is queued inside the
+    /// session and is not an [`session::IoJob`]. `fetchStream`'s synchronous
+    /// error is delivered before the prelude records the token, so that
+    /// promise stays pending. These are existing results, not the intended
+    /// long-term semantics.
+    #[test]
+    fn open_runs_entry_before_io_install_and_frame_flushes_pending() {
+        let logs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let record = std::rc::Rc::clone(&logs);
+        let jobs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = std::sync::Arc::clone(&jobs);
+        let source = r#"
+            console.log("sync");
+            Promise.resolve().then(function () { console.log("job"); });
+            setTimeout(function () { console.log("timer"); }, 0);
+            requestAnimationFrame(function () { console.log("raf"); });
+            fetch("https://example.test/pending").then(
+                function () { console.log("fetch-ok"); },
+                function (error) { console.log("fetch-fail:" + String(error)); }
+            );
+            fetchStream("https://example.test/stream").then(
+                function () { console.log("stream-ok"); },
+                function (error) { console.log("stream-fail:" + String(error && error.message)); }
+            );
+            var socket = new WebSocket("ws://example.test/socket");
+            socket.onerror = function () { console.log("socket-error"); };
+            socket.onopen = function () { console.log("socket-open"); };
+            console.log("sync-after");
+        "#;
+        let mut session = super::open_with_io(
+            source,
+            "order.js",
+            uicore::MonoShaper::default(),
+            Box::new(move |_level, text| record.borrow_mut().push(text.to_owned())),
+            Some(Box::new(move |_job| {
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            })),
+            ModuleConfig::disconnected(),
+        )
+        .expect("open");
+        assert_eq!(
+            logs.borrow().as_slice(),
+            ["sync", "sync-after", "job"],
+            "entry microtask runs during open; timers, fetch and sockets wait for a frame"
+        );
+        assert_eq!(jobs.load(std::sync::atomic::Ordering::Relaxed), 0);
+        session.frame(session::FrameTime::at(0.0));
+        assert_eq!(
+            logs.borrow().as_slice(),
+            [
+                "sync",
+                "sync-after",
+                "job",
+                "socket-error",
+                "timer",
+                "fetch-fail:TypeError",
+                "raf",
+            ]
+        );
+        assert_eq!(jobs.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(
+            !logs.borrow().iter().any(|line| line.starts_with("stream-")),
+            "fetchStream's sync error currently never settles the caller promise"
+        );
+        drop(session);
+    }
+
+    #[test]
+    fn unknown_io_completion_is_ignored_and_drop_discards_pending_fetch() {
+        let logs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let record = std::rc::Rc::clone(&logs);
+        let mut session = open(
+            "fetch('https://example.test/pending').then(function () { console.log('fetch-ok'); }, function (error) { console.log('fetch-fail:' + String(error)); });",
+            "pending-fetch.js",
+            uicore::MonoShaper::default(),
+            Box::new(move |_level, text| record.borrow_mut().push(text.to_owned())),
+        )
+        .expect("open");
+        assert!(logs.borrow().is_empty());
+        session.io_event(IoEvent::Http {
+            token: 99,
+            result: Err(session::HttpError::new(
+                session::HttpFailure::Network,
+                "late",
+            )),
+        });
+        session.io_event(IoEvent::Plugin {
+            token: 99,
+            result: PluginResult::Failed {
+                message: "late".into(),
+            },
+        });
+        session.io_event(IoEvent::Socket {
+            id: 99,
+            event: "error".into(),
+            text: true,
+            data: b"late".to_vec(),
+        });
+        assert!(logs.borrow().is_empty());
+        drop(session);
+        assert!(logs.borrow().is_empty());
+    }
+
     #[test]
     fn script_bytecode_round_trip_uses_the_envelope() {
         let bytes = super::compile(

@@ -10,7 +10,8 @@
 crates/protocol/         DrawList、LayerTree
 crates/uicore/           渲染树。Taffy、命中、手势、焦点
 crates/engine/           渲染引擎。读 LayerTree，调用 impeller.h
-crates/session/          会话 trait
+crates/js-host/          宿主交换契约。仅 std
+crates/session/          会话 trait。原名重导出 js-host 的自有数据类型
 crates/shell/        命令队列、帧调度、渲染线程
 crates/macos/            macOS 窗口
 crates/android/          HostActivity、HostView、Choreographer、Vulkan
@@ -24,7 +25,7 @@ kotlin/                  Gradle 根。路线暂缓
 apps/gallery-solid/      Solid 应用。dist/quotes.js 由 just gallery-dist 本地生成，不进 git
 ```
 
-依赖只向下：gallery → solid-ui / solid-router → solid-renderer → quickjs 会话 → uicore → protocol。宿主 → shell → session、engine。`engine` 不依赖 `uicore`。`uicore` 不包含 QuickJS、AppKit 或 Impeller 头文件。语言包不算坐标。选型表在 `AGENTS.md`。一个可执行文件只链一种会话。
+依赖只向下：gallery → solid-ui / solid-router → solid-renderer → quickjs 会话 → uicore → protocol。宿主 → shell → session、engine。`session` → `js-host`。`js-host` 只有 std，不依赖 session、uicore、quickjs、engine 或平台库。`engine` 不依赖 `uicore`。`uicore` 不包含 QuickJS、AppKit 或 Impeller 头文件。语言包不算坐标。选型表在 `AGENTS.md`。一个可执行文件只链一种会话。
 
 `crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 不手写 C 或 Objective-C。QuickJS 的 Rust 绑定在 `crates/quickjs/src/linked/rt`。`abi.yml` 生成 Rust、JavaScript 与 TypeScript 常量。
 

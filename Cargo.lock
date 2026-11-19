@@ -1238,6 +1238,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-host"
+version = "0.0.0"
+
+[[package]]
 name = "js-sys"
 version = "0.3.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2256,6 +2260,7 @@ dependencies = [
 name = "session"
 version = "0.0.0"
 dependencies = [
+ "js-host",
  "protocol",
  "uicore",
 ]

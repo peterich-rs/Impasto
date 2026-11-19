@@ -60,7 +60,7 @@ Taffy 只算盒子的位置和大小，含 Grid。文字和图片用它的 measu
 
 我们自己写的原生代码用 Rust：渲染树、场景格式、用 Impeller 绘制的渲染引擎、macOS 宿主。Rust 编码以 `.agents/skills/rust-best-practice` 为准，调用 `/rust-best-practice`。写本仓库的 Rust 时重点看其中的 trait、强类型、引用和泛型。布局和绘制在渲染线程上同步执行，不放进 async 运行时。异步留给以后的文件、网络和脚本加载。平台线程做窗口、输入换算和 vsync 登记。`Engine` 是 `!Send`。`register_font`、`submit_layers`、`draw_metal`、`draw_vulkan` 和 typography 只在渲染线程上调用，并且在该线程上创建和销毁。`CAMetalLayer` 在主线程创建并挂到视图上；渲染线程只用层指针取 drawable。Metal context 仍用 `MTLCreateSystemDefaultDevice()`。
 
-`crates/protocol`、`crates/uicore`、`crates/engine`、`crates/session`、`crates/shell`、`crates/macos`、`crates/android`、`crates/quickjs`、`crates/reactive`、`crates/cli` 是 Cargo workspace。`crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 在进程内部不经过 C。不要再给这四层加 C 或 Objective-C，也不要新增产品 C 头文件。QuickJS 的 Rust 绑定在 `crates/quickjs/src/linked/rt`，通过 rquickjs 调用现有的树操作。解释器由 Cargo 构建，不依赖本地上游检出。Kotlin 的 C ABI 留到 cinterop 有调用者时再写。工具链用 `rust-toolchain.toml` 钉住 stable。原生构建以 Cargo 为准。
+`crates/protocol`、`crates/uicore`、`crates/engine`、`crates/js-host`、`crates/session`、`crates/shell`、`crates/macos`、`crates/android`、`crates/quickjs`、`crates/reactive`、`crates/cli` 是 Cargo workspace。`js-host` 只有 std，放宿主交换的自有数据；`session` 原名重导出这些类型。`crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 在进程内部不经过 C。不要再给这四层加 C 或 Objective-C，也不要新增产品 C 头文件。QuickJS 的 Rust 绑定在 `crates/quickjs/src/linked/rt`，通过 rquickjs 调用现有的树操作。解释器由 Cargo 构建，不依赖本地上游检出。Kotlin 的 C ABI 留到 cinterop 有调用者时再写。工具链用 `rust-toolchain.toml` 钉住 stable。原生构建以 Cargo 为准。
 
 ## 保持仓库干净
 
@@ -161,7 +161,8 @@ present 之后 wants_ime 变化才让平台弹出或收起键盘
 crates/protocol/            DrawList、LayerTree
 crates/uicore/               渲染树。Taffy、等宽排版、命中、click
 crates/engine/               渲染引擎。只读 DrawList，调用 impeller.h
-crates/session/              会话 trait。宿主只看见 metrics、pointer、frame、lifecycle
+crates/js-host/              宿主交换契约。PluginValue、模块描述、Settle、HTTP 与 IoEvent。仅 std
+crates/session/              会话 trait。宿主只看见 metrics、pointer、frame、lifecycle。上述契约原名重导出
 crates/shell/            命令队列、帧调度、渲染线程
 crates/macos/                macOS 窗口。指针入队、CVDisplayLink、IMPASTO_DUMP
 crates/android/              Android 宿主。`HostActivity`、`HostView`、Choreographer、Vulkan。`just android` 打 APK
