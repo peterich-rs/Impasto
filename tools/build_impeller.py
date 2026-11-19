@@ -42,6 +42,14 @@ def run(*command, cwd):
     subprocess.run(command, cwd=cwd, check=True, stdout=sys.stderr)
 
 
+def gclient_config(template, android):
+    if android:
+        return template.read_text()
+    solutions = runpy.run_path(str(template))["solutions"]
+    solutions[0].setdefault("custom_vars", {})["download_android_deps"] = False
+    return f"solutions = {solutions!r}\n"
+
+
 def prepare_source(revision, android):
     if not (SOURCE / ".git").exists():
         SOURCE.mkdir(parents=True, exist_ok=True)
@@ -62,10 +70,8 @@ def prepare_source(revision, android):
     gclient = shutil.which("gclient")
     if not gclient:
         raise RuntimeError("gclient is required on PATH (from Chromium depot_tools)")
-    config = (SOURCE / "engine/scripts/standard.gclient").read_text()
-    if not android:
-        config += '\nsolutions[0]["custom_vars"] = {"download_android_deps": False}\n'
-    (SOURCE / ".gclient").write_text(config)
+    template = SOURCE / "engine/scripts/standard.gclient"
+    (SOURCE / ".gclient").write_text(gclient_config(template, android))
     run(gclient, "sync", "--no-history", cwd=SOURCE)
     synced.write_text(f"{revision}\n{scope}\n")
 
