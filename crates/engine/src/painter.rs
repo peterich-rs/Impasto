@@ -5,7 +5,7 @@ use std::ptr;
 use protocol::Picture;
 
 use crate::pictures::PictureCache;
-use crate::player::ffi;
+
 use crate::player::{HeldParagraph, RetainedPicture, Save};
 use crate::textures::TextureStore;
 use crate::typography::Typography;
@@ -19,7 +19,7 @@ pub(crate) struct Painter<'a> {
     pub(crate) saves: Vec<Save>,
     /// Canvas image sources skipped because the texture was not ready.
     pub(crate) waiting: Vec<std::sync::Arc<str>>,
-    pub(crate) impeller: ffi::ImpellerContext,
+    pub(crate) impeller: impeller::ImpellerContext,
 }
 
 pub(crate) fn build_picture<'pixels>(
@@ -29,15 +29,15 @@ pub(crate) fn build_picture<'pixels>(
     typography: &mut Typography,
     textures: &mut TextureStore,
     pending: &mut Vec<HeldParagraph>,
-    impeller: ffi::ImpellerContext,
+    impeller: impeller::ImpellerContext,
 ) -> Result<RetainedPicture, Status> {
     let saved = std::mem::take(pending);
-    let builder = unsafe { ffi::ImpellerDisplayListBuilderNew(ptr::null()) };
-    let paint = unsafe { ffi::ImpellerPaintNew() };
+    let builder = unsafe { impeller::ImpellerDisplayListBuilderNew(ptr::null()) };
+    let paint = unsafe { impeller::ImpellerPaintNew() };
     if builder.is_null() || paint.is_null() {
         unsafe {
-            ffi::ImpellerDisplayListBuilderRelease(builder);
-            ffi::ImpellerPaintRelease(paint);
+            impeller::ImpellerDisplayListBuilderRelease(builder);
+            impeller::ImpellerPaintRelease(paint);
         }
         *pending = saved;
         return Err(Status::BadScene);
@@ -63,12 +63,12 @@ pub(crate) fn build_picture<'pixels>(
     let list = if failed {
         ptr::null_mut()
     } else {
-        unsafe { ffi::ImpellerDisplayListBuilderCreateDisplayListNew(builder) }
+        unsafe { impeller::ImpellerDisplayListBuilderCreateDisplayListNew(builder) }
     };
     painter.drain_saves(builder);
     unsafe {
-        ffi::ImpellerDisplayListBuilderRelease(builder);
-        ffi::ImpellerPaintRelease(paint);
+        impeller::ImpellerDisplayListBuilderRelease(builder);
+        impeller::ImpellerPaintRelease(paint);
     }
     let held = std::mem::take(painter.pending);
     *painter.pending = saved;
@@ -76,7 +76,7 @@ pub(crate) fn build_picture<'pixels>(
         for item in held {
             painter.typography.release_draw(item.slot);
             // SAFETY: this retain was taken for a display list that was not installed.
-            unsafe { ffi::ImpellerParagraphRelease(item.paragraph) };
+            unsafe { impeller::ImpellerParagraphRelease(item.paragraph) };
         }
         return Err(Status::BadScene);
     }
@@ -92,6 +92,6 @@ pub(crate) fn release_pending(pending: &mut Vec<HeldParagraph>, typography: &mut
     for item in pending.drain(..) {
         typography.release_draw(item.slot);
         // SAFETY: the failed builder never installed a display list for this retain.
-        unsafe { ffi::ImpellerParagraphRelease(item.paragraph) };
+        unsafe { impeller::ImpellerParagraphRelease(item.paragraph) };
     }
 }

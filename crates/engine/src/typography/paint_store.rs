@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::ptr;
 
 use super::key::ParaKey;
-use crate::player::ffi;
 
 pub(super) struct PaintSlot {
     pub(super) generation: u32,
@@ -14,7 +13,7 @@ pub(super) struct PaintSlot {
     pub(super) used: u64,
     /// Pictures and the root list that still draw this paragraph.
     pub(super) live: u32,
-    pub(super) paragraph: ffi::ImpellerParagraph,
+    pub(super) paragraph: impeller::ImpellerParagraph,
     pub(super) key: Option<ParaKey>,
 }
 

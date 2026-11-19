@@ -26,10 +26,7 @@ pub fn build(target: &str, options: BuildOptions) -> Result<()> {
         "ios" => {
             let generated = app.root.join("build/ios");
             fs::create_dir_all(&generated)?;
-            fs::write(
-                generated.join("README.txt"),
-                "crates/ios 不存在；预构建 SDK 没有 iOS 列。此目录不是可安装的工程。\n",
-            )?;
+            fs::write(generated.join("README.txt"), "当前仓库没有 iOS 宿主。\n")?;
             bail!("crates/ios 不存在，不能生成可安装的 iOS 包");
         }
         _ => bail!("未知构建目标 {target}，可选 bundle、apk、macos、ios"),
@@ -188,12 +185,28 @@ pub fn macos(app: &App, options: &BuildOptions) -> Result<PathBuf> {
     let bundle = bundle_for(app, options, Some("macos"))?;
     let project = app.root.join("build/macos");
     fs::create_dir_all(&project)?;
+    let target = if cfg!(target_arch = "aarch64") {
+        "aarch64-apple-darwin"
+    } else {
+        "x86_64-apple-darwin"
+    };
+    let prepared = Command::new("python3")
+        .arg(framework.join("tools/impeller_sdk.py"))
+        .args(["prepare", target])
+        .env("PYTHONIOENCODING", "UTF-8")
+        .output()
+        .context("启动 Impeller SDK 准备工具")?;
+    if !prepared.status.success() {
+        bail!("{}", String::from_utf8_lossy(&prepared.stderr).trim());
+    }
+    let sdk = PathBuf::from(std::str::from_utf8(&prepared.stdout)?.trim());
     let mut command = Command::new("cargo");
     command
         .arg("build")
         .arg("--manifest-path")
         .arg(framework.join("Cargo.toml"))
-        .args(["-p", "macos"]);
+        .args(["-p", "macos", "--features", "impeller"])
+        .env("IMPASTO_IMPELLER_SDK_DIR", &sdk);
     if !options.debug {
         command.arg("--release");
     }
@@ -218,14 +231,10 @@ pub fn macos(app: &App, options: &BuildOptions) -> Result<PathBuf> {
     )?;
     copy_tree(&app.assets(), &resources.join("assets"), &[])?;
     fs::write(resources.join("app.modules"), app.modules("macos"))?;
-    let sdk = framework.join("third_party/impeller-sdk/darwin-arm64/lib/libimpeller.dylib");
-    fs::copy(&sdk, contents.join("Frameworks/libimpeller.dylib"))
-        .with_context(|| format!("复制 {}", sdk.display()))?;
-    let mut rpath = Command::new("install_name_tool");
-    rpath
-        .args(["-add_rpath", "@executable_path/../Frameworks"])
-        .arg(contents.join("MacOS/impasto"));
-    toolchain::run(rpath, "设置应用 rpath")?;
+    let library = sdk.join("lib/libimpeller.dylib");
+    fs::copy(&library, contents.join("Frameworks/libimpeller.dylib"))
+        .with_context(|| format!("复制 {}", library.display()))?;
+    fs::copy(sdk.join("LICENSE"), resources.join("Impeller-LICENSE"))?;
     fs::write(
         contents.join("Info.plist"),
         format!(

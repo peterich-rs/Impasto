@@ -13,6 +13,7 @@ import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 import org.gradle.process.ExecOperations
+import java.io.ByteArrayOutputStream
 import java.io.File
 import javax.inject.Inject
 
@@ -101,6 +102,7 @@ androidComponents {
             outputs.upToDateWhen { false }
         }
         variant.sources.jniLibs?.addGeneratedSourceDirectory(cargo, CargoImpasto::jniLibs)
+        variant.sources.assets?.addGeneratedSourceDirectory(cargo, CargoImpasto::sdkNotices)
 
         val assets = tasks.register<StageApkAssets>("stageApkAssets$capital") {
             quotes.set(repoRoot.resolve("apps/gallery-solid/dist/quotes.js"))
@@ -133,6 +135,9 @@ abstract class CargoImpasto : DefaultTask() {
     @get:OutputDirectory
     abstract val jniLibs: DirectoryProperty
 
+    @get:OutputDirectory
+    abstract val sdkNotices: DirectoryProperty
+
     @TaskAction
     fun build() {
         val ndk = resolveNdk()
@@ -143,6 +148,15 @@ abstract class CargoImpasto : DefaultTask() {
             throw GradleException("missing Android linker ${linker.path}")
         }
         val root = File(repoPath.get())
+        val sdkPath = ByteArrayOutputStream()
+        val python = if (System.getProperty("os.name").startsWith("Windows")) "python" else "python3"
+        execOps.exec {
+            commandLine(python, root.resolve("tools/impeller_sdk.py"), "prepare", "aarch64-linux-android")
+            workingDir(root)
+            environment("PYTHONIOENCODING", "UTF-8")
+            standardOutput = sdkPath
+        }.assertNormalExitValue()
+        val impellerSdk = File(sdkPath.toString(Charsets.UTF_8.name()).trim())
         val command = mutableListOf(
             "cargo",
             "build",
@@ -152,6 +166,8 @@ abstract class CargoImpasto : DefaultTask() {
             "aarch64-linux-android",
             "-p",
             "android",
+            "--features",
+            "impeller",
         )
         if (release.get()) {
             command.add("--release")
@@ -160,6 +176,7 @@ abstract class CargoImpasto : DefaultTask() {
             commandLine(command)
             workingDir(root)
             environment("ANDROID_NDK_HOME", ndk.path)
+            environment("IMPASTO_IMPELLER_SDK_DIR", impellerSdk.path)
             environment(
                 "PATH",
                 bin.path + File.pathSeparator + System.getenv("PATH").orEmpty(),
@@ -172,14 +189,13 @@ abstract class CargoImpasto : DefaultTask() {
         if (!built.isFile) {
             throw GradleException("cargo did not write ${built.path}")
         }
-        val impeller = root.resolve("third_party/impeller-sdk/android-arm64/lib/libimpeller.so")
-        if (!impeller.isFile) {
-            throw GradleException("missing ${impeller.path}; run crates/engine/fetch-impeller-sdk.sh")
-        }
         val abi = jniLibs.get().asFile.resolve("arm64-v8a")
         abi.mkdirs()
         built.copyTo(abi.resolve("libimpasto.so"), overwrite = true)
-        impeller.copyTo(abi.resolve("libimpeller.so"), overwrite = true)
+        impellerSdk.resolve("lib/libimpeller.so").copyTo(abi.resolve("libimpeller.so"), overwrite = true)
+        val notices = sdkNotices.get().asFile
+        notices.mkdirs()
+        impellerSdk.resolve("LICENSE").copyTo(notices.resolve("Impeller-LICENSE"), overwrite = true)
     }
 
     private fun resolveNdk(): File {

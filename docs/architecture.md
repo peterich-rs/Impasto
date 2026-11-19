@@ -9,7 +9,8 @@
 ```
 crates/protocol/         DrawList、LayerTree
 crates/uicore/           渲染树。Taffy、命中、手势、焦点
-crates/engine/           渲染引擎。读 LayerTree，调用 impeller.h
+crates/engine/           渲染引擎。读 LayerTree，通过 impeller 依赖绘制
+crates/impeller-sys/     Impeller C 头文件、Rust FFI 和原生链接
 crates/js-host/          宿主交换契约、模块元数据、I/O 身份和额度。仅 std
 crates/js/               QuickJS VM、Runtime、标准库、目录和调度
 crates/js-headless/      只依赖 js 的独立消费程序

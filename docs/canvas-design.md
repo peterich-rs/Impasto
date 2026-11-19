@@ -500,7 +500,7 @@ Canvas 回调复用现有非 eval turn 的 128 ms 上限，并标注 canvas/Node
 - protocol 的新变体与 TextStyle 新字段需要迁移；Graph 的新方法是内部能力扩展，普通 Solid API 行为保持。
 - 已知封闭操作用 enum；Shaper 是已有替换边界，沿用它。无需 CanvasBackend trait、对象安全的异步绘图接口或跨线程共享上下文。
 - 新增依赖只负责纯几何与解析；rquickjs class 沿用既有依赖能力。第三方类、Ctx/Persistent 不进入产品协议；TS 声明与 native 导出保持一份合同。
-- `crates/engine/build.rs` 按 SDK 生成绑定。Canvas 绘制由共用实现处理，macOS 和 Android 宿主提供窗口、输入与资源。
+- `crates/impeller-sys` 提供 Impeller 绑定。Canvas 绘制由共用实现处理，macOS 和 Android 宿主提供窗口、输入与资源。
 - 屏幕 Canvas 不需要长期 CPU bitmap；几何准备、命令复制与偶发 SaveLayer 有成本，首版即计量并设上限。
 
 ## 文件变更汇总

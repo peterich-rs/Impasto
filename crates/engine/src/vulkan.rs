@@ -7,8 +7,6 @@ use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
 use crate::{PixelSize, Status, VulkanPhase};
 
-use super::ffi;
-
 const RTLD_NOW: i32 = 2;
 
 unsafe extern "C" {
@@ -128,7 +126,7 @@ fn current_procs() -> *mut VulkanProcs {
 }
 
 pub struct VulkanSwapchain {
-    raw: ffi::ImpellerVulkanSwapchain,
+    raw: impeller::ImpellerVulkanSwapchain,
     extent: PixelSize,
 }
 
@@ -150,7 +148,7 @@ impl Drop for VulkanSwapchain {
     fn drop(&mut self) {
         // SAFETY: `raw` came from `ImpellerVulkanSwapchainCreateNew`. Release is a
         // no-op on null and also releases the `VkSurfaceKHR` Impeller took ownership of.
-        unsafe { ffi::ImpellerVulkanSwapchainRelease(self.raw) };
+        unsafe { impeller::ImpellerVulkanSwapchainRelease(self.raw) };
         self.raw = ptr::null_mut();
     }
 }
@@ -173,7 +171,7 @@ impl super::Engine {
             return Err(Status::NotLinked);
         }
         let procs = Box::into_raw(Box::new(VulkanProcs::new(vulkan_lib)));
-        let settings = ffi::ImpellerContextVulkanSettings {
+        let settings = impeller::ImpellerContextVulkanSettings {
             user_data: procs.cast(),
             proc_address_callback: Some(proc_address),
             enable_vulkan_validation: false,
@@ -183,13 +181,14 @@ impl super::Engine {
         // The guard publishes that pointer for hooks that have no user data.
         // A null context means this SDK cannot create Vulkan. Release is a no-op on null.
         let guard = CurrentProcs::enter(procs);
-        let context =
-            unsafe { ffi::ImpellerContextCreateVulkanNew(ffi::IMPELLER_VERSION, &settings) };
-        let typography = unsafe { ffi::ImpellerTypographyContextNew() };
+        let context = unsafe {
+            impeller::ImpellerContextCreateVulkanNew(impeller::IMPELLER_VERSION, &settings)
+        };
+        let typography = unsafe { impeller::ImpellerTypographyContextNew() };
         if context.is_null() || typography.is_null() {
             unsafe {
-                ffi::ImpellerTypographyContextRelease(typography);
-                ffi::ImpellerContextRelease(context);
+                impeller::ImpellerTypographyContextRelease(typography);
+                impeller::ImpellerContextRelease(context);
             }
             drop(guard);
             // SAFETY: `procs` came from `Box::into_raw` above and is not stored elsewhere.
@@ -215,7 +214,7 @@ impl super::Engine {
             return Err(Status::NotReady);
         }
         self.apply_extent(pixels);
-        let mut info = ffi::ImpellerContextVulkanInfo {
+        let mut info = impeller::ImpellerContextVulkanInfo {
             vk_instance: ptr::null_mut(),
             vk_physical_device: ptr::null_mut(),
             vk_logical_device: ptr::null_mut(),
@@ -224,7 +223,7 @@ impl super::Engine {
         };
         // SAFETY: `info` is a writable out-parameter. The context is the Vulkan
         // context created for this engine. Impeller keeps ownership of the handles.
-        let found = unsafe { ffi::ImpellerContextGetVulkanInfo(self.context, &mut info) };
+        let found = unsafe { impeller::ImpellerContextGetVulkanInfo(self.context, &mut info) };
         if !found || info.vk_instance.is_null() {
             return Err(Status::NotReady);
         }
@@ -262,7 +261,10 @@ impl super::Engine {
         // The guard lets the extent hook see this engine's proc table.
         let _guard = CurrentProcs::enter(self.vulkan_procs);
         let raw = unsafe {
-            ffi::ImpellerVulkanSwapchainCreateNew(self.context, surface_khr as usize as *mut c_void)
+            impeller::ImpellerVulkanSwapchainCreateNew(
+                self.context,
+                surface_khr as usize as *mut c_void,
+            )
         };
         if raw.is_null() {
             if let Some(destroy) = proc_symbol::<DestroySurface>(
@@ -307,7 +309,7 @@ impl super::Engine {
         let _guard = CurrentProcs::enter(self.vulkan_procs);
         let surface = {
             let _phase = section(VulkanPhase::Acquire);
-            unsafe { ffi::ImpellerVulkanSwapchainAcquireNextSurfaceNew(swapchain.raw) }
+            unsafe { impeller::ImpellerVulkanSwapchainAcquireNextSurfaceNew(swapchain.raw) }
         };
         if surface.is_null() {
             return Err(Status::AcquireMiss);
@@ -315,13 +317,13 @@ impl super::Engine {
         let presented = unsafe {
             let drew = {
                 let _phase = section(VulkanPhase::Draw);
-                ffi::ImpellerSurfaceDrawDisplayList(surface, self.list)
+                impeller::ImpellerSurfaceDrawDisplayList(surface, self.list)
             };
             let presented = drew && {
                 let _phase = section(VulkanPhase::Present);
-                ffi::ImpellerSurfacePresent(surface)
+                impeller::ImpellerSurfacePresent(surface)
             };
-            ffi::ImpellerSurfaceRelease(surface);
+            impeller::ImpellerSurfaceRelease(surface);
             presented
         };
         if presented {

@@ -17,18 +17,17 @@ pub(crate) use paint_store::PaintStore;
 use fonts::Face;
 use key::ParagraphStore;
 
-use crate::player::ffi;
 use crate::{ShapeStats, Status};
 
 /// Fonts, the measure cache, and the colored paint slots.
 ///
 /// `!Send`: the typography context stays on the render thread.
 pub struct Typography {
-    context: ffi::ImpellerTypographyContext,
+    context: impeller::ImpellerTypographyContext,
     fonts: FontRegistry,
     measured: ParagraphStore,
     paints: PaintStore,
-    retired: Vec<ffi::ImpellerParagraph>,
+    retired: Vec<impeller::ImpellerParagraph>,
     /// Submit generation. Paint slots and textures stamp this.
     generation: u64,
     /// Layout generation. Measured paragraphs stamp this, not [`Self::generation`].
@@ -43,7 +42,7 @@ pub struct Typography {
 }
 
 impl Typography {
-    pub(crate) fn new(context: ffi::ImpellerTypographyContext) -> Self {
+    pub(crate) fn new(context: impeller::ImpellerTypographyContext) -> Self {
         Self {
             context,
             fonts: FontRegistry::new(),
@@ -109,7 +108,7 @@ impl Typography {
     pub(crate) fn discard_measure_cache(&mut self) {
         for shaped in self.measured.drain_all() {
             // SAFETY: callers only discard the measure cache when no display list is installed.
-            unsafe { ffi::ImpellerParagraphRelease(shaped.paragraph) };
+            unsafe { impeller::ImpellerParagraphRelease(shaped.paragraph) };
         }
         self.stale = false;
     }
@@ -117,7 +116,7 @@ impl Typography {
     pub(crate) fn reap_retired(&mut self) {
         for paragraph in self.retired.drain(..) {
             // SAFETY: the display list that could reference these was released, or none is installed.
-            unsafe { ffi::ImpellerParagraphRelease(paragraph) };
+            unsafe { impeller::ImpellerParagraphRelease(paragraph) };
         }
     }
 
@@ -135,8 +134,8 @@ impl Typography {
         &mut self,
         id: protocol::ParagraphId,
         color: [u8; 4],
-        paragraph: ffi::ImpellerParagraph,
-    ) -> Option<ffi::ImpellerParagraph> {
+        paragraph: impeller::ImpellerParagraph,
+    ) -> Option<impeller::ImpellerParagraph> {
         self.paints
             .slots
             .get_mut(id.index as usize)
@@ -181,7 +180,7 @@ impl Typography {
         for shaped in dropped {
             // SAFETY: a paragraph is evicted only after the display list that drew it
             // was released, or it was never installed.
-            unsafe { ffi::ImpellerParagraphRelease(shaped.paragraph) };
+            unsafe { impeller::ImpellerParagraphRelease(shaped.paragraph) };
         }
     }
 
@@ -234,7 +233,7 @@ impl Typography {
         for slot in &mut self.paints.slots {
             if !slot.paragraph.is_null() {
                 // SAFETY: Drop runs after the display list is released.
-                unsafe { ffi::ImpellerParagraphRelease(slot.paragraph) };
+                unsafe { impeller::ImpellerParagraphRelease(slot.paragraph) };
                 slot.paragraph = ptr::null_mut();
             }
         }
@@ -263,7 +262,7 @@ impl Typography {
             return Ok(false);
         }
         let lease = fonts::FontLease::new(data.to_vec());
-        let mapping = ffi::ImpellerMapping {
+        let mapping = impeller::ImpellerMapping {
             data: fonts::FontLease::data(lease),
             length: fonts::FontLease::len(lease),
             // Impeller invokes this even when registration fails. A null callback crashes.
@@ -273,7 +272,7 @@ impl Typography {
         // The third argument is the callback baton. Failure still invokes the callback,
         // which drops Impeller's reference; this function then drops the owner's.
         let registered = unsafe {
-            ffi::ImpellerTypographyContextRegisterFont(
+            impeller::ImpellerTypographyContextRegisterFont(
                 self.context,
                 &mapping,
                 lease.cast(),
@@ -308,7 +307,7 @@ impl Drop for Typography {
         self.release_all_paragraphs();
         // SAFETY: the handle came from ImpellerTypographyContextNew. Release is a no-op on null.
         // Face leases drop after this returns. A late mapping callback still holds its reference.
-        unsafe { ffi::ImpellerTypographyContextRelease(self.context) };
+        unsafe { impeller::ImpellerTypographyContextRelease(self.context) };
         self.context = ptr::null_mut();
     }
 }

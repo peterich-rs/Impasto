@@ -1,8 +1,7 @@
-use super::ffi;
 use super::*;
 
 pub(crate) enum TextureLoad {
-    Ready(ffi::ImpellerTexture, f32, f32),
+    Ready(impeller::ImpellerTexture, f32, f32),
     Missing,
     /// Decoded size is zero. Nothing is cached and nothing is drawn.
     Empty,
@@ -34,15 +33,15 @@ impl<'a> crate::painter::Painter<'a> {
         if image.rgba.len() < bytes {
             return TextureLoad::Failed;
         }
-        let descriptor = ffi::ImpellerTextureDescriptor {
-            pixel_format: ffi::ImpellerPixelFormat::kImpellerPixelFormatRGBA8888,
-            size: ffi::ImpellerISize {
+        let descriptor = impeller::ImpellerTextureDescriptor {
+            pixel_format: impeller::ImpellerPixelFormat::kImpellerPixelFormatRGBA8888,
+            size: impeller::ImpellerISize {
                 width: image.width as i64,
                 height: image.height as i64,
             },
             mip_count: 1,
         };
-        let mapping = ffi::ImpellerMapping {
+        let mapping = impeller::ImpellerMapping {
             data: image.rgba.as_ptr(),
             length: bytes as u64,
             on_release: None,
@@ -50,7 +49,7 @@ impl<'a> crate::painter::Painter<'a> {
         // SAFETY: `mapping` borrows `image.rgba` until TextureCreate returns. Impeller copies
         // the pixels. The texture handle stays in `textures` until it is evicted or dropped.
         let texture = unsafe {
-            ffi::ImpellerTextureCreateWithContentsNew(
+            impeller::ImpellerTextureCreateWithContentsNew(
                 self.impeller,
                 &descriptor,
                 &mapping,
@@ -76,7 +75,7 @@ impl<'a> crate::painter::Painter<'a> {
 
     pub(crate) fn draw_image<'pixels>(
         &mut self,
-        builder: ffi::ImpellerDisplayListBuilder,
+        builder: impeller::ImpellerDisplayListBuilder,
         x: f32,
         y: f32,
         w: f32,
@@ -105,7 +104,7 @@ impl<'a> crate::painter::Painter<'a> {
     /// A visible stand-in for an optional image whose bytes are not available.
     pub(crate) fn paint_missing_image(
         &self,
-        builder: ffi::ImpellerDisplayListBuilder,
+        builder: impeller::ImpellerDisplayListBuilder,
         x: f32,
         y: f32,
         w: f32,
@@ -114,29 +113,35 @@ impl<'a> crate::painter::Painter<'a> {
         if !(w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0) {
             return true;
         }
-        let paint = unsafe { ffi::ImpellerPaintNew() };
+        let paint = unsafe { impeller::ImpellerPaintNew() };
         if paint.is_null() {
             return false;
         }
         paint_color(paint, [176, 72, 64, 255]);
         unsafe {
-            ffi::ImpellerPaintSetDrawStyle(paint, ffi::ImpellerDrawStyle::kImpellerDrawStyleFill);
+            impeller::ImpellerPaintSetDrawStyle(
+                paint,
+                impeller::ImpellerDrawStyle::kImpellerDrawStyleFill,
+            );
         }
         self.fill_rect(builder, paint, x, y, w, h, 4.0);
         paint_color(paint, [96, 32, 28, 255]);
         self.set_stroke(paint, 2.0);
         unsafe {
-            ffi::ImpellerPaintSetDrawStyle(paint, ffi::ImpellerDrawStyle::kImpellerDrawStyleStroke);
+            impeller::ImpellerPaintSetDrawStyle(
+                paint,
+                impeller::ImpellerDrawStyle::kImpellerDrawStyleStroke,
+            );
         }
         self.fill_rect(builder, paint, x, y, w, h, 4.0);
-        unsafe { ffi::ImpellerPaintRelease(paint) };
+        unsafe { impeller::ImpellerPaintRelease(paint) };
         true
     }
 
     pub(crate) fn blit_texture(
         &self,
-        builder: ffi::ImpellerDisplayListBuilder,
-        texture: ffi::ImpellerTexture,
+        builder: impeller::ImpellerDisplayListBuilder,
+        texture: impeller::ImpellerTexture,
         x: f32,
         y: f32,
         w: f32,
@@ -151,12 +156,12 @@ impl<'a> crate::painter::Painter<'a> {
         for (src, dst) in pairs {
             // SAFETY: `texture` is owned by `self.textures` for at least this submit.
             unsafe {
-                ffi::ImpellerDisplayListBuilderDrawTextureRect(
+                impeller::ImpellerDisplayListBuilderDrawTextureRect(
                     builder,
                     texture,
                     &src,
                     &dst,
-                    ffi::ImpellerTextureSampling::kImpellerTextureSamplingLinear,
+                    impeller::ImpellerTextureSampling::kImpellerTextureSamplingLinear,
                     ptr::null_mut(),
                 );
             }

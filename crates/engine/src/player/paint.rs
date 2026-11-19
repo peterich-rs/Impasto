@@ -5,7 +5,6 @@ use std::ptr;
 
 use protocol::{ColorStop, ContentMode, Gradient, TextAlign};
 
-use super::ffi;
 use crate::Status;
 
 pub(crate) fn utf16_len(text: &str) -> u32 {
@@ -18,66 +17,68 @@ pub(crate) fn utf16_len(text: &str) -> u32 {
 /// object. Releasing it here frees the cache, and the next query frees the
 /// same allocation.
 pub(crate) unsafe fn read_lines(
-    paragraph: ffi::ImpellerParagraph,
+    paragraph: impeller::ImpellerParagraph,
 ) -> Result<Vec<crate::LineMetric>, Status> {
-    let metrics = unsafe { ffi::ImpellerParagraphGetLineMetrics(paragraph) };
+    let metrics = unsafe { impeller::ImpellerParagraphGetLineMetrics(paragraph) };
     if metrics.is_null() {
         return Ok(Vec::new());
     }
-    let count = unsafe { ffi::ImpellerParagraphGetLineCount(paragraph) } as usize;
+    let count = unsafe { impeller::ImpellerParagraphGetLineCount(paragraph) } as usize;
     let mut lines = Vec::with_capacity(count);
     for line in 0..count {
-        let baseline = unsafe { ffi::ImpellerLineMetricsGetBaseline(metrics, line) };
-        let ascent = unsafe { ffi::ImpellerLineMetricsGetAscent(metrics, line) };
-        let height = unsafe { ffi::ImpellerLineMetricsGetHeight(metrics, line) };
+        let baseline = unsafe { impeller::ImpellerLineMetricsGetBaseline(metrics, line) };
+        let ascent = unsafe { impeller::ImpellerLineMetricsGetAscent(metrics, line) };
+        let height = unsafe { impeller::ImpellerLineMetricsGetHeight(metrics, line) };
         let y = (baseline - ascent) as f32;
         lines.push(crate::LineMetric {
-            start: unsafe { ffi::ImpellerLineMetricsGetCodeUnitStartIndex(metrics, line) } as u32,
-            end: unsafe { ffi::ImpellerLineMetricsGetCodeUnitEndIndex(metrics, line) } as u32,
+            start: unsafe { impeller::ImpellerLineMetricsGetCodeUnitStartIndex(metrics, line) }
+                as u32,
+            end: unsafe { impeller::ImpellerLineMetricsGetCodeUnitEndIndex(metrics, line) } as u32,
             end_with_break: unsafe {
-                ffi::ImpellerLineMetricsGetCodeUnitEndIndexIncludingNewline(metrics, line)
+                impeller::ImpellerLineMetricsGetCodeUnitEndIndexIncludingNewline(metrics, line)
             } as u32,
-            x: unsafe { ffi::ImpellerLineMetricsGetLeft(metrics, line) } as f32,
+            x: unsafe { impeller::ImpellerLineMetricsGetLeft(metrics, line) } as f32,
             y,
-            w: unsafe { ffi::ImpellerLineMetricsGetWidth(metrics, line) } as f32,
+            w: unsafe { impeller::ImpellerLineMetricsGetWidth(metrics, line) } as f32,
             h: height as f32,
             baseline: baseline as f32,
-            hard_break: unsafe { ffi::ImpellerLineMetricsIsHardbreak(metrics, line) },
+            hard_break: unsafe { impeller::ImpellerLineMetricsIsHardbreak(metrics, line) },
         });
     }
     Ok(lines)
 }
 
 pub(crate) fn apply_decoration(
-    style: ffi::ImpellerParagraphStyle,
+    style: impeller::ImpellerParagraphStyle,
     color: [u8; 4],
     underline: bool,
     line_through: bool,
 ) {
     let mut types = 0i32;
     if underline {
-        types |= ffi::ImpellerTextDecorationType::kImpellerTextDecorationTypeUnderline as i32;
+        types |= impeller::ImpellerTextDecorationType::kImpellerTextDecorationTypeUnderline as i32;
     }
     if line_through {
-        types |= ffi::ImpellerTextDecorationType::kImpellerTextDecorationTypeLineThrough as i32;
+        types |=
+            impeller::ImpellerTextDecorationType::kImpellerTextDecorationTypeLineThrough as i32;
     }
     if types == 0 {
         return;
     }
     #[cfg(test)]
     paint_trace::decoration(types);
-    let decoration = ffi::ImpellerTextDecoration {
+    let decoration = impeller::ImpellerTextDecoration {
         types,
         color: impeller_color(color),
-        style: ffi::ImpellerTextDecorationStyle::kImpellerTextDecorationStyleSolid,
+        style: impeller::ImpellerTextDecorationStyle::kImpellerTextDecorationStyleSolid,
         thickness_multiplier: 1.0,
     };
-    unsafe { ffi::ImpellerParagraphStyleSetTextDecoration(style, &decoration) };
+    unsafe { impeller::ImpellerParagraphStyleSetTextDecoration(style, &decoration) };
 }
 
 pub(crate) unsafe fn push_runs(
-    style: ffi::ImpellerParagraphStyle,
-    paragraph_builder: ffi::ImpellerParagraphBuilder,
+    style: impeller::ImpellerParagraphStyle,
+    paragraph_builder: impeller::ImpellerParagraphBuilder,
     family: *const std::ffi::c_char,
     cjk: Option<&CString>,
     utf8: &str,
@@ -97,27 +98,27 @@ pub(crate) unsafe fn push_runs(
             family
         };
         unsafe {
-            ffi::ImpellerParagraphStyleSetFontFamily(style, run_family);
+            impeller::ImpellerParagraphStyleSetFontFamily(style, run_family);
             let slice_len = u32::try_from(slice.len()).unwrap_or(0);
-            ffi::ImpellerParagraphBuilderPushStyle(paragraph_builder, style);
-            ffi::ImpellerParagraphBuilderAddText(paragraph_builder, slice.as_ptr(), slice_len);
-            ffi::ImpellerParagraphBuilderPopStyle(paragraph_builder);
+            impeller::ImpellerParagraphBuilderPushStyle(paragraph_builder, style);
+            impeller::ImpellerParagraphBuilderAddText(paragraph_builder, slice.as_ptr(), slice_len);
+            impeller::ImpellerParagraphBuilderPopStyle(paragraph_builder);
         }
     }
 }
 
-pub(crate) fn paint_color(paint: ffi::ImpellerPaint, color: [u8; 4]) {
+pub(crate) fn paint_color(paint: impeller::ImpellerPaint, color: [u8; 4]) {
     let color = impeller_color(color);
-    unsafe { ffi::ImpellerPaintSetColor(paint, &color) };
+    unsafe { impeller::ImpellerPaintSetColor(paint, &color) };
 }
 
-pub(crate) fn impeller_color(color: [u8; 4]) -> ffi::ImpellerColor {
-    ffi::ImpellerColor {
+pub(crate) fn impeller_color(color: [u8; 4]) -> impeller::ImpellerColor {
+    impeller::ImpellerColor {
         red: color[0] as f32 / 255.0,
         green: color[1] as f32 / 255.0,
         blue: color[2] as f32 / 255.0,
         alpha: color[3] as f32 / 255.0,
-        color_space: ffi::ImpellerColorSpace::kImpellerColorSpaceSRGB,
+        color_space: impeller::ImpellerColorSpace::kImpellerColorSpaceSRGB,
     }
 }
 
@@ -129,16 +130,16 @@ pub(crate) fn content_rects(
     tex_w: f32,
     tex_h: f32,
     mode: ContentMode,
-) -> Option<(ffi::ImpellerRect, ffi::ImpellerRect)> {
+) -> Option<(impeller::ImpellerRect, impeller::ImpellerRect)> {
     match mode {
         ContentMode::Fill => Some((
-            ffi::ImpellerRect {
+            impeller::ImpellerRect {
                 x: 0.0,
                 y: 0.0,
                 width: tex_w,
                 height: tex_h,
             },
-            ffi::ImpellerRect {
+            impeller::ImpellerRect {
                 x,
                 y,
                 width: w,
@@ -153,13 +154,13 @@ pub(crate) fn content_rects(
             let dw = tex_w * scale;
             let dh = tex_h * scale;
             Some((
-                ffi::ImpellerRect {
+                impeller::ImpellerRect {
                     x: 0.0,
                     y: 0.0,
                     width: tex_w,
                     height: tex_h,
                 },
-                ffi::ImpellerRect {
+                impeller::ImpellerRect {
                     x: x + (w - dw) * 0.5,
                     y: y + (h - dh) * 0.5,
                     width: dw,
@@ -175,13 +176,13 @@ pub(crate) fn content_rects(
             let src_w = w / scale;
             let src_h = h / scale;
             Some((
-                ffi::ImpellerRect {
+                impeller::ImpellerRect {
                     x: (tex_w - src_w) * 0.5,
                     y: (tex_h - src_h) * 0.5,
                     width: src_w,
                     height: src_h,
                 },
-                ffi::ImpellerRect {
+                impeller::ImpellerRect {
                     x,
                     y,
                     width: w,
@@ -201,7 +202,7 @@ pub(crate) fn slice_rects(
     tex_w: f32,
     tex_h: f32,
     mode: ContentMode,
-) -> Result<Vec<(ffi::ImpellerRect, ffi::ImpellerRect)>, ()> {
+) -> Result<Vec<(impeller::ImpellerRect, impeller::ImpellerRect)>, ()> {
     let ContentMode::NineSlice {
         left,
         top,
@@ -255,13 +256,13 @@ pub(crate) fn slice_rects(
                     return Err(());
                 }
                 pairs.push((
-                    ffi::ImpellerRect {
+                    impeller::ImpellerRect {
                         x: src_x,
                         y: src_y,
                         width: sw,
                         height: sh,
                     },
-                    ffi::ImpellerRect {
+                    impeller::ImpellerRect {
                         x: dst_x,
                         y: dst_y,
                         width: dw,
@@ -409,11 +410,11 @@ pub(crate) fn color_source(
     y: f32,
     w: f32,
     h: f32,
-) -> Option<ffi::ImpellerColorSource> {
+) -> Option<impeller::ImpellerColorSource> {
     let PreparedGradient::Paint { kind, stops } = prepared_gradient(gradient?) else {
         return None;
     };
-    let colors: Vec<ffi::ImpellerColor> = stops
+    let colors: Vec<impeller::ImpellerColor> = stops
         .iter()
         .map(|stop| impeller_color(stop.color))
         .collect();
@@ -421,41 +422,41 @@ pub(crate) fn color_source(
     let count = u32::try_from(stops.len()).unwrap_or(0);
     match kind {
         GradientKind::Linear { start, end } => {
-            let start = ffi::ImpellerPoint {
+            let start = impeller::ImpellerPoint {
                 x: x + start[0] * w,
                 y: y + start[1] * h,
             };
-            let end = ffi::ImpellerPoint {
+            let end = impeller::ImpellerPoint {
                 x: x + end[0] * w,
                 y: y + end[1] * h,
             };
             let source = unsafe {
-                ffi::ImpellerColorSourceCreateLinearGradientNew(
+                impeller::ImpellerColorSourceCreateLinearGradientNew(
                     &start,
                     &end,
                     count,
                     colors.as_ptr(),
                     offsets.as_ptr(),
-                    ffi::ImpellerTileMode::kImpellerTileModeClamp,
+                    impeller::ImpellerTileMode::kImpellerTileModeClamp,
                     ptr::null(),
                 )
             };
             if source.is_null() { None } else { Some(source) }
         }
         GradientKind::Radial { center, radius } => {
-            let center = ffi::ImpellerPoint {
+            let center = impeller::ImpellerPoint {
                 x: x + center[0] * w,
                 y: y + center[1] * h,
             };
             let scene_radius = radius * w.min(h);
             let source = unsafe {
-                ffi::ImpellerColorSourceCreateRadialGradientNew(
+                impeller::ImpellerColorSourceCreateRadialGradientNew(
                     &center,
                     scene_radius,
                     count,
                     colors.as_ptr(),
                     offsets.as_ptr(),
-                    ffi::ImpellerTileMode::kImpellerTileModeClamp,
+                    impeller::ImpellerTileMode::kImpellerTileModeClamp,
                     ptr::null(),
                 )
             };
@@ -466,21 +467,21 @@ pub(crate) fn color_source(
             start_angle_rad,
             end_angle_rad,
         } => {
-            let center = ffi::ImpellerPoint {
+            let center = impeller::ImpellerPoint {
                 x: x + center[0] * w,
                 y: y + center[1] * h,
             };
             let start = start_angle_rad * (180.0 / std::f32::consts::PI);
             let end = end_angle_rad * (180.0 / std::f32::consts::PI);
             let source = unsafe {
-                ffi::ImpellerColorSourceCreateSweepGradientNew(
+                impeller::ImpellerColorSourceCreateSweepGradientNew(
                     &center,
                     start,
                     end,
                     count,
                     colors.as_ptr(),
                     offsets.as_ptr(),
-                    ffi::ImpellerTileMode::kImpellerTileModeClamp,
+                    impeller::ImpellerTileMode::kImpellerTileModeClamp,
                     ptr::null(),
                 )
             };
@@ -489,12 +490,18 @@ pub(crate) fn color_source(
     }
 }
 
-pub(crate) fn rect_path(x: f32, y: f32, w: f32, h: f32, corner_radius: f32) -> ffi::ImpellerPath {
-    let builder = unsafe { ffi::ImpellerPathBuilderNew() };
+pub(crate) fn rect_path(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    corner_radius: f32,
+) -> impeller::ImpellerPath {
+    let builder = unsafe { impeller::ImpellerPathBuilderNew() };
     if builder.is_null() {
         return ptr::null_mut();
     }
-    let rect = ffi::ImpellerRect {
+    let rect = impeller::ImpellerRect {
         x,
         y,
         width: w,
@@ -504,45 +511,45 @@ pub(crate) fn rect_path(x: f32, y: f32, w: f32, h: f32, corner_radius: f32) -> f
     unsafe {
         if radius > 0.0 {
             let radii = uniform_radii(radius);
-            ffi::ImpellerPathBuilderAddRoundedRect(builder, &rect, &radii);
+            impeller::ImpellerPathBuilderAddRoundedRect(builder, &rect, &radii);
         } else {
-            ffi::ImpellerPathBuilderAddRect(builder, &rect);
+            impeller::ImpellerPathBuilderAddRect(builder, &rect);
         }
-        let path = ffi::ImpellerPathBuilderTakePathNew(
+        let path = impeller::ImpellerPathBuilderTakePathNew(
             builder,
-            ffi::ImpellerFillType::kImpellerFillTypeNonZero,
+            impeller::ImpellerFillType::kImpellerFillTypeNonZero,
         );
-        ffi::ImpellerPathBuilderRelease(builder);
+        impeller::ImpellerPathBuilderRelease(builder);
         path
     }
 }
 
-pub(crate) fn impeller_weight(weight: u16) -> ffi::ImpellerFontWeight::Type {
+pub(crate) fn impeller_weight(weight: u16) -> impeller::ImpellerFontWeight::Type {
     match weight {
-        100 => ffi::ImpellerFontWeight::kImpellerFontWeight100,
-        200 => ffi::ImpellerFontWeight::kImpellerFontWeight200,
-        300 => ffi::ImpellerFontWeight::kImpellerFontWeight300,
-        500 => ffi::ImpellerFontWeight::kImpellerFontWeight500,
-        600 => ffi::ImpellerFontWeight::kImpellerFontWeight600,
-        700 => ffi::ImpellerFontWeight::kImpellerFontWeight700,
-        800 => ffi::ImpellerFontWeight::kImpellerFontWeight800,
-        900 => ffi::ImpellerFontWeight::kImpellerFontWeight900,
-        _ => ffi::ImpellerFontWeight::kImpellerFontWeight400,
+        100 => impeller::ImpellerFontWeight::kImpellerFontWeight100,
+        200 => impeller::ImpellerFontWeight::kImpellerFontWeight200,
+        300 => impeller::ImpellerFontWeight::kImpellerFontWeight300,
+        500 => impeller::ImpellerFontWeight::kImpellerFontWeight500,
+        600 => impeller::ImpellerFontWeight::kImpellerFontWeight600,
+        700 => impeller::ImpellerFontWeight::kImpellerFontWeight700,
+        800 => impeller::ImpellerFontWeight::kImpellerFontWeight800,
+        900 => impeller::ImpellerFontWeight::kImpellerFontWeight900,
+        _ => impeller::ImpellerFontWeight::kImpellerFontWeight400,
     }
 }
 
-pub(crate) fn impeller_slant(slant: protocol::FontSlant) -> ffi::ImpellerFontStyle::Type {
+pub(crate) fn impeller_slant(slant: protocol::FontSlant) -> impeller::ImpellerFontStyle::Type {
     match slant {
-        protocol::FontSlant::Italic => ffi::ImpellerFontStyle::kImpellerFontStyleItalic,
-        protocol::FontSlant::Normal => ffi::ImpellerFontStyle::kImpellerFontStyleNormal,
+        protocol::FontSlant::Italic => impeller::ImpellerFontStyle::kImpellerFontStyleItalic,
+        protocol::FontSlant::Normal => impeller::ImpellerFontStyle::kImpellerFontStyleNormal,
     }
 }
 
-pub(crate) fn impeller_align(align: TextAlign) -> ffi::ImpellerTextAlignment::Type {
+pub(crate) fn impeller_align(align: TextAlign) -> impeller::ImpellerTextAlignment::Type {
     match align {
-        TextAlign::Left => ffi::ImpellerTextAlignment::kImpellerTextAlignmentLeft,
-        TextAlign::Center => ffi::ImpellerTextAlignment::kImpellerTextAlignmentCenter,
-        TextAlign::Right => ffi::ImpellerTextAlignment::kImpellerTextAlignmentRight,
+        TextAlign::Left => impeller::ImpellerTextAlignment::kImpellerTextAlignmentLeft,
+        TextAlign::Center => impeller::ImpellerTextAlignment::kImpellerTextAlignmentCenter,
+        TextAlign::Right => impeller::ImpellerTextAlignment::kImpellerTextAlignmentRight,
     }
 }
 
@@ -600,12 +607,12 @@ pub(crate) mod paint_trace {
     }
 }
 
-pub(crate) fn uniform_radii(radius: f32) -> ffi::ImpellerRoundingRadii {
-    let corner = ffi::ImpellerPoint {
+pub(crate) fn uniform_radii(radius: f32) -> impeller::ImpellerRoundingRadii {
+    let corner = impeller::ImpellerPoint {
         x: radius,
         y: radius,
     };
-    ffi::ImpellerRoundingRadii {
+    impeller::ImpellerRoundingRadii {
         top_left: corner,
         bottom_left: corner,
         top_right: corner,

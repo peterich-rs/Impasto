@@ -6,4 +6,4 @@
 git clone --branch next https://github.com/solidjs/solid.git third_party/solid
 ```
 
-Impeller SDK 由 `crates/engine/fetch-impeller-sdk.sh` 解到 `third_party/impeller-sdk/`，不进 git。JavaScript 解释器使用 Cargo 发布依赖 quickjs-jit 0.14.2，不从本目录编译源码。
+`impeller-sdk/` 缓存按版本和目标组织的 Impeller SDK。`impeller-build/` 保存本地源码构建结果。[Impeller SDK](../crates/impeller-sys/README.md)

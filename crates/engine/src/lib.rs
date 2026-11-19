@@ -1,31 +1,28 @@
 //! Impeller renderer. It paints a [`protocol::LayerTree`] and does not read scene bytes.
 
-#![allow(
-    unsafe_code,
-    reason = "Impeller FFI and the bindgen bindings live in this crate"
-)]
+#![allow(unsafe_code, reason = "This renderer calls the Impeller C API")]
 
 mod script;
 // Glyph boxes for span gradients. Callers are in typography, which needs the SDK.
 // Unit tests still build this module when the SDK is absent.
-#[cfg(any(impeller, test))]
+#[cfg(any(feature = "impeller", test))]
 mod span_box;
 mod status;
 
 pub use script::split_scripts;
 
-#[cfg(impeller_missing)]
+#[cfg(not(feature = "impeller"))]
 mod missing;
-#[cfg(impeller)]
+#[cfg(feature = "impeller")]
 mod painter;
-#[cfg(impeller)]
+#[cfg(feature = "impeller")]
 mod pictures;
-#[cfg(impeller)]
+#[cfg(feature = "impeller")]
 mod player;
 mod surface;
-#[cfg(impeller)]
+#[cfg(feature = "impeller")]
 mod textures;
-#[cfg(impeller)]
+#[cfg(feature = "impeller")]
 mod typography;
 
 pub use status::{AcquireFollowup, Status, acquire_followup};
@@ -64,26 +61,26 @@ pub struct ShapeStats {
     pub bridged: u32,
 }
 
-#[cfg(impeller_missing)]
+#[cfg(not(feature = "impeller"))]
 pub use missing::Engine;
-#[cfg(impeller_missing)]
+#[cfg(not(feature = "impeller"))]
 pub use missing::GpuImage;
-#[cfg(impeller_missing)]
+#[cfg(not(feature = "impeller"))]
 pub use missing::TextureFactory;
-#[cfg(impeller_missing)]
+#[cfg(not(feature = "impeller"))]
 pub use missing::Typography;
-#[cfg(impeller)]
+#[cfg(feature = "impeller")]
 pub use player::Engine;
-#[cfg(impeller)]
+#[cfg(feature = "impeller")]
 pub use player::GpuImage;
-#[cfg(impeller)]
+#[cfg(feature = "impeller")]
 pub use player::TextureFactory;
-#[cfg(impeller)]
+#[cfg(feature = "impeller")]
 pub use typography::Typography;
 
-#[cfg(all(impeller_missing, target_os = "android"))]
+#[cfg(all(not(feature = "impeller"), target_os = "android"))]
 pub use missing::VulkanSwapchain;
-#[cfg(all(impeller, target_os = "android"))]
+#[cfg(all(feature = "impeller", target_os = "android"))]
 pub use player::VulkanSwapchain;
 
 #[cfg(target_os = "android")]

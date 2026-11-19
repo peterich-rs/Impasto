@@ -4,6 +4,8 @@ target/
 apps/gallery-solid/dist/
 .metrics/
 third_party/impeller-sdk/
+third_party/impeller-build/
+__pycache__/
 crates/android/apk/.gradle/
 crates/android/apk/build/
 crates/android/apk/app/build/

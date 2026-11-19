@@ -1,6 +1,6 @@
 # 平台宿主
 
-macOS 与 Android 已落地：平台线程入队，渲染线程创建 `Engine` 和会话并 present。SDK 在 `third_party/impeller-sdk/<平台>/`。iOS 预构建矩阵没有这一列，所以没有 `crates/ios`。线程模型不按只有两台宿主来收死。
+macOS 与 Android 的平台线程将事件入队，渲染线程创建 `Engine` 和会话并上屏。两个宿主各自链接对应目标的 Impeller SDK。[Impeller SDK](../crates/impeller-sys/README.md)
 
 `shell` 不依赖 `quickjs`。一个可执行文件只链一种会话。`protocol`、`uicore`、`engine`、`crates/macos` 不手写 C。QuickJS 使用 Cargo 构建的 quickjs-jit 0.14.2，Rust 绑定在 `crates/quickjs/src/linked/rt`。`Engine` 与 QuickJS 都是 `!Send`。
 
