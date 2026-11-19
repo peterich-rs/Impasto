@@ -184,6 +184,86 @@ fn top_level_await_stays_pending_until_drive() {
     assert!(other.module_status(ticket).is_err());
 }
 
+#[test]
+fn sync_http_client_settles_on_drive_without_a_second_enqueue() {
+    let mut runtime = RuntimeBuilder::new()
+        .http_client(std::sync::Arc::new(SyncOk))
+        .build()
+        .expect("runtime");
+    runtime
+        .eval_script(
+            "fetch('https://example.test/sync').then(function (response) { return response.text(); }).then(function (text) { globalThis.body = text; });",
+            "sync.js",
+        )
+        .expect("fetch");
+    assert!(matches!(runtime.take_jobs().first(), Some(IoJob::Http(_))));
+    runtime.drive(0).expect("drive");
+    runtime
+        .eval_script(
+            "if (globalThis.body !== 'sync') throw new Error(String(globalThis.body));",
+            "check.js",
+        )
+        .expect("body");
+}
+
+struct SyncOk;
+
+impl js_host::HttpClient for SyncOk {
+    fn perform(&self, request: &js_host::HttpRequest) -> Result<HttpResponse, js_host::HttpError> {
+        assert_eq!(request.url, "https://example.test/sync");
+        Ok(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: b"sync".to_vec(),
+        })
+    }
+}
+
+#[test]
+fn sync_client_streams_head_and_chunk_through_the_shared_delivery() {
+    let mut runtime = RuntimeBuilder::new()
+        .http_client(std::sync::Arc::new(StreamOk))
+        .build()
+        .expect("runtime");
+    runtime
+        .eval_script(
+            "fetchStream('https://example.test/stream').then(function (response) { globalThis.status = response.status; return response.getReader().read(); }).then(function (part) { globalThis.text = new TextDecoder().decode(part.value); });",
+            "stream.js",
+        )
+        .expect("fetchStream");
+    runtime.drive(0).expect("drive");
+    runtime
+        .eval_script(
+            "if (globalThis.status !== 200 || globalThis.text !== 'abc') throw new Error(String(globalThis.status) + ':' + String(globalThis.text));",
+            "check.js",
+        )
+        .expect("stream body");
+}
+
+struct StreamOk;
+
+impl js_host::HttpClient for StreamOk {
+    fn perform(&self, _request: &js_host::HttpRequest) -> Result<HttpResponse, js_host::HttpError> {
+        Ok(HttpResponse {
+            status: 201,
+            headers: Vec::new(),
+            body: Vec::new(),
+        })
+    }
+
+    fn stream(
+        &self,
+        request: &js_host::HttpRequest,
+        sink: &mut dyn FnMut(js_host::HttpPiece<'_>) -> bool,
+    ) -> Result<(), js_host::HttpError> {
+        assert_eq!(request.url, "https://example.test/stream");
+        if sink(js_host::HttpPiece::Head(200, &[])) {
+            sink(js_host::HttpPiece::Chunk(b"abc", true));
+        }
+        Ok(())
+    }
+}
+
 struct AnswerFactory;
 
 impl js::NativeFactory for AnswerFactory {

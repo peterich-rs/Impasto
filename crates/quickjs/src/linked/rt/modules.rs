@@ -173,7 +173,7 @@ impl ModuleDef for GraphModule {
                     let host = unsafe { &*pointer };
                     let _active = host.enter(&ctx);
                     if matches!(op, 1 | 3 | 4 | 5 | 6 | 8 | 10 | 11 | 14 | 15 | 16) {
-                        canvas::side_effect(&ctx)?;
+                        js::host::OperationPolicy::before(host, &ctx)?;
                     }
                     let mut handles = Vec::new();
                     for (index, value) in args.0.into_iter().take(8).enumerate() {
@@ -256,7 +256,7 @@ impl ModuleDef for HostModule {
                     // SAFETY: module functions are destroyed with the VM before Host.
                     let host = unsafe { &*pointer };
                     let _active = host.enter(&ctx);
-                    canvas::side_effect(&ctx)?;
+                    js::host::OperationPolicy::before(host, &ctx)?;
                     call_host(host, &ctx, &name, &method, &args.0)
                 })?,
             )?;
@@ -275,7 +275,7 @@ impl ModuleDef for HostModule {
                         // SAFETY: Host outlives the native module's functions.
                         let host = unsafe { &*pointer };
                         let _active = host.enter(&ctx);
-                        canvas::side_effect(&ctx)?;
+                        js::host::OperationPolicy::before(host, &ctx)?;
                         if args.0.len() < 2 || !args.0[0].is_string() || !args.0[1].is_function() {
                             return Ok(());
                         }

@@ -11,12 +11,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use js_host::{HttpRequest, HttpResponse, IoEvent, IoJob};
+use js_host::{HttpClient, HttpPiece, HttpRequest, IoEvent, IoJob};
 use rquickjs::promise::PromiseState;
-use rquickjs::{ArrayBuffer, Ctx, Function, IntoJs, Object, Persistent};
+use rquickjs::{Ctx, Function, Persistent};
 
 use crate::LEGACY_PRELUDE;
-use crate::host::{HttpCall, IoPort};
+use crate::host::{HttpCall, IoPort, OperationPolicy};
 use crate::modules::{MemoryLoader, MemoryResolver, ModuleTable, NativeFactory};
 use crate::quickjs::{JobStop, Saved, Timer, Vm, poll_timer, run_jobs};
 
@@ -69,6 +69,7 @@ struct State {
     tickets: RefCell<HashMap<u64, TrackedModule>>,
     next_ticket: Cell<u64>,
     log: Log,
+    client: Option<Arc<dyn HttpClient>>,
     jobs: RefCell<Vec<IoJob>>,
     inbox: RefCell<Vec<IoEvent>>,
     cancels: RefCell<HashMap<u64, Arc<AtomicBool>>>,
@@ -86,6 +87,7 @@ pub struct RuntimeBuilder {
     modules: HashMap<String, String>,
     natives: HashMap<String, Box<dyn NativeFactory>>,
     duplicate: Option<String>,
+    client: Option<Arc<dyn HttpClient>>,
     log: Log,
 }
 
@@ -95,6 +97,7 @@ impl RuntimeBuilder {
             modules: HashMap::new(),
             natives: HashMap::new(),
             duplicate: None,
+            client: None,
             log: Box::new(|_, _| {}),
         }
     }
@@ -128,6 +131,15 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Run HTTP inside the calling `http` binding and queue the completion.
+    ///
+    /// [`Runtime::drive`] still performs the JavaScript settlement. The job is
+    /// recorded as well, so a test can see the request.
+    pub fn http_client(mut self, client: Arc<dyn HttpClient>) -> Self {
+        self.client = Some(client);
+        self
+    }
+
     pub fn build(self) -> Result<Runtime, JsError> {
         if let Some(name) = self.duplicate {
             return Err(JsError {
@@ -151,6 +163,7 @@ impl RuntimeBuilder {
                 tickets: RefCell::new(HashMap::new()),
                 next_ticket: Cell::new(0),
                 log: self.log,
+                client: self.client,
                 jobs: RefCell::new(Vec::new()),
                 inbox: RefCell::new(Vec::new()),
                 cancels: RefCell::new(HashMap::new()),
@@ -327,7 +340,8 @@ impl Runtime {
         }
         self.state.vm.with(|ctx| {
             for event in events {
-                deliver(&self.state.vm, &ctx, event).map_err(|error| script_error(&ctx, error))?;
+                crate::deliver::apply(&self.state.vm, &ctx, event)
+                    .map_err(|error| script_error(&ctx, error))?;
             }
             Ok(())
         })
@@ -408,8 +422,10 @@ impl Runtime {
             let vm = &self.state.vm as *const Vm as *mut Vm;
             let state: &State = &self.state;
             let port: *const dyn IoPort = std::ptr::from_ref(state as &dyn IoPort);
-            // SAFETY: `vm` and `port` address this runtime's boxed state.
-            unsafe { crate::host::install(&ctx, vm, port) }
+            let policy: *const dyn OperationPolicy =
+                std::ptr::from_ref(state as &dyn OperationPolicy);
+            // SAFETY: `vm`, `port`, and `policy` address this runtime's boxed state.
+            unsafe { crate::host::install(&ctx, vm, port, policy) }
                 .map_err(|error| script_error(&ctx, error))?;
             crate::standard::install_console(&ctx, move |level, text| {
                 // SAFETY: `log` points at the callback stored in this runtime.
@@ -436,6 +452,12 @@ impl Drop for Runtime {
     }
 }
 
+impl OperationPolicy for State {
+    fn before<'js>(&self, _ctx: &Ctx<'js>) -> rquickjs::Result<()> {
+        Ok(())
+    }
+}
+
 impl IoPort for State {
     fn http(&self, call: HttpCall) {
         let cancel = Arc::new(AtomicBool::new(false));
@@ -451,6 +473,42 @@ impl IoPort for State {
             cancel,
             timeout_ms: None,
         };
+        if let Some(client) = &self.client {
+            if call.streaming {
+                let mut events = Vec::new();
+                let streamed = client.stream(&request, &mut |piece| {
+                    match piece {
+                        HttpPiece::Head(status, headers) => events.push(IoEvent::HttpHead {
+                            token: request.token,
+                            status,
+                            headers: headers.to_vec(),
+                        }),
+                        HttpPiece::Chunk(bytes, done) => events.push(IoEvent::HttpChunk {
+                            token: request.token,
+                            bytes: bytes.to_vec(),
+                            done,
+                            error: None,
+                        }),
+                    }
+                    !request.cancel.load(Ordering::Relaxed)
+                });
+                if let Err(error) = streamed {
+                    events.push(IoEvent::HttpChunk {
+                        token: request.token,
+                        bytes: Vec::new(),
+                        done: true,
+                        error: Some(error),
+                    });
+                }
+                self.inbox.borrow_mut().extend(events);
+            } else {
+                let result = client.perform(&request);
+                self.inbox.borrow_mut().push(IoEvent::Http {
+                    token: request.token,
+                    result,
+                });
+            }
+        }
         self.jobs.borrow_mut().push(if call.streaming {
             IoJob::HttpStream(request)
         } else {
@@ -495,22 +553,6 @@ impl IoPort for State {
     }
 }
 
-fn header_block(headers: &[(String, String)]) -> String {
-    headers
-        .iter()
-        .map(|(name, value)| format!("{name}: {value}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "host tokens are finite ids and fit in a JavaScript number"
-)]
-fn js_number(id: u64) -> f64 {
-    id as f64
-}
-
 fn header_pairs(block: &str) -> Vec<(String, String)> {
     block
         .split('\n')
@@ -524,128 +566,6 @@ fn header_pairs(block: &str) -> Vec<(String, String)> {
             }
         })
         .collect()
-}
-
-fn deliver(vm: &Vm, ctx: &Ctx<'_>, event: IoEvent) -> rquickjs::Result<()> {
-    match event {
-        IoEvent::Http { token, result } => match result {
-            Ok(response) => settle_http(vm, ctx, token, &response),
-            Err(error) => vm.settle(ctx, token, false, error.dom_name().into_js(ctx)?),
-        },
-        IoEvent::Plugin { token, result } => match result {
-            js_host::PluginResult::Done(value) => {
-                vm.settle(ctx, token, true, plugin_value(ctx, &value)?)
-            }
-            js_host::PluginResult::Failed { message } => {
-                vm.settle(ctx, token, false, message.into_js(ctx)?)
-            }
-        },
-        IoEvent::Socket {
-            id,
-            event,
-            text,
-            data,
-        } => {
-            let payload = if text {
-                String::from_utf8_lossy(&data).into_owned().into_js(ctx)?
-            } else {
-                ArrayBuffer::new(ctx.clone(), data)?.into_js(ctx)?
-            };
-            call_hook(
-                ctx,
-                "_socket",
-                vec![js_number(id).into_js(ctx)?, event.into_js(ctx)?, payload],
-            )
-        }
-        IoEvent::HttpHead {
-            token,
-            status,
-            headers,
-        } => {
-            let head = Object::new(ctx.clone())?;
-            head.set("status", i32::from(status))?;
-            head.set("headers", header_block(&headers))?;
-            call_hook(
-                ctx,
-                "_httpStream",
-                vec![
-                    js_number(token).into_js(ctx)?,
-                    "head".into_js(ctx)?,
-                    head.into_value(),
-                ],
-            )
-        }
-        IoEvent::HttpChunk {
-            token,
-            bytes,
-            done,
-            error,
-        } => {
-            let payload = match error {
-                Some(error) => error.dom_name().into_js(ctx)?,
-                None => ArrayBuffer::new(ctx.clone(), bytes)?.into_value(),
-            };
-            call_hook(
-                ctx,
-                "_httpStream",
-                vec![
-                    js_number(token).into_js(ctx)?,
-                    (if done { "done" } else { "chunk" }).into_js(ctx)?,
-                    payload,
-                ],
-            )?;
-            if done {
-                vm.promises.borrow_mut().remove(&token);
-            }
-            Ok(())
-        }
-    }
-}
-
-fn settle_http(
-    vm: &Vm,
-    ctx: &Ctx<'_>,
-    token: u64,
-    response: &HttpResponse,
-) -> rquickjs::Result<()> {
-    let object = Object::new(ctx.clone())?;
-    object.set("status", i32::from(response.status))?;
-    object.set("headers", header_block(&response.headers))?;
-    object.set(
-        "body",
-        ArrayBuffer::new(ctx.clone(), response.body.clone())?,
-    )?;
-    vm.settle(ctx, token, true, object.into_value())
-}
-
-fn plugin_value<'js>(
-    ctx: &Ctx<'js>,
-    value: &js_host::PluginValue,
-) -> rquickjs::Result<rquickjs::Value<'js>> {
-    use js_host::PluginValue;
-    Ok(match value {
-        PluginValue::Null => rquickjs::Value::new_null(ctx.clone()),
-        PluginValue::Bool(value) => (*value).into_js(ctx)?,
-        PluginValue::F64(value) => (*value).into_js(ctx)?,
-        PluginValue::Str(value) => value.into_js(ctx)?,
-        PluginValue::Bytes(value) => ArrayBuffer::new(ctx.clone(), value.clone())?.into_js(ctx)?,
-        PluginValue::List(_) | PluginValue::Map(_) => rquickjs::Value::new_null(ctx.clone()),
-    })
-}
-
-fn call_hook<'js>(
-    ctx: &Ctx<'js>,
-    name: &str,
-    args: Vec<rquickjs::Value<'js>>,
-) -> rquickjs::Result<()> {
-    let bridge: Object = ctx.globals().get("__host")?;
-    let hook: rquickjs::Value = bridge.get(name)?;
-    if let Some(hook) = hook.into_function() {
-        let mut values = rquickjs::function::Args::new(ctx.clone(), args.len());
-        values.push_args(args)?;
-        hook.call_arg::<()>(values)?;
-    }
-    Ok(())
 }
 
 fn next_runtime_id() -> u64 {

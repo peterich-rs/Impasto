@@ -227,10 +227,18 @@ pub(super) fn install<'js>(host: &Host, ctx: &Ctx<'js>) -> rquickjs::Result<()> 
     }
     let vm = ptr::from_ref(&host.vm).cast_mut();
     let port: *const dyn js::host::IoPort = ptr::from_ref(host as &dyn js::host::IoPort);
-    // SAFETY: `vm` and `port` address this host until shutdown.
-    unsafe { js::host::install(ctx, vm, port) }?;
+    let policy: *const dyn js::host::OperationPolicy =
+        ptr::from_ref(host as &dyn js::host::OperationPolicy);
+    // SAFETY: `vm`, `port`, and `policy` address this host until shutdown.
+    unsafe { js::host::install(ctx, vm, port, policy) }?;
     rquickjs::Module::declare_def::<modules::GraphModule, _>(ctx.clone(), "#reactive")?;
     Ok(())
+}
+
+impl js::host::OperationPolicy for Host {
+    fn before<'js>(&self, ctx: &Ctx<'js>) -> rquickjs::Result<()> {
+        canvas::side_effect(ctx)
+    }
 }
 fn saved_function<'js>(ctx: &Ctx<'js>, args: &[Value<'js>], i: usize) -> rquickjs::Result<Saved> {
     let value = value(ctx, args, i);
@@ -313,7 +321,7 @@ pub(super) fn native<'js>(
     name: &str,
     args: &[Value<'js>],
 ) -> rquickjs::Result<Value<'js>> {
-    canvas::side_effect(ctx)?;
+    js::host::OperationPolicy::before(host, ctx)?;
     let undefined = || Value::new_undefined(ctx.clone());
     let minimum = match name {
         "setStyle" | "patchStyle" | "setComponentStyle" | "setClass" | "setStyleSource"

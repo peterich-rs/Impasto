@@ -11,6 +11,7 @@
 
 pub mod bytecode;
 pub mod compile;
+pub mod deliver;
 pub mod host;
 pub mod modules;
 pub mod quickjs;

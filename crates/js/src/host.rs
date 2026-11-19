@@ -17,6 +17,24 @@ pub struct HttpCall {
     pub body: Vec<u8>,
 }
 
+/// A host may reject a native call. The default policy allows it.
+///
+/// Console, performance, and timers do not consult this policy. The UI
+/// adapter uses it for host methods and the same bind points that used to
+/// call the canvas side-effect check.
+pub trait OperationPolicy {
+    fn before<'js>(&self, ctx: &Ctx<'js>) -> rquickjs::Result<()>;
+}
+
+/// Headless default: native host calls are allowed.
+pub struct Allow;
+
+impl OperationPolicy for Allow {
+    fn before<'js>(&self, _ctx: &Ctx<'js>) -> rquickjs::Result<()> {
+        Ok(())
+    }
+}
+
 pub trait IoPort {
     fn http(&self, call: HttpCall);
     fn abort(&self, token: u64);
@@ -35,43 +53,51 @@ pub unsafe fn install<'js>(
     ctx: &Ctx<'js>,
     vm: *mut Vm,
     port: *const dyn IoPort,
+    policy: *const dyn OperationPolicy,
 ) -> rquickjs::Result<()> {
     let bridge = Object::new(ctx.clone())?;
-    let http = function(ctx, vm, port, false)?;
-    let stream = function(ctx, vm, port, true)?;
+    let http = function(ctx, vm, port, policy, false)?;
+    let stream = function(ctx, vm, port, policy, true)?;
     bridge.set("http", http)?;
     bridge.set("httpStream", stream)?;
     bridge.set(
         "abort",
-        Function::new(ctx.clone(), move |args: Rest<Value<'js>>| {
-            let token = js_id(args.0.first());
-            if token != 0 {
-                // SAFETY: `port` belongs to the runtime that installed this function.
-                unsafe { (*port).abort(token) };
-            }
-        })?,
-    )?;
-    bridge.set(
-        "hasModule",
         Function::new(
             ctx.clone(),
-            move |_ctx: Ctx<'js>, args: Rest<Value<'js>>| {
-                let name = match args.0.first() {
-                    Some(value) => value
-                        .as_string()
-                        .and_then(|text| text.to_string().ok())
-                        .unwrap_or_default(),
-                    None => String::new(),
-                };
-                // SAFETY: `port` belongs to the runtime that installed this function.
-                let present = unsafe { (*port).has_module(&name) };
-                rquickjs::Result::Ok(present)
+            move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<()> {
+                // SAFETY: `policy` belongs to the runtime that installed this function.
+                unsafe { (*policy).before(&ctx)? };
+                let token = js_id(args.0.first());
+                if token != 0 {
+                    // SAFETY: `port` belongs to the runtime that installed this function.
+                    unsafe { (*port).abort(token) };
+                }
+                Ok(())
             },
         )?,
     )?;
     bridge.set(
+        "hasModule",
+        Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
+            // SAFETY: `policy` belongs to the runtime that installed this function.
+            unsafe { (*policy).before(&ctx)? };
+            let name = match args.0.first() {
+                Some(value) => value
+                    .as_string()
+                    .and_then(|text| text.to_string().ok())
+                    .unwrap_or_default(),
+                None => String::new(),
+            };
+            // SAFETY: `port` belongs to the runtime that installed this function.
+            let present = unsafe { (*port).has_module(&name) };
+            rquickjs::Result::Ok(present)
+        })?,
+    )?;
+    bridge.set(
         "socketOpen",
         Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
+            // SAFETY: `policy` belongs to the runtime that installed this function.
+            unsafe { (*policy).before(&ctx)? };
             let url = arg_string(&ctx, args.0.first());
             let protocols = arg_string(&ctx, args.0.get(1));
             // SAFETY: `port` belongs to the runtime that installed this function.
@@ -82,6 +108,8 @@ pub unsafe fn install<'js>(
     bridge.set(
         "socketSend",
         Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
+            // SAFETY: `policy` belongs to the runtime that installed this function.
+            unsafe { (*policy).before(&ctx)? };
             let id = js_id(args.0.first());
             let text = args.0.get(1).is_some_and(|value| value.is_string());
             let data = if text {
@@ -96,13 +124,19 @@ pub unsafe fn install<'js>(
     )?;
     bridge.set(
         "socketClose",
-        Function::new(ctx.clone(), move |args: Rest<Value<'js>>| {
-            let id = js_id(args.0.first());
-            if id != 0 {
-                // SAFETY: `port` belongs to the runtime that installed this function.
-                unsafe { (*port).close_socket(id) };
-            }
-        })?,
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<()> {
+                // SAFETY: `policy` belongs to the runtime that installed this function.
+                unsafe { (*policy).before(&ctx)? };
+                let id = js_id(args.0.first());
+                if id != 0 {
+                    // SAFETY: `port` belongs to the runtime that installed this function.
+                    unsafe { (*port).close_socket(id) };
+                }
+                Ok(())
+            },
+        )?,
     )?;
     ctx.globals().set("__host", bridge)
 }
@@ -111,11 +145,14 @@ fn function<'js>(
     ctx: &Ctx<'js>,
     vm: *mut Vm,
     port: *const dyn IoPort,
+    policy: *const dyn OperationPolicy,
     streaming: bool,
 ) -> rquickjs::Result<Function<'js>> {
     Function::new(
         ctx.clone(),
         move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<Value<'js>> {
+            // SAFETY: `policy` belongs to the runtime that installed this function.
+            unsafe { (*policy).before(&ctx)? };
             // SAFETY: `vm` is the armed runtime that installed this function.
             let (token, promise) = unsafe { (*vm).make_promise(&ctx)? };
             let method = arg_string(&ctx, args.0.first());
