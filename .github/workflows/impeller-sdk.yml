@@ -55,8 +55,35 @@ jobs:
       - name: Linux build dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libclang-dev pkg-config libgtk-3-dev libgl-dev libegl-dev libx11-dev libxcb1-dev libwayland-dev
+          packages=(libclang-dev pkg-config libgtk-3-dev libgl-dev libegl-dev libx11-dev libxcb1-dev libwayland-dev)
+          network_options=(-o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+          source_options=()
+
+          download_dependencies() {
+            sudo timeout --kill-after=15s 3m apt-get "${network_options[@]}" "${source_options[@]}" update --error-on=any &&
+              sudo timeout --kill-after=15s 5m apt-get "${network_options[@]}" "${source_options[@]}" install --download-only -y --no-install-recommends "${packages[@]}"
+          }
+
+          if ! download_dependencies; then
+            case "$(dpkg --print-architecture)" in
+              amd64) archive=https://mirrors.edge.kernel.org/ubuntu/ ;;
+              arm64) archive=https://ports.ubuntu.com/ubuntu-ports/ ;;
+              *) exit 1 ;;
+            esac
+            fallback="$RUNNER_TEMP/impeller-ubuntu.sources"
+            cat > "$fallback" <<EOF
+          Types: deb
+          URIs: $archive
+          Suites: noble noble-updates noble-security noble-backports
+          Components: main restricted universe multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+            echo "Retrying Ubuntu dependency downloads from $archive"
+            source_options=(-o "Dir::Etc::sourcelist=$fallback" -o Dir::Etc::sourceparts=-)
+            download_dependencies
+          fi
+
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get "${source_options[@]}" install --no-download -y --no-install-recommends "${packages[@]}"
       - name: Xcode Metal Toolchain
         if: runner.os == 'macOS'
         run: |
