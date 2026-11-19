@@ -10,7 +10,7 @@
 | 本文件对应的代码 | `1092be44f22d0e7e552d17c0e6468ea0ca6da8d6` |
 | 2.0 基线测试 | `3590486`，在提取之前锁住定时器 kind、时钟原点和宿主 getter 重入 |
 
-`1092be4` 之前的检查点 `8d25b41` 上，GitHub Actions 的 Linux cargo test、macOS cargo test、Kotlin、Solid 都成功。那些结果不属于 `1092be4`。
+`67a7c5c` 含 `1092be4` 的代码和这份记录的上一版。GitHub Actions run `44439226629` 在该提交上四项都成功：`cargo test (linux)`、`cargo test (macos)`、`kotlin`、`solid`。更早的 `8d25b41` 也成功过，那一轮不算这一轮。
 
 ## 2.0–2.7
 
@@ -23,7 +23,7 @@
 | 2.4 模块与编译 | 部分。`js::CompileEnvironment` 已接入。`quickjs::compile` 签名不变，编译前调用 UI 的 `prepare_compile`。封套实现、`CompiledBytecode`、内存模块 provider 和 native module factory 仍在 `quickjs`，没有迁到 `js`。`ModuleTicket` 只在 `evaluate` 返回后给 `Fulfilled`，不会表示挂起的 top-level await |
 | 2.5 I/O 与 prelude | 部分。prelude 正文只在 `crates/js/src/standard/legacy-prelude.js`。两边安装同一个 `js::host`。headless 把请求记成 `IoJob`，`enqueue` 只入队，`drive` 才用 `Vm::settle` 交付。取消会把请求上的 flag 设上并记 `IoJob::Abort`。流的 head/chunk 会调 prelude 的 `_httpStream`。同步 `HttpClient` 没有接。UI 仍在原来的帧位置用 `turns.rs` 交付，没有改成一次 `drive` |
 | 2.6 清理与守卫 | 部分。旧的 console / timeout / interval 安装器已从 `bindings.rs` 删掉。`tools/check-js-runtime-boundary.py` 在 Linux CI 里。`crates/js-headless` 的生产依赖只有 `js`。`js` 没有会拉起 UI 的 feature。启动失败点、root / Weak / drop 探针和监听计数还没有 |
-| 2.7 全平台 | 见下一节。macOS 还没有在 `1092be4` 上跑过。没有性能采样 |
+| 2.7 全平台 | 见下一节。`67a7c5c` 的 GitHub Actions 四项都成功，含 macOS。没有性能采样 |
 
 ## 已验证
 
@@ -60,7 +60,7 @@ quickjs 的 6 个 ignored 是既有项：5 个 gallery 行为在 `b48bb8a` 漂�
 8. 没有启动失败点、重复 `shutdown` 以外的清理探针、root / Weak / drop 探针、跨 runtime restore 拒绝，也没有分组计数。
 9. 32-job 上限和每批 64 个 timer 在实现里，headless 没有对应测试。
 10. UI 完成交付仍在 `turns.rs`。headless 在 `runtime.rs` 的 `deliver`。两边都进 `Vm::settle` 或 prelude 的同名 hook，但不是同一个交付函数。
-11. macOS CI 还没有在 `1092be4` 上跑。装机、release APK、`android-x64` 没有跑。
+11. 装机、release APK、`android-x64` 没有跑。macOS 已由 `67a7c5c` 的 `cargo test (macos)` 成功覆盖。
 12. 没有性能对照，也没有泄漏采样。不能说变快，也不能说没有泄漏。
 
 ## 保留的旧行为
