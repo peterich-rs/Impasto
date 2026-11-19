@@ -2,6 +2,7 @@
 """Build the pinned standalone Impeller library with Flutter's build tools."""
 
 from pathlib import Path
+import os
 import platform
 import runpy
 import shutil
@@ -24,7 +25,8 @@ TARGETS = {
     "android-arm64": (None, ("--android", "--android-cpu=arm64")),
     "android-x64": (None, ("--android", "--android-cpu=x64")),
     "linux-arm64": ("Linux", ("--target-os=linux", "--linux-cpu=arm64")),
-    "linux-x64": ("Linux", ("--target-os=linux", "--linux-cpu=x64")),
+    # Flutter's native x64 host mode supplies the standalone ANGLE options.
+    "linux-x64": ("Linux", ()),
     "windows-arm64": ("Windows", ("--windows-cpu=arm64",)),
     "windows-x64": ("Windows", ("--windows-cpu=x64",)),
 }
@@ -39,7 +41,21 @@ def host_target():
 
 
 def run(*command, cwd):
-    subprocess.run(command, cwd=cwd, check=True, stdout=sys.stderr)
+    try:
+        subprocess.run(command, cwd=cwd, check=True, stdout=sys.stderr)
+    except FileNotFoundError as error:
+        raise RuntimeError(f"could not run {command[0]}: {error}") from error
+
+
+def prepare_windows_git():
+    if shutil.which("git.bat"):
+        return
+    if not shutil.which("git.exe"):
+        raise RuntimeError("git.exe is required on PATH to build Impeller on Windows")
+    tools = SOURCE.parent / "windows-tools"
+    tools.mkdir(parents=True, exist_ok=True)
+    (tools / "git.bat").write_text("@git.exe %*\n", encoding="ascii")
+    os.environ["PATH"] = f"{tools}{os.pathsep}{os.environ['PATH']}"
 
 
 def gclient_config(template, android):
@@ -110,6 +126,10 @@ def build(target, revision):
         if not target.startswith("ios-") or (output / "link.txt").is_file():
             return output
 
+    if host == "Windows":
+        # Flutter's GN scripts invoke git.bat even when Git ships only git.exe.
+        prepare_windows_git()
+
     if target.startswith(("darwin-", "ios-")):
         metal = subprocess.run(["xcrun", "metal", "--version"], stdout=subprocess.DEVNULL)
         if metal.returncode != 0:
@@ -123,11 +143,7 @@ def build(target, revision):
         "gn", "--runtime-mode=release", "--no-enable-unittests", "--no-lto", *args,
     ])
     flutter_gn["validate_args"](options)
-    settings = flutter_gn["to_gn_args"](options)
-    if platform.system() == "Linux":
-        # The standalone graph parses ANGLE, but does not use its Wayland backend.
-        settings["angle_use_wayland"] = False
-    gn_args = flutter_gn["to_command_line"](settings)
+    gn_args = flutter_gn["to_command_line"](flutter_gn["to_gn_args"](options))
     suffix = ".exe" if platform.system() == "Windows" else ""
     pinned_gn = engine_src / "flutter/third_party/gn" / f"gn{suffix}"
     pinned_ninja = SOURCE / "third_party/ninja" / f"ninja{suffix}"
