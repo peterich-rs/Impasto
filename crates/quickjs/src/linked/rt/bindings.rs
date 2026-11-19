@@ -675,15 +675,9 @@ pub(super) fn native<'js>(
                 }
             }
         }
-        "setTimeout" | "setInterval" | "requestAnimationFrame" => {
+        "requestAnimationFrame" => {
             let function = saved_function(ctx, args, 0)?;
-            let kind = match name {
-                "setInterval" => 1,
-                "requestAnimationFrame" => 2,
-                _ => 0,
-            };
-            let delay = optional_num(ctx, args, 1)? as i64;
-            let delay = delay.max(0);
+            let _ = optional_num(ctx, args, 1)?;
             let id = host.alloc_id();
             let extra = args
                 .iter()
@@ -693,30 +687,20 @@ pub(super) fn native<'js>(
                 .collect();
             host.timers.borrow_mut().push(Timer {
                 id,
-                due: if kind == 2 {
-                    host.mono.get()
-                } else {
-                    host.mono.get().saturating_add(delay)
-                },
-                interval: if kind == 1 { delay } else { 0 },
+                due: host.mono.get(),
+                interval: 0,
                 eligible_turn: host.frame.get() + 1,
-                kind,
+                kind: 2,
                 function,
                 extra,
                 active: true,
             });
-            if kind == 2 || delay == 0 {
-                host.wants_frame.set(true);
-            }
+            host.wants_frame.set(true);
             return (id as f64).into_js(ctx);
         }
-        "clearTimeout" | "clearInterval" | "cancelAnimationFrame" => {
+        "cancelAnimationFrame" => {
             let id = optional_num(ctx, args, 0).unwrap_or(0.0) as u64;
-            let kind = match name {
-                "clearInterval" => 1,
-                "cancelAnimationFrame" => 2,
-                _ => 0,
-            };
+            let kind = 2;
             host.timers
                 .borrow_mut()
                 .retain(|t| t.id != id || t.kind != kind);
