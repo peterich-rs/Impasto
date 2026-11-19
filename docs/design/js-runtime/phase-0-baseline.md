@@ -139,7 +139,28 @@ job 上限仍是每轮 32，现有测试 `recursive_jobs_hit_the_round_limit_and
 
 没有跑分配采样或泄漏检测，所以这里没有内存结论。libtest 的 `0.00s` 只说明这几个测试落在它的计时分辨率里，不是性能对比。
 
-全量 `cargo test --workspace`、Linux `cargo check` / clippy、样式生成、gallery、Kotlin、Solid 以及 macOS 宿主不在这一节。它们在阶段 1 的树上按 CI 顺序补跑，结果补在文末。取消的 runner 不算通过。
+阶段 0 提交时还没有跑全量 workspace。下面这一节是阶段 1 头 `d6dd08f` 上补跑的结果，不是阶段 0 当时的数字。
+
+## 阶段 1 之后的检查
+
+本机 Linux x86_64，同一套工具链。没有 macOS runner，没有 Android NDK / APK。
+
+| 命令 | 结果 |
+|---|---|
+| `cargo fmt --all -- --check` | 通过 |
+| `cargo run --locked -p uicore --bin style-types -- --check --root .` | 通过 |
+| `python3 tools/check-js-host-boundary.py` | 通过。normal/build 闭包为空，只有 `session` 依赖 `js-host` |
+| `cargo tree -p js-host -e normal,build` | 只有 `js-host` 自己 |
+| `RUSTFLAGS="-D warnings" cargo check --workspace --exclude macos` | 通过。Cargo 另外打印既有 manifest 警告：`android` 未使用 `session`，`engine` 未使用 `tracing`。这是 Cargo 警告，不是 rustc，`-D warnings` 没有因此失败，本变更没有改这两个 manifest |
+| `cargo clippy --workspace --exclude macos --all-targets -- -D warnings` | 通过。同样带上两条既有 Cargo manifest 警告 |
+| gallery | 本机没有 `just`。按 `just gallery-dist` 的构建命令执行 `pnpm install --frozen-lockfile` 和 `pnpm -C apps/gallery-solid run build`，生成 `apps/gallery-solid/dist/quotes.js` |
+| `cargo test --workspace --exclude macos` | 退出码 0。各测试目标都是 `0 failed`。quickjs 有 6 个既有 `ignored`（说明写着 gallery 行为在 `b48bb8a` 漂移，以及 toolchain baseline 需显式跑）。uicore 有 1 个既有 `ignored`（`record_bench`）。没有新的失败 |
+| `pnpm -C . -r test` | 退出码 0。form、i18n、net、solid-renderer、solid-router、solid-ui、devtools、gallery-solid 都完成 |
+| `kotlin/gradlew -p kotlin :library:jvmTest` | 第二次在线运行 `BUILD SUCCESSFUL`。`:library:jvmTest` 是 `NO-SOURCE`，没有 JVM 测试可跑。第一次加了 `--offline`，插件仓库不可达，那次失败不算产品失败 |
+| macOS `cargo clippy -p macos` / `cargo test -p macos` | 未跑。这台机器不是 macOS |
+| `just android` | 未跑。没有把 Kotlin JVM 测试当成 Android Rust 验证 |
+
+quickjs 新测试 `open_runs_entry_before_io_install_and_frame_flushes_pending` 和 `unknown_io_completion_is_ignored_and_drop_discards_pending_fetch` 包含在这次 workspace 测试里并通过。libtest 仍把这两个和 session 契约测试报成 `finished in 0.00s`。没有做分配或泄漏采样，这里不写内存结论。
 
 ## 已知问题（不在阶段 0/1 修）
 
