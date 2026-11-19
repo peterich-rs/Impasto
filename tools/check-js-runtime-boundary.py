@@ -24,13 +24,14 @@ FORBIDDEN = {
     "android",
     "protocol",
 }
+# `js::quickjs` is this crate's engine module, so a bare `quickjs::` scan
+# false-positives. The cargo graph above is what rejects the quickjs crate.
 SOURCE_MARKERS = (
     "session::",
     "uicore::",
     "reactive::",
     "engine::",
     "shell::",
-    "quickjs::",
 )
 
 
