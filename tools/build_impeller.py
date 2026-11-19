@@ -123,7 +123,11 @@ def build(target, revision):
         "gn", "--runtime-mode=release", "--no-enable-unittests", "--no-lto", *args,
     ])
     flutter_gn["validate_args"](options)
-    gn_args = flutter_gn["to_command_line"](flutter_gn["to_gn_args"](options))
+    settings = flutter_gn["to_gn_args"](options)
+    if platform.system() == "Linux":
+        # The standalone graph parses ANGLE, but does not use its Wayland backend.
+        settings["angle_use_wayland"] = False
+    gn_args = flutter_gn["to_command_line"](settings)
     suffix = ".exe" if platform.system() == "Windows" else ""
     pinned_gn = engine_src / "flutter/third_party/gn" / f"gn{suffix}"
     pinned_ninja = SOURCE / "third_party/ninja" / f"ninja{suffix}"
