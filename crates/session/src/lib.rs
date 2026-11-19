@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+pub use js_host::{Credit, CreditPool, Delivery, RequestKey, Route, RuntimeKey};
+
 mod io;
 mod modules;
 pub mod trace;
@@ -501,6 +503,10 @@ pub trait Session {
     }
     /// Resolves one host IO completion. Called on the render thread.
     fn io_event(&mut self, _event: IoEvent) {}
+
+    fn io_delivery(&mut self, delivery: Delivery) {
+        self.io_event(delivery.event);
+    }
     /// Absolute monotonic milliseconds of the next timer, if one is armed.
     fn next_wake_ms(&mut self) -> Option<f64> {
         None

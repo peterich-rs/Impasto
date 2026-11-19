@@ -16,7 +16,8 @@ pub(super) fn handle(runtime: &mut Runtime, command: Command) -> Result<bool, Bo
         | Command::SemanticsEnabled(_)
         | Command::SemanticsAction(_)
         | Command::LaunchUrl(_)) => session(runtime, command),
-        command @ (Command::HttpDone { .. }
+        command @ (Command::JsIo(_)
+        | Command::HttpDone { .. }
         | Command::HttpHead { .. }
         | Command::HttpChunk { .. }
         | Command::PluginDone { .. }
@@ -81,6 +82,10 @@ fn session(runtime: &mut Runtime, command: Command) -> Result<bool, BootError> {
 
 fn io(runtime: &mut Runtime, command: Command) -> Result<bool, BootError> {
     let event = match command {
+        Command::JsIo(delivery) => {
+            io_done(runtime, |session| session.io_delivery(delivery));
+            return Ok(false);
+        }
         Command::HttpDone { token, result } => IoEvent::Http { token, result },
         Command::HttpHead {
             token,
@@ -116,7 +121,7 @@ fn io(runtime: &mut Runtime, command: Command) -> Result<bool, BootError> {
         },
         _ => return Ok(false),
     };
-    io_done(runtime, event);
+    io_done(runtime, |session| session.io_event(event));
     Ok(false)
 }
 
@@ -183,10 +188,16 @@ fn launch_url(runtime: &mut Runtime, url: String) {
 }
 
 /// Session-side IO completion: deliver the event, arm a frame if the session asks.
-fn io_done(runtime: &mut Runtime, event: IoEvent) {
+fn io_done(runtime: &mut Runtime, dispatch: impl FnOnce(&mut dyn session::Session)) {
     if let Some(session) = runtime.session.as_mut() {
-        session_call(|| session.io_event(event));
-        if session.wants_frame() {
+        session_call(|| dispatch(session.as_mut()));
+        let wants_frame = session.wants_frame();
+        let deadline = session.next_wake_ms().map(crate::net::ms_i64);
+        note_wake(
+            runtime,
+            deadline.into_iter().chain(runtime.present_retry_at).min(),
+        );
+        if wants_frame {
             arm(runtime);
         }
     }

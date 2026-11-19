@@ -139,6 +139,27 @@ pub struct Module {
     pub exports: ModuleExports,
 }
 
+pub const LISTENER_EXPORTS: [&str; 2] = ["addEventListener", "removeEventListener"];
+
+impl Module {
+    /// Export names in declaration order, shared by the binder and compiler.
+    pub fn export_names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.methods
+            .iter()
+            .map(|method| method.name)
+            .chain(self.listener_exports().iter().copied())
+            .chain(self.exports.object.then_some(self.name))
+    }
+
+    pub fn listener_exports(&self) -> &'static [&'static str] {
+        if self.exports.events.is_empty() {
+            &[]
+        } else {
+            &LISTENER_EXPORTS
+        }
+    }
+}
+
 /// `module "<name>" is not linked`, or with the method when the name exists but the method does not.
 pub fn module_not_linked(module: &str, method: Option<&str>) -> String {
     match method {

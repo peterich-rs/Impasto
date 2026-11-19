@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use js::{ModuleStatus, RuntimeBuilder, RuntimeCounts};
+use js::{ModuleStatus, Runtime, RuntimeBuilder, RuntimeCounts};
 use js_host::{HttpResponse, IoEvent, IoJob};
 
 #[test]
@@ -180,7 +180,7 @@ fn top_level_await_stays_pending_until_drive() {
             "seen.js",
         )
         .expect("seen");
-    let mut other = RuntimeBuilder::new().build().expect("other");
+    let other = RuntimeBuilder::new().build().expect("other");
     assert!(other.module_status(ticket).is_err());
 }
 
@@ -196,7 +196,7 @@ fn sync_http_client_settles_on_drive_without_a_second_enqueue() {
             "sync.js",
         )
         .expect("fetch");
-    assert!(matches!(runtime.take_jobs().first(), Some(IoJob::Http(_))));
+    assert!(runtime.take_jobs().is_empty());
     runtime.drive(0).expect("drive");
     runtime
         .eval_script(
@@ -362,7 +362,7 @@ impl js_host::HttpClient for StreamOk {
 
 struct AnswerFactory;
 
-impl js::NativeFactory for AnswerFactory {
+impl js::quickjs::NativeFactory for AnswerFactory {
     fn load<'js>(
         &self,
         ctx: &rquickjs::Ctx<'js>,
@@ -387,4 +387,343 @@ impl rquickjs::module::ModuleDef for Answer {
         exports.export("answer", 7)?;
         Ok(())
     }
+}
+
+#[test]
+fn timer_extra_arguments_and_yielding_follow_turns() {
+    let mut runtime = RuntimeBuilder::new()
+        .drive_policy(js::DrivePolicy::Yielding)
+        .limits(js::RuntimeLimits {
+            job_batch: 2,
+            ..js::RuntimeLimits::default()
+        })
+        .build()
+        .expect("runtime");
+    runtime
+        .eval_script(
+            r#"
+        let observed = [];
+        if (performance.now() !== 0) throw new Error('startup clock');
+        for (let i = 0; i < 5; i++) Promise.resolve().then(() => observed.push(i));
+        const id = setTimeout((...extra) => {
+            observed.push(extra.join(','));
+            setTimeout(() => observed.push('next'), 0);
+        }, -4, 1, 2, 3, 4, 5, 6, 7, 8, 9);
+        clearInterval(id);
+    "#,
+            "timer.js",
+        )
+        .expect("script");
+    let first = runtime.drive(300).expect("first");
+    assert_eq!((first.timers_ran, first.jobs_ran), (1, 2));
+    assert!(first.schedule.jobs_pending && first.schedule.due_next_turn);
+    let second = runtime.drive(305).expect("second");
+    assert_eq!((second.timers_ran, second.jobs_ran), (1, 2));
+    runtime.drive(310).expect("last");
+    runtime
+        .eval_script(
+            r#"
+        if (String(observed) !== '1,2,3,4,5,6,7,8,0,1,next,2,3,4' || performance.now() !== 10)
+            throw new Error(String(observed));
+    "#,
+            "check.js",
+        )
+        .expect("trace");
+}
+
+#[test]
+fn abort_resolves_locally_and_ignores_a_late_success() {
+    let mut runtime = RuntimeBuilder::new().build().expect("runtime");
+    runtime
+        .eval_script(
+            r#"
+        const abort = new AbortController();
+        let result;
+        fetch('https://example.test/abort', {signal: abort.signal}).then(
+            () => result = 'incorrect success',
+            error => result = error,
+        );
+    "#,
+            "request",
+        )
+        .expect("request");
+    let jobs = runtime.take_jobs();
+    let Some(IoJob::Http(request)) = jobs.first() else {
+        panic!("expected HTTP request")
+    };
+    runtime
+        .eval_script("abort.abort();", "abort")
+        .expect("abort");
+    assert!(request.cancel.load(Ordering::Acquire));
+    assert_eq!(runtime.counts().requests, 0);
+    assert_eq!(runtime.counts().promises, 0);
+    runtime
+        .enqueue(IoEvent::Http {
+            token: request.token,
+            result: Ok(HttpResponse {
+                status: 204,
+                headers: Vec::new(),
+                body: Vec::new(),
+            }),
+        })
+        .expect("late event");
+    runtime.drive(500).expect("drive");
+    runtime
+        .eval_script(
+            "if (result !== 'AbortError') throw new Error(result);",
+            "check",
+        )
+        .expect("abort result");
+    assert_eq!(runtime.counts().discarded_events, 1);
+}
+
+#[test]
+fn missing_stream_terminal_times_out_from_the_first_clock_sample() {
+    let mut runtime = RuntimeBuilder::new()
+        .limits(js::RuntimeLimits {
+            request_timeout_ms: 50,
+            ..js::RuntimeLimits::default()
+        })
+        .build()
+        .expect("runtime");
+    runtime
+        .eval_script(
+            r#"
+        let error;
+        fetchStream('https://example.test/timeout').catch(value => error = value.message);
+    "#,
+            "entry",
+        )
+        .expect("fetchStream");
+    let jobs = runtime.take_jobs();
+    assert!(matches!(jobs.first(), Some(IoJob::HttpStream(_))));
+    let first = runtime.drive(20_000).expect("clock origin");
+    assert_eq!(first.schedule.in_flight, 1);
+    assert_eq!(first.schedule.next_deadline_ms, Some(20_050));
+    assert!(!first.schedule.runnable());
+    runtime.drive(20_050).expect("time out");
+    assert_eq!(runtime.counts().requests, 0);
+    assert_eq!(runtime.counts().promises, 0);
+    runtime
+        .eval_script(
+            "if (error !== 'TimeoutError') throw new Error(error);",
+            "check",
+        )
+        .expect("timeout");
+}
+
+#[test]
+fn ticket_result_is_consumed_and_observation_can_be_abandoned() {
+    let mut runtime = RuntimeBuilder::new()
+        .module(
+            "bad",
+            "await Promise.resolve(); throw new Error('module failure')",
+        )
+        .module(
+            "abandon",
+            "await new Promise(resolve => { globalThis.finish = resolve }); globalThis.done = true",
+        )
+        .build()
+        .expect("runtime");
+    let rejected = runtime.start_module("bad").expect("start");
+    let pending = runtime.start_module("abandon").expect("start pending");
+    assert_eq!(runtime.take_module_result(pending).expect("poll"), None);
+    runtime.abandon_module(pending).expect("abandon");
+    runtime.eval_script("finish()", "release").expect("release");
+    runtime.drive(20).expect("drive");
+    let outcome = runtime.take_module_result(rejected).expect("consume");
+    let Some(js::ModuleOutcome::Rejected(error)) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert!(error.message.contains("module failure"));
+    assert_eq!(error.module.as_deref(), Some("bad"));
+    assert_eq!(
+        runtime
+            .take_module_result(rejected)
+            .expect_err("taken")
+            .kind,
+        js::ErrorKind::UnknownTicket
+    );
+    assert_eq!(runtime.counts().tickets, 0);
+    runtime
+        .eval_script(
+            "if (!done) throw new Error('abandoned module stopped');",
+            "check",
+        )
+        .expect("TLA still completes");
+}
+
+#[test]
+fn a_full_data_queue_keeps_space_for_the_terminal() {
+    let mut runtime = RuntimeBuilder::new()
+        .limits(js::RuntimeLimits {
+            queue_events: 1,
+            stream_events: 1,
+            queue_bytes: 4,
+            stream_bytes: 4,
+            ..js::RuntimeLimits::default()
+        })
+        .build()
+        .expect("runtime");
+    // The outbound admission counts URLs as well as data, so use a test port
+    // that accepts the request directly to exercise the inbound limits.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    runtime.configure_io(js::host::IoBindings::external(Box::new(move |job| {
+        sender.send(job).expect("accept work");
+    })));
+    runtime
+        .eval_script(
+            "let opened; fetchStream('https://example.test').then(value => opened = value);",
+            "entry",
+        )
+        .expect("fetch");
+    let IoJob::HttpStream(request) = receiver.try_recv().expect("stream request") else {
+        panic!("expected stream request");
+    };
+    let token = request.token;
+    runtime
+        .enqueue(IoEvent::HttpHead {
+            token,
+            status: 200,
+            headers: Vec::new(),
+        })
+        .expect("head");
+    runtime.drive(1).expect("open");
+    runtime
+        .enqueue(IoEvent::HttpChunk {
+            token,
+            bytes: b"full".to_vec(),
+            done: false,
+            error: None,
+        })
+        .expect("fill queue");
+    let blocked = runtime
+        .enqueue(IoEvent::Host(js::HostEvent {
+            module: "probe".into(),
+            event: "tick".into(),
+            payload: js::contract::PluginValue::Null,
+        }))
+        .expect_err("ordinary event needs admission");
+    assert!(matches!(blocked, js::EnqueueError::QueueFull(_)));
+    runtime
+        .enqueue(IoEvent::HttpChunk {
+            token,
+            bytes: Vec::new(),
+            done: true,
+            error: None,
+        })
+        .expect("reserved terminal");
+    runtime.drive(2).expect("finish");
+    assert_eq!(runtime.counts().queued_bytes, 4);
+    runtime
+        .eval_script(
+            "let body; opened.text().then(value => body = value);",
+            "consume",
+        )
+        .expect("read");
+    runtime.drive(3).expect("settle");
+    runtime
+        .eval_script(
+            "if (body !== 'full') throw new Error(String(body));",
+            "check",
+        )
+        .expect("body");
+    assert_eq!(runtime.counts().queued_bytes, 0);
+}
+
+#[test]
+fn repeated_completion_and_cancellation_release_requests() {
+    let mut runtime = Runtime::builder().build().expect("runtime");
+    for step in 0..64 {
+        runtime
+            .eval_script(
+                r#"
+            globalThis.controller = new AbortController();
+            fetch('https://example.test/resource', {signal: controller.signal}).catch(() => {});
+        "#,
+                "request",
+            )
+            .expect("request");
+        let jobs = runtime.take_jobs();
+        let Some(IoJob::Http(request)) = jobs.first() else {
+            panic!("network work")
+        };
+        if step % 2 == 0 {
+            runtime
+                .eval_script("controller.abort()", "cancel")
+                .expect("cancel");
+            assert!(request.cancel.load(Ordering::Acquire));
+            drop(runtime.take_jobs());
+        } else {
+            runtime
+                .enqueue(IoEvent::Http {
+                    token: request.token,
+                    result: Ok(HttpResponse {
+                        status: 200,
+                        headers: Vec::new(),
+                        body: b"ok".to_vec(),
+                    }),
+                })
+                .expect("completion");
+        }
+        runtime.drive(step).expect("drive");
+        let counts = runtime.counts();
+        assert_eq!(
+            (counts.requests, counts.promises, counts.queued_bytes),
+            (0, 0, 0)
+        );
+        assert_eq!((counts.peak_requests, counts.peak_promises), (1, 1));
+    }
+    let weak = runtime.downgrade();
+    runtime.shutdown();
+    assert!(!weak.is_open());
+    assert_eq!(runtime.counts(), RuntimeCounts::default());
+}
+
+#[test]
+fn a_throwing_delivery_releases_its_promise_and_preserves_the_next_event() {
+    let mut runtime = Runtime::builder().build().expect("runtime");
+    runtime.eval_script(r#"
+        let streamError, responseText;
+        fetchStream('https://example.test/broken').catch(error => streamError = String(error));
+        fetch('https://example.test/next').then(response => response.text()).then(text => responseText = text);
+        __host._httpStream = () => { throw new Error('delivery error'); };
+    "#, "requests").expect("requests");
+    let jobs = runtime.take_jobs();
+    let [IoJob::HttpStream(stream), IoJob::Http(whole)] = &jobs[..] else {
+        panic!("expected two jobs")
+    };
+    runtime
+        .enqueue(IoEvent::HttpHead {
+            token: stream.token,
+            status: 200,
+            headers: Vec::new(),
+        })
+        .expect("first");
+    runtime
+        .enqueue(IoEvent::Http {
+            token: whole.token,
+            result: Ok(HttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: b"next".to_vec(),
+            }),
+        })
+        .expect("second");
+    let error = runtime.drive(0).expect_err("failed hook");
+    assert!(error.message.contains("delivery error"));
+    assert_eq!(runtime.counts().requests, 1);
+    assert_eq!(runtime.counts().promises, 1);
+    runtime.drive(1).expect("next delivery");
+    runtime
+        .eval_script(
+            r#"
+        if (!streamError.includes('could not be converted') || responseText !== 'next') {
+            throw new Error('lost dispatch');
+        }
+    "#,
+            "check",
+        )
+        .expect("retained events");
+    assert_eq!(runtime.counts().promises, 0);
 }

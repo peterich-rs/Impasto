@@ -1,11 +1,10 @@
 //! App-confined file loading and the native scene, reactive and host modules.
 use super::*;
 use rquickjs::{
-    Module,
+    Module, Runtime,
     function::Rest,
     loader::{ImportAttributes, Loader, Resolver},
     module::{Declarations, Exports, ModuleDef},
-    object::Property,
 };
 use std::path::{Component, Path, PathBuf};
 
@@ -45,85 +44,216 @@ const REACTIVE_NAMES: &[&str] = &[
     "children",
     "catchError",
 ];
-fn scene_names() -> Vec<String> {
-    let mut names = std::collections::BTreeSet::new();
-    for line in bootstrap::SCENE_JS.lines() {
-        if let Some(rest) = line.trim().strip_prefix("core.")
-            && let Some((name, _)) = rest.split_once(" = function")
-            && !name.starts_with('_')
-        {
-            names.insert(name.to_owned());
-        }
-    }
-    for name in bindings::CORE_NAMES
-        .iter()
-        .copied()
-        .chain(bindings::GESTURES.iter().map(|(name, _)| *name))
-        .chain([
-            "scene",
-            "createElement",
-            "createTextNode",
-            "setProp",
-            "insertNode",
-            "effect",
-            "memo",
-            "createComponent",
-            "Path2D",
-            "bindCanvas",
-        ])
-    {
-        if !name.starts_with('_') {
-            names.insert(name.to_owned());
-        }
-    }
-    names.into_iter().collect()
+// Public functions installed by scene.js. Runtime and compiler use the same
+// export view; the module test checks these names against the installed object.
+const SCENE_SCRIPT_NAMES: &[&str] = &[
+    "align",
+    "animate",
+    "append",
+    "blur",
+    "caretAt",
+    "caretAtUnit",
+    "clip",
+    "column",
+    "decorated",
+    "detach",
+    "discard",
+    "firstChild",
+    "fling",
+    "flingTarget",
+    "focus",
+    "focusStep",
+    "focused",
+    "graphemeCount",
+    "graphemeIndex",
+    "graphemeUnit",
+    "grid",
+    "image",
+    "insert",
+    "isFocusable",
+    "isText",
+    "layerTreeStats",
+    "measurePanel",
+    "measureText",
+    "metrics",
+    "nextSibling",
+    "opacity",
+    "overscroll",
+    "padding",
+    "parent",
+    "placePanel",
+    "pointerPosition",
+    "pointerRegion",
+    "popFocusScope",
+    "pushFocusScope",
+    "rect",
+    "reduceMotion",
+    "registerFont",
+    "reload",
+    "remove",
+    "reparentChildren",
+    "row",
+    "scroll",
+    "scrollIntoView",
+    "scrollOffset",
+    "scrollTo",
+    "selectionRects",
+    "setAlign",
+    "setAlignSelf",
+    "setAlpha",
+    "setAspectRatio",
+    "setAxisSize",
+    "setBasis",
+    "setColor",
+    "setCross",
+    "setDragClaim",
+    "setEllipsis",
+    "setFamily",
+    "setFill",
+    "setFocusable",
+    "setFontSize",
+    "setFontWeight",
+    "setGap",
+    "setGridLine",
+    "setGridPlacement",
+    "setGrow",
+    "setImage",
+    "setImageMode",
+    "setImeConfig",
+    "setImeEnabled",
+    "setImeState",
+    "setImeText",
+    "setInset",
+    "setInsetEdge",
+    "setJustify",
+    "setLineHeight",
+    "setMargin",
+    "setMaxAxis",
+    "setMaxLines",
+    "setMaxSize",
+    "setMinAxis",
+    "setMinSize",
+    "setOverflow",
+    "setPadding",
+    "setPaddingEdge",
+    "setPaddingEdges",
+    "setPanel",
+    "setPosition",
+    "setRadius",
+    "setRecognizers",
+    "setScrollAxis",
+    "setScrollChain",
+    "setScrollOffset",
+    "setScrollPhysics",
+    "setSemantics",
+    "setShrink",
+    "setSize",
+    "setSizeAxis",
+    "setSoftWrap",
+    "setStyleSurface",
+    "setText",
+    "setTextAlign",
+    "setTextDirection",
+    "setTextLimit",
+    "setTextRuns",
+    "setTextScale",
+    "setTransform",
+    "setTransformComponent",
+    "setWrap",
+    "sized",
+    "stack",
+    "stopScroll",
+    "text",
+    "textCommand",
+    "textEdit",
+    "textScale",
+    "transform",
+    "view",
+    "wordRange",
+];
+const SCENE_ADAPTER_NAMES: &[&str] = &[
+    "scene",
+    "createElement",
+    "createTextNode",
+    "setProp",
+    "insertNode",
+    "effect",
+    "memo",
+    "createComponent",
+    "Path2D",
+    "bindCanvas",
+];
+
+fn scene_names() -> &'static [&'static str] {
+    static NAMES: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut names = SCENE_SCRIPT_NAMES
+            .iter()
+            .chain(SCENE_ADAPTER_NAMES)
+            .chain(bindings::CORE_NAMES)
+            .copied()
+            .chain(bindings::GESTURES.iter().map(|(name, _)| *name))
+            .filter(|name| !name.starts_with('_'))
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names.dedup();
+        names
+    })
 }
+
+pub(crate) fn compile_declarations() -> [(&'static str, &'static [&'static str]); 3] {
+    [
+        ("scene", scene_names()),
+        ("reactive", REACTIVE_NAMES),
+        ("#reactive", GRAPH_NAMES),
+    ]
+}
+
 pub(super) struct SceneModule;
 impl ModuleDef for SceneModule {
     fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
-        for name in scene_names() {
+        for &name in scene_names() {
             decl.declare(name)?;
         }
         Ok(())
     }
     fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
         let host = host_from_ctx(ctx)?;
-        let _active = host.enter(ctx);
-        let api = Object::new(ctx.clone())?;
-        let original = Object::from_value(
-            host.refs
-                .borrow()
-                .scene
-                .clone()
-                .ok_or_else(|| type_error(ctx, "scene is missing"))?
-                .restore(ctx)?,
-        )?;
-        for name in scene_names() {
-            if name == "scene" {
-                continue;
-            }
-            let value = match name.as_str() {
-                "createElement" | "createTextNode" | "setProp" | "insertNode" | "effect"
-                | "memo" | "createComponent" => {
-                    let pointer = ptr::from_ref(host).cast_mut();
-                    let name = name.clone();
-                    Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
-                        // SAFETY: Host and Inner outlive the module and all its native functions.
-                        let host = unsafe { &*pointer };
-                        let _active = host.enter(&ctx);
-                        renderer::call(host, &ctx, &name, &args.0)
-                    })?
-                    .into_value()
+        host.with_current(ctx, || {
+            let api = Object::new(ctx.clone())?;
+            let original = Object::from_value(
+                host.refs
+                    .borrow()
+                    .scene
+                    .clone()
+                    .ok_or_else(|| type_error(ctx, "scene is missing"))?
+                    .restore(ctx)?,
+            )?;
+            for &name in scene_names() {
+                if name == "scene" {
+                    continue;
                 }
-                "insert" => original.get("_insertRange")?,
-                "append" => original.get("_append")?,
-                _ => original.get(name.as_str())?,
-            };
-            api.set(name.as_str(), value.clone())?;
-            exports.export(name, value)?;
-        }
-        exports.export("scene", api)?;
-        Ok(())
+                let value = match name {
+                    "createElement" | "createTextNode" | "setProp" | "insertNode" | "effect"
+                    | "memo" | "createComponent" => {
+                        let pointer = ptr::from_ref(host).cast_mut();
+                        Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
+                            // SAFETY: Host and Inner outlive the module and all its native functions.
+                            let host = unsafe { &*pointer };
+                            host.with_current(&ctx, || renderer::call(host, &ctx, name, &args.0))
+                        })?
+                        .into_value()
+                    }
+                    "insert" => original.get("_insertRange")?,
+                    "append" => original.get("_append")?,
+                    _ => original.get(name)?,
+                };
+                api.set(name, value.clone())?;
+                exports.export(name, value)?;
+            }
+            exports.export("scene", api)?;
+            Ok(())
+        })
     }
 }
 pub(super) struct ReactiveModule;
@@ -172,39 +302,40 @@ impl ModuleDef for GraphModule {
                 move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<Value<'js>> {
                     // SAFETY: Engine clears graph values before destroying this function or Host.
                     let host = unsafe { &*pointer };
-                    let _active = host.enter(&ctx);
-                    if matches!(op, 1 | 3 | 4 | 5 | 6 | 8 | 10 | 11 | 14 | 15 | 16) {
-                        js::host::OperationPolicy::before(host, &ctx)?;
-                    }
-                    let mut handles = Vec::new();
-                    for (index, value) in args.0.into_iter().take(8).enumerate() {
-                        let is_id = matches!(op, 2 | 7 | 8 | 13 | 17 | 18)
-                            || op == 3 && index == 0
-                            || op == 5 && index == 2;
-                        if is_id && value.is_number() {
-                            handles.push(value.as_number().unwrap_or(0.0) as u64);
-                        } else {
-                            handles.push(
-                                host.inner()
-                                    .graph
-                                    .hold(reactive::Value::save(&ctx, pointer, value)),
-                            );
+                    host.with_current(&ctx, || {
+                        if matches!(op, 1 | 3 | 4 | 5 | 6 | 8 | 10 | 11 | 14 | 15 | 16) {
+                            canvas::side_effect(&ctx)?;
                         }
-                    }
-                    let result = reactive::reactive_entry(host.inner(), op, &handles);
-                    if ctx.has_exception() {
-                        return Err(rquickjs::Error::Exception);
-                    }
-                    if result == 0 && !matches!(op, 1 | 4 | 7 | 9 | 12) {
-                        return Ok(Value::new_undefined(ctx));
-                    }
-                    if result & (1 << 63) != 0 {
-                        return ((result & !(1 << 63)) as f64).into_js(&ctx);
-                    }
-                    match host.inner().graph.take(result) {
-                        Some(value) => value.restore(&ctx),
-                        None => (-1.0).into_js(&ctx),
-                    }
+                        let mut handles = Vec::new();
+                        for (index, value) in args.0.into_iter().take(8).enumerate() {
+                            let is_id = matches!(op, 2 | 7 | 8 | 13 | 17 | 18)
+                                || op == 3 && index == 0
+                                || op == 5 && index == 2;
+                            if is_id && value.is_number() {
+                                handles.push(value.as_number().unwrap_or(0.0) as u64);
+                            } else {
+                                handles.push(
+                                    host.inner()
+                                        .graph
+                                        .hold(reactive::Value::save(&ctx, pointer, value)),
+                                );
+                            }
+                        }
+                        let result = reactive::reactive_entry(host.inner(), op, &handles);
+                        if ctx.has_exception() {
+                            return Err(rquickjs::Error::Exception);
+                        }
+                        if result == 0 && !matches!(op, 1 | 4 | 7 | 9 | 12) {
+                            return Ok(Value::new_undefined(ctx.clone()));
+                        }
+                        if result & (1 << 63) != 0 {
+                            return ((result & !(1 << 63)) as f64).into_js(&ctx);
+                        }
+                        match host.inner().graph.take(result) {
+                            Some(value) => value.restore(&ctx),
+                            None => (-1.0).into_js(&ctx),
+                        }
+                    })
                 },
             )?;
             function.set_name(name)?;
@@ -212,175 +343,6 @@ impl ModuleDef for GraphModule {
         }
         Ok(())
     }
-}
-
-pub(super) struct HostModule;
-const HOST_LISTENER_METHODS: [(&str, bool); 2] =
-    [("addEventListener", false), ("removeEventListener", true)];
-
-impl ModuleDef for HostModule {
-    fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
-        let name: String = decl.module().name()?;
-        let host = host_from_ctx(decl.module().ctx())?;
-        let module = host
-            .inner()
-            .config
-            .registry
-            .by_specifier(&name)
-            .ok_or_else(|| {
-                type_error(
-                    decl.module().ctx(),
-                    &format!("module '{name}' is not linked"),
-                )
-            })?;
-        for method in &module.methods {
-            decl.declare(method.name)?;
-        }
-        if !module.exports.events.is_empty() {
-            for (name, _) in HOST_LISTENER_METHODS {
-                decl.declare(name)?;
-            }
-        }
-        if module.exports.object {
-            decl.declare(module.name)?;
-        }
-        Ok(())
-    }
-    fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
-        let specifier: String = exports.module().name()?;
-        let host = host_from_ctx(ctx)?;
-        let pointer = ptr::from_ref(host).cast_mut();
-        let module = host
-            .inner()
-            .config
-            .registry
-            .by_specifier(&specifier)
-            .ok_or_else(|| type_error(ctx, "module is not linked"))?;
-        let object = module
-            .exports
-            .object
-            .then(|| Object::new_proto(ctx.clone(), None))
-            .transpose()?;
-        for method in &module.methods {
-            let name = module.name;
-            let method = method.name;
-            let function =
-                Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
-                    // SAFETY: module functions are destroyed with the VM before Host.
-                    let host = unsafe { &*pointer };
-                    let _active = host.enter(&ctx);
-                    js::host::OperationPolicy::before(host, &ctx)?;
-                    call_host(host, &ctx, name, method, &args.0)
-                })?;
-            if let Some(object) = &object {
-                object.prop(method, Property::from(function.clone()).enumerable())?;
-            }
-            exports.export(method, function)?;
-        }
-        let events = module.exports.events;
-        if !events.is_empty() {
-            for (event_method, remove) in HOST_LISTENER_METHODS {
-                let name = module.name;
-                let function = Function::new(
-                    ctx.clone(),
-                    move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<()> {
-                        // SAFETY: Host outlives the native module's functions.
-                        let host = unsafe { &*pointer };
-                        let _active = host.enter(&ctx);
-                        js::host::OperationPolicy::before(host, &ctx)?;
-                        if args.0.len() < 2 || !args.0[0].is_string() || !args.0[1].is_function() {
-                            return Ok(());
-                        }
-                        let event = bindings::string(&ctx, &args.0, 0)?;
-                        if !events.iter().any(|declared| declared.name == event) {
-                            return Ok(());
-                        }
-                        let saved = Persistent::save(&ctx, args.0[1].clone());
-                        if remove {
-                            host.runtime.remove_listener(name, &event, &saved);
-                        } else {
-                            host.runtime.add_listener(name.to_owned(), event, saved);
-                        }
-                        Ok(())
-                    },
-                )?;
-                if let Some(object) = &object {
-                    object.prop(event_method, Property::from(function.clone()).enumerable())?;
-                }
-                exports.export(event_method, function)?;
-            }
-        }
-        if let Some(object) = object {
-            exports.export(module.name, object)?;
-        }
-        Ok(())
-    }
-}
-fn call_host<'js>(
-    host: &Host,
-    ctx: &Ctx<'js>,
-    name: &str,
-    method: &str,
-    args: &[Value<'js>],
-) -> rquickjs::Result<Value<'js>> {
-    // Decode getters before preparing a call: reentrant module calls cannot overwrite its builder.
-    let decoded = args
-        .iter()
-        .cloned()
-        .map(|v| bindings::plugin_from_js(ctx, v, 0))
-        .collect::<rquickjs::Result<Vec<_>>>()?;
-    // SAFETY: module_prepare copies both borrowed names into a session-owned call.
-    let kind = unsafe {
-        super::super::bridge::module_prepare(
-            host.session(),
-            name.as_ptr().cast(),
-            name.len(),
-            method.as_ptr().cast(),
-            method.len(),
-        )
-    };
-    if kind < 0 {
-        return Err(type_error(ctx, &last_error(host)));
-    }
-    let promise = if kind == 1 {
-        let (token, promise) = host.make_promise(ctx)?;
-        // SAFETY: the prepared call belongs to this live session.
-        unsafe {
-            super::super::bridge::module_set_token(host.session(), token);
-        }
-        Some((token, promise))
-    } else {
-        None
-    };
-    for value in decoded {
-        super::super::bridge::push_prepared(host.inner(), value);
-    }
-    // SAFETY: module_finish consumes the prepared call after all arguments are owned.
-    let finished = unsafe { super::super::bridge::module_finish(host.session()) };
-    if finished < 0 {
-        let message = last_error(host);
-        if let Some((token, promise)) = promise {
-            host.settle(ctx, token, false, message.into_js(ctx)?)?;
-            return Ok(promise);
-        }
-        return Err(type_error(ctx, &message));
-    }
-    if let Some((_, promise)) = promise {
-        Ok(promise)
-    } else {
-        match super::super::bridge::take_sync_result(host.inner()) {
-            Some(value) => bindings::plugin_to_js(ctx, &value),
-            None => Ok(Value::new_null(ctx.clone())),
-        }
-    }
-}
-fn last_error(host: &Host) -> String {
-    host.inner()
-        .last_error
-        .borrow()
-        .as_ref()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "module is not linked".to_owned())
 }
 
 fn is_host(name: &str) -> bool {
@@ -418,7 +380,7 @@ impl Resolver for AppResolver {
             ));
         }
         let app = self.directory.as_ref().ok_or_else(|| rejected(ctx))?;
-        if name.is_empty() || name.contains('\\') || name.contains("://") {
+        if name.is_empty() || name.contains(['\\', '\0']) || name.contains("//") {
             return Err(rejected(ctx));
         }
         let raw = if name.starts_with('/') {
@@ -473,14 +435,14 @@ impl Resolver for AppResolver {
     }
 }
 pub(super) struct AppLoader {
-    host: *mut Host,
     directory: Option<PathBuf>,
+    canonical_directory: Option<PathBuf>,
 }
 impl AppLoader {
-    pub(super) fn new(host: *mut Host, dir: Option<&str>) -> Self {
+    pub(super) fn new(dir: Option<&str>) -> Self {
         Self {
-            host,
             directory: dir.map(PathBuf::from),
+            canonical_directory: None,
         }
     }
 }
@@ -498,32 +460,23 @@ impl Loader for AppLoader {
             _ => {}
         }
         if is_host(name) {
-            // SAFETY: the loader lives inside the Runtime owned by Host.
-            let host = unsafe { &*self.host };
-            if host.inner().config.registry.by_specifier(name).is_none() {
-                return Err(rquickjs::Exception::throw_reference(
-                    ctx,
-                    &format!("module '{name}' is not linked"),
-                ));
-            }
-            return Module::declare_def::<HostModule, _>(ctx.clone(), name);
+            return js::quickjs::binder::declare_host_module(ctx, name);
         }
         let app = self.directory.as_ref().ok_or_else(|| rejected(ctx))?;
-        let path = Path::new(name);
-        if !path.starts_with(app) {
-            return Err(rejected(ctx));
-        }
-        // Also reject symlinks that escape the app, before reading any bytes.
-        let canonical = std::fs::canonicalize(path).map_err(|_| {
-            rquickjs::Exception::throw_reference(ctx, &format!("could not load module '{name}'"))
-        })?;
-        let app = std::fs::canonicalize(app).map_err(|_| rejected(ctx))?;
-        if !canonical.starts_with(app) {
-            return Err(rejected(ctx));
-        }
+        let logical = Path::new(name)
+            .strip_prefix(app)
+            .map_err(|_| rejected(ctx))?;
+        let canonical_app = match self.canonical_directory.as_ref() {
+            Some(path) => path,
+            None => self
+                .canonical_directory
+                .insert(std::fs::canonicalize(app).map_err(|_| rejected(ctx))?),
+        };
+        let canonical = physical_path(ctx, canonical_app, logical)?;
         use std::io::Read;
-        let file = std::fs::File::open(canonical).map_err(|_| rejected(ctx))?;
-        if file.metadata().map_err(|_| rejected(ctx))?.len() > 16 << 20 {
+        let file = std::fs::File::open(&canonical).map_err(|_| rejected(ctx))?;
+        let metadata = file.metadata().map_err(|_| rejected(ctx))?;
+        if !metadata.is_file() || metadata.len() > 16 << 20 {
             return Err(rejected(ctx));
         }
         let mut source = Vec::new();
@@ -534,6 +487,33 @@ impl Loader for AppLoader {
             return Err(rejected(ctx));
         }
         Module::declare(ctx.clone(), name, source)
+    }
+}
+
+fn physical_path(ctx: &Ctx<'_>, root: &Path, logical: &Path) -> rquickjs::Result<PathBuf> {
+    let mut path = root.to_owned();
+    for component in logical.components() {
+        let Component::Normal(segment) = component else {
+            return Err(rejected(ctx));
+        };
+        // Read the directory entry to check case on case-insensitive volumes.
+        // Canonicalize each hop before walking into a symlinked directory.
+        let mut entries = std::fs::read_dir(&path).map_err(|_| rejected(ctx))?;
+        if !entries.any(|entry| entry.is_ok_and(|entry| entry.file_name() == segment)) {
+            return Err(rquickjs::Exception::throw_reference(
+                ctx,
+                &format!("could not load module '{}'", logical.display()),
+            ));
+        }
+        path = std::fs::canonicalize(path.join(segment)).map_err(|_| rejected(ctx))?;
+        if !path.starts_with(root) {
+            return Err(rejected(ctx));
+        }
+    }
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(rejected(ctx))
     }
 }
 
@@ -573,4 +553,60 @@ impl Loader for CompileLoader {
 }
 pub(crate) fn prepare_compile(runtime: &Runtime) {
     runtime.set_loader(CompileResolver, CompileLoader);
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, reason = "module export assertions")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scene_script_exports_match_the_installed_functions() {
+        let runtime = Runtime::new().expect("test runtime");
+        let context = rquickjs::Context::full(&runtime).expect("test context");
+        context.with(|ctx| {
+            ctx.eval::<(), _>("globalThis.core = globalThis.__scene = {}; globalThis.__abi = {};")
+                .expect("test inputs");
+            ctx.eval::<(), _>(bootstrap::SCENE_JS)
+                .expect("scene script");
+            let core = ctx
+                .globals()
+                .get::<_, Object>("core")
+                .expect("scene functions");
+            let mut actual = core
+                .keys::<String>()
+                .collect::<rquickjs::Result<Vec<_>>>()
+                .expect("scene keys");
+            actual.retain(|name| !name.starts_with('_'));
+            actual.sort_unstable();
+            assert_eq!(actual, SCENE_SCRIPT_NAMES);
+        });
+    }
+
+    #[test]
+    fn runtime_extension_names_match_the_compiler_descriptions() {
+        use std::fmt::Write as _;
+
+        let mut source = String::new();
+        for (index, (name, names)) in compile_declarations().into_iter().enumerate() {
+            let mut names = names.to_vec();
+            names.sort_unstable();
+            writeln!(
+                source,
+                "import * as m{index} from {name:?};\n\
+                if (Object.keys(m{index}).sort().join(',') !== {:?}) throw Error({name:?});",
+                names.join(","),
+            )
+            .expect("write source");
+        }
+        assert!(
+            crate::JsSession::open(
+                &source,
+                "main.js",
+                uicore::MonoShaper::default(),
+                Box::new(|_, _| {})
+            )
+            .is_ok()
+        );
+    }
 }

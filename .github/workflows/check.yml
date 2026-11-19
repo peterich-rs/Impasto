@@ -42,6 +42,8 @@ jobs:
         run: python3 tools/check-js-host-boundary.py
       - name: js runtime dependency boundary
         run: python3 tools/check-js-runtime-boundary.py
+      - name: generated native module declarations
+        run: cargo run --locked -p shell --bin module-stubs -- --check
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -52,6 +54,10 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           just gallery-dist
+      - name: native module types
+        run: node tools/check-native-module-types.mjs
+      - name: standard library contract
+        run: node tools/check-standard-library.mjs
       - name: test
         run: cargo test --workspace --exclude macos
 

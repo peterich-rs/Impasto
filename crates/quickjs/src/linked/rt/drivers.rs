@@ -33,7 +33,7 @@ macro_rules! driver_common {
                 unsafe { &*self.host }
             }
             fn check(&self, ctx: &Ctx<'_>) -> rquickjs::Result<()> {
-                js::host::OperationPolicy::before(self.host(), ctx)?;
+                canvas::side_effect(ctx)?;
                 if self.released.get() {
                     Err(type_error(ctx, "driver is released"))
                 } else {
@@ -143,25 +143,26 @@ impl ListDriver {
     pub fn bind<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
         self.check(&ctx)?;
         let host = self.host();
-        let _active = host.enter(&ctx);
-        let mut nodes = [0; 10];
-        for (i, node) in nodes.iter_mut().enumerate() {
-            *node = handle(&ctx, &args.0, i)?;
-        }
-        // SAFETY: the ten initialized ids and the session live through this call.
-        done(
-            &ctx,
-            unsafe {
-                driver::list_bind(
-                    host.session(),
-                    self.index,
-                    self.generation,
-                    nodes.as_ptr(),
-                    10,
-                )
-            },
-            "listDriver.bind",
-        )
+        host.with_current(&ctx, || {
+            let mut nodes = [0; 10];
+            for (i, node) in nodes.iter_mut().enumerate() {
+                *node = handle(&ctx, &args.0, i)?;
+            }
+            // SAFETY: the ten initialized ids and the session live through this call.
+            done(
+                &ctx,
+                unsafe {
+                    driver::list_bind(
+                        host.session(),
+                        self.index,
+                        self.generation,
+                        nodes.as_ptr(),
+                        10,
+                    )
+                },
+                "listDriver.bind",
+            )
+        })
     }
     #[expect(
         clippy::cast_possible_truncation,
@@ -173,25 +174,26 @@ impl ListDriver {
         }
         self.check(&ctx)?;
         let host = self.host();
-        let _active = host.enter(&ctx);
-        let estimate = num(&ctx, &args.0, 0)? as f32;
-        let overscan = num(&ctx, &args.0, 1)? as i32;
-        let blocked = boolean(&ctx, &args.0, 2)?;
-        // SAFETY: only numeric parameters and the live session cross the callback.
-        done(
-            &ctx,
-            unsafe {
-                driver::list_configure(
-                    host.session(),
-                    self.index,
-                    self.generation,
-                    estimate,
-                    overscan,
-                    i32::from(blocked),
-                )
-            },
-            "listDriver.configure",
-        )
+        host.with_current(&ctx, || {
+            let estimate = num(&ctx, &args.0, 0)? as f32;
+            let overscan = num(&ctx, &args.0, 1)? as i32;
+            let blocked = boolean(&ctx, &args.0, 2)?;
+            // SAFETY: only numeric parameters and the live session cross the callback.
+            done(
+                &ctx,
+                unsafe {
+                    driver::list_configure(
+                        host.session(),
+                        self.index,
+                        self.generation,
+                        estimate,
+                        overscan,
+                        i32::from(blocked),
+                    )
+                },
+                "listDriver.configure",
+            )
+        })
     }
     #[qjs(rename = "setItems")]
     pub fn set_items<'js>(
@@ -201,47 +203,48 @@ impl ListDriver {
     ) -> rquickjs::Result<()> {
         self.check(&ctx)?;
         let host = self.host();
-        let _active = host.enter(&ctx);
-        // SAFETY: the live driver is addressed by its index and generation.
-        done(
-            &ctx,
-            // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
-            unsafe { driver::list_begin(host.session(), self.index, self.generation) },
-            "listDriver.setItems",
-        )?;
-        for item in items.iter::<Object>() {
-            let item = item?;
-            let key = item.get("key")?;
-            let ty = item.get("type")?;
-            let sticky = item.get("sticky")?;
-            let key = string(&ctx, &[key], 0)?;
-            let ty = string(&ctx, &[ty], 0)?;
-            let sticky = boolean(&ctx, &[sticky], 0)?;
-            // SAFETY: both strings are borrowed until the callback returns.
+        host.with_current(&ctx, || {
+            // SAFETY: the live driver is addressed by its index and generation.
             done(
                 &ctx,
                 // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
-                unsafe {
-                    driver::list_item(
-                        host.session(),
-                        self.index,
-                        self.generation,
-                        key.as_ptr().cast(),
-                        key.len(),
-                        ty.as_ptr().cast(),
-                        ty.len(),
-                        i32::from(sticky),
-                    )
-                },
+                unsafe { driver::list_begin(host.session(), self.index, self.generation) },
                 "listDriver.setItems",
             )?;
-        }
-        // SAFETY: the session and generation-checked driver remain alive.
-        done(
-            &ctx,
-            unsafe { driver::list_end(host.session(), self.index, self.generation) },
-            "listDriver.setItems",
-        )
+            for item in items.iter::<Object>() {
+                let item = item?;
+                let key = item.get("key")?;
+                let ty = item.get("type")?;
+                let sticky = item.get("sticky")?;
+                let key = string(&ctx, &[key], 0)?;
+                let ty = string(&ctx, &[ty], 0)?;
+                let sticky = boolean(&ctx, &[sticky], 0)?;
+                // SAFETY: both strings are borrowed until the callback returns.
+                done(
+                    &ctx,
+                    // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
+                    unsafe {
+                        driver::list_item(
+                            host.session(),
+                            self.index,
+                            self.generation,
+                            key.as_ptr().cast(),
+                            key.len(),
+                            ty.as_ptr().cast(),
+                            ty.len(),
+                            i32::from(sticky),
+                        )
+                    },
+                    "listDriver.setItems",
+                )?;
+            }
+            // SAFETY: the session and generation-checked driver remain alive.
+            done(
+                &ctx,
+                unsafe { driver::list_end(host.session(), self.index, self.generation) },
+                "listDriver.setItems",
+            )
+        })
     }
     #[qjs(rename = "noteRow")]
     pub fn note_row<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
@@ -250,24 +253,25 @@ impl ListDriver {
         }
         self.check(&ctx)?;
         let host = self.host();
-        let _active = host.enter(&ctx);
-        let key = string(&ctx, &args.0, 0)?;
-        let node = handle(&ctx, &args.0, 1)?;
-        // SAFETY: the key's bytes live through this call.
-        done(
-            &ctx,
-            unsafe {
-                driver::list_note_row(
-                    host.session(),
-                    self.index,
-                    self.generation,
-                    key.as_ptr().cast(),
-                    key.len(),
-                    node,
-                )
-            },
-            "listDriver.noteRow",
-        )
+        host.with_current(&ctx, || {
+            let key = string(&ctx, &args.0, 0)?;
+            let node = handle(&ctx, &args.0, 1)?;
+            // SAFETY: the key's bytes live through this call.
+            done(
+                &ctx,
+                unsafe {
+                    driver::list_note_row(
+                        host.session(),
+                        self.index,
+                        self.generation,
+                        key.as_ptr().cast(),
+                        key.len(),
+                        node,
+                    )
+                },
+                "listDriver.noteRow",
+            )
+        })
     }
 }
 
@@ -285,17 +289,18 @@ impl ScrollController {
         }
         self.check(&ctx)?;
         let host = self.host();
-        let _active = host.enter(&ctx);
-        let view = handle(&ctx, &args.0, 0)?;
-        let content = handle(&ctx, &args.0, 1)?;
-        // SAFETY: the callback uses live session state and validated numeric handles.
-        done(
-            &ctx,
-            unsafe {
-                driver::scroll_bind(host.session(), self.index, self.generation, view, content)
-            },
-            "scrollController.bind",
-        )
+        host.with_current(&ctx, || {
+            let view = handle(&ctx, &args.0, 0)?;
+            let content = handle(&ctx, &args.0, 1)?;
+            // SAFETY: the callback uses live session state and validated numeric handles.
+            done(
+                &ctx,
+                unsafe {
+                    driver::scroll_bind(host.session(), self.index, self.generation, view, content)
+                },
+                "scrollController.bind",
+            )
+        })
     }
     #[expect(
         clippy::cast_possible_truncation,
@@ -307,41 +312,42 @@ impl ScrollController {
         }
         self.check(&ctx)?;
         let host = self.host();
-        let _active = host.enter(&ctx);
-        let content_min = num(&ctx, &args.0, 0)? as f32;
-        let mode = num(&ctx, &args.0, 1)? as i32;
-        let threshold = num(&ctx, &args.0, 2)? as f32;
-        let rubber = boolean(&ctx, &args.0, 3)?;
-        let factor = num(&ctx, &args.0, 4)? as f32;
-        let parent = value(&ctx, &args.0, 5);
-        let (pi, pg, has) = if parent.is_null() || parent.is_undefined() {
-            (0, 0, 0)
-        } else {
-            let parent = Class::<ScrollController>::from_value(&parent)?;
-            let parent = parent.borrow();
-            parent.check(&ctx)?;
-            (parent.index, parent.generation, 1)
-        };
-        // SAFETY: both drivers are generation-checked by DriverSet.
-        done(
-            &ctx,
-            unsafe {
-                driver::scroll_configure(
-                    host.session(),
-                    self.index,
-                    self.generation,
-                    content_min,
-                    mode,
-                    threshold,
-                    i32::from(rubber),
-                    factor,
-                    pi,
-                    pg,
-                    has,
-                )
-            },
-            "scrollController.configure",
-        )
+        host.with_current(&ctx, || {
+            let content_min = num(&ctx, &args.0, 0)? as f32;
+            let mode = num(&ctx, &args.0, 1)? as i32;
+            let threshold = num(&ctx, &args.0, 2)? as f32;
+            let rubber = boolean(&ctx, &args.0, 3)?;
+            let factor = num(&ctx, &args.0, 4)? as f32;
+            let parent = value(&ctx, &args.0, 5);
+            let (pi, pg, has) = if parent.is_null() || parent.is_undefined() {
+                (0, 0, 0)
+            } else {
+                let parent = Class::<ScrollController>::from_value(&parent)?;
+                let parent = parent.borrow();
+                parent.check(&ctx)?;
+                (parent.index, parent.generation, 1)
+            };
+            // SAFETY: both drivers are generation-checked by DriverSet.
+            done(
+                &ctx,
+                unsafe {
+                    driver::scroll_configure(
+                        host.session(),
+                        self.index,
+                        self.generation,
+                        content_min,
+                        mode,
+                        threshold,
+                        i32::from(rubber),
+                        factor,
+                        pi,
+                        pg,
+                        has,
+                    )
+                },
+                "scrollController.configure",
+            )
+        })
     }
     #[qjs(rename = "dragBy")]
     #[expect(
@@ -358,34 +364,35 @@ impl ScrollController {
         }
         self.check(&ctx)?;
         let host = self.host();
-        let _active = host.enter(&ctx);
-        let dx = num(&ctx, &args.0, 0)? as f32;
-        let dy = num(&ctx, &args.0, 1)? as f32;
-        let (mut ox, mut oy, mut over_x, mut over_y) = (0.0, 0.0, 0.0, 0.0);
-        // SAFETY: all out parameters are writable local floats.
-        let status = unsafe {
-            driver::scroll_drag_by(
-                host.session(),
-                self.index,
-                self.generation,
-                dx,
-                dy,
-                &mut ox,
-                &mut oy,
-                &mut over_x,
-                &mut over_y,
-            )
-        };
-        if status < 0 {
-            return Err(type_error(&ctx, "scrollController.dragBy"));
-        }
-        let object = Object::new(ctx)?;
-        object.set("ox", ox)?;
-        object.set("oy", oy)?;
-        object.set("overX", over_x)?;
-        object.set("overY", over_y)?;
-        object.set("pending", status > 0)?;
-        Ok(object)
+        host.with_current(&ctx, || {
+            let dx = num(&ctx, &args.0, 0)? as f32;
+            let dy = num(&ctx, &args.0, 1)? as f32;
+            let (mut ox, mut oy, mut over_x, mut over_y) = (0.0, 0.0, 0.0, 0.0);
+            // SAFETY: all out parameters are writable local floats.
+            let status = unsafe {
+                driver::scroll_drag_by(
+                    host.session(),
+                    self.index,
+                    self.generation,
+                    dx,
+                    dy,
+                    &mut ox,
+                    &mut oy,
+                    &mut over_x,
+                    &mut over_y,
+                )
+            };
+            if status < 0 {
+                return Err(type_error(&ctx, "scrollController.dragBy"));
+            }
+            let object = Object::new(ctx.clone())?;
+            object.set("ox", ox)?;
+            object.set("oy", oy)?;
+            object.set("overX", over_x)?;
+            object.set("overY", over_y)?;
+            object.set("pending", status > 0)?;
+            Ok(object)
+        })
     }
     #[qjs(rename = "finishDrag")]
     pub fn finish_drag<'js>(&self, ctx: Ctx<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
@@ -394,33 +401,35 @@ impl ScrollController {
         }
         self.check(&ctx)?;
         let host = self.host();
-        let _active = host.enter(&ctx);
-        let taken = boolean(&ctx, &args.0, 0)?;
-        // SAFETY: only the live session and scalar values are passed.
-        done(
-            &ctx,
-            unsafe {
-                driver::scroll_finish(
-                    host.session(),
-                    self.index,
-                    self.generation,
-                    i32::from(taken),
-                )
-            },
-            "scrollController.finishDrag",
-        )
+        host.with_current(&ctx, || {
+            let taken = boolean(&ctx, &args.0, 0)?;
+            // SAFETY: only the live session and scalar values are passed.
+            done(
+                &ctx,
+                unsafe {
+                    driver::scroll_finish(
+                        host.session(),
+                        self.index,
+                        self.generation,
+                        i32::from(taken),
+                    )
+                },
+                "scrollController.finishDrag",
+            )
+        })
     }
     #[qjs(rename = "dragEnd")]
     pub fn drag_end(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
         self.check(&ctx)?;
         let host = self.host();
-        let _active = host.enter(&ctx);
-        // SAFETY: the callback addresses a generation-checked driver in the live session.
-        done(
-            &ctx,
-            unsafe { driver::scroll_drag_end(host.session(), self.index, self.generation) },
-            "scrollController.dragEnd",
-        )
+        host.with_current(&ctx, || {
+            // SAFETY: the callback addresses a generation-checked driver in the live session.
+            done(
+                &ctx,
+                unsafe { driver::scroll_drag_end(host.session(), self.index, self.generation) },
+                "scrollController.dragEnd",
+            )
+        })
     }
     #[expect(
         clippy::cast_possible_truncation,
@@ -432,15 +441,18 @@ impl ScrollController {
         }
         self.check(&ctx)?;
         let host = self.host();
-        let _active = host.enter(&ctx);
-        let dx = num(&ctx, &args.0, 0)? as f32;
-        let dy = num(&ctx, &args.0, 1)? as f32;
-        // SAFETY: the callback receives live session state and scalars only.
-        done(
-            &ctx,
-            unsafe { driver::scroll_wheel(host.session(), self.index, self.generation, dx, dy) },
-            "scrollController.wheel",
-        )
+        host.with_current(&ctx, || {
+            let dx = num(&ctx, &args.0, 0)? as f32;
+            let dy = num(&ctx, &args.0, 1)? as f32;
+            // SAFETY: the callback receives live session state and scalars only.
+            done(
+                &ctx,
+                unsafe {
+                    driver::scroll_wheel(host.session(), self.index, self.generation, dx, dy)
+                },
+                "scrollController.wheel",
+            )
+        })
     }
     #[expect(
         clippy::cast_possible_truncation,
@@ -456,29 +468,30 @@ impl ScrollController {
         }
         self.check(&ctx)?;
         let host = self.host();
-        let _active = host.enter(&ctx);
-        let cmd = num(&ctx, &args.0, 0)? as i32;
-        let (mut x, mut y) = (0.0, 0.0);
-        // SAFETY: x and y are local writable floats.
-        done(
-            &ctx,
-            // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
-            unsafe {
-                driver::scroll_query(
-                    host.session(),
-                    self.index,
-                    self.generation,
-                    cmd,
-                    &mut x,
-                    &mut y,
-                )
-            },
-            "scrollController.query",
-        )?;
-        let object = Object::new(ctx)?;
-        object.set("x", x)?;
-        object.set("y", y)?;
-        Ok(object)
+        host.with_current(&ctx, || {
+            let cmd = num(&ctx, &args.0, 0)? as i32;
+            let (mut x, mut y) = (0.0, 0.0);
+            // SAFETY: x and y are local writable floats.
+            done(
+                &ctx,
+                // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
+                unsafe {
+                    driver::scroll_query(
+                        host.session(),
+                        self.index,
+                        self.generation,
+                        cmd,
+                        &mut x,
+                        &mut y,
+                    )
+                },
+                "scrollController.query",
+            )?;
+            let object = Object::new(ctx.clone())?;
+            object.set("x", x)?;
+            object.set("y", y)?;
+            Ok(object)
+        })
     }
     #[expect(
         clippy::cast_possible_truncation,
@@ -490,16 +503,18 @@ impl ScrollController {
         }
         self.check(&ctx)?;
         let host = self.host();
-        let _active = host.enter(&ctx);
-        let ox = num(&ctx, &args.0, 0)? as f32;
-        let oy = num(&ctx, &args.0, 1)? as f32;
-        // SAFETY: only the live session and scalar values cross this callback.
-        let status =
-            unsafe { driver::scroll_consume(host.session(), self.index, self.generation, ox, oy) };
-        if status < 0 {
-            Err(type_error(&ctx, "scrollController.consume"))
-        } else {
-            Ok(status == 1)
-        }
+        host.with_current(&ctx, || {
+            let ox = num(&ctx, &args.0, 0)? as f32;
+            let oy = num(&ctx, &args.0, 1)? as f32;
+            // SAFETY: only the live session and scalar values cross this callback.
+            let status = unsafe {
+                driver::scroll_consume(host.session(), self.index, self.generation, ox, oy)
+            };
+            if status < 0 {
+                Err(type_error(&ctx, "scrollController.consume"))
+            } else {
+                Ok(status == 1)
+            }
+        })
     }
 }

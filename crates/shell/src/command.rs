@@ -72,6 +72,7 @@ pub enum Command {
     ImageReady(ImageReady),
     /// Drop one cache key and ask the render thread for another frame.
     ReloadImage(String),
+    JsIo(session::Delivery),
     /// A `fetch` finished on `net`.
     HttpDone {
         token: u64,
@@ -130,7 +131,10 @@ pub(crate) fn command_tag(command: &Command) -> &'static str {
         | Command::SurfaceDestroyed { .. } => "surface",
         Command::ImageReady(_) => "image",
         Command::ReloadImage(_) => "reload",
-        Command::HttpDone { .. } | Command::HttpHead { .. } | Command::HttpChunk { .. } => "http",
+        Command::JsIo(_)
+        | Command::HttpDone { .. }
+        | Command::HttpHead { .. }
+        | Command::HttpChunk { .. } => "http",
         Command::PluginDone { .. } => "plugin",
         Command::Socket { .. } => "socket",
         Command::Wake => "wake",

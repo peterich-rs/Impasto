@@ -46,6 +46,10 @@ macOS 已实现权限五法。还差：
 
 `FileSystem` 与 `AsyncStorage` 的方法就是各包 `@impasto/<pkg>/host` 上的导出。路径拒绝 `..`、绝对路径和反斜杠。带 schema 的存储库以后只依赖这两个包，不进 `solid-ui`。
 
+## JS 运行时与标准库
+
+设计约束见 [Impasto JS 运行时与标准库重构设计](design/js-runtime/runtime-and-standard-library.md)。平台覆盖、性能样本与待验证项见 [JS 运行时验收](design/js-runtime/runtime-and-standard-library-validation.md)。
+
 ## Gallery
 
 `/stocks`、`/stock/:symbol`、模拟订单与现有路由的分工见 [证券模拟盘](stock-app-design.md)。`/canvas` 是独立的绘图能力页。

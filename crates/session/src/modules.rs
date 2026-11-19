@@ -66,6 +66,7 @@ pub struct ModuleConfig {
     pub registry: Arc<ModuleRegistry>,
     pub exec: Arc<dyn MethodExec>,
     pub settle: Arc<dyn Fn(u64) -> Settle + Send + Sync>,
+    pub post_delivery: Option<Arc<dyn Fn(crate::Delivery) + Send + Sync>>,
     pub app_state: Shared<String>,
     pub launch_url: Shared<Option<String>>,
 }
@@ -82,6 +83,7 @@ impl ModuleConfig {
             registry: Arc::new(ModuleRegistry::new(Vec::new())),
             exec: Arc::new(ImmediateExec),
             settle: Arc::new(|_token| Settle::new(|_result| {})),
+            post_delivery: None,
             app_state: shared("active".to_owned()),
             launch_url: shared(None),
         }

@@ -977,7 +977,7 @@ pub fn run(
             // toolchain's `compile`. It is not network input. The envelope
             // does not prove the payload is valid bytecode.
             unsafe {
-                quickjs::open_trusted_bytecode_with_io(
+                quickjs::open_trusted_bytecode_with_routed_io(
                     &source,
                     &name,
                     open.shaper,
@@ -987,7 +987,14 @@ pub fn run(
                 )
             }
         } else {
-            quickjs::open_program_with_io(&source, &name, open.shaper, open.log, Some(io), host)
+            quickjs::open_program_with_routed_io(
+                &source,
+                &name,
+                open.shaper,
+                open.log,
+                Some(io),
+                host,
+            )
         }
         .map_err(|error| match error {
             quickjs::Error::Runtime => SessionError::Runtime,

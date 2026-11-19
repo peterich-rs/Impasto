@@ -1,28 +1,34 @@
-//! One completion path for owned [`IoEvent`] values.
-//!
-//! Headless `drive` and the UI adapter both call [`apply`]. The UI adapter
-//! still chooses the moment inside a frame. This function only builds the
-//! prelude values and settles the promise.
+//! Settlement and bridge hooks on the JavaScript thread.
 
-use js_host::{HttpResponse, IoEvent};
-use rquickjs::{ArrayBuffer, Ctx, IntoJs, Object};
+use std::cell::RefCell;
 
-use crate::quickjs::Vm;
+use js_host::{Credit, HttpResponse, IoEvent, PluginResult};
+use rquickjs::{ArrayBuffer, Ctx, Function, IntoJs, Object, Value};
 
-pub fn apply(vm: &Vm, ctx: &Ctx<'_>, event: IoEvent) -> rquickjs::Result<()> {
+use crate::quickjs::{Vm, codec};
+use crate::resources::number;
+
+pub(crate) fn apply(
+    vm: &Vm,
+    ctx: &Ctx<'_>,
+    event: IoEvent,
+    credit: Option<Credit>,
+) -> rquickjs::Result<()> {
     match event {
-        IoEvent::Http { token, result } => match result {
-            Ok(response) => settle_http(vm, ctx, token, &response),
-            Err(error) => vm.settle(ctx, token, false, error.dom_name().into_js(ctx)?),
-        },
-        IoEvent::Plugin { token, result } => match result {
-            js_host::PluginResult::Done(value) => {
-                vm.settle(ctx, token, true, plugin_value(ctx, &value)?)
-            }
-            js_host::PluginResult::Failed { message } => {
-                vm.settle(ctx, token, false, message.into_js(ctx)?)
-            }
-        },
+        IoEvent::Http { token, result } => {
+            let (ok, value) = match result {
+                Ok(response) => (true, response_value(ctx, response)),
+                Err(error) => (false, error.dom_name().into_js(ctx)),
+            };
+            settle(vm, ctx, token, ok, value)
+        }
+        IoEvent::Plugin { token, result } => {
+            let (ok, value) = match result {
+                PluginResult::Done(value) => (true, codec::encode(ctx, &value)),
+                PluginResult::Failed { message } => (false, message.into_js(ctx)),
+            };
+            settle(vm, ctx, token, ok, value)
+        }
         IoEvent::Socket {
             id,
             event,
@@ -30,14 +36,14 @@ pub fn apply(vm: &Vm, ctx: &Ctx<'_>, event: IoEvent) -> rquickjs::Result<()> {
             data,
         } => {
             let payload = if text {
-                String::from_utf8_lossy(&data).into_owned().into_js(ctx)?
+                String::from_utf8_lossy(&data).into_js(ctx)?
             } else {
-                ArrayBuffer::new(ctx.clone(), data)?.into_js(ctx)?
+                ArrayBuffer::new_copy(ctx.clone(), data)?.into_value()
             };
             call_hook(
                 ctx,
                 "_socket",
-                vec![js_number(id).into_js(ctx)?, event.into_js(ctx)?, payload],
+                [number(id).into_js(ctx)?, event.into_js(ctx)?, payload],
             )
         }
         IoEvent::HttpHead {
@@ -46,13 +52,13 @@ pub fn apply(vm: &Vm, ctx: &Ctx<'_>, event: IoEvent) -> rquickjs::Result<()> {
             headers,
         } => {
             let head = Object::new(ctx.clone())?;
-            head.set("status", i32::from(status))?;
+            head.set("status", status)?;
             head.set("headers", header_block(&headers))?;
             call_hook(
                 ctx,
                 "_httpStream",
-                vec![
-                    js_number(token).into_js(ctx)?,
+                [
+                    number(token).into_js(ctx)?,
                     "head".into_js(ctx)?,
                     head.into_value(),
                 ],
@@ -64,67 +70,83 @@ pub fn apply(vm: &Vm, ctx: &Ctx<'_>, event: IoEvent) -> rquickjs::Result<()> {
             done,
             error,
         } => {
+            let terminal = done || error.is_some();
             let payload = match error {
                 Some(error) => error.dom_name().into_js(ctx)?,
-                None => ArrayBuffer::new(ctx.clone(), bytes)?.into_value(),
+                None => ArrayBuffer::new_copy(ctx.clone(), bytes)?.into_value(),
+            };
+            let release = match credit {
+                Some(credit) => {
+                    let credit = RefCell::new(Some(credit));
+                    Function::new(ctx.clone(), move || drop(credit.borrow_mut().take()))?
+                        .into_value()
+                }
+                None => Value::new_undefined(ctx.clone()),
             };
             call_hook(
                 ctx,
                 "_httpStream",
-                vec![
-                    js_number(token).into_js(ctx)?,
-                    (if done { "done" } else { "chunk" }).into_js(ctx)?,
+                [
+                    number(token).into_js(ctx)?,
+                    (if terminal { "done" } else { "chunk" }).into_js(ctx)?,
                     payload,
+                    release,
                 ],
             )?;
-            if done {
+            if terminal {
                 vm.promises.borrow_mut().remove(&token);
             }
             Ok(())
         }
+        IoEvent::Host(_) => Ok(()),
     }
 }
 
-fn settle_http(
+fn settle<'js>(
     vm: &Vm,
-    ctx: &Ctx<'_>,
-    token: u64,
-    response: &HttpResponse,
-) -> rquickjs::Result<()> {
-    let object = Object::new(ctx.clone())?;
-    object.set("status", i32::from(response.status))?;
-    object.set("headers", header_block(&response.headers))?;
-    object.set(
-        "body",
-        ArrayBuffer::new(ctx.clone(), response.body.clone())?,
-    )?;
-    vm.settle(ctx, token, true, object.into_value())
-}
-
-fn plugin_value<'js>(
     ctx: &Ctx<'js>,
-    value: &js_host::PluginValue,
-) -> rquickjs::Result<rquickjs::Value<'js>> {
-    use js_host::PluginValue;
-    Ok(match value {
-        PluginValue::Null => rquickjs::Value::new_null(ctx.clone()),
-        PluginValue::Bool(value) => (*value).into_js(ctx)?,
-        PluginValue::F64(value) => (*value).into_js(ctx)?,
-        PluginValue::Str(value) => value.into_js(ctx)?,
-        PluginValue::Bytes(value) => ArrayBuffer::new(ctx.clone(), value.clone())?.into_js(ctx)?,
-        PluginValue::List(_) | PluginValue::Map(_) => rquickjs::Value::new_null(ctx.clone()),
-    })
+    token: u64,
+    ok: bool,
+    value: rquickjs::Result<Value<'js>>,
+) -> rquickjs::Result<()> {
+    match value {
+        Ok(value) => vm.settle(ctx, token, ok, value),
+        Err(error) => {
+            if error.is_exception() {
+                let _ = ctx.catch();
+            }
+            reject_bad_completion(vm, ctx, token)
+        }
+    }
 }
 
-fn call_hook<'js>(
+pub(crate) fn reject_bad_completion(vm: &Vm, ctx: &Ctx<'_>, token: u64) -> rquickjs::Result<()> {
+    let rejection = "host completion could not be converted"
+        .into_js(ctx)
+        .unwrap_or_else(|_| {
+            let _ = ctx.catch();
+            Value::new_undefined(ctx.clone())
+        });
+    vm.settle(ctx, token, false, rejection)
+}
+
+fn response_value<'js>(ctx: &Ctx<'js>, response: HttpResponse) -> rquickjs::Result<Value<'js>> {
+    let object = Object::new(ctx.clone())?;
+    object.set("status", response.status)?;
+    object.set("headers", header_block(&response.headers))?;
+    object.set("body", ArrayBuffer::new_copy(ctx.clone(), response.body)?)?;
+    Ok(object.into_value())
+}
+
+fn call_hook<'js, const N: usize>(
     ctx: &Ctx<'js>,
     name: &str,
-    args: Vec<rquickjs::Value<'js>>,
+    args: [Value<'js>; N],
 ) -> rquickjs::Result<()> {
     let bridge: Object = ctx.globals().get("__host")?;
-    let hook: rquickjs::Value = bridge.get(name)?;
+    let hook: Value = bridge.get(name)?;
     if let Some(hook) = hook.into_function() {
-        let mut values = rquickjs::function::Args::new(ctx.clone(), args.len());
+        let mut values = rquickjs::function::Args::new(ctx.clone(), N);
         values.push_args(args)?;
         hook.call_arg::<()>(values)?;
     }
@@ -137,12 +159,4 @@ fn header_block(headers: &[(String, String)]) -> String {
         .map(|(name, value)| format!("{name}: {value}"))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "host tokens are finite ids and fit in a JavaScript number"
-)]
-fn js_number(id: u64) -> f64 {
-    id as f64
 }

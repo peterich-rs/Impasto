@@ -17,11 +17,14 @@ mod linked;
 
 pub use linked::JsSession;
 
-pub use bytecode::{CompiledBytecode, compile};
+pub use bytecode::{CompiledBytecode, compile, compile_with_registry};
 pub use error::Error;
 
 /// Console callback. Level 3 is an error. Other levels are informational.
 pub type ConsoleLog = Box<dyn Fn(u8, &str)>;
+
+/// Nonblocking admission into the host's generation-aware transport.
+pub type RoutedIoSubmit = Box<dyn Fn(session::IoJob) -> Result<(), Box<session::IoJob>> + Send>;
 
 /// Loads `script` and returns the session the host pumps each frame.
 ///
@@ -86,8 +89,17 @@ pub fn open_compiled_with_io(
     io: Option<Box<dyn Fn(session::IoJob) + Send>>,
     config: session::ModuleConfig,
 ) -> Result<Box<dyn session::Session>, Error> {
-    // SAFETY: `CompiledBytecode` is only constructed by `compile`.
-    unsafe { open_trusted_bytecode_with_io(program.as_bytes(), name, shaper, log, io, config) }
+    finish_session(
+        JsSession::open_trusted(
+            bytecode::TrustedBytecode::from_compiled(program),
+            name,
+            shaper,
+            log,
+            None,
+            config,
+        )?,
+        io,
+    )
 }
 
 /// Loads an IQJS envelope from a trusted file.
@@ -111,6 +123,47 @@ pub unsafe fn open_trusted_bytecode_with_io(
         JsSession::open_trusted(program, name, shaper, log, None, config)?,
         io,
     )
+}
+
+/// Opens UTF-8 source with generation-aware external I/O after the entry.
+pub fn open_program_with_routed_io(
+    source: &[u8],
+    name: &str,
+    shaper: impl Shaper + 'static,
+    log: ConsoleLog,
+    io: Option<RoutedIoSubmit>,
+    config: session::ModuleConfig,
+) -> Result<Box<dyn session::Session>, Error> {
+    let session = JsSession::open_source(source, name, shaper, log, None, config)?;
+    Ok(finish_routed_session(session, io))
+}
+
+/// Opens a trusted IQJS envelope with generation-aware external I/O after the entry.
+///
+/// # Safety
+/// `bytes` must be an unmodified IQJS envelope written by this toolchain's compiler.
+pub unsafe fn open_trusted_bytecode_with_routed_io(
+    bytes: &[u8],
+    name: &str,
+    shaper: impl Shaper + 'static,
+    log: ConsoleLog,
+    io: Option<RoutedIoSubmit>,
+    config: session::ModuleConfig,
+) -> Result<Box<dyn session::Session>, Error> {
+    // SAFETY: the caller attests that the compiler produced this envelope.
+    let program = unsafe { bytecode::TrustedBytecode::from_bytes(bytes) };
+    let session = JsSession::open_trusted(program, name, shaper, log, None, config)?;
+    Ok(finish_routed_session(session, io))
+}
+
+fn finish_routed_session(
+    mut session: JsSession,
+    io: Option<RoutedIoSubmit>,
+) -> Box<dyn session::Session> {
+    if let Some(io) = io {
+        session.install_routed_io(io);
+    }
+    Box::new(session)
 }
 
 fn finish_session(
@@ -539,20 +592,44 @@ import * as core from "scene";
     fn drop_releases_reactive_cleanup() {
         let seen = std::rc::Rc::new(std::cell::Cell::new(0));
         let record = std::rc::Rc::clone(&seen);
-        let session = open(
-            "import {createRoot,createSignal,onCleanup} from 'reactive'; createRoot(() => onCleanup(() => { console.log('cleanup'); setTimeout(() => {}, 60000); createRoot(() => { createSignal({held: true}); onCleanup(() => console.log('nested cleanup')); }); }));",
-            "drop-cleanup.js", uicore::MonoShaper::default(), Box::new(move |_, text| { if text == "cleanup" { record.set(record.get() + 1); } }),
-        ).expect("open cleanup");
+        let (jobs, received) = std::sync::mpsc::channel();
+        let session = super::open_program_with_routed_io(
+            br#"
+                import {createRoot,createSignal,onCleanup} from 'reactive';
+                createRoot(() => onCleanup(() => {
+                    console.log('cleanup');
+                    setTimeout(() => {}, 60000);
+                    createRoot(() => {
+                        createSignal({held: true});
+                        onCleanup(() => console.log('nested cleanup'));
+                    });
+                    return fetch('https://example.test/shutdown');
+                }));
+            "#,
+            "drop-cleanup.js",
+            uicore::MonoShaper::default(),
+            Box::new(move |_, text| {
+                if text == "cleanup" || text == "nested cleanup" {
+                    record.set(record.get() + 1);
+                }
+            }),
+            Some(Box::new(move |job| {
+                jobs.send(job).map_err(|error| Box::new(error.0))
+            })),
+            ModuleConfig::disconnected(),
+        )
+        .expect("open cleanup");
         drop(session);
-        assert_eq!(seen.get(), 1);
+        assert_eq!(seen.get(), 2);
+        assert!(received.try_recv().is_err());
     }
 
     #[test]
-    fn failed_open_after_prelude_does_not_abort() {
+    fn failed_open_releases_standard_and_reactive_bindings() {
         let seen = std::rc::Rc::new(std::cell::Cell::new(0));
         let record = std::rc::Rc::clone(&seen);
         let result = open(
-            "import {createRoot,onCleanup} from 'reactive'; if (typeof fetch !== 'function' || typeof AbortController !== 'function') throw new Error('prelude missing'); createRoot(() => onCleanup(() => console.log('cleanup'))); setTimeout(() => {}, 60000); fetch('https://example.test/pending'); throw new Error('failed after prelude');",
+            "import {createRoot,onCleanup} from 'reactive'; if (typeof fetch !== 'function' || typeof AbortController !== 'function') throw new Error('standard bindings missing'); createRoot(() => onCleanup(() => console.log('cleanup'))); setTimeout(() => {}, 60000); fetch('https://example.test/pending'); throw new Error('failed during entry');",
             "failed-open.js",
             uicore::MonoShaper::default(),
             Box::new(move |_, text| {
@@ -562,17 +639,13 @@ import * as core from "scene";
             }),
         );
         assert!(
-            matches!(result, Err(Error::Script(ref message)) if message.contains("failed after prelude"))
+            matches!(result, Err(Error::Script(ref message)) if message.contains("failed during entry"))
         );
         assert_eq!(seen.get(), 1);
     }
 
-    /// Locks the current open sequence. The host sink is installed after the
-    /// entry script, so a top-level `fetch` / socket is queued inside the
-    /// session and is not an [`session::IoJob`]. `fetchStream`'s synchronous
-    /// error is delivered before the prelude records the token, so that
-    /// promise stays pending. These are existing results, not the intended
-    /// long-term semantics.
+    /// Application startup precedes the external transport. Its I/O
+    /// completions settle in the first frame after JS records their tokens.
     #[test]
     fn open_runs_entry_before_io_install_and_frame_flushes_pending() {
         let logs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -615,8 +688,14 @@ import * as core from "scene";
         );
         assert_eq!(jobs.load(std::sync::atomic::Ordering::Relaxed), 0);
         session.frame(session::FrameTime::at(0.0));
+        let lines = logs.borrow();
+        let remaining = lines
+            .iter()
+            .filter(|line| !line.starts_with("stream-"))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
         assert_eq!(
-            logs.borrow().as_slice(),
+            remaining,
             [
                 "sync",
                 "sync-after",
@@ -628,11 +707,196 @@ import * as core from "scene";
             ]
         );
         assert_eq!(jobs.load(std::sync::atomic::Ordering::Relaxed), 0);
-        assert!(
-            !logs.borrow().iter().any(|line| line.starts_with("stream-")),
-            "fetchStream's sync error currently never settles the caller promise"
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.starts_with("stream-fail:"))
+                .count(),
+            1,
+            "{lines:?}"
         );
         drop(session);
+    }
+
+    #[test]
+    fn socket_commands_and_microtasks_keep_the_previous_frame_clock() {
+        let logs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let record = std::rc::Rc::clone(&logs);
+        let (jobs, received) = std::sync::mpsc::channel();
+        let mut session = super::open_with_io(
+            r#"
+                console.log("entry:" + performance.now());
+                setTimeout(() => {
+                    const socket = new WebSocket("ws://example.test/socket");
+                    socket.onopen = () => {
+                        console.log("command:" + performance.now());
+                        Promise.resolve().then(() => console.log("job:" + performance.now()));
+                        setTimeout(() => console.log("timer:" + performance.now()), 0);
+                    };
+                }, 0);
+            "#,
+            "socket-clock.js",
+            uicore::MonoShaper::default(),
+            Box::new(move |_level, text| record.borrow_mut().push(text.to_owned())),
+            Some(Box::new(move |job| {
+                let _ = jobs.send(job);
+            })),
+            ModuleConfig::disconnected(),
+        )
+        .expect("open");
+
+        session.frame(session::FrameTime::at(100.0));
+        let session::IoJob::SocketOpen { id, .. } = received.try_recv().expect("socket open")
+        else {
+            panic!("unexpected network job");
+        };
+        session.io_event(IoEvent::Socket {
+            id,
+            event: "open".into(),
+            text: true,
+            data: Vec::new(),
+        });
+        assert_eq!(logs.borrow().as_slice(), ["entry:0", "command:0"]);
+
+        session.frame(session::FrameTime::at(116.0));
+        assert_eq!(
+            logs.borrow().as_slice(),
+            ["entry:0", "command:0", "job:0", "timer:16"]
+        );
+    }
+
+    #[test]
+    fn routed_socket_completion_requires_the_live_generation() {
+        let logs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let record = std::rc::Rc::clone(&logs);
+        let (jobs, received) = std::sync::mpsc::channel();
+        let mut session = super::open_program_with_routed_io(
+            br#"
+                setTimeout(() => {
+                    const socket = new WebSocket("ws://example.test/socket");
+                    socket.onopen = () => console.log("socket opened");
+                }, 0);
+            "#,
+            "routed-socket.js",
+            uicore::MonoShaper::default(),
+            Box::new(move |_level, text| record.borrow_mut().push(text.to_owned())),
+            Some(Box::new(move |job| {
+                jobs.send(job).map_err(|error| Box::new(error.0))
+            })),
+            ModuleConfig::disconnected(),
+        )
+        .expect("open");
+        session.frame(session::FrameTime::at(0.0));
+        let session::IoJob::Routed { route, job, .. } = received.try_recv().expect("routed socket")
+        else {
+            panic!("transport did not receive a route");
+        };
+        let session::IoJob::SocketOpen { id, .. } = *job else {
+            panic!("unexpected network job");
+        };
+        let opened = || IoEvent::Socket {
+            id,
+            event: "open".into(),
+            text: true,
+            data: Vec::new(),
+        };
+        let mut stale = route.deliver(opened(), None);
+        stale.runtime.generation += 1;
+        session.io_delivery(stale);
+        assert!(logs.borrow().is_empty());
+        session.io_delivery(route.deliver(opened(), None));
+        session.io_delivery(route.deliver(opened(), None));
+        assert_eq!(logs.borrow().as_slice(), ["socket opened"]);
+    }
+
+    #[test]
+    fn startup_inline_stream_settles_after_recording_the_token() {
+        struct EmptyResponse;
+
+        impl session::HttpClient for EmptyResponse {
+            fn perform(
+                &self,
+                request: &session::HttpRequest,
+            ) -> Result<session::HttpResponse, session::HttpError> {
+                assert_eq!(request.body, [11, 12]);
+                Ok(session::HttpResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: Vec::new(),
+                })
+            }
+        }
+
+        let logs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let record = std::rc::Rc::clone(&logs);
+        let mut session = super::JsSession::open_with(
+            r#"
+                const bytes = new Uint8Array([10, 11, 12, 13]).subarray(1, 3);
+                fetchStream("https://example.test/empty", {method: "POST", body: bytes})
+                    .then(async response => {
+                        const item = await response.getReader().read();
+                        console.log("stream:" + response.status + ":" + item.done);
+                    });
+            "#,
+            "startup-stream.js",
+            uicore::MonoShaper::default(),
+            Box::new(move |_level, text| record.borrow_mut().push(text.to_owned())),
+            Some(std::sync::Arc::new(EmptyResponse)),
+            ModuleConfig::disconnected(),
+        )
+        .expect("open");
+        assert!(logs.borrow().is_empty());
+        session.frame(session::FrameTime::at(0.0));
+        assert_eq!(logs.borrow().as_slice(), ["stream:200:true"]);
+    }
+
+    #[test]
+    fn module_listener_mutations_take_effect_after_the_snapshot() {
+        let logs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let record = std::rc::Rc::clone(&logs);
+        let (host, _pending) = test_host();
+        let mut session = super::JsSession::open_with(
+            r#"
+                import { addEventListener, removeEventListener } from "@impasto/linking";
+                const later = ({url}) => console.log("later:" + url);
+                const duplicate = ({url}) => console.log("duplicate:" + url);
+                const first = (event) => {
+                    console.log("first:" + event.url);
+                    event.url = "mutated";
+                    removeEventListener("url", first);
+                    removeEventListener("url", duplicate);
+                    addEventListener("url", later);
+                    throw new Error("the UI continues through the snapshot");
+                };
+                addEventListener("url", first);
+                addEventListener("url", duplicate);
+                addEventListener("url", duplicate);
+            "#,
+            "module-snapshot.js",
+            uicore::MonoShaper::default(),
+            Box::new(move |_level, text| record.borrow_mut().push(text.to_owned())),
+            None,
+            host,
+        )
+        .expect("open");
+        session.io_event(IoEvent::Host(js::HostEvent {
+            module: "Linking".into(),
+            event: "url".into(),
+            payload: PluginValue::Map(vec![(
+                "url".into(),
+                PluginValue::Str("impasto://first".into()),
+            )]),
+        }));
+        session.set_launch_url("impasto://second");
+        assert_eq!(
+            logs.borrow().as_slice(),
+            [
+                "first:impasto://first",
+                "duplicate:impasto://first",
+                "duplicate:impasto://first",
+                "later:impasto://second",
+            ]
+        );
     }
 
     #[test]
@@ -677,10 +941,13 @@ import * as core from "scene";
         let record = std::rc::Rc::clone(&logs);
         let mut session = open(
             r#"
+            var raf = requestAnimationFrame(function (value) { console.log("raf:" + value); }, 0, "argument");
+            var timeout = setTimeout(function () { console.log("timeout"); }, -5);
             var interval = setInterval(function () { console.log("interval"); }, 0);
             clearTimeout(interval);
-            var timeout = setTimeout(function () { console.log("timeout"); }, -5);
             clearInterval(timeout);
+            clearTimeout(raf);
+            cancelAnimationFrame(timeout);
             setTimeout(function () {
                 console.log("nested");
                 setTimeout(function () { console.log("inner"); }, 0);
@@ -696,19 +963,25 @@ import * as core from "scene";
         session.frame(session::FrameTime::at(16.0));
         assert_eq!(
             logs.borrow().as_slice(),
-            ["now:0", "interval", "timeout", "nested"]
+            ["now:0", "timeout", "interval", "nested", "raf:argument"]
         );
         session.frame(session::FrameTime::at(32.0));
         assert_eq!(
             logs.borrow().as_slice(),
             [
-                "now:0", "interval", "timeout", "nested", "interval", "inner"
+                "now:0",
+                "timeout",
+                "interval",
+                "nested",
+                "raf:argument",
+                "interval",
+                "inner"
             ]
         );
     }
 
     #[test]
-    fn host_argument_getter_runs_while_the_call_is_prepared() {
+    fn host_argument_getter_can_call_another_module_method() {
         let logs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let record = std::rc::Rc::clone(&logs);
         let nested = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -848,6 +1121,120 @@ import * as core from "scene";
             )
             .expect("module bytes"),
         );
+    }
+
+    #[test]
+    fn the_same_host_binding_script_runs_in_headless_and_ui() {
+        use js::ModuleOutcome;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use std::sync::Arc;
+
+        const SOURCE: &str = r#"
+            import {echo, later, addEventListener} from '@impasto/fixture';
+            const check = (channel, value) => {
+                if (!Array.isArray(value.list) || value.list[0] !== null || value.list[1].ok !== true) {
+                    throw new Error(channel + ': lost nested list or map');
+                }
+                if (Object.getPrototypeOf(value) !== Object.prototype ||
+                    !Object.hasOwn(value, '__proto__') || value.__proto__ !== 'ordinary property') {
+                    throw new Error(channel + ': mishandled __proto__');
+                }
+                if (!(value.bytes instanceof Uint8Array) || value.bytes.join(',') !== '11,12') {
+                    throw new Error(channel + ': lost view bounds');
+                }
+                console.log(channel);
+            };
+            const input = {
+                list: [null, {ok: true}],
+                ['__proto__']: 'ordinary property',
+                bytes: new Uint8Array([10, 11, 12, 13]).subarray(1, 3),
+            };
+            check('sync', echo(input));
+            addEventListener('sample', (value) => check('event', value));
+            check('promise', await later(input));
+        "#;
+        let echo = |args: &[PluginValue]| args.first().cloned().unwrap_or(PluginValue::Null);
+        let module = Module {
+            name: "Fixture",
+            specifier: "@impasto/fixture",
+            exports: session::ModuleExports {
+                events: &[EventType {
+                    name: "sample",
+                    payload: "unknown",
+                }],
+                ..Default::default()
+            },
+            methods: vec![
+                Method::sync("echo", move |args| Ok(echo(args))),
+                Method::promise("later", move |args, settle, exec| {
+                    exec.now(settle, PluginResult::Done(echo(args)));
+                }),
+            ],
+        };
+        let event = || {
+            IoEvent::Host(js::HostEvent {
+                module: "Fixture".into(),
+                event: "sample".into(),
+                payload: PluginValue::Map(vec![
+                    (
+                        "list".into(),
+                        PluginValue::List(vec![
+                            PluginValue::Null,
+                            PluginValue::Map(vec![("ok".into(), PluginValue::Bool(true))]),
+                        ]),
+                    ),
+                    (
+                        "__proto__".into(),
+                        PluginValue::Str("ordinary property".into()),
+                    ),
+                    ("bytes".into(), PluginValue::Bytes(vec![11, 12])),
+                ]),
+            })
+        };
+        let catalog = js::ModuleCatalog::new(
+            js::contract::ModuleRegistry::try_new(vec![module.clone()]).expect("registry"),
+        )
+        .expect("catalog");
+        let headless = Rc::new(RefCell::new(Vec::new()));
+        let record = Rc::clone(&headless);
+        let mut runtime = js::Runtime::builder()
+            .modules(catalog)
+            .module("app:fixture", SOURCE)
+            .log(move |_, line| record.borrow_mut().push(line.to_owned()))
+            .build()
+            .expect("headless");
+        let ticket = runtime.start_module("app:fixture").expect("start module");
+        runtime.enqueue(event()).expect("queue event");
+        runtime.drive(100).expect("complete module");
+        assert_eq!(
+            runtime.take_module_result(ticket).expect("module result"),
+            Some(ModuleOutcome::Fulfilled)
+        );
+        let ui = Rc::new(RefCell::new(Vec::new()));
+        let record = Rc::clone(&ui);
+        let (send, receive) = std::sync::mpsc::channel();
+        let config = ModuleConfig {
+            registry: Arc::new(ModuleRegistry::new(vec![module])),
+            post_delivery: Some(Arc::new(move |delivery| {
+                let _ = send.send(delivery);
+            })),
+            ..ModuleConfig::disconnected()
+        };
+        let mut session = super::JsSession::open_with(
+            SOURCE,
+            "fixture.js",
+            uicore::MonoShaper::default(),
+            Box::new(move |_, line| record.borrow_mut().push(line.to_owned())),
+            None,
+            config,
+        )
+        .expect("UI");
+        session.io_delivery(receive.try_recv().expect("module completion"));
+        session.io_event(event());
+        session.frame(session::FrameTime::at(100.0));
+        assert_eq!(headless.borrow().as_slice(), ["sync", "event", "promise"]);
+        assert_eq!(ui.borrow().as_slice(), headless.borrow().as_slice());
     }
 
     #[test]
@@ -1004,6 +1391,7 @@ import * as core from "scene";
             ])),
             exec: Arc::new(ImmediateExec),
             settle,
+            post_delivery: None,
             app_state,
             launch_url,
         };
@@ -1275,6 +1663,7 @@ import * as core from "scene";
             ])),
             exec: std::sync::Arc::new(ImmediateExec),
             settle: std::sync::Arc::new(|_token| session::Settle::new(|_result| {})),
+            post_delivery: None,
             app_state: session::shared("active".to_owned()),
             launch_url: session::shared(None),
         }
@@ -3666,6 +4055,8 @@ import * as core from "scene";
                 Err(error) => panic!("{error}"),
             };
             drain_plugin(&mut session, pending.as_ref());
+            assert!(session.jobs_pending());
+            assert!(session.wants_frame());
             session.metrics(&metrics());
             let _ = session.frame(session::FrameTime::at(0.0));
             let text = lines

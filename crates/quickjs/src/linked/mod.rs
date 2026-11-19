@@ -1,17 +1,14 @@
 //! Live QuickJS session. Tap handlers are JS values owned by the interpreter.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_void};
 use std::marker::PhantomData;
 use std::ptr;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
-use session::{
-    HttpError, HttpResponse, InputEvent, IoJob, Key, Metrics, ModuleConfig, PluginResult, Session,
-};
+use js::HostEvent;
+use session::{InputEvent, IoJob, Key, Metrics, ModuleConfig, PluginValue, Session};
 use uicore::{Affinity, FocusDirection, NodeId, Rect, Shaper, Tree};
 
 use crate::Error;
@@ -22,7 +19,6 @@ mod environment;
 mod reactive;
 mod scene;
 
-mod args;
 mod bridge;
 mod call;
 mod frame;
@@ -30,7 +26,6 @@ mod keys;
 mod mutation;
 mod nodes;
 mod rt;
-use args::*;
 use bridge::*;
 use frame::*;
 use keys::*;
@@ -48,15 +43,15 @@ macro_rules! vm_entry {
         }
     }};
 }
-pub(super) use rt::prepare_compile;
+pub(super) use rt::{compile_declarations, prepare_compile};
 pub(super) use vm_entry;
 
-type IoSubmit = Box<dyn Fn(IoJob) + Send>;
+type SharedConsoleLog = Rc<dyn Fn(u8, &str)>;
 
 struct Inner {
     pub(super) tree: RefCell<Tree>,
     pub(super) host: *mut Host,
-    pub(super) log: crate::ConsoleLog,
+    pub(super) log: SharedConsoleLog,
     pub(super) ime: RefCell<ImeSlot>,
     pub(super) text_scale: Cell<f32>,
     pub(super) reduce_motion: Cell<bool>,
@@ -68,22 +63,14 @@ struct Inner {
     pub(super) clipboard: RefCell<Option<String>>,
     /// Selection rectangles from the latest query, as packed `x,y,w,h` floats.
     pub(super) selection_rects: RefCell<Vec<f32>>,
-    pub(super) io: RefCell<Option<IoSubmit>>,
-    pub(super) http: RefCell<Option<Arc<dyn session::HttpClient>>>,
     pub(super) config: ModuleConfig,
-    pub(super) last_error: RefCell<Option<CString>>,
     /// Debug JSON from the latest `debug_json` call, as NUL-terminated UTF-8.
     pub(super) debug_json: RefCell<Option<CString>>,
     pub(super) paused: Cell<bool>,
-    pub(super) cancels: RefCell<HashMap<u64, Arc<AtomicBool>>>,
-    pub(super) pending: RefCell<Pending>,
     pub(super) fonts: RefCell<FontBook>,
     /// Sources passed to `reload` since the last [`Session::take_reloads`].
     pub(super) reloads: RefCell<Vec<String>>,
     pub(super) mutations: RefCell<Vec<mutation::OwnedRec>>,
-    pub(super) prepared: RefCell<Option<PreparedCall>>,
-    /// Owned result of the host call that just finished. Not a shared stack.
-    pub(super) sync_result: RefCell<Option<session::PluginValue>>,
     pub(super) marks: FrameMarks,
     pub(super) drivers: RefCell<uicore::DriverSet>,
     pub(super) driver_frame: Cell<bool>,
@@ -97,18 +84,34 @@ struct Inner {
     pub(super) canvas_budget: RefCell<uicore::canvas::Budget>,
 }
 
-pub(super) struct Pending {
-    pub(super) http: Vec<(u64, Result<HttpResponse, HttpError>)>,
-    pub(super) plugin: Vec<(u64, PluginResult)>,
-    pub(super) socket: Vec<(u64, String, bool, Vec<u8>)>,
-}
-
-impl Pending {
-    fn new() -> Self {
+impl Inner {
+    fn new(shaper: impl Shaper + 'static, log: crate::ConsoleLog, config: ModuleConfig) -> Self {
         Self {
-            http: Vec::new(),
-            plugin: Vec::new(),
-            socket: Vec::new(),
+            tree: RefCell::new(Tree::new(shaper)),
+            host: ptr::null_mut(),
+            log: Rc::from(log),
+            ime: RefCell::new(ImeSlot::new()),
+            text_scale: Cell::new(1.0),
+            reduce_motion: Cell::new(false),
+            platform: RefCell::new(session::PlatformSettings::default()),
+            settings_frame: Cell::new(false),
+            edit_bytes: RefCell::new(Vec::new()),
+            clipboard: RefCell::new(None),
+            selection_rects: RefCell::new(Vec::new()),
+            config,
+            debug_json: RefCell::new(None),
+            paused: Cell::new(false),
+            fonts: RefCell::new(FontBook::new()),
+            reloads: RefCell::new(Vec::new()),
+            mutations: RefCell::new(Vec::new()),
+            marks: FrameMarks::default(),
+            drivers: RefCell::new(uicore::DriverSet::new()),
+            driver_frame: Cell::new(false),
+            trace: Cell::new(std::env::var_os("IMPASTO_TRACE").is_some()),
+            faults: RefCell::new(Vec::new()),
+            graph: reactive::Graph::new(),
+            canvas: RefCell::new(CanvasSession::new()),
+            canvas_budget: RefCell::new(uicore::canvas::Budget::session()),
         }
     }
 }
@@ -280,54 +283,11 @@ impl JsSession {
         http: Option<Arc<dyn session::HttpClient>>,
         config: ModuleConfig,
     ) -> Result<Self, Error> {
-        let mut state = Box::new(Inner {
-            tree: RefCell::new(Tree::new(shaper)),
-            host: ptr::null_mut(),
-            log,
-            ime: RefCell::new(ImeSlot::new()),
-            text_scale: Cell::new(1.0),
-            reduce_motion: Cell::new(false),
-            platform: RefCell::new(session::PlatformSettings::default()),
-            settings_frame: Cell::new(false),
-            edit_bytes: RefCell::new(Vec::new()),
-            clipboard: RefCell::new(None),
-            selection_rects: RefCell::new(Vec::new()),
-            io: RefCell::new(None),
-            http: RefCell::new(None),
-            config,
-            last_error: RefCell::new(None),
-            debug_json: RefCell::new(None),
-            paused: Cell::new(false),
-            cancels: RefCell::new(HashMap::new()),
-            pending: RefCell::new(Pending::new()),
-            fonts: RefCell::new(FontBook::new()),
-            reloads: RefCell::new(Vec::new()),
-            mutations: RefCell::new(Vec::new()),
-            prepared: RefCell::new(None),
-            sync_result: RefCell::new(None),
-            marks: FrameMarks::default(),
-            drivers: RefCell::new(uicore::DriverSet::new()),
-            driver_frame: Cell::new(false),
-            trace: Cell::new(std::env::var_os("IMPASTO_TRACE").is_some()),
-            faults: RefCell::new(Vec::new()),
-            graph: reactive::Graph::new(),
-            canvas: RefCell::new(CanvasSession::new()),
-            canvas_budget: RefCell::new(uicore::canvas::Budget::session()),
-        });
-        let inner = &mut *state as *mut Inner;
-        let mut engine = Engine::new(state, app_directory(name))?;
-        let host = engine.host_ptr();
-        // SAFETY: Engine owns this stable allocation until shutdown completes.
-        unsafe { (*inner).host = host };
-        if let Some(client) = http {
-            // SAFETY: initialization runs before evaluating any JavaScript.
-            unsafe { *(*inner).http.borrow_mut() = Some(client) };
-        }
-        let startup = engine.start(program, name);
-        if let Err(error) = startup {
-            engine.shutdown();
-            return Err(error);
-        }
+        let state = Box::new(Inner::new(shaper, log, config));
+        let engine = Engine::new(state, app_directory(name), http)?;
+        engine.install(bootstrap::SCENE_JS)?;
+        engine.start(program, name)?;
+        let inner = engine.inner_ptr();
         // SAFETY: Engine owns Inner for the entire session.
         sweep_detached(unsafe { &*inner });
         Ok(Self {
@@ -363,9 +323,11 @@ impl JsSession {
     }
 
     pub fn install_io(&mut self, submit: Box<dyn Fn(IoJob) + Send>) {
-        // SAFETY: Engine owns this stable Inner allocation through VM shutdown.
-        let inner = unsafe { &*self.inner };
-        *inner.io.borrow_mut() = Some(submit);
+        self.engine.install_io(submit);
+    }
+
+    pub fn install_routed_io(&mut self, submit: crate::RoutedIoSubmit) {
+        self.engine.install_routed_io(submit);
     }
 
     pub fn semantics(&mut self) -> Option<uicore::SemanticsUpdate> {
@@ -786,7 +748,7 @@ impl Session for JsSession {
                     self.note_script_error(message);
                 }
             }
-            flush_pending(inner);
+            self.engine.drain_local_io();
             let mut error = [0u8; 512];
             let timer_started = std::time::Instant::now();
             let timer_failed =
@@ -1226,45 +1188,27 @@ impl Session for JsSession {
         };
         let state = bootstrap::app_state(name);
         session::shared_write(&inner.config.app_state, state.to_owned());
-        emit_module(inner, "AppState", "change", 0, state);
+        self.engine.emit_host_event(HostEvent {
+            module: "AppState".into(),
+            event: "change".into(),
+            payload: PluginValue::Str(state.into()),
+        });
     }
 
     fn window_focus(&mut self, focused: bool) {
-        // SAFETY: Engine owns this stable Inner allocation through VM shutdown.
-        let inner = unsafe { &*self.inner };
-        emit_module(
-            inner,
-            "AppState",
-            "focus",
-            0,
-            if focused { "true" } else { "false" },
-        );
+        self.engine.emit_host_event(HostEvent {
+            module: "AppState".into(),
+            event: "focus".into(),
+            payload: PluginValue::Str(focused.to_string()),
+        });
     }
 
     fn io_event(&mut self, event: session::IoEvent) {
-        // SAFETY: Engine owns this stable Inner allocation through VM shutdown.
-        let inner = unsafe { &*self.inner };
-        match event {
-            session::IoEvent::Http { token, result } => settle_http(inner, token, &result),
-            session::IoEvent::HttpHead {
-                token,
-                status,
-                headers,
-            } => settle_http_head(inner, token, status, &headers),
-            session::IoEvent::HttpChunk {
-                token,
-                bytes,
-                done,
-                error,
-            } => settle_http_chunk(inner, token, &bytes, done, error.as_ref()),
-            session::IoEvent::Plugin { token, result } => settle_plugin(inner, token, &result),
-            session::IoEvent::Socket {
-                id,
-                event,
-                text,
-                data,
-            } => deliver_socket(inner, id, &event, text, &data),
-        }
+        self.engine.deliver_event(event);
+    }
+
+    fn io_delivery(&mut self, delivery: session::Delivery) {
+        self.engine.deliver_routed(delivery);
     }
 
     fn next_wake_ms(&mut self) -> Option<f64> {
@@ -1286,7 +1230,11 @@ impl Session for JsSession {
         // SAFETY: Engine owns this stable Inner allocation through VM shutdown.
         let inner = unsafe { &*self.inner };
         session::shared_write(&inner.config.launch_url, Some(url.to_owned()));
-        emit_module(inner, "Linking", "url", 1, url);
+        self.engine.emit_host_event(HostEvent {
+            module: "Linking".into(),
+            event: "url".into(),
+            payload: PluginValue::Map(vec![("url".into(), PluginValue::Str(url.into()))]),
+        });
     }
 }
 

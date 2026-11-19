@@ -311,7 +311,7 @@ pub fn start(boot: Boot) -> Result<Link, BootError> {
         .spawn(move || {
             decode_loop(decoder, image_rx, &inbox_images, http_images, &upload_io);
         });
-    let (net_tx, net_rx) = mpsc::channel();
+    let (net_tx, net_rx) = mpsc::sync_channel(64);
     let (wake_tx, wake_rx) = mpsc::channel();
     let inbox_net = Arc::clone(&inbox);
     let _net = crate::net::spawn(net_rx, inbox_net, http, boot.devtools.clone());
@@ -461,7 +461,7 @@ impl Drop for Runtime {
 
 struct RenderLinks {
     image_tx: Sender<ImageRequest>,
-    net_tx: Sender<session::IoJob>,
+    net_tx: SyncSender<session::IoJob>,
     wake_tx: Sender<Option<i64>>,
     upload: Arc<Mutex<Option<engine::TextureFactory>>>,
 }
@@ -526,6 +526,10 @@ fn render(
             main: boot.main_thread.clone(),
         }),
         settle: crate::settle_factory(Arc::clone(inbox)),
+        post_delivery: Some(Arc::new({
+            let inbox = Arc::clone(inbox);
+            move |delivery| inbox.post(Command::JsIo(delivery))
+        })),
         app_state,
         launch_url,
     };
@@ -533,7 +537,11 @@ fn render(
         parts,
         Box::new({
             move |job| {
-                let _ = links.net_tx.send(job);
+                links.net_tx.try_send(job).map_err(|error| match error {
+                    mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job) => {
+                        Box::new(job)
+                    }
+                })
             }
         }),
         host,
@@ -663,6 +671,7 @@ fn dispatch_command(
         | Command::SemanticsEnabled(_)
         | Command::SemanticsAction(_)
         | Command::LaunchUrl(_)
+        | Command::JsIo(_)
         | Command::HttpDone { .. }
         | Command::HttpHead { .. }
         | Command::HttpChunk { .. }

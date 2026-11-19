@@ -1132,49 +1132,50 @@ fn invoke_error(
     callback: Persistent<Value<'static>>,
     error: &PendingError,
 ) -> Result<bool, String> {
-    let _active = host.enter(ctx);
-    let function = match callback.restore(ctx).and_then(Function::from_value) {
-        Ok(function) => function,
-        Err(failure) => return Err(failure.to_string()),
-    };
-    let object = match Object::new(ctx.clone()) {
-        Ok(object) => object,
-        Err(failure) => return Err(failure.to_string()),
-    };
-    if object.set("name", "CanvasError").is_err()
-        || object.set("code", error.code.as_str()).is_err()
-        || object.set("message", error.message.as_str()).is_err()
-    {
-        return Err(error.message.clone());
-    }
-    if let Some(api) = &error.api {
-        let _ = object.set("api", api.as_str());
-    }
-    let result = function.call::<_, Value<'_>>((object,));
-    if host.past_deadline() {
-        if ctx.has_exception() {
-            drop(ctx.catch());
+    host.with_current(ctx, || {
+        let function = match callback.restore(ctx).and_then(Function::from_value) {
+            Ok(function) => function,
+            Err(failure) => return Err(failure.to_string()),
+        };
+        let object = match Object::new(ctx.clone()) {
+            Ok(object) => object,
+            Err(failure) => return Err(failure.to_string()),
+        };
+        if object.set("name", "CanvasError").is_err()
+            || object.set("code", error.code.as_str()).is_err()
+            || object.set("message", error.message.as_str()).is_err()
+        {
+            return Err(error.message.clone());
         }
-        return Err("Interrupted: onDrawError exceeded its time budget".into());
-    }
-    match result {
-        Ok(value) => {
+        if let Some(api) = &error.api {
+            let _ = object.set("api", api.as_str());
+        }
+        let result = function.call::<_, Value<'_>>((object,));
+        if host.past_deadline() {
             if ctx.has_exception() {
-                let (message, _) = exception_text(ctx, ctx.catch());
-                Err(message)
-            } else {
-                Ok(value.as_bool() != Some(false))
+                drop(ctx.catch());
+            }
+            return Err("Interrupted: onDrawError exceeded its time budget".into());
+        }
+        match result {
+            Ok(value) => {
+                if ctx.has_exception() {
+                    let (message, _) = exception_text(ctx, ctx.catch());
+                    Err(message)
+                } else {
+                    Ok(value.as_bool() != Some(false))
+                }
+            }
+            Err(failure) => {
+                if failure.is_exception() {
+                    let (message, _) = exception_text(ctx, ctx.catch());
+                    Err(message)
+                } else {
+                    Err(failure.to_string())
+                }
             }
         }
-        Err(failure) => {
-            if failure.is_exception() {
-                let (message, _) = exception_text(ctx, ctx.catch());
-                Err(message)
-            } else {
-                Err(failure.to_string())
-            }
-        }
-    }
+    })
 }
 
 pub(super) fn side_effect(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
@@ -1202,8 +1203,7 @@ pub(super) fn install_exports<'js>(
     let function = Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
         // SAFETY: scene functions are destroyed before Engine drops Host.
         let host = unsafe { &*pointer };
-        let _active = host.enter(&ctx);
-        bind_canvas(host, &ctx, &args.0)
+        host.with_current(&ctx, || bind_canvas(host, &ctx, &args.0))
     })?;
     function.set_name("bindCanvas")?;
     core.set("bindCanvas", function)
@@ -1265,8 +1265,7 @@ fn bind_canvas<'js>(
         move |ctx: Ctx<'_>, _: Rest<Value<'_>>| -> rquickjs::Result<()> {
             // SAFETY: the paint effect is disposed before Engine drops Host.
             let host = unsafe { &*pointer };
-            let _active = host.enter(&ctx);
-            paint_binding(host, &ctx, index, generation);
+            host.with_current(&ctx, || paint_binding(host, &ctx, index, generation));
             Ok(())
         },
     )?;
@@ -1275,8 +1274,7 @@ fn bind_canvas<'js>(
         move |ctx: Ctx<'_>, _: Rest<Value<'_>>| -> rquickjs::Result<()> {
             // SAFETY: owner cleanup runs before Engine drops Host.
             let host = unsafe { &*pointer };
-            let _active = host.enter(&ctx);
-            release_binding(host.inner(), index, generation);
+            host.with_current(&ctx, || release_binding(host.inner(), index, generation));
             Ok(())
         },
     )?;

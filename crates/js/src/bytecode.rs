@@ -18,7 +18,7 @@ use crate::compile::CompileEnvironment;
 
 const BINDING_VERSION: &str = "quickjs-jit-0.14.2";
 const NG_REVISION: &str = "0fdea21";
-const BC_VERSION: u8 = 28;
+pub(crate) const BC_VERSION: u8 = 28;
 const MAGIC: &[u8; 4] = b"IQJS";
 
 const _: () = assert!(qjs::JS_READ_OBJ_ROM_DATA == 0);
@@ -42,11 +42,18 @@ impl std::error::Error for BytecodeError {}
 
 /// Envelope bytes produced by [`compile`] in this process.
 #[derive(Debug)]
-pub struct CompiledBytecode(Vec<u8>);
+pub struct CompiledBytecode {
+    bytes: Vec<u8>,
+    kind: Kind,
+}
 
 impl CompiledBytecode {
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+        &self.bytes
+    }
+
+    pub fn kind(&self) -> Kind {
+        self.kind
     }
 }
 
@@ -99,11 +106,18 @@ pub fn compile(
 ) -> Result<CompiledBytecode, BytecodeError> {
     let kind = if module { Kind::Module } else { Kind::Script };
     let payload = with_ctx(environment, |ctx| match kind {
-        Kind::Module => compile_module(ctx, source, name),
+        Kind::Module => {
+            let payload = compile_module(ctx, source, name)?;
+            environment.validate_module(ctx, name, &payload)?;
+            Ok(payload)
+        }
         Kind::Script => compile_script(ctx, source, name),
     })?;
     let version = bytecode_version()?;
-    Ok(CompiledBytecode(encode(&version, kind, &payload)?))
+    Ok(CompiledBytecode {
+        bytes: encode(&version, kind, &payload)?,
+        kind,
+    })
 }
 
 /// Rejects a missing magic, a different engine id, an unknown mode, or an empty payload.
@@ -207,13 +221,15 @@ fn with_ctx<T>(
 
 fn compile_module(ctx: &Ctx<'_>, source: &str, name: &str) -> Result<Vec<u8>, BytecodeError> {
     let module = Module::declare(ctx.clone(), name, source).map_err(|err| caught(ctx, err))?;
-    module
-        .write(WriteOptions {
-            endianness: WriteOptionsEndianness::Little,
-            strip_source: true,
-            ..WriteOptions::default()
-        })
-        .map_err(|err| caught(ctx, err))
+    write_module(&module).map_err(|err| caught(ctx, err))
+}
+
+pub(crate) fn write_module(module: &Module<'_>) -> rquickjs::Result<Vec<u8>> {
+    module.write(WriteOptions {
+        endianness: WriteOptionsEndianness::Little,
+        strip_source: true,
+        ..WriteOptions::default()
+    })
 }
 
 fn compile_script(ctx: &Ctx<'_>, source: &str, name: &str) -> Result<Vec<u8>, BytecodeError> {

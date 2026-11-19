@@ -179,3 +179,81 @@ fn host_contracts_are_send() {
     assert_send::<Arc<dyn HttpClient>>();
     assert_sync::<Arc<dyn HttpClient>>();
 }
+
+#[test]
+fn strict_module_registry_validates_shared_export_metadata() {
+    use js_host::{EventType, ModuleExports, RegistryError};
+
+    let module = Module {
+        name: "Storage",
+        specifier: "app:storage",
+        methods: vec![
+            Method::promise("delete", |_, _, _| {}).with_types("path: string", "void"),
+            sync_method("$delete", "present").with_types("", "string"),
+        ],
+        exports: ModuleExports {
+            object: true,
+            events: &[EventType {
+                name: "change",
+                payload: "{ path: string }",
+            }],
+            ..ModuleExports::default()
+        },
+    };
+    assert!(ModuleRegistry::try_new(vec![module.clone()]).is_ok());
+    assert_eq!(
+        module.export_names().collect::<Vec<_>>(),
+        [
+            "delete",
+            "$delete",
+            "addEventListener",
+            "removeEventListener",
+            "Storage"
+        ],
+    );
+    let declaration = module
+        .typescript_declaration()
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(declaration.contains("delete(path: string): Promise<void>;"));
+    assert!(declaration.contains("export { $$delete as delete };"));
+    assert!(declaration.contains("export declare function $delete(): string;"));
+    assert!(declaration.contains(
+        "export declare function addEventListener(type: \"change\", listener: (event: { path: string }) => void): void;"
+    ));
+
+    let with_method = |name| Module {
+        methods: vec![sync_method(name, "")],
+        ..module.clone()
+    };
+    for name in ["Storage", "addEventListener", "removeEventListener"] {
+        assert!(matches!(
+            ModuleRegistry::try_new(vec![with_method(name)]),
+            Err(RegistryError::DuplicateExport { name: found, .. }) if found == name
+        ));
+    }
+    assert!(matches!(
+        ModuleRegistry::try_new(vec![with_method("bad-name")]),
+        Err(RegistryError::InvalidExport { .. })
+    ));
+    assert!(matches!(
+        ModuleRegistry::try_new(vec![module.clone(), module.clone()]),
+        Err(RegistryError::DuplicateSpecifier("app:storage"))
+    ));
+    assert!(matches!(
+        ModuleRegistry::try_new(vec![
+            module.clone(),
+            Module {
+                specifier: "other",
+                ..module.clone()
+            },
+        ]),
+        Err(RegistryError::DuplicateName("Storage"))
+    ));
+    assert!(matches!(
+        ModuleRegistry::try_new(vec![Module {
+            specifier: "app/../storage",
+            ..module
+        }]),
+        Err(RegistryError::InvalidSpecifier("app/../storage"))
+    ));
+}

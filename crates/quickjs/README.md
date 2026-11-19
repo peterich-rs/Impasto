@@ -2,7 +2,7 @@
 
 包名是 `quickjs`。根 `Cargo.toml` 以依赖名 `rquickjs` 钉住 quickjs-jit 0.14.2，Cargo 构建唯一解释器。`linked/rt::Engine` 拥有 `Runtime`、`Context` 与 `Host`，并持有 `uicore::Tree` 和 `reactive::Graph` 的会话状态。所有调用与销毁都在渲染线程。宿主通过 `session::Session` 泵帧，`JsSession::take_script_error` 取出异常文本。
 
-`src/linked/rt` 注册 `scene`、`reactive`、`#reactive`、console、定时器与 `__host`。启动先安装原生绑定，再依次以脚本执行 `abi.js`、`scene.js`、`prelude.js`，以 ESM 执行 `reactive.js`，捕获并删除 `__reactive`，最后执行应用并排空 jobs。`prelude.js` 安装 fetch、WebSocket、URL、编码器和 AbortController。没有全局 `core`。
+`src/linked/rt` 注册 `scene`、`reactive`、`#reactive` 与 `__host`。`js::Runtime` 安装 console、performance 和定时器。启动执行 `abi.js` 和 `scene.js` 后，由 `js::standard::install_web` 注册 `legacy` profile 的 Web API，再执行 ESM `reactive-boot.js`。捕获并删除 `__reactive` 后执行应用并排空 jobs。
 
 节点是数字 `NodeId::to_raw()`，`0` 表示没有节点。场景属性在 `src/linked/scene.rs` 映射到 `abi.yml` 字段号，树更新继续通过 `src/linked/mutation.rs`。`src/scene.js` 提供查询、命令和插入范围归一化。布局和样式应用仍由 `uicore` 负责。Rust 绑定先完整解码 JS 样式为拥有型 `uicore::style::codec::Value`，再校验与提交；getter 抛错不提交部分来源。`build.rs` 只生成 `abi.rs`、`abi.js` 和 `packages/solid-renderer/src/mutation.gen.ts`。同步 `rect` 等查询冲刷 mutation、样式和所需布局。
 

@@ -1,11 +1,8 @@
 //! JavaScript argument decoding. Tree writes continue through linked::mutation.
-use std::cell::{Cell, RefCell};
-
 use super::super::{bridge, call, mutation};
 use super::*;
 use crate::abi::MutationOp;
-use rquickjs::{Array, ArrayBuffer, Coerced, FromJs, TypedArray, function::Rest};
-use session::PluginValue;
+use rquickjs::{Array, Coerced, FromJs, function::Rest};
 use uicore::style::codec::Value as StyleValue;
 
 pub(super) const GESTURES: &[(&str, i32)] = &[
@@ -183,8 +180,7 @@ pub(super) fn bind<'js>(
     let function = Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
         // SAFETY: VM functions are destroyed before Engine releases Host.
         let host = unsafe { &*pointer };
-        let _active = host.enter(&ctx);
-        native(host, &ctx, name, &args.0)
+        host.with_current(&ctx, || native(host, &ctx, name, &args.0))
     })?;
     function.set_name(name)?;
     object.set(name, function)
@@ -201,45 +197,38 @@ pub(super) fn install<'js>(host: &Host, ctx: &Ctx<'js>) -> rquickjs::Result<()> 
     host.refs.borrow_mut().scene = Some(Persistent::save(ctx, core.clone().into_value()));
     ctx.globals().set("__scene", core)?;
     let pointer = ptr::from_ref(host).cast_mut();
-    // SAFETY: `pointer` addresses the Host that owns these functions until shutdown.
-    js::standard::install_console(ctx, move |level, text| unsafe {
-        let host = &*pointer;
-        (host.inner().log)(level, text);
-    })?;
-    let timers = host.runtime.timers() as *const RefCell<Vec<Timer>>;
-    let next_id = host.runtime.next_id() as *const Cell<u64>;
-    let frame = host.runtime.turn() as *const Cell<u64>;
-    let mono = host.runtime.mono() as *const Cell<i64>;
-    let wants = pointer;
-    let on_zero = move || {
-        // SAFETY: `wants` addresses this host until shutdown.
-        unsafe { (*wants).wants_frame.set(true) };
-    };
-    // SAFETY: the timer cells live in this host for the whole session.
-    unsafe { js::standard::install_timers(ctx, timers, next_id, frame, mono, on_zero) }?;
-    js::standard::install_performance(ctx, move || {
-        // SAFETY: `pointer` addresses this host until shutdown.
-        let host = unsafe { &*pointer };
-        (host.runtime.mono().get() - host.runtime.origin().get().unwrap_or(0)) as f64
+    host.runtime.install_standard_bindings(ctx, move || {
+        // SAFETY: the installed callbacks die before the Engine drops Host.
+        unsafe { (*pointer).wants_frame.set(true) };
     })?;
     for name in ["requestAnimationFrame", "cancelAnimationFrame"] {
         bind(host, ctx, &ctx.globals(), name)?;
     }
-    let vm = ptr::from_ref(host.vm()).cast_mut();
-    let port: *const dyn js::host::IoPort = ptr::from_ref(host as &dyn js::host::IoPort);
-    let policy: *const dyn js::host::OperationPolicy =
-        ptr::from_ref(host as &dyn js::host::OperationPolicy);
-    // SAFETY: `vm`, `port`, and `policy` address this host until shutdown.
-    unsafe { js::host::install(ctx, vm, port, policy) }?;
+    host.runtime
+        .install_host(ctx, canvas::side_effect, move |name| {
+            // SAFETY: the installed callbacks die before the Engine drops Host.
+            unsafe { &*pointer }
+                .inner()
+                .config
+                .registry
+                .module(name)
+                .is_some()
+        })?;
+    let config = &host.inner().config;
+    host.runtime.install_modules(
+        ctx,
+        js::quickjs::binder::ModuleBindings::new(
+            config.registry.as_host_registry().clone(),
+            Arc::clone(&config.exec),
+        ),
+        canvas::side_effect,
+        Some(Arc::clone(&config.settle)),
+        config.post_delivery.clone(),
+    )?;
     rquickjs::Module::declare_def::<modules::GraphModule, _>(ctx.clone(), "#reactive")?;
     Ok(())
 }
 
-impl js::host::OperationPolicy for Host {
-    fn before<'js>(&self, ctx: &Ctx<'js>) -> rquickjs::Result<()> {
-        canvas::side_effect(ctx)
-    }
-}
 fn saved_function<'js>(ctx: &Ctx<'js>, args: &[Value<'js>], i: usize) -> rquickjs::Result<Saved> {
     let value = value(ctx, args, i);
     if !value.is_function() {
@@ -321,7 +310,7 @@ pub(super) fn native<'js>(
     name: &str,
     args: &[Value<'js>],
 ) -> rquickjs::Result<Value<'js>> {
-    js::host::OperationPolicy::before(host, ctx)?;
+    canvas::side_effect(ctx)?;
     let undefined = || Value::new_undefined(ctx.clone());
     let minimum = match name {
         "setStyle" | "patchStyle" | "setComponentStyle" | "setClass" | "setStyleSource"
@@ -543,7 +532,10 @@ pub(super) fn native<'js>(
         }
         "onBack" | "onSettings" => {
             let callback = saved_function(ctx, args, 0)?;
-            let id = host.alloc_id();
+            let id = host
+                .runtime
+                .allocate_timer_id()
+                .ok_or_else(|| rquickjs::Exception::throw_range(ctx, "callback IDs exhausted"))?;
             let mut refs = host.refs.borrow_mut();
             if name == "onBack" {
                 refs.backs.push((id, callback));
@@ -568,7 +560,10 @@ pub(super) fn native<'js>(
             let node = handle(ctx, args, 0)?;
             let prop = string(ctx, args, 1)?;
             let callback = saved_function(ctx, args, 2)?;
-            let id = host.alloc_id();
+            let id = host
+                .runtime
+                .allocate_timer_id()
+                .ok_or_else(|| rquickjs::Exception::throw_range(ctx, "callback IDs exhausted"))?;
             host.refs
                 .borrow_mut()
                 .motions
@@ -686,18 +681,22 @@ pub(super) fn native<'js>(
         "requestAnimationFrame" => {
             let function = saved_function(ctx, args, 0)?;
             let _ = optional_num(ctx, args, 1)?;
-            let id = host.alloc_id();
+            let id = host
+                .runtime
+                .allocate_timer_id()
+                .ok_or_else(|| rquickjs::Exception::throw_range(ctx, "callback IDs exhausted"))?;
             let extra = args
                 .iter()
                 .skip(2)
+                .take(8)
                 .cloned()
                 .map(|v| Persistent::save(ctx, v))
                 .collect();
             host.raf.borrow_mut().push(Timer {
                 id,
-                due: host.runtime.mono().get(),
+                due: 0,
                 interval: 0,
-                eligible_turn: host.runtime.turn().get() + 1,
+                eligible_turn: host.runtime.timer_turn().saturating_add(1),
                 kind: 2,
                 function,
                 extra,
@@ -719,85 +718,6 @@ pub(super) fn native<'js>(
         _ => return Err(type_error(ctx, "unknown native operation")),
     }
     Ok(undefined())
-}
-
-impl js::host::IoPort for Host {
-    fn http(&self, call: js::host::HttpCall) {
-        // SAFETY: the bridge copies these owned buffers before it returns.
-        unsafe {
-            if call.streaming {
-                bridge::http_stream_call(
-                    self.session(),
-                    call.token,
-                    call.method.as_ptr().cast(),
-                    call.method.len(),
-                    call.url.as_ptr().cast(),
-                    call.url.len(),
-                    call.headers.as_ptr().cast(),
-                    call.headers.len(),
-                    call.body.as_ptr(),
-                    call.body.len(),
-                );
-            } else {
-                bridge::http_call(
-                    self.session(),
-                    call.token,
-                    call.method.as_ptr().cast(),
-                    call.method.len(),
-                    call.url.as_ptr().cast(),
-                    call.url.len(),
-                    call.headers.as_ptr().cast(),
-                    call.headers.len(),
-                    call.body.as_ptr(),
-                    call.body.len(),
-                );
-            }
-        }
-    }
-
-    fn abort(&self, token: u64) {
-        // SAFETY: abort_token only touches this session's cancellation table.
-        unsafe { bridge::abort_token(self.session(), token) };
-    }
-
-    fn has_module(&self, name: &str) -> bool {
-        self.inner().config.registry.module(name).is_some()
-    }
-
-    fn open_socket(&self, url: String, protocols: String) -> u64 {
-        let id = self.socket.get().wrapping_add(1).max(1);
-        self.socket.set(id);
-        // SAFETY: socket_open copies the URL and protocol list before returning.
-        unsafe {
-            bridge::socket_open(
-                self.session(),
-                id,
-                url.as_ptr().cast(),
-                url.len(),
-                protocols.as_ptr().cast(),
-                protocols.len(),
-            );
-        }
-        id
-    }
-
-    fn send_socket(&self, id: u64, text: bool, data: Vec<u8>) {
-        // SAFETY: socket_send copies the payload before returning.
-        unsafe {
-            bridge::socket_send(
-                self.session(),
-                id,
-                data.as_ptr(),
-                data.len(),
-                i32::from(text),
-            );
-        }
-    }
-
-    fn close_socket(&self, id: u64) {
-        // SAFETY: the session owns this socket id.
-        unsafe { bridge::socket_close(self.session(), id) };
-    }
 }
 
 pub(super) fn settings<'js>(host: &Host, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
@@ -844,72 +764,4 @@ pub(super) fn read_bytes<'js>(
     bytes_of(ctx, value)?
         .map(Some)
         .ok_or_else(|| type_error(ctx, "expected bytes"))
-}
-pub(super) fn plugin_to_js<'js>(
-    ctx: &Ctx<'js>,
-    value: &PluginValue,
-) -> rquickjs::Result<Value<'js>> {
-    match value {
-        PluginValue::Null => Ok(Value::new_null(ctx.clone())),
-        PluginValue::Bool(v) => v.into_js(ctx),
-        PluginValue::F64(v) => v.into_js(ctx),
-        PluginValue::Str(v) => v.into_js(ctx),
-        PluginValue::Bytes(bytes) => {
-            if bytes.len() >= 4096 {
-                Ok(ArrayBuffer::new(ctx.clone(), bytes.clone())?.into_value())
-            } else {
-                Ok(TypedArray::<u8>::new(ctx.clone(), bytes.clone())?.into_value())
-            }
-        }
-        PluginValue::List(items) => {
-            let array = Array::new(ctx.clone())?;
-            for (i, item) in items.iter().enumerate() {
-                array.set(i, plugin_to_js(ctx, item)?)?;
-            }
-            Ok(array.into_value())
-        }
-        PluginValue::Map(items) => {
-            let object = Object::new(ctx.clone())?;
-            for (key, item) in items {
-                object.set(key.as_str(), plugin_to_js(ctx, item)?)?;
-            }
-            Ok(object.into_value())
-        }
-    }
-}
-pub(super) fn plugin_from_js<'js>(
-    ctx: &Ctx<'js>,
-    value: Value<'js>,
-    depth: usize,
-) -> rquickjs::Result<PluginValue> {
-    if depth > 256 {
-        return Err(type_error(ctx, "recursive module value"));
-    }
-    Ok(if value.is_null() || value.is_undefined() {
-        PluginValue::Null
-    } else if let Some(b) = value.as_bool() {
-        PluginValue::Bool(b)
-    } else if let Some(n) = value.as_number() {
-        PluginValue::F64(n)
-    } else if let Some(s) = value.as_string() {
-        PluginValue::Str(s.to_string()?)
-    } else if let Some(bytes) = bytes_of(ctx, &value)? {
-        PluginValue::Bytes(bytes)
-    } else if let Some(array) = value.as_array() {
-        let mut items = Vec::new();
-        for item in array.iter::<Value>() {
-            items.push(plugin_from_js(ctx, item?, depth + 1)?);
-        }
-        PluginValue::List(items)
-    } else if let Some(object) = value.as_object() {
-        let mut items = Vec::new();
-        for key in object.keys::<String>() {
-            let key = key?;
-            let item = object.get(key.as_str())?;
-            items.push((key, plugin_from_js(ctx, item, depth + 1)?));
-        }
-        PluginValue::Map(items)
-    } else {
-        PluginValue::Null
-    })
 }

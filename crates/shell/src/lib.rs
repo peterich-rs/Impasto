@@ -39,7 +39,8 @@ pub use images::{ImageDecoder, ImageError, ImageHandle, ImageReady};
 pub use log_sub::install as install_log;
 pub use log_sub::set_log_targets;
 pub use module_stubs::{
-    first_party_modules, module_stub_path, module_stub_source, package_folder, write_module_stubs,
+    check_module_stubs, first_party_modules, module_stub_path, module_stub_source, package_folder,
+    write_module_stubs,
 };
 pub use modules::{
     ClipboardHost, LinkingHost, PermissionsHost, StorageHost, app_state, async_storage, clipboard,
@@ -59,7 +60,7 @@ pub use tracing_subscriber::filter::{LevelFilter, Targets};
 pub type ConsoleLog = Box<dyn Fn(u8, &str)>;
 
 /// Host sink for one [`session::IoJob`].
-pub type IoSink = Box<dyn Fn(session::IoJob) + Send>;
+pub type IoSink = Box<dyn Fn(session::IoJob) -> Result<(), Box<session::IoJob>> + Send>;
 
 /// Builds the session on the render thread. The closure must not capture the engine.
 pub struct SessionOpen {
