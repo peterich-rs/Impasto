@@ -2,12 +2,7 @@
 
 跨平台 UI 框架。上层写细粒度响应式界面，下层用同一份场景描述，交给 Impeller 绘制，让各端像素一致。
 
-两条路线共用场景协议、渲染树和渲染引擎：
-
-| 路线 | 代码 | 现状 |
-|---|---|---|
-| Solid 2.0 TSX + QuickJS | `packages/solid-renderer`、`packages/solid-ui`、`packages/solid-router` | QuickJS 会话直接改 `uicore` 的渲染树。编译产物 ESM `apps/gallery-solid/dist/quotes.js` 由 `just gallery-dist` 本地生成，不进 git |
-| Kotlin lambda DSL | `kotlin` | 暂缓。Gradle 工程还在，界面 DSL、信号和原生嵌入未接，见 `docs/refactor-plan.md` |
+应用用 Solid 2.0 TSX 编写。`packages/solid-renderer`、`packages/solid-ui` 和 `packages/solid-router` 提供渲染器、控件与路由。QuickJS 会话更新 `uicore` 的渲染树。
 
 macOS 宿主在 `crates/macos`，用 Impeller standalone SDK 的 Metal 后端。Android 宿主在 `crates/android`，用同一份 SDK 的 Vulkan 后端。没有 SDK 时渲染引擎返回 `NotLinked`，测试仍可通过。iOS 的预构建矩阵没有这一列，宿主还没写。未落地的迭代规划在 `docs/refactor-plan.md`。
 
@@ -20,23 +15,22 @@ macOS 宿主在 `crates/macos`，用 Impeller standalone SDK 的 Metal 后端。
 | `docs/toolchain-design.md` | 工具链与原生响应式设计 |
 | `docs/toolchain-baseline.md` | gallery 点击和滚动的对照数据 |
 | `docs/refactor-plan.md` | 还没做的事 |
-| `AGENTS.md` | 改代码时的边界。当前行为以源码为准 |
+| `AGENTS.md` | 目标架构与工作约定 |
 
 ## 环境
 
 - Rust stable，版本由 `rust-toolchain.toml` 决定
 - [just](https://github.com/casey/just)
-- JDK 21
 - Node.js 22 或更新，测试用 `node --experimental-strip-types`
 - macOS 窗口另需 Xcode，以及本机 arm64
-- Android 包另需 NDK，以及 `android-arm64` 的 Impeller SDK
+- Android 包另需 JDK、SDK、NDK，以及 `android-arm64` 的 Impeller SDK
 
 这些内容不在 git 里，要用时再取：
 
 | 路径 | 取法 |
 |---|---|
 | `third_party/impeller-sdk/` | `engine/fetch-impeller-sdk.sh` |
-| `third_party/solid/`、`third_party/kiteui/` | 见 `third_party/README.md`。`just check` 不读它们 |
+| `third_party/solid/` | 见 `third_party/README.md`。`just check` 不读该检出 |
 | `build/` | 下载缓存。脚本自己创建 |
 
 ## 检查
@@ -45,7 +39,7 @@ macOS 宿主在 `crates/macos`，用 Impeller standalone SDK 的 Metal 后端。
 just check
 ```
 
-依次跑 `cargo test --workspace`、Kotlin 的 `:library:jvmTest`、Solid 的组件测试与原生响应式对照。不打开窗口。
+运行样式声明检查、Clippy、Rust workspace 测试、Solid 测试和 JS 标准库契约检查。
 
 QuickJS 测试始终运行 Cargo 构建的 quickjs-jit 0.14.2。没有 SDK 时，渲染引擎的图形测试不编译。
 
@@ -108,12 +102,9 @@ packages/net/               createFetch
 packages/form/              createForm
 packages/i18n/              formatNumber、formatDate、plural
 packages/permissions/       权限 API
-kotlin/                     Kotlin DSL。目前只开了 JVM 目标
 apps/gallery-solid/         Solid 模拟盘。行情工作台、Canvas 图表、自选和模拟交易。ESM 产物 dist/quotes.js 本地构建，不提交
 tools/                      node 测试的 register.mjs 和 resolve-hook.mjs
 ```
-
-仓库根上的 `settings.gradle.kts` 没有 `include`，用来挡住 Gradle 往家目录继续找工程。Kotlin 工程在 `kotlin`。
 
 ## 许可证
 

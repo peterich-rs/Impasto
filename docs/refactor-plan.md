@@ -2,9 +2,9 @@
 
 已落地的行为以代码和 `docs/architecture.md` 为准。这里只留还没做的。
 
-## Impeller 与桌面渲染
+## 渲染后端与平台宿主
 
-Flutter 3.50.0 配套 SDK 的构建、打包、CI 以及桌面渲染后端的边界见 [接入 Flutter 3.50.0 的 Impeller SDK 并分离桌面渲染后端](rendering-design.md)。
+桌面渲染后端的接口设计见 [渲染后端](rendering-design.md)。iOS、Linux 和 Windows 需要各自的窗口、表面和输入适配。
 
 ## 样式与布局
 
@@ -70,10 +70,8 @@ macOS 已实现权限五法。还差：
 
 ## 暂缓
 
-- Kotlin 全部。触发条件是 Solid 被第二个真实应用消费。重启时走 `crates/quickjs/abi.yml` 的变更缓冲，信号用已发布的 `com.lightningkite:reactive`。
-- `crates/ios`。预构建矩阵出现 iOS 列之前不写。
 - 外接 devtools 协议服务。触发条件是第二个真实应用。应用内面板已经在 `packages/devtools`。
-- Picture 字节。只在 Rust 里编解码一张 picture 的局部 `DrawList`，不包含 `LayerTree`。不定 opcode，不提交金样。TypeScript 和 Kotlin 不写对照实现。
+- Picture 字节。只在 Rust 里编解码一张 picture 的局部 `DrawList`，不包含 `LayerTree`。不定 opcode，不提交金样。
 - 跨 picture 选区。触发条件是阅读序，以及两端点之间的节点集合。
 - 导航往返之后，`picture_writes` 只计仍在树上的页面 picture。
 - 把 `submit_layers` 挪到单独的 gpu 线程。`Engine` 仍和会话一起在渲染线程上。

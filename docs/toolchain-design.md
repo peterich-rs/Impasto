@@ -511,7 +511,7 @@ export default function Main() {
 
 **File: `docs/architecture.md`**、**`README.md`**、**`justfile`**
 
-- 把 `hostshell`、`HostActivity` 的描述改成改名后的路径。`HostActivity` 是 Android 框架类名的话留在 Kotlin 侧另说；Rust 文件不再叫 host。这一阶段只改仓库自己的名字。
+- 更新 `hostshell` 和 Android `HostActivity` 的文档路径。这一阶段只改仓库自己的名字。
 
 公开文档和日志 target 里的 `impasto::host`（`shell.rs:745`）改成 `impasto::shell` 或 `impasto::input`。不留 host 前缀。
 
@@ -568,7 +568,7 @@ export default function Main() {
 - `Eval::dup` / `free` 是引用计数，不是序列化。漏 `free` 会卡住 QuickJS 的 GC。节点复用前必须 `free` 掉旧 `Value`。
 - `NodeId` 的 generation 继续由 `uicore` 管。`reactive` 的 generation 只管图节点。两套代数不要塞进同一个整数。
 - 滚动、fling、越界弹簧继续在 `Tree::motions`。`run_updates` 不采样它们。
-- 明确不动：`protocol` 的 `DrawList` / `LayerTree`、`engine` 的 Impeller、`ListDriver` 的可见集、Kotlin 路线（`docs/refactor-plan.md` 仍暂缓）、iOS 宿主、oxc 打包器、nsh 式热更新服务、`MountBatch`。样式对象不在这份方案里。
+- 明确不动：`protocol` 的 `DrawList` / `LayerTree`、`engine` 的 Impeller、`ListDriver` 的可见集、iOS 宿主、oxc 打包器、nsh 式热更新服务、`MountBatch`。样式对象不在这份方案里。
 - 新依赖：`crates/cli` 用 `clap`。`crates/reactive` 不新增第三方依赖。应用运行时不再依赖 `solid-js` 和 `@solidjs/universal` 的实现；类型声明可以由垫片携带。阶段 2 完成前 `package.json` 里的 `solid-js` 版本号还留着，给对照测试用。
 - 不把 nsh 当 crate 依赖引进来。结构和测试夹具是参照，代码不链接 `nsh-core`。
 

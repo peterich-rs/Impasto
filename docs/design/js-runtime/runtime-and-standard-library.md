@@ -307,7 +307,7 @@ cargo test --workspace --exclude macos
 pnpm -r test
 ```
 
-CI 运行 `cargo run --locked -p shell --bin module-stubs -- --check` 和 `just standard-check` 对应的标准库契约检查。macOS runner 在同一 SHA 执行本机 `cargo clippy -p macos --all-targets -- -D warnings` 和 `cargo test -p macos`，另记带 SDK 的宿主启动结果。Android 将 `just android`、`just android-release`、`android-x64` 模拟器和实体设备分别记录，注明 ABI、构建 profile、SDK/NDK 与运行场景。Kotlin 用 `kotlin/gradlew -p kotlin :library:jvmTest`，出现 `NO-SOURCE` 单独记任务结果。iOS 仍受预构建 SDK 矩阵约束。可用命令与系统矩阵见 [justfile](../../../justfile) 和 [CI](../../../.github/workflows/check.yml)。
+CI 运行 `cargo run --locked -p shell --bin module-stubs -- --check` 和 `just standard-check` 对应的标准库契约检查。macOS runner 在同一 SHA 执行本机 `cargo clippy -p macos --all-targets -- -D warnings` 和 `cargo test -p macos`，另记带 SDK 的宿主启动结果。Android 将 `just android`、`just android-release`、`android-x64` 模拟器和实体设备分别记录，注明 ABI、构建 profile、SDK/NDK 与运行场景。iOS 尚无宿主。可用命令与系统矩阵见 [justfile](../../../justfile) 和 [CI](../../../.github/workflows/check.yml)。
 
 ## 13. 性能与资源保护
 

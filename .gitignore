@@ -11,9 +11,7 @@ crates/android/apk/app/src/main/assets/
 crates/android/apk/app/src/main/jniLibs/
 third_party/quickjs/
 third_party/solid/
-third_party/kiteui/
 .gradle/
-.kotlin/
 .DS_Store
 cmake-build-*/
 compile_commands.json

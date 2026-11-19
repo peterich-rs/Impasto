@@ -50,7 +50,6 @@ Release 在同一 macOS 上用同一 Gallery bundle 和夹具交错测量，每�
 | macOS arm64 | 使用已链接 Impeller SDK 启动 Gallery，提交首帧并输出 720 × 1280 PNG |
 | Android arm64 | `just android` 和 `just android-release` 构建成功。独立 ID 的 debug APK 在 Pixel 9（API 37）与 ARM64 模拟器（API 34）冷启动并提交 Vulkan 首帧 |
 | Android x64 | 用 NDK 的 API 24 x86_64 编译器构建 `x86_64-linux-android` debug 原生库并核对 ELF ABI |
-| Kotlin | `kotlin/gradlew -p kotlin :library:jvmTest` 成功，任务结果为 `NO-SOURCE` |
 
 ## 性能样本
 

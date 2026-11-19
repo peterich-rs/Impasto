@@ -62,7 +62,7 @@ API 以已发布的 0.15.1 源码为准，外部 latest 页面只用于确认版
 6. **文字测量接入完整 LayoutOutput。** 从 Impeller 度量提供固有尺寸和第一基线，交给 Taffy 进行父布局；删除布局后的基线修正，避免两套几何结果。
 7. **样式层保留来源与 Reset。** 从最终 Taffy Style 反推声明会丢掉撤销与继承信息；已提交样式只作结果缓存。
 8. **高频更新不转 CSS 文本。** 普通 style 走生成的类型化批量记录；Grid 任意值的有限字符串语法复用 Taffy parse。文本解码不重复承担对象、数组和复杂绘制值的协议职责。
-9. **使用发布的缓存实现。** 类规则缓存采用 `lru` 0.18.5（MIT，default-features=false），补充字节预算；不维护自制链表。尚未引入的依赖在实施时登记到 AGENTS.md。
+9. **使用发布的缓存实现。** 类规则缓存采用 `lru` 0.18.5（MIT，default-features=false），补充字节预算。
 10. **默认值与应用迁移同批完成。** 新 View 可以先采用目标预设，旧构造器保持当前预设至迁移完成；不能根据“是否写了 style”隐式切换布局语义。
 
 ### 2. Taffy 能力矩阵
@@ -536,7 +536,7 @@ Tree 持有类型化环境。Session 将 metrics/settings 的变化转发给 Tre
 
 ## 阶段 4：完成原生工具类、主题和缓存
 
-**文件：`crates/uicore/Cargo.toml`、`Cargo.lock`、`style/classes.rs`（拆分删除）、`style/classes/{mod,parse,rules,variants,cache}.rs`（新增）、`style/environment.rs`、`tree/{style,gesture,semantics}.rs`、`AGENTS.md`。**
+**文件：`crates/uicore/Cargo.toml`、`Cargo.lock`、`style/classes.rs`（拆分删除）、`style/classes/{mod,parse,rules,variants,cache}.rs`（新增）、`style/environment.rs`、`tree/{style,gesture,semantics}.rs`。**
 
 - 引入已发布 lru 0.18.5，记录许可证与用途；实现含规则成本的容量预算。
 - 实现支持矩阵、严格词法、显式变体排序与 token 延迟求值。
@@ -626,7 +626,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p uicore --no-deps
 - protocol::DrawList/LayerTree 的 opcode 不变；现有矩形、裁剪和合成层负责统一边框与效果。四边不同描边等不完整能力明确排除。
 - 审核 tools/pack.mjs、analyze.mjs、distribute.mjs 的入口、exports 和复制规则；仅在分发验证发现遗漏时修改，不扩展为新的样式编译工具链。
 - calc、static/fixed/sticky、完整 contain、float、复杂选择器和任意 CSS 不以近似行为加入支持表。对应需求出现时，以最小回归和边界设计另行扩展。
-- Kotlin、iOS 与图片增强继续遵循 refactor-plan；样式领域类型不绑定当前只有两个宿主。
+- 样式领域类型与宿主平台解耦。iOS 与图片增强见 `docs/refactor-plan.md`。
 - 本文为设计交付，未切换产品默认值、接入新绑定或引入计划依赖；隔离 API 验证不替代完整产品验收。
 
 ## 文件变更汇总
