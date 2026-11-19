@@ -725,7 +725,7 @@ pub(super) fn native<'js>(
                     host.mono.get().saturating_add(delay)
                 },
                 interval: if kind == 1 { delay } else { 0 },
-                min_frame: host.frame.get() + 1,
+                eligible_turn: host.frame.get() + 1,
                 kind,
                 function,
                 extra,

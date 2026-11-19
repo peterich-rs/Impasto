@@ -296,8 +296,8 @@ pub(in crate::linked) unsafe fn vm_drain_jobs(
 pub(in crate::linked) unsafe fn vm_jobs_pending(pointer: *mut Host) -> i32 {
     i32::from(
         host(pointer)
-            .runtime
-            .as_ref()
+            .vm
+            .runtime()
             .is_some_and(Runtime::is_job_pending),
     )
 }
@@ -469,21 +469,11 @@ fn fire(host: &Host, raf: bool, err: *mut c_char, len: usize) -> i32 {
     for _ in 0..if raf { usize::MAX } else { 64 } {
         let callback = {
             let mut timers = host.timers.borrow_mut();
-            let Some(timer) = timers.iter_mut().find(|timer| {
-                timer.active
-                    && (timer.kind == 2) == raf
-                    && timer.min_frame <= host.frame.get()
-                    && (raf || timer.due <= host.mono.get())
-            }) else {
+            let Some(callback) =
+                js::poll_timer(&mut timers, raf, host.frame.get(), host.mono.get())
+            else {
                 break;
             };
-            let callback = (timer.function.clone(), timer.extra.clone());
-            if timer.kind == 1 {
-                timer.due = host.mono.get().saturating_add(timer.interval.max(0));
-                timer.min_frame = host.frame.get() + 1;
-            } else {
-                timer.active = false;
-            }
             callback
         };
         host.with(|ctx| {
@@ -513,7 +503,7 @@ fn fire(host: &Host, raf: bool, err: *mut c_char, len: usize) -> i32 {
             .timers
             .borrow()
             .iter()
-            .any(|t| t.kind != 2 && t.min_frame <= host.frame.get() && t.due <= host.mono.get())
+            .any(|t| t.kind != 2 && t.eligible_turn <= host.frame.get() && t.due <= host.mono.get())
     {
         host.wants_frame.set(true);
     }
@@ -539,7 +529,8 @@ pub(in crate::linked) unsafe fn vm_needs_frame(pointer: *mut Host) -> i32 {
         !h.paused.get()
             && h.timers.borrow().iter().any(|t| {
                 t.active
-                    && (t.kind == 2 || t.min_frame <= h.frame.get() + 1 && t.due <= h.mono.get())
+                    && (t.kind == 2
+                        || t.eligible_turn <= h.frame.get() + 1 && t.due <= h.mono.get())
             }),
     )
 }

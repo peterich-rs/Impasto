@@ -1,7 +1,7 @@
 //! Header helpers for the QuickJS host globals.
 
 pub(super) const ABI_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/abi.js"));
-pub(super) const PRELUDE: &str = include_str!("../prelude.js");
+pub(super) const PRELUDE: &str = js::LEGACY_PRELUDE;
 pub(super) const SCENE_JS: &str = include_str!("../scene.js");
 
 pub(super) const REACTIVE_BOOT: &str = include_str!("../reactive.js");
