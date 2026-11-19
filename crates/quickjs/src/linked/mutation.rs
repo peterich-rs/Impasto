@@ -1053,6 +1053,8 @@ fn apply_style(
 }
 
 pub(super) fn apply_now(inner: &Inner, mutation: Mutation) -> Result<Applied, uicore::Error> {
+    let trace = inner.marks.trace_enabled.get();
+    let started = trace.then(std::time::Instant::now);
     // Read the authoritative node before invoking a setter. Equal writes do
     // not cross into Tree::set_*. No JS property cache or second tree is kept.
     let unchanged = {
@@ -1067,6 +1069,14 @@ pub(super) fn apply_now(inner: &Inner, mutation: Mutation) -> Result<Applied, ui
         }
     };
     if unchanged {
+        if let Some(started) = started {
+            super::frame::bump(&inner.marks.mutation_calls);
+            super::frame::bump(&inner.marks.mutation_equal);
+            inner
+                .marks
+                .mutation_time
+                .set(inner.marks.mutation_time.get() + started.elapsed());
+        }
         return Ok(Applied {
             id: None,
             source: None,
@@ -1082,10 +1092,21 @@ pub(super) fn apply_now(inner: &Inner, mutation: Mutation) -> Result<Applied, ui
             | Mutation::SetStyleSurface { .. }
             | Mutation::Recognizers { .. }
     );
+    let text_write = trace && matches!(mutation, Mutation::SetText { .. });
     let applied = {
         let mut tree = inner.tree.borrow_mut();
         apply(&mut tree, mutation)?
     };
+    if let Some(started) = started {
+        super::frame::bump(&inner.marks.mutation_calls);
+        if text_write {
+            super::frame::bump(&inner.marks.text_writes);
+        }
+        inner
+            .marks
+            .mutation_time
+            .set(inner.marks.mutation_time.get() + started.elapsed());
+    }
     if styled {
         super::frame::bump(&inner.marks.sets);
     }
@@ -1101,6 +1122,7 @@ pub(super) fn flush_mutations(inner: &Inner) -> Result<bool, uicore::Error> {
     if pending.is_empty() {
         return Ok(false);
     }
+    let _trace = session::trace::Section::begin(c"Impasto mutation flush");
     for rec in pending {
         let mutation = parse(&rec)?;
         apply_now(inner, mutation)?;

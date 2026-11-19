@@ -138,6 +138,8 @@ pub struct SubmitStats {
     pub picture_rebuilt: u32,
     pub picture_reused: u32,
     pub layer_count: u32,
+    pub picture_prepare: std::time::Duration,
+    pub compose: std::time::Duration,
     /// Live cache entries after the submit. `paragraphs`, `pictures`, and
     /// `textures` replace the one-shot stderr warnings the caches used to
     /// print when they exceeded their caps.

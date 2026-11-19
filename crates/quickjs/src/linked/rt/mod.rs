@@ -72,7 +72,7 @@ impl Host {
         self.inner().tree.borrow_mut().discard_if_unattached(id);
     }
 
-    fn inner(&self) -> &Inner {
+    pub(super) fn inner(&self) -> &Inner {
         // SAFETY: Engine keeps Inner allocated until Context and Runtime have been dropped.
         unsafe { &*self.inner }
     }

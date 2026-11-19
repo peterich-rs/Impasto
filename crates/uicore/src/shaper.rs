@@ -178,6 +178,10 @@ pub fn paint_key(
 pub trait Shaper {
     fn begin_frame(&mut self) {}
     fn end_frame(&mut self) {}
+    /// Measurement-cache hits and misses in the current stats interval.
+    fn measure_cache_counts(&self) -> (u32, u32) {
+        (0, 0)
+    }
     /// Register a face used by later measurements. The default ignores it.
     /// Hosts that draw register the same bytes on the gpu context separately.
     fn register_font(&mut self, _family: &str, _bytes: &[u8]) -> bool {
@@ -249,6 +253,9 @@ impl Shaper for Box<dyn Shaper> {
     }
     fn end_frame(&mut self) {
         (**self).end_frame();
+    }
+    fn measure_cache_counts(&self) -> (u32, u32) {
+        (**self).measure_cache_counts()
     }
     fn register_font(&mut self, family: &str, bytes: &[u8]) -> bool {
         (**self).register_font(family, bytes)

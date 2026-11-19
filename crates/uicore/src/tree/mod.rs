@@ -17,7 +17,7 @@ mod text;
 pub use debug::{DebugAxis, LayoutIssue};
 #[cfg(test)]
 pub(crate) use hit::Affine;
-pub use layout::{LayoutCause, LayoutTrace};
+pub use layout::{LayoutCause, LayoutTrace, RootLayoutTrigger, TextProbeTrace};
 pub use node::{
     Alignment, AxisSize, BoxEdge, Discarded, DragClaim, Edges, FocusDirection, Gesture, GridLine,
     Inset, Justify, NodeId, PanelAlign, Rect, RowCrossAlign, ScrollEdge, SubtreeSpace, TrackSize,
@@ -94,6 +94,7 @@ pub struct Tree {
     layer_top: Option<protocol::LayerId>,
     /// Commands written into pictures by the latest `record`.
     picture_writes: usize,
+    layer_record_visits: u32,
     /// Bumps when a picture is rebuilt or a layer property changes.
     layer_epoch: u64,
     canvas_geometry_epoch: u64,
@@ -105,6 +106,7 @@ pub struct Tree {
     image_generation: u64,
     /// Offset notices produced by [`Tree::tick_motions`], drained by the session.
     scroll_notices: Vec<Gesture>,
+    scroll_paint_updates: u32,
     /// Style or structure must run Taffy again.
     needs_layout: bool,
     /// Paint changed. Layout boxes stay valid.
@@ -123,12 +125,15 @@ pub struct Tree {
     /// `layout` calls that entered Taffy since the last trace.
     layout_entries: u32,
     root_layouts: u32,
+    root_layout_trigger: Option<RootLayoutTrigger>,
     local_layouts: u32,
     same_text_layouts: u32,
     /// First reason `needs_layout` became true since the last trace.
     layout_cause: LayoutCause,
     text_reused: Cell<u32>,
     text_shaped: Cell<u32>,
+    trace_text_probes: bool,
+    text_probes: TextProbeTrace,
     /// `layout_passes` already published by [`Tree::semantics_patch`].
     semantics_layout_seen: u64,
     /// Scroll nodes whose offset changed since the last full semantics walk.

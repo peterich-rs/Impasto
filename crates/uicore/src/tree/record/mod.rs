@@ -198,6 +198,7 @@ impl Tree {
         self.sync_metrics();
         self.finish_measure();
         self.picture_writes = 0;
+        self.layer_record_visits = 0;
         self.layers.layers.clear();
         self.layers.pictures.clear();
         self.layer_stack.clear();
@@ -281,6 +282,11 @@ impl Tree {
             self.layers.layers.len(),
             self.pictures.len() + self.runs.values().map(Vec::len).sum::<usize>(),
         )
+    }
+
+    /// Entries visited while assembling layers in the last record.
+    pub fn layer_record_visits(&self) -> u32 {
+        self.layer_record_visits
     }
 
     #[cfg(test)]
@@ -528,6 +534,7 @@ impl Tree {
         ancestor_scroll: (f32, f32),
         clip: Option<PaintClip>,
     ) {
+        self.layer_record_visits = self.layer_record_visits.saturating_add(1);
         let Some(node) = self.get(id) else {
             return;
         };

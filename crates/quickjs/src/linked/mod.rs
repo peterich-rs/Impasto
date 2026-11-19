@@ -755,6 +755,9 @@ impl Session for JsSession {
         let stamp = std::time::Instant::now();
         {
             let mut tree = inner.tree.borrow_mut();
+            let trace_enabled = Section::enabled() || inner.trace.get();
+            inner.marks.trace_enabled.set(trace_enabled);
+            tree.trace_text_probes(trace_enabled);
             tree.prepare_sync_stats();
             inner.ime.borrow_mut().sync_editor(&mut tree);
             if inner.reduce_motion.get() {
@@ -978,6 +981,13 @@ impl Session for JsSession {
                         self.note_record_err(&message);
                     }
                 }
+                Section::event(|| {
+                    format!(
+                        "Impasto record work visits={} ops={}",
+                        tree.layer_record_visits(),
+                        tree.picture_writes()
+                    )
+                });
                 tree.clear_paint();
             }
             // Fresh overflow findings go to the log as warnings; the
@@ -1014,7 +1024,21 @@ impl Session for JsSession {
             let semantics = tree.semantics_patch();
             let semantics_ms = elapsed_ms(semantics_started);
             let (layout_ms, sync_ms) = tree.layout_timing();
+            let (sync_visited, sync_synced) = tree.sync_stats();
+            let scroll_paint_updates = tree.take_scroll_paint_updates();
             let layout_trace = tree.take_layout_trace();
+            if let Some(trigger) = layout_trace.root_trigger {
+                Section::event(|| {
+                    let node = trigger.node.map_or(0, NodeId::to_raw);
+                    match trigger.node.and_then(|id| tree.rect(id).ok()) {
+                        Some(rect) => format!(
+                            "Impasto root cause={} node={node} x={:.0} y={:.0} w={:.0} h={:.0}",
+                            trigger.cause, rect.x, rect.y, rect.w, rect.h,
+                        ),
+                        None => format!("Impasto root cause={} node={node}", trigger.cause),
+                    }
+                });
+            }
             inner.ime.borrow_mut().sync_editor(&mut tree);
             drop(tree);
             let trace = session::FrameTrace {
@@ -1061,15 +1085,70 @@ impl Session for JsSession {
                     trace.canvas_redraws,
                 )
             });
+            if layout_trace.passes != 0 || sync_visited != 0 {
+                Section::event(|| {
+                    format!(
+                        "Impasto layout work taffy_us={:.0} sync_us={:.0} hits={} misses={} shaped={} checked={} synced={}",
+                        layout_ms * 1000.0,
+                        sync_ms * 1000.0,
+                        layout_trace.cache_hits,
+                        layout_trace.cache_misses,
+                        layout_trace.text_shaped,
+                        sync_visited,
+                        sync_synced,
+                    )
+                });
+            }
+            if scroll_paint_updates != 0 {
+                Section::event(|| format!("Impasto scroll work changes={scroll_paint_updates}"));
+            }
+            let probes = layout_trace.text_probes;
+            if !probes.check_time.is_zero() {
+                Section::event(|| {
+                    format!(
+                        "Impasto text probes check_us={} measure_us={} queries={} intrinsic={} repeat={} hit={} miss={}",
+                        probes.check_time.as_micros(),
+                        probes.measure_time.as_micros(),
+                        probes.queries,
+                        probes.intrinsic,
+                        probes.repeated,
+                        probes.cache_hits,
+                        probes.cache_misses,
+                    )
+                });
+            }
+            if inner.marks.callbacks.get() != 0 || inner.marks.mutation_calls.get() != 0 {
+                Section::event(|| {
+                    format!(
+                        "Impasto script work callbacks={} callback_us={} mutations={} equal={} mutation_us={} text={}",
+                        inner.marks.callbacks.get(),
+                        inner.marks.callback_time.get().as_micros(),
+                        inner.marks.mutation_calls.get(),
+                        inner.marks.mutation_equal.get(),
+                        inner.marks.mutation_time.get().as_micros(),
+                        inner.marks.text_writes.get(),
+                    )
+                });
+            }
             if inner.trace.get() {
                 tracing::info!(
                     target: "impasto::script",
                     script_us = ((script_ms + layout_cb_ms) * 1000.0).round() as u64,
                     updates = trace.updates,
                     sets = trace.sets,
+                    callbacks = inner.marks.callbacks.get(),
+                    text_writes = inner.marks.text_writes.get(),
+                    text_probe_us = probes.check_time.as_micros() as u64,
+                    text_measure_us = probes.measure_time.as_micros() as u64,
+                    text_queries = probes.queries,
+                    text_intrinsic = probes.intrinsic,
+                    text_queries_repeated = probes.repeated,
+                    measure_hits = probes.cache_hits,
+                    measure_misses = probes.cache_misses,
                     "frame"
                 );
             }
+            inner.marks.reset_trace();
             let again = self.wants_frame();
             session::FrameOutput {
                 layers,

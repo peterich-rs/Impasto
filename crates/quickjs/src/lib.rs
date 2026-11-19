@@ -1563,6 +1563,9 @@ import * as core from "scene";
         click(session.as_mut(), x, y);
         let _opening = wait_for_text(session.as_mut(), &mut time, "‹ 返回");
         let detail = wait_for_text(session.as_mut(), &mut time, "价格区间");
+        let (daily_x, daily_y) = text_spot(&detail, "1D");
+        click(session.as_mut(), daily_x, daily_y);
+        let detail = wait_for_text(session.as_mut(), &mut time, "MA5");
         let (pause_x, pause_y) = text_spot(&detail, "Ⅱ");
         click(session.as_mut(), pause_x, pause_y);
         // A quiet frame did not re-record a canvas. The chart box from the last
@@ -1636,11 +1639,22 @@ import * as core from "scene";
         };
         same_chart(&dragged, "crosshair opens");
         assert_eq!(redraws(&dragged), 0, "press and drag must skip Canvas draw");
+        let first_readout = texts(&dragged);
         session.pointer(PointerEvent::new(Phase::Move, x + 48.0, y, time));
         time += 16.0;
         let dragged = session.frame(session::FrameTime::at(time));
         same_chart(&dragged, "horizontal drag again");
         assert!(volume_readout(&dragged));
+        assert_ne!(texts(&dragged), first_readout);
+        assert_eq!(
+            dragged
+                .phases
+                .expect("timed gallery frame")
+                .trace
+                .root_layouts,
+            0,
+            "changing the selected daily bar should keep ancestor layout"
+        );
 
         session.pointer(PointerEvent::new(Phase::Cancel, x + 48.0, y, time));
         time += 16.0;

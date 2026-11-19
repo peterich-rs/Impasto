@@ -3,6 +3,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use taffy::prelude::*;
 use taffy::style::{ExpandedDimension, ExpandedLengthPercentage, ExpandedLengthPercentageAuto};
@@ -40,7 +41,7 @@ impl Tree {
         self.note_layout(LayoutCause::Viewport);
         if let Some(root) = self.root {
             if let Some(taffy) = self.node(root)?.taffy {
-                self.taffy.dirty_root(taffy);
+                self.taffy.dirty_root(taffy, "viewport");
             }
             self.mark_layout_from(root);
             self.dirty_every_picture();
@@ -100,8 +101,13 @@ impl Tree {
         }
     }
 
+    pub fn trace_text_probes(&mut self, enabled: bool) {
+        self.trace_text_probes = enabled;
+    }
+
     /// Layout counters since the previous take. The next frame starts at zero.
     pub fn take_layout_trace(&mut self) -> LayoutTrace {
+        let (cache_hits, cache_misses) = self.taffy.take_cache_counts();
         let trace = LayoutTrace {
             laywork_ms: self.layout_work_ms,
             passes: self.layout_entries,
@@ -110,7 +116,11 @@ impl Tree {
             same_text_layouts: self.same_text_layouts,
             text_reused: self.text_reused.take(),
             text_shaped: self.text_shaped.take(),
+            text_probes: std::mem::take(&mut self.text_probes),
             cause: self.layout_cause,
+            root_trigger: self.root_layout_trigger.take(),
+            cache_hits,
+            cache_misses,
         };
         self.layout_work_ms = 0.0;
         self.layout_entries = 0;
@@ -1168,13 +1178,13 @@ impl Tree {
             },
             None => Size::MAX_CONTENT,
         };
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let mut measured = Vec::new();
         self.open_measure();
         self.check_changed_text()?;
         self.taffy.begin_layout();
-        let taffy_started = std::time::Instant::now();
-        let (root_pass, local) = {
+        let taffy_started = Instant::now();
+        let (root_trigger, local) = {
             let mut env = MeasureEnv {
                 slots: &self.slots,
                 shaper: &mut *self.shaper,
@@ -1188,19 +1198,20 @@ impl Tree {
                     measure_leaf(&mut env, known, available, context, &mut measured)
                 })
             };
-            let (root_pass, local) = self.taffy.relayout(!self.laid_out, &mut measure);
-            if root_pass {
+            let (root_trigger, local) = self.taffy.relayout(!self.laid_out, &mut measure);
+            if root_trigger.is_some() {
                 self.taffy
                     .compute_layout_with_measure(root_taffy, available, &mut measure);
             }
-            (root_pass, local)
+            (root_trigger, local)
         };
         self.taffy_ms += taffy_started.elapsed().as_secs_f64() * 1000.0;
         for id in measured {
             self.note_text(id);
         }
-        if root_pass {
+        if let Some(trigger) = root_trigger {
             self.place_boundary(root)?;
+            self.root_layout_trigger.get_or_insert(trigger);
             self.root_layouts = self.root_layouts.saturating_add(1);
         } else {
             for &id in &local {
@@ -1210,7 +1221,7 @@ impl Tree {
         self.local_layouts = self
             .local_layouts
             .saturating_add(crate::cast::u32_from_usize(local.len()));
-        if root_pass || !local.is_empty() {
+        if root_trigger.is_some() || !local.is_empty() {
             self.layout_passes = self.layout_passes.saturating_add(1);
             self.layout_entries = self.layout_entries.saturating_add(1);
             self.canvas_geometry_changed();
@@ -1237,6 +1248,12 @@ impl Tree {
     }
 
     fn check_changed_text(&mut self) -> Result<(), Error> {
+        if self.changed_text.is_empty() {
+            return Ok(());
+        }
+        let started = self.trace_text_probes.then(Instant::now);
+        let before = started.map(|_| self.shaper.measure_cache_counts());
+        let mut measurements = Vec::new();
         for id in std::mem::take(&mut self.changed_text) {
             let Some(slot) = self
                 .slots
@@ -1264,12 +1281,52 @@ impl Tree {
                     text_shaped: &self.text_shaped,
                     provisional: HashMap::new(),
                 };
+                measurements.clear();
+                let trace = &mut self.text_probes;
                 let same = self
                     .taffy
                     .text_outputs_match(taffy, |inputs, context, style| {
-                        env.provisional.clear();
                         leaf_output(inputs, style, |known, available| {
-                            measure_leaf(&mut env, known, available, context, &mut Vec::new())
+                            let intrinsic = matches!(available.width, AvailableSpace::MinContent);
+                            let key = (line_limit(available.width).to_bits(), intrinsic);
+                            if started.is_some() {
+                                trace.queries = trace.queries.saturating_add(1);
+                                if intrinsic {
+                                    trace.intrinsic = trace.intrinsic.saturating_add(1);
+                                }
+                            }
+                            // Only share the raw measurement of this node at the exact
+                            // width and mode. Taffy still applies each query's own box.
+                            let (size, baseline) = if let Some((_, output)) =
+                                measurements.iter().find(|(old, _)| *old == key)
+                            {
+                                if started.is_some() {
+                                    trace.repeated = trace.repeated.saturating_add(1);
+                                }
+                                *output
+                            } else {
+                                let measure_started = started.map(|_| Instant::now());
+                                env.provisional.clear();
+                                let output = measure_leaf(
+                                    &mut env,
+                                    Size::NONE,
+                                    available,
+                                    context,
+                                    &mut Vec::new(),
+                                );
+                                if let Some(started) = measure_started {
+                                    trace.measure_time += started.elapsed();
+                                }
+                                measurements.push((key, output));
+                                output
+                            };
+                            (
+                                Size {
+                                    width: known.width.unwrap_or(size.width),
+                                    height: known.height.unwrap_or(size.height),
+                                },
+                                baseline,
+                            )
                         })
                     });
                 text.max_width.set(width);
@@ -1283,6 +1340,17 @@ impl Tree {
                 self.taffy.mark_dirty(taffy)?;
                 self.mark_layout_from(id);
             }
+        }
+        if let (Some(started), Some((old_hits, old_misses))) = (started, before) {
+            let (hits, misses) = self.shaper.measure_cache_counts();
+            self.text_probes.check_time += started.elapsed();
+            let trace = &mut self.text_probes;
+            trace.cache_hits = trace
+                .cache_hits
+                .saturating_add(hits.saturating_sub(old_hits));
+            trace.cache_misses = trace
+                .cache_misses
+                .saturating_add(misses.saturating_sub(old_misses));
         }
         Ok(())
     }
@@ -1376,7 +1444,7 @@ impl Tree {
             } => AvailableSpace::Definite(h),
             _ => AvailableSpace::MaxContent,
         };
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let mut measured = Vec::new();
         self.open_measure();
         let natural = self.measure_subtree(taffy_id, first_width, first_height, &mut measured)?;
@@ -1491,7 +1559,7 @@ impl Tree {
         if let Some(taffy_id) = taffy_id {
             self.taffy.set_style(taffy_id, style)?;
             if is_root {
-                self.taffy.dirty_root(taffy_id);
+                self.taffy.dirty_root(taffy_id, "style");
             }
         }
         if !self.style_applying {
@@ -1699,7 +1767,31 @@ pub struct LayoutTrace {
     pub same_text_layouts: u32,
     pub text_reused: u32,
     pub text_shaped: u32,
+    pub text_probes: TextProbeTrace,
     pub cause: LayoutCause,
+    pub root_trigger: Option<RootLayoutTrigger>,
+    pub cache_hits: u32,
+    pub cache_misses: u32,
+}
+
+/// Work spent replaying the saved leaf constraints of changed text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TextProbeTrace {
+    pub check_time: Duration,
+    pub measure_time: Duration,
+    pub queries: u32,
+    pub intrinsic: u32,
+    /// Queries with the same width and intrinsic mode as an earlier query of this node.
+    pub repeated: u32,
+    pub cache_hits: u32,
+    pub cache_misses: u32,
+}
+
+/// The first invalidation that reached the root in one layout pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RootLayoutTrigger {
+    pub node: Option<NodeId>,
+    pub cause: &'static str,
 }
 
 pub(super) fn finite_positive(value: f32) -> Result<f32, Error> {
@@ -2209,7 +2301,7 @@ fn fixed_boxes_relayout_with_their_parent_input_and_match_a_root_pass() -> Resul
             )?;
         }
         let root_taffy = reference.node(ids[0])?.taffy.ok_or(Error::NoRoot)?;
-        reference.taffy.dirty_root(root_taffy);
+        reference.taffy.dirty_root(root_taffy, "reference");
         for tree in [&mut local, &mut reference] {
             tree.layout()?;
             tree.record_layers()?;
@@ -2238,7 +2330,7 @@ fn fixed_boxes_relayout_with_their_parent_input_and_match_a_root_pass() -> Resul
         for tree in [&mut local, &mut reference] {
             tree.set_size(ids[3], 233.0, 24.0)?;
         }
-        reference.taffy.dirty_root(root_taffy);
+        reference.taffy.dirty_root(root_taffy, "reference");
         local.layout()?;
         reference.layout()?;
         assert_eq!(local.take_layout_trace().root_layouts, 1);
@@ -2251,6 +2343,7 @@ fn fixed_boxes_relayout_with_their_parent_input_and_match_a_root_pass() -> Resul
 #[test]
 fn same_output_text_reuses_layout_until_width_or_baseline_changes() -> Result<(), Error> {
     let mut tree = Tree::new(crate::MonoShaper::default());
+    tree.trace_text_probes(true);
     let row = tree.row(0.0)?;
     tree.set_row_cross(row, super::RowCrossAlign::Baseline)?;
     let quote = tree.text("43.12", 16.0, [255; 4])?;
@@ -2265,6 +2358,13 @@ fn same_output_text_reuses_layout_until_width_or_baseline_changes() -> Result<()
     tree.layout()?;
     let trace = tree.take_layout_trace();
     assert_eq!((trace.same_text_layouts, trace.root_layouts), (1, 0));
+    assert!(trace.text_probes.repeated > 0, "{trace:?}");
+    assert_eq!(trace.text_probes.intrinsic, 1, "{trace:?}");
+    assert_eq!(
+        trace.text_shaped,
+        trace.text_probes.queries - trace.text_probes.repeated - trace.text_probes.intrinsic,
+        "{trace:?}",
+    );
     assert_eq!((tree.rect(quote)?, tree.rect(label)?), before);
     assert!(tree.record()?.commands.iter().any(|command| {
         matches!(command, protocol::Command::Text { utf8, .. } if utf8.as_ref() == "35.24")
@@ -2279,6 +2379,42 @@ fn same_output_text_reuses_layout_until_width_or_baseline_changes() -> Result<()
     tree.layout()?;
     assert_eq!(tree.take_layout_trace().root_layouts, 1);
     assert!(tree.rect(label)?.y > before.1.y);
+    Ok(())
+}
+
+#[test]
+fn fixed_text_keeps_layout_when_new_ink_stays_inside_its_box() -> Result<(), Error> {
+    let mut tree = Tree::new(crate::MonoShaper::default());
+    let row = tree.row(0.0)?;
+    let quote = tree.text("9.99", 16.0, [255; 4])?;
+    let next = tree.text("next", 16.0, [255; 4])?;
+    tree.set_axis_size(quote, AxisSize::Points(80.0), AxisSize::Points(24.0))?;
+    tree.set_min_size(quote, 0.0, 0.0)?;
+    tree.add_child(row, quote)?;
+    tree.add_child(row, next)?;
+    tree.layout()?;
+    let before = (tree.rect(quote)?, tree.rect(next)?);
+    let _ = tree.take_layout_trace();
+
+    tree.set_text(quote, "-1,034.56")?;
+    tree.layout()?;
+    let trace = tree.take_layout_trace();
+    assert_eq!(
+        (
+            trace.root_layouts,
+            trace.local_layouts,
+            trace.same_text_layouts
+        ),
+        (0, 0, 1)
+    );
+    assert_eq!((tree.rect(quote)?, tree.rect(next)?), before);
+    assert!(tree.record()?.commands.iter().any(|command| {
+        matches!(command, protocol::Command::Text { utf8, .. } if utf8.as_ref() == "-1,034.56")
+    }));
+
+    tree.set_text(quote, "9\n9\n9")?;
+    tree.layout()?;
+    assert_eq!(tree.take_layout_trace().root_layouts, 1);
     Ok(())
 }
 

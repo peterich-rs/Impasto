@@ -12,7 +12,7 @@ use super::node::{
     ImagePayload, Kind, MAX_GENERATION, Node, NodeFlags, Payload, Role, Slot, TextPayload,
     TransformGeom,
 };
-use super::{Alignment, Discarded, Gesture, NodeId, TrackSize, Tree};
+use super::{Alignment, Discarded, Gesture, NodeId, TextProbeTrace, TrackSize, Tree};
 use crate::{Error, Shaper};
 
 impl Tree {
@@ -41,6 +41,7 @@ impl Tree {
             layer_tail: Vec::new(),
             layer_top: None,
             picture_writes: 0,
+            layer_record_visits: 0,
             layer_epoch: 0,
             canvas_geometry_epoch: 0,
             layers: crate::layer::LayerTree::empty(),
@@ -48,6 +49,7 @@ impl Tree {
             image_counts: HashMap::new(),
             image_generation: 0,
             scroll_notices: Vec::new(),
+            scroll_paint_updates: 0,
             needs_layout: false,
             needs_paint: false,
             layout_passes: 0,
@@ -60,11 +62,14 @@ impl Tree {
             layout_work_ms: 0.0,
             layout_entries: 0,
             root_layouts: 0,
+            root_layout_trigger: None,
             local_layouts: 0,
             same_text_layouts: 0,
             layout_cause: super::LayoutCause::None,
             text_reused: Cell::new(0),
             text_shaped: Cell::new(0),
+            trace_text_probes: false,
+            text_probes: TextProbeTrace::default(),
             semantics_layout_seen: 0,
             scroll_semantics: Vec::new(),
             semantics_full: false,

@@ -54,7 +54,7 @@ pub use text::{
 pub use tree::{
     Alignment, AxisSize, BoxEdge, DebugAxis, Discarded, DragClaim, Edges, FocusDirection, Gesture,
     GridLine, Inset, Justify, LayoutCause, LayoutIssue, LayoutTrace, NodeId, PanelAlign, Rect,
-    RowCrossAlign, ScrollEdge, ScrollSample, SubtreeSpace, TrackSize, Tree,
+    RowCrossAlign, ScrollEdge, ScrollSample, SubtreeSpace, TextProbeTrace, TrackSize, Tree,
 };
 
 #[cfg(test)]

@@ -46,7 +46,14 @@ impl Eval for JsEval {
     ) -> CallResult<Value, Cleanup> {
         // SAFETY: the session clears the graph while Host and the VM are alive.
         let host = unsafe { &*func.host };
-        host.with(|ctx| {
+        let marks = &host.inner().marks;
+        let started = if marks.trace_enabled.get() {
+            super::frame::bump(&marks.callbacks);
+            (!marks.callback_active.replace(true)).then(std::time::Instant::now)
+        } else {
+            None
+        };
+        let result = host.with(|ctx| {
             let result = (|| {
                 let function = rquickjs::Function::from_value(func.saved.clone().restore(&ctx)?)?;
                 let mut args =
@@ -69,7 +76,14 @@ impl Eval for JsEval {
                     CallResult::Failed
                 }
             }
-        })
+        });
+        if let Some(started) = started {
+            marks.callback_active.set(false);
+            marks
+                .callback_time
+                .set(marks.callback_time.get() + started.elapsed());
+        }
+        result
     }
     fn effect(
         self,

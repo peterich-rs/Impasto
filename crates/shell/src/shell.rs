@@ -770,6 +770,18 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     let gesture_ms = gesture_started.elapsed().as_secs_f64() * 1000.0;
     drop(input_trace);
     runtime.frame_number = runtime.frame_number.wrapping_add(1);
+    Section::event(|| {
+        if time.target_ms > time.vsync_ms {
+            format!(
+                "Impasto frame id={} vsync_us={:.0} target_us={:.0}",
+                runtime.frame_number,
+                time.vsync_ms * 1000.0,
+                time.target_ms * 1000.0,
+            )
+        } else {
+            format!("Impasto frame id={}", runtime.frame_number)
+        }
+    });
     let frame_span = tracing::error_span!(
         target: "impasto::render",
         "frame",
@@ -986,21 +998,18 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     let present_ms = elapsed_ms(started);
     let work_ms = elapsed_ms(frame_started);
     let stats = runtime.engine.borrow().submit_stats();
-    Section::event(|| {
-        format!(
-            "Impasto pictures rebuilt={} reused={}",
-            if matches!(step, FrameStep::Submit) {
-                stats.picture_rebuilt
-            } else {
-                0
-            },
-            if matches!(step, FrameStep::Submit) {
-                stats.picture_reused
-            } else {
-                0
-            },
-        )
-    });
+    if matches!(step, FrameStep::Submit) {
+        Section::event(|| {
+            format!(
+                "Impasto pictures rebuilt={} reused={} layers={} prepare_us={} compose_us={}",
+                stats.picture_rebuilt,
+                stats.picture_reused,
+                stats.layer_count,
+                stats.picture_prepare.as_micros(),
+                stats.compose.as_micros(),
+            )
+        });
+    }
     let shapes = runtime.engine.borrow_mut().take_shape_stats();
     let phase = phases.unwrap_or_default();
     let timing = FrameTiming {

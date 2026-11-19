@@ -511,6 +511,11 @@ impl Typography {
         std::mem::take(&mut self.stats)
     }
 
+    /// Reads the current counters without resetting the engine's frame stats.
+    pub fn shape_stats(&self) -> crate::ShapeStats {
+        self.stats
+    }
+
     /// Marks a measured paragraph as used by this layout. Does not build one.
     pub fn touch_measure(
         &mut self,

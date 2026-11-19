@@ -7,7 +7,12 @@ seconds=${3:-6}
 app=dev.impasto.host.profile
 activity="$app/dev.impasto.host.HostActivity"
 refresh=${FRAME_REFRESH:-}
+suite=${FRAME_SUITE:-all}
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+case "$suite" in
+  all|detail|daily) ;;
+  *) echo "FRAME_SUITE 必须是 all、detail 或 daily" >&2; exit 2 ;;
+esac
 mkdir -p -- "$out"
 
 # The touch script uses the same portrait viewport as the Pixel 9 capture.
@@ -32,15 +37,19 @@ restore_refresh() {
   done
 }
 
+profile_layer() {
+  adb shell dumpsys SurfaceFlinger --list | awk '
+    /SurfaceView.*dev[.]impasto[.]host[.]profile.*[(]BLAST[)]/ && !found {
+      sub(/^RequestedLayerState[{]/, ""); sub(/ parentId=.*/, ""); print; found=1
+    }'
+}
+
 presentation_times() {
   local pid=$1
   local layer
   while kill -0 "$pid" 2>/dev/null; do
     if [[ -z ${layer:-} ]]; then
-      layer=$(adb shell dumpsys SurfaceFlinger --list | awk '
-        /SurfaceView.*dev[.]impasto[.]host[.]profile.*[(]BLAST[)]/ && !found {
-          sub(/^RequestedLayerState[{]/, ""); sub(/ parentId=.*/, ""); print; found=1
-        }')
+      layer=$(profile_layer)
     fi
     if [[ -n $layer ]]; then
       local sample
@@ -90,6 +99,25 @@ scroll_list() {
   done
 }
 
+scroll_detail() {
+  for _ in 1 2 3; do swipe 541 1770 541 580 570; done
+  for _ in 1 2 3; do swipe 541 580 541 1770 570; done
+}
+
+open_daily_detail() {
+  stop
+  start
+  sleep 1
+  if [[ -z $(profile_layer) ]]; then
+    echo "找不到 Gallery 的 SurfaceView，检查设备是否停在解锁或启动界面" >&2
+    return 1
+  fi
+  detail
+  sleep 1
+  daily
+  sleep 1
+}
+
 adb shell input keyevent KEYCODE_WAKEUP
 adb shell wm dismiss-keyguard
 if [[ -n $refresh ]]; then
@@ -101,20 +129,34 @@ if [[ -n $refresh ]]; then
   adb shell settings put system peak_refresh_rate "$refresh"
 fi
 for ((run = 1; run <= runs; run++)); do
-  stop
-  capture "startup-$run" start
-  capture "detail-entry-$run" detail
-  capture "intraday-$run" idle
-  daily
-  sleep 1
+  if [[ $suite == all ]]; then
+    stop
+    capture "startup-$run" start
+    capture "detail-entry-$run" detail
+    capture "intraday-$run" idle
+    daily
+    sleep 1
+  else
+    open_daily_detail
+  fi
   capture "daily-$run" idle
-  capture "crosshair-live-$run" crosshair
+  if [[ $suite == daily ]]; then
+    continue
+  fi
+  if [[ $suite == all ]]; then
+    capture "crosshair-live-$run" crosshair
+  fi
   pause_market
   sleep 1
   capture "crosshair-paused-$run" crosshair
-  stop
-  start
-  sleep 1
-  capture "home-$run" idle
-  capture "list-scroll-$run" scroll_list
+  capture "detail-scroll-paused-$run" scroll_detail
+  open_daily_detail
+  capture "detail-scroll-live-$run" scroll_detail
+  if [[ $suite == all ]]; then
+    stop
+    start
+    sleep 1
+    capture "home-$run" idle
+    capture "list-scroll-$run" scroll_list
+  fi
 done

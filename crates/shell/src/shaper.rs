@@ -82,6 +82,11 @@ impl Shaper for ImpellerShaper {
         self.typography.borrow_mut().end_measure();
     }
 
+    fn measure_cache_counts(&self) -> (u32, u32) {
+        let stats = self.typography.borrow().shape_stats();
+        (stats.measure_hit, stats.measure_miss)
+    }
+
     fn register_font(&mut self, family: &str, bytes: &[u8]) -> bool {
         let registered = self
             .typography

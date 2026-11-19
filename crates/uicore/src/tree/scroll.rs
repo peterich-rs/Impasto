@@ -35,6 +35,17 @@ fn default_stretch(over: f32, _dimension: f32) -> f32 {
 }
 
 impl Tree {
+    pub fn take_scroll_paint_updates(&mut self) -> u32 {
+        std::mem::take(&mut self.scroll_paint_updates)
+    }
+
+    fn mark_scroll_paint(&mut self) {
+        self.scroll_paint_updates = self.scroll_paint_updates.saturating_add(1);
+        self.canvas_geometry_changed();
+        self.layer_epoch = self.layer_epoch.wrapping_add(1);
+        self.mark_paint();
+    }
+
     pub fn overscroll(&self, id: NodeId) -> Result<(f32, f32), Error> {
         let node = self.node(id)?;
         if node.kind != Kind::Scroll {
@@ -115,9 +126,7 @@ impl Tree {
             !same
         };
         if wrote {
-            self.canvas_geometry_changed();
-            self.layer_epoch = self.layer_epoch.wrapping_add(1);
-            self.mark_paint();
+            self.mark_scroll_paint();
             if self.semantics_enabled {
                 self.scroll_semantics.push(id);
             }
@@ -693,9 +702,7 @@ impl Tree {
                 geom.overscroll_y = value;
             }
         }
-        self.canvas_geometry_changed();
-        self.layer_epoch = self.layer_epoch.wrapping_add(1);
-        self.mark_paint();
+        self.mark_scroll_paint();
         // A coast that hits the wall starts an overscroll spring at x0 = 0
         // with leftover velocity. Stopping at |value| < 0.5 would kill that
         // spring on the first sample. `done` and the sign-cross in

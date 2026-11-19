@@ -27,11 +27,24 @@ MARKS = {
     "Impasto Canvas draw",
     "Impasto Canvas prepare",
     "Impasto ListOp",
+    "Impasto mutation flush",
     "Impasto record",
     "Impasto submit",
     "Impasto Vulkan acquire",
     "Impasto Vulkan draw",
     "Impasto Vulkan present",
+}
+
+FRAME_EVENTS = {
+    "Impasto frame id=": "clock",
+    "Impasto work ": "work",
+    "Impasto root ": "root",
+    "Impasto layout work ": "layout",
+    "Impasto text probes ": "text_probes",
+    "Impasto script work ": "script",
+    "Impasto record work ": "record",
+    "Impasto scroll work ": "scroll",
+    "Impasto pictures ": "pictures",
 }
 
 
@@ -103,7 +116,17 @@ def load(path):
     counts = Counter()
     chart = Counter()
     chart_markers = {}
+    frame_events = defaultdict(dict)
     starts = [frame.ts for frame in frames]
+
+    def containing_frame(marker):
+        index = bisect.bisect_right(starts, marker.ts) - 1
+        if index >= 0:
+            frame = frames[index]
+            if frame.track_id == marker.track_id and marker.ts < frame.ts + frame.dur:
+                return frame
+        return None
+
     launch = None
     for marker in markers:
         if marker.name == 'launching: dev.impasto.host.profile':
@@ -121,11 +144,17 @@ def load(path):
                 chart_markers.setdefault(match[1], marker.ts)
         elif marker.name in MARKS and marker.dur > 0:
             phases[marker.name].append(marker.dur)
-            index = bisect.bisect_right(starts, marker.ts) - 1
-            if index >= 0:
-                frame = frames[index]
-                if frame.present and frame.track_id == marker.track_id and marker.ts < frame.ts + frame.dur:
-                    submitted_phases[marker.name].append(marker.dur)
+            frame = containing_frame(marker)
+            if frame is not None and frame.present:
+                submitted_phases[marker.name].append(marker.dur)
+        for prefix, category in FRAME_EVENTS.items():
+            if marker.name.startswith(prefix):
+                frame = containing_frame(marker)
+                if frame is not None:
+                    frame_events[frame.id][category] = dict(
+                        re.findall(r"(\w+)=(\S+)", marker.name)
+                    )
+                break
     latency = []
     consumed = 0
     latest_input = None
@@ -149,6 +178,41 @@ def load(path):
                 if 0 <= elapsed <= 500_000_000:
                     latency.append(elapsed)
         latest_input = None
+
+    scroll_frames = defaultdict(list)
+    scroll_intervals = []
+    scroll_start_delays = []
+    previous_scroll_present = None
+    diagnostics = defaultdict(list)
+    for frame in frames:
+        if not frame.present:
+            continue
+        events = frame_events.get(frame.id, {})
+        for category, fields in events.items():
+            diagnostics[category].append(fields)
+        if "scroll" not in events:
+            previous_scroll_present = None
+            continue
+        work = events.get("work", {})
+        if int(work.get("roots", 0)):
+            group = "root_layout"
+        elif int(work.get("draw", 0)):
+            group = "canvas_without_root"
+        else:
+            group = "without_root_or_canvas"
+        scroll_frames[group].append(frame.dur)
+        vsync_us = events.get("clock", {}).get("vsync_us", "")
+        if offset is not None and vsync_us.isdecimal():
+            start_delay = frame.ts - (int(vsync_us) * 1000 + offset)
+            if start_delay >= 0:
+                scroll_start_delays.append(start_delay)
+        # An unmatched submission breaks the pair of display timestamps.
+        actual_ts = presented_frames.get(frame.id)
+        if previous_scroll_present is not None and actual_ts is not None:
+            interval = actual_ts - previous_scroll_present
+            if interval > 0:
+                scroll_intervals.append(interval)
+        previous_scroll_present = actual_ts
 
     # The first screen milestone is the first stock sparkline on the surface.
     # Entry is the first chart frame after the replay taps 00700.
@@ -181,7 +245,46 @@ def load(path):
         "canvas_by_height": chart,
         "phases": phases,
         "submitted_phases": submitted_phases,
+        "diagnostics": diagnostics,
+        "scroll_frames": scroll_frames,
+        "scroll_intervals": scroll_intervals,
+        "scroll_start_delays": scroll_start_delays,
     }
+
+
+def summarize_diagnostics(runs):
+    events = defaultdict(list)
+    for run in runs:
+        for category, rows in run["diagnostics"].items():
+            events[category].extend(rows)
+    root_sources = Counter()
+    root_rects = {}
+    for row in events["root"]:
+        key = row["cause"], row["node"]
+        root_sources[key] += 1
+        if all(field in row for field in ("x", "y", "w", "h")):
+            root_rects.setdefault(key, [int(row[field]) for field in ("x", "y", "w", "h")])
+    result = {"root_sources": []}
+    for (cause, node), count in root_sources.most_common(10):
+        root = {"cause": cause, "node": node, "frames": count}
+        if (cause, node) in root_rects:
+            root["sample_rect_dp"] = root_rects[cause, node]
+        result["root_sources"].append(root)
+    for category in ("layout", "text_probes", "script", "record", "pictures"):
+        if not events[category]:
+            continue
+        values = defaultdict(list)
+        for row in events[category]:
+            for key, value in row.items():
+                if value.isdecimal():
+                    values[key].append(int(value))
+        result[category] = {
+            key: distribution([value * 1000 for value in samples])
+            if key.endswith("_us")
+            else {"frames": len(samples), "total": sum(samples), "peak": max(samples)}
+            for key, samples in values.items()
+        }
+    return result
 
 
 def main():
@@ -200,6 +303,7 @@ def main():
     for case, runs in sorted(cases.items()):
         phases = defaultdict(list)
         submitted_phases = defaultdict(list)
+        scroll_frames = defaultdict(list)
         work, canvas = Counter(), Counter()
         for run in runs:
             work.update(run["work"])
@@ -208,6 +312,8 @@ def main():
                 phases[name].extend(durations)
             for name, durations in run["submitted_phases"].items():
                 submitted_phases[name].extend(durations)
+            for name, durations in run["scroll_frames"].items():
+                scroll_frames[name].extend(durations)
         report[case] = {
             "runs": len(runs),
             "submitted": distribution([x for run in runs for x in run["frames"]], budget),
@@ -224,7 +330,15 @@ def main():
             "canvas_commits_by_height": canvas,
             "phases": {name: distribution(values) for name, values in sorted(phases.items())},
             "submitted_phases": {name: distribution(values) for name, values in sorted(submitted_phases.items())},
+            "diagnostics": summarize_diagnostics(runs),
         }
+        if scroll_frames:
+            report[case]["scrolling"] = {
+                "frames": distribution([ns for group in scroll_frames.values() for ns in group], budget),
+                "by_work": {name: distribution(group, budget) for name, group in sorted(scroll_frames.items())},
+                "present_intervals": distribution([ns for run in runs for ns in run["scroll_intervals"]]),
+                "vsync_to_render_start": distribution([ns for run in runs for ns in run["scroll_start_delays"]]),
+            }
     print(json.dumps(report, indent=2))
 
 

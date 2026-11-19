@@ -264,6 +264,10 @@ impl Typography {
         crate::ShapeStats::default()
     }
 
+    pub fn shape_stats(&self) -> crate::ShapeStats {
+        crate::ShapeStats::default()
+    }
+
     pub fn caret_for(
         &mut self,
         _query: crate::ParagraphQuery<'_>,

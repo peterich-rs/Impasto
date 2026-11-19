@@ -12,6 +12,8 @@ use taffy::{
     compute_root_layout, round_layout,
 };
 
+use super::layout::RootLayoutTrigger;
+
 type Result<T> = std::result::Result<T, TaffyError>;
 type Query = (LayoutInput, LayoutOutput);
 
@@ -71,8 +73,10 @@ pub(super) struct LayoutStore {
     // Count in reverse depth order during replay so a boundary sees the
     // results of any changed boundaries inside it.
     pending: HashSet<NodeId>,
-    root_dirty: bool,
+    root_dirty: Option<RootLayoutTrigger>,
     rounded_changes: HashSet<NodeId>,
+    cache_hits: u32,
+    cache_misses: u32,
 }
 
 impl LayoutStore {
@@ -144,7 +148,7 @@ impl LayoutStore {
         node.latest_layout = None;
         node.queries = Queries::default();
         self.get_mut(parent)?.children.insert(index, child);
-        self.invalidate(parent);
+        self.invalidate(parent, parent, "structure");
         Ok(())
     }
 
@@ -162,9 +166,9 @@ impl LayoutStore {
         let containing = removed.containing.take();
         removed.latest_layout = None;
         self.pending.remove(&child);
-        self.invalidate(parent);
+        self.invalidate(parent, parent, "structure");
         if let Some(containing) = containing.filter(|&id| id != parent) {
-            self.invalidate(containing);
+            self.invalidate(containing, parent, "structure");
         }
         Ok(())
     }
@@ -189,18 +193,28 @@ impl LayoutStore {
         self.pending.remove(&id);
         // Position and flex inputs are read by the parent.
         if let Some(parent) = self.at(id).parent {
-            self.invalidate(parent);
+            self.invalidate(parent, id, "style");
         }
         Ok(())
     }
 
     pub(super) fn mark_dirty(&mut self, id: NodeId) -> Result<()> {
         self.get(id)?;
-        self.invalidate(id);
+        self.invalidate(id, id, "text");
         Ok(())
     }
 
-    fn clear_to_root(&mut self, mut id: NodeId) {
+    fn note_root(&mut self, id: NodeId, cause: &'static str) {
+        if self.root_dirty.is_none() {
+            self.root_dirty = Some(RootLayoutTrigger {
+                node: self.at(id).owner,
+                cause,
+            });
+        }
+    }
+
+    fn clear_to_root(&mut self, mut id: NodeId, cause: &'static str) {
+        self.note_root(id, cause);
         loop {
             let node = self.at_mut(id);
             node.cache.clear();
@@ -210,10 +224,9 @@ impl LayoutStore {
                 break;
             }
         }
-        self.root_dirty = true;
     }
 
-    fn invalidate(&mut self, mut id: NodeId) {
+    fn invalidate(&mut self, mut id: NodeId, origin: NodeId, cause: &'static str) {
         loop {
             self.at_mut(id).cache.clear();
             if self.can_relayout(id) {
@@ -224,7 +237,7 @@ impl LayoutStore {
             if let Some(parent) = self.at(id).parent {
                 id = parent;
             } else {
-                self.root_dirty = true;
+                self.note_root(origin, cause);
                 return;
             }
         }
@@ -289,7 +302,7 @@ impl LayoutStore {
 
     pub(super) fn can_probe_text(&self, id: NodeId) -> bool {
         let node = self.at(id);
-        !self.root_dirty
+        self.root_dirty.is_none()
             && !node.cache.is_empty()
             && node.children.is_empty()
             && node.latest_layout.is_some()
@@ -303,7 +316,16 @@ impl LayoutStore {
     ) -> bool {
         let node = self.at(id);
         node.queries.entries.iter().all(|(input, previous)| {
-            let current = measure(*input, node.measure_index(), &node.style);
+            let mut current = measure(*input, node.measure_index(), &node.style);
+            if input.run_mode == RunMode::PerformLayout
+                && overflow_inside_box(&current)
+                && overflow_inside_box(previous)
+            {
+                // Taffy always contributes the child's border box to its parent's
+                // scrollable overflow. Text changes inside it preserve that
+                // contribution. Size, baselines and other outputs still compare.
+                current.scrollable_overflow_rect = previous.scrollable_overflow_rect;
+            }
             same_output(*input, &current, previous)
         })
     }
@@ -312,18 +334,18 @@ impl LayoutStore {
         &mut self,
         force_root: bool,
         mut measure: impl FnMut(LayoutInput, Option<usize>, &Style) -> LayoutOutput,
-    ) -> (bool, Vec<super::NodeId>) {
+    ) -> (Option<RootLayoutTrigger>, Vec<super::NodeId>) {
         let mut candidates: Vec<_> = self.pending.drain().collect();
         candidates.sort_unstable_by_key(|&id| std::cmp::Reverse(self.depth(id)));
         let mut local = Vec::new();
         for id in candidates {
-            if force_root || self.root_dirty || !self.can_relayout(id) {
-                self.clear_to_root(id);
+            if force_root || self.root_dirty.is_some() || !self.can_relayout(id) {
+                self.clear_to_root(id, "boundary_ineligible");
                 continue;
             }
             let node = self.at_mut(id);
             let Some(layout_input) = node.latest_layout else {
-                self.clear_to_root(id);
+                self.clear_to_root(id, "boundary_ineligible");
                 continue;
             };
             let previous = std::mem::take(&mut node.queries);
@@ -344,11 +366,16 @@ impl LayoutStore {
                 round_layout(&mut view, ROUND_PARENT);
                 local.extend(view.store.at(id).owner);
             } else {
-                self.clear_to_root(id);
+                self.clear_to_root(id, "boundary_output_changed");
             }
         }
-        let root = self.root_dirty || force_root;
-        self.root_dirty = false;
+        let root = self
+            .root_dirty
+            .take()
+            .or(force_root.then_some(RootLayoutTrigger {
+                node: None,
+                cause: "initial",
+            }));
         (root, local)
     }
 
@@ -383,14 +410,29 @@ impl LayoutStore {
         round_layout(&mut view, id);
     }
 
-    pub(super) fn dirty_root(&mut self, id: NodeId) {
-        self.clear_to_root(id);
+    pub(super) fn dirty_root(&mut self, id: NodeId, cause: &'static str) {
+        self.clear_to_root(id, cause);
+    }
+
+    pub(super) fn take_cache_counts(&mut self) -> (u32, u32) {
+        (
+            std::mem::take(&mut self.cache_hits),
+            std::mem::take(&mut self.cache_misses),
+        )
     }
 
     pub(super) fn forget_parent_input(&mut self, id: NodeId) {
         self.at_mut(id).latest_layout = None;
         self.at_mut(id).queries = Queries::default();
     }
+}
+
+fn overflow_inside_box(output: &LayoutOutput) -> bool {
+    let rect = output.scrollable_overflow_rect;
+    rect.left >= 0.0
+        && rect.top >= 0.0
+        && rect.right <= output.size.width
+        && rect.bottom <= output.size.height
 }
 
 fn same_output(input: LayoutInput, current: &LayoutOutput, previous: &LayoutOutput) -> bool {
@@ -522,7 +564,14 @@ where
 
 impl<M> CacheTree for View<'_, M> {
     fn cache_get(&mut self, id: NodeId, input: &LayoutInput) -> Option<LayoutOutput> {
-        self.store.at_mut(id).cache.get(input)
+        let result = self.store.at_mut(id).cache.get(input);
+        let count = if result.is_some() {
+            &mut self.store.cache_hits
+        } else {
+            &mut self.store.cache_misses
+        };
+        *count = count.saturating_add(1);
+        result
     }
 
     fn cache_store(&mut self, id: NodeId, input: &LayoutInput, output: LayoutOutput) {

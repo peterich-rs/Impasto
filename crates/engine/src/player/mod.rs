@@ -177,6 +177,7 @@ impl Engine {
         self.last_submit = crate::SubmitStats::default();
         let mut swap = crate::pictures::PictureSwap::default();
         let mut pending: Vec<HeldParagraph> = Vec::new();
+        let started = std::time::Instant::now();
         if let Err(status) = self.pictures.prepare(
             tree,
             point_scale,
@@ -193,6 +194,8 @@ impl Engine {
             crate::painter::release_pending(&mut pending, &mut typography);
             return Err(status);
         }
+        self.last_submit.picture_prepare = started.elapsed();
+        let started = std::time::Instant::now();
         let builder = unsafe { ffi::ImpellerDisplayListBuilderNew(ptr::null()) };
         let paint = unsafe { ffi::ImpellerPaintNew() };
         if builder.is_null() || paint.is_null() {
@@ -228,6 +231,7 @@ impl Engine {
             painter.drain_saves(builder);
             display
         };
+        self.last_submit.compose = started.elapsed();
         unsafe {
             ffi::ImpellerDisplayListBuilderRelease(builder);
             ffi::ImpellerPaintRelease(paint);
