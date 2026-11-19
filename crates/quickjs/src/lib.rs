@@ -638,6 +638,93 @@ import * as core from "scene";
     }
 
     #[test]
+    fn timer_kind_cancel_delay_and_origin_stay_on_the_frame_clock() {
+        let logs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let record = std::rc::Rc::clone(&logs);
+        let mut session = open(
+            r#"
+            var interval = setInterval(function () { console.log("interval"); }, 0);
+            clearTimeout(interval);
+            var timeout = setTimeout(function () { console.log("timeout"); }, -5);
+            clearInterval(timeout);
+            setTimeout(function () {
+                console.log("nested");
+                setTimeout(function () { console.log("inner"); }, 0);
+            }, 0);
+            console.log("now:" + performance.now());
+            "#,
+            "timers.js",
+            uicore::MonoShaper::default(),
+            Box::new(move |_level, text| record.borrow_mut().push(text.to_owned())),
+        )
+        .expect("open");
+        assert_eq!(logs.borrow().as_slice(), ["now:0"]);
+        session.frame(session::FrameTime::at(16.0));
+        assert_eq!(
+            logs.borrow().as_slice(),
+            ["now:0", "interval", "timeout", "nested"]
+        );
+        session.frame(session::FrameTime::at(32.0));
+        assert_eq!(
+            logs.borrow().as_slice(),
+            [
+                "now:0", "interval", "timeout", "nested", "interval", "inner"
+            ]
+        );
+    }
+
+    #[test]
+    fn host_argument_getter_runs_while_the_call_is_prepared() {
+        let logs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let record = std::rc::Rc::clone(&logs);
+        let nested = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let nested_for_ping = std::sync::Arc::clone(&nested);
+        let config = ModuleConfig {
+            registry: std::sync::Arc::new(ModuleRegistry::new(vec![Module {
+                name: "Probe",
+                specifier: "@impasto/probe",
+                methods: vec![
+                    Method::sync("read", |args| match args.first() {
+                        Some(PluginValue::Map(pairs)) => Ok(pairs
+                            .iter()
+                            .find(|(key, _)| key == "n")
+                            .map(|(_, value)| value.clone())
+                            .unwrap_or(PluginValue::Null)),
+                        _ => Ok(PluginValue::Null),
+                    }),
+                    Method::sync("ping", move |_| {
+                        nested_for_ping.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        Ok(PluginValue::Null)
+                    }),
+                ],
+            }])),
+            ..ModuleConfig::disconnected()
+        };
+        let _session = super::open_with_io(
+            r#"
+            import { read, ping } from '@impasto/probe';
+            const quiet = {};
+            Object.defineProperty(quiet, "n", { enumerable: true, get: function () { return 7; } });
+            console.log("quiet:" + read(quiet));
+            const nested = {};
+            Object.defineProperty(nested, "n", {
+                enumerable: true,
+                get: function () { ping(); return 1; },
+            });
+            console.log("nested:" + read(nested));
+            "#,
+            "getter.js",
+            uicore::MonoShaper::default(),
+            Box::new(move |_level, text| record.borrow_mut().push(text.to_owned())),
+            None,
+            config,
+        )
+        .expect("open");
+        assert_eq!(logs.borrow().as_slice(), ["quiet:7", "nested:1"]);
+        assert_eq!(nested.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn script_bytecode_round_trip_uses_the_envelope() {
         let bytes = super::compile(
             "globalThis.answer = 42; console.log(answer)",
