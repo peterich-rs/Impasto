@@ -43,10 +43,11 @@ def run(*command, cwd):
 
 
 def gclient_config(template, android):
-    if android:
-        return template.read_text()
     solutions = runpy.run_path(str(template))["solutions"]
-    solutions[0].setdefault("custom_vars", {})["download_android_deps"] = False
+    overrides = solutions[0].setdefault("custom_vars", {})
+    overrides["setup_githooks"] = False
+    if not android:
+        overrides["download_android_deps"] = False
     return f"solutions = {solutions!r}\n"
 
 
