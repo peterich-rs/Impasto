@@ -21,8 +21,11 @@ pub mod standard;
 pub use compile::{CompileEnvironment, EmptyCompile};
 pub use js_host::IoEvent;
 pub use modules::NativeFactory;
-pub use quickjs::{JobStop, Timer, Vm, poll_timer, run_jobs};
-pub use runtime::{DriveReport, JsError, ModuleStatus, ModuleTicket, Runtime, RuntimeBuilder};
+pub use quickjs::{JobStop, JsDiagnostic, Timer, Vm, poll_timer, run_jobs};
+pub use runtime::{
+    DriveReport, JsError, ModuleStatus, ModuleTicket, Runtime, RuntimeBuilder, RuntimeCounts,
+    WeakRuntime,
+};
 
 /// The one legacy prelude. UI startup and a headless [`Runtime`] both evaluate it.
 pub const LEGACY_PRELUDE: &str = include_str!("standard/legacy-prelude.js");

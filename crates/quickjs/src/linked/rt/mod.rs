@@ -45,15 +45,12 @@ struct References {
 pub(super) use js::quickjs::Timer;
 
 pub(in crate::linked) struct Host {
-    pub(in crate::linked) vm: js::quickjs::Vm,
+    /// The shared VM. Animation frames and UI references stay on this host.
+    pub(in crate::linked) runtime: js::Runtime,
     inner: *mut Inner,
     refs: RefCell<References>,
-    timers: RefCell<Vec<Timer>>,
-    next_id: Cell<u64>,
+    raf: RefCell<Vec<Timer>>,
     socket: Cell<u64>,
-    mono: Cell<i64>,
-    origin: Cell<Option<i64>>,
-    frame: Cell<u64>,
     paused: Cell<bool>,
     wants_frame: Cell<bool>,
     freeze: Cell<bool>,
@@ -67,8 +64,8 @@ struct Budget<'a> {
 }
 impl Drop for Budget<'_> {
     fn drop(&mut self) {
-        self.host.vm.entry.set(self.previous_entry);
-        self.host.vm.deadline.set(self.previous_deadline);
+        self.host.vm().entry.set(self.previous_entry);
+        self.host.vm().deadline.set(self.previous_deadline);
     }
 }
 
@@ -84,16 +81,19 @@ impl Host {
     fn session(&self) -> *mut c_void {
         self.inner.cast()
     }
+    fn vm(&self) -> &js::quickjs::Vm {
+        self.runtime.vm()
+    }
     fn enter<'js>(&self, ctx: &Ctx<'js>) -> js::quickjs::Active<'_> {
-        self.vm.enter(ctx)
+        self.vm().enter(ctx)
     }
     pub(super) fn with<R>(&self, body: impl for<'js> FnOnce(Ctx<'js>) -> R) -> R {
-        self.vm.with(body)
+        self.vm().with(body)
     }
     fn budget(&self, kind: &'static str, id: u64) -> Budget<'_> {
-        let previous_entry = self.vm.entry.replace((kind, id));
+        let previous_entry = self.vm().entry.replace((kind, id));
         let previous_deadline = self
-            .vm
+            .vm()
             .deadline
             .replace(js::monotonic_ms().saturating_add(if kind == "eval" { 1000 } else { 128 }));
         Budget {
@@ -104,35 +104,37 @@ impl Host {
     }
     /// Replace the interrupt label without restarting the turn's deadline.
     fn retarget(&self, kind: &'static str, id: u64) {
-        self.vm.entry.set((kind, id));
+        self.vm().entry.set((kind, id));
     }
     fn past_deadline(&self) -> bool {
-        js::monotonic_ms() > self.vm.deadline.get()
+        js::monotonic_ms() > self.vm().deadline.get()
     }
     fn alloc_id(&self) -> u64 {
-        let id = self.next_id.get().wrapping_add(1).max(1);
-        self.next_id.set(id);
+        let id = self.runtime.next_id().get().wrapping_add(1).max(1);
+        self.runtime.next_id().set(id);
         id
     }
     fn annotate(&self, message: String) -> String {
-        self.vm.annotate(message)
+        self.vm().annotate(message)
     }
     fn stash_value<'js>(&self, ctx: &Ctx<'js>, value: Value<'js>) {
         let (message, stack) = exception_text(ctx, value);
-        *self.vm.error.borrow_mut() = (self.annotate(message), stack);
+        *self.vm().error.borrow_mut() = (self.annotate(message), stack);
     }
     fn stash(&self, ctx: &Ctx<'_>, error: rquickjs::Error) {
         if error.is_exception() {
             self.stash_value(ctx, ctx.catch());
         } else {
-            *self.vm.error.borrow_mut() = (self.annotate(error.to_string()), String::new());
+            *self.vm().error.borrow_mut() = (self.annotate(error.to_string()), String::new());
         }
     }
     pub(super) fn take_error(&self) -> (String, String) {
-        std::mem::take(&mut *self.vm.error.borrow_mut())
+        let diagnostic = self.vm().diagnostic();
+        (diagnostic.message, diagnostic.stack)
     }
     fn report(&self, source: &'static str) {
-        let (message, stack) = self.vm.error.borrow().clone();
+        let diagnostic = self.vm().diagnostic();
+        let (message, stack) = (diagnostic.message, diagnostic.stack);
         self.inner().faults.borrow_mut().push(session::ScriptFault {
             source,
             message: message.clone(),
@@ -158,7 +160,7 @@ impl Host {
     }
     fn write_error(&self, out: *mut c_char, len: usize) {
         if !out.is_null() && len > 0 {
-            let error = self.vm.error.borrow();
+            let error = self.vm().error.borrow();
             let bytes = error.0.as_bytes();
             let count = bytes.len().min(len - 1);
             // SAFETY: session passes its writable error buffer with this length.
@@ -287,19 +289,19 @@ impl Host {
         Ok(())
     }
     fn script_error(&self) -> Error {
-        let (message, stack) = self.vm.error.borrow().clone();
-        Error::Script(super::display_fault(&message, &stack))
+        let diagnostic = self.vm().diagnostic();
+        Error::Script(super::display_fault(&diagnostic.message, &diagnostic.stack))
     }
     fn drain(&self) -> Result<(), Error> {
         let _budget = self.budget("jobs", 0);
-        let Some(runtime) = self.vm.runtime() else {
+        let Some(runtime) = self.vm().runtime() else {
             return Err(Error::Runtime);
         };
         if let Err(stop) = js::run_jobs(runtime, |ctx| {
             self.stash(ctx, rquickjs::Error::Exception);
         }) {
             if stop == js::JobStop::Limit {
-                *self.vm.error.borrow_mut() = (
+                *self.vm().error.borrow_mut() = (
                     self.annotate("quickjs job round limit".to_owned()),
                     String::new(),
                 );
@@ -307,7 +309,7 @@ impl Host {
             return Err(self.script_error());
         }
         self.with(|ctx| {
-            let rejections = std::mem::take(&mut *self.vm.rejections.borrow_mut());
+            let rejections = std::mem::take(&mut *self.vm().rejections.borrow_mut());
             for (_, reason) in rejections {
                 if let Ok(reason) = reason.restore(&ctx) {
                     let (message, stack) = exception_text(&ctx, reason);
@@ -369,17 +371,13 @@ pub(in crate::linked) struct Engine {
 }
 impl Engine {
     pub(super) fn new(mut inner: Box<Inner>, app_dir: Option<&str>) -> Result<Self, Error> {
-        let vm = js::quickjs::Vm::new().map_err(|_| Error::Runtime)?;
+        let runtime = js::RuntimeBuilder::bare().map_err(|_| Error::Runtime)?;
         let mut host = Box::new(Host {
-            vm,
+            runtime,
             inner: &mut *inner,
             refs: RefCell::new(References::default()),
-            timers: RefCell::new(Vec::new()),
-            next_id: Cell::new(0),
+            raf: RefCell::new(Vec::new()),
             socket: Cell::new(0),
-            mono: Cell::new(0),
-            origin: Cell::new(None),
-            frame: Cell::new(0),
             paused: Cell::new(false),
             wants_frame: Cell::new(false),
             freeze: Cell::new(false),
@@ -391,9 +389,7 @@ impl Engine {
             host,
             _inner: inner,
         };
-        // SAFETY: `Host` stays in this Box until shutdown disarms the hooks.
-        unsafe { js::quickjs::Vm::arm(std::ptr::addr_of_mut!((*host_ptr).vm)) };
-        if let Some(runtime) = engine.host.vm.runtime() {
+        if let Some(runtime) = engine.host.vm().runtime() {
             runtime.set_loader(
                 modules::AppResolver::new(app_dir),
                 modules::AppLoader::new(host_ptr, app_dir),
@@ -457,7 +453,7 @@ impl Engine {
         self.host.drain()
     }
     pub(super) fn shutdown(&mut self) {
-        if !self.host.vm.is_open() {
+        if !self.host.vm().is_open() {
             return;
         }
         // Close leases before owner cleanup. Recorders refund while the budget field still exists.
@@ -467,11 +463,12 @@ impl Engine {
             let _budget = self.host.budget("reactive", 0);
             reactive::release_all(self.host.inner());
             finish_shutdown(self.host.inner());
-            self.host.timers.borrow_mut().clear();
+            self.host.runtime.timers().borrow_mut().clear();
+            self.host.raf.borrow_mut().clear();
             *self.host.refs.borrow_mut() = References::default();
             let _ = ctx.remove_userdata::<HostPtr>();
         });
-        self.host.vm.close();
+        self.host.runtime.shutdown();
     }
 }
 impl Drop for Engine {

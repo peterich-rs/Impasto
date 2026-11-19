@@ -323,7 +323,7 @@ pub(in crate::linked) unsafe fn vm_drain_jobs(
 pub(in crate::linked) unsafe fn vm_jobs_pending(pointer: *mut Host) -> i32 {
     i32::from(
         host(pointer)
-            .vm
+            .vm()
             .runtime()
             .is_some_and(Runtime::is_job_pending),
     )
@@ -484,11 +484,11 @@ pub(in crate::linked) unsafe fn vm_motion_end(
 
 pub(in crate::linked) unsafe fn vm_set_clock(pointer: *mut Host, mono: i64, paused: i32) {
     let host = host(pointer);
-    host.mono.set(mono);
+    host.runtime.mono().set(mono);
     host.paused.set(paused != 0);
-    host.frame.set(host.frame.get() + 1);
-    if host.origin.get().is_none() {
-        host.origin.set(Some(mono));
+    host.runtime.turn().set(host.runtime.turn().get() + 1);
+    if host.runtime.origin().get().is_none() {
+        host.runtime.origin().set(Some(mono));
     }
 }
 fn fire(host: &Host, raf: bool, err: *mut c_char, len: usize) -> i32 {
@@ -499,10 +499,18 @@ fn fire(host: &Host, raf: bool, err: *mut c_char, len: usize) -> i32 {
     let mut failed = 0;
     for _ in 0..if raf { usize::MAX } else { 64 } {
         let callback = {
-            let mut timers = host.timers.borrow_mut();
-            let Some(callback) =
-                js::poll_timer(&mut timers, raf, host.frame.get(), host.mono.get())
-            else {
+            let table = if raf {
+                &host.raf
+            } else {
+                host.runtime.timers()
+            };
+            let mut timers = table.borrow_mut();
+            let Some(callback) = js::poll_timer(
+                &mut timers,
+                raf,
+                host.runtime.turn().get(),
+                host.runtime.mono().get(),
+            ) else {
                 break;
             };
             callback
@@ -532,13 +540,18 @@ fn fire(host: &Host, raf: bool, err: *mut c_char, len: usize) -> i32 {
             }
         });
     }
-    host.timers.borrow_mut().retain(|timer| timer.active);
+    let table = if raf {
+        &host.raf
+    } else {
+        host.runtime.timers()
+    };
+    table.borrow_mut().retain(|timer| timer.active);
     if !raf
-        && host
-            .timers
-            .borrow()
-            .iter()
-            .any(|t| t.kind != 2 && t.eligible_turn <= host.frame.get() && t.due <= host.mono.get())
+        && host.runtime.timers().borrow().iter().any(|timer| {
+            timer.kind != 2
+                && timer.eligible_turn <= host.runtime.turn().get()
+                && timer.due <= host.runtime.mono().get()
+        })
     {
         host.wants_frame.set(true);
     }
@@ -562,11 +575,12 @@ pub(in crate::linked) unsafe fn vm_needs_frame(pointer: *mut Host) -> i32 {
     let h = host(pointer);
     i32::from(
         !h.paused.get()
-            && h.timers.borrow().iter().any(|t| {
-                t.active
-                    && (t.kind == 2
-                        || t.eligible_turn <= h.frame.get() + 1 && t.due <= h.mono.get())
-            }),
+            && (h.raf.borrow().iter().any(|timer| timer.active)
+                || h.runtime.timers().borrow().iter().any(|timer| {
+                    timer.active
+                        && timer.eligible_turn <= h.runtime.turn().get() + 1
+                        && timer.due <= h.runtime.mono().get()
+                })),
     )
 }
 pub(in crate::linked) unsafe fn vm_next_deadline(pointer: *mut Host) -> i64 {
@@ -574,10 +588,11 @@ pub(in crate::linked) unsafe fn vm_next_deadline(pointer: *mut Host) -> i64 {
     if h.paused.get() {
         return -1;
     }
-    h.timers
+    h.runtime
+        .timers()
         .borrow()
         .iter()
-        .filter(|t| t.active && t.kind != 2 && t.due > h.mono.get())
+        .filter(|timer| timer.active && timer.kind != 2 && timer.due > h.runtime.mono().get())
         .map(|t| t.due)
         .min()
         .unwrap_or(-1)
@@ -585,7 +600,7 @@ pub(in crate::linked) unsafe fn vm_next_deadline(pointer: *mut Host) -> i64 {
 
 impl Host {
     pub(super) fn make_promise<'js>(&self, ctx: &Ctx<'js>) -> rquickjs::Result<(u64, Value<'js>)> {
-        self.vm.make_promise(ctx)
+        self.vm().make_promise(ctx)
     }
     pub(super) fn settle<'js>(
         &self,
@@ -594,7 +609,7 @@ impl Host {
         ok: bool,
         value: Value<'js>,
     ) -> rquickjs::Result<()> {
-        self.vm.settle(ctx, token, ok, value)
+        self.vm().settle(ctx, token, ok, value)
     }
 }
 pub(in crate::linked) fn push_plugin(pointer: *mut Host, value: &session::PluginValue) {
@@ -670,7 +685,7 @@ pub(in crate::linked) unsafe fn vm_settle_http(
                     }),
                 }
             };
-            js::deliver::apply(&host.vm, &ctx, event)
+            js::deliver::apply(host.vm(), &ctx, event)
         })();
         if result.is_err() {
             drop(ctx.catch());
@@ -696,7 +711,7 @@ pub(in crate::linked) unsafe fn vm_http_head(
         )]
         let result = (|| {
             js::deliver::apply(
-                &host.vm,
+                host.vm(),
                 &ctx,
                 session::IoEvent::HttpHead {
                     token,
@@ -739,7 +754,7 @@ pub(in crate::linked) unsafe fn vm_http_chunk(
                 (bytes_at(body, body_len), None)
             };
             js::deliver::apply(
-                &host.vm,
+                host.vm(),
                 &ctx,
                 session::IoEvent::HttpChunk {
                     token,
@@ -774,7 +789,7 @@ pub(in crate::linked) unsafe fn vm_socket_event(
         )]
         let result = (|| {
             js::deliver::apply(
-                &host.vm,
+                host.vm(),
                 &ctx,
                 session::IoEvent::Socket {
                     id,

@@ -206,10 +206,10 @@ pub(super) fn install<'js>(host: &Host, ctx: &Ctx<'js>) -> rquickjs::Result<()> 
         let host = &*pointer;
         (host.inner().log)(level, text);
     })?;
-    let timers = &host.timers as *const RefCell<Vec<Timer>>;
-    let next_id = &host.next_id as *const Cell<u64>;
-    let frame = &host.frame as *const Cell<u64>;
-    let mono = &host.mono as *const Cell<i64>;
+    let timers = host.runtime.timers() as *const RefCell<Vec<Timer>>;
+    let next_id = host.runtime.next_id() as *const Cell<u64>;
+    let frame = host.runtime.turn() as *const Cell<u64>;
+    let mono = host.runtime.mono() as *const Cell<i64>;
     let wants = pointer;
     let on_zero = move || {
         // SAFETY: `wants` addresses this host until shutdown.
@@ -220,12 +220,12 @@ pub(super) fn install<'js>(host: &Host, ctx: &Ctx<'js>) -> rquickjs::Result<()> 
     js::standard::install_performance(ctx, move || {
         // SAFETY: `pointer` addresses this host until shutdown.
         let host = unsafe { &*pointer };
-        (host.mono.get() - host.origin.get().unwrap_or(0)) as f64
+        (host.runtime.mono().get() - host.runtime.origin().get().unwrap_or(0)) as f64
     })?;
     for name in ["requestAnimationFrame", "cancelAnimationFrame"] {
         bind(host, ctx, &ctx.globals(), name)?;
     }
-    let vm = ptr::from_ref(&host.vm).cast_mut();
+    let vm = ptr::from_ref(host.vm()).cast_mut();
     let port: *const dyn js::host::IoPort = ptr::from_ref(host as &dyn js::host::IoPort);
     let policy: *const dyn js::host::OperationPolicy =
         ptr::from_ref(host as &dyn js::host::OperationPolicy);
@@ -693,11 +693,11 @@ pub(super) fn native<'js>(
                 .cloned()
                 .map(|v| Persistent::save(ctx, v))
                 .collect();
-            host.timers.borrow_mut().push(Timer {
+            host.raf.borrow_mut().push(Timer {
                 id,
-                due: host.mono.get(),
+                due: host.runtime.mono().get(),
                 interval: 0,
-                eligible_turn: host.frame.get() + 1,
+                eligible_turn: host.runtime.turn().get() + 1,
                 kind: 2,
                 function,
                 extra,
@@ -709,9 +709,9 @@ pub(super) fn native<'js>(
         "cancelAnimationFrame" => {
             let id = optional_num(ctx, args, 0).unwrap_or(0.0) as u64;
             let kind = 2;
-            host.timers
+            host.raf
                 .borrow_mut()
-                .retain(|t| t.id != id || t.kind != kind);
+                .retain(|timer| timer.id != id || timer.kind != kind);
             if ctx.has_exception() {
                 drop(ctx.catch());
             }

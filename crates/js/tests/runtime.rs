@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use js::{ModuleStatus, RuntimeBuilder};
+use js::{ModuleStatus, RuntimeBuilder, RuntimeCounts};
 use js_host::{HttpResponse, IoEvent, IoJob};
 
 #[test]
@@ -204,6 +204,102 @@ fn sync_http_client_settles_on_drive_without_a_second_enqueue() {
             "check.js",
         )
         .expect("body");
+}
+
+#[test]
+fn job_round_stops_at_32_and_timer_batch_stops_at_64() {
+    let mut runtime = RuntimeBuilder::new().build().expect("runtime");
+    let mut jobs = String::from("var n = 0;");
+    for _ in 0..40 {
+        jobs.push_str("Promise.resolve().then(function () { n += 1; });");
+    }
+    runtime.eval_script(&jobs, "jobs.js").expect("queue");
+    let error = runtime.drive(0).expect_err("limit");
+    assert!(
+        error.message.contains("job round limit"),
+        "{}",
+        error.message
+    );
+
+    let mut runtime = RuntimeBuilder::new().build().expect("runtime");
+    let mut timers = String::from("globalThis.ran = 0;");
+    for _ in 0..65 {
+        timers.push_str("setTimeout(function () { globalThis.ran += 1; }, 0);");
+    }
+    runtime.eval_script(&timers, "timers.js").expect("timers");
+    assert_eq!(runtime.drive(0).expect("first").timers_ran, 64);
+    assert_eq!(runtime.drive(1).expect("second").timers_ran, 1);
+    runtime
+        .eval_script(
+            "if (globalThis.ran !== 65) throw new Error(String(globalThis.ran));",
+            "check.js",
+        )
+        .expect("ran");
+}
+
+#[test]
+fn socket_completion_and_shutdown_drop_roots() {
+    let mut runtime = RuntimeBuilder::new().build().expect("runtime");
+    let weak = runtime.downgrade();
+    let other = RuntimeBuilder::new().build().expect("other");
+    assert!(weak.same_runtime(&runtime));
+    assert!(!weak.same_runtime(&other));
+    runtime
+        .eval_script(
+            "var socket = new WebSocket('ws://example.test/sock'); socket.onopen = function () { globalThis.opened = 1; }; socket.onmessage = function (event) { globalThis.message = String(event.data); };",
+            "socket.js",
+        )
+        .expect("socket");
+    let id = match runtime.take_jobs().first() {
+        Some(IoJob::SocketOpen { id, url, .. }) => {
+            assert_eq!(url, "ws://example.test/sock");
+            *id
+        }
+        other => panic!("expected a socket job, got {other:?}"),
+    };
+    assert!(runtime.counts().timers == 0);
+    runtime
+        .enqueue(IoEvent::Socket {
+            id,
+            event: "open".into(),
+            text: true,
+            data: Vec::new(),
+        })
+        .expect("open");
+    runtime
+        .enqueue(IoEvent::Socket {
+            id,
+            event: "message".into(),
+            text: true,
+            data: b"hi".to_vec(),
+        })
+        .expect("message");
+    runtime.drive(0).expect("drive");
+    runtime
+        .eval_script(
+            "if (globalThis.opened !== 1 || globalThis.message !== 'hi') throw new Error(String(globalThis.opened) + ':' + String(globalThis.message));",
+            "check.js",
+        )
+        .expect("socket state");
+    let failed = runtime.eval_script("throw new Error('boom');", "bad.js");
+    assert!(failed.is_err());
+    runtime
+        .eval_script("globalThis.after = 1;", "after.js")
+        .expect("still open");
+    runtime.shutdown();
+    assert!(!weak.is_open());
+    assert_eq!(runtime.counts(), RuntimeCounts::default());
+    runtime.shutdown();
+    assert!(
+        runtime
+            .enqueue(IoEvent::Socket {
+                id,
+                event: "close".into(),
+                text: true,
+                data: Vec::new(),
+            })
+            .is_err()
+    );
 }
 
 struct SyncOk;

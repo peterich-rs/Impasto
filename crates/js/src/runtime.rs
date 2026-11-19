@@ -75,6 +75,7 @@ struct State {
     cancels: RefCell<HashMap<u64, Arc<AtomicBool>>>,
     next_socket: Cell<u64>,
     closed: Cell<bool>,
+    life: RefCell<Option<Rc<()>>>,
 }
 
 type Log = Box<dyn Fn(u8, &str)>;
@@ -141,6 +142,27 @@ impl RuntimeBuilder {
     }
 
     pub fn build(self) -> Result<Runtime, JsError> {
+        let mut runtime = self.open()?;
+        if let Some(quickjs) = runtime.state.vm.runtime() {
+            quickjs.set_loader(
+                MemoryResolver(Rc::clone(&runtime.state.modules)),
+                MemoryLoader(Rc::clone(&runtime.state.modules)),
+            );
+        }
+        runtime.install_standard()?;
+        runtime.eval_script(LEGACY_PRELUDE, "prelude.js")?;
+        Ok(runtime)
+    }
+
+    /// A VM with no prelude and no module loader.
+    ///
+    /// The UI adapter uses this, then installs its own loader and bindings at
+    /// the historical points. Moving the returned value does not move the VM.
+    pub fn bare() -> Result<Runtime, JsError> {
+        Self::new().open()
+    }
+
+    fn open(self) -> Result<Runtime, JsError> {
         if let Some(name) = self.duplicate {
             return Err(JsError {
                 message: format!("module \"{name}\" is already registered"),
@@ -149,7 +171,6 @@ impl RuntimeBuilder {
         let vm = Vm::new().map_err(|message| JsError {
             message: message.into(),
         })?;
-        let modules = Rc::new(ModuleTable::new(self.modules, self.natives));
         let mut runtime = Runtime {
             state: Box::new(State {
                 vm,
@@ -159,7 +180,7 @@ impl RuntimeBuilder {
                 mono: Cell::new(0),
                 origin: Cell::new(None),
                 identity: next_runtime_id(),
-                modules,
+                modules: Rc::new(ModuleTable::new(self.modules, self.natives)),
                 tickets: RefCell::new(HashMap::new()),
                 next_ticket: Cell::new(0),
                 log: self.log,
@@ -169,18 +190,11 @@ impl RuntimeBuilder {
                 cancels: RefCell::new(HashMap::new()),
                 next_socket: Cell::new(0),
                 closed: Cell::new(false),
+                life: RefCell::new(Some(Rc::new(()))),
             }),
         };
-        if let Some(quickjs) = runtime.state.vm.runtime() {
-            quickjs.set_loader(
-                MemoryResolver(Rc::clone(&runtime.state.modules)),
-                MemoryLoader(Rc::clone(&runtime.state.modules)),
-            );
-        }
         // SAFETY: `state` is a Box. Moving `Runtime` does not move the `Vm`.
         unsafe { Vm::arm(&mut runtime.state.vm) };
-        runtime.install_standard()?;
-        runtime.eval_script(LEGACY_PRELUDE, "prelude.js")?;
         Ok(runtime)
     }
 }
@@ -191,7 +205,86 @@ impl Default for RuntimeBuilder {
     }
 }
 
+/// Grouped counts of roots this runtime owns. They do not retain extra values.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeCounts {
+    pub promises: usize,
+    pub timers: usize,
+    pub tickets: usize,
+    pub rejections: usize,
+}
+
+/// A non-owning handle. It does not keep the VM or the UI state alive.
+#[derive(Clone)]
+pub struct WeakRuntime {
+    id: u64,
+    life: std::rc::Weak<()>,
+}
+
+impl WeakRuntime {
+    pub fn is_open(&self) -> bool {
+        self.life.strong_count() > 0
+    }
+
+    pub fn same_runtime(&self, runtime: &Runtime) -> bool {
+        self.is_open() && self.id == runtime.state.identity
+    }
+}
+
 impl Runtime {
+    pub fn vm(&self) -> &Vm {
+        &self.state.vm
+    }
+
+    pub fn timers(&self) -> &RefCell<Vec<Timer>> {
+        &self.state.timers
+    }
+
+    pub fn next_id(&self) -> &Cell<u64> {
+        &self.state.next_id
+    }
+
+    pub fn turn(&self) -> &Cell<u64> {
+        &self.state.turn
+    }
+
+    pub fn mono(&self) -> &Cell<i64> {
+        &self.state.mono
+    }
+
+    pub fn origin(&self) -> &Cell<Option<i64>> {
+        &self.state.origin
+    }
+
+    pub fn downgrade(&self) -> WeakRuntime {
+        let life = self
+            .state
+            .life
+            .borrow()
+            .as_ref()
+            .map(Rc::downgrade)
+            .unwrap_or_default();
+        WeakRuntime {
+            id: self.state.identity,
+            life,
+        }
+    }
+
+    pub fn counts(&self) -> RuntimeCounts {
+        RuntimeCounts {
+            promises: self.state.vm.promises.borrow().len(),
+            timers: self
+                .state
+                .timers
+                .borrow()
+                .iter()
+                .filter(|timer| timer.active)
+                .count(),
+            tickets: self.state.tickets.borrow().len(),
+            rejections: self.state.vm.rejections.borrow().len(),
+        }
+    }
+
     pub fn eval_script(&mut self, source: &str, name: &str) -> Result<(), JsError> {
         self.ensure_open()?;
         self.state.vm.with(|ctx| {
@@ -330,6 +423,7 @@ impl Runtime {
         }
         self.state.cancels.borrow_mut().clear();
         self.state.vm.rejections.borrow_mut().clear();
+        self.state.life.borrow_mut().take();
         self.state.vm.close();
     }
 

@@ -10,4 +10,4 @@ mod vm;
     unused_imports,
     reason = "the UI adapter names Active even though this crate does not"
 )]
-pub use vm::{Active, JobStop, Saved, Timer, Vm, poll_timer, run_jobs};
+pub use vm::{Active, JobStop, JsDiagnostic, Saved, Timer, Vm, poll_timer, run_jobs};

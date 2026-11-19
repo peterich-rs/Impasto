@@ -7,6 +7,13 @@ use crate::monotonic_ms;
 
 pub type Saved = Persistent<Value<'static>>;
 
+/// A script failure the UI maps onto its own fault record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JsDiagnostic {
+    pub message: String,
+    pub stack: String,
+}
+
 /// One timer callback. `kind` 0 is timeout, 1 is interval, 2 is an animation frame.
 ///
 /// `eligible_turn` is the timer-turn that may run this callback. The UI adapter
@@ -191,6 +198,14 @@ impl Vm {
             vm: self,
             previous_entry,
             previous_deadline,
+        }
+    }
+
+    pub fn diagnostic(&self) -> JsDiagnostic {
+        let error = self.error.borrow();
+        JsDiagnostic {
+            message: error.0.clone(),
+            stack: error.1.clone(),
         }
     }
 
