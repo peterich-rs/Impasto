@@ -157,10 +157,37 @@ job 上限仍是每轮 32，现有测试 `recursive_jobs_hit_the_round_limit_and
 | `cargo test --workspace --exclude macos` | 退出码 0。各测试目标都是 `0 failed`。quickjs 有 6 个既有 `ignored`（说明写着 gallery 行为在 `b48bb8a` 漂移，以及 toolchain baseline 需显式跑）。uicore 有 1 个既有 `ignored`（`record_bench`）。没有新的失败 |
 | `pnpm -C . -r test` | 退出码 0。form、i18n、net、solid-renderer、solid-router、solid-ui、devtools、gallery-solid 都完成 |
 | `kotlin/gradlew -p kotlin :library:jvmTest` | 第二次在线运行 `BUILD SUCCESSFUL`。`:library:jvmTest` 是 `NO-SOURCE`，没有 JVM 测试可跑。第一次加了 `--offline`，插件仓库不可达，那次失败不算产品失败 |
-| macOS `cargo clippy -p macos` / `cargo test -p macos` | 未跑。这台机器不是 macOS |
-| `just android` | 未跑。没有把 Kotlin JVM 测试当成 Android Rust 验证 |
+| macOS `cargo clippy -p macos` / `cargo test -p macos` | 本机未跑。随后 GitHub Actions `cargo test (macos)` 在 `7029dee` 上成功 |
+| `just android` | 见下一节。这是 debug APK，包含 `aarch64-linux-android` 的 `libimpasto.so` |
 
 quickjs 新测试 `open_runs_entry_before_io_install_and_frame_flushes_pending` 和 `unknown_io_completion_is_ignored_and_drop_discards_pending_fetch` 包含在这次 workspace 测试里并通过。libtest 仍把这两个和 session 契约测试报成 `finished in 0.00s`。没有做分配或泄漏采样，这里不写内存结论。
+
+## Android debug APK
+
+验证提交仍是 `7029deee7fc35898f5f608ad4e3c38c52ae39039`。没有为此改产品代码。APK、SDK 和 Impeller 解压结果都没有进 git。
+
+命令是仓库的 `just android`：先走 `gallery-dist`，再 `crates/android/apk/gradlew -p crates/android/apk assembleDebug`。Gradle 任务 `cargoImpastoDebug` 执行 `cargo build --manifest-path <repo>/Cargo.toml --target aarch64-linux-android -p android`，不带 `--release`。
+
+| 项 | 值 |
+|---|---|
+| just | 1.43.0 |
+| rustc | 1.100.0 (0ef1bc386 2026-11-09)，`rust-toolchain.toml` 的 stable。`aarch64-linux-android` 装在这条工具链上 |
+| JDK | OpenJDK 21.0.13 |
+| Android Gradle Plugin | 8.7.3 |
+| Gradle | 8.11.1 |
+| compileSdk / targetSdk / minSdk | 35 / 35 / 24 |
+| NDK | 27.2.12479018，clang 18.0.3 |
+| ABI | `arm64-v8a` |
+| Impeller | `third_party/impeller-sdk/android-arm64/lib/libimpeller.so`，strip 后 6858536 字节，与 `engine.pin` 注释一致，SONAME `libimpeller.so` |
+| 结果 | `BUILD SUCCESSFUL in 1m 51s`。Cargo `Finished dev profile ... in 1m 39s` |
+| APK | `crates/android/apk/app/build/outputs/apk/debug/app-debug.apk`，64726721 字节 |
+| 包内 so | `lib/arm64-v8a/libimpasto.so`（未压缩 258577440 字节，debug）、`lib/arm64-v8a/libimpeller.so`（6858536 字节） |
+
+第一次 `just android` 失败是环境：当时 `rustup target add` 跑在 `/tmp`，目标装进了默认的 1.83，而仓库用 stable。错误是 `can't find crate for core` / `the aarch64-linux-android target may not be installed`。装到仓库工具链后同一命令成功。这不是本次类型移动的回归。
+
+构建时 `android` 对 `class_name` 和 `is_clickable` 报了 dead_code 警告。这两个函数在基线 `a61fdffd` 的 `crates/android/src/a11y.rs` 里已经存在，构建仍然成功，没有改它们。Gradle 还写了一句 `Unable to strip the following libraries, packaging them as they are: libimpeller.so`。这条库仍打进了 APK。
+
+`fetch-impeller-sdk.sh` 会先处理 `darwin-arm64` 并调用 `install_name_tool`，Linux 上跑不完。Android 构建只用 `android-arm64`。这次按该脚本的 URL、`engine.pin` 的 sha256 和 strip / SONAME 步骤只取了这一份。没有安装到设备，也没有打 release APK。
 
 ## 已知问题（不在阶段 0/1 修）
 
