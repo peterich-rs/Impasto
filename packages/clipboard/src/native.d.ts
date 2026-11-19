@@ -6,3 +6,6 @@ export interface Clipboard {
 }
 
 export declare const Clipboard: Clipboard;
+
+export declare function getString(): string;
+export declare function setString(text: string): void;

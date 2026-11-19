@@ -8,3 +8,8 @@ export interface AsyncStorage {
 }
 
 export declare const AsyncStorage: AsyncStorage;
+
+export declare function multiGet(keys: string[]): Promise<[string, string | null][]>;
+export declare function multiSet(entries: [string, string][]): Promise<void>;
+export declare function multiRemove(keys: string[]): Promise<void>;
+export declare function clear(): Promise<void>;

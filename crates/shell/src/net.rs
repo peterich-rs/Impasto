@@ -1,13 +1,15 @@
 //! WebSocket work for `net`. HTTP is [`crate::http::OpenWireClient`].
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
 use std::time::Duration;
 
-use session::{HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, IoJob};
+use session::{
+    Credit, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, IoEvent, IoJob, Route,
+};
 
 use crate::command::Command;
 use crate::queue::Inbox;
@@ -34,120 +36,404 @@ pub(crate) fn wake(
         .ok()
 }
 
+const STREAM_WORKERS: usize = 8;
+const WHOLE_WORKERS: usize = 8;
+const PIECE_BYTES: usize = 64 << 10;
+const CREDIT_WAIT: Duration = Duration::from_secs(10);
+
+type Hub = Arc<crate::diagnostics::DiagnosticsHub>;
+
 fn serve(
     jobs: Receiver<IoJob>,
     inbox: Arc<Inbox>,
     http: Option<Arc<dyn HttpClient>>,
-    hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
+    hub: Option<Hub>,
 ) {
-    let mut sockets: HashMap<u64, (Sender<SocketCmd>, String)> = HashMap::new();
-    while let Ok(job) = jobs.recv() {
+    let mut sockets: HashMap<u64, (SyncSender<SocketCmd>, thread::JoinHandle<()>)> = HashMap::new();
+    let connects = Arc::new(AtomicUsize::new(0));
+    let streams = Arc::new(AtomicUsize::new(0));
+    let whole = Arc::new(AtomicUsize::new(0));
+    let executor = crate::rt::handle().ok();
+    loop {
+        sockets.retain(|_, (_, worker)| !worker.is_finished());
+        let job = if sockets.is_empty() {
+            match jobs.recv() {
+                Ok(job) => job,
+                Err(_) => break,
+            }
+        } else {
+            match jobs.recv_timeout(Duration::from_millis(250)) {
+                Ok(job) => job,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        };
+        let (job, route, outbound) = match job {
+            IoJob::Routed {
+                route,
+                job,
+                outbound,
+            } => (*job, Some(route), outbound),
+            job => (job, None, None),
+        };
+        let post = Post {
+            inbox: Arc::clone(&inbox),
+            route,
+        };
         match job {
-            IoJob::Http(request) => {
-                if request.cancel.load(Ordering::Acquire) {
-                    continue;
-                }
-                let token = request.token;
-                let result = match http.as_ref() {
-                    Some(client) => client.perform(&request),
-                    None => Err(HttpError::new(
-                        HttpFailure::Network,
-                        "network is not linked",
-                    )),
+            job @ (IoJob::Http(_) | IoJob::HttpStream(_)) => {
+                let (request, streaming) = match job {
+                    IoJob::Http(request) => (request, false),
+                    IoJob::HttpStream(request) => (request, true),
+                    _ => unreachable!(),
                 };
-                if request.cancel.load(Ordering::Acquire) {
-                    continue;
-                }
-                if let Err(error) = result.as_ref() {
-                    log_http(&request.method, &request.url, error);
-                }
-                inbox.post(Command::HttpDone { token, result });
-            }
-            IoJob::HttpStream(request) => {
-                let token = request.token;
-                let cancel = Arc::clone(&request.cancel);
-                let mut deliver = |piece: HttpPiece<'_>| -> bool {
-                    if cancel.load(Ordering::Acquire) {
-                        return false;
-                    }
-                    match piece {
-                        HttpPiece::Head(status, headers) => inbox.post(Command::HttpHead {
-                            token,
-                            status,
-                            headers: headers.to_vec(),
-                        }),
-                        HttpPiece::Chunk(bytes, done) => inbox.post(Command::HttpChunk {
-                            token,
-                            bytes: bytes.to_vec(),
-                            done,
-                            error: None,
-                        }),
-                    }
-                    true
+                let permit = if streaming {
+                    WorkPermit::acquire(&streams, STREAM_WORKERS)
+                } else {
+                    WorkPermit::acquire(&whole, WHOLE_WORKERS)
                 };
-                let result = match http.as_ref() {
-                    Some(client) => client.stream(&request, &mut deliver),
-                    None => Err(HttpError::new(
-                        HttpFailure::Network,
-                        "network is not linked",
-                    )),
-                };
-                if let Some(error) = result.err() {
-                    log_http(&request.method, &request.url, &error);
-                    inbox.post(Command::HttpChunk {
-                        token,
-                        bytes: Vec::new(),
-                        done: true,
-                        error: Some(error),
-                    });
-                }
-            }
-            IoJob::Abort { .. } => {}
-            IoJob::SocketOpen { id, url, protocols } => {
-                if sockets.len() >= 8 {
-                    post_socket(
-                        &inbox,
-                        id,
-                        "error",
-                        true,
-                        b"too many sockets",
-                        hub.as_ref(),
-                        &url,
+                if let (Some(executor), Some(permit)) = (&executor, permit) {
+                    let http = http.clone();
+                    drop(executor.spawn_blocking(move || {
+                        let _permit = permit;
+                        let _outbound = outbound;
+                        execute_http(&request, streaming, &post, http.as_deref());
+                    }));
+                } else {
+                    post.http_failure(
+                        request.token,
+                        streaming,
+                        HttpError::new(HttpFailure::Network, "HTTP workers are busy or offline"),
                     );
-                    continue;
                 }
-                match open_socket(id, &url, &protocols, Arc::clone(&inbox), hub.clone()) {
-                    Ok(sender) => {
-                        sockets.insert(id, (sender, url));
+            }
+            IoJob::Abort { .. } | IoJob::Routed { .. } => {}
+            IoJob::SocketOpen { id, url, protocols } => {
+                let Some(permit) = WorkPermit::acquire(&connects, 8) else {
+                    post.socket(id, "error", true, b"too many sockets");
+                    continue;
+                };
+                match open_socket(id, &url, &protocols, post.clone(), hub.clone(), permit) {
+                    Ok(socket) => {
+                        sockets.insert(id, socket);
                     }
-                    Err(message) => post_socket(
-                        &inbox,
-                        id,
-                        "error",
-                        true,
-                        message.as_bytes(),
-                        hub.as_ref(),
-                        &url,
-                    ),
+                    Err(message) => {
+                        post.socket(id, "error", true, message.as_bytes());
+                    }
                 }
             }
             IoJob::SocketSend { id, text, data } => {
-                if let Some((sender, _url)) = sockets.get(&id) {
-                    let _ = sender.send(SocketCmd::Send { text, data });
+                if let Some((sender, _)) = sockets.get(&id)
+                    && sender
+                        .try_send(SocketCmd::Send {
+                            text,
+                            data,
+                            credit: outbound,
+                        })
+                        .is_err()
+                {
+                    post.socket(id, "error", true, b"socket send queue closed or full");
+                    sockets.remove(&id);
                 }
             }
             IoJob::SocketClose { id } => {
-                if let Some((sender, url)) = sockets.remove(&id) {
-                    let _ = sender.send(SocketCmd::Close);
-                    drop(url);
+                if let Some((sender, _)) = sockets.remove(&id)
+                    && sender.try_send(SocketCmd::Close).is_ok()
+                {
+                    continue;
                 }
+                post.socket(id, "close", true, b"");
             }
         }
     }
 }
 
+struct WorkPermit(Arc<AtomicUsize>);
+
+impl WorkPermit {
+    fn acquire(count: &Arc<AtomicUsize>, max: usize) -> Option<Self> {
+        count
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                (used < max).then(|| used + 1)
+            })
+            .ok()
+            .map(|_| Self(Arc::clone(count)))
+    }
+}
+
+impl Drop for WorkPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone)]
+struct Post {
+    inbox: Arc<Inbox>,
+    route: Option<Route>,
+}
+
+impl Post {
+    fn active(&self) -> bool {
+        self.route.as_ref().is_none_or(Route::is_active)
+    }
+
+    fn event(&self, event: IoEvent, credit: Option<Credit>) {
+        if let Some(route) = &self.route {
+            let admitted = if event.is_terminal() {
+                route.claim_terminal()
+            } else {
+                route.is_active()
+            };
+            if admitted {
+                self.inbox.post(Command::JsIo(route.deliver(event, credit)));
+            }
+            return;
+        }
+        self.inbox.post(match event {
+            IoEvent::Http { token, result } => Command::HttpDone { token, result },
+            IoEvent::HttpHead {
+                token,
+                status,
+                headers,
+            } => Command::HttpHead {
+                token,
+                status,
+                headers,
+            },
+            IoEvent::HttpChunk {
+                token,
+                bytes,
+                done,
+                error,
+            } => Command::HttpChunk {
+                token,
+                bytes,
+                done,
+                error,
+            },
+            IoEvent::Socket {
+                id,
+                event,
+                text,
+                data,
+            } => Command::Socket {
+                id,
+                event,
+                text,
+                data,
+            },
+            _ => return,
+        });
+    }
+
+    fn http_failure(&self, token: u64, streaming: bool, error: HttpError) {
+        self.event(
+            if streaming {
+                IoEvent::HttpChunk {
+                    token,
+                    bytes: Vec::new(),
+                    done: true,
+                    error: Some(error),
+                }
+            } else {
+                IoEvent::Http {
+                    token,
+                    result: Err(error),
+                }
+            },
+            None,
+        );
+    }
+
+    fn socket(&self, id: u64, event: &str, text: bool, data: &[u8]) -> bool {
+        if !self.active() {
+            return false;
+        }
+        let terminal = matches!(event, "error" | "close");
+        let credit = if let Some(route) = &self.route
+            && !terminal
+        {
+            let Some(credit) =
+                route.reserve(event.len().saturating_add(data.len()), Duration::ZERO)
+            else {
+                return false;
+            };
+            Some(credit)
+        } else {
+            None
+        };
+        let data = if terminal {
+            &data[..data.len().min(1024)]
+        } else {
+            data
+        };
+        self.event(
+            IoEvent::Socket {
+                id,
+                event: event.into(),
+                text,
+                data: data.to_vec(),
+            },
+            credit,
+        );
+        true
+    }
+}
+
+fn execute_http(
+    request: &HttpRequest,
+    streaming: bool,
+    post: &Post,
+    client: Option<&dyn HttpClient>,
+) {
+    let token = request.token;
+    if !post.active() || request.cancel.load(Ordering::Acquire) {
+        return;
+    }
+    let Some(client) = client else {
+        post.http_failure(
+            token,
+            streaming,
+            HttpError::new(HttpFailure::Network, "network is not linked"),
+        );
+        return;
+    };
+    if !streaming {
+        let result = client.perform(request);
+        if request.cancel.load(Ordering::Acquire) {
+            return;
+        }
+        if let Err(error) = &result {
+            log_http(&request.method, &request.url, error);
+            post.http_failure(
+                token,
+                false,
+                HttpError::new(error.kind, "HTTP transport failed"),
+            );
+        } else {
+            let event = IoEvent::Http { token, result };
+            let credit = post
+                .route
+                .as_ref()
+                .and_then(|route| route.reserve(event.payload_bytes(), Duration::ZERO));
+            if post.route.is_none() || credit.is_some() {
+                post.event(event, credit);
+            } else {
+                post.http_failure(
+                    token,
+                    false,
+                    HttpError::new(HttpFailure::TooLarge, "response queue is full"),
+                );
+            }
+        }
+        return;
+    }
+
+    let mut head_seen = false;
+    let mut done_seen = false;
+    let mut stopped = false;
+    let mut total: usize = 0;
+    let result = client.stream(request, &mut |piece| {
+        if done_seen || stopped || !post.active() || request.cancel.load(Ordering::Acquire) {
+            return false;
+        }
+        match piece {
+            HttpPiece::Head(status, headers) if !head_seen => {
+                let bytes = headers.iter().fold(0usize, |sum, (name, value)| {
+                    sum.saturating_add(name.len()).saturating_add(value.len())
+                });
+                let credit = post
+                    .route
+                    .as_ref()
+                    .and_then(|route| route.reserve(bytes, CREDIT_WAIT));
+                if post.route.is_some() && credit.is_none() {
+                    stopped = true;
+                    return false;
+                }
+                post.event(
+                    IoEvent::HttpHead {
+                        token,
+                        status,
+                        headers: headers.to_vec(),
+                    },
+                    credit,
+                );
+                head_seen = true;
+            }
+            HttpPiece::Chunk(bytes, done) if head_seen => {
+                total = total.saturating_add(bytes.len());
+                if total > session::HTTP_BODY_LIMIT {
+                    stopped = true;
+                    return false;
+                }
+                let chunk_size = post.route.as_ref().map_or(PIECE_BYTES, |route| {
+                    PIECE_BYTES.min(route.max_piece_bytes()).max(1)
+                });
+                for chunk in bytes.chunks(chunk_size) {
+                    let credit = post
+                        .route
+                        .as_ref()
+                        .and_then(|route| route.reserve(chunk.len(), CREDIT_WAIT));
+                    if post.route.is_some() && credit.is_none() {
+                        stopped = true;
+                        return false;
+                    }
+                    post.event(
+                        IoEvent::HttpChunk {
+                            token,
+                            bytes: chunk.to_vec(),
+                            done: false,
+                            error: None,
+                        },
+                        credit,
+                    );
+                }
+                done_seen = done;
+            }
+            _ => {
+                stopped = true;
+                return false;
+            }
+        }
+        true
+    });
+    if !post.active() || request.cancel.load(Ordering::Acquire) {
+        return;
+    }
+    let error = if stopped {
+        Some(HttpError::new(
+            HttpFailure::TooLarge,
+            "stream delivery limit exceeded",
+        ))
+    } else if let Err(error) = result {
+        log_http(&request.method, &request.url, &error);
+        Some(HttpError::new(error.kind, "stream transport failed"))
+    } else if !head_seen {
+        Some(HttpError::new(
+            HttpFailure::Network,
+            "stream ended without headers",
+        ))
+    } else {
+        None
+    };
+    post.event(
+        IoEvent::HttpChunk {
+            token,
+            bytes: Vec::new(),
+            done: true,
+            error,
+        },
+        None,
+    );
+}
+
 enum SocketCmd {
-    Send { text: bool, data: Vec<u8> },
+    Send {
+        text: bool,
+        data: Vec<u8>,
+        credit: Option<Credit>,
+    },
     Close,
 }
 
@@ -210,23 +496,15 @@ fn log_http(method: &str, url: &str, error: &HttpError) {
     }
 }
 
-fn post_socket(
-    inbox: &Inbox,
+fn socket_event(
+    post: &Post,
     id: u64,
+    url: &str,
+    hub: Option<&Hub>,
     event: &str,
     text: bool,
     data: &[u8],
-    hub: Option<&Arc<crate::diagnostics::DiagnosticsHub>>,
-    url: &str,
-) {
-    if event == "error" {
-        tracing::warn!(
-            target: "impasto::net",
-            url,
-            error = %String::from_utf8_lossy(data),
-            "socket error"
-        );
-    }
+) -> bool {
     if let Some(hub) = hub {
         use crate::diagnostics::{NetEntry, NetKind};
         hub.record_net(NetEntry {
@@ -241,37 +519,36 @@ fn post_socket(
             status: None,
             response_headers: Vec::new(),
             response_bytes: Some(data.len()),
-            response_preview: (!data.is_empty()).then(|| data.to_vec()),
+            response_preview: (!data.is_empty()).then(|| data[..data.len().min(1024)].to_vec()),
             error: (event == "error").then(|| String::from_utf8_lossy(data).to_string()),
             done_ms: Some(mono_ms()),
         });
     }
-    inbox.post(Command::Socket {
-        id,
-        event: event.to_owned(),
-        text,
-        data: data.to_vec(),
-    });
+    post.socket(id, event, text, data)
 }
 
 fn open_socket(
     id: u64,
     url: &str,
     protocols: &[String],
-    inbox: Arc<Inbox>,
-    hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
-) -> Result<Sender<SocketCmd>, String> {
+    post: Post,
+    hub: Option<Hub>,
+    permit: WorkPermit,
+) -> Result<(SyncSender<SocketCmd>, thread::JoinHandle<()>), String> {
     if !(url.starts_with("ws://") || url.starts_with("wss://")) {
         return Err("unsupported URL".to_owned());
     }
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::sync_channel(64);
     let url = url.to_owned();
     let protocols = protocols.to_vec();
-    thread::Builder::new()
+    let worker = thread::Builder::new()
         .name(format!("socket-{id}"))
-        .spawn(move || socket_loop(id, &url, &protocols, rx, inbox, hub))
+        .spawn(move || {
+            let _permit = permit;
+            socket_loop(id, &url, &protocols, rx, &post, hub.as_ref());
+        })
         .map_err(|error| error.to_string())?;
-    Ok(tx)
+    Ok((tx, worker))
 }
 
 fn socket_loop(
@@ -279,131 +556,146 @@ fn socket_loop(
     url: &str,
     protocols: &[String],
     commands: Receiver<SocketCmd>,
-    inbox: Arc<Inbox>,
-    hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
+    post: &Post,
+    hub: Option<&Hub>,
 ) {
-    let hub_ref = hub.as_ref();
-    let mut request = match tungstenite::client::IntoClientRequest::into_client_request(url) {
-        Ok(request) => request,
-        Err(error) => {
-            post_socket(
-                &inbox,
-                id,
-                "error",
-                true,
-                error.to_string().as_bytes(),
-                hub_ref,
-                url,
-            );
-            return;
-        }
-    };
-    if !protocols.is_empty() && request.headers().get("Sec-WebSocket-Protocol").is_none() {
-        let offered = protocols.join(", ");
-        if let Ok(value) = http::HeaderValue::from_str(&offered) {
+    use tungstenite::{Error, Message};
+    let emit = |event, text, data: &[u8]| socket_event(post, id, url, hub, event, text, data);
+    let outcome = (|| -> Result<(), String> {
+        let mut request = tungstenite::client::IntoClientRequest::into_client_request(url)
+            .map_err(|error| error.to_string())?;
+        if !protocols.is_empty() {
+            let offered = http::HeaderValue::from_str(&protocols.join(", "))
+                .map_err(|error| error.to_string())?;
             request
                 .headers_mut()
-                .insert("Sec-WebSocket-Protocol", value);
+                .insert("Sec-WebSocket-Protocol", offered);
         }
-    }
-    let mut connected = match tungstenite::connect(request) {
-        Ok((socket, _)) => socket,
-        Err(error) => {
-            post_socket(
-                &inbox,
-                id,
-                "error",
-                true,
-                error.to_string().as_bytes(),
-                hub_ref,
-                url,
-            );
-            return;
+        let mut config = tungstenite::protocol::WebSocketConfig::default();
+        config.max_message_size = Some(256 << 10);
+        config.max_frame_size = Some(256 << 10);
+        config.write_buffer_size = 16 << 10;
+        config.max_write_buffer_size = 256 << 10;
+        let tcp = connect_socket(request.uri(), post)?;
+        let (mut socket, response) =
+            tungstenite::client_tls_with_config(request, tcp, Some(config), None)
+                .map_err(|error| error.to_string())?;
+        let protocol = response
+            .headers()
+            .get("Sec-WebSocket-Protocol")
+            .map_or(&[][..], http::HeaderValue::as_bytes);
+        if !emit("open", true, protocol) {
+            return Err("socket event queue is full".into());
         }
-    };
-    post_socket(&inbox, id, "open", true, b"", hub_ref, url);
-    set_socket_timeout(&mut connected);
-    let socket = Mutex::new(connected);
-    loop {
-        match commands.recv_timeout(Duration::from_millis(50)) {
-            Ok(SocketCmd::Send { text, data }) => {
-                let mut guard = lock_socket(&socket);
-                let message = if text {
-                    match String::from_utf8(data) {
-                        Ok(text) => tungstenite::Message::Text(text.into()),
-                        Err(_) => {
-                            post_socket(&inbox, id, "error", true, b"invalid text", hub_ref, url);
-                            continue;
-                        }
-                    }
-                } else {
-                    tungstenite::Message::Binary(data.into())
-                };
-                if let Err(error) = guard.send(message) {
-                    post_socket(
-                        &inbox,
-                        id,
-                        "error",
-                        true,
-                        error.to_string().as_bytes(),
-                        hub_ref,
-                        url,
-                    );
+        let tcp = match socket.get_mut() {
+            tungstenite::stream::MaybeTlsStream::Plain(tcp) => Some(tcp),
+            tungstenite::stream::MaybeTlsStream::Rustls(tls) => Some(tls.get_mut()),
+            _ => None,
+        };
+        if let Some(tcp) = tcp {
+            tcp.set_read_timeout(Some(Duration::from_millis(50)))
+                .map_err(|error| error.to_string())?;
+            tcp.set_write_timeout(Some(Duration::from_secs(2)))
+                .map_err(|error| error.to_string())?;
+        }
+        while post.active() {
+            match commands.try_recv() {
+                Ok(SocketCmd::Send { text, data, credit }) => {
+                    let _credit = credit;
+                    let message = if text {
+                        Message::Text(
+                            String::from_utf8(data)
+                                .map_err(|error| error.to_string())?
+                                .into(),
+                        )
+                    } else {
+                        Message::Binary(data.into())
+                    };
+                    socket.send(message).map_err(|error| error.to_string())?;
+                }
+                Ok(SocketCmd::Close) | Err(mpsc::TryRecvError::Disconnected) => {
+                    let _ = socket.close(None);
                     break;
                 }
+                Err(mpsc::TryRecvError::Empty) => {}
             }
-            Ok(SocketCmd::Close) | Err(RecvTimeoutError::Disconnected) => {
-                let mut guard = lock_socket(&socket);
-                let _ = guard.close(None);
-                post_socket(&inbox, id, "close", true, b"", hub_ref, url);
-                break;
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                let mut guard = lock_socket(&socket);
-                match guard.read() {
-                    Ok(tungstenite::Message::Text(text)) => {
-                        post_socket(&inbox, id, "message", true, text.as_bytes(), hub_ref, url);
-                    }
-                    Ok(tungstenite::Message::Binary(data)) => {
-                        post_socket(&inbox, id, "message", false, &data, hub_ref, url);
-                    }
-                    Ok(tungstenite::Message::Close(_)) => {
-                        post_socket(&inbox, id, "close", true, b"", hub_ref, url);
-                        break;
-                    }
-                    Ok(tungstenite::Message::Ping(data)) => {
-                        let _ = guard.send(tungstenite::Message::Pong(data));
-                    }
-                    Ok(_) => {}
-                    Err(tungstenite::Error::Io(error))
-                        if error.kind() == std::io::ErrorKind::WouldBlock
-                            || error.kind() == std::io::ErrorKind::TimedOut => {}
-                    Err(tungstenite::Error::ConnectionClosed) => {
-                        post_socket(&inbox, id, "close", true, b"", hub_ref, url);
-                        break;
-                    }
-                    Err(_) => {}
+            let forwarded = match socket.read() {
+                Ok(Message::Text(text)) => emit("message", true, text.as_bytes()),
+                Ok(Message::Binary(data)) => emit("message", false, &data),
+                Ok(Message::Close(_)) | Err(Error::ConnectionClosed | Error::AlreadyClosed) => {
+                    break;
                 }
+                Ok(_) => true,
+                Err(Error::Io(error))
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    true
+                }
+                Err(error) => return Err(error.to_string()),
+            };
+            if !forwarded {
+                return Err("socket event queue is full".into());
             }
+        }
+        Ok(())
+    })();
+    match outcome {
+        Ok(()) => {
+            emit("close", true, b"");
+        }
+        Err(error) => {
+            emit("error", true, error.as_bytes());
         }
     }
 }
 
-fn set_socket_timeout(
-    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
-) {
-    let tcp = match socket.get_mut() {
-        tungstenite::stream::MaybeTlsStream::Plain(tcp) => tcp,
-        tungstenite::stream::MaybeTlsStream::Rustls(tls) => tls.get_mut(),
-        _ => return,
-    };
-    let _ = tcp.set_read_timeout(Some(Duration::from_millis(200)));
-}
+fn connect_socket(uri: &http::Uri, post: &Post) -> Result<std::net::TcpStream, String> {
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::time::Instant;
 
-fn lock_socket<T>(socket: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    socket
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    let host = uri
+        .host()
+        .ok_or_else(|| "websocket address is missing a host".to_owned())?;
+    let host = host.trim_matches(['[', ']']);
+    let port = uri
+        .port_u16()
+        .unwrap_or(if uri.scheme_str() == Some("wss") {
+            443
+        } else {
+            80
+        });
+    let timeout = Duration::from_secs(5);
+    let started = Instant::now();
+    let addresses = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| error.to_string())?;
+    let mut last_error = None;
+    for address in addresses {
+        if !post.active() {
+            return Err("websocket was canceled".into());
+        }
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        match TcpStream::connect_timeout(&address, remaining) {
+            Ok(tcp) => {
+                tcp.set_read_timeout(Some(timeout))
+                    .map_err(|error| error.to_string())?;
+                tcp.set_write_timeout(Some(timeout))
+                    .map_err(|error| error.to_string())?;
+                return Ok(tcp);
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.map_or_else(
+        || "websocket connection timed out".into(),
+        |error| error.to_string(),
+    ))
 }
 
 fn wake_loop(deadlines: Receiver<Option<i64>>, inbox: Arc<Inbox>) {
@@ -616,5 +908,194 @@ mod tests {
         // but the contract a real client honors is "stop when the sink says no".
         assert!(outcome.is_ok());
         assert_eq!(seen, 2);
+    }
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    use session::{CreditPool, HttpResponse, RequestKey, RuntimeKey};
+    use std::net::TcpListener;
+    use std::sync::atomic::AtomicBool;
+
+    struct Slow {
+        finished: mpsc::Sender<()>,
+    }
+
+    impl HttpClient for Slow {
+        fn perform(&self, _: &HttpRequest) -> Result<HttpResponse, HttpError> {
+            Ok(HttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: b"ok".to_vec(),
+            })
+        }
+
+        fn stream(
+            &self,
+            _: &HttpRequest,
+            sink: &mut dyn FnMut(HttpPiece<'_>) -> bool,
+        ) -> Result<(), HttpError> {
+            if sink(HttpPiece::Head(200, &[])) && sink(HttpPiece::Chunk(b"1234", false)) {
+                sink(HttpPiece::Chunk(b"5678", true));
+            }
+            let _ = self.finished.send(());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn blocked_stream_does_not_hold_commands_and_shutdown_releases_credit_wait() {
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let (work_tx, work_rx) = mpsc::sync_channel(8);
+        let (event_tx, event_rx) = mpsc::channel();
+        let inbox = Arc::new(Inbox::new());
+        let reader = thread::spawn({
+            let inbox = Arc::clone(&inbox);
+            move || {
+                while let Some(command) = inbox.recv() {
+                    if matches!(&command, Command::Shutdown) {
+                        break;
+                    }
+                    if event_tx.send(command).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        let worker = spawn(
+            work_rx,
+            Arc::clone(&inbox),
+            Some(Arc::new(Slow {
+                finished: finished_tx,
+            })),
+            None,
+        );
+        let ingress = Arc::new(CreditPool::new(64, 12, 4, 4));
+        let outbound = Arc::new(CreditPool::new(128, 12, 16, 4));
+        let runtime = RuntimeKey {
+            instance: 1,
+            generation: 3,
+        };
+        let submit = |id, streaming, job, cancel| {
+            let route = Route::new(
+                RequestKey {
+                    runtime,
+                    sequence: id,
+                },
+                Arc::clone(&ingress),
+                Arc::clone(&outbound),
+                cancel,
+                streaming,
+            );
+            assert!(
+                work_tx
+                    .send(IoJob::Routed {
+                        route,
+                        job: Box::new(job),
+                        outbound: None
+                    })
+                    .is_ok()
+            );
+        };
+        let request = |token, cancel| HttpRequest {
+            token,
+            method: "GET".into(),
+            url: "https://example.test/".into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            cancel,
+            timeout_ms: None,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        submit(
+            1,
+            true,
+            IoJob::HttpStream(request(1, Arc::clone(&cancel))),
+            cancel,
+        );
+        let next = || {
+            event_rx
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap_or_else(|error| panic!("{error}"))
+        };
+        let Command::JsIo(head) = next() else {
+            panic!("expected routed head")
+        };
+        assert_eq!(head.runtime, runtime);
+        assert!(matches!(head.event, IoEvent::HttpHead { token: 1, .. }));
+        drop(head.credit);
+        let Command::JsIo(chunk) = next() else {
+            panic!("expected first chunk")
+        };
+        assert!(
+            matches!(chunk.event, IoEvent::HttpChunk { token: 1, ref bytes, done: false, .. } if bytes == b"1234")
+        );
+        assert_eq!(ingress.usage().bytes, 4);
+        assert!(finished_rx.try_recv().is_err());
+
+        // A short HTTP job and a real WebSocket handshake both complete while the
+        // stream worker is waiting for the owner of the first chunk.
+        let cancel_short = Arc::new(AtomicBool::new(false));
+        submit(
+            2,
+            false,
+            IoJob::Http(request(2, Arc::clone(&cancel_short))),
+            cancel_short,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|error| panic!("{error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("{error}"));
+        let server = thread::spawn(move || {
+            let (tcp, _) = listener.accept().unwrap_or_else(|error| panic!("{error}"));
+            drop(tungstenite::accept(tcp));
+        });
+        let socket = Arc::new(AtomicBool::new(false));
+        submit(
+            3,
+            false,
+            IoJob::SocketOpen {
+                id: 3,
+                url: format!("ws://{address}/"),
+                protocols: Vec::new(),
+            },
+            socket,
+        );
+        let mut short = false;
+        let mut socket_open = false;
+        for _ in 0..3 {
+            let Command::JsIo(delivery) = next() else {
+                panic!("expected routed completion")
+            };
+            match delivery.event {
+                IoEvent::Http {
+                    token: 2,
+                    result: Ok(response),
+                } => {
+                    short = response.status == 200;
+                }
+                IoEvent::Socket { id: 3, event, .. } if event == "open" => socket_open = true,
+                IoEvent::Socket { id: 3, .. } => {}
+                _ => panic!("unexpected completion while stream is blocked"),
+            }
+            if short && socket_open {
+                break;
+            }
+        }
+        assert!(short && socket_open);
+        assert!(finished_rx.try_recv().is_err());
+
+        ingress.close();
+        assert!(finished_rx.recv_timeout(Duration::from_secs(1)).is_ok());
+        drop(chunk.credit);
+        assert_eq!(ingress.usage().bytes, 0);
+        drop(work_tx);
+        if let Some(worker) = worker {
+            assert!(worker.join().is_ok());
+        }
+        inbox.post(Command::Shutdown);
+        assert!(reader.join().is_ok());
+        assert!(server.join().is_ok());
     }
 }

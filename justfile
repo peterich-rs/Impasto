@@ -10,7 +10,7 @@ default:
 clippy:
     cargo clippy --manifest-path "{{root}}/Cargo.toml" --workspace --exclude macos --all-targets -- -D warnings
 
-check: style-check clippy test kotlin solid
+check: style-check clippy test kotlin solid standard-check
     @echo "check ok"
 
 bench:
@@ -44,6 +44,9 @@ kotlin:
 solid:
     pnpm -C "{{root}}" install --frozen-lockfile
     pnpm -C "{{root}}" -r test
+
+standard-check:
+    node "{{root}}/tools/check-standard-library.mjs"
 
 solid-app:
     pnpm -C "{{root}}" --filter @impasto/gallery-solid run build

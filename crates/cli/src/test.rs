@@ -89,7 +89,7 @@ fn run_bundle(bundle: &Path, app: &App) -> Result<()> {
         // treated as an envelope from this toolchain's `compile` (`impasto build`).
         // The envelope does not prove the payload is valid bytecode.
         unsafe {
-            quickjs::open_trusted_bytecode_with_io(
+            quickjs::open_trusted_bytecode_with_routed_io(
                 &bytes,
                 &name,
                 uicore::MonoShaper::default(),
@@ -99,7 +99,7 @@ fn run_bundle(bundle: &Path, app: &App) -> Result<()> {
             )
         }
     } else {
-        quickjs::open_program_with_io(
+        quickjs::open_program_with_routed_io(
             &bytes,
             &name,
             uicore::MonoShaper::default(),

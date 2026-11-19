@@ -37,13 +37,18 @@ pub fn build(target: &str, options: BuildOptions) -> Result<()> {
     Ok(())
 }
 pub fn bundle(app: &App, options: &BuildOptions) -> Result<PathBuf> {
+    bundle_for(app, options, None)
+}
+
+fn bundle_for(app: &App, options: &BuildOptions, target: Option<&str>) -> Result<PathBuf> {
     fs::create_dir_all(app.root.join("build"))?;
     let esm = app.root.join("build/app.js");
     pack(&app.entry, &esm, options)?;
     let output = app.output(options.debug);
     if !options.debug {
         let code = fs::read_to_string(&esm)?;
-        let bytes = quickjs::compile(&code, "app.js", true)?;
+        let registry = compile_registry(app, target);
+        let bytes = quickjs::compile_with_registry(&code, "app.js", true, registry)?;
         fs::write(&output, bytes)?;
         fs::remove_file(esm)?;
         let map = app.root.join("build/app.js.map");
@@ -58,6 +63,35 @@ pub fn bundle(app: &App, options: &BuildOptions) -> Result<PathBuf> {
     }
     Ok(output)
 }
+
+fn compile_registry(app: &App, target: Option<&str>) -> session::ModuleRegistry {
+    let modules = shell::first_party_modules();
+    let Some(target) = target else {
+        // A standalone bundle can be linked by a caller supplying its own
+        // module registry. The platform package checks its own capabilities.
+        return session::ModuleRegistry::new(modules);
+    };
+    let enabled = app.modules(target);
+    let modules = modules
+        .into_iter()
+        .filter(|module| {
+            let Some(package) = shell::package_folder(module.specifier) else {
+                return false;
+            };
+            host_has_module(target, package) && enabled.split(',').any(|name| name == package)
+        })
+        .collect();
+    session::ModuleRegistry::new(modules)
+}
+
+fn host_has_module(target: &str, package: &str) -> bool {
+    match target {
+        "macos" => true,
+        "android" => package != "permissions",
+        _ => false,
+    }
+}
+
 pub fn pack(entry: &Path, output: &Path, options: &BuildOptions) -> Result<()> {
     let mut command = toolchain::tool("pack.mjs", options.verbose)?;
     command.arg(entry).arg(output);
@@ -69,7 +103,7 @@ pub fn pack(entry: &Path, output: &Path, options: &BuildOptions) -> Result<()> {
 pub fn apk(app: &App, options: &BuildOptions) -> Result<PathBuf> {
     app.require("android")?;
     let framework = toolchain::framework()?;
-    let bundle = bundle(app, options)?;
+    let bundle = bundle_for(app, options, Some("android"))?;
     let generated = app.root.join("build/android");
     copy_tree(
         &framework.join("crates/android/apk"),
@@ -151,7 +185,7 @@ pub fn macos(app: &App, options: &BuildOptions) -> Result<PathBuf> {
         bail!("macos 构建需要 macOS");
     }
     let framework = toolchain::framework()?;
-    let bundle = bundle(app, options)?;
+    let bundle = bundle_for(app, options, Some("macos"))?;
     let project = app.root.join("build/macos");
     fs::create_dir_all(&project)?;
     let mut command = Command::new("cargo");

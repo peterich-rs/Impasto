@@ -9,10 +9,26 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use openwire::{Client, RequestBody, WireErrorKind};
+use openwire::{
+    Client, DefaultRedirectPolicy, RedirectContext, RedirectDecision, RedirectPolicy, RequestBody,
+    WireError, WireErrorKind,
+};
 use session::{
     HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, HttpResponse,
 };
+
+struct HttpRedirects(DefaultRedirectPolicy);
+
+impl RedirectPolicy for HttpRedirects {
+    fn should_redirect(&self, context: &RedirectContext<'_>) -> RedirectDecision {
+        if !matches!(context.location().scheme_str(), Some("http" | "https"))
+            || context.location().host().is_none()
+        {
+            return RedirectDecision::Error(WireError::redirect("unsupported redirect URL"));
+        }
+        self.0.should_redirect(context)
+    }
+}
 
 /// openwire `Client` plus a handle to the process tokio runtime.
 ///
@@ -26,10 +42,12 @@ pub struct OpenWireClient {
 impl OpenWireClient {
     pub fn new() -> Result<Self, String> {
         let handle = crate::rt::handle()?;
+        let mut redirects = DefaultRedirectPolicy::new();
+        redirects.set_max_redirects(5);
         let client = Client::builder()
             .call_timeout(Duration::from_secs(20))
             .connect_timeout(Duration::from_secs(20))
-            .max_redirects(5)
+            .redirect_policy(HttpRedirects(redirects))
             .max_decompressed_body_bytes(HTTP_BODY_LIMIT)
             .build()
             .map_err(|error| error.to_string())?;
@@ -205,7 +223,7 @@ fn hop_by_hop(name: &str) -> bool {
         || name.eq_ignore_ascii_case("transfer-encoding")
 }
 
-fn http_error(error: openwire::WireError) -> HttpError {
+fn http_error(error: WireError) -> HttpError {
     let kind = match error.kind() {
         WireErrorKind::Canceled => HttpFailure::Canceled,
         WireErrorKind::Timeout => HttpFailure::Timeout,
@@ -233,4 +251,38 @@ async fn read_limited(mut body: openwire::ResponseBody) -> Result<Vec<u8>, HttpE
 /// Shared client installed by the macOS and Android hosts.
 pub fn http_client() -> Result<Arc<dyn HttpClient>, String> {
     Ok(Arc::new(OpenWireClient::new()?))
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::*;
+    use http::{Method, StatusCode, Uri};
+
+    #[test]
+    fn redirect_checks_each_destination_and_prevents_a_downgrade() {
+        let policy = HttpRedirects(DefaultRedirectPolicy::new());
+        let request = Uri::from_static("https://example.test/start");
+        let decide = |destination: &Uri| {
+            policy.should_redirect(&RedirectContext::new(
+                &Method::GET,
+                &request,
+                StatusCode::FOUND,
+                destination,
+                0,
+                true,
+            ))
+        };
+        assert!(matches!(
+            decide(&Uri::from_static("ftp://example.test/file")),
+            RedirectDecision::Error(_)
+        ));
+        assert!(matches!(
+            decide(&Uri::from_static("http://example.test/file")),
+            RedirectDecision::Error(_)
+        ));
+        assert!(matches!(
+            decide(&Uri::from_static("https://other.test/next")),
+            RedirectDecision::Follow
+        ));
+    }
 }

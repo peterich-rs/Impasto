@@ -8,3 +8,8 @@ export interface Linking {
 }
 
 export declare const Linking: Linking;
+
+export declare function getInitialURL(): string | null;
+export declare function openURL(url: string): Promise<void>;
+export declare function addEventListener(type: "url", listener: (event: { url: string }) => void): void;
+export declare function removeEventListener(type: "url", listener: (event: { url: string }) => void): void;

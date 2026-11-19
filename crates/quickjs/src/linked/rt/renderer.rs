@@ -11,7 +11,7 @@ pub(super) fn call<'js>(
     name: &str,
     args: &[Value<'js>],
 ) -> rquickjs::Result<Value<'js>> {
-    js::host::OperationPolicy::before(host, ctx)?;
+    canvas::side_effect(ctx)?;
     match name {
         "createElement" => create_element(host, ctx, args),
         "createTextNode" => text_node(

@@ -410,15 +410,18 @@ fn default_stream_sends_head_then_one_chunk_and_stops() {
         }),
         performs: AtomicUsize::new(0),
     };
-    let mut pieces = 0;
+    let mut pieces = Vec::new();
     empty
         .stream(&request(), &mut |piece| {
-            pieces += 1;
-            assert!(matches!(piece, HttpPiece::Head(204, _)));
+            match piece {
+                HttpPiece::Head(204, _) => pieces.push("head"),
+                HttpPiece::Chunk([], true) => pieces.push("end"),
+                _ => panic!("unexpected empty response piece"),
+            }
             true
         })
         .unwrap_or_else(|error| panic!("{error:?}"));
-    assert_eq!(pieces, 1);
+    assert_eq!(pieces, ["head", "end"]);
 
     let stopped = FixedHttp {
         response: Ok(HttpResponse {
@@ -648,6 +651,7 @@ fn module_config_literal_and_shared_slots_keep_their_defaults() {
     let config = ModuleConfig {
         registry: Arc::clone(&registry),
         exec: Arc::new(ImmediateExec),
+        post_delivery: None,
         settle: Arc::new(|_token| Settle::new(|_result| {})),
         app_state: shared("active".to_owned()),
         launch_url: shared(Some("impasto://open".to_owned())),

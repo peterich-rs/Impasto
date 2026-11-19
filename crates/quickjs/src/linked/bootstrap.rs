@@ -1,38 +1,9 @@
-//! Header helpers for the QuickJS host globals.
+//! Script assets and compatibility payloads used during UI startup.
 
 pub(super) const ABI_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/abi.js"));
-pub(super) const PRELUDE: &str = js::LEGACY_PRELUDE;
 pub(super) const SCENE_JS: &str = include_str!("../scene.js");
 
 pub(super) const REACTIVE_BOOT: &str = include_str!("../reactive.js");
-
-pub(super) fn header_pairs(block: &str) -> Vec<(String, String)> {
-    let mut pairs = Vec::new();
-    for line in block.split('\n') {
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
-        };
-        let name = name.trim();
-        if name.is_empty() {
-            continue;
-        }
-        pairs.push((name.to_owned(), value.trim().to_owned()));
-    }
-    pairs
-}
-
-pub(super) fn header_block(headers: &[(String, String)]) -> String {
-    let mut out = String::new();
-    for (name, value) in headers {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(name);
-        out.push_str(": ");
-        out.push_str(value);
-    }
-    out
-}
 
 pub(super) fn app_state(name: &str) -> &'static str {
     match name {

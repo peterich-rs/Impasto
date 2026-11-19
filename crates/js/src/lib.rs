@@ -10,25 +10,26 @@
 )]
 
 pub mod bytecode;
+mod catalog;
 pub mod compile;
-pub mod deliver;
+mod deliver;
 pub mod host;
-pub mod modules;
+mod modules;
 pub mod quickjs;
+mod resources;
 mod runtime;
+mod scheduler;
 pub mod standard;
 
-pub use compile::{CompileEnvironment, EmptyCompile};
-pub use js_host::IoEvent;
-pub use modules::NativeFactory;
-pub use quickjs::{JobStop, JsDiagnostic, Timer, Vm, poll_timer, run_jobs};
+pub use catalog::{CatalogError, ModuleCatalog};
+pub use js_host::{self as contract, Delivery, HostEvent, IoEvent, RequestKey, RuntimeKey};
 pub use runtime::{
-    DriveReport, JsError, ModuleStatus, ModuleTicket, Runtime, RuntimeBuilder, RuntimeCounts,
-    WeakRuntime,
+    DriveReport, EnqueueError, ErrorKind, JsError, ModuleOutcome, ModuleStatus, ModuleTicket,
+    Runtime, RuntimeBuilder, RuntimeCounts, ScheduleState, WeakRuntime,
 };
 
-/// The one legacy prelude. UI startup and a headless [`Runtime`] both evaluate it.
-pub const LEGACY_PRELUDE: &str = include_str!("standard/legacy-prelude.js");
+pub use scheduler::{DrivePolicy, RuntimeLimits};
+pub use standard::StandardProfile;
 
 /// Milliseconds from a monotonic clock. Tests must not freeze this with a manual clock.
 pub fn monotonic_ms() -> i64 {

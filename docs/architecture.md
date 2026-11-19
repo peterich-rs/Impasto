@@ -10,7 +10,9 @@
 crates/protocol/         DrawList、LayerTree
 crates/uicore/           渲染树。Taffy、命中、手势、焦点
 crates/engine/           渲染引擎。读 LayerTree，调用 impeller.h
-crates/js-host/          宿主交换契约。仅 std
+crates/js-host/          宿主交换契约、模块元数据、I/O 身份和额度。仅 std
+crates/js/               QuickJS VM、Runtime、标准库、目录和调度
+crates/js-headless/      只依赖 js 的独立消费程序
 crates/session/          会话 trait。原名重导出 js-host 的自有数据类型
 crates/shell/        命令队列、帧调度、渲染线程
 crates/macos/            macOS 窗口
@@ -28,6 +30,16 @@ apps/gallery-solid/      Solid 应用。dist/quotes.js 由 just gallery-dist 本
 依赖只向下：gallery → solid-ui / solid-router → solid-renderer → quickjs 会话 → uicore → protocol。宿主 → shell → session、engine。`session` → `js-host`。`js-host` 只有 std，不依赖 session、uicore、quickjs、engine 或平台库。`engine` 不依赖 `uicore`。`uicore` 不包含 QuickJS、AppKit 或 Impeller 头文件。语言包不算坐标。选型表在 `AGENTS.md`。一个可执行文件只链一种会话。
 
 `crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 不手写 C 或 Objective-C。QuickJS 的 Rust 绑定在 `crates/quickjs/src/linked/rt`。`abi.yml` 生成 Rust、JavaScript 与 TypeScript 常量。
+
+## JS 运行时
+
+`js::Runtime` 在所属线程创建、驱动和销毁。普通宿主通过模块目录、时钟、自有事件和传输接入。`quickjs` 经 `js::quickjs::ExtensionContext` 安装 scene、Canvas、reactive 和 rAF。UI 构造按 ABI、scene、Rust 标准库注册、reactive boot、应用入口的顺序执行，外部传输在入口之后接入。
+
+`crates/js/src/standard` 的 Rust 模块直接向 QuickJS 注册 Web API。Rust 持有事件监听、取消信号、URL、解码器、Headers、Body、stream reader、Fetch 和 WebSocket 的状态。JS 回调和 Promise 由 QuickJS 执行，原生对象持有的 JS 引用参与 GC tracing。各绑定模块同时维护 TypeScript 签名。`StandardProfile::declarations()` 按宿主传输能力生成 `.d.ts`。`just standard-check` 对 `legacy` 和四种 `portable` 传输组合比较实际 QuickJS 全局值、原型与声明，并执行通过 TypeScript 检查的用例。
+
+`legacy` 是默认 profile，`fetch` 在整响应完成时结算，`fetchStream` 在响应头到达时结算。`portable` 的 `fetch` 用同一流式状态，要求外部 HTTP 传输。两个 profile 共用 Body、reader、Abort 和宿主值转换。Shell 的外部完成带 `RuntimeKey`，Runtime 按请求身份和状态结算。流的额度随 chunk 转移到 reader，读取、取消或关闭时归还。`shell` 用分开的阻塞任务执行整响应和流式请求，命令循环持续处理短请求和 socket 控制。
+
+宿主模块的运行和声明共用 `Module` 元数据。CLI 打包平台工程时按清单和目标构建目录，独立 bundle 使用首方目录。`cargo run --locked -p shell --bin module-stubs -- --check` 校验声明漂移。实施验收见 [JS 运行时验收](design/js-runtime/runtime-and-standard-library-validation.md)。
 
 ## 一帧
 
@@ -101,7 +113,7 @@ Android 用 `AccessibilityManager` 的监听通知会话启停语义快照。重
 
 ## 运行时会话
 
-`crates/quickjs` 使用根 `Cargo.toml` 钉住的 quickjs-jit 0.14.2，依赖名是 `rquickjs`。`linked/rt::Engine` 拥有唯一的 `Runtime`、`Context` 和 `Host`；`uicore::Tree`、`reactive::Graph` 与 VM 都留在渲染线程。Rust 绑定注册 `scene`、`reactive`、`#reactive` 和能力模块。`linked/scene.rs` 把属性名映射到 `abi.yml` 的字段号，`linked/mutation.rs` 应用树更新。`scene.js` 提供具名查询、命令与插入范围归一化。节点是 `NodeId::to_raw()`，`0` 表示没有节点，没有全局 `core`。启动先绑定原生入口，再依次执行 `abi.js`、`scene.js`、`prelude.js` 和 ESM `reactive.js`，捕获并删除 `__reactive` 后执行应用并排空 jobs。
+`crates/quickjs` 使用根 `Cargo.toml` 钉住的 quickjs-jit 0.14.2，依赖名是 `rquickjs`。`linked/rt::Engine` 拥有唯一的 `Runtime`、`Context` 和 `Host`；`uicore::Tree`、`reactive::Graph` 与 VM 都留在渲染线程。Rust 绑定注册 `scene`、`reactive`、`#reactive` 和能力模块。`linked/scene.rs` 把属性名映射到 `abi.yml` 的字段号，`linked/mutation.rs` 应用树更新。`scene.js` 提供具名查询、命令与插入范围归一化。节点是 `NodeId::to_raw()`，`0` 表示没有节点，没有全局 `core`。启动先绑定原生入口，再执行 `abi.js`、`scene.js`，调用 `js::standard::install_web`，最后执行 ESM `reactive-boot.js`。捕获并删除 `__reactive` 后执行应用并排空 jobs。
 
 `reactive::Graph` 使用带 generation 的 arena 和双向边。进入用户闭包和 cleanup 前结束 arena 借用，JS 值由 `linked/reactive.rs` 的 `Persistent` 持有和释放。signal 写入只标脏，`batch` 同步冲刷。`JsSession::frame` 在帧监听前、帧监听后和布局监听后冲刷图，空队列跳过。帧监听写入的信号在第一次布局前提交。`tick_motions` 在这些调用之前。`boot` 分发帧与布局监听。抛错的帧监听会从监听表摘掉。`Show`、`Switch`、`Match`、`For` 和 `Errored` 在 `packages/reactive`，调用同一张原生图。
 

@@ -6,7 +6,11 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use crate::PluginResult;
+use crate::{PluginResult, PluginValue};
+
+#[path = "io_credit.rs"]
+mod credit;
+pub use credit::{Credit, CreditPool, CreditUsage, Delivery, RequestKey, Route, RuntimeKey};
 
 /// One HTTP call. `cancel` becomes true when the script aborts it.
 /// `timeout_ms` of `None` leaves the client default in charge.
@@ -47,7 +51,7 @@ pub enum HttpFailure {
 }
 
 impl HttpFailure {
-    /// The DOMException name the prelude rejects the promise with.
+    /// The rejection name for the legacy HTTP API.
     pub fn dom_name(self) -> &'static str {
         match self {
             Self::Network => "TypeError",
@@ -83,8 +87,14 @@ impl HttpError {
 
 /// One unit of work posted from the script. The host decides which thread
 /// runs each job; every variant except `Abort` comes back as an [`IoEvent`].
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum IoJob {
+    /// External work associated with one live runtime and request.
+    Routed {
+        route: Route,
+        job: Box<IoJob>,
+        outbound: Option<Credit>,
+    },
     /// Download the whole body, then deliver it as one [`IoEvent::Http`].
     Http(HttpRequest),
     /// Deliver the head as [`IoEvent::HttpHead`], each body piece as
@@ -108,6 +118,29 @@ pub enum IoJob {
     },
 }
 
+impl IoJob {
+    pub fn payload_bytes(&self) -> usize {
+        match self {
+            Self::Http(request) | Self::HttpStream(request) => request.headers.iter().fold(
+                request
+                    .body
+                    .len()
+                    .saturating_add(request.url.len())
+                    .saturating_add(request.method.len()),
+                |sum, (key, value)| sum.saturating_add(key.len()).saturating_add(value.len()),
+            ),
+            Self::SocketOpen { url, protocols, .. } => {
+                protocols.iter().fold(url.len(), |sum, protocol| {
+                    sum.saturating_add(protocol.len())
+                })
+            }
+            Self::SocketSend { data, .. } => data.len(),
+            Self::Routed { job, .. } => job.payload_bytes(),
+            Self::SocketClose { .. } | Self::Abort { .. } => 0,
+        }
+    }
+}
+
 /// One streamed piece, handed to [`HttpClient::stream`]'s sink.
 pub enum HttpPiece<'a> {
     Head(u16, &'a [(String, String)]),
@@ -128,7 +161,7 @@ pub trait HttpClient: Send + Sync {
         sink: &mut dyn FnMut(HttpPiece<'_>) -> bool,
     ) -> Result<(), HttpError> {
         let response = self.perform(request)?;
-        if sink(HttpPiece::Head(response.status, &response.headers)) && !response.body.is_empty() {
+        if sink(HttpPiece::Head(response.status, &response.headers)) {
             sink(HttpPiece::Chunk(&response.body, true));
         }
         Ok(())
@@ -140,6 +173,7 @@ pub const HTTP_BODY_LIMIT: usize = 4 * 1024 * 1024;
 
 /// One owned IO completion. The host chooses the thread that delivers it.
 pub enum IoEvent {
+    Host(HostEvent),
     Http {
         token: u64,
         result: Result<HttpResponse, HttpError>,
@@ -168,4 +202,68 @@ pub enum IoEvent {
         text: bool,
         data: Vec<u8>,
     },
+}
+
+/// Owned module event. Module identity is resolved by the receiving catalog.
+pub struct HostEvent {
+    pub module: String,
+    pub event: String,
+    pub payload: PluginValue,
+}
+
+pub const TERMINAL_PAYLOAD_LIMIT: usize = 1024;
+
+pub const MAX_SAFE_ID: u64 = (1 << 53) - 1;
+
+impl IoEvent {
+    pub fn id(&self) -> Option<u64> {
+        match self {
+            Self::Http { token, .. }
+            | Self::HttpHead { token, .. }
+            | Self::HttpChunk { token, .. }
+            | Self::Plugin { token, .. } => Some(*token),
+            Self::Socket { id, .. } => Some(*id),
+            Self::Host(_) => None,
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        match self {
+            Self::Http { .. } | Self::Plugin { .. } => true,
+            Self::HttpChunk { done, error, .. } => *done || error.is_some(),
+            Self::Socket { event, .. } => matches!(event.as_str(), "error" | "close"),
+            _ => false,
+        }
+    }
+
+    pub fn payload_bytes(&self) -> usize {
+        fn header_bytes(headers: &[(String, String)]) -> usize {
+            headers.iter().fold(0usize, |sum, (name, value)| {
+                sum.saturating_add(name.len()).saturating_add(value.len())
+            })
+        }
+        match self {
+            Self::Http { result, .. } => match result {
+                Ok(response) => response
+                    .body
+                    .len()
+                    .saturating_add(header_bytes(&response.headers)),
+                Err(error) => error.message.len(),
+            },
+            Self::HttpHead { headers, .. } => header_bytes(headers),
+            Self::HttpChunk { bytes, error, .. } => bytes
+                .len()
+                .saturating_add(error.as_ref().map_or(0, |error| error.message.len())),
+            Self::Socket { event, data, .. } => event.len().saturating_add(data.len()),
+            Self::Plugin { result, .. } => match result {
+                PluginResult::Done(value) => value.payload_bytes(),
+                PluginResult::Failed { message } => message.len(),
+            },
+            Self::Host(event) => event
+                .module
+                .len()
+                .saturating_add(event.event.len())
+                .saturating_add(event.payload.payload_bytes()),
+        }
+    }
 }

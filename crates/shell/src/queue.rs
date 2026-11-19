@@ -27,6 +27,7 @@ impl Inbox {
     pub fn post(&self, command: Command) {
         let mut state = lock(&self.state);
         push_coalesced(&mut state.commands, command);
+        drop(state);
         self.cv.notify_one();
     }
 

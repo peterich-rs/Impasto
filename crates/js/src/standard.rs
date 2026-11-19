@@ -3,12 +3,24 @@
 //! Animation frames stay in the UI adapter. This module does not know about a
 //! session or a canvas.
 
-use std::cell::{Cell, RefCell};
-
 use rquickjs::function::Rest;
 use rquickjs::{Ctx, FromJs, Function, Object, Value};
 
 use crate::quickjs::{Saved, Timer};
+use crate::scheduler::Scheduler;
+
+mod encoding;
+mod events;
+mod headers;
+mod http;
+mod profile;
+mod socket;
+mod streams;
+mod url;
+mod web;
+
+pub use profile::{StandardModule, StandardProfile};
+pub use web::install_web;
 
 pub fn install_console<'js>(
     ctx: &Ctx<'js>,
@@ -56,14 +68,12 @@ pub fn install_performance<'js>(
 /// eligible on the next timer turn.
 /// # Safety
 ///
-/// `timers`, `next_id`, `turn`, and `mono` must stay allocated and unchanged
-/// for as long as the functions registered here can run.
-pub unsafe fn install_timers<'js>(
+/// `scheduler` stays at a stable address until the registered functions
+/// and their context are dropped.
+pub(crate) unsafe fn install_timers<'js>(
     ctx: &Ctx<'js>,
-    timers: *const RefCell<Vec<Timer>>,
-    next_id: *const Cell<u64>,
-    turn: *const Cell<u64>,
-    mono: *const Cell<i64>,
+    scheduler: *const Scheduler,
+    limit: usize,
     on_zero_delay: impl Fn() + Copy + 'static,
 ) -> rquickjs::Result<()> {
     for (name, kind) in [("setTimeout", 0i32), ("setInterval", 1)] {
@@ -87,28 +97,37 @@ pub unsafe fn install_timers<'js>(
                     .0
                     .iter()
                     .skip(2)
+                    .take(8)
                     .cloned()
                     .map(|value| rquickjs::Persistent::save(&ctx, value))
                     .collect();
-                // SAFETY: the cells belong to the runtime allocation that installed these functions.
-                let id = unsafe {
-                    let id = (*next_id).get().wrapping_add(1).max(1);
-                    (*next_id).set(id);
-                    (*timers).borrow_mut().push(schedule_timer(
-                        id,
-                        kind,
-                        delay,
-                        (*mono).get(),
-                        (*turn).get(),
-                        rquickjs::Persistent::save(&ctx, callback.clone()),
-                        extra,
+                // SAFETY: the scheduler belongs to the context that installed these functions.
+                let scheduler = unsafe { &*scheduler };
+                let mut timers = scheduler.timers.borrow_mut();
+                if timers.len() >= limit {
+                    return Err(rquickjs::Exception::throw_range(
+                        &ctx,
+                        "timer limit exceeded",
                     ));
-                    id
-                };
+                }
+                let id = scheduler
+                    .allocate_id()
+                    .ok_or_else(|| rquickjs::Exception::throw_range(&ctx, "timer IDs exhausted"))?;
+                timers.push(schedule_timer(
+                    id,
+                    kind,
+                    delay,
+                    scheduler.mono.get(),
+                    scheduler.turn.get(),
+                    rquickjs::Persistent::save(&ctx, callback.clone()),
+                    extra,
+                ));
+                scheduler.peak.set(scheduler.peak.get().max(timers.len()));
+                drop(timers);
                 if delay == 0 {
                     on_zero_delay();
                 }
-                Ok(id as f64)
+                Ok(crate::resources::number(id))
             },
         )?;
         ctx.globals().set(name, function)?;
@@ -117,7 +136,7 @@ pub unsafe fn install_timers<'js>(
         let function = Function::new(ctx.clone(), move |args: Rest<Value<'js>>| {
             let id = u64::try_from(number_arg(args.0.first())).unwrap_or(0);
             // SAFETY: the timer table belongs to the runtime that installed this function.
-            unsafe { clear_timer(&mut (*timers).borrow_mut(), id, kind) };
+            unsafe { clear_timer(&mut (*scheduler).timers.borrow_mut(), id, kind) };
         })?;
         ctx.globals().set(name, function)?;
     }
@@ -142,7 +161,7 @@ pub fn schedule_timer(
             mono.saturating_add(delay)
         },
         interval: if kind == 1 { delay } else { 0 },
-        eligible_turn: turn + 1,
+        eligible_turn: turn.saturating_add(1),
         kind,
         function,
         extra,
@@ -161,3 +180,27 @@ pub fn clear_timer(timers: &mut Vec<Timer>, id: u64, kind: i32) {
 fn number_arg(value: Option<&Value<'_>>) -> i64 {
     value.and_then(|value| value.as_number()).unwrap_or(0.0) as i64
 }
+
+pub(super) const CONSOLE_DECLARATIONS: &str = r#"
+declare const console: {
+  log(...values: unknown[]): void;
+  info(...values: unknown[]): void;
+  warn(...values: unknown[]): void;
+  error(...values: unknown[]): void;
+  debug(...values: unknown[]): void;
+  time(label?: string): void;
+  timeLog(label?: string): void;
+  timeEnd(label?: string): void;
+};
+"#;
+
+pub(super) const TIMER_DECLARATIONS: &str = r#"
+declare function setTimeout<Args extends unknown[]>(callback: (...args: Args) => void, delay?: number, ...args: Args): number;
+declare function clearTimeout(id?: number): void;
+declare function setInterval<Args extends unknown[]>(callback: (...args: Args) => void, delay?: number, ...args: Args): number;
+declare function clearInterval(id?: number): void;
+"#;
+
+pub(super) const PERFORMANCE_DECLARATIONS: &str = r#"
+declare const performance: { now(): number };
+"#;

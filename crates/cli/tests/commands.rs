@@ -186,6 +186,7 @@ void check();
             modules.push(shell::async_storage(storage));
             let config = session::ModuleConfig {
                 registry: Arc::new(session::ModuleRegistry::new(modules)),
+                post_delivery: None,
                 settle: Arc::new(move |token| {
                     let tx = tx.clone();
                     session::Settle::new(move |result| {

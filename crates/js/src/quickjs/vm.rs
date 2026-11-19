@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
+use rquickjs::object::Property;
 use rquickjs::{Context, Ctx, Function, Object, Persistent, Runtime, Value};
 
 use crate::monotonic_ms;
@@ -31,12 +32,12 @@ pub struct Timer {
     pub active: bool,
 }
 
-/// Why [`run_jobs`] stopped.
+/// Why a job checkpoint stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobStop {
     /// The legacy checkpoint: more than 32 jobs in one drain.
     Limit,
-    /// A job threw. `run_jobs` already invoked the failure callback.
+    /// A job threw and the failure callback was invoked.
     Failed,
 }
 
@@ -50,16 +51,35 @@ pub struct Vm {
     pub error: RefCell<(String, String)>,
     pub rejections: RefCell<Vec<(Saved, Saved)>>,
     pub promises: RefCell<HashMap<u64, (Saved, Saved)>>,
-    pub token: Cell<u64>,
+    pub rejection_overflows: Cell<usize>,
+    pub promise_peak: Cell<usize>,
+    pub rejection_peak: Cell<usize>,
+    eval_budget_ms: i64,
+    callback_budget_ms: i64,
     armed: Cell<bool>,
+    #[cfg(test)]
+    probes: [Option<AcquireProbe>; 2],
 }
 
 impl Vm {
-    pub fn new() -> Result<Self, &'static str> {
+    pub(crate) fn configured(
+        limits: &crate::RuntimeLimits,
+        stop: Option<AcquireStop>,
+    ) -> Result<Self, &'static str> {
+        if stop == Some(AcquireStop::Runtime) {
+            return Err("runtime did not start");
+        }
         let runtime = Runtime::new().map_err(|_| "runtime did not start")?;
-        runtime.set_memory_limit(16 << 20);
-        runtime.set_max_stack_size(8 << 20);
+        #[cfg(test)]
+        let runtime_probe = AcquireProbe::new(0);
+        runtime.set_memory_limit(limits.heap_bytes);
+        runtime.set_max_stack_size(limits.stack_bytes);
+        if stop == Some(AcquireStop::Context) {
+            return Err("context did not start");
+        }
         let context = Context::full(&runtime).map_err(|_| "context did not start")?;
+        #[cfg(test)]
+        let context_probe = AcquireProbe::new(1);
         Ok(Self {
             context: Some(context),
             runtime: Some(runtime),
@@ -69,24 +89,36 @@ impl Vm {
             error: RefCell::new((String::new(), String::new())),
             rejections: RefCell::new(Vec::new()),
             promises: RefCell::new(HashMap::new()),
-            token: Cell::new(0),
+            rejection_overflows: Cell::new(0),
+            promise_peak: Cell::new(0),
+            rejection_peak: Cell::new(0),
+            eval_budget_ms: limits.eval_budget_ms,
+            callback_budget_ms: limits.callback_budget_ms,
             armed: Cell::new(false),
+            #[cfg(test)]
+            probes: [Some(runtime_probe), Some(context_probe)],
         })
     }
 
     /// Allocate one promise and remember its resolve and reject functions.
     pub fn make_promise<'js>(&self, ctx: &Ctx<'js>) -> rquickjs::Result<(u64, Value<'js>)> {
+        let token = crate::resources::next_id()
+            .ok_or_else(|| rquickjs::Exception::throw_range(ctx, "request IDs exhausted"))?;
         let (promise, resolve, reject) = ctx.promise()?;
-        let token = self.token.get().wrapping_add(1).max(1);
-        self.token.set(token);
-        self.promises.borrow_mut().insert(
+        Object::from_value(promise.as_value().clone())?.prop(
+            "token",
+            Property::from(crate::resources::number(token)).enumerable(),
+        )?;
+        let mut promises = self.promises.borrow_mut();
+        promises.insert(
             token,
             (
                 Persistent::save(ctx, resolve.into_value()),
                 Persistent::save(ctx, reject.into_value()),
             ),
         );
-        Object::from_value(promise.as_value().clone())?.set("token", token as f64)?;
+        self.promise_peak
+            .set(self.promise_peak.get().max(promises.len()));
         Ok((token, promise.into_value()))
     }
 
@@ -106,8 +138,28 @@ impl Vm {
         function.call((value,))
     }
 
-    pub fn context(&self) -> Option<&Context> {
-        self.context.as_ref()
+    pub fn owns(&self, ctx: &Ctx<'_>) -> bool {
+        self.context
+            .as_ref()
+            .is_some_and(|context| context.as_raw() == ctx.as_raw())
+    }
+
+    pub fn is_active(&self) -> bool {
+        !self.active.get().is_null()
+    }
+
+    pub fn jobs_pending(&self) -> bool {
+        if self.is_active() {
+            self.with(|ctx| {
+                // SAFETY: the active context owns this live runtime under its existing lock.
+                unsafe {
+                    let runtime = rquickjs::qjs::JS_GetRuntime(ctx.as_raw().as_ptr());
+                    rquickjs::qjs::JS_IsJobPending(runtime)
+                }
+            })
+        } else {
+            self.runtime.as_ref().is_some_and(Runtime::is_job_pending)
+        }
     }
 
     pub fn runtime(&self) -> Option<&Runtime> {
@@ -142,10 +194,15 @@ impl Vm {
                     let saved = Persistent::save(&ctx, promise);
                     if handled {
                         rejections.retain(|(pending, _)| *pending != saved);
-                    } else if rejections.len() < 64
-                        && !rejections.iter().any(|(pending, _)| *pending == saved)
-                    {
-                        rejections.push((saved, Persistent::save(&ctx, reason)));
+                    } else if !rejections.iter().any(|(pending, _)| *pending == saved) {
+                        if rejections.len() < 64 {
+                            rejections.push((saved, Persistent::save(&ctx, reason)));
+                            vm.rejection_peak
+                                .set(vm.rejection_peak.get().max(rejections.len()));
+                        } else {
+                            vm.rejection_overflows
+                                .set(vm.rejection_overflows.get().saturating_add(1));
+                        }
                     }
                 },
             )));
@@ -165,11 +222,16 @@ impl Vm {
         self.promises.borrow_mut().clear();
         self.rejections.borrow_mut().clear();
         self.disarm();
+        debug_assert!(self.active.get().is_null());
         drop(self.context.take());
+        #[cfg(test)]
+        drop(self.probes[1].take());
         drop(self.runtime.take());
+        #[cfg(test)]
+        drop(self.probes[0].take());
     }
 
-    pub fn enter<'a, 'js>(&'a self, ctx: &Ctx<'js>) -> Active<'a> {
+    pub(crate) fn enter<'a, 'js>(&'a self, ctx: &Ctx<'js>) -> Active<'a> {
         let previous = self.active.replace(std::ptr::from_ref(ctx).cast());
         Active { vm: self, previous }
     }
@@ -191,9 +253,15 @@ impl Vm {
 
     pub fn budget(&self, kind: &'static str) -> Budget<'_> {
         let previous_entry = self.entry.replace((kind, 0));
-        let previous_deadline = self
-            .deadline
-            .replace(monotonic_ms().saturating_add(if kind == "eval" { 1000 } else { 128 }));
+        let limit = if kind == "eval" {
+            self.eval_budget_ms
+        } else {
+            self.callback_budget_ms
+        };
+        let deadline = monotonic_ms()
+            .saturating_add(limit)
+            .min(self.deadline.get());
+        let previous_deadline = self.deadline.replace(deadline);
         Budget {
             vm: self,
             previous_entry,
@@ -225,6 +293,54 @@ impl Vm {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AcquireStop {
+    Runtime,
+    Context,
+}
+
+#[cfg(test)]
+thread_local! {
+    static ACQUIRES: Cell<[(usize, usize); 2]> = const { Cell::new([(0, 0); 2]) };
+}
+
+#[cfg(test)]
+struct AcquireProbe(usize);
+
+#[cfg(test)]
+impl AcquireProbe {
+    fn new(index: usize) -> Self {
+        ACQUIRES.with(|counts| {
+            let mut next = counts.get();
+            next[index].0 += 1;
+            counts.set(next);
+        });
+        Self(index)
+    }
+}
+
+#[cfg(test)]
+impl Drop for AcquireProbe {
+    fn drop(&mut self) {
+        ACQUIRES.with(|counts| {
+            let mut next = counts.get();
+            next[self.0].1 += 1;
+            counts.set(next);
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn acquires() -> [(usize, usize); 2] {
+    ACQUIRES.with(Cell::get)
+}
+
+impl Drop for Vm {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 pub struct Active<'a> {
     vm: &'a Vm,
     previous: *const (),
@@ -249,15 +365,13 @@ impl Drop for Budget<'_> {
     }
 }
 
-/// Run pending jobs, stopping after 32.
-///
-/// `failed` runs on the context of a job that threw. That is not the round limit.
-pub fn run_jobs(runtime: &Runtime, mut failed: impl FnMut(&Ctx<'_>)) -> Result<(), JobStop> {
+pub(crate) fn run_job_batch(
+    runtime: &Runtime,
+    limit: u32,
+    mut failed: impl FnMut(&Ctx<'_>),
+) -> Result<JobReport, JobStop> {
     let mut rounds = 0;
-    while runtime.is_job_pending() {
-        if rounds >= 32 {
-            return Err(JobStop::Limit);
-        }
+    while rounds < limit && runtime.is_job_pending() {
         match runtime.execute_pending_job() {
             Ok(false) => break,
             Ok(true) => rounds += 1,
@@ -267,7 +381,16 @@ pub fn run_jobs(runtime: &Runtime, mut failed: impl FnMut(&Ctx<'_>)) -> Result<(
             }
         }
     }
-    Ok(())
+    Ok(JobReport {
+        ran: rounds,
+        pending: runtime.is_job_pending(),
+    })
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JobReport {
+    pub ran: u32,
+    pub pending: bool,
 }
 
 /// Take the next ready timer callback and apply the legacy reschedule rule.
@@ -289,7 +412,7 @@ pub fn poll_timer(
     let callback = (timer.function.clone(), timer.extra.clone());
     if timer.kind == 1 {
         timer.due = mono.saturating_add(timer.interval.max(0));
-        timer.eligible_turn = turn + 1;
+        timer.eligible_turn = turn.saturating_add(1);
     } else {
         timer.active = false;
     }

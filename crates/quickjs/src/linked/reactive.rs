@@ -119,7 +119,11 @@ impl Eval for JsEval {
     fn run_cleanup(self, graph: &Arena<Self>, cleanup: Cleanup) {
         match cleanup {
             Cleanup::Script(cleanup) => {
-                drop(graph.untrack(|graph| self.call(graph, &cleanup, None)));
+                // SAFETY: cleanup holds a root owned by the live Host.
+                let host = unsafe { &*cleanup.host };
+                if !host.is_closing() || !host.past_deadline() {
+                    drop(graph.untrack(|graph| self.call(graph, &cleanup, None)));
+                }
             }
             Cleanup::UnattachedNode(host, id) => {
                 // SAFETY: the session clears the graph before releasing Host.

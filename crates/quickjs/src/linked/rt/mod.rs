@@ -4,9 +4,14 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 use std::ptr;
+use std::rc::Rc;
+use std::sync::Arc;
 
 use rquickjs::function::Args;
-use rquickjs::{Ctx, Function, IntoJs, JsLifetime, Object, Persistent, Runtime, Value};
+use rquickjs::{Ctx, Function, IntoJs, JsLifetime, Object, Persistent, Value};
+
+use js::host::IoBindings;
+use js::quickjs::exception_text;
 
 use super::{Inner, bootstrap, reactive};
 use crate::{Error, bytecode};
@@ -20,7 +25,7 @@ mod turns;
 pub(super) use canvas::{
     CanvasSession, CanvasStats, begin_shutdown, deliver_errors, finish_shutdown, paint,
 };
-pub(crate) use modules::prepare_compile;
+pub(crate) use modules::{compile_declarations, prepare_compile};
 pub(super) use turns::*;
 
 type Saved = Persistent<Value<'static>>;
@@ -48,23 +53,11 @@ pub(in crate::linked) struct Host {
     inner: *mut Inner,
     refs: RefCell<References>,
     raf: RefCell<Vec<Timer>>,
-    socket: Cell<u64>,
     paused: Cell<bool>,
     wants_frame: Cell<bool>,
     freeze: Cell<bool>,
     reactive_failed: Cell<bool>,
-}
-
-struct Budget<'a> {
-    host: &'a Host,
-    previous_entry: (&'static str, u64),
-    previous_deadline: i64,
-}
-impl Drop for Budget<'_> {
-    fn drop(&mut self) {
-        self.host.vm().entry.set(self.previous_entry);
-        self.host.vm().deadline.set(self.previous_deadline);
-    }
+    closing: Cell<bool>,
 }
 
 impl Host {
@@ -79,59 +72,37 @@ impl Host {
     fn session(&self) -> *mut c_void {
         self.inner.cast()
     }
-    fn vm(&self) -> &js::quickjs::Vm {
-        self.runtime.vm()
-    }
-    fn enter<'js>(&self, ctx: &Ctx<'js>) -> js::quickjs::Active<'_> {
-        self.vm().enter(ctx)
+    fn with_current<R>(&self, ctx: &Ctx<'_>, body: impl FnOnce() -> R) -> R {
+        self.runtime.extension().with_current(ctx, body)
     }
     pub(super) fn with<R>(&self, body: impl for<'js> FnOnce(Ctx<'js>) -> R) -> R {
-        self.vm().with(body)
+        self.runtime.extension().with(body)
     }
-    fn budget(&self, kind: &'static str, id: u64) -> Budget<'_> {
-        let previous_entry = self.vm().entry.replace((kind, id));
-        let previous_deadline = self
-            .vm()
-            .deadline
-            .replace(js::monotonic_ms().saturating_add(if kind == "eval" { 1000 } else { 128 }));
-        Budget {
-            host: self,
-            previous_entry,
-            previous_deadline,
-        }
+    fn budget(&self, kind: &'static str, id: u64) -> js::quickjs::Budget<'_> {
+        self.runtime.extension().budget(kind, id)
     }
     /// Replace the interrupt label without restarting the turn's deadline.
     fn retarget(&self, kind: &'static str, id: u64) {
-        self.vm().entry.set((kind, id));
+        self.runtime.extension().retarget(kind, id);
     }
-    fn past_deadline(&self) -> bool {
-        js::monotonic_ms() > self.vm().deadline.get()
+    pub(super) fn is_closing(&self) -> bool {
+        self.closing.get()
     }
-    fn alloc_id(&self) -> u64 {
-        let id = self.runtime.next_id().get().wrapping_add(1).max(1);
-        self.runtime.next_id().set(id);
-        id
-    }
-    fn annotate(&self, message: String) -> String {
-        self.vm().annotate(message)
+    pub(super) fn past_deadline(&self) -> bool {
+        self.runtime.extension().past_deadline()
     }
     fn stash_value<'js>(&self, ctx: &Ctx<'js>, value: Value<'js>) {
-        let (message, stack) = exception_text(ctx, value);
-        *self.vm().error.borrow_mut() = (self.annotate(message), stack);
+        self.runtime.extension().stash_value(ctx, value);
     }
     fn stash(&self, ctx: &Ctx<'_>, error: rquickjs::Error) {
-        if error.is_exception() {
-            self.stash_value(ctx, ctx.catch());
-        } else {
-            *self.vm().error.borrow_mut() = (self.annotate(error.to_string()), String::new());
-        }
+        self.runtime.extension().stash(ctx, error);
     }
     pub(super) fn take_error(&self) -> (String, String) {
-        let diagnostic = self.vm().diagnostic();
+        let diagnostic = self.runtime.extension().diagnostic();
         (diagnostic.message, diagnostic.stack)
     }
     fn report(&self, source: &'static str) {
-        let diagnostic = self.vm().diagnostic();
+        let diagnostic = self.runtime.extension().diagnostic();
         let (message, stack) = (diagnostic.message, diagnostic.stack);
         self.inner().faults.borrow_mut().push(session::ScriptFault {
             source,
@@ -158,8 +129,8 @@ impl Host {
     }
     fn write_error(&self, out: *mut c_char, len: usize) {
         if !out.is_null() && len > 0 {
-            let error = self.vm().error.borrow();
-            let bytes = error.0.as_bytes();
+            let diagnostic = self.runtime.extension().diagnostic();
+            let bytes = diagnostic.message.as_bytes();
             let count = bytes.len().min(len - 1);
             // SAFETY: session passes its writable error buffer with this length.
             unsafe {
@@ -287,28 +258,23 @@ impl Host {
         Ok(())
     }
     fn script_error(&self) -> Error {
-        let diagnostic = self.vm().diagnostic();
+        let diagnostic = self.runtime.extension().diagnostic();
         Error::Script(super::display_fault(&diagnostic.message, &diagnostic.stack))
     }
-    fn drain(&self) -> Result<(), Error> {
+    pub(super) fn drain(&self) -> Result<(), Error> {
         let _budget = self.budget("jobs", 0);
-        let Some(runtime) = self.vm().runtime() else {
-            return Err(Error::Runtime);
-        };
-        if let Err(stop) = js::run_jobs(runtime, |ctx| {
+        if let Err(stop) = self.runtime.checkpoint(|ctx| {
             self.stash(ctx, rquickjs::Error::Exception);
         }) {
-            if stop == js::JobStop::Limit {
-                *self.vm().error.borrow_mut() = (
-                    self.annotate("quickjs job round limit".to_owned()),
-                    String::new(),
-                );
+            if stop == js::quickjs::JobStop::Limit {
+                self.runtime
+                    .extension()
+                    .record_error("quickjs job round limit".to_owned(), String::new());
             }
             return Err(self.script_error());
         }
         self.with(|ctx| {
-            let rejections = std::mem::take(&mut *self.vm().rejections.borrow_mut());
-            for (_, reason) in rejections {
+            for reason in self.runtime.extension().take_rejections() {
                 if let Ok(reason) = reason.restore(&ctx) {
                     let (message, stack) = exception_text(&ctx, reason);
                     let message = format!(
@@ -342,17 +308,6 @@ fn strict_equal<'js>(ctx: &Ctx<'js>, a: &Value<'js>, b: &Value<'js>) -> bool {
 }
 
 use rquickjs::FromJs;
-fn exception_text<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> (String, String) {
-    let stack = value
-        .as_object()
-        .and_then(|v| v.get::<_, rquickjs::Coerced<String>>("stack").ok())
-        .map(|v| v.0)
-        .unwrap_or_default();
-    let message = rquickjs::Coerced::<String>::from_js(ctx, value)
-        .map(|s| s.0)
-        .unwrap_or_else(|_| "quickjs error".to_owned());
-    (message, stack)
-}
 fn type_error(ctx: &Ctx<'_>, message: &str) -> rquickjs::Error {
     rquickjs::Exception::throw_type(ctx, message)
 }
@@ -368,18 +323,27 @@ pub(in crate::linked) struct Engine {
     _inner: Box<Inner>,
 }
 impl Engine {
-    pub(super) fn new(mut inner: Box<Inner>, app_dir: Option<&str>) -> Result<Self, Error> {
-        let runtime = js::RuntimeBuilder::bare().map_err(|_| Error::Runtime)?;
+    pub(super) fn new(
+        mut inner: Box<Inner>,
+        app_dir: Option<&str>,
+        http: Option<Arc<dyn session::HttpClient>>,
+    ) -> Result<Self, Error> {
+        let log = Rc::clone(&inner.log);
+        let runtime = js::Runtime::builder()
+            .log(move |level, text| log(level, text))
+            .build_unstarted()
+            .map_err(|_| Error::Runtime)?;
+        runtime.configure_io(http.map_or_else(IoBindings::disconnected, IoBindings::inline));
         let mut host = Box::new(Host {
             runtime,
             inner: &mut *inner,
             refs: RefCell::new(References::default()),
             raf: RefCell::new(Vec::new()),
-            socket: Cell::new(0),
             paused: Cell::new(false),
             wants_frame: Cell::new(false),
             freeze: Cell::new(false),
             reactive_failed: Cell::new(false),
+            closing: Cell::new(false),
         });
         let host_ptr: *mut Host = &mut *host;
         inner.host = host_ptr;
@@ -387,18 +351,23 @@ impl Engine {
             host,
             _inner: inner,
         };
-        if let Some(runtime) = engine.host.vm().runtime() {
-            runtime.set_loader(
+        engine
+            .host
+            .runtime
+            .extension()
+            .install_loader(
                 modules::AppResolver::new(app_dir),
-                modules::AppLoader::new(host_ptr, app_dir),
-            );
-        }
+                modules::AppLoader::new(app_dir),
+            )
+            .map_err(|_| Error::Runtime)?;
         Ok(engine)
     }
-    pub(super) fn host_ptr(&mut self) -> *mut Host {
-        &mut *self.host
+
+    pub(super) fn inner_ptr(&self) -> *mut Inner {
+        self.host.inner
     }
-    pub(super) fn start(&self, program: ProgramKind<'_>, name: &str) -> Result<(), Error> {
+
+    pub(super) fn install(&self, scene: &str) -> Result<(), Error> {
         self.host.with(|ctx| {
             ctx.store_userdata(HostPtr(ptr::from_ref(&*self.host).cast_mut()))
                 .map_err(|_| Error::Runtime)?;
@@ -409,10 +378,18 @@ impl Engine {
         })?;
         self.host
             .eval(bootstrap::ABI_JS.as_bytes(), "abi.js", false)?;
-        self.host
-            .eval(bootstrap::SCENE_JS.as_bytes(), "scene.js", false)?;
-        self.host
-            .eval(bootstrap::PRELUDE.as_bytes(), "prelude.js", false)?;
+        self.host.eval(scene.as_bytes(), "scene.js", false)?;
+        let profile = js::standard::StandardProfile::legacy();
+        {
+            let _budget = self.host.budget("eval", 0);
+            self.host.with(|ctx| {
+                js::standard::install_web(&ctx, profile).map_err(|error| {
+                    self.host.stash(&ctx, error);
+                    self.host.script_error()
+                })
+            })?;
+            self.host.drain()?;
+        }
         self.host.eval(
             bootstrap::REACTIVE_BOOT.as_bytes(),
             "reactive-boot.js",
@@ -426,10 +403,18 @@ impl Engine {
                 Ok(())
             })
             .map_err(|_| Error::Runtime)?;
+        self.host.runtime.finish_installation();
+        Ok(())
+    }
+
+    pub(super) fn start(&self, program: ProgramKind<'_>, name: &str) -> Result<(), Error> {
         match program {
             ProgramKind::Trusted(bytecode) => {
                 let _budget = self.host.budget("eval", 0);
-                let promise = self.host.with(|ctx| bytecode.load(&ctx))?;
+                let promise = self
+                    .host
+                    .with(|ctx| bytecode.load(&ctx))
+                    .map_err(bytecode::map_bytecode)?;
                 self.host.drain()?;
                 if let Some(promise) = promise {
                     self.host.with(|ctx| {
@@ -450,22 +435,62 @@ impl Engine {
         }
         self.host.drain()
     }
-    pub(super) fn shutdown(&mut self) {
-        if !self.host.vm().is_open() {
+    pub(super) fn install_io(&mut self, submit: Box<dyn Fn(session::IoJob) + Send>) {
+        self.host.runtime.configure_io(IoBindings::external(submit));
+    }
+
+    pub(super) fn install_routed_io(&mut self, submit: crate::RoutedIoSubmit) {
+        self.host.runtime.configure_io(IoBindings::routed(submit));
+    }
+
+    pub(super) fn drain_local_io(&self) {
+        self.host.runtime.drain_local_io(|_error| {});
+    }
+
+    pub(super) fn deliver_event(&self, event: session::IoEvent) {
+        if let session::IoEvent::Host(event) = event {
+            self.emit_host_event(event);
             return;
         }
-        // Close leases before owner cleanup. Recorders refund while the budget field still exists.
+        let _ = self.host.runtime.deliver_event(event);
+    }
+
+    pub(super) fn deliver_routed(&self, delivery: session::Delivery) {
+        if delivery.runtime == self.host.runtime.key()
+            && let session::IoEvent::Host(event) = delivery.event
+        {
+            self.emit_host_event(event);
+            return;
+        }
+        let _ = self.host.runtime.deliver_routed(delivery);
+    }
+
+    pub(super) fn emit_host_event(&self, event: js::HostEvent) {
+        let _ = self.host.runtime.emit_host_event(event, |ctx, _error| {
+            if ctx.has_exception() {
+                drop(ctx.catch());
+            }
+            true
+        });
+    }
+
+    pub(super) fn shutdown(&mut self) {
+        if !self.host.runtime.extension().is_open() {
+            return;
+        }
+        self.host.runtime.begin_shutdown();
+        self.host.closing.set(true);
+        // Close leases before owner cleanup so recorders can refund against a live budget.
         begin_shutdown(self.host.inner());
-        // All saved values, including cleanups that create more timers, die while the VM is alive.
         self.host.with(|ctx| {
             let _budget = self.host.budget("reactive", 0);
             reactive::release_all(self.host.inner());
             finish_shutdown(self.host.inner());
-            self.host.runtime.timers().borrow_mut().clear();
             self.host.raf.borrow_mut().clear();
             *self.host.refs.borrow_mut() = References::default();
             let _ = ctx.remove_userdata::<HostPtr>();
         });
+        // Host and Inner still exist while Context and VM run their finalizers.
         self.host.runtime.shutdown();
     }
 }
@@ -482,4 +507,40 @@ fn host_from_ctx<'a>(ctx: &'a Ctx<'_>) -> rquickjs::Result<&'a Host> {
         .0;
     // SAFETY: userdata is removed before Context is dropped, and Engine owns Host throughout.
     Ok(unsafe { &*pointer })
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, reason = "UI bootstrap failure assertions")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_scene_bootstrap_releases_native_and_timer_roots() {
+        let mut engine = Engine::new(
+            Box::new(Inner::new(
+                uicore::MonoShaper::default(),
+                Box::new(|_, _| {}),
+                session::ModuleConfig::disconnected(),
+            )),
+            None,
+            None,
+        )
+        .expect("allocate extension owner");
+        let weak = engine.host.runtime.downgrade();
+        let result = engine
+            .install("setTimeout(() => {}, 60000); throw new Error('scene bootstrap failed');");
+        assert!(
+            matches!(result, Err(Error::Script(message)) if message.contains("scene bootstrap failed"))
+        );
+        assert!(weak.is_open());
+        assert_eq!(engine.host.runtime.counts().timers, 1);
+        assert!(engine.host.refs.borrow().scene.is_some());
+
+        engine.shutdown();
+        engine.shutdown();
+        assert!(!weak.is_open());
+        assert_eq!(engine.host.runtime.counts().timers, 0);
+        assert!(engine.host.refs.borrow().scene.is_none());
+        assert!(!engine.host.runtime.extension().is_open());
+    }
 }
