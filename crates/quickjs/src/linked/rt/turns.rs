@@ -612,34 +612,28 @@ impl Host {
         self.vm().settle(ctx, token, ok, value)
     }
 }
-pub(in crate::linked) fn push_plugin(pointer: *mut Host, value: &session::PluginValue) {
+pub(in crate::linked) fn vm_settle_plugin(
+    pointer: *mut Host,
+    token: u64,
+    result: &session::PluginResult,
+) -> i32 {
     let host = host(pointer);
-    host.with(|ctx| {
-        if let Ok(value) = bindings::plugin_to_js(&ctx, value) {
-            host.refs
-                .borrow_mut()
-                .values
-                .push(Persistent::save(&ctx, value));
-        }
-    });
-}
-pub(in crate::linked) unsafe fn vm_settle_top(pointer: *mut Host, token: u64, ok: i32) -> i32 {
-    let host = host(pointer);
-    let _budget = host.budget("http", 0);
-    let value = host.refs.borrow_mut().values.pop();
+    let _budget = host.budget("plugin", 0);
     host.with(|ctx| {
         #[allow(
             clippy::redundant_closure_call,
             reason = "the closure is the `?` boundary for a function that returns a status code"
         )]
-        let result = (|| {
-            let value = match value {
-                Some(v) => v.restore(&ctx)?,
-                None => Value::new_null(ctx.clone()),
-            };
-            host.settle(&ctx, token, ok != 0, value)
+        let settled = (|| match result {
+            session::PluginResult::Done(value) => {
+                let value = bindings::plugin_to_js(&ctx, value)?;
+                host.settle(&ctx, token, true, value)
+            }
+            session::PluginResult::Failed { message } => {
+                host.settle(&ctx, token, false, message.as_str().into_js(&ctx)?)
+            }
         })();
-        if result.is_err() {
+        if settled.is_err() {
             drop(ctx.catch());
             -1
         } else {
@@ -820,14 +814,7 @@ pub(in crate::linked) unsafe fn vm_module_event(
     let module = cstr(module);
     let event = cstr(event);
     let text_value = string_at(text_ptr, len);
-    let callbacks: Vec<_> = host
-        .refs
-        .borrow()
-        .listeners
-        .iter()
-        .filter(|(m, e, _)| *m == module && *e == event)
-        .map(|(_, _, f)| f.clone())
-        .collect();
+    let callbacks = host.runtime.listener_callbacks(&module, &event);
     host.with(|ctx| {
         for callback in callbacks {
             #[allow(

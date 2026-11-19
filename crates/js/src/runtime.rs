@@ -76,6 +76,7 @@ struct State {
     next_socket: Cell<u64>,
     closed: Cell<bool>,
     life: RefCell<Option<Rc<()>>>,
+    listeners: RefCell<Vec<(String, String, Saved)>>,
 }
 
 type Log = Box<dyn Fn(u8, &str)>;
@@ -90,6 +91,8 @@ pub struct RuntimeBuilder {
     duplicate: Option<String>,
     client: Option<Arc<dyn HttpClient>>,
     log: Log,
+    #[cfg(test)]
+    stop: Option<BootStop>,
 }
 
 impl RuntimeBuilder {
@@ -100,7 +103,16 @@ impl RuntimeBuilder {
             duplicate: None,
             client: None,
             log: Box::new(|_, _| {}),
+            #[cfg(test)]
+            stop: None,
         }
+    }
+
+    /// Fail one startup step. Only the crate's own tests can call this.
+    #[cfg(test)]
+    fn stop_at(mut self, stop: BootStop) -> Self {
+        self.stop = Some(stop);
+        self
     }
 
     pub fn log(mut self, log: impl Fn(u8, &str) + 'static) -> Self {
@@ -142,7 +154,15 @@ impl RuntimeBuilder {
     }
 
     pub fn build(self) -> Result<Runtime, JsError> {
+        #[cfg(test)]
+        let stop = self.stop;
         let mut runtime = self.open()?;
+        #[cfg(test)]
+        if stop == Some(BootStop::Bindings) {
+            return Err(JsError {
+                message: "standard bindings did not install".into(),
+            });
+        }
         if let Some(quickjs) = runtime.state.vm.runtime() {
             quickjs.set_loader(
                 MemoryResolver(Rc::clone(&runtime.state.modules)),
@@ -150,6 +170,17 @@ impl RuntimeBuilder {
             );
         }
         runtime.install_standard()?;
+        #[cfg(test)]
+        if stop == Some(BootStop::Prelude) {
+            let failed = runtime.eval_script("throw new Error('prelude');", "prelude.js");
+            runtime.shutdown();
+            return match failed {
+                Err(error) => Err(error),
+                Ok(()) => Err(JsError {
+                    message: "prelude did not run".into(),
+                }),
+            };
+        }
         runtime.eval_script(LEGACY_PRELUDE, "prelude.js")?;
         Ok(runtime)
     }
@@ -168,9 +199,22 @@ impl RuntimeBuilder {
                 message: format!("module \"{name}\" is already registered"),
             });
         }
+        #[cfg(test)]
+        if self.stop == Some(BootStop::Runtime) {
+            return Err(JsError {
+                message: "runtime did not start".into(),
+            });
+        }
         let vm = Vm::new().map_err(|message| JsError {
             message: message.into(),
         })?;
+        #[cfg(test)]
+        if self.stop == Some(BootStop::Context) {
+            drop(vm);
+            return Err(JsError {
+                message: "context did not start".into(),
+            });
+        }
         let mut runtime = Runtime {
             state: Box::new(State {
                 vm,
@@ -191,6 +235,7 @@ impl RuntimeBuilder {
                 next_socket: Cell::new(0),
                 closed: Cell::new(false),
                 life: RefCell::new(Some(Rc::new(()))),
+                listeners: RefCell::new(Vec::new()),
             }),
         };
         // SAFETY: `state` is a Box. Moving `Runtime` does not move the `Vm`.
@@ -212,6 +257,16 @@ pub struct RuntimeCounts {
     pub timers: usize,
     pub tickets: usize,
     pub rejections: usize,
+    pub listeners: usize,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BootStop {
+    Runtime,
+    Context,
+    Bindings,
+    Prelude,
 }
 
 /// A non-owning handle. It does not keep the VM or the UI state alive.
@@ -282,7 +337,79 @@ impl Runtime {
                 .count(),
             tickets: self.state.tickets.borrow().len(),
             rejections: self.state.vm.rejections.borrow().len(),
+            listeners: self.state.listeners.borrow().len(),
         }
+    }
+
+    pub fn add_listener(
+        &self,
+        module: impl Into<String>,
+        event: impl Into<String>,
+        function: Saved,
+    ) {
+        self.state
+            .listeners
+            .borrow_mut()
+            .push((module.into(), event.into(), function));
+    }
+
+    pub fn remove_listener(&self, module: &str, event: &str, function: &Saved) {
+        self.state
+            .listeners
+            .borrow_mut()
+            .retain(|(name, kind, saved)| name != module || kind != event || saved != function);
+    }
+
+    pub fn listener_callbacks(&self, module: &str, event: &str) -> Vec<Saved> {
+        self.state
+            .listeners
+            .borrow()
+            .iter()
+            .filter(|(name, kind, _)| name == module && kind == event)
+            .map(|(_, _, function)| function.clone())
+            .collect()
+    }
+
+    /// Register `function_source` as a listener. The source must evaluate to a function.
+    pub fn listen(
+        &mut self,
+        module: &str,
+        event: &str,
+        function_source: &str,
+    ) -> Result<(), JsError> {
+        self.ensure_open()?;
+        let saved = self.state.vm.with(|ctx| {
+            let value = ctx
+                .eval::<rquickjs::Value, _>(function_source)
+                .map_err(|error| script_error(&ctx, error))?;
+            if !value.is_function() {
+                return Err(JsError {
+                    message: "listener must be a function".into(),
+                });
+            }
+            Ok(Persistent::save(&ctx, value))
+        })?;
+        self.add_listener(module, event, saved);
+        Ok(())
+    }
+
+    /// Call listeners for one module event. The text is the single argument.
+    pub fn emit_listener(&mut self, module: &str, event: &str, text: &str) -> Result<(), JsError> {
+        self.ensure_open()?;
+        let callbacks = self.listener_callbacks(module, event);
+        self.state.vm.with(|ctx| {
+            for callback in callbacks {
+                let value = callback
+                    .restore(&ctx)
+                    .map_err(|error| script_error(&ctx, error))?;
+                let function =
+                    Function::from_value(value).map_err(|error| script_error(&ctx, error))?;
+                function
+                    .call::<_, ()>((text,))
+                    .map_err(|error| script_error(&ctx, error))?;
+            }
+            Ok(())
+        })
     }
 
     pub fn eval_script(&mut self, source: &str, name: &str) -> Result<(), JsError> {
@@ -414,15 +541,26 @@ impl Runtime {
         if self.state.closed.replace(true) {
             return;
         }
-        self.state.timers.borrow_mut().clear();
-        self.state.tickets.borrow_mut().clear();
+        if self.state.vm.is_open() {
+            let timers = std::mem::take(&mut *self.state.timers.borrow_mut());
+            let listeners = std::mem::take(&mut *self.state.listeners.borrow_mut());
+            let tickets = std::mem::take(&mut *self.state.tickets.borrow_mut());
+            let promises = std::mem::take(&mut *self.state.vm.promises.borrow_mut());
+            let rejections = std::mem::take(&mut *self.state.vm.rejections.borrow_mut());
+            self.state.vm.with(|_ctx| {
+                drop(timers);
+                drop(listeners);
+                drop(tickets);
+                drop(promises);
+                drop(rejections);
+            });
+        }
         self.state.jobs.borrow_mut().clear();
         self.state.inbox.borrow_mut().clear();
         for flag in self.state.cancels.borrow().values() {
             flag.store(true, Ordering::Relaxed);
         }
         self.state.cancels.borrow_mut().clear();
-        self.state.vm.rejections.borrow_mut().clear();
         self.state.life.borrow_mut().take();
         self.state.vm.close();
     }
@@ -679,4 +817,51 @@ fn script_error(ctx: &Ctx<'_>, error: rquickjs::Error) -> JsError {
         error.to_string()
     };
     JsError { message }
+}
+
+#[cfg(test)]
+mod boot_tests {
+    use super::{BootStop, RuntimeBuilder, RuntimeCounts};
+
+    #[test]
+    fn each_boot_stop_releases_the_partial_runtime() {
+        for stop in [
+            BootStop::Runtime,
+            BootStop::Context,
+            BootStop::Bindings,
+            BootStop::Prelude,
+        ] {
+            let error = RuntimeBuilder::new().stop_at(stop).build();
+            assert!(error.is_err(), "{stop:?}");
+        }
+    }
+
+    #[test]
+    fn entry_failure_keeps_the_runtime_until_shutdown_drops_roots() {
+        let mut runtime = RuntimeBuilder::new().build().expect("runtime");
+        let weak = runtime.downgrade();
+        let failed = runtime.eval_script("throw new Error('entry');", "entry.js");
+        assert!(failed.is_err());
+        assert!(weak.is_open());
+        runtime
+            .listen(
+                "probe",
+                "ping",
+                "(function (value) { globalThis.seen = value; })",
+            )
+            .expect("listen");
+        runtime.emit_listener("probe", "ping", "ok").expect("emit");
+        runtime
+            .eval_script(
+                "if (globalThis.seen !== 'ok') throw new Error(String(globalThis.seen));",
+                "check.js",
+            )
+            .expect("seen");
+        assert_eq!(runtime.counts().listeners, 1);
+        runtime.shutdown();
+        assert!(!weak.is_open());
+        assert_eq!(runtime.counts(), RuntimeCounts::default());
+        assert!(runtime.emit_listener("probe", "ping", "late").is_err());
+        runtime.shutdown();
+    }
 }

@@ -775,8 +775,8 @@ pub(super) fn emit_module(inner: &Inner, module: &str, event: &str, shape: i32, 
     };
 }
 
-pub(super) fn emit_value(inner: &Inner, value: &PluginValue) {
-    push_plugin(inner.host, value);
+pub(super) fn take_sync_result(inner: &Inner) -> Option<PluginValue> {
+    inner.sync_result.borrow_mut().take()
 }
 
 /// Streamed head: status and headers before any body bytes.
@@ -828,18 +828,8 @@ pub(super) fn deliver_stream_error(inner: &Inner, token: u64, error: &HttpError)
 }
 
 pub(super) fn settle_plugin(inner: &Inner, token: u64, result: &PluginResult) {
-    match result {
-        PluginResult::Done(value) => {
-            emit_value(inner, value);
-            // SAFETY: the session owns Host; all borrowed input and output buffers live through this call.
-            let _ = unsafe { vm_settle_top(inner.host, token, 1) };
-        }
-        PluginResult::Failed { message } => {
-            emit_value(inner, &PluginValue::Str(message.clone()));
-            // SAFETY: the session owns Host; all borrowed input and output buffers live through this call.
-            let _ = unsafe { vm_settle_top(inner.host, token, 0) };
-        }
-    }
+    // SAFETY: the session owns Host for this call. The result is owned data.
+    let _ = vm_settle_plugin(inner.host, token, result);
 }
 
 pub(super) fn settle_http(inner: &Inner, token: u64, result: &Result<HttpResponse, HttpError>) {
@@ -1208,6 +1198,7 @@ pub(super) unsafe fn module_finish(session: *mut c_void) -> i32 {
     super::vm_entry!(-1, {
         // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
+        inner.sync_result.borrow_mut().take();
         let Some(call) = inner.prepared.borrow_mut().take() else {
             return -1;
         };
@@ -1215,7 +1206,7 @@ pub(super) unsafe fn module_finish(session: *mut c_void) -> i32 {
         match call.invoke {
             Invoke::Sync(f) => match f(&args) {
                 Ok(value) => {
-                    emit_value(inner, &value);
+                    *inner.sync_result.borrow_mut() = Some(value);
                     0
                 }
                 Err(message) => {

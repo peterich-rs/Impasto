@@ -38,8 +38,6 @@ struct References {
     shortcuts: Vec<(String, Saved)>,
     settings: Vec<(u64, Saved)>,
     motions: Vec<(u64, u64, String, Saved)>,
-    listeners: Vec<(String, String, Saved)>,
-    values: Vec<Saved>,
 }
 
 pub(super) use js::quickjs::Timer;
