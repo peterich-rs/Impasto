@@ -1,27 +1,29 @@
+import { createMemo } from "solid-js";
 import { Canvas, Row } from "@impasto/solid-ui";
 import { loc } from "../../copy.ts";
 import { fmtPrice } from "../../format.ts";
 import { blockSize, marketOpen, minute, type Analytics } from "../../engine/analytics.ts";
 import type { Bar, Quote, Tick } from "../../engine/types.ts";
-import { clock, colors, compact, Label, Legend, Section } from "./ui.tsx";
+import { clock, colors, compact, Label, Legend, Section, useLegendNumberStyle } from "./ui.tsx";
 import { dot, stroke } from "./chart.tsx";
 
-export function Tape(props: { ticks: readonly Tick[]; dayStart: number }) {
-  const totals = () => {
+export function Tape(props: { ticks: readonly Tick[]; rows: number; dayStart: number }) {
+  const numberStyle = useLegendNumberStyle();
+  const totals = createMemo(() => {
     const result = { buy: 0, sell: 0, blocks: 0 };
     for (const tick of props.ticks) {
       if (tick.side) result[tick.side] += tick.volume;
       if (tick.volume >= blockSize) result.blocks++;
     }
     return result;
-  };
+  });
   return <Section title={loc("逐笔成交", "Time & sales")} note={loc("大单 ≥ 8,000", "blocks ≥ 8,000")}>
-    <Row style={{ gap: 12, flexWrap: "wrap" }}>
-      <Legend label={loc("外盘", "At ask")} value={compact(totals().buy)} color={colors.up} />
-      <Legend label={loc("内盘", "At bid")} value={compact(totals().sell)} color={colors.down} />
-      <Legend label={loc("大单", "Blocks")} value={String(totals().blocks)} color={colors.lime} />
+    <Row style={{ gap: 12, alignItems: "baseline", flexWrap: "wrap" }}>
+      <Legend label={loc("外盘", "At ask")} value={compact(totals().buy)} color={colors.up} valueStyle={numberStyle()} />
+      <Legend label={loc("内盘", "At bid")} value={compact(totals().sell)} color={colors.down} valueStyle={numberStyle()} />
+      <Legend label={loc("大单", "Blocks")} value={String(totals().blocks)} color={colors.lime} valueStyle={numberStyle()} />
     </Row>
-    <Canvas deferWhenOffscreen style={{ width: "100%", height: 20 + 25 * Math.max(1, props.ticks.length) }}
+    <Canvas deferWhenOffscreen style={{ width: "100%", height: 20 + 25 * Math.max(1, props.rows) }}
       accessibilityLabel={loc("逐笔成交明细：时间、价格和数量", "Trades: time, price and size")}
       draw={(ctx, { width }) => {
         const time = (tick: Tick) => clock(marketOpen * minute + tick.t - props.dayStart);

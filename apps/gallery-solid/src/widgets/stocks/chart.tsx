@@ -4,8 +4,8 @@ import { Canvas, Column, Row, View, type CanvasController } from "@impasto/solid
 import { loc } from "../../copy.ts";
 import { fmtPrice } from "../../format.ts";
 import { series, type MinuteBar, type Period } from "../../engine/analytics.ts";
-import type { QuoteEngine } from "../../engine/engine.ts";
-import { Action, colors, compact, Legend, Label, Section, Segments, tone } from "./ui.tsx";
+import type { StockSnapshot } from "../../engine/stock-snapshot.ts";
+import { Action, colors, compact, Legend, Label, Section, Segments, tone, useLegendNumberStyle } from "./ui.tsx";
 import { barLabel, buildChartGeometry, paintChart, resolveSelection } from "./chart-model.ts";
 
 export { dot, stroke } from "./chart-model.ts";
@@ -20,25 +20,24 @@ function average(bars: readonly { c: number }[], index: number, length: number):
   return sum / length;
 }
 
-export function StockChart(props: { engine: QuoteEngine; symbol: string; revision: number; height: number }) {
+export function StockChart(props: { snapshot: StockSnapshot; height: number }) {
+  const numberStyle = useLegendNumberStyle();
   const [period, setPeriod] = createSignal<Period>("intraday");
   const [selectedTime, setSelectedTime] = createSignal<number | null>(null);
   const [startOffset, setStartOffset] = createSignal(0);
   const [slot, setSlot] = createSignal(6);
   const [size, setSize] = createSignal<{ width: number; height: number } | null>(null);
+  const symbol = createMemo(() => props.snapshot.quote.symbol);
   let controller: CanvasController | null = null;
   let canvasNode: NodeHandle | null = null;
   let hovered = false;
   let dragging = false;
   const intraday = () => period() === "intraday";
   const data = createMemo(() => {
-    props.revision;
-    return series(period(), props.engine.analytics(props.symbol).minutes, props.engine.bars(props.symbol), props.engine.quote(props.symbol));
+    const { minutes, history, quote } = props.snapshot;
+    return series(period(), minutes, history, quote);
   });
-  const ref = () => {
-    props.revision;
-    return props.engine.quote(props.symbol).prevClose;
-  };
+  const ref = createMemo(() => props.snapshot.quote.prevClose);
   const geometry = createMemo(() => {
     const box = size();
     if (!box) return null;
@@ -52,6 +51,14 @@ export function StockChart(props: { engine: QuoteEngine; symbol: string; revisio
       previous: ref(),
     });
   });
+  const overlayBox = createMemo((previous?: { top: number; plot: number; volumeBottom: number }) => {
+    const geo = geometry();
+    const top = geo?.top ?? 0;
+    const plot = geo?.plot ?? 0;
+    const volumeBottom = geo?.volumeBottom ?? 0;
+    return previous?.top === top && previous.plot === plot && previous.volumeBottom === volumeBottom
+      ? previous : { top, plot, volumeBottom };
+  });
   createTrackedEffect(() => {
     const time = selectedTime();
     if (time === null) return;
@@ -61,11 +68,17 @@ export function StockChart(props: { engine: QuoteEngine; symbol: string; revisio
   });
   const focusedIndex = () => {
     const bars = data();
+    const time = selectedTime();
+    if (time === null) return bars.length - 1;
     const geo = geometry();
-    const selected = geo ? resolveSelection(selectedTime(), bars, geo.first, geo.end) : null;
+    const selected = geo ? resolveSelection(time, bars, geo.first, geo.end) : null;
     return Math.min(bars.length - 1, selected ?? bars.length - 1);
   };
   const focus = () => data()[focusedIndex()];
+  const focusPrice = createMemo(() => fmtPrice(focus()?.c ?? 0));
+  const focusColor = createMemo(() => tone((focus()?.c ?? ref()) - ref()));
+  const focusAverage = createMemo(() => fmtPrice((focus() as MinuteBar | undefined)?.avg ?? 0));
+  const focusVolume = createMemo(() => compact(focus()?.v ?? 0));
   const stepSelection = (direction: -1 | 1) => {
     const geo = geometry();
     if (!geo) return;
@@ -74,9 +87,11 @@ export function StockChart(props: { engine: QuoteEngine; symbol: string; revisio
     setSelectedTime(data()[next]?.t ?? null);
   };
   const readout = createMemo(() => {
+    const time = selectedTime();
+    if (time === null) return null;
     const geo = geometry();
     const bars = data();
-    const index = geo ? resolveSelection(selectedTime(), bars, geo.first, geo.end) : null;
+    const index = geo ? resolveSelection(time, bars, geo.first, geo.end) : null;
     if (!geo || index === null) return null;
     const bar = bars[index]!;
     const x = geo.xAt(index);
@@ -138,17 +153,19 @@ export function StockChart(props: { engine: QuoteEngine; symbol: string; revisio
         <Action label="›" title={loc("下一个数据点", "Next chart point")} onClick={() => stepSelection(1)} />
       </Row>
     </Row>
-    <Row style={{ flexWrap: "wrap", gap: 12, minHeight: 16 }}>
-      <Show when={intraday()} fallback={<For each={averages}>{([length, color]) => <Legend color={color} label={`MA${length}`}
-        value={fmtPrice(average(data(), focusedIndex(), length) ?? focus()?.c ?? 0)} />}</For>}>
-        <Legend label={loc("价格", "Price")} value={fmtPrice(focus()?.c ?? 0)} color={tone((focus()?.c ?? ref()) - ref())} />
-        <Legend label={loc("均价", "Avg")} value={fmtPrice((focus() as MinuteBar | undefined)?.avg ?? 0)} color={colors.amber} />
-        <Legend label={loc("量", "Vol")} value={compact(focus()?.v ?? 0)} color={colors.faint} />
+    <Row style={{ alignItems: "baseline", flexWrap: "wrap", gap: 12, minHeight: 16 }}>
+      <Show when={intraday()} fallback={<For each={averages}>{([length, color]) => {
+        const value = createMemo(() => fmtPrice(average(data(), focusedIndex(), length) ?? focus()?.c ?? 0));
+        return <Legend color={color} label={`MA${length}`} valueStyle={numberStyle()} value={value()} />;
+      }}</For>}>
+        <Legend label={loc("价格", "Price")} value={focusPrice()} color={focusColor()} valueStyle={numberStyle()} />
+        <Legend label={loc("均价", "Avg")} value={focusAverage()} color={colors.amber} valueStyle={numberStyle()} />
+        <Legend label={loc("量", "Vol")} value={focusVolume()} color={colors.faint} valueStyle={numberStyle()} />
       </Show>
     </Row>
     <View style={{ height: props.height, width: "100%" }}
         focusable
-        accessibilityLabel={loc(`${props.symbol} 走势图`, `${props.symbol} chart`)}
+        accessibilityLabel={loc(`${symbol()} 走势图`, `${symbol()} chart`)}
         ref={(next) => { if (next) scene.setDragClaim(next, "horizontal"); }}
         onKey={(key) => {
           if (key === "Left") stepSelection(-1);
@@ -169,17 +186,17 @@ export function StockChart(props: { engine: QuoteEngine; symbol: string; revisio
         onZoom={(scale) => { if (!intraday()) setSlot((value) => Math.max(3, Math.min(18, value * scale))); }}>
       {plot}
       <View style={{ position: "absolute", top: 0, left: 0, width: "100%", height: props.height, opacity: readout() ? 1 : 0 }}>
-        <View style={{ position: "absolute", left: 0, top: geometry()?.top ?? 0,
-          width: 1, height: (geometry()?.volumeBottom ?? 0) - (geometry()?.top ?? 0),
+        <View style={{ position: "absolute", left: 0, top: overlayBox().top,
+          width: 1, height: overlayBox().volumeBottom - overlayBox().top,
           backgroundColor: colors.dim, translateX: lastReadout()?.x ?? 0 }} />
-        <View style={{ position: "absolute", left: 0, top: 0, width: geometry()?.plot ?? 0, height: 1,
+        <View style={{ position: "absolute", left: 0, top: 0, width: overlayBox().plot, height: 1,
           backgroundColor: colors.dim, translateY: lastReadout()?.y ?? 0 }} />
         <View style={{ position: "absolute", left: 0, top: 0, width: 6, height: 6, borderRadius: 3,
           backgroundColor: lastReadout()?.dot ?? colors.dim,
           translateX: (lastReadout()?.x ?? 3) - 3, translateY: (lastReadout()?.y ?? 3) - 3 }} />
         <Column style={{ position: "absolute", left: 0, top: 0,
-          translateX: lastReadout()?.boxX ?? 0, translateY: (geometry()?.top ?? 0) + 4,
-          width: Math.max(0, Math.min(132, (geometry()?.plot ?? 4) - 4)),
+          translateX: lastReadout()?.boxX ?? 0, translateY: overlayBox().top + 4,
+          width: Math.max(0, Math.min(132, overlayBox().plot - 4)),
           height: intraday() ? 43 : 73, padding: 8, gap: 3, borderRadius: 6, backgroundColor: colors.raised }}>
           <Label size={10} style={tooltipLine}>{lastReadout()?.title ?? ""}</Label>
           <Show when={!intraday()}>

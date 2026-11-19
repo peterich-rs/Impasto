@@ -3,6 +3,7 @@ import { flush } from "solid-js";
 import { mulberry32, hashString, gauss } from "./src/engine/rng.ts";
 import { QuoteEngine } from "./src/engine/engine.ts";
 import { book, series } from "./src/engine/analytics.ts";
+import { stockSnapshot } from "./src/engine/stock-snapshot.ts";
 import { createAccount } from "./src/state/account.ts";
 import { TickRing } from "./src/engine/types.ts";
 
@@ -78,6 +79,26 @@ import { TickRing } from "./src/engine/types.ts";
   assert.ok(bids.every((level, i) => i === 0 || level.price < bids[i - 1]!.price));
   assert.ok(asks.every((level, i) => i === 0 || level.price > asks[i - 1]!.price));
   assert.equal(asks.at(-1)?.total, asks.reduce((sum, level) => sum + level.size, 0));
+}
+
+// Detail subscribers can retain a published snapshot while offscreen.
+{
+  const e = new QuoteEngine({ seed: 5, warmupMinutes: 50 });
+  const symbol = "00700.HK";
+  const first = stockSnapshot(e, symbol);
+  const openMinute = { ...first.minutes.at(-1) };
+  const buy = first.flow.buy.slice();
+  assert.equal(stockSnapshot(e, symbol, first), first);
+  e.runFor(5_000);
+  const next = stockSnapshot(e, symbol, first);
+  assert.ok(next.quote.revision > first.quote.revision);
+  assert.equal(next.history, first.history);
+  assert.deepEqual(first.minutes.at(-1), openMinute);
+  assert.deepEqual(first.flow.buy, buy);
+  assert.equal(next.minutes.at(-1)?.c, next.quote.last);
+  assert.equal(next.trades[0]?.price, next.quote.last);
+  assert.deepEqual(first.book, book(first.quote, first.trades[0]?.side, e.ins(symbol).lot));
+  assert.equal(next.book, next.book);
 }
 
 // Pending orders reserve cash and lots until cancelled or filled.

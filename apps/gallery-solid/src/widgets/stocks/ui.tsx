@@ -1,14 +1,14 @@
-import { For, Show } from "solid-js";
-import type { UIChildren, ViewStyle } from "@impasto/solid-renderer";
-import { Column, Pressable, Role, Row, Text, View } from "@impasto/solid-ui";
+import { createMemo, For, Show } from "solid-js";
+import type { NodeRef, UIChildren, ViewStyle } from "@impasto/solid-renderer";
+import { Column, Pressable, Role, Row, Text, View, useTheme } from "@impasto/solid-ui";
 import { loc } from "../../copy.ts";
 import { marketRunning, toggleMarket } from "../../state/quotes-provider.tsx";
 import { colors } from "./theme.ts";
 
 export { change, clock, code, colors, compact, filling, sectorLabel, sign, tone } from "./theme.ts";
 
-export function Label(props: { children?: unknown; color?: string; size?: number; weight?: number; style?: ViewStyle }) {
-  return <Text style={[{ color: props.color ?? colors.ink, fontSize: props.size ?? 13, fontWeight: props.weight ?? 400,
+export function Label(props: { ref?: NodeRef; children?: unknown; color?: string; size?: number; weight?: number; style?: ViewStyle }) {
+  return <Text ref={props.ref} style={[{ color: props.color ?? colors.ink, fontSize: props.size ?? 13, fontWeight: props.weight ?? 400,
     maxLines: 1, textOverflow: "ellipsis", minWidth: 0 }, props.style]}>{props.children}</Text>;
 }
 
@@ -55,10 +55,24 @@ export function Segments<T extends string>(props: {
   </Row>;
 }
 
-export function Legend(props: { color: string; label: string; value: string }) {
-  return <Row style={{ gap: 5, alignItems: "center" }}>
-    <View style={{ width: 8, height: 8, borderRadius: 2, backgroundColor: props.color }} />
+export function useLegendNumberStyle(): () => ViewStyle {
+  const theme = useTheme();
+  return createMemo(() => ({
+    width: Math.ceil(56 * theme().textScale),
+    height: Math.ceil(16 * theme().textScale),
+    textAlign: "left",
+  }));
+}
+
+export function Legend(props: { color: string; label: string; value: string; valueStyle?: ViewStyle }) {
+  const theme = useTheme();
+  const swatch = createMemo(() => {
+    const size = 8 * theme().textScale;
+    return { width: size, height: size, borderRadius: size / 4 };
+  });
+  return <Row style={{ gap: 5, alignItems: "baseline", lineHeight: 1.2 }}>
+    <View style={{ ...swatch(), backgroundColor: props.color }} />
     <Label size={11} color={colors.dim}>{props.label}</Label>
-    <Label size={11}>{props.value}</Label>
+    <Label size={11} style={props.valueStyle}>{props.value}</Label>
   </Row>;
 }

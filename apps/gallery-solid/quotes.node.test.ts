@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import type { ViewStyle } from "@impasto/solid-renderer";
 import { installMockHost } from "../../packages/solid-ui/testing/renderTest.ts";
 
 const mock = installMockHost();
+const { scene } = await import("@impasto/solid-renderer");
 await import(new URL("./dist/quotes.js", import.meta.url).href);
 
 let time = 0;
@@ -20,6 +22,30 @@ function click(label: string): void {
 function shown(...labels: string[]): void {
   const texts = mock.liveTexts();
   for (const label of labels) assert.ok(texts.includes(label), `missing ${label}: ${texts.join(", ")}`);
+}
+function textNode(label: string): number {
+  const node = mock.calls.findLast(({ name, args }) => name === "setText" && args[1] === label)?.args[0];
+  assert.ok(typeof node === "number", label);
+  return node;
+}
+function inlineStyle(node: number): ViewStyle {
+  const call = mock.calls.findLast(({ name, args }) => name === "setStyleSource" && args[0] === node && args[1] === "inline");
+  assert.ok(call, `missing style for node ${node}`);
+  return Object.assign({}, ...[call.args[2]].flat(Infinity));
+}
+function checkLegend(label: string): void {
+  const caption = textNode(label);
+  const group = scene.parent(caption);
+  const value = scene.nextSibling(caption);
+  assert.equal(inlineStyle(scene.parent(group)).alignItems, "baseline");
+  const groupStyle = inlineStyle(group);
+  assert.equal(groupStyle.alignItems, "baseline");
+  assert.equal(groupStyle.lineHeight, 1.2);
+  const swatch = inlineStyle(scene.firstChild(group));
+  assert.equal(swatch.alignSelf ?? groupStyle.alignItems, "baseline", label);
+  assert.equal(swatch.width, swatch.height, label);
+  assert.equal(inlineStyle(value).textAlign, "left");
+  assert.equal(inlineStyle(value).width, 56);
 }
 
 frame();
@@ -57,10 +83,22 @@ click("☆");
 shown("★");
 click("5m");
 shown("MA5", "MA10", "MA20");
+checkLegend("MA5");
 click("分时");
 shown("均价");
+checkLegend("量");
+checkLegend("外盘");
+checkLegend("失衡");
 click("5 → 10");
 shown("A10", "B10", "10 → 5");
+const askPrice = scene.nextSibling(textNode("A10"));
+const askSize = scene.nextSibling(askPrice);
+const askCells = new Set([askPrice, scene.firstChild(askSize), scene.firstChild(scene.nextSibling(askSize))]);
+const beforePulse = mock.calls.length;
+frame();
+assert.ok(mock.calls.slice(beforePulse).some(({ name, args }) =>
+  name === "setText" && typeof args[0] === "number" && askCells.has(args[0]),
+), "expanded book rows follow live quotes");
 click("10 → 5");
 assert.ok(!mock.liveTexts().includes("A10"));
 
