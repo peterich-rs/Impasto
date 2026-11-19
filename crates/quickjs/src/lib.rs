@@ -1720,6 +1720,73 @@ import * as core from "scene";
     }
 
     #[test]
+    fn stocks_phone_reopens_during_exit_without_leaving_a_detail() {
+        let Some(mut session) = open_gallery() else {
+            return;
+        };
+        session.metrics(&phone());
+        let mut time = 0.0;
+        let home = wait_for_text(session.as_mut(), &mut time, "腾讯控股");
+        let (x, y) = text_spot(&home, "腾讯控股");
+        let (other_x, other_y) = text_spot(&home, "阿里巴巴");
+        click(session.as_mut(), x, y);
+        wait_for_text(session.as_mut(), &mut time, "‹ 返回");
+        click(session.as_mut(), other_x, other_y);
+        let detail = wait_for_text(session.as_mut(), &mut time, "价格区间");
+        assert_eq!(
+            texts(&detail)
+                .iter()
+                .filter(|label| **label == "‹ 返回")
+                .count(),
+            1
+        );
+        let (back_x, back_y) = text_spot(&detail, "‹ 返回");
+        click(session.as_mut(), back_x, back_y);
+        let mut exiting = detail;
+        for _ in 0..9 {
+            time += 16.0;
+            let frame = session.frame(session::FrameTime::at(time));
+            if frame.layers.is_some() {
+                exiting = frame;
+            }
+        }
+        assert!(text_spot(&exiting, "‹ 返回").0 > other_x);
+        click(session.as_mut(), other_x, other_y);
+        let mut reopened = wait_for_text(session.as_mut(), &mut time, "价格区间");
+        assert_eq!(
+            texts(&reopened)
+                .iter()
+                .filter(|label| **label == "09988")
+                .count(),
+            2
+        );
+        session.input(InputEvent::Back);
+        for _ in 0..48 {
+            time += 16.0;
+            let frame = session.frame(session::FrameTime::at(time));
+            let faults = session.take_faults();
+            assert!(faults.is_empty(), "{faults:?}");
+            if frame.layers.is_some() {
+                reopened = frame;
+            }
+        }
+        let shown = texts(&reopened);
+        assert!(shown.contains(&"综合指数"), "{shown:?}");
+        assert!(!shown.contains(&"‹ 返回"), "{shown:?}");
+
+        click(session.as_mut(), x, y);
+        let entering = wait_for_text(session.as_mut(), &mut time, "‹ 返回");
+        let before = text_spot(&entering, "‹ 返回").0;
+        session.input(InputEvent::Back);
+        let reversing = wait_for_text(session.as_mut(), &mut time, "‹ 返回");
+        let after = text_spot(&reversing, "‹ 返回").0;
+        assert!(
+            (after - before).abs() < 30.0,
+            "back jumped from {before} to {after}"
+        );
+    }
+
+    #[test]
     // Broken by the gallery rewrite in b48bb8a, which shipped without a
     // compiling quickjs test build. Re-pin these once the watchlist click
     // path is verified against the real tree again.

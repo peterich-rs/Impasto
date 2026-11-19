@@ -325,8 +325,14 @@ pub(super) unsafe fn effect(
         } else if kind == EffectKind::PushScope as i32 {
             bridge::push_focus_scope(session, node)
         } else if kind == EffectKind::PopScope as i32 {
-            bridge::pop_focus_scope(session);
-            0
+            let status = bridge::pop_focus_scope(session, node);
+            if status >= 0 {
+                out.nums[0] = f64::from(status);
+                out.nnums = 1;
+                0
+            } else {
+                status
+            }
         } else if kind == EffectKind::ScrollTo as i32 {
             nodes::scroll_to(
                 session,
@@ -350,6 +356,7 @@ pub(super) unsafe fn effect(
                 num(1),
                 num(2),
                 num(3),
+                num(4) != 0.0,
             )
         } else if kind == EffectKind::ScrollIntoView as i32 {
             let status = bridge::scroll_into_view(session, node, num(0) as i32);

@@ -955,6 +955,30 @@ fn focus_step_stays_inside_the_scope() -> Result<(), crate::Error> {
 }
 
 #[test]
+fn removing_a_covered_focus_scope_keeps_the_active_scope() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    let root = tree.column(0.0)?;
+    let first = tree.pointer_region()?;
+    let second = tree.pointer_region()?;
+    tree.add_child(root, first)?;
+    tree.add_child(root, second)?;
+    tree.set_focusable(first, true)?;
+    tree.set_focusable(second, true)?;
+
+    tree.push_focus_scope(first)?;
+    tree.push_focus_scope(second)?;
+    assert!(!tree.remove_focus_scope(first));
+    assert!(tree.focus(first)?.is_empty());
+    assert_eq!(tree.focus(second)?, vec![Gesture::Focus(second)]);
+    assert!(tree.remove_focus_scope(second));
+    assert_eq!(
+        tree.focus(first)?,
+        vec![Gesture::Blur(second), Gesture::Focus(first)]
+    );
+    Ok(())
+}
+
+#[test]
 fn remove_pops_a_focus_scope_inside_the_subtree() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper::default());
     let root = tree.column(0.0)?;

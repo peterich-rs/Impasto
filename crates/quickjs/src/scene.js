@@ -587,8 +587,9 @@
   core.pushFocusScope = function (node) {
     mustEffect(effect(EFFECT.PushScope, handle(node), []), "pushFocusScope failed");
   };
-  core.popFocusScope = function () {
-    mustEffect(effect(EFFECT.PopScope, 0, []), "popFocusScope failed");
+  core.popFocusScope = function (node) {
+    var result = mustEffect(effect(EFFECT.PopScope, node === undefined ? 0 : handle(node), []), "popFocusScope failed");
+    return result.n[0] === 1;
   };
   core.scrollTo = function (node, x, y, stiffness, damping) {
     mustEffect(effect(EFFECT.ScrollTo, handle(node), [+x, +y, +stiffness, +damping]), "scrollTo failed");
@@ -599,8 +600,8 @@
   core.stopScroll = function (node) {
     mustEffect(effect(EFFECT.StopScroll, handle(node), []), "stopScroll failed");
   };
-  core.animate = function (node, prop, from, to, stiffness, damping) {
-    mustEffect(effect(EFFECT.Animate, handle(node), [+from, +to, +stiffness, +damping], String(prop)), "animate failed");
+  core.animate = function (node, prop, from, to, stiffness, damping, retarget) {
+    mustEffect(effect(EFFECT.Animate, handle(node), [+from, +to, +stiffness, +damping, retarget ? 1 : 0], String(prop)), "animate failed");
   };
   core.scrollIntoView = function (node, edge) {
     mustEffect(effect(EFFECT.ScrollIntoView, handle(node), [edge | 0]), "scrollIntoView");

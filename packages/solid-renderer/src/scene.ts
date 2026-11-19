@@ -372,7 +372,8 @@ export interface SceneModule {
     direction: "next" | "previous" | "left" | "right" | "up" | "down",
   ): void;
   pushFocusScope(node: NodeHandle): void;
-  popFocusScope(): void;
+  /** Remove this node's scope and report whether it was active. Omit the node to pop the top scope. */
+  popFocusScope(node?: NodeHandle): boolean;
   pointerPosition(): { x: number; y: number };
   onBack(fn: () => boolean): number;
   offBack(id: number): void;
@@ -387,6 +388,7 @@ export interface SceneModule {
    * Spring on one property. `prop` is `scrollX`, `scrollY`, `opacity`,
    * `translateX`, `translateY`, `rotate`, `scale`, `overscrollX`, or `overscrollY`.
    * Core calls opacity `Opacity`; the script string is `opacity`.
+   * With `retarget`, a running motion supplies the starting value.
    */
   animate(
     id: NodeHandle,
@@ -395,6 +397,7 @@ export interface SceneModule {
     to: number,
     stiffness: number,
     damping: number,
+    retarget?: boolean,
   ): void;
   flingTarget(id: NodeHandle): { x: number; y: number } | null;
   setListenerErrorPolicy(policy: "report" | "freeze"): void;

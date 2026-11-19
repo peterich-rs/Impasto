@@ -946,6 +946,16 @@ impl Tree {
         !self.motions.is_empty()
     }
 
+    /// Current sample of the motion on this property, if it is still running.
+    pub fn motion_position(&self, id: NodeId, prop: crate::AnimProp) -> Option<f32> {
+        let motion = self
+            .motions
+            .iter()
+            .find(|motion| motion.node == id && motion.prop == prop)?;
+        let time_ms = (self.clock_ms - motion.started_ms).max(0.0);
+        Some(motion.simulation.x(time_ms))
+    }
+
     /// Samples every active motion at `target_ms`. Returns whether any remain.
     pub fn tick_motions(&mut self, target_ms: f64) -> bool {
         if !target_ms.is_finite() {

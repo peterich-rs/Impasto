@@ -77,5 +77,5 @@ macOS 已实现权限五法。还差：
 ## 必须守住
 
 - `reduceMotion` 把运动写成终值，并且仍然发出运动结束。只跳过 `tick_motions` 会把 overscroll 和页面弹簧留在半程。
-- 路由的退出条目活到运动结束。
+- `solid-router` 的退出条目保留到退场运动结束。新导航接管转场时销毁尚在退场的条目，完成回调只推进自己启动的阶段。
 - 包使用 `onBack(priority, fn)`。直接调用 `core.onBack` 会排在渲染器那一次登记前面。

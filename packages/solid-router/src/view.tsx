@@ -1,5 +1,6 @@
 import {
   For,
+  Show,
   createMemo,
   createSignal,
   createTrackedEffect,
@@ -25,6 +26,7 @@ import {
 import { stackMotion, travelDistance } from "./transition.ts";
 export type TransitionProps = {
   phase: RoutePhase;
+  /** Capture when starting the motion, then call it when that motion ends. */
   onDone: () => void;
   children?: NodeHandle;
 };
@@ -80,73 +82,57 @@ export function StackTransition(
 ): NodeHandle {
   let mover = 0;
   let fade = 0;
-  let played = "";
+  let played: RoutePhase | undefined;
+  let completion: (() => void) | undefined;
+  let pending = false;
+  const cancellations: Array<() => void> = [];
+  const cancelMotion = () => {
+    for (const cancel of cancellations.splice(0)) cancel();
+  };
+  onCleanup(cancelMotion);
   const [mounted, setMounted] = createSignal(0);
   createTrackedEffect(() => {
     const phase = props.phase;
-    if (mounted() === 0 || mover === 0 || fade === 0 || phase === played) {
+    const complete = props.onDone;
+    if (mounted() === 0 || mover === 0 || fade === 0) {
       return;
     }
+    if (phase === played && complete === completion) return;
+    const reveal = phase === "live" && played === "cover" && pending;
+    const retarget = phase !== "enter" && played !== undefined;
     played = phase;
-    if (phase === "live") {
-      scene.patchStyle(mover, {
-        translateX: 0,
-        translateY: 0,
-        rotate: 0,
-        scaleX: 1,
-        scaleY: 1,
-      });
-      scene.patchStyle(fade, {
-        opacity: 255 / 255,
-      });
-      return;
-    }
-    const steps = stackMotion(
-      phase === "cover" ? "cover" : phase,
-      pageDistance(mover),
-    ).filter((step) => !props.opaque || step.prop !== "opacity");
+    completion = complete;
+    cancelMotion();
+    const steps = (phase === "live"
+      ? [{ prop: "translateX", from: 0, to: 0 }, { prop: "opacity", from: 255, to: 255 }]
+      : stackMotion(phase, pageDistance(mover)))
+      .filter((step) => !props.opaque || step.prop !== "opacity");
     let left = steps.length;
+    pending = phase !== "live";
     for (const step of steps) {
-      if (step.prop === "opacity") {
-        scene.patchStyle(fade, {
-          opacity: Math.round(step.from) / 255,
-        });
-      } else {
-        scene.patchStyle(mover, {
-          translateX: step.from,
-          translateY: 0,
-          rotate: 0,
-          scaleX: 1,
-          scaleY: 1,
-        });
+      const isOpacity = step.prop === "opacity";
+      const id = isOpacity ? fade : mover;
+      const write = (value: number) => {
+        scene.patchStyle(id, isOpacity ? { opacity: Math.round(value) / 255 } : { translateX: value });
+      };
+      if (phase === "live" && !reveal) {
+        write(step.to);
+        continue;
       }
-      spring({
-        id: step.prop === "opacity" ? fade : mover,
-        prop: step.prop,
-        from: step.from,
-        to: step.to,
-        write: (value) => {
-          if (step.prop === "opacity") {
-            scene.patchStyle(fade, {
-              opacity: Math.round(value) / 255,
-            });
-          } else {
-            scene.patchStyle(mover, {
-              translateX: value,
-              translateY: 0,
-              rotate: 0,
-              scaleX: 1,
-              scaleY: 1,
-            });
-          }
-        },
-        onDone: () => {
+      if (!retarget) write(step.from);
+      cancellations.push(spring({
+        id,
+        ...step,
+        write,
+        retarget,
+        onDone: phase === "live" ? undefined : () => {
           left -= 1;
-          if (left <= 0) {
-            props.onDone();
+          if (left === 0) {
+            pending = false;
+            complete();
           }
         },
-      });
+      }));
     }
   });
   const body = (
@@ -232,6 +218,7 @@ function RouteHost(props: {
   errorFallback?: RouterViewProps["errorFallback"];
 }): NodeHandle {
   let previous = 0;
+  let scope: NodeHandle | undefined;
   const active = (): boolean => {
     const list = props.router.stack();
     for (let index = list.length - 1; index >= 0; index -= 1) {
@@ -243,15 +230,14 @@ function RouteHost(props: {
     return false;
   };
   onCleanup(() => {
-    try {
-      scene.popFocusScope();
-    } catch {
-      // core owns the scope stack. This pop matches the ref's push.
-    }
-    restoreFocus(previous);
+    if (scope !== undefined && scene.popFocusScope?.(scope)) restoreFocus(previous);
   });
-  const { component: Page, key, keepAlive } = untrack(props.entry);
+  const { component: Page, keepAlive } = untrack(props.entry);
   const params = createMemo(() => props.entry().params);
+  const transitionEnd = createMemo((previous?: { entry: RouteEntry; done: () => void }) => {
+    const entry = props.entry();
+    return previous?.entry === entry ? previous : { entry, done: () => props.router.complete(entry) };
+  });
   const transition =
     props.transition ??
     ((step: TransitionProps) => (
@@ -278,6 +264,7 @@ function RouteHost(props: {
               typeof scene.focused === "function" ? scene.focused() : 0;
             try {
               scene.pushFocusScope(node);
+              scope = node;
             } catch {
               // Mock hosts without a scope stack still mount the page.
             }
@@ -291,12 +278,18 @@ function RouteHost(props: {
             minHeight: 0,
           }}
         >
+          {/* The entering page can receive taps while the exposed lower page is blocked. */}
+          <Show when={props.entry().phase === "enter"}>
+            <view style={{ width: "100%", height: "100%" }} onClick={() => {}} />
+          </Show>
           {transition({
             // The transition tracks its phase; the route's content keeps its owner.
             get phase() {
               return props.entry().phase;
             },
-            onDone: () => props.router.complete(key),
+            get onDone() {
+              return transitionEnd().done;
+            },
             get children() {
               return (
                 <Errored

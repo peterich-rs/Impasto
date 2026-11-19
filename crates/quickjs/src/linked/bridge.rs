@@ -118,12 +118,17 @@ pub(super) unsafe fn push_focus_scope(session: *mut c_void, node: u64) -> i32 {
     })
 }
 
-pub(super) unsafe fn pop_focus_scope(session: *mut c_void) -> i32 {
+pub(super) unsafe fn pop_focus_scope(session: *mut c_void, scope: u64) -> i32 {
     super::vm_entry!(-1, {
         // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
-        inner.tree.borrow_mut().pop_focus_scope();
-        0
+        let mut tree = inner.tree.borrow_mut();
+        let was_active = if scope == 0 {
+            tree.pop_focus_scope()
+        } else {
+            tree.remove_focus_scope(NodeId::from_raw(scope))
+        };
+        i32::from(was_active)
     })
 }
 
@@ -289,6 +294,7 @@ pub(super) unsafe fn animate(
     to: f64,
     stiffness: f64,
     damping: f64,
+    retarget: bool,
 ) -> i32 {
     super::vm_entry!(-1, {
         // SAFETY: session is captured from the live Host and used only on the render thread.
@@ -306,11 +312,18 @@ pub(super) unsafe fn animate(
         {
             return -1;
         }
-        inner.tree.borrow_mut().animate(
-            NodeId::from_raw(node),
+        let mut tree = inner.tree.borrow_mut();
+        let node = NodeId::from_raw(node);
+        let start = if retarget {
+            tree.motion_position(node, prop).unwrap_or(from as f32)
+        } else {
+            from as f32
+        };
+        tree.animate(
+            node,
             prop,
             Box::new(uicore::Spring {
-                x0: from as f32,
+                x0: start,
                 v0: 0.0,
                 target: to as f32,
                 stiffness: stiffness as f32,

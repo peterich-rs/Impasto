@@ -1030,8 +1030,18 @@ impl Tree {
     }
 
     /// Drops the innermost scope. An empty stack stays empty.
-    pub fn pop_focus_scope(&mut self) {
-        self.scopes.pop();
+    pub fn pop_focus_scope(&mut self) -> bool {
+        self.scopes.pop().is_some()
+    }
+
+    /// Removes this scope and reports whether it was the active scope.
+    pub fn remove_focus_scope(&mut self, id: NodeId) -> bool {
+        let Some(index) = self.scopes.iter().rposition(|scope| *scope == id) else {
+            return false;
+        };
+        let was_active = index + 1 == self.scopes.len();
+        self.scopes.remove(index);
+        was_active
     }
 
     /// Moves focus by tree order or by geometry, inside the active scope.
