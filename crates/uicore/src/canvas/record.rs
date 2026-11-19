@@ -411,6 +411,50 @@ impl<'a> Recorder<'a> {
         Ok(())
     }
 
+    /// Starts one new subpath using consecutive x/y pairs.
+    pub fn polyline(&mut self, points: &[f64]) -> Result<(), CanvasError> {
+        self.append_points(points, 2, "polyline")
+    }
+
+    /// Starts an independent subpath for each x0/y0/x1/y1 group.
+    pub fn line_segments(&mut self, points: &[f64]) -> Result<(), CanvasError> {
+        self.append_points(points, 4, "lineSegments")
+    }
+
+    fn append_points(
+        &mut self,
+        points: &[f64],
+        group: usize,
+        api: &'static str,
+    ) -> Result<(), CanvasError> {
+        if !points.len().is_multiple_of(group) {
+            return Err(CanvasError::argument(api, "incomplete coordinate group"));
+        }
+        let count = points.len() / 2;
+        if self.segments.saturating_add(count) > MAX_SEGMENTS {
+            return Err(CanvasError::limit(api));
+        }
+        let (pairs, _) = points.as_chunks::<2>();
+        let map = |pair: &[f64; 2]| self.state.ctm * Point::new(pair[0], pair[1]);
+        if !pairs.iter().all(|pair| {
+            let mapped = map(pair);
+            pair.iter().all(|value| finite(*value)) && finite(mapped.x) && finite(mapped.y)
+        }) {
+            return Err(CanvasError::argument(api, "non-finite point"));
+        }
+        let ctm = self.state.ctm;
+        self.add_segments(count)?;
+        for (index, pair) in pairs.iter().enumerate() {
+            let point = ctm * Point::new(pair[0], pair[1]);
+            if index == 0 || (group == 4 && index % 2 == 0) {
+                self.path.move_to(point);
+            } else {
+                extend_line(&mut self.path, point);
+            }
+        }
+        Ok(())
+    }
+
     pub fn quad_to(&mut self, cx: f64, cy: f64, x: f64, y: f64) -> Result<(), CanvasError> {
         let (Some(control), Some(point)) = (self.map_point(cx, cy), self.map_point(x, y)) else {
             return Ok(());
@@ -815,6 +859,43 @@ impl<'a> Recorder<'a> {
             composite: self.state.composite,
             ctm: self.state.ctm,
         })
+    }
+
+    /// Fills the rectangles in input order with the current paint.
+    pub fn fill_rects(&mut self, rects: &[f64]) -> Result<(), CanvasError> {
+        const API: &str = "fillRects";
+        if !rects.len().is_multiple_of(4) {
+            return Err(CanvasError::argument(API, "incomplete rectangle"));
+        }
+        if rects.len() / 4 > MAX_OPS {
+            return Err(CanvasError::limit(API));
+        }
+        if !rects.iter().all(|value| finite(*value)) {
+            return Err(CanvasError::argument(API, "non-finite rectangle"));
+        }
+        let (paths, _) = rects.as_chunks::<4>();
+        let count = paths
+            .iter()
+            .filter(|rect| rect[2] != 0.0 && rect[3] != 0.0)
+            .count();
+        if self.ops.len().saturating_add(count) > MAX_OPS {
+            return Err(CanvasError::limit(API));
+        }
+        self.charge(count * 64)?;
+        let paint = self.state.fill.bake();
+        for rect in paths {
+            if let Some(path) = self.user_rect(rect[0], rect[1], rect[2], rect[3]) {
+                self.ops.push(RecOp::Fill {
+                    path: transform_path(&self.state.ctm, &path),
+                    fill: FillRule::NonZero,
+                    paint: paint.clone(),
+                    alpha: self.state.alpha,
+                    composite: self.state.composite,
+                    ctm: self.state.ctm,
+                });
+            }
+        }
+        Ok(())
     }
 
     pub fn stroke_rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> Result<(), CanvasError> {

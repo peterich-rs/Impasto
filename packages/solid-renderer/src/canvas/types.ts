@@ -98,6 +98,12 @@ export interface CanvasRenderingContext2D extends CanvasPath {
   save(): void;
   restore(): void;
   beginPath(): void;
+  /** Appends one new subpath from x/y pairs. */
+  polyline(points: Float64Array): void;
+  /** Appends one subpath per x0/y0/x1/y1 group. */
+  lineSegments(points: Float64Array): void;
+  /** Fills x/y/width/height rectangles in order with the current paint. */
+  fillRects(rects: Float64Array): void;
   translate(x: number, y: number): void;
   rotate(radians: number): void;
   scale(x: number, y: number): void;

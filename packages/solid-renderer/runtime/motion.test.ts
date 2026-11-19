@@ -24,4 +24,14 @@ assert.equal(settled, false);
 flushMotion();
 assert.equal(settled, true);
 
+const cancel = spring({
+  id: 3,
+  prop: "opacity",
+  from: 255,
+  to: 0,
+  onDone: () => assert.fail("cancelled motion completed"),
+});
+cancel();
+flushMotion();
+
 console.log("motion.test.ts ok");

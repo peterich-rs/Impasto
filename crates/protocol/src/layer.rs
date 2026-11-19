@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::draw_list::{BlendMode, Command, DrawList};
+use crate::draw_list::{BlendMode, Command, image_requirements};
 
 /// Identity of one picture. Child pictures use a boundary node id.
 /// A node's own commands use a different id so the two do not share a slot.
@@ -40,11 +40,11 @@ impl LayerTree {
     /// Image sources that will be drawn into some picture, including ones a
     /// viewport clip would drop from a flattened list.
     pub fn image_requirements(&self) -> Vec<(Arc<str>, bool)> {
-        let mut commands = Vec::new();
-        for picture in &self.pictures {
-            commands.extend(picture.commands.iter().cloned());
-        }
-        DrawList { commands }.image_requirements()
+        image_requirements(
+            self.pictures
+                .iter()
+                .flat_map(|picture| picture.commands.iter()),
+        )
     }
 }
 

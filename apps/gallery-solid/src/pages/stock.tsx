@@ -1,22 +1,39 @@
 import { For, Show, createMemo, createSignal, createTrackedEffect, onCleanup } from "solid-js";
 import { onFrame, requestFrame } from "@impasto/solid-renderer";
-import { Canvas, Column, Row, ScrollArea, View } from "@impasto/solid-ui";
+import { Canvas, Column, Row, ScrollArea, View, useTheme } from "@impasto/solid-ui";
 import type { Router } from "@impasto/solid-router";
 import { loc } from "../copy.ts";
 import { fmtPrice, fmtSigned } from "../format.ts";
-import { book, marketOpen, minute, sectorOf } from "../engine/analytics.ts";
+import { marketOpen, minute, sectorOf } from "../engine/analytics.ts";
 import type { QuoteEngine } from "../engine/engine.ts";
-import type { Quote, OrderSide, Tick } from "../engine/types.ts";
+import { stockSnapshot, type StockSnapshot } from "../engine/stock-snapshot.ts";
+import type { OrderSide } from "../engine/types.ts";
 import { marketRunning, useMarketPulse, useQuotes } from "../state/quotes-provider.tsx";
 import { inWatchlist, toggleWatch } from "../state/watchlist.ts";
 import { Flow, historicalRange, Ranges, Tape } from "../widgets/stocks/analysis.tsx";
 import { dot, StockChart, stroke } from "../widgets/stocks/chart.tsx";
 import { Depth, OrderBook } from "../widgets/stocks/order-book.tsx";
+import { trackStockSections } from "../widgets/stocks/section-visibility.ts";
 import { Action, change, ClockButton, clock, code, colors, compact, filling, Label, Rule, Section, sectorLabel, sign, tone } from "../widgets/stocks/ui.tsx";
 import { TicketOverlay, type TicketSeed } from "./order.tsx";
 
-function QuoteHeader(props: { engine: QuoteEngine; quote: Quote; wide: boolean }) {
-  const quote = () => props.quote;
+declare const __STOCK_REPLAY_FREEZE__: "" | "book" | "chart";
+const replayFreeze = typeof __STOCK_REPLAY_FREEZE__ === "undefined" ? "" : __STOCK_REPLAY_FREEZE__;
+
+function QuoteHeader(props: { engine: QuoteEngine; data: StockSnapshot; time: string; wide: boolean }) {
+  const theme = useTheme();
+  const quote = () => props.data.quote;
+  const price = createMemo(() => fmtPrice(quote().last));
+  const priceDigits = createMemo(() => price().length);
+  const priceSize = () => props.wide ? 38 : 36;
+  const priceStyle = createMemo(() => {
+    const em = priceSize() * theme().textScale;
+    return {
+      width: Math.ceil((priceDigits() * 0.58 + 0.2) * em),
+      height: Math.ceil(em * 1.2),
+      flexShrink: 1,
+    };
+  });
   const instrument = () => props.engine.ins(quote().symbol);
   const color = () => tone(quote().last - quote().prevClose);
   const stats = [0, 1, 2, 3, 4, 5, 6, 7];
@@ -24,8 +41,8 @@ function QuoteHeader(props: { engine: QuoteEngine; quote: Quote; wide: boolean }
     loc("成交量", "Volume"), loc("成交额", "Turnover"), loc("120 日高", "120d high"), loc("120 日低", "120d low")];
   const values = createMemo(() => {
     const q = quote();
-    const { turnover } = props.engine.analytics(q.symbol);
-    const [low, high] = historicalRange(props.engine.bars(q.symbol), q, 120);
+    const { turnover, history } = props.data;
+    const [low, high] = historicalRange(history, q, 120);
     return [fmtPrice(q.open), fmtPrice(q.prevClose), fmtPrice(q.volume ? turnover / q.volume : q.open),
       `${((q.high - q.low) / q.prevClose * 100).toFixed(2)}%`, compact(q.volume), compact(turnover), fmtPrice(high), fmtPrice(low)];
   });
@@ -40,11 +57,11 @@ function QuoteHeader(props: { engine: QuoteEngine; quote: Quote; wide: boolean }
       <Label size={15} color={colors.dim} style={{ flex: 1 }}>{instrument().name}</Label>
       <Label size={12} color={colors.faint}>{sectorLabel(sectorOf(instrument()))}</Label>
       <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: marketRunning() ? colors.lime : colors.faint }} />
-      <Label size={11} color={colors.dim}>{clock(marketOpen * minute + props.engine.simNow() - quote().dayStart)}</Label>
+      <Label size={11} color={colors.dim}>{props.time}</Label>
     </Row>
     <Row style={{ gap: 8, alignItems: "center", justifyContent: "space-between" }}>
       <Row style={{ gap: 6, alignItems: "center", minWidth: 0, flexShrink: 1 }}>
-        <Label size={props.wide ? 38 : 36} weight={600} color={color()}>{fmtPrice(quote().last)}</Label>
+        <Label size={priceSize()} style={priceStyle()} weight={600} color={color()}>{price()}</Label>
         <Label size={19} color={color()}>{quote().last > quote().prevClose ? "↑" : quote().last < quote().prevClose ? "↓" : "—"}</Label>
       </Row>
       <Column style={{ gap: 3, alignItems: "end" }}>
@@ -54,7 +71,7 @@ function QuoteHeader(props: { engine: QuoteEngine; quote: Quote; wide: boolean }
     </Row>
     <Row style={{ alignItems: "center", gap: 10, height: 13 }}>
       <Label size={11} color={colors.dim}>{`L ${fmtPrice(quote().low)}`}</Label>
-      <Canvas style={{ height: 13, flex: 1, minWidth: 12 }} draw={(ctx, { width }) => {
+      <Canvas deferWhenOffscreen style={{ height: 13, flex: 1, minWidth: 12 }} draw={(ctx, { width }) => {
         const q = quote();
         const share = (value: number) => q.high === q.low ? 0.5 : Math.max(0, Math.min(1, (value - q.low) / (q.high - q.low)));
         const x = (value: number) => 4 + Math.max(0, width - 8) * share(value);
@@ -106,58 +123,78 @@ export function StockView(props: { engine: QuoteEngine; symbol: string; wide?: b
     setTicket(null);
   });
   const revision = useMarketPulse(() => ticket() === null && !props.transitioning);
-  const quote = createMemo(() => { revision(); return { ...props.engine.quote(props.symbol) }; });
-  const trades = createMemo(() => {
-    quote();
-    const ring = props.engine.ring(props.symbol);
-    const ticks: Tick[] = [];
-    for (let index = ring.length - 1; index >= Math.max(0, ring.length - 14); index--) {
-      const tick = ring.at(index);
-      if (tick.side) ticks.push(tick);
-    }
-    return ticks;
+  const snapshot = createMemo((previous?: StockSnapshot) => {
+    revision();
+    return stockSnapshot(props.engine, props.symbol, previous);
   });
-  const depth = createMemo(() => book(quote(), trades()[0]?.side, props.engine.ins(props.symbol).lot));
-  const flow = createMemo(() => {
-    quote();
-    const { buy, sell } = props.engine.analytics(props.symbol);
-    return { buy: buy.slice(), sell: sell.slice() };
+  const quote = () => snapshot().quote;
+  const time = createMemo(() => {
+    revision();
+    return clock(marketOpen * minute + props.engine.simNow() - quote().dayStart);
   });
+  const tapeCount = createMemo(() => snapshot().trades.length);
+  const main = trackStockSections();
+  const side = trackStockSections();
+  const chartSection = main.section();
+  const rangeSection = main.section();
+  const depthSection = main.section();
+  const flowSection = main.section();
+  const bookMain = main.section();
+  const tapeMain = main.section();
+  const bookSide = side.section();
+  const tapeSide = side.section();
+  const nearViewport = (visible: () => boolean, frozen = false) => createMemo((previous?: StockSnapshot) =>
+    previous?.quote.symbol === props.symbol && (frozen || !visible()) ? previous : snapshot());
+  const chart = nearViewport(chartSection.visible, replayFreeze === "chart");
+  const range = nearViewport(rangeSection.visible);
+  const depth = nearViewport(depthSection.visible);
+  const flow = nearViewport(flowSection.visible);
+  const orderBook = nearViewport(() => props.split ? bookSide.visible() : bookMain.visible(), replayFreeze === "book");
+  const tape = nearViewport(() => props.split ? tapeSide.visible() : tapeMain.visible());
   const order = (side: OrderSide, price = quote().last) => {
     if (props.engine.ins(props.symbol).index) return;
     setTicket({ side, price });
     setOpen(true);
   };
-  const activity = () => <>
+  const activity = (bookSection: typeof bookMain, tapeSection: typeof tapeMain) => <>
     <Show when={mounted("book")}>
-      <OrderBook book={depth()} count={levels()} previous={quote().prevClose} onToggle={() => setLevels((value) => value === 5 ? 10 : 5)} onLevel={order} />
-      <Rule />
+      <Column ref={bookSection.ref}>
+        <OrderBook book={orderBook().book} count={levels()} previous={orderBook().quote.prevClose} onToggle={() => setLevels((value) => value === 5 ? 10 : 5)} onLevel={order} />
+        <Rule />
+      </Column>
     </Show>
-    <Show when={mounted("tape")}><Tape ticks={trades()} dayStart={quote().dayStart} /><Rule /></Show>
+    <Show when={mounted("tape")}>
+      <Column ref={tapeSection.ref}>
+        <Tape ticks={tape().trades} dayStart={tape().quote.dayStart} rows={tapeCount()} />
+        <Rule />
+      </Column>
+    </Show>
   </>;
-  const ranges = () => <><Ranges bars={props.engine.bars(props.symbol)} quote={quote()} /><Rule /></>;
+  const ranges = () => <Column ref={rangeSection.ref}><Ranges bars={range().history} quote={range().quote} /><Rule /></Column>;
   const tradeable = () => !props.engine.ins(props.symbol).index;
   return <Column style={[filling, { backgroundColor: colors.bg }]}>
     <Row style={filling}>
-      <ScrollArea style={filling}>
+      <ScrollArea style={filling} viewportRef={main.viewportRef}>
         <Show when={mounted("quote")}>
-          <QuoteHeader engine={props.engine} quote={quote()} wide={!!props.wide} />
+          <QuoteHeader engine={props.engine} data={snapshot()} time={time()} wide={!!props.wide} />
           <Rule />
         </Show>
         <Show when={mounted("chart")}>
-          <StockChart engine={props.engine} symbol={props.symbol} revision={revision()} height={props.split ? 320 : props.wide ? 270 : 204} />
-          <Rule />
+          <Column ref={chartSection.ref}>
+            <StockChart snapshot={chart()} height={props.split ? 320 : props.wide ? 270 : 204} />
+            <Rule />
+          </Column>
         </Show>
         <Show when={props.split && mounted("ranges")}>{ranges()}</Show>
-        <Show when={!props.split}>{activity()}</Show>
-        <Show when={mounted("depth")}><Depth book={depth()} /><Rule /></Show>
-        <Show when={mounted("flow")}><Flow data={flow()} /><Rule /></Show>
+        <Show when={!props.split}>{activity(bookMain, tapeMain)}</Show>
+        <Show when={mounted("depth")}><Column ref={depthSection.ref}><Depth book={depth().book} /><Rule /></Column></Show>
+        <Show when={mounted("flow")}><Column ref={flowSection.ref}><Flow data={flow().flow} /><Rule /></Column></Show>
         <Show when={!props.split && mounted("ranges")}>{ranges()}</Show>
       </ScrollArea>
       <Show when={props.split}>
         <Rule vertical />
-        <ScrollArea style={{ width: "39%", height: "100%", flex: 0, flexShrink: 0, minWidth: 290 }}>
-          {activity()}
+        <ScrollArea style={{ width: "39%", height: "100%", flex: 0, flexShrink: 0, minWidth: 290 }} viewportRef={side.viewportRef}>
+          {activity(bookSide, tapeSide)}
         </ScrollArea>
       </Show>
     </Row>

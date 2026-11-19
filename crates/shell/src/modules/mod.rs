@@ -117,6 +117,7 @@ mod tests {
         let launch = session::shared(None);
         let maps = Module {
             name: "Maps",
+            exports: Default::default(),
             specifier: "@impasto/maps",
             methods: vec![Method::sync("ping", |_| {
                 Ok(PluginValue::Str("pong".into()))

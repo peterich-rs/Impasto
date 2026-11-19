@@ -511,6 +511,11 @@ impl Typography {
         std::mem::take(&mut self.stats)
     }
 
+    /// Reads the current counters without resetting the engine's frame stats.
+    pub fn shape_stats(&self) -> crate::ShapeStats {
+        self.stats
+    }
+
     /// Marks a measured paragraph as used by this layout. Does not build one.
     pub fn touch_measure(
         &mut self,
@@ -972,6 +977,29 @@ impl Typography {
         let width = unsafe { ffi::ImpellerParagraphGetMinIntrinsicWidth(shaped.paragraph) };
         // SAFETY: this function owns the only retain from `build_paragraph`.
         unsafe { ffi::ImpellerParagraphRelease(shaped.paragraph) };
+        if width.is_finite() && width >= 0.0 {
+            Ok(width)
+        } else {
+            Err(Status::BadScene)
+        }
+    }
+
+    /// Reads the intrinsic width from a paragraph already measured with this key.
+    pub fn measured_min_intrinsic_width(
+        &mut self,
+        query: crate::ParagraphQuery<'_>,
+        spans: &[TextSpan],
+    ) -> Result<f32, Status> {
+        let paragraph = self.cached_paragraph(
+            query.utf8,
+            query.font_size,
+            query.max_width,
+            query.color,
+            query.style,
+            spans,
+        )?;
+        // SAFETY: the measured store owns a live paragraph until the borrow ends.
+        let width = unsafe { ffi::ImpellerParagraphGetMinIntrinsicWidth(paragraph) };
         if width.is_finite() && width >= 0.0 {
             Ok(width)
         } else {

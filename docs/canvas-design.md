@@ -2,7 +2,7 @@
 
 ## 破坏性变更与迁移
 
-本文描述已落地的屏幕 Canvas。离屏画布、像素读回、pattern、阴影、滤镜、strokeText、路径布尔运算，以及 copy / source-in / destination-in 仍留待后续。公共组件采用 `Canvas` 与 `draw(context, size)`，统一承载图表、自绘控件和二维图形。
+本文描述已落地的屏幕 Canvas。离屏画布、像素读回、pattern、阴影、滤镜、strokeText、路径布尔运算，以及 copy / source-in / destination-in 仍留待后续。公共组件采用 `Canvas` 与 `draw(context, size)`，统一承载图表、自绘控件和二维图形。挂载时设置 `deferWhenOffscreen` 可在内容盒进入视口后绘制最新数据，视口外期间的绘制和错误通知可以延后。`polyline`、`lineSegments` 和 `fillRects` 接收 `Float64Array`，分别按坐标对、线段和矩形分组，并沿用当前路径或画笔。
 
 拟新增 `protocol::Command::Canvas`；文字阶段给 `protocol::TextStyle` 增加具有默认值的 `FontSlant`。两者分别影响枚举穷尽匹配和完整结构体字面量。迁移步骤：
 

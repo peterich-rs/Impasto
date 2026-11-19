@@ -113,6 +113,8 @@ fn kind_name(kind: &LayerKind) -> &'static str {
 fn timing_json(out: &mut String, timing: &FrameTiming) {
     out.push('{');
     field_f64(out, "sessionMs", timing.session_ms, true);
+    field_f64(out, "workMs", timing.work_ms, false);
+    field_f64(out, "budgetMs", timing.interval_ms, false);
     field_f64(out, "gestureMs", timing.gesture_ms, false);
     field_f64(out, "scriptMs", timing.script_ms, false);
     field_f64(out, "layoutMs", timing.layout_ms, false);
@@ -239,6 +241,7 @@ mod tests {
             number,
             vsync_ms: 0.0,
             target_ms: 0.0,
+            work_ms: 1.55,
             session_ms: 1.25,
             gesture_ms: 0.0,
             script_ms: 0.5,

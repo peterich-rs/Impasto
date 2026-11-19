@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use session::{Method, Module, PluginValue};
+use session::{Method, Module, ModuleExports, PluginValue};
 
 use super::str_arg;
 
@@ -13,18 +13,24 @@ pub fn module(host: Arc<dyn ClipboardHost>) -> Module {
     Module {
         name: "Clipboard",
         specifier: "@impasto/clipboard",
+        exports: ModuleExports {
+            object: true,
+            ..Default::default()
+        },
         methods: vec![
             Method::sync("getString", {
                 let host = Arc::clone(&host);
                 move |_| Ok(PluginValue::Str(host.read_clipboard()))
-            }),
+            })
+            .with_types("", "string"),
             Method::sync("setString", {
                 let host = Arc::clone(&host);
                 move |args| {
                     host.write_clipboard(&str_arg(args));
                     Ok(PluginValue::Null)
                 }
-            }),
+            })
+            .with_types("text: string", "void"),
         ],
     }
 }

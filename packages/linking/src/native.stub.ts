@@ -1,3 +1,5 @@
+import type { Linking as LinkingApi } from "./native.js";
+
 export const state: {
   initialUrl: string | null;
   urlListener: ((event: { url: string }) => void) | null;
@@ -14,20 +16,21 @@ export function openURL(_url: string): Promise<void> {
   return Promise.resolve();
 }
 
-export function addEventListener(
-  type: string,
-  listener: (event: { url: string }) => void,
-): void {
+export const addEventListener: LinkingApi["addEventListener"] = (type, listener) => {
   if (type === "url") {
     state.urlListener = listener;
   }
-}
+};
 
-export function removeEventListener(
-  type: string,
-  listener: (event: { url: string }) => void,
-): void {
+export const removeEventListener: LinkingApi["removeEventListener"] = (type, listener) => {
   if (type === "url" && state.urlListener === listener) {
     state.urlListener = null;
   }
-}
+};
+
+export const Linking: LinkingApi = Object.freeze({
+  getInitialURL,
+  openURL,
+  addEventListener,
+  removeEventListener,
+});

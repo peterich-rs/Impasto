@@ -50,7 +50,7 @@ solid-app:
     pnpm -C "{{root}}" --filter @impasto/gallery-solid run test:node
     pnpm -C "{{root}}" --filter @impasto/gallery-solid run test:esm
 
-# Build the gallery ESM bundle from the TSX sources when sources changed. The
+# Build the gallery ESM bundle when its sources or the lockfile change. The
 # bundle is not committed; quickjs tests fail with instructions when it is
 # absent (`just test` builds it first).
 gallery-dist:
@@ -58,7 +58,7 @@ gallery-dist:
     set -euo pipefail
     src="{{root}}/apps/gallery-solid"
     out="$src/dist/quotes.js"
-    if [[ -f "$out" ]]; then
+    if [[ -f "$out" && ! "{{root}}/pnpm-lock.yaml" -nt "$out" ]]; then
       newer=$(find "{{root}}/packages" "{{root}}/tools" "$src" -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.mjs' \) \
         -not -path '*/node_modules/*' -not -path '*/dist/*' -not -name '*.test.ts' \
         -newer "$out" -print -quit)

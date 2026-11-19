@@ -27,6 +27,8 @@ export interface CanvasController {
 
 export type CanvasProps = Omit<ViewProps, "children"> & {
   children?: never;
+  /** When enabled at mount, draw with the latest dependencies on re-entering the viewport. */
+  deferWhenOffscreen?: boolean;
   draw: (context: CanvasRenderingContext2D, size: CanvasSize) => unknown;
   controller?: (controller: CanvasController | null) => void;
   onDrawError?: (error: CanvasError) => void;

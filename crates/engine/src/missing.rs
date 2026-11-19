@@ -90,7 +90,16 @@ impl Engine {
     }
 
     #[cfg(target_os = "android")]
-    pub fn draw_vulkan(&mut self, _swapchain: &VulkanSwapchain) -> Result<(), Status> {
+    pub fn draw_vulkan(&mut self, swapchain: &VulkanSwapchain) -> Result<(), Status> {
+        self.draw_vulkan_with_trace(swapchain, |_| ())
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn draw_vulkan_with_trace<G>(
+        &mut self,
+        _swapchain: &VulkanSwapchain,
+        _section: impl FnMut(crate::VulkanPhase) -> G,
+    ) -> Result<(), Status> {
         Err(Status::NotLinked)
     }
 
@@ -158,6 +167,14 @@ impl Typography {
         _utf8: &str,
         _font_size: f32,
         _text_style: &protocol::TextStyle,
+        _spans: &[protocol::TextSpan],
+    ) -> Result<f32, Status> {
+        Err(Status::NotLinked)
+    }
+
+    pub fn measured_min_intrinsic_width(
+        &mut self,
+        _query: crate::ParagraphQuery<'_>,
         _spans: &[protocol::TextSpan],
     ) -> Result<f32, Status> {
         Err(Status::NotLinked)
@@ -244,6 +261,10 @@ impl Typography {
     }
 
     pub fn take_shape_stats(&mut self) -> crate::ShapeStats {
+        crate::ShapeStats::default()
+    }
+
+    pub fn shape_stats(&self) -> crate::ShapeStats {
         crate::ShapeStats::default()
     }
 

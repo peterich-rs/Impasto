@@ -1,5 +1,5 @@
 // Control flow stays in JS. It calls the native memos and effects; it does not
-// schedule anything itself. The shapes match solid-js 2.0.0-rc.17.
+// schedule anything itself. Solid 2.0.0 is the reference for these components.
 
 import { children, createMemo, createRoot, createSignal, getOwner, onCleanup, runWithOwner, untrack } from "./native.ts";
 import type { JSX } from "./types.ts";

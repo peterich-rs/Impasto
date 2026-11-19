@@ -33,7 +33,7 @@ export type Router = {
   pop: () => boolean;
   popTo: (path: string) => boolean;
   reset: (path: string) => boolean;
-  complete: (key: string) => void;
+  complete: (entry: RouteEntry) => void;
 };
 export const PageActiveContext = createContext<Accessor<boolean>>(() => true);
 export const PageKeepContext = createContext<Accessor<boolean>>(() => false);
@@ -100,125 +100,62 @@ export function createRouter(
         ]
       : [],
   );
-  function push(path: string): boolean {
+  function navigate(path: string, previousPhase: "cover" | "exit"): boolean {
     const match = resolved(defs, path);
     if (!match) {
       return false;
     }
-    const next = {
-      ...match,
-      key: nextKey(),
-      phase: "enter" as const,
-    };
+    let accepted = false;
     setEntries((list) => {
-      const top = list[list.length - 1];
-      if (!top) {
-        return [
-          {
-            ...next,
-            phase: "live",
-          },
-        ];
+      // A superseded exit can be unmounted. It is already out of navigation history.
+      const history = list.filter((entry) => entry.phase !== "exit");
+      const top = history.pop();
+      if (previousPhase === "cover" && top?.phase === "enter" && top.path === match.path) {
+        return list;
       }
-      return [
-        ...list.slice(0, -1),
-        {
-          ...top,
-          phase: "cover",
-        },
-        next,
-      ];
+      accepted = true;
+      if (top) history.push({ ...top, phase: previousPhase });
+      history.push({ ...match, key: nextKey(), phase: top ? "enter" : "live" });
+      return history;
     });
-    return true;
-  }
-  function replace(path: string): boolean {
-    const match = resolved(defs, path);
-    if (!match) {
-      return false;
-    }
-    const next = {
-      ...match,
-      key: nextKey(),
-      phase: "enter" as const,
-    };
-    setEntries((list) => {
-      const top = list[list.length - 1];
-      if (!top) {
-        return [
-          {
-            ...next,
-            phase: "live",
-          },
-        ];
-      }
-      return [
-        ...list.slice(0, -1),
-        {
-          ...top,
-          phase: "exit",
-        },
-        next,
-      ];
-    });
-    return true;
+    return accepted;
   }
   function pop(): boolean {
-    const list = entries();
-    if (list.length <= 1) {
-      return false;
-    }
-    const top = list[list.length - 1];
-    if (!top) {
-      return false;
-    }
-    if (top.phase === "exit") {
-      return true;
-    }
-    setEntries((current) => {
-      if (current.length <= 1) {
-        return current;
+    let handled = false;
+    setEntries((list) => {
+      if (list.at(-1)?.phase === "exit") {
+        handled = true;
+        return list;
       }
-      return current.map((entry, index) => {
-        if (index === current.length - 1) {
-          return {
-            ...entry,
-            phase: "exit" as const,
-          };
-        }
-        if (entry.phase === "cover") {
-          return {
-            ...entry,
-            phase: "live" as const,
-          };
-        }
-        return entry;
-      });
+      const history = list.filter((entry) => entry.phase !== "exit");
+      const top = history.pop();
+      const revealed = history.at(-1);
+      if (!top || !revealed) return list;
+      handled = true;
+      if (revealed.phase !== "live") {
+        history[history.length - 1] = { ...revealed, phase: "live" };
+      }
+      history.push({ ...top, phase: "exit" });
+      return history;
     });
-    return true;
+    return handled;
   }
   function popTo(path: string): boolean {
     const pathname = routePath(path);
     let found = false;
     setEntries((list) => {
-      let index = -1;
-      for (let cursor = list.length - 1; cursor >= 0; cursor -= 1) {
-        if (list[cursor]?.path === pathname && list[cursor]?.phase !== "exit") {
-          index = cursor;
-          break;
-        }
-      }
-      if (index < 0 || index === list.length - 1) {
+      const history = list.filter((entry) => entry.phase !== "exit");
+      let index = history.length - 1;
+      while (index >= 0 && history[index]?.path !== pathname) index -= 1;
+      if (index < 0 || index === history.length - 1) {
         return list;
       }
       found = true;
-      return list.map((entry, cursor) =>
-        cursor > index
-          ? {
-              ...entry,
-              phase: "exit" as const,
-            }
-          : entry,
-      );
+      return history.map((entry, cursor) => {
+        if (cursor > index) return { ...entry, phase: "exit" };
+        if (cursor === index && entry.phase !== "live") return { ...entry, phase: "live" };
+        return entry;
+      });
     });
     return found;
   }
@@ -236,32 +173,23 @@ export function createRouter(
     ]);
     return true;
   }
-  function complete(key: string): void {
-    setEntries((list) =>
-      list.flatMap((entry) => {
-        if (entry.key !== key) {
-          return [entry];
-        }
-        if (entry.phase === "exit") {
-          return [];
-        }
-        if (entry.phase === "enter" || entry.phase === "cover") {
-          return [
-            {
-              ...entry,
-              phase: "live" as const,
-            },
-          ];
-        }
-        return [entry];
-      }),
-    );
+  function complete(entry: RouteEntry): void {
+    if (entry.phase === "live") return;
+    setEntries((list) => {
+      // An entry's key survives a phase change. Its object identifies the motion that started.
+      const index = list.indexOf(entry);
+      if (index < 0) return list;
+      const next = list.slice();
+      if (entry.phase === "exit") next.splice(index, 1);
+      else next[index] = { ...entry, phase: "live" };
+      return next;
+    });
   }
   const router: Router = {
     stack: entries,
     depth: () => entries().length,
-    push,
-    replace,
+    push: (path) => navigate(path, "cover"),
+    replace: (path) => navigate(path, "exit"),
     pop,
     popTo,
     reset,
@@ -279,7 +207,7 @@ export function createRouter(
     .then(({ Linking }) => {
       const initial = Linking.getInitialURL();
       if (initial) reset(initial);
-      Linking.addEventListener("url", (event) => push(event.url));
+      Linking.addEventListener("url", (event) => router.push(event.url));
     })
     .catch(() => {
       /* unregistered: same as today's get() == null */

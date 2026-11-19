@@ -12,6 +12,11 @@ const options = packOptions({
   entryPoints: ["src/quotes.tsx"],
   outfile: "dist/quotes.js",
 });
+const freeze = process.argv.find((arg) => arg.startsWith("--freeze-stock="))?.slice("--freeze-stock=".length) ?? "";
+if (freeze !== "" && freeze !== "book" && freeze !== "chart") {
+  throw new Error("--freeze-stock expects book or chart");
+}
+options.define.__STOCK_REPLAY_FREEZE__ = JSON.stringify(freeze);
 
 if (process.argv.includes("--watch")) {
   const ctx = await esbuild.context(options);

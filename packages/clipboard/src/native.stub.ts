@@ -1,3 +1,5 @@
+import type { Clipboard as ClipboardApi } from "./native.js";
+
 let text = "";
 
 export function getString(): string {
@@ -8,12 +10,7 @@ export function setString(value: string): void {
   text = value;
 }
 
-export function addEventListener(
-  _type: string,
-  _listener: (e: unknown) => void,
-): void {}
-
-export function removeEventListener(
-  _type: string,
-  _listener: (e: unknown) => void,
-): void {}
+export const Clipboard: ClipboardApi = Object.freeze({
+  getString,
+  setString,
+});

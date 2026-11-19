@@ -12,7 +12,7 @@ use super::node::{
     ImagePayload, Kind, MAX_GENERATION, Node, NodeFlags, Payload, Role, Slot, TextPayload,
     TransformGeom,
 };
-use super::{Alignment, Discarded, Gesture, NodeId, TrackSize, Tree};
+use super::{Alignment, Discarded, Gesture, NodeId, TextProbeTrace, TrackSize, Tree};
 use crate::{Error, Shaper};
 
 impl Tree {
@@ -20,7 +20,7 @@ impl Tree {
         Self {
             slots: Vec::new(),
             free: Vec::new(),
-            taffy: TaffyTree::new(),
+            taffy: super::LayoutStore::default(),
             shaper: Box::new(shaper),
             measure_open: false,
             root: None,
@@ -32,39 +32,48 @@ impl Tree {
             motion_ends: Vec::new(),
             clock_ms: 0.0,
             applying_motion: false,
-            dirty_boundaries: Vec::new(),
             pictures: HashMap::new(),
             runs: HashMap::new(),
             run: super::record::RunState::default(),
             finished_owners: Vec::new(),
             subtree_layers: HashMap::new(),
-            subtree_owners: HashMap::new(),
             layer_stack: Vec::new(),
             layer_tail: Vec::new(),
             layer_top: None,
             picture_writes: 0,
+            layer_record_visits: 0,
             layer_epoch: 0,
+            canvas_geometry_epoch: 0,
             layers: crate::layer::LayerTree::empty(),
             semantics_cache: HashMap::new(),
             image_counts: HashMap::new(),
             image_generation: 0,
             scroll_notices: Vec::new(),
+            scroll_paint_updates: 0,
             needs_layout: false,
             needs_paint: false,
             layout_passes: 0,
             pending_text: Vec::new(),
+            changed_text: Vec::new(),
             sync_visited: 0,
             sync_synced: 0,
             sync_ms: 0.0,
             taffy_ms: 0.0,
             layout_work_ms: 0.0,
             layout_entries: 0,
+            root_layouts: 0,
+            root_layout_trigger: None,
+            local_layouts: 0,
+            same_text_layouts: 0,
             layout_cause: super::LayoutCause::None,
             text_reused: Cell::new(0),
             text_shaped: Cell::new(0),
+            trace_text_probes: false,
+            text_probes: TextProbeTrace::default(),
             semantics_layout_seen: 0,
             scroll_semantics: Vec::new(),
             semantics_full: false,
+            semantics_enabled: true,
             sweep_stack: Vec::new(),
             sweep_children: Vec::new(),
             text_scale: 1.0,
@@ -274,16 +283,9 @@ impl Tree {
         let utf8 = utf8.into();
         let style = content_box();
         let (index, generation) = self.reserve();
-        let taffy = match self
+        let taffy = self
             .taffy
-            .new_leaf_with_context(style.clone(), index as usize)
-        {
-            Ok(id) => id,
-            Err(error) => {
-                self.retire(index);
-                return Err(error.into());
-            }
-        };
+            .new_node(style.clone(), NodeId { index, generation }, true);
         let id = self.occupy(
             index,
             generation,
@@ -306,16 +308,9 @@ impl Tree {
     ) -> Result<NodeId, Error> {
         let style = content_box();
         let (index, generation) = self.reserve();
-        let taffy = match self
+        let taffy = self
             .taffy
-            .new_leaf_with_context(style.clone(), index as usize)
-        {
-            Ok(id) => id,
-            Err(error) => {
-                self.retire(index);
-                return Err(error.into());
-            }
-        };
+            .new_node(style.clone(), NodeId { index, generation }, true);
         let source = Arc::<str>::from(source.into());
         let id = self.occupy(
             index,
@@ -412,6 +407,7 @@ impl Tree {
             InsertPlan::Place { before } => before,
         };
 
+        let previous_root = self.root;
         if self.node(parent)?.taffy.is_none() {
             self.revive(parent)?;
         }
@@ -434,12 +430,16 @@ impl Tree {
         self.taffy
             .insert_child_at_index(parent_taffy, index, child_taffy)?;
         self.attach_links(parent, child, before)?;
+        self.invalidate_subtree_layers(parent);
         if let Ok(node) = self.node_mut(child) {
             node.flags.insert(NodeFlags::LAYOUT_DIRTY);
         }
         self.note_text_tree(child);
         self.mark_layout_from(parent);
         self.promote(parent);
+        if previous_root != self.root {
+            self.laid_out = false;
+        }
         self.mark_structure();
         self.pending_discard.retain(|id| *id != child);
         Ok(())
@@ -559,6 +559,7 @@ impl Tree {
             self.motions.retain(|motion| motion.node != *id);
         }
         if was_root {
+            self.laid_out = false;
             self.mark_structure();
         }
         let mut gestures = gestures;
@@ -625,13 +626,9 @@ impl Tree {
 
     pub(super) fn container(&mut self, kind: Kind, style: Style) -> Result<NodeId, Error> {
         let (index, generation) = self.reserve();
-        let taffy = match self.taffy.new_leaf(style.clone()) {
-            Ok(id) => id,
-            Err(error) => {
-                self.retire(index);
-                return Err(error.into());
-            }
-        };
+        let taffy = self
+            .taffy
+            .new_node(style.clone(), NodeId { index, generation }, false);
         Ok(self.occupy(
             index,
             generation,
@@ -703,6 +700,7 @@ impl Tree {
             let id = NodeId { index, generation };
             self.pictures.remove(&id);
             self.runs.remove(&id);
+            self.subtree_layers.remove(&id);
         }
         self.arena.clear_index(index);
         if self.focused.is_some_and(|focused| focused.index == index) {
@@ -787,26 +785,26 @@ impl Tree {
     /// Siblings with a non-zero `z_index`, in paint order. `hit` reverses that
     /// order. `None` means every sibling is zero and the linked list is enough.
     pub(super) fn ordered_children(&self, id: NodeId, hit: bool) -> Option<Vec<NodeId>> {
-        let mut child = self.get(id).and_then(|node| node.first_child);
+        let first = self.get(id).and_then(|node| node.first_child);
+        let mut cursor = first;
+        loop {
+            let current = self.get(cursor?)?;
+            if current.z_index != 0 {
+                break;
+            }
+            cursor = current.next;
+        }
+        let mut child = first;
         let mut rows = Vec::new();
-        let mut any = false;
-        let mut order = 0i32;
         while let Some(current) = child {
             let Some(node) = self.get(current) else {
                 break;
             };
-            if node.z_index != 0 {
-                any = true;
-            }
-            rows.push((node.z_index, order, current));
-            order += 1;
+            rows.push((node.z_index, current));
             child = node.next;
         }
-        if !any {
-            return None;
-        }
-        rows.sort_by_key(|(z, order, _)| (*z, *order));
-        let mut ids: Vec<NodeId> = rows.into_iter().map(|(_, _, id)| id).collect();
+        rows.sort_by_key(|(z, _)| *z);
+        let mut ids: Vec<NodeId> = rows.into_iter().map(|(_, id)| id).collect();
         if hit {
             ids.reverse();
         }
@@ -839,7 +837,9 @@ impl Tree {
         if let (Some(parent_taffy), Some(child_taffy)) = (parent_taffy, child_taffy) {
             self.taffy.remove_child(parent_taffy, child_taffy)?;
         }
-        self.detach_links(child)
+        self.detach_links(child)?;
+        self.invalidate_subtree_layers(parent);
+        Ok(())
     }
 
     pub(super) fn child_count(&self, id: NodeId) -> Result<usize, Error> {
@@ -946,12 +946,9 @@ impl Tree {
         }
         let style = self.node(id)?.style.clone();
         let kind = self.node(id)?.kind;
-        let index = id.index as usize;
-        let taffy_id = if matches!(kind, Kind::Text | Kind::Image) {
-            self.taffy.new_leaf_with_context(style, index)?
-        } else {
-            self.taffy.new_leaf(style)?
-        };
+        let taffy_id = self
+            .taffy
+            .new_node(style, id, matches!(kind, Kind::Text | Kind::Image));
         if !children.is_empty() {
             let mut child_ids = Vec::with_capacity(children.len());
             for child in &children {
@@ -1003,7 +1000,6 @@ impl Tree {
     pub(super) fn mark_structure(&mut self) {
         self.note_layout(super::LayoutCause::Structure);
         self.mark_layout();
-        self.laid_out = false;
         if let Some(id) = self.arena.hovered.take() {
             self.arena.pending.push(Gesture::Leave(id));
         }

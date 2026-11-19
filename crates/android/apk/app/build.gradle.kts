@@ -28,6 +28,7 @@ val cargoGate = gradle.sharedServices.registerIfAbsent("impastoCargo", CargoGate
 }
 
 val repoRoot: File = rootProject.projectDir.resolve("../../..").canonicalFile
+val profileGallery = providers.gradleProperty("impastoProfile").orNull == "true"
 
 android {
     namespace = "dev.impasto.host"
@@ -53,6 +54,10 @@ android {
             isMinifyEnabled = false
             // Local install only. This is not a store key.
             signingConfig = signingConfigs.getByName("debug")
+            if (profileGallery) {
+                applicationIdSuffix = ".profile"
+                isProfileable = true
+            }
         }
     }
 

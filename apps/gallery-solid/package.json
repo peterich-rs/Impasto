@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "test": "node build.mjs && node --conditions=browser --experimental-strip-types --import ../../tools/register.mjs quotes.node.test.ts && node --conditions=browser --experimental-strip-types --import ../../tools/register.mjs quotes.binder.test.ts && node --conditions=browser --experimental-strip-types --import ../../tools/register.mjs quotes.engine.test.ts && node --conditions=browser --experimental-strip-types --import ../../tools/register.mjs quotes.esm.test.ts",
+    "test": "node build.mjs && node --conditions=browser --experimental-strip-types --import ../../tools/register.mjs quotes.node.test.ts && node --conditions=browser --experimental-strip-types --import ../../tools/register.mjs quotes.binder.test.ts && node --conditions=browser --experimental-strip-types --import ../../tools/register.mjs quotes.engine.test.ts && node --conditions=browser --experimental-strip-types --import ../../tools/register.mjs quotes.chart.test.ts && node --conditions=browser --experimental-strip-types --import ../../tools/register.mjs quotes.esm.test.ts",
     "test:node": "node --conditions=browser --experimental-strip-types --import ../../tools/register.mjs quotes.node.test.ts && node --conditions=browser --experimental-strip-types --import ../../tools/register.mjs quotes.binder.test.ts",
     "test:engine": "node --conditions=browser --experimental-strip-types --import ../../tools/register.mjs quotes.engine.test.ts",
     "test:esm": "node --conditions=browser --experimental-strip-types --import ../../tools/register.mjs quotes.esm.test.ts"

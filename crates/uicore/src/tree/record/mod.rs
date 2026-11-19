@@ -18,6 +18,13 @@ pub(super) struct SweepFrame {
     expanded: bool,
 }
 
+/// Properties of strict descendants that affect the owner's recording.
+#[derive(Clone, Copy, Default)]
+pub(super) struct SubtreeLayers {
+    pub(super) effects: bool,
+    pub(super) picture_owners: bool,
+}
+
 /// Axis-aligned clip in paint space. `None` means a transform ancestor made culling unsafe.
 #[derive(Clone, Copy)]
 pub(super) struct PaintClip {
@@ -68,6 +75,98 @@ impl FlatList<'_> {
 }
 
 impl Tree {
+    pub fn canvas_geometry_epoch(&self) -> u64 {
+        self.canvas_geometry_epoch
+    }
+
+    pub(super) fn canvas_geometry_changed(&mut self) {
+        self.canvas_geometry_epoch = self.canvas_geometry_epoch.wrapping_add(1);
+    }
+
+    /// True when the content box cannot contribute pixels in the surface or
+    /// a paint clip. Rounded clips use their enclosing rectangle.
+    pub fn canvas_is_offscreen(&self, id: NodeId) -> bool {
+        let Some(node) = self.get(id) else {
+            return true;
+        };
+        let mut path = Vec::new();
+        let mut current = Some(id);
+        while let Some(id) = current {
+            let Some(node) = self.get(id) else {
+                return false;
+            };
+            path.push((id, node));
+            current = node.parent;
+        }
+        if path.last().map(|(id, _)| *id) != self.root {
+            return true;
+        }
+        // Effects that can sample or extend beyond a content box leave the
+        // decision to the player, as do transforms other than translation.
+        if path.iter().any(|(_, node)| {
+            let transform = node.transform();
+            (node.paints_transform()
+                && (transform.rotate_rad != 0.0
+                    || transform.scale_x != 1.0
+                    || transform.scale_y != 1.0))
+                || node.blur() > 0.0
+                || node.backdrop() > 0.0
+                || node.blend() != protocol::BlendMode::SrcOver
+        }) {
+            return false;
+        }
+
+        let (mut x, mut y) = self.origin;
+        let mut clips = Vec::new();
+        if self.window.0 > 0.0 && self.window.1 > 0.0 {
+            clips.push(PaintClip {
+                x: 0.0,
+                y: 0.0,
+                w: self.window.0,
+                h: self.window.1,
+            });
+        } else if let Some((w, h)) = self.viewport {
+            clips.push(PaintClip { x, y, w, h });
+        }
+        for (_, ancestor) in path.into_iter().rev() {
+            let effect = paint_kind(ancestor);
+            x += ancestor.x;
+            y += ancestor.y;
+            if effect.transform {
+                let transform = ancestor.transform();
+                x += transform.translate_x;
+                y += transform.translate_y;
+            }
+            if std::ptr::eq(ancestor, node) {
+                break;
+            }
+            if effect.clip || effect.scroll {
+                clips.push(PaintClip {
+                    x,
+                    y,
+                    w: ancestor.w,
+                    h: ancestor.h,
+                });
+            }
+            if effect.scroll {
+                let (dx, dy) = ancestor.scroll_paint();
+                x -= dx;
+                y -= dy;
+            }
+        }
+        // Allow for a fractional clip edge sharing a device pixel.
+        let edge = self.pixel_scale().recip().max(1.0);
+        clips.iter().any(|clip| {
+            outside(
+                Some(*clip),
+                x + node.content_x - edge,
+                y + node.content_y - edge,
+                node.content_w + 2.0 * edge,
+                node.content_h + 2.0 * edge,
+            )
+        })
+    }
+
     pub fn record(&mut self) -> Result<DrawList, Error> {
         let mut commands = Vec::new();
         self.record_into(&mut commands)?;
@@ -99,14 +198,13 @@ impl Tree {
         self.sync_metrics();
         self.finish_measure();
         self.picture_writes = 0;
+        self.layer_record_visits = 0;
         self.layers.layers.clear();
         self.layers.pictures.clear();
         self.layer_stack.clear();
         self.layer_tail.clear();
         self.layer_top = None;
         self.finished_owners.clear();
-        self.subtree_layers.clear();
-        self.subtree_owners.clear();
         let root = self.root.ok_or(Error::NoRoot)?;
         let _ = self.sweep_subtree_layers(root);
         self.run = RunState {
@@ -184,6 +282,11 @@ impl Tree {
             self.layers.layers.len(),
             self.pictures.len() + self.runs.values().map(Vec::len).sum::<usize>(),
         )
+    }
+
+    /// Entries visited while assembling layers in the last record.
+    pub fn layer_record_visits(&self) -> u32 {
+        self.layer_record_visits
     }
 
     #[cfg(test)]
@@ -431,6 +534,7 @@ impl Tree {
         ancestor_scroll: (f32, f32),
         clip: Option<PaintClip>,
     ) {
+        self.layer_record_visits = self.layer_record_visits.saturating_add(1);
         let Some(node) = self.get(id) else {
             return;
         };
@@ -637,7 +741,10 @@ impl Tree {
             scope.mirror = (abs.0 - next_scroll.0, abs.1 - next_scroll.1);
         }
         pushed += self.push_content_layers(effect, abs, w, h, radius, scroll);
-        let hosts_rows = self.subtree_owners.get(&id).copied().unwrap_or(false);
+        let hosts_rows = self
+            .subtree_layers
+            .get(&id)
+            .is_some_and(|value| value.picture_owners);
         if caches && !hosts_rows && (self.picture_fresh(id) || self.subtree_flat(id)) {
             if !self.picture_fresh(id) {
                 self.fill_children(id, abs);
@@ -688,9 +795,11 @@ impl Tree {
             id,
             expanded: false,
         });
-        let mut root_result = false;
         while let Some(frame) = self.sweep_stack.pop() {
             if !frame.expanded {
+                if self.subtree_layers.contains_key(&frame.id) {
+                    continue;
+                }
                 self.sweep_stack.push(SweepFrame {
                     id: frame.id,
                     expanded: true,
@@ -713,28 +822,44 @@ impl Tree {
             let mut owners = false;
             let mut child = self.get(frame.id).and_then(|node| node.first_child);
             while let Some(current) = child {
-                let stored = self.subtree_layers.get(&current).copied().unwrap_or(false);
+                let stored = self
+                    .subtree_layers
+                    .get(&current)
+                    .copied()
+                    .unwrap_or_default();
                 let renders = self
                     .get(current)
-                    .is_some_and(|node| node.renders_layers(stored));
-                any |= stored || renders;
-                let child_owner = self.subtree_owners.get(&current).copied().unwrap_or(false);
-                let marked = self.is_picture_owner(current);
-                owners |= child_owner || marked;
+                    .is_some_and(|node| node.renders_layers(stored.effects));
+                any |= stored.effects || renders;
+                owners |= stored.picture_owners || self.is_picture_owner(current);
                 child = self.get(current).and_then(|node| node.next);
             }
-            let renders = self
-                .get(frame.id)
-                .is_some_and(|node| node.renders_layers(any));
-            self.subtree_layers.insert(frame.id, any);
-            self.subtree_owners.insert(frame.id, owners);
-            root_result = any || renders;
+            self.subtree_layers.insert(
+                frame.id,
+                SubtreeLayers {
+                    effects: any,
+                    picture_owners: owners,
+                },
+            );
         }
-        root_result
+        self.renders_layer_node(id) || !self.subtree_flat(id)
+    }
+
+    pub(super) fn invalidate_subtree_layers(&mut self, id: NodeId) {
+        let mut current = Some(id);
+        while let Some(id) = current {
+            if self.subtree_layers.remove(&id).is_none() {
+                break;
+            }
+            current = self.get(id).and_then(|node| node.parent);
+        }
     }
 
     fn subtree_flat(&self, id: NodeId) -> bool {
-        !self.subtree_layers.get(&id).copied().unwrap_or(false)
+        !self
+            .subtree_layers
+            .get(&id)
+            .is_some_and(|value| value.effects)
     }
 
     fn picture_fresh(&self, id: NodeId) -> bool {

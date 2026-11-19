@@ -77,11 +77,13 @@ fn host_settle_send_and_drop_once() {
 fn host_registry_is_namespace_neutral() {
     let first = Module {
         name: "Clipboard",
+        exports: Default::default(),
         specifier: "app:clipboard",
         methods: vec![sync_method("get", "one"), sync_method("get", "two")],
     };
     let second = Module {
         name: "Clipboard",
+        exports: Default::default(),
         specifier: "other:clipboard",
         methods: vec![sync_method("get", "other")],
     };
@@ -91,6 +93,7 @@ fn host_registry_is_namespace_neutral() {
     };
     let third = Module {
         name: "Ping",
+        exports: Default::default(),
         specifier: "not-impasto",
         methods: vec![kept_method],
     };

@@ -178,6 +178,10 @@ pub fn paint_key(
 pub trait Shaper {
     fn begin_frame(&mut self) {}
     fn end_frame(&mut self) {}
+    /// Measurement-cache hits and misses in the current stats interval.
+    fn measure_cache_counts(&self) -> (u32, u32) {
+        (0, 0)
+    }
     /// Register a face used by later measurements. The default ignores it.
     /// Hosts that draw register the same bytes on the gpu context separately.
     fn register_font(&mut self, _family: &str, _bytes: &[u8]) -> bool {
@@ -221,6 +225,11 @@ pub trait Shaper {
     fn metrics_paint(&mut self, key: &PaintKey) -> Arc<ParagraphMetrics> {
         self.metrics(&key.metrics)
     }
+    /// Intrinsic width and the metrics of the unbounded paragraph. The caller
+    /// supplies an unbounded paint key so the same paragraph can serve both.
+    fn min_content_metrics(&mut self, key: &PaintKey) -> (f32, Arc<ParagraphMetrics>) {
+        (self.intrinsic_width(&key.metrics), self.metrics_paint(key))
+    }
     /// The node still displays this key. Default does nothing.
     fn touch(&mut self, _key: &PaintKey) {}
     fn caret_at_unit(&mut self, key: &MetricsKey, unit: u32, affinity: Affinity) -> Caret;
@@ -245,6 +254,9 @@ impl Shaper for Box<dyn Shaper> {
     fn end_frame(&mut self) {
         (**self).end_frame();
     }
+    fn measure_cache_counts(&self) -> (u32, u32) {
+        (**self).measure_cache_counts()
+    }
     fn register_font(&mut self, family: &str, bytes: &[u8]) -> bool {
         (**self).register_font(family, bytes)
     }
@@ -262,6 +274,9 @@ impl Shaper for Box<dyn Shaper> {
     }
     fn metrics_paint(&mut self, key: &PaintKey) -> Arc<ParagraphMetrics> {
         (**self).metrics_paint(key)
+    }
+    fn min_content_metrics(&mut self, key: &PaintKey) -> (f32, Arc<ParagraphMetrics>) {
+        (**self).min_content_metrics(key)
     }
     fn touch(&mut self, key: &PaintKey) {
         (**self).touch(key);

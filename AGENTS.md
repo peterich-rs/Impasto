@@ -50,7 +50,7 @@ QuickJS 通过具名模块 `scene` 和 `reactive` 接到渲染树与响应式图
 | 光栅 | Impeller standalone SDK | `embedder.h`、Flutter shell、Skia、engine 源码。这三样都会带上 Dart VM，或等于把 engine 克隆进仓库 |
 | 宿主窗口 | 各端系统 API。macOS 用 objc2 调 AppKit。Android 用 `Activity` 与 `HostView`：`SurfaceView` 给出 `ANativeWindow`，vsync 用主线程 `Choreographer`，输入法用 `InputConnection`。图片解码用 `AImageDecoder`。`ndk` 0.9.0 只提供 NDK 绑定 | GLFW。Flutter embedding。这两样都会带进另一套窗口或 Dart VM |
 | JavaScript | quickjs-jit 0.14.2（MIT），依赖名 `rquickjs`。Cargo 从发布包构建唯一解释器，版本与特性钉在根 `Cargo.toml` | 第二套 JavaScript 引擎、futures、full、dyn-load、quickjs-jit-stdlib、quickjs-jit-runtime |
-| Solid 状态 | `crates/reactive`，`packages/reactive` 保留作者 API；以 `solid-js` 2.0.0-rc.17 做对照 | 在应用 bundle 中引入 Solid 的调度或 `@solidjs/universal`。改 `third_party/solid` |
+| Solid 状态 | `crates/reactive`，`packages/reactive` 保留作者 API；以 `solid-js` 2.0.0 做对照 | 在应用 bundle 中引入 Solid 的调度或 `@solidjs/universal`。改 `third_party/solid` |
 | Kotlin 状态 | 接到信号时依赖已发布的 `com.lightningkite:reactive`，版本那时再钉 | 把 KiteUI 或这份库的源码拷进仓库 |
 | 手势 | 点击写在 `uicore/`。没有独立、可嵌入、又不绑死某一套 UI 的库 | React Native Gesture Handler、Flutter gestures |
 | 图片解码 | 宿主平台的解码器，现在是 ImageIO。像素以 RGBA 交给 Impeller | Flutter 的 `dart:ui` 图片栈。没有平台解码器的宿主再考虑 `stb_image` |
@@ -211,7 +211,7 @@ solidPlugin({
 })
 ```
 
-`solid-js` 2.0.0-rc.17 只用于开发时的语义对照，应用打包时 alias 到 `@impasto/reactive`，调度实现不进入 bundle。`just gallery-dist` 在产物缺失或源码更新时重编 `dist/quotes.js`，产物不进 git。`just solid-app` 在此之上安装依赖并用 mock host 跑一遍。`just check` 不跑这一步。
+`solid-js` 2.0.0 只用于开发时的语义对照，应用打包时 alias 到 `@impasto/reactive`，调度实现不进入 bundle。`just gallery-dist` 在产物缺失、源码或锁文件更新时重编 `dist/quotes.js`，产物不进 git。`just solid-app` 在此之上安装依赖并用 mock host 跑一遍。`just check` 不跑这一步。
 
 ## 绘制
 

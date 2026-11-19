@@ -1,6 +1,6 @@
 //! Vulkan present. The swapchain stays across resizes and drops with this surface.
 
-use engine::{AcquireFollowup, Engine, PixelSize, VulkanSwapchain, acquire_followup};
+use engine::{AcquireFollowup, Engine, PixelSize, VulkanPhase, VulkanSwapchain, acquire_followup};
 use shell::{NativePtr, Presented, Surface};
 
 pub struct VulkanSurface {
@@ -50,7 +50,13 @@ impl Surface for VulkanSurface {
                 return Err(engine::Status::NotReady);
             };
             swapchain.set_extent(pixels);
-            engine.draw_vulkan(swapchain)
+            engine.draw_vulkan_with_trace(swapchain, |phase| {
+                session::trace::Section::begin(match phase {
+                    VulkanPhase::Acquire => c"Impasto Vulkan acquire",
+                    VulkanPhase::Draw => c"Impasto Vulkan draw",
+                    VulkanPhase::Present => c"Impasto Vulkan present",
+                })
+            })
         };
         match drawn {
             Ok(()) => {

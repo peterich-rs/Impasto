@@ -1,5 +1,5 @@
-import { For, Show, createMemo, createSignal, onCleanup } from "solid-js";
-import { onLayout, scene } from "@impasto/solid-renderer";
+import { For, Show, createMemo, createSignal, onCleanup, untrack } from "solid-js";
+import { onFrame, onLayout, requestFrame, scene } from "@impasto/solid-renderer";
 import { Canvas, Column, Pressable, Role, Row, View, VirtualList, createScrollController } from "@impasto/solid-ui";
 import type { Router } from "@impasto/solid-router";
 import { store as devtools } from "@impasto/devtools";
@@ -17,6 +17,32 @@ import { StockView } from "./stock.tsx";
 const filters = ["all", "gainers", "losers", "active"] as const;
 type Filter = typeof filters[number];
 const initialIndex = 4120.0;
+const publicationGroups = 8;
+
+/** Distributes the market snapshots across frames while keeping the per-row cadence. */
+function useRowPublications(revision: () => number, active: () => boolean) {
+  let published = untrack(revision);
+  let group = publicationGroups;
+  const groups = Array.from({ length: publicationGroups }, () => createSignal(published));
+  onCleanup(onFrame(() => {
+    const next = revision();
+    if (!active()) {
+      group = publicationGroups;
+      return;
+    }
+    if (next !== published && group === publicationGroups) {
+      published = next;
+      group = 0;
+    }
+    const current = groups[group];
+    if (current) {
+      current[1](published);
+      group++;
+      if (group < publicationGroups) requestFrame();
+    }
+  }));
+  return (index: number) => groups[index % publicationGroups]![0]();
+}
 
 function filterLabel(filter: Filter): string {
   switch (filter) {
@@ -109,7 +135,7 @@ function MarketStrip(props: { time: number; summary: ReturnType<typeof marketSum
 }
 
 function Spark(props: { engine: QuoteEngine; symbol: string; revision: number }) {
-  return <Canvas style={{ width: 96, maxWidth: "34%", flexShrink: 1, height: 36 }} draw={(ctx, { width, height }) => {
+  return <Canvas deferWhenOffscreen style={{ width: 96, maxWidth: "34%", flexShrink: 1, height: 36 }} draw={(ctx, { width, height }) => {
     props.revision;
     const prices = downsampleTicks(props.engine.ring(props.symbol), 24);
     if (!prices.length || width < 18) return;
@@ -184,14 +210,17 @@ export function StocksPage(props: { router: Router }) {
   const controller = createScrollController();
   const wide = () => width() >= 800;
   const split = () => width() >= 1240;
-  const revision = useMarketPulse(() => {
+  const canPublish = () => {
     const top = props.router.stack().at(-1);
     return top?.path === "/stocks" && top.phase === "live" && controller.phase() === "idle";
-  });
-  const sparkRevision = createMemo(() => Math.floor(revision() / 3));
-  const time = createMemo(() => { revision(); return engine.simNow() - engine.dayStart(); });
+  };
+  const revision = useMarketPulse(canPublish);
+  const rowRevision = useRowPublications(revision, canPublish);
+  const publicationIndex = new Map(instruments.map(({ symbol }, index) => [symbol, index]));
+  const overviewRevision = createMemo(() => Math.floor(revision() / 2));
+  const time = createMemo(() => { overviewRevision(); return engine.simNow() - engine.dayStart(); });
   const rankAt = createMemo(() => Math.floor(revision() / 5));
-  const summary = createMemo(() => { revision(); return marketSummary(engine, instruments); });
+  const summary = createMemo(() => { overviewRevision(); return marketSummary(engine, instruments); });
   const items = createMemo<readonly Instrument[]>((previous) => {
     const choice = filter();
     if (choice === "all") return instruments;
@@ -213,12 +242,17 @@ export function StocksPage(props: { router: Router }) {
         recycle={{
           typeOf: () => "stock",
           poolSize: 16,
-          render: (instrument) => <StockRow instrument={instrument()} engine={engine} revision={revision()} sparkRevision={sparkRevision()} selected={wide() && selected() === instrument().symbol}
-            onClick={() => {
-              const symbol = instrument().symbol;
-              setSelected(symbol);
-              if (!wide()) props.router.push(`/stock/${symbol}`);
-            }} />,
+          render: (instrument) => {
+            const index = () => publicationIndex.get(instrument().symbol)!;
+            const row = () => rowRevision(index());
+            const spark = createMemo(() => Math.floor((row() + index() % 3) / 3));
+            return <StockRow instrument={instrument()} engine={engine} revision={row()} sparkRevision={spark()} selected={wide() && selected() === instrument().symbol}
+              onClick={() => {
+                const symbol = instrument().symbol;
+                setSelected(symbol);
+                if (!wide()) props.router.push(`/stock/${symbol}`);
+              }} />;
+          },
         }} />
     </Column>
     <Show when={wide()}>

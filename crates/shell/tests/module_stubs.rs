@@ -12,7 +12,7 @@ fn module_stubs_match_generated_files() {
         };
         let current = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-        let fresh = shell::module_stub_source(&module);
+        let fresh = shell::module_stub_source(&module).unwrap_or_else(|error| panic!("{error}"));
         let current = format!("{}\n", current.trim_end());
         let fresh = format!("{}\n", fresh.trim_end());
         assert_eq!(
@@ -30,10 +30,10 @@ fn file_system_delete_is_reserved_safe() {
         .into_iter()
         .find(|module| module.name == "FileSystem")
         .unwrap_or_else(|| panic!("FileSystem"));
-    let source = shell::module_stub_source(&module);
+    let source = shell::module_stub_source(&module).unwrap_or_else(|error| panic!("{error}"));
     assert!(
         source.contains(
-            "declare function deletePath(...args: unknown[]): Promise<unknown>; export { deletePath as delete };"
+            "declare function $delete(path: string): Promise<void>;\nexport { $delete as delete };"
         ),
         "{source}"
     );

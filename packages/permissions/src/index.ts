@@ -1,10 +1,13 @@
 import {
   checkPermissionStatus,
   checkServiceStatus,
-  openAppSettings as hostOpenAppSettings,
   requestPermissions,
   shouldShowRequestPermissionRationale,
-} from "./permissions.ts";
+  type PermissionStatus,
+  type ServiceStatus,
+} from "./native.js";
+
+export { openAppSettings, type PermissionStatus, type ServiceStatus } from "./native.js";
 
 /** Names follow permission_handler 11.3.1. The scene maps each name. */
 const NAMES = [
@@ -24,16 +27,6 @@ const NAMES = [
   "calendar",
 ] as const;
 
-export type PermissionStatus =
-  | "granted"
-  | "denied"
-  | "restricted"
-  | "permanentlyDenied"
-  | "limited"
-  | "provisional";
-
-export type ServiceStatus = "enabled" | "disabled" | "notApplicable";
-
 export type PermissionHandle = {
   readonly name: string;
   readonly status: Promise<PermissionStatus>;
@@ -46,13 +39,13 @@ function bind(name: string): PermissionHandle {
   return {
     name,
     get status() {
-      return checkPermissionStatus(name) as Promise<PermissionStatus>;
+      return checkPermissionStatus(name);
     },
     get shouldShowRequestRationale() {
-      return shouldShowRequestPermissionRationale(name) as Promise<boolean>;
+      return shouldShowRequestPermissionRationale(name);
     },
     get serviceStatus() {
-      return checkServiceStatus(name) as Promise<ServiceStatus>;
+      return checkServiceStatus(name);
     },
     request() {
       return request([this]).then((result) => result[name] ?? "denied");
@@ -73,10 +66,5 @@ export const Permission = table();
 export async function request(
   permissions: readonly PermissionHandle[],
 ): Promise<Record<string, PermissionStatus>> {
-  const result = await requestPermissions(permissions.map((item) => item.name));
-  return result as Record<string, PermissionStatus>;
-}
-
-export function openAppSettings(): Promise<boolean> {
-  return hostOpenAppSettings() as Promise<boolean>;
+  return requestPermissions(permissions.map((item) => item.name));
 }

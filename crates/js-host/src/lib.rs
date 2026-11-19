@@ -14,8 +14,8 @@ pub use io::{
 };
 
 pub use modules::{
-    ImmediateExec, Invoke, Method, MethodExec, Module, PromiseFn, Settle, SyncFn, Work,
-    module_not_linked,
+    EventType, ImmediateExec, Invoke, Method, MethodExec, MethodTypes, Module, ModuleExports,
+    PromiseFn, Settle, SyncFn, Work, module_not_linked,
 };
 pub use registry::ModuleRegistry;
 pub use value::{PluginResult, PluginValue};

@@ -22,7 +22,12 @@ fn a_row_with_a_too_wide_child_reports_overflow() -> Result<(), Error> {
     )?;
     let wide = tree.text("wide", 16.0, [0, 0, 0, 255])?;
     tree.add_child(root, wide)?;
+    tree.layout()?;
+    assert!(tree.inspect_layout_issues().contains("\"excess\":12.00"));
+    assert!(tree.take_layout_issues().is_empty());
+
     tree.set_debug_scan(true);
+    tree.set_text(wide, "test")?;
     tree.layout()?;
     let issues = tree.layout_issues();
     // MonoShaper: 4 chars at font 16 are 4 * 8 = 32 wide inside 20.

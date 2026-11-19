@@ -26,5 +26,6 @@ declare module "scene" {
     onDrawError?: (
       error: import("../../solid-renderer/src/canvas/types.ts").CanvasError,
     ) => void,
+    deferWhenOffscreen?: boolean,
   ): import("../../solid-renderer/src/canvas/types.ts").CanvasBinding;
 }

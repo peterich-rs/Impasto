@@ -1,7 +1,7 @@
 /** Performance page: frame bars plus the selected frame's phase table. */
-import { createSignal, For, Show } from "solid-js";
-import { Text, useTheme } from "@impasto/solid-ui";
-import { frames, type FrameSample } from "../store.ts";
+import { createMemo, createSignal, For, Show } from "solid-js";
+import { Button, Text, useTheme } from "@impasto/solid-ui";
+import { frames, store, type FrameSample } from "../store.ts";
 const BAR_MAX = 96;
 
 /** Focused frame facts; each phase row is one line of the table. */
@@ -9,6 +9,7 @@ function rowsOf(frame: FrameSample): [string, string][] {
   const phase = frame.phases;
   const rows: [string, string][] = [
     ["帧号", String(frame.number)],
+    ["渲染线程 / 帧预算", `${frame.workMs.toFixed(2)} / ${frame.budgetMs.toFixed(2)}ms`],
     ["session", `${frame.sessionMs.toFixed(2)}ms`],
     ["gesture", `${frame.gestureMs.toFixed(2)}ms`],
     ["script", `${frame.scriptMs.toFixed(2)}ms`],
@@ -44,15 +45,16 @@ function rowsOf(frame: FrameSample): [string, string][] {
 export function PerformancePage() {
   const theme = useTheme();
   const [selected, setSelected] = createSignal<number>(-1);
-  const window = () => frames().slice(-120);
-  const peak = () =>
-    window().reduce(
+  store.sampleFrames();
+  const peak = createMemo(() =>
+    frames().reduce(
       (max, frame) =>
-        Math.max(max, frame.sessionMs + frame.submitMs + frame.presentMs),
+        Math.max(max, frame.workMs),
       0.01,
-    );
-  const current = () => window().find((frame) => frame.seq === selected());
-  const overCount = () => window().filter((frame) => frame.overBudget).length;
+    ),
+  );
+  const current = () => frames().find((frame) => frame.seq === selected());
+  const overCount = () => frames().filter((frame) => frame.overBudget).length;
   return (
     <view
       style={{
@@ -64,13 +66,14 @@ export function PerformancePage() {
         minHeight: 0,
       }}
     >
+      <Button label="刷新快照" onClick={store.sampleFrames} />
       <Text
         style={{
           fontSize: 11,
           color: theme().color.textMuted,
         }}
       >
-        {window().length} 帧 · 超预算 {overCount()} · 峰值 {peak().toFixed(1)}ms
+        {frames().length} 帧 · 超预算 {overCount()} · 峰值 {peak().toFixed(1)}ms
       </Text>
       <view
         style={{
@@ -79,10 +82,9 @@ export function PerformancePage() {
           alignItems: "start",
         }}
       >
-        <For each={window()}>
+        <For each={frames()}>
           {(frame) => {
-            const total = frame.sessionMs + frame.submitMs + frame.presentMs;
-            const height = Math.max(2, Math.round((total / peak()) * BAR_MAX));
+            const height = Math.max(2, Math.round((frame.workMs / peak()) * BAR_MAX));
             return (
               <view onClick={() => setSelected(frame.seq)} focusable={false}>
                 <view

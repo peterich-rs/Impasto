@@ -86,6 +86,14 @@ pub use missing::VulkanSwapchain;
 #[cfg(all(impeller, target_os = "android"))]
 pub use player::VulkanSwapchain;
 
+#[cfg(target_os = "android")]
+#[derive(Clone, Copy, Debug)]
+pub enum VulkanPhase {
+    Acquire,
+    Draw,
+    Present,
+}
+
 /// Text, size, width, color, and style that identify one measured paragraph.
 #[derive(Clone, Copy)]
 pub struct ParagraphQuery<'a> {
@@ -130,6 +138,8 @@ pub struct SubmitStats {
     pub picture_rebuilt: u32,
     pub picture_reused: u32,
     pub layer_count: u32,
+    pub picture_prepare: std::time::Duration,
+    pub compose: std::time::Duration,
     /// Live cache entries after the submit. `paragraphs`, `pictures`, and
     /// `textures` replace the one-shot stderr warnings the caches used to
     /// print when they exceeded their caps.

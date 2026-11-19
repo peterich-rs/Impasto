@@ -1,6 +1,7 @@
 //! Per-frame input counters.
 
 use std::cell::Cell;
+use std::time::Duration;
 
 pub(super) struct FrameMarks {
     pub(super) pointers: Cell<u32>,
@@ -13,6 +14,14 @@ pub(super) struct FrameMarks {
     pub(super) gestures: Cell<u32>,
     /// Scene setter calls since the last reset.
     pub(super) sets: Cell<u32>,
+    pub(super) trace_enabled: Cell<bool>,
+    pub(super) callback_active: Cell<bool>,
+    pub(super) callbacks: Cell<u32>,
+    pub(super) callback_time: Cell<Duration>,
+    pub(super) mutation_calls: Cell<u32>,
+    pub(super) mutation_equal: Cell<u32>,
+    pub(super) text_writes: Cell<u32>,
+    pub(super) mutation_time: Cell<Duration>,
 }
 
 impl FrameMarks {
@@ -26,6 +35,16 @@ impl FrameMarks {
         self.blur.set(0);
         self.gestures.set(0);
         self.sets.set(0);
+        self.reset_trace();
+    }
+
+    pub(super) fn reset_trace(&self) {
+        self.callbacks.set(0);
+        self.callback_time.set(Duration::ZERO);
+        self.mutation_calls.set(0);
+        self.mutation_equal.set(0);
+        self.text_writes.set(0);
+        self.mutation_time.set(Duration::ZERO);
     }
 }
 
@@ -41,6 +60,14 @@ impl Default for FrameMarks {
             blur: Cell::new(0),
             gestures: Cell::new(0),
             sets: Cell::new(0),
+            trace_enabled: Cell::new(false),
+            callback_active: Cell::new(false),
+            callbacks: Cell::new(0),
+            callback_time: Cell::new(Duration::ZERO),
+            mutation_calls: Cell::new(0),
+            mutation_equal: Cell::new(0),
+            text_writes: Cell::new(0),
+            mutation_time: Cell::new(Duration::ZERO),
         }
     }
 }

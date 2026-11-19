@@ -1,7 +1,6 @@
-// Observable order of Solid 2.0.0-rc.17. Run from the gallery app, which depends
-// on this exact version:
-//   node crates/reactive/tests/fixtures/order.mjs
-// The Rust tests assert the same lines. This file does not get copied into the crate.
+// Observable order of Solid 2.0.0, installed by packages/reactive. Re-record with:
+//   node --conditions=browser crates/reactive/tests/fixtures/order.mjs > crates/reactive/tests/fixtures/order.txt
+// The Rust and QuickJS tests compare against the same output.
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +9,8 @@ import { runProbe } from "./probe.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(join(here, "../../../../packages/reactive/package.json"));
+const { version } = require("solid-js/package.json");
+if (version !== "2.0.0") throw new Error(`Expected Solid 2.0.0, found ${version}`);
 const solid = require("solid-js");
 
 const lines = [];

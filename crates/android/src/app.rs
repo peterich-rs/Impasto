@@ -1663,6 +1663,17 @@ pub extern "system" fn Java_dev_impasto_host_VsyncWaiter_nativeOnVsync(
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_impasto_host_HostView_nativeSemanticsEnabled(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
+    enabled: jboolean,
+) {
+    if let Some(host) = host() {
+        host.link.post(Command::SemanticsEnabled(enabled));
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_impasto_host_AccessBridge_nativeActivate(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,

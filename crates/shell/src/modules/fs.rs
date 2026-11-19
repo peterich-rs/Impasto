@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use session::{Method, Module, PluginResult, PluginValue, document_relative};
+use session::{Method, Module, ModuleExports, PluginResult, PluginValue, document_relative};
 
 use super::{done_null, str_arg, string_list, string_pairs};
 
@@ -15,6 +15,7 @@ pub fn module(host: Arc<dyn StorageHost>) -> Module {
     Module {
         name: "FileSystem",
         specifier: "@impasto/file-system",
+        exports: ModuleExports::default(),
         methods: vec![
             Method::sync("documentDirectory", {
                 let dir = dir.clone();
@@ -22,7 +23,8 @@ pub fn module(host: Arc<dyn StorageHost>) -> Module {
                     Ok(path) => Ok(PluginValue::Str(path.clone())),
                     Err(message) => Err(message.clone()),
                 }
-            }),
+            })
+            .with_types("", "string"),
             Method::promise("read", {
                 let dir = dir.clone();
                 move |args, settle, exec| {
@@ -46,7 +48,8 @@ pub fn module(host: Arc<dyn StorageHost>) -> Module {
                         },
                     }
                 }
-            }),
+            })
+            .with_types("path: string", "Uint8Array | ArrayBuffer"),
             Method::promise("write", {
                 let dir = dir.clone();
                 move |args, settle, exec| {
@@ -76,7 +79,8 @@ pub fn module(host: Arc<dyn StorageHost>) -> Module {
                         },
                     }
                 }
-            }),
+            })
+            .with_types("path: string, bytes: Uint8Array", "void"),
             Method::promise("delete", {
                 move |args, settle, exec| {
                     let path = str_arg(args);
@@ -99,7 +103,8 @@ pub fn module(host: Arc<dyn StorageHost>) -> Module {
                         },
                     }
                 }
-            }),
+            })
+            .with_types("path: string", "void"),
             Method::promise("pick", {
                 let host = Arc::clone(&host);
                 move |_args, settle, exec| {
@@ -116,7 +121,8 @@ pub fn module(host: Arc<dyn StorageHost>) -> Module {
                         }),
                     );
                 }
-            }),
+            })
+            .with_types("", "{ name: string } | null"),
         ],
     }
 }
@@ -126,6 +132,10 @@ pub fn async_storage(host: Arc<dyn StorageHost>) -> Module {
     Module {
         name: "AsyncStorage",
         specifier: "@impasto/async-storage",
+        exports: ModuleExports {
+            object: true,
+            ..Default::default()
+        },
         methods: vec![
             Method::promise("multiGet", {
                 let dir = dir.clone();
@@ -155,7 +165,8 @@ pub fn async_storage(host: Arc<dyn StorageHost>) -> Module {
                         ),
                     }
                 }
-            }),
+            })
+            .with_types("keys: string[]", "[string, string | null][]"),
             Method::promise("multiSet", {
                 let dir = dir.clone();
                 move |args, settle, exec| {
@@ -173,7 +184,8 @@ pub fn async_storage(host: Arc<dyn StorageHost>) -> Module {
                         ),
                     }
                 }
-            }),
+            })
+            .with_types("entries: [string, string][]", "void"),
             Method::promise("multiRemove", {
                 let dir = dir.clone();
                 move |args, settle, exec| {
@@ -191,7 +203,8 @@ pub fn async_storage(host: Arc<dyn StorageHost>) -> Module {
                         ),
                     }
                 }
-            }),
+            })
+            .with_types("keys: string[]", "void"),
             Method::promise("clear", {
                 move |_args, settle, exec| match dir.clone() {
                     Err(message) => exec.now(settle, PluginResult::Failed { message }),
@@ -205,7 +218,8 @@ pub fn async_storage(host: Arc<dyn StorageHost>) -> Module {
                         ),
                     ),
                 }
-            }),
+            })
+            .with_types("", "void"),
         ],
     }
 }

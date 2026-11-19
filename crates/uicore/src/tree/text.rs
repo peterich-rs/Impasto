@@ -68,7 +68,9 @@ impl Tree {
                 }
                 Err(next) => {
                     let changed = text.utf8.as_ref() != next;
-                    text.utf8 = Arc::from(next);
+                    if changed {
+                        text.utf8 = Arc::from(next);
+                    }
                     changed
                 }
             };
@@ -83,7 +85,8 @@ impl Tree {
             return Ok(());
         }
         self.mark_semantics_chain(id);
-        self.touch_measure(id)
+        self.queue_text_measure(id);
+        Ok(())
     }
 
     pub fn set_font_size(&mut self, id: NodeId, font_size: f32) -> Result<(), Error> {
@@ -279,7 +282,10 @@ impl Tree {
         if scale <= 0.0 {
             return Err(Error::BadNumber);
         }
-        self.pixel_scale = scale;
+        if self.pixel_scale != scale {
+            self.pixel_scale = scale;
+            self.canvas_geometry_changed();
+        }
         Ok(())
     }
 

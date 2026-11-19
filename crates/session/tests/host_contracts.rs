@@ -24,6 +24,7 @@ fn sample_module(name: &'static str, specifier: &'static str, value: &'static st
     Module {
         name,
         specifier,
+        exports: Default::default(),
         methods: vec![Method::sync("getString", move |_| {
             Ok(PluginValue::Str(value.into()))
         })],
@@ -185,6 +186,7 @@ fn registry_first_wins_keeps_order_and_exact_errors() {
     let duplicate_specifier = sample_module("Clipboard", "@impasto/clipboard", "three");
     let maps = Module {
         name: "Maps",
+        exports: Default::default(),
         specifier: "@impasto/maps",
         methods: vec![
             Method::sync("ping", |_| Ok(PluginValue::Str("pong".into()))),
@@ -748,6 +750,7 @@ fn session_registry_shares_callback_arcs() {
     };
     let registry = ModuleRegistry::new(vec![Module {
         name: "Ping",
+        exports: Default::default(),
         specifier: "app:ping",
         methods: vec![method],
     }]);

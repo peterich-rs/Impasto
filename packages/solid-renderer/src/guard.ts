@@ -74,8 +74,10 @@ export function animate(
   to: number,
   stiffness: number,
   damping: number,
+  retarget?: boolean,
 ): void {
-  callVoid("animate", [id, prop, from, to, stiffness, damping]);
+  const args = [id, prop, from, to, stiffness, damping];
+  callVoid("animate", retarget ? [...args, retarget] : args);
 }
 
 export function flingTarget(id: NodeHandle): { x: number; y: number } | null {

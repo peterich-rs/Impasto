@@ -1,4 +1,4 @@
-import { createRoot } from "solid-js";
+import { batch, createRoot, createSignal } from "solid-js";
 import { scene } from "@impasto/solid-renderer";
 import { Button, Column, Image, Row, Text } from "@impasto/solid-ui";
 
@@ -7,6 +7,40 @@ const assert = (condition: unknown, message: string) => {
 };
 
 const root = <view style={{ width: 240, height: 640, alignItems: "start" }} />;
+
+createRoot((dispose) => {
+  const [width, setWidth] = createSignal(10);
+  let clicks = 0;
+  let refReads = 0;
+  let mounted = 0;
+  const ref = () => {
+    refReads++;
+    return (node: JSX.Element) => { mounted = node; };
+  };
+
+  function Probe(props: { onClick: () => void; onclick: number }) {
+    assert(clicks === 0, "JSX must pass onClick as a callback");
+    props.onClick();
+    return <view {...{ style: { width: 1 } }} ref={ref()} style={{ width: props.onclick, height: 10 }}>
+      {props.onclick > 10 && <view style={{ width: props.onclick, height: 1 }} />}
+    </view>;
+  }
+
+  const node = <Probe {...{ onclick: 0 }} onClick={() => { clicks++; }} onclick={width()} />;
+  scene.append(root, node);
+  assert(clicks === 1, "component can invoke onClick");
+  assert(mounted === node && refReads === 1, "JSX reads the ref factory once at creation");
+  assert(scene.rect(node).w === 10 && scene.firstChild(node) === 0, "initial JSX width and child");
+  batch(() => setWidth(20));
+  const child = scene.firstChild(node);
+  assert(
+    scene.rect(node).w === 20 && child !== 0 && scene.rect(child).w === 20,
+    "dynamic JSX prop and child update together",
+  );
+  assert(refReads === 1, "updating JSX props leaves the direct ref alone");
+  dispose();
+  scene.remove(root, node);
+});
 
 createRoot(() => {
   const page = (
@@ -63,7 +97,6 @@ createRoot(() => {
 });
 
 // Detached overlay targets must keep tracking the same props object.
-import { batch, createSignal } from "solid-js";
 import { createNodeRef, createStyleTarget } from "../../../../packages/solid-ui/src/target.ts";
 import { ErrorPage, Field, Pressable, Recycler, View, installThemePort } from "@impasto/solid-ui";
 

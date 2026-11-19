@@ -4,7 +4,7 @@ import { Clipboard } from "@impasto/clipboard";
 import { Text, useTheme } from "@impasto/solid-ui";
 import { errors, setUnseenErrors } from "../store.ts";
 import { SourceMap } from "../source-map.ts";
-import * as raw from "../devtools.ts";
+import * as raw from "../native.js";
 
 /** QuickJS stack frames look like `at fn (file.js:12:34)`. */
 const FRAME = /at\s+(?:(\S+)\s+)?\(?(.+?):(\d+):(\d+)\)?/g;
@@ -23,7 +23,7 @@ export function ErrorsPage() {
     setSelected(seq);
     setUnseenErrors(0);
     if (map() === null) {
-      const text = raw.sourceMap?.() as string | null | undefined;
+      const text = raw.sourceMap?.();
       if (typeof text === "string") {
         setMap(SourceMap.load(text));
       }

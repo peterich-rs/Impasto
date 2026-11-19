@@ -27,12 +27,23 @@ pub struct ProjectedNode {
 pub fn project(update: &SemanticsUpdate) -> Vec<ProjectedNode> {
     let by_id: HashMap<SemanticsId, &SemanticsNode> =
         update.nodes.iter().map(|node| (node.id, node)).collect();
+    let mut extents = HashMap::<SemanticsId, (f32, f32)>::new();
+    for node in &update.nodes {
+        if let Some(parent) = node.parent {
+            let extent = extents.entry(parent).or_default();
+            extent.0 = extent.0.max(node.rect.w);
+            extent.1 = extent.1.max(node.rect.h);
+        }
+    }
     update
         .nodes
         .iter()
         .filter(|node| node.role != SemanticsRole::Generic)
         .map(|node| {
-            let content = content_extent(update, node.id);
+            let content = extents
+                .get(&node.id)
+                .copied()
+                .unwrap_or((node.rect.w, node.rect.h));
             let (forward, backward) = if node.role == SemanticsRole::Scroll
                 || node.actions.contains(uicore::SemanticsActions::SCROLL)
             {

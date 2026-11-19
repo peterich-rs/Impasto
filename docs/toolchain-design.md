@@ -1,6 +1,6 @@
 # 把脚手架和场景写入收进 Rust
 
-应用侧命令对齐 Flutter。视图树继续只活在 `uicore::Tree`，这条对齐 nsh 的 core，而不是对齐 Flutter 的 Element。响应式图按 nsh 的 arena 另起一个 crate，调度对齐仓库已经依赖的 Solid `2.0.0-rc.17`，不移植它的源码。
+应用侧命令对齐 Flutter。视图树继续只活在 `uicore::Tree`，这条对齐 nsh 的 core，而不是对齐 Flutter 的 Element。响应式图按 nsh 的 arena 另起一个 crate，调度对齐仓库已经依赖的 Solid `2.0.0`，不移植它的源码。
 
 ## Breaking Change Notice
 
@@ -15,7 +15,7 @@
 
 ## Feasibility Assessment
 
-做得到，有三处边界。场景树已经在 Rust：`uicore::Tree`（`crates/uicore/src/tree/mod.rs:52`）持有槽位、代数、Taffy、命中和弹簧，`NodeId` 已是槽位加 generation（`crates/uicore/src/tree/node.rs:15`）。QuickJS 使用 Cargo 钉住的 quickjs-jit 0.14.2；`linked/rt` 的 Rust 绑定把参数交给现有 `mutate` / `apply_now`，帧末由 `flush_mutations` 排空队列。`Runtime` 与 `Context` 由 `Engine` 持有，启动失败和 Drop 共用显式 shutdown，先释放图、定时器与 Persistent，再释放 Context 与 Runtime。nsh 的 `Graph`（`nsh/crates/nsh-core/src/reactive.rs:1`）证明 arena、双向边、值留在运行时里这条路能撑住 Solid 的调度；Impasto 要对齐的是 `2.0.0-rc.17` 的上述 API，不是 nsh 写下的 Solid 1.9，也不把 nsh 的 `Host` 名字带过来。iOS 宿主不存在（`docs/refactor-plan.md:33`），`impasto build ios` 在 `crates/ios` 落地前只能生成工程、不能打出安装包。打包器换成 Rust 是后续的事，这条链路先把 Babel 和 esbuild 编进 CLI 发布包。
+做得到，有三处边界。场景树已经在 Rust：`uicore::Tree`（`crates/uicore/src/tree/mod.rs:52`）持有槽位、代数、Taffy、命中和弹簧，`NodeId` 已是槽位加 generation（`crates/uicore/src/tree/node.rs:15`）。QuickJS 使用 Cargo 钉住的 quickjs-jit 0.14.2；`linked/rt` 的 Rust 绑定把参数交给现有 `mutate` / `apply_now`，帧末由 `flush_mutations` 排空队列。`Runtime` 与 `Context` 由 `Engine` 持有，启动失败和 Drop 共用显式 shutdown，先释放图、定时器与 Persistent，再释放 Context 与 Runtime。nsh 的 `Graph`（`nsh/crates/nsh-core/src/reactive.rs:1`）证明 arena、双向边、值留在运行时里这条路能撑住 Solid 的调度；Impasto 要对齐的是 `2.0.0` 的上述 API，不是 nsh 写下的 Solid 1.9，也不把 nsh 的 `Host` 名字带过来。iOS 宿主不存在（`docs/refactor-plan.md:33`），`impasto build ios` 在 `crates/ios` 落地前只能生成工程、不能打出安装包。打包器换成 Rust 是后续的事，这条链路先把 Babel 和 esbuild 编进 CLI 发布包。
 
 Feasible with caveats: iOS 包要等宿主；应用机器不装 Node 要等 CLI 把打包器打进发布物；阶段 2 完成前不能删 `solid-js`。
 
@@ -36,7 +36,7 @@ Feasible with caveats: iOS 包要等宿主；应用机器不装 Node 要等 CLI 
 
 场景桥，今天全在 JS：
 
-- `apps/gallery-solid/build.mjs:37` — Babel：`moduleName: "@impasto/solid-renderer"`，`generate: "universal"`。esbuild 把 `solid-js@2.0.0-rc.17` 和 `@solidjs/universal@2.0.0-rc.17` 打进 `dist/quotes.js`。
+- `apps/gallery-solid/build.mjs` 使用 `tools/pack.mjs`。Babel 以 `moduleName: "@impasto/solid-renderer"` 和 `generate: "universal"` 编译 TSX。esbuild 将 `solid-js` 解析到 `@impasto/reactive`，并检查 `dist/quotes.js` 是否混入 Solid 调度器或 `@solidjs/universal`。
 - `packages/solid-renderer/runtime/index.ts:17` — `createRenderer<HostNode>`，导出 `insert`、`setProp`、`effect`、`memo`。
 - `packages/solid-renderer/src/tree.ts:11` — `HostNode` 是 `{ id }`。裸 number 会被 universal 当成文本。
 - `packages/solid-renderer/src/tree.ts:166` — `hostRendererOptions` 按属性名分发，最终进 `CoreHost`。
@@ -153,7 +153,7 @@ Legend: `──►` 同步调用，`★` 本设计新增。`tick_motions`、`lay
 
 3. **不新建第二棵视图树。** nsh 的 `Core` 是影子树，平台视图才是画出来的那棵，帧末交 `MountBatch`。Impasto 的 `Tree` 已经是画出来的那棵：槽位、代数、Taffy、picture、弹簧都在上面。`insert` / `setProp` 直接调 `Tree` 的方法。否决把 `MountBatch` 或 Flutter 的 Element/RenderObject 再夹一层。`{ id: number }` 这个包装只为了骗过 `@solidjs/universal`（`tree.ts:8`）。universal 删掉之后，JS 拿 `NodeId::to_raw` 的 `u64`。id 只由 Rust 分配，槽位回收时 generation 加一，这是现在的 `NodeId`。否决 nsh 的两套号：JS 发偶数、core 发奇数，以及 `NodeId = u32` 只增不回收、再配一张 `IdTable`。那是因为 nsh 的 id 由 JS 渲染器分配、等 GC 才 `Release`。Impasto 没有第二条分配器。
 
-4. **响应式图复制 nsh 的结构，不复制 `Host` 这个名字，也不复制 Solid 的源码。** 新 crate `reactive`。节点在 arena 里，槽位复用时 generation 加一，依赖是双向整数边，解开用 swap-remove。图不持有跨进用户闭包的借用：闭包可能重入。值类型叫 `Value`。QuickJS 实现把 `Persistent<Value>` 存在节点里，读取时克隆 Persistent，不把对象序列化成 JSON。trait 叫 `Eval`，对应 nsh 的 `Host`（`reactive.rs:83`），方法是 `dup`、`free`、`call`、`same`。否决继续把 `solid-js` 的调度打进 bundle：那是现状，订阅和标脏留在 JS。否决把 nsh 的实现搬过来当依赖：它的队列对齐 Solid 1.9，本仓库测的是 `2.0.0-rc.17` 里上面那张 API 清单。
+4. **响应式图复制 nsh 的结构，不复制 `Host` 这个名字，也不复制 Solid 的源码。** 新 crate `reactive`。节点在 arena 里，槽位复用时 generation 加一，依赖是双向整数边，解开用 swap-remove。图不持有跨进用户闭包的借用：闭包可能重入。值类型叫 `Value`。QuickJS 实现把 `Persistent<Value>` 存在节点里，读取时克隆 Persistent，不把对象序列化成 JSON。trait 叫 `Eval`，对应 nsh 的 `Host`（`reactive.rs:83`），方法是 `dup`、`free`、`call`、`same`。否决继续把 `solid-js` 的调度打进 bundle：那是现状，订阅和标脏留在 JS。否决把 nsh 的实现搬过来当依赖：它的队列对齐 Solid 1.9，本仓库测的是 `2.0.0` 里上面那张 API 清单。
 
 5. **滚动偏移和弹簧留在 `uicore` 的 `motions`，并且仍在渲染线程上、仍在 `run_updates` 之前采样。** 现在 `tick_motions` 是 `JsSession::frame` 的第一步（`linked/mod.rs:799`），`set_scroll_offset` 只标绘制。监听器可以读 offset、写别的 signal。禁止每帧 `set()` 一个滚动 signal。否决 nsh 的另一半：它的 offset 由平台视图报进 core，弹簧在 UI 线程的第二张动画图上采样。Impasto 的滚动是 `Tree` 自己算的，没有 UIKit 滚动视图。把弹簧搬去平台线程会拆掉「macos / android 只提供窗口、输入、帧」。`For` 只服务短列表。可见集继续由 `ListDriver` 决定，不把 nsh 的 `Each` 行协调搬进 `reactive`。
 
@@ -396,10 +396,10 @@ export default function Main() {
 **File: `crates/reactive/src/lib.rs`**（新）
 
 - 放设计一节的 `Graph`、`Eval`、`Kind`、`Edge`。
-- `run_updates` 的队列顺序按 `2.0.0-rc.17` 测出来的行为写，不按 nsh 的 Solid 1.9 注释写。
+- `run_updates` 的队列顺序按 `2.0.0` 测出来的行为写，不按 nsh 的 Solid 1.9 注释写。
 - 闭包重入时不能持有 `nodes` 的借用。和 nsh 一样：进 `Eval::call` 之前把值从节点里取出。
 
-**File: `crates/reactive/tests/solid_rc17.rs`**（新）
+**File: `crates/reactive/tests/solid_2_0.rs`**（新）
 
 - 用一个 Rust `Eval`（值是 `i32` / 字符串，不是 `JSValue`）覆盖清单里的语义：`createSignal` 的读写、memo 缓存、render effect 先于 tracked effect、`untrack` 不订阅、`batch` 合并通知、`onCleanup` 在 owner 销毁和 effect 重跑时触发、`createRoot` 销毁子节点、`getOwner` / `runWithOwner`、`createContext` / `useContext`、`children` 的扁平化。
 - 对照物是同一版本 Solid 的可观察行为，用小脚本在测试里跑一次 Node，把结果钉成夹具。不把 Solid 源码拷进 crate。
@@ -593,7 +593,7 @@ export default function Main() {
 - `crates/quickjs/src/linked/rt/renderer.rs` — native `insert` / `setProp` 直达 `Tree`
 - `crates/reactive/Cargo.toml` — 新 crate
 - `crates/reactive/src/lib.rs` — arena 图、`Eval`、`run_updates`
-- `crates/reactive/tests/solid_rc17.rs` — 按 `2.0.0-rc.17` 的可观察行为钉夹具
+- `crates/reactive/tests/solid_2_0.rs` — 按 `2.0.0` 的可观察行为钉夹具
 - `crates/session/src/modules.rs` — `HostModule` 等改名
 - `docs/architecture.md` — 阶段 4 改 hostshell 的路径描述
 - `docs/toolchain-baseline.md` — 阶段 6 写入点击和滚动的次数

@@ -3,20 +3,11 @@ import transformTypescript from "@babel/plugin-transform-typescript";
 import solidTransform from "@solidjs/babel-plugin";
 import * as esbuild from "esbuild";
 import { readFileSync, existsSync, realpathSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packages = join(root, "packages");
-const nativeFiles = new Map([
-  ["clipboard/clipboard.ts", "@impasto/clipboard"],
-  ["linking/linking.ts", "@impasto/linking"],
-  ["file-system/files.ts", "@impasto/file-system"],
-  ["async-storage/storage.ts", "@impasto/async-storage"],
-  ["app-state/app-state.ts", "@impasto/app-state"],
-  ["permissions/permissions.ts", "@impasto/permissions"],
-  ["devtools/devtools.ts", "@impasto/devtools"],
-].map(([path, name]) => [join(packages, path.split('/')[0], 'src', path.split('/')[1]), name]));
 
 export function assertNoScheduler(code, inputs = []) {
   if (inputs.some(path => /node_modules\/.*(?:solid-js|@solidjs[+/](?:signals|universal))/.test(path)) || /REACTIVITY_HALTED|@solidjs\/universal/.test(code)) {
@@ -41,13 +32,15 @@ export function packOptions({ absWorkingDir, entryPoints, outfile, release = fal
           if (!existsSync(manifest)) return;
           const exports = JSON.parse(readFileSync(manifest, "utf8")).exports;
           const target = exports?.[rest.length ? `./${rest.join('/')}` : "."];
+          if (target === "./src/native.d.ts") return { path: args.path, external: true };
           return typeof target === "string" ? { path: join(packages, name, target) } : undefined;
         });
-        build.onResolve({ filter: /\.ts$/ }, args => {
-          if (!args.path.startsWith(".")) return;
-          const path = resolve(args.resolveDir, args.path);
-          const native = nativeFiles.get(path);
-          return native ? { path: native, external: true } : undefined;
+        build.onResolve({ filter: /^\.\.?\/(.*\/)?native\.js$/ }, args => {
+          const source = dirname(resolve(args.resolveDir, args.path));
+          const folder = dirname(source);
+          if (dirname(folder) !== packages || basename(source) !== "src") return;
+          if (!existsSync(join(source, "native.d.ts"))) return;
+          return { path: `@impasto/${basename(folder)}`, external: true };
         });
         build.onLoad({ filter: /\.tsx?$/ }, async args => {
           const result = await transformAsync(readFileSync(args.path, "utf8"), {

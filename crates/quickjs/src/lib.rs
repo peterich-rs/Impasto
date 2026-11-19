@@ -131,13 +131,18 @@ mod component_tests;
 mod tests {
     use protocol::Command;
     use session::{
-        ImmediateExec, InputEvent, IoEvent, Key, Method, Module, ModuleConfig, ModuleRegistry,
-        PluginResult, PluginValue,
+        EventType, ImmediateExec, InputEvent, IoEvent, Key, Method, Module, ModuleConfig,
+        ModuleRegistry, PluginResult, PluginValue,
     };
     use session::{Metrics, Session};
     use uicore::{Phase, PointerEvent};
 
     use super::{Error, open};
+
+    const LINKING_EVENTS: &[EventType] = &[EventType {
+        name: "url",
+        payload: "{ url: string }",
+    }];
 
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -366,6 +371,35 @@ mod tests {
                 .iter()
                 .any(|fault| fault.message.contains("interrupted"))
         );
+    }
+
+    #[test]
+    fn frame_callback_signal_updates_layout_in_the_same_frame() {
+        let source = r#"
+            import { createSignal, createRenderEffect } from "reactive";
+            import * as scene from "scene";
+            const root = scene.column(0);
+            const label = scene.text("initial", 16, [255, 255, 255, 255]);
+            scene.append(root, label);
+            const [read, write] = createSignal("initial");
+            createRenderEffect(read, (value) => scene.setText(label, value));
+            scene.onFrame((target) => {
+                if (target === 16) write("from frame callback");
+            });
+        "#;
+        let mut session = open(
+            source,
+            "frame-signal.js",
+            uicore::MonoShaper::default(),
+            no_log(),
+        )
+        .expect("open session");
+        session.metrics(&metrics());
+        let first = session.frame(session::FrameTime::at(0.0));
+        text_spot(&first, "initial");
+        let next = session.frame(session::FrameTime::at(16.0));
+        text_spot(&next, "from frame callback");
+        assert_eq!(next.phases.expect("frame phases").trace.layout_passes, 1);
     }
 
     #[test]
@@ -682,6 +716,7 @@ import * as core from "scene";
         let config = ModuleConfig {
             registry: std::sync::Arc::new(ModuleRegistry::new(vec![Module {
                 name: "Probe",
+                exports: Default::default(),
                 specifier: "@impasto/probe",
                 methods: vec![
                     Method::sync("read", |args| match args.first() {
@@ -784,6 +819,7 @@ import * as core from "scene";
         let mut config = ModuleConfig::disconnected();
         config.registry = std::sync::Arc::new(ModuleRegistry::new(vec![Module {
             name: "Echo",
+            exports: Default::default(),
             specifier: "@impasto/echo",
             methods: vec![Method::sync("echo", |args| {
                 Ok(args.first().cloned().unwrap_or(PluginValue::Null))
@@ -885,6 +921,10 @@ import * as core from "scene";
             registry: Arc::new(ModuleRegistry::new(vec![
                 Module {
                     name: "Clipboard",
+                    exports: session::ModuleExports {
+                        object: true,
+                        ..Default::default()
+                    },
                     specifier: "@impasto/clipboard",
                     methods: vec![
                         Method::sync("getString", {
@@ -915,6 +955,13 @@ import * as core from "scene";
                 },
                 Module {
                     name: "AppState",
+                    exports: session::ModuleExports {
+                        events: &[EventType {
+                            name: "change",
+                            payload: "string",
+                        }],
+                        ..Default::default()
+                    },
                     specifier: "@impasto/app-state",
                     methods: vec![Method::sync("getCurrentState", {
                         let app_state = Arc::clone(&app_state);
@@ -923,6 +970,7 @@ import * as core from "scene";
                 },
                 Module {
                     name: "Echo",
+                    exports: Default::default(),
                     specifier: "@impasto/echo",
                     methods: vec![
                         Method::sync("fail", |_| Err("boom from host".into())),
@@ -937,6 +985,11 @@ import * as core from "scene";
                 },
                 Module {
                     name: "Linking",
+                    exports: session::ModuleExports {
+                        object: true,
+                        events: LINKING_EVENTS,
+                        ..Default::default()
+                    },
                     specifier: "@impasto/linking",
                     methods: vec![Method::sync("getInitialURL", {
                         let launch_url = Arc::clone(&launch_url);
@@ -1061,6 +1114,75 @@ import * as core from "scene";
         found.unwrap_or_else(|| panic!("missing text {utf8}"))
     }
 
+    fn redraws(frame: &session::FrameOutput) -> u32 {
+        frame.phases.expect("frame phases").trace.canvas_redraws
+    }
+
+    /// Picture generation and canvas body identity for canvases of `height`.
+    /// A re-record allocates a new body and advances the picture generation.
+    fn chart_pictures(frame: &session::FrameOutput, height: f32) -> Vec<(u64, usize)> {
+        let Some(tree) = frame.layers.as_deref() else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        for picture in &tree.pictures {
+            for command in picture.commands.iter() {
+                if let Command::Canvas {
+                    height: canvas_height,
+                    list,
+                    ..
+                } = command
+                    && (canvas_height - height).abs() < 0.5
+                {
+                    found.push((
+                        picture.generation,
+                        std::sync::Arc::as_ptr(&list.body) as usize,
+                    ));
+                }
+            }
+        }
+        found
+    }
+
+    fn chart_origin(frame: &session::FrameOutput, height: f32) -> Option<(f32, f32)> {
+        let mut found = None;
+        visit_commands(frame, &mut |command, tx, ty| {
+            if let Command::Canvas {
+                x,
+                y,
+                height: canvas_height,
+                ..
+            } = command
+                && (canvas_height - height).abs() < 0.5
+            {
+                found = Some((tx + *x, ty + *y));
+            }
+        });
+        found
+    }
+
+    fn volume_readout(frame: &session::FrameOutput) -> bool {
+        texts(frame).iter().any(|text| text.starts_with("成交量 "))
+    }
+
+    fn chart_recorded_volume(frame: &session::FrameOutput, height: f32) -> bool {
+        let mut found = false;
+        visit_commands(frame, &mut |command, _, _| {
+            if let Command::Canvas {
+                height: canvas_height,
+                list,
+                ..
+            } = command
+                && (canvas_height - height).abs() < 0.5
+            {
+                found |= list.ops().iter().any(|op| {
+                    matches!(op, protocol::CanvasOp::Text(text) if text.utf8.contains("成交量"))
+                });
+            }
+        });
+        found
+    }
+
     /// Pumps frames until the first screen lands. The quotes app mounts a
     /// heavier first screen than the old counter.
     fn pump_first(session: &mut dyn Session) -> session::FrameOutput {
@@ -1107,16 +1229,24 @@ import * as core from "scene";
         ModuleConfig {
             registry: std::sync::Arc::new(ModuleRegistry::new(vec![
                 Module {
-                    name: "Storage",
+                    name: "AsyncStorage",
+                    exports: session::ModuleExports {
+                        object: true,
+                        ..Default::default()
+                    },
                     specifier: "@impasto/async-storage",
                     methods: vec![
-                        Method::sync("getItem", |_| Ok(PluginValue::Null)),
-                        Method::sync("setItem", |_| Ok(PluginValue::Null)),
-                        Method::sync("removeItem", |_| Ok(PluginValue::Null)),
+                        Method::sync("multiGet", |_| Ok(PluginValue::List(Vec::new()))),
+                        Method::sync("multiSet", |_| Ok(PluginValue::Null)),
                     ],
                 },
                 Module {
                     name: "Linking",
+                    exports: session::ModuleExports {
+                        object: true,
+                        events: LINKING_EVENTS,
+                        ..Default::default()
+                    },
                     specifier: "@impasto/linking",
                     methods: vec![
                         Method::sync("getInitialURL", |_| Ok(PluginValue::Null)),
@@ -1126,6 +1256,10 @@ import * as core from "scene";
                 },
                 Module {
                     name: "Clipboard",
+                    exports: session::ModuleExports {
+                        object: true,
+                        ..Default::default()
+                    },
                     specifier: "@impasto/clipboard",
                     methods: vec![
                         Method::sync("getString", |_| Ok(PluginValue::Str(String::new()))),
@@ -1134,6 +1268,7 @@ import * as core from "scene";
                 },
                 Module {
                     name: "Devtools",
+                    exports: Default::default(),
                     specifier: "@impasto/devtools",
                     methods: vec![Method::sync("enabled", |_| Ok(PluginValue::Bool(false)))],
                 },
@@ -1388,19 +1523,186 @@ import * as core from "scene";
             }
         });
         let (x, y) = plot.expect("daily candle plot");
-        session.pointer(PointerEvent::new(Phase::Move, x + 120.0, y + 40.0, time));
-        let focus = session.frame(session::FrameTime::at(time + 16.0));
-        let mut readout = false;
-        visit_commands(&focus, &mut |command, _, _| {
-            if let Command::Canvas { list, .. } = command {
-                readout |= list.ops().iter().any(|op| {
-                    matches!(op, protocol::CanvasOp::Text(text) if text.utf8.starts_with("成交量 "))
-                });
+        session.pointer(PointerEvent::new(Phase::Down, x + 120.0, y + 40.0, time));
+        time += 16.0;
+        session.pointer(PointerEvent::new(Phase::Move, x + 144.0, y + 40.0, time));
+        time += 16.0;
+        let mut focus = session.frame(session::FrameTime::at(time));
+        for _ in 0..3 {
+            if volume_readout(&focus) {
+                break;
             }
-        });
-        assert!(readout, "hover should draw a candle readout");
+            time += 16.0;
+            let next = session.frame(session::FrameTime::at(time));
+            if next.layers.is_some() {
+                focus = next;
+            }
+        }
+        assert!(
+            volume_readout(&focus),
+            "crosshair should show a candle readout, got {:?}",
+            texts(&focus)
+        );
+        assert!(
+            !chart_recorded_volume(&focus, 320.0),
+            "main chart should not record the crosshair readout"
+        );
         let errors = session.take_faults();
         assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn stocks_phone_crosshair_keeps_the_chart_picture() {
+        let Some(mut session) = open_gallery() else {
+            return;
+        };
+        session.metrics(&phone());
+        let mut time = 0.0;
+        let first = wait_for_text(session.as_mut(), &mut time, "腾讯控股");
+        let (x, y) = text_spot(&first, "腾讯控股");
+        click(session.as_mut(), x, y);
+        let _opening = wait_for_text(session.as_mut(), &mut time, "‹ 返回");
+        let detail = wait_for_text(session.as_mut(), &mut time, "价格区间");
+        let (daily_x, daily_y) = text_spot(&detail, "1D");
+        click(session.as_mut(), daily_x, daily_y);
+        let detail = wait_for_text(session.as_mut(), &mut time, "MA5");
+        let (pause_x, pause_y) = text_spot(&detail, "Ⅱ");
+        click(session.as_mut(), pause_x, pause_y);
+        // A quiet frame did not re-record a canvas. The chart box from the last
+        // submitted tree is still where the pointer hits.
+        let mut baseline = None;
+        let mut point = None;
+        let mut last_spot = None;
+        let mut held_spot = None;
+        let mut held_pictures = None;
+        for _ in 0..8 {
+            time += 16.0;
+            let frame = session.frame(session::FrameTime::at(time));
+            let errors = session.take_faults();
+            assert!(errors.is_empty(), "{errors:?}");
+            if let Some(spot) = chart_origin(&frame, 204.0) {
+                let pictures = chart_pictures(&frame, 204.0);
+                if pictures.len() == 1 {
+                    held_spot = Some(spot);
+                    held_pictures = Some(pictures);
+                }
+            }
+            let (Some((plot_x, plot_y)), Some(pictures)) = (held_spot, held_pictures.clone())
+            else {
+                continue;
+            };
+            last_spot = Some((plot_x, plot_y));
+            let x = plot_x + 16.0;
+            let y = plot_y + 30.0;
+            let placed = (8.0..302.0).contains(&x) && (8.0..600.0).contains(&y);
+            if redraws(&frame) == 0 && placed {
+                baseline = Some(pictures);
+                point = Some((x, y));
+                break;
+            }
+        }
+        let baseline = baseline.unwrap_or_else(|| panic!("chart canvas spot={last_spot:?}"));
+        let (x, y) = point.expect("chart point");
+
+        session.pointer(PointerEvent::new(Phase::Down, x, y, time));
+        time += 16.0;
+        session.pointer(PointerEvent::new(Phase::Move, x + 24.0, y, time));
+        time += 16.0;
+        let mut dragged = session.frame(session::FrameTime::at(time));
+        for _ in 0..3 {
+            if volume_readout(&dragged) {
+                break;
+            }
+            time += 16.0;
+            let next = session.frame(session::FrameTime::at(time));
+            if next.layers.is_some() {
+                dragged = next;
+            }
+        }
+        assert!(
+            volume_readout(&dragged),
+            "crosshair tooltip missing {:?}",
+            texts(&dragged)
+        );
+        let same_chart = |frame: &session::FrameOutput, step: &str| {
+            if frame.layers.is_none() {
+                assert_eq!(redraws(frame), 0, "{step}");
+                return;
+            }
+            assert_eq!(
+                chart_pictures(frame, 204.0),
+                baseline,
+                "{step} redraws={}",
+                redraws(frame)
+            );
+            assert!(!chart_recorded_volume(frame, 204.0), "{step}");
+        };
+        same_chart(&dragged, "crosshair opens");
+        assert_eq!(redraws(&dragged), 0, "press and drag must skip Canvas draw");
+        let first_readout = texts(&dragged);
+        session.pointer(PointerEvent::new(Phase::Move, x + 48.0, y, time));
+        time += 16.0;
+        let dragged = session.frame(session::FrameTime::at(time));
+        same_chart(&dragged, "horizontal drag again");
+        assert!(volume_readout(&dragged));
+        assert_ne!(texts(&dragged), first_readout);
+        assert_eq!(
+            dragged
+                .phases
+                .expect("timed gallery frame")
+                .trace
+                .root_layouts,
+            0,
+            "changing the selected daily bar should keep ancestor layout"
+        );
+
+        session.pointer(PointerEvent::new(Phase::Cancel, x + 48.0, y, time));
+        time += 16.0;
+        let mut cancelled = session.frame(session::FrameTime::at(time));
+        for _ in 0..3 {
+            if !volume_readout(&cancelled) && cancelled.layers.is_some() {
+                break;
+            }
+            time += 16.0;
+            let next = session.frame(session::FrameTime::at(time));
+            if next.layers.is_some() {
+                cancelled = next;
+            }
+        }
+        assert!(
+            !volume_readout(&cancelled),
+            "cancel should clear the crosshair {:?}",
+            texts(&cancelled)
+        );
+        same_chart(&cancelled, "crosshair cancels");
+        assert_eq!(redraws(&cancelled), 0, "cancel must skip Canvas draw");
+
+        let (_, before_y) = text_spot(&dragged, "分时");
+        session.pointer(PointerEvent::new(Phase::Down, x, y, time));
+        time += 16.0;
+        session.pointer(PointerEvent::new(Phase::Move, x, y - 80.0, time));
+        time += 16.0;
+        let mut scrolled = None;
+        for _ in 0..4 {
+            let frame = session.frame(session::FrameTime::at(time));
+            time += 16.0;
+            let errors = session.take_faults();
+            assert!(errors.is_empty(), "{errors:?}");
+            if frame.layers.is_some() {
+                assert!(!chart_recorded_volume(&frame, 204.0), "vertical scroll");
+            }
+            if texts(&frame).contains(&"分时") {
+                scrolled = Some(text_spot(&frame, "分时").1);
+                break;
+            }
+        }
+        let after_y = scrolled.expect("分时 stayed visible");
+        assert_ne!(after_y, before_y, "vertical drag should scroll the page");
+        session.pointer(PointerEvent::new(Phase::Cancel, x, y - 80.0, time));
+        time += 16.0;
+        let ended = session.frame(session::FrameTime::at(time));
+        assert!(ended.phases.is_some(), "scroll cancel");
+        assert!(!chart_recorded_volume(&ended, 204.0), "scroll cancel");
     }
 
     #[test]
@@ -1429,6 +1731,73 @@ import * as core from "scene";
         let (x, y) = text_spot(&detail, "买入");
         click(session.as_mut(), x, y);
         wait_for_text(session.as_mut(), &mut time, "模拟下单");
+    }
+
+    #[test]
+    fn stocks_phone_reopens_during_exit_without_leaving_a_detail() {
+        let Some(mut session) = open_gallery() else {
+            return;
+        };
+        session.metrics(&phone());
+        let mut time = 0.0;
+        let home = wait_for_text(session.as_mut(), &mut time, "腾讯控股");
+        let (x, y) = text_spot(&home, "腾讯控股");
+        let (other_x, other_y) = text_spot(&home, "阿里巴巴");
+        click(session.as_mut(), x, y);
+        wait_for_text(session.as_mut(), &mut time, "‹ 返回");
+        click(session.as_mut(), other_x, other_y);
+        let detail = wait_for_text(session.as_mut(), &mut time, "价格区间");
+        assert_eq!(
+            texts(&detail)
+                .iter()
+                .filter(|label| **label == "‹ 返回")
+                .count(),
+            1
+        );
+        let (back_x, back_y) = text_spot(&detail, "‹ 返回");
+        click(session.as_mut(), back_x, back_y);
+        let mut exiting = detail;
+        for _ in 0..9 {
+            time += 16.0;
+            let frame = session.frame(session::FrameTime::at(time));
+            if frame.layers.is_some() {
+                exiting = frame;
+            }
+        }
+        assert!(text_spot(&exiting, "‹ 返回").0 > other_x);
+        click(session.as_mut(), other_x, other_y);
+        let mut reopened = wait_for_text(session.as_mut(), &mut time, "价格区间");
+        assert_eq!(
+            texts(&reopened)
+                .iter()
+                .filter(|label| **label == "09988")
+                .count(),
+            2
+        );
+        session.input(InputEvent::Back);
+        for _ in 0..48 {
+            time += 16.0;
+            let frame = session.frame(session::FrameTime::at(time));
+            let faults = session.take_faults();
+            assert!(faults.is_empty(), "{faults:?}");
+            if frame.layers.is_some() {
+                reopened = frame;
+            }
+        }
+        let shown = texts(&reopened);
+        assert!(shown.contains(&"综合指数"), "{shown:?}");
+        assert!(!shown.contains(&"‹ 返回"), "{shown:?}");
+
+        click(session.as_mut(), x, y);
+        let entering = wait_for_text(session.as_mut(), &mut time, "‹ 返回");
+        let before = text_spot(&entering, "‹ 返回").0;
+        session.input(InputEvent::Back);
+        let reversing = wait_for_text(session.as_mut(), &mut time, "‹ 返回");
+        let after = text_spot(&reversing, "‹ 返回").0;
+        assert!(
+            (after - before).abs() < 30.0,
+            "back jumped from {before} to {after}"
+        );
     }
 
     #[test]
@@ -3140,8 +3509,11 @@ import * as core from "scene";
                     .push(text.to_owned());
             });
             let source = r#"
-                import { setString, getString } from "@impasto/clipboard";
+                import * as clipboard from "@impasto/clipboard";
                 import { addEventListener } from "@impasto/app-state";
+                if ("addEventListener" in clipboard || "removeEventListener" in clipboard) {
+                    throw new Error("clipboard has no native events");
+                }
                 console.log(new URL("https://example.test/a?q=1").searchParams.get("q"));
                 console.log(String(new TextEncoder().encode("A").length));
                 setTimeout(() => console.log("soon"), 0);
@@ -3153,8 +3525,8 @@ import * as core from "scene";
                     .then((response) => response.text())
                     .then((text) => console.log("body:" + text));
                 addEventListener("change", (state) => console.log("state:" + state));
-                setString("hi");
-                console.log("clip:" + getString());
+                clipboard.setString("hi");
+                console.log("clip:" + clipboard.getString());
                 const socket = new WebSocket("ws://example.test/socket");
                 socket.onerror = () => console.log("ws");
             "#;
@@ -3846,6 +4218,139 @@ import * as core from "scene";
     }
 
     #[test]
+    fn offscreen_canvas_releases_dependencies_and_draws_latest_once() {
+        let source = r#"
+import * as core from "scene";
+import { createSignal } from "reactive";
+
+const root = core.column(0);
+const scroll = core.scroll();
+const content = core.column(0);
+const canvas = core.sized(80, 40);
+const spacer = core.sized(80, 200);
+const [value, set] = createSignal(0);
+core.setSize(scroll, 100, 80);
+core.append(root, scroll);
+core.append(scroll, content);
+core.append(content, canvas);
+core.append(content, spacer);
+const binding = core.bindCanvas(canvas, (ctx) => ctx.fillText(String(value()), 0, 12), null, true);
+core.onFrame((target) => {
+    const step = Math.round(target / 16);
+    if (step === 1 || step === 104) core.setScrollOffset(scroll, 0, 120);
+    if (step >= 2 && step <= 101) {
+        set(step - 1);
+        binding.invalidate();
+    }
+    if (step === 102 || step === 105) core.setScrollOffset(scroll, 0, 0);
+    if (step === 106) {
+        binding.release();
+        core.remove(content, canvas);
+    }
+});
+"#;
+        let mut session = open_canvas(source, "offscreen-canvas.js");
+        session.metrics(&metrics());
+        let first = session.frame(session::FrameTime::at(0.0));
+        assert_eq!(redraws(&first), 1);
+        for step in 1..=101 {
+            let frame = session.frame(session::FrameTime::at(f64::from(step) * 16.0));
+            let trace = frame.phases.expect("frame phases").trace;
+            assert_eq!(trace.canvas_callbacks, 0, "step {step}");
+            assert_eq!(trace.canvas_preparations, 0, "step {step}");
+            assert!(!frame.again, "step {step}");
+        }
+        let back = session.frame(session::FrameTime::at(102.0 * 16.0));
+        let trace = back.phases.expect("frame phases").trace;
+        assert_eq!((trace.canvas_callbacks, trace.canvas_preparations), (1, 1));
+        let mut latest = false;
+        visit_commands(&back, &mut |command, _, _| {
+            if let Command::Canvas { list, .. } = command {
+                latest |= list.ops().iter().any(
+                    |op| matches!(op, protocol::CanvasOp::Text(text) if text.utf8.as_ref() == "100"),
+                );
+            }
+        });
+        assert!(latest);
+        assert_eq!(
+            redraws(&session.frame(session::FrameTime::at(103.0 * 16.0))),
+            0
+        );
+        assert_eq!(
+            redraws(&session.frame(session::FrameTime::at(104.0 * 16.0))),
+            0
+        );
+        assert_eq!(
+            redraws(&session.frame(session::FrameTime::at(105.0 * 16.0))),
+            1
+        );
+        assert_eq!(
+            redraws(&session.frame(session::FrameTime::at(106.0 * 16.0))),
+            0
+        );
+        assert!(session.take_script_error().is_none());
+    }
+
+    #[test]
+    fn canvas_batches_match_scalar_paint_order_and_reject_bad_points() {
+        let source = r#"
+import * as core from "scene";
+
+const root = core.column(0);
+for (const bulk of [false, true]) {
+  const box = core.sized(80, 40);
+  core.append(root, box);
+  core.bindCanvas(box, (ctx) => {
+    ctx.translate(1.25, 3.5);
+    ctx.beginPath();
+    if (bulk) {
+      for (const invalid of [[0, 0, 1], [0, 0, NaN, 2]]) {
+        let rejected = false;
+        try { ctx.polyline(new Float64Array(invalid)); } catch (_) { rejected = true; }
+        if (!rejected) throw new Error("invalid path accepted");
+      }
+      ctx.polyline(new Float64Array(0));
+      ctx.lineSegments(new Float64Array(0));
+      ctx.fillRects(new Float64Array(0));
+      const backing = new Float64Array([900, 900, 1, 3, 8, 9, 12, 6, 900, 900]);
+      ctx.polyline(backing.subarray(2, 8));
+      ctx.lineSegments(new Float64Array([16, 4, 18, 10, 21, 4, 25, 10]));
+    } else {
+      ctx.moveTo(1, 3);
+      ctx.lineTo(8, 9);
+      ctx.lineTo(12, 6);
+      ctx.moveTo(16, 4);
+      ctx.lineTo(18, 10);
+      ctx.moveTo(21, 4);
+      ctx.lineTo(25, 10);
+    }
+    ctx.stroke();
+    ctx.fillStyle = '#11448880';
+    if (bulk) {
+      ctx.fillRects(new Float64Array([2, 5, 5, 6, 8, 9, -4, -3, 1, 2, 0, 10]));
+    } else {
+      ctx.fillRect(2, 5, 5, 6);
+      ctx.fillRect(8, 9, -4, -3);
+      ctx.fillRect(1, 2, 0, 10);
+    }
+  });
+}
+"#;
+        let mut session = open_canvas(source, "canvas-batches.js");
+        session.metrics(&metrics());
+        let frame = session.frame(session::FrameTime::at(0.0));
+        let mut lists = Vec::new();
+        visit_commands(&frame, &mut |command, _, _| {
+            if let Command::Canvas { list, .. } = command {
+                lists.push(list.ops().to_vec());
+            }
+        });
+        assert_eq!(lists.len(), 2);
+        assert_eq!(lists[0], lists[1]);
+        assert!(session.take_script_error().is_none());
+    }
+
+    #[test]
     fn canvas_side_effect_keeps_the_picture_and_reports_next_frame() {
         let source = r#"
 import * as core from "scene";
@@ -4223,6 +4728,13 @@ import * as core from "scene";
         let config = ModuleConfig {
             registry: std::sync::Arc::new(ModuleRegistry::new(vec![Module {
                 name: "Mark",
+                exports: session::ModuleExports {
+                    events: &[EventType {
+                        name: "tick",
+                        payload: "null",
+                    }],
+                    ..Default::default()
+                },
                 specifier: "@impasto/mark",
                 methods: vec![Method::sync("write", {
                     let flag = std::sync::Arc::clone(&flag);

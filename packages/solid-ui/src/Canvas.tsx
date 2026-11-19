@@ -29,6 +29,7 @@ export function Canvas(props: CanvasProps): NodeHandle {
         if (handler == null) return false;
         handler(error);
       },
+      props.deferWhenOffscreen,
     );
     props.controller?.(binding);
   };

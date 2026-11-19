@@ -2,21 +2,14 @@
 import { createRenderEffect, createSignal, For, Show } from "solid-js";
 import { Text, useTheme } from "@impasto/solid-ui";
 import { scene, readMetrics } from "@impasto/solid-renderer";
-import * as raw from "../devtools.ts";
+import * as raw from "../native.js";
 type Row = [string, string];
-function callRecord(read: () => unknown): Record<string, unknown> | null {
+function readIfAvailable<T>(read: () => T): T | null {
   try {
-    const value = read();
-    if (value && typeof value === "object") {
-      return value as Record<string, unknown>;
-    }
+    return read();
   } catch {
-    /* scene module not linked */
+    return null;
   }
-  return null;
-}
-function textOf(value: unknown): string {
-  return typeof value === "string" ? value : "";
 }
 export function InfoPage() {
   const theme = useTheme();
@@ -38,21 +31,15 @@ export function InfoPage() {
       } catch {
         /* scene without the debug binding keeps the dash */
       }
-      const platform = callRecord(() => raw.platform());
-      const versions = callRecord(() => raw.versions());
-      const viewport = platform?.viewport as
-        | {
-            w?: number;
-            h?: number;
-            dpr?: number;
-          }
-        | undefined;
+      const platform = readIfAvailable(() => raw.platform());
+      const versions = readIfAvailable(() => raw.versions());
+      const viewport = platform?.viewport;
       const out: Row[] = [
         [
           "os",
-          textOf(platform?.os) +
-            (textOf(platform?.osVersion)
-              ? ` ${textOf(platform?.osVersion)}`
+          (platform?.os ?? "") +
+            (platform?.osVersion
+              ? ` ${platform.osVersion}`
               : ""),
         ],
         [
@@ -69,13 +56,13 @@ export function InfoPage() {
             ? `t${metrics.viewInsets.top} b${metrics.viewInsets.bottom}`
             : "-",
         ],
-        ["app", textOf(platform?.appState)],
-        ["log", textOf(platform?.log) || "info"],
+        ["app", platform?.appState ?? ""],
+        ["log", platform?.log || "info"],
         ["devtools", platform?.devtools === true ? "1" : platform ? "0" : "-"],
-        ["dump", textOf(platform?.dump) || "-"],
-        ["shell", textOf(versions?.shell)],
-        ["engine", textOf(versions?.enginePin)],
-        ["quickjs", textOf(versions?.quickjsPin)],
+        ["dump", platform?.dump || "-"],
+        ["shell", versions?.shell ?? ""],
+        ["engine", versions?.enginePin ?? ""],
+        ["quickjs", versions?.quickjsPin ?? ""],
         ["memory", memory],
         ["sourcemap", "见错误页堆栈"],
       ];

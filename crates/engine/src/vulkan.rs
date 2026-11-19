@@ -5,7 +5,7 @@ use std::ffi::{CStr, c_char, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
-use crate::{PixelSize, Status};
+use crate::{PixelSize, Status, VulkanPhase};
 
 use super::ffi;
 
@@ -285,6 +285,15 @@ impl super::Engine {
     /// keeps the chain until consecutive misses ask it to rebuild.
     /// No display list is [`Status::NotReady`].
     pub fn draw_vulkan(&mut self, swapchain: &VulkanSwapchain) -> Result<(), Status> {
+        self.draw_vulkan_with_trace(swapchain, |_| ())
+    }
+
+    /// Calls `section` before each Vulkan phase and drops its guard on return.
+    pub fn draw_vulkan_with_trace<G>(
+        &mut self,
+        swapchain: &VulkanSwapchain,
+        mut section: impl FnMut(VulkanPhase) -> G,
+    ) -> Result<(), Status> {
         if self.context.is_null() || self.list.is_null() {
             return Err(Status::NotReady);
         }
@@ -296,13 +305,22 @@ impl super::Engine {
         // next image. The returned surface is released before this function returns.
         // The guard publishes this engine's extent to the swapchain-size hook.
         let _guard = CurrentProcs::enter(self.vulkan_procs);
-        let surface = unsafe { ffi::ImpellerVulkanSwapchainAcquireNextSurfaceNew(swapchain.raw) };
+        let surface = {
+            let _phase = section(VulkanPhase::Acquire);
+            unsafe { ffi::ImpellerVulkanSwapchainAcquireNextSurfaceNew(swapchain.raw) }
+        };
         if surface.is_null() {
             return Err(Status::AcquireMiss);
         }
         let presented = unsafe {
-            let drew = ffi::ImpellerSurfaceDrawDisplayList(surface, self.list);
-            let presented = drew && ffi::ImpellerSurfacePresent(surface);
+            let drew = {
+                let _phase = section(VulkanPhase::Draw);
+                ffi::ImpellerSurfaceDrawDisplayList(surface, self.list)
+            };
+            let presented = drew && {
+                let _phase = section(VulkanPhase::Present);
+                ffi::ImpellerSurfacePresent(surface)
+            };
             ffi::ImpellerSurfaceRelease(surface);
             presented
         };

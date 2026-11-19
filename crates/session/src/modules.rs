@@ -5,7 +5,8 @@ use std::sync::{Arc, RwLock};
 use crate::io::PluginValue;
 
 pub use js_host::{
-    ImmediateExec, Invoke, Method, MethodExec, Module, PromiseFn, Settle, SyncFn, Work,
+    EventType, ImmediateExec, Invoke, Method, MethodExec, MethodTypes, Module, ModuleExports,
+    PromiseFn, Settle, SyncFn, Work,
 };
 
 /// Compatibility registry. The modules live in one [`js_host::ModuleRegistry`].
@@ -180,6 +181,7 @@ mod tests {
     fn registry_first_wins_and_call_rejects_promise() {
         let first = Module {
             name: "Clipboard",
+            exports: Default::default(),
             specifier: "@impasto/clipboard",
             methods: vec![Method::sync("getString", |_| {
                 Ok(PluginValue::Str("one".into()))
@@ -187,6 +189,7 @@ mod tests {
         };
         let second = Module {
             name: "Clipboard",
+            exports: Default::default(),
             specifier: "@impasto/other",
             methods: vec![Method::sync("getString", |_| {
                 Ok(PluginValue::Str("two".into()))
@@ -194,6 +197,7 @@ mod tests {
         };
         let maps = Module {
             name: "Maps",
+            exports: Default::default(),
             specifier: "@impasto/maps",
             methods: vec![
                 Method::sync("ping", |_| Ok(PluginValue::Str("pong".into()))),

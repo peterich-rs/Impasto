@@ -5,6 +5,8 @@ pub struct FrameTiming {
     pub number: u64,
     pub vsync_ms: f64,
     pub target_ms: f64,
+    /// Wall time on the render thread through the return from present.
+    pub work_ms: f64,
     pub session_ms: f64,
     pub gesture_ms: f64,
     pub script_ms: f64,
@@ -35,8 +37,7 @@ pub struct FrameTiming {
 
 impl FrameTiming {
     pub fn over_budget(self) -> bool {
-        self.interval_ms > 0.0
-            && self.session_ms + self.submit_ms + self.present_ms > self.interval_ms
+        self.interval_ms > 0.0 && self.work_ms > self.interval_ms
     }
 }
 
@@ -120,6 +121,7 @@ fn log_over_budget(timing: &FrameTiming, phases: &session::FramePhases) {
             record_ms = timing.record_ms,
             submit_ms = timing.submit_ms,
             present_ms = timing.present_ms,
+            work_ms = timing.work_ms,
             budget_ms = timing.interval_ms,
             layout_cause = cause,
             layout_passes = passes,
@@ -150,6 +152,7 @@ fn log_over_budget(timing: &FrameTiming, phases: &session::FramePhases) {
             record_ms = timing.record_ms,
             submit_ms = timing.submit_ms,
             present_ms = timing.present_ms,
+            work_ms = timing.work_ms,
             budget_ms = timing.interval_ms,
             layout_cause = cause,
             layout_passes = passes,
@@ -240,6 +243,8 @@ impl FrameListener for DevtoolFrames {
             seq: 0,
             number: timing.number,
             at_ms: crate::net::mono_ms(),
+            work_ms: timing.work_ms,
+            budget_ms: timing.interval_ms,
             session_ms: timing.session_ms,
             gesture_ms: timing.gesture_ms,
             script_ms: timing.script_ms,
@@ -307,6 +312,8 @@ pub fn write_inspect(
     field(&mut body, "number", &timing.number.to_string(), true);
     field(&mut body, "vsync_ms", &num(timing.vsync_ms), true);
     field(&mut body, "target_ms", &num(timing.target_ms), true);
+    field(&mut body, "work_ms", &num(timing.work_ms), true);
+    field(&mut body, "budget_ms", &num(timing.interval_ms), true);
     field(&mut body, "gesture_ms", &num(timing.gesture_ms), true);
     field(&mut body, "script_ms", &num(timing.script_ms), true);
     field(&mut body, "layout_ms", &num(timing.layout_ms), true);
@@ -416,6 +423,7 @@ mod tests {
                 number: 0,
                 vsync_ms: 0.0,
                 target_ms: 0.0,
+                work_ms: 0.0,
                 session_ms: 0.0,
                 gesture_ms: 0.0,
                 script_ms: 0.0,

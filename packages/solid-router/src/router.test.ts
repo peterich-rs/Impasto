@@ -44,7 +44,7 @@ assert.equal(router.stack()[1]?.phase, "enter");
 assert.equal(router.stack()[1]?.params.depth, "1");
 const covered = router.stack()[0];
 assert.ok(covered);
-router.complete(covered.key);
+router.complete(covered);
 flush();
 assert.equal(router.depth(), 2);
 assert.equal(router.stack()[0]?.phase, "live");
@@ -58,6 +58,8 @@ assert.equal(router.depth(), 2);
 assert.equal(router.stack()[0]?.phase, "live");
 assert.equal(router.stack()[1]?.phase, "exit");
 assert.equal(router.stack()[1]?.key, top.key);
+const exiting = router.stack()[1];
+assert.ok(exiting);
 
 let removed = false;
 spring({
@@ -67,7 +69,7 @@ spring({
   to: -30,
   onDone: () => {
     removed = true;
-    router.complete(top.key);
+    router.complete(exiting);
   },
 });
 assert.equal(removed, false);
@@ -85,7 +87,9 @@ flush();
 assert.equal(handler(), true);
 flush();
 assert.equal(router.stack()[1]?.phase, "exit");
-router.complete(router.stack()[1]?.key ?? "");
+const exitingList = router.stack()[1];
+assert.ok(exitingList);
+router.complete(exitingList);
 flush();
 assert.equal(handler(), false);
 
@@ -101,11 +105,58 @@ assert.equal(router.stack().at(-1)?.phase, "enter");
   flush();
   const covered = race.stack()[0];
   assert.ok(covered);
-  race.complete(covered.key);
+  race.complete(covered);
   assert.equal(race.push("/list"), true);
   flush();
   assert.equal(race.stack().at(-1)?.path, "/list");
   assert.equal(race.stack().length, 3);
+}
+
+{
+  const race = createRouter(defs, { initial: "/schedule" });
+  race.push("/nav/1");
+  flush();
+  const entering = race.stack().at(-1);
+  assert.ok(entering);
+  assert.equal(race.pop(), true);
+  flush();
+  const first = race.stack().at(-1);
+  assert.ok(first);
+  assert.equal(first.phase, "exit");
+  race.complete(entering);
+  flush();
+  assert.equal(race.stack().at(-1), first);
+  assert.equal(race.push("/nav/2"), true);
+  flush();
+  assert.equal(race.push("/nav/2"), false);
+  race.complete(first);
+  flush();
+  assert.deepEqual(race.stack().map((entry) => entry.path), ["/schedule", "/nav/2"]);
+  assert.equal(race.pop(), true);
+  flush();
+  const second = race.stack().at(-1);
+  assert.ok(second);
+  race.complete(second);
+  flush();
+  assert.deepEqual(race.stack().map((entry) => entry.path), ["/schedule"]);
+}
+
+{
+  const race = createRouter(defs, { initial: "/schedule" });
+  assert.equal(race.replace("/list"), true);
+  assert.equal(race.pop(), false, "the retiring root is out of history");
+  assert.equal(race.push("/nav/1"), true);
+  assert.equal(race.push("/nav/2"), true);
+  assert.equal(race.popTo("/list"), true);
+  flush();
+  assert.deepEqual(race.stack().map(({ path, phase }) => [path, phase]), [
+    ["/list", "live"],
+    ["/nav/1", "exit"],
+    ["/nav/2", "exit"],
+  ]);
+  for (const entry of race.stack().slice(1)) race.complete(entry);
+  flush();
+  assert.equal(race.depth(), 1);
 }
 
 linking.initialUrl = null;

@@ -5,6 +5,7 @@ use rquickjs::{
     function::Rest,
     loader::{ImportAttributes, Loader, Resolver},
     module::{Declarations, Exports, ModuleDef},
+    object::Property,
 };
 use std::path::{Component, Path, PathBuf};
 
@@ -214,6 +215,9 @@ impl ModuleDef for GraphModule {
 }
 
 pub(super) struct HostModule;
+const HOST_LISTENER_METHODS: [(&str, bool); 2] =
+    [("addEventListener", false), ("removeEventListener", true)];
+
 impl ModuleDef for HostModule {
     fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
         let name: String = decl.module().name()?;
@@ -232,8 +236,14 @@ impl ModuleDef for HostModule {
         for method in &module.methods {
             decl.declare(method.name)?;
         }
-        decl.declare("addEventListener")?;
-        decl.declare("removeEventListener")?;
+        if !module.exports.events.is_empty() {
+            for (name, _) in HOST_LISTENER_METHODS {
+                decl.declare(name)?;
+            }
+        }
+        if module.exports.object {
+            decl.declare(module.name)?;
+        }
         Ok(())
     }
     fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
@@ -246,30 +256,32 @@ impl ModuleDef for HostModule {
             .registry
             .by_specifier(&specifier)
             .ok_or_else(|| type_error(ctx, "module is not linked"))?;
+        let object = module
+            .exports
+            .object
+            .then(|| Object::new_proto(ctx.clone(), None))
+            .transpose()?;
         for method in &module.methods {
-            let name = module.name.to_owned();
-            let method = method.name.to_owned();
-            let export = method.clone();
-            exports.export(
-                export,
+            let name = module.name;
+            let method = method.name;
+            let function =
                 Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
                     // SAFETY: module functions are destroyed with the VM before Host.
                     let host = unsafe { &*pointer };
                     let _active = host.enter(&ctx);
                     js::host::OperationPolicy::before(host, &ctx)?;
-                    call_host(host, &ctx, &name, &method, &args.0)
-                })?,
-            )?;
+                    call_host(host, &ctx, name, method, &args.0)
+                })?;
+            if let Some(object) = &object {
+                object.prop(method, Property::from(function.clone()).enumerable())?;
+            }
+            exports.export(method, function)?;
         }
-        for remove in [false, true] {
-            let name = module.name.to_owned();
-            exports.export(
-                if remove {
-                    "removeEventListener"
-                } else {
-                    "addEventListener"
-                },
-                Function::new(
+        let events = module.exports.events;
+        if !events.is_empty() {
+            for (event_method, remove) in HOST_LISTENER_METHODS {
+                let name = module.name;
+                let function = Function::new(
                     ctx.clone(),
                     move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<()> {
                         // SAFETY: Host outlives the native module's functions.
@@ -280,16 +292,26 @@ impl ModuleDef for HostModule {
                             return Ok(());
                         }
                         let event = bindings::string(&ctx, &args.0, 0)?;
+                        if !events.iter().any(|declared| declared.name == event) {
+                            return Ok(());
+                        }
                         let saved = Persistent::save(&ctx, args.0[1].clone());
                         if remove {
-                            host.runtime.remove_listener(&name, &event, &saved);
+                            host.runtime.remove_listener(name, &event, &saved);
                         } else {
-                            host.runtime.add_listener(name.clone(), event, saved);
+                            host.runtime.add_listener(name.to_owned(), event, saved);
                         }
                         Ok(())
                     },
-                )?,
-            )?;
+                )?;
+                if let Some(object) = &object {
+                    object.prop(event_method, Property::from(function.clone()).enumerable())?;
+                }
+                exports.export(event_method, function)?;
+            }
+        }
+        if let Some(object) = object {
+            exports.export(module.name, object)?;
         }
         Ok(())
     }

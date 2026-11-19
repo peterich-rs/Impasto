@@ -7,10 +7,15 @@
     "test": "pnpm -r test",
     "build:gallery": "pnpm --filter @impasto/gallery-solid build"
   },
+  "pnpm": {
+    "overrides": {
+      "@solidjs/signals": "2.0.0"
+    }
+  },
   "devDependencies": {
     "@babel/core": "^7.28.0",
     "@babel/plugin-transform-typescript": "^7.28.0",
-    "@solidjs/babel-plugin": "2.0.0-rc.17",
+    "@solidjs/babel-plugin": "2.0.0",
     "esbuild": "^0.25.0",
     "typescript": "5.9.3"
   }

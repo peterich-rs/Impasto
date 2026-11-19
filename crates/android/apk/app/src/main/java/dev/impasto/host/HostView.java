@@ -15,6 +15,7 @@ import android.view.ScaleGestureDetector;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsAnimation;
+import android.view.accessibility.AccessibilityManager;
 import android.view.accessibility.AccessibilityNodeProvider;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
@@ -32,6 +33,9 @@ public final class HostView extends FrameLayout {
     private final VsyncWaiter vsync;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final AccessBridge access = new AccessBridge();
+    private final AccessibilityManager accessibility;
+    private final AccessibilityManager.AccessibilityStateChangeListener accessibilityState =
+            HostView::nativeSemanticsEnabled;
     private final ScaleGestureDetector scale;
     private float density = 1f;
     private WindowInsets deferredInsets;
@@ -41,6 +45,7 @@ public final class HostView extends FrameLayout {
     public HostView(Context context) {
         super(context);
         density = context.getResources().getDisplayMetrics().density;
+        accessibility = context.getSystemService(AccessibilityManager.class);
         surface = new HostSurfaceView(context);
         text = new TextInput(this);
         vsync = new VsyncWaiter(this);
@@ -70,7 +75,19 @@ public final class HostView extends FrameLayout {
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
+        if (accessibility != null) {
+            accessibility.addAccessibilityStateChangeListener(accessibilityState);
+            nativeSemanticsEnabled(accessibility.isEnabled());
+        }
         requestApplyInsets();
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        if (accessibility != null) {
+            accessibility.removeAccessibilityStateChangeListener(accessibilityState);
+        }
+        super.onDetachedFromWindow();
     }
 
     float density() {
@@ -485,4 +502,5 @@ public final class HostView extends FrameLayout {
     private static native void nativeKey(int action, int keyCode, int meta, int unicode);
 
     private static native void nativeRunWork(long work);
+    private static native void nativeSemanticsEnabled(boolean enabled);
 }
