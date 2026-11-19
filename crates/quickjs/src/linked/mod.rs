@@ -82,6 +82,8 @@ struct Inner {
     pub(super) reloads: RefCell<Vec<String>>,
     pub(super) mutations: RefCell<Vec<mutation::OwnedRec>>,
     pub(super) prepared: RefCell<Option<PreparedCall>>,
+    /// Owned result of the host call that just finished. Not a shared stack.
+    pub(super) sync_result: RefCell<Option<session::PluginValue>>,
     pub(super) marks: FrameMarks,
     pub(super) drivers: RefCell<uicore::DriverSet>,
     pub(super) driver_frame: Cell<bool>,
@@ -302,6 +304,7 @@ impl JsSession {
             reloads: RefCell::new(Vec::new()),
             mutations: RefCell::new(Vec::new()),
             prepared: RefCell::new(None),
+            sync_result: RefCell::new(None),
             marks: FrameMarks::default(),
             drivers: RefCell::new(uicore::DriverSet::new()),
             driver_frame: Cell::new(false),

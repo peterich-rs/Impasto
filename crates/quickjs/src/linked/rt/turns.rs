@@ -1,6 +1,6 @@
 //! Session turns, timers and asynchronous host completions.
 use super::*;
-use rquickjs::{ArrayBuffer, FromJs};
+use rquickjs::FromJs;
 
 fn number<'js>(ctx: &Ctx<'js>, number: impl Into<f64>) -> Value<'js> {
     Value::new_float(ctx.clone(), number.into())
@@ -14,6 +14,29 @@ fn string_at(pointer: *const c_char, len: usize) -> String {
         .unwrap_or("")
         .to_owned()
 }
+fn failure_from_name(name: &str) -> session::HttpFailure {
+    match name {
+        "TimeoutError" => session::HttpFailure::Timeout,
+        "AbortError" => session::HttpFailure::Canceled,
+        _ => session::HttpFailure::Network,
+    }
+}
+
+fn header_pairs(block: &str) -> Vec<(String, String)> {
+    block
+        .split('\n')
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            let name = name.trim();
+            if name.is_empty() {
+                None
+            } else {
+                Some((name.to_owned(), value.trim().to_owned()))
+            }
+        })
+        .collect()
+}
+
 fn cstr(pointer: *const c_char) -> String {
     if pointer.is_null() {
         return String::new();
@@ -116,6 +139,10 @@ pub(in crate::linked) unsafe fn vm_dispatch_input(
         return 0;
     };
     host.with(|ctx| {
+        #[allow(
+            clippy::redundant_closure_call,
+            reason = "the closure is the `?` boundary for a function that returns a status code"
+        )]
         let result = (|| {
             let value = if utf8.is_null() {
                 Value::new_null(ctx.clone())
@@ -296,8 +323,8 @@ pub(in crate::linked) unsafe fn vm_drain_jobs(
 pub(in crate::linked) unsafe fn vm_jobs_pending(pointer: *mut Host) -> i32 {
     i32::from(
         host(pointer)
-            .runtime
-            .as_ref()
+            .vm()
+            .runtime()
             .is_some_and(Runtime::is_job_pending),
     )
 }
@@ -406,6 +433,10 @@ pub(in crate::linked) unsafe fn vm_apply_settings(
     let _budget = host.budget("settings", 0);
     let callbacks = host.refs.borrow().settings.clone();
     host.with(|ctx| {
+        #[allow(
+            clippy::redundant_closure_call,
+            reason = "the closure is the `?` boundary for a function that returns a status code"
+        )]
         let result = (|| {
             let settings = bindings::settings(host, &ctx)?;
             for (_, callback) in callbacks {
@@ -453,11 +484,11 @@ pub(in crate::linked) unsafe fn vm_motion_end(
 
 pub(in crate::linked) unsafe fn vm_set_clock(pointer: *mut Host, mono: i64, paused: i32) {
     let host = host(pointer);
-    host.mono.set(mono);
+    host.runtime.mono().set(mono);
     host.paused.set(paused != 0);
-    host.frame.set(host.frame.get() + 1);
-    if host.origin.get().is_none() {
-        host.origin.set(Some(mono));
+    host.runtime.turn().set(host.runtime.turn().get() + 1);
+    if host.runtime.origin().get().is_none() {
+        host.runtime.origin().set(Some(mono));
     }
 }
 fn fire(host: &Host, raf: bool, err: *mut c_char, len: usize) -> i32 {
@@ -468,25 +499,27 @@ fn fire(host: &Host, raf: bool, err: *mut c_char, len: usize) -> i32 {
     let mut failed = 0;
     for _ in 0..if raf { usize::MAX } else { 64 } {
         let callback = {
-            let mut timers = host.timers.borrow_mut();
-            let Some(timer) = timers.iter_mut().find(|timer| {
-                timer.active
-                    && (timer.kind == 2) == raf
-                    && timer.min_frame <= host.frame.get()
-                    && (raf || timer.due <= host.mono.get())
-            }) else {
+            let table = if raf {
+                &host.raf
+            } else {
+                host.runtime.timers()
+            };
+            let mut timers = table.borrow_mut();
+            let Some(callback) = js::poll_timer(
+                &mut timers,
+                raf,
+                host.runtime.turn().get(),
+                host.runtime.mono().get(),
+            ) else {
                 break;
             };
-            let callback = (timer.function.clone(), timer.extra.clone());
-            if timer.kind == 1 {
-                timer.due = host.mono.get().saturating_add(timer.interval.max(0));
-                timer.min_frame = host.frame.get() + 1;
-            } else {
-                timer.active = false;
-            }
             callback
         };
         host.with(|ctx| {
+            #[allow(
+                clippy::redundant_closure_call,
+                reason = "the closure is the `?` boundary for a function that returns a status code"
+            )]
             let result = (|| {
                 let values = callback
                     .1
@@ -507,13 +540,18 @@ fn fire(host: &Host, raf: bool, err: *mut c_char, len: usize) -> i32 {
             }
         });
     }
-    host.timers.borrow_mut().retain(|timer| timer.active);
+    let table = if raf {
+        &host.raf
+    } else {
+        host.runtime.timers()
+    };
+    table.borrow_mut().retain(|timer| timer.active);
     if !raf
-        && host
-            .timers
-            .borrow()
-            .iter()
-            .any(|t| t.kind != 2 && t.min_frame <= host.frame.get() && t.due <= host.mono.get())
+        && host.runtime.timers().borrow().iter().any(|timer| {
+            timer.kind != 2
+                && timer.eligible_turn <= host.runtime.turn().get()
+                && timer.due <= host.runtime.mono().get()
+        })
     {
         host.wants_frame.set(true);
     }
@@ -537,10 +575,12 @@ pub(in crate::linked) unsafe fn vm_needs_frame(pointer: *mut Host) -> i32 {
     let h = host(pointer);
     i32::from(
         !h.paused.get()
-            && h.timers.borrow().iter().any(|t| {
-                t.active
-                    && (t.kind == 2 || t.min_frame <= h.frame.get() + 1 && t.due <= h.mono.get())
-            }),
+            && (h.raf.borrow().iter().any(|timer| timer.active)
+                || h.runtime.timers().borrow().iter().any(|timer| {
+                    timer.active
+                        && timer.eligible_turn <= h.runtime.turn().get() + 1
+                        && timer.due <= h.runtime.mono().get()
+                })),
     )
 }
 pub(in crate::linked) unsafe fn vm_next_deadline(pointer: *mut Host) -> i64 {
@@ -548,10 +588,11 @@ pub(in crate::linked) unsafe fn vm_next_deadline(pointer: *mut Host) -> i64 {
     if h.paused.get() {
         return -1;
     }
-    h.timers
+    h.runtime
+        .timers()
         .borrow()
         .iter()
-        .filter(|t| t.active && t.kind != 2 && t.due > h.mono.get())
+        .filter(|timer| timer.active && timer.kind != 2 && timer.due > h.runtime.mono().get())
         .map(|t| t.due)
         .min()
         .unwrap_or(-1)
@@ -559,18 +600,7 @@ pub(in crate::linked) unsafe fn vm_next_deadline(pointer: *mut Host) -> i64 {
 
 impl Host {
     pub(super) fn make_promise<'js>(&self, ctx: &Ctx<'js>) -> rquickjs::Result<(u64, Value<'js>)> {
-        let (promise, resolve, reject) = ctx.promise()?;
-        let token = self.token.get().wrapping_add(1).max(1);
-        self.token.set(token);
-        self.refs.borrow_mut().promises.insert(
-            token,
-            (
-                Persistent::save(ctx, resolve.into_value()),
-                Persistent::save(ctx, reject.into_value()),
-            ),
-        );
-        Object::from_value(promise.as_value().clone())?.set("token", token as f64)?;
-        Ok((token, promise.into_value()))
+        self.vm().make_promise(ctx)
     }
     pub(super) fn settle<'js>(
         &self,
@@ -579,52 +609,31 @@ impl Host {
         ok: bool,
         value: Value<'js>,
     ) -> rquickjs::Result<()> {
-        let Some((resolve, reject)) = self.refs.borrow_mut().promises.remove(&token) else {
-            return Ok(());
-        };
-        self.call(ctx, if ok { &resolve } else { &reject }, vec![value])
-            .map(|_| ())
-    }
-    fn host_hook<'js>(
-        &self,
-        ctx: &Ctx<'js>,
-        name: &str,
-        args: Vec<Value<'js>>,
-    ) -> rquickjs::Result<()> {
-        let bridge: Object = ctx.globals().get("__host")?;
-        let hook: Value = bridge.get(name)?;
-        if let Some(hook) = hook.into_function() {
-            let mut values = Args::new(ctx.clone(), args.len());
-            values.push_args(args)?;
-            hook.call_arg::<()>(values)?;
-        }
-        Ok(())
+        self.vm().settle(ctx, token, ok, value)
     }
 }
-pub(in crate::linked) fn push_plugin(pointer: *mut Host, value: &session::PluginValue) {
+pub(in crate::linked) fn vm_settle_plugin(
+    pointer: *mut Host,
+    token: u64,
+    result: &session::PluginResult,
+) -> i32 {
     let host = host(pointer);
+    let _budget = host.budget("plugin", 0);
     host.with(|ctx| {
-        if let Ok(value) = bindings::plugin_to_js(&ctx, value) {
-            host.refs
-                .borrow_mut()
-                .values
-                .push(Persistent::save(&ctx, value));
-        }
-    });
-}
-pub(in crate::linked) unsafe fn vm_settle_top(pointer: *mut Host, token: u64, ok: i32) -> i32 {
-    let host = host(pointer);
-    let _budget = host.budget("http", 0);
-    let value = host.refs.borrow_mut().values.pop();
-    host.with(|ctx| {
-        let result = (|| {
-            let value = match value {
-                Some(v) => v.restore(&ctx)?,
-                None => Value::new_null(ctx.clone()),
-            };
-            host.settle(&ctx, token, ok != 0, value)
+        #[allow(
+            clippy::redundant_closure_call,
+            reason = "the closure is the `?` boundary for a function that returns a status code"
+        )]
+        let settled = (|| match result {
+            session::PluginResult::Done(value) => {
+                let value = bindings::plugin_to_js(&ctx, value)?;
+                host.settle(&ctx, token, true, value)
+            }
+            session::PluginResult::Failed { message } => {
+                host.settle(&ctx, token, false, message.as_str().into_js(&ctx)?)
+            }
         })();
-        if result.is_err() {
+        if settled.is_err() {
             drop(ctx.catch());
             -1
         } else {
@@ -649,20 +658,28 @@ pub(in crate::linked) unsafe fn vm_settle_http(
     let host = host(pointer);
     let _budget = host.budget("http", 0);
     host.with(|ctx| {
+        #[allow(
+            clippy::redundant_closure_call,
+            reason = "the closure is the `?` boundary for a function that returns a status code"
+        )]
         let result = (|| {
-            let value = if !error.is_null() {
-                text(&ctx, &cstr(error))?
+            let event = if !error.is_null() {
+                let name = cstr(error);
+                session::IoEvent::Http {
+                    token,
+                    result: Err(session::HttpError::new(failure_from_name(&name), name)),
+                }
             } else {
-                let object = Object::new(ctx.clone())?;
-                object.set("status", status)?;
-                object.set("headers", string_at(headers, headers_len))?;
-                object.set(
-                    "body",
-                    ArrayBuffer::new(ctx.clone(), bytes_at(body, body_len))?,
-                )?;
-                object.into_value()
+                session::IoEvent::Http {
+                    token,
+                    result: Ok(session::HttpResponse {
+                        status: u16::try_from(status).unwrap_or(0),
+                        headers: header_pairs(&string_at(headers, headers_len)),
+                        body: bytes_at(body, body_len),
+                    }),
+                }
             };
-            host.settle(&ctx, token, error.is_null(), value)
+            js::deliver::apply(host.vm(), &ctx, event)
         })();
         if result.is_err() {
             drop(ctx.catch());
@@ -682,18 +699,19 @@ pub(in crate::linked) unsafe fn vm_http_head(
     let host = host(pointer);
     let _budget = host.budget("http", 0);
     host.with(|ctx| {
+        #[allow(
+            clippy::redundant_closure_call,
+            reason = "the closure is the `?` boundary for a function that returns a status code"
+        )]
         let result = (|| {
-            let head = Object::new(ctx.clone())?;
-            head.set("status", status)?;
-            head.set("headers", string_at(headers, headers_len))?;
-            host.host_hook(
+            js::deliver::apply(
+                host.vm(),
                 &ctx,
-                "_httpStream",
-                vec![
-                    number(&ctx, token as f64),
-                    text(&ctx, "head")?,
-                    head.into_value(),
-                ],
+                session::IoEvent::HttpHead {
+                    token,
+                    status: u16::try_from(status).unwrap_or(0),
+                    headers: header_pairs(&string_at(headers, headers_len)),
+                },
             )
         })();
         if result.is_err() {
@@ -715,25 +733,31 @@ pub(in crate::linked) unsafe fn vm_http_chunk(
     let host = host(pointer);
     let _budget = host.budget("http", 0);
     host.with(|ctx| {
+        #[allow(
+            clippy::redundant_closure_call,
+            reason = "the closure is the `?` boundary for a function that returns a status code"
+        )]
         let result = (|| {
-            let payload = if !error.is_null() {
-                text(&ctx, &cstr(error))?
+            let (bytes, failure) = if !error.is_null() {
+                let name = cstr(error);
+                (
+                    Vec::new(),
+                    Some(session::HttpError::new(failure_from_name(&name), name)),
+                )
             } else {
-                ArrayBuffer::new(ctx.clone(), bytes_at(body, body_len))?.into_value()
+                (bytes_at(body, body_len), None)
             };
-            host.host_hook(
+            js::deliver::apply(
+                host.vm(),
                 &ctx,
-                "_httpStream",
-                vec![
-                    number(&ctx, token as f64),
-                    text(&ctx, if done != 0 { "done" } else { "chunk" })?,
-                    payload,
-                ],
+                session::IoEvent::HttpChunk {
+                    token,
+                    bytes,
+                    done: done != 0,
+                    error: failure,
+                },
             )
         })();
-        if done != 0 {
-            host.refs.borrow_mut().promises.remove(&token);
-        }
         if result.is_err() {
             drop(ctx.catch());
             -1
@@ -753,17 +777,20 @@ pub(in crate::linked) unsafe fn vm_socket_event(
     let host = host(pointer);
     let _budget = host.budget("socket", 0);
     host.with(|ctx| {
+        #[allow(
+            clippy::redundant_closure_call,
+            reason = "the closure is the `?` boundary for a function that returns a status code"
+        )]
         let result = (|| {
-            let bytes = bytes_at(data, len);
-            let payload = if is_text != 0 {
-                text(&ctx, &String::from_utf8_lossy(&bytes))?
-            } else {
-                ArrayBuffer::new(ctx.clone(), bytes)?.into_value()
-            };
-            host.host_hook(
+            js::deliver::apply(
+                host.vm(),
                 &ctx,
-                "_socket",
-                vec![number(&ctx, id as f64), text(&ctx, &cstr(event))?, payload],
+                session::IoEvent::Socket {
+                    id,
+                    event: cstr(event),
+                    text: is_text != 0,
+                    data: bytes_at(data, len),
+                },
             )
         })();
         if result.is_err() {
@@ -787,16 +814,13 @@ pub(in crate::linked) unsafe fn vm_module_event(
     let module = cstr(module);
     let event = cstr(event);
     let text_value = string_at(text_ptr, len);
-    let callbacks: Vec<_> = host
-        .refs
-        .borrow()
-        .listeners
-        .iter()
-        .filter(|(m, e, _)| *m == module && *e == event)
-        .map(|(_, _, f)| f.clone())
-        .collect();
+    let callbacks = host.runtime.listener_callbacks(&module, &event);
     host.with(|ctx| {
         for callback in callbacks {
+            #[allow(
+                clippy::redundant_closure_call,
+                reason = "the closure is the `?` boundary for a function that returns a status code"
+            )]
             let result = (|| {
                 let value = if shape == 1 {
                     let object = Object::new(ctx.clone())?;

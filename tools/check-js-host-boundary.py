@@ -104,12 +104,12 @@ def main() -> None:
         if host_id in prod_deps(node):
             dependents.append(packages[node_id]["name"])
     dependents.sort()
-    if dependents != ["session"]:
+    if dependents != ["js", "session"]:
         raise SystemExit(
-            "normal/build dependents of js-host must be exactly session, "
+            "normal/build dependents of js-host must be exactly js and session, "
             f"found {dependents or 'none'}"
         )
-    print("js-host normal/build closure is std-only; only session depends on it")
+    print("js-host normal/build closure is std-only; dependents are js and session")
 
 
 if __name__ == "__main__":

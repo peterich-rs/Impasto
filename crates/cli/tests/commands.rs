@@ -4,8 +4,10 @@ mod tests {
         fs,
         path::PathBuf,
         process::{Command, Output},
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
+    static SANDBOX_SEQ: AtomicU64 = AtomicU64::new(0);
     struct Sandbox(PathBuf);
     impl Sandbox {
         fn new() -> Self {
@@ -13,8 +15,9 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .expect("clock")
                 .as_nanos();
-            let dir =
-                std::env::temp_dir().join(format!("impasto-cli-{}-{stamp}", std::process::id()));
+            let seq = SANDBOX_SEQ.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir()
+                .join(format!("impasto-cli-{}-{stamp}-{seq}", std::process::id()));
             fs::create_dir(&dir).expect("sandbox");
             Self(dir)
         }

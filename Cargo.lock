@@ -1238,6 +1238,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "js"
+version = "0.0.0"
+dependencies = [
+ "js-host",
+ "libc",
+ "quickjs-jit",
+]
+
+[[package]]
+name = "js-headless"
+version = "0.0.0"
+dependencies = [
+ "js",
+]
+
+[[package]]
 name = "js-host"
 version = "0.0.0"
 
@@ -1871,6 +1887,7 @@ dependencies = [
 name = "quickjs"
 version = "0.0.0"
 dependencies = [
+ "js",
  "libc",
  "protocol",
  "quickjs-jit",

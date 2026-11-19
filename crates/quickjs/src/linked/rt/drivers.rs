@@ -33,7 +33,7 @@ macro_rules! driver_common {
                 unsafe { &*self.host }
             }
             fn check(&self, ctx: &Ctx<'_>) -> rquickjs::Result<()> {
-                super::canvas::side_effect(ctx)?;
+                js::host::OperationPolicy::before(self.host(), ctx)?;
                 if self.released.get() {
                     Err(type_error(ctx, "driver is released"))
                 } else {

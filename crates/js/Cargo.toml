@@ -1,0 +1,13 @@
+[package]
+name = "js"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+js-host = { workspace = true }
+libc = "0.2"
+rquickjs = { workspace = true }
+
+[lints]
+workspace = true
