@@ -1,0 +1,10 @@
+--- a/engine/src/flutter/impeller/entity/geometry/line_geometry.cc
++++ b/engine/src/flutter/impeller/entity/geometry/line_geometry.cc
+@@ -83,6 +83,6 @@
+ /// If we round up, it drops down a half.  If we round down it bumps up a half.
+ Scalar RoundToHalf(Scalar x) {
+   Scalar whole;
+-  std::modf(x, &whole);
++  static_cast<void>(std::modf(x, &whole));
+   return whole + 0.5;
+ }
