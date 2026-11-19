@@ -7,10 +7,14 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use rquickjs::{Ctx, FromJs, Function, Value};
+use js_host::{HttpRequest, HttpResponse, IoEvent, IoJob};
+use rquickjs::{ArrayBuffer, Ctx, Function, IntoJs, Object};
 
 use crate::LEGACY_PRELUDE;
+use crate::host::{HttpCall, IoPort};
 use crate::quickjs::{JobStop, Timer, Vm, poll_timer, run_jobs};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +42,10 @@ struct State {
     origin: Cell<Option<i64>>,
     modules: HashMap<String, String>,
     log: Log,
+    jobs: RefCell<Vec<IoJob>>,
+    inbox: RefCell<Vec<IoEvent>>,
+    cancels: RefCell<HashMap<u64, Arc<AtomicBool>>>,
+    next_socket: Cell<u64>,
     closed: Cell<bool>,
 }
 
@@ -84,6 +92,10 @@ impl RuntimeBuilder {
                 origin: Cell::new(None),
                 modules: self.modules,
                 log: self.log,
+                jobs: RefCell::new(Vec::new()),
+                inbox: RefCell::new(Vec::new()),
+                cancels: RefCell::new(HashMap::new()),
+                next_socket: Cell::new(0),
                 closed: Cell::new(false),
             }),
         };
@@ -135,8 +147,20 @@ impl Runtime {
         })
     }
 
+    pub fn take_jobs(&mut self) -> Vec<IoJob> {
+        std::mem::take(&mut *self.state.jobs.borrow_mut())
+    }
+
+    /// Queue an owned completion. JavaScript runs on the next [`Runtime::drive`].
+    pub fn enqueue(&mut self, event: IoEvent) -> Result<(), JsError> {
+        self.ensure_open()?;
+        self.state.inbox.borrow_mut().push(event);
+        Ok(())
+    }
+
     pub fn drive(&mut self, now_ms: i64) -> Result<DriveReport, JsError> {
         self.ensure_open()?;
+        self.deliver_inbox()?;
         self.state.turn.set(self.state.turn.get() + 1);
         self.state.mono.set(now_ms);
         if self.state.origin.get().is_none() {
@@ -181,8 +205,27 @@ impl Runtime {
             return;
         }
         self.state.timers.borrow_mut().clear();
+        self.state.jobs.borrow_mut().clear();
+        self.state.inbox.borrow_mut().clear();
+        for flag in self.state.cancels.borrow().values() {
+            flag.store(true, Ordering::Relaxed);
+        }
+        self.state.cancels.borrow_mut().clear();
         self.state.vm.rejections.borrow_mut().clear();
         self.state.vm.close();
+    }
+
+    fn deliver_inbox(&mut self) -> Result<(), JsError> {
+        let events = std::mem::take(&mut *self.state.inbox.borrow_mut());
+        if events.is_empty() {
+            return Ok(());
+        }
+        self.state.vm.with(|ctx| {
+            for event in events {
+                deliver(&self.state.vm, &ctx, event).map_err(|error| script_error(&ctx, error))?;
+            }
+            Ok(())
+        })
     }
 
     fn ensure_open(&self) -> Result<(), JsError> {
@@ -222,14 +265,26 @@ impl Runtime {
         let origin = &self.state.origin as *const Cell<Option<i64>>;
         let log = &self.state.log as *const Log;
         self.state.vm.with(|ctx| {
-            let host =
-                rquickjs::Object::new(ctx.clone()).map_err(|error| script_error(&ctx, error))?;
-            ctx.globals()
-                .set("__host", host)
+            let vm = &self.state.vm as *const Vm as *mut Vm;
+            let state: &State = &self.state;
+            let port: *const dyn IoPort = std::ptr::from_ref(state as &dyn IoPort);
+            // SAFETY: `vm` and `port` address this runtime's boxed state.
+            unsafe { crate::host::install(&ctx, vm, port) }
                 .map_err(|error| script_error(&ctx, error))?;
-            install_console(&ctx, log)?;
-            install_timers(&ctx, timers, next_id, turn, mono)?;
-            install_now(&ctx, mono, origin)?;
+            crate::standard::install_console(&ctx, move |level, text| {
+                // SAFETY: `log` points at the callback stored in this runtime.
+                unsafe { (*log)(level, text) };
+            })
+            .map_err(|error| script_error(&ctx, error))?;
+            // SAFETY: the timer cells address this runtime's boxed state.
+            unsafe { crate::standard::install_timers(&ctx, timers, next_id, turn, mono, || {}) }
+                .map_err(|error| script_error(&ctx, error))?;
+            crate::standard::install_performance(&ctx, move || {
+                // SAFETY: the clock cells live in this runtime allocation.
+                let (mono, origin) = unsafe { ((*mono).get(), (*origin).get().unwrap_or(0)) };
+                (mono - origin) as f64
+            })
+            .map_err(|error| script_error(&ctx, error))?;
             Ok(())
         })
     }
@@ -241,7 +296,217 @@ impl Drop for Runtime {
     }
 }
 
-type CoercedString = rquickjs::Coerced<String>;
+impl IoPort for State {
+    fn http(&self, call: HttpCall) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cancels
+            .borrow_mut()
+            .insert(call.token, Arc::clone(&cancel));
+        let request = HttpRequest {
+            token: call.token,
+            method: call.method,
+            url: call.url,
+            headers: header_pairs(&call.headers),
+            body: call.body,
+            cancel,
+            timeout_ms: None,
+        };
+        self.jobs.borrow_mut().push(if call.streaming {
+            IoJob::HttpStream(request)
+        } else {
+            IoJob::Http(request)
+        });
+    }
+
+    fn abort(&self, token: u64) {
+        if let Some(flag) = self.cancels.borrow().get(&token) {
+            flag.store(true, Ordering::Relaxed);
+        }
+        self.jobs.borrow_mut().push(IoJob::Abort { token });
+    }
+
+    fn has_module(&self, name: &str) -> bool {
+        self.modules.contains_key(name)
+    }
+
+    fn open_socket(&self, url: String, protocols: String) -> u64 {
+        let id = self.next_socket.get().wrapping_add(1).max(1);
+        self.next_socket.set(id);
+        let protocols = protocols
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect();
+        self.jobs
+            .borrow_mut()
+            .push(IoJob::SocketOpen { id, url, protocols });
+        id
+    }
+
+    fn send_socket(&self, id: u64, text: bool, data: Vec<u8>) {
+        self.jobs
+            .borrow_mut()
+            .push(IoJob::SocketSend { id, text, data });
+    }
+
+    fn close_socket(&self, id: u64) {
+        self.jobs.borrow_mut().push(IoJob::SocketClose { id });
+    }
+}
+
+fn header_block(headers: &[(String, String)]) -> String {
+    headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "host tokens are finite ids and fit in a JavaScript number"
+)]
+fn js_number(id: u64) -> f64 {
+    id as f64
+}
+
+fn header_pairs(block: &str) -> Vec<(String, String)> {
+    block
+        .split('\n')
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            let name = name.trim();
+            if name.is_empty() {
+                None
+            } else {
+                Some((name.to_owned(), value.trim().to_owned()))
+            }
+        })
+        .collect()
+}
+
+fn deliver(vm: &Vm, ctx: &Ctx<'_>, event: IoEvent) -> rquickjs::Result<()> {
+    match event {
+        IoEvent::Http { token, result } => match result {
+            Ok(response) => settle_http(vm, ctx, token, &response),
+            Err(error) => vm.settle(ctx, token, false, error.dom_name().into_js(ctx)?),
+        },
+        IoEvent::Plugin { token, result } => match result {
+            js_host::PluginResult::Done(value) => {
+                vm.settle(ctx, token, true, plugin_value(ctx, &value)?)
+            }
+            js_host::PluginResult::Failed { message } => {
+                vm.settle(ctx, token, false, message.into_js(ctx)?)
+            }
+        },
+        IoEvent::Socket {
+            id,
+            event,
+            text,
+            data,
+        } => {
+            let payload = if text {
+                String::from_utf8_lossy(&data).into_owned().into_js(ctx)?
+            } else {
+                ArrayBuffer::new(ctx.clone(), data)?.into_js(ctx)?
+            };
+            call_hook(
+                ctx,
+                "_socket",
+                vec![js_number(id).into_js(ctx)?, event.into_js(ctx)?, payload],
+            )
+        }
+        IoEvent::HttpHead {
+            token,
+            status,
+            headers,
+        } => {
+            let head = Object::new(ctx.clone())?;
+            head.set("status", i32::from(status))?;
+            head.set("headers", header_block(&headers))?;
+            call_hook(
+                ctx,
+                "_httpStream",
+                vec![
+                    js_number(token).into_js(ctx)?,
+                    "head".into_js(ctx)?,
+                    head.into_value(),
+                ],
+            )
+        }
+        IoEvent::HttpChunk {
+            token,
+            bytes,
+            done,
+            error,
+        } => {
+            let payload = match error {
+                Some(error) => error.dom_name().into_js(ctx)?,
+                None => ArrayBuffer::new(ctx.clone(), bytes)?.into_value(),
+            };
+            call_hook(
+                ctx,
+                "_httpStream",
+                vec![
+                    js_number(token).into_js(ctx)?,
+                    (if done { "done" } else { "chunk" }).into_js(ctx)?,
+                    payload,
+                ],
+            )?;
+            if done {
+                vm.promises.borrow_mut().remove(&token);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn settle_http(
+    vm: &Vm,
+    ctx: &Ctx<'_>,
+    token: u64,
+    response: &HttpResponse,
+) -> rquickjs::Result<()> {
+    let object = Object::new(ctx.clone())?;
+    object.set("status", i32::from(response.status))?;
+    object.set("headers", header_block(&response.headers))?;
+    object.set(
+        "body",
+        ArrayBuffer::new(ctx.clone(), response.body.clone())?,
+    )?;
+    vm.settle(ctx, token, true, object.into_value())
+}
+
+fn plugin_value<'js>(
+    ctx: &Ctx<'js>,
+    value: &js_host::PluginValue,
+) -> rquickjs::Result<rquickjs::Value<'js>> {
+    use js_host::PluginValue;
+    Ok(match value {
+        PluginValue::Null => rquickjs::Value::new_null(ctx.clone()),
+        PluginValue::Bool(value) => (*value).into_js(ctx)?,
+        PluginValue::F64(value) => (*value).into_js(ctx)?,
+        PluginValue::Str(value) => value.into_js(ctx)?,
+        PluginValue::Bytes(value) => ArrayBuffer::new(ctx.clone(), value.clone())?.into_js(ctx)?,
+        PluginValue::List(_) | PluginValue::Map(_) => rquickjs::Value::new_null(ctx.clone()),
+    })
+}
+
+fn call_hook<'js>(
+    ctx: &Ctx<'js>,
+    name: &str,
+    args: Vec<rquickjs::Value<'js>>,
+) -> rquickjs::Result<()> {
+    let bridge: Object = ctx.globals().get("__host")?;
+    let hook: rquickjs::Value = bridge.get(name)?;
+    if let Some(hook) = hook.into_function() {
+        let mut values = rquickjs::function::Args::new(ctx.clone(), args.len());
+        values.push_args(args)?;
+        hook.call_arg::<()>(values)?;
+    }
+    Ok(())
+}
 
 fn script_error(ctx: &Ctx<'_>, error: rquickjs::Error) -> JsError {
     let message = if error.is_exception() {
@@ -255,154 +520,4 @@ fn script_error(ctx: &Ctx<'_>, error: rquickjs::Error) -> JsError {
         error.to_string()
     };
     JsError { message }
-}
-
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "timer delays and ids arrive as JavaScript numbers and match the existing host conversion"
-)]
-fn f64_to_i64(value: f64) -> i64 {
-    if value.is_finite() { value as i64 } else { 0 }
-}
-
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "timer ids arrive as JavaScript numbers and match the existing host conversion"
-)]
-fn f64_to_u64(value: f64) -> u64 {
-    if value.is_finite() && value > 0.0 {
-        value as u64
-    } else {
-        0
-    }
-}
-
-fn install_console<'js>(ctx: &Ctx<'js>, log: *const Log) -> Result<(), JsError> {
-    let console = rquickjs::Object::new(ctx.clone()).map_err(|error| script_error(ctx, error))?;
-    for (name, level) in [("log", 0u8), ("info", 1), ("warn", 2), ("error", 3)] {
-        let function = Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'js>, args: rquickjs::function::Rest<Value<'js>>| {
-                let mut parts = Vec::new();
-                for arg in args.0 {
-                    if let Ok(text) = CoercedString::from_js(&ctx, arg) {
-                        parts.push(text.0);
-                    }
-                }
-                // SAFETY: `log` points at the boxed callback inside the runtime allocation.
-                unsafe { (*log)(level, &parts.join(" ")) };
-                rquickjs::Result::Ok(())
-            },
-        )
-        .map_err(|error| script_error(ctx, error))?;
-        console
-            .set(name, function)
-            .map_err(|error| script_error(ctx, error))?;
-    }
-    ctx.globals()
-        .set("console", console)
-        .map_err(|error| script_error(ctx, error))
-}
-
-fn install_now<'js>(
-    ctx: &Ctx<'js>,
-    mono: *const Cell<i64>,
-    origin: *const Cell<Option<i64>>,
-) -> Result<(), JsError> {
-    let performance =
-        rquickjs::Object::new(ctx.clone()).map_err(|error| script_error(ctx, error))?;
-    let now = Function::new(ctx.clone(), move || {
-        // SAFETY: both cells live in the runtime allocation that owns this function.
-        let (mono, origin) = unsafe { ((*mono).get(), (*origin).get().unwrap_or(0)) };
-        (mono - origin) as f64
-    })
-    .map_err(|error| script_error(ctx, error))?;
-    performance
-        .set("now", now)
-        .map_err(|error| script_error(ctx, error))?;
-    ctx.globals()
-        .set("performance", performance)
-        .map_err(|error| script_error(ctx, error))
-}
-
-fn install_timers<'js>(
-    ctx: &Ctx<'js>,
-    timers: *const RefCell<Vec<Timer>>,
-    next_id: *const Cell<u64>,
-    turn: *const Cell<u64>,
-    mono: *const Cell<i64>,
-) -> Result<(), JsError> {
-    for (name, kind) in [("setTimeout", 0i32), ("setInterval", 1)] {
-        let function = Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'js>,
-                  args: rquickjs::function::Rest<Value<'js>>|
-                  -> rquickjs::Result<f64> {
-                let Some(callback) = args.0.first().cloned() else {
-                    return Err(rquickjs::Exception::throw_type(
-                        &ctx,
-                        "callback must be a function",
-                    ));
-                };
-                if !callback.is_function() {
-                    return Err(rquickjs::Exception::throw_type(
-                        &ctx,
-                        "callback must be a function",
-                    ));
-                }
-                let delay = f64_to_i64(
-                    args.0
-                        .get(1)
-                        .and_then(|value| value.as_number())
-                        .unwrap_or(0.0),
-                );
-                let delay = delay.max(0);
-                // SAFETY: timer cells live in the runtime allocation that owns this function.
-                let id = unsafe {
-                    let id = (*next_id).get().wrapping_add(1).max(1);
-                    (*next_id).set(id);
-                    (*timers).borrow_mut().push(Timer {
-                        id,
-                        due: (*mono).get().saturating_add(delay),
-                        interval: if kind == 1 { delay } else { 0 },
-                        eligible_turn: (*turn).get() + 1,
-                        kind,
-                        function: rquickjs::Persistent::save(&ctx, callback),
-                        extra: Vec::new(),
-                        active: true,
-                    });
-                    id
-                };
-                Ok(id as f64)
-            },
-        )
-        .map_err(|error| script_error(ctx, error))?;
-        ctx.globals()
-            .set(name, function)
-            .map_err(|error| script_error(ctx, error))?;
-    }
-    for (name, kind) in [("clearTimeout", 0i32), ("clearInterval", 1)] {
-        let function = Function::new(
-            ctx.clone(),
-            move |args: rquickjs::function::Rest<Value<'_>>| {
-                let id = f64_to_u64(
-                    args.0
-                        .first()
-                        .and_then(|value| value.as_number())
-                        .unwrap_or(0.0),
-                );
-                // SAFETY: the timer table lives in the runtime allocation that owns this function.
-                unsafe {
-                    (*timers)
-                        .borrow_mut()
-                        .retain(|timer| timer.id != id || timer.kind != kind);
-                }
-            },
-        )
-        .map_err(|error| script_error(ctx, error))?;
-        ctx.globals()
-            .set(name, function)
-            .map_err(|error| script_error(ctx, error))?;
-    }
-    Ok(())
 }

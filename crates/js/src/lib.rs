@@ -9,9 +9,13 @@
     reason = "QuickJS interrupt and clock FFI stay inside this crate and are documented at each call"
 )]
 
+pub mod compile;
+pub mod host;
 pub mod quickjs;
 mod runtime;
+pub mod standard;
 
+pub use compile::{CompileEnvironment, EmptyCompile};
 pub use js_host::IoEvent;
 pub use quickjs::{JobStop, Timer, Vm, poll_timer, run_jobs};
 pub use runtime::{DriveReport, JsError, ModuleTicket, Runtime, RuntimeBuilder};

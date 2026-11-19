@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
-use rquickjs::{Context, Ctx, Persistent, Runtime, Value};
+use rquickjs::{Context, Ctx, Function, Object, Persistent, Runtime, Value};
 
 use crate::monotonic_ms;
 
@@ -41,6 +42,8 @@ pub struct Vm {
     pub entry: Cell<(&'static str, u64)>,
     pub error: RefCell<(String, String)>,
     pub rejections: RefCell<Vec<(Saved, Saved)>>,
+    pub promises: RefCell<HashMap<u64, (Saved, Saved)>>,
+    pub token: Cell<u64>,
     armed: Cell<bool>,
 }
 
@@ -58,8 +61,42 @@ impl Vm {
             entry: Cell::new(("", 0)),
             error: RefCell::new((String::new(), String::new())),
             rejections: RefCell::new(Vec::new()),
+            promises: RefCell::new(HashMap::new()),
+            token: Cell::new(0),
             armed: Cell::new(false),
         })
+    }
+
+    /// Allocate one promise and remember its resolve and reject functions.
+    pub fn make_promise<'js>(&self, ctx: &Ctx<'js>) -> rquickjs::Result<(u64, Value<'js>)> {
+        let (promise, resolve, reject) = ctx.promise()?;
+        let token = self.token.get().wrapping_add(1).max(1);
+        self.token.set(token);
+        self.promises.borrow_mut().insert(
+            token,
+            (
+                Persistent::save(ctx, resolve.into_value()),
+                Persistent::save(ctx, reject.into_value()),
+            ),
+        );
+        Object::from_value(promise.as_value().clone())?.set("token", token as f64)?;
+        Ok((token, promise.into_value()))
+    }
+
+    /// Settle a token once. An unknown or already settled token is ignored.
+    pub fn settle<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        token: u64,
+        ok: bool,
+        value: Value<'js>,
+    ) -> rquickjs::Result<()> {
+        let Some((resolve, reject)) = self.promises.borrow_mut().remove(&token) else {
+            return Ok(());
+        };
+        let saved = if ok { resolve } else { reject };
+        let function = Function::from_value(saved.restore(ctx)?)?;
+        function.call((value,))
     }
 
     pub fn context(&self) -> Option<&Context> {
@@ -117,6 +154,9 @@ impl Vm {
     }
 
     pub fn close(&mut self) {
+        // Drop promise roots while the QuickJS runtime is still alive.
+        self.promises.borrow_mut().clear();
+        self.rejections.borrow_mut().clear();
         self.disarm();
         drop(self.context.take());
         drop(self.runtime.take());

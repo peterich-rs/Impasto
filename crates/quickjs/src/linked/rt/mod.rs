@@ -39,7 +39,6 @@ struct References {
     settings: Vec<(u64, Saved)>,
     motions: Vec<(u64, u64, String, Saved)>,
     listeners: Vec<(String, String, Saved)>,
-    promises: HashMap<u64, (Saved, Saved)>,
     values: Vec<Saved>,
 }
 
@@ -51,7 +50,6 @@ pub(in crate::linked) struct Host {
     refs: RefCell<References>,
     timers: RefCell<Vec<Timer>>,
     next_id: Cell<u64>,
-    token: Cell<u64>,
     socket: Cell<u64>,
     mono: Cell<i64>,
     origin: Cell<Option<i64>>,
@@ -378,7 +376,6 @@ impl Engine {
             refs: RefCell::new(References::default()),
             timers: RefCell::new(Vec::new()),
             next_id: Cell::new(0),
-            token: Cell::new(0),
             socket: Cell::new(0),
             mono: Cell::new(0),
             origin: Cell::new(None),

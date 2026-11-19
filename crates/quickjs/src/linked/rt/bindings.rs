@@ -1,4 +1,6 @@
 //! JavaScript argument decoding. Tree writes continue through linked::mutation.
+use std::cell::{Cell, RefCell};
+
 use super::super::{bridge, call, mutation};
 use super::*;
 use crate::abi::MutationOp;
@@ -198,63 +200,35 @@ pub(super) fn install<'js>(host: &Host, ctx: &Ctx<'js>) -> rquickjs::Result<()> 
     canvas::install_exports(host, ctx, &core)?;
     host.refs.borrow_mut().scene = Some(Persistent::save(ctx, core.clone().into_value()));
     ctx.globals().set("__scene", core)?;
-    let console = Object::new(ctx.clone())?;
-    for name in ["log", "info", "warn", "error", "debug"] {
-        let pointer = ptr::from_ref(host).cast_mut();
-        console.set(
-            name,
-            Function::new(
-                ctx.clone(),
-                move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<()> {
-                    // SAFETY: the console functions live only in the owned VM.
-                    let host = unsafe { &*pointer };
-                    let _active = host.enter(&ctx);
-                    let mut parts = Vec::new();
-                    for arg in args.0 {
-                        parts.push(Coerced::<String>::from_js(&ctx, arg)?.0);
-                    }
-                    (host.inner().log)(
-                        match name {
-                            "log" => 0,
-                            "info" => 1,
-                            "warn" => 2,
-                            "error" => 3,
-                            _ => 4,
-                        },
-                        &parts.join(" "),
-                    );
-                    Ok(())
-                },
-            )?,
-        )?;
-    }
-    ctx.globals().set("console", console)?;
-    for name in [
-        "setTimeout",
-        "setInterval",
-        "clearTimeout",
-        "clearInterval",
-        "requestAnimationFrame",
-        "cancelAnimationFrame",
-    ] {
+    let pointer = ptr::from_ref(host).cast_mut();
+    // SAFETY: `pointer` addresses the Host that owns these functions until shutdown.
+    js::standard::install_console(ctx, move |level, text| unsafe {
+        let host = &*pointer;
+        (host.inner().log)(level, text);
+    })?;
+    let timers = &host.timers as *const RefCell<Vec<Timer>>;
+    let next_id = &host.next_id as *const Cell<u64>;
+    let frame = &host.frame as *const Cell<u64>;
+    let mono = &host.mono as *const Cell<i64>;
+    let wants = pointer;
+    let on_zero = move || {
+        // SAFETY: `wants` addresses this host until shutdown.
+        unsafe { (*wants).wants_frame.set(true) };
+    };
+    // SAFETY: the timer cells live in this host for the whole session.
+    unsafe { js::standard::install_timers(ctx, timers, next_id, frame, mono, on_zero) }?;
+    js::standard::install_performance(ctx, move || {
+        // SAFETY: `pointer` addresses this host until shutdown.
+        let host = unsafe { &*pointer };
+        (host.mono.get() - host.origin.get().unwrap_or(0)) as f64
+    })?;
+    for name in ["requestAnimationFrame", "cancelAnimationFrame"] {
         bind(host, ctx, &ctx.globals(), name)?;
     }
-    let performance = Object::new(ctx.clone())?;
-    bind(host, ctx, &performance, "now")?;
-    ctx.globals().set("performance", performance)?;
-    let bridge = Object::new(ctx.clone())?;
-    for name in [
-        "http",
-        "httpStream",
-        "abort",
-        "socketOpen",
-        "socketSend",
-        "socketClose",
-        "hasModule",
-    ] {
-        bind(host, ctx, &bridge, name)?;
-    }
-    ctx.globals().set("__host", bridge)?;
+    let vm = ptr::from_ref(&host.vm).cast_mut();
+    let port: *const dyn js::host::IoPort = ptr::from_ref(host as &dyn js::host::IoPort);
+    // SAFETY: `vm` and `port` address this host until shutdown.
+    unsafe { js::host::install(ctx, vm, port) }?;
     rquickjs::Module::declare_def::<modules::GraphModule, _>(ctx.clone(), "#reactive")?;
     Ok(())
 }
@@ -750,148 +724,88 @@ pub(super) fn native<'js>(
                 drop(ctx.catch());
             }
         }
-        "now" => return ((host.mono.get() - host.origin.get().unwrap_or(0)) as f64).into_js(ctx),
-        "hasModule" => {
-            let name = string(ctx, args, 0)?;
-            return host
-                .inner()
-                .config
-                .registry
-                .module(&name)
-                .is_some()
-                .into_js(ctx);
-        }
-        "http" | "httpStream" => {
-            let (token, promise) = host.make_promise(ctx)?;
-            let decoded: rquickjs::Result<(String, String, String, Vec<u8>)> = (|| {
-                let method = string(ctx, args, 0)?;
-                let url = string(ctx, args, 1)?;
-                let header = value(ctx, args, 2);
-                let headers = if header.is_null() || header.is_undefined() {
-                    String::new()
-                } else {
-                    string(ctx, args, 2)?
-                };
-                let body = value(ctx, args, 3);
-                let body = if body.is_string() {
-                    string(ctx, args, 3)?.into_bytes()
-                } else {
-                    read_bytes(ctx, &body)?.unwrap_or_default()
-                };
-                Ok((method, url, headers, body))
-            })();
-            match decoded {
-                Ok((method, url, headers, body)) => {
-                    // SAFETY: callbacks copy these owned request buffers synchronously.
-                    unsafe {
-                        if name == "http" {
-                            bridge::http_call(
-                                host.session(),
-                                token,
-                                method.as_ptr().cast(),
-                                method.len(),
-                                url.as_ptr().cast(),
-                                url.len(),
-                                headers.as_ptr().cast(),
-                                headers.len(),
-                                body.as_ptr(),
-                                body.len(),
-                            );
-                        } else {
-                            bridge::http_stream_call(
-                                host.session(),
-                                token,
-                                method.as_ptr().cast(),
-                                method.len(),
-                                url.as_ptr().cast(),
-                                url.len(),
-                                headers.as_ptr().cast(),
-                                headers.len(),
-                                body.as_ptr(),
-                                body.len(),
-                            );
-                        }
-                    }
-                }
-                Err(_) => {
-                    if ctx.has_exception() {
-                        drop(ctx.catch());
-                    }
-                    host.settle(ctx, token, false, "http".into_js(ctx)?)?;
-                }
-            }
-            return Ok(promise);
-        }
-        "abort" => {
-            let token = optional_num(ctx, args, 0).unwrap_or(0.0) as u64;
-            if ctx.has_exception() {
-                drop(ctx.catch());
-            }
-            if token == 0 {
-                return Ok(undefined());
-            }
-            // SAFETY: the callback accesses the live session's cancellation table.
-            unsafe {
-                bridge::abort_token(host.session(), token);
-            }
-        }
-        "socketOpen" => {
-            let url = string(ctx, args, 0)?;
-            let protocols = if value(ctx, args, 1).is_string() {
-                string(ctx, args, 1)?
-            } else {
-                String::new()
-            };
-            let id = host.socket.get().wrapping_add(1).max(1);
-            host.socket.set(id);
-            // SAFETY: socket_open copies the URL and protocol list before returning.
-            unsafe {
-                bridge::socket_open(
-                    host.session(),
-                    id,
-                    url.as_ptr().cast(),
-                    url.len(),
-                    protocols.as_ptr().cast(),
-                    protocols.len(),
-                );
-            }
-            return (id as f64).into_js(ctx);
-        }
-        "socketSend" => {
-            if args.len() < 2 {
-                return Ok(undefined());
-            }
-            let id = handle(ctx, args, 0)?;
-            let is_text = value(ctx, args, 1).is_string();
-            let bytes = if is_text {
-                string(ctx, args, 1)?.into_bytes()
-            } else {
-                read_bytes(ctx, &value(ctx, args, 1))?.unwrap_or_default()
-            };
-            // SAFETY: socket_send copies the borrowed payload before returning.
-            unsafe {
-                bridge::socket_send(
-                    host.session(),
-                    id,
-                    bytes.as_ptr(),
-                    bytes.len(),
-                    i32::from(is_text),
-                );
-            }
-        }
-        "socketClose" => {
-            let id = handle(ctx, args, 0)?;
-            if id == 0 {
-                return Ok(undefined());
-            }
-            // SAFETY: the live session owns this socket id.
-            unsafe {
-                bridge::socket_close(host.session(), id);
-            }
-        }
         _ => return Err(type_error(ctx, "unknown native operation")),
     }
     Ok(undefined())
+}
+
+impl js::host::IoPort for Host {
+    fn http(&self, call: js::host::HttpCall) {
+        // SAFETY: the bridge copies these owned buffers before it returns.
+        unsafe {
+            if call.streaming {
+                bridge::http_stream_call(
+                    self.session(),
+                    call.token,
+                    call.method.as_ptr().cast(),
+                    call.method.len(),
+                    call.url.as_ptr().cast(),
+                    call.url.len(),
+                    call.headers.as_ptr().cast(),
+                    call.headers.len(),
+                    call.body.as_ptr(),
+                    call.body.len(),
+                );
+            } else {
+                bridge::http_call(
+                    self.session(),
+                    call.token,
+                    call.method.as_ptr().cast(),
+                    call.method.len(),
+                    call.url.as_ptr().cast(),
+                    call.url.len(),
+                    call.headers.as_ptr().cast(),
+                    call.headers.len(),
+                    call.body.as_ptr(),
+                    call.body.len(),
+                );
+            }
+        }
+    }
+
+    fn abort(&self, token: u64) {
+        // SAFETY: abort_token only touches this session's cancellation table.
+        unsafe { bridge::abort_token(self.session(), token) };
+    }
+
+    fn has_module(&self, name: &str) -> bool {
+        self.inner().config.registry.module(name).is_some()
+    }
+
+    fn open_socket(&self, url: String, protocols: String) -> u64 {
+        let id = self.socket.get().wrapping_add(1).max(1);
+        self.socket.set(id);
+        // SAFETY: socket_open copies the URL and protocol list before returning.
+        unsafe {
+            bridge::socket_open(
+                self.session(),
+                id,
+                url.as_ptr().cast(),
+                url.len(),
+                protocols.as_ptr().cast(),
+                protocols.len(),
+            );
+        }
+        id
+    }
+
+    fn send_socket(&self, id: u64, text: bool, data: Vec<u8>) {
+        // SAFETY: socket_send copies the payload before returning.
+        unsafe {
+            bridge::socket_send(
+                self.session(),
+                id,
+                data.as_ptr(),
+                data.len(),
+                i32::from(text),
+            );
+        }
+    }
+
+    fn close_socket(&self, id: u64) {
+        // SAFETY: the session owns this socket id.
+        unsafe { bridge::socket_close(self.session(), id) };
+    }
 }
 
 pub(super) fn settings<'js>(host: &Host, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {

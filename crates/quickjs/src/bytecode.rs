@@ -109,7 +109,7 @@ pub(crate) fn compile_envelope(source: &str, name: &str, module: bool) -> Result
     } else {
         BytecodeKind::Script
     };
-    let payload = with_ctx(|ctx| match kind {
+    let payload = with_ctx(&UiCompile, |ctx| match kind {
         BytecodeKind::Module => compile_module(ctx, source, name),
         BytecodeKind::Script => compile_script(ctx, source, name),
     })?;
@@ -191,11 +191,22 @@ fn engine_release() -> Result<&'static str, Error> {
     text.to_str().map_err(|_| Error::Runtime)
 }
 
-fn with_ctx<T>(body: impl FnOnce(&Ctx<'_>) -> Result<T, Error>) -> Result<T, Error> {
+struct UiCompile;
+
+impl js::CompileEnvironment for UiCompile {
+    fn prepare(&self, runtime: &Runtime) {
+        crate::linked::prepare_compile(runtime);
+    }
+}
+
+fn with_ctx<T>(
+    prepare: &dyn js::CompileEnvironment,
+    body: impl FnOnce(&Ctx<'_>) -> Result<T, Error>,
+) -> Result<T, Error> {
     let runtime = Runtime::new().map_err(|_| Error::Runtime)?;
     runtime.set_memory_limit(16 << 20);
     runtime.set_max_stack_size(8 << 20);
-    crate::linked::prepare_compile(&runtime);
+    prepare.prepare(&runtime);
     let context = Context::full(&runtime).map_err(|_| Error::Runtime)?;
     context.with(|ctx| body(&ctx))
 }
@@ -392,7 +403,7 @@ mod tests {
             false,
         ));
         let payload = must(open_envelope_kind(&bytes, BytecodeKind::Script));
-        let answer = must(with_ctx(|ctx| {
+        let answer = must(with_ctx(&super::UiCompile, |ctx| {
             // SAFETY: `payload` is the script envelope `compile_envelope` just wrote.
             unsafe { eval_script(ctx, payload) }?;
             ctx.eval::<i32, _>("globalThis.answer")
@@ -407,7 +418,7 @@ mod tests {
         let envelope = must(open_envelope(&bytes));
         assert_eq!(envelope.kind, BytecodeKind::Module);
         assert_eq!(envelope.payload.first().copied(), Some(BC_VERSION));
-        let answer = must(with_ctx(|ctx| {
+        let answer = must(with_ctx(&super::UiCompile, |ctx| {
             // SAFETY: the payload is the module envelope `compile_envelope` just wrote.
             unsafe { eval_module_i32(ctx, envelope.payload, "answer") }
         }));

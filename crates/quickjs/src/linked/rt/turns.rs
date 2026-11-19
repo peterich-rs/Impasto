@@ -550,18 +550,7 @@ pub(in crate::linked) unsafe fn vm_next_deadline(pointer: *mut Host) -> i64 {
 
 impl Host {
     pub(super) fn make_promise<'js>(&self, ctx: &Ctx<'js>) -> rquickjs::Result<(u64, Value<'js>)> {
-        let (promise, resolve, reject) = ctx.promise()?;
-        let token = self.token.get().wrapping_add(1).max(1);
-        self.token.set(token);
-        self.refs.borrow_mut().promises.insert(
-            token,
-            (
-                Persistent::save(ctx, resolve.into_value()),
-                Persistent::save(ctx, reject.into_value()),
-            ),
-        );
-        Object::from_value(promise.as_value().clone())?.set("token", token as f64)?;
-        Ok((token, promise.into_value()))
+        self.vm.make_promise(ctx)
     }
     pub(super) fn settle<'js>(
         &self,
@@ -570,11 +559,7 @@ impl Host {
         ok: bool,
         value: Value<'js>,
     ) -> rquickjs::Result<()> {
-        let Some((resolve, reject)) = self.refs.borrow_mut().promises.remove(&token) else {
-            return Ok(());
-        };
-        self.call(ctx, if ok { &resolve } else { &reject }, vec![value])
-            .map(|_| ())
+        self.vm.settle(ctx, token, ok, value)
     }
     fn host_hook<'js>(
         &self,
@@ -723,7 +708,7 @@ pub(in crate::linked) unsafe fn vm_http_chunk(
             )
         })();
         if done != 0 {
-            host.refs.borrow_mut().promises.remove(&token);
+            host.vm.promises.borrow_mut().remove(&token);
         }
         if result.is_err() {
             drop(ctx.catch());
