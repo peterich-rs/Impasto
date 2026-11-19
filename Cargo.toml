@@ -4,6 +4,7 @@ members = [
     "crates/protocol",
     "crates/uicore",
     "crates/engine",
+    "crates/impeller-sys",
     "crates/js",
     "crates/js-headless",
     "crates/js-host",
@@ -26,6 +27,7 @@ thiserror = "2"
 protocol = { path = "crates/protocol" }
 uicore = { path = "crates/uicore" }
 engine = { path = "crates/engine" }
+impeller = { package = "impeller-sys", path = "crates/impeller-sys" }
 js = { path = "crates/js" }
 js-host = { path = "crates/js-host" }
 session = { path = "crates/session" }

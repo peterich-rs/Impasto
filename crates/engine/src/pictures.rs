@@ -58,7 +58,7 @@ impl PictureCache {
         textures: &mut TextureStore,
         pending: &mut Vec<HeldParagraph>,
         last_submit: &mut SubmitStats,
-        impeller: crate::player::ffi::ImpellerContext,
+        impeller: impeller::ImpellerContext,
     ) -> Result<(), Status> {
         let stale = typography.stale();
         let generation = typography.generation();

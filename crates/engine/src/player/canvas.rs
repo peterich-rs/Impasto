@@ -12,7 +12,7 @@ use protocol::{
 };
 
 use super::HeldParagraph;
-use super::ffi;
+
 use super::images::TextureLoad;
 use crate::ImagePixels;
 use crate::player::{impeller_color, paint_color};
@@ -26,8 +26,8 @@ impl<'a> crate::painter::Painter<'a> {
     )]
     pub(crate) fn play_canvas<'pixels>(
         &mut self,
-        builder: ffi::ImpellerDisplayListBuilder,
-        paint: ffi::ImpellerPaint,
+        builder: impeller::ImpellerDisplayListBuilder,
+        paint: impeller::ImpellerPaint,
         x: f32,
         y: f32,
         width: f32,
@@ -40,7 +40,7 @@ impl<'a> crate::painter::Painter<'a> {
         }
         // SAFETY: `builder` is the picture builder for this submit. The count is a
         // plain integer; nothing is retained.
-        let entry = unsafe { ffi::ImpellerDisplayListBuilderGetSaveCount(builder) };
+        let entry = unsafe { impeller::ImpellerDisplayListBuilderGetSaveCount(builder) };
         let Some(layer) = open_canvas(builder, list.isolation(), x, y, width, height) else {
             return false;
         };
@@ -48,40 +48,40 @@ impl<'a> crate::painter::Painter<'a> {
         // SAFETY: `entry` was captured before this canvas pushed. RestoreToCount
         // drops the isolation save and any author save left open, including when
         // an op failed halfway through.
-        unsafe { ffi::ImpellerDisplayListBuilderRestoreToCount(builder, entry) };
+        unsafe { impeller::ImpellerDisplayListBuilderRestoreToCount(builder, entry) };
         if let CanvasLayer::Isolated(layer_paint) = layer {
             // SAFETY: the layer paint was retained by this canvas until Restore.
             // The display list keeps its own reference.
-            unsafe { ffi::ImpellerPaintRelease(layer_paint) };
+            unsafe { impeller::ImpellerPaintRelease(layer_paint) };
         }
         played
     }
 
     fn play_ops<'pixels>(
         &mut self,
-        builder: ffi::ImpellerDisplayListBuilder,
-        paint: ffi::ImpellerPaint,
+        builder: impeller::ImpellerDisplayListBuilder,
+        paint: impeller::ImpellerPaint,
         width: f32,
         height: f32,
         ops: &[CanvasOp],
         resolve: &mut impl FnMut(&str) -> Option<ImagePixels<'pixels>>,
     ) -> bool {
         // SAFETY: the count is the isolation save plus the builder's previous stack.
-        let floor = unsafe { ffi::ImpellerDisplayListBuilderGetSaveCount(builder) };
+        let floor = unsafe { impeller::ImpellerDisplayListBuilderGetSaveCount(builder) };
         for op in ops {
             let drawn = match op {
                 CanvasOp::Save => {
                     // SAFETY: paired with an author Restore, or with RestoreToCount
                     // when the author leaves the save open.
-                    unsafe { ffi::ImpellerDisplayListBuilderSave(builder) };
+                    unsafe { impeller::ImpellerDisplayListBuilderSave(builder) };
                     true
                 }
                 CanvasOp::Restore => {
                     // SAFETY: only pops an author save. The isolation save stays
                     // until the canvas entry count is restored.
                     unsafe {
-                        if ffi::ImpellerDisplayListBuilderGetSaveCount(builder) > floor {
-                            ffi::ImpellerDisplayListBuilderRestore(builder);
+                        if impeller::ImpellerDisplayListBuilderGetSaveCount(builder) > floor {
+                            impeller::ImpellerDisplayListBuilderRestore(builder);
                         }
                     }
                     true
@@ -103,8 +103,8 @@ impl<'a> crate::painter::Painter<'a> {
 
     fn draw_text_op(
         &mut self,
-        builder: ffi::ImpellerDisplayListBuilder,
-        paint: ffi::ImpellerPaint,
+        builder: impeller::ImpellerDisplayListBuilder,
+        paint: impeller::ImpellerPaint,
         width: f32,
         height: f32,
         text: &CanvasTextOp,
@@ -125,8 +125,8 @@ impl<'a> crate::painter::Painter<'a> {
 
     fn draw_text_transformed(
         &mut self,
-        builder: ffi::ImpellerDisplayListBuilder,
-        paint: ffi::ImpellerPaint,
+        builder: impeller::ImpellerDisplayListBuilder,
+        paint: impeller::ImpellerPaint,
         text: &CanvasTextOp,
     ) -> bool {
         let compress = text_compress(text);
@@ -136,27 +136,27 @@ impl<'a> crate::painter::Painter<'a> {
         }
         // SAFETY: the save is restored on every path. Scale about `anchor_x` is
         // closest to the glyph, then the user matrix maps into the canvas.
-        unsafe { ffi::ImpellerDisplayListBuilderSave(builder) };
+        unsafe { impeller::ImpellerDisplayListBuilderSave(builder) };
         apply_ctm(builder, text.ctm);
         if compress != 1.0 {
             // SAFETY: builder is the submit's display list. Translation is in
             // user space so the anchor stays fixed while glyphs squeeze.
             unsafe {
-                ffi::ImpellerDisplayListBuilderTranslate(builder, text.anchor_x, 0.0);
-                ffi::ImpellerDisplayListBuilderScale(builder, compress, 1.0);
-                ffi::ImpellerDisplayListBuilderTranslate(builder, -text.anchor_x, 0.0);
+                impeller::ImpellerDisplayListBuilderTranslate(builder, text.anchor_x, 0.0);
+                impeller::ImpellerDisplayListBuilderScale(builder, compress, 1.0);
+                impeller::ImpellerDisplayListBuilderTranslate(builder, -text.anchor_x, 0.0);
             }
         }
         let drawn = self.draw_text_run(builder, paint, text);
         // SAFETY: balances the Save above, including when the text run fails.
-        unsafe { ffi::ImpellerDisplayListBuilderRestore(builder) };
+        unsafe { impeller::ImpellerDisplayListBuilderRestore(builder) };
         drawn
     }
 
     fn draw_text_run(
         &mut self,
-        builder: ffi::ImpellerDisplayListBuilder,
-        paint: ffi::ImpellerPaint,
+        builder: impeller::ImpellerDisplayListBuilder,
+        paint: impeller::ImpellerPaint,
         text: &CanvasTextOp,
     ) -> bool {
         let style = single_line_style(&text.style);
@@ -183,25 +183,25 @@ impl<'a> crate::painter::Painter<'a> {
 
     fn draw_gradient_text(
         &mut self,
-        builder: ffi::ImpellerDisplayListBuilder,
+        builder: impeller::ImpellerDisplayListBuilder,
         text: &CanvasTextOp,
         style: &TextStyle,
-        source: ffi::ImpellerColorSource,
+        source: impeller::ImpellerColorSource,
     ) -> bool {
         let Some(text_paint) = alloc_paint(
             [255, 255, 255, 255],
-            ffi::ImpellerBlendMode::kImpellerBlendModeSourceOver,
+            impeller::ImpellerBlendMode::kImpellerBlendModeSourceOver,
         ) else {
             // SAFETY: the gradient source is a New handle and is not stored.
-            unsafe { ffi::ImpellerColorSourceRelease(source) };
+            unsafe { impeller::ImpellerColorSourceRelease(source) };
             return false;
         };
         // SAFETY: the paint retains the color source. The paragraph copies that
         // paint during shape. Both handles are released before this returns;
         // the paragraph retain is the one `shape` returned.
         let paragraph = unsafe {
-            ffi::ImpellerPaintSetColorSource(text_paint, source);
-            ffi::ImpellerColorSourceRelease(source);
+            impeller::ImpellerPaintSetColorSource(text_paint, source);
+            impeller::ImpellerColorSourceRelease(source);
             let paragraph = self.typography.shape(
                 Some(text_paint),
                 text.utf8.as_ref(),
@@ -211,13 +211,13 @@ impl<'a> crate::painter::Painter<'a> {
                 style,
                 &[],
             );
-            ffi::ImpellerPaintRelease(text_paint);
+            impeller::ImpellerPaintRelease(text_paint);
             paragraph
         };
         let Some(paragraph) = paragraph else {
             return false;
         };
-        let point = ffi::ImpellerPoint {
+        let point = impeller::ImpellerPoint {
             x: text.x,
             y: text.y,
         };
@@ -225,7 +225,7 @@ impl<'a> crate::painter::Painter<'a> {
         // `pending` and released with the display list. Slot `u32::MAX` is not
         // a paint-cache index; release_draw ignores it.
         unsafe {
-            ffi::ImpellerDisplayListBuilderDrawParagraph(builder, paragraph, &point);
+            impeller::ImpellerDisplayListBuilderDrawParagraph(builder, paragraph, &point);
         }
         self.pending.push(HeldParagraph {
             paragraph,
@@ -236,7 +236,7 @@ impl<'a> crate::painter::Painter<'a> {
 
     fn draw_image_op<'pixels>(
         &mut self,
-        builder: ffi::ImpellerDisplayListBuilder,
+        builder: impeller::ImpellerDisplayListBuilder,
         width: f32,
         height: f32,
         image: &CanvasImageOp,
@@ -269,19 +269,19 @@ impl<'a> crate::painter::Painter<'a> {
 
     fn blit_canvas_image(
         &self,
-        builder: ffi::ImpellerDisplayListBuilder,
-        texture: ffi::ImpellerTexture,
+        builder: impeller::ImpellerDisplayListBuilder,
+        texture: impeller::ImpellerTexture,
         image: &CanvasImageOp,
         sample: &SampledRect,
     ) -> bool {
         let sampling = if image.smoothing {
-            ffi::ImpellerTextureSampling::kImpellerTextureSamplingLinear
+            impeller::ImpellerTextureSampling::kImpellerTextureSamplingLinear
         } else {
-            ffi::ImpellerTextureSampling::kImpellerTextureSamplingNearestNeighbor
+            impeller::ImpellerTextureSampling::kImpellerTextureSamplingNearestNeighbor
         };
         let Some(paint) = alloc_paint(
             [255, 255, 255, image.alpha],
-            ffi::ImpellerBlendMode::kImpellerBlendModeSourceOver,
+            impeller::ImpellerBlendMode::kImpellerBlendModeSourceOver,
         ) else {
             return false;
         };
@@ -290,13 +290,13 @@ impl<'a> crate::painter::Painter<'a> {
         // SAFETY: `texture` stays in the texture cache for this submit. The save
         // is restored before return. The paint is released after the draw.
         unsafe {
-            ffi::ImpellerDisplayListBuilderSave(builder);
+            impeller::ImpellerDisplayListBuilderSave(builder);
             apply_ctm(builder, image.ctm);
-            ffi::ImpellerDisplayListBuilderDrawTextureRect(
+            impeller::ImpellerDisplayListBuilderDrawTextureRect(
                 builder, texture, &src, &dst, sampling, paint,
             );
-            ffi::ImpellerDisplayListBuilderRestore(builder);
-            ffi::ImpellerPaintRelease(paint);
+            impeller::ImpellerDisplayListBuilderRestore(builder);
+            impeller::ImpellerPaintRelease(paint);
         }
         true
     }
@@ -315,11 +315,11 @@ impl<'a> crate::painter::Painter<'a> {
 
 enum CanvasLayer {
     Shared,
-    Isolated(ffi::ImpellerPaint),
+    Isolated(impeller::ImpellerPaint),
 }
 
 fn open_canvas(
-    builder: ffi::ImpellerDisplayListBuilder,
+    builder: impeller::ImpellerDisplayListBuilder,
     isolation: CanvasIsolation,
     x: f32,
     y: f32,
@@ -332,12 +332,12 @@ fn open_canvas(
             // SAFETY: RestoreToCount pops this save. The clip is the content box
             // after the origin translation, in scene points.
             unsafe {
-                ffi::ImpellerDisplayListBuilderSave(builder);
-                ffi::ImpellerDisplayListBuilderTranslate(builder, x, y);
-                ffi::ImpellerDisplayListBuilderClipRect(
+                impeller::ImpellerDisplayListBuilderSave(builder);
+                impeller::ImpellerDisplayListBuilderTranslate(builder, x, y);
+                impeller::ImpellerDisplayListBuilderClipRect(
                     builder,
                     &local,
-                    ffi::ImpellerClipOperation::kImpellerClipOperationIntersect,
+                    impeller::ImpellerClipOperation::kImpellerClipOperationIntersect,
                 );
             }
             Some(CanvasLayer::Shared)
@@ -346,7 +346,7 @@ fn open_canvas(
             // SAFETY: a null paint is an allocation failure and returns before
             // any save. RestoreToCount drops the layer; the caller then releases
             // this New handle.
-            let layer_paint = unsafe { ffi::ImpellerPaintNew() };
+            let layer_paint = unsafe { impeller::ImpellerPaintNew() };
             if layer_paint.is_null() {
                 return None;
             }
@@ -357,21 +357,21 @@ fn open_canvas(
             // blends inside it do not erase the parent picture. The clip keeps
             // those ops inside the content box.
             unsafe {
-                ffi::ImpellerPaintSetBlendMode(
+                impeller::ImpellerPaintSetBlendMode(
                     layer_paint,
-                    ffi::ImpellerBlendMode::kImpellerBlendModeSourceOver,
+                    impeller::ImpellerBlendMode::kImpellerBlendModeSourceOver,
                 );
-                ffi::ImpellerDisplayListBuilderSaveLayer(
+                impeller::ImpellerDisplayListBuilderSaveLayer(
                     builder,
                     &bounds,
                     layer_paint,
                     ptr::null_mut(),
                 );
-                ffi::ImpellerDisplayListBuilderTranslate(builder, x, y);
-                ffi::ImpellerDisplayListBuilderClipRect(
+                impeller::ImpellerDisplayListBuilderTranslate(builder, x, y);
+                impeller::ImpellerDisplayListBuilderClipRect(
                     builder,
                     &local,
-                    ffi::ImpellerClipOperation::kImpellerClipOperationIntersect,
+                    impeller::ImpellerClipOperation::kImpellerClipOperationIntersect,
                 );
             }
             Some(CanvasLayer::Isolated(layer_paint))
@@ -381,11 +381,11 @@ fn open_canvas(
 
 enum CompositeGuard {
     Direct,
-    Layer(ffi::ImpellerPaint),
+    Layer(impeller::ImpellerPaint),
 }
 
 fn open_composite(
-    builder: ffi::ImpellerDisplayListBuilder,
+    builder: impeller::ImpellerDisplayListBuilder,
     composite: CanvasComposite,
     width: f32,
     height: f32,
@@ -400,34 +400,39 @@ fn open_composite(
     // SAFETY: close_composite restores this layer. Text has no draw paint, so
     // the blend is the layer composite. The bounds are the canvas content box.
     unsafe {
-        ffi::ImpellerDisplayListBuilderSaveLayer(builder, &bounds, layer_paint, ptr::null_mut());
+        impeller::ImpellerDisplayListBuilderSaveLayer(
+            builder,
+            &bounds,
+            layer_paint,
+            ptr::null_mut(),
+        );
     }
     Ok(CompositeGuard::Layer(layer_paint))
 }
 
-fn close_composite(builder: ffi::ImpellerDisplayListBuilder, guard: CompositeGuard) {
+fn close_composite(builder: impeller::ImpellerDisplayListBuilder, guard: CompositeGuard) {
     let CompositeGuard::Layer(layer_paint) = guard else {
         return;
     };
     // SAFETY: this is the save opened by `open_composite`. The paint is released
     // after Restore so the layer can read it while compositing.
     unsafe {
-        ffi::ImpellerDisplayListBuilderRestore(builder);
-        ffi::ImpellerPaintRelease(layer_paint);
+        impeller::ImpellerDisplayListBuilderRestore(builder);
+        impeller::ImpellerPaintRelease(layer_paint);
     }
 }
 
-fn clip_path(builder: ffi::ImpellerDisplayListBuilder, path: &CanvasPath) -> bool {
+fn clip_path(builder: impeller::ImpellerDisplayListBuilder, path: &CanvasPath) -> bool {
     if path.verbs.is_empty() {
         let empty = rect(0.0, 0.0, 0.0, 0.0);
         // SAFETY: an empty clip intersects the current clip with a zero rect.
         // Later draws in this save are rejected until restore. `empty` is borrowed
         // for the call.
         unsafe {
-            ffi::ImpellerDisplayListBuilderClipRect(
+            impeller::ImpellerDisplayListBuilderClipRect(
                 builder,
                 &empty,
-                ffi::ImpellerClipOperation::kImpellerClipOperationIntersect,
+                impeller::ImpellerClipOperation::kImpellerClipOperationIntersect,
             );
         }
         return true;
@@ -438,18 +443,18 @@ fn clip_path(builder: ffi::ImpellerDisplayListBuilder, path: &CanvasPath) -> boo
     // SAFETY: ClipPath retains the path for the display list. This drops the
     // caller's New reference. The clip is intersect and is not stroked.
     unsafe {
-        ffi::ImpellerDisplayListBuilderClipPath(
+        impeller::ImpellerDisplayListBuilderClipPath(
             builder,
             path,
-            ffi::ImpellerClipOperation::kImpellerClipOperationIntersect,
+            impeller::ImpellerClipOperation::kImpellerClipOperationIntersect,
         );
-        ffi::ImpellerPathRelease(path);
+        impeller::ImpellerPathRelease(path);
     }
     true
 }
 
 fn fill_path(
-    builder: ffi::ImpellerDisplayListBuilder,
+    builder: impeller::ImpellerDisplayListBuilder,
     path: &CanvasPath,
     paint: &CanvasPaint,
 ) -> bool {
@@ -466,51 +471,51 @@ fn fill_path(
         }
     };
     // SAFETY: DrawPath retained the path. This releases the New reference.
-    unsafe { ffi::ImpellerPathRelease(path) };
+    unsafe { impeller::ImpellerPathRelease(path) };
     drawn
 }
 
 fn draw_filled(
-    builder: ffi::ImpellerDisplayListBuilder,
-    path: ffi::ImpellerPath,
+    builder: impeller::ImpellerDisplayListBuilder,
+    path: impeller::ImpellerPath,
     color: [u8; 4],
-    blend: ffi::ImpellerBlendMode::Type,
+    blend: impeller::ImpellerBlendMode::Type,
 ) -> bool {
     let Some(paint) = alloc_paint(color, blend) else {
         return false;
     };
     // SAFETY: the paint is released after the draw. The path outlives this call.
     unsafe {
-        ffi::ImpellerDisplayListBuilderDrawPath(builder, path, paint);
-        ffi::ImpellerPaintRelease(paint);
+        impeller::ImpellerDisplayListBuilderDrawPath(builder, path, paint);
+        impeller::ImpellerPaintRelease(paint);
     }
     true
 }
 
 fn draw_filled_source(
-    builder: ffi::ImpellerDisplayListBuilder,
-    path: ffi::ImpellerPath,
-    source: ffi::ImpellerColorSource,
-    blend: ffi::ImpellerBlendMode::Type,
+    builder: impeller::ImpellerDisplayListBuilder,
+    path: impeller::ImpellerPath,
+    source: impeller::ImpellerColorSource,
+    blend: impeller::ImpellerBlendMode::Type,
 ) -> bool {
     let Some(paint) = alloc_paint([255, 255, 255, 255], blend) else {
         // SAFETY: the gradient is a New handle. The paint allocation failed,
         // so nothing else retains the source.
-        unsafe { ffi::ImpellerColorSourceRelease(source) };
+        unsafe { impeller::ImpellerColorSourceRelease(source) };
         return false;
     };
     // SAFETY: the paint retains the color source. Both are released after the draw.
     unsafe {
-        ffi::ImpellerPaintSetColorSource(paint, source);
-        ffi::ImpellerColorSourceRelease(source);
-        ffi::ImpellerDisplayListBuilderDrawPath(builder, path, paint);
-        ffi::ImpellerPaintRelease(paint);
+        impeller::ImpellerPaintSetColorSource(paint, source);
+        impeller::ImpellerColorSourceRelease(source);
+        impeller::ImpellerDisplayListBuilderDrawPath(builder, path, paint);
+        impeller::ImpellerPaintRelease(paint);
     }
     true
 }
 
 fn clear_rect(
-    builder: ffi::ImpellerDisplayListBuilder,
+    builder: impeller::ImpellerDisplayListBuilder,
     x: f32,
     y: f32,
     w: f32,
@@ -527,7 +532,7 @@ fn clear_rect(
     }
     let Some(paint) = alloc_paint(
         [0, 0, 0, 255],
-        ffi::ImpellerBlendMode::kImpellerBlendModeClear,
+        impeller::ImpellerBlendMode::kImpellerBlendModeClear,
     ) else {
         return false;
     };
@@ -535,8 +540,8 @@ fn clear_rect(
         let area = rect(x, y, w, h);
         // SAFETY: the paint is released after the draw. Identity needs no path.
         unsafe {
-            ffi::ImpellerDisplayListBuilderDrawRect(builder, &area, paint);
-            ffi::ImpellerPaintRelease(paint);
+            impeller::ImpellerDisplayListBuilderDrawRect(builder, &area, paint);
+            impeller::ImpellerPaintRelease(paint);
         }
         return true;
     }
@@ -548,58 +553,58 @@ fn clear_rect(
     ];
     let Some(path) = corner_path(corners) else {
         // SAFETY: the clear paint is a New handle and the path was not drawn.
-        unsafe { ffi::ImpellerPaintRelease(paint) };
+        unsafe { impeller::ImpellerPaintRelease(paint) };
         return false;
     };
     // SAFETY: DrawPath retains the path. Both New handles are released once.
     unsafe {
-        ffi::ImpellerDisplayListBuilderDrawPath(builder, path, paint);
-        ffi::ImpellerPathRelease(path);
-        ffi::ImpellerPaintRelease(paint);
+        impeller::ImpellerDisplayListBuilderDrawPath(builder, path, paint);
+        impeller::ImpellerPathRelease(path);
+        impeller::ImpellerPaintRelease(paint);
     }
     true
 }
 
-fn take_path(path: &CanvasPath) -> Option<ffi::ImpellerPath> {
+fn take_path(path: &CanvasPath) -> Option<impeller::ImpellerPath> {
     // SAFETY: the builder is released on every path. TakePathNew returns the
     // caller's one reference; a null builder or path is a failed allocation.
     unsafe {
-        let builder = ffi::ImpellerPathBuilderNew();
+        let builder = impeller::ImpellerPathBuilderNew();
         if builder.is_null() {
             None
         } else {
             for verb in path.verbs.iter() {
                 match *verb {
                     PathVerb::Move(x, y) => {
-                        let point = ffi::ImpellerPoint { x, y };
-                        ffi::ImpellerPathBuilderMoveTo(builder, &point);
+                        let point = impeller::ImpellerPoint { x, y };
+                        impeller::ImpellerPathBuilderMoveTo(builder, &point);
                     }
                     PathVerb::Line(x, y) => {
-                        let point = ffi::ImpellerPoint { x, y };
-                        ffi::ImpellerPathBuilderLineTo(builder, &point);
+                        let point = impeller::ImpellerPoint { x, y };
+                        impeller::ImpellerPathBuilderLineTo(builder, &point);
                     }
                     PathVerb::Quad(cx, cy, x, y) => {
-                        let control = ffi::ImpellerPoint { x: cx, y: cy };
-                        let end = ffi::ImpellerPoint { x, y };
-                        ffi::ImpellerPathBuilderQuadraticCurveTo(builder, &control, &end);
+                        let control = impeller::ImpellerPoint { x: cx, y: cy };
+                        let end = impeller::ImpellerPoint { x, y };
+                        impeller::ImpellerPathBuilderQuadraticCurveTo(builder, &control, &end);
                     }
                     PathVerb::Cubic(c1x, c1y, c2x, c2y, x, y) => {
-                        let c1 = ffi::ImpellerPoint { x: c1x, y: c1y };
-                        let c2 = ffi::ImpellerPoint { x: c2x, y: c2y };
-                        let end = ffi::ImpellerPoint { x, y };
-                        ffi::ImpellerPathBuilderCubicCurveTo(builder, &c1, &c2, &end);
+                        let c1 = impeller::ImpellerPoint { x: c1x, y: c1y };
+                        let c2 = impeller::ImpellerPoint { x: c2x, y: c2y };
+                        let end = impeller::ImpellerPoint { x, y };
+                        impeller::ImpellerPathBuilderCubicCurveTo(builder, &c1, &c2, &end);
                     }
-                    PathVerb::Close => ffi::ImpellerPathBuilderClose(builder),
+                    PathVerb::Close => impeller::ImpellerPathBuilderClose(builder),
                 }
             }
-            let filled = ffi::ImpellerPathBuilderTakePathNew(builder, fill_type(path.fill));
-            ffi::ImpellerPathBuilderRelease(builder);
+            let filled = impeller::ImpellerPathBuilderTakePathNew(builder, fill_type(path.fill));
+            impeller::ImpellerPathBuilderRelease(builder);
             if filled.is_null() { None } else { Some(filled) }
         }
     }
 }
 
-fn corner_path(corners: [(f32, f32); 4]) -> Option<ffi::ImpellerPath> {
+fn corner_path(corners: [(f32, f32); 4]) -> Option<impeller::ImpellerPath> {
     let verbs: Arc<[PathVerb]> = Arc::from([
         PathVerb::Move(corners[0].0, corners[0].1),
         PathVerb::Line(corners[1].0, corners[1].1),
@@ -613,16 +618,16 @@ fn corner_path(corners: [(f32, f32); 4]) -> Option<ffi::ImpellerPath> {
     })
 }
 
-fn fill_type(fill: FillRule) -> ffi::ImpellerFillType::Type {
+fn fill_type(fill: FillRule) -> impeller::ImpellerFillType::Type {
     match fill {
-        FillRule::NonZero => ffi::ImpellerFillType::kImpellerFillTypeNonZero,
-        FillRule::EvenOdd => ffi::ImpellerFillType::kImpellerFillTypeOdd,
+        FillRule::NonZero => impeller::ImpellerFillType::kImpellerFillTypeNonZero,
+        FillRule::EvenOdd => impeller::ImpellerFillType::kImpellerFillTypeOdd,
     }
 }
 
 enum PreparedBrush {
     Solid([u8; 4]),
-    Gradient(ffi::ImpellerColorSource),
+    Gradient(impeller::ImpellerColorSource),
     Skip,
 }
 
@@ -676,7 +681,7 @@ fn linear_source(
     stops: &[ColorStop],
     coverage: u8,
     matrix: Option<[f32; 16]>,
-) -> Option<ffi::ImpellerColorSource> {
+) -> Option<impeller::ImpellerColorSource> {
     if !start
         .iter()
         .chain(end.iter())
@@ -685,11 +690,11 @@ fn linear_source(
         return None;
     }
     let (colors, offsets) = gradient_stops(stops, coverage)?;
-    let from = ffi::ImpellerPoint {
+    let from = impeller::ImpellerPoint {
         x: start[0],
         y: start[1],
     };
-    let to = ffi::ImpellerPoint {
+    let to = impeller::ImpellerPoint {
         x: end[0],
         y: end[1],
     };
@@ -698,13 +703,13 @@ fn linear_source(
         // SAFETY: color and offset slices live until this call returns. A null
         // source means Impeller rejected the gradient; the caller skips the draw.
         unsafe {
-            ffi::ImpellerColorSourceCreateLinearGradientNew(
+            impeller::ImpellerColorSourceCreateLinearGradientNew(
                 &from,
                 &to,
                 count,
                 colors.as_ptr(),
                 offsets.as_ptr(),
-                ffi::ImpellerTileMode::kImpellerTileModeClamp,
+                impeller::ImpellerTileMode::kImpellerTileModeClamp,
                 transform,
             )
         }
@@ -720,7 +725,7 @@ fn conical_source(
     stops: &[ColorStop],
     coverage: u8,
     matrix: Option<[f32; 16]>,
-) -> Option<ffi::ImpellerColorSource> {
+) -> Option<impeller::ImpellerColorSource> {
     if !start_radius.is_finite()
         || !end_radius.is_finite()
         || !start
@@ -731,11 +736,11 @@ fn conical_source(
         return None;
     }
     let (colors, offsets) = gradient_stops(stops, coverage)?;
-    let from = ffi::ImpellerPoint {
+    let from = impeller::ImpellerPoint {
         x: start[0],
         y: start[1],
     };
-    let to = ffi::ImpellerPoint {
+    let to = impeller::ImpellerPoint {
         x: end[0],
         y: end[1],
     };
@@ -744,7 +749,7 @@ fn conical_source(
         // SAFETY: slices live for the call. The two-circle radial is a conical
         // gradient. The caller releases a non-null source once.
         unsafe {
-            ffi::ImpellerColorSourceCreateConicalGradientNew(
+            impeller::ImpellerColorSourceCreateConicalGradientNew(
                 &from,
                 start_radius,
                 &to,
@@ -752,7 +757,7 @@ fn conical_source(
                 count,
                 colors.as_ptr(),
                 offsets.as_ptr(),
-                ffi::ImpellerTileMode::kImpellerTileModeClamp,
+                impeller::ImpellerTileMode::kImpellerTileModeClamp,
                 transform,
             )
         }
@@ -766,12 +771,12 @@ fn sweep_source(
     stops: &[ColorStop],
     coverage: u8,
     matrix: Option<[f32; 16]>,
-) -> Option<ffi::ImpellerColorSource> {
+) -> Option<impeller::ImpellerColorSource> {
     if !angle.is_finite() || !center[0].is_finite() || !center[1].is_finite() {
         return None;
     }
     let (colors, offsets) = gradient_stops(stops, coverage)?;
-    let center = ffi::ImpellerPoint {
+    let center = impeller::ImpellerPoint {
         x: center[0],
         y: center[1],
     };
@@ -782,14 +787,14 @@ fn sweep_source(
         // SAFETY: slices live for the call. Sweep angles are degrees. The caller
         // releases a non-null source once.
         unsafe {
-            ffi::ImpellerColorSourceCreateSweepGradientNew(
+            impeller::ImpellerColorSourceCreateSweepGradientNew(
                 &center,
                 start,
                 end,
                 count,
                 colors.as_ptr(),
                 offsets.as_ptr(),
-                ffi::ImpellerTileMode::kImpellerTileModeClamp,
+                impeller::ImpellerTileMode::kImpellerTileModeClamp,
                 transform,
             )
         }
@@ -799,9 +804,9 @@ fn sweep_source(
 
 fn with_gradient_matrix<T>(
     matrix: Option<[f32; 16]>,
-    build: impl FnOnce(*const ffi::ImpellerMatrix) -> T,
+    build: impl FnOnce(*const impeller::ImpellerMatrix) -> T,
 ) -> T {
-    let stored = matrix.map(|value| ffi::ImpellerMatrix { m: value });
+    let stored = matrix.map(|value| impeller::ImpellerMatrix { m: value });
     let transform = match &stored {
         Some(value) => ptr::from_ref(value),
         None => ptr::null(),
@@ -812,7 +817,7 @@ fn with_gradient_matrix<T>(
 fn gradient_stops(
     stops: &[ColorStop],
     coverage: u8,
-) -> Option<(Vec<ffi::ImpellerColor>, Vec<f32>)> {
+) -> Option<(Vec<impeller::ImpellerColor>, Vec<f32>)> {
     if stops.len() < 2 {
         return None;
     }
@@ -834,9 +839,12 @@ fn gradient_stops(
     Some((colors, offsets))
 }
 
-fn alloc_paint(color: [u8; 4], blend: ffi::ImpellerBlendMode::Type) -> Option<ffi::ImpellerPaint> {
+fn alloc_paint(
+    color: [u8; 4],
+    blend: impeller::ImpellerBlendMode::Type,
+) -> Option<impeller::ImpellerPaint> {
     // SAFETY: a null paint is an allocation failure. The caller releases it.
-    let paint = unsafe { ffi::ImpellerPaintNew() };
+    let paint = unsafe { impeller::ImpellerPaintNew() };
     if paint.is_null() {
         return None;
     }
@@ -844,34 +852,39 @@ fn alloc_paint(color: [u8; 4], blend: ffi::ImpellerBlendMode::Type) -> Option<ff
     // SAFETY: the paint was just created and is non-null. Blend and fill are
     // stored on it; the caller releases the paint.
     unsafe {
-        ffi::ImpellerPaintSetBlendMode(paint, blend);
-        ffi::ImpellerPaintSetDrawStyle(paint, ffi::ImpellerDrawStyle::kImpellerDrawStyleFill);
+        impeller::ImpellerPaintSetBlendMode(paint, blend);
+        impeller::ImpellerPaintSetDrawStyle(
+            paint,
+            impeller::ImpellerDrawStyle::kImpellerDrawStyleFill,
+        );
     }
     Some(paint)
 }
 
-fn composite_blend(composite: CanvasComposite) -> ffi::ImpellerBlendMode::Type {
+fn composite_blend(composite: CanvasComposite) -> impeller::ImpellerBlendMode::Type {
     match composite {
-        CanvasComposite::SourceOver => ffi::ImpellerBlendMode::kImpellerBlendModeSourceOver,
+        CanvasComposite::SourceOver => impeller::ImpellerBlendMode::kImpellerBlendModeSourceOver,
         CanvasComposite::DestinationOver => {
-            ffi::ImpellerBlendMode::kImpellerBlendModeDestinationOver
+            impeller::ImpellerBlendMode::kImpellerBlendModeDestinationOver
         }
-        CanvasComposite::DestinationOut => ffi::ImpellerBlendMode::kImpellerBlendModeDestinationOut,
-        CanvasComposite::Multiply => ffi::ImpellerBlendMode::kImpellerBlendModeMultiply,
-        CanvasComposite::Screen => ffi::ImpellerBlendMode::kImpellerBlendModeScreen,
-        CanvasComposite::Lighter => ffi::ImpellerBlendMode::kImpellerBlendModePlus,
-        CanvasComposite::Xor => ffi::ImpellerBlendMode::kImpellerBlendModeXor,
+        CanvasComposite::DestinationOut => {
+            impeller::ImpellerBlendMode::kImpellerBlendModeDestinationOut
+        }
+        CanvasComposite::Multiply => impeller::ImpellerBlendMode::kImpellerBlendModeMultiply,
+        CanvasComposite::Screen => impeller::ImpellerBlendMode::kImpellerBlendModeScreen,
+        CanvasComposite::Lighter => impeller::ImpellerBlendMode::kImpellerBlendModePlus,
+        CanvasComposite::Xor => impeller::ImpellerBlendMode::kImpellerBlendModeXor,
     }
 }
 
-fn apply_ctm(builder: ffi::ImpellerDisplayListBuilder, ctm: [f32; 6]) {
+fn apply_ctm(builder: impeller::ImpellerDisplayListBuilder, ctm: [f32; 6]) {
     if ctm_identity(ctm) {
         return;
     }
-    let matrix = ffi::ImpellerMatrix { m: ctm_matrix(ctm) };
+    let matrix = impeller::ImpellerMatrix { m: ctm_matrix(ctm) };
     // SAFETY: the matrix is borrowed for the call. Impeller appends it, so the
     // user matrix applies before the canvas origin and `point_scale`.
-    unsafe { ffi::ImpellerDisplayListBuilderTransform(builder, &matrix) };
+    unsafe { impeller::ImpellerDisplayListBuilderTransform(builder, &matrix) };
 }
 
 fn ctm_matrix(ctm: [f32; 6]) -> [f32; 16] {
@@ -968,8 +981,8 @@ fn scale_u8(channel: u8, coverage: u8) -> u8 {
     u8::try_from(product / 255).unwrap_or(u8::MAX)
 }
 
-fn rect(x: f32, y: f32, width: f32, height: f32) -> ffi::ImpellerRect {
-    ffi::ImpellerRect {
+fn rect(x: f32, y: f32, width: f32, height: f32) -> impeller::ImpellerRect {
+    impeller::ImpellerRect {
         x,
         y,
         width,

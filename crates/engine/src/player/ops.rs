@@ -1,4 +1,3 @@
-use super::ffi;
 #[cfg(test)]
 use super::paint_trace;
 use super::*;
@@ -7,8 +6,8 @@ use protocol::{BlendMode, Command, Shadow, TextSpan, TextStyle};
 impl<'a> crate::painter::Painter<'a> {
     pub(crate) fn play_commands<'pixels>(
         &mut self,
-        builder: ffi::ImpellerDisplayListBuilder,
-        paint: ffi::ImpellerPaint,
+        builder: impeller::ImpellerDisplayListBuilder,
+        paint: impeller::ImpellerPaint,
         commands: &[Command],
         point_scale: f32,
         apply_scale: bool,
@@ -19,7 +18,7 @@ impl<'a> crate::painter::Painter<'a> {
             let drawn = match command {
                 Command::Fill { color } => {
                     paint_color(paint, *color);
-                    unsafe { ffi::ImpellerDisplayListBuilderDrawPaint(builder, paint) };
+                    unsafe { impeller::ImpellerDisplayListBuilderDrawPaint(builder, paint) };
                     true
                 }
                 Command::Rect {
@@ -155,7 +154,7 @@ impl<'a> crate::painter::Painter<'a> {
     pub(crate) fn draw_layers(
         &mut self,
         tree: &LayerTree,
-        builder: ffi::ImpellerDisplayListBuilder,
+        builder: impeller::ImpellerDisplayListBuilder,
         start: Option<LayerId>,
     ) -> bool {
         let mut current = start;
@@ -169,8 +168,8 @@ impl<'a> crate::painter::Painter<'a> {
             let drawn = match kind {
                 LayerKind::Offset { x, y } => {
                     unsafe {
-                        ffi::ImpellerDisplayListBuilderSave(builder);
-                        ffi::ImpellerDisplayListBuilderTranslate(builder, x, y);
+                        impeller::ImpellerDisplayListBuilderSave(builder);
+                        impeller::ImpellerDisplayListBuilderTranslate(builder, x, y);
                     }
                     self.saves.push(Save::Transform);
                     let drawn = self.draw_layers(tree, builder, first_child);
@@ -252,7 +251,7 @@ impl<'a> crate::painter::Painter<'a> {
     pub(crate) fn draw_picture(
         &mut self,
         tree: &LayerTree,
-        builder: ffi::ImpellerDisplayListBuilder,
+        builder: impeller::ImpellerDisplayListBuilder,
         id: PictureId,
         opacity: f32,
     ) -> bool {
@@ -289,18 +288,18 @@ impl<'a> crate::painter::Painter<'a> {
         }
         let list = retained.list;
         unsafe {
-            ffi::ImpellerDisplayListBuilderSave(builder);
-            ffi::ImpellerDisplayListBuilderTranslate(builder, origin.0, origin.1);
-            ffi::ImpellerDisplayListBuilderDrawDisplayList(builder, list, opacity);
-            ffi::ImpellerDisplayListBuilderRestore(builder);
+            impeller::ImpellerDisplayListBuilderSave(builder);
+            impeller::ImpellerDisplayListBuilderTranslate(builder, origin.0, origin.1);
+            impeller::ImpellerDisplayListBuilderDrawDisplayList(builder, list, opacity);
+            impeller::ImpellerDisplayListBuilderRestore(builder);
         }
         true
     }
 
     pub(crate) fn draw_rect(
         &self,
-        builder: ffi::ImpellerDisplayListBuilder,
-        _paint: ffi::ImpellerPaint,
+        builder: impeller::ImpellerDisplayListBuilder,
+        _paint: impeller::ImpellerPaint,
         x: f32,
         y: f32,
         w: f32,
@@ -314,7 +313,7 @@ impl<'a> crate::painter::Painter<'a> {
         box_shadows: &[protocol::BoxShadow],
         point_scale: f32,
     ) -> bool {
-        let paint = unsafe { ffi::ImpellerPaintNew() };
+        let paint = unsafe { impeller::ImpellerPaintNew() };
         if paint.is_null() {
             return false;
         }
@@ -345,74 +344,74 @@ impl<'a> crate::painter::Painter<'a> {
                 paint_color(paint, fill_color);
                 self.set_stroke(paint, stroke_width);
                 unsafe {
-                    ffi::ImpellerPaintSetDrawStyle(
+                    impeller::ImpellerPaintSetDrawStyle(
                         paint,
-                        ffi::ImpellerDrawStyle::kImpellerDrawStyleStrokeAndFill,
+                        impeller::ImpellerDrawStyle::kImpellerDrawStyleStrokeAndFill,
                     );
                 }
                 self.fill_rect(builder, paint, x, y, w, h, corner_radius);
             } else {
                 paint_color(paint, fill_color);
                 unsafe {
-                    ffi::ImpellerPaintSetDrawStyle(
+                    impeller::ImpellerPaintSetDrawStyle(
                         paint,
-                        ffi::ImpellerDrawStyle::kImpellerDrawStyleFill,
+                        impeller::ImpellerDrawStyle::kImpellerDrawStyleFill,
                     );
                 }
                 self.paint_gradient(paint, gradient, x, y, w, h);
                 self.fill_rect(builder, paint, x, y, w, h, corner_radius);
-                let stroke_paint = unsafe { ffi::ImpellerPaintNew() };
+                let stroke_paint = unsafe { impeller::ImpellerPaintNew() };
                 if stroke_paint.is_null() {
-                    unsafe { ffi::ImpellerPaintRelease(paint) };
+                    unsafe { impeller::ImpellerPaintRelease(paint) };
                     return false;
                 }
                 paint_color(stroke_paint, stroke_color);
                 self.set_stroke(stroke_paint, stroke_width);
                 unsafe {
-                    ffi::ImpellerPaintSetDrawStyle(
+                    impeller::ImpellerPaintSetDrawStyle(
                         stroke_paint,
-                        ffi::ImpellerDrawStyle::kImpellerDrawStyleStroke,
+                        impeller::ImpellerDrawStyle::kImpellerDrawStyleStroke,
                     );
                 }
                 self.fill_rect(builder, stroke_paint, x, y, w, h, corner_radius);
-                unsafe { ffi::ImpellerPaintRelease(stroke_paint) };
+                unsafe { impeller::ImpellerPaintRelease(stroke_paint) };
             }
         } else if stroke {
             paint_color(paint, stroke_color);
             self.set_stroke(paint, stroke_width);
             unsafe {
-                ffi::ImpellerPaintSetDrawStyle(
+                impeller::ImpellerPaintSetDrawStyle(
                     paint,
-                    ffi::ImpellerDrawStyle::kImpellerDrawStyleStroke,
+                    impeller::ImpellerDrawStyle::kImpellerDrawStyleStroke,
                 );
             }
             self.fill_rect(builder, paint, x, y, w, h, corner_radius);
         } else if fill {
             paint_color(paint, fill_color);
             unsafe {
-                ffi::ImpellerPaintSetDrawStyle(
+                impeller::ImpellerPaintSetDrawStyle(
                     paint,
-                    ffi::ImpellerDrawStyle::kImpellerDrawStyleFill,
+                    impeller::ImpellerDrawStyle::kImpellerDrawStyleFill,
                 );
             }
             self.paint_gradient(paint, gradient, x, y, w, h);
             self.fill_rect(builder, paint, x, y, w, h, corner_radius);
         }
-        unsafe { ffi::ImpellerPaintRelease(paint) };
+        unsafe { impeller::ImpellerPaintRelease(paint) };
         true
     }
 
     pub(crate) fn fill_rect(
         &self,
-        builder: ffi::ImpellerDisplayListBuilder,
-        paint: ffi::ImpellerPaint,
+        builder: impeller::ImpellerDisplayListBuilder,
+        paint: impeller::ImpellerPaint,
         x: f32,
         y: f32,
         w: f32,
         h: f32,
         corner_radius: f32,
     ) {
-        let rect = ffi::ImpellerRect {
+        let rect = impeller::ImpellerRect {
             x,
             y,
             width: w,
@@ -423,22 +422,22 @@ impl<'a> crate::painter::Painter<'a> {
             let radii = uniform_radii(radius);
             // SAFETY: `builder` and `paint` live until this submit releases them.
             unsafe {
-                ffi::ImpellerDisplayListBuilderDrawRoundedRect(builder, &rect, &radii, paint);
+                impeller::ImpellerDisplayListBuilderDrawRoundedRect(builder, &rect, &radii, paint);
             }
         } else {
-            unsafe { ffi::ImpellerDisplayListBuilderDrawRect(builder, &rect, paint) };
+            unsafe { impeller::ImpellerDisplayListBuilderDrawRect(builder, &rect, paint) };
         }
     }
 
-    pub(crate) fn set_stroke(&self, paint: ffi::ImpellerPaint, width: f32) {
+    pub(crate) fn set_stroke(&self, paint: impeller::ImpellerPaint, width: f32) {
         #[cfg(test)]
         paint_trace::stroke(width);
-        unsafe { ffi::ImpellerPaintSetStrokeWidth(paint, width) };
+        unsafe { impeller::ImpellerPaintSetStrokeWidth(paint, width) };
     }
 
     pub(crate) fn paint_gradient(
         &self,
-        paint: ffi::ImpellerPaint,
+        paint: impeller::ImpellerPaint,
         gradient: Option<&Gradient>,
         x: f32,
         y: f32,
@@ -449,14 +448,14 @@ impl<'a> crate::painter::Painter<'a> {
             return;
         };
         unsafe {
-            ffi::ImpellerPaintSetColorSource(paint, source);
-            ffi::ImpellerColorSourceRelease(source);
+            impeller::ImpellerPaintSetColorSource(paint, source);
+            impeller::ImpellerColorSourceRelease(source);
         }
     }
 
     pub(crate) fn draw_box_shadow(
         &self,
-        builder: ffi::ImpellerDisplayListBuilder,
+        builder: impeller::ImpellerDisplayListBuilder,
         x: f32,
         y: f32,
         w: f32,
@@ -472,26 +471,29 @@ impl<'a> crate::painter::Painter<'a> {
         {
             return;
         }
-        let paint = unsafe { ffi::ImpellerPaintNew() };
+        let paint = unsafe { impeller::ImpellerPaintNew() };
         if paint.is_null() {
             return;
         }
         paint_color(paint, shadow.color);
         unsafe {
-            ffi::ImpellerPaintSetDrawStyle(paint, ffi::ImpellerDrawStyle::kImpellerDrawStyleFill);
+            impeller::ImpellerPaintSetDrawStyle(
+                paint,
+                impeller::ImpellerDrawStyle::kImpellerDrawStyleFill,
+            );
         }
         if shadow.blur_sigma > 0.0 {
             let filter = unsafe {
-                ffi::ImpellerImageFilterCreateBlurNew(
+                impeller::ImpellerImageFilterCreateBlurNew(
                     shadow.blur_sigma,
                     shadow.blur_sigma,
-                    ffi::ImpellerTileMode::kImpellerTileModeDecal,
+                    impeller::ImpellerTileMode::kImpellerTileModeDecal,
                 )
             };
             if !filter.is_null() {
                 unsafe {
-                    ffi::ImpellerPaintSetImageFilter(paint, filter);
-                    ffi::ImpellerImageFilterRelease(filter);
+                    impeller::ImpellerPaintSetImageFilter(paint, filter);
+                    impeller::ImpellerImageFilterRelease(filter);
                 }
             }
         }
@@ -505,12 +507,12 @@ impl<'a> crate::painter::Painter<'a> {
             h + spread * 2.0,
             corner_radius + spread,
         );
-        unsafe { ffi::ImpellerPaintRelease(paint) };
+        unsafe { impeller::ImpellerPaintRelease(paint) };
     }
 
     pub(crate) fn draw_shadow(
         &self,
-        builder: ffi::ImpellerDisplayListBuilder,
+        builder: impeller::ImpellerDisplayListBuilder,
         x: f32,
         y: f32,
         w: f32,
@@ -528,7 +530,7 @@ impl<'a> crate::painter::Painter<'a> {
         #[cfg(test)]
         paint_trace::shadow(shadow.elevation, point_scale);
         unsafe {
-            ffi::ImpellerDisplayListBuilderDrawShadow(
+            impeller::ImpellerDisplayListBuilderDrawShadow(
                 builder,
                 path,
                 &color,
@@ -536,20 +538,20 @@ impl<'a> crate::painter::Painter<'a> {
                 occluder_is_transparent,
                 point_scale,
             );
-            ffi::ImpellerPathRelease(path);
+            impeller::ImpellerPathRelease(path);
         }
     }
 
     pub(crate) fn push_clip(
         &mut self,
-        builder: ffi::ImpellerDisplayListBuilder,
+        builder: impeller::ImpellerDisplayListBuilder,
         x: f32,
         y: f32,
         w: f32,
         h: f32,
         corner_radius: f32,
     ) {
-        let rect = ffi::ImpellerRect {
+        let rect = impeller::ImpellerRect {
             x,
             y,
             width: w,
@@ -559,20 +561,20 @@ impl<'a> crate::painter::Painter<'a> {
         // SAFETY: `builder` lives until this submit releases it. Scale already ran, so the
         // saved transform includes `point_scale`. `rect` and `radii` are borrowed for the call.
         unsafe {
-            ffi::ImpellerDisplayListBuilderSave(builder);
+            impeller::ImpellerDisplayListBuilderSave(builder);
             if radius > 0.0 {
                 let radii = uniform_radii(radius);
-                ffi::ImpellerDisplayListBuilderClipRoundedRect(
+                impeller::ImpellerDisplayListBuilderClipRoundedRect(
                     builder,
                     &rect,
                     &radii,
-                    ffi::ImpellerClipOperation::kImpellerClipOperationIntersect,
+                    impeller::ImpellerClipOperation::kImpellerClipOperationIntersect,
                 );
             } else {
-                ffi::ImpellerDisplayListBuilderClipRect(
+                impeller::ImpellerDisplayListBuilderClipRect(
                     builder,
                     &rect,
-                    ffi::ImpellerClipOperation::kImpellerClipOperationIntersect,
+                    impeller::ImpellerClipOperation::kImpellerClipOperationIntersect,
                 );
             }
         }
@@ -581,7 +583,7 @@ impl<'a> crate::painter::Painter<'a> {
 
     pub(crate) fn push_opacity(
         &mut self,
-        builder: ffi::ImpellerDisplayListBuilder,
+        builder: impeller::ImpellerDisplayListBuilder,
         x: f32,
         y: f32,
         w: f32,
@@ -589,12 +591,12 @@ impl<'a> crate::painter::Painter<'a> {
         alpha: u8,
     ) -> bool {
         // SAFETY: a null paint means Impeller could not allocate one. The builder is unchanged.
-        let layer_paint = unsafe { ffi::ImpellerPaintNew() };
+        let layer_paint = unsafe { impeller::ImpellerPaintNew() };
         if layer_paint.is_null() {
             return false;
         }
         paint_color(layer_paint, [255, 255, 255, alpha]);
-        let bounds = ffi::ImpellerRect {
+        let bounds = impeller::ImpellerRect {
             x,
             y,
             width: w,
@@ -603,7 +605,7 @@ impl<'a> crate::painter::Painter<'a> {
         // SAFETY: `layer_paint` stays in `saves` until Restore reads it. The header applies
         // this paint when the layer is restored. `bounds` is borrowed for the call.
         unsafe {
-            ffi::ImpellerDisplayListBuilderSaveLayer(
+            impeller::ImpellerDisplayListBuilderSaveLayer(
                 builder,
                 &bounds,
                 layer_paint,
@@ -616,7 +618,7 @@ impl<'a> crate::painter::Painter<'a> {
 
     pub(crate) fn push_transform(
         &mut self,
-        builder: ffi::ImpellerDisplayListBuilder,
+        builder: impeller::ImpellerDisplayListBuilder,
         translate_x: f32,
         translate_y: f32,
         rotate_rad: f32,
@@ -628,17 +630,17 @@ impl<'a> crate::painter::Painter<'a> {
         // saved transform includes `point_scale`. Translate, then clockwise rotation, then
         // scale, matches the command order. Do not scale first.
         unsafe {
-            ffi::ImpellerDisplayListBuilderSave(builder);
-            ffi::ImpellerDisplayListBuilderTranslate(builder, translate_x, translate_y);
-            ffi::ImpellerDisplayListBuilderRotate(builder, degrees);
-            ffi::ImpellerDisplayListBuilderScale(builder, scale_x, scale_y);
+            impeller::ImpellerDisplayListBuilderSave(builder);
+            impeller::ImpellerDisplayListBuilderTranslate(builder, translate_x, translate_y);
+            impeller::ImpellerDisplayListBuilderRotate(builder, degrees);
+            impeller::ImpellerDisplayListBuilderScale(builder, scale_x, scale_y);
         }
         self.saves.push(Save::Transform);
     }
 
     pub(crate) fn push_blur(
         &mut self,
-        builder: ffi::ImpellerDisplayListBuilder,
+        builder: impeller::ImpellerDisplayListBuilder,
         x: f32,
         y: f32,
         w: f32,
@@ -652,16 +654,16 @@ impl<'a> crate::painter::Painter<'a> {
         #[cfg(test)]
         paint_trace::blur(sigma, sigma);
         let filter = unsafe {
-            ffi::ImpellerImageFilterCreateBlurNew(
+            impeller::ImpellerImageFilterCreateBlurNew(
                 sigma,
                 sigma,
-                ffi::ImpellerTileMode::kImpellerTileModeClamp,
+                impeller::ImpellerTileMode::kImpellerTileModeClamp,
             )
         };
         if filter.is_null() {
             return false;
         }
-        let bounds = ffi::ImpellerRect {
+        let bounds = impeller::ImpellerRect {
             x,
             y,
             width: w,
@@ -669,25 +671,30 @@ impl<'a> crate::painter::Painter<'a> {
         };
         if backdrop {
             unsafe {
-                ffi::ImpellerDisplayListBuilderSaveLayer(builder, &bounds, ptr::null_mut(), filter);
-                ffi::ImpellerImageFilterRelease(filter);
+                impeller::ImpellerDisplayListBuilderSaveLayer(
+                    builder,
+                    &bounds,
+                    ptr::null_mut(),
+                    filter,
+                );
+                impeller::ImpellerImageFilterRelease(filter);
             }
             self.saves.push(Save::Layer(ptr::null_mut()));
         } else {
-            let layer_paint = unsafe { ffi::ImpellerPaintNew() };
+            let layer_paint = unsafe { impeller::ImpellerPaintNew() };
             if layer_paint.is_null() {
-                unsafe { ffi::ImpellerImageFilterRelease(filter) };
+                unsafe { impeller::ImpellerImageFilterRelease(filter) };
                 return false;
             }
             unsafe {
-                ffi::ImpellerPaintSetImageFilter(layer_paint, filter);
-                ffi::ImpellerDisplayListBuilderSaveLayer(
+                impeller::ImpellerPaintSetImageFilter(layer_paint, filter);
+                impeller::ImpellerDisplayListBuilderSaveLayer(
                     builder,
                     &bounds,
                     layer_paint,
                     ptr::null_mut(),
                 );
-                ffi::ImpellerImageFilterRelease(filter);
+                impeller::ImpellerImageFilterRelease(filter);
             }
             self.saves.push(Save::Layer(layer_paint));
         }
@@ -696,7 +703,7 @@ impl<'a> crate::painter::Painter<'a> {
 
     pub(crate) fn push_blend(
         &mut self,
-        builder: ffi::ImpellerDisplayListBuilder,
+        builder: impeller::ImpellerDisplayListBuilder,
         x: f32,
         y: f32,
         w: f32,
@@ -710,22 +717,22 @@ impl<'a> crate::painter::Painter<'a> {
                 self.saves.push(Save::Skipped);
                 return true;
             }
-            BlendMode::Multiply => ffi::ImpellerBlendMode::kImpellerBlendModeMultiply,
-            BlendMode::Screen => ffi::ImpellerBlendMode::kImpellerBlendModeScreen,
+            BlendMode::Multiply => impeller::ImpellerBlendMode::kImpellerBlendModeMultiply,
+            BlendMode::Screen => impeller::ImpellerBlendMode::kImpellerBlendModeScreen,
         };
-        let layer_paint = unsafe { ffi::ImpellerPaintNew() };
+        let layer_paint = unsafe { impeller::ImpellerPaintNew() };
         if layer_paint.is_null() {
             return false;
         }
-        let bounds = ffi::ImpellerRect {
+        let bounds = impeller::ImpellerRect {
             x,
             y,
             width: w,
             height: h,
         };
         unsafe {
-            ffi::ImpellerPaintSetBlendMode(layer_paint, blend);
-            ffi::ImpellerDisplayListBuilderSaveLayer(
+            impeller::ImpellerPaintSetBlendMode(layer_paint, blend);
+            impeller::ImpellerDisplayListBuilderSaveLayer(
                 builder,
                 &bounds,
                 layer_paint,
@@ -736,38 +743,38 @@ impl<'a> crate::painter::Painter<'a> {
         true
     }
 
-    pub(crate) fn pop_save(&mut self, builder: ffi::ImpellerDisplayListBuilder) -> bool {
+    pub(crate) fn pop_save(&mut self, builder: impeller::ImpellerDisplayListBuilder) -> bool {
         if self.saves.is_empty() {
             return false;
         }
         match self.saves.pop() {
             Some(Save::Layer(layer_paint)) => {
-                unsafe { ffi::ImpellerDisplayListBuilderRestore(builder) };
+                unsafe { impeller::ImpellerDisplayListBuilderRestore(builder) };
                 if !layer_paint.is_null() {
-                    unsafe { ffi::ImpellerPaintRelease(layer_paint) };
+                    unsafe { impeller::ImpellerPaintRelease(layer_paint) };
                 }
                 true
             }
             Some(Save::Skipped) => true,
             Some(Save::Clip | Save::Transform) => {
-                unsafe { ffi::ImpellerDisplayListBuilderRestore(builder) };
+                unsafe { impeller::ImpellerDisplayListBuilderRestore(builder) };
                 true
             }
             None => false,
         }
     }
 
-    pub(crate) fn drain_saves(&mut self, builder: ffi::ImpellerDisplayListBuilder) {
+    pub(crate) fn drain_saves(&mut self, builder: impeller::ImpellerDisplayListBuilder) {
         while let Some(save) = self.saves.pop() {
             match save {
                 Save::Layer(layer_paint) => {
-                    unsafe { ffi::ImpellerDisplayListBuilderRestore(builder) };
+                    unsafe { impeller::ImpellerDisplayListBuilderRestore(builder) };
                     if !layer_paint.is_null() {
-                        unsafe { ffi::ImpellerPaintRelease(layer_paint) };
+                        unsafe { impeller::ImpellerPaintRelease(layer_paint) };
                     }
                 }
                 Save::Clip | Save::Transform => {
-                    unsafe { ffi::ImpellerDisplayListBuilderRestore(builder) };
+                    unsafe { impeller::ImpellerDisplayListBuilderRestore(builder) };
                 }
                 Save::Skipped => {}
             }
@@ -776,20 +783,20 @@ impl<'a> crate::painter::Painter<'a> {
 
     pub(crate) fn scale_once(
         &self,
-        builder: ffi::ImpellerDisplayListBuilder,
+        builder: impeller::ImpellerDisplayListBuilder,
         point_scale: f32,
         scaled: bool,
     ) -> bool {
         if !scaled {
-            unsafe { ffi::ImpellerDisplayListBuilderScale(builder, point_scale, point_scale) };
+            unsafe { impeller::ImpellerDisplayListBuilderScale(builder, point_scale, point_scale) };
         }
         true
     }
 
     pub(crate) fn draw_text(
         &mut self,
-        builder: ffi::ImpellerDisplayListBuilder,
-        _paint: ffi::ImpellerPaint,
+        builder: impeller::ImpellerDisplayListBuilder,
+        _paint: impeller::ImpellerPaint,
         x: f32,
         y: f32,
         max_width: f32,
@@ -831,10 +838,12 @@ impl<'a> crate::painter::Painter<'a> {
                 .slot_color(paragraph_id.index)
                 .unwrap_or(color);
             self.typography.store_text_probe(false, painted);
-            let point = ffi::ImpellerPoint { x, y };
+            let point = impeller::ImpellerPoint { x, y };
             // SAFETY: `paragraph` is the slot's live object. `release_paragraph` nulls
             // the slot before the pointer is freed, and this branch checks the generation.
-            unsafe { ffi::ImpellerDisplayListBuilderDrawParagraph(builder, paragraph, &point) };
+            unsafe {
+                impeller::ImpellerDisplayListBuilderDrawParagraph(builder, paragraph, &point)
+            };
             return true;
         }
         let Ok((paragraph, slot)) = self
@@ -852,10 +861,10 @@ impl<'a> crate::painter::Painter<'a> {
             return false;
         };
         self.typography.store_text_probe(true, color);
-        let point = ffi::ImpellerPoint { x, y };
+        let point = impeller::ImpellerPoint { x, y };
         // SAFETY: `paragraph` is an extra retain of the cache slot. `release_draw`
         // drops the cache's live count when this display list is released.
-        unsafe { ffi::ImpellerDisplayListBuilderDrawParagraph(builder, paragraph, &point) };
+        unsafe { impeller::ImpellerDisplayListBuilderDrawParagraph(builder, paragraph, &point) };
         self.pending.push(HeldParagraph { paragraph, slot });
         true
     }

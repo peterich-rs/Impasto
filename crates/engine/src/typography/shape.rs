@@ -5,7 +5,7 @@ use super::Typography;
 use super::key::{ParaKey, Shaped, hash_key, hash_query, key_matches, para_key};
 use super::paint_store::PaintSlot;
 use crate::Status;
-use crate::player::ffi;
+
 use crate::player::{
     apply_decoration, color_source, impeller_align, impeller_slant, impeller_weight, paint_color,
     push_runs, read_lines, utf16_len,
@@ -141,7 +141,7 @@ impl Typography {
         // SAFETY: `paragraph` is a live cached paragraph owned by this engine.
         // The glyph info is released before return. Bounds are written by Impeller.
         unsafe {
-            let info = ffi::ImpellerParagraphCreateGlyphInfoAtParagraphCoordinatesNew(
+            let info = impeller::ImpellerParagraphCreateGlyphInfoAtParagraphCoordinatesNew(
                 paragraph,
                 f64::from(x),
                 f64::from(y),
@@ -156,16 +156,16 @@ impl Typography {
                     upstream: false,
                 });
             }
-            let begin = ffi::ImpellerGlyphInfoGetGraphemeClusterCodeUnitRangeBegin(info);
-            let end = ffi::ImpellerGlyphInfoGetGraphemeClusterCodeUnitRangeEnd(info);
-            let mut bounds = ffi::ImpellerRect {
+            let begin = impeller::ImpellerGlyphInfoGetGraphemeClusterCodeUnitRangeBegin(info);
+            let end = impeller::ImpellerGlyphInfoGetGraphemeClusterCodeUnitRangeEnd(info);
+            let mut bounds = impeller::ImpellerRect {
                 x: 0.0,
                 y: 0.0,
                 width: 0.0,
                 height: 0.0,
             };
-            ffi::ImpellerGlyphInfoGetGraphemeClusterBounds(info, &mut bounds);
-            ffi::ImpellerGlyphInfoRelease(info);
+            impeller::ImpellerGlyphInfoGetGraphemeClusterBounds(info, &mut bounds);
+            impeller::ImpellerGlyphInfoRelease(info);
             let mid = bounds.x + bounds.width * 0.5;
             let at_end = x >= mid;
             Ok(crate::CaretHit {
@@ -219,8 +219,10 @@ impl Typography {
         }
         // SAFETY: `paragraph` is a live cached paragraph. Glyph info is released here.
         unsafe {
-            let info =
-                ffi::ImpellerParagraphCreateGlyphInfoAtCodeUnitIndexNew(paragraph, unit as usize);
+            let info = impeller::ImpellerParagraphCreateGlyphInfoAtCodeUnitIndexNew(
+                paragraph,
+                unit as usize,
+            );
             if info.is_null() {
                 return Ok(crate::CaretHit {
                     unit,
@@ -231,15 +233,15 @@ impl Typography {
                     upstream: false,
                 });
             }
-            let begin = ffi::ImpellerGlyphInfoGetGraphemeClusterCodeUnitRangeBegin(info);
-            let mut bounds = ffi::ImpellerRect {
+            let begin = impeller::ImpellerGlyphInfoGetGraphemeClusterCodeUnitRangeBegin(info);
+            let mut bounds = impeller::ImpellerRect {
                 x: 0.0,
                 y: 0.0,
                 width: 0.0,
                 height: 0.0,
             };
-            ffi::ImpellerGlyphInfoGetGraphemeClusterBounds(info, &mut bounds);
-            ffi::ImpellerGlyphInfoRelease(info);
+            impeller::ImpellerGlyphInfoGetGraphemeClusterBounds(info, &mut bounds);
+            impeller::ImpellerGlyphInfoRelease(info);
             let x = if unit as usize > begin {
                 bounds.x + bounds.width
             } else {
@@ -267,10 +269,10 @@ impl Typography {
         unit: u32,
     ) -> Result<(u32, u32), Status> {
         let paragraph = self.ensure_paragraph(utf8, font_size, max_width, color, style)?;
-        let mut range = ffi::ImpellerRange { start: 0, end: 0 };
+        let mut range = impeller::ImpellerRange { start: 0, end: 0 };
         // SAFETY: `paragraph` is a live cached paragraph. `range` is a local out-param.
         unsafe {
-            ffi::ImpellerParagraphGetWordBoundary(paragraph, unit as usize, &mut range);
+            impeller::ImpellerParagraphGetWordBoundary(paragraph, unit as usize, &mut range);
         }
         Ok((
             u32::try_from(range.start).unwrap_or(0),
@@ -349,7 +351,7 @@ impl Typography {
         max_width: f32,
         color: [u8; 4],
         style: &TextStyle,
-    ) -> Result<ffi::ImpellerParagraph, Status> {
+    ) -> Result<impeller::ImpellerParagraph, Status> {
         self.measure_paragraph(utf8, font_size, max_width, color, style)?;
         self.cached_paragraph(utf8, font_size, max_width, color, style, &[])
     }
@@ -362,7 +364,7 @@ impl Typography {
         color: [u8; 4],
         style: &TextStyle,
         spans: &[TextSpan],
-    ) -> Result<ffi::ImpellerParagraph, Status> {
+    ) -> Result<impeller::ImpellerParagraph, Status> {
         let Some(family) = self.resolved_family(style.family.as_deref()) else {
             return Err(Status::BadScene);
         };
@@ -428,7 +430,7 @@ impl Typography {
             .map(|(id, _, _)| id)
     }
 
-    /// A paragraph for one draw, plus an extra [`ffi::ImpellerParagraphRetain`].
+    /// A paragraph for one draw, plus an extra [`impeller::ImpellerParagraphRetain`].
     ///
     /// The cache keeps its own reference. `slot` is passed to [`Self::release_draw`]
     /// when the display list that drew this pointer is released.
@@ -440,7 +442,7 @@ impl Typography {
         color: [u8; 4],
         style: &TextStyle,
         spans: &[TextSpan],
-    ) -> Result<(ffi::ImpellerParagraph, u32), Status> {
+    ) -> Result<(impeller::ImpellerParagraph, u32), Status> {
         let (id, _, _) =
             self.paint_slot(utf8, font_size, max_width, color, style, spans, false, true)?;
         let slot = self
@@ -457,7 +459,7 @@ impl Typography {
         // SAFETY: `paragraph` is the live slot object. The extra retain is released
         // with the display list that draws it. Retain is a no-op on null, and the
         // null check above already returned.
-        unsafe { ffi::ImpellerParagraphRetain(paragraph) };
+        unsafe { impeller::ImpellerParagraphRetain(paragraph) };
         Ok((paragraph, id.index))
     }
 
@@ -795,7 +797,7 @@ impl Typography {
         color: [u8; 4],
         width: f32,
         height: f32,
-        paragraph: ffi::ImpellerParagraph,
+        paragraph: impeller::ImpellerParagraph,
         retain: bool,
     ) -> Result<(protocol::ParagraphId, f32, f32), Status> {
         let index = if let Some(index) = self.paints.free.pop() {
@@ -898,7 +900,10 @@ impl Typography {
         (self.probe_rebuilt, self.probe_color)
     }
 
-    pub(crate) fn live_paint(&self, id: protocol::ParagraphId) -> Option<ffi::ImpellerParagraph> {
+    pub(crate) fn live_paint(
+        &self,
+        id: protocol::ParagraphId,
+    ) -> Option<impeller::ImpellerParagraph> {
         let slot = self.paints.slots.get(id.index as usize)?;
         if slot.generation == id.generation && slot.refs > 0 && !slot.paragraph.is_null() {
             Some(slot.paragraph)
@@ -917,7 +922,7 @@ impl Typography {
         spans: &[TextSpan],
     ) -> Result<Shaped, Status> {
         // SAFETY: the paint is released before this returns. A null paint cannot shape.
-        let paint = unsafe { ffi::ImpellerPaintNew() };
+        let paint = unsafe { impeller::ImpellerPaintNew() };
         if paint.is_null() {
             return Err(Status::BadScene);
         }
@@ -931,19 +936,19 @@ impl Typography {
             text_style,
             spans,
         );
-        unsafe { ffi::ImpellerPaintRelease(paint) };
+        unsafe { impeller::ImpellerPaintRelease(paint) };
         let Some(paragraph) = paragraph else {
             return Err(Status::BadScene);
         };
         // SAFETY: `paragraph` is a live object from `shape` and is stored by the caller.
         let (width, height) = unsafe {
             (
-                ffi::ImpellerParagraphGetLongestLineWidth(paragraph),
-                ffi::ImpellerParagraphGetHeight(paragraph),
+                impeller::ImpellerParagraphGetLongestLineWidth(paragraph),
+                impeller::ImpellerParagraphGetHeight(paragraph),
             )
         };
         if !width.is_finite() || !height.is_finite() {
-            unsafe { ffi::ImpellerParagraphRelease(paragraph) };
+            unsafe { impeller::ImpellerParagraphRelease(paragraph) };
             return Err(Status::BadScene);
         }
         Ok(Shaped {
@@ -974,9 +979,9 @@ impl Typography {
         )?;
         // SAFETY: `shaped.paragraph` is a live paragraph from `build_paragraph`.
         // `GetMinIntrinsicWidth` returns a float cached on that paragraph.
-        let width = unsafe { ffi::ImpellerParagraphGetMinIntrinsicWidth(shaped.paragraph) };
+        let width = unsafe { impeller::ImpellerParagraphGetMinIntrinsicWidth(shaped.paragraph) };
         // SAFETY: this function owns the only retain from `build_paragraph`.
-        unsafe { ffi::ImpellerParagraphRelease(shaped.paragraph) };
+        unsafe { impeller::ImpellerParagraphRelease(shaped.paragraph) };
         if width.is_finite() && width >= 0.0 {
             Ok(width)
         } else {
@@ -999,7 +1004,7 @@ impl Typography {
             spans,
         )?;
         // SAFETY: the measured store owns a live paragraph until the borrow ends.
-        let width = unsafe { ffi::ImpellerParagraphGetMinIntrinsicWidth(paragraph) };
+        let width = unsafe { impeller::ImpellerParagraphGetMinIntrinsicWidth(paragraph) };
         if width.is_finite() && width >= 0.0 {
             Ok(width)
         } else {
@@ -1041,14 +1046,14 @@ impl Typography {
 
     pub(crate) fn shape(
         &self,
-        paint: Option<ffi::ImpellerPaint>,
+        paint: Option<impeller::ImpellerPaint>,
         utf8: &str,
         font_size: f32,
         max_width: f32,
         color: [u8; 4],
         text_style: &TextStyle,
         spans: &[TextSpan],
-    ) -> Option<ffi::ImpellerParagraph> {
+    ) -> Option<impeller::ImpellerParagraph> {
         let shaped = self.shape_once(
             paint, utf8, font_size, max_width, color, text_style, spans, None,
         )?;
@@ -1057,7 +1062,7 @@ impl Typography {
         }
         let boxes = gradient_boxes(shaped, spans);
         // SAFETY: `shaped` is the probe paragraph and is not stored.
-        unsafe { ffi::ImpellerParagraphRelease(shaped) };
+        unsafe { impeller::ImpellerParagraphRelease(shaped) };
         self.shape_once(
             paint,
             utf8,
@@ -1072,7 +1077,7 @@ impl Typography {
 
     fn shape_once(
         &self,
-        paint: Option<ffi::ImpellerPaint>,
+        paint: Option<impeller::ImpellerPaint>,
         utf8: &str,
         font_size: f32,
         max_width: f32,
@@ -1080,7 +1085,7 @@ impl Typography {
         text_style: &TextStyle,
         spans: &[TextSpan],
         boxes: Option<&[Option<SpanBox>]>,
-    ) -> Option<ffi::ImpellerParagraph> {
+    ) -> Option<impeller::ImpellerParagraph> {
         let family = self.resolved_face(text_style.family.as_deref())?;
         let family = family.as_ptr();
         let ellipsis = text_style
@@ -1096,39 +1101,45 @@ impl Typography {
         // display-list scale applied before the first non-fill command scales it.
         // `family` and `ellipsis` outlive this block.
         unsafe {
-            let style = ffi::ImpellerParagraphStyleNew();
-            let paragraph_builder = ffi::ImpellerParagraphBuilderNew(self.context);
+            let style = impeller::ImpellerParagraphStyleNew();
+            let paragraph_builder = impeller::ImpellerParagraphBuilderNew(self.context);
             if style.is_null() || paragraph_builder.is_null() {
-                ffi::ImpellerParagraphStyleRelease(style);
-                ffi::ImpellerParagraphBuilderRelease(paragraph_builder);
+                impeller::ImpellerParagraphStyleRelease(style);
+                impeller::ImpellerParagraphBuilderRelease(paragraph_builder);
                 return None;
             }
             if let Some(paint) = paint {
-                ffi::ImpellerParagraphStyleSetForeground(style, paint);
+                impeller::ImpellerParagraphStyleSetForeground(style, paint);
             }
-            ffi::ImpellerParagraphStyleSetFontFamily(style, family);
-            ffi::ImpellerParagraphStyleSetFontSize(style, font_size);
-            ffi::ImpellerParagraphStyleSetFontWeight(style, impeller_weight(text_style.weight));
-            ffi::ImpellerParagraphStyleSetFontStyle(style, impeller_slant(text_style.slant));
-            ffi::ImpellerParagraphStyleSetTextAlignment(style, impeller_align(text_style.align));
-            ffi::ImpellerParagraphStyleSetTextDirection(
+            impeller::ImpellerParagraphStyleSetFontFamily(style, family);
+            impeller::ImpellerParagraphStyleSetFontSize(style, font_size);
+            impeller::ImpellerParagraphStyleSetFontWeight(
+                style,
+                impeller_weight(text_style.weight),
+            );
+            impeller::ImpellerParagraphStyleSetFontStyle(style, impeller_slant(text_style.slant));
+            impeller::ImpellerParagraphStyleSetTextAlignment(
+                style,
+                impeller_align(text_style.align),
+            );
+            impeller::ImpellerParagraphStyleSetTextDirection(
                 style,
                 if text_style.direction_rtl {
-                    ffi::ImpellerTextDirection::kImpellerTextDirectionRTL
+                    impeller::ImpellerTextDirection::kImpellerTextDirectionRTL
                 } else {
-                    ffi::ImpellerTextDirection::kImpellerTextDirectionLTR
+                    impeller::ImpellerTextDirection::kImpellerTextDirectionLTR
                 },
             );
             if text_style.overflow != protocol::TextOverflow::Visible
                 && let Some(max_lines) = text_style.max_lines.filter(|lines| *lines > 0)
             {
-                ffi::ImpellerParagraphStyleSetMaxLines(style, max_lines);
+                impeller::ImpellerParagraphStyleSetMaxLines(style, max_lines);
             }
             if text_style.height.is_finite() && text_style.height > 0.0 {
-                ffi::ImpellerParagraphStyleSetHeight(style, text_style.height);
+                impeller::ImpellerParagraphStyleSetHeight(style, text_style.height);
             }
             if let Some(ellipsis) = &ellipsis {
-                ffi::ImpellerParagraphStyleSetEllipsis(style, ellipsis.as_ptr());
+                impeller::ImpellerParagraphStyleSetEllipsis(style, ellipsis.as_ptr());
             }
             apply_decoration(style, color, text_style.underline, text_style.line_through);
             let fallback = CString::new("SansCJK").ok();
@@ -1140,10 +1151,10 @@ impl Typography {
                     if span.utf8.is_empty() {
                         continue;
                     }
-                    let span_paint = ffi::ImpellerPaintNew();
+                    let span_paint = impeller::ImpellerPaintNew();
                     if span_paint.is_null() {
-                        ffi::ImpellerParagraphStyleRelease(style);
-                        ffi::ImpellerParagraphBuilderRelease(paragraph_builder);
+                        impeller::ImpellerParagraphStyleRelease(style);
+                        impeller::ImpellerParagraphBuilderRelease(paragraph_builder);
                         return None;
                     }
                     paint_color(span_paint, span.color);
@@ -1152,24 +1163,29 @@ impl Typography {
                             boxes.and_then(|all| all.get(index)).copied().flatten()
                         && let Some(source) = color_source(Some(gradient), x, y, w, h)
                     {
-                        ffi::ImpellerPaintSetColorSource(span_paint, source);
-                        ffi::ImpellerColorSourceRelease(source);
+                        impeller::ImpellerPaintSetColorSource(span_paint, source);
+                        impeller::ImpellerColorSourceRelease(source);
                     }
-                    ffi::ImpellerParagraphStyleSetForeground(style, span_paint);
-                    ffi::ImpellerParagraphStyleSetFontWeight(style, impeller_weight(span.weight));
+                    impeller::ImpellerParagraphStyleSetForeground(style, span_paint);
+                    impeller::ImpellerParagraphStyleSetFontWeight(
+                        style,
+                        impeller_weight(span.weight),
+                    );
                     apply_decoration(style, span.color, span.underline, span.line_through);
                     let span_family = self
                         .resolved_face(span.family.as_deref())
                         .map(|name| name.as_ptr())
                         .unwrap_or(family);
                     push_runs(style, paragraph_builder, span_family, cjk, &span.utf8);
-                    ffi::ImpellerPaintRelease(span_paint);
+                    impeller::ImpellerPaintRelease(span_paint);
                 }
             }
-            let paragraph =
-                ffi::ImpellerParagraphBuilderBuildParagraphNew(paragraph_builder, layout_width);
-            ffi::ImpellerParagraphStyleRelease(style);
-            ffi::ImpellerParagraphBuilderRelease(paragraph_builder);
+            let paragraph = impeller::ImpellerParagraphBuilderBuildParagraphNew(
+                paragraph_builder,
+                layout_width,
+            );
+            impeller::ImpellerParagraphStyleRelease(style);
+            impeller::ImpellerParagraphBuilderRelease(paragraph_builder);
             if paragraph.is_null() {
                 None
             } else {
@@ -1184,17 +1200,20 @@ impl Typography {
         }
     }
 
-    pub(crate) fn retire_paragraph(&mut self, paragraph: ffi::ImpellerParagraph) {
+    pub(crate) fn retire_paragraph(&mut self, paragraph: impeller::ImpellerParagraph) {
         if !self.list_installed {
             // SAFETY: no display list is installed, so this is the last retain.
-            unsafe { ffi::ImpellerParagraphRelease(paragraph) };
+            unsafe { impeller::ImpellerParagraphRelease(paragraph) };
         } else {
             self.retired.push(paragraph);
         }
     }
 }
 
-fn gradient_boxes(paragraph: ffi::ImpellerParagraph, spans: &[TextSpan]) -> Vec<Option<SpanBox>> {
+fn gradient_boxes(
+    paragraph: impeller::ImpellerParagraph,
+    spans: &[TextSpan],
+) -> Vec<Option<SpanBox>> {
     // SAFETY: `paragraph` is the live probe built just above. `read_lines` only
     // reads metrics cached on that paragraph.
     let lines = unsafe { read_lines(paragraph) }.unwrap_or_default();
@@ -1217,22 +1236,22 @@ fn gradient_boxes(paragraph: ffi::ImpellerParagraph, spans: &[TextSpan]) -> Vec<
 }
 
 /// Left and right edges of the glyph cluster at `unit`, in paragraph space.
-fn cluster_edges(paragraph: ffi::ImpellerParagraph, unit: u32) -> Option<(f32, f32)> {
+fn cluster_edges(paragraph: impeller::ImpellerParagraph, unit: u32) -> Option<(f32, f32)> {
     // SAFETY: `paragraph` is the live probe. The glyph info is released here.
     unsafe {
         let index = usize::try_from(unit).unwrap_or(0);
-        let info = ffi::ImpellerParagraphCreateGlyphInfoAtCodeUnitIndexNew(paragraph, index);
+        let info = impeller::ImpellerParagraphCreateGlyphInfoAtCodeUnitIndexNew(paragraph, index);
         if info.is_null() {
             return None;
         }
-        let mut bounds = ffi::ImpellerRect {
+        let mut bounds = impeller::ImpellerRect {
             x: 0.0,
             y: 0.0,
             width: 0.0,
             height: 0.0,
         };
-        ffi::ImpellerGlyphInfoGetGraphemeClusterBounds(info, &mut bounds);
-        ffi::ImpellerGlyphInfoRelease(info);
+        impeller::ImpellerGlyphInfoGetGraphemeClusterBounds(info, &mut bounds);
+        impeller::ImpellerGlyphInfoRelease(info);
         Some((bounds.x, bounds.x + bounds.width))
     }
 }

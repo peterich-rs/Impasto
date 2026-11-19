@@ -1,15 +1,16 @@
 # 架构
 
-当前代码的结构。未落地的事在 `docs/refactor-plan.md`。和代码不一致时，先改已经跑起来的那一边。
+本文记录当前代码的结构。目标架构见 [AGENTS.md](../AGENTS.md)。
 
 ## 仓库
 
-原生代码在 `crates/`，用 Cargo。JS 是仓库根的 pnpm workspace（`packages/*`、`apps/*`）。Kotlin 只用 `kotlin/` 里的 Gradle。根上的 `settings.gradle.kts` 没有 `include`。
+原生代码在 `crates/`，用 Cargo。JS 是仓库根的 pnpm workspace（`packages/*`、`apps/*`）。Android APK 使用 `crates/android/apk/` 下的 Gradle 工程。
 
 ```
 crates/protocol/         DrawList、LayerTree
 crates/uicore/           渲染树。Taffy、命中、手势、焦点
-crates/engine/           渲染引擎。读 LayerTree，调用 impeller.h
+crates/engine/           渲染引擎。读 LayerTree，通过 impeller 依赖绘制
+crates/impeller-sys/     Impeller C 头文件、Rust FFI 和原生链接
 crates/js-host/          宿主交换契约、模块元数据、I/O 身份和额度。仅 std
 crates/js/               QuickJS VM、Runtime、标准库、目录和调度
 crates/js-headless/      只依赖 js 的独立消费程序
@@ -23,11 +24,10 @@ packages/solid-ui/       View、Row、Column、Stack、Grid、Text、Image、But
 packages/devtools/       应用内调试面板。数据来自 shell 的 DiagnosticsHub
 packages/solid-router/   路径、栈、RouterView
 packages/*               clipboard、linking、app-state、file-system、async-storage、net、form、i18n、permissions
-kotlin/                  Gradle 根。路线暂缓
 apps/gallery-solid/      Solid 应用。dist/quotes.js 由 just gallery-dist 本地生成，不进 git
 ```
 
-依赖只向下：gallery → solid-ui / solid-router → solid-renderer → quickjs 会话 → uicore → protocol。宿主 → shell → session、engine。`session` → `js-host`。`js-host` 只有 std，不依赖 session、uicore、quickjs、engine 或平台库。`engine` 不依赖 `uicore`。`uicore` 不包含 QuickJS、AppKit 或 Impeller 头文件。语言包不算坐标。选型表在 `AGENTS.md`。一个可执行文件只链一种会话。
+依赖只向下：gallery → solid-ui / solid-router → solid-renderer → quickjs 会话 → uicore → protocol。宿主 → shell → session、engine。`session` → `js-host`。`js-host` 只有 std，不依赖 session、uicore、quickjs、engine 或平台库。`engine` 不依赖 `uicore`。`uicore` 不包含 QuickJS、AppKit 或 Impeller 头文件。语言包不算坐标。一个可执行文件只链一种会话。
 
 `crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 不手写 C 或 Objective-C。QuickJS 的 Rust 绑定在 `crates/quickjs/src/linked/rt`。`abi.yml` 生成 Rust、JavaScript 与 TypeScript 常量。
 
@@ -122,8 +122,6 @@ Android 用 `AccessibilityManager` 的监听通知会话启停语义快照。重
 CLI 按 `app.toml` 的目标权限生成 `app.modules`，宿主据此限制会话的 `ModuleRegistry`。未注册的能力在链接时报错。原生绑定用 `ArrayBuffer` 持有大字节（≥4KB）的 Rust `Vec<u8>`，较小字节使用 `Uint8Array`。公开的 `FileSystem.read` 总是返回 `Uint8Array`，对大字节创建共享同一缓冲区的视图。
 
 `quickjs::compile` 的脚本和模块路径都生成 IQJS envelope，包含引擎版本与模式，返回只有 `compile` 能构造的 `CompiledBytecode`。`bytecode.rs` 在加载前检查 magic、版本、模式标签和非空载荷；这些检查不能证明载荷是对应类型的字节码。进程内加载走 `open_compiled_with_io`。磁盘上的 `app.bin` 走 `open_trusted_bytecode_with_io`，调用者保证字节来自本工具链的 `compile`，该入口是 `unsafe`。脚本用 `JS_ReadObject` 与 `JS_EvalFunction`，模块用 `Module::load`。`open_program_with_io` 只加载源码。macOS 的 `.app` 和 Android 的资产都可携带 `app.bin`。内存上限 16 MiB，栈上限 8 MiB，eval 限时 1000 ms，其余 turn 为 128 ms，job drain 最多 32 轮。文件模块先按应用根做词法归一化，`..` 留在根内则接受，越出根才拒绝；`AppLoader` 再检查符号化后的真实路径。单个文件上限 16 MiB。脚本异常的 message 和 stack 分开进入 `DiagnosticsHub`。`Engine::shutdown` 在 VM 存活时先释放响应式图，再清空定时器、监听器及 HTTP 等 Persistent，移除 userdata，最后依次释放 Context 和 Runtime；正常 Drop 与启动失败共用此路径。`run --trace` 输出帧内脚本微秒、非空更新轮次和场景 setter 次数。
-
-Kotlin 会话还没接上原生树。见 `docs/refactor-plan.md`。
 
 ## 渲染器
 

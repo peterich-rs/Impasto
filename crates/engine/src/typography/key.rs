@@ -4,12 +4,10 @@ use std::hash::{Hash, Hasher};
 
 use protocol::{TextAlign, TextSpan, TextStyle};
 
-use crate::player::ffi;
-
 pub(crate) struct Shaped {
     pub(crate) width: f32,
     pub(crate) height: f32,
-    pub(crate) paragraph: ffi::ImpellerParagraph,
+    pub(crate) paragraph: impeller::ImpellerParagraph,
     pub(crate) used: u64,
 }
 

@@ -1,19 +1,6 @@
-use std::path::PathBuf;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
-    let target = std::env::var("TARGET").unwrap_or_default();
-    let platform = if target.starts_with("aarch64") || target.starts_with("arm64") {
-        "darwin-arm64"
-    } else {
-        "darwin-x64"
-    };
-    let lib = manifest
-        .join("../../third_party/impeller-sdk")
-        .join(platform)
-        .join("lib");
-    if lib.join("libimpeller.dylib").is_file() {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib.display());
+fn main() {
+    println!("cargo::rerun-if-changed=build.rs");
+    if std::env::var_os("CARGO_FEATURE_IMPELLER").is_some() {
+        println!("cargo::rustc-link-arg-bin=macos=-Wl,-rpath,@executable_path/../Frameworks");
     }
-    Ok(())
 }

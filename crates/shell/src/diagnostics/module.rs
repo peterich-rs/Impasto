@@ -475,9 +475,9 @@ fn versions_method() -> Method {
 }
 
 fn engine_pin() -> &'static str {
-    const PIN: &str = include_str!("../../../engine/engine.pin");
-    PIN.split_whitespace()
-        .find(|word| word.len() == 40 && word.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    const PIN: &str = include_str!("../../../impeller-sys/sdk.lock");
+    PIN.lines()
+        .find_map(|line| line.strip_prefix("source "))
         .unwrap_or("unknown")
 }
 

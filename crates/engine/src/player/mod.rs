@@ -12,14 +12,14 @@ use protocol::{ContentMode, Gradient, LayerId, LayerKind, LayerTree, PictureId};
 use crate::{ImagePixels, Status};
 
 pub(crate) struct HeldParagraph {
-    pub(crate) paragraph: ffi::ImpellerParagraph,
+    pub(crate) paragraph: impeller::ImpellerParagraph,
     /// Paint-slot index that owns the cache reference.
     pub(crate) slot: u32,
 }
 
 pub(crate) struct RetainedPicture {
     pub(crate) generation: u64,
-    pub(crate) list: ffi::ImpellerDisplayList,
+    pub(crate) list: impeller::ImpellerDisplayList,
     /// Extra retains for paragraphs this display list draws. Released only with
     /// the display list, after any root list that flattened it.
     pub(crate) held: Vec<HeldParagraph>,
@@ -31,14 +31,14 @@ pub(crate) enum Save {
     Clip,
     Transform,
     /// Paint read by `Restore`. Released after that restore.
-    Layer(ffi::ImpellerPaint),
+    Layer(impeller::ImpellerPaint),
     /// SrcOver is not a layer. Pop balances the command without `Restore`.
     Skipped,
 }
 
 pub struct Engine {
-    context: ffi::ImpellerContext,
-    list: ffi::ImpellerDisplayList,
+    context: impeller::ImpellerContext,
+    list: impeller::ImpellerDisplayList,
     /// Temporaries the installed root display list still references.
     held: Vec<HeldParagraph>,
     pictures: crate::pictures::PictureCache,
@@ -62,12 +62,11 @@ pub use vulkan::VulkanSwapchain;
 /// The linked Impeller library must match the header this crate was built against.
 fn impeller_version_matches() -> bool {
     // SAFETY: ImpellerGetVersion takes no pointers and does not retain state.
-    let linked = unsafe { ffi::ImpellerGetVersion() };
-    linked == ffi::IMPELLER_VERSION
+    let linked = unsafe { impeller::ImpellerGetVersion() };
+    linked == impeller::IMPELLER_VERSION
 }
 
 mod canvas;
-pub(crate) mod ffi;
 mod images;
 mod ops;
 mod paint;
@@ -89,11 +88,11 @@ impl Engine {
         // documented constructors. A null handle means this SDK cannot create Metal.
         // Release is a no-op on null, per impeller.h.
         let (context, typography) = unsafe {
-            let context = ffi::ImpellerContextCreateMetalNew(ffi::IMPELLER_VERSION);
-            let typography = ffi::ImpellerTypographyContextNew();
+            let context = impeller::ImpellerContextCreateMetalNew(impeller::IMPELLER_VERSION);
+            let typography = impeller::ImpellerTypographyContextNew();
             if context.is_null() || typography.is_null() {
-                ffi::ImpellerTypographyContextRelease(typography);
-                ffi::ImpellerContextRelease(context);
+                impeller::ImpellerTypographyContextRelease(typography);
+                impeller::ImpellerContextRelease(context);
                 return Err(Status::NotLinked);
             }
             (context, typography)
@@ -108,8 +107,8 @@ impl Engine {
     }
 
     pub(crate) fn blank(
-        context: ffi::ImpellerContext,
-        typography: ffi::ImpellerTypographyContext,
+        context: impeller::ImpellerContext,
+        typography: impeller::ImpellerTypographyContext,
     ) -> Self {
         Self {
             context,
@@ -196,12 +195,12 @@ impl Engine {
         }
         self.last_submit.picture_prepare = started.elapsed();
         let started = std::time::Instant::now();
-        let builder = unsafe { ffi::ImpellerDisplayListBuilderNew(ptr::null()) };
-        let paint = unsafe { ffi::ImpellerPaintNew() };
+        let builder = unsafe { impeller::ImpellerDisplayListBuilderNew(ptr::null()) };
+        let paint = unsafe { impeller::ImpellerPaintNew() };
         if builder.is_null() || paint.is_null() {
             unsafe {
-                ffi::ImpellerDisplayListBuilderRelease(builder);
-                ffi::ImpellerPaintRelease(paint);
+                impeller::ImpellerDisplayListBuilderRelease(builder);
+                impeller::ImpellerPaintRelease(paint);
             }
             self.pictures.rollback(swap, &mut typography);
             crate::painter::release_pending(&mut pending, &mut typography);
@@ -226,15 +225,15 @@ impl Engine {
             let display = if failed {
                 ptr::null_mut()
             } else {
-                unsafe { ffi::ImpellerDisplayListBuilderCreateDisplayListNew(builder) }
+                unsafe { impeller::ImpellerDisplayListBuilderCreateDisplayListNew(builder) }
             };
             painter.drain_saves(builder);
             display
         };
         self.last_submit.compose = started.elapsed();
         unsafe {
-            ffi::ImpellerDisplayListBuilderRelease(builder);
-            ffi::ImpellerPaintRelease(paint);
+            impeller::ImpellerDisplayListBuilderRelease(builder);
+            impeller::ImpellerPaintRelease(paint);
         }
         if display.is_null() {
             self.last_submit = crate::SubmitStats::default();
@@ -243,7 +242,7 @@ impl Engine {
             return Err(Status::BadScene);
         }
         unsafe {
-            ffi::ImpellerDisplayListRelease(self.list);
+            impeller::ImpellerDisplayListRelease(self.list);
             self.list = ptr::null_mut();
         }
         typography.set_list_installed(false);
@@ -256,7 +255,7 @@ impl Engine {
         for item in previous {
             typography.release_draw(item.slot);
             // SAFETY: the root display list that referenced this retain was just released.
-            unsafe { ffi::ImpellerParagraphRelease(item.paragraph) };
+            unsafe { impeller::ImpellerParagraphRelease(item.paragraph) };
         }
         self.held = std::mem::take(&mut pending);
         typography.clear_stale();
@@ -298,15 +297,15 @@ impl Engine {
         // SAFETY: `metal_drawable` is a CAMetalDrawable from the system default device,
         // kept alive by the caller for this call. The context uses that same device.
         let surface = unsafe {
-            ffi::ImpellerSurfaceCreateWrappedMetalDrawableNew(self.context, metal_drawable)
+            impeller::ImpellerSurfaceCreateWrappedMetalDrawableNew(self.context, metal_drawable)
         };
         if surface.is_null() {
             return Err(Status::PresentFailed);
         }
         let presented = unsafe {
-            let drew = ffi::ImpellerSurfaceDrawDisplayList(surface, self.list);
-            let presented = drew && ffi::ImpellerSurfacePresent(surface);
-            ffi::ImpellerSurfaceRelease(surface);
+            let drew = impeller::ImpellerSurfaceDrawDisplayList(surface, self.list);
+            let presented = drew && impeller::ImpellerSurfacePresent(surface);
+            impeller::ImpellerSurfaceRelease(surface);
             presented
         };
         if presented {
@@ -319,7 +318,7 @@ impl Engine {
     pub(crate) fn release_display(&mut self) {
         // SAFETY: `list` is null or the display list from the previous submit.
         unsafe {
-            ffi::ImpellerDisplayListRelease(self.list);
+            impeller::ImpellerDisplayListRelease(self.list);
             self.list = ptr::null_mut();
         }
     }
@@ -330,7 +329,7 @@ impl Engine {
         for item in held {
             typography.release_draw(item.slot);
             // SAFETY: the display list that referenced this retain was just released.
-            unsafe { ffi::ImpellerParagraphRelease(item.paragraph) };
+            unsafe { impeller::ImpellerParagraphRelease(item.paragraph) };
         }
     }
 
@@ -405,11 +404,11 @@ pub(crate) fn release_retained(
     typography: &mut crate::typography::Typography,
 ) {
     // SAFETY: `list` is the display list this picture owns. Release is a no-op on null.
-    unsafe { ffi::ImpellerDisplayListRelease(picture.list) };
+    unsafe { impeller::ImpellerDisplayListRelease(picture.list) };
     for item in picture.held {
         typography.release_draw(item.slot);
         // SAFETY: this is the picture's extra retain, released with its display list.
-        unsafe { ffi::ImpellerParagraphRelease(item.paragraph) };
+        unsafe { impeller::ImpellerParagraphRelease(item.paragraph) };
     }
 }
 
@@ -462,7 +461,7 @@ impl Drop for Engine {
         unsafe { std::mem::ManuallyDrop::drop(&mut self.typography) };
         if last {
             // SAFETY: `context` came from the context constructor. Release is a no-op on null.
-            unsafe { ffi::ImpellerContextRelease(self.context) };
+            unsafe { impeller::ImpellerContextRelease(self.context) };
             self.context = ptr::null_mut();
         } else {
             debug_assert!(false, "shaper dropped after Engine");
@@ -1132,7 +1131,7 @@ mod tests {
             .measure_paragraph("Hi", 16.0, 200.0, color, &struck)
             .expect("line through");
         let line_through =
-            super::ffi::ImpellerTextDecorationType::kImpellerTextDecorationTypeLineThrough as i32;
+            impeller::ImpellerTextDecorationType::kImpellerTextDecorationTypeLineThrough as i32;
         let trace = super::paint_trace::take();
         assert!(
             trace

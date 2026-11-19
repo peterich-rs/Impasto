@@ -2,14 +2,9 @@
 
 跨平台 UI 框架。上层写细粒度响应式界面，下层用同一份场景描述，交给 Impeller 绘制，让各端像素一致。
 
-两条路线共用场景协议、渲染树和渲染引擎：
+应用用 Solid 2.0 TSX 编写。`packages/solid-renderer`、`packages/solid-ui` 和 `packages/solid-router` 提供渲染器、控件与路由。QuickJS 会话更新 `uicore` 的渲染树。
 
-| 路线 | 代码 | 现状 |
-|---|---|---|
-| Solid 2.0 TSX + QuickJS | `packages/solid-renderer`、`packages/solid-ui`、`packages/solid-router` | QuickJS 会话直接改 `uicore` 的渲染树。编译产物 ESM `apps/gallery-solid/dist/quotes.js` 由 `just gallery-dist` 本地生成，不进 git |
-| Kotlin lambda DSL | `kotlin` | 暂缓。Gradle 工程还在，界面 DSL、信号和原生嵌入未接，见 `docs/refactor-plan.md` |
-
-macOS 宿主在 `crates/macos`，用 Impeller standalone SDK 的 Metal 后端。Android 宿主在 `crates/android`，用同一份 SDK 的 Vulkan 后端。没有 SDK 时渲染引擎返回 `NotLinked`，测试仍可通过。iOS 的预构建矩阵没有这一列，宿主还没写。未落地的迭代规划在 `docs/refactor-plan.md`。
+macOS 宿主用 Impeller 的 Metal 后端，Android 宿主用 Vulkan。CI 从同一个锁定的 Flutter 提交构建各目标的 Impeller SDK，本地构建链接对应的 SDK。[Impeller SDK](crates/impeller-sys/README.md)
 
 ## 文档
 
@@ -20,23 +15,23 @@ macOS 宿主在 `crates/macos`，用 Impeller standalone SDK 的 Metal 后端。
 | `docs/toolchain-design.md` | 工具链与原生响应式设计 |
 | `docs/toolchain-baseline.md` | gallery 点击和滚动的对照数据 |
 | `docs/refactor-plan.md` | 还没做的事 |
-| `AGENTS.md` | 改代码时的边界。当前行为以源码为准 |
+| `AGENTS.md` | 目标架构与工作约定 |
 
 ## 环境
 
 - Rust stable，版本由 `rust-toolchain.toml` 决定
 - [just](https://github.com/casey/just)
-- JDK 21
 - Node.js 22 或更新，测试用 `node --experimental-strip-types`
-- macOS 窗口另需 Xcode，以及本机 arm64
-- Android 包另需 NDK，以及 `android-arm64` 的 Impeller SDK
+- macOS 窗口需要 Xcode。Android 包需要 JDK、SDK 和 NDK。
+- 原生宿主构建使用 Python 3 准备 SDK。源码构建另需 `depot_tools` 提供的 `gclient` 和 bindgen。
 
 这些内容不在 git 里，要用时再取：
 
 | 路径 | 取法 |
 |---|---|
-| `third_party/impeller-sdk/` | `engine/fetch-impeller-sdk.sh` |
-| `third_party/solid/`、`third_party/kiteui/` | 见 `third_party/README.md`。`just check` 不读它们 |
+| `third_party/impeller-sdk/` | `just impeller` 准备当前宿主的 SDK |
+| `build/impeller-source/`、`third_party/impeller-build/` | `just impeller-source` 同步源码并构建绘制库 |
+| `third_party/solid/` | 见 `third_party/README.md`。`just check` 不读该检出 |
 | `build/` | 下载缓存。脚本自己创建 |
 
 ## 检查
@@ -45,9 +40,9 @@ macOS 宿主在 `crates/macos`，用 Impeller standalone SDK 的 Metal 后端。
 just check
 ```
 
-依次跑 `cargo test --workspace`、Kotlin 的 `:library:jvmTest`、Solid 的组件测试与原生响应式对照。不打开窗口。
+运行样式声明检查、Clippy、Rust workspace 测试、Solid 测试和 JS 标准库契约检查。
 
-QuickJS 测试始终运行 Cargo 构建的 quickjs-jit 0.14.2。没有 SDK 时，渲染引擎的图形测试不编译。
+QuickJS 测试始终运行 Cargo 构建的 quickjs-jit 0.14.2。渲染引擎的图形测试需要准备 SDK，再用 `cargo test -p engine --features impeller` 运行。
 
 推到 GitHub 后，[`.github/workflows/check.yml`](.github/workflows/check.yml) 跑同一组检查，并多一步 `cargo fmt --all -- --check`。`crates/macos` 只在 macOS runner 上编译。Linux 工作流在测试前用 Node 22、pnpm 9.15.9 安装依赖并构建 gallery；解释器由 Cargo 构建。工作流不下载 Impeller SDK，也不打 Android 包，也不打开窗口。
 
@@ -83,7 +78,7 @@ just android
 just android-release
 ```
 
-`just host` 打开默认 360×640 的窗口，加载 ESM `apps/gallery-solid/dist/quotes.js`（`just gallery-dist` 从 TSX 源码本地构建，产物不提交）。`just host-js` 是同一条命令。`IMPASTO_DUMP` 把一帧 Metal 纹理写成 PNG 后退出，用来看画面。日志过滤是 `shell` 的 `Targets`。debug 构建缺省 `trace`，release 构建缺省 `info`，由 `set_log_targets` 整份替换。`just android` 打 debug APK，`just android-release` 打 release APK；Gradle 按这个变体调 `cargo build`，产物是 `libimpasto.so`。需要 NDK 和 `android-arm64` SDK。
+`just host` 打开默认 360×640 的窗口，加载 `just gallery-dist` 生成的 Gallery ESM。`just host-js` 运行同一入口。设置 `IMPASTO_DUMP` 可将首帧写成 PNG。`just android` 构建 debug APK，`just android-release` 构建 release APK。Gradle 会准备该目标的 Impeller SDK，再调用 Cargo 构建 `libimpasto.so`。
 
 ## 目录
 
@@ -91,6 +86,7 @@ just android-release
 crates/protocol/            DrawList、LayerTree
 crates/uicore/              渲染树。Taffy 布局、命中、click 和 drag
 crates/engine/              渲染引擎。读绘制列表，调用 Impeller
+crates/impeller-sys/        Impeller C 绑定与 SDK 链接
 crates/session/             会话。宿主每帧调用 metrics、pointer、frame、wants_frame、lifecycle
 crates/shell/           壳。命令队列、帧调度、渲染线程
 crates/macos/               macOS 窗口
@@ -108,13 +104,10 @@ packages/net/               createFetch
 packages/form/              createForm
 packages/i18n/              formatNumber、formatDate、plural
 packages/permissions/       权限 API
-kotlin/                     Kotlin DSL。目前只开了 JVM 目标
 apps/gallery-solid/         Solid 模拟盘。行情工作台、Canvas 图表、自选和模拟交易。ESM 产物 dist/quotes.js 本地构建，不提交
 tools/                      node 测试的 register.mjs 和 resolve-hook.mjs
 ```
 
-仓库根上的 `settings.gradle.kts` 没有 `include`，用来挡住 Gradle 往家目录继续找工程。Kotlin 工程在 `kotlin`。
-
 ## 许可证
 
-产品代码使用 [Apache-2.0](LICENSE)。归属声明在 [NOTICE](NOTICE)。`.agents/skills/rust-best-practice` 使用该目录自己的 MIT 许可证。`third_party` 里的上游代码保持各自的许可证。Impeller SDK 的许可证在取回之后的 `LICENSE.sdk.md`。
+产品代码使用 [Apache-2.0](LICENSE)。归属声明在 [NOTICE](NOTICE)。`.agents/skills/rust-best-practice` 使用该目录自己的 MIT 许可证。`third_party` 里的上游代码保持各自的许可证。Impeller 的许可证随 SDK 的 `LICENSE` 文件分发。

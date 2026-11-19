@@ -3,14 +3,12 @@
 
 use std::ptr;
 
-use super::ffi;
-
 /// One retained Impeller context for the `io` thread.
 ///
 /// Metal and Vulkan contexts have no thread restriction for texture creation.
 /// This retain outlives the engine's own context reference.
 pub struct TextureFactory {
-    context: ffi::ImpellerContext,
+    context: impeller::ImpellerContext,
 }
 
 // SAFETY: Impeller documents non-OpenGL contexts as usable from other threads
@@ -20,7 +18,7 @@ unsafe impl Send for TextureFactory {}
 impl Drop for TextureFactory {
     fn drop(&mut self) {
         // SAFETY: `context` is the extra retain from `Engine::texture_factory`.
-        unsafe { ffi::ImpellerContextRelease(self.context) };
+        unsafe { impeller::ImpellerContextRelease(self.context) };
         self.context = ptr::null_mut();
     }
 }
@@ -37,15 +35,15 @@ impl TextureFactory {
         if rgba.len() < bytes {
             return None;
         }
-        let descriptor = ffi::ImpellerTextureDescriptor {
-            pixel_format: ffi::ImpellerPixelFormat::kImpellerPixelFormatRGBA8888,
-            size: ffi::ImpellerISize {
+        let descriptor = impeller::ImpellerTextureDescriptor {
+            pixel_format: impeller::ImpellerPixelFormat::kImpellerPixelFormatRGBA8888,
+            size: impeller::ImpellerISize {
                 width: width as i64,
                 height: height as i64,
             },
             mip_count: 1,
         };
-        let mapping = ffi::ImpellerMapping {
+        let mapping = impeller::ImpellerMapping {
             data: rgba.as_ptr(),
             length: bytes as u64,
             on_release: None,
@@ -53,7 +51,7 @@ impl TextureFactory {
         // SAFETY: `mapping` borrows `rgba` until create returns. Impeller copies.
         // The returned texture is owned by `GpuImage`.
         let texture = unsafe {
-            ffi::ImpellerTextureCreateWithContentsNew(
+            impeller::ImpellerTextureCreateWithContentsNew(
                 self.context,
                 &descriptor,
                 &mapping,
@@ -73,7 +71,7 @@ impl TextureFactory {
 
 /// A texture created on `io`. The render thread retains it into the frame cache.
 pub struct GpuImage {
-    pub(crate) texture: ffi::ImpellerTexture,
+    pub(crate) texture: impeller::ImpellerTexture,
     pub width: u32,
     pub height: u32,
 }
@@ -94,7 +92,7 @@ impl std::fmt::Debug for GpuImage {
 impl Drop for GpuImage {
     fn drop(&mut self) {
         // SAFETY: `texture` came from `ImpellerTextureCreateWithContentsNew`.
-        unsafe { ffi::ImpellerTextureRelease(self.texture) };
+        unsafe { impeller::ImpellerTextureRelease(self.texture) };
         self.texture = ptr::null_mut();
     }
 }
@@ -107,7 +105,7 @@ impl super::Engine {
         }
         // SAFETY: `context` is the engine's live context. Retain balances the
         // factory's drop. Release is a no-op on null, but we already checked.
-        unsafe { ffi::ImpellerContextRetain(self.context) };
+        unsafe { impeller::ImpellerContextRetain(self.context) };
         Some(TextureFactory {
             context: self.context,
         })
@@ -120,7 +118,7 @@ impl super::Engine {
             return;
         }
         // SAFETY: `image.texture` is live. The store's copy is released on evict.
-        unsafe { ffi::ImpellerTextureRetain(image.texture) };
+        unsafe { impeller::ImpellerTextureRetain(image.texture) };
         self.textures.insert(
             source.to_owned(),
             crate::textures::CachedTexture {

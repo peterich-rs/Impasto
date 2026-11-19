@@ -668,7 +668,7 @@ dependencies = [
 name = "engine"
 version = "0.0.0"
 dependencies = [
- "bindgen",
+ "impeller-sys",
  "protocol",
  "thiserror 2.0.21",
  "tracing",
@@ -1121,6 +1121,10 @@ dependencies = [
  "icu_normalizer",
  "icu_properties",
 ]
+
+[[package]]
+name = "impeller-sys"
+version = "0.0.0"
 
 [[package]]
 name = "indexmap"

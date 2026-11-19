@@ -308,7 +308,7 @@ CanvasOp 为封闭 enum：Save、Restore、ClipPath、DrawPath、DrawText、Draw
 
 ### 8. 几何与颜色依赖
 
-建议在 `uicore` 按发布版本引入两项纯计算依赖，实施时写入 Cargo.lock 和 AGENTS.md 选型表：
+Canvas 几何与颜色解析各使用一项纯计算依赖。
 
 | 依赖 | 作用 | 边界 |
 |---|---|---|
@@ -403,8 +403,8 @@ Canvas 回调复用现有非 eval turn 的 128 ms 上限，并标注 canvas/Node
 
 ## Phase 1: 通用录制、准备与播放
 
-**文件：`Cargo.toml`、`Cargo.lock`、`crates/uicore/Cargo.toml`、`AGENTS.md`**
-- 按已核对版本增加 kurbo 与 csscolorparser，检查依赖树与许可并更新选型表。
+**文件：`Cargo.toml`、`Cargo.lock`、`crates/uicore/Cargo.toml`**
+- 按已核对版本增加 kurbo 与 csscolorparser，检查依赖树与许可。
 
 **文件：`crates/protocol/src/canvas.rs`（新增）、`src/draw_list.rs`、`src/lib.rs`**
 - 定义 CanvasList、局部操作、路径与资源引用，并增加 Command::Canvas；数据不带 SDK 类型。
@@ -500,14 +500,13 @@ Canvas 回调复用现有非 eval turn 的 128 ms 上限，并标注 canvas/Node
 - protocol 的新变体与 TextStyle 新字段需要迁移；Graph 的新方法是内部能力扩展，普通 Solid API 行为保持。
 - 已知封闭操作用 enum；Shaper 是已有替换边界，沿用它。无需 CanvasBackend trait、对象安全的异步绘图接口或跨线程共享上下文。
 - 新增依赖只负责纯几何与解析；rquickjs class 沿用既有依赖能力。第三方类、Ctx/Persistent 不进入产品协议；TS 声明与 native 导出保持一份合同。
-- engine/build.rs 继续按 SDK 生成绑定，macOS/Android 宿主继续只提供窗口、输入与资源；不增加宿主 Canvas 实现。iOS 与 Kotlin 的既定条件保持。
+- `crates/impeller-sys` 提供 Impeller 绑定。Canvas 绘制由共用实现处理，macOS 和 Android 宿主提供窗口、输入与资源。
 - 屏幕 Canvas 不需要长期 CPU bitmap；几何准备、命令复制与偶发 SaveLayer 有成本，首版即计量并设上限。
 
 ## 文件变更汇总
 
 以下为实施目标；类型和方法只在对应阶段验收后导出。
 
-- `AGENTS.md` -- 落地时登记几何与颜色依赖。
 - `Cargo.toml` -- 登记发布版本依赖。
 - `Cargo.lock` -- 由 Cargo 更新锁定依赖树。
 - `apps/gallery-solid/src/app.tsx` -- 增加 Canvas 能力页路由。

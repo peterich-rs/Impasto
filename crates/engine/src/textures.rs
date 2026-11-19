@@ -4,10 +4,8 @@ use std::collections::HashMap;
 
 use protocol::Command;
 
-use crate::player::ffi;
-
 pub(crate) struct CachedTexture {
-    pub(crate) texture: ffi::ImpellerTexture,
+    pub(crate) texture: impeller::ImpellerTexture,
     pub(crate) width: f32,
     pub(crate) height: f32,
     pub(crate) used: u64,
@@ -89,7 +87,7 @@ impl TextureStore {
             if let Some(cached) = self.map.remove(&key) {
                 // SAFETY: a texture is evicted only after the display list that drew it
                 // was released, or it was never installed.
-                unsafe { ffi::ImpellerTextureRelease(cached.texture) };
+                unsafe { impeller::ImpellerTextureRelease(cached.texture) };
             }
         }
     }
@@ -97,7 +95,7 @@ impl TextureStore {
     pub(crate) fn release_all(&mut self) {
         for (_, cached) in self.map.drain() {
             // SAFETY: callers release the display list first, or no list is installed.
-            unsafe { ffi::ImpellerTextureRelease(cached.texture) };
+            unsafe { impeller::ImpellerTextureRelease(cached.texture) };
         }
     }
 }

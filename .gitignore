@@ -4,6 +4,8 @@ target/
 apps/gallery-solid/dist/
 .metrics/
 third_party/impeller-sdk/
+third_party/impeller-build/
+__pycache__/
 crates/android/apk/.gradle/
 crates/android/apk/build/
 crates/android/apk/app/build/
@@ -11,9 +13,7 @@ crates/android/apk/app/src/main/assets/
 crates/android/apk/app/src/main/jniLibs/
 third_party/quickjs/
 third_party/solid/
-third_party/kiteui/
 .gradle/
-.kotlin/
 .DS_Store
 cmake-build-*/
 compile_commands.json

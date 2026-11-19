@@ -10,7 +10,7 @@ default:
 clippy:
     cargo clippy --manifest-path "{{root}}/Cargo.toml" --workspace --exclude macos --all-targets -- -D warnings
 
-check: style-check clippy test kotlin solid standard-check
+check: style-check clippy test solid standard-check
     @echo "check ok"
 
 bench:
@@ -37,9 +37,6 @@ gen:
 # Fail when generated style types or the utility list drift.
 style-check:
     cargo run -p uicore --bin style-types -- --check --root "{{root}}"
-
-kotlin:
-    "{{root}}/kotlin/gradlew" -p "{{root}}/kotlin" :library:jvmTest
 
 solid:
     pnpm -C "{{root}}" install --frozen-lockfile
@@ -69,8 +66,19 @@ gallery-dist:
     fi
     pnpm -C "$src" install && pnpm -C "$src" run build
 
+[positional-arguments]
+impeller *target:
+    python3 "{{root}}/tools/impeller_sdk.py" prepare "$@"
+
+[positional-arguments]
+impeller-source *target:
+    python3 "{{root}}/tools/impeller_sdk.py" build "$@"
+
 host: gallery-dist
-    cargo run --manifest-path "{{root}}/Cargo.toml" -p macos -- --js "{{root}}/apps/gallery-solid/dist/quotes.js" "{{logo}}"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sdk=$(python3 "{{root}}/tools/impeller_sdk.py" prepare)
+    IMPASTO_IMPELLER_SDK_DIR="$sdk" cargo run --manifest-path "{{root}}/Cargo.toml" -p macos --features impeller -- --js "{{root}}/apps/gallery-solid/dist/quotes.js" "{{logo}}"
 
 host-js: host
 

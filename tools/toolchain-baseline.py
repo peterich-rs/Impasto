@@ -9,9 +9,6 @@ before=root/'target/toolchain-baseline/before'
 before.mkdir(parents=True,exist_ok=True)
 archive=subprocess.check_output(['git','archive','HEAD'],cwd=root)
 with tarfile.open(fileobj=io.BytesIO(archive)) as tar: tar.extractall(before)
-for name in ['impeller-sdk','quickjs']:
-    target=before/'third_party'/name
-    if not target.exists(): target.symlink_to(root/'third_party'/name,target_is_directory=True)
 # Counters share exactly the same boundary: scene style/text/image/recognizer
 # mutations that call Tree setters. Springs and layout internals are excluded.
 p=before/'crates/session/src/lib.rs'
