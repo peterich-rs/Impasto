@@ -71,6 +71,15 @@ jobs:
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
           $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json | ConvertFrom-Json
           if (-not $vs) { throw 'Visual Studio C++ tools were not found' }
+          $sdkInclude = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/Include/10.0.22621.0/um/Windows.h'
+          if (-not (Test-Path $sdkInclude)) {
+            $installer = Join-Path (Split-Path $vswhere) 'setup.exe'
+            $arguments = 'modify --installPath "{0}" --add Microsoft.VisualStudio.Component.Windows11SDK.22621 --quiet --norestart' -f $vs.installationPath
+            $install = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
+            if ($install.ExitCode -notin 0, 3010 -or -not (Test-Path $sdkInclude)) {
+              throw "Windows SDK 10.0.22621.0 installation failed (exit $($install.ExitCode))"
+            }
+          }
           $year = @{17 = '2022'; 18 = '2026'}[([version] $vs.installationVersion).Major]
           if (-not $year) { throw "Unsupported Visual Studio version $($vs.installationVersion)" }
           "GYP_MSVS_OVERRIDE_PATH=$($vs.installationPath)" >> $env:GITHUB_ENV
