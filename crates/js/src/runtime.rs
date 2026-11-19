@@ -7,23 +7,47 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use js_host::{HttpRequest, HttpResponse, IoEvent, IoJob};
-use rquickjs::{ArrayBuffer, Ctx, Function, IntoJs, Object};
+use rquickjs::promise::PromiseState;
+use rquickjs::{ArrayBuffer, Ctx, Function, IntoJs, Object, Persistent};
 
 use crate::LEGACY_PRELUDE;
 use crate::host::{HttpCall, IoPort};
-use crate::quickjs::{JobStop, Timer, Vm, poll_timer, run_jobs};
+use crate::modules::{MemoryLoader, MemoryResolver, ModuleTable, NativeFactory};
+use crate::quickjs::{JobStop, Saved, Timer, Vm, poll_timer, run_jobs};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JsError {
     pub message: String,
 }
 
+/// A handle for one [`Runtime::start_module`] call.
+///
+/// The handle is only meaningful on the runtime that created it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ModuleTicket {
+pub struct ModuleTicket {
+    runtime: u64,
+    id: u64,
+}
+
+/// Evaluation state of a [`ModuleTicket`].
+///
+/// `Pending` means top-level await has not finished. [`Runtime::drive`] runs
+/// the jobs that can move it to [`ModuleStatus::Fulfilled`] or
+/// [`ModuleStatus::Rejected`]. This call does not wait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModuleStatus {
+    Pending,
+    Fulfilled,
+    Rejected,
+}
+
+enum TrackedModule {
+    Pending(Saved),
     Fulfilled,
     Rejected,
 }
@@ -40,7 +64,10 @@ struct State {
     turn: Cell<u64>,
     mono: Cell<i64>,
     origin: Cell<Option<i64>>,
-    modules: HashMap<String, String>,
+    identity: u64,
+    modules: Rc<ModuleTable>,
+    tickets: RefCell<HashMap<u64, TrackedModule>>,
+    next_ticket: Cell<u64>,
     log: Log,
     jobs: RefCell<Vec<IoJob>>,
     inbox: RefCell<Vec<IoEvent>>,
@@ -57,6 +84,8 @@ pub struct Runtime {
 
 pub struct RuntimeBuilder {
     modules: HashMap<String, String>,
+    natives: HashMap<String, Box<dyn NativeFactory>>,
+    duplicate: Option<String>,
     log: Log,
 }
 
@@ -64,6 +93,8 @@ impl RuntimeBuilder {
     pub fn new() -> Self {
         Self {
             modules: HashMap::new(),
+            natives: HashMap::new(),
+            duplicate: None,
             log: Box::new(|_, _| {}),
         }
     }
@@ -74,14 +105,39 @@ impl RuntimeBuilder {
     }
 
     pub fn module(mut self, name: impl Into<String>, source: impl Into<String>) -> Self {
-        self.modules.insert(name.into(), source.into());
+        let name = name.into();
+        if self.modules.contains_key(&name) || self.natives.contains_key(&name) {
+            self.duplicate = Some(name);
+        } else {
+            self.modules.insert(name, source.into());
+        }
+        self
+    }
+
+    /// Register a native module under `name`.
+    ///
+    /// The factory runs when that specifier is loaded. A second registration of
+    /// the same name fails in [`RuntimeBuilder::build`].
+    pub fn native(mut self, name: impl Into<String>, factory: Box<dyn NativeFactory>) -> Self {
+        let name = name.into();
+        if self.modules.contains_key(&name) || self.natives.contains_key(&name) {
+            self.duplicate = Some(name);
+        } else {
+            self.natives.insert(name, factory);
+        }
         self
     }
 
     pub fn build(self) -> Result<Runtime, JsError> {
+        if let Some(name) = self.duplicate {
+            return Err(JsError {
+                message: format!("module \"{name}\" is already registered"),
+            });
+        }
         let vm = Vm::new().map_err(|message| JsError {
             message: message.into(),
         })?;
+        let modules = Rc::new(ModuleTable::new(self.modules, self.natives));
         let mut runtime = Runtime {
             state: Box::new(State {
                 vm,
@@ -90,7 +146,10 @@ impl RuntimeBuilder {
                 turn: Cell::new(0),
                 mono: Cell::new(0),
                 origin: Cell::new(None),
-                modules: self.modules,
+                identity: next_runtime_id(),
+                modules,
+                tickets: RefCell::new(HashMap::new()),
+                next_ticket: Cell::new(0),
                 log: self.log,
                 jobs: RefCell::new(Vec::new()),
                 inbox: RefCell::new(Vec::new()),
@@ -99,6 +158,12 @@ impl RuntimeBuilder {
                 closed: Cell::new(false),
             }),
         };
+        if let Some(quickjs) = runtime.state.vm.runtime() {
+            quickjs.set_loader(
+                MemoryResolver(Rc::clone(&runtime.state.modules)),
+                MemoryLoader(Rc::clone(&runtime.state.modules)),
+            );
+        }
         // SAFETY: `state` is a Box. Moving `Runtime` does not move the `Vm`.
         unsafe { Vm::arm(&mut runtime.state.vm) };
         runtime.install_standard()?;
@@ -124,27 +189,65 @@ impl Runtime {
         })
     }
 
-    /// Load one registered module. `scene` and `reactive` are not built in.
+    /// Evaluate one registered module.
     ///
-    /// The returned ticket is the state visible without waiting. This call does
-    /// not block on a pending promise.
+    /// A synchronous failure is returned here. Top-level await stays
+    /// [`ModuleStatus::Pending`] until [`Runtime::drive`] runs its jobs.
     pub fn start_module(&mut self, name: &str) -> Result<ModuleTicket, JsError> {
         self.ensure_open()?;
-        if name == "scene" || name == "reactive" || name == "#reactive" {
-            return Err(JsError {
-                message: format!("module \"{name}\" is not installed"),
-            });
-        }
-        let Some(source) = self.state.modules.get(name).cloned() else {
+        if !self.state.modules.contains(name) {
             return Err(JsError {
                 message: format!("module \"{name}\" is not registered"),
             });
+        }
+        let source = self.state.modules.source(name).map(str::to_owned);
+        let native = self.state.modules.is_native(name);
+        let table = Rc::clone(&self.state.modules);
+        let saved = self.state.vm.with(|ctx| {
+            let promise = if let Some(source) = source {
+                rquickjs::Module::evaluate(ctx.clone(), name, source)
+                    .map_err(|error| script_error(&ctx, error))?
+            } else if native {
+                let module = crate::modules::declare_native(&table, &ctx, name)
+                    .map_err(|error| script_error(&ctx, error))?;
+                module.eval().map_err(|error| script_error(&ctx, error))?.1
+            } else {
+                return Err(JsError {
+                    message: format!("module \"{name}\" is not registered"),
+                });
+            };
+            Ok(Persistent::save(&ctx, promise.into_value()))
+        })?;
+        let id = self.state.next_ticket.get().wrapping_add(1).max(1);
+        self.state.next_ticket.set(id);
+        self.state
+            .tickets
+            .borrow_mut()
+            .insert(id, TrackedModule::Pending(saved));
+        let ticket = ModuleTicket {
+            runtime: self.state.identity,
+            id,
         };
-        self.state.vm.with(|ctx| {
-            rquickjs::Module::evaluate(ctx.clone(), name, source)
-                .map_err(|error| script_error(&ctx, error))?;
-            Ok(ModuleTicket::Fulfilled)
-        })
+        self.refresh_ticket(id);
+        Ok(ticket)
+    }
+
+    pub fn module_status(&mut self, ticket: ModuleTicket) -> Result<ModuleStatus, JsError> {
+        self.ensure_open()?;
+        if ticket.runtime != self.state.identity {
+            return Err(JsError {
+                message: "module ticket belongs to another runtime".into(),
+            });
+        }
+        self.refresh_ticket(ticket.id);
+        match self.state.tickets.borrow().get(&ticket.id) {
+            Some(TrackedModule::Pending(_)) => Ok(ModuleStatus::Pending),
+            Some(TrackedModule::Fulfilled) => Ok(ModuleStatus::Fulfilled),
+            Some(TrackedModule::Rejected) => Ok(ModuleStatus::Rejected),
+            None => Err(JsError {
+                message: "module ticket is not open".into(),
+            }),
+        }
     }
 
     pub fn take_jobs(&mut self) -> Vec<IoJob> {
@@ -197,6 +300,7 @@ impl Runtime {
         }
         self.state.timers.borrow_mut().retain(|timer| timer.active);
         self.drain()?;
+        self.refresh_modules();
         Ok(DriveReport { timers_ran })
     }
 
@@ -205,6 +309,7 @@ impl Runtime {
             return;
         }
         self.state.timers.borrow_mut().clear();
+        self.state.tickets.borrow_mut().clear();
         self.state.jobs.borrow_mut().clear();
         self.state.inbox.borrow_mut().clear();
         for flag in self.state.cancels.borrow().values() {
@@ -226,6 +331,41 @@ impl Runtime {
             }
             Ok(())
         })
+    }
+
+    fn refresh_modules(&mut self) {
+        let ids: Vec<u64> = self.state.tickets.borrow().keys().copied().collect();
+        for id in ids {
+            self.refresh_ticket(id);
+        }
+    }
+
+    fn refresh_ticket(&mut self, id: u64) {
+        let Some(saved) = (match self.state.tickets.borrow().get(&id) {
+            Some(TrackedModule::Pending(saved)) => Some(saved.clone()),
+            _ => None,
+        }) else {
+            return;
+        };
+        let status = self.state.vm.with(|ctx| {
+            let value = saved.clone().restore(&ctx).ok()?;
+            let promise = value.as_promise()?;
+            Some(match promise.state() {
+                PromiseState::Pending => ModuleStatus::Pending,
+                PromiseState::Resolved => ModuleStatus::Fulfilled,
+                PromiseState::Rejected => ModuleStatus::Rejected,
+            })
+        });
+        if let Some(status) = status {
+            let mut tickets = self.state.tickets.borrow_mut();
+            if let Some(tracked) = tickets.get_mut(&id) {
+                *tracked = match status {
+                    ModuleStatus::Pending => TrackedModule::Pending(saved),
+                    ModuleStatus::Fulfilled => TrackedModule::Fulfilled,
+                    ModuleStatus::Rejected => TrackedModule::Rejected,
+                };
+            }
+        }
     }
 
     fn ensure_open(&self) -> Result<(), JsError> {
@@ -326,7 +466,7 @@ impl IoPort for State {
     }
 
     fn has_module(&self, name: &str) -> bool {
-        self.modules.contains_key(name)
+        self.modules.contains(name)
     }
 
     fn open_socket(&self, url: String, protocols: String) -> u64 {
@@ -506,6 +646,11 @@ fn call_hook<'js>(
         hook.call_arg::<()>(values)?;
     }
     Ok(())
+}
+
+fn next_runtime_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 fn script_error(ctx: &Ctx<'_>, error: rquickjs::Error) -> JsError {

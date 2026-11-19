@@ -9,16 +9,19 @@
     reason = "QuickJS interrupt and clock FFI stay inside this crate and are documented at each call"
 )]
 
+pub mod bytecode;
 pub mod compile;
 pub mod host;
+pub mod modules;
 pub mod quickjs;
 mod runtime;
 pub mod standard;
 
 pub use compile::{CompileEnvironment, EmptyCompile};
 pub use js_host::IoEvent;
+pub use modules::NativeFactory;
 pub use quickjs::{JobStop, Timer, Vm, poll_timer, run_jobs};
-pub use runtime::{DriveReport, JsError, ModuleTicket, Runtime, RuntimeBuilder};
+pub use runtime::{DriveReport, JsError, ModuleStatus, ModuleTicket, Runtime, RuntimeBuilder};
 
 /// The one legacy prelude. UI startup and a headless [`Runtime`] both evaluate it.
 pub const LEGACY_PRELUDE: &str = include_str!("standard/legacy-prelude.js");

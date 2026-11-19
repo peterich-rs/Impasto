@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use js::{ModuleTicket, RuntimeBuilder};
+use js::{ModuleStatus, RuntimeBuilder};
 use js_host::{HttpResponse, IoEvent, IoJob};
 
 #[test]
@@ -93,16 +93,122 @@ fn headless_abort_marks_the_request_and_queues_abort() {
 #[test]
 fn headless_refuses_scene_and_unknown_modules() {
     let mut runtime = RuntimeBuilder::new().build().expect("runtime");
-    match runtime.start_module("scene") {
-        Err(error) => assert!(error.message.contains("not installed"), "{}", error.message),
-        Ok(ticket) => panic!("scene returned {ticket:?}"),
+    for name in ["scene", "reactive", "#reactive", "missing"] {
+        match runtime.start_module(name) {
+            Err(error) => assert!(
+                error.message.contains("not registered"),
+                "{name}: {}",
+                error.message
+            ),
+            Ok(ticket) => panic!("{name} returned {ticket:?}"),
+        }
     }
-    match runtime.start_module("missing") {
+}
+
+#[test]
+fn memory_module_import_and_native_factory_share_one_loader() {
+    let mut runtime = RuntimeBuilder::new()
+        .module(
+            "app.js",
+            "import { answer } from 'answer'; import { extra } from './lib.js'; globalThis.value = answer + extra;",
+        )
+        .module("lib.js", "export const extra = 1;")
+        .native("answer", Box::new(AnswerFactory))
+        .build()
+        .expect("runtime");
+    let ticket = runtime.start_module("app.js").expect("start");
+    assert_eq!(
+        runtime.module_status(ticket).expect("status"),
+        ModuleStatus::Fulfilled
+    );
+    runtime
+        .eval_script(
+            "if (globalThis.value !== 8) throw new Error(String(globalThis.value));",
+            "check.js",
+        )
+        .expect("value");
+}
+
+#[test]
+fn duplicate_module_name_fails_at_build() {
+    match RuntimeBuilder::new()
+        .module("app.js", "export const a = 1;")
+        .module("app.js", "export const a = 2;")
+        .build()
+    {
         Err(error) => assert!(
-            error.message.contains("not registered"),
+            error.message.contains("already registered"),
             "{}",
             error.message
         ),
-        Ok(ModuleTicket::Fulfilled | ModuleTicket::Rejected) => panic!("missing module"),
+        Ok(_) => panic!("duplicate module was accepted"),
+    }
+}
+
+#[test]
+fn top_level_await_stays_pending_until_drive() {
+    let mut runtime = RuntimeBuilder::new()
+        .module(
+            "slow.js",
+            "globalThis.seen = 0; await new Promise(function (resolve) { globalThis.release = resolve; }); globalThis.seen = 1; export const done = true;",
+        )
+        .build()
+        .expect("runtime");
+    let ticket = runtime.start_module("slow.js").expect("start");
+    assert_eq!(
+        runtime.module_status(ticket).expect("pending"),
+        ModuleStatus::Pending
+    );
+    runtime
+        .eval_script(
+            "if (globalThis.seen !== 0) throw new Error('ran early'); globalThis.release();",
+            "release.js",
+        )
+        .expect("release");
+    assert_eq!(
+        runtime.module_status(ticket).expect("still pending"),
+        ModuleStatus::Pending
+    );
+    runtime.drive(0).expect("drive");
+    assert_eq!(
+        runtime.module_status(ticket).expect("fulfilled"),
+        ModuleStatus::Fulfilled
+    );
+    runtime
+        .eval_script(
+            "if (globalThis.seen !== 1) throw new Error(String(globalThis.seen));",
+            "seen.js",
+        )
+        .expect("seen");
+    let mut other = RuntimeBuilder::new().build().expect("other");
+    assert!(other.module_status(ticket).is_err());
+}
+
+struct AnswerFactory;
+
+impl js::NativeFactory for AnswerFactory {
+    fn load<'js>(
+        &self,
+        ctx: &rquickjs::Ctx<'js>,
+        name: &str,
+    ) -> rquickjs::Result<rquickjs::Module<'js, rquickjs::module::Declared>> {
+        rquickjs::Module::declare_def::<Answer, _>(ctx.clone(), name)
+    }
+}
+
+struct Answer;
+
+impl rquickjs::module::ModuleDef for Answer {
+    fn declare(decl: &rquickjs::module::Declarations) -> rquickjs::Result<()> {
+        decl.declare("answer")?;
+        Ok(())
+    }
+
+    fn evaluate<'js>(
+        _ctx: &rquickjs::Ctx<'js>,
+        exports: &rquickjs::module::Exports<'js>,
+    ) -> rquickjs::Result<()> {
+        exports.export("answer", 7)?;
+        Ok(())
     }
 }
