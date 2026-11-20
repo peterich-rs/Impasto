@@ -96,6 +96,8 @@ jobs:
       - name: enable pnpm
         run: corepack enable && corepack prepare pnpm@9.15.9 --activate
       - uses: extractions/setup-just@v2
+      - name: Set up Android SDK tools
+        uses: android-actions/setup-android@v4
       - name: Prepare Android SDK and NDK
         run: |
           sdkmanager 'platforms;android-35' "ndk;$ANDROID_NDK_VERSION"
