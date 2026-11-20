@@ -4,7 +4,7 @@
 
 应用用 Solid 2.0 TSX 编写。`packages/solid-renderer`、`packages/solid-ui` 和 `packages/solid-router` 提供渲染器、控件与路由。QuickJS 会话更新 `uicore` 的渲染树。
 
-macOS 宿主用 Impeller 的 Metal 后端，Android 宿主用 Vulkan。CI 从同一个锁定的 Flutter 提交构建各目标的 Impeller SDK，本地构建链接对应的 SDK。[Impeller SDK](crates/impeller-sys/README.md)
+macOS 宿主用 Impeller 的 Metal 后端，Android 宿主用 Vulkan。仓库收录了 CI 构建和验证的 Impeller SDK 归档，本地构建可以直接解压并链接对应目标的 SDK。[Impeller SDK](crates/impeller-sys/README.md)
 
 ## 文档
 

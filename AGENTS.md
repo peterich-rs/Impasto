@@ -19,5 +19,5 @@ JavaScript 运行时负责脚本执行、模块加载、定时器和标准 API�
 
 - 文档和回复使用中文。文档写清适用范围和前提，让读者可以独立理解。修改实现时核对相关说明，直接替换过时内容。
 - 写 Rust 时使用 `/rust-best-practice`。设计控件或 Gallery 界面时使用 `/unslop`，并用对应宿主验证画面。
-- 优先复用许可证合适的发布依赖。产品代码放在 `third_party/` 以外，SDK 和构建产物留在本地。
+- 优先复用许可证合适的发布依赖。产品代码放在 `third_party/` 以外。CI 验证的 Impeller SDK ZIP 归档纳入 `crates/impeller-sys/prebuilt/`，解压后的 SDK 和本地构建产物留在本地。
 - 删除实现前核对调用者，修改后运行受影响的检查。构建和检查入口见 [justfile](justfile)。
