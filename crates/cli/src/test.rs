@@ -79,7 +79,7 @@ fn run_bundle(bundle: &Path, app: &App) -> Result<()> {
     }
     .restrict(&modules);
     let name = bundle.to_string_lossy();
-    let log: quickjs::ConsoleLog = Box::new(|level, line| {
+    let log: javascript::ui::ConsoleLog = Box::new(|level, line| {
         if level >= 3 {
             eprintln!("{line}");
         }
@@ -89,7 +89,7 @@ fn run_bundle(bundle: &Path, app: &App) -> Result<()> {
         // treated as an envelope from this toolchain's `compile` (`impasto build`).
         // The envelope does not prove the payload is valid bytecode.
         unsafe {
-            quickjs::open_trusted_bytecode_with_routed_io(
+            javascript::ui::open_trusted_bytecode_with_routed_io(
                 &bytes,
                 &name,
                 uicore::MonoShaper::default(),
@@ -99,7 +99,7 @@ fn run_bundle(bundle: &Path, app: &App) -> Result<()> {
             )
         }
     } else {
-        quickjs::open_program_with_routed_io(
+        javascript::ui::open_program_with_routed_io(
             &bytes,
             &name,
             uicore::MonoShaper::default(),

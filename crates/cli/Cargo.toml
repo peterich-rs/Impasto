@@ -13,7 +13,7 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 clap = { version = "4", features = ["derive"] }
-quickjs = { workspace = true }
+javascript = { workspace = true, features = ["ui"] }
 session = { workspace = true }
 shell = { workspace = true }
 uicore = { workspace = true }

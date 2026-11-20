@@ -91,7 +91,7 @@ crates/session/             会话。宿主每帧调用 metrics、pointer、fram
 crates/shell/           壳。命令队列、帧调度、渲染线程
 crates/macos/               macOS 窗口
 crates/android/             Android 宿主。`HostActivity`、`HostView`、Choreographer、Vulkan
-crates/quickjs/             quickjs-jit 0.14.2 会话
+crates/javascript/          JavaScript 运行时、编译器、标准库及 UI 绑定
 packages/clipboard/         @impasto/clipboard
 packages/linking/           @impasto/linking
 packages/app-state/         @impasto/app-state

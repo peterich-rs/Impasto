@@ -1,10 +1,5 @@
 //! Document paths stay with the session. Transport values are the `js_host` types.
 
-pub use js_host::{
-    HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, HttpResponse,
-    IoEvent, IoJob, PluginResult, PluginValue, module_not_linked,
-};
-
 /// A path relative to the document directory. Rejects `..`, absolute paths, and backslashes.
 pub fn document_relative(path: &str) -> Result<String, String> {
     if path.is_empty()

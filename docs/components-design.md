@@ -28,7 +28,7 @@
 - `packages/solid-ui/src/{Dialog,Sheet,Menu,Toast,Tooltip}.tsx` 使用 `target.ts` 保存响应式样式快照。浮层关闭、重开和 owner 销毁时配对撤销 panel ref；Dialog/Sheet 在退出动画完成后清空。
 - `packages/solid-ui/src/{theme,theme-bind,use-theme}.ts` 将默认主题色板、文字角色、尺寸 token 与 locale 方向同步到原生 Environment。主题作用域与按依赖建立的节点索引仍在 `docs/refactor-plan.md`。
 - `packages/solid-router/src/{index.ts,view.tsx}` 保留 RouterView 与 StackTransition；它们的填充轨道使用 component 来源。
-- `packages/solid-ui/type-tests/components.tsx` 由 tsc 检查正反例。`crates/quickjs/src/component_tests.rs` 编译并执行 `tests/fixtures/component*.tsx`，检查真实 DrawList、输入、语义、主题更新和浮层生命周期。
+- `packages/solid-ui/type-tests/components.tsx` 由 tsc 检查正反例。`crates/javascript/src/ui/component_tests.rs` 编译并执行 `tests/fixtures/ui/component*.tsx`，检查真实 DrawList、输入、语义、主题更新和浮层生命周期。
 
 ## 设计
 
@@ -261,7 +261,7 @@ import { Button, Column, Grid, Image, Row, ScrollArea, Text } from "@impasto/sol
 
 - 明确面板/遮罩/提示/内容目标与 ref；保留焦点恢复和退出 owner。导出各自 XxxProps。
 
-**文件：`crates/uicore/src/tree/style.rs`、`style/{mod,property}.rs`、`crates/quickjs/{abi.yml,src/linked/rt/bindings.rs,src/linked/mutation.rs}`、`packages/solid-renderer/src/scene.ts`。**
+**文件：`crates/uicore/src/tree/style.rs`、`style/{mod,property}.rs`、`crates/javascript/src/ui/{abi.yml,player/vm/bindings.rs,player/mutation.rs}`、`packages/solid-renderer/src/scene.ts`。**
 
 - 对 Stack/Scroll 与列表内部目标记录允许的样式域，完整候选解析后按 Key 校验；class 和 style 一视同仁。拒绝必须保留来源、几何与驱动状态，不能静默忽略属性。
 
@@ -273,7 +273,7 @@ import { Button, Column, Grid, Image, Row, ScrollArea, Text } from "@impasto/sol
 
 - Image 接入 StyleProps/ref 与 intrinsicSize；补 solid-ui 的 Image/样式类型重导出。
 
-**文件：`crates/uicore/src/tree/{layout,store}.rs`、`crates/quickjs/{abi.yml,src/linked/rt/bindings.rs,src/linked/mutation.rs}`。**
+**文件：`crates/uicore/src/tree/{layout,store}.rs`、`crates/javascript/src/ui/{abi.yml,player/vm/bindings.rs,player/mutation.rs}`。**
 
 - 图片资源命令不写入作者尺寸；派生解码尺寸仍通过原有资源就绪与测量链进入 Taffy，不扩展图片缓存项目范围。
 
@@ -293,7 +293,7 @@ import { Button, Column, Grid, Image, Row, ScrollArea, Text } from "@impasto/sol
 
 - 检查全部公共导出及 Props，子目标与 ref 的归属，事件组合与独立来源清理。类型测试拒绝被删除的快捷属性与错误子目标。
 
-**文件：`crates/quickjs/tests/fixtures/components.tsx`（新增）、`crates/quickjs/src/lib.rs`、`crates/uicore/src/style_contract_test.rs`。**
+**文件：`crates/javascript/tests/fixtures/ui/components.tsx`（新增）、`crates/javascript/src/ui/tests.rs`、`crates/uicore/src/style_contract_test.rs`。**
 
 - 实际编译并运行所有目标组件；检查节点身份、原子拒绝、RTL、换图、IME、滚动、列表和离场生命周期，不能用 mock 的无布局实现代替。
 
@@ -324,11 +324,11 @@ import { Button, Column, Grid, Image, Row, ScrollArea, Text } from "@impasto/sol
 - `apps/gallery-solid/quotes.esm.test.ts` -- 新组件入口的应用 ESM 回归。
 - `apps/gallery-solid/src/app.tsx` -- 页面根与方向的明确声明。
 - `apps/gallery-solid/src/pages/watchlist.tsx` -- Column/Row 与滚动组合消费。
-- `crates/quickjs/abi.yml` -- 图片资源更新所需领域命令。
-- `crates/quickjs/src/linked/rt/bindings.rs` -- 图片资源与固有尺寸输入。
-- `crates/quickjs/src/lib.rs` -- 注册真实组件 fixture。
-- `crates/quickjs/src/linked/mutation.rs` -- 样式目标校验与资源命令分发。
-- `crates/quickjs/tests/fixtures/components.tsx` -- 公共组件原生合同。
+- `crates/javascript/src/ui/abi.yml` -- 图片资源更新所需领域命令。
+- `crates/javascript/src/ui/player/vm/bindings.rs` -- 图片资源与固有尺寸输入。
+- `crates/javascript/src/ui/tests.rs` -- 注册真实组件 fixture。
+- `crates/javascript/src/ui/player/mutation.rs` -- 样式目标校验与资源命令分发。
+- `crates/javascript/tests/fixtures/ui/components.tsx` -- 公共组件原生合同。
 - `crates/uicore/src/style/mod.rs` -- StyleSurface 与结构化错误。
 - `crates/uicore/src/style/property.rs` -- 目标样式域的 Key 元数据。
 - `crates/uicore/src/style_contract_test.rs` -- 结构约束与拒绝回滚。

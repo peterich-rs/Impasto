@@ -13,7 +13,6 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 uicore = { workspace = true }
-session = { workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 ndk = { version = "=0.9.0", default-features = false }
@@ -21,7 +20,7 @@ ndk-sys = { version = "=0.6.0" }
 jni = { version = "=0.22.4" }
 engine = { workspace = true }
 shell = { workspace = true }
-quickjs = { workspace = true }
+javascript = { workspace = true, features = ["ui"] }
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 session = { workspace = true }
 

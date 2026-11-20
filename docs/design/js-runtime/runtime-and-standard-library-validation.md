@@ -29,11 +29,13 @@ Release 在同一 macOS 上用同一 Gallery bundle 和夹具交错测量，每�
 
 ## 接入和兼容
 
-- `js` 管理 VM、宿主模块、值转换、任务和资源。独立运行入口是 `cargo run --locked -p js-headless`，该程序只依赖 `js`，验收了严格编译的 IQJS 模块、同步和 Promise 方法、owned 模块事件、标准库与外部传输。
-- `quickjs` 在显式扩展内安装 UI 绑定。源码与受信任字节码入口保留原引导检查点，入口后接入 Shell 外部传输。外部完成仍在命令点交付，启动和本地积压在帧内按 HTTP、模块、socket 的顺序交付。UI 保留严格 job checkpoint 和原 reactive、布局、Canvas 顺序。
+以下命令使用当前 workspace 的包名。
+
+- `javascript::runtime` 管理 VM、宿主模块、值转换、任务和资源。独立运行入口是 `cargo run --locked -p javascript --bin js-headless`，验收了严格编译的 IQJS 模块、同步和 Promise 方法、owned 模块事件、标准库与外部传输。
+- `javascript::ui` 在显式扩展内安装 UI 绑定。源码与受信任字节码入口保留原引导检查点，入口后接入 Shell 外部传输。外部完成仍在命令点交付，启动和本地积压在帧内按 HTTP、模块、socket 的顺序交付。UI 保留严格 job checkpoint 和原 reactive、布局、Canvas 顺序。
 - 本地 HTTP 使用 Inline 或 External 中的一种。启动流错误在 JS 登记之后交付，空 EOF 关闭 reader，abort 立即释放请求及 Promise。带数据的末块按数据计费，空终结事件可用预留位置。后台 credit 等待与 Shell 命令接收分离，Runtime 关闭时唤醒等待者。Shell 的 HTTP 重定向逐跳限制为 HTTP 或 HTTPS，并保留 HTTPS 降级拒绝。
-- `legacy` 保留整响应 `fetch`、`fetchStream().getReader()` 和 HTTP 错误名称。共享的 Body 实现修正空流、读中取消、终结后保留未读数据和读取失败。`portable` 的 fetch 在响应头到达时结算，要求 External。当前声明覆盖的 Web 子集见 `crates/js/src/standard`。URL 使用锁中的 `url 2.5.8`，编码覆盖 UTF-8 和流式解码。Web 子集用 QuickJS 执行等价边界夹具。
-- 后端的 loader、`NativeFactory` 和受信任字节码入口位于 `js::quickjs`。一般编译和票据入口使用目录和自有结果。字节码使用原 IQJS 封套。CLI 独立 bundle 使用首方模块目录，macOS 和 Android 打包使用应用与目标声明的模块目录。
+- `legacy` 保留整响应 `fetch`、`fetchStream().getReader()` 和 HTTP 错误名称。共享的 Body 实现修正空流、读中取消、终结后保留未读数据和读取失败。`portable` 的 fetch 在响应头到达时结算，要求 External。当前声明覆盖的 Web 子集见 `crates/javascript/src/standard`。URL 使用锁中的 `url 2.5.8`，编码覆盖 UTF-8 和流式解码。Web 子集用 QuickJS 执行等价边界夹具。
+- 后端的 loader 和受信任字节码加载位于 `runtime/quickjs`，扩展可使用 `javascript::runtime::NativeFactory`。一般编译和票据入口使用目录和自有结果。字节码使用原 IQJS 封套。CLI 独立 bundle 使用首方模块目录，macOS 和 Android 打包使用应用与目标声明的模块目录。
 - 兼容入口的消费者包括现有 `open_program_with_io` 和 `open_trusted_bytecode_with_io` 的调用方，以及基于旧 `IoEvent` 的测试和嵌入者。平台主路径走 `Delivery`。兼容 token 入口在这些消费者迁到显式路由和完成工厂后再删除。
 - 保持提前装配。空 VM 与 UI 测得约 1 ms 增量，Gallery 启动的中位数接近基线，当前样本未显示拆出独立 lazy 安装的收益。
 

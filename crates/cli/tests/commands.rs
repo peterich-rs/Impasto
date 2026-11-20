@@ -196,7 +196,7 @@ void check();
                 ..session::ModuleConfig::disconnected()
             };
             let completed = Arc::new(AtomicBool::new(false));
-            let log: quickjs::ConsoleLog = Box::new({
+            let log: javascript::ui::ConsoleLog = Box::new({
                 let completed = Arc::clone(&completed);
                 move |_, line| {
                     if line == "capabilities passed" {
@@ -207,13 +207,13 @@ void check();
             let shaper = uicore::MonoShaper::default();
             let mut session = if debug {
                 let source = fs::read(sandbox.0.join("build/app.js")).expect("ESM bundle");
-                quickjs::open_program_with_io(&source, "app.js", shaper, log, None, config)
+                javascript::ui::open_program_with_io(&source, "app.js", shaper, log, None, config)
             } else {
                 let source = fs::read(sandbox.0.join("build/app.bin")).expect("bytecode bundle");
                 // SAFETY: this test loads only the artifact built above by the pinned CLI.
                 #[expect(unsafe_code, reason = "loads this test's own compiled artifact")]
                 unsafe {
-                    quickjs::open_trusted_bytecode_with_io(
+                    javascript::ui::open_trusted_bytecode_with_io(
                         &source, "app.bin", shaper, log, None, config,
                     )
                 }

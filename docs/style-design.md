@@ -30,11 +30,11 @@
 - `crates/uicore/src/style/defaults.rs`：普通 View 使用 column、min 0、shrink 0、无隐式 max；Scroll 保留视口预设。
 - `crates/uicore/src/tree/{layout,scroll,hit}.rs`：Taffy 测量与几何、内容溢出、命中。真实固有文字度量和 RTL 滚动仍需后续验收。
 - `crates/uicore/src/tree/record/`：同节点背景、内容与组合效果，扁平 DrawList 和 LayerTree 共用作用域。
-- `crates/quickjs/{abi.yml,build.rs}`、`src/linked/{rt/bindings,mutation}.rs`：生成类型记录，复制 JS 输入后借用 Tree，一次提交完整来源。同步读强制冲刷样式和所需布局。
+- `crates/javascript/{src/ui/abi.yml,build.rs}`、`src/ui/player/{vm/bindings,mutation}.rs`：生成类型记录，复制 JS 输入后借用 Tree，一次提交完整来源。同步读强制冲刷样式和所需布局。
 - `packages/solid-renderer/runtime/{style,text}.ts`：响应式独立样式来源与清理，文字样式统一输入；Image 的资源尺寸接口仍待拆分。
 - `packages/solid-ui/src/Button.tsx`：单 View 承载布局、手势、焦点与语义，组件默认来源允许 class/inline 覆盖。
 - `packages/solid-ui`、`packages/solid-router`、`packages/devtools`、`apps/gallery-solid`：产品 TSX 使用 view/stack/scroll/image，文本展示字段位于 style。
-- `crates/uicore/src/style_contract_test.rs`、`crates/quickjs/tests/fixtures/style.tsx`：来源隔离、原子失败、clear/reset、环境/交互依赖、同步读与真实组件回归。
+- `crates/uicore/src/style_contract_test.rs`、`crates/javascript/tests/fixtures/ui/style.tsx`：来源隔离、原子失败、clear/reset、环境/交互依赖、同步读与真实组件回归。
 - `crates/uicore/src/bin/style-types.rs`、`justfile`：生成类型、属性表和能力清单，并提供一致性检查。
 
 ### 上游依据
@@ -459,7 +459,7 @@ Tree 持有类型化环境。Session 将 metrics/settings 的变化转发给 Tre
 
 ### 9. QuickJS、生成与冲刷
 
-**目标文件：`crates/quickjs/abi.yml`、`build.rs`、`src/linked/rt/bindings.rs`、`linked/{scene,mutation,mod,frame}.rs`，生成器与 renderer。**
+**目标文件：`crates/javascript/src/ui/abi.yml`、`build.rs`、`src/ui/player/vm/bindings.rs`、`src/ui/player/{scene,mutation,mod,frame}.rs`，生成器与 renderer。**
 
 - Rust 绑定读取 JS 值并产生拥有型 codec 值，不做长度求值、工具类展开或布局；进入 Tree 借用前完成值复制，不让 JS getter/回调发生在树的可变借用内。
 - 增加来源快照、patch、clear、class 快照及环境更新等批量操作，操作编号由 abi.yml 生成 Rust、JavaScript 与 TypeScript 常量；不新增产品 C 头文件。
@@ -488,7 +488,7 @@ Tree 持有类型化环境。Session 将 metrics/settings 的变化转发给 Tre
 
 ## 阶段 0：固定可验证基线
 
-**文件：`tools/style-benchmark.mjs`、`docs/style-baseline.md`（实施时新增），`crates/uicore/src/tree/record/mod.rs`、`crates/quickjs/tests/fixtures/style.tsx`（新增）。**
+**文件：`tools/style-benchmark.mjs`、`docs/style-baseline.md`（实施时新增），`crates/uicore/src/tree/record/mod.rs`、`crates/javascript/tests/fixtures/ui/style.tsx`（新增）。**
 
 - 建立同一 release workload 的冷启动、1000 行列表、行情文字、纯颜色、纯层值动画、主题与 resize 采样；先运行现有路径。
 - 增加原生 API 合同样例：基线、内容溢出、百分比、Grid parse；将隔离验证转为正式回归。
@@ -546,7 +546,7 @@ Tree 持有类型化环境。Session 将 metrics/settings 的变化转发给 Tre
 
 ## 阶段 5：贯通 QuickJS 与 TypeScript
 
-**文件：`crates/quickjs/{abi.yml,build.rs,README.md}`、`src/linked/rt/bindings.rs`、`src/scene.js`、`src/linked/{scene,mutation,mod,frame}.rs`、`src/lib.rs`、`tests/fixtures/style.tsx`。**
+**文件：`crates/javascript/{src/ui/abi.yml,build.rs,README.md}`、`src/ui/player/vm/bindings.rs`、`src/ui/scene.js`、`src/ui/player/{scene,mutation,mod,frame}.rs`、`src/ui/tests.rs`、`tests/fixtures/ui/style.tsx`。**
 
 - 生成类型化批量记录，加入来源/class/environment 命令与 View 创建。
 - 接入 flush_for_read 和帧内冲刷；移除未被消费的换行样式 codec。
@@ -568,7 +568,7 @@ Tree 持有类型化环境。Session 将 metrics/settings 的变化转发给 Tre
 - 把主题变更合并同步到原生环境，删除每个控件对同一颜色的重复绑定和 Row 的手动 locale 反转。
 - 明确 viewport/content/row/editor 的样式归属，保留动态列表与退出动画的 owner。
 
-**文件：`style/defaults.rs`、`tree/{node,store,layout}.rs`、`crates/quickjs/abi.yml`、`src/scene.js`、`linked/{scene,mutation}.rs`、renderer 的旧属性与 setter 文件。**
+**文件：`style/defaults.rs`、`tree/{node,store,layout}.rs`、`crates/javascript/src/ui/abi.yml`、`src/ui/scene.js`、`src/ui/player/{scene,mutation}.rs`、renderer 的旧属性与 setter 文件。**
 
 - 普通构造器切换 min 0/shrink 0/无隐式 max，页面填充改为显式声明。
 - 删除 fit_parent_cap、隐式 cap 标记、独立 setter 实现及失去消费者的 ABI 字段。
@@ -578,7 +578,7 @@ Tree 持有类型化环境。Session 将 metrics/settings 的变化转发给 Tre
 
 ## 阶段 7：验证、诊断与性能验收
 
-**文件：`crates/uicore/src/style/tests.rs`、`layout_test/{flex,grid,tree,picture,pointer,scroll,debug}.rs`、`scroll_test.rs`、`barrier_test.rs`、`list/tests.rs`、`refactor_test.rs`、`shaper.rs`，`crates/quickjs/src/lib.rs` 与新 fixture。**
+**文件：`crates/uicore/src/style/tests.rs`、`layout_test/{flex,grid,tree,picture,pointer,scroll,debug}.rs`、`scroll_test.rs`、`barrier_test.rs`、`list/tests.rs`、`refactor_test.rs`、`shaper.rs`，`crates/javascript/src/ui/tests.rs` 与新 fixture。**
 
 - 类型化行为、基线、intrinsic、分数布局、overflow、RTL、边框、文字内盒、display:none、reparent、无效值原子性。
 - reverse/RTL 下 flex-start 与 start 区别；0 点 basis 与 0%；min auto 与 0；minmax 非法域。
@@ -660,18 +660,18 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p uicore --no-deps
 - `crates/engine/src/typography/key.rs` -- 固有度量与字体 revision 的缓存身份
 - `crates/engine/src/typography/mod.rs` -- 公开完整固有度量的 Rust 接口并保留渲染线程约束
 - `crates/engine/src/typography/shape.rs` -- 读取真实段落固有宽度并验证 CJK/runs
-- `crates/quickjs/README.md` -- 说明批量 style/class 的语言边界
-- `crates/quickjs/abi.yml` -- 增加批量样式操作并删除已无消费者的旧字段
-- `crates/quickjs/build.rs` -- 生成配套样式记录及原生入口所需定义
-- `crates/quickjs/src/linked/rt/bindings.rs` -- 统一解码静态和动态 style/class，不添加逐属性 C API
-- `crates/quickjs/src/lib.rs` -- 真实 QuickJS、生命周期和字节码回归
-- `crates/quickjs/src/linked/frame.rs` -- 把待解析样式接入现有冲刷顺序和计数
-- `crates/quickjs/src/linked/mod.rs` -- 转发环境变化、衔接帧内冲刷与诊断
-- `crates/quickjs/src/linked/mutation.rs` -- 应用类型化批量声明和原子提交
-- `crates/quickjs/src/linked/nodes.rs` -- 轨道类型化后移除无引用的字符串解析
-- `crates/quickjs/src/linked/scene.rs` -- 新增 style/class 属性分发与错误转换
-- `crates/quickjs/src/scene.js` -- 统一命令式样式操作，清理旧包装
-- `crates/quickjs/tests/fixtures/style.tsx` -- 新增静态和动态 TSX 样式原生 fixture
+- `crates/javascript/README.md` -- 说明批量 style/class 的语言边界
+- `crates/javascript/src/ui/abi.yml` -- 增加批量样式操作并删除已无消费者的旧字段
+- `crates/javascript/build.rs` -- 生成配套样式记录及原生入口所需定义
+- `crates/javascript/src/ui/player/vm/bindings.rs` -- 统一解码静态和动态 style/class，不添加逐属性 C API
+- `crates/javascript/src/ui/tests.rs` -- 真实 QuickJS、生命周期和字节码回归
+- `crates/javascript/src/ui/player/frame.rs` -- 把待解析样式接入现有冲刷顺序和计数
+- `crates/javascript/src/ui/player/mod.rs` -- 转发环境变化、衔接帧内冲刷与诊断
+- `crates/javascript/src/ui/player/mutation.rs` -- 应用类型化批量声明和原子提交
+- `crates/javascript/src/ui/player/nodes.rs` -- 轨道类型化后移除无引用的字符串解析
+- `crates/javascript/src/ui/player/scene.rs` -- 新增 style/class 属性分发与错误转换
+- `crates/javascript/src/ui/scene.js` -- 统一命令式样式操作，清理旧包装
+- `crates/javascript/tests/fixtures/ui/style.tsx` -- 新增静态和动态 TSX 样式原生 fixture
 - `crates/session/src/lib.rs` -- 按需扩展 FrameTrace 的样式诊断字段
 - `crates/shell/src/diagnostics/hub.rs` -- 接收新增样式性能计数
 - `crates/shell/src/diagnostics/inspect.rs` -- 沿用诊断输出格式暴露计数

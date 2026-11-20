@@ -5,14 +5,11 @@ members = [
     "crates/uicore",
     "crates/engine",
     "crates/impeller-sys",
-    "crates/js",
-    "crates/js-headless",
-    "crates/js-host",
+    "crates/javascript",
     "crates/session",
     "crates/shell",
     "crates/macos",
     "crates/android",
-    "crates/quickjs",
     "crates/cli",
     "crates/reactive",
 ]
@@ -28,11 +25,9 @@ protocol = { path = "crates/protocol" }
 uicore = { path = "crates/uicore" }
 engine = { path = "crates/engine" }
 impeller = { package = "impeller-sys", path = "crates/impeller-sys" }
-js = { path = "crates/js" }
-js-host = { path = "crates/js-host" }
+javascript = { path = "crates/javascript", default-features = false }
 session = { path = "crates/session" }
 shell = { path = "crates/shell" }
-quickjs = { path = "crates/quickjs" }
 rquickjs = { package = "quickjs-jit", version = "=0.14.2", default-features = false, features = ["std", "loader", "macro", "bindgen"] }
 
 [profile.dev.package.quickjs-jit-sys]
@@ -43,7 +38,7 @@ opt-level = 3
 [profile.dev.package.reactive]
 opt-level = 2
 
-[profile.dev.package.quickjs]
+[profile.dev.package.javascript]
 opt-level = 2
 
 [profile.dev.package.uicore]

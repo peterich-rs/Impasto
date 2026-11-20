@@ -11,7 +11,7 @@ impeller = ["engine/impeller"]
 anyhow = "1"
 uicore = { workspace = true }
 engine = { workspace = true }
-quickjs = { workspace = true }
+javascript = { workspace = true, features = ["ui"] }
 session = { workspace = true }
 shell = { workspace = true }
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }

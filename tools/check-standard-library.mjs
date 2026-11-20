@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const fixture = readFileSync(new URL("../crates/js/tests/fixtures/standard.ts", import.meta.url), "utf8");
+const fixture = readFileSync(new URL("../crates/javascript/tests/fixtures/standard.ts", import.meta.url), "utf8");
 const options = {
   strict: true,
   noEmit: true,
@@ -16,7 +16,7 @@ const options = {
 };
 
 function rust(profile, action, input) {
-  return execFileSync("cargo", ["run", "--quiet", "--locked", "-p", "js", "--example", "standard-contract", "--", profile, action], {
+  return execFileSync("cargo", ["run", "--quiet", "--locked", "-p", "javascript", "--example", "standard-contract", "--", profile, action], {
     cwd: root,
     input,
     encoding: "utf8",

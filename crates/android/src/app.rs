@@ -645,7 +645,7 @@ fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
                 // `compile` output. It is not network input. The envelope does
                 // not prove the payload is valid bytecode.
                 unsafe {
-                    quickjs::open_trusted_bytecode_with_routed_io(
+                    javascript::ui::open_trusted_bytecode_with_routed_io(
                         &script,
                         &name,
                         open.shaper,
@@ -655,7 +655,7 @@ fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
                     )
                 }
             } else {
-                quickjs::open_program_with_routed_io(
+                javascript::ui::open_program_with_routed_io(
                     &script,
                     &name,
                     open.shaper,
@@ -665,8 +665,8 @@ fn attach(env: &mut Env, request: Attach) -> Result<(), String> {
                 )
             }
             .map_err(|error| match error {
-                quickjs::Error::Runtime => SessionError::Runtime,
-                quickjs::Error::Script(text) => {
+                javascript::ui::Error::Runtime => SessionError::Runtime,
+                javascript::ui::Error::Script(text) => {
                     tracing::error!(target: "impasto::script", "{text}");
                     SessionError::Script(text)
                 }

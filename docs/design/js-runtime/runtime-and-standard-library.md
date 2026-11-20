@@ -1,6 +1,6 @@
 # Impasto JS 运行时与标准库重构设计
 
-本文记录 `js`、`quickjs` 和 `shell` 共用运行时的接口、标准库、传输及回归边界。实际验证见 [JS 运行时验收](runtime-and-standard-library-validation.md)。
+本文记录 `javascript` 的运行时接口、标准库、UI 绑定及与 `shell` 的传输契约。实际验证见 [JS 运行时验收](runtime-and-standard-library-validation.md)。
 
 ## 1. 基线
 
@@ -8,56 +8,51 @@
 
 ## 2. Runtime 共用实现
 
-`js::Runtime` 维护 VM、普通定时器、模块注册与调用、宿主 I/O 及资源状态。同步结果、异步结果与事件经过共享值转换。宿主二进制数据按实际视图读取。HTTP 执行模式互斥，取消在本地完成结算，资源额度由持有者在终结或读取时释放。UI 扩展保留渲染帧、Canvas 策略和响应式回调的顺序。
+`javascript::runtime::Runtime` 维护 VM、普通定时器、模块注册与调用、宿主 I/O 及资源状态。同步结果、异步结果与事件经过共享值转换。宿主二进制数据按实际视图读取。HTTP 执行模式互斥，取消在本地完成结算，资源额度由持有者在终结或读取时释放。UI 扩展保留渲染帧、Canvas 策略和响应式回调的顺序。
 
-入口见 [Runtime](../../../crates/js/src/runtime.rs)、[宿主绑定](../../../crates/js/src/host.rs)、[完成交付](../../../crates/js/src/deliver.rs)、[UI 装配](../../../crates/quickjs/src/linked/rt/mod.rs)与 [Shell 网络循环](../../../crates/shell/src/net.rs)。
+入口见 [Runtime](../../../crates/javascript/src/runtime/mod.rs)、[宿主绑定](../../../crates/javascript/src/runtime/io.rs)、[完成交付](../../../crates/javascript/src/runtime/delivery.rs)、[UI 装配](../../../crates/javascript/src/ui/player/vm/mod.rs)与 [Shell 网络循环](../../../crates/shell/src/net.rs)。
 
 ## 3. 依赖边界与所有权
 
 ```mermaid
 flowchart TD
-    host["macOS / Android / CLI / 其他宿主"]
+    platform["macOS / Android / CLI"]
     shell["shell：平台能力、执行器、Inbox"]
-    ui["quickjs：Impasto UI 集成"]
-    session["session：Session / FrameTime / FrameOutput"]
-    runtime["js：Runtime、标准库、模块、调度与资源"]
-    backend["js::quickjs：Ctx、roots、绑定与字节码"]
-    contract["js-host：owned 值、模块契约与 I/O"]
-    headless["js-headless / 独立消费程序"]
-    host --> shell
-    host --> ui
-    shell --> session
-    ui --> session
-    ui --> runtime
-    ui --> backend
+    facade["session：平台会话入口"]
+    headless["js-headless：独立示例"]
+    subgraph javascript["javascript"]
+        ui["ui：Impasto UI 集成"]
+        session["session：帧、输入和配置"]
+        runtime["runtime：VM、模块、调度和资源"]
+        compiler["compiler：链接与 IQJS 字节码"]
+        standard["standard：标准 API 与声明"]
+        host["host：模块契约和 I/O"]
+        ui --> session
+        ui --> runtime
+        ui --> compiler
+        runtime --- standard
+        runtime --> host
+        session --> host
+    end
+    platform --> shell
+    platform --> ui
+    shell --> facade
+    facade --> session
     headless --> runtime
-    runtime --- backend
-    runtime --> contract
-    session --> contract
+    headless --> compiler
 ```
 
-`js-host` 保持 std-only。其数据可由宿主线程传递，API 使用自有值、一次性完成回调及传输契约。`js` 使用唯一的 QuickJS 后端，保持对 `session`、`uicore`、`shell` 和 Impasto 应用命名策略的独立。普通宿主的运行入口只需要模块、能力、时钟和自有事件。`quickjs` 负责 `scene`、`reactive`、`#reactive`、ABI、Canvas、rAF、UI 生命周期和帧策略。`shell` 继续持有平台实现、网络后端与唤醒。
+`host` 使用 std，负责自有值、模块声明、一次性完成回调与传输契约。`runtime` feature 默认启用，包含 QuickJS 后端、编译器及标准库。`ui` feature 在此基础上接入树、响应式图、Canvas 与帧调度。`session` crate 重导出帧和输入契约，单独构建时只启用同名 feature。`shell` 持有平台实现、网络传输、执行器与唤醒。
 
-运行时使用 workspace 的 `js` 与 `quickjs`，标准库支持范围见第 9 节。
-
-| 所有者 | 持有的状态 | 迁移要求 |
-|---|---|---|
-| `js::Runtime` | timer、模块票据、模块订阅、队列、运行状态。请求、socket、取消、每流额度和统计 | 宿主通过拥有型事件或完成端交付结果 |
-| `js::quickjs` | Context、VM、interrupt、rejection tracker、Promise 和 callback roots、编解码及原生绑定 | 显式标示后端专用 API。在哪个运行时恢复值由运行时身份和句柄约束决定 |
-| `quickjs` | Tree、Graph、IME、Canvas、style、driver、UI callbacks、rAF、UI 模块与错误上下文 | 保留直接绑定、批量 Canvas、局部布局、lease 和 picture 缓存。热路径无需经过通用模块 binder |
-| `session` | UI 生命周期及 `ModuleConfig` 的平台状态槽 | 通过现有 registry/exec/completion 适配通用 binder。app state 和 launch URL 留在 UI 层 |
-| `shell` | OpenWire 客户端、socket 传输、平台能力、执行器、命令路由 | 后台只持有 owned 参数、取消句柄和完成端。平台模块继续由 shell 组装 |
-
-运行时相关代码分布如下。
-
-| 路径 | 内容 |
+| 路径 | 职责 |
 |---|---|
-| `crates/js-host/src/{value,modules,registry,io,declaration}.rs` | 宿主契约、模块元数据和声明渲染、传输身份与交付 |
-| `crates/js/src/{runtime,builder,catalog,scheduler,resources}.rs` | 运行状态和生命周期、装配、目录、执行原语和资源表 |
-| `crates/js/src/standard/` | profile 与声明，以及通过 QuickJS 原生注册的 Rust 标准库模块 |
-| `crates/js/src/quickjs/` | VM、codec、roots、host binder、模块装载和扩展接口 |
-| `crates/js/src/{bytecode,compile}.rs` | 公共产物、编译入口和信任边界，QuickJS 专用操作归后端 |
-| `crates/quickjs/src/linked/{rt,bootstrap.rs,bridge.rs,mod.rs}` | UI 原生绑定、显式装配、UI 桥和 Session 帧编排 |
+| `crates/javascript/src/host` | 宿主契约、模块元数据、声明渲染、传输身份与交付 |
+| `crates/javascript/src/runtime` | VM 生命周期、模块目录、执行预算、调度、宿主绑定和资源表 |
+| `crates/javascript/src/runtime/quickjs` | QuickJS 的 Context、持久引用、原生模块绑定、值转换和受信任字节码加载 |
+| `crates/javascript/src/compiler` | 源码编译、静态导入检查、IQJS 封套格式与校验 |
+| `crates/javascript/src/standard` | 标准 API 的原生实现、profile 与 TypeScript 声明 |
+| `crates/javascript/src/ui` | UI 专用入口、ABI、场景和响应式绑定、帧编排 |
+| `crates/javascript/src/session` | 平台与 UI 会话共享的生命周期、帧、输入和宿主配置 |
 | `crates/shell/src/{net.rs,http.rs,modules/,module_stubs.rs}` | 传输、首方模块实例收集、声明工具入口 |
 
 ## 4. Runtime API 与装配
@@ -81,7 +76,7 @@ let outcome = runtime.take_module_result(ticket)?;
 
 UI 需要的窄操作包括 `set_clock`、`begin_timer_turn`、`deliver_event`、`run_due_timers`、`checkpoint`、`next_deadline_ms` 和 `schedule_state`。一个动作只修改所负责的状态。推进时钟和推进 turn 分开，交付一条事件和排空一批事件分开。仅查询状态时使用共享引用。由 **宿主推进 Runtime** 和 **VM 栈内处理原生回调** 分别走适合当前借用的入口。JS 可重入操作之前释放资源表和 UI 状态的可变借用。关闭后的执行入口返回 `Closed`。
 
-`js::quickjs::ExtensionContext` 给受信任的原生扩展提供作用域内的 `Ctx`、带预算调用和受 Runtime 管理的 roots。VM 栈内回调复用当前 context。检查点由宿主推进器在栈外运行。跨调用持有 JS 引用时用后端 roots 或 UI owner 管理的短生命周期引用，随 VM 关闭前释放。延续现有稳定 `Box<Host>` 和 `Box<Inner>` 可作为第一步。登记指针的内部安装入口统一说明地址稳定期、有效的脚本阶段、移除点及销毁顺序。采用 `Rc` 时，VM 回调反向引用 UI 状态用 `Weak`。
+`javascript::runtime::ExtensionContext` 给受信任的原生扩展提供作用域内的 `Ctx`、带预算调用和受 Runtime 管理的 roots。VM 栈内回调复用当前 context。检查点由宿主推进器在栈外运行。跨调用持有 JS 引用时用后端 roots 或 UI owner 管理的短生命周期引用，随 VM 关闭前释放。延续现有稳定 `Box<Host>` 和 `Box<Inner>` 可作为第一步。登记指针的内部安装入口统一说明地址稳定期、有效的脚本阶段、移除点及销毁顺序。采用 `Rc` 时，VM 回调反向引用 UI 状态用 `Weak`。
 
 普通 builder 可直接装配标准环境。UI 使用显式装配步骤，其中 **未启动** 表示应用入口尚未执行。`RuntimeBuilder::build_unstarted` 创建 VM 和值转换环境，UI 再按下一节的顺序安装绑定。`NativeFactory`、`Ctx` 和受信任字节码加载属于 QuickJS 后端。
 
@@ -125,7 +120,7 @@ Allocated → Installing → Ready → Closing → Closed
 
 运行时的注册目录增加严格构建入口。目录验证 specifier、模块名歧义、重复导出和事件、对象导出冲突，以及有事件模块预留的 listener 名称。`delete` 等 ESM 导出名和 TypeScript 绑定标识符分别验证。旧 `ModuleRegistry::new` 保持 first-wins。`session` 的 `@impasto/<pkg>` 过滤继续由 UI 适配层执行。
 
-唯一 Plugin codec 位于 `js::quickjs::codec`。输入在借用结束后交给 Invoke，输出由同步返回、Plugin 完成和模块事件复用。HTTP 和 socket 复用其中的字节读取。Canvas 沿用原有直接批量路径。
+唯一 Plugin codec 位于 `runtime/quickjs/codec.rs`。输入在借用结束后交给 Invoke，输出由同步返回、Plugin 完成和模块事件复用。HTTP 和 socket 复用其中的字节读取。Canvas 沿用原有直接批量路径。
 
 | 值 | 保持的兼容与新增的验证 |
 |---|---|
@@ -215,7 +210,7 @@ Shell 将 `net::serve` 的命令接收与会阻塞的 HTTP 请求任务分开。
 
 ## 9. 标准库与支持范围
 
-`legacy` 的行为夹具固定兼容边界。`crates/js/src/standard` 用 Rust 注册公开构造器、原型和方法。事件监听、取消、编码与 URL 状态、Headers、Body 队列、reader 锁、Fetch 结算和 WebSocket 状态由同一线程的 Rust 对象持有。JS 引用通过 QuickJS class tracing 保持可达，调用 JS 前释放资源状态的借用。普通 Promise、回调和对象继续使用 QuickJS 自身实现。各 Rust 绑定模块维护 TypeScript 签名。`StandardProfile::declarations()` 按 profile 和传输能力选择模块，再拼接声明。`just standard-check` 用 `legacy` 和 `portable` 的四种传输组合核对 TypeScript 声明与实际 QuickJS 全局值、原型和继承，并在两侧执行代表性用例。
+`legacy` 的行为夹具固定兼容边界。`crates/javascript/src/standard` 用 Rust 注册公开构造器、原型和方法。事件监听、取消、编码与 URL 状态、Headers、Body 队列、reader 锁、Fetch 结算和 WebSocket 状态由同一线程的 Rust 对象持有。JS 引用通过 QuickJS class tracing 保持可达，调用 JS 前释放资源状态的借用。普通 Promise、回调和对象继续使用 QuickJS 自身实现。各 Rust 绑定模块维护 TypeScript 签名。`StandardProfile::declarations()` 按 profile 和传输能力选择模块，再拼接声明。`just standard-check` 用 `legacy` 和 `portable` 的四种传输组合核对 TypeScript 声明与实际 QuickJS 全局值、原型和继承，并在两侧执行代表性用例。
 
 `legacy` 保持默认和已有 API，其中包括 `fetchStream`。`portable` 只发布已有行为夹具和类型声明覆盖的子集。两者共用实现，差异由安装清单及兼容适配表达。只在测到显著启动成本并且初始化与 bootstrap 独立时考虑 lazy。按需安装验证首次读取/赋值、递归访问、失败缓存和属性描述符。
 
@@ -267,7 +262,7 @@ socket 的状态为 Connecting、Open、Closing、Closed。关闭、握手失败
 
 原生模块的运行时导出、声明渲染与编译声明从同一可信描述生成。宿主模块以现有 `Module`、`MethodTypes`、`ModuleExports`、`EventType` 为源，目录派生 specifier、导出名和声明视图。UI 独立提供 `scene`、`reactive`、`#reactive` 的导出描述。
 
-CLI 按目标和应用权限组装编译目录。独立 bundle 使用首方模块目录，macOS 和 Android 使用目标和应用声明的模块目录。编译检查合法导入、缺失导出和重复 specifier，宿主方法在编译期间保持零调用。见 [UI 编译 loader](../../../crates/quickjs/src/linked/rt/modules.rs)和 [CLI bundle](../../../crates/cli/src/build.rs)。
+CLI 按目标和应用权限组装编译目录。独立 bundle 使用首方模块目录，macOS 和 Android 使用目标和应用声明的模块目录。编译检查合法导入、缺失导出和重复 specifier，宿主方法在编译期间保持零调用。见 [UI 编译 loader](../../../crates/javascript/src/ui/player/vm/modules.rs)和 [CLI bundle](../../../crates/cli/src/build.rs)。
 
 公共编译产物沿用 IQJS 的 engine/version/kind 封套和已钉引擎。源代码入口保持明确。外来字节码仅从受信任的 unsafe 路径加载，版本和封套只负责兼容性检查。本进程编译的产物由已有安全包装入口接收。目录/profile 指纹优先作为缓存 key 和诊断元数据。改变封套时单列格式版本及重编策略。
 
@@ -281,7 +276,7 @@ CLI 按目标和应用权限组装编译目录。独立 bundle 使用首方模�
 
 | 范围 | 必测用例与证据 |
 |---|---|
-| Rust 依赖边界 | 用 `cargo metadata` 核对 normal/build/目标依赖，保留边界脚本。独立 consumer 无需 Shaper、Tree 或 Session，实际运行同步/Promise 模块、事件、标准库和外部 I/O |
+| Rust 依赖边界 | 用 `cargo tree` 分别核对各 feature 的运行和构建依赖，保留边界脚本。独立 consumer 无需 Shaper、Tree 或 Session，实际运行同步/Promise 模块、事件、标准库和外部 I/O |
 | 值与模块 binder | 同步/异步/事件同值、嵌套、空/字节、view offset、4095/4096、getter 重入、特殊键、深度及总量预算，坏完成后正常完成仍结算 |
 | 调度顺序 | 手动时钟下记录启动、命令、帧、本地与外部交付，timer kind/turn/参数、32 jobs/64 timers、暂停与恢复，记录回调异常后的继续/退出 |
 | 预算与释放 | eval、TLA、job、timer、listener 超时由子进程隔离，外部超时只在测试无法退出时收尾。partial startup、cleanup 再登记、二次关闭、Weak、迟到结果、roots 归零 |
@@ -296,8 +291,8 @@ CLI 按目标和应用权限组装编译目录。独立 bundle 使用首方模�
 
 ```bash
 cargo fmt --all -- --check
-python3 tools/check-js-host-boundary.py
-python3 tools/check-js-runtime-boundary.py
+python3 tools/check-javascript-boundaries.py
+cargo run --locked -p javascript --bin js-headless
 cargo run --locked -p uicore --bin style-types -- --check --root .
 RUSTFLAGS="-D warnings" cargo check --workspace --exclude macos
 cargo clippy --workspace --exclude macos --all-targets -- -D warnings
@@ -322,7 +317,7 @@ CI 运行 `cargo run --locked -p shell --bin module-stubs -- --check` 和 `just 
 
 用稳定基线和改动提交做同机 A/B，记录工具链、系统、SDK、锁文件、release 配置和负载。两边预热、交错执行，保存原始样本与 median / p95 / max。覆盖空 Runtime 和 UI 启动、scene 高频调用、reactive burst、固定布局文字、屏外 Canvas、Promise/timer、嵌套宿主值、慢流和 idle/恢复。除耗时外，记录 JS/native 分配与拷贝字节、各资源高水位、queue bytes、Canvas callback/preparation、root/local layout、picture writes 和 wake。
 
-将正确性不变量和耗时阈值分别验收。零工作的路径继续保持为零，耗时阈值等新基线测出波动后确定。资源循环包含 warm-up、重复运行、关闭和空闲回收。结合原生计数、drop 记录和 RSS 解释 allocator 缓存与资源滞留，按阶段保存原始记录。测试落点见 [quickjs 回归](../../../crates/quickjs/src/lib.rs)和 [uicore 布局回归](../../../crates/uicore/src/tree/layout.rs)。
+将正确性不变量和耗时阈值分别验收。零工作的路径继续保持为零，耗时阈值等新基线测出波动后确定。资源循环包含 warm-up、重复运行、关闭和空闲回收。结合原生计数、drop 记录和 RSS 解释 allocator 缓存与资源滞留，按阶段保存原始记录。测试落点见 [UI 会话回归](../../../crates/javascript/src/ui/tests.rs)和 [uicore 布局回归](../../../crates/uicore/src/tree/layout.rs)。
 
 ## 14. 验收条件
 

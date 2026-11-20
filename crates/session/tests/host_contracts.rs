@@ -690,12 +690,12 @@ fn assert_sync<T: Sync>() {}
 
 trait DistinctRegistry {}
 impl DistinctRegistry for ModuleRegistry {}
-impl DistinctRegistry for js_host::ModuleRegistry {}
+impl DistinctRegistry for javascript::host::ModuleRegistry {}
 
 fn registry_types_differ() {
     fn hold<T: DistinctRegistry>() {}
     hold::<ModuleRegistry>();
-    hold::<js_host::ModuleRegistry>();
+    hold::<javascript::host::ModuleRegistry>();
 }
 
 #[test]
@@ -707,13 +707,16 @@ fn session_types_are_host_types() {
     fn same<T>(left: T, right: T) -> (T, T) {
         (left, right)
     }
-    let (value, _) = same(PluginValue::Bytes(vec![1]), js_host::PluginValue::Null);
+    let (value, _) = same(
+        PluginValue::Bytes(vec![1]),
+        javascript::host::PluginValue::Null,
+    );
     assert_eq!(value, PluginValue::Bytes(vec![1]));
     let (result, _) = same(
         PluginResult::Failed {
             message: "x".into(),
         },
-        js_host::PluginResult::Done(js_host::PluginValue::Null),
+        javascript::host::PluginResult::Done(javascript::host::PluginValue::Null),
     );
     assert!(matches!(result, PluginResult::Failed { .. }));
     let (event, _host_event) = same(
@@ -723,19 +726,19 @@ fn session_types_are_host_types() {
             text: true,
             data: vec![9],
         },
-        js_host::IoEvent::Http {
+        javascript::host::IoEvent::Http {
             token: 1,
-            result: Ok(js_host::HttpResponse {
+            result: Ok(javascript::host::HttpResponse {
                 status: 200,
                 headers: Vec::new(),
                 body: Vec::new(),
             }),
         },
     );
-    fn into_host(event: IoEvent) -> js_host::IoEvent {
+    fn into_host(event: IoEvent) -> javascript::host::IoEvent {
         event
     }
-    fn into_session(event: js_host::IoEvent) -> IoEvent {
+    fn into_session(event: javascript::host::IoEvent) -> IoEvent {
         event
     }
     let event = into_session(into_host(event));
