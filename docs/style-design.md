@@ -331,7 +331,7 @@ flowchart LR
 
 ### 6. 测量、基线、溢出与布局缓存
 
-**目标文件：`tree/layout.rs`、`tree/text.rs`、`tree/scroll.rs`、`shaper.rs`，`shell/src/shaper.rs`，`engine/src/typography/`。**
+**目标文件：`tree/layout.rs`、`tree/text.rs`、`tree/scroll.rs`、`shaper.rs`，`embedder/common/src/shaper.rs`，`engine/src/typography/`。**
 
 #### 6.1 叶测量
 
@@ -515,7 +515,7 @@ Tree 持有类型化环境。Session 将 metrics/settings 的变化转发给 Tre
 - 回传 LayoutOutput 基线，统一 content box；用 scroll_width/height 代替直接孩子扫描。
 - 核对当前 boundary 的后代同步与方向换算，保留 rounding。
 
-**文件：`crates/engine/src/player/ffi.rs`、`typography/{mod,key,shape}.rs`、`crates/shell/src/shaper.rs`。**
+**文件：`crates/engine/src/player/ffi.rs`、`typography/{mod,key,shape}.rs`、`crates/embedder/common/src/shaper.rs`。**
 
 - 绑定 SDK 已有固有宽度查询并放入度量缓存；扩展 Shaper 的完整测量键。
 - 验证真实 CJK/runs/字体度量，删除默认字体 word cache。
@@ -590,7 +590,7 @@ Tree 持有类型化环境。Session 将 metrics/settings 的变化转发给 Tre
 - class/inline/default 来源覆盖、移除和 cleanup；主题/密度/大字号；焦点、IME、下拉刷新、路由退出和列表行回收。
 - 完成已忽略且与本迁移有关的交互测试重钉；保留例外必须说明原因，不能算为通过。
 
-**文件：`crates/session/src/lib.rs`、`crates/shell/src/{timing.rs,diagnostics/hub.rs,diagnostics/inspect.rs,diagnostics/module.rs}`、`packages/devtools/src/pages/{performance,inspector,layout}.tsx`、`tools/style-benchmark.mjs`、`docs/style-baseline.md`。**
+**文件：`crates/session/src/lib.rs`、`crates/embedder/common/src/{timing.rs,diagnostics/hub.rs,diagnostics/inspect.rs,diagnostics/module.rs}`、`packages/devtools/src/pages/{performance,inspector,layout}.tsx`、`tools/style-benchmark.mjs`、`docs/style-baseline.md`。**
 
 - 复用现有 trace，补充 class parse/cache、resolve nodes、source updates、有效值无变化、Taffy set_style 次数及来源/规则内存。
 - 分别记录纯解析/规范化、冷布局、增量布局、文字测量、record 与真实应用帧的 p50/p95；同环境至少多轮比较。
@@ -673,11 +673,11 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p uicore --no-deps
 - `crates/javascript/src/ui/scene.js` -- 统一命令式样式操作，清理旧包装
 - `crates/javascript/tests/fixtures/ui/style.tsx` -- 新增静态和动态 TSX 样式原生 fixture
 - `crates/session/src/lib.rs` -- 按需扩展 FrameTrace 的样式诊断字段
-- `crates/shell/src/diagnostics/hub.rs` -- 接收新增样式性能计数
-- `crates/shell/src/diagnostics/inspect.rs` -- 沿用诊断输出格式暴露计数
-- `crates/shell/src/diagnostics/module.rs` -- 向应用内 devtools 提供相同计数
-- `crates/shell/src/shaper.rs` -- 提供完整 MetricsKey 的固有度量，删除默认字体 word cache
-- `crates/shell/src/timing.rs` -- 传递会话新增样式计数
+- `crates/embedder/common/src/diagnostics/hub.rs` -- 接收新增样式性能计数
+- `crates/embedder/common/src/diagnostics/inspect.rs` -- 沿用诊断输出格式暴露计数
+- `crates/embedder/common/src/diagnostics/module.rs` -- 向应用内 devtools 提供相同计数
+- `crates/embedder/common/src/shaper.rs` -- 提供完整 MetricsKey 的固有度量，删除默认字体 word cache
+- `crates/embedder/common/src/timing.rs` -- 传递会话新增样式计数
 - `crates/uicore/Cargo.toml` -- 开启 Taffy parse 并引入发布的 lru
 - `crates/uicore/src/barrier_test.rs` -- 验证新的样式与节点边界行为
 - `crates/uicore/src/bin/style-types.rs` -- 生成 TS、C 属性描述与能力清单，支持一致性检查

@@ -138,6 +138,7 @@ function mockHost() {
     setImeText: (text) => note("setImeText", [text]),
     setImeState: (text) => note("setImeState", [text]),
     setImeConfig: (keyboard, action) => note("setImeConfig", [keyboard, action]),
+    setPlatformView: (node, kind) => note("setPlatformView", [node, kind]),
     setSemantics: (node, role) => note("setSemantics", [node, role]),
     textScale: () => 1,
     setTextScale: (scale) => note("setTextScale", [scale]),

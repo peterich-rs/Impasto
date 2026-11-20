@@ -32,6 +32,8 @@ just impeller-source aarch64-apple-ios-sim
 
 iOS SDK 使用 Metal，最低部署版本为 iOS 15.0。[`patches/ios-interop.patch`](patches/ios-interop.patch) 补齐锁定版本对 GLES 和 Vulkan 的条件编译，使这些后端禁用时 C API 仍可链接。
 
+Android 源码构建会应用 [`patches/android-vulkan-shutdown.patch`](patches/android-vulkan-shutdown.patch)。standalone interop 拥有的 Vulkan 上下文在释放时先运行 `ContextVK::Shutdown()`，确保 Vulkan 资源回收线程由会话渲染线程结束。补丁通过 `ImpellerHasStandaloneVulkanShutdown` 导出标记供 Android 自动选后端。带补丁的源构建可用 `IMPASTO_IMPELLER_CACHE` 路由到独立的本地缓存。当前 CI 归档的 Vulkan 后端缺少该补丁，Android 自动选择 GLES，显式 Vulkan 适用于后端验证。更新发布归档要使用生成并通过 CI 验证的两种 Android ABI 包。
+
 Windows 构建通过 [`patches/windows-modf.patch`](patches/windows-modf.patch) 显式丢弃 `std::modf` 返回的小数部分，保留直线像素对齐使用的整数部分。
 
 更新 Flutter 提交时，从对应源码更新 `include/impeller.h`，再运行 `python3 tools/impeller_sdk.py bindings` 重新生成 Rust 绑定。

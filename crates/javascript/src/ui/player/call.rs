@@ -451,33 +451,17 @@ pub(super) unsafe fn effect(
         } else if kind == EffectKind::SetSemantics as i32 {
             // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
             let raw = unsafe { utf8_of(text, text_len) }.unwrap_or("");
-            let mut parts = raw.split('\0');
+            let mut parts = raw.splitn(4, '\0');
             let label = parts.next().unwrap_or("");
-            let value_text = parts.next().unwrap_or("");
-            let description_text = parts.next().unwrap_or("");
-            let label_len = label.len();
-            let value_len = value_text.len();
-            let description_len = description_text.len();
-            let value = if text.is_null() {
-                std::ptr::null()
-            } else {
-                // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
-                unsafe { text.add(label_len + 1) }
-            };
-            let description = if text.is_null() {
-                std::ptr::null()
-            } else {
-                // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
-                unsafe { text.add(label_len + 1 + value_len + 1) }
-            };
+            let value = parts.next().unwrap_or("");
+            let description = parts.next().unwrap_or("");
+            let autofill = parts.next().unwrap_or("");
             bridge::set_semantics(
                 session,
                 node,
                 num(0) as i32,
-                text,
-                label_len,
+                label,
                 value,
-                value_len,
                 num(1) as i32,
                 num(2) as i32,
                 num(3) as i32,
@@ -485,11 +469,17 @@ pub(super) unsafe fn effect(
                 num(5) as i32,
                 num(6) as i32,
                 description,
-                description_len,
                 num(7) as i32,
                 num(11) as i32,
                 num(12) as i32,
+                num(8) > 0.0,
+                num(9) as i32,
+                autofill,
             )
+        } else if kind == EffectKind::SetPlatformView as i32 {
+            // SAFETY: the VM callback borrows this UTF-8 input through the effect call.
+            let name = unsafe { utf8_of(text, text_len) }.unwrap_or("");
+            nodes::set_platform_view(session, node, name)
         } else if kind == EffectKind::SetRecognizers as i32 {
             bridge::set_recognizers(
                 session,

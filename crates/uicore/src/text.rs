@@ -104,6 +104,11 @@ pub enum Edit {
     SetCaret(u32),
     /// Keep `base` and move `extent` to a UTF-16 offset.
     ExtendCaret(u32),
+    /// Change the UTF-16 selection and commit any active composition.
+    SetSelection {
+        start: u32,
+        end: u32,
+    },
     WordLeft,
     WordRight,
     ExtendWordLeft,
@@ -404,6 +409,12 @@ impl TextEditor {
                 self.checkpoint();
                 self.delete_composing_text();
                 self.insert(&text);
+            }
+            Edit::SetSelection { start, end } => {
+                let bounds = grapheme_bounds(&self.value.text);
+                let boundary = |unit| bounds[bounds.partition_point(|bound| *bound <= unit) - 1];
+                self.place(boundary(start), Affinity::Downstream, false);
+                self.place(boundary(end), Affinity::Downstream, true);
             }
             Edit::Left
             | Edit::Right

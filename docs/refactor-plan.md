@@ -4,7 +4,9 @@
 
 ## 渲染后端与平台宿主
 
-桌面渲染后端的接口设计见 [渲染后端](rendering-design.md)。iOS、Linux 和 Windows 需要各自的窗口、表面和输入适配。
+Android 的框架能力、阶段依赖与发布验收见 [Impasto Android 框架能力建设方案](design/android-framework-plan.md)。
+
+宿主目录见 [平台宿主](platform-hosts.md)。iOS、Windows 和 Linux 的适配器各自接入窗口、表面、vsync、输入法和无障碍。iOS 使用 Metal，Windows 与 Linux 先验证 Vulkan 交换链、首帧和窗口尺寸变化。后端注入接口见 [渲染后端](rendering-design.md)。
 
 ## 样式与布局
 

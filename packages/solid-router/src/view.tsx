@@ -268,6 +268,19 @@ function RouteHost(props: {
             } catch {
               // Mock hosts without a scope stack still mount the page.
             }
+            createTrackedEffect(() => scene.setSemanticsHidden?.(node, !active()));
+            let previewing = false;
+            createTrackedEffect(() => {
+              const preview = props.router.backPreview();
+              if (preview?.key === props.entry().key && !scene.settings?.().reduceMotion) {
+                const width = scene.metrics?.().width ?? 0;
+                scene.patchStyle(node, { translateX: width * preview.progress * (preview.fromRight ? -0.25 : 0.25) });
+                previewing = true;
+              } else if (previewing) {
+                scene.clearStyle(node, ["translateX"]);
+                previewing = false;
+              }
+            });
           }}
           style={{
             width: "100%",

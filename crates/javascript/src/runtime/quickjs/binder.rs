@@ -34,8 +34,12 @@ impl ModuleBindings {
 /// or use a weak handle to the runtime state.
 pub(crate) trait ModuleRuntime {
     fn enter<'a>(&'a self, ctx: &Ctx<'_>) -> Option<super::vm::Active<'a>>;
-    fn before(&self, ctx: &Ctx<'_>) -> rquickjs::Result<()>;
-    fn reserve_plugin<'js>(&self, ctx: &Ctx<'js>) -> rquickjs::Result<(Value<'js>, Settle)>;
+    fn before(&self, ctx: &Ctx<'_>, removing_listener: bool) -> rquickjs::Result<()>;
+    fn reserve_plugin<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        awaits_user: bool,
+    ) -> rquickjs::Result<(Value<'js>, Settle)>;
     fn add_listener(&self, module: &str, event: &str, callback: Saved);
     fn remove_listener(&self, module: &str, event: &str, callback: &Saved);
 }
@@ -103,12 +107,13 @@ impl ModuleDef for BoundModule {
             let exec = Arc::clone(&binder.bindings.exec);
             let runtime = Rc::clone(&binder.runtime);
             let invoke = method.invoke;
+            let awaits_user = method.awaits_user;
             let function =
                 Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
                     let _active = runtime.enter(&ctx);
-                    runtime.before(&ctx)?;
+                    runtime.before(&ctx, false)?;
                     let args = decode_args(&ctx, args.0)?;
-                    call(&ctx, &*runtime, &*exec, &invoke, &args)
+                    call(&ctx, &*runtime, &*exec, &invoke, &args, awaits_user)
                 })?;
             export_function(exports, object.as_ref(), method.name, function)?;
         }
@@ -121,7 +126,7 @@ impl ModuleDef for BoundModule {
                     ctx.clone(),
                     move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<()> {
                         let _active = runtime.enter(&ctx);
-                        runtime.before(&ctx)?;
+                        runtime.before(&ctx, remove)?;
                         let [event, callback, ..] = &args.0[..] else {
                             return Ok(());
                         };
@@ -187,6 +192,7 @@ fn call<'js>(
     exec: &dyn MethodExec,
     invoke: &Invoke,
     args: &[PluginValue],
+    awaits_user: bool,
 ) -> rquickjs::Result<Value<'js>> {
     match invoke {
         Invoke::Sync(invoke) => {
@@ -196,7 +202,7 @@ fn call<'js>(
             encode(ctx, &value)
         }
         Invoke::Promise(invoke) => {
-            let (promise, settle) = runtime.reserve_plugin(ctx)?;
+            let (promise, settle) = runtime.reserve_plugin(ctx, awaits_user)?;
             // The one-shot completion rejects on drop if the method unwinds.
             let _ = catch_unwind(AssertUnwindSafe(|| invoke(args, settle, exec)));
             Ok(promise)

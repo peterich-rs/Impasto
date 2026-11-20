@@ -7,16 +7,16 @@
 ```mermaid
 flowchart LR
     Q[quickjs] --> U[uicore]
-    U -->|LayerTree 和 DrawList| S[shell]
+    U -->|LayerTree 和 DrawList| S[embedder]
     S --> I[Impeller]
     S --> W[wgpu 和 Vello]
     I -->|Shaper| U
     W -->|Shaper| U
 ```
 
-`shell` 继续掌管输入、vsync、`Submit`、`PresentCached`、`Skip` 和 `Flush`。宿主传入 `Send` 工厂，在渲染线程创建一套后端及其 `Shaper`。后端持有显示列表、文字、纹理和当前表面的 GPU 资源。宿主持有窗口和原生表面句柄。原生表面销毁时，`shell` 在后端释放表面后才应答 `SurfaceDropped`。表面尺寸变化由后端重配交换链，设备丢失则重建设备资源并使当前提交失效。`TextureFactory` 的提前上传留在 Impeller 实现，通用 `ImageCache` 管理解码后的 RGBA 和资源版本。迁移时以 Gallery 滚动和图片上传的基准检查是否引入渲染线程阻塞。
+`embedder` 继续掌管输入、vsync、`Submit`、`PresentCached`、`Skip` 和 `Flush`。宿主传入 `Send` 工厂，在渲染线程创建一套后端及其 `Shaper`。后端持有显示列表、文字、纹理和当前表面的 GPU 资源。宿主持有窗口和原生表面句柄。原生表面销毁时，`embedder` 在后端释放表面后才应答 `SurfaceDropped`。表面尺寸变化由后端重配交换链，设备丢失则重建设备资源并使当前提交失效。`TextureFactory` 的提前上传留在 Impeller 实现，通用 `ImageCache` 管理解码后的 RGBA 和资源版本。迁移时以 Gallery 滚动和图片上传的基准检查是否引入渲染线程阻塞。
 
-`crates/shell/src/lib.rs` 的接口草案。`Boot` 使用 `OpenRenderer` 取代 `OpenSurface`。`SurfaceHost` 继续跟踪 ID、尺寸和重试。`Renderer` 实现拥有与渲染设备配对的表面，避免从通用调度传递具体 `Engine`。
+`crates/embedder/common/src/lib.rs` 的接口草案。`Boot` 使用 `OpenRenderer` 取代 `OpenSurface`。`SurfaceHost` 继续跟踪 ID、尺寸和重试。`Renderer` 实现拥有与渲染设备配对的表面，避免从通用调度传递具体 `Engine`。
 
 ```rust
 pub type OpenRenderer =
@@ -50,8 +50,8 @@ pub trait Renderer {
 
 ## 收拢后端接口
 
-- `crates/shell/src/lib.rs`、`shell.rs` 和 `surface.rs` 由宿主注入后端，迁移表面所有权和 `SurfaceDropped` 顺序。以现有 Impeller 为第一个实现，测试替身覆盖调度、重试和缓存失效。
-- `crates/shell/src/shaper.rs` 和 `images.rs` 把段落对象、纹理与提前上传归入具体实现。`crates/macos/src/{app,surface}.rs` 和 `crates/android/src/{app,surface}.rs` 迁移到后端工厂，仍走现有平台线程的输入、解码与窗口生命周期。
+- `crates/embedder/common/src/lib.rs`、`host.rs` 和 `surface.rs` 由宿主注入后端，迁移表面所有权和 `SurfaceDropped` 顺序。以现有 Impeller 为第一个实现，测试替身覆盖调度、重试和缓存失效。
+- `crates/embedder/common/src/shaper.rs` 和 `images.rs` 把段落对象、纹理与提前上传归入具体实现。`crates/embedder/macos/src/{app,surface}.rs` 和 `crates/embedder/android/src/{app,surface}.rs` 迁移到后端工厂，仍走现有平台线程的输入、解码与窗口生命周期。
 - `crates/engine/src/surface.rs` 核对 `engine::Surface` 的调用者，共用的 `PixelSize`、`ImagePixels` 与错误语义沿用现有类型。为需要的 recoverable surface 失败与设备丢失定义具体处理，保留原有 `AcquireMiss` 退避路径。
 
 ## 桌面第二后端验证
@@ -61,5 +61,5 @@ pub trait Renderer {
 
 ## 架构与验证
 
-- `Boot`、`OpenSurface` 和 `shell::Surface` 的变动影响 Rust 宿主调用方。迁移顺序是把构造、绘制和表面操作组合成一个平台后端，实现 `Renderer`，再向 `Boot` 传入在渲染线程调用的工厂。调用方继续提供原来的 `Services`、`Vsync`、会话工厂和图像解码器。
+- `Boot`、`OpenSurface` 和 `embedder::Surface` 的变动影响 Rust 宿主调用方。迁移顺序是把构造、绘制和表面操作组合成一个平台后端，实现 `Renderer`，再向 `Boot` 传入在渲染线程调用的工厂。调用方继续提供原来的 `Services`、`Vsync`、会话工厂和图像解码器。
 - `Renderer` 的动态分发发生在帧、表面和字体边界，picture 和逐命令的循环由各实现管理。`Renderer` 和 `Shaper` 都由渲染线程所有，跨线程的是工厂、平台命令和解码产物。运行中切换设备或渲染器需要重新建立段落、纹理和 picture 缓存，第一版选择在启动时完成。

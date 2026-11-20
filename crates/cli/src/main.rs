@@ -46,7 +46,7 @@ enum Command {
     },
     /// Pack a release artifact. Defaults to release; `--debug` keeps ESM.
     Build {
-        /// `bundle`, `apk`, `ios`, or `macos`.
+        /// `bundle`, `apk`, `appbundle`, `aar`, `ios`, or `macos`.
         target: String,
         #[arg(long, conflicts_with = "release")]
         debug: bool,

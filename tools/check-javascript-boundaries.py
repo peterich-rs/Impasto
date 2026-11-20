@@ -7,8 +7,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "crates/javascript/src"
-UI_CRATES = {"session", "uicore", "reactive", "engine", "shell", "macos", "android", "protocol"}
-UI_IMPORT = re.compile(r"\b(?:(?:crate|super)::ui|" + "|".join(sorted(UI_CRATES)) + r")::")
+UI_CRATES = {"session", "uicore", "reactive", "engine", "embedder", "protocol"}
+UI_IMPORT = re.compile(
+    r"\b(?:(?:crate|super)::ui|embedder_\w+|" + "|".join(sorted(UI_CRATES)) + r")::"
+)
 
 
 def dependencies(package, *features):
@@ -29,7 +31,9 @@ def main():
         raise SystemExit(f"host contracts must stay std-only: {sorted(host_deps)}")
 
     runtime_deps = dependencies("javascript", "--features", "runtime")
-    if forbidden := runtime_deps & UI_CRATES:
+    if forbidden := {
+        name for name in runtime_deps if name in UI_CRATES or name.startswith("embedder-")
+    }:
         raise SystemExit(f"standalone JavaScript runtime reaches UI crates: {sorted(forbidden)}")
 
     session_deps = dependencies("session")

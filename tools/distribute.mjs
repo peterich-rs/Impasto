@@ -18,7 +18,7 @@ if(process.platform==="darwin") {
   });
   if(prepared.status!==0) process.exit(prepared.status ?? 1);
   macosSdk=prepared.stdout.trim();
-  const host=spawnSync("cargo",["build","--release","-p","macos","--features","impeller"],{
+  const host=spawnSync("cargo",["build","--release","-p","embedder-macos","--features","impeller"],{
     cwd:root,stdio:"inherit",env:{...process.env,IMPASTO_IMPELLER_SDK_DIR:macosSdk},
   });
   if(host.status!==0) process.exit(host.status ?? 1);

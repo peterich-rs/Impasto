@@ -10,6 +10,10 @@ pub enum Status {
     NotReady,
     #[error("present failed")]
     PresentFailed,
+    #[error("the window surface was lost")]
+    SurfaceLost,
+    #[error("the graphics device was lost")]
+    DeviceLost,
     /// The drawable or swapchain image was not acquired. Skip this present.
     /// The surface stays. Consecutive misses rebuild a Vulkan chain.
     #[error("acquire missed")]

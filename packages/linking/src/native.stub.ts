@@ -31,6 +31,7 @@ export const removeEventListener: LinkingApi["removeEventListener"] = (type, lis
 export const Linking: LinkingApi = Object.freeze({
   getInitialURL,
   openURL,
+  shareText: async () => {},
   addEventListener,
   removeEventListener,
 });

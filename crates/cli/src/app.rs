@@ -11,6 +11,84 @@ struct Manifest {
     targets: Vec<String>,
     #[serde(default)]
     permissions: BTreeMap<String, Permission>,
+    #[serde(default)]
+    android: AndroidConfig,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AndroidConfig {
+    pub application_id: Option<String>,
+    pub version_code: Option<u32>,
+    #[serde(default)]
+    pub abis: Vec<String>,
+    #[serde(default)]
+    pub deep_links: Vec<AndroidLink>,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AndroidLink {
+    pub scheme: String,
+    pub host: String,
+    pub path_prefix: Option<String>,
+}
+
+impl AndroidConfig {
+    fn validate(&self) -> Result<()> {
+        if let Some(id) = &self.application_id
+            && (!id.contains('.')
+                || !id.split('.').all(|part| {
+                    part.starts_with(|c: char| c.is_ascii_alphabetic())
+                        && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                }))
+        {
+            bail!("android.application_id 必须是以点分隔的 Android 包名");
+        }
+        if self
+            .version_code
+            .is_some_and(|code| !(1..=2_100_000_000).contains(&code))
+        {
+            bail!("android.version_code 必须在 1 到 2100000000 之间");
+        }
+        if self
+            .abis
+            .iter()
+            .any(|abi| !matches!(abi.as_str(), "arm64-v8a" | "x86_64"))
+        {
+            bail!("android.abis 只能包含 arm64-v8a 和 x86_64");
+        }
+        for link in &self.deep_links {
+            if !link.scheme.starts_with(|c: char| c.is_ascii_lowercase())
+                || !link.scheme.chars().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '+' | '-' | '.')
+                })
+                || link.host.is_empty()
+                || !link
+                    .host
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-'))
+                || link.path_prefix.as_ref().is_some_and(|path| {
+                    !path.starts_with('/') || path.chars().any(char::is_control)
+                })
+            {
+                bail!("android.deep_links 需要小写 scheme、host 和以 / 开头的可选 path_prefix");
+            }
+        }
+        for permission in &self.permissions {
+            if !permission.contains('.')
+                || !permission.split('.').all(|part| {
+                    part.starts_with(|c: char| c.is_ascii_alphabetic())
+                        && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                })
+            {
+                bail!("android.permissions 需要完整的 Android 权限名称");
+            }
+        }
+        Ok(())
+    }
 }
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -26,6 +104,7 @@ pub struct App {
     pub targets: Vec<String>,
     pub entry: PathBuf,
     pub gallery: bool,
+    pub android: AndroidConfig,
     permissions: BTreeMap<String, Permission>,
 }
 impl App {
@@ -42,6 +121,7 @@ impl App {
                 targets: vec!["macos".into(), "android".into()],
                 entry: framework.join("apps/gallery-solid/src/quotes.tsx"),
                 gallery: true,
+                android: AndroidConfig::default(),
                 permissions: BTreeMap::new(),
             });
         }
@@ -55,6 +135,7 @@ impl App {
         )
         .context("解析 app.toml")?;
         validate_name(&manifest.name)?;
+        manifest.android.validate()?;
         if manifest.version.split('.').count() != 3
             || !manifest
                 .version
@@ -102,6 +183,7 @@ impl App {
             targets: manifest.targets,
             entry,
             gallery: false,
+            android: manifest.android,
             permissions: manifest.permissions,
         })
     }
@@ -110,6 +192,13 @@ impl App {
             bail!("app.toml 没有启用目标 {target}");
         }
         Ok(())
+    }
+
+    pub fn android_id(&self) -> String {
+        self.android
+            .application_id
+            .clone()
+            .unwrap_or_else(|| format!("dev.impasto.{}", self.name.replace('-', "_")))
     }
     pub fn modules(&self, target: &str) -> String {
         if self.gallery {
@@ -137,7 +226,7 @@ impl App {
         if self.gallery {
             crate::framework_root().map_or_else(
                 || self.root.join("assets"),
-                |r| r.join("crates/macos/assets"),
+                |r| r.join("crates/embedder/macos/assets"),
             )
         } else {
             self.root.join("assets")

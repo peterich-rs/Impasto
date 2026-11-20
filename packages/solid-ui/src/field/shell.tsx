@@ -183,11 +183,13 @@ export function FieldShell(props: FieldProps): NodeHandle {
       editable,
       props.readOnly ? 1 : 0,
       shownError() || undefined,
-      multiline()
-        ? {
-            order: props.rows,
-          }
-        : undefined,
+      {
+        password: masked,
+        order: multiline() ? props.rows : undefined,
+        autofill: props.autofill && editable
+          ? { hint: props.autofill, value: controller.text() }
+          : undefined,
+      },
     );
   }
   function publish(show: boolean): void {

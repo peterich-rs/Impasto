@@ -16,9 +16,13 @@ SELECT f.ts, f.dur, f.track_id, f.id,
   EXISTS(SELECT 1 FROM slice p WHERE p.parent_id = f.id AND p.name = 'Impasto submit') AS install,
   EXISTS(SELECT 1 FROM slice p WHERE p.parent_id = f.id AND p.name = 'Impasto present') AS present,
   (SELECT MIN(q.ts) FROM slice q JOIN slice k ON q.parent_id = k.id
-    WHERE q.name = 'queueBuffer' AND k.name = 'QueuePresentKHR'
+    WHERE q.name = 'queueBuffer' AND k.name IN ('QueuePresentKHR', 'eglSwapBuffers', 'Impasto GLES draw and swap')
       AND q.track_id = f.track_id AND q.ts BETWEEN f.ts AND f.ts + f.dur) AS queued
 FROM slice f WHERE f.name = 'Impasto frame' AND f.dur > 0 ORDER BY f.ts
+"""
+CLOCK_SQL = """
+SELECT ts - clock_value AS offset FROM clock_snapshot
+WHERE clock_name = 'MONOTONIC' ORDER BY ts LIMIT 1
 """
 
 MARKS = {
@@ -33,6 +37,7 @@ MARKS = {
     "Impasto Vulkan acquire",
     "Impasto Vulkan draw",
     "Impasto Vulkan present",
+    "Impasto GLES draw and swap",
 }
 
 FRAME_EVENTS = {
@@ -63,11 +68,26 @@ def distribution(samples, budget_ns=None):
         "count": len(ordered),
         "p50_ms": percentile(0.5),
         "p95_ms": percentile(0.95),
+        "p99_ms": percentile(0.99),
         "peak_ms": round(ordered[-1] / 1e6, 2),
     }
     if budget_ns:
         stats["over_budget_percent"] = round(100 * sum(x > budget_ns for x in ordered) / len(ordered), 2)
     return stats
+
+
+def missed_periods(intervals, period_ns):
+    periods = [max(1, round(interval / period_ns)) for interval in intervals]
+    if not periods:
+        return {"matched_intervals": 0}
+    expected = sum(periods)
+    missed = expected - len(periods)
+    return {
+        "matched_intervals": len(periods),
+        "expected_periods": expected,
+        "missed_periods": missed,
+        "missed_percent": round(100 * missed / expected, 2),
+    }
 
 
 def read_presentations(path, offset, start, end):
@@ -89,13 +109,45 @@ def read_presentations(path, offset, start, end):
     return sorted(records), sorted(refreshes)
 
 
+def flutter_report(directory, budget):
+    cases = defaultdict(list)
+    for path in sorted(directory.glob("*.perfetto-trace")):
+        with TraceProcessor(trace=str(path)) as processor:
+            frames = list(processor.query("""
+              SELECT name, ts, dur FROM slice
+              WHERE name IN ('Animator::BeginFrame', 'GPURasterizer::Draw') AND dur > 0
+              ORDER BY ts
+            """))
+            clocks = list(processor.query(CLOCK_SQL))
+        if not frames:
+            raise ValueError(f"{path} has no Flutter frames (launch with trace-systrace)")
+        offset = clocks[0].offset if clocks else None
+        end = max(frame.ts + frame.dur for frame in frames)
+        presented, refreshes = read_presentations(path.with_suffix(".presentation"), offset, frames[0].ts, end)
+        actual = sorted({stamp for _, stamp in presented})
+        case = path.stem.rsplit("-", 1)[0]
+        cases[case].append({
+            "ui": [frame.dur for frame in frames if frame.name == "Animator::BeginFrame"],
+            "raster": [frame.dur for frame in frames if frame.name == "GPURasterizer::Draw"],
+            "intervals": [after - before for before, after in zip(actual, actual[1:])],
+            "refreshes": refreshes,
+        })
+    return {
+        case: {
+            "runs": len(runs),
+            "ui_frame": distribution([x for run in runs for x in run["ui"]], budget),
+            "raster_frame": distribution([x for run in runs for x in run["raster"]], budget),
+            "actual_presentation_intervals": distribution([x for run in runs for x in run["intervals"]]),
+            "refresh_intervals_ns": sorted({x for run in runs for x in run["refreshes"]}),
+        }
+        for case, runs in sorted(cases.items())
+    }
+
+
 def load(path):
     with TraceProcessor(trace=str(path)) as processor:
         frames = list(processor.query(FRAME_SQL))
-        clocks = list(processor.query("""
-          SELECT ts - clock_value AS offset FROM clock_snapshot
-          WHERE clock_name = 'MONOTONIC' ORDER BY ts LIMIT 1
-        """))
+        clocks = list(processor.query(CLOCK_SQL))
         markers = list(processor.query("""
           SELECT ts, dur, name, track_id FROM slice
           WHERE name GLOB 'Impasto *' OR name GLOB 'deliverInputEvent src=0x1002 eventTimeNano=*'
@@ -159,6 +211,7 @@ def load(path):
     consumed = 0
     latest_input = None
     presented_frames = {}
+    matched_buffers = set()
     for frame in frames:
         if frame.input_ts is not None:
             while consumed < len(deliveries) and deliveries[consumed][0] <= frame.input_ts:
@@ -171,7 +224,8 @@ def load(path):
         index = bisect.bisect_left(desired, frame.queued - 500_000)
         if index + 1 < len(desired) and desired[index + 1] <= frame.queued + 2_000_000:
             index = len(desired)
-        if index < len(desired) and desired[index] <= frame.queued + 2_000_000:
+        if index < len(desired) and index not in matched_buffers and desired[index] <= frame.queued + 2_000_000:
+            matched_buffers.add(index)
             presented_frames[frame.id] = presented[index][1]
             if latest_input is not None:
                 elapsed = presented[index][1] - latest_input
@@ -290,9 +344,16 @@ def summarize_diagnostics(runs):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
-    parser.add_argument("--hz", type=int, choices=(60, 120), required=True)
+    parser.add_argument("--hz", type=int, choices=(60, 90, 120), required=True)
+    parser.add_argument("--reference", choices=("impasto", "flutter"), default="impasto")
     args = parser.parse_args()
     budget = round(1e9 / args.hz)
+    if args.reference == "flutter":
+        report = flutter_report(args.directory, budget)
+        if not report:
+            parser.error("no replay traces found")
+        print(json.dumps(report, indent=2))
+        return
     cases = defaultdict(list)
     for path in sorted(args.directory.glob("*.perfetto-trace")):
         case = path.stem.rsplit("-", 1)[0]
@@ -314,6 +375,8 @@ def main():
                 submitted_phases[name].extend(durations)
             for name, durations in run["scroll_frames"].items():
                 scroll_frames[name].extend(durations)
+        queued = sum(run["queued"] for run in runs)
+        matched = sum(run["matched_presentations"] for run in runs)
         report[case] = {
             "runs": len(runs),
             "submitted": distribution([x for run in runs for x in run["frames"]], budget),
@@ -322,9 +385,10 @@ def main():
             "actual_presentation_intervals": distribution([x for run in runs for x in run["intervals"]]),
             "input_to_presentation": distribution([x for run in runs for x in run["latency"]]),
             "first_content_visible": distribution([x for run in runs for x in run["first_content"]]),
-            "queued_buffers": sum(run["queued"] for run in runs),
+            "queued_buffers": queued,
             "presented_buffers": sum(run["presented"] for run in runs),
-            "matched_presentations": sum(run["matched_presentations"] for run in runs),
+            "matched_presentations": matched,
+            "matched_percent_of_queued": round(100 * matched / queued, 2) if queued else None,
             "refresh_intervals_ns": sorted({x for run in runs for x in run["refreshes"]}),
             "work": work,
             "canvas_commits_by_height": canvas,
@@ -333,12 +397,16 @@ def main():
             "diagnostics": summarize_diagnostics(runs),
         }
         if scroll_frames:
+            scroll_intervals = [ns for run in runs for ns in run["scroll_intervals"]]
             report[case]["scrolling"] = {
                 "frames": distribution([ns for group in scroll_frames.values() for ns in group], budget),
                 "by_work": {name: distribution(group, budget) for name, group in sorted(scroll_frames.items())},
-                "present_intervals": distribution([ns for run in runs for ns in run["scroll_intervals"]]),
+                "present_intervals": distribution(scroll_intervals),
                 "vsync_to_render_start": distribution([ns for run in runs for ns in run["scroll_start_delays"]]),
             }
+            measured = report[case]["refresh_intervals_ns"]
+            if measured and all(abs(value - budget) / budget < 0.01 for value in measured):
+                report[case]["scrolling"]["present_periods"] = missed_periods(scroll_intervals, budget)
     print(json.dumps(report, indent=2))
 
 

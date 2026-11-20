@@ -581,11 +581,33 @@ fn open_runs_entry_before_io_install_and_frame_flushes_pending() {
 
 #[test]
 fn socket_commands_and_microtasks_keep_the_previous_frame_clock() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
+
     let logs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let record = std::rc::Rc::clone(&logs);
     let (jobs, received) = std::sync::mpsc::channel();
+    let (send, completions) = std::sync::mpsc::channel();
+    let clock = Arc::new(AtomicI64::new(100));
+    let host_clock = Arc::clone(&clock);
+    let config = ModuleConfig {
+        registry: Arc::new(ModuleRegistry::new(vec![Module {
+            name: "Draft",
+            specifier: "@impasto/draft",
+            exports: Default::default(),
+            methods: vec![Method::promise("save", |_, settle, exec| {
+                exec.now(settle, PluginResult::Done(PluginValue::Null));
+            })],
+        }])),
+        transport_clock: Some(Arc::new(move || host_clock.load(Ordering::Relaxed))),
+        post_delivery: Some(Arc::new(move |delivery| {
+            send.send(delivery).expect("post save completion");
+        })),
+        ..ModuleConfig::disconnected()
+    };
     let mut session = super::open_with_io(
         r#"
+                import {save} from '@impasto/draft';
                 console.log("entry:" + performance.now());
                 setTimeout(() => {
                     const socket = new WebSocket("ws://example.test/socket");
@@ -593,6 +615,7 @@ fn socket_commands_and_microtasks_keep_the_previous_frame_clock() {
                         console.log("command:" + performance.now());
                         Promise.resolve().then(() => console.log("job:" + performance.now()));
                         setTimeout(() => console.log("timer:" + performance.now()), 0);
+                        save().then(() => console.log("saved"), error => console.log(error.message));
                     };
                 }, 0);
             "#,
@@ -602,7 +625,7 @@ fn socket_commands_and_microtasks_keep_the_previous_frame_clock() {
         Some(Box::new(move |job| {
             let _ = jobs.send(job);
         })),
-        ModuleConfig::disconnected(),
+        config,
     )
     .expect("open");
 
@@ -610,6 +633,7 @@ fn socket_commands_and_microtasks_keep_the_previous_frame_clock() {
     let session::IoJob::SocketOpen { id, .. } = received.try_recv().expect("socket open") else {
         panic!("unexpected network job");
     };
+    clock.store(60_100, Ordering::Relaxed);
     session.io_event(IoEvent::Socket {
         id,
         event: "open".into(),
@@ -617,11 +641,12 @@ fn socket_commands_and_microtasks_keep_the_previous_frame_clock() {
         data: Vec::new(),
     });
     assert_eq!(logs.borrow().as_slice(), ["entry:0", "command:0"]);
-
-    session.frame(session::FrameTime::at(116.0));
+    session.frame(session::FrameTime::at(60_100.0));
+    session.io_delivery(completions.try_recv().expect("save completed"));
+    session.frame(session::FrameTime::at(60_116.0));
     assert_eq!(
         logs.borrow().as_slice(),
-        ["entry:0", "command:0", "job:0", "timer:16"]
+        ["entry:0", "command:0", "job:0", "timer:60000", "saved"]
     );
 }
 
@@ -1259,6 +1284,7 @@ fn test_host_with_launch_url(url: Option<String>) -> (ModuleConfig, PluginComple
         exec: Arc::new(ImmediateExec),
         settle,
         post_delivery: None,
+        transport_clock: None,
         app_state,
         launch_url,
     };
@@ -1282,6 +1308,52 @@ fn metrics() -> Metrics {
 
 fn phone() -> Metrics {
     Metrics::new(360.0, 640.0, 2.0)
+}
+
+#[test]
+fn window_metrics_notify_once_per_distinct_viewport() {
+    let logs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let collected = std::rc::Rc::clone(&logs);
+    let mut session = open(
+        r#"
+            import { windowMetrics, onWindowMetrics, offWindowMetrics } from "scene";
+            const listener = onWindowMetrics((window) => {
+                const current = windowMetrics();
+                console.log([current.width, window.pixelWidth, window.padding.bottom,
+                  window.viewInsets.bottom, window.systemGestureInsets.left].join(","));
+                if (window.viewInsets.bottom > 0) offWindowMetrics(listener);
+            });
+        "#,
+        "window-metrics.js",
+        uicore::MonoShaper::default(),
+        Box::new(move |_, line| collected.borrow_mut().push(line.to_owned())),
+    )
+    .expect("open");
+    let padding = session::Insets {
+        bottom: 20.0,
+        ..Default::default()
+    };
+    let mut viewport = Metrics::from_insets(360.0, 780.0, 3.0, padding, Default::default());
+    viewport.system_gesture_insets.left = 16.0;
+    session.metrics(&viewport);
+    session.metrics(&viewport);
+    viewport = Metrics::from_insets(
+        360.0,
+        780.0,
+        3.0,
+        padding,
+        session::Insets {
+            bottom: 250.0,
+            ..Default::default()
+        },
+    );
+    viewport.system_gesture_insets.left = 16.0;
+    session.metrics(&viewport);
+    session.metrics(&phone());
+    assert_eq!(
+        logs.borrow().as_slice(),
+        ["360,1080,20,0,16", "360,1080,20,250,16"]
+    );
 }
 
 fn visit_commands<'a>(
@@ -1528,6 +1600,7 @@ fn gallery_host() -> ModuleConfig {
         exec: std::sync::Arc::new(ImmediateExec),
         settle: std::sync::Arc::new(|_token| session::Settle::new(|_result| {})),
         post_delivery: None,
+        transport_clock: None,
         app_state: session::shared("active".to_owned()),
         launch_url: session::shared(None),
     }
@@ -5124,4 +5197,82 @@ import { createSignal } from "reactive";
     let third = session.frame(session::FrameTime::at(32.0));
     assert_eq!(texts(&third), ["DrawSideEffect"]);
     assert!(canvas_fills(&third) >= 1);
+}
+
+#[test]
+fn autofill_replaces_a_wrapper_field_without_exposing_the_password_in_semantics() {
+    let source = r#"
+        import * as scene from "scene";
+        const root = scene.column(0);
+        const editor = scene.view();
+        scene.setSize(editor, 96, 24);
+        scene.append(root, editor);
+        const label = scene.text("unfilled", 16, [0, 0, 0, 255]);
+        scene.append(root, label);
+        const publish = (value) => scene.setSemantics(
+            editor, 6, "Password", undefined, -1, -1, -1, 0, 1, 0, "",
+            { password: true, autofill: { hint: "password", value } },
+        );
+        publish("original");
+        scene.onTextReplaced(editor, value => {
+            publish(value);
+            scene.setText(label, value === "new😀" ? "filled" : "wrong");
+        });
+    "#;
+    let mut host = super::JsSession::open(
+        source,
+        "autofill.js",
+        uicore::MonoShaper::default(),
+        no_log(),
+    )
+    .expect("session");
+    host.set_autofill_enabled(true);
+    host.metrics(&metrics());
+    host.frame(session::FrameTime::at(0.0));
+    let snapshot = host.semantics().expect("initial semantics");
+    let field = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.autofill.is_some())
+        .expect("field");
+    assert_eq!(field.value, None);
+    assert_eq!(
+        field.autofill.as_ref().map(|entry| entry.value.as_str()),
+        Some("original")
+    );
+    assert!(!format!("{field:?}").contains("original"));
+    host.semantics_action(uicore::SemanticsAction::Autofill {
+        id: field.id,
+        text: "new😀".to_owned(),
+    });
+    let output = host.frame(session::FrameTime::at(16.0));
+    assert!(texts(&output).contains(&"filled"));
+}
+
+#[test]
+fn debug_update_checks_the_candidate_first_frame_before_replacing_the_program() {
+    let mut host = super::JsSession::open(
+        r#"import { text } from "scene"; text("initial", 16, [0, 0, 0, 255]);"#,
+        "app.js",
+        uicore::MonoShaper::default(),
+        no_log(),
+    )
+    .expect("initial session");
+    host.metrics(&metrics());
+    assert!(texts(&host.frame(session::FrameTime::at(0.0))).contains(&"initial"));
+    let attempted = host.update_source(
+        r#"import { text } from "scene"; text("bad", 16, [0, 0, 0, 255]); requestAnimationFrame(() => { throw new Error("first frame"); });"#,
+        Box::new(uicore::MonoShaper::default()),
+        Box::new(|_| Ok(())),
+        session::FrameTime::at(16.0),
+    );
+    assert!(attempted.unwrap_err().contains("first frame"));
+    host.update_source(
+        r#"import { text } from "scene"; text("updated", 16, [0, 0, 0, 255]);"#,
+        Box::new(uicore::MonoShaper::default()),
+        Box::new(|_| Ok(())),
+        session::FrameTime::at(32.0),
+    )
+    .expect("successful update");
+    assert!(texts(&host.frame(session::FrameTime::at(48.0))).contains(&"updated"));
 }

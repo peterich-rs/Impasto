@@ -31,12 +31,6 @@ impl Tree {
         parent: Option<SemanticsId>,
         out: &mut Vec<SemanticsNode>,
     ) {
-        if self.get(id).is_some_and(|node| {
-            node.flags.contains(super::node::NodeFlags::CULL_PAINT)
-                || node.flags.contains(super::node::NodeFlags::HIDDEN)
-        }) {
-            return;
-        }
         let Some(snapshot) = self.semantics_snapshot(id) else {
             return;
         };
@@ -47,6 +41,7 @@ impl Tree {
                 snapshot.text
             }
         });
+        let password = snapshot.flags.contains(SemanticsFlags::PASSWORD);
         out.push(SemanticsNode {
             id: SemanticsId::from_node(id),
             parent,
@@ -58,10 +53,11 @@ impl Tree {
             flags: snapshot.flags,
             scroll: snapshot.scroll,
             selection: snapshot.selection,
-            caret: self.focused_caret(id),
+            caret: (!password).then(|| self.focused_caret(id)).flatten(),
             description: snapshot.description,
+            autofill: snapshot.autofill,
         });
-        if snapshot.clip && (snapshot.rect.w == 0.0 || snapshot.rect.h == 0.0) {
+        if password || (snapshot.clip && (snapshot.rect.w == 0.0 || snapshot.rect.h == 0.0)) {
             return;
         }
         for child in snapshot.children {
@@ -71,22 +67,22 @@ impl Tree {
 
     fn semantics_snapshot(&self, id: NodeId) -> Option<Snapshot> {
         let node = self.node(id).ok()?;
-        let hint = node.semantics.clone();
-        let role = hint
-            .as_ref()
-            .and_then(|hint| hint.role)
-            .unwrap_or(match node.kind {
-                Kind::Text => SemanticsRole::Text,
-                Kind::Image => SemanticsRole::Image,
-                Kind::Scroll => SemanticsRole::Scroll,
-                Kind::View | Kind::Stack => SemanticsRole::Generic,
-            });
-        let disabled = hint
-            .as_ref()
-            .is_some_and(|hint| hint.disabled == Some(true));
-        let read_only = hint
-            .as_ref()
-            .is_some_and(|hint| hint.read_only == Some(true));
+        if node.flags.intersects(
+            super::node::NodeFlags::CULL_PAINT
+                | super::node::NodeFlags::HIDDEN
+                | super::node::NodeFlags::SEMANTICS_HIDDEN,
+        ) {
+            return None;
+        }
+        let hint = node.semantics.as_ref();
+        let role = hint.and_then(|hint| hint.role).unwrap_or(match node.kind {
+            Kind::Text => SemanticsRole::Text,
+            Kind::Image => SemanticsRole::Image,
+            Kind::Scroll => SemanticsRole::Scroll,
+            Kind::View | Kind::Stack => SemanticsRole::Generic,
+        });
+        let disabled = hint.is_some_and(|hint| hint.disabled == Some(true));
+        let read_only = hint.is_some_and(|hint| hint.read_only == Some(true));
         let mut actions = SemanticsActions(0);
         if node.is_pointer() && !disabled {
             actions.0 |= SemanticsActions::ACTIVATE;
@@ -98,23 +94,29 @@ impl Tree {
         if node.is_focusable() && !disabled {
             flags.0 |= SemanticsFlags::FOCUSABLE;
         }
+        if self.focused == Some(id) {
+            flags.0 |= SemanticsFlags::FOCUSED;
+        }
         if disabled {
             flags.0 |= SemanticsFlags::DISABLED;
         }
-        if hint.as_ref().is_some_and(|hint| hint.checked == Some(true)) {
+        let password = hint.is_some_and(|hint| hint.password);
+        if password {
+            flags.0 |= SemanticsFlags::PASSWORD;
+        }
+        if hint.is_some_and(|hint| hint.checked == Some(true)) {
             flags.0 |= SemanticsFlags::CHECKED;
         }
         if read_only {
             flags.0 |= SemanticsFlags::READ_ONLY;
-        } else if !disabled
-            && hint
-                .as_ref()
-                .is_some_and(|hint| hint.editable == Some(true))
-        {
+        } else if !disabled && hint.is_some_and(|hint| hint.editable == Some(true)) {
             flags.0 |= SemanticsFlags::EDITABLE;
         }
         if flags.contains(SemanticsFlags::EDITABLE) {
             actions.0 |= SemanticsActions::SET_TEXT;
+            if !password && hint.is_some_and(|hint| hint.selection.is_some()) {
+                actions.0 |= SemanticsActions::SET_SELECTION;
+            }
         }
         let scroll = node.is_scroll().then_some(node.scroll_offset());
         let kind = node.kind;
@@ -124,20 +126,30 @@ impl Tree {
             .text()
             .map(|text| text.utf8.as_ref().to_owned())
             .unwrap_or_default();
+        let autofill = hint
+            .filter(|_| self.autofill_enabled && flags.contains(SemanticsFlags::EDITABLE))
+            .and_then(|hint| hint.autofill.clone());
         let (w, h) = (node.w, node.h);
         let first = node.first_child;
         let _ = node;
         let (x, y) = self.layout_point(id).ok()?;
-        let rect = Rect { x, y, w, h };
+        let rect = if autofill.is_some() {
+            self.visible_scene_rect(id).ok()?
+        } else {
+            Rect { x, y, w, h }
+        };
         Some(Snapshot {
             kind,
             pointer,
             clip,
             role,
-            hint_label: hint.as_ref().and_then(|hint| hint.label.clone()),
-            value: hint.as_ref().and_then(|hint| hint.value.clone()),
-            selection: hint.as_ref().and_then(|hint| hint.selection),
-            description: hint.as_ref().and_then(|hint| hint.description.clone()),
+            hint_label: hint.and_then(|hint| hint.label.clone()),
+            value: hint
+                .filter(|_| !password)
+                .and_then(|hint| hint.value.clone()),
+            selection: hint.filter(|_| !password).and_then(|hint| hint.selection),
+            description: hint.and_then(|hint| hint.description.clone()),
+            autofill,
             text,
             rect,
             actions,
@@ -207,6 +219,7 @@ struct Snapshot {
     value: Option<String>,
     selection: Option<(u32, u32)>,
     description: Option<String>,
+    autofill: Option<crate::AutofillField>,
     rect: Rect,
     actions: SemanticsActions,
     flags: SemanticsFlags,
@@ -215,19 +228,36 @@ struct Snapshot {
 }
 
 impl Tree {
+    pub fn set_semantics_hidden(&mut self, id: NodeId, hidden: bool) -> Result<(), crate::Error> {
+        use super::node::NodeFlags;
+
+        let node = self.node_mut(id)?;
+        if node.flags.contains(NodeFlags::SEMANTICS_HIDDEN) != hidden {
+            node.flags.set(NodeFlags::SEMANTICS_HIDDEN, hidden);
+            self.mark_semantics_chain(id);
+        }
+        Ok(())
+    }
+
     pub fn set_semantics(
         &mut self,
         id: NodeId,
         hint: crate::SemanticsHint,
     ) -> Result<(), crate::Error> {
+        let supports_autofill = hint.autofill.is_some();
         self.node_mut(id)?.semantics = Some(hint);
+        if supports_autofill {
+            self.autofill_nodes.insert(id);
+        } else {
+            self.autofill_nodes.remove(&id);
+        }
         self.invalidate_style_deps(crate::style::DepMask::DISABLED);
         self.mark_semantics_chain(id);
         Ok(())
     }
 
     pub(super) fn mark_semantics_chain(&mut self, mut id: NodeId) {
-        if !self.semantics_enabled {
+        if !self.publish_semantics() {
             return;
         }
         self.semantics_full = true;
@@ -246,26 +276,57 @@ impl Tree {
         }
     }
 
+    pub fn semantics_enabled(&self) -> bool {
+        self.semantics_enabled
+    }
+
+    pub fn autofill_enabled(&self) -> bool {
+        self.autofill_enabled
+    }
+
+    pub fn set_autofill_enabled(&mut self, enabled: bool) {
+        if self.autofill_enabled != enabled {
+            self.autofill_enabled = enabled;
+            self.semantics_full = true;
+            self.semantics_cache.clear();
+        }
+    }
+
+    pub(super) fn publish_semantics(&self) -> bool {
+        self.semantics_enabled || (self.autofill_enabled && !self.autofill_nodes.is_empty())
+    }
+
     /// Hosts with an on-demand accessibility tree can suspend its snapshots.
     pub fn set_semantics_enabled(&mut self, enabled: bool) {
         if self.semantics_enabled == enabled {
             return;
         }
         self.semantics_enabled = enabled;
-        if enabled {
-            self.semantics_full = true;
-        } else {
-            self.semantics_cache.clear();
-            self.scroll_semantics.clear();
-        }
+        self.semantics_full = true;
+        self.semantics_cache.clear();
+        self.scroll_semantics.clear();
     }
 
     /// Diff against the previous patch. Clean nodes keep their strings and only
     /// refresh `rect` and scroll. `None` means nothing changed.
     pub fn semantics_patch(&mut self) -> Option<SemanticsPatch> {
         let root = self.root?;
-        if !self.semantics_enabled || !self.laid_out {
+        if !self.laid_out {
             return None;
+        }
+        if !self.publish_semantics() {
+            if self.semantics_cache.is_empty() {
+                return None;
+            }
+            let ops = self
+                .semantics_cache
+                .drain()
+                .map(|(id, _)| SemanticsOp::Remove(id))
+                .collect();
+            return Some(SemanticsPatch {
+                root: SemanticsId::from_node(root),
+                ops,
+            });
         }
         if self.layout_passes != self.semantics_layout_seen || self.semantics_full {
             self.semantics_layout_seen = self.layout_passes;
@@ -275,6 +336,14 @@ impl Tree {
         }
         if self.scroll_semantics.is_empty() {
             return None;
+        }
+        if self
+            .semantics_cache
+            .values()
+            .any(|node| node.autofill.is_some())
+        {
+            self.scroll_semantics.clear();
+            return self.semantics_full_patch(root);
         }
         self.patch_scroll_offsets(root)
     }
@@ -349,7 +418,8 @@ impl Tree {
             return;
         };
         let children = node.children.clone();
-        let skip_children = node.clip && (node.rect.w == 0.0 || node.rect.h == 0.0);
+        let skip_children = node.node.flags.contains(SemanticsFlags::PASSWORD)
+            || (node.clip && (node.rect.w == 0.0 || node.rect.h == 0.0));
         out.push(node.node);
         if skip_children {
             return;
@@ -381,7 +451,9 @@ impl Tree {
             cached.label.clone()
         } else {
             snapshot.hint_label.clone().unwrap_or_else(|| {
-                if snapshot.pointer {
+                if snapshot.flags.contains(SemanticsFlags::PASSWORD) {
+                    String::new()
+                } else if snapshot.pointer {
                     self.descendant_text(id)
                 } else {
                     snapshot.text.clone()
@@ -412,8 +484,13 @@ impl Tree {
                 flags: snapshot.flags,
                 scroll: snapshot.scroll,
                 selection: snapshot.selection,
-                caret: self.focused_caret(id),
+                caret: if snapshot.flags.contains(SemanticsFlags::PASSWORD) {
+                    None
+                } else {
+                    self.focused_caret(id)
+                },
                 description,
+                autofill: snapshot.autofill,
             },
         })
     }
@@ -451,15 +528,76 @@ impl Tree {
                 Vec::new()
             }
             crate::SemanticsAction::SetText { id, text } => {
+                self.replace_semantics_text(id, text, false)
+            }
+            crate::SemanticsAction::Autofill { id, text } => {
+                self.replace_semantics_text(id, text, true)
+            }
+            crate::SemanticsAction::SetSelection { id, start, end } => {
                 let Some(node) = self.lookup(id) else {
                     return Vec::new();
                 };
-                if self.text_edit(node, crate::Edit::Load(text)).is_err() {
+                if self.focused != Some(node)
+                    || !self.semantics_snapshot(node).is_some_and(|snapshot| {
+                        snapshot.actions.contains(SemanticsActions::SET_SELECTION)
+                    })
+                {
+                    return Vec::new();
+                }
+                if self
+                    .text_edit(node, crate::Edit::SetSelection { start, end })
+                    .is_err()
+                {
                     return Vec::new();
                 }
                 vec![super::Gesture::TextReplaced(node)]
             }
         }
+    }
+
+    /// Resolves the field again on the UI thread before a platform fill or edit.
+    pub fn semantics_edit_target(&self, id: SemanticsId, autofill: bool) -> Option<NodeId> {
+        let node = self.lookup(id)?;
+        let snapshot = self.semantics_snapshot(node)?;
+        if !snapshot.actions.contains(SemanticsActions::SET_TEXT)
+            || (autofill
+                && (snapshot.autofill.is_none()
+                    || snapshot.rect.w <= 0.0
+                    || snapshot.rect.h <= 0.0))
+        {
+            return None;
+        }
+        let mut current = Some(node);
+        while let Some(ancestor) = current {
+            let entry = self.node(ancestor).ok()?;
+            if entry.flags.intersects(
+                super::node::NodeFlags::CULL_PAINT
+                    | super::node::NodeFlags::HIDDEN
+                    | super::node::NodeFlags::SEMANTICS_HIDDEN,
+            ) {
+                return None;
+            }
+            if Some(ancestor) == self.root {
+                return Some(node);
+            }
+            current = entry.parent;
+        }
+        None
+    }
+
+    fn replace_semantics_text(
+        &mut self,
+        id: SemanticsId,
+        text: String,
+        autofill: bool,
+    ) -> Vec<super::Gesture> {
+        let Some(node) = self.semantics_edit_target(id, autofill) else {
+            return Vec::new();
+        };
+        if self.text_edit(node, crate::Edit::Load(text)).is_err() {
+            return Vec::new();
+        }
+        vec![super::Gesture::TextReplaced(node)]
     }
 
     fn lookup(&self, id: SemanticsId) -> Option<NodeId> {
@@ -491,6 +629,30 @@ mod tests {
             op, SemanticsOp::Upsert(node) if node.id == SemanticsId::from_node(text) && node.label == "after"
         )));
         assert!(tree.semantics_patch().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn hidden_subtree_is_removed_from_the_incremental_snapshot() -> Result<(), crate::Error> {
+        let mut tree = Tree::new(crate::MonoShaper::new());
+        let root = tree.column(0.0)?;
+        let panel = tree.column(0.0)?;
+        let text = tree.text("hidden", 16.0, [0, 0, 0, 255])?;
+        tree.add_child(root, panel)?;
+        tree.add_child(panel, text)?;
+        tree.layout()?;
+        assert!(tree.semantics_patch().is_some());
+
+        tree.node_mut(panel)?
+            .flags
+            .insert(crate::tree::node::NodeFlags::HIDDEN);
+        tree.mark_semantics_chain(panel);
+        let patch = tree
+            .semantics_patch()
+            .expect("removed subtrees are published");
+        assert!(patch.ops.iter().any(
+            |op| matches!(op, SemanticsOp::Remove(id) if *id == SemanticsId::from_node(text))
+        ));
         Ok(())
     }
 }

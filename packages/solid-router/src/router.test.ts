@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { flush } from "solid-js";
-import { flushMotion, spring } from "@impasto/solid-renderer";
+import { createRoot, flush } from "solid-js";
+import { flushMotion, onBack, spring } from "@impasto/solid-renderer";
 import { state as linking } from "../../linking/src/native.stub.ts";
 import { createRouter, type RouteDef } from "./stack.ts";
 
@@ -13,14 +13,71 @@ const defs: RouteDef[] = [
 ];
 
 const backs: Array<() => boolean> = [];
+let nativeBackEnabled = false;
+let nativeGesture: ((phase: "start" | "progress" | "cancel" | "commit", value: number) => boolean | void) | undefined;
 (globalThis as { core: Record<string, unknown> }).core = {
   onBack: (fn: () => boolean) => {
     backs.push(fn);
     return backs.length;
   },
   offBack: () => {},
+  setBackEnabled: (enabled: boolean) => { nativeBackEnabled = enabled; },
+  onBackGesture: (fn: typeof nativeGesture) => { nativeGesture = fn; },
   requestFrame: () => {},
 };
+
+{
+  const saved = new Map([["routes", '[1,"/schedule","/nav/2"]']]);
+  const restore = {
+    key: "routes",
+    get: (key: string) => saved.get(key) ?? null,
+    set: (key: string, value: string | null) => {
+      if (value === null) saved.delete(key);
+      else saved.set(key, value);
+    },
+  };
+  // Run in an owner so the predictive-return registration is released after this test.
+  const dispose = createRoot((dispose) => {
+    const router = createRouter(defs, { restoration: restore, linking: false });
+    flush();
+    assert.deepEqual(router.stack().map((entry) => entry.path), ["/schedule", "/nav/2"]);
+    assert.equal(nativeBackEnabled, true);
+    assert.ok(nativeGesture);
+    nativeGesture("start", 1);
+    nativeGesture("progress", 0.5);
+    flush();
+    assert.equal(router.backPreview()?.progress, 0.5);
+    assert.equal(router.backPreview()?.fromRight, true);
+    nativeGesture("cancel", 0);
+    flush();
+    assert.equal(router.backPreview(), null);
+    assert.equal(saved.get("routes"), '[1,"/schedule","/nav/2"]');
+    nativeGesture("start", 0);
+    nativeGesture("commit", 1);
+    flush();
+    assert.equal(router.stack().at(-1)?.phase, "exit");
+    assert.equal(saved.get("routes"), '[1,"/schedule"]');
+    return dispose;
+  });
+  dispose();
+  backs.length = 0;
+  assert.equal(nativeBackEnabled, false);
+}
+
+{
+  const calls: number[] = [];
+  const high = onBack(300, () => { calls.push(300); return false; });
+  const low = onBack(100, () => { calls.push(100); return true; });
+  assert.ok(nativeGesture);
+  nativeGesture("start", 0);
+  assert.equal(nativeGesture("commit", 1), true);
+  assert.deepEqual(calls, [300, 100]);
+  low();
+  nativeGesture("start", 0);
+  assert.equal(nativeGesture("commit", 1), false);
+  high();
+  backs.length = 0;
+}
 
 async function settleLinking(): Promise<void> {
   await import("@impasto/linking");

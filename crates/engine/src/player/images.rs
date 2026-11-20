@@ -19,6 +19,9 @@ impl<'a> crate::painter::Painter<'a> {
             return TextureLoad::Ready(cached.texture, cached.width, cached.height);
         }
         let Some(image) = resolve(source) else {
+            if source.starts_with(protocol::EXTERNAL_TEXTURE_PREFIX) {
+                return TextureLoad::Empty;
+            }
             return TextureLoad::Missing;
         };
         if image.width == 0 || image.height == 0 {

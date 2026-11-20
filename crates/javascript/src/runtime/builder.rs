@@ -29,6 +29,7 @@ pub struct RuntimeBuilder {
     policy: DrivePolicy,
     generation: u64,
     executor: Arc<dyn MethodExec>,
+    transport_clock: Option<super::TransportClock>,
     stop: Option<BootStop>,
 }
 
@@ -63,6 +64,7 @@ impl RuntimeBuilder {
             policy: DrivePolicy::LegacyStrict,
             generation: 1,
             executor: Arc::new(ImmediateExec),
+            transport_clock: None,
             stop: None,
         }
     }
@@ -109,6 +111,13 @@ impl RuntimeBuilder {
 
     pub fn host(mut self, io: IoBindings) -> Self {
         self.io = io;
+        self
+    }
+
+    /// Use the host monotonic clock for I/O deadlines. The host must pass
+    /// timestamps in the same domain when driving the runtime's timers.
+    pub fn transport_clock(mut self, clock: super::TransportClock) -> Self {
+        self.transport_clock = Some(clock);
         self
     }
 
@@ -222,6 +231,7 @@ impl RuntimeBuilder {
                 key,
                 limits,
                 scheduler: Scheduler::default(),
+                transport_clock: self.transport_clock,
                 phase: Cell::new(Phase::Installing),
                 life: RefCell::new(Some(Rc::new(()))),
                 drive_policy: self.policy,

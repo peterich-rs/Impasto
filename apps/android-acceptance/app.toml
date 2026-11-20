@@ -1,0 +1,19 @@
+name = "android-acceptance"
+version = "0.1.0"
+targets = ["macos", "android"]
+
+[permissions]
+app-state = true
+async-storage = true
+file-system = true
+linking = true
+permissions = true
+
+[android]
+application_id = "dev.impasto.fieldnotes"
+version_code = 1
+permissions = ["android.permission.CAMERA"]
+
+[[android.deep_links]]
+scheme = "impasto-demo"
+host = "record"

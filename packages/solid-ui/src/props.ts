@@ -1,3 +1,4 @@
+import type { AutofillHint } from "@impasto/solid-renderer";
 import type {
   CanvasError,
   CanvasRenderingContext2D,
@@ -85,6 +86,7 @@ export interface SwitchProps extends ElementProps {
 }
 
 export interface FieldProps extends ElementProps {
+  autofill?: AutofillHint;
   value?: string;
   placeholder?: string;
   onChange?: (value: string) => void;

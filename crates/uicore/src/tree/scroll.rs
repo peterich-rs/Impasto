@@ -127,7 +127,7 @@ impl Tree {
         };
         if wrote {
             self.mark_scroll_paint();
-            if self.semantics_enabled {
+            if self.publish_semantics() {
                 self.scroll_semantics.push(id);
             }
             if !applying {

@@ -2,6 +2,7 @@ import { createTrackedEffect, onCleanup } from "solid-js";
 import {
   bindNodeRef,
   bindStyle,
+  onLayout,
   scene,
   type NodeHandle,
 } from "@impasto/solid-renderer";
@@ -94,6 +95,7 @@ export function ScrollArea(props: ScrollAreaProps): NodeHandle {
   let viewport = 0;
   let content = 0;
   let minSource = 0;
+  let stopRestoring = () => {};
   function applyContentMin(): void {
     const min = props.contentMin ?? 0;
     ctrl.setContentMin(min);
@@ -109,6 +111,7 @@ export function ScrollArea(props: ScrollAreaProps): NodeHandle {
     );
   }
   onCleanup(() => {
+    stopRestoring();
     if (minSource !== 0) scene.removeStyleSource(minSource);
   });
   function applyPhysics(node: number): void {
@@ -174,10 +177,17 @@ export function ScrollArea(props: ScrollAreaProps): NodeHandle {
         });
         bindNodeRef(node, () => props.ref);
         bindNodeRef(node, () => props.viewportRef);
+        if (props.onOffset) {
+          scene.onScroll(node, (x, y) => props.onOffset?.({ x, y }, node));
+        }
         const initial = props.initialOffset;
+        stopRestoring();
         if (initial !== undefined && (initial.x !== 0 || initial.y !== 0)) {
-          scene.setScrollOffset(viewport, initial.x, initial.y);
-          ctrl.bind(node);
+          stopRestoring = onLayout(() => {
+            if (content === 0 || viewport !== node) return;
+            stopRestoring();
+            scene.setScrollOffset(node, initial.x, initial.y);
+          });
         }
       }}
       onDragBy={

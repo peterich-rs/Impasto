@@ -18,7 +18,13 @@ pub fn build(target: &str, options: BuildOptions) -> Result<()> {
             bundle(&app, &options)?;
         }
         "apk" => {
-            apk(&app, &options)?;
+            android(&app, &options, AndroidArtifact::Apk, false)?;
+        }
+        "aab" | "appbundle" => {
+            android(&app, &options, AndroidArtifact::Bundle, false)?;
+        }
+        "aar" => {
+            android(&app, &options, AndroidArtifact::Library, false)?;
         }
         "macos" => {
             macos(&app, &options)?;
@@ -27,9 +33,9 @@ pub fn build(target: &str, options: BuildOptions) -> Result<()> {
             let generated = app.root.join("build/ios");
             fs::create_dir_all(&generated)?;
             fs::write(generated.join("README.txt"), "当前仓库没有 iOS 宿主。\n")?;
-            bail!("crates/ios 不存在，不能生成可安装的 iOS 包");
+            bail!("iOS 宿主尚未实现，不能生成可安装的 iOS 包");
         }
-        _ => bail!("未知构建目标 {target}，可选 bundle、apk、macos、ios"),
+        _ => bail!("未知构建目标 {target}，可选 bundle、apk、appbundle、aar、macos、ios"),
     }
     Ok(())
 }
@@ -40,7 +46,11 @@ pub fn bundle(app: &App, options: &BuildOptions) -> Result<PathBuf> {
 fn bundle_for(app: &App, options: &BuildOptions, target: Option<&str>) -> Result<PathBuf> {
     fs::create_dir_all(app.root.join("build"))?;
     let esm = app.root.join("build/app.js");
-    pack(&app.entry, &esm, options)?;
+    let mut command = pack_command(&app.entry, &esm, options)?;
+    if target == Some("android") && !options.debug {
+        command.arg("--source-map");
+    }
+    toolchain::run(command, "打包 TSX")?;
     let output = app.output(options.debug);
     if !options.debug {
         let code = fs::read_to_string(&esm)?;
@@ -49,7 +59,7 @@ fn bundle_for(app: &App, options: &BuildOptions, target: Option<&str>) -> Result
         fs::write(&output, bytes)?;
         fs::remove_file(esm)?;
         let map = app.root.join("build/app.js.map");
-        if map.is_file() {
+        if map.is_file() && target != Some("android") {
             fs::remove_file(map)?;
         }
     } else {
@@ -62,58 +72,73 @@ fn bundle_for(app: &App, options: &BuildOptions, target: Option<&str>) -> Result
 }
 
 fn compile_registry(app: &App, target: Option<&str>) -> session::ModuleRegistry {
-    let modules = shell::first_party_modules();
+    let modules = embedder::first_party_modules();
     let Some(target) = target else {
         // A standalone bundle can be linked by a caller supplying its own
         // module registry. The platform package checks its own capabilities.
         return session::ModuleRegistry::new(modules);
     };
     let enabled = app.modules(target);
+    if !matches!(target, "macos" | "android") {
+        return session::ModuleRegistry::new(Vec::new());
+    }
     let modules = modules
         .into_iter()
         .filter(|module| {
-            let Some(package) = shell::package_folder(module.specifier) else {
+            let Some(package) = embedder::package_folder(module.specifier) else {
                 return false;
             };
-            host_has_module(target, package) && enabled.split(',').any(|name| name == package)
+            enabled.split(',').any(|name| name == package)
         })
         .collect();
     session::ModuleRegistry::new(modules)
 }
 
-fn host_has_module(target: &str, package: &str) -> bool {
-    match target {
-        "macos" => true,
-        "android" => package != "permissions",
-        _ => false,
-    }
+pub fn pack(entry: &Path, output: &Path, options: &BuildOptions) -> Result<()> {
+    toolchain::run(pack_command(entry, output, options)?, "打包 TSX")
 }
 
-pub fn pack(entry: &Path, output: &Path, options: &BuildOptions) -> Result<()> {
+fn pack_command(entry: &Path, output: &Path, options: &BuildOptions) -> Result<Command> {
     let mut command = toolchain::tool("pack.mjs", options.verbose)?;
     command.arg(entry).arg(output);
     if !options.debug {
         command.arg("--release");
     }
-    toolchain::run(command, "打包 TSX")
+    Ok(command)
 }
+
+enum AndroidArtifact {
+    Apk,
+    Bundle,
+    Library,
+}
+
 pub fn apk(app: &App, options: &BuildOptions) -> Result<PathBuf> {
+    android(app, options, AndroidArtifact::Apk, true)
+}
+
+fn android(
+    app: &App,
+    options: &BuildOptions,
+    artifact: AndroidArtifact,
+    local_install: bool,
+) -> Result<PathBuf> {
     app.require("android")?;
     let framework = toolchain::framework()?;
     let bundle = bundle_for(app, options, Some("android"))?;
     let generated = app.root.join("build/android");
     copy_tree(
-        &framework.join("crates/android/apk"),
+        &framework.join("crates/embedder/android/apk"),
         &generated,
         &["build", ".gradle", "local.properties"],
     )?;
     let gradle = generated.join("app/build.gradle.kts");
     let text=fs::read_to_string(&gradle)?
-        .replace("rootProject.projectDir.resolve(\"../../..\").canonicalFile",&format!("file({})",kotlin(&framework)))
+        .replace("rootProject.projectDir.resolve(\"../../../..\").canonicalFile",&format!("file({})",kotlin(&framework)))
         .replace("repoRoot.resolve(\"apps/gallery-solid/dist/quotes.js\")",&format!("file({})",kotlin(&bundle)))
-        .replace("repoRoot.resolve(\"crates/macos/assets/logo.png\")",&format!("file({})",kotlin(&framework.join("crates/macos/assets/logo.png"))))
-        .replace("applicationId = \"dev.impasto.host\"",&format!("applicationId = \"dev.impasto.{}\"",app.name.replace('-',"_")))
-        .replace("        minSdk = 24",&format!("        versionName = \"{}\"\n        versionCode = 1\n        minSdk = 24",app.version))
+        .replace("repoRoot.resolve(\"crates/embedder/macos/assets/logo.png\")",&format!("file({})",kotlin(&framework.join("crates/embedder/macos/assets/logo.png"))))
+        .replace("applicationId = \"dev.impasto.host\"",&format!("applicationId = \"{}\"",app.android_id()))
+        .replace("        minSdk = 24",&format!("        versionName = \"{}\"\n        versionCode = {}\n        minSdk = 24",app.version, app.android.version_code.unwrap_or(1)))
         .replace("script.copyTo(root.resolve(\"quotes.js\"), overwrite = true)","script.copyTo(root.resolve(if (script.extension == \"bin\") \"app.bin\" else \"app.js\"), overwrite = true)");
     fs::write(&gradle, text)?;
     let stage = generated.join("app/src/main/app-assets");
@@ -148,7 +173,38 @@ pub fn apk(app: &App, options: &BuildOptions) -> Result<PathBuf> {
     );
     fs::write(&gradle, text)?;
     let manifest = generated.join("app/src/main/AndroidManifest.xml");
-    let xml = fs::read_to_string(&manifest)?.replace("impasto counter", &app.name);
+    let mut filters = String::new();
+    for link in &app.android.deep_links {
+        let path = link
+            .path_prefix
+            .as_deref()
+            .map_or_else(String::new, |prefix| {
+                format!(" android:pathPrefix=\"{}\"", escape_xml(prefix))
+            });
+        filters.push_str(&format!(
+            "            <intent-filter>\n                <action android:name=\"android.intent.action.VIEW\" />\n                <category android:name=\"android.intent.category.DEFAULT\" />\n                <category android:name=\"android.intent.category.BROWSABLE\" />\n                <data android:scheme=\"{}\" android:host=\"{}\"{path} />\n            </intent-filter>\n",
+            link.scheme, link.host,
+        ));
+    }
+    let permissions: String = app
+        .android
+        .permissions
+        .iter()
+        .filter(|name| name.as_str() != "android.permission.INTERNET")
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|name| format!("    <uses-permission android:name=\"{name}\" />\n"))
+        .collect();
+    let xml = fs::read_to_string(&manifest)?
+        .replace("impasto counter", &app.name)
+        .replace(
+            "    <application",
+            &format!("{permissions}    <application"),
+        )
+        .replace(
+            "        </activity>",
+            &format!("{filters}        </activity>"),
+        );
     fs::write(manifest, xml)?;
     let mode = if options.debug { "Debug" } else { "Release" };
     // The wrapper pins the default. Developers can explicitly use an installed
@@ -163,18 +219,67 @@ pub fn apk(app: &App, options: &BuildOptions) -> Result<PathBuf> {
         generated.join("gradlew")
     };
     let mut command = Command::new(gradle);
+    let task = match artifact {
+        AndroidArtifact::Apk => ":app:assemble",
+        AndroidArtifact::Bundle => ":app:bundle",
+        AndroidArtifact::Library => ":host:assemble",
+    };
     command
         .arg("-p")
         .arg(&generated)
-        .arg(format!("assemble{mode}"));
-    toolchain::run(command, "构建 APK")?;
+        .arg(format!("{task}{mode}"));
+    if !app.android.abis.is_empty() {
+        command.arg(format!("-PimpastoAbis={}", app.android.abis.join(",")));
+    }
+    if local_install {
+        command.arg("-PimpastoLocalSigning=true");
+    }
+    toolchain::run(command, "构建 Android 应用")?;
     let profile = mode.to_lowercase();
-    let artifact = generated.join(format!("app/build/outputs/apk/{profile}/app-{profile}.apk"));
+    let artifact = match artifact {
+        AndroidArtifact::Apk => {
+            gradle_apk(&generated.join("app/build/outputs/apk").join(&profile))?
+        }
+        AndroidArtifact::Bundle => generated.join(format!(
+            "app/build/outputs/bundle/{profile}/app-{profile}.aab"
+        )),
+        AndroidArtifact::Library => {
+            generated.join(format!("host/build/outputs/aar/host-{profile}.aar"))
+        }
+    };
     if !artifact.is_file() {
         bail!("Gradle 没有生成 {}", artifact.display());
     }
     println!("{}", artifact.display());
     Ok(artifact)
+}
+
+fn gradle_apk(directory: &Path) -> Result<PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct Metadata {
+        elements: Vec<Output>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Output {
+        #[serde(rename = "outputFile")]
+        file: PathBuf,
+    }
+    let metadata = directory.join("output-metadata.json");
+    let outputs: Metadata = serde_json::from_slice(&fs::read(&metadata)?)?;
+    let [output] = outputs.elements.as_slice() else {
+        bail!("Gradle 应生成一个 APK，见 {}", metadata.display());
+    };
+    if output.file.file_name() != Some(output.file.as_os_str()) {
+        bail!("Gradle APK 文件名无效，见 {}", metadata.display());
+    }
+    Ok(directory.join(&output.file))
+}
+
+fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('"', "&quot;")
 }
 pub fn macos(app: &App, options: &BuildOptions) -> Result<PathBuf> {
     app.require("macos")?;
@@ -205,7 +310,7 @@ pub fn macos(app: &App, options: &BuildOptions) -> Result<PathBuf> {
         .arg("build")
         .arg("--manifest-path")
         .arg(framework.join("Cargo.toml"))
-        .args(["-p", "macos", "--features", "impeller"])
+        .args(["-p", "embedder-macos", "--features", "impeller"])
         .env("IMPASTO_IMPELLER_SDK_DIR", &sdk);
     if !options.debug {
         command.arg("--release");

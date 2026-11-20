@@ -342,7 +342,7 @@ def write_index(directory, lock, release):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cache-dir", type=Path, default=CACHE)
+    parser.add_argument("--cache-dir", type=Path, default=Path(os.environ.get("IMPASTO_IMPELLER_CACHE", CACHE)))
     commands = parser.add_subparsers(dest="command", required=True)
     for action in ("prepare", "build", "package"):
         command = commands.add_parser(action)

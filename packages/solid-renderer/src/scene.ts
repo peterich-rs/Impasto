@@ -7,6 +7,8 @@ import type {
 } from "./canvas/types.ts";
 import type { StyleInput } from "./style.ts";
 /** Stable scene-node handle. 0 means none, at the QuickJS boundary only. */
+export type AutofillHint = "username" | "password" | "newUsername" | "newPassword" | "emailAddress";
+
 export type NodeHandle = number;
 
 export type { AxisSize, GridLine, InsetEdge } from "./layout-values.ts";
@@ -20,6 +22,33 @@ export type PlatformSnapshot = {
   reduceMotion: boolean;
   boldText: boolean;
   highContrast: boolean;
+};
+
+type WindowInsets = { top: number; right: number; bottom: number; left: number };
+
+export type WindowMetrics = {
+  /** Android display mode, when supplied by the host. */
+  displayId?: number;
+  refreshRate?: number;
+  /** Coordinates in logical points relative to the current Impasto View. */
+  displayFeatures?: readonly DisplayFeature[];
+  width: number;
+  height: number;
+  pixelWidth: number;
+  pixelHeight: number;
+  devicePixelRatio: number;
+  padding: WindowInsets;
+  viewInsets: WindowInsets;
+  systemGestureInsets: WindowInsets;
+};
+export type DisplayFeature = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  type: "fold" | "hinge" | "cutout";
+  posture?: "flat" | "halfOpened";
+  separating: boolean;
 };
 
 export type GradientStopData = {
@@ -265,6 +294,7 @@ export interface SceneModule {
   setImeConfig(keyboard: number, action: number): void;
   /** Replace the session theme snapshot while preserving window dimensions. */
   setStyleEnvironment(environment: StyleEnvironment): void;
+  setPlatformView(node: NodeHandle, kind: string | null): void;
   setSemantics(
     node: NodeHandle,
     role: number,
@@ -277,7 +307,7 @@ export interface SceneModule {
     editable?: number,
     readOnly?: number,
     description?: string,
-    hint?: { order?: number; live?: "off" | "polite" | "assertive" },
+    hint?: { order?: number; live?: "off" | "polite" | "assertive"; password?: boolean; autofill?: { hint: AutofillHint; value: string } },
   ): void;
   textScale(): number;
   setTextScale(scale: number): void;
@@ -377,6 +407,9 @@ export interface SceneModule {
   pointerPosition(): { x: number; y: number };
   onBack(fn: () => boolean): number;
   offBack(id: number): void;
+  onBackGesture?(fn: (phase: "start" | "progress" | "cancel" | "commit", value: number) => boolean | void): void;
+  setBackEnabled?(enabled: boolean): void;
+  setSemanticsHidden?(node: NodeHandle, hidden: boolean): void;
   onMotionEnd(id: NodeHandle, prop: string, fn: () => void): number;
   offMotionEnd(id: number): void;
   /** Pinch scale along the hit path. Older hosts omit it. */
@@ -429,6 +462,10 @@ export interface SceneModule {
     height: number;
     viewInsets: { top: number; right: number; bottom: number; left: number };
   };
+  /** Full host View dimensions and insets in scene points, plus its pixel extent. */
+  windowMetrics(): WindowMetrics;
+  onWindowMetrics(fn: (metrics: WindowMetrics) => void): number;
+  offWindowMetrics(id: number): void;
   /** Native list state machine. The skin applies render ops. */
   listDriver(overscan: number, estimate: number): ListDriver;
   /** Native scroll clamp, drag, and refresh threshold. */

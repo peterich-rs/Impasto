@@ -1,0 +1,5 @@
+{
+  "name": "android-acceptance",
+  "private": true,
+  "type": "module"
+}

@@ -39,8 +39,9 @@ pub use motion::{
 pub use pointer::{Button, Buttons, Modifiers, Phase, PointerEvent, PointerId, PointerKind};
 pub use protocol::ParagraphId;
 pub use semantics::{
-    ImageCensus, LiveRegion, SemanticsAction, SemanticsActions, SemanticsFlags, SemanticsHint,
-    SemanticsId, SemanticsNode, SemanticsOp, SemanticsPatch, SemanticsRole, SemanticsUpdate,
+    AutofillField, ImageCensus, LiveRegion, SemanticsAction, SemanticsActions, SemanticsFlags,
+    SemanticsHint, SemanticsId, SemanticsNode, SemanticsOp, SemanticsPatch, SemanticsRole,
+    SemanticsUpdate,
 };
 pub use shaper::{
     Affinity, CanvasMetrics, Caret, MetricsKey, MonoShaper, PaintKey, ParagraphMetrics,
@@ -51,6 +52,7 @@ pub use text::{
     Edit, EditQuery, TextEditingValue, TextEditor, TextSelection, grapheme_count, grapheme_index,
     grapheme_unit,
 };
+pub use tree::PlatformViewPlacement;
 pub use tree::{
     Alignment, AxisSize, BoxEdge, DebugAxis, Discarded, DragClaim, Edges, FocusDirection, Gesture,
     GridLine, Inset, Justify, LayoutCause, LayoutIssue, LayoutTrace, NodeId, PanelAlign, Rect,

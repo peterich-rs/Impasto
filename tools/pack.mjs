@@ -15,11 +15,11 @@ export function assertNoScheduler(code, inputs = []) {
   }
 }
 
-export function packOptions({ absWorkingDir, entryPoints, outfile, release = false }) {
+export function packOptions({ absWorkingDir, entryPoints, outfile, release = false, sourceMap = !release }) {
   return {
     absWorkingDir, entryPoints, outfile, bundle: true, format: "esm",
     platform: "neutral", conditions: ["browser"], target: "es2022",
-    sourcemap: !release, minify: release, metafile: true,
+    sourcemap: sourceMap, minify: release, metafile: true,
     external: ["scene", "reactive"],
     define: { "process.env.NODE_ENV": JSON.stringify(release ? "production" : "development") },
     plugins: [{
@@ -45,6 +45,7 @@ export function packOptions({ absWorkingDir, entryPoints, outfile, release = fal
         build.onLoad({ filter: /\.tsx?$/ }, async args => {
           const result = await transformAsync(readFileSync(args.path, "utf8"), {
             filename: args.path, babelrc: false, configFile: false,
+            sourceMaps: sourceMap ? "inline" : false,
             plugins: [
               [transformTypescript, { isTSX: true, allExtensions: true }],
               [solidTransform, { moduleName: "@impasto/solid-renderer", generate: "universal" }],
@@ -63,7 +64,9 @@ export function packOptions({ absWorkingDir, entryPoints, outfile, release = fal
   };
 }
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [entry, outfile, mode] = process.argv.slice(2);
-  if (!entry || !outfile) throw new Error("usage: pack <entry.tsx> <outfile.js> [--release]");
-  await esbuild.build(packOptions({ absWorkingDir: dirname(resolve(entry)), entryPoints: [resolve(entry)], outfile: resolve(outfile), release: mode === "--release" }));
+  const [entry, outfile, ...flags] = process.argv.slice(2);
+  if (!entry || !outfile) throw new Error("usage: pack <entry.tsx> <outfile.js> [--release] [--source-map]");
+  const release = flags.includes("--release");
+  const sourceMap = flags.includes("--source-map") ? "external" : !release;
+  await esbuild.build(packOptions({ absWorkingDir: dirname(resolve(entry)), entryPoints: [resolve(entry)], outfile: resolve(outfile), release, sourceMap }));
 }

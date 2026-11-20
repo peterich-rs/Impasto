@@ -138,6 +138,7 @@ const SCENE_SCRIPT_NAMES: &[&str] = &[
     "setPaddingEdge",
     "setPaddingEdges",
     "setPanel",
+    "setPlatformView",
     "setPosition",
     "setRadius",
     "setRecognizers",

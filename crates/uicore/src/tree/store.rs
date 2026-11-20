@@ -46,6 +46,7 @@ impl Tree {
             canvas_geometry_epoch: 0,
             layers: crate::layer::LayerTree::empty(),
             semantics_cache: HashMap::new(),
+            platform_views: HashMap::new(),
             image_counts: HashMap::new(),
             image_generation: 0,
             scroll_notices: Vec::new(),
@@ -74,6 +75,8 @@ impl Tree {
             scroll_semantics: Vec::new(),
             semantics_full: false,
             semantics_enabled: true,
+            autofill_enabled: false,
+            autofill_nodes: Default::default(),
             sweep_stack: Vec::new(),
             sweep_children: Vec::new(),
             text_scale: 1.0,
@@ -556,6 +559,8 @@ impl Tree {
         let mut ids = Vec::new();
         self.retire_postorder(id, &mut ids)?;
         for id in &ids {
+            self.platform_views.remove(id);
+            self.autofill_nodes.remove(id);
             self.motions.retain(|motion| motion.node != *id);
         }
         if was_root {

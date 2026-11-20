@@ -58,6 +58,7 @@ export function render(component: () => Node, parent: Node): () => void {
 export { merge as mergeProps } from "@impasto/reactive";
 export { bindStyle } from "./style.ts";
 export type { StyleInput, StyleProps, ViewStyle } from "../src/style.ts";
+export type { AutofillHint, DisplayFeature, WindowMetrics } from "../src/scene.ts";
 export function applyRef(value: unknown, element: Node): void {
   for (const ref of [value].flat(Infinity))
     if (typeof ref === "function") ref(element);
@@ -131,7 +132,7 @@ export {
   setRecognizers,
 } from "../src/guard.ts";
 export { directionFor } from "../src/direction.ts";
-export { onBack } from "./back.ts";
+export { onBack, type BackGesture } from "./back.ts";
 export { firstFocusable, restoreFocus, takeInitialFocus } from "./focus.ts";
 export { SPRING, flushMotion, spring } from "./motion.ts";
 export type { Node as NodeHandle } from "../src/tree.ts";

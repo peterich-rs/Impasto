@@ -156,6 +156,7 @@ export const EffectKind = {
   Reload: 22,
   MeasurePanel: 23,
   SetTextScale: 24,
+  SetPlatformView: 25,
 } as const;
 
 export const StyleValueTag = {

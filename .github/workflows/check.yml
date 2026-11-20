@@ -1,6 +1,6 @@
 # 与 just check 对齐，并检查 rustfmt。
-# 不下载 Impeller SDK。
-# macos crate 只在 macOS 上编译。
+# Android 任务使用仓库中的 Impeller SDK 归档。
+# embedder-macos crate 只在 macOS 上编译。
 
 name: check
 
@@ -33,15 +33,15 @@ jobs:
       - name: generated style contracts
         run: cargo run --locked -p uicore --bin style-types -- --check --root .
       - name: check (deny warnings)
-        run: cargo check --workspace --exclude macos
+        run: cargo check --workspace --exclude embedder-macos
         env:
           RUSTFLAGS: "-D warnings"
       - name: clippy
-        run: cargo clippy --workspace --exclude macos --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude embedder-macos --all-targets -- -D warnings
       - name: JavaScript feature boundaries
         run: python3 tools/check-javascript-boundaries.py
       - name: generated native module declarations
-        run: cargo run --locked -p shell --bin module-stubs -- --check
+        run: cargo run --locked -p embedder --bin module-stubs -- --check
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -57,7 +57,7 @@ jobs:
       - name: standard library contract
         run: node tools/check-standard-library.mjs
       - name: test
-        run: cargo test --workspace --exclude macos
+        run: cargo test --workspace --exclude embedder-macos
 
   rust-macos:
     name: cargo test (macos)
@@ -70,9 +70,60 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: clippy macos host
-        run: cargo clippy -p macos --all-targets -- -D warnings
+        run: cargo clippy -p embedder-macos --all-targets -- -D warnings
       - name: test macos host
-        run: cargo test -p macos
+        run: cargo test -p embedder-macos
+
+  android:
+    name: Android APK and device tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      ANDROID_NDK_VERSION: 28.2.13676358
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: enable pnpm
+        run: corepack enable && corepack prepare pnpm@9.15.9 --activate
+      - uses: extractions/setup-just@v2
+      - name: Prepare Android SDK and NDK
+        run: |
+          sdkmanager 'platforms;android-35' "ndk;$ANDROID_NDK_VERSION"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+      - name: Build and lint Android APK
+        run: |
+          pnpm install --frozen-lockfile
+          just android-build-check
+      - name: Enable hardware virtualization for the emulator
+        run: sudo chmod a+rw /dev/kvm
+      - name: Run Android instrumentation tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_3a
+          emulator-options: -no-window -gpu swiftshader -no-snapshot -noaudio -no-boot-anim
+          script: just android-device-test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-check-results
+          path: |
+            crates/embedder/android/apk/app/build/outputs/apk/debug/app-debug.apk
+            crates/embedder/android/apk/app/build/reports/lint-results-debug.*
+            crates/embedder/android/apk/app/build/outputs/androidTest-results/connected/
+            crates/embedder/android/apk/app/build/reports/androidTests/connected/
 
   solid:
     name: solid

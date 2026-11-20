@@ -329,6 +329,44 @@ pub(in crate::ui::player) unsafe fn vm_forget_ids(pointer: *mut Host, ids: *cons
 pub(in crate::ui::player) unsafe fn vm_take_wants_frame(pointer: *mut Host) -> i32 {
     i32::from(host(pointer).wants_frame.replace(false))
 }
+pub(in crate::ui::player) unsafe fn vm_take_back_enabled(pointer: *mut Host) -> Option<bool> {
+    host(pointer).back_enabled.take()
+}
+
+pub(in crate::ui::player) unsafe fn vm_back_gesture(
+    pointer: *mut Host,
+    event: crate::session::BackGesture,
+    err: *mut c_char,
+    len: usize,
+) -> i32 {
+    use crate::session::BackGesture;
+    let vm = host(pointer);
+    let hook = vm.refs.borrow().hooks.get("backGesture").cloned();
+    let Some(hook) = hook else {
+        if event == BackGesture::Committed {
+            // SAFETY: forwards the same live VM and diagnostic buffer.
+            return unsafe { vm_dispatch_back(pointer, err, len) };
+        }
+        return 1;
+    };
+    let _budget = vm.budget("backGesture", 0);
+    vm.with(|ctx| {
+        let (phase, value) = match event {
+            BackGesture::Started { from_right } => ("start", f64::from(i32::from(from_right))),
+            BackGesture::Progress(value) => ("progress", f64::from(value)),
+            BackGesture::Cancelled => ("cancel", 0.0),
+            BackGesture::Committed => ("commit", 1.0),
+        };
+        let result = text(&ctx, phase)
+            .and_then(|phase| vm.call(&ctx, &hook, vec![phase, number(&ctx, value)]));
+        match result {
+            Ok(value) => {
+                i32::from(event != BackGesture::Committed || value.as_bool() != Some(false))
+            }
+            Err(error) => vm.finish(Err(error), &ctx, err, len),
+        }
+    })
+}
 pub(in crate::ui::player) unsafe fn vm_dispatch_back(
     pointer: *mut Host,
     err: *mut c_char,
@@ -416,6 +454,28 @@ pub(in crate::ui::player) unsafe fn vm_apply_settings(
         host.finish(result, &ctx, err, len)
     })
 }
+pub(in crate::ui::player) unsafe fn vm_apply_window_metrics(
+    pointer: *mut Host,
+    err: *mut c_char,
+    len: usize,
+) -> i32 {
+    let host = host(pointer);
+    let callbacks = host.refs.borrow().window_metrics.clone();
+    if callbacks.is_empty() {
+        return 0;
+    }
+    let _budget = host.budget("window metrics", 0);
+    host.with(|ctx| {
+        let result = bindings::window_metrics(host, &ctx).and_then(|metrics| {
+            for (_, callback) in callbacks {
+                host.call(&ctx, &callback, vec![metrics.clone()])?;
+            }
+            Ok(())
+        });
+        host.finish(result, &ctx, err, len)
+    })
+}
+
 pub(in crate::ui::player) unsafe fn vm_motion_end(
     pointer: *mut Host,
     node: u64,

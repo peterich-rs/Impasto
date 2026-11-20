@@ -633,42 +633,49 @@ pub(super) unsafe fn set_semantics(
     session: *mut c_void,
     node: u64,
     role: i32,
-    label: *const c_char,
-    label_len: usize,
-    value: *const c_char,
-    value_len: usize,
+    label: &str,
+    value: &str,
     checked: i32,
     sel_start: i32,
     sel_end: i32,
     disabled: i32,
     editable: i32,
     read_only: i32,
-    description: *const c_char,
-    description_len: usize,
+    description: &str,
     order_set: i32,
     order: i32,
     live: i32,
+    password: bool,
+    autofill_kind: i32,
+    autofill_value: &str,
 ) -> i32 {
     super::vm_entry!(-1, {
         // SAFETY: session is captured from the live Host and used only on the render thread.
         let inner = unsafe { inner(session) };
-        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
-        let label = unsafe { utf8_of(label, label_len) }.map(str::to_owned);
-        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
-        let value = unsafe { utf8_of(value, value_len) }.map(str::to_owned);
-        // SAFETY: the Rust caller keeps the session and input slices alive and supplies writable output slots.
-        let description = unsafe { utf8_of(description, description_len) }.map(str::to_owned);
+        let autofill_hint = match autofill_kind {
+            1 => Some("username"),
+            2 => Some("password"),
+            3 => Some("newUsername"),
+            4 => Some("newPassword"),
+            5 => Some("emailAddress"),
+            _ => None,
+        };
         let hint = uicore::SemanticsHint {
             role: role_of(role),
-            label: label.filter(|text| !text.is_empty()),
-            value: value.filter(|text| !text.is_empty()),
+            label: (!label.is_empty()).then(|| label.to_owned()),
+            value: (!password && !value.is_empty()).then(|| value.to_owned()),
             checked: tri_state(checked),
             selection: (sel_start >= 0 && sel_end >= sel_start)
                 .then_some((sel_start as u32, sel_end as u32)),
             disabled: tri_state(disabled),
             editable: tri_state(editable),
             read_only: tri_state(read_only),
-            description: description.filter(|text| !text.is_empty()),
+            password,
+            description: (!description.is_empty()).then(|| description.to_owned()),
+            autofill: autofill_hint.map(|hint| uicore::AutofillField {
+                hint,
+                value: autofill_value.to_owned(),
+            }),
             order: (order_set != 0).then_some(order),
             live: match live {
                 0 => Some(uicore::LiveRegion::Off),

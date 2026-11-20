@@ -48,6 +48,9 @@ pub(super) const CORE_NAMES: &[&str] = &[
     "onLayout",
     "onBack",
     "offBack",
+    "onBackGesture",
+    "setBackEnabled",
+    "setSemanticsHidden",
     "onMotionEnd",
     "offMotionEnd",
     "onShortcut",
@@ -64,6 +67,9 @@ pub(super) const CORE_NAMES: &[&str] = &[
     "settings",
     "onSettings",
     "offSettings",
+    "windowMetrics",
+    "onWindowMetrics",
+    "offWindowMetrics",
     "listDriver",
     "scrollController",
     "onDriver",
@@ -320,7 +326,8 @@ pub(super) fn native<'js>(
         | "setStyleEnvironment"
         | "socketOpen"
         | "offBack"
-        | "offSettings" => 1,
+        | "offSettings"
+        | "offWindowMetrics" => 1,
         _ if GESTURES.iter().any(|(n, _)| *n == name) => 2,
         _ => 0,
     };
@@ -517,12 +524,13 @@ pub(super) fn native<'js>(
             record.id = handle(ctx, args, 0)?;
             apply(host, ctx, &record)?;
         }
-        "onFrame" | "onLayout" | "onScrollState" | "onDriver" => {
+        "onFrame" | "onLayout" | "onScrollState" | "onDriver" | "onBackGesture" => {
             let callback = saved_function(ctx, args, 0)?;
             let key = match name {
                 "onFrame" => "frame",
                 "onLayout" => "layout",
                 "onDriver" => "driver",
+                "onBackGesture" => "backGesture",
                 _ => "scroll",
             };
             host.refs.borrow_mut().hooks.insert(key, callback);
@@ -530,27 +538,55 @@ pub(super) fn native<'js>(
         "requestFrame" => {
             host.wants_frame.set(true);
         }
-        "onBack" | "onSettings" => {
+        "setBackEnabled" => {
+            let enabled = args
+                .first()
+                .and_then(Value::as_bool)
+                .ok_or_else(|| type_error(ctx, "setBackEnabled(enabled)"))?;
+            host.back_enabled.set(Some(enabled));
+        }
+        "setSemanticsHidden" => {
+            let id = handle(ctx, args, 0)?;
+            let hidden = args
+                .get(1)
+                .and_then(Value::as_bool)
+                .ok_or_else(|| type_error(ctx, "setSemanticsHidden(node, hidden)"))?;
+            host.inner()
+                .tree
+                .borrow_mut()
+                .set_semantics_hidden(uicore::NodeId::from_raw(id), hidden)
+                .map_err(|_| type_error(ctx, "setSemanticsHidden requires a live node"))?;
+        }
+        "onBack" | "onSettings" | "onWindowMetrics" => {
             let callback = saved_function(ctx, args, 0)?;
             let id = host
                 .runtime
                 .allocate_timer_id()
                 .ok_or_else(|| rquickjs::Exception::throw_range(ctx, "callback IDs exhausted"))?;
             let mut refs = host.refs.borrow_mut();
-            if name == "onBack" {
-                refs.backs.push((id, callback));
-            } else {
-                refs.settings.push((id, callback));
+            if name == "onBack" && !refs.hooks.contains_key("backGesture") {
+                host.back_enabled.set(Some(true));
             }
+            let callbacks = match name {
+                "onBack" => &mut refs.backs,
+                "onSettings" => &mut refs.settings,
+                _ => &mut refs.window_metrics,
+            };
+            callbacks.push((id, callback));
             return (id as f64).into_js(ctx);
         }
-        "offBack" | "offSettings" => {
+        "offBack" | "offSettings" | "offWindowMetrics" => {
             let id = num(ctx, args, 0)? as u64;
             let mut refs = host.refs.borrow_mut();
-            if name == "offBack" {
-                refs.backs.retain(|(i, _)| *i != id);
-            } else {
-                refs.settings.retain(|(i, _)| *i != id);
+            let callbacks = match name {
+                "offBack" => &mut refs.backs,
+                "offSettings" => &mut refs.settings,
+                _ => &mut refs.window_metrics,
+            };
+            callbacks.retain(|(i, _)| *i != id);
+            if name == "offBack" && callbacks.is_empty() && !refs.hooks.contains_key("backGesture")
+            {
+                host.back_enabled.set(Some(false));
             }
         }
         "onMotionEnd" => {
@@ -612,6 +648,7 @@ pub(super) fn native<'js>(
             );
         }
         "settings" => return settings(host, ctx),
+        "windowMetrics" => return window_metrics(host, ctx),
         "listDriver" => return drivers::list(host, ctx, args),
         "scrollController" => return drivers::scroll(host, ctx),
         "debugMemory" => {
@@ -720,6 +757,66 @@ pub(super) fn native<'js>(
     Ok(undefined())
 }
 
+pub(super) fn window_metrics<'js>(host: &Host, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    use crate::session::{DisplayFeatureKind, FoldPosture};
+
+    let metrics = host.inner().window_metrics.get();
+    let display = host.inner().window_display.borrow();
+    let snapshot = Object::new(ctx.clone())?;
+    snapshot.set("width", metrics.width)?;
+    snapshot.set("height", metrics.height)?;
+    snapshot.set(
+        "pixelWidth",
+        (metrics.width * metrics.device_pixel_ratio).round(),
+    )?;
+    snapshot.set(
+        "pixelHeight",
+        (metrics.height * metrics.device_pixel_ratio).round(),
+    )?;
+    snapshot.set("devicePixelRatio", metrics.device_pixel_ratio)?;
+    snapshot.set("displayId", display.display_id)?;
+    snapshot.set("refreshRate", display.refresh_rate)?;
+    let features = Array::new(ctx.clone())?;
+    for (index, feature) in display.features.iter().enumerate() {
+        let value = Object::new(ctx.clone())?;
+        value.set("x", feature.bounds.x)?;
+        value.set("y", feature.bounds.y)?;
+        value.set("width", feature.bounds.w)?;
+        value.set("height", feature.bounds.h)?;
+        value.set(
+            "type",
+            match feature.kind {
+                DisplayFeatureKind::Fold => "fold",
+                DisplayFeatureKind::Hinge => "hinge",
+                DisplayFeatureKind::Cutout => "cutout",
+            },
+        )?;
+        value.set(
+            "posture",
+            feature.posture.map(|posture| match posture {
+                FoldPosture::Flat => "flat",
+                FoldPosture::HalfOpened => "halfOpened",
+            }),
+        )?;
+        value.set("separating", feature.separating)?;
+        features.set(index, value)?;
+    }
+    snapshot.set("displayFeatures", features)?;
+    for (name, value) in [
+        ("padding", metrics.padding),
+        ("viewInsets", metrics.view_insets),
+        ("systemGestureInsets", metrics.system_gesture_insets),
+    ] {
+        let insets = Object::new(ctx.clone())?;
+        insets.set("left", value.left)?;
+        insets.set("top", value.top)?;
+        insets.set("right", value.right)?;
+        insets.set("bottom", value.bottom)?;
+        snapshot.set(name, insets)?;
+    }
+    Ok(snapshot.into_value())
+}
+
 pub(super) fn settings<'js>(host: &Host, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let settings = host.inner().platform.borrow();
     let object = Object::new(ctx.clone())?;
@@ -739,7 +836,7 @@ pub(super) fn settings<'js>(host: &Host, ctx: &Ctx<'js>) -> rquickjs::Result<Val
     Ok(object.into_value())
 }
 fn bytes_of<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> rquickjs::Result<Option<Vec<u8>>> {
-    if let Some(buffer) = value.as_object().and_then(|o| o.as_array_buffer()) {
+    if let Some(buffer) = crate::runtime::quickjs::buffer::array_buffer(value)? {
         // SAFETY: copy the borrowed buffer before any JavaScript can detach or resize it.
         return unsafe { buffer.as_bytes() }
             .map(|b| Some(b.to_vec()))

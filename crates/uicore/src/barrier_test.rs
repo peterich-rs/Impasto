@@ -387,6 +387,46 @@ fn set_text_loads_the_editor_and_reports_replaced() -> Result<(), crate::Error> 
 }
 
 #[test]
+fn accessibility_selection_preserves_graphemes_in_the_focused_editor() -> Result<(), crate::Error> {
+    let mut tree = Tree::new(MonoShaper::default());
+    let text = tree.text("a😀e\u{301}z", 16.0, [0, 0, 0, 255])?;
+    tree.set_focusable(text, true)?;
+    tree.set_semantics(
+        text,
+        SemanticsHint {
+            role: Some(SemanticsRole::TextField),
+            editable: Some(true),
+            selection: Some((6, 6)),
+            ..SemanticsHint::default()
+        },
+    )?;
+    tree.text_edit(text, crate::Edit::Load("a😀e\u{301}z".to_owned()))?;
+    tree.layout()?;
+    let snapshot = tree.semantics().expect("semantics snapshot");
+    let node = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.role == SemanticsRole::TextField)
+        .expect("editor semantics");
+    assert!(node.actions.contains(SemanticsActions::SET_SELECTION));
+    let action = SemanticsAction::SetSelection {
+        id: node.id,
+        start: 2,
+        end: 4,
+    };
+    assert!(tree.semantics_action(action.clone()).is_empty());
+    tree.focus(text)?;
+    assert_eq!(
+        tree.semantics_action(action),
+        vec![Gesture::TextReplaced(text)]
+    );
+    let (_, value) = tree.editor_snapshot(text).expect("editor snapshot");
+    assert_eq!(value.selection.ordered(), (1, 3));
+    assert_eq!(value.text, "a😀e\u{301}z");
+    Ok(())
+}
+
+#[test]
 fn a_read_only_field_has_no_set_text() -> Result<(), crate::Error> {
     let mut tree = Tree::new(MonoShaper::default());
     let text = tree.text("old", 16.0, [0, 0, 0, 255])?;

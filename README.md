@@ -4,14 +4,14 @@
 
 应用用 Solid 2.0 TSX 编写。`packages/solid-renderer`、`packages/solid-ui` 和 `packages/solid-router` 提供渲染器、控件与路由。QuickJS 会话更新 `uicore` 的渲染树。
 
-macOS 宿主用 Impeller 的 Metal 后端，Android 宿主用 Vulkan。仓库收录了 CI 构建和验证的 Impeller SDK 归档，本地构建可以直接解压并链接对应目标的 SDK。[Impeller SDK](crates/impeller-sys/README.md)
+macOS 宿主用 Impeller 的 Metal 后端。Android 支持 Vulkan 和 GLES，使用仓库预构建 SDK 时默认选择 GLES。仓库收录了 CI 构建和验证的 Impeller SDK 归档，本地构建可以直接解压并链接对应目标的 SDK。[Impeller SDK](crates/impeller-sys/README.md)
 
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
 | `docs/architecture.md` | 当前仓库分层和一帧 |
-| `docs/platform-hosts.md` | macOS、Android 的线程、表面和输入。iOS 还没写 |
+| `docs/platform-hosts.md` | 公共宿主布局，macOS 与 Android 的线程、表面和输入 |
 | `docs/toolchain-design.md` | 工具链与原生响应式设计 |
 | `docs/toolchain-baseline.md` | gallery 点击和滚动的对照数据 |
 | `docs/refactor-plan.md` | 还没做的事 |
@@ -44,7 +44,7 @@ just check
 
 QuickJS 测试始终运行 Cargo 构建的 quickjs-jit 0.14.2。渲染引擎的图形测试需要准备 SDK，再用 `cargo test -p engine --features impeller` 运行。
 
-推到 GitHub 后，[`.github/workflows/check.yml`](.github/workflows/check.yml) 跑同一组检查，并多一步 `cargo fmt --all -- --check`。`crates/macos` 只在 macOS runner 上编译。Linux 工作流在测试前用 Node 22、pnpm 9.15.9 安装依赖并构建 gallery；解释器由 Cargo 构建。工作流不下载 Impeller SDK，也不打 Android 包，也不打开窗口。
+推到 GitHub 后，检查工作流运行 `just check` 对应的检查和 `cargo fmt --all -- --check`。Linux 任务用 Node 22、pnpm 9.15.9 安装依赖并构建 Gallery，QuickJS 解释器由 Cargo 构建。macOS 任务验证 `embedder-macos`。Android 任务使用仓库归档构建双 ABI APK，运行 lint、包对齐检查和模拟器仪器测试。[检查工作流](.github/workflows/check.yml)
 
 ## 应用命令
 
@@ -57,6 +57,8 @@ cd my-app
 /path/to/impasto build bundle
 /path/to/impasto build macos
 /path/to/impasto build apk --debug
+/path/to/impasto build appbundle
+/path/to/impasto build aar
 /path/to/impasto test
 /path/to/impasto clean
 /path/to/impasto packages get
@@ -78,7 +80,7 @@ just android
 just android-release
 ```
 
-`just host` 打开默认 360×640 的窗口，加载 `just gallery-dist` 生成的 Gallery ESM。`just host-js` 运行同一入口。设置 `IMPASTO_DUMP` 可将首帧写成 PNG。`just android` 构建 debug APK，`just android-release` 构建 release APK。Gradle 会准备该目标的 Impeller SDK，再调用 Cargo 构建 `libimpasto.so`。
+`just host` 打开默认 360×640 的窗口，加载 `just gallery-dist` 生成的 Gallery ESM。`just host-js` 运行同一入口。设置 `IMPASTO_DUMP` 可将首帧写成 PNG。`just android` 构建调试 APK，`just android-release` 构建带本地签名的发布变体。Gradle 为 arm64 和 x86_64 准备对应的 Impeller SDK，再调用 Cargo 构建 `libimpasto.so`。签名配置、16 KB 验证和原生 Fragment 构建见 [Android 验收应用](apps/android-acceptance/README.md)。
 
 ## 目录
 
@@ -88,9 +90,9 @@ crates/uicore/              渲染树。Taffy 布局、命中、click 和 drag
 crates/engine/              渲染引擎。读绘制列表，调用 Impeller
 crates/impeller-sys/        Impeller C 绑定与 SDK 链接
 crates/session/             会话。宿主每帧调用 metrics、pointer、frame、wants_frame、lifecycle
-crates/shell/           壳。命令队列、帧调度、渲染线程
-crates/macos/               macOS 窗口
-crates/android/             Android 宿主。`HostActivity`、`HostView`、Choreographer、Vulkan
+crates/embedder/common/     公共宿主，命令队列、帧调度、渲染线程
+crates/embedder/android/    Android 宿主，ImpastoHost、ImpastoView、Choreographer、Vulkan 和 GLES
+crates/embedder/macos/      macOS 宿主，AppKit、CVDisplayLink、Metal
 crates/javascript/          JavaScript 运行时、编译器、标准库及 UI 绑定
 packages/clipboard/         @impasto/clipboard
 packages/linking/           @impasto/linking

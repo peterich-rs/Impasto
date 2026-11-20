@@ -56,6 +56,8 @@ struct Inner {
     pub(super) text_scale: Cell<f32>,
     pub(super) reduce_motion: Cell<bool>,
     pub(super) platform: RefCell<crate::session::PlatformSettings>,
+    pub(super) window_metrics: Cell<Metrics>,
+    pub(super) window_display: RefCell<crate::session::WindowDisplay>,
     pub(super) settings_frame: Cell<bool>,
     /// Bytes from the latest `text_edit`. Stable until the next edit.
     pub(super) edit_bytes: RefCell<Vec<u8>>,
@@ -98,6 +100,8 @@ impl Inner {
             text_scale: Cell::new(1.0),
             reduce_motion: Cell::new(false),
             platform: RefCell::new(crate::session::PlatformSettings::default()),
+            window_metrics: Cell::new(Metrics::new(0.0, 0.0, 1.0)),
+            window_display: RefCell::new(crate::session::WindowDisplay::default()),
             settings_frame: Cell::new(false),
             edit_bytes: RefCell::new(Vec::new()),
             clipboard: RefCell::new(None),
@@ -212,11 +216,13 @@ pub struct JsSession {
     inner: *mut Inner,
     engine: Engine,
     layer_epoch: u64,
+    platform_views: Arc<[uicore::PlatformViewPlacement]>,
     image_generation: u64,
     script_error: RefCell<Option<String>>,
     exit: Cell<bool>,
     /// A failed frame must not schedule another frame by itself.
     suppress_demand: Cell<bool>,
+    reload_frame: Option<crate::session::FrameOutput>,
     record_failing: bool,
     record_frames: u32,
     _thread: PhantomData<Rc<()>>,
@@ -298,10 +304,12 @@ impl JsSession {
             inner,
             engine,
             layer_epoch: u64::MAX,
+            platform_views: Arc::default(),
             image_generation: u64::MAX,
             script_error: RefCell::new(None),
             exit: Cell::new(false),
             suppress_demand: Cell::new(false),
+            reload_frame: None,
             record_failing: false,
             record_frames: 0,
             _thread: PhantomData,
@@ -471,6 +479,36 @@ impl Session for JsSession {
         if metrics.device_pixel_ratio.is_finite() && metrics.device_pixel_ratio > 0.0 {
             let _ = tree.set_pixel_scale(metrics.device_pixel_ratio);
         }
+        drop(tree);
+        if inner.window_metrics.replace(*metrics) != *metrics {
+            let mut error = [0u8; 512];
+            // SAFETY: the session owns Host and the diagnostic buffer outlives the call.
+            if unsafe {
+                vm_apply_window_metrics(inner.host, error.as_mut_ptr().cast(), error.len())
+            } != 0
+            {
+                self.note_script_error(pull_error(inner, "input", &c_message(&error)));
+            }
+        }
+    }
+
+    fn window_display(&mut self, display: crate::session::WindowDisplay) {
+        // SAFETY: the session owns Inner. End the borrow before entering JS.
+        let inner = unsafe { &*self.inner };
+        {
+            let mut current = inner.window_display.borrow_mut();
+            if *current == display {
+                return;
+            }
+            *current = display;
+        }
+        let mut error = [0u8; 512];
+        // SAFETY: the VM and diagnostic buffer remain live throughout the turn.
+        if unsafe { vm_apply_window_metrics(inner.host, error.as_mut_ptr().cast(), error.len()) }
+            != 0
+        {
+            self.note_script_error(pull_error(inner, "windowMetrics", &c_message(&error)));
+        }
     }
 
     fn pointer(&mut self, event: uicore::PointerEvent) {
@@ -482,6 +520,24 @@ impl Session for JsSession {
         if let Err(message) = dispatch_pointer(inner, gestures) {
             self.note_script_error(message);
         }
+    }
+
+    fn take_back_enabled(&mut self) -> Option<bool> {
+        // SAFETY: the render thread owns this session and its live VM.
+        unsafe { vm_take_back_enabled((*self.inner).host) }
+    }
+
+    fn back_gesture(&mut self, event: crate::session::BackGesture) -> bool {
+        let mut error = [0u8; 512];
+        // SAFETY: Inner remains allocated while the session is live.
+        let inner = unsafe { &*self.inner };
+        // SAFETY: the session owns the VM and error buffer for this synchronous turn.
+        let status =
+            unsafe { vm_back_gesture(inner.host, event, error.as_mut_ptr().cast(), error.len()) };
+        if status < 0 {
+            self.note_script_error(pull_error(inner, "backGesture", &c_message(&error)));
+        }
+        status != 0
     }
 
     fn input(&mut self, event: InputEvent) {
@@ -656,16 +712,89 @@ impl Session for JsSession {
     fn semantics_action(&mut self, action: uicore::SemanticsAction) {
         // SAFETY: Engine owns this stable Inner allocation through VM shutdown.
         let inner = unsafe { &*self.inner };
-        let gestures = inner.tree.borrow_mut().semantics_action(action);
-        if let Err(message) = dispatch_gestures(inner, gestures) {
+        let wrapper_edit = match &action {
+            uicore::SemanticsAction::SetText { id, text }
+            | uicore::SemanticsAction::Autofill { id, text } => {
+                let tree = inner.tree.borrow();
+                let autofill = matches!(action, uicore::SemanticsAction::Autofill { .. });
+                tree.semantics_edit_target(*id, autofill)
+                    .filter(|node| tree.is_text(*node).is_ok_and(|is_text| !is_text))
+                    .map(|node| (node, text))
+            }
+            _ => None,
+        };
+        let result = if let Some((node, text)) = wrapper_edit {
+            dispatch_text(inner, node, text)
+        } else {
+            let gestures = inner.tree.borrow_mut().semantics_action(action);
+            dispatch_gestures(inner, gestures)
+        };
+        if let Err(message) = result {
             self.note_script_error(message);
         }
+    }
+
+    fn update_source(
+        &mut self,
+        source: &str,
+        shaper: Box<dyn Shaper>,
+        io: crate::ui::RoutedIoSubmit,
+        time: crate::session::FrameTime,
+    ) -> Result<(), String> {
+        // SAFETY: the render thread still owns the live session throughout staging.
+        let prior = unsafe { &*self.inner };
+        let log = Rc::clone(&prior.log);
+        let mut candidate = Self::open_source(
+            source.as_bytes(),
+            "app.js",
+            shaper,
+            Box::new(move |level, line| log(level, line)),
+            None,
+            prior.config.clone(),
+        )
+        .map_err(|error| error.to_string())?;
+        candidate.metrics(&prior.window_metrics.get());
+        candidate.settings(&prior.platform.borrow());
+        candidate.window_display(prior.window_display.borrow().clone());
+        candidate.set_semantics_enabled(prior.tree.borrow().semantics_enabled());
+        candidate.set_autofill_enabled(prior.tree.borrow().autofill_enabled());
+        candidate.set_trace(prior.trace.get());
+        let mut output = candidate.frame(time);
+        if let Some(fault) = candidate.take_faults().into_iter().next() {
+            return Err(fault.message);
+        }
+        if output
+            .layers
+            .as_ref()
+            .is_none_or(|tree| tree.layers.is_empty())
+            || output.exit
+        {
+            return Err("updated script did not produce a scene".to_owned());
+        }
+        if output.platform_views.is_none() {
+            // The previous runtime may have placed views with overlapping node IDs.
+            output.platform_views = Some(Arc::default());
+        }
+        if prior.paused.get() {
+            // SAFETY: this pointer is owned by the staged candidate.
+            unsafe { &*candidate.inner }.paused.set(true);
+        }
+        candidate.install_routed_io(io);
+        candidate.reload_frame = Some(output);
+        *self = candidate;
+        Ok(())
     }
 
     fn set_semantics_enabled(&mut self, enabled: bool) {
         // SAFETY: The session owns this Inner until it shuts down the VM.
         let inner = unsafe { &*self.inner };
         inner.tree.borrow_mut().set_semantics_enabled(enabled);
+    }
+
+    fn set_autofill_enabled(&mut self, enabled: bool) {
+        // SAFETY: the interpreter and its tree are owned by this session.
+        let inner = unsafe { &*self.inner };
+        inner.tree.borrow_mut().set_autofill_enabled(enabled);
     }
 
     fn take_fonts(&mut self) -> Vec<(String, Vec<u8>)> {
@@ -711,6 +840,10 @@ impl Session for JsSession {
         reason = "JavaScript f64 values convert to the existing fixed-width callback record and f32 geometry"
     )]
     fn frame(&mut self, time: crate::session::FrameTime) -> crate::session::FrameOutput {
+        if let Some(mut output) = self.reload_frame.take() {
+            output.again |= self.wants_frame();
+            return output;
+        }
         use crate::session::trace::Section;
 
         let script_started = std::time::Instant::now();
@@ -988,6 +1121,13 @@ impl Session for JsSession {
             let layout_report = tree.debug_scan_enabled().then(|| tree.layout_issues_json());
             let semantics_started = std::time::Instant::now();
             let semantics = tree.semantics_patch();
+            let placements = tree.platform_views();
+            let platform_views = if self.platform_views.as_ref() == placements.as_slice() {
+                None
+            } else {
+                self.platform_views = placements.into();
+                Some(Arc::clone(&self.platform_views))
+            };
             let semantics_ms = elapsed_ms(semantics_started);
             let (layout_ms, sync_ms) = tree.layout_timing();
             let (sync_visited, sync_synced) = tree.sync_stats();
@@ -1121,6 +1261,7 @@ impl Session for JsSession {
                 again,
                 ime: self.take_ime(),
                 semantics,
+                platform_views,
                 fonts: self.take_fonts(),
                 reloads: self.take_reloads(),
                 clipboard: self.take_clipboard(),
@@ -1204,6 +1345,14 @@ impl Session for JsSession {
             module: "AppState".into(),
             event: "focus".into(),
             payload: PluginValue::Str(focused.to_string()),
+        });
+    }
+
+    fn window_state_changed(&mut self, key: String) {
+        self.engine.emit_host_event(HostEvent {
+            module: "AppState".into(),
+            event: "windowState".into(),
+            payload: PluginValue::Str(key),
         });
     }
 

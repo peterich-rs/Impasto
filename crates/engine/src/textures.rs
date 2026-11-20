@@ -92,6 +92,13 @@ impl TextureStore {
         }
     }
 
+    pub(crate) fn forget(&mut self, source: &str) {
+        if let Some(cached) = self.map.remove(source) {
+            // SAFETY: this releases the cache retain. Impeller display lists own their images.
+            unsafe { impeller::ImpellerTextureRelease(cached.texture) };
+        }
+    }
+
     pub(crate) fn release_all(&mut self) {
         for (_, cached) in self.map.drain() {
             // SAFETY: callers release the display list first, or no list is installed.
