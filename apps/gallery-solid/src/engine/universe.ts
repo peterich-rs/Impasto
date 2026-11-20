@@ -499,14 +499,16 @@ export function dailyHistory(ins: Instrument, count: number): Bar[] {
   };
   const bars: Bar[] = [];
   let price = ins.base;
-  const dtYear = 1 / TRADING_DAYS_PER_YEAR;
+  const stepYear = 1 / TRADING_DAYS_PER_YEAR / 6;
+  const drift = (ins.drift - (ins.sigma * ins.sigma) / 2) * stepYear;
+  const volatility = ins.sigma * Math.sqrt(stepYear);
   for (let i = count - 1; i >= 0; i--) {
     const open = gapOpen(price, ins, rand, st);
     let high = open;
     let low = open;
     let close = open;
     for (let s = 0; s < 6; s++) {
-      close *= stepFactor(ins, dtYear / 6, rand, st);
+      close *= Math.exp(drift + volatility * gauss(rand, st));
       high = Math.max(high, close);
       low = Math.min(low, close);
     }
@@ -531,18 +533,6 @@ function hashSeed(symbol: string): number {
     h = (Math.imul(h, 33) ^ symbol.charCodeAt(i)) >>> 0;
   }
   return h ^ 0x9e3779b9;
-}
-function stepFactor(
-  ins: Instrument,
-  dtYear: number,
-  rand: () => number,
-  st: GaussState,
-): number {
-  const z = gauss(rand, st);
-  return Math.exp(
-    (ins.drift - (ins.sigma * ins.sigma) / 2) * dtYear +
-      ins.sigma * Math.sqrt(dtYear) * z,
-  );
 }
 function gapOpen(
   prevClose: number,

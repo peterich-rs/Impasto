@@ -1,5 +1,7 @@
 package dev.impasto.host
 
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.app.UiAutomation
 import android.content.Intent
 import android.os.Bundle
 import android.os.SystemClock
@@ -20,38 +22,55 @@ class AccessibilityEditingTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val automation = instrumentation.uiAutomation
         val context = instrumentation.targetContext
+        val serviceInfo = automation.serviceInfo
+        val originalFlags = serviceInfo.flags
+        serviceInfo.flags = originalFlags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+        automation.serviceInfo = serviceInfo
         val intent = Intent(context, ImpastoActivity::class.java)
             .putExtra("script", "host-test/editor.js")
-        ActivityScenario.launch<ImpastoActivity>(intent).use {
-            val focused = awaitEditor({ automation.rootInActiveWindow }) { it.isFocused }
-            assertTrue(focused.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS))
-
-            val replacement = "中😀e\u0301"
-            val setText = Bundle().apply {
-                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, replacement)
+        try {
+            ActivityScenario.launch<ImpastoActivity>(intent).use {
+                editVirtualNode(automation, context.packageName)
             }
-            val textEvent = automation.executeAndWaitForEvent({
-                assertTrue(focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, setText))
-            }, {
-                it.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED &&
-                    it.packageName == context.packageName && it.text.any { value -> value.toString() == replacement }
-            }, 10_000)
-            assertEquals(replacement.length, textEvent.addedCount)
-
-            val selection = Bundle().apply {
-                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 1)
-                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, 3)
-            }
-            val updated = awaitEditor({ automation.rootInActiveWindow }) { it.text?.toString() == replacement }
-            val selectionEvent = automation.executeAndWaitForEvent({
-                assertTrue(updated.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selection))
-            }, {
-                it.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED &&
-                    it.packageName == context.packageName && it.fromIndex == 1 && it.toIndex == 3
-            }, 10_000)
-            assertEquals(replacement.length, selectionEvent.itemCount)
-            awaitEditor({ automation.rootInActiveWindow }) { it.textSelectionStart == 1 && it.textSelectionEnd == 3 }
+        } finally {
+            serviceInfo.flags = originalFlags
+            automation.serviceInfo = serviceInfo
         }
+    }
+
+    private fun editVirtualNode(automation: UiAutomation, packageName: String) {
+        val appWindow = {
+            automation.windows.asSequence().mapNotNull { it.root }
+                .firstOrNull { it.packageName == packageName }
+        }
+        val focused = awaitEditor(appWindow) { it.isFocused }
+        assertTrue(focused.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS))
+
+        val replacement = "中😀e\u0301"
+        val setText = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, replacement)
+        }
+        val textEvent = automation.executeAndWaitForEvent({
+            assertTrue(focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, setText))
+        }, {
+            it.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED &&
+                it.packageName == packageName && it.text.any { value -> value.toString() == replacement }
+        }, 10_000)
+        assertEquals(replacement.length, textEvent.addedCount)
+
+        val selection = Bundle().apply {
+            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 1)
+            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, 3)
+        }
+        val updated = awaitEditor(appWindow) { it.text?.toString() == replacement }
+        val selectionEvent = automation.executeAndWaitForEvent({
+            assertTrue(updated.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selection))
+        }, {
+            it.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED &&
+                it.packageName == packageName && it.fromIndex == 1 && it.toIndex == 3
+        }, 10_000)
+        assertEquals(replacement.length, selectionEvent.itemCount)
+        awaitEditor(appWindow) { it.textSelectionStart == 1 && it.textSelectionEnd == 3 }
     }
 
     private fun awaitEditor(
