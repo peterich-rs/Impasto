@@ -28,4 +28,6 @@ just impeller-source aarch64-apple-ios-sim
 
 iOS SDK 使用 Metal，最低部署版本为 iOS 15.0。[`patches/ios-interop.patch`](patches/ios-interop.patch) 补齐锁定版本对 GLES 和 Vulkan 的条件编译，使这些后端禁用时 C API 仍可链接。
 
+Windows 构建通过 [`patches/windows-modf.patch`](patches/windows-modf.patch) 显式丢弃 `std::modf` 返回的小数部分，保留直线像素对齐使用的整数部分。
+
 更新 Flutter 提交时，从对应源码更新 `include/impeller.h`，再运行 `python3 tools/impeller_sdk.py bindings` 重新生成 Rust 绑定。

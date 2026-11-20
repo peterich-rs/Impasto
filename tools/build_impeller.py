@@ -16,6 +16,10 @@ SOURCE = ROOT / "build/impeller-source/flutter"
 SDK = ROOT / "third_party/impeller-build"
 REPOSITORY = "https://github.com/flutter/flutter.git"
 INTEROP = "flutter/impeller/toolkit/interop"
+PATCHES = {
+    "ios": ("ios-interop.patch", f"{INTEROP}/impeller.cc"),
+    "windows": ("windows-modf.patch", "flutter/impeller/entity/geometry/line_geometry.cc"),
+}
 TARGETS = {
     "darwin-arm64": ("Darwin", ("--mac", "--mac-cpu=arm64")),
     "darwin-x64": ("Darwin", ("--mac", "--mac-cpu=x64")),
@@ -151,19 +155,20 @@ def build(target, revision):
     label = f"{INTEROP}:{target_type}"
     # Generate the standalone graph directly. The default iOS graph omits it.
     root_target = f"--root-target=//{label}"
-    interop = engine_src / INTEROP / "impeller.cc"
-    original = None
-    if target_type == "static_library":
-        # The pinned source has unguarded references to GLES and Vulkan.
-        original = interop.read_bytes()
-        patch = ROOT / "crates/impeller-sys/patches/ios-interop.patch"
-        run("git", "apply", str(patch), cwd=SOURCE)
+    target_patch = PATCHES.get(target.split("-", 1)[0])
+    patched_source = None
+    if target_patch:
+        patch_name, source_path = target_patch
+        patched_source = engine_src / source_path
+        original = patched_source.read_bytes()
+        patch = ROOT / "crates/impeller-sys/patches" / patch_name
+        run("git", "apply", "--ignore-space-change", str(patch), cwd=SOURCE)
     try:
         run(str(pinned_gn), "gen", str(build_dir), root_target, f"--args={' '.join(gn_args)}", cwd=engine_src)
         run(str(pinned_ninja), "-C", str(build_dir), label, cwd=engine_src)
     finally:
-        if original is not None:
-            interop.write_bytes(original)
+        if patched_source is not None:
+            patched_source.write_bytes(original)
 
     SDK.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=SDK) as temporary:
