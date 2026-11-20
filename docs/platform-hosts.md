@@ -80,6 +80,8 @@ Android 启动前从 Intent 读取初始 URL，运行中由 `onNewIntent` 发布
 
 连接支持 Vulkan 和 GLES 的 Android 设备或模拟器后运行下列检查。Android 测试覆盖焦点与宿主事件的不同顺序、IME 组合区间与 UTF-16 选区。两种后端分别运行 Gallery 冷启动、前后台恢复、三轮旋转和同 Activity 独立会话测试。仪器测试使用 `PixelCopy` 验证缓冲区可读，旋转用 SurfaceFlinger 活跃缓冲区核对实际像素尺寸。调试 APK 可通过 Intent extra `impasto.renderer` 选择 `vulkan` 或 `gles`。
 
+GitHub 的 x86_64 AOSP 模拟器使用 `IMPASTO_TEST_VULKAN=false`，覆盖预构建 SDK 的默认 GLES 路径。强制 Vulkan 的设备测试使用支持该后端的本地设备，也可用带独立上下文关闭修复的源码 SDK 运行。
+
 GLES 包装 EGL 窗口的默认帧缓冲。窗口配置提供 24 位深度和 8 位模板附件，供 Impeller 的裁剪和路径覆盖使用。GLES 的 Canvas 像素回归检查曲线描边在包围盒中的覆盖率。 [Flutter 的 EGL 窗口配置](https://github.com/flutter/flutter/blob/77f043bc63196b9979cc09c5b97bb6d9b00be34d/engine/src/flutter/shell/platform/android/android_context_gl_impeller.cc#L122-L127)
 
 ```sh

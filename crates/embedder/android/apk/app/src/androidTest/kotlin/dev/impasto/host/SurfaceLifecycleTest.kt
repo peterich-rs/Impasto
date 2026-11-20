@@ -29,11 +29,11 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 
 @RunWith(Parameterized::class)
-class SurfaceLifecycleTest(private val renderer: String) {
+class SurfaceLifecycleTest(private val renderer: ImpastoHost.Renderer) {
     companion object {
         @JvmStatic
         @Parameterized.Parameters(name = "{0}")
-        fun renderers() = listOf("vulkan", "gles")
+        fun renderers() = testRenderers()
     }
 
     @Test
@@ -82,7 +82,7 @@ class SurfaceLifecycleTest(private val renderer: String) {
             scenario.onActivity { activity ->
                 embedded = requireNotNull(ImpastoHost.attach(
                     activity, activity,
-                    renderer = if (renderer == "gles") ImpastoHost.Renderer.GLES else ImpastoHost.Renderer.VULKAN,
+                    renderer = renderer,
                 ))
                 assertNotEquals(hostView(activity).handle, embedded.view.handle)
                 activity.addContentView(embedded.view, FrameLayout.LayoutParams(640, 640))
@@ -105,7 +105,7 @@ class SurfaceLifecycleTest(private val renderer: String) {
             scenario.onActivity { activity ->
                 original = requireNotNull(ImpastoHost.attach(
                     activity, activity,
-                    renderer = if (renderer == "gles") ImpastoHost.Renderer.GLES else ImpastoHost.Renderer.VULKAN,
+                    renderer = renderer,
                 ))
                 activity.addContentView(original.view, FrameLayout.LayoutParams(480, 560))
             }
@@ -138,7 +138,7 @@ class SurfaceLifecycleTest(private val renderer: String) {
     private fun launchGallery(): ActivityScenario<ImpastoActivity> {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val intent = Intent(context, ImpastoActivity::class.java)
-            .putExtra("impasto.renderer", renderer)
+            .putExtra("impasto.renderer", renderer.wireName)
         return ActivityScenario.launch(intent)
     }
 

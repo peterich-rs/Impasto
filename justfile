@@ -114,7 +114,9 @@ android-device-test: gallery-dist
     trap cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    ANDROID_SERIAL="$serial" "{{root}}/crates/embedder/android/apk/gradlew" -p "{{root}}/crates/embedder/android/apk" -PimpastoVerification=true :app:connectedDebugAndroidTest
+    ANDROID_SERIAL="$serial" "{{root}}/crates/embedder/android/apk/gradlew" -p "{{root}}/crates/embedder/android/apk" \
+        -PimpastoVerification=true -Pandroid.testInstrumentationRunnerArguments.impastoTestVulkan="${IMPASTO_TEST_VULKAN:-true}" \
+        :app:connectedDebugAndroidTest
 
 # Release APK. Gradle runs cargo build --release. Signed with the debug keystore.
 android-release: gallery-dist

@@ -28,7 +28,7 @@ class PlatformContentTest(private val renderer: ImpastoHost.Renderer) {
     companion object {
         @JvmStatic
         @Parameterized.Parameters(name = "{0}")
-        fun renderers() = listOf(ImpastoHost.Renderer.VULKAN, ImpastoHost.Renderer.GLES)
+        fun renderers() = testRenderers()
     }
 
     @Test
