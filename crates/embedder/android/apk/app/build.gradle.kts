@@ -216,6 +216,7 @@ abstract class CargoImpasto : DefaultTask() {
     private fun buildAbi(root: File, ndk: File, bin: File, target: String, output: File): File {
         val api = minSdk.get()
         val linker = File(bin, "$target$api-clang")
+        val sysroot = bin.parentFile.resolve("sysroot").invariantSeparatorsPath
         if (!linker.isFile) {
             throw GradleException("missing Android linker ${linker.path}")
         }
@@ -249,6 +250,8 @@ abstract class CargoImpasto : DefaultTask() {
             workingDir(root)
             environment("ANDROID_NDK_HOME", ndk.path)
             environment("IMPASTO_IMPELLER_SDK_DIR", impellerSdk.path)
+            // Bindgen uses libclang directly. Keep host headers out of Android bindings.
+            environment("BINDGEN_EXTRA_CLANG_ARGS_${target.replace('-', '_')}", "--sysroot=\"$sysroot\"")
             if (release.get()) {
                 environment("CARGO_PROFILE_RELEASE_DEBUG", "line-tables-only")
             }
