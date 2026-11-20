@@ -11,14 +11,11 @@ crates/protocol/         DrawList、LayerTree
 crates/uicore/           渲染树。Taffy、命中、手势、焦点
 crates/engine/           渲染引擎。读 LayerTree，通过 impeller 依赖绘制
 crates/impeller-sys/     Impeller C 头文件、Rust FFI 和原生链接
-crates/js-host/          宿主交换契约、模块元数据、I/O 身份和额度。仅 std
-crates/js/               QuickJS VM、Runtime、标准库、目录和调度
-crates/js-headless/      只依赖 js 的独立消费程序
-crates/session/          会话 trait。原名重导出 js-host 的自有数据类型
+crates/javascript/      JavaScript 运行时、编译器、标准库、宿主契约及 UI 绑定
+crates/session/          供平台使用的会话契约入口
 crates/shell/        命令队列、帧调度、渲染线程
 crates/macos/            macOS 窗口
 crates/android/          HostActivity、HostView、Choreographer、Vulkan
-crates/quickjs/          quickjs-jit 0.14.2 会话
 packages/solid-renderer/ 接到 scene 与 reactive 的运行时。不做布局
 packages/solid-ui/       View、Row、Column、Stack、Grid、Text、Image、Button、Field、Dialog 等作者组件
 packages/devtools/       应用内调试面板。数据来自 shell 的 DiagnosticsHub
@@ -27,15 +24,15 @@ packages/*               clipboard、linking、app-state、file-system、async-s
 apps/gallery-solid/      Solid 应用。dist/quotes.js 由 just gallery-dist 本地生成，不进 git
 ```
 
-依赖只向下：gallery → solid-ui / solid-router → solid-renderer → quickjs 会话 → uicore → protocol。宿主 → shell → session、engine。`session` → `js-host`。`js-host` 只有 std，不依赖 session、uicore、quickjs、engine 或平台库。`engine` 不依赖 `uicore`。`uicore` 不包含 QuickJS、AppKit 或 Impeller 头文件。语言包不算坐标。一个可执行文件只链一种会话。
+Gallery 经 solid-ui、solid-router 和 solid-renderer 使用 JavaScript UI 会话，UI 会话向 uicore 提交更新。平台宿主依赖 shell 和 `javascript/ui`。shell 通过 `session` 使用帧、输入和传输契约。`session` 只启用 JavaScript crate 的 `session` feature。`engine` 不依赖 `uicore`。`uicore` 不包含 QuickJS、AppKit 或 Impeller 头文件。语言包不算坐标。一个可执行文件只链一种会话。
 
-`crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 不手写 C 或 Objective-C。QuickJS 的 Rust 绑定在 `crates/quickjs/src/linked/rt`。`abi.yml` 生成 Rust、JavaScript 与 TypeScript 常量。
+`crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 不手写 C 或 Objective-C。QuickJS 的 Rust 绑定在 `crates/javascript/src/ui/player/vm`。`src/ui/abi.yml` 生成 Rust、JavaScript 与 TypeScript 常量。
 
 ## JS 运行时
 
-`js::Runtime` 在所属线程创建、驱动和销毁。普通宿主通过模块目录、时钟、自有事件和传输接入。`quickjs` 经 `js::quickjs::ExtensionContext` 安装 scene、Canvas、reactive 和 rAF。UI 构造按 ABI、scene、Rust 标准库注册、reactive boot、应用入口的顺序执行，外部传输在入口之后接入。
+`javascript::runtime::Runtime` 在所属线程创建、驱动和销毁。普通宿主通过模块目录、时钟、自有事件和传输接入。`javascript::ui` 经 `runtime::ExtensionContext` 安装 scene、Canvas、reactive 和 rAF。UI 构造按 ABI、scene、Rust 标准库注册、reactive boot、应用入口的顺序执行，外部传输在入口之后接入。
 
-`crates/js/src/standard` 的 Rust 模块直接向 QuickJS 注册 Web API。Rust 持有事件监听、取消信号、URL、解码器、Headers、Body、stream reader、Fetch 和 WebSocket 的状态。JS 回调和 Promise 由 QuickJS 执行，原生对象持有的 JS 引用参与 GC tracing。各绑定模块同时维护 TypeScript 签名。`StandardProfile::declarations()` 按宿主传输能力生成 `.d.ts`。`just standard-check` 对 `legacy` 和四种 `portable` 传输组合比较实际 QuickJS 全局值、原型与声明，并执行通过 TypeScript 检查的用例。
+`crates/javascript/src/standard` 的 Rust 模块直接向 QuickJS 注册 Web API。Rust 持有事件监听、取消信号、URL、解码器、Headers、Body、stream reader、Fetch 和 WebSocket 的状态。JS 回调和 Promise 由 QuickJS 执行，原生对象持有的 JS 引用参与 GC tracing。各绑定模块同时维护 TypeScript 签名。`StandardProfile::declarations()` 按宿主传输能力生成 `.d.ts`。`just standard-check` 对 `legacy` 和四种 `portable` 传输组合比较实际 QuickJS 全局值、原型与声明，并执行通过 TypeScript 检查的用例。
 
 `legacy` 是默认 profile，`fetch` 在整响应完成时结算，`fetchStream` 在响应头到达时结算。`portable` 的 `fetch` 用同一流式状态，要求外部 HTTP 传输。两个 profile 共用 Body、reader、Abort 和宿主值转换。Shell 的外部完成带 `RuntimeKey`，Runtime 按请求身份和状态结算。流的额度随 chunk 转移到 reader，读取、取消或关闭时归还。`shell` 用分开的阻塞任务执行整响应和流式请求，命令循环持续处理短请求和 socket 控制。
 
@@ -108,20 +105,20 @@ Taffy 复用既有文字尺寸时，也复用同一份测量的第一基线。Mi
 
 ## 宿主
 
-宿主入队、在 vsync 上要帧、把 `LayerTree` 交给引擎并上屏。不做命中，不保存 UI 状态。会话 trait 在 `crates/session`。三端差异在 `docs/platform-hosts.md`。iOS 宿主还没写。
+宿主入队、在 vsync 上要帧、把 `LayerTree` 交给引擎并上屏。不做命中，不保存 UI 状态。会话 trait 通过 `crates/session` 提供。三端差异在 `docs/platform-hosts.md`。iOS 宿主还没写。
 Android 用 `AccessibilityManager` 的监听通知会话启停语义快照。重新开启时会发布当前树的快照。
 
 ## 运行时会话
 
-`crates/quickjs` 使用根 `Cargo.toml` 钉住的 quickjs-jit 0.14.2，依赖名是 `rquickjs`。`linked/rt::Engine` 拥有唯一的 `Runtime`、`Context` 和 `Host`；`uicore::Tree`、`reactive::Graph` 与 VM 都留在渲染线程。Rust 绑定注册 `scene`、`reactive`、`#reactive` 和能力模块。`linked/scene.rs` 把属性名映射到 `abi.yml` 的字段号，`linked/mutation.rs` 应用树更新。`scene.js` 提供具名查询、命令与插入范围归一化。节点是 `NodeId::to_raw()`，`0` 表示没有节点，没有全局 `core`。启动先绑定原生入口，再执行 `abi.js`、`scene.js`，调用 `js::standard::install_web`，最后执行 ESM `reactive-boot.js`。捕获并删除 `__reactive` 后执行应用并排空 jobs。
+`crates/javascript` 使用根 `Cargo.toml` 钉住的 quickjs-jit 0.14.2，依赖名是 `rquickjs`。`ui::player::vm::Engine` 拥有唯一的 `Runtime`、`Context` 和 `Host`；`uicore::Tree`、`reactive::Graph` 与 VM 都留在渲染线程。Rust 绑定注册 `scene`、`reactive`、`#reactive` 和能力模块。`src/ui/player/scene.rs` 把属性名映射到 `abi.yml` 的字段号，`src/ui/player/mutation.rs` 应用树更新。`scene.js` 提供具名查询、命令与插入范围归一化。节点是 `NodeId::to_raw()`，`0` 表示没有节点，没有全局 `core`。启动先绑定原生入口，再执行 `abi.js`、`scene.js`，调用 `javascript::standard::install_web`，最后执行 ESM `reactive-boot.js`。捕获并删除 `__reactive` 后执行应用并排空 jobs。
 
-`reactive::Graph` 使用带 generation 的 arena 和双向边。进入用户闭包和 cleanup 前结束 arena 借用，JS 值由 `linked/reactive.rs` 的 `Persistent` 持有和释放。signal 写入只标脏，`batch` 同步冲刷。`JsSession::frame` 在帧监听前、帧监听后和布局监听后冲刷图，空队列跳过。帧监听写入的信号在第一次布局前提交。`tick_motions` 在这些调用之前。`boot` 分发帧与布局监听。抛错的帧监听会从监听表摘掉。`Show`、`Switch`、`Match`、`For` 和 `Errored` 在 `packages/reactive`，调用同一张原生图。
+`reactive::Graph` 使用带 generation 的 arena 和双向边。进入用户闭包和 cleanup 前结束 arena 借用，JS 值由 `src/ui/player/reactive.rs` 的 `Persistent` 持有和释放。signal 写入只标脏，`batch` 同步冲刷。`JsSession::frame` 在帧监听前、帧监听后和布局监听后冲刷图，空队列跳过。帧监听写入的信号在第一次布局前提交。`tick_motions` 在这些调用之前。`boot` 分发帧与布局监听。抛错的帧监听会从监听表摘掉。`Show`、`Switch`、`Match`、`For` 和 `Errored` 在 `packages/reactive`，调用同一张原生图。
 
 能力模块的运行时 specifier 是包入口 `@impasto/clipboard`、`@impasto/linking`、`@impasto/file-system`、`@impasto/async-storage`、`@impasto/app-state`、`@impasto/permissions` 和 `@impasto/devtools`。`ModuleDef` 从 Rust 的 `Module` 方法表注册导出，`cargo run -p shell --bin module-stubs` 从同一份表和方法签名生成各包的 `src/native.d.ts`。只有在 `ModuleExports::events` 声明事件的模块才导出 `addEventListener` 和 `removeEventListener`，监听方法只接受声明的事件名。`Linking` 声明 `url`，`AppState` 声明 `change` 和 `focus`。`Clipboard`、`Linking` 和 `AsyncStorage` 是 QuickJS 直接注册的具名对象。其余能力包的 TypeScript 入口使用生成的声明组合公开 API。Node 测试统一用同目录的 `native.stub.ts`。
 
 CLI 按 `app.toml` 的目标权限生成 `app.modules`，宿主据此限制会话的 `ModuleRegistry`。未注册的能力在链接时报错。原生绑定用 `ArrayBuffer` 持有大字节（≥4KB）的 Rust `Vec<u8>`，较小字节使用 `Uint8Array`。公开的 `FileSystem.read` 总是返回 `Uint8Array`，对大字节创建共享同一缓冲区的视图。
 
-`quickjs::compile` 的脚本和模块路径都生成 IQJS envelope，包含引擎版本与模式，返回只有 `compile` 能构造的 `CompiledBytecode`。`bytecode.rs` 在加载前检查 magic、版本、模式标签和非空载荷；这些检查不能证明载荷是对应类型的字节码。进程内加载走 `open_compiled_with_io`。磁盘上的 `app.bin` 走 `open_trusted_bytecode_with_io`，调用者保证字节来自本工具链的 `compile`，该入口是 `unsafe`。脚本用 `JS_ReadObject` 与 `JS_EvalFunction`，模块用 `Module::load`。`open_program_with_io` 只加载源码。macOS 的 `.app` 和 Android 的资产都可携带 `app.bin`。内存上限 16 MiB，栈上限 8 MiB，eval 限时 1000 ms，其余 turn 为 128 ms，job drain 最多 32 轮。文件模块先按应用根做词法归一化，`..` 留在根内则接受，越出根才拒绝；`AppLoader` 再检查符号化后的真实路径。单个文件上限 16 MiB。脚本异常的 message 和 stack 分开进入 `DiagnosticsHub`。`Engine::shutdown` 在 VM 存活时先释放响应式图，再清空定时器、监听器及 HTTP 等 Persistent，移除 userdata，最后依次释放 Context 和 Runtime；正常 Drop 与启动失败共用此路径。`run --trace` 输出帧内脚本微秒、非空更新轮次和场景 setter 次数。
+`javascript::ui::compile` 的脚本和模块路径都生成 IQJS envelope，包含引擎版本与模式，返回只有 `compile` 能构造的 `CompiledBytecode`。`bytecode.rs` 在加载前检查 magic、版本、模式标签和非空载荷；这些检查不能证明载荷是对应类型的字节码。进程内加载走 `open_compiled_with_io`。磁盘上的 `app.bin` 走 `open_trusted_bytecode_with_io`，调用者保证字节来自本工具链的 `compile`，该入口是 `unsafe`。脚本用 `JS_ReadObject` 与 `JS_EvalFunction`，模块用 `Module::load`。`open_program_with_io` 只加载源码。macOS 的 `.app` 和 Android 的资产都可携带 `app.bin`。内存上限 16 MiB，栈上限 8 MiB，eval 限时 1000 ms，其余 turn 为 128 ms，job drain 最多 32 轮。文件模块先按应用根做词法归一化，`..` 留在根内则接受，越出根才拒绝；`AppLoader` 再检查符号化后的真实路径。单个文件上限 16 MiB。脚本异常的 message 和 stack 分开进入 `DiagnosticsHub`。`Engine::shutdown` 在 VM 存活时先释放响应式图，再清空定时器、监听器及 HTTP 等 Persistent，移除 userdata，最后依次释放 Context 和 Runtime；正常 Drop 与启动失败共用此路径。`run --trace` 输出帧内脚本微秒、非空更新轮次和场景 setter 次数。
 
 ## 渲染器
 
@@ -141,4 +138,4 @@ CLI 按 `app.toml` 的目标权限生成 `app.modules`，宿主据此限制会�
 
 ## 应用
 
-`apps/gallery-solid/src/quotes.tsx`。路由包含 `/stocks`、`/watchlist`、`/market`、`/trade`、`/profile`、`/search`、`/stock/:symbol`、`/order/:symbol`。行情推进和发布频率由应用管理。首页通过稳定的证券分组把行更新分摊到多个帧，并将迷你图错开发布。自选列表打开 `VirtualList` 的 `recycle`。`just gallery-dist` 在源码更新后重编 `dist/quotes.js`。`quickjs` 的原生组件测试用 Node 编译 TSX fixture，再在真实会话中检查。Gallery 测试消费本地 ESM 产物，缺失时直接失败。
+`apps/gallery-solid/src/quotes.tsx`。路由包含 `/stocks`、`/watchlist`、`/market`、`/trade`、`/profile`、`/search`、`/stock/:symbol`、`/order/:symbol`。行情推进和发布频率由应用管理。首页通过稳定的证券分组把行更新分摊到多个帧，并将迷你图错开发布。自选列表打开 `VirtualList` 的 `recycle`。`just gallery-dist` 在源码更新后重编 `dist/quotes.js`。`javascript` 的原生组件测试用 Node 编译 TSX fixture，再在真实会话中检查。Gallery 测试消费本地 ESM 产物，缺失时直接失败。

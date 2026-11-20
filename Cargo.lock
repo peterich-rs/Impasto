@@ -43,10 +43,10 @@ name = "android"
 version = "0.0.0"
 dependencies = [
  "engine",
+ "javascript",
  "jni 0.22.4",
  "ndk",
  "ndk-sys",
- "quickjs",
  "session",
  "shell",
  "tracing",
@@ -362,7 +362,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
- "quickjs",
+ "javascript",
  "serde",
  "session",
  "shell",
@@ -1158,6 +1158,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
+name = "javascript"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "ndk-sys",
+ "protocol",
+ "quickjs-jit",
+ "reactive",
+ "thiserror 2.0.21",
+ "tracing",
+ "uicore",
+ "url",
+]
+
+[[package]]
 name = "jni"
 version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1240,27 +1255,6 @@ dependencies = [
  "getrandom 0.4.3",
  "libc",
 ]
-
-[[package]]
-name = "js"
-version = "0.0.0"
-dependencies = [
- "js-host",
- "libc",
- "quickjs-jit",
- "url",
-]
-
-[[package]]
-name = "js-headless"
-version = "0.0.0"
-dependencies = [
- "js",
-]
-
-[[package]]
-name = "js-host"
-version = "0.0.0"
 
 [[package]]
 name = "js-sys"
@@ -1351,6 +1345,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "engine",
+ "javascript",
  "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",
@@ -1361,7 +1356,6 @@ dependencies = [
  "objc2-metal",
  "objc2-quartz-core",
  "protocol",
- "quickjs",
  "session",
  "shell",
  "tracing",
@@ -1889,21 +1883,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "quickjs"
-version = "0.0.0"
-dependencies = [
- "js",
- "libc",
- "protocol",
- "quickjs-jit",
- "reactive",
- "session",
- "thiserror 2.0.21",
- "tracing",
- "uicore",
-]
-
-[[package]]
 name = "quickjs-jit"
 version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2282,8 +2261,7 @@ dependencies = [
 name = "session"
 version = "0.0.0"
 dependencies = [
- "js-host",
- "ndk-sys",
+ "javascript",
  "protocol",
  "uicore",
 ]

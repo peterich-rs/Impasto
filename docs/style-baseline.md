@@ -1,6 +1,6 @@
 # 样式验证
 
-布局与样式的可观察合同在 `crates/uicore/src/style_contract_test.rs`、`style/tests.rs` 和 `crates/quickjs/tests/fixtures/style.tsx`。QuickJS fixture 经实际 Babel/esbuild 编译后在原生会话中执行，不使用 Node 布局替身。
+布局与样式的可观察合同在 `crates/uicore/src/style_contract_test.rs`、`style/tests.rs` 和 `crates/javascript/tests/fixtures/ui/style.tsx`。QuickJS fixture 经实际 Babel/esbuild 编译后在原生会话中执行，不使用 Node 布局替身。
 
 ```sh
 cargo test --locked --workspace

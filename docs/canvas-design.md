@@ -13,7 +13,7 @@
 
 ## 可行性评估
 
-当前运行时由根 `Cargo.toml` 的 `rquickjs = { package = "quickjs-jit", version = "=0.14.2", ... }` 提供，绑定与会话在 Rust 的 `linked/rt`。现有 ListDriver/ScrollController 已使用 rquickjs class，响应式回调已由 Persistent 持有，因此 Canvas 上下文、Path2D 和渐变可以沿同一方式直接录制到 Rust。现有 Taffy、picture owner、Graph、Typography 与图片缓存继续复用。SDK 已有路径、矩阵、裁剪、SaveLayer、纹理裁切和段落绘制；通用离屏纹理渲染与读回尚未贯通。**屏幕 Canvas 可行；原生方法调用开销需要实测，离屏导出与像素访问另行交付。**
+当前运行时由根 `Cargo.toml` 的 `rquickjs = { package = "quickjs-jit", version = "=0.14.2", ... }` 提供，绑定与会话在 Rust 的 `src/ui/player/vm`。现有 ListDriver/ScrollController 已使用 rquickjs class，响应式回调已由 Persistent 持有，因此 Canvas 上下文、Path2D 和渐变可以沿同一方式直接录制到 Rust。现有 Taffy、picture owner、Graph、Typography 与图片缓存继续复用。SDK 已有路径、矩阵、裁剪、SaveLayer、纹理裁切和段落绘制；通用离屏纹理渲染与读回尚未贯通。**屏幕 Canvas 可行；原生方法调用开销需要实测，离屏导出与像素访问另行交付。**
 
 ## 当前接口与消费点
 
@@ -24,16 +24,16 @@
 - `packages/solid-renderer/runtime/index.ts:232`：boot 安装帧与布局监听，不应再在这里无条件遍历所有 Canvas。
 - `packages/reactive/src/api.d.ts:6`：现有 memo/effect API；没有 createReaction，不能在设计中假定已有延后跟踪接口。
 - `crates/reactive/src/lib.rs:208`、`:293`：Graph 的 memo/effect、has_updates、run_updates；现有 scheduled 参数只控制首次执行，不是布局后的独立队列。
-- `Cargo.toml:29`、`crates/quickjs/Cargo.toml`：依赖名 rquickjs 对应钉住的 quickjs-jit 0.14.2，启用 macro/loader/bindgen；解释器始终由 Cargo 构建。
-- `crates/quickjs/src/linked/rt/mod.rs:438`：`rt::Engine` 拥有 Host、Context、Runtime 与 Inner；Host::with 复用同步入口的活动 Ctx。
-- `crates/quickjs/src/linked/rt/mod.rs:29`、`:553`：References 中的 Persistent 与 Engine::shutdown；先清理图和全部持久值，再释放 Context/Runtime，Host/Inner 活过 class finalizer。
-- `crates/quickjs/src/linked/rt/drivers.rs:7`：ListDriver/ScrollController 的 Trace、JsLifetime、class/methods、index/generation 和释放路径，是 Canvas 原生类的直接接入依据。
-- `crates/quickjs/src/linked/rt/bindings.rs:267`：style_snapshot 先解码为拥有型 Rust 值，再由 OwnedRec 提交。Canvas 的录制对象原本就在 Rust，提交时不需要重做 JS 数组解码。
-- `crates/quickjs/src/linked/rt/modules.rs:51`：scene_names 与 SceneModule；Path2D 构造器需要声明、初始化和导出，不能只在 TS 增加类型。
-- `crates/quickjs/src/linked/rt/turns.rs:265`、`rt/mod.rs:138`：vm_run_updates、Host::budget 与中断入口。Canvas 绘制需要同类 Rust turn，继承单调时钟预算与入口归因。
-- `crates/quickjs/src/linked/mod.rs:831`、`:865`、`:890`：layout、vm_layout、最终 layout 与 record；绘图回调插在最终 layout 和 record 之间，并先结束 Tree 借用。
-- `crates/quickjs/src/linked/reactive.rs:9`：Value 的 Persistent 与 JsEval；复用同一张图与 owner，Canvas 局部绘制错误需要在专用入口截获，不能直接触发普通 reactive_error 的整帧失败状态。
-- `crates/quickjs/src/linked/mutation.rs:266`、`abi.yml`、`build.rs`：OwnedRec 持有 Rust payload；abi.yml 生成 Rust/JS/TS 常量，build.rs 不生成类型解码器或 C 头文件。
+- `Cargo.toml:29`、`crates/javascript/Cargo.toml`：依赖名 rquickjs 对应钉住的 quickjs-jit 0.14.2，启用 macro/loader/bindgen；解释器始终由 Cargo 构建。
+- `crates/javascript/src/ui/player/vm/mod.rs:438`：`rt::Engine` 拥有 Host、Context、Runtime 与 Inner；Host::with 复用同步入口的活动 Ctx。
+- `crates/javascript/src/ui/player/vm/mod.rs:29`、`:553`：References 中的 Persistent 与 Engine::shutdown；先清理图和全部持久值，再释放 Context/Runtime，Host/Inner 活过 class finalizer。
+- `crates/javascript/src/ui/player/vm/drivers.rs:7`：ListDriver/ScrollController 的 Trace、JsLifetime、class/methods、index/generation 和释放路径，是 Canvas 原生类的直接接入依据。
+- `crates/javascript/src/ui/player/vm/bindings.rs:267`：style_snapshot 先解码为拥有型 Rust 值，再由 OwnedRec 提交。Canvas 的录制对象原本就在 Rust，提交时不需要重做 JS 数组解码。
+- `crates/javascript/src/ui/player/vm/modules.rs:51`：scene_names 与 SceneModule；Path2D 构造器需要声明、初始化和导出，不能只在 TS 增加类型。
+- `crates/javascript/src/ui/player/vm/turns.rs:265`、`src/ui/player/vm/mod.rs`：vm_run_updates、Host::budget 与中断入口。Canvas 绘制需要同类 Rust turn，继承单调时钟预算与入口归因。
+- `crates/javascript/src/ui/player/mod.rs:831`、`:865`、`:890`：layout、vm_layout、最终 layout 与 record；绘图回调插在最终 layout 和 record 之间，并先结束 Tree 借用。
+- `crates/javascript/src/ui/player/reactive.rs:9`：Value 的 Persistent 与 JsEval；复用同一张图与 owner，Canvas 局部绘制错误需要在专用入口截获，不能直接触发普通 reactive_error 的整帧失败状态。
+- `crates/javascript/src/ui/player/mutation.rs:266`、`abi.yml`、`build.rs`：OwnedRec 持有 Rust payload；abi.yml 生成 Rust/JS/TS 常量，build.rs 不生成类型解码器或 C 头文件。
 - `crates/uicore/src/tree/node.rs`、`tree/mod.rs`：节点 payload 与 Tree；Canvas 可作为普通 View 的可选绘图内容，不增加 Kind。
 - `crates/uicore/src/tree/layout.rs:178`：picture owner 布尔标志；需要区分 ListDriver 与 Canvas 的使用来源。
 - `crates/uicore/src/tree/record/mod.rs:1163`：translate_command；Canvas 只平移外层原点，内部局部命令不逐点改写。
@@ -268,7 +268,7 @@ export interface TextMetrics {
 
 ### 7. Rust 原生类、录制与原子提交
 
-CanvasRenderingContext2D、Path2D、CanvasGradient 与 CanvasController 通过 `linked/rt/canvas.rs` 的 rquickjs class 暴露。类方法调用 `uicore::canvas::Recorder`、路径和画笔的具体 Rust 方法；TS 仅保留 Props、类型导出、组件样式/owner 绑定。
+CanvasRenderingContext2D、Path2D、CanvasGradient 与 CanvasController 通过 `src/ui/player/vm/canvas.rs` 的 rquickjs class 暴露。类方法调用 `uicore::canvas::Recorder`、路径和画笔的具体 Rust 方法；TS 仅保留 Props、类型导出、组件样式/owner 绑定。
 
 **数据流：** `JS draw → rquickjs class 方法 → Rust Recorder → finish/prepare → OwnedRec（MutationOp::SetCanvas）→ Tree → protocol::CanvasList → picture → engine`。
 
@@ -276,7 +276,7 @@ CanvasRenderingContext2D、Path2D、CanvasGradient 与 CanvasController 通过 `
 - Recorder 拥有当前路径、CTM、状态栈和调用形成的 Rust 记录；Path2D/Gradient 拥有可版本化 Rust 数据。绘制操作保存当时的不可变快照，后改 builder 不影响已安装内容。跨方法共享 Recorder 只为同次录制，不使用 Arc<Mutex> 或异步运行时。
 - 原生方法先完整转换参数，再借用 Recorder；可能执行 JS getter/coercion 的步骤不能跨越 RefMut。返回 JS 对象前也先释放可变借用，防止分配/GC/finalizer 重入。
 - 画笔属性 getter 若需要返回原来的 Gradient JS 对象，用带 Ctx 生命周期的 Class/Value 字段并实现 Trace；纯 Rust 几何/颜色字段不追踪。不要在原生类之间用 Persistent 互相固定成 GC 无法回收的根。
-- 跨 turn 的 draw/onDrawError 使用与现有回调一致的 Persistent；构造器与 native function 的声明/导出进入 rt/modules.rs。类方法优先从当前 Ctx 的 userdata 取得存活 Host，不为每个图元复制裸 Host 指针。
+- 跨 turn 的 draw/onDrawError 使用与现有回调一致的 Persistent；构造器与 native function 的声明/导出进入 vm/modules.rs。类方法优先从当前 Ctx 的 userdata 取得存活 Host，不为每个图元复制裸 Host 指针。
 - 类构造器有独立的原生导出表，并合并到 scene_names 的声明集合；不把 Path2D 混进只按普通函数包装的 CORE_NAMES 分派。Canvas 组件传入稳定的 draw 包装闭包，实际调用 props.draw 时仍处于 paint reader 下，因此 getter/信号依赖继续由 Graph 跟踪。
 - finish 只取得 Rust 拥有数据；prepare 校验、规范化路径/描边/裁剪和资源引用，形成不可变 CanvasList。随后构造带类型化 canvas payload 的 OwnedRec，一次走已有 mutation::mutate/apply 路径。getter、draw、prepare 失败时均不安装部分结果。
 - abi.yml 只需登记 SetCanvas 等真正的场景操作常量；现有 build.rs 可以生成对应 Rust/JS/TS 编号。每个 lineTo 不进入场景 mutation 表，也不新增 Canvas 操作的 JS 数组协议、编码器、解码器或 C 布局。
@@ -377,7 +377,7 @@ Canvas 回调复用现有非 eval turn 的 128 ms 上限，并标注 canvas/Node
 
 ### 12. GPU 生命周期与缓存
 
-- draw/error 的 Persistent、paint binding 与原生类归 quickjs 会话；Recorder 和 CPU 几何使用 Rust 所有权，安装后的 CanvasList 归 Tree；Impeller Path/Paint/Paragraph/DisplayList 归 engine。所有操作仍在渲染线程，Engine 与 Typography 的 !Send 约束保持。
+- draw/error 的 Persistent、paint binding 与原生类由 JavaScript UI 会话持有；Recorder 和 CPU 几何使用 Rust 所有权，安装后的 CanvasList 归 Tree；Impeller Path/Paint/Paragraph/DisplayList 归 engine。所有操作仍在渲染线程，Engine 与 Typography 的 !Send 约束保持。
 - Canvas 默认成为独立 picture owner；与 ListDriver 的 owner 来源独立计数/标记，关闭或清空 Canvas 不得撤掉列表行需要的隔离。普通 View 的 children 能力不因有无 Canvas 动态改变，公共 Canvas 组件自行禁止 children。
 - 同尺寸、相同绘图版本重复 present/滚动不运行 JS、不重新准备几何、不重建 Canvas picture。节点变换与 opacity 尽量继续走 LayerTree。
 - Hidden/Paused/MemoryWarning 的 Engine::trim 可以释放 GPU picture/纹理/段落；CPU CanvasList 仍可用于恢复。Resumed 重建 GPU 显示列表，不以每个 Canvas 重跑 draw 作为恢复前提。
@@ -421,15 +421,15 @@ Canvas 回调复用现有非 eval turn 的 128 ms 上限，并标注 canvas/Node
 
 ## Phase 2: 原生上下文、绘制阶段与公共 Canvas
 
-**文件：`crates/reactive/src/lib.rs`、`crates/quickjs/src/linked/reactive.rs`、`linked/mod.rs`**
+**文件：`crates/reactive/src/lib.rs`、`crates/javascript/src/ui/player/reactive.rs`、`src/ui/player/mod.rs`**
 - 加入同图的 paint 阶段、owner 清理、只读 guard；最终布局后先释放 Tree 借用，再运行绘制 turn，计入下一帧需求。
 
-**文件：`crates/quickjs/src/linked/rt/canvas.rs`（新增）、`rt/mod.rs`、`rt/bindings.rs`、`rt/modules.rs`、`rt/turns.rs`**
+**文件：`crates/javascript/src/ui/player/vm/canvas.rs`（新增）、`src/ui/player/vm/mod.rs`、`src/ui/player/vm/bindings.rs`、`src/ui/player/vm/modules.rs`、`src/ui/player/vm/turns.rs`**
 - 使用现有 class/methods/Trace/JsLifetime 能力实现 Context 和 Controller；接入 Host 活动 Ctx、Persistent、NodeId/绑定 generation、DrawLease 与预算。
 - 在 scene 中声明并导出原生类/构造器和绑定入口；vm_paint 截取局部异常，复用现有运行时中断与错误归因。
 - 在 shutdown 与 vm_forget_ids 中释放绑定；finalizer 只回收纯 Rust 状态。
 
-**文件：`crates/quickjs/abi.yml`、`src/linked/mutation.rs`**
+**文件：`crates/javascript/src/ui/abi.yml`、`src/ui/player/mutation.rs`**
 - 登记一次最终 SetCanvas，OwnedRec 保存类型化 CanvasList payload；直接复用现有 mutation 路径，不把绘图逐方法写入 ABI。
 - build.rs 保持现有常量生成职责，不增加 JS 录制格式或通用对象解码器。
 
@@ -442,11 +442,11 @@ Canvas 回调复用现有非 eval turn 的 128 ms 上限，并标注 canvas/Node
 
 ## Phase 3: 原生复用路径、渐变与图形查询
 
-**文件：`crates/quickjs/src/linked/rt/canvas.rs`、`rt/modules.rs`、`crates/uicore/src/canvas/path.rs`、`paint.rs`、`prepare.rs`、`packages/solid-renderer/src/canvas/types.ts`、`runtime/index.ts`、`packages/reactive/src/modules.d.ts`**
+**文件：`crates/javascript/src/ui/player/vm/canvas.rs`、`src/ui/player/vm/modules.rs`、`crates/uicore/src/canvas/path.rs`、`paint.rs`、`prepare.rs`、`packages/solid-renderer/src/canvas/types.ts`、`runtime/index.ts`、`packages/reactive/src/modules.d.ts`**
 - 实现 Path2D/Gradient 的原生 class、SVG path 与不可变版本快照；补齐属性对象身份、Trace 和无环的所有权。
 - 精确填充/描边查询直接读 native path，与实际绘制共用几何；原生类构造器按真实 scene 导出验收。
 
-**文件：`crates/uicore/src/tree/hit.rs`、`crates/quickjs/src/linked/rt/canvas.rs`、`packages/solid-renderer/src/scene.ts`、`packages/solid-ui/src/Canvas.tsx`**
+**文件：`crates/uicore/src/tree/hit.rs`、`crates/javascript/src/ui/player/vm/canvas.rs`、`packages/solid-renderer/src/scene.ts`、`packages/solid-ui/src/Canvas.tsx`**
 - 基于现有反变换提供 controller.toLocal，覆盖滚动、旋转、非等比缩放和 padding；该基础方法随阶段 2 一起交付，此阶段完成组合验收。
 
 ## Phase 4: 同源文字与图片
@@ -457,19 +457,19 @@ Canvas 回调复用现有非 eval turn 的 128 ms 上限，并标注 canvas/Node
 **文件：`crates/engine/src/typography/key.rs`、`shape.rs`、`paint_store.rs`、`mod.rs`、`src/player/canvas.rs`、`pictures.rs`、`textures.rs`**
 - 补齐缓存身份、画笔/基线、文字 retain；支持图片 natural size/source crop/sampling，图片加载完成使相关 picture 失效。
 
-**文件：`crates/uicore/src/tree/store.rs`、`crates/quickjs/src/linked/rt/canvas.rs`、`packages/solid-renderer/src/canvas/types.ts`、`packages/solid-ui/src/index.tsx`**
+**文件：`crates/uicore/src/tree/store.rs`、`crates/javascript/src/ui/player/vm/canvas.rs`、`packages/solid-renderer/src/canvas/types.ts`、`packages/solid-ui/src/index.tsx`**
 - 贯通同步 measureText、drawImage 资源引用与 B 版本完整类型。
 - 阶段出口：测量与绘制字号相同、字体更新失效、异步图片到达后显示、复用 picture 不丢纹理，Metal/Vulkan 一致。
 
 ## Phase 5: 原生验收、诊断与应用迁移
 
-**文件：`crates/quickjs/src/component_tests.rs`、`crates/reactive/src/lib.rs` 的测试、`crates/uicore/src/canvas/tests.rs`（新增）、`crates/engine/src/player/canvas.rs` 的测试**
+**文件：`crates/javascript/src/ui/component_tests.rs`、`crates/reactive/src/lib.rs` 的测试、`crates/uicore/src/canvas/tests.rs`（新增）、`crates/engine/src/player/canvas.rs` 的测试**
 - 覆盖下面的正确性矩阵，使用真实会话验证 class/getter、paint lane、错误局部化、无副作用和资源生命周期；补 GC/Trace、泄漏、被 JS 保留的关闭 context、启动失败/重复退出、JS 超时与 native 准备超时。测试始终运行当前解释器，几何用 MonoShaper 可在无 SDK 环境验收，不引入 QuickJS 缺失分支。
 
-**文件：`packages/solid-ui/src/canvas.test.ts`、`packages/solid-ui/type-tests/canvas.tsx`、`crates/quickjs/tests/fixtures/canvas.tsx`（新增）**
+**文件：`packages/solid-ui/src/canvas.test.ts`、`packages/solid-ui/type-tests/canvas.tsx`、`crates/javascript/tests/fixtures/ui/canvas.tsx`（新增）**
 - Node/类型测试覆盖 Props、绑定调用、controller 清理与导出；真实 QuickJS fixture 验证原生 class、上下文失效和不可变快照，不在 TS 测试中复制 Recorder 算法。
 
-**文件：`crates/shell/src/diagnostics/hub.rs`、`diagnostics/module.rs`、`diagnostics/inspect.rs`、`src/timing.rs`、`src/shell.rs`、`crates/session/src/lib.rs`、`crates/quickjs/src/linked/mod.rs`、`packages/devtools/src/store.ts`、`src/pages/performance.tsx`**
+**文件：`crates/shell/src/diagnostics/hub.rs`、`diagnostics/module.rs`、`diagnostics/inspect.rs`、`src/timing.rs`、`src/shell.rs`、`crates/javascript/src/session/mod.rs`、`crates/javascript/src/ui/player/mod.rs`、`packages/devtools/src/store.ts`、`src/pages/performance.tsx`**
 - 增加录制/准备时间、命令与路径段数量、重绘/复用计数；沿用环形缓冲。接入时先定位字段消费点，生成端与消费端同步更新，不只加孤立指标。
 
 **文件：`apps/gallery-solid/src/widgets/sparkline.tsx`、`src/pages/canvas.tsx`、`apps/gallery-solid/quotes.stocks.test.ts`**
@@ -526,19 +526,19 @@ Canvas 回调复用现有非 eval turn 的 128 ms 上限，并标注 canvas/Node
 - `crates/protocol/src/canvas.rs` -- 通用局部命令与资源类型。
 - `crates/protocol/src/draw_list.rs` -- Canvas 命令与 FontSlant。
 - `crates/protocol/src/lib.rs` -- 导出协议类型。
-- `crates/quickjs/abi.yml` -- 登记最终原子 SetCanvas 操作。
-- `crates/quickjs/src/component_tests.rs` -- 原生会话与 class/GC/预算回归。
-- `crates/quickjs/tests/fixtures/canvas.tsx` -- 真实原生组件 fixture。
-- `crates/quickjs/src/linked/rt/bindings.rs` -- 注册原生 Canvas 绑定入口。
-- `crates/quickjs/src/linked/rt/mod.rs` -- 持久回调、预算和 shutdown 清理。
-- `crates/quickjs/src/linked/rt/modules.rs` -- 声明与导出 Canvas 原生类。
-- `crates/quickjs/src/linked/rt/turns.rs` -- 原生 paint turn 与节点回收清理。
-- `crates/quickjs/src/linked/rt/canvas.rs` -- 原生 Context/Path2D/Gradient/Controller、DrawLease 与提交。
-- `crates/quickjs/src/linked/mod.rs` -- 最终布局后的绘制阶段。
-- `crates/quickjs/src/linked/mutation.rs` -- Typed CanvasList payload 与原子变更。
-- `crates/quickjs/src/linked/reactive.rs` -- 同图 paint computation。
+- `crates/javascript/src/ui/abi.yml` -- 登记最终原子 SetCanvas 操作。
+- `crates/javascript/src/ui/component_tests.rs` -- 原生会话与 class/GC/预算回归。
+- `crates/javascript/tests/fixtures/ui/canvas.tsx` -- 真实原生组件 fixture。
+- `crates/javascript/src/ui/player/vm/bindings.rs` -- 注册原生 Canvas 绑定入口。
+- `crates/javascript/src/ui/player/vm/mod.rs` -- 持久回调、预算和 shutdown 清理。
+- `crates/javascript/src/ui/player/vm/modules.rs` -- 声明与导出 Canvas 原生类。
+- `crates/javascript/src/ui/player/vm/turns.rs` -- 原生 paint turn 与节点回收清理。
+- `crates/javascript/src/ui/player/vm/canvas.rs` -- 原生 Context/Path2D/Gradient/Controller、DrawLease 与提交。
+- `crates/javascript/src/ui/player/mod.rs` -- 最终布局后的绘制阶段。
+- `crates/javascript/src/ui/player/mutation.rs` -- Typed CanvasList payload 与原子变更。
+- `crates/javascript/src/ui/player/reactive.rs` -- 同图 paint computation。
 - `crates/reactive/src/lib.rs` -- 分阶段执行与只读 guard。
-- `crates/session/src/lib.rs` -- 传递 Canvas 帧成本。
+- `crates/javascript/src/session/mod.rs` -- 传递 Canvas 帧成本。
 - `crates/shell/src/diagnostics/hub.rs` -- Canvas 指标。
 - `crates/shell/src/diagnostics/inspect.rs` -- 导出 Canvas 帧成本。
 - `crates/shell/src/diagnostics/module.rs` -- 序列化 devtools 帧字段。

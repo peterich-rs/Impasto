@@ -45,7 +45,7 @@ fn bundle_for(app: &App, options: &BuildOptions, target: Option<&str>) -> Result
     if !options.debug {
         let code = fs::read_to_string(&esm)?;
         let registry = compile_registry(app, target);
-        let bytes = quickjs::compile_with_registry(&code, "app.js", true, registry)?;
+        let bytes = javascript::ui::compile_with_registry(&code, "app.js", true, registry)?;
         fs::write(&output, bytes)?;
         fs::remove_file(esm)?;
         let map = app.root.join("build/app.js.map");

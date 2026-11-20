@@ -2,13 +2,13 @@
 
 macOS 与 Android 的平台线程将事件入队，渲染线程创建 `Engine` 和会话并上屏。两个宿主各自链接对应目标的 Impeller SDK。[Impeller SDK](../crates/impeller-sys/README.md)
 
-`shell` 不依赖 `quickjs`。一个可执行文件只链一种会话。`protocol`、`uicore`、`engine`、`crates/macos` 不手写 C。QuickJS 使用 Cargo 构建的 quickjs-jit 0.14.2，Rust 绑定在 `crates/quickjs/src/linked/rt`。`Engine` 与 QuickJS 都是 `!Send`。
+`shell` 通过 `session` 使用帧和输入类型。平台宿主启用 `javascript/ui` 打开应用会话。`protocol`、`uicore`、`engine`、`crates/macos` 不手写 C。QuickJS 使用 Cargo 构建的 quickjs-jit 0.14.2，Rust 绑定在 `crates/javascript/src/ui/player/vm`。`Engine` 与 QuickJS 都是 `!Send`。
 
 ## 分层
 
 ```text
 quotes.js
-  → quickjs 会话（渲染线程打开）
+  → JavaScript UI 会话（渲染线程打开）
   → session::Session
   → shell（队列、帧调度、submit）
   → macos / android

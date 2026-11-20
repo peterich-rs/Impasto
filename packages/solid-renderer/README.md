@@ -2,7 +2,7 @@
 
 `runtime/index.ts` 是 Babel 的编译入口，再导出 QuickJS `scene` 模块的原生渲染原语。`src/tree.ts` 中的 `Node` 是 `uicore::NodeId::to_raw()` 对应的数字句柄。`Text` 和 `Image` 是组件。测量、布局、命中和录制都在 `uicore`。
 
-`tools/pack.mjs` 将应用的 `solid-js` 导入指到 `@impasto/reactive`，运行时使用 `crates/reactive` 中的图。bundle 不包含 `@solidjs/universal` 或 Solid 的调度器。Node 测试替身在 `testing/`，实际原生行为由 `crates/quickjs` 的测试验证。
+`tools/pack.mjs` 将应用的 `solid-js` 导入指到 `@impasto/reactive`，运行时使用 `crates/reactive` 中的图。bundle 不包含 `@solidjs/universal` 或 Solid 的调度器。Node 测试替身在 `testing/`，实际原生行为由 `crates/javascript` 的测试验证。
 
 `just solid` 在仓库根安装依赖并运行全部 JS 包测试，`just solid-app` 运行 gallery 的构建与测试。标签和属性见 `docs/architecture.md`。
 

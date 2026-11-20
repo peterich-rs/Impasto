@@ -51,7 +51,7 @@ solid-app:
     pnpm -C "{{root}}" --filter @impasto/gallery-solid run test:esm
 
 # Build the gallery ESM bundle when its sources or the lockfile change. The
-# bundle is not committed; quickjs tests fail with instructions when it is
+# bundle is not committed; JavaScript UI tests fail with instructions when it is
 # absent (`just test` builds it first).
 gallery-dist:
     #!/usr/bin/env bash
