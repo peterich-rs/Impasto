@@ -960,6 +960,11 @@ fn host_module_bytes_preserve_typed_array_views() {
     }]));
     let source = r#"
             import {echo} from '@impasto/echo';
+            import {createSignal} from 'reactive';
+            const [read, write] = createSignal(0);
+            if (echo({ready: true}).ready !== true) throw new Error('module object');
+            write(1);
+            if (read() !== 1) throw new Error('signal after module call');
             const source = new Int16Array([1, 258, -3]);
             const view = source.subarray(1, 2);
             const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
@@ -969,6 +974,8 @@ fn host_module_bytes_preserve_typed_array_views() {
             if (clamped[0] !== 255 || clamped[1] !== 0) throw new Error('clamped bytes');
             const large = echo(new Uint8Array(4096).fill(7));
             if (!(large instanceof ArrayBuffer) || new Uint8Array(large)[4095] !== 7) throw new Error('owned buffer');
+            write(2);
+            if (read() !== 2) throw new Error('signal after byte conversion');
         "#;
     drop(
         super::JsSession::open_with(
