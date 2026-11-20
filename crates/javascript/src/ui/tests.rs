@@ -1656,6 +1656,103 @@ const IN_WATCHLIST_NAMES: &[&str] = &[
 ];
 
 #[test]
+fn watchlist_refreshes_quotes_during_drag_and_inertia() {
+    let Some(mut session) = open_gallery() else {
+        return;
+    };
+    session.metrics(&phone());
+    let mut time = 0.0;
+    let first = wait_for_text(session.as_mut(), &mut time, "腾讯控股");
+    let start = visible_watch_rows(&first);
+    let x = 180.0;
+    let y = start[start.len() / 2].1 + 4.0;
+    session.pointer(PointerEvent::new(Phase::Down, x, y, time));
+    let mut dragged = first;
+    for step in 1u16..=3 {
+        time += 16.0;
+        session.pointer(PointerEvent::new(
+            Phase::Move,
+            x,
+            y - 20.0 * f32::from(step),
+            time,
+        ));
+        let frame = session.frame(session::FrameTime::at(time));
+        if frame.layers.is_some() {
+            dragged = frame;
+        }
+    }
+    let moved = visible_watch_rows(&dragged);
+    assert!(
+        start.iter().any(|(name, y)| moved
+            .iter()
+            .any(|(row, offset)| name == row && y - offset > 8.0)),
+        "the gesture did not scroll the watchlist"
+    );
+    let clock = |frame: &session::FrameOutput| {
+        texts(frame)
+            .into_iter()
+            .find(|text| {
+                text.len() == 8 && text.as_bytes()[2] == b':' && text.as_bytes()[5] == b':'
+            })
+            .map(str::to_owned)
+    };
+    let mut last_clock = clock(&dragged).expect("market clock");
+    let mut clock_advanced = false;
+    let mut charts_redrawn = false;
+    for _ in 0..60 {
+        time += 16.0;
+        let frame = session.frame(session::FrameTime::at(time));
+        assert!(session.take_faults().is_empty(), "watchlist frame failed");
+        if let Some(next) = clock(&frame) {
+            clock_advanced |= next != last_clock;
+            last_clock = next;
+        }
+        charts_redrawn |= redraws(&frame) > 0;
+    }
+    assert!(clock_advanced, "market clock froze during the drag");
+    assert!(charts_redrawn, "sparklines froze during the drag");
+
+    let mut last_rows = moved;
+    for step in 4u16..=8 {
+        time += 16.0;
+        session.pointer(PointerEvent::new(
+            Phase::Move,
+            x,
+            y - 20.0 * f32::from(step),
+            time,
+        ));
+        let frame = session.frame(session::FrameTime::at(time));
+        if frame.layers.is_some() {
+            last_rows = visible_watch_rows(&frame);
+            last_clock = clock(&frame).expect("market clock");
+        }
+    }
+    time += 16.0;
+    session.pointer(PointerEvent::new(Phase::Up, x, y - 160.0, time));
+    let mut coasting = false;
+    let mut refreshed_while_coasting = false;
+    for _ in 0..40 {
+        let frame = session.frame(session::FrameTime::at(time));
+        assert!(session.take_faults().is_empty(), "watchlist frame failed");
+        if frame.layers.is_some() {
+            let rows = visible_watch_rows(&frame);
+            let moved = !rows.is_empty() && rows != last_rows;
+            coasting |= moved;
+            let next = clock(&frame).expect("market clock");
+            refreshed_while_coasting |= moved && next != last_clock;
+            last_clock = next;
+            last_rows = rows;
+        }
+        time += 16.0;
+    }
+    assert!(coasting, "the gesture did not start inertial scrolling");
+    assert!(
+        refreshed_while_coasting,
+        "market clock froze during inertial scrolling"
+    );
+}
+
+#[test]
 fn scrolled_watch_rows_stay_in_order() {
     let Some(mut session) = open_gallery() else {
         return;
