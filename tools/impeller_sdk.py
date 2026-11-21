@@ -203,7 +203,13 @@ def read_index(lock, override):
 def prepare(cache, target, lock, override):
     sdk = cache_path(cache, target, lock)
     with exclusive(sdk.with_suffix(".lock")):
-        if installed(sdk, target, lock):
+        expected_digest = lock.artifacts.get(target, (None, None))[0]
+        fingerprint = sdk / "artifact.sha256"
+        if installed(sdk, target, lock) and (
+            override is None and expected_digest is None
+            or override is None and fingerprint.is_file()
+            and fingerprint.read_text().strip() == expected_digest
+        ):
             return sdk
         try:
             index = read_index(lock, override)
@@ -236,6 +242,7 @@ def prepare(cache, target, lock, override):
                         shutil.copyfileobj(source, output, 1024 * 1024)
             if not installed(staged, target, lock):
                 raise ValueError(f"Impeller SDK metadata does not match {target} and {lock.version}")
+            (staged / "artifact.sha256").write_text(f"{digest}\n")
             replace_sdk(staged, sdk)
     return sdk
 
@@ -298,6 +305,8 @@ def build(cache, target, lock):
                 if generated.read_text() != bindings_path(target).read_text():
                     raise ValueError(f"bindings differ for {target}. Run `python3 tools/impeller_sdk.py bindings`")
                 (staged / "sdk.meta").write_text(lock.metadata(target))
+                if target in lock.artifacts:
+                    (staged / "artifact.sha256").write_text(f"{lock.artifacts[target][0]}\n")
                 replace_sdk(staged, sdk)
     return sdk
 
