@@ -399,6 +399,8 @@ mod tests {
             caret: None,
             description: None,
             autofill: None,
+            live: uicore::LiveRegion::Off,
+            scroll_content: None,
         }
     }
 
@@ -505,6 +507,8 @@ mod tests {
                     caret: None,
                     description: None,
                     autofill: None,
+                    live: uicore::LiveRegion::Off,
+                    scroll_content: None,
                 },
                 SemanticsNode {
                     id: SemanticsId(2),
@@ -520,6 +524,8 @@ mod tests {
                     caret: None,
                     description: None,
                     autofill: None,
+                    live: uicore::LiveRegion::Off,
+                    scroll_content: None,
                 },
             ],
             root: SemanticsId(1),

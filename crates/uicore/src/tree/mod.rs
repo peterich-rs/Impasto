@@ -103,7 +103,8 @@ pub struct Tree {
     layers: crate::layer::LayerTree,
     /// Last semantics nodes. A clean node reuses its strings.
     semantics_cache: HashMap<crate::SemanticsId, crate::SemanticsNode>,
-    platform_views: HashMap<NodeId, Arc<str>>,
+    semantics_order: Vec<crate::SemanticsId>,
+    platform_views: HashMap<NodeId, platform_view::PlatformViewSpec>,
     /// Image sources still on the tree. Maintained on insert and removal.
     image_counts: HashMap<Arc<str>, u32>,
     image_generation: u64,

@@ -52,6 +52,7 @@ impl SemanticsFlags {
     pub const READ_ONLY: u32 = 16;
     pub const FOCUSED: u32 = 32;
     pub const PASSWORD: u32 = 64;
+    pub const PLATFORM_VIEW: u32 = 128;
 
     pub const fn contains(self, bit: u32) -> bool {
         self.0 & bit == bit
@@ -92,6 +93,8 @@ pub struct SemanticsNode {
     /// Extra description, such as a field error. Never the password text.
     pub description: Option<String>,
     pub autofill: Option<AutofillField>,
+    pub live: LiveRegion,
+    pub scroll_content: Option<(f32, f32)>,
 }
 
 /// Optional override of the inferred semantics for one node.
@@ -117,6 +120,7 @@ pub struct SemanticsHint {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SemanticsAction {
     Activate(SemanticsId),
+    Focus(SemanticsId),
     Scroll {
         id: SemanticsId,
         dx: f32,
@@ -150,11 +154,12 @@ pub enum SemanticsOp {
     Remove(SemanticsId),
 }
 
-/// Nodes that changed. An empty `ops` is not produced; the session uses `None`.
+/// Nodes that changed, plus traversal order when the tree structure changes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SemanticsPatch {
     pub root: SemanticsId,
     pub ops: Vec<SemanticsOp>,
+    pub order: Option<Vec<SemanticsId>>,
 }
 
 /// Live image sources. `generation` bumps on insert and removal, not on `Arc::strong_count`.

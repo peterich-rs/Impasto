@@ -76,6 +76,7 @@ struct Inner {
     pub(super) marks: FrameMarks,
     pub(super) drivers: RefCell<uicore::DriverSet>,
     pub(super) driver_frame: Cell<bool>,
+    pub(super) last_pen: Cell<Option<uicore::PointerEvent>>,
     trace: Cell<bool>,
     /// Script failures waiting for [`crate::session::Session::take_faults`].
     pub(super) faults: RefCell<Vec<crate::session::ScriptFault>>,
@@ -115,6 +116,7 @@ impl Inner {
             marks: FrameMarks::default(),
             drivers: RefCell::new(uicore::DriverSet::new()),
             driver_frame: Cell::new(false),
+            last_pen: Cell::new(None),
             trace: Cell::new(std::env::var_os("IMPASTO_TRACE").is_some()),
             faults: RefCell::new(Vec::new()),
             graph: reactive::Graph::new(),
@@ -131,6 +133,7 @@ struct ImeSlot {
     state: crate::session::ImeState,
     /// Last editor revision copied into [`ImeSlot::state`].
     revision: u64,
+    target: Option<NodeId>,
 }
 
 impl ImeSlot {
@@ -141,14 +144,31 @@ impl ImeSlot {
             dirty: false,
             state: crate::session::ImeState::at_end(""),
             revision: 0,
+            target: None,
         }
     }
 
     /// Recomputes the platform keyboard state when the focused editor moved.
     fn sync_editor(&mut self, tree: &mut Tree) {
-        let Some(id) = tree.focused() else {
+        static NEXT_CLIENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let target = tree.focused();
+        if target != self.target {
+            self.target = target;
+            self.revision = 0;
+            self.state.client = NEXT_CLIENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.state.ack = 0;
+            self.state.node = target.map(NodeId::to_raw);
+            self.announced = false;
+            self.dirty = self.dirty || self.shown;
+        }
+        let Some(id) = target else {
             return;
         };
+        let autofill = tree.editor_autofill_hint(id);
+        if self.state.autofill != autofill {
+            self.state.autofill = autofill;
+            self.dirty = self.dirty || self.shown;
+        }
         let Some((revision, value)) = tree.editor_snapshot(id) else {
             return;
         };
@@ -515,6 +535,9 @@ impl Session for JsSession {
         // SAFETY: the tree borrow ends before dispatch. JS handlers may call
         // back into the tree through the `RefCell`.
         let inner = unsafe { &*self.inner };
+        if event.pen.is_some() {
+            inner.last_pen.set(Some(event));
+        }
         let gestures = inner.tree.borrow_mut().pointer(event);
         bump(&inner.marks.pointers);
         if let Err(message) = dispatch_pointer(inner, gestures) {
@@ -544,6 +567,49 @@ impl Session for JsSession {
         // SAFETY: `inner` is owned by this session. The tree borrow ends before
         // the callback, which may re-enter the tree.
         let inner = unsafe { &*self.inner };
+        let event = match event {
+            InputEvent::ReplaceIme {
+                client,
+                sequence,
+                text,
+                start,
+                end,
+                compose_start,
+                compose_end,
+            } => {
+                let focused = inner.tree.borrow().focused();
+                let mut ime = inner.ime.borrow_mut();
+                if !ime.shown
+                    || focused != ime.target
+                    || client != ime.state.client
+                    || sequence <= ime.state.ack
+                {
+                    return;
+                }
+                ime.state.ack = sequence;
+                ime.dirty = true;
+                InputEvent::Replace {
+                    text,
+                    start,
+                    end,
+                    compose_start,
+                    compose_end,
+                }
+            }
+            InputEvent::DismissIme(client) => {
+                let matches = {
+                    let ime = inner.ime.borrow();
+                    ime.shown
+                        && ime.target == inner.tree.borrow().focused()
+                        && client == ime.state.client
+                };
+                if matches {
+                    self.ime_dismissed();
+                }
+                return;
+            }
+            event => event,
+        };
         match &event {
             InputEvent::Key(_) | InputEvent::Back => bump(&inner.marks.keys),
             InputEvent::Text(_)
@@ -553,7 +619,9 @@ impl Session for JsSession {
             | InputEvent::Paste { .. }
             | InputEvent::SelectAll
             | InputEvent::Edit(_)
-            | InputEvent::Replace { .. } => bump(&inner.marks.edits),
+            | InputEvent::Replace { .. }
+            | InputEvent::ReplaceIme { .. }
+            | InputEvent::DismissIme(_) => bump(&inner.marks.edits),
         }
         if let InputEvent::Key(press) = &event {
             let spec = shortcut_spec(press);
@@ -655,7 +723,10 @@ impl Session for JsSession {
             InputEvent::Copy => (8, Some("Copy".to_string())),
             InputEvent::Cut => (8, Some("Cut".to_string())),
             InputEvent::SelectAll => (8, Some("SelectAll".to_string())),
-            InputEvent::Back | InputEvent::Replace { .. } => return,
+            InputEvent::Back
+            | InputEvent::Replace { .. }
+            | InputEvent::ReplaceIme { .. }
+            | InputEvent::DismissIme(_) => return,
         };
         if let Err(message) = dispatch_input(inner, id, kind, text.as_deref(), None) {
             self.note_script_error(message);

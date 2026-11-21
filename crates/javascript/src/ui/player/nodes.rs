@@ -259,16 +259,20 @@ pub(super) unsafe fn set_ime_config(session: *mut c_void, keyboard: i32, action:
     })
 }
 
-pub(super) unsafe fn set_platform_view(session: *mut c_void, node: u64, name: &str) -> i32 {
+pub(super) unsafe fn set_platform_view(
+    session: *mut c_void,
+    node: u64,
+    name: &str,
+    path: Option<&str>,
+) -> i32 {
     super::vm_entry!(-1, {
         // SAFETY: the effect runs on the owning session thread.
         let inner = unsafe { inner(session) };
-        status(
-            inner
-                .tree
-                .borrow_mut()
-                .set_platform_view(NodeId::from_raw(node), name),
-        )
+        status(inner.tree.borrow_mut().set_platform_view_with_path(
+            NodeId::from_raw(node),
+            name,
+            path,
+        ))
     })
 }
 

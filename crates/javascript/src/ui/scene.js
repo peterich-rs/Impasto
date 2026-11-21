@@ -658,8 +658,11 @@
     var descriptionText = description ? String(description) : "";
     mustEffect(effect(EFFECT.SetSemantics, id, [role | 0, checked === undefined ? -1 : checked | 0, selStart === undefined ? -1 : selStart | 0, selEnd === undefined ? -1 : selEnd | 0, disabled === undefined ? -1 : disabled | 0, editable === undefined ? -1 : editable | 0, readOnly === undefined ? -1 : readOnly | 0, orderSet, hint?.password === true ? 1 : 0, autofill, 0, order, live], labelText + "\0" + valueText + "\0" + descriptionText + "\0" + autofillValue), "setSemantics failed");
   };
-  core.setPlatformView = function (node, kind) {
-    mustEffect(effect(EFFECT.SetPlatformView, handle(node), [], String(kind ?? "")), "setPlatformView failed");
+  core.setPlatformView = function (node, kind, clipPath) {
+    var name = String(kind ?? "");
+    if (name.includes("\0")) throw new TypeError("Invalid platform view kind");
+    var spec = clipPath == null ? name : name + "\0" + String(clipPath);
+    mustEffect(effect(EFFECT.SetPlatformView, handle(node), [], spec), "setPlatformView failed");
   };
   core.setRecognizers = function (node, spec) {
     if (arguments.length < 2 || !spec) throw new Error("setRecognizers(node, spec)");

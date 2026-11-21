@@ -1,0 +1,46 @@
+[package]
+name = "embedder-ios"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["staticlib"]
+
+[target.'cfg(target_os = "ios")'.dependencies]
+embedder = { workspace = true }
+engine = { workspace = true, features = ["impeller"] }
+javascript = { workspace = true, features = ["ui"] }
+protocol = { workspace = true }
+session = { workspace = true }
+uicore = { workspace = true }
+block2 = "0.6.2"
+dispatch2 = "0.3.1"
+objc2 = "0.6.5"
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std", "CFData", "CFString", "CFDictionary", "CFNumber", "CFCGTypes",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGDataProvider", "CGImage",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std", "block2", "NSArray", "NSBundle", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError",
+    "NSFileManager", "NSObject", "NSOperation", "NSPathUtilities", "NSString", "NSURL",
+    "NSURLRequest", "NSURLResponse", "NSURLSession", "NSURLError",
+] }
+objc2-image-io = { version = "0.3.2", default-features = false, features = [
+    "std", "CGImageSource", "CGImageProperties", "objc2-core-graphics",
+] }
+objc2-metal = { version = "0.3.2", default-features = false, features = [
+    "std", "MTLDrawable", "MTLTexture", "block2", "objc2-core-foundation",
+] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
+    "std", "CALayer", "CAMetalLayer", "objc2-core-foundation", "objc2-metal",
+] }
+serde_json = "1"
+
+[target.'cfg(target_os = "ios")'.dev-dependencies]
+tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
+
+[lints]
+workspace = true

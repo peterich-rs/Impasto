@@ -48,6 +48,8 @@ pub struct Metrics {
     pub view_insets: Insets,
     /// Regions where system gestures may take precedence over application touch.
     pub system_gesture_insets: Insets,
+    /// Local occlusion, for example an undocked keyboard.
+    pub keyboard_occlusion: Option<uicore::Rect>,
 }
 
 impl Metrics {
@@ -81,6 +83,7 @@ impl Metrics {
             padding,
             view_insets,
             system_gesture_insets: Insets::default(),
+            keyboard_occlusion: None,
         }
     }
 }
@@ -280,6 +283,11 @@ pub enum KeyboardType {
 /// `selection` and `composing` are UTF-16 code units. `caret` is in scene points.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImeState {
+    /// Identity of one focus connection and the latest accepted platform edit.
+    pub client: u64,
+    pub ack: u64,
+    pub node: Option<u64>,
+    pub autofill: Option<&'static str>,
     pub text: String,
     pub selection: std::ops::Range<u32>,
     pub composing: Option<std::ops::Range<u32>>,
@@ -293,6 +301,10 @@ impl ImeState {
         let text = text.into();
         let end = utf16_len(&text);
         Self {
+            client: 0,
+            ack: 0,
+            node: None,
+            autofill: None,
             text,
             selection: end..end,
             composing: None,
@@ -361,6 +373,16 @@ pub enum InputEvent {
         compose_start: i32,
         compose_end: i32,
     },
+    ReplaceIme {
+        client: u64,
+        sequence: u64,
+        text: String,
+        start: u32,
+        end: u32,
+        compose_start: i32,
+        compose_end: i32,
+    },
+    DismissIme(u64),
 }
 
 /// Durations inside one [`Session::frame`]. The host adds gesture time itself.

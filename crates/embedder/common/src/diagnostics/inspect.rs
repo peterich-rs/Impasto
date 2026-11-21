@@ -107,6 +107,7 @@ fn kind_name(kind: &LayerKind) -> &'static str {
         LayerKind::BackdropBlur { .. } => "backdropBlur",
         LayerKind::Blend { .. } => "blend",
         LayerKind::Picture { .. } => "picture",
+        LayerKind::PlatformView { .. } => "platformView",
     }
 }
 

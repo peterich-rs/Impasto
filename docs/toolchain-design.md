@@ -17,9 +17,9 @@
 
 ## Feasibility Assessment
 
-做得到，有三处边界。场景树已经在 Rust：`uicore::Tree`（`crates/uicore/src/tree/mod.rs:52`）持有槽位、代数、Taffy、命中和弹簧，`NodeId` 已是槽位加 generation（`crates/uicore/src/tree/node.rs:15`）。QuickJS 使用 Cargo 钉住的 quickjs-jit 0.14.2；`src/ui/player/vm` 的 Rust 绑定把参数交给现有 `mutate` / `apply_now`，帧末由 `flush_mutations` 排空队列。`Runtime` 与 `Context` 由 `Engine` 持有，启动失败和 Drop 共用显式 shutdown，先释放图、定时器与 Persistent，再释放 Context 与 Runtime。nsh 的 `Graph`（`nsh/crates/nsh-core/src/reactive.rs:1`）证明 arena、双向边、值留在运行时里这条路能撑住 Solid 的调度；Impasto 要对齐的是 `2.0.0` 的上述 API，不是 nsh 写下的 Solid 1.9，也不把 nsh 的 `Host` 名字带过来。iOS 宿主不存在（`docs/refactor-plan.md:33`），`impasto build ios` 在 `crates/ios` 落地前只能生成工程、不能打出安装包。打包器换成 Rust 是后续的事，这条链路先把 Babel 和 esbuild 编进 CLI 发布包。
+做得到，有三处边界。场景树已经在 Rust：`uicore::Tree`（`crates/uicore/src/tree/mod.rs:52`）持有槽位、代数、Taffy、命中和弹簧，`NodeId` 已是槽位加 generation（`crates/uicore/src/tree/node.rs:15`）。QuickJS 使用 Cargo 钉住的 quickjs-jit 0.14.2；`src/ui/player/vm` 的 Rust 绑定把参数交给现有 `mutate` / `apply_now`，帧末由 `flush_mutations` 排空队列。`Runtime` 与 `Context` 由 `Engine` 持有，启动失败和 Drop 共用显式 shutdown，先释放图、定时器与 Persistent，再释放 Context 与 Runtime。nsh 的 `Graph`（`nsh/crates/nsh-core/src/reactive.rs:1`）证明 arena、双向边、值留在运行时里这条路能撑住 Solid 的调度；Impasto 要对齐的是 `2.0.0` 的上述 API，不是 nsh 写下的 Solid 1.9，也不把 nsh 的 `Host` 名字带过来。iOS 宿主位于 `crates/embedder/ios`，`impasto build ios` 生成 Xcode 工程和 `.app`。 [iOS 宿主](platform-hosts.md#ios-宿主)打包器换成 Rust 是后续的事，这条链路先把 Babel 和 esbuild 编进 CLI 发布包。
 
-Feasible with caveats: iOS 包要等宿主；应用机器不装 Node 要等 CLI 把打包器打进发布物；阶段 2 完成前不能删 `solid-js`。
+原生平台构建需要对应工具链。CLI 发布包提供打包所需的 Node 工具链。
 
 ## Current Surface Inventory
 
@@ -524,7 +524,7 @@ export default function Main() {
 - `build bundle`：release 打包，再把 ESM 交给 `javascript::ui::compile` 生成 IQJS envelope 字节码。`--debug` 时仍写 ESM。
 - `build apk`：在应用的 `build/android` 生成 Gradle 工程，链 `crates/android` 的引擎，跑 `assembleRelease`。逻辑从 `just android-release` 抬过来，路径改到应用目录，不假定框架仓库布局。
 - `build macos`：同样在 `build/macos` 生成工程并链 `crates/macos`。
-- `build ios`：只生成工程骨架时必须失败并写明 `crates/ios` 不存在。不要打出一个不能安装的包还返回零。`docs/refactor-plan.md` 的暂缓仍然有效。
+- `build ios`：生成 Xcode 工程，链接 `crates/embedder/ios` 的静态库并构建 `.app`。`--ios-simulator` 生成模拟器包，真机包由应用设置开发签名。
 
 **File: `crates/cli/src/toolchain.rs`**（新）
 
@@ -582,7 +582,7 @@ export default function Main() {
 - `crates/android/src/host.rs` — 阶段 4 改名 `app.rs`
 - `crates/cli/Cargo.toml` — 新 bin `impasto`
 - `crates/cli/src/analyze.rs` — 阶段 5 类型检查
-- `crates/cli/src/build.rs` — 阶段 5 `build bundle` / `apk` / `macos`；`ios` 在宿主出现前失败
+- `crates/cli/src/build.rs` — 阶段 5 `build bundle` / `apk` / `macos` / `ios`
 - `crates/cli/src/clean.rs` — 阶段 5 删 `build/`
 - `crates/cli/src/main.rs` — 阶段 1 子命令；`run` 调现有打包和 `macos`
 - `crates/cli/src/test.rs` — 阶段 5 无头测试

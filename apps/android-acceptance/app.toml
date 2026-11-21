@@ -1,6 +1,6 @@
 name = "android-acceptance"
 version = "0.1.0"
-targets = ["macos", "android"]
+targets = ["macos", "android", "ios"]
 
 [permissions]
 app-state = true
@@ -17,3 +17,11 @@ permissions = ["android.permission.CAMERA"]
 [[android.deep_links]]
 scheme = "impasto-demo"
 host = "record"
+
+[ios]
+bundle_id = "dev.impasto.fieldnotes"
+url_schemes = ["impasto-demo"]
+share_window_state = true
+
+[ios.usage_descriptions]
+NSCameraUsageDescription = "用于拍摄并附加本次现场检查的照片。"

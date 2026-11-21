@@ -68,6 +68,7 @@ pub(super) const CORE_NAMES: &[&str] = &[
     "onSettings",
     "offSettings",
     "windowMetrics",
+    "penSample",
     "onWindowMetrics",
     "offWindowMetrics",
     "listDriver",
@@ -649,6 +650,34 @@ pub(super) fn native<'js>(
         }
         "settings" => return settings(host, ctx),
         "windowMetrics" => return window_metrics(host, ctx),
+        "penSample" => {
+            let Some(event) = host.inner().last_pen.get() else {
+                return Ok(Value::new_null(ctx.clone()));
+            };
+            let Some(pen) = event.pen else {
+                return Ok(Value::new_null(ctx.clone()));
+            };
+            let sample = Object::new(ctx.clone())?;
+            sample.set("id", event.pointer.0.to_string())?;
+            sample.set("x", event.x)?;
+            sample.set("y", event.y)?;
+            sample.set("time", event.time_ms)?;
+            sample.set("force", pen.force)?;
+            sample.set("radius", pen.radius)?;
+            sample.set("altitude", pen.altitude)?;
+            sample.set("azimuth", pen.azimuth)?;
+            sample.set(
+                "phase",
+                match event.phase {
+                    uicore::Phase::Down => "down",
+                    uicore::Phase::Move => "move",
+                    uicore::Phase::Up => "up",
+                    uicore::Phase::Cancel => "cancel",
+                    uicore::Phase::Wheel | uicore::Phase::Zoom => "move",
+                },
+            )?;
+            return Ok(sample.into_value());
+        }
         "listDriver" => return drivers::list(host, ctx, args),
         "scrollController" => return drivers::scroll(host, ctx),
         "debugMemory" => {
@@ -802,6 +831,14 @@ pub(super) fn window_metrics<'js>(host: &Host, ctx: &Ctx<'js>) -> rquickjs::Resu
         features.set(index, value)?;
     }
     snapshot.set("displayFeatures", features)?;
+    if let Some(rect) = metrics.keyboard_occlusion {
+        let value = Object::new(ctx.clone())?;
+        value.set("x", rect.x)?;
+        value.set("y", rect.y)?;
+        value.set("width", rect.w)?;
+        value.set("height", rect.h)?;
+        snapshot.set("keyboardOcclusion", value)?;
+    }
     for (name, value) in [
         ("padding", metrics.padding),
         ("viewInsets", metrics.view_insets),

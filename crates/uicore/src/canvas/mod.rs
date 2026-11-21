@@ -12,6 +12,7 @@ mod tests;
 pub use paint::{ColorStop, Gradient, PaintSource};
 pub use path::{FillRule, Path2D};
 pub use prepare::prepare;
+pub(crate) use prepare::verb_of as path_verb;
 pub use record::{
     AuthorState, CanvasSize, Deadline, LineCap, LineJoin, PaintEnv, Recorder, Recording, TextAlign,
     TextBaseline, TextDirection,

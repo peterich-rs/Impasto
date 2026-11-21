@@ -40,6 +40,8 @@ pub(crate) enum Save {
 pub struct Engine {
     context: impeller::ImpellerContext,
     list: impeller::ImpellerDisplayList,
+    #[cfg(target_os = "ios")]
+    slices: metal_compositor::Slices,
     /// Temporaries the installed root display list still references.
     held: Vec<HeldParagraph>,
     pictures: crate::pictures::PictureCache,
@@ -78,6 +80,8 @@ fn impeller_version_matches() -> bool {
 
 mod canvas;
 mod images;
+#[cfg(target_os = "ios")]
+mod metal_compositor;
 mod ops;
 mod paint;
 mod upload;
@@ -123,6 +127,8 @@ impl Engine {
         Self {
             context,
             list: ptr::null_mut(),
+            #[cfg(target_os = "ios")]
+            slices: metal_compositor::Slices::default(),
             held: Vec::new(),
             pictures: crate::pictures::PictureCache::new(),
             textures: crate::textures::TextureStore::new(),
@@ -253,6 +259,32 @@ impl Engine {
             self.pictures.rollback(swap, &mut typography);
             return Err(Status::BadScene);
         }
+        #[cfg(target_os = "ios")]
+        let slices = {
+            let mut painter = crate::painter::Painter {
+                typography: &mut typography,
+                textures: &mut self.textures,
+                picture_cache: Some(&self.pictures),
+                pending: &mut pending,
+                saves: Vec::new(),
+                waiting: Vec::new(),
+                impeller: self.context,
+            };
+            match metal_compositor::Slices::build(tree, &mut painter, point_scale) {
+                Ok(slices) => slices,
+                Err(error) => {
+                    // SAFETY: the new fallback display list has not been installed.
+                    unsafe { impeller::ImpellerDisplayListRelease(display) };
+                    self.pictures.rollback(swap, &mut typography);
+                    crate::painter::release_pending(&mut pending, &mut typography);
+                    return Err(error);
+                }
+            }
+        };
+        #[cfg(target_os = "ios")]
+        {
+            self.slices = slices;
+        }
         unsafe {
             impeller::ImpellerDisplayListRelease(self.list);
             self.list = ptr::null_mut();
@@ -337,6 +369,10 @@ impl Engine {
     }
 
     pub(crate) fn release_display(&mut self) {
+        #[cfg(target_os = "ios")]
+        {
+            self.slices = metal_compositor::Slices::default();
+        }
         // SAFETY: `list` is null or the display list from the previous submit.
         unsafe {
             impeller::ImpellerDisplayListRelease(self.list);
@@ -374,13 +410,15 @@ impl Engine {
 
     /// Replaces GPU resources after the host has released its old surface.
     /// The shaper retains the typography context and registered fonts.
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     pub fn recreate_graphics(
         &mut self,
         create: impl FnOnce() -> Result<Self, Status>,
     ) -> Result<(), Status> {
         {
+            #[cfg(target_os = "android")]
             let procs = self.vulkan_procs.clone();
+            #[cfg(target_os = "android")]
             let _guard = procs.as_deref().map(vulkan::VulkanProcs::current);
             self.trim();
         }

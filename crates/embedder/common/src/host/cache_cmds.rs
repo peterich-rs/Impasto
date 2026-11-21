@@ -9,6 +9,9 @@ pub(super) fn handle(runtime: &mut Runtime, command: Command) -> Result<bool, Bo
         Command::MemoryWarning => memory_warning(runtime),
         Command::ImageReady(ready) => image_ready(runtime, ready),
         Command::ExternalTexture { source, frame } => external_texture(runtime, source, frame),
+        Command::ExternalGpuTexture { source, frame } => {
+            external_gpu_texture(runtime, source, frame)
+        }
         Command::ReloadImage(source) => reload(runtime, &source),
         _ => {}
     }
@@ -49,7 +52,31 @@ fn external_texture(runtime: &mut Runtime, source: String, frame: Option<crate::
     } else {
         runtime.external_textures.remove(&source);
     }
-    runtime.engine.borrow_mut().forget_texture(&source);
+    texture_updated(runtime, &source);
+}
+
+fn external_gpu_texture(
+    runtime: &mut Runtime,
+    source: String,
+    frame: Option<crate::ImportExternalFrame>,
+) {
+    if let Some(import) = frame {
+        let image = import(&runtime.engine.borrow());
+        if image.is_none() {
+            return;
+        }
+        runtime.external_gpu.insert(
+            source.clone(),
+            crate::images::ExternalGpuFrame { import, image },
+        );
+    } else {
+        runtime.external_gpu.remove(&source);
+    }
+    texture_updated(runtime, &source);
+}
+
+fn texture_updated(runtime: &mut Runtime, source: &str) {
+    runtime.engine.borrow_mut().forget_texture(source);
     if runtime
         .image_requirements
         .iter()

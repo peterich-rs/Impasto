@@ -1,12 +1,19 @@
 //! Document-directory files and the string map behind `AsyncStorage`.
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use session::document_relative;
 
 const STORE_NAME: &str = "async-storage.tsv";
+
+// All windows in a process can use the same application storage directory.
+static STORE_LOCK: Mutex<()> = Mutex::new(());
+static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
 pub fn read_document(root: &Path, path: &str) -> Result<Vec<u8>, String> {
     let full = joined(root, path).map_err(|error| io_fail("read", path, error))?;
@@ -30,7 +37,10 @@ pub fn delete_document(root: &Path, path: &str) -> Result<(), String> {
 }
 
 pub fn store_get(root: &Path, keys: &[String]) -> Result<Vec<(String, Option<String>)>, String> {
-    let map = load_store(root)?;
+    let map = {
+        let _guard = lock_store();
+        load_store(root)?
+    };
     Ok(keys
         .iter()
         .map(|key| {
@@ -41,6 +51,7 @@ pub fn store_get(root: &Path, keys: &[String]) -> Result<Vec<(String, Option<Str
 }
 
 pub fn store_set(root: &Path, rows: &[(String, String)]) -> Result<(), String> {
+    let _guard = lock_store();
     let mut map = load_store(root).map_err(|error| io_fail("store-set", STORE_NAME, error))?;
     for (key, value) in rows {
         map.insert(key.clone(), value.clone());
@@ -49,6 +60,7 @@ pub fn store_set(root: &Path, rows: &[(String, String)]) -> Result<(), String> {
 }
 
 pub fn store_remove(root: &Path, keys: &[String]) -> Result<(), String> {
+    let _guard = lock_store();
     let mut map = load_store(root).map_err(|error| io_fail("store-remove", STORE_NAME, error))?;
     for key in keys {
         map.remove(key);
@@ -57,12 +69,19 @@ pub fn store_remove(root: &Path, keys: &[String]) -> Result<(), String> {
 }
 
 pub fn store_clear(root: &Path) -> Result<(), String> {
-    let path = root.join(STORE_NAME);
-    if path.exists() {
-        fs::remove_file(path)
-            .map_err(|error| io_fail("store-clear", STORE_NAME, error.to_string()))?;
+    let _guard = lock_store();
+    match fs::remove_file(root.join(STORE_NAME)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_fail("store-clear", STORE_NAME, error.to_string())),
     }
-    Ok(())
+}
+
+fn lock_store() -> MutexGuard<'static, ()> {
+    // A previous panic leaves either the complete original file or its complete replacement.
+    STORE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn io_fail(op: &'static str, path: &str, error: String) -> String {
@@ -76,11 +95,11 @@ fn joined(root: &Path, path: &str) -> Result<PathBuf, String> {
 }
 
 fn load_store(root: &Path) -> Result<BTreeMap<String, String>, String> {
-    let path = root.join(STORE_NAME);
-    if !path.exists() {
-        return Ok(BTreeMap::new());
-    }
-    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let text = match fs::read_to_string(root.join(STORE_NAME)) {
+        Ok(text) => text,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => return Err(error.to_string()),
+    };
     let mut map = BTreeMap::new();
     for line in text.split('\n') {
         if line.is_empty() {
@@ -103,7 +122,26 @@ fn save_store(root: &Path, map: &BTreeMap<String, String>) -> Result<(), String>
         text.push_str(&escape(value));
         text.push('\n');
     }
-    fs::write(root.join(STORE_NAME), text).map_err(|error| error.to_string())
+    replace_store(root, text.as_bytes()).map_err(|error| error.to_string())
+}
+
+fn replace_store(root: &Path, value: &[u8]) -> io::Result<()> {
+    let (mut file, path) = loop {
+        let serial = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
+        let path = root.join(format!(".{STORE_NAME}.{}.{serial}.tmp", std::process::id()));
+        match File::create_new(&path) {
+            Ok(file) => break (file, path),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    let saved = file.write_all(value).and_then(|()| file.sync_all());
+    drop(file);
+    let result = saved.and_then(|()| fs::rename(&path, root.join(STORE_NAME)));
+    if result.is_err() {
+        let _ = fs::remove_file(&path);
+    }
+    result
 }
 
 fn escape(text: &str) -> String {
@@ -129,4 +167,74 @@ fn unescape(text: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{STORE_NAME, store_get, store_set};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::Barrier;
+    use std::thread;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestDirectory(PathBuf);
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn concurrent_store_writes_preserve_each_update() -> Result<(), String> {
+        const WRITERS: usize = 8;
+        const UPDATES: usize = 8;
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("impasto-storage-{}-{serial}", std::process::id()));
+        fs::create_dir(&root).map_err(|error| error.to_string())?;
+        let directory = TestDirectory(root);
+        let root = &directory.0;
+        // A preexisting store must survive concurrent read-modify-write operations.
+        fs::write(root.join(STORE_NAME), "legacy\tvalue\\nwith\\ttabs\n")
+            .map_err(|error| error.to_string())?;
+
+        let start = Barrier::new(WRITERS);
+        thread::scope(|scope| {
+            let start = &start;
+            let workers: Vec<_> = (0..WRITERS)
+                .map(|writer| {
+                    scope.spawn(move || {
+                        start.wait();
+                        for index in 0..UPDATES {
+                            let key = format!("{writer}:{index}");
+                            store_set(root, &[(key, "updated".to_owned())])?;
+                        }
+                        Ok::<(), String>(())
+                    })
+                })
+                .collect();
+            for worker in workers {
+                worker.join().map_err(|_| "storage worker panicked")??;
+            }
+            Ok::<(), String>(())
+        })?;
+
+        let keys: Vec<_> = (0..WRITERS)
+            .flat_map(|writer| (0..UPDATES).map(move |index| format!("{writer}:{index}")))
+            .collect();
+        let updated = store_get(root, &keys)?;
+        for (key, value) in updated {
+            assert_eq!(value.as_deref(), Some("updated"), "lost update for {key}");
+        }
+        assert_eq!(
+            store_get(root, &["legacy".into()])?,
+            [("legacy".into(), Some("value\nwith\ttabs".into()))]
+        );
+        Ok(())
+    }
 }

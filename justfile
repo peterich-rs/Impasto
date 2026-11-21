@@ -82,6 +82,17 @@ host: gallery-dist
 
 host-js: host
 
+ios-build-check:
+    cargo run --locked --manifest-path "{{root}}/Cargo.toml" -p cli -- build ios --ios-simulator --debug
+
+[positional-arguments]
+ios-sim-test *args:
+    "{{root}}/tools/ios-sim-test.sh" "$@"
+
+[positional-arguments]
+ios-composition-test udid *args:
+    "{{root}}/tools/ios-composition-test.sh" "$@"
+
 # Debug APK. Gradle runs cargo build without --release.
 # Needs the Android NDK and both Android Rust targets.
 android: gallery-dist
