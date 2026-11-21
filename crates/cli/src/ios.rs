@@ -369,11 +369,14 @@ fn build_rust(
 ) -> Result<String> {
     // rustc bundles the native static archives into libembedder_ios.a. The
     // Swift application's link step still needs the system frameworks/libraries.
+    // Read plain diagnostics even when the caller forces Cargo colors in CI.
     let mut command = Command::new("cargo");
     command
         .current_dir(framework)
         .args([
             "rustc",
+            "--color",
+            "never",
             "--locked",
             "-p",
             "embedder-ios",
