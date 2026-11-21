@@ -56,6 +56,8 @@ impl Tree {
             caret: (!password).then(|| self.focused_caret(id)).flatten(),
             description: snapshot.description,
             autofill: snapshot.autofill,
+            live: snapshot.live,
+            scroll_content: snapshot.scroll_content,
         });
         if password || (snapshot.clip && (snapshot.rect.w == 0.0 || snapshot.rect.h == 0.0)) {
             return;
@@ -91,6 +93,9 @@ impl Tree {
             actions.0 |= SemanticsActions::SCROLL;
         }
         let mut flags = SemanticsFlags(0);
+        if self.platform_views.contains_key(&id) {
+            flags.0 |= SemanticsFlags::PLATFORM_VIEW;
+        }
         if node.is_focusable() && !disabled {
             flags.0 |= SemanticsFlags::FOCUSABLE;
         }
@@ -119,6 +124,10 @@ impl Tree {
             }
         }
         let scroll = node.is_scroll().then_some(node.scroll_offset());
+        let live = hint
+            .and_then(|hint| hint.live)
+            .unwrap_or(crate::LiveRegion::Off);
+        let scroll_content = node.is_scroll().then(|| self.scroll_content(id)).flatten();
         let kind = node.kind;
         let pointer = node.is_pointer();
         let clip = node.role.contains(super::node::Role::CLIP);
@@ -133,11 +142,7 @@ impl Tree {
         let first = node.first_child;
         let _ = node;
         let (x, y) = self.layout_point(id).ok()?;
-        let rect = if autofill.is_some() {
-            self.visible_scene_rect(id).ok()?
-        } else {
-            Rect { x, y, w, h }
-        };
+        let rect = self.visible_scene_rect(id).unwrap_or(Rect { x, y, w, h });
         Some(Snapshot {
             kind,
             pointer,
@@ -150,6 +155,8 @@ impl Tree {
             selection: hint.filter(|_| !password).and_then(|hint| hint.selection),
             description: hint.and_then(|hint| hint.description.clone()),
             autofill,
+            live,
+            scroll_content,
             text,
             rect,
             actions,
@@ -220,6 +227,8 @@ struct Snapshot {
     selection: Option<(u32, u32)>,
     description: Option<String>,
     autofill: Option<crate::AutofillField>,
+    live: crate::LiveRegion,
+    scroll_content: Option<(f32, f32)>,
     rect: Rect,
     actions: SemanticsActions,
     flags: SemanticsFlags,
@@ -323,9 +332,11 @@ impl Tree {
                 .drain()
                 .map(|(id, _)| SemanticsOp::Remove(id))
                 .collect();
+            self.semantics_order.clear();
             return Some(SemanticsPatch {
                 root: SemanticsId::from_node(root),
                 ops,
+                order: Some(Vec::new()),
             });
         }
         if self.layout_passes != self.semantics_layout_seen || self.semantics_full {
@@ -371,6 +382,7 @@ impl Tree {
             Some(SemanticsPatch {
                 root: SemanticsId::from_node(root),
                 ops,
+                order: None,
             })
         }
     }
@@ -399,12 +411,18 @@ impl Tree {
         for node in &current {
             self.semantics_cache.insert(node.id, node.clone());
         }
-        if ops.is_empty() {
+        let order = current.iter().map(|node| node.id).collect::<Vec<_>>();
+        let order = (order != self.semantics_order).then(|| {
+            self.semantics_order.clone_from(&order);
+            order
+        });
+        if ops.is_empty() && order.is_none() {
             return None;
         }
         Some(SemanticsPatch {
             root: SemanticsId::from_node(root),
             ops,
+            order,
         })
     }
 
@@ -491,6 +509,8 @@ impl Tree {
                 },
                 description,
                 autofill: snapshot.autofill,
+                live: snapshot.live,
+                scroll_content: snapshot.scroll_content,
             },
         })
     }
@@ -498,6 +518,14 @@ impl Tree {
     /// Turns an accessibility action into pointer or scroll updates.
     pub fn semantics_action(&mut self, action: crate::SemanticsAction) -> Vec<super::Gesture> {
         match action {
+            crate::SemanticsAction::Focus(id) => self
+                .lookup(id)
+                .filter(|node| {
+                    self.semantics_snapshot(*node)
+                        .is_some_and(|snapshot| snapshot.flags.contains(SemanticsFlags::EDITABLE))
+                })
+                .and_then(|node| self.focus(node).ok())
+                .unwrap_or_default(),
             crate::SemanticsAction::Activate(id) => {
                 let Some(node) = self.lookup(id) else {
                     return Vec::new();
@@ -555,6 +583,15 @@ impl Tree {
         }
     }
 
+    pub fn editor_autofill_hint(&self, node: NodeId) -> Option<&'static str> {
+        self.get(node)?
+            .semantics
+            .as_ref()?
+            .autofill
+            .as_ref()
+            .map(|field| field.hint)
+    }
+
     /// Resolves the field again on the UI thread before a platform fill or edit.
     pub fn semantics_edit_target(&self, id: SemanticsId, autofill: bool) -> Option<NodeId> {
         let node = self.lookup(id)?;
@@ -609,6 +646,39 @@ impl Tree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_view_slots_follow_scene_reading_order() -> Result<(), crate::Error> {
+        let mut tree = Tree::new(crate::MonoShaper::new());
+        let root = tree.column(0.0)?;
+        let first = tree.text("first", 16.0, [0, 0, 0, 255])?;
+        let native = tree.column(0.0)?;
+        tree.set_platform_view(native, "editor")?;
+        tree.add_child(root, first)?;
+        tree.add_child(root, native)?;
+        tree.layout()?;
+
+        let patch = tree.semantics_patch().expect("initial semantics");
+        let root_id = SemanticsId::from_node(root);
+        let text_id = SemanticsId::from_node(first);
+        let native_id = SemanticsId::from_node(native);
+        assert_eq!(patch.order, Some(vec![root_id, text_id, native_id]));
+        assert!(
+            patch
+                .ops
+                .iter()
+                .any(|op| matches!(op, SemanticsOp::Upsert(node)
+            if node.id == native_id && node.flags.contains(SemanticsFlags::PLATFORM_VIEW)))
+        );
+
+        tree.insert(root, native, Some(first))?;
+        tree.layout()?;
+        assert_eq!(
+            tree.semantics_patch().and_then(|patch| patch.order),
+            Some(vec![root_id, native_id, text_id])
+        );
+        Ok(())
+    }
 
     #[test]
     fn restoring_semantics_publishes_current_labels_without_another_layout()

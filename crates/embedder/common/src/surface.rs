@@ -223,12 +223,16 @@ impl SurfaceHost {
         }
     }
 
-    pub fn present(&mut self, engine: &mut engine::Engine) -> Result<Presented, engine::Status> {
+    pub fn present(
+        &mut self,
+        engine: &mut engine::Engine,
+        views: &[uicore::PlatformViewPlacement],
+    ) -> Result<Presented, engine::Status> {
         let Some(open) = self.current.as_mut() else {
             return Err(engine::Status::NotReady);
         };
         let pixels = open.pixels;
-        open.surface.present(engine, pixels)
+        open.surface.present_with_views(engine, pixels, views)
     }
 
     pub fn recover_device(&mut self, engine: &mut engine::Engine) -> Result<(), engine::Status> {

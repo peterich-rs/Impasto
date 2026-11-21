@@ -219,9 +219,9 @@ fn launch_url(runtime: &mut Runtime, url: String) {
     }
     if let Some(session) = runtime.session.as_mut() {
         session_call(|| session.set_launch_url(&url));
-        if session.wants_frame() {
-            arm(runtime);
-        }
+        // A navigation listener can queue reactive work that only flushes
+        // on the next frame, before the session reports any frame demand.
+        arm(runtime);
     }
 }
 

@@ -12,6 +12,14 @@ pub struct ExternalFrame {
     pub pixels: Vec<u8>,
 }
 
+/// Imports a producer-owned frame on the render thread.
+pub type ImportExternalFrame = Box<dyn Fn(&engine::Engine) -> Option<engine::GpuImage> + Send>;
+
+pub(crate) struct ExternalGpuFrame {
+    pub import: ImportExternalFrame,
+    pub image: Option<engine::GpuImage>,
+}
+
 /// Decoded image. `gpu` is set when `io` already uploaded the texture.
 #[derive(Debug)]
 pub struct ImageHandle {

@@ -6,9 +6,12 @@ use std::fmt::Write as _;
 #[cfg(not(target_os = "android"))]
 use std::io::{self, Write as _};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(target_os = "ios"))]
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(not(target_os = "ios"))]
 use std::thread;
+#[cfg(not(target_os = "ios"))]
 use std::time::Duration;
 
 use tracing::field::{Field, Visit};
@@ -19,6 +22,7 @@ use tracing_subscriber::filter::{LevelFilter, Targets};
 
 use crate::diagnostics::{DiagnosticsHub, LogEntry, LogSource};
 
+#[cfg(not(target_os = "ios"))]
 const XLOG_QUEUE: usize = 256;
 
 /// One filtered event. Sinks must not filter again.
@@ -333,11 +337,13 @@ impl LogSink for DevtoolSink {
 }
 
 /// File sink. The render thread only enqueues. `mars-xlog` runs on a worker.
+#[cfg(not(target_os = "ios"))]
 pub struct XlogSink {
     tx: SyncSender<String>,
     dropped: Arc<AtomicU64>,
 }
 
+#[cfg(not(target_os = "ios"))]
 impl XlogSink {
     pub fn open(dir: &std::path::Path) -> Option<Self> {
         let dir = dir.to_str()?;
@@ -370,6 +376,7 @@ impl XlogSink {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
 impl LogSink for XlogSink {
     fn write(&self, _record: &LogRecord, line: &str) {
         match self.tx.try_send(line.to_owned()) {
@@ -381,6 +388,7 @@ impl LogSink for XlogSink {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
 impl Drop for XlogSink {
     fn drop(&mut self) {
         // Dropping `tx` closes the queue. The worker exits after the remaining lines.
@@ -392,11 +400,15 @@ impl Drop for XlogSink {
 static INSTALLED: OnceLock<()> = OnceLock::new();
 
 /// Installs the process subscriber. A second call is ignored.
+/// The optional file sink is available on desktop and Android.
 pub fn install(log_dir: Option<&std::path::Path>, devtools: Option<Arc<DiagnosticsHub>>) {
     if INSTALLED.set(()).is_err() {
         return;
     }
     let mut sinks: Vec<Arc<dyn LogSink>> = vec![Arc::new(ConsoleSink)];
+    #[cfg(target_os = "ios")]
+    let _ = log_dir;
+    #[cfg(not(target_os = "ios"))]
     if let Some(dir) = log_dir
         && std::fs::create_dir_all(dir).is_ok()
         && let Some(file) = XlogSink::open(dir)

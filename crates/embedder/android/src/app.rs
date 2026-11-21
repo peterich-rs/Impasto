@@ -303,6 +303,10 @@ impl Bridge {
     ) {
         self.call(|env, view| {
             use jni::objects::{JFloatArray, JLongArray, JObjectArray, JValue};
+            let placements: Vec<_> = placements
+                .iter()
+                .filter(|slot| slot.supports_rectangular_overlay())
+                .collect();
             let count = placements.len();
             let ids = JLongArray::new(env, count)?;
             let id_values: Vec<jlong> = placements

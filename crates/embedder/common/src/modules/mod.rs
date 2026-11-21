@@ -5,12 +5,14 @@ pub mod clipboard;
 pub mod fs;
 pub mod linking;
 pub mod memory;
+mod native_plugins;
 pub mod permissions;
 
 pub use app_state::module as app_state;
 pub use clipboard::{ClipboardHost, module as clipboard};
 pub use fs::{StorageHost, async_storage, module as file_system, picked_document};
 pub use linking::{LinkingHost, module as linking};
+pub use native_plugins::module as native_plugins;
 pub use permissions::{PermissionsHost, module as permissions, permission_results};
 
 use session::PluginValue;

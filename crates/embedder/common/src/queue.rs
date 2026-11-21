@@ -94,6 +94,13 @@ pub fn push_coalesced(commands: &mut VecDeque<Command>, command: Command) {
     {
         commands.remove(index);
     }
+    if let Command::ExternalGpuTexture { source, .. } = &command
+        && let Some(index) = commands.iter().rposition(|queued| {
+            matches!(queued, Command::ExternalGpuTexture { source: queued, .. } if source == queued)
+        })
+    {
+        commands.remove(index);
+    }
     commands.push_back(command);
 }
 

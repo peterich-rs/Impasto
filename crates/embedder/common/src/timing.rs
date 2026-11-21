@@ -401,6 +401,7 @@ fn layer_kind(kind: &protocol::LayerKind) -> &'static str {
         protocol::LayerKind::BackdropBlur { .. } => "backdrop",
         protocol::LayerKind::Blend { .. } => "blend",
         protocol::LayerKind::Picture { .. } => "picture",
+        protocol::LayerKind::PlatformView { .. } => "platformView",
     }
 }
 

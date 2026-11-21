@@ -841,6 +841,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativePointer(
         dx: 0.0,
         dy: 0.0,
         zoom: 0.0,
+        pen: None,
     }));
 }
 

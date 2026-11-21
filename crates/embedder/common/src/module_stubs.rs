@@ -9,7 +9,7 @@ use crate::diagnostics::{self, DevtoolsContext, DiagnosticsHub};
 use crate::modules::{
     app_state, async_storage, clipboard, file_system, linking,
     memory::{DeniedPermissions, MemoryClipboard, MemoryStorage, NullLinking},
-    permissions,
+    native_plugins, permissions,
 };
 
 pub fn first_party_modules() -> Vec<Module> {
@@ -22,6 +22,11 @@ pub fn first_party_modules() -> Vec<Module> {
         file_system(Arc::clone(&storage) as _),
         async_storage(storage),
         permissions(Arc::new(DeniedPermissions)),
+        native_plugins(|_, _, _, settle| {
+            settle.send(session::PluginResult::Failed {
+                message: "Native plugins are unavailable in this host".into(),
+            });
+        }),
         diagnostics::module(
             Arc::new(DiagnosticsHub::new()),
             DevtoolsContext {

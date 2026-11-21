@@ -36,7 +36,9 @@ pub use motion::{
     AnimProp, Band, Decay, Friction, OverscrollMode, PullMode, SCROLL_TAU_MS, ScrollAccept,
     ScrollAxis, ScrollPhase, ScrollPhysics, Simulation, SnapAlign, SnapGrid, Spring,
 };
-pub use pointer::{Button, Buttons, Modifiers, Phase, PointerEvent, PointerId, PointerKind};
+pub use pointer::{
+    Button, Buttons, Modifiers, PenSample, Phase, PointerEvent, PointerId, PointerKind,
+};
 pub use protocol::ParagraphId;
 pub use semantics::{
     AutofillField, ImageCensus, LiveRegion, SemanticsAction, SemanticsActions, SemanticsFlags,

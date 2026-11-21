@@ -107,6 +107,10 @@ pub enum LayerKind {
     Picture {
         picture: PictureId,
     },
+    /// A native view interleaves the pictures before and after this node.
+    PlatformView {
+        node: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
