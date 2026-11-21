@@ -34,6 +34,10 @@ impl VulkanSwapchain {
 }
 
 impl Engine {
+    pub fn invalidate_pictures(&mut self) {}
+
+    pub fn forget_texture(&mut self, _source: &str) {}
+
     #[cfg(not(target_os = "android"))]
     pub fn create_metal() -> Result<Self, Status> {
         Err(Status::NotLinked)

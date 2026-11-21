@@ -14,3 +14,6 @@ pub use draw_list::{
     TextStyle,
 };
 pub use layer::{Layer, LayerId, LayerKind, LayerTree, Picture, PictureId};
+
+/// Media producer sources are supplied by the current host instead of decoded from a URL.
+pub const EXTERNAL_TEXTURE_PREFIX: &str = "external:";

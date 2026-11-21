@@ -153,6 +153,7 @@ effects:
   Reload: 22
   MeasurePanel: 23
   SetTextScale: 24
+  SetPlatformView: 25
 
 style_value_tags:
   Null: 0

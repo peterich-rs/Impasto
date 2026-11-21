@@ -40,12 +40,12 @@
 - `crates/uicore/src/tree/hit.rs:24`：现有命中与坐标反变换；复用它导出节点局部点，不能仅做 pointer 减 rect。
 - `crates/uicore/src/tree/store.rs:729`：image_generation、image_census、note_image；必须计入 Canvas 内的图片。
 - `crates/uicore/src/tree/text.rs:539`：measure_text 自动乘 text_scale；Canvas 的显式字号不能直接通过这里再乘一次。
-- `crates/uicore/src/shaper.rs:166`、`crates/shell/src/shaper.rs:94`：Shaper 与 ImpellerShaper；测量继续使用引擎同一份 Typography。
+- `crates/uicore/src/shaper.rs:166`、`crates/embedder/common/src/shaper.rs:94`：Shaper 与 ImpellerShaper；测量继续使用引擎同一份 Typography。
 - `crates/protocol/src/draw_list.rs:421`、`src/layer.rs`：DrawList 与 LayerTree；尚无 Canvas、通用路径与任意矩阵绘制内容。
 - `crates/engine/src/player/ops.rs:8`、`player/paint.rs:493`：播放与已有路径句柄；继续使用 SDK，而非引入平台 Canvas。
 - `crates/engine/src/pictures.rs:64`、`textures.rs:45`：picture 复用及纹理 touch；只扫描顶层 Image 会漏掉 Canvas 图片。
 - `crates/engine/src/typography/key.rs`、`shape.rs`、`paint_store.rs`：缓存键、度量与绘制；斜体、Canvas 文字画笔和基线都需纳入。
-- `crates/shell/src/diagnostics/hub.rs:130`：FrameSample；补充 Canvas 录制/准备成本，继续复用 script/record/submit 指标。
+- `crates/embedder/common/src/diagnostics/hub.rs:130`：FrameSample；补充 Canvas 录制/准备成本，继续复用 script/record/submit 指标。
 - `apps/gallery-solid/src/pages/stocks.tsx`、`widgets/stocks/`：行情小图、分时、K 线、深度与价格区间。
 - `../nsh/crates/nsh-js/src/canvas.rs:1485`、`../nsh/crates/nsh-core/src/canvas.rs`：Canvas 2D 作者接口与录制数据的本地对照；其平台重放、动画槽和离屏实现不进入 Impasto。
 
@@ -451,7 +451,7 @@ Canvas 回调复用现有非 eval turn 的 128 ms 上限，并标注 canvas/Node
 
 ## Phase 4: 同源文字与图片
 
-**文件：`crates/protocol/src/draw_list.rs`、`canvas.rs`、`crates/uicore/src/shaper.rs`、`src/canvas/text.rs`（新增）、`prepare.rs`、`crates/shell/src/shaper.rs`**
+**文件：`crates/protocol/src/draw_list.rs`、`canvas.rs`、`crates/uicore/src/shaper.rs`、`src/canvas/text.rs`（新增）、`prepare.rs`、`crates/embedder/common/src/shaper.rs`**
 - 接入 FontSlant、Canvas 专用度量和基线数据。Shaper 可增加有默认“不支持”结果的方法，避免强迫外部实现返回伪度量；MonoShaper 与 ImpellerShaper 各自给出真实合同内结果。
 
 **文件：`crates/engine/src/typography/key.rs`、`shape.rs`、`paint_store.rs`、`mod.rs`、`src/player/canvas.rs`、`pictures.rs`、`textures.rs`**
@@ -469,7 +469,7 @@ Canvas 回调复用现有非 eval turn 的 128 ms 上限，并标注 canvas/Node
 **文件：`packages/solid-ui/src/canvas.test.ts`、`packages/solid-ui/type-tests/canvas.tsx`、`crates/javascript/tests/fixtures/ui/canvas.tsx`（新增）**
 - Node/类型测试覆盖 Props、绑定调用、controller 清理与导出；真实 QuickJS fixture 验证原生 class、上下文失效和不可变快照，不在 TS 测试中复制 Recorder 算法。
 
-**文件：`crates/shell/src/diagnostics/hub.rs`、`diagnostics/module.rs`、`diagnostics/inspect.rs`、`src/timing.rs`、`src/shell.rs`、`crates/javascript/src/session/mod.rs`、`crates/javascript/src/ui/player/mod.rs`、`packages/devtools/src/store.ts`、`src/pages/performance.tsx`**
+**文件：`crates/embedder/common/src/diagnostics/hub.rs`、`diagnostics/module.rs`、`diagnostics/inspect.rs`、`src/timing.rs`、`src/host.rs`、`crates/javascript/src/session/mod.rs`、`crates/javascript/src/ui/player/mod.rs`、`packages/devtools/src/store.ts`、`src/pages/performance.tsx`**
 - 增加录制/准备时间、命令与路径段数量、重绘/复用计数；沿用环形缓冲。接入时先定位字段消费点，生成端与消费端同步更新，不只加孤立指标。
 
 **文件：`apps/gallery-solid/src/widgets/sparkline.tsx`、`src/pages/canvas.tsx`、`apps/gallery-solid/quotes.stocks.test.ts`**
@@ -539,12 +539,12 @@ Canvas 回调复用现有非 eval turn 的 128 ms 上限，并标注 canvas/Node
 - `crates/javascript/src/ui/player/reactive.rs` -- 同图 paint computation。
 - `crates/reactive/src/lib.rs` -- 分阶段执行与只读 guard。
 - `crates/javascript/src/session/mod.rs` -- 传递 Canvas 帧成本。
-- `crates/shell/src/diagnostics/hub.rs` -- Canvas 指标。
-- `crates/shell/src/diagnostics/inspect.rs` -- 导出 Canvas 帧成本。
-- `crates/shell/src/diagnostics/module.rs` -- 序列化 devtools 帧字段。
-- `crates/shell/src/shaper.rs` -- Canvas 专用度量。
-- `crates/shell/src/shell.rs` -- 接收会话的 Canvas 成本。
-- `crates/shell/src/timing.rs` -- 构造对应帧样本。
+- `crates/embedder/common/src/diagnostics/hub.rs` -- Canvas 指标。
+- `crates/embedder/common/src/diagnostics/inspect.rs` -- 导出 Canvas 帧成本。
+- `crates/embedder/common/src/diagnostics/module.rs` -- 序列化 devtools 帧字段。
+- `crates/embedder/common/src/shaper.rs` -- Canvas 专用度量。
+- `crates/embedder/common/src/host.rs` -- 接收会话的 Canvas 成本。
+- `crates/embedder/common/src/timing.rs` -- 构造对应帧样本。
 - `crates/uicore/Cargo.toml` -- 引用几何和颜色依赖。
 - `crates/uicore/src/canvas/mod.rs` -- 录制准备入口与错误类型。
 - `crates/uicore/src/canvas/paint.rs` -- 颜色与渐变规范化。

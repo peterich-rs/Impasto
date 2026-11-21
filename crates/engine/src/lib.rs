@@ -81,7 +81,7 @@ pub use typography::Typography;
 #[cfg(all(not(feature = "impeller"), target_os = "android"))]
 pub use missing::VulkanSwapchain;
 #[cfg(all(feature = "impeller", target_os = "android"))]
-pub use player::VulkanSwapchain;
+pub use player::{GlesWindow, VulkanSwapchain};
 
 #[cfg(target_os = "android")]
 #[derive(Clone, Copy, Debug)]

@@ -651,10 +651,15 @@
       else if (hint.live === "polite") live = 1;
       else if (hint.live === "assertive") live = 2;
     }
+    var autofill = ["", "username", "password", "newUsername", "newPassword", "emailAddress"].indexOf(hint?.autofill?.hint);
+    var autofillValue = autofill > 0 ? String(hint.autofill.value ?? "") : "";
     var labelText = label ? String(label) : "";
     var valueText = value ? String(value) : "";
     var descriptionText = description ? String(description) : "";
-    mustEffect(effect(EFFECT.SetSemantics, id, [role | 0, checked === undefined ? -1 : checked | 0, selStart === undefined ? -1 : selStart | 0, selEnd === undefined ? -1 : selEnd | 0, disabled === undefined ? -1 : disabled | 0, editable === undefined ? -1 : editable | 0, readOnly === undefined ? -1 : readOnly | 0, orderSet, 0, 0, 0, order, live], labelText + "\0" + valueText + "\0" + descriptionText), "setSemantics failed");
+    mustEffect(effect(EFFECT.SetSemantics, id, [role | 0, checked === undefined ? -1 : checked | 0, selStart === undefined ? -1 : selStart | 0, selEnd === undefined ? -1 : selEnd | 0, disabled === undefined ? -1 : disabled | 0, editable === undefined ? -1 : editable | 0, readOnly === undefined ? -1 : readOnly | 0, orderSet, hint?.password === true ? 1 : 0, autofill, 0, order, live], labelText + "\0" + valueText + "\0" + descriptionText + "\0" + autofillValue), "setSemantics failed");
+  };
+  core.setPlatformView = function (node, kind) {
+    mustEffect(effect(EFFECT.SetPlatformView, handle(node), [], String(kind ?? "")), "setPlatformView failed");
   };
   core.setRecognizers = function (node, spec) {
     if (arguments.length < 2 || !spec) throw new Error("setRecognizers(node, spec)");

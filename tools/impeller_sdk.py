@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urljoin
 from urllib.request import urlopen
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
@@ -195,7 +196,7 @@ def read_index(lock, override):
             if url != f"{lock.release_url()}/{artifact_name(target)}":
                 raise ValueError(f"unexpected Release URL for {target}")
     if index.identity() != lock.identity():
-        raise ValueError("Impeller Release index does not match the workspace sdk.lock")
+        raise ValueError("Impeller SDK index does not match the workspace sdk.lock")
     return index
 
 
@@ -216,6 +217,8 @@ def prepare(cache, target, lock, override):
         with tempfile.TemporaryDirectory(dir=sdk.parent) as temporary:
             work = Path(temporary)
             archive = work / "sdk.zip"
+            index_path = Path(override) if override else LOCK_FILE
+            url = urljoin(index_path.resolve().as_uri(), url)
             with urlopen(url, timeout=120) as response, archive.open("wb") as stream:
                 shutil.copyfileobj(response, stream, 1024 * 1024)
             if sha256(archive) != digest:
@@ -339,7 +342,7 @@ def write_index(directory, lock, release):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cache-dir", type=Path, default=CACHE)
+    parser.add_argument("--cache-dir", type=Path, default=Path(os.environ.get("IMPASTO_IMPELLER_CACHE", CACHE)))
     commands = parser.add_subparsers(dest="command", required=True)
     for action in ("prepare", "build", "package"):
         command = commands.add_parser(action)

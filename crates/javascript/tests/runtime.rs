@@ -24,6 +24,51 @@ fn headless_script_promise_and_timer_share_the_runtime() {
 }
 
 #[test]
+fn user_interaction_remains_pending_after_the_transport_deadline() {
+    use javascript::host::{Method, Module, ModuleRegistry, PluginResult, PluginValue};
+    use javascript::runtime::{ModuleCatalog, ModuleOutcome};
+
+    let (send, receive) = std::sync::mpsc::channel();
+    let module = Module {
+        name: "Picker",
+        specifier: "@impasto/test-picker",
+        exports: Default::default(),
+        methods: vec![
+            Method::promise("pick", move |_, settle, _| {
+                send.send(settle).expect("retain picker reply");
+            })
+            .awaits_user(),
+        ],
+    };
+    let catalog = ModuleCatalog::new(ModuleRegistry::try_new(vec![module]).expect("registry"))
+        .expect("catalog");
+    let mut runtime = RuntimeBuilder::new().modules(catalog).module(
+        "app:picker",
+        "import {pick} from '@impasto/test-picker'; if (await pick() !== 'picked.txt') throw Error('wrong result');",
+    ).build().expect("runtime");
+    let ticket = runtime.start_module("app:picker").expect("start picker");
+    runtime.drive(0).expect("initial clock");
+    runtime
+        .drive(120_000)
+        .expect("leave the picker open for two minutes");
+    assert!(
+        runtime
+            .take_module_result(ticket)
+            .expect("pending picker")
+            .is_none()
+    );
+    receive
+        .try_recv()
+        .expect("picker started")
+        .send(PluginResult::Done(PluginValue::Str("picked.txt".into())));
+    runtime.drive(120_001).expect("deliver picked document");
+    assert_eq!(
+        runtime.take_module_result(ticket).expect("picked result"),
+        Some(ModuleOutcome::Fulfilled)
+    );
+}
+
+#[test]
 fn headless_fetch_submits_an_owned_job_and_settles_on_drive() {
     let mut runtime = RuntimeBuilder::new().build().expect("runtime");
     runtime

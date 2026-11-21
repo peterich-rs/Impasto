@@ -72,6 +72,7 @@ pub struct Method {
     pub name: &'static str,
     pub invoke: Invoke,
     pub types: Option<MethodTypes>,
+    pub(crate) awaits_user: bool,
 }
 
 /// The JavaScript parameters and resolved return type of a native method.
@@ -90,6 +91,7 @@ impl Method {
             name,
             invoke: Invoke::Sync(Arc::new(f)),
             types: None,
+            awaits_user: false,
         }
     }
 
@@ -101,7 +103,16 @@ impl Method {
             name,
             invoke: Invoke::Promise(Arc::new(f)),
             types: None,
+            awaits_user: false,
         }
+    }
+
+    /// A platform prompt completes when the user responds or the owner detaches.
+    /// Keep its request slot while it is open and leave cancellation to the host.
+    #[must_use]
+    pub fn awaits_user(mut self) -> Self {
+        self.awaits_user = true;
+        self
     }
 
     /// Describes the JavaScript signature. Promise methods specify the resolved value.

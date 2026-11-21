@@ -1,5 +1,7 @@
 # 把脚手架和场景写入收进 Rust
 
+本文保留当时的重构设计和路径。当前平台宿主布局见 [平台宿主](platform-hosts.md)。
+
 应用侧命令对齐 Flutter。视图树继续只活在 `uicore::Tree`，这条对齐 nsh 的 core，而不是对齐 Flutter 的 Element。响应式图按 nsh 的 arena 另起一个 crate，调度对齐仓库已经依赖的 Solid `2.0.0`，不移植它的源码。
 
 ## Breaking Change Notice
@@ -149,7 +151,7 @@ Legend: `──►` 同步调用，`★` 本设计新增。`tick_motions`、`lay
 
 1. **命令语法用 Flutter，不用 nsh，也不自造第三套。** Flutter 是 `flutter create`、`flutter run -d`、`flutter build apk`、`flutter analyze`、`flutter test`、`flutter clean`、`flutter pub get`。nsh 是 `nsh init`、`nsh dev`、`nsh run --target`、`nsh build`（直接打字节码）、`nsh check`、`nsh package`。作者规格写的是 Flutter 那一列，所以 bin 的子命令就是那一列。否决 nsh 的 `dev` 和 `run` 分成两条：规格里只有 `run`。否决 nsh 的 `--target` 作为唯一开关：设备选择用 `-d`，平台是 `run -d android` 这种目标，也允许 `-d <设备号>`。
 
-2. **debug 走 ESM，release 走字节码。这是规格，不是 nsh 的现状。** nsh 的 `run` 和 `build` 都打 QuickJS 字节码；ESM 只在字节码版本对不上、或者目标是 web 时才走。Impasto 的 `run` 默认 debug，产物 ESM，QuickJS 直接执行；`build` 默认 release，产物字节码。`--debug` 和 `--release` 覆盖默认值。否决在第一期做 nsh 那种 8790 端口和 `bytecode_version` 回退：`run` 只做改文件再打包再装，和现在的 `build.mjs --watch` 加重启窗口同一级。状态保留的热更新以后再说。nsh 没有 `clean`，生成物放 `.nsh/` 且不自动删。这里用 Flutter 的 `clean`，删应用的 `build/`。
+2. **debug 走 ESM，release 走字节码。这是规格，不是 nsh 的现状。** nsh 的 `run` 和 `build` 都打 QuickJS 字节码；ESM 只在字节码版本对不上、或者目标是 web 时才走。Impasto 的 `run` 默认 debug，产物 ESM，QuickJS 直接执行；`build` 默认 release，产物字节码。`--debug` 和 `--release` 覆盖默认值。Android 的调试源码更新通过 adb 写入应用私有目录，并在宿主会话内校验后替换脚本环境。nsh 没有 `clean`，生成物放 `.nsh/` 且不自动删。这里用 Flutter 的 `clean`，删应用的 `build/`。
 
 3. **不新建第二棵视图树。** nsh 的 `Core` 是影子树，平台视图才是画出来的那棵，帧末交 `MountBatch`。Impasto 的 `Tree` 已经是画出来的那棵：槽位、代数、Taffy、picture、弹簧都在上面。`insert` / `setProp` 直接调 `Tree` 的方法。否决把 `MountBatch` 或 Flutter 的 Element/RenderObject 再夹一层。`{ id: number }` 这个包装只为了骗过 `@solidjs/universal`（`tree.ts:8`）。universal 删掉之后，JS 拿 `NodeId::to_raw` 的 `u64`。id 只由 Rust 分配，槽位回收时 generation 加一，这是现在的 `NodeId`。否决 nsh 的两套号：JS 发偶数、core 发奇数，以及 `NodeId = u32` 只增不回收、再配一张 `IdTable`。那是因为 nsh 的 id 由 JS 渲染器分配、等 GC 才 `Release`。Impasto 没有第二条分配器。
 
@@ -178,7 +180,7 @@ Legend: `──►` 同步调用，`★` 本设计新增。`tick_motions`、`lay
 | 命令 | 行为 | 对齐 |
 |---|---|---|
 | `impasto create my-app` | 写 `app.toml`、`package.json`、`lib/main.tsx`、`assets/` | Flutter `create` 的目录纪律；不做 nsh 的 rust/mixed 模板 |
-| `impasto run` | debug 打包，装到本机桌面窗口，改文件再打包 | Flutter `run` 的 debug 默认；热更新只到「再打包」 |
+| `impasto run` | 调试打包和运行，监视应用文件。Android 纯源码变更走会话内更新。 | Flutter `run` 的 debug 默认 |
 | `impasto run -d android` | `-d` 选目标或设备 | Flutter `-d` |
 | `impasto build bundle` | 只产字节码 | Flutter `build bundle` 的「只出产物」 |
 | `impasto build apk` / `ios` / `macos` | 在 `build/` 生成工程，链引擎，打安装包 | Flutter `build apk` |
@@ -610,3 +612,10 @@ export default function Main() {
 - `packages/solid-renderer/src/jsx.ts` — `HostNode` 改名 `Node`
 - `packages/solid-renderer/src/tree.ts` — 阶段 3 删 JS 属性分发
 - `README.md` — 阶段 4 更新目录和 `just host` 的描述
+
+
+### Android 调试源码更新
+
+`impasto run -d <设备 ID>` 首次安装调试 APK。后续纯脚本改动打包为 UTF-8 源码，通过 adb `run-as` 写入应用的私有目录，再由调试宿主提交版本化更新。渲染线程验证候选脚本和首帧，成功后在同一宿主和表面上替换脚本环境。应用通过 `Restoration` 明确保存的状态可在候选环境启动时读取。候选失败时撤销候选对恢复快照的写入，旧脚本继续运行。源码更新会重新执行应用入口，内存中的组件状态和未完成的异步任务需要由应用自行保存或重新建立。
+
+当资产、`app.toml` 或 `package.json` 变化时，driver 重新构建和安装 APK。发布 APK 忽略调试更新 Intent。

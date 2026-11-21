@@ -34,6 +34,7 @@ impl SemanticsActions {
     pub const ACTIVATE: u32 = 1;
     pub const SCROLL: u32 = 2;
     pub const SET_TEXT: u32 = 4;
+    pub const SET_SELECTION: u32 = 8;
 
     pub const fn contains(self, bit: u32) -> bool {
         self.0 & bit == bit
@@ -49,9 +50,26 @@ impl SemanticsFlags {
     pub const DISABLED: u32 = 4;
     pub const EDITABLE: u32 = 8;
     pub const READ_ONLY: u32 = 16;
+    pub const FOCUSED: u32 = 32;
+    pub const PASSWORD: u32 = 64;
 
     pub const fn contains(self, bit: u32) -> bool {
         self.0 & bit == bit
+    }
+}
+
+/// Opt-in field data for the system autofill service.
+#[derive(Clone, PartialEq)]
+pub struct AutofillField {
+    pub hint: &'static str,
+    pub value: String,
+}
+
+impl std::fmt::Debug for AutofillField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AutofillField")
+            .field("hint", &self.hint)
+            .finish_non_exhaustive()
     }
 }
 
@@ -73,6 +91,7 @@ pub struct SemanticsNode {
     pub caret: Option<u32>,
     /// Extra description, such as a field error. Never the password text.
     pub description: Option<String>,
+    pub autofill: Option<AutofillField>,
 }
 
 /// Optional override of the inferred semantics for one node.
@@ -86,7 +105,9 @@ pub struct SemanticsHint {
     pub disabled: Option<bool>,
     pub editable: Option<bool>,
     pub read_only: Option<bool>,
+    pub password: bool,
     pub description: Option<String>,
+    pub autofill: Option<AutofillField>,
     /// Focus traversal weight. Missing keeps tree order.
     pub order: Option<i32>,
     pub live: Option<LiveRegion>,
@@ -96,8 +117,24 @@ pub struct SemanticsHint {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SemanticsAction {
     Activate(SemanticsId),
-    Scroll { id: SemanticsId, dx: f32, dy: f32 },
-    SetText { id: SemanticsId, text: String },
+    Scroll {
+        id: SemanticsId,
+        dx: f32,
+        dy: f32,
+    },
+    SetText {
+        id: SemanticsId,
+        text: String,
+    },
+    Autofill {
+        id: SemanticsId,
+        text: String,
+    },
+    SetSelection {
+        id: SemanticsId,
+        start: u32,
+        end: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -74,7 +74,9 @@ fn run_bundle(bundle: &Path, app: &App) -> Result<()> {
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let config = session::ModuleConfig {
-        registry: std::sync::Arc::new(session::ModuleRegistry::new(shell::first_party_modules())),
+        registry: std::sync::Arc::new(
+            session::ModuleRegistry::new(embedder::first_party_modules()),
+        ),
         ..session::ModuleConfig::disconnected()
     }
     .restrict(&modules);

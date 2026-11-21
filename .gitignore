@@ -6,11 +6,12 @@ apps/gallery-solid/dist/
 third_party/impeller-sdk/
 third_party/impeller-build/
 __pycache__/
-crates/android/apk/.gradle/
-crates/android/apk/build/
-crates/android/apk/app/build/
-crates/android/apk/app/src/main/assets/
-crates/android/apk/app/src/main/jniLibs/
+crates/embedder/android/apk/.gradle/
+crates/embedder/android/apk/.kotlin/
+crates/embedder/android/apk/build/
+crates/embedder/android/apk/app/build/
+crates/embedder/android/apk/app/src/main/assets/
+crates/embedder/android/apk/app/src/main/jniLibs/
 third_party/quickjs/
 third_party/solid/
 .gradle/

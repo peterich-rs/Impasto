@@ -47,6 +47,18 @@ pub(crate) fn is_typed_array(value: &Value<'_>) -> bool {
     unsafe { qjs::JS_GetTypedArrayType(value.as_raw()) >= 0 }
 }
 
+pub(crate) fn array_buffer<'js>(value: &Value<'js>) -> Result<Option<ArrayBuffer<'js>>> {
+    // SAFETY: the brand check reads a live value without probing its storage.
+    // JS_GetArrayBuffer throws when used to probe a non-buffer object.
+    if unsafe { qjs::JS_IsArrayBuffer(value.as_raw()) } {
+        ArrayBuffer::from_value(value.clone())
+            .map(Some)
+            .ok_or_else(|| Exception::throw_type(value.ctx(), "detached buffer"))
+    } else {
+        Ok(None)
+    }
+}
+
 pub(crate) fn is_source(value: &Value<'_>) -> bool {
     // SAFETY: the value is live and these operations only inspect internal class tags.
     unsafe {
@@ -58,7 +70,7 @@ pub(crate) fn is_source(value: &Value<'_>) -> bool {
 
 /// Obtain a byte view of exactly the supplied buffer range.
 pub(crate) fn view<'js>(ctx: &Ctx<'js>, input: Value<'js>) -> Result<TypedArray<'js, u8>> {
-    if let Some(buffer) = ArrayBuffer::from_value(input.clone()) {
+    if let Some(buffer) = array_buffer(&input)? {
         return TypedArray::from_arraybuffer(buffer);
     }
     // SAFETY: these calls inspect the brand of a live value without invoking JS.
@@ -76,7 +88,7 @@ pub(crate) fn view<'js>(ctx: &Ctx<'js>, input: Value<'js>) -> Result<TypedArray<
     let buffer: Value = getters
         .get::<_, Function>("buffer")?
         .call((This(input.clone()),))?;
-    let buffer = ArrayBuffer::from_value(buffer)
+    let buffer = array_buffer(&buffer)?
         .ok_or_else(|| Exception::throw_type(ctx, "Expected a non-shared ArrayBuffer"))?;
     // The engine's raw typed-array API reports the original length for a
     // length-tracking view. The getters expose the current bounds, and this

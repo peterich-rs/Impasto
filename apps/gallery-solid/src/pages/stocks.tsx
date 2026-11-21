@@ -212,7 +212,7 @@ export function StocksPage(props: { router: Router }) {
   const split = () => width() >= 1240;
   const canPublish = () => {
     const top = props.router.stack().at(-1);
-    return top?.path === "/stocks" && top.phase === "live" && controller.phase() === "idle";
+    return top?.path === "/stocks" && top.phase === "live";
   };
   const revision = useMarketPulse(canPublish);
   const rowRevision = useRowPublications(revision, canPublish);

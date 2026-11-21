@@ -39,21 +39,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
-name = "android"
-version = "0.0.0"
-dependencies = [
- "engine",
- "javascript",
- "jni 0.22.4",
- "ndk",
- "ndk-sys",
- "session",
- "shell",
- "tracing",
- "uicore",
-]
-
-[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -362,10 +347,11 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "embedder",
  "javascript",
  "serde",
+ "serde_json",
  "session",
- "shell",
  "toml",
  "uicore",
 ]
@@ -665,10 +651,71 @@ dependencies = [
 ]
 
 [[package]]
+name = "embedder"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "engine",
+ "http",
+ "http-body-util",
+ "mars-xlog",
+ "openwire",
+ "protocol",
+ "serde_json",
+ "session",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "tungstenite",
+ "uicore",
+]
+
+[[package]]
+name = "embedder-android"
+version = "0.0.0"
+dependencies = [
+ "embedder",
+ "engine",
+ "javascript",
+ "jni 0.22.4",
+ "ndk",
+ "ndk-sys",
+ "session",
+ "tracing",
+ "uicore",
+]
+
+[[package]]
+name = "embedder-macos"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "embedder",
+ "engine",
+ "javascript",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-video",
+ "objc2-foundation",
+ "objc2-image-io",
+ "objc2-metal",
+ "objc2-quartz-core",
+ "protocol",
+ "session",
+ "tracing",
+ "uicore",
+]
+
+[[package]]
 name = "engine"
 version = "0.0.0"
 dependencies = [
  "impeller-sys",
+ "khronos-egl",
+ "libloading",
  "protocol",
  "thiserror 2.0.21",
  "tracing",
@@ -1282,6 +1329,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "khronos-egl"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6aae1df220ece3c0ada96b8153459b67eebe9ae9212258bb0134ae60416fdf76"
+dependencies = [
+ "libc",
+ "libloading",
+]
+
+[[package]]
 name = "kurbo"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1338,29 +1395,6 @@ name = "lru"
 version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
-
-[[package]]
-name = "macos"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "engine",
- "javascript",
- "objc2",
- "objc2-app-kit",
- "objc2-core-foundation",
- "objc2-core-graphics",
- "objc2-core-video",
- "objc2-foundation",
- "objc2-image-io",
- "objc2-metal",
- "objc2-quartz-core",
- "protocol",
- "session",
- "shell",
- "tracing",
- "uicore",
-]
 
 [[package]]
 name = "mars-xlog"
@@ -2249,6 +2283,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_json"
+version = "1.0.154"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
+]
+
+[[package]]
 name = "serde_spanned"
 version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2286,26 +2333,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
-]
-
-[[package]]
-name = "shell"
-version = "0.0.0"
-dependencies = [
- "bytes",
- "engine",
- "http",
- "http-body-util",
- "mars-xlog",
- "openwire",
- "protocol",
- "session",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "tungstenite",
- "uicore",
 ]
 
 [[package]]
@@ -3301,6 +3328,12 @@ name = "zlib-rs"
 version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zstd"

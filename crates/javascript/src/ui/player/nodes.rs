@@ -259,6 +259,19 @@ pub(super) unsafe fn set_ime_config(session: *mut c_void, keyboard: i32, action:
     })
 }
 
+pub(super) unsafe fn set_platform_view(session: *mut c_void, node: u64, name: &str) -> i32 {
+    super::vm_entry!(-1, {
+        // SAFETY: the effect runs on the owning session thread.
+        let inner = unsafe { inner(session) };
+        status(
+            inner
+                .tree
+                .borrow_mut()
+                .set_platform_view(NodeId::from_raw(node), name),
+        )
+    })
+}
+
 pub(super) unsafe fn set_text_scale(session: *mut c_void, scale: f32) -> i32 {
     super::vm_entry!(-1, {
         // SAFETY: session is captured from the live Host and used only on the render thread.
@@ -612,8 +625,25 @@ fn dispatch_gesture_list(inner: &Inner, gestures: Vec<uicore::Gesture>) -> Resul
         note_gesture(&inner.marks, &gesture);
         match gesture {
             uicore::Gesture::TextReplaced(id) => {
-                let text = inner.tree.borrow().editor_text(id).unwrap_or_default();
-                dispatch_text(inner, id, &text)?;
+                let snapshot = inner.tree.borrow().editor_snapshot(id);
+                if let Some((_, value)) = snapshot {
+                    let unit = |position| i32::try_from(position).unwrap_or(i32::MAX);
+                    let (from, to) = value
+                        .composing
+                        .map_or((-1, -1), |range| (unit(range.start), unit(range.end)));
+                    dispatch_input(
+                        inner,
+                        id,
+                        16,
+                        Some(&value.text),
+                        Some((
+                            unit(value.selection.base),
+                            unit(value.selection.extent),
+                            from,
+                            to,
+                        )),
+                    )?;
+                }
                 continue;
             }
             uicore::Gesture::ActivateLink { id, link } => {

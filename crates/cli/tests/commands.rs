@@ -94,7 +94,7 @@ mod tests {
         }
         let ios = sandbox.cli(&["build", "ios"]);
         assert!(!ios.status.success());
-        assert!(String::from_utf8_lossy(&ios.stderr).contains("crates/ios"));
+        assert!(String::from_utf8_lossy(&ios.stderr).contains("iOS 宿主尚未实现"));
         success(sandbox.cli(&["clean"]));
         assert!(!sandbox.0.join("build").exists());
         assert!(sandbox.0.join("lib/main.tsx").is_file());
@@ -179,11 +179,11 @@ void check();
             }
             success(sandbox.cli(&args));
             let (tx, rx) = mpsc::channel();
-            let storage = shell::memory::MemoryStorage::new(sandbox.0.to_string_lossy());
-            let mut modules = shell::first_party_modules();
+            let storage = embedder::memory::MemoryStorage::new(sandbox.0.to_string_lossy());
+            let mut modules = embedder::first_party_modules();
             modules.retain(|module| !matches!(module.name, "FileSystem" | "AsyncStorage"));
-            modules.push(shell::file_system(Arc::clone(&storage) as _));
-            modules.push(shell::async_storage(storage));
+            modules.push(embedder::file_system(Arc::clone(&storage) as _));
+            modules.push(embedder::async_storage(storage));
             let config = session::ModuleConfig {
                 registry: Arc::new(session::ModuleRegistry::new(modules)),
                 post_delivery: None,

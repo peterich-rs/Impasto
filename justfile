@@ -1,14 +1,14 @@
 set shell := ["bash", "-euc"]
 
 root := justfile_directory()
-logo := root / "crates/macos/assets"
+logo := root / "crates/embedder/macos/assets"
 
 default:
     @just --list
 
 # Same gate as the Linux clippy job in `.github/workflows/check.yml`.
 clippy:
-    cargo clippy --manifest-path "{{root}}/Cargo.toml" --workspace --exclude macos --all-targets -- -D warnings
+    cargo clippy --manifest-path "{{root}}/Cargo.toml" --workspace --exclude embedder-macos --all-targets -- -D warnings
 
 check: style-check clippy test solid standard-check
     @echo "check ok"
@@ -23,7 +23,7 @@ test: gallery-dist
 # warning-free cargo check. crapper and dryer must be on PATH. CRAP reads
 # whatever `just coverage` last wrote; it does not rerun tests.
 quality:
-    crapper --use-existing-coverage protocol uicore engine session shell
+    crapper --use-existing-coverage protocol uicore engine session embedder
     dryer --threshold 0.8 crates/protocol/src crates/uicore/src crates/engine/src crates/session/src
     RUSTFLAGS="-D warnings" cargo check --manifest-path "{{root}}/Cargo.toml" --workspace
 
@@ -31,7 +31,7 @@ coverage:
     cargo llvm-cov --manifest-path "{{root}}/Cargo.toml" --lcov --output-path "{{root}}/target/coverage/rust/lcov.info" --workspace
 
 gen:
-    cargo run -p shell --bin module-stubs
+    cargo run -p embedder --bin module-stubs
     cargo run -p uicore --bin style-types -- --root "{{root}}"
 
 # Fail when generated style types or the utility list drift.
@@ -78,18 +78,49 @@ host: gallery-dist
     #!/usr/bin/env bash
     set -euo pipefail
     sdk=$(python3 "{{root}}/tools/impeller_sdk.py" prepare)
-    IMPASTO_IMPELLER_SDK_DIR="$sdk" cargo run --manifest-path "{{root}}/Cargo.toml" -p macos --features impeller -- --js "{{root}}/apps/gallery-solid/dist/quotes.js" "{{logo}}"
+    IMPASTO_IMPELLER_SDK_DIR="$sdk" cargo run --manifest-path "{{root}}/Cargo.toml" -p embedder-macos --features impeller -- --js "{{root}}/apps/gallery-solid/dist/quotes.js" "{{logo}}"
 
 host-js: host
 
 # Debug APK. Gradle runs cargo build without --release.
-# Needs the Android NDK, the arm64 Impeller SDK, and cargo on PATH.
+# Needs the Android NDK and both Android Rust targets.
 android: gallery-dist
-    "{{root}}/crates/android/apk/gradlew" -p "{{root}}/crates/android/apk" assembleDebug
+    "{{root}}/crates/embedder/android/apk/gradlew" -p "{{root}}/crates/embedder/android/apk" :app:assembleDebug
+
+android-build-check: gallery-dist
+    "{{root}}/crates/embedder/android/apk/gradlew" -p "{{root}}/crates/embedder/android/apk" :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+    python3 "{{root}}/tools/check-android-package.py" "{{root}}/crates/embedder/android/apk/app/build/outputs/apk/debug/app-debug.apk"
+
+# Run on one Android device and remove its temporary test packages on exit.
+android-device-test: gallery-dist
+    #!/usr/bin/env bash
+    set -euo pipefail
+    serial="$(adb get-serialno)"
+    cleanup() {
+        local status=$?
+        local installed
+        trap - EXIT
+        if ! installed="$(adb -s "$serial" shell pm list packages)"; then
+            echo "无法连接 $serial，未能清理 Android 测试包" >&2
+            exit 1
+        fi
+        for package in dev.impasto.host.verification.test dev.impasto.host.verification; do
+            if grep -Fxq "package:$package" <<< "$installed"; then
+                adb -s "$serial" uninstall "$package" || status=1
+            fi
+        done
+        exit "$status"
+    }
+    trap cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    ANDROID_SERIAL="$serial" "{{root}}/crates/embedder/android/apk/gradlew" -p "{{root}}/crates/embedder/android/apk" \
+        -PimpastoVerification=true -Pandroid.testInstrumentationRunnerArguments.impastoTestVulkan="${IMPASTO_TEST_VULKAN:-true}" \
+        :app:connectedDebugAndroidTest
 
 # Release APK. Gradle runs cargo build --release. Signed with the debug keystore.
 android-release: gallery-dist
-    "{{root}}/crates/android/apk/gradlew" -p "{{root}}/crates/android/apk" assembleRelease
+    "{{root}}/crates/embedder/android/apk/gradlew" -p "{{root}}/crates/embedder/android/apk" -PimpastoLocalSigning=true :app:assembleRelease
 
 # Relocatable CLI distribution, including the pinned Node/compiler toolchain.
 cli-dist:

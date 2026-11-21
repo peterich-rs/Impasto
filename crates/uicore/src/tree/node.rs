@@ -309,6 +309,8 @@ bitflags::bitflags! {
         const PICTURE_FROM_CANVAS = 1 << 11;
         /// `display: none`. Layout, paint, hit, and semantics skip the subtree.
         const HIDDEN = 1 << 13;
+        /// Keep the node drawable while omitting its subtree from accessibility.
+        const SEMANTICS_HIDDEN = 1 << 14;
     }
 }
 

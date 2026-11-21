@@ -42,6 +42,7 @@ struct References {
     backs: Vec<(u64, Saved)>,
     shortcuts: Vec<(String, Saved)>,
     settings: Vec<(u64, Saved)>,
+    window_metrics: Vec<(u64, Saved)>,
     motions: Vec<(u64, u64, String, Saved)>,
 }
 
@@ -55,6 +56,7 @@ pub(in crate::ui::player) struct Host {
     raf: RefCell<Vec<Timer>>,
     paused: Cell<bool>,
     wants_frame: Cell<bool>,
+    back_enabled: Cell<Option<bool>>,
     freeze: Cell<bool>,
     reactive_failed: Cell<bool>,
     closing: Cell<bool>,
@@ -335,10 +337,12 @@ impl Engine {
         http: Option<Arc<dyn crate::session::HttpClient>>,
     ) -> Result<Self, Error> {
         let log = Rc::clone(&inner.log);
-        let runtime = crate::runtime::Runtime::builder()
-            .log(move |level, text| log(level, text))
-            .build_unstarted()
-            .map_err(|_| Error::Runtime)?;
+        let mut builder =
+            crate::runtime::Runtime::builder().log(move |level, text| log(level, text));
+        if let Some(clock) = &inner.config.transport_clock {
+            builder = builder.transport_clock(Arc::clone(clock));
+        }
+        let runtime = builder.build_unstarted().map_err(|_| Error::Runtime)?;
         runtime.configure_io(http.map_or_else(IoBindings::disconnected, IoBindings::inline));
         let mut host = Box::new(Host {
             runtime,
@@ -347,6 +351,7 @@ impl Engine {
             raf: RefCell::new(Vec::new()),
             paused: Cell::new(false),
             wants_frame: Cell::new(false),
+            back_enabled: Cell::new(None),
             freeze: Cell::new(false),
             reactive_failed: Cell::new(false),
             closing: Cell::new(false),

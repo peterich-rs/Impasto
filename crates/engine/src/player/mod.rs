@@ -24,6 +24,7 @@ pub(crate) struct RetainedPicture {
     /// the display list, after any root list that flattened it.
     pub(crate) held: Vec<HeldParagraph>,
     /// Canvas images that were not ready. Reuse fails once any of them is cached.
+    pub(crate) has_external_texture: bool,
     pub(crate) waiting: Vec<std::sync::Arc<str>>,
 }
 
@@ -45,9 +46,11 @@ pub struct Engine {
     textures: crate::textures::TextureStore,
     typography: crate::typography::TypographyHandle,
     last_submit: crate::SubmitStats,
-    /// Proc table for this context. Null until [`Engine::create_vulkan`].
+    /// Proc table and loader shared with Vulkan resources retained outside the engine.
     #[cfg(target_os = "android")]
-    vulkan_procs: *mut vulkan::VulkanProcs,
+    vulkan_procs: Option<std::sync::Arc<vulkan::VulkanProcs>>,
+    #[cfg(target_os = "android")]
+    gles: Option<Rc<gles::GlesContext>>,
     /// Impeller objects are created and used on the render thread.
     render_thread: PhantomData<*mut ()>,
 }
@@ -55,6 +58,13 @@ pub struct Engine {
 #[cfg(target_os = "android")]
 #[path = "../vulkan.rs"]
 mod vulkan;
+
+#[cfg(target_os = "android")]
+#[path = "../gles.rs"]
+mod gles;
+
+#[cfg(target_os = "android")]
+pub use gles::GlesWindow;
 
 #[cfg(target_os = "android")]
 pub use vulkan::VulkanSwapchain;
@@ -121,7 +131,9 @@ impl Engine {
             ))),
             last_submit: crate::SubmitStats::default(),
             #[cfg(target_os = "android")]
-            vulkan_procs: ptr::null_mut(),
+            vulkan_procs: None,
+            #[cfg(target_os = "android")]
+            gles: None,
             render_thread: PhantomData,
         }
     }
@@ -276,6 +288,15 @@ impl Engine {
         Ok(())
     }
 
+    /// The installed display lists independently retain the underlying image.
+    pub fn invalidate_pictures(&mut self) {
+        self.typography.borrow_mut().mark_stale();
+    }
+
+    pub fn forget_texture(&mut self, source: &str) {
+        self.textures.forget(source);
+    }
+
     /// Pictures built since the engine was created. The cache key is picture id and generation.
     pub fn picture_builds(&self) -> u64 {
         self.pictures.builds()
@@ -349,6 +370,29 @@ impl Engine {
     pub fn trim(&mut self) {
         self.release_frame();
         self.last_submit = crate::SubmitStats::default();
+    }
+
+    /// Replaces GPU resources after the host has released its old surface.
+    /// The shaper retains the typography context and registered fonts.
+    #[cfg(target_os = "android")]
+    pub fn recreate_graphics(
+        &mut self,
+        create: impl FnOnce() -> Result<Self, Status>,
+    ) -> Result<(), Status> {
+        {
+            let procs = self.vulkan_procs.clone();
+            let _guard = procs.as_deref().map(vulkan::VulkanProcs::current);
+            self.trim();
+        }
+        // Drop EGL before binding a new context on this thread.
+        let mut retired = Self::inert();
+        std::mem::swap(&mut self.typography, &mut retired.typography);
+        std::mem::swap(self, &mut retired);
+        drop(retired);
+        let mut replacement = create()?;
+        std::mem::swap(&mut self.typography, &mut replacement.typography);
+        std::mem::swap(self, &mut replacement);
+        Ok(())
     }
 
     /// Test helper. Each call uses a new picture generation so the commands are rebuilt.
@@ -454,6 +498,10 @@ impl crate::Surface for Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
+        #[cfg(target_os = "android")]
+        let procs = self.vulkan_procs.take();
+        #[cfg(target_os = "android")]
+        let _guard = procs.as_deref().map(vulkan::VulkanProcs::current);
         self.release_frame();
         let last = Rc::strong_count(&self.typography) == 1;
         // SAFETY: the wrapper stays valid. This drops our `Rc` before the graphics context.
@@ -465,14 +513,6 @@ impl Drop for Engine {
             self.context = ptr::null_mut();
         } else {
             debug_assert!(false, "shaper dropped after Engine");
-        }
-        #[cfg(target_os = "android")]
-        if last && !self.vulkan_procs.is_null() {
-            // SAFETY: `vulkan_procs` came from `Box::into_raw` in `create_vulkan`.
-            // The context that used it as `user_data` was released above.
-            let procs = unsafe { Box::from_raw(self.vulkan_procs) };
-            self.vulkan_procs = ptr::null_mut();
-            vulkan::close_library(procs.library);
         }
     }
 }

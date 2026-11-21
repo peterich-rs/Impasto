@@ -34,6 +34,12 @@ export type Router = {
   popTo: (path: string) => boolean;
   reset: (path: string) => boolean;
   complete: (entry: RouteEntry) => void;
+  backPreview: Accessor<{ key: string; progress: number; fromRight: boolean } | null>;
+};
+type RouteRestoration = {
+  key: string;
+  get(key: string): string | null;
+  set(key: string, value: string | null): void;
 };
 export const PageActiveContext = createContext<Accessor<boolean>>(() => true);
 export const PageKeepContext = createContext<Accessor<boolean>>(() => false);
@@ -80,17 +86,39 @@ function nextKey(): string {
   keySeq += 1;
   return key;
 }
+
+function restoreRoutes(defs: readonly RouteDef[], restoration: RouteRestoration): RouteEntry[] | null {
+  try {
+    const saved = restoration.get(restoration.key);
+    if (!saved) return null;
+    const value: unknown = JSON.parse(saved);
+    if (!Array.isArray(value) || value[0] !== 1 || value.length < 2) return null;
+    const entries: RouteEntry[] = [];
+    for (const path of value.slice(1)) {
+      const entry = typeof path === "string" && resolved(defs, path);
+      if (!entry) return null;
+      entries.push({ ...entry, key: nextKey(), phase: "live" });
+    }
+    return entries;
+  } catch {
+    return null;
+  }
+}
 export function createRouter(
   defs: readonly RouteDef[],
   options: {
     initial?: string;
     onBack?: () => boolean;
+    restoration?: RouteRestoration;
+    /** Disable the automatic link handler when the application restores or maps its own routes. */
+    linking?: boolean;
   } = {},
 ): Router {
   const initialPath = options.initial ?? "/";
   const first = resolved(defs, initialPath);
+  const restored = options.restoration && restoreRoutes(defs, options.restoration);
   const [entries, setEntries] = createSignal<RouteEntry[]>(
-    first
+    restored ?? (first
       ? [
           {
             ...first,
@@ -98,8 +126,9 @@ export function createRouter(
             phase: "live",
           },
         ]
-      : [],
+      : []),
   );
+  const [backPreview, setBackPreview] = createSignal<ReturnType<Router["backPreview"]>>(null);
   function navigate(path: string, previousPhase: "cover" | "exit"): boolean {
     const match = resolved(defs, path);
     if (!match) {
@@ -194,23 +223,67 @@ export function createRouter(
     popTo,
     reset,
     complete,
+    backPreview,
   };
-  const releasePop = onBack(200, () => pop());
-  const releaseApp = options.onBack ? onBack(100, options.onBack) : () => {};
-  if (getOwner()) {
-    onCleanup(() => {
-      releasePop();
-      releaseApp();
+  const activeRoutes = () => entries().filter((entry) => entry.phase !== "exit");
+  if (options.restoration) {
+    const restoration = options.restoration;
+    let last: string | undefined;
+    createTrackedEffect(() => {
+      const value = JSON.stringify([1, ...activeRoutes().map((entry) => entry.path)]);
+      if (last === value) return;
+      last = value;
+      try {
+        restoration.set(restoration.key, value);
+      } catch (error) {
+        console.warn("无法保存路由状态", error);
+      }
     });
   }
-  void import("@impasto/linking")
-    .then(({ Linking }) => {
-      const initial = Linking.getInitialURL();
-      if (initial) reset(initial);
-      Linking.addEventListener("url", (event) => router.push(event.url));
-    })
-    .catch(() => {
-      /* unregistered: same as today's get() == null */
+  let committedKey: string | undefined;
+  const releasePop = onBack(200, () => {
+    const key = committedKey;
+    committedKey = undefined;
+    if (key && key !== activeRoutes().at(-1)?.key) return true;
+    return pop();
+  }, {
+    enabled: () => activeRoutes().length > 1 || entries().at(-1)?.phase === "exit",
+    gesture: (event) => {
+      if (event.phase === "start") {
+        const key = activeRoutes().at(-1)?.key;
+        if (key) setBackPreview({ key, fromRight: event.fromRight, progress: 0 });
+      } else if (event.phase === "progress") {
+        setBackPreview((preview) => preview && { ...preview, progress: event.progress });
+      } else {
+        committedKey = event.phase === "commit" ? backPreview()?.key : undefined;
+        setBackPreview(null);
+      }
+    },
+  });
+  const releaseApp = options.onBack ? onBack(100, options.onBack) : () => {};
+  let disposed = false;
+  let releaseLinking: (() => void) | undefined;
+  if (getOwner()) {
+    onCleanup(() => {
+      disposed = true;
+      releasePop();
+      releaseApp();
+      releaseLinking?.();
     });
+  }
+  if (options.linking !== false) {
+    void import("@impasto/linking")
+      .then(({ Linking }) => {
+        if (disposed) return;
+        const initial = Linking.getInitialURL();
+        if (initial) reset(initial);
+        const navigate = ({ url }: { url: string }) => { router.push(url); };
+        Linking.addEventListener("url", navigate);
+        releaseLinking = () => Linking.removeEventListener("url", navigate);
+      })
+      .catch(() => {
+        /* This host has no linking capability. */
+      });
+  }
   return router;
 }

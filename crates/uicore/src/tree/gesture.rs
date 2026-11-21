@@ -999,10 +999,12 @@ impl Tree {
         }
         let mut gestures = Vec::new();
         if let Some(old) = self.focused.take() {
+            self.mark_semantics_chain(old);
             gestures.push(Gesture::Blur(old));
         }
         if let Some(id) = next {
             self.focused = Some(id);
+            self.mark_semantics_chain(id);
             gestures.push(Gesture::Focus(id));
         }
         self.invalidate_style_deps(crate::style::DepMask::FOCUS);

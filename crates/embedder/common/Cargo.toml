@@ -1,0 +1,25 @@
+[package]
+name = "embedder"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+engine = { workspace = true }
+protocol = { workspace = true }
+session = { workspace = true }
+thiserror = { workspace = true }
+uicore = { workspace = true }
+bytes = "1"
+http = "1"
+http-body-util = "0.1"
+openwire = "0.1.2"
+mars-xlog = { git = "https://github.com/peterich-rs/xlog-rs", rev = "cdedbdf40868f3e1673755ec045dbf373f028fc2" }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "net", "rt-multi-thread", "sync", "time"] }
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std"] }
+tungstenite = { version = "0.26", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+
+[lints]
+workspace = true

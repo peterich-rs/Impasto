@@ -46,6 +46,8 @@ pub struct Metrics {
     pub inset_bottom: f32,
     pub padding: Insets,
     pub view_insets: Insets,
+    /// Regions where system gestures may take precedence over application touch.
+    pub system_gesture_insets: Insets,
 }
 
 impl Metrics {
@@ -78,8 +80,37 @@ impl Metrics {
             inset_bottom: padding.bottom.max(view_insets.bottom),
             padding,
             view_insets,
+            system_gesture_insets: Insets::default(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisplayFeatureKind {
+    Fold,
+    Hinge,
+    Cutout,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FoldPosture {
+    Flat,
+    HalfOpened,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DisplayFeature {
+    pub bounds: uicore::Rect,
+    pub kind: DisplayFeatureKind,
+    pub posture: Option<FoldPosture>,
+    pub separating: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WindowDisplay {
+    pub display_id: Option<i32>,
+    pub refresh_rate: Option<f32>,
+    pub features: Vec<DisplayFeature>,
 }
 
 /// One vsync. Fields are monotonic milliseconds on that platform's clock.
@@ -290,6 +321,14 @@ pub enum ImeUpdate {
     Hide,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BackGesture {
+    Started { from_right: bool },
+    Progress(f32),
+    Cancelled,
+    Committed,
+}
+
 /// One edit delivered to the focused control.
 ///
 /// `Text` is committed characters. `Composing(None)` ends an IME composition.
@@ -399,6 +438,7 @@ pub struct FrameOutput {
     pub again: bool,
     pub ime: Option<ImeUpdate>,
     pub semantics: Option<uicore::SemanticsPatch>,
+    pub platform_views: Option<Arc<[uicore::PlatformViewPlacement]>>,
     pub fonts: Vec<(String, Vec<u8>)>,
     pub reloads: Vec<String>,
     pub clipboard: Option<String>,
@@ -418,6 +458,7 @@ impl FrameOutput {
             again: false,
             ime: None,
             semantics: None,
+            platform_views: None,
             fonts: Vec::new(),
             reloads: Vec::new(),
             clipboard: None,
@@ -448,6 +489,7 @@ pub trait Session {
     /// Enable opt-in per-frame script counters on this render-thread session.
     fn set_trace(&mut self, _enabled: bool) {}
     fn metrics(&mut self, metrics: &Metrics);
+    fn window_display(&mut self, _display: WindowDisplay) {}
     fn pointer(&mut self, event: uicore::PointerEvent);
     fn frame(&mut self, time: FrameTime) -> FrameOutput;
     /// True after the session asked for another frame, until the host takes it.
@@ -471,9 +513,18 @@ pub trait Session {
     fn settings(&mut self, _settings: &PlatformSettings) {}
     /// The window became or resigned key. This is not text focus.
     fn window_focus(&mut self, _focused: bool) {}
+    fn window_state_changed(&mut self, _key: String) {}
     /// Keyboard or IME input for the focused node. No focus means the session
     /// drops the event.
     fn input(&mut self, _event: InputEvent) {}
+    /// A platform return gesture owned by the application.
+    fn back_gesture(&mut self, event: BackGesture) -> bool {
+        event != BackGesture::Committed
+    }
+    /// Ownership advertised to the platform before it begins a back gesture.
+    fn take_back_enabled(&mut self) -> Option<bool> {
+        None
+    }
     /// Keyboard visibility or a new editing state. `None` means nothing changed.
     fn take_ime(&mut self) -> Option<ImeUpdate> {
         None
@@ -490,8 +541,19 @@ pub trait Session {
     }
     /// An accessibility action. The default ignores it.
     fn semantics_action(&mut self, _action: uicore::SemanticsAction) {}
+    /// Builds a candidate script runtime and swaps it in after a valid first frame.
+    fn update_source(
+        &mut self,
+        _source: &str,
+        _shaper: Box<dyn uicore::Shaper>,
+        _io: Box<dyn Fn(IoJob) -> Result<(), Box<IoJob>> + Send>,
+        _time: FrameTime,
+    ) -> Result<(), String> {
+        Err("this session does not support debug source updates".to_owned())
+    }
     /// Whether the host currently needs semantics. Re-enabling must publish a fresh snapshot.
     fn set_semantics_enabled(&mut self, _enabled: bool) {}
+    fn set_autofill_enabled(&mut self, _enabled: bool) {}
     /// Font faces queued by the session since the last take.
     ///
     /// The host registers them on the render thread before `submit`. The default

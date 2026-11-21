@@ -1,6 +1,6 @@
 # Impasto JS 运行时与标准库重构设计
 
-本文记录 `javascript` 的运行时接口、标准库、UI 绑定及与 `shell` 的传输契约。实际验证见 [JS 运行时验收](runtime-and-standard-library-validation.md)。
+本文记录 `javascript` 的运行时接口、标准库、UI 绑定及与 `embedder` 的传输契约。实际验证见 [JS 运行时验收](runtime-and-standard-library-validation.md)。
 
 ## 1. 基线
 
@@ -10,7 +10,7 @@
 
 `javascript::runtime::Runtime` 维护 VM、普通定时器、模块注册与调用、宿主 I/O 及资源状态。同步结果、异步结果与事件经过共享值转换。宿主二进制数据按实际视图读取。HTTP 执行模式互斥，取消在本地完成结算，资源额度由持有者在终结或读取时释放。UI 扩展保留渲染帧、Canvas 策略和响应式回调的顺序。
 
-入口见 [Runtime](../../../crates/javascript/src/runtime/mod.rs)、[宿主绑定](../../../crates/javascript/src/runtime/io.rs)、[完成交付](../../../crates/javascript/src/runtime/delivery.rs)、[UI 装配](../../../crates/javascript/src/ui/player/vm/mod.rs)与 [Shell 网络循环](../../../crates/shell/src/net.rs)。
+入口见 [Runtime](../../../crates/javascript/src/runtime/mod.rs)、[宿主绑定](../../../crates/javascript/src/runtime/io.rs)、[完成交付](../../../crates/javascript/src/runtime/delivery.rs)、[UI 装配](../../../crates/javascript/src/ui/player/vm/mod.rs)与 [宿主网络循环](../../../crates/embedder/common/src/net.rs)。
 
 ## 3. 依赖边界与所有权
 
@@ -42,7 +42,7 @@ flowchart TD
     headless --> compiler
 ```
 
-`host` 使用 std，负责自有值、模块声明、一次性完成回调与传输契约。`runtime` feature 默认启用，包含 QuickJS 后端、编译器及标准库。`ui` feature 在此基础上接入树、响应式图、Canvas 与帧调度。`session` crate 重导出帧和输入契约，单独构建时只启用同名 feature。`shell` 持有平台实现、网络传输、执行器与唤醒。
+`host` 使用 std，负责自有值、模块声明、一次性完成回调与传输契约。`runtime` feature 默认启用，包含 QuickJS 后端、编译器及标准库。`ui` feature 在此基础上接入树、响应式图、Canvas 与帧调度。`session` crate 重导出帧和输入契约，单独构建时只启用同名 feature。`embedder` 持有平台实现、网络传输、执行器与唤醒。
 
 | 路径 | 职责 |
 |---|---|
@@ -53,7 +53,7 @@ flowchart TD
 | `crates/javascript/src/standard` | 标准 API 的原生实现、profile 与 TypeScript 声明 |
 | `crates/javascript/src/ui` | UI 专用入口、ABI、场景和响应式绑定、帧编排 |
 | `crates/javascript/src/session` | 平台与 UI 会话共享的生命周期、帧、输入和宿主配置 |
-| `crates/shell/src/{net.rs,http.rs,modules/,module_stubs.rs}` | 传输、首方模块实例收集、声明工具入口 |
+| `crates/embedder/common/src/{net.rs,http.rs,modules/,module_stubs.rs}` | 传输、首方模块实例收集、声明工具入口 |
 
 ## 4. Runtime API 与装配
 
@@ -206,7 +206,7 @@ Delivery   = (RuntimeKey, owned event)
 
 先入队再发 wake，调用 wake 回调前释放队列锁。合并 wake 时，用同一锁内的队列检查或 epoch 协议处理消费者刚看到空队列时的并发入队。挂起的 I/O 只计在途。实际进入队列的事件、可运行的任务或更早的 deadline 才产生唤醒依据。关闭端先使投递和 wake 失效，再释放资源并唤醒等待 credit 的任务。
 
-Shell 将 `net::serve` 的命令接收与会阻塞的 HTTP 请求任务分开。后台等待流额度时，命令循环仍能处理取消、短请求与 socket 控制。超时、取消与 shutdown 会结束等待。Shell 的回归测试让无人读取的流耗尽额度，再验证短请求和 socket 仍能推进。见 [Shell 网络循环](../../../crates/shell/src/net.rs)和 [OpenWire 适配](../../../crates/shell/src/http.rs)。
+`embedder` 将 `net::serve` 的命令接收与会阻塞的 HTTP 请求任务分开。后台等待流额度时，命令循环仍能处理取消、短请求与 socket 控制。超时、取消与 shutdown 会结束等待。`embedder` 的回归测试让无人读取的流耗尽额度，再验证短请求和 socket 仍能推进。见 [宿主网络循环](../../../crates/embedder/common/src/net.rs)和 [OpenWire 适配](../../../crates/embedder/common/src/http.rs)。
 
 ## 9. 标准库与支持范围
 
@@ -294,15 +294,15 @@ cargo fmt --all -- --check
 python3 tools/check-javascript-boundaries.py
 cargo run --locked -p javascript --bin js-headless
 cargo run --locked -p uicore --bin style-types -- --check --root .
-RUSTFLAGS="-D warnings" cargo check --workspace --exclude macos
-cargo clippy --workspace --exclude macos --all-targets -- -D warnings
+RUSTFLAGS="-D warnings" cargo check --workspace --exclude embedder-macos
+cargo clippy --workspace --exclude embedder-macos --all-targets -- -D warnings
 pnpm install --frozen-lockfile
 just gallery-dist
-cargo test --workspace --exclude macos
+cargo test --workspace --exclude embedder-macos
 pnpm -r test
 ```
 
-CI 运行 `cargo run --locked -p shell --bin module-stubs -- --check` 和 `just standard-check` 对应的标准库契约检查。macOS runner 在同一 SHA 执行本机 `cargo clippy -p macos --all-targets -- -D warnings` 和 `cargo test -p macos`，另记带 SDK 的宿主启动结果。Android 将 `just android`、`just android-release`、`android-x64` 模拟器和实体设备分别记录，注明 ABI、构建 profile、SDK/NDK 与运行场景。iOS 尚无宿主。可用命令与系统矩阵见 [justfile](../../../justfile) 和 [CI](../../../.github/workflows/check.yml)。
+CI 运行 `cargo run --locked -p embedder --bin module-stubs -- --check` 和 `just standard-check` 对应的标准库契约检查。macOS runner 在同一 SHA 执行本机 `cargo clippy -p embedder-macos --all-targets -- -D warnings` 和 `cargo test -p embedder-macos`，另记带 SDK 的宿主启动结果。Android 将 `just android`、`just android-release`、`android-x64` 模拟器和实体设备分别记录，注明 ABI、构建 profile、SDK/NDK 与运行场景。iOS 尚无宿主。可用命令与系统矩阵见 [justfile](../../../justfile) 和 [CI](../../../.github/workflows/check.yml)。
 
 ## 13. 性能与资源保护
 

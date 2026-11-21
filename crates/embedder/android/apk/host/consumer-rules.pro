@@ -1,0 +1,2 @@
+-keep class dev.impasto.host.NativeBridge { *; }
+-keep class dev.impasto.host.ImpastoView { *; }

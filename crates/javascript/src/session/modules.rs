@@ -67,6 +67,9 @@ pub struct ModuleConfig {
     pub exec: Arc<dyn MethodExec>,
     pub settle: Arc<dyn Fn(u64) -> Settle + Send + Sync>,
     pub post_delivery: Option<Arc<dyn Fn(crate::host::Delivery) + Send + Sync>>,
+    /// Current host monotonic time in milliseconds, in the same domain as frame times.
+    /// Without a host clock the session uses its explicitly driven frame clock.
+    pub transport_clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
     pub app_state: Shared<String>,
     pub launch_url: Shared<Option<String>>,
 }
@@ -84,6 +87,7 @@ impl ModuleConfig {
             exec: Arc::new(ImmediateExec),
             settle: Arc::new(|_token| Settle::new(|_result| {})),
             post_delivery: None,
+            transport_clock: None,
             app_state: shared("active".to_owned()),
             launch_url: shared(None),
         }

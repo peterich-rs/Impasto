@@ -4,7 +4,7 @@
 
 ## 仓库
 
-原生代码在 `crates/`，用 Cargo。JS 是仓库根的 pnpm workspace（`packages/*`、`apps/*`）。Android APK 使用 `crates/android/apk/` 下的 Gradle 工程。
+原生代码在 `crates/`，用 Cargo。JS 是仓库根的 pnpm workspace（`packages/*`、`apps/*`）。Android APK 使用 `crates/embedder/android/apk/` 下的 Gradle 工程。
 
 ```
 crates/protocol/         DrawList、LayerTree
@@ -13,20 +13,20 @@ crates/engine/           渲染引擎。读 LayerTree，通过 impeller 依赖�
 crates/impeller-sys/     Impeller C 头文件、Rust FFI 和原生链接
 crates/javascript/      JavaScript 运行时、编译器、标准库、宿主契约及 UI 绑定
 crates/session/          供平台使用的会话契约入口
-crates/shell/        命令队列、帧调度、渲染线程
-crates/macos/            macOS 窗口
-crates/android/          HostActivity、HostView、Choreographer、Vulkan
+crates/embedder/common/  公共宿主，命令队列、帧调度、渲染线程
+crates/embedder/android/ Android 宿主，ImpastoActivity、ImpastoView、Choreographer、Vulkan
+crates/embedder/macos/   macOS 宿主，AppKit、CVDisplayLink、Metal
 packages/solid-renderer/ 接到 scene 与 reactive 的运行时。不做布局
 packages/solid-ui/       View、Row、Column、Stack、Grid、Text、Image、Button、Field、Dialog 等作者组件
-packages/devtools/       应用内调试面板。数据来自 shell 的 DiagnosticsHub
+packages/devtools/       应用内调试面板。数据来自 embedder 的 DiagnosticsHub
 packages/solid-router/   路径、栈、RouterView
 packages/*               clipboard、linking、app-state、file-system、async-storage、net、form、i18n、permissions
 apps/gallery-solid/      Solid 应用。dist/quotes.js 由 just gallery-dist 本地生成，不进 git
 ```
 
-Gallery 经 solid-ui、solid-router 和 solid-renderer 使用 JavaScript UI 会话，UI 会话向 uicore 提交更新。平台宿主依赖 shell 和 `javascript/ui`。shell 通过 `session` 使用帧、输入和传输契约。`session` 只启用 JavaScript crate 的 `session` feature。`engine` 不依赖 `uicore`。`uicore` 不包含 QuickJS、AppKit 或 Impeller 头文件。语言包不算坐标。一个可执行文件只链一种会话。
+Gallery 经 solid-ui、solid-router 和 solid-renderer 使用 JavaScript UI 会话，UI 会话向 uicore 提交更新。平台宿主依赖 `embedder` 和 `javascript/ui`。`embedder` 通过 `session` 使用帧、输入和传输契约。`session` 只启用 JavaScript crate 的 `session` feature。`engine` 不依赖 `uicore`。`uicore` 不包含 QuickJS、AppKit 或 Impeller 头文件。语言包不算坐标。一个可执行文件只链一种会话。
 
-`crates/protocol`、`crates/uicore`、`crates/engine`、`crates/macos` 不手写 C 或 Objective-C。QuickJS 的 Rust 绑定在 `crates/javascript/src/ui/player/vm`。`src/ui/abi.yml` 生成 Rust、JavaScript 与 TypeScript 常量。
+`crates/protocol`、`crates/uicore`、`crates/engine`、`crates/embedder/macos` 不手写 C 或 Objective-C。QuickJS 的 Rust 绑定在 `crates/javascript/src/ui/player/vm`。`src/ui/abi.yml` 生成 Rust、JavaScript 与 TypeScript 常量。
 
 ## JS 运行时
 
@@ -34,9 +34,9 @@ Gallery 经 solid-ui、solid-router 和 solid-renderer 使用 JavaScript UI 会�
 
 `crates/javascript/src/standard` 的 Rust 模块直接向 QuickJS 注册 Web API。Rust 持有事件监听、取消信号、URL、解码器、Headers、Body、stream reader、Fetch 和 WebSocket 的状态。JS 回调和 Promise 由 QuickJS 执行，原生对象持有的 JS 引用参与 GC tracing。各绑定模块同时维护 TypeScript 签名。`StandardProfile::declarations()` 按宿主传输能力生成 `.d.ts`。`just standard-check` 对 `legacy` 和四种 `portable` 传输组合比较实际 QuickJS 全局值、原型与声明，并执行通过 TypeScript 检查的用例。
 
-`legacy` 是默认 profile，`fetch` 在整响应完成时结算，`fetchStream` 在响应头到达时结算。`portable` 的 `fetch` 用同一流式状态，要求外部 HTTP 传输。两个 profile 共用 Body、reader、Abort 和宿主值转换。Shell 的外部完成带 `RuntimeKey`，Runtime 按请求身份和状态结算。流的额度随 chunk 转移到 reader，读取、取消或关闭时归还。`shell` 用分开的阻塞任务执行整响应和流式请求，命令循环持续处理短请求和 socket 控制。
+`legacy` 是默认 profile，`fetch` 在整响应完成时结算，`fetchStream` 在响应头到达时结算。`portable` 的 `fetch` 用同一流式状态，要求外部 HTTP 传输。两个 profile 共用 Body、reader、Abort 和宿主值转换。`embedder` 的外部完成带 `RuntimeKey`，Runtime 按请求身份和状态结算。流的额度随 chunk 转移到 reader，读取、取消或关闭时归还。`embedder` 用分开的阻塞任务执行整响应和流式请求，命令循环持续处理短请求和 socket 控制。
 
-宿主模块的运行和声明共用 `Module` 元数据。CLI 打包平台工程时按清单和目标构建目录，独立 bundle 使用首方目录。`cargo run --locked -p shell --bin module-stubs -- --check` 校验声明漂移。实施验收见 [JS 运行时验收](design/js-runtime/runtime-and-standard-library-validation.md)。
+宿主模块的运行和声明共用 `Module` 元数据。CLI 打包平台工程时按清单和目标构建目录，独立 bundle 使用首方目录。`cargo run --locked -p embedder --bin module-stubs -- --check` 校验声明漂移。实施验收见 [JS 运行时验收](design/js-runtime/runtime-and-standard-library-validation.md)。
 
 ## 一帧
 
@@ -51,7 +51,7 @@ vsync → 冲刷 → layout → driver tick → 脏了再 layout → onLayout �
 
 `layer_epoch` 未变、缩放相同、`needs_present` 为假则跳过 `submit_layers` 和 `present`。为真则 `PresentCached`。`Resumed` 与 `Invalidate` 置 `needs_present`。`Hidden`、`Paused`、`MemoryWarning` 调用 `Engine::trim`，GPU 进入 `Flush`。`Dead` 取消这一帧。present 连续失败从第 3 次起退避。`BadScene` 不进退避，也不重建 Vulkan 链。定时器 `Wake` 在已有 vsync token 时不抢跑这一帧，也不取消那次回调；`Resumed` 会丢掉卡住的 token 再武装一次。
 
-macOS 与 Android 宿主打开应用内 devtools。面板经 `registerTopLayer` 挂在渲染器根 stack 上，复用现有布局和绘制。日志经 `shell` 过滤并分发到控制台、xlog 和 devtools。性能页进入时读取一次最近帧，之后由「刷新快照」更新。布局页按需扫描上一轮布局。连续溢出扫描由 `debugSetScan` 显式开启。
+macOS 与 Android 宿主打开应用内 devtools。面板经 `registerTopLayer` 挂在渲染器根 stack 上，复用现有布局和绘制。日志经 `embedder` 过滤并分发到控制台、xlog 和 devtools。性能页进入时读取一次最近帧，之后由「刷新快照」更新。布局页按需扫描上一轮布局。连续溢出扫描由 `debugSetScan` 显式开启。
 
 `FrameSample.workMs` 是渲染线程进入当帧至 `present` 返回的墙钟时间，`budgetMs` 是显示刷新间隔。子阶段可嵌套，例如 `scriptMs` 和 `layoutMs` 都包含在会话耗时中。Android 系统 trace 同时记录调用和跳过 `present` 的帧。采集入口见 [Android 帧性能](platform-hosts.md#android-帧性能)。
 
@@ -105,7 +105,7 @@ Taffy 复用既有文字尺寸时，也复用同一份测量的第一基线。Mi
 
 ## 宿主
 
-宿主入队、在 vsync 上要帧、把 `LayerTree` 交给引擎并上屏。不做命中，不保存 UI 状态。会话 trait 通过 `crates/session` 提供。三端差异在 `docs/platform-hosts.md`。iOS 宿主还没写。
+平台宿主将原生事件入队并提供 vsync。公共宿主驱动会话，将生成的 `LayerTree` 交给绘制后端并呈现。会话持有 UI 状态并通过 `crates/session` 的 trait 接入。各平台的目录和实现状态见 [平台宿主](platform-hosts.md)。
 Android 用 `AccessibilityManager` 的监听通知会话启停语义快照。重新开启时会发布当前树的快照。
 
 ## 运行时会话
@@ -114,7 +114,7 @@ Android 用 `AccessibilityManager` 的监听通知会话启停语义快照。重
 
 `reactive::Graph` 使用带 generation 的 arena 和双向边。进入用户闭包和 cleanup 前结束 arena 借用，JS 值由 `src/ui/player/reactive.rs` 的 `Persistent` 持有和释放。signal 写入只标脏，`batch` 同步冲刷。`JsSession::frame` 在帧监听前、帧监听后和布局监听后冲刷图，空队列跳过。帧监听写入的信号在第一次布局前提交。`tick_motions` 在这些调用之前。`boot` 分发帧与布局监听。抛错的帧监听会从监听表摘掉。`Show`、`Switch`、`Match`、`For` 和 `Errored` 在 `packages/reactive`，调用同一张原生图。
 
-能力模块的运行时 specifier 是包入口 `@impasto/clipboard`、`@impasto/linking`、`@impasto/file-system`、`@impasto/async-storage`、`@impasto/app-state`、`@impasto/permissions` 和 `@impasto/devtools`。`ModuleDef` 从 Rust 的 `Module` 方法表注册导出，`cargo run -p shell --bin module-stubs` 从同一份表和方法签名生成各包的 `src/native.d.ts`。只有在 `ModuleExports::events` 声明事件的模块才导出 `addEventListener` 和 `removeEventListener`，监听方法只接受声明的事件名。`Linking` 声明 `url`，`AppState` 声明 `change` 和 `focus`。`Clipboard`、`Linking` 和 `AsyncStorage` 是 QuickJS 直接注册的具名对象。其余能力包的 TypeScript 入口使用生成的声明组合公开 API。Node 测试统一用同目录的 `native.stub.ts`。
+能力模块的运行时 specifier 是包入口 `@impasto/clipboard`、`@impasto/linking`、`@impasto/file-system`、`@impasto/async-storage`、`@impasto/app-state`、`@impasto/permissions` 和 `@impasto/devtools`。`ModuleDef` 从 Rust 的 `Module` 方法表注册导出，`cargo run -p embedder --bin module-stubs` 从同一份表和方法签名生成各包的 `src/native.d.ts`。只有在 `ModuleExports::events` 声明事件的模块才导出 `addEventListener` 和 `removeEventListener`，监听方法只接受声明的事件名。`Linking` 声明 `url`，`AppState` 声明 `change` 和 `focus`。`Clipboard`、`Linking` 和 `AsyncStorage` 是 QuickJS 直接注册的具名对象。其余能力包的 TypeScript 入口使用生成的声明组合公开 API。Node 测试统一用同目录的 `native.stub.ts`。
 
 CLI 按 `app.toml` 的目标权限生成 `app.modules`，宿主据此限制会话的 `ModuleRegistry`。未注册的能力在链接时报错。原生绑定用 `ArrayBuffer` 持有大字节（≥4KB）的 Rust `Vec<u8>`，较小字节使用 `Uint8Array`。公开的 `FileSystem.read` 总是返回 `Uint8Array`，对大字节创建共享同一缓冲区的视图。
 
@@ -128,7 +128,7 @@ CLI 按 `app.toml` 的目标权限生成 `app.modules`，宿主据此限制会�
 
 ## 应用命令
 
-`crates/cli` 的二进制是 `impasto`。`create` 只创建 `app.toml`、`package.json`、`lib/main.tsx` 和 `assets/`。`run` 默认 debug，构建并启动窗口或通过 adb 安装启动 Android；文件改变后重新构建、重启。`build bundle` 默认 release 字节码，`--debug` 保留 ESM。`build macos` 在 `build/macos` 生成可启动的 `.app`，包含脚本、资产和 Impeller 动态库；`build apk` 在 `build/android` 生成 Gradle 工程并链 `crates/android`。`build ios` 写出缺失宿主的说明后返回非零。
+`crates/cli` 的二进制是 `impasto`。`create` 只创建 `app.toml`、`package.json`、`lib/main.tsx` 和 `assets/`。`run` 默认 debug，构建并启动窗口或通过 adb 安装启动 Android；文件改变后重新构建、重启。`build bundle` 默认 release 字节码，`--debug` 保留 ESM。`build macos` 在 `build/macos` 生成可启动的 `.app`，包含脚本、资产和 Impeller 动态库；`build apk` 在 `build/android` 生成 Gradle 工程并链 `crates/embedder/android`。`build ios` 写出缺失宿主的说明后返回非零。
 
 `analyze` 用内置 TypeScript 检查器检查应用；`test` 在 QuickJS 中执行测试入口，也可传入 ESM 或字节码路径；逻辑测试可以不创建渲染树。`clean` 删除应用的 `build/`、`dist/`。`packages get` 将参数交给 `pnpm install`。`tools/distribute.mjs` 生成可移动发布目录，携带按 `crates/cli/toolchain.pin` 校验的 Node、Babel、esbuild、TypeScript、框架包和原生构建输入。源码检出允许回退到本机 Node，`--verbose` 会打印选用路径。
 

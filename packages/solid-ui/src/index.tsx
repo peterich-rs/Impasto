@@ -18,6 +18,8 @@ export type { ButtonProps } from "./props.ts";
 export { Column } from "./Column.tsx";
 export type { ColumnProps } from "./props.ts";
 export { View } from "./View.tsx";
+export { ExternalTexture, type ExternalTextureProps } from "./ExternalTexture.tsx";
+export { PlatformView, type PlatformViewProps } from "./PlatformView.tsx";
 export type { ViewProps } from "./props.ts";
 export { Stack } from "./Stack.tsx";
 export type { StackProps } from "./props.ts";

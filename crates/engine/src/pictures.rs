@@ -65,6 +65,7 @@ impl PictureCache {
         for picture in &tree.pictures {
             let reuse = self.map.get(&picture.id).is_some_and(|cached| {
                 cached.generation == picture.generation
+                    && !cached.has_external_texture
                     && !stale
                     && !waiting_blocks_reuse(&cached.waiting, |source| textures.contains(source))
             });

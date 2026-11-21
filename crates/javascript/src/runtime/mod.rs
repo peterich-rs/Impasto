@@ -162,10 +162,12 @@ type Log = Box<dyn Fn(u8, &str)>;
 type HostPolicy = dyn for<'js> Fn(&Ctx<'js>) -> rquickjs::Result<()>;
 pub type CompletionFactory = Arc<dyn Fn(u64) -> Settle + Send + Sync>;
 pub type PostDelivery = Arc<dyn Fn(Delivery) + Send + Sync>;
+pub type TransportClock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
 struct State {
     vm: Vm,
     scheduler: Scheduler,
+    transport_clock: Option<TransportClock>,
     key: RuntimeKey,
     phase: Cell<Phase>,
     life: RefCell<Option<Rc<()>>>,
@@ -489,7 +491,7 @@ impl Runtime {
     }
 
     pub fn set_clock(&self, now_ms: i64) {
-        if self.state.scheduler.set_clock(now_ms) {
+        if self.state.scheduler.set_clock(now_ms) && self.state.transport_clock.is_none() {
             self.state.resources.borrow_mut().shift_deadlines(now_ms);
         }
     }
@@ -1016,11 +1018,11 @@ impl ModuleRuntime for BoundRuntime {
         self.state().map(|state| state.vm.enter(ctx))
     }
 
-    fn before(&self, ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+    fn before(&self, ctx: &Ctx<'_>, removing_listener: bool) -> rquickjs::Result<()> {
         let state = self
             .state()
             .ok_or_else(|| Exception::throw_type(ctx, "runtime is closed"))?;
-        if !state.is_open() {
+        if !(state.is_open() || removing_listener && state.phase.get() == Phase::Closing) {
             return Err(Exception::throw_type(ctx, "runtime is closing"));
         }
         (self.policy)(ctx)
@@ -1029,6 +1031,7 @@ impl ModuleRuntime for BoundRuntime {
     fn reserve_plugin<'js>(
         &self,
         ctx: &Ctx<'js>,
+        awaits_user: bool,
     ) -> rquickjs::Result<(rquickjs::Value<'js>, Settle)> {
         let state = self
             .state()
@@ -1037,7 +1040,8 @@ impl ModuleRuntime for BoundRuntime {
             return Err(Exception::throw_range(ctx, "request limit exceeded"));
         }
         let (id, promise) = state.vm.make_promise(ctx)?;
-        let route = state.register(id, Kind::Plugin, None);
+        let deadline = (!awaits_user).then(|| state.deadline());
+        let route = state.register(id, Kind::Plugin, None, deadline);
         let settle = if let Some(factory) = &self.completion
             && self.post.is_none()
         {
@@ -1181,14 +1185,24 @@ impl State {
         )
     }
 
+    fn transport_now(&self) -> i64 {
+        self.transport_clock
+            .as_ref()
+            .map_or_else(|| self.scheduler.mono.get(), |clock| clock())
+    }
+
     fn deadline(&self) -> i64 {
-        self.scheduler
-            .mono
-            .get()
+        self.transport_now()
             .saturating_add(i64::try_from(self.limits.request_timeout_ms).unwrap_or(i64::MAX))
     }
 
-    fn register(&self, id: u64, kind: Kind, cancel: Option<Arc<AtomicBool>>) -> Route {
+    fn register(
+        &self,
+        id: u64,
+        kind: Kind,
+        cancel: Option<Arc<AtomicBool>>,
+        deadline: Option<i64>,
+    ) -> Route {
         let route = self.route(
             id,
             cancel.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
@@ -1199,7 +1213,7 @@ impl State {
             Resource {
                 kind,
                 route: route.clone(),
-                deadline: Some(self.deadline()),
+                deadline,
             },
         );
         route
@@ -1214,7 +1228,7 @@ impl State {
     }
 
     fn expire(&self) -> Vec<Delivery> {
-        let expired = self.resources.borrow().expired(self.scheduler.mono.get());
+        let expired = self.resources.borrow().expired(self.transport_now());
         let mut events = Vec::with_capacity(expired.len());
         for id in expired {
             let resource = {
@@ -1396,7 +1410,12 @@ impl IoPort for State {
             Kind::Http
         };
         let cancel = Arc::new(AtomicBool::new(false));
-        let route = self.register(call.token, kind, Some(Arc::clone(&cancel)));
+        let route = self.register(
+            call.token,
+            kind,
+            Some(Arc::clone(&cancel)),
+            Some(self.deadline()),
+        );
         let request = HttpRequest {
             token: call.token,
             method: call.method,
@@ -1470,7 +1489,7 @@ impl IoPort for State {
         }
         let id = next_id()?;
         let kind = Kind::Socket(SocketState::Connecting);
-        let route = self.register(id, kind, None);
+        let route = self.register(id, kind, None, Some(self.deadline()));
         let protocols = protocols
             .split(',')
             .map(str::trim)

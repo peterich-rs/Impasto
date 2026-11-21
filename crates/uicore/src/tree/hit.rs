@@ -356,6 +356,26 @@ impl Tree {
         })
     }
 
+    /// The visible part of a projected scene box after ancestor viewport clips.
+    pub(super) fn visible_scene_rect(&self, id: NodeId) -> Result<super::Rect, crate::Error> {
+        let mut rect = self.scene_rect(id)?;
+        let mut current = self.node(id)?.parent;
+        while let Some(ancestor) = current {
+            let node = self.node(ancestor)?;
+            if node.is_scroll() || node.role.contains(super::node::Role::CLIP) {
+                let clip = self.scene_rect(ancestor)?;
+                let right = (rect.x + rect.w).min(clip.x + clip.w);
+                let bottom = (rect.y + rect.h).min(clip.y + clip.h);
+                rect.x = rect.x.max(clip.x);
+                rect.y = rect.y.max(clip.y);
+                rect.w = (right - rect.x).max(0.0);
+                rect.h = (bottom - rect.y).max(0.0);
+            }
+            current = node.parent;
+        }
+        Ok(rect)
+    }
+
     fn transformed_box_contains(&self, id: NodeId, scene_x: f32, scene_y: f32) -> bool {
         let Ok(box_) = self.scene_rect(id) else {
             return false;

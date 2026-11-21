@@ -1,0 +1,70 @@
+--- a/engine/src/flutter/impeller/toolkit/interop/backend/vulkan/context_vk.h
++++ b/engine/src/flutter/impeller/toolkit/interop/backend/vulkan/context_vk.h
+@@ -39,7 +39,9 @@
+   bool GetInfo(ImpellerContextVulkanInfo& info) const;
+ 
+  private:
+-  explicit ContextVK(std::shared_ptr<impeller::Context> context);
++  ContextVK(std::shared_ptr<impeller::Context> context, bool owns_context);
++
++  const bool owns_context_;
+ };
+ 
+ }  // namespace impeller::interop
+--- a/engine/src/flutter/impeller/toolkit/interop/backend/vulkan/context_vk.cc
++++ b/engine/src/flutter/impeller/toolkit/interop/backend/vulkan/context_vk.cc
+@@ -11,6 +11,10 @@
+ #include "impeller/renderer/backend/vulkan/context_vk.h"
+ #include "impeller/renderer/vk/compute_shaders_vk.h"
+ 
++extern "C" IMPELLER_EXPORT bool ImpellerHasStandaloneVulkanShutdown() {
++  return true;
++}
++
+ namespace impeller::interop {
+ 
+ static std::vector<std::shared_ptr<fml::Mapping>>
+@@ -60,14 +60,20 @@
+     VALIDATION_LOG << "Could not create Impeller context.";
+     return {};
+   }
+-  return Create(std::move(impeller_context));
++  auto context =
++      Adopt<Context>(new ContextVK(std::move(impeller_context), true));
++  if (!context->IsValid()) {
++    VALIDATION_LOG << "Could not create valid context.";
++    return {};
++  }
++  return context;
+ }
+ 
+ ScopedObject<Context> ContextVK::Create(
+     std::shared_ptr<impeller::Context> impeller_context) {
+   // Can't call Create because of private constructor. Adopt the raw pointer
+   // instead.
+-  auto context = Adopt<Context>(new ContextVK(std::move(impeller_context)));
++  auto context = Adopt<Context>(new ContextVK(std::move(impeller_context), false));
+   if (!context->IsValid()) {
+     VALIDATION_LOG << " Could not create valid context.";
+     return {};
+@@ -75,10 +81,17 @@
+   return context;
+ }
+ 
+-ContextVK::ContextVK(std::shared_ptr<impeller::Context> context)
+-    : Context(std::move(context)) {}
++ContextVK::ContextVK(std::shared_ptr<impeller::Context> context,
++                     bool owns_context)
++    : Context(std::move(context)), owns_context_(owns_context) {}
+ 
+-ContextVK::~ContextVK() = default;
++ContextVK::~ContextVK() {
++  if (owns_context_) {
++    // The standalone C API owns this context. Shut it down on the owner
++    // thread before the resource manager can take the final reference.
++    impeller::ContextVK::Cast(*GetContext()).Shutdown();
++  }
++}
+ 
+ ContextVK::Settings::Settings(const ImpellerContextVulkanSettings& settings)
+     : enable_validation(settings.enable_vulkan_validation) {

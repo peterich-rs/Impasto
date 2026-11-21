@@ -7,9 +7,9 @@ members = [
     "crates/impeller-sys",
     "crates/javascript",
     "crates/session",
-    "crates/shell",
-    "crates/macos",
-    "crates/android",
+    "crates/embedder/common",
+    "crates/embedder/android",
+    "crates/embedder/macos",
     "crates/cli",
     "crates/reactive",
 ]
@@ -27,7 +27,7 @@ engine = { path = "crates/engine" }
 impeller = { package = "impeller-sys", path = "crates/impeller-sys" }
 javascript = { path = "crates/javascript", default-features = false }
 session = { path = "crates/session" }
-shell = { path = "crates/shell" }
+embedder = { path = "crates/embedder/common" }
 rquickjs = { package = "quickjs-jit", version = "=0.14.2", default-features = false, features = ["std", "loader", "macro", "bindgen"] }
 
 [profile.dev.package.quickjs-jit-sys]

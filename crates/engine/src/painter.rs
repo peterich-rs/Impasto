@@ -82,6 +82,16 @@ pub(crate) fn build_picture<'pixels>(
     }
     Ok(RetainedPicture {
         generation: picture.generation,
+        has_external_texture: picture.commands.iter().any(|command| match command {
+            protocol::Command::Image { source, .. } => {
+                source.starts_with(protocol::EXTERNAL_TEXTURE_PREFIX)
+            }
+            protocol::Command::Canvas { list, .. } => list
+                .images()
+                .iter()
+                .any(|image| image.source.starts_with(protocol::EXTERNAL_TEXTURE_PREFIX)),
+            _ => false,
+        }),
         list,
         held,
         waiting: painter.waiting,

@@ -25,9 +25,6 @@ pub fn read_bytes<'js>(
 }
 
 fn bytes<'js>(ctx: &Ctx<'js>, value: &Value<'js>, max: usize) -> rquickjs::Result<Option<Vec<u8>>> {
-    let Some(object) = value.as_object() else {
-        return Ok(None);
-    };
     let bounded = |bytes: Option<&[u8]>| {
         let bytes = bytes.ok_or_else(|| Exception::throw_type(ctx, "detached buffer"))?;
         if bytes.len() > max {
@@ -35,7 +32,7 @@ fn bytes<'js>(ctx: &Ctx<'js>, value: &Value<'js>, max: usize) -> rquickjs::Resul
         }
         Ok(Some(bytes.to_vec()))
     };
-    if let Some(buffer) = object.as_array_buffer() {
+    if let Some(buffer) = buffer::array_buffer(value)? {
         // SAFETY: no JavaScript executes before the borrowed bytes are copied.
         return bounded(unsafe { buffer.as_bytes() });
     }

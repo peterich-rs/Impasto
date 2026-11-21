@@ -2,6 +2,7 @@
 """Build the pinned standalone Impeller library with Flutter's build tools."""
 
 from pathlib import Path
+import hashlib
 import os
 import platform
 import runpy
@@ -17,8 +18,12 @@ SDK = ROOT / "third_party/impeller-build"
 REPOSITORY = "https://github.com/flutter/flutter.git"
 INTEROP = "flutter/impeller/toolkit/interop"
 PATCHES = {
-    "ios": ("ios-interop.patch", f"{INTEROP}/impeller.cc"),
-    "windows": ("windows-modf.patch", "flutter/impeller/entity/geometry/line_geometry.cc"),
+    "android": ("android-vulkan-shutdown.patch", (
+        f"{INTEROP}/backend/vulkan/context_vk.cc",
+        f"{INTEROP}/backend/vulkan/context_vk.h",
+    )),
+    "ios": ("ios-interop.patch", (f"{INTEROP}/impeller.cc",)),
+    "windows": ("windows-modf.patch", ("flutter/impeller/entity/geometry/line_geometry.cc",)),
 }
 TARGETS = {
     "darwin-arm64": ("Darwin", ("--mac", "--mac-cpu=arm64")),
@@ -120,9 +125,14 @@ def build(target, revision):
     output = SDK / target
     library_paths_for_target = library_paths(target)
     manifest = output / "source-revision"
+    target_patch = PATCHES.get(target.split("-", 1)[0])
+    patch = ROOT / "crates/impeller-sys/patches" / target_patch[0] if target_patch else None
+    source_marker = revision + "\n"
+    if patch is not None:
+        source_marker += hashlib.sha256(patch.read_bytes()).hexdigest() + "\n"
     if (
         manifest.is_file()
-        and manifest.read_text().splitlines()[:1] == [revision]
+        and manifest.read_text() == source_marker
         and (output / "include/impeller.h").is_file()
         and (output / "LICENSE").is_file()
         and all((output / "lib" / Path(path).name).is_file() for path in library_paths_for_target)
@@ -155,20 +165,16 @@ def build(target, revision):
     label = f"{INTEROP}:{target_type}"
     # Generate the standalone graph directly. The default iOS graph omits it.
     root_target = f"--root-target=//{label}"
-    target_patch = PATCHES.get(target.split("-", 1)[0])
-    patched_source = None
-    if target_patch:
-        patch_name, source_path = target_patch
-        patched_source = engine_src / source_path
-        original = patched_source.read_bytes()
-        patch = ROOT / "crates/impeller-sys/patches" / patch_name
+    originals = {}
+    if target_patch is not None and patch is not None:
+        originals = {engine_src / path: (engine_src / path).read_bytes() for path in target_patch[1]}
         run("git", "apply", "--ignore-space-change", str(patch), cwd=SOURCE)
     try:
         run(str(pinned_gn), "gen", str(build_dir), root_target, f"--args={' '.join(gn_args)}", cwd=engine_src)
         run(str(pinned_ninja), "-C", str(build_dir), label, cwd=engine_src)
     finally:
-        if patched_source is not None:
-            patched_source.write_bytes(original)
+        for path, original in originals.items():
+            path.write_bytes(original)
 
     SDK.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=SDK) as temporary:
@@ -207,6 +213,6 @@ def build(target, revision):
         (staged / "LICENSE").replace(output / "LICENSE")
         if (staged / "link.txt").is_file():
             (staged / "link.txt").replace(output / "link.txt")
-        (staged / "source-revision").write_text(revision + "\n")
+        (staged / "source-revision").write_text(source_marker)
         (staged / "source-revision").replace(manifest)
     return output

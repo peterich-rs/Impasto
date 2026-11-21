@@ -7,6 +7,7 @@ mod hit;
 mod layout;
 mod layout_store;
 mod node;
+mod platform_view;
 mod record;
 mod scroll;
 mod semantics;
@@ -22,6 +23,7 @@ pub use node::{
     Alignment, AxisSize, BoxEdge, Discarded, DragClaim, Edges, FocusDirection, Gesture, GridLine,
     Inset, Justify, NodeId, PanelAlign, Rect, RowCrossAlign, ScrollEdge, SubtreeSpace, TrackSize,
 };
+pub use platform_view::PlatformViewPlacement;
 pub use scroll::ScrollSample;
 
 use crate::{AnimProp, Simulation};
@@ -36,7 +38,7 @@ struct ActiveMotion {
 }
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use layout_store::LayoutStore;
@@ -101,6 +103,7 @@ pub struct Tree {
     layers: crate::layer::LayerTree,
     /// Last semantics nodes. A clean node reuses its strings.
     semantics_cache: HashMap<crate::SemanticsId, crate::SemanticsNode>,
+    platform_views: HashMap<NodeId, Arc<str>>,
     /// Image sources still on the tree. Maintained on insert and removal.
     image_counts: HashMap<Arc<str>, u32>,
     image_generation: u64,
@@ -141,6 +144,8 @@ pub struct Tree {
     /// Hint or structure changed. The next patch walks the whole tree.
     semantics_full: bool,
     semantics_enabled: bool,
+    autofill_enabled: bool,
+    autofill_nodes: HashSet<NodeId>,
     /// Reused by [`Tree::sweep_subtree_layers`].
     sweep_stack: Vec<record::SweepFrame>,
     sweep_children: Vec<NodeId>,
