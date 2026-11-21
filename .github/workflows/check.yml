@@ -74,6 +74,42 @@ jobs:
       - name: test macos host
         run: cargo test -p embedder-macos
 
+  ios:
+    name: iOS simulator build and first frame
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: enable pnpm
+        run: corepack enable && corepack prepare pnpm@9.15.9 --activate
+      - uses: extractions/setup-just@v2
+      - run: pnpm install --frozen-lockfile
+      - name: Install and launch on an iOS simulator
+        shell: bash
+        run: |
+          udid=$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          runtimes = json.load(sys.stdin)["devices"]
+          for runtime, devices in reversed(list(runtimes.items())):
+              if not runtime.startswith("com.apple.CoreSimulator.SimRuntime.iOS-"):
+                  continue
+              device = next((device for device in devices if device["name"].startswith("iPhone")), None)
+              if device:
+                  print(device["udid"])
+                  break
+          else:
+              sys.exit("No available iOS simulator")
+          ')
+          xcrun simctl bootstatus "$udid" -b
+          just ios-sim-test --debug --udid "$udid"
+
   android:
     name: Android APK and device tests
     runs-on: ubuntu-24.04

@@ -128,7 +128,7 @@ CLI 按 `app.toml` 的目标权限生成 `app.modules`，宿主据此限制会�
 
 ## 应用命令
 
-`crates/cli` 的二进制是 `impasto`。`create` 只创建 `app.toml`、`package.json`、`lib/main.tsx` 和 `assets/`。`run` 默认 debug，构建并启动窗口或通过 adb 安装启动 Android；文件改变后重新构建、重启。`build bundle` 默认 release 字节码，`--debug` 保留 ESM。`build macos` 在 `build/macos` 生成可启动的 `.app`，包含脚本、资产和 Impeller 动态库；`build apk` 在 `build/android` 生成 Gradle 工程并链 `crates/embedder/android`。`build ios` 写出缺失宿主的说明后返回非零。
+`crates/cli` 的二进制是 `impasto`。`create` 创建 `app.toml`、`package.json`、`lib/main.tsx` 和 `assets/`。`run` 默认 debug，构建并启动窗口或安装应用。`build bundle` 默认 release 字节码，`--debug` 保留 ESM。`build macos` 在 `build/macos` 生成可启动的 `.app`，包含脚本、资产和 Impeller 动态库。`build apk` 在 `build/android` 生成 Gradle 工程并链接 Android 宿主。`build ios` 在 `build/ios` 生成 Xcode 工程并链接 UIKit 宿主和 Impeller 静态库。`run -d ios` 使用模拟器，指定设备时通过 `simctl` 或 `devicectl` 安装与启动。 [平台宿主](platform-hosts.md)
 
 `analyze` 用内置 TypeScript 检查器检查应用；`test` 在 QuickJS 中执行测试入口，也可传入 ESM 或字节码路径；逻辑测试可以不创建渲染树。`clean` 删除应用的 `build/`、`dist/`。`packages get` 将参数交给 `pnpm install`。`tools/distribute.mjs` 生成可移动发布目录，携带按 `crates/cli/toolchain.pin` 校验的 Node、Babel、esbuild、TypeScript、框架包和原生构建输入。源码检出允许回退到本机 Node，`--verbose` 会打印选用路径。
 

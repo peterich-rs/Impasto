@@ -21,7 +21,8 @@ const primary = { ...button, backgroundColor: "#2E5A47" } as const;
 const primaryLabel = { style: { color: "#FFFFFF" } } as const;
 
 function recordFromUrl(url: string | null) {
-  return url?.match(/^impasto-demo:\/\/record\/([a-zA-Z0-9-]+)(?:[?#].*)?$/)?.[1];
+  return url?.match(/^impasto-demo:\/\/record\/([a-zA-Z0-9-]+)(?:[?#].*)?$/)?.[1] ??
+    url?.match(/^https:\/\/[^/?#]+\/records\/([a-zA-Z0-9-]+)(?:[?#].*)?$/)?.[1];
 }
 
 function deserializeDraft(value: string | null): Draft | null {

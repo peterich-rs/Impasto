@@ -1,6 +1,6 @@
 # 平台宿主
 
-macOS 与 Android 的平台线程将事件入队，渲染线程创建 `Engine` 和会话并上屏。两个宿主各自链接对应目标的 Impeller SDK。[Impeller SDK](../crates/impeller-sys/README.md)
+macOS、Android 与 iOS 的平台线程将事件入队，渲染线程创建 `Engine` 和会话并上屏。宿主各自链接对应目标的 Impeller SDK。[Impeller SDK](../crates/impeller-sys/README.md)
 
 ## 目录与 Cargo 包
 
@@ -11,7 +11,7 @@ macOS 与 Android 的平台线程将事件入队，渲染线程创建 `Engine` �
 | `common/` | `embedder` | 公共宿主 |
 | `android/` | `embedder-android` | 已接入，Gradle 工程位于 `apk/` |
 | `macos/` | `embedder-macos` | 已接入 |
-| `ios/` | `embedder-ios` | 待接入 |
+| `ios/` | `embedder-ios` | UIKit/Metal 初版，Xcode 工程由 CLI 生成 |
 | `windows/` | `embedder-windows` | 待接入 |
 | `linux/` | `embedder-linux` | 待接入 |
 
@@ -28,6 +28,17 @@ embedder → 提交 LayerTree → engine::Engine → 平台表面
 ```
 
 宿主实现 `Services`、`Surface`、`Vsync`，并交给 `embedder` 一个 `Send` 闭包，在渲染线程上打开会话。`Engine` 的所有权留在 `embedder`。`Surface` 的公开接口不出现 `CAMetalLayer` 或 `VulkanSwapchain`。
+
+## iOS 宿主
+
+iOS/iPadOS 的最低部署目标为 15.0。生成工程由 `AppDelegate` 和 `SceneDelegate` 创建窗口并启动每个 Scene 的独立会话。UIKit 嵌入入口是 `ImpastoHost(resources:initialURL:)` 和 `makeViewController()`。`prepare()` 预热会话，`onStateChanged` 报告就绪、失败和关闭，`detach()` 保留会话供另一控制器连接，`close()` 异步结束会话。资源目录含 `app.js` 或 `app.bin`、`assets/` 和可选 `app.modules`。发行字节码来自应用安装包。 [UIKit 宿主](../crates/embedder/ios/host/ImpastoHost.swift) · [iOS 实现方案](design/ios-embedder-plan.md)
+
+- UIKit 主线程观察 Scene、窗口、视图尺寸和安全区，以 `CADisplayLink` 交付按需帧时钟。Rust 渲染线程通过 `CAMetalLayer` 上屏。离开前台或解绑时取消输入和新帧，旧图层保留到渲染侧确认回收。
+- 触摸、Pencil、鼠标、触控板和实体键盘通过当前场景交付。UIKit 编辑代理负责组合输入、系统选区、菜单和 AutoFill，编辑事务包含客户端 ID 和序号。浮动键盘坐标通过 `scene.windowMetrics().keyboardOcclusion` 查询，最近的笔样本通过 `scene.penSample()` 查询。语义桥保留元素 ID、屏幕坐标、焦点和动作，并接入原生视图的可访问元素。
+- URLSession 提供流式 HTTP 与 WebSocket。宿主按场景转发深链、权限、文件选择和系统分享，提供沙盒文件、AsyncStorage、剪贴板及 ImageIO 图片解码。场景各自保存恢复快照，可用 `ImpastoWindowGroup` 显式共享会话状态。
+- `registerPlatformView` 按 `kind` 注册工厂。UIKit 原生视图与 Impeller 绘制分片在同一个 Core Animation 事务提交，支持仿射变换、嵌套圆角裁剪、原生槽位的 SVG `clipPath` 和命中遮挡。`makeExternalTexture` 接收 BGRA 或 NV12 视频帧，NV12 在 GPU 转换到可导入的 IOSurface。 [原生混排](../crates/embedder/ios/host/ImpastoPlatformViews.swift) · [外部纹理](../crates/embedder/ios/host/ImpastoExternalTexture.swift)
+- `just ios-composition-test <UDID> [截图输出目录]` 通过 CLI 生成隔离的模拟器应用，验证 UIKit 与 Metal 混排、路径裁剪与命中、BGRA/NV12、嵌入截图和原生/框架无障碍顺序。验收结束只卸载临时 bundle ID 的应用。
+- `just ios-build-check` 构建 Gallery 模拟器包，`just ios-sim-test --debug --udid <UDID>` 安装临时副本并检查可见首帧。真机路径需要 `[ios].development_team` 和可用签名。CLI 支持签名归档、IPA、嵌入 SDK 和 debug 运行中更新。 [构建与嵌入](../crates/embedder/ios/README.md)
 
 ## Android 宿主
 
@@ -55,7 +66,7 @@ Android 使用 Kotlin 和 AndroidX，最低 API 为 24。默认入口是 `dev.im
 
 Android 启动前从 Intent 读取初始 URL，运行中由 `onNewIntent` 发布 `linking` 的 `url` 事件。`singleTop` 使位于栈顶的 Activity 接收新 Intent。重建 Activity 时，非空的有效任务快照会抑制先前已交付的启动 Intent。退到后台时先投递 `Hidden`，再隐藏 View，使系统可以回收表面。恢复时重新显示 View，原会话接续。Activity 销毁时释放其会话所有权。应用可在启动时用 `@impasto/app-state` 的 `Restoration.get(key)` 读取系统任务快照，通过 `Restoration.set(key, value)` 更新和通过 `null` 删除条目。快照总量以编码后的 32 KiB 为上限。默认 Activity 提供稳定键，嵌入宿主可向实现 `SavedStateRegistryOwner` 的生命周期所有者传入稳定的 `restorationId`。大型草稿使用应用持久化。
 
-应用可用 `scene.windowMetrics()` 读取宿主 View 的完整逻辑尺寸、像素尺寸、安全区、IME inset 和系统手势区。Android 另提供 `displayId`、`refreshRate` 和 `displayFeatures`。特征包含折痕、铰链和切口，边界以当前 View 的逻辑坐标表示，折叠特征还含姿态和是否分隔窗口。用 `scene.onWindowMetrics()` 订阅变化，并在组件销毁时用 `scene.offWindowMetrics()` 移除监听。`scene.metrics()` 表示扣除遮挡后的布局区域。macOS 和无窗口会话的系统手势区默认为零，显示特征列表默认为空。
+应用可用 `scene.windowMetrics()` 读取宿主 View 的完整逻辑尺寸、像素尺寸、安全区、IME inset 和系统手势区。iOS 提供 `displayId`、`refreshRate` 和可选的 `keyboardOcclusion`。Android 提供 `displayId`、`refreshRate` 和 `displayFeatures`，特征包含折痕、铰链和切口，边界以当前 View 的逻辑坐标表示，折叠特征还含姿态和是否分隔窗口。用 `scene.onWindowMetrics()` 订阅变化，并在组件销毁时用 `scene.offWindowMetrics()` 移除监听。`scene.metrics()` 表示扣除遮挡后的布局区域。macOS 和无窗口会话的系统手势区默认为零，显示特征列表默认为空。
 
 `just android-device-test` 使用独立验收包，结束后卸载该包及仪器测试包。连接多台设备时，通过 `ANDROID_SERIAL` 选择本次测试设备。手动安装的性能和 Flutter 对照包在采集结束后也应卸载。横竖屏测试读取 SurfaceFlinger 的 active buffer 尺寸，按缓冲区变换换算到窗口方向，再用 PixelCopy 确认新表面可以读取到图像。[SurfaceFlinger LayerProto](https://android.googlesource.com/platform/frameworks/native/+/04d24da36e/services/surfaceflinger/layerproto/layers.proto) · [缓冲区方向编码](https://android.googlesource.com/platform/frameworks/native/+/27c20ff12d67b4667edb01160289afc8a4e23373/services/surfaceflinger/LayerProtoHelper.cpp)
 

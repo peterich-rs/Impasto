@@ -302,7 +302,7 @@ cargo test --workspace --exclude embedder-macos
 pnpm -r test
 ```
 
-CI 运行 `cargo run --locked -p embedder --bin module-stubs -- --check` 和 `just standard-check` 对应的标准库契约检查。macOS runner 在同一 SHA 执行本机 `cargo clippy -p embedder-macos --all-targets -- -D warnings` 和 `cargo test -p embedder-macos`，另记带 SDK 的宿主启动结果。Android 将 `just android`、`just android-release`、`android-x64` 模拟器和实体设备分别记录，注明 ABI、构建 profile、SDK/NDK 与运行场景。iOS 尚无宿主。可用命令与系统矩阵见 [justfile](../../../justfile) 和 [CI](../../../.github/workflows/check.yml)。
+CI 运行 `cargo run --locked -p embedder --bin module-stubs -- --check` 和 `just standard-check` 对应的标准库契约检查。macOS runner 在同一 SHA 执行本机 `cargo clippy -p embedder-macos --all-targets -- -D warnings` 和 `cargo test -p embedder-macos`，另记带 SDK 的宿主启动结果。Android 将 `just android`、`just android-release`、`android-x64` 模拟器和实体设备分别记录，注明 ABI、构建 profile、SDK/NDK 与运行场景。iOS 通过 `just ios-build-check` 构建 arm64 模拟器应用。模拟器和签名真机的运行证据分别记录。可用命令与系统矩阵见 [justfile](../../../justfile) 和 [CI](../../../.github/workflows/check.yml)。
 
 ## 13. 性能与资源保护
 
