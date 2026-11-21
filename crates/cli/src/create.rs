@@ -14,7 +14,7 @@ pub fn create(name: &str) -> Result<()> {
     fs::write(
         root.join("app.toml"),
         format!(
-            "name = \"{name}\"\nversion = \"0.1.0\"\ntargets = [\"macos\", \"android\"]\n\n[permissions]\n"
+            "name = \"{name}\"\nversion = \"0.1.0\"\ntargets = [\"macos\", \"android\", \"ios\"]\n\n[permissions]\n"
         ),
     )?;
     fs::write(

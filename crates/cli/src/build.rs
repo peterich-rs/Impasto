@@ -11,7 +11,21 @@ pub struct BuildOptions {
     pub verbose: bool,
     pub trace: bool,
 }
-pub fn build(target: &str, options: BuildOptions) -> Result<()> {
+pub fn build(
+    target: &str,
+    options: BuildOptions,
+    ios_simulator: bool,
+    export_options: Option<&Path>,
+) -> Result<()> {
+    if ios_simulator && target != "ios" {
+        bail!("--ios-simulator 仅适用于 build ios");
+    }
+    if export_options.is_some() && target != "ipa" {
+        bail!("--export-options 仅适用于 build ipa");
+    }
+    if options.debug && matches!(target, "ios-archive" | "ipa" | "ios-xcframework") {
+        bail!("{target} 仅提供 release 产物");
+    }
     let app = App::current()?;
     match target {
         "bundle" => {
@@ -30,12 +44,30 @@ pub fn build(target: &str, options: BuildOptions) -> Result<()> {
             macos(&app, &options)?;
         }
         "ios" => {
-            let generated = app.root.join("build/ios");
-            fs::create_dir_all(&generated)?;
-            fs::write(generated.join("README.txt"), "当前仓库没有 iOS 宿主。\n")?;
-            bail!("iOS 宿主尚未实现，不能生成可安装的 iOS 包");
+            let platform = if ios_simulator {
+                crate::ios::IosPlatform::Simulator
+            } else {
+                crate::ios::IosPlatform::Device
+            };
+            let application = crate::ios::build(&app, &options, platform)?;
+            println!("{}", application.display());
         }
-        _ => bail!("未知构建目标 {target}，可选 bundle、apk、appbundle、aar、macos、ios"),
+        "ios-archive" => {
+            let archive = crate::ios::archive(&app, &options)?;
+            println!("{}", archive.display());
+        }
+        "ipa" => {
+            let export = export_options.context("build ipa 需要 --export-options <plist>")?;
+            let ipa = crate::ios::export_ipa(&app, &options, export)?;
+            println!("{}", ipa.display());
+        }
+        "ios-xcframework" => {
+            let sdk = crate::ios::xcframework(&app, &options)?;
+            println!("{}", sdk.display());
+        }
+        _ => bail!(
+            "未知构建目标 {target}，可选 bundle、apk、appbundle、aar、macos、ios、ios-archive、ipa、ios-xcframework"
+        ),
     }
     Ok(())
 }
@@ -44,31 +76,39 @@ pub fn bundle(app: &App, options: &BuildOptions) -> Result<PathBuf> {
 }
 
 fn bundle_for(app: &App, options: &BuildOptions, target: Option<&str>) -> Result<PathBuf> {
-    fs::create_dir_all(app.root.join("build"))?;
-    let esm = app.root.join("build/app.js");
+    bundle_in(app, options, target, &app.root.join("build"))
+}
+
+pub(crate) fn bundle_in(
+    app: &App,
+    options: &BuildOptions,
+    target: Option<&str>,
+    directory: &Path,
+) -> Result<PathBuf> {
+    fs::create_dir_all(directory)?;
+    let esm = directory.join("app.js");
+    let bytecode = directory.join("app.bin");
+    let map = directory.join("app.js.map");
     let mut command = pack_command(&app.entry, &esm, options)?;
-    if target == Some("android") && !options.debug {
+    if matches!(target, Some("android" | "ios")) && !options.debug {
         command.arg("--source-map");
     }
     toolchain::run(command, "打包 TSX")?;
-    let output = app.output(options.debug);
-    if !options.debug {
-        let code = fs::read_to_string(&esm)?;
-        let registry = compile_registry(app, target);
-        let bytes = javascript::ui::compile_with_registry(&code, "app.js", true, registry)?;
-        fs::write(&output, bytes)?;
-        fs::remove_file(esm)?;
-        let map = app.root.join("build/app.js.map");
-        if map.is_file() && target != Some("android") {
-            fs::remove_file(map)?;
+    if options.debug {
+        if bytecode.is_file() {
+            fs::remove_file(bytecode)?;
         }
-    } else {
-        let stale = app.output(false);
-        if stale.is_file() {
-            fs::remove_file(stale)?;
-        }
+        return Ok(esm);
     }
-    Ok(output)
+    let code = fs::read_to_string(&esm)?;
+    let registry = compile_registry(app, target);
+    let bytes = javascript::ui::compile_with_registry(&code, "app.js", true, registry)?;
+    fs::write(&bytecode, bytes)?;
+    fs::remove_file(esm)?;
+    if map.is_file() && !matches!(target, Some("android" | "ios")) {
+        fs::remove_file(map)?;
+    }
+    Ok(bytecode)
 }
 
 fn compile_registry(app: &App, target: Option<&str>) -> session::ModuleRegistry {
@@ -79,7 +119,7 @@ fn compile_registry(app: &App, target: Option<&str>) -> session::ModuleRegistry 
         return session::ModuleRegistry::new(modules);
     };
     let enabled = app.modules(target);
-    if !matches!(target, "macos" | "android") {
+    if !matches!(target, "macos" | "android" | "ios") {
         return session::ModuleRegistry::new(Vec::new());
     }
     let modules = modules
@@ -275,7 +315,7 @@ fn gradle_apk(directory: &Path) -> Result<PathBuf> {
     Ok(directory.join(&output.file))
 }
 
-fn escape_xml(value: &str) -> String {
+pub(crate) fn escape_xml(value: &str) -> String {
     value
         .replace('&', "&amp;")
         .replace('<', "&lt;")

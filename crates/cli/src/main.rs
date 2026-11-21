@@ -5,6 +5,7 @@ mod app;
 mod build;
 mod clean;
 mod create;
+mod ios;
 mod packages;
 mod run;
 mod test;
@@ -28,7 +29,7 @@ enum Command {
     Create { name: String },
     /// Pack in debug and open a window. `-d` selects a target or a device.
     Run {
-        /// Target name (`android`, `macos`) or a device id.
+        /// `macos`, `android`, an Android serial, `ios`, or `ios:<UDID>`.
         #[arg(short = 'd')]
         device: Option<String>,
         /// Pack ESM and skip bytecode. This is the default for `run`.
@@ -43,11 +44,20 @@ enum Command {
         /// Print one frame's script time, run_updates count, and set_* count.
         #[arg(long)]
         trace: bool,
+        /// Keep watching the app and send source updates to the running iOS debug app.
+        #[arg(long, conflicts_with = "release")]
+        watch: bool,
     },
     /// Pack a release artifact. Defaults to release; `--debug` keeps ESM.
     Build {
-        /// `bundle`, `apk`, `appbundle`, `aar`, `ios`, or `macos`.
+        /// `bundle`, `apk`, `appbundle`, `aar`, `ios`, `ios-archive`, `ipa`, `ios-xcframework`, or `macos`.
         target: String,
+        /// Build an iOS Simulator app without device signing.
+        #[arg(long)]
+        ios_simulator: bool,
+        /// Xcode export options for a locally exported IPA.
+        #[arg(long)]
+        export_options: Option<PathBuf>,
         #[arg(long, conflicts_with = "release")]
         debug: bool,
         #[arg(long)]
@@ -89,14 +99,18 @@ fn main() -> ExitCode {
             release,
             verbose,
             trace,
+            watch,
         } => finish(run::run(run::RunOptions {
             device,
             release,
             verbose,
             trace,
+            watch,
         })),
         Command::Build {
             target,
+            ios_simulator,
+            export_options,
             debug,
             release: _,
             verbose,
@@ -107,6 +121,8 @@ fn main() -> ExitCode {
                 verbose,
                 trace: false,
             },
+            ios_simulator,
+            export_options.as_deref(),
         )),
         Command::Analyze => finish(analyze::analyze()),
         Command::Test { bundle } => finish(test::test(bundle)),

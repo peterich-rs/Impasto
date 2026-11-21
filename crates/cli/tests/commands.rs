@@ -94,7 +94,12 @@ mod tests {
         }
         let ios = sandbox.cli(&["build", "ios"]);
         assert!(!ios.status.success());
-        assert!(String::from_utf8_lossy(&ios.stderr).contains("iOS 宿主尚未实现"));
+        let reason = if cfg!(target_os = "macos") {
+            "ios.development_team"
+        } else {
+            "macOS 与 Xcode"
+        };
+        assert!(String::from_utf8_lossy(&ios.stderr).contains(reason));
         success(sandbox.cli(&["clean"]));
         assert!(!sandbox.0.join("build").exists());
         assert!(sandbox.0.join("lib/main.tsx").is_file());
@@ -255,5 +260,58 @@ void check();
             .expect("invalid build");
         assert!(!result.status.success());
         assert!(!sandbox.0.join("valid/build").exists());
+    }
+    #[test]
+    fn ios_manifest_and_options_are_validated_before_staging() {
+        let mut sandbox = Sandbox::new();
+        success(sandbox.cli(&["create", "iosprobe"]));
+        sandbox.0.push("iosprobe");
+        let manifest = sandbox.0.join("app.toml");
+        let base = fs::read_to_string(&manifest).expect("default manifest");
+        assert!(base.contains("\"ios\""));
+
+        let non_ios = sandbox.cli(&["build", "bundle", "--ios-simulator"]);
+        assert!(!non_ios.status.success());
+        assert!(String::from_utf8_lossy(&non_ios.stderr).contains("--ios-simulator"));
+        for (config, field) in [
+            ("bundle_id = 'dev impasto.app'", "bundle_id"),
+            ("development_team = 'wrong'", "development_team"),
+            ("build_number = 0", "build_number"),
+            ("url_schemes = ['bad scheme']", "url_schemes"),
+            (
+                "associated_domains = ['applinks:https://bad.test']",
+                "associated_domains",
+            ),
+            ("device_families = [1, 1]", "device_families"),
+            (
+                "signing_certificate = 'Apple Development'",
+                "signing_certificate",
+            ),
+            (
+                "usage_descriptions = { NSCameraUsageDescription = '' }",
+                "usage_descriptions",
+            ),
+            ("privacy_manifest = 'manifest.xml'", "privacy_manifest"),
+        ] {
+            fs::write(&manifest, format!("{base}\n[ios]\n{config}\n")).expect("iOS manifest");
+            let failed = sandbox.cli(&["build", "ios", "--ios-simulator"]);
+            assert!(!failed.status.success());
+            assert!(String::from_utf8_lossy(&failed.stderr).contains(&format!("ios.{field}")));
+        }
+        fs::write(&manifest, &base).expect("restore valid manifest");
+        for (args, message) in [
+            (&["build", "ios-archive", "--debug"][..], "release"),
+            (
+                &["build", "ios", "--export-options", "settings.plist"][..],
+                "build ipa",
+            ),
+            (&["build", "ipa"][..], "--export-options"),
+            (&["run", "-d", "ios", "--watch", "--release"][..], "--watch"),
+        ] {
+            let failed = sandbox.cli(args);
+            assert!(!failed.status.success());
+            assert!(String::from_utf8_lossy(&failed.stderr).contains(message));
+        }
+        assert!(!sandbox.0.join("build").exists());
     }
 }
