@@ -1,9 +1,12 @@
 #![cfg(feature = "runtime")]
 
-use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use javascript::host::{HttpResponse, IoEvent, IoJob};
-use javascript::runtime::{ModuleStatus, Runtime, RuntimeBuilder, RuntimeCounts};
+use javascript::host::{
+    HostEvent, IoEvent, Method, Module, ModuleRegistry, PluginValue, StreamSink,
+};
+use javascript::runtime::{ModuleCatalog, ModuleStatus, RuntimeBuilder, RuntimeCounts};
 
 #[test]
 fn headless_script_promise_and_timer_share_the_runtime() {
@@ -66,80 +69,6 @@ fn user_interaction_remains_pending_after_the_transport_deadline() {
         runtime.take_module_result(ticket).expect("picked result"),
         Some(ModuleOutcome::Fulfilled)
     );
-}
-
-#[test]
-fn headless_fetch_submits_an_owned_job_and_settles_on_drive() {
-    let mut runtime = RuntimeBuilder::new().build().expect("runtime");
-    runtime
-        .eval_script(
-            "fetch('https://example.test/item').then(function (response) { return response.text(); }).then(function (text) { globalThis.body = text; });",
-            "fetch.js",
-        )
-        .expect("fetch");
-    let jobs = runtime.take_jobs();
-    let token = match jobs.first() {
-        Some(IoJob::HttpStream(request)) => {
-            assert_eq!(request.url, "https://example.test/item");
-            request.token
-        }
-        other => panic!("expected an HTTP job, got {other:?}"),
-    };
-    runtime
-        .enqueue(IoEvent::HttpHead {
-            token,
-            status: 200,
-            headers: Vec::new(),
-        })
-        .expect("response head");
-    runtime
-        .enqueue(IoEvent::HttpChunk {
-            token,
-            bytes: b"ok".to_vec(),
-            done: true,
-            error: None,
-        })
-        .expect("enqueue");
-    runtime.drive(0).expect("drive");
-    runtime
-        .eval_script(
-            "if (globalThis.body !== 'ok') throw new Error(String(globalThis.body));",
-            "check.js",
-        )
-        .expect("body");
-    runtime.shutdown();
-    assert!(
-        runtime
-            .enqueue(IoEvent::Http {
-                token: 1,
-                result: Ok(HttpResponse {
-                    status: 200,
-                    headers: Vec::new(),
-                    body: Vec::new(),
-                }),
-            })
-            .is_err()
-    );
-}
-
-#[test]
-fn headless_abort_marks_the_request_and_queues_abort() {
-    let mut runtime = RuntimeBuilder::new().build().expect("runtime");
-    runtime
-        .eval_script(
-            "var ctrl = new AbortController(); fetch('https://example.test/late', { signal: ctrl.signal }); ctrl.abort();",
-            "abort.js",
-        )
-        .expect("abort");
-    let jobs = runtime.take_jobs();
-    let (flag, token) = match jobs.first() {
-        Some(IoJob::HttpStream(request)) => (std::sync::Arc::clone(&request.cancel), request.token),
-        other => panic!("expected an HTTP job, got {other:?}"),
-    };
-    assert!(flag.load(Ordering::Relaxed));
-    assert!(matches!(jobs.get(1), Some(IoJob::Abort { token: got }) if *got == token));
-    runtime.shutdown();
-    runtime.shutdown();
 }
 
 #[test]
@@ -237,28 +166,6 @@ fn top_level_await_stays_pending_until_drive() {
 }
 
 #[test]
-fn sync_http_client_settles_on_drive_without_a_second_enqueue() {
-    let mut runtime = RuntimeBuilder::new()
-        .http_client(std::sync::Arc::new(SyncOk))
-        .build()
-        .expect("runtime");
-    runtime
-        .eval_script(
-            "fetch('https://example.test/sync').then(function (response) { return response.text(); }).then(function (text) { globalThis.body = text; });",
-            "sync.js",
-        )
-        .expect("fetch");
-    assert!(runtime.take_jobs().is_empty());
-    runtime.drive(0).expect("drive");
-    runtime
-        .eval_script(
-            "if (globalThis.body !== 'sync') throw new Error(String(globalThis.body));",
-            "check.js",
-        )
-        .expect("body");
-}
-
-#[test]
 fn job_round_stops_at_32_and_timer_batch_stops_at_64() {
     let mut runtime = RuntimeBuilder::new().build().expect("runtime");
     let mut jobs = String::from("var n = 0;");
@@ -290,49 +197,12 @@ fn job_round_stops_at_32_and_timer_batch_stops_at_64() {
 }
 
 #[test]
-fn socket_completion_and_shutdown_drop_roots() {
+fn weak_runtime_tracks_identity_and_shutdown_drops_roots() {
     let mut runtime = RuntimeBuilder::new().build().expect("runtime");
     let weak = runtime.downgrade();
     let other = RuntimeBuilder::new().build().expect("other");
     assert!(weak.same_runtime(&runtime));
     assert!(!weak.same_runtime(&other));
-    runtime
-        .eval_script(
-            "var socket = new WebSocket('ws://example.test/sock'); socket.onopen = function () { globalThis.opened = 1; }; socket.onmessage = function (event) { globalThis.message = String(event.data); };",
-            "socket.js",
-        )
-        .expect("socket");
-    let id = match runtime.take_jobs().first() {
-        Some(IoJob::SocketOpen { id, url, .. }) => {
-            assert_eq!(url, "ws://example.test/sock");
-            *id
-        }
-        other => panic!("expected a socket job, got {other:?}"),
-    };
-    assert!(runtime.counts().timers == 0);
-    runtime
-        .enqueue(IoEvent::Socket {
-            id,
-            event: "open".into(),
-            text: true,
-            data: Vec::new(),
-        })
-        .expect("open");
-    runtime
-        .enqueue(IoEvent::Socket {
-            id,
-            event: "message".into(),
-            text: true,
-            data: b"hi".to_vec(),
-        })
-        .expect("message");
-    runtime.drive(0).expect("drive");
-    runtime
-        .eval_script(
-            "if (globalThis.opened !== 1 || globalThis.message !== 'hi') throw new Error(String(globalThis.opened) + ':' + String(globalThis.message));",
-            "check.js",
-        )
-        .expect("socket state");
     let failed = runtime.eval_script("throw new Error('boom');", "bad.js");
     assert!(failed.is_err());
     runtime
@@ -344,78 +214,13 @@ fn socket_completion_and_shutdown_drop_roots() {
     runtime.shutdown();
     assert!(
         runtime
-            .enqueue(IoEvent::Socket {
-                id,
-                event: "close".into(),
-                text: true,
-                data: Vec::new(),
-            })
+            .enqueue(IoEvent::Host(HostEvent {
+                module: "Echo".into(),
+                event: "tick".into(),
+                payload: PluginValue::Null,
+            }))
             .is_err()
     );
-}
-
-struct SyncOk;
-
-impl javascript::host::HttpClient for SyncOk {
-    fn perform(
-        &self,
-        request: &javascript::host::HttpRequest,
-    ) -> Result<HttpResponse, javascript::host::HttpError> {
-        assert_eq!(request.url, "https://example.test/sync");
-        Ok(HttpResponse {
-            status: 200,
-            headers: Vec::new(),
-            body: b"sync".to_vec(),
-        })
-    }
-}
-
-#[test]
-fn sync_client_streams_head_and_chunk_through_the_shared_delivery() {
-    let mut runtime = RuntimeBuilder::new()
-        .http_client(std::sync::Arc::new(StreamOk))
-        .build()
-        .expect("runtime");
-    runtime
-        .eval_script(
-            "fetch('https://example.test/stream').then(function (response) { globalThis.status = response.status; return response.body.getReader().read(); }).then(function (part) { globalThis.text = new TextDecoder().decode(part.value); });",
-            "stream.js",
-        )
-        .expect("fetch");
-    runtime.drive(0).expect("drive");
-    runtime
-        .eval_script(
-            "if (globalThis.status !== 200 || globalThis.text !== 'abc') throw new Error(String(globalThis.status) + ':' + String(globalThis.text));",
-            "check.js",
-        )
-        .expect("stream body");
-}
-
-struct StreamOk;
-
-impl javascript::host::HttpClient for StreamOk {
-    fn perform(
-        &self,
-        _request: &javascript::host::HttpRequest,
-    ) -> Result<HttpResponse, javascript::host::HttpError> {
-        Ok(HttpResponse {
-            status: 201,
-            headers: Vec::new(),
-            body: Vec::new(),
-        })
-    }
-
-    fn stream(
-        &self,
-        request: &javascript::host::HttpRequest,
-        sink: &mut dyn FnMut(javascript::host::HttpPiece<'_>) -> bool,
-    ) -> Result<(), javascript::host::HttpError> {
-        assert_eq!(request.url, "https://example.test/stream");
-        if sink(javascript::host::HttpPiece::Head(200, &[])) {
-            sink(javascript::host::HttpPiece::Chunk(b"abc", true));
-        }
-        Ok(())
-    }
 }
 
 struct AnswerFactory;
@@ -490,68 +295,32 @@ fn timer_extra_arguments_and_yielding_follow_turns() {
 }
 
 #[test]
-fn abort_resolves_locally_and_ignores_a_late_success() {
-    let mut runtime = RuntimeBuilder::new().build().expect("runtime");
-    runtime
-        .eval_script(
-            r#"
-        const abort = new AbortController();
-        let result;
-        fetch('https://example.test/abort', {signal: abort.signal}).then(
-            () => result = 'incorrect success',
-            error => result = error,
-        );
-    "#,
-            "request",
-        )
-        .expect("request");
-    let jobs = runtime.take_jobs();
-    let Some(IoJob::HttpStream(request)) = jobs.first() else {
-        panic!("expected HTTP request")
+fn missing_plugin_terminal_times_out_from_the_first_clock_sample() {
+    let held = Arc::new(Mutex::new(Vec::new()));
+    let module = Module {
+        name: "TimeoutProbe",
+        specifier: "@impasto/timeout-probe",
+        exports: Default::default(),
+        methods: vec![Method::promise("hang", {
+            let held = Arc::clone(&held);
+            move |_, settle, _| held.lock().expect("lock").push(settle)
+        })],
     };
-    runtime
-        .eval_script("abort.abort();", "abort")
-        .expect("abort");
-    assert!(request.cancel.load(Ordering::Acquire));
-    assert_eq!(runtime.counts().requests, 0);
-    assert_eq!(runtime.counts().promises, 0);
-    runtime
-        .enqueue(IoEvent::HttpHead {
-            token: request.token,
-            status: 204,
-            headers: Vec::new(),
-        })
-        .expect("late event");
-    runtime.drive(500).expect("drive");
-    runtime
-        .eval_script(
-            "if (!(result instanceof DOMException) || result.name !== 'AbortError') throw new Error(result);",
-            "check",
-        )
-        .expect("abort result");
-    assert_eq!(runtime.counts().discarded_events, 1);
-}
-
-#[test]
-fn missing_stream_terminal_times_out_from_the_first_clock_sample() {
+    let catalog = ModuleCatalog::new(ModuleRegistry::try_new(vec![module]).expect("registry"))
+        .expect("catalog");
     let mut runtime = RuntimeBuilder::new()
+        .modules(catalog)
+        .module(
+            "app:timeout",
+            "import { hang } from '@impasto/timeout-probe'; globalThis.error = undefined; hang().catch(value => { globalThis.error = String(value); });",
+        )
         .limits(javascript::runtime::RuntimeLimits {
             request_timeout_ms: 50,
             ..javascript::runtime::RuntimeLimits::default()
         })
         .build()
         .expect("runtime");
-    runtime
-        .eval_script(
-            r#"
-        let error;
-        fetch('https://example.test/timeout').catch(value => error = value.message);
-    "#,
-            "entry",
-        )
-        .expect("fetch");
-    let jobs = runtime.take_jobs();
-    assert!(matches!(jobs.first(), Some(IoJob::HttpStream(_))));
+    let ticket = runtime.start_module("app:timeout").expect("start");
     let first = runtime.drive(20_000).expect("clock origin");
     assert_eq!(first.schedule.in_flight, 1);
     assert_eq!(first.schedule.next_deadline_ms, Some(20_050));
@@ -561,10 +330,12 @@ fn missing_stream_terminal_times_out_from_the_first_clock_sample() {
     assert_eq!(runtime.counts().promises, 0);
     runtime
         .eval_script(
-            "if (error !== 'TimeoutError') throw new Error(error);",
+            "if (!error || !error.includes('expired')) throw new Error(error);",
             "check",
         )
         .expect("timeout");
+    let _ = ticket;
+    held.lock().expect("lock").clear();
 }
 
 #[test]
@@ -610,7 +381,24 @@ fn ticket_result_is_consumed_and_observation_can_be_abandoned() {
 
 #[test]
 fn a_full_data_queue_keeps_space_for_the_terminal() {
+    let sinks: Arc<Mutex<Vec<StreamSink>>> = Arc::new(Mutex::new(Vec::new()));
+    let module = Module {
+        name: "StreamProbe",
+        specifier: "@impasto/stream-probe",
+        exports: Default::default(),
+        methods: vec![Method::stream_with_exec("open", {
+            let sinks = Arc::clone(&sinks);
+            move |_, sink, _| sinks.lock().expect("lock").push(sink)
+        })],
+    };
+    let catalog = ModuleCatalog::new(ModuleRegistry::try_new(vec![module]).expect("registry"))
+        .expect("catalog");
     let mut runtime = RuntimeBuilder::new()
+        .modules(catalog)
+        .module(
+            "app:queue",
+            "import { open } from '@impasto/stream-probe'; globalThis.opened = open();",
+        )
         .limits(javascript::runtime::RuntimeLimits {
             queue_events: 1,
             stream_events: 1,
@@ -620,64 +408,35 @@ fn a_full_data_queue_keeps_space_for_the_terminal() {
         })
         .build()
         .expect("runtime");
-    // The outbound admission counts URLs as well as data, so use a test port
-    // that accepts the request directly to exercise the inbound limits.
-    let (sender, receiver) = std::sync::mpsc::channel();
-    runtime.configure_io(javascript::runtime::IoBindings::external(Box::new(
-        move |job| {
-            sender.send(job).expect("accept work");
-        },
-    )));
-    runtime
-        .eval_script(
-            "let opened; fetch('https://example.test').then(value => opened = value);",
-            "entry",
-        )
-        .expect("fetch");
-    let IoJob::HttpStream(request) = receiver.try_recv().expect("stream request") else {
-        panic!("expected stream request");
-    };
-    let token = request.token;
-    runtime
-        .enqueue(IoEvent::HttpHead {
-            token,
-            status: 200,
-            headers: Vec::new(),
-        })
-        .expect("head");
-    runtime.drive(1).expect("open");
-    runtime
-        .enqueue(IoEvent::HttpChunk {
-            token,
-            bytes: b"full".to_vec(),
-            done: false,
-            error: None,
-        })
+    let _ticket = runtime.start_module("app:queue").expect("start");
+    let mut sink = sinks.lock().expect("lock").pop().expect("stream sink");
+    sink.send(PluginValue::Bytes(b"full".to_vec()), Duration::ZERO)
         .expect("fill queue");
     let blocked = runtime
-        .enqueue(IoEvent::Host(javascript::host::HostEvent {
+        .enqueue(IoEvent::Host(HostEvent {
             module: "probe".into(),
             event: "tick".into(),
-            payload: javascript::host::PluginValue::Null,
+            payload: PluginValue::Null,
         }))
         .expect_err("ordinary event needs admission");
     assert!(matches!(
         blocked,
         javascript::runtime::EnqueueError::QueueFull(_)
     ));
-    runtime
-        .enqueue(IoEvent::HttpChunk {
-            token,
-            bytes: Vec::new(),
-            done: true,
-            error: None,
-        })
-        .expect("reserved terminal");
+    sink.finish();
     runtime.drive(2).expect("finish");
     assert_eq!(runtime.counts().queued_bytes, 4);
     runtime
         .eval_script(
-            "let body; opened.text().then(value => body = value);",
+            r#"
+        let body;
+        (async () => {
+            const reader = opened.getReader();
+            const first = await reader.read();
+            body = new TextDecoder().decode(first.value);
+            await reader.read();
+        })();
+    "#,
             "consume",
         )
         .expect("read");
@@ -693,108 +452,64 @@ fn a_full_data_queue_keeps_space_for_the_terminal() {
 
 #[test]
 fn repeated_completion_and_cancellation_release_requests() {
-    let mut runtime = Runtime::builder().build().expect("runtime");
+    let sinks: Arc<Mutex<Vec<StreamSink>>> = Arc::new(Mutex::new(Vec::new()));
+    let module = Module {
+        name: "StreamLoop",
+        specifier: "@impasto/stream-loop",
+        exports: Default::default(),
+        methods: vec![Method::stream_with_exec("open", {
+            let sinks = Arc::clone(&sinks);
+            move |_, sink, _| sinks.lock().expect("lock").push(sink)
+        })],
+    };
+    let catalog = ModuleCatalog::new(ModuleRegistry::try_new(vec![module]).expect("registry"))
+        .expect("catalog");
+    let mut runtime = RuntimeBuilder::new()
+        .modules(catalog)
+        .module(
+            "app:loop",
+            "import { open } from '@impasto/stream-loop'; globalThis.openStream = open;",
+        )
+        .build()
+        .expect("runtime");
+    let loop_ticket = runtime.start_module("app:loop").expect("start");
+    runtime.drive(0).expect("init");
+    let _ = runtime.take_module_result(loop_ticket);
     for step in 0..64 {
         runtime
             .eval_script(
                 r#"
             globalThis.controller = new AbortController();
-            fetch('https://example.test/resource', {signal: controller.signal}).catch(() => {});
+            globalThis.stream = globalThis.openStream(controller.signal);
         "#,
                 "request",
             )
             .expect("request");
-        let jobs = runtime.take_jobs();
-        let Some(IoJob::HttpStream(request)) = jobs.first() else {
-            panic!("network work")
-        };
+        let mut sink = sinks.lock().expect("lock").pop().expect("stream sink");
         if step % 2 == 0 {
             runtime
                 .eval_script("controller.abort()", "cancel")
                 .expect("cancel");
-            assert!(request.cancel.load(Ordering::Acquire));
-            drop(runtime.take_jobs());
+            assert!(sink.cancellation().is_cancelled());
+            drop(sink);
         } else {
+            sink.send(PluginValue::Bytes(b"ok".to_vec()), Duration::ZERO)
+                .expect("send chunk");
+            sink.finish();
             runtime
-                .enqueue(IoEvent::HttpHead {
-                    token: request.token,
-                    status: 200,
-                    headers: Vec::new(),
-                })
-                .expect("response head");
-            runtime
-                .enqueue(IoEvent::HttpChunk {
-                    token: request.token,
-                    bytes: b"ok".to_vec(),
-                    done: true,
-                    error: None,
-                })
-                .expect("completion");
+                .eval_script("stream.getReader().read();", "read")
+                .expect("read");
         }
         runtime.drive(step).expect("drive");
+        runtime
+            .eval_script("globalThis.stream = null;", "drop")
+            .expect("drop");
         let counts = runtime.counts();
-        assert_eq!(
-            (counts.requests, counts.promises, counts.queued_bytes),
-            (0, 0, 0)
-        );
-        assert_eq!((counts.peak_requests, counts.peak_promises), (1, 1));
+        assert_eq!((counts.requests, counts.queued_bytes), (0, 0));
+        assert_eq!(counts.peak_requests, 1);
     }
     let weak = runtime.downgrade();
     runtime.shutdown();
     assert!(!weak.is_open());
     assert_eq!(runtime.counts(), RuntimeCounts::default());
-}
-
-#[test]
-fn a_throwing_delivery_releases_its_promise_and_preserves_the_next_event() {
-    let mut runtime = Runtime::builder().build().expect("runtime");
-    runtime.eval_script(r#"
-        let streamError, responseText;
-        fetch('https://example.test/broken').catch(error => streamError = String(error));
-        fetch('https://example.test/next').then(response => response.text()).then(text => responseText = text);
-        const receive = __host._httpStream;
-        __host._httpStream = (...args) => { __host._httpStream = receive; throw new Error('delivery error'); };
-    "#, "requests").expect("requests");
-    let jobs = runtime.take_jobs();
-    let [IoJob::HttpStream(stream), IoJob::HttpStream(whole)] = &jobs[..] else {
-        panic!("expected two jobs")
-    };
-    runtime
-        .enqueue(IoEvent::HttpHead {
-            token: stream.token,
-            status: 200,
-            headers: Vec::new(),
-        })
-        .expect("first");
-    runtime
-        .enqueue(IoEvent::HttpHead {
-            token: whole.token,
-            status: 200,
-            headers: Vec::new(),
-        })
-        .expect("response head");
-    runtime
-        .enqueue(IoEvent::HttpChunk {
-            token: whole.token,
-            bytes: b"next".to_vec(),
-            done: true,
-            error: None,
-        })
-        .expect("second");
-    let error = runtime.drive(0).expect_err("failed hook");
-    assert!(error.message.contains("delivery error"));
-    assert_eq!(runtime.counts().requests, 1);
-    assert_eq!(runtime.counts().promises, 1);
-    runtime.drive(1).expect("next delivery");
-    runtime
-        .eval_script(
-            r#"
-        if (!streamError.includes('could not be converted') || responseText !== 'next') {
-            throw new Error('lost dispatch');
-        }
-    "#,
-            "check",
-        )
-        .expect("retained events");
-    assert_eq!(runtime.counts().promises, 0);
 }

@@ -6,7 +6,7 @@ use javascript::standard::StandardProfile;
 #[test]
 fn native_web_constructors_keep_subclass_and_live_iterator_semantics() {
     let result = Runtime::builder()
-        .standard(StandardProfile::default())
+        .standard(StandardProfile)
         .build()
         .and_then(|mut runtime| {
             runtime.eval_script(
@@ -74,7 +74,7 @@ if (!closed) throw new Error('iterator not closed after invalid tuple');
 #[test]
 fn utf8_buffers_use_native_ranges_after_prototype_mutation() {
     let result = Runtime::builder()
-        .standard(StandardProfile::default())
+        .standard(StandardProfile)
         .build()
         .and_then(|mut runtime| {
             runtime.eval_script(

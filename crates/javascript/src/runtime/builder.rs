@@ -11,9 +11,9 @@ use crate::runtime::resources::Wake;
 use crate::standard::{EntropySource, StandardProfile, SystemEntropy};
 
 use super::{
-    Arc, Cell, CreditPool, Ctx, DrivePolicy, ErrorKind, HashMap, HttpClient, HttpMode, Inbox,
-    IoBindings, JsError, Log, ModuleBindings, ModuleTable, Phase, Rc, RefCell, Resources, Runtime,
-    RuntimeKey, RuntimeLimits, Scheduler, State, VecDeque, Vm,
+    Arc, Cell, CreditPool, Ctx, DrivePolicy, ErrorKind, HashMap, Inbox, JsError, Log,
+    ModuleBindings, ModuleTable, Phase, Rc, RefCell, Resources, Runtime, RuntimeKey, RuntimeLimits,
+    Scheduler, State, VecDeque, Vm,
 };
 
 pub struct RuntimeBuilder {
@@ -21,7 +21,6 @@ pub struct RuntimeBuilder {
     natives: HashMap<String, Box<dyn NativeFactory>>,
     catalog: ModuleCatalog,
     duplicate: Option<String>,
-    io: IoBindings,
     log: Log,
     wake: Option<Wake>,
     profile: StandardProfile,
@@ -46,7 +45,9 @@ enum BootStop {
     Runtime,
     #[cfg(test)]
     Context,
+    #[cfg(test)]
     Bindings,
+    #[cfg(test)]
     Web,
 }
 
@@ -57,10 +58,9 @@ impl RuntimeBuilder {
             natives: HashMap::new(),
             catalog: ModuleCatalog::default(),
             duplicate: None,
-            io: IoBindings::jobs(),
             log: Box::new(|_, _| {}),
             wake: None,
-            profile: StandardProfile::default(),
+            profile: StandardProfile,
             entropy: Arc::new(SystemEntropy),
             limits: RuntimeLimits::default(),
             policy: DrivePolicy::LegacyStrict,
@@ -116,20 +116,10 @@ impl RuntimeBuilder {
         self
     }
 
-    pub fn host(mut self, io: IoBindings) -> Self {
-        self.io = io;
-        self
-    }
-
     /// Use the host monotonic clock for I/O deadlines. The host must pass
     /// timestamps in the same domain when driving the runtime's timers.
     pub fn transport_clock(mut self, clock: super::TransportClock) -> Self {
         self.transport_clock = Some(clock);
-        self
-    }
-
-    pub fn http_client(mut self, client: Arc<dyn HttpClient>) -> Self {
-        self.io.http = HttpMode::Inline(client);
         self
     }
 
@@ -156,10 +146,7 @@ impl RuntimeBuilder {
     pub fn build(self) -> Result<Runtime, JsError> {
         let stop = self.stop;
         let entropy = Arc::clone(&self.entropy);
-        let profile = self.profile.with_transports(
-            !matches!(self.io.http, HttpMode::Disconnected),
-            self.io.socket.is_some(),
-        );
+        let profile = self.profile;
         let bindings =
             ModuleBindings::new(self.catalog.registry().clone(), Arc::clone(&self.executor));
         let runtime = self.build_unstarted()?;
@@ -176,20 +163,23 @@ impl RuntimeBuilder {
             .vm
             .with(|ctx| {
                 runtime.install_standard_bindings(&ctx, || {})?;
-                runtime.install_host_inner(
-                    &ctx,
-                    |_: &Ctx<'_>| Ok(()),
-                    move |name| table.contains(name),
-                    stop == Some(BootStop::Bindings),
-                )?;
+                #[cfg(test)]
+                if stop == Some(BootStop::Bindings) {
+                    return Err(rquickjs::Exception::throw_internal(
+                        &ctx,
+                        "partial bindings installation",
+                    ));
+                }
                 runtime.install_modules(&ctx, bindings, |_: &Ctx<'_>| Ok(()), None, None)?;
                 crate::standard::install_with_entropy(&ctx, profile, entropy)?;
+                #[cfg(test)]
                 if stop == Some(BootStop::Web) {
                     return Err(rquickjs::Exception::throw_internal(
                         &ctx,
                         "partial Web standard library installation",
                     ));
                 }
+                let _ = stop;
                 Ok(())
             })
             .map_err(|error| state.vm.with(|ctx| state.script_error(&ctx, error)))?;
@@ -246,14 +236,9 @@ impl RuntimeBuilder {
                 modules: Rc::new(modules),
                 tickets: RefCell::new(HashMap::new()),
                 listeners: RefCell::new(Vec::new()),
-                web_cleanup: RefCell::new(None),
                 ticket_peak: Cell::new(0),
                 listener_peak: Cell::new(0),
                 log: self.log,
-                host_policy: RefCell::new(Rc::new(|_| Ok(()))),
-                io: RefCell::new(self.io),
-                jobs: RefCell::new(Vec::new()),
-                jobs_bytes: Cell::new(0),
                 inbox: Arc::new(Inbox::new(key, self.wake)),
                 local: RefCell::new(VecDeque::new()),
                 resources: RefCell::new(Resources::default()),
@@ -267,7 +252,7 @@ impl RuntimeBuilder {
                 outbound: Arc::new(CreditPool::new(
                     limits.queue_bytes,
                     limits.queue_events,
-                    limits.socket_send_bytes,
+                    limits.stream_bytes,
                     limits.stream_events,
                 )),
             }),
@@ -285,9 +270,7 @@ impl RuntimeBuilder {
     }
 
     pub fn bare() -> Result<Runtime, JsError> {
-        Self::new()
-            .host(IoBindings::disconnected())
-            .build_unstarted()
+        Self::new().build_unstarted()
     }
 }
 

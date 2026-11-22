@@ -207,12 +207,6 @@ pub(super) fn install<'js>(host: &Host, ctx: &Ctx<'js>) -> rquickjs::Result<()> 
     for name in ["requestAnimationFrame", "cancelAnimationFrame"] {
         bind(ctx, &ctx.globals(), name, native)?;
     }
-    let weak = host.downgrade();
-    host.runtime
-        .install_host(ctx, canvas::side_effect, move |name| {
-            weak.upgrade()
-                .is_some_and(|host| host.inner().config.registry.module(name).is_some())
-        })?;
     let config = &host.inner().config;
     host.runtime.install_modules(
         ctx,
@@ -331,11 +325,10 @@ fn native<'js>(
     let undefined = || Value::new_undefined(ctx.clone());
     let minimum = match name {
         "setStyle" | "patchStyle" | "setComponentStyle" | "setClass" | "setStyleSource"
-        | "createStyleSource" | "http" | "httpStream" => 2,
+        | "createStyleSource" => 2,
         "clearStyle"
         | "removeStyleSource"
         | "setStyleEnvironment"
-        | "socketOpen"
         | "offBack"
         | "offSettings"
         | "offWindowMetrics" => 1,

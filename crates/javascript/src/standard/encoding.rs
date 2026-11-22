@@ -213,11 +213,6 @@ pub(super) fn usv_string<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<Strin
     }
 }
 
-/// Response and request bodies decode with a fresh, nonfatal UTF-8 decoder.
-pub(super) fn decode_utf8(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes)).into_owned()
-}
-
 fn decode_chunk(
     pending: &[u8],
     bytes: &[u8],

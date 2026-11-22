@@ -8,7 +8,6 @@ use std::sync::Arc;
 use rquickjs::function::Args;
 use rquickjs::{Ctx, Function, IntoJs, JsLifetime, Object, Persistent, Value};
 
-use javascript::runtime::IoBindings;
 use javascript::runtime::extension::exception_text;
 
 use super::{Inner, bootstrap, reactive};
@@ -310,11 +309,7 @@ pub(in crate::js::player) struct JsVm {
     pub(super) host: Rc<Host>,
 }
 impl JsVm {
-    pub(super) fn new(
-        inner: Rc<Inner>,
-        app_dir: Option<&str>,
-        http: Option<Arc<dyn crate::session::HttpClient>>,
-    ) -> Result<Self, Error> {
+    pub(super) fn new(inner: Rc<Inner>, app_dir: Option<&str>) -> Result<Self, Error> {
         let log = Rc::clone(&inner.log);
         let mut builder =
             javascript::runtime::Runtime::builder().log(move |level, text| log(level, text));
@@ -332,7 +327,6 @@ impl JsVm {
             });
         }
         let runtime = builder.build_unstarted().map_err(|_| Error::Runtime)?;
-        runtime.configure_io(http.map_or_else(IoBindings::disconnected, IoBindings::inline));
         let host = Rc::new_cyclic(|weak| Host {
             runtime,
             inner,
@@ -366,7 +360,7 @@ impl JsVm {
             })
         })?;
         self.host.eval(scene.as_bytes(), "scene.js", false)?;
-        let profile = javascript::standard::StandardProfile::default();
+        let profile = javascript::standard::StandardProfile;
         {
             let _budget = self.host.budget("eval", 0);
             self.host.with(|ctx| {
@@ -422,14 +416,6 @@ impl JsVm {
         }
         self.host.drain()
     }
-    pub(super) fn install_io(&mut self, submit: Box<dyn Fn(crate::session::IoJob) + Send>) {
-        self.host.runtime.configure_io(IoBindings::external(submit));
-    }
-
-    pub(super) fn install_routed_io(&mut self, submit: crate::js::RoutedIoSubmit) {
-        self.host.runtime.configure_io(IoBindings::routed(submit));
-    }
-
     pub(super) fn drain_local_io(&self) {
         self.host.runtime.drain_local_io(|_error| {});
     }
@@ -506,7 +492,6 @@ mod tests {
                 Box::new(|_, _| {}),
                 crate::session::ModuleConfig::disconnected(),
             )),
-            None,
             None,
         )
         .expect("allocate extension owner");

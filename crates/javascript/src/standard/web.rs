@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use rquickjs::class::JsClass;
 use rquickjs::function::{Constructor, IntoJsFunc, Opt, ParamRequirement, Params, This};
-use rquickjs::{Array, Coerced, Ctx, Exception, FromJs, Function, JsLifetime, Object, Value};
+use rquickjs::{Coerced, Ctx, Exception, FromJs, Function, JsLifetime, Object, Value};
 
 use super::StandardProfile;
 
@@ -13,24 +13,11 @@ const NATIVE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(JsLifetime)]
 struct Platform {
-    profile: StandardProfile,
     owned_bytes: Rc<Cell<usize>>,
-}
-
-pub(super) fn platform(ctx: &Ctx<'_>) -> rquickjs::Result<StandardProfile> {
-    ctx.userdata::<Platform>()
-        .map(|state| state.profile)
-        .ok_or_else(|| Exception::throw_internal(ctx, "standard library is unavailable"))
 }
 
 pub(super) fn is_nullish(value: &Value<'_>) -> bool {
     value.is_null() || value.is_undefined()
-}
-
-pub(super) fn array_from<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<Array<'js>> {
-    let array: Function = ctx.globals().get("Array")?;
-    let from: Function = array.get("from")?;
-    from.call((This(array), value))
 }
 
 pub(super) fn constructor<'js, C, F, P>(
@@ -106,59 +93,31 @@ impl Drop for Charge {
     }
 }
 
-pub(super) fn bridge<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
-    ctx.globals().get("__host")
-}
-
-pub(super) fn option<'js>(
-    ctx: &Ctx<'js>,
-    object: &Value<'js>,
-    key: &str,
-) -> rquickjs::Result<Value<'js>> {
-    match object.as_object() {
-        Some(object) => object.get(key),
-        None => Ok(Value::new_undefined(ctx.clone())),
-    }
-}
-
-/// Install the standard Web globals after the native host transport.
+/// Install the standard Web globals into a QuickJS context.
 pub fn install_web(ctx: &Ctx<'_>, profile: StandardProfile) -> rquickjs::Result<()> {
     install_with_entropy(ctx, profile, std::sync::Arc::new(super::SystemEntropy))
 }
 
 pub(crate) fn install_with_entropy(
     ctx: &Ctx<'_>,
-    profile: StandardProfile,
+    _profile: StandardProfile,
     entropy: std::sync::Arc<dyn super::EntropySource>,
 ) -> rquickjs::Result<()> {
     let globals = ctx.globals();
     ctx.store_userdata(Platform {
-        profile,
         owned_bytes: Rc::default(),
     })
     .map_err(|_| Exception::throw_internal(ctx, "standard installation is already borrowed"))?;
-    let bridge = bridge(ctx)?;
     let error: Object = globals.get("Error")?;
     error.set("stackTraceLimit", 50)?;
     super::primitives::install(ctx, &globals, entropy)?;
     super::events::install(ctx, &globals)?;
     super::encoding::install(ctx, &globals)?;
     super::url::install(ctx, &globals)?;
-    super::headers::install(ctx, &globals)?;
     super::streams::install(ctx, &globals)?;
     super::native_stream::install(ctx)?;
-    super::http::install(ctx, &bridge)?;
-    super::socket::install(ctx, &bridge)?;
     install_console_timing(ctx)?;
-    bridge.set(
-        "_closeWeb",
-        Function::new(ctx.clone(), |ctx: Ctx<'_>| {
-            let http = super::http::close(&ctx);
-            let socket = super::socket::close(&ctx);
-            let extension = super::native_stream::close(&ctx);
-            http.and(socket).and(extension)
-        })?,
-    )
+    Ok(())
 }
 
 fn install_console_timing<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {

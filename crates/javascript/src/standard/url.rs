@@ -85,18 +85,6 @@ fn can_parse<'js>(
         .is_ok())
 }
 
-/// Serialize a URLSearchParams body without consulting user-overridden methods.
-pub(super) fn form_query<'js>(value: &Value<'js>) -> Result<Option<String>> {
-    value
-        .as_object()
-        .and_then(|object| object.as_class::<URLSearchParams>())
-        .map(|params| {
-            let params = params.try_borrow()?;
-            Ok(params.serialize())
-        })
-        .transpose()
-}
-
 fn parse_pairs(ctx: &Ctx<'_>, query: &str) -> Result<(Vec<Pair>, Charge)> {
     collect_pairs(
         ctx,

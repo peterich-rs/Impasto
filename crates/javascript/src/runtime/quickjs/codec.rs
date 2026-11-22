@@ -10,20 +10,6 @@ const MAX_DEPTH: usize = 256;
 const MAX_ITEMS: usize = 65_536;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 
-/// Read an optional buffer or typed array, honoring the view's byte offset and length.
-pub fn read_bytes<'js>(
-    ctx: &Ctx<'js>,
-    value: &Value<'js>,
-    max: usize,
-) -> rquickjs::Result<Option<Vec<u8>>> {
-    if value.is_null() || value.is_undefined() {
-        return Ok(None);
-    }
-    bytes(ctx, value, max)?
-        .map(Some)
-        .ok_or_else(|| Exception::throw_type(ctx, "expected bytes"))
-}
-
 fn bytes<'js>(ctx: &Ctx<'js>, value: &Value<'js>, max: usize) -> rquickjs::Result<Option<Vec<u8>>> {
     let bounded = |bytes: Option<&[u8]>| {
         let bytes = bytes.ok_or_else(|| Exception::throw_type(ctx, "detached buffer"))?;

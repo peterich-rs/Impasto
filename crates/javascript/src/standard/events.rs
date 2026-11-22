@@ -117,7 +117,6 @@ pub(super) struct Target<'js> {
     next_listener: u64,
     listeners: Vec<Listener<'js>>,
     signal: Option<AbortState<'js>>,
-    attachment: Option<Object<'js>>,
 }
 
 #[derive(Clone, Trace, JsLifetime)]
@@ -667,26 +666,6 @@ pub(super) fn event<'js>(ctx: &Ctx<'js>, kind: &str) -> Result<Object<'js>> {
 
 pub(super) fn target_prototype<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>> {
     Class::<Target>::prototype(ctx)?.ok_or(rquickjs::Error::Unknown)
-}
-
-pub(super) fn target_with_attachment<'js>(
-    prototype: &Object<'js>,
-    attachment: Object<'js>,
-) -> Result<Object<'js>> {
-    Ok(Class::instance_proto(
-        Target {
-            attachment: Some(attachment),
-            ..Target::default()
-        },
-        prototype.clone(),
-    )?
-    .into_inner())
-}
-
-pub(super) fn target_attachment<'js>(target: &Object<'js>) -> Result<Option<Object<'js>>> {
-    let target = Class::<Target>::from_object(target)
-        .ok_or_else(|| Exception::throw_type(target.ctx(), "Expected an EventTarget"))?;
-    Ok(target.try_borrow()?.attachment.clone())
 }
 
 pub(super) fn new_signal<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>> {

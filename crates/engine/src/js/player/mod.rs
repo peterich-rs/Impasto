@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::session::{InputEvent, IoJob, Key, Metrics, ModuleConfig, PluginValue, Session};
+use crate::session::{InputEvent, Key, Metrics, ModuleConfig, PluginValue, Session};
 use crate::{
     text::{Affinity, Shaper},
     tree::{FocusDirection, NodeId, Rect, Tree},
@@ -241,14 +241,7 @@ impl JsSession {
         shaper: impl Shaper + 'static,
         log: crate::js::ConsoleLog,
     ) -> Result<Self, Error> {
-        Self::open_with(
-            script,
-            name,
-            shaper,
-            log,
-            None,
-            ModuleConfig::disconnected(),
-        )
+        Self::open_with(script, name, shaper, log, ModuleConfig::disconnected())
     }
 
     pub fn open_with(
@@ -256,10 +249,9 @@ impl JsSession {
         name: &str,
         shaper: impl Shaper + 'static,
         log: crate::js::ConsoleLog,
-        http: Option<Arc<dyn crate::session::HttpClient>>,
         config: ModuleConfig,
     ) -> Result<Self, Error> {
-        Self::open_source(script.as_bytes(), name, shaper, log, http, config)
+        Self::open_source(script.as_bytes(), name, shaper, log, config)
     }
 
     pub fn open_source(
@@ -267,10 +259,9 @@ impl JsSession {
         name: &str,
         shaper: impl Shaper + 'static,
         log: crate::js::ConsoleLog,
-        http: Option<Arc<dyn crate::session::HttpClient>>,
         config: ModuleConfig,
     ) -> Result<Self, Error> {
-        Self::open_program(ProgramKind::Source(script), name, shaper, log, http, config)
+        Self::open_program(ProgramKind::Source(script), name, shaper, log, config)
     }
 
     pub(crate) fn open_trusted(
@@ -278,17 +269,9 @@ impl JsSession {
         name: &str,
         shaper: impl Shaper + 'static,
         log: crate::js::ConsoleLog,
-        http: Option<Arc<dyn crate::session::HttpClient>>,
         config: ModuleConfig,
     ) -> Result<Self, Error> {
-        Self::open_program(
-            ProgramKind::Trusted(program),
-            name,
-            shaper,
-            log,
-            http,
-            config,
-        )
+        Self::open_program(ProgramKind::Trusted(program), name, shaper, log, config)
     }
 
     fn open_program(
@@ -296,11 +279,10 @@ impl JsSession {
         name: &str,
         shaper: impl Shaper + 'static,
         log: crate::js::ConsoleLog,
-        http: Option<Arc<dyn crate::session::HttpClient>>,
         config: ModuleConfig,
     ) -> Result<Self, Error> {
         let inner = Rc::new(Inner::new(shaper, log, config));
-        let vm = JsVm::new(Rc::clone(&inner), app_directory(name), http)?;
+        let vm = JsVm::new(Rc::clone(&inner), app_directory(name))?;
         vm.install(bootstrap::SCENE_JS)?;
         vm.start(program, name)?;
         sweep_detached(&vm.host);
@@ -333,14 +315,6 @@ impl JsSession {
     pub(crate) fn picture_writes(&self) -> usize {
         let inner = &self.inner;
         inner.tree.borrow().picture_writes()
-    }
-
-    pub fn install_io(&mut self, submit: Box<dyn Fn(IoJob) + Send>) {
-        self.vm.install_io(submit);
-    }
-
-    pub fn install_routed_io(&mut self, submit: crate::js::RoutedIoSubmit) {
-        self.vm.install_routed_io(submit);
     }
 
     pub fn semantics(&mut self) -> Option<crate::semantics::SemanticsUpdate> {
@@ -711,7 +685,6 @@ impl Session for JsSession {
         &mut self,
         source: &str,
         shaper: Box<dyn Shaper>,
-        io: crate::js::RoutedIoSubmit,
         time: crate::session::FrameTime,
     ) -> Result<(), String> {
         let prior = &self.inner;
@@ -721,7 +694,6 @@ impl Session for JsSession {
             "app.js",
             shaper,
             Box::new(move |level, line| log(level, line)),
-            None,
             prior.config.clone(),
         )
         .map_err(|error| error.to_string())?;
@@ -750,7 +722,6 @@ impl Session for JsSession {
         if prior.paused.get() {
             candidate.inner.paused.set(true);
         }
-        candidate.install_routed_io(io);
         candidate.reload_frame = Some(output);
         *self = candidate;
         Ok(())

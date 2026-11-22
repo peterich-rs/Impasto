@@ -10,9 +10,8 @@ mod registry;
 mod value;
 
 pub use io::{
-    Credit, CreditPool, CreditUsage, Delivery, HTTP_BODY_LIMIT, HostEvent, HttpClient, HttpError,
-    HttpFailure, HttpPiece, HttpRequest, HttpResponse, IoEvent, IoJob, MAX_SAFE_ID, RequestKey,
-    Route, RuntimeKey, TERMINAL_PAYLOAD_LIMIT,
+    Credit, CreditPool, CreditUsage, Delivery, HostEvent, IoEvent, MAX_SAFE_ID, RequestKey, Route,
+    RuntimeKey, TERMINAL_PAYLOAD_LIMIT,
 };
 
 pub use declaration::DeclarationError;

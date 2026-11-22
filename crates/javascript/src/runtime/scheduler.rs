@@ -25,12 +25,10 @@ pub struct RuntimeLimits {
     pub tickets: usize,
     pub listeners: usize,
     pub requests: usize,
-    pub sockets: usize,
     pub queue_events: usize,
     pub queue_bytes: usize,
     pub stream_events: usize,
     pub stream_bytes: usize,
-    pub socket_send_bytes: usize,
     pub request_timeout_ms: u64,
 }
 
@@ -48,12 +46,10 @@ impl Default for RuntimeLimits {
             tickets: 64,
             listeners: 1_024,
             requests: 32,
-            sockets: 8,
             queue_events: 256,
             queue_bytes: 16 << 20,
             stream_events: 64,
             stream_bytes: 256 << 10,
-            socket_send_bytes: 256 << 10,
             request_timeout_ms: 30_000,
         }
     }

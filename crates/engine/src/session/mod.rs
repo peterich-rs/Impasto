@@ -18,10 +18,7 @@ pub use metrics::*;
 )]
 pub mod trace;
 
-pub use javascript::host::{
-    HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, HttpResponse,
-    IoEvent, IoJob, PluginResult, PluginValue, module_not_linked,
-};
+pub use javascript::host::{IoEvent, PluginResult, PluginValue, module_not_linked};
 pub use modules::{
     CancelToken, EventType, ImmediateExec, Invoke, Method, MethodExec, MethodTypes, Module,
     ModuleConfig, ModuleExports, ModuleRegistry, NativeExtension, NativeResource, PromiseFn,
@@ -212,7 +209,6 @@ pub trait Session {
         &mut self,
         _source: &str,
         _shaper: Box<dyn crate::text::Shaper>,
-        _io: Box<dyn Fn(IoJob) -> Result<(), Box<IoJob>> + Send>,
         _time: FrameTime,
     ) -> Result<(), String> {
         Err("this session does not support debug source updates".to_owned())

@@ -61,8 +61,7 @@ impl MethodExec for ImmediateExec {
 pub type SyncFn = Arc<dyn Fn(&[PluginValue]) -> Result<PluginValue, String> + Send + Sync>;
 pub type ResourceFn =
     Arc<dyn Fn(&[PluginValue]) -> Result<Box<dyn NativeResource>, String> + Send + Sync>;
-pub type StreamFn =
-    Arc<dyn Fn(Vec<PluginValue>, &mut StreamSink) -> Result<(), String> + Send + Sync>;
+pub type StreamFn = Arc<dyn Fn(Vec<PluginValue>, StreamSink, &dyn MethodExec) + Send + Sync>;
 pub type PromiseFn = Arc<dyn Fn(&[PluginValue], Settle, &dyn MethodExec) + Send + Sync>;
 
 #[derive(Clone)]
@@ -132,9 +131,33 @@ impl Method {
         name: &'static str,
         work: impl Fn(Vec<PluginValue>, &mut StreamSink) -> Result<(), String> + Send + Sync + 'static,
     ) -> Self {
+        let work = Arc::new(work);
+        Self::stream_with_exec(name, move |args, mut sink, exec| {
+            let work = Arc::clone(&work);
+            exec.worker(
+                Settle::new(|_| {}),
+                Box::new(move || {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        work(args, &mut sink)
+                    })) {
+                        Ok(Ok(())) => sink.finish(),
+                        Ok(Err(message)) => sink.fail(message),
+                        Err(_) => sink.fail("native stream producer panicked".into()),
+                    }
+                    PluginResult::Done(PluginValue::Null)
+                }),
+            );
+        })
+    }
+
+    /// Start a stream producer that schedules its own work on `exec` or an async runtime.
+    pub fn stream_with_exec(
+        name: &'static str,
+        start: impl Fn(Vec<PluginValue>, StreamSink, &dyn MethodExec) + Send + Sync + 'static,
+    ) -> Self {
         Self {
             name,
-            invoke: Invoke::Stream(Arc::new(work)),
+            invoke: Invoke::Stream(Arc::new(start)),
             types: None,
             awaits_user: false,
         }
