@@ -23,9 +23,9 @@ pub use javascript::host::{
     IoEvent, IoJob, PluginResult, PluginValue, module_not_linked,
 };
 pub use modules::{
-    EventType, ImmediateExec, Invoke, Method, MethodExec, MethodTypes, Module, ModuleConfig,
-    ModuleExports, ModuleRegistry, PromiseFn, Settle, Shared, SyncFn, Work, shared, shared_read,
-    shared_write,
+    CancelToken, EventType, ImmediateExec, Invoke, Method, MethodExec, MethodTypes, Module,
+    ModuleConfig, ModuleExports, ModuleRegistry, NativeExtension, NativeResource, PromiseFn,
+    Settle, Shared, StreamSendError, StreamSink, SyncFn, Work, shared, shared_read, shared_write,
 };
 
 /// Durations inside one [`Session::frame`]. The host adds gesture time itself.

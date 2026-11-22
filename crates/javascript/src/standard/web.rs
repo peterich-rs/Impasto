@@ -123,6 +123,14 @@ pub(super) fn option<'js>(
 
 /// Install the standard Web globals after the native host transport.
 pub fn install_web(ctx: &Ctx<'_>, profile: StandardProfile) -> rquickjs::Result<()> {
+    install_with_entropy(ctx, profile, std::sync::Arc::new(super::SystemEntropy))
+}
+
+pub(crate) fn install_with_entropy(
+    ctx: &Ctx<'_>,
+    profile: StandardProfile,
+    entropy: std::sync::Arc<dyn super::EntropySource>,
+) -> rquickjs::Result<()> {
     let globals = ctx.globals();
     ctx.store_userdata(Platform {
         profile,
@@ -132,11 +140,13 @@ pub fn install_web(ctx: &Ctx<'_>, profile: StandardProfile) -> rquickjs::Result<
     let bridge = bridge(ctx)?;
     let error: Object = globals.get("Error")?;
     error.set("stackTraceLimit", 50)?;
-    super::events::install(ctx, &globals, profile.is_portable())?;
-    super::encoding::install(ctx, &globals, profile.is_portable())?;
+    super::primitives::install(ctx, &globals, entropy)?;
+    super::events::install(ctx, &globals)?;
+    super::encoding::install(ctx, &globals)?;
     super::url::install(ctx, &globals)?;
     super::headers::install(ctx, &globals)?;
     super::streams::install(ctx, &globals)?;
+    super::native_stream::install(ctx)?;
     super::http::install(ctx, &bridge)?;
     super::socket::install(ctx, &bridge)?;
     install_console_timing(ctx)?;
@@ -145,7 +155,8 @@ pub fn install_web(ctx: &Ctx<'_>, profile: StandardProfile) -> rquickjs::Result<
         Function::new(ctx.clone(), |ctx: Ctx<'_>| {
             let http = super::http::close(&ctx);
             let socket = super::socket::close(&ctx);
-            http.and(socket)
+            let extension = super::native_stream::close(&ctx);
+            http.and(socket).and(extension)
         })?,
     )
 }

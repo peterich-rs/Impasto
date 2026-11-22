@@ -556,7 +556,7 @@ fn open_runs_entry_before_io_install_and_frame_flushes_pending() {
                 function () { console.log("fetch-ok"); },
                 function (error) { console.log("fetch-fail:" + String(error)); }
             );
-            fetchStream("https://example.test/stream").then(
+            fetch("https://example.test/stream").then(
                 function () { console.log("stream-ok"); },
                 function (error) { console.log("stream-fail:" + String(error && error.message)); }
             );
@@ -597,7 +597,7 @@ fn open_runs_entry_before_io_install_and_frame_flushes_pending() {
             "job",
             "socket-error",
             "timer",
-            "fetch-fail:TypeError",
+            "fetch-fail:TypeError: TypeError",
             "raf",
         ]
     );
@@ -751,9 +751,9 @@ fn startup_inline_stream_settles_after_recording_the_token() {
     let mut session = super::JsSession::open_with(
         r#"
                 const bytes = new Uint8Array([10, 11, 12, 13]).subarray(1, 3);
-                fetchStream("https://example.test/empty", {method: "POST", body: bytes})
+                fetch("https://example.test/empty", {method: "POST", body: bytes})
                     .then(async response => {
-                        const item = await response.getReader().read();
+                        const item = await response.body.getReader().read();
                         console.log("stream:" + response.status + ":" + item.done);
                     });
             "#,

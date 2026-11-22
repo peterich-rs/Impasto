@@ -60,7 +60,7 @@ Runtime 由所属线程创建、推进和关闭，保持 `!Send`。跨线程工�
 ```rust
 // 宿主收到事件或到达下一 deadline 时调用 drive。
 let mut runtime = Runtime::builder()
-    .standard(StandardProfile::legacy())
+    .standard(StandardProfile::default())
     .modules(catalog)
     .host(host_bindings)
     .limits(limits)
@@ -93,7 +93,7 @@ UI 需要的窄操作包括 `set_clock`、`begin_timer_turn`、`deliver_event`�
 
 源码按现有 parser 判定脚本或模块。UI 兼容入口继续允许处于 pending 的 TLA。headless `eval_script` 保持只执行源码，`drive` 或显式 checkpoint 才推进 jobs。模块启动失败由入口调用者决定是否关闭 owner。UI 的入口构造失败关闭会话，显式 headless 调用仍可按错误类型保留 Runtime。
 
-`legacy` 的本地 stream 把 head、chunk 或错误先暂存，待 JS 登记 token 后在帧内 I/O 点交付。测试覆盖入口源码、本地成功或错误、trusted bytecode 入口以及运行期外部完成。
+本地 HTTP 传输把 head、chunk 或错误先暂存，待 JS 登记 token 后在帧内 I/O 点交付。测试覆盖入口源码、本地成功或错误、trusted bytecode 入口以及运行期外部完成。
 
 ### 生命周期与清理
 
@@ -143,7 +143,7 @@ Allocated → Installing → Ready → Closing → Closed
 | 驱动入口 | 兼容顺序 |
 |---|---|
 | headless `drive(now_ms)` | 先交付 inbox，再推进 timer turn、更新 mono/origin，跑最多 64 个 timer，做 job checkpoint，刷新模块票据 |
-| Shell 外部 `Command` | 入队后唤醒渲染线程，命令处理直接调用 `Session::io_event`。socket 回调可在下一帧前执行，此处沿用上一帧时钟。JavaScript 后续 jobs 仍由原检查点推进 |
+| Shell 外部 `Command` | 入队后唤醒 UI 队列，命令处理直接调用 `Session::io_event`。socket 回调可在下一帧前执行，此处沿用上一帧时钟。JavaScript 后续 jobs 仍由原检查点推进 |
 | UI 帧内积压 | 本地/启动积压走帧内 `flush_pending`，保留 HTTP、Plugin、socket 的分组次序和各组内部顺序。同一条流按 head、chunk、终结顺序交付 |
 | UI 模块事件 | 生命周期、窗口焦点和 launch URL 留在各自同步命令点，外部 producer 只投递 owned 数据 |
 
@@ -208,9 +208,9 @@ Delivery   = (RuntimeKey, owned event)
 
 ## 9. 标准库与支持范围
 
-`legacy` 的行为夹具固定兼容边界。`crates/javascript/src/standard` 用 Rust 注册公开构造器、原型和方法。事件监听、取消、编码与 URL 状态、Headers、Body 队列、reader 锁、Fetch 结算和 WebSocket 状态由同一线程的 Rust 对象持有。JS 引用通过 QuickJS class tracing 保持可达，调用 JS 前释放资源状态的借用。普通 Promise、回调和对象继续使用 QuickJS 自身实现。各 Rust 绑定模块维护 TypeScript 签名。`StandardProfile::declarations()` 按 profile 和传输能力选择模块，再拼接声明。`just standard-check` 用 `legacy` 和 `portable` 的四种传输组合核对 TypeScript 声明与实际 QuickJS 全局值、原型和继承，并在两侧执行代表性用例。
+`crates/javascript/src/standard` 维护一套 API 语义。QuickJS 直接提供 `queueMicrotask`、`DOMException`、`atob` 与 `btoa`。Rust Web 绑定持有其余原生状态，原生对象里的 JS 引用通过 QuickJS GC tracing 保持可达。调用 JS 前释放原生状态借用。
 
-`legacy` 保持默认和已有 API，其中包括 `fetchStream`。`portable` 只发布已有行为夹具和类型声明覆盖的子集。两者共用实现，差异由安装清单及兼容适配表达。只在测到显著启动成本并且初始化与 bootstrap 独立时考虑 lazy。按需安装验证首次读取/赋值、递归访问、失败缓存和属性描述符。
+`StandardProfile::declarations()` 按传输能力生成声明。`just standard-check` 对 full、HTTP-only、socket-only、offline 四种环境核对 TypeScript 声明和 QuickJS 的全局值、构造器、原型成员与继承关系。运行时的 `fetch` 在 head 到达时结算。旧代码可用 `(await fetch(url)).body?.getReader()` 读取流，用 `text()`、`json()` 或 `arrayBuffer()` 等待完整响应。
 
 | 模块 | 实施与验收 |
 |---|---|
@@ -219,9 +219,12 @@ Delivery   = (RuntimeKey, owned event)
 | Encoding | UTF-8 TextEncoder/TextDecoder，覆盖代理对、孤立代理项、非法字节、replacement/fatal、BOM 与跨 chunk/流式 decode。声明仅发布实际支持的参数 |
 | URL、URLSearchParams | 优先评估成熟解析器，覆盖相对路径与 base、Unicode、重复键、空值、迭代和 percent 编码 |
 | Headers、Request、Response、Body | 大小写、多值、null body 和有 body 的行为、消费规则、字节/文本/JSON。流接入前保留同一消费入口，标准 stream 的锁定行为在流接通后验收 |
-| fetch、ReadableStream | 第 10 节的同一 transport、资源表和额度。portable 只在配置满足并完成语义测试后公开对应 API |
+| ReadableStream | 默认 reader 和 controller，共用 JS source 与原生有界队列，支持 pull、cancel 和结构化值 |
+| fetch | 按宿主传输能力启用。按第 10 节管理响应与取消 |
+| structuredClone | 克隆对象图和循环引用，支持 Map、Set、Date、RegExp、Error、普通 ArrayBuffer、类型化视图和 ArrayBuffer transfer。资源与不可克隆值抛 DataCloneError |
+| crypto | `getRandomValues` 填充整数类型化视图，`randomUUID` 生成 v4 UUID，独立运行时可在 builder 注入熵源 |
 | WebSocket | 独立连接状态，复用 bytes codec、身份和终结规则。readyState、二进制类型、事件、关闭后发送和缓冲限额需验收 |
-| buffer、crypto、path、压缩 | 有实际需求再按模块决策，单独审查依赖、权限和平台 |
+| path、压缩及更多宿主能力 | 有实际需求再按模块决策，单独审查依赖、权限和平台 |
 
 依赖以仓库 `quickjs-jit =0.14.2` 与现有 feature 为基线。候选库固定版本，核对许可证、sys ABI、全局安装副作用、线程和 fs/process 暴露，验证 Linux、macOS 和 Android 构建及实际 QuickJS 语义。当前仓库约束排除 `quickjs-jit-stdlib`、`quickjs-jit-runtime`、第二引擎以及未启用的引擎特性。若将来调整取舍，先单独修订依赖决定。第三方纯实现仍由项目的 profile、声明、limits 和 transport adapter 接入，网络请求继续经过已有后端和能力检查。默认标准库范围限于本表，DOM、任意本地路径、进程环境与进程控制属于宿主能力之外的范围。
 
@@ -238,15 +241,19 @@ Request / Body 校验 → owned 请求参数 → reserve RequestKey → 传输
 
 ### Body 状态
 
-保持独立的 body 是否存在、reader 锁、`disturbed` 标记和 readable/closed/errored 状态。取得 reader 只建立锁。释放锁可以使尚未开始读取的 body 恢复可消费。开始读取或取消会设置 disturbed，设置后保持。portable 的 `bodyUsed` 反映 disturbed，消费入口对 locked 或 disturbed body 拒绝。null body 的消费由 Fetch 规则测试。读取 waiter 有明确归属与限额，释放锁、关闭、失败和取消分别结算。见 [WHATWG Fetch Body](https://fetch.spec.whatwg.org/#body-mixin) 和 [WHATWG Streams 锁定](https://streams.spec.whatwg.org/#locking)。
+保持独立的 body 是否存在、reader 锁、`disturbed` 标记和 readable/closed/errored 状态。取得 reader 只建立锁。释放锁可以使尚未开始读取的 body 恢复可消费。开始读取或取消会设置 disturbed，设置后保持。`bodyUsed` 反映 disturbed，消费入口对 locked 或 disturbed body 拒绝。null body 的消费由 Fetch 规则测试。读取 waiter 有明确归属与限额，释放锁、关闭、失败和取消分别结算。见 [WHATWG Fetch Body](https://fetch.spec.whatwg.org/#body-mixin) 和 [WHATWG Streams 锁定](https://streams.spec.whatwg.org/#locking)。
 
 `text()`、`json()`、`arrayBuffer()` 经同一消费入口。读出的 chunk 移交物化缓冲后归还队列 credit。物化缓冲有独立的总字节预算，超限时拒绝并终结读取。最终构造 JS 值所需的复制计入峰值，以免整响应聚合把 credit 一直占到 end，或把有界队列转成无界物化。第一轮声明省略 clone/tee，直到能定义两端共享流量和滞后端额度。
 
 ### 传输与兼容
 
-External transport 提供真正的增量读取。收到 head 后可发出 Response，HTTP 请求可以继续读取。head 后失败只改变 body 的错误状态。reader cancel 在首个无 tee 的实现中取消其整个 body。AbortSignal 在请求终结后移除登记。Inline 可按 legacy 使用有界的整响应交付，portable 的流式入口需要 External。Inline 回调在本次调用内完成传输和交付登记。
+外部传输从响应头开始增量交付。head 后的失败影响已经返回的 body，reader cancel 终止对应传输，AbortSignal 在请求终结后移除登记。显式注入的 Inline 客户端先收集有界响应片段，再在本地检查点交付相同的 head 和 chunk 事件。后端正常 EOF 产生一次结束。若后端未结束，运行时超时使请求在本地终结。
 
-`fetchStream` 适配到同一个 body 状态，锁定旧的 `getReader()`、status、headers 和 Promise 结算点。legacy `fetch` 的兼容包装保留整响应结算时机及旧错误映射，迁到 head 时结算的语义由 portable 显式提供。对旧错误和终结的修正分别写明行为和测试。后端正常 EOF 必须产生一次结束。head 前失败、结束遗漏、done/abort 竞争、读取前与 head 后取消各有明确终结结果。对不遵守完成契约的外部端，需定义断开或超时触发本地终结。
+### 原生扩展
+
+`NativeExtension` 使用现有 `Module` 的 ESM 导出和能力检查。`Method::resource` 在 VM 所属线程创建 `NativeResource`，JS 通过句柄的 `call` 调用和 `close` 释放。句柄遗失或运行时关闭也会释放资源，取消令牌可交给该资源创建的后台任务。
+
+`Method::stream` 把拥有型 `PluginValue` 传给原生 worker，返回 JavaScript 的 `ReadableStream`。尾参数可提供 `AbortSignal`。`StreamSink` 的额度随交付转到 reader，支持带超时等待的有界写入。显式取消、GC 和运行时关闭使生产者失效并唤醒额度等待。结束与失败只有一次终结交付。原生扩展、HTTP 和 socket 使用相同的 `RuntimeKey`、`Route`、`CancelToken` 与 `CreditPool`。
 
 慢消费者、无 reader、并发多流、跨 chunk UTF-8、空响应及跨边界的大 chunk 都进入测试。现有请求/响应总量上限继续记作兼容基线，队列上限与新物化上限按测量确定。
 

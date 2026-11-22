@@ -4,6 +4,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use super::IoEvent;
+use crate::host::CancelToken;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RuntimeKey {
@@ -173,7 +174,7 @@ pub struct Route {
     pub key: RequestKey,
     ingress: Arc<CreditPool>,
     outbound: Arc<CreditPool>,
-    canceled: Arc<AtomicBool>,
+    canceled: CancelToken,
     terminal: Arc<AtomicBool>,
     stream: bool,
     send_bytes: usize,
@@ -187,6 +188,7 @@ impl Route {
         canceled: Arc<AtomicBool>,
         stream: bool,
     ) -> Self {
+        let canceled = CancelToken::routed(canceled, Arc::clone(&ingress), Arc::clone(&outbound));
         Self {
             key,
             ingress,
@@ -208,13 +210,19 @@ impl Route {
     }
 
     pub fn is_active(&self) -> bool {
-        !self.canceled.load(Ordering::Acquire) && self.ingress.is_open()
+        !self.is_cancelled() && self.ingress.is_open()
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.canceled.is_cancelled()
     }
 
     pub fn cancel(&self) {
-        self.canceled.store(true, Ordering::Release);
-        self.ingress.notify_cancel();
-        self.outbound.notify_cancel();
+        self.canceled.cancel();
+    }
+
+    pub fn cancellation(&self) -> CancelToken {
+        self.canceled.clone()
     }
 
     pub fn claim_terminal(&self) -> bool {
@@ -234,7 +242,7 @@ impl Route {
             self.key.sequence,
             bytes,
             self.max_piece_bytes(),
-            &self.canceled,
+            self.canceled.flag(),
             timeout,
         )
     }
@@ -244,7 +252,7 @@ impl Route {
             self.key.sequence,
             bytes,
             self.outbound.bytes,
-            &self.canceled,
+            self.canceled.flag(),
             Duration::ZERO,
         )
     }
@@ -254,7 +262,7 @@ impl Route {
             self.key.sequence,
             self.send_bytes,
             self.outbound.resource_bytes,
-            &self.canceled,
+            self.canceled.flag(),
             Duration::ZERO,
         )
     }

@@ -38,3 +38,17 @@ async function checkTypes(body: Response) {
   // @ts-expect-error The runtime has no DOM.
   document.createElement("div");
 }
+
+const clonedGraph: { bytes: Uint8Array; self?: unknown } = { bytes: new Uint8Array([1, 2, 3]) };
+clonedGraph.self = clonedGraph;
+const cloned = structuredClone(clonedGraph);
+if (cloned.self !== cloned || cloned.bytes === clonedGraph.bytes || cloned.bytes[2] !== 3) {
+  throw new Error("structured clone must preserve cycles and copy bytes");
+}
+if (atob(btoa("\u00ff\u0000")) !== "\u00ff\u0000") throw new Error("Base64 binary string");
+if (new DOMException("stop", "AbortError").code !== DOMException.ABORT_ERR) throw new Error("DOMException");
+const random = new Uint16Array(2);
+if (crypto.getRandomValues(random) !== random || !/^[0-9a-f-]{36}$/.test(crypto.randomUUID())) {
+  throw new Error("crypto random values and UUID");
+}
+queueMicrotask(() => {});

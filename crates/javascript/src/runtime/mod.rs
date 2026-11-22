@@ -10,10 +10,10 @@ use std::time::Duration;
 
 use crate::host::{
     CreditPool, CreditUsage, Delivery, HostEvent, HttpClient, HttpFailure, HttpPiece, HttpRequest,
-    IoEvent, IoJob, PluginValue, RequestKey, Route, RuntimeKey, Settle,
+    IoEvent, IoJob, NativeResource, PluginValue, RequestKey, Route, RuntimeKey, Settle, StreamSink,
 };
 use rquickjs::promise::PromiseState;
-use rquickjs::{Ctx, Exception, Persistent};
+use rquickjs::{Ctx, Exception, Object, Persistent};
 
 use crate::runtime::resources::{Inbox, Kind, Resource, Resources, SocketState, failure, next_id};
 use io::{External, HttpMode, IoPort};
@@ -196,6 +196,7 @@ struct State {
     inbox: Arc<Inbox>,
     local: RefCell<VecDeque<Delivery>>,
     resources: RefCell<Resources>,
+    native_resources: Rc<quickjs::native_resource::ResourceTable>,
     ingress: Arc<CreditPool>,
     outbound: Arc<CreditPool>,
 }
@@ -256,7 +257,7 @@ impl Runtime {
             let cleanup = self.state.vm.with(|ctx| {
                 let cleanup: rquickjs::Result<rquickjs::Value> = ctx
                     .globals()
-                    .get::<_, rquickjs::Object>("__host")
+                    .get::<_, Object>("__host")
                     .and_then(|bridge| bridge.get("_closeWeb"));
                 if ctx.has_exception() {
                     drop(ctx.catch());
@@ -968,6 +969,7 @@ impl Runtime {
             self.state.ingress.close();
             self.state.outbound.close();
             self.state.resources.borrow_mut().close();
+            self.state.native_resources.close();
             let cleanup = self.state.web_cleanup.borrow_mut().take();
             if let Some(cleanup) = cleanup {
                 let _budget = self.state.vm.budget("shutdown");
@@ -1081,6 +1083,54 @@ impl ModuleRuntime for BoundRuntime {
             })
         };
         Ok((promise, settle))
+    }
+
+    fn open_resource<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        create: &mut dyn FnMut() -> Result<Box<dyn NativeResource>, String>,
+    ) -> rquickjs::Result<rquickjs::Value<'js>> {
+        let state = self
+            .state()
+            .ok_or_else(|| Exception::throw_type(ctx, "runtime is closed"))?;
+        state
+            .native_resources
+            .open(ctx, state.limits.requests, create)
+    }
+
+    fn reserve_stream<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        signal: Option<Object<'js>>,
+    ) -> rquickjs::Result<(rquickjs::Value<'js>, StreamSink)> {
+        let state = self
+            .state()
+            .ok_or_else(|| Exception::throw_type(ctx, "runtime is closed"))?;
+        let canceled = state.resources.borrow_mut().reap_canceled_streams();
+        crate::standard::native_stream::reap(ctx, canceled);
+        if state.resources.borrow().requests() >= state.limits.requests {
+            return Err(Exception::throw_range(ctx, "request limit exceeded"));
+        }
+        let id = next_id().ok_or_else(|| Exception::throw_range(ctx, "stream IDs exhausted"))?;
+        let route = state.register(id, Kind::NativeStream, None, None);
+        let stream = match crate::standard::native_stream::create(ctx, route.clone(), signal) {
+            Ok(stream) => stream,
+            Err(error) => {
+                route.cancel();
+                state.resources.borrow_mut().remove(id);
+                return Err(error);
+            }
+        };
+        let inbox = Arc::clone(&state.inbox);
+        let post = self.post.clone();
+        let sink = StreamSink::new(route, move |delivery| {
+            if let Some(post) = &post {
+                post(delivery);
+            } else {
+                let _ = inbox.push(delivery);
+            }
+        });
+        Ok((stream, sink))
     }
 
     fn add_listener(&self, module: &str, event: &str, callback: Saved) {
@@ -1215,7 +1265,10 @@ impl State {
         let route = self.route(
             id,
             cancel.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
-            matches!(kind, Kind::Stream { .. } | Kind::Socket(_)),
+            matches!(
+                kind,
+                Kind::Stream { .. } | Kind::Socket(_) | Kind::NativeStream
+            ),
         );
         self.resources.borrow_mut().insert(
             id,
@@ -1452,9 +1505,7 @@ impl IoPort for State {
                     );
                 }
             }
-            HttpMode::Inline(client) if !call.external_only => {
-                self.inline_http(&*client, &request, kind, &route)
-            }
+            HttpMode::Inline(client) => self.inline_http(&*client, &request, kind, &route),
             _ => self.queue_terminal(
                 request.token,
                 kind,

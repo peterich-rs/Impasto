@@ -356,7 +356,7 @@ impl JsVm {
             })
         })?;
         self.host.eval(scene.as_bytes(), "scene.js", false)?;
-        let profile = javascript::standard::StandardProfile::legacy();
+        let profile = javascript::standard::StandardProfile::default();
         {
             let _budget = self.host.budget("eval", 0);
             self.host.with(|ctx| {

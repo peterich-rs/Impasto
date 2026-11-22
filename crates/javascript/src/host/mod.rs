@@ -3,6 +3,7 @@
 //! Module declarations and transport payloads use owned Rust values and `std`.
 
 mod declaration;
+mod extensions;
 mod io;
 mod modules;
 mod registry;
@@ -15,6 +16,8 @@ pub use io::{
 };
 
 pub use declaration::DeclarationError;
+pub use extensions::{CancelToken, NativeResource, StreamEvent, StreamSendError, StreamSink};
+pub use modules::Module as NativeExtension;
 pub use modules::{
     EventType, ImmediateExec, Invoke, LISTENER_EXPORTS, Method, MethodExec, MethodTypes, Module,
     ModuleExports, PromiseFn, Settle, SyncFn, Work, module_not_linked,

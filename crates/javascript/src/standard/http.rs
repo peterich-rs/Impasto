@@ -14,12 +14,11 @@ use crate::runtime::quickjs::buffer::{is_source as is_buffer_source, view as buf
 use super::encoding::usv_string;
 use super::events::{abort_reason, named_error, new_signal, on_abort};
 use super::headers::{Headers, is_token};
-use super::streams::{self, BodyOutput, ReadableStream, ReadableStreamDefaultReader};
+use super::streams::{self, BodyOutput, ReadableStream};
 use super::url::{form_query, parse};
 use super::web::{Charge, bridge, constructor, is_nullish, option, platform};
 
 type Stream<'js> = Class<'js, ReadableStream<'js>>;
-type Reader<'js> = Class<'js, ReadableStreamDefaultReader<'js>>;
 
 const BODY_LIMIT: usize = crate::host::HTTP_BODY_LIMIT;
 
@@ -104,12 +103,10 @@ fn request_method<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<String> {
         return Err(Exception::throw_type(ctx, "Forbidden HTTP method"));
     }
     Ok(
-        if !platform(ctx)?.is_portable()
-            || matches!(
-                normalized.as_str(),
-                "DELETE" | "GET" | "HEAD" | "OPTIONS" | "POST" | "PUT"
-            )
-        {
+        if matches!(
+            normalized.as_str(),
+            "DELETE" | "GET" | "HEAD" | "OPTIONS" | "POST" | "PUT"
+        ) {
             normalized
         } else {
             method
@@ -154,28 +151,17 @@ impl<'js> Request<'js> {
         } else {
             request_method(ctx, method)?
         };
-        let portable = platform(ctx)?.is_portable();
         let header_init = option(ctx, &init, "headers")?;
         let source_headers = source
             .as_ref()
             .map(|source| source.try_borrow().map(|value| value.headers.clone()))
             .transpose()?;
-        let mut headers = if let Some(source_headers) = source_headers {
-            if header_init.is_undefined() {
-                Headers::from_value(ctx, source_headers.into_value(), false)?
-            } else if portable {
-                Headers::from_value(ctx, header_init, false)?
-            } else {
-                let supplied = Headers::from_value(ctx, header_init, false)?;
-                let mut merged = Headers::from_value(ctx, source_headers.into_value(), false)?;
-                for (name, value) in supplied.merged() {
-                    merged.set_valid(ctx, name.to_owned(), value)?;
-                }
-                merged
-            }
+        let header_init = if header_init.is_undefined() {
+            source_headers.map_or(header_init, Class::into_value)
         } else {
-            Headers::from_value(ctx, header_init, false)?
+            header_init
         };
+        let mut headers = Headers::from_value(ctx, header_init, false)?;
         let signal = option(ctx, &init, "signal")?;
         let signal = if signal.is_undefined() {
             if let Some(source) = &source {
@@ -209,8 +195,7 @@ impl<'js> Request<'js> {
         } else {
             None
         };
-        if portable
-            && (!is_nullish(&body_input) || inherited.is_some())
+        if (!is_nullish(&body_input) || inherited.is_some())
             && matches!(method.as_str(), "GET" | "HEAD")
         {
             return Err(Exception::throw_type(
@@ -302,15 +287,8 @@ struct Response<'js> {
     status_text: String,
     headers: Class<'js, Headers>,
     body: Option<Body<'js>>,
-    legacy: Option<LegacyReader<'js>>,
     #[qjs(skip_trace)]
     _charge: Charge,
-}
-
-#[derive(Trace, JsLifetime)]
-struct LegacyReader<'js> {
-    stream: Stream<'js>,
-    reader: Option<Reader<'js>>,
 }
 
 impl<'js> Response<'js> {
@@ -356,7 +334,6 @@ impl<'js> Response<'js> {
             status_text,
             headers: Class::instance(ctx.clone(), headers)?,
             body,
-            legacy: None,
             _charge: charge,
         })
     }
@@ -421,30 +398,6 @@ impl<'js> Response<'js> {
     }
 }
 
-fn legacy_reader<'js>(
-    This(response): This<Class<'js, Response<'js>>>,
-    ctx: Ctx<'js>,
-) -> Result<Reader<'js>> {
-    let (stream, prior) = {
-        let response = response.try_borrow()?;
-        let reader = response
-            .legacy
-            .as_ref()
-            .ok_or_else(|| Exception::throw_type(&ctx, "Expected a stream response"))?;
-        (reader.stream.clone(), reader.reader.clone())
-    };
-    if let Some(prior) = prior
-        && streams::reader(&stream)?.as_ref() == Some(&prior)
-    {
-        return Ok(prior);
-    }
-    let reader = streams::lock(&ctx, &stream)?;
-    if let Some(legacy) = response.try_borrow_mut()?.legacy.as_mut() {
-        legacy.reader = Some(reader.clone());
-    }
-    Ok(reader)
-}
-
 fn no_body(method: &str, status: u16) -> bool {
     method == "HEAD" || matches!(status, 101 | 103 | 204 | 205 | 304)
 }
@@ -460,16 +413,8 @@ struct StreamRequest<'js> {
     stream: Stream<'js>,
     reply: Option<Reply<'js>>,
     detach: Option<Function<'js>>,
-    external: bool,
     no_body: bool,
     received: usize,
-    url: String,
-    method: String,
-}
-
-#[derive(Trace, JsLifetime)]
-struct WholeRequest<'js> {
-    detach: Option<Function<'js>>,
     url: String,
     method: String,
 }
@@ -478,8 +423,6 @@ struct WholeRequest<'js> {
 #[rquickjs::class]
 struct Fetches<'js> {
     streams: HashMap<u64, StreamRequest<'js>>,
-    whole: HashMap<u64, WholeRequest<'js>>,
-    legacy_proto: Option<Object<'js>>,
 }
 
 fn fetches<'js>(ctx: &Ctx<'js>) -> Result<Class<'js, Fetches<'js>>> {
@@ -517,27 +460,10 @@ fn fetch<'js>(
     input: Value<'js>,
     Opt(init): Opt<Value<'js>>,
 ) -> Result<Promise<'js>> {
-    let portable = platform(&ctx)?.is_portable();
-    let result = request(&ctx, input, init).and_then(|request| {
-        if portable {
-            start_stream(&ctx, request, true)
-        } else {
-            start_whole(&ctx, request)
-        }
-    });
-    match result {
-        Err(error) if portable => reject(&ctx, caught(&ctx, error)?),
-        result => result,
+    match request(&ctx, input, init).and_then(|request| start_stream(&ctx, request)) {
+        Ok(promise) => Ok(promise),
+        Err(error) => reject(&ctx, caught(&ctx, error)?),
     }
-}
-
-fn fetch_stream<'js>(
-    ctx: Ctx<'js>,
-    input: Value<'js>,
-    Opt(init): Opt<Value<'js>>,
-) -> Result<Promise<'js>> {
-    let request = request(&ctx, input, init)?;
-    start_stream(&ctx, request, false)
 }
 
 fn request<'js>(
@@ -556,21 +482,16 @@ fn request<'js>(
     Ok(request)
 }
 
-fn submit<'js>(
-    ctx: &Ctx<'js>,
-    request: &Request<'js>,
-    streaming: bool,
-    external: bool,
-) -> Result<(u64, Promise<'js>)> {
+fn submit<'js>(ctx: &Ctx<'js>, request: &Request<'js>) -> Result<(u64, Promise<'js>)> {
     let host = bridge(ctx)?;
-    let send: Function = host.get(if streaming { "httpStream" } else { "http" })?;
+    let send: Function = host.get("httpStream")?;
     let headers = request.headers.try_borrow()?.wire();
     let body = request
         .body
         .as_ref()
         .map(|body| streams::take_bytes(ctx, &body.stream))
         .transpose()?;
-    let sent: Promise = send.call((&request.method, &request.url, headers, body, external))?;
+    let sent: Promise = send.call((&request.method, &request.url, headers, body))?;
     let token = sent
         .as_object()
         .ok_or(Error::Unknown)?
@@ -580,71 +501,13 @@ fn submit<'js>(
     Ok((token, sent))
 }
 
-fn start_whole<'js>(ctx: &Ctx<'js>, request: Request<'js>) -> Result<Promise<'js>> {
-    if abort_reason(&request.signal)?.is_some() {
-        return reject(ctx, named_error(ctx, "Error", "AbortError")?);
-    }
-    let store = fetches(ctx)?;
-    let (token, sent) = submit(ctx, &request, false, false)?;
-    let registered = on_abort(
-        &request.signal,
-        Function::new(ctx.clone(), move |ctx: Ctx<'js>| abort(&ctx, token))?,
-    )?;
-    store.try_borrow_mut()?.whole.insert(
-        token,
-        WholeRequest {
-            detach: Some(registered),
-            url: request.url,
-            method: request.method,
-        },
-    );
-    let fulfilled = Function::new(ctx.clone(), move |ctx: Ctx<'js>, raw: Object<'js>| {
-        let request = fetches(&ctx)?
-            .try_borrow_mut()?
-            .whole
-            .remove(&token)
-            .ok_or_else(|| Exception::throw_internal(&ctx, "HTTP response has no request"))?;
-        detach(request.detach)?;
-        let status = raw.get("status")?;
-        let headers = raw.get("headers")?;
-        let body = if no_body(&request.method, status) {
-            None
-        } else {
-            let buffer: ArrayBuffer = raw.get("body")?;
-            let bytes = TypedArray::<u8>::from_arraybuffer(buffer)?;
-            Some(body_from_bytes(&ctx, bytes, None)?)
-        };
-        network_response(&ctx, request.url, status, headers, body, None)
-    })?;
-    let rejected = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'js>, error: Value<'js>| -> Result<Value<'js>> {
-            let request = fetches(&ctx)?.try_borrow_mut()?.whole.remove(&token);
-            detach(request.and_then(|request| request.detach))?;
-            Err(ctx.throw(error))
-        },
-    )?;
-    streams::promise_then(ctx, &sent, Some(&fulfilled), Some(&rejected))
-}
-
-fn start_stream<'js>(
-    ctx: &Ctx<'js>,
-    request: Request<'js>,
-    external: bool,
-) -> Result<Promise<'js>> {
+fn start_stream<'js>(ctx: &Ctx<'js>, request: Request<'js>) -> Result<Promise<'js>> {
     if let Some(reason) = abort_reason(&request.signal)? {
-        return reject(
-            ctx,
-            if external {
-                reason
-            } else {
-                named_error(ctx, "Error", "AbortError")?
-            },
-        );
+        return reject(ctx, reason);
     }
     let (promise, resolve, reject) = ctx.promise()?;
     let store = fetches(ctx)?;
-    let (token, sent) = submit(ctx, &request, true, external)?;
+    let (token, sent) = submit(ctx, &request)?;
     let cancel = Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
         detach(take_stream(&ctx, token)?.and_then(|entry| entry.detach))?;
         abort(&ctx, token)
@@ -656,7 +519,6 @@ fn start_stream<'js>(
             stream,
             reply: Some(Reply { resolve, reject }),
             detach: None,
-            external,
             no_body: false,
             received: 0,
             url: request.url,
@@ -666,11 +528,6 @@ fn start_stream<'js>(
     let handler = on_abort(
         &request.signal,
         Function::new(ctx.clone(), move |ctx: Ctx<'js>, reason: Value<'js>| {
-            let reason = if external {
-                reason
-            } else {
-                named_error(&ctx, "Error", "AbortError")?
-            };
             fail_stream(&ctx, token, reason)?;
             abort(&ctx, token)
         })?,
@@ -719,17 +576,17 @@ fn http_stream<'js>(
         return release(credit);
     };
     let store = fetches(&ctx)?;
-    let Some((is_pending, external, stream)) = store
+    let Some((is_pending, stream)) = store
         .try_borrow()?
         .streams
         .get(&token)
-        .map(|entry| (entry.reply.is_some(), entry.external, entry.stream.clone()))
+        .map(|entry| (entry.reply.is_some(), entry.stream.clone()))
     else {
         return release(credit);
     };
     if kind == "head" {
         return if is_pending {
-            stream_head(&ctx, &store, token, &stream, payload, external)
+            stream_head(&ctx, &store, token, &stream, payload)
         } else {
             Ok(())
         };
@@ -739,11 +596,7 @@ fn http_stream<'js>(
     {
         release(credit)?;
         let message = message.to_string()?;
-        let error = if external {
-            named_error(&ctx, &message, &message)?
-        } else {
-            named_error(&ctx, "Error", &message)?
-        };
+        let error = named_error(&ctx, &message, &message)?;
         return fail_stream(&ctx, token, error);
     }
     if is_pending {
@@ -805,7 +658,6 @@ fn stream_head<'js>(
     token: u64,
     stream: &Stream<'js>,
     head: Value<'js>,
-    external: bool,
 ) -> Result<()> {
     let (url, method) = {
         let store = store.try_borrow()?;
@@ -824,14 +676,7 @@ fn stream_head<'js>(
             stream: stream.clone(),
             media_type: None,
         });
-        let response = network_response(
-            ctx,
-            url,
-            status,
-            head.get("headers")?,
-            body,
-            (!external).then_some(stream.clone()),
-        )?;
+        let response = network_response(ctx, url, status, head.get("headers")?, body)?;
         Ok::<_, Error>((empty, response))
     };
     let (empty, response) = match build() {
@@ -864,50 +709,26 @@ fn network_response<'js>(
     status: u16,
     wire: Value<'js>,
     body: Option<Body<'js>>,
-    legacy: Option<Stream<'js>>,
 ) -> Result<Class<'js, Response<'js>>> {
     let headers = Class::instance(ctx.clone(), Headers::from_value(ctx, wire, true)?)?;
     let mut charge = Charge::new(ctx)?;
     charge.resize(ctx, url.len())?;
-    let legacy = legacy.map(|stream| LegacyReader {
-        stream,
-        reader: None,
-    });
-    let response = Response {
-        url,
-        status,
-        status_text: String::new(),
-        headers,
-        body,
-        legacy,
-        _charge: charge,
-    };
-    if response.legacy.is_some() {
-        let proto = fetches(ctx)?
-            .try_borrow()?
-            .legacy_proto
-            .clone()
-            .ok_or_else(|| {
-                Exception::throw_internal(ctx, "Stream response prototype is unavailable")
-            })?;
-        Class::instance_proto(response, proto)
-    } else {
-        Class::instance(ctx.clone(), response)
-    }
+    Class::instance(
+        ctx.clone(),
+        Response {
+            url,
+            status,
+            status_text: String::new(),
+            headers,
+            body,
+            _charge: charge,
+        },
+    )
 }
 
 pub(super) fn close(ctx: &Ctx<'_>) -> Result<()> {
     let store = fetches(ctx)?;
-    let (streams, whole) = {
-        let mut store = store.try_borrow_mut()?;
-        (
-            std::mem::take(&mut store.streams),
-            std::mem::take(&mut store.whole),
-        )
-    };
-    for request in whole.into_values() {
-        detach(request.detach)?;
-    }
+    let streams = std::mem::take(&mut store.try_borrow_mut()?.streams);
     let error = named_error(ctx, "AbortError", "Runtime closed")?;
     for request in streams.into_values() {
         detach(request.detach)?;
@@ -943,24 +764,6 @@ pub(super) fn install<'js>(ctx: &Ctx<'js>, bridge: &Object<'js>) -> Result<()> {
         )?,
     )?;
     let profile = platform(ctx)?;
-    let legacy_proto = if profile.is_portable() {
-        None
-    } else {
-        let parent = Class::<Response>::prototype(ctx)?
-            .ok_or_else(|| Exception::throw_internal(ctx, "Response prototype is unavailable"))?;
-        let proto = Object::new_proto(ctx.clone(), Some(&parent))?;
-        proto.prop(
-            "getReader",
-            rquickjs::object::Property::from(Function::new(ctx.clone(), legacy_reader)?)
-                .configurable()
-                .writable(),
-        )?;
-        globals.set(
-            "fetchStream",
-            Function::new(ctx.clone(), fetch_stream)?.with_name("fetchStream")?,
-        )?;
-        Some(proto)
-    };
     if profile.has_http() {
         globals.set(
             "fetch",
@@ -969,13 +772,7 @@ pub(super) fn install<'js>(ctx: &Ctx<'js>, bridge: &Object<'js>) -> Result<()> {
     }
     bridge.prop(
         "_fetches",
-        Class::instance(
-            ctx.clone(),
-            Fetches {
-                legacy_proto,
-                ..Fetches::default()
-            },
-        )?,
+        Class::instance(ctx.clone(), Fetches::default())?,
     )?;
     bridge.set("_httpStream", Function::new(ctx.clone(), http_stream)?)
 }
@@ -1034,12 +831,4 @@ declare class Response implements Body {
 
 pub(super) const FETCH_DECLARATIONS: &str = r#"
 declare function fetch(input: string | URL | Request, init?: RequestInit): Promise<Response>;
-"#;
-
-pub(super) const LEGACY_DECLARATIONS: &str = r#"
-interface StreamResponse extends Response {
-  getReader(): ReadableStreamDefaultReader<Uint8Array>;
-}
-
-declare function fetchStream(input: string | URL | Request, init?: RequestInit): Promise<StreamResponse>;
 "#;

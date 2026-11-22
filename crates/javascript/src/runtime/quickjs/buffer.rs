@@ -73,6 +73,16 @@ pub(crate) fn view<'js>(ctx: &Ctx<'js>, input: Value<'js>) -> Result<TypedArray<
     if let Some(buffer) = array_buffer(&input)? {
         return TypedArray::from_arraybuffer(buffer);
     }
+    let (buffer, offset, length) = view_parts(ctx, input)?;
+    intrinsics(ctx)?
+        .get::<_, Constructor>("bytes")?
+        .construct((buffer, offset, length))
+}
+
+pub(crate) fn view_parts<'js>(
+    ctx: &Ctx<'js>,
+    input: Value<'js>,
+) -> Result<(ArrayBuffer<'js>, usize, usize)> {
     // SAFETY: these calls inspect the brand of a live value without invoking JS.
     let (typed, data) = unsafe {
         (
@@ -99,7 +109,5 @@ pub(crate) fn view<'js>(ctx: &Ctx<'js>, input: Value<'js>) -> Result<TypedArray<
     let length: usize = getters
         .get::<_, Function>("byteLength")?
         .call((This(input),))?;
-    holder
-        .get::<_, Constructor>("bytes")?
-        .construct((buffer, offset, length))
+    Ok((buffer, offset, length))
 }

@@ -6,9 +6,10 @@ publish.workspace = true
 
 [features]
 default = ["runtime"]
-runtime = ["dep:libc", "dep:rquickjs", "dep:url"]
+runtime = ["dep:getrandom", "dep:libc", "dep:rquickjs", "dep:url"]
 
 [dependencies]
+getrandom = { version = "0.3.4", features = ["std"], optional = true }
 libc = { version = "0.2", optional = true }
 rquickjs = { workspace = true, optional = true }
 url = { version = "=2.5.8", optional = true }

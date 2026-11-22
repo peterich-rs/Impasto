@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::{PluginResult, PluginValue};
+use super::{NativeResource, PluginResult, PluginValue, StreamSink};
 
 pub type Work = Box<dyn FnOnce() -> PluginResult + Send>;
 
@@ -59,12 +59,18 @@ impl MethodExec for ImmediateExec {
 }
 
 pub type SyncFn = Arc<dyn Fn(&[PluginValue]) -> Result<PluginValue, String> + Send + Sync>;
+pub type ResourceFn =
+    Arc<dyn Fn(&[PluginValue]) -> Result<Box<dyn NativeResource>, String> + Send + Sync>;
+pub type StreamFn =
+    Arc<dyn Fn(Vec<PluginValue>, &mut StreamSink) -> Result<(), String> + Send + Sync>;
 pub type PromiseFn = Arc<dyn Fn(&[PluginValue], Settle, &dyn MethodExec) + Send + Sync>;
 
 #[derive(Clone)]
 pub enum Invoke {
     Sync(SyncFn),
     Promise(PromiseFn),
+    Resource(ResourceFn),
+    Stream(StreamFn),
 }
 
 #[derive(Clone)]
@@ -102,6 +108,33 @@ impl Method {
         Self {
             name,
             invoke: Invoke::Promise(Arc::new(f)),
+            types: None,
+            awaits_user: false,
+        }
+    }
+
+    /// Open a managed, thread-affine resource. JS can call methods or close it.
+    pub fn resource(
+        name: &'static str,
+        open: impl Fn(&[PluginValue]) -> Result<Box<dyn NativeResource>, String> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            name,
+            invoke: Invoke::Resource(Arc::new(open)),
+            types: None,
+            awaits_user: false,
+        }
+    }
+
+    /// Start a producer on the native executor. JS may pass an AbortSignal as
+    /// its last argument. The producer receives the decoded remaining arguments.
+    pub fn stream(
+        name: &'static str,
+        work: impl Fn(Vec<PluginValue>, &mut StreamSink) -> Result<(), String> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            name,
+            invoke: Invoke::Stream(Arc::new(work)),
             types: None,
             awaits_user: false,
         }

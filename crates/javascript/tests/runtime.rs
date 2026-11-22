@@ -79,20 +79,25 @@ fn headless_fetch_submits_an_owned_job_and_settles_on_drive() {
         .expect("fetch");
     let jobs = runtime.take_jobs();
     let token = match jobs.first() {
-        Some(IoJob::Http(request)) => {
+        Some(IoJob::HttpStream(request)) => {
             assert_eq!(request.url, "https://example.test/item");
             request.token
         }
         other => panic!("expected an HTTP job, got {other:?}"),
     };
     runtime
-        .enqueue(IoEvent::Http {
+        .enqueue(IoEvent::HttpHead {
             token,
-            result: Ok(HttpResponse {
-                status: 200,
-                headers: Vec::new(),
-                body: b"ok".to_vec(),
-            }),
+            status: 200,
+            headers: Vec::new(),
+        })
+        .expect("response head");
+    runtime
+        .enqueue(IoEvent::HttpChunk {
+            token,
+            bytes: b"ok".to_vec(),
+            done: true,
+            error: None,
         })
         .expect("enqueue");
     runtime.drive(0).expect("drive");
@@ -128,7 +133,7 @@ fn headless_abort_marks_the_request_and_queues_abort() {
         .expect("abort");
     let jobs = runtime.take_jobs();
     let (flag, token) = match jobs.first() {
-        Some(IoJob::Http(request)) => (std::sync::Arc::clone(&request.cancel), request.token),
+        Some(IoJob::HttpStream(request)) => (std::sync::Arc::clone(&request.cancel), request.token),
         other => panic!("expected an HTTP job, got {other:?}"),
     };
     assert!(flag.load(Ordering::Relaxed));
@@ -373,10 +378,10 @@ fn sync_client_streams_head_and_chunk_through_the_shared_delivery() {
         .expect("runtime");
     runtime
         .eval_script(
-            "fetchStream('https://example.test/stream').then(function (response) { globalThis.status = response.status; return response.getReader().read(); }).then(function (part) { globalThis.text = new TextDecoder().decode(part.value); });",
+            "fetch('https://example.test/stream').then(function (response) { globalThis.status = response.status; return response.body.getReader().read(); }).then(function (part) { globalThis.text = new TextDecoder().decode(part.value); });",
             "stream.js",
         )
-        .expect("fetchStream");
+        .expect("fetch");
     runtime.drive(0).expect("drive");
     runtime
         .eval_script(
@@ -501,7 +506,7 @@ fn abort_resolves_locally_and_ignores_a_late_success() {
         )
         .expect("request");
     let jobs = runtime.take_jobs();
-    let Some(IoJob::Http(request)) = jobs.first() else {
+    let Some(IoJob::HttpStream(request)) = jobs.first() else {
         panic!("expected HTTP request")
     };
     runtime
@@ -511,19 +516,16 @@ fn abort_resolves_locally_and_ignores_a_late_success() {
     assert_eq!(runtime.counts().requests, 0);
     assert_eq!(runtime.counts().promises, 0);
     runtime
-        .enqueue(IoEvent::Http {
+        .enqueue(IoEvent::HttpHead {
             token: request.token,
-            result: Ok(HttpResponse {
-                status: 204,
-                headers: Vec::new(),
-                body: Vec::new(),
-            }),
+            status: 204,
+            headers: Vec::new(),
         })
         .expect("late event");
     runtime.drive(500).expect("drive");
     runtime
         .eval_script(
-            "if (result !== 'AbortError') throw new Error(result);",
+            "if (!(result instanceof DOMException) || result.name !== 'AbortError') throw new Error(result);",
             "check",
         )
         .expect("abort result");
@@ -543,11 +545,11 @@ fn missing_stream_terminal_times_out_from_the_first_clock_sample() {
         .eval_script(
             r#"
         let error;
-        fetchStream('https://example.test/timeout').catch(value => error = value.message);
+        fetch('https://example.test/timeout').catch(value => error = value.message);
     "#,
             "entry",
         )
-        .expect("fetchStream");
+        .expect("fetch");
     let jobs = runtime.take_jobs();
     assert!(matches!(jobs.first(), Some(IoJob::HttpStream(_))));
     let first = runtime.drive(20_000).expect("clock origin");
@@ -628,7 +630,7 @@ fn a_full_data_queue_keeps_space_for_the_terminal() {
     )));
     runtime
         .eval_script(
-            "let opened; fetchStream('https://example.test').then(value => opened = value);",
+            "let opened; fetch('https://example.test').then(value => opened = value);",
             "entry",
         )
         .expect("fetch");
@@ -703,7 +705,7 @@ fn repeated_completion_and_cancellation_release_requests() {
             )
             .expect("request");
         let jobs = runtime.take_jobs();
-        let Some(IoJob::Http(request)) = jobs.first() else {
+        let Some(IoJob::HttpStream(request)) = jobs.first() else {
             panic!("network work")
         };
         if step % 2 == 0 {
@@ -714,13 +716,18 @@ fn repeated_completion_and_cancellation_release_requests() {
             drop(runtime.take_jobs());
         } else {
             runtime
-                .enqueue(IoEvent::Http {
+                .enqueue(IoEvent::HttpHead {
                     token: request.token,
-                    result: Ok(HttpResponse {
-                        status: 200,
-                        headers: Vec::new(),
-                        body: b"ok".to_vec(),
-                    }),
+                    status: 200,
+                    headers: Vec::new(),
+                })
+                .expect("response head");
+            runtime
+                .enqueue(IoEvent::HttpChunk {
+                    token: request.token,
+                    bytes: b"ok".to_vec(),
+                    done: true,
+                    error: None,
                 })
                 .expect("completion");
         }
@@ -743,12 +750,13 @@ fn a_throwing_delivery_releases_its_promise_and_preserves_the_next_event() {
     let mut runtime = Runtime::builder().build().expect("runtime");
     runtime.eval_script(r#"
         let streamError, responseText;
-        fetchStream('https://example.test/broken').catch(error => streamError = String(error));
+        fetch('https://example.test/broken').catch(error => streamError = String(error));
         fetch('https://example.test/next').then(response => response.text()).then(text => responseText = text);
-        __host._httpStream = () => { throw new Error('delivery error'); };
+        const receive = __host._httpStream;
+        __host._httpStream = (...args) => { __host._httpStream = receive; throw new Error('delivery error'); };
     "#, "requests").expect("requests");
     let jobs = runtime.take_jobs();
-    let [IoJob::HttpStream(stream), IoJob::Http(whole)] = &jobs[..] else {
+    let [IoJob::HttpStream(stream), IoJob::HttpStream(whole)] = &jobs[..] else {
         panic!("expected two jobs")
     };
     runtime
@@ -759,13 +767,18 @@ fn a_throwing_delivery_releases_its_promise_and_preserves_the_next_event() {
         })
         .expect("first");
     runtime
-        .enqueue(IoEvent::Http {
+        .enqueue(IoEvent::HttpHead {
             token: whole.token,
-            result: Ok(HttpResponse {
-                status: 200,
-                headers: Vec::new(),
-                body: b"next".to_vec(),
-            }),
+            status: 200,
+            headers: Vec::new(),
+        })
+        .expect("response head");
+    runtime
+        .enqueue(IoEvent::HttpChunk {
+            token: whole.token,
+            bytes: b"next".to_vec(),
+            done: true,
+            error: None,
         })
         .expect("second");
     let error = runtime.drive(0).expect_err("failed hook");

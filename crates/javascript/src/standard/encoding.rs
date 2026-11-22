@@ -13,7 +13,7 @@ use crate::runtime::quickjs::buffer::view as buffer_bytes;
 
 use super::web::constructor;
 
-pub(super) fn install<'js>(ctx: &Ctx<'js>, globals: &Object<'js>, portable: bool) -> Result<()> {
+pub(super) fn install<'js>(ctx: &Ctx<'js>, globals: &Object<'js>) -> Result<()> {
     globals.set(
         "TextEncoder",
         constructor::<TextEncoder, _, _>(ctx, || TextEncoder {})?,
@@ -21,7 +21,7 @@ pub(super) fn install<'js>(ctx: &Ctx<'js>, globals: &Object<'js>, portable: bool
     globals.set(
         "TextDecoder",
         constructor::<TextDecoder, _, _>(ctx, move |ctx, label, options| {
-            TextDecoder::new(&ctx, label, options, portable)
+            TextDecoder::new(&ctx, label, options)
         })?,
     )
 }
@@ -55,7 +55,6 @@ impl TextEncoder {
 struct TextDecoder {
     fatal: bool,
     ignore_bom: bool,
-    portable: bool,
     pending: Vec<u8>,
     bom_seen: bool,
 }
@@ -67,7 +66,6 @@ impl TextDecoder {
         ctx: &Ctx<'js>,
         Opt(label): Opt<Value<'js>>,
         Opt(options): Opt<Value<'js>>,
-        portable: bool,
     ) -> Result<Self> {
         if let Some(label) = label.filter(|label| !label.is_undefined()) {
             let label = usv_string(ctx, label)?;
@@ -89,7 +87,6 @@ impl TextDecoder {
         Ok(Self {
             fatal: option_flag(options.as_ref(), "fatal")?,
             ignore_bom: option_flag(options.as_ref(), "ignoreBOM")?,
-            portable,
             pending: Vec::new(),
             bom_seen: false,
         })
@@ -117,9 +114,8 @@ impl TextDecoder {
         Opt(options): Opt<Value<'js>>,
     ) -> Result<String> {
         let streaming = option_flag(options.as_ref(), "stream")?;
-        let portable = this.try_borrow()?.portable;
         let view = input
-            .filter(|value| !(value.is_undefined() || (!portable && value.is_null())))
+            .filter(|value| !value.is_undefined())
             .map(|value| buffer_bytes(&ctx, value))
             .transpose()?;
         let mut state = this.try_borrow_mut()?;

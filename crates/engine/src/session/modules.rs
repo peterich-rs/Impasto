@@ -3,8 +3,9 @@
 use std::sync::{Arc, RwLock};
 
 pub use javascript::host::{
-    EventType, ImmediateExec, Invoke, Method, MethodExec, MethodTypes, Module, ModuleExports,
-    ModuleRegistry, PromiseFn, Settle, SyncFn, Work,
+    CancelToken, EventType, ImmediateExec, Invoke, Method, MethodExec, MethodTypes, Module,
+    ModuleExports, ModuleRegistry, NativeExtension, NativeResource, PromiseFn, Settle,
+    StreamSendError, StreamSink, SyncFn, Work,
 };
 
 /// Registry, executor, and shared slots installed on a language session.

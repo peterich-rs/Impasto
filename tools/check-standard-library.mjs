@@ -152,24 +152,21 @@ function compareSurface(profile, declared, installed) {
 }
 
 const profiles = [
-  { name: "legacy", http: true, socket: true, streaming: true },
-  { name: "portable", http: true, socket: true },
-  { name: "portable-http", http: true },
-  { name: "portable-socket", socket: true },
-  { name: "portable-offline" },
+  { name: "full", http: true, socket: true },
+  { name: "http", http: true },
+  { name: "socket", socket: true },
+  { name: "offline" },
 ];
 
-for (const { name, http, socket, streaming } of profiles) {
+for (const { name, http, socket } of profiles) {
   const declarations = rust(name, "declarations");
   const source = `${fixture}
-    ${streaming ? 'if (new AbortSignal().aborted) throw new Error("legacy signal is already aborted");' : `
     function checkSignalConstructor() {
-      // @ts-expect-error Portable signals are constructed by AbortController or AbortSignal.abort.
+      // @ts-expect-error AbortController and AbortSignal.abort create signals.
       new AbortSignal();
-    }`}
+    }
     async function useTransports(request: Request) {
-      ${http ? 'const response: Response = await fetch(request); void response;' : '// @ts-expect-error HTTP is disabled.\nawait fetch(request);'}
-      ${streaming ? 'const reader: ReadableStreamDefaultReader<Uint8Array> = (await fetchStream(request)).getReader(); reader.releaseLock();' : '// @ts-expect-error fetchStream belongs to legacy.\nawait fetchStream(request);'}
+      ${http ? 'const response: Response = await fetch(request); response.body?.getReader().releaseLock();' : '// @ts-expect-error HTTP is disabled.\nawait fetch(request);'}
       ${socket ? 'const socket = new WebSocket("wss://example.test/socket"); socket.addEventListener("message", event => console.log(event.data)); socket.addEventListener("close", event => console.log(event.code)); socket.close();' : '// @ts-expect-error WebSocket is disabled.\nnew WebSocket("wss://example.test/socket");'}
     }
   `;

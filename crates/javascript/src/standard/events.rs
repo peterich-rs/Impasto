@@ -144,6 +144,8 @@ struct AbortState<'js> {
 #[derive(Trace, JsLifetime)]
 struct Action<'js> {
     id: u64,
+    #[qjs(skip_trace)]
+    active: Rc<Cell<bool>>,
     operation: AbortAction<'js>,
 }
 
@@ -157,10 +159,13 @@ enum AbortAction<'js> {
 struct Registration<'js> {
     signal: Object<'js>,
     id: u64,
+    #[qjs(skip_trace)]
+    active: Rc<Cell<bool>>,
 }
 
 impl Registration<'_> {
     fn remove(&self) -> Result<()> {
+        self.active.set(false);
         if let Some(signal) = Class::<Target>::from_object(&self.signal)
             && let Some(state) = signal.try_borrow_mut()?.signal.as_mut()
         {
@@ -173,6 +178,14 @@ impl Registration<'_> {
 #[derive(Trace, JsLifetime)]
 struct DetachAbort<'js> {
     registration: Option<Registration<'js>>,
+}
+
+impl Drop for DetachAbort<'_> {
+    fn drop(&mut self) {
+        if let Some(registration) = &self.registration {
+            registration.active.set(false);
+        }
+    }
 }
 
 impl<'js> JsClass<'js> for DetachAbort<'js> {
@@ -386,6 +399,14 @@ fn optional_signal<'js>(value: Value<'js>) -> Result<Option<Object<'js>>> {
     Ok(Some(signal.clone()))
 }
 
+pub(super) fn is_abort_signal(value: &Value<'_>) -> bool {
+    value
+        .as_object()
+        .and_then(Class::<Target>::from_object)
+        .and_then(|target| target.try_borrow().ok().map(|state| state.signal.is_some()))
+        .unwrap_or(false)
+}
+
 pub(super) fn abort_reason<'js>(signal: &Object<'js>) -> Result<Option<Value<'js>>> {
     signal_target(signal)?
         .try_borrow()?
@@ -413,10 +434,17 @@ fn register<'js>(
         .checked_add(1)
         .ok_or(rquickjs::Error::Allocation)?;
     state.next_action = id;
-    state.actions.push(Action { id, operation });
+    state.actions.retain(|action| action.active.get());
+    let active = Rc::new(Cell::new(true));
+    state.actions.push(Action {
+        id,
+        active: Rc::clone(&active),
+        operation,
+    });
     Ok(Some(Registration {
         signal: signal.clone(),
         id,
+        active,
     }))
 }
 
@@ -458,6 +486,9 @@ fn abort_signal<'js>(signal: &Object<'js>, reason: Option<Value<'js>>) -> Result
         std::mem::take(&mut state.actions)
     };
     for action in actions {
+        if !action.active.get() {
+            continue;
+        }
         match action.operation {
             AbortAction::Callback(callback) => {
                 if let Err(error) = callback.call::<_, ()>((reason.clone(),)) {
@@ -670,10 +701,34 @@ pub(super) fn new_signal<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>> {
     .into_inner())
 }
 
+#[derive(Trace, JsLifetime)]
+#[rquickjs::class]
+struct ExceptionIntrinsics {}
+
+fn error_intrinsics<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>> {
+    Class::<ExceptionIntrinsics>::prototype(ctx)?.ok_or(rquickjs::Error::Unknown)
+}
+
 pub(super) fn named_error<'js>(ctx: &Ctx<'js>, name: &str, message: &str) -> Result<Value<'js>> {
     if name == "TypeError" {
         Exception::throw_type(ctx, message);
         return Ok(ctx.catch());
+    }
+    if name.ends_with("Error")
+        && matches!(
+            name,
+            "AbortError"
+                | "TimeoutError"
+                | "NetworkError"
+                | "InvalidStateError"
+                | "DataCloneError"
+                | "TypeMismatchError"
+                | "QuotaExceededError"
+                | "SyntaxError"
+        )
+    {
+        let constructor: Constructor = error_intrinsics(ctx)?.get("DOMException")?;
+        return constructor.construct((message, name));
     }
     let error = Exception::from_message(ctx.clone(), message)?.into_object();
     error.set("name", name)?;
@@ -730,7 +785,11 @@ pub(super) fn constructor<'js>(
     Ok(function)
 }
 
-pub(super) fn install<'js>(ctx: &Ctx<'js>, globals: &Object<'js>, portable: bool) -> Result<()> {
+pub(super) fn install<'js>(ctx: &Ctx<'js>, globals: &Object<'js>) -> Result<()> {
+    error_intrinsics(ctx)?.set(
+        "DOMException",
+        globals.get::<_, Constructor>("DOMException")?,
+    )?;
     let event_prototype = Class::<Event>::prototype(ctx)?.ok_or(rquickjs::Error::Unknown)?;
     globals.set(
         "Event",
@@ -790,11 +849,8 @@ pub(super) fn install<'js>(ctx: &Ctx<'js>, globals: &Object<'js>, portable: bool
         .configurable(),
     )?;
     define_handler(&signal_prototype, "abort")?;
-    let signal_constructor = constructor(ctx, signal_prototype, "AbortSignal", 0, move |args| {
-        if portable {
-            return Err(Exception::throw_type(args.ctx(), "Illegal constructor"));
-        }
-        Ok(new_signal(args.ctx())?.into_value())
+    let signal_constructor = constructor(ctx, signal_prototype, "AbortSignal", 0, |args| {
+        Err(Exception::throw_type(args.ctx(), "Illegal constructor"))
     })?;
     signal_constructor.set_prototype(target_constructor.as_object())?;
     signal_constructor.prop(
@@ -871,8 +927,7 @@ declare class EventTarget {
 declare class AbortSignal extends EventTarget {
 "#;
 
-pub(super) const LEGACY_ABORT_SIGNAL_CONSTRUCTOR: &str = "  constructor();\n";
-pub(super) const PORTABLE_ABORT_SIGNAL_CONSTRUCTOR: &str = "  private constructor();\n";
+pub(super) const ABORT_SIGNAL_CONSTRUCTOR: &str = "  private constructor();\n";
 
 pub(super) const ABORT_DECLARATIONS: &str = r#"
   readonly aborted: boolean;

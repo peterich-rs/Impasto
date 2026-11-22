@@ -13,14 +13,19 @@ mod encoding;
 mod events;
 mod headers;
 mod http;
+pub(crate) mod native_stream;
+mod primitives;
 mod profile;
 mod socket;
 mod streams;
+mod structured_clone;
 mod url;
 mod web;
 
+pub use primitives::{EntropySource, SystemEntropy};
 pub use profile::{StandardModule, StandardProfile};
 pub use web::install_web;
+pub(crate) use web::install_with_entropy;
 
 pub fn install_console<'js>(
     ctx: &Ctx<'js>,

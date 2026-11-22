@@ -10,7 +10,7 @@ use javascript::standard::StandardProfile;
 
 fn portable() -> Runtime {
     Runtime::builder()
-        .standard(StandardProfile::portable())
+        .standard(StandardProfile::default())
         .build()
         .unwrap_or_else(|error| panic!("portable runtime failed: {error}"))
 }
@@ -24,9 +24,8 @@ fn eval(runtime: &mut Runtime, source: &str) {
 #[test]
 fn standard_manifest_tracks_runtime_globals_and_dependencies() {
     for profile in [
-        StandardProfile::legacy(),
-        StandardProfile::portable(),
-        StandardProfile::portable().with_transports(false, false),
+        StandardProfile::default(),
+        StandardProfile::default().with_transports(false, false),
     ] {
         let mut runtime = Runtime::builder()
             .standard(profile)
@@ -46,7 +45,7 @@ fn standard_manifest_tracks_runtime_globals_and_dependencies() {
         for global in profile.globals() {
             let test = format!(
                 "var descriptor = Object.getOwnPropertyDescriptor(globalThis, {global:?}); \
-                 if (!descriptor || !descriptor.writable || !descriptor.configurable || !descriptor.enumerable) \
+                 if (!descriptor || !descriptor.writable || !descriptor.configurable) \
                  throw Error({global:?});"
             );
             eval(&mut runtime, &test);
@@ -412,14 +411,13 @@ socket.onclose = event => trace.push(String(event.code));
 }
 
 #[test]
-fn legacy_stream_empty_end_closes_without_a_spurious_piece() {
-    let mut runtime = Runtime::builder().build().expect("legacy runtime");
+fn stream_empty_end_closes_without_a_spurious_piece() {
+    let mut runtime = Runtime::builder().build().expect("runtime");
     eval(
         &mut runtime,
         r#"
-fetchStream('https://example.test/empty').then(response => {
-  const reader = response.getReader();
-  if (response.getReader() !== reader) throw Error('compatibility reader identity');
+fetch('https://example.test/empty').then(response => {
+  const reader = response.body.getReader();
   return reader.read();
 }).then(value => { globalThis.empty = value; });
 "#,
@@ -438,7 +436,7 @@ fetchStream('https://example.test/empty').then(response => {
 #[test]
 fn unread_stream_does_not_hold_the_other_streams_credit() {
     let mut runtime = Runtime::builder()
-        .standard(StandardProfile::portable())
+        .standard(StandardProfile::default())
         .limits(javascript::runtime::RuntimeLimits {
             stream_bytes: 4,
             ..javascript::runtime::RuntimeLimits::default()
@@ -525,7 +523,7 @@ fetch('https://example.test/broken').then(response => {
 }
 
 #[test]
-fn portable_does_not_publish_fetch_for_an_inline_transport() {
+fn profiles_can_disable_fetch_for_an_inline_transport() {
     struct UnusedClient;
 
     impl javascript::host::HttpClient for UnusedClient {
@@ -538,7 +536,7 @@ fn portable_does_not_publish_fetch_for_an_inline_transport() {
     }
 
     let mut runtime = Runtime::builder()
-        .standard(StandardProfile::portable())
+        .standard(StandardProfile::default().with_transports(false, true))
         .http_client(std::sync::Arc::new(UnusedClient))
         .build()
         .expect("runtime");

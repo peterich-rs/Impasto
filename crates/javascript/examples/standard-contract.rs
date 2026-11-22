@@ -12,33 +12,23 @@ fn main() -> Result<(), String> {
     let [name, action] = args.as_slice() else {
         return Err("usage: standard-contract <profile> <declarations|inspect>".into());
     };
-    let portable = StandardProfile::portable();
-    let (profile, io, expected) = match name.as_str() {
-        "legacy" => (
-            StandardProfile::legacy(),
-            IoBindings::disconnected(),
-            StandardProfile::legacy(),
-        ),
-        "portable" => (portable, IoBindings::jobs(), portable),
-        "portable-http" => {
-            let http_only = portable.with_transports(true, false);
-            (http_only, IoBindings::jobs(), http_only)
-        }
-        "portable-socket" => (
-            portable,
+    let profile = StandardProfile::default();
+    let (io, profile) = match name.as_str() {
+        "full" => (IoBindings::jobs(), profile),
+        "http" => (IoBindings::jobs(), profile.with_transports(true, false)),
+        "socket" => (
             IoBindings::disconnected().with_socket_jobs(),
-            portable.with_transports(false, true),
+            profile.with_transports(false, true),
         ),
-        "portable-offline" => (
-            portable,
+        "offline" => (
             IoBindings::disconnected(),
-            portable.with_transports(false, false),
+            profile.with_transports(false, false),
         ),
         _ => return Err(format!("unknown profile {name:?}")),
     };
 
     match action.as_str() {
-        "declarations" => print!("{}", expected.declarations()),
+        "declarations" => print!("{}", profile.declarations()),
         "inspect" => {
             let mut script = String::new();
             io::stdin()

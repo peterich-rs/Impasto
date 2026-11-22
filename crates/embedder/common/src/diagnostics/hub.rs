@@ -63,7 +63,7 @@ pub struct DiagError {
     pub frame: Option<u64>,
 }
 
-/// One HTTP call (fetch or fetchStream) or socket lifecycle step.
+/// One HTTP call or socket lifecycle step.
 #[derive(Clone, Debug)]
 pub struct NetEntry {
     pub seq: u64,

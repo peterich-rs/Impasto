@@ -98,6 +98,9 @@ pub(crate) fn apply(
             }
             Ok(())
         }
+        IoEvent::NativeStream { id, event } => {
+            crate::standard::native_stream::apply(ctx, id, event, credit)
+        }
         IoEvent::Host(_) => Ok(()),
     }
 }

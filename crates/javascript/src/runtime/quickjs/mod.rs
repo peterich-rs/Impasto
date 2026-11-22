@@ -10,6 +10,7 @@ pub mod codec;
 mod entry;
 mod extension;
 pub use entry::TrustedBytecode;
+pub(crate) mod native_resource;
 mod vm;
 pub use extension::{ExtensionContext, exception_text};
 pub use vm::JobReport;

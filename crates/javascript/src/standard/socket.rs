@@ -52,13 +52,8 @@ fn socket<'js>(object: &Object<'js>) -> Result<Class<'js, Socket>> {
         .ok_or_else(|| Exception::throw_type(object.ctx(), "Expected a WebSocket"))
 }
 
-fn socket_protocols<'js>(
-    ctx: &Ctx<'js>,
-    input: Option<Value<'js>>,
-    portable: bool,
-) -> Result<String> {
-    let Some(input) = input.filter(|input| !input.is_undefined() && (portable || !input.is_null()))
-    else {
+fn socket_protocols<'js>(ctx: &Ctx<'js>, input: Option<Value<'js>>) -> Result<String> {
+    let Some(input) = input.filter(|input| !input.is_undefined()) else {
         return Ok(String::new());
     };
     let protocols: Vec<String> = if let Some(input) = input.as_string() {
@@ -83,11 +78,10 @@ fn open<'js>(
     input: Value<'js>,
     protocols: Option<Value<'js>>,
 ) -> Result<Value<'js>> {
-    let portable = platform(ctx)?.is_portable();
     let mut url = parse(ctx, input, None)?;
     let upgraded = match url.scheme() {
-        "http" if portable => Some("ws"),
-        "https" if portable => Some("wss"),
+        "http" => Some("ws"),
+        "https" => Some("wss"),
         _ => None,
     };
     if let Some(scheme) = upgraded {
@@ -101,7 +95,7 @@ fn open<'js>(
     {
         return Err(Exception::throw_type(ctx, "Invalid WebSocket URL"));
     }
-    let protocols = socket_protocols(ctx, protocols, portable)?;
+    let protocols = socket_protocols(ctx, protocols)?;
     let url: String = url.into();
     let store = sockets(ctx)?;
     let mut charge = Charge::new(ctx)?;
