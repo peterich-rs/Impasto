@@ -1,119 +1,130 @@
 # Impasto
 
-跨平台 UI 框架。上层写细粒度响应式界面，下层用同一份场景描述，交给 Impeller 绘制，让各端像素一致。
+Impasto 是一个用 Rust 和 TypeScript 构建的跨平台 UI 框架。界面使用 Solid 2.0 TSX 编写，在内置 QuickJS 运行时中执行；UI 树、样式、Taffy 布局、原生响应式图与层树录制在 Rust 引擎完成，最终由 Impeller 渲染到各平台原生表面。
 
-应用用 Solid 2.0 TSX 编写。`packages/solid-renderer`、`packages/solid-ui` 和 `packages/solid-router` 提供渲染器、控件与路由。QuickJS 会话通过 `scene` 模块更新 `engine` 的渲染树。
+目前支持 macOS（Metal）、iOS 15+（UIKit / Metal）和 Android API 24+（GLES / Vulkan）。仓库已收录 CI 验证的 Impeller 预构建 SDK，本地构建会自动解压并链接。
 
-macOS 和 iOS 宿主用 Impeller 的 Metal 后端。Android 支持 Vulkan 和 GLES，使用仓库预构建 SDK 时默认选择 GLES。仓库收录了 CI 构建和验证的 Impeller SDK 归档，本地构建可以直接解压并链接对应目标的 SDK。[Impeller SDK](crates/impeller-sys/README.md)
+```tsx
+import { createSignal } from "solid-js";
+import { boot } from "@impasto/solid-renderer";
+import { Button, Column, Text } from "@impasto/solid-ui";
 
-## 文档
+function Main() {
+  const [count, setCount] = createSignal(0);
 
-| 文档 | 内容 |
-|---|---|
-| `docs/architecture.md` | 当前仓库分层和一帧 |
-| `docs/platform-hosts.md` | 公共宿主布局，各平台的线程、表面和输入 |
-| `docs/toolchain-design.md` | 工具链与原生响应式设计 |
-| `docs/toolchain-baseline.md` | gallery 点击和滚动的对照数据 |
-| `docs/refactor-plan.md` | 还没做的事 |
-| `AGENTS.md` | 目标架构与工作约定 |
+  return (
+    <Column style={{ width: "100%", height: "100%", padding: 24, gap: 12 }}>
+      <Text style={{ fontSize: 20 }}>计数：{count()}</Text>
+      <Button label="+1" variant="primary" onClick={() => setCount((n) => n + 1)} />
+    </Column>
+  );
+}
 
-## 环境
-
-- Rust stable，版本由 `rust-toolchain.toml` 决定
-- [just](https://github.com/casey/just)
-- Node.js 22 或更新，测试用 `node --experimental-strip-types`
-- macOS 和 iOS 构建需要 Xcode。iOS 模拟器需要安装对应 Runtime，并用 `rustup target add aarch64-apple-ios-sim` 安装 Apple Silicon 目标，Intel 对应 `x86_64-apple-ios`。真机需要 `aarch64-apple-ios`、开发签名和已配对设备。Android 包需要 JDK、SDK 和 NDK。
-- 原生宿主构建使用 Python 3 准备 SDK。源码构建另需 `depot_tools` 提供的 `gclient` 和 bindgen。
-
-这些内容不在 git 里，要用时再取：
-
-| 路径 | 取法 |
-|---|---|
-| `third_party/impeller-sdk/` | `just impeller` 准备当前宿主的 SDK |
-| `build/impeller-source/`、`third_party/impeller-build/` | `just impeller-source` 同步源码并构建绘制库 |
-| `third_party/solid/` | 见 `third_party/README.md`。`just check` 不读该检出 |
-| `build/` | 下载缓存。脚本自己创建 |
-
-## 检查
-
-```sh
-just check
+boot(Main);
 ```
 
-运行样式声明检查、Clippy、Rust workspace 测试、Solid 测试和 JS 标准库契约检查。
+## 环境要求
 
-QuickJS 测试始终运行 Cargo 构建的 quickjs-jit 0.14.2。渲染引擎的图形测试需要准备 SDK，再用 `cargo test -p engine --features impeller` 运行。
+- Rust stable（见 [`rust-toolchain.toml`](rust-toolchain.toml)）
+- [just](https://github.com/casey/just)
+- Node.js 22+ 与 pnpm 9
+- Python 3（用于准备 Impeller SDK 与依赖边界检查）
+- 平台工具链：macOS / iOS 需要 Xcode 及对应 Rust target；Android 需要 JDK 17、Android SDK 35、NDK 及 `aarch64-linux-android`、`x86_64-linux-android` target
 
-推到 GitHub 后，检查工作流运行 `just check` 对应的检查和 `cargo fmt --all -- --check`。Linux 任务用 Node 22、pnpm 9.15.9 安装依赖并构建 Gallery，QuickJS 解释器由 Cargo 构建。macOS 任务验证 `embedder-macos`。Android 任务使用仓库归档构建双 ABI APK，运行 lint、包对齐检查和模拟器仪器测试。[检查工作流](.github/workflows/check.yml)
+## 快速开始
 
-## 应用命令
+### 运行内置示例
+
+仓库自带基于 Solid 2.0 的行情模拟盘应用（[`apps/gallery-solid`](apps/gallery-solid)）：
+
+```sh
+# macOS 桌面窗口（首次运行自动解压 Impeller SDK 并构建 Gallery）
+just host
+
+# Android 调试 APK
+just android
+
+# iOS 模拟器（构建、安装并校验首帧）
+just ios-sim-test --debug --udid <SIMULATOR_UDID>
+```
+
+### 创建并运行应用
+
+`crates/cli` 提供 `impasto` 命令行工具，用于创建工程、打包、生成平台工程、运行与测试。可通过 `cargo build -p cli` 构建二进制，或运行 `just cli-dist` 在 `target/cli-dist` 生成可独立分发的目录。
 
 ```sh
 cargo run -p cli -- create my-app
 cd my-app
-/path/to/impasto analyze
-/path/to/impasto run
-/path/to/impasto run -d android
-/path/to/impasto run -d ios
-/path/to/impasto build bundle
-/path/to/impasto build macos
-/path/to/impasto build ios --ios-simulator
-/path/to/impasto build apk --debug
-/path/to/impasto build appbundle
-/path/to/impasto build aar
-/path/to/impasto test
-/path/to/impasto clean
-/path/to/impasto packages get
+
+# 以下假设 impasto 已加入 PATH（run 默认 debug ESM，build 默认 release QuickJS 字节码）
+impasto run                         # 在 macOS 启动（可用 -d android / -d ios 指定设备）
+impasto build bundle                # 打包独立字节码
+impasto build macos                 # 生成 macOS .app
+impasto build apk --debug           # 生成 Android APK（另支持 appbundle / aar）
+impasto build ios --ios-simulator   # 生成 iOS 模拟器包（另支持 ios-archive / ipa / ios-xcframework）
+impasto analyze                     # TypeScript 类型检查
+impasto test                        # 在 QuickJS 中运行无头测试
 ```
 
-在框架仓库根执行 `cargo run -p cli -- run` 会打开 gallery。`run` 默认 debug，`build` 默认 release；`--debug` 和 `--release` 可显式选择。release bundle 是 QuickJS 字节码。生成的平台工程和包在应用的 `build/`；`create` 不生成可提交的平台目录。`app.toml` 的 `[permissions]` 缺省关闭能力模块，可写 `clipboard = ["macos"]` 或 `linking = true`。
+在仓库根目录直接执行 `cargo run -p cli -- run` 会启动内置的 Gallery 示例。
 
-iOS 宿主使用 UIKit、Metal 和 iOS 15.0 部署目标。`run -d ios` 安装并启动模拟器应用，`-d ios:<UDID>` 可选择具体模拟器或配对设备，`--watch` 可更新运行中的 debug 会话。UIKit 宿主支持场景恢复、系统输入法、无障碍、原生视图与 GPU 纹理混排。CLI 可交付 `.app`、签名归档、IPA 和嵌入 SDK。 [构建与嵌入](crates/embedder/ios/README.md) · [iOS 宿主](docs/platform-hosts.md#ios-宿主)
+## 仓库结构
 
-`just cli-dist` 在 `target/cli-dist` 生成完整 CLI 发布目录，须将 `impasto` 与旁边的 `impasto-tools/` 一起移动。发布包的打包、检查和无头测试使用内置 Node；原生构建还需要 Cargo 和对应平台工具链。源码开发仍使用本机 Node。`--verbose` 打印工具链路径，`run --trace` 输出帧计数。
+```text
+crates/
+├── engine/             UI 树、样式与工具类、Taffy 布局、手势、原生响应式图、层树录制及可选 JS 绑定
+├── raster/             消费层树，基于 Impeller 完成文字排版、绘制与上屏
+├── impeller-sys/       Impeller C FFI、平台补丁与预构建 SDK 归档
+├── javascript/         独立 QuickJS 运行时、IQJS 字节码编译器与 Web 标准 API 子集
+├── embedder/
+│   ├── common/         公共宿主：任务队列、帧调度、生命周期、网络与平台模块
+│   ├── macos/          macOS 宿主（AppKit / CVDisplayLink / Metal）
+│   ├── ios/            iOS 宿主（UIKit / CADisplayLink / Metal）
+│   └── android/        Android 宿主（Kotlin / JNI / Choreographer / GLES & Vulkan）
+└── cli/                impasto CLI 驱动工具
 
-Android 构建缺省使用生成工程里的 Gradle wrapper。需要使用本机已安装的 Gradle 时，显式设置 `GRADLE_HOME`；`run -d <设备号>` 使用 adb 安装并启动应用。APK 的 release 变体使用本地调试签名，供真机安装验证。
+packages/
+├── reactive/           接入原生响应式图的 solid-js 垫片
+├── solid-renderer/     面向引擎 scene 的 Solid 通用渲染器
+├── solid-ui/           基础布局、控件、Canvas、主题与浮层组件
+├── solid-router/       路由栈与转场
+├── devtools/           应用内调试面板
+└── *                   平台能力与工具包（app-state、async-storage、clipboard、
+                        file-system、form、i18n、linking、native-plugins、net、permissions）
 
-## 窗口
+apps/
+├── gallery-solid/      模拟盘示例应用
+└── android-acceptance/ 移动端验收应用与原生 Fragment 嵌入示例
+```
+
+## 开发与检查
+
+常用构建与检查入口定义在 [`justfile`](justfile)：
 
 ```sh
-just host
-IMPASTO_DUMP=/tmp/impasto-frame.png just host
-just host-js
-just android
-just android-release
+just check               # 样式声明检查、依赖边界、Impeller 脚本测试、Clippy、Rust/JS 测试与标准库契约
+just impeller            # 仅解压当前平台的 Impeller SDK 到 third_party/impeller-sdk/
+just gen                 # 重新生成样式类型与原生模块声明
+just android-build-check # 构建、lint 并校验 Android APK
+just ios-build-check     # 构建 Gallery 的 iOS 模拟器包
 ```
 
-`just host` 打开默认 360×640 的窗口，加载 `just gallery-dist` 生成的 Gallery ESM。`just host-js` 运行同一入口。设置 `IMPASTO_DUMP` 可将首帧写成 PNG。`just android` 构建调试 APK，`just android-release` 构建带本地签名的发布变体。Gradle 为 arm64 和 x86_64 准备对应的 Impeller SDK，再调用 Cargo 构建 `libimpasto.so`。签名配置、16 KB 验证和原生 Fragment 构建见 [Android 验收应用](apps/android-acceptance/README.md)。
+单独运行带 Impeller 链接的绘制后端测试：
 
-## 目录
+```sh
+just impeller
+cargo test -p raster --features impeller
+```
 
-```
-crates/engine/              UI 树、布局、输入、响应式图、宿主会话、层树录制与可选 JS 绑定
-crates/raster/              使用 Impeller 排版、绘制并呈现层树
-crates/impeller-sys/        Impeller C 绑定与 SDK 链接
-crates/embedder/common/     公共宿主，命令队列、帧调度、渲染线程
-crates/embedder/android/    Android 宿主，ImpastoHost、ImpastoView、Choreographer、Vulkan 和 GLES
-crates/embedder/macos/      macOS 宿主，AppKit、CVDisplayLink、Metal
-crates/embedder/ios/        iOS 宿主，UIKit、CADisplayLink、Metal
-crates/cli/                 驱动工具，工程创建、构建、打包、部署和热重载
-crates/javascript/          独立 JavaScript 运行时、编译器、标准库及宿主交换类型
-packages/clipboard/         @impasto/clipboard
-packages/linking/           @impasto/linking
-packages/app-state/         @impasto/app-state
-packages/file-system/       @impasto/file-system
-packages/async-storage/     @impasto/async-storage
-packages/solid-renderer/    接到引擎 scene 与 reactive 的运行时
-packages/solid-ui/          Button、Field、Dialog、theme、overlay
-packages/solid-router/      路径、栈和 RouterView
-packages/net/               createFetch
-packages/form/              createForm
-packages/i18n/              formatNumber、formatDate、plural
-packages/permissions/       权限 API
-apps/gallery-solid/         Solid 模拟盘。行情工作台、Canvas 图表、自选和模拟交易。ESM 产物 dist/quotes.js 本地构建，不提交
-tools/                      node 测试的 register.mjs 和 resolve-hook.mjs
-```
+## 相关文档
+
+- [样式属性与工具类清单](docs/style-utilities.gen.md) — `just gen` 生成的受支持样式属性与工具类列表
+- [Impeller SDK](crates/impeller-sys/README.md) — 预构建归档、平台补丁与源码构建说明
+- [iOS 构建与 UIKit 嵌入](crates/embedder/ios/README.md) — `[ios]` 配置、签名归档、XCFramework 与 Swift 插件
+- [移动端验收应用](apps/android-acceptance/README.md) — Android / iOS 深链、恢复、权限与原生 Fragment 验收流程
+- [Flutter 性能对照参考](tools/android-flutter-reference/README.md) — Android 行情参考应用的构建与回放
+- [AGENTS.md](AGENTS.md) — 目标架构分工与仓库约定
 
 ## 许可证
 
-产品代码使用 [Apache-2.0](LICENSE)。归属声明在 [NOTICE](NOTICE)。`.agents/skills/rust-best-practice` 使用该目录自己的 MIT 许可证。`third_party` 里的上游代码保持各自的许可证。Impeller 的许可证随 SDK 的 `LICENSE` 文件分发。
+产品代码基于 [Apache-2.0](LICENSE) 发布，版权归属见 [NOTICE](NOTICE)。Impeller 及第三方依赖沿用各自许可证。

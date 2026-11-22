@@ -34,7 +34,7 @@ just impeller-source
 just impeller-source aarch64-apple-ios-sim
 ```
 
-脚本使用 `build/impeller-source/` 缓存源码，使用 `third_party/impeller-build/` 缓存原生构建结果，并将最终 SDK 安装到日常构建使用的目录。CI 目标列表由 `python3 tools/impeller_sdk.py matrix [--targets ... | --base ...]` 输出。SDK 构建目标与已接入的应用宿主分别维护，当前应用宿主为 macOS 和 Android。
+脚本使用 `build/impeller-source/` 缓存源码，使用 `third_party/impeller-build/` 缓存原生构建结果，并将最终 SDK 安装到日常构建使用的目录。CI 目标列表由 `python3 tools/impeller_sdk.py matrix [--targets ... | --base ...]` 输出。SDK 构建目标与已接入的应用宿主分别维护，当前应用宿主为 macOS、iOS 和 Android。
 
 iOS SDK 使用 Metal，最低部署版本为 iOS 15.0。[`patches/ios-interop.patch`](patches/ios-interop.patch) 补齐锁定版本对 GLES 和 Vulkan 的条件编译，使这些后端禁用时 C API 仍可链接。
 
