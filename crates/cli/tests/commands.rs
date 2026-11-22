@@ -212,15 +212,13 @@ void check();
             let shaper = engine::text::MonoShaper::default();
             let mut session = if debug {
                 let source = fs::read(sandbox.0.join("build/app.js")).expect("ESM bundle");
-                engine::js::open_program_with_io(&source, "app.js", shaper, log, None, config)
+                engine::js::open_program(&source, "app.js", shaper, log, config)
             } else {
                 let source = fs::read(sandbox.0.join("build/app.bin")).expect("bytecode bundle");
                 // SAFETY: this test loads only the artifact built above by the pinned CLI.
                 #[expect(unsafe_code, reason = "loads this test's own compiled artifact")]
                 unsafe {
-                    engine::js::open_trusted_bytecode_with_io(
-                        &source, "app.bin", shaper, log, None, config,
-                    )
+                    engine::js::open_trusted_bytecode(&source, "app.bin", shaper, log, config)
                 }
             }
             .expect("link capability imports");

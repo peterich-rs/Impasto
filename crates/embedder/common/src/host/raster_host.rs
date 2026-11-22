@@ -220,7 +220,7 @@ fn render_layers(
     graphics.needs_present |= submission.placements_changed;
     if graphics
         .frame_retry_at
-        .is_some_and(|deadline| crate::net::ms_i64(graphics.clock.monotonic_ms()) < deadline)
+        .is_some_and(|deadline| crate::timing::ms_i64(graphics.clock.monotonic_ms()) < deadline)
     {
         return Ok(RasterOutput::finish(again));
     }
@@ -455,7 +455,7 @@ fn render_layers(
                 }
             }
             graphics.frame_retry_at =
-                Some(crate::net::ms_i64(graphics.clock.monotonic_ms()).saturating_add(delay));
+                Some(crate::timing::ms_i64(graphics.clock.monotonic_ms()).saturating_add(delay));
             again = false;
         } else {
             graphics.frame_retry_at = None;

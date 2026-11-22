@@ -3,17 +3,21 @@
 pub mod app_state;
 pub mod clipboard;
 pub mod fs;
+pub mod http;
 pub mod linking;
 pub mod memory;
 mod native_plugins;
 pub mod permissions;
+pub mod websocket;
 
 pub use app_state::module as app_state;
 pub use clipboard::{ClipboardHost, module as clipboard};
 pub use fs::{StorageHost, async_storage, module as file_system, picked_document};
+pub use http::http;
 pub use linking::{LinkingHost, module as linking};
 pub use native_plugins::module as native_plugins;
 pub use permissions::{PermissionsHost, module as permissions, permission_results};
+pub use websocket::websocket;
 
 use engine::session::PluginValue;
 
@@ -66,11 +70,11 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use engine::session::{
-        HttpClient, Invoke, Method, MethodExec, Module, ModuleRegistry, PluginResult, PluginValue,
-        Settle, Work,
+        Invoke, Method, MethodExec, Module, ModuleRegistry, PluginResult, PluginValue, Settle, Work,
     };
 
     use super::*;
+    use crate::http::HttpClient;
     use crate::modules::memory::{DeniedPermissions, MemoryClipboard, MemoryStorage, NullLinking};
 
     struct RecordingExec {
@@ -258,14 +262,15 @@ mod tests {
             Err(error) => panic!("{error}"),
         };
         let started = Instant::now();
-        let result = client.perform(&engine::session::HttpRequest {
-            token: 1,
+        let result = client.perform(&crate::http::HttpRequest {
             method: "GET".to_owned(),
             url: format!("http://127.0.0.1:{port}/"),
             headers: Vec::new(),
             body: Vec::new(),
-            cancel: Arc::new(AtomicBool::new(false)),
+            cancel: engine::session::CancelToken::new(),
             timeout_ms: None,
+            redirect: crate::http::RedirectMode::Follow,
+            max_body_bytes: None,
         });
         let http_ms = started.elapsed();
         let _ = server.join();

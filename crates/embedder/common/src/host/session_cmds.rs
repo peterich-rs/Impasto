@@ -133,7 +133,7 @@ fn metrics_cmd(runtime: &mut UiHost, metrics: Metrics) {
 fn lifecycle(runtime: &mut UiHost, state: engine::session::Lifecycle) {
     let deadline = runtime.session.as_mut().map(|session| {
         session_call(|| session.lifecycle(state));
-        session.next_wake_ms().map(crate::net::ms_i64)
+        session.next_wake_ms().map(crate::timing::ms_i64)
     });
     if let Some(deadline) = deadline {
         note_wake(runtime, deadline);
@@ -202,7 +202,7 @@ fn io_done(runtime: &mut UiHost, dispatch: impl FnOnce(&mut dyn engine::session:
     if let Some(session) = runtime.session.as_mut() {
         session_call(|| dispatch(session.as_mut()));
         let wants_frame = session.wants_frame();
-        let deadline = session.next_wake_ms().map(crate::net::ms_i64);
+        let deadline = session.next_wake_ms().map(crate::timing::ms_i64);
         note_wake(
             runtime,
             deadline.into_iter().chain(runtime.present_retry_at).min(),

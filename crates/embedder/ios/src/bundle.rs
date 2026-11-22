@@ -5,8 +5,8 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use embedder::{BootError, ImageDecoder, Launch, SessionError};
-use engine::session::{HttpClient, Module, Shared};
+use embedder::{BootError, HttpClient, ImageDecoder, Launch, SessionError};
+use engine::session::{Module, Shared};
 use objc2_foundation::{NSBundle, NSFileManager, NSSearchPathDirectory, NSSearchPathDomainMask};
 
 #[path = "clipboard.rs"]
@@ -58,27 +58,21 @@ pub(crate) fn prepare(
         let modules = native_modules(&enabled, launch_url, &services)?;
         let program = load_program(&root)?;
 
-        let launch = Launch::Session(Box::new(move |open, io, host| {
+        let launch = Launch::Session(Box::new(move |open, host| {
             let host = host.restrict(&enabled);
             match program {
-                Program::Source(bytes) => engine::js::open_program_with_routed_io(
-                    &bytes,
-                    "app.js",
-                    open.shaper,
-                    open.log,
-                    Some(io),
-                    host,
-                ),
+                Program::Source(bytes) => {
+                    engine::js::open_program(&bytes, "app.js", open.shaper, open.log, host)
+                }
                 Program::Bytecode(bytes) => {
                     // SAFETY: load_program accepts bytecode only from the installed
                     // app bundle, where the packaging tool stores its compiler output.
                     unsafe {
-                        engine::js::open_trusted_bytecode_with_routed_io(
+                        engine::js::open_trusted_bytecode(
                             &bytes,
                             "app.js",
                             open.shaper,
                             open.log,
-                            Some(io),
                             host,
                         )
                     }
@@ -161,7 +155,9 @@ fn enabled_modules(root: &Path) -> Result<Vec<String>, BootError> {
         .filter(|name| !name.is_empty())
         .map(|name| match name {
             "file-system" | "async-storage" | "app-state" | "clipboard" | "linking"
-            | "devtools" | "permissions" | "native-plugins" => Ok(name.to_owned()),
+            | "devtools" | "permissions" | "native-plugins" | "http" | "websocket" => {
+                Ok(name.to_owned())
+            }
             name => Err(BootError::Platform(format!("iOS 尚未提供 {name} 模块"))),
         })
         .collect()

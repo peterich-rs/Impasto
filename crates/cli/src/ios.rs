@@ -27,8 +27,10 @@ pub(crate) const MODULES: &[&str] = &[
     "clipboard",
     "devtools",
     "file-system",
+    "http",
     "linking",
     "permissions",
+    "websocket",
 ];
 
 #[derive(Default, Deserialize)]

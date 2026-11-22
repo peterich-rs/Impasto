@@ -967,7 +967,7 @@ pub fn run(
     } = launch;
     let devtools_source_map = load_source_map(&name);
     let inspect_dir = std::env::var_os("IMPASTO_INSPECT").map(PathBuf::from);
-    let embedder_launch = EmbedderLaunch::Session(Box::new(move |open, io, host| {
+    let embedder_launch = EmbedderLaunch::Session(Box::new(move |open, host| {
         let host = modules
             .as_ref()
             .map_or_else(|| host.clone(), |modules| host.clone().restrict(modules));
@@ -977,24 +977,10 @@ pub fn run(
             // toolchain's `compile`. It is not network input. The envelope
             // does not prove the payload is valid bytecode.
             unsafe {
-                engine::js::open_trusted_bytecode_with_routed_io(
-                    &source,
-                    &name,
-                    open.shaper,
-                    open.log,
-                    Some(io),
-                    host,
-                )
+                engine::js::open_trusted_bytecode(&source, &name, open.shaper, open.log, host)
             }
         } else {
-            engine::js::open_program_with_routed_io(
-                &source,
-                &name,
-                open.shaper,
-                open.log,
-                Some(io),
-                host,
-            )
+            engine::js::open_program(&source, &name, open.shaper, open.log, host)
         }
         .map_err(|error| match error {
             engine::js::Error::Runtime => SessionError::Runtime,

@@ -5,7 +5,9 @@ mod inspect;
 mod module;
 mod recorder;
 
-pub use hub::{DiagnosticsHub, FrameSample, LogEntry, LogSource, NetEntry, NetKind, PhaseSample};
+pub use hub::{
+    DiagnosticsHub, FrameSample, LogEntry, LogSource, NetEntry, NetKind, PREVIEW_CAP, PhaseSample,
+};
 pub use inspect::write_frame;
 pub use module::{DevtoolsContext, module};
 pub use recorder::wrap_if_devtools;

@@ -91,22 +91,20 @@ fn run_bundle(bundle: &Path, app: &App) -> Result<()> {
         // treated as an envelope from this toolchain's `compile` (`impasto build`).
         // The envelope does not prove the payload is valid bytecode.
         unsafe {
-            engine::js::open_trusted_bytecode_with_routed_io(
+            engine::js::open_trusted_bytecode(
                 &bytes,
                 &name,
                 engine::text::MonoShaper::default(),
                 log,
-                None,
                 config,
             )
         }
     } else {
-        engine::js::open_program_with_routed_io(
+        engine::js::open_program(
             &bytes,
             &name,
             engine::text::MonoShaper::default(),
             log,
-            None,
             config,
         )
     }?;

@@ -953,7 +953,7 @@ fn android_boot(
     let trace = decode::read_bytes(&script_assets, c"app.trace").is_some();
     Ok(Boot {
         font_family: FONT_FAMILY.to_string(),
-        launch: Launch::Session(Box::new(move |open, io, host| {
+        launch: Launch::Session(Box::new(move |open, host| {
             // ActivityHost publishes the first focused resume after the view is attached.
             engine::session::shared_write(&host.app_state, "inactive".to_owned());
             let host = if let Some(modules) = modules {
@@ -967,24 +967,10 @@ fn android_boot(
                 // `compile` output. It is not network input. The envelope does
                 // not prove the payload is valid bytecode.
                 unsafe {
-                    engine::js::open_trusted_bytecode_with_routed_io(
-                        &script,
-                        &name,
-                        open.shaper,
-                        open.log,
-                        Some(io),
-                        host,
-                    )
+                    engine::js::open_trusted_bytecode(&script, &name, open.shaper, open.log, host)
                 }
             } else {
-                engine::js::open_program_with_routed_io(
-                    &script,
-                    &name,
-                    open.shaper,
-                    open.log,
-                    Some(io),
-                    host,
-                )
+                engine::js::open_program(&script, &name, open.shaper, open.log, host)
             }
             .map_err(|error| match error {
                 engine::js::Error::Runtime => SessionError::Runtime,

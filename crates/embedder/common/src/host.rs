@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -703,15 +703,6 @@ fn run_boot(
             }))
         }
     });
-    let (net_tx, net_rx) = mpsc::sync_channel(64);
-    let inbox_net = Arc::clone(inbox);
-    let _net = crate::net::spawn(
-        net_rx,
-        inbox_net,
-        http,
-        boot.services.websocket_transport(),
-        boot.devtools.clone(),
-    );
     open_ui(
         boot,
         fonts,
@@ -720,7 +711,7 @@ fn run_boot(
         runners,
         RenderLinks {
             load_image,
-            net_tx,
+            http,
             upload,
         },
     )
@@ -730,14 +721,14 @@ type ImageLoader = Arc<dyn Fn(ImageRequest) -> bool + Send + Sync>;
 
 fn decode_one(
     decoder: &dyn ImageDecoder,
-    http: Option<&dyn engine::session::HttpClient>,
+    http: Option<&dyn crate::http::HttpClient>,
     request: &ImageRequest,
     upload: &Mutex<Option<raster::TextureFactory>>,
 ) -> ImageReady {
     let result = if request.source.starts_with("https://") {
-        match crate::net::fetch_image_body(http, &request.source) {
+        match crate::http::fetch_image_body(http, &request.source) {
             Ok(bytes) => decoder.decode_bytes(&request.source, &bytes),
-            Err(error) => Err(error),
+            Err(error) => Err(ImageError::Failed(error)),
         }
     } else if request.source.starts_with("http://") {
         Err(ImageError::Failed("image URL must be https".into()))
@@ -787,7 +778,6 @@ pub(crate) struct UiHost {
     inbox: Arc<Inbox>,
     services: Rc<RefCell<Box<dyn Services>>>,
     session: Option<Box<dyn engine::session::Session>>,
-    net_tx: SyncSender<engine::session::IoJob>,
     registry: Arc<engine::session::ModuleRegistry>,
     // WindowSession keeps a weak subscription to this poster.
     _window: Arc<Poster>,
@@ -877,7 +867,7 @@ impl FramePipeline {
 
 struct RenderLinks {
     load_image: ImageLoader,
-    net_tx: SyncSender<engine::session::IoJob>,
+    http: Option<Arc<dyn crate::http::HttpClient>>,
     upload: Arc<Mutex<Option<raster::TextureFactory>>>,
 }
 
@@ -1006,6 +996,20 @@ fn open_ui(
         services.borrow().restoration(),
         window_session,
     )];
+    let has_http = boot.modules.iter().any(|m| m.specifier == "@impasto/http");
+    let has_ws = boot
+        .modules
+        .iter()
+        .any(|m| m.specifier == "@impasto/websocket");
+    if !has_http {
+        modules.push(crate::modules::http(links.http));
+    }
+    if !has_ws {
+        modules.push(crate::modules::websocket(
+            services.borrow().websocket_transport(),
+            boot.devtools.clone(),
+        ));
+    }
     if let Some(hub) = boot.devtools.as_ref() {
         modules.push(crate::diagnostics::module(
             Arc::clone(hub),
@@ -1037,7 +1041,7 @@ fn open_ui(
         })),
         transport_clock: Some(Arc::new({
             let clock = Arc::clone(&runners.ui);
-            move || crate::net::ms_i64(clock.monotonic_ms())
+            move || crate::timing::ms_i64(clock.monotonic_ms())
         })),
         script_execution: if boot.thread_topology == ThreadTopology::PlatformUi {
             engine::session::ScriptExecution::PlatformUi
@@ -1048,7 +1052,7 @@ fn open_ui(
         launch_url,
     };
     startup.checkpoint()?;
-    let session = open(parts, io_sink(links.net_tx.clone()), host);
+    let session = open(parts, host);
     startup.checkpoint()?;
     let session = match session {
         Ok(opened) => Some(opened),
@@ -1076,7 +1080,6 @@ fn open_ui(
         inbox: Arc::clone(inbox),
         services,
         session,
-        net_tx: links.net_tx,
         registry,
         _window: window,
         latest: None,
@@ -1104,14 +1107,6 @@ fn open_ui(
     })
 }
 
-fn io_sink(tx: SyncSender<engine::session::IoJob>) -> crate::IoSink {
-    Box::new(move |job| {
-        tx.try_send(job).map_err(|error| match error {
-            mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job) => Box::new(job),
-        })
-    })
-}
-
 fn update_source(runtime: &mut UiHost, revision: &str, source: &str) {
     let Some(session) = runtime.session.as_mut() else {
         return;
@@ -1122,7 +1117,6 @@ fn update_source(runtime: &mut UiHost, revision: &str, source: &str) {
     let result = session.update_source(
         source,
         Box::new(raster::ImpellerShaper::new(Rc::clone(&runtime.typography))),
-        io_sink(runtime.net_tx.clone()),
         FrameTime {
             vsync_ms: now,
             target_ms: now,
@@ -1748,7 +1742,7 @@ fn refresh_wake(runtime: &mut UiHost) {
         if runtime.input.is_paused() {
             None
         } else {
-            session.next_wake_ms().map(crate::net::ms_i64)
+            session.next_wake_ms().map(crate::timing::ms_i64)
         }
     });
     let deadline = if runtime.input.is_paused() {
@@ -1788,7 +1782,7 @@ impl WakeTimer {
             handle.cancel();
         }
         if let Some(deadline) = next {
-            let now = crate::net::ms_i64(self.runner.monotonic_ms());
+            let now = crate::timing::ms_i64(self.runner.monotonic_ms());
             let millis = u64::try_from(deadline.saturating_sub(now)).unwrap_or(0);
             let inbox = Arc::downgrade(&self.inbox);
             let handle = self.runner.post_delayed(
@@ -2111,7 +2105,6 @@ mod tests {
                 session: Some(Box::new(MockSession {
                     log: Rc::clone(&log),
                 })),
-                net_tx: mpsc::sync_channel(1).0,
                 registry: Arc::new(engine::session::ModuleRegistry::new(Vec::new())),
                 _window: Arc::new(super::Poster {
                     inbox: Arc::new(Inbox::new()),
@@ -2494,19 +2487,18 @@ mod tests {
     fn io_event_arms_only_when_session_wants_frame() {
         let mut harness = TestHarness::new();
         let tokens_before = harness.vsync.token_count();
-        assert!(!harness.command(Command::Io(IoEvent::Http {
+        assert!(!harness.command(Command::Io(IoEvent::Plugin {
             token: 7,
-            result: Err(engine::session::HttpError::new(
-                engine::session::HttpFailure::Network,
-                "offline"
-            )),
+            result: engine::session::PluginResult::Failed {
+                message: "offline".into(),
+            },
         })));
         assert!(
             matches!(
                 harness.session.borrow().io.last(),
-                Some(IoEvent::Http { token: 7, .. })
+                Some(IoEvent::Plugin { token: 7, .. })
             ),
-            "http completion must reach the session"
+            "plugin failure completion must reach the session"
         );
         assert_eq!(harness.vsync.token_count(), tokens_before);
         harness.session.borrow_mut().wants = true;
@@ -2520,19 +2512,6 @@ mod tests {
                 Some(IoEvent::Plugin { token: 8, .. })
             ),
             "plugin completion must reach the session"
-        );
-        assert!(!harness.command(Command::Io(IoEvent::Socket {
-            id: 9,
-            event: "open".into(),
-            text: true,
-            data: Vec::new(),
-        })));
-        assert!(
-            matches!(
-                harness.session.borrow().io.last(),
-                Some(IoEvent::Socket { id: 9, .. })
-            ),
-            "socket completion must reach the session"
         );
         assert!(harness.vsync.token_count() > tokens_before);
     }
@@ -2732,12 +2711,11 @@ mod tests {
             source: Arc::from("asset:missing"),
             generation: 1,
         })));
-        assert!(!harness.command(Command::Io(IoEvent::Http {
+        assert!(!harness.command(Command::Io(IoEvent::Plugin {
             token: 11,
-            result: Err(engine::session::HttpError::new(
-                engine::session::HttpFailure::Network,
-                "retry"
-            )),
+            result: engine::session::PluginResult::Failed {
+                message: "retry".into(),
+            },
         })));
         assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Inactive)));
         let replaced = SurfaceId::fresh();

@@ -7,9 +7,9 @@ use engine::session::Module;
 
 use crate::diagnostics::{self, DevtoolsContext, DiagnosticsHub};
 use crate::modules::{
-    app_state, async_storage, clipboard, file_system, linking,
+    app_state, async_storage, clipboard, file_system, http, linking,
     memory::{DeniedPermissions, MemoryClipboard, MemoryStorage, NullLinking},
-    native_plugins, permissions,
+    native_plugins, permissions, websocket,
 };
 
 pub fn first_party_modules() -> Vec<Module> {
@@ -22,6 +22,8 @@ pub fn first_party_modules() -> Vec<Module> {
         file_system(Arc::clone(&storage) as _),
         async_storage(storage),
         permissions(Arc::new(DeniedPermissions)),
+        http(None),
+        websocket(None, None),
         native_plugins(|_, _, _, settle| {
             settle.send(engine::session::PluginResult::Failed {
                 message: "Native plugins are unavailable in this host".into(),

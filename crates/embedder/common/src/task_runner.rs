@@ -66,7 +66,7 @@ pub trait TaskRunner: Send + Sync + 'static {
     fn queue_id(&self) -> TaskQueueId;
 
     fn monotonic_ms(&self) -> f64 {
-        crate::net::mono_ms()
+        crate::timing::mono_ms()
     }
 }
 
