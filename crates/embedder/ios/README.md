@@ -74,7 +74,7 @@ func installImpasto(in parent: UIViewController, resources: URL) {
 }
 ```
 
-资源目录与独立宿主使用同一格式，包含 `app.js` 或安装包中的 `app.bin`、`assets/` 及可选 `app.modules`。SDK 带有公开 C 头 `Headers/impasto_ios.h` 和构建 Swift 客户可用的模块接口。 [UIKit 接入和线程边界](../../../docs/platform-hosts.md#ios-宿主)
+资源目录与独立宿主使用同一格式，包含 `app.js` 或安装包中的 `app.bin`、`assets/` 及可选 `app.modules`。SDK 带有公开 C 头 `Headers/impasto_ios.h` 和构建 Swift 客户可用的模块接口。
 
 - `try await host.prepare()` 可在挂接 View 之前等待脚本会话就绪。取消当前任务只结束这次等待，`host.close()` 结束整个会话。
 - 在主 actor 调用 `try host.captureSnapshot()` 获取当前控制器的 sRGB 图像。画面包含上次提交的原生视图和媒体，尺寸为当前 drawable 像素。可开启 `content.hidesContentInAppSwitcher` 在场景失活时覆盖内容。
