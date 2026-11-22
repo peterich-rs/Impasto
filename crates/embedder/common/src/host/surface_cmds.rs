@@ -1,4 +1,4 @@
-use session::Metrics;
+use engine::session::Metrics;
 
 use super::{Acks, OpenPlace, OpenedSurface, Runtime, arm, note_scale, open_surface_target};
 use crate::command::{Command, SurfaceId, SurfaceTarget};
@@ -53,7 +53,7 @@ fn changed(
     runtime: &mut Runtime,
     id: SurfaceId,
     metrics: Metrics,
-    pixels: engine::PixelSize,
+    pixels: raster::PixelSize,
 ) -> Result<bool, BootError> {
     if let Changed::Staged { resized } = runtime.surfaces.changed(id, metrics, pixels) {
         note_scale(runtime, metrics.device_pixel_ratio);

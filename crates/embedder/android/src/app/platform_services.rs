@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+use engine::session::{MethodExec, PluginResult, Settle};
 use jni::objects::{JObjectArray, JString, JValue};
 use jni::strings::JNIStr;
 use jni::sys::jlong;
-use session::{MethodExec, PluginResult, Settle};
 
 use super::Bridge;
 

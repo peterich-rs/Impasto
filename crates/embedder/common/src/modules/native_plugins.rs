@@ -1,4 +1,4 @@
-use session::{Method, Module, ModuleExports, PluginResult, PluginValue, Settle};
+use engine::session::{Method, Module, ModuleExports, PluginResult, PluginValue, Settle};
 
 pub fn module(invoke: impl Fn(&str, &str, &str, Settle) + Send + Sync + 'static) -> Module {
     Module {

@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use embedder::{BootError, ImageDecoder, Launch, SessionError};
+use engine::session::{HttpClient, Module, Shared};
 use objc2_foundation::{NSBundle, NSFileManager, NSSearchPathDirectory, NSSearchPathDomainMask};
-use session::{HttpClient, Module, Shared};
 
 #[path = "clipboard.rs"]
 mod clipboard;
@@ -61,7 +61,7 @@ pub(crate) fn prepare(
         let launch = Launch::Session(Box::new(move |open, io, host| {
             let host = host.restrict(&enabled);
             match program {
-                Program::Source(bytes) => javascript::ui::open_program_with_routed_io(
+                Program::Source(bytes) => engine::js::open_program_with_routed_io(
                     &bytes,
                     "app.js",
                     open.shaper,
@@ -73,7 +73,7 @@ pub(crate) fn prepare(
                     // SAFETY: load_program accepts bytecode only from the installed
                     // app bundle, where the packaging tool stores its compiler output.
                     unsafe {
-                        javascript::ui::open_trusted_bytecode_with_routed_io(
+                        engine::js::open_trusted_bytecode_with_routed_io(
                             &bytes,
                             "app.js",
                             open.shaper,
@@ -85,8 +85,8 @@ pub(crate) fn prepare(
                 }
             }
             .map_err(|error| match error {
-                javascript::ui::Error::Runtime => SessionError::Runtime,
-                javascript::ui::Error::Script(text) => SessionError::Script(text),
+                engine::js::Error::Runtime => SessionError::Runtime,
+                engine::js::Error::Script(text) => SessionError::Script(text),
             })
         }));
 

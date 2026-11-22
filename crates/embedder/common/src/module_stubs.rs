@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use session::Module;
+use engine::session::Module;
 
 use crate::diagnostics::{self, DevtoolsContext, DiagnosticsHub};
 use crate::modules::{
@@ -16,14 +16,14 @@ pub fn first_party_modules() -> Vec<Module> {
     let clipboard_host = MemoryClipboard::new("");
     let storage = MemoryStorage::new("/tmp/file-system");
     vec![
-        app_state(session::shared("active".to_owned())),
-        linking(Arc::new(NullLinking), session::shared(None)),
+        app_state(engine::session::shared("active".to_owned())),
+        linking(Arc::new(NullLinking), engine::session::shared(None)),
         clipboard(clipboard_host),
         file_system(Arc::clone(&storage) as _),
         async_storage(storage),
         permissions(Arc::new(DeniedPermissions)),
         native_plugins(|_, _, _, settle| {
-            settle.send(session::PluginResult::Failed {
+            settle.send(engine::session::PluginResult::Failed {
                 message: "Native plugins are unavailable in this host".into(),
             });
         }),
@@ -32,7 +32,7 @@ pub fn first_party_modules() -> Vec<Module> {
             DevtoolsContext {
                 enabled: true,
                 source_map: None,
-                app_state: session::shared("active".to_owned()),
+                app_state: engine::session::shared("active".to_owned()),
                 os: "test",
                 os_version: String::new(),
                 dump: None,

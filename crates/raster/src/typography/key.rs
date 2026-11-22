@@ -1,0 +1,501 @@
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+use engine::scene::{Gradient, SpanPaint, TextAlign, TextSpan, TextStyle};
+use engine::text::{MetricsKey, SpanMetrics};
+
+/// A borrowed view shared by layout keys and recorded text runs.
+#[derive(Clone, Copy)]
+pub(crate) enum Spans<'a> {
+    Scene(&'a [TextSpan]),
+    Metrics {
+        runs: &'a [SpanMetrics],
+        paints: Option<&'a [SpanPaint]>,
+        color: [u8; 4],
+    },
+}
+
+pub(super) struct Span<'a> {
+    pub(super) utf8: &'a str,
+    pub(super) family: &'a str,
+    pub(super) weight: u16,
+    pub(super) color: [u8; 4],
+    pub(super) gradient: Option<&'a Gradient>,
+    pub(super) underline: bool,
+    pub(super) line_through: bool,
+}
+
+impl Span<'_> {
+    fn paint(&self) -> SpanPaint {
+        self.gradient
+            .map_or(SpanPaint::Color(self.color), |gradient| {
+                SpanPaint::Gradient(gradient.clone())
+            })
+    }
+}
+
+impl<'a> Spans<'a> {
+    pub(super) fn metrics(
+        key: &'a MetricsKey,
+        color: [u8; 4],
+        paints: Option<&'a [SpanPaint]>,
+    ) -> Self {
+        Self::Metrics {
+            runs: &key.spans,
+            paints,
+            color,
+        }
+    }
+
+    pub(super) fn len(self) -> usize {
+        match self {
+            Self::Scene(runs) => runs.len(),
+            Self::Metrics { runs, .. } => runs.len(),
+        }
+    }
+
+    pub(super) fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    pub(super) fn iter(self) -> impl Iterator<Item = Span<'a>> {
+        (0..self.len()).map(move |index| match self {
+            Self::Scene(runs) => {
+                let span = &runs[index];
+                Span {
+                    utf8: &span.utf8,
+                    family: span.family.as_deref().unwrap_or(""),
+                    weight: span.weight,
+                    color: span.color,
+                    gradient: span.gradient.as_ref(),
+                    underline: span.underline,
+                    line_through: span.line_through,
+                }
+            }
+            Self::Metrics {
+                runs,
+                paints,
+                color,
+            } => {
+                let span = &runs[index];
+                // Gradients use the paragraph foreground when measuring. Drawing
+                // builds the gradient from the scene run and its laid-out bounds.
+                let color = match paints.and_then(|paints| paints.get(index)) {
+                    Some(SpanPaint::Color(color)) => *color,
+                    Some(SpanPaint::Gradient(_)) | None => color,
+                };
+                Span {
+                    utf8: &span.utf8,
+                    family: &span.family,
+                    weight: span.weight,
+                    color,
+                    gradient: None,
+                    underline: span.underline,
+                    line_through: span.line_through,
+                }
+            }
+        })
+    }
+
+    /// Scene callers may supply text separately from spans. Metrics keys
+    /// already share the complete text with the layout node.
+    pub(super) fn scene_text(self) -> Option<String> {
+        match self {
+            Self::Scene(runs) if !runs.is_empty() => {
+                Some(runs.iter().map(|span| span.utf8.as_str()).collect())
+            }
+            _ => None,
+        }
+    }
+}
+
+pub(crate) struct Shaped {
+    pub(crate) width: f32,
+    pub(crate) height: f32,
+    pub(crate) paragraph: impeller::ImpellerParagraph,
+    pub(crate) used: u64,
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub(super) struct ParaKey {
+    pub(super) utf8: String,
+    pub(super) font_size: u32,
+    pub(super) max_width: u32,
+    pub(super) color: [u8; 4],
+    pub(super) family: String,
+    pub(super) max_lines: u32,
+    pub(super) ellipsis: String,
+    pub(super) align: TextAlign,
+    pub(super) weight: u16,
+    pub(super) direction_rtl: bool,
+    pub(super) height_bits: u32,
+    pub(super) underline: bool,
+    pub(super) line_through: bool,
+    pub(super) soft_wrap: bool,
+    pub(super) overflow: engine::scene::TextOverflow,
+    pub(super) slant: engine::scene::FontSlant,
+    pub(super) spans: Vec<SpanKey>,
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub(super) struct SpanKey {
+    pub(super) utf8: String,
+    pub(super) family: String,
+    pub(super) weight: u16,
+    pub(super) paint: SpanPaint,
+    pub(super) underline: bool,
+    pub(super) line_through: bool,
+}
+
+/// Owned keys in hash buckets. A hit compares the query to the stored key and
+/// does not allocate the paragraph text.
+pub(super) struct ParagraphStore {
+    pub(super) buckets: HashMap<u64, Vec<(ParaKey, Shaped)>>,
+    pub(super) len: usize,
+}
+
+impl ParagraphStore {
+    pub(super) fn new() -> Self {
+        Self {
+            buckets: HashMap::new(),
+            len: 0,
+        }
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.len
+    }
+
+    pub(super) fn get_mut(
+        &mut self,
+        hash: u64,
+        matches: impl Fn(&ParaKey) -> bool,
+    ) -> Option<&mut Shaped> {
+        let bucket = self.buckets.get_mut(&hash)?;
+        bucket
+            .iter_mut()
+            .find(|(key, _)| matches(key))
+            .map(|(_, shaped)| shaped)
+    }
+
+    /// Removes one match. The caller owns the paragraph pointer after this returns.
+    pub(super) fn remove(
+        &mut self,
+        hash: u64,
+        matches: impl Fn(&ParaKey) -> bool,
+    ) -> Option<(ParaKey, Shaped)> {
+        let bucket = self.buckets.get_mut(&hash)?;
+        let index = bucket.iter().position(|(key, _)| matches(key))?;
+        let removed = bucket.swap_remove(index);
+        self.len = self.len.saturating_sub(1);
+        if bucket.is_empty() {
+            self.buckets.remove(&hash);
+        }
+        Some(removed)
+    }
+
+    pub(super) fn insert(&mut self, key: ParaKey, shaped: Shaped) -> Option<Shaped> {
+        let hash = hash_key(&key);
+        let bucket = self.buckets.entry(hash).or_default();
+        if let Some((_, slot)) = bucket.iter_mut().find(|(stored, _)| stored == &key) {
+            return Some(std::mem::replace(slot, shaped));
+        }
+        bucket.push((key, shaped));
+        self.len += 1;
+        None
+    }
+
+    pub(super) fn drain_if(&mut self, mut drop_shaped: impl FnMut(&Shaped) -> bool) -> Vec<Shaped> {
+        let mut dropped = Vec::new();
+        self.buckets.retain(|_, bucket| {
+            let mut index = 0;
+            while index < bucket.len() {
+                if drop_shaped(&bucket[index].1) {
+                    let (_, shaped) = bucket.swap_remove(index);
+                    self.len = self.len.saturating_sub(1);
+                    dropped.push(shaped);
+                } else {
+                    index += 1;
+                }
+            }
+            !bucket.is_empty()
+        });
+        dropped
+    }
+
+    pub(super) fn drain_all(&mut self) -> Vec<Shaped> {
+        self.len = 0;
+        let mut dropped = Vec::new();
+        for (_, bucket) in self.buckets.drain() {
+            dropped.extend(bucket.into_iter().map(|(_, shaped)| shaped));
+        }
+        dropped
+    }
+}
+
+pub(super) fn hash_key(key: &ParaKey) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+pub(super) fn hash_query(
+    utf8: &str,
+    font_size: u32,
+    max_width: u32,
+    color: [u8; 4],
+    family: &str,
+    max_lines: u32,
+    ellipsis: &str,
+    align: TextAlign,
+    weight: u16,
+    direction_rtl: bool,
+    height_bits: u32,
+    underline: bool,
+    line_through: bool,
+    soft_wrap: bool,
+    overflow: engine::scene::TextOverflow,
+    slant: engine::scene::FontSlant,
+    spans: Spans<'_>,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    utf8.hash(&mut hasher);
+    font_size.hash(&mut hasher);
+    max_width.hash(&mut hasher);
+    color.hash(&mut hasher);
+    family.hash(&mut hasher);
+    max_lines.hash(&mut hasher);
+    ellipsis.hash(&mut hasher);
+    align.hash(&mut hasher);
+    weight.hash(&mut hasher);
+    direction_rtl.hash(&mut hasher);
+    height_bits.hash(&mut hasher);
+    underline.hash(&mut hasher);
+    line_through.hash(&mut hasher);
+    soft_wrap.hash(&mut hasher);
+    overflow.hash(&mut hasher);
+    slant.hash(&mut hasher);
+    spans.len().hash(&mut hasher);
+    for span in spans.iter() {
+        span.utf8.hash(&mut hasher);
+        span.family.hash(&mut hasher);
+        span.weight.hash(&mut hasher);
+        span.paint().hash(&mut hasher);
+        span.underline.hash(&mut hasher);
+        span.line_through.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+pub(super) fn key_matches(
+    key: &ParaKey,
+    utf8: &str,
+    font_size: u32,
+    max_width: u32,
+    color: [u8; 4],
+    family: &str,
+    max_lines: u32,
+    ellipsis: &str,
+    align: TextAlign,
+    weight: u16,
+    direction_rtl: bool,
+    height_bits: u32,
+    underline: bool,
+    line_through: bool,
+    soft_wrap: bool,
+    overflow: engine::scene::TextOverflow,
+    slant: engine::scene::FontSlant,
+    spans: Spans<'_>,
+) -> bool {
+    key.utf8 == utf8
+        && key.font_size == font_size
+        && key.max_width == max_width
+        && key.color == color
+        && key.family == family
+        && key.max_lines == max_lines
+        && key.ellipsis == ellipsis
+        && key.align == align
+        && key.weight == weight
+        && key.direction_rtl == direction_rtl
+        && key.height_bits == height_bits
+        && key.underline == underline
+        && key.line_through == line_through
+        && key.soft_wrap == soft_wrap
+        && key.overflow == overflow
+        && key.slant == slant
+        && key.spans.len() == spans.len()
+        && key.spans.iter().zip(spans.iter()).all(|(stored, span)| {
+            stored.utf8 == span.utf8
+                && stored.family == span.family
+                && stored.weight == span.weight
+                && stored.paint == span.paint()
+                && stored.underline == span.underline
+                && stored.line_through == span.line_through
+        })
+}
+
+pub(super) fn para_key(
+    utf8: &str,
+    font_size: f32,
+    max_width: f32,
+    color: [u8; 4],
+    family: &str,
+    style: &TextStyle,
+    spans: Spans<'_>,
+) -> Option<ParaKey> {
+    if !font_size.is_finite() || font_size <= 0.0 || !max_width.is_finite() || max_width <= 0.0 {
+        return None;
+    }
+    Some(ParaKey {
+        utf8: utf8.to_owned(),
+        font_size: font_size.to_bits(),
+        max_width: max_width.to_bits(),
+        color,
+        family: family.to_owned(),
+        max_lines: style.max_lines.unwrap_or(0),
+        ellipsis: style.ellipsis.clone().unwrap_or_default(),
+        align: style.align,
+        weight: style.weight,
+        direction_rtl: style.direction_rtl,
+        height_bits: style.height.to_bits(),
+        underline: style.underline,
+        line_through: style.line_through,
+        soft_wrap: style.soft_wrap,
+        overflow: style.overflow,
+        slant: style.slant,
+        spans: spans
+            .iter()
+            .map(|span| SpanKey {
+                utf8: span.utf8.to_owned(),
+                family: span.family.to_owned(),
+                weight: span.weight,
+                paint: span.paint(),
+                underline: span.underline,
+                line_through: span.line_through,
+            })
+            .collect(),
+    })
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::{Spans, hash_key, hash_query, key_matches, para_key};
+    use engine::scene::{TextSpan, TextStyle};
+
+    #[test]
+    fn a_query_hashes_like_the_owned_key() {
+        let style = TextStyle::default();
+        let spans = [TextSpan {
+            utf8: "ab".into(),
+            color: [1, 2, 3, 4],
+            gradient: None,
+            weight: 700,
+            underline: true,
+            line_through: false,
+            family: Some("Sans".into()),
+        }];
+        let key = para_key(
+            "ab",
+            16.0,
+            100.0,
+            [9, 8, 7, 6],
+            "Sans",
+            &style,
+            Spans::Scene(&spans),
+        )
+        .unwrap();
+        let hash = hash_query(
+            "ab",
+            16.0f32.to_bits(),
+            100.0f32.to_bits(),
+            [9, 8, 7, 6],
+            "Sans",
+            style.max_lines.unwrap_or(0),
+            style.ellipsis.as_deref().unwrap_or(""),
+            style.align,
+            style.weight,
+            style.direction_rtl,
+            style.height.to_bits(),
+            style.underline,
+            style.line_through,
+            style.soft_wrap,
+            style.overflow,
+            style.slant,
+            Spans::Scene(&spans),
+        );
+        assert_eq!(hash, hash_key(&key));
+        assert!(key_matches(
+            &key,
+            "ab",
+            16.0f32.to_bits(),
+            100.0f32.to_bits(),
+            [9, 8, 7, 6],
+            "Sans",
+            style.max_lines.unwrap_or(0),
+            style.ellipsis.as_deref().unwrap_or(""),
+            style.align,
+            style.weight,
+            style.direction_rtl,
+            style.height.to_bits(),
+            style.underline,
+            style.line_through,
+            style.soft_wrap,
+            style.overflow,
+            style.slant,
+            Spans::Scene(&spans),
+        ));
+    }
+
+    #[test]
+    fn italic_changes_the_paragraph_key() {
+        let upright = TextStyle::default();
+        let italic = TextStyle {
+            slant: engine::scene::FontSlant::Italic,
+            ..TextStyle::default()
+        };
+        let Some(left) = para_key(
+            "ab",
+            16.0,
+            100.0,
+            [0, 0, 0, 255],
+            "Sans",
+            &upright,
+            Spans::Scene(&[]),
+        ) else {
+            panic!("upright key");
+        };
+        let Some(right) = para_key(
+            "ab",
+            16.0,
+            100.0,
+            [0, 0, 0, 255],
+            "Sans",
+            &italic,
+            Spans::Scene(&[]),
+        ) else {
+            panic!("italic key");
+        };
+        assert_ne!(hash_key(&left), hash_key(&right));
+        assert!(!key_matches(
+            &left,
+            "ab",
+            16.0f32.to_bits(),
+            100.0f32.to_bits(),
+            [0, 0, 0, 255],
+            "Sans",
+            italic.max_lines.unwrap_or(0),
+            italic.ellipsis.as_deref().unwrap_or(""),
+            italic.align,
+            italic.weight,
+            italic.direction_rtl,
+            italic.height.to_bits(),
+            italic.underline,
+            italic.line_through,
+            italic.soft_wrap,
+            italic.overflow,
+            italic.slant,
+            Spans::Scene(&[]),
+        ));
+    }
+}

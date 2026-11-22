@@ -1,6 +1,6 @@
 //! One native surface. A stale id cannot replace the current one.
 
-use session::Metrics;
+use engine::session::Metrics;
 
 use crate::command::{SurfaceId, SurfaceTarget};
 use crate::{Presented, Surface};
@@ -34,7 +34,7 @@ pub enum Ready {
         id: SurfaceId,
         replaced: Option<SurfaceId>,
     },
-    Failed(engine::Status),
+    Failed(raster::Status),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +53,7 @@ struct Open {
     id: SurfaceId,
     surface: Box<dyn Surface>,
     metrics: Metrics,
-    pixels: engine::PixelSize,
+    pixels: raster::PixelSize,
 }
 
 pub struct SurfaceHost {
@@ -131,7 +131,7 @@ impl SurfaceHost {
         &mut self,
         id: SurfaceId,
         metrics: Metrics,
-        pixels: engine::PixelSize,
+        pixels: raster::PixelSize,
     ) -> PendingMetrics {
         let Some(pending) = self.pending.as_mut() else {
             return PendingMetrics::Absent;
@@ -164,13 +164,13 @@ impl SurfaceHost {
     pub fn ready(
         &mut self,
         target: SurfaceTarget,
-        engine: &mut engine::Engine,
+        raster: &mut raster::Rasterizer,
         open: &mut crate::SurfaceOpener,
     ) -> Ready {
         let id = target.id;
         let metrics = target.metrics;
         let pixels = target.pixels;
-        match open(engine, target) {
+        match open(raster, target) {
             Ok(surface) => {
                 let replaced = self.current.as_ref().map(|open| open.id);
                 self.current = Some(Open {
@@ -189,7 +189,7 @@ impl SurfaceHost {
         &mut self,
         id: SurfaceId,
         metrics: Metrics,
-        pixels: engine::PixelSize,
+        pixels: raster::PixelSize,
     ) -> Changed {
         let Some(open) = self.current.as_mut() else {
             return Changed::Ignored;
@@ -225,19 +225,22 @@ impl SurfaceHost {
 
     pub fn present(
         &mut self,
-        engine: &mut engine::Engine,
-        views: &[uicore::PlatformViewPlacement],
-    ) -> Result<Presented, engine::Status> {
+        raster: &mut raster::Rasterizer,
+        views: &[engine::tree::PlatformViewPlacement],
+    ) -> Result<Presented, raster::Status> {
         let Some(open) = self.current.as_mut() else {
-            return Err(engine::Status::NotReady);
+            return Err(raster::Status::NotReady);
         };
         let pixels = open.pixels;
-        open.surface.present_with_views(engine, pixels, views)
+        open.surface.present_with_views(raster, pixels, views)
     }
 
-    pub fn recover_device(&mut self, engine: &mut engine::Engine) -> Result<(), engine::Status> {
-        let open = self.current.as_mut().ok_or(engine::Status::NotReady)?;
-        open.surface.recover_device(engine)
+    pub fn recover_device(
+        &mut self,
+        raster: &mut raster::Rasterizer,
+    ) -> Result<(), raster::Status> {
+        let open = self.current.as_mut().ok_or(raster::Status::NotReady)?;
+        open.surface.recover_device(raster)
     }
 
     pub fn clear(&mut self) {
@@ -247,8 +250,8 @@ impl SurfaceHost {
 
 /// Physical pixels for a surface. A non-positive or non-finite axis is zero,
 /// which tells Vulkan to keep the extent it already has.
-pub fn pixel_size(metrics: Metrics) -> engine::PixelSize {
-    engine::PixelSize {
+pub fn pixel_size(metrics: Metrics) -> raster::PixelSize {
+    raster::PixelSize {
         width: points_to_pixels(metrics.width, metrics.device_pixel_ratio),
         height: points_to_pixels(metrics.height, metrics.device_pixel_ratio),
     }
@@ -276,7 +279,7 @@ fn points_to_pixels(points: f32, scale: f32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use session::Metrics;
+    use engine::session::Metrics;
 
     use super::{OpenRetry, PendingMetrics, SURFACE_OPEN_ATTEMPTS, SurfaceHost};
     use crate::command::{SurfaceId, SurfaceTarget};
@@ -287,7 +290,7 @@ mod tests {
         let metrics = Metrics::new(360.0, 640.0, 2.0);
         assert_eq!(
             super::pixel_size(metrics),
-            engine::PixelSize::new(720, 1280)
+            raster::PixelSize::new(720, 1280)
         );
         let broken = Metrics::new(0.0, 640.0, 2.0);
         assert_eq!(super::pixel_size(broken).width, 0);
@@ -339,14 +342,14 @@ mod tests {
         ));
         let metrics = Metrics::new(11.0, 20.0, 2.0);
         assert!(matches!(
-            host.retarget(id, metrics, engine::PixelSize::new(22, 40)),
+            host.retarget(id, metrics, raster::PixelSize::new(22, 40)),
             PendingMetrics::Rearm
         ));
         let (kept, attempts) = host.take_attempt().expect("rearmed");
         assert_eq!(attempts, 0);
         assert_eq!(kept.metrics.width, 11.0);
         assert!(matches!(
-            host.retarget(SurfaceId(9), metrics, engine::PixelSize::default()),
+            host.retarget(SurfaceId(9), metrics, raster::PixelSize::default()),
             PendingMetrics::Absent
         ));
     }

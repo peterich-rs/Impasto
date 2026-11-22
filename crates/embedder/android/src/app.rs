@@ -11,12 +11,12 @@ use embedder::{
     Boot, BootError, ClipboardHost, Command, Launch, LinkingHost, NativePtr, Services,
     SessionError, StorageHost, SurfaceId, SurfaceTarget, Vsync,
 };
+use engine::session::{InputEvent as EditEvent, Key, Metrics};
 use jni::Env;
 use jni::objects::{Global, JObject, JString};
 use jni::sys::jlong;
 use ndk::asset::AssetManager;
 use ndk::native_window::NativeWindow;
-use session::{InputEvent as EditEvent, Key, Metrics};
 
 use crate::decode;
 use crate::insets::{insets_in_points, scene_point};
@@ -51,11 +51,11 @@ struct Bridge {
 
 struct DocumentPick {
     id: jlong,
-    settle: session::Settle,
+    settle: engine::session::Settle,
 }
 
 impl Bridge {
-    fn open_document_picker(&self, settle: session::Settle) {
+    fn open_document_picker(&self, settle: engine::session::Settle) {
         static NEXT_PICK: AtomicI64 = AtomicI64::new(1);
         let id = NEXT_PICK.fetch_add(1, Ordering::Relaxed);
         {
@@ -299,7 +299,7 @@ impl Bridge {
     fn place_platform_views(
         &self,
         surface: SurfaceId,
-        placements: &[uicore::PlatformViewPlacement],
+        placements: &[engine::tree::PlatformViewPlacement],
     ) {
         self.call(|env, view| {
             use jni::objects::{JFloatArray, JLongArray, JObjectArray, JValue};
@@ -479,7 +479,7 @@ struct ImeCall {
 }
 
 impl ImeCall {
-    fn from_state(op: i32, state: &session::ImeState) -> Self {
+    fn from_state(op: i32, state: &engine::session::ImeState) -> Self {
         let (comp_start, comp_end) = match &state.composing {
             Some(range) => (range.start as i32, range.end as i32),
             None => (-1, -1),
@@ -512,8 +512,8 @@ impl ImeCall {
             caret_y: 0.0,
             caret_w: 0.0,
             caret_h: 0.0,
-            input_type: input_type(session::KeyboardType::Text),
-            ime_action: ime_action(session::TextInputAction::Done),
+            input_type: input_type(engine::session::KeyboardType::Text),
+            ime_action: ime_action(engine::session::TextInputAction::Done),
         }
     }
 }
@@ -555,8 +555,8 @@ impl StorageHost for Bridge {
 
     fn pick_document_async(
         self: Arc<Self>,
-        settle: session::Settle,
-        _exec: &dyn session::MethodExec,
+        settle: engine::session::Settle,
+        _exec: &dyn engine::session::MethodExec,
     ) {
         self.open_document_picker(settle);
     }
@@ -619,7 +619,11 @@ impl Services for Shared {
         self.0.update_result(revision, result);
     }
 
-    fn platform_views(&self, surface: SurfaceId, placements: &[uicore::PlatformViewPlacement]) {
+    fn platform_views(
+        &self,
+        surface: SurfaceId,
+        placements: &[engine::tree::PlatformViewPlacement],
+    ) {
         self.0.place_platform_views(surface, placements);
     }
 
@@ -643,11 +647,11 @@ impl Services for Shared {
         Vec::new()
     }
 
-    fn apply_ime(&self, update: &session::ImeUpdate) {
+    fn apply_ime(&self, update: &engine::session::ImeUpdate) {
         let call = match update {
-            session::ImeUpdate::Show(state) => ImeCall::from_state(IME_SHOW, state),
-            session::ImeUpdate::Update(state) => ImeCall::from_state(IME_UPDATE, state),
-            session::ImeUpdate::Hide => ImeCall::hide(),
+            engine::session::ImeUpdate::Show(state) => ImeCall::from_state(IME_SHOW, state),
+            engine::session::ImeUpdate::Update(state) => ImeCall::from_state(IME_UPDATE, state),
+            engine::session::ImeUpdate::Hide => ImeCall::hide(),
         };
         self.0.apply_ime(call);
     }
@@ -671,7 +675,7 @@ struct Viewport {
 struct Window {
     native: NativeWindow,
     id: Option<SurfaceId>,
-    pixels: engine::PixelSize,
+    pixels: raster::PixelSize,
 }
 
 struct Ui {
@@ -747,10 +751,10 @@ impl Host {
 
 fn edit_event(edit: Edit, shift: bool) -> Option<EditEvent> {
     let press = |key| {
-        EditEvent::Key(session::KeyPress {
+        EditEvent::Key(engine::session::KeyPress {
             key,
             shift,
-            modifiers: uicore::Modifiers::empty(),
+            modifiers: engine::input::Modifiers::empty(),
         })
     };
     Some(match edit {
@@ -774,14 +778,14 @@ fn edit_event(edit: Edit, shift: bool) -> Option<EditEvent> {
         Edit::SelectAll => EditEvent::SelectAll,
         Edit::Text(text) => EditEvent::Text(text),
         Edit::DeleteRange { start, end } => {
-            EditEvent::Edit(uicore::Edit::DeleteRange { start, end })
+            EditEvent::Edit(engine::text::Edit::DeleteRange { start, end })
         }
-        Edit::Insert(text) => EditEvent::Edit(uicore::Edit::Insert(text)),
+        Edit::Insert(text) => EditEvent::Edit(engine::text::Edit::Insert(text)),
         Edit::Composing(text) => EditEvent::Composing(text),
     })
 }
 
-fn input_type(keyboard: session::KeyboardType) -> i32 {
+fn input_type(keyboard: engine::session::KeyboardType) -> i32 {
     const CLASS_TEXT: i32 = 1;
     const CLASS_NUMBER: i32 = 2;
     const CLASS_PHONE: i32 = 3;
@@ -794,26 +798,30 @@ fn input_type(keyboard: session::KeyboardType) -> i32 {
     const FLAG_MULTI_LINE: i32 = 0x20000;
     const FLAG_NO_SUGGESTIONS: i32 = 0x80000;
     match keyboard {
-        session::KeyboardType::Text => CLASS_TEXT | FLAG_AUTO_CORRECT,
-        session::KeyboardType::Multiline => CLASS_TEXT | FLAG_MULTI_LINE | FLAG_AUTO_CORRECT,
-        session::KeyboardType::Number => CLASS_NUMBER,
-        session::KeyboardType::Phone => CLASS_PHONE,
-        session::KeyboardType::Email => CLASS_TEXT | VARIATION_EMAIL,
-        session::KeyboardType::Url => CLASS_TEXT | VARIATION_URI,
-        session::KeyboardType::Name => CLASS_TEXT | VARIATION_PERSON_NAME | FLAG_CAP_WORDS,
-        session::KeyboardType::Password => CLASS_TEXT | VARIATION_PASSWORD | FLAG_NO_SUGGESTIONS,
+        engine::session::KeyboardType::Text => CLASS_TEXT | FLAG_AUTO_CORRECT,
+        engine::session::KeyboardType::Multiline => {
+            CLASS_TEXT | FLAG_MULTI_LINE | FLAG_AUTO_CORRECT
+        }
+        engine::session::KeyboardType::Number => CLASS_NUMBER,
+        engine::session::KeyboardType::Phone => CLASS_PHONE,
+        engine::session::KeyboardType::Email => CLASS_TEXT | VARIATION_EMAIL,
+        engine::session::KeyboardType::Url => CLASS_TEXT | VARIATION_URI,
+        engine::session::KeyboardType::Name => CLASS_TEXT | VARIATION_PERSON_NAME | FLAG_CAP_WORDS,
+        engine::session::KeyboardType::Password => {
+            CLASS_TEXT | VARIATION_PASSWORD | FLAG_NO_SUGGESTIONS
+        }
     }
 }
 
-fn ime_action(action: session::TextInputAction) -> i32 {
+fn ime_action(action: engine::session::TextInputAction) -> i32 {
     match action {
-        session::TextInputAction::None | session::TextInputAction::Newline => 1,
-        session::TextInputAction::Go => 2,
-        session::TextInputAction::Search => 3,
-        session::TextInputAction::Send => 4,
-        session::TextInputAction::Next => 5,
-        session::TextInputAction::Done => 6,
-        session::TextInputAction::Previous => 7,
+        engine::session::TextInputAction::None | engine::session::TextInputAction::Newline => 1,
+        engine::session::TextInputAction::Go => 2,
+        engine::session::TextInputAction::Search => 3,
+        engine::session::TextInputAction::Send => 4,
+        engine::session::TextInputAction::Next => 5,
+        engine::session::TextInputAction::Done => 6,
+        engine::session::TextInputAction::Previous => 7,
     }
 }
 
@@ -825,7 +833,7 @@ struct Attach {
     saved_state: Option<String>,
     window_session: embedder::WindowSession,
     replayed_intent: bool,
-    settings: session::PlatformSettings,
+    settings: engine::session::PlatformSettings,
     renderer: Renderer,
 }
 
@@ -944,7 +952,7 @@ fn android_boot(
 ) -> Result<Boot, BootError> {
     let bridge_for_surface = Arc::clone(&bridge);
     let script_assets = Arc::clone(&bridge.assets);
-    let launch_url = session::shared(initial_url);
+    let launch_url = engine::session::shared(initial_url);
     let main_thread = {
         let bridge = Arc::clone(&bridge);
         Arc::new(move |work: Box<dyn FnOnce() + Send>| {
@@ -956,7 +964,7 @@ fn android_boot(
         launch: Launch::Session(Box::new(move |open, io, host| {
             let (name, script) = load_script(&script_assets, requested.as_deref())?;
             // ActivityHost publishes the first focused resume after the view is attached.
-            session::shared_write(&host.app_state, "inactive".to_owned());
+            engine::session::shared_write(&host.app_state, "inactive".to_owned());
             let host = if let Some(bytes) = decode::read_bytes(&script_assets, c"app.modules") {
                 let text = String::from_utf8(bytes).map_err(|_| SessionError::Runtime)?;
                 host.restrict(
@@ -975,7 +983,7 @@ fn android_boot(
                 // `compile` output. It is not network input. The envelope does
                 // not prove the payload is valid bytecode.
                 unsafe {
-                    javascript::ui::open_trusted_bytecode_with_routed_io(
+                    engine::js::open_trusted_bytecode_with_routed_io(
                         &script,
                         &name,
                         open.shaper,
@@ -985,7 +993,7 @@ fn android_boot(
                     )
                 }
             } else {
-                javascript::ui::open_program_with_routed_io(
+                engine::js::open_program_with_routed_io(
                     &script,
                     &name,
                     open.shaper,
@@ -995,8 +1003,8 @@ fn android_boot(
                 )
             }
             .map_err(|error| match error {
-                javascript::ui::Error::Runtime => SessionError::Runtime,
-                javascript::ui::Error::Script(text) => {
+                engine::js::Error::Runtime => SessionError::Runtime,
+                engine::js::Error::Script(text) => {
                     tracing::error!(target: "impasto::script", "{text}");
                     SessionError::Script(text)
                 }
@@ -1013,7 +1021,7 @@ fn android_boot(
         main_thread: Some(main_thread),
         launch_url: Arc::clone(&launch_url),
         http: Some(embedder::http_client().map_err(BootError::Platform)?),
-        open_engine: Box::new(move || renderer.create_engine()),
+        open_raster: Box::new(move || renderer.create_raster()),
         open_surface: renderer.surfaces(move |id| bridge_for_surface.first_frame(id)),
         dump_list: false,
         inspect: std::env::var_os("IMPASTO_INSPECT").map(std::path::PathBuf::from),
@@ -1076,7 +1084,7 @@ fn destroy_surface(host: &Host) {
         return;
     };
     if let Some(id) = window.id {
-        let _trace = session::trace::Section::begin(c"Impasto Android surface destroy");
+        let _trace = engine::session::trace::Section::begin(c"Impasto Android surface destroy");
         host.link.begin_destroy(id);
         // SurfaceHolder permits the producer to be torn down once its callback returns.
         host.link.drop_wait().wait(id);
@@ -1176,13 +1184,13 @@ fn metrics_of(viewport: &Viewport) -> Option<Metrics> {
         width,
         height,
         viewport.density,
-        session::Insets {
+        engine::session::Insets {
             left: pad_left,
             top: pad_top,
             right: pad_right,
             bottom: pad_bottom,
         },
-        session::Insets {
+        engine::session::Insets {
             left: ime_left,
             top: ime_top,
             right: ime_right,
@@ -1191,7 +1199,7 @@ fn metrics_of(viewport: &Viewport) -> Option<Metrics> {
     );
     let [left, top, right, bottom] = viewport.gestures;
     let (left, top, right, bottom) = insets_in_points(left, top, right, bottom, viewport.density)?;
-    metrics.system_gesture_insets = session::Insets {
+    metrics.system_gesture_insets = engine::session::Insets {
         left,
         top,
         right,
@@ -1222,8 +1230,8 @@ fn publish_metrics(host: &Host) {
     }
 }
 
-fn pixel_size(width: i32, height: i32) -> engine::PixelSize {
-    engine::PixelSize {
+fn pixel_size(width: i32, height: i32) -> raster::PixelSize {
+    raster::PixelSize {
         width: u32::try_from(width).unwrap_or(0),
         height: u32::try_from(height).unwrap_or(0),
     }
@@ -1339,7 +1347,7 @@ fn image_handle(source: &str, width: u32, height: u32, pixels: Vec<u8>) -> embed
 #[cfg(test)]
 mod ime_map {
     use super::{ime_action, input_type};
-    use session::{KeyboardType, TextInputAction};
+    use engine::session::{KeyboardType, TextInputAction};
 
     #[test]
     fn action_ordinals_match_android_ime_action() {

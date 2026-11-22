@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use session::{Method, Module, ModuleExports, PluginValue};
+use engine::session::{Method, Module, ModuleExports, PluginValue};
 
 use super::str_arg;
 

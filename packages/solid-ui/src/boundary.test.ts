@@ -19,7 +19,7 @@ const { render } = createSceneRenderer(options);
 
 let sawFallback = false;
 createRoot(() => {
-  const parent = options.createElement("column");
+  const parent = options.createElement("view");
   render(
     () =>
       createComponent(Errored, {
@@ -63,7 +63,7 @@ installThemePort({
 
 createRoot(() => {
   const theme = useTheme();
-  const parent = options.createElement("column");
+  const parent = options.createElement("view");
   bindFocusRing(
     () => parent,
     () => theme().brightness === "dark",

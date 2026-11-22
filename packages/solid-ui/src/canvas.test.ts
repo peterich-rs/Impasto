@@ -8,7 +8,7 @@ const errorHandlers: Array<((error: unknown) => unknown) | undefined> = [];
 let released = 0;
 let controller: { release(): void } | null = null;
 (globalThis as { core: Record<string, unknown> }).core = {
-  view: () => 7,
+  createElement: () => 7,
   createStyleSource: () => 1,
   setStyleSource: () => {},
   removeStyleSource: () => {},

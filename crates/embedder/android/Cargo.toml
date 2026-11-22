@@ -5,14 +5,14 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-impeller = ["engine/impeller"]
+impeller = ["raster/impeller"]
 
 [lib]
 name = "impasto"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-uicore = { workspace = true }
+engine = { workspace = true }
 
 [dev-dependencies]
 embedder = { workspace = true }
@@ -21,11 +21,10 @@ embedder = { workspace = true }
 ndk = { version = "=0.9.0", default-features = false }
 ndk-sys = { version = "=0.6.0" }
 jni = { version = "=0.22.4" }
-engine = { workspace = true }
+raster = { workspace = true }
+engine = { workspace = true, features = ["js", "android-trace"] }
 embedder = { workspace = true }
-javascript = { workspace = true, features = ["ui"] }
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
-session = { workspace = true }
 
 [lints]
 workspace = true

@@ -61,7 +61,7 @@ fn external_gpu_texture(
     frame: Option<crate::ImportExternalFrame>,
 ) {
     if let Some(import) = frame {
-        let image = import(&runtime.engine.borrow());
+        let image = import(&runtime.raster.borrow());
         if image.is_none() {
             return;
         }
@@ -76,7 +76,7 @@ fn external_gpu_texture(
 }
 
 fn texture_updated(runtime: &mut Runtime, source: &str) {
-    runtime.engine.borrow_mut().forget_texture(source);
+    runtime.raster.borrow_mut().forget_texture(source);
     if runtime
         .image_requirements
         .iter()

@@ -7,11 +7,11 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use embedder::{NativePtr, Presented, Surface};
-use engine::Engine;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLOrigin, MTLRegion, MTLSize, MTLTexture};
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
+use raster::Rasterizer;
 
 use crate::pixels::write_bgra_png;
 
@@ -34,11 +34,11 @@ impl MetalSurface {
         }
     }
 
-    fn present_drawable(&mut self, engine: &mut Engine) -> Result<Presented, engine::Status> {
+    fn present_drawable(&mut self, engine: &mut Rasterizer) -> Result<Presented, raster::Status> {
         // SAFETY: the main thread retains this layer until shutdown; this is the render thread's only use.
         let layer = unsafe { &*self.layer.0.cast::<CAMetalLayer>() };
         let Some(drawable) = layer.nextDrawable() else {
-            return Err(engine::Status::AcquireMiss);
+            return Err(raster::Status::AcquireMiss);
         };
         let drawable_ptr = Retained::as_ptr(&drawable) as *mut c_void;
         // SAFETY: `drawable` stays retained until this function returns.
@@ -61,9 +61,9 @@ impl MetalSurface {
 impl Surface for MetalSurface {
     fn present(
         &mut self,
-        engine: &mut Engine,
-        _pixels: engine::PixelSize,
-    ) -> Result<Presented, engine::Status> {
+        engine: &mut Rasterizer,
+        _pixels: raster::PixelSize,
+    ) -> Result<Presented, raster::Status> {
         objc2::rc::autoreleasepool(|_| self.present_drawable(engine))
     }
 }

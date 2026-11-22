@@ -1,4 +1,4 @@
-//! First-party host modules. Constructors return [`session::Module`].
+//! First-party host modules. Constructors return [`engine::session::Module`].
 
 pub mod app_state;
 pub mod clipboard;
@@ -15,7 +15,7 @@ pub use linking::{LinkingHost, module as linking};
 pub use native_plugins::module as native_plugins;
 pub use permissions::{PermissionsHost, module as permissions, permission_results};
 
-use session::PluginValue;
+use engine::session::PluginValue;
 
 pub(crate) fn str_arg(args: &[PluginValue]) -> String {
     match args.first() {
@@ -56,8 +56,8 @@ pub(crate) fn string_pairs(value: Option<&PluginValue>) -> Vec<(String, String)>
         .collect()
 }
 
-pub(crate) fn done_null() -> session::PluginResult {
-    session::PluginResult::Done(PluginValue::Null)
+pub(crate) fn done_null() -> engine::session::PluginResult {
+    engine::session::PluginResult::Done(PluginValue::Null)
 }
 
 #[cfg(test)]
@@ -65,7 +65,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use session::{
+    use engine::session::{
         HttpClient, Invoke, Method, MethodExec, Module, ModuleRegistry, PluginResult, PluginValue,
         Settle, Work,
     };
@@ -116,7 +116,7 @@ mod tests {
     fn host_module_table_includes_unknown_names() {
         let clip = MemoryClipboard::new("");
         let storage = MemoryStorage::new("/tmp/file-system");
-        let launch = session::shared(None);
+        let launch = engine::session::shared(None);
         let maps = Module {
             name: "Maps",
             exports: Default::default(),
@@ -258,7 +258,7 @@ mod tests {
             Err(error) => panic!("{error}"),
         };
         let started = Instant::now();
-        let result = client.perform(&session::HttpRequest {
+        let result = client.perform(&engine::session::HttpRequest {
             token: 1,
             method: "GET".to_owned(),
             url: format!("http://127.0.0.1:{port}/"),

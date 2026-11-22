@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use session::{
+use engine::session::{
     EventType, Method, MethodExec, Module, ModuleExports, PluginResult, PluginValue, Settle,
     Shared, shared_read,
 };

@@ -6,13 +6,11 @@ import type {
   Path2DConstructor,
 } from "./canvas/types.ts";
 import type { StyleInput } from "./style.ts";
-/** Stable scene-node handle. 0 means none, at the QuickJS boundary only. */
+
 export type AutofillHint = "username" | "password" | "newUsername" | "newPassword" | "emailAddress";
 
+/** Stable scene-node handle. 0 means none, at the QuickJS boundary only. */
 export type NodeHandle = number;
-
-export type { AxisSize, GridLine, InsetEdge } from "./layout-values.ts";
-import type { AxisSize, GridLine, InsetEdge } from "./layout-values.ts";
 
 /** Platform settings projected into the script. Field names match the session. */
 export type PlatformSnapshot = {
@@ -55,7 +53,7 @@ export type DisplayFeature = {
 
 export type GradientStopData = {
   offset: number;
-  color: [number, number, number, number];
+  color: string | [number, number, number, number];
 };
 
 export type SpanGradient = {
@@ -69,10 +67,10 @@ export type SpanGradient = {
   stops: GradientStopData[];
 };
 
-/** One run after color strings have been turned into bytes. */
+/** One structured text run, with optional foreground and gradient. */
 export type TextSpanData = {
   text: string;
-  color: [number, number, number, number];
+  color?: string | [number, number, number, number];
   weight?: number;
   family?: string;
   underline?: boolean;
@@ -85,10 +83,10 @@ export type TextSpanData = {
  * Handles are JS numbers. A live id is never 0.
  */
 export interface SceneModule {
-  insertNode(parent: number, child: number, before?: number): void;
-  column(gap: number): NodeHandle;
-  /** Column, min 0, shrink 0, no implicit max. */
-  view(): NodeHandle;
+  createElement(tag: string, props?: Record<string, unknown>): NodeHandle;
+  createTextNode(value: string | number): NodeHandle;
+  setProp(node: NodeHandle, name: string, value: unknown): void;
+  insertNode(parent: NodeHandle, child: NodeHandle, before?: NodeHandle): void;
   createStyleSource(
     node: NodeHandle,
     origin: "component" | "classes" | "inline" | "imperative" | "animation",
@@ -100,29 +98,8 @@ export interface SceneModule {
   clearStyle(node: NodeHandle, keys?: string[]): void;
   setClass(node: NodeHandle, text: string): void;
   setComponentStyle(node: NodeHandle, style: StyleInput): void;
-  row(gap: number): NodeHandle;
-  stack(): NodeHandle;
-  align(align: "start" | "center" | "end"): NodeHandle;
-  padding(edges: number): NodeHandle;
-  grid(columns: string[], rows: string[], gap: number): NodeHandle;
-  pointerRegion(): NodeHandle;
-  decorated(color: number[], radius: number): NodeHandle;
-  clip(radius: number): NodeHandle;
-  opacity(alpha: number): NodeHandle;
-  /** `0` both, `1` vertical, `2` horizontal. Omitted is both. */
-  scroll(axis?: number): NodeHandle;
-  transform(): NodeHandle;
-  image(
-    source: string,
-    width: number,
-    height: number,
-    mode?: string,
-    required?: boolean,
-  ): NodeHandle;
-  setImageMode(node: NodeHandle, mode: string, required: boolean): void;
-  text(utf8: string, fontSize: number, color: number[]): NodeHandle;
-  append(parent: NodeHandle, child: NodeHandle): void;
-  insert(parent: NodeHandle, child: NodeHandle, before: NodeHandle): void;
+  append(parent: NodeHandle, child: unknown): void;
+  insert(parent: NodeHandle, children: unknown, before?: NodeHandle | null): void;
   remove(parent: NodeHandle, child: NodeHandle): void;
   /** Unlink `child` and keep its id. Does not queue retirement. */
   detach(parent: NodeHandle, child: NodeHandle): void;
@@ -134,36 +111,6 @@ export interface SceneModule {
   isText(node: NodeHandle): boolean;
   setText(node: NodeHandle, utf8: string): void;
   setTextRuns(node: NodeHandle, runs: TextSpanData[]): void;
-  setFontSize(node: NodeHandle, fontSize: number): void;
-  setColor(node: NodeHandle, color: number[]): void;
-  setGap(node: NodeHandle, gap: number): void;
-  setPadding(node: NodeHandle, edges: number): void;
-  setPaddingEdges(
-    node: NodeHandle,
-    top: number,
-    right: number,
-    bottom: number,
-    left: number,
-  ): void;
-  setPaddingEdge(node: NodeHandle, edge: number, value: number): void;
-  setInsetEdge(node: NodeHandle, edge: number, value: number | null): void;
-  setTransformComponent(
-    node: NodeHandle,
-    component: number,
-    value: number,
-  ): void;
-  setSizeAxis(
-    node: NodeHandle,
-    axis: number,
-    kind: number,
-    value: number,
-  ): void;
-  setGridLine(
-    node: NodeHandle,
-    edge: number,
-    kind: number,
-    value: number,
-  ): void;
   placePanel(panel: NodeHandle, anchor: NodeHandle, align: number): void;
   reparentChildren(from: NodeHandle, to: NodeHandle): void;
   textCommand(
@@ -173,27 +120,6 @@ export interface SceneModule {
     recordUndo?: boolean,
   ): { text: string; start: number; end: number };
   setTextLimit(node: NodeHandle, limit: number): void;
-  setMargin(
-    node: NodeHandle,
-    top: number,
-    right: number,
-    bottom: number,
-    left: number,
-  ): void;
-  setMinSize(node: NodeHandle, width: number, height: number): void;
-  setMaxSize(node: NodeHandle, width: number, height: number): void;
-  setShrink(node: NodeHandle, shrink: number): void;
-  setBasis(node: NodeHandle, basis: number): void;
-  setAlignSelf(node: NodeHandle, align: "start" | "center" | "end"): void;
-  setGrow(node: NodeHandle, grow: number): void;
-  setRadius(node: NodeHandle, radius: number): void;
-  setAlpha(node: NodeHandle, alpha: number): void;
-  setAlign(node: NodeHandle, align: "start" | "center" | "end"): void;
-  setCross(
-    node: NodeHandle,
-    align: "start" | "center" | "end" | "stretch" | "baseline",
-  ): void;
-  setSize(node: NodeHandle, width: number, height: number): void;
   setImage(
     node: NodeHandle,
     source: string,
@@ -205,21 +131,7 @@ export interface SceneModule {
     node: NodeHandle,
     surface: "general" | "stack" | "scroll-viewport" | "list-content",
   ): void;
-  setMaxLines(node: NodeHandle, lines: number): void;
-  setEllipsis(node: NodeHandle, text: string): void;
-  setSoftWrap(node: NodeHandle, wrap: boolean): void;
-  setOverflow(
-    node: NodeHandle,
-    overflow: "clip" | "ellipsis" | "visible",
-  ): void;
-  setTextAlign(node: NodeHandle, align: "left" | "center" | "right"): void;
-  setFontWeight(node: NodeHandle, weight: number): void;
-  setTextDirection(node: NodeHandle, direction: "ltr" | "rtl"): void;
-  setLineHeight(node: NodeHandle, height: number): void;
-  setFamily(node: NodeHandle, family: string): void;
   setScrollOffset(node: NodeHandle, x: number, y: number): void;
-  /** `0` both, `1` vertical, `2` horizontal. */
-  setScrollAxis(node: NodeHandle, axis: number): void;
   overscroll(node: NodeHandle): { x: number; y: number };
   setScrollPhysics(
     node: NodeHandle,
@@ -253,26 +165,6 @@ export interface SceneModule {
   ): void;
   scrollOffset(node: NodeHandle): { x: number; y: number };
   rect(node: NodeHandle): { x: number; y: number; w: number; h: number };
-  setTransform(
-    node: NodeHandle,
-    x: number,
-    y: number,
-    rotate: number,
-    scale: number,
-  ): void;
-  setJustify(
-    node: NodeHandle,
-    justify:
-      | "start"
-      | "center"
-      | "end"
-      | "space-between"
-      | "space-around"
-      | "space-evenly",
-  ): void;
-  setWrap(node: NodeHandle, wrap: boolean): void;
-  setFill(node: NodeHandle): void;
-  sized(width: number, height: number): NodeHandle;
   setFocusable(node: NodeHandle, enabled: boolean): void;
   focus(node: NodeHandle): void;
   /** Clears focus. No argument: `Tree::focus(0)` is an unknown node. */
@@ -322,23 +214,6 @@ export interface SceneModule {
   graphemeUnit(text: string, index: number): number;
   registerFont(family: string, bytes: Uint8Array): void;
   reload(source: string): void;
-  setAxisSize(node: NodeHandle, width: AxisSize, height: AxisSize): void;
-  setAspectRatio(node: NodeHandle, ratio: number | null): void;
-  setPosition(node: NodeHandle, absolute: boolean): void;
-  setInset(
-    node: NodeHandle,
-    top: InsetEdge,
-    right: InsetEdge,
-    bottom: InsetEdge,
-    left: InsetEdge,
-  ): void;
-  setGridPlacement(
-    node: NodeHandle,
-    columnStart: GridLine,
-    columnEnd: GridLine,
-    rowStart: GridLine,
-    rowEnd: GridLine,
-  ): void;
   measureText(
     text: string,
     fontSize: number,

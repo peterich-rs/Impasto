@@ -1,7 +1,7 @@
 use std::collections::{HashSet, VecDeque};
 
-use session::{InputEvent, Metrics};
-use uicore::{Button, Buttons, Phase, PointerEvent, PointerId, PointerKind};
+use engine::input::{Button, Buttons, Phase, PointerEvent, PointerId, PointerKind};
+use engine::session::{InputEvent, Metrics};
 
 /// Last sample for one pointer. Used to legalize the packet, not to resample it.
 #[derive(Clone, Copy, Debug)]
@@ -12,8 +12,8 @@ struct Tracked {
     time_ms: f64,
     button: Button,
     buttons: Buttons,
-    modifiers: uicore::Modifiers,
-    pen: Option<uicore::PenSample>,
+    modifiers: engine::input::Modifiers,
+    pen: Option<engine::input::PenSample>,
     down: bool,
     moved: bool,
 }
@@ -135,7 +135,7 @@ impl PointerConverter {
                 time_ms: 0.0,
                 button: Button::None,
                 buttons: Buttons::empty(),
-                modifiers: uicore::Modifiers::empty(),
+                modifiers: engine::input::Modifiers::empty(),
                 dx: 0.0,
                 dy: 0.0,
                 zoom: 0.0,
@@ -334,8 +334,8 @@ impl Input {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use session::InputEvent;
-    use uicore::Phase;
+    use engine::input::Phase;
+    use engine::session::InputEvent;
 
     fn event(phase: Phase, x: f32) -> PointerEvent {
         PointerEvent::new(phase, x, 0.0, 0.0)
@@ -460,9 +460,11 @@ mod tests {
         let mut input = Input::new();
         assert!(input.push_input(InputEvent::Text("a".to_string())));
         input.pause();
-        assert!(!input.push_input(InputEvent::Key(session::KeyPress::new(
-            session::Key::Backspace
-        ))));
+        assert!(
+            !input.push_input(InputEvent::Key(engine::session::KeyPress::new(
+                engine::session::Key::Backspace
+            )))
+        );
         assert!(!input.dismiss_ime());
         let frame = input.begin_frame();
         assert!(frame.paused);
@@ -473,8 +475,8 @@ mod tests {
             next.events,
             vec![
                 FrameInput::Session(InputEvent::Text("a".to_string())),
-                FrameInput::Session(InputEvent::Key(session::KeyPress::new(
-                    session::Key::Backspace
+                FrameInput::Session(InputEvent::Key(engine::session::KeyPress::new(
+                    engine::session::Key::Backspace
                 ))),
                 FrameInput::DismissIme,
             ]

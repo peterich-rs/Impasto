@@ -5,12 +5,12 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use embedder::{Command, FrameToken, Lifecycle};
+use engine::session::{InputEvent as EditEvent, Key};
 use jni::objects::{JIntArray, JObject, JObjectArray, JString};
 use jni::sys::{jboolean, jint, jlong};
 use jni::{Env, EnvUnowned};
 use ndk::asset::AssetManager;
 use ndk::native_window::NativeWindow;
-use session::{InputEvent as EditEvent, Key};
 
 use super::{
     Attach, IME_HIDE, IME_UPDATE, Viewport, attach, configure_window_buffers, destroy_surface,
@@ -32,8 +32,8 @@ fn settings_from(
     reduce_motion: bool,
     bold_text: bool,
     high_contrast: bool,
-) -> session::PlatformSettings {
-    session::PlatformSettings {
+) -> engine::session::PlatformSettings {
+    engine::session::PlatformSettings {
         locale,
         text_scale: if text_scale.is_finite() && text_scale > 0.0 {
             text_scale
@@ -41,9 +41,9 @@ fn settings_from(
             1.0
         },
         brightness: if dark {
-            session::Brightness::Dark
+            engine::session::Brightness::Dark
         } else {
-            session::Brightness::Light
+            engine::session::Brightness::Light
         },
         reduce_motion,
         bold_text,
@@ -525,7 +525,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeBackGesture(
     phase: jint,
     value: f32,
 ) {
-    use session::BackGesture;
+    use engine::session::BackGesture;
     let Some(host) = host(handle) else {
         return;
     };
@@ -551,7 +551,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeWindowDisplay<'l
     density: f32,
     features: JIntArray<'local>,
 ) {
-    use session::{DisplayFeature, DisplayFeatureKind, FoldPosture, WindowDisplay};
+    use engine::session::{DisplayFeature, DisplayFeatureKind, FoldPosture, WindowDisplay};
     let Some(host) = host(handle) else { return };
     let features = with_env(&mut env, |env| {
         let length = features.len(env)?;
@@ -570,7 +570,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeWindowDisplay<'l
                     return None;
                 }
                 Some(DisplayFeature {
-                    bounds: uicore::Rect {
+                    bounds: engine::Rect {
                         x: x as f32 / density,
                         y: y as f32 / density,
                         w: w as f32 / density,
@@ -792,57 +792,58 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativePointer(
         return;
     };
     let kind = match kind {
-        1 => uicore::PointerKind::Mouse,
-        2 => uicore::PointerKind::Pen,
-        _ => uicore::PointerKind::Touch,
+        1 => engine::input::PointerKind::Mouse,
+        2 => engine::input::PointerKind::Pen,
+        _ => engine::input::PointerKind::Touch,
     };
     let button = match button {
-        1 => uicore::Button::Primary,
-        2 => uicore::Button::Secondary,
-        3 => uicore::Button::Auxiliary,
-        _ => uicore::Button::None,
+        1 => engine::input::Button::Primary,
+        2 => engine::input::Button::Secondary,
+        3 => engine::input::Button::Auxiliary,
+        _ => engine::input::Button::None,
     };
     if phase == 5 {
         let Some((dx, dy)) = android_wheel(wheel_x, wheel_y) else {
             return;
         };
-        let mut event = uicore::PointerEvent::wheel(x, y, time_ms as f64, dx, dy);
-        event.pointer = uicore::PointerId(pointer_id as u64);
+        let mut event = engine::input::PointerEvent::wheel(x, y, time_ms as f64, dx, dy);
+        event.pointer = engine::input::PointerId(pointer_id as u64);
         event.kind = kind;
-        event.modifiers = uicore::Modifiers::from_bits(modifiers as u8);
+        event.modifiers = engine::input::Modifiers::from_bits(modifiers as u8);
         host.link.post(Command::Pointer(event));
         return;
     }
     let (x, y) = if phase == 6 { (-1.0, -1.0) } else { (x, y) };
     let phase = match phase {
-        0 => uicore::Phase::Down,
-        1 | 4 | 6 => uicore::Phase::Move,
-        2 => uicore::Phase::Up,
-        3 => uicore::Phase::Cancel,
+        0 => engine::input::Phase::Down,
+        1 | 4 | 6 => engine::input::Phase::Move,
+        2 => engine::input::Phase::Up,
+        3 => engine::input::Phase::Cancel,
         _ => return,
     };
-    let button = if phase == uicore::Phase::Cancel {
-        uicore::Button::None
-    } else if kind == uicore::PointerKind::Touch && button == uicore::Button::None {
-        uicore::Button::Primary
+    let button = if phase == engine::input::Phase::Cancel {
+        engine::input::Button::None
+    } else if kind == engine::input::PointerKind::Touch && button == engine::input::Button::None {
+        engine::input::Button::Primary
     } else {
         button
     };
-    host.link.post(Command::Pointer(uicore::PointerEvent {
-        pointer: uicore::PointerId(pointer_id as u64),
-        kind,
-        phase,
-        x,
-        y,
-        time_ms: time_ms as f64,
-        button,
-        buttons: uicore::Buttons::from_bits(buttons as u8),
-        modifiers: uicore::Modifiers::from_bits(modifiers as u8),
-        dx: 0.0,
-        dy: 0.0,
-        zoom: 0.0,
-        pen: None,
-    }));
+    host.link
+        .post(Command::Pointer(engine::input::PointerEvent {
+            pointer: engine::input::PointerId(pointer_id as u64),
+            kind,
+            phase,
+            x,
+            y,
+            time_ms: time_ms as f64,
+            button,
+            buttons: engine::input::Buttons::from_bits(buttons as u8),
+            modifiers: engine::input::Modifiers::from_bits(modifiers as u8),
+            dx: 0.0,
+            dy: 0.0,
+            zoom: 0.0,
+            pen: None,
+        }));
 }
 
 #[unsafe(no_mangle)]
@@ -865,8 +866,8 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeZoom(
     if !scale.is_finite() || scale <= 0.0 {
         return;
     }
-    let mut event = uicore::PointerEvent::zoom(x, y, time_ms as f64, scale);
-    event.kind = uicore::PointerKind::Touch;
+    let mut event = engine::input::PointerEvent::zoom(x, y, time_ms as f64, scale);
+    event.kind = engine::input::PointerKind::Touch;
     host.link.post(Command::Pointer(event));
 }
 
@@ -982,10 +983,9 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeAction(
         return;
     };
     host.clear_pending();
-    host.link
-        .post(Command::Input(EditEvent::Key(session::KeyPress::new(
-            Key::Enter,
-        ))));
+    host.link.post(Command::Input(EditEvent::Key(
+        engine::session::KeyPress::new(Key::Enter),
+    )));
 }
 
 #[unsafe(no_mangle)]
@@ -1124,10 +1124,9 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeActivate(
     let Some(host) = host(handle) else {
         return;
     };
-    host.link
-        .post(Command::SemanticsAction(uicore::SemanticsAction::Activate(
-            uicore::SemanticsId(id as u64),
-        )));
+    host.link.post(Command::SemanticsAction(
+        engine::semantics::SemanticsAction::Activate(engine::semantics::SemanticsId(id as u64)),
+    ));
 }
 
 #[unsafe(no_mangle)]
@@ -1141,7 +1140,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeScroll(
     let Some(host) = host(handle) else {
         return;
     };
-    let id = uicore::SemanticsId(id as u64);
+    let id = engine::semantics::SemanticsId(id as u64);
     let (dx, dy) = {
         let nodes = host
             .bridge
@@ -1160,12 +1159,9 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeScroll(
     if dx == 0.0 && dy == 0.0 {
         return;
     }
-    host.link
-        .post(Command::SemanticsAction(uicore::SemanticsAction::Scroll {
-            id,
-            dx,
-            dy,
-        }));
+    host.link.post(Command::SemanticsAction(
+        engine::semantics::SemanticsAction::Scroll { id, dx, dy },
+    ));
 }
 
 #[unsafe(no_mangle)]
@@ -1181,11 +1177,12 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSetText<'local>(
             return Ok(());
         };
         let text = java_string(env, &text)?.unwrap_or_default();
-        host.link
-            .post(Command::SemanticsAction(uicore::SemanticsAction::SetText {
-                id: uicore::SemanticsId(id as u64),
+        host.link.post(Command::SemanticsAction(
+            engine::semantics::SemanticsAction::SetText {
+                id: engine::semantics::SemanticsId(id as u64),
                 text,
-            }));
+            },
+        ));
         Ok(())
     });
 }
@@ -1204,8 +1201,8 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeAutofill<'local>
         };
         let text = java_string(env, &text)?.unwrap_or_default();
         host.link.post(Command::SemanticsAction(
-            uicore::SemanticsAction::Autofill {
-                id: uicore::SemanticsId(id as u64),
+            engine::semantics::SemanticsAction::Autofill {
+                id: engine::semantics::SemanticsId(id as u64),
                 text,
             },
         ));
@@ -1226,8 +1223,8 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSetSelection(
         (host(handle), u32::try_from(start), u32::try_from(end))
     {
         host.link.post(Command::SemanticsAction(
-            uicore::SemanticsAction::SetSelection {
-                id: uicore::SemanticsId(id as u64),
+            engine::semantics::SemanticsAction::SetSelection {
+                id: engine::semantics::SemanticsId(id as u64),
                 start,
                 end,
             },

@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex, MutexGuard};
 
-use uicore::Phase;
+use engine::input::Phase;
 
 use crate::command::Command;
 
@@ -64,8 +64,8 @@ impl Inbox {
 }
 
 pub fn push_coalesced(commands: &mut VecDeque<Command>, command: Command) {
-    if let Command::BackGesture(session::BackGesture::Progress(next)) = command
-        && let Some(Command::BackGesture(session::BackGesture::Progress(previous))) =
+    if let Command::BackGesture(engine::session::BackGesture::Progress(next)) = command
+        && let Some(Command::BackGesture(engine::session::BackGesture::Progress(previous))) =
             commands.back_mut()
     {
         *previous = next;
@@ -111,7 +111,7 @@ fn lock(mutex: &Mutex<State>) -> MutexGuard<'_, State> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uicore::{Phase, PointerEvent};
+    use engine::input::{Phase, PointerEvent};
 
     fn move_event(x: f32, time_ms: f64) -> PointerEvent {
         PointerEvent::new(Phase::Move, x, 0.0, time_ms)

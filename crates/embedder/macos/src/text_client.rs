@@ -5,14 +5,14 @@
 //! callbacks that post [`InputEvent`]s, so those queries have a length to return.
 //! It does not decide editing policy.
 
-use session::{InputEvent, Key};
+use engine::session::{InputEvent, Key};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Marked {
     pub committed: String,
     pub composing: String,
     pub selection: std::ops::Range<u32>,
-    pub caret: uicore::Rect,
+    pub caret: engine::Rect,
 }
 
 impl Default for Marked {
@@ -21,7 +21,7 @@ impl Default for Marked {
             committed: String::new(),
             composing: String::new(),
             selection: 0..0,
-            caret: uicore::Rect {
+            caret: engine::Rect {
                 x: 0.0,
                 y: 0.0,
                 w: 0.0,
@@ -82,7 +82,9 @@ impl Marked {
         }
         pop_char(&mut self.committed);
         self.selection_at_end();
-        vec![InputEvent::Key(session::KeyPress::new(Key::Backspace))]
+        vec![InputEvent::Key(engine::session::KeyPress::new(
+            Key::Backspace,
+        ))]
     }
 
     fn selection_at_end(&mut self) {
@@ -97,7 +99,7 @@ impl Marked {
         text.encode_utf16().count()
     }
 
-    pub fn apply(&mut self, state: &session::ImeState) {
+    pub fn apply(&mut self, state: &engine::session::ImeState) {
         self.committed = state.text.clone();
         self.selection = state.selection.clone();
         self.caret = state.caret;
@@ -176,7 +178,9 @@ mod tests {
         marked.unmark();
         assert_eq!(
             marked.backspace(),
-            vec![InputEvent::Key(session::KeyPress::new(Key::Backspace))]
+            vec![InputEvent::Key(engine::session::KeyPress::new(
+                Key::Backspace
+            ))]
         );
         assert!(marked.committed.is_empty());
         assert!(marked.backspace().is_empty());

@@ -11,7 +11,7 @@ pub enum SessionError {
 #[derive(Debug, Error, Clone)]
 pub enum BootError {
     #[error("impeller context was not created: {0}")]
-    Engine(engine::Status),
+    Engine(raster::Status),
     #[error("font {0} was not provided")]
     Font(String),
     #[error(transparent)]
@@ -46,7 +46,7 @@ mod tests {
     #[test]
     fn startup_failures_use_the_process_status_table() {
         assert_eq!(BootError::Font("Sans".to_string()).code(), 2);
-        assert_eq!(BootError::Engine(engine::Status::NotLinked).code(), 2);
+        assert_eq!(BootError::Engine(raster::Status::NotLinked).code(), 2);
         assert_eq!(BootError::Session(SessionError::Runtime).code(), 3);
         assert_eq!(
             BootError::Session(SessionError::Script("bad".to_string())).code(),

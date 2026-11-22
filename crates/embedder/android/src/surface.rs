@@ -3,7 +3,9 @@
 #[cfg(feature = "impeller")]
 use embedder::SurfaceTarget;
 use embedder::{NativePtr, OpenSurface, Presented, Surface, SurfaceId};
-use engine::{AcquireFollowup, Engine, PixelSize, VulkanPhase, VulkanSwapchain, acquire_followup};
+use raster::{
+    AcquireFollowup, PixelSize, Rasterizer, VulkanPhase, VulkanSwapchain, acquire_followup,
+};
 
 #[derive(Clone, Copy)]
 pub(crate) enum Renderer {
@@ -21,18 +23,18 @@ struct VulkanProbe {
 }
 
 impl Renderer {
-    pub fn create_engine(self) -> Result<Engine, engine::Status> {
+    pub fn create_raster(self) -> Result<Rasterizer, raster::Status> {
         match self {
             #[cfg(feature = "impeller")]
-            Self::Auto if !Engine::vulkan_has_safe_shutdown() => {
+            Self::Auto if !Rasterizer::vulkan_has_safe_shutdown() => {
                 tracing::warn!(target: "impasto::render", "Impeller SDK lacks standalone Vulkan shutdown, using GLES");
                 create_gles()
             }
-            Self::Auto => Engine::create_vulkan().or_else(|error| {
+            Self::Auto => Rasterizer::create_vulkan().or_else(|error| {
                 tracing::warn!(target: "impasto::render", %error, "Vulkan unavailable, trying GLES");
                 create_gles()
             }),
-            Self::Vulkan => Engine::create_vulkan(),
+            Self::Vulkan => Rasterizer::create_vulkan(),
             Self::Gles => create_gles(),
         }
     }
@@ -70,7 +72,7 @@ impl Renderer {
                             probe.attempts = 0;
                         }
                         probe.attempts = probe.attempts.saturating_add(1);
-                        if probe.attempts >= 3 || error == engine::Status::DeviceLost {
+                        if probe.attempts >= 3 || error == raster::Status::DeviceLost {
                             tracing::warn!(target: "impasto::render::surface", surface = id.0, %error, "Vulkan window could not open, trying GLES");
                             engine.use_gles()?;
                             return open_gles(engine, target, notify);
@@ -83,23 +85,23 @@ impl Renderer {
     }
 }
 
-fn create_gles() -> Result<Engine, engine::Status> {
+fn create_gles() -> Result<Rasterizer, raster::Status> {
     #[cfg(feature = "impeller")]
     {
-        Engine::create_gles()
+        Rasterizer::create_gles()
     }
     #[cfg(not(feature = "impeller"))]
     {
-        Err(engine::Status::NotLinked)
+        Err(raster::Status::NotLinked)
     }
 }
 
 #[cfg(feature = "impeller")]
 fn open_gles(
-    engine: &Engine,
+    engine: &Rasterizer,
     target: SurfaceTarget,
     first_frame: impl FnOnce() + 'static,
-) -> Result<Box<dyn Surface>, engine::Status> {
+) -> Result<Box<dyn Surface>, raster::Status> {
     let id = target.id;
     let surface = GlesSurface::open(engine, target, first_frame)?;
     tracing::info!(target: "impasto::render::surface", surface = id.0, backend = "gles", "Android surface opened");
@@ -109,7 +111,7 @@ fn open_gles(
 #[cfg(feature = "impeller")]
 struct GlesSurface {
     native: NativePtr,
-    window: Option<engine::GlesWindow>,
+    window: Option<raster::GlesWindow>,
     pixels: PixelSize,
     first_frame: Option<Box<dyn FnOnce()>>,
 }
@@ -117,10 +119,10 @@ struct GlesSurface {
 #[cfg(feature = "impeller")]
 impl GlesSurface {
     fn open(
-        engine: &Engine,
+        engine: &Rasterizer,
         target: SurfaceTarget,
         first_frame: impl FnOnce() + 'static,
-    ) -> Result<Self, engine::Status> {
+    ) -> Result<Self, raster::Status> {
         // SAFETY: the Android host owns this window until surface teardown is acknowledged.
         let window = unsafe { engine.create_gles_window(target.layer.0)? };
         Ok(Self {
@@ -134,17 +136,17 @@ impl GlesSurface {
 
 #[cfg(feature = "impeller")]
 impl Surface for GlesSurface {
-    fn recover_device(&mut self, engine: &mut Engine) -> Result<(), engine::Status> {
+    fn recover_device(&mut self, engine: &mut Rasterizer) -> Result<(), raster::Status> {
         self.window = None;
-        engine.recreate_graphics(Engine::create_gles)
+        engine.recreate_graphics(Rasterizer::create_gles)
     }
 
     fn present(
         &mut self,
-        engine: &mut Engine,
+        engine: &mut Rasterizer,
         pixels: PixelSize,
-    ) -> Result<Presented, engine::Status> {
-        let _trace = session::trace::Section::begin(c"Impasto GLES draw and swap");
+    ) -> Result<Presented, raster::Status> {
+        let _trace = engine::session::trace::Section::begin(c"Impasto GLES draw and swap");
         if pixels.is_usable() && pixels != self.pixels {
             self.window = None;
             self.pixels = pixels;
@@ -155,7 +157,7 @@ impl Surface for GlesSurface {
             slot @ None => slot.insert(unsafe { engine.create_gles_window(self.native.0)? }),
         };
         let result = engine.draw_gles(window, self.pixels);
-        if result == Err(engine::Status::SurfaceLost) {
+        if result == Err(raster::Status::SurfaceLost) {
             self.window = None;
         }
         result?;
@@ -190,17 +192,17 @@ impl VulkanSurface {
 
 impl Surface for VulkanSurface {
     #[cfg(feature = "impeller")]
-    fn recover_device(&mut self, engine: &mut Engine) -> Result<(), engine::Status> {
+    fn recover_device(&mut self, engine: &mut Rasterizer) -> Result<(), raster::Status> {
         self.swapchain = None;
         self.misses = 0;
-        engine.recreate_graphics(Engine::create_vulkan)
+        engine.recreate_graphics(Rasterizer::create_vulkan)
     }
 
     fn present(
         &mut self,
-        engine: &mut Engine,
+        engine: &mut Rasterizer,
         pixels: PixelSize,
-    ) -> Result<Presented, engine::Status> {
+    ) -> Result<Presented, raster::Status> {
         // The standalone Impeller API has no equivalent of UpdateSurfaceSize.
         // Some drivers keep acquiring old-sized buffers after a window resize.
         if pixels.is_usable()
@@ -218,7 +220,7 @@ impl Surface for VulkanSurface {
             slot @ None => slot.insert(engine.create_swapchain(self.window.0, pixels)?),
         };
         let drawn = engine.draw_vulkan_with_trace(swapchain, |phase| {
-            session::trace::Section::begin(match phase {
+            engine::session::trace::Section::begin(match phase {
                 VulkanPhase::Acquire => c"Impasto Vulkan acquire",
                 VulkanPhase::Draw => c"Impasto Vulkan draw",
                 VulkanPhase::Present => c"Impasto Vulkan present",
@@ -232,18 +234,18 @@ impl Surface for VulkanSurface {
                 }
                 Ok(Presented::Continue)
             }
-            Err(engine::Status::AcquireMiss) => {
+            Err(raster::Status::AcquireMiss) => {
                 self.misses = self.misses.saturating_add(1);
                 if acquire_followup(self.misses) == AcquireFollowup::Rebuild {
                     self.swapchain = None;
                     self.misses = 0;
                 }
-                Err(engine::Status::AcquireMiss)
+                Err(raster::Status::AcquireMiss)
             }
-            Err(engine::Status::SurfaceLost) => {
+            Err(raster::Status::SurfaceLost) => {
                 self.swapchain = None;
                 self.misses = 0;
-                Err(engine::Status::SurfaceLost)
+                Err(raster::Status::SurfaceLost)
             }
             Err(status) => {
                 self.misses = 0;

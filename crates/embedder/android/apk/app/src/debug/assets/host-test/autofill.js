@@ -1,9 +1,9 @@
 import * as scene from "scene";
 import { setRestorationState } from "@impasto/app-state";
 
-const column = scene.column(0);
-const field = scene.view();
-scene.setSize(field, 128, 48);
+const column = scene.createElement("view");
+const field = scene.createElement("view");
+scene.patchStyle(field, { width: 128, height: 48 });
 scene.append(column, field);
 const publish = (value) => scene.setSemantics(
   field, 6, "Test password", undefined, -1, -1, -1, 0, 1, 0, "",

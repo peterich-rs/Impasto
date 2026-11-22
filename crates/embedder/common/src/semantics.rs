@@ -2,27 +2,27 @@
 
 use std::collections::HashMap;
 
-use uicore::{SemanticsId, SemanticsNode, SemanticsRole, SemanticsUpdate};
+use engine::semantics::{SemanticsId, SemanticsNode, SemanticsRole, SemanticsUpdate};
 
 /// A node after Generic parents have been skipped, with scroll extent already resolved.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectedNode {
     pub id: SemanticsId,
     pub parent: Option<SemanticsId>,
-    pub rect: uicore::Rect,
+    pub rect: engine::Rect,
     pub role: SemanticsRole,
     pub label: String,
     pub value: String,
     pub help: String,
-    pub autofill: Option<uicore::AutofillField>,
-    pub actions: uicore::SemanticsActions,
-    pub flags: uicore::SemanticsFlags,
+    pub autofill: Option<engine::semantics::AutofillField>,
+    pub actions: engine::semantics::SemanticsActions,
+    pub flags: engine::semantics::SemanticsFlags,
     pub selection: Option<(u32, u32)>,
     pub scroll_offset: (f32, f32),
     pub content: (f32, f32),
     pub scroll_forward: (f32, f32),
     pub scroll_backward: (f32, f32),
-    pub live: uicore::LiveRegion,
+    pub live: engine::semantics::LiveRegion,
 }
 
 /// Drop Generic nodes. Scroll extent and step are computed once, here.
@@ -49,9 +49,11 @@ pub(crate) fn project_with_platform_views(
         .iter()
         .filter(|node| {
             node.role != SemanticsRole::Generic
-                || node.live != uicore::LiveRegion::Off
+                || node.live != engine::semantics::LiveRegion::Off
                 || (include_platform_views
-                    && node.flags.contains(uicore::SemanticsFlags::PLATFORM_VIEW))
+                    && node
+                        .flags
+                        .contains(engine::semantics::SemanticsFlags::PLATFORM_VIEW))
         })
         .map(|node| {
             let content = node
@@ -59,7 +61,9 @@ pub(crate) fn project_with_platform_views(
                 .or_else(|| extents.get(&node.id).copied())
                 .unwrap_or((node.rect.w, node.rect.h));
             let (forward, backward) = if node.role == SemanticsRole::Scroll
-                || node.actions.contains(uicore::SemanticsActions::SCROLL)
+                || node
+                    .actions
+                    .contains(engine::semantics::SemanticsActions::SCROLL)
             {
                 (
                     scroll_step(node.rect.w, node.rect.h, content.0, content.1, true),
@@ -150,7 +154,7 @@ pub fn scroll_step(
 #[cfg(test)]
 mod tests {
     use super::{content_extent, project, scroll_step};
-    use uicore::{
+    use engine::semantics::{
         SemanticsActions, SemanticsFlags, SemanticsId, SemanticsNode, SemanticsRole,
         SemanticsUpdate,
     };
@@ -159,7 +163,7 @@ mod tests {
         SemanticsNode {
             id: SemanticsId(id),
             parent: parent.map(SemanticsId),
-            rect: uicore::Rect {
+            rect: engine::Rect {
                 x: 0.0,
                 y: 0.0,
                 w,
@@ -175,7 +179,7 @@ mod tests {
             caret: None,
             description: None,
             autofill: None,
-            live: uicore::LiveRegion::Off,
+            live: engine::semantics::LiveRegion::Off,
             scroll_content: None,
         }
     }

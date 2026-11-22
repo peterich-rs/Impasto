@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
 use std::time::Duration;
 
-use session::{
+use engine::session::{
     Credit, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, IoEvent, IoJob, Route,
 };
 
@@ -201,41 +201,7 @@ impl Post {
             }
             return;
         }
-        self.inbox.post(match event {
-            IoEvent::Http { token, result } => Command::HttpDone { token, result },
-            IoEvent::HttpHead {
-                token,
-                status,
-                headers,
-            } => Command::HttpHead {
-                token,
-                status,
-                headers,
-            },
-            IoEvent::HttpChunk {
-                token,
-                bytes,
-                done,
-                error,
-            } => Command::HttpChunk {
-                token,
-                bytes,
-                done,
-                error,
-            },
-            IoEvent::Socket {
-                id,
-                event,
-                text,
-                data,
-            } => Command::Socket {
-                id,
-                event,
-                text,
-                data,
-            },
-            _ => return,
-        });
+        self.inbox.post(Command::Io(event));
     }
 
     fn http_failure(&self, token: u64, streaming: bool, error: HttpError) {
@@ -374,7 +340,7 @@ fn execute_http(
             }
             HttpPiece::Chunk(bytes, done) if head_seen => {
                 total = total.saturating_add(bytes.len());
-                if total > session::HTTP_BODY_LIMIT {
+                if total > engine::session::HTTP_BODY_LIMIT {
                     stopped = true;
                     return false;
                 }
@@ -814,7 +780,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
-    use session::{HttpClient, HttpRequest};
+    use engine::session::{HttpClient, HttpRequest};
 
     use crate::http::OpenWireClient;
 
@@ -919,8 +885,8 @@ mod tests {
             &request(&format!("http://127.0.0.1:{port}/")),
             &mut |piece| {
                 match piece {
-                    session::HttpPiece::Head(status, _) => head = Some(status),
-                    session::HttpPiece::Chunk(bytes, done) => {
+                    engine::session::HttpPiece::Head(status, _) => head = Some(status),
+                    engine::session::HttpPiece::Chunk(bytes, done) => {
                         body.extend_from_slice(bytes);
                         if done {
                             closed = true;
@@ -944,25 +910,25 @@ mod tests {
             fn perform(
                 &self,
                 _request: &HttpRequest,
-            ) -> Result<session::HttpResponse, session::HttpError> {
+            ) -> Result<engine::session::HttpResponse, engine::session::HttpError> {
                 unreachable!("stream is the path under test");
             }
             fn stream(
                 &self,
                 _request: &HttpRequest,
-                sink: &mut dyn FnMut(session::HttpPiece<'_>) -> bool,
-            ) -> Result<(), session::HttpError> {
-                assert!(sink(session::HttpPiece::Head(200, &[])));
+                sink: &mut dyn FnMut(engine::session::HttpPiece<'_>) -> bool,
+            ) -> Result<(), engine::session::HttpError> {
+                assert!(sink(engine::session::HttpPiece::Head(200, &[])));
                 // The sink turns false once the cancel flag flips; emulate a
                 // consumer that rejects the second piece.
-                sink(session::HttpPiece::Chunk(b"one", false));
-                sink(session::HttpPiece::Chunk(b"two", false));
+                sink(engine::session::HttpPiece::Chunk(b"one", false));
+                sink(engine::session::HttpPiece::Chunk(b"two", false));
                 Ok(())
             }
         }
         let mut seen = 0;
         let outcome = CancelFirst.stream(&request("http://127.0.0.1:1/"), &mut |piece| {
-            if matches!(piece, session::HttpPiece::Chunk(..)) {
+            if matches!(piece, engine::session::HttpPiece::Chunk(..)) {
                 seen += 1;
                 return seen < 2;
             }
@@ -978,7 +944,7 @@ mod tests {
 #[cfg(test)]
 mod routing_tests {
     use super::*;
-    use session::{CreditPool, HttpResponse, RequestKey, RuntimeKey};
+    use engine::session::{CreditPool, HttpResponse, RequestKey, RuntimeKey};
     use std::net::TcpListener;
     use std::sync::atomic::AtomicBool;
 

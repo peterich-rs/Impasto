@@ -1,6 +1,6 @@
 fn sample_gallery_frames() {
     let started = std::time::Instant::now();
-    let empty = open("", "empty.js", uicore::MonoShaper::default(), no_log()).expect("empty UI");
+    let empty = open("", "empty.js", crate::text::MonoShaper::default(), no_log()).expect("empty UI");
     println!(
         "SAMPLE ui-start {:.3}",
         started.elapsed().as_secs_f64() * 1_000_000.0

@@ -4,10 +4,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use dispatch2::DispatchQueue;
 use embedder::Command;
-use engine::Status;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_quartz_core::CAMetalDrawable;
+use raster::Status;
 
 use super::{Event, Events, ImpastoIOSHost, input, with_host};
 use crate::surface::LayerLease;
@@ -120,7 +120,7 @@ impl Compositor {
         surface: u64,
         drawables: Vec<Retained<Drawable>>,
         resets: bool,
-        views: &[uicore::PlatformViewPlacement],
+        views: &[engine::tree::PlatformViewPlacement],
         events: &Events,
     ) -> Result<(), Status> {
         let mut state = self.lock();

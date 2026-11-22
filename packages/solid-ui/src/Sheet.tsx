@@ -131,7 +131,7 @@ export function Sheet(props: SheetProps): NodeHandle {
       return null;
     }
     const overlay = nodeId(overlayParent());
-    const shell = scene.stack();
+    const shell = scene.createElement("stack");
     scene.setComponentStyle(shell, {
       gridTemplateColumns: "minmax(0, 1fr)",
       gridTemplateRows: "minmax(0, 1fr)",

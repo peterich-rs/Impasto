@@ -45,17 +45,16 @@ function unlink(child: number): void {
 }
 
 const host = {
-  view: () => alloc("view"),
   setStyle: () => {},
-  column: () => alloc("column"),
-  text: (value?: string) => {
+  createElement: (tag: string) => alloc(tag),
+  createTextNode: (value: string | number) => {
     const id = alloc("text");
     if (value !== undefined) {
-      texts.set(id, value);
+      texts.set(id, String(value));
     }
     return id;
   },
-  insert(parent: number, child: number, before: number) {
+  insertNode(parent: number, child: number, before = 0) {
     unlink(child);
     const parentNode = nodes.get(parent);
     const childNode = nodes.get(child);
@@ -129,7 +128,7 @@ const createSlot = bindSlot({
   forget: (id) => {
     scene.forget(id);
   },
-  scene: { ...host, insertNode: host.insert },
+  scene: host,
 });
 
 const seen = { flag: false, reads: 0 };
@@ -193,7 +192,7 @@ assert.equal(texts.get(labeledText), "Item 9");
 labeled.discard();
 
 const compiled = createSlot({ n: 3 }, 0, (item) => {
-  const row = scene.createElement("column");
+  const row = scene.createElement("view");
   insert(
     row,
     createComponent(Text, {

@@ -38,7 +38,8 @@ impl ImageDecoder for Decoder {
 
     fn decode_at(&self, source: &str, scale_bucket: u8) -> Result<ImageHandle, ImageError> {
         let relative = source.strip_prefix("asset:").ok_or(ImageError::Missing)?;
-        let relative = session::document_relative(relative).map_err(|_| ImageError::Missing)?;
+        let relative =
+            engine::session::document_relative(relative).map_err(|_| ImageError::Missing)?;
         let densities = match scale_bucket {
             3 => ["@3x", "@2x", ""],
             2 => ["@2x", "@3x", ""],

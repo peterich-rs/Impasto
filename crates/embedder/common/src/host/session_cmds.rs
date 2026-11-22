@@ -1,4 +1,4 @@
-use session::{IoEvent, Metrics, PlatformSettings};
+use engine::session::{Metrics, PlatformSettings};
 
 use super::{Runtime, arm, flush_gpu, note_wake, session_call};
 use crate::command::Command;
@@ -20,12 +20,14 @@ pub(super) fn handle(runtime: &mut Runtime, command: Command) -> Result<bool, Bo
         | Command::AutofillEnabled(_)
         | Command::SemanticsAction(_)
         | Command::LaunchUrl(_)) => session(runtime, command),
-        command @ (Command::JsIo(_)
-        | Command::HttpDone { .. }
-        | Command::HttpHead { .. }
-        | Command::HttpChunk { .. }
-        | Command::PluginDone { .. }
-        | Command::Socket { .. }) => io(runtime, command),
+        Command::JsIo(delivery) => {
+            io_done(runtime, |session| session.io_delivery(delivery));
+            Ok(false)
+        }
+        Command::Io(event) => {
+            io_done(runtime, |session| session.io_event(event));
+            Ok(false)
+        }
         _ => Ok(false),
     }
 }
@@ -118,51 +120,6 @@ fn renew_semantics(runtime: &mut Runtime) {
     }
 }
 
-fn io(runtime: &mut Runtime, command: Command) -> Result<bool, BootError> {
-    let event = match command {
-        Command::JsIo(delivery) => {
-            io_done(runtime, |session| session.io_delivery(delivery));
-            return Ok(false);
-        }
-        Command::HttpDone { token, result } => IoEvent::Http { token, result },
-        Command::HttpHead {
-            token,
-            status,
-            headers,
-        } => IoEvent::HttpHead {
-            token,
-            status,
-            headers,
-        },
-        Command::HttpChunk {
-            token,
-            bytes,
-            done,
-            error,
-        } => IoEvent::HttpChunk {
-            token,
-            bytes,
-            done,
-            error,
-        },
-        Command::PluginDone { token, result } => IoEvent::Plugin { token, result },
-        Command::Socket {
-            id,
-            event,
-            text,
-            data,
-        } => IoEvent::Socket {
-            id,
-            event,
-            text,
-            data,
-        },
-        _ => return Ok(false),
-    };
-    io_done(runtime, |session| session.io_event(event));
-    Ok(false)
-}
-
 fn metrics_cmd(runtime: &mut Runtime, metrics: Metrics) {
     super::note_scale(runtime, metrics.device_pixel_ratio);
     if let Some(hub) = runtime.hub.as_ref() {
@@ -173,7 +130,7 @@ fn metrics_cmd(runtime: &mut Runtime, metrics: Metrics) {
     }
 }
 
-fn lifecycle(runtime: &mut Runtime, state: session::Lifecycle) {
+fn lifecycle(runtime: &mut Runtime, state: engine::session::Lifecycle) {
     let deadline = runtime.session.as_mut().map(|session| {
         session_call(|| session.lifecycle(state));
         session.next_wake_ms().map(crate::net::ms_i64)
@@ -182,11 +139,11 @@ fn lifecycle(runtime: &mut Runtime, state: session::Lifecycle) {
         note_wake(runtime, deadline);
     }
     let arm_frame = match (state, runtime.input.is_paused()) {
-        (session::Lifecycle::Hidden | session::Lifecycle::Paused, _) => {
+        (engine::session::Lifecycle::Hidden | engine::session::Lifecycle::Paused, _) => {
             flush_gpu(runtime, "trim");
             runtime.input.pause()
         }
-        (session::Lifecycle::Resumed, _) | (session::Lifecycle::Inactive, true) => {
+        (engine::session::Lifecycle::Resumed, _) | (engine::session::Lifecycle::Inactive, true) => {
             runtime.needs_present = true;
             runtime.present_failures = 0;
             runtime.present_retry_at = None;
@@ -197,7 +154,8 @@ fn lifecycle(runtime: &mut Runtime, state: session::Lifecycle) {
             runtime.vsync.cancel();
             runtime.input.resume()
         }
-        (session::Lifecycle::Inactive, false) | (session::Lifecycle::Detached, _) => false,
+        (engine::session::Lifecycle::Inactive, false)
+        | (engine::session::Lifecycle::Detached, _) => false,
     };
     if arm_frame {
         arm(runtime);
@@ -226,7 +184,7 @@ fn launch_url(runtime: &mut Runtime, url: String) {
 }
 
 /// Session-side IO completion: deliver the event, arm a frame if the session asks.
-fn io_done(runtime: &mut Runtime, dispatch: impl FnOnce(&mut dyn session::Session)) {
+fn io_done(runtime: &mut Runtime, dispatch: impl FnOnce(&mut dyn engine::session::Session)) {
     if let Some(session) = runtime.session.as_mut() {
         session_call(|| dispatch(session.as_mut()));
         let wants_frame = session.wants_frame();

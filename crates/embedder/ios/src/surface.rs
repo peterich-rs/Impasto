@@ -6,12 +6,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use embedder::{NativePtr, Presented, Surface, SurfaceId, SurfaceTarget};
-use engine::{Engine, PixelSize, Status};
 use objc2::rc::Retained;
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
 use objc2::sel;
 use objc2_metal::{MTLDrawable, MTLTexture};
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
+use raster::{PixelSize, Rasterizer, Status};
 
 use crate::bridge::compositor::Compositor;
 use crate::bridge::{Event, Events};
@@ -85,7 +85,7 @@ impl MetalSurface {
         }
     }
 
-    fn draw(&mut self, engine: &mut Engine, pixels: PixelSize) -> Result<Presented, Status> {
+    fn draw(&mut self, engine: &mut Rasterizer, pixels: PixelSize) -> Result<Presented, Status> {
         let id = self.target.id;
         if !self.gate.allows(id) {
             return Err(Status::AcquireMiss);
@@ -135,9 +135,9 @@ impl MetalSurface {
 
     fn compose(
         &mut self,
-        engine: &mut Engine,
+        engine: &mut Rasterizer,
         pixels: PixelSize,
-        views: &[uicore::PlatformViewPlacement],
+        views: &[engine::tree::PlatformViewPlacement],
     ) -> Result<Presented, Status> {
         let id = self.target.id;
         if !self.gate.allows(id) {
@@ -191,15 +191,15 @@ fn acquire(
 }
 
 impl Surface for MetalSurface {
-    fn present(&mut self, engine: &mut Engine, pixels: PixelSize) -> Result<Presented, Status> {
+    fn present(&mut self, engine: &mut Rasterizer, pixels: PixelSize) -> Result<Presented, Status> {
         objc2::rc::autoreleasepool(|_| self.draw(engine, pixels))
     }
 
     fn present_with_views(
         &mut self,
-        engine: &mut Engine,
+        engine: &mut Rasterizer,
         pixels: PixelSize,
-        views: &[uicore::PlatformViewPlacement],
+        views: &[engine::tree::PlatformViewPlacement],
     ) -> Result<Presented, Status> {
         let result = objc2::rc::autoreleasepool(|_| self.compose(engine, pixels, views));
         match result {
@@ -215,8 +215,8 @@ impl Surface for MetalSurface {
         result
     }
 
-    fn recover_device(&mut self, engine: &mut Engine) -> Result<(), Status> {
+    fn recover_device(&mut self, engine: &mut Rasterizer) -> Result<(), Status> {
         self.encode_failures = 0;
-        engine.recreate_graphics(Engine::create_metal)
+        engine.recreate_graphics(Rasterizer::create_metal)
     }
 }

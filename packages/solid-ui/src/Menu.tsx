@@ -48,7 +48,7 @@ function Floating(props: MenuProps & { place: (panel: number) => void }): NodeHa
       return;
     }
     const overlay = nodeId(overlayParent());
-    shell = scene.stack();
+    shell = scene.createElement("stack");
     scene.setComponentStyle(shell, {
       gridTemplateColumns: "minmax(0, 1fr)",
       gridTemplateRows: "minmax(0, 1fr)",

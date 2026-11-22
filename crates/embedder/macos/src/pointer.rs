@@ -1,6 +1,6 @@
 //! Pointer samples stay in scene points. AppKit already reports those points.
 
-use uicore::{Button, Modifiers, Phase, PointerEvent};
+use engine::input::{Button, Modifiers, Phase, PointerEvent};
 
 /// One AppKit sample before it is flipped into scene points.
 pub struct PointerSample {
@@ -39,14 +39,14 @@ pub fn pointer_event(
 ) -> PointerEvent {
     let (x, y) = scene_point(sample.local_x, sample.local_y, sample.view_height);
     PointerEvent {
-        pointer: uicore::PointerId(0),
-        kind: uicore::PointerKind::Mouse,
+        pointer: engine::input::PointerId(0),
+        kind: engine::input::PointerKind::Mouse,
         phase: sample.phase,
         x,
         y,
         time_ms: sample.time_ms,
         button,
-        buttons: uicore::Buttons::from_button(button),
+        buttons: engine::input::Buttons::from_button(button),
         modifiers,
         dx,
         dy,
@@ -58,7 +58,7 @@ pub fn pointer_event(
 #[cfg(test)]
 mod tests {
     use super::{PointerSample, pointer_event, scene_point};
-    use uicore::{Button, Modifiers, Phase};
+    use engine::input::{Button, Modifiers, Phase};
 
     #[test]
     fn top_left_of_the_view_is_the_scene_origin() {

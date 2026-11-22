@@ -189,19 +189,19 @@ void check();
             modules.retain(|module| !matches!(module.name, "FileSystem" | "AsyncStorage"));
             modules.push(embedder::file_system(Arc::clone(&storage) as _));
             modules.push(embedder::async_storage(storage));
-            let config = session::ModuleConfig {
-                registry: Arc::new(session::ModuleRegistry::new(modules)),
+            let config = engine::session::ModuleConfig {
+                registry: Arc::new(engine::session::ModuleRegistry::new(modules)),
                 post_delivery: None,
                 settle: Arc::new(move |token| {
                     let tx = tx.clone();
-                    session::Settle::new(move |result| {
-                        let _ = tx.send(session::IoEvent::Plugin { token, result });
+                    engine::session::Settle::new(move |result| {
+                        let _ = tx.send(engine::session::IoEvent::Plugin { token, result });
                     })
                 }),
-                ..session::ModuleConfig::disconnected()
+                ..engine::session::ModuleConfig::disconnected()
             };
             let completed = Arc::new(AtomicBool::new(false));
-            let log: javascript::ui::ConsoleLog = Box::new({
+            let log: engine::js::ConsoleLog = Box::new({
                 let completed = Arc::clone(&completed);
                 move |_, line| {
                     if line == "capabilities passed" {
@@ -209,30 +209,30 @@ void check();
                     }
                 }
             });
-            let shaper = uicore::MonoShaper::default();
+            let shaper = engine::text::MonoShaper::default();
             let mut session = if debug {
                 let source = fs::read(sandbox.0.join("build/app.js")).expect("ESM bundle");
-                javascript::ui::open_program_with_io(&source, "app.js", shaper, log, None, config)
+                engine::js::open_program_with_io(&source, "app.js", shaper, log, None, config)
             } else {
                 let source = fs::read(sandbox.0.join("build/app.bin")).expect("bytecode bundle");
                 // SAFETY: this test loads only the artifact built above by the pinned CLI.
                 #[expect(unsafe_code, reason = "loads this test's own compiled artifact")]
                 unsafe {
-                    javascript::ui::open_trusted_bytecode_with_io(
+                    engine::js::open_trusted_bytecode_with_io(
                         &source, "app.bin", shaper, log, None, config,
                     )
                 }
             }
             .expect("link capability imports");
-            session.metrics(&session::Metrics::new(360.0, 640.0, 1.0));
+            session.metrics(&engine::session::Metrics::new(360.0, 640.0, 1.0));
             session.set_launch_url("demo://open");
-            session.lifecycle(session::Lifecycle::Inactive);
+            session.lifecycle(engine::session::Lifecycle::Inactive);
             session.window_focus(false);
             for step in 0..8 {
                 for event in rx.try_iter() {
                     session.io_event(event);
                 }
-                session.frame(session::FrameTime::at(f64::from(step) * 16.0));
+                session.frame(engine::session::FrameTime::at(f64::from(step) * 16.0));
             }
             let faults = session.take_faults();
             assert!(faults.is_empty(), "{faults:?}");

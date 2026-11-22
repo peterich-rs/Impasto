@@ -19,14 +19,14 @@ use objc2_foundation::{NSArray, NSNumber, NSPoint, NSRange, NSRect, NSString};
 /// One non-Generic node after Generic ancestors have been skipped.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VisibleNode {
-    pub id: uicore::SemanticsId,
-    pub parent: Option<uicore::SemanticsId>,
-    pub rect: uicore::Rect,
-    pub role: uicore::SemanticsRole,
+    pub id: engine::semantics::SemanticsId,
+    pub parent: Option<engine::semantics::SemanticsId>,
+    pub rect: engine::Rect,
+    pub role: engine::semantics::SemanticsRole,
     pub label: String,
     pub help: String,
-    pub actions: uicore::SemanticsActions,
-    pub flags: uicore::SemanticsFlags,
+    pub actions: engine::semantics::SemanticsActions,
+    pub flags: engine::semantics::SemanticsFlags,
     /// Selection, or a collapsed caret. Empty when the node has neither.
     pub selection: Option<(u32, u32)>,
 }
@@ -45,7 +45,7 @@ pub enum AxRole {
     TextArea,
 }
 
-/// Stable slot for one [`uicore::SemanticsId`]. Disappeared ids are dropped.
+/// Stable slot for one [`engine::semantics::SemanticsId`]. Disappeared ids are dropped.
 #[cfg(test)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ElementCache {
@@ -94,26 +94,26 @@ pub fn visible_nodes(nodes: &[embedder::ProjectedNode]) -> Vec<VisibleNode> {
 
 /// Button, Text, Image, TextField, Switch→CheckBox, Scroll. Generic is not an element.
 #[cfg(test)]
-pub fn ax_role(role: uicore::SemanticsRole) -> Option<AxRole> {
+pub fn ax_role(role: engine::semantics::SemanticsRole) -> Option<AxRole> {
     match role {
-        uicore::SemanticsRole::Generic => None,
-        uicore::SemanticsRole::Button => Some(AxRole::Button),
-        uicore::SemanticsRole::Text => Some(AxRole::StaticText),
-        uicore::SemanticsRole::Image => Some(AxRole::Image),
-        uicore::SemanticsRole::Scroll => Some(AxRole::ScrollArea),
-        uicore::SemanticsRole::Switch => Some(AxRole::CheckBox),
-        uicore::SemanticsRole::TextField => Some(AxRole::TextField),
-        uicore::SemanticsRole::SearchField => Some(AxRole::SearchField),
-        uicore::SemanticsRole::TextArea => Some(AxRole::TextArea),
+        engine::semantics::SemanticsRole::Generic => None,
+        engine::semantics::SemanticsRole::Button => Some(AxRole::Button),
+        engine::semantics::SemanticsRole::Text => Some(AxRole::StaticText),
+        engine::semantics::SemanticsRole::Image => Some(AxRole::Image),
+        engine::semantics::SemanticsRole::Scroll => Some(AxRole::ScrollArea),
+        engine::semantics::SemanticsRole::Switch => Some(AxRole::CheckBox),
+        engine::semantics::SemanticsRole::TextField => Some(AxRole::TextField),
+        engine::semantics::SemanticsRole::SearchField => Some(AxRole::SearchField),
+        engine::semantics::SemanticsRole::TextArea => Some(AxRole::TextArea),
     }
 }
 
 /// `1` when `CHECKED` is set, otherwise `0`.
-pub fn checked_value(flags: uicore::SemanticsFlags) -> i32 {
-    i32::from(flags.contains(uicore::SemanticsFlags::CHECKED))
+pub fn checked_value(flags: engine::semantics::SemanticsFlags) -> i32 {
+    i32::from(flags.contains(engine::semantics::SemanticsFlags::CHECKED))
 }
 
-pub fn scene_rect_to_screen(view: &NSView, rect: uicore::Rect) -> NSRect {
+pub fn scene_rect_to_screen(view: &NSView, rect: engine::Rect) -> NSRect {
     let height = view.bounds().size.height;
     let local = NSRect::new(
         NSPoint::new(rect.x as f64, height - rect.y as f64 - rect.h as f64),
@@ -127,14 +127,14 @@ pub fn scene_rect_to_screen(view: &NSView, rect: uicore::Rect) -> NSRect {
 }
 
 pub(crate) struct A11yIvars {
-    id: uicore::SemanticsId,
+    id: engine::semantics::SemanticsId,
     poster: Poster,
     host: Cell<*const NSView>,
     parent: Cell<*const AnyObject>,
     label: RefCell<String>,
     help: RefCell<String>,
-    role: Cell<uicore::SemanticsRole>,
-    rect: Cell<uicore::Rect>,
+    role: Cell<engine::semantics::SemanticsRole>,
+    rect: Cell<engine::Rect>,
     actions: Cell<u32>,
     flags: Cell<u32>,
     selected: Cell<Option<(u32, u32)>>,
@@ -171,18 +171,18 @@ define_class!(
             // SAFETY: AppKit role constants are immortal NSString objects.
             unsafe {
                 match self.ivars().role.get() {
-                    uicore::SemanticsRole::Button => Some(NSAccessibilityButtonRole.retain()),
-                    uicore::SemanticsRole::Text => Some(NSAccessibilityStaticTextRole.retain()),
-                    uicore::SemanticsRole::Image => Some(NSAccessibilityImageRole.retain()),
-                    uicore::SemanticsRole::Scroll => Some(NSAccessibilityScrollAreaRole.retain()),
-                    uicore::SemanticsRole::Switch => Some(NSAccessibilityCheckBoxRole.retain()),
-                    uicore::SemanticsRole::TextField
-                    | uicore::SemanticsRole::SearchField
-                    | uicore::SemanticsRole::TextArea => {
+                    engine::semantics::SemanticsRole::Button => Some(NSAccessibilityButtonRole.retain()),
+                    engine::semantics::SemanticsRole::Text => Some(NSAccessibilityStaticTextRole.retain()),
+                    engine::semantics::SemanticsRole::Image => Some(NSAccessibilityImageRole.retain()),
+                    engine::semantics::SemanticsRole::Scroll => Some(NSAccessibilityScrollAreaRole.retain()),
+                    engine::semantics::SemanticsRole::Switch => Some(NSAccessibilityCheckBoxRole.retain()),
+                    engine::semantics::SemanticsRole::TextField
+                    | engine::semantics::SemanticsRole::SearchField
+                    | engine::semantics::SemanticsRole::TextArea => {
                         // objc2 does not export the search-field or text-area role symbols.
                         Some(NSAccessibilityTextFieldRole.retain())
                     }
-                    uicore::SemanticsRole::Generic => None,
+                    engine::semantics::SemanticsRole::Generic => None,
                 }
             }
         }
@@ -190,8 +190,8 @@ define_class!(
         #[unsafe(method_id(accessibilityValue))]
         fn accessibility_value(&self) -> Option<Retained<NSNumber>> {
             match self.ivars().role.get() {
-                uicore::SemanticsRole::Switch => Some(NSNumber::numberWithInt(checked_value(
-                    uicore::SemanticsFlags(self.ivars().flags.get()),
+                engine::semantics::SemanticsRole::Switch => Some(NSNumber::numberWithInt(checked_value(
+                    engine::semantics::SemanticsFlags(self.ivars().flags.get()),
                 ))),
                 _ => None,
             }
@@ -237,12 +237,12 @@ define_class!(
 
         #[unsafe(method(accessibilityPerformPress))]
         fn accessibility_perform_press(&self) -> bool {
-            let allowed = uicore::SemanticsActions(self.ivars().actions.get())
-                .contains(uicore::SemanticsActions::ACTIVATE);
+            let allowed = engine::semantics::SemanticsActions(self.ivars().actions.get())
+                .contains(engine::semantics::SemanticsActions::ACTIVATE);
             if allowed {
                 self.ivars()
                     .poster
-                    .post(Command::SemanticsAction(uicore::SemanticsAction::Activate(
+                    .post(Command::SemanticsAction(engine::semantics::SemanticsAction::Activate(
                         self.ivars().id,
                     )));
             }
@@ -254,7 +254,7 @@ define_class!(
 impl A11yNode {
     fn new(
         mtm: MainThreadMarker,
-        id: uicore::SemanticsId,
+        id: engine::semantics::SemanticsId,
         poster: Poster,
         host: *const NSView,
     ) -> Retained<Self> {
@@ -265,8 +265,8 @@ impl A11yNode {
             parent: Cell::new(std::ptr::null()),
             label: RefCell::new(String::new()),
             help: RefCell::new(String::new()),
-            role: Cell::new(uicore::SemanticsRole::Generic),
-            rect: Cell::new(uicore::Rect {
+            role: Cell::new(engine::semantics::SemanticsRole::Generic),
+            rect: Cell::new(engine::Rect {
                 x: 0.0,
                 y: 0.0,
                 w: 0.0,
@@ -297,7 +297,7 @@ impl A11yNode {
     }
 }
 
-/// Main-thread cache of AppKit elements, keyed by [`uicore::SemanticsId`].
+/// Main-thread cache of AppKit elements, keyed by [`engine::semantics::SemanticsId`].
 pub(crate) struct A11yHost {
     elements: RefCell<HashMap<u64, Retained<A11yNode>>>,
     roots: RefCell<Vec<Retained<A11yNode>>>,
@@ -370,13 +370,13 @@ impl A11yHost {
 #[cfg(test)]
 mod tests {
     use super::{AxRole, ElementCache, ax_role, checked_value, visible_nodes};
-    use uicore::{
+    use engine::semantics::{
         SemanticsActions, SemanticsFlags, SemanticsId, SemanticsNode, SemanticsRole,
         SemanticsUpdate,
     };
 
-    fn rect(w: f32, h: f32) -> uicore::Rect {
-        uicore::Rect {
+    fn rect(w: f32, h: f32) -> engine::Rect {
+        engine::Rect {
             x: 0.0,
             y: 0.0,
             w,
@@ -399,7 +399,7 @@ mod tests {
             caret: None,
             description: None,
             autofill: None,
-            live: uicore::LiveRegion::Off,
+            live: engine::semantics::LiveRegion::Off,
             scroll_content: None,
         }
     }
@@ -507,7 +507,7 @@ mod tests {
                     caret: None,
                     description: None,
                     autofill: None,
-                    live: uicore::LiveRegion::Off,
+                    live: engine::semantics::LiveRegion::Off,
                     scroll_content: None,
                 },
                 SemanticsNode {
@@ -524,7 +524,7 @@ mod tests {
                     caret: None,
                     description: None,
                     autofill: None,
-                    live: uicore::LiveRegion::Off,
+                    live: engine::semantics::LiveRegion::Off,
                     scroll_content: None,
                 },
             ],

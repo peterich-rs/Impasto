@@ -14,10 +14,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
 clap = { version = "4", features = ["derive"] }
-javascript = { workspace = true, features = ["ui"] }
-session = { workspace = true }
 embedder = { workspace = true }
-uicore = { workspace = true }
+engine = { workspace = true, features = ["js"] }
 
 [lints]
 workspace = true

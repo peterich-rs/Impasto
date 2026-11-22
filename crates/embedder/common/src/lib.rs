@@ -1,5 +1,5 @@
 //! Shared platform host. The platform thread posts commands. The render thread owns
-//! the engine, the session, and the surface.
+//! the raster, the session, and the surface.
 
 mod command;
 mod diagnostics;
@@ -22,7 +22,6 @@ mod restoration;
 mod rt;
 mod scheduler;
 mod semantics;
-mod shaper;
 mod surface;
 mod timing;
 mod watchdog;
@@ -30,10 +29,11 @@ mod window_session;
 
 use std::sync::Arc;
 
-use session::Metrics;
+use engine::session::Metrics;
 
 pub use command::{Command, FrameToken, SurfaceId, SurfaceTarget};
 pub use diagnostics::DiagnosticsHub;
+pub use engine::session::{FrameTime, Lifecycle};
 pub use error::{BootError, SessionError};
 pub use exec::{MainThreadPoster, RtExec, settle_factory};
 pub use host::{DropWait, Link, Poster, console_log, start, start_async, start_async_with_exit};
@@ -55,8 +55,6 @@ pub use present::{AfterPresent, after_present};
 pub use ptr::NativePtr;
 pub use restoration::Restoration;
 pub use semantics::{ProjectedNode, content_extent, project, scroll_step};
-pub use session::{FrameTime, Lifecycle};
-pub use shaper::ImpellerShaper;
 pub use surface::pixel_size;
 pub use timing::FrameTiming;
 pub use tracing_subscriber::filter::{LevelFilter, Targets};
@@ -65,12 +63,13 @@ pub use window_session::WindowSession;
 /// QuickJS console callback. Level 3 is an error.
 pub type ConsoleLog = Box<dyn Fn(u8, &str)>;
 
-/// Host sink for one [`session::IoJob`].
-pub type IoSink = Box<dyn Fn(session::IoJob) -> Result<(), Box<session::IoJob>> + Send>;
+/// Host sink for one [`engine::session::IoJob`].
+pub type IoSink =
+    Box<dyn Fn(engine::session::IoJob) -> Result<(), Box<engine::session::IoJob>> + Send>;
 
-/// Builds the session on the render thread. The closure must not capture the engine.
+/// Builds the session on the render thread. The closure must not capture the raster.
 pub struct SessionOpen {
-    pub shaper: Box<dyn uicore::Shaper>,
+    pub shaper: Box<dyn engine::text::Shaper>,
     pub log: ConsoleLog,
 }
 
@@ -78,13 +77,13 @@ pub type SessionFactory = Box<
     dyn FnOnce(
             SessionOpen,
             IoSink,
-            session::ModuleConfig,
-        ) -> Result<Box<dyn session::Session>, SessionError>
+            engine::session::ModuleConfig,
+        ) -> Result<Box<dyn engine::session::Session>, SessionError>
         + Send,
 >;
 
 /// Opens one platform surface. `Send` so the shell can hand it to the render thread.
-pub type SurfaceOpener = dyn FnMut(&mut engine::Engine, SurfaceTarget) -> Result<Box<dyn Surface>, engine::Status>
+pub type SurfaceOpener = dyn FnMut(&mut raster::Rasterizer, SurfaceTarget) -> Result<Box<dyn Surface>, raster::Status>
     + Send;
 
 pub type OpenSurface = Box<SurfaceOpener>;
@@ -125,12 +124,12 @@ pub trait Services: Send {
         false
     }
     /// Placement from the most recently submitted frame for a specific surface.
-    fn platform_views(&self, _surface: SurfaceId, _views: &[uicore::PlatformViewPlacement]) {}
+    fn platform_views(&self, _surface: SurfaceId, _views: &[engine::tree::PlatformViewPlacement]) {}
     /// The current surface is ready to receive window-specific output.
     fn surface_attached(&self, _surface: SurfaceId) {}
     /// Apply one keyboard update. Called on the render thread.
     /// The implementation posts the work to the platform thread.
-    fn apply_ime(&self, update: &session::ImeUpdate);
+    fn apply_ime(&self, update: &engine::session::ImeUpdate);
     /// The session wants the process to leave. The default does nothing.
     fn request_exit(&self) {}
     /// `IMPASTO_INSPECT` wrote `frame.json`. The host should leave, like a dump.
@@ -144,8 +143,8 @@ pub trait Services: Send {
 pub trait Surface {
     /// Retires a lost device and its surface. The next present can open the
     /// window again once the host resubmits its current layer tree.
-    fn recover_device(&mut self, _engine: &mut engine::Engine) -> Result<(), engine::Status> {
-        Err(engine::Status::DeviceLost)
+    fn recover_device(&mut self, _engine: &mut raster::Rasterizer) -> Result<(), raster::Status> {
+        Err(raster::Status::DeviceLost)
     }
 
     /// Acquire, draw, and present.
@@ -155,17 +154,17 @@ pub trait Surface {
     /// the layer.
     fn present(
         &mut self,
-        engine: &mut engine::Engine,
-        pixels: engine::PixelSize,
-    ) -> Result<Presented, engine::Status>;
+        raster: &mut raster::Rasterizer,
+        pixels: raster::PixelSize,
+    ) -> Result<Presented, raster::Status>;
 
     fn present_with_views(
         &mut self,
-        engine: &mut engine::Engine,
-        pixels: engine::PixelSize,
-        _views: &[uicore::PlatformViewPlacement],
-    ) -> Result<Presented, engine::Status> {
-        self.present(engine, pixels)
+        raster: &mut raster::Rasterizer,
+        pixels: raster::PixelSize,
+        _views: &[engine::tree::PlatformViewPlacement],
+    ) -> Result<Presented, raster::Status> {
+        self.present(raster, pixels)
     }
 }
 
@@ -181,14 +180,14 @@ pub struct Boot {
     pub services: Box<dyn Services>,
     pub vsync: Arc<dyn Vsync>,
     pub decoder: Arc<dyn ImageDecoder>,
-    pub modules: Vec<session::Module>,
+    pub modules: Vec<engine::session::Module>,
     pub main_thread: Option<MainThreadPoster>,
     /// Written before `start` so `Linking.getInitialURL` is visible during eval.
-    pub launch_url: session::Shared<Option<String>>,
+    pub launch_url: engine::session::Shared<Option<String>>,
     /// Absent HTTP fails with `network is not linked`. Hosts inject [`http_client`].
-    pub http: Option<Arc<dyn session::HttpClient>>,
+    pub http: Option<Arc<dyn engine::session::HttpClient>>,
     /// Creates the graphics context on the render thread.
-    pub open_engine: Box<dyn FnOnce() -> Result<engine::Engine, engine::Status> + Send>,
+    pub open_raster: Box<dyn FnOnce() -> Result<raster::Rasterizer, raster::Status> + Send>,
     pub open_surface: OpenSurface,
     /// Log one line of layer-tree shape after a frame records new layers.
     pub dump_list: bool,
@@ -207,7 +206,7 @@ pub struct Boot {
 }
 
 impl Boot {
-    pub fn with_module(mut self, module: session::Module) -> Self {
+    pub fn with_module(mut self, module: engine::session::Module) -> Self {
         self.modules.push(module);
         self
     }

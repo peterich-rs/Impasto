@@ -34,18 +34,18 @@ pub fn present_retry_delay_ms(failures: u32) -> Option<i64> {
     Some(16_i64.saturating_mul(1_i64 << shift).min(1_000))
 }
 
-pub fn after_present(result: Result<Presented, engine::Status>, again: bool) -> AfterPresent {
+pub fn after_present(result: Result<Presented, raster::Status>, again: bool) -> AfterPresent {
     match result {
         Ok(Presented::Continue) => AfterPresent::Shown { again },
         Ok(Presented::Stop) => AfterPresent::Stop,
         Err(
-            engine::Status::PresentFailed
-            | engine::Status::SurfaceLost
-            | engine::Status::NotReady
-            | engine::Status::AcquireMiss,
+            raster::Status::PresentFailed
+            | raster::Status::SurfaceLost
+            | raster::Status::NotReady
+            | raster::Status::AcquireMiss,
         ) => AfterPresent::Retry,
-        Err(engine::Status::BadScene) => AfterPresent::Rejected,
-        Err(engine::Status::NotLinked | engine::Status::DeviceLost) => AfterPresent::Fatal,
+        Err(raster::Status::BadScene) => AfterPresent::Rejected,
+        Err(raster::Status::NotLinked | raster::Status::DeviceLost) => AfterPresent::Fatal,
     }
 }
 
@@ -57,23 +57,23 @@ mod tests {
     #[test]
     fn a_failed_present_retries_and_a_missing_surface_waits() {
         assert_eq!(
-            after_present(Err(engine::Status::PresentFailed), false),
+            after_present(Err(raster::Status::PresentFailed), false),
             AfterPresent::Retry
         );
         assert_eq!(
-            after_present(Err(engine::Status::NotReady), true),
+            after_present(Err(raster::Status::NotReady), true),
             AfterPresent::Retry
         );
         assert_eq!(
-            after_present(Err(engine::Status::BadScene), false),
+            after_present(Err(raster::Status::BadScene), false),
             AfterPresent::Rejected
         );
         assert_eq!(
-            after_present(Err(engine::Status::AcquireMiss), false),
+            after_present(Err(raster::Status::AcquireMiss), false),
             AfterPresent::Retry
         );
         assert_eq!(
-            after_present(Err(engine::Status::NotLinked), false),
+            after_present(Err(raster::Status::NotLinked), false),
             AfterPresent::Fatal
         );
         assert_eq!(

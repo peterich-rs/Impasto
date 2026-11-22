@@ -1,0 +1,745 @@
+//! Text node setters, caret, and paragraph keys.
+
+use std::sync::Arc;
+
+use crate::scene::{TextAlign, TextStyle};
+
+use super::layout::{finite_number, finite_positive, live_node};
+use super::node::{Kind, NodeFlags, TextPayload};
+use super::{NodeId, Rect, Tree};
+use crate::{Error, text::TextSize};
+
+enum RunDirty {
+    Paint,
+    Measure,
+}
+
+fn span_geometry_changed(old: &[crate::scene::TextSpan], new: &[crate::scene::TextSpan]) -> bool {
+    old.len() != new.len()
+        || old.iter().zip(new).any(|(left, right)| {
+            left.utf8 != right.utf8
+                || left.weight != right.weight
+                || left.underline != right.underline
+                || left.line_through != right.line_through
+                || left.family != right.family
+        })
+}
+
+fn span_paint_changed(old: &[crate::scene::TextSpan], new: &[crate::scene::TextSpan]) -> bool {
+    old.len() != new.len()
+        || old
+            .iter()
+            .zip(new)
+            .any(|(left, right)| left.paint() != right.paint())
+}
+
+/// Inclusive-exclusive UTF-16 range. `id` is the value delivered with `ActivateLink`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextLink {
+    pub start: u32,
+    pub end: u32,
+    pub id: u32,
+}
+
+impl Tree {
+    pub fn is_text(&self, id: NodeId) -> Result<bool, Error> {
+        Ok(self.node(id)?.kind == Kind::Text)
+    }
+
+    /// Current plain text, borrowed from this tree. Styled text has no plain
+    /// replacement equivalent because replacing it also clears spans and links.
+    pub fn plain_text(&self, id: NodeId) -> Result<Option<&str>, Error> {
+        let text = self.node(id)?.text().ok_or(Error::NotText)?;
+        Ok((text.spans.is_empty() && text.links.is_empty()).then_some(text.utf8.as_ref()))
+    }
+
+    /// Replaces the text and clears styled runs. The previous geometry stays
+    /// valid for hit testing until the next `layout`.
+    pub fn set_text(&mut self, id: NodeId, utf8: impl Into<String>) -> Result<(), Error> {
+        let next = utf8.into();
+        let (text_changed, cleared_runs) = {
+            let node = self.node_mut(id)?;
+            let Some(text) = node.text_mut() else {
+                return Err(Error::NotText);
+            };
+            // The editor borrow has to end before `utf8` is replaced.
+            let pending = if let Some(editor) = text.editor.as_mut() {
+                let changed = editor.replace_keeping_composition(next);
+                Ok((changed, editor.value().text.clone()))
+            } else {
+                Err(next)
+            };
+            let text_changed = match pending {
+                Ok((changed, stored)) => {
+                    text.utf8 = Arc::from(stored);
+                    changed
+                }
+                Err(next) => {
+                    let changed = text.utf8.as_ref() != next;
+                    if changed {
+                        text.utf8 = Arc::from(next);
+                    }
+                    changed
+                }
+            };
+            let cleared_runs = !text.spans.is_empty() || !text.links.is_empty();
+            if cleared_runs {
+                text.spans = Arc::from([]);
+                text.links = Arc::from([]);
+            }
+            (text_changed, cleared_runs)
+        };
+        if !text_changed && !cleared_runs {
+            return Ok(());
+        }
+        self.mark_semantics_chain(id);
+        self.queue_text_measure(id);
+        Ok(())
+    }
+
+    pub fn set_font_size(&mut self, id: NodeId, font_size: f32) -> Result<(), Error> {
+        finite_number(font_size)?;
+        {
+            let node = self.node_mut(id)?;
+            let Some(text) = node.text_mut() else {
+                return Err(Error::NotText);
+            };
+            if text.font_size == font_size {
+                return Ok(());
+            }
+            text.font_size = font_size;
+        }
+        self.touch_measure(id)
+    }
+
+    /// Styled runs and UTF-16 links. Non-empty spans replace `utf8` with their concatenation.
+    ///
+    /// A color or gradient change repaints. A change to the text, weight, family,
+    /// or decoration measures again.
+    pub fn set_text_runs(
+        &mut self,
+        id: NodeId,
+        spans: Vec<crate::scene::TextSpan>,
+        links: Vec<TextLink>,
+    ) -> Result<(), Error> {
+        let dirty = {
+            let node = self.node_mut(id)?;
+            let Some(text) = node.text_mut() else {
+                return Err(Error::NotText);
+            };
+            let geometry = span_geometry_changed(text.spans.as_ref(), &spans);
+            let paint = span_paint_changed(text.spans.as_ref(), &spans)
+                || text.links.as_ref() != links.as_slice();
+            let joined = if spans.is_empty() {
+                None
+            } else {
+                Some(
+                    spans
+                        .iter()
+                        .map(|span| span.utf8.as_str())
+                        .collect::<String>(),
+                )
+            };
+            let utf8_changed = joined
+                .as_deref()
+                .is_some_and(|joined| text.utf8.as_ref() != joined);
+            if !geometry && !paint && !utf8_changed {
+                return Ok(());
+            }
+            if let Some(joined) = joined
+                && utf8_changed
+            {
+                text.utf8 = Arc::from(joined);
+            }
+            text.spans = Arc::from(spans);
+            text.links = Arc::from(links);
+            if geometry || utf8_changed {
+                RunDirty::Measure
+            } else {
+                RunDirty::Paint
+            }
+        };
+        match dirty {
+            RunDirty::Paint => {
+                self.mark_repaint(id);
+                Ok(())
+            }
+            RunDirty::Measure => {
+                self.mark_semantics_chain(id);
+                self.touch_measure(id)
+            }
+        }
+    }
+
+    /// Replaces spans and keeps the links already stored on `id`.
+    pub fn set_text_spans(
+        &mut self,
+        id: NodeId,
+        spans: Vec<crate::scene::TextSpan>,
+    ) -> Result<(), Error> {
+        let links = {
+            let text = self.node(id)?.text().ok_or(Error::NotText)?;
+            text.links.to_vec()
+        };
+        self.set_text_runs(id, spans, links)
+    }
+
+    pub fn set_max_lines(&mut self, id: NodeId, max_lines: Option<u32>) -> Result<(), Error> {
+        if matches!(max_lines, Some(0)) {
+            return Err(Error::BadNumber);
+        }
+        self.edit_text(id, |text| text.style_mut().max_lines = max_lines)
+    }
+
+    pub fn set_ellipsis(&mut self, id: NodeId, ellipsis: Option<&str>) -> Result<(), Error> {
+        let ellipsis = match ellipsis {
+            Some(text) if !text.is_empty() => Some(text.to_owned()),
+            _ => None,
+        };
+        self.edit_text(id, |text| {
+            if ellipsis.is_some() {
+                text.style_mut().overflow = crate::scene::TextOverflow::Ellipsis;
+            } else if text.style_mut().overflow == crate::scene::TextOverflow::Ellipsis {
+                text.style_mut().overflow = crate::scene::TextOverflow::Clip;
+            }
+            text.style_mut().ellipsis = ellipsis;
+        })
+    }
+
+    pub fn set_overflow(
+        &mut self,
+        id: NodeId,
+        overflow: crate::scene::TextOverflow,
+    ) -> Result<(), Error> {
+        self.edit_text(id, |text| {
+            text.style_mut().overflow = overflow;
+            if overflow == crate::scene::TextOverflow::Ellipsis
+                && text.style_mut().ellipsis.is_none()
+            {
+                text.style_mut().ellipsis = Some("…".to_owned());
+            }
+        })
+    }
+
+    pub fn set_soft_wrap(&mut self, id: NodeId, soft_wrap: bool) -> Result<(), Error> {
+        self.edit_text(id, |text| text.style_mut().soft_wrap = soft_wrap)
+    }
+
+    pub fn set_text_align(&mut self, id: NodeId, align: TextAlign) -> Result<(), Error> {
+        self.edit_text(id, |text| text.style_mut().align = align)
+    }
+
+    pub fn set_font_weight(&mut self, id: NodeId, weight: u16) -> Result<(), Error> {
+        if !matches!(weight, 100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900) {
+            return Err(Error::BadNumber);
+        }
+        self.edit_text(id, |text| text.style_mut().weight = weight)
+    }
+
+    pub fn set_text_direction(&mut self, id: NodeId, rtl: bool) -> Result<(), Error> {
+        self.edit_text(id, |text| text.style_mut().direction_rtl = rtl)
+    }
+
+    /// `0.0` uses the font's own line height.
+    pub fn set_line_height(&mut self, id: NodeId, height: f32) -> Result<(), Error> {
+        let height = finite_positive(height)?;
+        self.edit_text(id, |text| text.style_mut().height = height)
+    }
+
+    /// Marks every text node dirty so a text-scale change lays out again.
+    pub fn mark_text_dirty(&mut self) {
+        let ids: Vec<NodeId> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                let node = slot.node.as_ref()?;
+                node.text()?;
+                Some(NodeId {
+                    index: crate::cast::u32_from_usize(index),
+                    generation: slot.generation,
+                })
+            })
+            .collect();
+        for id in ids {
+            let _ = self.touch_measure(id);
+        }
+    }
+
+    /// Logical font sizes are multiplied by `scale` during measure and record.
+    pub fn set_text_scale(&mut self, scale: f32) -> Result<(), Error> {
+        finite_number(scale)?;
+        if scale <= 0.0 {
+            return Err(Error::BadNumber);
+        }
+        if (self.text_scale - scale).abs() <= f32::EPSILON {
+            return Ok(());
+        }
+        self.text_scale = scale;
+        self.mark_text_dirty();
+        Ok(())
+    }
+
+    pub fn text_scale(&self) -> f32 {
+        self.text_scale
+    }
+
+    /// Device pixels per scene point. Scroll offsets snap to whole device
+    /// pixels when a motion settles, so text and hairlines land on texel
+    /// boundaries. The default of 1.0 keeps scene-point rounding.
+    pub fn set_pixel_scale(&mut self, scale: f32) -> Result<(), Error> {
+        finite_number(scale)?;
+        if scale <= 0.0 {
+            return Err(Error::BadNumber);
+        }
+        if self.pixel_scale != scale {
+            self.pixel_scale = scale;
+            self.canvas_geometry_changed();
+        }
+        Ok(())
+    }
+
+    pub fn pixel_scale(&self) -> f32 {
+        self.pixel_scale
+    }
+
+    /// `value` in scene points rounded to the nearest device pixel.
+    pub(crate) fn settle_pixels(&self, value: f32) -> f32 {
+        (value * self.pixel_scale).round() / self.pixel_scale
+    }
+
+    /// UTF-16 cap for later edits. `None` clears it. An over-limit edit is rejected.
+    pub fn set_text_limit(&mut self, id: NodeId, limit: Option<u32>) -> Result<(), Error> {
+        let text = self.node_mut(id)?.text_mut().ok_or(Error::NotText)?;
+        text.editor
+            .get_or_insert_with(|| crate::text::TextEditor::new(""))
+            .set_max_length(limit);
+        Ok(())
+    }
+
+    /// Applies one edit to the editor stored on `id` and returns the new value.
+    ///
+    /// Line, word, and vertical motions use this node's paragraph when the
+    /// editor string still matches the text node.
+    pub fn text_edit(
+        &mut self,
+        id: NodeId,
+        edit: crate::text::Edit,
+    ) -> Result<crate::text::TextEditingValue, Error> {
+        let lines = self.editor_lines(id);
+        let mut editor = self
+            .node_mut(id)?
+            .text_mut()
+            .ok_or(Error::NotText)?
+            .editor
+            .take()
+            .unwrap_or_else(|| crate::text::TextEditor::new(""));
+        struct Query<'a> {
+            tree: &'a mut Tree,
+            id: NodeId,
+        }
+        impl crate::text::EditQuery for Query<'_> {
+            fn word_at(&mut self, text: &str, unit: u32) -> (u32, u32) {
+                self.tree.word_at(self.id, text, unit)
+            }
+            fn caret_at(
+                &mut self,
+                unit: u32,
+                affinity: crate::text::Affinity,
+            ) -> crate::text::Caret {
+                self.tree
+                    .caret_for(self.id, unit, affinity)
+                    .unwrap_or(crate::text::Caret {
+                        unit,
+                        x: 0.0,
+                        y: 0.0,
+                        w: 1.0,
+                        h: 0.0,
+                        affinity,
+                    })
+            }
+            fn hit_at(&mut self, x: f32, y: f32) -> crate::text::Caret {
+                self.tree
+                    .caret_at_local(self.id, x, y)
+                    .unwrap_or(crate::text::Caret {
+                        unit: 0,
+                        x,
+                        y,
+                        w: 1.0,
+                        h: 0.0,
+                        affinity: crate::text::Affinity::Downstream,
+                    })
+            }
+        }
+        let mut query = Query { tree: self, id };
+        editor.apply_in(edit, &lines, &mut query);
+        let value = editor.value().clone();
+        let changed = {
+            let text = self.node_mut(id)?.text_mut().ok_or(Error::NotText)?;
+            let changed = text.utf8.as_ref() != value.text;
+            text.editor = Some(editor);
+            if changed {
+                text.utf8 = Arc::from(value.text.as_str());
+            }
+            changed
+        };
+        if changed {
+            self.touch_measure(id)?;
+        }
+        Ok(value)
+    }
+
+    /// Revision and value of the editor on `id`.
+    pub fn editor_snapshot(&self, id: NodeId) -> Option<(u64, crate::text::TextEditingValue)> {
+        let editor = self.node(id).ok()?.text()?.editor.as_ref()?;
+        Some((editor.revision(), editor.value().clone()))
+    }
+
+    /// The editor string, after [`Tree::text_edit`]. `None` when this node has no editor.
+    pub fn editor_text(&self, id: NodeId) -> Option<String> {
+        self.node(id)
+            .ok()?
+            .text()?
+            .editor
+            .as_ref()
+            .map(|editor| editor.value().text.clone())
+    }
+
+    /// Rectangles covering a UTF-16 selection, in paragraph space.
+    pub fn selection_rects(
+        &mut self,
+        id: NodeId,
+        start: u32,
+        end: u32,
+    ) -> Result<Vec<Rect>, Error> {
+        let (start, end) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        if start == end {
+            return Ok(Vec::new());
+        }
+        let key = self.text_key(id)?;
+        let metrics = self.shaper.metrics(&key.metrics);
+        let lines = &metrics.lines;
+        let mut rects = Vec::new();
+        for line in lines.iter() {
+            let from = start.max(line.start);
+            let to = end.min(line.end);
+            if from >= to {
+                continue;
+            }
+            let left =
+                self.shaper
+                    .caret_at_unit(&key.metrics, from, crate::text::Affinity::Downstream);
+            let right =
+                self.shaper
+                    .caret_at_unit(&key.metrics, to, crate::text::Affinity::Upstream);
+            let x = left.x.min(right.x);
+            let w = (left.x - right.x).abs().max(1.0);
+            rects.push(Rect {
+                x,
+                y: line.y,
+                w,
+                h: line.h,
+            });
+        }
+        Ok(rects)
+    }
+
+    pub(super) fn editor_lines(&mut self, id: NodeId) -> Vec<crate::text::TextLine> {
+        let matches = live_node(&self.slots, id).ok().is_some_and(|node| {
+            node.text().is_some_and(|text| {
+                text.editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.value().text == text.utf8.as_ref())
+            })
+        });
+        if !matches {
+            return Vec::new();
+        }
+        let Ok(key) = self.text_key(id) else {
+            return Vec::new();
+        };
+        self.shaper.metrics(&key.metrics).lines.to_vec()
+    }
+
+    pub(super) fn word_at(&mut self, id: NodeId, text: &str, unit: u32) -> (u32, u32) {
+        if let Ok(key) = self.text_key(id)
+            && key.metrics.text.as_ref() == text
+        {
+            return self.shaper.word_range(&key.metrics, unit);
+        }
+        crate::text::shaper::whitespace_word(text, unit)
+    }
+
+    pub fn caret_for(
+        &mut self,
+        id: NodeId,
+        unit: u32,
+        affinity: crate::text::Affinity,
+    ) -> Result<crate::text::Caret, Error> {
+        let key = self.text_key(id)?;
+        Ok(self.shaper.caret_at_unit(&key.metrics, unit, affinity))
+    }
+
+    pub(super) fn caret_at_local(
+        &mut self,
+        id: NodeId,
+        x: f32,
+        y: f32,
+    ) -> Result<crate::text::Caret, Error> {
+        let key = self.text_key(id)?;
+        Ok(self.shaper.caret_at_point(&key.metrics, x, y))
+    }
+
+    pub fn text_clipboard(&self, id: NodeId) -> Result<Option<String>, Error> {
+        let node = self.node(id)?;
+        Ok(node
+            .text()
+            .and_then(|text| text.editor.as_ref())
+            .and_then(|editor| editor.clipboard().map(str::to_owned)))
+    }
+
+    /// `None` or `""` uses the family registered on the player.
+    pub fn set_family(&mut self, id: NodeId, family: Option<&str>) -> Result<(), Error> {
+        let family = match family {
+            Some(name) if !name.is_empty() => Some(name.to_owned()),
+            _ => None,
+        };
+        self.edit_text(id, |text| text.style_mut().family = family)
+    }
+
+    pub(super) fn edit_text(
+        &mut self,
+        id: NodeId,
+        edit: impl FnOnce(&mut TextPayload),
+    ) -> Result<(), Error> {
+        let same = {
+            let node = self.node_mut(id)?;
+            let Some(text) = node.text_mut() else {
+                return Err(Error::NotText);
+            };
+            let style = Arc::clone(&text.style);
+            let color = text.color;
+            let utf8 = Arc::clone(&text.utf8);
+            edit(text);
+            color == text.color && utf8 == text.utf8 && *style == *text.style
+        };
+        if same {
+            return Ok(());
+        }
+        self.touch_measure(id)
+    }
+
+    /// Caret for a scene point over a text node. The returned `x` and `y` are
+    /// relative to the paragraph origin.
+    pub fn caret_at(&mut self, id: NodeId, x: f32, y: f32) -> Result<crate::text::Caret, Error> {
+        let (local_x, local_y) = self.scene_to_layout(id, x, y).ok_or(Error::BadNumber)?;
+        let (abs_x, abs_y) = self.layout_point(id)?;
+        let key = self.text_key(id)?;
+        Ok(self
+            .shaper
+            .caret_at_point(&key.metrics, local_x - abs_x, local_y - abs_y))
+    }
+
+    /// Caret rectangle for a UTF-16 index in a text node.
+    pub fn caret_at_unit(&mut self, id: NodeId, unit: u32) -> Result<crate::text::Caret, Error> {
+        self.caret_for(id, unit, crate::text::Affinity::Downstream)
+    }
+
+    /// UTF-16 word range around `unit` in a text node.
+    pub fn word_range(&mut self, id: NodeId, unit: u32) -> Result<(u32, u32), Error> {
+        let key = self.text_key(id)?;
+        Ok(self.shaper.word_range(&key.metrics, unit))
+    }
+
+    /// Content box, hidden ancestors, and inherited layout direction.
+    ///
+    /// `None` means the node is gone or an ancestor id does not resolve.
+    pub fn canvas_surface(&self, id: NodeId) -> Option<crate::canvas::CanvasSurface> {
+        let (width, height, mut hidden, mut cursor) = {
+            let node = self.get(id)?;
+            (
+                node.content_w,
+                node.content_h,
+                node.flags.contains(NodeFlags::HIDDEN),
+                node.parent,
+            )
+        };
+        let rtl = self.layout_direction_rtl(id)?;
+        while let Some(parent) = cursor {
+            let parent_node = self.get(parent)?;
+            hidden |= parent_node.flags.contains(NodeFlags::HIDDEN);
+            cursor = parent_node.parent;
+        }
+        Some(crate::canvas::CanvasSurface {
+            width,
+            height,
+            hidden,
+            rtl,
+        })
+    }
+
+    /// Canvas `measureText`. Font size is scene points and is not multiplied by `text_scale`.
+    pub fn canvas_text_metrics(
+        &mut self,
+        text: &str,
+        font: &crate::canvas::CanvasFont,
+        direction_rtl: bool,
+    ) -> Result<crate::canvas::TextMetrics, crate::canvas::CanvasError> {
+        self.open_measure();
+        crate::canvas::measure_font(text, font, direction_rtl, &mut *self.shaper)
+    }
+
+    /// Prepare one recording with this tree's shaper. Opens the measure window
+    /// when the frame has not laid out.
+    pub fn prepare_canvas(
+        &mut self,
+        recording: crate::canvas::Recording<'_>,
+        deadline: &crate::canvas::Deadline,
+    ) -> Result<crate::scene::CanvasList, crate::canvas::CanvasError> {
+        self.open_measure();
+        crate::canvas::prepare(recording, &mut *self.shaper, deadline)
+    }
+
+    /// Same shaper `layout` used for this tree.
+    pub fn measure_text(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+    ) -> TextSize {
+        let key = crate::text::paint_key(
+            Arc::from(utf8),
+            Arc::new(style.clone()),
+            &[],
+            font_size * self.text_scale,
+            max_width,
+            color,
+        );
+        self.shaper.metrics(&key.metrics).size
+    }
+
+    pub(super) fn text_key(&self, id: NodeId) -> Result<crate::text::PaintKey, Error> {
+        let node = live_node(&self.slots, id)?;
+        let text = node.text().ok_or(Error::NotText)?;
+        Ok(crate::text::paint_key(
+            Arc::clone(&text.utf8),
+            Arc::clone(&text.style),
+            text.spans.as_ref(),
+            text.font_size * self.text_scale,
+            text.max_width.get(),
+            text.color,
+        ))
+    }
+
+    /// Registers a face for later measurement. Drawing registers the same bytes
+    /// on the gpu context.
+    pub fn register_font(&mut self, family: &str, bytes: &[u8]) -> bool {
+        self.shaper.register_font(family, bytes)
+    }
+
+    pub(super) fn sync_metrics(&mut self) {
+        let started = std::time::Instant::now();
+        let ids = std::mem::take(&mut self.pending_text);
+        for id in ids {
+            let flagged = self.node_mut(id).ok().is_some_and(|node| {
+                let flagged = node.flags.contains(NodeFlags::TEXT_DIRTY);
+                node.flags.remove(NodeFlags::TEXT_DIRTY);
+                flagged && node.text().is_some()
+            });
+            if !flagged {
+                continue;
+            }
+            self.sync_visited = self.sync_visited.saturating_add(1);
+            if self.sync_metrics_one(id) {
+                self.sync_synced = self.sync_synced.saturating_add(1);
+            }
+        }
+        self.sync_ms += started.elapsed().as_secs_f64() * 1000.0;
+    }
+
+    pub(super) fn sync_metrics_one(&mut self, id: NodeId) -> bool {
+        let Ok(key) = self.text_key(id) else {
+            return false;
+        };
+        if key.metrics.text.is_empty() {
+            self.clear_metrics(id);
+            return false;
+        }
+        let same = self
+            .node(id)
+            .ok()
+            .and_then(|node| node.text())
+            .is_some_and(|text| {
+                text.cached.as_ref().is_some_and(|cached| {
+                    cached.metrics == key.metrics
+                        && cached.color == key.color
+                        && cached.span_paints.as_ref() == key.span_paints.as_ref()
+                })
+            });
+        if same {
+            self.shaper.touch(&key);
+            return false;
+        }
+        let metrics = self.shaper.metrics_paint(&key);
+        let Ok(node) = self.node_mut(id) else {
+            return false;
+        };
+        let Some(text) = node.text_mut() else {
+            return false;
+        };
+        text.metrics = Some(metrics);
+        text.cached = Some(key);
+        true
+    }
+
+    pub(super) fn clear_metrics(&mut self, id: NodeId) {
+        if let Ok(node) = self.node_mut(id)
+            && let Some(text) = node.text_mut()
+        {
+            text.metrics = None;
+            text.cached = None;
+        }
+    }
+
+    pub(super) fn note_text(&mut self, id: NodeId) {
+        let Ok(node) = self.node_mut(id) else {
+            return;
+        };
+        if node.text().is_none() || node.flags.contains(NodeFlags::TEXT_DIRTY) {
+            return;
+        }
+        node.flags.insert(NodeFlags::TEXT_DIRTY);
+        self.pending_text.push(id);
+    }
+
+    pub(super) fn note_text_tree(&mut self, id: NodeId) {
+        self.note_text(id);
+        let mut child = self.get(id).and_then(|node| node.first_child);
+        let mut kids = Vec::new();
+        while let Some(current) = child {
+            kids.push(current);
+            child = self.get(current).and_then(|node| node.next);
+        }
+        for child in kids {
+            self.note_text_tree(child);
+        }
+    }
+
+    /// Zeros the sync counters for this frame. `layout` and `record` then add to them.
+    pub fn prepare_sync_stats(&mut self) {
+        self.sync_visited = 0;
+        self.sync_synced = 0;
+        self.sync_ms = 0.0;
+        self.taffy_ms = 0.0;
+    }
+
+    pub fn sync_stats(&self) -> (u32, u32) {
+        (self.sync_visited, self.sync_synced)
+    }
+}

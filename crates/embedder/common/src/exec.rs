@@ -1,8 +1,8 @@
-//! [`session::MethodExec`] backed by the process runtime and an optional main poster.
+//! [`engine::session::MethodExec`] backed by the process runtime and an optional main poster.
 
 use std::sync::Arc;
 
-use session::{MethodExec, PluginResult, Settle, Work};
+use engine::session::{IoEvent, MethodExec, PluginResult, Settle, Work};
 
 use crate::command::Command;
 use crate::queue::Inbox;
@@ -36,6 +36,6 @@ impl MethodExec for RtExec {
 pub fn settle_factory(inbox: Arc<Inbox>) -> Arc<dyn Fn(u64) -> Settle + Send + Sync> {
     Arc::new(move |token| {
         let inbox = Arc::clone(&inbox);
-        Settle::new(move |result| inbox.post(Command::PluginDone { token, result }))
+        Settle::new(move |result| inbox.post(Command::Io(IoEvent::Plugin { token, result })))
     })
 }

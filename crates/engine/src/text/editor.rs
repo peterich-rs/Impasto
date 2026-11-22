@@ -1,0 +1,1402 @@
+//! Editing value for one field. Offsets are UTF-16 code units.
+//!
+//! Grapheme boundaries come from `unicode-segmentation`. A family emoji or a
+//! combining accent moves and deletes as one cluster. The editor does not talk
+//! to the platform keyboard; the session copies [`TextEditingValue`] into
+//! `ImeState`.
+
+use std::ops::Range;
+
+use unicode_segmentation::UnicodeSegmentation;
+
+use crate::text::{Affinity, Caret, TextLine};
+
+const UNDO_LIMIT: usize = 100;
+
+/// A selection. `base` stays put while `extent` moves.
+///
+/// `affinity` matters only while the selection is collapsed on a soft line break.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextSelection {
+    pub base: u32,
+    pub extent: u32,
+    pub affinity: Affinity,
+}
+
+impl TextSelection {
+    pub fn collapsed(unit: u32) -> Self {
+        Self {
+            base: unit,
+            extent: unit,
+            affinity: Affinity::Downstream,
+        }
+    }
+
+    pub fn is_collapsed(self) -> bool {
+        self.base == self.extent
+    }
+
+    /// Inclusive start and exclusive end, in order.
+    pub fn ordered(self) -> (u32, u32) {
+        if self.base <= self.extent {
+            (self.base, self.extent)
+        } else {
+            (self.extent, self.base)
+        }
+    }
+}
+
+/// One field's text, caret or selection, and the IME composing range.
+///
+/// `selection` and `composing` count UTF-16 code units into `text`. `text`
+/// includes the composing characters while a composition is open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextEditingValue {
+    pub text: String,
+    pub selection: TextSelection,
+    pub composing: Option<Range<u32>>,
+}
+
+impl TextEditingValue {
+    pub fn at_end(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let end = utf16_len(&text);
+        Self {
+            text,
+            selection: TextSelection::collapsed(end),
+            composing: None,
+        }
+    }
+}
+
+/// What a key, the IME, or the clipboard asked the editor to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Edit {
+    Left,
+    Right,
+    ExtendLeft,
+    ExtendRight,
+    Backspace,
+    /// Delete the cluster after the caret.
+    ForwardDelete,
+    Insert(String),
+    /// Insert a hard line break.
+    Newline,
+    /// `None` commits the open composition. `Some` replaces it.
+    Composing(Option<String>),
+    Paste(String),
+    Copy,
+    Cut,
+    Undo,
+    Redo,
+    SelectAll,
+    /// Replace the value and clear undo. Used when a control loads a fresh buffer.
+    Load(String),
+    /// Programmatic replace. `record_undo` pushes the previous value; it does not clear the stack.
+    Replace {
+        text: String,
+        record_undo: bool,
+    },
+    /// Delete the composing range, then insert `String`. Does not clear composing
+    /// by the insert path, so a following insert cannot delete the same range again.
+    Commit(String),
+    /// Move the caret to a UTF-16 offset, clamped to the text.
+    SetCaret(u32),
+    /// Keep `base` and move `extent` to a UTF-16 offset.
+    ExtendCaret(u32),
+    /// Change the UTF-16 selection and commit any active composition.
+    SetSelection {
+        start: u32,
+        end: u32,
+    },
+    WordLeft,
+    WordRight,
+    ExtendWordLeft,
+    ExtendWordRight,
+    LineStart,
+    LineEnd,
+    ExtendLineStart,
+    ExtendLineEnd,
+    DocumentStart,
+    DocumentEnd,
+    ExtendDocumentStart,
+    ExtendDocumentEnd,
+    Up,
+    Down,
+    ExtendUp,
+    ExtendDown,
+    DeleteWordBackward,
+    DeleteWordForward,
+    DeleteToLineStart,
+    DeleteToLineEnd,
+    /// Delete a UTF-16 range. The tree uses this after it resolves a word.
+    DeleteRange {
+        start: u32,
+        end: u32,
+    },
+}
+
+/// Grapheme-aware edits and a fixed-depth undo stack.
+#[derive(Clone, Debug)]
+pub struct TextEditor {
+    value: TextEditingValue,
+    undo: Vec<TextEditingValue>,
+    redo: Vec<TextEditingValue>,
+    /// Text copied by the last `Copy` or `Cut`. The host writes the pasteboard.
+    clipboard: Option<String>,
+    /// Horizontal anchor for a run of vertical motions.
+    column_x: Option<f32>,
+    revision: u64,
+    /// UTF-16 limit. `None` does not reject. An over-limit edit is returned unchanged.
+    max_length: Option<u32>,
+}
+
+/// Word, caret, and hit queries used while applying one edit.
+///
+/// One object keeps the mutable borrow. Three closures would each need it
+/// for the whole call.
+pub trait EditQuery {
+    fn word_at(&mut self, text: &str, unit: u32) -> (u32, u32);
+    fn caret_at(&mut self, unit: u32, affinity: Affinity) -> Caret;
+    fn hit_at(&mut self, x: f32, y: f32) -> Caret;
+}
+
+impl TextEditor {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            value: TextEditingValue::at_end(text),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            clipboard: None,
+            column_x: None,
+            revision: 0,
+            max_length: None,
+        }
+    }
+
+    /// Rejects an edit whose UTF-16 length would pass `limit`. `None` clears the cap.
+    pub fn set_max_length(&mut self, limit: Option<u32>) {
+        self.max_length = limit;
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Replace the string and clamp the selection and composing range into it.
+    ///
+    /// A composing range that collapses stays `Some`. The undo stack is left
+    /// alone. `revision` increments only when the text changes.
+    pub fn replace_keeping_composition(&mut self, next: String) -> bool {
+        if self.value.text == next {
+            return false;
+        }
+        let limit = utf16_len(&next);
+        self.value.text = next;
+        self.value.selection.base = self.value.selection.base.min(limit);
+        self.value.selection.extent = self.value.selection.extent.min(limit);
+        if let Some(range) = self.value.composing.as_mut() {
+            let start = range.start.min(limit);
+            let end = range.end.min(limit);
+            *range = start..end;
+        }
+        self.revision = self.revision.saturating_add(1);
+        true
+    }
+
+    pub fn value(&self) -> &TextEditingValue {
+        &self.value
+    }
+
+    pub fn clipboard(&self) -> Option<&str> {
+        self.clipboard.as_deref()
+    }
+
+    pub fn column_x(&self) -> Option<f32> {
+        self.column_x
+    }
+
+    pub fn set_column_x(&mut self, x: Option<f32>) {
+        self.column_x = x;
+    }
+
+    pub fn apply(&mut self, edit: Edit) {
+        struct Plain;
+        impl EditQuery for Plain {
+            fn word_at(&mut self, text: &str, unit: u32) -> (u32, u32) {
+                crate::text::shaper::whitespace_word(text, unit)
+            }
+            fn caret_at(&mut self, _unit: u32, _affinity: Affinity) -> Caret {
+                empty_caret()
+            }
+            fn hit_at(&mut self, _x: f32, _y: f32) -> Caret {
+                empty_caret()
+            }
+        }
+        self.apply_in(edit, &[], &mut Plain);
+    }
+
+    /// `lines` is the paragraph the text currently occupies. An empty slice
+    /// falls back to grapheme steps, which is what a single unwrapped line does.
+    pub fn apply_in<Q: EditQuery>(&mut self, edit: Edit, lines: &[TextLine], query: &mut Q) {
+        let saved = self.max_length.map(|_| self.clone());
+        if !self.apply_motion(&edit, lines, query) {
+            self.apply_mutation(edit, lines, query);
+        }
+        if let Some(limit) = self.max_length
+            && utf16_len(&self.value.text) > limit
+        {
+            if let Some(saved) = saved {
+                *self = saved;
+            }
+            return;
+        }
+        self.revision = self.revision.saturating_add(1);
+    }
+
+    fn apply_motion<Q: EditQuery>(
+        &mut self,
+        edit: &Edit,
+        lines: &[TextLine],
+        query: &mut Q,
+    ) -> bool {
+        match edit {
+            Edit::Left | Edit::Right | Edit::ExtendLeft | Edit::ExtendRight => {
+                let extend = matches!(edit, Edit::ExtendLeft | Edit::ExtendRight);
+                let dir = if matches!(edit, Edit::Left | Edit::ExtendLeft) {
+                    -1
+                } else {
+                    1
+                };
+                self.move_cluster(lines, dir, extend);
+            }
+            Edit::WordLeft | Edit::WordRight | Edit::ExtendWordLeft | Edit::ExtendWordRight => {
+                let extend = matches!(edit, Edit::ExtendWordLeft | Edit::ExtendWordRight);
+                let dir = if matches!(edit, Edit::WordLeft | Edit::ExtendWordLeft) {
+                    -1
+                } else {
+                    1
+                };
+                self.move_word(query, dir, extend);
+            }
+            Edit::LineStart | Edit::LineEnd | Edit::ExtendLineStart | Edit::ExtendLineEnd => {
+                let extend = matches!(edit, Edit::ExtendLineStart | Edit::ExtendLineEnd);
+                let dir = if matches!(edit, Edit::LineStart | Edit::ExtendLineStart) {
+                    -1
+                } else {
+                    1
+                };
+                self.move_line_edge(lines, dir, extend);
+            }
+            Edit::Up | Edit::Down | Edit::ExtendUp | Edit::ExtendDown => {
+                let extend = matches!(edit, Edit::ExtendUp | Edit::ExtendDown);
+                let dir = if matches!(edit, Edit::Up | Edit::ExtendUp) {
+                    -1
+                } else {
+                    1
+                };
+                self.move_vertical(lines, dir, extend, query);
+            }
+            Edit::DocumentStart => self.place(0, Affinity::Downstream, false),
+            Edit::DocumentEnd => {
+                let end = utf16_len(&self.value.text);
+                self.place(end, Affinity::Downstream, false);
+            }
+            Edit::ExtendDocumentStart => self.place(0, Affinity::Downstream, true),
+            Edit::ExtendDocumentEnd => {
+                let end = utf16_len(&self.value.text);
+                self.place(end, Affinity::Downstream, true);
+            }
+            Edit::SetCaret(unit) => self.place(*unit, Affinity::Downstream, false),
+            Edit::ExtendCaret(unit) => self.place(*unit, Affinity::Downstream, true),
+            _ => return false,
+        }
+        true
+    }
+
+    fn apply_mutation<Q: EditQuery>(&mut self, edit: Edit, lines: &[TextLine], query: &mut Q) {
+        match edit {
+            Edit::Backspace => {
+                self.checkpoint();
+                self.delete_backward();
+            }
+            Edit::ForwardDelete => {
+                self.checkpoint();
+                self.delete_forward();
+            }
+            Edit::Insert(text) => {
+                self.commit_composing();
+                self.checkpoint();
+                self.insert(&text);
+            }
+            Edit::Newline => {
+                self.commit_composing();
+                self.checkpoint();
+                self.insert("\n");
+            }
+            Edit::Paste(text) => {
+                self.commit_composing();
+                self.checkpoint();
+                self.insert(&text);
+            }
+            Edit::Composing(next) => self.set_composing(next),
+            Edit::Copy => self.copy(),
+            Edit::Cut => {
+                self.copy();
+                self.checkpoint();
+                self.delete_selection();
+            }
+            Edit::Undo => self.undo(),
+            Edit::Redo => self.redo(),
+            Edit::SelectAll => {
+                let end = utf16_len(&self.value.text);
+                self.value.selection = TextSelection {
+                    base: 0,
+                    extent: end,
+                    affinity: Affinity::Downstream,
+                };
+                self.value.composing = None;
+                self.column_x = None;
+            }
+            Edit::Load(text) => {
+                self.undo.clear();
+                self.redo.clear();
+                self.value = TextEditingValue::at_end(text);
+                self.clipboard = None;
+                self.column_x = None;
+            }
+            Edit::Replace { text, record_undo } => {
+                if record_undo {
+                    self.checkpoint();
+                }
+                let limit = utf16_len(&text);
+                self.value.text = text;
+                self.value.selection.base = self.value.selection.base.min(limit);
+                self.value.selection.extent = self.value.selection.extent.min(limit);
+                if let Some(range) = self.value.composing.as_mut() {
+                    let start = range.start.min(limit);
+                    let end = range.end.min(limit);
+                    *range = start..end;
+                }
+                self.column_x = None;
+            }
+            Edit::DeleteWordBackward => {
+                self.checkpoint();
+                self.delete_word(query, -1);
+            }
+            Edit::DeleteWordForward => {
+                self.checkpoint();
+                self.delete_word(query, 1);
+            }
+            Edit::DeleteToLineStart => {
+                self.checkpoint();
+                self.delete_to_line_edge(lines, -1);
+            }
+            Edit::DeleteToLineEnd => {
+                self.checkpoint();
+                self.delete_to_line_edge(lines, 1);
+            }
+            Edit::DeleteRange { start, end } => {
+                self.checkpoint();
+                self.value.selection = TextSelection {
+                    base: start,
+                    extent: end,
+                    affinity: Affinity::Downstream,
+                };
+                self.delete_selection();
+            }
+            Edit::Commit(text) => {
+                self.checkpoint();
+                self.delete_composing_text();
+                self.insert(&text);
+            }
+            Edit::SetSelection { start, end } => {
+                let bounds = grapheme_bounds(&self.value.text);
+                let boundary = |unit| bounds[bounds.partition_point(|bound| *bound <= unit) - 1];
+                self.place(boundary(start), Affinity::Downstream, false);
+                self.place(boundary(end), Affinity::Downstream, true);
+            }
+            Edit::Left
+            | Edit::Right
+            | Edit::ExtendLeft
+            | Edit::ExtendRight
+            | Edit::WordLeft
+            | Edit::WordRight
+            | Edit::ExtendWordLeft
+            | Edit::ExtendWordRight
+            | Edit::LineStart
+            | Edit::LineEnd
+            | Edit::ExtendLineStart
+            | Edit::ExtendLineEnd
+            | Edit::Up
+            | Edit::Down
+            | Edit::ExtendUp
+            | Edit::ExtendDown
+            | Edit::DocumentStart
+            | Edit::DocumentEnd
+            | Edit::ExtendDocumentStart
+            | Edit::ExtendDocumentEnd
+            | Edit::SetCaret(_)
+            | Edit::ExtendCaret(_) => {}
+        }
+    }
+
+    fn checkpoint(&mut self) {
+        self.undo.push(self.value.clone());
+        if self.undo.len() > UNDO_LIMIT {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    fn step_history(
+        value: &mut TextEditingValue,
+        column_x: &mut Option<f32>,
+        from: &mut Vec<TextEditingValue>,
+        to: &mut Vec<TextEditingValue>,
+    ) {
+        let Some(previous) = from.pop() else {
+            return;
+        };
+        to.push(std::mem::replace(value, previous));
+        *column_x = None;
+    }
+
+    fn undo(&mut self) {
+        Self::step_history(
+            &mut self.value,
+            &mut self.column_x,
+            &mut self.undo,
+            &mut self.redo,
+        );
+    }
+
+    fn redo(&mut self) {
+        Self::step_history(
+            &mut self.value,
+            &mut self.column_x,
+            &mut self.redo,
+            &mut self.undo,
+        );
+    }
+
+    fn copy(&mut self) {
+        let (start, end) = self.value.selection.ordered();
+        if start == end {
+            self.clipboard = None;
+            return;
+        }
+        self.clipboard = Some(slice_utf16(&self.value.text, start, end));
+    }
+
+    fn place(&mut self, unit: u32, affinity: Affinity, extend: bool) {
+        self.commit_composing();
+        let end = utf16_len(&self.value.text);
+        let unit = unit.min(end);
+        if extend {
+            self.value.selection.extent = unit;
+            self.value.selection.affinity = affinity;
+        } else {
+            self.value.selection = TextSelection {
+                base: unit,
+                extent: unit,
+                affinity,
+            };
+        }
+        self.column_x = None;
+    }
+
+    fn move_cluster(&mut self, lines: &[TextLine], delta: i32, extend: bool) {
+        self.commit_composing();
+        let selection = self.value.selection;
+        if !extend && !selection.is_collapsed() {
+            let (start, end) = selection.ordered();
+            let edge = if delta < 0 { start } else { end };
+            self.place(edge, Affinity::Downstream, false);
+            return;
+        }
+        let unit = selection.extent;
+        let affinity = selection.affinity;
+        if delta < 0 && affinity == Affinity::Downstream && soft_line_start(lines, unit) {
+            self.place(unit, Affinity::Upstream, extend);
+            return;
+        }
+        if delta > 0 && affinity == Affinity::Upstream && soft_line_start(lines, unit) {
+            self.place(unit, Affinity::Downstream, extend);
+            return;
+        }
+        let bounds = grapheme_bounds(&self.value.text);
+        let next = step_bound(&bounds, unit, delta);
+        self.place(next, Affinity::Downstream, extend);
+    }
+
+    fn move_word<Q: EditQuery>(&mut self, query: &mut Q, delta: i32, extend: bool) {
+        self.commit_composing();
+        let unit = self.value.selection.extent;
+        let end = utf16_len(&self.value.text);
+        let (start, stop) = query.word_at(&self.value.text, unit.min(end));
+        let next = if delta < 0 {
+            if unit > start {
+                start
+            } else if unit == 0 {
+                0
+            } else {
+                query.word_at(&self.value.text, unit - 1).0
+            }
+        } else if unit < stop {
+            stop
+        } else if unit >= end {
+            end
+        } else {
+            query.word_at(&self.value.text, unit + 1).1
+        };
+        self.place(next, Affinity::Downstream, extend);
+    }
+
+    fn move_line_edge(&mut self, lines: &[TextLine], delta: i32, extend: bool) {
+        self.commit_composing();
+        let unit = self.value.selection.extent;
+        let affinity = self.value.selection.affinity;
+        let Some(line) = line_for(lines, unit, affinity) else {
+            let edge = if delta < 0 {
+                0
+            } else {
+                utf16_len(&self.value.text)
+            };
+            self.place(edge, Affinity::Downstream, extend);
+            return;
+        };
+        if delta < 0 {
+            self.place(line.start, Affinity::Downstream, extend);
+        } else {
+            self.place(line.end, Affinity::Upstream, extend);
+        }
+    }
+
+    fn move_vertical<Q: EditQuery>(
+        &mut self,
+        lines: &[TextLine],
+        delta: i32,
+        extend: bool,
+        query: &mut Q,
+    ) {
+        if lines.is_empty() {
+            return;
+        }
+        self.commit_composing();
+        let unit = self.value.selection.extent;
+        let affinity = self.value.selection.affinity;
+        let caret = query.caret_at(unit, affinity);
+        let x = self.column_x.unwrap_or(caret.x);
+        let index = line_index(lines, unit, affinity);
+        let len = crate::cast::i32_from_usize(lines.len());
+        let next = (crate::cast::i32_from_usize(index) + delta).clamp(0, len - 1);
+        let next = usize::try_from(next).unwrap_or(0);
+        let line = &lines[next];
+        let hit = query.hit_at(x, line.y + line.h * 0.5);
+        self.place(hit.unit, hit.affinity, extend);
+        self.column_x = Some(x);
+    }
+
+    fn delete_backward(&mut self) {
+        self.commit_composing();
+        if !self.value.selection.is_collapsed() {
+            self.delete_selection();
+            return;
+        }
+        let bounds = grapheme_bounds(&self.value.text);
+        let caret = self.value.selection.extent;
+        let previous = step_bound(&bounds, caret, -1);
+        if previous == caret {
+            return;
+        }
+        self.value.text = delete_utf16(&self.value.text, previous, caret);
+        self.value.selection = TextSelection::collapsed(previous);
+    }
+
+    fn delete_forward(&mut self) {
+        self.commit_composing();
+        if !self.value.selection.is_collapsed() {
+            self.delete_selection();
+            return;
+        }
+        let bounds = grapheme_bounds(&self.value.text);
+        let caret = self.value.selection.extent;
+        let next = step_bound(&bounds, caret, 1);
+        if next == caret {
+            return;
+        }
+        self.value.text = delete_utf16(&self.value.text, caret, next);
+        self.value.selection = TextSelection::collapsed(caret);
+    }
+
+    fn delete_word<Q: EditQuery>(&mut self, query: &mut Q, delta: i32) {
+        self.commit_composing();
+        if !self.value.selection.is_collapsed() {
+            self.delete_selection();
+            return;
+        }
+        let unit = self.value.selection.extent;
+        let end = utf16_len(&self.value.text);
+        let (start, stop) = query.word_at(&self.value.text, unit.min(end));
+        let (from, to) = if delta < 0 {
+            if unit > start {
+                (start, unit)
+            } else if unit == 0 {
+                return;
+            } else {
+                (query.word_at(&self.value.text, unit - 1).0, unit)
+            }
+        } else if unit < stop {
+            (unit, stop)
+        } else if unit >= end {
+            return;
+        } else {
+            (unit, query.word_at(&self.value.text, unit + 1).1)
+        };
+        if from == to {
+            return;
+        }
+        self.value.text = delete_utf16(&self.value.text, from, to);
+        self.value.selection = TextSelection::collapsed(from);
+    }
+
+    fn delete_to_line_edge(&mut self, lines: &[TextLine], delta: i32) {
+        self.commit_composing();
+        if !self.value.selection.is_collapsed() {
+            self.delete_selection();
+            return;
+        }
+        let unit = self.value.selection.extent;
+        let affinity = self.value.selection.affinity;
+        let Some(line) = line_for(lines, unit, affinity) else {
+            return;
+        };
+        let (from, to) = if delta < 0 {
+            (line.start, unit)
+        } else {
+            (unit, line.end)
+        };
+        if from == to {
+            return;
+        }
+        self.value.text = delete_utf16(&self.value.text, from, to);
+        self.value.selection = TextSelection::collapsed(from);
+    }
+
+    fn delete_selection(&mut self) {
+        let (start, end) = self.value.selection.ordered();
+        if start == end {
+            return;
+        }
+        self.value.text = delete_utf16(&self.value.text, start, end);
+        self.value.selection = TextSelection::collapsed(start);
+        self.value.composing = None;
+    }
+
+    fn insert(&mut self, extra: &str) {
+        self.delete_selection();
+        let at = self.value.selection.extent;
+        self.value.text = insert_utf16(&self.value.text, at, extra);
+        let end = at.saturating_add(utf16_len(extra));
+        self.value.selection = TextSelection::collapsed(end);
+        self.value.composing = None;
+        self.column_x = None;
+    }
+
+    fn commit_composing(&mut self) {
+        self.value.composing = None;
+    }
+
+    /// Remove the marked characters. The composing flag is cleared with them.
+    fn delete_composing_text(&mut self) {
+        let Some(range) = self.value.composing.take() else {
+            return;
+        };
+        let (start, end) = if range.start <= range.end {
+            (range.start, range.end)
+        } else {
+            (range.end, range.start)
+        };
+        if start == end {
+            return;
+        }
+        self.value.text = delete_utf16(&self.value.text, start, end);
+        self.value.selection = TextSelection::collapsed(start);
+    }
+
+    fn set_composing(&mut self, next: Option<String>) {
+        if self.value.composing.is_none() && next.is_some() {
+            self.checkpoint();
+            if !self.value.selection.is_collapsed() {
+                self.delete_selection();
+            }
+        }
+        if let Some(range) = self.value.composing.take() {
+            let (start, end) = if range.start <= range.end {
+                (range.start, range.end)
+            } else {
+                (range.end, range.start)
+            };
+            self.value.text = delete_utf16(&self.value.text, start, end);
+            self.value.selection = TextSelection::collapsed(start);
+        }
+        let Some(extra) = next else {
+            return;
+        };
+        let at = self.value.selection.extent;
+        self.value.text = insert_utf16(&self.value.text, at, &extra);
+        let end = at.saturating_add(utf16_len(&extra));
+        self.value.composing = Some(at..end);
+        self.value.selection = TextSelection::collapsed(end);
+        self.column_x = None;
+    }
+}
+
+fn empty_caret() -> Caret {
+    Caret {
+        unit: 0,
+        x: 0.0,
+        y: 0.0,
+        w: 1.0,
+        h: 0.0,
+        affinity: Affinity::Downstream,
+    }
+}
+
+fn soft_line_start(lines: &[TextLine], unit: u32) -> bool {
+    lines
+        .iter()
+        .enumerate()
+        .any(|(index, line)| index > 0 && line.start == unit && !lines[index - 1].hard_break)
+}
+
+fn line_index(lines: &[TextLine], unit: u32, affinity: Affinity) -> usize {
+    if affinity == Affinity::Upstream
+        && let Some(index) = lines.iter().position(|line| line.start == unit)
+        && index > 0
+        && !lines[index - 1].hard_break
+    {
+        return index - 1;
+    }
+    lines
+        .iter()
+        .position(|line| unit < line.end_with_break)
+        .unwrap_or(lines.len().saturating_sub(1))
+}
+
+fn line_for(lines: &[TextLine], unit: u32, affinity: Affinity) -> Option<&TextLine> {
+    if lines.is_empty() {
+        return None;
+    }
+    Some(&lines[line_index(lines, unit, affinity)])
+}
+
+pub fn utf16_len(text: &str) -> u32 {
+    crate::cast::u32_from_usize(text.encode_utf16().count())
+}
+
+/// UTF-16 offset of the grapheme cluster that contains `utf16`.
+///
+/// An offset past the end clamps to the final boundary, which is [`grapheme_count`].
+pub fn grapheme_index(text: &str, utf16: u32) -> u32 {
+    let bounds = grapheme_bounds(text);
+    let mut index = 0u32;
+    for (slot, bound) in bounds.iter().enumerate() {
+        if *bound <= utf16 {
+            index = crate::cast::u32_from_usize(slot);
+        } else {
+            break;
+        }
+    }
+    index
+}
+
+/// Number of grapheme clusters in `text`.
+pub fn grapheme_count(text: &str) -> u32 {
+    crate::cast::u32_from_usize(grapheme_bounds(text).len().saturating_sub(1))
+}
+
+/// UTF-16 start of grapheme `index`. Past the end clamps to `utf16_len`.
+pub fn grapheme_unit(text: &str, index: u32) -> u32 {
+    let bounds = grapheme_bounds(text);
+    let slot = (index as usize).min(bounds.len().saturating_sub(1));
+    bounds[slot]
+}
+
+fn grapheme_bounds(text: &str) -> Vec<u32> {
+    let mut bounds = vec![0];
+    let mut unit = 0u32;
+    for grapheme in text.graphemes(true) {
+        unit = unit.saturating_add(crate::cast::u32_from_usize(grapheme.encode_utf16().count()));
+        bounds.push(unit);
+    }
+    bounds
+}
+
+fn step_bound(bounds: &[u32], unit: u32, delta: i32) -> u32 {
+    if bounds.is_empty() {
+        return 0;
+    }
+    let index = bounds
+        .iter()
+        .position(|bound| *bound >= unit)
+        .unwrap_or(bounds.len() - 1);
+    let index = if bounds.get(index).copied() != Some(unit) && index > 0 {
+        index - 1
+    } else {
+        index
+    };
+    let next = if delta < 0 {
+        index.saturating_sub(1)
+    } else {
+        (index + 1).min(bounds.len() - 1)
+    };
+    bounds[next]
+}
+
+fn byte_index(text: &str, unit: u32) -> usize {
+    let mut seen = 0u32;
+    for (byte, ch) in text.char_indices() {
+        if seen >= unit {
+            return byte;
+        }
+        seen = seen.saturating_add(crate::cast::u32_from_usize(ch.len_utf16()));
+    }
+    text.len()
+}
+
+fn slice_utf16(text: &str, start: u32, end: u32) -> String {
+    let from = byte_index(text, start);
+    let to = byte_index(text, end);
+    text.get(from..to).unwrap_or("").to_owned()
+}
+
+fn delete_utf16(text: &str, start: u32, end: u32) -> String {
+    let (start, end) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    let from = byte_index(text, start);
+    let to = byte_index(text, end);
+    let mut out = String::with_capacity(text.len());
+    out.push_str(text.get(..from).unwrap_or(""));
+    out.push_str(text.get(to..).unwrap_or(""));
+    out
+}
+
+fn insert_utf16(text: &str, at: u32, extra: &str) -> String {
+    let byte = byte_index(text, at);
+    let mut out = String::with_capacity(text.len() + extra.len());
+    out.push_str(text.get(..byte).unwrap_or(""));
+    out.push_str(extra);
+    out.push_str(text.get(byte..).unwrap_or(""));
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grapheme_index_splits_an_emoji_from_ascii() {
+        let text = "😀a";
+        assert_eq!(grapheme_count(text), 2);
+        assert_eq!(grapheme_index(text, 0), 0);
+        assert_eq!(grapheme_index(text, 1), 0);
+        assert_eq!(grapheme_index(text, 2), 1);
+        assert_eq!(grapheme_unit(text, 1), 2);
+    }
+
+    #[test]
+    fn emoji_and_combining_marks_move_as_one_cluster() {
+        let mut editor = TextEditor::new("a👨‍👩‍👧‍👦e\u{0301}");
+        editor.apply(Edit::Left);
+        assert_eq!(editor.value().selection.extent, utf16_len("a👨‍👩‍👧‍👦"));
+        editor.apply(Edit::Left);
+        assert_eq!(editor.value().selection.extent, utf16_len("a"));
+        editor.apply(Edit::Left);
+        assert_eq!(editor.value().selection, TextSelection::collapsed(0));
+        editor.apply(Edit::Right);
+        assert_eq!(editor.value().selection.extent, utf16_len("a"));
+    }
+
+    #[test]
+    fn backspace_removes_one_grapheme() {
+        let mut editor = TextEditor::new("a👨‍👩‍👧‍👦");
+        editor.apply(Edit::Backspace);
+        assert_eq!(editor.value().text, "a");
+        editor.apply(Edit::Backspace);
+        assert_eq!(editor.value().text, "");
+    }
+
+    #[test]
+    fn undo_restores_the_deleted_cluster() {
+        let mut editor = TextEditor::new("a👨‍👩‍👧‍👦");
+        editor.apply(Edit::Backspace);
+        editor.apply(Edit::Undo);
+        assert_eq!(editor.value().text, "a👨‍👩‍👧‍👦");
+        editor.apply(Edit::Redo);
+        assert_eq!(editor.value().text, "a");
+    }
+
+    #[test]
+    fn forward_delete_and_newline_and_extend() {
+        let mut editor = TextEditor::new("ab");
+        editor.apply(Edit::Left);
+        editor.apply(Edit::ForwardDelete);
+        assert_eq!(editor.value().text, "a");
+        editor.apply(Edit::Newline);
+        assert_eq!(editor.value().text, "a\n");
+        editor.apply(Edit::DocumentStart);
+        editor.apply(Edit::ExtendDocumentEnd);
+        assert_eq!(editor.value().selection.base, 0);
+        assert_eq!(editor.value().selection.extent, 2);
+        editor.apply(Edit::Backspace);
+        assert_eq!(editor.value().text, "");
+    }
+
+    #[test]
+    fn shift_left_extends_and_word_backspace_removes_the_word() {
+        let mut editor = TextEditor::new("hello world");
+        editor.apply(Edit::ExtendWordLeft);
+        assert_eq!(editor.value().selection.extent, utf16_len("hello "));
+        editor.apply(Edit::DeleteWordBackward);
+        assert_eq!(editor.value().text, "hello ");
+    }
+
+    #[test]
+    fn every_edit_moves_or_changes_the_value_predictably() {
+        struct Case {
+            start: &'static str,
+            caret: u32,
+            base: Option<u32>,
+            edit: Edit,
+            text: &'static str,
+            expect_base: u32,
+            expect_extent: u32,
+        }
+        let cases = [
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Left,
+                text: "hello world",
+                expect_base: 10,
+                expect_extent: 10,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Right,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ExtendLeft,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 10,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ExtendRight,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Backspace,
+                text: "hello worl",
+                expect_base: 10,
+                expect_extent: 10,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ForwardDelete,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Insert("!".into()),
+                text: "hello world!",
+                expect_base: 12,
+                expect_extent: 12,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Newline,
+                text: "hello world\n",
+                expect_base: 12,
+                expect_extent: 12,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Paste("!".into()),
+                text: "hello world!",
+                expect_base: 12,
+                expect_extent: 12,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Composing(Some("x".into())),
+                text: "hello worldx",
+                expect_base: 12,
+                expect_extent: 12,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Composing(None),
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "ab",
+                caret: 2,
+                base: Some(0),
+                edit: Edit::Copy,
+                text: "ab",
+                expect_base: 0,
+                expect_extent: 2,
+            },
+            Case {
+                start: "ab",
+                caret: 2,
+                base: Some(0),
+                edit: Edit::Cut,
+                text: "",
+                expect_base: 0,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Undo,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Redo,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::SelectAll,
+                text: "hello world",
+                expect_base: 0,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Load("ab".into()),
+                text: "ab",
+                expect_base: 2,
+                expect_extent: 2,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::SetCaret(0),
+                text: "hello world",
+                expect_base: 0,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ExtendCaret(0),
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::WordLeft,
+                text: "hello world",
+                expect_base: 6,
+                expect_extent: 6,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::WordRight,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ExtendWordLeft,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 6,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ExtendWordRight,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::LineStart,
+                text: "hello world",
+                expect_base: 0,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 0,
+                base: None,
+                edit: Edit::LineEnd,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ExtendLineStart,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 0,
+                base: None,
+                edit: Edit::ExtendLineEnd,
+                text: "hello world",
+                expect_base: 0,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::DocumentStart,
+                text: "hello world",
+                expect_base: 0,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 0,
+                base: None,
+                edit: Edit::DocumentEnd,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ExtendDocumentStart,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 0,
+                base: None,
+                edit: Edit::ExtendDocumentEnd,
+                text: "hello world",
+                expect_base: 0,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Up,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Down,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ExtendUp,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::ExtendDown,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::DeleteWordBackward,
+                text: "hello ",
+                expect_base: 6,
+                expect_extent: 6,
+            },
+            Case {
+                start: "hello world",
+                caret: 0,
+                base: None,
+                edit: Edit::DeleteWordForward,
+                text: " world",
+                expect_base: 0,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::DeleteToLineStart,
+                text: "hello world",
+                expect_base: 11,
+                expect_extent: 11,
+            },
+            Case {
+                start: "hello world",
+                caret: 0,
+                base: None,
+                edit: Edit::DeleteToLineEnd,
+                text: "hello world",
+                expect_base: 0,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::DeleteRange { start: 0, end: 6 },
+                text: "world",
+                expect_base: 0,
+                expect_extent: 0,
+            },
+            Case {
+                start: "hello world",
+                caret: 11,
+                base: None,
+                edit: Edit::Commit("!".into()),
+                text: "hello world!",
+                expect_base: 12,
+                expect_extent: 12,
+            },
+        ];
+        for case in cases {
+            let mut editor = TextEditor::new(case.start);
+            editor.apply(Edit::SetCaret(case.caret));
+            if let Some(base) = case.base {
+                editor.apply(Edit::SetCaret(base));
+                editor.apply(Edit::ExtendCaret(case.caret));
+            }
+            editor.apply(case.edit.clone());
+            assert_eq!(editor.value().text, case.text, "text after {:?}", case.edit);
+            assert_eq!(
+                editor.value().selection.base,
+                case.expect_base,
+                "base after {:?}",
+                case.edit
+            );
+            assert_eq!(
+                editor.value().selection.extent,
+                case.expect_extent,
+                "extent after {:?}",
+                case.edit
+            );
+        }
+        let mut selected = TextEditor::new("ab");
+        selected.apply(Edit::SetCaret(0));
+        selected.apply(Edit::ExtendCaret(2));
+        selected.apply(Edit::Copy);
+        assert_eq!(selected.clipboard(), Some("ab"));
+        let mut undo = TextEditor::new("ab");
+        undo.apply(Edit::Backspace);
+        undo.apply(Edit::Undo);
+        assert_eq!(undo.value().text, "ab");
+        undo.apply(Edit::Redo);
+        assert_eq!(undo.value().text, "a");
+    }
+
+    #[test]
+    fn max_length_rejects_without_touching_undo() {
+        let mut editor = TextEditor::new("ab");
+        editor.set_max_length(Some(2));
+        editor.apply(Edit::Insert("c".into()));
+        assert_eq!(editor.value().text, "ab");
+        editor.apply(Edit::Undo);
+        assert_eq!(editor.value().text, "ab");
+        editor.apply(Edit::Replace {
+            text: "z".into(),
+            record_undo: false,
+        });
+        assert_eq!(editor.value().text, "z");
+        editor.apply(Edit::Undo);
+        assert_eq!(editor.value().text, "z");
+    }
+}
