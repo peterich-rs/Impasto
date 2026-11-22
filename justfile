@@ -10,7 +10,7 @@ default:
 clippy:
     cargo clippy --manifest-path "{{root}}/Cargo.toml" --workspace --exclude embedder-macos --all-targets -- -D warnings
 
-check: style-check boundaries clippy test solid standard-check
+check: style-check boundaries impeller-sdk-test clippy test solid standard-check
     @echo "check ok"
 
 bench:
@@ -44,6 +44,9 @@ solid:
 
 boundaries:
     python3 "{{root}}/tools/check-javascript-boundaries.py"
+
+impeller-sdk-test:
+    python3 "{{root}}/tools/test_impeller_sdk.py"
 
 standard-check:
     node "{{root}}/tools/check-standard-library.mjs"
