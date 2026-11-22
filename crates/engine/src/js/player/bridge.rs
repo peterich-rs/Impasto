@@ -1,6 +1,7 @@
 //! Focus events, animations, IME state and font registration for the JS adapter.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::motion::Spring;
 use crate::session::{ImeState, utf16_len};
@@ -108,7 +109,7 @@ const FONT_LIMIT: usize = 8;
 const FONT_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 
 pub(super) struct FontBook {
-    queued: Vec<(String, Vec<u8>)>,
+    queued: Vec<(String, Arc<[u8]>)>,
     handed: HashSet<String>,
 }
 
@@ -127,22 +128,22 @@ impl FontBook {
             return Err(());
         }
         if let Some(slot) = self.queued.iter_mut().find(|(name, _)| name == &family) {
-            slot.1 = bytes;
+            slot.1 = bytes.into();
             return Ok(());
         }
         let seen = self.handed.contains(&family);
         if !seen && !startup_font(&family) && self.occupied() >= FONT_LIMIT {
             return Err(());
         }
-        self.queued.push((family, bytes));
+        self.queued.push((family, bytes.into()));
         Ok(())
     }
 
-    pub(super) fn snapshot(&self) -> Vec<(String, Vec<u8>)> {
+    pub(super) fn snapshot(&self) -> Vec<(String, Arc<[u8]>)> {
         self.queued.clone()
     }
 
-    pub(super) fn take(&mut self) -> Vec<(String, Vec<u8>)> {
+    pub(super) fn take(&mut self) -> Vec<(String, Arc<[u8]>)> {
         let taken = std::mem::take(&mut self.queued);
         for (name, _) in &taken {
             self.handed.insert(name.clone());

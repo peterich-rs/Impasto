@@ -6,7 +6,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use dispatch2::DispatchQueue;
+use dispatch2::{DispatchQueue, DispatchTime};
 use embedder::{
     Boot, BootError, Command, FrameToken, Lifecycle, Link, Restoration, Services, SurfaceId,
     SurfaceTarget, Vsync, WindowSession,
@@ -296,7 +296,16 @@ impl ImpastoIOSHost {
                     vsync: boot_clock,
                     decoder: app.decoder,
                     modules: app.modules,
-                    main_thread: Some(Arc::new(|work| DispatchQueue::main().exec_async(work))),
+                    platform_runner: Some(embedder::PlatformTaskRunner::new(
+                        Arc::new(|work| DispatchQueue::main().exec_async(work)),
+                        |delay, work| {
+                            let when =
+                                DispatchTime::try_from(delay).unwrap_or(DispatchTime::FOREVER);
+                            let _ = DispatchQueue::main().after(when, work);
+                        },
+                        || MainThreadMarker::new().is_some(),
+                    )),
+                    thread_topology: embedder::ThreadTopology::configured()?,
                     launch_url,
                     http: app.http,
                     open_raster: Box::new(Rasterizer::create_metal),

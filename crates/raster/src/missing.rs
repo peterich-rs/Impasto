@@ -48,6 +48,14 @@ impl Rasterizer {
         Self
     }
 
+    pub fn register_shared_font(
+        &mut self,
+        _data: std::sync::Arc<[u8]>,
+        _family: &str,
+    ) -> Result<(), Status> {
+        Err(Status::NotLinked)
+    }
+
     pub fn register_font(&mut self, _data: &[u8], _family: &str) -> Result<(), Status> {
         Err(Status::NotLinked)
     }
@@ -121,6 +129,20 @@ impl Rasterizer {
 }
 
 impl Typography {
+    pub(crate) fn discard_measure_cache(&mut self) {}
+
+    pub fn standalone() -> Result<Self, Status> {
+        Err(Status::NotLinked)
+    }
+
+    pub fn register_shared_face(
+        &mut self,
+        _data: std::sync::Arc<[u8]>,
+        _family: &str,
+    ) -> Result<bool, Status> {
+        Err(Status::NotLinked)
+    }
+
     pub fn begin_measure(&mut self) -> u64 {
         0
     }

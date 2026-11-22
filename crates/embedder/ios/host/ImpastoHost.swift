@@ -888,6 +888,14 @@ private func receiveImpastoEvent(
     let message = bytes.map {
         String(decoding: UnsafeBufferPointer(start: $0, count: length), as: UTF8.self)
     } ?? ""
+    // These updates only touch the current UIKit view. The session may
+    // already be on the main actor when the UI and platform queues are shared.
+    if Thread.isMainThread && (8...11).contains(kind) {
+        MainActor.assumeIsolated {
+            context.host?.receive(kind, value: value, message: message, generation: context.generation)
+        }
+        return
+    }
     DispatchQueue.main.async {
         context.host?.receive(kind, value: value, message: message, generation: context.generation)
     }

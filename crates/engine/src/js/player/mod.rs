@@ -766,7 +766,7 @@ impl Session for JsSession {
         inner.tree.borrow_mut().set_autofill_enabled(enabled);
     }
 
-    fn take_fonts(&mut self) -> Vec<(String, Vec<u8>)> {
+    fn take_fonts(&mut self) -> Vec<(String, Arc<[u8]>)> {
         let inner = &self.inner;
         inner.fonts.borrow_mut().take()
     }
@@ -901,7 +901,7 @@ impl Session for JsSession {
             let queued = inner.fonts.borrow().snapshot();
             let mut tree = inner.tree.borrow_mut();
             for (family, bytes) in &queued {
-                let _ = tree.register_font(family, bytes);
+                let _ = tree.register_shared_font(family, Arc::clone(bytes));
             }
             if let Err(error) = tree.flush_styles() {
                 let message = error.to_string();

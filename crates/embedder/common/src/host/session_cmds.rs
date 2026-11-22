@@ -1,10 +1,10 @@
 use engine::session::{Metrics, PlatformSettings};
 
-use super::{Runtime, arm, flush_gpu, note_wake, session_call};
+use super::{UiHost, arm, flush_gpu, note_wake, session_call};
 use crate::command::Command;
 use crate::error::BootError;
 
-pub(super) fn handle(runtime: &mut Runtime, command: Command) -> Result<bool, BootError> {
+pub(super) fn handle(runtime: &mut UiHost, command: Command) -> Result<bool, BootError> {
     match command {
         command @ (Command::Pointer(_)
         | Command::Input(_)
@@ -32,7 +32,7 @@ pub(super) fn handle(runtime: &mut Runtime, command: Command) -> Result<bool, Bo
     }
 }
 
-fn input(runtime: &mut Runtime, command: Command) -> Result<bool, BootError> {
+fn input(runtime: &mut UiHost, command: Command) -> Result<bool, BootError> {
     match command {
         Command::Pointer(event) => {
             if runtime.input.push_pointer(event) {
@@ -55,7 +55,7 @@ fn input(runtime: &mut Runtime, command: Command) -> Result<bool, BootError> {
     Ok(false)
 }
 
-fn session(runtime: &mut Runtime, command: Command) -> Result<bool, BootError> {
+fn session(runtime: &mut UiHost, command: Command) -> Result<bool, BootError> {
     match command {
         Command::Lifecycle(state) => lifecycle(runtime, state),
         Command::BackGesture(event) => {
@@ -111,7 +111,7 @@ fn session(runtime: &mut Runtime, command: Command) -> Result<bool, BootError> {
     Ok(false)
 }
 
-fn renew_semantics(runtime: &mut Runtime) {
+fn renew_semantics(runtime: &mut UiHost) {
     if runtime.semantics.take().is_some() {
         runtime.services.borrow().semantics(&[]);
     }
@@ -120,7 +120,7 @@ fn renew_semantics(runtime: &mut Runtime) {
     }
 }
 
-fn metrics_cmd(runtime: &mut Runtime, metrics: Metrics) {
+fn metrics_cmd(runtime: &mut UiHost, metrics: Metrics) {
     super::note_scale(runtime, metrics.device_pixel_ratio);
     if let Some(hub) = runtime.hub.as_ref() {
         hub.note_metrics(metrics);
@@ -130,7 +130,7 @@ fn metrics_cmd(runtime: &mut Runtime, metrics: Metrics) {
     }
 }
 
-fn lifecycle(runtime: &mut Runtime, state: engine::session::Lifecycle) {
+fn lifecycle(runtime: &mut UiHost, state: engine::session::Lifecycle) {
     let deadline = runtime.session.as_mut().map(|session| {
         session_call(|| session.lifecycle(state));
         session.next_wake_ms().map(crate::net::ms_i64)
@@ -144,10 +144,24 @@ fn lifecycle(runtime: &mut Runtime, state: engine::session::Lifecycle) {
             runtime.input.pause()
         }
         (engine::session::Lifecycle::Resumed, _) | (engine::session::Lifecycle::Inactive, true) => {
-            runtime.needs_present = true;
-            runtime.present_failures = 0;
+            runtime.revision = runtime.revision.wrapping_add(1);
+            runtime.update_raster(
+                |graphics| {
+                    graphics.needs_present = true;
+                    graphics.present_failures = 0;
+                    graphics.frame_retry_at = None;
+                    graphics.surfaces.rearm_pending()
+                },
+                |ui, rearmed| {
+                    if rearmed {
+                        ui.try_surface = true;
+                        if !ui.input.is_paused() {
+                            arm(ui);
+                        }
+                    }
+                },
+            );
             runtime.present_retry_at = None;
-            runtime.surfaces.rearm_pending();
             // A stuck armed token cannot be replaced by `arm`. Drop it so resume
             // can post a fresh vsync even if the surface never went away.
             runtime.scheduler.cancel();
@@ -162,7 +176,7 @@ fn lifecycle(runtime: &mut Runtime, state: engine::session::Lifecycle) {
     }
 }
 
-fn settings_cmd(runtime: &mut Runtime, settings: &PlatformSettings) {
+fn settings_cmd(runtime: &mut UiHost, settings: &PlatformSettings) {
     if let Some(session) = runtime.session.as_mut() {
         session_call(|| session.settings(settings));
         if session.wants_frame() {
@@ -171,7 +185,7 @@ fn settings_cmd(runtime: &mut Runtime, settings: &PlatformSettings) {
     }
 }
 
-fn launch_url(runtime: &mut Runtime, url: String) {
+fn launch_url(runtime: &mut UiHost, url: String) {
     if url.is_empty() {
         return;
     }
@@ -184,7 +198,7 @@ fn launch_url(runtime: &mut Runtime, url: String) {
 }
 
 /// Session-side IO completion: deliver the event, arm a frame if the session asks.
-fn io_done(runtime: &mut Runtime, dispatch: impl FnOnce(&mut dyn engine::session::Session)) {
+fn io_done(runtime: &mut UiHost, dispatch: impl FnOnce(&mut dyn engine::session::Session)) {
     if let Some(session) = runtime.session.as_mut() {
         session_call(|| dispatch(session.as_mut()));
         let wants_frame = session.wants_frame();

@@ -41,15 +41,21 @@ impl Shaper for ImpellerShaper {
     }
 
     fn register_font(&mut self, family: &str, bytes: &[u8]) -> bool {
-        let registered = self
-            .typography
-            .borrow_mut()
-            .register_face(bytes, family)
-            .is_ok();
-        if registered {
-            self.intrinsic.clear();
+        self.register_shared_font(family, Arc::from(bytes))
+    }
+
+    fn register_shared_font(&mut self, family: &str, bytes: Arc<[u8]>) -> bool {
+        let mut typography = self.typography.borrow_mut();
+        match typography.register_shared_face(bytes, family) {
+            Ok(changed) => {
+                if changed {
+                    typography.discard_measure_cache();
+                    self.intrinsic.clear();
+                }
+                true
+            }
+            Err(_) => false,
         }
-        registered
     }
 
     fn metrics(&mut self, key: &MetricsKey) -> Arc<ParagraphMetrics> {

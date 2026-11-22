@@ -143,7 +143,6 @@ internal object NativeBridge {
         compEnd: Int,
     ): Boolean
 
-    external fun nativeRunWork(work: Long, run: Boolean)
 
     external fun nativeOnVsync(
         handle: Long,

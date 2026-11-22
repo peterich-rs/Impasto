@@ -1,6 +1,6 @@
 # 平台宿主
 
-macOS、Android 与 iOS 的平台线程将事件入队，渲染线程创建 `Engine` 和会话并上屏。宿主各自链接对应目标的 Impeller SDK。[Impeller SDK](../crates/impeller-sys/README.md)
+macOS、Android 与 iOS 的平台适配器将窗口事件和 vsync 入队。公共宿主在 UI 队列推进会话，在 Raster 队列呈现。宿主各自链接对应目标的 Impeller SDK。[Impeller SDK](../crates/impeller-sys/README.md)
 
 ## 目录与 Cargo 包
 
@@ -19,21 +19,21 @@ macOS、Android 与 iOS 的平台线程将事件入队，渲染线程创建 `Eng
 
 ## 分层
 
-`embedder` 通过 `engine::session` 使用帧和输入类型。平台宿主启用 `engine/js` 打开应用会话，`raster/impeller` 提供绘制后端。QuickJS 由 Cargo 构建，Rust UI 绑定位于 `crates/engine/src/js/player/vm`。`raster::Rasterizer` 和 QuickJS 均在各自所属的渲染线程使用。
+`embedder` 通过 `engine::session` 使用帧和输入类型。平台宿主启用 `engine/js` 打开应用会话，`raster/impeller` 提供绘制后端。QuickJS 由 Cargo 构建，Rust UI 绑定位于 `crates/engine/src/js/player/vm`。`raster::Rasterizer` 归 Raster 队列所有，QuickJS 归 UI 队列所有。
 
 ```text
 平台适配器 → 窗口事件、输入、vsync → embedder
 embedder → 驱动 session::Session（JavaScript UI 会话）
-embedder → 提交 LayerTree → engine::Engine → 平台表面
+UI 队列 → 提交 LayerTree → Raster 队列 → raster::Rasterizer → 平台表面
 ```
 
-宿主实现 `Services`、`Surface`、`Vsync`，并交给 `embedder` 一个 `Send` 闭包，在渲染线程上打开会话。`Engine` 的所有权留在 `embedder`。`Surface` 的公开接口不出现 `CAMetalLayer` 或 `VulkanSwapchain`。
+宿主实现 `Services`、`Surface`、`Vsync`，并交给 `embedder` 一个 `Send` 闭包，在 UI 队列上打开会话。公共宿主管理 UI、Raster 与平台表面的生命周期。`Surface` 的公开接口不出现 `CAMetalLayer` 或 `VulkanSwapchain`。
 
 ## iOS 宿主
 
 iOS/iPadOS 的最低部署目标为 15.0。生成工程由 `AppDelegate` 和 `SceneDelegate` 创建窗口并启动每个 Scene 的独立会话。UIKit 嵌入入口是 `ImpastoHost(resources:initialURL:)` 和 `makeViewController()`。`prepare()` 预热会话，`onStateChanged` 报告就绪、失败和关闭，`detach()` 保留会话供另一控制器连接，`close()` 异步结束会话。资源目录含 `app.js` 或 `app.bin`、`assets/` 和可选 `app.modules`。发行字节码来自应用安装包。 [UIKit 宿主](../crates/embedder/ios/host/ImpastoHost.swift) · [iOS 实现方案](design/ios-embedder-plan.md)
 
-- UIKit 主线程观察 Scene、窗口、视图尺寸和安全区，以 `CADisplayLink` 交付按需帧时钟。Rust 渲染线程通过 `CAMetalLayer` 上屏。离开前台或解绑时取消输入和新帧，旧图层保留到渲染侧确认回收。
+- UIKit 主线程观察 Scene、窗口、视图尺寸和安全区，以 `CADisplayLink` 交付按需帧时钟。Raster 队列通过 `CAMetalLayer` 上屏。离开前台或解绑时取消输入和新帧，旧图层保留到渲染侧确认回收。
 - 触摸、Pencil、鼠标、触控板和实体键盘通过当前场景交付。UIKit 编辑代理负责组合输入、系统选区、菜单和 AutoFill，编辑事务包含客户端 ID 和序号。浮动键盘坐标通过 `scene.windowMetrics().keyboardOcclusion` 查询，最近的笔样本通过 `scene.penSample()` 查询。语义桥保留元素 ID、屏幕坐标、焦点和动作，并接入原生视图的可访问元素。
 - URLSession 提供流式 HTTP 与 WebSocket。宿主按场景转发深链、权限、文件选择和系统分享，提供沙盒文件、AsyncStorage、剪贴板及 ImageIO 图片解码。场景各自保存恢复快照，可用 `ImpastoWindowGroup` 显式共享会话状态。
 - `registerPlatformView` 按 `kind` 注册工厂。UIKit 原生视图与 Impeller 绘制分片在同一个 Core Animation 事务提交，支持仿射变换、嵌套圆角裁剪、原生槽位的 SVG `clipPath` 和命中遮挡。`makeExternalTexture` 接收 BGRA 或 NV12 视频帧，NV12 在 GPU 转换到可导入的 IOSurface。 [原生混排](../crates/embedder/ios/host/ImpastoPlatformViews.swift) · [外部纹理](../crates/embedder/ios/host/ImpastoExternalTexture.swift)
@@ -70,7 +70,7 @@ Android 启动前从 Intent 读取初始 URL，运行中由 `onNewIntent` 发布
 
 `just android-device-test` 使用独立验收包，结束后卸载该包及仪器测试包。连接多台设备时，通过 `ANDROID_SERIAL` 选择本次测试设备。手动安装的性能和 Flutter 对照包在采集结束后也应卸载。横竖屏测试读取 SurfaceFlinger 的 active buffer 尺寸，按缓冲区变换换算到窗口方向，再用 PixelCopy 确认新表面可以读取到图像。[SurfaceFlinger LayerProto](https://android.googlesource.com/platform/frameworks/native/+/04d24da36e/services/surfaceflinger/layerproto/layers.proto) · [缓冲区方向编码](https://android.googlesource.com/platform/frameworks/native/+/27c20ff12d67b4667edb01160289afc8a4e23373/services/surfaceflinger/LayerProtoHelper.cpp)
 
-传给渲染线程的表面包含 `SurfaceId`、Android 像素尺寸、逻辑视口和 `ANativeWindow`。`surfaceDestroyed` 等待渲染线程丢弃该 ID 的待打开目标和交换链，再释放原生窗口引用并返回 Android。渲染线程提前退出时，在释放表面资源后完成等待。View 更新由主线程处理，释放后的 View 丢弃迟到的更新。[Android SurfaceHolder.Callback](https://developer.android.com/reference/android/view/SurfaceHolder.Callback#surfaceDestroyed(android.view.SurfaceHolder))
+传给 Raster 队列的表面包含 `SurfaceId`、Android 像素尺寸、逻辑视口和 `ANativeWindow`。`surfaceDestroyed` 等待 Raster 队列丢弃该 ID 的待打开目标和交换链，再释放原生窗口引用并返回 Android。宿主提前退出时，在释放表面资源后完成等待。View 更新由主线程处理，释放后的 View 丢弃迟到的更新。[Android SurfaceHolder.Callback](https://developer.android.com/reference/android/view/SurfaceHolder.Callback#surfaceDestroyed(android.view.SurfaceHolder))
 
 ### 兼容性差距与验收
 
@@ -78,11 +78,11 @@ Android 启动前从 Intent 读取初始 URL，运行中由 `onNewIntent` 发布
 
 | 能力 | Flutter 源码与行为 | Impasto 待完成与验收 |
 |---|---|---|
-| 启动 | `FlutterLoader` 在后台准备运行时和资源，并提供异步等待入口。Activity、Engine 和首帧回调各自有明确的接入时机。 | `nativeAttach` 返回会话句柄，渲染线程准备 Engine 和脚本。会话准备期间可取消，尚未交给渲染线程的窗口可立即释放。仍需定标真实设备首帧与恢复预算。 |
+| 启动 | `FlutterLoader` 在后台准备运行时和资源，并提供异步等待入口。Activity、Engine 和首帧回调各自有明确的接入时机。 | `nativeAttach` 返回会话句柄，I/O 队列加载启动输入，UI 队列打开会话。会话准备期间可取消，尚未交给 Raster 队列的窗口可立即释放。仍需定标真实设备首帧与恢复预算。 |
 | 表面和 GPU | `PlatformViewAndroid::NotifyDestroyed` 等待光栅线程拆除表面。`AndroidContextDynamicImpeller` 在探测 Vulkan 以及检查设备和驱动后选择 Vulkan 或 GLES。`FlutterSurfaceView` 通过 `RenderSurface` 和 Renderer 连接，另有 TextureView 路径。 | 具备 Vulkan 关闭修复的 SDK 上优先尝试 Vulkan。当前预构建归档默认走 GLES。APK 支持 `arm64-v8a` 和 `x86_64`。两条路径已在 API 34 arm64 模拟器上验证旋转与恢复，仍需覆盖实际 GPU 驱动丢失和更广的设备矩阵。 |
 | 生命周期和恢复 | `LifecycleChannel` 合并 Activity 和焦点。Dart `services/binding.dart` 补齐状态迁移，`scheduler/binding.dart` 按状态开关帧。`RestorationChannel` 在启动时交付恢复数据。 | 窗口焦点和 Activity 状态合并。AndroidX `SavedStateRegistry` 提供任务快照，已在 Activity 重建和 16 KB 模拟器进程回收后验证。分屏、外接屏和反复迁移仍需验证。 |
 | 视口与时钟 | `FlutterView` 分开报告系统栏、IME、手势区、瀑布屏边缘和折叠特征。`VsyncWaiterAndroid` 提供 NDK 与 Java 路径。 | 视口含安全区、IME inset、系统手势区和显示特征。仍需实测折叠屏姿态、API 24–29 的 IME inset 及动画、API 33 以上的帧时间线和 60/90/120 Hz 动态切换。 |
-| 帧流水线 | `shell/common/animator.cc` 通过有容量上限的 `FramePipeline` 投递帧，`Shell::OnAnimatorDraw` 在光栅任务运行器上调用 `Rasterizer`。Dart 调度器负责框架帧回调。 | Impasto 在同一渲染线程内同步推进脚本、布局、录制和呈现。用帧阶段埋点区分 CPU 工作、GPU 等待和排队延迟，再评估分离各阶段的收益与同步成本。 |
+| 帧流水线 | `shell/common/animator.cc` 通过有容量上限的 `FramePipeline` 投递帧，`Shell::OnAnimatorDraw` 在光栅任务运行器上调用 `Rasterizer`。Dart 调度器负责框架帧回调。 | Impasto 可让 UI 和 Raster 共用队列，或经两槽位帧管线移交层树。帧阶段埋点记录脚本、布局、提交和呈现耗时。 |
 | 指针和键盘 | `AndroidTouchProcessor` 处理多指变化及触控板平移缩放，底层 `PointerDataPacketConverter` 合法化事件序列，Dart `gestures/binding.dart` 提供可选重采样。`KeyboardManager` 根据框架处理结果走编辑或系统重派发。 | 补齐跨设备的指针事件序列、触控板和键盘处理结果。验收覆盖鼠标按钮、滚轮、触控板、手写笔、硬件键盘、手势取消与失焦期间的按键恢复。 |
 | IME 和无障碍 | `TextInputPlugin` 按输入目标维护连接、批量编辑、增量更新和自动填充。`AccessibilityBridge` 连接语义树、平台无障碍动作和原生 View。 | 已接入虚拟字段自动填充。富内容与无障碍遍历仍需扩展。用多个输入法验证组合文本、UTF-16 选区、编辑器切换与键盘显隐，用 TalkBack 验证焦点、朗读、滚动和编辑。 |
 | 插件和嵌入 | `FlutterEngineConnectionRegistry` 转发 Activity 接入、配置变更、权限与 Activity result。`PlatformViewsController` 与 `FlutterRenderer` 协作混排原生 View 和外部纹理。 | Android 支持权限、文档选择、系统文本分享和预测返回。保留会话可跨逻辑 Activity 重建接续权限请求。原生 View 覆盖层和媒体纹理已接入。待验证系统弹窗、更多原生 View 效果及 GPU 直接导入。 |
@@ -102,7 +102,7 @@ just android-device-test
 
 ## 启动
 
-Android 平台线程创建 View、读取启动参数、提交准备任务后回到事件循环。渲染线程选择 Engine、加载字体和脚本并报告会话就绪。Android 把准备期间收到的最新视口和表面交给已就绪的渲染线程。macOS 使用同步启动适配入口 `embedder::start`，同样在渲染线程准备 Engine 并打开脚本。
+Android 与 iOS 的平台线程发起资源准备后返回事件循环。I/O 池加载脚本和字体，UI 队列打开会话，Raster 队列创建绘制上下文。准备期间到达的窗口命令在会话就绪后处理。macOS 使用同步入口 `embedder::start`，启动文件在进入事件循环前加载。
 
 启动 URL 在应用脚本执行前写入 Shared `launch_url`。macOS 来自 argv `--url`，Android 来自 Intent 的 `getData()`。CLI 根据 `app.toml` 的 `[[android.deep_links]]` 生成 Intent filter，暖启动通过 `Linking` 事件交付。
 
@@ -110,14 +110,31 @@ Android 平台线程创建 View、读取启动参数、提交准备任务后回�
 
 ## 线程
 
-| 对象 | 线程 |
-|---|---|
-| 窗口、`CAMetalLayer` 的创建和挂载、`ANativeWindow` 的获取 | 平台线程 |
-| `ANativeWindow_release` | Android 主线程，收到渲染线程的表面销毁应答后 |
-| `Engine`、会话、`Shaper`、`Surface::present` | 渲染线程 |
-| vsync 回调 | 平台自己的线程，只入队 `Frame` |
+| 拓扑 | 系统主线程 | 专用线程 |
+|---|---|---|
+| `shared`（缺省） | 平台 | UI 与 Raster 共用 `render` |
+| `split` | 平台 | 独立 `ui` 和 `raster` |
+| `platform-ui` | 平台与 UI | 独立 `raster` |
 
-Android 的 vsync 是主线程 `Choreographer`。macOS 是 `CVDisplayLink`。渲染线程是同步循环，不进 async 运行时。相邻的 `Pointer(Move)` 合并成队尾那一个。`Down`、`Up`、`Cancel` 不合并。
+macOS 与 iOS 进程通过 `IMPASTO_THREAD_TOPOLOGY` 选择拓扑。用 iOS 模拟器的 `simctl launch` 时，以 `SIMCTL_CHILD_IMPASTO_THREAD_TOPOLOGY` 将设置传入应用。Android 固定宿主 APK 可用 Gradle 属性 `-PimpastoThreadTopology=split` 选择，原生宿主读取应用资产 `app.thread_topology`。Rust 嵌入者可向 `start_on` 传入 `TaskRunners`。`ManualTaskRunner` 可给四个角色共用，时钟由测试推进。
+
+Apple 用 GCD 主队列派发工作和延迟任务。Android 在主 `ALooper` 注册 `eventfd` 和 `timerfd`。专用队列使用 FIFO 工作和基于时间的延迟任务，图片解码和原生模块 worker 使用进程级 Tokio 阻塞池。UI 定时器和呈现退避在 UI 队列安排。相邻的指针移动在宿主输入队列合并，按下、抬起和取消保留顺序。
+
+`UiHost` 拥有会话、输入、语义和帧调度。`RasterHost` 拥有交换链、绘制上下文、图片与外部纹理缓存。分线程时，两者各自在所属线程创建和释放 Rust 对象。帧管线移交不可变的 `Arc<LayerTree>`、字体数据和本帧的平台视图位置。呈现、丢帧或失败完成后归还槽位。
+
+Android 的 `surfaceDestroyed` 保留原生窗口直到 Raster 应答。Raster 对平台线程的通知均异步交付，因此主线程可同步等待表面回收。iOS 通过异步应答释放旧图层。平台与 UI 共用主队列时，IME、语义及支持主线程执行的模块可在本地调用。该拓扑把 JS 初始执行预算设为 500 ms，回调预算设为 32 ms，发行包使用预编译字节码。watchdog 分别记录 UI 和 Raster 的长时间停顿。
+
+### 拓扑验收
+
+同一台 macOS 机器使用 debug Gallery，每种拓扑冷启动三次。下表为首帧中位数，单位为毫秒。`work` 包含排队耗时，`present` 包含写入验收 PNG 的 GPU 读回。该取样用于确认三种装配都能呈现和退出，持续动画和输入延迟需要另行采样。
+
+| 拓扑 | work | script | submit | present |
+|---|---:|---:|---:|---:|
+| `shared` | 213.55 | 1.82 | 8.71 | 153.93 |
+| `split` | 183.67 | 0.90 | 12.58 | 114.42 |
+| `platform-ui` | 120.50 | 0.74 | 10.77 | 78.61 |
+
+iOS 模拟器的三种拓扑均通过可见首帧检查。`platform-ui` 另通过 UIKit/Metal 混排、外部纹理和无障碍阅读顺序验收。Android API 35、16 KB 页模拟器的三种拓扑均通过表面重建、旋转、原生内容和双窗口状态测试。完整 Android 仪器套件的 `AccessibilityEditingTest` 在等待聚焦编辑节点时超时，改造前的 `d92035e` 在同一设备及同一断言复现。
 
 ## 指针
 
@@ -148,7 +165,7 @@ Android 的编辑区间使用 UTF-16，UI 会话转换到 Rust 字符串的有�
 → 没有新事件且会话不要下一帧，就不再 request_frame
 ```
 
-`embedder` 根据会话的 `wants_frame` 调度，覆盖未布局、未绘制、未排空的 job 和未结束的运动。公共 `FrameScheduler` 在提交或呈现前即可登记下一次 vsync，回调入队后由渲染线程串行处理。失败进入退避时作废这次登记。Android 的调度器按当前显示器的刷新率计算帧预算，呈现时间取自 `Choreographer` 的首选 timeline（API 33 及以上）。脚本错误清掉这一次的需求。
+`embedder` 根据会话的 `wants_frame` 调度，覆盖未布局、未绘制、未排空的 job 和未结束的运动。公共 `FrameScheduler` 在提交或呈现前即可登记下一次 vsync，回调入队后由 UI 队列串行处理。失败进入退避时作废这次登记。Android 的调度器按当前显示器的刷新率计算帧预算，呈现时间取自 `Choreographer` 的首选 timeline（API 33 及以上）。脚本错误清掉这一次的需求。
 
 `Hidden`、`Paused`、`MemoryWarning` 调用 `Engine::trim` 进入 `Flush`。连续 `PresentFailed`、`NotReady` 或 `AcquireMiss` 从第 3 次起退避，16ms 起翻倍，上限 1000ms。`BadScene` 不计入。同一表面打开 `NotReady` 最多再试 120 次。
 
@@ -173,9 +190,9 @@ Flutter 参考从 Gallery 的同一行情引擎导出确定性股票列表、分
 
 用 `FRAME_SUITE=daily` 只跑日 K 静置。用 `pnpm -C apps/gallery-solid run build --freeze-stock=book` 或 `--freeze-stock=chart` 生成冻结对应区块行情输入的 bundle，再打包并运行同一回放。冻结主图时仍可切换周期。完成对照后，用无参数的 `pnpm -C apps/gallery-solid run build` 恢复实时行情的 bundle。
 
-`Impasto frame` 覆盖渲染线程处理一帧的完整区间。报告按发起呈现的帧计算 P50、P95、峰值和超预算比例，另计跳过呈现与新层树提交次数。`Impasto work` 记录根布局、局部布局、同输出文字、输入、响应式更新和 Canvas 次数；`Impasto Canvas commit` 记录节点、内容盒高度和绘制命令数。Pixel 9 竖屏详情页的主图高度是 204 点。Vulkan 的 acquire、draw 和 present 各有独立区间。
+`Impasto frame` 在共享拓扑覆盖整个帧。在分线程拓扑中，它覆盖 UI 段，GPU 段可通过帧号对应的 Raster 记录查看。现有 Perfetto 回放汇总脚本适用于共享拓扑。报告按发起呈现的帧计算 P50、P95、峰值和超预算比例，另计跳过呈现与新层树提交次数。`Impasto work` 记录根布局、局部布局、同输出文字、输入、响应式更新和 Canvas 次数；`Impasto Canvas commit` 记录节点、内容盒高度和绘制命令数。Pixel 9 竖屏详情页的主图高度是 204 点。Vulkan 的 acquire、draw 和 present 各有独立区间。
 
-`Impasto Android surface destroy` 记录 Android 主线程等待渲染线程拆除表面的时长，可与同一时间段的渲染线程区间对照。
+`Impasto Android surface destroy` 记录 Android 主线程等待 Raster 队列拆除表面的时长，可与同一时间段的渲染线程区间对照。
 
 SurfaceFlinger 的 `--latency` 记录提供实际呈现时间。报告将对应的 `queueBuffer` 与送达应用的触摸事件配对，保留配对样本数和覆盖率。首屏统计从启动到首页首个走势 Canvas 实际呈现，详情入场统计从点击到详情主图实际呈现。提交帧 CPU 耗时、实际呈现间隔与输入到呈现延迟分别给出 P50、P95、P99。滚动中的相邻配对帧用于估算错过的显示周期。设备报告的刷新率需与指定周期匹配，报告才输出这一项。
 
@@ -272,9 +289,9 @@ Pixel 9 的 120 Hz 三轮回放按滚动或回弹更新了绘制的帧计算。�
 
 ## 表面
 
-`SurfaceChanged` 更新逻辑视口和缓冲区尺寸。缓冲区尺寸变化会请求重绘，由下一帧为新尺寸重建交换链。视口和 IME inset 变化沿用现有交换链。空 acquire 是 `AcquireMiss`，连续 3 次后丢弃交换链并在下一帧用同一窗口重建。重建暂时失败时，后续呈现按退避策略继续尝试。`SurfaceDestroyed` 使渲染线程丢掉 `Surface` 并应答，Android 主线程随后释放对应窗口引用。
+`SurfaceChanged` 更新逻辑视口和缓冲区尺寸。缓冲区尺寸变化会请求重绘，由下一帧为新尺寸重建交换链。视口和 IME inset 变化沿用现有交换链。空 acquire 是 `AcquireMiss`，连续 3 次后丢弃交换链并在下一帧用同一窗口重建。重建暂时失败时，后续呈现按退避策略继续尝试。`SurfaceDestroyed` 使 Raster 队列丢掉 `Surface` 并应答，Android 主线程随后释放对应窗口引用。
 
-交换链、后台纹理上传器和已上传纹理都持有 Vulkan 加载器。纹理先释放 GPU 资源，再释放对图形上下文的引用，加载器在最后一个持有者退出时关闭。GLES 的 EGL context、离屏 Pbuffer、窗口表面、绘制和纹理上传都归渲染线程，后台只解码图像。识别到设备丢失后，公共帧循环有限次重建设备，保留层树与排版上下文，丢弃旧 GPU 资源和迟到的上传结果。
+交换链、后台纹理上传器和已上传纹理都持有 Vulkan 加载器。纹理先释放 GPU 资源，再释放对图形上下文的引用，加载器在最后一个持有者退出时关闭。GLES 的 EGL context、离屏 Pbuffer、窗口表面、绘制和纹理上传都归 Raster 队列，后台只解码图像。识别到设备丢失后，公共帧循环有限次重建设备，保留层树与排版上下文，丢弃旧 GPU 资源和迟到的上传结果。
 
 ## 资产
 

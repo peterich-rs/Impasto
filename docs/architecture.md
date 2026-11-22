@@ -12,7 +12,7 @@ crates/engine/           UI 树、布局、响应式图、帧会话、层树录�
 crates/raster/           Impeller 排版、绘制与表面资源
 crates/impeller-sys/     Impeller C 头文件、Rust FFI 和原生链接
 crates/javascript/      独立 JavaScript 运行时、编译器、标准库和宿主交换类型
-crates/embedder/common/  公共宿主，命令队列、帧调度、渲染线程
+crates/embedder/common/  公共宿主，任务队列、窗口生命周期、UI 与 Raster 协调
 crates/embedder/android/ Android 宿主，ImpastoActivity、ImpastoView、Choreographer、Vulkan
 crates/embedder/macos/   macOS 宿主，AppKit、CVDisplayLink、Metal
 crates/embedder/ios/     iOS 宿主，UIKit、CADisplayLink、Metal
@@ -26,21 +26,21 @@ apps/gallery-solid/      Solid 应用。dist/quotes.js 由 just gallery-dist 本
 
 Gallery 经 Solid 渲染器调用 `engine::js`，由绑定提交树变更。平台宿主和 CLI 启用 `engine/js`。公共宿主通过 `engine::session` 交付输入和生命周期、推进帧，并将 `engine::scene::LayerTree` 交给 `raster`。引擎的默认构建使用标准库版 `javascript::host`。独立构建的 `raster` 可通过 `impeller` 启用 SDK 链接。运行 `just boundaries` 检查三处依赖隔离。
 
-`engine` 的 `scene` 发布后端可消费的显示数据。`style`、`input`、`motion`、`text`、`canvas`、`semantics` 和 `reactive` 提供原语，`tree` 管理节点并执行布局和录制，`session` 定义渲染线程的宿主契约。`js` 安装 QuickJS 绑定并编排帧。场景查询和即时操作由 QuickJS 具名绑定直接访问引擎。
+`engine` 的 `scene` 发布后端可消费的显示数据。`style`、`input`、`motion`、`text`、`canvas`、`semantics` 和 `reactive` 提供原语，`tree` 管理节点并执行布局和录制，`session` 定义会话与宿主的帧契约。`js` 安装 QuickJS 绑定并编排帧。场景查询和即时操作由 QuickJS 具名绑定直接访问引擎。
 
 ## JS 运行时
 
 `javascript::runtime::Runtime` 在所属线程创建、驱动和销毁。普通宿主通过模块目录、时钟、自有事件和传输接入。`engine::js` 经 `runtime::ExtensionContext` 安装 scene、Canvas、reactive 和 rAF。UI 构造按 ABI、scene、Rust 标准库注册、reactive boot、应用入口的顺序执行，外部传输在入口之后接入。
 
-`crates/javascript/src/standard` 的 Rust 模块直接向 QuickJS 注册 Web API。Rust 持有事件监听、取消信号、URL、解码器、Headers、Body、stream reader、Fetch 和 WebSocket 的状态。JS 回调和 Promise 由 QuickJS 执行，原生对象持有的 JS 引用参与 GC tracing。各绑定模块同时维护 TypeScript 签名。`StandardProfile::declarations()` 按宿主传输能力生成 `.d.ts`。`just standard-check` 对 `legacy` 和四种 `portable` 传输组合比较实际 QuickJS 全局值、原型与声明，并执行通过 TypeScript 检查的用例。
+`crates/javascript/src/standard` 注册运行时的 Web API 子集。QuickJS 自带 Promise jobs、`queueMicrotask`、`DOMException` 和 Base64。Rust 负责事件和取消状态、编码、URL、可读流、结构化克隆和随机数，标准流可接受 JS source 或拥有型的原生值。随机数默认由操作系统提供，独立运行时可注入熵源。内建类型和原生状态都在运行时所属线程使用。
 
-`legacy` 是默认 profile，`fetch` 在整响应完成时结算，`fetchStream` 在响应头到达时结算。`portable` 的 `fetch` 用同一流式状态，要求外部 HTTP 传输。两个 profile 共用 Body、reader、Abort 和宿主值转换。`embedder` 的外部完成带 `RuntimeKey`，Runtime 按请求身份和状态结算。流的额度随 chunk 转移到 reader，读取、取消或关闭时归还。`embedder` 用分开的阻塞任务执行整响应和流式请求，命令循环持续处理短请求和 socket 控制。
+`fetch` 在响应头到达时返回 `Response`，响应体通过 `response.body` 增量读取。传输由宿主注入。`StandardProfile::declarations()` 按 HTTP 和 WebSocket 能力生成声明，`just standard-check` 对四种能力组合核对 TypeScript 和 QuickJS 的可见 API。原生扩展、HTTP 和 WebSocket 复用带 `RuntimeKey` 的交付和额度机制。数据额度随队列项移交给 reader，在读取、取消或回收时归还。
 
-宿主模块的运行和声明共用 `Module` 元数据。CLI 打包平台工程时按清单和目标构建目录，独立 bundle 使用首方目录。`cargo run --locked -p embedder --bin module-stubs -- --check` 校验声明漂移。实施验收见 [JS 运行时验收](design/js-runtime/runtime-and-standard-library-validation.md)。
+宿主模块的运行和声明共用 `Module` 元数据。扩展资源由 Runtime 资源表持有，JS 句柄支持显式关闭和 GC 回收。流式原生方法把拥有型参数交给工作队列，末尾可接收 `AbortSignal`。CLI 打包平台工程时按清单和目标构建目录，独立 bundle 使用首方目录。`cargo run --locked -p embedder --bin module-stubs -- --check` 校验声明漂移。实施验收见 [JS 运行时验收](design/js-runtime/runtime-and-standard-library-validation.md)。
 
 ## 一帧
 
-平台线程入队，渲染线程做命中、冲刷、布局、录制和上屏。命中用上一帧的几何。监听器只改状态。
+平台线程把输入和 vsync 交给 UI 队列。UI 使用上一帧几何命中，推进脚本、布局与场景录制。Raster 消费层树并呈现。分线程拓扑最多允许两帧在途，GPU 返回结果后归还一个槽位。
 
 ```text
 pointer → hit-test → 监听器写信号
@@ -53,7 +53,7 @@ vsync → 冲刷 → layout → driver tick → 脏了再 layout → onLayout �
 
 macOS 与 Android 宿主打开应用内 devtools。面板经 `registerTopLayer` 挂在渲染器根 stack 上，复用现有布局和绘制。日志经 `embedder` 过滤并分发到控制台、xlog 和 devtools。性能页进入时读取一次最近帧，之后由「刷新快照」更新。布局页按需扫描上一轮布局。连续溢出扫描由 `debugSetScan` 显式开启。
 
-`FrameSample.workMs` 是渲染线程进入当帧至 `present` 返回的墙钟时间，`budgetMs` 是显示刷新间隔。子阶段可嵌套，例如 `scriptMs` 和 `layoutMs` 都包含在会话耗时中。Android 系统 trace 同时记录调用和跳过 `present` 的帧。采集入口见 [Android 帧性能](platform-hosts.md#android-帧性能)。
+`FrameSample.workMs` 是 UI 开始当帧至 Raster 的 `present` 返回的墙钟时间，包含队列等待，`budgetMs` 是显示刷新间隔。子阶段可嵌套，例如 `scriptMs` 和 `layoutMs` 都包含在会话耗时中。Android 系统 trace 同时记录调用和跳过 `present` 的帧。采集入口见 [Android 帧性能](platform-hosts.md#android-帧性能)。
 
 ## 绘制
 
@@ -94,7 +94,7 @@ macOS 与 Android 宿主打开应用内 devtools。面板经 `registerTopLayer` 
 
 `PointerRegion` 缺省语义角色是 `Generic`；未禁用时提供 `Activate` 动作。按钮角色由 `SemanticsHint` 显式声明。
 
-测试排版是 `MonoShaper`。宿主测量和绘制共用 `Engine` 的 `Typography`。
+测试排版是 `MonoShaper`。共享拓扑在同一线程内复用 `Typography`。分线程拓扑在 UI 和 Raster 各建一个排版上下文，字体以 `Arc<[u8]>` 共享。两端分别填充测量和绘制缓存。
 Taffy 复用既有文字尺寸时，也复用同一份测量的第一基线。Min-content 用同一无界段落读取固有宽度、行高和基线。
 
 ## 渲染引擎
@@ -110,7 +110,7 @@ Android 用 `AccessibilityManager` 的监听通知会话启停语义快照。重
 
 ## 运行时会话
 
-`crates/javascript` 使用根 `Cargo.toml` 钉住的 quickjs-jit 0.14.2，依赖名是 `rquickjs`。`engine::js` 的 VM 扩展拥有唯一的 `Runtime`、`Context` 和 `Host`；`engine::tree::Tree`、`reactive::Graph` 与 VM 都留在渲染线程。QuickJS 的原生回调通过弱引用访问同一个宿主，会话关闭时先释放 JS 回调和响应式节点，再销毁运行时。Rust 绑定注册 `scene`、`reactive`、`#reactive` 和能力模块。`createElement` 解析节点种类和构造参数，样式对象通过统一的属性表解析。具名绑定构造 Rust mutation，交给 `crates/engine/src/js/player/mutation.rs` 提交。`scene` 的原生绑定负责参数校验，并直接返回调用方使用的 JavaScript 值。`scene.js` 维护响应式插入范围、归一化子节点和构造字节视图。子节点归一化通过原生 `_isNode` 校验节点 ID 和槽位代次。节点是 `NodeId::to_raw()`，`0` 表示没有节点，没有全局 `core`。启动先绑定原生入口，再执行 `scene.js`，经运行时扩展接口安装标准库，最后执行 ESM `reactive-boot.js`。捕获并删除 `__reactive` 后执行应用并排空 jobs。
+`crates/javascript` 使用根 `Cargo.toml` 钉住的 quickjs-jit 0.14.2，依赖名是 `rquickjs`。`engine::js` 的 VM 扩展拥有唯一的 `Runtime`、`Context` 和 `Host`；`engine::tree::Tree`、`reactive::Graph` 与 VM 都留在 UI 队列所属的线程。QuickJS 的原生回调通过弱引用访问同一个宿主，会话关闭时先释放 JS 回调和响应式节点，再销毁运行时。Rust 绑定注册 `scene`、`reactive`、`#reactive` 和能力模块。`createElement` 解析节点种类和构造参数，样式对象通过统一的属性表解析。具名绑定构造 Rust mutation，交给 `crates/engine/src/js/player/mutation.rs` 提交。`scene` 的原生绑定负责参数校验，并直接返回调用方使用的 JavaScript 值。`scene.js` 维护响应式插入范围、归一化子节点和构造字节视图。子节点归一化通过原生 `_isNode` 校验节点 ID 和槽位代次。节点是 `NodeId::to_raw()`，`0` 表示没有节点，没有全局 `core`。启动先绑定原生入口，再执行 `scene.js`，经运行时扩展接口安装标准库，最后执行 ESM `reactive-boot.js`。捕获并删除 `__reactive` 后执行应用并排空 jobs。
 
 `reactive::Graph` 使用带 generation 的 arena 和双向边。进入用户闭包和 cleanup 前结束 arena 借用，JS 值由 `crates/engine/src/js/player/reactive.rs` 的 `Persistent` 持有和释放。signal 写入只标脏，`batch` 同步冲刷。`JsSession::frame` 在帧监听前、帧监听后和布局监听后冲刷图，空队列跳过。帧监听写入的信号在第一次布局前提交。`tick_motions` 在这些调用之前。`boot` 分发帧与布局监听。抛错的帧监听会从监听表摘掉。`Show`、`Switch`、`Match`、`For` 和 `Errored` 在 `packages/reactive`，调用同一张原生图。
 

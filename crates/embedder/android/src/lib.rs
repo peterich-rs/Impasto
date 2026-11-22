@@ -40,6 +40,8 @@ mod app;
 #[cfg(target_os = "android")]
 mod decode;
 #[cfg(target_os = "android")]
+mod main_runner;
+#[cfg(target_os = "android")]
 mod surface;
 #[cfg(any(target_os = "android", test))]
 mod vsync;

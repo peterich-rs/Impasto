@@ -685,6 +685,7 @@ dependencies = [
  "embedder",
  "engine",
  "jni 0.22.4",
+ "libc",
  "ndk",
  "ndk-sys",
  "raster",

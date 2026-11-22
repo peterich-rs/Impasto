@@ -7,21 +7,24 @@ use engine::session::{IoEvent, MethodExec, PluginResult, Settle, Work};
 use crate::command::Command;
 use crate::queue::Inbox;
 
-pub type MainThreadPoster = Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>;
+use crate::TaskRunner;
 
 pub struct RtExec {
-    pub rt: tokio::runtime::Handle,
-    pub main: Option<MainThreadPoster>,
+    pub io: Arc<dyn TaskRunner>,
+    pub main: Option<Arc<dyn TaskRunner>>,
 }
 
 impl MethodExec for RtExec {
     fn worker(&self, settle: Settle, work: Work) {
-        drop(self.rt.spawn_blocking(move || settle.send(work())));
+        self.io.post(Box::new(move || settle.send(work())));
     }
 
     fn main_thread(&self, settle: Settle, work: Work) {
-        match self.main.clone() {
-            Some(post) => post(Box::new(move || settle.send(work()))),
+        match &self.main {
+            Some(main) if main.runs_on_current_thread() => settle.send(work()),
+            Some(main) => {
+                main.post(Box::new(move || settle.send(work())));
+            }
             None => settle.send(PluginResult::Failed {
                 message: "module needs a main-thread host".into(),
             }),

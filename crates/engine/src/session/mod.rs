@@ -25,7 +25,8 @@ pub use javascript::host::{
 pub use modules::{
     CancelToken, EventType, ImmediateExec, Invoke, Method, MethodExec, MethodTypes, Module,
     ModuleConfig, ModuleExports, ModuleRegistry, NativeExtension, NativeResource, PromiseFn,
-    Settle, Shared, StreamSendError, StreamSink, SyncFn, Work, shared, shared_read, shared_write,
+    ScriptExecution, Settle, Shared, StreamSendError, StreamSink, SyncFn, Work, shared,
+    shared_read, shared_write,
 };
 
 /// Durations inside one [`Session::frame`]. The host adds gesture time itself.
@@ -104,7 +105,7 @@ pub struct FrameOutput {
     pub ime: Option<ImeUpdate>,
     pub semantics: Option<crate::semantics::SemanticsPatch>,
     pub platform_views: Option<Arc<[crate::tree::PlatformViewPlacement]>>,
-    pub fonts: Vec<(String, Vec<u8>)>,
+    pub fonts: Vec<(String, Arc<[u8]>)>,
     pub reloads: Vec<String>,
     pub clipboard: Option<String>,
     pub exit: bool,
@@ -223,7 +224,7 @@ pub trait Session {
     ///
     /// The host registers them on the render thread before `submit`. The default
     /// is empty, so a session that does not load faces stays out of the cap.
-    fn take_fonts(&mut self) -> Vec<(String, Vec<u8>)> {
+    fn take_fonts(&mut self) -> Vec<(String, Arc<[u8]>)> {
         Vec::new()
     }
     /// Image sources the session asked to fetch again. The host drops those cache

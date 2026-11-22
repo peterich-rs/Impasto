@@ -160,6 +160,7 @@ androidComponents {
             quotes.set(repoRoot.resolve("apps/gallery-solid/dist/quotes.js"))
             font.set(repoRoot.resolve("crates/embedder/android/assets/fonts/Sans.ttf"))
             logo.set(repoRoot.resolve("crates/embedder/macos/assets/logo.png"))
+            threadTopology.set(providers.gradleProperty("impastoThreadTopology").orElse(""))
         }
         variant.sources.assets?.addGeneratedSourceDirectory(assets, StageApkAssets::output)
     }
@@ -319,6 +320,9 @@ abstract class StageApkAssets : DefaultTask() {
     @get:PathSensitive(PathSensitivity.NONE)
     abstract val logo: RegularFileProperty
 
+    @get:Input
+    abstract val threadTopology: Property<String>
+
     @get:OutputDirectory
     abstract val output: DirectoryProperty
 
@@ -336,5 +340,12 @@ abstract class StageApkAssets : DefaultTask() {
         font.get().asFile.copyTo(fonts.resolve("Sans.ttf"), overwrite = true)
         logo.get().asFile.copyTo(images.resolve("logo.png"), overwrite = true)
         script.copyTo(root.resolve("quotes.js"), overwrite = true)
+        val topology = threadTopology.get()
+        val config = root.resolve("app.thread_topology")
+        when (topology) {
+            "" -> config.delete()
+            "shared", "split", "platform-ui" -> config.writeText(topology)
+            else -> throw GradleException("Unknown Impasto thread topology: $topology")
+        }
     }
 }

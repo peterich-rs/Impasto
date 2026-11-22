@@ -1,4 +1,5 @@
 use std::ffi::{CString, c_void};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Font bytes Impeller may still read after `RegisterFont` returns.
@@ -7,13 +8,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// [`release_font_lease`]. The allocation is freed when the count hits zero,
 /// on whichever thread drops the last reference.
 pub(super) struct FontLease {
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
     refs: AtomicU32,
 }
 
 impl FontLease {
     /// Two references: the caller, and the Impeller mapping callback.
-    pub(super) fn new(bytes: Vec<u8>) -> *mut Self {
+    pub(super) fn new(bytes: Arc<[u8]>) -> *mut Self {
         Box::into_raw(Box::new(Self {
             bytes,
             refs: AtomicU32::new(2),
@@ -27,7 +28,7 @@ impl FontLease {
 
     pub(super) fn len(ptr: *mut Self) -> u64 {
         // SAFETY: `ptr` is a live lease. The caller still holds a reference.
-        unsafe { (*ptr).bytes.len() as u64 }
+        unsafe { ptr.as_ref() }.map_or(0, |lease| lease.bytes.len() as u64)
     }
 
     pub(super) fn same(ptr: *mut Self, data: &[u8]) -> bool {
@@ -35,7 +36,7 @@ impl FontLease {
             return false;
         }
         // SAFETY: `ptr` is a live lease held by a registered face.
-        unsafe { (*ptr).bytes.as_slice() == data }
+        unsafe { (*ptr).bytes.as_ref() == data }
     }
 
     pub(super) fn release(ptr: *mut Self) {
@@ -91,7 +92,7 @@ mod tests {
 
     #[test]
     fn the_last_release_frees_the_lease() {
-        let lease = FontLease::new(b"face".to_vec());
+        let lease = FontLease::new(std::sync::Arc::from(b"face".as_slice()));
         assert_eq!(
             unsafe { (*lease).refs.load(std::sync::atomic::Ordering::Acquire) },
             2

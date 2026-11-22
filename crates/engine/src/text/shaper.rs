@@ -203,6 +203,10 @@ pub trait Shaper {
     fn register_font(&mut self, _family: &str, _bytes: &[u8]) -> bool {
         false
     }
+    fn register_shared_font(&mut self, family: &str, bytes: Arc<[u8]>) -> bool {
+        self.register_font(family, &bytes)
+    }
+
     fn metrics(&mut self, key: &MetricsKey) -> Arc<ParagraphMetrics>;
     /// Min-content width for this metrics identity. Color and the layout width
     /// are ignored. The default splits on whitespace.
@@ -275,6 +279,10 @@ impl Shaper for Box<dyn Shaper> {
     }
     fn register_font(&mut self, family: &str, bytes: &[u8]) -> bool {
         (**self).register_font(family, bytes)
+    }
+
+    fn register_shared_font(&mut self, family: &str, bytes: Arc<[u8]>) -> bool {
+        (**self).register_shared_font(family, bytes)
     }
     fn metrics(&mut self, key: &MetricsKey) -> Arc<ParagraphMetrics> {
         (**self).metrics(key)
