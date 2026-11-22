@@ -74,9 +74,10 @@ pub(crate) unsafe fn install_timers<'js>(
     ctx: &Ctx<'js>,
     scheduler: *const Scheduler,
     limit: usize,
-    on_zero_delay: impl Fn() + Copy + 'static,
+    on_zero_delay: impl Fn() + Clone + 'static,
 ) -> rquickjs::Result<()> {
     for (name, kind) in [("setTimeout", 0i32), ("setInterval", 1)] {
+        let on_zero_delay = on_zero_delay.clone();
         let function = Function::new(
             ctx.clone(),
             move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<f64> {

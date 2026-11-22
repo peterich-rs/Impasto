@@ -47,7 +47,7 @@ pub(crate) fn is_typed_array(value: &Value<'_>) -> bool {
     unsafe { qjs::JS_GetTypedArrayType(value.as_raw()) >= 0 }
 }
 
-pub(crate) fn array_buffer<'js>(value: &Value<'js>) -> Result<Option<ArrayBuffer<'js>>> {
+pub fn array_buffer<'js>(value: &Value<'js>) -> Result<Option<ArrayBuffer<'js>>> {
     // SAFETY: the brand check reads a live value without probing its storage.
     // JS_GetArrayBuffer throws when used to probe a non-buffer object.
     if unsafe { qjs::JS_IsArrayBuffer(value.as_raw()) } {

@@ -17,7 +17,6 @@ pub use vm::JobReport;
 pub(crate) use vm::acquires;
 pub(crate) use vm::{AcquireStop, run_job_batch};
 
-#[cfg(feature = "ui")]
 pub use vm::Budget;
 pub(crate) use vm::{Active, Vm};
 pub use vm::{JobStop, JsDiagnostic, Saved, Timer, poll_timer};

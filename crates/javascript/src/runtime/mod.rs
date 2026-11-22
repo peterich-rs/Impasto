@@ -37,6 +37,15 @@ pub use modules::NativeFactory;
 pub use quickjs::{ExtensionContext, JsDiagnostic, Saved, TrustedBytecode};
 pub use scheduler::{DrivePolicy, RuntimeLimits};
 
+/// QuickJS capabilities available to trusted native extensions.
+pub mod extension {
+    pub use super::quickjs::binder::{ModuleBindings, declare_host_module};
+    pub use super::quickjs::buffer::array_buffer;
+    pub use super::quickjs::{Budget, JobStop, Timer, exception_text, poll_timer};
+    pub use crate::compiler::bytecode::is_module;
+    pub use crate::standard::install_web;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
     Configuration,
@@ -880,7 +889,7 @@ impl Runtime {
     pub fn install_standard_bindings(
         &self,
         ctx: &Ctx<'_>,
-        on_zero_delay: impl Fn() + Copy + 'static,
+        on_zero_delay: impl Fn() + Clone + 'static,
     ) -> rquickjs::Result<()> {
         self.check_context(ctx)?;
         let state = std::ptr::from_ref(&*self.state);
