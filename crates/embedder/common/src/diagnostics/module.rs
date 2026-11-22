@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use session::{Method, Module, ModuleExports, PluginValue};
+use engine::session::{Method, Module, ModuleExports, PluginValue};
 
 use super::hub::{DiagnosticsHub, LogSource, PhaseSample};
 
@@ -131,7 +131,7 @@ pub struct DevtoolsContext {
     /// Bundle source map text, when the host found `<js>.map` next to the script.
     pub source_map: Option<Arc<String>>,
     /// `AppState.currentState`, the same slot the app-state module writes.
-    pub app_state: session::Shared<String>,
+    pub app_state: engine::session::Shared<String>,
     pub os: &'static str,
     pub os_version: String,
     /// `IMPASTO_DUMP` path, when set.
@@ -404,7 +404,7 @@ fn platform_method(hub: &Arc<DiagnosticsHub>, context: &DevtoolsContext) -> Meth
     let context = context.clone();
     Method::sync("platform", move |_| {
         let metrics = hub.metrics();
-        let app_state = session::shared_read(&context.app_state);
+        let app_state = engine::session::shared_read(&context.app_state);
         Ok(map(vec![
             ("os", PluginValue::Str(context.os.to_owned())),
             ("osVersion", PluginValue::Str(context.os_version.clone())),
@@ -632,7 +632,7 @@ mod tests {
         DevtoolsContext {
             enabled: true,
             source_map: None,
-            app_state: session::shared("active".to_owned()),
+            app_state: engine::session::shared("active".to_owned()),
             os: "test",
             os_version: "0".to_owned(),
             dump: None,
@@ -655,7 +655,7 @@ mod tests {
         let module = module(Arc::clone(&hub), sample_context());
         let method = module.methods.iter().find(|m| m.name == "logs").unwrap();
         let result = match &method.invoke {
-            session::Invoke::Sync(f) => f(&[PluginValue::F64(0.0)]).unwrap(),
+            engine::session::Invoke::Sync(f) => f(&[PluginValue::F64(0.0)]).unwrap(),
             _ => panic!("logs must be sync"),
         };
         let text = format!("{result:?}");

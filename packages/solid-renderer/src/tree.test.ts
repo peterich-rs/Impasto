@@ -1,7 +1,6 @@
 import {installStyleMock} from "../testing/style.ts";
-import { BUTTON_FILL, FONT_SIZE, TEXT_COLOR } from "./defaults.ts";
+import assert from "node:assert/strict";
 import type { SceneModule } from "./scene.ts";
-import { colorBytes } from "./colors.ts";
 import { testScene } from "../testing/scene.ts";
 
 function fail(message: string): never {
@@ -24,37 +23,24 @@ function mockHost() {
   const alloc = (name: string, args: unknown[]) => {
     const id = next++;
     note(name, args);
-    if (name === "text") {
+    if (name === "createTextNode" || (name === "createElement" && args[0] === "text")) {
       texts.add(id);
     }
     return id;
   };
-  const host: SceneModule = {
-    column: (gap) => alloc("column", [gap]),
-    view: () => alloc("view", []),
+  const host = {
+    createElement(tag: string, props?: Record<string, unknown>) {
+      return alloc("createElement", [tag, props]);
+    },
+    createTextNode(value: string | number) {
+      return alloc("createTextNode", [String(value)]);
+    },
+    insertNode: (parent: number, child: number, before = 0) => note("insert", [parent, child, before]),
     setStyle: (node, style) => note("setStyle", [node, style]),
     patchStyle: (node, style) => note("patchStyle", [node, style]),
     clearStyle: (node, keys) => note("clearStyle", [node, keys]),
     setClass: (node, text) => note("setClass", [node, text]),
     setComponentStyle: (node, style) => note("setComponentStyle", [node, style]),
-    row: (gap) => alloc("row", [gap]),
-    stack: () => alloc("stack", []),
-    align: (align) => alloc("align", [align]),
-    padding: (edges) => alloc("padding", [edges]),
-    grid: (columns, rows, gap) => alloc("grid", [columns, rows, gap]),
-    pointerRegion: () => alloc("pointerRegion", []),
-    clip: (radius) => alloc("clip", [radius]),
-    opacity: (alpha) => alloc("opacity", [alpha]),
-    scroll: (axis) => alloc("scroll", [axis]),
-    setScrollAxis: (node, axis) => note("setScrollAxis", [node, axis]),
-    transform: () => alloc("transform", []),
-    decorated: (color, radius) => alloc("decorated", [color, radius]),
-    image: (source, width, height, mode, required) =>
-      alloc("image", [source, width, height, mode, required]),
-    setImageMode: (node, mode, required) => note("setImageMode", [node, mode, required]),
-    text: (utf8, fontSize, color) => alloc("text", [utf8, fontSize, color]),
-    append: (parent, child) => note("append", [parent, child]),
-    insert: (parent, child, before) => note("insert", [parent, child, before]),
     remove: (parent, child) => note("remove", [parent, child]),
     detach: (parent, child) => note("detach", [parent, child]),
     discard: (node) => note("discard", [node]),
@@ -64,17 +50,6 @@ function mockHost() {
     isText: (node) => texts.has(node),
     setText: (node, utf8) => note("setText", [node, utf8]),
     setTextRuns: (node, runs) => note("setTextRuns", [node, runs]),
-    setFontSize: (node, fontSize) => note("setFontSize", [node, fontSize]),
-    setColor: (node, color) => note("setColor", [node, color]),
-    setGap: (node, gap) => note("setGap", [node, gap]),
-    setPadding: (node, edges) => note("setPadding", [node, edges]),
-    setPaddingEdges: (node, top, right, bottom, left) =>
-      note("setPaddingEdges", [node, top, right, bottom, left]),
-    setPaddingEdge: (node, edge, value) => note("setPaddingEdge", [node, edge, value]),
-    setInsetEdge: (node, edge, value) => note("setInsetEdge", [node, edge, value]),
-    setTransformComponent: (node, component, value) => note("setTransformComponent", [node, component, value]),
-    setSizeAxis: (node, axis, kind, value) => note("setSizeAxis", [node, axis, kind, value]),
-    setGridLine: (node, edge, kind, value) => note("setGridLine", [node, edge, kind, value]),
     placePanel: (panel, anchor, align) => note("placePanel", [panel, anchor, align]),
     reparentChildren: (from, to) => note("reparentChildren", [from, to]),
     textCommand: (node, name, extra) => {
@@ -82,12 +57,6 @@ function mockHost() {
       return { text: extra ?? "", start: 0, end: 0 };
     },
     setTextLimit: (node, limit) => note("setTextLimit", [node, limit]),
-    setMargin: (node, top, right, bottom, left) => note("setMargin", [node, top, right, bottom, left]),
-    setMinSize: (node, width, height) => note("setMinSize", [node, width, height]),
-    setMaxSize: (node, width, height) => note("setMaxSize", [node, width, height]),
-    setShrink: (node, shrink) => note("setShrink", [node, shrink]),
-    setBasis: (node, basis) => note("setBasis", [node, basis]),
-    setAlignSelf: (node, align) => note("setAlignSelf", [node, align]),
     setDragClaim: () => {},
     caretAt: () => ({ unit: 0, x: 0, y: 0, w: 1, h: 0 }),
     caretAtUnit: () => ({ x: 0, y: 0, w: 1, h: 0 }),
@@ -99,22 +68,7 @@ function mockHost() {
     pointerPosition: () => ({ x: 0, y: 0 }),
     onBack: () => 0,
     offBack: () => {},
-    setGrow: (node, grow) => note("setGrow", [node, grow]),
-    setRadius: (node, radius) => note("setRadius", [node, radius]),
-    setAlpha: (node, alpha) => note("setAlpha", [node, alpha]),
-    setAlign: (node, align) => note("setAlign", [node, align]),
-    setCross: (node, align) => note("setCross", [node, align]),
-    setSize: (node, width, height) => note("setSize", [node, width, height]),
     setImage: (node, source, width, height) => note("setImage", [node, source, width, height]),
-    setMaxLines: (node, lines) => note("setMaxLines", [node, lines]),
-    setEllipsis: (node, text) => note("setEllipsis", [node, text]),
-    setSoftWrap: (node, wrap) => note("setSoftWrap", [node, wrap]),
-    setOverflow: (node, overflow) => note("setOverflow", [node, overflow]),
-    setTextAlign: (node, align) => note("setTextAlign", [node, align]),
-    setFontWeight: (node, weight) => note("setFontWeight", [node, weight]),
-    setTextDirection: (node, direction) => note("setTextDirection", [node, direction]),
-    setLineHeight: (node, height) => note("setLineHeight", [node, height]),
-    setFamily: (node, family) => note("setFamily", [node, family]),
     setScrollOffset: (node, x, y) => note("setScrollOffset", [node, x, y]),
     overscroll: () => ({ x: 0, y: 0 }),
     setScrollPhysics: (node, tau) => note("setScrollPhysics", [node, tau]),
@@ -124,11 +78,6 @@ function mockHost() {
     scrollTo: (node, x, y) => note("scrollTo", [node, x, y]),
     scrollOffset: () => ({ x: 0, y: 0 }),
     rect: () => ({ x: 0, y: 0, w: 0, h: 0 }),
-    setTransform: (node, x, y, rotate, scale) => note("setTransform", [node, x, y, rotate, scale]),
-    setJustify: (node, justify) => note("setJustify", [node, justify]),
-    setWrap: (node, wrap) => note("setWrap", [node, wrap]),
-    setFill: (node) => note("setFill", [node]),
-    sized: (width, height) => alloc("sized", [width, height]),
     setFocusable: (node, enabled) => note("setFocusable", [node, enabled]),
     focus: (node) => note("focus", [node]),
     blur: () => note("blur", []),
@@ -159,12 +108,6 @@ function mockHost() {
 
     registerFont: (family, bytes) => note("registerFont", [family, bytes.length]),
     reload: (source) => note("reload", [source]),
-    setAxisSize: (node, width, height) => note("setAxisSize", [node, width, height]),
-    setAspectRatio: (node, ratio) => note("setAspectRatio", [node, ratio]),
-    setPosition: (node, absolute) => note("setPosition", [node, absolute]),
-    setInset: (node, top, right, bottom, left) => note("setInset", [node, top, right, bottom, left]),
-    setGridPlacement: (node, columnStart, columnEnd, rowStart, rowEnd) =>
-      note("setGridPlacement", [node, columnStart, columnEnd, rowStart, rowEnd]),
     measureText: (text, fontSize, maxWidth, color) => {
       note("measureText", [text, fontSize, maxWidth, color]);
       return { w: text.length, h: fontSize };
@@ -198,11 +141,11 @@ function mockHost() {
     },
     onFrame: (fn) => note("onFrame", [typeof fn]),
     onLayout: (fn) => note("onLayout", [typeof fn]),
-  };
+  } satisfies Partial<SceneModule>;
   installStyleMock(host,calls);
   (globalThis as unknown as {core:SceneModule}).core=host;
   return {
-    host,
+    host: host as SceneModule,
     calls,
     setParent(id: number) {
       parentOf = id;
@@ -222,212 +165,86 @@ function find(calls: Call[], name: string): Call | undefined {
 
 const mock = mockHost();
 const options = testScene(mock.host);
-const column = options.createElement("column", { gap: 8 });
-const row = options.createElement("row", { gap: 4 });
-const stack = options.createElement("stack");
-const padding = options.createElement("padding", { edges: 8 });
 const clicked = () => {};
-const pointer = options.createElement("pointer", { onClick: clicked });
-const decorated = options.createElement("decorated", { color: BUTTON_FILL });
-const rounded = options.createElement("decorated", { color: BUTTON_FILL, radius: 6 });
-const clip = options.createElement("clip", { radius: 12 });
-const fade = options.createElement("opacity", { alpha: 0 });
-const logo = options.createElement("image", { source: "asset:logo", w: 56, h: 56 });
-const grown = options.createElement("row", { gap: 1, grow: 3 });
+const pickedStyle = { flexDirection: "row", gap: 8, flexGrow: 3 };
+const row = options.createElement("view", { style: pickedStyle });
+const stack = options.createElement("stack", { style: { opacity: 0, overflow: "hidden" } });
+const pointer = options.createElement("view", { focusable: true, onClick: clicked });
+const imageProps = { source: "asset:logo", intrinsicSize: { width: 56, height: 56 }, required: true };
+const logo = options.createElement("image", imageProps);
 const label = options.createTextNode("Hi");
+const creates = mock.calls.filter((call) => call.name === "createElement");
+assert.deepEqual(creates[0]?.args, ["view", { style: pickedStyle }]);
+assert.deepEqual(creates[1]?.args, ["stack", { style: { opacity: 0, overflow: "hidden" } }]);
+assert.deepEqual(creates[3]?.args, ["image", imageProps]);
+assert.deepEqual(find(mock.calls, "createTextNode")?.args, ["Hi"]);
+assert.equal(options.isTextNode(label), true);
+assert.equal(options.isTextNode(row), false);
+assert.deepEqual(find(mock.calls, "setFocusable")?.args, [pointer, true]);
+assert.deepEqual(find(mock.calls, "onClick")?.args, [pointer, "function"]);
 
-if (find(mock.calls, "column")?.args[0] !== 8) fail("column gap");
-if (find(mock.calls, "row")?.args[0] !== 4) fail("row gap");
-if (!find(mock.calls, "stack")) fail("stack");
-if (find(mock.calls, "padding")?.args[0] !== 8) fail("padding edges");
-if (!find(mock.calls, "pointerRegion")) fail("pointer");
-if (JSON.stringify(find(mock.calls, "decorated")?.args[0]) !== JSON.stringify(colorBytes(BUTTON_FILL))) {
-  fail("decorated color");
-}
-const decoratedCalls = mock.calls.filter((call) => call.name === "decorated");
-if (decoratedCalls[0]?.args[1] !== 0 || decoratedCalls[1]?.args[1] !== 6) fail("decorated radius");
-if (find(mock.calls, "clip")?.args[0] !== 12) fail("clip");
-if (find(mock.calls, "opacity")?.args[0] !== 0) fail("opacity zero");
-const imageCall = find(mock.calls, "image");
-if (imageCall?.args[0] !== "asset:logo" || imageCall.args[1] !== 56 || imageCall.args[2] !== 56) {
-  fail("image");
-}
-if (logo === 0) fail("image id");
-if (find(mock.calls, "setGrow")?.args[0] !== grown || find(mock.calls, "setGrow")?.args[1] !== 3) {
-  fail("grow");
-}
-const textCall = find(mock.calls, "text");
-if (textCall?.args[0] !== "Hi" || textCall.args[1] !== FONT_SIZE) fail("text node");
-if (JSON.stringify(textCall?.args[2]) !== JSON.stringify(colorBytes(TEXT_COLOR))) fail("text color");
-if (!mock.host.isText(label) || options.isTextNode(column)) fail("isText");
-
-options.insertNode(column, row);
-options.insertNode(column, padding, row);
+options.insertNode(stack, row);
+options.insertNode(stack, pointer, row);
 const inserted = mock.calls.filter((call) => call.name === "insert");
-if (inserted[0]?.args[0] !== column || inserted[0]?.args[1] !== row || inserted[0]?.args[2] !== 0) {
-  fail("insert without anchor");
-}
-if (inserted[1]?.args[2] !== row) fail("insert with anchor");
-options.removeNode(column, padding);
-if (find(mock.calls, "remove")?.args[0] !== column || find(mock.calls, "remove")?.args[1] !== padding) {
-  fail("remove");
-}
+assert.deepEqual(inserted.map((call) => call.args), [[stack, row, 0], [stack, pointer, row]]);
+options.removeNode(stack, pointer);
+assert.deepEqual(find(mock.calls, "remove")?.args, [stack, pointer]);
 
-options.setProperty(column, "gap", 12);
-options.setProperty(padding, "edges", 3);
-options.setProperty(label, "fontSize", 20);
-options.setProperty(label, "color", "#112233");
+const geometry = {
+  width: "50%",
+  height: "auto",
+  paddingLeft: 4,
+  paddingTop: 6,
+  margin: 8,
+  alignSelf: "center",
+  position: "absolute",
+  top: 10,
+  left: 4,
+  translateX: 4,
+  scaleX: 2,
+  gridColumnStart: { span: 2 },
+  gridColumnEnd: "auto",
+};
+options.setProperty(row, "style", geometry);
+options.setProperty(label, "style", { fontSize: 20, color: "#112233", maxLines: 2, textAlign: "center" });
 options.setProperty(label, "value", "Yo");
-options.setProperty(pointer, "onClick", clicked);
+options.replaceText(label, "Next");
+const styles = mock.calls.filter((call) => call.name === "setStyle");
+assert.deepEqual(styles.map((call) => call.args), [
+  [row, geometry],
+  [label, { fontSize: 20, color: "#112233", maxLines: 2, textAlign: "center" }],
+]);
+assert.deepEqual(mock.calls.filter((call) => call.name === "setText").map((call) => call.args), [
+  [label, "Yo"], [label, "Next"],
+]);
+mock.host.setImage(logo, "asset:mark", 12, 8);
+assert.deepEqual(find(mock.calls, "setImage")?.args, [logo, "asset:mark", 12, 8]);
+
+assert.equal(options.getParentNode(row), undefined);
+assert.equal(options.getFirstChild(stack), undefined);
+assert.equal(options.getNextSibling(row), undefined);
+mock.setParent(stack);
+mock.setFirst(logo);
+mock.setSibling(pointer);
+assert.equal(options.getParentNode(row), stack);
+assert.equal(options.getFirstChild(stack), logo);
+assert.equal(options.getNextSibling(row), pointer);
+
+const scroller = options.createElement("scroll", { axis: "vertical", onDragBy: clicked });
+options.setProperty(scroller, "onWheel", clicked);
 options.setProperty(pointer, "onPress", clicked);
 options.setProperty(pointer, "onRelease", clicked);
-options.replaceText(label, "Next");
-
-if (find(mock.calls, "setGap")?.args[1] !== 12) fail("setGap");
-if (find(mock.calls, "setPadding")?.args[1] !== 3) fail("setPadding");
-if (find(mock.calls, "setFontSize")?.args[1] !== 20) fail("setFontSize");
-if (JSON.stringify(find(mock.calls, "setColor")?.args[1]) !== JSON.stringify([0x11, 0x22, 0x33, 255])) {
-  fail("setColor");
-}
-const setTexts = mock.calls.filter((call) => call.name === "setText").map((call) => call.args[1]);
-if (setTexts[0] !== "Yo" || setTexts[1] !== "Next") fail("setText");
-if (find(mock.calls, "onClick")?.args[0] !== pointer) fail("onClick");
-if (find(mock.calls, "onPress")?.args[0] !== pointer) fail("onPress");
-if (find(mock.calls, "onRelease")?.args[0] !== pointer) fail("onRelease");
-options.setProperty(fade, "alpha", 40);
-options.setProperty(rounded, "radius", 4);
-options.setProperty(label, "maxLines", 2);
-options.setProperty(label, "textAlign", "center");
-if (find(mock.calls, "setAlpha")?.args[0] !== fade || find(mock.calls, "setAlpha")?.args[1] !== 40) {
-  fail("setAlpha");
-}
-if (find(mock.calls, "setRadius")?.args[0] !== rounded || find(mock.calls, "setRadius")?.args[1] !== 4) {
-  fail("setRadius");
-}
-if (find(mock.calls, "setMaxLines")?.args[1] !== 2) fail("setMaxLines");
-if (find(mock.calls, "setTextAlign")?.args[1] !== "center") fail("setTextAlign");
-mock.host.setImage(logo, "asset:mark", 12, 8);
-const imageUpdates = mock.calls.filter((call) => call.name === "setImage");
-if (imageUpdates.length !== 1 || imageUpdates[0]?.args[1] !== "asset:mark") fail("setImage");
-
-mock.setParent(0);
-mock.setFirst(0);
-mock.setSibling(0);
-if (options.getParentNode(row) !== undefined) fail("parent 0");
-if (options.getFirstChild(column) !== undefined) fail("first 0");
-if (options.getNextSibling(row) !== undefined) fail("sibling 0");
-mock.setParent(stack);
-mock.setFirst(decorated);
-mock.setSibling(pointer);
-if (options.getParentNode(row) !== stack) fail("parent");
-if (options.getFirstChild(column) !== decorated) fail("first");
-if (options.getNextSibling(row) !== pointer) fail("sibling");
-
-const dragged = () => {};
-const scroller = options.createElement("scroll", { onDragBy: dragged });
-const shifted = options.createElement("transform", { x: 4, scale: 2 });
-const spread = options.createElement("row", { gap: 0, justify: "space-between", wrap: true, fill: true });
-if (!find(mock.calls, "scroll")) fail("scroll");
-if (find(mock.calls, "onDragBy")?.args[0] !== scroller) fail("onDragBy");
-const transforms = mock.calls.filter((call) => call.name === "setTransformComponent" && call.args[0] === shifted);
-if (!transforms.some((call) => call.args[1] === 0 && call.args[2] === 4)) fail("transform x");
-if (!transforms.some((call) => call.args[1] === 3 && call.args[2] === 2)) fail("transform scale");
-if (find(mock.calls, "setJustify")?.args[0] !== spread || find(mock.calls, "setJustify")?.args[1] !== "space-between") {
-  fail("justify");
-}
-if (find(mock.calls, "setWrap")?.args[0] !== spread || find(mock.calls, "setWrap")?.args[1] !== true) {
-  fail("wrap");
-}
-if (find(mock.calls, "setFill")?.args[0] !== spread) fail("fill");
-const centered = options.createElement("align", { align: "center", fill: true });
-const alignCall = find(mock.calls, "align");
-if (alignCall?.args[0] !== "center" || centered === 0) fail("align");
-if (!mock.calls.some((call) => call.name === "setFill" && call.args[0] === centered)) fail("align fill");
-options.setProperty(spread, "cross", "center");
-if (find(mock.calls, "setCross")?.args[0] !== spread || find(mock.calls, "setCross")?.args[1] !== "center") {
-  fail("cross");
-}
-const field = options.createElement("pointer", { focusable: true, onFocus: clicked });
-const box = options.createElement("sized", { w: 1, h: 22 });
-if (find(mock.calls, "setFocusable")?.args[0] !== field || find(mock.calls, "setFocusable")?.args[1] !== true) {
-  fail("focusable");
-}
-if (find(mock.calls, "onFocus")?.args[0] !== field) fail("onFocus");
-if (find(mock.calls, "sized")?.args[0] !== 1 || find(mock.calls, "sized")?.args[1] !== 22) fail("sized");
-if (box === 0) fail("sized id");
-
-const tracks = options.createElement("grid", { columns: ["40", "1fr"], rows: ["min"], gap: 0 });
-const gridCall = find(mock.calls, "grid");
-if (JSON.stringify(gridCall?.args[0]) !== JSON.stringify(["40", "1fr"])) fail("grid columns");
-if (JSON.stringify(gridCall?.args[1]) !== JSON.stringify(["min"])) fail("grid rows");
-if (gridCall?.args[2] !== 0 || tracks === 0) fail("grid");
-const inset = options.createElement("padding", { edges: 4, left: 4, top: 6 });
-const edgeCall = mock.calls.filter((call) => call.name === "setPaddingEdge" && call.args[0] === inset);
-if (!edgeCall.some((call) => call.args[1] === 0 && call.args[2] === 6)) fail("padding top");
-if (!edgeCall.some((call) => call.args[1] === 3 && call.args[2] === 4)) fail("padding left");
-if (mock.calls.some((call) => String(call.name).includes("mutation"))) fail("mutation file");
-options.setProperty(row, "margin", 8);
-options.setProperty(row, "shrink", 0);
-options.setProperty(row, "alignSelf", "center");
-const wheeled = () => {};
-options.setProperty(scroller, "onWheel", wheeled);
-if (find(mock.calls, "setMargin")?.args[1] !== 8) fail("margin");
-if (find(mock.calls, "setShrink")?.args[1] !== 0) fail("shrink");
-if (find(mock.calls, "setAlignSelf")?.args[1] !== "center") fail("alignSelf");
-if (find(mock.calls, "onWheel")?.args[0] !== scroller) fail("onWheel");
-const secondary = () => {};
-options.setProperty(field, "onSecondaryClick", secondary);
-if (find(mock.calls, "onSecondaryClick")?.args[0] !== field) fail("onSecondaryClick");
-options.setProperty(pointer, "onZoom", (scale: number) => scale);
-if (find(mock.calls, "onZoom")?.args[0] !== pointer) fail("onZoom");
-const held = () => {};
-options.setProperty(pointer, "onLongPress", held);
+options.setProperty(pointer, "onFocus", clicked);
+options.setProperty(pointer, "onSecondaryClick", clicked);
+options.setProperty(pointer, "onZoom", clicked);
+options.setProperty(pointer, "onLongPress", clicked);
 options.setProperty(pointer, "recognizers", { drag: "free", longPress: true });
-if (find(mock.calls, "onLongPress")?.args[0] !== pointer) fail("onLongPress");
-const recognizers = find(mock.calls, "setRecognizers");
-if (recognizers?.args[0] !== pointer || (recognizers.args[1] as { drag?: string }).drag !== "free") {
-  fail("recognizers");
+for (const event of ["onDragBy", "onWheel"]) assert.equal(find(mock.calls, event)?.args[0], scroller);
+for (const event of ["onPress", "onRelease", "onFocus", "onSecondaryClick", "onZoom", "onLongPress"]) {
+  assert.equal(find(mock.calls, event)?.args[0], pointer);
 }
-
-options.setProperty(box, "w", "50%");
-const axisCalls = mock.calls.filter((call) => call.name === "setSizeAxis" && call.args[0] === box);
-const half = axisCalls[axisCalls.length - 1];
-if (half?.args[1] !== 0 || half.args[2] !== 2 || half.args[3] !== 0.5) fail("axis percent");
-options.setProperty(box, "h", "auto");
-const autoHeight = mock.calls.filter((call) => call.name === "setSizeAxis" && call.args[0] === box);
-const autoCall = autoHeight[autoHeight.length - 1];
-if (autoCall?.args[1] !== 1 || autoCall.args[2] !== 0) fail("axis auto");
-options.setProperty(box, "aspect", null);
-options.setProperty(box, "absolute", true);
-options.setProperty(box, "insetTop", 10);
-options.setProperty(box, "insetLeft", 4);
-options.setProperty(box, "columnStart", { span: 2 });
-options.setProperty(box, "columnEnd", "auto");
-if (find(mock.calls, "setAspectRatio")?.args[0] !== box || find(mock.calls, "setAspectRatio")?.args[1] !== null) {
-  fail("aspect");
-}
-if (find(mock.calls, "setPosition")?.args[1] !== true) fail("absolute");
-const insetCalls = mock.calls.filter((call) => call.name === "setInsetEdge" && call.args[0] === box);
-if (!insetCalls.some((call) => call.args[1] === 0 && call.args[2] === 10)) fail("inset");
-if (!insetCalls.some((call) => call.args[1] === 3 && call.args[2] === 4)) fail("inset");
-const placement = mock.calls.filter((call) => call.name === "setGridLine" && call.args[0] === box);
-if (!placement.some((call) => call.args[1] === 0 && call.args[2] === 2 && call.args[3] === 2)) fail("grid line");
-if (!placement.some((call) => call.args[1] === 1 && call.args[2] === 0)) fail("grid line");
-let badAxis = false;
-try {
-  options.setProperty(box, "w", "fill");
-} catch {
-  badAxis = true;
-}
-if (!badAxis) fail("bad axis");
-
-let threw = false;
-try {
-  options.createElement("nope");
-} catch {
-  threw = true;
-}
-if (!threw) fail("unknown tag");
+assert.deepEqual(find(mock.calls, "setRecognizers")?.args, [pointer, { drag: "free", longPress: true }]);
+assert.throws(() => options.setProperty(row, "w", "50%"), /unknown prop/);
 
 await reorderFor();
 await colorStaysPut();
@@ -482,8 +299,8 @@ async function reorderFor(): Promise<void> {
     parentOf.delete(child);
   };
   const impl = {
-    column: () => next++,
-    text: (utf8: string) => {
+    createElement: () => next++,
+    createTextNode: (utf8: string) => {
       const id = next++;
       texts.set(id, utf8);
       return id;
@@ -492,8 +309,7 @@ async function reorderFor(): Promise<void> {
       texts.set(node, utf8);
     },
     isText: (node: number) => texts.has(node),
-    append: (parent: number, child: number) => impl.insert(parent, child, 0),
-    insert: (parent: number, child: number, before: number) => {
+    insertNode: (parent: number, child: number, before = 0) => {
       unlink(child);
       const list = kids(parent);
       const at = before === 0 ? list.length : list.indexOf(before);
@@ -527,7 +343,7 @@ async function reorderFor(): Promise<void> {
   });
   const options = testScene(host);
   const renderer = rendererApi.createSceneRenderer(options);
-  const root = options.createElement("column");
+  const root = options.createElement("view");
   const [items, setItems] = solid.createSignal([
     { id: "a", label: "Alpha" },
     { id: "b", label: "Beta" },
@@ -560,7 +376,7 @@ async function colorStaysPut(): Promise<void> {
   const options = testScene(mock.host);
   bindText(options);
   const renderer = createSceneRenderer(options);
-  const parent = options.createElement("column");
+  const parent = options.createElement("view");
   const [color, setColor] = solid.createSignal("#111111");
   solid.createRoot(() => {
     renderer.render(
@@ -589,7 +405,7 @@ async function runsAreSent(): Promise<void> {
   const options = testScene(mock.host);
   bindText(options);
   const renderer = createSceneRenderer(options);
-  const parent = options.createElement("column");
+  const parent = options.createElement("view");
   solid.createRoot(() => {
     renderer.render(
       () =>
@@ -620,11 +436,10 @@ async function runsAreSent(): Promise<void> {
     fail("missing setTextRuns");
   }
   const runs = call.args[1] as {
-    text: string;
-    color: number[];
-    gradient?: { kind: string; stops: { color: number[] }[] };
+    color: string;
+    gradient?: { kind: string; stops: { color: string | number[] }[] };
   }[];
-  if (runs[0]?.text !== "Im" || runs[0].color[0] !== 0x11) {
+  if (runs[0]?.text !== "Im" || runs[0].color !== "#112233") {
     fail(`runs ${JSON.stringify(runs)}`);
   }
   if (runs[0].gradient?.kind !== "linear" || runs[0].gradient.stops[1]?.color[0] !== 255) {

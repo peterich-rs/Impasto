@@ -1,4 +1,4 @@
-use session::{EventType, Method, Module, ModuleExports, PluginValue, Shared, shared_read};
+use engine::session::{EventType, Method, Module, ModuleExports, PluginValue, Shared, shared_read};
 
 use crate::{Restoration, WindowSession};
 

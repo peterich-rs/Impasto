@@ -21,19 +21,6 @@ assert.ok(toast.includes('alignItems: "end"'));
 assert.ok(button.includes("minTarget(size(), theme().density) * scale()"));
 
 const mock = installMockHost();
-const column = mock.host.column(0);
-assert.throws(() => mock.host.setAlign(column, "center"), /setAlign failed/);
-const frame = mock.host.align("center");
-mock.host.setAlign(frame, "end");
-assert.ok(
-  mock.calls.some(
-    (call) =>
-      call.name === "setAlign" &&
-      call.args[0] === frame &&
-      call.args[1] === "end",
-  ),
-);
-
 const reparent = mock.host.reparentChildren as (
   from: number,
   to: number,
@@ -51,6 +38,6 @@ mock.host.firstChild = () => {
 };
 assert.equal(readFirstChild(4), null);
 mock.host.firstChild = first;
-assert.equal(readFirstChild(column), 0);
+assert.equal(readFirstChild(mock.host.createElement("view")), 0);
 
 console.log("overlay.test.ts ok");

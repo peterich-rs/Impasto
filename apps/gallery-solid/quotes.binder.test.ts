@@ -17,8 +17,8 @@ const binder = new QuoteBinder(
 );
 
 const symbol = engine.symbols()[0]!;
-const last = mock.host.text("—", 14, [0, 0, 0, 255]);
-const pct = mock.host.text("—", 12, [0, 0, 0, 255]);
+const last = mock.host.createTextNode("—");
+const pct = mock.host.createTextNode("—");
 const stopLast = binder.bind(symbol, { last, flashNode: last });
 const stopPct = binder.bind(symbol, { pct, flashNode: pct });
 
@@ -66,8 +66,8 @@ assert.equal(
 );
 
 stopPct();
-const parent = mock.host.column(0);
-const stale = mock.host.text("—", 14, [0, 0, 0, 255]);
+const parent = mock.host.createElement("view");
+const stale = mock.host.createTextNode("—");
 mock.host.append(parent, stale);
 binder.bind(symbol, { last: stale, flashNode: stale });
 mock.host.remove(parent, stale);
@@ -86,7 +86,7 @@ const capBinder = new QuoteBinder(
 );
 const lastNodes: number[] = [];
 for (const capSymbol of capEngine.symbols().slice(0, 10)) {
-  const node = mock.host.text("—", 14, [0, 0, 0, 255]);
+  const node = mock.host.createTextNode("—");
   capBinder.bind(capSymbol, { last: node });
   lastNodes.push(node);
 }
@@ -120,10 +120,10 @@ const pairBinder = new QuoteBinder(
 const singles = pairEngine.symbols().slice(0, 7);
 const pairSymbol = pairEngine.symbols()[7]!;
 for (const capSymbol of singles) {
-  pairBinder.bind(capSymbol, { last: mock.host.text("—", 14, [0, 0, 0, 255]) });
+  pairBinder.bind(capSymbol, { last: mock.host.createTextNode("—") });
 }
-const pairLast = mock.host.text("—", 14, [0, 0, 0, 255]);
-const pairPct = mock.host.text("—", 12, [0, 0, 0, 255]);
+const pairLast = mock.host.createTextNode("—");
+const pairPct = mock.host.createTextNode("—");
 pairBinder.bind(pairSymbol, { last: pairLast, pct: pairPct });
 pairEngine.runFor(5_000);
 mock.calls.length = 0;

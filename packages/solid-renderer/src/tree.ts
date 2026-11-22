@@ -1,4 +1,4 @@
-/** Opaque generational handle allocated by uicore::Tree. Zero means absent. */
+/** Opaque generational handle allocated by the engine tree. Zero means absent. */
 export type Node = number;
 
 /** Renderer hooks used by leaf components. Every operation calls `scene`. */

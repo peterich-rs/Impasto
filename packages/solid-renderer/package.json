@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Solid universal renderer. The runtime drives uicore.",
+  "description": "Solid renderer for the Impasto scene module.",
   "exports": {
     ".": "./runtime/index.ts",
     "./defaults": "./src/defaults.ts",

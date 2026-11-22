@@ -1,5 +1,5 @@
 //! Render thread. Commands come from the platform thread. This thread owns the
-//! engine, the session, and the surface.
+//! raster, the session, and the surface.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -10,7 +10,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Instant;
 
-use session::FrameTime;
+use engine::session::FrameTime;
 
 use crate::command::{Command, SurfaceId, SurfaceTarget};
 use crate::error::BootError;
@@ -294,9 +294,9 @@ fn issue_list(report: &str) -> &str {
 
 fn write_inspect(
     runtime: &mut Runtime,
-    tree: &uicore::LayerTree,
+    tree: &engine::scene::LayerTree,
     timing: &FrameTiming,
-    phases: &session::FramePhases,
+    phases: &engine::session::FramePhases,
     issues: &str,
 ) {
     if runtime.inspect_written {
@@ -461,8 +461,8 @@ fn decode_loop(
     decoder: Arc<dyn ImageDecoder>,
     jobs: Receiver<ImageRequest>,
     inbox: &Inbox,
-    http: Option<Arc<dyn session::HttpClient>>,
-    upload: &Mutex<Option<engine::TextureFactory>>,
+    http: Option<Arc<dyn engine::session::HttpClient>>,
+    upload: &Mutex<Option<raster::TextureFactory>>,
 ) {
     while let Ok(request) = jobs.recv() {
         inbox.post(Command::ImageReady(decode_one(
@@ -476,9 +476,9 @@ fn decode_loop(
 
 fn decode_one(
     decoder: &dyn ImageDecoder,
-    http: Option<&dyn session::HttpClient>,
+    http: Option<&dyn engine::session::HttpClient>,
     request: &ImageRequest,
-    upload: &Mutex<Option<engine::TextureFactory>>,
+    upload: &Mutex<Option<raster::TextureFactory>>,
 ) -> ImageReady {
     let result = if request.source.starts_with("https://") {
         match crate::net::fetch_image_body(http, &request.source) {
@@ -525,11 +525,11 @@ struct Installed {
 
 struct Runtime {
     services: Rc<RefCell<Box<dyn Services>>>,
-    engine: Rc<RefCell<engine::Engine>>,
-    session: Option<Box<dyn session::Session>>,
-    net_tx: SyncSender<session::IoJob>,
-    registry: Arc<session::ModuleRegistry>,
-    latest: Option<Arc<protocol::LayerTree>>,
+    raster: Rc<RefCell<raster::Rasterizer>>,
+    session: Option<Box<dyn engine::session::Session>>,
+    net_tx: SyncSender<engine::session::IoJob>,
+    registry: Arc<engine::session::ModuleRegistry>,
+    latest: Option<Arc<engine::scene::LayerTree>>,
     image_requirements: Vec<(Arc<str>, bool)>,
     external_textures: HashMap<String, images::ExternalFrame>,
     external_gpu: HashMap<String, images::ExternalGpuFrame>,
@@ -543,12 +543,12 @@ struct Runtime {
     needs_present: bool,
     images: ImageCache,
     image_tx: Sender<ImageRequest>,
-    upload: Arc<Mutex<Option<engine::TextureFactory>>>,
+    upload: Arc<Mutex<Option<raster::TextureFactory>>>,
     frame_number: u64,
-    semantics: Option<uicore::SemanticsUpdate>,
+    semantics: Option<engine::semantics::SemanticsUpdate>,
     semantics_enabled: bool,
     autofill_enabled: bool,
-    platform_views: Arc<[uicore::PlatformViewPlacement]>,
+    platform_views: Arc<[engine::tree::PlatformViewPlacement]>,
     platform_views_surface: Option<SurfaceId>,
     platform_views_dirty: bool,
     wake_tx: Sender<Option<i64>>,
@@ -571,18 +571,18 @@ struct Runtime {
 impl Drop for Runtime {
     fn drop(&mut self) {
         self.vsync.cancel();
-        // Vulkan swapchains use the engine context. Retire them before its fields drop.
+        // Vulkan swapchains use the raster context. Retire them before its fields drop.
         self.surfaces.clear();
-        // The shaper shares the engine typography context. Drop it before the engine.
+        // The shaper shares the raster typography context. Drop it before the raster.
         self.session.take();
     }
 }
 
 struct RenderLinks {
     image_tx: Sender<ImageRequest>,
-    net_tx: SyncSender<session::IoJob>,
+    net_tx: SyncSender<engine::session::IoJob>,
     wake_tx: Sender<Option<i64>>,
-    upload: Arc<Mutex<Option<engine::TextureFactory>>>,
+    upload: Arc<Mutex<Option<raster::TextureFactory>>>,
 }
 
 fn render(
@@ -594,15 +594,15 @@ fn render(
 ) -> Result<(), BootError> {
     startup.checkpoint()?;
     let services = Rc::new(RefCell::new(boot.services));
-    let engine = {
+    let raster = {
         let services = services.borrow();
-        prepare_engine(services.as_ref(), &boot.font_family, boot.open_engine)
+        prepare_raster(services.as_ref(), &boot.font_family, boot.open_raster)
     };
     startup.checkpoint()?;
-    let engine = engine?;
+    let raster = raster?;
     let Launch::Session(open) = boot.launch;
     let parts = crate::SessionOpen {
-        shaper: Box::new(crate::ImpellerShaper::new(engine.borrow().typography())),
+        shaper: Box::new(raster::ImpellerShaper::new(raster.borrow().typography())),
         log: console_log(),
     };
     let rt = match crate::rt::handle() {
@@ -612,7 +612,7 @@ fn render(
             return Err(crate::SessionError::Runtime.into());
         }
     };
-    let app_state = session::shared("active".to_owned());
+    let app_state = engine::session::shared("active".to_owned());
     let launch_url = Arc::clone(&boot.launch_url);
     let window_session = services.borrow().window_session();
     let window = Arc::new(Poster {
@@ -638,8 +638,8 @@ fn render(
         ));
     }
     modules.extend(boot.modules);
-    let registry = Arc::new(session::ModuleRegistry::new(modules));
-    let host = session::ModuleConfig {
+    let registry = Arc::new(engine::session::ModuleRegistry::new(modules));
+    let host = engine::session::ModuleConfig {
         registry: Arc::clone(&registry),
         exec: Arc::new(crate::RtExec {
             rt,
@@ -674,7 +674,7 @@ fn render(
     crate::watchdog::spawn(Arc::downgrade(&busy), boot.devtools.clone());
     let mut runtime = Runtime {
         services,
-        engine,
+        raster,
         session,
         net_tx: links.net_tx,
         registry,
@@ -732,7 +732,7 @@ fn render(
     Ok(())
 }
 
-fn io_sink(tx: SyncSender<session::IoJob>) -> crate::IoSink {
+fn io_sink(tx: SyncSender<engine::session::IoJob>) -> crate::IoSink {
     Box::new(move |job| {
         tx.try_send(job).map_err(|error| match error {
             mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job) => Box::new(job),
@@ -749,8 +749,8 @@ fn update_source(runtime: &mut Runtime, revision: &str, source: &str) {
     let now = crate::net::mono_ms();
     let result = session.update_source(
         source,
-        Box::new(crate::ImpellerShaper::new(
-            runtime.engine.borrow().typography(),
+        Box::new(raster::ImpellerShaper::new(
+            runtime.raster.borrow().typography(),
         )),
         io_sink(runtime.net_tx.clone()),
         FrameTime {
@@ -765,12 +765,12 @@ fn update_source(runtime: &mut Runtime, revision: &str, source: &str) {
             update.commit();
         }
         runtime.input.reset_for_source_update();
-        runtime.engine.borrow_mut().invalidate_pictures();
+        runtime.raster.borrow_mut().invalidate_pictures();
         runtime.installed = None;
         runtime.semantics = None;
         runtime.diag_armed = false;
         let services = runtime.services.borrow();
-        services.apply_ime(&session::ImeUpdate::Hide);
+        services.apply_ime(&engine::session::ImeUpdate::Hide);
         services.semantics(&[]);
         if let Some(surface) = runtime.surfaces.id() {
             services.platform_views(surface, &[]);
@@ -809,7 +809,7 @@ struct FaultPlan {
     stop_again: bool,
 }
 
-fn fault_followup(diag_armed: bool, faults: &[session::ScriptFault]) -> FaultPlan {
+fn fault_followup(diag_armed: bool, faults: &[engine::session::ScriptFault]) -> FaultPlan {
     if faults.is_empty() {
         return FaultPlan {
             diag_armed: false,
@@ -871,11 +871,7 @@ fn dispatch_command(
         | Command::SemanticsAction(_)
         | Command::LaunchUrl(_)
         | Command::JsIo(_)
-        | Command::HttpDone { .. }
-        | Command::HttpHead { .. }
-        | Command::HttpChunk { .. }
-        | Command::PluginDone { .. }
-        | Command::Socket { .. }) => session_cmds::handle(runtime, command),
+        | Command::Io(_)) => session_cmds::handle(runtime, command),
         command @ (Command::Invalidate
         | Command::MemoryWarning
         | Command::ImageReady(_)
@@ -888,22 +884,27 @@ fn dispatch_command(
     }
 }
 
-fn fold_semantics(snapshot: &mut Option<uicore::SemanticsUpdate>, patch: &uicore::SemanticsPatch) {
-    let update = snapshot.get_or_insert_with(|| uicore::SemanticsUpdate {
+fn fold_semantics(
+    snapshot: &mut Option<engine::semantics::SemanticsUpdate>,
+    patch: &engine::semantics::SemanticsPatch,
+) {
+    let update = snapshot.get_or_insert_with(|| engine::semantics::SemanticsUpdate {
         root: patch.root,
         nodes: Vec::new(),
     });
     update.root = patch.root;
     for op in &patch.ops {
         match op {
-            uicore::SemanticsOp::Upsert(node) => {
+            engine::semantics::SemanticsOp::Upsert(node) => {
                 if let Some(found) = update.nodes.iter_mut().find(|item| item.id == node.id) {
                     *found = node.clone();
                 } else {
                     update.nodes.push(node.clone());
                 }
             }
-            uicore::SemanticsOp::Remove(id) => update.nodes.retain(|node| node.id != *id),
+            engine::semantics::SemanticsOp::Remove(id) => {
+                update.nodes.retain(|node| node.id != *id)
+            }
         }
     }
     if let Some(order) = &patch.order {
@@ -914,7 +915,7 @@ fn fold_semantics(snapshot: &mut Option<uicore::SemanticsUpdate>, patch: &uicore
     }
 }
 
-fn layer_tree_line(tree: &protocol::LayerTree) -> String {
+fn layer_tree_line(tree: &engine::scene::LayerTree) -> String {
     let pictures: Vec<String> = tree
         .pictures
         .iter()
@@ -923,7 +924,7 @@ fn layer_tree_line(tree: &protocol::LayerTree) -> String {
                 "{}:gen{}:{}cmds",
                 picture.id.0,
                 picture.generation,
-                picture.commands.len()
+                picture.commands().len()
             )
         })
         .collect();
@@ -936,7 +937,7 @@ fn layer_tree_line(tree: &protocol::LayerTree) -> String {
 }
 
 fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool, BootError> {
-    use session::trace::Section;
+    use engine::session::trace::Section;
 
     let _frame_trace = Section::begin(c"Impasto frame");
     let frame_started = Instant::now();
@@ -1060,7 +1061,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                     && let Err(message) = runtime.registry.call(
                         "Clipboard",
                         "setString",
-                        &[session::PluginValue::Str(text)],
+                        &[engine::session::PluginValue::Str(text)],
                     )
                 {
                     tracing::error!(target: "impasto::shell", "{message}");
@@ -1117,7 +1118,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     }
     again |= reloaded;
     if !fonts.is_empty() {
-        install_fonts(&mut runtime.engine.borrow_mut(), fonts);
+        install_fonts(&mut runtime.raster.borrow_mut(), fonts);
     }
     let Some(tree) = runtime.latest.clone() else {
         return Ok(end_frame(runtime, again, false));
@@ -1158,14 +1159,14 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
         FrameStep::Submit => {
             let _trace = Section::begin(c"Impasto submit");
             runtime.images.install_uploaded(
-                &mut runtime.engine.borrow_mut(),
+                &mut runtime.raster.borrow_mut(),
                 images::scale_bucket(runtime.point_scale),
             );
             {
-                let mut engine = runtime.engine.borrow_mut();
+                let mut raster = runtime.raster.borrow_mut();
                 for (source, frame) in &runtime.external_gpu {
                     if let Some(image) = &frame.image {
-                        engine.install_uploaded(source, image);
+                        raster.install_uploaded(source, image);
                     }
                 }
             }
@@ -1175,9 +1176,9 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                 images::scale_bucket(runtime.point_scale),
             );
             let resolve = |source: &str| {
-                if source.starts_with(protocol::EXTERNAL_TEXTURE_PREFIX) {
+                if source.starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX) {
                     return runtime.external_textures.get(source).map(|frame| {
-                        engine::ImagePixels {
+                        raster::ImagePixels {
                             width: frame.size[0],
                             height: frame.size[1],
                             rgba: &frame.pixels,
@@ -1187,7 +1188,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                 pixels
                     .iter()
                     .find(|(name, ..)| name == source)
-                    .map(|(_, width, height, rgba)| engine::ImagePixels {
+                    .map(|(_, width, height, rgba)| raster::ImagePixels {
                         width: *width,
                         height: *height,
                         rgba,
@@ -1195,7 +1196,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
             };
             let submitted =
                 runtime
-                    .engine
+                    .raster
                     .borrow_mut()
                     .submit_layers(&tree, runtime.point_scale, resolve);
             submit_ms = elapsed_ms(started);
@@ -1213,7 +1214,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                         Some(runtime.frame_number),
                     );
                 }
-                if status == engine::Status::NotLinked {
+                if status == raster::Status::NotLinked {
                     return Err(BootError::Engine(status));
                 }
                 // A rejected list is not a lost surface. Do not force another vsync.
@@ -1235,10 +1236,10 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     let started = Instant::now();
     let presented = {
         let _trace = Section::begin(c"Impasto present");
-        let mut engine = runtime.engine.borrow_mut();
+        let mut raster = runtime.raster.borrow_mut();
         runtime
             .surfaces
-            .present(&mut engine, &runtime.platform_views)
+            .present(&mut raster, &runtime.platform_views)
     };
     if presented.is_ok() {
         let _trace = Section::begin(c"Impasto presented");
@@ -1257,7 +1258,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     }
     let present_ms = elapsed_ms(started);
     let work_ms = elapsed_ms(frame_started);
-    let stats = runtime.engine.borrow().submit_stats();
+    let stats = runtime.raster.borrow().submit_stats();
     if matches!(step, FrameStep::Submit) {
         Section::event(|| {
             format!(
@@ -1270,7 +1271,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
             )
         });
     }
-    let shapes = runtime.engine.borrow_mut().take_shape_stats();
+    let shapes = runtime.raster.borrow_mut().take_shape_stats();
     let phase = phases.unwrap_or_default();
     let timing = FrameTiming {
         number: runtime.frame_number,
@@ -1312,21 +1313,21 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
         tracing::warn!(target: "impasto::shell", %error, "inspect write failed");
     }
     let present_error = presented.as_ref().err().copied();
-    if present_error == Some(engine::Status::DeviceLost) && runtime.device_recoveries < 2 {
+    if present_error == Some(raster::Status::DeviceLost) && runtime.device_recoveries < 2 {
         runtime.device_recoveries += 1;
         tracing::warn!(target: "impasto::render::gpu", attempts = runtime.device_recoveries, "graphics device lost, rebuilding");
         *lock(&runtime.upload) = None;
         runtime.images.invalidate_gpu();
         {
-            let mut engine = runtime.engine.borrow_mut();
+            let mut raster = runtime.raster.borrow_mut();
             runtime
                 .surfaces
-                .recover_device(&mut engine)
+                .recover_device(&mut raster)
                 .map_err(BootError::Engine)?;
             for frame in runtime.external_gpu.values_mut() {
-                frame.image = (frame.import)(&engine);
+                frame.image = (frame.import)(&raster);
             }
-            *lock(&runtime.upload) = engine.texture_factory();
+            *lock(&runtime.upload) = raster.texture_factory();
         }
         runtime.installed = None;
         runtime.gpu = Gpu::Flush;
@@ -1336,7 +1337,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     let after = after_present(presented, again);
     if after == AfterPresent::Fatal {
         return Err(BootError::Engine(
-            present_error.unwrap_or(engine::Status::NotLinked),
+            present_error.unwrap_or(raster::Status::NotLinked),
         ));
     }
     if after == AfterPresent::Rejected {
@@ -1424,17 +1425,17 @@ fn open_surface_target(
         pixels: target.pixels,
     };
     let opened = {
-        let mut engine = runtime.engine.borrow_mut();
+        let mut raster = runtime.raster.borrow_mut();
         runtime
             .surfaces
-            .ready(target, &mut engine, runtime.open_surface.as_mut())
+            .ready(target, &mut raster, runtime.open_surface.as_mut())
     };
     match opened {
         Ready::Opened { replaced, .. } => {
             runtime.services.borrow().surface_attached(kept.id);
             // The first real window can select a different backend from the
             // initial graphics context. Publish its factory only after it opens.
-            *lock(&runtime.upload) = runtime.engine.borrow().texture_factory();
+            *lock(&runtime.upload) = runtime.raster.borrow().texture_factory();
             if matches!(place, OpenPlace::Command) {
                 if runtime.input.set_metrics(metrics) {
                     arm(runtime);
@@ -1451,7 +1452,7 @@ fn open_surface_target(
             Ok(OpenedSurface::Ready { replaced })
         }
         Ready::Failed(
-            engine::Status::NotReady | engine::Status::SurfaceLost | engine::Status::AcquireMiss,
+            raster::Status::NotReady | raster::Status::SurfaceLost | raster::Status::AcquireMiss,
         ) => {
             let retry = runtime.surfaces.fail_attempt(kept, attempts);
             if matches!(retry, OpenRetry::GaveUp) {
@@ -1477,7 +1478,7 @@ fn open_surface_target(
     }
 }
 
-fn images_ready(runtime: &mut Runtime, census: Option<&uicore::ImageCensus>) -> bool {
+fn images_ready(runtime: &mut Runtime, census: Option<&engine::semantics::ImageCensus>) -> bool {
     let requirements = &runtime.image_requirements;
     runtime.images.begin_frame();
     if let Some(census) = census {
@@ -1493,7 +1494,7 @@ fn images_ready(runtime: &mut Runtime, census: Option<&uicore::ImageCensus>) -> 
     for (source, required) in requirements {
         let source = source.as_ref();
         let required = *required;
-        if source.starts_with(protocol::EXTERNAL_TEXTURE_PREFIX) {
+        if source.starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX) {
             continue;
         }
         if runtime.images.is_pending(source, bucket) {
@@ -1573,28 +1574,30 @@ fn arm(runtime: &mut Runtime) {
     }
 }
 
-fn phase_name(phase: uicore::Phase) -> &'static str {
+fn phase_name(phase: engine::input::Phase) -> &'static str {
     match phase {
-        uicore::Phase::Down => "down",
-        uicore::Phase::Move => "move",
-        uicore::Phase::Up => "up",
-        uicore::Phase::Cancel => "cancel",
-        uicore::Phase::Wheel => "wheel",
-        uicore::Phase::Zoom => "zoom",
+        engine::input::Phase::Down => "down",
+        engine::input::Phase::Move => "move",
+        engine::input::Phase::Up => "up",
+        engine::input::Phase::Cancel => "cancel",
+        engine::input::Phase::Wheel => "wheel",
+        engine::input::Phase::Zoom => "zoom",
     }
 }
 
-fn input_kind(event: &session::InputEvent) -> &'static str {
+fn input_kind(event: &engine::session::InputEvent) -> &'static str {
     match event {
-        session::InputEvent::Key(_) | session::InputEvent::Back => "key",
-        session::InputEvent::Text(_) | session::InputEvent::Paste { .. } => "text",
-        session::InputEvent::Composing(_) | session::InputEvent::DismissIme(_) => "ime",
-        session::InputEvent::Copy
-        | session::InputEvent::Cut
-        | session::InputEvent::SelectAll
-        | session::InputEvent::Edit(_)
-        | session::InputEvent::Replace { .. }
-        | session::InputEvent::ReplaceIme { .. } => "edit",
+        engine::session::InputEvent::Key(_) | engine::session::InputEvent::Back => "key",
+        engine::session::InputEvent::Text(_) | engine::session::InputEvent::Paste { .. } => "text",
+        engine::session::InputEvent::Composing(_) | engine::session::InputEvent::DismissIme(_) => {
+            "ime"
+        }
+        engine::session::InputEvent::Copy
+        | engine::session::InputEvent::Cut
+        | engine::session::InputEvent::SelectAll
+        | engine::session::InputEvent::Edit(_)
+        | engine::session::InputEvent::Replace { .. }
+        | engine::session::InputEvent::ReplaceIme { .. } => "edit",
     }
 }
 
@@ -1623,7 +1626,7 @@ fn frame_listeners(
 /// Releases GPU caches and refuses acquire until a later submit rebuilds them.
 fn flush_gpu(runtime: &mut Runtime, reason: &'static str) {
     tracing::info!(target: "impasto::render::gpu", reason, "gpu flush");
-    runtime.engine.borrow_mut().trim();
+    runtime.raster.borrow_mut().trim();
     runtime.installed = None;
     runtime.gpu = Gpu::Flush;
     runtime.needs_present = false;
@@ -1644,10 +1647,10 @@ fn elapsed_ms(started: Instant) -> f64 {
 }
 
 /// Registers queued faces before `submit`. A failure logs the family and status
-/// only, then the frame continues with the faces already on the engine.
-fn install_fonts(engine: &mut engine::Engine, fonts: Vec<(String, Vec<u8>)>) {
+/// only, then the frame continues with the faces already on the raster.
+fn install_fonts(raster: &mut raster::Rasterizer, fonts: Vec<(String, Vec<u8>)>) {
     for (family, bytes) in fonts {
-        if let Err(status) = engine.register_font(&bytes, &family) {
+        if let Err(status) = raster.register_font(&bytes, &family) {
             tracing::warn!(target: "impasto::shell", %family, %status, "font registration failed");
         } else {
             tracing::info!(target: "impasto::shell", %family, "font registered");
@@ -1655,16 +1658,16 @@ fn install_fonts(engine: &mut engine::Engine, fonts: Vec<(String, Vec<u8>)>) {
     }
 }
 
-fn prepare_engine(
+fn prepare_raster(
     services: &dyn Services,
     family: &str,
-    open: impl FnOnce() -> Result<engine::Engine, engine::Status>,
-) -> Result<Rc<RefCell<engine::Engine>>, BootError> {
-    let mut engine = match open() {
-        Ok(engine) => engine,
+    open: impl FnOnce() -> Result<raster::Rasterizer, raster::Status>,
+) -> Result<Rc<RefCell<raster::Rasterizer>>, BootError> {
+    let mut raster = match open() {
+        Ok(raster) => raster,
         Err(status) => {
             let error = BootError::Engine(status);
-            tracing::error!(target: "impasto::shell", %status, "engine was not created");
+            tracing::error!(target: "impasto::shell", %status, "raster was not created");
             return Err(error);
         }
     };
@@ -1673,20 +1676,20 @@ fn prepare_engine(
         tracing::error!(target: "impasto::shell", %family, "font was not provided");
         return Err(error);
     };
-    if let Err(status) = engine.register_font(font, family) {
+    if let Err(status) = raster.register_font(font, family) {
         let error = BootError::Engine(status);
         tracing::error!(target: "impasto::shell", %family, %status, "font registration failed");
         return Err(error);
     }
     tracing::info!(target: "impasto::shell", %family, "font registered");
     for (name, bytes) in services.extra_fonts() {
-        if let Err(status) = engine.register_font(&bytes, &name) {
+        if let Err(status) = raster.register_font(&bytes, &name) {
             tracing::warn!(target: "impasto::shell", %name, %status, "font registration failed");
         } else {
             tracing::info!(target: "impasto::shell", %name, "font registered");
         }
     }
-    Ok(Rc::new(RefCell::new(engine)))
+    Ok(Rc::new(RefCell::new(raster)))
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -1701,7 +1704,7 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
 
-    use session::{FrameOutput, FrameTime, IoEvent, Metrics};
+    use engine::session::{FrameOutput, FrameTime, IoEvent, Metrics};
 
     use super::install_fonts;
     use super::{
@@ -1720,11 +1723,11 @@ mod tests {
         let secret = b"SECRET-FONT-BYTES-DO-NOT-LOG";
         let lines = Arc::new(Mutex::new(Vec::new()));
         let capture = Capture(Arc::clone(&lines));
-        tracing::subscriber::with_default(capture, || match engine::Engine::create_metal() {
-            Ok(mut engine) => {
-                install_fonts(&mut engine, vec![("Custom".to_owned(), secret.to_vec())]);
+        tracing::subscriber::with_default(capture, || match raster::Rasterizer::create_metal() {
+            Ok(mut raster) => {
+                install_fonts(&mut raster, vec![("Custom".to_owned(), secret.to_vec())]);
             }
-            Err(engine::Status::NotLinked) => {
+            Err(raster::Status::NotLinked) => {
                 tracing::warn!(
                     target: "impasto::shell",
                     family = "Custom",
@@ -1749,7 +1752,7 @@ mod tests {
             None
         }
 
-        fn apply_ime(&self, _: &session::ImeUpdate) {}
+        fn apply_ime(&self, _: &engine::session::ImeUpdate) {}
     }
 
     struct NullSurface;
@@ -1757,24 +1760,24 @@ mod tests {
     impl Surface for NullSurface {
         fn present(
             &mut self,
-            _: &mut engine::Engine,
-            _: engine::PixelSize,
-        ) -> Result<Presented, engine::Status> {
+            _: &mut raster::Rasterizer,
+            _: raster::PixelSize,
+        ) -> Result<Presented, raster::Status> {
             Ok(Presented::Continue)
         }
     }
 
     struct CountSurface {
         presents: Arc<AtomicU32>,
-        pixels: Arc<Mutex<engine::PixelSize>>,
+        pixels: Arc<Mutex<raster::PixelSize>>,
     }
 
     impl Surface for CountSurface {
         fn present(
             &mut self,
-            _: &mut engine::Engine,
-            pixels: engine::PixelSize,
-        ) -> Result<Presented, engine::Status> {
+            _: &mut raster::Rasterizer,
+            pixels: raster::PixelSize,
+        ) -> Result<Presented, raster::Status> {
             self.presents.fetch_add(1, Ordering::Relaxed);
             *lock(&self.pixels) = pixels;
             Ok(Presented::Continue)
@@ -1831,10 +1834,10 @@ mod tests {
         log: Rc<RefCell<SessionLog>>,
     }
 
-    impl session::Session for MockSession {
+    impl engine::session::Session for MockSession {
         fn metrics(&mut self, _: &Metrics) {}
 
-        fn pointer(&mut self, _: uicore::PointerEvent) {}
+        fn pointer(&mut self, _: engine::input::PointerEvent) {}
 
         fn frame(&mut self, time: FrameTime) -> FrameOutput {
             let mut log = self.log.borrow_mut();
@@ -1866,7 +1869,7 @@ mod tests {
 
     impl TestHarness {
         fn new() -> Self {
-            let engine = Rc::new(RefCell::new(engine::Engine::inert()));
+            let raster = Rc::new(RefCell::new(raster::Rasterizer::inert()));
             let vsync = RecVsync::new();
             let log = Rc::new(RefCell::new(SessionLog {
                 io: Vec::new(),
@@ -1879,12 +1882,12 @@ mod tests {
             let (wake_tx, _wake_rx) = mpsc::channel();
             let runtime = Runtime {
                 services: Rc::new(RefCell::new(Box::new(NullServices))),
-                engine,
+                raster,
                 session: Some(Box::new(MockSession {
                     log: Rc::clone(&log),
                 })),
                 net_tx: mpsc::sync_channel(1).0,
-                registry: Arc::new(session::ModuleRegistry::new(Vec::new())),
+                registry: Arc::new(engine::session::ModuleRegistry::new(Vec::new())),
                 latest: None,
                 image_requirements: Vec::new(),
                 external_textures: Default::default(),
@@ -1986,7 +1989,7 @@ mod tests {
     fn wake_while_paused_does_not_frame() {
         let mut harness = TestHarness::new();
         harness.open_dummy();
-        assert!(!harness.command(Command::Lifecycle(session::Lifecycle::Paused)));
+        assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Paused)));
         assert!(harness.runtime.input.is_paused());
         assert!(!harness.command(Command::Wake));
         assert_eq!(harness.frame_count(), 0);
@@ -2041,7 +2044,7 @@ mod tests {
             "an armed token must block the next request"
         );
         let cancels_before = harness.vsync.cancel_count();
-        assert!(!harness.command(Command::Lifecycle(session::Lifecycle::Resumed)));
+        assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Resumed)));
         assert!(harness.vsync.cancel_count() > cancels_before);
         let next = harness
             .vsync
@@ -2067,7 +2070,7 @@ mod tests {
         harness.runtime.needs_present = false;
         harness.runtime.present_failures = 3;
         harness.runtime.present_retry_at = Some(1);
-        assert!(!harness.command(Command::Lifecycle(session::Lifecycle::Resumed)));
+        assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Resumed)));
         assert!(harness.runtime.needs_present);
         assert_eq!(harness.runtime.present_failures, 0);
         assert!(harness.runtime.present_retry_at.is_none());
@@ -2079,10 +2082,10 @@ mod tests {
         let mut harness = TestHarness::new();
         harness.open_dummy();
         let before = harness.vsync.last_token();
-        assert!(!harness.command(Command::Lifecycle(session::Lifecycle::Hidden)));
+        assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Hidden)));
         assert!(harness.runtime.input.is_paused());
 
-        assert!(!harness.command(Command::Lifecycle(session::Lifecycle::Inactive)));
+        assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Inactive)));
         assert!(!harness.runtime.input.is_paused());
         let token = harness
             .vsync
@@ -2130,14 +2133,14 @@ mod tests {
             let presents = Arc::clone(&counted);
             Ok(Box::new(CountSurface {
                 presents,
-                pixels: Arc::new(Mutex::new(engine::PixelSize::default())),
+                pixels: Arc::new(Mutex::new(raster::PixelSize::default())),
             }))
         });
         harness.open_dummy();
-        harness.runtime.latest = Some(Arc::new(protocol::LayerTree::empty()));
+        harness.runtime.latest = Some(Arc::new(engine::scene::LayerTree::empty()));
         harness.runtime.installed = Some(Installed { scale: 2.0 });
         harness.runtime.needs_present = true;
-        assert!(!harness.command(Command::Lifecycle(session::Lifecycle::Hidden)));
+        assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Hidden)));
         assert_eq!(harness.runtime.gpu, Gpu::Flush);
         assert!(harness.runtime.installed.is_none());
         assert!(harness.runtime.input.is_paused());
@@ -2151,7 +2154,7 @@ mod tests {
 
     #[test]
     fn present_passes_the_pixels_the_host_posted() {
-        let seen = Arc::new(Mutex::new(engine::PixelSize::default()));
+        let seen = Arc::new(Mutex::new(raster::PixelSize::default()));
         let mut harness = TestHarness::new();
         let seen_open = Arc::clone(&seen);
         harness.runtime.open_surface = Box::new(move |_, _| {
@@ -2161,12 +2164,12 @@ mod tests {
             }))
         });
         harness.open_dummy();
-        harness.runtime.latest = Some(Arc::new(protocol::LayerTree::empty()));
+        harness.runtime.latest = Some(Arc::new(engine::scene::LayerTree::empty()));
         harness.runtime.installed = Some(Installed { scale: 2.0 });
         harness.runtime.point_scale = 2.0;
         harness.runtime.needs_present = true;
         assert!(!on_frame(&mut harness.runtime, now(), &harness.acks).unwrap());
-        assert_eq!(*lock(&seen), engine::PixelSize::new(720, 1280));
+        assert_eq!(*lock(&seen), raster::PixelSize::new(720, 1280));
     }
 
     #[test]
@@ -2176,13 +2179,13 @@ mod tests {
         impl Surface for LostDevice {
             fn present(
                 &mut self,
-                _: &mut engine::Engine,
-                _: engine::PixelSize,
-            ) -> Result<Presented, engine::Status> {
-                Err(engine::Status::DeviceLost)
+                _: &mut raster::Rasterizer,
+                _: raster::PixelSize,
+            ) -> Result<Presented, raster::Status> {
+                Err(raster::Status::DeviceLost)
             }
 
-            fn recover_device(&mut self, _: &mut engine::Engine) -> Result<(), engine::Status> {
+            fn recover_device(&mut self, _: &mut raster::Rasterizer) -> Result<(), raster::Status> {
                 self.0.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
@@ -2194,7 +2197,7 @@ mod tests {
         harness.runtime.open_surface =
             Box::new(move |_, _| Ok(Box::new(LostDevice(Arc::clone(&counted)))));
         harness.open_dummy();
-        let latest = Arc::new(protocol::LayerTree::empty());
+        let latest = Arc::new(engine::scene::LayerTree::empty());
         harness.runtime.latest = Some(Arc::clone(&latest));
         harness.runtime.installed = Some(Installed { scale: 2.0 });
         harness.runtime.point_scale = 2.0;
@@ -2219,13 +2222,13 @@ mod tests {
     fn io_event_arms_only_when_session_wants_frame() {
         let mut harness = TestHarness::new();
         let tokens_before = harness.vsync.token_count();
-        assert!(!harness.command(Command::HttpDone {
+        assert!(!harness.command(Command::Io(IoEvent::Http {
             token: 7,
-            result: Err(session::HttpError::new(
-                session::HttpFailure::Network,
+            result: Err(engine::session::HttpError::new(
+                engine::session::HttpFailure::Network,
                 "offline"
             )),
-        }));
+        })));
         assert!(
             matches!(
                 harness.session.borrow().io.last(),
@@ -2235,10 +2238,10 @@ mod tests {
         );
         assert_eq!(harness.vsync.token_count(), tokens_before);
         harness.session.borrow_mut().wants = true;
-        assert!(!harness.command(Command::PluginDone {
+        assert!(!harness.command(Command::Io(IoEvent::Plugin {
             token: 8,
-            result: session::PluginResult::Done(session::PluginValue::Null),
-        }));
+            result: engine::session::PluginResult::Done(engine::session::PluginValue::Null),
+        })));
         assert!(
             matches!(
                 harness.session.borrow().io.last(),
@@ -2246,12 +2249,12 @@ mod tests {
             ),
             "plugin completion must reach the session"
         );
-        assert!(!harness.command(Command::Socket {
+        assert!(!harness.command(Command::Io(IoEvent::Socket {
             id: 9,
             event: "open".into(),
             text: true,
             data: Vec::new(),
-        }));
+        })));
         assert!(
             matches!(
                 harness.session.borrow().io.last(),
@@ -2264,12 +2267,12 @@ mod tests {
 
     #[test]
     fn faults_arm_one_extra_frame_then_stop_when_held() {
-        let listener = session::ScriptFault {
+        let listener = engine::session::ScriptFault {
             source: "listener",
             message: "boom".into(),
             stack: "at f".into(),
         };
-        let frame = session::ScriptFault {
+        let frame = engine::session::ScriptFault {
             source: "frame",
             message: "interrupted (frame)".into(),
             stack: String::new(),
@@ -2288,9 +2291,9 @@ mod tests {
     #[test]
     fn a_panicking_frame_stays_on_the_render_thread() {
         struct PanicSession;
-        impl session::Session for PanicSession {
+        impl engine::session::Session for PanicSession {
             fn metrics(&mut self, _: &Metrics) {}
-            fn pointer(&mut self, _: uicore::PointerEvent) {}
+            fn pointer(&mut self, _: engine::input::PointerEvent) {}
             fn frame(&mut self, _: FrameTime) -> FrameOutput {
                 panic!("js host");
             }
@@ -2414,7 +2417,7 @@ mod tests {
         assert!(!harness.command(Command::SurfaceChanged {
             id,
             metrics,
-            pixels: engine::PixelSize::new(800, 1280),
+            pixels: raster::PixelSize::new(800, 1280),
         }));
         assert!(harness.runtime.needs_present);
         assert!(harness.runtime.scheduler.token_armed());
@@ -2429,40 +2432,42 @@ mod tests {
         assert!(!harness.command(Command::SurfaceChanged {
             id,
             metrics: Metrics::new(400.0, 800.0, 2.0),
-            pixels: engine::PixelSize::new(800, 1600),
+            pixels: raster::PixelSize::new(800, 1600),
         }));
-        assert!(!harness.command(Command::Pointer(uicore::PointerEvent::new(
-            uicore::Phase::Move,
-            1.0,
-            1.0,
-            0.0,
-        ))));
-        assert!(!harness.command(Command::Input(session::InputEvent::Back)));
+        assert!(
+            !harness.command(Command::Pointer(engine::input::PointerEvent::new(
+                engine::input::Phase::Move,
+                1.0,
+                1.0,
+                0.0,
+            )))
+        );
+        assert!(!harness.command(Command::Input(engine::session::InputEvent::Back)));
         assert!(!harness.command(Command::ImeDismissed));
         assert!(!harness.command(Command::Metrics(Metrics::new(360.0, 640.0, 3.0))));
         assert!(!harness.command(Command::Invalidate));
         assert!(harness.runtime.needs_present);
-        assert!(!harness.command(Command::Settings(session::PlatformSettings::default())));
+        assert!(!harness.command(Command::Settings(
+            engine::session::PlatformSettings::default()
+        )));
         assert!(!harness.command(Command::WindowFocus(true)));
         assert!(!harness.command(Command::LaunchUrl("https://app.example/item".into())));
-        assert!(
-            !harness.command(Command::SemanticsAction(uicore::SemanticsAction::Activate(
-                uicore::SemanticsId(1)
-            )))
-        );
+        assert!(!harness.command(Command::SemanticsAction(
+            engine::semantics::SemanticsAction::Activate(engine::semantics::SemanticsId(1))
+        )));
         assert!(!harness.command(Command::ReloadImage("asset:logo".into())));
         assert!(!harness.command(Command::ImageReady(ImageReady::Missing {
             source: Arc::from("asset:missing"),
             generation: 1,
         })));
-        assert!(!harness.command(Command::HttpDone {
+        assert!(!harness.command(Command::Io(IoEvent::Http {
             token: 11,
-            result: Err(session::HttpError::new(
-                session::HttpFailure::Network,
+            result: Err(engine::session::HttpError::new(
+                engine::session::HttpFailure::Network,
                 "retry"
             )),
-        }));
-        assert!(!harness.command(Command::Lifecycle(session::Lifecycle::Inactive)));
+        })));
+        assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Inactive)));
         let replaced = SurfaceId::fresh();
         assert!(!harness.command(Command::SurfaceReady(SurfaceTarget::new(
             replaced,
@@ -2476,7 +2481,7 @@ mod tests {
             frames_before,
             "Wake must not steal the vsync token SurfaceReady just armed"
         );
-        assert!(!harness.command(Command::Lifecycle(session::Lifecycle::Hidden)));
+        assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Hidden)));
         assert!(harness.runtime.input.is_paused());
         assert!(harness.command(Command::Shutdown));
     }
@@ -2497,9 +2502,9 @@ mod tests {
     fn editor_copy_calls_clipboard_set_string() {
         let clip = crate::memory::MemoryClipboard::new("");
         let mut harness = TestHarness::new();
-        harness.runtime.registry = Arc::new(session::ModuleRegistry::new(vec![crate::clipboard(
-            Arc::clone(&clip) as _,
-        )]));
+        harness.runtime.registry = Arc::new(engine::session::ModuleRegistry::new(vec![
+            crate::clipboard(Arc::clone(&clip) as _),
+        ]));
         harness.open_dummy();
         harness.session.borrow_mut().clipboard = Some("copied".into());
         let token = match harness.vsync.last_token() {
@@ -2591,7 +2596,7 @@ mod tests {
     #[test]
     fn not_ready_surface_waits_and_a_gave_up_change_rearms() {
         let mut harness = TestHarness::new();
-        harness.runtime.open_surface = Box::new(|_, _| Err(engine::Status::NotReady));
+        harness.runtime.open_surface = Box::new(|_, _| Err(raster::Status::NotReady));
         let id = SurfaceId::fresh();
         assert!(!harness.command(Command::SurfaceReady(SurfaceTarget::new(
             id,
@@ -2610,7 +2615,7 @@ mod tests {
         assert!(!harness.command(Command::SurfaceChanged {
             id,
             metrics: Metrics::new(400.0, 800.0, 2.0),
-            pixels: engine::PixelSize::new(800, 1600),
+            pixels: raster::PixelSize::new(800, 1600),
         }));
         assert!(harness.runtime.surfaces.take_attempt().is_some());
     }

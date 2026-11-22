@@ -2,7 +2,7 @@ import * as scene from "scene";
 import { getRestorationState, setRestorationState } from "@impasto/app-state";
 import { Linking } from "@impasto/linking";
 
-const summary = scene.text("Android task", 18, [255, 255, 255, 255]);
+const summary = scene.createElement("text", { value: "Android task", style: { fontSize: 18, color: "#ffffff" } });
 setRestorationState("starts", String(Number(getRestorationState("starts")) + 1));
 setRestorationState("initialUrl", Linking.getInitialURL());
 scene.onBackGesture((phase, value) => {

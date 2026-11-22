@@ -11,6 +11,7 @@ use embedder::{
     NativePtr, PermissionsHost, Poster, Services, SessionError, StorageHost, SurfaceTarget,
     metrics,
 };
+use engine::session::{InputEvent, Key};
 use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
@@ -27,7 +28,6 @@ use objc2_foundation::{
     NSNotFound, NSNotification, NSNotificationSuspensionBehavior, NSPoint, NSRange, NSRect,
     NSString, NSUInteger, NSURL,
 };
-use session::{InputEvent, Key};
 
 use crate::text_client::Marked;
 use objc2_metal::{MTLCreateSystemDefaultDevice, MTLPixelFormat};
@@ -36,7 +36,7 @@ use objc2_quartz_core::{CALayer, CAMetalLayer};
 use crate::pointer::{PointerSample, pointer_event, scene_f32};
 use crate::surface::MetalSurface;
 use crate::vsync::DisplayLink;
-use uicore::{Button, Modifiers, Phase, PointerEvent};
+use engine::input::{Button, Modifiers, Phase, PointerEvent};
 
 const CONTENT_WIDTH: f64 = 360.0;
 const CONTENT_HEIGHT: f64 = 640.0;
@@ -228,7 +228,7 @@ define_class!(
                 || modifiers.contains(Modifiers::ALT)
                 || modifiers.contains(Modifiers::META);
             if chord && let Some(ch) = shortcut_character(event) {
-                self.post_edits(vec![InputEvent::Key(session::KeyPress {
+                self.post_edits(vec![InputEvent::Key(engine::session::KeyPress {
                     key: Key::Char(ch),
                     shift: modifiers.contains(Modifiers::SHIFT),
                     modifiers,
@@ -343,14 +343,14 @@ impl ContentView {
 
     fn post_outside(&self, event: &NSEvent) {
         self.ivars().poster.post(Command::Pointer(PointerEvent {
-            pointer: uicore::PointerId(0),
-            kind: uicore::PointerKind::Mouse,
+            pointer: engine::input::PointerId(0),
+            kind: engine::input::PointerKind::Mouse,
             phase: Phase::Move,
             x: -1.0,
             y: -1.0,
             time_ms: event.timestamp() * 1000.0,
             button: Button::None,
-            buttons: uicore::Buttons::empty(),
+            buttons: engine::input::Buttons::empty(),
             modifiers: modifiers_of(event),
             dx: 0.0,
             dy: 0.0,
@@ -423,7 +423,7 @@ impl ContentView {
         self.post_edits(events);
     }
 
-    fn scene_rect_to_screen(&self, rect: uicore::Rect) -> NSRect {
+    fn scene_rect_to_screen(&self, rect: engine::Rect) -> NSRect {
         let height = self.bounds().size.height;
         let local = NSRect::new(
             NSPoint::new(rect.x as f64, height - rect.y as f64 - rect.h as f64),
@@ -454,19 +454,19 @@ impl ContentView {
         );
     }
 
-    fn apply_ime_update(&self, update: &session::ImeUpdate) {
+    fn apply_ime_update(&self, update: &engine::session::ImeUpdate) {
         let Some(window) = self.window() else {
             return;
         };
         match update {
-            session::ImeUpdate::Hide => {
+            engine::session::ImeUpdate::Hide => {
                 self.ivars().wants_ime.set(false);
                 let _: bool = window.makeFirstResponder(None);
             }
-            session::ImeUpdate::Show(state) | session::ImeUpdate::Update(state) => {
+            engine::session::ImeUpdate::Show(state) | engine::session::ImeUpdate::Update(state) => {
                 self.ivars().marked.borrow_mut().apply(state);
                 self.ivars().wants_ime.set(true);
-                if matches!(update, session::ImeUpdate::Show(_)) {
+                if matches!(update, engine::session::ImeUpdate::Show(_)) {
                     let _: bool = window.makeFirstResponder(Some(self));
                 }
             }
@@ -554,7 +554,7 @@ define_class!(
         fn will_terminate(&self, _notification: &NSNotification) {
             self.ivars()
                 .link
-                .post(Command::Lifecycle(session::Lifecycle::Detached));
+                .post(Command::Lifecycle(engine::session::Lifecycle::Detached));
             let _ = self.ivars().link.shutdown_and_join();
         }
 
@@ -562,7 +562,7 @@ define_class!(
         fn did_become_active(&self, _notification: &NSNotification) {
             self.ivars()
                 .link
-                .post(Command::Lifecycle(session::Lifecycle::Resumed));
+                .post(Command::Lifecycle(engine::session::Lifecycle::Resumed));
             self.post_settings();
         }
 
@@ -570,14 +570,14 @@ define_class!(
         fn will_resign_active(&self, _notification: &NSNotification) {
             self.ivars()
                 .link
-                .post(Command::Lifecycle(session::Lifecycle::Inactive));
+                .post(Command::Lifecycle(engine::session::Lifecycle::Inactive));
         }
 
         #[unsafe(method(applicationDidHide:))]
         fn did_hide(&self, _notification: &NSNotification) {
             self.ivars()
                 .link
-                .post(Command::Lifecycle(session::Lifecycle::Hidden));
+                .post(Command::Lifecycle(engine::session::Lifecycle::Hidden));
         }
 
 
@@ -627,14 +627,14 @@ define_class!(
         fn window_did_miniaturize(&self, _notification: &NSNotification) {
             self.ivars()
                 .link
-                .post(Command::Lifecycle(session::Lifecycle::Hidden));
+                .post(Command::Lifecycle(engine::session::Lifecycle::Hidden));
         }
 
         #[unsafe(method(windowDidDeminiaturize:))]
         fn window_did_deminiaturize(&self, _notification: &NSNotification) {
             self.ivars()
                 .link
-                .post(Command::Lifecycle(session::Lifecycle::Resumed));
+                .post(Command::Lifecycle(engine::session::Lifecycle::Resumed));
         }
 
         #[unsafe(method(windowDidChangeOcclusionState:))]
@@ -729,13 +729,13 @@ impl Host {
     }
 }
 
-fn current_settings() -> session::PlatformSettings {
+fn current_settings() -> engine::session::PlatformSettings {
     let locale = NSLocale::currentLocale()
         .localeIdentifier()
         .to_string()
         .replace('_', "-");
     let mut text_scale = 1.0;
-    let mut brightness = session::Brightness::Light;
+    let mut brightness = engine::session::Brightness::Light;
     let mut reduce_motion = false;
     let mut high_contrast = false;
     let mut bold_text = false;
@@ -761,7 +761,7 @@ fn current_settings() -> session::PlatformSettings {
         };
         text_scale = text_scale_from_point_size(font.pointSize());
     }
-    session::PlatformSettings {
+    engine::session::PlatformSettings {
         locale,
         text_scale,
         brightness,
@@ -772,11 +772,11 @@ fn current_settings() -> session::PlatformSettings {
 }
 
 /// `Dark` when the appearance name contains `Dark`.
-pub(crate) fn appearance_brightness(name: &str) -> session::Brightness {
+pub(crate) fn appearance_brightness(name: &str) -> engine::session::Brightness {
     if name.contains("Dark") {
-        session::Brightness::Dark
+        engine::session::Brightness::Dark
     } else {
-        session::Brightness::Light
+        engine::session::Brightness::Light
     }
 }
 
@@ -792,7 +792,7 @@ pub(crate) fn text_scale_from_point_size(point_size: f64) -> f32 {
     scale.clamp(0.5, 3.0)
 }
 
-fn command_key(selector: &str) -> Option<session::KeyPress> {
+fn command_key(selector: &str) -> Option<engine::session::KeyPress> {
     let (key, shift) = match selector {
         "insertNewline:" => (Key::Enter, false),
         "insertTab:" => (Key::Tab, false),
@@ -828,7 +828,7 @@ fn command_key(selector: &str) -> Option<session::KeyPress> {
         "moveToEndOfDocumentAndModifySelection:" => (Key::DocumentEnd, true),
         _ => return None,
     };
-    Some(session::KeyPress {
+    Some(engine::session::KeyPress {
         key,
         shift,
         modifiers: Modifiers::empty(),
@@ -887,7 +887,7 @@ impl Services for MacServices {
         Vec::new()
     }
 
-    fn apply_ime(&self, update: &session::ImeUpdate) {
+    fn apply_ime(&self, update: &engine::session::ImeUpdate) {
         let view = self.ime_view.load(Ordering::Acquire) as usize;
         if view == 0 {
             return;
@@ -979,7 +979,7 @@ pub fn run(
             // toolchain's `compile`. It is not network input. The envelope
             // does not prove the payload is valid bytecode.
             unsafe {
-                javascript::ui::open_trusted_bytecode_with_routed_io(
+                engine::js::open_trusted_bytecode_with_routed_io(
                     &source,
                     &name,
                     open.shaper,
@@ -989,7 +989,7 @@ pub fn run(
                 )
             }
         } else {
-            javascript::ui::open_program_with_routed_io(
+            engine::js::open_program_with_routed_io(
                 &source,
                 &name,
                 open.shaper,
@@ -999,8 +999,8 @@ pub fn run(
             )
         }
         .map_err(|error| match error {
-            javascript::ui::Error::Runtime => SessionError::Runtime,
-            javascript::ui::Error::Script(text) => {
+            engine::js::Error::Runtime => SessionError::Runtime,
+            engine::js::Error::Script(text) => {
                 tracing::error!(target: "impasto::script", "{text}");
                 SessionError::Script(text)
             }
@@ -1010,7 +1010,7 @@ pub fn run(
     let on_stop_for_surface = Arc::clone(&on_stop);
     let ime_view = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
     let decoder = Arc::new(PngDecoder { directory: assets });
-    let launch_url = session::shared(initial_url.clone());
+    let launch_url = engine::session::shared(initial_url.clone());
     let mac = Arc::new(MacBridge);
     let devtools = Some(Arc::new(embedder::DiagnosticsHub::new()));
     fn log_directory() -> Option<PathBuf> {
@@ -1037,7 +1037,7 @@ pub fn run(
                 embedder::http_client()
                     .map_err(|message| RunError::Window(anyhow::anyhow!(message)))?,
             ),
-            open_engine: Box::new(engine::Engine::create_metal),
+            open_raster: Box::new(raster::Rasterizer::create_metal),
             open_surface: Box::new(move |_engine, target| {
                 Ok(Box::new(MetalSurface::new(
                     target.layer,
@@ -1207,7 +1207,7 @@ fn point_scale(window: &NSWindow, mtm: MainThreadMarker) -> f64 {
 
 #[cfg(test)]
 mod settings_tests {
-    use session::{Brightness, Key};
+    use engine::session::{Brightness, Key};
 
     use super::{appearance_brightness, command_key, text_scale_from_point_size};
 

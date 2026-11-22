@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use protocol::{LayerId, LayerKind, LayerTree};
+use engine::scene::{LayerId, LayerKind, LayerTree};
 
 use crate::timing::FrameTiming;
 
@@ -13,7 +13,7 @@ pub fn write_frame(
     dir: &Path,
     tree: &LayerTree,
     timing: &FrameTiming,
-    phases: Option<&session::FramePhases>,
+    phases: Option<&engine::session::FramePhases>,
     issues_json: &str,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
@@ -72,7 +72,7 @@ fn write_layer(tree: &LayerTree, id: LayerId, out: &mut String, first: &mut bool
         push_key(out, "commands");
         let count = tree
             .picture(picture)
-            .map(|picture| picture.commands.len())
+            .map(|picture| picture.commands().len())
             .unwrap_or(0);
         push_u64(out, count as u64);
         if let Some(picture) = tree.picture(picture) {
@@ -132,7 +132,7 @@ fn timing_json(out: &mut String, timing: &FrameTiming) {
     out.push('}');
 }
 
-fn phases_json(out: &mut String, phases: &session::FramePhases) {
+fn phases_json(out: &mut String, phases: &engine::session::FramePhases) {
     out.push('{');
     field_f64(out, "motionMs", phases.script.motion_ms, true);
     field_f64(out, "dispatchMs", phases.script.dispatch_ms, false);
@@ -219,22 +219,22 @@ fn push_f64(out: &mut String, value: f64) {
 mod tests {
     use std::sync::Arc;
 
-    use protocol::{Picture, PictureId};
+    use engine::scene::{Picture, PictureId};
 
     use super::*;
 
     fn picture(id: u64, commands: usize) -> Arc<Picture> {
-        Arc::new(Picture {
-            id: PictureId(id),
-            generation: 1,
-            origin: (1.5, 2.5),
-            commands: Arc::from(vec![
-                protocol::Command::Fill {
+        Arc::new(Picture::new(
+            PictureId(id),
+            1,
+            (1.5, 2.5),
+            Arc::from(vec![
+                engine::scene::Command::Fill {
                     color: [0, 0, 0, 0],
                 };
                 commands
             ]),
-        })
+        ))
     }
 
     fn timing(number: u64) -> FrameTiming {
@@ -273,13 +273,13 @@ mod tests {
     fn a_nested_tree_writes_layers_and_timing() {
         let tree = LayerTree {
             layers: vec![
-                protocol::Layer {
+                engine::scene::Layer {
                     kind: LayerKind::Offset { x: 0.0, y: 0.0 },
                     parent: None,
                     first_child: Some(LayerId(1)),
                     next: None,
                 },
-                protocol::Layer {
+                engine::scene::Layer {
                     kind: LayerKind::Clip {
                         x: 0.0,
                         y: 0.0,
@@ -291,7 +291,7 @@ mod tests {
                     first_child: Some(LayerId(2)),
                     next: None,
                 },
-                protocol::Layer {
+                engine::scene::Layer {
                     kind: LayerKind::Picture {
                         picture: PictureId(7),
                     },
@@ -307,10 +307,10 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("impasto-inspect-layers-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let phases = session::FramePhases {
+        let phases = engine::session::FramePhases {
             script_ms: 0.5,
             layout_ms: 0.4,
-            ..session::FramePhases::default()
+            ..engine::session::FramePhases::default()
         };
         write_frame(&dir, &tree, &timing(4), Some(&phases), "[]").unwrap();
         let text = std::fs::read_to_string(dir.join("frame.json")).unwrap();

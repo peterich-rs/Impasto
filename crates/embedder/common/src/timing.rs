@@ -43,7 +43,7 @@ impl FrameTiming {
 
 /// Receives one finished frame. It does not start clocks.
 pub trait FrameListener {
-    fn on_frame(&mut self, timing: &FrameTiming, phases: &session::FramePhases);
+    fn on_frame(&mut self, timing: &FrameTiming, phases: &engine::session::FramePhases);
 }
 
 /// Rising and falling edge of a boolean that stays true across frames.
@@ -89,7 +89,7 @@ pub struct BudgetEdge {
 }
 
 impl FrameListener for BudgetEdge {
-    fn on_frame(&mut self, timing: &FrameTiming, phases: &session::FramePhases) {
+    fn on_frame(&mut self, timing: &FrameTiming, phases: &engine::session::FramePhases) {
         match self.over.observe(timing.over_budget()) {
             StreakStep::Enter => log_over_budget(timing, phases),
             StreakStep::Leave { frames } => {
@@ -104,7 +104,7 @@ impl FrameListener for BudgetEdge {
     }
 }
 
-fn log_over_budget(timing: &FrameTiming, phases: &session::FramePhases) {
+fn log_over_budget(timing: &FrameTiming, phases: &engine::session::FramePhases) {
     let cause = phases.trace.layout_cause;
     let passes = phases.trace.layout_passes;
     let shaped = phases.trace.text_shaped;
@@ -187,7 +187,7 @@ pub struct WorkEdge {
 }
 
 impl FrameListener for WorkEdge {
-    fn on_frame(&mut self, timing: &FrameTiming, phases: &session::FramePhases) {
+    fn on_frame(&mut self, timing: &FrameTiming, phases: &engine::session::FramePhases) {
         match self.shaping.observe(phases.trace.text_shaped > 0) {
             StreakStep::Enter => {
                 tracing::info!(
@@ -238,7 +238,7 @@ impl DevtoolFrames {
 }
 
 impl FrameListener for DevtoolFrames {
-    fn on_frame(&mut self, timing: &FrameTiming, phases: &session::FramePhases) {
+    fn on_frame(&mut self, timing: &FrameTiming, phases: &engine::session::FramePhases) {
         self.devtools.push_frame(crate::diagnostics::FrameSample {
             seq: 0,
             number: timing.number,
@@ -304,7 +304,7 @@ impl FrameListener for DevtoolFrames {
 pub fn write_inspect(
     dir: &std::path::Path,
     timing: &FrameTiming,
-    tree: Option<&protocol::LayerTree>,
+    tree: Option<&engine::scene::LayerTree>,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let mut body = String::new();
@@ -353,10 +353,10 @@ pub fn write_inspect(
             body.push_str("\n    {");
             body.push_str(&format!("\"index\":{index}"));
             body.push_str(&format!(",\"kind\":\"{}\"", layer_kind(&layer.kind)));
-            if let protocol::LayerKind::Picture { picture } = layer.kind {
+            if let engine::scene::LayerKind::Picture { picture } = layer.kind {
                 let commands = tree
                     .picture(picture)
-                    .map(|picture| picture.commands.len())
+                    .map(|picture| picture.commands().len())
                     .unwrap_or(0);
                 body.push_str(&format!(",\"picture\":{}", picture.0));
                 body.push_str(&format!(",\"commands\":{commands}"));
@@ -391,17 +391,17 @@ fn num(value: f64) -> String {
     }
 }
 
-fn layer_kind(kind: &protocol::LayerKind) -> &'static str {
+fn layer_kind(kind: &engine::scene::LayerKind) -> &'static str {
     match kind {
-        protocol::LayerKind::Offset { .. } => "offset",
-        protocol::LayerKind::Transform { .. } => "transform",
-        protocol::LayerKind::Clip { .. } => "clip",
-        protocol::LayerKind::Opacity { .. } => "opacity",
-        protocol::LayerKind::Blur { .. } => "blur",
-        protocol::LayerKind::BackdropBlur { .. } => "backdrop",
-        protocol::LayerKind::Blend { .. } => "blend",
-        protocol::LayerKind::Picture { .. } => "picture",
-        protocol::LayerKind::PlatformView { .. } => "platformView",
+        engine::scene::LayerKind::Offset { .. } => "offset",
+        engine::scene::LayerKind::Transform { .. } => "transform",
+        engine::scene::LayerKind::Clip { .. } => "clip",
+        engine::scene::LayerKind::Opacity { .. } => "opacity",
+        engine::scene::LayerKind::Blur { .. } => "blur",
+        engine::scene::LayerKind::BackdropBlur { .. } => "backdrop",
+        engine::scene::LayerKind::Blend { .. } => "blend",
+        engine::scene::LayerKind::Picture { .. } => "picture",
+        engine::scene::LayerKind::PlatformView { .. } => "platformView",
     }
 }
 

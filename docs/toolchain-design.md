@@ -1,6 +1,8 @@
 # 把脚手架和场景写入收进 Rust
 
-本文保留当时的重构设计和路径。当前平台宿主布局见 [平台宿主](platform-hosts.md)。
+> 文中的实施阶段与代码引用反映设计或审计时的仓库结构。当前 crate 职责、源码入口和验证命令见 [架构](architecture.md)。
+
+本文保留当时的重构设计和路径。当前 `scene` 直接接受 `createElement`、`insertNode` 与统一样式对象。节点构造、样式更新、场景查询和操作均由 QuickJS 具名绑定提供。当前平台宿主布局见 [平台宿主](platform-hosts.md)。
 
 应用侧命令对齐 Flutter。视图树继续只活在 `uicore::Tree`，这条对齐 nsh 的 core，而不是对齐 Flutter 的 Element。响应式图按 nsh 的 arena 另起一个 crate，调度对齐仓库已经依赖的 Solid `2.0.0`，不移植它的源码。
 

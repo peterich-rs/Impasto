@@ -1,0 +1,1415 @@
+use std::ffi::CString;
+use std::ptr;
+
+use super::Typography;
+use super::key::{ParaKey, Shaped, Spans, hash_key, hash_query, key_matches, para_key};
+use super::paint_store::PaintSlot;
+use crate::Status;
+
+use crate::player::{
+    apply_decoration, color_source, impeller_align, impeller_slant, impeller_weight, paint_color,
+    push_runs, read_lines, utf16_len,
+};
+use crate::span_box::{SpanBox, span_bounds};
+use engine::scene::{SpanPaint, TextSpan, TextStyle};
+use engine::text::{MetricsKey, PaintKey, ParagraphQuery};
+
+impl Typography {
+    /// Shapes `utf8` with `color` on this engine's typography context.
+    ///
+    /// The paragraph is kept and drawn by the next [`crate::Rasterizer::submit_layers`] that
+    /// carries the same text, size, width, and color.
+    pub fn measure_paragraph(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+    ) -> Result<(f32, f32), Status> {
+        self.measure_with_spans(utf8, font_size, max_width, color, style, &[])
+    }
+
+    /// Same paragraph as [`Self::measure_paragraph`], including each span in the cache key.
+    pub fn measure_with_spans(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+        spans: &[TextSpan],
+    ) -> Result<(f32, f32), Status> {
+        self.measure_runs(
+            utf8,
+            font_size,
+            max_width,
+            color,
+            style,
+            Spans::Scene(spans),
+        )
+    }
+
+    pub(crate) fn measure_key(
+        &mut self,
+        key: &MetricsKey,
+        color: [u8; 4],
+        paints: Option<&[SpanPaint]>,
+    ) -> Result<(f32, f32), Status> {
+        self.measure_runs(
+            &key.text,
+            f32::from_bits(key.font_size),
+            f32::from_bits(key.max_width),
+            color,
+            &key.style,
+            Spans::metrics(key, color, paints),
+        )
+    }
+
+    fn measure_runs(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+        spans: Spans<'_>,
+    ) -> Result<(f32, f32), Status> {
+        let owned = spans.scene_text();
+        debug_assert!(owned.as_deref().is_none_or(|text| text == utf8));
+        let utf8 = owned.as_deref().unwrap_or(utf8);
+        if utf8.is_empty() {
+            return Err(Status::BadScene);
+        }
+        let Some(family) = self.resolved_family(style.family.as_deref()) else {
+            return Err(Status::BadScene);
+        };
+        let font_bits = font_size.to_bits();
+        let width_bits = max_width.to_bits();
+        let ellipsis = style.ellipsis.as_deref().unwrap_or("");
+        let hash = hash_query(
+            utf8,
+            font_bits,
+            width_bits,
+            color,
+            &family,
+            style.max_lines.unwrap_or(0),
+            ellipsis,
+            style.align,
+            style.weight,
+            style.direction_rtl,
+            style.height.to_bits(),
+            style.underline,
+            style.line_through,
+            style.soft_wrap,
+            style.overflow,
+            style.slant,
+            spans,
+        );
+        if !self.stale
+            && let Some(found) = self.measured.get_mut(hash, |key| {
+                key_matches(
+                    key,
+                    utf8,
+                    font_bits,
+                    width_bits,
+                    color,
+                    &family,
+                    style.max_lines.unwrap_or(0),
+                    ellipsis,
+                    style.align,
+                    style.weight,
+                    style.direction_rtl,
+                    style.height.to_bits(),
+                    style.underline,
+                    style.line_through,
+                    style.soft_wrap,
+                    style.overflow,
+                    style.slant,
+                    spans,
+                )
+            })
+        {
+            found.used = self.measure_generation;
+            let size = (found.width, found.height);
+            self.stats.measure_hit = self.stats.measure_hit.saturating_add(1);
+            return Ok(size);
+        }
+        self.stats.measure_miss = self.stats.measure_miss.saturating_add(1);
+        let Some(key) = para_key(utf8, font_size, max_width, color, &family, style, spans) else {
+            return Err(Status::BadScene);
+        };
+        let mut shaped = self.build_paragraph(utf8, font_size, max_width, color, style, spans)?;
+        self.stats.built = self.stats.built.saturating_add(1);
+        shaped.used = self.measure_generation;
+        if style.overflow != engine::scene::TextOverflow::Visible {
+            shaped.width = shaped.width.min(max_width);
+        }
+        let size = (shaped.width, shaped.height);
+        self.store_paragraph(key, shaped);
+        Ok(size)
+    }
+
+    /// Caret nearest a point in paragraph space. The paragraph is the one
+    /// [`Self::measure_paragraph`] caches.
+    pub fn caret_at_point(
+        &mut self,
+        query: ParagraphQuery<'_>,
+        x: f32,
+        y: f32,
+    ) -> Result<engine::text::Caret, Status> {
+        let ParagraphQuery {
+            utf8,
+            font_size,
+            max_width,
+            color,
+            style,
+        } = query;
+        let paragraph = self.ensure_paragraph(utf8, font_size, max_width, color, style)?;
+        // SAFETY: `paragraph` is a live cached paragraph owned by this engine.
+        // The glyph info is released before return. Bounds are written by Impeller.
+        unsafe {
+            let info = impeller::ImpellerParagraphCreateGlyphInfoAtParagraphCoordinatesNew(
+                paragraph,
+                f64::from(x),
+                f64::from(y),
+            );
+            if info.is_null() {
+                return Ok(engine::text::Caret {
+                    unit: utf16_len(utf8),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1.0,
+                    h: font_size.max(0.0),
+                    affinity: engine::text::Affinity::Downstream,
+                });
+            }
+            let begin = impeller::ImpellerGlyphInfoGetGraphemeClusterCodeUnitRangeBegin(info);
+            let end = impeller::ImpellerGlyphInfoGetGraphemeClusterCodeUnitRangeEnd(info);
+            let mut bounds = impeller::ImpellerRect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            };
+            impeller::ImpellerGlyphInfoGetGraphemeClusterBounds(info, &mut bounds);
+            impeller::ImpellerGlyphInfoRelease(info);
+            let mid = bounds.x + bounds.width * 0.5;
+            let at_end = x >= mid;
+            Ok(engine::text::Caret {
+                unit: u32::try_from(if at_end { end } else { begin }).unwrap_or(0),
+                x: if at_end {
+                    bounds.x + bounds.width
+                } else {
+                    bounds.x
+                },
+                y: bounds.y,
+                w: 1.0,
+                h: bounds.height,
+                affinity: engine::text::Affinity::Downstream,
+            })
+        }
+    }
+
+    /// Caret rectangle for a UTF-16 index in the cached paragraph.
+    pub fn caret_at_unit(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+        unit: u32,
+    ) -> Result<engine::text::Caret, Status> {
+        let paragraph = self.ensure_paragraph(utf8, font_size, max_width, color, style)?;
+        let end_unit = utf16_len(utf8);
+        let unit = unit.min(end_unit);
+        if unit == end_unit {
+            let lines = self.lines(utf8, font_size, max_width, color, style)?;
+            if let Some(last) = lines.last() {
+                return Ok(engine::text::Caret {
+                    unit,
+                    x: last.x + last.w,
+                    y: last.y,
+                    w: 1.0,
+                    h: last.h,
+                    affinity: engine::text::Affinity::Downstream,
+                });
+            }
+            return Ok(engine::text::Caret {
+                unit,
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: font_size.max(0.0),
+                affinity: engine::text::Affinity::Downstream,
+            });
+        }
+        // SAFETY: `paragraph` is a live cached paragraph. Glyph info is released here.
+        unsafe {
+            let info = impeller::ImpellerParagraphCreateGlyphInfoAtCodeUnitIndexNew(
+                paragraph,
+                unit as usize,
+            );
+            if info.is_null() {
+                return Ok(engine::text::Caret {
+                    unit,
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1.0,
+                    h: font_size.max(0.0),
+                    affinity: engine::text::Affinity::Downstream,
+                });
+            }
+            let begin = impeller::ImpellerGlyphInfoGetGraphemeClusterCodeUnitRangeBegin(info);
+            let mut bounds = impeller::ImpellerRect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            };
+            impeller::ImpellerGlyphInfoGetGraphemeClusterBounds(info, &mut bounds);
+            impeller::ImpellerGlyphInfoRelease(info);
+            let x = if unit as usize > begin {
+                bounds.x + bounds.width
+            } else {
+                bounds.x
+            };
+            Ok(engine::text::Caret {
+                unit,
+                x,
+                y: bounds.y,
+                w: 1.0,
+                h: bounds.height,
+                affinity: engine::text::Affinity::Downstream,
+            })
+        }
+    }
+
+    /// UTF-16 word bounds around `unit`, from the cached paragraph.
+    pub fn word_range(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+        unit: u32,
+    ) -> Result<(u32, u32), Status> {
+        let paragraph = self.ensure_paragraph(utf8, font_size, max_width, color, style)?;
+        let mut range = impeller::ImpellerRange { start: 0, end: 0 };
+        // SAFETY: `paragraph` is a live cached paragraph. `range` is a local out-param.
+        unsafe {
+            impeller::ImpellerParagraphGetWordBoundary(paragraph, unit as usize, &mut range);
+        }
+        Ok((
+            u32::try_from(range.start).unwrap_or(0),
+            u32::try_from(range.end).unwrap_or(0),
+        ))
+    }
+
+    /// Laid-out lines of the cached paragraph.
+    pub fn lines(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+    ) -> Result<Vec<engine::text::TextLine>, Status> {
+        self.lines_with_spans(utf8, font_size, max_width, color, style, &[])
+    }
+
+    /// Laid-out lines. Span runs use the same cache entry as [`Self::measure_with_spans`].
+    pub fn lines_with_spans(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+        spans: &[TextSpan],
+    ) -> Result<Vec<engine::text::TextLine>, Status> {
+        self.measure_with_spans(utf8, font_size, max_width, color, style, spans)?;
+        let paragraph = self.cached_paragraph(
+            utf8,
+            font_size,
+            max_width,
+            color,
+            style,
+            Spans::Scene(spans),
+        )?;
+        // SAFETY: `paragraph` is cached and alive. Line metrics stay with it.
+        unsafe { read_lines(paragraph) }
+    }
+
+    pub(crate) fn lines_key(
+        &mut self,
+        key: &MetricsKey,
+        color: [u8; 4],
+        paints: Option<&[SpanPaint]>,
+    ) -> Result<Vec<engine::text::TextLine>, Status> {
+        let paragraph = self.cached_paragraph(
+            &key.text,
+            f32::from_bits(key.font_size),
+            f32::from_bits(key.max_width),
+            color,
+            &key.style,
+            Spans::metrics(key, color, paints),
+        )?;
+        // SAFETY: the measured cache owns the paragraph during this read.
+        unsafe { read_lines(paragraph) }
+    }
+
+    /// Caret at `unit`. `upstream` selects the previous line at a soft break.
+    pub fn caret_for(
+        &mut self,
+        query: ParagraphQuery<'_>,
+        unit: u32,
+        upstream: bool,
+    ) -> Result<engine::text::Caret, Status> {
+        let ParagraphQuery {
+            utf8,
+            font_size,
+            max_width,
+            color,
+            style,
+        } = query;
+        let lines = self.lines(utf8, font_size, max_width, color, style)?;
+        if upstream
+            && let Some((index, _)) = lines
+                .iter()
+                .enumerate()
+                .find(|(_, line)| line.start == unit)
+            && index > 0
+            && !lines[index - 1].hard_break
+        {
+            let prev = &lines[index - 1];
+            return Ok(engine::text::Caret {
+                unit,
+                x: prev.x + prev.w,
+                y: prev.y,
+                w: 1.0,
+                h: prev.h,
+                affinity: engine::text::Affinity::Upstream,
+            });
+        }
+        self.caret_at_unit(utf8, font_size, max_width, color, style, unit)
+    }
+
+    pub(crate) fn ensure_paragraph(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+    ) -> Result<impeller::ImpellerParagraph, Status> {
+        self.measure_paragraph(utf8, font_size, max_width, color, style)?;
+        self.cached_paragraph(utf8, font_size, max_width, color, style, Spans::Scene(&[]))
+    }
+
+    fn cached_paragraph(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+        spans: Spans<'_>,
+    ) -> Result<impeller::ImpellerParagraph, Status> {
+        let Some(family) = self.resolved_family(style.family.as_deref()) else {
+            return Err(Status::BadScene);
+        };
+        let ellipsis = style.ellipsis.as_deref().unwrap_or("");
+        let hash = hash_query(
+            utf8,
+            font_size.to_bits(),
+            max_width.to_bits(),
+            color,
+            &family,
+            style.max_lines.unwrap_or(0),
+            ellipsis,
+            style.align,
+            style.weight,
+            style.direction_rtl,
+            style.height.to_bits(),
+            style.underline,
+            style.line_through,
+            style.soft_wrap,
+            style.overflow,
+            style.slant,
+            spans,
+        );
+        self.measured
+            .get_mut(hash, |key| {
+                key_matches(
+                    key,
+                    utf8,
+                    font_size.to_bits(),
+                    max_width.to_bits(),
+                    color,
+                    &family,
+                    style.max_lines.unwrap_or(0),
+                    ellipsis,
+                    style.align,
+                    style.weight,
+                    style.direction_rtl,
+                    style.height.to_bits(),
+                    style.underline,
+                    style.line_through,
+                    style.soft_wrap,
+                    style.overflow,
+                    style.slant,
+                    spans,
+                )
+            })
+            .map(|shaped| shaped.paragraph)
+            .ok_or(Status::BadScene)
+    }
+
+    /// Retains a colored paragraph. The same key bumps the reference count and
+    /// returns the existing id. A released slot is reused with a new generation.
+    pub fn retain_paragraph(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+        spans: &[TextSpan],
+    ) -> Result<engine::scene::ParagraphId, Status> {
+        self.paint_slot(
+            utf8,
+            font_size,
+            max_width,
+            color,
+            style,
+            Spans::Scene(spans),
+            true,
+            false,
+        )
+        .map(|(id, _, _)| id)
+    }
+
+    /// A paragraph for one draw, plus an extra [`impeller::ImpellerParagraphRetain`].
+    ///
+    /// The cache keeps its own reference. `slot` is passed to [`Self::release_draw`]
+    /// when the display list that drew this pointer is released.
+    pub(crate) fn acquire_draw(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+        spans: &[TextSpan],
+    ) -> Result<(impeller::ImpellerParagraph, u32), Status> {
+        let (id, _, _) = self.paint_slot(
+            utf8,
+            font_size,
+            max_width,
+            color,
+            style,
+            Spans::Scene(spans),
+            false,
+            true,
+        )?;
+        let slot = self
+            .paints
+            .slots
+            .get_mut(id.index as usize)
+            .ok_or(Status::BadScene)?;
+        if slot.paragraph.is_null() {
+            return Err(Status::BadScene);
+        }
+        slot.live = slot.live.saturating_add(1);
+        slot.used = self.generation;
+        let paragraph = slot.paragraph;
+        // SAFETY: `paragraph` is the live slot object. The extra retain is released
+        // with the display list that draws it. Retain is a no-op on null, and the
+        // null check above already returned.
+        unsafe { impeller::ImpellerParagraphRetain(paragraph) };
+        Ok((paragraph, id.index))
+    }
+
+    /// Drops one display-list reference. The cache object stays until it is unused.
+    pub(crate) fn release_draw(&mut self, slot: u32) {
+        let Some(slot) = self.paints.slots.get_mut(slot as usize) else {
+            return;
+        };
+        slot.live = slot.live.saturating_sub(1);
+    }
+
+    /// Measures with the real foreground. A miss builds the paint slot at `refs == 0`.
+    pub fn measure_paint(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+        spans: &[TextSpan],
+    ) -> Result<(f32, f32), Status> {
+        self.paint_slot(
+            utf8,
+            font_size,
+            max_width,
+            color,
+            style,
+            Spans::Scene(spans),
+            false,
+            false,
+        )
+        .map(|(_, width, height)| (width, height))
+    }
+
+    /// Retains the paint slot, including one just built by [`Self::measure_paint`].
+    pub fn retain_measured(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+        spans: &[TextSpan],
+    ) -> Result<
+        (
+            engine::scene::ParagraphId,
+            f32,
+            f32,
+            Vec<engine::text::TextLine>,
+            f32,
+        ),
+        Status,
+    > {
+        let (id, width, height) = self.paint_slot(
+            utf8,
+            font_size,
+            max_width,
+            color,
+            style,
+            Spans::Scene(spans),
+            true,
+            false,
+        )?;
+        let Some(paragraph) = self.live_paint(id) else {
+            return Err(Status::BadScene);
+        };
+        // SAFETY: `paragraph` is the slot just retained. Line metrics stay with it.
+        let lines = unsafe { read_lines(paragraph)? };
+        let baseline = lines.first().map(|line| line.baseline).unwrap_or(0.0);
+        Ok((id, width, height, lines, baseline))
+    }
+
+    /// Paragraph build and lookup counts since the previous take.
+    pub fn take_shape_stats(&mut self) -> crate::ShapeStats {
+        std::mem::take(&mut self.stats)
+    }
+
+    /// Reads the current counters without resetting the engine's frame stats.
+    pub fn shape_stats(&self) -> crate::ShapeStats {
+        self.stats
+    }
+
+    /// Marks a measured paragraph as used by this layout. Does not build one.
+    pub fn touch_measure(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+        spans: &[TextSpan],
+    ) -> bool {
+        self.touch_runs(
+            utf8,
+            font_size,
+            max_width,
+            color,
+            style,
+            Spans::Scene(spans),
+        )
+    }
+
+    pub(crate) fn touch_key(&mut self, key: &PaintKey) -> bool {
+        let metrics = &key.metrics;
+        self.touch_runs(
+            &metrics.text,
+            f32::from_bits(metrics.font_size),
+            f32::from_bits(metrics.max_width),
+            key.color,
+            &metrics.style,
+            Spans::metrics(metrics, key.color, Some(&key.span_paints)),
+        )
+    }
+
+    fn touch_runs(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+        spans: Spans<'_>,
+    ) -> bool {
+        if self.stale || utf8.is_empty() {
+            return false;
+        }
+        let Some(family) = self.resolved_family(style.family.as_deref()) else {
+            return false;
+        };
+        let font_bits = font_size.to_bits();
+        let width_bits = max_width.to_bits();
+        let ellipsis = style.ellipsis.as_deref().unwrap_or("");
+        let hash = hash_query(
+            utf8,
+            font_bits,
+            width_bits,
+            color,
+            &family,
+            style.max_lines.unwrap_or(0),
+            ellipsis,
+            style.align,
+            style.weight,
+            style.direction_rtl,
+            style.height.to_bits(),
+            style.underline,
+            style.line_through,
+            style.soft_wrap,
+            style.overflow,
+            style.slant,
+            spans,
+        );
+        let Some(found) = self.measured.get_mut(hash, |key| {
+            key_matches(
+                key,
+                utf8,
+                font_bits,
+                width_bits,
+                color,
+                &family,
+                style.max_lines.unwrap_or(0),
+                ellipsis,
+                style.align,
+                style.weight,
+                style.direction_rtl,
+                style.height.to_bits(),
+                style.underline,
+                style.line_through,
+                style.soft_wrap,
+                style.overflow,
+                style.slant,
+                spans,
+            )
+        }) else {
+            return false;
+        };
+        found.used = self.measure_generation;
+        true
+    }
+
+    /// Moves a measured paragraph into the caller. `None` when the font changed.
+    fn take_measured(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+        spans: Spans<'_>,
+    ) -> Option<(ParaKey, Shaped)> {
+        if self.stale {
+            return None;
+        }
+        let family = self.resolved_family(style.family.as_deref())?;
+        let font_bits = font_size.to_bits();
+        let width_bits = max_width.to_bits();
+        let ellipsis = style.ellipsis.as_deref().unwrap_or("");
+        let hash = hash_query(
+            utf8,
+            font_bits,
+            width_bits,
+            color,
+            &family,
+            style.max_lines.unwrap_or(0),
+            ellipsis,
+            style.align,
+            style.weight,
+            style.direction_rtl,
+            style.height.to_bits(),
+            style.underline,
+            style.line_through,
+            style.soft_wrap,
+            style.overflow,
+            style.slant,
+            spans,
+        );
+        self.measured.remove(hash, |key| {
+            key_matches(
+                key,
+                utf8,
+                font_bits,
+                width_bits,
+                color,
+                &family,
+                style.max_lines.unwrap_or(0),
+                ellipsis,
+                style.align,
+                style.weight,
+                style.direction_rtl,
+                style.height.to_bits(),
+                style.underline,
+                style.line_through,
+                style.soft_wrap,
+                style.overflow,
+                style.slant,
+                spans,
+            )
+        })
+    }
+
+    /// `retain` increments `refs`. `draw` counts paint hits and may take a measured paragraph.
+    fn paint_slot(
+        &mut self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        style: &TextStyle,
+        spans: Spans<'_>,
+        retain: bool,
+        draw: bool,
+    ) -> Result<(engine::scene::ParagraphId, f32, f32), Status> {
+        let owned = spans.scene_text();
+        let utf8 = owned.as_deref().unwrap_or(utf8);
+        let Some(family) = self.resolved_family(style.family.as_deref()) else {
+            return Err(Status::BadScene);
+        };
+        let font_bits = font_size.to_bits();
+        let width_bits = max_width.to_bits();
+        let ellipsis = style.ellipsis.as_deref().unwrap_or("");
+        let hash = hash_query(
+            utf8,
+            font_bits,
+            width_bits,
+            color,
+            &family,
+            style.max_lines.unwrap_or(0),
+            ellipsis,
+            style.align,
+            style.weight,
+            style.direction_rtl,
+            style.height.to_bits(),
+            style.underline,
+            style.line_through,
+            style.soft_wrap,
+            style.overflow,
+            style.slant,
+            spans,
+        );
+        let matches = |key: &ParaKey| {
+            key_matches(
+                key,
+                utf8,
+                font_bits,
+                width_bits,
+                color,
+                &family,
+                style.max_lines.unwrap_or(0),
+                ellipsis,
+                style.align,
+                style.weight,
+                style.direction_rtl,
+                style.height.to_bits(),
+                style.underline,
+                style.line_through,
+                style.soft_wrap,
+                style.overflow,
+                style.slant,
+                spans,
+            )
+        };
+        if !self.stale
+            && let Some(index) = self.find_paint(hash, matches)
+        {
+            let slot = &mut self.paints.slots[index];
+            if retain {
+                slot.refs = slot.refs.saturating_add(1);
+            }
+            slot.used = self.generation;
+            let size = (slot.width, slot.height);
+            let id = engine::scene::ParagraphId {
+                index: index as u32,
+                generation: slot.generation,
+            };
+            if draw {
+                self.stats.paint_hit = self.stats.paint_hit.saturating_add(1);
+            } else {
+                self.stats.measure_hit = self.stats.measure_hit.saturating_add(1);
+            }
+            return Ok((id, size.0, size.1));
+        }
+        if draw
+            && let Some((key, shaped)) =
+                self.take_measured(utf8, font_size, max_width, color, style, spans)
+        {
+            self.stats.bridged = self.stats.bridged.saturating_add(1);
+            let width = if style.overflow != engine::scene::TextOverflow::Visible {
+                shaped.width.min(max_width)
+            } else {
+                shaped.width
+            };
+            return self.install_paint(key, color, width, shaped.height, shaped.paragraph, retain);
+        }
+        if draw {
+            self.stats.paint_miss = self.stats.paint_miss.saturating_add(1);
+        } else {
+            self.stats.measure_miss = self.stats.measure_miss.saturating_add(1);
+        }
+        let Some(key) = para_key(utf8, font_size, max_width, color, &family, style, spans) else {
+            return Err(Status::BadScene);
+        };
+        let shaped = self.build_paragraph(utf8, font_size, max_width, color, style, spans)?;
+        self.stats.built = self.stats.built.saturating_add(1);
+        let width = if style.overflow != engine::scene::TextOverflow::Visible {
+            shaped.width.min(max_width)
+        } else {
+            shaped.width
+        };
+        let index = if let Some(index) = self.paints.free.pop() {
+            index as usize
+        } else {
+            self.paints.slots.push(PaintSlot::empty());
+            self.paints.slots.len() - 1
+        };
+        let hash = hash_key(&key);
+        let slot = &mut self.paints.slots[index];
+        slot.generation = slot.generation.wrapping_add(1).max(1);
+        slot.refs = u32::from(retain);
+        slot.color = color;
+        slot.width = width;
+        slot.height = shaped.height;
+        slot.used = self.generation;
+        slot.paragraph = shaped.paragraph;
+        slot.key = Some(key);
+        self.paints
+            .index
+            .entry(hash)
+            .or_default()
+            .push(index as u32);
+        Ok((
+            engine::scene::ParagraphId {
+                index: index as u32,
+                generation: self.paints.slots[index].generation,
+            },
+            width,
+            shaped.height,
+        ))
+    }
+
+    fn install_paint(
+        &mut self,
+        key: ParaKey,
+        color: [u8; 4],
+        width: f32,
+        height: f32,
+        paragraph: impeller::ImpellerParagraph,
+        retain: bool,
+    ) -> Result<(engine::scene::ParagraphId, f32, f32), Status> {
+        let index = if let Some(index) = self.paints.free.pop() {
+            index as usize
+        } else {
+            self.paints.slots.push(PaintSlot::empty());
+            self.paints.slots.len() - 1
+        };
+        let hash = hash_key(&key);
+        let slot = &mut self.paints.slots[index];
+        slot.generation = slot.generation.wrapping_add(1).max(1);
+        slot.refs = u32::from(retain);
+        slot.color = color;
+        slot.width = width;
+        slot.height = height;
+        slot.used = self.generation;
+        slot.paragraph = paragraph;
+        slot.key = Some(key);
+        self.paints
+            .index
+            .entry(hash)
+            .or_default()
+            .push(index as u32);
+        Ok((
+            engine::scene::ParagraphId {
+                index: index as u32,
+                generation: self.paints.slots[index].generation,
+            },
+            width,
+            height,
+        ))
+    }
+
+    fn find_paint(&self, hash: u64, matches: impl Fn(&ParaKey) -> bool) -> Option<usize> {
+        let bucket = self.paints.index.get(&hash)?;
+        bucket.iter().copied().find_map(|index| {
+            let slot = self.paints.slots.get(index as usize)?;
+            let key = slot.key.as_ref()?;
+            if slot.paragraph.is_null() || !matches(key) {
+                None
+            } else {
+                Some(index as usize)
+            }
+        })
+    }
+
+    pub(crate) fn unindex_paint(&mut self, hash: u64, index: u32) {
+        let Some(bucket) = self.paints.index.get_mut(&hash) else {
+            return;
+        };
+        bucket.retain(|slot| *slot != index);
+        if bucket.is_empty() {
+            self.paints.index.remove(&hash);
+        }
+    }
+
+    /// Drops one retain. The slot pointer is cleared before it is released, so a
+    /// stale id cannot observe the new color or the freed paragraph.
+    ///
+    /// A measure slot stays at `refs == 0` and is not released here.
+    pub fn release_paragraph(&mut self, id: engine::scene::ParagraphId) {
+        let Some(slot) = self.paints.slots.get_mut(id.index as usize) else {
+            return;
+        };
+        if slot.generation != id.generation || slot.refs == 0 {
+            return;
+        }
+        slot.refs -= 1;
+        if slot.refs > 0 {
+            return;
+        }
+        let paragraph = slot.paragraph;
+        let key = slot.key.take();
+        slot.paragraph = ptr::null_mut();
+        slot.color = [0, 0, 0, 0];
+        slot.width = 0.0;
+        slot.height = 0.0;
+        self.paints.free.push(id.index);
+        if let Some(key) = key {
+            let hash = hash_key(&key);
+            self.unindex_paint(hash, id.index);
+        }
+        if !paragraph.is_null() {
+            self.retire_paragraph(paragraph);
+        }
+    }
+
+    /// True when `id` still names a live retained paragraph.
+    pub fn paragraph_live(&self, id: engine::scene::ParagraphId) -> bool {
+        self.paints
+            .slots
+            .get(id.index as usize)
+            .is_some_and(|slot| {
+                slot.generation == id.generation && slot.refs > 0 && !slot.paragraph.is_null()
+            })
+    }
+
+    /// `(rebuilt_from_payload, color)` of the last text command submitted.
+    pub fn text_paint_probe(&self) -> (bool, [u8; 4]) {
+        (self.probe_rebuilt, self.probe_color)
+    }
+
+    pub(crate) fn live_paint(
+        &self,
+        id: engine::scene::ParagraphId,
+    ) -> Option<impeller::ImpellerParagraph> {
+        let slot = self.paints.slots.get(id.index as usize)?;
+        if slot.generation == id.generation && slot.refs > 0 && !slot.paragraph.is_null() {
+            Some(slot.paragraph)
+        } else {
+            None
+        }
+    }
+
+    fn build_paragraph(
+        &self,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        text_style: &TextStyle,
+        spans: Spans<'_>,
+    ) -> Result<Shaped, Status> {
+        // SAFETY: the paint is released before this returns. A null paint cannot shape.
+        let paint = unsafe { impeller::ImpellerPaintNew() };
+        if paint.is_null() {
+            return Err(Status::BadScene);
+        }
+        paint_color(paint, color);
+        let paragraph = self.shape(
+            Some(paint),
+            utf8,
+            font_size,
+            max_width,
+            color,
+            text_style,
+            spans,
+        );
+        unsafe { impeller::ImpellerPaintRelease(paint) };
+        let Some(paragraph) = paragraph else {
+            return Err(Status::BadScene);
+        };
+        // SAFETY: `paragraph` is a live object from `shape` and is stored by the caller.
+        let (width, height) = unsafe {
+            (
+                impeller::ImpellerParagraphGetLongestLineWidth(paragraph),
+                impeller::ImpellerParagraphGetHeight(paragraph),
+            )
+        };
+        if !width.is_finite() || !height.is_finite() {
+            unsafe { impeller::ImpellerParagraphRelease(paragraph) };
+            return Err(Status::BadScene);
+        }
+        Ok(Shaped {
+            width,
+            height,
+            paragraph,
+            used: self.measure_generation,
+        })
+    }
+
+    /// Min-content width from the paragraph's intrinsic query.
+    ///
+    /// The paragraph is released before this returns. The float is a copy, not a new handle.
+    pub fn min_intrinsic_width(
+        &self,
+        utf8: &str,
+        font_size: f32,
+        text_style: &TextStyle,
+        spans: &[TextSpan],
+    ) -> Result<f32, Status> {
+        self.min_intrinsic_runs(utf8, font_size, text_style, Spans::Scene(spans))
+    }
+
+    pub(crate) fn min_intrinsic_key(&self, key: &MetricsKey) -> Result<f32, Status> {
+        self.min_intrinsic_runs(
+            &key.text,
+            f32::from_bits(key.font_size),
+            &key.style,
+            Spans::metrics(key, [0, 0, 0, 255], None),
+        )
+    }
+
+    fn min_intrinsic_runs(
+        &self,
+        utf8: &str,
+        font_size: f32,
+        text_style: &TextStyle,
+        spans: Spans<'_>,
+    ) -> Result<f32, Status> {
+        let shaped = self.build_paragraph(
+            utf8,
+            font_size,
+            1_000_000.0,
+            [0, 0, 0, 255],
+            text_style,
+            spans,
+        )?;
+        // SAFETY: `shaped.paragraph` is a live paragraph from `build_paragraph`.
+        // `GetMinIntrinsicWidth` returns a float cached on that paragraph.
+        let width = unsafe { impeller::ImpellerParagraphGetMinIntrinsicWidth(shaped.paragraph) };
+        // SAFETY: this function owns the only retain from `build_paragraph`.
+        unsafe { impeller::ImpellerParagraphRelease(shaped.paragraph) };
+        if width.is_finite() && width >= 0.0 {
+            Ok(width)
+        } else {
+            Err(Status::BadScene)
+        }
+    }
+
+    /// Reads the intrinsic width from a paragraph already measured with this key.
+    pub fn measured_min_intrinsic_width(
+        &mut self,
+        query: ParagraphQuery<'_>,
+        spans: &[TextSpan],
+    ) -> Result<f32, Status> {
+        self.measured_min_intrinsic_runs(query, Spans::Scene(spans))
+    }
+
+    pub(crate) fn measured_min_intrinsic_key(&mut self, key: &PaintKey) -> Result<f32, Status> {
+        let metrics = &key.metrics;
+        self.measured_min_intrinsic_runs(
+            ParagraphQuery {
+                utf8: &metrics.text,
+                font_size: f32::from_bits(metrics.font_size),
+                max_width: f32::from_bits(metrics.max_width),
+                color: key.color,
+                style: &metrics.style,
+            },
+            Spans::metrics(metrics, key.color, Some(&key.span_paints)),
+        )
+    }
+
+    fn measured_min_intrinsic_runs(
+        &mut self,
+        query: ParagraphQuery<'_>,
+        spans: Spans<'_>,
+    ) -> Result<f32, Status> {
+        let paragraph = self.cached_paragraph(
+            query.utf8,
+            query.font_size,
+            query.max_width,
+            query.color,
+            query.style,
+            spans,
+        )?;
+        // SAFETY: the measured store owns a live paragraph until the borrow ends.
+        let width = unsafe { impeller::ImpellerParagraphGetMinIntrinsicWidth(paragraph) };
+        if width.is_finite() && width >= 0.0 {
+            Ok(width)
+        } else {
+            Err(Status::BadScene)
+        }
+    }
+
+    /// Family actually passed to Impeller. A missing name falls back to the first
+    /// registered face so a typo does not fail the whole frame.
+    pub(crate) fn resolved_family(&self, requested: Option<&str>) -> Option<String> {
+        self.resolved_face(requested)
+            .and_then(|family| family.to_str().ok().map(str::to_owned))
+    }
+
+    pub(crate) fn resolved_face(&self, requested: Option<&str>) -> Option<&CString> {
+        if let Some(name) = requested.filter(|name| !name.is_empty())
+            && let Some(face) = self
+                .fonts
+                .faces
+                .iter()
+                .find(|face| face.family.as_bytes() == name.as_bytes())
+        {
+            return Some(&face.family);
+        }
+        let default = self.fonts.default_family.as_ref()?;
+        self.fonts
+            .faces
+            .iter()
+            .find(|face| face.family.as_c_str() == default.as_c_str())
+            .map(|face| &face.family)
+    }
+
+    pub(crate) fn has_family(&self, name: &CString) -> bool {
+        self.fonts
+            .faces
+            .iter()
+            .any(|face| face.family.as_c_str() == name.as_c_str())
+    }
+
+    pub(crate) fn shape(
+        &self,
+        paint: Option<impeller::ImpellerPaint>,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        text_style: &TextStyle,
+        spans: Spans<'_>,
+    ) -> Option<impeller::ImpellerParagraph> {
+        let shaped = self.shape_once(
+            paint, utf8, font_size, max_width, color, text_style, spans, None,
+        )?;
+        if !spans.iter().any(|span| span.gradient.is_some()) {
+            return Some(shaped);
+        }
+        let boxes = gradient_boxes(shaped, spans);
+        // SAFETY: `shaped` is the probe paragraph and is not stored.
+        unsafe { impeller::ImpellerParagraphRelease(shaped) };
+        self.shape_once(
+            paint,
+            utf8,
+            font_size,
+            max_width,
+            color,
+            text_style,
+            spans,
+            Some(&boxes),
+        )
+    }
+
+    fn shape_once(
+        &self,
+        paint: Option<impeller::ImpellerPaint>,
+        utf8: &str,
+        font_size: f32,
+        max_width: f32,
+        color: [u8; 4],
+        text_style: &TextStyle,
+        spans: Spans<'_>,
+        boxes: Option<&[Option<SpanBox>]>,
+    ) -> Option<impeller::ImpellerParagraph> {
+        let family = self.resolved_face(text_style.family.as_deref())?;
+        let family = family.as_ptr();
+        let ellipsis = text_style
+            .ellipsis_str()
+            .and_then(|text| CString::new(text).ok());
+        let layout_width = if text_style.soft_wrap || ellipsis.is_some() {
+            max_width
+        } else {
+            max_width.max(1_000_000.0)
+        };
+        // SAFETY: style and the builder are released on every path. The returned
+        // paragraph is owned by the caller. Font size stays in scene points; the
+        // display-list scale applied before the first non-fill command scales it.
+        // `family` and `ellipsis` outlive this block.
+        unsafe {
+            let style = impeller::ImpellerParagraphStyleNew();
+            let paragraph_builder = impeller::ImpellerParagraphBuilderNew(self.context);
+            if style.is_null() || paragraph_builder.is_null() {
+                impeller::ImpellerParagraphStyleRelease(style);
+                impeller::ImpellerParagraphBuilderRelease(paragraph_builder);
+                return None;
+            }
+            if let Some(paint) = paint {
+                impeller::ImpellerParagraphStyleSetForeground(style, paint);
+            }
+            impeller::ImpellerParagraphStyleSetFontFamily(style, family);
+            impeller::ImpellerParagraphStyleSetFontSize(style, font_size);
+            impeller::ImpellerParagraphStyleSetFontWeight(
+                style,
+                impeller_weight(text_style.weight),
+            );
+            impeller::ImpellerParagraphStyleSetFontStyle(style, impeller_slant(text_style.slant));
+            impeller::ImpellerParagraphStyleSetTextAlignment(
+                style,
+                impeller_align(text_style.align),
+            );
+            impeller::ImpellerParagraphStyleSetTextDirection(
+                style,
+                if text_style.direction_rtl {
+                    impeller::ImpellerTextDirection::kImpellerTextDirectionRTL
+                } else {
+                    impeller::ImpellerTextDirection::kImpellerTextDirectionLTR
+                },
+            );
+            if text_style.overflow != engine::scene::TextOverflow::Visible
+                && let Some(max_lines) = text_style.max_lines.filter(|lines| *lines > 0)
+            {
+                impeller::ImpellerParagraphStyleSetMaxLines(style, max_lines);
+            }
+            if text_style.height.is_finite() && text_style.height > 0.0 {
+                impeller::ImpellerParagraphStyleSetHeight(style, text_style.height);
+            }
+            if let Some(ellipsis) = &ellipsis {
+                impeller::ImpellerParagraphStyleSetEllipsis(style, ellipsis.as_ptr());
+            }
+            apply_decoration(style, color, text_style.underline, text_style.line_through);
+            let fallback = CString::new("SansCJK").ok();
+            let cjk = fallback.as_ref().filter(|name| self.has_family(name));
+            if spans.is_empty() {
+                push_runs(style, paragraph_builder, family, cjk, utf8);
+            } else {
+                for (index, span) in spans.iter().enumerate() {
+                    if span.utf8.is_empty() {
+                        continue;
+                    }
+                    let span_paint = impeller::ImpellerPaintNew();
+                    if span_paint.is_null() {
+                        impeller::ImpellerParagraphStyleRelease(style);
+                        impeller::ImpellerParagraphBuilderRelease(paragraph_builder);
+                        return None;
+                    }
+                    paint_color(span_paint, span.color);
+                    if let Some(gradient) = span.gradient
+                        && let Some(SpanBox { x, y, w, h }) =
+                            boxes.and_then(|all| all.get(index)).copied().flatten()
+                        && let Some(source) = color_source(Some(gradient), x, y, w, h)
+                    {
+                        impeller::ImpellerPaintSetColorSource(span_paint, source);
+                        impeller::ImpellerColorSourceRelease(source);
+                    }
+                    impeller::ImpellerParagraphStyleSetForeground(style, span_paint);
+                    impeller::ImpellerParagraphStyleSetFontWeight(
+                        style,
+                        impeller_weight(span.weight),
+                    );
+                    apply_decoration(style, span.color, span.underline, span.line_through);
+                    let span_family = self
+                        .resolved_face(Some(span.family))
+                        .map(|name| name.as_ptr())
+                        .unwrap_or(family);
+                    push_runs(style, paragraph_builder, span_family, cjk, span.utf8);
+                    impeller::ImpellerPaintRelease(span_paint);
+                }
+            }
+            let paragraph = impeller::ImpellerParagraphBuilderBuildParagraphNew(
+                paragraph_builder,
+                layout_width,
+            );
+            impeller::ImpellerParagraphStyleRelease(style);
+            impeller::ImpellerParagraphBuilderRelease(paragraph_builder);
+            if paragraph.is_null() {
+                None
+            } else {
+                Some(paragraph)
+            }
+        }
+    }
+
+    fn store_paragraph(&mut self, key: ParaKey, shaped: Shaped) {
+        if let Some(old) = self.measured.insert(key, shaped) {
+            self.retire_paragraph(old.paragraph);
+        }
+    }
+
+    pub(crate) fn retire_paragraph(&mut self, paragraph: impeller::ImpellerParagraph) {
+        if !self.list_installed {
+            // SAFETY: no display list is installed, so this is the last retain.
+            unsafe { impeller::ImpellerParagraphRelease(paragraph) };
+        } else {
+            self.retired.push(paragraph);
+        }
+    }
+}
+
+fn gradient_boxes(
+    paragraph: impeller::ImpellerParagraph,
+    spans: Spans<'_>,
+) -> Vec<Option<SpanBox>> {
+    // SAFETY: `paragraph` is the live probe built just above. `read_lines` only
+    // reads metrics cached on that paragraph.
+    let lines = unsafe { read_lines(paragraph) }.unwrap_or_default();
+    let mut unit = 0u32;
+    let mut boxes = Vec::with_capacity(spans.len());
+    for span in spans.iter() {
+        let len = utf16_len(span.utf8);
+        let start = unit;
+        unit = unit.saturating_add(len);
+        if span.gradient.is_none() || span.utf8.is_empty() {
+            boxes.push(None);
+            continue;
+        }
+        let end = unit;
+        boxes.push(span_bounds(&lines, start, end, |code| {
+            cluster_edges(paragraph, code)
+        }));
+    }
+    boxes
+}
+
+/// Left and right edges of the glyph cluster at `unit`, in paragraph space.
+fn cluster_edges(paragraph: impeller::ImpellerParagraph, unit: u32) -> Option<(f32, f32)> {
+    // SAFETY: `paragraph` is the live probe. The glyph info is released here.
+    unsafe {
+        let index = usize::try_from(unit).unwrap_or(0);
+        let info = impeller::ImpellerParagraphCreateGlyphInfoAtCodeUnitIndexNew(paragraph, index);
+        if info.is_null() {
+            return None;
+        }
+        let mut bounds = impeller::ImpellerRect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        };
+        impeller::ImpellerGlyphInfoGetGraphemeClusterBounds(info, &mut bounds);
+        impeller::ImpellerGlyphInfoRelease(info);
+        Some((bounds.x, bounds.x + bounds.width))
+    }
+}

@@ -1,12 +1,15 @@
 use std::ffi::c_char;
 
 use embedder::{Command, ProjectedNode};
-use serde_json::{Value, json};
-use session::{BackGesture, ImeUpdate, InputEvent, Key, KeyPress, KeyboardType, TextInputAction};
-use uicore::{
-    Button, Buttons, Modifiers, Phase, PointerEvent, PointerId, PointerKind, Rect, SemanticsAction,
-    SemanticsId,
+use engine::session::{
+    BackGesture, ImeUpdate, InputEvent, Key, KeyPress, KeyboardType, TextInputAction,
 };
+use engine::{
+    input::{Button, Buttons, Modifiers, Phase, PointerEvent, PointerId, PointerKind},
+    semantics::{SemanticsAction, SemanticsId},
+    tree::Rect,
+};
+use serde_json::{Value, json};
 
 use super::{ImpastoIOSHost, string, with_host};
 
@@ -66,12 +69,12 @@ pub(super) fn semantics_message(nodes: &[ProjectedNode]) -> String {
             "contentWidth": node.content.0, "contentHeight": node.content.1,
             "autofill": node.autofill.as_ref().map(|field| field.hint),
             "live": format!("{:?}", node.live),
-            "platformView": node.flags.contains(uicore::SemanticsFlags::PLATFORM_VIEW),
+            "platformView": node.flags.contains(engine::semantics::SemanticsFlags::PLATFORM_VIEW),
         })
     }).collect()).to_string()
 }
 
-pub(super) fn platform_views_value(views: &[uicore::PlatformViewPlacement]) -> Value {
+pub(super) fn platform_views_value(views: &[engine::tree::PlatformViewPlacement]) -> Value {
     let rect = |rect: Rect| json!({"x": rect.x, "y": rect.y, "w": rect.w, "h": rect.h});
     Value::Array(
         views
@@ -96,8 +99,8 @@ pub(super) fn platform_views_value(views: &[uicore::PlatformViewPlacement]) -> V
     )
 }
 
-fn path_command(verb: &protocol::PathVerb) -> Value {
-    use protocol::PathVerb;
+fn path_command(verb: &engine::scene::PathVerb) -> Value {
+    use engine::scene::PathVerb;
     match *verb {
         PathVerb::Move(x, y) => json!([0, x, y]),
         PathVerb::Line(x, y) => json!([1, x, y]),
@@ -254,8 +257,8 @@ pub unsafe extern "C" fn impasto_ios_key(
             "Copy" => InputEvent::Copy,
             "Cut" => InputEvent::Cut,
             "SelectAll" => InputEvent::SelectAll,
-            "Undo" => InputEvent::Edit(uicore::Edit::Undo),
-            "Redo" => InputEvent::Edit(uicore::Edit::Redo),
+            "Undo" => InputEvent::Edit(engine::text::Edit::Undo),
+            "Redo" => InputEvent::Edit(engine::text::Edit::Redo),
             _ => {
                 let Some(key) = named_key(&key) else { return };
                 InputEvent::Key(KeyPress::with_modifiers(key, modifiers))
@@ -407,7 +410,7 @@ pub unsafe extern "C" fn impasto_ios_pen(
         };
         event.buttons = Buttons::from_bits(if held { Buttons::PRIMARY } else { 0 });
         event.modifiers = Modifiers::from_bits(u8::try_from(modifiers & 15).unwrap_or_default());
-        event.pen = Some(uicore::PenSample {
+        event.pen = Some(engine::input::PenSample {
             force: force.clamp(0.0, 1.0),
             radius: radius.max(0.0),
             altitude,

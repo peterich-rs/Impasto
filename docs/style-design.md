@@ -1,5 +1,7 @@
 # 基于 Taffy 0.15.1 重构样式对象与工具类
 
+> 文中的实施阶段与代码引用反映设计或审计时的仓库结构。当前 crate 职责、源码入口和验证命令见 [架构](architecture.md)。
+
 本文定义样式体系的完整目标与验收合同。已实现的行为以源码和 `docs/architecture.md` 为准，剩余工作列在 `docs/refactor-plan.md`；本文的阶段列表不代表全部已完成。布局基线为 Taffy 0.15.1，工具类采用明确的原生支持范围。
 
 ## 破坏性变更与迁移
@@ -30,7 +32,7 @@
 - `crates/uicore/src/style/defaults.rs`：普通 View 使用 column、min 0、shrink 0、无隐式 max；Scroll 保留视口预设。
 - `crates/uicore/src/tree/{layout,scroll,hit}.rs`：Taffy 测量与几何、内容溢出、命中。真实固有文字度量和 RTL 滚动仍需后续验收。
 - `crates/uicore/src/tree/record/`：同节点背景、内容与组合效果，扁平 DrawList 和 LayerTree 共用作用域。
-- `crates/javascript/{src/ui/abi.yml,build.rs}`、`src/ui/player/{vm/bindings,mutation}.rs`：生成类型记录，复制 JS 输入后借用 Tree，一次提交完整来源。同步读强制冲刷样式和所需布局。
+- `crates/engine/src/js/player/{vm/bindings,mutation}.rs` 先解码 JS 输入，再借用 Tree 一次提交完整来源。同步几何查询先提交待处理的样式并执行所需布局。
 - `packages/solid-renderer/runtime/{style,text}.ts`：响应式独立样式来源与清理，文字样式统一输入；Image 的资源尺寸接口仍待拆分。
 - `packages/solid-ui/src/Button.tsx`：单 View 承载布局、手势、焦点与语义，组件默认来源允许 class/inline 覆盖。
 - `packages/solid-ui`、`packages/solid-router`、`packages/devtools`、`apps/gallery-solid`：产品 TSX 使用 view/stack/scroll/image，文本展示字段位于 style。
@@ -754,7 +756,6 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p uicore --no-deps
 - `packages/solid-renderer/src/defaults.ts` -- 移除语言侧的旧布局默认补丁
 - `packages/solid-renderer/src/guard.ts` -- 移除旧样式 setter 包装，保留领域命令
 - `packages/solid-renderer/src/jsx.ts` -- 共享 StyleProps 和 view，删除顶层旧样式 prop
-- `packages/solid-renderer/src/layout-values.ts` -- 复用生成的领域类型并保留非样式领域命令类型
 - `packages/solid-renderer/src/scene.ts` -- 定义 setStyle/patchStyle/clearStyle 及新的资源更新
 - `packages/solid-renderer/src/style.gen.ts` -- 新增从 Rust 元数据生成的属性类型
 - `packages/solid-renderer/src/style.test.ts` -- 新增样式输入、绑定和清理测试

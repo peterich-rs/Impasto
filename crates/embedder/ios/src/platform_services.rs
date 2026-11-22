@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use embedder::{LinkingHost, PermissionsHost, StorageHost};
+use engine::session::{MethodExec, PluginResult, PluginValue, Settle};
 use serde_json::{Value, json};
-use session::{MethodExec, PluginResult, PluginValue, Settle};
 
 type RequestSink = dyn Fn(u64, &str) + Send + Sync;
 
@@ -196,7 +196,7 @@ impl Reply {
             Self::Nothing => PluginValue::Null,
             Self::Document => {
                 return embedder::picked_document(match payload {
-                    Some(name) => session::document_relative(&name).map(Some),
+                    Some(name) => engine::session::document_relative(&name).map(Some),
                     None => Err("missing iOS document name".into()),
                 });
             }

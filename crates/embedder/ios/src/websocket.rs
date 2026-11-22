@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use embedder::{WebSocketCommand, WebSocketEvent, WebSocketTransport};
+use engine::session::Credit;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
@@ -19,7 +20,6 @@ use objc2_foundation::{
     NSURLSessionWebSocketCloseCode, NSURLSessionWebSocketDelegate, NSURLSessionWebSocketMessage,
     NSURLSessionWebSocketTask,
 };
-use session::Credit;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const SEND_TIMEOUT: Duration = Duration::from_secs(2);

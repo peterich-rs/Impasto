@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use session::{HttpClient, HttpError, HttpPiece, HttpRequest, HttpResponse};
+use engine::session::{HttpClient, HttpError, HttpPiece, HttpRequest, HttpResponse};
 
 use super::hub::{DiagnosticsHub, NetEntry, NetKind, PREVIEW_CAP};
 
@@ -79,7 +79,7 @@ impl RecordingHttpClient {
 
 fn canceled(request: &HttpRequest, error: Option<&HttpError>) -> bool {
     request.cancel.load(std::sync::atomic::Ordering::Relaxed)
-        || error.is_some_and(|error| error.kind == session::HttpFailure::Canceled)
+        || error.is_some_and(|error| error.kind == engine::session::HttpFailure::Canceled)
 }
 
 impl HttpClient for RecordingHttpClient {
@@ -150,7 +150,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
-    use session::{HttpClient, HttpPiece, HttpRequest, HttpResponse};
+    use engine::session::{HttpClient, HttpPiece, HttpRequest, HttpResponse};
 
     use super::*;
     use crate::diagnostics::NetKind;
@@ -233,7 +233,10 @@ mod tests {
 
     impl HttpClient for Abort {
         fn perform(&self, _request: &HttpRequest) -> Result<HttpResponse, HttpError> {
-            Err(HttpError::new(session::HttpFailure::Canceled, "aborted"))
+            Err(HttpError::new(
+                engine::session::HttpFailure::Canceled,
+                "aborted",
+            ))
         }
 
         fn stream(
@@ -241,7 +244,10 @@ mod tests {
             _request: &HttpRequest,
             _sink: &mut dyn FnMut(HttpPiece<'_>) -> bool,
         ) -> Result<(), HttpError> {
-            Err(HttpError::new(session::HttpFailure::Canceled, "aborted"))
+            Err(HttpError::new(
+                engine::session::HttpFailure::Canceled,
+                "aborted",
+            ))
         }
     }
 
@@ -252,7 +258,7 @@ mod tests {
         let error = client
             .perform(&request("https://example.test", b""))
             .unwrap_err();
-        assert_eq!(error.kind, session::HttpFailure::Canceled);
+        assert_eq!(error.kind, engine::session::HttpFailure::Canceled);
         assert!(hub.network.lock().unwrap().tail(0).next().is_none());
     }
 }

@@ -109,7 +109,7 @@ export function Dialog(props: DialogProps): NodeHandle {
       flexShrink: 1,
     });
     scene.insert(overlay, fade, 0);
-    const shell = scene.stack();
+    const shell = scene.createElement("stack");
     scene.setComponentStyle(shell, {
       gridTemplateColumns: "minmax(0, 1fr)",
       gridTemplateRows: "minmax(0, 1fr)",

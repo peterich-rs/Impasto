@@ -3,8 +3,8 @@
 //! Generic nodes are dropped. Scroll increments use the same formula as macOS.
 
 #[cfg(test)]
-use uicore::SemanticsActions;
-use uicore::SemanticsRole;
+use engine::semantics::SemanticsActions;
+use engine::semantics::SemanticsRole;
 
 pub const ROLE_GENERIC: i32 = 0;
 pub const ROLE_BUTTON: i32 = 1;
@@ -101,10 +101,12 @@ pub fn bridge_nodes(nodes: &[embedder::ProjectedNode]) -> Vec<BridgeNode> {
 #[cfg(test)]
 mod tests {
     use super::{ROLE_SWITCH, ROLE_TEXT, ROLE_TEXT_FIELD, class_name, is_clickable, role_ordinal};
-    use uicore::{SemanticsActions, SemanticsFlags, SemanticsId, SemanticsNode, SemanticsRole};
+    use engine::semantics::{
+        SemanticsActions, SemanticsFlags, SemanticsId, SemanticsNode, SemanticsRole,
+    };
 
-    fn rect(w: f32, h: f32) -> uicore::Rect {
-        uicore::Rect {
+    fn rect(w: f32, h: f32) -> engine::Rect {
+        engine::Rect {
             x: 0.0,
             y: 0.0,
             w,
@@ -127,7 +129,7 @@ mod tests {
             caret: None,
             description: None,
             autofill: None,
-            live: uicore::LiveRegion::Off,
+            live: engine::semantics::LiveRegion::Off,
             scroll_content: None,
         }
     }

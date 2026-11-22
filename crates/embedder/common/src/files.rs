@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-use session::document_relative;
+use engine::session::document_relative;
 
 const STORE_NAME: &str = "async-storage.tsv";
 

@@ -2,7 +2,7 @@
 
 跨平台 UI 框架。上层写细粒度响应式界面，下层用同一份场景描述，交给 Impeller 绘制，让各端像素一致。
 
-应用用 Solid 2.0 TSX 编写。`packages/solid-renderer`、`packages/solid-ui` 和 `packages/solid-router` 提供渲染器、控件与路由。QuickJS 会话更新 `uicore` 的渲染树。
+应用用 Solid 2.0 TSX 编写。`packages/solid-renderer`、`packages/solid-ui` 和 `packages/solid-router` 提供渲染器、控件与路由。QuickJS 会话通过 `scene` 模块更新 `engine` 的渲染树。
 
 macOS 和 iOS 宿主用 Impeller 的 Metal 后端。Android 支持 Vulkan 和 GLES，使用仓库预构建 SDK 时默认选择 GLES。仓库收录了 CI 构建和验证的 Impeller SDK 归档，本地构建可以直接解压并链接对应目标的 SDK。[Impeller SDK](crates/impeller-sys/README.md)
 
@@ -89,21 +89,21 @@ just android-release
 ## 目录
 
 ```
-crates/protocol/            DrawList、LayerTree
-crates/uicore/              渲染树。Taffy 布局、命中、click 和 drag
-crates/engine/              渲染引擎。读绘制列表，调用 Impeller
+crates/engine/              UI 树、布局、输入、响应式图、宿主会话、层树录制与可选 JS 绑定
+crates/raster/              使用 Impeller 排版、绘制并呈现层树
 crates/impeller-sys/        Impeller C 绑定与 SDK 链接
-crates/session/             会话。宿主每帧调用 metrics、pointer、frame、wants_frame、lifecycle
 crates/embedder/common/     公共宿主，命令队列、帧调度、渲染线程
 crates/embedder/android/    Android 宿主，ImpastoHost、ImpastoView、Choreographer、Vulkan 和 GLES
 crates/embedder/macos/      macOS 宿主，AppKit、CVDisplayLink、Metal
-crates/javascript/          JavaScript 运行时、编译器、标准库及 UI 绑定
+crates/embedder/ios/        iOS 宿主，UIKit、CADisplayLink、Metal
+crates/cli/                 驱动工具，工程创建、构建、打包、部署和热重载
+crates/javascript/          独立 JavaScript 运行时、编译器、标准库及宿主交换类型
 packages/clipboard/         @impasto/clipboard
 packages/linking/           @impasto/linking
 packages/app-state/         @impasto/app-state
 packages/file-system/       @impasto/file-system
 packages/async-storage/     @impasto/async-storage
-packages/solid-renderer/    接到 uicore 的运行时
+packages/solid-renderer/    接到引擎 scene 与 reactive 的运行时
 packages/solid-ui/          Button、Field、Dialog、theme、overlay
 packages/solid-router/      路径、栈和 RouterView
 packages/net/               createFetch

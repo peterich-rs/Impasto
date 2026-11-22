@@ -11,9 +11,9 @@ Impasto 是跨平台 UI 框架。下表按目标职责命名。现有目录、�
 | `engine` | 接收应用框架提交的 UI 树变更，管理 UI 状态、脏标记和帧内阶段，完成命中测试、手势、测量、布局和绘制录制，产出层树。 |
 | `raster` | 接入成熟的绘制库，消费层树并上屏，管理绘制资源和后端表面。文字测量和绘制共用排版实现。 |
 
-JavaScript 运行时负责脚本执行、模块加载、定时器和标准 API，可以独立于 UI 运行。UI 绑定向 `engine` 提交树变更，并把 UI 事件交给脚本。以 `fetch` 为例，运行时实现 API 语义，`embedder` 提供网络传输。
+JavaScript 运行时负责脚本执行、模块加载、定时器和标准 API，可以独立于 UI 运行。`crates/javascript` 提供独立运行时。`engine::js` 通过可选的 `js` feature 接入该运行时，提交树变更并把 UI 事件交给脚本。以 `fetch` 为例，运行时实现 API 语义，`embedder` 提供网络传输。
 
-平台线程通过队列交付输入和生命周期事件，渲染线程同步推进 UI 帧。跨线程交付使用自有数据。
+平台线程通过队列交付输入和生命周期事件，渲染线程通过 `engine::session::Session` 同步推进 UI 帧。跨线程交付使用自有数据。`raster` 消费 `engine::scene::LayerTree`，并实现 `engine::text::Shaper`。独立运行时、默认引擎和光栅后端的依赖隔离由 `just boundaries` 校验。
 
 ## 工作约定
 

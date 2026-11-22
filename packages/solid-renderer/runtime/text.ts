@@ -1,31 +1,14 @@
 import { bindStyleTo } from "./style.ts";
 import { bindNodeRef } from "./ref.ts";
 import type { NodeRef } from "../src/jsx.ts";
+import type { SpanGradient, TextSpanData } from "../src/scene.ts";
 import type { StyleProps } from "../src/style.ts";
 import { children, createRenderEffect } from "solid-js";
 
 import type { Node, SceneOptions } from "../src/tree.ts";
 
-export type TextGradient = {
-  kind: "linear" | "radial" | "sweep";
-  from?: [number, number];
-  to?: [number, number];
-  center?: [number, number];
-  radius?: number;
-  startAngle?: number;
-  endAngle?: number;
-  stops: { offset: number; color: string | [number, number, number, number] }[];
-};
-
-export type TextRun = {
-  text: string;
-  color?: string | [number, number, number, number];
-  weight?: number;
-  family?: string;
-  underline?: boolean;
-  lineThrough?: boolean;
-  gradient?: TextGradient;
-};
+export type TextGradient = SpanGradient;
+export type TextRun = TextSpanData;
 
 function textContent(value: unknown): string {
   if (typeof value === "function") {

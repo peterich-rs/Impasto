@@ -1,0 +1,117 @@
+//! Impeller typography and rendering for [`engine::scene::LayerTree`].
+
+#![allow(unsafe_code, reason = "This renderer calls the Impeller C API")]
+
+mod script;
+mod shaper;
+pub use shaper::ImpellerShaper;
+// Glyph boxes for span gradients. Callers are in typography, which needs the SDK.
+// Unit tests still build this module when the SDK is absent.
+#[cfg(any(feature = "impeller", test))]
+mod span_box;
+mod status;
+
+pub use script::split_scripts;
+
+#[cfg(not(feature = "impeller"))]
+mod missing;
+#[cfg(feature = "impeller")]
+mod painter;
+#[cfg(feature = "impeller")]
+mod pictures;
+#[cfg(feature = "impeller")]
+mod player;
+mod surface;
+#[cfg(feature = "impeller")]
+mod textures;
+#[cfg(feature = "impeller")]
+mod typography;
+
+pub use status::{AcquireFollowup, Status, acquire_followup};
+pub use surface::Surface;
+
+/// Drawable size in physical pixels.
+///
+/// The shell passes this into present. Vulkan stores it on the swapchain and
+/// applies it before acquire. A zero axis means the size is not known yet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PixelSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl PixelSize {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+
+    /// The standalone SDK asks for a 1×1 chain. A usable extent replaces that.
+    pub fn is_usable(&self) -> bool {
+        self.width > 1 && self.height > 1
+    }
+}
+
+/// Counts from paragraph build and cache lookup since the last [`Typography::take_shape_stats`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ShapeStats {
+    pub built: u32,
+    pub measure_hit: u32,
+    pub measure_miss: u32,
+    pub paint_hit: u32,
+    pub paint_miss: u32,
+    /// Measured paragraphs moved into a paint slot instead of built again.
+    pub bridged: u32,
+}
+
+#[cfg(not(feature = "impeller"))]
+pub use missing::GpuImage;
+#[cfg(not(feature = "impeller"))]
+pub use missing::Rasterizer;
+#[cfg(not(feature = "impeller"))]
+pub use missing::TextureFactory;
+#[cfg(not(feature = "impeller"))]
+pub use missing::Typography;
+#[cfg(feature = "impeller")]
+pub use player::GpuImage;
+#[cfg(feature = "impeller")]
+pub use player::Rasterizer;
+#[cfg(feature = "impeller")]
+pub use player::TextureFactory;
+#[cfg(feature = "impeller")]
+pub use typography::Typography;
+
+#[cfg(all(not(feature = "impeller"), target_os = "android"))]
+pub use missing::VulkanSwapchain;
+#[cfg(all(feature = "impeller", target_os = "android"))]
+pub use player::{GlesWindow, VulkanSwapchain};
+
+#[cfg(target_os = "android")]
+#[derive(Clone, Copy, Debug)]
+pub enum VulkanPhase {
+    Acquire,
+    Draw,
+    Present,
+}
+
+/// Counts from the last successful [`Rasterizer::submit_layers`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SubmitStats {
+    pub picture_rebuilt: u32,
+    pub picture_reused: u32,
+    pub layer_count: u32,
+    pub picture_prepare: std::time::Duration,
+    pub compose: std::time::Duration,
+    /// Live cache entries after the submit. `paragraphs`, `pictures`, and
+    /// `textures` replace the one-shot stderr warnings the caches used to
+    /// print when they exceeded their caps.
+    pub paragraphs: u32,
+    pub pictures: u32,
+    pub textures: u32,
+}
+
+/// RGBA pixels borrowed until [`Rasterizer::submit_layers`] returns.
+pub struct ImagePixels<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: &'a [u8],
+}

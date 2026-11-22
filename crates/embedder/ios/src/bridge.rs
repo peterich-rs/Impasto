@@ -11,10 +11,10 @@ use embedder::{
     Boot, BootError, Command, FrameToken, Lifecycle, Link, Restoration, Services, SurfaceId,
     SurfaceTarget, Vsync, WindowSession,
 };
-use engine::Engine;
+use engine::input::{Button, Buttons, Modifiers, Phase, PointerEvent, PointerId, PointerKind};
+use engine::session::{Brightness, FrameTime, Insets, Metrics, PlatformSettings, WindowDisplay};
 use objc2::MainThreadMarker;
-use session::{Brightness, FrameTime, Insets, Metrics, PlatformSettings, WindowDisplay};
-use uicore::{Button, Buttons, Modifiers, Phase, PointerEvent, PointerId, PointerKind};
+use raster::Rasterizer;
 
 use crate::bundle;
 use crate::surface::{LayerLease, MetalSurface, SurfaceGate};
@@ -174,7 +174,7 @@ impl Services for HostServices {
         self.back_enabled(self.back_enabled.get());
     }
 
-    fn apply_ime(&self, update: &session::ImeUpdate) {
+    fn apply_ime(&self, update: &engine::session::ImeUpdate) {
         let message = input::ime_message(update);
         self.events
             .send(Event::Ime, self.surface.get(), Some(&message));
@@ -207,7 +207,7 @@ impl Services for HostServices {
         self.unhandled_back();
     }
 
-    fn platform_views(&self, surface: SurfaceId, views: &[uicore::PlatformViewPlacement]) {
+    fn platform_views(&self, surface: SurfaceId, views: &[engine::tree::PlatformViewPlacement]) {
         if self.compositor.configured(surface.0) {
             return;
         }
@@ -254,7 +254,7 @@ impl ImpastoIOSHost {
             events: Arc::clone(&events),
             sink: OnceLock::new(),
         });
-        let launch_url = session::shared(initial_url);
+        let launch_url = engine::session::shared(initial_url);
         let boot_gate = Arc::clone(&gate);
         let boot_events = Arc::clone(&events);
         let boot_clock = Arc::clone(&clock);
@@ -299,7 +299,7 @@ impl ImpastoIOSHost {
                     main_thread: Some(Arc::new(|work| DispatchQueue::main().exec_async(work))),
                     launch_url,
                     http: app.http,
-                    open_engine: Box::new(Engine::create_metal),
+                    open_raster: Box::new(Rasterizer::create_metal),
                     open_surface: Box::new(move |_, target| {
                         Ok(Box::new(MetalSurface::new(
                             target,

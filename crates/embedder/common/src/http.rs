@@ -8,13 +8,13 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use bytes::Bytes;
+use engine::session::{
+    HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, HttpResponse,
+};
 use http_body_util::BodyExt;
 use openwire::{
     Client, DefaultRedirectPolicy, RedirectContext, RedirectDecision, RedirectPolicy, RequestBody,
     WireError, WireErrorKind,
-};
-use session::{
-    HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, HttpResponse,
 };
 
 struct HttpRedirects(DefaultRedirectPolicy);

@@ -31,7 +31,7 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: generated style contracts
-        run: cargo run --locked -p uicore --bin style-types -- --check --root .
+        run: cargo run --locked -p engine --bin style-types -- --check --root .
       - name: check (deny warnings)
         run: cargo check --workspace --exclude embedder-macos
         env:

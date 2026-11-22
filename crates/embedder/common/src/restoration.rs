@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use session::{Shared, shared};
+use engine::session::{Shared, shared};
 
 const MAX_BYTES: usize = 32 * 1024;
 const MAX_KEY_BYTES: usize = 128;

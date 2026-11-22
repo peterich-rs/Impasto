@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use engine::ImagePixels;
+use raster::ImagePixels;
 
 /// Producer frame in premultiplied RGBA8. The render thread owns the latest frame.
 pub struct ExternalFrame {
@@ -13,11 +13,11 @@ pub struct ExternalFrame {
 }
 
 /// Imports a producer-owned frame on the render thread.
-pub type ImportExternalFrame = Box<dyn Fn(&engine::Engine) -> Option<engine::GpuImage> + Send>;
+pub type ImportExternalFrame = Box<dyn Fn(&raster::Rasterizer) -> Option<raster::GpuImage> + Send>;
 
 pub(crate) struct ExternalGpuFrame {
     pub import: ImportExternalFrame,
-    pub image: Option<engine::GpuImage>,
+    pub image: Option<raster::GpuImage>,
 }
 
 /// Decoded image. `gpu` is set when `io` already uploaded the texture.
@@ -28,7 +28,7 @@ pub struct ImageHandle {
     pub size: [u32; 2],
     pub pixels: Arc<[u8]>,
     /// Present blits this. Empty pixels are fine once it is set.
-    pub gpu: Option<engine::GpuImage>,
+    pub gpu: Option<raster::GpuImage>,
 }
 
 #[derive(Debug)]
@@ -441,9 +441,9 @@ impl ImageCache {
     }
 
     /// Drops decoded pixels and in-flight keys. A late decode for the old generation is ignored.
-    /// Retains uploaded textures into the engine cache for this scale bucket.
+    /// Retains uploaded textures into the raster cache for this scale bucket.
     /// Submit then blits them and does not create textures on the render thread.
-    pub fn install_uploaded(&self, engine: &mut engine::Engine, bucket: u8) {
+    pub fn install_uploaded(&self, raster: &mut raster::Rasterizer, bucket: u8) {
         for (key, entry) in &self.entries {
             if key.bucket != bucket {
                 continue;
@@ -451,7 +451,7 @@ impl ImageCache {
             if let Entry::Ready { handle, .. } = entry
                 && let Some(gpu) = &handle.gpu
             {
-                engine.install_uploaded(key.source.as_ref(), gpu);
+                raster.install_uploaded(key.source.as_ref(), gpu);
             }
         }
     }
@@ -520,7 +520,7 @@ impl ImageCache {
 }
 
 /// Uploads `handle` when a factory is available, then drops the CPU copy.
-pub fn attach_upload(handle: &mut ImageHandle, factory: Option<&engine::TextureFactory>) {
+pub fn attach_upload(handle: &mut ImageHandle, factory: Option<&raster::TextureFactory>) {
     let Some(factory) = factory else {
         return;
     };

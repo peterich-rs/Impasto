@@ -94,7 +94,7 @@ export function Toast(props: ToastProps): NodeHandle {
       return;
     }
     const overlay = nodeId(overlayParent());
-    shell = scene.stack();
+    shell = scene.createElement("stack");
     scene.setComponentStyle(shell, {
       gridTemplateColumns: "minmax(0, 1fr)",
       gridTemplateRows: "minmax(0, 1fr)",

@@ -282,7 +282,7 @@ pub struct DiagnosticsHub {
     revision: AtomicU64,
     flags: Mutex<DevtoolsFlags>,
     /// Latest window metrics. The platform page reads this.
-    metrics: Mutex<session::Metrics>,
+    metrics: Mutex<engine::session::Metrics>,
     /// Overflow report JSON from the last frame that scanned, or `"[]"`.
     layout_report: Mutex<String>,
 }
@@ -308,16 +308,16 @@ impl DiagnosticsHub {
             frames: Mutex::new(Ring::new(FRAME_CAP)),
             revision: AtomicU64::new(1),
             flags: Mutex::new(DevtoolsFlags::default()),
-            metrics: Mutex::new(session::Metrics::new(0.0, 0.0, 1.0)),
+            metrics: Mutex::new(engine::session::Metrics::new(0.0, 0.0, 1.0)),
             layout_report: Mutex::new("[]".to_owned()),
         }
     }
 
-    pub fn note_metrics(&self, metrics: session::Metrics) {
+    pub fn note_metrics(&self, metrics: engine::session::Metrics) {
         *lock(&self.metrics) = metrics;
     }
 
-    pub fn metrics(&self) -> session::Metrics {
+    pub fn metrics(&self) -> engine::session::Metrics {
         *lock(&self.metrics)
     }
 

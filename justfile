@@ -10,7 +10,7 @@ default:
 clippy:
     cargo clippy --manifest-path "{{root}}/Cargo.toml" --workspace --exclude embedder-macos --all-targets -- -D warnings
 
-check: style-check clippy test solid standard-check
+check: style-check boundaries clippy test solid standard-check
     @echo "check ok"
 
 bench:
@@ -23,8 +23,8 @@ test: gallery-dist
 # warning-free cargo check. crapper and dryer must be on PATH. CRAP reads
 # whatever `just coverage` last wrote; it does not rerun tests.
 quality:
-    crapper --use-existing-coverage protocol uicore engine session embedder
-    dryer --threshold 0.8 crates/protocol/src crates/uicore/src crates/engine/src crates/session/src
+    crapper --use-existing-coverage engine raster embedder
+    dryer --threshold 0.8 crates/engine/src crates/raster/src crates/embedder
     RUSTFLAGS="-D warnings" cargo check --manifest-path "{{root}}/Cargo.toml" --workspace
 
 coverage:
@@ -32,15 +32,18 @@ coverage:
 
 gen:
     cargo run -p embedder --bin module-stubs
-    cargo run -p uicore --bin style-types -- --root "{{root}}"
+    cargo run -p engine --bin style-types -- --root "{{root}}"
 
 # Fail when generated style types or the utility list drift.
 style-check:
-    cargo run -p uicore --bin style-types -- --check --root "{{root}}"
+    cargo run -p engine --bin style-types -- --check --root "{{root}}"
 
 solid:
     pnpm -C "{{root}}" install --frozen-lockfile
     pnpm -C "{{root}}" -r test
+
+boundaries:
+    python3 "{{root}}/tools/check-javascript-boundaries.py"
 
 standard-check:
     node "{{root}}/tools/check-standard-library.mjs"

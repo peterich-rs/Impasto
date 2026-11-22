@@ -73,15 +73,15 @@ fn run_bundle(bundle: &Path, app: &App) -> Result<()> {
         .split(',')
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let config = session::ModuleConfig {
-        registry: std::sync::Arc::new(
-            session::ModuleRegistry::new(embedder::first_party_modules()),
-        ),
-        ..session::ModuleConfig::disconnected()
+    let config = engine::session::ModuleConfig {
+        registry: std::sync::Arc::new(engine::session::ModuleRegistry::new(
+            embedder::first_party_modules(),
+        )),
+        ..engine::session::ModuleConfig::disconnected()
     }
     .restrict(&modules);
     let name = bundle.to_string_lossy();
-    let log: javascript::ui::ConsoleLog = Box::new(|level, line| {
+    let log: engine::js::ConsoleLog = Box::new(|level, line| {
         if level >= 3 {
             eprintln!("{line}");
         }
@@ -91,39 +91,39 @@ fn run_bundle(bundle: &Path, app: &App) -> Result<()> {
         // treated as an envelope from this toolchain's `compile` (`impasto build`).
         // The envelope does not prove the payload is valid bytecode.
         unsafe {
-            javascript::ui::open_trusted_bytecode_with_routed_io(
+            engine::js::open_trusted_bytecode_with_routed_io(
                 &bytes,
                 &name,
-                uicore::MonoShaper::default(),
+                engine::text::MonoShaper::default(),
                 log,
                 None,
                 config,
             )
         }
     } else {
-        javascript::ui::open_program_with_routed_io(
+        engine::js::open_program_with_routed_io(
             &bytes,
             &name,
-            uicore::MonoShaper::default(),
+            engine::text::MonoShaper::default(),
             log,
             None,
             config,
         )
     }?;
-    session.metrics(&session::Metrics::new(360.0, 640.0, 2.0));
+    session.metrics(&engine::session::Metrics::new(360.0, 640.0, 2.0));
     for step in 0..4 {
-        session.frame(session::FrameTime::at(f64::from(step) * 16.0));
+        session.frame(engine::session::FrameTime::at(f64::from(step) * 16.0));
     }
     if let Some(error) = session
         .take_script_error()
-        .filter(|error| error != &uicore::Error::NoRoot.to_string())
+        .filter(|error| error != &engine::Error::NoRoot.to_string())
     {
         bail!("{error}");
     }
     if let Some(fault) = session
         .take_faults()
         .iter()
-        .find(|fault| fault.message != uicore::Error::NoRoot.to_string())
+        .find(|fault| fault.message != engine::Error::NoRoot.to_string())
     {
         bail!("{}: {}", fault.source, fault.message);
     }

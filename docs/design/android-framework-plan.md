@@ -46,9 +46,9 @@ Android embedder 和 Impeller 的源码对照基线为 `build/impeller-source/fl
 |---|---|---|
 | `driver` | 生成平台工程、编译和打包、安装、测试、符号管理及调试更新。APK、AAB 和嵌入库消费同一宿主实现。 | `crates/cli`、Gradle 模板和 `tools/` |
 | `embedder` | 管理会话及窗口接入、平台事件与时钟、原生资源的所有权、原生 View 和插件。 | `crates/embedder/common`、`crates/embedder/android` 和 `crates/embedder/macos` |
-| `engine` | 管理 UI 树、布局、命中、手势、快捷键、焦点、语义和层树。 | 当前主要由 `crates/uicore` 和 UI 会话驱动 |
-| `raster` | 消费层树，管理绘制后端、交换链、纹理、字体与资源重建。文字测量和绘制共用排版及字体资源。 | 当前由 `crates/engine` 和 `crates/impeller-sys` 承担 |
-| JavaScript 与作者层 | 运行时拥有 JS、模块和标准库语义。UI 绑定送交变更并返回事件，Solid 组件和路由提供应用作者接口。 | `crates/javascript`、`crates/session`、`packages/solid-renderer`、`packages/solid-ui` 和 `packages/solid-router` |
+| `engine` | 管理 UI 树、布局、命中、手势、快捷键、焦点、语义和层树。 | `crates/engine` |
+| `raster` | 消费层树，管理绘制后端、交换链、纹理、字体与资源重建。文字测量和绘制共用排版及字体资源。 | `crates/raster` 和 `crates/impeller-sys` |
+| JavaScript 与作者层 | 运行时拥有 JS、模块和标准库语义。UI 绑定送交变更并返回事件，Solid 组件和路由提供应用作者接口。 | `crates/javascript`、`engine::js`、`packages/solid-renderer`、`packages/solid-ui` 和 `packages/solid-router` |
 
 沿用现有 crate 入口分步迁移。Android 主线程管理 View、系统回调和 Android 服务。渲染线程同步推进 UI 帧并独占 QuickJS、UI 树和当前光栅后端。后台工作线程处理 I/O 与解码，交付自有数据。具体后端对纹理上传线程的约束由后端实现保证。 [目标架构](../../AGENTS.md) · [现有渲染后端设计](../rendering-design.md)
 

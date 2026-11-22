@@ -1,153 +1,39 @@
-//! Impeller renderer. It paints a [`protocol::LayerTree`] and does not read scene bytes.
+//! 跨平台 UI 引擎，管理界面树、样式、输入、手势与帧内更新。
+//! 使用 Taffy 完成布局，将绘制操作录制为供光栅后端消费的层树。
+//! 可选的 `js` 功能通过独立的 JavaScript 运行时接入应用脚本。
 
-#![allow(unsafe_code, reason = "This renderer calls the Impeller C API")]
+pub mod canvas;
+mod cast;
+mod error;
+mod geometry;
+pub mod input;
+pub mod motion;
+pub mod reactive;
+pub mod scene;
+pub mod semantics;
+pub mod session;
+pub mod style;
 
-mod script;
-// Glyph boxes for span gradients. Callers are in typography, which needs the SDK.
-// Unit tests still build this module when the SDK is absent.
-#[cfg(any(feature = "impeller", test))]
-mod span_box;
-mod status;
+#[cfg(feature = "js")]
+#[allow(
+    unsafe_code,
+    reason = "JS extensions install native bindings into QuickJS"
+)]
+pub mod js;
+pub mod text;
+pub mod tree;
 
-pub use script::split_scripts;
+#[cfg(test)]
+mod barrier_test;
+#[cfg(test)]
+mod layout_test;
+#[cfg(test)]
+mod refactor_test;
+#[cfg(test)]
+mod scroll_test;
 
-#[cfg(not(feature = "impeller"))]
-mod missing;
-#[cfg(feature = "impeller")]
-mod painter;
-#[cfg(feature = "impeller")]
-mod pictures;
-#[cfg(feature = "impeller")]
-mod player;
-mod surface;
-#[cfg(feature = "impeller")]
-mod textures;
-#[cfg(feature = "impeller")]
-mod typography;
+pub use error::Error;
+pub use geometry::{NodeId, Rect};
 
-pub use status::{AcquireFollowup, Status, acquire_followup};
-pub use surface::Surface;
-
-/// Drawable size in physical pixels.
-///
-/// The shell passes this into present. Vulkan stores it on the swapchain and
-/// applies it before acquire. A zero axis means the size is not known yet.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PixelSize {
-    pub width: u32,
-    pub height: u32,
-}
-
-impl PixelSize {
-    pub fn new(width: u32, height: u32) -> Self {
-        Self { width, height }
-    }
-
-    /// The standalone SDK asks for a 1×1 chain. A usable extent replaces that.
-    pub fn is_usable(&self) -> bool {
-        self.width > 1 && self.height > 1
-    }
-}
-
-/// Counts from paragraph build and cache lookup since the last [`Typography::take_shape_stats`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ShapeStats {
-    pub built: u32,
-    pub measure_hit: u32,
-    pub measure_miss: u32,
-    pub paint_hit: u32,
-    pub paint_miss: u32,
-    /// Measured paragraphs moved into a paint slot instead of built again.
-    pub bridged: u32,
-}
-
-#[cfg(not(feature = "impeller"))]
-pub use missing::Engine;
-#[cfg(not(feature = "impeller"))]
-pub use missing::GpuImage;
-#[cfg(not(feature = "impeller"))]
-pub use missing::TextureFactory;
-#[cfg(not(feature = "impeller"))]
-pub use missing::Typography;
-#[cfg(feature = "impeller")]
-pub use player::Engine;
-#[cfg(feature = "impeller")]
-pub use player::GpuImage;
-#[cfg(feature = "impeller")]
-pub use player::TextureFactory;
-#[cfg(feature = "impeller")]
-pub use typography::Typography;
-
-#[cfg(all(not(feature = "impeller"), target_os = "android"))]
-pub use missing::VulkanSwapchain;
-#[cfg(all(feature = "impeller", target_os = "android"))]
-pub use player::{GlesWindow, VulkanSwapchain};
-
-#[cfg(target_os = "android")]
-#[derive(Clone, Copy, Debug)]
-pub enum VulkanPhase {
-    Acquire,
-    Draw,
-    Present,
-}
-
-/// Text, size, width, color, and style that identify one measured paragraph.
-#[derive(Clone, Copy)]
-pub struct ParagraphQuery<'a> {
-    pub utf8: &'a str,
-    pub font_size: f32,
-    pub max_width: f32,
-    pub color: [u8; 4],
-    pub style: &'a protocol::TextStyle,
-}
-
-/// A caret in paragraph space. `unit` is a UTF-16 index. `x` and `y` are
-/// relative to the paragraph origin.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CaretHit {
-    pub unit: u32,
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-    /// The caret sits on the previous line of a soft break.
-    pub upstream: bool,
-}
-
-/// One paragraph line in the same space as [`CaretHit`].
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct LineMetric {
-    pub start: u32,
-    pub end: u32,
-    pub end_with_break: u32,
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-    /// Distance from the top of the line box to the baseline.
-    pub baseline: f32,
-    pub hard_break: bool,
-}
-
-/// Counts from the last successful [`Engine::submit_layers`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SubmitStats {
-    pub picture_rebuilt: u32,
-    pub picture_reused: u32,
-    pub layer_count: u32,
-    pub picture_prepare: std::time::Duration,
-    pub compose: std::time::Duration,
-    /// Live cache entries after the submit. `paragraphs`, `pictures`, and
-    /// `textures` replace the one-shot stderr warnings the caches used to
-    /// print when they exceeded their caps.
-    pub paragraphs: u32,
-    pub pictures: u32,
-    pub textures: u32,
-}
-
-/// RGBA pixels borrowed until [`Engine::submit_layers`] returns.
-pub struct ImagePixels<'a> {
-    pub width: u32,
-    pub height: u32,
-    pub rgba: &'a [u8],
-}
+#[cfg(test)]
+mod style_contract_test;

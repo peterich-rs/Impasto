@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use session::{
+use engine::session::{
     Method, MethodExec, Module, ModuleExports, PluginResult, PluginValue, Settle, document_relative,
 };
 

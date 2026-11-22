@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use session::{FrameTime, InputEvent, Metrics, PlatformSettings};
-use uicore::PointerEvent;
+use engine::input::PointerEvent;
+use engine::session::{FrameTime, InputEvent, IoEvent, Metrics, PlatformSettings};
 
 use crate::Lifecycle;
 use crate::images::ImageReady;
@@ -27,7 +27,7 @@ pub struct SurfaceTarget {
     pub layer: NativePtr,
     pub metrics: Metrics,
     /// Drawable size in physical pixels. Vulkan stores this on the swapchain.
-    pub pixels: engine::PixelSize,
+    pub pixels: raster::PixelSize,
 }
 
 impl SurfaceTarget {
@@ -46,11 +46,11 @@ impl SurfaceTarget {
 pub enum Command {
     Pointer(PointerEvent),
     Input(InputEvent),
-    BackGesture(session::BackGesture),
+    BackGesture(engine::session::BackGesture),
     /// The user hid the platform keyboard. The session blurs on the next frame.
     ImeDismissed,
     Metrics(Metrics),
-    WindowDisplay(session::WindowDisplay),
+    WindowDisplay(engine::session::WindowDisplay),
     WindowStateChanged(String),
     Settings(PlatformSettings),
     Lifecycle(Lifecycle),
@@ -61,7 +61,7 @@ pub enum Command {
     WindowFocus(bool),
     SemanticsEnabled(bool),
     AutofillEnabled(bool),
-    SemanticsAction(uicore::SemanticsAction),
+    SemanticsAction(engine::semantics::SemanticsAction),
     /// A URL that arrived after the session exists. The render thread calls `Session::set_launch_url`.
     LaunchUrl(String),
     /// Staged UTF-8 debug update sent by the driver.
@@ -73,7 +73,7 @@ pub enum Command {
     SurfaceChanged {
         id: SurfaceId,
         metrics: Metrics,
-        pixels: engine::PixelSize,
+        pixels: raster::PixelSize,
     },
     SurfaceDestroyed {
         id: SurfaceId,
@@ -89,37 +89,9 @@ pub enum Command {
     },
     /// Drop one cache key and ask the render thread for another frame.
     ReloadImage(String),
-    JsIo(session::Delivery),
-    /// A `fetch` finished on `net`.
-    HttpDone {
-        token: u64,
-        result: Result<session::HttpResponse, session::HttpError>,
-    },
-    /// A streamed response produced its head on `net`.
-    HttpHead {
-        token: u64,
-        status: u16,
-        headers: Vec<(String, String)>,
-    },
-    /// A streamed response produced one body piece on `net`.
-    HttpChunk {
-        token: u64,
-        bytes: Vec<u8>,
-        done: bool,
-        error: Option<session::HttpError>,
-    },
-    /// A framework module method finished on `net`.
-    PluginDone {
-        token: u64,
-        result: session::PluginResult,
-    },
-    /// A socket the script opened produced one event.
-    Socket {
-        id: u64,
-        event: String,
-        text: bool,
-        data: Vec<u8>,
-    },
+    JsIo(engine::session::Delivery),
+    /// I/O from hosts that submit work without a runtime route.
+    Io(IoEvent),
     /// A timer deadline arrived. The render thread runs one frame.
     Wake,
     Frame {
@@ -156,11 +128,12 @@ pub(crate) fn command_tag(command: &Command) -> &'static str {
         | Command::ExternalGpuTexture { .. } => "image",
         Command::ReloadImage(_) => "reload",
         Command::JsIo(_)
-        | Command::HttpDone { .. }
-        | Command::HttpHead { .. }
-        | Command::HttpChunk { .. } => "http",
-        Command::PluginDone { .. } => "plugin",
-        Command::Socket { .. } => "socket",
+        | Command::Io(
+            IoEvent::Http { .. } | IoEvent::HttpHead { .. } | IoEvent::HttpChunk { .. },
+        ) => "http",
+        Command::Io(IoEvent::Plugin { .. }) => "plugin",
+        Command::Io(IoEvent::Socket { .. }) => "socket",
+        Command::Io(IoEvent::Host(_)) => "host event",
         Command::Wake => "wake",
         Command::Frame { .. } => "frame",
         Command::Shutdown => "shutdown",

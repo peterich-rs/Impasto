@@ -1,7 +1,7 @@
 import * as scene from "scene";
 
-const root = scene.column(0);
-const canvas = scene.sized(128, 96);
+const root = scene.createElement("view");
+const canvas = scene.createElement("view", { style: { width: 128, height: 96 } });
 scene.append(root, canvas);
 scene.bindCanvas(canvas, (ctx) => {
   ctx.strokeStyle = "#20e090";

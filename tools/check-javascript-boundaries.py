@@ -7,9 +7,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "crates/javascript/src"
-UI_CRATES = {"session", "uicore", "reactive", "engine", "embedder", "protocol"}
+UI_CRATES = {"engine", "raster", "embedder", "impeller-sys"}
 UI_IMPORT = re.compile(
-    r"\b(?:(?:crate|super)::ui|embedder_\w+|" + "|".join(sorted(UI_CRATES)) + r")::"
+    r"\b(?:(?:crate|super)::(?:ui|js|session)|embedder_\w+|" + "|".join(sorted(UI_CRATES)) + r")::"
 )
 
 
@@ -17,7 +17,7 @@ def dependencies(package, *features):
     output = subprocess.check_output(
         [
             "cargo", "tree", "--locked", "-p", package, "--no-default-features", *features,
-            "--edges", "normal,build", "--prefix", "none", "--format", "{p}",
+            "--target", "all", "--edges", "normal,build", "--prefix", "none", "--format", "{p}",
         ],
         cwd=ROOT,
         text=True,
@@ -36,16 +36,29 @@ def main():
     }:
         raise SystemExit(f"standalone JavaScript runtime reaches UI crates: {sorted(forbidden)}")
 
-    session_deps = dependencies("session")
-    if "quickjs-jit" in session_deps or "reactive" in session_deps:
-        raise SystemExit("the session contract pulls in the VM or reactive graph")
+    engine_deps = dependencies("engine")
+    raster_deps = dependencies("raster", "--features", "impeller")
+    for package, package_deps in (("engine", engine_deps), ("raster", raster_deps)):
+        if forbidden := {
+            name for name in package_deps
+            if name.startswith(("rquickjs", "quickjs-jit"))
+        }:
+            raise SystemExit(f"{package} reaches the JavaScript VM: {sorted(forbidden)}")
+
+    if forbidden := {
+        name for name in engine_deps
+        if name in {"impeller-sys", "khronos-egl", "libloading", "jni"}
+        or name.startswith(("ndk", "objc", "embedder", "windows", "android"))
+        or name == "raster"
+    }:
+        raise SystemExit(f"engine reaches platform or raster crates: {sorted(forbidden)}")
 
     for module in ("host", "compiler", "runtime", "standard"):
         for path in (SOURCE / module).rglob("*.rs"):
             if match := UI_IMPORT.search(path.read_text()):
                 raise SystemExit(f"{path.relative_to(ROOT)} contains {match[0]}")
 
-    print("Host contracts are std-only. The standalone runtime and session dependencies are isolated.")
+    print("JavaScript host, standalone runtime, engine and raster dependency boundaries passed.")
 
 
 if __name__ == "__main__":

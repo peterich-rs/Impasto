@@ -1,0 +1,317 @@
+//! Paragraph cache and the Impeller typography context. One owner on the render thread.
+
+mod fonts;
+mod key;
+mod paint_store;
+mod shape;
+
+use std::cell::RefCell;
+use std::marker::PhantomData;
+use std::mem::ManuallyDrop;
+use std::ptr;
+use std::rc::Rc;
+
+pub(crate) use fonts::FontRegistry;
+pub(crate) use key::Spans;
+pub(crate) use paint_store::PaintStore;
+
+use fonts::Face;
+use key::ParagraphStore;
+
+use crate::{ShapeStats, Status};
+
+/// Fonts, the measure cache, and the colored paint slots.
+///
+/// `!Send`: the typography context stays on the render thread.
+pub struct Typography {
+    context: impeller::ImpellerTypographyContext,
+    fonts: FontRegistry,
+    measured: ParagraphStore,
+    paints: PaintStore,
+    retired: Vec<impeller::ImpellerParagraph>,
+    /// Submit generation. Paint slots and textures stamp this.
+    generation: u64,
+    /// Layout generation. Measured paragraphs stamp this, not [`Self::generation`].
+    measure_generation: u64,
+    list_installed: bool,
+    stale: bool,
+    stats: ShapeStats,
+    warned_paragraphs: bool,
+    probe_rebuilt: bool,
+    probe_color: [u8; 4],
+    render_thread: PhantomData<*mut ()>,
+}
+
+impl Typography {
+    pub(crate) fn new(context: impeller::ImpellerTypographyContext) -> Self {
+        Self {
+            context,
+            fonts: FontRegistry::new(),
+            measured: ParagraphStore::new(),
+            paints: PaintStore::new(),
+            retired: Vec::new(),
+            generation: 0,
+            measure_generation: 0,
+            list_installed: false,
+            stale: false,
+            stats: ShapeStats::default(),
+            warned_paragraphs: false,
+            probe_rebuilt: false,
+            probe_color: [0, 0, 0, 0],
+            render_thread: PhantomData,
+        }
+    }
+
+    /// Bumps the measure generation. Does not mean a display list is being built.
+    pub fn begin_measure(&mut self) -> u64 {
+        self.measure_generation = self.measure_generation.wrapping_add(1);
+        self.measure_generation
+    }
+
+    /// Drops measure-cache paragraphs that this layout did not touch.
+    pub fn end_measure(&mut self) {
+        let generation = self.measure_generation;
+        self.evict_measured(|used| used != generation);
+        self.reap_retired();
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(crate) fn stale(&self) -> bool {
+        self.stale
+    }
+
+    pub(crate) fn measured_len(&self) -> usize {
+        self.measured.len()
+    }
+
+    /// Bumps the generation measure and retain stamp, then returns it.
+    pub(crate) fn begin_submit(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.generation
+    }
+
+    pub(crate) fn set_list_installed(&mut self, installed: bool) {
+        self.list_installed = installed;
+    }
+
+    pub(crate) fn mark_stale(&mut self) {
+        self.stale = true;
+    }
+
+    pub(crate) fn clear_stale(&mut self) {
+        self.stale = false;
+    }
+
+    /// Drops the measure cache immediately. Used when no display list is installed.
+    pub(crate) fn discard_measure_cache(&mut self) {
+        for shaped in self.measured.drain_all() {
+            // SAFETY: callers only discard the measure cache when no display list is installed.
+            unsafe { impeller::ImpellerParagraphRelease(shaped.paragraph) };
+        }
+        self.stale = false;
+    }
+
+    pub(crate) fn reap_retired(&mut self) {
+        for paragraph in self.retired.drain(..) {
+            // SAFETY: the display list that could reference these was released, or none is installed.
+            unsafe { impeller::ImpellerParagraphRelease(paragraph) };
+        }
+    }
+
+    pub(crate) fn slot_color(&self, index: u32) -> Option<[u8; 4]> {
+        self.paints.slots.get(index as usize).map(|slot| slot.color)
+    }
+
+    /// Swaps the paragraph a retained slot draws. The previous pointer is returned
+    /// so the caller can retire it.
+    #[allow(
+        dead_code,
+        reason = "stale retained ids still swap a paragraph without allocating a new slot"
+    )]
+    pub(crate) fn replace_retained(
+        &mut self,
+        id: engine::scene::ParagraphId,
+        color: [u8; 4],
+        paragraph: impeller::ImpellerParagraph,
+    ) -> Option<impeller::ImpellerParagraph> {
+        self.paints
+            .slots
+            .get_mut(id.index as usize)
+            .and_then(|slot| {
+                if slot.generation == id.generation && slot.refs > 0 {
+                    let old = slot.paragraph;
+                    slot.paragraph = paragraph;
+                    slot.color = color;
+                    Some(old)
+                } else {
+                    None
+                }
+            })
+    }
+
+    pub(crate) fn store_text_probe(&mut self, rebuilt: bool, color: [u8; 4]) {
+        self.probe_rebuilt = rebuilt;
+        self.probe_color = color;
+    }
+
+    pub(crate) fn note_paragraph_limit(&mut self) {
+        if self.measured.len() > 1024 && !self.warned_paragraphs {
+            self.warned_paragraphs = true;
+        }
+    }
+
+    /// Drops paint slots nobody retained. Measured paragraphs stay until
+    /// [`Self::end_measure`] or [`Self::evict_over_cap`].
+    pub(crate) fn evict(&mut self) {
+        self.evict_provisional_paints();
+    }
+
+    pub(crate) fn evict_over_cap(&mut self) {
+        let generation = self.measure_generation;
+        if self.measured.len() > 1024 {
+            self.evict_measured(|used| used != generation);
+        }
+    }
+
+    fn evict_measured(&mut self, drop_used: impl Fn(u64) -> bool) {
+        let dropped = self.measured.drain_if(|shaped| drop_used(shaped.used));
+        for shaped in dropped {
+            // SAFETY: a paragraph is evicted only after the display list that drew it
+            // was released, or it was never installed.
+            unsafe { impeller::ImpellerParagraphRelease(shaped.paragraph) };
+        }
+    }
+
+    fn evict_provisional_paints(&mut self) {
+        let generation = self.generation;
+        let stale: Vec<u32> = self
+            .paints
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                if slot.refs == 0
+                    && slot.live == 0
+                    && !slot.paragraph.is_null()
+                    && slot.used != generation
+                {
+                    Some(index as u32)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for index in stale {
+            self.free_paint_slot(index);
+        }
+    }
+
+    pub(crate) fn free_paint_slot(&mut self, index: u32) {
+        let Some(slot) = self.paints.slots.get_mut(index as usize) else {
+            return;
+        };
+        let paragraph = slot.paragraph;
+        let key = slot.key.take();
+        slot.paragraph = ptr::null_mut();
+        slot.refs = 0;
+        slot.width = 0.0;
+        slot.height = 0.0;
+        slot.color = [0, 0, 0, 0];
+        self.paints.free.push(index);
+        if let Some(key) = key {
+            let hash = key::hash_key(&key);
+            self.unindex_paint(hash, index);
+        }
+        if !paragraph.is_null() {
+            self.retire_paragraph(paragraph);
+        }
+    }
+
+    pub(crate) fn release_all_paragraphs(&mut self) {
+        for slot in &mut self.paints.slots {
+            if !slot.paragraph.is_null() {
+                // SAFETY: Drop runs after the display list is released.
+                unsafe { impeller::ImpellerParagraphRelease(slot.paragraph) };
+                slot.paragraph = ptr::null_mut();
+            }
+        }
+        self.discard_measure_cache();
+        self.reap_retired();
+    }
+
+    /// Registers face bytes. `Ok(false)` means this family already has these bytes.
+    ///
+    /// Does not mark pictures stale. The engine does that only when the bytes change.
+    pub fn register_face(&mut self, data: &[u8], family: &str) -> Result<bool, Status> {
+        if data.is_empty() {
+            return Err(Status::BadScene);
+        }
+        let family = std::ffi::CString::new(family).map_err(|_| Status::BadScene)?;
+        if family.as_bytes().is_empty() {
+            return Err(Status::BadScene);
+        }
+        if let Some(face) = self
+            .fonts
+            .faces
+            .iter()
+            .find(|face| face.family.as_bytes() == family.as_bytes())
+            && fonts::FontLease::same(face.lease, data)
+        {
+            return Ok(false);
+        }
+        let lease = fonts::FontLease::new(data.to_vec());
+        let mapping = impeller::ImpellerMapping {
+            data: fonts::FontLease::data(lease),
+            length: fonts::FontLease::len(lease),
+            // Impeller invokes this even when registration fails. A null callback crashes.
+            on_release: Some(fonts::release_font_lease),
+        };
+        // SAFETY: `mapping.data` points at the lease until both references are released.
+        // The third argument is the callback baton. Failure still invokes the callback,
+        // which drops Impeller's reference; this function then drops the owner's.
+        let registered = unsafe {
+            impeller::ImpellerTypographyContextRegisterFont(
+                self.context,
+                &mapping,
+                lease.cast(),
+                family.as_ptr(),
+            )
+        };
+        if !registered {
+            fonts::FontLease::release(lease);
+            return Err(Status::BadScene);
+        }
+        if self.fonts.default_family.is_none() {
+            self.fonts.default_family = Some(family.clone());
+        }
+        if let Some(face) = self
+            .fonts
+            .faces
+            .iter_mut()
+            .find(|face| face.family.as_bytes() == family.as_bytes())
+        {
+            fonts::FontLease::release(face.lease);
+            face.lease = lease;
+            face.family = family;
+        } else {
+            self.fonts.faces.push(Face { lease, family });
+        }
+        Ok(true)
+    }
+}
+
+impl Drop for Typography {
+    fn drop(&mut self) {
+        self.release_all_paragraphs();
+        // SAFETY: the handle came from ImpellerTypographyContextNew. Release is a no-op on null.
+        // Face leases drop after this returns. A late mapping callback still holds its reference.
+        unsafe { impeller::ImpellerTypographyContextRelease(self.context) };
+        self.context = ptr::null_mut();
+    }
+}
+
+/// Dropped by [`crate::Rasterizer`] after display lists and before the graphics context.
+pub(crate) type TypographyHandle = ManuallyDrop<Rc<RefCell<Typography>>>;

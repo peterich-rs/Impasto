@@ -1,8 +1,11 @@
 import * as scene from "scene";
 
-const column = scene.column(0);
-const field = scene.text("draft", 18, [255, 255, 255, 255]);
-scene.setPadding(column, 24);
+const column = scene.createElement("view");
+const field = scene.createElement("text", {
+  value: "draft",
+  style: { fontSize: 18, color: "#ffffff" },
+});
+scene.patchStyle(column, { padding: 24 });
 scene.append(column, field);
 scene.setFocusable(field, true);
 

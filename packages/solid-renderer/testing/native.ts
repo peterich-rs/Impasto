@@ -16,8 +16,8 @@ export const scene = new Proxy({} as SceneModule, {
     refresh();
     if(key==="createElement" || key==="createTextNode") return (...args:unknown[]) => {refresh();return (options[key] as Function)(...args);};
     if(key==="insert") return (...args:unknown[])=>{refresh();return (renderer.insert as Function)(...args);};
-    if(key==="append") return (parent:number,child:unknown)=>{refresh();if(typeof child==="number") source()?.insert(parent,child,0);else renderer.insert(parent,child,0);};
-    if(key==="insertNode") return (parent:number,node:number,anchor?:number)=>source()?.insert(parent,node,anchor ?? 0);
+    if(key==="append") return (parent:number,child:unknown)=>{refresh();if(typeof child==="number") source()?.insertNode(parent,child);else renderer.insert(parent,child,0);};
+    if(key==="insertNode") return (parent:number,node:number,anchor?:number)=>source()?.insertNode(parent,node,anchor);
     if(key==="setProp") return (node:number,name:string,value:unknown)=>options.setProperty(node,name,value);
     const value=source()?.[key as keyof SceneModule];
     return typeof value==="function" ? value.bind(source()) : value;
@@ -26,7 +26,7 @@ export const scene = new Proxy({} as SceneModule, {
 export const createElement=(...args:unknown[])=>{refresh();return (options.createElement as Function)(...args);};
 export const createTextNode=(value:string|number)=>{refresh();return options.createTextNode(value);};
 export const insert=(...args:unknown[])=>{refresh();return (renderer.insert as Function)(...args);};
-export const insertNode=(parent:number,node:number,anchor?:number)=>source()?.insert(parent,node,anchor ?? 0);
+export const insertNode=(parent:number,node:number,anchor?:number)=>source()?.insertNode(parent,node,anchor);
 export const setProp=(node:number,name:string,value:unknown)=>{refresh();return options.setProperty(node,name,value);};
 export const effect=(...args:unknown[])=>{refresh();return (renderer.effect as Function)(...args);};
 export const memo=(...args:unknown[])=>{refresh();return (renderer.memo as Function)(...args);};

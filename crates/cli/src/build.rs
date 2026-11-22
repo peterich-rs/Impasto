@@ -102,7 +102,7 @@ pub(crate) fn bundle_in(
     }
     let code = fs::read_to_string(&esm)?;
     let registry = compile_registry(app, target);
-    let bytes = javascript::ui::compile_with_registry(&code, "app.js", true, registry)?;
+    let bytes = engine::js::compile_with_registry(&code, "app.js", true, registry)?;
     fs::write(&bytecode, bytes)?;
     fs::remove_file(esm)?;
     if map.is_file() && !matches!(target, Some("android" | "ios")) {
@@ -111,16 +111,16 @@ pub(crate) fn bundle_in(
     Ok(bytecode)
 }
 
-fn compile_registry(app: &App, target: Option<&str>) -> session::ModuleRegistry {
+fn compile_registry(app: &App, target: Option<&str>) -> engine::session::ModuleRegistry {
     let modules = embedder::first_party_modules();
     let Some(target) = target else {
         // A standalone bundle can be linked by a caller supplying its own
         // module registry. The platform package checks its own capabilities.
-        return session::ModuleRegistry::new(modules);
+        return engine::session::ModuleRegistry::new(modules);
     };
     let enabled = app.modules(target);
     if !matches!(target, "macos" | "android" | "ios") {
-        return session::ModuleRegistry::new(Vec::new());
+        return engine::session::ModuleRegistry::new(Vec::new());
     }
     let modules = modules
         .into_iter()
@@ -131,7 +131,7 @@ fn compile_registry(app: &App, target: Option<&str>) -> session::ModuleRegistry 
             enabled.split(',').any(|name| name == package)
         })
         .collect();
-    session::ModuleRegistry::new(modules)
+    engine::session::ModuleRegistry::new(modules)
 }
 
 pub fn pack(entry: &Path, output: &Path, options: &BuildOptions) -> Result<()> {

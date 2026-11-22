@@ -9,14 +9,12 @@ name = "macos"
 path = "src/main.rs"
 
 [features]
-impeller = ["engine/impeller"]
+impeller = ["raster/impeller"]
 
 [dependencies]
 anyhow = "1"
-uicore = { workspace = true }
-engine = { workspace = true }
-javascript = { workspace = true, features = ["ui"] }
-session = { workspace = true }
+engine = { workspace = true, features = ["js"] }
+raster = { workspace = true }
 embedder = { workspace = true }
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 objc2 = "0.6.5"
@@ -105,7 +103,6 @@ objc2-core-video = { version = "0.3.2", default-features = false, features = [
     "CVHostTime",
     "CVReturn",
 ] }
-protocol = { workspace = true }
 
 [lints]
 workspace = true

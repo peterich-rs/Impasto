@@ -6,7 +6,7 @@ import {
   setWindowState,
 } from "@impasto/app-state";
 
-scene.text("Window state", 16, [255, 255, 255, 255]);
+scene.createElement("text", { value: "Window state", style: { fontSize: 16, color: "#ffffff" } });
 const refresh = () => setRestorationState("shared", getWindowState("selection"));
 refresh();
 addEventListener("windowState", refresh);

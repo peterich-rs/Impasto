@@ -10,39 +10,37 @@
 
 `javascript::runtime::Runtime` 维护 VM、普通定时器、模块注册与调用、宿主 I/O 及资源状态。同步结果、异步结果与事件经过共享值转换。宿主二进制数据按实际视图读取。HTTP 执行模式互斥，取消在本地完成结算，资源额度由持有者在终结或读取时释放。UI 扩展保留渲染帧、Canvas 策略和响应式回调的顺序。
 
-入口见 [Runtime](../../../crates/javascript/src/runtime/mod.rs)、[宿主绑定](../../../crates/javascript/src/runtime/io.rs)、[完成交付](../../../crates/javascript/src/runtime/delivery.rs)、[UI 装配](../../../crates/javascript/src/ui/player/vm/mod.rs)与 [宿主网络循环](../../../crates/embedder/common/src/net.rs)。
+入口见 [Runtime](../../../crates/javascript/src/runtime/mod.rs)、[宿主绑定](../../../crates/javascript/src/runtime/io.rs)、[完成交付](../../../crates/javascript/src/runtime/delivery.rs)、[UI 装配](../../../crates/engine/src/js/player/vm/mod.rs)与 [宿主网络循环](../../../crates/embedder/common/src/net.rs)。
 
 ## 3. 依赖边界与所有权
 
 ```mermaid
 flowchart TD
-    platform["macOS / Android / CLI"]
-    shell["shell：平台能力、执行器、Inbox"]
-    facade["session：平台会话入口"]
+    platform["macOS / Android / iOS / CLI"]
+    shell["embedder：平台能力、执行器、Inbox"]
+    session["engine::session：帧、输入和配置"]
+    ui["engine::js：场景与响应式绑定"]
     headless["js-headless：独立示例"]
     subgraph javascript["javascript"]
-        ui["ui：Impasto UI 集成"]
-        session["session：帧、输入和配置"]
         runtime["runtime：VM、模块、调度和资源"]
         compiler["compiler：链接与 IQJS 字节码"]
         standard["standard：标准 API 与声明"]
         host["host：模块契约和 I/O"]
-        ui --> session
-        ui --> runtime
-        ui --> compiler
         runtime --- standard
         runtime --> host
-        session --> host
     end
     platform --> shell
     platform --> ui
-    shell --> facade
-    facade --> session
+    shell --> session
+    ui --> session
+    ui --> runtime
+    ui --> compiler
+    session --> host
     headless --> runtime
     headless --> compiler
 ```
 
-`host` 使用 std，负责自有值、模块声明、一次性完成回调与传输契约。`runtime` feature 默认启用，包含 QuickJS 后端、编译器及标准库。`ui` feature 在此基础上接入树、响应式图、Canvas 与帧调度。`session` crate 重导出帧和输入契约，单独构建时只启用同名 feature。`embedder` 持有平台实现、网络传输、执行器与唤醒。
+`javascript::host` 使用标准库，拥有交换值、模块声明、一次性完成回调与传输契约。默认的 `javascript/runtime` 构建 QuickJS、编译器及标准库。`engine/js` 启用运行时并安装树、响应式图、Canvas 和帧调度。`engine::session` 始终可用，依赖 `javascript::host`。`embedder` 持有平台实现、网络传输、执行器与唤醒。
 
 | 路径 | 职责 |
 |---|---|
@@ -51,8 +49,8 @@ flowchart TD
 | `crates/javascript/src/runtime/quickjs` | QuickJS 的 Context、持久引用、原生模块绑定、值转换和受信任字节码加载 |
 | `crates/javascript/src/compiler` | 源码编译、静态导入检查、IQJS 封套格式与校验 |
 | `crates/javascript/src/standard` | 标准 API 的原生实现、profile 与 TypeScript 声明 |
-| `crates/javascript/src/ui` | UI 专用入口、ABI、场景和响应式绑定、帧编排 |
-| `crates/javascript/src/session` | 平台与 UI 会话共享的生命周期、帧、输入和宿主配置 |
+| `crates/engine/src/js` | UI 专用入口、ABI、场景和响应式绑定、帧编排 |
+| `crates/engine/src/session` | 平台与 UI 会话共享的生命周期、帧、输入和宿主配置 |
 | `crates/embedder/common/src/{net.rs,http.rs,modules/,module_stubs.rs}` | 传输、首方模块实例收集、声明工具入口 |
 
 ## 4. Runtime API 与装配
@@ -262,7 +260,7 @@ socket 的状态为 Connecting、Open、Closing、Closed。关闭、握手失败
 
 原生模块的运行时导出、声明渲染与编译声明从同一可信描述生成。宿主模块以现有 `Module`、`MethodTypes`、`ModuleExports`、`EventType` 为源，目录派生 specifier、导出名和声明视图。UI 独立提供 `scene`、`reactive`、`#reactive` 的导出描述。
 
-CLI 按目标和应用权限组装编译目录。独立 bundle 使用首方模块目录，macOS 和 Android 使用目标和应用声明的模块目录。编译检查合法导入、缺失导出和重复 specifier，宿主方法在编译期间保持零调用。见 [UI 编译 loader](../../../crates/javascript/src/ui/player/vm/modules.rs)和 [CLI bundle](../../../crates/cli/src/build.rs)。
+CLI 按目标和应用权限组装编译目录。独立 bundle 使用首方模块目录，macOS 和 Android 使用目标和应用声明的模块目录。编译检查合法导入、缺失导出和重复 specifier，宿主方法在编译期间保持零调用。见 [UI 编译 loader](../../../crates/engine/src/js/player/vm/modules.rs)和 [CLI bundle](../../../crates/cli/src/build.rs)。
 
 公共编译产物沿用 IQJS 的 engine/version/kind 封套和已钉引擎。源代码入口保持明确。外来字节码仅从受信任的 unsafe 路径加载，版本和封套只负责兼容性检查。本进程编译的产物由已有安全包装入口接收。目录/profile 指纹优先作为缓存 key 和诊断元数据。改变封套时单列格式版本及重编策略。
 
@@ -293,7 +291,7 @@ CLI 按目标和应用权限组装编译目录。独立 bundle 使用首方模�
 cargo fmt --all -- --check
 python3 tools/check-javascript-boundaries.py
 cargo run --locked -p javascript --bin js-headless
-cargo run --locked -p uicore --bin style-types -- --check --root .
+cargo run --locked -p engine --bin style-types -- --check --root .
 RUSTFLAGS="-D warnings" cargo check --workspace --exclude embedder-macos
 cargo clippy --workspace --exclude embedder-macos --all-targets -- -D warnings
 pnpm install --frozen-lockfile
@@ -317,7 +315,7 @@ CI 运行 `cargo run --locked -p embedder --bin module-stubs -- --check` 和 `ju
 
 用稳定基线和改动提交做同机 A/B，记录工具链、系统、SDK、锁文件、release 配置和负载。两边预热、交错执行，保存原始样本与 median / p95 / max。覆盖空 Runtime 和 UI 启动、scene 高频调用、reactive burst、固定布局文字、屏外 Canvas、Promise/timer、嵌套宿主值、慢流和 idle/恢复。除耗时外，记录 JS/native 分配与拷贝字节、各资源高水位、queue bytes、Canvas callback/preparation、root/local layout、picture writes 和 wake。
 
-将正确性不变量和耗时阈值分别验收。零工作的路径继续保持为零，耗时阈值等新基线测出波动后确定。资源循环包含 warm-up、重复运行、关闭和空闲回收。结合原生计数、drop 记录和 RSS 解释 allocator 缓存与资源滞留，按阶段保存原始记录。测试落点见 [UI 会话回归](../../../crates/javascript/src/ui/tests.rs)和 [uicore 布局回归](../../../crates/uicore/src/tree/layout.rs)。
+将正确性不变量和耗时阈值分别验收。零工作的路径继续保持为零，耗时阈值等新基线测出波动后确定。资源循环包含 warm-up、重复运行、关闭和空闲回收。结合原生计数、drop 记录和 RSS 解释 allocator 缓存与资源滞留，按阶段保存原始记录。测试落点见 [UI 会话回归](../../../crates/engine/src/js/tests.rs)和 [引擎布局回归](../../../crates/engine/src/tree/layout.rs)。
 
 ## 14. 验收条件
 

@@ -18,7 +18,6 @@ iOS 的 UIKit 宿主、Metal、原生混排和应用分发见 [iOS Embedder 实�
 - 真实文字固有尺寸、字体与 runs 的缓存键、CJK 换行及基线的跨宿主验收。
 - 图片资源更新与固有尺寸拆分；图片作者尺寸完全迁入 style。
 - RTL 横向滚动从 inline-start 起算，物理输入在滚动核心转换一次。
-- 清理仍被原生命令测试消费的旧构造与逐字段 setter ABI；产品 TSX 已使用 view、stack、scroll、image 和统一样式。
 - 样式解析、来源更新与 Taffy 写入诊断，固定负载的多轮性能记录，以及 Android 原生截图与交互验收。
 
 ## 渲染管线

@@ -1,6 +1,6 @@
 //! Pointer samples. Each finger keeps its pointer id. Historical samples stay out.
 
-use uicore::Phase;
+use engine::input::Phase;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(

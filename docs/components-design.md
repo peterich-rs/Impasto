@@ -1,5 +1,7 @@
 # 统一对外组件与属性接口
 
+> 文中的实施阶段与代码引用反映设计或审计时的仓库结构。当前 crate 职责、源码入口和验证命令见 [架构](architecture.md)。
+
 本文是 `@impasto/solid-ui` 的对外组件合同。布局、内容、交互、输入、滚动和浮层都从该包导入；`style` / `class` / `classList` 是展示配置，`disabled`、`variant`、`controller` 等领域属性保留。底层仍是 View、Stack、Scroll、Text、Image 五种节点。样式值与来源沿用 `style-design.md`。主题作用域的原生索引仍按该文推进，不在组件里另写一套求值。
 
 ## 破坏性变更与迁移
@@ -160,7 +162,7 @@ export interface ImageProps extends ElementProps {
 
 VirtualList.contentProps 的样式域只开放绘制和继承文字字段，布局由 driver 拥有；class 同样按解析后的 Key 校验，不能绕过限制。需要间隔或内边距时由驱动明确支持，并纳入测量/extent 合同，不能简单透传 gap 后继续沿用旧行高估计。
 
-目标原生约束使用封闭的 `StyleSurface`：`General`、`Stack`、`ScrollViewport`、`ListContent`。Stack/Scroll 按节点种类确定；ListContent 由组件创建内部内容节点时登记。新增内部领域命令 `scene.setStyleSurface(node, "list-content")` 经 abi.yml 生成并调用 Tree，不为每个属性增加 C 函数。登记时先校验已接受的声明；失败不得改变约束。约束按来源分类：preset/component 保存组件拥有的结构，class/inline/imperative/animation 均受作者样式域限制。该约束是组件正确性合同，不是脚本安全沙箱。违反约束返回包含节点、来源和 Key 的 StyleError，不能先写入 Taffy 再撤销。
+目标原生约束使用封闭的 `StyleSurface`：`General`、`Stack`、`ScrollViewport`、`ListContent`。Stack/Scroll 按节点种类确定；ListContent 由组件创建内部内容节点时登记。新增内部领域命令 `scene.setStyleSurface(node, "list-content")` 由 QuickJS 具名绑定调用 Tree。登记时先校验已接受的声明；失败不得改变约束。约束按来源分类：preset/component 保存组件拥有的结构，class/inline/imperative/animation 均受作者样式域限制。该约束是组件正确性合同，不是脚本安全沙箱。违反约束返回包含节点、来源和 Key 的 StyleError，不能先写入 Taffy 再撤销。
 
 ScrollArea.contentMin 当前还参与控制器估计，保持领域参数，单独审计其最终归属；作者最小尺寸通过 contentProps.style 声明，不能在 TS 中读取并解释 CSS 长度来驱动滚动。
 

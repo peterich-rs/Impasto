@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use session::{Method, MethodExec, Module, ModuleExports, PluginResult, PluginValue, Settle};
+use engine::session::{
+    Method, MethodExec, Module, ModuleExports, PluginResult, PluginValue, Settle,
+};
 
 use super::{str_arg, string_list};
 

@@ -110,18 +110,12 @@ export function installMockHost(): MockHost {
   }
 
   const host = {
-    column: (gap: number) => alloc("column", [gap]),
-    row: (gap: number) => alloc("row", [gap]),
-    stack: () => alloc("stack", []),
-    align: (align: string) => alloc("align", [align]),
-    padding: (edges: number) => alloc("padding", [edges]),
-    pointerRegion: () => alloc("pointerRegion", []),
-    clip: (radius: number) => alloc("clip", [radius]),
-    opacity: (alpha: number) => alloc("opacity", [alpha]),
-    scroll: (axis?: number) => alloc("scroll", [axis]),
-    setScrollAxis: (node: number, axis: number) => {
-      calls.push({ name: "setScrollAxis", args: [node, axis] });
+    createElement(tag: string, props?: Record<string, unknown>) {
+      const id = alloc(tag, tag === "text" ? [props?.value] : []);
+      if (props?.style !== undefined) host.setStyle(id, props.style);
+      return id;
     },
+    createTextNode: (value: string | number) => alloc("text", [value]),
     onDriver: (
       fn: (
         kind: number,
@@ -212,14 +206,10 @@ export function installMockHost(): MockHost {
         id: () => ({ index, generation }),
       };
     },
-    transform: () => alloc("transform", []),
-    decorated: (color: number[], radius = 0) => alloc("decorated", [color, radius]),
-    image: (source: string, width: number, height: number) => alloc("image", [source, width, height]),
-    text: (utf8: string, fontSize: number, color: number[]) => alloc("text", [utf8, fontSize, color]),
     append: (parent: number, child: number) => {
-      host.insert(parent, child, 0);
+      host.insertNode(parent, child);
     },
-    insert: (parent: number, child: number, before: number) => {
+    insertNode: (parent: number, child: number, before = 0) => {
       const parentNode = nodes.get(parent);
       const childNode = nodes.get(child);
       if (parentNode === undefined || childNode === undefined) {
@@ -284,10 +274,6 @@ export function installMockHost(): MockHost {
       texts.set(node, utf8);
       calls.push({ name: "setText", args: [node, utf8] });
     },
-    setFontSize: (node: number, fontSize: number) => {
-      calls.push({ name: "setFontSize", args: [node, fontSize] });
-    },
-    view: () => alloc("view", []),
     setStyle: (node: number, style: unknown) => {
       calls.push({ name: "setStyle", args: [node, style] });
     },
@@ -306,33 +292,6 @@ export function installMockHost(): MockHost {
     setComponentStyle: (node: number, style: unknown) => {
       calls.push({ name: "setComponentStyle", args: [node, style] });
     },
-    setColor: (node: number, color: number[]) => {
-      calls.push({ name: "setColor", args: [node, color] });
-    },
-    setGap: (node: number, gap: number) => {
-      calls.push({ name: "setGap", args: [node, gap] });
-    },
-    setPadding: (node: number, edges: number) => {
-      calls.push({ name: "setPadding", args: [node, edges] });
-    },
-    setPaddingEdges: (node: number, top: number, right: number, bottom: number, left: number) => {
-      calls.push({ name: "setPaddingEdges", args: [node, top, right, bottom, left] });
-    },
-    setPaddingEdge: (node: number, edge: number, value: number) => {
-      calls.push({ name: "setPaddingEdge", args: [node, edge, value] });
-    },
-    setInsetEdge: (node: number, edge: number, value: number | null) => {
-      calls.push({ name: "setInsetEdge", args: [node, edge, value] });
-    },
-    setTransformComponent: (node: number, component: number, value: number) => {
-      calls.push({ name: "setTransformComponent", args: [node, component, value] });
-    },
-    setSizeAxis: (node: number, axis: number, kind: number, value: number) => {
-      calls.push({ name: "setSizeAxis", args: [node, axis, kind, value] });
-    },
-    setGridLine: (node: number, edge: number, kind: number, value: number) => {
-      calls.push({ name: "setGridLine", args: [node, edge, kind, value] });
-    },
     placePanel: (panel: number, anchor: number, align: number) => {
       calls.push({ name: "placePanel", args: [panel, anchor, align] });
     },
@@ -346,69 +305,13 @@ export function installMockHost(): MockHost {
     setTextLimit: (node: number, limit: number) => {
       calls.push({ name: "setTextLimit", args: [node, limit] });
     },
-    setGrow: (node: number, grow: number) => {
-      calls.push({ name: "setGrow", args: [node, grow] });
-    },
-    setShrink: () => {},
-    setBasis: () => {},
-    setMargin: () => {},
-    setMinAxis: () => {},
-    setMaxAxis: () => {},
-    setAspectRatio: () => {},
-    setAlignSelf: (node: number, align: string) => {
-      calls.push({ name: "setAlignSelf", args: [node, align] });
-    },
-    setRadius: (node: number, radius: number) => {
-      calls.push({ name: "setRadius", args: [node, radius] });
-    },
-    setAlpha: (node: number, alpha: number) => {
-      calls.push({ name: "setAlpha", args: [node, alpha] });
-    },
-    setAlign: (node: number, align: string) => {
-      if (nodes.get(node)?.kind !== "align") {
-        throw new Error("setAlign failed");
-      }
-      calls.push({ name: "setAlign", args: [node, align] });
-    },
-    setCross: (node: number, align: string) => {
-      calls.push({ name: "setCross", args: [node, align] });
-    },
     metrics: () => ({
       width: 360,
       height: 640,
       viewInsets: { top: 0, right: 0, bottom: 0, left: 0 },
     }),
-    setAxisSize: (node: number, width: unknown, height: unknown) => {
-      calls.push({ name: "setAxisSize", args: [node, width, height] });
-    },
-    setSize: (node: number, width: number, height: number) => {
-      calls.push({ name: "setSize", args: [node, width, height] });
-    },
     setImage: (node: number, source: string, width: number, height: number) => {
       calls.push({ name: "setImage", args: [node, source, width, height] });
-    },
-    setMaxLines: (node: number, lines: number) => {
-      calls.push({ name: "setMaxLines", args: [node, lines] });
-    },
-    setEllipsis: (node: number, text: string) => {
-      calls.push({ name: "setEllipsis", args: [node, text] });
-    },
-    setSoftWrap: () => {},
-    setOverflow: () => {},
-    setTextAlign: (node: number, align: string) => {
-      calls.push({ name: "setTextAlign", args: [node, align] });
-    },
-    setFontWeight: (node: number, weight: number) => {
-      calls.push({ name: "setFontWeight", args: [node, weight] });
-    },
-    setTextDirection: (node: number, direction: string) => {
-      calls.push({ name: "setTextDirection", args: [node, direction] });
-    },
-    setLineHeight: (node: number, height: number) => {
-      calls.push({ name: "setLineHeight", args: [node, height] });
-    },
-    setFamily: (node: number, family: string) => {
-      calls.push({ name: "setFamily", args: [node, family] });
     },
     setScrollOffset: (node: number, x: number, y: number) => {
       calls.push({ name: "setScrollOffset", args: [node, x, y] });
@@ -422,23 +325,6 @@ export function installMockHost(): MockHost {
     onScrollState: () => {},
     scrollOffset: () => ({ x: 0, y: 0 }),
     rect: () => ({ x: 0, y: 40, w: 100, h: 200 }),
-    setTransform: (node: number, x: number, y: number, rotate: number, scale: number) => {
-      calls.push({ name: "setTransform", args: [node, x, y, rotate, scale] });
-    },
-    setJustify: (node: number, justify: string) => {
-      calls.push({ name: "setJustify", args: [node, justify] });
-    },
-    setWrap: (node: number, wrap: boolean) => {
-      calls.push({ name: "setWrap", args: [node, wrap] });
-    },
-    setFill: (node: number) => {
-      calls.push({ name: "setFill", args: [node] });
-    },
-    sized: (width: number, height: number) => alloc("sized", [width, height]),
-    setMinSize: (node: number, width: number, height: number) => {
-      calls.push({ name: "setMinSize", args: [node, width, height] });
-    },
-    setMaxSize: () => {},
     textEdit: (node: number, op: number, extra: string) => {
       calls.push({ name: "textEdit", args: [node, op, extra] });
       const text = extra ?? "";
@@ -535,13 +421,6 @@ export function installMockHost(): MockHost {
       calls.push({ name: "onLayout", args: [typeof fn] });
     },
     setDragClaim: () => {},
-    setPosition: (node: number, absolute: boolean) => {
-      calls.push({ name: "setPosition", args: [node, absolute] });
-    },
-    setInset: (node: number, top: number, right: number, bottom: number, left: number) => {
-      calls.push({ name: "setInset", args: [node, top, right, bottom, left] });
-    },
-    setGridPlacement: () => {},
     caretAt: () => ({ unit: 0, x: 0, y: 0, w: 1, h: 16 }),
     caretAtUnit: () => ({ x: 0, y: 0, w: 1, h: 16 }),
     selectionRects: () => [],
