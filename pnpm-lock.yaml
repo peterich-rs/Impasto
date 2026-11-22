@@ -74,13 +74,13 @@ importers:
         specifier: 2.0.0
         version: 2.0.0
 
+  packages/http: {}
+
   packages/i18n: {}
 
   packages/linking: {}
 
   packages/native-plugins: {}
-
-  packages/net: {}
 
   packages/permissions: {}
 
@@ -122,6 +122,8 @@ importers:
       solid-js:
         specifier: 2.0.0
         version: 2.0.0
+
+  packages/websocket: {}
 
 packages:
 

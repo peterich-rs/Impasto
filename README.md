@@ -90,7 +90,7 @@ packages/
 ├── solid-router/       路由栈与转场
 ├── devtools/           应用内调试面板
 └── *                   平台能力与工具包（app-state、async-storage、clipboard、
-                        file-system、form、i18n、linking、native-plugins、net、permissions）
+                        file-system、form、http、i18n、linking、native-plugins、permissions、websocket）
 
 apps/
 ├── gallery-solid/      模拟盘示例应用
