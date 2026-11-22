@@ -4,6 +4,7 @@ use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use anyhow::Context;
 use embedder::{NativePtr, Presented, Surface};
@@ -18,19 +19,15 @@ use crate::pixels::write_bgra_png;
 pub struct MetalSurface {
     layer: NativePtr,
     dump: Option<PathBuf>,
-    on_stop: Arc<dyn Fn(i32) + Send + Sync>,
+    exit_code: Arc<AtomicI32>,
 }
 
 impl MetalSurface {
-    pub fn new(
-        layer: NativePtr,
-        dump: Option<PathBuf>,
-        on_stop: Arc<dyn Fn(i32) + Send + Sync>,
-    ) -> Self {
+    pub fn new(layer: NativePtr, dump: Option<PathBuf>, exit_code: Arc<AtomicI32>) -> Self {
         Self {
             layer,
             dump,
-            on_stop,
+            exit_code,
         }
     }
 
@@ -48,12 +45,11 @@ impl MetalSurface {
         };
         if let Err(error) = read_drawable_png(&drawable, path) {
             tracing::error!(target: "impasto::shell", %error, path = %path.display(), "dump write failed");
-            (self.on_stop)(1);
+            self.exit_code.store(1, Ordering::SeqCst);
             return Ok(Presented::Stop);
         }
         tracing::info!(target: "impasto::shell", "frame dumped");
         let _ = std::io::Write::flush(&mut std::io::stdout());
-        (self.on_stop)(0);
         Ok(Presented::Stop)
     }
 }

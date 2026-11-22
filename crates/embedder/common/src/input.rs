@@ -1,3 +1,4 @@
+use crate::command::Command;
 use std::collections::{HashSet, VecDeque};
 
 use engine::input::{Button, Buttons, Phase, PointerEvent, PointerId, PointerKind};
@@ -548,5 +549,94 @@ mod tests {
         assert!(input.set_metrics(landscape));
         assert!(!input.set_metrics(portrait));
         assert!(input.begin_frame().metrics.is_none());
+    }
+}
+
+pub(crate) fn push_coalesced(commands: &mut VecDeque<Command>, command: Command) {
+    if let Command::BackGesture(engine::session::BackGesture::Progress(next)) = command
+        && let Some(Command::BackGesture(engine::session::BackGesture::Progress(previous))) =
+            commands.back_mut()
+    {
+        *previous = next;
+        return;
+    }
+    if let Command::Pointer(next) = command
+        && next.phase == Phase::Move
+        && let Some(Command::Pointer(previous)) = commands.back_mut()
+        && previous.phase == Phase::Move
+        && previous.pointer == next.pointer
+    {
+        *previous = next;
+        return;
+    }
+    if let Command::WindowStateChanged(key) = &command
+        && let Some(index) = commands.iter().rposition(
+            |queued| matches!(queued, Command::WindowStateChanged(queued) if key == queued),
+        )
+    {
+        commands.remove(index);
+    }
+    if let Command::ExternalTexture { source, .. } = &command
+        && let Some(index) = commands.iter().rposition(|queued| {
+            matches!(queued, Command::ExternalTexture { source: queued, .. } if source == queued)
+        })
+    {
+        commands.remove(index);
+    }
+    if let Command::ExternalGpuTexture { source, .. } = &command
+        && let Some(index) = commands.iter().rposition(|queued| {
+            matches!(queued, Command::ExternalGpuTexture { source: queued, .. } if source == queued)
+        })
+    {
+        commands.remove(index);
+    }
+    commands.push_back(command);
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+    use engine::input::{Phase, PointerEvent};
+
+    fn move_event(x: f32, time_ms: f64) -> PointerEvent {
+        PointerEvent::new(Phase::Move, x, 0.0, time_ms)
+    }
+
+    #[test]
+    fn adjacent_moves_collapse_to_the_latest() {
+        let mut commands = VecDeque::new();
+        push_coalesced(&mut commands, Command::Pointer(move_event(1.0, 10.0)));
+        push_coalesced(&mut commands, Command::Pointer(move_event(2.0, 18.0)));
+        assert_eq!(commands.len(), 1);
+        let Some(Command::Pointer(event)) = commands.front() else {
+            panic!("expected a pointer");
+        };
+        assert_eq!(event.x, 2.0);
+        assert_eq!(event.time_ms, 18.0);
+    }
+
+    #[test]
+    fn a_move_after_a_down_stays_in_order() {
+        let mut commands = VecDeque::new();
+        push_coalesced(
+            &mut commands,
+            Command::Pointer(PointerEvent::new(Phase::Down, 0.0, 0.0, 0.0)),
+        );
+        push_coalesced(&mut commands, Command::Pointer(move_event(3.0, 4.0)));
+        assert_eq!(commands.len(), 2);
+    }
+
+    #[test]
+    fn wheels_stay_in_order() {
+        let mut commands = VecDeque::new();
+        push_coalesced(
+            &mut commands,
+            Command::Pointer(PointerEvent::wheel(1.0, 2.0, 0.0, 0.0, 4.0)),
+        );
+        push_coalesced(
+            &mut commands,
+            Command::Pointer(PointerEvent::wheel(1.0, 2.0, 8.0, 0.0, 6.0)),
+        );
+        assert_eq!(commands.len(), 2);
     }
 }

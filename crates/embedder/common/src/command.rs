@@ -133,6 +133,7 @@ pub(crate) fn command_tag(command: &Command) -> &'static str {
         ) => "http",
         Command::Io(IoEvent::Plugin { .. }) => "plugin",
         Command::Io(IoEvent::Socket { .. }) => "socket",
+        Command::Io(IoEvent::NativeStream { .. }) => "native stream",
         Command::Io(IoEvent::Host(_)) => "host event",
         Command::Wake => "wake",
         Command::Frame { .. } => "frame",

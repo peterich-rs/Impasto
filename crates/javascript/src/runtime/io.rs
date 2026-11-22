@@ -10,7 +10,6 @@ use crate::runtime::quickjs::{Vm, codec};
 
 pub struct HttpCall {
     pub streaming: bool,
-    pub external_only: bool,
     pub token: u64,
     pub method: String,
     pub url: String,
@@ -139,7 +138,6 @@ pub(crate) unsafe fn install<'js>(
                     let (token, promise) = vm.make_promise(&ctx)?;
                     let admitted = port.http(HttpCall {
                         streaming,
-                        external_only: args.0.get(4).and_then(Value::as_bool) == Some(true),
                         token,
                         method,
                         url,

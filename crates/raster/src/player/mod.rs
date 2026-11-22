@@ -161,9 +161,17 @@ impl Rasterizer {
     }
 
     pub fn register_font(&mut self, data: &[u8], family: &str) -> Result<(), Status> {
+        self.register_shared_font(std::sync::Arc::from(data), family)
+    }
+
+    pub fn register_shared_font(
+        &mut self,
+        data: std::sync::Arc<[u8]>,
+        family: &str,
+    ) -> Result<(), Status> {
         let installed = !self.list.is_null();
         let mut typography = self.typography.borrow_mut();
-        let changed = typography.register_face(data, family)?;
+        let changed = typography.register_shared_face(data, family)?;
         if !changed {
             return Ok(());
         }

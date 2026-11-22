@@ -321,6 +321,16 @@ impl JsVm {
         if let Some(clock) = &inner.config.transport_clock {
             builder = builder.transport_clock(Arc::clone(clock));
         }
+        if matches!(
+            inner.config.script_execution,
+            crate::session::ScriptExecution::PlatformUi
+        ) {
+            builder = builder.limits(javascript::runtime::RuntimeLimits {
+                eval_budget_ms: 500,
+                callback_budget_ms: 32,
+                ..Default::default()
+            });
+        }
         let runtime = builder.build_unstarted().map_err(|_| Error::Runtime)?;
         runtime.configure_io(http.map_or_else(IoBindings::disconnected, IoBindings::inline));
         let host = Rc::new_cyclic(|weak| Host {
@@ -356,7 +366,7 @@ impl JsVm {
             })
         })?;
         self.host.eval(scene.as_bytes(), "scene.js", false)?;
-        let profile = javascript::standard::StandardProfile::legacy();
+        let profile = javascript::standard::StandardProfile::default();
         {
             let _budget = self.host.budget("eval", 0);
             self.host.with(|ctx| {

@@ -556,7 +556,7 @@ fn open_runs_entry_before_io_install_and_frame_flushes_pending() {
                 function () { console.log("fetch-ok"); },
                 function (error) { console.log("fetch-fail:" + String(error)); }
             );
-            fetchStream("https://example.test/stream").then(
+            fetch("https://example.test/stream").then(
                 function () { console.log("stream-ok"); },
                 function (error) { console.log("stream-fail:" + String(error && error.message)); }
             );
@@ -597,7 +597,7 @@ fn open_runs_entry_before_io_install_and_frame_flushes_pending() {
             "job",
             "socket-error",
             "timer",
-            "fetch-fail:TypeError",
+            "fetch-fail:TypeError: TypeError",
             "raf",
         ]
     );
@@ -634,6 +634,7 @@ fn socket_commands_and_microtasks_keep_the_previous_frame_clock() {
             })],
         }])),
         transport_clock: Some(Arc::new(move || host_clock.load(Ordering::Relaxed))),
+        script_execution: Default::default(),
         post_delivery: Some(Arc::new(move |delivery| {
             send.send(delivery).expect("post save completion");
         })),
@@ -751,9 +752,9 @@ fn startup_inline_stream_settles_after_recording_the_token() {
     let mut session = super::JsSession::open_with(
         r#"
                 const bytes = new Uint8Array([10, 11, 12, 13]).subarray(1, 3);
-                fetchStream("https://example.test/empty", {method: "POST", body: bytes})
+                fetch("https://example.test/empty", {method: "POST", body: bytes})
                     .then(async response => {
-                        const item = await response.getReader().read();
+                        const item = await response.body.getReader().read();
                         console.log("stream:" + response.status + ":" + item.done);
                     });
             "#,
@@ -1327,6 +1328,7 @@ fn test_host_with_launch_url(url: Option<String>) -> (ModuleConfig, PluginComple
         settle,
         post_delivery: None,
         transport_clock: None,
+        script_execution: Default::default(),
         app_state,
         launch_url,
     };
@@ -1643,6 +1645,7 @@ fn gallery_host() -> ModuleConfig {
         settle: std::sync::Arc::new(|_token| session::Settle::new(|_result| {})),
         post_delivery: None,
         transport_clock: None,
+        script_execution: Default::default(),
         app_state: session::shared("active".to_owned()),
         launch_url: session::shared(None),
     }
@@ -4561,7 +4564,7 @@ import * as core from "scene";
         assert_eq!(queued.len(), 9, "{queued:?}");
         assert!(session.take_fonts().is_empty());
         let replaced = queued.iter().find(|(name, _)| name == "F0").expect("F0");
-        assert_eq!(replaced.1, vec![9, 9]);
+        assert_eq!(replaced.1.as_ref(), &[9, 9]);
         assert!(queued.iter().any(|(name, _)| name == "Sans"));
         assert!(queued.iter().all(|(name, _)| name != "Extra"));
         let listed = session.frame(session::FrameTime::at(0.0));
@@ -4578,7 +4581,7 @@ import * as core from "scene";
         let again = listed.fonts;
         assert_eq!(again.len(), 1, "{again:?}");
         assert_eq!(again[0].0, "F0");
-        assert_eq!(again[0].1, vec![8]);
+        assert_eq!(again[0].1.as_ref(), &[8]);
     }
 }
 
@@ -4614,7 +4617,7 @@ import * as core from "scene";
         let queued = listed.fonts;
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].0, "Keep");
-        assert_eq!(queued[0].1, vec![7]);
+        assert_eq!(queued[0].1.as_ref(), &[7]);
     }
 }
 

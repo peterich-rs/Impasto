@@ -151,7 +151,7 @@ mod tests {
                     Ok(PluginValue::Str(path)) => assert_eq!(path, "/tmp/file-system"),
                     other => panic!("{other:?}"),
                 },
-                Invoke::Promise(_) => panic!("documentDirectory must be sync"),
+                _ => panic!("documentDirectory must be sync"),
             },
             None => panic!("documentDirectory"),
         }

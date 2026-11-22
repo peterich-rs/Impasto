@@ -838,7 +838,6 @@ fn command_key(selector: &str) -> Option<engine::session::KeyPress> {
 struct MacServices {
     font: Vec<u8>,
     ime_view: Arc<AtomicPtr<c_void>>,
-    on_stop: Arc<dyn Fn(i32) + Send + Sync>,
 }
 
 /// Source maps larger than this stay off the panel. The bundle's map is small.
@@ -864,7 +863,7 @@ impl Services for MacServices {
             return;
         }
         let nodes = nodes.to_vec();
-        dispatch_main(Box::new(move || {
+        on_main(Box::new(move || {
             // SAFETY: the address is the content view stored on the main thread, and this closure runs there too.
             let view = unsafe { &*(view as *const ContentView) };
             view.apply_semantics(&nodes);
@@ -893,7 +892,7 @@ impl Services for MacServices {
             return;
         }
         let update = update.clone();
-        dispatch_main(Box::new(move || {
+        on_main(Box::new(move || {
             // SAFETY: the address is the content view stored on the main thread, and this closure runs there too.
             let view = unsafe { &*(view as *const ContentView) };
             view.apply_ime_update(&update);
@@ -901,7 +900,11 @@ impl Services for MacServices {
     }
 
     fn inspect_finished(&self) {
-        (self.on_stop)(0);
+        wake_main();
+    }
+
+    fn request_exit(&self) {
+        wake_main();
     }
 }
 
@@ -956,11 +959,6 @@ pub fn run(
         .map(PathBuf::from)
         .or_else(|| inspect.as_ref().map(|dir| dir.join("frame.png")));
     let exit_code = Arc::new(AtomicI32::new(0));
-    let exit_for_stop = Arc::clone(&exit_code);
-    let on_stop: Arc<dyn Fn(i32) + Send + Sync> = Arc::new(move |code| {
-        exit_for_stop.store(code, Ordering::SeqCst);
-        wake_main();
-    });
     let Launch::Script {
         name,
         source,
@@ -1007,7 +1005,7 @@ pub fn run(
         })
     }));
     let dump_for_surface = dump;
-    let on_stop_for_surface = Arc::clone(&on_stop);
+    let exit_for_surface = Arc::clone(&exit_code);
     let ime_view = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
     let decoder = Arc::new(PngDecoder { directory: assets });
     let launch_url = engine::session::shared(initial_url.clone());
@@ -1026,12 +1024,17 @@ pub fn run(
             services: Box::new(MacServices {
                 font: font.to_vec(),
                 ime_view: Arc::clone(&ime_view),
-                on_stop: Arc::clone(&on_stop),
             }),
             vsync: Arc::new(vsync),
             decoder,
             modules: Vec::new(),
-            main_thread: Some(Arc::new(dispatch_main)),
+            platform_runner: Some(embedder::PlatformTaskRunner::new(
+                Arc::new(dispatch_main),
+                dispatch_main_after,
+                || MainThreadMarker::new().is_some(),
+            )),
+            thread_topology: embedder::ThreadTopology::configured()
+                .map_err(|error| RunError::Window(error.into()))?,
             launch_url: Arc::clone(&launch_url),
             http: Some(
                 embedder::http_client()
@@ -1042,7 +1045,7 @@ pub fn run(
                 Ok(Box::new(MetalSurface::new(
                     target.layer,
                     dump_for_surface.clone(),
-                    Arc::clone(&on_stop_for_surface),
+                    Arc::clone(&exit_for_surface),
                 )))
             }),
             dump_list,
@@ -1481,6 +1484,24 @@ fn dispatch_main(work: Box<dyn FnOnce() + Send>) {
     }
 }
 
+fn dispatch_main_after(delay: std::time::Duration, work: embedder::Task) {
+    let nanos = i64::try_from(delay.as_nanos()).unwrap_or(i64::MAX);
+    let context = Box::into_raw(Box::new(work));
+    // SAFETY: Dispatch owns the boxed closure until its main-queue callback.
+    unsafe {
+        let queue = std::ptr::addr_of!(_dispatch_main_q).cast_mut().cast();
+        dispatch_after_f(dispatch_time(0, nanos), queue, context.cast(), run_on_main);
+    }
+}
+
+fn on_main(work: embedder::Task) {
+    if MainThreadMarker::new().is_some() {
+        work();
+    } else {
+        dispatch_main(work);
+    }
+}
+
 // SAFETY: `dispatch_async_f` calls this once with the pointer passed as `context`.
 unsafe extern "C" fn run_on_main(context: *mut c_void) {
     // SAFETY: `context` is the boxed closure from `dispatch_main`, and this call takes it once.
@@ -1491,6 +1512,13 @@ unsafe extern "C" fn run_on_main(context: *mut c_void) {
 // SAFETY: these are the libdispatch symbols used to hop to the main queue.
 unsafe extern "C" {
     static _dispatch_main_q: u8;
+    fn dispatch_time(when: u64, delta: i64) -> u64;
+    fn dispatch_after_f(
+        when: u64,
+        queue: *mut c_void,
+        context: *mut c_void,
+        work: unsafe extern "C" fn(*mut c_void),
+    );
     fn dispatch_async_f(
         queue: *mut c_void,
         context: *mut c_void,

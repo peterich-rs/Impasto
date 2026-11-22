@@ -8,7 +8,7 @@ use crate::runtime::ModuleCatalog;
 use crate::runtime::modules::{MemoryLoader, MemoryResolver, NativeFactory};
 use crate::runtime::quickjs::AcquireStop;
 use crate::runtime::resources::Wake;
-use crate::standard::StandardProfile;
+use crate::standard::{EntropySource, StandardProfile, SystemEntropy};
 
 use super::{
     Arc, Cell, CreditPool, Ctx, DrivePolicy, ErrorKind, HashMap, HttpClient, HttpMode, Inbox,
@@ -25,6 +25,7 @@ pub struct RuntimeBuilder {
     log: Log,
     wake: Option<Wake>,
     profile: StandardProfile,
+    entropy: Arc<dyn EntropySource>,
     limits: RuntimeLimits,
     policy: DrivePolicy,
     generation: u64,
@@ -59,7 +60,8 @@ impl RuntimeBuilder {
             io: IoBindings::jobs(),
             log: Box::new(|_, _| {}),
             wake: None,
-            profile: StandardProfile::legacy(),
+            profile: StandardProfile::default(),
+            entropy: Arc::new(SystemEntropy),
             limits: RuntimeLimits::default(),
             policy: DrivePolicy::LegacyStrict,
             generation: 1,
@@ -86,6 +88,11 @@ impl RuntimeBuilder {
 
     pub fn standard(mut self, profile: StandardProfile) -> Self {
         self.profile = profile;
+        self
+    }
+
+    pub fn entropy(mut self, entropy: Arc<dyn EntropySource>) -> Self {
+        self.entropy = entropy;
         self
     }
 
@@ -148,8 +155,9 @@ impl RuntimeBuilder {
 
     pub fn build(self) -> Result<Runtime, JsError> {
         let stop = self.stop;
+        let entropy = Arc::clone(&self.entropy);
         let profile = self.profile.with_transports(
-            matches!(self.io.http, HttpMode::External(_)),
+            !matches!(self.io.http, HttpMode::Disconnected),
             self.io.socket.is_some(),
         );
         let bindings =
@@ -175,7 +183,7 @@ impl RuntimeBuilder {
                     stop == Some(BootStop::Bindings),
                 )?;
                 runtime.install_modules(&ctx, bindings, |_: &Ctx<'_>| Ok(()), None, None)?;
-                crate::standard::install_web(&ctx, profile)?;
+                crate::standard::install_with_entropy(&ctx, profile, entropy)?;
                 if stop == Some(BootStop::Web) {
                     return Err(rquickjs::Exception::throw_internal(
                         &ctx,
@@ -249,6 +257,7 @@ impl RuntimeBuilder {
                 inbox: Arc::new(Inbox::new(key, self.wake)),
                 local: RefCell::new(VecDeque::new()),
                 resources: RefCell::new(Resources::default()),
+                native_resources: Rc::default(),
                 ingress: Arc::new(CreditPool::new(
                     limits.queue_bytes,
                     limits.queue_events,

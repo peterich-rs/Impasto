@@ -1,18 +1,24 @@
 use std::collections::VecDeque;
-use std::sync::{Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use engine::input::Phase;
-
+use crate::BootError;
 use crate::command::Command;
+use crate::host::UiHost;
+use crate::input::push_coalesced;
+
+pub(crate) type Completion = Box<dyn FnOnce(&mut UiHost) -> Result<bool, BootError> + Send>;
+
+type Notify = Arc<dyn Fn() + Send + Sync>;
 
 pub struct Inbox {
     state: Mutex<State>,
-    cv: Condvar,
 }
 
 struct State {
     commands: VecDeque<Command>,
+    completions: VecDeque<Completion>,
     closed: bool,
+    notify: Option<Notify>,
 }
 
 impl Inbox {
@@ -20,138 +26,90 @@ impl Inbox {
         Self {
             state: Mutex::new(State {
                 commands: VecDeque::new(),
+                completions: VecDeque::new(),
                 closed: false,
+                notify: None,
             }),
-            cv: Condvar::new(),
+        }
+    }
+
+    pub fn bind(&self, notify: Notify) {
+        let pending = {
+            let mut state = lock(&self.state);
+            state.notify = Some(Arc::clone(&notify));
+            !state.commands.is_empty() || !state.completions.is_empty()
+        };
+        if pending {
+            notify();
         }
     }
 
     pub fn post(&self, command: Command) {
-        let mut state = lock(&self.state);
-        if state.closed {
-            return;
+        let notify = {
+            let mut state = lock(&self.state);
+            if state.closed {
+                return;
+            }
+            let notify = (state.commands.is_empty() && state.completions.is_empty())
+                .then(|| state.notify.clone())
+                .flatten();
+            push_coalesced(&mut state.commands, command);
+            notify
+        };
+        if let Some(notify) = notify {
+            notify();
         }
-        push_coalesced(&mut state.commands, command);
-        drop(state);
-        self.cv.notify_one();
+    }
+
+    pub(crate) fn complete(&self, completion: Completion) {
+        let notify = {
+            let mut state = lock(&self.state);
+            if state.closed {
+                return;
+            }
+            state.completions.push_back(completion);
+            state.notify.clone()
+        };
+        if let Some(notify) = notify {
+            notify();
+        }
+    }
+
+    pub(crate) fn take_completion(&self) -> Option<Completion> {
+        lock(&self.state).completions.pop_front()
     }
 
     pub fn close(&self) {
         let commands = {
             let mut state = lock(&self.state);
             state.closed = true;
-            std::mem::take(&mut state.commands)
+            state.notify = None;
+            (
+                std::mem::take(&mut state.commands),
+                std::mem::take(&mut state.completions),
+            )
         };
-        self.cv.notify_all();
         drop(commands);
     }
 
-    pub fn recv(&self) -> Option<Command> {
-        let mut state = lock(&self.state);
-        loop {
-            if let Some(command) = state.commands.pop_front() {
-                return Some(command);
-            }
-            if state.closed {
-                return None;
-            }
-            state = self
-                .cv
-                .wait(state)
-                .unwrap_or_else(|error| error.into_inner());
-        }
+    pub fn discard_surface(&self, id: crate::SurfaceId) {
+        lock(&self.state).commands.retain(|command| match command {
+            Command::SurfaceReady(target) => target.id != id,
+            Command::SurfaceChanged { id: queued, .. } => *queued != id,
+            _ => true,
+        });
     }
-}
 
-pub fn push_coalesced(commands: &mut VecDeque<Command>, command: Command) {
-    if let Command::BackGesture(engine::session::BackGesture::Progress(next)) = command
-        && let Some(Command::BackGesture(engine::session::BackGesture::Progress(previous))) =
-            commands.back_mut()
-    {
-        *previous = next;
-        return;
+    pub fn pop(&self) -> Option<Command> {
+        lock(&self.state).commands.pop_front()
     }
-    if let Command::Pointer(next) = command
-        && next.phase == Phase::Move
-        && let Some(Command::Pointer(previous)) = commands.back_mut()
-        && previous.phase == Phase::Move
-        && previous.pointer == next.pointer
-    {
-        *previous = next;
-        return;
+
+    pub fn has_pending(&self) -> bool {
+        let state = lock(&self.state);
+        !state.commands.is_empty() || !state.completions.is_empty()
     }
-    if let Command::WindowStateChanged(key) = &command
-        && let Some(index) = commands.iter().rposition(
-            |queued| matches!(queued, Command::WindowStateChanged(queued) if key == queued),
-        )
-    {
-        commands.remove(index);
-    }
-    if let Command::ExternalTexture { source, .. } = &command
-        && let Some(index) = commands.iter().rposition(|queued| {
-            matches!(queued, Command::ExternalTexture { source: queued, .. } if source == queued)
-        })
-    {
-        commands.remove(index);
-    }
-    if let Command::ExternalGpuTexture { source, .. } = &command
-        && let Some(index) = commands.iter().rposition(|queued| {
-            matches!(queued, Command::ExternalGpuTexture { source: queued, .. } if source == queued)
-        })
-    {
-        commands.remove(index);
-    }
-    commands.push_back(command);
 }
 
 fn lock(mutex: &Mutex<State>) -> MutexGuard<'_, State> {
     mutex.lock().unwrap_or_else(|error| error.into_inner())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use engine::input::{Phase, PointerEvent};
-
-    fn move_event(x: f32, time_ms: f64) -> PointerEvent {
-        PointerEvent::new(Phase::Move, x, 0.0, time_ms)
-    }
-
-    #[test]
-    fn adjacent_moves_collapse_to_the_latest() {
-        let mut commands = VecDeque::new();
-        push_coalesced(&mut commands, Command::Pointer(move_event(1.0, 10.0)));
-        push_coalesced(&mut commands, Command::Pointer(move_event(2.0, 18.0)));
-        assert_eq!(commands.len(), 1);
-        let Some(Command::Pointer(event)) = commands.front() else {
-            panic!("expected a pointer");
-        };
-        assert_eq!(event.x, 2.0);
-        assert_eq!(event.time_ms, 18.0);
-    }
-
-    #[test]
-    fn a_move_after_a_down_stays_in_order() {
-        let mut commands = VecDeque::new();
-        push_coalesced(
-            &mut commands,
-            Command::Pointer(PointerEvent::new(Phase::Down, 0.0, 0.0, 0.0)),
-        );
-        push_coalesced(&mut commands, Command::Pointer(move_event(3.0, 4.0)));
-        assert_eq!(commands.len(), 2);
-    }
-
-    #[test]
-    fn wheels_stay_in_order() {
-        let mut commands = VecDeque::new();
-        push_coalesced(
-            &mut commands,
-            Command::Pointer(PointerEvent::wheel(1.0, 2.0, 0.0, 0.0, 4.0)),
-        );
-        push_coalesced(
-            &mut commands,
-            Command::Pointer(PointerEvent::wheel(1.0, 2.0, 8.0, 0.0, 6.0)),
-        );
-        assert_eq!(commands.len(), 2);
-    }
 }

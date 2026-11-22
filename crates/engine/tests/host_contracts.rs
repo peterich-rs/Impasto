@@ -658,6 +658,7 @@ fn module_config_literal_and_shared_slots_keep_their_defaults() {
         exec: Arc::new(ImmediateExec),
         post_delivery: None,
         transport_clock: None,
+        script_execution: Default::default(),
         settle: Arc::new(|_token| Settle::new(|_result| {})),
         app_state: shared("active".to_owned()),
         launch_url: shared(Some("impasto://open".to_owned())),

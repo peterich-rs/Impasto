@@ -2,7 +2,7 @@
 
 ## Rust 标准库复验
 
-`just standard-check` 校验 `legacy` 和 `portable` 的四种传输组合。检查从 Rust 绑定模块逐组生成声明，核对 QuickJS 中的全局值、构造器、静态成员、原型成员及继承，并用同一份用例验证 TypeScript 和 QuickJS。`AbortSignal` 直接构造属于 `legacy`，由两组声明分别表达。
+`just standard-check` 校验 full、HTTP-only、socket-only 和 offline 四种传输组合。检查从 Rust 模块生成声明，核对 QuickJS 中的全局值、构造器、静态成员、原型成员及继承，并用同一份用例验证 TypeScript 和 QuickJS。
 
 声明契约检查覆盖五组配置。Rust workspace 串行通过 680 项，忽略 8 项。`js`、`js-host`、`js-headless` 和 `quickjs` 的全目标 Clippy 通过。Android debug APK 构建通过，Pixel 9 用独立应用 ID 冷启动并提交 Vulkan 首帧。
 
@@ -34,7 +34,7 @@ Release 在同一 macOS 上用同一 Gallery bundle 和夹具交错测量，每�
 - `javascript::runtime` 管理 VM、宿主模块、值转换、任务和资源。独立运行入口是 `cargo run --locked -p javascript --bin js-headless`，验收了严格编译的 IQJS 模块、同步和 Promise 方法、owned 模块事件、标准库与外部传输。
 - `engine::js` 在显式扩展内安装 UI 绑定。源码与受信任字节码入口保留原引导检查点，入口后接入 Shell 外部传输。外部完成仍在命令点交付，启动和本地积压在帧内按 HTTP、模块、socket 的顺序交付。UI 保留严格 job checkpoint 和原 reactive、布局、Canvas 顺序。
 - 本地 HTTP 使用 Inline 或 External 中的一种。启动流错误在 JS 登记之后交付，空 EOF 关闭 reader，abort 立即释放请求及 Promise。带数据的末块按数据计费，空终结事件可用预留位置。后台 credit 等待与 `embedder` 的命令接收分离，Runtime 关闭时唤醒等待者。`embedder` 的 HTTP 重定向逐跳限制为 HTTP 或 HTTPS，并保留 HTTPS 降级拒绝。
-- `legacy` 保留整响应 `fetch`、`fetchStream().getReader()` 和 HTTP 错误名称。共享的 Body 实现修正空流、读中取消、终结后保留未读数据和读取失败。`portable` 的 fetch 在响应头到达时结算，要求 External。当前声明覆盖的 Web 子集见 `crates/javascript/src/standard`。URL 使用锁中的 `url 2.5.8`，编码覆盖 UTF-8 和流式解码。Web 子集用 QuickJS 执行等价边界夹具。
+- `fetch` 在响应头到达时结算。请求可以由外部传输或显式注入的 Inline HTTP 客户端完成。Web 和原生扩展夹具覆盖空流、读取中取消、终结后保留未读数据、额度释放、宿主资源关闭和 GC。URL 使用锁中的 `url 2.5.8`，编码覆盖 UTF-8 与流式解码。
 - 后端的 loader 和受信任字节码加载位于 `runtime/quickjs`，扩展可使用 `javascript::runtime::NativeFactory`。一般编译和票据入口使用目录和自有结果。字节码使用原 IQJS 封套。CLI 独立 bundle 使用首方模块目录，macOS 和 Android 打包使用应用与目标声明的模块目录。
 - 兼容入口的消费者包括现有 `open_program_with_io` 和 `open_trusted_bytecode_with_io` 的调用方，以及基于旧 `IoEvent` 的测试和嵌入者。平台主路径走 `Delivery`。兼容 token 入口在这些消费者迁到显式路由和完成工厂后再删除。
 - 保持提前装配。空 VM 与 UI 测得约 1 ms 增量，Gallery 启动的中位数接近基线，当前样本未显示拆出独立 lazy 安装的收益。
@@ -69,7 +69,7 @@ Release 基线和候选使用同一 Gallery bundle 和同一测试夹具。各�
 
 点击维持 2 次 reactive 更新、53 次 setter。滚动维持 2 次更新、24 次 setter。屏外 Canvas、批量 Canvas 和固定布局的不变量由 workspace 回归校验。原始样本、二进制与锁文件哈希、测试日志、APK 验收日志和首帧 PNG 保存在仓库根的 `target/js-runtime-acceptance/`。
 
-另用相同的 legacy `fetchStream` 夹具交错测量有请求在途且尚无事件的 512 次 `drive`，再投递 16 个 16 KiB chunk 并读取。各侧预热 2 轮和测量 20 轮。空转驱动中位数为 5.75 → 68.73 µs，两侧均无 Rust 分配。256 KiB 入队并交付的中位数为 21.81 → 108.42 µs，读取中位数为 23.85 → 37.77 µs。入队和交付的 Rust 累积分配为 265,440 → 266,032 字节。排队后的 QuickJS 分配快照为 176,248 → 651,344 字节。候选把 chunk 复制进 QuickJS heap，由 VM 上限约束应用持有的数据，基线的外部 buffer 不列入该 heap 快照。原始数据见 `target/js-runtime-acceptance/transport-bench/`。
+历史基准测试使用当时的专用 HTTP 流夹具交错测量有请求在途且尚无事件的 512 次 `drive`，再投递 16 个 16 KiB chunk 并读取。各侧预热 2 轮和测量 20 轮。空转驱动中位数为 5.75 → 68.73 µs，两侧均无 Rust 分配。256 KiB 入队并交付的中位数为 21.81 → 108.42 µs，读取中位数为 23.85 → 37.77 µs。入队和交付的 Rust 累积分配为 265,440 → 266,032 字节。排队后的 QuickJS 分配快照为 176,248 → 651,344 字节。候选把 chunk 复制进 QuickJS heap，由 VM 上限约束应用持有的数据，基线的外部 buffer 不列入该 heap 快照。原始数据见 `target/js-runtime-acceptance/transport-bench/`。
 
 ## 待验证
 

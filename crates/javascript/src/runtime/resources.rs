@@ -35,6 +35,7 @@ pub(crate) enum Kind {
     Http,
     Stream { head: bool },
     Plugin,
+    NativeStream,
     Socket(SocketState),
 }
 
@@ -75,7 +76,14 @@ impl Resources {
     }
 
     pub fn requests(&self) -> usize {
-        self.entries.len() - self.sockets()
+        self.entries
+            .values()
+            .filter(|resource| match resource.kind {
+                Kind::Socket(_) => false,
+                Kind::NativeStream => !resource.route.is_cancelled(),
+                _ => true,
+            })
+            .count()
     }
 
     pub fn sockets(&self) -> usize {
@@ -112,6 +120,19 @@ impl Resources {
         }
     }
 
+    pub fn reap_canceled_streams(&mut self) -> Vec<u64> {
+        let mut ids = Vec::new();
+        self.entries.retain(|id, resource| {
+            if matches!(resource.kind, Kind::NativeStream) && !resource.route.is_active() {
+                ids.push(*id);
+                false
+            } else {
+                true
+            }
+        });
+        ids
+    }
+
     pub fn close(&mut self) {
         for resource in self.entries.drain().map(|(_, resource)| resource) {
             resource.route.cancel();
@@ -132,6 +153,10 @@ impl Resources {
             (Kind::Http, IoEvent::Http { .. }) | (Kind::Plugin, IoEvent::Plugin { .. }) => {
                 (true, None)
             }
+            (Kind::NativeStream, IoEvent::NativeStream { event, .. }) => (
+                true,
+                matches!(event, crate::host::StreamEvent::Item(_)).then_some(Kind::NativeStream),
+            ),
             (Kind::Stream { head: false }, IoEvent::HttpHead { .. }) => {
                 (true, Some(Kind::Stream { head: true }))
             }
@@ -185,6 +210,10 @@ pub(crate) fn failure(id: u64, kind: Kind, failure: HttpFailure, message: &str) 
             event: "error".into(),
             text: true,
             data: message.as_bytes().to_vec(),
+        },
+        Kind::NativeStream => IoEvent::NativeStream {
+            id,
+            event: crate::host::StreamEvent::Failed(message.into()),
         },
         Kind::Plugin => IoEvent::Plugin {
             token: id,

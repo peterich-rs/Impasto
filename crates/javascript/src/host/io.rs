@@ -173,6 +173,10 @@ pub const HTTP_BODY_LIMIT: usize = 4 * 1024 * 1024;
 
 /// One owned IO completion. The host chooses the thread that delivers it.
 pub enum IoEvent {
+    NativeStream {
+        id: u64,
+        event: super::StreamEvent,
+    },
     Host(HostEvent),
     Http {
         token: u64,
@@ -222,7 +226,7 @@ impl IoEvent {
             | Self::HttpHead { token, .. }
             | Self::HttpChunk { token, .. }
             | Self::Plugin { token, .. } => Some(*token),
-            Self::Socket { id, .. } => Some(*id),
+            Self::Socket { id, .. } | Self::NativeStream { id, .. } => Some(*id),
             Self::Host(_) => None,
         }
     }
@@ -230,6 +234,7 @@ impl IoEvent {
     pub fn is_terminal(&self) -> bool {
         match self {
             Self::Http { .. } | Self::Plugin { .. } => true,
+            Self::NativeStream { event, .. } => !matches!(event, super::StreamEvent::Item(_)),
             Self::HttpChunk { done, error, .. } => *done || error.is_some(),
             Self::Socket { event, .. } => matches!(event.as_str(), "error" | "close"),
             _ => false,
@@ -258,6 +263,11 @@ impl IoEvent {
             Self::Plugin { result, .. } => match result {
                 PluginResult::Done(value) => value.payload_bytes(),
                 PluginResult::Failed { message } => message.len(),
+            },
+            Self::NativeStream { event, .. } => match event {
+                super::StreamEvent::Item(value) => value.payload_bytes(),
+                super::StreamEvent::Finished => 0,
+                super::StreamEvent::Failed(message) => message.len(),
             },
             Self::Host(event) => event
                 .module

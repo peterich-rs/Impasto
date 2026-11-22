@@ -83,7 +83,9 @@ fn signatures(module: &Module) -> Result<Vec<(&'static str, String)>, Declaratio
         let parameters = types.parameters;
         let returns = types.returns;
         let signature = match method.invoke {
-            Invoke::Sync(_) => format!("({parameters}): {returns};"),
+            Invoke::Sync(_) | Invoke::Resource(_) | Invoke::Stream(_) => {
+                format!("({parameters}): {returns};")
+            }
             Invoke::Promise(_) => format!("({parameters}): Promise<{returns}>;"),
         };
         signatures.push((method.name, signature));

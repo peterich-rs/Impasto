@@ -1063,23 +1063,6 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeAccept<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeRunWork(
-    _env: EnvUnowned<'_>,
-    _class: JObject<'_>,
-    work: jlong,
-    run: jboolean,
-) {
-    if work == 0 {
-        return;
-    }
-    // SAFETY: `work` is the pointer `post_work` gave Java, and this is the only take.
-    let work = unsafe { Box::from_raw(work as *mut Box<dyn FnOnce() + Send>) };
-    if run {
-        work();
-    }
-}
-
-#[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeOnVsync(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,

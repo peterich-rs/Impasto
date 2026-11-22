@@ -1,5 +1,4 @@
-//! Render thread. Commands come from the platform thread. This thread owns the
-//! raster, the session, and the surface.
+//! Dispatches platform commands and coordinates the UI and raster owners.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -7,8 +6,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use engine::session::FrameTime;
 
@@ -16,16 +14,22 @@ use crate::command::{Command, SurfaceId, SurfaceTarget};
 use crate::error::BootError;
 use crate::images::{self, ImageCache, ImageDecoder, ImageError, ImageReady, ImageRequest};
 use crate::input::{FrameInput, Input};
-use crate::present::{self, AfterPresent, after_present};
 use crate::queue::Inbox;
-use crate::scheduler::{self, FrameScheduler, FrameStep, FrameView, Gpu, VsyncOp};
+use crate::scheduler::{FrameScheduler, Gpu};
 
 use crate::surface::{OpenRetry, Ready, SurfaceHost};
+use crate::task_runner::{RunnerSlot, WorkerTaskRunner};
 use crate::timing::FrameTiming;
-use crate::{Boot, Launch, Services};
+use crate::{
+    Boot, Launch, Services, TaskHandle, TaskRunner, TaskRunners, ThreadTaskRunner, ThreadTopology,
+};
 
 mod cache_cmds;
 mod frame_cmds;
+mod raster_host;
+use raster_host::{
+    FrameSubmission, RasterCompletion, RasterHost, RasterPort, install_fonts, raster_frame,
+};
 mod session_cmds;
 mod surface_cmds;
 
@@ -148,6 +152,7 @@ pub struct Link {
     done: Mutex<Option<Receiver<Result<(), BootError>>>>,
     acks: Arc<Acks>,
     cancelled: Arc<AtomicBool>,
+    shell: Arc<Mutex<Option<Arc<Shell>>>>,
 }
 
 impl Link {
@@ -169,9 +174,18 @@ impl Link {
     /// Posts destruction and remembers `id`. The platform thread keeps the window
     /// until [`DropWait::wait`] sees this ack. [`Link::poll_dropped`] is the same bit.
     pub fn begin_destroy(&self, id: SurfaceId) {
-        if self.acks.arm(id) {
-            self.inbox.post(Command::SurfaceDestroyed { id });
+        if !self.acks.arm(id) {
+            return;
         }
+        let shell = lock(&self.shell).clone();
+        if let Some(shell) = shell
+            && shell.ui.runner().runs_on_current_thread()
+            && shell.retire_surface_on_raster(id)
+        {
+            return;
+        }
+        self.inbox.post(Command::SurfaceDestroyed { id });
+        self.drain_inline();
     }
 
     pub fn poll_dropped(&self, id: SurfaceId) -> bool {
@@ -195,7 +209,26 @@ impl Link {
 
     pub fn shutdown_and_join(&self) -> Result<(), BootError> {
         self.request_shutdown();
+        self.drain_inline();
+        let shell = lock(&self.shell).clone();
+        if let Some(shell) = shell
+            && shell.ui.runner().runs_on_current_thread()
+            && lock(&shell.exit).is_some()
+        {
+            return Err(BootError::Platform(
+                "cannot join a busy UI queue from the UI thread".into(),
+            ));
+        }
         self.join()
+    }
+
+    fn drain_inline(&self) {
+        let shell = lock(&self.shell).clone();
+        if let Some(shell) = shell
+            && shell.ui.runner().runs_on_current_thread()
+        {
+            shell.drain(usize::MAX);
+        }
     }
 
     fn join(&self) -> Result<(), BootError> {
@@ -293,7 +326,7 @@ fn issue_list(report: &str) -> &str {
 }
 
 fn write_inspect(
-    runtime: &mut Runtime,
+    runtime: &mut UiHost,
     tree: &engine::scene::LayerTree,
     timing: &FrameTiming,
     phases: &engine::session::FramePhases,
@@ -319,12 +352,35 @@ fn write_inspect(
 
 pub fn start(boot: Boot) -> Result<Link, BootError> {
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
-    let link = start_async(
-        move || Ok(boot),
-        move |result| {
-            let _ = ready_tx.send(result);
-        },
-    )?;
+    let (link, startup, guard) = new_link(Box::new(move |result| {
+        let _ = ready_tx.send(result);
+    }));
+    launch_boot(
+        Ok(boot),
+        None,
+        &link.shell,
+        startup,
+        guard,
+        Box::new(|_| {}),
+    );
+    ready_rx.recv().map_err(|_| BootError::Panicked)??;
+    Ok(link)
+}
+
+/// Starts a host with an explicit topology, including a manual event loop.
+pub fn start_on(boot: Boot, runners: TaskRunners) -> Result<Link, BootError> {
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+    let (link, startup, guard) = new_link(Box::new(move |result| {
+        let _ = ready_tx.send(result);
+    }));
+    launch_boot(
+        Ok(boot),
+        Some(runners),
+        &link.shell,
+        startup,
+        guard,
+        Box::new(|_| {}),
+    );
     ready_rx.recv().map_err(|_| BootError::Panicked)??;
     Ok(link)
 }
@@ -352,9 +408,33 @@ impl Startup {
     }
 }
 
-/// Creates the command link immediately. Preparation and the one-shot readiness
-/// callback run on the render thread. Cancellation is observed at startup
-/// checkpoints, so an in-progress platform call may still need to return.
+fn new_link(on_started: StartupCallback) -> (Link, Startup, ExitGuard) {
+    let (done, receiver) = mpsc::channel();
+    let inbox = Arc::new(Inbox::new());
+    let acks = Arc::new(Acks::new());
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let link = Link {
+        inbox: Arc::clone(&inbox),
+        done: Mutex::new(Some(receiver)),
+        acks: Arc::clone(&acks),
+        cancelled: Arc::clone(&cancelled),
+        shell: Arc::default(),
+    };
+    (
+        link,
+        Startup {
+            cancelled,
+            notify: Some(on_started),
+        },
+        ExitGuard {
+            done: Some(done),
+            acks,
+            inbox,
+        },
+    )
+}
+
+/// Prepares boot inputs on an I/O worker and creates the session on its UI runner.
 pub fn start_async(
     prepare: impl FnOnce() -> Result<Boot, BootError> + Send + 'static,
     on_started: impl FnOnce(Result<(), BootError>) + Send + 'static,
@@ -362,59 +442,238 @@ pub fn start_async(
     start_async_with_exit(prepare, on_started, |_| {})
 }
 
-/// Like [`start_async`], with a notification after render resources are
-/// released and the inbox is closed. Both callbacks run on the render thread.
+/// Notifies the caller after thread-affine resources and the inbox are closed.
 pub fn start_async_with_exit(
     prepare: impl FnOnce() -> Result<Boot, BootError> + Send + 'static,
     on_started: impl FnOnce(Result<(), BootError>) + Send + 'static,
     on_exit: impl FnOnce(Result<(), BootError>) + Send + 'static,
 ) -> Result<Link, BootError> {
-    let inbox = Arc::new(Inbox::new());
-    let inbox_thread = Arc::clone(&inbox);
-    let (done_tx, done_rx) = mpsc::channel();
-    let acks = Arc::new(Acks::new());
-    let acks_thread = Arc::clone(&acks);
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let mut startup = Startup {
-        cancelled: Arc::clone(&cancelled),
-        notify: Some(Box::new(on_started)),
-    };
-    thread::Builder::new()
-        .name("render".to_string())
-        .spawn(move || {
-            let guard = ExitGuard {
-                done: Some(done_tx),
-                acks: Arc::clone(&acks_thread),
-                inbox: Arc::clone(&inbox_thread),
+    let worker = WorkerTaskRunner::new(crate::rt::handle().map_err(BootError::Platform)?);
+    let (link, startup, guard) = new_link(Box::new(on_started));
+    let slot = Arc::clone(&link.shell);
+    worker.post(Box::new(move || {
+        let boot = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            startup.checkpoint()?;
+            let boot = prepare();
+            startup.checkpoint()?;
+            boot
+        }))
+        .unwrap_or(Err(BootError::Panicked));
+        launch_boot(boot, None, &slot, startup, guard, Box::new(on_exit));
+    }));
+    Ok(link)
+}
+
+fn launch_boot(
+    boot: Result<Boot, BootError>,
+    runners: Option<TaskRunners>,
+    slot: &Mutex<Option<Arc<Shell>>>,
+    mut startup: Startup,
+    guard: ExitGuard,
+    on_exit: StartupCallback,
+) {
+    let initialized = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        boot.and_then(|boot| {
+            let runners = match runners {
+                Some(runners) => runners,
+                None => task_runners(&boot)?,
             };
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                startup.checkpoint()?;
-                let boot = prepare();
-                startup.checkpoint()?;
-                run_boot(boot?, &inbox_thread, &acks_thread, &mut startup)
-            }))
-            .unwrap_or(Err(BootError::Panicked));
-            guard.finish(result.clone());
-            startup.report(result.clone());
-            on_exit(result);
+            let fonts = collect_fonts(&boot)?;
+            Ok((boot, runners, fonts))
         })
-        .map_err(|error| BootError::Platform(error.to_string()))?;
-    Ok(Link {
-        inbox,
-        done: Mutex::new(Some(done_rx)),
-        acks,
-        cancelled,
+    }))
+    .unwrap_or(Err(BootError::Panicked));
+    let (boot, runners, fonts) = match initialized {
+        Ok(pair) => pair,
+        Err(error) => {
+            guard.finish(Err(error.clone()));
+            startup.report(Err(error.clone()));
+            on_exit(Err(error));
+            return;
+        }
+    };
+    let ui = Arc::clone(&runners.ui);
+    let shell = Arc::new(Shell {
+        inbox: Arc::clone(&guard.inbox),
+        acks: Arc::clone(&guard.acks),
+        ui: RunnerSlot::new(Arc::clone(&ui)),
+        remote_raster: Mutex::default(),
+        queued: AtomicBool::new(false),
+        exit: Mutex::new(Some((guard, on_exit))),
+    });
+    *lock(slot) = Some(Arc::clone(&shell));
+    let initialize = move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            startup.checkpoint()?;
+            let mut runtime = run_boot(boot, fonts, &shell.inbox, runners, &startup)?;
+            startup.checkpoint()?;
+            publish_back_ownership(&mut runtime);
+            if let RasterPort::Remote(slot) = &runtime.graphics {
+                *lock(&shell.remote_raster) = Some(Arc::clone(slot));
+            }
+            shell.ui.install(runtime);
+            Ok(())
+        }))
+        .unwrap_or(Err(BootError::Panicked));
+        if let Err(error) = result {
+            startup.report(Err(error.clone()));
+            shell.finish(Err(error));
+            return;
+        }
+        let weak = Arc::downgrade(&shell);
+        shell.inbox.bind(Arc::new(move || {
+            if let Some(shell) = weak.upgrade() {
+                shell.schedule();
+            }
+        }));
+        startup.report(Ok(()));
+    };
+    if ui.runs_on_current_thread() {
+        initialize();
+    } else {
+        ui.post(Box::new(initialize));
+    }
+}
+
+fn task_runners(boot: &Boot) -> Result<TaskRunners, BootError> {
+    let thread = |name| {
+        ThreadTaskRunner::start(name)
+            .map(|runner| runner as Arc<dyn TaskRunner>)
+            .map_err(|error| BootError::Platform(error.to_string()))
+    };
+    let io = Arc::new(WorkerTaskRunner::new(
+        crate::rt::handle().map_err(BootError::Platform)?,
+    ));
+    let ui = if boot.thread_topology == ThreadTopology::PlatformUi {
+        boot.platform_runner.clone().ok_or_else(|| {
+            BootError::Platform("platform UI topology requires a native main-loop runner".into())
+        })?
+    } else {
+        thread(if boot.thread_topology == ThreadTopology::SharedRender {
+            "render"
+        } else {
+            "ui"
+        })?
+    };
+    let raster = if boot.thread_topology == ThreadTopology::SharedRender {
+        Arc::clone(&ui)
+    } else {
+        thread("raster")?
+    };
+    Ok(TaskRunners {
+        platform: boot
+            .platform_runner
+            .clone()
+            .unwrap_or_else(|| Arc::clone(&ui)),
+        ui,
+        raster,
+        io,
     })
+}
+
+struct Shell {
+    inbox: Arc<Inbox>,
+    acks: Arc<Acks>,
+    ui: RunnerSlot<UiHost>,
+    remote_raster: Mutex<Option<Arc<RunnerSlot<RasterHost>>>>,
+    queued: AtomicBool,
+    exit: Mutex<Option<(ExitGuard, StartupCallback)>>,
+}
+
+impl Shell {
+    fn schedule(self: &Arc<Self>) {
+        if !self.queued.swap(true, Ordering::AcqRel) {
+            let shell = Arc::clone(self);
+            self.ui.runner().post(Box::new(move || {
+                shell.queued.store(false, Ordering::Release);
+                shell.drain(32);
+            }));
+        }
+    }
+
+    fn drain(self: &Arc<Self>, limit: usize) {
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.ui.with(|runtime| {
+                for _ in 0..limit {
+                    if let Some(completion) = self.inbox.take_completion() {
+                        if completion(runtime)? {
+                            return Ok(true);
+                        }
+                        continue;
+                    }
+                    let Some(command) = self.inbox.pop() else { return Ok(false) };
+                    match on_command(runtime, command, &self.acks) {
+                        Ok(true) => return Ok(true),
+                        Ok(false) => publish_back_ownership(runtime),
+                        Err(error) => {
+                            tracing::error!(target: "impasto::shell", %error, "UI host stopped");
+                            runtime.services.borrow().request_exit();
+                            return Err(error);
+                        }
+                    }
+                }
+                Ok(false)
+            })
+            }))
+            .unwrap_or(Some(Err(BootError::Panicked)));
+        match result {
+            Some(Ok(true)) => self.finish(Ok(())),
+            Some(Err(error)) => self.finish(Err(error)),
+            Some(Ok(false)) if self.inbox.has_pending() => self.schedule(),
+            _ => {}
+        }
+    }
+
+    // UIKit/Android can synchronously retire a window from within a platform
+    // callback while UiHost is already borrowed. Raster only publishes back
+    // to the UI queue, so this acknowledgement never needs the main loop.
+    fn retire_surface_on_raster(&self, id: SurfaceId) -> bool {
+        let Some(slot) = lock(&self.remote_raster).clone() else {
+            return false;
+        };
+        self.inbox.discard_surface(id);
+        let inbox = Arc::clone(&self.inbox);
+        let acks = Arc::clone(&self.acks);
+        Arc::clone(slot.runner()).post(Box::new(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                slot.with(|graphics| surface_cmds::retire(graphics, id))
+            }));
+            inbox.complete(Box::new(move |runtime| match result {
+                Ok(dropped) => {
+                    surface_cmds::did_retire(runtime, id, dropped.unwrap_or(false));
+                    Ok(false)
+                }
+                Err(_) => Err(BootError::Panicked),
+            }));
+            acks.signal(id);
+        }))
+    }
+
+    fn finish(&self, result: Result<(), BootError>) {
+        let retired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.ui.clear()));
+        let result = if retired.is_err() {
+            Err(BootError::Panicked)
+        } else {
+            result
+        };
+        lock(&self.remote_raster).take();
+        let exit = lock(&self.exit).take();
+        if let Some((guard, on_exit)) = exit {
+            guard.finish(result.clone());
+            on_exit(result);
+        }
+    }
 }
 
 fn run_boot(
     boot: Boot,
+    fonts: StartupFonts,
     inbox: &Arc<Inbox>,
-    acks: &Acks,
-    startup: &mut Startup,
-) -> Result<(), BootError> {
+    runners: TaskRunners,
+    startup: &Startup,
+) -> Result<UiHost, BootError> {
     crate::log_sub::install(boot.log_dir.as_deref(), boot.devtools.clone());
-    let (image_tx, image_rx) = mpsc::channel();
     let upload = Arc::new(Mutex::new(None));
     if let Some(hub) = boot.devtools.as_ref() {
         install_panic_hook(Arc::clone(hub));
@@ -423,17 +682,28 @@ fn run_boot(
         .http
         .clone()
         .map(|inner| crate::diagnostics::wrap_if_devtools(inner, boot.devtools.clone()));
-    let decoder = Arc::clone(&boot.decoder);
-    let inbox_images = Arc::clone(inbox);
-    let http_images = http.clone();
-    let upload_io = Arc::clone(&upload);
-    let _io = thread::Builder::new()
-        .name("io".to_string())
-        .spawn(move || {
-            decode_loop(decoder, image_rx, &inbox_images, http_images, &upload_io);
-        });
+    let load_image: ImageLoader = Arc::new({
+        let decoder = Arc::clone(&boot.decoder);
+        let inbox = Arc::clone(inbox);
+        let http = http.clone();
+        let upload = Arc::clone(&upload);
+        let io = Arc::clone(&runners.io);
+        move |request| {
+            let decoder = Arc::clone(&decoder);
+            let inbox = Arc::clone(&inbox);
+            let http = http.clone();
+            let upload = Arc::clone(&upload);
+            io.post(Box::new(move || {
+                inbox.post(Command::ImageReady(decode_one(
+                    decoder.as_ref(),
+                    http.as_deref(),
+                    &request,
+                    &upload,
+                )));
+            }))
+        }
+    });
     let (net_tx, net_rx) = mpsc::sync_channel(64);
-    let (wake_tx, wake_rx) = mpsc::channel();
     let inbox_net = Arc::clone(inbox);
     let _net = crate::net::spawn(
         net_rx,
@@ -442,37 +712,21 @@ fn run_boot(
         boot.services.websocket_transport(),
         boot.devtools.clone(),
     );
-    let _time = crate::net::wake(wake_rx, Arc::clone(inbox));
-    render(
+    open_ui(
         boot,
+        fonts,
         inbox,
-        acks,
         startup,
+        runners,
         RenderLinks {
-            image_tx,
+            load_image,
             net_tx,
-            wake_tx,
             upload,
         },
     )
 }
 
-fn decode_loop(
-    decoder: Arc<dyn ImageDecoder>,
-    jobs: Receiver<ImageRequest>,
-    inbox: &Inbox,
-    http: Option<Arc<dyn engine::session::HttpClient>>,
-    upload: &Mutex<Option<raster::TextureFactory>>,
-) {
-    while let Ok(request) = jobs.recv() {
-        inbox.post(Command::ImageReady(decode_one(
-            decoder.as_ref(),
-            http.as_deref(),
-            &request,
-            upload,
-        )));
-    }
-}
+type ImageLoader = Arc<dyn Fn(ImageRequest) -> bool + Send + Sync>;
 
 fn decode_one(
     decoder: &dyn ImageDecoder,
@@ -523,41 +777,36 @@ struct Installed {
     scale: f32,
 }
 
-struct Runtime {
+pub(crate) struct UiHost {
+    typography: Rc<RefCell<raster::Typography>>,
+    graphics: RasterPort,
+    active_surface: Option<SurfaceId>,
+    try_surface: bool,
+    revision: u64,
+    frames: FramePipeline,
+    inbox: Arc<Inbox>,
     services: Rc<RefCell<Box<dyn Services>>>,
-    raster: Rc<RefCell<raster::Rasterizer>>,
     session: Option<Box<dyn engine::session::Session>>,
     net_tx: SyncSender<engine::session::IoJob>,
     registry: Arc<engine::session::ModuleRegistry>,
+    // WindowSession keeps a weak subscription to this poster.
+    _window: Arc<Poster>,
     latest: Option<Arc<engine::scene::LayerTree>>,
-    image_requirements: Vec<(Arc<str>, bool)>,
-    external_textures: HashMap<String, images::ExternalFrame>,
-    external_gpu: HashMap<String, images::ExternalGpuFrame>,
+    image_requirements: Arc<[(Arc<str>, bool)]>,
     input: Input,
-    surfaces: SurfaceHost,
     scheduler: FrameScheduler,
     vsync: Arc<dyn crate::Vsync>,
-    open_surface: crate::OpenSurface,
-    installed: Option<Installed>,
     point_scale: f32,
-    needs_present: bool,
-    images: ImageCache,
-    image_tx: Sender<ImageRequest>,
-    upload: Arc<Mutex<Option<raster::TextureFactory>>>,
     frame_number: u64,
     semantics: Option<engine::semantics::SemanticsUpdate>,
     semantics_enabled: bool,
     autofill_enabled: bool,
     platform_views: Arc<[engine::tree::PlatformViewPlacement]>,
-    platform_views_surface: Option<SurfaceId>,
-    platform_views_dirty: bool,
-    wake_tx: Sender<Option<i64>>,
+    published_views: Option<(SurfaceId, Arc<[engine::tree::PlatformViewPlacement]>)>,
+
+    wake: WakeTimer,
     dump_list: bool,
-    present_failures: u32,
-    device_recoveries: u8,
     present_retry_at: Option<i64>,
-    gpu: Gpu,
-    last_step: Option<(FrameStep, Gpu)>,
     listeners: Vec<Box<dyn crate::timing::FrameListener>>,
     inspect: Option<std::path::PathBuf>,
     hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
@@ -568,49 +817,182 @@ struct Runtime {
     diag_armed: bool,
 }
 
-impl Drop for Runtime {
+impl UiHost {
+    fn update_raster<R: Send + 'static>(
+        &mut self,
+        work: impl FnOnce(&mut RasterHost) -> R + Send + 'static,
+        apply: impl FnOnce(&mut Self, R) + Send + 'static,
+    ) {
+        match &mut self.graphics {
+            RasterPort::Local(graphics) => {
+                let result = work(graphics);
+                apply(self, result);
+            }
+            RasterPort::Remote(_) => {
+                let inbox = Arc::clone(&self.inbox);
+                self.graphics.post(move |graphics| {
+                    let result = work(graphics);
+                    inbox.complete(Box::new(move |ui| {
+                        apply(ui, result);
+                        Ok(false)
+                    }));
+                });
+            }
+        }
+    }
+}
+
+impl Drop for UiHost {
     fn drop(&mut self) {
         self.vsync.cancel();
-        // Vulkan swapchains use the raster context. Retire them before its fields drop.
-        self.surfaces.clear();
-        // The shaper shares the raster typography context. Drop it before the raster.
         self.session.take();
+        self.graphics.retire();
+    }
+}
+
+#[derive(Default)]
+struct FramePipeline {
+    in_flight: usize,
+    waiting: bool,
+}
+
+impl FramePipeline {
+    const DEPTH: usize = 2;
+
+    fn has_room(&mut self) -> bool {
+        let room = self.in_flight < Self::DEPTH;
+        self.waiting |= !room;
+        room
+    }
+
+    fn submit(&mut self) {
+        self.in_flight += 1;
+    }
+
+    fn complete(&mut self) -> bool {
+        self.in_flight -= 1;
+        std::mem::take(&mut self.waiting)
     }
 }
 
 struct RenderLinks {
-    image_tx: Sender<ImageRequest>,
+    load_image: ImageLoader,
     net_tx: SyncSender<engine::session::IoJob>,
-    wake_tx: Sender<Option<i64>>,
     upload: Arc<Mutex<Option<raster::TextureFactory>>>,
 }
 
-fn render(
+struct StartupFonts {
+    family: String,
+    primary: Arc<[u8]>,
+    extras: Vec<(String, Arc<[u8]>)>,
+}
+
+fn collect_fonts(boot: &Boot) -> Result<StartupFonts, BootError> {
+    let family = boot.font_family.clone();
+    let font = boot
+        .services
+        .font(&family)
+        .ok_or_else(|| BootError::Font(family.clone()))?;
+    let extras = boot
+        .services
+        .extra_fonts()
+        .into_iter()
+        .map(|(name, bytes)| (name, Arc::from(bytes)))
+        .collect();
+    Ok(StartupFonts {
+        family,
+        primary: Arc::from(font),
+        extras,
+    })
+}
+
+fn open_ui(
     boot: Boot,
+    fonts: StartupFonts,
     inbox: &Arc<Inbox>,
-    acks: &Acks,
-    startup: &mut Startup,
+    startup: &Startup,
+    runners: TaskRunners,
     links: RenderLinks,
-) -> Result<(), BootError> {
+) -> Result<UiHost, BootError> {
     startup.checkpoint()?;
     let services = Rc::new(RefCell::new(boot.services));
-    let raster = {
-        let services = services.borrow();
-        prepare_raster(services.as_ref(), &boot.font_family, boot.open_raster)
+    let StartupFonts {
+        family,
+        primary,
+        extras,
+    } = fonts;
+    let split = runners.ui.queue_id() != runners.raster.queue_id();
+    let ui_typography = if split {
+        let mut typography = raster::Typography::standalone().map_err(BootError::Engine)?;
+        typography
+            .register_shared_face(Arc::clone(&primary), &family)
+            .map_err(BootError::Engine)?;
+        for (family, bytes) in &extras {
+            if let Err(status) = typography.register_shared_face(Arc::clone(bytes), family) {
+                tracing::warn!(target: "impasto::shell", %family, %status, "font registration failed");
+            }
+        }
+        Some(Rc::new(RefCell::new(typography)))
+    } else {
+        None
+    };
+    let raster_busy = Arc::new(crate::watchdog::Busy::new());
+    if split {
+        crate::watchdog::spawn(
+            "raster",
+            Arc::downgrade(&raster_busy),
+            boot.devtools.clone(),
+        );
+    }
+    let raster_clock = Arc::clone(&runners.raster);
+    let open = boot.open_raster;
+    let open_surface = boot.open_surface;
+    let create = move || {
+        let mut raster = open().map_err(BootError::Engine)?;
+        raster
+            .register_shared_font(primary, &family)
+            .map_err(BootError::Engine)?;
+        install_fonts(&mut raster, extras);
+        Ok::<_, BootError>(RasterHost {
+            raster: Rc::new(RefCell::new(raster)),
+            surfaces: SurfaceHost::new(),
+            open_surface,
+            external_textures: Default::default(),
+            external_gpu: Default::default(),
+            installed: None,
+            needs_present: false,
+            images: ImageCache::new(),
+            load_image: links.load_image,
+            upload: links.upload,
+            present_failures: 0,
+            device_recoveries: 0,
+            frame_retry_at: None,
+            clock: raster_clock,
+            gpu: Gpu::Live,
+            last_step: None,
+            busy: raster_busy,
+        })
+    };
+    let (graphics, typography) = if let Some(typography) = ui_typography {
+        let slot = Arc::new(RunnerSlot::new(Arc::clone(&runners.raster)));
+        let target = Arc::clone(&slot);
+        let (ready, response) = mpsc::sync_channel(1);
+        runners.raster.post(Box::new(move || {
+            let result = create().map(|raster| target.install(raster));
+            let _ = ready.send(result);
+        }));
+        response.recv().map_err(|_| BootError::Panicked)??;
+        (RasterPort::Remote(slot), typography)
+    } else {
+        let graphics = create()?;
+        let typography = graphics.raster.borrow().typography();
+        (RasterPort::Local(Box::new(graphics)), typography)
     };
     startup.checkpoint()?;
-    let raster = raster?;
     let Launch::Session(open) = boot.launch;
     let parts = crate::SessionOpen {
-        shaper: Box::new(raster::ImpellerShaper::new(raster.borrow().typography())),
+        shaper: Box::new(raster::ImpellerShaper::new(Rc::clone(&typography))),
         log: console_log(),
-    };
-    let rt = match crate::rt::handle() {
-        Ok(handle) => handle,
-        Err(message) => {
-            tracing::error!(target: "impasto::session", "{message}");
-            return Err(crate::SessionError::Runtime.into());
-        }
     };
     let app_state = engine::session::shared("active".to_owned());
     let launch_url = Arc::clone(&boot.launch_url);
@@ -642,15 +1024,26 @@ fn render(
     let host = engine::session::ModuleConfig {
         registry: Arc::clone(&registry),
         exec: Arc::new(crate::RtExec {
-            rt,
-            main: boot.main_thread.clone(),
+            io: Arc::clone(&runners.io),
+            main: boot
+                .platform_runner
+                .as_ref()
+                .map(|_| Arc::clone(&runners.platform)),
         }),
         settle: crate::settle_factory(Arc::clone(inbox)),
         post_delivery: Some(Arc::new({
             let inbox = Arc::clone(inbox);
             move |delivery| inbox.post(Command::JsIo(delivery))
         })),
-        transport_clock: Some(Arc::new(|| crate::net::ms_i64(crate::net::mono_ms()))),
+        transport_clock: Some(Arc::new({
+            let clock = Arc::clone(&runners.ui);
+            move || crate::net::ms_i64(clock.monotonic_ms())
+        })),
+        script_execution: if boot.thread_topology == ThreadTopology::PlatformUi {
+            engine::session::ScriptExecution::PlatformUi
+        } else {
+            engine::session::ScriptExecution::DedicatedUi
+        },
         app_state,
         launch_url,
     };
@@ -666,47 +1059,41 @@ fn render(
         }
     };
     let inbox_frames = Arc::clone(inbox);
+    let frame_clock = Arc::clone(&runners.ui);
     boot.vsync.bind(Arc::new(move |token, mut time| {
-        time.mono_ms = crate::net::mono_ms();
+        time.mono_ms = frame_clock.monotonic_ms();
         inbox_frames.post(Command::Frame { token, time });
     }));
     let busy = Arc::new(crate::watchdog::Busy::new());
-    crate::watchdog::spawn(Arc::downgrade(&busy), boot.devtools.clone());
-    let mut runtime = Runtime {
+    crate::watchdog::spawn("ui", Arc::downgrade(&busy), boot.devtools.clone());
+    Ok(UiHost {
+        graphics,
+        typography,
+        active_surface: None,
+        try_surface: false,
+        revision: 0,
+        frames: FramePipeline::default(),
+        inbox: Arc::clone(inbox),
         services,
-        raster,
         session,
         net_tx: links.net_tx,
         registry,
+        _window: window,
         latest: None,
-        image_requirements: Vec::new(),
-        external_textures: Default::default(),
-        external_gpu: Default::default(),
+        image_requirements: Arc::default(),
         input: Input::new(),
-        surfaces: SurfaceHost::new(),
         scheduler: FrameScheduler::new(),
         vsync: boot.vsync,
-        open_surface: boot.open_surface,
-        installed: None,
         point_scale: 1.0,
-        needs_present: false,
-        images: ImageCache::new(),
-        image_tx: links.image_tx,
-        upload: links.upload,
         frame_number: 0,
         semantics: None,
         semantics_enabled: true,
         autofill_enabled: false,
         platform_views: Arc::default(),
-        platform_views_surface: None,
-        platform_views_dirty: false,
-        wake_tx: links.wake_tx,
+        published_views: None,
+        wake: WakeTimer::new(runners.ui, Arc::clone(inbox)),
         dump_list: boot.dump_list,
-        present_failures: 0,
-        device_recoveries: 0,
         present_retry_at: None,
-        gpu: Gpu::Live,
-        last_step: None,
         listeners: frame_listeners(boot.devtools.clone()),
         inspect: boot.inspect,
         hub: boot.devtools.clone(),
@@ -714,22 +1101,7 @@ fn render(
         inspect_written: false,
         busy,
         diag_armed: false,
-    };
-    startup.checkpoint()?;
-    startup.report(Ok(()));
-    publish_back_ownership(&mut runtime);
-    while let Some(command) = inbox.recv() {
-        match on_command(&mut runtime, command, acks) {
-            Ok(true) => break,
-            Ok(false) => publish_back_ownership(&mut runtime),
-            Err(error) => {
-                tracing::error!(target: "impasto::render", %error, "render thread stopped");
-                runtime.services.borrow().request_exit();
-                return Err(error);
-            }
-        }
-    }
-    Ok(())
+    })
 }
 
 fn io_sink(tx: SyncSender<engine::session::IoJob>) -> crate::IoSink {
@@ -740,18 +1112,16 @@ fn io_sink(tx: SyncSender<engine::session::IoJob>) -> crate::IoSink {
     })
 }
 
-fn update_source(runtime: &mut Runtime, revision: &str, source: &str) {
+fn update_source(runtime: &mut UiHost, revision: &str, source: &str) {
     let Some(session) = runtime.session.as_mut() else {
         return;
     };
     let restoration = runtime.services.borrow().restoration();
     let staged = restoration.as_ref().map(crate::Restoration::stage_update);
-    let now = crate::net::mono_ms();
+    let now = runtime.wake.runner.monotonic_ms();
     let result = session.update_source(
         source,
-        Box::new(raster::ImpellerShaper::new(
-            runtime.raster.borrow().typography(),
-        )),
+        Box::new(raster::ImpellerShaper::new(Rc::clone(&runtime.typography))),
         io_sink(runtime.net_tx.clone()),
         FrameTime {
             vsync_ms: now,
@@ -765,14 +1135,19 @@ fn update_source(runtime: &mut Runtime, revision: &str, source: &str) {
             update.commit();
         }
         runtime.input.reset_for_source_update();
-        runtime.raster.borrow_mut().invalidate_pictures();
-        runtime.installed = None;
+        runtime.revision = runtime.revision.wrapping_add(1);
+        runtime.graphics.post(|graphics| {
+            graphics.raster.borrow_mut().invalidate_pictures();
+            graphics.installed = None;
+        });
         runtime.semantics = None;
         runtime.diag_armed = false;
         let services = runtime.services.borrow();
         services.apply_ime(&engine::session::ImeUpdate::Hide);
         services.semantics(&[]);
-        if let Some(surface) = runtime.surfaces.id() {
+        runtime.platform_views = Arc::default();
+        runtime.published_views = None;
+        if let Some(surface) = runtime.active_surface {
             services.platform_views(surface, &[]);
         }
         drop(services);
@@ -787,7 +1162,7 @@ fn update_source(runtime: &mut Runtime, revision: &str, source: &str) {
     );
 }
 
-fn publish_back_ownership(runtime: &mut Runtime) {
+fn publish_back_ownership(runtime: &mut UiHost) {
     if let Some(session) = runtime.session.as_mut() {
         session_call(|| {
             if let Some(enabled) = session.take_back_enabled() {
@@ -835,7 +1210,7 @@ fn fault_followup(diag_armed: bool, faults: &[engine::session::ScriptFault]) -> 
     }
 }
 
-fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bool, BootError> {
+fn on_command(runtime: &mut UiHost, command: Command, acks: &Acks) -> Result<bool, BootError> {
     runtime.busy.enter(crate::command::command_tag(&command));
     let result = dispatch_command(runtime, command, acks);
     runtime.busy.leave();
@@ -843,7 +1218,7 @@ fn on_command(runtime: &mut Runtime, command: Command, acks: &Acks) -> Result<bo
 }
 
 fn dispatch_command(
-    runtime: &mut Runtime,
+    runtime: &mut UiHost,
     command: Command,
     acks: &Acks,
 ) -> Result<bool, BootError> {
@@ -936,12 +1311,24 @@ fn layer_tree_line(tree: &engine::scene::LayerTree) -> String {
     )
 }
 
-fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool, BootError> {
+fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, BootError> {
     use engine::session::trace::Section;
 
     let _frame_trace = Section::begin(c"Impasto frame");
     let frame_started = Instant::now();
-    if let Some((target, attempts)) = runtime.surfaces.take_attempt() {
+    if !runtime.frames.has_room() {
+        return Ok(end_frame(runtime, false, false));
+    }
+    let attempt = if runtime.try_surface || matches!(runtime.graphics, RasterPort::Local(_)) {
+        let attempt = runtime
+            .graphics
+            .with(|graphics| graphics.surfaces.take_attempt())?;
+        runtime.try_surface = attempt.is_some();
+        attempt
+    } else {
+        None
+    };
+    if let Some((target, attempts)) = attempt {
         match open_surface_target(runtime, target, attempts, OpenPlace::Frame)? {
             OpenedSurface::Ready { replaced } => {
                 if let Some(old) = replaced {
@@ -951,7 +1338,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
             OpenedSurface::Waiting => return Ok(end_frame(runtime, false, false)),
         }
     }
-    if !runtime.surfaces.is_open() {
+    if runtime.active_surface.is_none() {
         return Ok(end_frame(runtime, false, false));
     }
     let frame = runtime.input.begin_frame();
@@ -1015,6 +1402,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     let mut fonts = Vec::new();
     let mut census = None;
     let mut layers_changed = false;
+    let mut placements_changed = false;
     let mut phases = None;
     let mut layout_report = None;
     if let Some(session) = runtime.session.as_mut() {
@@ -1053,7 +1441,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                             layer_tree_line(&tree)
                         );
                     }
-                    runtime.image_requirements = tree.image_requirements();
+                    runtime.image_requirements = tree.image_requirements().into();
                     runtime.latest = Some(tree);
                     layers_changed = true;
                 }
@@ -1083,8 +1471,7 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                 }
                 if let Some(placements) = output.platform_views.take() {
                     runtime.platform_views = placements;
-                    runtime.platform_views_dirty = true;
-                    runtime.needs_present = true;
+                    placements_changed = true;
                 }
                 reloads = std::mem::take(&mut output.reloads);
                 fonts = std::mem::take(&mut output.fonts);
@@ -1111,293 +1498,144 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     if leave {
         runtime.services.borrow().request_exit();
     }
-    let session_ms = elapsed_ms(session_started);
-    let reloaded = !reloads.is_empty();
-    for source in &reloads {
-        runtime.images.reload(source);
-    }
-    again |= reloaded;
-    if !fonts.is_empty() {
-        install_fonts(&mut runtime.raster.borrow_mut(), fonts);
-    }
-    let Some(tree) = runtime.latest.clone() else {
-        return Ok(end_frame(runtime, again, false));
-    };
-    if !images_ready(runtime, census.as_deref()) {
-        return Ok(end_frame(runtime, reloaded, false));
-    }
-    let unchanged = !layers_changed
-        && runtime
-            .installed
-            .as_ref()
-            .is_some_and(|installed| installed.scale == runtime.point_scale);
-    let mut submit_ms = 0.0;
-    let step = scheduler::frame_step(&FrameView {
-        surface_open: runtime.surfaces.is_open(),
-        paused: frame.paused,
-        unchanged,
-        needs_present: runtime.needs_present,
-        again,
-        gpu: runtime.gpu,
-    });
-    note_step(runtime, step);
-    if again
-        && matches!(step, FrameStep::Submit | FrameStep::PresentCached)
-        && let Some(token) = runtime.scheduler.prepare_next()
-    {
-        runtime.vsync.request_frame(token);
-    }
-    match step {
-        FrameStep::Cancel | FrameStep::Skip { again: false } => {
-            let _trace = Section::begin(c"Impasto skip present");
-            return Ok(end_frame(runtime, false, false));
-        }
-        FrameStep::Skip { again: true } => {
-            let _trace = Section::begin(c"Impasto skip present");
-            return Ok(end_frame(runtime, true, false));
-        }
-        FrameStep::Submit => {
-            let _trace = Section::begin(c"Impasto submit");
-            runtime.images.install_uploaded(
-                &mut runtime.raster.borrow_mut(),
-                images::scale_bucket(runtime.point_scale),
-            );
-            {
-                let mut raster = runtime.raster.borrow_mut();
-                for (source, frame) in &runtime.external_gpu {
-                    if let Some(image) = &frame.image {
-                        raster.install_uploaded(source, image);
-                    }
-                }
-            }
-            let started = Instant::now();
-            let pixels = runtime.images.snapshot_requirements(
-                &runtime.image_requirements,
-                images::scale_bucket(runtime.point_scale),
-            );
-            let resolve = |source: &str| {
-                if source.starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX) {
-                    return runtime.external_textures.get(source).map(|frame| {
-                        raster::ImagePixels {
-                            width: frame.size[0],
-                            height: frame.size[1],
-                            rgba: &frame.pixels,
-                        }
-                    });
-                }
-                pixels
-                    .iter()
-                    .find(|(name, ..)| name == source)
-                    .map(|(_, width, height, rgba)| raster::ImagePixels {
-                        width: *width,
-                        height: *height,
-                        rgba,
-                    })
-            };
-            let submitted =
-                runtime
-                    .raster
-                    .borrow_mut()
-                    .submit_layers(&tree, runtime.point_scale, resolve);
-            submit_ms = elapsed_ms(started);
-            if let Err(status) = submitted {
-                tracing::error!(
-                    target: "impasto::render::present",
-                    %status,
-                    "scene submit failed"
-                );
-                if let Some(hub) = runtime.hub.as_ref() {
-                    hub.error(
-                        "engine",
-                        &format!("scene submit failed: {status}"),
-                        None,
-                        Some(runtime.frame_number),
-                    );
-                }
-                if status == raster::Status::NotLinked {
-                    return Err(BootError::Engine(status));
-                }
-                // A rejected list is not a lost surface. Do not force another vsync.
-                return Ok(end_frame(runtime, again, false));
-            }
-            runtime.installed = Some(Installed {
-                scale: runtime.point_scale,
-            });
-            if runtime.gpu == Gpu::Flush {
-                runtime.gpu = Gpu::Live;
-                tracing::info!(target: "impasto::render::gpu", reason = "resume", "gpu live");
-            }
-        }
-        FrameStep::PresentCached => {}
-    }
-    if runtime.gpu != Gpu::Live {
-        return Ok(end_frame(runtime, false, false));
-    }
-    let started = Instant::now();
-    let presented = {
-        let _trace = Section::begin(c"Impasto present");
-        let mut raster = runtime.raster.borrow_mut();
-        runtime
-            .surfaces
-            .present(&mut raster, &runtime.platform_views)
-    };
-    if presented.is_ok() {
-        let _trace = Section::begin(c"Impasto presented");
-        if let Some(surface) = runtime.surfaces.id()
-            && (runtime.platform_views_dirty
-                || (!runtime.platform_views.is_empty()
-                    && runtime.platform_views_surface != Some(surface)))
-        {
-            runtime
-                .services
-                .borrow()
-                .platform_views(surface, &runtime.platform_views);
-            runtime.platform_views_dirty = false;
-            runtime.platform_views_surface = Some(surface);
-        }
-    }
-    let present_ms = elapsed_ms(started);
-    let work_ms = elapsed_ms(frame_started);
-    let stats = runtime.raster.borrow().submit_stats();
-    if matches!(step, FrameStep::Submit) {
-        Section::event(|| {
-            format!(
-                "Impasto pictures rebuilt={} reused={} layers={} prepare_us={} compose_us={}",
-                stats.picture_rebuilt,
-                stats.picture_reused,
-                stats.layer_count,
-                stats.picture_prepare.as_micros(),
-                stats.compose.as_micros(),
-            )
-        });
-    }
-    let shapes = runtime.raster.borrow_mut().take_shape_stats();
-    let phase = phases.unwrap_or_default();
-    let timing = FrameTiming {
+    let split = matches!(&runtime.graphics, RasterPort::Remote(_));
+    let submission = FrameSubmission {
+        revision: runtime.revision,
         number: runtime.frame_number,
-        vsync_ms: time.vsync_ms,
-        target_ms: time.target_ms,
-        interval_ms: time.interval_ms,
-        work_ms,
-        session_ms,
+        time,
+        frame_started,
+        session_ms: elapsed_ms(session_started),
         gesture_ms,
-        script_ms: phase.script_ms,
-        layout_ms: phase.layout_ms,
-        layout_cb_ms: phase.layout_cb_ms,
-        sync_ms: phase.sync_ms,
-        record_ms: phase.record_ms,
-        semantics_ms: phase.semantics_ms,
-        submit_ms,
-        present_ms,
-        shapes_built: shapes.built,
-        shapes_measure_hit: shapes.measure_hit,
-        shapes_measure_miss: shapes.measure_miss,
-        shapes_paint_hit: shapes.paint_hit,
-        shapes_paint_miss: shapes.paint_miss,
-        shapes_bridged: shapes.bridged,
-        picture_rebuilt: stats.picture_rebuilt,
-        picture_reused: stats.picture_reused,
-        layer_count: stats.layer_count,
-        paragraphs: stats.paragraphs,
-        pictures: stats.pictures,
-        textures: stats.textures,
+        phases: phases.unwrap_or_default(),
+        layout_report,
+        measure: if split {
+            runtime.typography.borrow_mut().take_shape_stats()
+        } else {
+            raster::ShapeStats::default()
+        },
+        scale: runtime.point_scale,
+        paused: frame.paused,
+        again,
+        tree: runtime.latest.clone(),
+        requirements: Arc::clone(&runtime.image_requirements),
+        platform_views: Arc::clone(&runtime.platform_views),
+        placements_changed,
+        layers_changed,
+        reloads,
+        fonts,
+        census,
+        hub: runtime.hub.clone(),
     };
-    for listener in &mut runtime.listeners {
-        listener.on_frame(&timing, &phase);
-    }
-    // The richer `inspect_dir` writer owns `frame.json` when both are set.
-    if runtime.inspect_dir.is_none()
-        && let Some(dir) = &runtime.inspect
-        && let Err(error) = crate::timing::write_inspect(dir, &timing, runtime.latest.as_deref())
-    {
-        tracing::warn!(target: "impasto::shell", %error, "inspect write failed");
-    }
-    let present_error = presented.as_ref().err().copied();
-    if present_error == Some(raster::Status::DeviceLost) && runtime.device_recoveries < 2 {
-        runtime.device_recoveries += 1;
-        tracing::warn!(target: "impasto::render::gpu", attempts = runtime.device_recoveries, "graphics device lost, rebuilding");
-        *lock(&runtime.upload) = None;
-        runtime.images.invalidate_gpu();
-        {
-            let mut raster = runtime.raster.borrow_mut();
-            runtime
-                .surfaces
-                .recover_device(&mut raster)
-                .map_err(BootError::Engine)?;
-            for frame in runtime.external_gpu.values_mut() {
-                frame.image = (frame.import)(&raster);
+    match &mut runtime.graphics {
+        RasterPort::Local(graphics) => {
+            let completion = raster_frame(graphics, submission, false, || {
+                if let Some(token) = runtime.scheduler.prepare_next() {
+                    runtime.vsync.request_frame(token);
+                }
+            });
+            finish_raster_frame(runtime, completion, false)
+        }
+        RasterPort::Remote(slot) => {
+            let slot = Arc::clone(slot);
+            let inbox = Arc::clone(&runtime.inbox);
+            runtime.frames.submit();
+            let run = Arc::clone(slot.runner()).post(Box::new(move || {
+                let completion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    slot.with(|graphics| raster_frame(graphics, submission, true, || {}))
+                        .unwrap_or(Err(BootError::Panicked))
+                }))
+                .unwrap_or(Err(BootError::Panicked));
+                inbox.complete(Box::new(move |runtime| {
+                    finish_raster_frame(runtime, completion, true)
+                }));
+            }));
+            if !run {
+                return Err(BootError::Panicked);
             }
-            *lock(&runtime.upload) = raster.texture_factory();
+            Ok(end_frame(
+                runtime,
+                again && runtime.frames.in_flight < FramePipeline::DEPTH,
+                false,
+            ))
         }
-        runtime.installed = None;
-        runtime.gpu = Gpu::Flush;
-        runtime.needs_present = true;
-        return Ok(end_frame(runtime, true, false));
     }
-    let after = after_present(presented, again);
-    if after == AfterPresent::Fatal {
-        return Err(BootError::Engine(
-            present_error.unwrap_or(raster::Status::NotLinked),
-        ));
-    }
-    if after == AfterPresent::Rejected {
-        runtime.needs_present = false;
-        return Ok(end_frame(runtime, again, false));
-    }
-    let follow = scheduler::present_followup(after);
-    runtime.needs_present = follow.needs_present;
-    if follow.clear_surface {
-        runtime.surfaces.clear();
-        runtime.installed = None;
-    }
-    if matches!(after, AfterPresent::Shown { .. } | AfterPresent::Stop) {
-        if matches!(after, AfterPresent::Shown { .. }) {
-            runtime.busy.arm();
+}
+
+fn finish_raster_frame(
+    runtime: &mut UiHost,
+    completion: Result<RasterCompletion, BootError>,
+    split: bool,
+) -> Result<bool, BootError> {
+    let waiting = split && runtime.frames.complete();
+    let RasterCompletion {
+        submission,
+        output,
+        surface,
+        retry_at,
+    } = completion?;
+    if let Some(timing) = output.timing {
+        for listener in &mut runtime.listeners {
+            listener.on_frame(&timing, &submission.phases);
         }
-        if runtime.present_failures >= present::PRESENT_BACKOFF_AFTER {
-            tracing::info!(target: "impasto::render::present", "present recovered");
+        if runtime.inspect_dir.is_none()
+            && let Some(dir) = &runtime.inspect
+            && let Err(error) =
+                crate::timing::write_inspect(dir, &timing, submission.tree.as_deref())
+        {
+            tracing::warn!(target: "impasto::shell", %error, "inspect write failed");
         }
-        runtime.present_failures = 0;
-        runtime.device_recoveries = 0;
-        runtime.present_retry_at = None;
-        if let Some(tree) = runtime.latest.clone() {
+        if (submission.revision == runtime.revision || output.stop)
+            && output.shown
+            && let Some(tree) = submission.tree
+        {
             write_inspect(
                 runtime,
                 &tree,
                 &timing,
-                &phase,
-                issue_list(layout_report.as_deref().unwrap_or("[]")),
+                &submission.phases,
+                issue_list(submission.layout_report.as_deref().unwrap_or("[]")),
             );
         }
     }
-    let mut again = follow.vsync == VsyncOp::Request;
-    if after == AfterPresent::Retry {
-        runtime.present_failures = runtime.present_failures.saturating_add(1);
-        if let Some(delay) = present::present_retry_delay_ms(runtime.present_failures) {
-            if runtime.present_failures == present::PRESENT_BACKOFF_AFTER {
-                tracing::warn!(
-                    target: "impasto::render::present",
-                    failures = runtime.present_failures,
-                    retry_in_ms = delay,
-                    "present failed; backing off"
-                );
-                if let Some(hub) = runtime.hub.as_ref() {
-                    hub.error(
-                        "engine",
-                        "present failed; backing off",
-                        None,
-                        Some(runtime.frame_number),
-                    );
-                }
+    if output.stop {
+        runtime.services.borrow().request_exit();
+        return Ok(end_frame(runtime, false, true));
+    }
+    if submission.revision != runtime.revision {
+        if waiting && !runtime.input.is_paused() {
+            arm(runtime);
+        }
+        return Ok(false);
+    }
+    runtime.active_surface = surface;
+    runtime.present_retry_at = retry_at;
+    if output.shown {
+        runtime.busy.arm();
+        if let Some(surface) = surface {
+            let views = submission.platform_views;
+            let changed =
+                runtime
+                    .published_views
+                    .as_ref()
+                    .map_or(!views.is_empty(), |(id, prior)| {
+                        (*id == surface && !Arc::ptr_eq(prior, &views))
+                            || (*id != surface && !views.is_empty())
+                    });
+            if changed {
+                runtime.services.borrow().platform_views(surface, &views);
+                runtime.published_views = Some((surface, views));
             }
-            runtime.present_retry_at = Some(crate::net::ms_i64(crate::net::mono_ms()) + delay);
-            again = false;
-        } else {
-            runtime.present_retry_at = None;
         }
     }
-    let stop = follow.vsync == VsyncOp::Stop;
-    Ok(end_frame(runtime, again, stop))
+    let again = (waiting || output.again) && !runtime.input.is_paused();
+    if split {
+        refresh_wake(runtime);
+        if again {
+            arm(runtime);
+        }
+        return Ok(false);
+    }
+    Ok(end_frame(runtime, again, false))
 }
 
 enum OpenPlace {
@@ -1411,7 +1649,7 @@ enum OpenedSurface {
 }
 
 fn open_surface_target(
-    runtime: &mut Runtime,
+    runtime: &mut UiHost,
     target: SurfaceTarget,
     attempts: u32,
     place: OpenPlace,
@@ -1424,18 +1662,24 @@ fn open_surface_target(
         metrics,
         pixels: target.pixels,
     };
-    let opened = {
-        let mut raster = runtime.raster.borrow_mut();
-        runtime
+    let opened = runtime.graphics.with(move |graphics| {
+        let mut raster = graphics.raster.borrow_mut();
+        let opened = graphics
             .surfaces
-            .ready(target, &mut raster, runtime.open_surface.as_mut())
-    };
+            .ready(target, &mut raster, graphics.open_surface.as_mut());
+        if matches!(opened, Ready::Opened { .. }) {
+            *lock(&graphics.upload) = raster.texture_factory();
+            graphics.needs_present = true;
+            graphics.installed = None;
+        }
+        opened
+    })?;
     match opened {
         Ready::Opened { replaced, .. } => {
             runtime.services.borrow().surface_attached(kept.id);
-            // The first real window can select a different backend from the
-            // initial graphics context. Publish its factory only after it opens.
-            *lock(&runtime.upload) = runtime.raster.borrow().texture_factory();
+            runtime.active_surface = Some(kept.id);
+            runtime.try_surface = false;
+            runtime.revision = runtime.revision.wrapping_add(1);
             if matches!(place, OpenPlace::Command) {
                 if runtime.input.set_metrics(metrics) {
                     arm(runtime);
@@ -1454,7 +1698,10 @@ fn open_surface_target(
         Ready::Failed(
             raster::Status::NotReady | raster::Status::SurfaceLost | raster::Status::AcquireMiss,
         ) => {
-            let retry = runtime.surfaces.fail_attempt(kept, attempts);
+            let retry = runtime
+                .graphics
+                .with(move |graphics| graphics.surfaces.fail_attempt(kept, attempts))?;
+            runtime.try_surface = matches!(retry, OpenRetry::Again);
             if matches!(retry, OpenRetry::GaveUp) {
                 tracing::error!(
                     target: "impasto::render::surface",
@@ -1478,65 +1725,25 @@ fn open_surface_target(
     }
 }
 
-fn images_ready(runtime: &mut Runtime, census: Option<&engine::semantics::ImageCensus>) -> bool {
-    let requirements = &runtime.image_requirements;
-    runtime.images.begin_frame();
-    if let Some(census) = census {
-        runtime.images.sync_counts(census.counts.as_ref());
-    }
-    let bucket = images::scale_bucket(runtime.point_scale);
-    runtime.images.pin_sources(
-        requirements.iter().map(|(source, _)| source.as_ref()),
-        bucket,
-    );
-    let mut waiting = false;
-    let mut blocked = false;
-    for (source, required) in requirements {
-        let source = source.as_ref();
-        let required = *required;
-        if source.starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX) {
-            continue;
-        }
-        if runtime.images.is_pending(source, bucket) {
-            if required {
-                waiting = true;
-            }
-            continue;
-        }
-        if runtime.images.resolve(source, bucket).is_some() {
-            continue;
-        }
-        if runtime.images.is_negative(source, bucket) {
-            if required {
-                blocked = true;
-                if let Some(message) = runtime.images.take_required_log(source, bucket) {
-                    tracing::error!(target: "impasto::render::image", "{message}");
-                }
-            }
-            continue;
-        }
-        if let Some(request) = runtime.images.request(source, bucket)
-            && runtime.image_tx.send(request).is_err()
-        {
-            tracing::error!(target: "impasto::render::image", "image decoder stopped");
-        }
-        if required {
-            waiting = true;
-        }
-    }
-    if blocked {
-        return false;
-    }
-    !waiting
-}
-
-fn end_frame(runtime: &mut Runtime, again: bool, stop: bool) -> bool {
+fn end_frame(runtime: &mut UiHost, again: bool, stop: bool) -> bool {
     if stop {
         runtime.scheduler.cancel();
         runtime.vsync.cancel();
         note_wake(runtime, None);
         return true;
     }
+    refresh_wake(runtime);
+    if let Some(token) = runtime.scheduler.finish(again) {
+        runtime.vsync.request_frame(token);
+    } else if runtime.scheduler.token_armed() {
+        // A posted vsync still owns this token. Cancelling it would freeze input.
+    } else {
+        runtime.vsync.cancel();
+    }
+    false
+}
+
+fn refresh_wake(runtime: &mut UiHost) {
     let session_deadline = runtime.session.as_mut().and_then(|session| {
         if runtime.input.is_paused() {
             None
@@ -1554,21 +1761,64 @@ fn end_frame(runtime: &mut Runtime, again: bool, stop: bool) -> bool {
         }
     };
     note_wake(runtime, deadline);
-    if let Some(token) = runtime.scheduler.finish(again) {
-        runtime.vsync.request_frame(token);
-    } else if runtime.scheduler.token_armed() {
-        // A posted vsync still owns this token. Cancelling it would freeze input.
-    } else {
-        runtime.vsync.cancel();
+}
+
+struct WakeTimer {
+    runner: Arc<dyn TaskRunner>,
+    inbox: Arc<Inbox>,
+    pending: RefCell<Option<(i64, TaskHandle)>>,
+}
+
+impl WakeTimer {
+    fn new(runner: Arc<dyn TaskRunner>, inbox: Arc<Inbox>) -> Self {
+        Self {
+            runner,
+            inbox,
+            pending: RefCell::default(),
+        }
     }
-    false
+
+    fn set(&self, next: Option<i64>) {
+        let mut pending = self.pending.borrow_mut();
+        if let Some((deadline, handle)) = pending.take() {
+            if next == Some(deadline) && handle.is_pending() {
+                *pending = Some((deadline, handle));
+                return;
+            }
+            handle.cancel();
+        }
+        if let Some(deadline) = next {
+            let now = crate::net::ms_i64(self.runner.monotonic_ms());
+            let millis = u64::try_from(deadline.saturating_sub(now)).unwrap_or(0);
+            let inbox = Arc::downgrade(&self.inbox);
+            let handle = self.runner.post_delayed(
+                Duration::from_millis(millis),
+                Box::new(move || {
+                    if let Some(inbox) = inbox.upgrade() {
+                        inbox.post(Command::Wake);
+                    }
+                }),
+            );
+            *pending = Some((deadline, handle));
+        }
+    }
 }
 
-fn note_wake(runtime: &Runtime, deadline: Option<i64>) {
-    let _ = runtime.wake_tx.send(deadline);
+impl Drop for WakeTimer {
+    fn drop(&mut self) {
+        self.set(None);
+    }
 }
 
-fn arm(runtime: &mut Runtime) {
+fn note_wake(runtime: &UiHost, deadline: Option<i64>) {
+    // A due timer cannot drive a third frame. The next raster completion
+    // releases the slot and reinstates the wake from the session deadline.
+    runtime
+        .wake
+        .set(deadline.filter(|_| !runtime.frames.waiting));
+}
+
+fn arm(runtime: &mut UiHost) {
     if let Some(token) = runtime.scheduler.request() {
         runtime.vsync.request_frame(token);
     }
@@ -1601,15 +1851,6 @@ fn input_kind(event: &engine::session::InputEvent) -> &'static str {
     }
 }
 
-fn note_step(runtime: &mut Runtime, step: FrameStep) {
-    let gpu = runtime.gpu;
-    if runtime.last_step == Some((step, gpu)) {
-        return;
-    }
-    runtime.last_step = Some((step, gpu));
-    tracing::debug!(target: "impasto::render", ?step, ?gpu, "frame step");
-}
-
 fn frame_listeners(
     devtools: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
 ) -> Vec<Box<dyn crate::timing::FrameListener>> {
@@ -1624,72 +1865,30 @@ fn frame_listeners(
 }
 
 /// Releases GPU caches and refuses acquire until a later submit rebuilds them.
-fn flush_gpu(runtime: &mut Runtime, reason: &'static str) {
+fn flush_gpu(runtime: &mut UiHost, reason: &'static str) {
     tracing::info!(target: "impasto::render::gpu", reason, "gpu flush");
-    runtime.raster.borrow_mut().trim();
-    runtime.installed = None;
-    runtime.gpu = Gpu::Flush;
-    runtime.needs_present = false;
-    runtime.present_failures = 0;
+    runtime.revision = runtime.revision.wrapping_add(1);
+    runtime.graphics.post(|graphics| {
+        graphics.raster.borrow_mut().trim();
+        graphics.installed = None;
+        graphics.gpu = Gpu::Flush;
+        graphics.needs_present = false;
+        graphics.present_failures = 0;
+        graphics.frame_retry_at = None;
+    });
     runtime.present_retry_at = None;
     note_wake(runtime, None);
 }
 
-fn note_scale(runtime: &mut Runtime, next: f32) {
-    if (next - runtime.point_scale).abs() > f32::EPSILON && runtime.installed.is_some() {
-        runtime.installed = None;
+fn note_scale(runtime: &mut UiHost, next: f32) {
+    if (next - runtime.point_scale).abs() > f32::EPSILON {
+        runtime.graphics.post(|graphics| graphics.installed = None);
     }
     runtime.point_scale = next;
 }
 
 fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0
-}
-
-/// Registers queued faces before `submit`. A failure logs the family and status
-/// only, then the frame continues with the faces already on the raster.
-fn install_fonts(raster: &mut raster::Rasterizer, fonts: Vec<(String, Vec<u8>)>) {
-    for (family, bytes) in fonts {
-        if let Err(status) = raster.register_font(&bytes, &family) {
-            tracing::warn!(target: "impasto::shell", %family, %status, "font registration failed");
-        } else {
-            tracing::info!(target: "impasto::shell", %family, "font registered");
-        }
-    }
-}
-
-fn prepare_raster(
-    services: &dyn Services,
-    family: &str,
-    open: impl FnOnce() -> Result<raster::Rasterizer, raster::Status>,
-) -> Result<Rc<RefCell<raster::Rasterizer>>, BootError> {
-    let mut raster = match open() {
-        Ok(raster) => raster,
-        Err(status) => {
-            let error = BootError::Engine(status);
-            tracing::error!(target: "impasto::shell", %status, "raster was not created");
-            return Err(error);
-        }
-    };
-    let Some(font) = services.font(family) else {
-        let error = BootError::Font(family.to_owned());
-        tracing::error!(target: "impasto::shell", %family, "font was not provided");
-        return Err(error);
-    };
-    if let Err(status) = raster.register_font(font, family) {
-        let error = BootError::Engine(status);
-        tracing::error!(target: "impasto::shell", %family, %status, "font registration failed");
-        return Err(error);
-    }
-    tracing::info!(target: "impasto::shell", %family, "font registered");
-    for (name, bytes) in services.extra_fonts() {
-        if let Err(status) = raster.register_font(&bytes, &name) {
-            tracing::warn!(target: "impasto::shell", %name, %status, "font registration failed");
-        } else {
-            tracing::info!(target: "impasto::shell", %name, "font registered");
-        }
-    }
-    Ok(Rc::new(RefCell::new(raster)))
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -1708,8 +1907,8 @@ mod tests {
 
     use super::install_fonts;
     use super::{
-        Acks, DropWait, ExitGuard, Installed, Runtime, fault_followup, lock, on_command, on_frame,
-        start_async,
+        Acks, DropWait, ExitGuard, FramePipeline, Inbox, Installed, RasterHost, RasterPort, UiHost,
+        WakeTimer, fault_followup, lock, on_command, on_frame, start_async,
     };
     use crate::command::{Command, FrameToken, SurfaceId, SurfaceTarget};
     use crate::images::{ImageHandle, ImageReady};
@@ -1725,7 +1924,10 @@ mod tests {
         let capture = Capture(Arc::clone(&lines));
         tracing::subscriber::with_default(capture, || match raster::Rasterizer::create_metal() {
             Ok(mut raster) => {
-                install_fonts(&mut raster, vec![("Custom".to_owned(), secret.to_vec())]);
+                install_fonts(
+                    &mut raster,
+                    vec![("Custom".to_owned(), Arc::from(secret.as_slice()))],
+                );
             }
             Err(raster::Status::NotLinked) => {
                 tracing::warn!(
@@ -1861,7 +2063,7 @@ mod tests {
     }
 
     struct TestHarness {
-        runtime: Runtime,
+        runtime: UiHost,
         acks: Acks,
         vsync: Arc<RecVsync>,
         session: Rc<RefCell<SessionLog>>,
@@ -1878,45 +2080,60 @@ mod tests {
                 launch_urls: Vec::new(),
                 clipboard: None,
             }));
-            let (image_tx, _image_rx) = mpsc::channel();
-            let (wake_tx, _wake_rx) = mpsc::channel();
-            let runtime = Runtime {
+            let typography = raster.borrow().typography();
+            let runtime = UiHost {
+                typography,
+                graphics: RasterPort::Local(Box::new(RasterHost {
+                    raster,
+                    load_image: Arc::new(|_| true),
+                    busy: Arc::new(crate::watchdog::Busy::new()),
+                    frame_retry_at: None,
+                    clock: Arc::new(crate::ManualTaskRunner::default()),
+                    external_textures: Default::default(),
+                    external_gpu: Default::default(),
+                    surfaces: SurfaceHost::new(),
+                    open_surface: Box::new(|_, _| Ok(Box::new(NullSurface))),
+                    installed: None,
+                    needs_present: false,
+                    images: crate::images::ImageCache::new(),
+                    upload: Arc::new(Mutex::new(None)),
+                    present_failures: 0,
+                    device_recoveries: 0,
+                    gpu: Gpu::Live,
+                    last_step: None,
+                })),
+                active_surface: None,
+                try_surface: false,
+                revision: 0,
+                frames: FramePipeline::default(),
+                inbox: Arc::new(Inbox::new()),
                 services: Rc::new(RefCell::new(Box::new(NullServices))),
-                raster,
                 session: Some(Box::new(MockSession {
                     log: Rc::clone(&log),
                 })),
                 net_tx: mpsc::sync_channel(1).0,
                 registry: Arc::new(engine::session::ModuleRegistry::new(Vec::new())),
+                _window: Arc::new(super::Poster {
+                    inbox: Arc::new(Inbox::new()),
+                }),
                 latest: None,
-                image_requirements: Vec::new(),
-                external_textures: Default::default(),
-                external_gpu: Default::default(),
+                image_requirements: Arc::default(),
                 input: crate::input::Input::new(),
-                surfaces: SurfaceHost::new(),
                 scheduler: FrameScheduler::new(),
                 vsync: Arc::clone(&vsync) as Arc<dyn Vsync>,
-                open_surface: Box::new(|_, _| Ok(Box::new(NullSurface))),
-                installed: None,
                 point_scale: 1.0,
-                needs_present: false,
-                images: crate::images::ImageCache::new(),
-                image_tx,
-                upload: Arc::new(Mutex::new(None)),
                 frame_number: 0,
                 semantics: None,
                 semantics_enabled: true,
                 autofill_enabled: false,
                 platform_views: Arc::default(),
-                platform_views_surface: None,
-                platform_views_dirty: false,
-                wake_tx,
+                published_views: None,
+                wake: WakeTimer::new(
+                    Arc::new(crate::ManualTaskRunner::default()),
+                    Arc::new(Inbox::new()),
+                ),
                 dump_list: false,
-                present_failures: 0,
-                device_recoveries: 0,
                 present_retry_at: None,
-                gpu: Gpu::Live,
-                last_step: None,
                 listeners: Vec::new(),
                 inspect: None,
                 hub: None,
@@ -1945,7 +2162,7 @@ mod tests {
                 NativePtr(std::ptr::null_mut()),
                 Metrics::new(360.0, 640.0, 2.0),
             ))));
-            assert!(self.runtime.surfaces.is_open());
+            assert!(self.runtime.graphics.local().surfaces.is_open());
             id
         }
 
@@ -1961,6 +2178,25 @@ mod tests {
             interval_ms: 16.0,
             mono_ms: 1.0,
         }
+    }
+
+    #[test]
+    fn a_full_frame_pipeline_defers_ui_work_until_raster_releases_capacity() {
+        let mut harness = TestHarness::new();
+        harness.open_dummy();
+        assert!(harness.runtime.frames.has_room());
+        harness.runtime.frames.submit();
+        assert!(harness.runtime.frames.has_room());
+        harness.runtime.frames.submit();
+        let token = harness
+            .vsync
+            .last_token()
+            .expect("surface requests a frame");
+        assert!(!harness.command(Command::Frame { token, time: now() }));
+        assert_eq!(harness.frame_count(), 0);
+        assert!(harness.runtime.frames.complete());
+        assert!(harness.runtime.frames.has_room());
+        assert!(!harness.runtime.frames.complete());
     }
 
     #[test]
@@ -2064,17 +2300,35 @@ mod tests {
         );
         harness
             .runtime
+            .graphics
+            .local()
             .surfaces
             .fail_attempt(target, SURFACE_OPEN_ATTEMPTS - 1);
-        assert!(harness.runtime.surfaces.take_attempt().is_none());
-        harness.runtime.needs_present = false;
-        harness.runtime.present_failures = 3;
+        assert!(
+            harness
+                .runtime
+                .graphics
+                .local()
+                .surfaces
+                .take_attempt()
+                .is_none()
+        );
+        harness.runtime.graphics.local().needs_present = false;
+        harness.runtime.graphics.local().present_failures = 3;
         harness.runtime.present_retry_at = Some(1);
         assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Resumed)));
-        assert!(harness.runtime.needs_present);
-        assert_eq!(harness.runtime.present_failures, 0);
+        assert!(harness.runtime.graphics.local().needs_present);
+        assert_eq!(harness.runtime.graphics.local().present_failures, 0);
         assert!(harness.runtime.present_retry_at.is_none());
-        assert!(harness.runtime.surfaces.take_attempt().is_some());
+        assert!(
+            harness
+                .runtime
+                .graphics
+                .local()
+                .surfaces
+                .take_attempt()
+                .is_some()
+        );
     }
 
     #[test]
@@ -2101,11 +2355,15 @@ mod tests {
         let mut harness = TestHarness::new();
         let request = harness
             .runtime
+            .graphics
+            .local()
             .images
             .request("asset:logo", 1)
             .expect("pending decode");
         harness
             .runtime
+            .graphics
+            .local()
             .images
             .apply(ImageReady::Decoded(ImageHandle {
                 source: Arc::from("asset:logo"),
@@ -2114,13 +2372,27 @@ mod tests {
                 pixels: Arc::from([0u8, 0, 0, 0]),
                 gpu: None,
             }));
-        assert!(harness.runtime.images.contains("asset:logo", 1));
-        harness.runtime.installed = Some(Installed { scale: 2.0 });
+        assert!(
+            harness
+                .runtime
+                .graphics
+                .local()
+                .images
+                .contains("asset:logo", 1)
+        );
+        harness.runtime.graphics.local().installed = Some(Installed { scale: 2.0 });
         let tokens_before = harness.vsync.token_count();
         assert!(!harness.command(Command::MemoryWarning));
-        assert!(harness.runtime.installed.is_none());
-        assert!(!harness.runtime.images.contains("asset:logo", 1));
-        assert_eq!(harness.runtime.gpu, Gpu::Flush);
+        assert!(harness.runtime.graphics.local().installed.is_none());
+        assert!(
+            !harness
+                .runtime
+                .graphics
+                .local()
+                .images
+                .contains("asset:logo", 1)
+        );
+        assert_eq!(harness.runtime.graphics.local().gpu, Gpu::Flush);
         assert!(harness.vsync.token_count() > tokens_before);
     }
 
@@ -2129,7 +2401,7 @@ mod tests {
         let presents = Arc::new(AtomicU32::new(0));
         let mut harness = TestHarness::new();
         let counted = Arc::clone(&presents);
-        harness.runtime.open_surface = Box::new(move |_, _| {
+        harness.runtime.graphics.local().open_surface = Box::new(move |_, _| {
             let presents = Arc::clone(&counted);
             Ok(Box::new(CountSurface {
                 presents,
@@ -2138,15 +2410,15 @@ mod tests {
         });
         harness.open_dummy();
         harness.runtime.latest = Some(Arc::new(engine::scene::LayerTree::empty()));
-        harness.runtime.installed = Some(Installed { scale: 2.0 });
-        harness.runtime.needs_present = true;
+        harness.runtime.graphics.local().installed = Some(Installed { scale: 2.0 });
+        harness.runtime.graphics.local().needs_present = true;
         assert!(!harness.command(Command::Lifecycle(engine::session::Lifecycle::Hidden)));
-        assert_eq!(harness.runtime.gpu, Gpu::Flush);
-        assert!(harness.runtime.installed.is_none());
+        assert_eq!(harness.runtime.graphics.local().gpu, Gpu::Flush);
+        assert!(harness.runtime.graphics.local().installed.is_none());
         assert!(harness.runtime.input.is_paused());
         assert!(!on_frame(&mut harness.runtime, now(), &harness.acks).unwrap());
         assert_eq!(presents.load(Ordering::Relaxed), 0);
-        harness.runtime.gpu = Gpu::Dead;
+        harness.runtime.graphics.local().gpu = Gpu::Dead;
         harness.runtime.input.resume();
         assert!(!on_frame(&mut harness.runtime, now(), &harness.acks).unwrap());
         assert_eq!(presents.load(Ordering::Relaxed), 0);
@@ -2157,7 +2429,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(raster::PixelSize::default()));
         let mut harness = TestHarness::new();
         let seen_open = Arc::clone(&seen);
-        harness.runtime.open_surface = Box::new(move |_, _| {
+        harness.runtime.graphics.local().open_surface = Box::new(move |_, _| {
             Ok(Box::new(CountSurface {
                 presents: Arc::new(AtomicU32::new(0)),
                 pixels: Arc::clone(&seen_open),
@@ -2165,9 +2437,9 @@ mod tests {
         });
         harness.open_dummy();
         harness.runtime.latest = Some(Arc::new(engine::scene::LayerTree::empty()));
-        harness.runtime.installed = Some(Installed { scale: 2.0 });
+        harness.runtime.graphics.local().installed = Some(Installed { scale: 2.0 });
         harness.runtime.point_scale = 2.0;
-        harness.runtime.needs_present = true;
+        harness.runtime.graphics.local().needs_present = true;
         assert!(!on_frame(&mut harness.runtime, now(), &harness.acks).unwrap());
         assert_eq!(*lock(&seen), raster::PixelSize::new(720, 1280));
     }
@@ -2194,20 +2466,20 @@ mod tests {
         let recoveries = Arc::new(AtomicU32::new(0));
         let counted = Arc::clone(&recoveries);
         let mut harness = TestHarness::new();
-        harness.runtime.open_surface =
+        harness.runtime.graphics.local().open_surface =
             Box::new(move |_, _| Ok(Box::new(LostDevice(Arc::clone(&counted)))));
         harness.open_dummy();
         let latest = Arc::new(engine::scene::LayerTree::empty());
         harness.runtime.latest = Some(Arc::clone(&latest));
-        harness.runtime.installed = Some(Installed { scale: 2.0 });
+        harness.runtime.graphics.local().installed = Some(Installed { scale: 2.0 });
         harness.runtime.point_scale = 2.0;
-        harness.runtime.needs_present = true;
+        harness.runtime.graphics.local().needs_present = true;
 
         let token = harness.vsync.last_token().expect("initial vsync");
         assert!(!harness.command(Command::Frame { token, time: now() }));
         assert_eq!(recoveries.load(Ordering::Relaxed), 1);
-        assert!(harness.runtime.installed.is_none());
-        assert_eq!(harness.runtime.gpu, Gpu::Flush);
+        assert!(harness.runtime.graphics.local().installed.is_none());
+        assert_eq!(harness.runtime.graphics.local().gpu, Gpu::Flush);
         assert!(
             harness
                 .runtime
@@ -2329,11 +2601,11 @@ mod tests {
         let id = harness.open_dummy();
         assert!(harness.acks.arm(id));
         assert!(!harness.acks.poll(id));
-        harness.runtime.installed = Some(Installed { scale: 1.0 });
+        harness.runtime.graphics.local().installed = Some(Installed { scale: 1.0 });
         let cancels_before = harness.vsync.cancel_count();
         assert!(!harness.command(Command::SurfaceDestroyed { id }));
-        assert!(harness.runtime.installed.is_none());
-        assert!(!harness.runtime.surfaces.is_open());
+        assert!(harness.runtime.graphics.local().installed.is_none());
+        assert!(!harness.runtime.graphics.local().surfaces.is_open());
         assert!(harness.acks.poll(id));
         assert!(harness.vsync.cancel_count() > cancels_before);
         assert!(
@@ -2353,7 +2625,7 @@ mod tests {
         ExitGuard {
             done: Some(done),
             acks: Arc::clone(&acks),
-            inbox: Arc::new(crate::queue::Inbox::new()),
+            inbox: Arc::new(Inbox::new()),
         }
         .finish(Ok(()));
 
@@ -2411,7 +2683,7 @@ mod tests {
         // An idle frame has already delivered these logical metrics.
         let metrics = Metrics::new(360.0, 640.0, 2.0);
         assert_eq!(harness.runtime.input.begin_frame().metrics, Some(metrics));
-        harness.runtime.needs_present = false;
+        harness.runtime.graphics.local().needs_present = false;
         harness.runtime.scheduler.cancel();
 
         assert!(!harness.command(Command::SurfaceChanged {
@@ -2419,7 +2691,7 @@ mod tests {
             metrics,
             pixels: raster::PixelSize::new(800, 1280),
         }));
-        assert!(harness.runtime.needs_present);
+        assert!(harness.runtime.graphics.local().needs_present);
         assert!(harness.runtime.scheduler.token_armed());
         assert!(harness.runtime.input.begin_frame().metrics.is_none());
     }
@@ -2446,7 +2718,7 @@ mod tests {
         assert!(!harness.command(Command::ImeDismissed));
         assert!(!harness.command(Command::Metrics(Metrics::new(360.0, 640.0, 3.0))));
         assert!(!harness.command(Command::Invalidate));
-        assert!(harness.runtime.needs_present);
+        assert!(harness.runtime.graphics.local().needs_present);
         assert!(!harness.command(Command::Settings(
             engine::session::PlatformSettings::default()
         )));
@@ -2596,15 +2868,16 @@ mod tests {
     #[test]
     fn not_ready_surface_waits_and_a_gave_up_change_rearms() {
         let mut harness = TestHarness::new();
-        harness.runtime.open_surface = Box::new(|_, _| Err(raster::Status::NotReady));
+        harness.runtime.graphics.local().open_surface =
+            Box::new(|_, _| Err(raster::Status::NotReady));
         let id = SurfaceId::fresh();
         assert!(!harness.command(Command::SurfaceReady(SurfaceTarget::new(
             id,
             NativePtr(std::ptr::null_mut()),
             Metrics::new(360.0, 640.0, 2.0),
         ))));
-        assert!(!harness.runtime.surfaces.is_open());
-        harness.runtime.surfaces.fail_attempt(
+        assert!(!harness.runtime.graphics.local().surfaces.is_open());
+        harness.runtime.graphics.local().surfaces.fail_attempt(
             SurfaceTarget::new(
                 id,
                 NativePtr(std::ptr::null_mut()),
@@ -2617,6 +2890,14 @@ mod tests {
             metrics: Metrics::new(400.0, 800.0, 2.0),
             pixels: raster::PixelSize::new(800, 1600),
         }));
-        assert!(harness.runtime.surfaces.take_attempt().is_some());
+        assert!(
+            harness
+                .runtime
+                .graphics
+                .local()
+                .surfaces
+                .take_attempt()
+                .is_some()
+        );
     }
 }

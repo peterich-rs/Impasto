@@ -309,8 +309,6 @@ class ImpastoView internal constructor(
         )
     }
 
-    fun postNative(work: Long): Boolean =
-        handler.post { NativeBridge.nativeRunWork(work, handle != 0L) }
 
     fun requestDocument(id: Long): Boolean = handler.post {
         if (handle != 0L) {

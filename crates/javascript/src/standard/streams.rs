@@ -1,9 +1,11 @@
-//! Readable byte streams and body consumption on the QuickJS owner thread.
+//! Readable streams and byte materialization on the QuickJS owner thread.
+
+mod source;
 
 use std::collections::VecDeque;
 
 use rquickjs::class::Trace;
-use rquickjs::function::{Opt, This};
+use rquickjs::function::{Constructor, Opt, This};
 use rquickjs::object::Property;
 use rquickjs::{
     ArrayBuffer, Class, Ctx, Error, Exception, Function, IntoJs, JsLifetime, Object, Promise,
@@ -14,7 +16,8 @@ use super::encoding::decode_utf8;
 use super::web::{Charge, constructor};
 
 const PENDING_READ_LIMIT: usize = 32;
-const BODY_CHUNK_LIMIT: usize = 1024;
+const STREAM_CHUNK_LIMIT: usize = 1024;
+const STREAM_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 const MATERIALIZED_BYTE_LIMIT: usize = 24 * 1024 * 1024;
 
 #[derive(Clone, Trace, JsLifetime)]
@@ -22,6 +25,7 @@ struct Deferred<'js> {
     promise: Promise<'js>,
     resolve: Function<'js>,
     reject: Function<'js>,
+    retained: bool,
 }
 
 impl<'js> Deferred<'js> {
@@ -31,40 +35,71 @@ impl<'js> Deferred<'js> {
             promise,
             resolve,
             reject,
+            retained: false,
         })
     }
 
+    fn retain(&mut self, stream: &Class<'js, ReadableStream<'js>>) -> Result<()> {
+        let holder = read_anchors(self.promise.ctx())?;
+        let map: Object = holder.get("map")?;
+        holder.get::<_, Function>("set")?.call::<_, ()>((
+            This(map),
+            self.promise.clone(),
+            stream.clone(),
+        ))?;
+        self.retained = true;
+        Ok(())
+    }
+
+    fn release(&self) -> Result<()> {
+        if self.retained {
+            let holder = read_anchors(self.promise.ctx())?;
+            let map: Object = holder.get("map")?;
+            holder
+                .get::<_, Function>("delete")?
+                .call::<_, ()>((This(map), self.promise.clone()))?;
+        }
+        Ok(())
+    }
+
     fn resolve(&self, value: impl IntoJs<'js>) -> Result<()> {
+        self.release()?;
         self.resolve.call((value,))
     }
 
     fn reject(&self, error: Value<'js>) -> Result<()> {
+        self.release()?;
         self.reject.call((error,))
     }
 }
 
 #[derive(Trace, JsLifetime)]
+#[rquickjs::class]
+struct ReadAnchors {}
+
+fn read_anchors<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>> {
+    Class::<ReadAnchors>::prototype(ctx)?.ok_or(Error::Unknown)
+}
+
+#[derive(Trace, JsLifetime)]
 struct Chunk<'js> {
-    bytes: TypedArray<'js, u8>,
+    value: Value<'js>,
     release: Option<Function<'js>>,
     len: usize,
+    weight: f64,
 }
 
 impl<'js> Chunk<'js> {
-    fn as_bytes(&self, ctx: &Ctx<'js>) -> Result<&[u8]> {
-        self.bytes.arraybuffer()?;
-        // SAFETY: the backing buffer was checked above. The caller copies the
-        // bytes before executing JavaScript.
-        unsafe { self.bytes.as_bytes() }
-            .filter(|bytes| bytes.len() == self.len)
-            .ok_or_else(|| Exception::throw_type(ctx, "Body buffer detached or resized"))
+    fn bytes(&self, ctx: &Ctx<'js>) -> Result<TypedArray<'js, u8>> {
+        TypedArray::from_value(self.value.clone())
+            .map_err(|_| Exception::throw_type(ctx, "Expected a byte stream"))
     }
 
-    fn release(self) -> Result<TypedArray<'js, u8>> {
+    fn release(self) -> Result<Value<'js>> {
         if let Some(release) = self.release {
             release.call::<_, ()>(())?;
         }
-        Ok(self.bytes)
+        Ok(self.value)
     }
 }
 
@@ -110,6 +145,8 @@ pub(super) struct ReadableStream<'js> {
     queued_bytes: usize,
     pending: VecDeque<Deferred<'js>>,
     cancel: Option<Function<'js>>,
+    cleanup: Option<Function<'js>>,
+    source: Option<source::Source<'js>>,
 }
 
 #[derive(Trace, JsLifetime)]
@@ -157,7 +194,7 @@ impl<'js> ReadableStream<'js> {
                 reason.unwrap_or_else(|| Value::new_undefined(ctx.clone())),
             )
         };
-        settlement(&ctx, result)
+        result.or_else(|error| settlement::<()>(&ctx, Err(error)))
     }
 }
 
@@ -195,7 +232,7 @@ impl<'js> ReadableStreamDefaultReader<'js> {
                 )
             },
         );
-        settlement(&ctx, result)
+        result.or_else(|error| settlement::<()>(&ctx, Err(error)))
     }
 
     #[qjs(rename = "releaseLock")]
@@ -218,18 +255,26 @@ pub(super) fn create<'js>(
             queued_bytes: 0,
             pending: VecDeque::new(),
             cancel,
+            cleanup: None,
+            source: None,
         },
     )
 }
 
-pub(super) fn reader<'js>(
+pub(super) fn attach_cleanup<'js>(
     stream: &Class<'js, ReadableStream<'js>>,
-) -> Result<Option<Class<'js, ReadableStreamDefaultReader<'js>>>> {
-    let stream = stream.try_borrow()?;
-    Ok(match &stream.lock {
-        Some(Lock::Reader(reader)) => Some(reader.clone()),
-        _ => None,
-    })
+    detach: Function<'js>,
+) -> Result<()> {
+    stream.try_borrow_mut()?.cleanup = Some(detach);
+    Ok(())
+}
+
+fn run_cleanup<'js>(stream: &Class<'js, ReadableStream<'js>>) -> Result<()> {
+    let cleanup = stream.try_borrow_mut()?.cleanup.take();
+    if let Some(cleanup) = cleanup {
+        cleanup.call::<_, ()>(())?;
+    }
+    Ok(())
 }
 
 pub(super) fn unavailable<'js>(stream: &Class<'js, ReadableStream<'js>>) -> Result<bool> {
@@ -350,7 +395,7 @@ fn release_reader<'js>(
     Ok(())
 }
 
-fn iteration<'js>(ctx: &Ctx<'js>, bytes: Option<TypedArray<'js, u8>>) -> Result<Object<'js>> {
+fn iteration<'js>(ctx: &Ctx<'js>, bytes: Option<Value<'js>>) -> Result<Object<'js>> {
     let result = Object::new(ctx.clone())?;
     let done = bytes.is_none();
     result.prop(
@@ -365,7 +410,7 @@ fn iteration<'js>(ctx: &Ctx<'js>, bytes: Option<TypedArray<'js, u8>>) -> Result<
 }
 
 fn read<'js>(ctx: &Ctx<'js>, stream: &Class<'js, ReadableStream<'js>>) -> Result<Promise<'js>> {
-    let deferred = Deferred::new(ctx)?;
+    let mut deferred = Deferred::new(ctx)?;
     let (phase, chunk, closing) = {
         let mut state = stream.try_borrow_mut()?;
         state.disturbed = true;
@@ -373,6 +418,9 @@ fn read<'js>(ctx: &Ctx<'js>, stream: &Class<'js, ReadableStream<'js>>) -> Result
             (Some(Err(error.clone())), None, None)
         } else if let Some(chunk) = state.queue.pop_front() {
             state.queued_bytes -= chunk.len;
+            if let Some(source) = state.source.as_mut() {
+                source.queued = (source.queued - chunk.weight).max(0.0);
+            }
             let closing = if state.queue.is_empty() && matches!(state.phase, Phase::Ending) {
                 Some(state.close()?)
             } else {
@@ -388,7 +436,10 @@ fn read<'js>(ctx: &Ctx<'js>, stream: &Class<'js, ReadableStream<'js>>) -> Result
                 Err(Exception::throw_range(ctx, "Too many pending reads")),
             );
         } else {
-            state.pending.push_back(deferred.clone());
+            drop(state);
+            deferred.retain(stream)?;
+            stream.try_borrow_mut()?.pending.push_back(deferred.clone());
+            source::pull_if_needed(ctx, stream)?;
             return Ok(deferred.promise);
         }
     };
@@ -402,6 +453,7 @@ fn read<'js>(ctx: &Ctx<'js>, stream: &Class<'js, ReadableStream<'js>>) -> Result
     } else {
         deferred.resolve(iteration(ctx, None)?)?;
     }
+    source::pull_if_needed(ctx, stream)?;
     Ok(deferred.promise)
 }
 
@@ -463,6 +515,7 @@ pub(super) fn finish<'js>(ctx: &Ctx<'js>, stream: &Class<'js, ReadableStream<'js
         }
         state.phase = Phase::Ending;
         state.cancel = None;
+        state.source = None;
         if state.queue.is_empty() {
             Some(state.close()?)
         } else {
@@ -472,6 +525,7 @@ pub(super) fn finish<'js>(ctx: &Ctx<'js>, stream: &Class<'js, ReadableStream<'js
     if let Some(closing) = closing {
         closing.settle(ctx, Ok(()))?;
     }
+    run_cleanup(stream)?;
     schedule_body(ctx, stream)
 }
 
@@ -487,10 +541,12 @@ pub(super) fn error<'js>(
         }
         state.phase = Phase::Errored(reason.clone());
         state.cancel = None;
+        state.source = None;
         (state.readers()?, state.discard())
     };
     release_chunks(chunks)?;
     work.settle(ctx, Err(reason))?;
+    run_cleanup(stream)?;
     schedule_body(ctx, stream)
 }
 
@@ -498,23 +554,29 @@ fn cancel<'js>(
     ctx: &Ctx<'js>,
     stream: &Class<'js, ReadableStream<'js>>,
     reason: Value<'js>,
-) -> Result<()> {
-    let (work, chunks, cancel) = {
+) -> Result<Promise<'js>> {
+    let (work, chunks, cancel, source) = {
         let mut state = stream.try_borrow_mut()?;
         state.disturbed = true;
         match &state.phase {
-            Phase::Closed => return Ok(()),
+            Phase::Closed => return settlement(ctx, Ok(())),
             Phase::Errored(error) => return Err(ctx.throw(error.clone())),
             _ => {}
         }
-        (state.close()?, state.discard(), state.cancel.take())
+        (
+            state.close()?,
+            state.discard(),
+            state.cancel.take(),
+            state.source.take(),
+        )
     };
     release_chunks(chunks)?;
     work.settle(ctx, Ok(()))?;
+    run_cleanup(stream)?;
     if let Some(cancel) = cancel {
-        cancel.call::<_, ()>((reason,))?;
+        cancel.call::<_, ()>((reason.clone(),))?;
     }
-    Ok(())
+    source::cancel(ctx, source, reason)
 }
 
 pub(super) fn push<'js>(
@@ -527,23 +589,54 @@ pub(super) fn push<'js>(
         .as_raw()
         .ok_or_else(|| Exception::throw_type(ctx, "Detached buffer"))?
         .len();
+    if len == 0 {
+        if let Some(release) = release {
+            release.call::<_, ()>(())?;
+        }
+        return Ok(true);
+    }
+    push_value(ctx, stream, bytes.into_value(), len, release)
+}
+
+pub(super) fn push_value<'js>(
+    ctx: &Ctx<'js>,
+    stream: &Class<'js, ReadableStream<'js>>,
+    value: Value<'js>,
+    len: usize,
+    release: Option<Function<'js>>,
+) -> Result<bool> {
+    push_chunk(ctx, stream, value, len, 0.0, release)
+}
+
+fn push_chunk<'js>(
+    ctx: &Ctx<'js>,
+    stream: &Class<'js, ReadableStream<'js>>,
+    value: Value<'js>,
+    len: usize,
+    weight: f64,
+    release: Option<Function<'js>>,
+) -> Result<bool> {
     let chunk = Chunk {
-        bytes,
+        value,
         release,
         len,
+        weight,
     };
     let (accepted, pending) = {
         let mut state = stream.try_borrow_mut()?;
-        if len == 0 || !matches!(state.phase, Phase::Readable) {
+        if !matches!(state.phase, Phase::Readable) {
             (true, None)
         } else if let Some(read) = state.pending.pop_front() {
             (true, Some(read))
-        } else if len > crate::host::HTTP_BODY_LIMIT.saturating_sub(state.queued_bytes)
-            || state.queue.len() >= BODY_CHUNK_LIMIT
+        } else if len > STREAM_BYTE_LIMIT.saturating_sub(state.queued_bytes)
+            || state.queue.len() >= STREAM_CHUNK_LIMIT
         {
             (false, None)
         } else {
             state.queued_bytes += len;
+            if let Some(source) = state.source.as_mut() {
+                source.queued += weight;
+            }
             state.queue.push_back(chunk);
             drop(state);
             schedule_body(ctx, stream)?;
@@ -574,12 +667,14 @@ pub(super) fn take_bytes<'js>(
     if chunks.len() == 1
         && let Some(chunk) = chunks.pop_front()
     {
-        chunk.as_bytes(ctx)?;
-        return chunk.release();
+        let bytes = chunk.bytes(ctx)?;
+        bytes.arraybuffer()?;
+        chunk.release()?;
+        return Ok(bytes);
     }
     let mut bytes = Vec::new();
     for chunk in chunks {
-        bytes.extend_from_slice(chunk.as_bytes(ctx)?);
+        append_bytes(ctx, &mut bytes, &chunk)?;
         chunk.release()?;
     }
     TypedArray::new_copy(ctx.clone(), bytes)
@@ -719,9 +814,7 @@ fn append_chunks<'js>(
     };
     for chunk in chunks {
         let size = body.bytes.len().saturating_add(chunk.len);
-        if size > crate::host::HTTP_BODY_LIMIT
-            || size.saturating_mul(factor) > MATERIALIZED_BYTE_LIMIT
-        {
+        if size > STREAM_BYTE_LIMIT || size.saturating_mul(factor) > MATERIALIZED_BYTE_LIMIT {
             return Err(Exception::throw_range(
                 ctx,
                 "Body exceeds materialization limit",
@@ -730,14 +823,25 @@ fn append_chunks<'js>(
         if size > body.bytes.capacity() {
             let capacity = size
                 .max(body.bytes.capacity().saturating_mul(2))
-                .min(crate::host::HTTP_BODY_LIMIT);
+                .min(STREAM_BYTE_LIMIT);
             body.charge.resize(ctx, capacity)?;
             body.bytes
                 .try_reserve_exact(capacity - body.bytes.len())
                 .map_err(|_| Exception::throw_range(ctx, "Body allocation failed"))?;
         }
-        body.bytes.extend_from_slice(chunk.as_bytes(ctx)?);
+        append_bytes(ctx, &mut body.bytes, chunk)?;
     }
+    Ok(())
+}
+
+fn append_bytes<'js>(ctx: &Ctx<'js>, dest: &mut Vec<u8>, chunk: &Chunk<'js>) -> Result<()> {
+    let bytes = chunk.bytes(ctx)?;
+    bytes.arraybuffer()?;
+    // SAFETY: the backing buffer was checked above. No JS runs before the copy.
+    let bytes = unsafe { bytes.as_bytes() }
+        .filter(|bytes| bytes.len() == chunk.len)
+        .ok_or_else(|| Exception::throw_type(ctx, "Body buffer detached or resized"))?;
+    dest.extend_from_slice(bytes);
     Ok(())
 }
 
@@ -781,10 +885,22 @@ fn exception_value<'js>(ctx: &Ctx<'js>, error: Error) -> Result<Value<'js>> {
 }
 
 pub(super) fn install<'js>(ctx: &Ctx<'js>, globals: &Object<'js>) -> Result<()> {
+    // The pending read promise keeps its stream alive even when the caller
+    // discards the reader after calling read. The weak key permits GC of both.
+    let holder = read_anchors(ctx)?;
+    let weak: Constructor = globals.get("WeakMap")?;
+    let map: Object = weak.construct(())?;
+    holder.set("set", map.get::<_, Function>("set")?)?;
+    holder.set("delete", map.get::<_, Function>("delete")?)?;
+    holder.set("map", map)?;
     globals.set(
         "ReadableStream",
-        constructor::<ReadableStream<'js>, _, _>(ctx, |ctx: Ctx<'js>| {
-            Err::<Class<'js, ReadableStream<'js>>, _>(Exception::throw_type(
+        constructor::<ReadableStream<'js>, _, _>(ctx, source::construct)?,
+    )?;
+    globals.set(
+        "ReadableStreamDefaultController",
+        constructor::<source::Controller<'js>, _, _>(ctx, |ctx: Ctx<'js>| {
+            Err::<Class<'js, source::Controller<'js>>, _>(Exception::throw_type(
                 &ctx,
                 "Illegal constructor",
             ))
@@ -802,8 +918,24 @@ pub(super) fn install<'js>(ctx: &Ctx<'js>, globals: &Object<'js>) -> Result<()> 
 pub(super) const DECLARATIONS: &str = r#"
 type ReadableStreamReadResult<T> = { done: false; value: T } | { done: true; value: undefined };
 
-declare class ReadableStream<T = Uint8Array> {
+interface UnderlyingSource<T> {
+  start?(controller: ReadableStreamDefaultController<T>): void | PromiseLike<void>;
+  pull?(controller: ReadableStreamDefaultController<T>): void | PromiseLike<void>;
+  cancel?(reason?: unknown): void | PromiseLike<void>;
+}
+interface QueuingStrategy<T> {
+  highWaterMark?: number;
+  size?(chunk: T): number;
+}
+declare class ReadableStreamDefaultController<T = unknown> {
   private constructor();
+  readonly desiredSize: number | null;
+  enqueue(chunk?: T): void;
+  close(): void;
+  error(reason?: unknown): void;
+}
+declare class ReadableStream<T = unknown> {
+  constructor(underlyingSource?: UnderlyingSource<T>, strategy?: QueuingStrategy<T>);
   readonly locked: boolean;
   getReader(): ReadableStreamDefaultReader<T>;
   cancel(reason?: unknown): Promise<void>;

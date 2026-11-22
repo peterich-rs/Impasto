@@ -27,16 +27,6 @@ pub(crate) fn spawn(
         .ok()
 }
 
-pub(crate) fn wake(
-    deadlines: Receiver<Option<i64>>,
-    inbox: Arc<Inbox>,
-) -> Option<thread::JoinHandle<()>> {
-    thread::Builder::new()
-        .name("time".to_string())
-        .spawn(move || wake_loop(deadlines, inbox))
-        .ok()
-}
-
 const STREAM_WORKERS: usize = 8;
 const WHOLE_WORKERS: usize = 8;
 const PIECE_BYTES: usize = 64 << 10;
@@ -728,33 +718,6 @@ fn connect_socket(uri: &http::Uri, post: &Post) -> Result<std::net::TcpStream, S
     ))
 }
 
-fn wake_loop(deadlines: Receiver<Option<i64>>, inbox: Arc<Inbox>) {
-    let mut deadline = None;
-    loop {
-        let wait = match deadline {
-            Some(due) => {
-                let now = ms_i64(mono_ms());
-                if due <= now {
-                    inbox.post(Command::Wake);
-                    deadline = None;
-                    continue;
-                }
-                Duration::from_millis((due - now) as u64)
-            }
-            None => Duration::from_secs(3600),
-        };
-        match deadlines.recv_timeout(wait) {
-            Ok(next) => deadline = next,
-            Err(RecvTimeoutError::Timeout) => {
-                if deadline.take().is_some() {
-                    inbox.post(Command::Wake);
-                }
-            }
-            Err(RecvTimeoutError::Disconnected) => break,
-        }
-    }
-}
-
 pub(crate) fn ms_i64(ms: f64) -> i64 {
     #[expect(
         clippy::cast_possible_truncation,
@@ -980,15 +943,19 @@ mod routing_tests {
         let (work_tx, work_rx) = mpsc::sync_channel(8);
         let (event_tx, event_rx) = mpsc::channel();
         let inbox = Arc::new(Inbox::new());
+        let (notify_tx, notify_rx) = mpsc::channel();
+        inbox.bind(Arc::new(move || {
+            let _ = notify_tx.send(());
+        }));
         let reader = thread::spawn({
             let inbox = Arc::clone(&inbox);
             move || {
-                while let Some(command) = inbox.recv() {
-                    if matches!(&command, Command::Shutdown) {
-                        break;
-                    }
-                    if event_tx.send(command).is_err() {
-                        break;
+                while notify_rx.recv().is_ok() {
+                    while let Some(command) = inbox.pop() {
+                        if matches!(&command, Command::Shutdown) || event_tx.send(command).is_err()
+                        {
+                            return;
+                        }
                     }
                 }
             }

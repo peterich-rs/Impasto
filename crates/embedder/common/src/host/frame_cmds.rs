@@ -1,11 +1,11 @@
 use engine::session::FrameTime;
 
-use super::{Acks, Runtime, arm, on_frame};
+use super::{Acks, UiHost, arm, on_frame};
 use crate::command::{Command, FrameToken};
 use crate::error::BootError;
 
 pub(super) fn handle(
-    runtime: &mut Runtime,
+    runtime: &mut UiHost,
     command: Command,
     acks: &Acks,
 ) -> Result<bool, BootError> {
@@ -16,7 +16,7 @@ pub(super) fn handle(
     }
 }
 
-fn wake(runtime: &mut Runtime, acks: &Acks) -> Result<bool, BootError> {
+fn wake(runtime: &mut UiHost, acks: &Acks) -> Result<bool, BootError> {
     if runtime.input.is_paused() {
         return Ok(false);
     }
@@ -36,7 +36,7 @@ fn wake(runtime: &mut Runtime, acks: &Acks) -> Result<bool, BootError> {
     if !runtime.scheduler.accept(token) {
         return Ok(false);
     }
-    let now = crate::net::mono_ms();
+    let now = runtime.wake.runner.monotonic_ms();
     on_frame(
         runtime,
         FrameTime {
@@ -50,7 +50,7 @@ fn wake(runtime: &mut Runtime, acks: &Acks) -> Result<bool, BootError> {
 }
 
 fn frame(
-    runtime: &mut Runtime,
+    runtime: &mut UiHost,
     token: FrameToken,
     time: FrameTime,
     acks: &Acks,

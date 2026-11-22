@@ -10,7 +10,7 @@ use rquickjs::{
     Array, Class, Coerced, Ctx, Exception, Function, IntoJs, JsLifetime, Object, Value,
 };
 
-use super::web::{Charge, array_from, constructor, is_nullish, platform};
+use super::web::{Charge, array_from, constructor, is_nullish};
 
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class]
@@ -57,9 +57,7 @@ fn name(ctx: &Ctx<'_>, value: String) -> rquickjs::Result<String> {
 
 fn text(ctx: &Ctx<'_>, value: &str) -> rquickjs::Result<String> {
     let value = value.trim_matches(['\t', '\n', '\r', ' ']);
-    if value.contains(['\0', '\n', '\r'])
-        || platform(ctx)?.is_portable() && value.chars().any(|ch| u32::from(ch) > 255)
-    {
+    if value.contains(['\0', '\n', '\r']) || value.chars().any(|ch| u32::from(ch) > 255) {
         return Err(Exception::throw_type(ctx, "Invalid header value"));
     }
     Ok(value.to_owned())
@@ -88,7 +86,7 @@ impl Headers {
             headers.charge.resize(ctx, source.charge.size())?;
             headers.values = source.values.clone();
         } else if let Some(value) = input.as_string() {
-            if platform(ctx)?.is_portable() && !wire {
+            if !wire {
                 return Err(Exception::throw_type(ctx, "Invalid headers initializer"));
             }
             for line in value.to_string()?.split('\n') {
@@ -150,12 +148,6 @@ impl Headers {
         value: String,
     ) -> rquickjs::Result<()> {
         self.insert(ctx, name, value, true)
-    }
-
-    pub(super) fn merged(&self) -> impl Iterator<Item = (&str, String)> {
-        self.values
-            .iter()
-            .map(|(name, values)| (name.as_str(), values.join(", ")))
     }
 
     pub(super) fn wire(&self) -> String {

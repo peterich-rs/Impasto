@@ -4,7 +4,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::host::{HostEvent, Invoke, MethodExec, Module, ModuleRegistry, PluginValue, Settle};
+use crate::host::{
+    HostEvent, Invoke, MethodExec, Module, ModuleRegistry, NativeResource, PluginValue, Settle,
+    StreamSink,
+};
 use rquickjs::function::Rest;
 use rquickjs::module::{Declarations, Exports, ModuleDef};
 use rquickjs::object::Property;
@@ -40,6 +43,16 @@ pub(crate) trait ModuleRuntime {
         ctx: &Ctx<'js>,
         awaits_user: bool,
     ) -> rquickjs::Result<(Value<'js>, Settle)>;
+    fn open_resource<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        create: &mut dyn FnMut() -> Result<Box<dyn NativeResource>, String>,
+    ) -> rquickjs::Result<Value<'js>>;
+    fn reserve_stream<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        signal: Option<Object<'js>>,
+    ) -> rquickjs::Result<(Value<'js>, StreamSink)>;
     fn add_listener(&self, module: &str, event: &str, callback: Saved);
     fn remove_listener(&self, module: &str, event: &str, callback: &Saved);
 }
@@ -112,8 +125,12 @@ impl ModuleDef for BoundModule {
                 Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
                     let _active = runtime.enter(&ctx);
                     runtime.before(&ctx, false)?;
-                    let args = decode_args(&ctx, args.0)?;
-                    call(&ctx, &*runtime, &*exec, &invoke, &args, awaits_user)
+                    let mut args = args.0;
+                    let signal = matches!(&invoke, Invoke::Stream(_))
+                        .then(|| crate::standard::native_stream::signal(&mut args))
+                        .flatten();
+                    let args = decode_args(&ctx, args)?;
+                    call(&ctx, &*runtime, &*exec, &invoke, args, signal, awaits_user)
                 })?;
             export_function(exports, object.as_ref(), method.name, function)?;
         }
@@ -191,20 +208,40 @@ fn call<'js>(
     runtime: &dyn ModuleRuntime,
     exec: &dyn MethodExec,
     invoke: &Invoke,
-    args: &[PluginValue],
+    args: Vec<PluginValue>,
+    signal: Option<Object<'js>>,
     awaits_user: bool,
 ) -> rquickjs::Result<Value<'js>> {
     match invoke {
         Invoke::Sync(invoke) => {
-            let value = catch_unwind(AssertUnwindSafe(|| invoke(args)))
+            let value = catch_unwind(AssertUnwindSafe(|| invoke(&args)))
                 .map_err(|_| Exception::throw_type(ctx, "host callback panicked"))?
                 .map_err(|message| Exception::throw_type(ctx, &message))?;
             encode(ctx, &value)
         }
+        Invoke::Resource(open) => runtime.open_resource(ctx, &mut || open(&args)),
+        Invoke::Stream(work) => {
+            let (stream, mut sink) = runtime.reserve_stream(ctx, signal)?;
+            if !sink.cancellation().is_cancelled() {
+                let work = Arc::clone(work);
+                exec.worker(
+                    Settle::new(|_| {}),
+                    Box::new(move || {
+                        match catch_unwind(AssertUnwindSafe(|| work(args, &mut sink))) {
+                            Ok(Ok(())) => sink.finish(),
+                            Ok(Err(message)) => sink.fail(message),
+                            Err(_) => sink.fail("native stream producer panicked".into()),
+                        }
+                        crate::host::PluginResult::Done(PluginValue::Null)
+                    }),
+                );
+            }
+            Ok(stream)
+        }
         Invoke::Promise(invoke) => {
             let (promise, settle) = runtime.reserve_plugin(ctx, awaits_user)?;
             // The one-shot completion rejects on drop if the method unwinds.
-            let _ = catch_unwind(AssertUnwindSafe(|| invoke(args, settle, exec)));
+            let _ = catch_unwind(AssertUnwindSafe(|| invoke(&args, settle, exec)));
             Ok(promise)
         }
     }

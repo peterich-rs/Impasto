@@ -127,7 +127,9 @@ impl ModuleRegistry {
     ) -> Result<PluginValue, String> {
         match &self.method(module, method).map(|entry| &entry.invoke) {
             Some(Invoke::Sync(function)) => function(args),
-            Some(Invoke::Promise(_)) => Err(format!("module \"{module}.{method}\" is not sync")),
+            Some(Invoke::Promise(_) | Invoke::Resource(_) | Invoke::Stream(_)) => {
+                Err(format!("module \"{module}.{method}\" is not sync"))
+            }
             None => Err(module_not_linked(module, Some(method))),
         }
     }

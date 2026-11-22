@@ -643,6 +643,10 @@ impl Tree {
         self.shaper.register_font(family, bytes)
     }
 
+    pub fn register_shared_font(&mut self, family: &str, bytes: Arc<[u8]>) -> bool {
+        self.shaper.register_shared_font(family, bytes)
+    }
+
     pub(super) fn sync_metrics(&mut self) {
         let started = std::time::Instant::now();
         let ids = std::mem::take(&mut self.pending_text);

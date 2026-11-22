@@ -23,6 +23,7 @@ mod rt;
 mod scheduler;
 mod semantics;
 mod surface;
+mod task_runner;
 mod timing;
 mod watchdog;
 mod window_session;
@@ -35,8 +36,10 @@ pub use command::{Command, FrameToken, SurfaceId, SurfaceTarget};
 pub use diagnostics::DiagnosticsHub;
 pub use engine::session::{FrameTime, Lifecycle};
 pub use error::{BootError, SessionError};
-pub use exec::{MainThreadPoster, RtExec, settle_factory};
-pub use host::{DropWait, Link, Poster, console_log, start, start_async, start_async_with_exit};
+pub use exec::{RtExec, settle_factory};
+pub use host::{
+    DropWait, Link, Poster, console_log, start, start_async, start_async_with_exit, start_on,
+};
 pub use http::{OpenWireClient, http_client};
 pub use images::{ExternalFrame, ImportExternalFrame, pixel_count_ok};
 pub use images::{ImageDecoder, ImageError, ImageHandle, ImageReady};
@@ -56,6 +59,10 @@ pub use ptr::NativePtr;
 pub use restoration::Restoration;
 pub use semantics::{ProjectedNode, content_extent, project, scroll_step};
 pub use surface::pixel_size;
+pub use task_runner::{
+    MainThreadPoster, ManualTaskRunner, PlatformTaskRunner, Task, TaskHandle, TaskQueueId,
+    TaskRunner, TaskRunners, ThreadTaskRunner,
+};
 pub use timing::FrameTiming;
 pub use tracing_subscriber::filter::{LevelFilter, Targets};
 pub use window_session::WindowSession;
@@ -174,6 +181,40 @@ pub trait Vsync: Send + Sync {
     fn cancel(&self);
 }
 
+/// Maps the UI and raster roles to physical queues.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThreadTopology {
+    #[default]
+    SharedRender,
+    Split,
+    PlatformUi,
+}
+
+impl ThreadTopology {
+    pub fn configured() -> Result<Self, BootError> {
+        match std::env::var("IMPASTO_THREAD_TOPOLOGY") {
+            Ok(mode) => mode.parse(),
+            Err(std::env::VarError::NotPresent) => Ok(Self::default()),
+            Err(error) => Err(BootError::Platform(error.to_string())),
+        }
+    }
+}
+
+impl std::str::FromStr for ThreadTopology {
+    type Err = BootError;
+
+    fn from_str(mode: &str) -> Result<Self, Self::Err> {
+        match mode {
+            "shared" => Ok(Self::SharedRender),
+            "split" => Ok(Self::Split),
+            "platform-ui" => Ok(Self::PlatformUi),
+            _ => Err(BootError::Platform(format!(
+                "unknown thread topology: {mode}"
+            ))),
+        }
+    }
+}
+
 pub struct Boot {
     pub font_family: String,
     pub launch: Launch,
@@ -181,7 +222,8 @@ pub struct Boot {
     pub vsync: Arc<dyn Vsync>,
     pub decoder: Arc<dyn ImageDecoder>,
     pub modules: Vec<engine::session::Module>,
-    pub main_thread: Option<MainThreadPoster>,
+    pub platform_runner: Option<Arc<dyn TaskRunner>>,
+    pub thread_topology: ThreadTopology,
     /// Written before `start` so `Linking.getInitialURL` is visible during eval.
     pub launch_url: engine::session::Shared<Option<String>>,
     /// Absent HTTP fails with `network is not linked`. Hosts inject [`http_client`].

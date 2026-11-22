@@ -212,26 +212,6 @@ impl Bridge {
         });
     }
 
-    fn post_work(&self, work: Box<dyn FnOnce() + Send>) {
-        let boxed = Box::into_raw(Box::new(work));
-        let mut posted = false;
-        self.call(|env, view| {
-            posted = env
-                .call_method(
-                    view,
-                    jni::jni_str!("postNative"),
-                    jni::jni_sig!("(J)Z"),
-                    &[jni::objects::JValue::Long(boxed as jlong)],
-                )?
-                .z()?;
-            Ok(())
-        });
-        if !posted {
-            // SAFETY: `boxed` came from `Box::into_raw` above and Java did not take it.
-            drop(unsafe { Box::from_raw(boxed) });
-        }
-    }
-
     fn invoke_text_action(
         &self,
         method: &jni::strings::JNIStr,
@@ -907,6 +887,7 @@ fn attach(env: &mut Env, request: Attach) -> Result<jlong, String> {
     let clock = FrameClock::new(Arc::new(move |token| {
         bridge_for_clock.schedule_frame(token)
     }));
+    let platform_runner = crate::main_runner::main_runner()?;
     let settings = request.settings;
     let callback = Arc::clone(&bridge);
     let boot_bridge = Arc::clone(&bridge);
@@ -920,6 +901,7 @@ fn attach(env: &mut Env, request: Attach) -> Result<jlong, String> {
                 launch_url,
                 log_dir,
                 request.renderer,
+                platform_runner,
             )
         },
         move |result| callback.session_started(result),
@@ -949,31 +931,33 @@ fn android_boot(
     initial_url: Option<String>,
     log_dir: Option<std::path::PathBuf>,
     renderer: Renderer,
+    platform_runner: Arc<dyn embedder::TaskRunner>,
 ) -> Result<Boot, BootError> {
     let bridge_for_surface = Arc::clone(&bridge);
     let script_assets = Arc::clone(&bridge.assets);
     let launch_url = engine::session::shared(initial_url);
-    let main_thread = {
-        let bridge = Arc::clone(&bridge);
-        Arc::new(move |work: Box<dyn FnOnce() + Send>| {
-            bridge.post_work(work);
-        }) as embedder::MainThreadPoster
+    let thread_topology = match decode::read_bytes(&script_assets, c"app.thread_topology") {
+        Some(bytes) => String::from_utf8_lossy(&bytes).trim().parse()?,
+        None => embedder::ThreadTopology::configured()?,
     };
+    let (name, script) = load_script(&script_assets, requested.as_deref())?;
+    let modules = decode::read_bytes(&script_assets, c"app.modules")
+        .map(|bytes| String::from_utf8(bytes).map_err(|_| SessionError::Runtime))
+        .transpose()?
+        .map(|text| {
+            text.split(',')
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        });
+    let trace = decode::read_bytes(&script_assets, c"app.trace").is_some();
     Ok(Boot {
         font_family: FONT_FAMILY.to_string(),
         launch: Launch::Session(Box::new(move |open, io, host| {
-            let (name, script) = load_script(&script_assets, requested.as_deref())?;
             // ActivityHost publishes the first focused resume after the view is attached.
             engine::session::shared_write(&host.app_state, "inactive".to_owned());
-            let host = if let Some(bytes) = decode::read_bytes(&script_assets, c"app.modules") {
-                let text = String::from_utf8(bytes).map_err(|_| SessionError::Runtime)?;
-                host.restrict(
-                    &text
-                        .split(',')
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>(),
-                )
+            let host = if let Some(modules) = modules {
+                host.restrict(&modules)
             } else {
                 host
             };
@@ -1009,7 +993,7 @@ fn android_boot(
                     SessionError::Script(text)
                 }
             })?;
-            session.set_trace(decode::read_bytes(&script_assets, c"app.trace").is_some());
+            session.set_trace(trace);
             Ok(session)
         })),
         services: Box::new(Shared(Arc::clone(&bridge))),
@@ -1018,7 +1002,8 @@ fn android_boot(
             assets: Arc::clone(&bridge.assets),
         }),
         modules: Vec::new(),
-        main_thread: Some(main_thread),
+        platform_runner: Some(platform_runner),
+        thread_topology,
         launch_url: Arc::clone(&launch_url),
         http: Some(embedder::http_client().map_err(BootError::Platform)?),
         open_raster: Box::new(move || renderer.create_raster()),

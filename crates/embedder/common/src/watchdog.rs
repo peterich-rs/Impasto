@@ -3,7 +3,6 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::thread;
 use std::time::Duration;
 
 use crate::diagnostics::DiagnosticsHub;
@@ -54,48 +53,52 @@ pub(crate) fn stalled(armed: bool, since_ms: u64, now_ms: u64) -> bool {
     armed && since_ms != 0 && now_ms.saturating_sub(since_ms) >= STALL_MS
 }
 
-pub(crate) fn spawn(busy: Weak<Busy>, hub: Option<Arc<DiagnosticsHub>>) {
-    let _ = thread::Builder::new()
-        .name("watchdog".into())
-        .spawn(move || {
-            loop {
-                thread::sleep(TICK);
-                let Some(state) = busy.upgrade() else {
-                    break;
-                };
-                let since = state.since_ms.load(Ordering::Acquire);
-                let now = crate::net::ms_i64(crate::net::mono_ms()) as u64;
-                let armed = state.armed.load(Ordering::Acquire);
-                if !stalled(armed, since, now) {
-                    if state.reported.swap(false, Ordering::AcqRel) {
-                        tracing::info!(target: "impasto::watchdog", "render thread recovered");
-                    }
-                    continue;
+pub(crate) fn spawn(role: &'static str, busy: Weak<Busy>, hub: Option<Arc<DiagnosticsHub>>) {
+    let Ok(runtime) = crate::rt::handle() else {
+        return;
+    };
+    runtime.spawn(async move {
+        let mut tick = tokio::time::interval(TICK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            let Some(state) = busy.upgrade() else {
+                break;
+            };
+            let since = state.since_ms.load(Ordering::Acquire);
+            let now = crate::net::ms_i64(crate::net::mono_ms()) as u64;
+            let armed = state.armed.load(Ordering::Acquire);
+            if !stalled(armed, since, now) {
+                if state.reported.swap(false, Ordering::AcqRel) {
+                    tracing::info!(target: "impasto::watchdog", role, "host thread recovered");
                 }
-                if state.reported.swap(true, Ordering::AcqRel) {
-                    continue;
-                }
-                let tag = *state
-                    .tag
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let stalled_ms = now.saturating_sub(since);
-                tracing::error!(
-                    target: "impasto::watchdog",
-                    tag,
-                    stalled_ms,
-                    "render thread stalled"
-                );
-                if let Some(hub) = hub.as_ref() {
-                    hub.error(
-                        "watchdog",
-                        &format!("render thread stalled in {tag}"),
-                        None,
-                        None,
-                    );
-                }
+                continue;
             }
-        });
+            if state.reported.swap(true, Ordering::AcqRel) {
+                continue;
+            }
+            let tag = *state
+                .tag
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let stalled_ms = now.saturating_sub(since);
+            tracing::error!(
+                target: "impasto::watchdog",
+                role,
+                tag,
+                stalled_ms,
+                "host thread stalled"
+            );
+            if let Some(hub) = hub.as_ref() {
+                hub.error(
+                    "watchdog",
+                    &format!("{role} thread stalled in {tag}"),
+                    None,
+                    None,
+                );
+            }
+        }
+    });
 }
 
 #[cfg(test)]

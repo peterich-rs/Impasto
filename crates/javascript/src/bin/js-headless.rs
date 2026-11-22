@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use javascript::compiler;
 use javascript::host::{
-    EventType, HostEvent, HttpResponse, IoEvent, IoJob, Method, Module, ModuleExports,
-    ModuleRegistry, PluginResult, PluginValue,
+    EventType, HostEvent, IoEvent, IoJob, Method, Module, ModuleExports, ModuleRegistry,
+    PluginResult, PluginValue,
 };
 use javascript::runtime::IoBindings;
 use javascript::runtime::{ModuleCatalog, ModuleOutcome, Runtime};
@@ -104,7 +104,7 @@ fn main() -> Result<(), String> {
     let IoJob::Routed { route, job, .. } = job else {
         return Err(format!("expected a routed HTTP job, received {job:?}"));
     };
-    let IoJob::Http(request) = job.as_ref() else {
+    let IoJob::HttpStream(request) = job.as_ref() else {
         return Err(format!("expected an HTTP job, received {job:?}"));
     };
     if request.url != "https://example.invalid/data/payload"
@@ -117,20 +117,26 @@ fn main() -> Result<(), String> {
         return Err("HTTP request was submitted twice".into());
     }
 
-    let completion = IoEvent::Http {
-        token: request.token,
-        result: Ok(HttpResponse {
+    for completion in [
+        IoEvent::HttpHead {
+            token: request.token,
             status: 201,
             headers: vec![("Content-Type".into(), "text/plain".into())],
-            body: b"written".to_vec(),
-        }),
-    };
-    let credit = route
-        .reserve(completion.payload_bytes(), Duration::ZERO)
-        .ok_or_else(|| "HTTP completion exceeded the queue limit".to_owned())?;
-    runtime
-        .enqueue_delivery(route.deliver(completion, Some(credit)))
-        .map_err(|error| format!("HTTP delivery failed: {error:?}"))?;
+        },
+        IoEvent::HttpChunk {
+            token: request.token,
+            bytes: b"written".to_vec(),
+            done: true,
+            error: None,
+        },
+    ] {
+        let credit = route
+            .reserve(completion.payload_bytes(), Duration::ZERO)
+            .ok_or_else(|| "HTTP completion exceeded the queue limit".to_owned())?;
+        runtime
+            .enqueue_delivery(route.deliver(completion, Some(credit)))
+            .map_err(|error| format!("HTTP delivery failed: {error:?}"))?;
+    }
     runtime.drive(11).map_err(|error| error.to_string())?;
 
     match runtime

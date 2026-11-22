@@ -43,6 +43,16 @@ pub struct Typography {
 }
 
 impl Typography {
+    /// Opens a CPU-only typography context on the caller's thread.
+    pub fn standalone() -> Result<Self, Status> {
+        // SAFETY: Impeller creates a new thread-affine context. Self owns its release.
+        let context = unsafe { impeller::ImpellerTypographyContextNew() };
+        if context.is_null() {
+            return Err(Status::NotReady);
+        }
+        Ok(Self::new(context))
+    }
+
     pub(crate) fn new(context: impeller::ImpellerTypographyContext) -> Self {
         Self {
             context,
@@ -246,6 +256,14 @@ impl Typography {
     ///
     /// Does not mark pictures stale. The engine does that only when the bytes change.
     pub fn register_face(&mut self, data: &[u8], family: &str) -> Result<bool, Status> {
+        self.register_shared_face(std::sync::Arc::from(data), family)
+    }
+
+    pub fn register_shared_face(
+        &mut self,
+        data: std::sync::Arc<[u8]>,
+        family: &str,
+    ) -> Result<bool, Status> {
         if data.is_empty() {
             return Err(Status::BadScene);
         }
@@ -258,11 +276,11 @@ impl Typography {
             .faces
             .iter()
             .find(|face| face.family.as_bytes() == family.as_bytes())
-            && fonts::FontLease::same(face.lease, data)
+            && fonts::FontLease::same(face.lease, &data)
         {
             return Ok(false);
         }
-        let lease = fonts::FontLease::new(data.to_vec());
+        let lease = fonts::FontLease::new(data);
         let mapping = impeller::ImpellerMapping {
             data: fonts::FontLease::data(lease),
             length: fonts::FontLease::len(lease),
