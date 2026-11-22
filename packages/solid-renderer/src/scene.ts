@@ -27,7 +27,7 @@ export type PlatformSnapshot = {
 type WindowInsets = { top: number; right: number; bottom: number; left: number };
 
 export type WindowMetrics = {
-  /** Android display mode, when supplied by the host. */
+  /** Display information, when supplied by the host. */
   displayId?: number;
   refreshRate?: number;
   /** Coordinates in logical points relative to the current Impasto View. */
@@ -39,6 +39,8 @@ export type WindowMetrics = {
   devicePixelRatio: number;
   padding: WindowInsets;
   viewInsets: WindowInsets;
+  /** Local obstruction such as an undocked iPad keyboard. */
+  keyboardOcclusion?: { x: number; y: number; width: number; height: number };
   systemGestureInsets: WindowInsets;
 };
 export type DisplayFeature = {
@@ -294,7 +296,7 @@ export interface SceneModule {
   setImeConfig(keyboard: number, action: number): void;
   /** Replace the session theme snapshot while preserving window dimensions. */
   setStyleEnvironment(environment: StyleEnvironment): void;
-  setPlatformView(node: NodeHandle, kind: string | null): void;
+  setPlatformView(node: NodeHandle, kind: string | null, clipPath?: string): void;
   setSemantics(
     node: NodeHandle,
     role: number,
@@ -405,6 +407,17 @@ export interface SceneModule {
   /** Remove this node's scope and report whether it was active. Omit the node to pop the top scope. */
   popFocusScope(node?: NodeHandle): boolean;
   pointerPosition(): { x: number; y: number };
+  penSample(): {
+    id: string;
+    phase: "down" | "move" | "up" | "cancel";
+    x: number;
+    y: number;
+    time: number;
+    force: number;
+    radius: number;
+    altitude: number;
+    azimuth: number;
+  } | null;
   onBack(fn: () => boolean): number;
   offBack(id: number): void;
   onBackGesture?(fn: (phase: "start" | "progress" | "cancel" | "commit", value: number) => boolean | void): void;

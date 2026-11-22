@@ -83,6 +83,10 @@ pub enum Command {
         source: String,
         frame: Option<crate::images::ExternalFrame>,
     },
+    ExternalGpuTexture {
+        source: String,
+        frame: Option<crate::images::ImportExternalFrame>,
+    },
     /// Drop one cache key and ask the render thread for another frame.
     ReloadImage(String),
     JsIo(session::Delivery),
@@ -147,7 +151,9 @@ pub(crate) fn command_tag(command: &Command) -> &'static str {
         Command::SurfaceReady(_)
         | Command::SurfaceChanged { .. }
         | Command::SurfaceDestroyed { .. } => "surface",
-        Command::ImageReady(_) | Command::ExternalTexture { .. } => "image",
+        Command::ImageReady(_)
+        | Command::ExternalTexture { .. }
+        | Command::ExternalGpuTexture { .. } => "image",
         Command::ReloadImage(_) => "reload",
         Command::JsIo(_)
         | Command::HttpDone { .. }

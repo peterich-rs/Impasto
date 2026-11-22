@@ -1,0 +1,204 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000003 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* LaunchScreen.storyboard */; };
+		A10000000000000000000004 /* libembedder_ios.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* libembedder_ios.a */; };
+		A10000000000000000000005 /* App script in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* App script */; };
+		A10000000000000000000006 /* app.modules in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* app.modules */; };
+		A10000000000000000000007 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* assets */; };
+		A10000000000000000000008 /* Impeller-LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* Impeller-LICENSE */; };
+		A1000000000000000000000A /* Roboto-NOTICE in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* Roboto-NOTICE */; };
+@HOST_SWIFT_BUILDFILES@
+		A1000000000000000000000B /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000F /* PrivacyInfo.xcprivacy */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A20000000000000000000003 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = host/LaunchScreen.storyboard; sourceTree = "<group>"; };
+		A20000000000000000000004 /* libembedder_ios.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = native/libembedder_ios.a; sourceTree = "<group>"; };
+		A20000000000000000000005 /* App script */ = {isa = PBXFileReference; lastKnownFileType = file; path = "resources/@APP_SCRIPT@"; sourceTree = "<group>"; };
+		A20000000000000000000006 /* app.modules */ = {isa = PBXFileReference; lastKnownFileType = text; path = resources/app.modules; sourceTree = "<group>"; };
+		A20000000000000000000007 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = resources/assets; sourceTree = "<group>"; };
+		A20000000000000000000008 /* Impeller-LICENSE */ = {isa = PBXFileReference; lastKnownFileType = text; path = "resources/Impeller-LICENSE"; sourceTree = "<group>"; };
+		A2000000000000000000000E /* Roboto-NOTICE */ = {isa = PBXFileReference; lastKnownFileType = text; path = "resources/Roboto-NOTICE"; sourceTree = "<group>"; };
+		A20000000000000000000009 /* impasto_ios.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = native/impasto_ios.h; sourceTree = "<group>"; };
+		A2000000000000000000000A /* BuildSettings.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = BuildSettings.xcconfig; sourceTree = "<group>"; };
+		A2000000000000000000000B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A2000000000000000000000C /* Impasto.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Impasto.app; sourceTree = BUILT_PRODUCTS_DIR; };
+@HOST_SWIFT_REFERENCES@
+		A2000000000000000000000F /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "resources/PrivacyInfo.xcprivacy"; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A30000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (A10000000000000000000004 /* libembedder_ios.a in Frameworks */,);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A40000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+@HOST_SWIFT_GROUP@
+				A2000000000000000000000F /* PrivacyInfo.xcprivacy */,
+				A20000000000000000000003 /* LaunchScreen.storyboard */,
+				A20000000000000000000004 /* libembedder_ios.a */,
+				A20000000000000000000005 /* App script */,
+				A20000000000000000000006 /* app.modules */,
+				A20000000000000000000007 /* assets */,
+				A20000000000000000000008 /* Impeller-LICENSE */,
+				A2000000000000000000000E /* Roboto-NOTICE */,
+				A20000000000000000000009 /* impasto_ios.h */,
+				A2000000000000000000000A /* BuildSettings.xcconfig */,
+				A2000000000000000000000B /* Info.plist */,
+				A40000000000000000000002 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A40000000000000000000002 /* Products */ = {
+			isa = PBXGroup;
+			children = (A2000000000000000000000C /* Impasto.app */,);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A50000000000000000000001 /* Impasto */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A90000000000000000000002;
+			buildPhases = (
+				A70000000000000000000001 /* Sources */,
+				A30000000000000000000001 /* Frameworks */,
+				A80000000000000000000001 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = Impasto;
+			productName = Impasto;
+			productReference = A2000000000000000000000C /* Impasto.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A60000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			buildConfigurationList = A90000000000000000000001;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base,);
+			mainGroup = A40000000000000000000001;
+			productRefGroup = A40000000000000000000002 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (A50000000000000000000001 /* Impasto */,);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A70000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+@HOST_SWIFT_SOURCES@
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A80000000000000000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000003 /* LaunchScreen.storyboard in Resources */,
+				A10000000000000000000005 /* App script in Resources */,
+				A10000000000000000000006 /* app.modules in Resources */,
+				A10000000000000000000007 /* assets in Resources */,
+				A10000000000000000000008 /* Impeller-LICENSE in Resources */,
+				A1000000000000000000000A /* Roboto-NOTICE in Resources */,
+				A1000000000000000000000B /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		AA0000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				OTHER_SWIFT_FLAGS = ("$(inherited)", "-Xcc", "-DIMPASTO_IOS_DEVELOPMENT=1",);
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		AA0000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+		AA0000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A2000000000000000000000A /* BuildSettings.xcconfig */;
+			buildSettings = {
+				INFOPLIST_FILE = Info.plist;
+				LIBRARY_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/native",);
+				PRODUCT_NAME = Impasto;
+				SWIFT_OBJC_BRIDGING_HEADER = native/impasto_ios.h;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		AA0000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A2000000000000000000000A /* BuildSettings.xcconfig */;
+			buildSettings = {
+				INFOPLIST_FILE = Info.plist;
+				LIBRARY_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/native",);
+				PRODUCT_NAME = Impasto;
+				SWIFT_OBJC_BRIDGING_HEADER = native/impasto_ios.h;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A90000000000000000000001 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (AA0000000000000000000001, AA0000000000000000000002,);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A90000000000000000000002 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (AA0000000000000000000003, AA0000000000000000000004,);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A60000000000000000000001 /* Project object */;
+}

@@ -16,6 +16,7 @@ pub struct RunOptions {
     pub release: bool,
     pub verbose: bool,
     pub trace: bool,
+    pub watch: bool,
 }
 pub fn run(options: RunOptions) -> Result<()> {
     let mut app = App::current()?;
@@ -27,16 +28,18 @@ pub fn run(options: RunOptions) -> Result<()> {
         } else {
             "android"
         });
-    if device == "ios" {
-        bail!("iOS 宿主尚未实现，无法运行 iOS 应用");
-    }
-    let android = device != "macos";
     let settings = BuildOptions {
         debug: !options.release,
         verbose: options.verbose,
         trace: options.trace,
     };
-    if android {
+    if device == "ios" || device.starts_with("ios:") {
+        return crate::ios::run(app, &settings, device.strip_prefix("ios:"), options.watch);
+    }
+    if options.watch {
+        bail!("--watch 仅适用于 iOS 调试运行");
+    }
+    if device != "macos" {
         let adb = || {
             let mut command = Command::new("adb");
             if device != "android" {
@@ -150,9 +153,9 @@ pub fn run(options: RunOptions) -> Result<()> {
         }
     }
 }
-type Snapshot = BTreeMap<PathBuf, (SystemTime, u64)>;
+pub(crate) type Snapshot = BTreeMap<PathBuf, (SystemTime, u64)>;
 
-fn script_only(app: &App, previous: &Snapshot, current: &Snapshot) -> bool {
+pub(crate) fn script_only(app: &App, previous: &Snapshot, current: &Snapshot) -> bool {
     let unchanged = |path: &Path| {
         previous
             .iter()
@@ -225,27 +228,7 @@ fn update_android(
     Ok(())
 }
 
-fn files(app: &App) -> Result<Snapshot> {
-    fn visit(path: &Path, out: &mut BTreeMap<PathBuf, (SystemTime, u64)>) -> Result<()> {
-        if !path.exists() {
-            return Ok(());
-        }
-        let meta = fs::metadata(path)?;
-        if meta.is_dir() {
-            for entry in fs::read_dir(path)? {
-                let entry = entry?;
-                if !["node_modules", "build", "dist", "target", ".git"]
-                    .iter()
-                    .any(|n| entry.file_name() == *n)
-                {
-                    visit(&entry.path(), out)?;
-                }
-            }
-        } else {
-            out.insert(path.to_owned(), (meta.modified()?, meta.len()));
-        }
-        Ok(())
-    }
+pub(crate) fn files(app: &App) -> Result<Snapshot> {
     let mut out = BTreeMap::new();
     for name in [
         if app.gallery { "src" } else { "lib" },
@@ -253,10 +236,34 @@ fn files(app: &App) -> Result<Snapshot> {
         "app.toml",
         "package.json",
     ] {
-        visit(&app.root.join(name), &mut out)?;
+        snapshot_path(&app.root.join(name), &mut out)?;
     }
     if app.gallery {
-        visit(&toolchain::framework()?.join("packages"), &mut out)?;
+        snapshot_path(&toolchain::framework()?.join("packages"), &mut out)?;
     }
     Ok(out)
+}
+
+pub(crate) fn snapshot_path(
+    path: &Path,
+    out: &mut BTreeMap<PathBuf, (SystemTime, u64)>,
+) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let meta = fs::metadata(path)?;
+    if meta.is_dir() {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            if !["node_modules", "build", "dist", "target", ".git"]
+                .iter()
+                .any(|n| entry.file_name() == *n)
+            {
+                snapshot_path(&entry.path(), out)?;
+            }
+        }
+    } else {
+        out.insert(path.to_owned(), (meta.modified()?, meta.len()));
+    }
+    Ok(())
 }

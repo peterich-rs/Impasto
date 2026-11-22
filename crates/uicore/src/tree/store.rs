@@ -46,6 +46,7 @@ impl Tree {
             canvas_geometry_epoch: 0,
             layers: crate::layer::LayerTree::empty(),
             semantics_cache: HashMap::new(),
+            semantics_order: Vec::new(),
             platform_views: HashMap::new(),
             image_counts: HashMap::new(),
             image_generation: 0,

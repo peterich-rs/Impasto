@@ -10,6 +10,7 @@ members = [
     "crates/embedder/common",
     "crates/embedder/android",
     "crates/embedder/macos",
+    "crates/embedder/ios",
     "crates/cli",
     "crates/reactive",
 ]

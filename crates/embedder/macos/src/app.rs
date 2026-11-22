@@ -355,6 +355,7 @@ impl ContentView {
             dx: 0.0,
             dy: 0.0,
             zoom: 0.0,
+            pen: None,
         }));
     }
 

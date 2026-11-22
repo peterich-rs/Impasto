@@ -15,7 +15,7 @@ use session::FrameTime;
 use crate::command::{Command, SurfaceId, SurfaceTarget};
 use crate::error::BootError;
 use crate::images::{self, ImageCache, ImageDecoder, ImageError, ImageReady, ImageRequest};
-use crate::input::Input;
+use crate::input::{FrameInput, Input};
 use crate::present::{self, AfterPresent, after_present};
 use crate::queue::Inbox;
 use crate::scheduler::{self, FrameScheduler, FrameStep, FrameView, Gpu, VsyncOp};
@@ -359,6 +359,16 @@ pub fn start_async(
     prepare: impl FnOnce() -> Result<Boot, BootError> + Send + 'static,
     on_started: impl FnOnce(Result<(), BootError>) + Send + 'static,
 ) -> Result<Link, BootError> {
+    start_async_with_exit(prepare, on_started, |_| {})
+}
+
+/// Like [`start_async`], with a notification after render resources are
+/// released and the inbox is closed. Both callbacks run on the render thread.
+pub fn start_async_with_exit(
+    prepare: impl FnOnce() -> Result<Boot, BootError> + Send + 'static,
+    on_started: impl FnOnce(Result<(), BootError>) + Send + 'static,
+    on_exit: impl FnOnce(Result<(), BootError>) + Send + 'static,
+) -> Result<Link, BootError> {
     let inbox = Arc::new(Inbox::new());
     let inbox_thread = Arc::clone(&inbox);
     let (done_tx, done_rx) = mpsc::channel();
@@ -385,7 +395,8 @@ pub fn start_async(
             }))
             .unwrap_or(Err(BootError::Panicked));
             guard.finish(result.clone());
-            startup.report(result);
+            startup.report(result.clone());
+            on_exit(result);
         })
         .map_err(|error| BootError::Platform(error.to_string()))?;
     Ok(Link {
@@ -424,7 +435,13 @@ fn run_boot(
     let (net_tx, net_rx) = mpsc::sync_channel(64);
     let (wake_tx, wake_rx) = mpsc::channel();
     let inbox_net = Arc::clone(inbox);
-    let _net = crate::net::spawn(net_rx, inbox_net, http, boot.devtools.clone());
+    let _net = crate::net::spawn(
+        net_rx,
+        inbox_net,
+        http,
+        boot.services.websocket_transport(),
+        boot.devtools.clone(),
+    );
     let _time = crate::net::wake(wake_rx, Arc::clone(inbox));
     render(
         boot,
@@ -515,6 +532,7 @@ struct Runtime {
     latest: Option<Arc<protocol::LayerTree>>,
     image_requirements: Vec<(Arc<str>, bool)>,
     external_textures: HashMap<String, images::ExternalFrame>,
+    external_gpu: HashMap<String, images::ExternalGpuFrame>,
     input: Input,
     surfaces: SurfaceHost,
     scheduler: FrameScheduler,
@@ -663,6 +681,7 @@ fn render(
         latest: None,
         image_requirements: Vec::new(),
         external_textures: Default::default(),
+        external_gpu: Default::default(),
         input: Input::new(),
         surfaces: SurfaceHost::new(),
         scheduler: FrameScheduler::new(),
@@ -861,6 +880,7 @@ fn dispatch_command(
         | Command::MemoryWarning
         | Command::ImageReady(_)
         | Command::ExternalTexture { .. }
+        | Command::ExternalGpuTexture { .. }
         | Command::ReloadImage(_)) => cache_cmds::handle(runtime, command),
         command @ (Command::Wake | Command::Frame { .. }) => {
             frame_cmds::handle(runtime, command, acks)
@@ -885,6 +905,12 @@ fn fold_semantics(snapshot: &mut Option<uicore::SemanticsUpdate>, patch: &uicore
             }
             uicore::SemanticsOp::Remove(id) => update.nodes.retain(|node| node.id != *id),
         }
+    }
+    if let Some(order) = &patch.order {
+        let ranks: HashMap<_, _> = order.iter().copied().zip(0..).collect();
+        update
+            .nodes
+            .sort_by_key(|node| ranks.get(&node.id).copied().unwrap_or(usize::MAX));
     }
 }
 
@@ -938,23 +964,27 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     let input_trace = Section::begin(c"Impasto input");
     let mut leave = false;
     if let Some(session) = runtime.session.as_mut() {
-        for event in frame.pointers {
-            tracing::trace!(
-                target: "impasto::shell",
-                kind = phase_name(event.phase),
-                x = event.x,
-                y = event.y,
-                "pointer"
-            );
-            session_call(|| session.pointer(event));
-        }
-        for event in frame.inputs {
-            tracing::trace!(target: "impasto::shell", kind = input_kind(&event), "input");
-            session_call(|| session.input(event));
-        }
-        if frame.ime_dismissed {
-            tracing::trace!(target: "impasto::shell", "ime dismissed");
-            session_call(|| session.ime_dismissed());
+        for event in frame.events {
+            match event {
+                FrameInput::Pointer(event) => {
+                    tracing::trace!(
+                        target: "impasto::shell",
+                        kind = phase_name(event.phase),
+                        x = event.x,
+                        y = event.y,
+                        "pointer"
+                    );
+                    session_call(|| session.pointer(event));
+                }
+                FrameInput::Session(event) => {
+                    tracing::trace!(target: "impasto::shell", kind = input_kind(&event), "input");
+                    session_call(|| session.input(event));
+                }
+                FrameInput::DismissIme => {
+                    tracing::trace!(target: "impasto::shell", "ime dismissed");
+                    session_call(|| session.ime_dismissed());
+                }
+            }
         }
     }
     let gesture_ms = gesture_started.elapsed().as_secs_f64() * 1000.0;
@@ -1042,8 +1072,12 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                     let _trace = Section::begin(c"Impasto accessibility");
                     fold_semantics(&mut runtime.semantics, &patch);
                     if let Some(update) = runtime.semantics.as_ref() {
-                        let projected = crate::semantics::project(update);
-                        runtime.services.borrow().semantics(&projected);
+                        let services = runtime.services.borrow();
+                        let projected = crate::semantics::project_with_platform_views(
+                            update,
+                            services.semantics_include_platform_views(),
+                        );
+                        services.semantics(&projected);
                     }
                 }
                 if let Some(placements) = output.platform_views.take() {
@@ -1127,6 +1161,14 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                 &mut runtime.engine.borrow_mut(),
                 images::scale_bucket(runtime.point_scale),
             );
+            {
+                let mut engine = runtime.engine.borrow_mut();
+                for (source, frame) in &runtime.external_gpu {
+                    if let Some(image) = &frame.image {
+                        engine.install_uploaded(source, image);
+                    }
+                }
+            }
             let started = Instant::now();
             let pixels = runtime.images.snapshot_requirements(
                 &runtime.image_requirements,
@@ -1194,7 +1236,9 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
     let presented = {
         let _trace = Section::begin(c"Impasto present");
         let mut engine = runtime.engine.borrow_mut();
-        runtime.surfaces.present(&mut engine)
+        runtime
+            .surfaces
+            .present(&mut engine, &runtime.platform_views)
     };
     if presented.is_ok() {
         let _trace = Section::begin(c"Impasto presented");
@@ -1279,6 +1323,9 @@ fn on_frame(runtime: &mut Runtime, time: FrameTime, acks: &Acks) -> Result<bool,
                 .surfaces
                 .recover_device(&mut engine)
                 .map_err(BootError::Engine)?;
+            for frame in runtime.external_gpu.values_mut() {
+                frame.image = (frame.import)(&engine);
+            }
             *lock(&runtime.upload) = engine.texture_factory();
         }
         runtime.installed = None;
@@ -1384,6 +1431,7 @@ fn open_surface_target(
     };
     match opened {
         Ready::Opened { replaced, .. } => {
+            runtime.services.borrow().surface_attached(kept.id);
             // The first real window can select a different backend from the
             // initial graphics context. Publish its factory only after it opens.
             *lock(&runtime.upload) = runtime.engine.borrow().texture_factory();
@@ -1540,12 +1588,13 @@ fn input_kind(event: &session::InputEvent) -> &'static str {
     match event {
         session::InputEvent::Key(_) | session::InputEvent::Back => "key",
         session::InputEvent::Text(_) | session::InputEvent::Paste { .. } => "text",
-        session::InputEvent::Composing(_) => "ime",
+        session::InputEvent::Composing(_) | session::InputEvent::DismissIme(_) => "ime",
         session::InputEvent::Copy
         | session::InputEvent::Cut
         | session::InputEvent::SelectAll
         | session::InputEvent::Edit(_)
-        | session::InputEvent::Replace { .. } => "edit",
+        | session::InputEvent::Replace { .. }
+        | session::InputEvent::ReplaceIme { .. } => "edit",
     }
 }
 
@@ -1839,6 +1888,7 @@ mod tests {
                 latest: None,
                 image_requirements: Vec::new(),
                 external_textures: Default::default(),
+                external_gpu: Default::default(),
                 input: crate::input::Input::new(),
                 surfaces: SurfaceHost::new(),
                 scheduler: FrameScheduler::new(),
@@ -1911,9 +1961,14 @@ mod tests {
     }
 
     #[test]
-    fn launch_url_reaches_the_session() {
+    fn launch_url_delivers_and_arms_an_idle_surface() {
         let mut harness = TestHarness::new();
+        harness.open_dummy();
+        harness.runtime.scheduler.cancel();
+        assert!(!harness.runtime.scheduler.token_armed());
+
         assert!(!harness.command(Command::LaunchUrl("https://app.example/item".into())));
+        assert!(harness.runtime.scheduler.token_armed());
         assert_eq!(
             harness.session.borrow().launch_urls.as_slice(),
             ["https://app.example/item"]

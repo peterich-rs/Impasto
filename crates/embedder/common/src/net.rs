@@ -18,11 +18,12 @@ pub(crate) fn spawn(
     jobs: Receiver<IoJob>,
     inbox: Arc<Inbox>,
     http: Option<Arc<dyn HttpClient>>,
+    websocket: Option<Arc<dyn WebSocketTransport>>,
     hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
 ) -> Option<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name("net".to_string())
-        .spawn(move || serve(jobs, inbox, http, hub))
+        .spawn(move || serve(jobs, inbox, http, websocket, hub))
         .ok()
 }
 
@@ -47,9 +48,11 @@ fn serve(
     jobs: Receiver<IoJob>,
     inbox: Arc<Inbox>,
     http: Option<Arc<dyn HttpClient>>,
+    websocket: Option<Arc<dyn WebSocketTransport>>,
     hub: Option<Hub>,
 ) {
-    let mut sockets: HashMap<u64, (SyncSender<SocketCmd>, thread::JoinHandle<()>)> = HashMap::new();
+    let mut sockets: HashMap<u64, (SyncSender<WebSocketCommand>, thread::JoinHandle<()>)> =
+        HashMap::new();
     let connects = Arc::new(AtomicUsize::new(0));
     let streams = Arc::new(AtomicUsize::new(0));
     let whole = Arc::new(AtomicUsize::new(0));
@@ -113,7 +116,15 @@ fn serve(
                     post.socket(id, "error", true, b"too many sockets");
                     continue;
                 };
-                match open_socket(id, &url, &protocols, post.clone(), hub.clone(), permit) {
+                match open_socket(
+                    id,
+                    &url,
+                    &protocols,
+                    post.clone(),
+                    hub.clone(),
+                    permit,
+                    websocket.clone(),
+                ) {
                     Ok(socket) => {
                         sockets.insert(id, socket);
                     }
@@ -125,7 +136,7 @@ fn serve(
             IoJob::SocketSend { id, text, data } => {
                 if let Some((sender, _)) = sockets.get(&id)
                     && sender
-                        .try_send(SocketCmd::Send {
+                        .try_send(WebSocketCommand::Send {
                             text,
                             data,
                             credit: outbound,
@@ -138,7 +149,7 @@ fn serve(
             }
             IoJob::SocketClose { id } => {
                 if let Some((sender, _)) = sockets.remove(&id)
-                    && sender.try_send(SocketCmd::Close).is_ok()
+                    && sender.try_send(WebSocketCommand::Close).is_ok()
                 {
                     continue;
                 }
@@ -428,13 +439,35 @@ fn execute_http(
     );
 }
 
-enum SocketCmd {
+/// One command from the session to the transport worker.
+pub enum WebSocketCommand {
     Send {
         text: bool,
         data: Vec<u8>,
+        /// Hold while the message is pending in the transport.
         credit: Option<Credit>,
     },
     Close,
+}
+
+/// A handshake or message forwarded to the session.
+pub enum WebSocketEvent<'a> {
+    Opened(&'a str),
+    Message { text: bool, data: &'a [u8] },
+}
+
+/// A transport runs on the existing bounded socket worker. Returning settles
+/// the close or error event. Stop when the session is inactive or emit rejects
+/// more data due to backpressure.
+pub trait WebSocketTransport: Send + Sync {
+    fn run(
+        &self,
+        url: &str,
+        protocols: &[String],
+        commands: Receiver<WebSocketCommand>,
+        active: &dyn Fn() -> bool,
+        emit: &dyn Fn(WebSocketEvent<'_>) -> bool,
+    ) -> Result<(), String>;
 }
 
 /// HTTPS image body. HTTP is rejected. The body cap matches [`crate::images::IMAGE_BODY_LIMIT`].
@@ -534,7 +567,8 @@ fn open_socket(
     post: Post,
     hub: Option<Hub>,
     permit: WorkPermit,
-) -> Result<(SyncSender<SocketCmd>, thread::JoinHandle<()>), String> {
+    transport: Option<Arc<dyn WebSocketTransport>>,
+) -> Result<(SyncSender<WebSocketCommand>, thread::JoinHandle<()>), String> {
     if !(url.starts_with("ws://") || url.starts_with("wss://")) {
         return Err("unsupported URL".to_owned());
     }
@@ -545,7 +579,15 @@ fn open_socket(
         .name(format!("socket-{id}"))
         .spawn(move || {
             let _permit = permit;
-            socket_loop(id, &url, &protocols, rx, &post, hub.as_ref());
+            socket_loop(
+                id,
+                &url,
+                &protocols,
+                rx,
+                &post,
+                hub.as_ref(),
+                transport.as_deref(),
+            );
         })
         .map_err(|error| error.to_string())?;
     Ok((tx, worker))
@@ -555,93 +597,26 @@ fn socket_loop(
     id: u64,
     url: &str,
     protocols: &[String],
-    commands: Receiver<SocketCmd>,
+    commands: Receiver<WebSocketCommand>,
     post: &Post,
     hub: Option<&Hub>,
+    transport: Option<&dyn WebSocketTransport>,
 ) {
-    use tungstenite::{Error, Message};
-    let emit = |event, text, data: &[u8]| socket_event(post, id, url, hub, event, text, data);
-    let outcome = (|| -> Result<(), String> {
-        let mut request = tungstenite::client::IntoClientRequest::into_client_request(url)
-            .map_err(|error| error.to_string())?;
-        if !protocols.is_empty() {
-            let offered = http::HeaderValue::from_str(&protocols.join(", "))
-                .map_err(|error| error.to_string())?;
-            request
-                .headers_mut()
-                .insert("Sec-WebSocket-Protocol", offered);
-        }
-        let mut config = tungstenite::protocol::WebSocketConfig::default();
-        config.max_message_size = Some(256 << 10);
-        config.max_frame_size = Some(256 << 10);
-        config.write_buffer_size = 16 << 10;
-        config.max_write_buffer_size = 256 << 10;
-        let tcp = connect_socket(request.uri(), post)?;
-        let (mut socket, response) =
-            tungstenite::client_tls_with_config(request, tcp, Some(config), None)
-                .map_err(|error| error.to_string())?;
-        let protocol = response
-            .headers()
-            .get("Sec-WebSocket-Protocol")
-            .map_or(&[][..], http::HeaderValue::as_bytes);
-        if !emit("open", true, protocol) {
-            return Err("socket event queue is full".into());
-        }
-        let tcp = match socket.get_mut() {
-            tungstenite::stream::MaybeTlsStream::Plain(tcp) => Some(tcp),
-            tungstenite::stream::MaybeTlsStream::Rustls(tls) => Some(tls.get_mut()),
-            _ => None,
-        };
-        if let Some(tcp) = tcp {
-            tcp.set_read_timeout(Some(Duration::from_millis(50)))
-                .map_err(|error| error.to_string())?;
-            tcp.set_write_timeout(Some(Duration::from_secs(2)))
-                .map_err(|error| error.to_string())?;
-        }
-        while post.active() {
-            match commands.try_recv() {
-                Ok(SocketCmd::Send { text, data, credit }) => {
-                    let _credit = credit;
-                    let message = if text {
-                        Message::Text(
-                            String::from_utf8(data)
-                                .map_err(|error| error.to_string())?
-                                .into(),
-                        )
-                    } else {
-                        Message::Binary(data.into())
-                    };
-                    socket.send(message).map_err(|error| error.to_string())?;
-                }
-                Ok(SocketCmd::Close) | Err(mpsc::TryRecvError::Disconnected) => {
-                    let _ = socket.close(None);
-                    break;
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
-            }
-            let forwarded = match socket.read() {
-                Ok(Message::Text(text)) => emit("message", true, text.as_bytes()),
-                Ok(Message::Binary(data)) => emit("message", false, &data),
-                Ok(Message::Close(_)) | Err(Error::ConnectionClosed | Error::AlreadyClosed) => {
-                    break;
-                }
-                Ok(_) => true,
-                Err(Error::Io(error))
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    true
-                }
-                Err(error) => return Err(error.to_string()),
-            };
-            if !forwarded {
-                return Err("socket event queue is full".into());
-            }
-        }
-        Ok(())
-    })();
+    let emit = |event: &str, text, data: &[u8]| socket_event(post, id, url, hub, event, text, data);
+    let outcome = if let Some(transport) = transport {
+        transport.run(
+            url,
+            protocols,
+            commands,
+            &|| post.active(),
+            &|event| match event {
+                WebSocketEvent::Opened(protocol) => emit("open", true, protocol.as_bytes()),
+                WebSocketEvent::Message { text, data } => emit("message", text, data),
+            },
+        )
+    } else {
+        run_tungstenite(url, protocols, commands, post, &emit)
+    };
     match outcome {
         Ok(()) => {
             emit("close", true, b"");
@@ -650,6 +625,95 @@ fn socket_loop(
             emit("error", true, error.as_bytes());
         }
     }
+}
+
+fn run_tungstenite(
+    url: &str,
+    protocols: &[String],
+    commands: Receiver<WebSocketCommand>,
+    post: &Post,
+    emit: &dyn Fn(&str, bool, &[u8]) -> bool,
+) -> Result<(), String> {
+    use tungstenite::{Error, Message};
+    let mut request = tungstenite::client::IntoClientRequest::into_client_request(url)
+        .map_err(|error| error.to_string())?;
+    if !protocols.is_empty() {
+        let offered = http::HeaderValue::from_str(&protocols.join(", "))
+            .map_err(|error| error.to_string())?;
+        request
+            .headers_mut()
+            .insert("Sec-WebSocket-Protocol", offered);
+    }
+    let mut config = tungstenite::protocol::WebSocketConfig::default();
+    config.max_message_size = Some(256 << 10);
+    config.max_frame_size = Some(256 << 10);
+    config.write_buffer_size = 16 << 10;
+    config.max_write_buffer_size = 256 << 10;
+    let tcp = connect_socket(request.uri(), post)?;
+    let (mut socket, response) =
+        tungstenite::client_tls_with_config(request, tcp, Some(config), None)
+            .map_err(|error| error.to_string())?;
+    let protocol = response
+        .headers()
+        .get("Sec-WebSocket-Protocol")
+        .map_or(&[][..], http::HeaderValue::as_bytes);
+    if !emit("open", true, protocol) {
+        return Err("socket event queue is full".into());
+    }
+    let tcp = match socket.get_mut() {
+        tungstenite::stream::MaybeTlsStream::Plain(tcp) => Some(tcp),
+        tungstenite::stream::MaybeTlsStream::Rustls(tls) => Some(tls.get_mut()),
+        _ => None,
+    };
+    if let Some(tcp) = tcp {
+        tcp.set_read_timeout(Some(Duration::from_millis(50)))
+            .map_err(|error| error.to_string())?;
+        tcp.set_write_timeout(Some(Duration::from_secs(2)))
+            .map_err(|error| error.to_string())?;
+    }
+    while post.active() {
+        match commands.try_recv() {
+            Ok(WebSocketCommand::Send { text, data, credit }) => {
+                let _credit = credit;
+                let message = if text {
+                    Message::Text(
+                        String::from_utf8(data)
+                            .map_err(|error| error.to_string())?
+                            .into(),
+                    )
+                } else {
+                    Message::Binary(data.into())
+                };
+                socket.send(message).map_err(|error| error.to_string())?;
+            }
+            Ok(WebSocketCommand::Close) | Err(mpsc::TryRecvError::Disconnected) => {
+                let _ = socket.close(None);
+                break;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        let forwarded = match socket.read() {
+            Ok(Message::Text(text)) => emit("message", true, text.as_bytes()),
+            Ok(Message::Binary(data)) => emit("message", false, &data),
+            Ok(Message::Close(_)) | Err(Error::ConnectionClosed | Error::AlreadyClosed) => {
+                break;
+            }
+            Ok(_) => true,
+            Err(Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                true
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        if !forwarded {
+            return Err("socket event queue is full".into());
+        }
+    }
+    Ok(())
 }
 
 fn connect_socket(uri: &http::Uri, post: &Post) -> Result<std::net::TcpStream, String> {
@@ -969,6 +1033,7 @@ mod routing_tests {
             Some(Arc::new(Slow {
                 finished: finished_tx,
             })),
+            None,
             None,
         );
         let ingress = Arc::new(CreditPool::new(64, 12, 4, 4));

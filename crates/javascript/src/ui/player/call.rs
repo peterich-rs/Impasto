@@ -478,8 +478,11 @@ pub(super) unsafe fn effect(
             )
         } else if kind == EffectKind::SetPlatformView as i32 {
             // SAFETY: the VM callback borrows this UTF-8 input through the effect call.
-            let name = unsafe { utf8_of(text, text_len) }.unwrap_or("");
-            nodes::set_platform_view(session, node, name)
+            let spec = unsafe { utf8_of(text, text_len) }.unwrap_or("");
+            let (name, path) = spec
+                .split_once('\0')
+                .map_or((spec, None), |(name, path)| (name, Some(path)));
+            nodes::set_platform_view(session, node, name, path)
         } else if kind == EffectKind::SetRecognizers as i32 {
             bridge::set_recognizers(
                 session,

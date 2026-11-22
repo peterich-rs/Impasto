@@ -70,6 +70,16 @@ pub struct PointerEvent {
     pub dy: f32,
     /// Relative magnification. Zero unless [`Phase::Zoom`].
     pub zoom: f32,
+    pub pen: Option<PenSample>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PenSample {
+    /// Normalized pressure, radius in scene points, angles in radians.
+    pub force: f32,
+    pub radius: f32,
+    pub altitude: f32,
+    pub azimuth: f32,
 }
 
 impl PointerEvent {
@@ -87,6 +97,7 @@ impl PointerEvent {
             dx: 0.0,
             dy: 0.0,
             zoom: 0.0,
+            pen: None,
         }
     }
 
@@ -104,6 +115,7 @@ impl PointerEvent {
             dx,
             dy,
             zoom: 0.0,
+            pen: None,
         }
     }
 
@@ -122,6 +134,7 @@ impl PointerEvent {
             dx: 0.0,
             dy: 0.0,
             zoom: scale,
+            pen: None,
         }
     }
 }

@@ -6,6 +6,16 @@ use super::{str_arg, string_list};
 
 pub trait PermissionsHost: Send + Sync {
     fn permission_status(&self, name: &str) -> String;
+    fn permission_status_async(self: Arc<Self>, name: String, settle: Settle, exec: &dyn MethodExec)
+    where
+        Self: 'static,
+    {
+        exec.main_thread(
+            settle,
+            Box::new(move || PluginResult::Done(PluginValue::Str(self.permission_status(&name)))),
+        );
+    }
+
     fn request_permissions_async(
         self: Arc<Self>,
         names: Vec<String>,
@@ -27,6 +37,15 @@ pub trait PermissionsHost: Send + Sync {
     fn permission_rationale(&self, name: &str) -> bool;
     fn service_status(&self, name: &str) -> String;
     fn open_app_settings(&self) -> bool;
+    fn open_app_settings_async(self: Arc<Self>, settle: Settle, exec: &dyn MethodExec)
+    where
+        Self: 'static,
+    {
+        exec.main_thread(
+            settle,
+            Box::new(move || PluginResult::Done(PluginValue::Bool(self.open_app_settings()))),
+        );
+    }
 }
 
 pub fn permission_results(rows: impl IntoIterator<Item = (String, String)>) -> PluginResult {
@@ -57,14 +76,7 @@ export type ServiceStatus = "enabled" | "disabled" | "notApplicable";"#,
             Method::promise("checkPermissionStatus", {
                 let host = Arc::clone(&host);
                 move |args, settle, exec| {
-                    let name = str_arg(args);
-                    let host = Arc::clone(&host);
-                    exec.main_thread(
-                        settle,
-                        Box::new(move || {
-                            PluginResult::Done(PluginValue::Str(host.permission_status(&name)))
-                        }),
-                    );
+                    Arc::clone(&host).permission_status_async(str_arg(args), settle, exec)
                 }
             })
             .with_types("permission: string", "PermissionStatus"),
@@ -107,15 +119,7 @@ export type ServiceStatus = "enabled" | "disabled" | "notApplicable";"#,
             .with_types("permission: string", "ServiceStatus"),
             Method::promise("openAppSettings", {
                 let host = Arc::clone(&host);
-                move |_args, settle, exec| {
-                    let host = Arc::clone(&host);
-                    exec.main_thread(
-                        settle,
-                        Box::new(move || {
-                            PluginResult::Done(PluginValue::Bool(host.open_app_settings()))
-                        }),
-                    );
-                }
+                move |_args, settle, exec| Arc::clone(&host).open_app_settings_async(settle, exec)
             })
             .with_types("", "boolean"),
         ],

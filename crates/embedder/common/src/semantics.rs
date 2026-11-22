@@ -22,10 +22,18 @@ pub struct ProjectedNode {
     pub content: (f32, f32),
     pub scroll_forward: (f32, f32),
     pub scroll_backward: (f32, f32),
+    pub live: uicore::LiveRegion,
 }
 
 /// Drop Generic nodes. Scroll extent and step are computed once, here.
 pub fn project(update: &SemanticsUpdate) -> Vec<ProjectedNode> {
+    project_with_platform_views(update, false)
+}
+
+pub(crate) fn project_with_platform_views(
+    update: &SemanticsUpdate,
+    include_platform_views: bool,
+) -> Vec<ProjectedNode> {
     let by_id: HashMap<SemanticsId, &SemanticsNode> =
         update.nodes.iter().map(|node| (node.id, node)).collect();
     let mut extents = HashMap::<SemanticsId, (f32, f32)>::new();
@@ -39,11 +47,16 @@ pub fn project(update: &SemanticsUpdate) -> Vec<ProjectedNode> {
     update
         .nodes
         .iter()
-        .filter(|node| node.role != SemanticsRole::Generic)
+        .filter(|node| {
+            node.role != SemanticsRole::Generic
+                || node.live != uicore::LiveRegion::Off
+                || (include_platform_views
+                    && node.flags.contains(uicore::SemanticsFlags::PLATFORM_VIEW))
+        })
         .map(|node| {
-            let content = extents
-                .get(&node.id)
-                .copied()
+            let content = node
+                .scroll_content
+                .or_else(|| extents.get(&node.id).copied())
                 .unwrap_or((node.rect.w, node.rect.h));
             let (forward, backward) = if node.role == SemanticsRole::Scroll
                 || node.actions.contains(uicore::SemanticsActions::SCROLL)
@@ -73,6 +86,7 @@ pub fn project(update: &SemanticsUpdate) -> Vec<ProjectedNode> {
                 content,
                 scroll_forward: forward,
                 scroll_backward: backward,
+                live: node.live,
             }
         })
         .collect()
@@ -161,6 +175,8 @@ mod tests {
             caret: None,
             description: None,
             autofill: None,
+            live: uicore::LiveRegion::Off,
+            scroll_content: None,
         }
     }
 

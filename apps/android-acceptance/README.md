@@ -1,4 +1,4 @@
-# Android 现场记录验收应用
+# 现场记录验收应用
 
 这个应用从 `impasto create android-acceptance` 生成。它声明 `impasto-demo://record/<编号>` 深链，支持从原生文档选择器导入文件、请求相机权限及通过 Sharesheet 分享文本。路由、滚动位置和小型表单状态使用框架的任务快照，手动保存的草稿使用 `AsyncStorage`。系统重建进程后先恢复任务，再处理新交付的深链。
 
@@ -35,3 +35,21 @@ adb shell am start -W -a android.intent.action.MAIN -c android.intent.category.L
 adb install -r native-host/build/outputs/apk/debug/native-host-debug.apk
 adb shell am start -W -n dev.impasto.fieldnotes.embedded/.NativeActivity
 ```
+
+## iOS 模拟器与真机
+
+同一个 TSX 入口在 iOS 用于验收深链、Scene 恢复、输入法、无障碍、系统文件选择、授权和分享。生成的 iOS 包使用独立的应用容器。
+
+在本目录构建并安装模拟器包。若多个模拟器已启动，用设备 UDID 替换下列命令的 `booted` 和 `ios`。
+
+```sh
+impasto run -d ios --debug
+xcrun simctl openurl booted impasto-demo://record/42
+```
+
+验证冷启动链接时，先执行 `xcrun simctl terminate booted dev.impasto.fieldnotes` 再打开链接。运行中打开 `impasto-demo://record/43` 应切换到记录 43。需要验收 Universal Link 时，在 `[ios].associated_domains` 中设置应用有权限使用的域名，并在该域发布与应用签名相符的 AASA。使用 `https://<关联域名>/records/42` 验证冷启动和运行中路由。
+
+1. 在详情页输入中文、日文或带组合符号的备注，验证候选词替换、选区和退格。用 VoiceOver 定位备注并激活按钮。
+2. 从文件选择器中选一个文件，再打开系统分享面板。取消选择或分享后，应用返回当前记录。
+3. 返回主屏后结束应用进程，再从桌面图标打开。确认记录、滚动位置和未手动保存的短备注恢复。
+4. 在完成开发签名的 iPhone 或 iPad 上检查相机授权。使用新安装的应用分别验证拒绝、授权和从设置修改权限后的结果。

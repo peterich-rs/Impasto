@@ -15,6 +15,18 @@ mod bindings;
 #[cfg(feature = "link")]
 pub use bindings::*;
 
+#[cfg(all(feature = "link", target_os = "ios"))]
+#[allow(unsafe_code, reason = "standalone iOS Metal interoperability ABI")]
+unsafe extern "C" {
+    pub fn ImpastoMetalWaitUntilScheduled(context: ImpellerContext) -> bool;
+    pub fn ImpastoMetalTextureNew(
+        context: ImpellerContext,
+        texture: *const core::ffi::c_void,
+        release: Option<extern "C" fn(*mut core::ffi::c_void)>,
+        user_data: *mut core::ffi::c_void,
+    ) -> ImpellerTexture;
+}
+
 #[cfg(all(test, feature = "link"))]
 mod tests {
     #[test]

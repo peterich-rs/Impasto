@@ -36,9 +36,9 @@ pub use command::{Command, FrameToken, SurfaceId, SurfaceTarget};
 pub use diagnostics::DiagnosticsHub;
 pub use error::{BootError, SessionError};
 pub use exec::{MainThreadPoster, RtExec, settle_factory};
-pub use host::{DropWait, Link, Poster, console_log, start, start_async};
+pub use host::{DropWait, Link, Poster, console_log, start, start_async, start_async_with_exit};
 pub use http::{OpenWireClient, http_client};
-pub use images::ExternalFrame;
+pub use images::{ExternalFrame, ImportExternalFrame, pixel_count_ok};
 pub use images::{ImageDecoder, ImageError, ImageHandle, ImageReady};
 pub use log_sub::install as install_log;
 pub use log_sub::set_log_targets;
@@ -48,8 +48,9 @@ pub use module_stubs::{
 };
 pub use modules::{
     ClipboardHost, LinkingHost, PermissionsHost, StorageHost, app_state, async_storage, clipboard,
-    file_system, linking, memory, permission_results, permissions, picked_document,
+    file_system, linking, memory, native_plugins, permission_results, permissions, picked_document,
 };
+pub use net::{WebSocketCommand, WebSocketEvent, WebSocketTransport};
 pub use present::{AfterPresent, after_present};
 pub use ptr::NativePtr;
 pub use restoration::Restoration;
@@ -109,14 +110,24 @@ pub trait Services: Send {
     fn window_session(&self) -> WindowSession {
         WindowSession::default()
     }
+    /// Platform WebSockets, if the host uses a different network stack.
+    fn websocket_transport(&self) -> Option<Arc<dyn WebSocketTransport>> {
+        None
+    }
     fn source_updated(&self, _revision: &str, _result: Result<(), &str>) {}
     fn unhandled_back(&self) {
         self.request_exit();
     }
     /// Projected semantics nodes. The default ignores them. Called on the render thread.
     fn semantics(&self, _nodes: &[ProjectedNode]) {}
+    /// Includes native view slots in the framework's accessibility traversal order.
+    fn semantics_include_platform_views(&self) -> bool {
+        false
+    }
     /// Placement from the most recently submitted frame for a specific surface.
     fn platform_views(&self, _surface: SurfaceId, _views: &[uicore::PlatformViewPlacement]) {}
+    /// The current surface is ready to receive window-specific output.
+    fn surface_attached(&self, _surface: SurfaceId) {}
     /// Apply one keyboard update. Called on the render thread.
     /// The implementation posts the work to the platform thread.
     fn apply_ime(&self, update: &session::ImeUpdate);
@@ -147,6 +158,15 @@ pub trait Surface {
         engine: &mut engine::Engine,
         pixels: engine::PixelSize,
     ) -> Result<Presented, engine::Status>;
+
+    fn present_with_views(
+        &mut self,
+        engine: &mut engine::Engine,
+        pixels: engine::PixelSize,
+        _views: &[uicore::PlatformViewPlacement],
+    ) -> Result<Presented, engine::Status> {
+        self.present(engine, pixels)
+    }
 }
 
 pub trait Vsync: Send + Sync {

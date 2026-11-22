@@ -1,3 +1,4 @@
+use crate::ios::IosConfig;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -13,6 +14,8 @@ struct Manifest {
     permissions: BTreeMap<String, Permission>,
     #[serde(default)]
     android: AndroidConfig,
+    #[serde(default)]
+    ios: IosConfig,
 }
 
 #[derive(Default, Deserialize)]
@@ -105,6 +108,7 @@ pub struct App {
     pub entry: PathBuf,
     pub gallery: bool,
     pub android: AndroidConfig,
+    pub ios: IosConfig,
     permissions: BTreeMap<String, Permission>,
 }
 impl App {
@@ -118,10 +122,11 @@ impl App {
                 root: framework.join("apps/gallery-solid"),
                 name: "gallery".into(),
                 version: "0.1.0".into(),
-                targets: vec!["macos".into(), "android".into()],
+                targets: vec!["macos".into(), "android".into(), "ios".into()],
                 entry: framework.join("apps/gallery-solid/src/quotes.tsx"),
                 gallery: true,
                 android: AndroidConfig::default(),
+                ios: IosConfig::default(),
                 permissions: BTreeMap::new(),
             });
         }
@@ -136,6 +141,7 @@ impl App {
         .context("解析 app.toml")?;
         validate_name(&manifest.name)?;
         manifest.android.validate()?;
+        manifest.ios.validate()?;
         if manifest.version.split('.').count() != 3
             || !manifest
                 .version
@@ -157,6 +163,14 @@ impl App {
             bail!("缺少 {}", entry.display());
         }
         for (name, permission) in &manifest.permissions {
+            if name == "native-plugins"
+                && match permission {
+                    Permission::Enabled(enabled) => *enabled,
+                    Permission::Targets(targets) => targets != &["ios"],
+                }
+            {
+                bail!(r#"启用 native-plugins 需要显式设置为 ["ios"]"#);
+            }
             if ![
                 "clipboard",
                 "linking",
@@ -164,6 +178,7 @@ impl App {
                 "async-storage",
                 "app-state",
                 "permissions",
+                "native-plugins",
                 "devtools",
             ]
             .contains(&name.as_str())
@@ -184,6 +199,7 @@ impl App {
             entry,
             gallery: false,
             android: manifest.android,
+            ios: manifest.ios,
             permissions: manifest.permissions,
         })
     }
@@ -202,6 +218,9 @@ impl App {
     }
     pub fn modules(&self, target: &str) -> String {
         if self.gallery {
+            if target == "ios" {
+                return crate::ios::MODULES.join(",");
+            }
             return "clipboard,linking,file-system,async-storage,app-state,permissions,devtools"
                 .into();
         }
@@ -214,13 +233,6 @@ impl App {
             .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>()
             .join(",")
-    }
-    pub fn output(&self, debug: bool) -> PathBuf {
-        self.root.join(if debug {
-            "build/app.js"
-        } else {
-            "build/app.bin"
-        })
     }
     pub fn assets(&self) -> PathBuf {
         if self.gallery {

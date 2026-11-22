@@ -157,6 +157,16 @@ impl<'a> crate::painter::Painter<'a> {
         builder: impeller::ImpellerDisplayListBuilder,
         start: Option<LayerId>,
     ) -> bool {
+        self.draw_layers_filtered(tree, builder, start, None)
+    }
+
+    pub(crate) fn draw_layers_filtered(
+        &mut self,
+        tree: &LayerTree,
+        builder: impeller::ImpellerDisplayListBuilder,
+        start: Option<LayerId>,
+        included: Option<&std::collections::HashSet<LayerId>>,
+    ) -> bool {
         let mut current = start;
         while let Some(id) = current {
             let Some(layer) = tree.layers.get(id.0 as usize) else {
@@ -165,14 +175,19 @@ impl<'a> crate::painter::Painter<'a> {
             let kind = layer.kind.clone();
             let first_child = layer.first_child;
             let next = layer.next;
+            if included.is_some_and(|set| !set.contains(&id)) {
+                current = next;
+                continue;
+            }
             let drawn = match kind {
+                LayerKind::PlatformView { .. } => true,
                 LayerKind::Offset { x, y } => {
                     unsafe {
                         impeller::ImpellerDisplayListBuilderSave(builder);
                         impeller::ImpellerDisplayListBuilderTranslate(builder, x, y);
                     }
                     self.saves.push(Save::Transform);
-                    let drawn = self.draw_layers(tree, builder, first_child);
+                    let drawn = self.draw_layers_filtered(tree, builder, first_child, included);
                     self.pop_save(builder) && drawn
                 }
                 LayerKind::Transform {
@@ -190,7 +205,7 @@ impl<'a> crate::painter::Painter<'a> {
                         scale_x,
                         scale_y,
                     );
-                    let drawn = self.draw_layers(tree, builder, first_child);
+                    let drawn = self.draw_layers_filtered(tree, builder, first_child, included);
                     self.pop_save(builder) && drawn
                 }
                 LayerKind::Clip {
@@ -201,14 +216,14 @@ impl<'a> crate::painter::Painter<'a> {
                     corner_radius,
                 } => {
                     self.push_clip(builder, x, y, w, h, corner_radius);
-                    let drawn = self.draw_layers(tree, builder, first_child);
+                    let drawn = self.draw_layers_filtered(tree, builder, first_child, included);
                     self.pop_save(builder) && drawn
                 }
                 LayerKind::Opacity { alpha, x, y, w, h } => {
                     if let Some(picture) = single_picture_child(tree, id) {
                         self.draw_picture(tree, builder, picture, alpha as f32 / 255.0)
                     } else if self.push_opacity(builder, x, y, w, h, alpha) {
-                        let drawn = self.draw_layers(tree, builder, first_child);
+                        let drawn = self.draw_layers_filtered(tree, builder, first_child, included);
                         self.pop_save(builder) && drawn
                     } else {
                         false
@@ -218,7 +233,7 @@ impl<'a> crate::painter::Painter<'a> {
                     if !self.push_blur(builder, x, y, w, h, sigma, false) {
                         false
                     } else {
-                        let drawn = self.draw_layers(tree, builder, first_child);
+                        let drawn = self.draw_layers_filtered(tree, builder, first_child, included);
                         self.pop_save(builder) && drawn
                     }
                 }
@@ -226,7 +241,7 @@ impl<'a> crate::painter::Painter<'a> {
                     if !self.push_blur(builder, x, y, w, h, sigma, true) {
                         false
                     } else {
-                        let drawn = self.draw_layers(tree, builder, first_child);
+                        let drawn = self.draw_layers_filtered(tree, builder, first_child, included);
                         self.pop_save(builder) && drawn
                     }
                 }
@@ -234,7 +249,7 @@ impl<'a> crate::painter::Painter<'a> {
                     if !self.push_blend(builder, x, y, w, h, mode) {
                         false
                     } else {
-                        let drawn = self.draw_layers(tree, builder, first_child);
+                        let drawn = self.draw_layers_filtered(tree, builder, first_child, included);
                         self.pop_save(builder) && drawn
                     }
                 }

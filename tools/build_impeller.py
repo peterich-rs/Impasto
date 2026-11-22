@@ -22,7 +22,9 @@ PATCHES = {
         f"{INTEROP}/backend/vulkan/context_vk.cc",
         f"{INTEROP}/backend/vulkan/context_vk.h",
     )),
-    "ios": ("ios-interop.patch", (f"{INTEROP}/impeller.cc",)),
+    "ios": ("ios-interop.patch", (
+        f"{INTEROP}/impeller.cc", f"{INTEROP}/backend/metal/surface_mtl.mm",
+    )),
     "windows": ("windows-modf.patch", ("flutter/impeller/entity/geometry/line_geometry.cc",)),
 }
 TARGETS = {

@@ -125,6 +125,34 @@ impl Drop for GpuImage {
 }
 
 impl super::Engine {
+    /// Imports a producer texture from the Metal device associated with this engine.
+    ///
+    /// # Safety
+    /// texture points to a live MTLTexture. The caller transfers one owner reference
+    /// in context, which the SDK releases even when import fails.
+    #[cfg(target_os = "ios")]
+    pub unsafe fn import_metal_texture(
+        &self,
+        texture: *const std::ffi::c_void,
+        size: [u32; 2],
+        release: Option<extern "C" fn(*mut std::ffi::c_void)>,
+        context: *mut std::ffi::c_void,
+    ) -> Option<GpuImage> {
+        // SAFETY: the SDK retains this texture and takes ownership of the producer context.
+        let texture =
+            unsafe { impeller::ImpastoMetalTextureNew(self.context, texture, release, context) };
+        if texture.is_null() {
+            return None;
+        }
+        // SAFETY: self and its context outlive this call; the output owns one retain.
+        unsafe { impeller::ImpellerContextRetain(self.context) };
+        Some(GpuImage {
+            texture,
+            context: self.context,
+            width: size[0],
+            height: size[1],
+        })
+    }
     /// Extra context retain for background texture upload. Null context is `None`.
     pub fn texture_factory(&self) -> Option<TextureFactory> {
         if self.context.is_null() {

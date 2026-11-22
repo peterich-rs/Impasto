@@ -218,7 +218,7 @@ fn protocol_fill(fill: FillRule) -> protocol::FillRule {
     }
 }
 
-fn verb_of(element: PathEl) -> Option<PathVerb> {
+pub(crate) fn verb_of(element: PathEl) -> Option<PathVerb> {
     match element {
         PathEl::MoveTo(point) => Some(PathVerb::Move(narrow(point.x)?, narrow(point.y)?)),
         PathEl::LineTo(point) => Some(PathVerb::Line(narrow(point.x)?, narrow(point.y)?)),

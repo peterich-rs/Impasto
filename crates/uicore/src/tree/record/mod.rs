@@ -560,11 +560,12 @@ impl Tree {
             self.emit_layer(id, out, parent_abs, ancestor_scroll, clip);
             return;
         }
-        if self.is_picture_owner(id) {
+        if self.platform_views.is_empty() && self.is_picture_owner(id) {
             self.emit_picture_owner(id, out, parent_abs, ancestor_scroll, clip);
             return;
         }
         self.capture(id, parent_abs, out, clip);
+        self.emit_platform_view(id);
         self.emit_children(id, out, abs, ancestor_scroll, clip);
     }
 
@@ -605,6 +606,7 @@ impl Tree {
         let radius = node.corner_radius();
         let abs = (parent_abs.0 + node.x, parent_abs.1 + node.y);
         self.capture(id, parent_abs, out, clip);
+        self.emit_platform_view(id);
         let paint = (abs.0 - ancestor_scroll.0, abs.1 - ancestor_scroll.1);
         let local = self.local_xy(abs);
         self.push_run_bracket(
@@ -715,6 +717,7 @@ impl Tree {
             });
         }
         self.capture(id, parent_abs, out, clip);
+        self.emit_platform_view(id);
         if effect.clip || effect.scroll {
             out.push(Command::PushClip {
                 x: at.0,
@@ -745,7 +748,11 @@ impl Tree {
             .subtree_layers
             .get(&id)
             .is_some_and(|value| value.picture_owners);
-        if caches && !hosts_rows && (self.picture_fresh(id) || self.subtree_flat(id)) {
+        if self.platform_views.is_empty()
+            && caches
+            && !hosts_rows
+            && (self.picture_fresh(id) || self.subtree_flat(id))
+        {
             if !self.picture_fresh(id) {
                 self.fill_children(id, abs);
             } else if let Some(picture) = self.pictures.get(&id).cloned() {
@@ -1108,6 +1115,13 @@ impl Tree {
         let id = picture.id;
         self.layers.pictures.push(picture);
         self.note_layer(crate::layer::LayerKind::Picture { picture: id });
+    }
+
+    fn emit_platform_view(&mut self, id: NodeId) {
+        if self.records_platform_view(id) {
+            self.close_run();
+            self.note_layer(crate::layer::LayerKind::PlatformView { node: id.to_raw() });
+        }
     }
 
     fn clear_repaint(&mut self, id: NodeId) {

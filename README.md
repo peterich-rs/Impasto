@@ -4,14 +4,14 @@
 
 应用用 Solid 2.0 TSX 编写。`packages/solid-renderer`、`packages/solid-ui` 和 `packages/solid-router` 提供渲染器、控件与路由。QuickJS 会话更新 `uicore` 的渲染树。
 
-macOS 宿主用 Impeller 的 Metal 后端。Android 支持 Vulkan 和 GLES，使用仓库预构建 SDK 时默认选择 GLES。仓库收录了 CI 构建和验证的 Impeller SDK 归档，本地构建可以直接解压并链接对应目标的 SDK。[Impeller SDK](crates/impeller-sys/README.md)
+macOS 和 iOS 宿主用 Impeller 的 Metal 后端。Android 支持 Vulkan 和 GLES，使用仓库预构建 SDK 时默认选择 GLES。仓库收录了 CI 构建和验证的 Impeller SDK 归档，本地构建可以直接解压并链接对应目标的 SDK。[Impeller SDK](crates/impeller-sys/README.md)
 
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
 | `docs/architecture.md` | 当前仓库分层和一帧 |
-| `docs/platform-hosts.md` | 公共宿主布局，macOS 与 Android 的线程、表面和输入 |
+| `docs/platform-hosts.md` | 公共宿主布局，各平台的线程、表面和输入 |
 | `docs/toolchain-design.md` | 工具链与原生响应式设计 |
 | `docs/toolchain-baseline.md` | gallery 点击和滚动的对照数据 |
 | `docs/refactor-plan.md` | 还没做的事 |
@@ -22,7 +22,7 @@ macOS 宿主用 Impeller 的 Metal 后端。Android 支持 Vulkan 和 GLES，使
 - Rust stable，版本由 `rust-toolchain.toml` 决定
 - [just](https://github.com/casey/just)
 - Node.js 22 或更新，测试用 `node --experimental-strip-types`
-- macOS 窗口需要 Xcode。Android 包需要 JDK、SDK 和 NDK。
+- macOS 和 iOS 构建需要 Xcode。iOS 模拟器需要安装对应 Runtime，并用 `rustup target add aarch64-apple-ios-sim` 安装 Apple Silicon 目标，Intel 对应 `x86_64-apple-ios`。真机需要 `aarch64-apple-ios`、开发签名和已配对设备。Android 包需要 JDK、SDK 和 NDK。
 - 原生宿主构建使用 Python 3 准备 SDK。源码构建另需 `depot_tools` 提供的 `gclient` 和 bindgen。
 
 这些内容不在 git 里，要用时再取：
@@ -54,8 +54,10 @@ cd my-app
 /path/to/impasto analyze
 /path/to/impasto run
 /path/to/impasto run -d android
+/path/to/impasto run -d ios
 /path/to/impasto build bundle
 /path/to/impasto build macos
+/path/to/impasto build ios --ios-simulator
 /path/to/impasto build apk --debug
 /path/to/impasto build appbundle
 /path/to/impasto build aar
@@ -64,7 +66,9 @@ cd my-app
 /path/to/impasto packages get
 ```
 
-在框架仓库根执行 `cargo run -p cli -- run` 会打开 gallery。`run` 默认 debug，`build` 默认 release；`--debug` 和 `--release` 可显式选择。release bundle 是 QuickJS 字节码。生成的平台工程和包在应用的 `build/`；`create` 不生成可提交的平台目录。`app.toml` 的 `[permissions]` 缺省关闭能力模块，可写 `clipboard = ["macos"]` 或 `linking = true`。iOS 没有宿主，构建会返回非零。
+在框架仓库根执行 `cargo run -p cli -- run` 会打开 gallery。`run` 默认 debug，`build` 默认 release；`--debug` 和 `--release` 可显式选择。release bundle 是 QuickJS 字节码。生成的平台工程和包在应用的 `build/`；`create` 不生成可提交的平台目录。`app.toml` 的 `[permissions]` 缺省关闭能力模块，可写 `clipboard = ["macos"]` 或 `linking = true`。
+
+iOS 宿主使用 UIKit、Metal 和 iOS 15.0 部署目标。`run -d ios` 安装并启动模拟器应用，`-d ios:<UDID>` 可选择具体模拟器或配对设备，`--watch` 可更新运行中的 debug 会话。UIKit 宿主支持场景恢复、系统输入法、无障碍、原生视图与 GPU 纹理混排。CLI 可交付 `.app`、签名归档、IPA 和嵌入 SDK。 [构建与嵌入](crates/embedder/ios/README.md) · [iOS 宿主](docs/platform-hosts.md#ios-宿主)
 
 `just cli-dist` 在 `target/cli-dist` 生成完整 CLI 发布目录，须将 `impasto` 与旁边的 `impasto-tools/` 一起移动。发布包的打包、检查和无头测试使用内置 Node；原生构建还需要 Cargo 和对应平台工具链。源码开发仍使用本机 Node。`--verbose` 打印工具链路径，`run --trace` 输出帧计数。
 

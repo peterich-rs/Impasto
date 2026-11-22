@@ -51,6 +51,7 @@ pub fn pointer_event(
         dx,
         dy,
         zoom: 0.0,
+        pen: None,
     }
 }
 

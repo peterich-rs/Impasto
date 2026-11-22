@@ -127,6 +127,8 @@ mod tests {
             caret: None,
             description: None,
             autofill: None,
+            live: uicore::LiveRegion::Off,
+            scroll_content: None,
         }
     }
 

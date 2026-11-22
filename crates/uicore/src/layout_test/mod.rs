@@ -219,6 +219,7 @@ pub(super) fn scene_marks_in_layers(tree: &protocol::LayerTree) -> Vec<Mark> {
             let next = layer.next;
             let child = layer.first_child;
             match layer.kind {
+                protocol::LayerKind::PlatformView { .. } => {}
                 protocol::LayerKind::Offset { x, y } => {
                     if let Some(child) = child {
                         walk(

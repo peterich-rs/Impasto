@@ -545,7 +545,12 @@ pub(super) unsafe fn set_ime_text(session: *mut c_void, utf8: *const c_char, len
             return -1;
         };
         let mut ime = inner.ime.borrow_mut();
-        ime.state = crate::session::ImeState::at_end(text);
+        let mut state = crate::session::ImeState::at_end(text);
+        state.client = ime.state.client;
+        state.ack = ime.state.ack;
+        state.node = ime.state.node;
+        state.autofill = ime.state.autofill;
+        ime.state = state;
         ime.dirty = true;
         0
     })
@@ -606,6 +611,10 @@ pub(super) unsafe fn set_ime_state(
         ime.shown = true;
         ime.dirty = true;
         ime.state = crate::session::ImeState {
+            client: ime.state.client,
+            ack: ime.state.ack,
+            node: ime.state.node,
+            autofill: ime.state.autofill,
             text: text.to_owned(),
             selection: sel_start..sel_end,
             composing,

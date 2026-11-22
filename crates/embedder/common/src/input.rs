@@ -13,6 +13,7 @@ struct Tracked {
     button: Button,
     buttons: Buttons,
     modifiers: uicore::Modifiers,
+    pen: Option<uicore::PenSample>,
     down: bool,
     moved: bool,
 }
@@ -72,11 +73,22 @@ impl PointerConverter {
             dx: 0.0,
             dy: 0.0,
             zoom: 0.0,
+            pen: tracked.pen,
         }
     }
 
     fn note(&mut self, event: &PointerEvent) {
         if matches!(event.phase, Phase::Wheel | Phase::Zoom) {
+            return;
+        }
+        // Zero is the conventional persistent desktop cursor. Contact IDs
+        // can increase on every press, including UIKit's indirect pointers.
+        if event.phase == Phase::Cancel
+            || (event.phase == Phase::Up
+                && (event.pointer != PointerId(0)
+                    || matches!(event.kind, PointerKind::Touch | PointerKind::Pen)))
+        {
+            self.tracked.remove(&event.pointer);
             return;
         }
         let tracked = self.tracked.entry(event.pointer).or_insert(Tracked {
@@ -87,6 +99,7 @@ impl PointerConverter {
             button: event.button,
             buttons: event.buttons,
             modifiers: event.modifiers,
+            pen: event.pen,
             down: false,
             moved: false,
         });
@@ -99,16 +112,15 @@ impl PointerConverter {
         tracked.button = event.button;
         tracked.buttons = event.buttons;
         tracked.modifiers = event.modifiers;
+        tracked.pen = event.pen;
         match event.phase {
             Phase::Down => {
                 tracked.down = true;
                 tracked.moved = false;
             }
             Phase::Move => tracked.moved = true,
-            Phase::Up | Phase::Cancel => {
-                tracked.down = false;
-            }
-            Phase::Wheel | Phase::Zoom => {}
+            Phase::Up => tracked.down = false,
+            Phase::Cancel | Phase::Wheel | Phase::Zoom => {}
         }
     }
 
@@ -127,6 +139,7 @@ impl PointerConverter {
                 dx: 0.0,
                 dy: 0.0,
                 zoom: 0.0,
+                pen: None,
             },
             |tracked| PointerEvent {
                 pointer: id,
@@ -141,6 +154,7 @@ impl PointerConverter {
                 dx: 0.0,
                 dy: 0.0,
                 zoom: 0.0,
+                pen: tracked.pen,
             },
         )
     }
@@ -160,17 +174,16 @@ fn move_at(pointer: PointerId, tracked: &Tracked, time_ms: f64) -> PointerEvent 
         dx: 0.0,
         dy: 0.0,
         zoom: 0.0,
+        pen: tracked.pen,
     }
 }
 
 /// Pointer filtering and "should another frame be requested" for one shell.
 #[derive(Debug)]
 pub struct Input {
-    pointers: VecDeque<PointerEvent>,
-    inputs: VecDeque<InputEvent>,
+    events: VecDeque<FrameInput>,
     /// Pointers frozen at `pause`, including one synthetic cancel per active id.
-    frozen: Option<VecDeque<PointerEvent>>,
-    ime_dismissed: bool,
+    frozen: Option<VecDeque<FrameInput>>,
     active: HashSet<PointerId>,
     converter: PointerConverter,
     paused: bool,
@@ -178,21 +191,24 @@ pub struct Input {
     sent_metrics: Option<Metrics>,
 }
 
+#[derive(Debug, PartialEq)]
+pub enum FrameInput {
+    Pointer(PointerEvent),
+    Session(InputEvent),
+    DismissIme,
+}
+
 pub struct FrameIn {
-    pub pointers: VecDeque<PointerEvent>,
-    pub inputs: VecDeque<InputEvent>,
+    pub events: VecDeque<FrameInput>,
     pub metrics: Option<Metrics>,
     pub paused: bool,
-    pub ime_dismissed: bool,
 }
 
 impl Input {
     pub fn new() -> Self {
         Self {
-            pointers: VecDeque::new(),
-            inputs: VecDeque::new(),
+            events: VecDeque::new(),
             frozen: None,
-            ime_dismissed: false,
             active: HashSet::new(),
             converter: PointerConverter::default(),
             paused: false,
@@ -213,7 +229,7 @@ impl Input {
                 }
                 Phase::Move | Phase::Wheel | Phase::Zoom => {}
             }
-            self.pointers.push_back(event);
+            self.events.push_back(FrameInput::Pointer(event));
         }
         !self.paused
     }
@@ -221,13 +237,15 @@ impl Input {
     /// Queues a key or text event. Returns whether the platform should arm vsync.
     /// Paused input stays queued until resume, matching [`Input::push_pointer`].
     pub fn push_input(&mut self, event: InputEvent) -> bool {
-        self.inputs.push_back(event);
+        self.events.push_back(FrameInput::Session(event));
         !self.paused
     }
 
     /// The keyboard went away. Delivered once on the next frame.
     pub fn dismiss_ime(&mut self) -> bool {
-        self.ime_dismissed = true;
+        if !matches!(self.events.back(), Some(FrameInput::DismissIme)) {
+            self.events.push_back(FrameInput::DismissIme);
+        }
         !self.paused
     }
 
@@ -239,11 +257,21 @@ impl Input {
         if self.frozen.is_some() || self.active.is_empty() {
             return false;
         }
-        let mut frozen = std::mem::take(&mut self.pointers);
-        let ids: Vec<PointerId> = self.active.drain().collect();
-        for id in ids {
-            frozen.push_back(self.converter.cancel_event(id));
+        let mut deferred = VecDeque::new();
+        let mut frozen = VecDeque::new();
+        for event in self.events.drain(..) {
+            if matches!(event, FrameInput::Pointer(_)) {
+                frozen.push_back(event);
+            } else {
+                deferred.push_back(event);
+            }
         }
+        self.events = deferred;
+        frozen.extend(
+            self.active
+                .drain()
+                .map(|id| FrameInput::Pointer(self.converter.cancel_event(id))),
+        );
         self.frozen = Some(frozen);
         true
     }
@@ -270,31 +298,25 @@ impl Input {
     }
 
     pub fn reset_for_source_update(&mut self) {
-        self.pointers.clear();
-        self.inputs.clear();
+        self.events.clear();
         self.frozen = None;
-        self.ime_dismissed = false;
         self.active.clear();
         self.converter = PointerConverter::default();
     }
 
     pub fn begin_frame(&mut self) -> FrameIn {
-        if let Some(pointers) = self.frozen.take() {
+        if let Some(events) = self.frozen.take() {
             return FrameIn {
-                pointers,
-                inputs: VecDeque::new(),
+                events,
                 metrics: None,
                 paused: true,
-                ime_dismissed: false,
             };
         }
         if self.paused {
             return FrameIn {
-                pointers: VecDeque::new(),
-                inputs: VecDeque::new(),
+                events: VecDeque::new(),
                 metrics: None,
                 paused: true,
-                ime_dismissed: false,
             };
         }
         let metrics = self.pending_metrics.take();
@@ -302,11 +324,9 @@ impl Input {
             self.sent_metrics = Some(metrics);
         }
         FrameIn {
-            pointers: std::mem::take(&mut self.pointers),
-            inputs: std::mem::take(&mut self.inputs),
+            events: std::mem::take(&mut self.events),
             metrics,
             paused: false,
-            ime_dismissed: std::mem::take(&mut self.ime_dismissed),
         }
     }
 }
@@ -322,7 +342,19 @@ mod tests {
     }
 
     fn phases(input: &Input) -> Vec<Phase> {
-        input.pointers.iter().map(|event| event.phase).collect()
+        input
+            .events
+            .iter()
+            .filter_map(pointer)
+            .map(|event| event.phase)
+            .collect()
+    }
+
+    fn pointer(event: &FrameInput) -> Option<&PointerEvent> {
+        match event {
+            FrameInput::Pointer(event) => Some(event),
+            _ => None,
+        }
     }
 
     #[test]
@@ -355,7 +387,7 @@ mod tests {
         let mut input = Input::new();
         assert!(!input.pause());
         assert!(input.begin_frame().paused);
-        assert!(input.begin_frame().pointers.is_empty());
+        assert!(input.begin_frame().events.is_empty());
     }
 
     #[test]
@@ -370,10 +402,14 @@ mod tests {
         up.time_ms = 12.0;
         input.push_pointer(up);
         assert_eq!(phases(&input), vec![Phase::Down, Phase::Move, Phase::Up]);
+        assert!(!input.converter.tracked.contains_key(&up.pointer));
+        down.x = 9.0;
+        down.time_ms = 12.0;
+        input.push_pointer(down);
         let mut cancel = event(Phase::Cancel, 0.0);
         cancel.kind = PointerKind::Mouse;
         input.push_pointer(cancel);
-        let last = input.pointers.back().expect("cancel");
+        let last = input.events.back().and_then(pointer).expect("cancel");
         assert_eq!(last.phase, Phase::Cancel);
         assert_eq!(last.kind, PointerKind::Touch);
         assert_eq!((last.x, last.y), (9.0, 0.0));
@@ -392,7 +428,12 @@ mod tests {
         leave.buttons = Buttons::empty();
         input.push_pointer(leave);
         assert_eq!(phases(&input), vec![Phase::Move, Phase::Move, Phase::Move]);
-        let xs: Vec<f32> = input.pointers.iter().map(|event| event.x).collect();
+        let xs: Vec<f32> = input
+            .events
+            .iter()
+            .filter_map(pointer)
+            .map(|event| event.x)
+            .collect();
         assert_eq!(xs, vec![6.0, 6.0, -1.0]);
     }
 
@@ -405,8 +446,9 @@ mod tests {
         assert!(frame.paused);
         assert_eq!(
             frame
-                .pointers
+                .events
                 .iter()
+                .filter_map(pointer)
                 .map(|event| event.phase)
                 .collect::<Vec<_>>(),
             vec![Phase::Down, Phase::Cancel]
@@ -424,16 +466,17 @@ mod tests {
         assert!(!input.dismiss_ime());
         let frame = input.begin_frame();
         assert!(frame.paused);
-        assert!(!frame.ime_dismissed);
-        assert!(frame.inputs.is_empty());
+        assert!(frame.events.is_empty());
         assert!(input.resume());
         let next = input.begin_frame();
-        assert!(next.ime_dismissed);
         assert_eq!(
-            next.inputs,
+            next.events,
             vec![
-                InputEvent::Text("a".to_string()),
-                InputEvent::Key(session::KeyPress::new(session::Key::Backspace))
+                FrameInput::Session(InputEvent::Text("a".to_string())),
+                FrameInput::Session(InputEvent::Key(session::KeyPress::new(
+                    session::Key::Backspace
+                ))),
+                FrameInput::DismissIme,
             ]
         );
     }
@@ -447,8 +490,9 @@ mod tests {
         let frame = input.begin_frame();
         assert_eq!(
             frame
-                .pointers
+                .events
                 .iter()
+                .filter_map(pointer)
                 .map(|event| event.phase)
                 .collect::<Vec<_>>(),
             vec![Phase::Down, Phase::Cancel]
@@ -456,11 +500,30 @@ mod tests {
         assert!(input.resume());
         let next = input.begin_frame();
         assert_eq!(
-            next.pointers
+            next.events
                 .iter()
+                .filter_map(pointer)
                 .map(|event| event.phase)
                 .collect::<Vec<_>>(),
             vec![Phase::Move]
+        );
+    }
+
+    #[test]
+    fn a_text_edit_and_dismissal_precede_the_next_pointer_focus_change() {
+        let mut input = Input::new();
+        let text = InputEvent::Text("a".to_string());
+        let next_focus = event(Phase::Down, 20.0);
+        input.push_input(text.clone());
+        input.dismiss_ime();
+        input.push_pointer(next_focus);
+        assert_eq!(
+            input.begin_frame().events,
+            [
+                FrameInput::Session(text),
+                FrameInput::DismissIme,
+                FrameInput::Pointer(next_focus)
+            ],
         );
     }
 
