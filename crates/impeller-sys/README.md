@@ -7,6 +7,12 @@
 
 `sdk.lock` 的 `source` 记录完整的 Flutter 源码提交，`version` 记录 Impasto 的 SDK 包版本，用于包内元数据、本地缓存和 GitHub Release。锁文件同时记录各目标归档的 SHA-256。[Impeller SDK 工作流](../../.github/workflows/impeller-sdk.yml) 使用 Flutter 的 `DEPS` 同步依赖，再用 GN 和 Ninja 编译 standalone interop。构建时核对上游头文件及各目标生成的绑定与源码树一致。每个 SDK 包包含头文件、绑定、原生库、许可证和版本信息，工作流会解压归档并验证链接，也支持将整套包发布为版本化 GitHub Release。
 
+PR 中的源码构建仅在改动影响原生构建或绑定生成时触发，并按改动裁剪目标矩阵：
+
+- 触发路径限定为 `include/**`、`patches/**`、`sdk.lock`、`src/bindings.rs`、`src/bindings_msvc.rs`、`tools/build_impeller.py` 和 `tools/impeller_sdk.py`；修改 `README.md`、`prebuilt/**`、纯 Rust 封装（`Cargo.toml`、`build.rs`、`src/lib.rs`）或 `.github/workflows/impeller-sdk.yml` 自身不自动触发 PR 源码构建。
+- `patches/` 下已知平台补丁仅构建对应平台族目标，`bindings.rs` / `bindings_msvc.rs` 仅构建对应 ABI 目标；若 `sdk.lock` 仅更新 `artifact` 校验或地址（`version` 与 `source` 未变），会自动跳过 `build` 与 `verify`。
+- 手动执行 `workflow_dispatch` 时可通过 `targets` 选择目标三元组、平台族（`darwin`、`macos`、`ios`、`android`、`linux`、`windows`）或 `all`（逗号分隔）；启用 `publish` 发布 Release 时要求 `targets=all`。
+
 仓库按 Flutter 提交组织预构建包。[prebuilt/flutter-77f043bc6319/](prebuilt/flutter-77f043bc6319/) 收录了从该提交构建并通过 CI 验证的 11 个 SDK 归档，覆盖 macOS、Android、iOS、Linux 和 Windows 的目标矩阵。[Flutter 源码提交](https://github.com/flutter/flutter/commit/77f043bc63196b9979cc09c5b97bb6d9b00be34d) · [构建与验证记录](https://github.com/peterich-rs/Impasto/actions/runs/44658054748)
 
 ```sh
@@ -28,7 +34,7 @@ just impeller-source
 just impeller-source aarch64-apple-ios-sim
 ```
 
-脚本使用 `build/impeller-source/` 缓存源码，使用 `third_party/impeller-build/` 缓存原生构建结果，并将最终 SDK 安装到日常构建使用的目录。CI 目标列表由 `python3 tools/impeller_sdk.py matrix` 输出。SDK 构建目标与已接入的应用宿主分别维护，当前应用宿主为 macOS 和 Android。
+脚本使用 `build/impeller-source/` 缓存源码，使用 `third_party/impeller-build/` 缓存原生构建结果，并将最终 SDK 安装到日常构建使用的目录。CI 目标列表由 `python3 tools/impeller_sdk.py matrix [--targets ... | --base ...]` 输出。SDK 构建目标与已接入的应用宿主分别维护，当前应用宿主为 macOS 和 Android。
 
 iOS SDK 使用 Metal，最低部署版本为 iOS 15.0。[`patches/ios-interop.patch`](patches/ios-interop.patch) 补齐锁定版本对 GLES 和 Vulkan 的条件编译，使这些后端禁用时 C API 仍可链接。
 

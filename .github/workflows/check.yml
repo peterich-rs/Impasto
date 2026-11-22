@@ -40,6 +40,8 @@ jobs:
         run: cargo clippy --workspace --exclude embedder-macos --all-targets -- -D warnings
       - name: JavaScript feature boundaries
         run: python3 tools/check-javascript-boundaries.py
+      - name: Impeller SDK matrix tests
+        run: python3 tools/test_impeller_sdk.py
       - name: generated native module declarations
         run: cargo run --locked -p embedder --bin module-stubs -- --check
       - uses: actions/setup-node@v4

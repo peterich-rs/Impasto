@@ -3,14 +3,21 @@ name: Impeller SDK
 on:
   pull_request:
     paths:
-      - '.github/workflows/impeller-sdk.yml'
-      - 'crates/impeller-sys/**'
+      - 'crates/impeller-sys/include/**'
+      - 'crates/impeller-sys/patches/**'
+      - 'crates/impeller-sys/sdk.lock'
+      - 'crates/impeller-sys/src/bindings.rs'
+      - 'crates/impeller-sys/src/bindings_msvc.rs'
       - 'tools/build_impeller.py'
       - 'tools/impeller_sdk.py'
   workflow_dispatch:
     inputs:
+      targets:
+        description: Target triples, platform families (darwin, macos, ios, android, linux, windows), or 'all' (comma-separated)
+        type: string
+        default: all
       publish:
-        description: Publish every verified target as a versioned GitHub Release
+        description: Publish every verified target as a versioned GitHub Release (requires targets=all)
         type: boolean
         default: false
 
@@ -26,12 +33,46 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.matrix.outputs.targets }}
+      has_targets: ${{ steps.matrix.outputs.has_targets }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - id: matrix
-        run: echo "targets=$(python3 tools/impeller_sdk.py matrix)" >> "$GITHUB_OUTPUT"
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          INPUT_TARGETS: ${{ inputs.targets }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            if git rev-parse --verify HEAD^2 >/dev/null 2>&1; then
+              base="HEAD^1"
+            else
+              if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+                git fetch --no-tags --depth=1 origin "$BASE_SHA"
+              fi
+              base="$BASE_SHA"
+            fi
+            matrix=$(python3 tools/impeller_sdk.py matrix --base "$base")
+          else
+            args=(--targets "${INPUT_TARGETS:-all}")
+            if [[ "$INPUT_PUBLISH" == "true" ]]; then
+              args+=(--require-all)
+            fi
+            matrix=$(python3 tools/impeller_sdk.py matrix "${args[@]}")
+          fi
+          echo "targets=$matrix" >> "$GITHUB_OUTPUT"
+          if [[ "$matrix" == "[]" ]]; then
+            echo "has_targets=false" >> "$GITHUB_OUTPUT"
+            echo "No Impeller source build targets affected; skipping build and verify."
+          else
+            echo "has_targets=true" >> "$GITHUB_OUTPUT"
+            echo "Selected Impeller SDK targets: $matrix"
+          fi
 
   build:
+    if: needs.targets.outputs.has_targets == 'true'
     needs: targets
     strategy:
       fail-fast: false
@@ -133,6 +174,7 @@ jobs:
           if-no-files-found: error
 
   verify:
+    if: needs.targets.outputs.has_targets == 'true'
     needs: [build, targets]
     strategy:
       fail-fast: false

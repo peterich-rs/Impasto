@@ -45,6 +45,9 @@ SIMULATOR_CLANG = {
     "aarch64-apple-ios-sim": "aarch64-apple-ios-simulator",
     "x86_64-apple-ios": "x86_64-apple-ios-simulator",
 }
+LOCK_RELPATH = "crates/impeller-sys/sdk.lock"
+FAMILY_ALIASES = {"macos": "darwin"}
+FULL_BUILD_PATHS = {"tools/build_impeller.py", "tools/impeller_sdk.py"}
 
 
 @dataclass(frozen=True)
@@ -349,6 +352,101 @@ def write_index(directory, lock, release):
     return index.resolve()
 
 
+def targets_for_family(family):
+    canonical = FAMILY_ALIASES.get(family, family)
+    return [
+        target
+        for target, (platform, _) in TARGETS.items()
+        if platform.split("-", 1)[0] == canonical
+    ]
+
+
+def parse_target_spec(spec):
+    if not spec.strip():
+        raise ValueError("empty Impeller target selection")
+    tokens = [token.strip() for token in spec.split(",")]
+    if any(not token for token in tokens):
+        raise ValueError("empty Impeller target selection")
+    if tokens == ["all"]:
+        return list(TARGETS)
+    if "all" in tokens:
+        raise ValueError("cannot combine 'all' with specific Impeller targets")
+
+    selected = set()
+    for token in tokens:
+        if token in TARGETS:
+            selected.add(token)
+        elif family_targets := targets_for_family(token):
+            selected.update(family_targets)
+        else:
+            raise ValueError(f"unknown Impeller target or platform family: {token}")
+    return [target for target in TARGETS if target in selected]
+
+
+def patch_target_families():
+    return {
+        f"crates/impeller-sys/patches/{patch_name}": family
+        for family, (patch_name, _) in build_impeller.PATCHES.items()
+    }
+
+
+def select_targets_for_changes(changed_paths, base_lock_text=None, head_lock_text=None):
+    patches = patch_target_families()
+    selected = set()
+    for path in changed_paths:
+        if path in FULL_BUILD_PATHS or path.startswith("crates/impeller-sys/include/"):
+            return list(TARGETS)
+        if path == "crates/impeller-sys/src/bindings.rs":
+            selected.update(target for target in TARGETS if not target.endswith("-msvc"))
+        elif path == "crates/impeller-sys/src/bindings_msvc.rs":
+            selected.update(target for target in TARGETS if target.endswith("-msvc"))
+        elif path.startswith("crates/impeller-sys/patches/"):
+            if path in patches:
+                selected.update(targets_for_family(patches[path]))
+            else:
+                return list(TARGETS)
+        elif path == LOCK_RELPATH:
+            if head_lock_text is None:
+                raise ValueError(f"missing {LOCK_RELPATH} at head revision")
+            head_lock = SdkLock.parse(head_lock_text)
+            if base_lock_text is None:
+                return list(TARGETS)
+            try:
+                base_lock = SdkLock.parse(base_lock_text)
+            except ValueError:
+                return list(TARGETS)
+            if (base_lock.version, base_lock.source) != (head_lock.version, head_lock.source):
+                return list(TARGETS)
+    return [target for target in TARGETS if target in selected]
+
+
+def changed_files_between(base, head="HEAD", root=ROOT):
+    result = subprocess.run(
+        ["git", "-c", "core.quotepath=false", "diff", "-z", "--name-only", "--no-renames", base, head],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    return [entry for entry in result.stdout.decode("utf-8").split("\0") if entry]
+
+
+def read_git_blob(rev, relpath, root=ROOT):
+    result = subprocess.run(
+        ["git", "show", f"{rev}:{relpath}"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout if result.returncode == 0 else None
+
+
+def matrix_entries(targets):
+    return [
+        {"target": target, "runner": TARGETS[target][1], "platform": TARGETS[target][0]}
+        for target in targets
+    ]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache-dir", type=Path, default=Path(os.environ.get("IMPASTO_IMPELLER_CACHE", CACHE)))
@@ -361,16 +459,39 @@ def main():
     index = commands.add_parser("index")
     index.add_argument("directory", type=Path)
     index.add_argument("--release", action="store_true")
-    commands.add_parser("matrix")
+    matrix = commands.add_parser("matrix")
+    matrix_selector = matrix.add_mutually_exclusive_group()
+    matrix_selector.add_argument("--targets")
+    matrix_selector.add_argument("--base")
+    matrix.add_argument("--head")
+    matrix.add_argument("--require-all", action="store_true")
     commands.add_parser("bindings")
     args = parser.parse_args()
     try:
         lock = SdkLock.parse(LOCK_FILE.read_text())
         if args.command == "matrix":
-            print(json.dumps([
-                {"target": target, "runner": runner, "platform": platform}
-                for target, (platform, runner) in TARGETS.items()
-            ]))
+            if args.head is not None and args.base is None:
+                raise ValueError("--head requires --base")
+            if args.base is not None:
+                if not args.base:
+                    raise ValueError("--base cannot be empty")
+                head = args.head if args.head is not None else "HEAD"
+                if not head:
+                    raise ValueError("--head cannot be empty")
+                changed = changed_files_between(args.base, head)
+                base_lock_text = None
+                head_lock_text = None
+                if LOCK_RELPATH in changed:
+                    base_lock_text = read_git_blob(args.base, LOCK_RELPATH)
+                    head_lock_text = read_git_blob(head, LOCK_RELPATH)
+                selected = select_targets_for_changes(changed, base_lock_text, head_lock_text)
+            elif args.targets is not None:
+                selected = parse_target_spec(args.targets)
+            else:
+                selected = list(TARGETS)
+            if args.require_all and len(selected) != len(TARGETS):
+                raise ValueError("publishing a release requires all Impeller targets (targets=all)")
+            print(json.dumps(matrix_entries(selected)))
         elif args.command == "index":
             print(write_index(args.directory, lock, args.release))
         elif args.command == "bindings":
