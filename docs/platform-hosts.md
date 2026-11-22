@@ -19,7 +19,7 @@ macOS、Android 与 iOS 的平台线程将事件入队，渲染线程创建 `Eng
 
 ## 分层
 
-`embedder` 通过 `session` 使用帧和输入类型。平台宿主启用 `javascript/ui` 打开应用会话。`protocol`、`uicore`、`engine`、`crates/embedder/macos` 不手写 C。QuickJS 使用 Cargo 构建的 quickjs-jit 0.14.2，Rust 绑定在 `crates/javascript/src/ui/player/vm`。`Engine` 与 QuickJS 都是 `!Send`。
+`embedder` 通过 `engine::session` 使用帧和输入类型。平台宿主启用 `engine/js` 打开应用会话，`raster/impeller` 提供绘制后端。QuickJS 由 Cargo 构建，Rust UI 绑定位于 `crates/engine/src/js/player/vm`。`raster::Rasterizer` 和 QuickJS 均在各自所属的渲染线程使用。
 
 ```text
 平台适配器 → 窗口事件、输入、vsync → embedder

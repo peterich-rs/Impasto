@@ -1,12 +1,14 @@
 # @impasto/solid-renderer
 
-`runtime/index.ts` 是 Babel 的编译入口，再导出 QuickJS `scene` 模块的原生渲染原语。`src/tree.ts` 中的 `Node` 是 `uicore::NodeId::to_raw()` 对应的数字句柄。`Text` 和 `Image` 是组件。测量、布局、命中和录制都在 `uicore`。
+`runtime/index.ts` 是 Babel 的编译入口，再导出 QuickJS `scene` 模块的原生渲染原语。`src/tree.ts` 中的 `Node` 是 `engine::tree::NodeId::to_raw()` 对应的数字句柄。`Text` 和 `Image` 是组件。测量、布局、命中和录制都在 `engine`。
 
-`tools/pack.mjs` 将应用的 `solid-js` 导入指到 `@impasto/reactive`，运行时使用 `crates/reactive` 中的图。bundle 不包含 `@solidjs/universal` 或 Solid 的调度器。Node 测试替身在 `testing/`，实际原生行为由 `crates/javascript` 的测试验证。
+`tools/pack.mjs` 将应用的 `solid-js` 导入指到 `@impasto/reactive`，运行时使用 `engine::reactive` 中的图。bundle 不包含 `@solidjs/universal` 或 Solid 的调度器。Node 测试替身在 `testing/`，实际原生行为由 `engine/js` 的测试验证。
 
 `just solid` 在仓库根安装依赖并运行全部 JS 包测试，`just solid-app` 运行 gallery 的构建与测试。标签和属性见 `docs/architecture.md`。
 
 作者标签为 `view`、`stack`、`scroll`、`image`。布局、颜色、字体与效果使用 `style`；工具类通过 `class` 和 `classList` 写入同一声明体系。普通 View 默认纵向、min 0、shrink 0，不带父级 100% 上限；填充需要显式声明。
+
+直接调用原生场景时用 `scene.createElement("view", { style })` 或相应标签构造节点，用 `scene.patchStyle(node, style)` 更新样式。底层文字节点使用 `scene.createTextNode`。从旧构造函数和逐字段 setter 迁移的脚本需重新打包。
 
 ```tsx
 <view class="flex-row gap-2" style={{ padding: 16 }}>

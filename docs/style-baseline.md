@@ -1,13 +1,13 @@
 # 样式验证
 
-布局与样式的可观察合同在 `crates/uicore/src/style_contract_test.rs`、`style/tests.rs` 和 `crates/javascript/tests/fixtures/ui/style.tsx`。QuickJS fixture 经实际 Babel/esbuild 编译后在原生会话中执行，不使用 Node 布局替身。
+布局与样式的可观察合同在 `crates/engine/src/style_contract_test.rs`、`style/tests.rs` 和 `crates/engine/tests/fixtures/ui/style.tsx`。QuickJS fixture 经实际 Babel/esbuild 编译后在原生会话中执行，不使用 Node 布局替身。
 
 ```sh
 cargo test --locked --workspace
-cargo clippy --locked -p uicore --all-targets --all-features -- -D warnings
+cargo clippy --locked -p engine --all-targets --all-features -- -D warnings
 cargo fmt --all --check
-cargo run --locked -p uicore --bin style-types -- --check --root .
-cargo doc --locked --no-deps -p uicore -p quickjs
+cargo run --locked -p engine --bin style-types -- --check --root .
+cargo doc --locked --no-deps -p engine --features js
 pnpm -r test
 pnpm exec tsc --noEmit -p packages/solid-renderer
 pnpm exec tsc --noEmit -p packages/solid-ui

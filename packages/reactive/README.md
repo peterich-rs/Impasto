@@ -16,4 +16,4 @@
 
 框架不提供 `@solidjs/web`、SSR、hydration、`seroval`、`ssrSource`、`enableHydration`、`@solidjs/universal`、`@solidjs/router` 或 `@solidjs/diagnostics`（含浏览器桥）。路由使用 `@impasto/solid-router`，编译使用 Babel 的 universal 输出。
 
-`just solid` 中通过 `tools/resolve-hook.mjs` 导入 `solid-js` 的测试运行官方 2.0.0。`crates/reactive/tests/solid_2_0.rs` 验证 Rust 图，并用 Node 重跑官方包对照。`crates/javascript` 的测试让原生模块运行同一段脚本。官方包和原生模块都与 [order.txt](../../crates/reactive/tests/fixtures/order.txt) 比对。
+`just solid` 中通过 `tools/resolve-hook.mjs` 导入 `solid-js` 的测试运行官方 2.0.0。`crates/engine/tests/reactive_solid_2_0.rs` 验证 Rust 图，并用 Node 重跑官方包对照。`engine/js` 的测试让原生模块运行同一段脚本。官方包和原生模块都与 [order.txt](../../crates/engine/tests/fixtures/order.txt) 比对。

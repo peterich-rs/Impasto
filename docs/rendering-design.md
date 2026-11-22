@@ -6,39 +6,39 @@
 
 ```mermaid
 flowchart LR
-    Q[quickjs] --> U[uicore]
-    U -->|LayerTree 和 DrawList| S[embedder]
-    S --> I[Impeller]
-    S --> W[wgpu 和 Vello]
-    I -->|Shaper| U
-    W -->|Shaper| U
+    JS["engine::js"] --> T["engine::tree"]
+    T -->|LayerTree| E["embedder"]
+    E --> I["raster · Impeller"]
+    I -->|Shaper| T
+    E -.-> V["raster · Vello 原型"]
+    V -.->|Shaper| T
 ```
 
 `embedder` 继续掌管输入、vsync、`Submit`、`PresentCached`、`Skip` 和 `Flush`。宿主传入 `Send` 工厂，在渲染线程创建一套后端及其 `Shaper`。后端持有显示列表、文字、纹理和当前表面的 GPU 资源。宿主持有窗口和原生表面句柄。原生表面销毁时，`embedder` 在后端释放表面后才应答 `SurfaceDropped`。表面尺寸变化由后端重配交换链，设备丢失则重建设备资源并使当前提交失效。`TextureFactory` 的提前上传留在 Impeller 实现，通用 `ImageCache` 管理解码后的 RGBA 和资源版本。迁移时以 Gallery 滚动和图片上传的基准检查是否引入渲染线程阻塞。
 
-`crates/embedder/common/src/lib.rs` 的接口草案。`Boot` 使用 `OpenRenderer` 取代 `OpenSurface`。`SurfaceHost` 继续跟踪 ID、尺寸和重试。`Renderer` 实现拥有与渲染设备配对的表面，避免从通用调度传递具体 `Engine`。
+当前由 `raster::Rasterizer` 提交 `LayerTree`，`raster::ImpellerShaper` 与绘制共用 `Typography`。以下为 `embedder` 的后端注入接口草案。`Boot` 使用 `OpenRenderer` 取代 `OpenSurface`。`SurfaceHost` 继续跟踪 ID、尺寸和重试。`Renderer` 实现拥有与渲染设备配对的表面，避免从通用调度传递具体 `Rasterizer`。
 
 ```rust
 pub type OpenRenderer =
-    Box<dyn FnOnce() -> Result<Box<dyn Renderer>, engine::Status> + Send>;
+    Box<dyn FnOnce() -> Result<Box<dyn Renderer>, raster::Status> + Send>;
 
 pub trait Renderer {
-    fn shaper(&self) -> Box<dyn uicore::Shaper>;
-    fn register_font(&mut self, bytes: &[u8], family: &str) -> Result<(), engine::Status>;
+    fn shaper(&self) -> Box<dyn engine::text::Shaper>;
+    fn register_font(&mut self, bytes: &[u8], family: &str) -> Result<(), raster::Status>;
     fn submit_layers<'pixels>(
         &mut self,
-        tree: &protocol::LayerTree,
+        tree: &engine::scene::LayerTree,
         point_scale: f32,
-        resolve: &mut dyn FnMut(&str) -> Option<engine::ImagePixels<'pixels>>,
-    ) -> Result<(), engine::Status>;
-    fn open_surface(&mut self, target: SurfaceTarget) -> Result<(), engine::Status>;
+        resolve: &mut dyn FnMut(&str) -> Option<raster::ImagePixels<'pixels>>,
+    ) -> Result<(), raster::Status>;
+    fn open_surface(&mut self, target: SurfaceTarget) -> Result<(), raster::Status>;
     fn drop_surface(&mut self);
-    fn present(&mut self, pixels: engine::PixelSize) -> Result<Presented, engine::Status>;
+    fn present(&mut self, pixels: raster::PixelSize) -> Result<Presented, raster::Status>;
     fn trim(&mut self);
 }
 ```
 
-以启动时选择为第一版。`macos` 根据构建配置传入 Metal/Impeller 或 wgpu 工厂，`android` 传入 Vulkan/Impeller 工厂。同一个 QuickJS 应用 bundle 和输入服务可复用。会话启动前准备排版。wgpu 若需要依据窗口表面选择适配器，可在首次 `open_surface` 时创建设备，初始化只发生在打开或恢复阶段。设备重建用已注册的字体字节和图像缓存复原，已回收的图像从来源重新解码。`ParagraphId::NONE` 是 `uicore` 录制的默认值，后端以文字描述进行缓存，保留段落句柄仅在产生它的实现中使用。 [wgpu 的 surface 与 adapter 接口](https://docs.rs/wgpu/latest/wgpu/struct.Instance.html)
+以启动时选择为第一版。`macos` 根据构建配置传入 Metal/Impeller 或 wgpu 工厂，`android` 传入 Vulkan/Impeller 工厂。同一个 QuickJS 应用 bundle 和输入服务可复用。会话启动前准备排版。wgpu 若需要依据窗口表面选择适配器，可在首次 `open_surface` 时创建设备，初始化只发生在打开或恢复阶段。设备重建用已注册的字体字节和图像缓存复原，已回收的图像从来源重新解码。`ParagraphId::NONE` 是 `engine` 录制的默认值，后端以文字描述进行缓存，保留段落句柄仅在产生它的实现中使用。 [wgpu 的 surface 与 adapter 接口](https://docs.rs/wgpu/latest/wgpu/struct.Instance.html)
 
 | 目标 | 接入方式与成本 |
 |---|---|
@@ -51,12 +51,12 @@ pub trait Renderer {
 ## 收拢后端接口
 
 - `crates/embedder/common/src/lib.rs`、`host.rs` 和 `surface.rs` 由宿主注入后端，迁移表面所有权和 `SurfaceDropped` 顺序。以现有 Impeller 为第一个实现，测试替身覆盖调度、重试和缓存失效。
-- `crates/embedder/common/src/shaper.rs` 和 `images.rs` 把段落对象、纹理与提前上传归入具体实现。`crates/embedder/macos/src/{app,surface}.rs` 和 `crates/embedder/android/src/{app,surface}.rs` 迁移到后端工厂，仍走现有平台线程的输入、解码与窗口生命周期。
-- `crates/engine/src/surface.rs` 核对 `engine::Surface` 的调用者，共用的 `PixelSize`、`ImagePixels` 与错误语义沿用现有类型。为需要的 recoverable surface 失败与设备丢失定义具体处理，保留原有 `AcquireMiss` 退避路径。
+- `raster::ImpellerShaper` 持有 Impeller 排版资源。后端注入时整理 `images.rs` 与纹理、提前上传之间的接口。`crates/embedder/macos/src/{app,surface}.rs` 和 `crates/embedder/android/src/{app,surface}.rs` 迁移到后端工厂，仍走现有平台线程的输入、解码与窗口生命周期。
+- `crates/raster/src/surface.rs` 核对 `raster::Surface` 的调用者，共用的 `PixelSize`、`ImagePixels` 与错误语义沿用现有类型。为需要的 recoverable surface 失败与设备丢失定义具体处理，保留原有 `AcquireMiss` 退避路径。
 
 ## 桌面第二后端验证
 
-- `crates/engine` 内先以可选实现接入 Vello，在同一 macOS 宿主上绘制固定 `LayerTree`，再用 Gallery 验证。首个原型覆盖路径、图片、段落、变换、裁剪和组透明度。之后补画面依赖的模糊、混合及 Canvas 语义。验证不同大小的 surface、设备资源失效和缩放切换。
+- `crates/raster` 内先以可选实现接入 Vello，在同一 macOS 宿主上绘制固定 `LayerTree`，再用 Gallery 验证。首个原型覆盖路径、图片、段落、变换、裁剪和组透明度。之后补画面依赖的模糊、混合及 Canvas 语义。验证不同大小的 surface、设备资源失效和缩放切换。
 - 记录同一负载的提交、合成与 present 耗时、picture 重建次数和纹理上传量。通过语义与性能验收后，再按真实的 Linux 或 Windows 需求选择扩平台路线。GPUI 独立宿主只在需要使用 GPUI 窗口和控件时立项。
 
 ## 架构与验证
