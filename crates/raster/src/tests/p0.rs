@@ -190,6 +190,9 @@ fn asymmetric_continuous_corners_agree_in_paint_and_clip() {
 
 #[test]
 fn rounded_shadow_matches_two_dimensional_reference() {
+    if std::env::var("IMPASTO_SHADOW_2D").as_deref() != Ok("1") {
+        return;
+    }
     let Some(mut raster) = headless(FontLibrary::new()) else {
         return;
     };

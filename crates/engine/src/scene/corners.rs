@@ -10,15 +10,19 @@ pub struct CornerShape {
 }
 
 impl CornerShape {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "fitted radii remain in the original finite f32 range after scaling"
+    )]
     pub fn fitted(self, width: f32, height: f32) -> Self {
         let [tl, tr, br, bl] = self.radii.map(|radius| {
             if radius.is_finite() {
-                radius.max(0.0)
+                f64::from(radius.max(0.0))
             } else {
                 0.0
             }
         });
-        let mut scale = 1.0_f32;
+        let mut scale = 1.0_f64;
         for (length, pair) in [
             (width, tl + tr),
             (height, tr + br),
@@ -26,11 +30,11 @@ impl CornerShape {
             (height, bl + tl),
         ] {
             if pair > 0.0 {
-                scale = scale.min(length.max(0.0) / pair);
+                scale = scale.min(f64::from(length.max(0.0)) / pair);
             }
         }
         Self {
-            radii: [tl, tr, br, bl].map(|radius| radius * scale),
+            radii: [tl, tr, br, bl].map(|radius| (radius * scale) as f32),
             curve: if self.curve.is_finite() {
                 self.curve.clamp(2.0, 8.0)
             } else {

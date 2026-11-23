@@ -225,8 +225,7 @@ pub unsafe extern "C" fn impasto_ios_compositor_finish(
         state.submitted |= submitted;
         drop(state);
         let ack_us = frame.published_at.elapsed().as_micros();
-        tracing::debug!(target: "impasto::surface", serial, submitted, ack_us, "UIKit compositor ack");
-        engine::session::trace::Section::event(|| format!("UIKit ack: {ack_us} us"));
+        engine::session::trace::Section::event(|| format!("UIKit ack: {ack_us} us ({submitted})"));
         drop(frame);
         if first {
             host.clock.events.send(Event::FrameSubmitted, surface, None);

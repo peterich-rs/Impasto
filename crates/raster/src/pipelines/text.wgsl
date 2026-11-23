@@ -1,5 +1,6 @@
 // Glyphs and decoration bars.
 override simple_paint: bool = false;
+override text_gamma: bool = false;
 @group(1) @binding(0) var mask_atlas: texture_2d_array<f32>;
 @group(1) @binding(1) var color_atlas: texture_2d_array<f32>;
 @group(1) @binding(2) var atlas_sampler: sampler;
@@ -43,7 +44,10 @@ fn vs_main(@builtin(vertex_index) vertex: u32, data: GlyphVertex) -> VertexOut {
 
 fn glyph_coverage(uv: vec2<f32>, layer: i32, flags: u32) -> f32 {
     let coverage = textureSample(mask_atlas, atlas_sampler, uv, layer).r;
-    return select(coverage, pow(coverage, 0.85), (flags & 8u) != 0u);
+    if text_gamma && (flags & 8u) != 0u {
+        return pow(coverage, 0.85);
+    }
+    return coverage;
 }
 
 @fragment

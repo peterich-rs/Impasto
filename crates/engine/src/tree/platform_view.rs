@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::scene::PathVerb;
+use crate::scene::{CornerShape, PathVerb};
 use kurbo::BezPath;
 
 use super::node::{NodeFlags, Role};
@@ -181,7 +181,9 @@ impl Tree {
                     height: node.h,
                     radius: node.corner_radius(),
                     transform: self.platform_transform(current)?,
-                    path: None,
+                    path: node
+                        .corners()
+                        .and_then(|corners| corner_path(corners, node.w, node.h)),
                 });
             }
             next = node.parent;
@@ -216,6 +218,43 @@ impl Tree {
         (matrix.iter().all(|v| v.is_finite()) && (a * d - b * c).abs() > f32::EPSILON)
             .then_some(matrix)
     }
+}
+
+fn corner_path(shape: CornerShape, width: f32, height: f32) -> Option<Arc<[PathVerb]>> {
+    let shape = shape.fitted(width, height);
+    let [tl, tr, br, bl] = shape.radii;
+    if shape.radii == [0.0; 4] {
+        return None;
+    }
+    let quadrants = [
+        ([tl, tl], tl, [-1.0, -1.0]),
+        ([width - tr, tr], tr, [1.0, -1.0]),
+        ([width - br, height - br], br, [1.0, 1.0]),
+        ([bl, height - bl], bl, [-1.0, 1.0]),
+    ];
+    let mut path = Vec::with_capacity(101);
+    let exponent = 2.0 / shape.curve;
+    for (quadrant, ([x, y], radius, [sx, sy])) in quadrants.into_iter().enumerate() {
+        let steps = if radius > 0.0 { 24 } else { 1 };
+        for i in 0..=steps {
+            let angle = std::f32::consts::FRAC_PI_2 * i as f32 / steps as f32;
+            let (sin, cos) = angle.sin_cos();
+            let (u, v) = if quadrant % 2 == 0 {
+                (cos, sin)
+            } else {
+                (sin, cos)
+            };
+            let px = x + sx * radius * u.max(0.0).powf(exponent);
+            let py = y + sy * radius * v.max(0.0).powf(exponent);
+            if path.is_empty() {
+                path.push(PathVerb::Move(px, py));
+            } else {
+                path.push(PathVerb::Line(px, py));
+            }
+        }
+    }
+    path.push(PathVerb::Close);
+    Some(path.into())
 }
 
 fn parse_path(svg: &str) -> Result<Arc<[PathVerb]>, crate::Error> {

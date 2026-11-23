@@ -45,7 +45,6 @@ pub(crate) struct Compositor {
     compute_blur: Option<ComputeBlur>,
     early_z: bool,
     canvas_stencil: bool,
-    text_gamma: bool,
     dither_output: bool,
     transient: bool,
 }
@@ -261,7 +260,6 @@ impl Compositor {
             compute_blur: ComputeBlur::new(gpu),
             early_z: std::env::var("IMPASTO_EARLY_Z").as_deref() == Ok("1"),
             canvas_stencil: std::env::var("IMPASTO_CANVAS_STENCIL").as_deref() == Ok("1"),
-            text_gamma: std::env::var("IMPASTO_TEXT_GAMMA").as_deref() == Ok("1"),
             dither_output: std::env::var("IMPASTO_DITHER").as_deref() == Ok("1"),
             transient: match std::env::var("IMPASTO_TRANSIENT_ATTACHMENTS").as_deref() {
                 Ok("0") => false,
@@ -1956,7 +1954,7 @@ impl Frame<'_> {
             let mut flags = if color { batch::GLYPH_COLOR } else { 0 };
             if decoration {
                 flags |= batch::GLYPH_DECORATION;
-            } else if !color && self.compositor.text_gamma && glyph.size * pixel_scale <= 14.0 {
+            } else if !color && self.gpu.text_gamma && glyph.size * pixel_scale <= 14.0 {
                 flags |= batch::GLYPH_GAMMA;
             }
             let (page, index) = if let Some(gradient) = glyph.gradient.as_deref().filter(|_| !color)

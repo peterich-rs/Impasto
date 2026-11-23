@@ -1,5 +1,6 @@
 // Analytic rectangles and tessellated paths in linear premultiplied color.
 override simple_paint: bool = false;
+override two_dimensional_shadow: bool = false;
 @group(1) @binding(0) var clip_mask_tex: texture_2d<f32>;
 @group(1) @binding(1) var clip_mask_sampler: sampler;
 
@@ -88,6 +89,16 @@ fn shadow_alpha(data: VertexOut, p: vec2<f32>, extra: PaintExtra) -> f32 {
     let r = clamp(data.shape.x + extra.shadow.z, 0.0, min(half.x, half.y));
     let radii = select(vec4(r), extra.corners, data.curve >= 2.0);
     let curve = max(data.curve, 2.0);
+    if !two_dimensional_shadow {
+        var distance = sd_rounded_box(q, half, r);
+        if (data.curve >= 2.0) {
+            distance = sd_shaped_box(q, half, radii, curve);
+        }
+        if (sigma < 0.3) {
+            return select(0.0, 1.0, distance <= 0.0);
+        }
+        return 0.5 + 0.5 * erf(-distance * 0.70710678 / sigma);
+    }
     if (sigma < 0.3) {
         return select(0.0, 1.0, sd_shaped_box(q, half, radii, curve) <= 0.0);
     }

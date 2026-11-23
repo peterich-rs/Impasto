@@ -450,12 +450,16 @@ fn build(
         },
         _ => wgpu::BlendState::REPLACE,
     };
-    let constants = [("simple_paint", 1.0)];
-    let fragment_constants: &[(&str, f64)] = if matches!(kind, K::RectSolid | K::TextMask) {
-        &constants
-    } else {
-        &[]
-    };
+    let mut constants = Vec::new();
+    if matches!(kind, K::RectSolid | K::TextMask) {
+        constants.push(("simple_paint", 1.0));
+    }
+    if gpu.shadow_2d && kind == K::Rect {
+        constants.push(("two_dimensional_shadow", 1.0));
+    }
+    if gpu.text_gamma && matches!(kind, K::Text | K::TextMask) {
+        constants.push(("text_gamma", 1.0));
+    }
     let label = format!("impasto {kind:?} {blend:?}");
     let layout = gpu
         .device
@@ -478,7 +482,7 @@ fn build(
                 module,
                 entry_point: Some(fragment),
                 compilation_options: wgpu::PipelineCompilationOptions {
-                    constants: fragment_constants,
+                    constants: &constants,
                     ..Default::default()
                 },
                 targets: &[Some(wgpu::ColorTargetState {
