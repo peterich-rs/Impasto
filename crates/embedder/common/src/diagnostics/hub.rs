@@ -437,6 +437,10 @@ impl TelemetryHub {
     }
 
     pub(crate) fn start_trace(&self, path: PathBuf, overwrite: bool) -> Option<u64> {
+        self.begin_capture(Some((path, overwrite)))
+    }
+
+    pub(super) fn begin_capture(&self, destination: Option<(PathBuf, bool)>) -> Option<u64> {
         static NEXT_TRACE: AtomicU64 = AtomicU64::new(1);
         let mut capture = lock(&self.capture);
         if capture.is_some() {
@@ -445,8 +449,7 @@ impl TelemetryHub {
         let id = NEXT_TRACE.fetch_add(1, Ordering::Relaxed);
         *capture = Some(TraceCapture {
             id,
-            path,
-            overwrite,
+            destination,
             started_ns: mono_ns(),
             frames: VecDeque::with_capacity(TRACE_FRAME_CAP),
             io: VecDeque::with_capacity(TRACE_IO_CAP),
@@ -456,16 +459,35 @@ impl TelemetryHub {
     }
 
     pub(crate) fn finish_trace(&self, id: u64) -> std::io::Result<PathBuf> {
-        let capture = {
-            let mut slot = lock(&self.capture);
-            if !slot.as_ref().is_some_and(|capture| capture.id == id) {
-                return Err(std::io::Error::other("trace recording expired"));
-            }
-            self.recording.store(false, Ordering::Release);
-            slot.take()
-        };
-        let capture = capture.ok_or_else(|| std::io::Error::other("no active trace"))?;
+        let capture = self
+            .take_capture(id)
+            .ok_or_else(|| std::io::Error::other("trace recording expired"))?;
         super::trace_export::write(&capture)
+    }
+
+    pub(super) fn take_capture(&self, id: u64) -> Option<TraceCapture> {
+        let mut slot = lock(&self.capture);
+        if slot.as_ref().is_none_or(|capture| capture.id != id) {
+            return None;
+        }
+        self.recording.store(false, Ordering::Release);
+        slot.take()
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn frame_updates(&self, since: u64) -> (u64, bool, Vec<FrameSample>) {
+        let frames = lock(&self.frames);
+        let reset = since == 0
+            || since > frames.seq
+            || frames
+                .buf
+                .front()
+                .is_some_and(|oldest| since < oldest.seq.saturating_sub(1));
+        let samples = frames
+            .tail(if reset { 0 } else { since })
+            .cloned()
+            .collect();
+        (frames.seq, reset, samples)
     }
 
     pub(crate) fn note_io(&self, span: IoSpan) {
@@ -544,8 +566,7 @@ const TRACE_IO_CAP: usize = 2048;
 
 pub(super) struct TraceCapture {
     id: u64,
-    pub path: PathBuf,
-    pub overwrite: bool,
+    pub destination: Option<(PathBuf, bool)>,
     pub started_ns: u64,
     pub frames: VecDeque<FrameSample>,
     pub io: VecDeque<IoSpan>,

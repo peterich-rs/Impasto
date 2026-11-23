@@ -5,6 +5,7 @@ mod app;
 mod build;
 mod clean;
 mod create;
+mod devtools;
 mod ios;
 mod packages;
 mod run;
@@ -74,6 +75,8 @@ enum Command {
     },
     /// Delete `build/` and pack output. Leaves `lib/`, `assets/`, and `app.toml`.
     Clean,
+    /// Open a standalone diagnostics client, optionally forwarding a USB device.
+    Devtools(devtools::Options),
     /// Package-manager commands. Only `get` is implemented.
     Packages {
         #[command(subcommand)]
@@ -127,6 +130,7 @@ fn main() -> ExitCode {
         Command::Analyze => finish(analyze::analyze()),
         Command::Test { bundle } => finish(test::test(bundle)),
         Command::Clean => finish(clean::clean()),
+        Command::Devtools(options) => finish(devtools::run(options)),
         Command::Packages { command } => match command {
             PackagesCommand::Get { args } => finish(packages::get(&args)),
         },

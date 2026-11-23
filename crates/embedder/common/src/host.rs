@@ -678,15 +678,27 @@ fn run_boot(
     crate::diagnostics::telemetry::install_system_trace();
     let trace_path =
         std::env::var_os("IMPASTO_TRACE").filter(|path| !path.is_empty() && path != "1");
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    let remote = crate::diagnostics::remote::Config::configured(boot.log_dir.as_deref());
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    let remote_enabled = remote.is_some();
+    #[cfg(not(any(debug_assertions, feature = "devtools-server")))]
+    let remote_enabled = false;
     let profile = TelemetryProfile::configured(boot.devtools.is_some());
+    let profile = if remote_enabled && std::env::var_os("IMPASTO_TELEMETRY").is_none() {
+        profile.max(TelemetryProfile::Counters)
+    } else {
+        profile
+    };
     let telemetry = boot.devtools.clone().or_else(|| {
-        (profile != TelemetryProfile::Off || trace_path.is_some())
+        (profile != TelemetryProfile::Off || trace_path.is_some() || remote_enabled)
             .then(|| Arc::new(TelemetryHub::new()))
     });
     if let Some(hub) = &telemetry {
         hub.set_profile(profile);
     }
     let enable_gpu_timing = trace_path.is_some()
+        || remote_enabled
         || profile == TelemetryProfile::GpuAndTimeline
         || (boot.devtools.is_some() && cfg!(debug_assertions) && profile != TelemetryProfile::Off);
     if telemetry.is_some() || boot.inspect.is_some() || boot.inspect_dir.is_some() {
@@ -694,6 +706,17 @@ fn run_boot(
     }
     let capture_runner = Arc::clone(&runners.io);
     crate::log_sub::install(boot.log_dir.as_deref(), boot.devtools.clone());
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    let remote = match (remote, telemetry.clone()) {
+        (Some(config), Some(hub)) => match crate::diagnostics::remote::Server::start(config, hub) {
+            Ok(server) => Some(server),
+            Err(error) => {
+                tracing::warn!(target: "impasto::devtools", %error, "DevTools listener unavailable");
+                None
+            }
+        },
+        _ => None,
+    };
     let upload = Arc::new(Mutex::new(None));
     if let Some(hub) = boot.devtools.as_ref() {
         install_panic_hook(Arc::clone(hub));
@@ -738,6 +761,8 @@ fn run_boot(
             upload,
             telemetry: telemetry.clone(),
             enable_gpu_timing,
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            remote,
         },
     )?;
     if let (Some(path), Some(hub)) = (trace_path, telemetry)
@@ -842,6 +867,8 @@ pub(crate) struct UiHost {
     frame_number: u64,
     topology: ThreadTopology,
     telemetry: Option<Arc<TelemetryHub>>,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    _remote: Option<crate::diagnostics::remote::Server>,
     gpu_poll: bool,
     semantics: Option<engine::semantics::SemanticsUpdate>,
     semantics_enabled: bool,
@@ -924,6 +951,8 @@ struct RenderLinks {
     load_image: ImageLoader,
     telemetry: Option<Arc<TelemetryHub>>,
     enable_gpu_timing: bool,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    remote: Option<crate::diagnostics::remote::Server>,
     http: Option<Arc<dyn crate::http::HttpClient>>,
     upload: Arc<Mutex<Option<raster::TextureFactory>>>,
 }
@@ -1142,6 +1171,8 @@ fn open_ui(
         frame_number: 0,
         topology: boot.thread_topology,
         telemetry: links.telemetry,
+        #[cfg(any(debug_assertions, feature = "devtools-server"))]
+        _remote: links.remote,
         gpu_poll: false,
         semantics: None,
         semantics_enabled: true,
@@ -2232,6 +2263,8 @@ mod tests {
                 frame_number: 0,
                 topology: crate::ThreadTopology::SharedRender,
                 telemetry: None,
+                #[cfg(any(debug_assertions, feature = "devtools-server"))]
+                _remote: None,
                 gpu_poll: false,
                 semantics: None,
                 semantics_enabled: true,

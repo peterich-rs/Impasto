@@ -134,6 +134,8 @@ impl Trace {
                 "compute_passes": r.compute_passes, "buffers_created": r.buffers_created,
                 "bind_groups_created": r.bind_groups_created, "copy_pixels": r.copy_pixels,
                 "blur_pixels": r.blur_pixels,
+                "stencil_draws": r.stencil_draws, "early_z_instances": r.early_z_instances,
+                "gradient_lut_hits": r.gradient_lut_hits,
             }),
         );
         self.counter(
@@ -152,6 +154,7 @@ impl Trace {
             json!({
                 "allocated": r.offscreen_alloc_bytes, "peak": r.offscreen_peak_bytes,
                 "pooled": r.pooled_texture_bytes,
+                "transient": r.transient_bytes,
             }),
         );
         let images = frame.raster.image_upload;
@@ -188,7 +191,7 @@ impl Trace {
     }
 }
 
-fn document(capture: &TraceCapture) -> Value {
+pub(super) fn document(capture: &TraceCapture) -> Value {
     let mut trace = Trace {
         pid: std::process::id(),
         start_ns: capture.started_ns,
@@ -264,21 +267,20 @@ fn document(capture: &TraceCapture) -> Value {
 }
 
 pub(super) fn write(capture: &TraceCapture) -> io::Result<PathBuf> {
-    if let Some(parent) = capture
-        .path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-    {
+    let Some((path, overwrite)) = &capture.destination else {
+        return Err(io::Error::other("trace file destination missing"));
+    };
+    if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
     let file = File::options()
         .write(true)
         .create(true)
-        .create_new(!capture.overwrite)
-        .truncate(capture.overwrite)
-        .open(&capture.path)?;
+        .create_new(!overwrite)
+        .truncate(*overwrite)
+        .open(path)?;
     let mut writer = BufWriter::new(file);
     serde_json::to_writer(&mut writer, &document(capture))?;
     writer.flush()?;
-    Ok(capture.path.clone())
+    Ok(path.clone())
 }

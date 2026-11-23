@@ -4,6 +4,8 @@ mod hub;
 mod inspect;
 mod module;
 mod recorder;
+#[cfg(any(debug_assertions, feature = "devtools-server"))]
+pub(crate) mod remote;
 
 pub use hub::{
     DiagnosticsHub, FrameSample, LogEntry, LogSource, NetEntry, NetKind, PREVIEW_CAP, PhaseSample,

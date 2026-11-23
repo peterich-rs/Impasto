@@ -774,6 +774,16 @@ impl RunDevice {
     ) -> Result<()> {
         let mut install = Command::new("xcrun");
         let mut launch = Command::new("xcrun");
+        if options.debug
+            && let Some((port, token)) = crate::devtools::config()?
+        {
+            let prefix = match self {
+                Self::Simulator(_) => "SIMCTL_CHILD",
+                Self::Physical(_) => "DEVICECTL_CHILD",
+            };
+            launch.env(format!("{prefix}_IMPASTO_DEVTOOLS_PORT"), port.to_string());
+            launch.env(format!("{prefix}_IMPASTO_DEVTOOLS_TOKEN"), token);
+        }
         match self {
             Self::Simulator(device) => {
                 install.args(["simctl", "install", &device.udid]);

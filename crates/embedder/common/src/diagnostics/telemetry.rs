@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use crate::ThreadTopology;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TelemetryProfile {
     #[default]
     Off,
