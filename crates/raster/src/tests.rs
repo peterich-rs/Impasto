@@ -11,7 +11,7 @@ use super::{FontLibrary, ImagePixels, ParleyShaper, PixelSize, RasterOptions, Ra
 
 pub(crate) const ROBOTO: &[u8] = include_bytes!("../../embedder/android/assets/fonts/Sans.ttf");
 
-fn headless(fonts: FontLibrary) -> Option<Rasterizer> {
+pub(crate) fn headless(fonts: FontLibrary) -> Option<Rasterizer> {
     match Rasterizer::headless(RasterOptions::default(), fonts) {
         Ok(raster) => Some(raster),
         Err(Status::NoDevice(backend)) if std::env::var_os("IMPASTO_TEST_GPU").is_none() => {
@@ -379,3 +379,5 @@ fn frames_reuse_glyphs_and_reject_uploads_from_another_device() {
         .expect("recovered readback");
     assert_eq!(pixel(&rgba, 3, 1, 1), [0, 255, 0, 255]);
 }
+
+mod p0;

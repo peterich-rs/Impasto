@@ -207,12 +207,12 @@ flowchart TD
 1. **SDF Uber-Shader（`Fill` / `Rect` / `BoxShadow` / `Shadow` / `PushClip`）**：
    - 每个图元只提交 1 个 Quad（4 顶点或 `vertex_index` 生成 6 顶点三角形），在 Fragment Shader 中基于解析式有向距离场（Signed Distance Field）计算抗锯齿边缘：
      - 支持矩形与任意平滑圆角（`corner_radius`）、独立描边（`stroke_width` / `stroke_color`）及内圆角过渡。
-     - 支持纯色填充与 `Gradient::Linear` / `Radial` / `Sweep`（Stops 通过 1D 渐变查找表或 Uniform/Storage Buffer 传递）。
+     - 支持纯色填充与 `Gradient::Linear` / `Radial` / `Sweep`。实例顶点携带共用 Uniform 渐变停靠点块内的偏移，颜色与渐变在同一批次绘制。
      - **解析式 `BoxShadow`**：Impeller 绘制带 `BoxShadow` 的圆角矩形时必须创建高斯模糊 `ImageFilter` 并触发离屏模糊 Pass；本方案在 WGSL 中直接采用解析式圆角矩形高斯积分（Evan Wallace 算法），**只需画 1 个 Quad（零离屏纹理切换）**，即可完成 `offset`、`blur_sigma`、`spread`、`color` 计算，在移动端 Tile-Based GPU（Apple GPU / Adreno / Mali）上 stays on-tile，带宽开销极低。
-     - **圆角裁剪（`PushClip`）**：轴对齐直角裁剪使用 scissor，圆角、仿射变换及路径裁剪使用覆盖率遮罩并与父裁剪相交。
+     - **圆角裁剪（`PushClip`）**：轴对齐裁剪收紧硬件 scissor。最多四层轴对齐、等比正缩放的圆角由着色器解析求交。其余圆角与路径生成紧边界覆盖率遮罩，同一帧内可复用。
 2. **Text Atlas Pass（文字图集管线）**：
-   - **双图集管理**：维护灰阶覆盖图集（`R8Unorm`，用于普通抗锯齿文字与 Subpixel/Hinting 字形）和彩色图集（`Rgba8UnormSrgb`，用于 COLR/SVG/位图彩色 Emoji），采用 Shelf Packing 算法分配与 LRU 淘汰。
-   - **字形光栅化**：消费 UI 线程传入的 `Arc<ShapedParagraph>`；当第 7.6 节的字形键未命中图集时，使用 Swash在 CPU 生成单字小位图，通过 `wgpu::Queue::write_texture` 增量更新到图集区域。
+   - **双图集管理**：灰阶覆盖与彩色字形各使用一张按需扩层的二维数组纹理。常驻字形按实例选择图集和层，普通文字、彩色字形与装饰线可共用一批。图集按页回收，超限字形使用临时页。
+   - **字形光栅化**：消费 UI 线程传入的 `Arc<ShapedParagraph>`；Swash 在字形键未命中时生成位图。灰阶常驻层合并连续脏带后上传，彩色字形使用复用的暂存区。回收页清零，包括字形间的采样边距。
    - **前景与装饰**：支持单色前景、`SpanPaint::Gradient`（在 Shader 内按段落局部坐标采样渐变）以及下划线/删除线矩形实例合批。
 3. **Image Pass（图像绘制管线）**：
    - 处理 `Command::Image`、`CanvasImageOp` 与异步上传的 `GpuImage`，直接在 Vertex/Fragment Shader 中映射 `ContentMode::Fill`、`Fit`、`Crop` 的 UV 采样框；对于 `NineSlice` 拆分为最多 9 个 Instanced Quad 在同一批次绘制。
@@ -223,13 +223,14 @@ flowchart TD
 
 1. **`Picture` 缓存为 GPU 数据切片，而非离屏纹理**：
    - 传统引擎若为每个 `Picture` 缓存一张离屏纹理，在长列表场景下会导致移动端显存瞬间爆满。
-   - 本方案为未变更的 `Picture` 缓存**编译后的 CPU/GPU Instance 切片、Vertex Slice 与 `lyon` 顶点切片**（甚至可针对静态大型子画面预录制 `wgpu::RenderBundle`）。当滚动触发 `LayerKind::Offset` 或动画触发 `LayerKind::Transform` 时，Raster 线程无需重新解析 `Command` 与重算字体/阴影布局，只需更新视图变换 Uniform 矩阵并重放已缓存的 GPU 数据即可。
+   - 本方案为未变更的 `Picture` 缓存**编译后的绘制命令与驻留 GPU 网格**。位移和动画可直接复用编译结果。Canvas 网格与路径裁剪的索引在上传前加上顶点基址，绘制时 `base_vertex` 为零。当前帧的实例与动态 Uniform 使用可复用的上传块。
 2. **离屏纹理池（Texture Pool）与 Dual-Kawase Blur**：
    - 由我们自己的 `wgpu` Layer Compositor 显式管理按尺寸分桶的离屏纹理池（Texture Pool），仅当遇到以下需要中间合成目标的层节点时才租借离屏 `wgpu::Texture`：
      - `LayerKind::Opacity` / `Command::PushOpacity`（当内部含多个重叠子节点，无法通过简单的单图元乘 alpha 替代时；单子节点如 `single_picture_child` 继续走透传优化）。
-     - `LayerKind::Blend` / `Command::PushBlend`（`Multiply`、`Screen` 等需要读取目标颜色的分离混合模式）。
+     - `LayerKind::Blend` / `Command::PushBlend`（子层先合成至局部源纹理。Multiply 读取局部目标快照，Screen 使用固定管线混合回贴）。
      - `LayerKind::Blur` / `Command::PushBlur` 与 `LayerKind::BackdropBlur` / `Command::PushBackdropBlur`。
-   - **Dual-Kawase Blur 管线**：使用降采样 + 升采样 2~4 Pass 实现 `PushBlur` 和 `PushBackdropBlur`，实际 pass 数按半径与设备限制选取。
+   - **Dual-Kawase Blur 管线**：用 5-tap 降采样与 8-tap 升采样过滤。前景模糊根据实际绘制范围外扩，背景模糊仅复制作用域与滤波边缘所需的像素。池使用 64 px 分桶，采样坐标钳位到有效像素中心。
+   - **直绘**：输出支持 sRGB 且场景无需读取根目标时直接绘制表面；首个绘制 Pass 同时执行清屏。
 
 ### 5.4 模块 3：Canvas 2D 矢量路径子管线（`Command::Canvas`）
 
@@ -406,8 +407,10 @@ commands.push(Command::Text {
 |---|---|
 | `lib.rs`、`status.rs` | `Rasterizer`、`RasterOptions`、`Status`、`SubmitInfo`。实例与 GPU 设备代次由 Raster 队列管理 |
 | `fonts.rs`、`shaper.rs` | `FontLibrary`、`ParleyShaper`、`ShapeStats`。UI 独占排版上下文 |
-| `atlas.rs` | Swash、etagere、`R8Unorm` mask 页和 `Rgba8UnormSrgb` 彩色页，Raster 独占上传与逐帧淘汰 |
-| `pipelines/mod.rs`、`ui.wgsl` | 目标格式/样本数流水线缓存。Fill、圆角矩形、描边、渐变、解析式阴影、裁剪遮罩与 lyon 网格 |
+| `atlas.rs` | Swash、etagere、灰阶和彩色二维数组纹理，Raster 管理页分配、上传与回收 |
+| `pipelines/mod.rs`、`ui.wgsl` | 按目标格式、样本数、图元与混合键缓存流水线。实例顶点、渐变、解析裁剪、阴影与 lyon 网格 |
+| `arena.rs` | 复用实例顶点、动态 Uniform 和渐变停靠点缓冲块。多切片共用同一帧生命周期，提交前统一上传 |
+| `gpu.rs` | 探测设备限额与 Downlevel 能力。热路径检查异步设备错误，显式校验模式保留逐帧 Error Scope |
 | `pipelines/text.wgsl`、`image.wgsl`、`blur.wgsl` | 字形与渐变、Image/Canvas 图像与九宫格、Dual-Kawase 与目标读取合成 |
 | `compiler.rs` | `CompiledPicture` 与 Picture 缓存，Command、Canvas 的不可见判定、画刷和 lyon 路径剖分 |
 | `compositor.rs` | 有序绘制批次、scope 栈、TexturePool、离屏效果、PlatformView 切片 |
@@ -416,8 +419,8 @@ commands.push(Command::Text {
 
 **编译与合成**
 
-- `submit_layers` 验证有限正 scale、层索引/顺序、Picture 引用和 Push/Pop。新帧完整构建后原子替换当前帧，错误保留上一帧。缓存位于一个场景流，键为 `PictureId + generation`，加入会改变剖分容差的有效缩放档。重载或更换 scene stream 时清空。Picture 局部实例与网格可复用，采样绑定、图集 UV、外部纹理代次和离屏目标在编码时解析。提交与普通重绘只对相邻且绑定/裁剪/混合一致的绘制合批，保持透明绘制顺序。
-- `compiler.rs` 对 `CanvasOp` 做穷尽匹配，映射 `Move/Line/Quad/Cubic/Close` 与 NonZero/EvenOdd，沿用 Canvas 传入的描边、路径裁剪和 CTM。曲线路径依有效像素误差剖分，AA 使用目标格式支持的 MSAA 或覆盖率遮罩。Save/Restore 与 Layer/Command 的作用域共享显式栈。轴对齐矩形用 scissor，变换后的圆角或路径裁剪使用覆盖率遮罩，且与父裁剪相交。
+- `submit_layers` 验证有限正 scale、层索引/顺序、Picture 引用和 Push/Pop。新帧完整构建后原子替换当前帧，错误保留上一帧。缓存位于一个场景流，键为 `PictureId + generation`，加入会改变剖分容差的有效缩放档。重载或更换 scene stream 时清空。Picture 局部绘制和驻留网格可复用，图集 UV、外部纹理代次和离屏目标在编码时解析。编译时记录的绘制边界覆盖阴影、描边与溢出子层，必要时按实际合成变换重算边缘。提交与普通重绘只对相邻且绑定/裁剪/混合一致的绘制合批，保持透明绘制顺序。
+- `compiler.rs` 对 `CanvasOp` 做穷尽匹配，映射 `Move/Line/Quad/Cubic/Close` 与 NonZero/EvenOdd，沿用 Canvas 传入的描边、路径裁剪和 CTM。曲线路径依有效像素误差剖分，AA 使用目标格式支持的 MSAA 或覆盖率遮罩。Save/Restore 与 Layer/Command 的作用域共享显式栈。Canvas 连续的 SourceOver 网格在同一个局部 MSAA Pass 按绘制顺序合成，再统一解析回贴。复杂裁剪通过紧边界覆盖率遮罩与父裁剪相交。
 - 所有颜色在管线内使用线性预乘 RGBA，UI 颜色、图片、渐变和平台纹理在输入端按其声明的色域及 alpha 约定转换。普通透明按 SourceOver。组 opacity 在子树合并后应用一次。源内容模糊使用透明临时目标，BackdropBlur 读取当前位置之前的颜色快照，加入滤波边距再裁回效果边界。乘色、滤色和 Canvas 目标读取按 Porter–Duff 语义选择固定混合或独立快照，禁止同一附件同时作为采样输入。Canvas `clearRect` 只擦除隔离 Canvas，保留其后方 UI。
 - 离屏目标按格式、样本数、尺寸分桶与用途租用，利用同一队列的提交顺序复用，帧内后续 pass 仍在读取的资源保持独占。常规 surface 只依赖可渲染附件能力，读取背景或截图走可采样可复制的中间目标。效果半径与设备上限校验后分配，以像素测试确认阴影、模糊范围与边缘裁剪。
 

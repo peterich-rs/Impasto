@@ -344,10 +344,16 @@ fn render_layers(
             draws = stats.render.draws,
             passes = stats.render.passes,
             pooled_texture_bytes = stats.render.pooled_texture_bytes,
+            buffers_created = stats.render.buffers_created,
+            bind_groups_created = stats.render.bind_groups_created,
+            instance_bytes = stats.render.instance_bytes,
+            offscreen_passes = stats.render.offscreen_passes,
+            direct_present = stats.render.direct_present,
             atlas_bytes = stats.atlas.bytes,
             atlas_hits = stats.atlas.hits,
             atlas_misses = stats.atlas.misses,
             atlas_uploads = stats.atlas.uploads,
+            atlas_upload_calls = stats.atlas.upload_calls,
             atlas_evictions = stats.atlas.evictions,
             "render resources");
     }

@@ -1,12 +1,7 @@
 //! Pipeline cache, bind group layouts, and the instance record layout.
 //!
 //! Pipelines are keyed by target format and sample count. Each pipeline
-//! draws instanced quads from one uniform buffer; the fragment shader reads
-//! its per-instance record. Gradient stops live in one uniform buffer that
-//! every UI and text pipeline binds.
-//!
-//! Instance records are raw `f32` words. The Rust structs below must match
-//! the WGSL structs field for field, with every `vec4` 16-byte aligned.
+//! draws quads from instance vertex buffers and shares the frame uniform slabs.
 
 use std::collections::HashMap;
 
@@ -20,43 +15,99 @@ pub struct Target {
     pub samples: u32,
 }
 
-/// Pipelines for one target.
-pub struct Pipelines {
-    pub rect: wgpu::RenderPipeline,
-    pub mesh: wgpu::RenderPipeline,
-    pub text: wgpu::RenderPipeline,
-    pub image: wgpu::RenderPipeline,
-    pub blur: wgpu::RenderPipeline,
-    pub composite: wgpu::RenderPipeline,
-    pub backdrop: wgpu::RenderPipeline,
-    pub copy: wgpu::RenderPipeline,
-    pub copy_srgb: wgpu::RenderPipeline,
-    pub over: wgpu::RenderPipeline,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum BlendKey {
+    #[default]
+    SrcOver,
+    DstOver,
+    DstOut,
+    Lighter,
+    Xor,
+    Screen,
+}
+
+impl BlendKey {
+    pub fn from_mode(mode: u32) -> Option<Self> {
+        match mode {
+            0 => Some(Self::SrcOver),
+            2 => Some(Self::Screen),
+            3 => Some(Self::DstOver),
+            4 => Some(Self::DstOut),
+            5 => Some(Self::Lighter),
+            6 => Some(Self::Xor),
+            _ => None,
+        }
+    }
+
+    fn state(self) -> wgpu::BlendState {
+        use wgpu::BlendFactor::*;
+        let (src_factor, dst_factor) = match self {
+            Self::SrcOver => (One, OneMinusSrcAlpha),
+            Self::DstOver => (OneMinusDstAlpha, One),
+            Self::DstOut => (Zero, OneMinusSrcAlpha),
+            Self::Lighter => (One, One),
+            Self::Xor => (OneMinusDstAlpha, OneMinusSrcAlpha),
+            Self::Screen => (One, OneMinusSrc),
+        };
+        let color = wgpu::BlendComponent {
+            src_factor,
+            dst_factor,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let alpha = if self == Self::Screen {
+            wgpu::BlendComponent {
+                dst_factor: OneMinusSrcAlpha,
+                ..color
+            }
+        } else {
+            color
+        };
+        wgpu::BlendState { color, alpha }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PipelineKind {
+    Rect,
+    Mesh,
+    Text,
+    Image,
+    BlurDown,
+    BlurUp,
+    Copy,
+    CopySrgb,
+    Over,
+    Multiply,
+    Backdrop,
+    MaskIntersect,
 }
 
 /// Bind group layouts shared by every target.
 pub struct Layouts {
-    pub ui: wgpu::BindGroupLayout,
-    pub text: wgpu::BindGroupLayout,
-    pub image: wgpu::BindGroupLayout,
-    pub blur: wgpu::BindGroupLayout,
+    pub view: wgpu::BindGroupLayout,
+    pub paint: wgpu::BindGroupLayout,
+    pub effects: wgpu::BindGroupLayout,
+    pub material: wgpu::BindGroupLayout,
+    pub atlas: wgpu::BindGroupLayout,
     pub composite: wgpu::BindGroupLayout,
 }
 
-/// View uniform: transform (16 f32) + scale + padding. Matches `View` in WGSL.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ViewUniform {
     pub transform: [[f32; 4]; 4],
-    pub scale: f32,
-    pub pad: [f32; 3],
+    pub meta: [f32; 4],
+    pub target_info: [f32; 4],
+    pub mask_rect: [f32; 4],
+    pub clip_boxes: [[f32; 4]; 4],
+    pub clip_radii: [f32; 4],
 }
 
-/// Effect parameters: texel size xy, down/up flag, opacity or blend mode.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ParamsUniform {
     pub values: [f32; 4],
+    pub uv_bounds: [f32; 4],
 }
 
 /// Stop pairs: each stop is a premultiplied color then `(offset, 0, 0, 0)`.
@@ -68,7 +119,7 @@ const IMAGE_WGSL: &str = include_str!("image.wgsl");
 const BLUR_WGSL: &str = include_str!("blur.wgsl");
 
 pub struct PipelineCache {
-    targets: HashMap<Target, Pipelines>,
+    targets: HashMap<(Target, PipelineKind, BlendKey), wgpu::RenderPipeline>,
     ui: wgpu::ShaderModule,
     text: wgpu::ShaderModule,
     image: wgpu::ShaderModule,
@@ -78,59 +129,77 @@ pub struct PipelineCache {
 
 impl PipelineCache {
     pub fn new(gpu: &Gpu) -> Self {
-        let module = |label, source: &str| {
+        let module = |label, source: &str, clipped: bool| {
+            let view = include_str!("view.wgsl");
+            let clip = if clipped {
+                include_str!("clip.wgsl")
+            } else {
+                ""
+            };
             gpu.device
                 .create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some(label),
-                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                    source: wgpu::ShaderSource::Wgsl(format!("{view}\n{source}\n{clip}").into()),
                 })
         };
+        let view = U(size_of::<ViewUniform>() as u64);
         let layouts = Layouts {
-            // ui.wgsl: view, stops, instances, clip mask, clip sampler, mask atlas, mask sampler
-            ui: layout(gpu, "impasto ui", &[U, U, U, T, S]),
-            // text.wgsl: view, stops, instances, mask, color, atlas sampler, clip, clip sampler
-            text: layout(gpu, "impasto text", &[U, U, U, T, T, S, T, S]),
-            // image.wgsl: view, instances, image, linear, nearest, clip, clip sampler
-            image: layout(gpu, "impasto image", &[U, U, T, S, T, S]),
-            // blur.wgsl: view, params, source, linear
-            blur: layout(gpu, "impasto blur", &[U, U, T, S]),
-            // blur.wgsl group 1: backdrop, sampler
+            view: layout(gpu, "impasto view", &[view]),
+            paint: layout(gpu, "impasto paint", &[view, U((MAX_STOPS * 32) as u64)]),
+            effects: layout(
+                gpu,
+                "impasto effects",
+                &[view, U(size_of::<ParamsUniform>() as u64)],
+            ),
+            material: layout(gpu, "impasto material", &[T, S]),
+            atlas: layout(gpu, "impasto atlas", &[Slot::Array, Slot::Array, S]),
             composite: layout(gpu, "impasto composite", &[T, S, T]),
         };
         Self {
             targets: HashMap::new(),
-            ui: module("impasto ui", UI_WGSL),
-            text: module("impasto text", TEXT_WGSL),
-            image: module("impasto image", IMAGE_WGSL),
-            blur: module("impasto blur", BLUR_WGSL),
+            ui: module("impasto ui", UI_WGSL, true),
+            text: module("impasto text", TEXT_WGSL, true),
+            image: module("impasto image", IMAGE_WGSL, true),
+            blur: module("impasto blur", BLUR_WGSL, false),
             layouts,
         }
     }
 
-    /// Pipelines for a target, built on first use.
-    pub fn get(&mut self, gpu: &Gpu, target: Target) -> Result<&Pipelines, Status> {
-        if !self.targets.contains_key(&target) {
-            let built = gpu.validation(|| {
-                build(
-                    gpu,
-                    &self.layouts,
-                    [&self.ui, &self.text, &self.image, &self.blur],
-                    target,
-                )
-            })?;
-            self.targets.insert(target, built);
+    /// Compile only the pipeline requested by this draw.
+    pub fn get(
+        &mut self,
+        gpu: &Gpu,
+        target: Target,
+        kind: PipelineKind,
+        blend: BlendKey,
+    ) -> Result<wgpu::RenderPipeline, Status> {
+        use std::collections::hash_map::Entry;
+        let key = (target, kind, blend);
+        match self.targets.entry(key) {
+            Entry::Occupied(entry) => Ok(entry.get().clone()),
+            Entry::Vacant(entry) => {
+                let pipeline = gpu.validation(|| {
+                    Ok(build(
+                        gpu,
+                        &self.layouts,
+                        [&self.ui, &self.text, &self.image, &self.blur],
+                        target,
+                        kind,
+                        blend,
+                    ))
+                })?;
+                Ok(entry.insert(pipeline).clone())
+            }
         }
-        Ok(self
-            .targets
-            .get(&target)
-            .unwrap_or_else(|| unreachable!("inserted above")))
     }
 }
 
 /// Binding kinds in declaration order, matching each WGSL `@group(0)`.
+#[derive(Clone, Copy)]
 enum Slot {
-    Uniform,
+    Uniform(u64),
     Texture,
+    Array,
     Sampler,
 }
 
@@ -140,18 +209,22 @@ fn layout(gpu: &Gpu, label: &str, slots: &[Slot]) -> wgpu::BindGroupLayout {
         .zip(0u32..)
         .map(|(slot, binding)| {
             let (ty, visibility) = match slot {
-                Slot::Uniform => (
+                Slot::Uniform(size) => (
                     wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(*size),
                     },
                     wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ),
-                Slot::Texture => (
+                Slot::Texture | Slot::Array => (
                     wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                        view_dimension: if matches!(slot, Slot::Array) {
+                            wgpu::TextureViewDimension::D2Array
+                        } else {
+                            wgpu::TextureViewDimension::D2
+                        },
                         multisampled: false,
                     },
                     wgpu::ShaderStages::FRAGMENT,
@@ -183,122 +256,125 @@ fn build(
     layouts: &Layouts,
     shaders: [&wgpu::ShaderModule; 4],
     target: Target,
-) -> Result<Pipelines, Status> {
+    kind: PipelineKind,
+    blend: BlendKey,
+) -> wgpu::RenderPipeline {
+    use crate::batch::{GlyphVertex, ImageVertex, RectVertex};
+    use PipelineKind as K;
+
     let [ui, text, image, blur] = shaders;
-    let device = &gpu.device;
-    let blend = wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING;
-    let targets = |blend: wgpu::BlendState| {
-        vec![Some(wgpu::ColorTargetState {
-            format: target.format,
-            blend: Some(blend),
-            write_mask: wgpu::ColorWrites::ALL,
-        })]
+    let rect_attrs = wgpu::vertex_attr_array![1 => Float32x4, 2 => Float32x4, 3 => Float32x4,
+        4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4, 8 => Float32x4];
+    let text_attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4,
+        3 => Float32x4, 4 => Float32x4, 5 => Float32x4];
+    let image_attrs =
+        wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4];
+    let mesh_attrs = wgpu::vertex_attr_array![0 => Float32x3];
+    let instance = |array_stride, attributes| {
+        Some(wgpu::VertexBufferLayout {
+            array_stride,
+            attributes,
+            step_mode: wgpu::VertexStepMode::Instance,
+        })
     };
-    let multisample = wgpu::MultisampleState {
-        count: target.samples,
-        ..Default::default()
-    };
-    let single = wgpu::MultisampleState::default();
-    let mesh = wgpu::VertexBufferLayout {
-        array_stride: 12,
+    let rect = instance(size_of::<RectVertex>() as u64, &rect_attrs);
+    let glyph = instance(size_of::<GlyphVertex>() as u64, &text_attrs);
+    let quad = instance(size_of::<ImageVertex>() as u64, &image_attrs);
+    let geometry = Some(wgpu::VertexBufferLayout {
+        array_stride: size_of::<[f32; 3]>() as u64,
+        attributes: &mesh_attrs,
         step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+    });
+    let paint = [Some(&layouts.paint), Some(&layouts.material)];
+    let text_groups = [
+        Some(&layouts.paint),
+        Some(&layouts.atlas),
+        Some(&layouts.material),
+    ];
+    let image_groups = [
+        Some(&layouts.view),
+        Some(&layouts.material),
+        Some(&layouts.material),
+    ];
+    let effects = [Some(&layouts.effects), Some(&layouts.material)];
+    let composite = [
+        Some(&layouts.effects),
+        Some(&layouts.material),
+        Some(&layouts.composite),
+    ];
+    let (module, groups, vertex, fragment) = match kind {
+        K::Rect => (ui, paint.as_slice(), "vs_main", "fs_main"),
+        K::Mesh => (ui, paint.as_slice(), "vs_mesh", "fs_mesh"),
+        K::Text => (text, text_groups.as_slice(), "vs_main", "fs_main"),
+        K::Image => (image, image_groups.as_slice(), "vs_main", "fs_main"),
+        K::BlurDown => (blur, effects.as_slice(), "vs_full", "fs_blur_down"),
+        K::BlurUp => (blur, effects.as_slice(), "vs_full", "fs_blur_up"),
+        K::Copy | K::MaskIntersect => (blur, effects.as_slice(), "vs_full", "fs_copy"),
+        K::CopySrgb => (blur, effects.as_slice(), "vs_full", "fs_copy_srgb"),
+        K::Over => (blur, composite.as_slice(), "vs_full", "fs_over"),
+        K::Multiply => (blur, composite.as_slice(), "vs_full", "fs_composite"),
+        K::Backdrop => (blur, composite.as_slice(), "vs_full", "fs_backdrop"),
     };
-    let mesh_layouts = [Some(mesh)];
-    let instanced = |label: &str,
-                     module: &wgpu::ShaderModule,
-                     layout: &wgpu::BindGroupLayout,
-                     is_mesh: bool| {
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some(label),
-            bind_group_layouts: &[Some(layout)],
+    let rect_buffers = [rect.clone()];
+    let mesh_buffers = [geometry, rect];
+    let glyph_buffers = [glyph];
+    let image_buffers = [quad];
+    let buffers = match kind {
+        K::Rect => rect_buffers.as_slice(),
+        K::Mesh => mesh_buffers.as_slice(),
+        K::Text => glyph_buffers.as_slice(),
+        K::Image => image_buffers.as_slice(),
+        _ => &[],
+    };
+    let blend = match kind {
+        K::Rect | K::Mesh | K::Text | K::Image | K::Over => blend.state(),
+        K::MaskIntersect => wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Dst,
+                dst_factor: wgpu::BlendFactor::Zero,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent::REPLACE,
+        },
+        _ => wgpu::BlendState::REPLACE,
+    };
+    let label = format!("impasto {kind:?} {blend:?}");
+    let layout = gpu
+        .device
+        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some(&label),
+            bind_group_layouts: groups,
             immediate_size: 0,
         });
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(&pipeline_layout),
+    gpu.device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(&label),
+            layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module,
-                entry_point: Some(if is_mesh { "vs_mesh" } else { "vs_main" }),
+                entry_point: Some(vertex),
+                buffers,
                 compilation_options: Default::default(),
-                buffers: if is_mesh { &mesh_layouts } else { &[] },
             },
             fragment: Some(wgpu::FragmentState {
                 module,
-                entry_point: Some(if is_mesh { "fs_mesh" } else { "fs_main" }),
+                entry_point: Some(fragment),
                 compilation_options: Default::default(),
-                targets: &targets(blend),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target.format,
+                    blend: Some(blend),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
-            multisample,
-            multiview_mask: None,
-            cache: None,
-        })
-    };
-    let full = |label: &str, entry: &str, groups: &[&wgpu::BindGroupLayout], blend| {
-        let group_refs: Vec<Option<&wgpu::BindGroupLayout>> =
-            groups.iter().map(|group| Some(*group)).collect();
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some(label),
-            bind_group_layouts: &group_refs,
-            immediate_size: 0,
-        });
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: blur,
-                entry_point: Some("vs_full"),
-                compilation_options: Default::default(),
-                buffers: &[],
+            multisample: wgpu::MultisampleState {
+                count: target.samples,
+                ..Default::default()
             },
-            fragment: Some(wgpu::FragmentState {
-                module: blur,
-                entry_point: Some(entry),
-                compilation_options: Default::default(),
-                targets: &targets(blend),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: single,
             multiview_mask: None,
             cache: None,
         })
-    };
-    let replace = wgpu::BlendState::REPLACE;
-    Ok(Pipelines {
-        rect: instanced("impasto rect", ui, &layouts.ui, false),
-        mesh: instanced("impasto mesh", ui, &layouts.ui, true),
-        text: instanced("impasto text", text, &layouts.text, false),
-        image: instanced("impasto image", image, &layouts.image, false),
-        blur: full("impasto blur", "fs_blur", &[&layouts.blur], replace),
-        composite: full(
-            "impasto composite",
-            "fs_composite",
-            &[&layouts.blur, &layouts.composite],
-            replace,
-        ),
-        backdrop: full(
-            "impasto backdrop",
-            "fs_backdrop",
-            &[&layouts.blur, &layouts.composite],
-            replace,
-        ),
-        copy: full("impasto copy", "fs_copy", &[&layouts.blur], replace),
-        copy_srgb: full(
-            "impasto copy sRGB",
-            "fs_copy_srgb",
-            &[&layouts.blur],
-            replace,
-        ),
-        over: full(
-            "impasto opacity",
-            "fs_over",
-            &[&layouts.blur, &layouts.composite],
-            blend,
-        ),
-    })
 }
 
 pub fn linear_sampler(gpu: &Gpu) -> wgpu::Sampler {
@@ -349,4 +425,52 @@ pub fn buffer_from(
         buffer.unmap();
     }
     Ok(buffer)
+}
+
+pub fn bind_group(
+    gpu: &Gpu,
+    layout: &wgpu::BindGroupLayout,
+    resources: &[wgpu::BindingResource<'_>],
+) -> wgpu::BindGroup {
+    let entries: Vec<_> = (0..)
+        .zip(resources.iter().cloned())
+        .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource })
+        .collect();
+    gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("impasto material"),
+        layout,
+        entries: &entries,
+    })
+}
+
+#[derive(Default)]
+pub struct MaterialCache {
+    linear: std::sync::OnceLock<wgpu::BindGroup>,
+    nearest: std::sync::OnceLock<wgpu::BindGroup>,
+}
+
+impl MaterialCache {
+    pub fn get(
+        &self,
+        gpu: &Gpu,
+        layout: &wgpu::BindGroupLayout,
+        view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+        nearest: bool,
+    ) -> (wgpu::BindGroup, bool) {
+        let slot = if nearest { &self.nearest } else { &self.linear };
+        let mut created = false;
+        let group = slot.get_or_init(|| {
+            created = true;
+            bind_group(
+                gpu,
+                layout,
+                &[
+                    wgpu::BindingResource::TextureView(view),
+                    wgpu::BindingResource::Sampler(sampler),
+                ],
+            )
+        });
+        (group.clone(), created)
+    }
 }

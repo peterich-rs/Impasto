@@ -1,77 +1,46 @@
-// Glyphs from the mask and color atlases, plus decoration bars.
-//
-// A glyph instance is one quad in scene points. The fragment shader samples
-// either the R8 coverage atlas (tinted by a solid or gradient brush) or the
-// RGBA color atlas (emoji and COLR glyphs keep their own color).
-
-struct View {
-    transform: mat4x4<f32>,
-    scale: f32,
-    pad0: f32,
-    pad1: f32,
-};
-
-@group(0) @binding(0) var<uniform> view: View;
-
-struct GlyphInstance {
-    // Scene points: quad x, y, w, h. The atlas rect for a mask glyph is
-    // pixel-aligned so the quad covers exactly its texels.
-    rect: vec4<f32>,
-    // Atlas UV: u0, v0, u1, v1.
-    uv: vec4<f32>,
-    // Solid brush (premultiplied linear). Ignored for color glyphs.
-    color: vec4<f32>,
-    // bit 0: color atlas, bit 1: gradient brush, bit 2: decoration bar (no atlas).
-    flags: f32,
-    // Gradient kind, first stop, stop count.
-    gradient_kind: f32,
-    gradient_first: f32,
-    gradient_count: f32,
-    // Linear start.xy end.xy; radial center.xy radius start radius; sweep center.xy angles.
-    gradient_a: vec4<f32>,
-    // Span box for gradient coordinates: x, y, w, h in scene points.
-    span: vec4<f32>,
-    // Axis-aligned scissor in scene points. z == 0 disables it.
-    clip_rect: vec4<f32>,
-    // Coverage mask: scene rect xy, wh. z == 0 disables it.
-    clip_mask: vec4<f32>,
-    // Total opacity.
-    opacity: f32,
-    pad1: f32,
-    pad2: f32,
-    pad3: f32,
-    pad4: vec4<f32>,
-};
-
+// Glyphs and decoration bars.
 @group(0) @binding(1) var<uniform> stops: array<vec4<f32>, 512>;
-@group(0) @binding(2) var<uniform> instances: array<GlyphInstance, 64>;
-@group(0) @binding(3) var mask_atlas: texture_2d<f32>;
-@group(0) @binding(4) var color_atlas: texture_2d<f32>;
-@group(0) @binding(5) var atlas_sampler: sampler;
-@group(0) @binding(6) var clip_mask_tex: texture_2d<f32>;
-@group(0) @binding(7) var clip_mask_sampler: sampler;
+@group(1) @binding(0) var mask_atlas: texture_2d_array<f32>;
+@group(1) @binding(1) var color_atlas: texture_2d_array<f32>;
+@group(1) @binding(2) var atlas_sampler: sampler;
+@group(2) @binding(0) var clip_mask_tex: texture_2d<f32>;
+@group(2) @binding(1) var clip_mask_sampler: sampler;
+
+struct GlyphVertex {
+    @location(0) rect: vec4<f32>,
+    @location(1) uv: vec4<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) info: vec4<f32>,
+    @location(4) gradient_a: vec4<f32>,
+    @location(5) gradient_b: vec4<f32>,
+};
 
 struct VertexOut {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) local: vec2<f32>,
-    @location(2) @interpolate(flat) index: u32,
+    @location(2) @interpolate(flat) color: vec4<f32>,
+    @location(3) @interpolate(flat) info: vec4<f32>,
+    @location(4) @interpolate(flat) gradient_a: vec4<f32>,
+    @location(5) @interpolate(flat) gradient_b: vec4<f32>,
 };
 
 @vertex
-fn vs_main(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> VertexOut {
-    var corners = array<vec2<f32>, 6>(
+fn vs_main(@builtin(vertex_index) vertex: u32, data: GlyphVertex) -> VertexOut {
+    let corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0)
     );
-    let data = instances[instance];
     let unit = corners[vertex];
     let scene = data.rect.xy + unit * data.rect.zw;
     var out: VertexOut;
     out.position = view.transform * vec4<f32>(scene, 0.0, 1.0);
     out.uv = mix(data.uv.xy, data.uv.zw, unit);
     out.local = scene;
-    out.index = instance;
+    out.color = data.color;
+    out.info = data.info;
+    out.gradient_a = data.gradient_a;
+    out.gradient_b = data.gradient_b;
     return out;
 }
 
@@ -121,17 +90,17 @@ fn conical_position(p: vec2<f32>, centers: vec4<f32>, radii: vec2<f32>) -> vec2<
     return vec2<f32>(t, select(0.0, 1.0, radii.x + t * dr >= 0.0));
 }
 
-fn gradient_color(data: GlyphInstance, p: vec2<f32>) -> vec4<f32> {
-    let kind = u32(data.gradient_kind);
-    let first = u32(data.gradient_first);
-    let count = u32(data.gradient_count);
+fn gradient_color(data: VertexOut, p: vec2<f32>) -> vec4<f32> {
+    let kind = u32(data.info.z);
+    let first = u32(data.gradient_b.x);
+    let count = u32(data.gradient_b.y);
     var t = 0.0;
     if (kind == 1u) {
         let center = data.gradient_a.xy;
         let radius = data.gradient_a.z;
         t = length(p - center) / max(radius, 1e-6);
     } else if (kind == 3u) {
-        let conical = conical_position(p, data.gradient_a, data.span.xy);
+        let conical = conical_position(p, data.gradient_a, data.gradient_b.zw);
         return sample_gradient(conical.x, first, count) * conical.y;
     } else if (kind == 2u) {
         let center = data.gradient_a.xy;
@@ -149,21 +118,12 @@ fn gradient_color(data: GlyphInstance, p: vec2<f32>) -> vec4<f32> {
     return sample_gradient(t, first, count);
 }
 
-fn clip_coverage(data: GlyphInstance, position: vec2<f32>) -> f32 {
-    if (data.clip_mask.z > 0.0) {
-        let uv = position / vec2<f32>(view.pad0, view.pad1);
-        return textureSampleLevel(clip_mask_tex, clip_mask_sampler, uv, 0.0).r;
-    }
-    return 1.0;
-}
-
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    let data = instances[in.index];
-    let aa = 1.0 / max(view.scale, 1e-6);
+    let data = in;
     let p = in.local;
     var color = vec4<f32>(0.0);
-    let flags = u32(data.flags);
+    let flags = u32(data.info.x);
     if ((flags & 4u) != 0u) {
         // Decoration bar: a solid or gradient rectangle.
         if ((flags & 2u) != 0u) {
@@ -174,16 +134,16 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     } else if ((flags & 1u) != 0u) {
         // Color glyph: the atlas is straight RGBA in sRGB; the pipeline's
         // target is sRGB so the hardware converts on write.
-        let texel = textureSample(color_atlas, atlas_sampler, in.uv);
-        color = vec4<f32>(texel.rgb * texel.a * data.opacity, texel.a * data.opacity);
+        let texel = textureSample(color_atlas, atlas_sampler, in.uv, i32(data.info.y));
+        color = vec4<f32>(texel.rgb * texel.a * data.info.w, texel.a * data.info.w);
     } else {
-        let coverage = textureSample(mask_atlas, atlas_sampler, in.uv).r;
+        let coverage = textureSample(mask_atlas, atlas_sampler, in.uv, i32(data.info.y)).r;
         var brush = data.color;
         if ((flags & 2u) != 0u) {
             brush = gradient_color(data, p);
         }
         color = brush * coverage;
     }
-    color = color * clip_coverage(data, in.position.xy);
+    color = color * clip_coverage(in.position.xy);
     return color;
 }

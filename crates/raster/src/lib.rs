@@ -1,5 +1,6 @@
 //! wgpu raster and Parley typography for [`engine::scene::LayerTree`].
 
+mod arena;
 mod atlas;
 mod batch;
 mod color;
@@ -93,6 +94,7 @@ pub struct Rasterizer {
     frame: Option<Frame>,
     stats: SubmitStats,
     reuse_pictures: bool,
+    prepared_buffers: u32,
     #[cfg(target_os = "ios")]
     frame_number: u64,
 }
@@ -124,6 +126,7 @@ impl Rasterizer {
             frame: None,
             stats: SubmitStats::default(),
             reuse_pictures: false,
+            prepared_buffers: 0,
             #[cfg(target_os = "ios")]
             frame_number: 0,
         })
@@ -158,7 +161,7 @@ impl Rasterizer {
 
     fn new_device(gpu: Gpu) -> Result<DeviceState, Status> {
         let generation = NEXT_DEVICE.fetch_add(1, Ordering::Relaxed);
-        let compositor = gpu.validation(|| Ok(Compositor::new(&gpu)))?;
+        let compositor = gpu.validation(|| Compositor::new(&gpu))?;
         let mut textures = TextureStore::default();
         textures.begin_frame(generation);
         Ok(DeviceState {
@@ -248,7 +251,8 @@ impl Rasterizer {
                         .map(|cached| (frame, cached))
                 })
                 .filter(|(frame, cached)| {
-                    cached.generation == picture.generation
+                    cached.device == device.generation
+                        && cached.generation == picture.generation
                         && cached.scale == compile_scale
                         && cached.origin == picture.origin
                         && cached
@@ -268,12 +272,16 @@ impl Rasterizer {
             } else {
                 let mut context = CompileContext {
                     gpu: &device.gpu,
+                    device_generation: device.generation,
                     textures: &mut textures,
                     resolve: &mut resolve,
                     point_scale: compile_scale,
                 };
                 let result = compiler::compile(picture, &mut context)?;
                 stats.picture_rebuilt = stats.picture_rebuilt.saturating_add(1);
+                if result.mesh_buffer.get().is_some() {
+                    stats.render.buffers_created += 2;
+                }
                 Arc::new(result)
             };
             if pictures.insert(picture.id, compiled).is_some() {
@@ -333,6 +341,7 @@ impl Rasterizer {
         {
             self.frame_number = self.frame_number.wrapping_add(1);
         }
+        self.prepared_buffers = stats.render.buffers_created;
         self.stats = stats;
         self.fonts.sweep();
         Ok(SubmitInfo {
@@ -354,7 +363,7 @@ impl Rasterizer {
         let gpu = &device.gpu;
         let compositor = &mut device.compositor;
         compositor.begin_frame();
-        self.stats.atlas = gpu.validation(|| {
+        self.stats.atlas = gpu.hot_validation(|| {
             let command = compositor.encode(
                 gpu,
                 frame.scene(&self.fonts, None),
@@ -367,6 +376,7 @@ impl Rasterizer {
             Ok(atlas)
         })?;
         self.stats.render = compositor.render_stats();
+        self.stats.render.buffers_created += std::mem::take(&mut self.prepared_buffers);
         self.stats.compose = started.elapsed();
         Ok(())
     }

@@ -225,81 +225,90 @@ impl Rasterizer {
             }))
         })?;
         self.encode_and_submit(&target.create_view(&Default::default()), format, pixels)?;
-        let row = pixels.width.checked_mul(4).ok_or(Status::BadScene)?;
-        let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let stride = row
-            .div_ceil(alignment)
-            .checked_mul(alignment)
-            .ok_or(Status::BadScene)?;
-        let buffer_size = u64::from(stride) * u64::from(pixels.height);
-        if buffer_size > gpu.device.limits().max_buffer_size {
-            return Err(Status::BadScene);
-        }
-        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("impasto readback"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut command = gpu.device.create_command_encoder(&Default::default());
-        command.copy_texture_to_buffer(
-            target.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(stride),
-                    rows_per_image: None,
-                },
+        read_rgba(&gpu, &target, pixels)
+    }
+}
+
+pub(crate) fn read_rgba(
+    gpu: &Gpu,
+    target: &wgpu::Texture,
+    pixels: PixelSize,
+) -> Result<Vec<u8>, Status> {
+    let size = extent([pixels.width, pixels.height]);
+    let row = pixels.width.checked_mul(4).ok_or(Status::BadScene)?;
+    let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let stride = row
+        .div_ceil(alignment)
+        .checked_mul(alignment)
+        .ok_or(Status::BadScene)?;
+    let buffer_size = u64::from(stride) * u64::from(pixels.height);
+    if buffer_size > gpu.device.limits().max_buffer_size {
+        return Err(Status::BadScene);
+    }
+    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("impasto readback"),
+        size: buffer_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut command = gpu.device.create_command_encoder(&Default::default());
+    command.copy_texture_to_buffer(
+        target.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(stride),
+                rows_per_image: None,
             },
-            size,
-        );
-        let submitted = gpu.queue.submit([command.finish()]);
-        let (send, receive) = std::sync::mpsc::channel();
-        buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                let _ = send.send(result);
-            });
-        let timeout = std::time::Duration::from_secs(5);
-        gpu.device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submitted),
-                timeout: Some(timeout),
-            })
-            .map_err(|_| {
-                if gpu.is_lost() {
-                    Status::DeviceLost
-                } else {
-                    Status::PresentFailed
-                }
-            })?;
-        receive
-            .recv_timeout(timeout)
-            .map_err(|_| Status::PresentFailed)?
-            .map_err(|_| Status::PresentFailed)?;
-        let bytes = buffer
-            .slice(..)
-            .get_mapped_range()
-            .map_err(|_| Status::PresentFailed)?;
-        let mut output = Vec::with_capacity(row as usize * pixels.height as usize);
-        for padded in bytes.chunks_exact(stride as usize) {
-            for rgba in padded[..row as usize].as_chunks::<4>().0 {
-                if rgba[3] == 255 {
-                    output.extend_from_slice(rgba);
-                } else {
-                    let color = [
-                        srgb_to_linear(rgba[0]),
-                        srgb_to_linear(rgba[1]),
-                        srgb_to_linear(rgba[2]),
-                        f32::from(rgba[3]) / 255.0,
-                    ];
-                    output.extend(straight_srgb(color));
-                }
+        },
+        size,
+    );
+    let submitted = gpu.queue.submit([command.finish()]);
+    let (send, receive) = std::sync::mpsc::channel();
+    buffer
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, move |result| {
+            let _ = send.send(result);
+        });
+    let timeout = std::time::Duration::from_secs(5);
+    gpu.device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(submitted),
+            timeout: Some(timeout),
+        })
+        .map_err(|_| {
+            if gpu.is_lost() {
+                Status::DeviceLost
+            } else {
+                Status::PresentFailed
+            }
+        })?;
+    receive
+        .recv_timeout(timeout)
+        .map_err(|_| Status::PresentFailed)?
+        .map_err(|_| Status::PresentFailed)?;
+    let bytes = buffer
+        .slice(..)
+        .get_mapped_range()
+        .map_err(|_| Status::PresentFailed)?;
+    let mut output = Vec::with_capacity(row as usize * pixels.height as usize);
+    for padded in bytes.chunks_exact(stride as usize) {
+        for rgba in padded[..row as usize].as_chunks::<4>().0 {
+            if rgba[3] == 255 {
+                output.extend_from_slice(rgba);
+            } else {
+                let color = [
+                    srgb_to_linear(rgba[0]),
+                    srgb_to_linear(rgba[1]),
+                    srgb_to_linear(rgba[2]),
+                    f32::from(rgba[3]) / 255.0,
+                ];
+                output.extend(straight_srgb(color));
             }
         }
-        Ok(output)
     }
+    Ok(output)
 }
 
 #[expect(

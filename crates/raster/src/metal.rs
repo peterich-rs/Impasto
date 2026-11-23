@@ -85,7 +85,7 @@ impl Rasterizer {
             return Err(Status::AcquireMiss);
         }
         let descriptor = texture_descriptor(pixels, format, wgpu::TextureUsages::RENDER_ATTACHMENT);
-        let command = gpu.validation(|| {
+        let command = gpu.hot_validation(|| {
             let texture = wrap(
                 &gpu.device,
                 texture,
@@ -134,7 +134,7 @@ impl Rasterizer {
             })
         }
         .ok_or(Status::PresentFailed)?;
-        self.stats.atlas = gpu.validation(|| {
+        self.stats.atlas = gpu.hot_validation(|| {
             let atlas = device.compositor.flush(gpu);
             gpu.queue
                 .submit(batch.commands.into_iter().chain([tail.finish()]));
@@ -151,6 +151,7 @@ impl Rasterizer {
             return Err(Status::PresentFailed);
         }
         self.stats.render = device.compositor.render_stats();
+        self.stats.render.buffers_created += std::mem::take(&mut self.prepared_buffers);
         self.stats.compose = batch.started.elapsed();
         Ok(())
     }

@@ -16,6 +16,7 @@ static NEXT_UPLOAD: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone)]
 pub struct GpuImage {
     view: Arc<wgpu::TextureView>,
+    pub(crate) material: Arc<crate::pipelines::MaterialCache>,
     pub width: u32,
     pub height: u32,
     /// Device generation the texture belongs to.
@@ -93,6 +94,7 @@ impl GpuImage {
         let view = texture.create_view(&Default::default());
         Some(Self {
             view: Arc::new(view),
+            material: Arc::default(),
             width,
             height,
             device,
@@ -110,6 +112,7 @@ impl GpuImage {
         let view = texture.create_view(&Default::default());
         Self {
             view: Arc::new(view),
+            material: Arc::default(),
             width: pixels.width,
             height: pixels.height,
             device,

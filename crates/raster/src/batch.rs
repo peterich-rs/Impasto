@@ -6,10 +6,9 @@
 
 use engine::scene::{BlendMode, ColorStop, ContentMode, FillRule, Gradient, PathVerb};
 
-/// Fill, stroke, or shadow rectangle records. Word layout matches `RectInstance` in `ui.wgsl`.
+/// Compiled rectangle paint in scene points.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RectInstance {
-    /// `[x, y, w, h]` in scene points.
     pub rect: [f32; 4],
     pub radius: f32,
     pub stroke_width: f32,
@@ -20,38 +19,40 @@ pub struct RectInstance {
     pub gradient_a: [f32; 4],
     pub gradient_b: [f32; 4],
     pub shadow: [f32; 4],
-    pub clip_rect: [f32; 4],
-    pub clip_mask: [f32; 4],
-    pub pad: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct RectVertex {
+    pub rect: [f32; 4],
+    pub shape: [f32; 4],
+    pub color: [f32; 4],
+    pub stroke_color: [f32; 4],
+    pub gradient_a: [f32; 4],
+    pub gradient_b: [f32; 4],
+    pub shadow: [f32; 4],
+    pub extra: [f32; 4],
 }
 
 impl RectInstance {
-    pub const WORDS: usize = 10 * 4;
-
-    pub fn words(&self) -> [f32; Self::WORDS] {
-        let mut out = [0.0; Self::WORDS];
-        let mut at = 0;
-        for field in [
-            self.rect,
-            [
+    pub fn vertex(&self, first: f32) -> RectVertex {
+        let mut gradient_b = self.gradient_b;
+        gradient_b[1] = first;
+        RectVertex {
+            rect: self.rect,
+            shape: [
                 self.radius,
                 self.stroke_width,
                 self.kind as f32,
                 self.flags as f32,
             ],
-            self.color,
-            self.stroke_color,
-            self.gradient_a,
-            self.gradient_b,
-            self.shadow,
-            self.clip_rect,
-            self.clip_mask,
-            self.pad,
-        ] {
-            out[at..at + 4].copy_from_slice(&field);
-            at += 4;
+            color: self.color,
+            stroke_color: self.stroke_color,
+            gradient_a: self.gradient_a,
+            gradient_b,
+            shadow: self.shadow,
+            extra: [1.0, 0.0, 0.0, 0.0],
         }
-        out
     }
 }
 
@@ -61,101 +62,72 @@ pub const RECT_FILL_STROKE: u32 = 2;
 pub const RECT_SHADOW: u32 = 3;
 pub const RECT_GRADIENT: u32 = 1;
 
-/// Glyph and decoration records. Word layout matches `GlyphInstance` in `text.wgsl`.
-#[derive(Clone, Debug, PartialEq)]
-pub struct GlyphInstance {
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GlyphVertex {
     pub rect: [f32; 4],
     pub uv: [f32; 4],
     pub color: [f32; 4],
-    pub flags: u32,
-    pub gradient: [f32; 4],
+    pub meta: [f32; 4],
     pub gradient_a: [f32; 4],
-    pub span: [f32; 4],
-    pub clip_rect: [f32; 4],
-    pub clip_mask: [f32; 4],
-    pub pad: [f32; 4],
-}
-
-impl GlyphInstance {
-    pub const WORDS: usize = 10 * 4;
-
-    pub fn words(&self) -> [f32; Self::WORDS] {
-        let fields = [
-            self.rect,
-            self.uv,
-            self.color,
-            [
-                self.flags as f32,
-                self.gradient[0],
-                self.gradient[1],
-                self.gradient[2],
-            ],
-            self.gradient_a,
-            self.span,
-            self.clip_rect,
-            self.clip_mask,
-            self.pad,
-            [0.0; 4],
-        ];
-        let mut words = [0.0; Self::WORDS];
-        for (dst, field) in words.as_chunks_mut::<4>().0.iter_mut().zip(fields) {
-            *dst = field;
-        }
-        words
-    }
+    pub gradient_b: [f32; 4],
 }
 
 pub const GLYPH_COLOR: u32 = 1;
 pub const GLYPH_GRADIENT: u32 = 2;
 pub const GLYPH_DECORATION: u32 = 4;
 
-/// Image records. Word layout matches `ImageInstance` in `image.wgsl`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageInstance {
     pub rect: [f32; 4],
     pub uv: [f32; 4],
     pub color: [f32; 4],
     pub flags: u32,
-    pub clip_rect: [f32; 4],
-    pub clip_mask: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ImageVertex {
+    pub rect: [f32; 4],
+    pub uv: [f32; 4],
+    pub color: [f32; 4],
+    pub meta: [f32; 4],
 }
 
 impl ImageInstance {
-    pub const WORDS: usize = 8 * 4;
-
-    pub fn words(&self) -> [f32; Self::WORDS] {
-        let fields = [
-            self.rect,
-            self.uv,
-            self.color,
-            [self.flags as f32, 0.0, 0.0, 0.0],
-            self.clip_rect,
-            self.clip_mask,
-            [0.0; 4],
-            [0.0; 4],
-        ];
-        let mut words = [0.0; Self::WORDS];
-        for (dst, field) in words.as_chunks_mut::<4>().0.iter_mut().zip(fields) {
-            *dst = field;
+    pub fn vertex(&self, premultiplied_srgb: bool) -> ImageVertex {
+        let flags = self.flags
+            | if premultiplied_srgb {
+                IMAGE_PREMULTIPLIED_SRGB
+            } else {
+                0
+            };
+        ImageVertex {
+            rect: self.rect,
+            uv: self.uv,
+            color: self.color,
+            meta: [flags as f32, 0.0, 0.0, 0.0],
         }
-        words
     }
 }
 
 pub const IMAGE_NEAREST: u32 = 1;
 pub const IMAGE_PREMULTIPLIED_SRGB: u32 = 2;
 
-/// One tessellated canvas path, in scene points local to the picture.
+#[derive(Debug, PartialEq)]
+pub struct GpuMeshBuffer {
+    pub vertices: wgpu::Buffer,
+    pub indices: wgpu::Buffer,
+}
+
+/// A tessellated path's range in its picture's resident buffers.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mesh {
-    /// Position `x, y` and coverage `a` per vertex.
-    pub vertices: Vec<[f32; 3]>,
-    pub indices: Vec<u32>,
-    /// Fill brush: a solid premultiplied color or a gradient in canvas space.
+    pub buffer: std::sync::Arc<std::sync::OnceLock<GpuMeshBuffer>>,
+    pub indices: std::ops::Range<u32>,
+    pub bounds: [f32; 4],
     pub brush: Brush,
-    /// Porter-Duff or separable blend for this draw.
     pub composite: engine::scene::CanvasComposite,
-    pub alpha: u8,
 }
 
 /// Brush of a mesh or decoration.
