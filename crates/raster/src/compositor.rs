@@ -223,13 +223,8 @@ impl Compositor {
             extent([1, 1]),
         );
         let mut pipelines = PipelineCache::new(gpu);
-        for kind in [PipelineKind::Rect, PipelineKind::Text, PipelineKind::Image] {
-            pipelines.get(
-                gpu,
-                single(wgpu::TextureFormat::Rgba8UnormSrgb),
-                kind,
-                BlendKey::SrcOver,
-            )?;
+        if std::env::var("IMPASTO_PREWARM").as_deref() != Ok("0") {
+            pipelines.prewarm(gpu, wgpu::TextureFormat::Rgba8UnormSrgb, false)?;
         }
         let linear = pipelines::linear_sampler(gpu);
         let white_mask_group = pipelines::bind_group(
@@ -274,6 +269,14 @@ impl Compositor {
                 _ => gpu.adapter.get_info().transient_saves_memory == Some(true),
             },
         })
+    }
+
+    pub fn prewarm_surface(&mut self, gpu: &Gpu, format: wgpu::TextureFormat) {
+        if std::env::var("IMPASTO_PREWARM").as_deref() == Ok("1")
+            && let Err(error) = self.pipelines.prewarm(gpu, format, self.specialize_paint)
+        {
+            tracing::debug!(target: "impasto::startup", ?error, "surface pipeline prewarm failed");
+        }
     }
 
     pub fn begin_frame(&mut self) {

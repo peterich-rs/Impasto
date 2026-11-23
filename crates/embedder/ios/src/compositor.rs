@@ -1,6 +1,7 @@
 use std::ffi::c_void;
 use std::ptr::with_exposed_provenance_mut;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Instant;
 
 use dispatch2::DispatchQueue;
 use embedder::Command;
@@ -36,6 +37,7 @@ struct Frame {
     serial: u64,
     resets: bool,
     drawables: Vec<usize>,
+    published_at: Instant,
 }
 
 impl Drop for Frame {
@@ -140,6 +142,7 @@ impl Compositor {
         let frame = Frame {
             serial: state.serial,
             resets,
+            published_at: Instant::now(),
             drawables: drawables
                 .into_iter()
                 .map(|drawable| Retained::into_raw(drawable).expose_provenance())
@@ -211,17 +214,20 @@ pub unsafe extern "C" fn impasto_ios_compositor_finish(
         {
             return;
         }
-        if state
-            .frame
-            .take()
-            .is_some_and(|frame| frame.resets && submitted)
-        {
+        let Some(frame) = state.frame.take() else {
+            return;
+        };
+        if frame.resets && submitted {
             state.configured = false;
             state.layers.clear();
         }
         let first = submitted && !state.submitted;
         state.submitted |= submitted;
         drop(state);
+        let ack_us = frame.published_at.elapsed().as_micros();
+        tracing::debug!(target: "impasto::surface", serial, submitted, ack_us, "UIKit compositor ack");
+        engine::session::trace::Section::event(|| format!("UIKit ack: {ack_us} us"));
+        drop(frame);
         if first {
             host.clock.events.send(Event::FrameSubmitted, surface, None);
         }

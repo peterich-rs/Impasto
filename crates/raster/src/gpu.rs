@@ -2,6 +2,9 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
+
+use engine::session::trace::Section;
 
 use crate::{RasterBackend, RasterOptions, Status, ValidationMode};
 
@@ -130,10 +133,15 @@ impl Gpu {
             force_fallback_adapter: options.force_fallback_adapter,
             ..Default::default()
         };
-        let adapter = pollster::block_on(instance.request_adapter(&request)).map_err(|error| {
-            tracing::debug!(target: "impasto::gpu", ?backend, %error, "adapter unavailable");
-            Status::NoDevice(backend)
-        })?;
+        let started = Instant::now();
+        let adapter = {
+            let _trace = Section::begin(c"GPU adapter request");
+            pollster::block_on(instance.request_adapter(&request)).map_err(|error| {
+                tracing::debug!(target: "impasto::gpu", ?backend, %error, "adapter unavailable");
+                Status::NoDevice(backend)
+            })?
+        };
+        let adapter_us = started.elapsed().as_secs_f64() * 1_000_000.0;
         let info = adapter.get_info();
         if cfg!(target_os = "android")
             && backend == RasterBackend::Vulkan
@@ -185,8 +193,12 @@ impl Gpu {
             requested |= lcd;
         }
         let mut adapter = adapter;
+        let device_started = Instant::now();
         let result = loop {
-            let result = request_device(&adapter, requested);
+            let result = {
+                let _trace = Section::begin(c"GPU device request");
+                request_device(&adapter, requested)
+            };
             if result.is_ok() || requested.is_empty() {
                 break result;
             }
@@ -204,6 +216,7 @@ impl Gpu {
             tracing::warn!(target: "impasto::gpu", ?backend, %error, "device request failed");
             Status::NoDevice(backend)
         })?;
+        let device_us = device_started.elapsed().as_secs_f64() * 1_000_000.0;
         let lost = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&lost);
         device.set_device_lost_callback(move |reason, message| {
@@ -227,7 +240,8 @@ impl Gpu {
         let caps = GpuCaps::detect(&adapter, &device);
         tracing::info!(target: "impasto::gpu", ?backend, device = %info.name,
             tier = ?caps.tier, caps.min_uniform_align, caps.max_texture_2d,
-            caps.max_array_layers, caps.msaa4_srgb, supported = ?caps.adapter_features, enabled = ?device.features(), "graphics device ready");
+            caps.max_array_layers, caps.msaa4_srgb, adapter_us, device_us,
+            supported = ?caps.adapter_features, enabled = ?device.features(), "graphics device ready");
         Ok(Self {
             instance,
             adapter,

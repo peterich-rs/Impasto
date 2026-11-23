@@ -7,6 +7,7 @@ use crate::color::{srgb_to_linear, straight_srgb};
 use crate::compositor::extent;
 use crate::gpu::Gpu;
 use crate::{PixelSize, Rasterizer, Status};
+use engine::session::trace::Section;
 
 /// A native surface handle valid for the full life of its wgpu surface.
 #[derive(Clone, Copy, Debug)]
@@ -49,6 +50,7 @@ pub struct WgpuSurface {
     config: wgpu::SurfaceConfiguration,
     device: u64,
     reconfigure: bool,
+    first_present_since: Option<std::time::Instant>,
 }
 
 impl std::fmt::Debug for WgpuSurface {
@@ -77,13 +79,17 @@ impl Rasterizer {
         if !pixels.is_usable() {
             return Err(Status::NotReady);
         }
-        if let Some(device) = self.device.as_ref() {
+        if let Some(device) = self.device.as_mut() {
             if device.gpu.is_lost() {
                 return Err(Status::DeviceLost);
             }
             // SAFETY: the caller retains this native handle through surface destruction.
             let raw = unsafe { create_raw(&device.gpu.instance, handle) }?;
-            return configure(&device.gpu, device.generation, handle, raw, pixels);
+            let surface = configure(&device.gpu, device.generation, handle, raw, pixels)?;
+            device
+                .compositor
+                .prewarm_surface(&device.gpu, surface.config.format);
+            return Ok(surface);
         }
         let mut last = Status::SurfaceLost;
         for backend in self.backends() {
@@ -99,8 +105,11 @@ impl Rasterizer {
                     continue;
                 }
             };
-            match Self::new_device(gpu).and_then(|device| {
+            match Self::new_device(gpu).and_then(|mut device| {
                 let surface = configure(&device.gpu, device.generation, handle, raw, pixels)?;
+                device
+                    .compositor
+                    .prewarm_surface(&device.gpu, surface.config.format);
                 Ok((surface, device))
             }) {
                 Ok((surface, device)) => {
@@ -168,7 +177,10 @@ impl Rasterizer {
         let raw = surface.inner.as_ref().ok_or(Status::SurfaceLost)?;
         use wgpu::CurrentSurfaceTexture as Frame;
         let started = std::time::Instant::now();
-        let acquired = raw.get_current_texture();
+        let acquired = {
+            let _trace = Section::begin(c"Surface acquire");
+            raw.get_current_texture()
+        };
         self.stats.acquire = started.elapsed();
         let texture = match acquired {
             Frame::Success(texture) => texture,
@@ -196,10 +208,20 @@ impl Rasterizer {
         self.encode_and_submit(&view, surface.config.format, pixels)?;
         let state = self.device.as_ref().ok_or(Status::NotReady)?;
         let started = std::time::Instant::now();
-        state.gpu.queue.present(texture);
+        {
+            let _trace = Section::begin(c"Surface present");
+            state.gpu.queue.present(texture);
+        }
         self.stats.surface_present = started.elapsed();
         if state.gpu.is_lost() {
             return Err(Status::DeviceLost);
+        }
+        if let Some(since) = surface.first_present_since.take() {
+            tracing::info!(target: "impasto::startup",
+                configure_to_present_us = since.elapsed().as_secs_f64() * 1_000_000.0,
+                acquire_us = self.stats.acquire.as_secs_f64() * 1_000_000.0,
+                present_us = self.stats.surface_present.as_secs_f64() * 1_000_000.0,
+                "first surface present returned");
         }
         Ok(())
     }
@@ -351,15 +373,51 @@ fn configure(
     {
         config.color_space = wgpu::SurfaceColorSpace::Srgb;
     }
-    config.present_mode = wgpu::PresentMode::Fifo;
+    config.desired_maximum_frame_latency = std::env::var("IMPASTO_SURFACE_LATENCY")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| (1..=3).contains(value))
+        .unwrap_or(2);
+    let present = std::env::var("IMPASTO_PRESENT_MODE").ok();
+    config.present_mode = present_mode(present.as_deref(), &caps.present_modes);
+    let alpha = match std::env::var("IMPASTO_SURFACE_ALPHA").as_deref() {
+        Ok("opaque") => Some(wgpu::CompositeAlphaMode::Opaque),
+        Ok("premultiplied") => Some(wgpu::CompositeAlphaMode::PreMultiplied),
+        Ok("postmultiplied") => Some(wgpu::CompositeAlphaMode::PostMultiplied),
+        _ => None,
+    };
+    if let Some(alpha) = alpha.filter(|alpha| caps.alpha_modes.contains(alpha)) {
+        config.alpha_mode = alpha;
+    }
     resize(gpu, &raw, &mut config, pixels)?;
+    tracing::info!(
+        target: "impasto::surface", ?present, requested_alpha = ?alpha,
+        present = ?config.present_mode, alpha = ?config.alpha_mode, format = ?config.format,
+        color_space = ?config.color_space, latency = config.desired_maximum_frame_latency,
+        "surface configured"
+    );
     Ok(WgpuSurface {
         inner: Some(raw),
         handle,
         config,
         device,
         reconfigure: false,
+        first_present_since: Some(std::time::Instant::now()),
     })
+}
+
+fn present_mode(selected: Option<&str>, available: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+    use wgpu::PresentMode as Mode;
+    let requested = match selected {
+        Some("mailbox") => Mode::Mailbox,
+        Some("fifo-relaxed") => Mode::FifoRelaxed,
+        _ => Mode::Fifo,
+    };
+    if available.contains(&requested) {
+        requested
+    } else {
+        Mode::Fifo
+    }
 }
 
 fn resize_if_needed(gpu: &Gpu, surface: &mut WgpuSurface, pixels: PixelSize) -> Result<(), Status> {

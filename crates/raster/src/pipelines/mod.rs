@@ -4,6 +4,9 @@
 //! draws quads from instance vertex buffers and shares the frame uniform slabs.
 
 use std::collections::HashMap;
+use std::time::Instant;
+
+use engine::session::trace::Section;
 
 use crate::gpu::Gpu;
 use crate::status::Status;
@@ -141,6 +144,8 @@ pub struct PipelineCache {
 
 impl PipelineCache {
     pub fn new(gpu: &Gpu) -> Self {
+        let _trace = Section::begin(c"Raster shader modules");
+        let started = Instant::now();
         let module = |label, source: &str, clipped: bool, gradients: bool| {
             let view = include_str!("view.wgsl");
             let clip = if clipped {
@@ -197,14 +202,16 @@ impl PipelineCache {
             atlas: layout(gpu, "impasto atlas", &[Slot::Array, Slot::Array, S]),
             composite: layout(gpu, "impasto composite", &[T, S, T]),
         };
-        Self {
+        let cache = Self {
             targets: HashMap::new(),
             ui: module("impasto ui", UI_WGSL, true, true),
             text: module("impasto text", TEXT_WGSL, true, true),
             image: module("impasto image", IMAGE_WGSL, true, false),
             blur: module("impasto blur", BLUR_WGSL, false, false),
             layouts,
-        }
+        };
+        tracing::debug!(target: "impasto::startup", shader_us = started.elapsed().as_secs_f64() * 1_000_000.0, "raster shader modules ready");
+        cache
     }
 
     /// Compile only the pipeline requested by this draw.
@@ -220,6 +227,8 @@ impl PipelineCache {
         match self.targets.entry(key) {
             Entry::Occupied(entry) => Ok(entry.get().clone()),
             Entry::Vacant(entry) => {
+                let _trace = Section::begin(c"Raster pipeline creation");
+                let started = Instant::now();
                 let pipeline = gpu.validation(|| {
                     Ok(build(
                         gpu,
@@ -230,9 +239,34 @@ impl PipelineCache {
                         blend,
                     ))
                 })?;
+                tracing::debug!(target: "impasto::startup", ?target, ?kind, ?blend,
+                    pipeline_us = started.elapsed().as_secs_f64() * 1_000_000.0, "raster pipeline ready");
                 Ok(entry.insert(pipeline).clone())
             }
         }
+    }
+
+    pub fn prewarm(
+        &mut self,
+        gpu: &Gpu,
+        format: wgpu::TextureFormat,
+        specialize: bool,
+    ) -> Result<(), Status> {
+        let _trace = Section::begin(c"Raster pipeline prewarm");
+        let started = Instant::now();
+        let target = Target { format, samples: 1 };
+        let count = self.targets.len();
+        let [rect, text] = if specialize {
+            [PipelineKind::RectSolid, PipelineKind::TextMask]
+        } else {
+            [PipelineKind::Rect, PipelineKind::Text]
+        };
+        for kind in [rect, text, PipelineKind::Image] {
+            self.get(gpu, target, kind, BlendKey::SrcOver)?;
+        }
+        tracing::debug!(target: "impasto::startup", ?format, variants = self.targets.len() - count,
+            prewarm_us = started.elapsed().as_secs_f64() * 1_000_000.0, "pipeline prewarm complete");
+        Ok(())
     }
 }
 
