@@ -220,21 +220,10 @@ fn call<'js>(
             encode(ctx, &value)
         }
         Invoke::Resource(open) => runtime.open_resource(ctx, &mut || open(&args)),
-        Invoke::Stream(work) => {
-            let (stream, mut sink) = runtime.reserve_stream(ctx, signal)?;
+        Invoke::Stream(start) => {
+            let (stream, sink) = runtime.reserve_stream(ctx, signal)?;
             if !sink.cancellation().is_cancelled() {
-                let work = Arc::clone(work);
-                exec.worker(
-                    Settle::new(|_| {}),
-                    Box::new(move || {
-                        match catch_unwind(AssertUnwindSafe(|| work(args, &mut sink))) {
-                            Ok(Ok(())) => sink.finish(),
-                            Ok(Err(message)) => sink.fail(message),
-                            Err(_) => sink.fail("native stream producer panicked".into()),
-                        }
-                        crate::host::PluginResult::Done(PluginValue::Null)
-                    }),
-                );
+                let _ = catch_unwind(AssertUnwindSafe(|| start(args, sink, exec)));
             }
             Ok(stream)
         }

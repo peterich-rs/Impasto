@@ -10,7 +10,7 @@ use javascript::standard::StandardProfile;
 #[test]
 fn event_constructors_preserve_subclass_identity_and_native_brand() {
     let mut runtime = RuntimeBuilder::new()
-        .standard(StandardProfile::default())
+        .standard(StandardProfile)
         .build()
         .expect("the portable runtime starts");
     runtime
@@ -48,7 +48,7 @@ fn event_constructors_preserve_subclass_identity_and_native_brand() {
 #[test]
 fn event_options_and_abort_actions_preserve_callback_order() {
     let mut runtime = RuntimeBuilder::new()
-        .standard(StandardProfile::default())
+        .standard(StandardProfile)
         .build()
         .expect("the portable runtime starts");
     runtime

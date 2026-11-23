@@ -11,8 +11,9 @@ use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::time::{Duration, Instant};
 
 use block2::DynBlock;
-use engine::session::{
+use embedder::{
     HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, HttpResponse,
+    RedirectMode,
 };
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
@@ -33,7 +34,11 @@ const CANCEL_CHECK: Duration = Duration::from_millis(20);
 const REDIRECT_LIMIT: usize = 5;
 
 enum Received {
-    Head(u16, Vec<(String, String)>),
+    Head {
+        status: u16,
+        url: Option<String>,
+        headers: Vec<(String, String)>,
+    },
     Body(Vec<u8>),
     Completed(Result<(), HttpError>),
 }
@@ -41,6 +46,8 @@ enum Received {
 struct ReceiverState {
     send: SyncSender<Received>,
     redirects: AtomicUsize,
+    redirect_mode: RedirectMode,
+    max_bytes: usize,
     bytes: AtomicUsize,
 }
 
@@ -67,6 +74,22 @@ define_class!(
             completion: &DynBlock<dyn Fn(*mut NSURLRequest)>,
         ) {
             let state = self.ivars();
+            match state.redirect_mode {
+                RedirectMode::Manual => {
+                    completion.call((ptr::null_mut(),));
+                    return;
+                }
+                RedirectMode::Error => {
+                    let _ = state.send.send(Received::Completed(Err(HttpError::new(
+                        HttpFailure::Network,
+                        "redirect disallowed by redirect mode",
+                    ))));
+                    completion.call((ptr::null_mut(),));
+                    task.cancel();
+                    return;
+                }
+                RedirectMode::Follow => {}
+            }
             let count = state.redirects.fetch_add(1, Ordering::Relaxed);
             if count >= REDIRECT_LIMIT || request.URL().is_none_or(|url| !is_http_url(&url)) {
                 let message = if count >= REDIRECT_LIMIT {
@@ -147,7 +170,8 @@ define_class!(
                 .bytes
                 .fetch_add(data.len(), Ordering::Relaxed)
                 .saturating_add(data.len());
-            let received = if limit > HTTP_BODY_LIMIT {
+            let exceeded = limit > state.max_bytes;
+            let received = if exceeded {
                 Received::Completed(Err(HttpError::new(
                     HttpFailure::TooLarge,
                     "response body too large",
@@ -155,7 +179,7 @@ define_class!(
             } else {
                 Received::Body(data.to_vec())
             };
-            if state.send.send(received).is_err() || limit > HTTP_BODY_LIMIT {
+            if state.send.send(received).is_err() || exceeded {
                 task.cancel();
             }
         }
@@ -163,10 +187,16 @@ define_class!(
 );
 
 impl Receiver {
-    fn new(send: SyncSender<Received>) -> Retained<Self> {
+    fn new(
+        send: SyncSender<Received>,
+        redirect_mode: RedirectMode,
+        max_bytes: usize,
+    ) -> Retained<Self> {
         let this = Self::alloc().set_ivars(ReceiverState {
             send,
             redirects: AtomicUsize::new(0),
+            redirect_mode,
+            max_bytes,
             bytes: AtomicUsize::new(0),
         });
         // SAFETY: this is an allocated NSObject subclass initialized once.
@@ -176,6 +206,10 @@ impl Receiver {
 
 fn response_head(response: &NSHTTPURLResponse) -> Option<Received> {
     let status = u16::try_from(response.statusCode()).ok()?;
+    let url = response
+        .URL()
+        .and_then(|url| url.absoluteString())
+        .map(|s| s.to_string());
     let fields = response.allHeaderFields();
     let headers = fields
         .keys()
@@ -189,7 +223,11 @@ fn response_head(response: &NSHTTPURLResponse) -> Option<Received> {
             Some((name, value))
         })
         .collect();
-    Some(Received::Head(status, headers))
+    Some(Received::Head {
+        status,
+        url,
+        headers,
+    })
 }
 
 fn http_error(error: &NSError) -> HttpError {
@@ -216,15 +254,22 @@ impl HttpClient for Http {
         let mut body = Vec::new();
         self.stream(request, &mut |piece| {
             match piece {
-                HttpPiece::Head(status, headers) => head = Some((status, headers.to_vec())),
+                HttpPiece::Head {
+                    status,
+                    url,
+                    redirected,
+                    headers,
+                } => head = Some((status, url.to_owned(), redirected, headers.to_vec())),
                 HttpPiece::Chunk(bytes, _) => body.extend_from_slice(bytes),
             }
             true
         })?;
-        let (status, headers) =
+        let (status, url, redirected, headers) =
             head.ok_or_else(|| HttpError::new(HttpFailure::Network, "no HTTP response"))?;
         Ok(HttpResponse {
             status,
+            url,
+            redirected,
             headers,
             body,
         })
@@ -239,7 +284,7 @@ impl HttpClient for Http {
             let timeout = request
                 .timeout_ms
                 .map_or(DEFAULT_TIMEOUT, Duration::from_millis);
-            if request.cancel.load(Ordering::Acquire) {
+            if request.cancel.is_cancelled() {
                 return Err(aborted());
             }
             let configuration = NSURLSessionConfiguration::ephemeralSessionConfiguration();
@@ -250,7 +295,11 @@ impl HttpClient for Http {
             configuration.setHTTPShouldSetCookies(false);
             let native = native_request(request, timeout)?;
             let (send, receive) = mpsc::sync_channel(2);
-            let delegate = Receiver::new(send);
+            let delegate = Receiver::new(
+                send,
+                request.redirect,
+                request.max_body_bytes.unwrap_or(HTTP_BODY_LIMIT),
+            );
             // SAFETY: NSURLSession creates its own serial delegate queue; the
             // receiver owns all state by value, and its ivars are Send + Sync.
             let session = Session(unsafe {
@@ -264,7 +313,7 @@ impl HttpClient for Http {
             task.resume();
             let start = Instant::now();
             loop {
-                if request.cancel.load(Ordering::Acquire) {
+                if request.cancel.is_cancelled() {
                     return Err(aborted());
                 }
                 let left = timeout.saturating_sub(start.elapsed());
@@ -284,12 +333,23 @@ impl HttpClient for Http {
                         ));
                     }
                 };
-                if request.cancel.load(Ordering::Acquire) {
+                if request.cancel.is_cancelled() {
                     return Err(aborted());
                 }
                 match received {
-                    Received::Head(status, headers) => {
-                        if !sink(HttpPiece::Head(status, &headers)) {
+                    Received::Head {
+                        status,
+                        url,
+                        headers,
+                    } => {
+                        let url = url.as_deref().unwrap_or(&request.url);
+                        let redirected = delegate.ivars().redirects.load(Ordering::Relaxed) > 0;
+                        if !sink(HttpPiece::Head {
+                            status,
+                            url,
+                            redirected,
+                            headers: &headers,
+                        }) {
                             return Ok(());
                         }
                     }
@@ -385,9 +445,9 @@ fn aborted() -> HttpError {
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
     use std::thread;
+
+    use engine::session::CancelToken;
 
     use super::*;
 
@@ -433,20 +493,21 @@ mod tests {
             Ok(())
         });
         let request = HttpRequest {
-            token: 1,
             method: "GET".into(),
             url: format!("http://{address}"),
             headers: Vec::new(),
             body: Vec::new(),
-            cancel: Arc::new(AtomicBool::new(false)),
+            cancel: CancelToken::new(),
             timeout_ms: Some(4_000),
+            redirect: RedirectMode::Follow,
+            max_body_bytes: None,
         };
         let mut status = 0;
         let mut body = Vec::new();
         let mut done = false;
         let transfer = Http.stream(&request, &mut |piece| {
             match piece {
-                HttpPiece::Head(code, _) => status = code,
+                HttpPiece::Head { status: code, .. } => status = code,
                 HttpPiece::Chunk(bytes, last) => {
                     body.extend_from_slice(bytes);
                     if body.len() == FIRST_BODY && !last {

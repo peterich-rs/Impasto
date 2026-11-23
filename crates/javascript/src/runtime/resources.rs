@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-use crate::host::{Delivery, HttpError, HttpFailure, IoEvent, MAX_SAFE_ID, Route, RuntimeKey};
+use crate::host::{Delivery, IoEvent, MAX_SAFE_ID, Route, RuntimeKey};
 
 /// Allocate a safe integer for each compatibility token. A naked late token
 /// cannot settle an operation in a newer instance, even through an old sink.
@@ -23,20 +23,10 @@ pub(crate) fn number(id: u64) -> f64 {
     id as f64
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SocketState {
-    Connecting,
-    Open,
-    Closing,
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum Kind {
-    Http,
-    Stream { head: bool },
     Plugin,
     NativeStream,
-    Socket(SocketState),
 }
 
 pub(crate) struct Resource {
@@ -49,7 +39,6 @@ pub(crate) struct Resource {
 pub(crate) struct Resources {
     entries: HashMap<u64, Resource>,
     pub peak: usize,
-    pub socket_peak: usize,
     pub discarded: usize,
 }
 
@@ -61,7 +50,6 @@ impl Resources {
     pub fn insert(&mut self, id: u64, resource: Resource) {
         self.entries.insert(id, resource);
         self.peak = self.peak.max(self.requests());
-        self.socket_peak = self.socket_peak.max(self.sockets());
     }
 
     pub fn remove(&mut self, id: u64) -> Option<Resource> {
@@ -79,17 +67,9 @@ impl Resources {
         self.entries
             .values()
             .filter(|resource| match resource.kind {
-                Kind::Socket(_) => false,
                 Kind::NativeStream => !resource.route.is_cancelled(),
-                _ => true,
+                Kind::Plugin => true,
             })
-            .count()
-    }
-
-    pub fn sockets(&self) -> usize {
-        self.entries
-            .values()
-            .filter(|resource| matches!(resource.kind, Kind::Socket(_)))
             .count()
     }
 
@@ -150,38 +130,16 @@ impl Resources {
             return false;
         }
         let (valid, next) = match (resource.kind, event) {
-            (Kind::Http, IoEvent::Http { .. }) | (Kind::Plugin, IoEvent::Plugin { .. }) => {
-                (true, None)
-            }
+            (Kind::Plugin, IoEvent::Plugin { .. }) => (true, None),
             (Kind::NativeStream, IoEvent::NativeStream { event, .. }) => (
                 true,
                 matches!(event, crate::host::StreamEvent::Item(_)).then_some(Kind::NativeStream),
             ),
-            (Kind::Stream { head: false }, IoEvent::HttpHead { .. }) => {
-                (true, Some(Kind::Stream { head: true }))
-            }
-            (Kind::Stream { head }, IoEvent::HttpChunk { done, error, .. }) => (
-                head || *done || error.is_some(),
-                (!done && error.is_none()).then_some(resource.kind),
-            ),
-            (Kind::Socket(state), IoEvent::Socket { event, .. }) => match event.as_str() {
-                "open" if state == SocketState::Connecting => {
-                    (true, Some(Kind::Socket(SocketState::Open)))
-                }
-                "message" if state == SocketState::Open => (true, Some(resource.kind)),
-                "close" | "error" => (true, None),
-                _ => (false, None),
-            },
             _ => (false, None),
         };
         if valid {
             if let Some(kind) = next {
-                let deadline = if matches!(kind, Kind::Socket(SocketState::Open)) {
-                    None
-                } else {
-                    resource.deadline
-                };
-                self.set_kind(id, kind, deadline);
+                self.set_kind(id, kind, resource.deadline);
             } else if let Some(resource) = self.remove(id) {
                 resource.route.cancel();
             }
@@ -192,25 +150,8 @@ impl Resources {
     }
 }
 
-pub(crate) fn failure(id: u64, kind: Kind, failure: HttpFailure, message: &str) -> IoEvent {
-    let error = HttpError::new(failure, message);
+pub(crate) fn failure(id: u64, kind: Kind, message: &str) -> IoEvent {
     match kind {
-        Kind::Http => IoEvent::Http {
-            token: id,
-            result: Err(error),
-        },
-        Kind::Stream { .. } => IoEvent::HttpChunk {
-            token: id,
-            bytes: Vec::new(),
-            done: true,
-            error: Some(error),
-        },
-        Kind::Socket(_) => IoEvent::Socket {
-            id,
-            event: "error".into(),
-            text: true,
-            data: message.as_bytes().to_vec(),
-        },
         Kind::NativeStream => IoEvent::NativeStream {
             id,
             event: crate::host::StreamEvent::Failed(message.into()),

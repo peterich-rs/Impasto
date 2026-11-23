@@ -1,20 +1,16 @@
-//! Standalone JavaScript host demonstrating compilation, events, and transport.
-
-use std::sync::mpsc::{self, TrySendError};
-use std::time::Duration;
+//! Standalone JavaScript host demonstrating compilation, events, resources, and streams.
 
 use javascript::compiler;
 use javascript::host::{
-    EventType, HostEvent, IoEvent, IoJob, Method, Module, ModuleExports, ModuleRegistry,
-    PluginResult, PluginValue,
+    CancelToken, EventType, HostEvent, Method, Module, ModuleExports, ModuleRegistry,
+    NativeResource, PluginResult, PluginValue,
 };
-use javascript::runtime::IoBindings;
 use javascript::runtime::{ModuleCatalog, ModuleOutcome, Runtime};
 
 const MAIN: &str = "example:main";
 
 const SOURCE: &str = r#"
-    import { Echo, copy, later } from "example:echo";
+    import { Echo, copy, later, open, chunks } from "example:echo";
     if (globalThis.compiledValue !== 42) throw Error("compiled script");
 
     let state;
@@ -26,15 +22,43 @@ const SOURCE: &str = r#"
     if (state.name !== "ready") throw Error("event payload");
     Echo.removeEventListener("change", onChange);
 
+    const handle = open();
+    if (handle.call("ping", "ok") !== "pong:ok") throw Error("resource method");
+    handle.close();
+
     const url = new URL("payload", "https://example.invalid/data/");
-    const body = new TextEncoder().encode("测试");
-    const response = await fetch(url.href, { method: "POST", body });
-    if (response.status !== 201 || await response.text() !== "written") throw Error("HTTP result");
+    if (url.pathname !== "/data/payload") throw Error("URL pathname");
+
+    const reader = chunks(new TextEncoder().encode("测试")).getReader();
+    const first = await reader.read();
+    const second = await reader.read();
+    if (first.done || new TextDecoder().decode(first.value) !== "测试" || !second.done) {
+        throw Error("native stream result");
+    }
     export const completed = true;
 "#;
 
 fn echo(args: &[PluginValue]) -> PluginValue {
     args.first().cloned().unwrap_or(PluginValue::Null)
+}
+
+struct EchoHandle;
+
+impl NativeResource for EchoHandle {
+    fn call(
+        &mut self,
+        method: &str,
+        args: &[PluginValue],
+        _cancel: &CancelToken,
+    ) -> Result<PluginValue, String> {
+        match method {
+            "ping" => match args.first() {
+                Some(PluginValue::Str(text)) => Ok(PluginValue::Str(format!("pong:{text}"))),
+                _ => Ok(PluginValue::Str("pong".into())),
+            },
+            _ => Err(format!("unknown method {method:?}")),
+        }
+    }
 }
 
 fn main() -> Result<(), String> {
@@ -47,6 +71,28 @@ fn main() -> Result<(), String> {
                 exec.now(settle, PluginResult::Done(echo(args)));
             })
             .with_types("value: unknown", "unknown"),
+            Method::resource("open", |_| Ok(Box::new(EchoHandle))).with_types(
+                "",
+                "{ call(method: \"ping\", label?: string): string; close(): void }",
+            ),
+            Method::stream_with_exec("chunks", |args, mut sink, exec| {
+                let bytes = match args.into_iter().next() {
+                    Some(PluginValue::Bytes(bytes)) => bytes,
+                    _ => Vec::new(),
+                };
+                exec.worker(
+                    javascript::host::Settle::new(|_| {}),
+                    Box::new(move || {
+                        let _ = sink.send(
+                            PluginValue::Bytes(bytes),
+                            std::time::Duration::from_millis(100),
+                        );
+                        sink.finish();
+                        PluginResult::Done(PluginValue::Null)
+                    }),
+                );
+            })
+            .with_types("payload: Uint8Array", "Uint8Array"),
         ],
         exports: ModuleExports {
             object: true,
@@ -75,14 +121,8 @@ fn main() -> Result<(), String> {
     )
     .map_err(|error| error.to_string())?;
 
-    let (submit, jobs) = mpsc::sync_channel(1);
-    let transport = IoBindings::routed(move |job| match submit.try_send(job) {
-        Ok(()) => Ok(()),
-        Err(TrySendError::Full(job) | TrySendError::Disconnected(job)) => Err(Box::new(job)),
-    });
     let mut runtime = Runtime::builder()
         .modules(catalog)
-        .host(transport)
         .build()
         .map_err(|error| error.to_string())?;
     runtime
@@ -92,51 +132,9 @@ fn main() -> Result<(), String> {
         .start_compiled_module(&bytes, MAIN)
         .map_err(|error| error.to_string())?;
     runtime
-        .enqueue(IoEvent::Host(HostEvent {
-            module: "Echo".to_owned(),
-            event: "change".to_owned(),
-            payload: PluginValue::Map(vec![("name".to_owned(), PluginValue::Str("ready".into()))]),
-        }))
+        .enqueue(host_change_event())
         .map_err(|error| format!("event admission failed: {error:?}"))?;
     runtime.drive(10).map_err(|error| error.to_string())?;
-
-    let job = jobs.try_recv().map_err(|error| error.to_string())?;
-    let IoJob::Routed { route, job, .. } = job else {
-        return Err(format!("expected a routed HTTP job, received {job:?}"));
-    };
-    let IoJob::HttpStream(request) = job.as_ref() else {
-        return Err(format!("expected an HTTP job, received {job:?}"));
-    };
-    if request.url != "https://example.invalid/data/payload"
-        || request.method != "POST"
-        || request.body != "测试".as_bytes()
-    {
-        return Err("HTTP request did not preserve URL, method, and UTF-8 bytes".into());
-    }
-    if jobs.try_recv().is_ok() || !runtime.take_jobs().is_empty() {
-        return Err("HTTP request was submitted twice".into());
-    }
-
-    for completion in [
-        IoEvent::HttpHead {
-            token: request.token,
-            status: 201,
-            headers: vec![("Content-Type".into(), "text/plain".into())],
-        },
-        IoEvent::HttpChunk {
-            token: request.token,
-            bytes: b"written".to_vec(),
-            done: true,
-            error: None,
-        },
-    ] {
-        let credit = route
-            .reserve(completion.payload_bytes(), Duration::ZERO)
-            .ok_or_else(|| "HTTP completion exceeded the queue limit".to_owned())?;
-        runtime
-            .enqueue_delivery(route.deliver(completion, Some(credit)))
-            .map_err(|error| format!("HTTP delivery failed: {error:?}"))?;
-    }
     runtime.drive(11).map_err(|error| error.to_string())?;
 
     match runtime
@@ -163,6 +161,14 @@ fn main() -> Result<(), String> {
     }
     runtime.shutdown();
     Ok(())
+}
+
+fn host_change_event() -> javascript::host::IoEvent {
+    javascript::host::IoEvent::Host(HostEvent {
+        module: "Echo".to_owned(),
+        event: "change".to_owned(),
+        payload: PluginValue::Map(vec![("name".to_owned(), PluginValue::Str("ready".into()))]),
+    })
 }
 
 #[cfg(test)]

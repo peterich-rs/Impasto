@@ -177,12 +177,11 @@ fn bytecode_round_trip_uses_the_native_modules() {
     {
         let source = "import {createSignal,batch} from 'reactive'; import {createElement,insert,setProp} from 'scene'; const [get,set]=createSignal('first'); const root=createElement('view',{style:{gap:8}}); insert(root,get); batch(()=>set('compiled')); setProp(root,'style',{gap:16});";
         let bytes = super::compile(source, "compiled.js", true).expect("compile module");
-        let mut session = super::open_compiled_with_io(
+        let mut session = super::open_compiled(
             &bytes,
             "compiled.bin",
             crate::text::MonoShaper::default(),
             no_log(),
-            None,
             ModuleConfig::disconnected(),
         )
         .expect("load bytecode");
@@ -487,8 +486,7 @@ fn drop_releases_unfired_timer() {
 fn drop_releases_reactive_cleanup() {
     let seen = std::rc::Rc::new(std::cell::Cell::new(0));
     let record = std::rc::Rc::clone(&seen);
-    let (jobs, received) = std::sync::mpsc::channel();
-    let session = super::open_program_with_routed_io(
+    let session = super::open_program(
         br#"
                 import {createRoot,createSignal,onCleanup} from 'reactive';
                 createRoot(() => onCleanup(() => {
@@ -498,7 +496,6 @@ fn drop_releases_reactive_cleanup() {
                         createSignal({held: true});
                         onCleanup(() => console.log('nested cleanup'));
                     });
-                    return fetch('https://example.test/shutdown');
                 }));
             "#,
         "drop-cleanup.js",
@@ -508,15 +505,11 @@ fn drop_releases_reactive_cleanup() {
                 record.set(record.get() + 1);
             }
         }),
-        Some(Box::new(move |job| {
-            jobs.send(job).map_err(|error| Box::new(error.0))
-        })),
         ModuleConfig::disconnected(),
     )
     .expect("open cleanup");
     drop(session);
     assert_eq!(seen.get(), 2);
-    assert!(received.try_recv().is_err());
 }
 
 #[test]
@@ -524,7 +517,7 @@ fn failed_open_releases_standard_and_reactive_bindings() {
     let seen = std::rc::Rc::new(std::cell::Cell::new(0));
     let record = std::rc::Rc::clone(&seen);
     let result = open(
-        "import {createRoot,onCleanup} from 'reactive'; if (typeof fetch !== 'function' || typeof AbortController !== 'function') throw new Error('standard bindings missing'); createRoot(() => onCleanup(() => console.log('cleanup'))); setTimeout(() => {}, 60000); fetch('https://example.test/pending'); throw new Error('failed during entry');",
+        "import {createRoot,onCleanup} from 'reactive'; if (typeof URL !== 'function' || typeof AbortController !== 'function') throw new Error('standard bindings missing'); createRoot(() => onCleanup(() => console.log('cleanup'))); setTimeout(() => {}, 60000); throw new Error('failed during entry');",
         "failed-open.js",
         crate::text::MonoShaper::default(),
         Box::new(move |_, text| {
@@ -539,88 +532,46 @@ fn failed_open_releases_standard_and_reactive_bindings() {
     assert_eq!(seen.get(), 1);
 }
 
-/// Application startup precedes the external transport. Its I/O
-/// completions settle in the first frame after JS records their tokens.
+/// Application startup microtasks run during `open`; timers and rAF wait for a frame.
 #[test]
-fn open_runs_entry_before_io_install_and_frame_flushes_pending() {
+fn open_runs_entry_before_frame_flushes_timers() {
     let logs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let record = std::rc::Rc::clone(&logs);
-    let jobs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let count = std::sync::Arc::clone(&jobs);
     let source = r#"
             console.log("sync");
             Promise.resolve().then(function () { console.log("job"); });
             setTimeout(function () { console.log("timer"); }, 0);
             requestAnimationFrame(function () { console.log("raf"); });
-            fetch("https://example.test/pending").then(
-                function () { console.log("fetch-ok"); },
-                function (error) { console.log("fetch-fail:" + String(error)); }
-            );
-            fetch("https://example.test/stream").then(
-                function () { console.log("stream-ok"); },
-                function (error) { console.log("stream-fail:" + String(error && error.message)); }
-            );
-            var socket = new WebSocket("ws://example.test/socket");
-            socket.onerror = function () { console.log("socket-error"); };
-            socket.onopen = function () { console.log("socket-open"); };
             console.log("sync-after");
         "#;
-    let mut session = super::open_with_io(
+    let mut session = super::open_with_config(
         source,
         "order.js",
         crate::text::MonoShaper::default(),
         Box::new(move |_level, text| record.borrow_mut().push(text.to_owned())),
-        Some(Box::new(move |_job| {
-            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        })),
         ModuleConfig::disconnected(),
     )
     .expect("open");
     assert_eq!(
         logs.borrow().as_slice(),
         ["sync", "sync-after", "job"],
-        "entry microtask runs during open; timers, fetch and sockets wait for a frame"
+        "entry microtask runs during open; timers and raf wait for a frame"
     );
-    assert_eq!(jobs.load(std::sync::atomic::Ordering::Relaxed), 0);
     session.frame(session::FrameTime::at(0.0));
-    let lines = logs.borrow();
-    let remaining = lines
-        .iter()
-        .filter(|line| !line.starts_with("stream-"))
-        .map(String::as_str)
-        .collect::<Vec<_>>();
     assert_eq!(
-        remaining,
-        [
-            "sync",
-            "sync-after",
-            "job",
-            "socket-error",
-            "timer",
-            "fetch-fail:TypeError: TypeError",
-            "raf",
-        ]
-    );
-    assert_eq!(jobs.load(std::sync::atomic::Ordering::Relaxed), 0);
-    assert_eq!(
-        lines
-            .iter()
-            .filter(|line| line.starts_with("stream-fail:"))
-            .count(),
-        1,
-        "{lines:?}"
+        logs.borrow().as_slice(),
+        ["sync", "sync-after", "job", "timer", "raf"],
     );
     drop(session);
 }
 
 #[test]
-fn socket_commands_and_microtasks_keep_the_previous_frame_clock() {
+fn module_commands_and_microtasks_keep_the_previous_frame_clock() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicI64, Ordering};
 
     let logs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let record = std::rc::Rc::clone(&logs);
-    let (jobs, received) = std::sync::mpsc::channel();
     let (send, completions) = std::sync::mpsc::channel();
     let clock = Arc::new(AtomicI64::new(100));
     let host_clock = Arc::clone(&clock);
@@ -628,7 +579,13 @@ fn socket_commands_and_microtasks_keep_the_previous_frame_clock() {
         registry: Arc::new(ModuleRegistry::new(vec![Module {
             name: "Draft",
             specifier: "@impasto/draft",
-            exports: Default::default(),
+            exports: session::ModuleExports {
+                events: &[EventType {
+                    name: "command",
+                    payload: "null",
+                }],
+                ..session::ModuleExports::default()
+            },
             methods: vec![Method::promise("save", |_, settle, exec| {
                 exec.now(settle, PluginResult::Done(PluginValue::Null));
             })],
@@ -640,41 +597,31 @@ fn socket_commands_and_microtasks_keep_the_previous_frame_clock() {
         })),
         ..ModuleConfig::disconnected()
     };
-    let mut session = super::open_with_io(
+    let mut session = super::open_with_config(
         r#"
-                import {save} from '@impasto/draft';
+                import {save, addEventListener} from '@impasto/draft';
                 console.log("entry:" + performance.now());
-                setTimeout(() => {
-                    const socket = new WebSocket("ws://example.test/socket");
-                    socket.onopen = () => {
-                        console.log("command:" + performance.now());
-                        Promise.resolve().then(() => console.log("job:" + performance.now()));
-                        setTimeout(() => console.log("timer:" + performance.now()), 0);
-                        save().then(() => console.log("saved"), error => console.log(error.message));
-                    };
-                }, 0);
+                addEventListener("command", () => {
+                    console.log("command:" + performance.now());
+                    Promise.resolve().then(() => console.log("job:" + performance.now()));
+                    setTimeout(() => console.log("timer:" + performance.now()), 0);
+                    save().then(() => console.log("saved"), error => console.log(error.message));
+                });
             "#,
-        "socket-clock.js",
+        "module-clock.js",
         crate::text::MonoShaper::default(),
         Box::new(move |_level, text| record.borrow_mut().push(text.to_owned())),
-        Some(Box::new(move |job| {
-            let _ = jobs.send(job);
-        })),
         config,
     )
     .expect("open");
 
     session.frame(session::FrameTime::at(100.0));
-    let session::IoJob::SocketOpen { id, .. } = received.try_recv().expect("socket open") else {
-        panic!("unexpected network job");
-    };
     clock.store(60_100, Ordering::Relaxed);
-    session.io_event(IoEvent::Socket {
-        id,
-        event: "open".into(),
-        text: true,
-        data: Vec::new(),
-    });
+    session.io_event(IoEvent::Host(javascript::host::HostEvent {
+        module: "Draft".into(),
+        event: "command".into(),
+        payload: PluginValue::Null,
+    }));
     assert_eq!(logs.borrow().as_slice(), ["entry:0", "command:0"]);
     session.frame(session::FrameTime::at(60_100.0));
     session.io_delivery(completions.try_recv().expect("save completed"));
@@ -686,88 +633,55 @@ fn socket_commands_and_microtasks_keep_the_previous_frame_clock() {
 }
 
 #[test]
-fn routed_socket_completion_requires_the_live_generation() {
+fn routed_completion_requires_the_live_generation() {
+    use std::sync::Arc;
+
     let logs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let record = std::rc::Rc::clone(&logs);
-    let (jobs, received) = std::sync::mpsc::channel();
-    let mut session = super::open_program_with_routed_io(
-        br#"
-                setTimeout(() => {
-                    const socket = new WebSocket("ws://example.test/socket");
-                    socket.onopen = () => console.log("socket opened");
-                }, 0);
-            "#,
-        "routed-socket.js",
-        crate::text::MonoShaper::default(),
-        Box::new(move |_level, text| record.borrow_mut().push(text.to_owned())),
-        Some(Box::new(move |job| {
-            jobs.send(job).map_err(|error| Box::new(error.0))
+    let (send, completions) = std::sync::mpsc::channel();
+    let config = ModuleConfig {
+        registry: Arc::new(ModuleRegistry::new(vec![Module {
+            name: "Probe",
+            specifier: "@impasto/probe",
+            exports: Default::default(),
+            methods: vec![Method::promise("ping", |_, settle, _| {
+                settle.send(PluginResult::Done(PluginValue::Str("ok".into())));
+            })],
+        }])),
+        post_delivery: Some(Arc::new(move |delivery| {
+            send.send(delivery).expect("post delivery");
         })),
-        ModuleConfig::disconnected(),
-    )
-    .expect("open");
-    session.frame(session::FrameTime::at(0.0));
-    let session::IoJob::Routed { route, job, .. } = received.try_recv().expect("routed socket")
-    else {
-        panic!("transport did not receive a route");
+        ..ModuleConfig::disconnected()
     };
-    let session::IoJob::SocketOpen { id, .. } = *job else {
-        panic!("unexpected network job");
-    };
-    let opened = || IoEvent::Socket {
-        id,
-        event: "open".into(),
-        text: true,
-        data: Vec::new(),
-    };
-    let mut stale = route.deliver(opened(), None);
-    stale.runtime.generation += 1;
-    session.io_delivery(stale);
-    assert!(logs.borrow().is_empty());
-    session.io_delivery(route.deliver(opened(), None));
-    session.io_delivery(route.deliver(opened(), None));
-    assert_eq!(logs.borrow().as_slice(), ["socket opened"]);
-}
-
-#[test]
-fn startup_inline_stream_settles_after_recording_the_token() {
-    struct EmptyResponse;
-
-    impl session::HttpClient for EmptyResponse {
-        fn perform(
-            &self,
-            request: &session::HttpRequest,
-        ) -> Result<session::HttpResponse, session::HttpError> {
-            assert_eq!(request.body, [11, 12]);
-            Ok(session::HttpResponse {
-                status: 200,
-                headers: Vec::new(),
-                body: Vec::new(),
-            })
-        }
-    }
-
-    let logs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    let record = std::rc::Rc::clone(&logs);
-    let mut session = super::JsSession::open_with(
-        r#"
-                const bytes = new Uint8Array([10, 11, 12, 13]).subarray(1, 3);
-                fetch("https://example.test/empty", {method: "POST", body: bytes})
-                    .then(async response => {
-                        const item = await response.body.getReader().read();
-                        console.log("stream:" + response.status + ":" + item.done);
-                    });
+    let mut session = super::open_program(
+        br#"
+                import { ping } from "@impasto/probe";
+                ping().then(value => console.log("opened:" + value));
             "#,
-        "startup-stream.js",
+        "routed-plugin.js",
         crate::text::MonoShaper::default(),
         Box::new(move |_level, text| record.borrow_mut().push(text.to_owned())),
-        Some(std::sync::Arc::new(EmptyResponse)),
-        ModuleConfig::disconnected(),
+        config,
     )
     .expect("open");
-    assert!(logs.borrow().is_empty());
+    let valid = completions.try_recv().expect("posted completion");
+    let wrong_gen = session::Delivery {
+        runtime: session::RuntimeKey {
+            instance: valid.runtime.instance,
+            generation: valid.runtime.generation + 1,
+        },
+        event: IoEvent::Plugin {
+            token: valid.event.id().expect("token"),
+            result: PluginResult::Done(PluginValue::Str("stale".into())),
+        },
+        credit: None,
+    };
+    session.io_delivery(wrong_gen);
     session.frame(session::FrameTime::at(0.0));
-    assert_eq!(logs.borrow().as_slice(), ["stream:200:true"]);
+    assert!(logs.borrow().is_empty());
+    session.io_delivery(valid);
+    session.frame(session::FrameTime::at(16.0));
+    assert_eq!(logs.borrow().as_slice(), ["opened:ok"]);
 }
 
 #[test]
@@ -795,7 +709,6 @@ fn module_listener_mutations_take_effect_after_the_snapshot() {
         "module-snapshot.js",
         crate::text::MonoShaper::default(),
         Box::new(move |_level, text| record.borrow_mut().push(text.to_owned())),
-        None,
         host,
     )
     .expect("open");
@@ -820,35 +733,31 @@ fn module_listener_mutations_take_effect_after_the_snapshot() {
 }
 
 #[test]
-fn unknown_io_completion_is_ignored_and_drop_discards_pending_fetch() {
+fn unknown_io_completion_is_ignored_and_drop_discards_pending_promise() {
     let logs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let record = std::rc::Rc::clone(&logs);
-    let mut session = open(
-            "fetch('https://example.test/pending').then(function () { console.log('fetch-ok'); }, function (error) { console.log('fetch-fail:' + String(error)); });",
-            "pending-fetch.js",
-            crate::text::MonoShaper::default(),
-            Box::new(move |_level, text| record.borrow_mut().push(text.to_owned())),
-        )
-        .expect("open");
+    let (host, _pending) = test_host();
+    let mut session = super::JsSession::open_with(
+        r#"
+            import { later } from "@impasto/echo";
+            later("pending").then(v => console.log("ok:" + v), err => console.log("fail:" + err));
+        "#,
+        "pending-promise.js",
+        crate::text::MonoShaper::default(),
+        Box::new(move |_level, text| record.borrow_mut().push(text.to_owned())),
+        host,
+    )
+    .expect("open");
     assert!(logs.borrow().is_empty());
-    session.io_event(IoEvent::Http {
-        token: 99,
-        result: Err(session::HttpError::new(
-            session::HttpFailure::Network,
-            "late",
-        )),
-    });
     session.io_event(IoEvent::Plugin {
         token: 99,
         result: PluginResult::Failed {
             message: "late".into(),
         },
     });
-    session.io_event(IoEvent::Socket {
+    session.io_event(IoEvent::NativeStream {
         id: 99,
-        event: "error".into(),
-        text: true,
-        data: b"late".to_vec(),
+        event: javascript::host::StreamEvent::Failed("late".into()),
     });
     assert!(logs.borrow().is_empty());
     drop(session);
@@ -928,7 +837,7 @@ fn host_argument_getter_can_call_another_module_method() {
         }])),
         ..ModuleConfig::disconnected()
     };
-    let _session = super::open_with_io(
+    let _session = super::open_with_config(
         r#"
             import { read, ping } from '@impasto/probe';
             const quiet = {};
@@ -944,7 +853,6 @@ fn host_argument_getter_can_call_another_module_method() {
         "getter.js",
         crate::text::MonoShaper::default(),
         Box::new(move |_level, text| record.borrow_mut().push(text.to_owned())),
-        None,
         config,
     )
     .expect("open");
@@ -962,12 +870,11 @@ fn script_bytecode_round_trip_uses_the_envelope() {
     .expect("compile script");
     let seen = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
     let record = std::rc::Rc::clone(&seen);
-    let session = super::open_compiled_with_io(
+    let session = super::open_compiled(
         &bytes,
         "script.bin",
         crate::text::MonoShaper::default(),
         Box::new(move |_, text| record.borrow_mut().push_str(text)),
-        None,
         ModuleConfig::disconnected(),
     )
     .expect("load script envelope");
@@ -1051,7 +958,6 @@ fn host_module_bytes_preserve_typed_array_views() {
             "bytes.js",
             crate::text::MonoShaper::default(),
             no_log(),
-            None,
             config,
         )
         .expect("module bytes"),
@@ -1161,7 +1067,6 @@ fn the_same_host_binding_script_runs_in_headless_and_ui() {
         "fixture.js",
         crate::text::MonoShaper::default(),
         Box::new(move |_, line| record.borrow_mut().push(line.to_owned())),
-        None,
         config,
     )
     .expect("UI");
@@ -1658,12 +1563,11 @@ fn open_gallery() -> Option<Box<dyn Session>> {
     {
         let body = gallery_source();
         let source = body;
-        match super::open_with_io(
+        match super::open_with_config(
             &source,
             "test.js",
             crate::text::MonoShaper::default(),
             Box::new(|level, line| eprintln!("[js {level}] {line}")),
-            None,
             gallery_host(),
         ) {
             Ok(session) => Some(session),
@@ -3952,26 +3856,9 @@ import * as core from "scene";
 }
 
 #[test]
-fn timers_fetch_and_modules_run_inside_the_frame() {
+fn timers_and_modules_run_inside_the_frame() {
     {
         use std::sync::{Arc, Mutex};
-
-        struct FixedHttp;
-
-        impl session::HttpClient for FixedHttp {
-            fn perform(
-                &self,
-                request: &session::HttpRequest,
-            ) -> Result<session::HttpResponse, session::HttpError> {
-                assert_eq!(request.method, "POST");
-                assert_eq!(request.body, b"hi");
-                Ok(session::HttpResponse {
-                    status: 200,
-                    headers: vec![("content-type".to_owned(), "text/plain".to_owned())],
-                    body: b"pong".to_vec(),
-                })
-            }
-        }
 
         let lines = Arc::new(Mutex::new(Vec::new()));
         let log_lines = Arc::clone(&lines);
@@ -3994,14 +3881,9 @@ fn timers_fetch_and_modules_run_inside_the_frame() {
                 const cleared = setTimeout(() => console.log("cleared"), 0);
                 clearTimeout(cleared);
                 requestAnimationFrame(() => console.log("raf"));
-                fetch("https://example.test/a", { method: "POST", body: "hi" })
-                    .then((response) => response.text())
-                    .then((text) => console.log("body:" + text));
                 addEventListener("change", (state) => console.log("state:" + state));
                 clipboard.setString("hi");
                 console.log("clip:" + clipboard.getString());
-                const socket = new WebSocket("ws://example.test/socket");
-                socket.onerror = () => console.log("ws");
             "#;
         let (host, _pending) = test_host();
         let mut session = match super::JsSession::open_with(
@@ -4009,7 +3891,6 @@ fn timers_fetch_and_modules_run_inside_the_frame() {
             "host.js",
             crate::text::MonoShaper::default(),
             log,
-            Some(Arc::new(FixedHttp)),
             host,
         ) {
             Ok(session) => session,
@@ -4026,9 +3907,7 @@ fn timers_fetch_and_modules_run_inside_the_frame() {
         assert!(text.contains('1'), "{text}");
         assert!(text.contains("soon"), "{text}");
         assert!(text.contains("raf"), "{text}");
-        assert!(text.contains("body:pong"), "{text}");
         assert!(text.contains("clip:hi"), "{text}");
-        assert!(text.contains("ws"), "{text}");
         assert!(text.contains("state:background"), "{text}");
         assert!(!text.contains("cleared"), "{text}");
         assert!(text.contains("later"), "{text}");
@@ -4057,7 +3936,6 @@ fn get_initial_url_is_visible_during_eval() {
             "launch.js",
             crate::text::MonoShaper::default(),
             log,
-            None,
             host,
         ) {
             Ok(_) => {}
@@ -4097,7 +3975,6 @@ fn sync_module_error_reaches_js() {
             "error.js",
             crate::text::MonoShaper::default(),
             log,
-            None,
             host,
         ) {
             Ok(_) => {}
@@ -4132,7 +4009,6 @@ fn promise_module_settles_through_io_event() {
             "promise.js",
             crate::text::MonoShaper::default(),
             log,
-            None,
             host,
         ) {
             Ok(session) => session,
@@ -4160,7 +4036,6 @@ fn unregistered_host_specifier_is_not_linked() {
             "missing.js",
             crate::text::MonoShaper::default(),
             no_log(),
-            None,
             host,
         ) {
             Err(Error::Script(message)) => {
@@ -4181,7 +4056,6 @@ fn bare_scope_must_be_bundled() {
             "bare.js",
             crate::text::MonoShaper::default(),
             no_log(),
-            None,
             host,
         ) {
             Err(Error::Script(message)) => {
@@ -4205,7 +4079,6 @@ fn nested_host_path_must_be_bundled() {
             "nested.js",
             crate::text::MonoShaper::default(),
             no_log(),
-            None,
             host,
         ) {
             Err(Error::Script(message)) => {
@@ -5374,7 +5247,6 @@ import { createSignal } from "reactive";
         "canvas-host.js",
         crate::text::MonoShaper::default(),
         no_log(),
-        None,
         config,
     ) {
         Ok(session) => session,
@@ -5456,14 +5328,12 @@ fn debug_update_checks_the_candidate_first_frame_before_replacing_the_program() 
     let attempted = host.update_source(
         r#"import { createElement } from "scene"; createElement("text", { value: "bad", style: { color: [0, 0, 0, 255] } }); requestAnimationFrame(() => { throw new Error("first frame"); });"#,
         Box::new(crate::text::MonoShaper::default()),
-        Box::new(|_| Ok(())),
         session::FrameTime::at(16.0),
     );
     assert!(attempted.unwrap_err().contains("first frame"));
     host.update_source(
         r#"import { createElement } from "scene"; createElement("text", { value: "updated", style: { color: [0, 0, 0, 255] } });"#,
         Box::new(crate::text::MonoShaper::default()),
-        Box::new(|_| Ok(())),
         session::FrameTime::at(32.0),
     )
     .expect("successful update");

@@ -242,7 +242,7 @@ impl FrameListener for DevtoolFrames {
         self.devtools.push_frame(crate::diagnostics::FrameSample {
             seq: 0,
             number: timing.number,
-            at_ms: crate::net::mono_ms(),
+            at_ms: mono_ms(),
             work_ms: timing.work_ms,
             budget_ms: timing.interval_ms,
             session_ms: timing.session_ms,
@@ -403,6 +403,25 @@ fn layer_kind(kind: &engine::scene::LayerKind) -> &'static str {
         engine::scene::LayerKind::Picture { .. } => "picture",
         engine::scene::LayerKind::PlatformView { .. } => "platformView",
     }
+}
+
+pub(crate) fn ms_i64(ms: f64) -> i64 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "deadlines are millisecond timestamps and fit in i64"
+    )]
+    {
+        ms as i64
+    }
+}
+
+pub(crate) fn mono_ms() -> f64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs_f64()
+        * 1000.0
 }
 
 #[cfg(test)]

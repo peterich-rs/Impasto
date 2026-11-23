@@ -4,9 +4,8 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 
 use javascript::host::{
-    HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpRequest, ImmediateExec, Invoke,
-    IoEvent, IoJob, Method, MethodExec, Module, ModuleRegistry, PluginResult, PluginValue, Settle,
-    Work,
+    ImmediateExec, Invoke, IoEvent, Method, MethodExec, Module, ModuleRegistry, PluginResult,
+    PluginValue, Settle, StreamEvent, Work,
 };
 
 fn sync_method(name: &'static str, text: &'static str) -> Method {
@@ -130,34 +129,24 @@ fn host_registry_is_namespace_neutral() {
 #[test]
 fn transport_variants_roundtrip() {
     let (tx, rx) = mpsc::channel();
-    let event = IoEvent::HttpChunk {
-        token: 4,
-        bytes: vec![7],
-        done: true,
-        error: Some(HttpError::new(HttpFailure::Canceled, "AbortError")),
+    let event = IoEvent::NativeStream {
+        id: 4,
+        event: StreamEvent::Failed("Canceled".into()),
     };
-    let job = IoJob::SocketClose { id: 4 };
-    if tx.send((event, job)).is_err() {
+    if tx.send(event).is_err() {
         panic!("send");
     }
-    let (event, job) = match rx.try_recv() {
-        Ok(pair) => pair,
+    let event = match rx.try_recv() {
+        Ok(event) => event,
         Err(error) => panic!("{error}"),
     };
     match event {
-        IoEvent::HttpChunk {
-            token: 4,
-            bytes,
-            done: true,
-            error: Some(error),
-        } => {
-            assert_eq!(bytes, vec![7]);
-            assert_eq!(error.dom_name(), "AbortError");
-        }
-        _ => panic!("http chunk"),
+        IoEvent::NativeStream {
+            id: 4,
+            event: StreamEvent::Failed(message),
+        } => assert_eq!(message, "Canceled"),
+        _ => panic!("native stream"),
     }
-    assert!(matches!(job, IoJob::SocketClose { id: 4 }));
-    assert_eq!(HTTP_BODY_LIMIT, 4 * 1024 * 1024);
 }
 
 fn assert_send<T: Send>() {}
@@ -169,15 +158,11 @@ fn host_contracts_are_send() {
     assert_send::<PluginResult>();
     assert_send::<Settle>();
     assert_send::<Work>();
-    assert_send::<HttpRequest>();
-    assert_send::<IoJob>();
     assert_send::<IoEvent>();
     assert_send::<ImmediateExec>();
     assert_sync::<ImmediateExec>();
     assert_send::<Arc<dyn MethodExec>>();
     assert_sync::<Arc<dyn MethodExec>>();
-    assert_send::<Arc<dyn HttpClient>>();
-    assert_sync::<Arc<dyn HttpClient>>();
 }
 
 #[test]

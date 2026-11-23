@@ -4,13 +4,13 @@
     reason = "test assertions identify the failed step"
 )]
 
-use javascript::host::{HttpError, HttpFailure, IoEvent, IoJob};
-use javascript::runtime::Runtime;
+use javascript::host::{Method, Module, ModuleRegistry, PluginValue};
+use javascript::runtime::{ModuleCatalog, Runtime};
 use javascript::standard::StandardProfile;
 
 fn portable() -> Runtime {
     Runtime::builder()
-        .standard(StandardProfile::default())
+        .standard(StandardProfile)
         .build()
         .unwrap_or_else(|error| panic!("portable runtime failed: {error}"))
 }
@@ -23,42 +23,43 @@ fn eval(runtime: &mut Runtime, source: &str) {
 
 #[test]
 fn standard_manifest_tracks_runtime_globals_and_dependencies() {
-    for profile in [
-        StandardProfile::default(),
-        StandardProfile::default().with_transports(false, false),
+    let profile = StandardProfile;
+    let mut runtime = Runtime::builder()
+        .standard(profile)
+        .build()
+        .expect("runtime");
+    let mut installed = std::collections::HashSet::new();
+    for module in profile.modules() {
+        for dependency in module.dependencies {
+            assert!(
+                installed.contains(dependency),
+                "{dependency} before {}",
+                module.name
+            );
+        }
+        assert!(installed.insert(module.name));
+    }
+    for global in profile.globals() {
+        let test = format!(
+            "var descriptor = Object.getOwnPropertyDescriptor(globalThis, {global:?}); \
+             if (!descriptor || !descriptor.writable || !descriptor.configurable) \
+             throw Error({global:?});"
+        );
+        eval(&mut runtime, &test);
+    }
+    for removed in [
+        "fetch",
+        "fetchStream",
+        "WebSocket",
+        "Headers",
+        "Request",
+        "Response",
+        "__host",
     ] {
-        let mut runtime = Runtime::builder()
-            .standard(profile)
-            .build()
-            .expect("runtime");
-        let mut installed = std::collections::HashSet::new();
-        for module in profile.modules() {
-            for dependency in module.dependencies {
-                assert!(
-                    installed.contains(dependency),
-                    "{dependency} before {}",
-                    module.name
-                );
-            }
-            assert!(installed.insert(module.name));
-        }
-        for global in profile.globals() {
-            let test = format!(
-                "var descriptor = Object.getOwnPropertyDescriptor(globalThis, {global:?}); \
-                 if (!descriptor || !descriptor.writable || !descriptor.configurable) \
-                 throw Error({global:?});"
-            );
-            eval(&mut runtime, &test);
-        }
-        for optional in ["fetch", "fetchStream", "WebSocket"] {
-            let expected = profile.globals().any(|name| name == optional);
-            eval(
-                &mut runtime,
-                &format!(
-                    "if (Object.hasOwn(globalThis, {optional:?}) !== {expected}) throw Error({optional:?});"
-                ),
-            );
-        }
+        eval(
+            &mut runtime,
+            &format!("if (Object.hasOwn(globalThis, {removed:?})) throw Error({removed:?});"),
+        );
     }
 }
 
@@ -163,390 +164,6 @@ if (URL.canParse('relative') || !URL.canParse('relative', url)) throw Error('can
 }
 
 #[test]
-fn static_body_tracks_null_empty_lock_and_disturbance() {
-    let mut runtime = portable();
-    eval(
-        &mut runtime,
-        r#"
-const headers = new Headers([['X-Test', '  a '], ['x-test', 'b'], ['Set-Cookie', 'a=1'], ['set-cookie', 'b=2']]);
-if (headers.get('X-TEST') !== 'a, b' || headers.getSetCookie().join('/') !== 'a=1/b=2') throw Error('headers');
-globalThis.bodyDone = false;
-globalThis.bodyError = undefined;
-(async () => {
-  const absent = new Response(null);
-  const empty = new Response('');
-  if (absent.body !== null || absent.bodyUsed || empty.body === null || empty.bodyUsed) throw Error('empty vs null');
-  if (await absent.text() !== '' || (await absent.arrayBuffer()).byteLength !== 0 || absent.bodyUsed) throw Error('null consume');
-  const held = empty.body.getReader();
-  if (!empty.body.locked || empty.bodyUsed) throw Error('lock disturbed body');
-  try {
-    await empty.text();
-    throw Error('locked body consumed');
-  } catch (error) {
-    if (!(error instanceof TypeError)) throw error;
-  }
-  held.releaseLock();
-  if (empty.body.locked || empty.bodyUsed || await empty.text() !== '' || !empty.bodyUsed) throw Error('released body');
-  try {
-    await empty.arrayBuffer();
-    throw Error('disturbed body consumed');
-  } catch (error) {
-    if (!(error instanceof TypeError)) throw error;
-  }
-  const request = new Request('https://example.test/post', { method: 'post', body: 'q=abc' });
-  const copied = new Request(request);
-  if (!request.bodyUsed || copied.bodyUsed || await copied.text() !== 'q=abc') throw Error('body transfer');
-  globalThis.bodyDone = true;
-})().catch(error => { globalThis.bodyError = error; });
-"#,
-    );
-    runtime.drive(0).expect("consume body");
-    eval(
-        &mut runtime,
-        "if (!bodyDone) throw bodyError || Error('pending body');",
-    );
-}
-
-fn stream_token(runtime: &mut Runtime) -> u64 {
-    match runtime.take_jobs().as_slice() {
-        [IoJob::HttpStream(request)] => request.token,
-        other => panic!("expected one stream job, got {other:?}"),
-    }
-}
-
-fn head(runtime: &Runtime, token: u64) {
-    assert!(
-        runtime
-            .enqueue(IoEvent::HttpHead {
-                token,
-                status: 200,
-                headers: vec![("x-fixture".into(), "yes".into())],
-            })
-            .is_ok()
-    );
-}
-
-fn chunk(runtime: &Runtime, token: u64, bytes: &[u8], done: bool) {
-    assert!(
-        runtime
-            .enqueue(IoEvent::HttpChunk {
-                token,
-                bytes: bytes.to_vec(),
-                done,
-                error: None,
-            })
-            .is_ok()
-    );
-}
-
-#[test]
-fn portable_fetch_resolves_at_head_and_reads_across_chunks() {
-    let mut runtime = portable();
-    eval(
-        &mut runtime,
-        r#"
-globalThis.status = 0;
-globalThis.text = null;
-fetch('https://example.test/stream').then(response => {
-  status = response.status;
-  if (response.headers.get('X-Fixture') !== 'yes') throw Error('response headers');
-  return response.text();
-}).then(result => { text = result; });
-"#,
-    );
-    let token = stream_token(&mut runtime);
-    head(&runtime, token);
-    runtime.drive(1).expect("response head");
-    eval(
-        &mut runtime,
-        "if (status !== 200 || text !== null) throw Error('head checkpoint');",
-    );
-    chunk(&runtime, token, &[0xe7, 0x95], false);
-    runtime.drive(2).expect("first bytes");
-    chunk(&runtime, token, &[0x8c], true);
-    runtime.drive(3).expect("last bytes");
-    eval(
-        &mut runtime,
-        "if (text !== '界') throw Error(String(text));",
-    );
-    assert_eq!(runtime.counts().requests, 0);
-    assert_eq!(runtime.counts().queued_bytes, 0);
-}
-
-#[test]
-fn reader_release_abort_and_terminal_errors_settle_the_right_promises() {
-    let mut runtime = portable();
-    eval(
-        &mut runtime,
-        r#"
-globalThis.controller = new AbortController();
-globalThis.outcome = [];
-fetch('https://example.test/stream', { signal: controller.signal }).then(response => {
-  globalThis.result = response;
-  const reader = response.body.getReader();
-  reader.read().catch(error => outcome.push(error.name));
-  reader.releaseLock();
-  globalThis.finalReader = response.body.getReader();
-  finalReader.read().catch(error => outcome.push(error));
-});
-"#,
-    );
-    let token = stream_token(&mut runtime);
-    head(&runtime, token);
-    runtime.drive(0).expect("head and first reader release");
-    eval(
-        &mut runtime,
-        "if (!result.bodyUsed || outcome.join(',') !== 'TypeError') throw Error(outcome); controller.abort('stop');",
-    );
-    runtime.drive(1).expect("abort jobs");
-    eval(
-        &mut runtime,
-        "if (outcome.join(',') !== 'TypeError,stop') throw Error(outcome);",
-    );
-    assert_eq!(runtime.counts().requests, 0);
-    chunk(&runtime, token, b"ignored", true);
-    runtime.drive(2).expect("ignore stale transport");
-    assert_eq!(runtime.counts().queued_bytes, 0);
-
-    eval(
-        &mut runtime,
-        "fetch('https://example.test/down').catch(error => { globalThis.failure = error.name; });",
-    );
-    let token = match runtime.take_jobs().last() {
-        Some(IoJob::HttpStream(request)) => request.token,
-        other => panic!("expected retry job, got {other:?}"),
-    };
-    assert!(
-        runtime
-            .enqueue(IoEvent::HttpChunk {
-                token,
-                bytes: Vec::new(),
-                done: true,
-                error: Some(HttpError::new(HttpFailure::Timeout, "down")),
-            })
-            .is_ok()
-    );
-    runtime.drive(3).expect("transport failure");
-    eval(
-        &mut runtime,
-        "if (failure !== 'TimeoutError') throw Error(failure);",
-    );
-    assert_eq!(runtime.counts().requests, 0);
-}
-
-#[test]
-fn queued_credit_follows_the_body_past_transport_end() {
-    let mut runtime = portable();
-    eval(
-        &mut runtime,
-        "fetch('https://example.test/unread').then(response => { globalThis.unread = response; });",
-    );
-    let token = stream_token(&mut runtime);
-    head(&runtime, token);
-    chunk(&runtime, token, b"held", true);
-    runtime.drive(1).expect("enqueue body chunk");
-    assert_eq!(runtime.counts().requests, 0);
-    assert_eq!(runtime.counts().queued_bytes, 4);
-    eval(
-        &mut runtime,
-        "unread.body.getReader().read().then(part => { globalThis.held = new TextDecoder().decode(part.value); });",
-    );
-    assert_eq!(runtime.counts().queued_bytes, 0);
-    runtime.drive(2).expect("read buffered bytes");
-    eval(&mut runtime, "if (held !== 'held') throw Error(held);");
-}
-
-#[test]
-fn socket_terminal_releases_the_connection_and_rejects_late_events() {
-    let mut runtime = portable();
-    eval(
-        &mut runtime,
-        r#"
-globalThis.trace = [];
-globalThis.socket = new WebSocket('https://example.test/socket', ['probe']);
-try {
-  socket.send('early');
-  throw Error('connecting send succeeded');
-} catch (error) {
-  if (error.name !== 'InvalidStateError') throw error;
-}
-socket.onopen = () => {
-  if (socket.readyState !== WebSocket.OPEN) throw Error('bad open state');
-  socket.send(new Uint8Array([1, 2, 3, 4]).subarray(1, 3));
-  trace.push(socket.protocol);
-};
-socket.onerror = () => trace.push('error');
-socket.onclose = event => trace.push(String(event.code));
-"#,
-    );
-    let id = match runtime.take_jobs().as_slice() {
-        [IoJob::SocketOpen { id, url, protocols }] => {
-            assert_eq!(url, "wss://example.test/socket");
-            assert_eq!(protocols, &["probe"]);
-            *id
-        }
-        other => panic!("expected socket job, got {other:?}"),
-    };
-    let post = |event: &str, text: &str| IoEvent::Socket {
-        id,
-        event: event.into(),
-        text: true,
-        data: text.as_bytes().to_vec(),
-    };
-    assert!(runtime.enqueue(post("open", "probe")).is_ok());
-    runtime.drive(0).expect("open socket");
-    assert!(
-        matches!(runtime.take_jobs().as_slice(), [IoJob::SocketSend { text: false, data, .. }] if data == &[2, 3])
-    );
-    assert!(runtime.enqueue(post("error", "down")).is_ok());
-    assert!(runtime.enqueue(post("close", "")).is_ok());
-    assert!(runtime.enqueue(post("open", "late")).is_ok());
-    runtime.drive(1).expect("close socket");
-    eval(
-        &mut runtime,
-        "if (trace.join(',') !== 'probe,error,1006' || socket.readyState !== WebSocket.CLOSED) throw Error(trace); socket.send('ignored');",
-    );
-    assert!(runtime.take_jobs().is_empty());
-    assert_eq!(runtime.counts().sockets, 0);
-}
-
-#[test]
-fn stream_empty_end_closes_without_a_spurious_piece() {
-    let mut runtime = Runtime::builder().build().expect("runtime");
-    eval(
-        &mut runtime,
-        r#"
-fetch('https://example.test/empty').then(response => {
-  const reader = response.body.getReader();
-  return reader.read();
-}).then(value => { globalThis.empty = value; });
-"#,
-    );
-    let token = stream_token(&mut runtime);
-    head(&runtime, token);
-    chunk(&runtime, token, &[], true);
-    runtime.drive(0).expect("empty stream");
-    eval(
-        &mut runtime,
-        "if (!empty.done || empty.value !== undefined) throw Error('spurious empty chunk');",
-    );
-    assert_eq!(runtime.counts().requests, 0);
-}
-
-#[test]
-fn unread_stream_does_not_hold_the_other_streams_credit() {
-    let mut runtime = Runtime::builder()
-        .standard(StandardProfile::default())
-        .limits(javascript::runtime::RuntimeLimits {
-            stream_bytes: 4,
-            ..javascript::runtime::RuntimeLimits::default()
-        })
-        .build()
-        .expect("limited runtime");
-    eval(
-        &mut runtime,
-        r#"
-fetch('https://example.test/slow').then(response => { globalThis.slow = response; });
-fetch('https://example.test/fast').then(response => response.text()).then(text => { globalThis.fast = text; });
-"#,
-    );
-    let (slow, fast) = match runtime.take_jobs().as_slice() {
-        [IoJob::HttpStream(slow), IoJob::HttpStream(fast)] => (slow.token, fast.token),
-        other => panic!("expected parallel stream jobs, got {other:?}"),
-    };
-    for token in [slow, fast] {
-        assert!(
-            runtime
-                .enqueue(IoEvent::HttpHead {
-                    token,
-                    status: 200,
-                    headers: Vec::new(),
-                })
-                .is_ok()
-        );
-    }
-    chunk(&runtime, slow, b"slow", false);
-    chunk(&runtime, fast, b"fast", true);
-    runtime.drive(0).expect("parallel streams");
-    assert_eq!(runtime.counts().queued_bytes, 4);
-    assert!(
-        runtime
-            .enqueue(IoEvent::HttpChunk {
-                token: slow,
-                bytes: Vec::from(&b"more"[..]),
-                done: false,
-                error: None,
-            })
-            .is_err()
-    );
-    eval(
-        &mut runtime,
-        "if (fast !== 'fast' || slow.bodyUsed) throw Error('slow stream blocked the fast one'); slow.body.cancel('done');",
-    );
-    assert_eq!(runtime.counts().queued_bytes, 0);
-    assert_eq!(runtime.counts().requests, 0);
-}
-
-#[test]
-fn remote_error_after_head_rejects_reads_instead_of_the_response() {
-    let mut runtime = portable();
-    eval(
-        &mut runtime,
-        r#"
-globalThis.trace = [];
-fetch('https://example.test/broken').then(response => {
-  trace.push('head');
-  const reader = response.body.getReader();
-  reader.read().catch(error => trace.push(error.name));
-  reader.closed.catch(error => trace.push('closed:' + error.name));
-}, error => trace.push('fetch:' + error.name));
-"#,
-    );
-    let token = stream_token(&mut runtime);
-    head(&runtime, token);
-    runtime.drive(0).expect("head available");
-    assert!(
-        runtime
-            .enqueue(IoEvent::HttpChunk {
-                token,
-                bytes: Vec::new(),
-                done: true,
-                error: Some(HttpError::new(HttpFailure::Network, "disconnected")),
-            })
-            .is_ok()
-    );
-    runtime.drive(1).expect("readers reject");
-    eval(
-        &mut runtime,
-        "if (trace.join(',') !== 'head,closed:TypeError,TypeError') throw Error(trace);",
-    );
-}
-
-#[test]
-fn profiles_can_disable_fetch_for_an_inline_transport() {
-    struct UnusedClient;
-
-    impl javascript::host::HttpClient for UnusedClient {
-        fn perform(
-            &self,
-            _: &javascript::host::HttpRequest,
-        ) -> Result<javascript::host::HttpResponse, HttpError> {
-            panic!("no portable fetch should reach an inline client")
-        }
-    }
-
-    let mut runtime = Runtime::builder()
-        .standard(StandardProfile::default().with_transports(false, true))
-        .http_client(std::sync::Arc::new(UnusedClient))
-        .build()
-        .expect("runtime");
-    eval(
-        &mut runtime,
-        "if (typeof fetch !== 'undefined' || typeof fetchStream !== 'undefined' || typeof Response !== 'function') throw Error('profile capability');",
-    );
-}
-
-#[test]
 fn utf8_decoder_rejects_detached_input_and_flushes_partial_bytes() {
     let mut runtime = portable();
     eval(
@@ -568,38 +185,31 @@ if (decoder.decode(new Uint8Array([0xf0, 0x90]), { stream: true }) !== '' ||
 }
 
 #[test]
-fn native_web_constructors_keep_subclasses_and_reentrant_headers() {
+fn native_web_constructors_keep_subclasses() {
     let mut runtime = portable();
     eval(
         &mut runtime,
         r#"
-class ExtendedHeaders extends Headers {}
-const headers = new ExtendedHeaders([['a', 'one'], ['b', 'two']]);
-if (!(headers instanceof ExtendedHeaders) || !(headers instanceof Headers)) throw Error('Headers prototype');
-if (headers.get('absent') !== null) throw Error('missing header');
-const pairs = headers.entries();
-if (pairs[Symbol.iterator]() !== pairs || String(pairs.next().value) !== 'a,one') throw Error('header iterator');
-headers.set('b', 'updated');
-if (String(pairs.next().value) !== 'b,updated' || !pairs.next().done) throw Error('header iterator values');
-headers.set({
-  toString() {
-    headers.append('nested', 'present');
-    return 'outer';
-  }
-}, 'present');
-if (!headers.has('outer') || !headers.has('nested')) throw Error('coercion reentry');
-class ExtendedRequest extends Request {}
-class ExtendedResponse extends Response {}
-if (!(new ExtendedRequest('https://example.test') instanceof ExtendedRequest)) throw Error('Request prototype');
-if (!(new ExtendedResponse() instanceof ExtendedResponse)) throw Error('Response prototype');
-for (const [ctor, args] of [[Headers, []], [Response, []], [Request, ['https://example.test']]]) {
+class ExtendedTarget extends EventTarget {}
+class ExtendedEvent extends Event {}
+class ExtendedUrl extends URL {}
+class ExtendedParams extends URLSearchParams {}
+class ExtendedEncoder extends TextEncoder {}
+class ExtendedDecoder extends TextDecoder {}
+class ExtendedStream extends ReadableStream {}
+class ExtendedError extends DOMException {}
+if (!(new ExtendedTarget() instanceof EventTarget)) throw Error('EventTarget prototype');
+if (!(new ExtendedEvent('x') instanceof Event)) throw Error('Event prototype');
+if (!(new ExtendedUrl('https://example.test') instanceof URL)) throw Error('URL prototype');
+if (!(new ExtendedParams() instanceof URLSearchParams)) throw Error('URLSearchParams prototype');
+if (!(new ExtendedEncoder() instanceof TextEncoder)) throw Error('TextEncoder prototype');
+if (!(new ExtendedDecoder() instanceof TextDecoder)) throw Error('TextDecoder prototype');
+if (!(new ExtendedStream() instanceof ReadableStream)) throw Error('ReadableStream prototype');
+if (!(new ExtendedError('msg', 'AbortError') instanceof DOMException)) throw Error('DOMException prototype');
+for (const [ctor, args] of [[EventTarget, []], [Event, ['x']], [URL, ['https://example.test']], [TextEncoder, []], [TextDecoder, []], [ReadableStream, []]]) {
   try { ctor(...args); throw Error('constructor called without new'); }
   catch (error) { if (!(error instanceof TypeError)) throw error; }
 }
-class ExtendedSocket extends WebSocket {}
-const socket = new ExtendedSocket('ws://example.test');
-if (!(socket instanceof ExtendedSocket) || !(socket instanceof EventTarget)) throw Error('WebSocket prototype');
-socket.close();
 "#,
     );
 }
@@ -633,20 +243,44 @@ fn native_console_time_uses_the_same_manual_clock() {
 
 #[test]
 fn host_byte_codec_uses_current_length_tracking_view_bounds() {
-    let mut runtime = portable();
-    eval(
-        &mut runtime,
-        r#"
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let module = Module {
+        name: "BytesProbe",
+        specifier: "@impasto/bytes-probe",
+        exports: Default::default(),
+        methods: vec![Method::sync("send", {
+            let captured = std::sync::Arc::clone(&captured);
+            move |args| {
+                let Some(PluginValue::Bytes(bytes)) = args.first() else {
+                    return Err("expected bytes".into());
+                };
+                *captured.lock().expect("lock") = bytes.clone();
+                Ok(PluginValue::Null)
+            }
+        })],
+    };
+    let catalog = ModuleCatalog::new(ModuleRegistry::try_new(vec![module]).expect("registry"))
+        .expect("catalog");
+    let mut runtime = Runtime::builder()
+        .modules(catalog)
+        .module(
+            "app:bytes",
+            r#"
+import { send } from '@impasto/bytes-probe';
 const buffer = new ArrayBuffer(2, { maxByteLength: 8 });
 const view = new Uint8Array(buffer);
 buffer.resize(4);
 view.set([4, 3, 2, 1]);
-__host.http('POST', 'https://example.test/raw', '', view);
+send(view);
 "#,
+        )
+        .build()
+        .expect("runtime");
+    let ticket = runtime.start_module("app:bytes").expect("start");
+    runtime.drive(0).expect("drive");
+    assert_eq!(
+        runtime.take_module_result(ticket).expect("result"),
+        Some(javascript::runtime::ModuleOutcome::Fulfilled)
     );
-    let jobs = runtime.take_jobs();
-    let [IoJob::Http(request)] = &jobs[..] else {
-        panic!("expected request")
-    };
-    assert_eq!(request.body, [4, 3, 2, 1]);
+    assert_eq!(*captured.lock().expect("lock"), vec![4, 3, 2, 1]);
 }

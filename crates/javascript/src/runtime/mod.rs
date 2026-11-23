@@ -9,14 +9,13 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::host::{
-    CreditPool, CreditUsage, Delivery, HostEvent, HttpClient, HttpFailure, HttpPiece, HttpRequest,
-    IoEvent, IoJob, NativeResource, PluginValue, RequestKey, Route, RuntimeKey, Settle, StreamSink,
+    CreditPool, CreditUsage, Delivery, HostEvent, IoEvent, NativeResource, PluginValue, RequestKey,
+    Route, RuntimeKey, Settle, StreamSink,
 };
 use rquickjs::promise::PromiseState;
 use rquickjs::{Ctx, Exception, Object, Persistent};
 
-use crate::runtime::resources::{Inbox, Kind, Resource, Resources, SocketState, failure, next_id};
-use io::{External, HttpMode, IoPort};
+use crate::runtime::resources::{Inbox, Kind, Resource, Resources, failure, next_id};
 use modules::ModuleTable;
 use quickjs::binder::{self, ModuleBindings, ModuleRuntime};
 use quickjs::{JobReport, JobStop, Vm, poll_timer, run_job_batch};
@@ -24,7 +23,6 @@ use scheduler::Scheduler;
 mod builder;
 mod catalog;
 mod delivery;
-pub(crate) mod io;
 pub(crate) mod modules;
 pub(crate) mod quickjs;
 pub(crate) mod resources;
@@ -32,7 +30,6 @@ pub(crate) mod scheduler;
 
 pub use builder::RuntimeBuilder;
 pub use catalog::{CatalogError, ModuleCatalog};
-pub use io::{Allow, HttpCall, IoBindings, IoSubmit, OperationPolicy};
 pub use modules::NativeFactory;
 pub use quickjs::{ExtensionContext, JsDiagnostic, Saved, TrustedBytecode};
 pub use scheduler::{DrivePolicy, RuntimeLimits};
@@ -143,7 +140,6 @@ pub struct RuntimeCounts {
     pub rejections: usize,
     pub listeners: usize,
     pub requests: usize,
-    pub sockets: usize,
     pub queued_events: usize,
     pub queued_bytes: usize,
     pub peak_promises: usize,
@@ -152,7 +148,6 @@ pub struct RuntimeCounts {
     pub peak_tickets: usize,
     pub peak_rejections: usize,
     pub peak_requests: usize,
-    pub peak_sockets: usize,
     pub peak_queued_events: usize,
     pub peak_queued_bytes: usize,
     pub discarded_events: usize,
@@ -185,14 +180,9 @@ struct State {
     modules: Rc<ModuleTable>,
     tickets: RefCell<HashMap<u64, TrackedModule>>,
     listeners: RefCell<Vec<(String, String, Saved)>>,
-    web_cleanup: RefCell<Option<Saved>>,
     ticket_peak: Cell<usize>,
     listener_peak: Cell<usize>,
     log: Log,
-    host_policy: RefCell<Rc<HostPolicy>>,
-    io: RefCell<IoBindings>,
-    jobs: RefCell<Vec<IoJob>>,
-    jobs_bytes: Cell<usize>,
     inbox: Arc<Inbox>,
     local: RefCell<VecDeque<Delivery>>,
     resources: RefCell<Resources>,
@@ -253,28 +243,7 @@ impl Runtime {
 
     pub fn finish_installation(&self) {
         if self.state.phase.get() == Phase::Installing {
-            let _budget = self.state.vm.budget("eval");
-            let cleanup = self.state.vm.with(|ctx| {
-                let cleanup: rquickjs::Result<rquickjs::Value> = ctx
-                    .globals()
-                    .get::<_, Object>("__host")
-                    .and_then(|bridge| bridge.get("_closeWeb"));
-                if ctx.has_exception() {
-                    drop(ctx.catch());
-                }
-                cleanup
-                    .ok()
-                    .filter(rquickjs::Value::is_function)
-                    .map(|cleanup| Persistent::save(&ctx, cleanup))
-            });
-            *self.state.web_cleanup.borrow_mut() = cleanup;
             self.state.phase.set(Phase::Ready);
-        }
-    }
-
-    pub fn configure_io(&self, io: IoBindings) {
-        if self.state.is_open() {
-            *self.state.io.borrow_mut() = io;
         }
     }
 
@@ -316,7 +285,6 @@ impl Runtime {
             rejections: state.vm.rejections.borrow().len(),
             listeners: state.listeners.borrow().len(),
             requests: resources.requests(),
-            sockets: resources.sockets(),
             queued_events: state.inbox.len() + state.local.borrow().len(),
             queued_bytes: bytes,
             peak_promises: state.vm.promise_peak.get(),
@@ -325,7 +293,6 @@ impl Runtime {
             peak_listeners: state.listener_peak.get(),
             peak_rejections: state.vm.rejection_peak.get(),
             peak_requests: resources.peak,
-            peak_sockets: resources.socket_peak,
             peak_queued_events: peak_events,
             peak_queued_bytes: peak_bytes,
             discarded_events: resources.discarded,
@@ -560,7 +527,7 @@ impl Runtime {
             jobs_pending: self.jobs_pending(),
             due_next_turn: self.due_timer_next_turn(),
             queued_events: state.inbox.len() + state.local.borrow().len(),
-            in_flight: resources.requests() + resources.sockets(),
+            in_flight: resources.requests(),
             next_deadline_ms: state
                 .scheduler
                 .next_timer_ms()
@@ -691,12 +658,6 @@ impl Runtime {
         })
     }
 
-    /// Work queued for an external owner. Inline work has already run.
-    pub fn take_jobs(&mut self) -> Vec<IoJob> {
-        self.state.jobs_bytes.set(0);
-        std::mem::take(&mut *self.state.jobs.borrow_mut())
-    }
-
     pub fn enqueue(&self, event: IoEvent) -> Result<(), EnqueueError> {
         self.enqueue_delivery(Delivery {
             runtime: self.key(),
@@ -720,10 +681,7 @@ impl Runtime {
             .borrow()
             .get(id)
             .map(|resource| resource.route.clone());
-        let carries_chunk =
-            matches!(&delivery.event, IoEvent::HttpChunk { bytes, .. } if !bytes.is_empty());
         let reserved_terminal = delivery.event.is_terminal()
-            && !carries_chunk
             && known.is_some()
             && bytes <= crate::host::TERMINAL_PAYLOAD_LIMIT;
         let credit_verified = delivery
@@ -807,7 +765,7 @@ impl Runtime {
         })
     }
 
-    /// Frame delivery retains the UI's HTTP, module completion, socket ordering.
+    /// Frame delivery preserves module completion ordering before stream items.
     pub fn drain_local_io(&self, mut on_error: impl FnMut(JsError)) {
         let expired = self.state.expire();
         let mut events: Vec<_> = self
@@ -826,7 +784,6 @@ impl Runtime {
         events.extend(expired.into_iter().map(|event| (event, true)));
         events.sort_by_key(|(delivery, _)| match delivery.event {
             IoEvent::Plugin { .. } | IoEvent::Host(_) => 1,
-            IoEvent::Socket { .. } => 2,
             _ => 0,
         });
         for (event, local) in events {
@@ -909,29 +866,6 @@ impl Runtime {
         })
     }
 
-    pub fn install_host(
-        &self,
-        ctx: &Ctx<'_>,
-        policy: impl for<'js> Fn(&Ctx<'js>) -> rquickjs::Result<()> + 'static,
-        has_module: impl Fn(&str) -> bool + 'static,
-    ) -> rquickjs::Result<()> {
-        self.install_host_inner(ctx, policy, has_module, false)
-    }
-
-    fn install_host_inner(
-        &self,
-        ctx: &Ctx<'_>,
-        policy: impl for<'js> Fn(&Ctx<'js>) -> rquickjs::Result<()> + 'static,
-        has_module: impl Fn(&str) -> bool + 'static,
-        stop: bool,
-    ) -> rquickjs::Result<()> {
-        self.check_context(ctx)?;
-        let state = &*self.state;
-        *state.host_policy.borrow_mut() = Rc::new(policy);
-        // SAFETY: the stable boxed state owns the VM and both providers until its context closes.
-        unsafe { io::install(ctx, &state.vm, state, state, has_module, stop) }
-    }
-
     pub fn install_modules(
         &self,
         ctx: &Ctx<'_>,
@@ -970,20 +904,13 @@ impl Runtime {
             self.state.outbound.close();
             self.state.resources.borrow_mut().close();
             self.state.native_resources.close();
-            let cleanup = self.state.web_cleanup.borrow_mut().take();
-            if let Some(cleanup) = cleanup {
-                let _budget = self.state.vm.budget("shutdown");
-                self.state.vm.with(|ctx| {
-                    let result = cleanup
-                        .restore(&ctx)
-                        .and_then(rquickjs::Function::from_value)
-                        .and_then(|close| close.call::<_, ()>(()));
-                    if let Err(error) = result {
-                        let diagnostic = self.state.script_error(&ctx, error);
-                        (self.state.log)(3, &diagnostic.message);
-                    }
-                });
-            }
+            let _budget = self.state.vm.budget("shutdown");
+            self.state.vm.with(|ctx| {
+                if let Err(error) = crate::standard::native_stream::close(&ctx) {
+                    let diagnostic = self.state.script_error(&ctx, error);
+                    (self.state.log)(3, &diagnostic.message);
+                }
+            });
         }
     }
 
@@ -993,7 +920,6 @@ impl Runtime {
         }
         self.begin_shutdown();
         self.state.local.borrow_mut().clear();
-        self.state.jobs.borrow_mut().clear();
         self.state.scheduler.timers.borrow_mut().clear();
         self.state.listeners.borrow_mut().clear();
         self.state.tickets.borrow_mut().clear();
@@ -1067,12 +993,7 @@ impl ModuleRuntime for BoundRuntime {
                 let mut event = IoEvent::Plugin { token: id, result };
                 let credit = route.reserve(event.payload_bytes(), Duration::ZERO);
                 if credit.is_none() {
-                    event = failure(
-                        id,
-                        Kind::Plugin,
-                        HttpFailure::TooLarge,
-                        "host completion exceeds queue limit",
-                    );
+                    event = failure(id, Kind::Plugin, "host completion exceeds queue limit");
                 }
                 let delivery = route.deliver(event, credit);
                 if let Some(post) = post {
@@ -1265,10 +1186,7 @@ impl State {
         let route = self.route(
             id,
             cancel.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
-            matches!(
-                kind,
-                Kind::Stream { .. } | Kind::Socket(_) | Kind::NativeStream
-            ),
+            matches!(kind, Kind::NativeStream),
         );
         self.resources.borrow_mut().insert(
             id,
@@ -1279,14 +1197,6 @@ impl State {
             },
         );
         route
-    }
-
-    fn queue_terminal(&self, id: u64, kind: Kind, error: HttpFailure, reason: &str) {
-        self.local.borrow_mut().push_back(Delivery {
-            runtime: self.key,
-            event: failure(id, kind, error, reason),
-            credit: None,
-        });
     }
 
     fn expire(&self) -> Vec<Delivery> {
@@ -1310,352 +1220,12 @@ impl State {
                 .retain(|event| event.event.id() != Some(id));
             events.push(Delivery {
                 runtime: self.key,
-                event: failure(
-                    id,
-                    resource.0,
-                    HttpFailure::Timeout,
-                    "transport deadline expired",
-                ),
+                event: failure(id, resource.0, "transport deadline expired"),
                 credit: None,
             });
         }
         events
     }
-
-    fn submit(&self, transport: &External, route: &Route, job: IoJob) -> bool {
-        match transport {
-            External::Jobs => {
-                let mut jobs = self.jobs.borrow_mut();
-                let pending = self.jobs_bytes.get().saturating_add(job.payload_bytes());
-                if jobs.len() >= self.limits.queue_events || pending > self.limits.queue_bytes {
-                    return false;
-                }
-                self.jobs_bytes.set(pending);
-                jobs.push(job);
-                true
-            }
-            External::Legacy(submit) => submit(job).is_ok(),
-            External::Routed(submit) => {
-                let outbound = match &job {
-                    IoJob::SocketSend { .. } => {
-                        let Some(credit) = route.reserve_send() else {
-                            return false;
-                        };
-                        Some(credit)
-                    }
-                    IoJob::Http(_) | IoJob::HttpStream(_) | IoJob::SocketOpen { .. } => {
-                        let Some(credit) = route.reserve_upload(job.payload_bytes()) else {
-                            return false;
-                        };
-                        Some(credit)
-                    }
-                    _ => None,
-                };
-                submit(IoJob::Routed {
-                    route: route.clone(),
-                    job: Box::new(job),
-                    outbound,
-                })
-                .is_ok()
-            }
-        }
-    }
-
-    fn inline_http(
-        &self,
-        client: &dyn HttpClient,
-        request: &HttpRequest,
-        kind: Kind,
-        route: &Route,
-    ) {
-        let token = request.token;
-        if matches!(kind, Kind::Http) {
-            let result = client.perform(request);
-            let event = IoEvent::Http { token, result };
-            if let Some(credit) = route.reserve(event.payload_bytes(), Duration::ZERO) {
-                self.local
-                    .borrow_mut()
-                    .push_back(route.deliver(event, Some(credit)));
-            } else {
-                self.queue_terminal(
-                    token,
-                    kind,
-                    HttpFailure::TooLarge,
-                    "inline response exceeds queue limit",
-                );
-            }
-            return;
-        }
-        // Inline cannot wait for a reader while it is on the JavaScript stack.
-        // Stage the bounded whole response, then replay it at the local checkpoint.
-        let mut events = Vec::new();
-        let mut ended = false;
-        let mut overflow = false;
-        let mut total: usize = 0;
-        let result = client.stream(request, &mut |piece| {
-            if ended || overflow {
-                return false;
-            }
-            let event = match piece {
-                HttpPiece::Head(status, headers) => IoEvent::HttpHead {
-                    token,
-                    status,
-                    headers: headers.to_vec(),
-                },
-                HttpPiece::Chunk(bytes, done) => {
-                    if bytes.len() > crate::host::HTTP_BODY_LIMIT.saturating_sub(total) {
-                        overflow = true;
-                        return false;
-                    }
-                    ended = done;
-                    IoEvent::HttpChunk {
-                        token,
-                        bytes: bytes.to_vec(),
-                        done,
-                        error: None,
-                    }
-                }
-            };
-            total = total.saturating_add(event.payload_bytes());
-            let whole_response = self.route(token, Arc::clone(&request.cancel), false);
-            if let Some(credit) = whole_response.reserve(event.payload_bytes(), Duration::ZERO) {
-                events.push(route.deliver(event, Some(credit)));
-                true
-            } else {
-                overflow = true;
-                false
-            }
-        });
-        if overflow {
-            self.queue_terminal(
-                token,
-                kind,
-                HttpFailure::TooLarge,
-                "inline stream exceeds queue limit",
-            );
-            return;
-        }
-        self.local.borrow_mut().extend(events);
-        if !ended {
-            let error = result.err();
-            self.local.borrow_mut().push_back(route.deliver(
-                IoEvent::HttpChunk {
-                    token,
-                    bytes: Vec::new(),
-                    done: true,
-                    error,
-                },
-                None,
-            ));
-        }
-    }
-}
-
-impl OperationPolicy for State {
-    fn before(&self, ctx: &Ctx<'_>) -> rquickjs::Result<()> {
-        if !self.is_open() {
-            return Err(Exception::throw_type(ctx, "runtime is closing"));
-        }
-        let policy = Rc::clone(&self.host_policy.borrow());
-        policy(ctx)
-    }
-}
-
-impl IoPort for State {
-    fn http(&self, call: HttpCall) -> bool {
-        if self.resources.borrow().requests() >= self.limits.requests {
-            return false;
-        }
-        let kind = if call.streaming {
-            Kind::Stream { head: false }
-        } else {
-            Kind::Http
-        };
-        let cancel = Arc::new(AtomicBool::new(false));
-        let route = self.register(
-            call.token,
-            kind,
-            Some(Arc::clone(&cancel)),
-            Some(self.deadline()),
-        );
-        let request = HttpRequest {
-            token: call.token,
-            method: call.method,
-            url: call.url,
-            headers: header_pairs(&call.headers),
-            body: call.body,
-            cancel,
-            timeout_ms: Some(self.limits.request_timeout_ms),
-        };
-        let mode = self.io.borrow().http.clone();
-        match mode {
-            HttpMode::External(external) => {
-                let token = request.token;
-                let job = if call.streaming {
-                    IoJob::HttpStream(request)
-                } else {
-                    IoJob::Http(request)
-                };
-                if !self.submit(&external, &route, job) {
-                    self.queue_terminal(
-                        token,
-                        kind,
-                        HttpFailure::Network,
-                        "transport is busy or disconnected",
-                    );
-                }
-            }
-            HttpMode::Inline(client) => self.inline_http(&*client, &request, kind, &route),
-            _ => self.queue_terminal(
-                request.token,
-                kind,
-                HttpFailure::Network,
-                "HTTP transport is not linked",
-            ),
-        }
-        true
-    }
-
-    fn abort(&self, ctx: &Ctx<'_>, token: u64) -> rquickjs::Result<()> {
-        let resource = self.resources.borrow_mut().remove(token);
-        let Some(resource) = resource else {
-            return Ok(());
-        };
-        let kind = resource.kind;
-        if !matches!(kind, Kind::Http | Kind::Stream { .. }) {
-            self.resources.borrow_mut().insert(token, resource);
-            return Ok(());
-        }
-        resource.route.cancel();
-        let mode = self.io.borrow().http.clone();
-        if let HttpMode::External(external) = mode {
-            let _ = self.submit(&external, &resource.route, IoJob::Abort { token });
-        }
-        self.inbox.discard(token);
-        self.local
-            .borrow_mut()
-            .retain(|event| event.event.id() != Some(token));
-        delivery::apply(
-            &self.vm,
-            ctx,
-            failure(token, kind, HttpFailure::Canceled, "request canceled"),
-            None,
-        )
-    }
-
-    fn open_socket(&self, url: String, protocols: String) -> Option<u64> {
-        if self.resources.borrow().sockets() >= self.limits.sockets {
-            return None;
-        }
-        let id = next_id()?;
-        let kind = Kind::Socket(SocketState::Connecting);
-        let route = self.register(id, kind, None, Some(self.deadline()));
-        let protocols = protocols
-            .split(',')
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(str::to_owned)
-            .collect();
-        let socket = self.io.borrow().socket.clone();
-        if !socket.is_some_and(|transport| {
-            self.submit(&transport, &route, IoJob::SocketOpen { id, url, protocols })
-        }) {
-            self.queue_terminal(
-                id,
-                kind,
-                HttpFailure::Network,
-                "socket transport is not linked",
-            );
-        }
-        Some(id)
-    }
-
-    fn send_socket(&self, id: u64, text: bool, data: Vec<u8>) -> bool {
-        let route = {
-            let resources = self.resources.borrow();
-            let Some(resource) = resources.get(id) else {
-                return false;
-            };
-            if !matches!(resource.kind, Kind::Socket(SocketState::Open)) {
-                return false;
-            }
-            resource.route.clone().with_send_bytes(data.len())
-        };
-        if data.len()
-            > self
-                .limits
-                .socket_send_bytes
-                .saturating_sub(self.buffered_amount(id))
-        {
-            return false;
-        }
-        let socket = self.io.borrow().socket.clone();
-        socket.is_some_and(|transport| {
-            self.submit(&transport, &route, IoJob::SocketSend { id, text, data })
-        })
-    }
-
-    fn close_socket(&self, id: u64) {
-        let route = {
-            let mut resources = self.resources.borrow_mut();
-            let Some(resource) = resources.get(id) else {
-                return;
-            };
-            if matches!(resource.kind, Kind::Socket(SocketState::Closing)) {
-                return;
-            }
-            let route = resource.route.clone();
-            resources.set_kind(
-                id,
-                Kind::Socket(SocketState::Closing),
-                Some(self.deadline()),
-            );
-            route
-        };
-        let socket = self.io.borrow().socket.clone();
-        if !socket
-            .is_some_and(|transport| self.submit(&transport, &route, IoJob::SocketClose { id }))
-        {
-            self.local.borrow_mut().push_back(route.deliver(
-                IoEvent::Socket {
-                    id,
-                    event: "close".into(),
-                    text: true,
-                    data: Vec::new(),
-                },
-                None,
-            ));
-        }
-    }
-
-    fn buffered_amount(&self, id: u64) -> usize {
-        let routed = self
-            .resources
-            .borrow()
-            .get(id)
-            .map_or(0, |resource| resource.route.buffered_amount());
-        self.jobs
-            .borrow()
-            .iter()
-            .filter_map(|job| match job {
-                IoJob::SocketSend {
-                    id: socket, data, ..
-                } if *socket == id => Some(data.len()),
-                _ => None,
-            })
-            .fold(routed, usize::saturating_add)
-    }
-}
-
-fn header_pairs(block: &str) -> Vec<(String, String)> {
-    block
-        .split('\n')
-        .filter_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            let name = name.trim();
-            (!name.is_empty()).then(|| (name.into(), value.trim().into()))
-        })
-        .collect()
 }
 
 /// Milliseconds from a monotonic clock. Tests must not freeze this with a manual clock.

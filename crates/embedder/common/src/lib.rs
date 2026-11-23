@@ -14,7 +14,6 @@ mod input;
 mod log_sub;
 mod module_stubs;
 mod modules;
-mod net;
 mod present;
 mod ptr;
 mod queue;
@@ -26,6 +25,7 @@ mod surface;
 mod task_runner;
 mod timing;
 mod watchdog;
+mod websocket;
 mod window_session;
 
 use std::sync::Arc;
@@ -33,14 +33,17 @@ use std::sync::Arc;
 use engine::session::Metrics;
 
 pub use command::{Command, FrameToken, SurfaceId, SurfaceTarget};
-pub use diagnostics::DiagnosticsHub;
+pub use diagnostics::{DiagnosticsHub, NetEntry, NetKind, wrap_if_devtools};
 pub use engine::session::{FrameTime, Lifecycle};
 pub use error::{BootError, SessionError};
 pub use exec::{RtExec, settle_factory};
 pub use host::{
     DropWait, Link, Poster, console_log, start, start_async, start_async_with_exit, start_on,
 };
-pub use http::{OpenWireClient, http_client};
+pub use http::{
+    HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, HttpResponse,
+    OpenWireClient, RedirectMode, http_client,
+};
 pub use images::{ExternalFrame, ImportExternalFrame, pixel_count_ok};
 pub use images::{ImageDecoder, ImageError, ImageHandle, ImageReady};
 pub use log_sub::install as install_log;
@@ -51,9 +54,9 @@ pub use module_stubs::{
 };
 pub use modules::{
     ClipboardHost, LinkingHost, PermissionsHost, StorageHost, app_state, async_storage, clipboard,
-    file_system, linking, memory, native_plugins, permission_results, permissions, picked_document,
+    file_system, http as http_module, linking, memory, native_plugins, permission_results,
+    permissions, picked_document, websocket as websocket_module,
 };
-pub use net::{WebSocketCommand, WebSocketEvent, WebSocketTransport};
 pub use present::{AfterPresent, after_present};
 pub use ptr::NativePtr;
 pub use restoration::Restoration;
@@ -65,14 +68,11 @@ pub use task_runner::{
 };
 pub use timing::FrameTiming;
 pub use tracing_subscriber::filter::{LevelFilter, Targets};
+pub use websocket::{WebSocketCommand, WebSocketEvent, WebSocketTransport};
 pub use window_session::WindowSession;
 
 /// QuickJS console callback. Level 3 is an error.
 pub type ConsoleLog = Box<dyn Fn(u8, &str)>;
-
-/// Host sink for one [`engine::session::IoJob`].
-pub type IoSink =
-    Box<dyn Fn(engine::session::IoJob) -> Result<(), Box<engine::session::IoJob>> + Send>;
 
 /// Builds the session on the render thread. The closure must not capture the raster.
 pub struct SessionOpen {
@@ -83,7 +83,6 @@ pub struct SessionOpen {
 pub type SessionFactory = Box<
     dyn FnOnce(
             SessionOpen,
-            IoSink,
             engine::session::ModuleConfig,
         ) -> Result<Box<dyn engine::session::Session>, SessionError>
         + Send,
@@ -227,7 +226,7 @@ pub struct Boot {
     /// Written before `start` so `Linking.getInitialURL` is visible during eval.
     pub launch_url: engine::session::Shared<Option<String>>,
     /// Absent HTTP fails with `network is not linked`. Hosts inject [`http_client`].
-    pub http: Option<Arc<dyn engine::session::HttpClient>>,
+    pub http: Option<Arc<dyn HttpClient>>,
     /// Creates the graphics context on the render thread.
     pub open_raster: Box<dyn FnOnce() -> Result<raster::Rasterizer, raster::Status> + Send>,
     pub open_surface: OpenSurface,

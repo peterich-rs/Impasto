@@ -142,7 +142,7 @@ pub(super) fn install(ctx: &Ctx<'_>) -> Result<()> {
     holder.set("weak", weak)
 }
 
-pub(super) fn close(ctx: &Ctx<'_>) -> Result<()> {
+pub(crate) fn close(ctx: &Ctx<'_>) -> Result<()> {
     let ids = holder(ctx)?.keys::<String>().collect::<Result<Vec<_>>>()?;
     let reason = events::named_error(ctx, "AbortError", "Runtime closed")?;
     for id in ids

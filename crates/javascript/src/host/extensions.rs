@@ -1,44 +1,93 @@
 //! Values and cancellation shared by native extensions and the transport bridge.
 
-use std::sync::Arc;
+use std::future::poll_fn;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Poll, Waker};
 use std::thread::{self, ThreadId};
 use std::time::Duration;
 
+use super::io::{register_waker, wake_all};
 use super::{CreditPool, Delivery, IoEvent, PluginValue, Route, TERMINAL_PAYLOAD_LIMIT};
 
-#[derive(Clone, Debug, Default)]
-pub struct CancelToken {
+#[derive(Debug, Default)]
+struct CancelInner {
     flag: Arc<AtomicBool>,
+    wakers: Mutex<Vec<Waker>>,
     pools: Option<(Arc<CreditPool>, Arc<CreditPool>)>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct CancelToken {
+    inner: Arc<CancelInner>,
+}
+
 impl CancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     pub(super) fn routed(
         flag: Arc<AtomicBool>,
         ingress: Arc<CreditPool>,
         outbound: Arc<CreditPool>,
     ) -> Self {
         Self {
-            flag,
-            pools: Some((ingress, outbound)),
+            inner: Arc::new(CancelInner {
+                flag,
+                wakers: Mutex::new(Vec::new()),
+                pools: Some((ingress, outbound)),
+            }),
         }
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.flag.load(Ordering::Acquire)
+        self.inner.flag.load(Ordering::Acquire)
     }
 
     pub fn cancel(&self) {
-        self.flag.store(true, Ordering::Release);
-        if let Some((ingress, outbound)) = &self.pools {
+        self.inner.flag.store(true, Ordering::Release);
+        let wakers = {
+            let mut guard = self
+                .inner
+                .wakers
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            std::mem::take(&mut *guard)
+        };
+        wake_all(wakers);
+        if let Some((ingress, outbound)) = &self.inner.pools {
             ingress.notify_cancel();
             outbound.notify_cancel();
         }
     }
 
+    pub async fn cancelled(&self) {
+        poll_fn(|cx| {
+            if self.is_cancelled() {
+                return Poll::Ready(());
+            }
+            if let Some((ingress, _)) = &self.inner.pools
+                && ingress.poll_closed(cx.waker()).is_ready()
+            {
+                return Poll::Ready(());
+            }
+            let mut wakers = self
+                .inner
+                .wakers
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if self.is_cancelled() {
+                return Poll::Ready(());
+            }
+            register_waker(&mut wakers, cx.waker());
+            Poll::Pending
+        })
+        .await;
+    }
+
     pub(super) fn flag(&self) -> &AtomicBool {
-        &self.flag
+        &self.inner.flag
     }
 }
 
@@ -92,7 +141,11 @@ impl StreamSink {
         self.route.cancellation()
     }
 
-    pub fn send(&mut self, item: PluginValue, timeout: Duration) -> Result<(), StreamSendError> {
+    pub fn max_piece_bytes(&self) -> usize {
+        self.route.max_piece_bytes()
+    }
+
+    fn prepare_send(&self, item: &PluginValue) -> Result<usize, StreamSendError> {
         if !self.route.is_active() || self.ended {
             return Err(StreamSendError::Closed);
         }
@@ -100,12 +153,40 @@ impl StreamSink {
         if bytes > self.route.max_piece_bytes() {
             return Err(StreamSendError::TooLarge);
         }
+        Ok(bytes)
+    }
+
+    pub fn try_send(&mut self, item: PluginValue) -> Result<(), StreamSendError> {
+        self.send(item, Duration::ZERO)
+    }
+
+    pub fn send(&mut self, item: PluginValue, timeout: Duration) -> Result<(), StreamSendError> {
+        let bytes = self.prepare_send(&item)?;
         let timeout = if thread::current().id() == self.consumer {
             Duration::ZERO
         } else {
             timeout
         };
         let Some(credit) = self.route.reserve(bytes, timeout) else {
+            return Err(if self.route.is_active() {
+                StreamSendError::Backpressure
+            } else {
+                StreamSendError::Closed
+            });
+        };
+        if !self.route.is_active() {
+            return Err(StreamSendError::Closed);
+        }
+        self.deliver(StreamEvent::Item(item), Some(credit));
+        Ok(())
+    }
+
+    pub async fn send_async(&mut self, item: PluginValue) -> Result<(), StreamSendError> {
+        let bytes = self.prepare_send(&item)?;
+        if thread::current().id() == self.consumer {
+            return self.send(item, Duration::ZERO);
+        }
+        let Some(credit) = self.route.reserve_async(bytes).await else {
             return Err(if self.route.is_active() {
                 StreamSendError::Backpressure
             } else {

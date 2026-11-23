@@ -1,4 +1,4 @@
-//! Readable streams and byte materialization on the QuickJS owner thread.
+//! Readable streams on the QuickJS owner thread.
 
 mod source;
 
@@ -8,17 +8,14 @@ use rquickjs::class::Trace;
 use rquickjs::function::{Constructor, Opt, This};
 use rquickjs::object::Property;
 use rquickjs::{
-    ArrayBuffer, Class, Ctx, Error, Exception, Function, IntoJs, JsLifetime, Object, Promise,
-    Result, TypedArray, Value,
+    Class, Ctx, Error, Exception, Function, IntoJs, JsLifetime, Object, Promise, Result, Value,
 };
 
-use super::encoding::decode_utf8;
-use super::web::{Charge, constructor};
+use super::web::constructor;
 
 const PENDING_READ_LIMIT: usize = 32;
 const STREAM_CHUNK_LIMIT: usize = 1024;
 const STREAM_BYTE_LIMIT: usize = 4 * 1024 * 1024;
-const MATERIALIZED_BYTE_LIMIT: usize = 24 * 1024 * 1024;
 
 #[derive(Clone, Trace, JsLifetime)]
 struct Deferred<'js> {
@@ -90,11 +87,6 @@ struct Chunk<'js> {
 }
 
 impl<'js> Chunk<'js> {
-    fn bytes(&self, ctx: &Ctx<'js>) -> Result<TypedArray<'js, u8>> {
-        TypedArray::from_value(self.value.clone())
-            .map_err(|_| Exception::throw_type(ctx, "Expected a byte stream"))
-    }
-
     fn release(self) -> Result<Value<'js>> {
         if let Some(release) = self.release {
             release.call::<_, ()>(())?;
@@ -111,36 +103,11 @@ enum Phase<'js> {
     Errored(Value<'js>),
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum BodyOutput {
-    Buffer,
-    Text,
-    Json,
-}
-
-#[derive(Trace, JsLifetime)]
-struct Materializing<'js> {
-    reply: Deferred<'js>,
-    bytes: Vec<u8>,
-    #[qjs(skip_trace)]
-    charge: Charge,
-    scheduled: bool,
-    #[qjs(skip_trace)]
-    output: BodyOutput,
-}
-
-#[derive(Trace, JsLifetime)]
-enum Lock<'js> {
-    Reader(Class<'js, ReadableStreamDefaultReader<'js>>),
-    Body(Materializing<'js>),
-}
-
 #[derive(Trace, JsLifetime)]
 #[rquickjs::class]
 pub(super) struct ReadableStream<'js> {
     phase: Phase<'js>,
-    lock: Option<Lock<'js>>,
-    disturbed: bool,
+    lock: Option<Class<'js, ReadableStreamDefaultReader<'js>>>,
     queue: VecDeque<Chunk<'js>>,
     queued_bytes: usize,
     pending: VecDeque<Deferred<'js>>,
@@ -250,7 +217,6 @@ pub(super) fn create<'js>(
         ReadableStream {
             phase: Phase::Readable,
             lock: None,
-            disturbed: false,
             queue: VecDeque::new(),
             queued_bytes: 0,
             pending: VecDeque::new(),
@@ -275,15 +241,6 @@ fn run_cleanup<'js>(stream: &Class<'js, ReadableStream<'js>>) -> Result<()> {
         cleanup.call::<_, ()>(())?;
     }
     Ok(())
-}
-
-pub(super) fn unavailable<'js>(stream: &Class<'js, ReadableStream<'js>>) -> Result<bool> {
-    let stream = stream.try_borrow()?;
-    Ok(stream.disturbed || stream.locked())
-}
-
-pub(super) fn disturbed<'js>(stream: &Class<'js, ReadableStream<'js>>) -> Result<bool> {
-    Ok(stream.try_borrow()?.disturbed)
 }
 
 fn handled_deferred<'js>(ctx: &Ctx<'js>) -> Result<Deferred<'js>> {
@@ -338,7 +295,7 @@ pub(super) fn lock<'js>(
     )?;
     let terminal = {
         let mut state = stream.try_borrow_mut()?;
-        state.lock = Some(Lock::Reader(reader.clone()));
+        state.lock = Some(reader.clone());
         match &state.phase {
             Phase::Closed => Some(Ok(())),
             Phase::Errored(reason) => Some(Err(reason.clone())),
@@ -413,7 +370,6 @@ fn read<'js>(ctx: &Ctx<'js>, stream: &Class<'js, ReadableStream<'js>>) -> Result
     let mut deferred = Deferred::new(ctx)?;
     let (phase, chunk, closing) = {
         let mut state = stream.try_borrow_mut()?;
-        state.disturbed = true;
         if let Phase::Errored(error) = &state.phase {
             (Some(Err(error.clone())), None, None)
         } else if let Some(chunk) = state.queue.pop_front() {
@@ -480,8 +436,8 @@ impl<'js> ReaderWork<'js> {
 impl<'js> ReadableStream<'js> {
     fn readers(&mut self) -> Result<ReaderWork<'js>> {
         let closed = match &self.lock {
-            Some(Lock::Reader(reader)) => Some(reader.try_borrow()?.closed.clone()),
-            _ => None,
+            Some(reader) => Some(reader.try_borrow()?.closed.clone()),
+            None => None,
         };
         Ok(ReaderWork {
             closed,
@@ -525,8 +481,7 @@ pub(super) fn finish<'js>(ctx: &Ctx<'js>, stream: &Class<'js, ReadableStream<'js
     if let Some(closing) = closing {
         closing.settle(ctx, Ok(()))?;
     }
-    run_cleanup(stream)?;
-    schedule_body(ctx, stream)
+    run_cleanup(stream)
 }
 
 pub(super) fn error<'js>(
@@ -546,8 +501,7 @@ pub(super) fn error<'js>(
     };
     release_chunks(chunks)?;
     work.settle(ctx, Err(reason))?;
-    run_cleanup(stream)?;
-    schedule_body(ctx, stream)
+    run_cleanup(stream)
 }
 
 fn cancel<'js>(
@@ -557,7 +511,6 @@ fn cancel<'js>(
 ) -> Result<Promise<'js>> {
     let (work, chunks, cancel, source) = {
         let mut state = stream.try_borrow_mut()?;
-        state.disturbed = true;
         match &state.phase {
             Phase::Closed => return settlement(ctx, Ok(())),
             Phase::Errored(error) => return Err(ctx.throw(error.clone())),
@@ -577,25 +530,6 @@ fn cancel<'js>(
         cancel.call::<_, ()>((reason.clone(),))?;
     }
     source::cancel(ctx, source, reason)
-}
-
-pub(super) fn push<'js>(
-    ctx: &Ctx<'js>,
-    stream: &Class<'js, ReadableStream<'js>>,
-    bytes: TypedArray<'js, u8>,
-    release: Option<Function<'js>>,
-) -> Result<bool> {
-    let len = bytes
-        .as_raw()
-        .ok_or_else(|| Exception::throw_type(ctx, "Detached buffer"))?
-        .len();
-    if len == 0 {
-        if let Some(release) = release {
-            release.call::<_, ()>(())?;
-        }
-        return Ok(true);
-    }
-    push_value(ctx, stream, bytes.into_value(), len, release)
 }
 
 pub(super) fn push_value<'js>(
@@ -638,8 +572,6 @@ fn push_chunk<'js>(
                 source.queued += weight;
             }
             state.queue.push_back(chunk);
-            drop(state);
-            schedule_body(ctx, stream)?;
             return Ok(true);
         }
     };
@@ -648,223 +580,6 @@ fn push_chunk<'js>(
         pending.resolve(iteration(ctx, Some(bytes))?)?;
     }
     Ok(accepted)
-}
-
-pub(super) fn take_bytes<'js>(
-    ctx: &Ctx<'js>,
-    stream: &Class<'js, ReadableStream<'js>>,
-) -> Result<TypedArray<'js, u8>> {
-    if unavailable(stream)? {
-        return Err(Exception::throw_type(ctx, "Body is locked or already used"));
-    }
-    let mut chunks = {
-        let mut state = stream.try_borrow_mut()?;
-        state.disturbed = true;
-        state.phase = Phase::Closed;
-        state.cancel = None;
-        state.discard()
-    };
-    if chunks.len() == 1
-        && let Some(chunk) = chunks.pop_front()
-    {
-        let bytes = chunk.bytes(ctx)?;
-        bytes.arraybuffer()?;
-        chunk.release()?;
-        return Ok(bytes);
-    }
-    let mut bytes = Vec::new();
-    for chunk in chunks {
-        append_bytes(ctx, &mut bytes, &chunk)?;
-        chunk.release()?;
-    }
-    TypedArray::new_copy(ctx.clone(), bytes)
-}
-
-pub(super) fn consume<'js>(
-    ctx: &Ctx<'js>,
-    stream: Option<&Class<'js, ReadableStream<'js>>>,
-    output: BodyOutput,
-) -> Result<Promise<'js>> {
-    let Some(stream) = stream else {
-        return settlement(ctx, materialized_value(ctx, output, Vec::new()));
-    };
-    if unavailable(stream)? {
-        return settlement::<()>(
-            ctx,
-            Err(Exception::throw_type(ctx, "Body is locked or already used")),
-        );
-    }
-    let reply = Deferred::new(ctx)?;
-    let charge = Charge::new(ctx)?;
-    {
-        let mut state = stream.try_borrow_mut()?;
-        state.disturbed = true;
-        state.lock = Some(Lock::Body(Materializing {
-            reply: reply.clone(),
-            bytes: Vec::new(),
-            charge,
-            scheduled: false,
-            output,
-        }));
-    }
-    if let Err(error) = schedule_body(ctx, stream) {
-        stream.try_borrow_mut()?.lock = None;
-        reply.reject(exception_value(ctx, error)?)?;
-    }
-    Ok(reply.promise)
-}
-
-fn schedule_body<'js>(ctx: &Ctx<'js>, stream: &Class<'js, ReadableStream<'js>>) -> Result<()> {
-    {
-        let mut state = stream.try_borrow_mut()?;
-        let Some(Lock::Body(body)) = &mut state.lock else {
-            return Ok(());
-        };
-        if body.scheduled {
-            return Ok(());
-        }
-        body.scheduled = true;
-    }
-    if let Err(error) =
-        Function::new(ctx.clone(), drain_body).and_then(|job| job.defer((stream.clone(),)))
-    {
-        let mut state = stream.try_borrow_mut()?;
-        if let Some(Lock::Body(body)) = &mut state.lock {
-            body.scheduled = false;
-        }
-        return Err(error);
-    }
-    Ok(())
-}
-
-fn drain_body<'js>(ctx: Ctx<'js>, stream: Class<'js, ReadableStream<'js>>) -> Result<()> {
-    let (chunks, outcome, completed, cancel) = {
-        let mut state = stream.try_borrow_mut()?;
-        if !matches!(state.lock, Some(Lock::Body(_))) {
-            return Ok(());
-        }
-        let chunks = state.discard();
-        let Some(Lock::Body(mut body)) = state.lock.take() else {
-            return Ok(());
-        };
-        body.scheduled = false;
-
-        let outcome = if let Phase::Errored(reason) = &state.phase {
-            BodyResult::Error(reason.clone())
-        } else if let Err(error) = append_chunks(&ctx, &chunks, &mut body) {
-            BodyResult::Invalid(error)
-        } else if matches!(state.phase, Phase::Readable) {
-            BodyResult::Pending
-        } else {
-            BodyResult::Done
-        };
-        let cancel = if matches!(outcome, BodyResult::Invalid(_)) {
-            state.phase = Phase::Closed;
-            state.cancel.take()
-        } else {
-            None
-        };
-        let completed = if matches!(outcome, BodyResult::Pending) {
-            state.lock = Some(Lock::Body(body));
-            None
-        } else {
-            if matches!(outcome, BodyResult::Done) {
-                state.phase = Phase::Closed;
-            }
-            Some(body)
-        };
-        (chunks, outcome, completed, cancel)
-    };
-    release_chunks(chunks)?;
-    let Some(body) = completed else { return Ok(()) };
-    match outcome {
-        BodyResult::Done => match materialized_value(&ctx, body.output, body.bytes) {
-            Ok(value) => body.reply.resolve(value),
-            Err(error) => body.reply.reject(exception_value(&ctx, error)?),
-        },
-        BodyResult::Error(reason) => body.reply.reject(reason),
-        BodyResult::Invalid(error) => {
-            let reason = exception_value(&ctx, error)?;
-            if let Some(cancel) = cancel
-                && let Err(error) = cancel.call::<_, ()>((reason.clone(),))
-            {
-                return body.reply.reject(exception_value(&ctx, error)?);
-            }
-            body.reply.reject(reason)
-        }
-        BodyResult::Pending => Ok(()),
-    }
-}
-
-enum BodyResult<'js> {
-    Pending,
-    Done,
-    Error(Value<'js>),
-    Invalid(Error),
-}
-
-fn append_chunks<'js>(
-    ctx: &Ctx<'js>,
-    chunks: &VecDeque<Chunk<'js>>,
-    body: &mut Materializing<'js>,
-) -> Result<()> {
-    let factor = match body.output {
-        BodyOutput::Buffer => 2,
-        BodyOutput::Text | BodyOutput::Json => 6,
-    };
-    for chunk in chunks {
-        let size = body.bytes.len().saturating_add(chunk.len);
-        if size > STREAM_BYTE_LIMIT || size.saturating_mul(factor) > MATERIALIZED_BYTE_LIMIT {
-            return Err(Exception::throw_range(
-                ctx,
-                "Body exceeds materialization limit",
-            ));
-        }
-        if size > body.bytes.capacity() {
-            let capacity = size
-                .max(body.bytes.capacity().saturating_mul(2))
-                .min(STREAM_BYTE_LIMIT);
-            body.charge.resize(ctx, capacity)?;
-            body.bytes
-                .try_reserve_exact(capacity - body.bytes.len())
-                .map_err(|_| Exception::throw_range(ctx, "Body allocation failed"))?;
-        }
-        append_bytes(ctx, &mut body.bytes, chunk)?;
-    }
-    Ok(())
-}
-
-fn append_bytes<'js>(ctx: &Ctx<'js>, dest: &mut Vec<u8>, chunk: &Chunk<'js>) -> Result<()> {
-    let bytes = chunk.bytes(ctx)?;
-    bytes.arraybuffer()?;
-    // SAFETY: the backing buffer was checked above. No JS runs before the copy.
-    let bytes = unsafe { bytes.as_bytes() }
-        .filter(|bytes| bytes.len() == chunk.len)
-        .ok_or_else(|| Exception::throw_type(ctx, "Body buffer detached or resized"))?;
-    dest.extend_from_slice(bytes);
-    Ok(())
-}
-
-fn materialized_value<'js>(
-    ctx: &Ctx<'js>,
-    output: BodyOutput,
-    bytes: Vec<u8>,
-) -> Result<Value<'js>> {
-    if matches!(output, BodyOutput::Buffer) {
-        return ArrayBuffer::new_copy(ctx.clone(), bytes).map(ArrayBuffer::into_value);
-    }
-    let text = decode_utf8(&bytes);
-    match output {
-        BodyOutput::Json => {
-            // JS_ParseJSON takes UTF-8 bytes without a leading BOM. A raw NUL
-            // must produce a SyntaxError before C-string conversion.
-            if text.contains('\0') {
-                return Err(Exception::throw_syntax(ctx, "Invalid JSON"));
-            }
-            ctx.json_parse(text.into_bytes())
-        }
-        _ => text.into_js(ctx),
-    }
 }
 
 fn settlement<'js, T: IntoJs<'js>>(ctx: &Ctx<'js>, result: Result<T>) -> Result<Promise<'js>> {
@@ -979,8 +694,8 @@ mod tests {
                 move || assert_eq!(probe.0.get(), 0)
             })
             .unwrap();
-            let bytes = TypedArray::new_copy(ctx.clone(), [42_u8]).unwrap();
-            assert!(push(&ctx, &stream, bytes, Some(callback)).unwrap());
+            let bytes = rquickjs::TypedArray::new_copy(ctx.clone(), [42_u8]).unwrap();
+            assert!(push_value(&ctx, &stream, bytes.into_value(), 1, Some(callback)).unwrap());
             let _reader = lock(&ctx, &stream).unwrap();
             assert_eq!(dropped.get(), 0);
         });

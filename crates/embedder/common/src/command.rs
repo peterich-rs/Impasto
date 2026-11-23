@@ -127,12 +127,8 @@ pub(crate) fn command_tag(command: &Command) -> &'static str {
         | Command::ExternalTexture { .. }
         | Command::ExternalGpuTexture { .. } => "image",
         Command::ReloadImage(_) => "reload",
-        Command::JsIo(_)
-        | Command::Io(
-            IoEvent::Http { .. } | IoEvent::HttpHead { .. } | IoEvent::HttpChunk { .. },
-        ) => "http",
+        Command::JsIo(_) => "js io",
         Command::Io(IoEvent::Plugin { .. }) => "plugin",
-        Command::Io(IoEvent::Socket { .. }) => "socket",
         Command::Io(IoEvent::NativeStream { .. }) => "native stream",
         Command::Io(IoEvent::Host(_)) => "host event",
         Command::Wake => "wake",

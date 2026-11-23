@@ -180,6 +180,8 @@ impl App {
                 "permissions",
                 "native-plugins",
                 "devtools",
+                "http",
+                "websocket",
             ]
             .contains(&name.as_str())
             {
@@ -221,7 +223,7 @@ impl App {
             if target == "ios" {
                 return crate::ios::MODULES.join(",");
             }
-            return "clipboard,linking,file-system,async-storage,app-state,permissions,devtools"
+            return "clipboard,linking,file-system,async-storage,app-state,permissions,devtools,http,websocket"
                 .into();
         }
         self.permissions

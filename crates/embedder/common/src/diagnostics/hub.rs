@@ -358,7 +358,7 @@ impl DiagnosticsHub {
         stack: Option<&str>,
         frame: Option<u64>,
     ) {
-        let at = crate::net::mono_ms();
+        let at = crate::timing::mono_ms();
         lock(&self.errors).push(|seq| DiagError {
             seq,
             at_ms: at,
@@ -376,6 +376,10 @@ impl DiagnosticsHub {
             entry
         });
         self.bump();
+    }
+
+    pub fn network_snapshot(&self) -> Vec<NetEntry> {
+        lock(&self.network).tail(0).cloned().collect()
     }
 
     pub fn push_frame(&self, sample: FrameSample) {

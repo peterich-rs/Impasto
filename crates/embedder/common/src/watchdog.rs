@@ -34,7 +34,7 @@ impl Busy {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = tag;
         self.since_ms.store(
-            crate::net::ms_i64(crate::net::mono_ms()) as u64,
+            crate::timing::ms_i64(crate::timing::mono_ms()) as u64,
             Ordering::Release,
         );
     }
@@ -66,7 +66,7 @@ pub(crate) fn spawn(role: &'static str, busy: Weak<Busy>, hub: Option<Arc<Diagno
                 break;
             };
             let since = state.since_ms.load(Ordering::Acquire);
-            let now = crate::net::ms_i64(crate::net::mono_ms()) as u64;
+            let now = crate::timing::ms_i64(crate::timing::mono_ms()) as u64;
             let armed = state.armed.load(Ordering::Acquire);
             if !stalled(armed, since, now) {
                 if state.reported.swap(false, Ordering::AcqRel) {

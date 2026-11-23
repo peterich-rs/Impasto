@@ -15,8 +15,8 @@ const options = {
   types: [],
 };
 
-function rust(profile, action, input) {
-  return execFileSync("cargo", ["run", "--quiet", "--locked", "-p", "javascript", "--example", "standard-contract", "--", profile, action], {
+function rust(action, input) {
+  return execFileSync("cargo", ["run", "--quiet", "--locked", "-p", "javascript", "--example", "standard-contract", "--", action], {
     cwd: root,
     input,
     encoding: "utf8",
@@ -96,7 +96,7 @@ function inspectSurface(baseline, declared) {
   for (const key of Reflect.ownKeys(globalThis)) {
     // QuickJS already supplies some globals, such as performance, that the
     // runtime replaces. Inspect those when they belong to the public contract.
-    if ((baseline.includes(key) && !Object.hasOwn(declared, key)) || key === "__host") continue;
+    if (baseline.includes(key) && !Object.hasOwn(declared, key)) continue;
     const value = globalThis[key];
     const contract = Object.hasOwn(declared, key) && declared[key];
     if (contract.kind === "class" && typeof value === "function" && value.prototype) {
@@ -151,32 +151,25 @@ function compareSurface(profile, declared, installed) {
   }
 }
 
-const profiles = [
-  { name: "full", http: true, socket: true },
-  { name: "http", http: true },
-  { name: "socket", socket: true },
-  { name: "offline" },
-];
-
-for (const { name, http, socket } of profiles) {
-  const declarations = rust(name, "declarations");
-  const source = `${fixture}
-    function checkSignalConstructor() {
-      // @ts-expect-error AbortController and AbortSignal.abort create signals.
-      new AbortSignal();
-    }
-    async function useTransports(request: Request) {
-      ${http ? 'const response: Response = await fetch(request); response.body?.getReader().releaseLock();' : '// @ts-expect-error HTTP is disabled.\nawait fetch(request);'}
-      ${socket ? 'const socket = new WebSocket("wss://example.test/socket"); socket.addEventListener("message", event => console.log(event.data)); socket.addEventListener("close", event => console.log(event.code)); socket.close();' : '// @ts-expect-error WebSocket is disabled.\nnew WebSocket("wss://example.test/socket");'}
-    }
-  `;
-  const declared = declaredSurface(compile(name, declarations, source));
-  const javascript = ts.transpileModule(source, { compilerOptions: { target: options.target } }).outputText;
-  const installed = JSON.parse(rust(name, "inspect", `
-    const installed = (${inspectSurface})(baseline, ${JSON.stringify(declared)});
-    ${javascript}
-    return JSON.stringify(installed);
-  `));
-  compareSurface(name, declared, installed);
-  process.stdout.write(`${name}: standard library contract passed\n`);
-}
+const declarations = rust("declarations");
+const source = `${fixture}
+  function checkSignalConstructor() {
+    // @ts-expect-error AbortController and AbortSignal.abort create signals.
+    new AbortSignal();
+  }
+  async function checkPackagesOnly() {
+    // @ts-expect-error fetch lives in @impasto/http.
+    await fetch("https://example.test/");
+    // @ts-expect-error WebSocket lives in @impasto/websocket.
+    new WebSocket("wss://example.test/socket");
+  }
+`;
+const declared = declaredSurface(compile("standard", declarations, source));
+const javascript = ts.transpileModule(source, { compilerOptions: { target: options.target } }).outputText;
+const installed = JSON.parse(rust("inspect", `
+  const installed = (${inspectSurface})(baseline, ${JSON.stringify(declared)});
+  ${javascript}
+  return JSON.stringify(installed);
+`));
+compareSurface("standard", declared, installed);
+process.stdout.write("standard library contract passed\n");

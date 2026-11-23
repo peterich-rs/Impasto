@@ -11,12 +11,9 @@ use crate::runtime::scheduler::Scheduler;
 
 mod encoding;
 mod events;
-mod headers;
-mod http;
 pub(crate) mod native_stream;
 mod primitives;
 mod profile;
-mod socket;
 mod streams;
 mod structured_clone;
 mod url;

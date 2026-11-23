@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use embedder::{WebSocketCommand, WebSocketEvent, WebSocketTransport};
-use engine::session::Credit;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
@@ -202,7 +201,7 @@ impl WebSocketTransport for WebSocket {
         protocols: &[String],
         commands: Receiver<WebSocketCommand>,
         active: &dyn Fn() -> bool,
-        emit: &dyn Fn(WebSocketEvent<'_>) -> bool,
+        emit: &mut dyn FnMut(WebSocketEvent) -> bool,
     ) -> Result<(), String> {
         let (sender, receive) = mpsc::channel();
         let connection = autoreleasepool(|_| Connection::new(url, protocols, sender.clone()))?;
@@ -210,37 +209,36 @@ impl WebSocketTransport for WebSocket {
         let mut opened = false;
         // The worker starts another send/receive only after its previous callback.
         // At most those two callbacks and the native lifecycle events can be queued.
-        let mut sending: Option<(Instant, Option<Credit>)> = None;
+        let mut sending: Option<Instant> = None;
         while active() {
             if !opened && started.elapsed() >= CONNECT_TIMEOUT {
                 return Err("iOS WebSocket handshake timed out".into());
             }
-            if sending
-                .as_ref()
-                .is_some_and(|(since, _)| since.elapsed() >= SEND_TIMEOUT)
-            {
+            if sending.is_some_and(|since| since.elapsed() >= SEND_TIMEOUT) {
                 return Err("iOS WebSocket send timed out".into());
             }
             if sending.is_none() {
                 match commands.try_recv() {
-                    Ok(WebSocketCommand::Send { text, data, credit }) => {
+                    Ok(WebSocketCommand::Send { text, data }) => {
                         autoreleasepool(|_| connection.send(text, data, &sender))?;
-                        sending = Some((Instant::now(), credit));
+                        sending = Some(Instant::now());
                     }
-                    Ok(WebSocketCommand::Close) | Err(TryRecvError::Disconnected) => return Ok(()),
+                    Ok(WebSocketCommand::Close { .. }) | Err(TryRecvError::Disconnected) => {
+                        return Ok(());
+                    }
                     Err(TryRecvError::Empty) => {}
                 }
             }
             match receive.recv_timeout(POLL_INTERVAL) {
                 Ok(NativeEvent::Open(protocol)) => {
                     opened = true;
-                    if !emit(WebSocketEvent::Opened(&protocol)) {
+                    if !emit(WebSocketEvent::Open { protocol }) {
                         return Err("socket event queue is full".into());
                     }
                     autoreleasepool(|_| connection.receive(&sender));
                 }
                 Ok(NativeEvent::Data(text, data)) => {
-                    if !emit(WebSocketEvent::Message { text, data: &data }) {
+                    if !emit(WebSocketEvent::Message { text, data }) {
                         return Err("socket event queue is full".into());
                     }
                     autoreleasepool(|_| connection.receive(&sender));
@@ -320,20 +318,23 @@ mod tests {
             &[],
             commands,
             &|| started.elapsed() < Duration::from_secs(4),
-            &|event| {
+            &mut |event| {
                 let command = match event {
-                    WebSocketEvent::Opened(protocol) => {
+                    WebSocketEvent::Open { protocol } => {
                         assert!(protocol.is_empty());
                         WebSocketCommand::Send {
                             text: true,
                             data: b"hello".to_vec(),
-                            credit: None,
                         }
                     }
                     WebSocketEvent::Message { text, data } => {
-                        messages.borrow_mut().push((text, data.to_vec()));
-                        WebSocketCommand::Close
+                        messages.borrow_mut().push((text, data));
+                        WebSocketCommand::Close {
+                            code: Some(1000),
+                            reason: String::new(),
+                        }
                     }
+                    WebSocketEvent::Close { .. } | WebSocketEvent::Error(_) => return true,
                 };
                 send.send(command).is_ok()
             },

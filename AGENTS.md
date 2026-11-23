@@ -15,7 +15,7 @@ Impasto 是跨平台 UI 框架。下表按职责与现有目录对应；具体�
 
 ### 核心边界与数据流
 
-- **运行时与宿主分离**：`crates/javascript` 默认提供独立运行时；关闭默认 feature 后仅保留纯 `std` 的 `javascript::host`。`engine::js` 通过可选 `js` feature 接入该运行时，提交树变更并将 UI 事件交给脚本。以 `fetch` / WebSocket 为例，运行时实现 API 语义，`embedder` 提供网络传输。
+- **运行时与宿主分离**：`crates/javascript` 默认提供独立运行时；关闭默认 feature 后仅保留纯 `std` 的 `javascript::host`。运行时仅内置语言与 Web 基础原语（`console`、定时器、`performance`、`events`、`encoding`、`url`、`streams`），不包含网络实现；`engine::js` 通过可选 `js` feature 接入该运行时，提交树变更并将 UI 事件交给脚本。HTTP（`@impasto/http`）与 WebSocket（`@impasto/websocket`）等网络与平台能力由 `embedder` 原生模块提供，并通过 `packages/*` 导出给应用层。
 - **线程与帧流水线**：平台线程通过队列交付自有数据（输入、生命周期、视口、vsync）。UI 队列通过 `engine::session::Session` 同步推进脚本、响应式图、布局与录制，产出不可变 `engine::scene::LayerTree`。Raster 队列消费层树并实现 `engine::text::Shaper`。公共宿主支持 `shared`（默认）、`split`、`platform-ui` 三种线程拓扑（环境变量 `IMPASTO_THREAD_TOPOLOGY`），跨线程传递一律使用自有数据。
 - **TSX 编译与响应式**：[`tools/pack.mjs`](tools/pack.mjs) 将 `solid-js` 解析到 `@impasto/reactive`，`@solidjs/babel-plugin` 生成 universal 输出，保留 `scene` 和 `reactive` 为运行时模块。应用 bundle 严禁混入 Solid 调度器或 `@solidjs/universal`（由 `assertNoScheduler` 检查）。
 

@@ -325,7 +325,7 @@ impl LogSink for DevtoolSink {
     fn write(&self, record: &LogRecord, _line: &str) {
         self.devtools.push_log(LogEntry {
             seq: 0,
-            at_ms: crate::net::mono_ms(),
+            at_ms: crate::timing::mono_ms(),
             level: record.level,
             source: LogSource::from_target(record.target),
             target: record.target,

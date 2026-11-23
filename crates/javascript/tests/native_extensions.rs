@@ -349,3 +349,109 @@ fn signal_abort_unblocks_a_native_producer_waiting_for_credit() {
     );
     assert_eq!(runtime.counts().queued_bytes, 0);
 }
+
+#[test]
+fn stream_with_exec_drives_async_sink_and_cancels_cleanly() {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct FlagWake(AtomicUsize);
+    impl Wake for FlagWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (step_tx, step_rx) = mpsc::channel();
+    let step_rx = Arc::new(std::sync::Mutex::new(Some(step_rx)));
+    let (done_tx, done_rx) = mpsc::channel();
+    let method = Method::stream_with_exec("open", move |args, mut sink, _exec| {
+        assert_eq!(args, [PluginValue::Str("async".into())]);
+        let step_rx = step_rx.lock().unwrap().take().expect("one open");
+        let ready_tx = ready_tx.clone();
+        let done_tx = done_tx.clone();
+        std::thread::spawn(move || {
+            let wake = Arc::new(FlagWake(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&wake));
+            let mut cx = Context::from_waker(&waker);
+            {
+                let mut first = pin!(sink.send_async(PluginValue::F64(1.0)));
+                assert!(matches!(first.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+            }
+            {
+                let mut second = pin!(sink.send_async(PluginValue::F64(2.0)));
+                assert!(matches!(second.as_mut().poll(&mut cx), Poll::Pending));
+                ready_tx.send(()).expect("signal pending");
+                step_rx.recv().expect("consume first");
+                assert_eq!(wake.0.load(Ordering::SeqCst), 1);
+                assert!(matches!(second.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+            }
+            let cancel = sink.cancellation();
+            let cancel_wake = Arc::new(FlagWake(AtomicUsize::new(0)));
+            let cw = Waker::from(Arc::clone(&cancel_wake));
+            let mut ccx = Context::from_waker(&cw);
+            {
+                let mut cancel_fut = pin!(cancel.cancelled());
+                assert!(cancel_fut.as_mut().poll(&mut ccx).is_pending());
+                ready_tx.send(()).expect("signal cancel wait");
+                step_rx.recv().expect("abort signal");
+                assert_eq!(cancel_wake.0.load(Ordering::SeqCst), 1);
+                assert!(cancel_fut.as_mut().poll(&mut ccx).is_ready());
+            }
+            sink.finish();
+            let _ = done_tx.send(());
+        });
+    });
+    let mut runtime = Runtime::builder()
+        .limits(javascript::runtime::RuntimeLimits {
+            stream_events: 1,
+            ..Default::default()
+        })
+        .modules(catalog(method))
+        .module(
+            "app:test",
+            "import {open} from '@impasto/test-native';
+             globalThis.ctrl = new AbortController();
+             globalThis.reader = open('async', ctrl.signal).getReader();",
+        )
+        .build()
+        .expect("async stream runtime");
+    let ticket = runtime.start_module("app:test").expect("start");
+    ready_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("producer waiting on credit");
+
+    runtime.drive(0).expect("deliver first");
+    runtime
+        .eval_script(
+            "reader.read().then(part => { globalThis.v1 = part.value; });",
+            "read1.js",
+        )
+        .expect("read1");
+    runtime.drive(1).expect("consume first");
+    step_tx.send(()).expect("wake second send");
+
+    ready_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("producer waiting on cancel");
+    runtime
+        .eval_script("ctrl.abort('bye');", "abort.js")
+        .expect("abort");
+    step_tx.send(()).expect("check cancel");
+    done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("producer finished");
+    runtime.drive(2).expect("settle");
+    runtime
+        .eval_script(
+            "if (globalThis.v1 !== 1) throw Error('missing async value');",
+            "check.js",
+        )
+        .expect("check");
+    assert_eq!(
+        runtime.take_module_result(ticket).expect("result"),
+        Some(ModuleOutcome::Fulfilled)
+    );
+}

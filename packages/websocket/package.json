@@ -1,10 +1,12 @@
 {
-  "name": "@impasto/net",
+  "name": "@impasto/websocket",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./compat": "./src/compat.ts",
+    "./polyfill": "./src/polyfill.ts"
   },
   "scripts": {
     "test": "node --experimental-strip-types src/index.test.ts"
