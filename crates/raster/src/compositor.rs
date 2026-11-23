@@ -43,6 +43,9 @@ pub(crate) struct Compositor {
     trim_pending: bool,
     specialize_paint: bool,
     compute_blur: Option<ComputeBlur>,
+    early_z: bool,
+    canvas_stencil: bool,
+    transient: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -83,6 +86,9 @@ pub struct RenderStats {
     pub compute_passes: u32,
     pub offscreen_passes: u32,
     pub direct_present: bool,
+    pub transient_bytes: u64,
+    pub early_z_instances: u32,
+    pub stencil_draws: u32,
 }
 
 pub(crate) struct Scene<'a> {
@@ -255,6 +261,13 @@ impl Compositor {
             trim_pending: false,
             specialize_paint: std::env::var_os("IMPASTO_SPECIALIZE_PAINT").is_some(),
             compute_blur: ComputeBlur::new(gpu),
+            early_z: std::env::var("IMPASTO_EARLY_Z").as_deref() == Ok("1"),
+            canvas_stencil: std::env::var("IMPASTO_CANVAS_STENCIL").as_deref() == Ok("1"),
+            transient: match std::env::var("IMPASTO_TRANSIENT_ATTACHMENTS").as_deref() {
+                Ok("0") => false,
+                Ok("1") => true,
+                _ => gpu.adapter.get_info().transient_saves_memory == Some(true),
+            },
         })
     }
 
@@ -525,6 +538,7 @@ enum FullPass {
 struct Coverage {
     scissor: Option<[u32; 4]>,
     mask: Option<Image>,
+    stencil: Vec<ClipShape>,
     empty: bool,
     boxes: [[f32; 4]; 4],
     radii: [f32; 4],
@@ -701,8 +715,20 @@ impl Frame<'_> {
         samples: u32,
         usage: wgpu::TextureUsages,
     ) -> Image {
-        let [x, y, w, h] = area;
+        let [_, _, w, h] = area;
         let size = [w, h].map(|side| side.next_multiple_of(64).min(self.gpu.caps.max_texture_2d));
+        self.take_image(area, size, format, samples, usage)
+    }
+
+    fn take_image(
+        &mut self,
+        area: [u32; 4],
+        size: [u32; 2],
+        format: wgpu::TextureFormat,
+        samples: u32,
+        usage: wgpu::TextureUsages,
+    ) -> Image {
+        let [x, y, w, h] = area;
         let compositor = &mut self.compositor;
         let index = compositor.pool.iter().position(|image| {
             image.size == size
@@ -724,6 +750,37 @@ impl Frame<'_> {
             .max(compositor.offscreen_live_bytes);
         image.logical = [w, h];
         image.origin = [x, y];
+        image
+    }
+
+    fn take_attachment(
+        &mut self,
+        area: [u32; 4],
+        format: wgpu::TextureFormat,
+        samples: u32,
+    ) -> Image {
+        use wgpu::TextureUsages as U;
+        let mut usage = U::RENDER_ATTACHMENT;
+        if self.compositor.transient {
+            usage |= U::TRANSIENT_ATTACHMENT;
+        }
+        let image = self.take_area_with_usage(area, format, samples, usage);
+        if self.compositor.transient {
+            self.compositor.render_stats.transient_bytes += image.bytes();
+        }
+        image
+    }
+
+    fn take_exact_attachment(&mut self, area: [u32; 4], format: wgpu::TextureFormat) -> Image {
+        use wgpu::TextureUsages as U;
+        let mut usage = U::RENDER_ATTACHMENT;
+        if self.compositor.transient {
+            usage |= U::TRANSIENT_ATTACHMENT;
+        }
+        let image = self.take_image(area, [area[2], area[3]], format, 1, usage);
+        if self.compositor.transient {
+            self.compositor.render_stats.transient_bytes += image.bytes();
+        }
         image
     }
 
@@ -964,12 +1021,65 @@ impl Frame<'_> {
             }
             let transform = compiler::compose(origin, state.transform);
             let clip = merge_clip(parent_clip, &state.clip, origin);
-            let coverage = self.coverage(target, &clip)?;
+            let stencil = self.compositor.canvas_stencil
+                && scope.draws.iter().all(|draw| {
+                    matches!(draw, Draw::Mesh(mesh)
+                    if mesh.composite == engine::scene::CanvasComposite::SourceOver)
+                });
+            let coverage = if stencil {
+                match self.stencil_coverage(target, &clip) {
+                    Some(coverage) => coverage,
+                    None => self.coverage(target, &clip)?,
+                }
+            } else {
+                self.coverage(target, &clip)?
+            };
             if !coverage.empty {
                 self.draws(target, transform, &coverage, &scope.draws)?;
             }
         }
         Ok(())
+    }
+
+    fn stencil_coverage(&self, target: &Image, clip: &Clip) -> Option<Coverage> {
+        let format =
+            pipelines::CANVAS_STENCIL.guaranteed_format_features(self.gpu.device.features());
+        if clip.shapes.is_empty()
+            || clip.shapes.len() > 255
+            || !format
+                .allowed_usages
+                .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+            || (self.gpu.caps.msaa4_srgb
+                && !format
+                    .flags
+                    .contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4))
+        {
+            return None;
+        }
+        if !clip.shapes.iter().all(|shape| {
+            shape
+                .path
+                .as_ref()
+                .is_some_and(|path| axis_aligned_path(path, shape.transform, self.scene.scale))
+        }) {
+            return None;
+        }
+        let area = match clip.scissor {
+            Some(bounds) => scissor(bounds, self.scene.scale, self.size)
+                .and_then(|bounds| intersect_pixels(bounds, target.area())),
+            None => Some(target.area()),
+        };
+        let Some(area) = area else {
+            return Some(Coverage {
+                empty: true,
+                ..Coverage::default()
+            });
+        };
+        Some(Coverage {
+            scissor: (area != target.area()).then_some(area),
+            stencil: clip.shapes.clone(),
+            ..Coverage::default()
+        })
     }
 
     fn coverage(&mut self, target: &Image, clip: &Clip) -> Result<Coverage, Status> {
@@ -1183,15 +1293,17 @@ impl Frame<'_> {
                         draws.next();
                         Some((rects, stops))
                     });
-                    self.rect_batches(
-                        target,
-                        transform,
-                        clip,
-                        *blend,
-                        batches.map(|(rects, stops)| {
-                            (rects.as_slice(), stops.as_deref().unwrap_or_default())
-                        }),
-                    )?;
+                    let batches = batches.map(|(rects, stops)| {
+                        (rects.as_slice(), stops.as_deref().unwrap_or_default())
+                    });
+                    if self.compositor.early_z && *blend == BlendKey::SrcOver {
+                        let batches: Vec<_> = batches.collect();
+                        if !self.try_early_z(target, transform, clip, &batches)? {
+                            self.rect_batches(target, transform, clip, *blend, batches)?;
+                        }
+                    } else {
+                        self.rect_batches(target, transform, clip, *blend, batches)?;
+                    }
                 }
                 Draw::Fill(color) => {
                     if clip.mask.is_none()
@@ -1328,6 +1440,106 @@ impl Frame<'_> {
         Ok(())
     }
 
+    fn try_early_z(
+        &mut self,
+        target: &Image,
+        transform: Affine,
+        clip: &Coverage,
+        batches: &[(&[RectInstance], &[[f32; 4]])],
+    ) -> Result<bool, Status> {
+        if target.view != self.root
+            || clip.count != 0
+            || clip.mask.is_some()
+            || clip.scissor.is_some()
+        {
+            return Ok(false);
+        }
+        let [a, b, c, d, x, y] = transform;
+        if b != 0.0 || c != 0.0 || a != d || a <= 0.0 {
+            return Ok(false);
+        }
+        let scale = self.scene.scale;
+        let count = batches.iter().map(|(rects, _)| rects.len()).sum::<usize>();
+        if !(16..=65535).contains(&count)
+            || batches.iter().flat_map(|(rects, _)| *rects).any(|rect| {
+                let [left, top, width, height] = rect.rect;
+                rect.kind != batch::RECT_FILL
+                    || rect.flags != 0
+                    || rect.radius != 0.0
+                    || rect.color[3] != 1.0
+                    || rect.gradient_b[3] != 1.0
+                    || ![
+                        (left * a + x) * scale,
+                        (top * a + y) * scale,
+                        ((left + width) * a + x) * scale,
+                        ((top + height) * a + y) * scale,
+                    ]
+                    .into_iter()
+                    .all(|edge| edge.is_finite() && edge == edge.round())
+            })
+        {
+            return Ok(false);
+        }
+        let instances: Vec<_> = batches
+            .iter()
+            .rev()
+            .flat_map(|(rects, _)| rects.iter().rev())
+            .enumerate()
+            .map(|(rank, rect)| {
+                let mut instance = rect.vertex(u32::MAX);
+                instance.padding[0] = ((rank + 1) as f32 / (count + 1) as f32).to_bits();
+                instance
+            })
+            .collect();
+        let view = self.transform(target, transform, clip)?;
+        let globals = self.globals(view, Extra::None);
+        let pipeline = self.compositor.pipelines.get(
+            self.gpu,
+            single(target.format),
+            PipelineKind::EarlyZ,
+            BlendKey::SrcOver,
+        )?;
+        let vertices = self.compositor.arena.vertices(self.gpu, &instances)?;
+        self.flush_draws();
+        let depth = self.take_exact_attachment(target.area(), pipelines::EARLY_DEPTH);
+        let load = self.load(&target.view);
+        self.count_pass(&target.view);
+        self.compositor.render_stats.draws += 1;
+        let count = draw_count(count)?;
+        self.compositor.render_stats.early_z_instances += count;
+        let stamps = pass_timestamps(&mut self.capture, GpuPassKind::EarlyZ, 1);
+        {
+            let mut pass = self.command.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("impasto opaque front-to-back"),
+                timestamp_writes: stamps,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &globals.group, globals.offsets());
+            pass.set_vertex_buffer(0, vertices.slice());
+            pass.draw(0..6, 0..count);
+        }
+        self.release(depth);
+        Ok(true)
+    }
+
     fn rect_batch(
         &mut self,
         target: &Image,
@@ -1393,7 +1605,7 @@ impl Frame<'_> {
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let samples = if self.gpu.caps.msaa4_srgb { 4 } else { 1 };
         let resolved = self.take_area(area, format, 1);
-        let multisample = (samples > 1).then(|| self.take_area(area, format, samples));
+        let multisample = (samples > 1).then(|| self.take_attachment(area, format, samples));
         let view = self.transform(&resolved, transform, &Coverage::default())?;
         let mask_group = self.mask_group(&Coverage::default());
         let mut calls = Vec::with_capacity(meshes.len());
@@ -1421,13 +1633,38 @@ impl Frame<'_> {
         }
         self.flush_draws();
         self.count_pass(&resolved.view);
-        self.compositor.render_stats.draws += draw_count(calls.len())?;
+        let stencil = (!clip.stencil.is_empty())
+            .then(|| self.take_attachment(area, pipelines::CANVAS_STENCIL, samples));
+        let mut clip_triangles = Vec::with_capacity(clip.stencil.len());
+        for shape in &clip.stencil {
+            let mesh = shape.mesh.as_ref().ok_or(Status::BadScene)?;
+            let view = self.transform(&resolved, shape.transform, &Coverage::default())?;
+            clip_triangles.push((mesh, self.globals(view, Extra::None)));
+        }
+        let target_state = Target { format, samples };
+        let clip_writer = if stencil.is_some() {
+            Some(self.compositor.pipelines.get(
+                self.gpu,
+                target_state,
+                PipelineKind::StencilWrite,
+                BlendKey::SrcOver,
+            )?)
+        } else {
+            None
+        };
         let pipeline = self.compositor.pipelines.get(
             self.gpu,
-            Target { format, samples },
-            PipelineKind::Mesh,
+            target_state,
+            if stencil.is_some() {
+                PipelineKind::MeshStencil
+            } else {
+                PipelineKind::Mesh
+            },
             BlendKey::SrcOver,
         )?;
+        let draw_total = draw_count(calls.len() + clip_triangles.len())?;
+        self.compositor.render_stats.draws += draw_total;
+        self.compositor.render_stats.stencil_draws += draw_count(clip_triangles.len())?;
         {
             let view = multisample
                 .as_ref()
@@ -1438,8 +1675,7 @@ impl Frame<'_> {
             } else {
                 self.pass_kind(&resolved.view, format)
             };
-            let timestamp_writes =
-                pass_timestamps(&mut self.capture, kind, draw_count(calls.len())?);
+            let timestamp_writes = pass_timestamps(&mut self.capture, kind, draw_total);
             let mut pass = self.command.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("canvas path batch"),
                 timestamp_writes,
@@ -1456,10 +1692,35 @@ impl Frame<'_> {
                         },
                     },
                 })],
+                depth_stencil_attachment: stencil.as_ref().map(|image| {
+                    wgpu::RenderPassDepthStencilAttachment {
+                        view: &image.view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                        stencil_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(0),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                    }
+                }),
                 ..Default::default()
             });
-            pass.set_pipeline(&pipeline);
             set_scissor(&mut pass, Some([0, 0, area[2], area[3]]));
+            if let Some(writer) = &clip_writer {
+                pass.set_pipeline(writer);
+                for (reference, (mesh, globals)) in (0u32..).zip(&clip_triangles) {
+                    let buffers = mesh.buffer.get().ok_or(Status::BadScene)?;
+                    pass.set_stencil_reference(reference);
+                    pass.set_bind_group(0, &globals.group, globals.offsets());
+                    pass.set_vertex_buffer(0, buffers.vertices.slice(..));
+                    pass.set_index_buffer(buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(mesh.indices.clone(), 0, 0..1);
+                }
+                pass.set_stencil_reference(draw_count(clip_triangles.len())?);
+            }
+            pass.set_pipeline(&pipeline);
             pass.set_bind_group(1, &mask_group, &[]);
             let mut last = None;
             for (mesh, vertices, globals) in &calls {
@@ -1497,6 +1758,9 @@ impl Frame<'_> {
         self.release(resolved);
         if let Some(multisample) = multisample {
             self.release(multisample);
+        }
+        if let Some(stencil) = stencil {
+            self.release(stencil);
         }
         Ok(())
     }
@@ -2245,6 +2509,54 @@ fn intersect(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     ]
 }
 
+/// Baked fill triangles can use stencil when the original path has only
+/// orthogonal edges on pixel boundaries. MSAA coverage is then binary.
+fn axis_aligned_path(path: &engine::scene::CanvasPath, transform: Affine, scale: f32) -> bool {
+    use engine::scene::PathVerb;
+    if transform[1] != 0.0 || transform[2] != 0.0 {
+        return false;
+    }
+    let pixel = |x, y| {
+        let (x, y) = compiler::apply(transform, x, y);
+        [x * scale, y * scale]
+    };
+    let orthogonal = |a: [f32; 2], b: [f32; 2]| a[0] == b[0] || a[1] == b[1];
+    let aligned = |p: [f32; 2]| p.into_iter().all(|v| v.is_finite() && v.round() == v);
+    let mut contour: Option<([f32; 2], [f32; 2])> = None;
+    for verb in path.verbs.iter() {
+        match *verb {
+            PathVerb::Move(x, y) => {
+                if contour.is_some_and(|(first, end)| !orthogonal(first, end)) {
+                    return false;
+                }
+                let point = pixel(x, y);
+                if !aligned(point) {
+                    return false;
+                }
+                contour = Some((point, point));
+            }
+            PathVerb::Line(x, y) => {
+                let Some((first, last)) = contour else {
+                    return false;
+                };
+                let point = pixel(x, y);
+                if !aligned(point) || !orthogonal(last, point) {
+                    return false;
+                }
+                contour = Some((first, point));
+            }
+            PathVerb::Close => {
+                if contour.is_some_and(|(first, end)| !orthogonal(first, end)) {
+                    return false;
+                }
+                contour = None;
+            }
+            _ => return false,
+        }
+    }
+    contour.is_none_or(|(first, end)| orthogonal(first, end))
+}
+
 fn add_rect_clip(clip: &mut Clip, rect: [f32; 4], radius: f32, transform: Affine) {
     if rect[2] <= 0.0 || rect[3] <= 0.0 {
         clip.scissor = Some([0.0; 4]);
@@ -2271,6 +2583,7 @@ fn add_rect_clip(clip: &mut Clip, rect: [f32; 4], radius: f32, transform: Affine
             radius,
             transform,
             mesh: None,
+            path: None,
         });
     }
 }

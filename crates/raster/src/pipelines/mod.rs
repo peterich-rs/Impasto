@@ -70,7 +70,10 @@ impl BlendKey {
 pub enum PipelineKind {
     Rect,
     RectSolid,
+    EarlyZ,
     Mesh,
+    MeshStencil,
+    StencilWrite,
     Text,
     TextMask,
     Image,
@@ -114,6 +117,8 @@ pub struct ParamsUniform {
 
 /// Stop pairs: each stop is a premultiplied color then `(offset, 0, 0, 0)`.
 pub const MAX_STOPS: usize = 256;
+pub const CANVAS_STENCIL: wgpu::TextureFormat = wgpu::TextureFormat::Depth24PlusStencil8;
+pub const EARLY_DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 pub const EXTRA_BYTES: usize = 128 * size_of::<crate::batch::PaintExtra>();
 
 const UI_WGSL: &str = include_str!("ui.wgsl");
@@ -301,7 +306,7 @@ fn build(
 
     let [ui, text, image, blur] = shaders;
     let rect_attrs = wgpu::vertex_attr_array![1 => Float32x4, 2 => Float32x4, 3 => Float32x4,
-        4 => Float32, 5 => Uint32];
+        4 => Float32, 5 => Uint32, 6 => Float32];
     let text_attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Uint16x4, 2 => Float16x4,
         3 => Uint32, 4 => Uint32];
     let image_attrs =
@@ -322,6 +327,7 @@ fn build(
         attributes: &mesh_attrs,
         step_mode: wgpu::VertexStepMode::Vertex,
     });
+    let view_only = [Some(&layouts.view)];
     let paint = [Some(&layouts.paint), Some(&layouts.material)];
     let text_groups = [
         Some(&layouts.paint),
@@ -341,7 +347,9 @@ fn build(
     ];
     let (module, groups, vertex, fragment) = match kind {
         K::Rect | K::RectSolid => (ui, paint.as_slice(), "vs_main", "fs_main"),
-        K::Mesh => (ui, paint.as_slice(), "vs_mesh", "fs_mesh"),
+        K::EarlyZ => (ui, view_only.as_slice(), "vs_depth_rect", "fs_depth_rect"),
+        K::StencilWrite => (ui, view_only.as_slice(), "vs_stencil", "fs_stencil"),
+        K::Mesh | K::MeshStencil => (ui, paint.as_slice(), "vs_mesh", "fs_mesh"),
         K::Text | K::TextMask => (text, text_groups.as_slice(), "vs_main", "fs_main"),
         K::Image => (image, image_groups.as_slice(), "vs_main", "fs_main"),
         K::BlurDown => (blur, effects.as_slice(), "vs_full", "fs_blur_down"),
@@ -353,20 +361,27 @@ fn build(
         K::Backdrop => (blur, composite.as_slice(), "vs_full", "fs_backdrop"),
     };
     let rect_buffers = [rect.clone()];
+    let stencil_buffers = [geometry.clone()];
     let mesh_buffers = [geometry, rect];
     let glyph_buffers = [glyph];
     let image_buffers = [quad];
     let buffers = match kind {
-        K::Rect | K::RectSolid => rect_buffers.as_slice(),
-        K::Mesh => mesh_buffers.as_slice(),
+        K::Rect | K::RectSolid | K::EarlyZ => rect_buffers.as_slice(),
+        K::Mesh | K::MeshStencil => mesh_buffers.as_slice(),
+        K::StencilWrite => stencil_buffers.as_slice(),
         K::Text | K::TextMask => glyph_buffers.as_slice(),
         K::Image => image_buffers.as_slice(),
         _ => &[],
     };
     let blend = match kind {
-        K::Rect | K::RectSolid | K::Mesh | K::Text | K::TextMask | K::Image | K::Over => {
-            blend.state()
-        }
+        K::Rect
+        | K::RectSolid
+        | K::Mesh
+        | K::MeshStencil
+        | K::Text
+        | K::TextMask
+        | K::Image
+        | K::Over => blend.state(),
         K::MaskIntersect => wgpu::BlendState {
             color: wgpu::BlendComponent {
                 src_factor: wgpu::BlendFactor::Dst,
@@ -411,11 +426,15 @@ fn build(
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target.format,
                     blend: Some(blend),
-                    write_mask: wgpu::ColorWrites::ALL,
+                    write_mask: if kind == K::StencilWrite {
+                        wgpu::ColorWrites::empty()
+                    } else {
+                        wgpu::ColorWrites::ALL
+                    },
                 })],
             }),
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
+            depth_stencil: depth_stencil(kind),
             multisample: wgpu::MultisampleState {
                 count: target.samples,
                 ..Default::default()
@@ -423,6 +442,47 @@ fn build(
             multiview_mask: None,
             cache: None,
         })
+}
+
+fn depth_stencil(kind: PipelineKind) -> Option<wgpu::DepthStencilState> {
+    use wgpu::{CompareFunction, StencilOperation};
+    match kind {
+        PipelineKind::EarlyZ => Some(wgpu::DepthStencilState {
+            format: EARLY_DEPTH,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(CompareFunction::Less),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        PipelineKind::StencilWrite | PipelineKind::MeshStencil => {
+            let face = wgpu::StencilFaceState {
+                compare: CompareFunction::Equal,
+                pass_op: if kind == PipelineKind::StencilWrite {
+                    StencilOperation::IncrementClamp
+                } else {
+                    StencilOperation::Keep
+                },
+                ..Default::default()
+            };
+            Some(wgpu::DepthStencilState {
+                format: CANVAS_STENCIL,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(CompareFunction::Always),
+                stencil: wgpu::StencilState {
+                    front: face,
+                    back: face,
+                    read_mask: 255,
+                    write_mask: if kind == PipelineKind::StencilWrite {
+                        255
+                    } else {
+                        0
+                    },
+                },
+                bias: Default::default(),
+            })
+        }
+        _ => None,
+    }
 }
 
 pub fn linear_sampler(gpu: &Gpu) -> wgpu::Sampler {

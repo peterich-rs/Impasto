@@ -14,6 +14,7 @@ pub enum GpuPassKind {
     OffscreenEffect,
     BackdropBlur,
     CanvasMsaa,
+    EarlyZ,
     ClipMask,
     ComputeBlur,
     Mipmap,

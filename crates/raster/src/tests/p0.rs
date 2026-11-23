@@ -964,3 +964,84 @@ fn timestamp_capture_reports_unsupported_without_an_enabled_feature() {
     );
     assert!(!raster.gpu_timings_pending());
 }
+
+#[test]
+fn opaque_depth_segments_preserve_painter_order() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let mut commands = vec![rect([2.0, 2.0, 11.0, 13.0], [255, 0, 0, 255]); 24];
+    commands.push(rect([5.0, 5.0, 9.0, 9.0], [0, 0, 255, 255]));
+    let pixels = capture(&mut raster, 1, commands, PixelSize::new(19, 23));
+    assert_eq!(pixel(&pixels, 19, 2, 2), [255, 0, 0, 255]);
+    assert_eq!(pixel(&pixels, 19, 6, 6), [0, 0, 255, 255]);
+    assert_eq!(pixel(&pixels, 19, 4, 1), [0; 4]);
+    let stats = raster.submit_stats().render;
+    assert!(stats.direct_present);
+    assert_eq!(stats.passes, 1);
+    assert_eq!(
+        stats.early_z_instances,
+        if std::env::var("IMPASTO_EARLY_Z").as_deref() == Ok("1") {
+            25
+        } else {
+            0
+        },
+    );
+}
+
+#[test]
+fn stencil_intersects_pixel_aligned_canvas_clips_with_even_odd_holes() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let mut ring = path([2.0, 2.0, 26.0, 26.0]).verbs.to_vec();
+    ring.extend_from_slice(&path([8.0, 8.0, 8.0, 8.0]).verbs);
+    let pixels = capture(
+        &mut raster,
+        1,
+        vec![canvas(
+            vec![
+                CanvasOp::Clip {
+                    path: CanvasPath {
+                        fill: FillRule::EvenOdd,
+                        verbs: ring.into(),
+                    },
+                },
+                CanvasOp::Save,
+                CanvasOp::Clip {
+                    path: path([0.0, 0.0, 20.0, 32.0]),
+                },
+                fill_path(
+                    path([0.0, 0.0, 32.0, 32.0]),
+                    [255, 0, 0, 255],
+                    CanvasComposite::SourceOver,
+                ),
+                CanvasOp::Restore,
+                fill_path(
+                    path([20.0, 0.0, 12.0, 32.0]),
+                    [0, 0, 255, 255],
+                    CanvasComposite::SourceOver,
+                ),
+            ],
+            32.0,
+            32.0,
+        )],
+        PixelSize::new(32, 32),
+    );
+    assert_eq!(pixel(&pixels, 32, 2, 2), [255, 0, 0, 255]);
+    assert_eq!(pixel(&pixels, 32, 10, 10), [0; 4]);
+    assert_eq!(pixel(&pixels, 32, 21, 10), [0, 0, 255, 255]);
+    assert_eq!(pixel(&pixels, 32, 29, 10), [0; 4]);
+    if std::env::var("IMPASTO_CANVAS_STENCIL").as_deref() == Ok("1") {
+        let gpu = &raster.device.as_ref().unwrap().gpu;
+        let format =
+            crate::pipelines::CANVAS_STENCIL.guaranteed_format_features(gpu.device.features());
+        if !gpu.caps.msaa4_srgb
+            || format
+                .flags
+                .contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4)
+        {
+            assert_eq!(raster.submit_stats().render.stencil_draws, 3);
+        }
+    }
+}

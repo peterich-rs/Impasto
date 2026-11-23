@@ -9,6 +9,7 @@ struct RectVertex {
     @location(3) color: vec4<f32>,
     @location(4) opacity: f32,
     @location(5) paint_index: u32,
+    @location(6) depth: f32,
 };
 
 struct VertexOut {
@@ -135,4 +136,36 @@ fn fs_mesh(in: VertexOut) -> @location(0) vec4<f32> {
         color = paint_gradient(load_paint(in.paint_index), in.local_coverage.xy) * in.opacity;
     }
     return color * in.local_coverage.z * clip_coverage(in.position.xy);
+}
+
+
+struct DepthOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) color: vec4<f32>,
+};
+
+@vertex
+fn vs_depth_rect(@builtin(vertex_index) vertex: u32, data: RectVertex) -> DepthOut {
+    let corners = array<vec2<f32>, 6>(
+        vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
+        vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0),
+    );
+    let scene = data.rect.xy + corners[vertex] * data.rect.zw;
+    return DepthOut(view.transform * vec4(scene, data.depth, 1.0), data.color);
+}
+
+@fragment
+fn fs_depth_rect(in: DepthOut) -> @location(0) vec4<f32> {
+    return in.color;
+}
+
+
+@vertex
+fn vs_stencil(@location(0) vertex: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return view.transform * vec4(vertex.xy, 0.0, 1.0);
+}
+
+@fragment
+fn fs_stencil() -> @location(0) vec4<f32> {
+    return vec4(0.0);
 }

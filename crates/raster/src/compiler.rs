@@ -124,6 +124,7 @@ pub struct ClipShape {
     pub transform: Affine,
     /// Tessellated path for a canvas clip, in the clip's space.
     pub mesh: Option<Arc<Mesh>>,
+    pub path: Option<CanvasPath>,
 }
 
 /// State every draw in a scope runs under.
@@ -820,6 +821,7 @@ impl Compiler<'_, '_, '_> {
                 radius,
                 transform,
                 mesh: None,
+                path: None,
             });
         }
         self.stack.push(state);
@@ -964,6 +966,7 @@ impl Compiler<'_, '_, '_> {
                         radius: 0.0,
                         transform,
                         mesh: Some(Arc::new(mesh)),
+                        path: Some(path.clone()),
                     });
                 }
                 self.boundary();
