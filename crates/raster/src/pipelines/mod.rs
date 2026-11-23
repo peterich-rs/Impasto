@@ -129,17 +129,24 @@ pub struct PipelineCache {
 
 impl PipelineCache {
     pub fn new(gpu: &Gpu) -> Self {
-        let module = |label, source: &str, clipped: bool| {
+        let module = |label, source: &str, clipped: bool, gradients: bool| {
             let view = include_str!("view.wgsl");
             let clip = if clipped {
                 include_str!("clip.wgsl")
             } else {
                 ""
             };
+            let gradient = if gradients {
+                include_str!("gradient.wgsl")
+            } else {
+                ""
+            };
             gpu.device
                 .create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some(label),
-                    source: wgpu::ShaderSource::Wgsl(format!("{view}\n{source}\n{clip}").into()),
+                    source: wgpu::ShaderSource::Wgsl(
+                        format!("{view}\n{source}\n{clip}\n{gradient}").into(),
+                    ),
                 })
         };
         let view = U(size_of::<ViewUniform>() as u64);
@@ -157,10 +164,10 @@ impl PipelineCache {
         };
         Self {
             targets: HashMap::new(),
-            ui: module("impasto ui", UI_WGSL, true),
-            text: module("impasto text", TEXT_WGSL, true),
-            image: module("impasto image", IMAGE_WGSL, true),
-            blur: module("impasto blur", BLUR_WGSL, false),
+            ui: module("impasto ui", UI_WGSL, true, true),
+            text: module("impasto text", TEXT_WGSL, true, true),
+            image: module("impasto image", IMAGE_WGSL, true, false),
+            blur: module("impasto blur", BLUR_WGSL, false, false),
             layouts,
         }
     }
