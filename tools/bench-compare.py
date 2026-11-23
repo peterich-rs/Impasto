@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare four raster benchmarks from two prepared Impasto checkouts."""
+"""Compare Impasto raster benchmarks in alternating runs."""
 
 import argparse
 import json
@@ -15,6 +15,13 @@ SCENES = {
     "scroll_1000_cards", "dense_text_wall", "backdrop_blur_overlays", "canvas_500_paths",
 }
 PREFIX = "IMPASTO_BENCH_JSON "
+EXPERIMENTS = {
+    "IMPASTO_CANVAS_STENCIL", "IMPASTO_COMPUTE_BLUR", "IMPASTO_DARKEN_STEMS",
+    "IMPASTO_DITHER", "IMPASTO_EARLY_Z", "IMPASTO_GRADIENT_LUT",
+    "IMPASTO_IMAGE_UPLOAD", "IMPASTO_LCD_RGB", "IMPASTO_PAINT_UNIFORM",
+    "IMPASTO_PREWARM", "IMPASTO_SHADOW_2D", "IMPASTO_SPECIALIZE_PAINT",
+    "IMPASTO_TEXT_GAMMA", "IMPASTO_TRANSIENT_ATTACHMENTS",
+}
 
 
 def capture(command, checkout, env=None):
@@ -44,16 +51,17 @@ def prepare(checkout):
     raise ValueError(f"raster benchmark binary missing in {checkout}")
 
 
-def run(checkout, prepared, backend, gpu):
+def run(checkout, prepared, backend, gpu, test_filter, experiments):
     binary, sha = prepared
     env = {
         **os.environ,
         "IMPASTO_BENCH_GIT_SHA": sha,
         "IMPASTO_BENCH_BACKEND": backend,
         "IMPASTO_BENCH_GPU": "1" if gpu else "0",
+        **experiments,
     }
     output = capture([
-        str(binary), "tests::p0::bench_", "--ignored", "--nocapture", "--test-threads=1",
+        str(binary), test_filter, "--ignored", "--nocapture", "--test-threads=1",
     ], checkout, env)
     reports = {}
     for line in output.splitlines():
@@ -66,7 +74,9 @@ def run(checkout, prepared, backend, gpu):
             if report["environment"]["debug_assertions"]:
                 raise ValueError(f"{checkout} did not run with release assertions")
             reports[scene] = report
-    if reports.keys() != SCENES:
+    if not reports:
+        raise ValueError(f"no benchmarks matched {test_filter} in {checkout}")
+    if test_filter == "tests::p0::bench_" and reports.keys() != SCENES:
         raise ValueError(f"{checkout} must have the Stage 0 harness, got scenes {sorted(reports)}")
     return reports
 
@@ -82,7 +92,10 @@ def fingerprint(report):
 
 def compare(pairs):
     summaries = {}
-    for scene in sorted(SCENES):
+    scenes = pairs[0]["base"].keys()
+    if any(reports.keys() != scenes for pair in pairs for reports in (pair["base"], pair["head"])):
+        raise ValueError("benchmark scene sets differ")
+    for scene in sorted(scenes):
         runs = [(pair["base"][scene], pair["head"][scene]) for pair in pairs]
         reference = fingerprint(runs[0][0])
         if any(fingerprint(report) != reference for pair in runs for report in pair):
@@ -114,6 +127,13 @@ def compare(pairs):
     return summaries
 
 
+def configuration(argument):
+    key, equals, value = argument.partition("=")
+    if not equals or key not in EXPERIMENTS:
+        raise argparse.ArgumentTypeError("expected an IMPASTO raster experiment as KEY=VALUE")
+    return key, value
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("base", type=Path, help="checkout containing the baseline")
@@ -121,11 +141,19 @@ def main():
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--backend", choices=["auto", "metal", "vulkan", "gles", "dx12"], default="auto")
     parser.add_argument("--cpu-only", action="store_true")
+    parser.add_argument("--filter", default="tests::p0::bench_", help="Rust libtest filter")
+    parser.add_argument("--base-env", action="append", type=configuration, default=[], metavar="KEY=VALUE")
+    parser.add_argument("--head-env", action="append", type=configuration, default=[], metavar="KEY=VALUE")
     parser.add_argument("--out", type=Path, required=True, help="JSON report path")
     args = parser.parse_args()
     if args.rounds < 1:
         parser.error("--rounds must be positive")
     checkouts = {"base": args.base.resolve(), "head": args.head.resolve()}
+    shared = {key: os.environ[key] for key in EXPERIMENTS if key in os.environ}
+    experiments = {
+        "base": {**shared, **dict(args.base_env)},
+        "head": {**shared, **dict(args.head_env)},
+    }
     builds = {path: prepare(path) for path in dict.fromkeys(checkouts.values())}
     if checkouts["base"] != checkouts["head"] and builds[checkouts["base"]][0] == builds[checkouts["head"]][0]:
         raise ValueError("checkouts share a benchmark binary path, use separate Cargo target directories")
@@ -136,12 +164,15 @@ def main():
         pair = {"order": order}
         for side in order:
             path = checkouts[side]
-            pair[side] = run(path, builds[path], args.backend, not args.cpu_only)
+            pair[side] = run(
+                path, builds[path], args.backend, not args.cpu_only, args.filter, experiments[side],
+            )
         pairs.append(pair)
     summary = compare(pairs)
     report = {
         "schema": 1,
         "host": {"platform": platform.platform(), "processor": platform.processor()},
+        "experiments": experiments,
         "pairs": pairs,
         "summary": summary,
     }

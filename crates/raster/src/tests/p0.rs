@@ -6,6 +6,7 @@ use super::*;
 use crate::{compositor::extent, surface::read_rgba};
 
 mod benchmark;
+mod p1;
 
 fn capture(
     raster: &mut Rasterizer,

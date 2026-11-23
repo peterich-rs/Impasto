@@ -1,11 +1,19 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 
 use serde_json::{Value, json};
 
 use super::{ImagePixels, LayerTree, PixelSize, output};
 use crate::{FontLibrary, RasterBackend, RasterOptions, Rasterizer, ValidationMode};
 
-pub(super) fn headless(fonts: FontLibrary) -> Rasterizer {
+pub(super) struct Headless {
+    raster: Rasterizer,
+    init_us: f64,
+}
+
+pub(super) fn headless(fonts: FontLibrary) -> Headless {
     let backend = match std::env::var("IMPASTO_BENCH_BACKEND").as_deref() {
         Ok("metal") => Some(RasterBackend::Metal),
         Ok("vulkan") => Some(RasterBackend::Vulkan),
@@ -14,7 +22,8 @@ pub(super) fn headless(fonts: FontLibrary) -> Rasterizer {
         Ok("auto") | Err(std::env::VarError::NotPresent) => None,
         other => panic!("invalid benchmark backend: {other:?}"),
     };
-    Rasterizer::headless(
+    let started = Instant::now();
+    let raster = Rasterizer::headless(
         RasterOptions {
             enable_gpu_timing: std::env::var("IMPASTO_BENCH_GPU").as_deref() != Ok("0"),
             validation: ValidationMode::AsyncOnly,
@@ -23,16 +32,45 @@ pub(super) fn headless(fonts: FontLibrary) -> Rasterizer {
         },
         fonts,
     )
-    .unwrap()
+    .unwrap();
+    Headless {
+        raster,
+        init_us: started.elapsed().as_secs_f64() * 1_000_000.0,
+    }
 }
 
 pub(super) fn run(
-    raster: &mut Rasterizer,
+    host: &mut Headless,
+    name: &str,
+    frames: u32,
+    size: PixelSize,
+    scene: impl FnMut(u32) -> LayerTree,
+) {
+    run_with_images(
+        host,
+        name,
+        frames,
+        size,
+        scene,
+        ImagePixels {
+            width: 2,
+            height: 2,
+            rgba: &[
+                230, 110, 50, 255, 90, 120, 180, 255, 88, 90, 124, 255, 70, 60, 200, 255,
+            ],
+        },
+    );
+}
+
+pub(super) fn run_with_images(
+    host: &mut Headless,
     name: &str,
     frames: u32,
     size: PixelSize,
     mut scene: impl FnMut(u32) -> LayerTree,
+    image: ImagePixels<'_>,
 ) {
+    let raster = &mut host.raster;
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let gpu = raster.device.as_ref().unwrap().gpu.clone();
     let target = output(&gpu, format, size);
@@ -43,22 +81,23 @@ pub(super) fn run(
         let frame_id = u64::from(frame) + 1;
         let frame_scene = scene(frame);
         raster.begin_gpu_frame(raster.options.enable_gpu_timing.then_some(frame_id));
+        let prepare = Instant::now();
         raster
             .submit_layers(&frame_scene, 1.0, |_| {
                 Some(ImagePixels {
-                    width: 2,
-                    height: 2,
-                    rgba: &[
-                        230, 110, 50, 255, 90, 120, 180, 255, 88, 90, 124, 255, 70, 60, 200, 255,
-                    ],
+                    width: image.width,
+                    height: image.height,
+                    rgba: image.rgba,
                 })
             })
             .unwrap();
+        let scene_install = prepare.elapsed();
         raster.encode_and_submit(&view, format, size).unwrap();
         let stats = raster.submit_stats();
         // Use a steady single in-flight submission. The wait and readback are
         // outside all CPU metrics, and each sample has the same queue depth.
         wait_for_gpu(&gpu);
+        let output_ready = prepare.elapsed();
         let mut readback = raster.drain_gpu_timings().pop();
         if raster.gpu_timings_pending() {
             // Metal queues the resolve after the rendered frame completes.
@@ -79,6 +118,8 @@ pub(super) fn run(
             ("encode_us", stats.encode),
             ("flush_us", stats.flush),
             ("queue_submit_us", stats.queue_submit),
+            ("scene_install_us", scene_install),
+            ("output_ready_us", output_ready),
         ]
         .map(|(name, time)| (name, time.as_secs_f64() * 1_000_000.0));
         let mut by_kind = BTreeMap::new();
@@ -134,6 +175,8 @@ pub(super) fn run(
                 "gradient_lut_hits": r.gradient_lut_hits, "copy_pixels": r.copy_pixels,
                 "blur_pixels": r.blur_pixels, "offscreen_alloc_bytes": r.offscreen_alloc_bytes,
                 "offscreen_peak_bytes": r.offscreen_peak_bytes, "pooled_texture_bytes": r.pooled_texture_bytes,
+                "stencil_draws": r.stencil_draws, "early_z_instances": r.early_z_instances,
+                "transient_bytes": r.transient_bytes,
             },
         }));
     }
@@ -177,6 +220,7 @@ pub(super) fn run(
             "in_flight": 1,
         },
         "steady_state_us": percentiles,
+        "raster_init_us": host.init_us,
         "samples": samples,
     });
     println!("IMPASTO_BENCH_JSON {report}");

@@ -25,7 +25,7 @@ flowchart LR
     H --> T["Perfetto Trace"]
     H --> B["基准与 Inspect"]
     H --> D["应用内 DevTools"]
-    H -.-> W["进程外 DevTools"]
+    H --> W["进程外 DevTools"]
 ```
 
 以进程内单调帧号和设备代次关联 GPU 样本。宿主时钟统一为单调纳秒，记录平台收到 vsync、UI 开始/完成、Raster 开始、提交完成、present 返回与帧预算。UI 和 Raster 的时间表示各自线程上的墙钟区间，包含其同步等待。端到端时间与 UI→Raster 排队单独呈现。平台提供的 vsync 时间戳属于平台时钟，平台回调到达时间使用宿主时钟。Present 返回表示宿主完成调用，UIKit 可另记事务确认。
@@ -137,6 +137,46 @@ flowchart LR
 
 **6.4 远程 DevTools。** 先定义只读且版本化的 JSON-RPC 帧订阅和 Trace 抓取。以稳定帧号与 revision 传送初始快照、增量和 GPU 回填，为慢客户端设有界队列与重同步入口。随后在 debug/profile 构建提供显式开启的本地监听和短期连接凭证，由 CLI 连接桌面、转发 Android，再针对 iOS 验证可用的设备连接方案。最后实现独立客户端的帧列表、逐 Pass 与导出。验收覆盖断连重连、慢客户端、版本不匹配、环覆盖、设备重建、Release 无监听，以及 Overlay 关闭场景。UIKit 事务确认、GC 周期和单次 DeepInspect 按各自信号成熟度独立接入。 [TelemetryHub](../crates/embedder/common/src/diagnostics/hub.rs) · [现有 DevTools](../packages/devtools/src/pages/performance.tsx)
 
-### 首个可独立合入的改动
+## P1 运行配置
 
-执行 **1.1 共用渐变 WGSL**。把公共函数接进现有 shader 拼装，冻结 Rust 实例布局、binding 和 Stop 编码。通过 Rect、文本、Canvas 渐变及现有 GPU 像素测试，并对固定场景核对 Draw/Pass、顶点和 Stop 上传量。先复跑 `mixed_rectangles_use_one_draw_and_reuse_warm_resources`、`resident_mask_pages_color_gradients_and_decorations_share_a_draw`，补足锥形渐变与硬停靠点的覆盖。独立验收后，再开始 **1.2 Glyph 实例压缩**。 [现有 Raster 用例](../crates/raster/src/tests/p0.rs)
+默认使用共享渐变 WGSL、40 B Glyph 和 64 B Rect、图片 GPU 线性预乘和逐级 mip、独立四角和连续曲率，以及 latency 2 的 FIFO 表面。纯色 Glyph 和 Rect 无需冷字段上传。Tier 0 使用有界 Uniform PaintExtra 分页。普通直绘帧保持零根 Copy。
+
+| 配置 | 路径 |
+| --- | --- |
+| `IMPASTO_PAINT_UNIFORM=1`、`IMPASTO_SPECIALIZE_PAINT=1` | 强制 Uniform 分页，或启用简单画笔的 WGSL 特化。 |
+| `IMPASTO_IMAGE_UPLOAD=cpu\|render\|compute` | 选择 CPU 基线、默认 RenderPass 或支持设备的 Compute 对照。Nearest、九宫格与 Canvas 子区域保持自己的采样约束。 |
+| `IMPASTO_COMPUTE_BLUR=1`、`IMPASTO_GRADIENT_LUT=1` | 在设备能力与像素误差允许时启用共享内存模糊与渐变纹理。 |
+| `IMPASTO_TRANSIENT_ATTACHMENTS=0\|1` | 强制关闭或开启瞬态附件。自动档使用适配器的内存节省提示。 |
+| `IMPASTO_CANVAS_STENCIL=1`、`IMPASTO_EARLY_Z=1` | 对齐且具有二值覆盖的 Canvas 路径可用 Stencil。连续不透明、轴对齐的实心段可用 Early-Z。 |
+| `IMPASTO_SHADOW_2D=1` | 启用二维阴影积分。默认使用距离近似，避免在密集阴影场景承担积分开销。 |
+| `IMPASTO_TEXT_GAMMA=1`、`IMPASTO_DARKEN_STEMS=1`、`IMPASTO_LCD_RGB=1` | 对照小字号灰阶，或在支持双源混合的桌面不透明直绘目标实验 RGB LCD。 |
+| `IMPASTO_DITHER=1` | 在已有合成输出处量化 8-bit RGB。可证明完全覆盖的直绘不透明渐变在原 Pass 中抖动。 |
+| `IMPASTO_PREWARM=0\|1` | 延迟创建基础变体，或在已有基础变体外预热实际 surface 的常用变体。 |
+| `IMPASTO_SURFACE_LATENCY=1\|2\|3`、`IMPASTO_PRESENT_MODE=fifo\|mailbox\|fifo-relaxed`、`IMPASTO_SURFACE_ALPHA=opaque\|premultiplied\|postmultiplied` | 选择表面队列预算和能力协商选项。每次配置记录实际选项。 |
+
+启动日志或系统 Trace 分列 adapter、device、shader、pipeline、首个 surface present 返回，以及 UIKit 混排时的 ack。当前管线缓存属于设备代次。跨进程 Vulkan 磁盘缓存需要目标驱动上可复现的收益以及满足 wgpu 来源契约的加载设计。
+
+## 进程外 DevTools
+
+启动调试应用时设置同一个端口和会话凭证。客户端可经本机回环、Android USB 或 iOS USB 接收版本化帧流并下载 Perfetto Trace。Release 只有构建时显式启用 `embedder/devtools-server` 才包含监听器。
+
+```sh
+export IMPASTO_DEVTOOLS_PORT=8765
+export IMPASTO_DEVTOOLS_TOKEN="$(openssl rand -hex 32)"
+impasto run -d macos
+```
+
+在另一个终端运行 `impasto devtools --port 8765`，用浏览器打开命令给出的本地 HTML，填入当前会话的凭证。Android 在 `impasto run -d android` 安装调试 APK 时通过应用私有缓存配置该会话，再运行 `impasto devtools -d android --port 8765`。对特定 Android 设备可传入 adb serial。iOS Simulator 可直接连接本机端口，USB 真机用 `impasto devtools -d ios:<UDID> --port 8765`，转发需要系统可调用的 libusbmuxd `iproxy`。USB 命令按 Enter 关闭转发。可设置 `IMPASTO_TELEMETRY=gpu` 打开常驻 GPU 统计，录制也会在采集窗口请求 GPU 时间戳。 [Android adb 转发](https://developer.android.com/tools/adb#forwardports) · [iOS iproxy](https://github.com/libimobiledevice/libusbmuxd/blob/master/docs/iproxy.1)
+
+## 专题基准
+
+同一份 checkout 可以按路径开关做配对对照。报告保留基准场景、原始样本、每侧的实验开关、CPU 创建 Rasterizer 耗时、首帧与暖帧数据。大图用例的 `scene_install_us` 包含 CPU 上传和场景安装，`output_ready_us` 包含等待渲染及上传工作完成。
+
+```sh
+python3 tools/bench-compare.py . . --backend metal --rounds 5 \
+  --filter tests::p0::p1::blur_matrix \
+  --base-env IMPASTO_COMPUTE_BLUR=0 --head-env IMPASTO_COMPUTE_BLUR=1 \
+  --out /tmp/impasto-blur-ab.json
+```
+
+同一入口下的 `opaque_overlap` 比较 Early-Z，`gradient_wall` 比较长 Stop LUT，`upload_image` 比较不同图片上传模式。用 `bench_scroll_1000_cards` 和 `IMPASTO_PREWARM=0\|1` 对照冷启动 Rasterizer 创建与首帧总时间。GPU 分位的显示指标为本机同配置实验。
