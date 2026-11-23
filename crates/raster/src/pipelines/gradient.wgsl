@@ -1,5 +1,6 @@
 @group(0) @binding(1) var<uniform> stops: array<vec4<f32>, 512>;
 @group(0) @binding(3) var gradient_ramps: texture_2d_array<f32>;
+override use_gradient_ramps: bool = false;
 
 // Stops are stored in pairs: even = premultiplied color, odd = (offset, 0, 0, 0).
 fn sample_gradient(t: f32, first: u32, count: u32, ramp: u32) -> vec4<f32> {
@@ -7,7 +8,7 @@ fn sample_gradient(t: f32, first: u32, count: u32, ramp: u32) -> vec4<f32> {
         return vec4<f32>(0.0);
     }
     let clamped = clamp(t, 0.0, 1.0);
-    if ramp > 0u {
+    if use_gradient_ramps && ramp > 0u {
         let index = clamped * 255.0;
         let low = i32(floor(index));
         let high = min(low + 1, 255);

@@ -45,7 +45,6 @@ pub(crate) struct Compositor {
     compute_blur: Option<ComputeBlur>,
     early_z: bool,
     canvas_stencil: bool,
-    dither_output: bool,
     transient: bool,
 }
 
@@ -260,7 +259,6 @@ impl Compositor {
             compute_blur: ComputeBlur::new(gpu),
             early_z: std::env::var("IMPASTO_EARLY_Z").as_deref() == Ok("1"),
             canvas_stencil: std::env::var("IMPASTO_CANVAS_STENCIL").as_deref() == Ok("1"),
-            dither_output: std::env::var("IMPASTO_DITHER").as_deref() == Ok("1"),
             transient: match std::env::var("IMPASTO_TRANSIENT_ATTACHMENTS").as_deref() {
                 Ok("0") => false,
                 Ok("1") => true,
@@ -363,7 +361,7 @@ impl Compositor {
                 label: Some("impasto frame"),
             });
         let direct = format.is_srgb() && !scene_reads_root(&scene, Some(scene.tree.root));
-        let dither_output = self.dither_output
+        let dither_output = gpu.dither_output
             && !direct
             && matches!(
                 format,
@@ -1469,14 +1467,14 @@ impl Frame<'_> {
         blend: BlendKey,
         batches: impl IntoIterator<Item = (&'a [RectInstance], &'a [[f32; 4]])>,
     ) -> Result<(), Status> {
-        let dither = self.compositor.dither_output
+        let dither = self.gpu.dither_output
             && target.view == self.root
             && matches!(
                 target.format,
                 wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Rgba8UnormSrgb
             )
             && blend == BlendKey::SrcOver;
-        let view = self.geometry_uniform(target, transform, clip, dither)?;
+        let view = self.geometry_uniform(target, transform, clip, f32::from(dither))?;
         let mut batch = Vec::new();
         let mut active = None;
         for (rects, stops) in batches {
@@ -1882,7 +1880,8 @@ impl Frame<'_> {
         let mut key = AtlasBinding::default();
         let empty = self.stops(&[])?;
         let (mut active, _) = self.paint(empty, None)?;
-        let view = self.transform(target, transform, clip)?;
+        let atlas_scale = self.compositor.atlas.inverse_page_size();
+        let view = self.geometry_uniform(target, transform, clip, atlas_scale)?;
         let mut last_gradient: Option<(&batch::PackedGradient, PaintPage, u32)> = None;
         let scale = self.scene.scale;
         let [a, b, c, d, ..] = transform;
@@ -1999,6 +1998,9 @@ impl Frame<'_> {
             };
             if lcd && flags & 7 == 0 {
                 flags |= batch::GLYPH_LCD;
+            }
+            if matches!(binding, AtlasBinding::Temporary { .. }) {
+                flags |= batch::GLYPH_TEMPORARY_PAGE;
             }
             if key != binding || !active.same_bindings(page) {
                 self.glyph_batch(target, clip, view, active, &batch, key)?;
@@ -2409,7 +2411,7 @@ impl Frame<'_> {
     }
 
     fn transform(&mut self, target: &Image, t: Affine, clip: &Coverage) -> Result<Address, Status> {
-        self.geometry_uniform(target, t, clip, false)
+        self.geometry_uniform(target, t, clip, 0.0)
     }
 
     fn geometry_uniform(
@@ -2417,7 +2419,7 @@ impl Frame<'_> {
         target: &Image,
         t: Affine,
         clip: &Coverage,
-        dither: bool,
+        value: f32,
     ) -> Result<Address, Status> {
         let [w, h] = target.size.map(|v| v as f32);
         let sx = 2.0 * self.scene.scale / w;
@@ -2433,7 +2435,7 @@ impl Frame<'_> {
             ],
             ..clip.view(target, scale)
         };
-        view.meta[3] = f32::from(dither);
+        view.meta[3] = value;
         self.uniform(&view)
     }
 

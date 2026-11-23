@@ -272,6 +272,10 @@ impl Atlas {
         ])
     }
 
+    pub fn inverse_page_size(&self) -> f32 {
+        1.0 / self.page_size as f32
+    }
+
     fn pin(&mut self, placement: Placement) {
         if placement.rect.page != usize::MAX {
             self.pinned.insert((placement.color, placement.rect.page));

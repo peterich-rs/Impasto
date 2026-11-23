@@ -112,6 +112,7 @@ pub const GLYPH_GRADIENT: u32 = 2;
 pub const GLYPH_DECORATION: u32 = 4;
 pub const GLYPH_GAMMA: u32 = 8;
 pub const GLYPH_LCD: u32 = 16;
+pub const GLYPH_TEMPORARY_PAGE: u32 = 32;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageInstance {

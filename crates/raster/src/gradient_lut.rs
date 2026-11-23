@@ -22,7 +22,7 @@ pub(crate) struct GradientLut {
 
 impl GradientLut {
     pub fn new(gpu: &Gpu) -> Self {
-        let enabled = std::env::var("IMPASTO_GRADIENT_LUT").as_deref() == Ok("1");
+        let enabled = gpu.gradient_lut;
         let layers = if enabled {
             LAYERS.min(gpu.caps.max_array_layers)
         } else {

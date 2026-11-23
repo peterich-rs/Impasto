@@ -199,7 +199,11 @@ impl PipelineCache {
                 &[view, U(size_of::<ParamsUniform>() as u64)],
             ),
             material: layout(gpu, "impasto material", &[T, S]),
-            atlas: layout(gpu, "impasto atlas", &[Slot::Array, Slot::Array, S]),
+            atlas: layout(
+                gpu,
+                "impasto atlas",
+                &[Slot::GlyphArray, Slot::GlyphArray, S],
+            ),
             composite: layout(gpu, "impasto composite", &[T, S, T]),
         };
         let cache = Self {
@@ -277,6 +281,7 @@ enum Slot {
     Paint,
     Texture,
     Array,
+    GlyphArray,
     Sampler,
 }
 
@@ -306,17 +311,21 @@ fn layout(gpu: &Gpu, label: &str, slots: &[Slot]) -> wgpu::BindGroupLayout {
                     },
                     wgpu::ShaderStages::FRAGMENT,
                 ),
-                Slot::Texture | Slot::Array => (
+                Slot::Texture | Slot::Array | Slot::GlyphArray => (
                     wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: if matches!(slot, Slot::Array) {
+                        view_dimension: if matches!(slot, Slot::Array | Slot::GlyphArray) {
                             wgpu::TextureViewDimension::D2Array
                         } else {
                             wgpu::TextureViewDimension::D2
                         },
                         multisampled: false,
                     },
-                    wgpu::ShaderStages::FRAGMENT,
+                    if matches!(slot, Slot::GlyphArray) {
+                        wgpu::ShaderStages::VERTEX_FRAGMENT
+                    } else {
+                        wgpu::ShaderStages::FRAGMENT
+                    },
                 ),
                 Slot::Sampler => (
                     wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
@@ -459,6 +468,12 @@ fn build(
     }
     if gpu.text_gamma && matches!(kind, K::Text | K::TextMask) {
         constants.push(("text_gamma", 1.0));
+    }
+    if gpu.dither_output && kind == K::Rect {
+        constants.push(("output_dither", 1.0));
+    }
+    if gpu.gradient_lut && matches!(kind, K::Rect | K::Mesh | K::MeshStencil | K::Text) {
+        constants.push(("use_gradient_ramps", 1.0));
     }
     let label = format!("impasto {kind:?} {blend:?}");
     let layout = gpu

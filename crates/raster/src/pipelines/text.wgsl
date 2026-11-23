@@ -34,7 +34,15 @@ fn vs_main(@builtin(vertex_index) vertex: u32, data: GlyphVertex) -> VertexOut {
     let scene = data.rect.xy + unit * data.rect.zw;
     var out: VertexOut;
     out.position = view.transform * vec4<f32>(scene, 0.0, 1.0);
-    out.uv = mix(vec2<f32>(data.uv.xy), vec2<f32>(data.uv.zw), unit);
+    var scale = vec2(view.info.w);
+    if (data.flags_and_layer & 32u) != 0u {
+        if (data.flags_and_layer & 1u) != 0u {
+            scale = 1.0 / vec2<f32>(textureDimensions(color_atlas));
+        } else {
+            scale = 1.0 / vec2<f32>(textureDimensions(mask_atlas));
+        }
+    }
+    out.uv = mix(vec2<f32>(data.uv.xy), vec2<f32>(data.uv.zw), unit) * scale;
     out.local = scene;
     out.color = data.color;
     out.flags_and_layer = data.flags_and_layer;
@@ -58,8 +66,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let flags = data.flags_and_layer & 255u;
     let layer = i32(data.flags_and_layer >> 8u);
     if simple_paint {
-        let uv = in.uv / vec2<f32>(textureDimensions(mask_atlas));
-        return data.color * glyph_coverage(uv, layer, flags);
+        return data.color * glyph_coverage(in.uv, layer, flags);
     }
     if ((flags & 4u) != 0u) {
         // Decoration bar: a solid or gradient rectangle.
@@ -71,10 +78,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     } else if ((flags & 1u) != 0u) {
         // Color glyph: the atlas is straight RGBA in sRGB; the pipeline's
         // target is sRGB so the hardware converts on write.
-        let texel = textureSample(color_atlas, atlas_sampler, in.uv / vec2<f32>(textureDimensions(color_atlas)), layer);
+        let texel = textureSample(color_atlas, atlas_sampler, in.uv, layer);
         color = vec4<f32>(texel.rgb * texel.a * data.color.a, texel.a * data.color.a);
     } else {
-        let coverage = glyph_coverage(in.uv / vec2<f32>(textureDimensions(mask_atlas)), layer, flags);
+        let coverage = glyph_coverage(in.uv, layer, flags);
         var brush = data.color;
         if ((flags & 2u) != 0u) {
             brush = paint_gradient(load_paint(data.paint_index), p);

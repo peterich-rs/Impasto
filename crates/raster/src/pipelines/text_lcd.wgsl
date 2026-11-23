@@ -7,9 +7,8 @@ struct LcdOut {
 @fragment
 fn fs_lcd(in: VertexOut) -> LcdOut {
     let layer = i32(in.flags_and_layer >> 8u);
-    let size = vec2<f32>(textureDimensions(mask_atlas));
-    let uv = in.uv / size;
-    let third_pixel = dpdx(in.uv) / (3.0 * size);
+    let uv = in.uv;
+    let third_pixel = dpdx(uv) / 3.0;
     let masks = vec3(
         glyph_coverage(uv - third_pixel, layer, in.flags_and_layer),
         glyph_coverage(uv, layer, in.flags_and_layer),

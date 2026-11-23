@@ -1,6 +1,7 @@
 // Analytic rectangles and tessellated paths in linear premultiplied color.
 override simple_paint: bool = false;
 override two_dimensional_shadow: bool = false;
+override output_dither: bool = false;
 @group(1) @binding(0) var clip_mask_tex: texture_2d<f32>;
 @group(1) @binding(1) var clip_mask_sampler: sampler;
 
@@ -165,7 +166,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
 
     color = color * clip_coverage(in.position.xy) * data.opacity;
-    if view.info.w > 0.0 && color.a >= 1.0 && (u32(data.shape.w) & 1u) != 0u {
+    if output_dither && view.info.w > 0.0 && color.a >= 1.0 && (u32(data.shape.w) & 1u) != 0u {
         return vec4(to_linear(dither_srgb(color, in.position.xy).rgb), color.a);
     }
     return color;
