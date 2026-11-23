@@ -138,6 +138,7 @@ fn timing_json(out: &mut String, timing: &FrameTiming) {
     field_u64(out, "vertexBytes", raster.render.vertex_bytes, false);
     field_u64(out, "uniformBytes", raster.render.uniform_bytes, false);
     field_u64(out, "stopBytes", raster.render.stop_bytes, false);
+    field_u64(out, "extraBytes", raster.render.extra_bytes, false);
     field_u64(
         out,
         "meshUploadBytes",

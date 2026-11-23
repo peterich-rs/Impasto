@@ -69,8 +69,10 @@ impl BlendKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PipelineKind {
     Rect,
+    RectSolid,
     Mesh,
     Text,
+    TextMask,
     Image,
     BlurDown,
     BlurUp,
@@ -112,6 +114,7 @@ pub struct ParamsUniform {
 
 /// Stop pairs: each stop is a premultiplied color then `(offset, 0, 0, 0)`.
 pub const MAX_STOPS: usize = 256;
+pub const EXTRA_BYTES: usize = 128 * size_of::<crate::batch::PaintExtra>();
 
 const UI_WGSL: &str = include_str!("ui.wgsl");
 const TEXT_WGSL: &str = include_str!("text.wgsl");
@@ -141,18 +144,32 @@ impl PipelineCache {
             } else {
                 ""
             };
+            let paint = if gradients {
+                let qualifier = if gpu.caps.paint_storage {
+                    "storage, read"
+                } else {
+                    "uniform"
+                };
+                format!("@group(0) @binding(2) var<{qualifier}> paint: array<PaintExtra, 128>;")
+            } else {
+                String::new()
+            };
             gpu.device
                 .create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some(label),
                     source: wgpu::ShaderSource::Wgsl(
-                        format!("{view}\n{source}\n{clip}\n{gradient}").into(),
+                        format!("{view}\n{source}\n{clip}\n{gradient}\n{paint}").into(),
                     ),
                 })
         };
         let view = U(size_of::<ViewUniform>() as u64);
         let layouts = Layouts {
             view: layout(gpu, "impasto view", &[view]),
-            paint: layout(gpu, "impasto paint", &[view, U((MAX_STOPS * 32) as u64)]),
+            paint: layout(
+                gpu,
+                "impasto paint",
+                &[view, U((MAX_STOPS * 32) as u64), Slot::Paint],
+            ),
             effects: layout(
                 gpu,
                 "impasto effects",
@@ -205,6 +222,7 @@ impl PipelineCache {
 #[derive(Clone, Copy)]
 enum Slot {
     Uniform(u64),
+    Paint,
     Texture,
     Array,
     Sampler,
@@ -223,6 +241,18 @@ fn layout(gpu: &Gpu, label: &str, slots: &[Slot]) -> wgpu::BindGroupLayout {
                         min_binding_size: wgpu::BufferSize::new(*size),
                     },
                     wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ),
+                Slot::Paint => (
+                    wgpu::BindingType::Buffer {
+                        ty: if gpu.caps.paint_storage {
+                            wgpu::BufferBindingType::Storage { read_only: true }
+                        } else {
+                            wgpu::BufferBindingType::Uniform
+                        },
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(EXTRA_BYTES as u64),
+                    },
+                    wgpu::ShaderStages::FRAGMENT,
                 ),
                 Slot::Texture | Slot::Array => (
                     wgpu::BindingType::Texture {
@@ -271,9 +301,9 @@ fn build(
 
     let [ui, text, image, blur] = shaders;
     let rect_attrs = wgpu::vertex_attr_array![1 => Float32x4, 2 => Float32x4, 3 => Float32x4,
-        4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4, 8 => Float32x4];
-    let text_attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4,
-        3 => Float32x4, 4 => Float32x4, 5 => Float32x4];
+        4 => Float32, 5 => Uint32];
+    let text_attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Uint16x4, 2 => Float16x4,
+        3 => Uint32, 4 => Uint32];
     let image_attrs =
         wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4];
     let mesh_attrs = wgpu::vertex_attr_array![0 => Float32x3];
@@ -310,9 +340,9 @@ fn build(
         Some(&layouts.composite),
     ];
     let (module, groups, vertex, fragment) = match kind {
-        K::Rect => (ui, paint.as_slice(), "vs_main", "fs_main"),
+        K::Rect | K::RectSolid => (ui, paint.as_slice(), "vs_main", "fs_main"),
         K::Mesh => (ui, paint.as_slice(), "vs_mesh", "fs_mesh"),
-        K::Text => (text, text_groups.as_slice(), "vs_main", "fs_main"),
+        K::Text | K::TextMask => (text, text_groups.as_slice(), "vs_main", "fs_main"),
         K::Image => (image, image_groups.as_slice(), "vs_main", "fs_main"),
         K::BlurDown => (blur, effects.as_slice(), "vs_full", "fs_blur_down"),
         K::BlurUp => (blur, effects.as_slice(), "vs_full", "fs_blur_up"),
@@ -327,14 +357,16 @@ fn build(
     let glyph_buffers = [glyph];
     let image_buffers = [quad];
     let buffers = match kind {
-        K::Rect => rect_buffers.as_slice(),
+        K::Rect | K::RectSolid => rect_buffers.as_slice(),
         K::Mesh => mesh_buffers.as_slice(),
-        K::Text => glyph_buffers.as_slice(),
+        K::Text | K::TextMask => glyph_buffers.as_slice(),
         K::Image => image_buffers.as_slice(),
         _ => &[],
     };
     let blend = match kind {
-        K::Rect | K::Mesh | K::Text | K::Image | K::Over => blend.state(),
+        K::Rect | K::RectSolid | K::Mesh | K::Text | K::TextMask | K::Image | K::Over => {
+            blend.state()
+        }
         K::MaskIntersect => wgpu::BlendState {
             color: wgpu::BlendComponent {
                 src_factor: wgpu::BlendFactor::Dst,
@@ -344,6 +376,12 @@ fn build(
             alpha: wgpu::BlendComponent::REPLACE,
         },
         _ => wgpu::BlendState::REPLACE,
+    };
+    let constants = [("simple_paint", 1.0)];
+    let fragment_constants: &[(&str, f64)] = if matches!(kind, K::RectSolid | K::TextMask) {
+        &constants
+    } else {
+        &[]
     };
     let label = format!("impasto {kind:?} {blend:?}");
     let layout = gpu
@@ -366,7 +404,10 @@ fn build(
             fragment: Some(wgpu::FragmentState {
                 module,
                 entry_point: Some(fragment),
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: fragment_constants,
+                    ..Default::default()
+                },
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target.format,
                     blend: Some(blend),

@@ -259,18 +259,14 @@ impl Atlas {
         self.stats.entries = self.entries.len();
     }
 
-    pub fn uv(&self, placement: Placement) -> [f32; 4] {
+    pub fn texels(&self, placement: Placement) -> Option<[u16; 4]> {
         let rect = placement.rect;
-        let [width, height] = self
-            .pages_for_ref(placement.color)
-            .get(rect.page)
-            .map_or([1; 2], |page| page.size);
-        [
-            rect.x as f32 / width as f32,
-            rect.y as f32 / height as f32,
-            (rect.x + rect.w) as f32 / width as f32,
-            (rect.y + rect.h) as f32 / height as f32,
-        ]
+        Some([
+            u16::try_from(rect.x).ok()?,
+            u16::try_from(rect.y).ok()?,
+            u16::try_from(rect.x + rect.w).ok()?,
+            u16::try_from(rect.y + rect.h).ok()?,
+        ])
     }
 
     fn pin(&mut self, placement: Placement) {
@@ -730,16 +726,16 @@ impl Atlas {
         self.mask.retired.clear();
     }
 
-    pub fn binding(&self, placement: Placement) -> (AtlasBinding, f32) {
+    pub fn binding(&self, placement: Placement) -> (AtlasBinding, u32) {
         let page = placement.rect.page;
         match &self.pages_for_ref(placement.color)[page].backing {
-            PageBacking::Resident { layer, .. } => (AtlasBinding::Resident, *layer as f32),
+            PageBacking::Resident { layer, .. } => (AtlasBinding::Resident, *layer),
             PageBacking::Temporary { .. } => (
                 AtlasBinding::Temporary {
                     color: placement.color,
                     page,
                 },
-                0.0,
+                0,
             ),
         }
     }
@@ -966,7 +962,7 @@ mod tests {
             atlas.upload(gpu, false, rect, &glyph).unwrap();
             let (binding, index) = atlas.binding(placement);
             assert!(binding == AtlasBinding::Resident);
-            assert_eq!(index, layer as f32);
+            assert_eq!(index, u32::try_from(layer).unwrap());
         }
         atlas.flush(gpu);
         assert_eq!(sample(gpu, &initial, 2, 2, 0), 200);

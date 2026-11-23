@@ -21,23 +21,45 @@ pub struct RectInstance {
     pub shadow: [f32; 4],
 }
 
+/// Optional paint fields shared by glyphs, rectangles and mesh brushes.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PaintExtra {
+    pub geometry: [f32; 4],
+    pub gradient: [f32; 4],
+    pub shadow: [f32; 4],
+    pub stroke: [f32; 4],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct RectVertex {
     pub rect: [f32; 4],
     pub shape: [f32; 4],
     pub color: [f32; 4],
-    pub stroke_color: [f32; 4],
-    pub gradient_a: [f32; 4],
-    pub gradient_b: [f32; 4],
-    pub shadow: [f32; 4],
-    pub extra: [f32; 4],
+    pub opacity: f32,
+    pub paint: u32,
+    pub padding: [u32; 2],
 }
 
 impl RectInstance {
-    pub fn vertex(&self, first: f32) -> RectVertex {
-        let mut gradient_b = self.gradient_b;
-        gradient_b[1] = first;
+    pub fn extra(&self, first: f32) -> Option<PaintExtra> {
+        let has_gradient = self.flags & RECT_GRADIENT != 0;
+        (has_gradient || matches!(self.kind, RECT_STROKE | RECT_FILL_STROKE | RECT_SHADOW)).then(
+            || {
+                let mut gradient = self.gradient_b;
+                gradient[1] = first;
+                PaintExtra {
+                    geometry: self.gradient_a,
+                    gradient,
+                    shadow: self.shadow,
+                    stroke: self.stroke_color,
+                }
+            },
+        )
+    }
+
+    pub fn vertex(&self, paint: u32) -> RectVertex {
         RectVertex {
             rect: self.rect,
             shape: [
@@ -47,11 +69,9 @@ impl RectInstance {
                 self.flags as f32,
             ],
             color: self.color,
-            stroke_color: self.stroke_color,
-            gradient_a: self.gradient_a,
-            gradient_b,
-            shadow: self.shadow,
-            extra: [1.0, 0.0, 0.0, 0.0],
+            opacity: self.gradient_b[3],
+            paint,
+            padding: [0; 2],
         }
     }
 }
@@ -66,12 +86,15 @@ pub const RECT_GRADIENT: u32 = 1;
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GlyphVertex {
     pub rect: [f32; 4],
-    pub uv: [f32; 4],
-    pub color: [f32; 4],
-    pub meta: [f32; 4],
-    pub gradient_a: [f32; 4],
-    pub gradient_b: [f32; 4],
+    pub uv: [u16; 4],
+    pub color: [u16; 4],
+    pub flags_and_layer: u32,
+    pub paint: u32,
 }
+
+const _: () = assert!(size_of::<RectVertex>() == 64);
+const _: () = assert!(size_of::<GlyphVertex>() == 40);
+const _: () = assert!(size_of::<PaintExtra>() == 64);
 
 pub const GLYPH_COLOR: u32 = 1;
 pub const GLYPH_GRADIENT: u32 = 2;

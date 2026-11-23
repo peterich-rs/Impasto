@@ -89,7 +89,7 @@ fn mixed_rectangles_use_one_draw_and_reuse_warm_resources() {
     assert!(cold.direct_present, "{cold:?}");
     assert_eq!((cold.passes, cold.draws), (1, 1));
     // Each shadow contributes a second instance for its rectangle.
-    assert_eq!(cold.vertex_bytes, 400 * 128);
+    assert_eq!(cold.vertex_bytes, 400 * 64);
     assert_eq!(
         (
             cold.mesh_upload_bytes,

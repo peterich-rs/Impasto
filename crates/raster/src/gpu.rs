@@ -25,6 +25,7 @@ pub(crate) struct GpuCaps {
     pub has_vertex_storage: bool,
     pub has_fragment_storage: bool,
     pub has_compute: bool,
+    pub paint_storage: bool,
     pub has_timestamp_query: bool,
 }
 
@@ -52,6 +53,10 @@ impl GpuCaps {
             has_vertex_storage: downlevel_flags.contains(D::VERTEX_STORAGE),
             has_fragment_storage: downlevel_flags.contains(D::FRAGMENT_STORAGE),
             has_compute: downlevel_flags.contains(D::COMPUTE_SHADERS),
+            paint_storage: downlevel_flags.contains(D::FRAGMENT_STORAGE)
+                && limits.max_storage_buffers_per_shader_stage > 0
+                && limits.max_storage_buffer_binding_size >= crate::pipelines::EXTRA_BYTES as u64
+                && std::env::var_os("IMPASTO_PAINT_UNIFORM").is_none(),
             has_timestamp_query: features.contains(F::TIMESTAMP_QUERY),
         };
         if caps.has_compute

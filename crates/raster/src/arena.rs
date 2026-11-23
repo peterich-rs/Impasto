@@ -3,8 +3,9 @@ use std::collections::HashMap;
 
 use crate::{
     Status,
+    batch::PaintExtra,
     gpu::Gpu,
-    pipelines::{Layouts, ParamsUniform, ViewUniform},
+    pipelines::{EXTRA_BYTES, Layouts, ParamsUniform, ViewUniform},
 };
 
 const MAX_SLAB: usize = 16 * 1024 * 1024;
@@ -138,17 +139,30 @@ impl Pool {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Globals {
+enum Globals {
     View,
-    Stops(usize),
+    Paint { stops: usize, extra: usize },
     Params(usize),
 }
 
 #[derive(Clone, Copy)]
 pub enum Extra {
     None,
-    Stops(Address),
+    Paint(PaintPage),
     Params(Address),
+}
+
+/// Both pages are part of a paint batch's binding key.
+#[derive(Clone, Copy)]
+pub struct PaintPage {
+    pub stops: Address,
+    pub extra: Address,
+}
+
+impl PaintPage {
+    pub fn same_bindings(self, other: Self) -> bool {
+        self.stops.slab == other.stops.slab && self.extra.slab == other.extra.slab
+    }
 }
 
 #[derive(Clone)]
@@ -168,17 +182,28 @@ pub struct FrameArena {
     vertices: Pool,
     uniforms: Pool,
     stops: Pool,
+    paint: Pool,
+    paint_entries: HashMap<[u32; 16], Address>,
     groups: HashMap<(usize, Globals), wgpu::BindGroup>,
     pub buffers_created: u32,
     pub bind_groups_created: u32,
 }
 
 impl FrameArena {
-    pub fn new() -> Self {
+    pub fn new(gpu: &Gpu) -> Self {
         Self {
             vertices: Pool::new(256 * 1024, wgpu::BufferUsages::VERTEX),
             uniforms: Pool::new(64 * 1024, wgpu::BufferUsages::UNIFORM),
             stops: Pool::new(STOPS_BYTES, wgpu::BufferUsages::UNIFORM),
+            paint: Pool::new(
+                EXTRA_BYTES,
+                if gpu.caps.paint_storage {
+                    wgpu::BufferUsages::STORAGE
+                } else {
+                    wgpu::BufferUsages::UNIFORM
+                },
+            ),
+            paint_entries: HashMap::new(),
             groups: HashMap::new(),
             buffers_created: 0,
             bind_groups_created: 0,
@@ -190,16 +215,24 @@ impl FrameArena {
         if self.uniforms.reset() {
             self.groups.clear();
         }
-        self.stops.active = 0;
-        for slab in &mut self.stops.slabs {
-            slab.data.clear();
+        for pool in [&mut self.stops, &mut self.paint] {
+            pool.active = 0;
+            for slab in &mut pool.slabs {
+                slab.data.clear();
+            }
         }
+        self.paint_entries.clear();
         self.buffers_created = 0;
         self.bind_groups_created = 0;
     }
 
     pub fn trim(&mut self) {
-        for pool in [&mut self.vertices, &mut self.uniforms, &mut self.stops] {
+        for pool in [
+            &mut self.vertices,
+            &mut self.uniforms,
+            &mut self.stops,
+            &mut self.paint,
+        ] {
             pool.block = pool.initial;
             pool.peak = 0;
             pool.active = 0;
@@ -215,16 +248,17 @@ impl FrameArena {
             }
         }
         self.groups.clear();
+        self.paint_entries.clear();
     }
 
     pub fn flush(&self, gpu: &Gpu) {
-        for pool in [&self.vertices, &self.uniforms, &self.stops] {
+        for pool in [&self.vertices, &self.uniforms, &self.stops, &self.paint] {
             pool.flush(&gpu.queue);
         }
     }
 
-    pub fn bytes_uploaded(&self) -> [u64; 3] {
-        [&self.vertices, &self.uniforms, &self.stops]
+    pub fn bytes_uploaded(&self) -> [u64; 4] {
+        [&self.vertices, &self.uniforms, &self.stops, &self.paint]
             .map(|pool| pool.slabs.iter().map(|slab| slab.data.len() as u64).sum())
     }
 
@@ -274,8 +308,37 @@ impl FrameArena {
         (address.offset / 16) as f32
     }
 
-    pub fn same_stops(a: Address, b: Address) -> bool {
-        a.slab == b.slab
+    pub fn paint(
+        &mut self,
+        gpu: &Gpu,
+        stops: Address,
+        value: Option<PaintExtra>,
+    ) -> Result<(PaintPage, u32), Status> {
+        let (extra, index) = if let Some(value) = value {
+            let key = bytemuck::cast(value);
+            let extra = if let Some(&address) = self.paint_entries.get(&key) {
+                address
+            } else {
+                let (address, created) = self.paint.push(gpu, bytemuck::bytes_of(&value), 16)?;
+                self.buffers_created += u32::from(created);
+                self.paint_entries.insert(key, address);
+                address
+            };
+            (extra, extra.offset / 64)
+        } else {
+            if self.paint.slabs.is_empty() {
+                let (_, created) = self.paint.push(gpu, &[], 16)?;
+                self.buffers_created += u32::from(created);
+            }
+            (
+                Address {
+                    slab: self.paint.active,
+                    offset: 0,
+                },
+                u32::MAX,
+            )
+        };
+        Ok((PaintPage { stops, extra }, index))
     }
 
     pub fn group(
@@ -286,7 +349,13 @@ impl FrameArena {
         extra: Extra,
     ) -> DynamicGroup {
         let (kind, offset) = match extra {
-            Extra::Stops(stops) => (Globals::Stops(stops.slab), 0),
+            Extra::Paint(page) => (
+                Globals::Paint {
+                    stops: page.stops.slab,
+                    extra: page.extra.slab,
+                },
+                0,
+            ),
             Extra::Params(params) => (Globals::Params(params.slab), params.offset),
             Extra::None => (Globals::View, 0),
         };
@@ -313,37 +382,35 @@ impl FrameArena {
                 &self.uniforms.slabs[view.slab].buffer,
                 size_of::<ViewUniform>() as u64,
             );
-            let extra = match kind {
-                Globals::View => None,
-                Globals::Stops(slab) => Some(binding(
-                    1,
-                    &self.stops.slabs[slab].buffer,
-                    STOPS_BYTES as u64,
-                )),
-                Globals::Params(slab) => Some(binding(
-                    1,
-                    &self.uniforms.slabs[slab].buffer,
-                    size_of::<ParamsUniform>() as u64,
-                )),
-            };
-            let (layout, entries) = match kind {
-                Globals::View => (&layouts.view, [view.clone(), view]),
-                Globals::Stops(_) => (
-                    &layouts.paint,
-                    [view, extra.unwrap_or_else(|| unreachable!("stops binding"))],
-                ),
-                Globals::Params(_) => (
-                    &layouts.effects,
-                    [
-                        view,
-                        extra.unwrap_or_else(|| unreachable!("params binding")),
-                    ],
-                ),
+            let mut entries = vec![view];
+            let layout = match kind {
+                Globals::View => &layouts.view,
+                Globals::Paint { stops, extra } => {
+                    entries.push(binding(
+                        1,
+                        &self.stops.slabs[stops].buffer,
+                        STOPS_BYTES as u64,
+                    ));
+                    entries.push(binding(
+                        2,
+                        &self.paint.slabs[extra].buffer,
+                        EXTRA_BYTES as u64,
+                    ));
+                    &layouts.paint
+                }
+                Globals::Params(slab) => {
+                    entries.push(binding(
+                        1,
+                        &self.uniforms.slabs[slab].buffer,
+                        size_of::<ParamsUniform>() as u64,
+                    ));
+                    &layouts.effects
+                }
             };
             gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("impasto frame globals"),
                 layout,
-                entries: &entries[..if kind == Globals::View { 1 } else { 2 }],
+                entries: &entries,
             })
         });
         DynamicGroup {

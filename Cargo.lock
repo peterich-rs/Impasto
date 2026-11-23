@@ -2531,6 +2531,7 @@ dependencies = [
  "engine",
  "etagere",
  "fontique",
+ "half",
  "lyon_geom",
  "lyon_path",
  "lyon_tessellation",

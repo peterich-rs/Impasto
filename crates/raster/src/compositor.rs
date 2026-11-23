@@ -8,9 +8,9 @@ use engine::scene::{LayerId, LayerKind, LayerTree, PictureId};
 
 use bytemuck::Zeroable;
 
-use crate::arena::{Address, DynamicGroup, Extra, FrameArena, VertexSlice};
+use crate::arena::{Address, DynamicGroup, Extra, FrameArena, PaintPage, VertexSlice};
 use crate::atlas::{Atlas, AtlasBinding, AtlasStats};
-use crate::batch::{self, GlyphVertex, ImageInstance, Mesh, RectInstance, RectVertex};
+use crate::batch::{self, GlyphVertex, ImageInstance, Mesh, PaintExtra, RectInstance, RectVertex};
 use crate::compiler::{
     self, Affine, Clip, ClipShape, CompiledPicture, Draw, Effect, Group, IDENTITY, PictureBounds,
     Scope,
@@ -39,6 +39,7 @@ pub(crate) struct Compositor {
     offscreen_live_bytes: u64,
     frame_active: bool,
     trim_pending: bool,
+    specialize_paint: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -67,6 +68,7 @@ pub struct RenderStats {
     pub vertex_bytes: u64,
     pub uniform_bytes: u64,
     pub stop_bytes: u64,
+    pub extra_bytes: u64,
     pub mesh_upload_bytes: u64,
     pub atlas_upload_bytes: u64,
     pub offscreen_alloc_bytes: u64,
@@ -218,12 +220,13 @@ impl Compositor {
             linear,
             nearest: pipelines::nearest_sampler(gpu),
             render_stats: RenderStats::default(),
-            arena: FrameArena::new(),
+            arena: FrameArena::new(gpu),
             composites: HashMap::new(),
             masks: HashMap::new(),
             offscreen_live_bytes: 0,
             frame_active: false,
             trim_pending: false,
+            specialize_paint: std::env::var_os("IMPASTO_SPECIALIZE_PAINT").is_some(),
         })
     }
 
@@ -256,6 +259,7 @@ impl Compositor {
             self.render_stats.vertex_bytes,
             self.render_stats.uniform_bytes,
             self.render_stats.stop_bytes,
+            self.render_stats.extra_bytes,
         ] = self.arena.bytes_uploaded();
         let atlas_stats = self.atlas.take_stats();
         self.render_stats.atlas_upload_bytes = atlas_stats.upload_bytes;
@@ -1120,33 +1124,29 @@ impl Frame<'_> {
         while let Some(draw) = draws.next() {
             match draw {
                 Draw::Rects(instances, stops, blend) => {
-                    let view = self.transform(target, transform, clip)?;
-                    let mut batch = Vec::new();
-                    let mut active = self.stops(&[])?;
-                    let mut current = (instances, stops);
-                    loop {
-                        let (rects, stops) = current;
-                        let next = self.stops(stops.as_deref().unwrap_or_default())?;
-                        if !FrameArena::same_stops(active, next) {
-                            self.rect_batch(target, clip, view, active, &batch, *blend)?;
-                            batch.clear();
-                            active = next;
+                    let mut first = Some((instances, stops));
+                    let batches = std::iter::from_fn(|| {
+                        if let Some(first) = first.take() {
+                            return Some(first);
                         }
-                        batch.extend(
-                            rects
-                                .iter()
-                                .map(|rect| rect.vertex(FrameArena::stop_index(next))),
-                        );
-                        let Some(Draw::Rects(rects, stops, next_blend)) = draws.peek() else {
-                            break;
+                        let Draw::Rects(rects, stops, next_blend) = *draws.peek()? else {
+                            return None;
                         };
                         if next_blend != blend {
-                            break;
+                            return None;
                         }
-                        current = (rects, stops);
                         draws.next();
-                    }
-                    self.rect_batch(target, clip, view, active, &batch, *blend)?;
+                        Some((rects, stops))
+                    });
+                    self.rect_batches(
+                        target,
+                        transform,
+                        clip,
+                        *blend,
+                        batches.map(|(rects, stops)| {
+                            (rects.as_slice(), stops.as_deref().unwrap_or_default())
+                        }),
+                    )?;
                 }
                 Draw::Fill(color) => {
                     if clip.mask.is_none()
@@ -1246,13 +1246,38 @@ impl Frame<'_> {
         rects: &[RectInstance],
         stops: &[[f32; 4]],
     ) -> Result<(), Status> {
+        self.rect_batches(target, transform, clip, BlendKey::SrcOver, [(rects, stops)])
+    }
+
+    fn rect_batches<'a>(
+        &mut self,
+        target: &Image,
+        transform: Affine,
+        clip: &Coverage,
+        blend: BlendKey,
+        batches: impl IntoIterator<Item = (&'a [RectInstance], &'a [[f32; 4]])>,
+    ) -> Result<(), Status> {
         let view = self.transform(target, transform, clip)?;
-        let stops = self.stops(stops)?;
-        let vertices: Vec<_> = rects
-            .iter()
-            .map(|rect| rect.vertex(FrameArena::stop_index(stops)))
-            .collect();
-        self.rect_batch(target, clip, view, stops, &vertices, BlendKey::SrcOver)
+        let mut batch = Vec::new();
+        let mut active = None;
+        for (rects, stops) in batches {
+            let stops = self.stops(stops)?;
+            for rect in rects {
+                let (page, index) = self.paint(stops, rect.extra(FrameArena::stop_index(stops)))?;
+                if let Some(previous) = active
+                    && !page.same_bindings(previous)
+                {
+                    self.rect_batch(target, clip, view, previous, &batch, blend)?;
+                    batch.clear();
+                }
+                active = Some(page);
+                batch.push(rect.vertex(index));
+            }
+        }
+        if let Some(page) = active {
+            self.rect_batch(target, clip, view, page, &batch, blend)?;
+        }
+        Ok(())
     }
 
     fn rect_batch(
@@ -1260,21 +1285,30 @@ impl Frame<'_> {
         target: &Image,
         clip: &Coverage,
         view: Address,
-        stops: Address,
+        page: PaintPage,
         vertices: &[RectVertex],
         blend: BlendKey,
     ) -> Result<(), Status> {
         if vertices.is_empty() {
             return Ok(());
         }
-        let globals = self.globals(view, Extra::Stops(stops));
+        let globals = self.globals(view, Extra::Paint(page));
         let mask = self.mask_group(clip);
-        let pipeline = self.compositor.pipelines.get(
-            self.gpu,
-            single(target.format),
-            PipelineKind::Rect,
-            blend,
-        )?;
+        let kind = if self.compositor.specialize_paint
+            && clip.mask.is_none()
+            && clip.count == 0
+            && vertices
+                .iter()
+                .all(|rect| rect.shape[2] == 0.0 && rect.paint == u32::MAX)
+        {
+            PipelineKind::RectSolid
+        } else {
+            PipelineKind::Rect
+        };
+        let pipeline =
+            self.compositor
+                .pipelines
+                .get(self.gpu, single(target.format), kind, blend)?;
         self.record(
             target,
             pipeline,
@@ -1327,11 +1361,12 @@ impl Frame<'_> {
                 &[]
             };
             let stops = self.stops(stops)?;
+            let (page, index) = self.paint(stops, paint.extra(FrameArena::stop_index(stops)))?;
             let data = self
                 .compositor
                 .arena
-                .vertices(self.gpu, &[paint.vertex(FrameArena::stop_index(stops))])?;
-            let globals = self.globals(view, Extra::Stops(stops));
+                .vertices(self.gpu, &[paint.vertex(index)])?;
+            let globals = self.globals(view, Extra::Paint(page));
             calls.push((mesh, data, globals));
         }
         self.flush_draws();
@@ -1468,9 +1503,10 @@ impl Frame<'_> {
     ) -> Result<(), Status> {
         let mut batch = Vec::new();
         let mut key = AtlasBinding::default();
-        let mut active = self.stops(&[])?;
+        let empty = self.stops(&[])?;
+        let (mut active, _) = self.paint(empty, None)?;
         let view = self.transform(target, transform, clip)?;
-        let mut last_gradient: Option<(&batch::PackedGradient, Address)> = None;
+        let mut last_gradient: Option<(&batch::PackedGradient, PaintPage, u32)> = None;
         let scale = self.scene.scale;
         let [a, b, c, d, ..] = transform;
         let pixel_scale = scale * a.hypot(b).max(c.hypot(d)).max(0.001);
@@ -1478,7 +1514,7 @@ impl Frame<'_> {
         for glyph in glyphs {
             let (rect, uv, color, binding, layer, decoration) = if let Some(rect) = glyph.decoration
             {
-                (rect, [0.0; 4], false, key, 0.0, true)
+                (rect, [0; 4], false, key, 0, true)
             } else {
                 let (x, y) = compiler::apply(transform, glyph.x, glyph.y);
                 let (sx, sy) = if aligned {
@@ -1517,65 +1553,73 @@ impl Frame<'_> {
                 let (binding, layer) = self.compositor.atlas.binding(placement);
                 (
                     rect,
-                    self.compositor.atlas.uv(placement),
+                    self.compositor
+                        .atlas
+                        .texels(placement)
+                        .ok_or(Status::BadScene)?,
                     placement.color,
                     binding,
                     layer,
                     false,
                 )
             };
-            let stops = if let Some(gradient) = glyph.gradient.as_deref() {
-                match last_gradient {
-                    Some((last, address))
-                        if std::ptr::eq(last, gradient)
-                            && FrameArena::same_stops(active, address) =>
-                    {
-                        address
-                    }
-                    _ => {
-                        let address = self.stops(&gradient.stops)?;
-                        last_gradient = Some((gradient, address));
-                        address
-                    }
-                }
-            } else {
-                self.stops(&[])?
-            };
-            let next = binding;
-            if !batch.is_empty() && (key != next || !FrameArena::same_stops(active, stops)) {
-                self.glyph_batch(target, clip, view, active, &batch, key)?;
-                batch.clear();
-            }
-            key = next;
-            active = stops;
-            let mut instance = GlyphVertex {
-                rect,
-                uv,
-                color: glyph.color,
-                meta: [0.0, layer, 0.0, glyph.color[3]],
-                gradient_a: [0.0; 4],
-                gradient_b: [0.0; 4],
-            };
-            let mut flags = 0;
-            if color {
-                flags |= batch::GLYPH_COLOR;
-            }
+            let mut flags = if color { batch::GLYPH_COLOR } else { 0 };
             if decoration {
                 flags |= batch::GLYPH_DECORATION;
             }
-            if let Some(gradient) = glyph.gradient.as_deref() {
+            let (page, index) = if let Some(gradient) = glyph.gradient.as_deref().filter(|_| !color)
+            {
                 flags |= batch::GLYPH_GRADIENT;
-                instance.meta[2] = gradient.kind as f32;
-                instance.gradient_a = gradient.a;
-                instance.gradient_b = [
-                    FrameArena::stop_index(stops),
-                    (gradient.stops.len() / 2) as f32,
-                    gradient.radial_radii[0],
-                    gradient.radial_radii[1],
-                ];
+                match last_gradient {
+                    Some((last, page, index))
+                        if std::ptr::eq(last, gradient) && page.same_bindings(active) =>
+                    {
+                        (page, index)
+                    }
+                    _ => {
+                        let stops = self.stops(&gradient.stops)?;
+                        let (page, index) = self.paint(
+                            stops,
+                            Some(PaintExtra {
+                                geometry: gradient.a,
+                                gradient: [
+                                    gradient.kind as f32,
+                                    FrameArena::stop_index(stops),
+                                    (gradient.stops.len() / 2) as f32,
+                                    0.0,
+                                ],
+                                shadow: [
+                                    gradient.radial_radii[0],
+                                    gradient.radial_radii[1],
+                                    0.0,
+                                    0.0,
+                                ],
+                                stroke: [0.0; 4],
+                            }),
+                        )?;
+                        last_gradient = Some((gradient, page, index));
+                        (page, index)
+                    }
+                }
+            } else {
+                // Solid glyphs can share any currently bound page.
+                (active, u32::MAX)
+            };
+            if key != binding || !active.same_bindings(page) {
+                self.glyph_batch(target, clip, view, active, &batch, key)?;
+                batch.clear();
             }
-            instance.meta[0] = flags as f32;
-            batch.push(instance);
+            key = binding;
+            active = page;
+            batch.push(GlyphVertex {
+                rect,
+                uv,
+                color: glyph
+                    .color
+                    .map(|value| half::f16::from_f32(value).to_bits()),
+                flags_and_layer: flags | (layer << 8),
+                paint: index,
+            });
         }
         self.glyph_batch(target, clip, view, active, &batch, key)
     }
@@ -1585,7 +1629,7 @@ impl Frame<'_> {
         target: &Image,
         clip: &Coverage,
         view: Address,
-        stops: Address,
+        page: PaintPage,
         glyphs: &[GlyphVertex],
         key: AtlasBinding,
     ) -> Result<(), Status> {
@@ -1599,12 +1643,21 @@ impl Frame<'_> {
             key,
         );
         self.compositor.render_stats.bind_groups_created += u32::from(created);
-        let globals = self.globals(view, Extra::Stops(stops));
+        let globals = self.globals(view, Extra::Paint(page));
         let mask = self.mask_group(clip);
+        let kind = if self.compositor.specialize_paint
+            && clip.mask.is_none()
+            && clip.count == 0
+            && glyphs.iter().all(|glyph| glyph.flags_and_layer & 255 == 0)
+        {
+            PipelineKind::TextMask
+        } else {
+            PipelineKind::Text
+        };
         let pipeline = self.compositor.pipelines.get(
             self.gpu,
             single(target.format),
-            PipelineKind::Text,
+            kind,
             BlendKey::SrcOver,
         )?;
         self.record(
@@ -1901,6 +1954,14 @@ impl Frame<'_> {
 
     fn stops(&mut self, stops: &[[f32; 4]]) -> Result<Address, Status> {
         self.compositor.arena.stops(self.gpu, stops)
+    }
+
+    fn paint(
+        &mut self,
+        stops: Address,
+        paint: Option<PaintExtra>,
+    ) -> Result<(PaintPage, u32), Status> {
+        self.compositor.arena.paint(self.gpu, stops, paint)
     }
 
     fn globals(&mut self, view: Address, extra: Extra) -> DynamicGroup {

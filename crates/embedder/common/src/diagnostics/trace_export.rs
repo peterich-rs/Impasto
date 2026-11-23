@@ -141,7 +141,7 @@ impl Trace {
             "Raster uploads (bytes)",
             s.present_done_ns,
             json!({
-                "vertex": r.vertex_bytes, "uniform": r.uniform_bytes, "stops": r.stop_bytes,
+                "vertex": r.vertex_bytes, "uniform": r.uniform_bytes, "stops": r.stop_bytes, "extra": r.extra_bytes,
                 "mesh": r.mesh_upload_bytes, "atlas": r.atlas_upload_bytes,
             }),
         );

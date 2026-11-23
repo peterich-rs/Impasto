@@ -124,7 +124,7 @@ pub(super) fn run(
                 "compute_passes": r.compute_passes, "direct_present": r.direct_present,
                 "buffers_created": r.buffers_created, "bind_groups_created": r.bind_groups_created,
                 "vertex_bytes": r.vertex_bytes, "uniform_bytes": r.uniform_bytes,
-                "stop_bytes": r.stop_bytes, "mesh_upload_bytes": r.mesh_upload_bytes,
+                "stop_bytes": r.stop_bytes, "extra_bytes": r.extra_bytes, "mesh_upload_bytes": r.mesh_upload_bytes,
                 "atlas_upload_bytes": r.atlas_upload_bytes, "copy_pixels": r.copy_pixels,
                 "blur_pixels": r.blur_pixels, "offscreen_alloc_bytes": r.offscreen_alloc_bytes,
                 "offscreen_peak_bytes": r.offscreen_peak_bytes, "pooled_texture_bytes": r.pooled_texture_bytes,

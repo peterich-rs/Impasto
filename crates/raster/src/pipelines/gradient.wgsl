@@ -73,3 +73,23 @@ fn gradient_color(
     }
     return sample_gradient(t, first, count);
 }
+
+
+struct PaintExtra {
+    geometry: vec4<f32>,
+    gradient: vec4<f32>,
+    shadow: vec4<f32>,
+    stroke: vec4<f32>,
+};
+
+fn load_paint(index: u32) -> PaintExtra {
+    if index == 0xffffffffu {
+        return PaintExtra(vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0));
+    }
+    return paint[index];
+}
+
+fn paint_gradient(data: PaintExtra, p: vec2<f32>) -> vec4<f32> {
+    let indices = vec3<u32>(data.gradient.xyz);
+    return gradient_color(p, indices.x, indices.y, indices.z, data.geometry, data.shadow.xy);
+}
