@@ -49,7 +49,7 @@ flowchart LR
 - `IMPASTO_TELEMETRY=off|counters|gpu` 选择常驻档位。Debug DevTools 默认记录 Counters，并预先协商时间戳 feature 供进程内录制使用。Release 默认 Off，运行时录制需要在创建设备前用 `gpu` 或 `IMPASTO_TRACE` 协商 GPU 能力。GPU 查询槽在首次采样时创建。
 - 应用内性能页可以查看帧的 GPU 状态和逐 Pass 时间，也能隐藏 Overlay 并录制约 5 秒。导出文件写入应用临时目录。尚未完成读回的样本显示 Pending，超过 256 个 Pass 的样本显示 DroppedPassLimit。IO 泳道在录制窗口有图片工作时显示 fetch、decode 或 upload。
 
-`missed_vsync` 表示从宿主接到 vsync 到 present 返回超过预算。真实 scanout、UIKit 事务确认与 GC 周期事件需要额外的平台或运行时测量。当前 QuickJS 内存统计是低频堆快照，DeepInspect 的单次抓取留在后续扩展。
+`missed_vsync` 表示从宿主接到 vsync 到 present 返回超过预算。UIKit 混排的事务确认单独记入系统 Trace。真实 scanout 与 GC 周期事件需要额外的平台或运行时测量。当前 QuickJS 内存统计是低频堆快照，DeepInspect 的单次抓取留在后续扩展。
 
 ## 交付阶段
 
@@ -65,7 +65,7 @@ flowchart LR
 
 ### 实施顺序与验收
 
-`4462fb3` 是 P0 提交。首次比较 P1 时，以引入遥测和基准脚本的 Stage 0 提交作为可重复构建的基线。已有 macOS Trace 和 A/A 样本验证了采集链路。Android 当前有构建验证，移动 GPU 的默认策略需要 Android 真机数据。
+`4462fb3` 是 P0 提交。比较 P1 时，以引入遥测和基准脚本的 Stage 0 提交作为可重复构建的基线。macOS Trace 和 A/A 样本验证了采集链路。Android 已有构建与 GLES 模拟器验证，移动 GPU 的默认策略以 Android Vulkan 真机数据为准。
 
 | 顺序 | 交付 | 依赖与并行范围 |
 | --- | --- | --- |
@@ -180,3 +180,19 @@ python3 tools/bench-compare.py . . --backend metal --rounds 5 \
 ```
 
 同一入口下的 `opaque_overlap` 比较 Early-Z，`gradient_wall` 比较长 Stop LUT，`upload_image` 比较不同图片上传模式。用 `bench_scroll_1000_cards` 和 `IMPASTO_PREWARM=0\|1` 对照冷启动 Rasterizer 创建与首帧总时间。GPU 分位的显示指标为本机同配置实验。
+
+### Apple M2 Max · Metal 实测
+
+Release、`AsyncOnly`、DPR 1。以 Stage 0 的 `cb0e7c5` 与 P1 渲染提交 `954c888` 交替跑五轮。百分比取配对变化的中位数，上传量取固定暖帧的 `vertex_bytes + extra_bytes`。四组的 Draw 和 Pass 数一致。
+
+| 场景 | 顶点与冷字段，B | 编码 p50 / p95 | GPU 帧包围时间 p50 / p95 |
+| --- | ---: | ---: | ---: |
+| 1,000 卡片滚动 | 35,840 → 26,880 | +10.7% / +8.6% | +6.6% / +3.5% |
+| 密集渐变文字 | 52,896 → 25,080 | +10.6% / +0.9% | +8.1% / +5.1% |
+| 背景模糊叠层 | 2,944 → 1,472 | −5.6% / −15.3% | +0.2% / −3.8% |
+| Canvas 500 路径 | 65,152 → 33,024 | +11.5% / +24.4% | +1.1% / −0.4% |
+
+- 三轮大图对照中，2,049 × 1,537 透明图的 RenderPass 上传把 CPU 场景安装 p50 降低 98.7%，安装至 GPU 完成 p50 降低 97.2%。生成 mip 后单独测到的后续帧 GPU 包围时间增加 225.9%。Compute 版本的安装至 GPU 完成 p50 高于 RenderPass 25.2%。
+- 64 层不透明重叠触发 64 个 Early-Z 实例，GPU 帧包围时间 p50 降低 96.8%。32 Stop 的平滑 LUT 令 GPU p50 降低 45.7%，编码 p50 增加 79.9%。这两条路径保留为显式实验开关。
+- Compute 模糊的 9 组面积 × σ 对照没有在此设备上测到稳定交叉点。Metal 默认使用 RenderPass。Android 真机的交叉点需要在目标 SoC 上测量。
+- Headless 基础预热对照中，Rasterizer 初始化中位数从 11.3 ms 到 11.7 ms，首帧场景安装至 GPU 完成从 10.4 ms 到 9.8 ms。两段耗时均保留在报告中。当前配置沿用基础预热，实际表面格式的附加预热显式开启。
