@@ -9,14 +9,18 @@ mod compositor;
 mod fonts;
 mod gpu;
 mod pipelines;
+mod profiler;
 mod shaper;
 mod status;
 mod text_index;
 mod textures;
 
 pub use fonts::{FontLibrary, ShapeStats};
+pub use profiler::{
+    GpuFrameTiming, GpuPassKind, GpuPassTiming, GpuSample, GpuTimingStatus, GpuTimingUpdate,
+};
 pub use shaper::ParleyShaper;
-pub use status::{RasterBackend, RasterOptions, Status};
+pub use status::{RasterBackend, RasterOptions, Status, ValidationMode};
 
 /// Drawable size in physical pixels. A zero axis means the size is unknown.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -63,6 +67,7 @@ use engine::scene::{LayerId, LayerKind, LayerTree, PictureId};
 use compiler::{Affine, CompileContext, CompiledPicture, IDENTITY, compose, layer_transform};
 use compositor::{Compositor, Scene};
 use gpu::Gpu;
+use profiler::{Capture, GpuProfiler};
 use textures::TextureStore;
 
 static NEXT_DEVICE: AtomicU64 = AtomicU64::new(1);
@@ -75,6 +80,12 @@ pub struct SubmitStats {
     pub layer_count: u32,
     pub picture_prepare: Duration,
     pub compose: Duration,
+    pub encode: Duration,
+    pub flush: Duration,
+    pub queue_submit: Duration,
+    pub submit_done: Option<Instant>,
+    pub acquire: Duration,
+    pub surface_present: Duration,
     pub pictures: u32,
     pub textures: u32,
     pub atlas: AtlasStats,
@@ -95,6 +106,9 @@ pub struct Rasterizer {
     stats: SubmitStats,
     reuse_pictures: bool,
     prepared_buffers: u32,
+    prepared_mesh_bytes: u64,
+    gpu_frame: Option<u64>,
+    gpu_sample: GpuSample,
     #[cfg(target_os = "ios")]
     frame_number: u64,
 }
@@ -103,6 +117,7 @@ struct DeviceState {
     gpu: Gpu,
     generation: u64,
     compositor: Compositor,
+    profiler: Option<GpuProfiler>,
     textures: TextureStore,
 }
 
@@ -127,6 +142,9 @@ impl Rasterizer {
             stats: SubmitStats::default(),
             reuse_pictures: false,
             prepared_buffers: 0,
+            prepared_mesh_bytes: 0,
+            gpu_frame: None,
+            gpu_sample: GpuSample::default(),
             #[cfg(target_os = "ios")]
             frame_number: 0,
         })
@@ -168,8 +186,83 @@ impl Rasterizer {
             gpu,
             generation,
             compositor,
+            profiler: None,
             textures,
         })
+    }
+
+    /// Configures timestamp capability before the first device is created.
+    pub fn enable_gpu_timing(&mut self) {
+        self.options.enable_gpu_timing = true;
+    }
+
+    /// Arms one present attempt. With no ID the attempt skips GPU queries.
+    pub fn begin_gpu_frame(&mut self, frame_id: Option<u64>) {
+        self.gpu_frame = frame_id;
+        self.gpu_sample = GpuSample::default();
+        self.stats.acquire = Duration::ZERO;
+        self.stats.surface_present = Duration::ZERO;
+        self.stats.submit_done = None;
+    }
+
+    pub fn gpu_sample(&self) -> GpuSample {
+        self.gpu_sample
+    }
+
+    pub fn gpu_timings_pending(&self) -> bool {
+        self.device
+            .as_ref()
+            .and_then(|device| device.profiler.as_ref())
+            .is_some_and(GpuProfiler::has_pending)
+    }
+
+    pub fn drain_gpu_timings(&mut self) -> Vec<GpuTimingUpdate> {
+        let Some(device) = self.device.as_mut() else {
+            return Vec::new();
+        };
+        device
+            .profiler
+            .as_mut()
+            .map_or_else(Vec::new, |profiler| profiler.drain(&device.gpu))
+    }
+
+    /// Completes pending samples as stale before the host replaces the device.
+    pub fn retire_gpu_timings(&mut self) -> Vec<GpuTimingUpdate> {
+        self.device
+            .as_mut()
+            .and_then(|device| device.profiler.take())
+            .map_or_else(Vec::new, |mut profiler| profiler.retire())
+    }
+
+    fn begin_gpu_capture(&mut self) -> Option<Capture> {
+        let frame_id = self.gpu_frame.take()?;
+        let device = self.device.as_mut()?;
+        let sample = GpuSample {
+            frame_id,
+            device_generation: device.generation,
+            status: GpuTimingStatus::Unsupported,
+        };
+        self.gpu_sample = sample;
+        if device.gpu.caps.has_timestamp_query && device.profiler.is_none() {
+            match device.gpu.validation(|| Ok(GpuProfiler::new(&device.gpu))) {
+                Ok(profiler) => device.profiler = profiler,
+                Err(_) => {
+                    self.gpu_sample.status = GpuTimingStatus::ReadbackFailed;
+                    return None;
+                }
+            }
+        }
+        let profiler = device.profiler.as_ref()?;
+        self.gpu_sample.status = GpuTimingStatus::DroppedSlotFull;
+        let capture = profiler.begin(sample)?;
+        self.gpu_sample.status = GpuTimingStatus::ReadbackFailed;
+        Some(capture)
+    }
+
+    fn finish_render_stats(&mut self, mut stats: RenderStats) {
+        stats.buffers_created += std::mem::take(&mut self.prepared_buffers);
+        stats.mesh_upload_bytes = std::mem::take(&mut self.prepared_mesh_bytes);
+        self.stats.render = stats;
     }
 
     pub fn texture_factory(&self) -> Option<TextureFactory> {
@@ -279,8 +372,9 @@ impl Rasterizer {
                 };
                 let result = compiler::compile(picture, &mut context)?;
                 stats.picture_rebuilt = stats.picture_rebuilt.saturating_add(1);
-                if result.mesh_buffer.get().is_some() {
+                if let Some(mesh) = result.mesh_buffer.get() {
                     stats.render.buffers_created += 2;
+                    stats.render.mesh_upload_bytes += mesh.vertices.size() + mesh.indices.size();
                 }
                 Arc::new(result)
             };
@@ -342,6 +436,7 @@ impl Rasterizer {
             self.frame_number = self.frame_number.wrapping_add(1);
         }
         self.prepared_buffers = stats.render.buffers_created;
+        self.prepared_mesh_bytes = stats.render.mesh_upload_bytes;
         self.stats = stats;
         self.fonts.sweep();
         Ok(SubmitInfo {
@@ -356,6 +451,7 @@ impl Rasterizer {
         format: wgpu::TextureFormat,
         pixels: PixelSize,
     ) -> Result<(), Status> {
+        let mut capture = self.begin_gpu_capture();
         let device = self.device.as_mut().ok_or(Status::NotReady)?;
         let frame = self.frame.as_ref().ok_or(Status::NotReady)?;
         surface::check_size(&device.gpu, pixels)?;
@@ -363,20 +459,42 @@ impl Rasterizer {
         let gpu = &device.gpu;
         let compositor = &mut device.compositor;
         compositor.begin_frame();
-        self.stats.atlas = gpu.hot_validation(|| {
-            let command = compositor.encode(
+        let (atlas, encode, flush, submitted) = gpu.hot_validation(|| {
+            let stage = Instant::now();
+            let mut command = compositor.encode(
                 gpu,
                 frame.scene(&self.fonts, None),
                 target,
                 format,
                 [pixels.width, pixels.height],
+                capture.as_mut().map(|capture| (capture, None)),
             )?;
+            if gpu.backend != RasterBackend::Metal
+                && let Some(capture) = &capture
+            {
+                capture.resolve(&mut command);
+            }
+            let command = command.finish();
+            let encode = stage.elapsed();
+            let stage = Instant::now();
             let atlas = compositor.flush(gpu);
+            let flush = stage.elapsed();
+            let stage = Instant::now();
             gpu.queue.submit([command]);
-            Ok(atlas)
+            let done = Instant::now();
+            Ok((atlas, encode, flush, (done, done.duration_since(stage))))
         })?;
-        self.stats.render = compositor.render_stats();
-        self.stats.render.buffers_created += std::mem::take(&mut self.prepared_buffers);
+        let (submit_done, submit_elapsed) = submitted;
+        if let (Some(profiler), Some(capture)) = (&mut device.profiler, capture) {
+            self.gpu_sample = profiler.submitted(gpu, capture);
+        }
+        self.stats.atlas = atlas;
+        self.stats.encode = encode;
+        self.stats.flush = flush;
+        self.stats.queue_submit = submit_elapsed;
+        self.stats.submit_done = Some(submit_done);
+        let render = compositor.render_stats();
+        self.finish_render_stats(render);
         self.stats.compose = started.elapsed();
         Ok(())
     }

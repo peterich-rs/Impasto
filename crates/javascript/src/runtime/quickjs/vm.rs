@@ -62,6 +62,10 @@ pub struct Vm {
 }
 
 impl Vm {
+    pub(crate) fn heap_bytes(&self) -> Option<usize> {
+        usize::try_from(self.runtime.as_ref()?.memory_usage().memory_used_size).ok()
+    }
+
     pub(crate) fn configured(
         limits: &crate::runtime::RuntimeLimits,
         stop: Option<AcquireStop>,

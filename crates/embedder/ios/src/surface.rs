@@ -177,11 +177,13 @@ impl MetalSurface {
             return self.draw(engine, pixels);
         };
         engine.prepare_metal_surface(&mut self.surface, pixels)?;
-        let mut drawables = Vec::with_capacity(count + 1);
-        drawables.push(acquire(self.target.layer, pixels)?);
-        for layer in &targets.layers {
-            drawables.push(acquire(layer.ptr(), pixels)?);
-        }
+        let acquire_started = std::time::Instant::now();
+        let drawables = std::iter::once(self.target.layer)
+            .chain(targets.layers.iter().map(|layer| layer.ptr()))
+            .map(|layer| acquire(layer, pixels))
+            .collect::<Result<Vec<_>, _>>();
+        engine.note_metal_acquire(acquire_started.elapsed());
+        let drawables = drawables?;
         if !self.gate.allows(id) {
             return Err(Status::AcquireMiss);
         }

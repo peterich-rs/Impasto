@@ -223,12 +223,9 @@ impl FrameArena {
         }
     }
 
-    pub fn bytes_uploaded(&self) -> u64 {
+    pub fn bytes_uploaded(&self) -> [u64; 3] {
         [&self.vertices, &self.uniforms, &self.stops]
-            .into_iter()
-            .flat_map(|pool| &pool.slabs)
-            .map(|slab| slab.data.len() as u64)
-            .sum()
+            .map(|pool| pool.slabs.iter().map(|slab| slab.data.len() as u64).sum())
     }
 
     pub fn vertex_limit<T: bytemuck::Pod>(gpu: &Gpu) -> usize {

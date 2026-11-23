@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -11,6 +11,10 @@ use std::time::{Duration, Instant};
 use engine::session::FrameTime;
 
 use crate::command::{Command, SurfaceId, SurfaceTarget};
+use crate::diagnostics::TelemetryHub;
+use crate::diagnostics::telemetry::{
+    IoSpan, ScheduleTiming, TelemetryProfile, mono_ns, mono_ns_at,
+};
 use crate::error::BootError;
 use crate::images::{self, ImageCache, ImageDecoder, ImageError, ImageReady, ImageRequest};
 use crate::input::{FrameInput, Input};
@@ -671,6 +675,24 @@ fn run_boot(
     runners: TaskRunners,
     startup: &Startup,
 ) -> Result<UiHost, BootError> {
+    crate::diagnostics::telemetry::install_system_trace();
+    let trace_path =
+        std::env::var_os("IMPASTO_TRACE").filter(|path| !path.is_empty() && path != "1");
+    let profile = TelemetryProfile::configured(boot.devtools.is_some());
+    let telemetry = boot.devtools.clone().or_else(|| {
+        (profile != TelemetryProfile::Off || trace_path.is_some())
+            .then(|| Arc::new(TelemetryHub::new()))
+    });
+    if let Some(hub) = &telemetry {
+        hub.set_profile(profile);
+    }
+    let enable_gpu_timing = trace_path.is_some()
+        || profile == TelemetryProfile::GpuAndTimeline
+        || (boot.devtools.is_some() && cfg!(debug_assertions) && profile != TelemetryProfile::Off);
+    if telemetry.is_some() || boot.inspect.is_some() || boot.inspect_dir.is_some() {
+        mono_ns();
+    }
+    let capture_runner = Arc::clone(&runners.io);
     crate::log_sub::install(boot.log_dir.as_deref(), boot.devtools.clone());
     let upload = Arc::new(Mutex::new(None));
     if let Some(hub) = boot.devtools.as_ref() {
@@ -686,22 +708,25 @@ fn run_boot(
         let http = http.clone();
         let upload = Arc::clone(&upload);
         let io = Arc::clone(&runners.io);
+        let telemetry = telemetry.clone();
         move |request| {
             let decoder = Arc::clone(&decoder);
             let inbox = Arc::clone(&inbox);
             let http = http.clone();
             let upload = Arc::clone(&upload);
+            let telemetry = telemetry.clone();
             io.post(Box::new(move || {
                 inbox.post(Command::ImageReady(decode_one(
                     decoder.as_ref(),
                     http.as_deref(),
                     &request,
                     &upload,
+                    telemetry.as_deref(),
                 )));
             }))
         }
     });
-    open_ui(
+    let runtime = open_ui(
         boot,
         fonts,
         inbox,
@@ -711,8 +736,21 @@ fn run_boot(
             load_image,
             http,
             upload,
+            telemetry: telemetry.clone(),
+            enable_gpu_timing,
         },
-    )
+    )?;
+    if let (Some(path), Some(hub)) = (trace_path, telemetry)
+        && let Some(id) = hub.start_trace(path.into(), true)
+    {
+        capture_runner.post_delayed(Duration::from_secs(5), Box::new(move || {
+            match hub.finish_trace(id) {
+                Ok(path) => tracing::info!(target: "impasto::trace", path = %path.display(), "trace exported"),
+                Err(error) => tracing::warn!(target: "impasto::trace", %error, "trace export failed"),
+            }
+        }));
+    }
+    Ok(runtime)
 }
 
 type ImageLoader = Arc<dyn Fn(ImageRequest) -> bool + Send + Sync>;
@@ -722,9 +760,24 @@ fn decode_one(
     http: Option<&dyn crate::http::HttpClient>,
     request: &ImageRequest,
     upload: &Mutex<Option<raster::TextureFactory>>,
+    telemetry: Option<&TelemetryHub>,
 ) -> ImageReady {
+    let span_start = || telemetry.filter(|hub| hub.recording()).map(|_| mono_ns());
+    let note = |name, start| {
+        if let (Some(hub), Some(start_ns)) = (telemetry, start) {
+            hub.note_io(IoSpan {
+                name,
+                start_ns,
+                end_ns: mono_ns(),
+            });
+        }
+    };
+    let mut decode_start = span_start();
     let result = if request.source.starts_with("https://") {
-        match crate::http::fetch_image_body(http, &request.source) {
+        let body = crate::http::fetch_image_body(http, &request.source);
+        note("Image fetch", decode_start);
+        decode_start = span_start();
+        match body {
             Ok(bytes) => decoder.decode_bytes(&request.source, &bytes),
             Err(error) => Err(ImageError::Failed(error)),
         }
@@ -733,6 +786,7 @@ fn decode_one(
     } else {
         decoder.decode_at(&request.source, request.scale_bucket)
     };
+    note("Image decode", decode_start);
     match result {
         Ok(mut handle) => {
             if !images::pixel_count_ok(handle.size) {
@@ -744,10 +798,12 @@ fn decode_one(
             }
             handle.source = Arc::clone(&request.source);
             handle.generation = request.generation;
+            let upload_start = span_start();
             {
                 let factory = lock(upload);
                 images::attach_upload(&mut handle, factory.as_ref());
             }
+            note("Image upload", upload_start);
             ImageReady::Decoded(handle)
         }
         Err(ImageError::Missing) => ImageReady::Missing {
@@ -786,6 +842,9 @@ pub(crate) struct UiHost {
     vsync: Arc<dyn crate::Vsync>,
     point_scale: f32,
     frame_number: u64,
+    topology: ThreadTopology,
+    telemetry: Option<Arc<TelemetryHub>>,
+    gpu_poll: bool,
     semantics: Option<engine::semantics::SemanticsUpdate>,
     semantics_enabled: bool,
     autofill_enabled: bool,
@@ -865,6 +924,8 @@ impl FramePipeline {
 
 struct RenderLinks {
     load_image: ImageLoader,
+    telemetry: Option<Arc<TelemetryHub>>,
+    enable_gpu_timing: bool,
     http: Option<Arc<dyn crate::http::HttpClient>>,
     upload: Arc<Mutex<Option<raster::TextureFactory>>>,
 }
@@ -930,10 +991,15 @@ fn open_ui(
     let raster_clock = Arc::clone(&runners.raster);
     let open = boot.open_raster;
     let open_surface = boot.open_surface;
+    let raster_telemetry = links.telemetry.clone();
     let create = move || {
-        let raster = open(library).map_err(BootError::Engine)?;
+        let mut raster = open(library).map_err(BootError::Engine)?;
+        if links.enable_gpu_timing {
+            raster.enable_gpu_timing();
+        }
         Ok::<_, BootError>(RasterHost {
             raster: Rc::new(RefCell::new(raster)),
+            telemetry: raster_telemetry,
             surfaces: SurfaceHost::new(),
             open_surface,
             external_textures: Default::default(),
@@ -1076,6 +1142,9 @@ fn open_ui(
         vsync: boot.vsync,
         point_scale: 1.0,
         frame_number: 0,
+        topology: boot.thread_topology,
+        telemetry: links.telemetry,
+        gpu_poll: false,
         semantics: None,
         semantics_enabled: true,
         autofill_enabled: false,
@@ -1084,7 +1153,7 @@ fn open_ui(
         wake: WakeTimer::new(runners.ui, Arc::clone(inbox)),
         dump_list: boot.dump_list,
         present_retry_at: None,
-        listeners: frame_listeners(boot.devtools.clone()),
+        listeners: frame_listeners(),
         inspect: boot.inspect,
         hub: boot.devtools.clone(),
         inspect_dir: boot.inspect_dir,
@@ -1292,11 +1361,44 @@ fn layer_tree_line(tree: &engine::scene::LayerTree) -> String {
     )
 }
 
-fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, BootError> {
+fn ms_to_ns(ms: f64) -> u64 {
+    Duration::try_from_secs_f64(ms / 1_000.0)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
+        .unwrap_or_default()
+}
+
+fn on_frame(
+    runtime: &mut UiHost,
+    time: FrameTime,
+    from_vsync: bool,
+    acks: &Acks,
+) -> Result<bool, BootError> {
     use engine::session::trace::Section;
 
     let _frame_trace = Section::begin(c"Impasto frame");
     let frame_started = Instant::now();
+    let counters = runtime
+        .telemetry
+        .as_ref()
+        .is_some_and(|hub| hub.collects_frames());
+    let inspect = runtime.inspect.is_some() || runtime.inspect_dir.is_some();
+    let schedule = (counters || inspect).then(|| {
+        let ui_start_ns = mono_ns_at(frame_started);
+        // FrameTime::mono_ms was stamped when the callback posted to the
+        // inbox. Use that runner's elapsed time so custom epochs also work.
+        let vsync_ns = from_vsync.then(|| {
+            let queued_ms = (runtime.wake.runner.monotonic_ms() - time.mono_ms).max(0.0);
+            ui_start_ns.saturating_sub(ms_to_ns(queued_ms))
+        });
+        ScheduleTiming {
+            vsync_ns,
+            ui_start_ns,
+            topology: runtime.topology,
+            budget_ns: ms_to_ns(time.interval_ms),
+            ..ScheduleTiming::default()
+        }
+    });
     if !runtime.frames.has_room() {
         return Ok(end_frame(runtime, false, false));
     }
@@ -1358,7 +1460,8 @@ fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, 
     }
     let gesture_ms = gesture_started.elapsed().as_secs_f64() * 1000.0;
     drop(input_trace);
-    runtime.frame_number = runtime.frame_number.wrapping_add(1);
+    static NEXT_FRAME: AtomicU64 = AtomicU64::new(1);
+    runtime.frame_number = NEXT_FRAME.fetch_add(1, Ordering::Relaxed);
     Section::event(|| {
         if time.target_ms > time.vsync_ms {
             format!(
@@ -1384,14 +1487,19 @@ fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, 
     let mut layers_changed = false;
     let mut placements_changed = false;
     let mut phases = None;
+    let mut runtime_sample = None;
     let mut layout_report = None;
     if let Some(session) = runtime.session.as_mut() {
+        session.set_counters(counters);
         let framed = {
             let _trace = Section::begin(c"Impasto session");
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.frame(time)))
         };
         match framed {
             Ok(mut output) => {
+                if counters && runtime.frame_number.is_multiple_of(30) {
+                    runtime_sample = session.runtime_sample();
+                }
                 again = output.again;
                 leave = output.exit;
                 let faults = session.take_faults();
@@ -1482,6 +1590,12 @@ fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, 
         number: runtime.frame_number,
         time,
         frame_started,
+        schedule: schedule.map(|schedule| ScheduleTiming {
+            ui_done_ns: mono_ns(),
+            ..schedule
+        }),
+        telemetry: runtime.telemetry.clone().filter(|_| counters),
+        runtime_sample,
         session_ms: elapsed_ms(session_started),
         gesture_ms,
         phases: phases.unwrap_or_default(),
@@ -1546,6 +1660,9 @@ fn finish_raster_frame(
         surface,
         retry_at,
     } = completion?;
+    if output.gpu_pending {
+        schedule_gpu_poll(runtime);
+    }
     if let Some(timing) = output.timing {
         for listener in &mut runtime.listeners {
             listener.on_frame(&timing, &submission.phases);
@@ -1829,17 +1946,41 @@ fn input_kind(event: &engine::session::InputEvent) -> &'static str {
     }
 }
 
-fn frame_listeners(
-    devtools: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
-) -> Vec<Box<dyn crate::timing::FrameListener>> {
-    let mut listeners: Vec<Box<dyn crate::timing::FrameListener>> = vec![
+fn frame_listeners() -> Vec<Box<dyn crate::timing::FrameListener>> {
+    vec![
         Box::new(crate::timing::BudgetEdge::default()),
         Box::new(crate::timing::WorkEdge::default()),
-    ];
-    if let Some(devtools) = devtools {
-        listeners.push(Box::new(crate::timing::DevtoolFrames::new(devtools)));
+    ]
+}
+
+fn schedule_gpu_poll(runtime: &mut UiHost) {
+    let Some(hub) = runtime.telemetry.clone() else {
+        return;
+    };
+    if runtime.gpu_poll {
+        return;
     }
-    listeners
+    runtime.gpu_poll = true;
+    let inbox = Arc::downgrade(&runtime.inbox);
+    runtime.wake.runner.post_delayed(
+        Duration::from_millis(8),
+        Box::new(move || {
+            if let Some(inbox) = inbox.upgrade() {
+                inbox.complete(Box::new(move |runtime| {
+                    runtime.update_raster(
+                        move |graphics| raster_host::drain_gpu(graphics, &hub),
+                        |runtime, pending| {
+                            runtime.gpu_poll = false;
+                            if pending {
+                                schedule_gpu_poll(runtime);
+                            }
+                        },
+                    );
+                    Ok(false)
+                }));
+            }
+        }),
+    );
 }
 
 /// Releases GPU caches and refuses acquire until a later submit rebuilds them.
@@ -2053,6 +2194,7 @@ mod tests {
                 shaper,
                 graphics: RasterPort::Local(Box::new(RasterHost {
                     raster,
+                    telemetry: None,
                     load_image: Arc::new(|_| true),
                     busy: Arc::new(crate::watchdog::Busy::new()),
                     frame_retry_at: None,
@@ -2090,6 +2232,9 @@ mod tests {
                 vsync: Arc::clone(&vsync) as Arc<dyn Vsync>,
                 point_scale: 1.0,
                 frame_number: 0,
+                topology: crate::ThreadTopology::SharedRender,
+                telemetry: None,
+                gpu_poll: false,
                 semantics: None,
                 semantics_enabled: true,
                 autofill_enabled: false,
@@ -2383,11 +2528,11 @@ mod tests {
         assert_eq!(harness.runtime.graphics.local().gpu, Gpu::Flush);
         assert!(harness.runtime.graphics.local().installed.is_none());
         assert!(harness.runtime.input.is_paused());
-        assert!(!on_frame(&mut harness.runtime, now(), &harness.acks).unwrap());
+        assert!(!on_frame(&mut harness.runtime, now(), false, &harness.acks).unwrap());
         assert_eq!(presents.load(Ordering::Relaxed), 0);
         harness.runtime.graphics.local().gpu = Gpu::Dead;
         harness.runtime.input.resume();
-        assert!(!on_frame(&mut harness.runtime, now(), &harness.acks).unwrap());
+        assert!(!on_frame(&mut harness.runtime, now(), false, &harness.acks).unwrap());
         assert_eq!(presents.load(Ordering::Relaxed), 0);
     }
 
@@ -2407,7 +2552,7 @@ mod tests {
         harness.runtime.graphics.local().installed = Some(Installed { scale: 2.0 });
         harness.runtime.point_scale = 2.0;
         harness.runtime.graphics.local().needs_present = true;
-        assert!(!on_frame(&mut harness.runtime, now(), &harness.acks).unwrap());
+        assert!(!on_frame(&mut harness.runtime, now(), false, &harness.acks).unwrap());
         assert_eq!(*lock(&seen), raster::PixelSize::new(720, 1280));
     }
 

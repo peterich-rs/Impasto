@@ -8,7 +8,7 @@ import { onFrame } from "@impasto/solid-renderer";
 import { appendCapped } from "./cursor.ts";
 import type { HighlightBox } from "./highlight.tsx";
 import * as raw from "./native.js";
-import type { DiagError, FrameSample, LogLine, NetEntry } from "./native.js";
+import type { DiagError, FrameSample, GpuFrameTiming, LogLine, NetEntry } from "./native.js";
 export type {
   DiagError,
   FrameSample,
@@ -23,6 +23,8 @@ export const [logs, setLogs] = createSignal<LogLine[]>([]);
 export const [errors, setErrors] = createSignal<DiagError[]>([]);
 export const [network, setNetwork] = createSignal<NetEntry[]>([]);
 export const [frames, setFrames] = createSignal<FrameSample[]>([]);
+export const [traceRecording, setTraceRecording] = createSignal(false);
+export const [traceResult, setTraceResult] = createSignal<string | null>(null);
 export const [unseenErrors, setUnseenErrors] = createSignal(0);
 export const [pageOpen, setPageOpen] = createSignal(false);
 export const [highlights, setHighlights] = createSignal<HighlightBox[]>([]);
@@ -33,6 +35,7 @@ const cursors: Record<Channel, number> = {
   network: 0,
 };
 let lastRevision = -1;
+let framesRevision = -1;
 let attached = false;
 /** Error source names the banner reacts to. */
 const BANNER_SOURCES = new Set(["listener", "rejection", "scene"]);
@@ -96,7 +99,29 @@ export const store = {
     setUnseenErrors(0);
   },
   sampleFrames(): void {
-    setFrames(raw.frames().entries.slice(-120));
+    const page = raw.frames();
+    if (page.revision !== framesRevision) {
+      framesRevision = page.revision;
+      setFrames(page.entries.slice(-120));
+    }
+  },
+  gpuTiming(frame: number): GpuFrameTiming | null {
+    return raw.gpuTiming(frame);
+  },
+  async recordTrace(): Promise<void> {
+    if (traceRecording()) return;
+    setTraceResult(null);
+    try {
+      const recording = raw.startTrace();
+      setTraceRecording(true);
+      await new Promise<void>((resolve) => setTimeout(resolve, 5000));
+      const path = await raw.finishTrace(recording);
+      setTraceResult(path);
+    } catch (error) {
+      setTraceResult(`导出失败 · ${String(error)}`);
+    } finally {
+      setTraceRecording(false);
+    }
   },
   /** True when the scene registered the devtools module. */
   available(): boolean {
@@ -113,6 +138,7 @@ export const store = {
     attached = true;
     let elapsed = 200;
     const stop = onFrame((_target, interval) => {
+      if (traceRecording()) return;
       elapsed += interval;
       if (elapsed < 200) return;
       elapsed = 0;

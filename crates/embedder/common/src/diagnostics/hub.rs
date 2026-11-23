@@ -1,10 +1,13 @@
 //! Ring buffers with a monotonic revision per channel. Producers are the
-//! render thread, the net thread, and the log hook; the only reader is the
-//! devtools host module (render thread).
+//! UI, raster and IO queues, external network callbacks and the log hook.
+
+use super::telemetry::{IoSpan, ScheduleTiming, TelemetryProfile, mono_ns};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU8};
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// One filtered log event copied for the devtools console.
 #[derive(Clone, Debug, PartialEq)]
@@ -132,9 +135,17 @@ pub struct PhaseSample {
 }
 
 /// Per-frame timing sample, trimmed from [`crate::FrameTiming`].
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct FrameSample {
     pub seq: u64,
+    pub(crate) changed_at: u64,
+    pub schedule: ScheduleTiming,
+    pub raster: raster::SubmitStats,
+    pub gpu: raster::GpuSample,
+    pub gpu_timing: Option<Arc<raster::GpuFrameTiming>>,
+    pub updates: u32,
+    pub sets: u32,
+    pub runtime: Option<engine::session::RuntimeSample>,
     pub number: u64,
     pub at_ms: f64,
     pub work_ms: f64,
@@ -168,6 +179,14 @@ impl Default for FrameSample {
     fn default() -> Self {
         Self {
             seq: 0,
+            changed_at: 0,
+            schedule: ScheduleTiming::default(),
+            raster: raster::SubmitStats::default(),
+            gpu: raster::GpuSample::default(),
+            gpu_timing: None,
+            updates: 0,
+            sets: 0,
+            runtime: None,
             number: 0,
             at_ms: 0.0,
             work_ms: 0.0,
@@ -237,7 +256,7 @@ impl<T: SeqField> Ring<T> {
 
     /// Entries with `seq > since`.
     pub(crate) fn tail(&self, since: u64) -> impl Iterator<Item = &T> {
-        self.buf.iter().filter(move |entry| entry.seq() > since)
+        self.buf.iter().filter(move |entry| entry.cursor() > since)
     }
 
     pub(crate) fn clear(&mut self) {
@@ -245,15 +264,15 @@ impl<T: SeqField> Ring<T> {
     }
 }
 
-/// Every ring entry carries its sequence number as the `seq` field.
+/// The most recent channel revision that changed an entry.
 pub(crate) trait SeqField {
-    fn seq(&self) -> u64;
+    fn cursor(&self) -> u64;
 }
 
 macro_rules! seq_field {
     ($ty:ty) => {
         impl SeqField for $ty {
-            fn seq(&self) -> u64 {
+            fn cursor(&self) -> u64 {
                 self.seq
             }
         }
@@ -263,7 +282,11 @@ macro_rules! seq_field {
 seq_field!(LogEntry);
 seq_field!(DiagError);
 seq_field!(NetEntry);
-seq_field!(FrameSample);
+impl SeqField for FrameSample {
+    fn cursor(&self) -> u64 {
+        self.changed_at
+    }
+}
 
 pub const LOG_CAP: usize = 400;
 pub const ERROR_CAP: usize = 100;
@@ -272,8 +295,11 @@ pub const FRAME_CAP: usize = 240;
 /// Body preview cap for network entries.
 pub const PREVIEW_CAP: usize = 2048;
 
-/// Process-wide diagnostics sink. Every method takes the lock only to clone.
-pub struct DiagnosticsHub {
+/// Process-local telemetry store, shared by the host and its consumers.
+pub struct TelemetryHub {
+    profile: AtomicU8,
+    recording: AtomicBool,
+    capture: Mutex<Option<TraceCapture>>,
     pub(crate) logs: Mutex<Ring<LogEntry>>,
     pub(crate) errors: Mutex<Ring<DiagError>>,
     pub(crate) network: Mutex<Ring<NetEntry>>,
@@ -293,15 +319,18 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-impl Default for DiagnosticsHub {
+impl Default for TelemetryHub {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl DiagnosticsHub {
+impl TelemetryHub {
     pub fn new() -> Self {
         Self {
+            profile: AtomicU8::new(TelemetryProfile::Counters as u8),
+            recording: AtomicBool::new(false),
+            capture: Mutex::new(None),
             logs: Mutex::new(Ring::new(LOG_CAP)),
             errors: Mutex::new(Ring::new(ERROR_CAP)),
             network: Mutex::new(Ring::new(NET_CAP)),
@@ -382,10 +411,151 @@ impl DiagnosticsHub {
         lock(&self.network).tail(0).cloned().collect()
     }
 
-    pub fn push_frame(&self, sample: FrameSample) {
-        lock(&self.frames).push(|seq| FrameSample { seq, ..sample });
+    pub fn set_profile(&self, profile: TelemetryProfile) {
+        if profile != TelemetryProfile::Off {
+            let mut frames = lock(&self.frames);
+            if frames.buf.capacity() < FRAME_CAP {
+                let available = frames.buf.len();
+                frames.buf.reserve(FRAME_CAP - available);
+            }
+        }
+        self.profile.store(profile as u8, Ordering::Relaxed);
+    }
+
+    pub(crate) fn collects_frames(&self) -> bool {
+        self.profile.load(Ordering::Relaxed) != TelemetryProfile::Off as u8
+            || self.recording.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn collects_gpu(&self) -> bool {
+        self.profile.load(Ordering::Relaxed) >= TelemetryProfile::GpuAndTimeline as u8
+            || self.recording.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn recording(&self) -> bool {
+        self.recording.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn start_trace(&self, path: PathBuf, overwrite: bool) -> Option<u64> {
+        static NEXT_TRACE: AtomicU64 = AtomicU64::new(1);
+        let mut capture = lock(&self.capture);
+        if capture.is_some() {
+            return None;
+        }
+        let id = NEXT_TRACE.fetch_add(1, Ordering::Relaxed);
+        *capture = Some(TraceCapture {
+            id,
+            path,
+            overwrite,
+            started_ns: mono_ns(),
+            frames: VecDeque::with_capacity(TRACE_FRAME_CAP),
+            io: VecDeque::with_capacity(TRACE_IO_CAP),
+        });
+        self.recording.store(true, Ordering::Release);
+        Some(id)
+    }
+
+    pub(crate) fn finish_trace(&self, id: u64) -> std::io::Result<PathBuf> {
+        let capture = {
+            let mut slot = lock(&self.capture);
+            if !slot.as_ref().is_some_and(|capture| capture.id == id) {
+                return Err(std::io::Error::other("trace recording expired"));
+            }
+            self.recording.store(false, Ordering::Release);
+            slot.take()
+        };
+        let capture = capture.ok_or_else(|| std::io::Error::other("no active trace"))?;
+        super::trace_export::write(&capture)
+    }
+
+    pub(crate) fn note_io(&self, span: IoSpan) {
+        if self.recording()
+            && let Some(capture) = lock(&self.capture).as_mut()
+            && span.start_ns >= capture.started_ns
+        {
+            push_bounded(&mut capture.io, TRACE_IO_CAP, span);
+        }
+    }
+
+    pub fn push_frame(&self, mut sample: FrameSample) {
+        {
+            let mut frames = lock(&self.frames);
+            frames.push(|seq| {
+                sample.seq = seq;
+                sample.changed_at = seq;
+                sample.clone()
+            });
+        }
+        if self.recording()
+            && let Some(capture) = lock(&self.capture).as_mut()
+            && sample.schedule.ui_start_ns >= capture.started_ns
+        {
+            push_bounded(&mut capture.frames, TRACE_FRAME_CAP, sample);
+        }
         self.bump();
     }
+
+    pub(crate) fn patch_gpu_timing(&self, update: raster::GpuTimingUpdate) {
+        let timing = update.timing.map(Arc::new);
+        let patch = |frame: &mut FrameSample| {
+            let key = update.sample;
+            if frame.number == key.frame_id
+                && frame.gpu.device_generation == key.device_generation
+                && frame.gpu.status == raster::GpuTimingStatus::Pending
+            {
+                frame.gpu = key;
+                frame.gpu_timing.clone_from(&timing);
+                true
+            } else {
+                false
+            }
+        };
+        let mut frames = lock(&self.frames);
+        let revision = frames.seq.saturating_add(1);
+        if let Some(frame) = frames
+            .buf
+            .iter_mut()
+            .rev()
+            .find(|frame| frame.number == update.sample.frame_id)
+            && patch(frame)
+        {
+            frame.changed_at = revision;
+            frames.seq = revision;
+            self.bump();
+        }
+        drop(frames);
+        if self.recording()
+            && let Some(capture) = lock(&self.capture).as_mut()
+            && let Some(frame) = capture
+                .frames
+                .iter_mut()
+                .rev()
+                .find(|frame| frame.number == update.sample.frame_id)
+        {
+            patch(frame);
+        }
+    }
+}
+
+pub type DiagnosticsHub = TelemetryHub;
+
+const TRACE_FRAME_CAP: usize = 1024;
+const TRACE_IO_CAP: usize = 2048;
+
+pub(super) struct TraceCapture {
+    id: u64,
+    pub path: PathBuf,
+    pub overwrite: bool,
+    pub started_ns: u64,
+    pub frames: VecDeque<FrameSample>,
+    pub io: VecDeque<IoSpan>,
+}
+
+fn push_bounded<T>(queue: &mut VecDeque<T>, capacity: usize, value: T) {
+    if queue.len() == capacity {
+        queue.pop_front();
+    }
+    queue.push_back(value);
 }
 #[cfg(test)]
 mod tests {
@@ -402,6 +572,44 @@ mod tests {
             fields: Vec::new(),
             frame: None,
         }
+    }
+
+    #[test]
+    fn late_gpu_update_keeps_frame_selection_and_advances_the_cursor() {
+        use raster::{GpuSample, GpuTimingStatus, GpuTimingUpdate};
+
+        let hub = TelemetryHub::new();
+        hub.push_frame(FrameSample {
+            number: 42,
+            gpu: GpuSample {
+                frame_id: 42,
+                device_generation: 7,
+                status: GpuTimingStatus::Pending,
+            },
+            ..FrameSample::default()
+        });
+        let patch = |generation| GpuTimingUpdate {
+            sample: GpuSample {
+                frame_id: 42,
+                device_generation: generation,
+                status: GpuTimingStatus::StaleDevice,
+            },
+            timing: None,
+        };
+        hub.patch_gpu_timing(patch(8));
+        assert_eq!(lock(&hub.frames).revision(), 1);
+        hub.push_frame(FrameSample {
+            number: 43,
+            ..FrameSample::default()
+        });
+        hub.patch_gpu_timing(patch(7));
+        let frames = lock(&hub.frames);
+        assert_eq!(frames.revision(), 3);
+        let updated: Vec<_> = frames.tail(2).collect();
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].seq, 1);
+        assert_eq!(updated[0].number, 42);
+        assert_eq!(updated[0].gpu.status, GpuTimingStatus::StaleDevice);
     }
 
     #[test]

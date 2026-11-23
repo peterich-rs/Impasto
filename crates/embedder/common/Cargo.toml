@@ -22,6 +22,9 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["s
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 mars-xlog = { git = "https://github.com/peterich-rs/xlog-rs", rev = "cdedbdf40868f3e1673755ec045dbf373f028fc2" }
 
+[build-dependencies]
+cc = "1"
+
 [dev-dependencies]
 javascript = { path = "../../javascript", features = ["runtime"] }
 

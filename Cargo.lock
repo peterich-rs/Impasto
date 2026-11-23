@@ -738,6 +738,7 @@ name = "embedder"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "cc",
  "engine",
  "futures-util",
  "http",
@@ -2539,6 +2540,7 @@ dependencies = [
  "parley",
  "pollster",
  "raw-window-handle",
+ "serde_json",
  "swash",
  "thiserror 2.0.21",
  "tracing",

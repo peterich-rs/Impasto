@@ -1,9 +1,11 @@
-use std::{collections::HashSet, time::Duration};
+use std::collections::HashSet;
 
 use engine::scene::{BoxShadow, ColorStop, Gradient};
 
 use super::*;
-use crate::{SubmitStats, compositor::extent, surface::read_rgba};
+use crate::{compositor::extent, surface::read_rgba};
+
+mod benchmark;
 
 fn capture(
     raster: &mut Rasterizer,
@@ -86,11 +88,24 @@ fn mixed_rectangles_use_one_draw_and_reuse_warm_resources() {
     let cold = raster.submit_stats().render;
     assert!(cold.direct_present, "{cold:?}");
     assert_eq!((cold.passes, cold.draws), (1, 1));
-    assert!(cold.instance_bytes >= 300 * 128);
+    // Each shadow contributes a second instance for its rectangle.
+    assert_eq!(cold.vertex_bytes, 400 * 128);
+    assert_eq!(
+        (
+            cold.mesh_upload_bytes,
+            cold.atlas_upload_bytes,
+            cold.copy_pixels
+        ),
+        (0, 0, 0)
+    );
     raster.submit_layers(&scene, 1.0, |_| None).unwrap();
     assert_eq!(raster.render_rgba(size).unwrap(), pixels);
     let warm = raster.submit_stats().render;
     assert_eq!((warm.buffers_created, warm.bind_groups_created), (0, 0));
+    assert_eq!(
+        (warm.passes, warm.draws, warm.vertex_bytes),
+        (1, 1, cold.vertex_bytes)
+    );
 }
 
 fn output(gpu: &crate::Gpu, format: wgpu::TextureFormat, size: PixelSize) -> wgpu::Texture {
@@ -164,13 +179,18 @@ fn frame_slabs_survive_growing_between_slices() {
             if !commands.is_empty() {
                 compositor.trim();
             }
-            commands.push(compositor.encode(
-                gpu,
-                frame.scene(&raster.fonts, Some(&slice)),
-                &target.create_view(&Default::default()),
-                format,
-                [12, 12],
-            )?);
+            commands.push(
+                compositor
+                    .encode(
+                        gpu,
+                        frame.scene(&raster.fonts, Some(&slice)),
+                        &target.create_view(&Default::default()),
+                        format,
+                        [12, 12],
+                        None,
+                    )?
+                    .finish(),
+            );
         }
         compositor.flush(gpu);
         gpu.queue.submit(commands);
@@ -506,57 +526,8 @@ fn dense_mask_glyphs_share_a_draw_and_coalesce_uploads() {
         stats.atlas.uploads >= 50 && stats.atlas.upload_calls <= 2,
         "{stats:?}"
     );
-}
-
-fn benchmark(
-    raster: &mut Rasterizer,
-    frames: u32,
-    size: PixelSize,
-    mut scene: impl FnMut(u32) -> LayerTree,
-) {
-    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-    let gpu = raster.device.as_ref().unwrap().gpu.clone();
-    let target = output(&gpu, format, size);
-    let view = target.create_view(&Default::default());
-    let mut samples = Vec::new();
-    for frame in 0..frames {
-        raster
-            .submit_layers(&scene(frame), 1.0, |_| {
-                Some(ImagePixels {
-                    width: 2,
-                    height: 2,
-                    rgba: &[
-                        230, 110, 50, 255, 90, 120, 180, 255, 88, 90, 124, 255, 70, 60, 200, 255,
-                    ],
-                })
-            })
-            .unwrap();
-        raster.encode_and_submit(&view, format, size).unwrap();
-        samples.push(raster.submit_stats());
-    }
-    gpu.device
-        .poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: Some(Duration::from_secs(30)),
-        })
-        .unwrap();
-    let percentile = |metric: fn(&SubmitStats) -> Duration, p: usize| {
-        let mut times: Vec<_> = samples.iter().map(metric).collect();
-        times.sort_unstable();
-        times[(times.len() * p).div_ceil(100) - 1]
-    };
-    eprintln!(
-        "compose p50/p99 {:?}/{:?}, picture_prepare p50/p99 {:?}/{:?}",
-        percentile(|stats| stats.compose, 50),
-        percentile(|stats| stats.compose, 99),
-        percentile(|stats| stats.picture_prepare, 50),
-        percentile(|stats| stats.picture_prepare, 99)
-    );
-    eprintln!(
-        "cold {:?}, warm {:?}",
-        samples[0],
-        samples[samples.len() - 1]
-    );
+    assert_eq!(stats.render.atlas_upload_bytes, stats.atlas.upload_bytes);
+    assert!(stats.render.atlas_upload_bytes > 0);
 }
 
 fn bench_text(
@@ -637,24 +608,28 @@ fn bench_scroll_1000_cards() {
         ]);
     }
     let commands: Arc<[Command]> = commands.into();
-    let Some(mut raster) = headless(fonts) else {
-        return;
-    };
-    benchmark(&mut raster, 120, PixelSize::new(640, 720), |frame| {
-        let mut scene = tree(1, Arc::clone(&commands));
-        scene.root = LayerId(1);
-        scene.layers[0].parent = Some(scene.root);
-        scene.layers.push(Layer {
-            kind: LayerKind::Offset {
-                x: 0.0,
-                y: -(frame as f32) * 10.0,
-            },
-            parent: None,
-            first_child: Some(LayerId(0)),
-            next: None,
-        });
-        scene
-    });
+    let mut raster = benchmark::headless(fonts);
+    benchmark::run(
+        &mut raster,
+        "scroll_1000_cards",
+        120,
+        PixelSize::new(640, 720),
+        |frame| {
+            let mut scene = tree(1, Arc::clone(&commands));
+            scene.root = LayerId(1);
+            scene.layers[0].parent = Some(scene.root);
+            scene.layers.push(Layer {
+                kind: LayerKind::Offset {
+                    x: 0.0,
+                    y: -(frame as f32) * 10.0,
+                },
+                parent: None,
+                first_child: Some(LayerId(0)),
+                next: None,
+            });
+            scene
+        },
+    );
 }
 
 #[test]
@@ -666,101 +641,113 @@ fn bench_dense_text_wall() {
     let mut text: String = (0x4e00..0x4e00 + 500).filter_map(char::from_u32).collect();
     text.push_str(" abcdefghijklmnopqrstuvwxyz 🌈🧑🏽‍💻❤️🎨");
     let text: Arc<str> = text.into();
-    let Some(mut raster) = headless(fonts) else {
-        return;
-    };
-    benchmark(&mut raster, 30, PixelSize::new(800, 680), |frame| {
-        let command = bench_text(
-            &mut shaper,
-            Arc::clone(&text),
-            20.0 + (frame % 8) as f32,
-            784.0,
-            true,
-        );
-        tree(u64::from(frame), [command])
-    });
+    let mut raster = benchmark::headless(fonts);
+    benchmark::run(
+        &mut raster,
+        "dense_text_wall",
+        30,
+        PixelSize::new(800, 680),
+        |frame| {
+            let command = bench_text(
+                &mut shaper,
+                Arc::clone(&text),
+                20.0 + (frame % 8) as f32,
+                784.0,
+                true,
+            );
+            tree(u64::from(frame), [command])
+        },
+    );
 }
 
 #[test]
 #[ignore = "GPU microbenchmark"]
 fn bench_backdrop_blur_overlays() {
-    let Some(mut raster) = headless(FontLibrary::new()) else {
-        return;
-    };
-    benchmark(&mut raster, 60, PixelSize::new(800, 600), |frame| {
-        let mut commands = vec![Command::Fill {
-            color: [44, 60, 90, 255],
-        }];
-        for index in 0..20u16 {
-            commands.push(rect(
-                [f32::from(index) * 45.0 - frame as f32, 0.0, 20.0, 600.0],
-                [180, 100, 50, 255],
-            ));
-        }
-        for index in 0..3u16 {
-            let [x, y, w, h] = [
-                80.0 + f32::from(index) * 160.0,
-                80.0 + f32::from(index) * 130.0,
-                240.0,
-                120.0,
-            ];
-            commands.extend([
-                rounded([x, y, w, h], 16.0),
-                Command::PushBackdropBlur {
-                    x,
-                    y,
-                    w,
-                    h,
-                    sigma: 9.0,
-                },
-                rect([x, y, w, h], [255, 255, 255, 50]),
-                Command::Pop,
-                Command::Pop,
-            ]);
-        }
-        tree(u64::from(frame), commands)
-    });
+    let mut raster = benchmark::headless(FontLibrary::new());
+    benchmark::run(
+        &mut raster,
+        "backdrop_blur_overlays",
+        60,
+        PixelSize::new(800, 600),
+        |frame| {
+            let mut commands = vec![Command::Fill {
+                color: [44, 60, 90, 255],
+            }];
+            for index in 0..20u16 {
+                commands.push(rect(
+                    [f32::from(index) * 45.0 - frame as f32, 0.0, 20.0, 600.0],
+                    [180, 100, 50, 255],
+                ));
+            }
+            for index in 0..3u16 {
+                let [x, y, w, h] = [
+                    80.0 + f32::from(index) * 160.0,
+                    80.0 + f32::from(index) * 130.0,
+                    240.0,
+                    120.0,
+                ];
+                commands.extend([
+                    rounded([x, y, w, h], 16.0),
+                    Command::PushBackdropBlur {
+                        x,
+                        y,
+                        w,
+                        h,
+                        sigma: 9.0,
+                    },
+                    rect([x, y, w, h], [255, 255, 255, 50]),
+                    Command::Pop,
+                    Command::Pop,
+                ]);
+            }
+            tree(u64::from(frame), commands)
+        },
+    );
 }
 
 #[test]
 #[ignore = "GPU microbenchmark"]
 fn bench_canvas_500_paths() {
-    let Some(mut raster) = headless(FontLibrary::new()) else {
-        return;
-    };
-    benchmark(&mut raster, 60, PixelSize::new(720, 480), |frame| {
-        let mut ops = vec![CanvasOp::Clip {
-            path: path([20.0, 20.0, 650.0, 400.0]),
-        }];
-        ops.extend((0..500u16).map(|index| {
-            let y = f32::from(index % 125) * 3.0 + 20.0;
-            let shift = (frame / 10) as f32;
-            let curve = CanvasPath {
-                fill: FillRule::NonZero,
-                verbs: Arc::from([
-                    PathVerb::Move(20.0, y),
-                    PathVerb::Cubic(160.0, y - shift, 440.0, y + 8.0, 660.0, y),
-                    PathVerb::Line(660.0, y + 2.0),
-                    PathVerb::Line(20.0, y + 2.0),
-                    PathVerb::Close,
-                ]),
-            };
-            let mode = match index % 101 {
-                99 => CanvasComposite::Screen,
-                100 => CanvasComposite::Lighter,
-                _ => CanvasComposite::SourceOver,
-            };
-            fill_path(curve, [70, 100, 220, 128], mode)
-        }));
-        ops.push(CanvasOp::Clear {
-            x: 5.0,
-            y: 5.0,
-            w: 30.0,
-            h: 30.0,
-            ctm: crate::compiler::IDENTITY,
-        });
-        tree(u64::from(frame / 10), [canvas(ops, 720.0, 480.0)])
-    });
+    let mut raster = benchmark::headless(FontLibrary::new());
+    benchmark::run(
+        &mut raster,
+        "canvas_500_paths",
+        60,
+        PixelSize::new(720, 480),
+        |frame| {
+            let mut ops = vec![CanvasOp::Clip {
+                path: path([20.0, 20.0, 650.0, 400.0]),
+            }];
+            ops.extend((0..500u16).map(|index| {
+                let y = f32::from(index % 125) * 3.0 + 20.0;
+                let shift = (frame / 10) as f32;
+                let curve = CanvasPath {
+                    fill: FillRule::NonZero,
+                    verbs: Arc::from([
+                        PathVerb::Move(20.0, y),
+                        PathVerb::Cubic(160.0, y - shift, 440.0, y + 8.0, 660.0, y),
+                        PathVerb::Line(660.0, y + 2.0),
+                        PathVerb::Line(20.0, y + 2.0),
+                        PathVerb::Close,
+                    ]),
+                };
+                let mode = match index % 101 {
+                    99 => CanvasComposite::Screen,
+                    100 => CanvasComposite::Lighter,
+                    _ => CanvasComposite::SourceOver,
+                };
+                fill_path(curve, [70, 100, 220, 128], mode)
+            }));
+            ops.push(CanvasOp::Clear {
+                x: 5.0,
+                y: 5.0,
+                w: 30.0,
+                h: 30.0,
+                ctm: crate::compiler::IDENTITY,
+            });
+            tree(u64::from(frame / 10), [canvas(ops, 720.0, 480.0)])
+        },
+    );
 }
 
 #[test]
@@ -902,4 +889,78 @@ fn rotated_rounded_mask_is_shared_by_separate_scopes() {
     assert_eq!(pixel(&pixels, 40, 20, 20), [0, 0, 255, 255]);
     assert_eq!(pixel(&pixels, 40, 10, 10), [0; 4]);
     assert_eq!(raster.stats.render.offscreen_passes, 1);
+}
+
+#[test]
+fn timestamp_readback_keeps_frame_and_device_identity() {
+    let mut raster = match Rasterizer::headless(
+        RasterOptions {
+            enable_gpu_timing: true,
+            validation: crate::ValidationMode::AsyncOnly,
+            ..RasterOptions::default()
+        },
+        FontLibrary::new(),
+    ) {
+        Ok(raster) => raster,
+        Err(Status::NoDevice(_)) if std::env::var_os("IMPASTO_TEST_GPU").is_none() => return,
+        Err(error) => panic!("headless renderer: {error}"),
+    };
+    let size = PixelSize::new(32, 32);
+    let scene = tree(1, [rect([0.0, 0.0, 32.0, 32.0], [255; 4])]);
+    raster.submit_layers(&scene, 1.0, |_| None).unwrap();
+    raster.render_rgba(size).unwrap();
+    let reference = raster.submit_stats().render;
+    let frame_id = 42;
+    raster.begin_gpu_frame(Some(frame_id));
+    raster.render_rgba(size).unwrap();
+    let sample = raster.gpu_sample();
+    let counters = raster.submit_stats().render;
+    assert_eq!(sample.frame_id, frame_id);
+    assert_eq!((counters.passes, counters.draws), (1, 1));
+    assert_eq!(counters.vertex_bytes, reference.vertex_bytes);
+    assert_eq!(counters.buffers_created, 0);
+    if raster.device.as_ref().unwrap().gpu.caps.has_timestamp_query {
+        assert_eq!(sample.status, crate::GpuTimingStatus::Pending);
+        let mut updates = raster.drain_gpu_timings();
+        if raster.gpu_timings_pending() {
+            benchmark::wait_for_gpu(&raster.device.as_ref().unwrap().gpu);
+            updates.extend(raster.drain_gpu_timings());
+        }
+        let [update] = updates.try_into().unwrap();
+        let update: crate::GpuTimingUpdate = update;
+        assert_eq!(update.sample.frame_id, frame_id);
+        assert_eq!(update.sample.device_generation, sample.device_generation);
+        assert_eq!(update.sample.status, crate::GpuTimingStatus::Ready);
+        let timing = update.timing.unwrap();
+        assert_eq!(timing.passes.len(), 1);
+        assert_eq!(timing.passes[0].kind, crate::GpuPassKind::Main);
+        assert_eq!(timing.passes[0].draws, 1);
+        assert_eq!(timing.frame_span_us, timing.passes_sum_us);
+        assert!(timing.frame_span_us > 0.0);
+    } else {
+        assert_eq!(sample.status, crate::GpuTimingStatus::Unsupported);
+        assert!(raster.drain_gpu_timings().is_empty());
+    }
+}
+
+#[test]
+fn timestamp_capture_reports_unsupported_without_an_enabled_feature() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let size = PixelSize::new(16, 16);
+    raster
+        .submit_layers(
+            &tree(1, [rect([0.0, 0.0, 16.0, 16.0], [255; 4])]),
+            1.0,
+            |_| None,
+        )
+        .unwrap();
+    raster.begin_gpu_frame(Some(8));
+    raster.render_rgba(size).unwrap();
+    assert_eq!(
+        raster.gpu_sample().status,
+        crate::GpuTimingStatus::Unsupported
+    );
+    assert!(!raster.gpu_timings_pending());
 }

@@ -167,7 +167,10 @@ impl Rasterizer {
         resize_if_needed(gpu, surface, pixels)?;
         let raw = surface.inner.as_ref().ok_or(Status::SurfaceLost)?;
         use wgpu::CurrentSurfaceTexture as Frame;
-        let texture = match raw.get_current_texture() {
+        let started = std::time::Instant::now();
+        let acquired = raw.get_current_texture();
+        self.stats.acquire = started.elapsed();
+        let texture = match acquired {
             Frame::Success(texture) => texture,
             Frame::Suboptimal(texture) => {
                 surface.reconfigure = true;
@@ -192,7 +195,9 @@ impl Rasterizer {
         let view = texture.texture.create_view(&Default::default());
         self.encode_and_submit(&view, surface.config.format, pixels)?;
         let state = self.device.as_ref().ok_or(Status::NotReady)?;
+        let started = std::time::Instant::now();
         state.gpu.queue.present(texture);
+        self.stats.surface_present = started.elapsed();
         if state.gpu.is_lost() {
             return Err(Status::DeviceLost);
         }

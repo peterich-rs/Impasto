@@ -11,3 +11,7 @@ pub use hub::{
 pub use inspect::write_frame;
 pub use module::{DevtoolsContext, module};
 pub use recorder::wrap_if_devtools;
+
+pub mod telemetry;
+mod trace_export;
+pub use hub::TelemetryHub;

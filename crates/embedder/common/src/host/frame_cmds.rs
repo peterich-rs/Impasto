@@ -45,6 +45,7 @@ fn wake(runtime: &mut UiHost, acks: &Acks) -> Result<bool, BootError> {
             interval_ms: 16.0,
             mono_ms: now,
         },
+        false,
         acks,
     )
 }
@@ -58,5 +59,5 @@ fn frame(
     if !runtime.scheduler.accept(token) {
         return Ok(false);
     }
-    on_frame(runtime, time, acks)
+    on_frame(runtime, time, true, acks)
 }

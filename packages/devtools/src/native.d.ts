@@ -63,11 +63,32 @@ export type PhaseSample = {
   canvasRedraws: number;
   canvasReused: number;
 };
+export type GpuPassTiming = {
+  kind: string;
+  sliceIndex: number | null;
+  draws: number;
+  startUs: number;
+  durationUs: number;
+};
+export type GpuFrameTiming = {
+  frameSpanUs: number;
+  passesSumUs: number;
+  passes: GpuPassTiming[];
+};
+export type GpuTimingStatus = "disabled" | "unsupported" | "droppedSlotFull" | "droppedPassLimit"
+  | "pending" | "staleDevice" | "readbackFailed" | "ready";
 export type FrameSample = {
   seq: number;
   number: number;
   at: number;
   workMs: number;
+  uiMs: number;
+  rasterMs: number;
+  queueMs: number;
+  e2eMs: number;
+  draws: number;
+  passes: number;
+  gpuStatus: GpuTimingStatus;
   budgetMs: number;
   sessionMs: number;
   gestureMs: number;
@@ -125,6 +146,9 @@ export declare function logs(since?: number): Page<LogLine>;
 export declare function errors(since?: number): Page<DiagError>;
 export declare function network(since?: number): Page<NetEntry>;
 export declare function frames(since?: number): Page<FrameSample>;
+export declare function gpuTiming(frame: number): GpuFrameTiming | null;
+export declare function startTrace(): number;
+export declare function finishTrace(recording: number): Promise<string>;
 export declare function flags(): Flags;
 export declare function setFlags(flags?: Partial<Flags>): void;
 export declare function clear(): void;

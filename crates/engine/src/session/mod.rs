@@ -26,6 +26,17 @@ pub use modules::{
     shared_read, shared_write,
 };
 
+/// A low-frequency snapshot of script runtime resources.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RuntimeSample {
+    pub promises: usize,
+    pub timers: usize,
+    pub requests: usize,
+    pub queued_events: usize,
+    pub queued_bytes: usize,
+    pub heap_bytes: Option<usize>,
+}
+
 /// Durations inside one [`Session::frame`]. The host adds gesture time itself.
 ///
 /// `script` splits the script interval. `trace` counts layout work and the
@@ -149,6 +160,10 @@ pub struct ScriptFault {
 pub trait Session {
     /// Enable opt-in per-frame script counters on this render-thread session.
     fn set_trace(&mut self, _enabled: bool) {}
+    fn set_counters(&mut self, _enabled: bool) {}
+    fn runtime_sample(&self) -> Option<RuntimeSample> {
+        None
+    }
     fn metrics(&mut self, metrics: &Metrics);
     fn window_display(&mut self, _display: WindowDisplay) {}
     fn pointer(&mut self, event: crate::input::PointerEvent);

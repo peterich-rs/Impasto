@@ -94,6 +94,15 @@ impl RasterBackend {
     }
 }
 
+/// Error handling for hot frame encoding and presentation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ValidationMode {
+    #[default]
+    Auto,
+    Strict,
+    AsyncOnly,
+}
+
 /// Options for [`crate::Rasterizer::create`] and [`crate::Rasterizer::headless`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RasterOptions {
@@ -102,6 +111,9 @@ pub struct RasterOptions {
     /// Prefer a software or integrated adapter. Headless tests use this to
     /// avoid depending on a discrete GPU.
     pub force_fallback_adapter: bool,
+    /// Request pass timestamp support when creating the device.
+    pub enable_gpu_timing: bool,
+    pub validation: ValidationMode,
 }
 
 #[cfg(test)]

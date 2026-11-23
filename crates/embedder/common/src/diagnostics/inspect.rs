@@ -115,6 +115,41 @@ fn timing_json(out: &mut String, timing: &FrameTiming) {
     out.push('{');
     field_f64(out, "sessionMs", timing.session_ms, true);
     field_f64(out, "workMs", timing.work_ms, false);
+    field_f64(out, "uiMs", timing.schedule.ui_ms(), false);
+    field_f64(out, "rasterMs", timing.schedule.raster_ms(), false);
+    field_f64(out, "queueMs", timing.schedule.queue_ms(), false);
+    field_f64(out, "e2eMs", timing.schedule.e2e_ms(), false);
+    let raster = timing.raster;
+    field_f64(
+        out,
+        "encodeMs",
+        raster.encode.as_secs_f64() * 1_000.0,
+        false,
+    );
+    field_f64(out, "flushMs", raster.flush.as_secs_f64() * 1_000.0, false);
+    field_f64(
+        out,
+        "acquireMs",
+        raster.acquire.as_secs_f64() * 1_000.0,
+        false,
+    );
+    field_u64(out, "draws", u64::from(raster.render.draws), false);
+    field_u64(out, "passes", u64::from(raster.render.passes), false);
+    field_u64(out, "vertexBytes", raster.render.vertex_bytes, false);
+    field_u64(out, "uniformBytes", raster.render.uniform_bytes, false);
+    field_u64(out, "stopBytes", raster.render.stop_bytes, false);
+    field_u64(
+        out,
+        "meshUploadBytes",
+        raster.render.mesh_upload_bytes,
+        false,
+    );
+    field_u64(
+        out,
+        "atlasUploadBytes",
+        raster.render.atlas_upload_bytes,
+        false,
+    );
     field_f64(out, "budgetMs", timing.interval_ms, false);
     field_f64(out, "gestureMs", timing.gesture_ms, false);
     field_f64(out, "scriptMs", timing.script_ms, false);
@@ -266,6 +301,7 @@ mod tests {
             pictures: 1,
             textures: 0,
             interval_ms: 0.0,
+            ..FrameTiming::default()
         }
     }
 

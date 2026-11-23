@@ -174,6 +174,8 @@ pub struct AtlasStats {
     pub misses: u32,
     pub uploads: u32,
     pub upload_calls: u32,
+    pub upload_bytes: u64,
+    pub copy_pixels: u64,
     pub evictions: u32,
     /// Live entries across both atlases.
     pub entries: usize,
@@ -551,6 +553,7 @@ impl Atlas {
                             },
                         );
                     }
+                    self.stats.copy_pixels += u64::from(page_size).pow(2) * u64::from(old.layers);
                     gpu.queue.submit([encoder.finish()]);
                     if !color {
                         atlas.retired.push(old);
@@ -627,7 +630,8 @@ impl Atlas {
             if color {
                 if let Some(texture) = &atlas.texture {
                     let [w, h] = page.size;
-                    write_texture(gpu, texture, [0, 0, *layer], [w, h], 4, &self.scratch);
+                    self.stats.upload_bytes +=
+                        write_texture(gpu, texture, [0, 0, *layer], [w, h], 4, &self.scratch);
                     self.stats.upload_calls += 1;
                 }
             } else {
@@ -673,7 +677,7 @@ impl Atlas {
         }
         // Queue writes precede any draw using this placement, including writes
         // to a color array that is subsequently copied into a larger array.
-        write_texture(
+        self.stats.upload_bytes += write_texture(
             gpu,
             texture,
             [rect.x - GUTTER, rect.y - GUTTER, layer],
@@ -714,7 +718,8 @@ impl Atlas {
                     let data = &shadow[(y * w) as usize..(end * w) as usize];
                     for target in std::iter::once(texture).chain(&self.mask.retired) {
                         if *layer < target.layers {
-                            write_texture(gpu, target, [0, y, *layer], [w, end - y], 1, data);
+                            self.stats.upload_bytes +=
+                                write_texture(gpu, target, [0, y, *layer], [w, end - y], 1, data);
                             self.stats.upload_calls += 1;
                         }
                     }
@@ -811,7 +816,7 @@ fn write_texture(
     size: [u32; 2],
     channels: u32,
     data: &[u8],
-) {
+) -> u64 {
     let [x, y, z] = origin;
     gpu.queue.write_texture(
         wgpu::TexelCopyTextureInfo {
@@ -828,6 +833,7 @@ fn write_texture(
         },
         crate::compositor::extent(size),
     );
+    u64::from(size[0]) * u64::from(size[1]) * u64::from(channels)
 }
 
 impl AtlasArray {

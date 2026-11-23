@@ -260,6 +260,13 @@ impl Runtime {
         }
     }
 
+    pub fn heap_bytes(&self) -> Option<usize> {
+        if self.state.phase.get() == Phase::Closed {
+            return None;
+        }
+        self.state.vm.heap_bytes()
+    }
+
     pub fn counts(&self) -> RuntimeCounts {
         let state = &self.state;
         if state.phase.get() == Phase::Closed {

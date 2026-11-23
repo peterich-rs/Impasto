@@ -1,5 +1,6 @@
 //! Ordered scene replay, clipping, and offscreen composition.
 
+use crate::profiler::{Capture, GpuPassKind};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -35,6 +36,7 @@ pub(crate) struct Compositor {
     arena: FrameArena,
     composites: HashMap<(wgpu::TextureView, wgpu::TextureView), wgpu::BindGroup>,
     masks: HashMap<MaskKey, Image>,
+    offscreen_live_bytes: u64,
     frame_active: bool,
     trim_pending: bool,
 }
@@ -62,7 +64,16 @@ pub struct RenderStats {
     pub pooled_texture_bytes: u64,
     pub buffers_created: u32,
     pub bind_groups_created: u32,
-    pub instance_bytes: u64,
+    pub vertex_bytes: u64,
+    pub uniform_bytes: u64,
+    pub stop_bytes: u64,
+    pub mesh_upload_bytes: u64,
+    pub atlas_upload_bytes: u64,
+    pub offscreen_alloc_bytes: u64,
+    pub offscreen_peak_bytes: u64,
+    pub copy_pixels: u64,
+    pub blur_pixels: u64,
+    pub compute_passes: u32,
     pub offscreen_passes: u32,
     pub direct_present: bool,
 }
@@ -210,6 +221,7 @@ impl Compositor {
             arena: FrameArena::new(),
             composites: HashMap::new(),
             masks: HashMap::new(),
+            offscreen_live_bytes: 0,
             frame_active: false,
             trim_pending: false,
         })
@@ -224,6 +236,7 @@ impl Compositor {
         self.atlas.begin_frame();
         self.arena.reset();
         self.recycle_masks();
+        self.offscreen_live_bytes = 0;
         self.render_stats = RenderStats::default();
     }
 
@@ -239,8 +252,14 @@ impl Compositor {
         self.render_stats.pooled_texture_bytes = self.pool.iter().map(Image::bytes).sum();
         self.render_stats.buffers_created += self.arena.buffers_created;
         self.render_stats.bind_groups_created += self.arena.bind_groups_created;
-        self.render_stats.instance_bytes = self.arena.bytes_uploaded();
+        [
+            self.render_stats.vertex_bytes,
+            self.render_stats.uniform_bytes,
+            self.render_stats.stop_bytes,
+        ] = self.arena.bytes_uploaded();
         let atlas_stats = self.atlas.take_stats();
+        self.render_stats.atlas_upload_bytes = atlas_stats.upload_bytes;
+        self.render_stats.copy_pixels += atlas_stats.copy_pixels;
         self.frame_active = false;
         if self.trim_pending {
             self.trim_resources();
@@ -283,7 +302,8 @@ impl Compositor {
         output: &wgpu::TextureView,
         format: wgpu::TextureFormat,
         size: [u32; 2],
-    ) -> Result<wgpu::CommandBuffer, Status> {
+        capture: Option<(&mut Capture, Option<usize>)>,
+    ) -> Result<wgpu::CommandEncoder, Status> {
         let command = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -301,6 +321,8 @@ impl Compositor {
             pending: None,
             clears: HashMap::new(),
             root: output.view.clone(),
+            main: output.view.clone(),
+            capture,
             size,
         };
         let main = if direct {
@@ -308,6 +330,7 @@ impl Compositor {
         } else {
             frame.take(size, wgpu::TextureFormat::Rgba8UnormSrgb)
         };
+        frame.main = main.view.clone();
         frame.clear(&main.view);
         if !frame.scene.tree.layers.is_empty() {
             frame.layers(
@@ -330,7 +353,7 @@ impl Compositor {
             )?;
             frame.release(main);
         }
-        Ok(frame.command.finish())
+        Ok(frame.command)
     }
 }
 
@@ -429,10 +452,13 @@ struct Frame<'a> {
     pending: Option<DrawPass>,
     clears: HashMap<wgpu::TextureView, wgpu::Color>,
     root: wgpu::TextureView,
+    main: wgpu::TextureView,
+    capture: Option<(&'a mut Capture, Option<usize>)>,
     size: [u32; 2],
 }
 
 struct DrawPass {
+    format: wgpu::TextureFormat,
     target: wgpu::TextureView,
     size: [u32; 2],
     calls: Vec<DrawCall>,
@@ -454,8 +480,8 @@ enum FullPass {
     Over { blend: BlendKey, opacity: f32 },
     Multiply { opacity: f32 },
     Backdrop,
-    BlurDown(f32),
-    BlurUp(f32),
+    BlurDown { radius: f32, backdrop: bool },
+    BlurUp { radius: f32, backdrop: bool },
     MaskIntersect,
 }
 
@@ -522,6 +548,7 @@ impl Frame<'_> {
             self.flush_draws();
         }
         let pending = self.pending.get_or_insert_with(|| DrawPass {
+            format: target.format,
             target: target.view.clone(),
             size: target.logical,
             calls: Vec::new(),
@@ -551,7 +578,13 @@ impl Frame<'_> {
         };
         self.count_pass(&batch.target);
         let load = self.load(&batch.target);
-        let mut pass = render(&mut self.command, &batch.target, load);
+        let kind = self.pass_kind(&batch.target, batch.format);
+        let stamps = pass_timestamps(
+            &mut self.capture,
+            kind,
+            u32::try_from(batch.calls.len()).unwrap_or(u32::MAX),
+        );
+        let mut pass = render(&mut self.command, &batch.target, load, stamps);
         let mut scissor = None;
         set_scissor(&mut pass, Some([0, 0, batch.size[0], batch.size[1]]));
         for call in &batch.calls {
@@ -570,6 +603,16 @@ impl Frame<'_> {
             }
             pass.set_vertex_buffer(0, call.vertices.slice());
             pass.draw(0..6, 0..call.instances);
+        }
+    }
+
+    fn pass_kind(&self, view: &wgpu::TextureView, format: wgpu::TextureFormat) -> GpuPassKind {
+        if *view == self.main {
+            GpuPassKind::Main
+        } else if format == wgpu::TextureFormat::R8Unorm {
+            GpuPassKind::ClipMask
+        } else {
+            GpuPassKind::OffscreenEffect
         }
     }
 
@@ -592,7 +635,18 @@ impl Frame<'_> {
         self.flush_draws();
         if let Some(color) = self.clears.remove(view) {
             self.count_pass(view);
-            drop(render(&mut self.command, view, wgpu::LoadOp::Clear(color)));
+            let kind = if *view == self.main {
+                GpuPassKind::Main
+            } else {
+                GpuPassKind::OffscreenEffect
+            };
+            let stamps = pass_timestamps(&mut self.capture, kind, 0);
+            drop(render(
+                &mut self.command,
+                view,
+                wgpu::LoadOp::Clear(color),
+                stamps,
+            ));
         }
     }
 
@@ -603,23 +657,29 @@ impl Frame<'_> {
     fn take_area(&mut self, area: [u32; 4], format: wgpu::TextureFormat, samples: u32) -> Image {
         let [x, y, w, h] = area;
         let size = [w, h].map(|side| side.next_multiple_of(64).min(self.gpu.caps.max_texture_2d));
-        let mut image = self
-            .compositor
-            .pool
-            .iter()
-            .position(|image| {
-                image.size == size && image.format == format && image.samples == samples
-            })
-            .map_or_else(
-                || Image::new(self.gpu, size, format, samples),
-                |at| self.compositor.pool.swap_remove(at),
-            );
+        let compositor = &mut self.compositor;
+        let index = compositor.pool.iter().position(|image| {
+            image.size == size && image.format == format && image.samples == samples
+        });
+        let mut image = if let Some(index) = index {
+            compositor.pool.swap_remove(index)
+        } else {
+            let image = Image::new(self.gpu, size, format, samples);
+            compositor.render_stats.offscreen_alloc_bytes += image.bytes();
+            image
+        };
+        compositor.offscreen_live_bytes += image.bytes();
+        compositor.render_stats.offscreen_peak_bytes = compositor
+            .render_stats
+            .offscreen_peak_bytes
+            .max(compositor.offscreen_live_bytes);
         image.logical = [w, h];
         image.origin = [x, y];
         image
     }
 
     fn release(&mut self, image: Image) {
+        self.compositor.offscreen_live_bytes -= image.bytes();
         release_image(&mut self.compositor.pool, image);
     }
 
@@ -1288,8 +1348,16 @@ impl Frame<'_> {
                 .as_ref()
                 .map_or(&resolved.view, |image| &image.view);
             let resolve_target = multisample.as_ref().map(|_| &resolved.view);
+            let kind = if resolve_target.is_some() {
+                GpuPassKind::CanvasMsaa
+            } else {
+                self.pass_kind(&resolved.view, format)
+            };
+            let timestamp_writes =
+                pass_timestamps(&mut self.capture, kind, draw_count(calls.len())?);
             let mut pass = self.command.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("canvas path batch"),
+                timestamp_writes,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
                     depth_slice: None,
@@ -1574,7 +1642,7 @@ impl Frame<'_> {
                     let dst = coverage.scissor.unwrap_or_else(|| target.area());
                     let src = expand_pixels(dst, radius, target.area());
                     let snapshot = self.snapshot(target, src);
-                    let blurred = self.blur(&snapshot, radius)?;
+                    let blurred = self.blur(&snapshot, radius, true)?;
                     let kind = if coverage.mask.is_none() && coverage.count == 0 {
                         FullPass::Copy
                     } else {
@@ -1604,7 +1672,7 @@ impl Frame<'_> {
         children(self, &source)?;
         self.finish(&source.view);
         let blurred = if filter {
-            Some(self.blur(&source, radius)?)
+            Some(self.blur(&source, radius, false)?)
         } else {
             None
         };
@@ -1660,6 +1728,7 @@ impl Frame<'_> {
         let [x, y, w, h] = target.local(area);
         let mut from = target.texture.as_image_copy();
         from.origin = wgpu::Origin3d { x, y, z: 0 };
+        self.compositor.render_stats.copy_pixels += u64::from(w) * u64::from(h);
         self.command.copy_texture_to_texture(
             from,
             snapshot.texture.as_image_copy(),
@@ -1668,7 +1737,7 @@ impl Frame<'_> {
         snapshot
     }
 
-    fn blur(&mut self, source: &Image, radius: f32) -> Result<Image, Status> {
+    fn blur(&mut self, source: &Image, radius: f32, backdrop: bool) -> Result<Image, Status> {
         let mut levels = Vec::new();
         let mut size = source.logical;
         let mut remaining = radius;
@@ -1678,7 +1747,14 @@ impl Frame<'_> {
             size = size.map(|dim| dim.div_ceil(2));
             let down = self.take_area([origin[0], origin[1], size[0], size[1]], format, 1);
             let from = levels.last().unwrap_or(source);
-            self.blur_pass(from, &down, FullPass::BlurDown(1.0))?;
+            self.blur_pass(
+                from,
+                &down,
+                FullPass::BlurDown {
+                    radius: 1.0,
+                    backdrop,
+                },
+            )?;
             levels.push(down);
             remaining *= 0.5;
         }
@@ -1686,12 +1762,22 @@ impl Frame<'_> {
         self.blur_pass(
             levels.last().unwrap_or(source),
             &filtered,
-            FullPass::BlurDown(remaining.clamp(0.1, 4.0)),
+            FullPass::BlurDown {
+                radius: remaining.clamp(0.1, 4.0),
+                backdrop,
+            },
         )?;
         while let Some(level) = levels.pop() {
             let [w, h] = levels.last().map_or(source.logical, |image| image.logical);
             let next = self.take_area([origin[0], origin[1], w, h], format, 1);
-            self.blur_pass(&filtered, &next, FullPass::BlurUp(0.75))?;
+            self.blur_pass(
+                &filtered,
+                &next,
+                FullPass::BlurUp {
+                    radius: 0.75,
+                    backdrop,
+                },
+            )?;
             self.release(level);
             self.release(filtered);
             filtered = next;
@@ -1725,7 +1811,7 @@ impl Frame<'_> {
         })?;
         let value = match kind {
             FullPass::Over { opacity, .. } | FullPass::Multiply { opacity } => opacity,
-            FullPass::BlurDown(radius) | FullPass::BlurUp(radius) => radius,
+            FullPass::BlurDown { radius, .. } | FullPass::BlurUp { radius, .. } => radius,
             _ => 0.0,
         };
         let params = self.uniform(&ParamsUniform {
@@ -1750,8 +1836,8 @@ impl Frame<'_> {
         let pipeline_kind = match kind {
             FullPass::Copy if !target.format.is_srgb() => PipelineKind::CopySrgb,
             FullPass::Copy => PipelineKind::Copy,
-            FullPass::BlurDown(_) => PipelineKind::BlurDown,
-            FullPass::BlurUp(_) => PipelineKind::BlurUp,
+            FullPass::BlurDown { .. } => PipelineKind::BlurDown,
+            FullPass::BlurUp { .. } => PipelineKind::BlurUp,
             FullPass::Over { .. } => PipelineKind::Over,
             FullPass::Multiply { .. } => PipelineKind::Multiply,
             FullPass::Backdrop => PipelineKind::Backdrop,
@@ -1762,7 +1848,25 @@ impl Frame<'_> {
                 .pipelines
                 .get(self.gpu, single(target.format), pipeline_kind, blend)?;
         let [x, y, w, h] = target.local(area);
-        let mut pass = render(&mut self.command, &target.view, load);
+        let kind = match kind {
+            FullPass::BlurDown { backdrop, .. } | FullPass::BlurUp { backdrop, .. } => {
+                self.compositor.render_stats.blur_pixels += u64::from(w) * u64::from(h);
+                if backdrop {
+                    GpuPassKind::BackdropBlur
+                } else {
+                    GpuPassKind::OffscreenEffect
+                }
+            }
+            FullPass::Backdrop => GpuPassKind::BackdropBlur,
+            FullPass::MaskIntersect => GpuPassKind::ClipMask,
+            FullPass::Copy => {
+                self.compositor.render_stats.copy_pixels += u64::from(w) * u64::from(h);
+                GpuPassKind::Copy
+            }
+            _ => GpuPassKind::OffscreenEffect,
+        };
+        let stamps = pass_timestamps(&mut self.capture, kind, 1);
+        let mut pass = render(&mut self.command, &target.view, load, stamps);
         pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &globals.group, globals.offsets());
@@ -1870,13 +1974,24 @@ pub(crate) const fn extent(size: [u32; 2]) -> wgpu::Extent3d {
     }
 }
 
+fn pass_timestamps<'a>(
+    capture: &'a mut Option<(&mut Capture, Option<usize>)>,
+    kind: GpuPassKind,
+    draws: u32,
+) -> Option<wgpu::RenderPassTimestampWrites<'a>> {
+    let (capture, slice) = capture.as_mut()?;
+    capture.pass(kind, *slice, draws)
+}
+
 fn render<'a>(
     command: &'a mut wgpu::CommandEncoder,
     view: &wgpu::TextureView,
     load: wgpu::LoadOp<wgpu::Color>,
+    timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
 ) -> wgpu::RenderPass<'a> {
     command.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("impasto ordered pass"),
+        timestamp_writes,
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view,
             depth_slice: None,

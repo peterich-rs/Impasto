@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use engine::session::{Method, Module, ModuleExports, PluginValue};
+use engine::session::{Method, Module, ModuleExports, PluginResult, PluginValue};
 
 use super::hub::{DiagnosticsHub, LogSource, PhaseSample};
 
@@ -69,11 +69,32 @@ export type PhaseSample = {
   canvasRedraws: number;
   canvasReused: number;
 };
+export type GpuPassTiming = {
+  kind: string;
+  sliceIndex: number | null;
+  draws: number;
+  startUs: number;
+  durationUs: number;
+};
+export type GpuFrameTiming = {
+  frameSpanUs: number;
+  passesSumUs: number;
+  passes: GpuPassTiming[];
+};
+export type GpuTimingStatus = "disabled" | "unsupported" | "droppedSlotFull" | "droppedPassLimit"
+  | "pending" | "staleDevice" | "readbackFailed" | "ready";
 export type FrameSample = {
   seq: number;
   number: number;
   at: number;
   workMs: number;
+  uiMs: number;
+  rasterMs: number;
+  queueMs: number;
+  e2eMs: number;
+  draws: number;
+  passes: number;
+  gpuStatus: GpuTimingStatus;
   budgetMs: number;
   sessionMs: number;
   gestureMs: number;
@@ -355,6 +376,16 @@ fn frames_channel(hub: &Arc<DiagnosticsHub>) -> Method {
                     ("at", fnum(frame.at_ms)),
                     ("sessionMs", fnum(frame.session_ms)),
                     ("workMs", fnum(frame.work_ms)),
+                    ("uiMs", fnum(frame.schedule.ui_ms())),
+                    ("rasterMs", fnum(frame.schedule.raster_ms())),
+                    ("queueMs", fnum(frame.schedule.queue_ms())),
+                    ("e2eMs", fnum(frame.schedule.e2e_ms())),
+                    ("draws", num(u64::from(frame.raster.render.draws))),
+                    ("passes", num(u64::from(frame.raster.render.passes))),
+                    (
+                        "gpuStatus",
+                        PluginValue::Str(frame.gpu.status.name().into()),
+                    ),
                     ("budgetMs", fnum(frame.budget_ms)),
                     ("gestureMs", fnum(frame.gesture_ms)),
                     ("scriptMs", fnum(frame.script_ms)),
@@ -388,6 +419,79 @@ fn frames_channel(hub: &Arc<DiagnosticsHub>) -> Method {
         ]))
     })
     .with_types("since?: number", "Page<FrameSample>")
+}
+
+fn gpu_timing(hub: &Arc<DiagnosticsHub>) -> Method {
+    let hub = Arc::clone(hub);
+    Method::sync("gpuTiming", move |args| {
+        let number = since_arg(args);
+        let timing = hub
+            .frames
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .tail(0)
+            .find(|frame| frame.number == number)
+            .and_then(|frame| frame.gpu_timing.clone());
+        let Some(timing) = timing else {
+            return Ok(PluginValue::Null);
+        };
+        let passes = timing
+            .passes
+            .iter()
+            .map(|pass| {
+                map(vec![
+                    ("kind", PluginValue::Str(format!("{:?}", pass.kind))),
+                    (
+                        "sliceIndex",
+                        pass.slice_index
+                            .map_or(PluginValue::Null, |i| num(i as u64)),
+                    ),
+                    ("draws", num(u64::from(pass.draws))),
+                    ("startUs", fnum(pass.start_us)),
+                    ("durationUs", fnum(pass.duration_us)),
+                ])
+            })
+            .collect();
+        Ok(map(vec![
+            ("frameSpanUs", fnum(timing.frame_span_us)),
+            ("passesSumUs", fnum(timing.passes_sum_us)),
+            ("passes", PluginValue::List(passes)),
+        ]))
+    })
+    .with_types("frame: number", "GpuFrameTiming | null")
+}
+
+fn start_trace(hub: &Arc<DiagnosticsHub>) -> Method {
+    let hub = Arc::clone(hub);
+    Method::sync("startTrace", move |_| {
+        let at = super::telemetry::mono_ns();
+        let path =
+            std::env::temp_dir().join(format!("impasto-trace-{}-{at}.json", std::process::id()));
+        hub.start_trace(path, false)
+            .map(num)
+            .ok_or_else(|| "trace recording already active".into())
+    })
+    .with_types("", "number")
+}
+
+fn finish_trace(hub: &Arc<DiagnosticsHub>) -> Method {
+    let hub = Arc::clone(hub);
+    Method::promise("finishTrace", move |args, settle, exec| {
+        let id = since_arg(args);
+        let hub = Arc::clone(&hub);
+        exec.worker(
+            settle,
+            Box::new(move || match hub.finish_trace(id) {
+                Ok(path) => {
+                    PluginResult::Done(PluginValue::Str(path.to_string_lossy().into_owned()))
+                }
+                Err(error) => PluginResult::Failed {
+                    message: error.to_string(),
+                },
+            }),
+        );
+    })
+    .with_types("recording: number", "string")
 }
 
 fn edge_map(left: f32, top: f32, right: f32, bottom: f32) -> PluginValue {
@@ -589,6 +693,9 @@ pub fn module(hub: Arc<DiagnosticsHub>, context: DevtoolsContext) -> Module {
             errors_channel(&hub),
             network_channel(&hub),
             frames_channel(&hub),
+            gpu_timing(&hub),
+            start_trace(&hub),
+            finish_trace(&hub),
             flags_pair(&hub),
             set_flags(&hub),
             clear_logs(&hub),
@@ -618,7 +725,7 @@ mod tests {
     use crate::diagnostics::hub::{DiagError, LogEntry, NetEntry, NetKind, Ring};
 
     #[test]
-    fn methods_are_sync_and_named_for_the_stub() {
+    fn methods_match_the_stub_contract() {
         let module = module(Arc::new(DiagnosticsHub::new()), sample_context());
         assert_eq!(module.specifier, "@impasto/devtools");
         let names: Vec<&str> = module.methods.iter().map(|m| m.name).collect();
@@ -632,6 +739,9 @@ mod tests {
                 "errors",
                 "network",
                 "frames",
+                "gpuTiming",
+                "startTrace",
+                "finishTrace",
                 "flags",
                 "setFlags",
                 "clear",

@@ -33,7 +33,8 @@ use std::sync::Arc;
 use engine::session::Metrics;
 
 pub use command::{Command, FrameToken, SurfaceId, SurfaceTarget};
-pub use diagnostics::{DiagnosticsHub, NetEntry, NetKind, wrap_if_devtools};
+pub use diagnostics::telemetry::{ScheduleTiming, TelemetryProfile};
+pub use diagnostics::{DiagnosticsHub, NetEntry, NetKind, TelemetryHub, wrap_if_devtools};
 pub use engine::session::{FrameTime, Lifecycle};
 pub use error::{BootError, SessionError};
 pub use exec::{RtExec, settle_factory};

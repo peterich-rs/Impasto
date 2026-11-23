@@ -1,7 +1,9 @@
 //! Metal interop for UIKit transactions and producer-owned textures.
 
 use std::ffi::c_void;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use crate::profiler::Capture;
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -23,10 +25,17 @@ pub struct MetalSliceBatch {
     frame: u64,
     started: Instant,
     commands: Vec<wgpu::CommandBuffer>,
+    capture: Option<Capture>,
+    encode: Duration,
 }
 
 impl Rasterizer {
+    pub fn note_metal_acquire(&mut self, elapsed: Duration) {
+        self.stats.acquire = elapsed;
+    }
+
     pub fn begin_metal_slices(&mut self) -> Result<MetalSliceBatch, Status> {
+        let capture = self.begin_gpu_capture();
         let device = self.device.as_mut().ok_or(Status::NotReady)?;
         if device.gpu.is_lost() {
             return Err(Status::DeviceLost);
@@ -40,6 +49,8 @@ impl Rasterizer {
             frame: self.frame_number,
             started: Instant::now(),
             commands: Vec::new(),
+            capture,
+            encode: Duration::ZERO,
         })
     }
 
@@ -85,6 +96,7 @@ impl Rasterizer {
             return Err(Status::AcquireMiss);
         }
         let descriptor = texture_descriptor(pixels, format, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let started = Instant::now();
         let command = gpu.hot_validation(|| {
             let texture = wrap(
                 &gpu.device,
@@ -93,14 +105,19 @@ impl Rasterizer {
                 wgpu::TextureUses::UNINITIALIZED,
                 None,
             );
-            device.compositor.encode(
-                gpu,
-                frame.scene(&self.fonts, subset),
-                &texture.create_view(&Default::default()),
-                format,
-                [pixels.width, pixels.height],
-            )
+            device
+                .compositor
+                .encode(
+                    gpu,
+                    frame.scene(&self.fonts, subset),
+                    &texture.create_view(&Default::default()),
+                    format,
+                    [pixels.width, pixels.height],
+                    batch.capture.as_mut().map(|capture| (capture, slice)),
+                )
+                .map(wgpu::CommandEncoder::finish)
         })?;
+        batch.encode += started.elapsed();
         batch.commands.push(command);
         Ok(())
     }
@@ -112,10 +129,10 @@ impl Rasterizer {
     )]
     pub fn wait_for_metal_schedule(&mut self, batch: MetalSliceBatch) -> Result<(), Status> {
         let device = self.device.as_mut().ok_or(Status::NotReady)?;
-        if batch.generation != device.generation
-            || batch.frame != self.frame_number
-            || batch.commands.is_empty()
-        {
+        if batch.generation != device.generation || batch.frame != self.frame_number {
+            return Err(Status::NotReady);
+        }
+        if batch.commands.is_empty() {
             return Err(Status::NotReady);
         }
         let gpu = &device.gpu;
@@ -134,12 +151,22 @@ impl Rasterizer {
             })
         }
         .ok_or(Status::PresentFailed)?;
-        self.stats.atlas = gpu.hot_validation(|| {
+        let (atlas, flush, (submit_done, submit_elapsed)) = gpu.hot_validation(|| {
+            let stage = Instant::now();
             let atlas = device.compositor.flush(gpu);
+            let flush = stage.elapsed();
+            let stage = Instant::now();
             gpu.queue
                 .submit(batch.commands.into_iter().chain([tail.finish()]));
-            Ok(atlas)
+            let done = Instant::now();
+            Ok((atlas, flush, (done, done.duration_since(stage))))
         })?;
+        if let (Some(profiler), Some(capture)) = (&mut device.profiler, batch.capture) {
+            self.gpu_sample = profiler.submitted(gpu, capture);
+        }
+        self.stats.submit_done = Some(submit_done);
+        self.stats.queue_submit = submit_elapsed;
+        let present_started = Instant::now();
         scheduled.waitUntilScheduled();
         if gpu.is_lost() {
             return Err(Status::DeviceLost);
@@ -150,8 +177,12 @@ impl Rasterizer {
         ) {
             return Err(Status::PresentFailed);
         }
-        self.stats.render = device.compositor.render_stats();
-        self.stats.render.buffers_created += std::mem::take(&mut self.prepared_buffers);
+        self.stats.atlas = atlas;
+        self.stats.encode = batch.encode;
+        self.stats.flush = flush;
+        self.stats.surface_present = present_started.elapsed();
+        let render = device.compositor.render_stats();
+        self.finish_render_stats(render);
         self.stats.compose = batch.started.elapsed();
         Ok(())
     }

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::{RasterBackend, RasterOptions, Status};
+use crate::{RasterBackend, RasterOptions, Status, ValidationMode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum GpuTier {
@@ -15,6 +15,7 @@ pub(crate) enum GpuTier {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct GpuCaps {
     pub tier: GpuTier,
+    pub adapter_features: wgpu::Features,
     pub downlevel_flags: wgpu::DownlevelFlags,
     pub min_uniform_align: u32,
     pub max_texture_2d: u32,
@@ -24,18 +25,14 @@ pub(crate) struct GpuCaps {
     pub has_vertex_storage: bool,
     pub has_fragment_storage: bool,
     pub has_compute: bool,
-    pub has_immediates: bool,
-    pub has_pipeline_cache: bool,
     pub has_timestamp_query: bool,
-    pub has_dual_source_blending: bool,
-    pub has_shader_f16: bool,
-    pub has_texture_binding_array: bool,
 }
 
 impl GpuCaps {
     fn detect(adapter: &wgpu::Adapter, device: &wgpu::Device) -> Self {
         use wgpu::{DownlevelFlags as D, Features as F, TextureFormatFeatureFlags as T};
-        let features = adapter.features();
+        let adapter_features = adapter.features();
+        let features = device.features();
         let downlevel_flags = adapter.get_downlevel_capabilities().flags;
         let limits = device.limits();
         // Query the capabilities available to this device without optional format features.
@@ -43,6 +40,7 @@ impl GpuCaps {
             wgpu::TextureFormat::Rgba8UnormSrgb.guaranteed_format_features(device.features());
         let mut caps = Self {
             tier: GpuTier::Tier0Baseline,
+            adapter_features,
             downlevel_flags,
             min_uniform_align: limits.min_uniform_buffer_offset_alignment,
             max_texture_2d: limits.max_texture_dimension_2d,
@@ -54,25 +52,21 @@ impl GpuCaps {
             has_vertex_storage: downlevel_flags.contains(D::VERTEX_STORAGE),
             has_fragment_storage: downlevel_flags.contains(D::FRAGMENT_STORAGE),
             has_compute: downlevel_flags.contains(D::COMPUTE_SHADERS),
-            has_immediates: features.contains(F::IMMEDIATES),
-            has_pipeline_cache: features.contains(F::PIPELINE_CACHE),
             has_timestamp_query: features.contains(F::TIMESTAMP_QUERY),
-            has_dual_source_blending: features.contains(F::DUAL_SOURCE_BLENDING),
-            has_shader_f16: features.contains(F::SHADER_F16),
-            has_texture_binding_array: features.contains(F::TEXTURE_BINDING_ARRAY),
         };
         if caps.has_compute
             && caps.has_vertex_storage
             && caps.has_fragment_storage
             && caps.downlevel_flags.contains(D::READ_ONLY_DEPTH_STENCIL)
         {
-            caps.tier = if caps.has_immediates
-                || caps.has_pipeline_cache
-                || caps.has_timestamp_query
-                || caps.has_dual_source_blending
-                || caps.has_shader_f16
-                || caps.has_texture_binding_array
-            {
+            caps.tier = if adapter_features.intersects(
+                F::IMMEDIATES
+                    | F::PIPELINE_CACHE
+                    | F::TIMESTAMP_QUERY
+                    | F::DUAL_SOURCE_BLENDING
+                    | F::SHADER_F16
+                    | F::TEXTURE_BINDING_ARRAY,
+            ) {
                 GpuTier::Tier2Native
             } else {
                 GpuTier::Tier1Standard
@@ -151,12 +145,33 @@ impl Gpu {
             // GLES 3.0 may advertise zero compute and storage limits.
             baseline(wgpu::Limits::downlevel_webgl2_defaults())
         };
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("impasto device"),
-            required_limits: limits,
-            ..Default::default()
-        }))
-        .map_err(|error| {
+        let timestamps = wgpu::Features::TIMESTAMP_QUERY;
+        let request_device = |adapter: &wgpu::Adapter, required_features| {
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("impasto device"),
+                required_features,
+                required_limits: limits.clone(),
+                ..Default::default()
+            }))
+        };
+        let (adapter, result) = if options.enable_gpu_timing
+            && adapter.features().contains(timestamps)
+        {
+            match request_device(&adapter, timestamps) {
+                Ok(device) => (adapter, Ok(device)),
+                Err(error) => {
+                    tracing::warn!(target: "impasto::gpu", ?backend, %error, "retrying without timestamp queries");
+                    let adapter = pollster::block_on(instance.request_adapter(&request))
+                        .map_err(|_| Status::NoDevice(backend))?;
+                    let result = request_device(&adapter, wgpu::Features::empty());
+                    (adapter, result)
+                }
+            }
+        } else {
+            let result = request_device(&adapter, wgpu::Features::empty());
+            (adapter, result)
+        };
+        let (device, queue) = result.map_err(|error| {
             tracing::warn!(target: "impasto::gpu", ?backend, %error, "device request failed");
             Status::NoDevice(backend)
         })?;
@@ -183,7 +198,7 @@ impl Gpu {
         let caps = GpuCaps::detect(&adapter, &device);
         tracing::info!(target: "impasto::gpu", ?backend, device = %info.name,
             tier = ?caps.tier, caps.min_uniform_align, caps.max_texture_2d,
-            caps.max_array_layers, caps.msaa4_srgb, "graphics device ready");
+            caps.max_array_layers, caps.msaa4_srgb, supported = ?caps.adapter_features, enabled = ?device.features(), "graphics device ready");
         Ok(Self {
             instance,
             adapter,
@@ -194,8 +209,14 @@ impl Gpu {
             lost,
             oom,
             uncaptured_error,
-            validate_frames: cfg!(any(test, debug_assertions))
-                || std::env::var("IMPASTO_GPU_VALIDATE").as_deref() == Ok("1"),
+            validate_frames: match options.validation {
+                ValidationMode::Auto => {
+                    cfg!(any(test, debug_assertions))
+                        || std::env::var("IMPASTO_GPU_VALIDATE").as_deref() == Ok("1")
+                }
+                ValidationMode::Strict => true,
+                ValidationMode::AsyncOnly => false,
+            },
         })
     }
 

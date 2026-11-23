@@ -1,12 +1,16 @@
 //! Per-frame durations. Recording them does not change the frame.
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct FrameTiming {
     pub number: u64,
     pub vsync_ms: f64,
     pub target_ms: f64,
-    /// Wall time on the render thread through the return from present.
+    /// Wall time from UI start through present return.
     pub work_ms: f64,
+    pub schedule: crate::diagnostics::telemetry::ScheduleTiming,
+    pub raster: raster::SubmitStats,
+    pub gpu: raster::GpuSample,
+    pub runtime: Option<engine::session::RuntimeSample>,
     pub session_ms: f64,
     pub gesture_ms: f64,
     pub script_ms: f64,
@@ -37,7 +41,11 @@ pub struct FrameTiming {
 
 impl FrameTiming {
     pub fn over_budget(self) -> bool {
-        self.interval_ms > 0.0 && self.work_ms > self.interval_ms
+        if self.schedule.budget_ns == 0 {
+            self.interval_ms > 0.0 && self.work_ms > self.interval_ms
+        } else {
+            self.schedule.missed_vsync
+        }
     }
 }
 
@@ -226,77 +234,77 @@ impl FrameListener for WorkEdge {
     }
 }
 
-/// Copies the frame into the devtools frames ring.
-pub struct DevtoolFrames {
-    devtools: std::sync::Arc<crate::diagnostics::DiagnosticsHub>,
-}
-
-impl DevtoolFrames {
-    pub fn new(devtools: std::sync::Arc<crate::diagnostics::DiagnosticsHub>) -> Self {
-        Self { devtools }
-    }
-}
-
-impl FrameListener for DevtoolFrames {
-    fn on_frame(&mut self, timing: &FrameTiming, phases: &engine::session::FramePhases) {
-        self.devtools.push_frame(crate::diagnostics::FrameSample {
-            seq: 0,
-            number: timing.number,
-            at_ms: mono_ms(),
-            work_ms: timing.work_ms,
-            budget_ms: timing.interval_ms,
-            session_ms: timing.session_ms,
-            gesture_ms: timing.gesture_ms,
-            script_ms: timing.script_ms,
-            layout_ms: timing.layout_ms,
-            record_ms: timing.record_ms,
-            submit_ms: timing.submit_ms,
-            present_ms: timing.present_ms,
-            layers: timing.layer_count,
-            atlas_entries: timing.atlas_entries,
-            pictures: timing.pictures,
-            textures: timing.textures,
-            shapes_built: timing.shapes_built,
-            shapes_measure_hit: timing.shapes_measure_hit,
-            shapes_measure_miss: timing.shapes_measure_miss,
-            shapes_paint_hit: timing.shapes_paint_hit,
-            shapes_paint_miss: timing.shapes_paint_miss,
-            atlas_hits: timing.atlas_hits,
-            picture_rebuilt: timing.picture_rebuilt,
-            picture_reused: timing.picture_reused,
-            layout_cause: phases.trace.layout_cause,
-            gestures: phases.trace.gestures,
-            over_budget: timing.over_budget(),
-            phases: crate::diagnostics::PhaseSample {
-                motion_ms: phases.script.motion_ms,
-                dispatch_ms: phases.script.dispatch_ms,
-                timer_ms: phases.script.timer_ms,
-                raf_ms: phases.script.raf_ms,
-                callback_ms: phases.script.callback_ms,
-                flush_ms: phases.script.flush_ms,
-                layout_cb_ms: phases.layout_cb_ms,
-                sync_ms: phases.sync_ms,
-                semantics_ms: phases.semantics_ms,
-                laywork_ms: phases.trace.laywork_ms,
-                layout_passes: phases.trace.layout_passes,
-                text_reused: phases.trace.text_reused,
-                text_shaped: phases.trace.text_shaped,
-                pointers: phases.trace.pointers,
-                keys: phases.trace.keys,
-                edits: phases.trace.edits,
-                ime: phases.trace.ime,
-                scrolls: phases.trace.scrolls,
-                focus: phases.trace.focus,
-                blur: phases.trace.blur,
-                canvas_record_ms: phases.trace.canvas_record_ms,
-                canvas_prepare_ms: phases.trace.canvas_prepare_ms,
-                canvas_ops: phases.trace.canvas_ops,
-                canvas_segments: phases.trace.canvas_segments,
-                canvas_redraws: phases.trace.canvas_redraws,
-                canvas_reused: phases.trace.canvas_reused,
-            },
-        });
-    }
+/// Copies a frame into the telemetry hub on the owning raster queue.
+pub(crate) fn record_frame(
+    hub: &crate::diagnostics::TelemetryHub,
+    timing: &FrameTiming,
+    phases: &engine::session::FramePhases,
+) {
+    hub.push_frame(crate::diagnostics::FrameSample {
+        seq: 0,
+        changed_at: 0,
+        schedule: timing.schedule,
+        raster: timing.raster,
+        gpu: timing.gpu,
+        gpu_timing: None,
+        updates: phases.trace.updates,
+        sets: phases.trace.sets,
+        runtime: timing.runtime,
+        number: timing.number,
+        at_ms: mono_ms(),
+        work_ms: timing.work_ms,
+        budget_ms: timing.interval_ms,
+        session_ms: timing.session_ms,
+        gesture_ms: timing.gesture_ms,
+        script_ms: timing.script_ms,
+        layout_ms: timing.layout_ms,
+        record_ms: timing.record_ms,
+        submit_ms: timing.submit_ms,
+        present_ms: timing.present_ms,
+        layers: timing.layer_count,
+        atlas_entries: timing.atlas_entries,
+        pictures: timing.pictures,
+        textures: timing.textures,
+        shapes_built: timing.shapes_built,
+        shapes_measure_hit: timing.shapes_measure_hit,
+        shapes_measure_miss: timing.shapes_measure_miss,
+        shapes_paint_hit: timing.shapes_paint_hit,
+        shapes_paint_miss: timing.shapes_paint_miss,
+        atlas_hits: timing.atlas_hits,
+        picture_rebuilt: timing.picture_rebuilt,
+        picture_reused: timing.picture_reused,
+        layout_cause: phases.trace.layout_cause,
+        gestures: phases.trace.gestures,
+        over_budget: timing.over_budget(),
+        phases: crate::diagnostics::PhaseSample {
+            motion_ms: phases.script.motion_ms,
+            dispatch_ms: phases.script.dispatch_ms,
+            timer_ms: phases.script.timer_ms,
+            raf_ms: phases.script.raf_ms,
+            callback_ms: phases.script.callback_ms,
+            flush_ms: phases.script.flush_ms,
+            layout_cb_ms: phases.layout_cb_ms,
+            sync_ms: phases.sync_ms,
+            semantics_ms: phases.semantics_ms,
+            laywork_ms: phases.trace.laywork_ms,
+            layout_passes: phases.trace.layout_passes,
+            text_reused: phases.trace.text_reused,
+            text_shaped: phases.trace.text_shaped,
+            pointers: phases.trace.pointers,
+            keys: phases.trace.keys,
+            edits: phases.trace.edits,
+            ime: phases.trace.ime,
+            scrolls: phases.trace.scrolls,
+            focus: phases.trace.focus,
+            blur: phases.trace.blur,
+            canvas_record_ms: phases.trace.canvas_record_ms,
+            canvas_prepare_ms: phases.trace.canvas_prepare_ms,
+            canvas_ops: phases.trace.canvas_ops,
+            canvas_segments: phases.trace.canvas_segments,
+            canvas_redraws: phases.trace.canvas_redraws,
+            canvas_reused: phases.trace.canvas_reused,
+        },
+    });
 }
 
 /// Writes `frame.json` for `IMPASTO_INSPECT`. Uses the timing already recorded
@@ -313,6 +321,32 @@ pub fn write_inspect(
     field(&mut body, "vsync_ms", &num(timing.vsync_ms), true);
     field(&mut body, "target_ms", &num(timing.target_ms), true);
     field(&mut body, "work_ms", &num(timing.work_ms), true);
+    field(&mut body, "ui_cpu_ms", &num(timing.schedule.ui_ms()), true);
+    field(
+        &mut body,
+        "raster_cpu_ms",
+        &num(timing.schedule.raster_ms()),
+        true,
+    );
+    field(
+        &mut body,
+        "queue_wait_ms",
+        &num(timing.schedule.queue_ms()),
+        true,
+    );
+    field(&mut body, "e2e_ms", &num(timing.schedule.e2e_ms()), true);
+    field(
+        &mut body,
+        "draws",
+        &timing.raster.render.draws.to_string(),
+        true,
+    );
+    field(
+        &mut body,
+        "passes",
+        &timing.raster.render.passes.to_string(),
+        true,
+    );
     field(&mut body, "budget_ms", &num(timing.interval_ms), true);
     field(&mut body, "gesture_ms", &num(timing.gesture_ms), true);
     field(&mut body, "script_ms", &num(timing.script_ms), true);
@@ -439,35 +473,7 @@ mod tests {
             pictures: 2,
             textures: 1,
             atlas_entries: 3,
-            ..FrameTiming {
-                number: 0,
-                vsync_ms: 0.0,
-                target_ms: 0.0,
-                work_ms: 0.0,
-                session_ms: 0.0,
-                gesture_ms: 0.0,
-                script_ms: 0.0,
-                layout_ms: 0.0,
-                layout_cb_ms: 0.0,
-                sync_ms: 0.0,
-                record_ms: 0.0,
-                semantics_ms: 0.0,
-                submit_ms: 0.0,
-                present_ms: 0.0,
-                shapes_built: 0,
-                shapes_measure_hit: 0,
-                shapes_measure_miss: 0,
-                shapes_paint_hit: 0,
-                shapes_paint_miss: 0,
-                atlas_hits: 0,
-                picture_rebuilt: 0,
-                picture_reused: 0,
-                layer_count: 0,
-                interval_ms: 0.0,
-                atlas_entries: 0,
-                pictures: 0,
-                textures: 0,
-            }
+            ..FrameTiming::default()
         };
         write_inspect(&dir, &timing, None).expect("write");
         let text = std::fs::read_to_string(dir.join("frame.json")).expect("read");

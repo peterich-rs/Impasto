@@ -76,6 +76,7 @@ struct Inner {
     pub(super) driver_frame: Cell<bool>,
     pub(super) last_pen: Cell<Option<crate::input::PointerEvent>>,
     trace: Cell<bool>,
+    counters: Cell<bool>,
     /// Script failures waiting for [`crate::session::Session::take_faults`].
     pub(super) faults: RefCell<Vec<crate::session::ScriptFault>>,
     /// The reactive graph owns Persistent values and temporary transfer slots.
@@ -110,7 +111,8 @@ impl Inner {
             drivers: RefCell::new(crate::tree::list::DriverSet::new()),
             driver_frame: Cell::new(false),
             last_pen: Cell::new(None),
-            trace: Cell::new(std::env::var_os("IMPASTO_TRACE").is_some()),
+            trace: Cell::new(std::env::var("IMPASTO_TRACE").as_deref() == Ok("1")),
+            counters: Cell::new(false),
             faults: RefCell::new(Vec::new()),
             graph: reactive::Graph::new(),
             canvas: RefCell::new(CanvasSession::new()),
@@ -398,6 +400,22 @@ impl JsSession {
 }
 
 impl Session for JsSession {
+    fn set_counters(&mut self, enabled: bool) {
+        self.inner.counters.set(enabled);
+    }
+
+    fn runtime_sample(&self) -> Option<crate::session::RuntimeSample> {
+        let counts = self.vm.host.runtime.counts();
+        Some(crate::session::RuntimeSample {
+            promises: counts.promises,
+            timers: counts.timers,
+            requests: counts.requests,
+            queued_events: counts.queued_events,
+            queued_bytes: counts.queued_bytes,
+            heap_bytes: self.vm.host.runtime.heap_bytes(),
+        })
+    }
+
     fn set_trace(&mut self, enabled: bool) {
         self.inner.trace.set(enabled);
     }
@@ -790,7 +808,7 @@ impl Session for JsSession {
         let stamp = std::time::Instant::now();
         {
             let mut tree = inner.tree.borrow_mut();
-            let trace_enabled = Section::enabled() || inner.trace.get();
+            let trace_enabled = Section::enabled() || inner.trace.get() || inner.counters.get();
             inner.marks.trace_enabled.set(trace_enabled);
             tree.trace_text_probes(trace_enabled);
             tree.prepare_sync_stats();
