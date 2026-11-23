@@ -9,7 +9,7 @@ use engine::text::{Shaper, metrics_key};
 
 use super::{FontLibrary, ImagePixels, ParleyShaper, PixelSize, RasterOptions, Rasterizer, Status};
 
-const ROBOTO: &[u8] = include_bytes!("../../embedder/android/assets/fonts/Sans.ttf");
+pub(crate) const ROBOTO: &[u8] = include_bytes!("../../embedder/android/assets/fonts/Sans.ttf");
 
 fn headless(fonts: FontLibrary) -> Option<Rasterizer> {
     match Rasterizer::headless(RasterOptions::default(), fonts) {

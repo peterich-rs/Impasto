@@ -914,6 +914,7 @@ mod tests {
     use engine::text::{MetricsKey, Shaper};
     use std::sync::Arc;
 
+    #[cfg(target_os = "macos")]
     fn macos_font(path: &str) -> Option<Arc<[u8]>> {
         std::fs::read(path).ok().map(Into::into)
     }
@@ -923,13 +924,9 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
     fn empty_text_keeps_the_font_box_and_italic_measures() {
-        let Some(font) = macos_font("/System/Library/Fonts/Supplemental/Arial.ttf") else {
-            return;
-        };
         let mut shaper = ParleyShaper::new(crate::FontLibrary::new());
-        assert!(shaper.register_shared("Sans", font));
+        assert!(shaper.register("Sans", crate::tests::ROBOTO));
         let style = TextStyle::default();
         let Some(empty) = shaper.canvas_metrics("", &style, 16.0) else {
             panic!("empty metrics");
@@ -953,13 +950,9 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
     fn freezes_glyphs_once_and_reuses_them_for_a_color_change() {
-        let Some(font) = macos_font("/System/Library/Fonts/Supplemental/Arial.ttf") else {
-            return;
-        };
         let mut shaper = ParleyShaper::new(crate::FontLibrary::new());
-        assert!(shaper.register_shared("Sans", font));
+        assert!(shaper.register("Sans", crate::tests::ROBOTO));
         let first = shaper.metrics(&key("Hi", 16.0, 100.0, TextStyle::default()));
         let shaped = first.shaped.as_ref().expect("glyphs");
         assert!(!shaped.runs.is_empty());
@@ -983,13 +976,9 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
     fn wider_width_reflows_without_reshaping() {
-        let Some(font) = macos_font("/System/Library/Fonts/Supplemental/Arial.ttf") else {
-            return;
-        };
         let mut shaper = ParleyShaper::new(crate::FontLibrary::new());
-        assert!(shaper.register_shared("Sans", font));
+        assert!(shaper.register("Sans", crate::tests::ROBOTO));
         let style = TextStyle::default();
         let narrow = shaper.metrics(&key("Hello World", 16.0, 40.0, style.clone()));
         let wide = shaper.metrics(&key("Hello World", 16.0, 400.0, style));
@@ -1018,13 +1007,9 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
     fn ellipsis_truncates_the_last_line_with_the_mark() {
-        let Some(font) = macos_font("/System/Library/Fonts/Supplemental/Arial.ttf") else {
-            return;
-        };
         let mut shaper = ParleyShaper::new(crate::FontLibrary::new());
-        assert!(shaper.register_shared("Sans", font));
+        assert!(shaper.register("Sans", crate::tests::ROBOTO));
         let style = TextStyle {
             max_lines: Some(1),
             overflow: engine::scene::TextOverflow::Ellipsis,

@@ -29,6 +29,7 @@ boot(Main);
 - [just](https://github.com/casey/just)
 - Node.js 22+ 与 pnpm 9
 - Python 3（用于依赖边界与打包检查）
+- Linux 工作区构建需要 Fontconfig 开发包。无窗口 GPU 验收需要 Vulkan 驱动，Ubuntu 可安装 `libfontconfig-dev` 和 `mesa-vulkan-drivers`
 - 平台工具链：macOS / iOS 需要 Xcode 及对应 Rust target；Android 需要 JDK 17、Android SDK 35、NDK 及 `aarch64-linux-android`、`x86_64-linux-android` target
 
 ## 快速开始

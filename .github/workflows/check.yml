@@ -27,6 +27,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install Fontconfig and a headless Vulkan driver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig-dev mesa-vulkan-drivers
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: generated style contracts
@@ -55,8 +59,6 @@ jobs:
         run: node tools/check-native-module-types.mjs
       - name: standard library contract
         run: node tools/check-standard-library.mjs
-      - name: Install headless Vulkan driver
-        run: sudo apt-get install -y mesa-vulkan-drivers
       - name: test
         env:
           IMPASTO_TEST_GPU: "1"

@@ -324,21 +324,17 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
     fn same_family_replaces_the_mapping_and_keeps_old_faces_readable() {
-        let Ok(bytes) = std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf") else {
-            return;
-        };
-        let bytes: Arc<[u8]> = bytes.into();
+        let bytes: Arc<[u8]> = Arc::from(crate::tests::ROBOTO);
         let library = FontLibrary::new();
         let mut context = FontContext::new();
         let first = library
             .register(&mut context, Arc::clone(&bytes), "Sans")
-            .expect("Arial registers");
+            .expect("Roboto registers");
         assert_eq!(library.revision(), 1);
         let second = library
             .register(&mut context, Arc::clone(&bytes), "Sans")
-            .expect("Arial registers again");
+            .expect("Roboto registers again");
         assert_eq!(library.revision(), 2);
         assert_ne!(first[0], second[0]);
         let first_id = *first[0];
