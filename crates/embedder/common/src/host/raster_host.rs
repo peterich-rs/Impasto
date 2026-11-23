@@ -395,6 +395,7 @@ fn render_layers(
         stats.picture_prepare = std::time::Duration::ZERO;
         stats.picture_rebuilt = 0;
         stats.picture_reused = 0;
+        stats.image_upload = raster::ImageUploadStats::default();
     }
     if !presented.is_ok() && stats.submit_done.is_none() {
         stats.render = raster::RenderStats::default();

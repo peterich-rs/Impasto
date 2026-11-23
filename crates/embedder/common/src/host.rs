@@ -799,10 +799,8 @@ fn decode_one(
             handle.source = Arc::clone(&request.source);
             handle.generation = request.generation;
             let upload_start = span_start();
-            {
-                let factory = lock(upload);
-                images::attach_upload(&mut handle, factory.as_ref());
-            }
+            let factory = lock(upload).clone();
+            images::attach_upload(&mut handle, factory.as_ref());
             note("Image upload", upload_start);
             ImageReady::Decoded(handle)
         }

@@ -381,3 +381,88 @@ fn frames_reuse_glyphs_and_reject_uploads_from_another_device() {
 }
 
 mod p0;
+
+#[test]
+fn odd_image_mips_average_linear_premultiplied_texels() {
+    if std::env::var("IMPASTO_IMAGE_UPLOAD").as_deref() == Ok("cpu") {
+        return;
+    }
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let mut image = [[0, 0, 255, 0]; 9];
+    image[4] = [255, 0, 0, 255];
+    let scene = tree(
+        1,
+        [Command::Image {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+            source: Arc::from("checker"),
+            mode: ContentMode::Fill,
+            required: true,
+        }],
+    );
+    raster
+        .submit_layers(&scene, 1.0, |_| {
+            Some(ImagePixels {
+                width: 3,
+                height: 3,
+                rgba: image.as_flattened(),
+            })
+        })
+        .unwrap();
+    let stats = raster.submit_stats().image_upload;
+    assert_eq!(stats.render_passes + stats.compute_passes, 2, "{stats:?}");
+    if std::env::var("IMPASTO_IMAGE_UPLOAD").as_deref() == Ok("compute")
+        && raster.device.as_ref().unwrap().gpu.caps.has_compute
+    {
+        let feature =
+            wgpu::TextureFormat::Rgba16Float.guaranteed_format_features(wgpu::Features::empty());
+        if feature
+            .flags
+            .contains(wgpu::TextureFormatFeatureFlags::STORAGE_WRITE_ONLY)
+        {
+            assert_eq!(stats.compute_passes, 2, "{stats:?}");
+        }
+    }
+    let pixel = raster.render_rgba(PixelSize::new(1, 1)).unwrap();
+    assert!(
+        pixel[0] >= 250 && pixel[1] == 0 && pixel[2] == 0 && pixel[3].abs_diff(28) <= 1,
+        "{pixel:?}"
+    );
+}
+
+#[test]
+fn compute_blur_writes_bounded_output_and_counts_both_axes() {
+    if std::env::var("IMPASTO_COMPUTE_BLUR").as_deref() != Ok("1") {
+        return;
+    }
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let size = PixelSize::new(64, 64);
+    let scene = tree(
+        1,
+        [
+            Command::PushBlur {
+                x: 16.0,
+                y: 16.0,
+                w: 32.0,
+                h: 32.0,
+                sigma: 3.0,
+            },
+            rect([16.0, 16.0, 32.0, 32.0], [255; 4]),
+            Command::Pop,
+        ],
+    );
+    raster.submit_layers(&scene, 1.0, |_| None).unwrap();
+    let image = raster.render_rgba(size).unwrap();
+    let stats = raster.submit_stats().render;
+    if raster.device.as_ref().unwrap().gpu.caps.has_compute {
+        assert_eq!(stats.compute_passes, 2, "{stats:?}");
+    }
+    assert_eq!(pixel(&image, 64, 0, 0), [0; 4]);
+    assert_eq!(pixel(&image, 64, 32, 32), [255; 4]);
+}

@@ -142,7 +142,7 @@ impl Trace {
             s.present_done_ns,
             json!({
                 "vertex": r.vertex_bytes, "uniform": r.uniform_bytes, "stops": r.stop_bytes, "extra": r.extra_bytes,
-                "mesh": r.mesh_upload_bytes, "atlas": r.atlas_upload_bytes,
+                "mesh": r.mesh_upload_bytes, "atlas": r.atlas_upload_bytes, "gradient_lut": r.gradient_lut_bytes,
             }),
         );
         self.counter(
@@ -154,6 +154,19 @@ impl Trace {
                 "pooled": r.pooled_texture_bytes,
             }),
         );
+        let images = frame.raster.image_upload;
+        if images.source_bytes != 0 {
+            self.counter(
+                RASTER,
+                "Image upload",
+                s.present_done_ns,
+                json!({
+                    "source_bytes": images.source_bytes, "temporary_bytes": images.temporary_bytes,
+                    "resident_bytes": images.resident_bytes, "render_passes": images.render_passes,
+                    "compute_passes": images.compute_passes,
+                }),
+            );
+        }
         self.counter(UI, "UI work", s.ui_done_ns, json!({
             "layout_passes": frame.phases.layout_passes, "text_shaped": frame.phases.text_shaped,
             "updates": frame.updates, "sets": frame.sets,

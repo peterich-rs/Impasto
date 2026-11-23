@@ -183,6 +183,7 @@ pub struct FrameArena {
     uniforms: Pool,
     stops: Pool,
     paint: Pool,
+    pub lut: crate::gradient_lut::GradientLut,
     paint_entries: HashMap<[u32; 16], Address>,
     groups: HashMap<(usize, Globals), wgpu::BindGroup>,
     pub buffers_created: u32,
@@ -204,6 +205,7 @@ impl FrameArena {
                 },
             ),
             paint_entries: HashMap::new(),
+            lut: crate::gradient_lut::GradientLut::new(gpu),
             groups: HashMap::new(),
             buffers_created: 0,
             bind_groups_created: 0,
@@ -222,6 +224,7 @@ impl FrameArena {
             }
         }
         self.paint_entries.clear();
+        self.lut.reset();
         self.buffers_created = 0;
         self.bind_groups_created = 0;
     }
@@ -249,6 +252,7 @@ impl FrameArena {
         }
         self.groups.clear();
         self.paint_entries.clear();
+        self.lut.trim();
     }
 
     pub fn flush(&self, gpu: &Gpu) {
@@ -290,6 +294,14 @@ impl FrameArena {
         )?;
         self.buffers_created += u32::from(created);
         Ok(address)
+    }
+
+    pub fn uniform_binding<T>(&self, address: Address) -> wgpu::BindingResource<'_> {
+        wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            buffer: &self.uniforms.slabs[address.slab].buffer,
+            offset: u64::from(address.offset),
+            size: wgpu::BufferSize::new(size_of::<T>() as u64),
+        })
     }
 
     pub fn stops(&mut self, gpu: &Gpu, values: &[[f32; 4]]) -> Result<Address, Status> {
@@ -396,6 +408,10 @@ impl FrameArena {
                         &self.paint.slabs[extra].buffer,
                         EXTRA_BYTES as u64,
                     ));
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&self.lut.view),
+                    });
                     &layouts.paint
                 }
                 Globals::Params(slab) => {

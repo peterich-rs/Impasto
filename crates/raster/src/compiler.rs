@@ -15,7 +15,7 @@ use engine::scene::{
 };
 
 use crate::batch::{
-    Brush, GpuMeshBuffer, ImageInstance, Mesh, PackedGradient, RECT_FILL, RECT_FILL_STROKE,
+    self, Brush, GpuMeshBuffer, ImageInstance, Mesh, PackedGradient, RECT_FILL, RECT_FILL_STROKE,
     RECT_GRADIENT, RECT_SHADOW, RECT_STROKE, RectInstance, image_slices, lyon_fill_rule,
     pack_canvas_gradient, pack_gradient, tessellation_path,
 };
@@ -750,7 +750,11 @@ impl Compiler<'_, '_, '_> {
                         rect,
                         uv,
                         color: [opacity; 4],
-                        flags: 0,
+                        flags: if matches!(mode, ContentMode::NineSlice { .. }) {
+                            batch::IMAGE_BASE_LEVEL
+                        } else {
+                            0
+                        },
                     })
                     .collect();
                 self.remember_image(source, required);
@@ -1026,8 +1030,7 @@ impl Compiler<'_, '_, '_> {
                         let Some((rect, uv)) = canvas_image_sample(image, tex_w, tex_h) else {
                             return Ok(());
                         };
-                        let blend =
-                            BlendKey::from_mode(crate::batch::canvas_composite(image.composite));
+                        let blend = BlendKey::from_mode(batch::canvas_composite(image.composite));
                         let isolated =
                             blend.is_none() && self.push_canvas_composite(image.composite);
                         let mut state = self.current().clone();
@@ -1043,7 +1046,12 @@ impl Compiler<'_, '_, '_> {
                                 rect,
                                 uv,
                                 color: [alpha, alpha, alpha, alpha],
-                                flags: u32::from(!image.smoothing),
+                                flags: batch::IMAGE_BASE_LEVEL
+                                    | if image.smoothing {
+                                        0
+                                    } else {
+                                        batch::IMAGE_NEAREST
+                                    },
                             }],
                         });
                         self.pop();

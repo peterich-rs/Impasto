@@ -168,7 +168,7 @@ impl PipelineCache {
             paint: layout(
                 gpu,
                 "impasto paint",
-                &[view, U((MAX_STOPS * 32) as u64), Slot::Paint],
+                &[view, U((MAX_STOPS * 32) as u64), Slot::Paint, Slot::Array],
             ),
             effects: layout(
                 gpu,

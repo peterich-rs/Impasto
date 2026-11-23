@@ -43,12 +43,13 @@ pub struct RectVertex {
 }
 
 impl RectInstance {
-    pub fn extra(&self, first: f32) -> Option<PaintExtra> {
+    pub fn extra(&self, first: f32, ramp: u32) -> Option<PaintExtra> {
         let has_gradient = self.flags & RECT_GRADIENT != 0;
         (has_gradient || matches!(self.kind, RECT_STROKE | RECT_FILL_STROKE | RECT_SHADOW)).then(
             || {
                 let mut gradient = self.gradient_b;
                 gradient[1] = first;
+                gradient[3] = ramp as f32;
                 PaintExtra {
                     geometry: self.gradient_a,
                     gradient,
@@ -136,6 +137,7 @@ impl ImageInstance {
 
 pub const IMAGE_NEAREST: u32 = 1;
 pub const IMAGE_PREMULTIPLIED_SRGB: u32 = 2;
+pub const IMAGE_BASE_LEVEL: u32 = 4;
 
 #[derive(Debug, PartialEq)]
 pub struct GpuMeshBuffer {

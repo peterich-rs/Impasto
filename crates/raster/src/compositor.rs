@@ -15,6 +15,7 @@ use crate::compiler::{
     self, Affine, Clip, ClipShape, CompiledPicture, Draw, Effect, Group, IDENTITY, PictureBounds,
     Scope,
 };
+use crate::compute_blur::{BlurParams, ComputeBlur};
 use crate::gpu::Gpu;
 use crate::pipelines::{
     self, BlendKey, ParamsUniform, PipelineCache, PipelineKind, Target, ViewUniform,
@@ -32,6 +33,7 @@ pub(crate) struct Compositor {
     white_mask_group: wgpu::BindGroup,
     linear: wgpu::Sampler,
     nearest: wgpu::Sampler,
+    trilinear: wgpu::Sampler,
     render_stats: RenderStats,
     arena: FrameArena,
     composites: HashMap<(wgpu::TextureView, wgpu::TextureView), wgpu::BindGroup>,
@@ -40,6 +42,7 @@ pub(crate) struct Compositor {
     frame_active: bool,
     trim_pending: bool,
     specialize_paint: bool,
+    compute_blur: Option<ComputeBlur>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -69,6 +72,8 @@ pub struct RenderStats {
     pub uniform_bytes: u64,
     pub stop_bytes: u64,
     pub extra_bytes: u64,
+    pub gradient_lut_bytes: u64,
+    pub gradient_lut_hits: u32,
     pub mesh_upload_bytes: u64,
     pub atlas_upload_bytes: u64,
     pub offscreen_alloc_bytes: u64,
@@ -98,11 +103,31 @@ struct Image {
     origin: [u32; 2],
     format: wgpu::TextureFormat,
     samples: u32,
+    usage: wgpu::TextureUsages,
     material: Arc<pipelines::MaterialCache>,
 }
 
 impl Image {
     fn new(gpu: &Gpu, size: [u32; 2], format: wgpu::TextureFormat, samples: u32) -> Self {
+        Self::with_usage(gpu, size, format, samples, Self::usage(samples))
+    }
+
+    fn usage(samples: u32) -> wgpu::TextureUsages {
+        use wgpu::TextureUsages as U;
+        if samples > 1 {
+            U::RENDER_ATTACHMENT
+        } else {
+            U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC | U::COPY_DST
+        }
+    }
+
+    fn with_usage(
+        gpu: &Gpu,
+        size: [u32; 2],
+        format: wgpu::TextureFormat,
+        samples: u32,
+        usage: wgpu::TextureUsages,
+    ) -> Self {
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("impasto offscreen"),
             size: extent(size),
@@ -110,14 +135,7 @@ impl Image {
             sample_count: samples,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: if samples == 1 {
-                wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC
-                    | wgpu::TextureUsages::COPY_DST
-            } else {
-                wgpu::TextureUsages::RENDER_ATTACHMENT
-            },
+            usage,
             view_formats: &[],
         });
         let view = texture.create_view(&Default::default());
@@ -129,6 +147,7 @@ impl Image {
             origin: [0; 2],
             format,
             samples,
+            usage,
             material: Arc::default(),
         }
     }
@@ -142,6 +161,7 @@ impl Image {
             origin: [0; 2],
             format,
             samples: 1,
+            usage: view.texture().usage(),
             material: Arc::default(),
         }
     }
@@ -175,10 +195,10 @@ impl Image {
     }
 
     fn bytes(&self) -> u64 {
-        let channels = if self.format == wgpu::TextureFormat::R8Unorm {
-            1
-        } else {
-            4
+        let channels = match self.format {
+            wgpu::TextureFormat::R8Unorm => 1,
+            wgpu::TextureFormat::Rgba16Float => 8,
+            _ => 4,
         };
         u64::from(self.size[0]) * u64::from(self.size[1]) * u64::from(self.samples) * channels
     }
@@ -219,6 +239,13 @@ impl Compositor {
             white_mask_group,
             linear,
             nearest: pipelines::nearest_sampler(gpu),
+            trilinear: gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("impasto image trilinear"),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Linear,
+                ..Default::default()
+            }),
             render_stats: RenderStats::default(),
             arena: FrameArena::new(gpu),
             composites: HashMap::new(),
@@ -227,6 +254,7 @@ impl Compositor {
             frame_active: false,
             trim_pending: false,
             specialize_paint: std::env::var_os("IMPASTO_SPECIALIZE_PAINT").is_some(),
+            compute_blur: ComputeBlur::new(gpu),
         })
     }
 
@@ -261,6 +289,8 @@ impl Compositor {
             self.render_stats.stop_bytes,
             self.render_stats.extra_bytes,
         ] = self.arena.bytes_uploaded();
+        self.render_stats.gradient_lut_bytes = self.arena.lut.upload_bytes;
+        self.render_stats.gradient_lut_hits = self.arena.lut.hits;
         let atlas_stats = self.atlas.take_stats();
         self.render_stats.atlas_upload_bytes = atlas_stats.upload_bytes;
         self.render_stats.copy_pixels += atlas_stats.copy_pixels;
@@ -412,6 +442,8 @@ impl ImageSource<'_> {
         let compositor = &mut frame.compositor;
         let sampler = if nearest {
             &compositor.nearest
+        } else if matches!(self, Self::External(image) if image.mipmapped) {
+            &compositor.trilinear
         } else {
             &compositor.linear
         };
@@ -659,16 +691,29 @@ impl Frame<'_> {
     }
 
     fn take_area(&mut self, area: [u32; 4], format: wgpu::TextureFormat, samples: u32) -> Image {
+        self.take_area_with_usage(area, format, samples, Image::usage(samples))
+    }
+
+    fn take_area_with_usage(
+        &mut self,
+        area: [u32; 4],
+        format: wgpu::TextureFormat,
+        samples: u32,
+        usage: wgpu::TextureUsages,
+    ) -> Image {
         let [x, y, w, h] = area;
         let size = [w, h].map(|side| side.next_multiple_of(64).min(self.gpu.caps.max_texture_2d));
         let compositor = &mut self.compositor;
         let index = compositor.pool.iter().position(|image| {
-            image.size == size && image.format == format && image.samples == samples
+            image.size == size
+                && image.format == format
+                && image.samples == samples
+                && image.usage == usage
         });
         let mut image = if let Some(index) = index {
             compositor.pool.swap_remove(index)
         } else {
-            let image = Image::new(self.gpu, size, format, samples);
+            let image = Image::with_usage(self.gpu, size, format, samples, usage);
             compositor.render_stats.offscreen_alloc_bytes += image.bytes();
             image
         };
@@ -1261,9 +1306,12 @@ impl Frame<'_> {
         let mut batch = Vec::new();
         let mut active = None;
         for (rects, stops) in batches {
+            let ramp = self.compositor.arena.lut.layer(self.gpu, stops);
             let stops = self.stops(stops)?;
+
             for rect in rects {
-                let (page, index) = self.paint(stops, rect.extra(FrameArena::stop_index(stops)))?;
+                let (page, index) =
+                    self.paint(stops, rect.extra(FrameArena::stop_index(stops), ramp))?;
                 if let Some(previous) = active
                     && !page.same_bindings(previous)
                 {
@@ -1360,8 +1408,10 @@ impl Frame<'_> {
             } else {
                 &[]
             };
+            let ramp = self.compositor.arena.lut.layer(self.gpu, stops);
             let stops = self.stops(stops)?;
-            let (page, index) = self.paint(stops, paint.extra(FrameArena::stop_index(stops)))?;
+            let (page, index) =
+                self.paint(stops, paint.extra(FrameArena::stop_index(stops), ramp))?;
             let data = self
                 .compositor
                 .arena
@@ -1578,6 +1628,7 @@ impl Frame<'_> {
                     }
                     _ => {
                         let stops = self.stops(&gradient.stops)?;
+                        let ramp = self.compositor.arena.lut.layer(self.gpu, &gradient.stops);
                         let (page, index) = self.paint(
                             stops,
                             Some(PaintExtra {
@@ -1586,7 +1637,7 @@ impl Frame<'_> {
                                     gradient.kind as f32,
                                     FrameArena::stop_index(stops),
                                     (gradient.stops.len() / 2) as f32,
-                                    0.0,
+                                    ramp as f32,
                                 ],
                                 shadow: [
                                     gradient.radial_radii[0],
@@ -1811,15 +1862,25 @@ impl Frame<'_> {
             levels.push(down);
             remaining *= 0.5;
         }
-        let mut filtered = self.take_area([origin[0], origin[1], size[0], size[1]], format, 1);
-        self.blur_pass(
-            levels.last().unwrap_or(source),
-            &filtered,
-            FullPass::BlurDown {
-                radius: remaining.clamp(0.1, 4.0),
-                backdrop,
-            },
-        )?;
+        let input = levels.last().unwrap_or(source);
+        // The apron fits sigma <= 8 at this pyramid level. The render path
+        // is retained for larger kernels and for capabilities without storage.
+        let mut filtered = if (0.25..=8.0).contains(&remaining)
+            && let Some(pipeline) = self.compositor.compute_blur.clone()
+        {
+            self.compute_blur(&pipeline, input, remaining)?
+        } else {
+            let image = self.take_area([origin[0], origin[1], size[0], size[1]], format, 1);
+            self.blur_pass(
+                input,
+                &image,
+                FullPass::BlurDown {
+                    radius: remaining.clamp(0.1, 4.0),
+                    backdrop,
+                },
+            )?;
+            image
+        };
         while let Some(level) = levels.pop() {
             let [w, h] = levels.last().map_or(source.logical, |image| image.logical);
             let next = self.take_area([origin[0], origin[1], w, h], format, 1);
@@ -1836,6 +1897,66 @@ impl Frame<'_> {
             filtered = next;
         }
         Ok(filtered)
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "sigma is between 0.25 and 8 at the call site"
+    )]
+    fn compute_blur(
+        &mut self,
+        kernel: &ComputeBlur,
+        source: &Image,
+        sigma: f32,
+    ) -> Result<Image, Status> {
+        let format = wgpu::TextureFormat::Rgba16Float;
+        let usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING;
+        let scratch = self.take_area_with_usage(source.area(), format, 1, usage);
+        let output = self.take_area_with_usage(source.area(), format, 1, usage);
+        let [w, h] = source.logical;
+        let params = self.uniform(&BlurParams {
+            size: [w, h],
+            radius: (sigma * 3.0).ceil() as u32,
+            sigma,
+        })?;
+        for (axis, (input, target)) in
+            [(&source.view, &scratch.view), (&scratch.view, &output.view)]
+                .into_iter()
+                .enumerate()
+        {
+            let pipeline = kernel.pipeline(axis);
+            let material = pipelines::bind_group(
+                self.gpu,
+                &pipeline.get_bind_group_layout(0),
+                &[
+                    wgpu::BindingResource::TextureView(input),
+                    wgpu::BindingResource::TextureView(target),
+                    self.compositor.arena.uniform_binding::<BlurParams>(params),
+                ],
+            );
+            let stamps = pass_timestamps(&mut self.capture, GpuPassKind::ComputeBlur, 0);
+            let mut pass = self
+                .command
+                .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("impasto compute blur"),
+                    timestamp_writes: stamps.map(|writes| wgpu::ComputePassTimestampWrites {
+                        query_set: writes.query_set,
+                        beginning_of_pass_write_index: writes.beginning_of_pass_write_index,
+                        end_of_pass_write_index: writes.end_of_pass_write_index,
+                    }),
+                });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &material, &[]);
+            pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
+            drop(pass);
+            self.count_pass(target);
+            self.compositor.render_stats.compute_passes += 1;
+            self.compositor.render_stats.bind_groups_created += 1;
+            self.compositor.render_stats.blur_pixels += u64::from(w) * u64::from(h);
+        }
+        self.release(scratch);
+        Ok(output)
     }
 
     fn blur_pass(&mut self, source: &Image, to: &Image, kind: FullPass) -> Result<(), Status> {

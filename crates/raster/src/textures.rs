@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::gpu::Gpu;
+use crate::{ImageUploadStats, gpu::Gpu};
 
 static NEXT_UPLOAD: AtomicU64 = AtomicU64::new(1);
 
@@ -25,6 +25,8 @@ pub struct GpuImage {
     pub revision: u64,
     /// Producer pixels are premultiplied in sRGB before upload.
     pub(crate) premultiplied_srgb: bool,
+    pub(crate) mipmapped: bool,
+    pub upload: ImageUploadStats,
 }
 
 impl std::fmt::Debug for GpuImage {
@@ -57,40 +59,37 @@ impl GpuImage {
         if rgba.len() < bytes {
             return None;
         }
-        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("impasto image"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
+        let size = [width, height];
+        let rgba = &rgba[..bytes];
+        let converted = (width > 1 || height > 1)
+            .then(|| gpu.image_upload())
+            .flatten()
+            .and_then(|upload| gpu.validation(|| Ok(upload.upload(gpu, size, rgba))).ok());
+        let (texture, upload) = converted.unwrap_or_else(|| {
+            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("impasto image"),
+                size: crate::compositor::extent(size),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let pixels = crate::color::premultiply_rgba(rgba);
+            crate::image_upload::upload_rgba(gpu, &texture, size, &pixels);
+            (
+                texture,
+                ImageUploadStats {
+                    source_bytes: bytes as u64,
+                    resident_bytes: bytes as u64,
+                    ..Default::default()
+                },
+            )
         });
-        let pixels = crate::color::premultiply_rgba(&rgba[..bytes]);
-        gpu.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &pixels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
+        if gpu.is_lost() {
+            return None;
+        }
         let view = texture.create_view(&Default::default());
         Some(Self {
             view: Arc::new(view),
@@ -100,6 +99,8 @@ impl GpuImage {
             device,
             revision: NEXT_UPLOAD.fetch_add(1, Ordering::Relaxed),
             premultiplied_srgb: false,
+            mipmapped: texture.mip_level_count() > 1,
+            upload,
         })
     }
 
@@ -118,6 +119,8 @@ impl GpuImage {
             device,
             revision: NEXT_UPLOAD.fetch_add(1, Ordering::Relaxed),
             premultiplied_srgb: true,
+            mipmapped: false,
+            upload: ImageUploadStats::default(),
         }
     }
 
@@ -179,9 +182,14 @@ pub struct TextureStore {
     map: HashMap<String, Cached>,
     generation: u64,
     device: u64,
+    uploads: ImageUploadStats,
 }
 
 impl TextureStore {
+    pub fn take_uploads(&mut self) -> ImageUploadStats {
+        std::mem::take(&mut self.uploads)
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }
@@ -229,6 +237,7 @@ impl TextureStore {
     }
 
     fn insert(&mut self, source: &str, image: GpuImage) -> Load {
+        self.uploads.add(image.upload);
         let load = Load::Ready {
             width: image.width(),
             height: image.height(),

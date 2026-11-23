@@ -1,7 +1,7 @@
 //! Owns one wgpu device generation and its submission queue.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use crate::{RasterBackend, RasterOptions, Status, ValidationMode};
 
@@ -93,6 +93,15 @@ pub(crate) struct Gpu {
     oom: Arc<AtomicBool>,
     uncaptured_error: Arc<AtomicBool>,
     validate_frames: bool,
+    image_upload: Arc<OnceLock<Option<crate::image_upload::ImageUpload>>>,
+    image_upload_mode: ImageUploadMode,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ImageUploadMode {
+    Cpu,
+    Render,
+    Compute,
 }
 
 impl Gpu {
@@ -214,6 +223,12 @@ impl Gpu {
             lost,
             oom,
             uncaptured_error,
+            image_upload: Arc::default(),
+            image_upload_mode: match std::env::var("IMPASTO_IMAGE_UPLOAD").as_deref() {
+                Ok("cpu") => ImageUploadMode::Cpu,
+                Ok("compute") => ImageUploadMode::Compute,
+                _ => ImageUploadMode::Render,
+            },
             validate_frames: match options.validation {
                 ValidationMode::Auto => {
                     cfg!(any(test, debug_assertions))
@@ -223,6 +238,33 @@ impl Gpu {
                 ValidationMode::AsyncOnly => false,
             },
         })
+    }
+
+    pub fn image_upload(&self) -> Option<&crate::image_upload::ImageUpload> {
+        if self.image_upload_mode == ImageUploadMode::Cpu {
+            return None;
+        }
+        self.image_upload
+            .get_or_init(|| {
+                use wgpu::{TextureFormatFeatureFlags as F, TextureUsages as U};
+                let format = wgpu::TextureFormat::Rgba16Float
+                    .guaranteed_format_features(self.device.features());
+                let compute = self.image_upload_mode == ImageUploadMode::Compute
+                    && self.caps.has_compute
+                    && format
+                        .allowed_usages
+                        .contains(U::TEXTURE_BINDING | U::STORAGE_BINDING)
+                    && format.flags.contains(F::FILTERABLE | F::STORAGE_WRITE_ONLY);
+                if compute
+                    && let Ok(upload) =
+                        self.validation(|| Ok(crate::image_upload::ImageUpload::new(self, true)))
+                {
+                    return Some(upload);
+                }
+                self.validation(|| Ok(crate::image_upload::ImageUpload::new(self, false)))
+                    .ok()
+            })
+            .as_ref()
     }
 
     pub fn is_lost(&self) -> bool {

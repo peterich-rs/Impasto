@@ -6,8 +6,11 @@ mod batch;
 mod color;
 mod compiler;
 mod compositor;
+mod compute_blur;
 mod fonts;
 mod gpu;
+mod gradient_lut;
+mod image_upload;
 mod pipelines;
 mod profiler;
 mod shaper;
@@ -16,6 +19,7 @@ mod text_index;
 mod textures;
 
 pub use fonts::{FontLibrary, ShapeStats};
+pub use image_upload::ImageUploadStats;
 pub use profiler::{
     GpuFrameTiming, GpuPassKind, GpuPassTiming, GpuSample, GpuTimingStatus, GpuTimingUpdate,
 };
@@ -89,6 +93,7 @@ pub struct SubmitStats {
     pub pictures: u32,
     pub textures: u32,
     pub atlas: AtlasStats,
+    pub image_upload: ImageUploadStats,
     pub render: RenderStats,
 }
 
@@ -415,6 +420,7 @@ impl Rasterizer {
             return Err(Status::DeviceLost);
         }
         textures.evict_unused();
+        stats.image_upload = textures.take_uploads();
         let platform_views: Arc<[u64]> = views.into();
         stats.picture_prepare = started.elapsed();
         stats.layer_count = u32::try_from(tree.layers.len()).unwrap_or(u32::MAX);
