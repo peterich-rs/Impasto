@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use raster::ImagePixels;
 
-/// Producer frame in premultiplied RGBA8. The render thread owns the latest frame.
+/// Producer frame in straight-alpha sRGB RGBA8. The render thread owns the latest frame.
 pub struct ExternalFrame {
     pub size: [u32; 2],
     pub pixels: Vec<u8>,
@@ -529,6 +529,19 @@ pub fn attach_upload(handle: &mut ImageHandle, factory: Option<&raster::TextureF
     };
     handle.gpu = Some(gpu);
     handle.pixels = Arc::from([]);
+}
+
+/// Restores straight-alpha RGBA8 from an OS decoder's premultiplied buffer.
+pub fn unpremultiply_rgba(pixels: &mut [u8]) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        let alpha = u16::from(pixel[3]);
+        if alpha != 0 && alpha != 255 {
+            for channel in &mut pixel[..3] {
+                *channel = u8::try_from((u16::from(*channel) * 255 + alpha / 2) / alpha)
+                    .unwrap_or(u8::MAX);
+            }
+        }
+    }
 }
 
 pub fn pixel_count_ok(size: [u32; 2]) -> bool {

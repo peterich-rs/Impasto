@@ -1,6 +1,7 @@
 use crate::input::{Phase, PointerEvent};
 use crate::scene::Command;
 use crate::session;
+use crate::text::test_support::mono_text;
 use session::{
     EventType, ImmediateExec, InputEvent, IoEvent, Key, Method, Module, ModuleConfig,
     ModuleRegistry, PluginResult, PluginValue,
@@ -187,7 +188,11 @@ fn bytecode_round_trip_uses_the_native_modules() {
         .expect("load bytecode");
         session.metrics(&metrics());
         let frame = session.frame(session::FrameTime::at(0.0));
-        assert!(texts(&frame).contains(&"compiled"), "{:?}", texts(&frame));
+        assert!(
+            texts(&frame).iter().any(|text| text == "compiled"),
+            "{:?}",
+            texts(&frame)
+        );
         assert!(session.take_faults().is_empty());
     }
 }
@@ -1363,11 +1368,15 @@ fn visit_commands<'a>(
     }
 }
 
-fn texts(frame: &session::FrameOutput) -> Vec<&str> {
+fn texts(frame: &session::FrameOutput) -> Vec<String> {
     let mut found = Vec::new();
     visit_commands(frame, &mut |command, _, _| {
-        if let Command::Text { utf8, .. } = command {
-            found.push(utf8.as_ref());
+        if let Command::Text {
+            shaped: Some(shaped),
+            ..
+        } = command
+        {
+            found.push(mono_text(shaped));
         }
     });
     found
@@ -1377,9 +1386,12 @@ fn text_spot(frame: &session::FrameOutput, utf8: &str) -> (f32, f32) {
     let mut found = None;
     visit_commands(frame, &mut |command, origin_x, origin_y| {
         if let Command::Text {
-            utf8: text, x, y, ..
+            shaped: Some(shaped),
+            x,
+            y,
+            ..
         } = command
-            && text.as_ref() == utf8
+            && mono_text(shaped) == utf8
         {
             found = Some((*x + origin_x + 1.0, *y + origin_y + 1.0));
         }
@@ -1487,10 +1499,10 @@ fn wait_for_text(
         assert!(errors.is_empty(), "waiting for {expected}: {errors:?}");
         if frame.layers.is_some() {
             let labels = texts(&frame);
-            if labels.contains(&expected) {
+            if labels.iter().any(|text| text == expected) {
                 return frame;
             }
-            seen = labels.into_iter().map(str::to_owned).collect();
+            seen = labels;
         }
     }
     panic!("missing {expected} in {seen:?}");
@@ -1592,12 +1604,12 @@ fn watchlist_page_shows_prices() {
     }
     let shown = texts(&first);
     assert!(
-        shown.contains(&"综合指数"),
+        shown.iter().any(|text| text == "综合指数"),
         "{shown:?} error={:?} faults={:?}",
         session.take_script_error(),
         session.take_faults()
     );
-    assert!(shown.contains(&"腾讯控股"), "{shown:?}");
+    assert!(shown.iter().any(|text| text == "腾讯控股"), "{shown:?}");
     let mut sparks = 0;
     visit_commands(&first, &mut |command, _, _| {
         if matches!(command, Command::Canvas { list, .. } if !list.ops().is_empty()) {
@@ -1624,7 +1636,11 @@ fn market_tab_renders_the_board() {
     };
     session.metrics(&phone());
     let first = pump_first(session.as_mut());
-    assert!(texts(&first).contains(&"综合指数"), "{:?}", texts(&first));
+    assert!(
+        texts(&first).iter().any(|text| text == "综合指数"),
+        "{:?}",
+        texts(&first)
+    );
     assert!(
         !texts(&first)
             .iter()
@@ -1640,7 +1656,7 @@ fn market_tab_renders_the_board() {
     let second = session.frame(session::FrameTime::at(32.0));
     let shown = texts(&second);
     assert!(
-        shown.contains(&"涨幅榜"),
+        shown.iter().any(|text| text == "涨幅榜"),
         "market page replaced itself with an error: {shown:?}"
     );
     assert!(!shown.iter().any(|text| text.contains("not a function")));
@@ -1649,10 +1665,16 @@ fn market_tab_renders_the_board() {
 fn visible_watch_rows(frame: &session::FrameOutput) -> Vec<(String, f32)> {
     let mut rows = Vec::new();
     visit_commands(frame, &mut |command, _, origin_y| {
-        if let Command::Text { utf8, y, .. } = command
-            && IN_WATCHLIST_NAMES.iter().any(|name| *name == &**utf8)
+        if let Command::Text {
+            shaped: Some(shaped),
+            y,
+            ..
+        } = command
         {
-            rows.push((utf8.to_string(), *y + origin_y));
+            let text = mono_text(shaped);
+            if IN_WATCHLIST_NAMES.contains(&text.as_str()) {
+                rows.push((text, *y + origin_y));
+            }
         }
     });
     rows.sort_by(|left, right| left.1.total_cmp(&right.1));
@@ -1711,12 +1733,9 @@ fn watchlist_refreshes_quotes_during_drag_and_inertia() {
         "the gesture did not scroll the watchlist"
     );
     let clock = |frame: &session::FrameOutput| {
-        texts(frame)
-            .into_iter()
-            .find(|text| {
-                text.len() == 8 && text.as_bytes()[2] == b':' && text.as_bytes()[5] == b':'
-            })
-            .map(str::to_owned)
+        texts(frame).into_iter().find(|text| {
+            text.len() == 8 && text.as_bytes()[2] == b':' && text.as_bytes()[5] == b':'
+        })
     };
     let mut last_clock = clock(&dragged).expect("market clock");
     let mut clock_advanced = false;
@@ -1836,7 +1855,7 @@ fn trade_tab_renders_equity_and_orders() {
         }
     }
     assert!(
-        texts(&shown).contains(&"总资产 (模拟)"),
+        texts(&shown).iter().any(|text| text == "总资产 (模拟)"),
         "equity card missing {:?}",
         texts(&shown)
     );
@@ -1857,7 +1876,7 @@ fn stocks_desktop_switches_symbols_and_keeps_chart_and_book_inline() {
     let first = wait_for_text(session.as_mut(), &mut time, "价格区间");
     let shown = texts(&first);
     assert!(
-        shown.contains(&"综合指数") && shown.contains(&"盘口"),
+        shown.iter().any(|text| text == "综合指数") && shown.iter().any(|text| text == "盘口"),
         "{shown:?}"
     );
     let (chart_x, _) = text_spot(&first, "分时");
@@ -1881,7 +1900,10 @@ fn stocks_desktop_switches_symbols_and_keeps_chart_and_book_inline() {
     let (x, y) = text_spot(&changed, "5 → 10");
     click(session.as_mut(), x, y);
     let ten = wait_for_text(session.as_mut(), &mut time, "A10");
-    assert!(texts(&ten).contains(&"A10") && texts(&ten).contains(&"B10"));
+    assert!(
+        texts(&ten).iter().any(|text| text == "A10")
+            && texts(&ten).iter().any(|text| text == "B10")
+    );
     let (x, y) = text_spot(&ten, "1D");
     click(session.as_mut(), x, y);
     let candles = wait_for_text(session.as_mut(), &mut time, "MA20");
@@ -2061,7 +2083,7 @@ fn stocks_phone_crosshair_keeps_the_chart_picture() {
         if frame.layers.is_some() {
             assert!(!chart_recorded_volume(&frame, 204.0), "vertical scroll");
         }
-        if texts(&frame).contains(&"分时") {
+        if texts(&frame).iter().any(|text| text == "分时") {
             scrolled = Some(text_spot(&frame, "分时").1);
             break;
         }
@@ -2086,8 +2108,8 @@ fn stocks_phone_opens_detail_and_order_ticket() {
     let (x, y) = text_spot(&first, "腾讯控股");
     click(session.as_mut(), x, y);
     let opening = wait_for_text(session.as_mut(), &mut time, "‹ 返回");
-    assert!(texts(&opening).contains(&"买入"));
-    assert!(!texts(&opening).contains(&"盘口"));
+    assert!(texts(&opening).iter().any(|text| text == "买入"));
+    assert!(!texts(&opening).iter().any(|text| text == "盘口"));
     let mut detail = wait_for_text(session.as_mut(), &mut time, "价格区间");
     for _ in 0..20 {
         time += 16.0;
@@ -2155,8 +2177,8 @@ fn stocks_phone_reopens_during_exit_without_leaving_a_detail() {
         }
     }
     let shown = texts(&reopened);
-    assert!(shown.contains(&"综合指数"), "{shown:?}");
-    assert!(!shown.contains(&"‹ 返回"), "{shown:?}");
+    assert!(shown.iter().any(|text| text == "综合指数"), "{shown:?}");
+    assert!(!shown.iter().any(|text| text == "‹ 返回"), "{shown:?}");
 
     click(session.as_mut(), x, y);
     let entering = wait_for_text(session.as_mut(), &mut time, "‹ 返回");
@@ -2201,9 +2223,13 @@ fn repeated_clicks_leave_no_pending_jobs() {
         let second = session.frame(session::FrameTime::at(16.0));
         click(&mut session, x, y);
         let third = session.frame(session::FrameTime::at(32.0));
-        assert!(texts(&second).contains(&"涨幅榜"));
+        assert!(texts(&second).iter().any(|text| text == "涨幅榜"));
         if third.layers.is_some() {
-            assert!(texts(&third).contains(&"涨幅榜"), "{:?}", texts(&third));
+            assert!(
+                texts(&third).iter().any(|text| text == "涨幅榜"),
+                "{:?}",
+                texts(&third)
+            );
         }
         assert!(!session.jobs_pending());
     }
@@ -2345,13 +2371,17 @@ fn stock_page_pushes_over_the_watchlist() {
     let (x, y) = text_spot(&first, "腾讯控股");
     click(session.as_mut(), x, y);
     let second = session.frame(session::FrameTime::at(16.0));
-    assert!(texts(&second).contains(&"返回"), "{:?}", texts(&second));
     assert!(
-        texts(&second).contains(&"盘口 五档"),
+        texts(&second).iter().any(|text| text == "返回"),
         "{:?}",
         texts(&second)
     );
-    assert!(!texts(&second).contains(&"涨幅榜"));
+    assert!(
+        texts(&second).iter().any(|text| text == "盘口 五档"),
+        "{:?}",
+        texts(&second)
+    );
+    assert!(!texts(&second).iter().any(|text| text == "涨幅榜"));
 }
 
 #[test]
@@ -2372,8 +2402,12 @@ fn press_move_out_up_does_not_fire() {
     let second = session.frame(session::FrameTime::at(16.0));
     if let Some(layers) = second.layers.as_ref() {
         let _ = layers;
-        assert!(texts(&second).contains(&"自选"), "{:?}", texts(&second));
-        assert!(!texts(&second).contains(&"盘口 五档"));
+        assert!(
+            texts(&second).iter().any(|text| text == "自选"),
+            "{:?}",
+            texts(&second)
+        );
+        assert!(!texts(&second).iter().any(|text| text == "盘口 五档"));
     }
 }
 
@@ -2518,7 +2552,7 @@ import * as core from "scene";
         assert!(message.contains("boom"), "script error was {message:?}");
         let second = session.frame(session::FrameTime::at(16.0));
         assert!(second.layers.is_none());
-        assert!(texts(&first).contains(&"Go"));
+        assert!(texts(&first).iter().any(|text| text == "Go"));
     }
 }
 
@@ -2551,7 +2585,11 @@ import * as core from "scene";
         click(&mut session, x, y);
         assert!(session.take_script_error().is_none());
         let second = session.frame(session::FrameTime::at(16.0));
-        assert!(texts(&second).contains(&"later"), "{:?}", texts(&second));
+        assert!(
+            texts(&second).iter().any(|text| text == "later"),
+            "{:?}",
+            texts(&second)
+        );
     }
 }
 
@@ -2589,7 +2627,11 @@ import * as core from "scene";
             modifiers: crate::input::Modifiers::empty().with(crate::input::Modifiers::META),
         }));
         let frame = session.frame(session::FrameTime::at(16.0));
-        assert!(texts(&frame).contains(&"cut"), "{:?}", texts(&frame));
+        assert!(
+            texts(&frame).iter().any(|text| text == "cut"),
+            "{:?}",
+            texts(&frame)
+        );
     }
 }
 
@@ -2626,7 +2668,11 @@ import * as core from "scene";
         session.metrics(&metrics());
         let frame = session.frame(session::FrameTime::at(0.0));
         assert!(session.take_script_error().is_none());
-        assert!(texts(&frame).contains(&"row"), "{:?}", texts(&frame));
+        assert!(
+            texts(&frame).iter().any(|text| text == "row"),
+            "{:?}",
+            texts(&frame)
+        );
         let later = session.frame(session::FrameTime::at(48.0));
         assert!(later.layers.is_some() || frame.layers.is_some());
     }
@@ -2782,7 +2828,7 @@ import * as core from "scene";
         let frame = session.frame(session::FrameTime::at(0.0));
         assert!(session.take_script_error().is_none());
         assert!(
-            texts(&frame).contains(&"w:320"),
+            texts(&frame).iter().any(|text| text == "w:320"),
             "metrics width should be the content box, got {:?}",
             texts(&frame)
         );
@@ -2824,7 +2870,7 @@ import * as core from "scene";
             "a 40 ms turn was interrupted"
         );
         let second = session.frame(session::FrameTime::at(16.0));
-        assert!(texts(&second).contains(&"Done"));
+        assert!(texts(&second).iter().any(|text| text == "Done"));
     }
 }
 
@@ -2877,7 +2923,7 @@ import * as core from "scene";
         );
         let second = session.frame(session::FrameTime::at(16.0));
         assert!(second.layers.is_none());
-        assert!(texts(&first).contains(&"Go"));
+        assert!(texts(&first).iter().any(|text| text == "Go"));
     }
 }
 
@@ -3201,7 +3247,11 @@ import * as core from "scene";
         let (x, y) = text_spot(&first, "old");
         click(&mut session, x, y);
         let second = session.frame(session::FrameTime::at(16.0));
-        assert!(texts(&second).contains(&"new"), "{:?}", texts(&second));
+        assert!(
+            texts(&second).iter().any(|text| text == "new"),
+            "{:?}",
+            texts(&second)
+        );
         assert!(!session.wants_frame());
     }
 }
@@ -3363,16 +3413,24 @@ import * as core from "scene";
         assert!(session.take_script_error().is_none());
         let mut found = false;
         visit_commands(&frame, &mut |command, _, _| {
-            let Command::Text { utf8, spans, .. } = command else {
+            let Command::Text {
+                shaped: Some(shaped),
+                span_paints,
+                ..
+            } = command
+            else {
                 return;
             };
-            if utf8.as_ref() != "abc" {
+            if mono_text(shaped) != "abc" {
                 return;
             }
-            found = spans.len() == 2
-                && spans[0].color == [1, 2, 3, 255]
-                && spans[0].gradient.is_none()
-                && spans[1].gradient.is_some();
+            found = matches!(
+                span_paints.as_ref(),
+                [
+                    crate::scene::SpanPaint::Color([1, 2, 3, 255]),
+                    crate::scene::SpanPaint::Gradient(_),
+                ]
+            );
         });
         assert!(found, "styled runs were not recorded");
     }
@@ -3415,12 +3473,17 @@ fn dragging_the_list_translates_a_visible_row() {
         };
         let mut row = None;
         visit_commands(&first, &mut |command, origin_x, origin_y| {
-            if let Command::Text { utf8, x, y, .. } = command
-                && IN_WATCHLIST_NAMES.contains(&&**utf8)
+            if let Command::Text {
+                shaped: Some(shaped),
+                x,
+                y,
+                ..
+            } = command
+                && IN_WATCHLIST_NAMES.contains(&mono_text(shaped).as_str())
             {
                 let scene_y = *y + origin_y;
                 if scene_y >= clip_y && scene_y < clip_y + clip_h {
-                    row = Some((std::sync::Arc::clone(utf8), *x + origin_x + 1.0, scene_y));
+                    row = Some((mono_text(shaped), *x + origin_x + 1.0, scene_y));
                 }
             }
         });
@@ -3438,8 +3501,12 @@ fn dragging_the_list_translates_a_visible_row() {
         let scrolled = session.frame(session::FrameTime::at(16.0));
         let mut after = None;
         visit_commands(&scrolled, &mut |command, _, origin_y| {
-            if let Command::Text { utf8, y, .. } = command
-                && utf8.as_ref() == label.as_ref()
+            if let Command::Text {
+                shaped: Some(shaped),
+                y,
+                ..
+            } = command
+                && mono_text(shaped) == label
             {
                 after = Some(*y + origin_y);
             }
@@ -3456,7 +3523,7 @@ fn dragging_the_list_translates_a_visible_row() {
             (before - after - delta).abs() < 0.5,
             "{label} moved from {before} to {after}"
         );
-        assert!(texts(&scrolled).contains(&"自选"));
+        assert!(texts(&scrolled).iter().any(|text| text == "自选"));
     }
 }
 
@@ -3506,7 +3573,7 @@ fn module_loader_accepts_a_sibling_script_and_rejects_escape() {
         session.metrics(&metrics());
         let frame = session.frame(session::FrameTime::at(0.0));
         assert!(
-            texts(&frame).contains(&"from-util"),
+            texts(&frame).iter().any(|text| text == "from-util"),
             "{:?} {}",
             texts(&frame),
             session.take_script_error().unwrap_or_default()
@@ -3596,7 +3663,7 @@ fn module_loader_accepts_parent_segments_inside_the_app() {
     session.metrics(&metrics());
     let frame = session.frame(session::FrameTime::at(0.0));
     assert!(
-        texts(&frame).contains(&"shared-ok"),
+        texts(&frame).iter().any(|text| text == "shared-ok"),
         "{:?} {}",
         texts(&frame),
         session.take_script_error().unwrap_or_default()
@@ -3651,12 +3718,17 @@ fn gallery_pages_scroll_without_picture_writes() {
         };
         let mut row = None;
         visit_commands(&shown, &mut |command, origin_x, origin_y| {
-            if let Command::Text { utf8, x, y, .. } = command
-                && IN_WATCHLIST_NAMES.contains(&&**utf8)
+            if let Command::Text {
+                shaped: Some(shaped),
+                x,
+                y,
+                ..
+            } = command
+                && IN_WATCHLIST_NAMES.contains(&mono_text(shaped).as_str())
             {
                 let scene_y = *y + origin_y;
                 if scene_y >= clip_y && scene_y < clip_y + clip_h {
-                    row = Some((std::sync::Arc::clone(utf8), *x + origin_x + 1.0, scene_y));
+                    row = Some((mono_text(shaped), *x + origin_x + 1.0, scene_y));
                 }
             }
         });
@@ -3683,7 +3755,7 @@ fn gallery_pages_scroll_without_picture_writes() {
         assert!(
             texts(&scrolled)
                 .iter()
-                .any(|text| IN_WATCHLIST_NAMES.contains(text)),
+                .any(|text| IN_WATCHLIST_NAMES.contains(&text.as_str())),
             "list rows left after scrolling {:?}",
             texts(&scrolled)
         );
@@ -3778,11 +3850,11 @@ import * as core from "scene";
         };
         session.metrics(&metrics());
         let first = session.frame(session::FrameTime::at(0.0));
-        assert!(texts(&first).contains(&"field"));
+        assert!(texts(&first).iter().any(|text| text == "field"));
         session.input(InputEvent::Text("你".to_string()));
         let ignored = session.frame(session::FrameTime::at(16.0));
         assert!(ignored.layers.is_none());
-        assert!(texts(&first).contains(&"field"));
+        assert!(texts(&first).iter().any(|text| text == "field"));
         assert!(session.take_ime().is_none());
         let (x, y) = text_spot(&first, "field");
         click(&mut session, x, y);
@@ -3793,12 +3865,12 @@ import * as core from "scene";
         session.input(InputEvent::Text("你".to_string()));
         session.input(InputEvent::Composing(Some("ni".to_string())));
         let composed = session.frame(session::FrameTime::at(32.0));
-        assert!(texts(&composed).contains(&"你ni"));
+        assert!(texts(&composed).iter().any(|text| text == "你ni"));
         session.input(InputEvent::Composing(None));
         session.input(InputEvent::Key(session::KeyPress::new(Key::Backspace)));
         let cleared = session.frame(session::FrameTime::at(48.0));
-        assert!(!texts(&cleared).contains(&"你"));
-        assert!(!texts(&cleared).contains(&"你ni"));
+        assert!(!texts(&cleared).iter().any(|text| text == "你"));
+        assert!(!texts(&cleared).iter().any(|text| text == "你ni"));
         match cleared.ime {
             Some(session::ImeUpdate::Update(state)) => assert_eq!(state.text, ""),
             other => panic!("expected update, got {other:?}"),
@@ -3809,7 +3881,7 @@ import * as core from "scene";
         assert!(matches!(dropped.ime, Some(session::ImeUpdate::Hide)));
         session.input(InputEvent::Text("no".to_string()));
         let after = session.frame(session::FrameTime::at(80.0));
-        assert!(!texts(&after).contains(&"no"));
+        assert!(!texts(&after).iter().any(|text| text == "no"));
     }
 }
 
@@ -4130,7 +4202,7 @@ fn scene_insert_distinguishes_reused_node_slots_from_numeric_children() {
     .expect("session");
     host.metrics(&metrics());
     let output = host.frame(session::FrameTime::at(0.0));
-    assert!(texts(&output).contains(&"42"));
+    assert!(texts(&output).iter().any(|text| text == "42"));
 }
 
 #[test]
@@ -4222,7 +4294,11 @@ import * as core from "scene";
         };
         session.metrics(&metrics());
         let frame = session.frame(session::FrameTime::at(0.0));
-        assert!(texts(&frame).contains(&"bad handle"), "{:?}", texts(&frame));
+        assert!(
+            texts(&frame).iter().any(|text| text == "bad handle"),
+            "{:?}",
+            texts(&frame)
+        );
         let update = session.semantics().expect("semantics");
         let switch = update
             .nodes
@@ -4272,7 +4348,7 @@ import * as core from "scene";
         session.metrics(&metrics());
         let frame = session.frame(session::FrameTime::at(0.0));
         assert!(
-            texts(&frame).contains(&"zh-CN:dark:1"),
+            texts(&frame).iter().any(|text| text == "zh-CN:dark:1"),
             "{:?}",
             texts(&frame)
         );
@@ -4317,13 +4393,25 @@ import * as core from "scene";
         let _ = session.frame(session::FrameTime::at(0.0));
         session.input(InputEvent::Key(session::KeyPress::new(Key::Tab)));
         let next = session.frame(session::FrameTime::at(16.0));
-        assert!(texts(&next).contains(&"first"), "{:?}", texts(&next));
+        assert!(
+            texts(&next).iter().any(|text| text == "first"),
+            "{:?}",
+            texts(&next)
+        );
         session.input(InputEvent::Key(session::KeyPress::new(Key::Tab)));
         let after = session.frame(session::FrameTime::at(32.0));
-        assert!(texts(&after).contains(&"second"), "{:?}", texts(&after));
+        assert!(
+            texts(&after).iter().any(|text| text == "second"),
+            "{:?}",
+            texts(&after)
+        );
         session.input(InputEvent::Key(session::KeyPress::new(Key::Escape)));
         let closed = session.frame(session::FrameTime::at(48.0));
-        assert!(texts(&closed).contains(&"back"), "{:?}", texts(&closed));
+        assert!(
+            texts(&closed).iter().any(|text| text == "back"),
+            "{:?}",
+            texts(&closed)
+        );
         assert!(!session.take_exit());
     }
 }
@@ -4367,10 +4455,56 @@ import * as core from "scene";
         });
         let frame = session.frame(session::FrameTime::at(16.0));
         assert!(
-            texts(&frame).contains(&"replaced:Hello"),
+            texts(&frame).iter().any(|text| text == "replaced:Hello"),
             "{:?}",
             texts(&frame)
         );
+    }
+}
+
+/// Records every face the session hands to its shaper, in order.
+struct FontRecorder {
+    inner: crate::text::MonoShaper,
+}
+
+thread_local! {
+    static REGISTERED_FONTS: std::cell::RefCell<Vec<(String, std::sync::Arc<[u8]>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn registered_fonts() -> Vec<(String, std::sync::Arc<[u8]>)> {
+    REGISTERED_FONTS.with(|fonts| std::mem::take(&mut *fonts.borrow_mut()))
+}
+
+impl crate::text::Shaper for FontRecorder {
+    fn register_shared_font(&mut self, family: &str, bytes: std::sync::Arc<[u8]>) -> bool {
+        REGISTERED_FONTS.with(|fonts| fonts.borrow_mut().push((family.to_owned(), bytes)));
+        true
+    }
+    fn metrics(
+        &mut self,
+        key: &crate::text::MetricsKey,
+    ) -> std::sync::Arc<crate::text::ParagraphMetrics> {
+        self.inner.metrics(key)
+    }
+    fn caret_at_unit(
+        &mut self,
+        key: &crate::text::MetricsKey,
+        unit: u32,
+        affinity: crate::text::Affinity,
+    ) -> crate::text::Caret {
+        self.inner.caret_at_unit(key, unit, affinity)
+    }
+    fn caret_at_point(
+        &mut self,
+        key: &crate::text::MetricsKey,
+        x: f32,
+        y: f32,
+    ) -> crate::text::Caret {
+        self.inner.caret_at_point(key, x, y)
+    }
+    fn word_range(&mut self, key: &crate::text::MetricsKey, unit: u32) -> (u32, u32) {
+        self.inner.word_range(key, unit)
     }
 }
 
@@ -4426,35 +4560,37 @@ import * as core from "scene";
         let mut session = match super::JsSession::open(
             source,
             "fonts.js",
-            crate::text::MonoShaper::default(),
+            FontRecorder {
+                inner: crate::text::MonoShaper::default(),
+            },
             no_log(),
         ) {
             Ok(session) => session,
             Err(error) => panic!("{error}"),
         };
-        session.metrics(&metrics());
-        let queued = session.take_fonts();
+        // Nothing reaches the shaper until the first UI frame drains the queue.
+        assert!(registered_fonts().is_empty());
+        let listed = session.frame(session::FrameTime::at(0.0));
+        let queued = registered_fonts();
         assert_eq!(queued.len(), 9, "{queued:?}");
-        assert!(session.take_fonts().is_empty());
         let replaced = queued.iter().find(|(name, _)| name == "F0").expect("F0");
-        assert_eq!(replaced.1.as_ref(), &[9, 9]);
+        // Script callbacks run before layout, so only the final F0 bytes
+        // for this frame reach the shaper.
+        assert_eq!(replaced.1.as_ref(), &[8]);
         assert!(queued.iter().any(|(name, _)| name == "Sans"));
         assert!(queued.iter().all(|(name, _)| name != "Extra"));
-        let listed = session.frame(session::FrameTime::at(0.0));
         assert!(
-            texts(&listed).contains(&"handed-rejected"),
+            texts(&listed).iter().any(|text| text == "handed-rejected"),
             "{:?}",
             texts(&listed)
         );
         assert!(
-            texts(&listed).contains(&"empty-rejected"),
+            texts(&listed).iter().any(|text| text == "empty-rejected"),
             "{:?}",
             texts(&listed)
         );
-        let again = listed.fonts;
-        assert_eq!(again.len(), 1, "{again:?}");
-        assert_eq!(again[0].0, "F0");
-        assert_eq!(again[0].1.as_ref(), &[8]);
+        session.frame(session::FrameTime::at(16.0));
+        assert!(registered_fonts().is_empty());
     }
 }
 
@@ -4478,7 +4614,9 @@ import * as core from "scene";
         let mut session = match super::JsSession::open(
             source,
             "bigfont.js",
-            crate::text::MonoShaper::default(),
+            FontRecorder {
+                inner: crate::text::MonoShaper::default(),
+            },
             no_log(),
         ) {
             Ok(session) => session,
@@ -4486,8 +4624,12 @@ import * as core from "scene";
         };
         session.metrics(&metrics());
         let listed = session.frame(session::FrameTime::at(0.0));
-        assert!(texts(&listed).contains(&"rejected"), "{:?}", texts(&listed));
-        let queued = listed.fonts;
+        assert!(
+            texts(&listed).iter().any(|text| text == "rejected"),
+            "{:?}",
+            texts(&listed)
+        );
+        let queued = registered_fonts();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].0, "Keep");
         assert_eq!(queued[0].1.as_ref(), &[7]);
@@ -4525,7 +4667,11 @@ import * as core from "scene";
     assert!(session.take_reloads().is_empty());
     session.metrics(&metrics());
     let frame = session.frame(session::FrameTime::at(0.0));
-    assert!(texts(&frame).contains(&"rejected"), "{:?}", texts(&frame));
+    assert!(
+        texts(&frame).iter().any(|text| text == "rejected"),
+        "{:?}",
+        texts(&frame)
+    );
 }
 
 #[test]
@@ -4559,7 +4705,11 @@ import * as core from "scene";
     };
     session.metrics(&metrics());
     let frame = session.frame(session::FrameTime::at(0.0));
-    assert!(texts(&frame).contains(&"bad-axis"), "{:?}", texts(&frame));
+    assert!(
+        texts(&frame).iter().any(|text| text == "bad-axis"),
+        "{:?}",
+        texts(&frame)
+    );
     let mut child = None;
     visit_commands(&frame, &mut |command, _, _| {
         if let Command::Rect { w, h, color, .. } = command
@@ -4601,7 +4751,11 @@ import * as core from "scene";
     };
     session.metrics(&metrics());
     let frame = session.frame(session::FrameTime::at(0.0));
-    assert!(texts(&frame).contains(&"bad-image"), "{:?}", texts(&frame));
+    assert!(
+        texts(&frame).iter().any(|text| text == "bad-image"),
+        "{:?}",
+        texts(&frame)
+    );
     let mut image = None;
     visit_commands(&frame, &mut |command, _, _| {
         if let Command::Image { mode, required, .. } = command {
@@ -4640,7 +4794,11 @@ import * as core from "scene";
     };
     session.metrics(&metrics());
     let frame = session.frame(session::FrameTime::at(0.0));
-    assert!(texts(&frame).contains(&"applied"), "{:?}", texts(&frame));
+    assert!(
+        texts(&frame).iter().any(|text| text == "applied"),
+        "{:?}",
+        texts(&frame)
+    );
 }
 
 fn canvas_fills(frame: &session::FrameOutput) -> usize {
@@ -5311,7 +5469,7 @@ fn autofill_replaces_a_wrapper_field_without_exposing_the_password_in_semantics(
         text: "new😀".to_owned(),
     });
     let output = host.frame(session::FrameTime::at(16.0));
-    assert!(texts(&output).contains(&"filled"));
+    assert!(texts(&output).iter().any(|text| text == "filled"));
 }
 
 #[test]
@@ -5324,7 +5482,11 @@ fn debug_update_checks_the_candidate_first_frame_before_replacing_the_program() 
     )
     .expect("initial session");
     host.metrics(&metrics());
-    assert!(texts(&host.frame(session::FrameTime::at(0.0))).contains(&"initial"));
+    assert!(
+        texts(&host.frame(session::FrameTime::at(0.0)))
+            .iter()
+            .any(|text| text == "initial")
+    );
     let attempted = host.update_source(
         r#"import { createElement } from "scene"; createElement("text", { value: "bad", style: { color: [0, 0, 0, 255] } }); requestAnimationFrame(() => { throw new Error("first frame"); });"#,
         Box::new(crate::text::MonoShaper::default()),
@@ -5337,5 +5499,9 @@ fn debug_update_checks_the_candidate_first_frame_before_replacing_the_program() 
         session::FrameTime::at(32.0),
     )
     .expect("successful update");
-    assert!(texts(&host.frame(session::FrameTime::at(48.0))).contains(&"updated"));
+    assert!(
+        texts(&host.frame(session::FrameTime::at(48.0)))
+            .iter()
+            .any(|text| text == "updated")
+    );
 }

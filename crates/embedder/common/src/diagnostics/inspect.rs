@@ -126,7 +126,7 @@ fn timing_json(out: &mut String, timing: &FrameTiming) {
     field_f64(out, "submitMs", timing.submit_ms, false);
     field_f64(out, "presentMs", timing.present_ms, false);
     field_u64(out, "layers", u64::from(timing.layer_count), false);
-    field_u64(out, "paragraphs", u64::from(timing.paragraphs), false);
+    field_u64(out, "atlasEntries", u64::from(timing.atlas_entries), false);
     field_u64(out, "pictures", u64::from(timing.pictures), false);
     field_u64(out, "textures", u64::from(timing.textures), false);
     out.push('}');
@@ -258,11 +258,11 @@ mod tests {
             shapes_measure_miss: 0,
             shapes_paint_hit: 0,
             shapes_paint_miss: 0,
-            shapes_bridged: 0,
+            atlas_hits: 0,
             picture_rebuilt: 0,
             picture_reused: 0,
             layer_count: 3,
-            paragraphs: 1,
+            atlas_entries: 1,
             pictures: 1,
             textures: 0,
             interval_ms: 0.0,

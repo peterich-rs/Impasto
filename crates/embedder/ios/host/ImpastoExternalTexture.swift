@@ -98,7 +98,7 @@ public final class ImpastoExternalTexture: @unchecked Sendable {
 
     private func mutate(_ body: (inout State) -> Void) {
         // The mailbox holds one pending buffer. GPU owners hold at most three
-        // prepared buffers until the Rust/Impeller release callback.
+        // prepared buffers until the Raster release callback.
         let schedule = lock.withLock {
             body(&state)
             guard state.canPublish, state.latest != nil, state.inFlight < 3, !state.scheduled else { return false }
@@ -334,11 +334,11 @@ private final class MediaFrameConverter {
         let width = Int(extent.width)
         let height = Int(extent.height)
         // Core Image textures are bottom-up. Match the top-down Core Video
-        // rows used by the direct BGRA import before Impeller samples them.
+        // rows used by the direct BGRA import before Raster samples them.
         let image = source.transformed(by: CGAffineTransform(
             a: 1, b: 0, c: 0, d: -1, tx: -extent.minX, ty: extent.maxY
         ))
-        // Use a shareable IOSurface target for Core Image and Impeller's separate
+        // Use a shareable IOSurface target for Core Image and Raster's separate
         // Metal command queues. The producer's in-flight limit bounds pool usage.
         let usage: MTLTextureUsage = [.shaderRead, .shaderWrite, .renderTarget]
         let attributes = [kCVMetalTextureUsage: NSNumber(value: usage.rawValue)] as CFDictionary
@@ -349,7 +349,7 @@ private final class MediaFrameConverter {
         else { return nil }
         context.render(image, to: frame.texture, commandBuffer: command, bounds: image.extent, colorSpace: srgb)
         command.commit()
-        // Only the private producer queue waits. Impeller samples after this
+        // Only the private producer queue waits. Raster samples after this
         // fence, with a different command queue on the same device.
         command.waitUntilCompleted()
         return command.status == .completed ? frame : nil

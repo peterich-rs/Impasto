@@ -1,11 +1,11 @@
 //! Local drawing commands for one [`crate::scene::Command::Canvas`].
 //!
 //! Coordinates are scene points in the canvas content box. The list does not
-//! carry a JavaScript value, a node id, or an Impeller handle.
+//! carry a JavaScript value, a node id, or a font handle.
 
 use std::sync::Arc;
 
-use crate::scene::{ColorStop, TextStyle};
+use crate::scene::{ColorStop, ShapedParagraph};
 
 /// Whether the player must composite this list off the parent picture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,14 +118,14 @@ pub struct CanvasTextOp {
     pub x: f32,
     pub y: f32,
     pub anchor_x: f32,
+    /// Source text, kept for tests and diagnostics. Drawing uses `shaped`.
     pub utf8: Arc<str>,
-    pub font_size: f32,
-    pub max_width: f32,
     /// Horizontal scale about `anchor_x`. `1` draws the measured advances.
     pub compress: f32,
     /// `[a, b, c, d, e, f]` matches canvas `setTransform`.
     pub ctm: [f32; 6],
-    pub style: Arc<TextStyle>,
+    /// Frozen glyphs relative to `(x, y)`. `None` draws nothing.
+    pub shaped: Option<Arc<ShapedParagraph>>,
     pub paint: CanvasPaint,
 }
 

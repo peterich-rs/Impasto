@@ -8,9 +8,8 @@ use anyhow::{Context, Result, bail};
 use serde_json::json;
 
 use super::{
-    IosPlatform, build_rust, impeller_sdk, lock_directory, plist_json, plist_xml,
-    prepare_application, require_output, require_platform, swift_sources, verify_application,
-    verify_signature,
+    IosPlatform, build_rust, lock_directory, plist_json, plist_xml, prepare_application,
+    require_output, require_platform, swift_sources, verify_application, verify_signature,
 };
 use crate::{
     app::App,
@@ -189,7 +188,7 @@ struct FrameworkSources {
     swift: Vec<PathBuf>,
     header: PathBuf,
     privacy: PathBuf,
-    font_notice: String,
+    notices: String,
 }
 
 impl FrameworkSources {
@@ -211,7 +210,10 @@ impl FrameworkSources {
             swift: swift_sources(&swift)?,
             header,
             privacy,
-            font_notice: format!("{font}\n{license}"),
+            notices: format!(
+                "{}\n{font}\n{license}",
+                fs::read_to_string(framework.join("NOTICE"))?
+            ),
         })
     }
 }
@@ -275,7 +277,7 @@ fn build_framework(
         "framework module ImpastoHost {\n  umbrella header \"impasto_ios.h\"\n  export *\n}\n",
     )?;
     fs::copy(&sources.privacy, bundle.join("PrivacyInfo.xcprivacy"))?;
-    fs::write(bundle.join("Roboto-NOTICE"), &sources.font_notice)?;
+    fs::write(bundle.join("ThirdParty-NOTICE"), &sources.notices)?;
     fs::write(
         bundle.join("Info.plist"),
         plist_xml(
@@ -290,9 +292,7 @@ fn build_framework(
     )?;
     let mut binaries = Vec::new();
     for slice in slices {
-        let sdk = impeller_sdk(framework, slice.rust)?;
-        fs::copy(sdk.join("LICENSE"), bundle.join("Impeller-LICENSE"))?;
-        let linker = build_rust(framework, rust_target_dir, slice.rust, &sdk, options)?;
+        let linker = build_rust(framework, rust_target_dir, slice.rust, options)?;
         let platform = if slice.simulator {
             "iphonesimulator"
         } else {

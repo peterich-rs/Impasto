@@ -13,8 +13,8 @@ use ndk::asset::AssetManager;
 use ndk::native_window::NativeWindow;
 
 use super::{
-    Attach, IME_HIDE, IME_UPDATE, Viewport, attach, configure_window_buffers, destroy_surface,
-    detach, edit_event, host, open_surface, pixel_size, publish_metrics, release_window,
+    Attach, IME_HIDE, IME_UPDATE, Viewport, attach, destroy_surface, detach, edit_event, host,
+    open_surface, pixel_size, publish_metrics, release_window,
 };
 use crate::insets::scene_point;
 use crate::motion::android_wheel;
@@ -696,10 +696,8 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSurfaceChanged(
     host.ui(|ui| {
         let pixels = pixel_size(width, height);
         if let Some(window) = ui.window.as_mut()
-            && pixels.is_usable()
             && pixels != window.pixels
         {
-            configure_window_buffers(&window.native, width, height);
             window.pixels = pixels;
         }
     });

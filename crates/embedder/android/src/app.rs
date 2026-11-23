@@ -992,8 +992,8 @@ fn android_boot(
         thread_topology,
         launch_url: Arc::clone(&launch_url),
         http: Some(embedder::http_client().map_err(BootError::Platform)?),
-        open_raster: Box::new(move || renderer.create_raster()),
-        open_surface: renderer.surfaces(move |id| bridge_for_surface.first_frame(id)),
+        open_raster: Box::new(move |fonts| renderer.create_raster(fonts)),
+        open_surface: Renderer::surfaces(move |id| bridge_for_surface.first_frame(id)),
         dump_list: false,
         inspect: std::env::var_os("IMPASTO_INSPECT").map(std::path::PathBuf::from),
         devtools: Some(Arc::new(embedder::DiagnosticsHub::new())),
@@ -1066,7 +1066,6 @@ fn open_surface(host: &Host, window: NativeWindow) {
     destroy_surface(host);
     let width = window.width();
     let height = window.height();
-    configure_window_buffers(&window, width, height);
     host.ui(|ui| {
         ui.window = Some(Window {
             native: window,
@@ -1103,31 +1102,6 @@ fn post_ready(host: &Host) -> bool {
         true
     } else {
         false
-    }
-}
-
-fn configure_window_buffers(window: &NativeWindow, width: i32, height: i32) {
-    if width <= 1 || height <= 1 {
-        tracing::error!(
-            target: "impasto::shell",
-            width,
-            height,
-            "window buffer is too small"
-        );
-        return;
-    }
-    if let Err(error) = window.set_buffers_geometry(
-        width,
-        height,
-        Some(ndk::hardware_buffer_format::HardwareBufferFormat::R8G8B8A8_UNORM),
-    ) {
-        tracing::error!(
-            target: "impasto::shell",
-            width,
-            height,
-            %error,
-            "buffer geometry failed"
-        );
     }
 }
 

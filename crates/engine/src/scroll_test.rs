@@ -1148,7 +1148,8 @@ fn a_row_picture_rebuilds_without_the_rest_of_the_scroll() -> Result<(), crate::
     let copies = list
         .commands
         .iter()
-        .filter(|command| matches!(command, crate::scene::Command::Text { utf8, .. } if utf8.as_ref() == "one"))
+        .filter(|command| matches!(command, crate::scene::Command::Text { shaped, .. }
+            if shaped.as_deref().is_some_and(|shaped| crate::text::test_support::mono_text(shaped) == "one")))
         .count();
     assert_eq!(copies, 1, "the row must not paint twice");
     let row_picture = crate::tree::picture_id::child_picture_id(row);

@@ -46,6 +46,12 @@ pub(super) use vm_entry;
 
 type SharedConsoleLog = Rc<dyn Fn(u8, &str)>;
 
+fn drain_fonts(inner: &Inner, tree: &mut Tree) {
+    for (family, bytes) in inner.fonts.borrow_mut().take() {
+        tree.register_shared_font(&family, bytes);
+    }
+}
+
 struct Inner {
     pub(super) tree: RefCell<Tree>,
     pub(super) log: SharedConsoleLog,
@@ -737,11 +743,6 @@ impl Session for JsSession {
         inner.tree.borrow_mut().set_autofill_enabled(enabled);
     }
 
-    fn take_fonts(&mut self) -> Vec<(String, Arc<[u8]>)> {
-        let inner = &self.inner;
-        inner.fonts.borrow_mut().take()
-    }
-
     fn take_reloads(&mut self) -> Vec<String> {
         let inner = &self.inner;
         std::mem::take(&mut *inner.reloads.borrow_mut())
@@ -869,11 +870,8 @@ impl Session for JsSession {
             let script_ms = elapsed_ms(script_started);
             drop(script_trace);
             let style_trace = Section::begin(c"Impasto styles");
-            let queued = inner.fonts.borrow().snapshot();
             let mut tree = inner.tree.borrow_mut();
-            for (family, bytes) in &queued {
-                let _ = tree.register_shared_font(family, Arc::clone(bytes));
-            }
+            drain_fonts(inner, &mut tree);
             if let Err(error) = tree.flush_styles() {
                 let message = error.to_string();
                 drop(tree);
@@ -911,6 +909,7 @@ impl Session for JsSession {
             drop(driver_trace);
             {
                 let mut tree = inner.tree.borrow_mut();
+                drain_fonts(inner, &mut tree);
                 if tree.needs_layout() {
                     let _trace = Section::begin(c"Impasto layout after drivers");
                     if let Err(error) = tree.layout() {
@@ -935,7 +934,8 @@ impl Session for JsSession {
                 layout_cb_ms = elapsed_ms(callback_started);
             }
             let mut tree = inner.tree.borrow_mut();
-            if ran_layout && tree.needs_layout() {
+            drain_fonts(inner, &mut tree);
+            if tree.needs_layout() {
                 let _trace = Section::begin(c"Impasto layout after callbacks");
                 if let Err(error) = tree.layout() {
                     let message = error.to_string();
@@ -1143,7 +1143,6 @@ impl Session for JsSession {
                 ime: self.take_ime(),
                 semantics,
                 platform_views,
-                fonts: self.take_fonts(),
                 reloads: self.take_reloads(),
                 clipboard: self.take_clipboard(),
                 exit: self.take_exit(),

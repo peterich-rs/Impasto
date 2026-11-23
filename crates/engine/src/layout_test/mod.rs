@@ -36,7 +36,9 @@ pub(super) fn texts(tree: &mut Tree) -> Result<Vec<String>, crate::Error> {
         .commands
         .iter()
         .filter_map(|command| match command {
-            crate::scene::Command::Text { utf8, .. } => Some(utf8.to_string()),
+            crate::scene::Command::Text { shaped, .. } => {
+                shaped.as_deref().map(crate::text::test_support::mono_text)
+            }
             _ => None,
         })
         .collect())
@@ -156,8 +158,12 @@ pub(super) fn scene_marks_in_commands(
     for command in commands {
         let (ctm, clips) = stack.last().expect("frame").clone();
         match command {
-            crate::scene::Command::Text { utf8, x, y, .. } => {
-                push_mark(&mut marks, utf8.to_string(), *x, *y, ctm, &clips);
+            crate::scene::Command::Text { shaped, x, y, .. } => {
+                let text = shaped
+                    .as_deref()
+                    .map(crate::text::test_support::mono_text)
+                    .unwrap_or_default();
+                push_mark(&mut marks, text, *x, *y, ctm, &clips);
             }
             crate::scene::Command::Image { source, x, y, .. } => {
                 push_mark(&mut marks, source.to_string(), *x, *y, ctm, &clips);

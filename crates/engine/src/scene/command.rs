@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use super::{
-    BlendMode, BoxShadow, ContentMode, Gradient, ParagraphId, Shadow, TextSpan, TextStyle,
-};
+use super::{BlendMode, BoxShadow, ContentMode, Gradient, Shadow, ShapedParagraph, SpanPaint};
 
 /// One paint operation. Coordinates are absolute scene points.
 #[derive(Clone, Debug, PartialEq)]
@@ -29,16 +27,11 @@ pub enum Command {
     Text {
         x: f32,
         y: f32,
-        /// Paragraph constraint used when this run was measured, in scene points.
-        max_width: f32,
-        font_size: f32,
-        /// Retained paragraph. [`ParagraphId::NONE`] rebuilds from the payload.
-        paragraph: ParagraphId,
+        /// Frozen glyphs from the final layout. `None` draws nothing.
+        shaped: Option<Arc<ShapedParagraph>>,
         color: [u8; 4],
-        utf8: Arc<str>,
-        style: Arc<TextStyle>,
-        /// Empty means one run with the command color and style.
-        spans: Arc<[TextSpan]>,
+        /// Foreground of each logical span. Empty means one run with `color`.
+        span_paints: Arc<[SpanPaint]>,
     },
     Image {
         x: f32,

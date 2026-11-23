@@ -77,11 +77,11 @@ export type FrameSample = {
   submitMs: number;
   presentMs: number;
   layers: number;
-  paragraphs: number;
+  atlasEntries: number;
   pictures: number;
   textures: number;
   shapesBuilt?: number;
-  shapesBridged?: number;
+  atlasHits?: number;
   paintHit?: number;
   paintMiss?: number;
   pictureRebuilt?: number;
@@ -116,7 +116,7 @@ export type Platform = {
   dump: string | null;
 };
 
-export type Versions = { shell: string; enginePin: string; quickjsPin: string };
+export type Versions = { shell: string; wgpu: string; parley: string; quickjsPin: string };
 
 export declare function enabled(): boolean;
 export declare function sourceMap(): string | null;

@@ -4,9 +4,6 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[features]
-impeller = ["raster/impeller"]
-
 [lib]
 name = "impasto"
 crate-type = ["cdylib", "rlib"]

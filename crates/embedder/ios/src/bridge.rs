@@ -308,14 +308,17 @@ impl ImpastoIOSHost {
                     thread_topology: embedder::ThreadTopology::configured()?,
                     launch_url,
                     http: app.http,
-                    open_raster: Box::new(Rasterizer::create_metal),
-                    open_surface: Box::new(move |_, target| {
-                        Ok(Box::new(MetalSurface::new(
+                    open_raster: Box::new(|fonts| {
+                        Rasterizer::create(raster::RasterOptions::default(), fonts)
+                    }),
+                    open_surface: Box::new(move |raster, target| {
+                        Ok(Box::new(MetalSurface::open(
+                            raster,
                             target,
                             Arc::clone(&boot_gate),
                             Arc::clone(&boot_events),
                             Arc::clone(&boot_compositor),
-                        )))
+                        )?))
                     }),
                     dump_list: false,
                     inspect: None,
@@ -845,11 +848,6 @@ impl Drop for TextureOwner {
     }
 }
 
-extern "C" fn release_texture_owner(context: *mut c_void) {
-    // SAFETY: the SDK calls this once for the Arc passed to one import.
-    drop(unsafe { Arc::<TextureOwner>::from_raw(context.cast()) });
-}
-
 fn external_source(name: &str) -> Option<String> {
     if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
         return None;
@@ -889,14 +887,13 @@ pub unsafe extern "C" fn impasto_ios_texture_frame(
         host.link.post(Command::ExternalGpuTexture {
             source,
             frame: Some(Box::new(move |engine| {
-                let context = Arc::into_raw(Arc::clone(&owner)).cast_mut().cast();
-                // SAFETY: owner holds the live texture until the SDK consumes its context.
+                let owner = Arc::clone(&owner);
+                // SAFETY: the retained owner keeps the ready producer texture alive.
                 unsafe {
                     engine.import_metal_texture(
                         ptr::with_exposed_provenance(texture),
                         [width, height],
-                        Some(release_texture_owner),
-                        context,
+                        move || drop(owner),
                     )
                 }
             })),

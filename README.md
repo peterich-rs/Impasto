@@ -1,8 +1,8 @@
 # Impasto
 
-Impasto 是一个用 Rust 和 TypeScript 构建的跨平台 UI 框架。界面使用 Solid 2.0 TSX 编写，在内置 QuickJS 运行时中执行；UI 树、样式、Taffy 布局、原生响应式图与层树录制在 Rust 引擎完成，最终由 Impeller 渲染到各平台原生表面。
+Impasto 是一个用 Rust 和 TypeScript 构建的跨平台 UI 框架。界面使用 Solid 2.0 TSX 编写，在内置 QuickJS 运行时中执行；UI 树、样式、Taffy 布局、原生响应式图与层树录制在 Rust 引擎完成，最终由 wgpu 渲染到各平台原生表面。
 
-目前支持 macOS（Metal）、iOS 15+（UIKit / Metal）和 Android API 24+（GLES / Vulkan）。仓库已收录 CI 验证的 Impeller 预构建 SDK，本地构建会自动解压并链接。
+目前支持 macOS（Metal）、iOS 15+（UIKit / Metal）和 Android API 24+（GLES / Vulkan）。Parley 在 UI 队列排版，Raster 根据同一份字形数据绘制组件和 Canvas 文字。
 
 ```tsx
 import { createSignal } from "solid-js";
@@ -28,7 +28,7 @@ boot(Main);
 - Rust stable（见 [`rust-toolchain.toml`](rust-toolchain.toml)）
 - [just](https://github.com/casey/just)
 - Node.js 22+ 与 pnpm 9
-- Python 3（用于准备 Impeller SDK 与依赖边界检查）
+- Python 3（用于依赖边界与打包检查）
 - 平台工具链：macOS / iOS 需要 Xcode 及对应 Rust target；Android 需要 JDK 17、Android SDK 35、NDK 及 `aarch64-linux-android`、`x86_64-linux-android` target
 
 ## 快速开始
@@ -38,7 +38,7 @@ boot(Main);
 仓库自带基于 Solid 2.0 的行情模拟盘应用（[`apps/gallery-solid`](apps/gallery-solid)）：
 
 ```sh
-# macOS 桌面窗口（首次运行自动解压 Impeller SDK 并构建 Gallery）
+# macOS 桌面窗口（首次运行会构建 Gallery）
 just host
 
 # Android 调试 APK
@@ -73,8 +73,7 @@ impasto test                        # 在 QuickJS 中运行无头测试
 ```text
 crates/
 ├── engine/             UI 树、样式与工具类、Taffy 布局、手势、原生响应式图、层树录制及可选 JS 绑定
-├── raster/             消费层树，基于 Impeller 完成文字排版、绘制与上屏
-├── impeller-sys/       Impeller C FFI、平台补丁与预构建 SDK 归档
+├── raster/             提供 Parley 排版和 wgpu 渲染，消费层树并上屏
 ├── javascript/         独立 QuickJS 运行时、IQJS 字节码编译器与 Web 标准 API 子集
 ├── embedder/
 │   ├── common/         公共宿主：任务队列、帧调度、生命周期、网络与平台模块
@@ -102,24 +101,22 @@ apps/
 常用构建与检查入口定义在 [`justfile`](justfile)：
 
 ```sh
-just check               # 样式声明检查、依赖边界、Impeller 脚本测试、Clippy、Rust/JS 测试与标准库契约
-just impeller            # 仅解压当前平台的 Impeller SDK 到 third_party/impeller-sdk/
+just check               # 样式声明检查、依赖边界、Clippy、Rust/JS 测试与标准库契约
 just gen                 # 重新生成样式类型与原生模块声明
 just android-build-check # 构建、lint 并校验 Android APK
 just ios-build-check     # 构建 Gallery 的 iOS 模拟器包
 ```
 
-单独运行带 Impeller 链接的绘制后端测试：
+在支持 Metal 或 Vulkan/GLES 的设备上运行绘制后端测试：
 
 ```sh
-just impeller
-cargo test -p raster --features impeller
+cargo test -p raster
 ```
 
 ## 相关文档
 
 - [样式属性与工具类清单](docs/style-utilities.gen.md) — `just gen` 生成的受支持样式属性与工具类列表
-- [Impeller SDK](crates/impeller-sys/README.md) — 预构建归档、平台补丁与源码构建说明
+- [wgpu 渲染管线](docs/wgpu-rendering-pipeline.md) — 渲染与排版设计、平台合成和验收路径
 - [iOS 构建与 UIKit 嵌入](crates/embedder/ios/README.md) — `[ios]` 配置、签名归档、XCFramework 与 Swift 插件
 - [移动端验收应用](apps/android-acceptance/README.md) — Android / iOS 深链、恢复、权限与原生 Fragment 验收流程
 - [Flutter 性能对照参考](tools/android-flutter-reference/README.md) — Android 行情参考应用的构建与回放
@@ -127,4 +124,4 @@ cargo test -p raster --features impeller
 
 ## 许可证
 
-产品代码基于 [Apache-2.0](LICENSE) 发布，版权归属见 [NOTICE](NOTICE)。Impeller 及第三方依赖沿用各自许可证。
+产品代码基于 [Apache-2.0](LICENSE) 发布，版权归属见 [NOTICE](NOTICE)。第三方依赖沿用各自许可证。

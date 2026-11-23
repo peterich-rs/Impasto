@@ -27,9 +27,7 @@ use crate::{
 mod cache_cmds;
 mod frame_cmds;
 mod raster_host;
-use raster_host::{
-    FrameSubmission, RasterCompletion, RasterHost, RasterPort, install_fonts, raster_frame,
-};
+use raster_host::{FrameSubmission, RasterCompletion, RasterHost, RasterPort, raster_frame};
 mod session_cmds;
 mod surface_cmds;
 
@@ -769,7 +767,7 @@ struct Installed {
 }
 
 pub(crate) struct UiHost {
-    typography: Rc<RefCell<raster::Typography>>,
+    shaper: Rc<RefCell<raster::ParleyShaper>>,
     graphics: RasterPort,
     active_surface: Option<SurfaceId>,
     try_surface: bool,
@@ -912,20 +910,15 @@ fn open_ui(
         extras,
     } = fonts;
     let split = runners.ui.queue_id() != runners.raster.queue_id();
-    let ui_typography = if split {
-        let mut typography = raster::Typography::standalone().map_err(BootError::Engine)?;
-        typography
-            .register_shared_face(Arc::clone(&primary), &family)
-            .map_err(BootError::Engine)?;
-        for (family, bytes) in &extras {
-            if let Err(status) = typography.register_shared_face(Arc::clone(bytes), family) {
-                tracing::warn!(target: "impasto::shell", %family, %status, "font registration failed");
-            }
-        }
-        Some(Rc::new(RefCell::new(typography)))
-    } else {
-        None
-    };
+    let library = raster::FontLibrary::new();
+    let mut shaper = raster::ParleyShaper::new(library.clone());
+    if !shaper.register_shared(&family, primary) {
+        return Err(BootError::Font(family));
+    }
+    for (family, bytes) in extras {
+        shaper.register_shared(&family, bytes);
+    }
+    let shaper = Rc::new(RefCell::new(shaper));
     let raster_busy = Arc::new(crate::watchdog::Busy::new());
     if split {
         crate::watchdog::spawn(
@@ -938,11 +931,7 @@ fn open_ui(
     let open = boot.open_raster;
     let open_surface = boot.open_surface;
     let create = move || {
-        let mut raster = open().map_err(BootError::Engine)?;
-        raster
-            .register_shared_font(primary, &family)
-            .map_err(BootError::Engine)?;
-        install_fonts(&mut raster, extras);
+        let raster = open(library).map_err(BootError::Engine)?;
         Ok::<_, BootError>(RasterHost {
             raster: Rc::new(RefCell::new(raster)),
             surfaces: SurfaceHost::new(),
@@ -963,7 +952,7 @@ fn open_ui(
             busy: raster_busy,
         })
     };
-    let (graphics, typography) = if let Some(typography) = ui_typography {
+    let graphics = if split {
         let slot = Arc::new(RunnerSlot::new(Arc::clone(&runners.raster)));
         let target = Arc::clone(&slot);
         let (ready, response) = mpsc::sync_channel(1);
@@ -972,16 +961,14 @@ fn open_ui(
             let _ = ready.send(result);
         }));
         response.recv().map_err(|_| BootError::Panicked)??;
-        (RasterPort::Remote(slot), typography)
+        RasterPort::Remote(slot)
     } else {
-        let graphics = create()?;
-        let typography = graphics.raster.borrow().typography();
-        (RasterPort::Local(Box::new(graphics)), typography)
+        RasterPort::Local(Box::new(create()?))
     };
     startup.checkpoint()?;
     let Launch::Session(open) = boot.launch;
     let parts = crate::SessionOpen {
-        shaper: Box::new(raster::ImpellerShaper::new(Rc::clone(&typography))),
+        shaper: Box::new(Rc::clone(&shaper)),
         log: console_log(),
     };
     let app_state = engine::session::shared("active".to_owned());
@@ -1072,7 +1059,7 @@ fn open_ui(
     crate::watchdog::spawn("ui", Arc::downgrade(&busy), boot.devtools.clone());
     Ok(UiHost {
         graphics,
-        typography,
+        shaper,
         active_surface: None,
         try_surface: false,
         revision: 0,
@@ -1116,7 +1103,7 @@ fn update_source(runtime: &mut UiHost, revision: &str, source: &str) {
     let now = runtime.wake.runner.monotonic_ms();
     let result = session.update_source(
         source,
-        Box::new(raster::ImpellerShaper::new(Rc::clone(&runtime.typography))),
+        Box::new(Rc::clone(&runtime.shaper)),
         FrameTime {
             vsync_ms: now,
             target_ms: now,
@@ -1393,7 +1380,6 @@ fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, 
     let session_started = Instant::now();
     let mut again;
     let mut reloads = Vec::new();
-    let mut fonts = Vec::new();
     let mut census = None;
     let mut layers_changed = false;
     let mut placements_changed = false;
@@ -1468,7 +1454,6 @@ fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, 
                     placements_changed = true;
                 }
                 reloads = std::mem::take(&mut output.reloads);
-                fonts = std::mem::take(&mut output.fonts);
                 census = output.images.take();
                 phases = output.phases.take();
                 layout_report = output.layout_report.take();
@@ -1492,7 +1477,6 @@ fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, 
     if leave {
         runtime.services.borrow().request_exit();
     }
-    let split = matches!(&runtime.graphics, RasterPort::Remote(_));
     let submission = FrameSubmission {
         revision: runtime.revision,
         number: runtime.frame_number,
@@ -1502,11 +1486,7 @@ fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, 
         gesture_ms,
         phases: phases.unwrap_or_default(),
         layout_report,
-        measure: if split {
-            runtime.typography.borrow_mut().take_shape_stats()
-        } else {
-            raster::ShapeStats::default()
-        },
+        measure: runtime.shaper.borrow_mut().take_shape_stats(),
         scale: runtime.point_scale,
         paused: frame.paused,
         again,
@@ -1516,7 +1496,6 @@ fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, 
         placements_changed,
         layers_changed,
         reloads,
-        fonts,
         census,
         hub: runtime.hub.clone(),
     };
@@ -1662,6 +1641,11 @@ fn open_surface_target(
             .surfaces
             .ready(target, &mut raster, graphics.open_surface.as_mut());
         if matches!(opened, Ready::Opened { .. }) {
+            for frame in graphics.external_gpu.values_mut() {
+                if frame.image.is_none() {
+                    frame.image = (frame.import)(&raster);
+                }
+            }
             *lock(&graphics.upload) = raster.texture_factory();
             graphics.needs_present = true;
             graphics.installed = None;
@@ -1899,7 +1883,6 @@ mod tests {
 
     use engine::session::{FrameOutput, FrameTime, IoEvent, Metrics};
 
-    use super::install_fonts;
     use super::{
         Acks, DropWait, ExitGuard, FramePipeline, Inbox, Installed, RasterHost, RasterPort, UiHost,
         WakeTimer, fault_followup, lock, on_command, on_frame, start_async,
@@ -1916,22 +1899,9 @@ mod tests {
         let secret = b"SECRET-FONT-BYTES-DO-NOT-LOG";
         let lines = Arc::new(Mutex::new(Vec::new()));
         let capture = Capture(Arc::clone(&lines));
-        tracing::subscriber::with_default(capture, || match raster::Rasterizer::create_metal() {
-            Ok(mut raster) => {
-                install_fonts(
-                    &mut raster,
-                    vec![("Custom".to_owned(), Arc::from(secret.as_slice()))],
-                );
-            }
-            Err(raster::Status::NotLinked) => {
-                tracing::warn!(
-                    target: "impasto::shell",
-                    family = "Custom",
-                    status = "not linked",
-                    "font registration failed"
-                );
-            }
-            Err(status) => panic!("{status}"),
+        tracing::subscriber::with_default(capture, || {
+            let mut shaper = raster::ParleyShaper::new(raster::FontLibrary::new());
+            assert!(!shaper.register("Custom", secret));
         });
         let lines = lines.lock().unwrap_or_else(|error| error.into_inner());
         assert!(!lines.is_empty(), "a bad face must be reported");
@@ -2065,7 +2035,11 @@ mod tests {
 
     impl TestHarness {
         fn new() -> Self {
-            let raster = Rc::new(RefCell::new(raster::Rasterizer::inert()));
+            let library = raster::FontLibrary::new();
+            let raster = Rc::new(RefCell::new(
+                raster::Rasterizer::create(raster::RasterOptions::default(), library.clone())
+                    .unwrap_or_else(|error| panic!("{error}")),
+            ));
             let vsync = RecVsync::new();
             let log = Rc::new(RefCell::new(SessionLog {
                 io: Vec::new(),
@@ -2074,9 +2048,9 @@ mod tests {
                 launch_urls: Vec::new(),
                 clipboard: None,
             }));
-            let typography = raster.borrow().typography();
+            let shaper = Rc::new(RefCell::new(raster::ParleyShaper::new(library)));
             let runtime = UiHost {
-                typography,
+                shaper,
                 graphics: RasterPort::Local(Box::new(RasterHost {
                     raster,
                     load_image: Arc::new(|_| true),
@@ -2450,7 +2424,11 @@ mod tests {
                 Err(raster::Status::DeviceLost)
             }
 
-            fn recover_device(&mut self, _: &mut raster::Rasterizer) -> Result<(), raster::Status> {
+            fn recover_device(
+                &mut self,
+                _: &mut raster::Rasterizer,
+                _: raster::PixelSize,
+            ) -> Result<(), raster::Status> {
                 self.0.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }

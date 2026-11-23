@@ -14,16 +14,7 @@ fn collapsed_clip_records_no_text() -> Result<(), crate::Error> {
     tree.add_child(page, clip)?;
     tree.layout()?;
     let list = tree.record()?;
-    let texts: Vec<_> = list
-        .commands
-        .iter()
-        .filter_map(|command| match command {
-            crate::scene::Command::Text {
-                utf8, max_width, ..
-            } => Some((utf8.as_ref().to_string(), *max_width)),
-            _ => None,
-        })
-        .collect();
+    let texts: Vec<String> = crate::text::test_support::texts(&list);
     assert!(
         texts.is_empty(),
         "collapsed text {texts:?} box {:?}",
@@ -40,23 +31,23 @@ fn recorded_text_uses_the_ancestor_origin() -> Result<(), crate::Error> {
     tree.add_child(pad, text)?;
     tree.layout()?;
     let list = tree.record()?;
-    assert!(matches!(
-        list.commands.first(),
-        Some(crate::scene::Command::Text {
-            x,
-            y,
-            utf8,
-            color,
-            font_size,
-            max_width,
-            ..
-        }) if *x == 8.0
-            && *y == 8.0
-            && utf8.as_ref() == "Hi"
-            && *color == [1, 2, 3, 4]
-            && *font_size == 16.0
-            && *max_width >= 16.0
-    ));
+    let Some(crate::scene::Command::Text {
+        x,
+        y,
+        shaped,
+        color,
+        ..
+    }) = list.commands.first()
+    else {
+        panic!("text first: {:?}", list.commands);
+    };
+    assert_eq!((*x, *y), (8.0, 8.0));
+    assert_eq!(crate::text::test_support::texts(&list), ["Hi"]);
+    assert_eq!(*color, [1, 2, 3, 4]);
+    // The frozen glyphs carry the scaled font size and the committed width.
+    let shaped = shaped.as_deref().expect("glyphs");
+    assert_eq!(shaped.runs[0].font_size, 16.0);
+    assert!(shaped.size[0] >= 16.0, "{:?}", shaped.size);
     Ok(())
 }
 
@@ -159,16 +150,18 @@ fn clip_wraps_an_image_and_nested_clips_stay_balanced() -> Result<(), crate::Err
     tree.add_child(outer, inner)?;
     tree.add_child(inner, text)?;
     tree.layout()?;
+    let list = tree.record()?;
     assert!(matches!(
-        tree.record()?.commands.as_slice(),
+        list.commands.as_slice(),
         [
             crate::scene::Command::PushClip { corner_radius: outer_radius, .. },
             crate::scene::Command::PushClip { corner_radius: inner_radius, .. },
-            crate::scene::Command::Text { utf8, .. },
+            crate::scene::Command::Text { .. },
             crate::scene::Command::Pop,
             crate::scene::Command::Pop,
-        ] if *outer_radius == 3.0 && *inner_radius == 1.0 && utf8.as_ref() == "Hi"
+        ] if *outer_radius == 3.0 && *inner_radius == 1.0
     ));
+    assert_eq!(crate::text::test_support::texts(&list), ["Hi"]);
     Ok(())
 }
 
@@ -179,14 +172,16 @@ fn opacity_wraps_text() -> Result<(), crate::Error> {
     let text = tree.text("Hi", 16.0, [1, 2, 3, 4])?;
     tree.add_child(fade, text)?;
     tree.layout()?;
+    let list = tree.record()?;
     assert!(matches!(
-        tree.record()?.commands.as_slice(),
+        list.commands.as_slice(),
         [
             crate::scene::Command::PushOpacity { alpha, .. },
-            crate::scene::Command::Text { utf8, .. },
+            crate::scene::Command::Text { .. },
             crate::scene::Command::Pop,
-        ] if *alpha == 128 && utf8.as_ref() == "Hi"
+        ] if *alpha == 128
     ));
+    assert_eq!(crate::text::test_support::texts(&list), ["Hi"]);
     Ok(())
 }
 
@@ -214,7 +209,10 @@ fn text_scale_multiplies_measurement_and_the_recorded_size() -> Result<(), crate
     assert!((tree.rect(text)?.w - logical * 2.0).abs() < 0.01);
     let list = tree.record()?;
     let size = list.commands.iter().find_map(|command| match command {
-        crate::scene::Command::Text { font_size, .. } => Some(*font_size),
+        crate::scene::Command::Text { shaped, .. } => shaped
+            .as_ref()
+            .and_then(|shaped| shaped.runs.first())
+            .map(|run| run.font_size),
         _ => None,
     });
     assert_eq!(size, Some(32.0));
@@ -278,7 +276,7 @@ fn transform_wraps_children_and_hit_uses_the_inverse() -> Result<(), crate::Erro
                 scale_x,
                 scale_y,
             },
-            crate::scene::Command::Text { utf8, x, y, .. },
+            crate::scene::Command::Text { x, y, .. },
             crate::scene::Command::Pop,
             crate::scene::Command::Pop,
         ] if *translate_x == 40.0
@@ -286,10 +284,10 @@ fn transform_wraps_children_and_hit_uses_the_inverse() -> Result<(), crate::Erro
             && *rotate_rad == 0.0
             && *scale_x == 2.0
             && *scale_y == 2.0
-            && utf8.as_ref() == "Hi"
             && *x == before.x
             && *y == before.y
     ));
+    assert_eq!(crate::text::test_support::texts(&tree.record()?), ["Hi"]);
     assert!(matches!(
         tree.set_transform(text, 0.0, 0.0, 0.0, 1.0),
         Err(crate::Error::WrongKind)
@@ -471,10 +469,9 @@ fn flat_and_layer_trees_agree() -> Result<(), crate::Error> {
     shifted_origin.layout()?;
     agree(&mut shifted_origin)?;
     let list = shifted_origin.record()?;
+    assert_eq!(crate::text::test_support::texts(&list), ["origin"]);
     let spot = list.commands.iter().find_map(|command| match command {
-        crate::scene::Command::Text { x, y, utf8, .. } if utf8.as_ref() == "origin" => {
-            Some((*x, *y))
-        }
+        crate::scene::Command::Text { x, y, .. } => Some((*x, *y)),
         _ => None,
     });
     let rect = shifted_origin.rect(origin_text)?;

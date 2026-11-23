@@ -9,7 +9,7 @@ crate-type = ["staticlib"]
 
 [target.'cfg(target_os = "ios")'.dependencies]
 embedder = { workspace = true }
-raster = { workspace = true, features = ["impeller"] }
+raster = { workspace = true }
 engine = { workspace = true, features = ["js"] }
 block2 = "0.6.2"
 dispatch2 = "0.3.1"

@@ -1,5 +1,4 @@
 # 与 just check 对齐，并检查 rustfmt。
-# Android 任务使用仓库中的 Impeller SDK 归档。
 # embedder-macos crate 只在 macOS 上编译。
 
 name: check
@@ -40,8 +39,6 @@ jobs:
         run: cargo clippy --workspace --exclude embedder-macos --all-targets -- -D warnings
       - name: JavaScript feature boundaries
         run: python3 tools/check-javascript-boundaries.py
-      - name: Impeller SDK matrix tests
-        run: python3 tools/test_impeller_sdk.py
       - name: generated native module declarations
         run: cargo run --locked -p embedder --bin module-stubs -- --check
       - uses: actions/setup-node@v4
@@ -58,7 +55,11 @@ jobs:
         run: node tools/check-native-module-types.mjs
       - name: standard library contract
         run: node tools/check-standard-library.mjs
+      - name: Install headless Vulkan driver
+        run: sudo apt-get install -y mesa-vulkan-drivers
       - name: test
+        env:
+          IMPASTO_TEST_GPU: "1"
         run: cargo test --workspace --exclude embedder-macos
 
   rust-macos:

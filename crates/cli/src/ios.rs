@@ -282,8 +282,7 @@ fn prepare_application(
 
     let bundle = bundle_in(app, options, Some("ios"), &path.join("bundle"))?;
     let rust_target_dir = base.join("target");
-    let sdk = impeller_sdk(&framework, target)?;
-    let native_flags = build_rust(&framework, &rust_target_dir, target, &sdk, options)?;
+    let native_flags = build_rust(&framework, &rust_target_dir, target, options)?;
     let library = rust_target_dir
         .join(target)
         .join(profile)
@@ -296,7 +295,6 @@ fn prepare_application(
         BuildInputs {
             bundle: &bundle,
             library: &library,
-            sdk: &sdk,
             script,
             modules: &modules,
             native_flags: &native_flags,
@@ -350,23 +348,10 @@ fn verify_signature(application: &Path) -> Result<()> {
     toolchain::run(command, "校验 iOS 应用签名")
 }
 
-fn impeller_sdk(framework: &Path, target: &str) -> Result<PathBuf> {
-    let output = Command::new("python3")
-        .arg(framework.join("tools/impeller_sdk.py"))
-        .args(["prepare", target])
-        .env("PYTHONIOENCODING", "UTF-8")
-        .output()
-        .context("启动 Impeller SDK 准备工具")?;
-    Ok(PathBuf::from(
-        require_output(output, "准备 iOS Impeller SDK")?.trim(),
-    ))
-}
-
 fn build_rust(
     framework: &Path,
     target_dir: &Path,
     target: &str,
-    sdk: &Path,
     options: &BuildOptions,
 ) -> Result<String> {
     // rustc bundles the native static archives into libembedder_ios.a. The
@@ -388,8 +373,7 @@ fn build_rust(
         .arg("--target-dir")
         .arg(target_dir)
         .env_remove("SDKROOT")
-        .env("IPHONEOS_DEPLOYMENT_TARGET", "15.0")
-        .env("IMPASTO_IMPELLER_SDK_DIR", sdk);
+        .env("IPHONEOS_DEPLOYMENT_TARGET", "15.0");
     if !options.debug {
         // Xcode 27's strip can leave host proc-macro dylibs unloadable by dyld.
         command.args([
@@ -436,7 +420,6 @@ fn bundle_id(app: &App) -> String {
 struct BuildInputs<'a> {
     bundle: &'a Path,
     library: &'a Path,
-    sdk: &'a Path,
     script: &'a str,
     modules: &'a str,
     native_flags: &'a str,
@@ -619,15 +602,12 @@ fn stage(project: &Path, host: &Path, app: &App, inputs: BuildInputs<'_>) -> Res
     copy_tree(&app.assets(), &resources.join("assets"), &[])?;
     fs::write(resources.join("app.modules"), inputs.modules)?;
     fs::copy(inputs.bundle, resources.join(inputs.script))?;
-    fs::copy(
-        inputs.sdk.join("LICENSE"),
-        resources.join("Impeller-LICENSE"),
-    )?;
     let font_notice = fs::read_to_string(host.join("../android/assets/fonts/NOTICE"))?;
     let license = fs::read_to_string(host.join("../../../LICENSE"))?;
+    let notice = fs::read_to_string(host.join("../../../NOTICE"))?;
     fs::write(
-        resources.join("Roboto-NOTICE"),
-        format!("{font_notice}\n{license}"),
+        resources.join("ThirdParty-NOTICE"),
+        format!("{notice}\n{font_notice}\n{license}"),
     )?;
 
     write_privacy_manifest(

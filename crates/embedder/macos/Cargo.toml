@@ -8,9 +8,6 @@ publish.workspace = true
 name = "macos"
 path = "src/main.rs"
 
-[features]
-impeller = ["raster/impeller"]
-
 [dependencies]
 anyhow = "1"
 engine = { workspace = true, features = ["js"] }

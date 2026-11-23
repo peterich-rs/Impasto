@@ -30,7 +30,6 @@ use objc2_foundation::{
 };
 
 use crate::text_client::Marked;
-use objc2_metal::{MTLCreateSystemDefaultDevice, MTLPixelFormat};
 use objc2_quartz_core::{CALayer, CAMetalLayer};
 
 use crate::pointer::{PointerSample, pointer_event, scene_f32};
@@ -1026,13 +1025,16 @@ pub fn run(
                 embedder::http_client()
                     .map_err(|message| RunError::Window(anyhow::anyhow!(message)))?,
             ),
-            open_raster: Box::new(raster::Rasterizer::create_metal),
-            open_surface: Box::new(move |_engine, target| {
-                Ok(Box::new(MetalSurface::new(
-                    target.layer,
+            open_raster: Box::new(|fonts| {
+                raster::Rasterizer::create(raster::RasterOptions::default(), fonts)
+            }),
+            open_surface: Box::new(move |raster, target| {
+                Ok(Box::new(MetalSurface::open(
+                    raster,
+                    target,
                     dump_for_surface.clone(),
                     Arc::clone(&exit_for_surface),
-                )))
+                )?))
             }),
             dump_list,
             inspect,
@@ -1077,15 +1079,7 @@ pub fn run(
     unsafe { window.setReleasedWhenClosed(false) };
 
     let scale = point_scale(&window, mtm);
-    let Some(device) = MTLCreateSystemDefaultDevice() else {
-        return Err(RunError::Window(anyhow::anyhow!(
-            "Metal device was not created"
-        )));
-    };
     let layer = CAMetalLayer::layer();
-    layer.setDevice(Some(&device));
-    layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-    layer.setFramebufferOnly(false);
     layer.setContentsScale(scale);
     layer.setFrame(frame);
     layer.setDrawableSize(CGSize::new(CONTENT_WIDTH * scale, CONTENT_HEIGHT * scale));

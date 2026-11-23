@@ -16,7 +16,7 @@ fn sample_gallery_frames() {
         session.metrics(&phone());
         let first = pump_first(session.as_mut());
         let target = if scenario == "click" {
-            let (navigation, next_frame) = if texts(&first).contains(&"市场") {
+            let (navigation, next_frame) = if texts(&first).iter().any(|text| text == "市场") {
                 (first, 16.0)
             } else {
                 let (x, y) = text_spot(&first, "⋯");

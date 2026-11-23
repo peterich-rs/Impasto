@@ -41,7 +41,6 @@ pub(super) struct RasterHost {
 
 impl Drop for RasterHost {
     fn drop(&mut self) {
-        // A Vulkan swapchain needs the graphics context while it retires.
         self.surfaces.clear();
         *lock(&self.upload) = None;
     }
@@ -124,7 +123,6 @@ pub(super) struct FrameSubmission {
     pub(super) placements_changed: bool,
     pub(super) layers_changed: bool,
     pub(super) reloads: Vec<String>,
-    pub(super) fonts: Vec<(String, Arc<[u8]>)>,
     pub(super) census: Option<Arc<engine::semantics::ImageCensus>>,
     pub(super) hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
 }
@@ -200,17 +198,14 @@ fn render_layers(
         ..
     } = *submission;
     let reloads = std::mem::take(&mut submission.reloads);
-    let fonts = std::mem::take(&mut submission.fonts);
     let census = submission.census.take();
     let reloaded = !reloads.is_empty();
     for source in reloads {
         graphics.images.reload(&source);
-    }
-    again |= reloaded;
-    if !fonts.is_empty() {
-        install_fonts(&mut graphics.raster.borrow_mut(), fonts);
+        graphics.raster.borrow_mut().forget_texture(&source);
         graphics.installed = None;
     }
+    again |= reloaded;
     let Some(tree) = submission.tree.as_ref() else {
         return Ok(RasterOutput::finish(again));
     };
@@ -253,6 +248,14 @@ fn render_layers(
         }
         FrameStep::Submit => {
             let _trace = Section::begin(c"Impasto submit");
+            let bucket = images::scale_bucket(scale);
+            if graphics
+                .installed
+                .as_ref()
+                .is_some_and(|installed| images::scale_bucket(installed.scale) != bucket)
+            {
+                graphics.raster.borrow_mut().invalidate_textures();
+            }
             graphics.images.install_uploaded(
                 &mut graphics.raster.borrow_mut(),
                 images::scale_bucket(scale),
@@ -294,6 +297,10 @@ fn render_layers(
                 .submit_layers(tree, scale, resolve);
             submit_ms = elapsed_ms(started);
             if let Err(status) = submitted {
+                if status == raster::Status::DeviceLost {
+                    recover_device(graphics)?;
+                    return Ok(RasterOutput::finish(true));
+                }
                 tracing::error!(
                     target: "impasto::render::present",
                     %status,
@@ -306,9 +313,6 @@ fn render_layers(
                         None,
                         Some(number),
                     );
-                }
-                if status == raster::Status::NotLinked {
-                    return Err(BootError::Engine(status));
                 }
                 // A rejected list is not a lost surface. Do not force another vsync.
                 return Ok(RasterOutput::finish(again));
@@ -335,6 +339,18 @@ fn render_layers(
     let present_ms = elapsed_ms(started);
     let work_ms = elapsed_ms(frame_started);
     let stats = graphics.raster.borrow().submit_stats();
+    if presented.is_ok() {
+        tracing::trace!(target: "impasto::render::gpu",
+            draws = stats.render.draws,
+            passes = stats.render.passes,
+            pooled_texture_bytes = stats.render.pooled_texture_bytes,
+            atlas_bytes = stats.atlas.bytes,
+            atlas_hits = stats.atlas.hits,
+            atlas_misses = stats.atlas.misses,
+            atlas_uploads = stats.atlas.uploads,
+            atlas_evictions = stats.atlas.evictions,
+            "render resources");
+    }
     if matches!(step, FrameStep::Submit) {
         Section::event(|| {
             format!(
@@ -347,7 +363,7 @@ fn render_layers(
             )
         });
     }
-    let shapes = graphics.raster.borrow_mut().take_shape_stats();
+    let shapes = submission.measure;
     let timing = FrameTiming {
         number,
         vsync_ms: time.vsync_ms,
@@ -364,20 +380,16 @@ fn render_layers(
         semantics_ms: phase.semantics_ms,
         submit_ms,
         present_ms,
-        shapes_built: shapes.built.saturating_add(submission.measure.built),
-        shapes_measure_hit: shapes
-            .measure_hit
-            .saturating_add(submission.measure.measure_hit),
-        shapes_measure_miss: shapes
-            .measure_miss
-            .saturating_add(submission.measure.measure_miss),
+        shapes_built: shapes.built,
+        shapes_measure_hit: shapes.measure_hit,
+        shapes_measure_miss: shapes.measure_miss,
         shapes_paint_hit: shapes.paint_hit,
         shapes_paint_miss: shapes.paint_miss,
-        shapes_bridged: shapes.bridged,
+        atlas_hits: stats.atlas.hits,
         picture_rebuilt: stats.picture_rebuilt,
         picture_reused: stats.picture_reused,
         layer_count: stats.layer_count,
-        paragraphs: stats.paragraphs,
+        atlas_entries: u32::try_from(stats.atlas.entries).unwrap_or(u32::MAX),
         pictures: stats.pictures,
         textures: stats.textures,
     };
@@ -388,34 +400,22 @@ fn render_layers(
         timing: Some(timing),
     };
     let present_error = presented.as_ref().err().copied();
-    if present_error == Some(raster::Status::DeviceLost) && graphics.device_recoveries < 2 {
-        graphics.device_recoveries += 1;
-        tracing::warn!(target: "impasto::render::gpu", attempts = graphics.device_recoveries, "graphics device lost, rebuilding");
-        *lock(&graphics.upload) = None;
-        graphics.images.invalidate_gpu();
-        {
-            let mut raster = graphics.raster.borrow_mut();
-            graphics
-                .surfaces
-                .recover_device(&mut raster)
-                .map_err(BootError::Engine)?;
-            for frame in graphics.external_gpu.values_mut() {
-                frame.image = (frame.import)(&raster);
-            }
-            *lock(&graphics.upload) = raster.texture_factory();
-        }
-        graphics.installed = None;
-        graphics.gpu = Gpu::Flush;
-        graphics.needs_present = true;
+    if present_error == Some(raster::Status::DeviceLost) {
+        recover_device(graphics)?;
         return Ok(RasterOutput {
             again: true,
             ..output
         });
     }
+    if present_error == Some(raster::Status::OutOfMemory) {
+        graphics.raster.borrow_mut().trim();
+        graphics.images.trim();
+        graphics.installed = None;
+    }
     let after = after_present(presented, again);
     if after == AfterPresent::Fatal {
         return Err(BootError::Engine(
-            present_error.unwrap_or(raster::Status::NotLinked),
+            present_error.unwrap_or(raster::Status::DeviceLost),
         ));
     }
     if after == AfterPresent::Rejected {
@@ -467,6 +467,29 @@ fn render_layers(
     }
     output.again = again;
     Ok(output)
+}
+
+fn recover_device(graphics: &mut RasterHost) -> Result<(), BootError> {
+    if graphics.device_recoveries >= 2 {
+        return Err(BootError::Engine(raster::Status::DeviceLost));
+    }
+    graphics.device_recoveries += 1;
+    tracing::warn!(target: "impasto::render::gpu", attempts = graphics.device_recoveries, "graphics device lost, rebuilding");
+    *lock(&graphics.upload) = None;
+    graphics.images.invalidate_gpu();
+    let mut raster = graphics.raster.borrow_mut();
+    graphics
+        .surfaces
+        .recover_device(&mut raster)
+        .map_err(BootError::Engine)?;
+    for frame in graphics.external_gpu.values_mut() {
+        frame.image = (frame.import)(&raster);
+    }
+    *lock(&graphics.upload) = raster.texture_factory();
+    graphics.installed = None;
+    graphics.gpu = Gpu::Flush;
+    graphics.needs_present = true;
+    Ok(())
 }
 
 fn images_ready(
@@ -532,16 +555,4 @@ fn note_step(runtime: &mut RasterHost, step: FrameStep) {
     }
     runtime.last_step = Some((step, gpu));
     tracing::debug!(target: "impasto::render", ?step, ?gpu, "frame step");
-}
-
-/// Registers queued faces before `submit`. A failure logs the family and status
-/// only, then the frame continues with the faces already on the raster.
-pub(super) fn install_fonts(raster: &mut raster::Rasterizer, fonts: Vec<(String, Arc<[u8]>)>) {
-    for (family, bytes) in fonts {
-        if let Err(status) = raster.register_shared_font(bytes, &family) {
-            tracing::warn!(target: "impasto::shell", %family, %status, "font registration failed");
-        } else {
-            tracing::info!(target: "impasto::shell", %family, "font registered");
-        }
-    }
 }

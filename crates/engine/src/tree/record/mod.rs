@@ -460,7 +460,7 @@ impl Tree {
                 list,
             });
         }
-        emit_text(self.text_scale, commands, node, x, y, &marks);
+        emit_text(commands, node, x, y, &marks);
         emit_image(commands, node, x, y);
         if !at.descend {
             return 1;
@@ -1354,23 +1354,15 @@ fn translate_command(command: &Command, dx: f32, dy: f32) -> Command {
         Command::Text {
             x,
             y,
-            max_width,
-            font_size,
-            paragraph,
+            shaped,
             color,
-            utf8,
-            style,
-            spans,
+            span_paints,
         } => Command::Text {
             x: x + dx,
             y: y + dy,
-            max_width,
-            font_size,
-            paragraph,
+            shaped,
             color,
-            utf8,
-            style,
-            spans,
+            span_paints,
         },
         Command::Image {
             x,
@@ -1466,9 +1458,19 @@ fn command_outside(command: &Command, clip: Option<PaintClip>) -> bool {
         | Command::PushBlur { x, y, w, h, .. }
         | Command::PushBackdropBlur { x, y, w, h, .. }
         | Command::PushBlend { x, y, w, h, .. } => outside(clip, *x, *y, *w, *h),
-        Command::Text {
-            x, y, font_size, ..
-        } => outside(clip, *x, *y, font_size.max(1.0), *font_size),
+        Command::Text { x, y, shaped, .. } => {
+            // Cull on the frozen glyph extent. A paragraph without glyphs
+            // paints nothing, so it is always outside the clip.
+            shaped.as_deref().is_none_or(|shaped| {
+                outside(
+                    clip,
+                    *x,
+                    *y,
+                    shaped.size[0].max(1.0),
+                    shaped.size[1].max(1.0),
+                )
+            })
+        }
         Command::Canvas {
             x,
             y,

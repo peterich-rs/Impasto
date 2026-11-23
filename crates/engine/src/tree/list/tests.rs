@@ -392,7 +392,8 @@ fn paints_group(tree: &mut Tree) -> bool {
     };
     tree.layer_tree().pictures.iter().any(|picture| {
         picture.commands().iter().any(|command| {
-            matches!(command, crate::scene::Command::Text { utf8, .. } if utf8.as_ref() == "Group")
+            matches!(command, crate::scene::Command::Text { shaped, .. }
+                if shaped.as_deref().is_some_and(|shaped| crate::text::test_support::mono_text(shaped) == "Group"))
         })
     })
 }

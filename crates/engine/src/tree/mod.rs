@@ -56,7 +56,7 @@ use crate::text::Shaper;
 /// Render tree. `layout` writes positions. `pointer` updates click and drag.
 ///
 /// The shaper is erased here so one tree type serves the test shaper and the
-/// host's Impeller shaper. The trait is not `Send`: an Impeller typography
+/// host's Parley shaper. The trait is not `Send`: the typography
 /// context stays on the UI thread, and so does the tree.
 pub struct Tree {
     slots: Vec<Slot>,

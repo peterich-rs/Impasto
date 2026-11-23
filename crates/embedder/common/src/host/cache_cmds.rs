@@ -37,7 +37,12 @@ fn memory_warning(runtime: &mut UiHost) {
 }
 
 fn image_ready(runtime: &mut UiHost, ready: ImageReady) {
+    let decoded =
+        matches!(&ready, ImageReady::Decoded(handle) if uses_texture(runtime, &handle.source));
     runtime.graphics.post(move |graphics| {
+        if decoded {
+            graphics.installed = None;
+        }
         if let Some(message) = graphics.images.apply(ready) {
             tracing::error!(target: "impasto::render::image", "{message}");
         }
@@ -47,9 +52,11 @@ fn image_ready(runtime: &mut UiHost, ready: ImageReady) {
 
 fn reload(runtime: &mut UiHost, source: String) {
     tracing::debug!(target: "impasto::render::image", source, "image reload");
-    runtime
-        .graphics
-        .post(move |graphics| graphics.images.reload(&source));
+    runtime.graphics.post(move |graphics| {
+        graphics.images.reload(&source);
+        graphics.raster.borrow_mut().forget_texture(&source);
+        graphics.installed = None;
+    });
     arm(runtime);
 }
 
@@ -77,9 +84,6 @@ fn external_gpu_texture(
     runtime.graphics.post(move |graphics| {
         if let Some(import) = frame {
             let image = import(&graphics.raster.borrow());
-            if image.is_none() {
-                return;
-            }
             graphics.external_gpu.insert(
                 source.clone(),
                 crate::images::ExternalGpuFrame { import, image },

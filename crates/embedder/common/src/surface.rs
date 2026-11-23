@@ -198,7 +198,7 @@ impl SurfaceHost {
             return Changed::Ignored;
         }
         open.metrics = metrics;
-        let resized = pixels.is_usable() && open.pixels != pixels;
+        let resized = open.pixels != pixels;
         if resized {
             open.pixels = pixels;
         }
@@ -240,7 +240,7 @@ impl SurfaceHost {
         raster: &mut raster::Rasterizer,
     ) -> Result<(), raster::Status> {
         let open = self.current.as_mut().ok_or(raster::Status::NotReady)?;
-        open.surface.recover_device(raster)
+        open.surface.recover_device(raster, open.pixels)
     }
 
     pub fn clear(&mut self) {
@@ -249,7 +249,7 @@ impl SurfaceHost {
 }
 
 /// Physical pixels for a surface. A non-positive or non-finite axis is zero,
-/// which tells Vulkan to keep the extent it already has.
+/// so acquisition can wait for a drawable size.
 pub fn pixel_size(metrics: Metrics) -> raster::PixelSize {
     raster::PixelSize {
         width: points_to_pixels(metrics.width, metrics.device_pixel_ratio),

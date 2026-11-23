@@ -44,7 +44,7 @@ pub use http::{
     HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, HttpResponse,
     OpenWireClient, RedirectMode, http_client,
 };
-pub use images::{ExternalFrame, ImportExternalFrame, pixel_count_ok};
+pub use images::{ExternalFrame, ImportExternalFrame, pixel_count_ok, unpremultiply_rgba};
 pub use images::{ImageDecoder, ImageError, ImageHandle, ImageReady};
 pub use log_sub::install as install_log;
 pub use log_sub::set_log_targets;
@@ -149,15 +149,17 @@ pub trait Services: Send {
 pub trait Surface {
     /// Retires a lost device and its surface. The next present can open the
     /// window again once the host resubmits its current layer tree.
-    fn recover_device(&mut self, _engine: &mut raster::Rasterizer) -> Result<(), raster::Status> {
+    fn recover_device(
+        &mut self,
+        _engine: &mut raster::Rasterizer,
+        _pixels: raster::PixelSize,
+    ) -> Result<(), raster::Status> {
         Err(raster::Status::DeviceLost)
     }
 
     /// Acquire, draw, and present.
     ///
-    /// `pixels` is the drawable size the host posted with the surface. Vulkan
-    /// copies it onto the swapchain before acquire. Metal reads the size from
-    /// the layer.
+    /// `pixels` is the current drawable size in physical pixels.
     fn present(
         &mut self,
         raster: &mut raster::Rasterizer,
@@ -228,7 +230,8 @@ pub struct Boot {
     /// Absent HTTP fails with `network is not linked`. Hosts inject [`http_client`].
     pub http: Option<Arc<dyn HttpClient>>,
     /// Creates the graphics context on the render thread.
-    pub open_raster: Box<dyn FnOnce() -> Result<raster::Rasterizer, raster::Status> + Send>,
+    pub open_raster:
+        Box<dyn FnOnce(raster::FontLibrary) -> Result<raster::Rasterizer, raster::Status> + Send>,
     pub open_surface: OpenSurface,
     /// Log one line of layer-tree shape after a frame records new layers.
     pub dump_list: bool,

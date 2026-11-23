@@ -102,7 +102,6 @@ pub struct FrameOutput {
     pub ime: Option<ImeUpdate>,
     pub semantics: Option<crate::semantics::SemanticsPatch>,
     pub platform_views: Option<Arc<[crate::tree::PlatformViewPlacement]>>,
-    pub fonts: Vec<(String, Arc<[u8]>)>,
     pub reloads: Vec<String>,
     pub clipboard: Option<String>,
     pub exit: bool,
@@ -122,7 +121,6 @@ impl FrameOutput {
             ime: None,
             semantics: None,
             platform_views: None,
-            fonts: Vec::new(),
             reloads: Vec::new(),
             clipboard: None,
             exit: false,
@@ -216,13 +214,6 @@ pub trait Session {
     /// Whether the host currently needs semantics. Re-enabling must publish a fresh snapshot.
     fn set_semantics_enabled(&mut self, _enabled: bool) {}
     fn set_autofill_enabled(&mut self, _enabled: bool) {}
-    /// Font faces queued by the session since the last take.
-    ///
-    /// The host registers them on the render thread before `submit`. The default
-    /// is empty, so a session that does not load faces stays out of the cap.
-    fn take_fonts(&mut self) -> Vec<(String, Arc<[u8]>)> {
-        Vec::new()
-    }
     /// Image sources the session asked to fetch again. The host drops those cache
     /// keys on the render thread before it reads the cache. The default is empty.
     fn take_reloads(&mut self) -> Vec<String> {

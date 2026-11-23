@@ -152,7 +152,7 @@ fi
     printf 'impasto_checkout_dirty=false\n'
   fi
   if [[ $reference == impasto ]]; then
-    sed -n '1,12p' "$repo_dir/crates/impeller-sys/sdk.lock"
+    cargo tree --locked --manifest-path "$repo_dir/Cargo.toml" -p raster --depth 1 --prefix none | sed -n '/^wgpu v/p; /^parley v/p'
   else
     version="$repo_dir/target/android-flutter-reference/flutter-version.json"
     if [[ -f $version ]]; then cat "$version"; fi

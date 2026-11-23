@@ -1,7 +1,4 @@
-//! ImageIO paths that match the previous macOS host.
-//!
-//! Logo pixels are tightly packed RGBA (`PremultipliedLast` + 32-bit big endian).
-//! Frame dumps are the Metal texture's BGRA bytes (`PremultipliedFirst` + 32-bit little endian).
+//! ImageIO decoding and straight-alpha sRGB frame dumps.
 
 use std::path::Path;
 use std::ptr;
@@ -28,7 +25,7 @@ pub fn load_rgba_png(path: &Path) -> anyhow::Result<Rgba> {
     rgba_from_source(&source, &path.display().to_string())
 }
 
-/// Decode PNG, JPEG, or WebP bytes the same way as a file: device RGB, premultiplied.
+/// Decode PNG, JPEG, or WebP bytes to straight-alpha sRGB.
 pub fn load_rgba_bytes(bytes: &[u8]) -> anyhow::Result<Rgba> {
     let data = CFData::from_bytes(bytes);
     let source = {
@@ -51,7 +48,7 @@ fn rgba_from_source(source: &CGImageSource, label: &str) -> anyhow::Result<Rgba>
     let row = width.checked_mul(4).context("logo is too wide")?;
     let len = row.checked_mul(height).context("logo is too large")?;
     let mut pixels = vec![0u8; len];
-    let space = CGColorSpace::new_device_rgb().context("device RGB is unavailable")?;
+    let space = srgb()?;
     let info = CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
     // SAFETY: `pixels` is `len` bytes and outlives `context`. The bitmap is 8 bits per channel.
     let context = unsafe {
@@ -72,6 +69,7 @@ fn rgba_from_source(source: &CGImageSource, label: &str) -> anyhow::Result<Rgba>
     );
     CGContext::draw_image(Some(&context), rect, Some(&image));
     drop(context);
+    embedder::unpremultiply_rgba(&mut pixels);
     Ok(Rgba {
         width: u32::try_from(width).context("logo width does not fit u32")?,
         height: u32::try_from(height).context("logo height does not fit u32")?,
@@ -79,19 +77,17 @@ fn rgba_from_source(source: &CGImageSource, label: &str) -> anyhow::Result<Rgba>
     })
 }
 
-pub fn write_bgra_png(path: &Path, width: usize, height: usize, bgra: &[u8]) -> anyhow::Result<()> {
+pub fn write_rgba_png(path: &Path, width: usize, height: usize, rgba: &[u8]) -> anyhow::Result<()> {
     let row = width.checked_mul(4).context("frame is too wide")?;
     let len = row.checked_mul(height).context("frame is too large")?;
-    if bgra.len() != len || width == 0 || height == 0 {
+    if rgba.len() != len || width == 0 || height == 0 {
         anyhow::bail!("failed to write {}", path.display());
     }
-    let data = CFData::from_bytes(bgra);
+    let data = CFData::from_bytes(rgba);
     let provider = CGDataProvider::with_cf_data(Some(&data))
         .with_context(|| format!("failed to write {}", path.display()))?;
-    let space = CGColorSpace::new_device_rgb().context("device RGB is unavailable")?;
-    let info = CGBitmapInfo(
-        CGImageAlphaInfo::PremultipliedFirst.0 | CGImageByteOrderInfo::Order32Little.0,
-    );
+    let space = srgb()?;
+    let info = CGBitmapInfo(CGImageAlphaInfo::Last.0 | CGImageByteOrderInfo::Order32Big.0);
     // SAFETY: `provider` retains `data` for the image. `decode` is null, so every channel is used.
     let image = unsafe {
         CGImage::new(
@@ -123,6 +119,12 @@ pub fn write_bgra_png(path: &Path, width: usize, height: usize, bgra: &[u8]) -> 
     } else {
         anyhow::bail!("failed to write {}", path.display())
     }
+}
+
+fn srgb() -> anyhow::Result<objc2_core_foundation::CFRetained<CGColorSpace>> {
+    // SAFETY: the framework provides this static color space name.
+    let name = unsafe { objc2_core_graphics::kCGColorSpaceSRGB };
+    CGColorSpace::with_name(Some(name)).context("sRGB is unavailable")
 }
 
 fn file_url(path: &Path) -> anyhow::Result<objc2_core_foundation::CFRetained<CFURL>> {

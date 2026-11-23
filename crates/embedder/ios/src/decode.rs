@@ -143,6 +143,7 @@ fn decode(source: &str, bytes: &[u8]) -> Result<ImageHandle, ImageError> {
     );
     CGContext::draw_image(Some(&context), rect, Some(&image));
     drop(context);
+    embedder::unpremultiply_rgba(&mut pixels);
     Ok(ImageHandle {
         source: Arc::from(source),
         generation: 0,

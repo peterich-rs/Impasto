@@ -15,4 +15,7 @@ pub use command::{Command, DrawList};
 pub use image::ContentMode;
 pub use layer::{Layer, LayerId, LayerKind, LayerTree, Picture, PictureId, SELF_PICTURE};
 pub use paint::{BlendMode, BoxShadow, ColorSpace, ColorStop, Gradient, Shadow};
-pub use text::{FontSlant, ParagraphId, SpanPaint, TextAlign, TextOverflow, TextSpan, TextStyle};
+pub use text::{
+    DecorationLine, FontFaceId, FontSlant, PositionedGlyph, ShapedParagraph, ShapedRun, SpanPaint,
+    TextAlign, TextOverflow, TextSpan, TextStyle,
+};

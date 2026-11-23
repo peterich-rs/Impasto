@@ -42,10 +42,11 @@ pub fn after_present(result: Result<Presented, raster::Status>, again: bool) -> 
             raster::Status::PresentFailed
             | raster::Status::SurfaceLost
             | raster::Status::NotReady
-            | raster::Status::AcquireMiss,
+            | raster::Status::AcquireMiss
+            | raster::Status::OutOfMemory,
         ) => AfterPresent::Retry,
-        Err(raster::Status::BadScene) => AfterPresent::Rejected,
-        Err(raster::Status::NotLinked | raster::Status::DeviceLost) => AfterPresent::Fatal,
+        Err(raster::Status::BadScene | raster::Status::Occluded) => AfterPresent::Rejected,
+        Err(raster::Status::NoDevice(_) | raster::Status::DeviceLost) => AfterPresent::Fatal,
     }
 }
 
@@ -73,7 +74,10 @@ mod tests {
             AfterPresent::Retry
         );
         assert_eq!(
-            after_present(Err(raster::Status::NotLinked), false),
+            after_present(
+                Err(raster::Status::NoDevice(raster::RasterBackend::Metal)),
+                false
+            ),
             AfterPresent::Fatal
         );
         assert_eq!(

@@ -83,11 +83,11 @@ export type FrameSample = {
   submitMs: number;
   presentMs: number;
   layers: number;
-  paragraphs: number;
+  atlasEntries: number;
   pictures: number;
   textures: number;
   shapesBuilt?: number;
-  shapesBridged?: number;
+  atlasHits?: number;
   paintHit?: number;
   paintMiss?: number;
   pictureRebuilt?: number;
@@ -122,7 +122,7 @@ export type Platform = {
   dump: string | null;
 };
 
-export type Versions = { shell: string; enginePin: string; quickjsPin: string };"#;
+export type Versions = { shell: string; wgpu: string; parley: string; quickjsPin: string };"#;
 
 /// Extra host facts the hub does not own.
 #[derive(Clone)]
@@ -363,11 +363,11 @@ fn frames_channel(hub: &Arc<DiagnosticsHub>) -> Method {
                     ("submitMs", fnum(frame.submit_ms)),
                     ("presentMs", fnum(frame.present_ms)),
                     ("layers", num(u64::from(frame.layers))),
-                    ("paragraphs", num(u64::from(frame.paragraphs))),
+                    ("atlasEntries", num(u64::from(frame.atlas_entries))),
                     ("pictures", num(u64::from(frame.pictures))),
                     ("textures", num(u64::from(frame.textures))),
                     ("shapesBuilt", num(u64::from(frame.shapes_built))),
-                    ("shapesBridged", num(u64::from(frame.shapes_bridged))),
+                    ("atlasHits", num(u64::from(frame.atlas_hits))),
                     ("paintHit", num(u64::from(frame.shapes_paint_hit))),
                     ("paintMiss", num(u64::from(frame.shapes_paint_miss))),
                     ("pictureRebuilt", num(u64::from(frame.picture_rebuilt))),
@@ -467,17 +467,31 @@ fn versions_method() -> Method {
                 "shell",
                 PluginValue::Str(env!("CARGO_PKG_VERSION").to_owned()),
             ),
-            ("enginePin", PluginValue::Str(engine_pin().to_owned())),
+            ("wgpu", PluginValue::Str(locked_version("wgpu").to_owned())),
+            (
+                "parley",
+                PluginValue::Str(locked_version("parley").to_owned()),
+            ),
             ("quickjsPin", PluginValue::Str(quickjs_pin().to_owned())),
         ]))
     })
     .with_types("", "Versions")
 }
 
-fn engine_pin() -> &'static str {
-    const PIN: &str = include_str!("../../../../impeller-sys/sdk.lock");
-    PIN.lines()
-        .find_map(|line| line.strip_prefix("source "))
+fn locked_version(package: &str) -> &'static str {
+    include_str!("../../../../../Cargo.lock")
+        .split("[[package]]")
+        .find_map(|entry| {
+            let mut lines = entry.lines().filter(|line| !line.is_empty());
+            let name = lines.next()?.strip_prefix("name = \"")?.strip_suffix('"')?;
+            if name != package {
+                return None;
+            }
+            lines
+                .next()?
+                .strip_prefix("version = \"")?
+                .strip_suffix('"')
+        })
         .unwrap_or("unknown")
 }
 

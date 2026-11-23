@@ -10,7 +10,7 @@ default:
 clippy:
     cargo clippy --manifest-path "{{root}}/Cargo.toml" --workspace --exclude embedder-macos --all-targets -- -D warnings
 
-check: style-check boundaries impeller-sdk-test clippy test solid standard-check
+check: style-check boundaries clippy test solid standard-check
     @echo "check ok"
 
 bench:
@@ -45,9 +45,6 @@ solid:
 boundaries:
     python3 "{{root}}/tools/check-javascript-boundaries.py"
 
-impeller-sdk-test:
-    python3 "{{root}}/tools/test_impeller_sdk.py"
-
 standard-check:
     node "{{root}}/tools/check-standard-library.mjs"
 
@@ -72,19 +69,8 @@ gallery-dist:
     fi
     pnpm -C "$src" install && pnpm -C "$src" run build
 
-[positional-arguments]
-impeller *target:
-    python3 "{{root}}/tools/impeller_sdk.py" prepare "$@"
-
-[positional-arguments]
-impeller-source *target:
-    python3 "{{root}}/tools/impeller_sdk.py" build "$@"
-
 host: gallery-dist
-    #!/usr/bin/env bash
-    set -euo pipefail
-    sdk=$(python3 "{{root}}/tools/impeller_sdk.py" prepare)
-    IMPASTO_IMPELLER_SDK_DIR="$sdk" cargo run --manifest-path "{{root}}/Cargo.toml" -p embedder-macos --features impeller -- --js "{{root}}/apps/gallery-solid/dist/quotes.js" "{{logo}}"
+    cargo run --manifest-path "{{root}}/Cargo.toml" -p embedder-macos -- --js "{{root}}/apps/gallery-solid/dist/quotes.js" "{{logo}}"
 
 host-js: host
 

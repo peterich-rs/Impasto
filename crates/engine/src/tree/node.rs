@@ -301,8 +301,18 @@ pub(super) struct TextPayload {
     pub(super) editor: Option<crate::text::TextEditor>,
     /// Line boxes for the current metrics key. Color changes leave this in place.
     pub(super) metrics: Option<Arc<crate::text::ParagraphMetrics>>,
-    /// Last key measured for this node. Color is not part of the hit.
-    pub(super) cached: Option<crate::text::PaintKey>,
+    /// Last geometry key measured for this node. Color is not part of the key.
+    pub(super) cached: Option<crate::text::MetricsKey>,
+    /// Foreground the frozen glyphs were last recorded with. A change repaints
+    /// without a new shape.
+    pub(super) painted: Option<PaintedForeground>,
+}
+
+/// The brushes a text node's current command carries.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PaintedForeground {
+    pub(super) color: [u8; 4],
+    pub(super) span_paints: Arc<[crate::scene::SpanPaint]>,
 }
 
 impl TextPayload {
@@ -318,6 +328,7 @@ impl TextPayload {
             editor: None,
             metrics: None,
             cached: None,
+            painted: None,
         }
     }
 

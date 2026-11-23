@@ -246,7 +246,7 @@ impl Tree {
         self.edit_text(id, |text| text.style_mut().height = height)
     }
 
-    /// Marks every text node dirty so a text-scale change lays out again.
+    /// Reflows existing text after a change to font selection or scale.
     pub fn mark_text_dirty(&mut self) {
         let ids: Vec<NodeId> = self
             .slots
@@ -262,6 +262,7 @@ impl Tree {
             })
             .collect();
         for id in ids {
+            self.clear_metrics(id);
             let _ = self.touch_measure(id);
         }
     }
@@ -421,7 +422,7 @@ impl Tree {
             return Ok(Vec::new());
         }
         let key = self.text_key(id)?;
-        let metrics = self.shaper.metrics(&key.metrics);
+        let metrics = self.shaper.metrics(&key);
         let lines = &metrics.lines;
         let mut rects = Vec::new();
         for line in lines.iter() {
@@ -430,12 +431,12 @@ impl Tree {
             if from >= to {
                 continue;
             }
-            let left =
-                self.shaper
-                    .caret_at_unit(&key.metrics, from, crate::text::Affinity::Downstream);
-            let right =
-                self.shaper
-                    .caret_at_unit(&key.metrics, to, crate::text::Affinity::Upstream);
+            let left = self
+                .shaper
+                .caret_at_unit(&key, from, crate::text::Affinity::Downstream);
+            let right = self
+                .shaper
+                .caret_at_unit(&key, to, crate::text::Affinity::Upstream);
             let x = left.x.min(right.x);
             let w = (left.x - right.x).abs().max(1.0);
             rects.push(Rect {
@@ -462,14 +463,14 @@ impl Tree {
         let Ok(key) = self.text_key(id) else {
             return Vec::new();
         };
-        self.shaper.metrics(&key.metrics).lines.to_vec()
+        self.shaper.metrics(&key).lines.to_vec()
     }
 
     pub(super) fn word_at(&mut self, id: NodeId, text: &str, unit: u32) -> (u32, u32) {
         if let Ok(key) = self.text_key(id)
-            && key.metrics.text.as_ref() == text
+            && key.text.as_ref() == text
         {
-            return self.shaper.word_range(&key.metrics, unit);
+            return self.shaper.word_range(&key, unit);
         }
         crate::text::shaper::whitespace_word(text, unit)
     }
@@ -481,7 +482,7 @@ impl Tree {
         affinity: crate::text::Affinity,
     ) -> Result<crate::text::Caret, Error> {
         let key = self.text_key(id)?;
-        Ok(self.shaper.caret_at_unit(&key.metrics, unit, affinity))
+        Ok(self.shaper.caret_at_unit(&key, unit, affinity))
     }
 
     pub(super) fn caret_at_local(
@@ -491,7 +492,7 @@ impl Tree {
         y: f32,
     ) -> Result<crate::text::Caret, Error> {
         let key = self.text_key(id)?;
-        Ok(self.shaper.caret_at_point(&key.metrics, x, y))
+        Ok(self.shaper.caret_at_point(&key, x, y))
     }
 
     pub fn text_clipboard(&self, id: NodeId) -> Result<Option<String>, Error> {
@@ -541,7 +542,7 @@ impl Tree {
         let key = self.text_key(id)?;
         Ok(self
             .shaper
-            .caret_at_point(&key.metrics, local_x - abs_x, local_y - abs_y))
+            .caret_at_point(&key, local_x - abs_x, local_y - abs_y))
     }
 
     /// Caret rectangle for a UTF-16 index in a text node.
@@ -552,7 +553,7 @@ impl Tree {
     /// UTF-16 word range around `unit` in a text node.
     pub fn word_range(&mut self, id: NodeId, unit: u32) -> Result<(u32, u32), Error> {
         let key = self.text_key(id)?;
-        Ok(self.shaper.word_range(&key.metrics, unit))
+        Ok(self.shaper.word_range(&key, unit))
     }
 
     /// Content box, hidden ancestors, and inherited layout direction.
@@ -610,41 +611,47 @@ impl Tree {
         utf8: &str,
         font_size: f32,
         max_width: f32,
-        color: [u8; 4],
+        _color: [u8; 4],
         style: &TextStyle,
     ) -> TextSize {
-        let key = crate::text::paint_key(
+        let key = crate::text::metrics_key(
             Arc::from(utf8),
             Arc::new(style.clone()),
             &[],
             font_size * self.text_scale,
             max_width,
-            color,
         );
-        self.shaper.metrics(&key.metrics).size
+        self.shaper.metrics(&key).size
     }
 
-    pub(super) fn text_key(&self, id: NodeId) -> Result<crate::text::PaintKey, Error> {
+    pub(super) fn text_key(&self, id: NodeId) -> Result<crate::text::MetricsKey, Error> {
         let node = live_node(&self.slots, id)?;
         let text = node.text().ok_or(Error::NotText)?;
-        Ok(crate::text::paint_key(
+        Ok(crate::text::metrics_key(
             Arc::clone(&text.utf8),
             Arc::clone(&text.style),
             text.spans.as_ref(),
             text.font_size * self.text_scale,
             text.max_width.get(),
-            text.color,
         ))
     }
 
-    /// Registers a face for later measurement. Drawing registers the same bytes
-    /// on the gpu context.
+    /// Registers a face for later measurement and drawing. The window's font
+    /// library is shared, so the raster needs no second copy.
     pub fn register_font(&mut self, family: &str, bytes: &[u8]) -> bool {
-        self.shaper.register_font(family, bytes)
+        let registered = self.shaper.register_font(family, bytes);
+        if registered {
+            self.mark_text_dirty();
+        }
+        registered
     }
 
     pub fn register_shared_font(&mut self, family: &str, bytes: Arc<[u8]>) -> bool {
-        self.shaper.register_shared_font(family, bytes)
+        let registered = self.shaper.register_shared_font(family, bytes);
+        if registered {
+            self.mark_text_dirty();
+        }
+        registered
     }
 
     pub(super) fn sync_metrics(&mut self) {
@@ -671,7 +678,7 @@ impl Tree {
         let Ok(key) = self.text_key(id) else {
             return false;
         };
-        if key.metrics.text.is_empty() {
+        if key.text.is_empty() {
             self.clear_metrics(id);
             return false;
         }
@@ -679,18 +686,15 @@ impl Tree {
             .node(id)
             .ok()
             .and_then(|node| node.text())
-            .is_some_and(|text| {
-                text.cached.as_ref().is_some_and(|cached| {
-                    cached.metrics == key.metrics
-                        && cached.color == key.color
-                        && cached.span_paints.as_ref() == key.span_paints.as_ref()
-                })
-            });
+            .is_some_and(|text| text.cached.as_ref().is_some_and(|cached| *cached == key));
         if same {
             self.shaper.touch(&key);
             return false;
         }
-        let metrics = self.shaper.metrics_paint(&key);
+        // Shape at the node's final constraint so the frozen glyphs match the
+        // lines Taffy committed to. A wider intrinsic or provisional probe
+        // may have reused its size, but it did not shape at this width.
+        let metrics = self.shaper.metrics(&key);
         let Ok(node) = self.node_mut(id) else {
             return false;
         };
@@ -708,6 +712,7 @@ impl Tree {
         {
             text.metrics = None;
             text.cached = None;
+            text.painted = None;
         }
     }
 

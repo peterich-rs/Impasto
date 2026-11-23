@@ -680,6 +680,7 @@ impl Tree {
         {
             text.metrics = None;
             text.cached = None;
+            text.painted = None;
         }
         if let Some(source) = self
             .slots

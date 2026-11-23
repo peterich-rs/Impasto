@@ -1965,7 +1965,7 @@ fn justify_content(justify: Justify) -> JustifyContent {
 /// Size already laid out for this text, when `max_width` cannot change the lines.
 ///
 /// Taffy asks once at max-content and again at the definite width. The max-content
-/// pass uses a million-point constraint, which misses the paint slot and builds a
+/// pass uses a million-point constraint, which misses the frozen glyphs and builds a
 /// paragraph that is thrown away. A result that already fits inside its old
 /// constraint is the same at any wider limit, including that probe.
 fn reusable_text_metrics(
@@ -1975,7 +1975,7 @@ fn reusable_text_metrics(
 ) -> Option<&crate::text::ParagraphMetrics> {
     let cached = text.cached.as_ref()?;
     let metrics = text.metrics.as_ref()?;
-    let key = &cached.metrics;
+    let key = cached;
     if key.font_size != font_size.to_bits() || key.text.as_ref() != text.utf8.as_ref() {
         return None;
     }
@@ -1996,13 +1996,13 @@ fn reusable_text_metrics(
     None
 }
 
-fn spans_match(text: &super::node::TextPayload, cached: &crate::text::PaintKey) -> bool {
-    if text.spans.len() != cached.metrics.spans.len() {
+fn spans_match(text: &super::node::TextPayload, cached: &crate::text::MetricsKey) -> bool {
+    if text.spans.len() != cached.spans.len() {
         return false;
     }
     text.spans
         .iter()
-        .zip(cached.metrics.spans.iter())
+        .zip(cached.spans.iter())
         .all(|(span, metric)| {
             span.utf8 == metric.utf8.as_ref()
                 && span.weight == metric.weight
@@ -2078,15 +2078,14 @@ fn measure_leaf(
         // metrics key: family, weight, and runs, not a whitespace split alone.
         if matches!(available.width, AvailableSpace::MinContent) {
             let font_size = text.font_size * env.text_scale;
-            let paint = crate::text::paint_key(
+            let key = crate::text::metrics_key(
                 Arc::clone(&text.utf8),
                 Arc::clone(&text.style),
                 text.spans.as_ref(),
                 font_size,
                 SINGLE_LINE_MAX,
-                text.color,
             );
-            let (width, metrics) = env.shaper.min_content_metrics(&paint);
+            let (width, metrics) = env.shaper.min_content_metrics(&key);
             baseline = Some(metrics.first_baseline());
             let size = TextSize {
                 width,
@@ -2103,7 +2102,7 @@ fn measure_leaf(
             if let Some(metrics) = reusable_text_metrics(text, font_size, max_width) {
                 env.text_reused.set(env.text_reused.get().saturating_add(1));
                 let cached = text.cached.as_ref();
-                let paints_at = cached.map(|key| key.metrics.max_width).unwrap_or(0);
+                let paints_at = cached.map(|key| key.max_width).unwrap_or(0);
                 if paints_at == width_bits {
                     text.max_width.set(max_width);
                 }
@@ -2137,16 +2136,15 @@ fn measure_leaf(
                         generation: slot.generation,
                     });
                 }
-                let key = crate::text::paint_key(
+                let key = crate::text::metrics_key(
                     Arc::clone(&text.utf8),
                     Arc::clone(&text.style),
                     text.spans.as_ref(),
                     font_size,
                     max_width,
-                    text.color,
                 );
                 env.text_shaped.set(env.text_shaped.get().saturating_add(1));
-                let metrics = env.shaper.metrics_paint(&key);
+                let metrics = env.shaper.metrics(&key);
                 baseline = Some(metrics.first_baseline());
                 let size = metrics.size;
                 env.provisional.insert(index, (max_width, metrics));
@@ -2197,13 +2195,12 @@ fn mark_descendants_dirty(tree: &mut Tree, id: NodeId) {
 #[test]
 fn short_line_reuses_a_wider_constraint() {
     let mut text = super::node::TextPayload::new("Item 1", 16.0, [0, 0, 0, 255]);
-    text.cached = Some(crate::text::paint_key(
+    text.cached = Some(crate::text::metrics_key(
         Arc::clone(&text.utf8),
         Arc::clone(&text.style),
         &[],
         16.0,
         200.0,
-        text.color,
     ));
     text.metrics = Some(Arc::new(crate::text::ParagraphMetrics::with_baseline(
         TextSize {
@@ -2384,9 +2381,8 @@ fn same_output_text_reuses_layout_until_width_or_baseline_changes() -> Result<()
         "{trace:?}",
     );
     assert_eq!((tree.rect(quote)?, tree.rect(label)?), before);
-    assert!(tree.record()?.commands.iter().any(|command| {
-        matches!(command, crate::scene::Command::Text { utf8, .. } if utf8.as_ref() == "35.24")
-    }));
+    let texts = crate::text::test_support::texts(&tree.record()?);
+    assert!(texts.contains(&"35.24".to_owned()), "{texts:?}");
 
     tree.set_text(quote, "-123.45")?;
     tree.layout()?;
@@ -2426,9 +2422,8 @@ fn fixed_text_keeps_layout_when_new_ink_stays_inside_its_box() -> Result<(), Err
         (0, 0, 1)
     );
     assert_eq!((tree.rect(quote)?, tree.rect(next)?), before);
-    assert!(tree.record()?.commands.iter().any(|command| {
-        matches!(command, crate::scene::Command::Text { utf8, .. } if utf8.as_ref() == "-1,034.56")
-    }));
+    let texts = crate::text::test_support::texts(&tree.record()?);
+    assert_eq!(texts, ["-1,034.56", "next"]);
 
     tree.set_text(quote, "9\n9\n9")?;
     tree.layout()?;
@@ -2443,9 +2438,7 @@ fn second_layout_touches_cached_text_and_color_only_repaints() -> Result<(), Err
 
     struct Count {
         inner: crate::text::MonoShaper,
-        paints: Rc<Cell<u32>>,
         touches: Rc<Cell<u32>>,
-        color: Rc<Cell<[u8; 4]>>,
         metrics: Rc<Cell<u32>>,
     }
 
@@ -2454,22 +2447,8 @@ fn second_layout_touches_cached_text_and_color_only_repaints() -> Result<(), Err
             self.metrics.set(self.metrics.get().saturating_add(1));
             self.inner.metrics(key)
         }
-        fn measure_paint(&mut self, key: &crate::text::PaintKey) -> TextSize {
-            self.paints.set(self.paints.get().saturating_add(1));
-            self.color.set(key.color);
-            self.inner.measure_paint(key)
-        }
-        fn metrics_paint(
-            &mut self,
-            key: &crate::text::PaintKey,
-        ) -> Arc<crate::text::ParagraphMetrics> {
-            self.paints.set(self.paints.get().saturating_add(1));
-            self.color.set(key.color);
-            self.inner.metrics_paint(key)
-        }
-        fn touch(&mut self, key: &crate::text::PaintKey) {
+        fn touch(&mut self, _key: &crate::text::MetricsKey) {
             self.touches.set(self.touches.get().saturating_add(1));
-            self.color.set(key.color);
         }
         fn caret_at_unit(
             &mut self,
@@ -2492,41 +2471,44 @@ fn second_layout_touches_cached_text_and_color_only_repaints() -> Result<(), Err
         }
     }
 
-    let paints = Rc::new(Cell::new(0));
     let touches = Rc::new(Cell::new(0));
-    let color = Rc::new(Cell::new([0, 0, 0, 0]));
     let metrics = Rc::new(Cell::new(0));
     let mut tree = Tree::new(Count {
         inner: crate::text::MonoShaper::new(),
-        paints: Rc::clone(&paints),
         touches: Rc::clone(&touches),
-        color: Rc::clone(&color),
         metrics: Rc::clone(&metrics),
     });
     tree.set_viewport(0.0, 0.0, 200.0, 400.0)?;
     let text = tree.text("Hi", 16.0, [0, 0, 0, 255])?;
     tree.layout()?;
-    let first = paints.get();
-    assert!(first > 0);
-    let unpainted = metrics.get();
+    let shaped = metrics.get();
+    assert!(shaped > 0);
     tree.touch_measure(text)?;
     tree.layout()?;
     assert!(touches.get() >= 1);
-    assert_eq!(paints.get(), first);
-    assert_eq!(metrics.get(), unpainted);
+    assert_eq!(metrics.get(), shaped);
     let passes = tree.layout_passes();
     tree.set_color(text, [255, 0, 0, 255])?;
     assert!(!tree.needs_layout());
     tree.layout()?;
     assert_eq!(tree.layout_passes(), passes);
-    assert_eq!(paints.get(), first);
+    // A color change repaints without another shape.
+    assert_eq!(metrics.get(), shaped);
     let list = tree.record()?;
-    assert!(list.commands.iter().any(|command| matches!(
-        command,
-        crate::scene::Command::Text {
-            color: [255, 0, 0, 255],
-            ..
-        }
-    )));
+    let Some(crate::scene::Command::Text {
+        color,
+        shaped,
+        span_paints,
+        ..
+    }) = list
+        .commands
+        .iter()
+        .find(|command| matches!(command, crate::scene::Command::Text { .. }))
+    else {
+        panic!("text command");
+    };
+    assert_eq!(*color, [255, 0, 0, 255]);
+    assert!(span_paints.is_empty());
+    assert!(shaped.as_ref().is_some_and(|shaped| !shaped.is_empty()));
     Ok(())
 }

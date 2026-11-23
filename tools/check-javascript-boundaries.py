@@ -7,7 +7,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "crates/javascript/src"
-UI_CRATES = {"engine", "raster", "embedder", "impeller-sys"}
+UI_CRATES = {"engine", "raster", "embedder"}
+RASTER_PREFIXES = ("wgpu", "naga", "parley", "fontique", "swash", "lyon", "etagere")
 UI_IMPORT = re.compile(
     r"\b(?:(?:crate|super)::(?:ui|js|session)|embedder_\w+|" + "|".join(sorted(UI_CRATES)) + r")::"
 )
@@ -32,12 +33,12 @@ def main():
 
     runtime_deps = dependencies("javascript", "--features", "runtime")
     if forbidden := {
-        name for name in runtime_deps if name in UI_CRATES or name.startswith("embedder-")
+        name for name in runtime_deps if name in UI_CRATES or name.startswith(("embedder-", *RASTER_PREFIXES))
     }:
         raise SystemExit(f"standalone JavaScript runtime reaches UI crates: {sorted(forbidden)}")
 
     engine_deps = dependencies("engine")
-    raster_deps = dependencies("raster", "--features", "impeller")
+    raster_deps = dependencies("raster")
     for package, package_deps in (("engine", engine_deps), ("raster", raster_deps)):
         if forbidden := {
             name for name in package_deps
@@ -47,8 +48,8 @@ def main():
 
     if forbidden := {
         name for name in engine_deps
-        if name in {"impeller-sys", "khronos-egl", "libloading", "jni"}
-        or name.startswith(("ndk", "objc", "embedder", "windows", "android"))
+        if name in {"khronos-egl", "libloading", "jni"}
+        or name.startswith(("ndk", "objc", "embedder", "windows", "android", *RASTER_PREFIXES))
         or name == "raster"
     }:
         raise SystemExit(f"engine reaches platform or raster crates: {sorted(forbidden)}")

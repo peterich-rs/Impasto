@@ -73,6 +73,15 @@ impl Compositor {
         };
     }
 
+    pub(crate) fn refresh_layers(&self, surface: u64) {
+        let mut state = self.lock();
+        if state.surface == surface {
+            state.layers.clear();
+            state.frame = None;
+            state.requested = None;
+        }
+    }
+
     pub(crate) fn configured(&self, surface: u64) -> bool {
         let state = self.lock();
         state.surface == surface && state.configured

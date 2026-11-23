@@ -9,7 +9,7 @@ import zipfile
 
 PAGE = 16_384
 MACHINES = {"arm64-v8a": 183, "x86_64": 62}
-REQUIRED = {"libimpasto.so", "libimpeller.so"}
+REQUIRED = {"libimpasto.so"}
 ELF_HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
 PROGRAM_HEADER = struct.Struct("<IIQQQQQQ")
 ZIP_HEADER = struct.Struct("<IHHHHHIIIHH")
@@ -66,6 +66,8 @@ def check(package, abis):
     for abi, libraries in found.items():
         if missing := REQUIRED - libraries:
             raise ValueError(f"{abi}: missing {', '.join(sorted(missing))}")
+        if extra := libraries - REQUIRED:
+            raise ValueError(f"{abi}: unexpected libraries {', '.join(sorted(extra))}")
 
 
 def main():

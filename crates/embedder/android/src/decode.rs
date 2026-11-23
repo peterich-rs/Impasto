@@ -149,11 +149,9 @@ pub fn decode_rgba(bytes: &[u8]) -> Result<Rgba, String> {
             (fns.delete)(decoder);
             return Err(format!("set_format {set_format} {width}x{height}"));
         }
-        if let Some(unpremultiply) = fns.unpremultiply {
-            // Straight alpha matches the PNG bytes Impeller samples. A refusal
-            // leaves the decoder's default, which is premultiplied.
-            let _ = unpremultiply(decoder, 1);
-        }
+        let straight = fns
+            .unpremultiply
+            .is_some_and(|unpremultiply| unpremultiply(decoder, 1) == 0);
         let stride = (fns.stride)(decoder);
         let Some(row) = (width as usize).checked_mul(4) else {
             (fns.delete)(decoder);
@@ -175,7 +173,7 @@ pub fn decode_rgba(bytes: &[u8]) -> Result<Rgba, String> {
         if status != 0 {
             return Err(format!("decode {status} set_format {set_format}"));
         }
-        let pixels = if stride == row {
+        let mut pixels = if stride == row {
             packed
         } else {
             let mut tight = Vec::with_capacity(row * height as usize);
@@ -185,6 +183,9 @@ pub fn decode_rgba(bytes: &[u8]) -> Result<Rgba, String> {
             }
             tight
         };
+        if !straight {
+            embedder::unpremultiply_rgba(&mut pixels);
+        }
         Rgba {
             width: width as u32,
             height: height as u32,
