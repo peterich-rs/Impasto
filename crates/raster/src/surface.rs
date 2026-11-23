@@ -1,7 +1,7 @@
 //! Window attachment, device recovery and RGBA capture.
 
-use std::ffi::c_void;
-use std::ptr::NonNull;
+#[cfg(any(target_vendor = "apple", target_os = "android"))]
+use std::{ffi::c_void, ptr::NonNull};
 
 use crate::color::{srgb_to_linear, straight_srgb};
 use crate::compositor::extent;
