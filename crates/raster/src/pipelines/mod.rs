@@ -78,6 +78,7 @@ pub enum PipelineKind {
     MeshStencil,
     StencilWrite,
     Text,
+    TextUnclipped,
     TextMask,
     TextLcd,
     Image,
@@ -263,7 +264,7 @@ impl PipelineCache {
         let [rect, text] = if specialize {
             [PipelineKind::RectSolid, PipelineKind::TextMask]
         } else {
-            [PipelineKind::Rect, PipelineKind::Text]
+            [PipelineKind::Rect, PipelineKind::TextUnclipped]
         };
         for kind in [rect, text, PipelineKind::Image] {
             self.get(gpu, target, kind, BlendKey::SrcOver)?;
@@ -309,7 +310,7 @@ fn layout(gpu: &Gpu, label: &str, slots: &[Slot]) -> wgpu::BindGroupLayout {
                         has_dynamic_offset: false,
                         min_binding_size: wgpu::BufferSize::new(EXTRA_BYTES as u64),
                     },
-                    wgpu::ShaderStages::FRAGMENT,
+                    wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ),
                 Slot::Texture | Slot::Array | Slot::GlyphArray => (
                     wgpu::BindingType::Texture {
@@ -407,7 +408,9 @@ fn build(
         K::StencilWrite => (ui, view_only.as_slice(), "vs_stencil", "fs_stencil"),
         K::Mesh | K::MeshStencil => (ui, paint.as_slice(), "vs_mesh", "fs_mesh"),
         K::TextLcd => (text, text_groups.as_slice(), "vs_main", "fs_lcd"),
-        K::Text | K::TextMask => (text, text_groups.as_slice(), "vs_main", "fs_main"),
+        K::Text | K::TextUnclipped | K::TextMask => {
+            (text, text_groups.as_slice(), "vs_main", "fs_main")
+        }
         K::Image => (image, image_groups.as_slice(), "vs_main", "fs_main"),
         K::BlurDown => (blur, effects.as_slice(), "vs_full", "fs_blur_down"),
         K::BlurUp => (blur, effects.as_slice(), "vs_full", "fs_blur_up"),
@@ -428,7 +431,7 @@ fn build(
         K::Rect | K::RectSolid | K::EarlyZ => rect_buffers.as_slice(),
         K::Mesh | K::MeshStencil => mesh_buffers.as_slice(),
         K::StencilWrite => stencil_buffers.as_slice(),
-        K::Text | K::TextMask | K::TextLcd => glyph_buffers.as_slice(),
+        K::Text | K::TextUnclipped | K::TextMask | K::TextLcd => glyph_buffers.as_slice(),
         K::Image => image_buffers.as_slice(),
         _ => &[],
     };
@@ -446,6 +449,7 @@ fn build(
         | K::Mesh
         | K::MeshStencil
         | K::Text
+        | K::TextUnclipped
         | K::TextMask
         | K::Image
         | K::Over => blend.state(),
@@ -466,14 +470,22 @@ fn build(
     if gpu.shadow_2d && kind == K::Rect {
         constants.push(("two_dimensional_shadow", 1.0));
     }
-    if gpu.text_gamma && matches!(kind, K::Text | K::TextMask) {
+    if gpu.text_gamma && matches!(kind, K::Text | K::TextUnclipped | K::TextMask) {
         constants.push(("text_gamma", 1.0));
     }
     if gpu.dither_output && kind == K::Rect {
         constants.push(("output_dither", 1.0));
     }
-    if gpu.gradient_lut && matches!(kind, K::Rect | K::Mesh | K::MeshStencil | K::Text) {
+    if gpu.gradient_lut
+        && matches!(
+            kind,
+            K::Rect | K::Mesh | K::MeshStencil | K::Text | K::TextUnclipped
+        )
+    {
         constants.push(("use_gradient_ramps", 1.0));
+    }
+    if kind == K::TextUnclipped {
+        constants.push(("unclipped", 1.0));
     }
     let label = format!("impasto {kind:?} {blend:?}");
     let layout = gpu

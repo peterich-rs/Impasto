@@ -56,7 +56,7 @@ fn gradient_wall() {
     let size = PixelSize::new(1024, 768);
     let mut raster = benchmark::headless(FontLibrary::new());
     for count in [8u8, 32] {
-        let color = |index: u8| [index.wrapping_mul(42), index.wrapping_mul(5), 125, 255];
+        let color = |index: u8| [40 + index * 4, 85 + index * 5, 125, 255];
         let gradient = Gradient::Linear {
             start: [0.0, 0.0],
             end: [1.0, 0.0],

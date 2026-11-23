@@ -1,6 +1,7 @@
 // Glyphs and decoration bars.
 override simple_paint: bool = false;
 override text_gamma: bool = false;
+override unclipped: bool = false;
 @group(1) @binding(0) var mask_atlas: texture_2d_array<f32>;
 @group(1) @binding(1) var color_atlas: texture_2d_array<f32>;
 @group(1) @binding(2) var atlas_sampler: sampler;
@@ -21,7 +22,9 @@ struct VertexOut {
     @location(1) local: vec2<f32>,
     @location(2) @interpolate(flat) color: vec4<f32>,
     @location(3) @interpolate(flat) flags_and_layer: u32,
-    @location(4) @interpolate(flat) paint_index: u32,
+    @location(4) @interpolate(flat) gradient_geometry: vec4<f32>,
+    @location(5) @interpolate(flat) gradient_parameters: vec4<u32>,
+    @location(6) @interpolate(flat) radial_radii: vec2<f32>,
 };
 
 @vertex
@@ -46,7 +49,10 @@ fn vs_main(@builtin(vertex_index) vertex: u32, data: GlyphVertex) -> VertexOut {
     out.local = scene;
     out.color = data.color;
     out.flags_and_layer = data.flags_and_layer;
-    out.paint_index = data.paint_index;
+    let extra = load_paint(data.paint_index);
+    out.gradient_geometry = extra.geometry;
+    out.gradient_parameters = vec4<u32>(extra.gradient);
+    out.radial_radii = extra.shadow.xy;
     return out;
 }
 
@@ -58,10 +64,15 @@ fn glyph_coverage(uv: vec2<f32>, layer: i32, flags: u32) -> f32 {
     return coverage;
 }
 
+fn glyph_gradient(in: VertexOut) -> vec4<f32> {
+    let parameters = in.gradient_parameters;
+    return gradient_color(in.local, parameters.x, parameters.y, parameters.z,
+        in.gradient_geometry, in.radial_radii, parameters.w);
+}
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let data = in;
-    let p = in.local;
     var color = vec4<f32>(0.0);
     let flags = data.flags_and_layer & 255u;
     let layer = i32(data.flags_and_layer >> 8u);
@@ -71,7 +82,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if ((flags & 4u) != 0u) {
         // Decoration bar: a solid or gradient rectangle.
         if ((flags & 2u) != 0u) {
-            color = paint_gradient(load_paint(data.paint_index), p);
+            color = glyph_gradient(in);
         } else {
             color = data.color;
         }
@@ -84,10 +95,12 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let coverage = glyph_coverage(in.uv, layer, flags);
         var brush = data.color;
         if ((flags & 2u) != 0u) {
-            brush = paint_gradient(load_paint(data.paint_index), p);
+            brush = glyph_gradient(in);
         }
         color = brush * coverage;
     }
-    color = color * clip_coverage(in.position.xy);
+    if !unclipped {
+        color *= clip_coverage(in.position.xy);
+    }
     return color;
 }

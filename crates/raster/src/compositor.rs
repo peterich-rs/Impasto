@@ -2054,6 +2054,8 @@ impl Frame<'_> {
             && glyphs.iter().all(|glyph| glyph.flags_and_layer & 7 == 0)
         {
             PipelineKind::TextMask
+        } else if clip.count == 0 && clip.mask.is_none() {
+            PipelineKind::TextUnclipped
         } else {
             PipelineKind::Text
         };

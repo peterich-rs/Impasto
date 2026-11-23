@@ -15,6 +15,7 @@ pub(crate) struct GradientLut {
     pub view: wgpu::TextureView,
     enabled: bool,
     layers: u32,
+    used_layers: u32,
     ramps: HashMap<Vec<[u32; 4]>, u32>,
     pub upload_bytes: u64,
     pub hits: u32,
@@ -51,6 +52,7 @@ impl GradientLut {
             view,
             enabled,
             layers,
+            used_layers: 0,
             ramps: HashMap::new(),
             upload_bytes: 0,
             hits: 0,
@@ -60,34 +62,37 @@ impl GradientLut {
     pub fn reset(&mut self) {
         self.upload_bytes = 0;
         self.hits = 0;
-        if self.ramps.len() as u64 == u64::from(self.layers) {
+        if self.used_layers == self.layers || self.ramps.len() >= 2 * self.layers as usize {
             // All prior slices have been submitted or discarded. Queue writes
             // in the next frame can now replace these layers safely.
-            self.ramps.clear();
+            self.trim();
         }
     }
 
     pub fn trim(&mut self) {
         self.ramps.clear();
+        self.used_layers = 0;
     }
 
     pub fn layer(&mut self, gpu: &Gpu, pairs: &[[f32; 4]]) -> u32 {
         if !self.enabled || pairs.len() < 16 {
             return 0;
         }
-        let key = pairs
-            .iter()
-            .map(|pair| pair.map(f32::to_bits))
-            .collect::<Vec<_>>();
-        if let Some(&id) = self.ramps.get(&key) {
-            self.hits += 1;
+        let key = bytemuck::cast_slice(pairs);
+        if let Some(&id) = self.ramps.get(key) {
+            self.hits += u32::from(id != 0);
             return id;
         }
-        let layer = u32::try_from(self.ramps.len()).unwrap_or(self.layers);
-        if layer == self.layers {
+        let layer = self.used_layers;
+        if layer == self.layers || self.ramps.len() >= 2 * self.layers as usize {
             return 0;
         }
-        let Some(ramp) = bake(pairs) else { return 0 };
+        let Some(ramp) = bake(pairs) else {
+            // Retain the analytic fallback until this generation's ramp pages
+            // recycle, such as for a gradient with hard stops.
+            self.ramps.insert(key.to_vec(), 0);
+            return 0;
+        };
         gpu.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
@@ -112,7 +117,8 @@ impl GradientLut {
             },
         );
         let id = layer + 1;
-        self.ramps.insert(key, id);
+        self.ramps.insert(key.to_vec(), id);
+        self.used_layers += 1;
         self.upload_bytes += size_of::<Ramp>() as u64;
         id
     }
