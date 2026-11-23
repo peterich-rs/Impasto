@@ -351,6 +351,8 @@ pub(super) struct ImagePayload {
 pub(super) struct PaintProps {
     pub(super) fill: Option<[u8; 4]>,
     pub(super) corner_radius: f32,
+    pub(super) corner_radii: Option<[f32; 4]>,
+    pub(super) corner_curve: f32,
     pub(super) stroke_width: f32,
     pub(super) stroke_color: [u8; 4],
     pub(super) outline_width: f32,
@@ -368,6 +370,8 @@ impl PaintProps {
     fn is_plain(&self) -> bool {
         self.fill.is_none()
             && self.corner_radius == 0.0
+            && self.corner_radii.is_none()
+            && self.corner_curve == 2.0
             && self.stroke_width <= 0.0
             && self.outline_width <= 0.0
             && self.gradient.is_none()
@@ -385,6 +389,8 @@ impl Default for PaintProps {
         Self {
             fill: None,
             corner_radius: 0.0,
+            corner_radii: None,
+            corner_curve: 2.0,
             stroke_width: 0.0,
             stroke_color: [0, 0, 0, 0],
             outline_width: 0.0,
@@ -747,6 +753,16 @@ impl Node {
 
     pub(super) fn fill(&self) -> Option<[u8; 4]> {
         self.paint.as_ref().and_then(|paint| paint.fill)
+    }
+
+    pub(super) fn corners(&self) -> Option<crate::scene::CornerShape> {
+        let paint = self.paint.as_deref()?;
+        (paint.corner_radii.is_some() || paint.corner_curve != 2.0).then(|| {
+            crate::scene::CornerShape {
+                radii: paint.corner_radii.unwrap_or([paint.corner_radius; 4]),
+                curve: paint.corner_curve,
+            }
+        })
     }
 
     pub(super) fn corner_radius(&self) -> f32 {

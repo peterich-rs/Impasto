@@ -45,6 +45,8 @@ pub(crate) struct Compositor {
     compute_blur: Option<ComputeBlur>,
     early_z: bool,
     canvas_stencil: bool,
+    text_gamma: bool,
+    dither_output: bool,
     transient: bool,
 }
 
@@ -59,6 +61,7 @@ struct MaskKey {
 struct MaskShapeKey {
     rect: [u32; 4],
     radius: u32,
+    corners: Option<[u32; 5]>,
     transform: [u32; 6],
     mesh: Option<(wgpu::Buffer, std::ops::Range<u32>)>,
 }
@@ -263,6 +266,8 @@ impl Compositor {
             compute_blur: ComputeBlur::new(gpu),
             early_z: std::env::var("IMPASTO_EARLY_Z").as_deref() == Ok("1"),
             canvas_stencil: std::env::var("IMPASTO_CANVAS_STENCIL").as_deref() == Ok("1"),
+            text_gamma: std::env::var("IMPASTO_TEXT_GAMMA").as_deref() == Ok("1"),
+            dither_output: std::env::var("IMPASTO_DITHER").as_deref() == Ok("1"),
             transient: match std::env::var("IMPASTO_TRANSIENT_ATTACHMENTS").as_deref() {
                 Ok("0") => false,
                 Ok("1") => true,
@@ -357,6 +362,15 @@ impl Compositor {
                 label: Some("impasto frame"),
             });
         let direct = format.is_srgb() && !scene_reads_root(&scene, Some(scene.tree.root));
+        let dither_output = self.dither_output
+            && !direct
+            && matches!(
+                format,
+                wgpu::TextureFormat::Bgra8Unorm
+                    | wgpu::TextureFormat::Bgra8UnormSrgb
+                    | wgpu::TextureFormat::Rgba8Unorm
+                    | wgpu::TextureFormat::Rgba8UnormSrgb
+            );
         let first = self.render_stats.passes == 0;
         self.render_stats.direct_present = direct && (first || self.render_stats.direct_present);
         let output = Image::output(output, format, size);
@@ -374,6 +388,8 @@ impl Compositor {
         };
         let main = if direct {
             output.clone()
+        } else if dither_output {
+            frame.take(size, wgpu::TextureFormat::Rgba16Float)
         } else {
             frame.take(size, wgpu::TextureFormat::Rgba8UnormSrgb)
         };
@@ -396,7 +412,11 @@ impl Compositor {
                 &Coverage::default(),
                 &output,
                 output.area(),
-                FullPass::Copy,
+                if dither_output {
+                    FullPass::DitherOutput
+                } else {
+                    FullPass::Copy
+                },
             )?;
             frame.release(main);
         }
@@ -429,7 +449,10 @@ fn scene_reads_root(scene: &Scene<'_>, mut current: Option<LayerId>) -> bool {
                     return true;
                 }
             }
-            LayerKind::Clip { .. } | LayerKind::Offset { .. } | LayerKind::Transform { .. }
+            LayerKind::Clip { .. }
+            | LayerKind::CornerClip { .. }
+            | LayerKind::Offset { .. }
+            | LayerKind::Transform { .. }
                 if scene_reads_root(scene, layer.first_child) =>
             {
                 return true;
@@ -526,6 +549,7 @@ struct DrawCall {
 #[derive(Clone, Copy)]
 enum FullPass {
     Copy,
+    DitherOutput,
     Over { blend: BlendKey, opacity: f32 },
     Multiply { opacity: f32 },
     Backdrop,
@@ -541,7 +565,8 @@ struct Coverage {
     stencil: Vec<ClipShape>,
     empty: bool,
     boxes: [[f32; 4]; 4],
-    radii: [f32; 4],
+    radii: [[f32; 4]; 4],
+    curves: [f32; 4],
     count: usize,
 }
 
@@ -570,6 +595,7 @@ impl Coverage {
             }),
             clip_boxes: self.boxes,
             clip_radii: self.radii,
+            clip_curves: self.curves,
             ..ViewUniform::zeroed()
         }
     }
@@ -821,6 +847,19 @@ impl Frame<'_> {
                     children,
                     compiler::compose(transform, compiler::layer_transform(&layer.kind)),
                 )?,
+                LayerKind::CornerClip {
+                    bounds: [x, y, w, h],
+                    ..
+                } => {
+                    let child = self.layer_bounds(children, transform)?;
+                    if let PictureBounds::Rect(clip) =
+                        PictureBounds::rect([x, y, w, h]).transform(transform)
+                    {
+                        child.clip(clip)
+                    } else {
+                        child
+                    }
+                }
                 LayerKind::Clip { x, y, w, h, .. } => {
                     let child = self.layer_bounds(children, transform)?;
                     if let PictureBounds::Rect(clip) =
@@ -886,6 +925,11 @@ impl Frame<'_> {
                 LayerKind::Offset { .. } | LayerKind::Transform { .. } => {
                     let local = compiler::layer_transform(&layer.kind);
                     self.layers(children, target, compiler::compose(transform, local), clip)?;
+                }
+                LayerKind::CornerClip { bounds, corners } => {
+                    let mut next = clip.clone();
+                    add_corner_clip(&mut next, bounds, 0.0, Some(corners), transform);
+                    self.layers(layer.first_child, target, transform, &next)?;
                 }
                 LayerKind::Clip {
                     x,
@@ -1122,7 +1166,12 @@ impl Frame<'_> {
                     w * a * scale * 0.5,
                     h * a * scale * 0.5,
                 ];
-                coverage.radii[coverage.count] = shape.radius * a * scale;
+                if let Some(corners) = shape.corners {
+                    coverage.radii[coverage.count] = corners.radii.map(|radius| radius * a * scale);
+                    coverage.curves[coverage.count] = corners.curve;
+                } else {
+                    coverage.radii[coverage.count] = [shape.radius * a * scale; 4];
+                }
                 coverage.count += 1;
             } else {
                 complex.push(shape);
@@ -1140,6 +1189,10 @@ impl Frame<'_> {
                 .map(|shape| MaskShapeKey {
                     rect: shape.rect.map(f32::to_bits),
                     radius: shape.radius.to_bits(),
+                    corners: shape.corners.map(|shape| {
+                        let [tl, tr, br, bl] = shape.radii.map(f32::to_bits);
+                        [tl, tr, br, bl, shape.curve.to_bits()]
+                    }),
                     transform: shape.transform.map(f32::to_bits),
                     mesh: shape.mesh.as_deref().and_then(|mesh| {
                         Some((mesh.buffer.get()?.indices.clone(), mesh.indices.clone()))
@@ -1161,6 +1214,7 @@ impl Frame<'_> {
             } else {
                 let mut rect = compiler::solid_rect(shape.rect, [1.0; 4]);
                 rect.radius = shape.radius;
+                rect.corners = shape.corners;
                 self.rects(&next, shape.transform, &unclipped, &[rect], &[])?;
             }
             self.finish(&next.view);
@@ -1414,7 +1468,14 @@ impl Frame<'_> {
         blend: BlendKey,
         batches: impl IntoIterator<Item = (&'a [RectInstance], &'a [[f32; 4]])>,
     ) -> Result<(), Status> {
-        let view = self.transform(target, transform, clip)?;
+        let dither = self.compositor.dither_output
+            && target.view == self.root
+            && matches!(
+                target.format,
+                wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Rgba8UnormSrgb
+            )
+            && blend == BlendKey::SrcOver;
+        let view = self.geometry_uniform(target, transform, clip, dither)?;
         let mut batch = Vec::new();
         let mut active = None;
         for (rects, stops) in batches {
@@ -1466,6 +1527,7 @@ impl Frame<'_> {
                 rect.kind != batch::RECT_FILL
                     || rect.flags != 0
                     || rect.radius != 0.0
+                    || rect.corners.is_some()
                     || rect.color[3] != 1.0
                     || rect.gradient_b[3] != 1.0
                     || ![
@@ -1825,6 +1887,17 @@ impl Frame<'_> {
         let [a, b, c, d, ..] = transform;
         let pixel_scale = scale * a.hypot(b).max(c.hypot(d)).max(0.001);
         let aligned = b.abs() < 0.0001 && c.abs() < 0.0001 && a > 0.0 && (a - d).abs() < 0.0001;
+        let lcd = aligned
+            && self.gpu.caps.lcd
+            && target.format.is_srgb()
+            && target.view == self.root
+            && clip.count == 0
+            && clip.mask.is_none()
+            && self.pending.is_none()
+            && self
+                .clears
+                .get(&target.view)
+                .is_some_and(|color| color.a == 1.0);
         for glyph in glyphs {
             let (rect, uv, color, binding, layer, decoration) = if let Some(rect) = glyph.decoration
             {
@@ -1880,6 +1953,8 @@ impl Frame<'_> {
             let mut flags = if color { batch::GLYPH_COLOR } else { 0 };
             if decoration {
                 flags |= batch::GLYPH_DECORATION;
+            } else if !color && self.compositor.text_gamma && glyph.size * pixel_scale <= 14.0 {
+                flags |= batch::GLYPH_GAMMA;
             }
             let (page, index) = if let Some(gradient) = glyph.gradient.as_deref().filter(|_| !color)
             {
@@ -1910,6 +1985,7 @@ impl Frame<'_> {
                                     0.0,
                                 ],
                                 stroke: [0.0; 4],
+                                corners: [0.0; 4],
                             }),
                         )?;
                         last_gradient = Some((gradient, page, index));
@@ -1920,6 +1996,9 @@ impl Frame<'_> {
                 // Solid glyphs can share any currently bound page.
                 (active, u32::MAX)
             };
+            if lcd && flags & 7 == 0 {
+                flags |= batch::GLYPH_LCD;
+            }
             if key != binding || !active.same_bindings(page) {
                 self.glyph_batch(target, clip, view, active, &batch, key)?;
                 batch.clear();
@@ -1960,10 +2039,16 @@ impl Frame<'_> {
         self.compositor.render_stats.bind_groups_created += u32::from(created);
         let globals = self.globals(view, Extra::Paint(page));
         let mask = self.mask_group(clip);
-        let kind = if self.compositor.specialize_paint
+        let kind = if self.gpu.caps.lcd
+            && glyphs
+                .iter()
+                .all(|glyph| glyph.flags_and_layer & batch::GLYPH_LCD != 0)
+        {
+            PipelineKind::TextLcd
+        } else if self.compositor.specialize_paint
             && clip.mask.is_none()
             && clip.count == 0
-            && glyphs.iter().all(|glyph| glyph.flags_and_layer & 255 == 0)
+            && glyphs.iter().all(|glyph| glyph.flags_and_layer & 7 == 0)
         {
             PipelineKind::TextMask
         } else {
@@ -2272,6 +2357,8 @@ impl Frame<'_> {
             BlendKey::SrcOver
         };
         let pipeline_kind = match kind {
+            FullPass::DitherOutput if target.format.is_srgb() => PipelineKind::Dither,
+            FullPass::DitherOutput => PipelineKind::DitherSrgb,
             FullPass::Copy if !target.format.is_srgb() => PipelineKind::CopySrgb,
             FullPass::Copy => PipelineKind::Copy,
             FullPass::BlurDown { .. } => PipelineKind::BlurDown,
@@ -2297,7 +2384,7 @@ impl Frame<'_> {
             }
             FullPass::Backdrop => GpuPassKind::BackdropBlur,
             FullPass::MaskIntersect => GpuPassKind::ClipMask,
-            FullPass::Copy => {
+            FullPass::Copy | FullPass::DitherOutput => {
                 self.compositor.render_stats.copy_pixels += u64::from(w) * u64::from(h);
                 GpuPassKind::Copy
             }
@@ -2321,12 +2408,22 @@ impl Frame<'_> {
     }
 
     fn transform(&mut self, target: &Image, t: Affine, clip: &Coverage) -> Result<Address, Status> {
+        self.geometry_uniform(target, t, clip, false)
+    }
+
+    fn geometry_uniform(
+        &mut self,
+        target: &Image,
+        t: Affine,
+        clip: &Coverage,
+        dither: bool,
+    ) -> Result<Address, Status> {
         let [w, h] = target.size.map(|v| v as f32);
         let sx = 2.0 * self.scene.scale / w;
         let sy = -2.0 * self.scene.scale / h;
         let [x, y] = target.origin.map(|v| v as f32 / self.scene.scale);
         let scale = compiler::primitive_scale(t, self.scene.scale);
-        self.uniform(&ViewUniform {
+        let mut view = ViewUniform {
             transform: [
                 [t[0] * sx, t[1] * sy, 0.0, 0.0],
                 [t[2] * sx, t[3] * sy, 0.0, 0.0],
@@ -2334,7 +2431,9 @@ impl Frame<'_> {
                 [(t[4] - x) * sx - 1.0, (t[5] - y) * sy + 1.0, 0.0, 1.0],
             ],
             ..clip.view(target, scale)
-        })
+        };
+        view.meta[3] = f32::from(dither);
+        self.uniform(&view)
     }
 
     fn stops(&mut self, stops: &[[f32; 4]]) -> Result<Address, Status> {
@@ -2558,6 +2657,16 @@ fn axis_aligned_path(path: &engine::scene::CanvasPath, transform: Affine, scale:
 }
 
 fn add_rect_clip(clip: &mut Clip, rect: [f32; 4], radius: f32, transform: Affine) {
+    add_corner_clip(clip, rect, radius, None, transform);
+}
+
+fn add_corner_clip(
+    clip: &mut Clip,
+    rect: [f32; 4],
+    radius: f32,
+    corners: Option<engine::scene::CornerShape>,
+    transform: Affine,
+) {
     if rect[2] <= 0.0 || rect[3] <= 0.0 {
         clip.scissor = Some([0.0; 4]);
         return;
@@ -2577,10 +2686,11 @@ fn add_rect_clip(clip: &mut Clip, rect: [f32; 4], radius: f32, transform: Affine
                 .map_or(bounds, |ancestor| intersect(ancestor, bounds)),
         );
     }
-    if radius > 0.0 || !aligned {
+    if radius > 0.0 || corners.is_some() || !aligned {
         clip.shapes.push(ClipShape {
             rect,
             radius,
+            corners: corners.map(|shape| shape.fitted(rect[2], rect[3])),
             transform,
             mesh: None,
             path: None,

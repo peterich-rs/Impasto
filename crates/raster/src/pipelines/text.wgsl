@@ -41,6 +41,11 @@ fn vs_main(@builtin(vertex_index) vertex: u32, data: GlyphVertex) -> VertexOut {
     return out;
 }
 
+fn glyph_coverage(uv: vec2<f32>, layer: i32, flags: u32) -> f32 {
+    let coverage = textureSample(mask_atlas, atlas_sampler, uv, layer).r;
+    return select(coverage, pow(coverage, 0.85), (flags & 8u) != 0u);
+}
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let data = in;
@@ -50,7 +55,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let layer = i32(data.flags_and_layer >> 8u);
     if simple_paint {
         let uv = in.uv / vec2<f32>(textureDimensions(mask_atlas));
-        return data.color * textureSample(mask_atlas, atlas_sampler, uv, layer).r;
+        return data.color * glyph_coverage(uv, layer, flags);
     }
     if ((flags & 4u) != 0u) {
         // Decoration bar: a solid or gradient rectangle.
@@ -65,7 +70,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let texel = textureSample(color_atlas, atlas_sampler, in.uv / vec2<f32>(textureDimensions(color_atlas)), layer);
         color = vec4<f32>(texel.rgb * texel.a * data.color.a, texel.a * data.color.a);
     } else {
-        let coverage = textureSample(mask_atlas, atlas_sampler, in.uv / vec2<f32>(textureDimensions(mask_atlas)), layer).r;
+        let coverage = glyph_coverage(in.uv / vec2<f32>(textureDimensions(mask_atlas)), layer, flags);
         var brush = data.color;
         if ((flags & 2u) != 0u) {
             brush = paint_gradient(load_paint(data.paint_index), p);

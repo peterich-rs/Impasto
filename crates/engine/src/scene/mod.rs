@@ -2,6 +2,7 @@
 
 mod canvas;
 mod command;
+mod corners;
 pub mod image;
 mod layer;
 mod paint;
@@ -11,7 +12,8 @@ pub use canvas::{
     CanvasBody, CanvasBrush, CanvasComposite, CanvasImageOp, CanvasImageRef, CanvasIsolation,
     CanvasList, CanvasOp, CanvasPaint, CanvasPath, CanvasTextOp, FillRule, PathVerb,
 };
-pub use command::{Command, DrawList};
+pub use command::{Command, DrawList, RectPaint};
+pub use corners::CornerShape;
 pub use image::ContentMode;
 pub use layer::{Layer, LayerId, LayerKind, LayerTree, Picture, PictureId, SELF_PICTURE};
 pub use paint::{BlendMode, BoxShadow, ColorSpace, ColorStop, Gradient, Shadow};

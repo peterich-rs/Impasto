@@ -42,6 +42,7 @@ struct GlyphKey {
     subpixel: [u32; 2],
     coords: Box<[i16]>,
     embolden: bool,
+    darken_stem: bool,
     hint: bool,
     skew: Option<u32>,
 }
@@ -165,6 +166,7 @@ pub struct Atlas {
     material: Option<wgpu::BindGroup>,
     stats: AtlasStats,
     scratch: Vec<u8>,
+    darken_small: bool,
     pinned: HashSet<(bool, usize)>,
 }
 
@@ -210,6 +212,7 @@ impl Atlas {
             material: None,
             stats: AtlasStats::default(),
             scratch: Vec::new(),
+            darken_small: std::env::var("IMPASTO_DARKEN_STEMS").as_deref() == Ok("1"),
             pinned: HashSet::new(),
         }
     }
@@ -312,6 +315,7 @@ impl Atlas {
             subpixel: position.map_or([0, 0], |position| position.map(bucket)),
             coords: draw.coords.to_vec().into(),
             embolden: draw.embolden,
+            darken_stem: self.darken_small && position.is_some() && size <= 14 * 64,
             hint: position.is_some(),
             skew: draw.skew.map(f32::to_bits),
         };
@@ -372,6 +376,8 @@ impl Atlas {
             .offset(offset);
         if key.embolden {
             render.embolden(ppem / 24.0);
+        } else if key.darken_stem {
+            render.embolden(0.12);
         }
         if let Some(skew) = key.skew.map(f32::from_bits) {
             render.transform(Some(Transform::skew(

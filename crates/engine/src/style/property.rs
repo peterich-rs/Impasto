@@ -114,6 +114,8 @@ pub enum Key {
     GridAutoColumns = 106,
     GridAutoRows = 107,
     GridAutoFlow = 108,
+    BorderRadii = 109,
+    BorderCurve = 110,
 }
 
 impl Key {
@@ -165,6 +167,8 @@ impl Key {
             Self::OutlineWidth => "outlineWidth",
             Self::OutlineColor => "outlineColor",
             Self::BorderRadius => "borderRadius",
+            Self::BorderRadii => "borderRadii",
+            Self::BorderCurve => "borderCurve",
             Self::Opacity => "opacity",
             Self::Overflow => "overflow",
             Self::TranslateX => "translateX",
@@ -241,7 +245,9 @@ impl Key {
             | Self::Blur
             | Self::Backdrop
             | Self::Blend => Impact::LAYER | Impact::PAINT | Impact::HIT,
-            Self::BorderRadius | Self::OutlineWidth => Impact::PAINT | Impact::HIT,
+            Self::BorderRadius | Self::BorderRadii | Self::BorderCurve | Self::OutlineWidth => {
+                Impact::PAINT | Impact::HIT
+            }
             Self::ZIndex => Impact::PAINT | Impact::HIT,
             Self::Overflow | Self::OverflowX | Self::OverflowY => {
                 Impact::LAYOUT | Impact::HIT | Impact::PAINT | Impact::SEMANTICS
@@ -326,6 +332,8 @@ pub(super) const KEYS: &[Key] = &[
     Key::OutlineWidth,
     Key::OutlineColor,
     Key::BorderRadius,
+    Key::BorderRadii,
+    Key::BorderCurve,
     Key::Opacity,
     Key::Overflow,
     Key::TranslateX,
@@ -421,6 +429,8 @@ pub enum Property {
     OutlineWidth(Length),
     OutlineColor(PaintColor),
     BorderRadius(Length),
+    BorderRadii([f32; 4]),
+    BorderCurve(f32),
     /// Author opacity in `0..=1`. `1` stays on the fast path.
     Opacity(f32),
     Overflow(OverflowMode),
@@ -517,6 +527,8 @@ impl Property {
             Self::OutlineWidth(_) => Key::OutlineWidth,
             Self::OutlineColor(_) => Key::OutlineColor,
             Self::BorderRadius(_) => Key::BorderRadius,
+            Self::BorderRadii(_) => Key::BorderRadii,
+            Self::BorderCurve(_) => Key::BorderCurve,
             Self::Opacity(_) => Key::Opacity,
             Self::Overflow(_) => Key::Overflow,
             Self::TranslateX(_) => Key::TranslateX,
@@ -583,6 +595,11 @@ impl Property {
             | Self::BorderWidth(value)
             | Self::OutlineWidth(value)
             | Self::BorderRadius(value) => length_non_negative(value, self.key()),
+            Self::BorderRadii(values) => values
+                .iter()
+                .try_for_each(|value| non_negative(*value, self.key())),
+            Self::BorderCurve(value) if (2.0..=8.0).contains(value) => Ok(()),
+            Self::BorderCurve(_) => bad(self.key(), "expected a value between 2 and 8"),
             Self::MarginTop(value)
             | Self::MarginRight(value)
             | Self::MarginBottom(value)
@@ -1272,6 +1289,16 @@ const FIELDS: &[FieldMeta] = &[
     FieldMeta {
         name: "borderRadius",
         ts_type: "Length",
+        group: "paint",
+    },
+    FieldMeta {
+        name: "borderRadii",
+        ts_type: "readonly [number, number, number, number]",
+        group: "paint",
+    },
+    FieldMeta {
+        name: "borderCurve",
+        ts_type: "number",
         group: "paint",
     },
     FieldMeta {

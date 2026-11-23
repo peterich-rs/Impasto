@@ -76,11 +76,14 @@ pub enum PipelineKind {
     StencilWrite,
     Text,
     TextMask,
+    TextLcd,
     Image,
     BlurDown,
     BlurUp,
     Copy,
     CopySrgb,
+    Dither,
+    DitherSrgb,
     Over,
     Multiply,
     Backdrop,
@@ -105,7 +108,8 @@ pub struct ViewUniform {
     pub target_info: [f32; 4],
     pub mask_rect: [f32; 4],
     pub clip_boxes: [[f32; 4]; 4],
-    pub clip_radii: [f32; 4],
+    pub clip_radii: [[f32; 4]; 4],
+    pub clip_curves: [f32; 4],
 }
 
 #[repr(C)]
@@ -159,11 +163,20 @@ impl PipelineCache {
             } else {
                 String::new()
             };
+            let (enable, lcd) = if gpu.caps.lcd && label == "impasto text" {
+                (
+                    "enable dual_source_blending;",
+                    include_str!("text_lcd.wgsl"),
+                )
+            } else {
+                ("", "")
+            };
             gpu.device
                 .create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some(label),
                     source: wgpu::ShaderSource::Wgsl(
-                        format!("{view}\n{source}\n{clip}\n{gradient}\n{paint}").into(),
+                        format!("{enable}\n{view}\n{source}\n{clip}\n{gradient}\n{paint}\n{lcd}")
+                            .into(),
                     ),
                 })
         };
@@ -306,7 +319,7 @@ fn build(
 
     let [ui, text, image, blur] = shaders;
     let rect_attrs = wgpu::vertex_attr_array![1 => Float32x4, 2 => Float32x4, 3 => Float32x4,
-        4 => Float32, 5 => Uint32, 6 => Float32];
+        4 => Float32, 5 => Uint32, 6 => Float32, 7 => Float32];
     let text_attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Uint16x4, 2 => Float16x4,
         3 => Uint32, 4 => Uint32];
     let image_attrs =
@@ -350,12 +363,15 @@ fn build(
         K::EarlyZ => (ui, view_only.as_slice(), "vs_depth_rect", "fs_depth_rect"),
         K::StencilWrite => (ui, view_only.as_slice(), "vs_stencil", "fs_stencil"),
         K::Mesh | K::MeshStencil => (ui, paint.as_slice(), "vs_mesh", "fs_mesh"),
+        K::TextLcd => (text, text_groups.as_slice(), "vs_main", "fs_lcd"),
         K::Text | K::TextMask => (text, text_groups.as_slice(), "vs_main", "fs_main"),
         K::Image => (image, image_groups.as_slice(), "vs_main", "fs_main"),
         K::BlurDown => (blur, effects.as_slice(), "vs_full", "fs_blur_down"),
         K::BlurUp => (blur, effects.as_slice(), "vs_full", "fs_blur_up"),
         K::Copy | K::MaskIntersect => (blur, effects.as_slice(), "vs_full", "fs_copy"),
         K::CopySrgb => (blur, effects.as_slice(), "vs_full", "fs_copy_srgb"),
+        K::Dither => (blur, effects.as_slice(), "vs_full", "fs_dither"),
+        K::DitherSrgb => (blur, effects.as_slice(), "vs_full", "fs_dither_srgb"),
         K::Over => (blur, composite.as_slice(), "vs_full", "fs_over"),
         K::Multiply => (blur, composite.as_slice(), "vs_full", "fs_composite"),
         K::Backdrop => (blur, composite.as_slice(), "vs_full", "fs_backdrop"),
@@ -369,11 +385,19 @@ fn build(
         K::Rect | K::RectSolid | K::EarlyZ => rect_buffers.as_slice(),
         K::Mesh | K::MeshStencil => mesh_buffers.as_slice(),
         K::StencilWrite => stencil_buffers.as_slice(),
-        K::Text | K::TextMask => glyph_buffers.as_slice(),
+        K::Text | K::TextMask | K::TextLcd => glyph_buffers.as_slice(),
         K::Image => image_buffers.as_slice(),
         _ => &[],
     };
     let blend = match kind {
+        K::TextLcd => wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::OneMinusSrc1,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: BlendKey::SrcOver.state().alpha,
+        },
         K::Rect
         | K::RectSolid
         | K::Mesh

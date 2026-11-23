@@ -171,7 +171,25 @@ pub(super) fn scene_marks_in_commands(
             crate::scene::Command::Rect { x, y, color, .. } => {
                 push_mark(&mut marks, format!("rect:{color:?}"), *x, *y, ctm, &clips);
             }
-            crate::scene::Command::PushClip { x, y, w, h, .. } => {
+            crate::scene::Command::ShapedRect {
+                bounds: [x, y, ..],
+                paint,
+                ..
+            } => {
+                push_mark(
+                    &mut marks,
+                    format!("rect:{:?}", paint.color),
+                    *x,
+                    *y,
+                    ctm,
+                    &clips,
+                );
+            }
+            crate::scene::Command::PushClip { x, y, w, h, .. }
+            | crate::scene::Command::PushCornerClip {
+                bounds: [x, y, w, h],
+                ..
+            } => {
                 let mut clips = clips;
                 clips.push(SceneClip {
                     ctm,
@@ -256,7 +274,11 @@ pub(super) fn scene_marks_in_layers(tree: &crate::scene::LayerTree) -> Vec<Mark>
                         );
                     }
                 }
-                crate::scene::LayerKind::Clip { x, y, w, h, .. } => {
+                crate::scene::LayerKind::Clip { x, y, w, h, .. }
+                | crate::scene::LayerKind::CornerClip {
+                    bounds: [x, y, w, h],
+                    ..
+                } => {
                     if let Some(child) = child {
                         let mut clips = clips.to_vec();
                         clips.push(SceneClip { ctm, x, y, w, h });

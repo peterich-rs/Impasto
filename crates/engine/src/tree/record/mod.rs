@@ -596,6 +596,7 @@ impl Tree {
         };
         let (w, h) = (node.w, node.h);
         let radius = node.corner_radius();
+        let corners = node.corners();
         let abs = (parent_abs.0 + node.x, parent_abs.1 + node.y);
         self.capture(id, parent_abs, out, clip);
         self.emit_platform_view(id);
@@ -603,13 +604,7 @@ impl Tree {
         let local = self.local_xy(abs);
         self.push_run_bracket(
             Some(id),
-            Command::PushClip {
-                x: local.0,
-                y: local.1,
-                w,
-                h,
-                corner_radius: radius,
-            },
+            Command::clip([local.0, local.1, w, h], radius, corners),
             out,
         );
         let child_clip = intersect(clip, paint.0, paint.1, w, h);
@@ -633,6 +628,7 @@ impl Tree {
         let (w, h) = (node.w, node.h);
         let effect = paint_kind(node);
         let radius = node.corner_radius();
+        let corners = node.corners();
         let alpha = node.alpha();
         let scroll = node.scroll_paint();
         let geom = node.transform().placed(abs.0, abs.1, w, h);
@@ -711,12 +707,10 @@ impl Tree {
         self.capture(id, parent_abs, out, clip);
         self.emit_platform_view(id);
         if effect.clip || effect.scroll {
-            out.push(Command::PushClip {
-                x: at.0,
-                y: at.1,
-                w,
-                h,
-                corner_radius: if effect.scroll { 0.0 } else { radius },
+            out.push(if effect.scroll {
+                Command::clip([at.0, at.1, w, h], 0.0, None)
+            } else {
+                Command::clip([at.0, at.1, w, h], radius, corners)
             });
         }
         self.close_run();
@@ -735,7 +729,7 @@ impl Tree {
         if let Some(scope) = self.run.scope.as_mut() {
             scope.mirror = (abs.0 - next_scroll.0, abs.1 - next_scroll.1);
         }
-        pushed += self.push_content_layers(effect, abs, w, h, radius, scroll);
+        pushed += self.push_content_layers(effect, [abs.0, abs.1, w, h], radius, corners, scroll);
         let hosts_rows = self
             .subtree_layers
             .get(&id)
@@ -1245,17 +1239,17 @@ impl Tree {
     fn push_content_layers(
         &mut self,
         effect: PaintKind,
-        abs: (f32, f32),
-        w: f32,
-        h: f32,
+        bounds: [f32; 4],
         radius: f32,
+        corners: Option<crate::scene::CornerShape>,
         scroll: (f32, f32),
     ) -> usize {
+        let [x, y, w, h] = bounds;
         let mut pushed = 0;
         if effect.scroll {
             self.push_layer(crate::scene::LayerKind::Clip {
-                x: abs.0,
-                y: abs.1,
+                x,
+                y,
                 w,
                 h,
                 corner_radius: 0.0,
@@ -1266,12 +1260,16 @@ impl Tree {
             });
             pushed += 2;
         } else if effect.clip {
-            self.push_layer(crate::scene::LayerKind::Clip {
-                x: abs.0,
-                y: abs.1,
-                w,
-                h,
-                corner_radius: radius,
+            self.push_layer(if let Some(corners) = corners {
+                crate::scene::LayerKind::CornerClip { bounds, corners }
+            } else {
+                crate::scene::LayerKind::Clip {
+                    x,
+                    y,
+                    w,
+                    h,
+                    corner_radius: radius,
+                }
             });
             pushed += 1;
         }
@@ -1351,6 +1349,27 @@ fn translate_command(command: &Command, dx: f32, dy: f32) -> Command {
             shadow,
             box_shadows,
         },
+        Command::ShapedRect {
+            mut bounds,
+            corners,
+            paint,
+        } => {
+            bounds[0] += dx;
+            bounds[1] += dy;
+            Command::ShapedRect {
+                bounds,
+                corners,
+                paint,
+            }
+        }
+        Command::PushCornerClip {
+            mut bounds,
+            corners,
+        } => {
+            bounds[0] += dx;
+            bounds[1] += dy;
+            Command::PushCornerClip { bounds, corners }
+        }
         Command::Text {
             x,
             y,
@@ -1443,6 +1462,7 @@ fn is_leaf_paint(command: &Command) -> bool {
     matches!(
         command,
         Command::Rect { .. }
+            | Command::ShapedRect { .. }
             | Command::Text { .. }
             | Command::Image { .. }
             | Command::Canvas { .. }
@@ -1451,6 +1471,14 @@ fn is_leaf_paint(command: &Command) -> bool {
 
 fn command_outside(command: &Command, clip: Option<PaintClip>) -> bool {
     match command {
+        Command::ShapedRect {
+            bounds: [x, y, w, h],
+            ..
+        }
+        | Command::PushCornerClip {
+            bounds: [x, y, w, h],
+            ..
+        } => outside(clip, *x, *y, *w, *h),
         Command::Rect { x, y, w, h, .. }
         | Command::Image { x, y, w, h, .. }
         | Command::PushClip { x, y, w, h, .. }

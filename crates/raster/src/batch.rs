@@ -11,6 +11,7 @@ use engine::scene::{BlendMode, ColorStop, ContentMode, FillRule, Gradient, PathV
 pub struct RectInstance {
     pub rect: [f32; 4],
     pub radius: f32,
+    pub corners: Option<engine::scene::CornerShape>,
     pub stroke_width: f32,
     pub kind: u32,
     pub flags: u32,
@@ -29,6 +30,7 @@ pub struct PaintExtra {
     pub gradient: [f32; 4],
     pub shadow: [f32; 4],
     pub stroke: [f32; 4],
+    pub corners: [f32; 4],
 }
 
 #[repr(C)]
@@ -45,19 +47,21 @@ pub struct RectVertex {
 impl RectInstance {
     pub fn extra(&self, first: f32, ramp: u32) -> Option<PaintExtra> {
         let has_gradient = self.flags & RECT_GRADIENT != 0;
-        (has_gradient || matches!(self.kind, RECT_STROKE | RECT_FILL_STROKE | RECT_SHADOW)).then(
-            || {
-                let mut gradient = self.gradient_b;
-                gradient[1] = first;
-                gradient[3] = ramp as f32;
-                PaintExtra {
-                    geometry: self.gradient_a,
-                    gradient,
-                    shadow: self.shadow,
-                    stroke: self.stroke_color,
-                }
-            },
-        )
+        (self.corners.is_some()
+            || has_gradient
+            || matches!(self.kind, RECT_STROKE | RECT_FILL_STROKE | RECT_SHADOW))
+        .then(|| {
+            let mut gradient = self.gradient_b;
+            gradient[1] = first;
+            gradient[3] = ramp as f32;
+            PaintExtra {
+                geometry: self.gradient_a,
+                gradient,
+                shadow: self.shadow,
+                stroke: self.stroke_color,
+                corners: self.corners.map_or([0.0; 4], |shape| shape.radii),
+            }
+        })
     }
 
     pub fn vertex(&self, paint: u32) -> RectVertex {
@@ -67,12 +71,17 @@ impl RectInstance {
                 self.radius,
                 self.stroke_width,
                 self.kind as f32,
-                self.flags as f32,
+                (self.flags
+                    | if self.corners.is_some() {
+                        RECT_SHAPED
+                    } else {
+                        0
+                    }) as f32,
             ],
             color: self.color,
             opacity: self.gradient_b[3],
             paint,
-            padding: [0; 2],
+            padding: [0, self.corners.map_or(0, |shape| shape.curve.to_bits())],
         }
     }
 }
@@ -82,6 +91,7 @@ pub const RECT_STROKE: u32 = 1;
 pub const RECT_FILL_STROKE: u32 = 2;
 pub const RECT_SHADOW: u32 = 3;
 pub const RECT_GRADIENT: u32 = 1;
+pub const RECT_SHAPED: u32 = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -95,11 +105,13 @@ pub struct GlyphVertex {
 
 const _: () = assert!(size_of::<RectVertex>() == 64);
 const _: () = assert!(size_of::<GlyphVertex>() == 40);
-const _: () = assert!(size_of::<PaintExtra>() == 64);
+const _: () = assert!(size_of::<PaintExtra>() == 80);
 
 pub const GLYPH_COLOR: u32 = 1;
 pub const GLYPH_GRADIENT: u32 = 2;
 pub const GLYPH_DECORATION: u32 = 4;
+pub const GLYPH_GAMMA: u32 = 8;
+pub const GLYPH_LCD: u32 = 16;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageInstance {

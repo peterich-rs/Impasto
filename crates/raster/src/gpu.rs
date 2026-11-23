@@ -27,6 +27,7 @@ pub(crate) struct GpuCaps {
     pub has_compute: bool,
     pub paint_storage: bool,
     pub has_timestamp_query: bool,
+    pub lcd: bool,
 }
 
 impl GpuCaps {
@@ -58,6 +59,7 @@ impl GpuCaps {
                 && limits.max_storage_buffer_binding_size >= crate::pipelines::EXTRA_BYTES as u64
                 && std::env::var_os("IMPASTO_PAINT_UNIFORM").is_none(),
             has_timestamp_query: features.contains(F::TIMESTAMP_QUERY),
+            lcd: features.contains(F::DUAL_SOURCE_BLENDING),
         };
         if caps.has_compute
             && caps.has_vertex_storage
@@ -168,22 +170,35 @@ impl Gpu {
                 ..Default::default()
             }))
         };
-        let (adapter, result) = if options.enable_gpu_timing
-            && adapter.features().contains(timestamps)
-        {
-            match request_device(&adapter, timestamps) {
-                Ok(device) => (adapter, Ok(device)),
-                Err(error) => {
-                    tracing::warn!(target: "impasto::gpu", ?backend, %error, "retrying without timestamp queries");
-                    let adapter = pollster::block_on(instance.request_adapter(&request))
-                        .map_err(|_| Status::NoDevice(backend))?;
-                    let result = request_device(&adapter, wgpu::Features::empty());
-                    (adapter, result)
-                }
-            }
+        let support = adapter.features();
+        let timing = if options.enable_gpu_timing && support.contains(timestamps) {
+            timestamps
         } else {
-            let result = request_device(&adapter, wgpu::Features::empty());
-            (adapter, result)
+            wgpu::Features::empty()
+        };
+        let lcd = wgpu::Features::DUAL_SOURCE_BLENDING;
+        let mut requested = timing;
+        if !cfg!(any(target_os = "ios", target_os = "android"))
+            && std::env::var("IMPASTO_LCD_RGB").as_deref() == Ok("1")
+            && support.contains(lcd)
+        {
+            requested |= lcd;
+        }
+        let mut adapter = adapter;
+        let result = loop {
+            let result = request_device(&adapter, requested);
+            if result.is_ok() || requested.is_empty() {
+                break result;
+            }
+            tracing::warn!(target: "impasto::gpu", ?backend, ?requested, "retrying with fewer device features");
+            if requested.contains(lcd) {
+                requested.remove(lcd);
+            } else {
+                requested = wgpu::Features::empty();
+            }
+            adapter = pollster::block_on(instance.request_adapter(&request))
+                .map_err(|_| Status::NoDevice(backend))?;
+            requested &= adapter.features();
         };
         let (device, queue) = result.map_err(|error| {
             tracing::warn!(target: "impasto::gpu", ?backend, %error, "device request failed");

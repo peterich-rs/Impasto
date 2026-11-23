@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use engine::scene::{BoxShadow, ColorStop, Gradient};
+use engine::scene::{BoxShadow, ColorStop, CornerShape, Gradient, RectPaint};
 
 use super::*;
 use crate::{compositor::extent, surface::read_rgba};
@@ -141,6 +141,145 @@ fn srgb_format_fallback_encodes_gamma() {
         pixel(&read_rgba(&gpu, &target, size).unwrap(), 9, 4, 4),
         [205, 135, 80, 255]
     );
+}
+
+#[test]
+fn asymmetric_continuous_corners_agree_in_paint_and_clip() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let bounds = [2.0, 2.0, 24.0, 20.0];
+    let corners = CornerShape {
+        radii: [12.0, 0.0, 8.0, 3.0],
+        curve: 4.0,
+    };
+    let size = PixelSize::new(28, 24);
+    let shape = capture(
+        &mut raster,
+        1,
+        vec![Command::ShapedRect {
+            bounds,
+            corners,
+            paint: RectPaint {
+                color: [255; 4],
+                stroke_width: 0.0,
+                stroke_color: [0; 4],
+                gradient: None,
+                shadow: None,
+                box_shadows: Arc::from([]),
+            },
+        }],
+        size,
+    );
+    let clipped = capture(
+        &mut raster,
+        2,
+        vec![
+            Command::PushCornerClip { bounds, corners },
+            rect([0.0, 0.0, 28.0, 24.0], [255; 4]),
+            Command::Pop,
+        ],
+        size,
+    );
+    assert_eq!(shape, clipped);
+    assert_eq!(pixel(&shape, 28, 2, 2)[3], 0);
+    assert_eq!(pixel(&shape, 28, 25, 2)[3], 255);
+    assert_eq!(pixel(&shape, 28, 25, 21)[3], 0);
+    assert_eq!(pixel(&shape, 28, 6, 20)[3], 255);
+}
+
+#[test]
+fn rounded_shadow_matches_two_dimensional_reference() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let bounds = [10.0_f32, 10.0_f32, 12.0_f32, 10.0_f32];
+    let corners = CornerShape {
+        radii: [4.0; 4],
+        curve: 2.0,
+    };
+    let sigma = 3.0_f32;
+    let pixels = capture(
+        &mut raster,
+        1,
+        vec![Command::ShapedRect {
+            bounds,
+            corners,
+            paint: RectPaint {
+                color: [0; 4],
+                stroke_width: 0.0,
+                stroke_color: [0; 4],
+                gradient: None,
+                shadow: None,
+                box_shadows: Arc::from([BoxShadow {
+                    offset: [0.0; 2],
+                    blur_sigma: sigma,
+                    spread: 0.0,
+                    color: [255; 4],
+                }]),
+            },
+        }],
+        PixelSize::new(32, 32),
+    );
+    let steps = 16;
+    for [x, y] in [[9, 9], [10, 10], [10, 14], [16, 14]] {
+        let mut expected = 0.0;
+        for sy in 0..10 * steps {
+            for sx in 0..12 * steps {
+                let u = (sx as f32 + 0.5) / steps as f32;
+                let v = (sy as f32 + 0.5) / steps as f32;
+                if corners.contains([12.0, 10.0], [u, v]) {
+                    let dx = 9.5 + u - x as f32;
+                    let dy = 9.5 + v - y as f32;
+                    expected += (-(dx * dx + dy * dy) / (2.0 * sigma * sigma)).exp();
+                }
+            }
+        }
+        expected /= std::f32::consts::TAU * sigma * sigma * (steps * steps) as f32;
+        let actual = f32::from(pixel(&pixels, 32, x, y)[3]) / 255.0;
+        assert!(
+            (actual - expected).abs() < 0.02,
+            "{x}, {y}: {actual} vs {expected}"
+        );
+    }
+}
+
+#[test]
+fn opaque_root_can_use_lcd_glyphs() {
+    let fonts = FontLibrary::new();
+    let mut shaper = ParleyShaper::new(fonts.clone());
+    assert!(shaper.register("Sans", ROBOTO));
+    let key = metrics_key(
+        Arc::from("Impasto"),
+        Arc::new(TextStyle::default()),
+        &[],
+        14.0,
+        192.0,
+    );
+    let Some(mut raster) = headless(fonts) else {
+        return;
+    };
+    let lcd = raster.device.as_ref().unwrap().gpu.caps.lcd;
+    let size = PixelSize::new(192, 32);
+    let pixels = capture(
+        &mut raster,
+        1,
+        vec![
+            Command::Fill { color: [255; 4] },
+            Command::Text {
+                x: 0.0,
+                y: 0.0,
+                shaped: shaper.metrics(&key).shaped.clone(),
+                color: [0, 0, 0, 255],
+                span_paints: Arc::from([]),
+            },
+        ],
+        size,
+    );
+    let (pixels, _) = pixels.as_chunks::<4>();
+    assert!(pixels.iter().all(|p| p[3] == 255));
+    assert!(pixels.iter().any(|p| p[0] < 200));
+    assert_eq!(pixels.iter().any(|p| p[0] != p[1] || p[1] != p[2]), lcd);
 }
 
 #[test]
@@ -491,7 +630,12 @@ fn local_backdrop_reuses_buckets_without_sampling_old_pixels() {
     capture(&mut raster, 1, scene(12.0, 39.0, 41.0), size);
     let pixels = capture(&mut raster, 2, scene(0.0, 28.0, 26.0), size);
     assert_eq!(pixels, capture(&mut fresh, 2, scene(0.0, 28.0, 26.0), size));
-    assert!(raster.stats.render.pooled_texture_bytes < 2 * 256 * 192 * 4);
+    let bytes_per_pixel = if std::env::var("IMPASTO_DITHER").as_deref() == Ok("1") {
+        8
+    } else {
+        4
+    };
+    assert!(raster.stats.render.pooled_texture_bytes < 2 * 256 * 192 * bytes_per_pixel);
     assert_eq!(pixel(&pixels, 256, 0, 60), [255; 4]);
     assert_eq!(pixel(&pixels, 256, 30, 60), [0, 0, 0, 255]);
 }

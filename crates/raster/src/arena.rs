@@ -184,7 +184,7 @@ pub struct FrameArena {
     stops: Pool,
     paint: Pool,
     pub lut: crate::gradient_lut::GradientLut,
-    paint_entries: HashMap<[u32; 16], Address>,
+    paint_entries: HashMap<[u32; size_of::<PaintExtra>() / 4], Address>,
     groups: HashMap<(usize, Globals), wgpu::BindGroup>,
     pub buffers_created: u32,
     pub bind_groups_created: u32,
@@ -336,7 +336,7 @@ impl FrameArena {
                 self.paint_entries.insert(key, address);
                 address
             };
-            (extra, extra.offset / 64)
+            (extra, extra.offset / 80)
         } else {
             if self.paint.slabs.is_empty() {
                 let (_, created) = self.paint.push(gpu, &[], 16)?;

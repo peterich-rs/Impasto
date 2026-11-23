@@ -80,6 +80,10 @@ pub enum LayerKind {
         h: f32,
         corner_radius: f32,
     },
+    CornerClip {
+        bounds: [f32; 4],
+        corners: super::CornerShape,
+    },
     Opacity {
         alpha: u8,
         x: f32,

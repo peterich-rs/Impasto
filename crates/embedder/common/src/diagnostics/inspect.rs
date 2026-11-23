@@ -101,7 +101,7 @@ fn kind_name(kind: &LayerKind) -> &'static str {
     match kind {
         LayerKind::Offset { .. } => "offset",
         LayerKind::Transform { .. } => "transform",
-        LayerKind::Clip { .. } => "clip",
+        LayerKind::Clip { .. } | LayerKind::CornerClip { .. } => "clip",
         LayerKind::Opacity { .. } => "opacity",
         LayerKind::Blur { .. } => "blur",
         LayerKind::BackdropBlur { .. } => "backdropBlur",

@@ -429,7 +429,9 @@ fn layer_kind(kind: &engine::scene::LayerKind) -> &'static str {
     match kind {
         engine::scene::LayerKind::Offset { .. } => "offset",
         engine::scene::LayerKind::Transform { .. } => "transform",
-        engine::scene::LayerKind::Clip { .. } => "clip",
+        engine::scene::LayerKind::Clip { .. } | engine::scene::LayerKind::CornerClip { .. } => {
+            "clip"
+        }
         engine::scene::LayerKind::Opacity { .. } => "opacity",
         engine::scene::LayerKind::Blur { .. } => "blur",
         engine::scene::LayerKind::BackdropBlur { .. } => "backdrop",

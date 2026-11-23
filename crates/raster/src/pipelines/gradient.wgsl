@@ -89,11 +89,12 @@ struct PaintExtra {
     gradient: vec4<f32>,
     shadow: vec4<f32>,
     stroke: vec4<f32>,
+    corners: vec4<f32>,
 };
 
 fn load_paint(index: u32) -> PaintExtra {
     if index == 0xffffffffu {
-        return PaintExtra(vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0));
+        return PaintExtra(vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0));
     }
     return paint[index];
 }

@@ -77,6 +77,8 @@
 - `outlineWidth` (`paint`): `Length`
 - `outlineColor` (`paint`): `Color`
 - `borderRadius` (`paint`): `Length`
+- `borderRadii` (`paint`): `readonly [number, number, number, number]`
+- `borderCurve` (`paint`): `number`
 - `opacity` (`paint`): `number`
 - `translateX` (`paint`): `number`
 - `translateY` (`paint`): `number`

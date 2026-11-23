@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use super::{BlendMode, BoxShadow, ContentMode, Gradient, Shadow, ShapedParagraph, SpanPaint};
+use super::{
+    BlendMode, BoxShadow, ContentMode, CornerShape, Gradient, Shadow, ShapedParagraph, SpanPaint,
+};
 
 /// One paint operation. Coordinates are absolute scene points.
 #[derive(Clone, Debug, PartialEq)]
@@ -23,6 +25,11 @@ pub enum Command {
         shadow: Option<Shadow>,
         /// Drawn before the rectangle, in array order. Empty means no box shadow.
         box_shadows: Arc<[BoxShadow]>,
+    },
+    ShapedRect {
+        bounds: [f32; 4],
+        corners: CornerShape,
+        paint: RectPaint,
     },
     Text {
         x: f32,
@@ -50,6 +57,10 @@ pub enum Command {
         w: f32,
         h: f32,
         corner_radius: f32,
+    },
+    PushCornerClip {
+        bounds: [f32; 4],
+        corners: CornerShape,
     },
     /// Later commands are composited offscreen and drawn back at `alpha` until [`Command::Pop`].
     ///
@@ -109,6 +120,61 @@ pub enum Command {
         height: f32,
         list: crate::scene::CanvasList,
     },
+}
+
+/// Rectangle paint independent of its bounds and corner geometry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RectPaint {
+    pub color: [u8; 4],
+    pub stroke_width: f32,
+    pub stroke_color: [u8; 4],
+    pub gradient: Option<Gradient>,
+    pub shadow: Option<Shadow>,
+    pub box_shadows: Arc<[BoxShadow]>,
+}
+
+impl RectPaint {
+    pub fn command(self, bounds: [f32; 4], radius: f32, corners: Option<CornerShape>) -> Command {
+        if let Some(corners) = corners {
+            Command::ShapedRect {
+                bounds,
+                corners,
+                paint: self,
+            }
+        } else {
+            let [x, y, w, h] = bounds;
+            Command::Rect {
+                x,
+                y,
+                w,
+                h,
+                corner_radius: radius,
+                color: self.color,
+                stroke_width: self.stroke_width,
+                stroke_color: self.stroke_color,
+                gradient: self.gradient,
+                shadow: self.shadow,
+                box_shadows: self.box_shadows,
+            }
+        }
+    }
+}
+
+impl Command {
+    pub fn clip(bounds: [f32; 4], radius: f32, corners: Option<CornerShape>) -> Self {
+        if let Some(corners) = corners {
+            Self::PushCornerClip { bounds, corners }
+        } else {
+            let [x, y, w, h] = bounds;
+            Self::PushClip {
+                x,
+                y,
+                w,
+                h,
+                corner_radius: radius,
+            }
+        }
+    }
 }
 
 /// Flattened commands for tests and diagnostics.

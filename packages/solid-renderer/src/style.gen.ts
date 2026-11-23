@@ -89,6 +89,8 @@ export interface PaintStyle {
   outlineWidth?: Length | null;
   outlineColor?: Color | null;
   borderRadius?: Length | null;
+  borderRadii?: readonly [number, number, number, number] | null;
+  borderCurve?: number | null;
   opacity?: number | null;
   translateX?: number | null;
   translateY?: number | null;

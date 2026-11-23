@@ -78,6 +78,20 @@ pub fn declarations(name: &str, value: &Value) -> Result<Vec<Declaration>, Style
     match value {
         Value::Null => resets(name),
         Value::Undefined => Ok(Vec::new()),
+        Value::Array(values) if name == "borderRadii" => {
+            let [tl, tr, br, bl] = values.as_slice() else {
+                return Err(invalid(name, "expected four corner radii"));
+            };
+            set(Property::BorderRadii([
+                tl.number(name)?,
+                tr.number(name)?,
+                br.number(name)?,
+                bl.number(name)?,
+            ]))
+        }
+        Value::Number(value) if name == "borderCurve" => {
+            set(Property::BorderCurve(finite_f32(name, *value)?))
+        }
         Value::Number(value) => number_value(name, finite_f32(name, *value)?),
         Value::Bool(value) => match name {
             "softWrap" => set(Property::SoftWrap(*value)),

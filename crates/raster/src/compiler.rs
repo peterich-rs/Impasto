@@ -120,6 +120,7 @@ pub struct Clip {
 pub struct ClipShape {
     pub rect: [f32; 4],
     pub radius: f32,
+    pub corners: Option<engine::scene::CornerShape>,
     /// Transform from the clip's space into the current scope's space.
     pub transform: Affine,
     /// Tessellated path for a canvas clip, in the clip's space.
@@ -511,6 +512,27 @@ impl Compiler<'_, '_, '_> {
                     gradient,
                     shadow,
                     box_shadows,
+                    None,
+                )?;
+            }
+            Command::ShapedRect {
+                bounds: [x, y, w, h],
+                corners,
+                paint,
+            } => {
+                self.rect(
+                    *x,
+                    *y,
+                    *w,
+                    *h,
+                    0.0,
+                    &paint.color,
+                    paint.stroke_width,
+                    &paint.stroke_color,
+                    &paint.gradient,
+                    &paint.shadow,
+                    &paint.box_shadows,
+                    Some(*corners),
                 )?;
             }
             Command::Text {
@@ -535,7 +557,13 @@ impl Compiler<'_, '_, '_> {
                 w,
                 h,
                 corner_radius,
-            } => self.push_clip(*x, *y, *w, *h, *corner_radius),
+            } => self.push_clip(*x, *y, *w, *h, *corner_radius, None),
+            Command::PushCornerClip {
+                bounds: [x, y, w, h],
+                corners,
+            } => {
+                self.push_clip(*x, *y, *w, *h, 0.0, Some(*corners));
+            }
             Command::PushOpacity { alpha, .. } => {
                 self.push_effect(Effect::Opacity, f32::from(*alpha) / 255.0, 0.0, None)
             }
@@ -594,22 +622,29 @@ impl Compiler<'_, '_, '_> {
         gradient: &Option<Gradient>,
         shadow: &Option<Shadow>,
         box_shadows: &[BoxShadow],
+        corners: Option<engine::scene::CornerShape>,
     ) -> Result<(), Status> {
         if !positive_box(x, y, w, h) {
             return Ok(());
         }
+        let corners = corners.map(|shape| shape.fitted(w, h));
         let opacity = self.current().opacity;
         let mut instances = Vec::new();
         for shadow in box_shadows {
-            if let Some(instance) = box_shadow(x, y, w, h, corner_radius, shadow, opacity) {
+            if let Some(mut instance) = box_shadow(x, y, w, h, corner_radius, shadow, opacity) {
+                instance.corners = corners.map(|mut shape| {
+                    shape.radii = shape.radii.map(|radius| (radius + shadow.spread).max(0.0));
+                    shape.fitted(w + 2.0 * shadow.spread, h + 2.0 * shadow.spread)
+                });
                 instances.push(instance);
             }
         }
         if let Some(shadow) = shadow
             && shadow.elevation.is_finite()
             && shadow.elevation > 0.0
-            && let Some(instance) = material_shadow(x, y, w, h, corner_radius, shadow, opacity)
+            && let Some(mut instance) = material_shadow(x, y, w, h, corner_radius, shadow, opacity)
         {
+            instance.corners = corners;
             instances.push(instance);
         }
         let stroke = stroke_width.is_finite() && stroke_width > 0.0;
@@ -654,6 +689,7 @@ impl Compiler<'_, '_, '_> {
         instances.push(RectInstance {
             rect: [x, y, w, h],
             radius: clamped_radius(corner_radius, w, h),
+            corners,
             stroke_width: if stroke { stroke_width } else { 0.0 },
             kind,
             flags,
@@ -793,7 +829,15 @@ impl Compiler<'_, '_, '_> {
         }
     }
 
-    fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32, corner_radius: f32) {
+    fn push_clip(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        corner_radius: f32,
+        corners: Option<engine::scene::CornerShape>,
+    ) {
         let mut state = self.current().clone();
         let transform = state.transform;
         let radius = clamped_radius(corner_radius, w, h);
@@ -806,7 +850,7 @@ impl Compiler<'_, '_, '_> {
                 Some(existing) => intersect(existing, rect),
                 None => rect,
             });
-            if radius <= 0.0 {
+            if radius <= 0.0 && corners.is_none() {
                 state.clip.hard_scissor = Some(
                     state
                         .clip
@@ -815,10 +859,11 @@ impl Compiler<'_, '_, '_> {
                 );
             }
         }
-        if radius > 0.0 || !is_axis_aligned(transform) {
+        if radius > 0.0 || corners.is_some() || !is_axis_aligned(transform) {
             state.clip.shapes.push(ClipShape {
                 rect: [x, y, w, h],
                 radius,
+                corners: corners.map(|shape| shape.fitted(w, h)),
                 transform,
                 mesh: None,
                 path: None,
@@ -905,7 +950,7 @@ impl Compiler<'_, '_, '_> {
         if isolated {
             self.push_effect(Effect::Opacity, 1.0, 0.0, None);
         }
-        self.push_clip(x, y, width, height, 0.0);
+        self.push_clip(x, y, width, height, 0.0, None);
         self.push_transform(x, y, 0.0, 1.0, 1.0);
         let floor = self.stack.len();
         for op in list.ops() {
@@ -964,6 +1009,7 @@ impl Compiler<'_, '_, '_> {
                     self.current_mut().clip.shapes.push(ClipShape {
                         rect: mesh.bounds,
                         radius: 0.0,
+                        corners: None,
                         transform,
                         mesh: Some(Arc::new(mesh)),
                         path: Some(path.clone()),
@@ -1094,6 +1140,7 @@ pub fn solid_rect(rect: [f32; 4], color: [f32; 4]) -> RectInstance {
     RectInstance {
         rect,
         radius: 0.0,
+        corners: None,
         stroke_width: 0.0,
         kind: RECT_FILL,
         flags: 0,
@@ -1315,6 +1362,7 @@ fn box_shadow(
     Some(RectInstance {
         rect,
         radius: corner_radius,
+        corners: None,
         stroke_width: 0.0,
         kind: RECT_SHADOW,
         flags: 0,
@@ -1353,6 +1401,7 @@ fn material_shadow(
     Some(RectInstance {
         rect,
         radius: corner_radius,
+        corners: None,
         stroke_width: 0.0,
         kind: RECT_SHADOW,
         flags: 0,

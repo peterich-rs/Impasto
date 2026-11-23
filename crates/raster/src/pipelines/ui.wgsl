@@ -10,6 +10,7 @@ struct RectVertex {
     @location(4) opacity: f32,
     @location(5) paint_index: u32,
     @location(6) depth: f32,
+    @location(7) curve: f32,
 };
 
 struct VertexOut {
@@ -20,6 +21,7 @@ struct VertexOut {
     @location(3) @interpolate(flat) color: vec4<f32>,
     @location(4) @interpolate(flat) opacity: f32,
     @location(5) @interpolate(flat) paint_index: u32,
+    @location(6) @interpolate(flat) curve: f32,
 };
 
 fn vertex_out(data: RectVertex, p: vec3<f32>) -> VertexOut {
@@ -31,6 +33,7 @@ fn vertex_out(data: RectVertex, p: vec3<f32>) -> VertexOut {
     out.color = data.color;
     out.opacity = data.opacity;
     out.paint_index = data.paint_index;
+    out.curve = data.curve;
     return out;
 }
 
@@ -59,24 +62,53 @@ fn erf(x: f32) -> f32 {
     return s * y;
 }
 
-// Analytic rounded-box shadow: the Gaussian integral of the box's distance
-// field (Evan Wallace, "Fast Rounded-Rectangle Shadows"). One quad, no blur pass.
-fn shadow_alpha(data: VertexOut, p: vec2<f32>, shadow: vec4<f32>) -> f32 {
-    // rect is the rect grown by the shadow margin. Recover the spread box.
-    let spread = shadow.z;
-    let margin = shadow.w * 3.0;
-    let half = data.rect.zw * 0.5 - vec2<f32>(margin);
-    let center = data.rect.xy + data.rect.zw * 0.5;
-    let sigma = max(shadow.w, 0.0);
-    let r = data.shape.x + spread;
-    let q = abs(p - center) - half + vec2<f32>(r);
-    let outside = length(max(q, vec2<f32>(0.0)));
-    let inside = min(max(q.x, q.y), 0.0) - r;
-    let dist = outside + inside;
-    if (sigma < 0.3) {
-        return select(0.0, 1.0, dist <= 0.0);
+fn box_distance(data: VertexOut, p: vec2<f32>) -> f32 {
+    let half = data.rect.zw * 0.5;
+    let centered = p - (data.rect.xy + half);
+    if (data.curve >= 2.0) {
+        return sd_shaped_box(centered, half, load_paint(data.paint_index).corners, data.curve);
     }
-    return 0.5 + 0.5 * erf(-dist * 0.70710678 / sigma);
+    return sd_rounded_box(centered, half, data.shape.x);
+}
+
+fn corner_cut(distance: f32, r: f32, curve: f32) -> f32 {
+    if (r <= 0.0 || distance >= r) { return 0.0; }
+    let y = clamp(1.0 - distance / r, 0.0, 1.0);
+    return r * (1.0 - pow(max(0.0, 1.0 - pow(y, curve)), 1.0 / curve));
+}
+
+// Integrate the horizontal Gaussian analytically over each row of the
+// shape and integrate the vertical Gaussian over its finite halo.
+fn shadow_alpha(data: VertexOut, p: vec2<f32>, extra: PaintExtra) -> f32 {
+    let sigma = max(extra.shadow.w, 0.0);
+    let half = data.rect.zw * 0.5 - vec2(3.0 * sigma);
+    if (any(half <= vec2(0.0))) { return 0.0; }
+    let center = data.rect.xy + data.rect.zw * 0.5;
+    let q = p - center;
+    let r = clamp(data.shape.x + extra.shadow.z, 0.0, min(half.x, half.y));
+    let radii = select(vec4(r), extra.corners, data.curve >= 2.0);
+    let curve = max(data.curve, 2.0);
+    if (sigma < 0.3) {
+        return select(0.0, 1.0, sd_shaped_box(q, half, radii, curve) <= 0.0);
+    }
+    let inv = 0.70710678118 / sigma;
+    let low = max(-half.y, q.y - 3.0 * sigma);
+    let high = min(half.y, q.y + 3.0 * sigma);
+    if (high <= low) { return 0.0; }
+    // The quadrature is local in Y, including for a tall rectangle.
+    let step = (high - low) / 8.0;
+    var integral = 0.0;
+    for (var i = 0u; i < 8u; i++) {
+        let y = low + (f32(i) + 0.5) * step;
+        let top = y + half.y;
+        let bottom = half.y - y;
+        let left = -half.x + max(corner_cut(top, radii.x, curve), corner_cut(bottom, radii.w, curve));
+        let right = half.x - max(corner_cut(top, radii.y, curve), corner_cut(bottom, radii.z, curve));
+        let horizontal = 0.5 * (erf((right - q.x) * inv) - erf((left - q.x) * inv));
+        let vertical = (y - q.y) * inv;
+        integral += horizontal * exp(-vertical * vertical);
+    }
+    return clamp(integral * step * 0.3989422804 / sigma, 0.0, 1.0);
 }
 
 @fragment
@@ -93,21 +125,17 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var color = vec4<f32>(0.0);
 
     if (kind == 3u) {
-        color = data.color * shadow_alpha(data, p, load_paint(data.paint_index).shadow);
+        color = data.color * shadow_alpha(data, p, load_paint(data.paint_index));
     } else if (kind == 4u) {
         // Clip mask target: write coverage of the rounded rect into r and a.
-        let half = data.rect.zw * 0.5;
-        let center = data.rect.xy + half;
-        let d = sd_rounded_box(p - center, half, data.shape.x);
+        let d = box_distance(data, p);
         let a = clamp(0.5 - d / aa, 0.0, 1.0);
         color = vec4<f32>(a, 0.0, 0.0, a);
     } else if (kind == 5u) {
         // Mesh: lyon wrote per-vertex coverage; the brush is the color.
         color = data.color;
     } else {
-        let half = data.rect.zw * 0.5;
-        let center = data.rect.xy + half;
-        let d = sd_rounded_box(p - center, half, data.shape.x);
+        let d = box_distance(data, p);
         if (kind == 0u || kind == 2u) {
             let coverage = clamp(0.5 - d / aa, 0.0, 1.0);
             var brush = data.color;
@@ -126,6 +154,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
 
     color = color * clip_coverage(in.position.xy) * data.opacity;
+    if view.info.w > 0.0 && color.a >= 1.0 && (u32(data.shape.w) & 1u) != 0u {
+        return vec4(to_linear(dither_srgb(color, in.position.xy).rgb), color.a);
+    }
     return color;
 }
 

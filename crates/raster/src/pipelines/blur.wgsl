@@ -109,3 +109,19 @@ fn fs_backdrop(in: VertexOut) -> @location(0) vec4<f32> {
     let dst = textureSampleLevel(backdrop, backdrop_sampler, clamp_uv(uv), 0.0);
     return mix(dst, read_source(uv), coverage(in.position.xy));
 }
+
+
+fn dithered_output(in: VertexOut) -> vec4<f32> {
+    return dither_srgb(read_source(source_uv(in.position.xy)), in.position.xy);
+}
+
+@fragment
+fn fs_dither(in: VertexOut) -> @location(0) vec4<f32> {
+    let pixel = dithered_output(in);
+    return vec4(to_linear(pixel.rgb), pixel.a);
+}
+
+@fragment
+fn fs_dither_srgb(in: VertexOut) -> @location(0) vec4<f32> {
+    return dithered_output(in);
+}
