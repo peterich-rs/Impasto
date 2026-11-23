@@ -167,6 +167,14 @@ fn android(
     let framework = toolchain::framework()?;
     let bundle = bundle_for(app, options, Some("android"))?;
     let generated = app.root.join("build/android");
+    // Replace the generated source sets so removed or renamed host files
+    // cannot survive an upgrade. Keep Gradle output and caches reusable.
+    for source_set in ["app/src", "host/src"] {
+        let old = generated.join(source_set);
+        if old.exists() {
+            fs::remove_dir_all(&old).with_context(|| format!("清理 {}", old.display()))?;
+        }
+    }
     copy_tree(
         &framework.join("crates/embedder/android/apk"),
         &generated,
