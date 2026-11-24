@@ -375,6 +375,11 @@ impl TextureTransaction<'_> {
         self.get(source).map(size) == self.store.get(source).map(size)
     }
 
+    pub fn same_revision(&self, source: &str) -> bool {
+        let revision = |image: &GpuImage| image.revision;
+        self.get(source).map(revision) == self.store.get(source).map(revision)
+    }
+
     pub fn touch(&mut self, source: &str) {
         let cached = if let Some(entry) = self.store.staged.get_mut(source) {
             entry.as_mut()

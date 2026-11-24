@@ -10,6 +10,7 @@ mod compiler;
 mod compositor;
 mod compositor_tracks;
 mod compute_blur;
+mod damage;
 mod fonts;
 mod gpu;
 mod gradient_lut;
@@ -18,6 +19,7 @@ mod outline;
 #[cfg(target_os = "android")]
 mod pipeline_disk_cache;
 mod pipelines;
+mod prepare;
 mod profiler;
 mod resident;
 mod shaper;
@@ -25,6 +27,7 @@ mod status;
 mod text_index;
 mod textures;
 
+pub use damage::DamageRect;
 pub use fonts::{FontLibrary, ShapeStats};
 pub use image_upload::ImageUploadStats;
 pub use profiler::{
@@ -62,7 +65,7 @@ mod metal;
 mod surface;
 
 pub use atlas::AtlasStats;
-pub use compositor::RenderStats;
+pub use compositor::{RenderStats, SubtreeCacheStats};
 #[cfg(target_os = "ios")]
 pub use metal::MetalSliceBatch;
 pub use surface::{RawSurfaceHandle, WgpuSurface};
@@ -88,6 +91,8 @@ static NEXT_DEVICE: AtomicU64 = AtomicU64::new(1);
 pub struct SubmitStats {
     pub picture_rebuilt: u32,
     pub picture_reused: u32,
+    pub picture_workers: u32,
+    pub damage: DamageRect,
     pub layer_count: u32,
     pub picture_prepare: Duration,
     pub compose: Duration,
@@ -117,6 +122,7 @@ pub struct Rasterizer {
     frame: Option<Frame>,
     stats: SubmitStats,
     reuse_pictures: bool,
+    parallel_prepare: bool,
     pipeline_cache_dir: Option<std::path::PathBuf>,
     prepared_buffers: u32,
     prepared_mesh_bytes: u64,
@@ -139,6 +145,11 @@ struct Frame {
     scale: f32,
     pictures: HashMap<PictureId, Arc<CompiledPicture>>,
     views: Arc<[u64]>,
+    parallel_prepare: bool,
+    damage: DamageRect,
+    has_glyphs: bool,
+    revision: u64,
+    previous_revision: u64,
     #[cfg(target_os = "ios")]
     slices: Vec<HashSet<LayerId>>,
 }
@@ -153,6 +164,7 @@ impl Rasterizer {
             frame: None,
             stats: SubmitStats::default(),
             reuse_pictures: false,
+            parallel_prepare: std::env::var("IMPASTO_PARALLEL_PREPARE").as_deref() != Ok("0"),
             pipeline_cache_dir: None,
             prepared_buffers: 0,
             prepared_mesh_bytes: 0,
@@ -370,10 +382,46 @@ impl Rasterizer {
         }
         let mut textures = device.textures.begin_frame();
         let previous = self.frame.as_ref().filter(|_| self.reuse_pictures);
-        let mut stats = SubmitStats::default();
+        let previous_revision = self.frame.as_ref().map_or(0, |frame| frame.revision);
+        let compile_scale = |picture| scales.get(&picture).copied().unwrap_or(point_scale);
+        let (pool, mut prepared) = if self.parallel_prepare {
+            prepare::pictures(
+                tree.pictures.iter().filter_map(|picture| {
+                    let scale = compile_scale(picture.id);
+                    let cached = previous
+                        .and_then(|frame| frame.pictures.get(&picture.id))
+                        .is_some_and(|old| {
+                            old.device == device.generation
+                                && old.generation == picture.generation
+                                && old.scale == scale
+                                && old.origin == picture.origin
+                                && old
+                                    .images
+                                    .iter()
+                                    .all(|(source, _)| textures.same_geometry(source))
+                                && old.waiting.is_empty()
+                        });
+                    (!cached).then_some((picture.as_ref(), scale))
+                }),
+                |source| {
+                    textures
+                        .get(source)
+                        .map(|image| (image.width(), image.height()))
+                },
+            )
+        } else {
+            (None, HashMap::new())
+        };
+        let mut stats = SubmitStats {
+            picture_workers: pool.map_or(0, |pool| {
+                u32::try_from(pool.current_num_threads()).unwrap_or(u32::MAX)
+            }),
+            ..SubmitStats::default()
+        };
         let mut pictures = HashMap::with_capacity(tree.pictures.len());
+        let mut has_glyphs = false;
         for picture in &tree.pictures {
-            let compile_scale = scales.get(&picture.id).copied().unwrap_or(point_scale);
+            let compile_scale = compile_scale(picture.id);
             let cached = previous
                 .and_then(|frame| frame.pictures.get(&picture.id))
                 .filter(|cached| {
@@ -409,7 +457,15 @@ impl Rasterizer {
                     resolve: &mut resolve,
                     point_scale: compile_scale,
                 };
-                let result = compiler::compile(picture, &mut context)?;
+                let result = if let Some(prepared) = prepared.remove(&picture.id) {
+                    let compiled = prepared?.install(context.gpu, context.device_generation)?;
+                    for (source, _) in picture.images() {
+                        context.textures.touch(source);
+                    }
+                    compiled
+                } else {
+                    compiler::compile(picture, &mut context, pool)?
+                };
                 stats.picture_rebuilt = stats.picture_rebuilt.saturating_add(1);
                 if let Some(mesh) = result.mesh_buffer.get() {
                     stats.render.buffers_created += 2;
@@ -417,6 +473,7 @@ impl Rasterizer {
                 }
                 Arc::new(result)
             };
+            has_glyphs |= compiled.has_glyphs;
             if pictures.insert(picture.id, compiled).is_some() {
                 return Err(Status::BadScene);
             }
@@ -424,7 +481,7 @@ impl Rasterizer {
         let mut views = Vec::new();
         #[cfg(target_os = "ios")]
         let mut slices = vec![HashSet::new()];
-        for id in order {
+        for &id in &order {
             let layer = &tree.layers[id.0 as usize];
             match layer.kind {
                 LayerKind::PlatformView { node } => {
@@ -453,20 +510,29 @@ impl Rasterizer {
         if device.gpu.is_lost() {
             return Err(Status::DeviceLost);
         }
-        stats.image_upload = textures.commit(&device.gpu)?;
         let platform_views: Arc<[u64]> = views.into();
-        stats.picture_prepare = started.elapsed();
-        stats.layer_count = u32::try_from(tree.layers.len()).unwrap_or(u32::MAX);
-        stats.pictures = u32::try_from(pictures.len()).unwrap_or(u32::MAX);
-        stats.textures = u32::try_from(device.textures.len()).unwrap_or(u32::MAX);
-        self.frame = Some(Frame {
+        let mut frame = Frame {
             tree,
             scale: point_scale,
             pictures,
             views: Arc::clone(&platform_views),
+            parallel_prepare: pool.is_some(),
+            damage: DamageRect::Full,
+            has_glyphs,
+            revision: previous_revision.wrapping_add(1),
+            previous_revision,
             #[cfg(target_os = "ios")]
             slices,
-        });
+        };
+        frame.damage = damage::between(previous, &frame, &order, &textures);
+        stats.damage = frame.damage;
+        stats.image_upload = textures.commit(&device.gpu)?;
+        device.compositor.prune_subtrees(&frame.pictures);
+        stats.picture_prepare = started.elapsed();
+        stats.layer_count = u32::try_from(frame.tree.layers.len()).unwrap_or(u32::MAX);
+        stats.pictures = u32::try_from(frame.pictures.len()).unwrap_or(u32::MAX);
+        stats.textures = u32::try_from(device.textures.len()).unwrap_or(u32::MAX);
+        self.frame = Some(frame);
         self.reuse_pictures = true;
         #[cfg(target_os = "ios")]
         {
@@ -565,6 +631,11 @@ impl Frame {
             textures,
             scale: self.scale,
             slice,
+            parallel_prepare: self.parallel_prepare,
+            damage: self.damage,
+            has_glyphs: self.has_glyphs,
+            revision: self.revision,
+            previous_revision: self.previous_revision,
         }
     }
 }

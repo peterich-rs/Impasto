@@ -67,11 +67,30 @@ pub(super) fn run_with_images(
     name: &str,
     frames: u32,
     size: PixelSize,
-    mut scene: impl FnMut(u32) -> LayerTree,
+    scene: impl FnMut(u32) -> LayerTree,
     image: ImagePixels<'_>,
 ) {
+    run_in_format(
+        host,
+        name,
+        frames,
+        size,
+        scene,
+        image,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+    );
+}
+
+pub(super) fn run_in_format(
+    host: &mut Headless,
+    name: &str,
+    frames: u32,
+    size: PixelSize,
+    mut scene: impl FnMut(u32) -> LayerTree,
+    image: ImagePixels<'_>,
+    format: wgpu::TextureFormat,
+) {
     let raster = &mut host.raster;
-    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let gpu = raster.device.as_ref().unwrap().gpu.clone();
     let target = output(&gpu, format, size);
     let view = target.create_view(&Default::default());
@@ -166,6 +185,12 @@ pub(super) fn run_with_images(
                 "compute_passes": stats.image_upload.compute_passes,
             },
             "counters": {
+                "picture_workers": stats.picture_workers,
+                "prerasterized_glyphs": stats.atlas.prerasterized,
+                "subtree_cache_hits": r.subtree_cache.hits,
+                "subtree_cache_bytes": r.subtree_cache.bytes,
+                "damage_pct": stats.damage.fraction(size) * 100.0,
+                "partial_redraw": r.partial_redraw,
                 "draws": r.draws, "passes": r.passes, "offscreen_passes": r.offscreen_passes,
                 "compute_passes": r.compute_passes, "direct_present": r.direct_present,
                 "buffers_created": r.buffers_created, "bind_groups_created": r.bind_groups_created,
@@ -196,6 +221,7 @@ pub(super) fn run_with_images(
         "schema": 1,
         "scene": name,
         "viewport": [size.width, size.height],
+        "output_format": format!("{format:?}"),
         "dpr": 1,
         "environment": {
             "git_sha": std::env::var("IMPASTO_BENCH_GIT_SHA").unwrap_or_else(|_| {

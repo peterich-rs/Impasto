@@ -350,28 +350,38 @@ fn render_layers(
                     .borrow_mut()
                     .submit_shared_layers(Arc::clone(tree), scale, resolve);
             submit_ms = elapsed_ms(started);
-            if let Err(status) = submitted {
-                if status == raster::Status::DeviceLost {
-                    recover_device(graphics)?;
-                    return Ok(RasterOutput::finish(true));
-                }
-                tracing::error!(
-                    target: "impasto::render::present",
-                    %status,
-                    "scene submit failed"
-                );
-                if let Some(hub) = submission.hub.as_ref() {
-                    hub.error(
-                        "engine",
-                        &format!("scene submit failed: {status}"),
-                        None,
-                        Some(number),
+            let submitted = match submitted {
+                Ok(submitted) => submitted,
+                Err(status) => {
+                    if status == raster::Status::DeviceLost {
+                        recover_device(graphics)?;
+                        return Ok(RasterOutput::finish(true));
+                    }
+                    tracing::error!(
+                        target: "impasto::render::present",
+                        %status,
+                        "scene submit failed"
                     );
+                    if let Some(hub) = submission.hub.as_ref() {
+                        hub.error(
+                            "engine",
+                            &format!("scene submit failed: {status}"),
+                            None,
+                            Some(number),
+                        );
+                    }
+                    return Ok(RasterOutput::finish(again));
                 }
-                // A rejected list is not a lost surface. Do not force another vsync.
+            };
+            graphics.installed = Some(Installed { scale });
+            if submitted.stats.damage == raster::DamageRect::Empty
+                && graphics.gpu == Gpu::Live
+                && !graphics.needs_present
+            {
+                tracing::event!(name: "present_skipped", target: "impasto::render", tracing::Level::DEBUG,
+                    trace_event = true, status = "no_damage");
                 return Ok(RasterOutput::finish(again));
             }
-            graphics.installed = Some(Installed { scale });
             if graphics.gpu == Gpu::Flush {
                 graphics.gpu = Gpu::Live;
                 tracing::info!(target: "impasto::render::gpu", reason = "resume", "gpu live");

@@ -16,6 +16,7 @@ use engine::scene::{
     CanvasPath, Command, ContentMode, Gradient, Picture, Shadow, ShapedParagraph, ShapedRun,
     SpanPaint,
 };
+use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::batch::{
     self, Brush, GpuMeshBuffer, ImageInstance, Mesh, PackedGradient, RECT_FILL, RECT_FILL_STROKE,
@@ -26,6 +27,7 @@ use crate::color::linear_premultiplied;
 use crate::gpu::Gpu;
 use crate::pipelines::{self, BlendKey};
 use crate::status::Status;
+use crate::textures::Load;
 
 /// Column-major 3x3 affine in scene points: `[a, b, c, d, e, f]` as
 /// `x' = a*x + c*y + e`, `y' = b*x + d*y + f`.
@@ -352,6 +354,10 @@ pub struct CompiledPicture {
     pub mesh_buffer: Arc<OnceLock<GpuMeshBuffer>>,
     pub reads_root: bool,
     pub has_resident_candidate: bool,
+    pub has_glyphs: bool,
+    pub cache_safe: bool,
+    pub cache_expensive: bool,
+    pub supports_partial: bool,
     /// Picture origin in the parent layer's space.
     pub origin: (f32, f32),
     pub scopes: Vec<Scope>,
@@ -413,11 +419,64 @@ pub struct CompileContext<'a, 'store, 'pixels> {
 pub fn compile(
     picture: &Picture,
     context: &mut CompileContext<'_, '_, '_>,
+    pool: Option<&rayon::ThreadPool>,
 ) -> Result<CompiledPicture, Status> {
-    let point_scale = context.point_scale;
+    let prepared = prepare(picture, context.point_scale, pool, &mut |source| {
+        context.textures.load(context.gpu, source, context.resolve)
+    })?;
+    prepared.install(context.gpu, context.device_generation)
+}
+
+type Tessellation = lyon_tessellation::VertexBuffers<[f32; 3], u32>;
+
+/// Upload-free geometry prepared on a worker and installed in paint order.
+pub struct PreparedPicture {
+    compiled: CompiledPicture,
+    vertices: Vec<[f32; 3]>,
+    indices: Vec<u32>,
+}
+
+impl PreparedPicture {
+    pub fn install(mut self, gpu: &Gpu, device: u64) -> Result<CompiledPicture, Status> {
+        if !self.indices.is_empty() {
+            let mesh = gpu.validation(|| {
+                Ok(GpuMeshBuffer {
+                    vertices: pipelines::buffer_from(
+                        gpu,
+                        "picture mesh vertices",
+                        bytemuck::cast_slice(&self.vertices),
+                        wgpu::BufferUsages::VERTEX,
+                    )?,
+                    indices: pipelines::buffer_from(
+                        gpu,
+                        "picture mesh indices",
+                        bytemuck::cast_slice(&self.indices),
+                        wgpu::BufferUsages::INDEX,
+                    )?,
+                })
+            })?;
+            self.compiled
+                .mesh_buffer
+                .set(mesh)
+                .map_err(|_| Status::BadScene)?;
+        }
+        self.compiled.device = device;
+        self.compiled.resident_id = NEXT_COMPILED_PICTURE.fetch_add(1, Ordering::Relaxed);
+        Ok(self.compiled)
+    }
+}
+
+pub fn prepare(
+    picture: &Picture,
+    point_scale: f32,
+    pool: Option<&rayon::ThreadPool>,
+    load: &mut dyn FnMut(&Arc<str>) -> Load,
+) -> Result<PreparedPicture, Status> {
     let origin = picture.origin;
     let mut compiler = Compiler {
-        context,
+        load,
+        pool,
+        point_scale,
         stack: vec![root_state()],
         scopes: vec![Scope {
             state: root_state(),
@@ -440,32 +499,30 @@ pub fn compile(
         // An unbalanced push was rejected at record time. Nothing to do.
         return Err(Status::BadScene);
     }
-    if !compiler.indices.is_empty() {
-        let gpu = compiler.context.gpu;
-        let mesh = gpu.validation(|| {
-            Ok(GpuMeshBuffer {
-                vertices: pipelines::buffer_from(
-                    gpu,
-                    "picture mesh vertices",
-                    bytemuck::cast_slice(&compiler.vertices),
-                    wgpu::BufferUsages::VERTEX,
-                )?,
-                indices: pipelines::buffer_from(
-                    gpu,
-                    "picture mesh indices",
-                    bytemuck::cast_slice(&compiler.indices),
-                    wgpu::BufferUsages::INDEX,
-                )?,
-            })
-        })?;
-        compiler.meshes.set(mesh).map_err(|_| Status::BadScene)?;
-    }
     let mut has_resident_candidate = false;
+    let mut has_glyphs = false;
+    let mut supports_partial = compiler.groups.is_empty();
+    let mut cache_safe = true;
+    let mut shadows = 0usize;
+    let mut paths = 0usize;
     for scope in &mut compiler.scopes {
         for draw in &mut scope.draws {
             if let Draw::Rects(run) = draw {
                 run.prepare()?;
+                shadows += run
+                    .rects
+                    .iter()
+                    .filter(|rect| rect.kind == RECT_SHADOW)
+                    .count();
             }
+            has_glyphs |= matches!(draw, Draw::Glyphs(_));
+            supports_partial &= matches!(
+                draw,
+                Draw::Rects(_) | Draw::Images { .. } | Draw::Glyphs(_) | Draw::Fill(_)
+            ) && draw.source_over();
+            paths += usize::from(matches!(draw, Draw::Mesh(_)));
+            cache_safe &= matches!(draw, Draw::Rects(_) | Draw::Mesh(_))
+                && (draw.source_over() || !scope.state.groups.is_empty());
         }
         if compiler.groups.is_empty() {
             let candidates: Vec<_> = scope.draws.iter().map(resident_candidate).collect();
@@ -498,11 +555,38 @@ pub fn compile(
     for (group, content) in compiler.groups.iter_mut().zip(content_by_group) {
         group.content = content;
     }
-    Ok(CompiledPicture {
-        resident_id: NEXT_COMPILED_PICTURE.fetch_add(1, Ordering::Relaxed),
+    cache_safe &= compiler
+        .groups
+        .iter()
+        .all(|group| group.effect != Effect::BackdropBlur)
+        && compiler.scopes.iter().all(|scope| {
+            scope.state.groups.first().is_none_or(|id| {
+                matches!(
+                    compiler.groups[*id].effect,
+                    Effect::Opacity
+                        | Effect::Isolation
+                        | Effect::Blur
+                        | Effect::Blend(BlendMode::SrcOver)
+                )
+            })
+        });
+    let cache_expensive = paths >= 32
+        || shadows >= 2
+        || compiler.groups.iter().any(|group| {
+            matches!(
+                group.effect,
+                Effect::Blur | Effect::Opacity | Effect::Blend(_)
+            )
+        });
+    let compiled = CompiledPicture {
+        resident_id: 0,
         generation: picture.generation,
         has_resident_candidate,
-        device: compiler.context.device_generation,
+        has_glyphs,
+        cache_safe,
+        cache_expensive,
+        supports_partial,
+        device: 0,
         bounds,
         mesh_buffer: compiler.meshes,
         reads_root: compiler.scopes.iter().any(|scope| {
@@ -522,6 +606,11 @@ pub fn compile(
         images: compiler.images,
         waiting: compiler.waiting,
         groups: compiler.groups,
+    };
+    Ok(PreparedPicture {
+        compiled,
+        vertices: compiler.vertices,
+        indices: compiler.indices,
     })
 }
 
@@ -552,8 +641,10 @@ fn group_output(content: PictureBounds, group: Group, origin: Affine) -> Picture
     }
 }
 
-struct Compiler<'c, 'a, 'store, 'pixels> {
-    context: &'c mut CompileContext<'a, 'store, 'pixels>,
+struct Compiler<'a> {
+    load: &'a mut dyn FnMut(&Arc<str>) -> Load,
+    pool: Option<&'a rayon::ThreadPool>,
+    point_scale: f32,
     stack: Vec<ScopeState>,
     scopes: Vec<Scope>,
     images: Vec<(Arc<str>, bool)>,
@@ -564,7 +655,7 @@ struct Compiler<'c, 'a, 'store, 'pixels> {
     indices: Vec<u32>,
 }
 
-impl Compiler<'_, '_, '_, '_> {
+impl Compiler<'_> {
     fn current(&self) -> &ScopeState {
         self.stack
             .last()
@@ -929,12 +1020,8 @@ impl Compiler<'_, '_, '_, '_> {
         mode: ContentMode,
         required: bool,
     ) -> Result<(), Status> {
-        match self
-            .context
-            .textures
-            .load(self.context.gpu, source, self.context.resolve)
-        {
-            crate::textures::Load::Ready { width, height, .. } => {
+        match (self.load)(source) {
+            Load::Ready { width, height, .. } => {
                 let slices =
                     image_slices(mode, x, y, w, h, width, height).ok_or(Status::BadScene)?;
                 let instances: Vec<ImageInstance> = slices
@@ -957,7 +1044,7 @@ impl Compiler<'_, '_, '_, '_> {
                     blend: BlendKey::SrcOver,
                 });
             }
-            crate::textures::Load::Missing => {
+            Load::Missing => {
                 if required {
                     return Err(Status::NotReady);
                 }
@@ -968,11 +1055,11 @@ impl Compiler<'_, '_, '_, '_> {
                     self.remember_image(source, false);
                 }
             }
-            crate::textures::Load::Empty => {
+            Load::Empty => {
                 self.waiting.push(Arc::clone(source));
                 self.remember_image(source, required);
             }
-            crate::textures::Load::Failed => return Err(Status::BadScene),
+            Load::Failed => return Err(Status::BadScene),
         }
         Ok(())
     }
@@ -1055,7 +1142,7 @@ impl Compiler<'_, '_, '_, '_> {
 
     fn tessellation_tolerance(&self) -> f32 {
         let [a, b, c, d, ..] = self.current().transform;
-        let scale = self.context.point_scale * a.hypot(b).max(c.hypot(d));
+        let scale = self.point_scale * a.hypot(b).max(c.hypot(d));
         0.2 / scale.clamp(0.25, 128.0)
     }
 
@@ -1109,8 +1196,29 @@ impl Compiler<'_, '_, '_, '_> {
         self.push_clip(x, y, width, height, 0.0, None);
         self.push_transform(x, y, 0.0, 1.0, 1.0);
         let floor = self.stack.len();
-        for op in list.ops() {
-            self.canvas_op(op, floor)?;
+        let ops = list.ops();
+        if let Some(pool) = self.pool.filter(|_| crate::prepare::path_count(ops) >= 16) {
+            // Canvas paths already contain their local transforms. Save/restore
+            // and the remaining ops leave the enclosing scale unchanged.
+            let tolerance = self.tessellation_tolerance();
+            let prepared: Vec<_> = pool.install(|| {
+                ops.par_iter()
+                    .map(|op| match op {
+                        CanvasOp::Clip { path } if path.verbs.is_empty() => Ok(None),
+                        CanvasOp::Fill { path, .. } | CanvasOp::Clip { path } => {
+                            tessellate(path, tolerance).map(Some)
+                        }
+                        _ => Ok(None),
+                    })
+                    .collect()
+            });
+            for (op, buffers) in ops.iter().zip(prepared) {
+                self.canvas_op(op, floor, buffers?)?;
+            }
+        } else {
+            for op in ops {
+                self.canvas_op(op, floor, None)?;
+            }
         }
         self.stack.truncate(entry);
         self.boundary();
@@ -1122,8 +1230,12 @@ impl Compiler<'_, '_, '_, '_> {
         path: &CanvasPath,
         brush: Brush,
         composite: CanvasComposite,
+        buffers: Option<Tessellation>,
     ) -> Result<Mesh, Status> {
-        let buffers = tessellate(path, self.tessellation_tolerance())?;
+        let buffers = match buffers {
+            Some(buffers) => buffers,
+            None => tessellate(path, self.tessellation_tolerance())?,
+        };
         let base = u32::try_from(self.vertices.len()).map_err(|_| Status::BadScene)?;
         let start = u32::try_from(self.indices.len()).map_err(|_| Status::BadScene)?;
         let bounds = mesh_bounds(&buffers.vertices);
@@ -1142,7 +1254,12 @@ impl Compiler<'_, '_, '_, '_> {
         })
     }
 
-    fn canvas_op(&mut self, op: &CanvasOp, floor: usize) -> Result<(), Status> {
+    fn canvas_op(
+        &mut self,
+        op: &CanvasOp,
+        floor: usize,
+        buffers: Option<Tessellation>,
+    ) -> Result<(), Status> {
         match op {
             CanvasOp::Save => {
                 self.stack.push(self.current().clone());
@@ -1160,8 +1277,12 @@ impl Compiler<'_, '_, '_, '_> {
                     clip.scissor = Some([0.0; 4]);
                     clip.hard_scissor = Some([0.0; 4]);
                 } else {
-                    let mesh =
-                        self.mesh(path, Brush::Solid([1.0; 4]), CanvasComposite::SourceOver)?;
+                    let mesh = self.mesh(
+                        path,
+                        Brush::Solid([1.0; 4]),
+                        CanvasComposite::SourceOver,
+                        buffers,
+                    )?;
                     self.current_mut().clip.shapes.push(ClipShape {
                         rect: mesh.bounds,
                         radius: 0.0,
@@ -1182,7 +1303,7 @@ impl Compiler<'_, '_, '_, '_> {
                         pack_canvas_gradient(gradient, paint.alpha).ok_or(Status::BadScene)?,
                     ),
                 };
-                let mesh = self.mesh(path, brush, paint.composite)?;
+                let mesh = self.mesh(path, brush, paint.composite, buffers)?;
                 let isolated = paint.composite == CanvasComposite::Multiply
                     && self.push_canvas_composite(paint.composite);
                 self.push_draw(Draw::Mesh(mesh));
@@ -1221,13 +1342,9 @@ impl Compiler<'_, '_, '_, '_> {
                 }
             }
             CanvasOp::Image(image) => {
-                let load = self.context.textures.load(
-                    self.context.gpu,
-                    &image.source,
-                    self.context.resolve,
-                );
+                let load = (self.load)(&image.source);
                 match load {
-                    crate::textures::Load::Ready {
+                    Load::Ready {
                         width: tex_w,
                         height: tex_h,
                         ..
@@ -1263,7 +1380,7 @@ impl Compiler<'_, '_, '_, '_> {
                             self.pop();
                         }
                     }
-                    crate::textures::Load::Missing => {
+                    Load::Missing => {
                         if !image
                             .source
                             .starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX)
@@ -1271,8 +1388,8 @@ impl Compiler<'_, '_, '_, '_> {
                             self.waiting.push(Arc::clone(&image.source));
                         }
                     }
-                    crate::textures::Load::Empty => self.waiting.push(Arc::clone(&image.source)),
-                    crate::textures::Load::Failed => return Err(Status::BadScene),
+                    Load::Empty => self.waiting.push(Arc::clone(&image.source)),
+                    Load::Failed => return Err(Status::BadScene),
                 }
             }
             CanvasOp::Clear { x, y, w, h, ctm } => {

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use engine::scene::{CompositorSnapshot, apply_compositor_samples};
 
-use crate::Rasterizer;
+use crate::{DamageRect, Rasterizer};
 
 impl Rasterizer {
     /// Samples a route's installed scene without validation, tessellation, or mesh uploads.
@@ -27,6 +27,8 @@ impl Rasterizer {
             if !apply_compositor_samples(&mut tree.layers, &tree.tracks, &samples) {
                 return None;
             }
+            frame.damage = DamageRect::Full;
+            self.stats.damage = DamageRect::Full;
         }
         Some(CompositorSnapshot { target_ms, samples })
     }

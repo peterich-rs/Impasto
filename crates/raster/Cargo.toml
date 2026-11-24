@@ -16,6 +16,7 @@ lyon_tessellation = "1"
 lyon_path = "1"
 lyon_geom = "1"
 etagere = "0.2"
+rayon = "1.12"
 half = { version = "2", default-features = false }
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"

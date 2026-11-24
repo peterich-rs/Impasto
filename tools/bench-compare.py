@@ -12,7 +12,8 @@ import sys
 
 
 SCENES = {
-    "scroll_1000_cards", "dense_text_wall", "backdrop_blur_overlays", "canvas_500_paths",
+    "scroll_1000_cards", "scroll_10000_cards", "dense_text_wall",
+    "backdrop_blur_overlays", "canvas_500_paths",
 }
 PREFIX = "IMPASTO_BENCH_JSON "
 EXPERIMENTS = {

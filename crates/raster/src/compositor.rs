@@ -1,7 +1,12 @@
 //! Ordered scene replay, clipping, and offscreen composition.
 
+mod glyph_prepare;
 mod image_array;
 mod resident;
+mod retained;
+mod subtree_cache;
+
+pub use subtree_cache::SubtreeCacheStats;
 
 use crate::profiler::{Capture, GpuPassKind};
 use std::collections::{HashMap, HashSet};
@@ -26,6 +31,8 @@ use crate::pipelines::{
 };
 use crate::resident::ResidentPictures;
 use crate::{FontLibrary, Status, textures::TextureStore};
+use retained::RetainedRoot;
+use subtree_cache::{CacheCandidate, CacheSlot, MIN_RESAMPLED_BLUR, SubtreeCache};
 
 const POOL_LIMIT: usize = 16;
 const POOL_BYTES: u64 = 64 * 1024 * 1024;
@@ -42,6 +49,10 @@ pub(crate) struct Compositor {
     render_stats: RenderStats,
     arena: FrameArena,
     resident: ResidentPictures,
+    subtrees: SubtreeCache,
+    retained: Option<RetainedRoot>,
+    retain_offscreen: bool,
+    glyph_prefetch_revision: Option<u64>,
     image_groups: HashMap<(Vec<wgpu::TextureView>, bool), wgpu::BindGroup>,
     composites: HashMap<(wgpu::TextureView, wgpu::TextureView), wgpu::BindGroup>,
     masks: HashMap<MaskKey, Image>,
@@ -98,6 +109,8 @@ pub struct RenderStats {
     pub transient_bytes: u64,
     pub early_z_instances: u32,
     pub stencil_draws: u32,
+    pub subtree_cache: SubtreeCacheStats,
+    pub partial_redraw: bool,
 }
 
 pub(crate) struct Scene<'a> {
@@ -107,6 +120,11 @@ pub(crate) struct Scene<'a> {
     pub textures: &'a TextureStore,
     pub scale: f32,
     pub slice: Option<&'a HashSet<LayerId>>,
+    pub parallel_prepare: bool,
+    pub damage: crate::DamageRect,
+    pub has_glyphs: bool,
+    pub revision: u64,
+    pub previous_revision: u64,
 }
 
 #[derive(Clone)]
@@ -116,6 +134,7 @@ struct Image {
     size: [u32; 2],
     logical: [u32; 2],
     origin: [u32; 2],
+    sample_offset: [f32; 2],
     format: wgpu::TextureFormat,
     samples: u32,
     usage: wgpu::TextureUsages,
@@ -160,6 +179,7 @@ impl Image {
             size,
             logical: size,
             origin: [0; 2],
+            sample_offset: [0.0; 2],
             format,
             samples,
             usage,
@@ -174,6 +194,7 @@ impl Image {
             size,
             logical: size,
             origin: [0; 2],
+            sample_offset: [0.0; 2],
             format,
             samples: 1,
             usage: view.texture().usage(),
@@ -219,7 +240,7 @@ impl Image {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct OutputFormat {
     pub format: wgpu::TextureFormat,
     space: wgpu::SurfaceColorSpace,
@@ -285,6 +306,10 @@ impl Compositor {
             render_stats: RenderStats::default(),
             arena: FrameArena::new(gpu),
             resident: ResidentPictures::default(),
+            subtrees: SubtreeCache::new(),
+            retained: None,
+            retain_offscreen: std::env::var("IMPASTO_RETAIN_OFFSCREEN").as_deref() == Ok("1"),
+            glyph_prefetch_revision: None,
             image_groups: HashMap::new(),
             composites: HashMap::new(),
             masks: HashMap::new(),
@@ -330,6 +355,7 @@ impl Compositor {
         self.frame_active = true;
         self.atlas.begin_frame();
         self.resident.begin_frame();
+        self.subtrees.begin();
         self.arena.reset();
         self.recycle_masks();
         self.offscreen_live_bytes = 0;
@@ -365,6 +391,7 @@ impl Compositor {
         self.render_stats.gradient_lut_hits = self.arena.lut.hits;
         let atlas_stats = self.atlas.take_stats();
         self.render_stats.atlas_upload_bytes = atlas_stats.upload_bytes;
+        self.render_stats.subtree_cache = self.subtrees.stats();
         self.render_stats.copy_pixels += atlas_stats.copy_pixels;
         self.frame_active = false;
         if self.trim_pending {
@@ -376,6 +403,24 @@ impl Compositor {
     pub fn submitted(&mut self, gpu: &Gpu) {
         self.arena.submitted(gpu);
         self.resident.clear_uploads();
+        self.subtrees.submitted();
+        if let Some(retained) = &mut self.retained {
+            retained.submitted = true;
+        }
+    }
+
+    pub fn prune_subtrees(&mut self, pictures: &HashMap<PictureId, Arc<CompiledPicture>>) {
+        self.subtrees.prune(pictures);
+    }
+
+    #[cfg(test)]
+    pub fn disable_subtree_cache(&mut self) {
+        self.subtrees.disable();
+    }
+
+    #[cfg(test)]
+    pub fn set_retain_offscreen(&mut self, enabled: bool) {
+        self.retain_offscreen = enabled;
     }
 
     pub fn render_stats(&self) -> RenderStats {
@@ -401,6 +446,9 @@ impl Compositor {
         self.blur_groups.clear();
         self.arena.trim();
         self.resident = ResidentPictures::default();
+        self.subtrees.clear();
+        self.retained = None;
+        self.glyph_prefetch_revision = None;
         self.masks.clear();
     }
 
@@ -419,11 +467,13 @@ impl Compositor {
         size: [u32; 2],
         capture: Option<(&mut Capture, Option<usize>)>,
     ) -> Result<wgpu::CommandEncoder, Status> {
+        let output_format = output_format.into();
+        self.subtrees.output(output_format);
         let OutputFormat {
             format,
             space,
             straight_alpha,
-        } = output_format.into();
+        } = output_format;
         let working = match space {
             wgpu::SurfaceColorSpace::DisplayP3 | wgpu::SurfaceColorSpace::ExtendedSrgbLinear => {
                 wgpu::TextureFormat::Rgba16Float
@@ -437,9 +487,11 @@ impl Compositor {
             });
         let p3 = space == wgpu::SurfaceColorSpace::DisplayP3;
         let linear = space == wgpu::SurfaceColorSpace::ExtendedSrgbLinear;
-        let direct = !straight_alpha
-            && (linear && format == working || !p3 && format.is_srgb())
-            && !scene_reads_root(&scene, Some(scene.tree.root));
+        let direct_candidate =
+            !straight_alpha && (linear && format == working || !p3 && format.is_srgb());
+        let reads_root = (direct_candidate || self.retain_offscreen)
+            && scene_reads_root(&scene, Some(scene.tree.root));
+        let direct = direct_candidate && !reads_root;
         let dither_output = gpu.dither_output
             && !direct
             && matches!(
@@ -451,6 +503,21 @@ impl Compositor {
             );
         let first = self.render_stats.passes == 0;
         self.render_stats.direct_present = direct && (first || self.render_stats.direct_present);
+        let main_format = if dither_output {
+            wgpu::TextureFormat::Rgba16Float
+        } else {
+            working
+        };
+        let retain = self.retain_offscreen
+            && !direct
+            && !reads_root
+            && RetainedRoot::eligible(&scene, size, main_format);
+        let retained = self.retained.take().filter(|root| {
+            retain && root.submitted && root.output == output_format && root.image.size == size
+        });
+        let damage = retained
+            .as_ref()
+            .map_or(crate::DamageRect::Full, |root| root.damage(&scene));
         let output = Image::output(output, format, size);
         let mut frame = Frame {
             gpu,
@@ -464,25 +531,39 @@ impl Compositor {
             main: output.view.clone(),
             capture,
             size,
+            damage_scissor: None,
+            baking_subtree: false,
             working,
             straight_alpha,
         };
-        let main = if direct {
+        let main = if let Some(retained) = retained {
+            retained.image
+        } else if retain {
+            Image::new(gpu, size, main_format, 1)
+        } else if direct {
             output.clone()
-        } else if dither_output {
-            frame.take(size, wgpu::TextureFormat::Rgba16Float)
         } else {
-            frame.take(size, working)
+            frame.take(size, main_format)
         };
         frame.main = main.view.clone();
-        frame.clear(&main.view);
-        if !frame.scene.tree.layers.is_empty() {
-            frame.layers(
-                Some(frame.scene.tree.root),
-                &main,
-                IDENTITY,
-                &Clip::default(),
-            )?;
+        let clip = match damage {
+            crate::DamageRect::Full => {
+                frame.clear(&main.view);
+                Some(Clip::default())
+            }
+            _ => {
+                frame.compositor.render_stats.partial_redraw = true;
+                damage
+                    .pixels(size)
+                    .map(|area| frame.clear_damage(&main, area))
+                    .transpose()?
+            }
+        };
+        if let Some(clip) = clip
+            && !frame.scene.tree.layers.is_empty()
+        {
+            frame.prepare_glyphs(&main);
+            frame.layers(Some(frame.scene.tree.root), &main, IDENTITY, &clip)?;
         }
         frame.finish(&main.view);
         if !direct {
@@ -503,8 +584,34 @@ impl Compositor {
                     FullPass::EncodeSrgb
                 },
             )?;
-            frame.release(main);
+            if retain {
+                frame.compositor.retained = Some(RetainedRoot {
+                    image: main,
+                    output: output_format,
+                    revision: frame.scene.revision,
+                    submitted: false,
+                });
+            } else {
+                frame.release(main);
+            }
         }
+        let cache = frame.compositor.subtrees.stats();
+        let damage_pct = frame
+            .scene
+            .damage
+            .fraction(crate::PixelSize::new(size[0], size[1]))
+            * 100.0;
+        tracing::event!(
+            name: "subtree_cache",
+            target: "impasto::cache",
+            tracing::Level::DEBUG,
+            trace_event = true,
+            hits = cache.hits,
+            misses = cache.misses,
+            evictions = cache.evictions,
+            cache_bytes = cache.bytes,
+            damage_pct
+        );
         Ok(frame.command)
     }
 }
@@ -596,6 +703,7 @@ impl<'a> ImageSource<'a> {
 
 struct PictureReplay<'a> {
     layer: LayerId,
+    picture_id: PictureId,
     picture: &'a CompiledPicture,
     origin: Affine,
     group_bounds: Option<Vec<PictureBounds>>,
@@ -624,6 +732,8 @@ struct Frame<'a> {
     main: wgpu::TextureView,
     capture: Option<(&'a mut Capture, Option<usize>)>,
     size: [u32; 2],
+    damage_scissor: Option<[u32; 4]>,
+    baking_subtree: bool,
     working: wgpu::TextureFormat,
     straight_alpha: bool,
 }
@@ -1158,15 +1268,22 @@ impl Frame<'_> {
             let children = layer.first_child;
             match layer.kind {
                 LayerKind::PlatformView { .. } => {}
-                LayerKind::Picture { picture } => {
-                    let picture =
-                        Arc::clone(self.scene.pictures.get(&picture).ok_or(Status::BadScene)?);
+                LayerKind::Picture {
+                    picture: picture_id,
+                } => {
+                    let picture = Arc::clone(
+                        self.scene
+                            .pictures
+                            .get(&picture_id)
+                            .ok_or(Status::BadScene)?,
+                    );
                     let local = compiler::compose(
                         transform,
                         translation(picture.origin.0, picture.origin.1),
                     );
                     let replay = PictureReplay {
                         layer: id,
+                        picture_id,
                         picture: &picture,
                         origin: local,
                         group_bounds: if picture.groups.is_empty() {
@@ -1175,25 +1292,25 @@ impl Frame<'_> {
                             picture.bounds_in(local, self.scene.scale).1
                         },
                     };
-                    if picture.scope_blocks.is_empty()
-                        || local[..4] != IDENTITY[..4]
-                        || self.scene.scale < picture.scale
-                    {
-                        self.scopes(&replay, &picture.scopes, 0, target, clip, 0)?;
-                    } else {
-                        let block_size = compiler::SCOPES_PER_BLOCK;
-                        for (block, (&bounds, scopes)) in picture
-                            .scope_blocks
-                            .iter()
-                            .zip(picture.scopes.chunks(block_size))
-                            .enumerate()
-                        {
-                            let bounds = bounds.transform(local).expand(1.0 / self.scene.scale);
-                            if self.area(bounds, target).is_some() {
-                                self.scopes(&replay, scopes, 0, target, clip, block * block_size)?;
-                            }
+                    if picture.cache_expensive {
+                        let candidate = CacheCandidate {
+                            slot: CacheSlot {
+                                layer: id,
+                                group: None,
+                            },
+                            picture_id,
+                            picture: &picture,
+                            origin: local,
+                            bounds: picture.bounds_in(local, self.scene.scale).0,
+                            blur: None,
+                        };
+                        if self.try_subtree_cache(candidate, target, clip, |frame, target| {
+                            frame.replay_picture(&replay, target, clip)
+                        })? {
+                            continue;
                         }
                     }
+                    self.replay_picture(&replay, target, clip)?;
                 }
                 LayerKind::Offset { .. } | LayerKind::Transform { .. } => {
                     let local = compiler::layer_transform(&layer.kind);
@@ -1258,6 +1375,39 @@ impl Frame<'_> {
                         content: self.layer_bounds(children, transform)?,
                         transform,
                     };
+                    if let Some(child) = children
+                        .and_then(|id| self.scene.tree.layers.get(id.0 as usize))
+                        .filter(|child| child.next.is_none())
+                        && let LayerKind::Picture {
+                            picture: picture_id,
+                        } = child.kind
+                        && let Some(picture) = self.scene.pictures.get(&picture_id).cloned()
+                    {
+                        let origin = compiler::compose(
+                            transform,
+                            translation(picture.origin.0, picture.origin.1),
+                        );
+                        let candidate = CacheCandidate {
+                            slot: CacheSlot {
+                                layer: id,
+                                group: None,
+                            },
+                            picture_id,
+                            picture: &picture,
+                            origin,
+                            bounds: group
+                                .content
+                                .expand(3.0 * sigma.max(0.0) * compiler::effect_scale(transform)),
+                            blur: Some(sigma),
+                        };
+                        if self.try_subtree_cache(candidate, target, clip, |frame, target| {
+                            frame.group(target, transform, clip, group, |frame, target| {
+                                frame.layers(children, target, transform, clip)
+                            })
+                        })? {
+                            continue;
+                        }
+                    }
                     self.group(target, transform, clip, group, |frame, target| {
                         frame.layers(children, target, transform, clip)
                     })?;
@@ -1288,6 +1438,35 @@ impl Frame<'_> {
                         frame.layers(children, target, transform, clip)
                     })?;
                 }
+            }
+        }
+        Ok(())
+    }
+
+    fn replay_picture(
+        &mut self,
+        replay: &PictureReplay<'_>,
+        target: &Image,
+        clip: &Clip,
+    ) -> Result<(), Status> {
+        let picture = replay.picture;
+        let origin = replay.origin;
+        if picture.scope_blocks.is_empty()
+            || origin[..4] != IDENTITY[..4]
+            || self.scene.scale < picture.scale
+        {
+            return self.scopes(replay, &picture.scopes, 0, target, clip, 0);
+        }
+        let block_size = compiler::SCOPES_PER_BLOCK;
+        for (block, (&bounds, scopes)) in picture
+            .scope_blocks
+            .iter()
+            .zip(picture.scopes.chunks(block_size))
+            .enumerate()
+        {
+            let bounds = bounds.transform(origin).expand(1.0 / self.scene.scale);
+            if self.area(bounds, target).is_some() {
+                self.scopes(replay, scopes, 0, target, clip, block * block_size)?;
             }
         }
         Ok(())
@@ -1345,16 +1524,47 @@ impl Frame<'_> {
                     origin,
                     parent_clip,
                 )? {
-                    self.group(target, transform, &clip, group, |frame, target| {
-                        frame.scopes(
-                            replay,
-                            group_scopes,
-                            depth + 1,
+                    let render = |frame: &mut Self, target: &Image| {
+                        frame.group(target, transform, &clip, group, |frame, target| {
+                            frame.scopes(
+                                replay,
+                                group_scopes,
+                                depth + 1,
+                                target,
+                                parent_clip,
+                                scope_index,
+                            )
+                        })
+                    };
+                    let sigma = group.sigma * compiler::effect_scale(transform);
+                    // Retain a soft group inside a mixed picture independently
+                    // so its sharp siblings can still follow the live transform.
+                    if depth == 0
+                        && group.effect == Effect::Blur
+                        && group.bounds.is_none()
+                        && sigma.is_finite()
+                        && sigma * self.scene.scale >= MIN_RESAMPLED_BLUR
+                        && self.try_subtree_cache(
+                            CacheCandidate {
+                                slot: CacheSlot {
+                                    layer: replay.layer,
+                                    group: Some(*id),
+                                },
+                                picture_id: replay.picture_id,
+                                picture: replay.picture,
+                                origin,
+                                bounds: group.content.expand(3.0 * sigma),
+                                blur: Some(sigma),
+                            },
                             target,
-                            parent_clip,
-                            scope_index,
-                        )
-                    })?;
+                            &clip,
+                            render,
+                        )?
+                    {
+                        scopes = remaining;
+                        continue;
+                    }
+                    render(self, target)?;
                 }
                 scopes = remaining;
                 continue;
@@ -1471,7 +1681,10 @@ impl Frame<'_> {
 
     fn coverage(&mut self, target: &Image, clip: &Clip) -> Result<Coverage, Status> {
         let mut coverage = Coverage::default();
-        let mut area = target.area();
+        let mut area = self
+            .damage_scissor
+            .filter(|_| target.view == self.main)
+            .unwrap_or_else(|| target.area());
         if let Some(bounds) = clip.scissor {
             let Some(clipped) = scissor(bounds, self.scene.scale, self.size)
                 .and_then(|bounds| intersect_pixels(area, bounds))
@@ -1591,11 +1804,15 @@ impl Frame<'_> {
     }
 
     fn area(&self, bounds: PictureBounds, target: &Image) -> Option<[u32; 4]> {
+        let target_area = self
+            .damage_scissor
+            .filter(|_| target.view == self.main)
+            .unwrap_or_else(|| target.area());
         match bounds {
             PictureBounds::Empty => None,
-            PictureBounds::Unbounded => Some(target.area()),
+            PictureBounds::Unbounded => Some(target_area),
             PictureBounds::Rect(bounds) => scissor(bounds, self.scene.scale, self.size)
-                .and_then(|area| intersect_pixels(area, target.area())),
+                .and_then(|area| intersect_pixels(area, target_area)),
         }
     }
 
@@ -3041,8 +3258,8 @@ impl Frame<'_> {
         };
         let params = ParamsUniform {
             values: [
-                source.origin[0] as f32,
-                source.origin[1] as f32,
+                source.origin[0] as f32 + source.sample_offset[0],
+                source.origin[1] as f32 + source.sample_offset[1],
                 value,
                 f32::from(
                     matches!(kind, FullPass::Gaussian { vertical: true, .. })

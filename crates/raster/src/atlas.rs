@@ -1,7 +1,8 @@
 //! Glyph atlases. Pages of `R8Unorm` coverage for ordinary antialiased
 //! text and `Rgba8UnormSrgb` for color glyphs (emoji, COLR, bitmap strikes).
 //!
-//! Swash rasterizes on the raster thread. A glyph's key covers every input
+//! The raster queue packs bitmaps in draw order. Workers may prepare missing
+//! bitmaps ahead of replay. A glyph's key covers every input
 //! that changes its bitmap: face, glyph ID, physical size, subpixel
 //! position bucket, variation coordinates, and synthetic bold or skew.
 //! Entries are shelf-packed. The shelf allocator cannot free one rect, so
@@ -18,6 +19,7 @@ use std::{
 use engine::scene::FontFaceId;
 use etagere::BucketedAtlasAllocator;
 use etagere::size2;
+use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use swash::scale::{Render, ScaleContext, Source};
 use swash::zeno::{Angle, Fill, Format, Style, Transform, Vector};
 use swash::{CacheKey, FontRef, GlyphId};
@@ -36,7 +38,7 @@ const GUTTER: u32 = 1;
 
 /// Identity of one rasterized glyph bitmap.
 #[derive(Clone, PartialEq, Eq, Hash)]
-struct GlyphKey {
+pub(crate) struct GlyphKey {
     face: FontFaceId,
     glyph: u16,
     /// Physical font size in 1/64 pixel steps.
@@ -161,9 +163,8 @@ pub enum AtlasBinding {
 
 /// Rasterizer for glyph bitmaps and the pages that hold them.
 pub struct Atlas {
-    context: ScaleContext,
-    font_keys: HashMap<FontFaceId, CacheKey>,
-    sources: Vec<Source>,
+    rasterizer: GlyphRasterizer,
+    prepared: HashMap<GlyphKey, Bitmap>,
     mask: AtlasArray,
     color: AtlasArray,
     entries: HashMap<GlyphKey, Entry>,
@@ -188,6 +189,7 @@ pub struct AtlasStats {
     pub upload_bytes: u64,
     pub copy_pixels: u64,
     pub evictions: u32,
+    pub prerasterized: u32,
     /// Live entries across both atlases.
     pub entries: usize,
     /// Bytes of texture memory in live pages.
@@ -197,13 +199,8 @@ pub struct AtlasStats {
 impl Atlas {
     pub fn new(gpu: &Gpu) -> Self {
         Self {
-            context: ScaleContext::new(),
-            font_keys: HashMap::new(),
-            sources: vec![
-                Source::ColorOutline(0),
-                Source::ColorBitmap(swash::scale::StrikeWith::BestFit),
-                Source::Bitmap(swash::scale::StrikeWith::ExactSize),
-            ],
+            rasterizer: GlyphRasterizer::default(),
+            prepared: HashMap::new(),
             mask: AtlasArray {
                 texture: Some(AtlasTexture::new(
                     gpu,
@@ -234,7 +231,8 @@ impl Atlas {
         self.color = AtlasArray::default();
         self.material = None;
         self.entries.clear();
-        self.font_keys.clear();
+        self.rasterizer.font_keys.clear();
+        self.prepared.clear();
         self.scratch = Vec::new();
         self.pinned.clear();
         self.stats = AtlasStats::default();
@@ -242,6 +240,7 @@ impl Atlas {
 
     /// Starts a transaction after the previous frame was submitted or discarded.
     pub fn begin_frame(&mut self) {
+        self.prepared.clear();
         self.pinned.clear();
         if self
             .mask
@@ -334,8 +333,38 @@ impl Atlas {
         position: Option<[f32; 2]>,
         lcd: bool,
     ) -> Option<Placement> {
+        let key = self.glyph_key(gpu, draw, size, position, lcd)?;
+        self.clock = self.clock.wrapping_add(1);
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.used = self.clock;
+            self.stats.hits = self.stats.hits.saturating_add(1);
+            let placement = entry.placement;
+            self.pin(placement);
+            return Some(placement);
+        }
+        self.stats.misses = self.stats.misses.saturating_add(1);
+        let bitmap = self
+            .prepared
+            .remove(&key)
+            .or_else(|| self.rasterizer.glyph(library, &key))?;
+        let placement = self.store(gpu, key, bitmap)?;
+        if placement.rect.page != usize::MAX {
+            self.stats.uploads = self.stats.uploads.saturating_add(1);
+        }
+        self.pin(placement);
+        Some(placement)
+    }
+
+    fn glyph_key(
+        &self,
+        gpu: &Gpu,
+        draw: &GlyphDraw,
+        size: f32,
+        position: Option<[f32; 2]>,
+        lcd: bool,
+    ) -> Option<GlyphKey> {
         let size = quantize_size(size, gpu.max_texture_size())?;
-        let key = GlyphKey {
+        Some(GlyphKey {
             face: *draw.face,
             glyph: draw.glyph,
             size,
@@ -346,82 +375,55 @@ impl Atlas {
             hint: position.is_some(),
             lcd,
             skew: draw.skew.map(f32::to_bits),
-        };
-        self.clock = self.clock.wrapping_add(1);
-        if let Some(entry) = self.entries.get_mut(&key) {
-            entry.used = self.clock;
-            self.stats.hits = self.stats.hits.saturating_add(1);
-            let placement = entry.placement;
-            self.pin(placement);
-            return Some(placement);
-        }
-        self.stats.misses = self.stats.misses.saturating_add(1);
-        let bitmap =
-            library.with_face(&key.face, |bytes, index| self.rasterize(bytes, index, &key))??;
-        let placement = self.store(gpu, key, bitmap)?;
-        if placement.rect.page != usize::MAX {
-            self.stats.uploads = self.stats.uploads.saturating_add(1);
-        }
-        self.pin(placement);
-        Some(placement)
+        })
     }
 
-    fn rasterize(&mut self, bytes: &[u8], index: u32, key: &GlyphKey) -> Option<Bitmap> {
-        let mut font = FontRef::from_index(bytes, index as usize)?;
-        if self.font_keys.len() >= 1024 {
-            self.font_keys.clear();
+    pub(crate) fn missing_glyph(
+        &self,
+        gpu: &Gpu,
+        draw: &GlyphDraw,
+        size: f32,
+        position: Option<[f32; 2]>,
+        lcd: bool,
+    ) -> Option<GlyphKey> {
+        let key = self.glyph_key(gpu, draw, size, position, lcd)?;
+        (!self.entries.contains_key(&key) && !self.prepared.contains_key(&key)).then_some(key)
+    }
+
+    pub(crate) fn prepare(
+        &mut self,
+        pool: &rayon::ThreadPool,
+        library: &FontLibrary,
+        keys: HashSet<GlyphKey>,
+    ) {
+        if keys.len() < 4 {
+            return;
         }
-        font.key = *self.font_keys.entry(key.face).or_insert(font.key);
-        let ppem = key.size as f32 / 64.0;
-        let mut scaler = self
-            .context
-            .builder(font)
-            .size(ppem)
-            .hint(key.hint)
-            .normalized_coords(key.coords.as_deref().unwrap_or_default().iter().copied())
-            .build();
-        let offset = Vector::new(
-            key.subpixel[0] as f32 / SUBPIXEL_BUCKETS as f32,
-            -(key.subpixel[1] as f32) / SUBPIXEL_BUCKETS as f32,
+        let span = tracing::debug_span!(
+            target: "impasto::compile",
+            "parallel_prepare",
+            pictures_rebuilt = 0u64,
+            workers = pool.current_num_threads(),
+            tess_us = 0u64,
+            glyph_pre_us = tracing::field::Empty,
+            glyphs = keys.len()
         );
-        let id = GlyphId::from(key.glyph);
-        // Color sources first: emoji and COLR glyphs keep their own pixels.
-        let mut image = swash::scale::image::Image::new();
-        let mut render = Render::new(&self.sources);
-        render.format(Format::Alpha).offset(offset);
-        if render.render_into(&mut scaler, id, &mut image)
-            && image.content == swash::scale::image::Content::Color
-        {
-            return Some(Bitmap::Color(image));
-        }
-        let mut render = Render::new(&[
-            Source::Outline,
-            Source::Bitmap(swash::scale::StrikeWith::ExactSize),
-        ]);
-        render
-            .format(if key.lcd {
-                Format::Subpixel
-            } else {
-                Format::Alpha
-            })
-            .style(Style::Fill(Fill::NonZero))
-            .offset(offset);
-        if key.embolden {
-            render.embolden(ppem / 24.0);
-        } else if key.darken_stem {
-            render.embolden(0.12);
-        }
-        if let Some(skew) = key.skew.map(f32::from_bits) {
-            render.transform(Some(Transform::skew(
-                Angle::from_degrees(-skew),
-                Angle::ZERO,
-            )));
-        }
-        if render.render_into(&mut scaler, id, &mut image) {
-            return Some(Bitmap::Mask(image));
-        }
-        // No outline: whitespace or a missing glyph. Cache an empty entry.
-        Some(Bitmap::Empty)
+        let _entered = span.enter();
+        let started = std::time::Instant::now();
+        let prepared = pool.install(|| {
+            keys.into_par_iter()
+                .map_init(GlyphRasterizer::default, |worker, key| {
+                    worker.glyph(library, &key).map(|bitmap| (key, bitmap))
+                })
+                .flatten()
+                .collect::<Vec<_>>()
+        });
+        self.stats.prerasterized += u32::try_from(prepared.len()).unwrap_or(u32::MAX);
+        self.prepared.extend(prepared);
+        span.record(
+            "glyph_pre_us",
+            u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+        );
     }
 
     fn store(&mut self, gpu: &Gpu, key: GlyphKey, bitmap: Bitmap) -> Option<Placement> {
@@ -916,6 +918,80 @@ impl AtlasArray {
                     _ => 0,
                 })
                 .sum::<usize>()
+    }
+}
+
+#[derive(Default)]
+struct GlyphRasterizer {
+    context: ScaleContext,
+    font_keys: HashMap<FontFaceId, CacheKey>,
+}
+
+impl GlyphRasterizer {
+    fn glyph(&mut self, library: &FontLibrary, key: &GlyphKey) -> Option<Bitmap> {
+        library.with_face(&key.face, |bytes, index| self.rasterize(bytes, index, key))?
+    }
+
+    fn rasterize(&mut self, bytes: &[u8], index: u32, key: &GlyphKey) -> Option<Bitmap> {
+        let mut font = FontRef::from_index(bytes, index as usize)?;
+        if self.font_keys.len() >= 1024 {
+            self.font_keys.clear();
+        }
+        font.key = *self.font_keys.entry(key.face).or_insert(font.key);
+        let ppem = key.size as f32 / 64.0;
+        let mut scaler = self
+            .context
+            .builder(font)
+            .size(ppem)
+            .hint(key.hint)
+            .normalized_coords(key.coords.as_deref().unwrap_or_default().iter().copied())
+            .build();
+        let offset = Vector::new(
+            key.subpixel[0] as f32 / SUBPIXEL_BUCKETS as f32,
+            -(key.subpixel[1] as f32) / SUBPIXEL_BUCKETS as f32,
+        );
+        let id = GlyphId::from(key.glyph);
+        // Color sources first: emoji and COLR glyphs keep their own pixels.
+        let mut image = swash::scale::image::Image::new();
+        let mut render = Render::new(&[
+            Source::ColorOutline(0),
+            Source::ColorBitmap(swash::scale::StrikeWith::BestFit),
+            Source::Bitmap(swash::scale::StrikeWith::ExactSize),
+        ]);
+        render.format(Format::Alpha).offset(offset);
+        if render.render_into(&mut scaler, id, &mut image)
+            && image.content == swash::scale::image::Content::Color
+        {
+            return Some(Bitmap::Color(image));
+        }
+        let mut render = Render::new(&[
+            Source::Outline,
+            Source::Bitmap(swash::scale::StrikeWith::ExactSize),
+        ]);
+        render
+            .format(if key.lcd {
+                Format::Subpixel
+            } else {
+                Format::Alpha
+            })
+            .style(Style::Fill(Fill::NonZero))
+            .offset(offset);
+        if key.embolden {
+            render.embolden(ppem / 24.0);
+        } else if key.darken_stem {
+            render.embolden(0.12);
+        }
+        if let Some(skew) = key.skew.map(f32::from_bits) {
+            render.transform(Some(Transform::skew(
+                Angle::from_degrees(-skew),
+                Angle::ZERO,
+            )));
+        }
+        if render.render_into(&mut scaler, id, &mut image) {
+            return Some(Bitmap::Mask(image));
+        }
+        // No outline: whitespace or a missing glyph. Cache an empty entry.
+        Some(Bitmap::Empty)
     }
 }
 

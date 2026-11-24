@@ -383,6 +383,15 @@ fn allowed(key: &str) -> bool {
             | "active_tracks"
             | "ui_woken"
             | "missed_vsync"
+            | "pictures_rebuilt"
+            | "workers"
+            | "tess_us"
+            | "glyph_pre_us"
+            | "hits"
+            | "misses"
+            | "evictions"
+            | "cache_bytes"
+            | "damage_pct"
     )
 }
 
