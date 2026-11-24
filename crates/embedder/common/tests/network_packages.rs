@@ -491,15 +491,18 @@ for (let i = 0; i < 8; i++) {{
 let ninthFailed = false;
 try {{
   await connect("ws://{addr}/pool");
-}} catch {{
+}} catch (error) {{
+  if (!String(error).includes("too many open WebSockets")) throw error;
   ninthFailed = true;
 }}
 if (!ninthFailed) throw new Error("9th concurrent socket should fail MAX_SOCKETS=8");
-await pool[0].close(1000, "free-slot");
-const replacement = await connect("ws://{addr}/pool");
-await replacement.close(1000, "bye");
-for (let i = 1; i < pool.length; i++) {{
-  await pool[i].close(1000, "bye");
+for (let i = 0; i < pool.length; i++) {{
+  const closed = await pool[i].close(1000, "free-slot");
+  if (!closed.wasClean) throw new Error("expected clean slot close");
+  pool[i] = await connect("ws://{addr}/pool");
+}}
+for (const socket of pool) {{
+  await socket.close(1000, "bye");
 }}
 "#,
     );
