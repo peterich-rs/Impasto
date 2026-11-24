@@ -3,7 +3,6 @@ resolver = "3"
 members = [
     "crates/engine",
     "crates/raster",
-    "crates/impeller-sys",
     "crates/javascript",
     "crates/embedder/common",
     "crates/embedder/android",
@@ -21,7 +20,6 @@ publish = false
 thiserror = "2"
 engine = { path = "crates/engine" }
 raster = { path = "crates/raster" }
-impeller = { package = "impeller-sys", path = "crates/impeller-sys" }
 javascript = { path = "crates/javascript", default-features = false }
 embedder = { path = "crates/embedder/common" }
 rquickjs = { package = "quickjs-jit", version = "=0.14.2", default-features = false, features = ["std", "loader", "macro", "bindgen"] }

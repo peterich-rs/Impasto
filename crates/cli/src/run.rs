@@ -84,7 +84,7 @@ pub fn run(options: RunOptions) -> Result<()> {
                         let deployed = if source_only {
                             update_android(&adb, &app.android_id(), &revision, &artifact)
                         } else {
-                            install_android(&adb, &app.android_id(), &artifact)
+                            install_android(&adb, &app.android_id(), &artifact, settings.debug)
                         };
                         match deployed {
                             Err(_) if installed.is_some() && !connected() => continue,
@@ -167,13 +167,28 @@ pub(crate) fn script_only(app: &App, previous: &Snapshot, current: &Snapshot) ->
         .all(|name| unchanged(&app.root.join(name)))
 }
 
-fn install_android(adb: &impl Fn() -> Command, package: &str, apk: &Path) -> Result<()> {
+fn install_android(
+    adb: &impl Fn() -> Command,
+    package: &str,
+    apk: &Path,
+    debug: bool,
+) -> Result<()> {
+    let devtools = if debug {
+        crate::devtools::config()?
+    } else {
+        None
+    };
     let mut install = adb();
     install.args(["install", "-r"]).arg(apk);
     toolchain::run(install, "安装 APK")?;
     let mut start = adb();
+    start.args(["shell", "am", "start"]);
+    if let Some((port, token)) = devtools {
+        crate::devtools::configure_android(adb, package, port, &token)?;
+        start.arg("-S");
+    }
     start
-        .args(["shell", "am", "start", "-n"])
+        .arg("-n")
         .arg(format!("{package}/dev.impasto.host.ImpastoActivity"));
     toolchain::run(start, "启动 Android 应用")
 }

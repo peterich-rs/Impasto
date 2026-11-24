@@ -14,7 +14,6 @@ import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 import org.gradle.process.ExecOperations
-import java.io.ByteArrayOutputStream
 import java.io.File
 import javax.inject.Inject
 
@@ -154,12 +153,14 @@ androidComponents {
             outputs.upToDateWhen { false }
         }
         variant.sources.jniLibs?.addGeneratedSourceDirectory(cargo, CargoImpasto::jniLibs)
-        variant.sources.assets?.addGeneratedSourceDirectory(cargo, CargoImpasto::sdkNotices)
 
         val assets = tasks.register<StageApkAssets>("stageApkAssets$capital") {
             quotes.set(repoRoot.resolve("apps/gallery-solid/dist/quotes.js"))
             font.set(repoRoot.resolve("crates/embedder/android/assets/fonts/Sans.ttf"))
             logo.set(repoRoot.resolve("crates/embedder/macos/assets/logo.png"))
+            fontNotice.set(repoRoot.resolve("crates/embedder/android/assets/fonts/NOTICE"))
+            license.set(repoRoot.resolve("LICENSE"))
+            notice.set(repoRoot.resolve("NOTICE"))
             threadTopology.set(providers.gradleProperty("impastoThreadTopology").orElse(""))
         }
         variant.sources.assets?.addGeneratedSourceDirectory(assets, StageApkAssets::output)
@@ -194,9 +195,6 @@ abstract class CargoImpasto : DefaultTask() {
     @get:OutputDirectory
     abstract val jniLibs: DirectoryProperty
 
-    @get:OutputDirectory
-    abstract val sdkNotices: DirectoryProperty
-
     @TaskAction
     fun build() {
         val ndk = resolveNdk()
@@ -206,30 +204,18 @@ abstract class CargoImpasto : DefaultTask() {
         if (!libraries.deleteRecursively()) {
             throw GradleException("could not clear ${libraries.path}")
         }
-        val notices = sdkNotices.get().asFile
-        notices.mkdirs()
         for ((abi, target) in targets.get()) {
-            val sdk = buildAbi(root, ndk, bin, target, libraries.resolve(abi))
-            sdk.resolve("LICENSE").copyTo(notices.resolve("Impeller-LICENSE"), overwrite = true)
+            buildAbi(root, ndk, bin, target, libraries.resolve(abi))
         }
     }
 
-    private fun buildAbi(root: File, ndk: File, bin: File, target: String, output: File): File {
+    private fun buildAbi(root: File, ndk: File, bin: File, target: String, output: File) {
         val api = minSdk.get()
         val linker = File(bin, "$target$api-clang")
         val sysroot = bin.parentFile.resolve("sysroot").invariantSeparatorsPath
         if (!linker.isFile) {
             throw GradleException("missing Android linker ${linker.path}")
         }
-        val sdkPath = ByteArrayOutputStream()
-        val python = if (System.getProperty("os.name").startsWith("Windows")) "python" else "python3"
-        execOps.exec {
-            commandLine(python, root.resolve("tools/impeller_sdk.py"), "prepare", target)
-            workingDir(root)
-            environment("PYTHONIOENCODING", "UTF-8")
-            standardOutput = sdkPath
-        }.assertNormalExitValue()
-        val impellerSdk = File(sdkPath.toString(Charsets.UTF_8.name()).trim())
         val command = mutableListOf(
             "cargo",
             "build",
@@ -240,8 +226,6 @@ abstract class CargoImpasto : DefaultTask() {
             target,
             "-p",
             "embedder-android",
-            "--features",
-            "impeller",
         )
         if (release.get()) {
             command.add("--release")
@@ -250,7 +234,6 @@ abstract class CargoImpasto : DefaultTask() {
             commandLine(command)
             workingDir(root)
             environment("ANDROID_NDK_HOME", ndk.path)
-            environment("IMPASTO_IMPELLER_SDK_DIR", impellerSdk.path)
             // Bindgen uses libclang directly. Keep host headers out of Android bindings.
             environment("BINDGEN_EXTRA_CLANG_ARGS_${target.replace('-', '_')}", "--sysroot=\"$sysroot\"")
             if (release.get()) {
@@ -270,8 +253,6 @@ abstract class CargoImpasto : DefaultTask() {
         }
         output.mkdirs()
         built.copyTo(output.resolve("libimpasto.so"), overwrite = true)
-        impellerSdk.resolve("lib/libimpeller.so").copyTo(output.resolve("libimpeller.so"), overwrite = true)
-        return impellerSdk
     }
 
     private fun resolveNdk(): File {
@@ -320,6 +301,18 @@ abstract class StageApkAssets : DefaultTask() {
     @get:PathSensitive(PathSensitivity.NONE)
     abstract val logo: RegularFileProperty
 
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val fontNotice: RegularFileProperty
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val license: RegularFileProperty
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val notice: RegularFileProperty
+
     @get:Input
     abstract val threadTopology: Property<String>
 
@@ -338,6 +331,9 @@ abstract class StageApkAssets : DefaultTask() {
         fonts.mkdirs()
         images.mkdirs()
         font.get().asFile.copyTo(fonts.resolve("Sans.ttf"), overwrite = true)
+        fontNotice.get().asFile.copyTo(fonts.resolve("NOTICE"), overwrite = true)
+        license.get().asFile.copyTo(root.resolve("LICENSE"), overwrite = true)
+        notice.get().asFile.copyTo(root.resolve("NOTICE"), overwrite = true)
         logo.get().asFile.copyTo(images.resolve("logo.png"), overwrite = true)
         script.copyTo(root.resolve("quotes.js"), overwrite = true)
         val topology = threadTopology.get()

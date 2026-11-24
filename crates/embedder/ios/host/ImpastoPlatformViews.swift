@@ -269,6 +269,9 @@ final class ImpastoPlatformViews {
             overlay.device = root.device
             overlay.pixelFormat = root.pixelFormat
             overlay.colorspace = root.colorspace
+            if #available(iOS 16.0, *) {
+                overlay.wantsExtendedDynamicRangeContent = root.wantsExtendedDynamicRangeContent
+            }
             overlay.contentsScale = root.contentsScale
             overlay.drawableSize = root.drawableSize
             overlay.frame = CGRect(origin: .zero, size: drawable.bounds.size)

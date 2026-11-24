@@ -21,6 +21,7 @@ type CreateFromBuffer = unsafe extern "C" fn(
 type HeaderInfo = unsafe extern "C" fn(decoder: *mut c_void) -> *const c_void;
 type HeaderI32 = unsafe extern "C" fn(header: *const c_void) -> i32;
 type SetFormat = unsafe extern "C" fn(decoder: *mut c_void, format: i32) -> i32;
+type SetTargetSize = unsafe extern "C" fn(decoder: *mut c_void, width: i32, height: i32) -> i32;
 type MinStride = unsafe extern "C" fn(decoder: *mut c_void) -> usize;
 type DecodeImage = unsafe extern "C" fn(
     decoder: *mut c_void,
@@ -38,6 +39,7 @@ struct ImageFns {
     height: HeaderI32,
     set_format: SetFormat,
     unpremultiply: Option<SetUnpremultiplied>,
+    target_size: Option<SetTargetSize>,
     stride: MinStride,
     decode: DecodeImage,
     delete: DeleteDecoder,
@@ -59,6 +61,7 @@ fn image_fns() -> Option<&'static ImageFns> {
             let height = symbol(c"AImageDecoderHeaderInfo_getHeight");
             let set_format = symbol(c"AImageDecoder_setAndroidBitmapFormat");
             let unpremultiply = symbol(c"AImageDecoder_setUnpremultipliedRequired");
+            let target_size = symbol(c"AImageDecoder_setTargetSize");
             let stride = symbol(c"AImageDecoder_getMinimumStride");
             let decode = symbol(c"AImageDecoder_decodeImage");
             let delete = symbol(c"AImageDecoder_delete");
@@ -83,6 +86,11 @@ fn image_fns() -> Option<&'static ImageFns> {
                     None
                 } else {
                     Some(std::mem::transmute(unpremultiply))
+                },
+                target_size: if target_size.is_null() {
+                    None
+                } else {
+                    Some(std::mem::transmute(target_size))
                 },
                 stride: std::mem::transmute(stride),
                 decode: std::mem::transmute(decode),
@@ -121,7 +129,7 @@ pub struct Rgba {
     pub pixels: Vec<u8>,
 }
 
-pub fn decode_rgba(bytes: &[u8]) -> Result<Rgba, String> {
+pub fn decode_rgba(bytes: &[u8], target: Option<embedder::DecodeTarget>) -> Result<Rgba, String> {
     let fns = image_fns().ok_or_else(|| "AImageDecoder is missing".to_string())?;
     if bytes.is_empty() {
         return Err("empty image".to_string());
@@ -138,8 +146,8 @@ pub fn decode_rgba(bytes: &[u8]) -> Result<Rgba, String> {
             (fns.delete)(decoder);
             return Err("header is null".to_string());
         }
-        let width = (fns.width)(header);
-        let height = (fns.height)(header);
+        let mut width = (fns.width)(header);
+        let mut height = (fns.height)(header);
         if width <= 0 || height <= 0 {
             (fns.delete)(decoder);
             return Err(format!("size {width}x{height}"));
@@ -149,11 +157,21 @@ pub fn decode_rgba(bytes: &[u8]) -> Result<Rgba, String> {
             (fns.delete)(decoder);
             return Err(format!("set_format {set_format} {width}x{height}"));
         }
-        if let Some(unpremultiply) = fns.unpremultiply {
-            // Straight alpha matches the PNG bytes Impeller samples. A refusal
-            // leaves the decoder's default, which is premultiplied.
-            let _ = unpremultiply(decoder, 1);
+        if let Some((target, set_size)) = target.zip(fns.target_size) {
+            let [w, h] = target.fit([width as u32, height as u32]);
+            if (w < width as u32 || h < height as u32) && set_size(decoder, w as i32, h as i32) == 0
+            {
+                width = w as i32;
+                height = h as i32;
+            }
         }
+        if !embedder::pixel_count_ok([width as u32, height as u32]) {
+            (fns.delete)(decoder);
+            return Err("image exceeds pixel budget".to_owned());
+        }
+        let straight = fns
+            .unpremultiply
+            .is_some_and(|unpremultiply| unpremultiply(decoder, 1) == 0);
         let stride = (fns.stride)(decoder);
         let Some(row) = (width as usize).checked_mul(4) else {
             (fns.delete)(decoder);
@@ -175,7 +193,7 @@ pub fn decode_rgba(bytes: &[u8]) -> Result<Rgba, String> {
         if status != 0 {
             return Err(format!("decode {status} set_format {set_format}"));
         }
-        let pixels = if stride == row {
+        let mut pixels = if stride == row {
             packed
         } else {
             let mut tight = Vec::with_capacity(row * height as usize);
@@ -185,6 +203,9 @@ pub fn decode_rgba(bytes: &[u8]) -> Result<Rgba, String> {
             }
             tight
         };
+        if !straight {
+            embedder::unpremultiply_rgba(&mut pixels);
+        }
         Rgba {
             width: width as u32,
             height: height as u32,

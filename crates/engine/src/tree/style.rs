@@ -98,6 +98,8 @@ impl Presentation {
             P::OutlineColor(color) => self.paint.outline_color = env.resolve_color(color)?,
             P::OutlineWidth(length) => self.paint.outline_width = env.resolve_points(length)?,
             P::BorderRadius(length) => self.paint.corner_radius = env.resolve_points(length)?,
+            P::BorderRadii(values) => self.paint.corner_radii = Some(*values),
+            P::BorderCurve(value) => self.paint.corner_curve = *value,
             P::Opacity(value) => self.paint.alpha = (*value < 1.0).then(|| opacity_byte(*value)),
             P::Blur(value) => self.paint.blur = *value,
             P::Backdrop(value) => self.paint.backdrop = *value,

@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal, onCleanup, untrack } from "solid-js";
+import { For, Show, createMemo, createSignal, createTrackedEffect, onCleanup, untrack } from "solid-js";
 import { onFrame, onLayout, requestFrame, scene } from "@impasto/solid-renderer";
 import { Canvas, Column, Pressable, Role, Row, View, VirtualList, createScrollController } from "@impasto/solid-ui";
 import type { Router } from "@impasto/solid-router";
@@ -24,23 +24,30 @@ function useRowPublications(revision: () => number, active: () => boolean) {
   let published = untrack(revision);
   let group = publicationGroups;
   const groups = Array.from({ length: publicationGroups }, () => createSignal(published));
-  onCleanup(onFrame(() => {
+  let stop: (() => void) | undefined;
+  function stopPublishing() {
+    stop?.();
+    stop = undefined;
+    group = publicationGroups;
+  }
+  createTrackedEffect(() => {
     const next = revision();
     if (!active()) {
-      group = publicationGroups;
-      return;
+      stopPublishing();
+    } else if (next !== published && stop === undefined) {
+      stop = onFrame(() => {
+        if (group === publicationGroups) {
+          published = revision();
+          group = 0;
+        }
+        groups[group++]![1](published);
+        if (group === publicationGroups && revision() === published) stopPublishing();
+        else requestFrame();
+      });
+      requestFrame();
     }
-    if (next !== published && group === publicationGroups) {
-      published = next;
-      group = 0;
-    }
-    const current = groups[group];
-    if (current) {
-      current[1](published);
-      group++;
-      if (group < publicationGroups) requestFrame();
-    }
-  }));
+  });
+  onCleanup(stopPublishing);
   return (index: number) => groups[index % publicationGroups]![0]();
 }
 
@@ -135,7 +142,7 @@ function MarketStrip(props: { time: number; summary: ReturnType<typeof marketSum
 }
 
 function Spark(props: { engine: QuoteEngine; symbol: string; revision: number }) {
-  return <Canvas deferWhenOffscreen style={{ width: 96, maxWidth: "34%", flexShrink: 1, height: 36 }} draw={(ctx, { width, height }) => {
+  return <Canvas style={{ width: 96, maxWidth: "34%", flexShrink: 1, height: 36 }} draw={(ctx, { width, height }) => {
     props.revision;
     const prices = downsampleTicks(props.engine.ring(props.symbol), 24);
     if (!prices.length || width < 18) return;
@@ -235,7 +242,7 @@ export function StocksPage(props: { router: Router }) {
   return <Row style={[filling, { backgroundColor: colors.bg }]}>
     <Column style={[filling, wide() ? { flex: 0, width: "28%", minWidth: 280, maxWidth: 380 } : { width: "100%" }]}>
       <MarketStrip time={marketOpen * minute + time()} summary={summary()} count={instruments.length} router={props.router} selected={filter()}
-        onSelect={(value) => { if (filter() !== value) { setFilter(value); controller.scrollTo(0, 0, false); } }} />
+        onSelect={(value) => { if (filter() !== value) { setFilter(value); controller.scrollTo(0, 0); } }} />
       <Rule />
       <VirtualList items={items()} itemKey={(instrument) => instrument.symbol} controller={controller} estimatedHeight={61} overscan={8}
         style={filling} empty={() => <Label color={colors.dim} style={{ padding: 20, textAlign: "center" }}>{loc("暂无符合条件的证券", "Nothing here right now")}</Label>}

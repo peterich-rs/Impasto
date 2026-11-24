@@ -1,8 +1,7 @@
-import { onCleanup } from "solid-js";
+import { createRenderEffect, createSignal, onCleanup } from "solid-js";
 import {
   directionFor,
   scene,
-  onFrame,
   overlayParent,
   removeNode,
   restoreFocus,
@@ -13,7 +12,6 @@ import {
 import { colorBytes } from "./colors.ts";
 import { sceneApi, nodeId } from "./scene-ext.ts";
 import { registerOverlay } from "./overlay/registry.ts";
-import { moveChildren, readFirstChild, restoreChildren } from "./overlay.ts";
 import type { DialogProps } from "./props.ts";
 import { Role } from "./semantics.ts";
 import { createNodeRef, createStyleTarget } from "./target.ts";
@@ -37,6 +35,7 @@ export function Dialog(props: DialogProps): NodeHandle {
   }));
   const panelRef = createNodeRef(() => props.ref);
   let placeholder = 0;
+  const [contentNode, setContentNode] = createSignal(0);
   let layer: Layer | null = null;
   let closing = false;
   let epoch = 0;
@@ -53,7 +52,13 @@ export function Dialog(props: DialogProps): NodeHandle {
     layer = null;
     closing = false;
     try {
-      restoreChildren(current.slot, placeholder);
+      try {
+        if (placeholder !== 0 && contentNode() !== 0) {
+          scene.insert(placeholder, contentNode(), 0);
+        }
+      } catch {
+        // Owner disposal can remove the placeholder before this cleanup.
+      }
       if (current.focused) {
         scene.popFocusScope();
         restoreFocus(current.previous);
@@ -91,7 +96,8 @@ export function Dialog(props: DialogProps): NodeHandle {
     if (layer !== null) {
       return layer;
     }
-    if (placeholder === 0) {
+    const slot = contentNode();
+    if (placeholder === 0 || slot === 0) {
       return null;
     }
     const overlay = nodeId(overlayParent());
@@ -99,6 +105,11 @@ export function Dialog(props: DialogProps): NodeHandle {
       style: {
         opacity: 0 / 255,
       },
+    });
+    scene.setTransitionSnapshot?.(fade, true);
+    scene.setComponentStyle(fade, {
+      gridTemplateColumns: "minmax(0, 1fr)",
+      gridTemplateRows: "minmax(0, 1fr)",
     });
     scene.patchStyle(fade, {
       width: "100%",
@@ -166,7 +177,6 @@ export function Dialog(props: DialogProps): NodeHandle {
       Role.Generic,
       title.length > 0 ? title : undefined,
     );
-    const slot = scene.createElement("view");
     scene.insert(content, slot, 0);
     panelStyle.attach(content);
     scrimStyle.attach(paint);
@@ -175,7 +185,6 @@ export function Dialog(props: DialogProps): NodeHandle {
     if (titleId !== 0) titleStyle.attach(titleId);
     layer = {
       shell,
-      slot,
       titleId,
       fade,
       previous: 0,
@@ -197,11 +206,11 @@ export function Dialog(props: DialogProps): NodeHandle {
         }),
     });
   }
-  function sync(): void {
+  function sync(open: boolean): void {
     if (placeholder === 0) {
       return;
     }
-    if (!props.open) {
+    if (!open) {
       beginClose();
       return;
     }
@@ -214,15 +223,6 @@ export function Dialog(props: DialogProps): NodeHandle {
     const current = ensureLayer();
     if (current === null) {
       return;
-    }
-    const parked = readFirstChild(placeholder);
-    if (parked === null) {
-      placeholder = 0;
-      closeLayer();
-      return;
-    }
-    if (parked !== 0) {
-      moveChildren(placeholder, current.slot);
     }
     if (created || reopening) armEnter(current);
     if (current.focused) {
@@ -242,13 +242,11 @@ export function Dialog(props: DialogProps): NodeHandle {
       // A failed focus restore must not escape into runFrames.
     }
   }
-  const stop = onFrame(() => {
-    sync();
-  });
-  onCleanup(() => {
-    stop();
-    closeLayer();
-  });
+  createRenderEffect(
+    () => ({ open: props.open, mounted: contentNode() !== 0 }),
+    ({ open, mounted }) => { if (mounted) sync(open); },
+  );
+  onCleanup(closeLayer);
   return (
     <stack
       ref={(node) => {
@@ -271,13 +269,12 @@ export function Dialog(props: DialogProps): NodeHandle {
         maxHeight: 0,
       }}
     >
-      {props.children}
+      <view ref={(node) => setContentNode(node ?? 0)}>{props.children}</view>
     </stack>
   );
 }
 type Layer = {
   shell: number;
-  slot: number;
   titleId: number;
   fade: number;
   previous: number;

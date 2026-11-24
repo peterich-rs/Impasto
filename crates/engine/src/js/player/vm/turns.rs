@@ -5,7 +5,7 @@ fn number<'js>(ctx: &Ctx<'js>, number: impl Into<f64>) -> Value<'js> {
     Value::new_float(ctx.clone(), number.into())
 }
 
-const KINDS: [&str; 22] = [
+const KINDS: [&str; 23] = [
     "click",
     "press",
     "release",
@@ -28,6 +28,7 @@ const KINDS: [&str; 22] = [
     "doubleTap",
     "zoom",
     "scrollPhase",
+    "scrollOffset",
 ];
 fn dispatch_kind(kind: i32) -> &'static str {
     usize::try_from(kind)
@@ -38,6 +39,15 @@ fn dispatch_kind(kind: i32) -> &'static str {
 }
 
 impl Host {
+    pub(in crate::js::player) fn observes_frame(&self) -> bool {
+        self.refs.borrow().hooks.contains_key("frame")
+    }
+
+    pub(in crate::js::player) fn observes_scroll(&self, id: u64) -> bool {
+        let refs = self.refs.borrow();
+        refs.callbacks.contains_key(&(id, 15)) || refs.callbacks.contains_key(&(id, 22))
+    }
+
     pub(in crate::js::player) fn dispatch(
         &self,
         id: u64,
@@ -45,6 +55,9 @@ impl Host {
         a: f64,
         b: f64,
     ) -> Result<(), String> {
+        if kind == 15 {
+            self.dispatch(id, 22, a, b)?;
+        }
         let _budget = self.budget(dispatch_kind(kind), id);
         let callback = self.refs.borrow().callbacks.get(&(id, kind)).cloned();
         let Some(callback) = callback else {
@@ -52,7 +65,7 @@ impl Host {
         };
         self.with(|ctx| {
             let args = match kind {
-                4 | 5 | 13 | 15 => vec![number(&ctx, a), number(&ctx, b)],
+                4 | 5 | 13 | 15 | 22 => vec![number(&ctx, a), number(&ctx, b)],
                 17 | 20 => vec![number(&ctx, a)],
                 _ => vec![],
             };
@@ -109,6 +122,16 @@ impl Host {
 
     pub(in crate::js::player) fn layout(&self) -> Result<(), String> {
         self.hook_turn("layout", |_| vec![])
+    }
+
+    pub(in crate::js::player) fn scroll_threshold(
+        &self,
+        id: u32,
+        active: bool,
+    ) -> Result<(), String> {
+        self.hook_turn("scrollThreshold", |ctx| {
+            vec![number(ctx, id), Value::new_bool(ctx.clone(), active)]
+        })
     }
 
     pub(in crate::js::player) fn scroll_state(

@@ -167,6 +167,14 @@ fn android(
     let framework = toolchain::framework()?;
     let bundle = bundle_for(app, options, Some("android"))?;
     let generated = app.root.join("build/android");
+    // Replace the generated source sets so removed or renamed host files
+    // cannot survive an upgrade. Keep Gradle output and caches reusable.
+    for source_set in ["app/src", "host/src"] {
+        let old = generated.join(source_set);
+        if old.exists() {
+            fs::remove_dir_all(&old).with_context(|| format!("清理 {}", old.display()))?;
+        }
+    }
     copy_tree(
         &framework.join("crates/embedder/android/apk"),
         &generated,
@@ -330,28 +338,12 @@ pub fn macos(app: &App, options: &BuildOptions) -> Result<PathBuf> {
     let bundle = bundle_for(app, options, Some("macos"))?;
     let project = app.root.join("build/macos");
     fs::create_dir_all(&project)?;
-    let target = if cfg!(target_arch = "aarch64") {
-        "aarch64-apple-darwin"
-    } else {
-        "x86_64-apple-darwin"
-    };
-    let prepared = Command::new("python3")
-        .arg(framework.join("tools/impeller_sdk.py"))
-        .args(["prepare", target])
-        .env("PYTHONIOENCODING", "UTF-8")
-        .output()
-        .context("启动 Impeller SDK 准备工具")?;
-    if !prepared.status.success() {
-        bail!("{}", String::from_utf8_lossy(&prepared.stderr).trim());
-    }
-    let sdk = PathBuf::from(std::str::from_utf8(&prepared.stdout)?.trim());
     let mut command = Command::new("cargo");
     command
         .arg("build")
         .arg("--manifest-path")
         .arg(framework.join("Cargo.toml"))
-        .args(["-p", "embedder-macos", "--features", "impeller"])
-        .env("IMPASTO_IMPELLER_SDK_DIR", &sdk);
+        .args(["--locked", "-p", "embedder-macos"]);
     if !options.debug {
         command.arg("--release");
     }
@@ -363,7 +355,6 @@ pub fn macos(app: &App, options: &BuildOptions) -> Result<PathBuf> {
         fs::remove_dir_all(&contents)?;
     }
     fs::create_dir_all(contents.join("MacOS"))?;
-    fs::create_dir_all(contents.join("Frameworks"))?;
     fs::create_dir_all(&resources)?;
     let profile = if options.debug { "debug" } else { "release" };
     fs::copy(
@@ -376,10 +367,9 @@ pub fn macos(app: &App, options: &BuildOptions) -> Result<PathBuf> {
     )?;
     copy_tree(&app.assets(), &resources.join("assets"), &[])?;
     fs::write(resources.join("app.modules"), app.modules("macos"))?;
-    let library = sdk.join("lib/libimpeller.dylib");
-    fs::copy(&library, contents.join("Frameworks/libimpeller.dylib"))
-        .with_context(|| format!("复制 {}", library.display()))?;
-    fs::copy(sdk.join("LICENSE"), resources.join("Impeller-LICENSE"))?;
+    for notice in ["LICENSE", "NOTICE"] {
+        fs::copy(framework.join(notice), resources.join(notice))?;
+    }
     fs::write(
         contents.join("Info.plist"),
         format!(

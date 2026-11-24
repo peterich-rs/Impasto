@@ -360,9 +360,11 @@ fn text_of(
     let Some(font_size) = narrow(font.size).filter(|size| *size > 0.0) else {
         return Ok(None);
     };
-    let metrics = shaper
-        .canvas_metrics(&flat, &style, font_size)
+    // One unbreakable layout serves the anchor, the font box, and the glyphs.
+    let layout = shaper
+        .shape_canvas(&flat, &style, font_size)
         .ok_or_else(|| text_unavailable("fillText"))?;
+    let metrics = layout.metrics;
     let width = f64::from(metrics.width);
     let ascent = f64::from(metrics.ascent);
     let descent = f64::from(metrics.descent);
@@ -405,11 +407,9 @@ fn text_of(
         y,
         anchor_x,
         utf8: Arc::from(flat),
-        font_size,
-        max_width: max_width.and_then(narrow).unwrap_or(0.0),
         compress,
         ctm,
-        style: Arc::new(style),
+        shaped: layout.shaped,
         paint,
     }))
 }
@@ -513,6 +513,8 @@ fn list_bytes(ops: &[CanvasOp], images: &[CanvasImageRef]) -> usize {
     let mut bytes = size_of::<crate::scene::CanvasBody>();
     bytes = bytes.saturating_add(size_of_val(ops));
     bytes = bytes.saturating_add(size_of_val(images));
+    // Two text ops in one list may share one frozen paragraph. Count it once.
+    let mut seen: Vec<*const crate::scene::ShapedParagraph> = Vec::new();
     for op in ops {
         match op {
             CanvasOp::Clip { path } | CanvasOp::Fill { path, .. } => {
@@ -520,7 +522,20 @@ fn list_bytes(ops: &[CanvasOp], images: &[CanvasImageRef]) -> usize {
             }
             CanvasOp::Text(text) => {
                 bytes = bytes.saturating_add(text.utf8.len());
-                bytes = bytes.saturating_add(text.style.family.as_ref().map_or(0, String::len));
+                if let Some(shaped) = &text.shaped {
+                    let key = Arc::as_ptr(shaped);
+                    if !seen.contains(&key) {
+                        seen.push(key);
+                        bytes = bytes.saturating_add(size_of_val(shaped.as_ref()));
+                        bytes = bytes.saturating_add(size_of_val(shaped.decorations.as_ref()));
+                        for run in &shaped.runs {
+                            bytes = bytes.saturating_add(size_of_val(run));
+                            bytes = bytes.saturating_add(size_of_val(run.glyphs.as_ref()));
+                            bytes =
+                                bytes.saturating_add(size_of_val(run.normalized_coords.as_ref()));
+                        }
+                    }
+                }
             }
             CanvasOp::Image(image) => {
                 bytes = bytes.saturating_add(image.source.len());

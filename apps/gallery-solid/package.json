@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@impasto/devtools": "workspace:*",
+    "@impasto/linking": "workspace:*",
     "@impasto/solid-renderer": "workspace:*",
     "@impasto/solid-router": "workspace:*",
     "@impasto/solid-ui": "workspace:*"

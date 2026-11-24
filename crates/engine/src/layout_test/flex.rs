@@ -68,10 +68,14 @@ fn viewport_wraps_text_to_the_available_width() -> Result<(), crate::Error> {
     tree.layout()?;
     assert_eq!((tree.rect(text)?.w, tree.rect(text)?.h), (8.0, 32.0));
     let list = tree.record()?;
-    assert!(matches!(
-        list.commands.first(),
-        Some(crate::scene::Command::Text { max_width, .. }) if *max_width == 10.0
-    ));
+    // The text wrapped to the 10-point viewport, so the frozen glyph box is
+    // at most one line wide and two lines tall.
+    let Some(crate::scene::Command::Text { shaped, .. }) = list.commands.first() else {
+        panic!("text first");
+    };
+    let shaped = shaped.as_deref().expect("glyphs");
+    assert!(shaped.size[0] <= 10.0, "{:?}", shaped.size);
+    assert!((shaped.size[1] - 32.0).abs() < 0.01, "{:?}", shaped.size);
     Ok(())
 }
 
@@ -101,10 +105,7 @@ fn set_text_keeps_the_hit_box_until_the_next_layout() -> Result<(), crate::Error
     tree.layout()?;
     assert!(!tree.is_dirty());
     let list = tree.record()?;
-    assert!(matches!(
-        list.commands.first(),
-        Some(crate::scene::Command::Text { utf8, .. }) if utf8.as_ref() == "Hello"
-    ));
+    assert_eq!(crate::text::test_support::texts(&list), ["Hello"]);
     Ok(())
 }
 
@@ -172,17 +173,13 @@ fn viewport_origin_shifts_hit_testing() -> Result<(), crate::Error> {
 fn mono_shaper_counts_scalars() {
     let mut shaper = MonoShaper::default();
     let size = shaper
-        .metrics(
-            &crate::text::paint_key(
-                std::sync::Arc::from("中"),
-                std::sync::Arc::new(crate::scene::TextStyle::default()),
-                &[],
-                16.0,
-                1_000_000.0,
-                [0, 0, 0, 255],
-            )
-            .metrics,
-        )
+        .metrics(&crate::text::metrics_key(
+            std::sync::Arc::from("中"),
+            std::sync::Arc::new(crate::scene::TextStyle::default()),
+            &[],
+            16.0,
+            1_000_000.0,
+        ))
         .size;
     assert_eq!(
         size,
@@ -192,17 +189,13 @@ fn mono_shaper_counts_scalars() {
         }
     );
     let latin = shaper
-        .metrics(
-            &crate::text::paint_key(
-                std::sync::Arc::from("Hi"),
-                std::sync::Arc::new(crate::scene::TextStyle::default()),
-                &[],
-                16.0,
-                1_000_000.0,
-                [0, 0, 0, 255],
-            )
-            .metrics,
-        )
+        .metrics(&crate::text::metrics_key(
+            std::sync::Arc::from("Hi"),
+            std::sync::Arc::new(crate::scene::TextStyle::default()),
+            &[],
+            16.0,
+            1_000_000.0,
+        ))
         .size;
     assert_eq!(latin.width, 16.0);
 }

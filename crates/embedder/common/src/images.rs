@@ -2,11 +2,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use raster::ImagePixels;
-
-/// Producer frame in premultiplied RGBA8. The render thread owns the latest frame.
+/// Producer frame in straight-alpha sRGB RGBA8. The render thread owns the latest frame.
 pub struct ExternalFrame {
     pub size: [u32; 2],
     pub pixels: Vec<u8>,
@@ -51,6 +50,57 @@ pub enum ImageError {
     Failed(String),
 }
 
+/// A physical display size rounded up to stable 64-pixel decode buckets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DecodeTarget([u32; 2]);
+
+impl DecodeTarget {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "positive bounds are checked and limited before rounding"
+    )]
+    pub(crate) fn from_layout(extent: [f32; 2], dpr: f32) -> Option<Self> {
+        let extent = extent.map(|value| value * dpr);
+        if extent
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0 || *value > 8192.0)
+        {
+            return None;
+        }
+        Some(Self(
+            extent.map(|value| (value.ceil() as u32).next_multiple_of(64)),
+        ))
+    }
+
+    /// Aspect-preserving dimensions sufficient for either fit or crop.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "rounded dimensions never exceed u32 source dimensions"
+    )]
+    pub fn fit(self, source: [u32; 2]) -> [u32; 2] {
+        let factor = self
+            .0
+            .into_iter()
+            .zip(source)
+            .map(|(goal, dimension)| f64::from(goal) / f64::from(dimension.max(1)))
+            .fold(0.0_f64, f64::max)
+            .min(1.0);
+        source.map(|value| (f64::from(value) * factor).ceil() as u32)
+    }
+
+    fn covers(self, other: Self) -> bool {
+        self.0[0] >= other.0[0] && self.0[1] >= other.0[1]
+    }
+}
+
+fn covers(existing: Option<DecodeTarget>, target: Option<DecodeTarget>) -> bool {
+    match (existing, target) {
+        (None, _) => true,
+        (Some(existing), Some(target)) => existing.covers(target),
+        (Some(_), None) => false,
+    }
+}
+
 /// Reads one source. Called only on the `io` thread.
 pub trait ImageDecoder: Send + Sync {
     fn decode(&self, source: &str) -> Result<ImageHandle, ImageError>;
@@ -58,6 +108,24 @@ pub trait ImageDecoder: Send + Sync {
     fn decode_at(&self, source: &str, scale_bucket: u8) -> Result<ImageHandle, ImageError> {
         let _ = scale_bucket;
         self.decode(source)
+    }
+
+    fn decode_sized(
+        &self,
+        source: &str,
+        scale_bucket: u8,
+        _target: Option<DecodeTarget>,
+    ) -> Result<ImageHandle, ImageError> {
+        self.decode_at(source, scale_bucket)
+    }
+
+    fn decode_bytes_sized(
+        &self,
+        source: &str,
+        bytes: &[u8],
+        _target: Option<DecodeTarget>,
+    ) -> Result<ImageHandle, ImageError> {
+        self.decode_bytes(source, bytes)
     }
 
     fn decode_bytes(&self, source: &str, bytes: &[u8]) -> Result<ImageHandle, ImageError> {
@@ -73,6 +141,7 @@ pub struct ImageRequest {
     pub source: Arc<str>,
     pub generation: u64,
     pub scale_bucket: u8,
+    pub target: Option<DecodeTarget>,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -87,6 +156,7 @@ enum Entry {
         handle: ImageHandle,
         bytes: usize,
         used_frame: u64,
+        target: Option<DecodeTarget>,
     },
     Missing {
         at: Instant,
@@ -133,8 +203,9 @@ pub fn source_log(source: &str) -> String {
 /// Render-thread cache. Pending sources are not inserted until [`ImageReady`].
 pub struct ImageCache {
     entries: HashMap<CacheKey, Entry>,
-    pending: HashMap<CacheKey, u64>,
-    generation: u64,
+    pending: HashMap<CacheKey, (u64, Option<DecodeTarget>)>,
+    targets: HashMap<Arc<str>, DecodeTarget>,
+    failed_upgrades: HashMap<CacheKey, Instant>,
     frame: u64,
     logged_missing: HashSet<CacheKey>,
     logged_over_budget: bool,
@@ -147,7 +218,8 @@ impl ImageCache {
         Self {
             entries: HashMap::new(),
             pending: HashMap::new(),
-            generation: 0,
+            targets: HashMap::new(),
+            failed_upgrades: HashMap::new(),
             frame: 0,
             logged_missing: HashSet::new(),
             logged_over_budget: false,
@@ -158,6 +230,23 @@ impl ImageCache {
 
     pub fn begin_frame(&mut self) {
         self.frame = self.frame.wrapping_add(1);
+        self.failed_upgrades
+            .retain(|key, at| at.elapsed() < FAILED_TTL && self.entries.contains_key(key));
+    }
+
+    pub(crate) fn set_layout_targets(&mut self, extents: HashMap<Arc<str>, [f32; 2]>, scale: f32) {
+        self.targets = extents
+            .into_iter()
+            .filter_map(|(source, extent)| {
+                DecodeTarget::from_layout(extent, scale).map(|target| (source, target))
+            })
+            .collect();
+    }
+
+    pub(crate) fn accepts(&self, source: &str, generation: u64) -> bool {
+        self.pending
+            .iter()
+            .any(|(key, (id, _))| key.source.as_ref() == source && *id == generation)
     }
 
     pub fn pin_sources<'a>(&mut self, sources: impl IntoIterator<Item = &'a str>, bucket: u8) {
@@ -215,19 +304,12 @@ impl ImageCache {
         out
     }
 
-    pub fn resolve<'a>(&'a self, source: &str, bucket: u8) -> Option<ImagePixels<'a>> {
+    pub(crate) fn is_ready(&self, source: &str, bucket: u8) -> bool {
         let key = CacheKey {
             source: Arc::from(source),
             bucket,
         };
-        match self.entries.get(&key) {
-            Some(Entry::Ready { handle, .. }) => Some(ImagePixels {
-                width: handle.size[0],
-                height: handle.size[1],
-                rgba: &handle.pixels,
-            }),
-            _ => None,
-        }
+        matches!(self.entries.get(&key), Some(Entry::Ready { .. }))
     }
 
     #[allow(dead_code, reason = "hosts ask whether a decode is already cached")]
@@ -291,23 +373,35 @@ impl ImageCache {
             source: Arc::from(source),
             bucket,
         };
-        if let Some(entry) = self.entries.get(&key)
-            && self.fresh(entry)
+        let target = self.targets.get(source).copied();
+        let upgrading = matches!(self.entries.get(&key), Some(Entry::Ready { .. }));
+        if self.pending.contains_key(&key)
+            || self
+                .failed_upgrades
+                .get(&key)
+                .is_some_and(|at| at.elapsed() < FAILED_TTL)
         {
             return None;
         }
-        if self.pending.contains_key(&key) {
-            return None;
+        match self.entries.get(&key) {
+            Some(Entry::Ready {
+                target: existing, ..
+            }) if covers(*existing, target) => return None,
+            Some(entry) if !upgrading && self.fresh(entry) => return None,
+            _ => {}
         }
-        self.entries.remove(&key);
-        self.logged_missing.remove(&key);
-        self.generation = self.generation.wrapping_add(1);
-        let generation = self.generation;
-        self.pending.insert(key.clone(), generation);
+        if !upgrading {
+            self.entries.remove(&key);
+            self.logged_missing.remove(&key);
+        }
+        static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+        let generation = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+        self.pending.insert(key.clone(), (generation, target));
         Some(ImageRequest {
             source: key.source,
             generation,
             scale_bucket: bucket,
+            target,
         })
     }
 
@@ -321,22 +415,16 @@ impl ImageCache {
                 source, generation, ..
             } => (Arc::clone(source), *generation),
         };
-        let bucket = self
-            .pending
-            .iter()
-            .find_map(|(key, pending_generation)| {
-                (key.source == source && *pending_generation == generation).then_some(key.bucket)
-            })
-            .unwrap_or(1);
-        let key = CacheKey {
-            source: Arc::clone(&source),
-            bucket,
-        };
-        match self.pending.get(&key).copied() {
-            Some(expected) if expected == generation => {
-                self.pending.remove(&key);
-            }
-            _ => return None,
+        let (key, target) = self.pending.iter().find_map(|(key, (id, target))| {
+            (key.source == source && *id == generation).then(|| (key.clone(), *target))
+        })?;
+        self.pending.remove(&key);
+        let upgrading = matches!(self.entries.get(&key), Some(Entry::Ready { .. }));
+        if upgrading
+            && !matches!(&ready, ImageReady::Decoded(handle) if pixel_count_ok(handle.size))
+        {
+            self.failed_upgrades.insert(key, Instant::now());
+            return None;
         }
         match ready {
             ImageReady::Decoded(handle) => {
@@ -355,7 +443,13 @@ impl ImageCache {
                 } else {
                     handle.pixels.len()
                 };
+                let previous = upgrading.then(|| self.entries.remove(&key)).flatten();
                 if !self.admit_ready(bytes) {
+                    if let Some(previous) = previous {
+                        self.failed_upgrades.insert(key.clone(), Instant::now());
+                        self.entries.insert(key, previous);
+                        return None;
+                    }
                     self.entries
                         .insert(key, Entry::Failed { at: Instant::now() });
                     if !self.logged_over_budget {
@@ -364,12 +458,14 @@ impl ImageCache {
                     }
                     return None;
                 }
+                self.failed_upgrades.remove(&key);
                 self.entries.insert(
                     key,
                     Entry::Ready {
                         handle,
                         bytes,
                         used_frame: 0,
+                        target,
                     },
                 );
                 None
@@ -459,9 +555,10 @@ impl ImageCache {
     pub fn trim(&mut self) {
         self.entries.clear();
         self.pending.clear();
+        self.targets.clear();
+        self.failed_upgrades.clear();
         self.logged_missing.clear();
         self.pinned.clear();
-        self.generation = self.generation.wrapping_add(1);
     }
 
     /// CPU-only entries can still be uploaded. GPU-only entries are requested
@@ -474,19 +571,19 @@ impl ImageCache {
         self.pending.clear();
     }
 
-    /// Drop cache entries for `source` and bump generation so an in-flight decode is stale.
+    /// Drop cache entries and retire in-flight tickets for `source`.
     ///
     /// The shell posts [`crate::Command::ReloadImage`], which also arms one frame.
     pub fn reload(&mut self, source: &str) {
         self.entries.retain(|key, _| key.source.as_ref() != source);
         self.pending.retain(|key, _| key.source.as_ref() != source);
+        self.failed_upgrades
+            .retain(|key, _| key.source.as_ref() != source);
         self.logged_missing
             .retain(|key| key.source.as_ref() != source);
-        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Cancel in-flight decodes for sources whose live count became 0.
-    /// Does not bump generation when `counts` is unused.
     pub fn sync_counts(&mut self, counts: &HashMap<Arc<str>, u32>) {
         let previous = std::mem::take(&mut self.counts);
         for (source, count) in counts {
@@ -504,18 +601,7 @@ impl ImageCache {
     }
 
     fn cancel_source(&mut self, source: &str) {
-        let mut cancelled = false;
-        self.pending.retain(|key, _| {
-            if key.source.as_ref() == source {
-                cancelled = true;
-                false
-            } else {
-                true
-            }
-        });
-        if cancelled {
-            self.generation = self.generation.wrapping_add(1);
-        }
+        self.pending.retain(|key, _| key.source.as_ref() != source);
     }
 }
 
@@ -529,6 +615,19 @@ pub fn attach_upload(handle: &mut ImageHandle, factory: Option<&raster::TextureF
     };
     handle.gpu = Some(gpu);
     handle.pixels = Arc::from([]);
+}
+
+/// Restores straight-alpha RGBA8 from an OS decoder's premultiplied buffer.
+pub fn unpremultiply_rgba(pixels: &mut [u8]) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        let alpha = u16::from(pixel[3]);
+        if alpha != 0 && alpha != 255 {
+            for channel in &mut pixel[..3] {
+                *channel = u8::try_from((u16::from(*channel) * 255 + alpha / 2) / alpha)
+                    .unwrap_or(u8::MAX);
+            }
+        }
+    }
 }
 
 pub fn pixel_count_ok(size: [u32; 2]) -> bool {
@@ -567,7 +666,7 @@ mod tests {
                 source: Arc::from("asset:logo"),
                 bucket: 1,
             },
-            request.generation.wrapping_add(1),
+            (request.generation.wrapping_add(1), request.target),
         );
         assert!(
             cache

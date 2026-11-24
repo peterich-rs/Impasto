@@ -64,7 +64,10 @@ mod tests {
         tree.layout().unwrap();
         let commands = tree.record().unwrap().commands;
         let size = commands.iter().find_map(|c| match c {
-            crate::scene::Command::Text { font_size, .. } => Some(*font_size),
+            crate::scene::Command::Text { shaped, .. } => shaped
+                .as_ref()
+                .and_then(|shaped| shaped.runs.first())
+                .map(|run| run.font_size),
             _ => None,
         });
         assert_eq!(size, Some(14.0));

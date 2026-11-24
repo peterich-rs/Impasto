@@ -1,4 +1,4 @@
-import { createSignal, onCleanup, type Accessor } from "solid-js";
+import { createRoot, createSignal, createTrackedEffect, onCleanup, type Accessor } from "solid-js";
 import {
   scene,
   listenRefresh,
@@ -68,7 +68,7 @@ export function createScrollController(): ScrollController {
   return wrapScroll(native);
 }
 function wrapScroll(native: ScrollDriver): ScrollController {
-  let viewport = 0;
+  const [viewport, setViewport] = createSignal(0);
   let content = 0;
   let contentMin = 0;
   let pullMode = 0;
@@ -83,6 +83,17 @@ function wrapScroll(native: ScrollDriver): ScrollController {
   });
   const offsetListeners = new Set<(offset: ScrollOffset) => void>();
   let stopState = () => {};
+  let released = false;
+  let observed = 0;
+  function syncOffsets(): void {
+    const next = offsetListeners.size === 0 ? 0 : viewport();
+    if (next === observed) return;
+    if (observed !== 0) scene.observeScrollOffset(observed);
+    observed = next;
+    if (next !== 0) {
+      scene.observeScrollOffset(next, (x, y) => controller.noteOffset({ x, y }));
+    }
+  }
   function push(): void {
     native.configure(contentMin, pullMode, threshold, rubber, factor, parent);
   }
@@ -94,10 +105,12 @@ function wrapScroll(native: ScrollDriver): ScrollController {
     });
   }
   const controller: ScrollController = {
-    node: () => viewport,
+    node: viewport,
     bind(next) {
+      if (released) return;
       stopState();
-      viewport = next;
+      setViewport(next);
+      syncOffsets();
       if (next !== 0) {
         native.bind(next, content);
         stopState = onScrollState(next, (sample) => {
@@ -107,12 +120,15 @@ function wrapScroll(native: ScrollDriver): ScrollController {
             y: sample.oy,
           });
         });
+      } else {
+        content = 0;
+        native.bind(0, 0);
       }
     },
     bindContent(next) {
       content = next;
-      if (viewport !== 0) {
-        native.bind(viewport, next);
+      if (viewport() !== 0) {
+        native.bind(viewport(), next);
       }
     },
     phase,
@@ -126,8 +142,10 @@ function wrapScroll(native: ScrollDriver): ScrollController {
     },
     onOffset(fn) {
       offsetListeners.add(fn);
+      syncOffsets();
       return () => {
         offsetListeners.delete(fn);
+        syncOffsets();
       };
     },
     noteOffset(offset) {
@@ -147,11 +165,11 @@ function wrapScroll(native: ScrollDriver): ScrollController {
     },
     setLimits(_next) {},
     scrollTo(x, y, animate) {
-      if (viewport === 0) {
+      if (viewport() === 0) {
         return;
       }
       scene.scrollTo(
-        viewport,
+        viewport(),
         x,
         y,
         animate?.stiffness ?? 0,
@@ -159,16 +177,16 @@ function wrapScroll(native: ScrollDriver): ScrollController {
       );
     },
     fling(vx, vy) {
-      if (viewport === 0) {
+      if (viewport() === 0) {
         return;
       }
-      scene.fling(viewport, vx, vy);
+      scene.fling(viewport(), vx, vy);
     },
     stop() {
-      if (viewport === 0) {
+      if (viewport() === 0) {
         return;
       }
-      scene.stopScroll(viewport);
+      scene.stopScroll(viewport());
     },
     dragBy(dx, dy) {
       const step = native.dragBy(dx, dy);
@@ -206,15 +224,7 @@ function wrapScroll(native: ScrollDriver): ScrollController {
       push();
     },
     consume(overflowX, overflowY) {
-      const taken = native.consume(overflowX, overflowY);
-      if (taken) {
-        const sample = native.query(0);
-        controller.noteOffset({
-          x: sample.x,
-          y: sample.y,
-        });
-      }
-      return taken;
+      return native.consume(overflowX, overflowY);
     },
     nativeId() {
       return native.id();
@@ -222,16 +232,40 @@ function wrapScroll(native: ScrollDriver): ScrollController {
   };
   natives.set(controller, native);
   onCleanup(() => {
+    released = true;
     stopState();
+    offsetListeners.clear();
+    syncOffsets();
     native.release();
   });
   return controller;
 }
+export type ScrollLinkOptions = {
+  factor: number;
+  offset?: number;
+  axis?: "x" | "y" | "both";
+};
 export function createScrollLink(
   source: ScrollController,
   target: ScrollController,
-  map: (offset: ScrollOffset) => ScrollOffset,
+  map: ((offset: ScrollOffset) => ScrollOffset) | ScrollLinkOptions,
 ): () => void {
+  if (typeof map !== "function") {
+    return createRoot((dispose) => {
+      createTrackedEffect(() => {
+        const from = source.node();
+        const to = target.node();
+        if (from === 0 || to === 0) return;
+        const axis = map.axis ?? "y";
+        for (const channel of ["scrollX", "scrollY"] as const) {
+          if (axis !== "both" && (axis === "x") !== (channel === "scrollX")) continue;
+          const id = scene.bindScrollProp(from, channel, to, channel, map.factor, map.offset ?? 0, "linear");
+          onCleanup(() => scene.unbindScrollProp(id));
+        }
+      });
+      return dispose;
+    });
+  }
   return source.onOffset((offset) => {
     const next = map(offset);
     const node = target.node();

@@ -1,18 +1,21 @@
-//! ImageIO paths that match the previous macOS host.
-//!
-//! Logo pixels are tightly packed RGBA (`PremultipliedLast` + 32-bit big endian).
-//! Frame dumps are the Metal texture's BGRA bytes (`PremultipliedFirst` + 32-bit little endian).
+//! ImageIO decoding and straight-alpha sRGB frame dumps.
 
 use std::path::Path;
 use std::ptr;
 
 use anyhow::Context;
-use objc2_core_foundation::{CFData, CFString, CFURL, CFURLPathStyle, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{
+    CFBoolean, CFData, CFDictionary, CFNumber, CFString, CFType, CFURL, CFURLPathStyle, CGPoint,
+    CGRect, CGSize,
+};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGContext,
     CGDataProvider, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
 };
-use objc2_image_io::{CGImageDestination, CGImageSource};
+use objc2_image_io::{
+    CGImageDestination, CGImageSource, kCGImagePropertyPixelHeight, kCGImagePropertyPixelWidth,
+    kCGImageSourceCreateThumbnailFromImageAlways, kCGImageSourceThumbnailMaxPixelSize,
+};
 
 pub struct Rgba {
     pub width: u32,
@@ -20,29 +23,71 @@ pub struct Rgba {
     pub pixels: Vec<u8>,
 }
 
-pub fn load_rgba_png(path: &Path) -> anyhow::Result<Rgba> {
+pub fn load_rgba_png(path: &Path, target: Option<embedder::DecodeTarget>) -> anyhow::Result<Rgba> {
     let url = file_url(path)?;
     // SAFETY: `url` is a file URL. A null options dictionary is the documented default.
     let source = unsafe { CGImageSource::with_url(&url, None) }
         .with_context(|| format!("failed to read logo {}", path.display()))?;
-    rgba_from_source(&source, &path.display().to_string())
+    rgba_from_source(&source, &path.display().to_string(), target)
 }
 
-/// Decode PNG, JPEG, or WebP bytes the same way as a file: device RGB, premultiplied.
-pub fn load_rgba_bytes(bytes: &[u8]) -> anyhow::Result<Rgba> {
+/// Decode PNG, JPEG, or WebP bytes to straight-alpha sRGB.
+pub fn load_rgba_bytes(
+    bytes: &[u8],
+    target: Option<embedder::DecodeTarget>,
+) -> anyhow::Result<Rgba> {
     let data = CFData::from_bytes(bytes);
     let source = {
         // SAFETY: `data` retains `bytes`. A null options dictionary is the default.
         unsafe { CGImageSource::with_data(&data, None) }
     }
     .context("image bytes were not decoded")?;
-    rgba_from_source(&source, "image bytes")
+    rgba_from_source(&source, "image bytes", target)
 }
 
-fn rgba_from_source(source: &CGImageSource, label: &str) -> anyhow::Result<Rgba> {
-    // SAFETY: index 0 is the first image. A null options dictionary keeps the source pixels.
-    let image = unsafe { source.image_at_index(0, None) }
-        .with_context(|| format!("failed to read {label}"))?;
+fn rgba_from_source(
+    source: &CGImageSource,
+    label: &str,
+    target: Option<embedder::DecodeTarget>,
+) -> anyhow::Result<Rgba> {
+    let image = if let Some(target) = target {
+        // SAFETY: the first image's metadata uses CFString keys and numeric dimensions.
+        let properties =
+            unsafe { source.properties_at_index(0, None) }.context("missing image dimensions")?;
+        // SAFETY: CGImageSource returns the documented CFString-keyed property dictionary.
+        let properties = unsafe { properties.cast_unchecked::<CFString, CFType>() };
+        let dimension = |key| {
+            properties
+                .get(key)
+                .and_then(|value| value.downcast_ref::<CFNumber>()?.as_i64())
+                .and_then(|value| u32::try_from(value).ok())
+                .context("invalid image dimension")
+        };
+        // SAFETY: all keys below are ImageIO process-lifetime constants.
+        let size = unsafe {
+            [
+                dimension(kCGImagePropertyPixelWidth)?,
+                dimension(kCGImagePropertyPixelHeight)?,
+            ]
+        };
+        let [width, height] = target.fit(size);
+        let max_side = CFNumber::new_i64(i64::from(width.max(height)));
+        let flag = CFBoolean::new(true);
+        // SAFETY: ImageIO initializes both thumbnail option keys for the process lifetime.
+        let keys = unsafe {
+            [
+                kCGImageSourceCreateThumbnailFromImageAlways,
+                kCGImageSourceThumbnailMaxPixelSize,
+            ]
+        };
+        let options = CFDictionary::<CFString, CFType>::from_slices(&keys, &[flag, &max_side]);
+        // SAFETY: the Boolean and Number options have the documented types.
+        unsafe { source.thumbnail_at_index(0, Some(options.as_opaque())) }
+    } else {
+        // SAFETY: index 0 is the first image. A null options dictionary keeps the source pixels.
+        unsafe { source.image_at_index(0, None) }
+    }
+    .with_context(|| format!("failed to read {label}"))?;
     let width = CGImage::width(Some(&image));
     let height = CGImage::height(Some(&image));
     if width == 0 || height == 0 {
@@ -51,7 +96,7 @@ fn rgba_from_source(source: &CGImageSource, label: &str) -> anyhow::Result<Rgba>
     let row = width.checked_mul(4).context("logo is too wide")?;
     let len = row.checked_mul(height).context("logo is too large")?;
     let mut pixels = vec![0u8; len];
-    let space = CGColorSpace::new_device_rgb().context("device RGB is unavailable")?;
+    let space = srgb()?;
     let info = CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
     // SAFETY: `pixels` is `len` bytes and outlives `context`. The bitmap is 8 bits per channel.
     let context = unsafe {
@@ -72,6 +117,7 @@ fn rgba_from_source(source: &CGImageSource, label: &str) -> anyhow::Result<Rgba>
     );
     CGContext::draw_image(Some(&context), rect, Some(&image));
     drop(context);
+    embedder::unpremultiply_rgba(&mut pixels);
     Ok(Rgba {
         width: u32::try_from(width).context("logo width does not fit u32")?,
         height: u32::try_from(height).context("logo height does not fit u32")?,
@@ -79,19 +125,17 @@ fn rgba_from_source(source: &CGImageSource, label: &str) -> anyhow::Result<Rgba>
     })
 }
 
-pub fn write_bgra_png(path: &Path, width: usize, height: usize, bgra: &[u8]) -> anyhow::Result<()> {
+pub fn write_rgba_png(path: &Path, width: usize, height: usize, rgba: &[u8]) -> anyhow::Result<()> {
     let row = width.checked_mul(4).context("frame is too wide")?;
     let len = row.checked_mul(height).context("frame is too large")?;
-    if bgra.len() != len || width == 0 || height == 0 {
+    if rgba.len() != len || width == 0 || height == 0 {
         anyhow::bail!("failed to write {}", path.display());
     }
-    let data = CFData::from_bytes(bgra);
+    let data = CFData::from_bytes(rgba);
     let provider = CGDataProvider::with_cf_data(Some(&data))
         .with_context(|| format!("failed to write {}", path.display()))?;
-    let space = CGColorSpace::new_device_rgb().context("device RGB is unavailable")?;
-    let info = CGBitmapInfo(
-        CGImageAlphaInfo::PremultipliedFirst.0 | CGImageByteOrderInfo::Order32Little.0,
-    );
+    let space = srgb()?;
+    let info = CGBitmapInfo(CGImageAlphaInfo::Last.0 | CGImageByteOrderInfo::Order32Big.0);
     // SAFETY: `provider` retains `data` for the image. `decode` is null, so every channel is used.
     let image = unsafe {
         CGImage::new(
@@ -125,6 +169,12 @@ pub fn write_bgra_png(path: &Path, width: usize, height: usize, bgra: &[u8]) -> 
     }
 }
 
+fn srgb() -> anyhow::Result<objc2_core_foundation::CFRetained<CGColorSpace>> {
+    // SAFETY: the framework provides this static color space name.
+    let name = unsafe { objc2_core_graphics::kCGColorSpaceSRGB };
+    CGColorSpace::with_name(Some(name)).context("sRGB is unavailable")
+}
+
 fn file_url(path: &Path) -> anyhow::Result<objc2_core_foundation::CFRetained<CFURL>> {
     let text = path
         .to_str()
@@ -147,7 +197,7 @@ mod tests {
     #[test]
     fn logo_png_is_tightly_packed_rgba() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/logo.png");
-        let image = match load_rgba_png(&path) {
+        let image = match load_rgba_png(&path, None) {
             Ok(image) => image,
             Err(error) => panic!("{error:#}"),
         };

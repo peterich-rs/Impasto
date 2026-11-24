@@ -1,9 +1,12 @@
+//! Failure states of the wgpu raster queue.
+//!
+//! Hosts map these onto their present and recovery paths. A `Status` never
+//! carries a message: the raster logs context before returning one.
+
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
-    #[error("impeller is not linked")]
-    NotLinked,
     #[error("scene is not drawable")]
     BadScene,
     #[error("frame is not ready")]
@@ -14,39 +17,116 @@ pub enum Status {
     SurfaceLost,
     #[error("the graphics device was lost")]
     DeviceLost,
-    /// The drawable or swapchain image was not acquired. Skip this present.
-    /// The surface stays. Consecutive misses rebuild a Vulkan chain.
+    /// The drawable was not acquired. Skip this present. The surface stays.
     #[error("acquire missed")]
     AcquireMiss,
+    #[error("graphics memory exhausted")]
+    OutOfMemory,
+    #[error("surface is occluded")]
+    Occluded,
+    /// No adapter or device could be created for the requested backend.
+    #[error("no graphics device: {0:?}")]
+    NoDevice(RasterBackend),
 }
 
-/// Consecutive null acquires before the swapchain is dropped and rebuilt.
-pub const ACQUIRE_REBUILD_AFTER: u32 = 3;
-
-/// What to do after another null acquire. The chain is not touched on [`Skip`](AcquireFollowup::Skip).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AcquireFollowup {
-    Skip,
-    Rebuild,
-}
-
-/// `consecutive` is the miss count including the one just observed.
-pub fn acquire_followup(consecutive: u32) -> AcquireFollowup {
-    if consecutive >= ACQUIRE_REBUILD_AFTER {
-        AcquireFollowup::Rebuild
-    } else {
-        AcquireFollowup::Skip
+impl Status {
+    /// Errors that keep the surface and retry on a later frame.
+    pub const fn is_retry(self) -> bool {
+        matches!(
+            self,
+            Self::PresentFailed
+                | Self::SurfaceLost
+                | Self::NotReady
+                | Self::AcquireMiss
+                | Self::OutOfMemory
+        )
     }
+}
+
+/// Graphics API behind one [`crate::Rasterizer`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RasterBackend {
+    Metal,
+    Vulkan,
+    Gles,
+    Dx12,
+}
+
+impl RasterBackend {
+    /// Backends a platform tries when the caller did not force one, in order.
+    pub fn candidates() -> &'static [Self] {
+        #[cfg(target_os = "android")]
+        {
+            &[Self::Vulkan, Self::Gles]
+        }
+        #[cfg(all(target_vendor = "apple", not(target_os = "android")))]
+        {
+            &[Self::Metal]
+        }
+        #[cfg(all(target_os = "windows", not(target_vendor = "apple")))]
+        {
+            &[Self::Dx12, Self::Vulkan]
+        }
+        #[cfg(not(any(target_os = "android", target_vendor = "apple", target_os = "windows")))]
+        {
+            &[Self::Vulkan, Self::Gles]
+        }
+    }
+
+    pub fn backends(self) -> wgpu::Backends {
+        match self {
+            Self::Metal => wgpu::Backends::METAL,
+            Self::Vulkan => wgpu::Backends::VULKAN,
+            Self::Gles => wgpu::Backends::GL,
+            Self::Dx12 => wgpu::Backends::DX12,
+        }
+    }
+
+    pub fn from_adapter(adapter: &wgpu::Adapter) -> Option<Self> {
+        let backend = adapter.get_info().backend;
+        Some(match backend {
+            wgpu::Backend::Metal => Self::Metal,
+            wgpu::Backend::Vulkan => Self::Vulkan,
+            wgpu::Backend::Gl => Self::Gles,
+            wgpu::Backend::Dx12 => Self::Dx12,
+            _ => return None,
+        })
+    }
+}
+
+/// Error handling for hot frame encoding and presentation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ValidationMode {
+    #[default]
+    Auto,
+    Strict,
+    AsyncOnly,
+}
+
+/// Options for [`crate::Rasterizer::create`] and [`crate::Rasterizer::headless`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RasterOptions {
+    /// `None` tries the platform's default backends in order.
+    pub backend: Option<RasterBackend>,
+    /// Prefer a software or integrated adapter. Headless tests use this to
+    /// avoid depending on a discrete GPU.
+    pub force_fallback_adapter: bool,
+    /// Request pass timestamp support when creating the device.
+    pub enable_gpu_timing: bool,
+    pub validation: ValidationMode,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AcquireFollowup, acquire_followup};
+    use super::RasterBackend;
 
     #[test]
-    fn a_null_acquire_skips_until_the_chain_is_rebuilt() {
-        assert_eq!(acquire_followup(1), AcquireFollowup::Skip);
-        assert_eq!(acquire_followup(2), AcquireFollowup::Skip);
-        assert_eq!(acquire_followup(3), AcquireFollowup::Rebuild);
+    fn candidates_start_with_the_platform_default() {
+        let first = RasterBackend::candidates()[0];
+        if cfg!(target_vendor = "apple") && !cfg!(target_os = "android") {
+            assert_eq!(first, RasterBackend::Metal);
+        } else if cfg!(target_os = "android") {
+            assert_eq!(first, RasterBackend::Vulkan);
+        }
     }
 }

@@ -35,6 +35,7 @@ internal object NativeBridge {
     external fun nativeAttachWindow(handle: Long, view: ImpastoView): Boolean
     external fun nativeSavedState(handle: Long): String?
     external fun nativeUpdateSource(handle: Long, revision: String, source: ByteArray)
+    external fun nativeHardwareTexture(handle: Long, name: String, width: Int, height: Int, lease: Any): Boolean
     external fun nativeExternalTexture(handle: Long, name: String, width: Int, height: Int, pixels: ByteArray?)
 
     external fun nativeSessionReady(handle: Long)

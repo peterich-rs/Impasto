@@ -1,57 +1,42 @@
 import { createSignal, onCleanup } from "solid-js";
 import { onLayout, scene, type NodeHandle } from "@impasto/solid-renderer";
+import { createScrollController, useScrollThreshold } from "@impasto/solid-ui";
 
-// Warm sections just before they enter the viewport during a vertical drag.
+// Refresh a section slightly before it enters the viewport.
 const margin = 48;
 
 export function trackStockSections() {
-  let viewport: NodeHandle | null = null;
-  let height = 0;
-  const sections: { node: NodeHandle | null; top: number; bottom: number; shown: boolean; setVisible: (visible: boolean) => void }[] = [];
-  const update = (y: number) => {
-    for (const section of sections) {
-      if (section.node === null) continue;
-      const shown = section.bottom > y - margin && section.top < y + height + margin;
-      if (section.shown !== shown) {
-        section.shown = shown;
-        section.setVisible(shown);
-      }
-    }
-  };
-  onCleanup(onLayout(() => {
-    if (viewport === null) return;
-    const view = scene.rect(viewport);
-    height = view.h;
-    for (const section of sections) {
-      if (section.node === null) continue;
-      const box = scene.rect(section.node);
-      section.top = box.y - view.y;
-      section.bottom = section.top + box.h;
-    }
-    // Edge bounce reveals empty space. The clamped window covers its in-flow sections.
-    update(scene.scrollOffset(viewport).y);
-  }));
+  const controller = createScrollController();
   return {
-    viewportRef(node: NodeHandle | null) {
-      viewport = node;
-      if (node !== null) {
-        scene.onScroll(node, (_x, y) => update(y));
-      }
-    },
+    controller,
     section() {
-      const [visible, setVisible] = createSignal(true);
-      const section = { node: null as NodeHandle | null, top: 0, bottom: Infinity, shown: true, setVisible };
-      sections.push(section);
+      let node: NodeHandle | null = null;
+      const [bounds, setBounds] = createSignal<{ enter: number; exit: number } | null>(null);
+      onCleanup(onLayout(() => {
+        const viewport = controller.node();
+        if (node === null || viewport === 0) return;
+        const view = scene.rect(viewport);
+        const box = scene.rect(node);
+        const top = box.y - view.y;
+        const enter = Math.max(0, top - view.h - margin);
+        const exit = top + box.h + margin;
+        setBounds((previous) =>
+          previous?.enter === enter && previous.exit === exit ? previous : { enter, exit });
+      }));
+      const entered = useScrollThreshold(controller, {
+        get enabled() { return bounds() !== null; },
+        get value() { return bounds()?.enter ?? 0; },
+      });
+      const exited = useScrollThreshold(controller, {
+        from: "start",
+        get enabled() { return bounds() !== null; },
+        get value() { return bounds()?.exit ?? 0; },
+      });
       return {
-        visible,
-        ref(node: NodeHandle | null) {
-          section.node = node;
-          if (node !== null) {
-            section.top = 0;
-            section.bottom = Infinity;
-            section.shown = true;
-            setVisible(true);
-          }
+        visible: () => bounds() === null || (entered() && !exited()),
+        ref(next: NodeHandle | null) {
+          node = next;
+          setBounds(null);
         },
       };
     },

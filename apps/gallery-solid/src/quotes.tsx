@@ -1,4 +1,5 @@
 import { installDevtools } from "@impasto/devtools";
+import { getInitialURL } from "@impasto/linking";
 import { boot, scene } from "@impasto/solid-renderer";
 import {
   installThemePort,
@@ -12,9 +13,8 @@ import { loadSettings } from "./state/settings.ts";
 import { loadWatchlist } from "./state/watchlist.ts";
 import { loadSearchHistory } from "./state/search-history.ts";
 import { App } from "./app.tsx";
-void loadSettings();
-void loadWatchlist();
-void loadSearchHistory();
+import { COMPOSITOR_LAB_URL, CompositorLabPage } from "./pages/compositor-lab.tsx";
+import { GPU_LAB_URL, GpuLabPage } from "./pages/gpu-lab.tsx";
 type SettingsHost = {
   settings(): PlatformSnapshot;
   onSettings(fn: (snap: PlatformSnapshot) => void): number;
@@ -33,13 +33,21 @@ installThemePort({
   onSettings: (fn) => settingsHost.onSettings((snap) => fn(light(snap))),
   offSettings: (id) => settingsHost.offSettings(id),
 });
-const { engine } = wireQuotes();
-setAccount(createAccount(engine));
-
-// The panel stays out of the app's JSX and mounts through registerTopLayer.
-installDevtools({ launcher: false });
-boot(() => (
-  <OverlayRoot>
-    <App />
-  </OverlayRoot>
-));
+const launchUrl = getInitialURL();
+if (launchUrl === GPU_LAB_URL || launchUrl === `${GPU_LAB_URL}/invalid`) {
+  boot(() => GpuLabPage({ invalidOnLaunch: launchUrl.endsWith("/invalid") }));
+} else if (launchUrl === COMPOSITOR_LAB_URL || launchUrl?.startsWith(`${COMPOSITOR_LAB_URL}/`)) {
+  boot(() => CompositorLabPage({ launchUrl }));
+} else {
+  void loadSettings();
+  void loadWatchlist();
+  void loadSearchHistory();
+  const { engine } = wireQuotes();
+  setAccount(createAccount(engine));
+  installDevtools({ launcher: false });
+  boot(() => (
+    <OverlayRoot>
+      <App />
+    </OverlayRoot>
+  ));
+}

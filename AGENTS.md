@@ -9,7 +9,7 @@ Impasto 是跨平台 UI 框架。下表按职责与现有目录对应；具体�
 | `driver` | `crates/cli`、`tools/` | 创建应用工程，编译和打包，生成平台工程，部署应用，以及为热重载监听变更、构建并发送更新产物。 |
 | `embedder` | `crates/embedder/{common,macos,ios,android}` | 创建平台窗口和框架执行环境，启动应用并管理生命周期，提供原生绘制表面、vsync、输入、IME、无障碍和平台插件。 |
 | `engine` | `crates/engine` | 接收应用框架提交的 UI 树变更，管理 UI 状态、样式、脏标记和帧内阶段，完成命中测试、手势、测量、Taffy 布局和绘制录制，产出层树。 |
-| `raster` | `crates/raster`、`crates/impeller-sys` | 接入 Impeller，消费层树并上屏，管理绘制资源和后端表面。文字测量和绘制共用排版实现；分线程时各队列使用自己的排版上下文。 |
+| `raster` | `crates/raster` | 提供 Parley 排版与 wgpu 渲染，消费层树并上屏。UI 队列拥有排版上下文，Raster 队列光栅化已排版的字形，两者共享窗口的字体库。 |
 | `javascript` | `crates/javascript` | 独立 JavaScript 运行时、IQJS 字节码编译器、Web 标准 API 子集及纯 `std` 宿主交换契约。 |
 | 应用层 | `packages/*`、`apps/*` | Solid 2.0 通用渲染器、`@impasto/reactive` 垫片、UI 组件、路由、平台能力封装、调试面板与示例/验收应用。 |
 
@@ -26,9 +26,9 @@ Impasto 是跨平台 UI 框架。下表按职责与现有目录对应；具体�
 修改 `Cargo.toml` 或跨 crate 引用时，必须守住以下边界：
 
 - `javascript --no-default-features` 保持纯 `std`，不引入任何外部依赖。
-- `javascript --features runtime` 不得依赖 `engine`、`raster`、`embedder*` 或 `impeller-sys`，源码中不得出现 UI 模块路径。
-- `engine` 默认构建不得依赖 `rquickjs` / `quickjs-jit`、`raster`、`impeller-sys` 或任何平台/渲染库。
-- `raster`（含 `impeller` feature）不得依赖 `rquickjs` / `quickjs-jit`。
+- `javascript --features runtime` 不得依赖 `engine`、`raster`、`embedder*` 或图形、排版依赖，源码中不得出现 UI 模块路径。
+- `engine` 默认构建不得依赖 `rquickjs` / `quickjs-jit`、`raster`、`wgpu` 或任何平台/渲染库。
+- `raster`不得依赖 `rquickjs` / `quickjs-jit`。
 
 ### Rust Lint 与安全规则
 
@@ -47,7 +47,6 @@ workspace lint 见 [`Cargo.toml`](Cargo.toml) 与 [`clippy.toml`](clippy.toml)�
 | `packages/solid-renderer/src/style.gen.ts`、[`docs/style-utilities.gen.md`](docs/style-utilities.gen.md) | `crates/engine/src/style/` | `just gen` / `just style-check` |
 | `packages/*/src/native.d.ts` | `crates/embedder/common` 中的 `Module` 元数据 | `just gen` / `cargo run --locked -p embedder --bin module-stubs -- --check`、`node tools/check-native-module-types.mjs` |
 | JS 标准库声明与运行时一致面 | `crates/javascript/src/standard/` | `just standard-check` |
-| `crates/impeller-sys/src/bindings{,_msvc}.rs` | `crates/impeller-sys/include/impeller.h` | `python3 tools/impeller_sdk.py bindings`（详情见 [Impeller SDK](crates/impeller-sys/README.md)） |
 
 `apps/gallery-solid/dist/quotes.js` 不提交 git，但部分 Rust 测试会读取该产物；`just test` 会自动执行 `just gallery-dist`，单独跑 `cargo test` 前需先确保已构建。
 
@@ -57,15 +56,17 @@ workspace lint 见 [`Cargo.toml`](Cargo.toml) 与 [`clippy.toml`](clippy.toml)�
 
 - **常规门禁**：`just check`、`cargo fmt --all -- --check`
 - **注意 `just check` 未覆盖的 CI 项**：`cargo run --locked -p embedder --bin module-stubs -- --check`、`node tools/check-native-module-types.mjs`，以及 macOS 下的 `embedder-macos` 检查（`just clippy` 与 Linux CI 保持一致，默认排除 `embedder-macos`）
-- **光栅后端（Impeller 链接）**：先 `just impeller`，再 `cargo test -p raster --features impeller`
+- **光栅后端**：在可用 Metal 或 Vulkan/GLES 设备上运行 `cargo test -p raster`
 - **macOS 宿主**：`cargo clippy -p embedder-macos --all-targets -- -D warnings`、`cargo test -p embedder-macos`；界面或渲染改动用 `just host`（可设 `IMPASTO_DUMP=/tmp/frame.png` 导出首帧）验证画面
-- **iOS 宿主**：`just ios-build-check`、`just ios-sim-test --debug --udid <UDID>`（构建与嵌入细则见 [iOS README](crates/embedder/ios/README.md)）
-- **Android 宿主**：`just android-build-check`，连真机或模拟器时跑 `just android-device-test`
+- **iOS 宿主**：`just ios-build-check` 构建模拟器包。本地启动模拟器后，用 `just ios-sim-test --debug --udid <UDID>` 验证首帧。构建与嵌入细则见 [iOS README](crates/embedder/ios/README.md)
+- **Android 宿主**：`just android-build-check` 构建、lint 并校验 APK。本地连接真机或模拟器时，用 `just android-device-test` 运行仪器测试
 - **JS / Solid 包**：`just solid`、`just solid-app`
+
+CI 的运行测试限于逻辑用例与 `raster` 的 headless 渲染，移动端任务只构建和校验产物。真机和模拟器的运行结果及性能样本仅用于本地平台验收和调优。
 
 ## 工作约定
 
 - 文档写清适用范围和前提，让读者可以独立理解。修改实现时同步核对相关说明，直接替换过时内容；不为历史设计或一次性排查保留冗余文档。
 - 写 Rust 时使用 `/rust-best-practice`；设计控件或 Gallery 界面时使用 `/unslop`，并用对应宿主验证画面；整理提交历史时使用 `/git-commit`。
-- 优先复用许可证合适的发布依赖。产品代码放在 `third_party/` 以外。CI 验证的 Impeller SDK ZIP 归档纳入 `crates/impeller-sys/prebuilt/`，解压后的 SDK 和本地构建产物留在本地。
+- 优先复用许可证合适的发布依赖。产品代码放在 `third_party/` 以外。本地依赖与构建产物留在本地。
 - 删除实现前核对全部调用者与生成/测试依赖，修改后运行受影响的检查。

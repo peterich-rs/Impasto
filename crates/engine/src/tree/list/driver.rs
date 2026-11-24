@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use crate::tree::compositor_motion::{ListCompositorLink, ListCompositorWindow};
 use crate::tree::{NodeId, Tree};
 
 use super::diff::{ListOp, ShownRow, diff_rows};
@@ -122,6 +123,106 @@ pub struct ListDriver {
 }
 
 impl ListDriver {
+    pub(super) fn viewport(&self) -> Option<NodeId> {
+        self.nodes.viewport
+    }
+
+    pub(super) fn compositor_window(&self, tree: &Tree) -> Option<ListCompositorWindow> {
+        let viewport = self.nodes.viewport?;
+        let view = tree.rect(viewport).ok()?;
+        let (_, offset) = tree.scroll_offset(viewport).ok()?;
+        if !self.placed || self.blocked || !tree.motion_active() || view.h <= 0.0 {
+            return None;
+        }
+        let rows = self.items.get(self.range.start..self.range.end)?;
+        let (mut top, mut bottom) = (None, 0.0_f32);
+        for item in rows {
+            let rect = tree.rect(self.mounted.get(&item.key)?.node).ok()?;
+            let y = rect.y - view.y;
+            if rect.h <= 0.0 || top.is_some() && y > bottom + HEIGHT_EPS {
+                return None;
+            }
+            top.get_or_insert(y);
+            bottom = y + rect.h;
+        }
+        let top = top?;
+        let slack = (view.h * 0.25).min(((bottom - top - view.h).max(0.0)) * 0.5);
+        let mut low = if self.range.start == 0 {
+            top
+        } else {
+            top + slack
+        };
+        let mut high = if self.range.end == self.items.len() {
+            bottom - view.h
+        } else {
+            bottom - view.h - slack
+        };
+        let prefetch_edges = [
+            (self.range.start > 0).then_some(low),
+            (self.range.end < self.items.len()).then_some(high),
+        ];
+        let pin = usize::try_from(self.chrome.pin_index).ok();
+        let next_start = self
+            .items
+            .iter()
+            .enumerate()
+            .skip(pin.map_or(0, |i| i + 1))
+            .find(|(_, item)| item.sticky)
+            .map(|(index, _)| self.prefix.item_start(index));
+        if let Some(start) = next_start {
+            high = high.min(start);
+        }
+        if let Some(index) = pin {
+            low = low.max(self.prefix.item_start(index));
+        }
+        let limit = tree.scroll_limits(viewport).1;
+        let covered_start = offset >= low || (offset == 0.0 && low.abs() <= HEIGHT_EPS);
+        let covered_end = offset <= high || (offset == limit && (limit - high).abs() <= HEIGHT_EPS);
+        if !(covered_start && covered_end) {
+            return None;
+        }
+        let sticky = match (pin, next_start) {
+            (Some(index), Some(start)) => Some(ListCompositorLink {
+                node: self.nodes.pin?,
+                factor: -1.0,
+                offset: start - self.prefix.height_at(index),
+                maximum: Some(0.0),
+            }),
+            _ => None,
+        };
+        let thumb = |node, view: f32, content, visible| {
+            if visible {
+                Some(ListCompositorLink {
+                    node: node?,
+                    factor: thumb_offset(view, content, 1.0),
+                    offset: 0.0,
+                    maximum: None,
+                })
+            } else {
+                None
+            }
+        };
+        let vertical_thumb = thumb(
+            self.nodes.v_thumb,
+            view.h,
+            self.prefix.total(),
+            self.chrome.thumb_on,
+        );
+        let horizontal_thumb = thumb(self.nodes.h_thumb, view.w, self.content_w, self.chrome.h_on);
+        if (self.chrome.thumb_on && vertical_thumb.is_none())
+            || (self.chrome.h_on && horizontal_thumb.is_none())
+        {
+            return None;
+        }
+        Some(ListCompositorWindow {
+            bounds: [low, high],
+            prefetch_edges,
+            horizontal_thumb,
+            vertical_thumb,
+            sticky,
+        })
+    }
+
     pub fn new(overscan: i32, estimate: f32) -> Self {
         Self {
             overscan: overscan.max(0) as usize,
@@ -244,7 +345,8 @@ impl ListDriver {
             self.placed_h = view.h;
             self.placed = true;
         }
-        let fling_y = tree.fling_target(viewport).map(|pair| pair.1);
+        let predicted = tree.list_scroll_prediction(viewport);
+        let fling_y = tree.fling_target(viewport).map(|pair| pair.1).or(predicted);
         let refresh_width = size_changed || self.force || self.content_w < 0.0;
         let placed = PlacedViewport {
             offset_x,
@@ -255,7 +357,12 @@ impl ListDriver {
         let must_place = self.force
             || pending_measure
             || size_changed
-            || !window_covers(&self.prefix, self.range, offset_y, view.h);
+            || !window_covers(&self.prefix, self.range, offset_y, view.h)
+            || predicted.is_some_and(|future| {
+                (future < offset_y && self.range.start > 0
+                    || future > offset_y && self.range.end < self.items.len())
+                    && !window_covers(&self.prefix, self.range, future, view.h)
+            });
         if std::env::var("IMPASTO_TEST_LOG").is_ok() {
             let mut chain = String::new();
             let mut cursor = Some(viewport);
@@ -559,8 +666,12 @@ impl ListDriver {
     /// does not paint twice. The measured height stays in the prefix.
     fn cull_pinned_row(&self, tree: &mut Tree) {
         let pin = self.chrome.pin_key.as_str();
+        let ready = self.nodes.pin.is_some_and(|id| {
+            tree.rect(id).is_ok_and(|rect| rect.w > 0.0 && rect.h > 0.0)
+                && tree.first_child(id).is_ok_and(|child| child.is_some())
+        });
         for (key, mounted) in &self.mounted {
-            let cull = !pin.is_empty() && key == pin;
+            let cull = ready && !pin.is_empty() && key == pin;
             let _ = tree.set_cull_paint(mounted.node, cull);
         }
     }
@@ -626,6 +737,11 @@ impl ListDriver {
             }
         }
         if let Some(id) = self.nodes.pin {
+            if self.content_view_w > 0.0
+                && let Ok(index) = usize::try_from(self.chrome.pin_index)
+            {
+                let _ = tree.set_size(id, self.content_view_w, self.prefix.height_at(index));
+            }
             let _ = tree.set_transform(id, 0.0, self.chrome.pin_y, 0.0, 1.0);
         }
     }

@@ -11,8 +11,7 @@
 		A10000000000000000000005 /* App script in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* App script */; };
 		A10000000000000000000006 /* app.modules in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* app.modules */; };
 		A10000000000000000000007 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* assets */; };
-		A10000000000000000000008 /* Impeller-LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* Impeller-LICENSE */; };
-		A1000000000000000000000A /* Roboto-NOTICE in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* Roboto-NOTICE */; };
+		A1000000000000000000000A /* ThirdParty-NOTICE in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* ThirdParty-NOTICE */; };
 @HOST_SWIFT_BUILDFILES@
 		A1000000000000000000000B /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000F /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
@@ -23,8 +22,7 @@
 		A20000000000000000000005 /* App script */ = {isa = PBXFileReference; lastKnownFileType = file; path = "resources/@APP_SCRIPT@"; sourceTree = "<group>"; };
 		A20000000000000000000006 /* app.modules */ = {isa = PBXFileReference; lastKnownFileType = text; path = resources/app.modules; sourceTree = "<group>"; };
 		A20000000000000000000007 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = resources/assets; sourceTree = "<group>"; };
-		A20000000000000000000008 /* Impeller-LICENSE */ = {isa = PBXFileReference; lastKnownFileType = text; path = "resources/Impeller-LICENSE"; sourceTree = "<group>"; };
-		A2000000000000000000000E /* Roboto-NOTICE */ = {isa = PBXFileReference; lastKnownFileType = text; path = "resources/Roboto-NOTICE"; sourceTree = "<group>"; };
+		A2000000000000000000000E /* ThirdParty-NOTICE */ = {isa = PBXFileReference; lastKnownFileType = text; path = "resources/ThirdParty-NOTICE"; sourceTree = "<group>"; };
 		A20000000000000000000009 /* impasto_ios.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = native/impasto_ios.h; sourceTree = "<group>"; };
 		A2000000000000000000000A /* BuildSettings.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = BuildSettings.xcconfig; sourceTree = "<group>"; };
 		A2000000000000000000000B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -53,8 +51,7 @@
 				A20000000000000000000005 /* App script */,
 				A20000000000000000000006 /* app.modules */,
 				A20000000000000000000007 /* assets */,
-				A20000000000000000000008 /* Impeller-LICENSE */,
-				A2000000000000000000000E /* Roboto-NOTICE */,
+				A2000000000000000000000E /* ThirdParty-NOTICE */,
 				A20000000000000000000009 /* impasto_ios.h */,
 				A2000000000000000000000A /* BuildSettings.xcconfig */,
 				A2000000000000000000000B /* Info.plist */,
@@ -124,8 +121,7 @@
 				A10000000000000000000005 /* App script in Resources */,
 				A10000000000000000000006 /* app.modules in Resources */,
 				A10000000000000000000007 /* assets in Resources */,
-				A10000000000000000000008 /* Impeller-LICENSE in Resources */,
-				A1000000000000000000000A /* Roboto-NOTICE in Resources */,
+				A1000000000000000000000A /* ThirdParty-NOTICE in Resources */,
 				A1000000000000000000000B /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -139,10 +139,9 @@ impl FontBook {
         Ok(())
     }
 
-    pub(super) fn snapshot(&self) -> Vec<(String, Arc<[u8]>)> {
-        self.queued.clone()
-    }
-
+    /// Faces queued since the last take. Marks each family as handed out, so
+    /// a later registration of the same family replaces bytes instead of
+    /// taking another slot.
     pub(super) fn take(&mut self) -> Vec<(String, Arc<[u8]>)> {
         let taken = std::mem::take(&mut self.queued);
         for (name, _) in &taken {

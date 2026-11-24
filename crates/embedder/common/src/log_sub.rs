@@ -1,10 +1,10 @@
-//! Process log dispatcher. Call sites emit `tracing` events. This subscriber
+//! Process log dispatcher. Call sites emit `tracing` events. This layer
 //! filters once and hands the same record to every sink.
 
-use std::collections::HashMap;
 use std::fmt::Write as _;
 #[cfg(not(target_os = "android"))]
 use std::io::{self, Write as _};
+#[cfg(not(target_os = "ios"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(target_os = "ios"))]
 use std::sync::mpsc::{self, SyncSender, TrySendError};
@@ -18,7 +18,11 @@ use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
 use tracing::subscriber::Interest;
 use tracing::{Level, Metadata, Subscriber};
+use tracing_subscriber::Layer;
 use tracing_subscriber::filter::{LevelFilter, Targets};
+use tracing_subscriber::layer::{Context, Filter};
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::registry::LookupSpan;
 
 use crate::diagnostics::{DiagnosticsHub, LogEntry, LogSource};
 
@@ -40,131 +44,115 @@ pub trait LogSink: Send + Sync {
     fn write(&self, record: &LogRecord, line: &str);
 }
 
-struct SpanState {
-    frame: Option<u64>,
-}
+#[derive(Clone, Copy)]
+struct FrameTag(u64);
 
-/// Filters with the process [`Targets`] and fans out to the installed sinks.
-pub struct ImpastoSubscriber {
-    sinks: Vec<Arc<dyn LogSink>>,
-    spans: Mutex<HashMap<u64, SpanState>>,
-}
+struct LogFilter;
 
-impl ImpastoSubscriber {
-    pub fn new(sinks: Vec<Arc<dyn LogSink>>) -> Self {
-        Self {
-            sinks,
-            spans: Mutex::new(HashMap::new()),
+impl<S> Filter<S> for LogFilter {
+    fn enabled(&self, metadata: &Metadata<'_>, _cx: &Context<'_, S>) -> bool {
+        if metadata.is_span() {
+            return metadata.fields().field("frame").is_some();
         }
-    }
-}
-
-impl Subscriber for ImpastoSubscriber {
-    fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
-        // `register_callsite` already dropped disabled call sites.
-        true
+        if metadata.fields().field("trace_event").is_some() {
+            return false;
+        }
+        lock(shared_filter()).would_enable(metadata.target(), metadata.level())
     }
 
-    fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
-        let targets = lock(shared_filter());
-        if targets.would_enable(metadata.target(), metadata.level()) {
+    fn callsite_enabled(&self, metadata: &'static Metadata<'static>) -> Interest {
+        if metadata.is_span() {
+            if metadata.fields().field("frame").is_some() {
+                Interest::always()
+            } else {
+                Interest::never()
+            }
+        } else if metadata.fields().field("trace_event").is_none()
+            && lock(shared_filter()).would_enable(metadata.target(), metadata.level())
+        {
             Interest::always()
         } else {
             Interest::never()
         }
     }
+}
 
-    fn max_level_hint(&self) -> Option<LevelFilter> {
-        Some(max_level(&lock(shared_filter())))
+/// Filters with the process [`Targets`] and fans out to the installed sinks.
+pub struct LogLayer {
+    sinks: Vec<Arc<dyn LogSink>>,
+}
+
+impl LogLayer {
+    pub fn new(sinks: Vec<Arc<dyn LogSink>>) -> Self {
+        Self { sinks }
     }
+}
 
-    fn new_span(&self, attrs: &Attributes<'_>) -> Id {
-        let mut visitor = FieldVisitor::default();
+impl<S> Layer<S> for LogLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        let mut visitor = FrameVisitor::default();
         attrs.record(&mut visitor);
-        let id = Id::from_u64(next_span_id());
-        let mut spans = lock(&self.spans);
-        spans.insert(
-            id.into_u64(),
-            SpanState {
-                frame: visitor.frame,
-            },
-        );
-        id
-    }
-
-    fn record(&self, id: &Id, values: &Record<'_>) {
-        let mut visitor = FieldVisitor::default();
-        values.record(&mut visitor);
-        if let Some(frame) = visitor.frame {
-            lock(&self.spans)
-                .entry(id.into_u64())
-                .or_insert(SpanState { frame: None })
-                .frame = Some(frame);
+        if let Some(frame) = visitor.frame
+            && let Some(span) = ctx.span(id)
+        {
+            span.extensions_mut().insert(FrameTag(frame));
         }
     }
 
-    fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+    fn on_record(&self, id: &Id, values: &Record<'_>, ctx: Context<'_, S>) {
+        let mut visitor = FrameVisitor::default();
+        values.record(&mut visitor);
+        if let Some(frame) = visitor.frame
+            && let Some(span) = ctx.span(id)
+        {
+            span.extensions_mut().insert(FrameTag(frame));
+        }
+    }
 
-    fn event(&self, event: &tracing::Event<'_>) {
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
         let mut visitor = FieldVisitor::default();
         event.record(&mut visitor);
+        let frame = ctx.event_scope(event).and_then(|scope| {
+            scope
+                .into_iter()
+                .find_map(|span| span.extensions().get::<FrameTag>().map(|tag| tag.0))
+        });
         let record = LogRecord {
             level: *event.metadata().level(),
             target: event.metadata().target(),
             message: visitor.message,
             fields: visitor.fields,
-            frame: current_frame(&self.spans),
+            frame,
         };
         let line = format_line(&record);
         for sink in &self.sinks {
             sink.write(&record, &line);
         }
     }
-
-    fn enter(&self, id: &Id) {
-        STACK.with(|stack| stack.borrow_mut().push(id.into_u64()));
-    }
-
-    fn exit(&self, id: &Id) {
-        STACK.with(|stack| {
-            let mut stack = stack.borrow_mut();
-            if stack.last() == Some(&id.into_u64()) {
-                stack.pop();
-            } else {
-                stack.retain(|open| *open != id.into_u64());
-            }
-        });
-    }
-
-    fn try_close(&self, id: Id) -> bool {
-        lock(&self.spans).remove(&id.into_u64());
-        true
-    }
 }
 
-fn current_frame(spans: &Mutex<HashMap<u64, SpanState>>) -> Option<u64> {
-    let stack = STACK.with(|stack| stack.borrow().clone());
-    let spans = lock(spans);
-    stack
-        .iter()
-        .rev()
-        .find_map(|id| spans.get(id).and_then(|span| span.frame))
+#[derive(Default)]
+struct FrameVisitor {
+    frame: Option<u64>,
 }
 
-fn next_span_id() -> u64 {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    NEXT.fetch_add(1, Ordering::Relaxed)
-}
+impl Visit for FrameVisitor {
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        if field.name() == "frame" {
+            self.frame = Some(value);
+        }
+    }
 
-thread_local! {
-    static STACK: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+    fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
 }
 
 #[derive(Default)]
 struct FieldVisitor {
     message: String,
     fields: Vec<(&'static str, String)>,
-    frame: Option<u64>,
 }
 
 impl Visit for FieldVisitor {
@@ -181,9 +169,6 @@ impl Visit for FieldVisitor {
     }
 
     fn record_u64(&mut self, field: &Field, value: u64) {
-        if field.name() == "frame" {
-            self.frame = Some(value);
-        }
         self.store(field, value.to_string());
     }
 
@@ -418,7 +403,10 @@ pub fn install(log_dir: Option<&std::path::Path>, devtools: Option<Arc<Diagnosti
     if let Some(devtools) = devtools {
         sinks.push(Arc::new(DevtoolSink::new(devtools)));
     }
-    let subscriber = ImpastoSubscriber::new(sinks);
+    let subscriber = tracing_subscriber::Registry::default()
+        .with(LogLayer::new(sinks).with_filter(LogFilter))
+        .with(crate::diagnostics::system_trace::layer())
+        .with(crate::diagnostics::timeline::layer());
     let _ = tracing::subscriber::set_global_default(subscriber);
 }
 
@@ -450,16 +438,6 @@ fn default_level() -> Level {
     } else {
         Level::INFO
     }
-}
-
-fn max_level(targets: &Targets) -> LevelFilter {
-    let mut max = targets.default_level().unwrap_or(LevelFilter::OFF);
-    for (_, level) in targets.iter() {
-        if level > max {
-            max = level;
-        }
-    }
-    max
 }
 
 fn format_targets(targets: &Targets) -> String {

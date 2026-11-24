@@ -46,6 +46,12 @@ pub(super) use vm_entry;
 
 type SharedConsoleLog = Rc<dyn Fn(u8, &str)>;
 
+fn drain_fonts(inner: &Inner, tree: &mut Tree) {
+    for (family, bytes) in inner.fonts.borrow_mut().take() {
+        tree.register_shared_font(&family, bytes);
+    }
+}
+
 struct Inner {
     pub(super) tree: RefCell<Tree>,
     pub(super) log: SharedConsoleLog,
@@ -70,6 +76,7 @@ struct Inner {
     pub(super) driver_frame: Cell<bool>,
     pub(super) last_pen: Cell<Option<crate::input::PointerEvent>>,
     trace: Cell<bool>,
+    counters: Cell<bool>,
     /// Script failures waiting for [`crate::session::Session::take_faults`].
     pub(super) faults: RefCell<Vec<crate::session::ScriptFault>>,
     /// The reactive graph owns Persistent values and temporary transfer slots.
@@ -104,7 +111,8 @@ impl Inner {
             drivers: RefCell::new(crate::tree::list::DriverSet::new()),
             driver_frame: Cell::new(false),
             last_pen: Cell::new(None),
-            trace: Cell::new(std::env::var_os("IMPASTO_TRACE").is_some()),
+            trace: Cell::new(std::env::var("IMPASTO_TRACE").as_deref() == Ok("1")),
+            counters: Cell::new(false),
             faults: RefCell::new(Vec::new()),
             graph: reactive::Graph::new(),
             canvas: RefCell::new(CanvasSession::new()),
@@ -229,6 +237,7 @@ pub struct JsSession {
     exit: Cell<bool>,
     /// A failed frame must not schedule another frame by itself.
     suppress_demand: Cell<bool>,
+    ui_work_pending: bool,
     reload_frame: Option<crate::session::FrameOutput>,
     record_failing: bool,
     record_frames: u32,
@@ -295,6 +304,7 @@ impl JsSession {
             script_error: RefCell::new(None),
             exit: Cell::new(false),
             suppress_demand: Cell::new(false),
+            ui_work_pending: false,
             reload_frame: None,
             record_failing: false,
             record_frames: 0,
@@ -337,6 +347,8 @@ impl JsSession {
         if !inner.graph.has_updates() {
             return Ok(());
         }
+        let _trace =
+            tracing::trace_span!(target: "impasto::script::solid", "reactive_flush").entered();
         self.vm.host.run_updates()
     }
 
@@ -392,6 +404,32 @@ impl JsSession {
 }
 
 impl Session for JsSession {
+    fn register_shader_program(
+        &mut self,
+        source: &str,
+        clock: crate::scene::ShaderClock,
+    ) -> Result<crate::scene::ShaderProgramId, crate::scene::ShaderError> {
+        self.inner
+            .tree
+            .borrow_mut()
+            .register_shader_program(source, clock)
+    }
+    fn set_counters(&mut self, enabled: bool) {
+        self.inner.counters.set(enabled);
+    }
+
+    fn runtime_sample(&self) -> Option<crate::session::RuntimeSample> {
+        let counts = self.vm.host.runtime.counts();
+        Some(crate::session::RuntimeSample {
+            promises: counts.promises,
+            timers: counts.timers,
+            requests: counts.requests,
+            queued_events: counts.queued_events,
+            queued_bytes: counts.queued_bytes,
+            heap_bytes: self.vm.host.runtime.heap_bytes(),
+        })
+    }
+
     fn set_trace(&mut self, enabled: bool) {
         self.inner.trace.set(enabled);
     }
@@ -467,6 +505,13 @@ impl Session for JsSession {
     }
 
     fn back_gesture(&mut self, event: crate::session::BackGesture) -> bool {
+        use crate::session::BackGesture;
+        let progress = if let BackGesture::Progress(value) = event {
+            value
+        } else {
+            0.0
+        };
+        self.inner.tree.borrow_mut().set_back_progress(progress);
         match self.vm.host.back_gesture(event) {
             Ok(handled) => handled,
             Err(message) => {
@@ -737,11 +782,6 @@ impl Session for JsSession {
         inner.tree.borrow_mut().set_autofill_enabled(enabled);
     }
 
-    fn take_fonts(&mut self) -> Vec<(String, Arc<[u8]>)> {
-        let inner = &self.inner;
-        inner.fonts.borrow_mut().take()
-    }
-
     fn take_reloads(&mut self) -> Vec<String> {
         let inner = &self.inner;
         std::mem::take(&mut *inner.reloads.borrow_mut())
@@ -779,17 +819,20 @@ impl Session for JsSession {
             output.again |= self.wants_frame();
             return output;
         }
-        use crate::session::trace::Section;
-
+        self.vm.record_stack_samples();
         let script_started = std::time::Instant::now();
-        let script_trace = Section::begin(c"Impasto script");
+        let script_trace = tracing::debug_span!(target: "impasto::script", "script").entered();
         let vm_host = Rc::clone(&self.vm.host);
         let host = &*vm_host;
         let inner = host.inner();
         let stamp = std::time::Instant::now();
         {
+            let motion_span =
+                tracing::trace_span!(target: "impasto::script", "motion_tick").entered();
             let mut tree = inner.tree.borrow_mut();
-            let trace_enabled = Section::enabled() || inner.trace.get();
+            let trace_enabled = tracing::enabled!(target: "impasto::layout", tracing::Level::DEBUG)
+                || inner.trace.get()
+                || inner.counters.get();
             inner.marks.trace_enabled.set(trace_enabled);
             tree.trace_text_probes(trace_enabled);
             tree.prepare_sync_stats();
@@ -799,16 +842,22 @@ impl Session for JsSession {
             } else {
                 tree.tick_motions(time.target_ms);
             }
+            tree.sync_scroll_offsets();
             let mut notices = tree.tick(time.target_ms);
             notices.extend(tree.take_scroll_notices());
             drop(tree);
+            drop(motion_span);
             let motion_ms = elapsed_ms(stamp);
             let stamp = std::time::Instant::now();
-            if let Err(message) = dispatch_gestures(host, notices) {
-                return self.hold_frame(message);
-            }
-            if let Err(message) = host.drain_jobs() {
-                return self.hold_frame(message);
+            {
+                let _dispatch_span =
+                    tracing::trace_span!(target: "impasto::script", "dispatch_gestures").entered();
+                if let Err(message) = dispatch_gestures(host, notices) {
+                    return self.hold_frame(message);
+                }
+                if let Err(message) = host.drain_jobs() {
+                    return self.hold_frame(message);
+                }
             }
             let dispatch_ms = elapsed_ms(stamp);
             let paused = inner.paused.get();
@@ -820,16 +869,23 @@ impl Session for JsSession {
             }
             self.vm.drain_local_io();
             let timer_started = std::time::Instant::now();
-            if let Err(message) = host.fire_timers() {
-                self.note_script_error(message);
+            {
+                let _timer_span =
+                    tracing::trace_span!(target: "impasto::script", "timers").entered();
+                if let Err(message) = host.fire_timers() {
+                    self.note_script_error(message);
+                }
             }
             let timer_ms = elapsed_ms(timer_started);
             if let Err(message) = host.drain_jobs() {
                 return self.hold_frame(message);
             }
             let raf_started = std::time::Instant::now();
-            if let Err(message) = host.fire_raf() {
-                self.note_script_error(message);
+            {
+                let _raf_span = tracing::trace_span!(target: "impasto::script", "raf").entered();
+                if let Err(message) = host.fire_raf() {
+                    self.note_script_error(message);
+                }
             }
             let raf_ms = elapsed_ms(raf_started);
             if let Err(message) = host.drain_jobs() {
@@ -843,13 +899,14 @@ impl Session for JsSession {
             }
             // Frame listeners can read the graph updated by input, timers, and rAF.
             {
-                let _trace = Section::begin(c"Impasto reactive");
+                let _trace = tracing::debug_span!(target: "impasto::script", "reactive").entered();
                 if let Err(error) = self.run_reactive() {
                     return self.hold_frame(error);
                 }
             }
             let callback_started = std::time::Instant::now();
-            let callback_trace = Section::begin(c"Impasto frame callbacks");
+            let callback_trace =
+                tracing::debug_span!(target: "impasto::script", "frame_callbacks").entered();
             if let Err(message) = host.frame(time.target_ms, time.interval_ms) {
                 return self.hold_frame(message);
             }
@@ -860,7 +917,8 @@ impl Session for JsSession {
             }
             // Commit frame listeners' signal writes before layout reads the tree.
             {
-                let _trace = Section::begin(c"Impasto reactive after frame callbacks");
+                let _trace =
+                    tracing::debug_span!(target: "impasto::script", "reactive_post").entered();
                 if let Err(error) = self.run_reactive() {
                     return self.hold_frame(error);
                 }
@@ -868,12 +926,9 @@ impl Session for JsSession {
             sweep_detached(host);
             let script_ms = elapsed_ms(script_started);
             drop(script_trace);
-            let style_trace = Section::begin(c"Impasto styles");
-            let queued = inner.fonts.borrow().snapshot();
+            let style_trace = tracing::debug_span!(target: "impasto::layout", "styles").entered();
             let mut tree = inner.tree.borrow_mut();
-            for (family, bytes) in &queued {
-                let _ = tree.register_shared_font(family, Arc::clone(bytes));
-            }
+            drain_fonts(inner, &mut tree);
             if let Err(error) = tree.flush_styles() {
                 let message = error.to_string();
                 drop(tree);
@@ -888,7 +943,7 @@ impl Session for JsSession {
             let mut tree = inner.tree.borrow_mut();
             let mut ran_layout = tree.needs_layout();
             if ran_layout {
-                let _trace = Section::begin(c"Impasto layout");
+                let _trace = tracing::debug_span!(target: "impasto::layout", "layout").entered();
                 if let Err(error) = tree.layout() {
                     let message = error.to_string();
                     drop(tree);
@@ -896,13 +951,15 @@ impl Session for JsSession {
                 }
             }
             drop(tree);
-            let driver_trace = Section::begin(c"Impasto list and scroll");
+            inner.tree.borrow_mut().sync_scroll_offsets();
+            let driver_trace =
+                tracing::debug_span!(target: "impasto::layout", "list_driver").entered();
             let mut list_ops = 0_u32;
             for event in driver::collect_driver_tick(inner) {
                 let _trace =
                     matches!(event, crate::tree::list::DriverEvent::ListOp { .. }).then(|| {
                         list_ops = list_ops.saturating_add(1);
-                        Section::begin(c"Impasto ListOp")
+                        tracing::trace_span!(target: "impasto::layout", "list_op").entered()
                     });
                 if let Err(message) = host.driver(&event) {
                     self.note_script_error(message);
@@ -911,8 +968,11 @@ impl Session for JsSession {
             drop(driver_trace);
             {
                 let mut tree = inner.tree.borrow_mut();
+                drain_fonts(inner, &mut tree);
                 if tree.needs_layout() {
-                    let _trace = Section::begin(c"Impasto layout after drivers");
+                    let _trace =
+                        tracing::debug_span!(target: "impasto::layout", "layout_after_drivers")
+                            .entered();
                     if let Err(error) = tree.layout() {
                         let message = error.to_string();
                         drop(tree);
@@ -923,7 +983,8 @@ impl Session for JsSession {
             }
             let mut layout_cb_ms = 0.0;
             if ran_layout {
-                let _trace = Section::begin(c"Impasto layout callbacks");
+                let _trace =
+                    tracing::debug_span!(target: "impasto::script", "layout_callbacks").entered();
                 let callback_started = std::time::Instant::now();
                 if let Err(message) = host.layout() {
                     return self.hold_frame(message);
@@ -935,8 +996,11 @@ impl Session for JsSession {
                 layout_cb_ms = elapsed_ms(callback_started);
             }
             let mut tree = inner.tree.borrow_mut();
-            if ran_layout && tree.needs_layout() {
-                let _trace = Section::begin(c"Impasto layout after callbacks");
+            drain_fonts(inner, &mut tree);
+            if tree.needs_layout() {
+                let _trace =
+                    tracing::debug_span!(target: "impasto::layout", "layout_after_callbacks")
+                        .entered();
                 if let Err(error) = tree.layout() {
                     let message = error.to_string();
                     drop(tree);
@@ -944,16 +1008,57 @@ impl Session for JsSession {
                 }
             }
             drop(tree);
+            let thresholds = inner.tree.borrow_mut().update_scroll_thresholds();
+            if !thresholds.is_empty() {
+                for (id, active) in thresholds {
+                    if let Err(message) = host.scroll_threshold(id, active) {
+                        self.note_script_error(message);
+                    }
+                }
+                if let Err(error) = self.run_reactive() {
+                    return self.hold_frame(error);
+                }
+                let mut tree = inner.tree.borrow_mut();
+                let layout = tree.flush_styles().and_then(|()| {
+                    if tree.needs_layout() {
+                        tree.layout().map(|()| true)
+                    } else {
+                        Ok(false)
+                    }
+                });
+                drop(tree);
+                match layout {
+                    Err(error) => return self.hold_layout(error.to_string()),
+                    Ok(true) if !ran_layout => {
+                        let started = std::time::Instant::now();
+                        if let Err(error) = host.layout().and_then(|()| self.run_reactive()) {
+                            return self.hold_frame(error);
+                        }
+                        layout_cb_ms += elapsed_ms(started);
+                        let mut tree = inner.tree.borrow_mut();
+                        if tree.needs_layout()
+                            && let Err(error) = tree.layout()
+                        {
+                            let message = error.to_string();
+                            drop(tree);
+                            return self.hold_layout(message);
+                        }
+                    }
+                    _ => {}
+                }
+            }
             let canvas_stats = if paused {
                 CanvasStats::default()
             } else {
-                let _trace = Section::begin(c"Impasto canvas");
+                let _trace = tracing::debug_span!(target: "impasto::canvas", "canvas").entered();
                 paint(host)
             };
             let mut tree = inner.tree.borrow_mut();
             let record_started = std::time::Instant::now();
             if tree.needs_paint() {
-                let _trace = Section::begin(c"Impasto record");
+                let _trace =
+                    tracing::debug_span!(target: "impasto::render::record", "record_layers")
+                        .entered();
                 match tree.record_layers() {
                     Ok(()) => self.note_record_ok(),
                     Err(error) => {
@@ -961,13 +1066,12 @@ impl Session for JsSession {
                         self.note_record_err(&message);
                     }
                 }
-                Section::event(|| {
-                    format!(
-                        "Impasto record work visits={} ops={}",
-                        tree.layer_record_visits(),
-                        tree.picture_writes()
-                    )
-                });
+                tracing::debug!(
+                    target: "impasto::render::record",
+                    visits = tree.layer_record_visits(),
+                    ops = tree.picture_writes(),
+                    "record_work"
+                );
                 tree.clear_paint();
             }
             // Fresh overflow findings go to the log as warnings; the
@@ -1001,6 +1105,8 @@ impl Session for JsSession {
             };
             let layout_report = tree.debug_scan_enabled().then(|| tree.layout_issues_json());
             let semantics_started = std::time::Instant::now();
+            let semantics_span =
+                tracing::debug_span!(target: "impasto::layout", "semantics").entered();
             let semantics = tree.semantics_patch();
             let placements = tree.platform_views();
             let platform_views = if self.platform_views.as_ref() == placements.as_slice() {
@@ -1009,25 +1115,37 @@ impl Session for JsSession {
                 self.platform_views = placements.into();
                 Some(Arc::clone(&self.platform_views))
             };
+            drop(semantics_span);
             let semantics_ms = elapsed_ms(semantics_started);
             let (layout_ms, sync_ms) = tree.layout_timing();
             let (sync_visited, sync_synced) = tree.sync_stats();
             let scroll_paint_updates = tree.take_scroll_paint_updates();
             let layout_trace = tree.take_layout_trace();
             if let Some(trigger) = layout_trace.root_trigger {
-                Section::event(|| {
-                    let node = trigger.node.map_or(0, NodeId::to_raw);
-                    match trigger.node.and_then(|id| tree.rect(id).ok()) {
-                        Some(rect) => format!(
-                            "Impasto root cause={} node={node} x={:.0} y={:.0} w={:.0} h={:.0}",
-                            trigger.cause, rect.x, rect.y, rect.w, rect.h,
-                        ),
-                        None => format!("Impasto root cause={} node={node}", trigger.cause),
-                    }
-                });
+                let node = trigger.node.map_or(0, NodeId::to_raw);
+                if let Some(rect) = trigger.node.and_then(|id| tree.rect(id).ok()) {
+                    tracing::debug!(
+                        target: "impasto::layout",
+                        cause = %trigger.cause,
+                        node,
+                        x = rect.x,
+                        y = rect.y,
+                        w = rect.w,
+                        h = rect.h,
+                        "root_layout_trigger"
+                    );
+                } else {
+                    tracing::debug!(
+                        target: "impasto::layout",
+                        cause = %trigger.cause,
+                        node,
+                        "root_layout_trigger"
+                    );
+                }
             }
             inner.ime.borrow_mut().sync_editor(&mut tree);
             drop(tree);
+            self.vm.record_stack_samples();
             let trace = crate::session::FrameTrace {
                 laywork_ms: layout_trace.laywork_ms,
                 layout_passes: layout_trace.passes,
@@ -1057,65 +1175,65 @@ impl Session for JsSession {
                 canvas_preparations: canvas_stats.preparations,
                 canvas_reused: canvas_stats.reused,
             };
-            Section::event(|| {
-                format!(
-                    "Impasto work roots={} local={} same_text={} pointer={} updates={} sets={} list_ops={} draw={} prepare={} commit={}",
-                    trace.root_layouts,
-                    trace.local_layouts,
-                    trace.same_text_layouts,
-                    trace.pointers,
-                    trace.updates,
-                    trace.sets,
-                    trace.list_ops,
-                    trace.canvas_callbacks,
-                    trace.canvas_preparations,
-                    trace.canvas_redraws,
-                )
-            });
+            tracing::debug!(
+                target: "impasto::layout",
+                roots = trace.root_layouts,
+                local = trace.local_layouts,
+                same_text = trace.same_text_layouts,
+                pointer = trace.pointers,
+                updates = trace.updates,
+                sets = trace.sets,
+                list_ops = trace.list_ops,
+                draw = trace.canvas_callbacks,
+                prepare = trace.canvas_preparations,
+                commit = trace.canvas_redraws,
+                "frame_work"
+            );
             if layout_trace.passes != 0 || sync_visited != 0 {
-                Section::event(|| {
-                    format!(
-                        "Impasto layout work taffy_us={:.0} sync_us={:.0} hits={} misses={} shaped={} checked={} synced={}",
-                        layout_ms * 1000.0,
-                        sync_ms * 1000.0,
-                        layout_trace.cache_hits,
-                        layout_trace.cache_misses,
-                        layout_trace.text_shaped,
-                        sync_visited,
-                        sync_synced,
-                    )
-                });
+                tracing::debug!(
+                    target: "impasto::layout",
+                    taffy_us = layout_ms * 1000.0,
+                    sync_us = sync_ms * 1000.0,
+                    hits = layout_trace.cache_hits,
+                    misses = layout_trace.cache_misses,
+                    shaped = layout_trace.text_shaped,
+                    checked = sync_visited,
+                    synced = sync_synced,
+                    "layout_work"
+                );
             }
             if scroll_paint_updates != 0 {
-                Section::event(|| format!("Impasto scroll work changes={scroll_paint_updates}"));
+                tracing::debug!(
+                    target: "impasto::layout",
+                    changes = scroll_paint_updates,
+                    "scroll_work"
+                );
             }
             let probes = layout_trace.text_probes;
             if !probes.check_time.is_zero() {
-                Section::event(|| {
-                    format!(
-                        "Impasto text probes check_us={} measure_us={} queries={} intrinsic={} repeat={} hit={} miss={}",
-                        probes.check_time.as_micros(),
-                        probes.measure_time.as_micros(),
-                        probes.queries,
-                        probes.intrinsic,
-                        probes.repeated,
-                        probes.cache_hits,
-                        probes.cache_misses,
-                    )
-                });
+                tracing::debug!(
+                    target: "impasto::layout",
+                    check_us = probes.check_time.as_micros() as u64,
+                    measure_us = probes.measure_time.as_micros() as u64,
+                    queries = probes.queries,
+                    intrinsic = probes.intrinsic,
+                    repeat = probes.repeated,
+                    hit = probes.cache_hits,
+                    miss = probes.cache_misses,
+                    "text_probes"
+                );
             }
             if inner.marks.callbacks.get() != 0 || inner.marks.mutation_calls.get() != 0 {
-                Section::event(|| {
-                    format!(
-                        "Impasto script work callbacks={} callback_us={} mutations={} equal={} mutation_us={} text={}",
-                        inner.marks.callbacks.get(),
-                        inner.marks.callback_time.get().as_micros(),
-                        inner.marks.mutation_calls.get(),
-                        inner.marks.mutation_equal.get(),
-                        inner.marks.mutation_time.get().as_micros(),
-                        inner.marks.text_writes.get(),
-                    )
-                });
+                tracing::debug!(
+                    target: "impasto::script",
+                    callbacks = inner.marks.callbacks.get(),
+                    callback_us = inner.marks.callback_time.get().as_micros() as u64,
+                    mutations = inner.marks.mutation_calls.get(),
+                    equal = inner.marks.mutation_equal.get(),
+                    mutation_us = inner.marks.mutation_time.get().as_micros() as u64,
+                    text = inner.marks.text_writes.get(),
+                    "script_work"
+                );
             }
             if inner.trace.get() {
                 tracing::info!(
@@ -1143,7 +1261,6 @@ impl Session for JsSession {
                 ime: self.take_ime(),
                 semantics,
                 platform_views,
-                fonts: self.take_fonts(),
                 reloads: self.take_reloads(),
                 clipboard: self.take_clipboard(),
                 exit: self.take_exit(),
@@ -1172,23 +1289,56 @@ impl Session for JsSession {
     fn wants_frame(&mut self) -> bool {
         let inner = &self.inner;
         if self.suppress_demand.replace(false) {
+            self.ui_work_pending = true;
             inner.settings_frame.set(false);
             self.vm.host.take_wants_frame();
             return false;
         }
-        let visual = {
+        let (visual, motion) = {
             let tree = inner.tree.borrow();
-            tree.needs_layout()
-                || tree.needs_paint()
-                || tree.motion_active()
-                || tree.pending_long_press()
+            (
+                tree.needs_layout() || tree.needs_paint() || tree.pending_long_press(),
+                tree.motion_active(),
+            )
         };
         let jobs = self.vm.host.jobs_pending();
         let soon = self.vm.host.needs_frame();
         let explicit = inner.settings_frame.take() || self.vm.host.take_wants_frame();
         let driver = inner.driver_frame.get();
         let paints = !inner.paused.get() && inner.graph.has_paints();
-        explicit || visual || jobs || soon || driver || paints
+        self.ui_work_pending = explicit || visual || jobs || soon || driver || paints;
+        self.ui_work_pending || motion
+    }
+
+    fn compositor_eligibility(
+        &self,
+        tracks: &[crate::scene::CompositorTrack],
+    ) -> crate::scene::CompositorEligibility {
+        use crate::scene::CompositorBlockReason;
+
+        let inner = &self.inner;
+        let host = &self.vm.host;
+        if host.observes_frame() {
+            return Err(CompositorBlockReason::GlobalFrameHook);
+        }
+        if inner.canvas.borrow().observes_visibility() {
+            return Err(CompositorBlockReason::CanvasVisibilityObserver);
+        }
+        inner
+            .tree
+            .borrow()
+            .compositor_eligibility(tracks, |node| host.observes_scroll(node.to_raw()))?;
+        if self.ui_work_pending || inner.paused.get() || inner.graph.has_updates() {
+            return Err(CompositorBlockReason::PendingUiWork);
+        }
+        Ok(())
+    }
+
+    fn commit_compositor_state(&mut self, snapshot: &crate::scene::CompositorSnapshot) {
+        self.inner
+            .tree
+            .borrow_mut()
+            .commit_compositor_state(snapshot);
     }
 
     fn lifecycle(&mut self, event: crate::session::Lifecycle) {

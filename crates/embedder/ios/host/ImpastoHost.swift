@@ -482,7 +482,7 @@ public final class ImpastoHost {
             backEnabled = value != 0
         case IMPASTO_IOS_EVENT_FRAME_REQUESTED:
             if state == .ready && surface != nil {
-                frameClock.request(value)
+                frameClock.request(value, preferredRate: Float(message))
             }
         case IMPASTO_IOS_EVENT_FRAME_CANCELLED:
             frameClock.cancel()
@@ -910,6 +910,8 @@ private func releaseImpastoContext(_ rawContext: UnsafeMutableRawPointer?) {
 private final class FrameClock: NSObject {
     private var lifetime: DisplayLinkLifetime?
     private var token: UInt64?
+    private var maximumRate: Float = 60
+    private var preferredRate: Float?
     private let pulse: (UInt64, CFTimeInterval, CFTimeInterval) -> Void
 
     init(pulse: @escaping (UInt64, CFTimeInterval, CFTimeInterval) -> Void) {
@@ -939,14 +941,22 @@ private final class FrameClock: NSObject {
     }
 
     func updateMaximumRate(_ rate: Int) {
-        let maxFPS = Float(rate)
-        lifetime?.link?.preferredFrameRateRange = maxFPS > 60
-            ? CAFrameRateRange(minimum: 30, maximum: maxFPS, preferred: maxFPS)
-            : .default
+        maximumRate = Float(rate)
+        configureRate()
     }
 
-    func request(_ token: UInt64) {
+    private func configureRate() {
+        let rate = min(preferredRate ?? maximumRate, maximumRate)
+        lifetime?.link?.preferredFrameRateRange = CAFrameRateRange(
+            minimum: min(30, rate), maximum: rate, preferred: rate)
+    }
+
+    func request(_ token: UInt64, preferredRate: Float?) {
         self.token = token
+        if self.preferredRate != preferredRate {
+            self.preferredRate = preferredRate
+            configureRate()
+        }
         lifetime?.link?.isPaused = false
     }
 

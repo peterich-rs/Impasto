@@ -157,6 +157,7 @@ export function StackTransition(
           gridTemplateColumns: "minmax(0, 1fr)",
           gridTemplateRows: "minmax(0, 1fr)",
         });
+        scene.setTransitionSnapshot?.(node, true);
         fade = node;
         setMounted(node);
       }}
@@ -177,6 +178,7 @@ export function StackTransition(
           gridTemplateColumns: "minmax(0, 1fr)",
           gridTemplateRows: "minmax(0, 1fr)",
         });
+        scene.setTransitionSnapshot?.(node, true);
         mover = node;
         }}
         style={{
@@ -219,6 +221,13 @@ function RouteHost(props: {
 }): NodeHandle {
   let previous = 0;
   let scope: NodeHandle | undefined;
+  const showsBackScrim = () => {
+    const preview = props.router.backPreview();
+    if (!preview || scene.settings?.().reduceMotion) return false;
+    const stack = props.router.stack();
+    const index = stack.findIndex((entry) => entry.key === preview.key);
+    return index > 0 && stack[index - 1]?.key === props.entry().key;
+  };
   const active = (): boolean => {
     const list = props.router.stack();
     for (let index = list.length - 1; index >= 0; index -= 1) {
@@ -318,6 +327,19 @@ function RouteHost(props: {
               );
             },
           })}
+          <Show when={showsBackScrim()}>
+            <view
+              ref={(node) => {
+                if (node === null || typeof scene.bindBackProgressOpacity !== "function") return;
+                const rule = scene.bindBackProgressOpacity(node, [0, 1], [0.24, 0]);
+                onCleanup(() => scene.unbindScrollProp(rule));
+              }}
+              style={{
+                position: "absolute", top: 0, left: 0, width: "100%", height: "100%",
+                backgroundColor: "#000000",
+              }}
+            />
+          </Show>
         </stack>
       </PageKeepContext>
     </PageActiveContext>

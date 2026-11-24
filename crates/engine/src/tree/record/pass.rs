@@ -2,20 +2,30 @@
 
 use std::sync::Arc;
 
-use crate::scene::Command;
+use crate::scene::{Command, RectPaint as SceneRectPaint};
 
 use super::super::node::{Node, Role};
 use super::{PreparedGradient, RectPaint, positive_sigma, prepared_gradient, rect_paint};
 
-pub(super) fn emit_rect(commands: &mut Vec<Command>, node: &Node, x: f32, y: f32) {
+pub(super) fn emit_rect(
+    commands: &mut Vec<Command>,
+    node: &Node,
+    x: f32,
+    y: f32,
+    replace_background: bool,
+) {
     let RectPaint {
-        fill,
+        mut fill,
         stroke_width,
         stroke_color,
-        gradient,
+        mut gradient,
         shadow,
         box_shadows,
     } = rect_paint(node);
+    if replace_background {
+        fill = None;
+        gradient = None;
+    }
     if node.w <= 0.0
         || node.h <= 0.0
         || (fill.is_none()
@@ -35,19 +45,17 @@ pub(super) fn emit_rect(commands: &mut Vec<Command>, node: &Node, x: f32, y: f32
         }
         None | Some(PreparedGradient::Drop) => None,
     };
-    commands.push(Command::Rect {
-        x,
-        y,
-        w: node.w,
-        h: node.h,
-        corner_radius: node.corner_radius(),
-        color,
-        stroke_width,
-        stroke_color,
-        gradient,
-        shadow,
-        box_shadows,
-    });
+    commands.push(
+        SceneRectPaint {
+            color,
+            stroke_width,
+            stroke_color,
+            gradient,
+            shadow,
+            box_shadows,
+        }
+        .command([x, y, node.w, node.h], node.corner_radius(), node.corners()),
+    );
 }
 
 pub(super) fn emit_outline(commands: &mut Vec<Command>, node: &Node, x: f32, y: f32) {
@@ -58,23 +66,29 @@ pub(super) fn emit_outline(commands: &mut Vec<Command>, node: &Node, x: f32, y: 
     if width <= 0.0 || node.w <= 0.0 || node.h <= 0.0 {
         return;
     }
-    commands.push(Command::Rect {
-        x: x - width * 0.5,
-        y: y - width * 0.5,
-        w: node.w + width,
-        h: node.h + width,
-        corner_radius: node.corner_radius() + width * 0.5,
-        color: [0; 4],
-        stroke_width: width,
-        stroke_color: paint.outline_color,
-        gradient: None,
-        shadow: None,
-        box_shadows: Arc::from([]),
+    let delta = width * 0.5;
+    let corners = node.corners().map(|mut shape| {
+        shape.radii = shape.radii.map(|radius| radius + delta);
+        shape
     });
+    commands.push(
+        SceneRectPaint {
+            color: [0; 4],
+            stroke_width: width,
+            stroke_color: paint.outline_color,
+            gradient: None,
+            shadow: None,
+            box_shadows: Arc::from([]),
+        }
+        .command(
+            [x - delta, y - delta, node.w + width, node.h + width],
+            node.corner_radius() + delta,
+            corners,
+        ),
+    );
 }
 
 pub(super) fn emit_text(
-    text_scale: f32,
     commands: &mut Vec<Command>,
     node: &Node,
     x: f32,
@@ -100,23 +114,26 @@ pub(super) fn emit_text(
             corner_radius: 0.0,
         });
     }
-    let utf8 = if text.spans.is_empty() {
-        Arc::clone(&text.utf8)
-    } else {
-        let joined: String = text.spans.iter().map(|span| span.utf8.as_str()).collect();
-        debug_assert_eq!(joined.as_str(), text.utf8.as_ref());
-        Arc::from(joined)
-    };
+    // A collapsed soft-wrapped run has no line to draw. Failing the whole
+    // frame would hide the page that contains it, such as a closed dialog.
+    let collapsed = text
+        .max_width
+        .get()
+        .partial_cmp(&0.0)
+        .is_none_or(|order| order != std::cmp::Ordering::Greater);
+    let draws = !(text.style.soft_wrap && collapsed);
     commands.push(Command::Text {
         x: x + node.content_x,
         y: y + node.content_y,
-        max_width: text.max_width.get(),
-        font_size: text.font_size * text_scale,
-        paragraph: crate::scene::ParagraphId::NONE,
+        shaped: if draws {
+            text.metrics
+                .as_ref()
+                .and_then(|metrics| metrics.shaped.clone())
+        } else {
+            None
+        },
         color: text.color,
-        utf8,
-        style: Arc::clone(&text.style),
-        spans: Arc::clone(&text.spans),
+        span_paints: crate::text::span_paints(&text.spans),
     });
     for (rect, mark) in marks {
         commands.push(Command::Rect {

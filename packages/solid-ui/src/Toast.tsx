@@ -1,11 +1,9 @@
-import { onCleanup } from "solid-js";
+import { createTrackedEffect, onCleanup, untrack } from "solid-js";
 import {
   directionFor,
   scene,
-  onFrame,
   overlayParent,
   removeNode,
-  requestFrame,
   spring,
   type NodeHandle,
 } from "@impasto/solid-renderer";
@@ -34,9 +32,11 @@ export function Toast(props: ToastProps): NodeHandle {
   let panel = 0;
   let fade = 0;
   let label = 0;
-  let openedAt: number | null = null;
+  let openedAt = 0;
   let closing = false;
+  let stopSlide = () => {};
   function slide(leaving: boolean, onDone?: () => void): void {
+    stopSlide();
     if (fade === 0 || panel === 0) {
       onDone?.();
       return;
@@ -48,22 +48,24 @@ export function Toast(props: ToastProps): NodeHandle {
         onDone?.();
       }
     };
-    spring({
+    const stopFade = spring({
       id: fade,
       prop: "opacity",
       from: leaving ? 255 : 0,
       to: leaving ? 0 : 255,
+      retarget: true,
       write: (value) =>
         scene.patchStyle(fade, {
           opacity: Math.round(value) / 255,
         }),
-      onDone: done,
+      onDone: onDone ? done : undefined,
     });
-    spring({
+    const stopPanel = spring({
       id: panel,
       prop: "translateY",
       from: leaving ? 0 : 24,
       to: leaving ? 24 : 0,
+      retarget: true,
       write: (value) =>
         scene.patchStyle(panel, {
           translateX: 0,
@@ -72,10 +74,15 @@ export function Toast(props: ToastProps): NodeHandle {
           scaleX: 1,
           scaleY: 1,
         }),
-      onDone: done,
+      onDone: onDone ? done : undefined,
     });
+    stopSlide = () => {
+      stopFade();
+      stopPanel();
+    };
   }
   function dismiss(): void {
+    stopSlide();
     panelRef.clear();
     panelStyle.detach();
     textStyle.detach();
@@ -86,7 +93,6 @@ export function Toast(props: ToastProps): NodeHandle {
     panel = 0;
     fade = 0;
     label = 0;
-    openedAt = null;
     closing = false;
   }
   function ensure(): void {
@@ -174,38 +180,27 @@ export function Toast(props: ToastProps): NodeHandle {
     closing = true;
     slide(true, () => dismiss());
   }
-  function sync(targetMs: number): void {
-    if (props.open) {
-      if (closing) {
-        closing = false;
-      }
-      const born = shell === 0;
-      ensure();
-      if (label !== 0) {
-        scene.setText(label, props.text);
-      }
-      if (born) {
-        openedAt = targetMs;
-        slide(false);
-      }
-      const duration = props.durationMs ?? 3000;
-      if (openedAt !== null && targetMs - openedAt >= duration) {
-        props.onClose();
-        requestFrame();
-        return;
-      }
-      requestFrame();
+  createTrackedEffect(() => {
+    if (!props.open) {
+      untrack(beginClose);
       return;
     }
-    beginClose();
-  }
-  const stop = onFrame((targetMs) => {
-    sync(targetMs);
+    untrack(() => {
+      if (shell === 0 || closing) {
+        openedAt = performance.now();
+        closing = false;
+        ensure();
+        slide(false);
+      }
+    });
+    const remaining = (props.durationMs ?? 3000) - (performance.now() - openedAt);
+    const timer = setTimeout(() => props.onClose(), Math.max(0, remaining));
+    onCleanup(() => clearTimeout(timer));
   });
-  onCleanup(() => {
-    stop();
-    dismiss();
+  createTrackedEffect(() => {
+    if (props.open && label !== 0) scene.setText(label, props.text);
   });
+  onCleanup(dismiss);
   return (
     <stack
       style={{

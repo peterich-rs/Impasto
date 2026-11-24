@@ -3,8 +3,6 @@ node_modules/
 target/
 apps/gallery-solid/dist/
 .metrics/
-third_party/impeller-sdk/
-third_party/impeller-build/
 __pycache__/
 crates/embedder/android/apk/.gradle/
 crates/embedder/android/apk/.kotlin/

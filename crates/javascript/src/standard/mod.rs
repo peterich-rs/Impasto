@@ -53,13 +53,56 @@ pub fn install_console<'js>(
     ctx.globals().set("console", console)
 }
 
+/// Installs the User Timing subset using the runtime's public clock.
 pub fn install_performance<'js>(
     ctx: &Ctx<'js>,
     now: impl Fn() -> f64 + 'static,
 ) -> rquickjs::Result<()> {
-    let performance = Object::new(ctx.clone())?;
-    let function = Function::new(ctx.clone(), now)?;
-    performance.set("now", function)?;
+    install_user_timing(ctx, now, None)
+}
+
+pub(crate) fn install_user_timing<'js>(
+    ctx: &Ctx<'js>,
+    now: impl Fn() -> f64 + 'static,
+    hook: Option<crate::runtime::UserTimingHook>,
+) -> rquickjs::Result<()> {
+    let install: Function = ctx.eval(include_str!("performance.js"))?;
+    let now = Function::new(ctx.clone(), now)?;
+    let (clock, notify) = if let Some(hook) = hook {
+        let epoch = std::time::Instant::now();
+        let clock = Function::new(ctx.clone(), move || epoch.elapsed().as_secs_f64() * 1_000.0)?;
+        let notify = Function::new(
+            ctx.clone(),
+            move |name: String, mark: bool, start: f64, end: f64| {
+                let to_instant = |ms: f64| {
+                    let duration =
+                        std::time::Duration::try_from_secs_f64(ms.abs() / 1_000.0).ok()?;
+                    if ms < 0.0 {
+                        epoch.checked_sub(duration)
+                    } else {
+                        epoch.checked_add(duration)
+                    }
+                };
+                if let (Some(start), Some(end)) = (to_instant(start), to_instant(end)) {
+                    let kind = if mark {
+                        crate::runtime::UserTimingKind::Mark
+                    } else {
+                        crate::runtime::UserTimingKind::Measure
+                    };
+                    hook(crate::runtime::UserTiming {
+                        name: &name,
+                        kind,
+                        start,
+                        end,
+                    });
+                }
+            },
+        )?;
+        (Some(clock), Some(notify))
+    } else {
+        (None, None)
+    };
+    let performance: Object = install.call((now, clock, notify))?;
     ctx.globals().set("performance", performance)
 }
 
@@ -205,5 +248,22 @@ declare function clearInterval(id?: number): void;
 "#;
 
 pub(super) const PERFORMANCE_DECLARATIONS: &str = r#"
-declare const performance: { now(): number };
+interface ImpastoPerformanceEntry {
+  readonly name: string;
+  readonly entryType: "mark" | "measure";
+  readonly startTime: number;
+  readonly duration: number;
+  readonly detail: unknown;
+}
+declare const performance: {
+  now(): number;
+  mark(name: string, options?: { startTime?: number; detail?: unknown }): ImpastoPerformanceEntry;
+  measure(name: string, startMark?: string, endMark?: string): ImpastoPerformanceEntry;
+  measure(name: string, options: { start?: string | number; end?: string | number; duration?: number; detail?: unknown }): ImpastoPerformanceEntry;
+  getEntries(): ImpastoPerformanceEntry[];
+  getEntriesByName(name: string, type?: string): ImpastoPerformanceEntry[];
+  getEntriesByType(type: string): ImpastoPerformanceEntry[];
+  clearMarks(name?: string): void;
+  clearMeasures(name?: string): void;
+};
 "#;

@@ -102,6 +102,9 @@ impl Tree {
         if self.layout_cause == LayoutCause::None {
             self.layout_cause = cause;
         }
+        if self.pending_layout_cause == LayoutCause::None {
+            self.pending_layout_cause = cause;
+        }
     }
 
     pub fn trace_text_probes(&mut self, enabled: bool) {
@@ -201,8 +204,12 @@ impl Tree {
 
     pub(super) fn is_picture_owner(&self, id: NodeId) -> bool {
         self.get(id).is_some_and(|node| {
-            node.flags
-                .intersects(NodeFlags::PICTURE_OWNER | NodeFlags::PICTURE_FROM_CANVAS)
+            node.flags.intersects(
+                NodeFlags::PICTURE_OWNER
+                    | NodeFlags::PICTURE_FROM_CANVAS
+                    | NodeFlags::PICTURE_FROM_SHADER
+                    | NodeFlags::PICTURE_FROM_BOUNDARY,
+            )
         })
     }
 
@@ -211,10 +218,37 @@ impl Tree {
     /// dirties `id` and its parent owner so the parent run drops the old commands.
     /// A repeat call does not.
     pub(crate) fn set_picture_owner(&mut self, id: NodeId, on: bool) -> Result<(), Error> {
-        if self.node(id)?.flags.contains(NodeFlags::PICTURE_OWNER) == on {
+        self.set_picture_flag(id, NodeFlags::PICTURE_OWNER, on)
+    }
+
+    /// Records this node's independent picture for application-driven repaints.
+    pub fn set_repaint_boundary(&mut self, id: NodeId, on: bool) -> Result<(), Error> {
+        self.set_picture_flag(id, NodeFlags::PICTURE_FROM_BOUNDARY, on)
+    }
+
+    /// Allows the rasterizer to cache this node's subtree during its transitions.
+    pub fn set_transition_snapshot(&mut self, id: NodeId, on: bool) -> Result<(), Error> {
+        if self
+            .node(id)?
+            .flags
+            .contains(NodeFlags::TRANSITION_SNAPSHOT)
+            != on
+        {
+            self.node_mut(id)?
+                .flags
+                .set(NodeFlags::TRANSITION_SNAPSHOT, on);
+            self.invalidate_subtree_layers(id);
+            self.layer_epoch = self.layer_epoch.wrapping_add(1);
+            self.mark_paint();
+        }
+        Ok(())
+    }
+
+    fn set_picture_flag(&mut self, id: NodeId, flag: NodeFlags, on: bool) -> Result<(), Error> {
+        if self.node(id)?.flags.contains(flag) == on {
             return Ok(());
         }
-        self.node_mut(id)?.flags.set(NodeFlags::PICTURE_OWNER, on);
+        self.node_mut(id)?.flags.set(flag, on);
         self.invalidate_subtree_layers(id);
         self.dirty_picture(id);
         if let Some(parent) = self.get(id).and_then(|node| node.parent) {
@@ -256,6 +290,11 @@ impl Tree {
                 None => node.flags.remove(NodeFlags::PICTURE_FROM_CANVAS),
             }
         }
+        self.repaint_picture_owner(id, was_owner);
+        Ok(())
+    }
+
+    pub(super) fn repaint_picture_owner(&mut self, id: NodeId, was_owner: bool) {
         if was_owner == self.is_picture_owner(id) {
             self.mark_repaint(id);
         } else {
@@ -267,16 +306,18 @@ impl Tree {
             self.layer_epoch = self.layer_epoch.wrapping_add(1);
             self.mark_paint();
         }
-        Ok(())
     }
 
     pub(super) fn renders_layer_node(&self, id: NodeId) -> bool {
         let subtree = self
             .subtree_layers
             .get(&id)
-            .is_some_and(|value| value.effects);
-        self.get(id)
-            .is_some_and(|node| node.renders_layers(subtree))
+            .is_some_and(|value| value.requires_clip_layer());
+        self.get(id).is_some_and(|node| {
+            node.renders_layers(subtree) || node.flags.contains(NodeFlags::PICTURE_FROM_BOUNDARY)
+        }) || self.motion_layers.get(&id).is_some_and(|layers| {
+            layers.linked_transform || layers.transition_opacity || layers.linked_effect
+        })
     }
 
     pub(super) fn is_repaint_dirty(&self, id: NodeId) -> bool {
@@ -1052,7 +1093,9 @@ impl Tree {
     ) {
         self.motions
             .retain(|motion| !(motion.node == id && motion.prop == prop));
+        self.next_motion_id = self.next_motion_id.wrapping_add(1);
         self.motions.push(super::ActiveMotion {
+            id: crate::scene::CompositorTrackId(self.next_motion_id),
             started_ms: self.clock_ms,
             node: id,
             prop,
@@ -1090,12 +1133,7 @@ impl Tree {
                 self.apply_scroll(id, prop, value)
             }
             crate::motion::AnimProp::Opacity => {
-                let rounded = value.round().clamp(0.0, 255.0);
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "rounded and clamped into the closed range 0..=255"
-                )]
-                let alpha = rounded as u8;
+                let alpha = crate::scene::compositor_alpha(value);
                 self.write_alpha(id, alpha).is_err()
             }
             crate::motion::AnimProp::TranslateX
@@ -1104,6 +1142,9 @@ impl Tree {
             | crate::motion::AnimProp::Scale => self.apply_transform_prop(id, prop, value),
             crate::motion::AnimProp::OverscrollX | crate::motion::AnimProp::OverscrollY => {
                 self.apply_overscroll(id, prop, value)
+            }
+            crate::motion::AnimProp::ShaderUniform(index) => {
+                self.apply_shader_uniform(id, index, value)
             }
         };
         self.applying_motion = false;
@@ -1187,6 +1228,10 @@ impl Tree {
         if !self.needs_layout && self.laid_out {
             return Ok(());
         }
+        let pass = self.layout_passes.saturating_add(1);
+        let _trace = tracing::debug_span!(target: "impasto::layout", "layout_pass",
+            pass, cause = self.pending_layout_cause.name())
+        .entered();
         let root = self.root.ok_or(Error::NoRoot)?;
         let root_taffy = self.node(root)?.taffy.ok_or(Error::NoRoot)?;
         let available = match self.viewport {
@@ -1199,10 +1244,15 @@ impl Tree {
         let started = Instant::now();
         let mut measured = Vec::new();
         self.open_measure();
-        self.check_changed_text()?;
+        {
+            let _span =
+                tracing::trace_span!(target: "impasto::layout", "check_changed_text").entered();
+            self.check_changed_text()?;
+        }
         self.taffy.begin_layout();
         let taffy_started = Instant::now();
         let (root_trigger, local) = {
+            let _span = tracing::debug_span!(target: "impasto::layout", "taffy_compute").entered();
             let mut env = MeasureEnv {
                 slots: &self.slots,
                 shaper: &mut *self.shaper,
@@ -1227,13 +1277,16 @@ impl Tree {
         for id in measured {
             self.note_text(id);
         }
-        if let Some(trigger) = root_trigger {
-            self.place_boundary(root)?;
-            self.root_layout_trigger.get_or_insert(trigger);
-            self.root_layouts = self.root_layouts.saturating_add(1);
-        } else {
-            for &id in &local {
-                self.place_boundary(id)?;
+        {
+            let _span = tracing::trace_span!(target: "impasto::layout", "place_boundary").entered();
+            if let Some(trigger) = root_trigger {
+                self.place_boundary(root)?;
+                self.root_layout_trigger.get_or_insert(trigger);
+                self.root_layouts = self.root_layouts.saturating_add(1);
+            } else {
+                for &id in &local {
+                    self.place_boundary(id)?;
+                }
             }
         }
         self.local_layouts = self
@@ -1247,7 +1300,11 @@ impl Tree {
         self.needs_layout = false;
         self.needs_paint = true;
         self.laid_out = true;
-        self.sync_metrics();
+        self.pending_layout_cause = LayoutCause::None;
+        {
+            let _span = tracing::trace_span!(target: "impasto::layout", "sync_metrics").entered();
+            self.sync_metrics();
+        }
         self.layout_work_ms += started.elapsed().as_secs_f64() * 1000.0;
         if self.debug.scan_overflow {
             self.scan_overflow();
@@ -1420,6 +1477,7 @@ impl Tree {
         height: AvailableSpace,
         measured: &mut Vec<NodeId>,
     ) -> Result<Size<f32>, Error> {
+        let _trace = tracing::trace_span!(target: "impasto::layout", "measure_subtree").entered();
         let shaper = &mut *self.shaper;
         let mut env = MeasureEnv {
             slots: &self.slots,
@@ -1965,7 +2023,7 @@ fn justify_content(justify: Justify) -> JustifyContent {
 /// Size already laid out for this text, when `max_width` cannot change the lines.
 ///
 /// Taffy asks once at max-content and again at the definite width. The max-content
-/// pass uses a million-point constraint, which misses the paint slot and builds a
+/// pass uses a million-point constraint, which misses the frozen glyphs and builds a
 /// paragraph that is thrown away. A result that already fits inside its old
 /// constraint is the same at any wider limit, including that probe.
 fn reusable_text_metrics(
@@ -1975,7 +2033,7 @@ fn reusable_text_metrics(
 ) -> Option<&crate::text::ParagraphMetrics> {
     let cached = text.cached.as_ref()?;
     let metrics = text.metrics.as_ref()?;
-    let key = &cached.metrics;
+    let key = cached;
     if key.font_size != font_size.to_bits() || key.text.as_ref() != text.utf8.as_ref() {
         return None;
     }
@@ -1996,13 +2054,13 @@ fn reusable_text_metrics(
     None
 }
 
-fn spans_match(text: &super::node::TextPayload, cached: &crate::text::PaintKey) -> bool {
-    if text.spans.len() != cached.metrics.spans.len() {
+fn spans_match(text: &super::node::TextPayload, cached: &crate::text::MetricsKey) -> bool {
+    if text.spans.len() != cached.spans.len() {
         return false;
     }
     text.spans
         .iter()
-        .zip(cached.metrics.spans.iter())
+        .zip(cached.spans.iter())
         .all(|(span, metric)| {
             span.utf8 == metric.utf8.as_ref()
                 && span.weight == metric.weight
@@ -2078,15 +2136,14 @@ fn measure_leaf(
         // metrics key: family, weight, and runs, not a whitespace split alone.
         if matches!(available.width, AvailableSpace::MinContent) {
             let font_size = text.font_size * env.text_scale;
-            let paint = crate::text::paint_key(
+            let key = crate::text::metrics_key(
                 Arc::clone(&text.utf8),
                 Arc::clone(&text.style),
                 text.spans.as_ref(),
                 font_size,
                 SINGLE_LINE_MAX,
-                text.color,
             );
-            let (width, metrics) = env.shaper.min_content_metrics(&paint);
+            let (width, metrics) = env.shaper.min_content_metrics(&key);
             baseline = Some(metrics.first_baseline());
             let size = TextSize {
                 width,
@@ -2103,7 +2160,7 @@ fn measure_leaf(
             if let Some(metrics) = reusable_text_metrics(text, font_size, max_width) {
                 env.text_reused.set(env.text_reused.get().saturating_add(1));
                 let cached = text.cached.as_ref();
-                let paints_at = cached.map(|key| key.metrics.max_width).unwrap_or(0);
+                let paints_at = cached.map(|key| key.max_width).unwrap_or(0);
                 if paints_at == width_bits {
                     text.max_width.set(max_width);
                 }
@@ -2137,16 +2194,15 @@ fn measure_leaf(
                         generation: slot.generation,
                     });
                 }
-                let key = crate::text::paint_key(
+                let key = crate::text::metrics_key(
                     Arc::clone(&text.utf8),
                     Arc::clone(&text.style),
                     text.spans.as_ref(),
                     font_size,
                     max_width,
-                    text.color,
                 );
                 env.text_shaped.set(env.text_shaped.get().saturating_add(1));
-                let metrics = env.shaper.metrics_paint(&key);
+                let metrics = env.shaper.metrics(&key);
                 baseline = Some(metrics.first_baseline());
                 let size = metrics.size;
                 env.provisional.insert(index, (max_width, metrics));
@@ -2197,13 +2253,12 @@ fn mark_descendants_dirty(tree: &mut Tree, id: NodeId) {
 #[test]
 fn short_line_reuses_a_wider_constraint() {
     let mut text = super::node::TextPayload::new("Item 1", 16.0, [0, 0, 0, 255]);
-    text.cached = Some(crate::text::paint_key(
+    text.cached = Some(crate::text::metrics_key(
         Arc::clone(&text.utf8),
         Arc::clone(&text.style),
         &[],
         16.0,
         200.0,
-        text.color,
     ));
     text.metrics = Some(Arc::new(crate::text::ParagraphMetrics::with_baseline(
         TextSize {
@@ -2384,9 +2439,8 @@ fn same_output_text_reuses_layout_until_width_or_baseline_changes() -> Result<()
         "{trace:?}",
     );
     assert_eq!((tree.rect(quote)?, tree.rect(label)?), before);
-    assert!(tree.record()?.commands.iter().any(|command| {
-        matches!(command, crate::scene::Command::Text { utf8, .. } if utf8.as_ref() == "35.24")
-    }));
+    let texts = crate::text::test_support::texts(&tree.record()?);
+    assert!(texts.contains(&"35.24".to_owned()), "{texts:?}");
 
     tree.set_text(quote, "-123.45")?;
     tree.layout()?;
@@ -2426,9 +2480,8 @@ fn fixed_text_keeps_layout_when_new_ink_stays_inside_its_box() -> Result<(), Err
         (0, 0, 1)
     );
     assert_eq!((tree.rect(quote)?, tree.rect(next)?), before);
-    assert!(tree.record()?.commands.iter().any(|command| {
-        matches!(command, crate::scene::Command::Text { utf8, .. } if utf8.as_ref() == "-1,034.56")
-    }));
+    let texts = crate::text::test_support::texts(&tree.record()?);
+    assert_eq!(texts, ["-1,034.56", "next"]);
 
     tree.set_text(quote, "9\n9\n9")?;
     tree.layout()?;
@@ -2443,9 +2496,7 @@ fn second_layout_touches_cached_text_and_color_only_repaints() -> Result<(), Err
 
     struct Count {
         inner: crate::text::MonoShaper,
-        paints: Rc<Cell<u32>>,
         touches: Rc<Cell<u32>>,
-        color: Rc<Cell<[u8; 4]>>,
         metrics: Rc<Cell<u32>>,
     }
 
@@ -2454,22 +2505,8 @@ fn second_layout_touches_cached_text_and_color_only_repaints() -> Result<(), Err
             self.metrics.set(self.metrics.get().saturating_add(1));
             self.inner.metrics(key)
         }
-        fn measure_paint(&mut self, key: &crate::text::PaintKey) -> TextSize {
-            self.paints.set(self.paints.get().saturating_add(1));
-            self.color.set(key.color);
-            self.inner.measure_paint(key)
-        }
-        fn metrics_paint(
-            &mut self,
-            key: &crate::text::PaintKey,
-        ) -> Arc<crate::text::ParagraphMetrics> {
-            self.paints.set(self.paints.get().saturating_add(1));
-            self.color.set(key.color);
-            self.inner.metrics_paint(key)
-        }
-        fn touch(&mut self, key: &crate::text::PaintKey) {
+        fn touch(&mut self, _key: &crate::text::MetricsKey) {
             self.touches.set(self.touches.get().saturating_add(1));
-            self.color.set(key.color);
         }
         fn caret_at_unit(
             &mut self,
@@ -2492,41 +2529,44 @@ fn second_layout_touches_cached_text_and_color_only_repaints() -> Result<(), Err
         }
     }
 
-    let paints = Rc::new(Cell::new(0));
     let touches = Rc::new(Cell::new(0));
-    let color = Rc::new(Cell::new([0, 0, 0, 0]));
     let metrics = Rc::new(Cell::new(0));
     let mut tree = Tree::new(Count {
         inner: crate::text::MonoShaper::new(),
-        paints: Rc::clone(&paints),
         touches: Rc::clone(&touches),
-        color: Rc::clone(&color),
         metrics: Rc::clone(&metrics),
     });
     tree.set_viewport(0.0, 0.0, 200.0, 400.0)?;
     let text = tree.text("Hi", 16.0, [0, 0, 0, 255])?;
     tree.layout()?;
-    let first = paints.get();
-    assert!(first > 0);
-    let unpainted = metrics.get();
+    let shaped = metrics.get();
+    assert!(shaped > 0);
     tree.touch_measure(text)?;
     tree.layout()?;
     assert!(touches.get() >= 1);
-    assert_eq!(paints.get(), first);
-    assert_eq!(metrics.get(), unpainted);
+    assert_eq!(metrics.get(), shaped);
     let passes = tree.layout_passes();
     tree.set_color(text, [255, 0, 0, 255])?;
     assert!(!tree.needs_layout());
     tree.layout()?;
     assert_eq!(tree.layout_passes(), passes);
-    assert_eq!(paints.get(), first);
+    // A color change repaints without another shape.
+    assert_eq!(metrics.get(), shaped);
     let list = tree.record()?;
-    assert!(list.commands.iter().any(|command| matches!(
-        command,
-        crate::scene::Command::Text {
-            color: [255, 0, 0, 255],
-            ..
-        }
-    )));
+    let Some(crate::scene::Command::Text {
+        color,
+        shaped,
+        span_paints,
+        ..
+    }) = list
+        .commands
+        .iter()
+        .find(|command| matches!(command, crate::scene::Command::Text { .. }))
+    else {
+        panic!("text command");
+    };
+    assert_eq!(*color, [255, 0, 0, 255]);
+    assert!(span_paints.is_empty());
+    assert!(shaped.as_ref().is_some_and(|shaped| !shaped.is_empty()));
     Ok(())
 }

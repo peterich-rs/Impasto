@@ -99,12 +99,15 @@ fn write_layer(tree: &LayerTree, id: LayerId, out: &mut String, first: &mut bool
 
 fn kind_name(kind: &LayerKind) -> &'static str {
     match kind {
+        LayerKind::Fill { .. } => "fill",
         LayerKind::Offset { .. } => "offset",
         LayerKind::Transform { .. } => "transform",
-        LayerKind::Clip { .. } => "clip",
+        LayerKind::Clip { .. } | LayerKind::CornerClip { .. } => "clip",
         LayerKind::Opacity { .. } => "opacity",
         LayerKind::Blur { .. } => "blur",
+        LayerKind::ColorFilter { .. } => "colorFilter",
         LayerKind::BackdropBlur { .. } => "backdropBlur",
+        LayerKind::BackdropMaterial { .. } => "backdropMaterial",
         LayerKind::Blend { .. } => "blend",
         LayerKind::Picture { .. } => "picture",
         LayerKind::PlatformView { .. } => "platformView",
@@ -115,6 +118,42 @@ fn timing_json(out: &mut String, timing: &FrameTiming) {
     out.push('{');
     field_f64(out, "sessionMs", timing.session_ms, true);
     field_f64(out, "workMs", timing.work_ms, false);
+    field_f64(out, "uiMs", timing.schedule.ui_ms(), false);
+    field_f64(out, "rasterMs", timing.schedule.raster_ms(), false);
+    field_f64(out, "queueMs", timing.schedule.queue_ms(), false);
+    field_f64(out, "e2eMs", timing.schedule.e2e_ms(), false);
+    let raster = timing.raster;
+    field_f64(
+        out,
+        "encodeMs",
+        raster.encode.as_secs_f64() * 1_000.0,
+        false,
+    );
+    field_f64(out, "flushMs", raster.flush.as_secs_f64() * 1_000.0, false);
+    field_f64(
+        out,
+        "acquireMs",
+        raster.acquire.as_secs_f64() * 1_000.0,
+        false,
+    );
+    field_u64(out, "draws", u64::from(raster.render.draws), false);
+    field_u64(out, "passes", u64::from(raster.render.passes), false);
+    field_u64(out, "vertexBytes", raster.render.vertex_bytes, false);
+    field_u64(out, "uniformBytes", raster.render.uniform_bytes, false);
+    field_u64(out, "stopBytes", raster.render.stop_bytes, false);
+    field_u64(out, "extraBytes", raster.render.extra_bytes, false);
+    field_u64(
+        out,
+        "meshUploadBytes",
+        raster.render.mesh_upload_bytes,
+        false,
+    );
+    field_u64(
+        out,
+        "atlasUploadBytes",
+        raster.render.atlas_upload_bytes,
+        false,
+    );
     field_f64(out, "budgetMs", timing.interval_ms, false);
     field_f64(out, "gestureMs", timing.gesture_ms, false);
     field_f64(out, "scriptMs", timing.script_ms, false);
@@ -126,7 +165,7 @@ fn timing_json(out: &mut String, timing: &FrameTiming) {
     field_f64(out, "submitMs", timing.submit_ms, false);
     field_f64(out, "presentMs", timing.present_ms, false);
     field_u64(out, "layers", u64::from(timing.layer_count), false);
-    field_u64(out, "paragraphs", u64::from(timing.paragraphs), false);
+    field_u64(out, "atlasEntries", u64::from(timing.atlas_entries), false);
     field_u64(out, "pictures", u64::from(timing.pictures), false);
     field_u64(out, "textures", u64::from(timing.textures), false);
     out.push('}');
@@ -258,14 +297,15 @@ mod tests {
             shapes_measure_miss: 0,
             shapes_paint_hit: 0,
             shapes_paint_miss: 0,
-            shapes_bridged: 0,
+            atlas_hits: 0,
             picture_rebuilt: 0,
             picture_reused: 0,
             layer_count: 3,
-            paragraphs: 1,
+            atlas_entries: 1,
             pictures: 1,
             textures: 0,
             interval_ms: 0.0,
+            ..FrameTiming::default()
         }
     }
 
@@ -303,6 +343,7 @@ mod tests {
             pictures: vec![picture(7, 3)],
             root: LayerId(0),
             epoch: 1,
+            ..LayerTree::empty()
         };
         let dir =
             std::env::temp_dir().join(format!("impasto-inspect-layers-{}", std::process::id()));

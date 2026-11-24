@@ -110,7 +110,6 @@ struct QueuedCommand {
 }
 
 struct PendingSocketRun {
-    ticket: SlotTicket,
     url: String,
     protocols: Vec<String>,
     rx: mpsc::Receiver<QueuedCommand>,
@@ -135,7 +134,7 @@ pub(crate) struct SocketSession {
     cancel: CancelToken,
     close_notify: Arc<Notify>,
     pending_close: PendingClose,
-    pending_run: Mutex<Option<PendingSocketRun>>,
+    pending_run: Mutex<Option<(SlotTicket, PendingSocketRun)>>,
 }
 
 static NEXT_SOCKET_ID: AtomicU64 = AtomicU64::new(0);
@@ -163,14 +162,16 @@ impl SocketSession {
             cancel: CancelToken::new(),
             close_notify: Arc::new(Notify::new()),
             pending_close: Arc::new(Mutex::new(None)),
-            pending_run: Mutex::new(Some(PendingSocketRun {
+            pending_run: Mutex::new(Some((
                 ticket,
-                url,
-                protocols,
-                rx,
-                transport,
-                devtools,
-            })),
+                PendingSocketRun {
+                    url,
+                    protocols,
+                    rx,
+                    transport,
+                    devtools,
+                },
+            ))),
         }))
     }
 
@@ -277,7 +278,7 @@ impl SocketSession {
     }
 
     pub(crate) fn start_stream(&self, sink: StreamSink) -> Result<(), Box<(StreamSink, String)>> {
-        let Some(run) = self
+        let Some((ticket, run)) = self
             .pending_run
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -301,6 +302,7 @@ impl SocketSession {
             sink_cancel: sink.cancellation(),
             close_notify: Arc::clone(&self.close_notify),
             pending_close: Arc::clone(&self.pending_close),
+            ticket: Mutex::new(Some(ticket)),
         };
         drop(handle.spawn(run_socket(run, shared, sink, handle.clone())));
         Ok(())
@@ -316,9 +318,18 @@ struct SocketShared {
     sink_cancel: CancelToken,
     close_notify: Arc<Notify>,
     pending_close: PendingClose,
+    ticket: Mutex<Option<SlotTicket>>,
 }
 
 impl SocketShared {
+    fn mark_closed(&self) {
+        // JavaScript can open a replacement as soon as it sees the close
+        // event. Release the slot before publishing that event.
+        let ticket = self.ticket.lock().unwrap_or_else(|p| p.into_inner()).take();
+        drop(ticket);
+        self.ready_state.store(READY_CLOSED, Ordering::Release);
+    }
+
     fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled() || self.sink_cancel.is_cancelled()
     }
@@ -378,22 +389,19 @@ async fn run_socket(
     handle: tokio::runtime::Handle,
 ) {
     let PendingSocketRun {
-        ticket,
         url,
         protocols,
         rx,
         transport,
         devtools,
     } = run;
-    let _ticket = ticket;
-
     if let Some(platform) = transport {
         run_blocking_transport(platform, url, protocols, rx, shared, sink, handle).await;
         return;
     }
 
     run_native_async(url, protocols, rx, &shared, &mut sink, devtools).await;
-    shared.ready_state.store(READY_CLOSED, Ordering::Release);
+    shared.mark_closed();
     sink.finish();
 }
 
@@ -421,7 +429,6 @@ async fn run_native_async(
     let (ws_stream, handshake_response) =
         match select(select(abort_fut, close_fut), connect_fut).await {
             Either::Left((Either::Left(((), _)), _)) => {
-                shared.ready_state.store(READY_CLOSED, Ordering::Release);
                 return;
             }
             Either::Left((Either::Right(((), _)), _)) => {
@@ -439,6 +446,7 @@ async fn run_native_async(
                     reason,
                     clean: false,
                 };
+                shared.mark_closed();
                 shared.record_event(devtools.as_deref(), &url, &ev);
                 let _ = send_event_async(sink, ev).await;
                 return;
@@ -542,6 +550,7 @@ async fn run_native_async(
                     reason: "close handshake timed out".to_owned(),
                     clean: false,
                 };
+                shared.mark_closed();
                 shared.record_event(devtools.as_deref(), &url, &ev);
                 let _ = send_event_async(sink, ev).await;
                 break;
@@ -598,6 +607,7 @@ async fn run_native_async(
                     reason: String::new(),
                     clean: false,
                 };
+                shared.mark_closed();
                 shared.record_event(devtools.as_deref(), &url, &ev);
                 let _ = send_event_async(sink, ev).await;
                 break;
@@ -678,7 +688,7 @@ async fn run_native_async(
                             ))
                             .await;
                     }
-                    shared.ready_state.store(READY_CLOSED, Ordering::Release);
+                    shared.mark_closed();
                     let ev = WebSocketEvent::Close {
                         code,
                         reason,
@@ -720,8 +730,6 @@ async fn run_blocking_transport(
         }
     });
 
-    let ready_state = Arc::clone(&shared.ready_state);
-    let protocol_slot = Arc::clone(&shared.protocol);
     let active_cancel = shared.cancel.clone();
     let active_sink_cancel = shared.sink_cancel.clone();
     let emit_cancel = shared.cancel.clone();
@@ -739,11 +747,12 @@ async fn run_blocking_transport(
                 }
                 match &event {
                     WebSocketEvent::Open { protocol } => {
-                        *protocol_slot.lock().unwrap_or_else(|p| p.into_inner()) = protocol.clone();
-                        ready_state.store(READY_OPEN, Ordering::Release);
+                        *shared.protocol.lock().unwrap_or_else(|p| p.into_inner()) =
+                            protocol.clone();
+                        shared.ready_state.store(READY_OPEN, Ordering::Release);
                     }
                     WebSocketEvent::Close { .. } => {
-                        ready_state.store(READY_CLOSED, Ordering::Release);
+                        shared.mark_closed();
                     }
                     WebSocketEvent::Message { .. } | WebSocketEvent::Error(_) => {}
                 }
@@ -753,6 +762,7 @@ async fn run_blocking_transport(
                 sink.send(item, BLOCKING_SEND_TIMEOUT).is_ok()
             },
         );
+        shared.mark_closed();
         if let Err(message) = outcome
             && !emit_cancel.is_cancelled()
             && !emit_sink_cancel.is_cancelled()
@@ -760,7 +770,6 @@ async fn run_blocking_transport(
         {
             let _ = sink.send(item, BLOCKING_SEND_TIMEOUT);
         }
-        ready_state.store(READY_CLOSED, Ordering::Release);
         sink.finish();
     });
 
@@ -777,9 +786,9 @@ async fn emit_error_and_close(
     close_code: u16,
 ) {
     let err_ev = WebSocketEvent::Error(message);
+    shared.mark_closed();
     shared.record_event(devtools, url, &err_ev);
     if send_event_async(sink, err_ev).await {
-        shared.ready_state.store(READY_CLOSED, Ordering::Release);
         let close_ev = WebSocketEvent::Close {
             code: close_code,
             reason: String::new(),

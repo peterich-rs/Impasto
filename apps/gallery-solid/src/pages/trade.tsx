@@ -2,13 +2,12 @@ import { createSignal, createTrackedEffect, onCleanup } from "solid-js";
 import {
   scene,
   insert,
-  onFrame,
   type NodeHandle,
 } from "@impasto/solid-renderer";
 import { Button, Dialog } from "@impasto/solid-ui";
 import { colorBytes } from "../colors.ts";
 import { clearChildren } from "../widgets/palette.ts";
-import { useQuotes } from "../state/quotes-provider.tsx";
+import { marketPulse, useQuotes } from "../state/quotes-provider.tsx";
 import { accountRef } from "../state/account-ref.ts";
 import { showToast } from "../state/toast.ts";
 import { fmtPrice, fmtQty } from "../format.ts";
@@ -106,31 +105,25 @@ export function TradePage(props: { router: Router }): NodeHandle {
     });
     scene.append(statRow, s.root);
   }
-  let lastPaint = -1;
-  onCleanup(
-    onFrame((targetMs) => {
-      if (lastPaint >= 0 && targetMs - lastPaint < 500) {
-        return;
-      }
-      lastPaint = targetMs;
-      const mv = account.marketValue();
-      const total = account.cash() + mv;
-      const pnl =
-        mv - account.positions().reduce((s, p) => s + p.avgCost * p.qty, 0);
-      scene.setText(equity, fmtPrice(total));
-      scene.setText(cashStat.value, fmtPrice(account.cash()));
-      scene.setText(mvStat.value, fmtPrice(mv));
-      scene.setText(pnlStat.value, fmtPrice(pnl));
-      scene.patchStyle(pnlStat.value, {
-        color:
-          pnl > 0
-            ? colorBytes("#FF7B72")
-            : pnl < 0
-              ? colorBytes("#3FB950")
-              : colorBytes("#9AA0A6"),
-      });
-    }),
-  );
+  createTrackedEffect(() => {
+    marketPulse();
+    const mv = account.marketValue();
+    const total = account.cash() + mv;
+    const pnl =
+      mv - account.positions().reduce((s, p) => s + p.avgCost * p.qty, 0);
+    scene.setText(equity, fmtPrice(total));
+    scene.setText(cashStat.value, fmtPrice(account.cash()));
+    scene.setText(mvStat.value, fmtPrice(mv));
+    scene.setText(pnlStat.value, fmtPrice(pnl));
+    scene.patchStyle(pnlStat.value, {
+      color:
+        pnl > 0
+          ? colorBytes("#FF7B72")
+          : pnl < 0
+            ? colorBytes("#3FB950")
+            : colorBytes("#9AA0A6"),
+    });
+  });
   function cardStat(labelText: string): {
     root: number;
     value: number;
@@ -447,21 +440,20 @@ export function TradePage(props: { router: Router }): NodeHandle {
         flashNode: market,
       }),
     );
-    onCleanup(
-      onFrame(() => {
-        const last = engine.quote(symbol).last;
-        const diff = (last - avgCost) * qty;
-        scene.setText(pnl, `${diff >= 0 ? "+" : ""}${fmtPrice(diff)}`);
-        scene.patchStyle(pnl, {
-          color:
-            diff > 0
-              ? colorBytes("#EB3E3E")
-              : diff < 0
-                ? colorBytes("#22B05F")
-                : MUTED,
-        });
-      }),
-    );
+    createTrackedEffect(() => {
+      marketPulse();
+      const last = engine.quote(symbol).last;
+      const diff = (last - avgCost) * qty;
+      scene.setText(pnl, `${diff >= 0 ? "+" : ""}${fmtPrice(diff)}`);
+      scene.patchStyle(pnl, {
+        color:
+          diff > 0
+            ? colorBytes("#EB3E3E")
+            : diff < 0
+              ? colorBytes("#22B05F")
+              : MUTED,
+      });
+    });
     return row;
   }
   function buildOrderRow(

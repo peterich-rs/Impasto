@@ -3,13 +3,19 @@
 use super::{boolean, decode_handle, num, read_bytes, value};
 use crate::input::{DRAG_SLOP, DoubleTapConfig, DragAxis, RecognizerSet};
 use crate::js::player::{bridge, mutation, nodes};
-use crate::motion::{Band, Decay, OverscrollMode, ScrollAccept, ScrollPhysics};
-use crate::scene::TextStyle;
+use crate::motion::{Band, Decay, Easing, OverscrollMode, ScrollAccept, ScrollPhysics};
+use crate::scene::{
+    MAX_SHADER_TEXTURES, MAX_SHADER_UNIFORM_BYTES, ShaderClock, ShaderEffect, ShaderProgramId,
+    TextStyle,
+};
 use crate::semantics::{AutofillField, LiveRegion, SemanticsHint};
 use crate::text::{TextEditingValue, grapheme_count, grapheme_index, grapheme_unit};
 use crate::tree::{FocusDirection, PanelAlign, ScrollEdge, SubtreeSpace};
 use crate::{NodeId, Rect};
-use rquickjs::{Array, Coerced, Ctx, Exception, FromJs, Function, IntoJs, Object, Value};
+use rquickjs::{
+    Array, Coerced, Ctx, Exception, FromJs, Function, IntoJs, Object, TypedArray, Value,
+};
+use std::sync::Arc;
 
 use super::super::{Host, canvas, host_from_ctx, type_error};
 
@@ -59,6 +65,9 @@ pub(super) const NAMES: &[&str] = &[
     "setRecognizers",
     "setScrollPhysics",
     "registerFont",
+    "registerShaderProgram",
+    "setShaderEffect",
+    "animateShaderUniform",
     "reload",
     "measurePanel",
     "setTextScale",
@@ -464,6 +473,41 @@ pub(super) fn call<'js>(
                 .enqueue(family, bytes)
                 .map_err(|()| error())?;
         }
+        "registerShaderProgram" => {
+            let source = String::from_js(ctx, value(ctx, args, 0))?;
+            let clock = match Option::<bool>::from_js(ctx, value(ctx, args, 1))? {
+                Some(true) => ShaderClock::Frame,
+                _ => ShaderClock::Static,
+            };
+            let id = tree
+                .borrow_mut()
+                .register_shader_program(&source, clock)
+                .map_err(|error| type_error(ctx, &error.to_string()))?;
+            return (id.0 as f64).into_js(ctx);
+        }
+        "setShaderEffect" => {
+            let node = node()?;
+            let effect = shader_effect(ctx, args)?;
+            tree.borrow_mut()
+                .set_shader_effect(node, effect)
+                .map_err(|error| type_error(ctx, &error.to_string()))?;
+        }
+        "animateShaderUniform" => {
+            let node = node()?;
+            let index = u8::try_from(decode_handle(ctx, num(ctx, args, 1)?)?)
+                .map_err(|_| type_error(ctx, "invalid shader uniform index"))?;
+            let target = numeric(2)?;
+            let duration = num(ctx, args, 3)?;
+            let easing = match Option::<String>::from_js(ctx, value(ctx, args, 4))?.as_deref() {
+                None | Some("ease-in-out") => Easing::EaseInOut,
+                Some("linear") => Easing::Linear,
+                _ => return Err(type_error(ctx, "unknown shader uniform easing")),
+            };
+            tree.borrow_mut()
+                .animate_shader_uniform(node, index, target, duration, easing)
+                .map_err(|error| type_error(ctx, &error.to_string()))?;
+            host.wants_frame.set(true);
+        }
         "reload" => {
             if !boolean(ctx, args, 0)? {
                 return Err(Exception::throw_message(ctx, "reload(source)"));
@@ -501,6 +545,47 @@ pub(super) fn call<'js>(
         _ => return Err(type_error(ctx, "unknown scene operation")),
     }
     Ok(Value::new_undefined(ctx.clone()))
+}
+
+fn shader_effect<'js>(
+    ctx: &Ctx<'js>,
+    args: &[Value<'js>],
+) -> rquickjs::Result<Option<ShaderEffect>> {
+    let id = value(ctx, args, 1);
+    if id.is_null() || id.is_undefined() {
+        return Ok(None);
+    }
+    let id = id
+        .as_number()
+        .ok_or_else(|| type_error(ctx, "expected a shader program handle"))?;
+    let shader = ShaderProgramId(decode_handle(ctx, id)?);
+    let uniforms = match Option::<TypedArray<u8>>::from_js(ctx, value(ctx, args, 2))? {
+        None => Arc::from([]),
+        Some(array) if array.len() <= MAX_SHADER_UNIFORM_BYTES => {
+            Arc::from(read_bytes(ctx, array.as_value())?.unwrap_or_default())
+        }
+        Some(_) => {
+            return Err(type_error(
+                ctx,
+                "shader uniform data exceeds the byte limit",
+            ));
+        }
+    };
+    let textures = match Option::<Array>::from_js(ctx, value(ctx, args, 3))? {
+        None => Arc::from([]),
+        Some(array) if array.len() <= MAX_SHADER_TEXTURES => Arc::from(
+            array
+                .iter::<String>()
+                .map(|source| source.map(Arc::<str>::from))
+                .collect::<rquickjs::Result<Vec<_>>>()?,
+        ),
+        Some(_) => return Err(type_error(ctx, "shader texture count exceeds the limit")),
+    };
+    Ok(Some(ShaderEffect {
+        shader,
+        uniforms,
+        textures,
+    }))
 }
 
 fn require_args(

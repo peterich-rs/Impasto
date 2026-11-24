@@ -1,5 +1,16 @@
 const ticks = new Map<number, (targetMs: number, intervalMs: number) => void>();
 let nextTick = 1;
+let frameBridge: ((callback?: typeof runFrames) => void) | undefined;
+
+/** The native hook exists only while the application observes frames. */
+export function bindFrames(bridge: NonNullable<typeof frameBridge>): void {
+  frameBridge = bridge;
+  if (ticks.size > 0) frameBridge(runFrames);
+}
+
+function removeTick(id: number): void {
+  if (ticks.delete(id) && ticks.size === 0) frameBridge?.();
+}
 
 /** Runs after Solid flushes, once per frame the scene delivers. */
 export function onFrame(
@@ -8,9 +19,8 @@ export function onFrame(
   const id = nextTick;
   nextTick += 1;
   ticks.set(id, fn);
-  return () => {
-    ticks.delete(id);
-  };
+  if (ticks.size === 1) frameBridge?.(runFrames);
+  return () => removeTick(id);
 }
 
 /** Listeners still registered. Tests use this after mount and unmount. */
@@ -26,7 +36,7 @@ export function runFrames(targetMs: number, intervalMs: number): void {
     try {
       fn(targetMs, intervalMs);
     } catch (error) {
-      ticks.delete(id);
+      removeTick(id);
       throw error;
     }
   }

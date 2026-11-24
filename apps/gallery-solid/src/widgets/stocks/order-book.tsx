@@ -95,7 +95,7 @@ export function Depth(props: { book: Book }) {
   const totalBid = () => props.book.bids.at(-1)!.total;
   const totalAsk = () => props.book.asks.at(-1)!.total;
   return <Section title={loc("深度", "Depth")} note={loc("±12 档 · 累计", "±12 ticks · cumulative")}>
-    <Canvas deferWhenOffscreen style={{ width: "100%", height: 115 }} accessibilityLabel={loc("累计深度图", "Cumulative depth chart")}
+    <Canvas style={{ width: "100%", height: 115 }} accessibilityLabel={loc("累计深度图", "Cumulative depth chart")}
       draw={(ctx, { width, height }) => {
         if (width < 40) return;
         const bottom = height - 17;

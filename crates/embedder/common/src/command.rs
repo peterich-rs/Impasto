@@ -94,6 +94,12 @@ pub enum Command {
     Io(IoEvent),
     /// A timer deadline arrived. The render thread runs one frame.
     Wake,
+    /// Raster reached a motion or scheduling boundary and returned frame ownership to UI.
+    CommitCompositorState {
+        generation: u64,
+        snapshot: Option<std::sync::Arc<engine::scene::CompositorSnapshot>>,
+        time: Option<FrameTime>,
+    },
     Frame {
         token: FrameToken,
         time: FrameTime,
@@ -132,6 +138,7 @@ pub(crate) fn command_tag(command: &Command) -> &'static str {
         Command::Io(IoEvent::NativeStream { .. }) => "native stream",
         Command::Io(IoEvent::Host(_)) => "host event",
         Command::Wake => "wake",
+        Command::CommitCompositorState { .. } => "animation handoff",
         Command::Frame { .. } => "frame",
         Command::Shutdown => "shutdown",
     }

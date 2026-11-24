@@ -31,6 +31,7 @@ export function installMockHost(): MockHost {
   const frames: Array<(targetMs: number, intervalMs: number) => void> = [];
   const motionEnds: Array<{ token: number; fn: () => void }> = [];
   let motionToken = 1;
+  let scrollRule = 1;
   let driverNotify:
     | ((
         kind: number,
@@ -323,6 +324,18 @@ export function installMockHost(): MockHost {
     stopScroll: () => {},
     scrollTo: () => {},
     onScrollState: () => {},
+    observeScrollOffset: () => {},
+    onScrollThreshold: () => {},
+    addScrollThreshold: (...args: unknown[]) => {
+      calls.push({ name: "addScrollThreshold", args });
+      return scrollRule++;
+    },
+    removeScrollThreshold: (id: number) => calls.push({ name: "removeScrollThreshold", args: [id] }),
+    bindScrollProp: (...args: unknown[]) => {
+      calls.push({ name: "bindScrollProp", args });
+      return scrollRule++;
+    },
+    unbindScrollProp: (id: number) => calls.push({ name: "unbindScrollProp", args: [id] }),
     scrollOffset: () => ({ x: 0, y: 0 }),
     rect: () => ({ x: 0, y: 40, w: 100, h: 200 }),
     textEdit: (node: number, op: number, extra: string) => {
@@ -412,8 +425,9 @@ export function installMockHost(): MockHost {
     onWheel: (node: number, fn: (dx: number, dy: number) => void) => {
       calls.push({ name: "onWheel", args: [node, typeof fn] });
     },
-    onFrame: (fn: (targetMs: number, intervalMs: number) => void) => {
-      frames.push(fn);
+    onFrame: (fn?: (targetMs: number, intervalMs: number) => void) => {
+      frames.length = 0;
+      if (fn) frames.push(fn);
       calls.push({ name: "onFrame", args: [typeof fn] });
       return frames.length;
     },

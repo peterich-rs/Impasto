@@ -1,6 +1,6 @@
 import { For, Show, createMemo, createSignal, createTrackedEffect, onCleanup } from "solid-js";
 import { onFrame, requestFrame } from "@impasto/solid-renderer";
-import { Canvas, Column, Row, ScrollArea, View, useTheme } from "@impasto/solid-ui";
+import { Canvas, Column, RepaintBoundary, Row, ScrollArea, View, useTheme } from "@impasto/solid-ui";
 import type { Router } from "@impasto/solid-router";
 import { loc } from "../copy.ts";
 import { fmtPrice, fmtSigned } from "../format.ts";
@@ -71,7 +71,7 @@ function QuoteHeader(props: { engine: QuoteEngine; data: StockSnapshot; time: st
     </Row>
     <Row style={{ alignItems: "center", gap: 10, height: 13 }}>
       <Label size={11} color={colors.dim}>{`L ${fmtPrice(quote().low)}`}</Label>
-      <Canvas deferWhenOffscreen style={{ height: 13, flex: 1, minWidth: 12 }} draw={(ctx, { width }) => {
+      <Canvas style={{ height: 13, flex: 1, minWidth: 12 }} draw={(ctx, { width }) => {
         const q = quote();
         const share = (value: number) => q.high === q.low ? 0.5 : Math.max(0, Math.min(1, (value - q.low) / (q.high - q.low)));
         const x = (value: number) => 4 + Math.max(0, width - 8) * share(value);
@@ -104,16 +104,18 @@ export function StockView(props: { engine: QuoteEngine; symbol: string; wide?: b
   const sections = ["quote", "chart", "book", "tape", "depth", "flow", "ranges"] as const;
   const [ready, setReady] = createSignal(-1);
   const [ticket, setTicket] = createSignal<TicketSeed | null>(null);
-  let stage = -1;
-  // Give the route and each section separate turns on the render thread.
-  const stop = onFrame(() => {
-    // Mount the quote and chart on entry. The sections below them wait until the slide ends.
-    if ((!props.transitioning && ticket() === null) || stage < sections.indexOf("chart")) setReady(++stage);
-    if (stage === sections.length - 1) stop();
-    else requestFrame();
+  // Mount the quote and chart on entry. Resume staging when the slide or ticket closes.
+  createTrackedEffect(() => {
+    const next = ready() + 1;
+    if (next === sections.length) return;
+    if (next > sections.indexOf("chart") && (props.transitioning || ticket() !== null)) return;
+    const stop = onFrame(() => {
+      stop();
+      setReady(next);
+    });
+    onCleanup(stop);
+    requestFrame();
   });
-  onCleanup(stop);
-  requestFrame();
   const mounted = (section: typeof sections[number]) => ready() >= sections.indexOf(section);
   const [levels, setLevels] = createSignal<5 | 10>(5);
   const [open, setOpen] = createSignal(false);
@@ -174,7 +176,7 @@ export function StockView(props: { engine: QuoteEngine; symbol: string; wide?: b
   const tradeable = () => !props.engine.ins(props.symbol).index;
   return <Column style={[filling, { backgroundColor: colors.bg }]}>
     <Row style={filling}>
-      <ScrollArea style={filling} viewportRef={main.viewportRef}>
+      <ScrollArea style={filling} controller={main.controller}>
         <Show when={mounted("quote")}>
           <QuoteHeader engine={props.engine} data={snapshot()} time={time()} wide={!!props.wide} />
           <Rule />
@@ -193,7 +195,7 @@ export function StockView(props: { engine: QuoteEngine; symbol: string; wide?: b
       </ScrollArea>
       <Show when={props.split}>
         <Rule vertical />
-        <ScrollArea style={{ width: "39%", height: "100%", flex: 0, flexShrink: 0, minWidth: 290 }} viewportRef={side.viewportRef}>
+        <ScrollArea style={{ width: "39%", height: "100%", flex: 0, flexShrink: 0, minWidth: 290 }} controller={side.controller}>
           {activity(bookSide, tapeSide)}
         </ScrollArea>
       </Show>
@@ -201,10 +203,10 @@ export function StockView(props: { engine: QuoteEngine; symbol: string; wide?: b
     <Rule />
     <Row style={{ backgroundColor: colors.bar, paddingLeft: 16, paddingRight: 16, paddingTop: 8, paddingBottom: 8,
       gap: 10, alignItems: "center", flexShrink: 0 }}>
-      <Column style={{ width: 92, minWidth: 0, gap: 2 }}>
+      <RepaintBoundary style={{ flexDirection: "column", width: 92, minWidth: 0, gap: 2 }}>
         <Label size={16} weight={600}>{fmtPrice(quote().last)}</Label>
         <Label size={12} color={tone(change(quote()))}>{`${sign(change(quote()))}%`}</Label>
-      </Column>
+      </RepaintBoundary>
       <Show when={tradeable()} fallback={<Label color={colors.dim}>{loc("指数不可交易", "Index · not tradable")}</Label>}>
         <Action label={loc("卖出", "Sell")} onClick={() => order("sell")} style={{ flex: 1, minHeight: 36 }} />
         <Action label={loc("买入", "Buy")} onClick={() => order("buy")} style={{ flex: 1, minHeight: 36 }} primary />

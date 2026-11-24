@@ -11,15 +11,9 @@ const output=resolve(process.argv[2] ?? join(root,"target/cli-dist"));
 if(output===root || root.startsWith(output+"/")) throw new Error("distribution output must not contain the checkout");
 const cargo=spawnSync("cargo",["build","--release","-p","cli"],{cwd:root,stdio:"inherit"});
 if(cargo.status!==0) process.exit(cargo.status ?? 1);
-let macosSdk;
 if(process.platform==="darwin") {
-  const prepared=spawnSync("python3",[join(root,"tools/impeller_sdk.py"),"prepare"],{
-    cwd:root,encoding:"utf8",stdio:["ignore","pipe","inherit"],
-  });
-  if(prepared.status!==0) process.exit(prepared.status ?? 1);
-  macosSdk=prepared.stdout.trim();
-  const host=spawnSync("cargo",["build","--release","-p","embedder-macos","--features","impeller"],{
-    cwd:root,stdio:"inherit",env:{...process.env,IMPASTO_IMPELLER_SDK_DIR:macosSdk},
+  const host=spawnSync("cargo",["build","--locked","--release","-p","embedder-macos"],{
+    cwd:root,stdio:"inherit",
   });
   if(host.status!==0) process.exit(host.status ?? 1);
 }
@@ -53,11 +47,7 @@ cpSync(join(root,"node_modules"),join(framework,"node_modules"),{recursive:true,
 for(const pkg of ["reactive","solid-renderer"]){
   const from=join(root,"packages",pkg,"node_modules");if(existsSync(from))cpSync(from,join(framework,"packages",pkg,"node_modules"),{recursive:true,dereference:false,verbatimSymlinks:true});
 }
-if(macosSdk) {
-  copy(macosSdk,join(framework,relative(root,macosSdk)));
   mkdirSync(join(framework,"target/release"),{recursive:true});
-  mkdirSync(join(framework,"target/Frameworks"),{recursive:true});
   copyFileSync(join(root,"target/release/macos"),join(framework,"target/release/macos"));
-  copyFileSync(join(macosSdk,"lib/libimpeller.dylib"),join(framework,"target/Frameworks/libimpeller.dylib"));
 }
 console.log(output);

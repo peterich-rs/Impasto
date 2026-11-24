@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Impasto DevTools</title>
+<style>
+  :root { color-scheme: light dark; font: 15px/1.5 system-ui, sans-serif; }
+  body { margin: 0 auto; padding: 28px; max-width: 1120px; }
+  h1 { font-size: 26px; margin: 0 0 18px; }
+  h2 { font-size: 17px; margin: 0 0 8px; }
+  form { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; }
+  label { display: grid; gap: 3px; }
+  input, button, select { font: inherit; padding: 5px 9px; }
+  #port { width: 85px; }
+  .check { display: flex; align-items: center; align-self: end; padding-block: 7px; gap: 5px; }
+  #status { min-height: 1.5em; margin: 10px 0 18px; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 24px; }
+  .section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 8px; }
+  .section-head h2 { margin: 0; }
+  #archiveStatus, #summary, #sliceInfo, #timelineScale { color: light-dark(#4d5863, #b3bdc8); font-size: 13px; }
+  #timelineScale { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
+  #timeline { max-height: 42vh; overflow: auto; }
+  .lane-title { margin: 12px 0 4px; font-size: 13px; font-weight: 600; }
+  .lane-row { position: relative; height: 25px; margin-bottom: 2px; background: color-mix(in srgb, CanvasText 6%, Canvas); }
+  .slice { position: absolute; height: 24px; min-width: 3px; overflow: hidden; padding: 1px 4px;
+    text-overflow: ellipsis; white-space: nowrap; font-size: 11px; text-align: left;
+    background: light-dark(#d2e6ee, #244355); border: 1px solid light-dark(#8faebb, #507489);
+    color: CanvasText; border-radius: 3px; }
+  .slice[data-gpu] { background: light-dark(#e6e9dc, #363e30); border-color: light-dark(#a5ae96, #637257); }
+  .slice:focus-visible { outline: 2px solid Highlight; outline-offset: -2px; }
+  .slice[data-instant] { padding: 0; border-radius: 0; }
+  #sliceInfo { overflow-wrap: anywhere; min-height: 1.5em; }
+  .data { max-height: 68vh; overflow: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { padding: 5px 6px; border-bottom: 1px solid color-mix(in srgb, CanvasText 20%, transparent); text-align: right; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  tr[aria-selected="true"] { background: color-mix(in srgb, Highlight 17%, Canvas); }
+  tr[data-late] td:last-child { color: light-dark(#a23513, #ff9a7a); }
+  td button { padding: 1px 5px; }
+  @media (max-width: 820px) {
+    body { padding: 16px; }
+    main { grid-template-columns: minmax(0, 1fr); }
+    .data { max-height: 48vh; }
+    th, td { padding-inline: 4px; font-size: 13px; }
+  }
+</style>
+<h1>Impasto DevTools</h1>
+<form id="connection">
+  <label>Port <input id="port" inputmode="numeric" type="number" min="1" max="65535" value="%%PORT%%" required></label>
+  <label>Session token <input id="token" type="password" pattern="[0-9a-fA-F]{32,128}" autocomplete="off" required></label>
+  <button id="connect">Connect</button>
+  <label>Trace detail
+    <select id="traceDetail" disabled><option value="stages">Stages</option><option value="detailed">Detailed</option></select>
+  </label>
+  <label class="check"><input id="traceGpu" type="checkbox" checked disabled>GPU timing</label>
+  <button id="capture" type="button" disabled>Record 5 seconds</button>
+  <button id="openPerfetto" type="button" disabled>Open in Perfetto</button>
+  <button id="download" type="button" disabled>Download</button>
+</form>
+<p id="status" role="status">Disconnected</p>
+<main>
+  <section aria-label="Frames">
+    <div class="section-head">
+      <h2>Frames</h2>
+      <select id="view" aria-label="Frame source" disabled><option value="live">Live</option></select>
+    </div>
+    <p id="archiveStatus" hidden></p>
+    <div class="data">
+      <table>
+        <thead><tr><th>Frame</th><th>UI ms</th><th>Queue ms</th><th>Raster ms</th><th>GPU µs</th><th>Total ms</th></tr></thead>
+        <tbody id="frames"></tbody>
+      </table>
+    </div>
+  </section>
+  <section aria-label="Selected frame">
+    <h2 id="detail">Frame detail</h2>
+    <p id="summary">Select a frame.</p>
+    <div id="timelineScale" hidden></div>
+    <div id="timeline" aria-label="Frame timeline" hidden></div>
+    <p id="sliceInfo" aria-live="polite" hidden></p>
+    <div class="data">
+      <table>
+        <thead><tr><th>Pass</th><th>Slice</th><th>Draws</th><th>µs</th></tr></thead>
+        <tbody id="passes"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<script>
+"use strict";
+const field = id => document.getElementById(id);
+const frames = new Map();
+const pending = new Map();
+let socket;
+let selected;
+let nextId = 0;
+let authenticated = false;
+let canInspectCapture = false;
+let lastTraceBuffer;
+let archive;
+let archivedFrames = new Map();
+let selectionRequest = 0;
+const display = (value, digits = 2) => value == null ? "—" : value.toFixed(digits);
+function rpc(method, params) {
+  if (socket?.readyState !== WebSocket.OPEN) return Promise.reject(new Error("Disconnected"));
+  const id = ++nextId;
+  socket.send(JSON.stringify({jsonrpc: "2.0", id, method, params}));
+  return new Promise((resolve, reject) => pending.set(id, {resolve, reject}));
+}
+function addCells(row, values) {
+  for (const value of values) row.insertCell().textContent = value;
+}
+function passLabel(pass) {
+  const id = pass.view_id ?? pass.shader_id;
+  return id == null ? pass.kind : pass.kind + " · " + id;
+}
+function renderDetail(frame, data) {
+  const timeline = field("timeline");
+  const scale = field("timelineScale");
+  const info = field("sliceInfo");
+  for (const panel of [timeline, scale, info]) {
+    panel.replaceChildren();
+    panel.hidden = !data;
+  }
+  field("passes").replaceChildren();
+  field("detail").textContent = frame ? "Frame " + frame.id : "Frame detail";
+  field("summary").textContent = !frame ? "Select a frame."
+    : [frame.topology, "GPU " + frame.gpu.state,
+        frame.gpu.state === "ready" ? display(frame.gpu.frame_span_us) + " µs span" : null,
+        data?.omitted_spans ? data.omitted_spans + " additional slices omitted" : null,
+        data && !data.spans.length ? "No CPU slices retained" : null].filter(Boolean).join(" · ");
+  for (const pass of frame?.gpu.passes ?? []) {
+    addCells(field("passes").insertRow(), [passLabel(pass), pass.slice ?? "—", pass.draws, display(pass.duration_us)]);
+  }
+  if (!data) return;
+  const extent = Math.max(1, (frame.ui_ms + frame.queue_ms + frame.raster_ms) * 1e6,
+    ...data.spans.map(span => span.offset_ns + span.duration_ns));
+  for (const label of ["0 ms", display(extent / 1e6) + " ms CPU"]) {
+    const element = document.createElement("span");
+    element.textContent = label;
+    scale.append(element);
+  }
+  const lanes = new Map();
+  const depths = new Map();
+  for (const span of data.spans) {
+    const lane = span.target === "impasto::user_timing" ? "User Timing" : span.queue;
+    const parent = depths.get(span.parent_id);
+    const depth = parent?.lane === lane ? parent.depth + 1 : 0;
+    depths.set(span.id, {lane, depth});
+    if (!lanes.has(lane)) lanes.set(lane, []);
+    lanes.get(lane).push({span, depth});
+  }
+  for (const [label, spans] of lanes) {
+    drawLane(label, spans, extent);
+  }
+  if (frame.gpu.passes?.length) {
+    const extent = Math.max(1, ...frame.gpu.passes.map(pass => pass.start_us + pass.duration_us)) * 1e3;
+    drawLane("GPU · time from first pass", frame.gpu.passes.map(pass => ({
+      depth: 0, span: {name: passLabel(pass), offset_ns: pass.start_us * 1e3, duration_ns: pass.duration_us * 1e3,
+        fields: {draws: pass.draws, slice: pass.slice}},
+    })), extent, true);
+  }
+
+  function drawLane(label, spans, extent, gpu = false) {
+    const heading = document.createElement("p");
+    heading.className = "lane-title";
+    heading.textContent = gpu ? label + " · " + display(extent / 1e3) + " µs" : label;
+    timeline.append(heading);
+    const rows = [];
+    const ends = [];
+    for (const {span, depth} of spans) {
+      let level = depth;
+      while (ends[level] > span.offset_ns) level++;
+      const row = rows[level] ?? document.createElement("div");
+      row.className = "lane-row";
+      rows[level] = row;
+      ends[level] = span.offset_ns + Math.max(1, span.duration_ns);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "slice";
+      if (gpu) button.dataset.gpu = "";
+      if (span.instant) button.dataset.instant = "";
+      button.style.left = Math.min(99.9, span.offset_ns / extent * 100) + "%";
+      button.style.width = span.duration_ns / extent * 100 + "%";
+      button.textContent = span.instant ? "" : span.name;
+      const fields = Object.entries(span.fields).map(([name, value]) => name + "=" + value);
+      const label = [span.name, display(span.duration_ns / 1e3) + " µs", ...fields].join(" · ");
+      button.title = label;
+      button.setAttribute("aria-label", label);
+      button.addEventListener("click", () => { info.textContent = label; });
+      row.append(button);
+    }
+    for (const row of rows) if (row) timeline.append(row);
+  }
+}
+function paintFrames() {
+  const recorded = field("view").value === "capture" && archive;
+  const ids = recorded ? [...archive.frame_ids].reverse() : [...frames.keys()].sort((a, b) => b - a).slice(0, 120);
+  if (selected != null && !ids.includes(selected)) {
+    selected = undefined;
+    renderDetail();
+  }
+  field("frames").replaceChildren();
+  for (const id of ids) {
+    const frame = (recorded ? archivedFrames : frames).get(id);
+    const row = field("frames").insertRow();
+    row.setAttribute("aria-selected", String(id === selected));
+    if (frame?.over_budget) row.dataset.late = "";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = id;
+    button.addEventListener("click", () => selectFrame(id));
+    row.insertCell().append(button);
+    addCells(row, [display(frame?.ui_ms), display(frame?.queue_ms), display(frame?.raster_ms),
+      display(frame?.gpu.frame_span_us, 1), display(frame?.e2e_ms)]);
+  }
+}
+async function selectFrame(id) {
+  selected = id;
+  const ticket = ++selectionRequest;
+  paintFrames();
+  if (field("view").value !== "capture" || !archive) {
+    renderDetail(frames.get(id));
+    return;
+  }
+  renderDetail(archivedFrames.get(id));
+  field("summary").textContent = "Loading frame " + id + "…";
+  try {
+    const data = await rpc("get_frame_spans", {capture_id: archive.id, frame_id: id});
+    if (ticket === selectionRequest) renderDetail(data.frame, data);
+  } catch (error) {
+    if (ticket === selectionRequest) field("summary").textContent = error.message;
+  }
+}
+function update({reset, frames: samples}) {
+  if (reset) frames.clear();
+  for (const sample of samples) frames.set(sample.id, sample);
+  const retained = [...frames.keys()].sort((a, b) => b - a);
+  for (const id of retained.slice(240)) frames.delete(id);
+  if (field("view").value === "live") {
+    paintFrames();
+    if (selected != null) renderDetail(frames.get(selected));
+  }
+}
+function showArchive(value, activate = false) {
+  archive = value;
+  archivedFrames = new Map((archive?.frames ?? []).map(frame => [frame.id, frame]));
+  if (!archive) return;
+  const view = field("view");
+  const option = view.options[1] ?? new Option("", "capture");
+  option.textContent = "Capture " + archive.id;
+  if (!view.options[1]) view.add(option);
+  view.disabled = false;
+  const loss = [archive.overwritten_frames ? archive.overwritten_frames + " overwritten frames" : null,
+    archive.overwritten_spans ? archive.overwritten_spans + " overwritten slices" : null,
+    archive.open_spans_at_stop ? archive.open_spans_at_stop + " open slices at stop" : null,
+    archive.unfinished_frames ? archive.unfinished_frames + " unfinished frames" : null,
+    archive.pending_gpu ? archive.pending_gpu + " GPU samples pending" : null,
+    archive.producer_limit ? archive.producer_limit + " producers omitted" : null].filter(Boolean);
+  field("archiveStatus").textContent = [archive.frame_ids.length + " frames", ...loss].join(" · ");
+  if (activate) view.value = "capture";
+  viewChanged();
+}
+function viewChanged() {
+  selectionRequest++;
+  selected = undefined;
+  const recording = field("view").value === "capture" && archive;
+  field("archiveStatus").hidden = !recording;
+  paintFrames();
+  renderDetail();
+  if (recording && archive.frame_ids.length) selectFrame(archive.frame_ids.at(-1));
+}
+field("view").addEventListener("change", viewChanged);
+field("connection").addEventListener("submit", event => {
+  event.preventDefault();
+  if (socket) { socket.close(); return; }
+  const port = field("port").value;
+  const connection = new WebSocket("ws://127.0.0.1:" + port + "/devtools");
+  socket = connection;
+  field("connect").textContent = "Disconnect";
+  field("status").textContent = "Connecting…";
+  connection.addEventListener("message", event => {
+    const reply = JSON.parse(event.data);
+    if (reply.method === "frames") { update(reply.params); return; }
+    const request = pending.get(reply.id);
+    if (!request) return;
+    pending.delete(reply.id);
+    if (reply.error) request.reject(new Error(reply.error.message));
+    else request.resolve(reply.result);
+  });
+  connection.addEventListener("open", async () => {
+    try {
+      const auth = await rpc("authenticate", {version: 1, token: field("token").value});
+      canInspectCapture = auth.capabilities?.includes("frame_spans") ?? false;
+      update(await rpc("subscribe", {}));
+      if (canInspectCapture) {
+        const status = await rpc("capture_status", {});
+        showArchive(status.latest);
+      }
+      field("traceDetail").disabled = !auth.capabilities?.includes("trace_detail");
+      field("traceGpu").disabled = !auth.capabilities?.includes("capture_gpu");
+      authenticated = true;
+      field("status").textContent = "Connected to port " + port;
+      field("capture").disabled = false;
+    } catch (error) {
+      field("status").textContent = error.message;
+      connection.close();
+    }
+  });
+  connection.addEventListener("error", () => {
+    field("status").textContent = "Connection failed";
+  });
+  connection.addEventListener("close", () => {
+    for (const request of pending.values()) request.reject(new Error("Disconnected"));
+    pending.clear();
+    socket = undefined;
+    field("connect").textContent = "Connect";
+    field("capture").disabled = true;
+    if (authenticated) field("status").textContent = "Disconnected";
+    authenticated = false;
+    field("traceDetail").disabled = true;
+    field("traceGpu").disabled = true;
+    field("view").value = "live";
+    field("view").options[1]?.remove();
+    field("view").disabled = true;
+    archive = undefined;
+    archivedFrames.clear();
+    viewChanged();
+  });
+});
+field("capture").addEventListener("click", async () => {
+  field("capture").disabled = true;
+  field("status").textContent = "Recording trace…";
+  try {
+    const trace = await rpc("capture", {duration_ms: 5000, detail: field("traceDetail").value,
+      gpu: field("traceGpu").disabled || field("traceGpu").checked});
+    const binary = atob(trace.data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    lastTraceBuffer = bytes.buffer;
+    field("openPerfetto").disabled = false;
+    if (canInspectCapture) showArchive(trace.capture, true);
+    field("download").disabled = false;
+    field("status").textContent = `Trace ready (${bytes.length} bytes)`;
+  } catch (error) {
+    field("status").textContent = error.message;
+  } finally {
+    field("capture").disabled = !authenticated;
+  }
+});
+field("download").addEventListener("click", () => {
+  if (!lastTraceBuffer) return;
+  const url = URL.createObjectURL(new Blob([lastTraceBuffer], {type: "application/octet-stream"}));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "impasto-trace.pftrace";
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+field("openPerfetto").addEventListener("click", () => {
+  if (!lastTraceBuffer) return;
+  const targetOrigin = "https://ui.perfetto.dev";
+  const perfettoWindow = window.open(targetOrigin);
+  if (!perfettoWindow) {
+    field("status").textContent = "Popup blocked by browser; allow popups to open Perfetto";
+    return;
+  }
+  field("status").textContent = "Opening trace in Perfetto…";
+  let done = false;
+  const pingTimer = setInterval(() => {
+    if (!done) perfettoWindow.postMessage("PING", targetOrigin);
+  }, 200);
+  const timeoutTimer = setTimeout(() => {
+    if (done) return;
+    done = true;
+    clearInterval(pingTimer);
+    window.removeEventListener("message", onMessage);
+    field("status").textContent = "Timed out waiting for Perfetto UI";
+  }, 15000);
+  function onMessage(event) {
+    if (event.origin !== targetOrigin || event.source !== perfettoWindow) return;
+    if (event.data !== "PONG" || done) return;
+    done = true;
+    clearInterval(pingTimer);
+    clearTimeout(timeoutTimer);
+    window.removeEventListener("message", onMessage);
+    const buffer = lastTraceBuffer.slice(0);
+    perfettoWindow.postMessage({
+      perfetto: {
+        buffer,
+        title: "Impasto Trace",
+        fileName: "impasto-trace.pftrace",
+      }
+    }, targetOrigin, [buffer]);
+    field("status").textContent = "Sent trace to Perfetto UI";
+  }
+  window.addEventListener("message", onMessage);
+});
+</script>
+</html>

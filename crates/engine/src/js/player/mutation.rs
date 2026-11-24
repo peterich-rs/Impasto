@@ -1,7 +1,9 @@
 //! Owned UI mutations and their commit on the render thread.
 
+use std::sync::Arc;
+
 use crate::motion::ScrollAxis;
-use crate::scene::{ContentMode, TextSpan};
+use crate::scene::{BackdropMaterial, ColorMatrix, ContentMode, TextSpan};
 use crate::style::codec::{self, Value};
 use crate::tree::{DragClaim, NodeId, Tree};
 
@@ -63,6 +65,22 @@ pub(super) enum Mutation {
     TextRuns {
         id: NodeId,
         spans: Vec<TextSpan>,
+    },
+    RepaintBoundary {
+        id: NodeId,
+        enabled: bool,
+    },
+    TransitionSnapshot {
+        id: NodeId,
+        enabled: bool,
+    },
+    ColorFilter {
+        id: NodeId,
+        matrix: Option<Arc<ColorMatrix>>,
+    },
+    BackdropMaterial {
+        id: NodeId,
+        material: Option<Arc<BackdropMaterial>>,
     },
     Focusable {
         id: NodeId,
@@ -235,6 +253,12 @@ pub(super) fn apply(tree: &mut Tree, mutation: Mutation) -> Result<Applied, crat
         }
         Mutation::SetStyleSurface { id, surface } => tree.set_style_surface(id, surface)?,
         Mutation::TextRuns { id, spans } => tree.set_text_spans(id, spans)?,
+        Mutation::RepaintBoundary { id, enabled } => tree.set_repaint_boundary(id, enabled)?,
+        Mutation::TransitionSnapshot { id, enabled } => {
+            tree.set_transition_snapshot(id, enabled)?
+        }
+        Mutation::ColorFilter { id, matrix } => tree.set_color_filter(id, matrix)?,
+        Mutation::BackdropMaterial { id, material } => tree.set_backdrop_material(id, material)?,
         Mutation::Focusable { id, enabled } => {
             applied.gestures = tree.set_focusable(id, enabled)?
         }
@@ -364,7 +388,7 @@ pub(super) fn mutate(host: &Host, mutation: Mutation) -> Result<u64, crate::Erro
 /// Commits pending style and layout work before reading a rectangle.
 pub(super) fn flush_for_read(host: &Host) -> bool {
     let inner = host.inner();
-    let _trace = crate::session::trace::Section::begin(c"Impasto synchronous geometry");
+    let _trace = tracing::debug_span!(target: "impasto::layout", "sync_geometry").entered();
     let notices = {
         let mut tree = inner.tree.borrow_mut();
         if tree.flush_styles().is_err() {

@@ -112,6 +112,7 @@ export function ScrollArea(props: ScrollAreaProps): NodeHandle {
   }
   onCleanup(() => {
     stopRestoring();
+    if (ctrl.node() === viewport && viewport !== 0) ctrl.bind(0);
     if (minSource !== 0) scene.removeStyleSource(minSource);
   });
   function applyPhysics(node: number): void {
@@ -177,9 +178,10 @@ export function ScrollArea(props: ScrollAreaProps): NodeHandle {
         });
         bindNodeRef(node, () => props.ref);
         bindNodeRef(node, () => props.viewportRef);
-        if (props.onOffset) {
-          scene.onScroll(node, (x, y) => props.onOffset?.({ x, y }, node));
-        }
+        createTrackedEffect(() => {
+          const listener = props.onOffset;
+          if (listener) onCleanup(ctrl.onOffset((offset) => listener(offset, node)));
+        });
         const initial = props.initialOffset;
         stopRestoring();
         if (initial !== undefined && (initial.x !== 0 || initial.y !== 0)) {

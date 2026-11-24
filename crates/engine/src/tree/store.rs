@@ -30,6 +30,13 @@ impl Tree {
             focused: None,
             scopes: Vec::new(),
             motions: Vec::new(),
+            next_motion_id: 0,
+            next_scroll_rule: 0,
+            back_progress: 0.0,
+            scroll_bindings: HashMap::new(),
+            scroll_thresholds: Default::default(),
+            motion_layers: HashMap::new(),
+            list_compositor_windows: HashMap::new(),
             motion_ends: Vec::new(),
             clock_ms: 0.0,
             applying_motion: false,
@@ -46,6 +53,7 @@ impl Tree {
             layer_epoch: 0,
             canvas_geometry_epoch: 0,
             layers: crate::scene::LayerTree::empty(),
+            shader_effects: HashMap::new(),
             semantics_cache: HashMap::new(),
             semantics_order: Vec::new(),
             platform_views: HashMap::new(),
@@ -69,6 +77,7 @@ impl Tree {
             local_layouts: 0,
             same_text_layouts: 0,
             layout_cause: super::LayoutCause::None,
+            pending_layout_cause: super::LayoutCause::None,
             text_reused: Cell::new(0),
             text_shaped: Cell::new(0),
             trace_text_probes: false,
@@ -680,6 +689,7 @@ impl Tree {
         {
             text.metrics = None;
             text.cached = None;
+            text.painted = None;
         }
         if let Some(source) = self
             .slots
@@ -705,6 +715,8 @@ impl Tree {
         let generation = self.slots.get(index as usize).map(|slot| slot.generation);
         if let Some(generation) = generation {
             let id = NodeId { index, generation };
+            self.remove_shader_effect(id);
+            self.forget_scroll_rules(id);
             self.pictures.remove(&id);
             self.runs.remove(&id);
             self.subtree_layers.remove(&id);

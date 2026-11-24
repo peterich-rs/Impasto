@@ -1,5 +1,6 @@
 //! Render tree. Layout goes through Taffy. Positions, hits, and gestures stay on this type.
 
+mod compositor_motion;
 mod debug;
 mod geometry;
 mod gesture;
@@ -12,7 +13,9 @@ pub(crate) mod picture_id;
 mod platform_view;
 mod record;
 mod scroll;
+mod scroll_rules;
 mod semantics;
+mod shader;
 mod store;
 mod style;
 mod text;
@@ -33,6 +36,7 @@ pub use text::TextLink;
 use crate::motion::{AnimProp, Simulation};
 
 struct ActiveMotion {
+    id: crate::scene::CompositorTrackId,
     started_ms: f64,
     node: NodeId,
     prop: AnimProp,
@@ -56,7 +60,7 @@ use crate::text::Shaper;
 /// Render tree. `layout` writes positions. `pointer` updates click and drag.
 ///
 /// The shaper is erased here so one tree type serves the test shaper and the
-/// host's Impeller shaper. The trait is not `Send`: an Impeller typography
+/// host's Parley shaper. The trait is not `Send`: the typography
 /// context stays on the UI thread, and so does the tree.
 pub struct Tree {
     slots: Vec<Slot>,
@@ -76,6 +80,14 @@ pub struct Tree {
     scopes: Vec<NodeId>,
     /// Scroll friction and property springs, sampled by [`Tree::tick_motions`].
     motions: Vec<ActiveMotion>,
+    next_motion_id: u64,
+    next_scroll_rule: u32,
+    back_progress: f32,
+    scroll_bindings:
+        HashMap<NodeId, std::collections::BTreeMap<u32, scroll_rules::NodeScrollBinding>>,
+    scroll_thresholds: std::collections::BTreeMap<u32, scroll_rules::ThresholdState>,
+    motion_layers: HashMap<NodeId, compositor_motion::MotionLayers>,
+    list_compositor_windows: HashMap<NodeId, Option<compositor_motion::ListCompositorWindow>>,
     /// Motions that finished since the last [`Tree::take_motion_ends`].
     motion_ends: Vec<(NodeId, AnimProp)>,
     /// Last timestamp passed to [`Tree::tick_motions`]. New motions start here.
@@ -105,6 +117,8 @@ pub struct Tree {
     layer_epoch: u64,
     canvas_geometry_epoch: u64,
     layers: crate::scene::LayerTree,
+    /// Shader effects are sparse. Regular nodes do not carry a shader slot.
+    shader_effects: HashMap<NodeId, crate::scene::ShaderEffect>,
     /// Last semantics nodes. A clean node reuses its strings.
     semantics_cache: HashMap<crate::semantics::SemanticsId, crate::semantics::SemanticsNode>,
     semantics_order: Vec<crate::semantics::SemanticsId>,
@@ -138,6 +152,7 @@ pub struct Tree {
     same_text_layouts: u32,
     /// First reason `needs_layout` became true since the last trace.
     layout_cause: LayoutCause,
+    pending_layout_cause: LayoutCause,
     text_reused: Cell<u32>,
     text_shaped: Cell<u32>,
     trace_text_probes: bool,

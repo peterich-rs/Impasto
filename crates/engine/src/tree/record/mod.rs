@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use crate::scene::{ScrollTargetProp, ScrollValue};
+
 use crate::scene::{Command, DrawList};
 
 use super::node::{Node, Role};
@@ -23,6 +25,13 @@ pub(super) struct SweepFrame {
 pub(super) struct SubtreeLayers {
     pub(super) effects: bool,
     pub(super) picture_owners: bool,
+}
+
+impl SubtreeLayers {
+    pub(super) fn requires_clip_layer(self) -> bool {
+        // A descendant's picture boundary closes the current command run.
+        self.effects || self.picture_owners
+    }
 }
 
 /// Axis-aligned clip in paint space. `None` means a transform ancestor made culling unsafe.
@@ -187,16 +196,19 @@ impl Tree {
         if let Some(commands) = out.0.as_mut() {
             commands.clear();
         }
+        self.sync_scroll_offsets();
         self.sync_metrics();
         self.finish_measure();
         self.picture_writes = 0;
         self.layer_record_visits = 0;
         self.layers.layers.clear();
         self.layers.pictures.clear();
+        self.layers.shader_uniforms.clear();
         self.layer_stack.clear();
         self.layer_tail.clear();
         self.layer_top = None;
         self.finished_owners.clear();
+        self.begin_compositor_record();
         let root = self.root.ok_or(Error::NoRoot)?;
         let _ = self.sweep_subtree_layers(root);
         self.run = RunState {
@@ -212,6 +224,7 @@ impl Tree {
         self.emit_node(root, &mut out, self.origin, (0.0, 0.0), None);
         self.close_run();
         self.leave_owner(root);
+        self.finish_compositor_record();
         self.runs.retain(|id, _| self.finished_owners.contains(id));
         debug_assert!(self.layer_stack.is_empty());
         self.layers.epoch = self.layer_epoch;
@@ -407,6 +420,62 @@ impl Tree {
         Ok(())
     }
 
+    /// Composites the backdrop with a material inside this node's bounds.
+    pub fn set_backdrop_material(
+        &mut self,
+        id: NodeId,
+        material: Option<Arc<crate::scene::BackdropMaterial>>,
+    ) -> Result<(), Error> {
+        if material
+            .as_ref()
+            .is_some_and(|material| !material.is_valid())
+        {
+            return Err(Error::BadNumber);
+        }
+        let old = self.node(id)?.backdrop_material();
+        if old == material.as_ref() {
+            return Ok(());
+        }
+        let same_structure = old.is_some() == material.is_some();
+        self.node_mut(id)?
+            .write_paint(|paint| paint.backdrop_material = material);
+        if same_structure {
+            self.paint_layer_value();
+        } else {
+            self.repaint_ancestors(id);
+        }
+        Ok(())
+    }
+
+    /// Filters this node and its descendants after they have been composited.
+    pub fn set_color_filter(
+        &mut self,
+        id: NodeId,
+        matrix: Option<Arc<crate::scene::ColorMatrix>>,
+    ) -> Result<(), Error> {
+        if matrix.as_ref().is_some_and(|matrix| {
+            matrix
+                .iter()
+                .flatten()
+                .any(|coefficient| !coefficient.is_finite())
+        }) {
+            return Err(Error::BadNumber);
+        }
+        let old = self.node(id)?.color_filter();
+        if old == matrix.as_ref() {
+            return Ok(());
+        }
+        let same_structure = old.is_some() == matrix.is_some();
+        self.node_mut(id)?
+            .write_paint(|paint| paint.color_filter = matrix);
+        if same_structure {
+            self.paint_layer_value();
+        } else {
+            self.repaint_ancestors(id);
+        }
+        Ok(())
+    }
+
     /// Layer blend. [`crate::scene::BlendMode::SrcOver`] records no push and no pop.
     pub fn set_blend(&mut self, id: NodeId, mode: crate::scene::BlendMode) -> Result<(), Error> {
         let previous = self.node(id)?.blend() != crate::scene::BlendMode::SrcOver;
@@ -428,6 +497,10 @@ impl Tree {
         if node.flags.contains(super::node::NodeFlags::CULL_PAINT)
             || node.flags.contains(super::node::NodeFlags::HIDDEN)
             || node.alpha() == Some(0)
+                && !self
+                    .motion_layers
+                    .get(&id)
+                    .is_some_and(|layers| layers.transition_opacity)
         {
             return 1;
         }
@@ -443,7 +516,12 @@ impl Tree {
         if at.descend {
             frame.push_outer(commands);
         }
-        emit_rect(commands, node, x, y);
+        let replace_background = self.scroll_bindings.get(&id).is_some_and(|rules| {
+            rules
+                .values()
+                .any(|rule| rule.prop == ScrollTargetProp::BackgroundColor)
+        });
+        emit_rect(commands, node, x, y, replace_background);
         pass::emit_outline(commands, node, x, y);
         if at.descend {
             frame.push_content(commands);
@@ -460,7 +538,23 @@ impl Tree {
                 list,
             });
         }
-        emit_text(self.text_scale, commands, node, x, y, &marks);
+        if node.content_w > 0.0
+            && node.content_h > 0.0
+            && let Some(effect) = self.shader_effects.get(&id)
+        {
+            commands.push(Command::ShaderEffect {
+                bounds: [
+                    x + node.content_x,
+                    y + node.content_y,
+                    node.content_w,
+                    node.content_h,
+                ],
+                shader: effect.shader,
+                uniforms: Arc::clone(&effect.uniforms),
+                textures: Arc::clone(&effect.textures),
+            });
+        }
+        emit_text(commands, node, x, y, &marks);
         emit_image(commands, node, x, y);
         if !at.descend {
             return 1;
@@ -530,9 +624,13 @@ impl Tree {
         let Some(node) = self.get(id) else {
             return;
         };
+        let transition_opacity = self
+            .motion_layers
+            .get(&id)
+            .is_some_and(|layers| layers.transition_opacity);
         if node.flags.contains(super::node::NodeFlags::CULL_PAINT)
             || node.flags.contains(super::node::NodeFlags::HIDDEN)
-            || node.alpha() == Some(0)
+            || node.alpha() == Some(0) && !transition_opacity
         {
             return;
         }
@@ -540,7 +638,7 @@ impl Tree {
         let alpha = node.alpha();
         let abs = (parent_abs.0 + node.x, parent_abs.1 + node.y);
         let child = node.first_child;
-        if paint.opacity && alpha == Some(0) {
+        if paint.opacity && alpha == Some(0) && !transition_opacity {
             self.capture(id, parent_abs, out, clip);
             return;
         }
@@ -596,6 +694,7 @@ impl Tree {
         };
         let (w, h) = (node.w, node.h);
         let radius = node.corner_radius();
+        let corners = node.corners();
         let abs = (parent_abs.0 + node.x, parent_abs.1 + node.y);
         self.capture(id, parent_abs, out, clip);
         self.emit_platform_view(id);
@@ -603,13 +702,7 @@ impl Tree {
         let local = self.local_xy(abs);
         self.push_run_bracket(
             Some(id),
-            Command::PushClip {
-                x: local.0,
-                y: local.1,
-                w,
-                h,
-                corner_radius: radius,
-            },
+            Command::clip([local.0, local.1, w, h], radius, corners),
             out,
         );
         let child_clip = intersect(clip, paint.0, paint.1, w, h);
@@ -631,11 +724,16 @@ impl Tree {
         let abs = (parent_abs.0 + node.x, parent_abs.1 + node.y);
         let at = (abs.0 - ancestor_scroll.0, abs.1 - ancestor_scroll.1);
         let (w, h) = (node.w, node.h);
-        let effect = paint_kind(node);
+        let mut effect = paint_kind(node);
         let radius = node.corner_radius();
-        let alpha = node.alpha();
+        let corners = node.corners();
+        let mut alpha = node.alpha();
         let scroll = node.scroll_paint();
-        let geom = node.transform().placed(abs.0, abs.1, w, h);
+        let base = self
+            .effective_transform(id)
+            .unwrap_or_else(|| node.transform());
+        effect.transform |= !base.is_identity();
+        let geom = base.placed(abs.0, abs.1, w, h);
         let transform = (
             geom.translate_x,
             geom.translate_y,
@@ -643,8 +741,33 @@ impl Tree {
             geom.scale_x,
             geom.scale_y,
         );
-        let blur = positive_sigma(node.blur());
-        let backdrop = positive_sigma(node.backdrop());
+        let mut blur = positive_sigma(node.blur());
+        let mut backdrop = positive_sigma(node.backdrop());
+        let mut fill = None;
+        let mut uniforms = [None; crate::scene::MAX_SHADER_UNIFORM_BYTES / size_of::<f32>()];
+        for (prop, value) in self.binding_values(id) {
+            match (prop, value) {
+                (ScrollTargetProp::Opacity, ScrollValue::Alpha(value)) => {
+                    effect.opacity = true;
+                    alpha = Some(value);
+                }
+                (ScrollTargetProp::BlurSigma, ScrollValue::Scalar(value)) => blur = Some(value),
+                (ScrollTargetProp::BackdropBlurSigma, ScrollValue::Scalar(value)) => {
+                    backdrop = Some(value)
+                }
+                (ScrollTargetProp::BackgroundColor, ScrollValue::Color(value)) => {
+                    fill = Some(value)
+                }
+                (ScrollTargetProp::ShaderUniform(index), ScrollValue::Scalar(value)) => {
+                    if let Some(slot) = uniforms.get_mut(usize::from(index)) {
+                        *slot = Some(value);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let backdrop_material = node.backdrop_material().cloned();
+        let color_filter = node.color_filter().cloned();
         let blend = node.blend();
         let blend = (blend != crate::scene::BlendMode::SrcOver).then_some(blend);
         let caches = node.caches_picture();
@@ -660,8 +783,20 @@ impl Tree {
             mirror: at,
             segment: if saved.owner == id { saved.segment } else { 0 },
         });
+        let track_base = base.compositor_transform(abs.0, abs.1, w, h);
         let mut pushed = self.push_effect_layers(
-            effect, abs, w, h, radius, alpha, scroll, transform, blur, backdrop, blend,
+            id,
+            effect,
+            abs,
+            w,
+            h,
+            alpha,
+            transform,
+            blur,
+            backdrop,
+            blend,
+            color_filter.as_ref(),
+            track_base,
         );
         if pushes_matrix {
             out.push(Command::PushTransform {
@@ -699,6 +834,11 @@ impl Tree {
                 sigma,
             });
         }
+        if let Some(matrix) = &color_filter {
+            out.push(Command::PushColorFilter {
+                matrix: Arc::clone(matrix),
+            });
+        }
         if let Some(sigma) = blur {
             out.push(Command::PushBlur {
                 x: at.0,
@@ -708,15 +848,60 @@ impl Tree {
                 sigma,
             });
         }
+        if let Some(material) = &backdrop_material {
+            let corners = corners.or_else(|| {
+                (radius > 0.0).then_some(crate::scene::CornerShape {
+                    radii: [radius; 4],
+                    curve: 2.0,
+                })
+            });
+            self.push_layer(crate::scene::LayerKind::BackdropMaterial {
+                bounds: [abs.0, abs.1, w, h],
+                corners,
+                material: Arc::clone(material),
+            });
+            pushed += 1;
+            out.push(Command::PushBackdropMaterial {
+                bounds: [at.0, at.1, w, h],
+                corners,
+                material: Arc::clone(material),
+            });
+        }
+        if let Some(color) = fill {
+            let layer = self.note_layer(crate::scene::LayerKind::Fill {
+                bounds: [abs.0, abs.1, w, h],
+                radius,
+                corners,
+                color,
+            });
+            if let Some(links) = self.motion_layers.get_mut(&id) {
+                links.fill = Some(layer);
+            }
+            out.push(
+                crate::scene::RectPaint {
+                    color: crate::scene::linear_color_bytes(color),
+                    stroke_width: 0.0,
+                    stroke_color: [0; 4],
+                    gradient: None,
+                    shadow: None,
+                    box_shadows: Arc::from([]),
+                }
+                .command([at.0, at.1, w, h], radius, corners),
+            );
+        }
         self.capture(id, parent_abs, out, clip);
+        if uniforms.iter().any(Option::is_some) {
+            self.close_run();
+            if let Some(layer) = self.scroll_shader_layer(id) {
+                self.layers.shader_uniforms.insert(layer, uniforms);
+            }
+        }
         self.emit_platform_view(id);
         if effect.clip || effect.scroll {
-            out.push(Command::PushClip {
-                x: at.0,
-                y: at.1,
-                w,
-                h,
-                corner_radius: if effect.scroll { 0.0 } else { radius },
+            out.push(if effect.scroll {
+                Command::clip([at.0, at.1, w, h], 0.0, None)
+            } else {
+                Command::clip([at.0, at.1, w, h], radius, corners)
             });
         }
         self.close_run();
@@ -735,7 +920,8 @@ impl Tree {
         if let Some(scope) = self.run.scope.as_mut() {
             scope.mirror = (abs.0 - next_scroll.0, abs.1 - next_scroll.1);
         }
-        pushed += self.push_content_layers(effect, abs, w, h, radius, scroll);
+        pushed +=
+            self.push_content_layers(id, effect, [abs.0, abs.1, w, h], radius, corners, scroll);
         let hosts_rows = self
             .subtree_layers
             .get(&id)
@@ -771,7 +957,13 @@ impl Tree {
         if effect.clip || effect.scroll {
             out.push(Command::Pop);
         }
+        if backdrop_material.is_some() {
+            out.push(Command::Pop);
+        }
         if blur.is_some() {
+            out.push(Command::Pop);
+        }
+        if color_filter.is_some() {
             out.push(Command::Pop);
         }
         if backdrop.is_some() {
@@ -828,8 +1020,8 @@ impl Tree {
                     .unwrap_or_default();
                 let renders = self
                     .get(current)
-                    .is_some_and(|node| node.renders_layers(stored.effects));
-                any |= stored.effects || renders;
+                    .is_some_and(|node| node.renders_layers(stored.requires_clip_layer()));
+                any |= stored.effects || renders || self.scroll_bindings.contains_key(&current);
                 owners |= stored.picture_owners || self.is_picture_owner(current);
                 child = self.get(current).and_then(|node| node.next);
             }
@@ -1154,9 +1346,10 @@ impl Tree {
         self.layer_tail[slot] = Some(child);
     }
 
-    fn push_layer(&mut self, kind: crate::scene::LayerKind) {
+    fn push_layer(&mut self, kind: crate::scene::LayerKind) -> crate::scene::LayerId {
         let id = self.note_layer(kind);
         self.layer_stack.push(id);
+        id
     }
 
     fn pop_layers(&mut self, count: usize) {
@@ -1171,17 +1364,18 @@ impl Tree {
     )]
     fn push_effect_layers(
         &mut self,
+        node: NodeId,
         effect: PaintKind,
         abs: (f32, f32),
         w: f32,
         h: f32,
-        _radius: f32,
         alpha: Option<u8>,
-        _scroll: (f32, f32),
         transform: (f32, f32, f32, f32, f32),
         blur: Option<f32>,
         backdrop: Option<f32>,
         blend: Option<crate::scene::BlendMode>,
+        color_filter: Option<&Arc<crate::scene::ColorMatrix>>,
+        track_base: crate::scene::CompositorTransform,
     ) -> usize {
         let mut pushed = 0;
         let identity = transform.0 == 0.0
@@ -1189,24 +1383,40 @@ impl Tree {
             && transform.2 == 0.0
             && transform.3 == 1.0
             && transform.4 == 1.0;
-        if !identity && effect.transform {
-            self.push_layer(crate::scene::LayerKind::Transform {
+        if !identity && effect.transform
+            || self
+                .motion_layers
+                .get(&node)
+                .is_some_and(|layers| layers.linked_transform)
+        {
+            let layer = self.push_layer(crate::scene::LayerKind::Transform {
                 translate_x: transform.0,
                 translate_y: transform.1,
                 rotate_rad: transform.2,
                 scale_x: transform.3,
                 scale_y: transform.4,
             });
+            if let Some(links) = self.motion_layers.get_mut(&node) {
+                links.transform = Some((layer, track_base));
+            }
             pushed += 1;
         }
-        if effect.opacity && alpha.unwrap_or(255) != 255 {
-            self.push_layer(crate::scene::LayerKind::Opacity {
+        if effect.opacity && alpha.unwrap_or(255) != 255
+            || self
+                .motion_layers
+                .get(&node)
+                .is_some_and(|layers| layers.transition_opacity)
+        {
+            let layer = self.push_layer(crate::scene::LayerKind::Opacity {
                 alpha: alpha.unwrap_or(255),
                 x: abs.0,
                 y: abs.1,
                 w,
                 h,
             });
+            if let Some(links) = self.motion_layers.get_mut(&node) {
+                links.opacity = Some(layer);
+            }
             pushed += 1;
         }
         if let Some(mode) = blend {
@@ -1220,23 +1430,35 @@ impl Tree {
             pushed += 1;
         }
         if let Some(sigma) = backdrop {
-            self.push_layer(crate::scene::LayerKind::BackdropBlur {
+            let layer = self.push_layer(crate::scene::LayerKind::BackdropBlur {
                 x: abs.0,
                 y: abs.1,
                 w,
                 h,
                 sigma,
+            });
+            if let Some(links) = self.motion_layers.get_mut(&node) {
+                links.backdrop = Some(layer);
+            }
+            pushed += 1;
+        }
+        if let Some(matrix) = color_filter {
+            self.push_layer(crate::scene::LayerKind::ColorFilter {
+                matrix: Arc::clone(matrix),
             });
             pushed += 1;
         }
         if let Some(sigma) = blur {
-            self.push_layer(crate::scene::LayerKind::Blur {
+            let layer = self.push_layer(crate::scene::LayerKind::Blur {
                 x: abs.0,
                 y: abs.1,
                 w,
                 h,
                 sigma,
             });
+            if let Some(links) = self.motion_layers.get_mut(&node) {
+                links.blur = Some(layer);
+            }
             pushed += 1;
         }
         pushed
@@ -1244,34 +1466,42 @@ impl Tree {
 
     fn push_content_layers(
         &mut self,
+        node: NodeId,
         effect: PaintKind,
-        abs: (f32, f32),
-        w: f32,
-        h: f32,
+        bounds: [f32; 4],
         radius: f32,
+        corners: Option<crate::scene::CornerShape>,
         scroll: (f32, f32),
     ) -> usize {
+        let [x, y, w, h] = bounds;
         let mut pushed = 0;
         if effect.scroll {
             self.push_layer(crate::scene::LayerKind::Clip {
-                x: abs.0,
-                y: abs.1,
+                x,
+                y,
                 w,
                 h,
                 corner_radius: 0.0,
             });
-            self.push_layer(crate::scene::LayerKind::Offset {
+            let layer = self.push_layer(crate::scene::LayerKind::Offset {
                 x: -scroll.0,
                 y: -scroll.1,
             });
+            if let Some(links) = self.motion_layers.get_mut(&node) {
+                links.scroll = Some(layer);
+            }
             pushed += 2;
         } else if effect.clip {
-            self.push_layer(crate::scene::LayerKind::Clip {
-                x: abs.0,
-                y: abs.1,
-                w,
-                h,
-                corner_radius: radius,
+            self.push_layer(if let Some(corners) = corners {
+                crate::scene::LayerKind::CornerClip { bounds, corners }
+            } else {
+                crate::scene::LayerKind::Clip {
+                    x,
+                    y,
+                    w,
+                    h,
+                    corner_radius: radius,
+                }
             });
             pushed += 1;
         }
@@ -1351,26 +1581,39 @@ fn translate_command(command: &Command, dx: f32, dy: f32) -> Command {
             shadow,
             box_shadows,
         },
+        Command::ShapedRect {
+            mut bounds,
+            corners,
+            paint,
+        } => {
+            bounds[0] += dx;
+            bounds[1] += dy;
+            Command::ShapedRect {
+                bounds,
+                corners,
+                paint,
+            }
+        }
+        Command::PushCornerClip {
+            mut bounds,
+            corners,
+        } => {
+            bounds[0] += dx;
+            bounds[1] += dy;
+            Command::PushCornerClip { bounds, corners }
+        }
         Command::Text {
             x,
             y,
-            max_width,
-            font_size,
-            paragraph,
+            shaped,
             color,
-            utf8,
-            style,
-            spans,
+            span_paints,
         } => Command::Text {
             x: x + dx,
             y: y + dy,
-            max_width,
-            font_size,
-            paragraph,
+            shaped,
             color,
-            utf8,
-            style,
-            spans,
+            span_paints,
         },
         Command::Image {
             x,
@@ -1416,6 +1659,15 @@ fn translate_command(command: &Command, dx: f32, dy: f32) -> Command {
             h,
             sigma,
         },
+        Command::PushBackdropMaterial {
+            bounds: [x, y, w, h],
+            corners,
+            material,
+        } => Command::PushBackdropMaterial {
+            bounds: [x + dx, y + dy, w, h],
+            corners,
+            material,
+        },
         Command::PushBackdropBlur { x, y, w, h, sigma } => Command::PushBackdropBlur {
             x: x + dx,
             y: y + dy,
@@ -1443,6 +1695,21 @@ fn translate_command(command: &Command, dx: f32, dy: f32) -> Command {
             height,
             list,
         },
+        Command::ShaderEffect {
+            mut bounds,
+            shader,
+            uniforms,
+            textures,
+        } => {
+            bounds[0] += dx;
+            bounds[1] += dy;
+            Command::ShaderEffect {
+                bounds,
+                shader,
+                uniforms,
+                textures,
+            }
+        }
         other => other,
     }
 }
@@ -1451,14 +1718,32 @@ fn is_leaf_paint(command: &Command) -> bool {
     matches!(
         command,
         Command::Rect { .. }
+            | Command::ShapedRect { .. }
             | Command::Text { .. }
             | Command::Image { .. }
             | Command::Canvas { .. }
+            | Command::ShaderEffect { .. }
     )
 }
 
 fn command_outside(command: &Command, clip: Option<PaintClip>) -> bool {
     match command {
+        Command::ShapedRect {
+            bounds: [x, y, w, h],
+            ..
+        }
+        | Command::ShaderEffect {
+            bounds: [x, y, w, h],
+            ..
+        }
+        | Command::PushCornerClip {
+            bounds: [x, y, w, h],
+            ..
+        }
+        | Command::PushBackdropMaterial {
+            bounds: [x, y, w, h],
+            ..
+        } => outside(clip, *x, *y, *w, *h),
         Command::Rect { x, y, w, h, .. }
         | Command::Image { x, y, w, h, .. }
         | Command::PushClip { x, y, w, h, .. }
@@ -1466,9 +1751,19 @@ fn command_outside(command: &Command, clip: Option<PaintClip>) -> bool {
         | Command::PushBlur { x, y, w, h, .. }
         | Command::PushBackdropBlur { x, y, w, h, .. }
         | Command::PushBlend { x, y, w, h, .. } => outside(clip, *x, *y, *w, *h),
-        Command::Text {
-            x, y, font_size, ..
-        } => outside(clip, *x, *y, font_size.max(1.0), *font_size),
+        Command::Text { x, y, shaped, .. } => {
+            // Cull on the frozen glyph extent. A paragraph without glyphs
+            // paints nothing, so it is always outside the clip.
+            shaped.as_deref().is_none_or(|shaped| {
+                outside(
+                    clip,
+                    *x,
+                    *y,
+                    shaped.size[0].max(1.0),
+                    shaped.size[1].max(1.0),
+                )
+            })
+        }
         Command::Canvas {
             x,
             y,
@@ -1476,7 +1771,10 @@ fn command_outside(command: &Command, clip: Option<PaintClip>) -> bool {
             height,
             ..
         } => outside(clip, *x, *y, *width, *height),
-        Command::Fill { .. } | Command::PushTransform { .. } | Command::Pop => false,
+        Command::Fill { .. }
+        | Command::PushTransform { .. }
+        | Command::PushColorFilter { .. }
+        | Command::Pop => false,
     }
 }
 

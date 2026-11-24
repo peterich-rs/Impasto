@@ -273,10 +273,15 @@ bitflags::bitflags! {
         const PICTURE_OWNER = 1 << 10;
         /// Canvas list installed on this node. Independent of [`Self::PICTURE_OWNER`].
         const PICTURE_FROM_CANVAS = 1 << 11;
+        /// A shader owns its picture so scalar tracks can address it independently.
+        const PICTURE_FROM_SHADER = 1 << 12;
         /// `display: none`. Layout, paint, hit, and semantics skip the subtree.
         const HIDDEN = 1 << 13;
         /// Keep the node drawable while omitting its subtree from accessibility.
         const SEMANTICS_HIDDEN = 1 << 14;
+        /// App-requested picture boundary, independent of list/canvas ownership.
+        const PICTURE_FROM_BOUNDARY = 1 << 15;
+        const TRANSITION_SNAPSHOT = 1 << 16;
     }
 }
 
@@ -301,8 +306,18 @@ pub(super) struct TextPayload {
     pub(super) editor: Option<crate::text::TextEditor>,
     /// Line boxes for the current metrics key. Color changes leave this in place.
     pub(super) metrics: Option<Arc<crate::text::ParagraphMetrics>>,
-    /// Last key measured for this node. Color is not part of the hit.
-    pub(super) cached: Option<crate::text::PaintKey>,
+    /// Last geometry key measured for this node. Color is not part of the key.
+    pub(super) cached: Option<crate::text::MetricsKey>,
+    /// Foreground the frozen glyphs were last recorded with. A change repaints
+    /// without a new shape.
+    pub(super) painted: Option<PaintedForeground>,
+}
+
+/// The brushes a text node's current command carries.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PaintedForeground {
+    pub(super) color: [u8; 4],
+    pub(super) span_paints: Arc<[crate::scene::SpanPaint]>,
 }
 
 impl TextPayload {
@@ -318,6 +333,7 @@ impl TextPayload {
             editor: None,
             metrics: None,
             cached: None,
+            painted: None,
         }
     }
 
@@ -340,6 +356,8 @@ pub(super) struct ImagePayload {
 pub(super) struct PaintProps {
     pub(super) fill: Option<[u8; 4]>,
     pub(super) corner_radius: f32,
+    pub(super) corner_radii: Option<[f32; 4]>,
+    pub(super) corner_curve: f32,
     pub(super) stroke_width: f32,
     pub(super) stroke_color: [u8; 4],
     pub(super) outline_width: f32,
@@ -349,6 +367,8 @@ pub(super) struct PaintProps {
     pub(super) box_shadows: Arc<[crate::scene::BoxShadow]>,
     pub(super) blur: f32,
     pub(super) backdrop: f32,
+    pub(super) backdrop_material: Option<Arc<crate::scene::BackdropMaterial>>,
+    pub(super) color_filter: Option<Arc<crate::scene::ColorMatrix>>,
     pub(super) blend: crate::scene::BlendMode,
     pub(super) alpha: Option<u8>,
 }
@@ -357,6 +377,8 @@ impl PaintProps {
     fn is_plain(&self) -> bool {
         self.fill.is_none()
             && self.corner_radius == 0.0
+            && self.corner_radii.is_none()
+            && self.corner_curve == 2.0
             && self.stroke_width <= 0.0
             && self.outline_width <= 0.0
             && self.gradient.is_none()
@@ -374,6 +396,8 @@ impl Default for PaintProps {
         Self {
             fill: None,
             corner_radius: 0.0,
+            corner_radii: None,
+            corner_curve: 2.0,
             stroke_width: 0.0,
             stroke_color: [0, 0, 0, 0],
             outline_width: 0.0,
@@ -383,6 +407,8 @@ impl Default for PaintProps {
             box_shadows: Arc::from([]),
             blur: 0.0,
             backdrop: 0.0,
+            backdrop_material: None,
+            color_filter: None,
             blend: crate::scene::BlendMode::SrcOver,
             alpha: None,
         }
@@ -458,21 +484,29 @@ impl TransformGeom {
     /// node's border box, whose top-left is `(x, y)` in the same space as the
     /// commands being transformed.
     pub(super) fn placed(&self, x: f32, y: f32, w: f32, h: f32) -> Self {
-        let Some((ox, oy, rx, ry)) = self.pivot else {
-            return *self;
-        };
-        let px = x + ox + rx * w;
-        let py = y + oy + ry * h;
-        let (sin, cos) = self.rotate_rad.sin_cos();
-        let scaled_x = px * self.scale_x;
-        let scaled_y = py * self.scale_y;
-        let rotated_x = scaled_x * cos - scaled_y * sin;
-        let rotated_y = scaled_x * sin + scaled_y * cos;
+        let [translate_x, translate_y] = self.compositor_transform(x, y, w, h).placed();
         Self {
-            translate_x: self.translate_x + px - rotated_x,
-            translate_y: self.translate_y + py - rotated_y,
+            translate_x,
+            translate_y,
             pivot: None,
             ..*self
+        }
+    }
+
+    pub(super) fn compositor_transform(
+        &self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> crate::scene::CompositorTransform {
+        crate::scene::CompositorTransform {
+            translate: [self.translate_x, self.translate_y],
+            rotate_rad: self.rotate_rad,
+            scale: [self.scale_x, self.scale_y],
+            pivot: self
+                .pivot
+                .map(|(ox, oy, rx, ry)| [x + ox + rx * w, y + oy + ry * h]),
         }
     }
 
@@ -685,6 +719,8 @@ impl Node {
         let live = |sigma: f32| sigma.is_finite() && sigma > 0.0;
         live(self.blur())
             || live(self.backdrop())
+            || self.backdrop_material().is_some()
+            || self.color_filter().is_some()
             || self.blend() != crate::scene::BlendMode::SrcOver
     }
 
@@ -738,6 +774,16 @@ impl Node {
         self.paint.as_ref().and_then(|paint| paint.fill)
     }
 
+    pub(super) fn corners(&self) -> Option<crate::scene::CornerShape> {
+        let paint = self.paint.as_deref()?;
+        (paint.corner_radii.is_some() || paint.corner_curve != 2.0).then(|| {
+            crate::scene::CornerShape {
+                radii: paint.corner_radii.unwrap_or([paint.corner_radius; 4]),
+                curve: paint.corner_curve,
+            }
+        })
+    }
+
     pub(super) fn corner_radius(&self) -> f32 {
         self.paint
             .as_ref()
@@ -789,6 +835,14 @@ impl Node {
             .as_ref()
             .map(|paint| paint.backdrop)
             .unwrap_or(0.0)
+    }
+
+    pub(super) fn color_filter(&self) -> Option<&Arc<crate::scene::ColorMatrix>> {
+        self.paint.as_ref()?.color_filter.as_ref()
+    }
+
+    pub(super) fn backdrop_material(&self) -> Option<&Arc<crate::scene::BackdropMaterial>> {
+        self.paint.as_ref()?.backdrop_material.as_ref()
     }
 
     pub(super) fn blend(&self) -> crate::scene::BlendMode {

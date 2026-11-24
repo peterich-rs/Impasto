@@ -1,14 +1,19 @@
 import assert from "node:assert/strict";
+import { mock as testMock } from "node:test";
 import type { ViewStyle } from "@impasto/solid-renderer";
 import { installMockHost } from "../../packages/solid-ui/testing/renderTest.ts";
 
 const mock = installMockHost();
+let time = 0;
+testMock.timers.enable({ apis: ["setTimeout"] });
+testMock.method(performance, "now", () => time);
 const { scene } = await import("@impasto/solid-renderer");
 await import(new URL("./dist/quotes.js", import.meta.url).href);
 
-let time = 0;
 function frame(): void {
-  mock.flushHostFrame(time += 250);
+  time += 250;
+  testMock.timers.tick(250);
+  mock.flushHostFrame(time);
 }
 function click(label: string): void {
   try {
@@ -114,6 +119,8 @@ shown("限价", "市价");
 click("复核订单");
 click("确认订单");
 assert.ok(mock.liveTexts().some((text) => text.includes("已提交模拟订单")), mock.liveTexts().join(", "));
+for (let index = 0; index < 14; index++) frame();
+assert.ok(!mock.liveTexts().some((text) => text.includes("已提交模拟订单")), "the toast expires on its timer");
 
 click("‹ 返回");
 shown("综合指数");
@@ -135,4 +142,6 @@ frame();
 click("行情");
 shown("综合指数");
 
+testMock.timers.reset();
+testMock.restoreAll();
 console.log("stocks app interactions ok");

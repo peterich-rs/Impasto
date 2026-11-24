@@ -4,9 +4,9 @@ import { createRoot, onCleanup, untrack } from "solid-js";
 import { bindText } from "./text.ts";
 import { bindImage } from "./image.ts";
 import {
+  bindFrames,
   onFrame,
   onLayout as listenLayout,
-  runFrames,
   runLayouts,
 } from "./frames.ts";
 import { bindSlot } from "./slot.ts";
@@ -143,6 +143,8 @@ export {
   onFrame,
   onLayout,
 } from "./frames.ts";
+export type { ScrollChannel } from "../src/scene.ts";
+export { listenScrollThreshold } from "./scroll-threshold.ts";
 export { onScrollState } from "./scroll-state.ts";
 export { listenRefresh } from "./driver.ts";
 export { bindListRenderer } from "./list-binding.ts";
@@ -249,9 +251,7 @@ export function boot(component: () => Node) {
   }
   overlayId = overlay;
   // The shell flushes the graph around these listeners. They only write signals.
-  scene.onFrame((targetMs: number, intervalMs: number) => {
-    runFrames(targetMs, intervalMs);
-  });
+  bindFrames((callback) => scene.onFrame(callback));
   scene.onLayout(() => {
     runLayouts();
   });

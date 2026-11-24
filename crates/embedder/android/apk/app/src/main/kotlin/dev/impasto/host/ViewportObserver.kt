@@ -139,7 +139,9 @@ internal class ViewportObserver(private val activity: Activity, private val view
             }
         }
         for (cutout in insets?.displayCutout?.boundingRects.orEmpty()) add(cutout, 3, 0, false, location)
-        val display = Display(screen.displayId, screen.refreshRate, view.density, features)
+        // Choreographer uses the per-app rate. Window metrics use the physical mode
+        // so a compositor cadence vote does not wake UI and cancel its own handoff.
+        val display = Display(screen.displayId, screen.mode.refreshRate, view.density, features)
         if (display == lastDisplay) return
         lastDisplay = display
         val data = features.flatMap { feature ->

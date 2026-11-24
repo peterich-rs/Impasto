@@ -11,8 +11,11 @@ mod entry;
 mod extension;
 pub use entry::TrustedBytecode;
 pub(crate) mod native_resource;
+mod sampling;
 mod vm;
+
 pub use extension::{ExtensionContext, exception_text};
+pub use sampling::StackSample;
 pub use vm::JobReport;
 #[cfg(test)]
 pub(crate) use vm::acquires;

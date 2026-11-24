@@ -13,8 +13,8 @@ use ndk::asset::AssetManager;
 use ndk::native_window::NativeWindow;
 
 use super::{
-    Attach, IME_HIDE, IME_UPDATE, Viewport, attach, configure_window_buffers, destroy_surface,
-    detach, edit_event, host, open_surface, pixel_size, publish_metrics, release_window,
+    Attach, IME_HIDE, IME_UPDATE, Viewport, attach, destroy_surface, detach, edit_event, host,
+    open_surface, pixel_size, publish_metrics, release_window,
 };
 use crate::insets::scene_point;
 use crate::motion::android_wheel;
@@ -290,6 +290,50 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeAttachWindow<'lo
     })
 }
 
+fn valid_texture_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeHardwareTexture<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JObject<'local>,
+    handle: jlong,
+    name: JString<'local>,
+    width: jint,
+    height: jint,
+    image: JObject<'local>,
+) -> jboolean {
+    with_env(&mut env, |env| {
+        let Some(host) = host(handle) else {
+            return Ok(false);
+        };
+        let Some(name) = java_string(env, &name)?.filter(|name| valid_texture_name(name)) else {
+            return Ok(false);
+        };
+        let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height)) else {
+            return Ok(false);
+        };
+        if image.is_null() || !(1..=2_073_600).contains(&(u64::from(width) * u64::from(height))) {
+            return Ok(false);
+        }
+        let frame = Arc::new(super::hardware_frame::HardwareFrame::new(
+            env.get_java_vm()?,
+            env.new_global_ref(&image)?,
+            raster::PixelSize::new(width, height),
+        ));
+        host.link.post(Command::ExternalGpuTexture {
+            source: format!("external:{name}"),
+            frame: Some(Box::new(move |raster| frame.image(raster))),
+        });
+        Ok(true)
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeExternalTexture<'local>(
     mut env: EnvUnowned<'local>,
@@ -307,12 +351,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeExternalTexture<
         let Some(name) = java_string(env, &name)? else {
             return Ok(());
         };
-        if name.is_empty()
-            || name.len() > 64
-            || !name
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
-        {
+        if !valid_texture_name(&name) {
             return Ok(());
         }
         let frame = if bytes.is_null() {
@@ -696,10 +735,8 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSurfaceChanged(
     host.ui(|ui| {
         let pixels = pixel_size(width, height);
         if let Some(window) = ui.window.as_mut()
-            && pixels.is_usable()
             && pixels != window.pixels
         {
-            configure_window_buffers(&window.native, width, height);
             window.pixels = pixels;
         }
     });

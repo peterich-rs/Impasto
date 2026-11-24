@@ -2,7 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
@@ -30,7 +30,6 @@ use objc2_foundation::{
 };
 
 use crate::text_client::Marked;
-use objc2_metal::{MTLCreateSystemDefaultDevice, MTLPixelFormat};
 use objc2_quartz_core::{CALayer, CAMetalLayer};
 
 use crate::pointer::{PointerSample, pointer_event, scene_f32};
@@ -844,7 +843,7 @@ struct MacServices {
 const SOURCE_MAP_CAP: u64 = 512 * 1024;
 
 fn load_source_map(script: &str) -> Option<Arc<String>> {
-    let path = std::path::Path::new(script).with_extension("js.map");
+    let path = Path::new(script).with_extension("js.map");
     let meta = std::fs::metadata(&path).ok()?;
     if meta.len() > SOURCE_MAP_CAP {
         return None;
@@ -953,7 +952,7 @@ pub fn run(
             "AppKit must start on the main thread"
         )));
     };
-    let vsync = DisplayLink::new().map_err(RunError::Window)?;
+    let vsync = Arc::new(DisplayLink::new().map_err(RunError::Window)?);
     let inspect = std::env::var_os("IMPASTO_INSPECT").map(PathBuf::from);
     let dump = std::env::var_os("IMPASTO_DUMP")
         .map(PathBuf::from)
@@ -966,6 +965,9 @@ pub fn run(
         modules,
     } = launch;
     let devtools_source_map = load_source_map(&name);
+    let gallery = Path::new(&name)
+        .file_name()
+        .is_some_and(|name| name == "quotes.js");
     let inspect_dir = std::env::var_os("IMPASTO_INSPECT").map(PathBuf::from);
     let embedder_launch = EmbedderLaunch::Session(Box::new(move |open, host| {
         let host = modules
@@ -1011,7 +1013,7 @@ pub fn run(
                 font: font.to_vec(),
                 ime_view: Arc::clone(&ime_view),
             }),
-            vsync: Arc::new(vsync),
+            vsync: Arc::clone(&vsync) as Arc<dyn embedder::Vsync>,
             decoder,
             modules: Vec::new(),
             platform_runner: Some(embedder::PlatformTaskRunner::new(
@@ -1026,13 +1028,16 @@ pub fn run(
                 embedder::http_client()
                     .map_err(|message| RunError::Window(anyhow::anyhow!(message)))?,
             ),
-            open_raster: Box::new(raster::Rasterizer::create_metal),
-            open_surface: Box::new(move |_engine, target| {
-                Ok(Box::new(MetalSurface::new(
-                    target.layer,
+            open_raster: Box::new(|fonts| {
+                raster::Rasterizer::create(raster::RasterOptions::default(), fonts)
+            }),
+            open_surface: Box::new(move |raster, target| {
+                Ok(Box::new(MetalSurface::open(
+                    raster,
+                    target,
                     dump_for_surface.clone(),
                     Arc::clone(&exit_for_surface),
-                )))
+                )?))
             }),
             dump_list,
             inspect,
@@ -1048,7 +1053,8 @@ pub fn run(
         ))
         .with_module(embedder::file_system(Arc::clone(&mac) as _))
         .with_module(embedder::async_storage(Arc::clone(&mac) as _))
-        .with_module(embedder::permissions(mac as _)),
+        .with_module(embedder::permissions(mac as _))
+        .with_gallery_gpu_view(gallery),
     )
     .map_err(RunError::Boot)?;
 
@@ -1071,21 +1077,14 @@ pub fn run(
             false,
         )
     };
+    vsync.attach(&window, mtm);
     window.setTitle(&NSString::from_str("impasto counter"));
     window.setAcceptsMouseMovedEvents(true);
     // SAFETY: `HostState` keeps this window retained until the process leaves `run`.
     unsafe { window.setReleasedWhenClosed(false) };
 
     let scale = point_scale(&window, mtm);
-    let Some(device) = MTLCreateSystemDefaultDevice() else {
-        return Err(RunError::Window(anyhow::anyhow!(
-            "Metal device was not created"
-        )));
-    };
     let layer = CAMetalLayer::layer();
-    layer.setDevice(Some(&device));
-    layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-    layer.setFramebufferOnly(false);
     layer.setContentsScale(scale);
     layer.setFrame(frame);
     layer.setDrawableSize(CGSize::new(CONTENT_WIDTH * scale, CONTENT_HEIGHT * scale));
@@ -1156,11 +1155,20 @@ impl embedder::ImageDecoder for PngDecoder {
         source: &str,
         scale_bucket: u8,
     ) -> Result<embedder::ImageHandle, embedder::ImageError> {
+        self.decode_sized(source, scale_bucket, None)
+    }
+
+    fn decode_sized(
+        &self,
+        source: &str,
+        scale_bucket: u8,
+        target: Option<embedder::DecodeTarget>,
+    ) -> Result<embedder::ImageHandle, embedder::ImageError> {
         let scale = f32::from(scale_bucket.max(1));
         let Some(path) = crate::assets::resolve_asset_path(&self.directory, source, scale) else {
             return Err(embedder::ImageError::Missing);
         };
-        let rgba = crate::pixels::load_rgba_png(&path)
+        let rgba = crate::pixels::load_rgba_png(&path, target)
             .map_err(|error| embedder::ImageError::Failed(error.to_string()))?;
         Ok(image_handle(source, rgba))
     }
@@ -1170,7 +1178,16 @@ impl embedder::ImageDecoder for PngDecoder {
         source: &str,
         bytes: &[u8],
     ) -> Result<embedder::ImageHandle, embedder::ImageError> {
-        let rgba = crate::pixels::load_rgba_bytes(bytes)
+        self.decode_bytes_sized(source, bytes, None)
+    }
+
+    fn decode_bytes_sized(
+        &self,
+        source: &str,
+        bytes: &[u8],
+        target: Option<embedder::DecodeTarget>,
+    ) -> Result<embedder::ImageHandle, embedder::ImageError> {
+        let rgba = crate::pixels::load_rgba_bytes(bytes, target)
             .map_err(|error| embedder::ImageError::Failed(error.to_string()))?;
         Ok(image_handle(source, rgba))
     }
@@ -1480,7 +1497,7 @@ fn dispatch_main_after(delay: std::time::Duration, work: embedder::Task) {
     }
 }
 
-fn on_main(work: embedder::Task) {
+pub(crate) fn on_main(work: embedder::Task) {
     if MainThreadMarker::new().is_some() {
         work();
     } else {

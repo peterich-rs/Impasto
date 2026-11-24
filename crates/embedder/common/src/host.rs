@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 use engine::session::FrameTime;
 
 use crate::command::{Command, SurfaceId, SurfaceTarget};
+use crate::diagnostics::TelemetryHub;
+use crate::diagnostics::telemetry::{ScheduleTiming, TelemetryProfile, mono_ns, mono_ns_at};
 use crate::error::BootError;
 use crate::images::{self, ImageCache, ImageDecoder, ImageError, ImageReady, ImageRequest};
 use crate::input::{FrameInput, Input};
@@ -25,11 +27,10 @@ use crate::{
 };
 
 mod cache_cmds;
+mod compositor_animation;
 mod frame_cmds;
 mod raster_host;
-use raster_host::{
-    FrameSubmission, RasterCompletion, RasterHost, RasterPort, install_fonts, raster_frame,
-};
+use raster_host::{FrameSubmission, RasterCompletion, RasterHost, RasterPort, raster_frame};
 mod session_cmds;
 mod surface_cmds;
 
@@ -673,7 +674,47 @@ fn run_boot(
     runners: TaskRunners,
     startup: &Startup,
 ) -> Result<UiHost, BootError> {
+    let trace_path =
+        std::env::var_os("IMPASTO_TRACE").filter(|path| !path.is_empty() && path != "1");
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    let remote = crate::diagnostics::remote::Config::configured(boot.log_dir.as_deref());
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    let remote_enabled = remote.is_some();
+    #[cfg(not(any(debug_assertions, feature = "devtools-server")))]
+    let remote_enabled = false;
+    let profile = TelemetryProfile::configured(boot.devtools.is_some());
+    let profile = if remote_enabled && std::env::var_os("IMPASTO_TELEMETRY").is_none() {
+        profile.max(TelemetryProfile::Counters)
+    } else {
+        profile
+    };
+    let telemetry = boot.devtools.clone().or_else(|| {
+        (profile != TelemetryProfile::Off || trace_path.is_some() || remote_enabled)
+            .then(|| Arc::new(TelemetryHub::new()))
+    });
+    if let Some(hub) = &telemetry {
+        hub.set_profile(profile);
+    }
+    let enable_gpu_timing = trace_path.is_some()
+        || remote_enabled
+        || profile == TelemetryProfile::GpuAndTimeline
+        || (boot.devtools.is_some() && cfg!(debug_assertions) && profile != TelemetryProfile::Off);
+    if telemetry.is_some() || boot.inspect.is_some() || boot.inspect_dir.is_some() {
+        mono_ns();
+    }
+    let capture_runner = Arc::clone(&runners.io);
     crate::log_sub::install(boot.log_dir.as_deref(), boot.devtools.clone());
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    let remote = match (remote, telemetry.clone()) {
+        (Some(config), Some(hub)) => match crate::diagnostics::remote::Server::start(config, hub) {
+            Ok(server) => Some(server),
+            Err(error) => {
+                tracing::warn!(target: "impasto::devtools", %error, "DevTools listener unavailable");
+                None
+            }
+        },
+        _ => None,
+    };
     let upload = Arc::new(Mutex::new(None));
     if let Some(hub) = boot.devtools.as_ref() {
         install_panic_hook(Arc::clone(hub));
@@ -693,17 +734,23 @@ fn run_boot(
             let inbox = Arc::clone(&inbox);
             let http = http.clone();
             let upload = Arc::clone(&upload);
+            let request_id = request.generation;
+            tracing::event!(name: "image_requested", target: "impasto::io", tracing::Level::DEBUG,
+                trace_event = true, request_id);
             io.post(Box::new(move || {
-                inbox.post(Command::ImageReady(decode_one(
-                    decoder.as_ref(),
-                    http.as_deref(),
-                    &request,
-                    &upload,
-                )));
+                let _job = tracing::debug_span!(target: "impasto::io", "image_job", request_id, queue = "io").entered();
+                let result = decode_one(decoder.as_ref(), http.as_deref(), &request, &upload);
+                tracing::event!(name: "image_ready", target: "impasto::io", tracing::Level::DEBUG,
+                    trace_event = true, request_id);
+                inbox.post(Command::ImageReady(result));
             }))
         }
     });
-    open_ui(
+    let startup_capture = trace_path.zip(telemetry.clone()).and_then(|(path, hub)| {
+        let id = hub.start_trace(path.into(), true)?;
+        Some((id, hub))
+    });
+    let runtime = open_ui(
         boot,
         fonts,
         inbox,
@@ -713,8 +760,25 @@ fn run_boot(
             load_image,
             http,
             upload,
+            telemetry,
+            enable_gpu_timing,
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            remote,
         },
-    )
+    );
+    if let Some((id, hub)) = startup_capture {
+        if runtime.is_ok() {
+            capture_runner.post_delayed(Duration::from_secs(5), Box::new(move || {
+                match hub.finish_trace(id) {
+                    Ok(path) => tracing::info!(target: "impasto::trace", path = %path.display(), "trace exported"),
+                    Err(error) => tracing::warn!(target: "impasto::trace", %error, "trace export failed"),
+                }
+            }));
+        } else {
+            hub.cancel_capture(id);
+        }
+    }
+    runtime
 }
 
 type ImageLoader = Arc<dyn Fn(ImageRequest) -> bool + Send + Sync>;
@@ -726,14 +790,26 @@ fn decode_one(
     upload: &Mutex<Option<raster::TextureFactory>>,
 ) -> ImageReady {
     let result = if request.source.starts_with("https://") {
-        match crate::http::fetch_image_body(http, &request.source) {
-            Ok(bytes) => decoder.decode_bytes(&request.source, &bytes),
+        let body = {
+            let _span =
+                tracing::debug_span!(target: "impasto::io", "image_fetch", request_id = request.generation)
+                    .entered();
+            crate::http::fetch_image_body(http, &request.source)
+        };
+        let _span =
+            tracing::debug_span!(target: "impasto::io", "image_decode", request_id = request.generation)
+                .entered();
+        match body {
+            Ok(bytes) => decoder.decode_bytes_sized(&request.source, &bytes, request.target),
             Err(error) => Err(ImageError::Failed(error)),
         }
     } else if request.source.starts_with("http://") {
         Err(ImageError::Failed("image URL must be https".into()))
     } else {
-        decoder.decode_at(&request.source, request.scale_bucket)
+        let _span =
+            tracing::debug_span!(target: "impasto::io", "image_decode", request_id = request.generation)
+                .entered();
+        decoder.decode_sized(&request.source, request.scale_bucket, request.target)
     };
     match result {
         Ok(mut handle) => {
@@ -747,7 +823,13 @@ fn decode_one(
             handle.source = Arc::clone(&request.source);
             handle.generation = request.generation;
             {
-                let factory = lock(upload);
+                let _span = tracing::debug_span!(
+                    target: "impasto::io",
+                    "image_upload",
+                    request_id = request.generation
+                )
+                .entered();
+                let factory = lock(upload).clone();
                 images::attach_upload(&mut handle, factory.as_ref());
             }
             ImageReady::Decoded(handle)
@@ -769,7 +851,7 @@ struct Installed {
 }
 
 pub(crate) struct UiHost {
-    typography: Rc<RefCell<raster::Typography>>,
+    shaper: Rc<RefCell<raster::ParleyShaper>>,
     graphics: RasterPort,
     active_surface: Option<SurfaceId>,
     try_surface: bool,
@@ -786,8 +868,20 @@ pub(crate) struct UiHost {
     input: Input,
     scheduler: FrameScheduler,
     vsync: Arc<dyn crate::Vsync>,
+    last_vsync: Option<FrameTime>,
+    compositor_mode: Arc<compositor_animation::CompositorMode>,
+    compositor_enabled: bool,
+    compositor_epoch: u64,
+    compositor_generation: Option<u64>,
+    animated_effects: bool,
+    gpu_views: bool,
     point_scale: f32,
     frame_number: u64,
+    topology: ThreadTopology,
+    telemetry: Option<Arc<TelemetryHub>>,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    _remote: Option<crate::diagnostics::remote::Server>,
+    gpu_poll: bool,
     semantics: Option<engine::semantics::SemanticsUpdate>,
     semantics_enabled: bool,
     autofill_enabled: bool,
@@ -834,6 +928,7 @@ impl UiHost {
 
 impl Drop for UiHost {
     fn drop(&mut self) {
+        self.compositor_mode.cancel();
         self.vsync.cancel();
         self.session.take();
         self.graphics.retire();
@@ -867,6 +962,10 @@ impl FramePipeline {
 
 struct RenderLinks {
     load_image: ImageLoader,
+    telemetry: Option<Arc<TelemetryHub>>,
+    enable_gpu_timing: bool,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    remote: Option<crate::diagnostics::remote::Server>,
     http: Option<Arc<dyn crate::http::HttpClient>>,
     upload: Arc<Mutex<Option<raster::TextureFactory>>>,
 }
@@ -912,20 +1011,15 @@ fn open_ui(
         extras,
     } = fonts;
     let split = runners.ui.queue_id() != runners.raster.queue_id();
-    let ui_typography = if split {
-        let mut typography = raster::Typography::standalone().map_err(BootError::Engine)?;
-        typography
-            .register_shared_face(Arc::clone(&primary), &family)
-            .map_err(BootError::Engine)?;
-        for (family, bytes) in &extras {
-            if let Err(status) = typography.register_shared_face(Arc::clone(bytes), family) {
-                tracing::warn!(target: "impasto::shell", %family, %status, "font registration failed");
-            }
-        }
-        Some(Rc::new(RefCell::new(typography)))
-    } else {
-        None
-    };
+    let library = raster::FontLibrary::new();
+    let mut shaper = raster::ParleyShaper::new(library.clone());
+    if !shaper.register_shared(&family, primary) {
+        return Err(BootError::Font(family));
+    }
+    for (family, bytes) in extras {
+        shaper.register_shared(&family, bytes);
+    }
+    let shaper = Rc::new(RefCell::new(shaper));
     let raster_busy = Arc::new(crate::watchdog::Busy::new());
     if split {
         crate::watchdog::spawn(
@@ -937,14 +1031,16 @@ fn open_ui(
     let raster_clock = Arc::clone(&runners.raster);
     let open = boot.open_raster;
     let open_surface = boot.open_surface;
+    let raster_telemetry = links.telemetry.clone();
     let create = move || {
-        let mut raster = open().map_err(BootError::Engine)?;
-        raster
-            .register_shared_font(primary, &family)
-            .map_err(BootError::Engine)?;
-        install_fonts(&mut raster, extras);
+        let mut raster = open(library).map_err(BootError::Engine)?;
+        if links.enable_gpu_timing {
+            raster.enable_gpu_timing();
+        }
         Ok::<_, BootError>(RasterHost {
             raster: Rc::new(RefCell::new(raster)),
+            telemetry: raster_telemetry,
+            gpu_poll_pending: false,
             surfaces: SurfaceHost::new(),
             open_surface,
             external_textures: Default::default(),
@@ -963,7 +1059,7 @@ fn open_ui(
             busy: raster_busy,
         })
     };
-    let (graphics, typography) = if let Some(typography) = ui_typography {
+    let graphics = if split {
         let slot = Arc::new(RunnerSlot::new(Arc::clone(&runners.raster)));
         let target = Arc::clone(&slot);
         let (ready, response) = mpsc::sync_channel(1);
@@ -972,16 +1068,14 @@ fn open_ui(
             let _ = ready.send(result);
         }));
         response.recv().map_err(|_| BootError::Panicked)??;
-        (RasterPort::Remote(slot), typography)
+        RasterPort::Remote(slot)
     } else {
-        let graphics = create()?;
-        let typography = graphics.raster.borrow().typography();
-        (RasterPort::Local(Box::new(graphics)), typography)
+        RasterPort::Local(Box::new(create()?))
     };
     startup.checkpoint()?;
     let Launch::Session(open) = boot.launch;
     let parts = crate::SessionOpen {
-        shaper: Box::new(raster::ImpellerShaper::new(Rc::clone(&typography))),
+        shaper: Box::new(Rc::clone(&shaper)),
         log: console_log(),
     };
     let app_state = engine::session::shared("active".to_owned());
@@ -1064,15 +1158,28 @@ fn open_ui(
     };
     let inbox_frames = Arc::clone(inbox);
     let frame_clock = Arc::clone(&runners.ui);
+    let compositor_mode = Arc::new(compositor_animation::CompositorMode::default());
+    let route_mode = Arc::clone(&compositor_mode);
+    let render_queue = match &graphics {
+        RasterPort::Remote(slot) => Some(Arc::downgrade(slot)),
+        RasterPort::Local(_) => None,
+    };
+    let frame_vsync = Arc::downgrade(&boot.vsync);
     boot.vsync.bind(Arc::new(move |token, mut time| {
         time.mono_ms = frame_clock.monotonic_ms();
-        inbox_frames.post(Command::Frame { token, time });
+        if compositor_animation::CompositorMode::is_raster_token(token) {
+            if let Some(slot) = render_queue.as_ref().and_then(std::sync::Weak::upgrade) {
+                route_mode.route(&slot, &inbox_frames, &frame_vsync, token, time);
+            }
+        } else {
+            inbox_frames.post(Command::Frame { token, time });
+        }
     }));
     let busy = Arc::new(crate::watchdog::Busy::new());
     crate::watchdog::spawn("ui", Arc::downgrade(&busy), boot.devtools.clone());
     Ok(UiHost {
         graphics,
-        typography,
+        shaper,
         active_surface: None,
         try_surface: false,
         revision: 0,
@@ -1087,8 +1194,20 @@ fn open_ui(
         input: Input::new(),
         scheduler: FrameScheduler::new(),
         vsync: boot.vsync,
+        last_vsync: None,
+        compositor_mode,
+        compositor_enabled: split && std::env::var("IMPASTO_COMPOSITOR").as_deref() != Ok("0"),
+        compositor_epoch: 0,
+        compositor_generation: None,
+        animated_effects: false,
+        gpu_views: false,
         point_scale: 1.0,
         frame_number: 0,
+        topology: boot.thread_topology,
+        telemetry: links.telemetry,
+        #[cfg(any(debug_assertions, feature = "devtools-server"))]
+        _remote: links.remote,
+        gpu_poll: false,
         semantics: None,
         semantics_enabled: true,
         autofill_enabled: false,
@@ -1097,7 +1216,7 @@ fn open_ui(
         wake: WakeTimer::new(runners.ui, Arc::clone(inbox)),
         dump_list: boot.dump_list,
         present_retry_at: None,
-        listeners: frame_listeners(boot.devtools.clone()),
+        listeners: frame_listeners(),
         inspect: boot.inspect,
         hub: boot.devtools.clone(),
         inspect_dir: boot.inspect_dir,
@@ -1116,7 +1235,7 @@ fn update_source(runtime: &mut UiHost, revision: &str, source: &str) {
     let now = runtime.wake.runner.monotonic_ms();
     let result = session.update_source(
         source,
-        Box::new(raster::ImpellerShaper::new(Rc::clone(&runtime.typography))),
+        Box::new(Rc::clone(&runtime.shaper)),
         FrameTime {
             vsync_ms: now,
             target_ms: now,
@@ -1206,7 +1325,25 @@ fn fault_followup(diag_armed: bool, faults: &[engine::session::ScriptFault]) -> 
 
 fn on_command(runtime: &mut UiHost, command: Command, acks: &Acks) -> Result<bool, BootError> {
     runtime.busy.enter(crate::command::command_tag(&command));
+    let wake_command = matches!(command, Command::Wake);
+    let interrupted = if matches!(
+        command,
+        Command::Frame { .. } | Command::CommitCompositorState { .. }
+    ) {
+        false
+    } else {
+        runtime.compositor_epoch = runtime.compositor_epoch.wrapping_add(1);
+        compositor_animation::stop(runtime, None)?
+    };
     let result = dispatch_command(runtime, command, acks);
+    if interrupted
+        && !wake_command
+        && matches!(result, Ok(false))
+        && !runtime.input.is_paused()
+        && !runtime.scheduler.token_armed()
+    {
+        arm(runtime);
+    }
     runtime.busy.leave();
     result
 }
@@ -1249,6 +1386,26 @@ fn dispatch_command(
         | Command::ReloadImage(_)) => cache_cmds::handle(runtime, command),
         command @ (Command::Wake | Command::Frame { .. }) => {
             frame_cmds::handle(runtime, command, acks)
+        }
+        Command::CommitCompositorState {
+            generation,
+            snapshot,
+            time,
+        } => {
+            if runtime.compositor_generation != Some(generation) {
+                return Ok(false);
+            }
+            compositor_animation::stop(runtime, snapshot)?;
+            if runtime.input.is_paused() {
+                return Ok(false);
+            }
+            if let Some(time) = time
+                && let Some(token) = runtime.scheduler.request()
+            {
+                return frame_cmds::handle(runtime, Command::Frame { token, time }, acks);
+            }
+            arm(runtime);
+            Ok(false)
         }
     }
 }
@@ -1305,12 +1462,48 @@ fn layer_tree_line(tree: &engine::scene::LayerTree) -> String {
     )
 }
 
-fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, BootError> {
-    use engine::session::trace::Section;
+fn ms_to_ns(ms: f64) -> u64 {
+    Duration::try_from_secs_f64(ms / 1_000.0)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
+        .unwrap_or_default()
+}
 
-    let _frame_trace = Section::begin(c"Impasto frame");
+fn next_frame_number() -> u64 {
+    static NEXT_FRAME: AtomicU64 = AtomicU64::new(1);
+    NEXT_FRAME.fetch_add(1, Ordering::Relaxed)
+}
+
+fn on_frame(
+    runtime: &mut UiHost,
+    time: FrameTime,
+    from_vsync: bool,
+    acks: &Acks,
+) -> Result<bool, BootError> {
     let frame_started = Instant::now();
+    let counters = runtime
+        .telemetry
+        .as_ref()
+        .is_some_and(|hub| hub.collects_frames());
+    let inspect = runtime.inspect.is_some() || runtime.inspect_dir.is_some();
+    let mut schedule = (counters || inspect).then(|| {
+        let ui_start_ns = mono_ns_at(frame_started);
+        // FrameTime::mono_ms was stamped when the callback posted to the
+        // inbox. Use that runner's elapsed time so custom epochs also work.
+        let vsync_ns = from_vsync.then(|| {
+            let queued_ms = (runtime.wake.runner.monotonic_ms() - time.mono_ms).max(0.0);
+            ui_start_ns.saturating_sub(ms_to_ns(queued_ms))
+        });
+        ScheduleTiming {
+            vsync_ns,
+            ui_start_ns,
+            topology: runtime.topology,
+            budget_ns: ms_to_ns(time.interval_ms),
+            ..ScheduleTiming::default()
+        }
+    });
     if !runtime.frames.has_room() {
+        skipped_frame("queue_full");
         return Ok(end_frame(runtime, false, false));
     }
     let attempt = if runtime.try_surface || matches!(runtime.graphics, RasterPort::Local(_)) {
@@ -1329,11 +1522,38 @@ fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, 
                     acks.signal(old);
                 }
             }
-            OpenedSurface::Waiting => return Ok(end_frame(runtime, false, false)),
+            OpenedSurface::Waiting => {
+                skipped_frame("surface_waiting");
+                return Ok(end_frame(runtime, false, false));
+            }
         }
     }
     if runtime.active_surface.is_none() {
+        skipped_frame("no_surface");
         return Ok(end_frame(runtime, false, false));
+    }
+    runtime.frame_number = next_frame_number();
+    let capture_frame = schedule.and_then(|schedule| {
+        runtime
+            .telemetry
+            .as_ref()?
+            .track_frame(schedule.ui_start_ns)
+    });
+    let frame_span = tracing::info_span!(
+        target: "impasto::frame",
+        "frame",
+        frame = runtime.frame_number,
+        queue = "ui",
+        topology = runtime.topology.name(),
+        vsync_ms = time.vsync_ms,
+        target_ms = time.target_ms
+    );
+    let entered = frame_span.enter();
+    if from_vsync {
+        let vsync_us = ms_to_ns(time.mono_ms) / 1_000;
+        tracing::debug!(target: "impasto::frame", id = runtime.frame_number, vsync_us, "Impasto frame");
+    } else {
+        tracing::debug!(target: "impasto::frame", id = runtime.frame_number, "Impasto frame");
     }
     let frame = runtime.input.begin_frame();
     if let Some(metrics) = frame.metrics {
@@ -1343,7 +1563,7 @@ fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, 
         }
     }
     let gesture_started = Instant::now();
-    let input_trace = Section::begin(c"Impasto input");
+    let input_trace = tracing::debug_span!(target: "impasto::frame", "input").entered();
     let mut leave = false;
     if let Some(session) = runtime.session.as_mut() {
         for event in frame.events {
@@ -1371,41 +1591,27 @@ fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, 
     }
     let gesture_ms = gesture_started.elapsed().as_secs_f64() * 1000.0;
     drop(input_trace);
-    runtime.frame_number = runtime.frame_number.wrapping_add(1);
-    Section::event(|| {
-        if time.target_ms > time.vsync_ms {
-            format!(
-                "Impasto frame id={} vsync_us={:.0} target_us={:.0}",
-                runtime.frame_number,
-                time.vsync_ms * 1000.0,
-                time.target_ms * 1000.0,
-            )
-        } else {
-            format!("Impasto frame id={}", runtime.frame_number)
-        }
-    });
-    let frame_span = tracing::error_span!(
-        target: "impasto::render",
-        "frame",
-        frame = runtime.frame_number
-    );
-    let _entered = frame_span.enter();
     let session_started = Instant::now();
     let mut again;
     let mut reloads = Vec::new();
-    let mut fonts = Vec::new();
     let mut census = None;
     let mut layers_changed = false;
     let mut placements_changed = false;
     let mut phases = None;
+    let mut runtime_sample = None;
     let mut layout_report = None;
+    let mut compositor_epoch = None;
     if let Some(session) = runtime.session.as_mut() {
+        session.set_counters(counters);
         let framed = {
-            let _trace = Section::begin(c"Impasto session");
+            let _trace = tracing::debug_span!(target: "impasto::frame", "session").entered();
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.frame(time)))
         };
         match framed {
             Ok(mut output) => {
+                if counters && runtime.frame_number.is_multiple_of(30) {
+                    runtime_sample = session.runtime_sample();
+                }
                 again = output.again;
                 leave = output.exit;
                 let faults = session.take_faults();
@@ -1424,9 +1630,6 @@ fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, 
                         );
                     }
                 }
-                if plan.arm_extra {
-                    arm(runtime);
-                }
                 if let Some(tree) = output.layers.take() {
                     if runtime.dump_list {
                         tracing::debug!(
@@ -1436,8 +1639,47 @@ fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, 
                         );
                     }
                     runtime.image_requirements = tree.image_requirements().into();
+                    runtime.animated_effects = tree.has_animated_effects();
+                    runtime.gpu_views = tree.has_gpu_views();
                     runtime.latest = Some(tree);
                     layers_changed = true;
+                }
+                if !frame.paused
+                    && !leave
+                    && faults.is_empty()
+                    && let Some(tree) = runtime.latest.as_ref()
+                    && (again || runtime.animated_effects || runtime.gpu_views)
+                {
+                    use engine::scene::CompositorBlockReason;
+                    let has_compositor_work =
+                        !tree.tracks.is_empty() || runtime.animated_effects || runtime.gpu_views;
+                    let eligible = session.compositor_eligibility(&tree.tracks).and({
+                        if !has_compositor_work || runtime.compositor_enabled {
+                            Ok(())
+                        } else if matches!(runtime.graphics, RasterPort::Local(_)) {
+                            Err(CompositorBlockReason::SharedTopology)
+                        } else {
+                            Err(CompositorBlockReason::Disabled)
+                        }
+                    });
+                    match eligible {
+                        Ok(()) if has_compositor_work => {
+                            compositor_epoch = Some(runtime.compositor_epoch);
+                        }
+                        Ok(()) => {}
+                        Err(reason) => {
+                            if let Some(schedule) = schedule.as_mut() {
+                                schedule.compositor_block = Some(reason);
+                            }
+                            tracing::event!(name: "compositor_deferred", target: "impasto::compositor",
+                                tracing::Level::DEBUG, trace_event = true, queue = "ui",
+                                status = reason.name(), node = reason.node(),
+                                active_tracks = tree.tracks.len());
+                        }
+                    }
+                }
+                if plan.arm_extra {
+                    arm(runtime);
                 }
                 if let Some(text) = output.clipboard.take()
                     && let Err(message) = runtime.registry.call(
@@ -1452,7 +1694,8 @@ fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, 
                     crate::ime::publish_update(&update, &runtime.services);
                 }
                 if let Some(patch) = output.semantics.take() {
-                    let _trace = Section::begin(c"Impasto accessibility");
+                    let _trace =
+                        tracing::debug_span!(target: "impasto::frame", "accessibility").entered();
                     fold_semantics(&mut runtime.semantics, &patch);
                     if let Some(update) = runtime.semantics.as_ref() {
                         let services = runtime.services.borrow();
@@ -1468,7 +1711,6 @@ fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, 
                     placements_changed = true;
                 }
                 reloads = std::mem::take(&mut output.reloads);
-                fonts = std::mem::take(&mut output.fonts);
                 census = output.images.take();
                 phases = output.phases.take();
                 layout_report = output.layout_report.take();
@@ -1492,21 +1734,24 @@ fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, 
     if leave {
         runtime.services.borrow().request_exit();
     }
-    let split = matches!(&runtime.graphics, RasterPort::Remote(_));
-    let submission = FrameSubmission {
+    let mut submission = FrameSubmission {
+        capture_frame,
+        sample_gpu: runtime
+            .telemetry
+            .as_ref()
+            .is_some_and(|hub| hub.collects_gpu()),
         revision: runtime.revision,
         number: runtime.frame_number,
         time,
         frame_started,
+        schedule,
+        telemetry: runtime.telemetry.clone().filter(|_| counters),
+        runtime_sample,
         session_ms: elapsed_ms(session_started),
         gesture_ms,
         phases: phases.unwrap_or_default(),
         layout_report,
-        measure: if split {
-            runtime.typography.borrow_mut().take_shape_stats()
-        } else {
-            raster::ShapeStats::default()
-        },
+        measure: runtime.shaper.borrow_mut().take_shape_stats(),
         scale: runtime.point_scale,
         paused: frame.paused,
         again,
@@ -1516,10 +1761,17 @@ fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, 
         placements_changed,
         layers_changed,
         reloads,
-        fonts,
         census,
         hub: runtime.hub.clone(),
+        compositor_epoch,
+        compositor_frame: false,
+        animated_effects: runtime.animated_effects,
+        gpu_views: runtime.gpu_views,
     };
+    drop(entered);
+    if let Some(schedule) = submission.schedule.as_mut() {
+        schedule.ui_done_ns = mono_ns();
+    }
     match &mut runtime.graphics {
         RasterPort::Local(graphics) => {
             let completion = raster_frame(graphics, submission, false, || {
@@ -1544,15 +1796,23 @@ fn on_frame(runtime: &mut UiHost, time: FrameTime, acks: &Acks) -> Result<bool, 
                 }));
             }));
             if !run {
+                skipped_frame("raster_closed");
                 return Err(BootError::Panicked);
             }
             Ok(end_frame(
                 runtime,
-                again && runtime.frames.in_flight < FramePipeline::DEPTH,
+                compositor_epoch.is_none()
+                    && again
+                    && runtime.frames.in_flight < FramePipeline::DEPTH,
                 false,
             ))
         }
     }
+}
+
+fn skipped_frame(status: &'static str) {
+    tracing::event!(name: "frame_skipped", target: "impasto::frame", tracing::Level::DEBUG,
+        trace_event = true, queue = "ui", status);
 }
 
 fn finish_raster_frame(
@@ -1561,12 +1821,17 @@ fn finish_raster_frame(
     split: bool,
 ) -> Result<bool, BootError> {
     let waiting = split && runtime.frames.complete();
+    let completion = completion?;
+    let activated = split && compositor_animation::activate(runtime, &completion);
     let RasterCompletion {
         submission,
         output,
         surface,
         retry_at,
-    } = completion?;
+    } = completion;
+    if !activated && output.gpu_pending {
+        schedule_gpu_poll(runtime);
+    }
     if let Some(timing) = output.timing {
         for listener in &mut runtime.listeners {
             listener.on_frame(&timing, &submission.phases);
@@ -1621,6 +1886,9 @@ fn finish_raster_frame(
             }
         }
     }
+    if activated {
+        return Ok(false);
+    }
     let again = (waiting || output.again) && !runtime.input.is_paused();
     if split {
         refresh_wake(runtime);
@@ -1662,6 +1930,11 @@ fn open_surface_target(
             .surfaces
             .ready(target, &mut raster, graphics.open_surface.as_mut());
         if matches!(opened, Ready::Opened { .. }) {
+            for frame in graphics.external_gpu.values_mut() {
+                if frame.image.is_none() {
+                    frame.image = (frame.import)(&raster);
+                }
+            }
             *lock(&graphics.upload) = raster.texture_factory();
             graphics.needs_present = true;
             graphics.installed = None;
@@ -1845,17 +2118,45 @@ fn input_kind(event: &engine::session::InputEvent) -> &'static str {
     }
 }
 
-fn frame_listeners(
-    devtools: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
-) -> Vec<Box<dyn crate::timing::FrameListener>> {
-    let mut listeners: Vec<Box<dyn crate::timing::FrameListener>> = vec![
+fn frame_listeners() -> Vec<Box<dyn crate::timing::FrameListener>> {
+    vec![
         Box::new(crate::timing::BudgetEdge::default()),
         Box::new(crate::timing::WorkEdge::default()),
-    ];
-    if let Some(devtools) = devtools {
-        listeners.push(Box::new(crate::timing::DevtoolFrames::new(devtools)));
+    ]
+}
+
+fn schedule_gpu_poll(runtime: &mut UiHost) {
+    let Some(hub) = runtime.telemetry.clone() else {
+        return;
+    };
+    if let RasterPort::Remote(slot) = &runtime.graphics {
+        raster_host::schedule_gpu_poll(Arc::clone(slot), hub);
+        return;
     }
-    listeners
+    if runtime.gpu_poll {
+        return;
+    }
+    runtime.gpu_poll = true;
+    let inbox = Arc::downgrade(&runtime.inbox);
+    runtime.wake.runner.post_delayed(
+        Duration::from_millis(8),
+        Box::new(move || {
+            if let Some(inbox) = inbox.upgrade() {
+                inbox.complete(Box::new(move |runtime| {
+                    runtime.update_raster(
+                        move |graphics| raster_host::drain_gpu(graphics, &hub),
+                        |runtime, pending| {
+                            runtime.gpu_poll = false;
+                            if pending {
+                                schedule_gpu_poll(runtime);
+                            }
+                        },
+                    );
+                    Ok(false)
+                }));
+            }
+        }),
+    );
 }
 
 /// Releases GPU caches and refuses acquire until a later submit rebuilds them.
@@ -1899,7 +2200,6 @@ mod tests {
 
     use engine::session::{FrameOutput, FrameTime, IoEvent, Metrics};
 
-    use super::install_fonts;
     use super::{
         Acks, DropWait, ExitGuard, FramePipeline, Inbox, Installed, RasterHost, RasterPort, UiHost,
         WakeTimer, fault_followup, lock, on_command, on_frame, start_async,
@@ -1916,22 +2216,9 @@ mod tests {
         let secret = b"SECRET-FONT-BYTES-DO-NOT-LOG";
         let lines = Arc::new(Mutex::new(Vec::new()));
         let capture = Capture(Arc::clone(&lines));
-        tracing::subscriber::with_default(capture, || match raster::Rasterizer::create_metal() {
-            Ok(mut raster) => {
-                install_fonts(
-                    &mut raster,
-                    vec![("Custom".to_owned(), Arc::from(secret.as_slice()))],
-                );
-            }
-            Err(raster::Status::NotLinked) => {
-                tracing::warn!(
-                    target: "impasto::shell",
-                    family = "Custom",
-                    status = "not linked",
-                    "font registration failed"
-                );
-            }
-            Err(status) => panic!("{status}"),
+        tracing::subscriber::with_default(capture, || {
+            let mut shaper = raster::ParleyShaper::new(raster::FontLibrary::new());
+            assert!(!shaper.register("Custom", secret));
         });
         let lines = lines.lock().unwrap_or_else(|error| error.into_inner());
         assert!(!lines.is_empty(), "a bad face must be reported");
@@ -2065,7 +2352,11 @@ mod tests {
 
     impl TestHarness {
         fn new() -> Self {
-            let raster = Rc::new(RefCell::new(raster::Rasterizer::inert()));
+            let library = raster::FontLibrary::new();
+            let raster = Rc::new(RefCell::new(
+                raster::Rasterizer::create(raster::RasterOptions::default(), library.clone())
+                    .unwrap_or_else(|error| panic!("{error}")),
+            ));
             let vsync = RecVsync::new();
             let log = Rc::new(RefCell::new(SessionLog {
                 io: Vec::new(),
@@ -2074,11 +2365,13 @@ mod tests {
                 launch_urls: Vec::new(),
                 clipboard: None,
             }));
-            let typography = raster.borrow().typography();
+            let shaper = Rc::new(RefCell::new(raster::ParleyShaper::new(library)));
             let runtime = UiHost {
-                typography,
+                shaper,
                 graphics: RasterPort::Local(Box::new(RasterHost {
                     raster,
+                    telemetry: None,
+                    gpu_poll_pending: false,
                     load_image: Arc::new(|_| true),
                     busy: Arc::new(crate::watchdog::Busy::new()),
                     frame_retry_at: None,
@@ -2114,8 +2407,20 @@ mod tests {
                 input: crate::input::Input::new(),
                 scheduler: FrameScheduler::new(),
                 vsync: Arc::clone(&vsync) as Arc<dyn Vsync>,
+                last_vsync: None,
+                compositor_mode: Arc::default(),
+                compositor_enabled: false,
+                compositor_epoch: 0,
+                compositor_generation: None,
+                animated_effects: false,
+                gpu_views: false,
                 point_scale: 1.0,
                 frame_number: 0,
+                topology: crate::ThreadTopology::SharedRender,
+                telemetry: None,
+                #[cfg(any(debug_assertions, feature = "devtools-server"))]
+                _remote: None,
+                gpu_poll: false,
                 semantics: None,
                 semantics_enabled: true,
                 autofill_enabled: false,
@@ -2409,11 +2714,11 @@ mod tests {
         assert_eq!(harness.runtime.graphics.local().gpu, Gpu::Flush);
         assert!(harness.runtime.graphics.local().installed.is_none());
         assert!(harness.runtime.input.is_paused());
-        assert!(!on_frame(&mut harness.runtime, now(), &harness.acks).unwrap());
+        assert!(!on_frame(&mut harness.runtime, now(), false, &harness.acks).unwrap());
         assert_eq!(presents.load(Ordering::Relaxed), 0);
         harness.runtime.graphics.local().gpu = Gpu::Dead;
         harness.runtime.input.resume();
-        assert!(!on_frame(&mut harness.runtime, now(), &harness.acks).unwrap());
+        assert!(!on_frame(&mut harness.runtime, now(), false, &harness.acks).unwrap());
         assert_eq!(presents.load(Ordering::Relaxed), 0);
     }
 
@@ -2433,7 +2738,7 @@ mod tests {
         harness.runtime.graphics.local().installed = Some(Installed { scale: 2.0 });
         harness.runtime.point_scale = 2.0;
         harness.runtime.graphics.local().needs_present = true;
-        assert!(!on_frame(&mut harness.runtime, now(), &harness.acks).unwrap());
+        assert!(!on_frame(&mut harness.runtime, now(), false, &harness.acks).unwrap());
         assert_eq!(*lock(&seen), raster::PixelSize::new(720, 1280));
     }
 
@@ -2450,7 +2755,11 @@ mod tests {
                 Err(raster::Status::DeviceLost)
             }
 
-            fn recover_device(&mut self, _: &mut raster::Rasterizer) -> Result<(), raster::Status> {
+            fn recover_device(
+                &mut self,
+                _: &mut raster::Rasterizer,
+                _: raster::PixelSize,
+            ) -> Result<(), raster::Status> {
                 self.0.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }

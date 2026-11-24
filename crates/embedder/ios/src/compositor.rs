@@ -1,6 +1,7 @@
 use std::ffi::c_void;
 use std::ptr::with_exposed_provenance_mut;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Instant;
 
 use dispatch2::DispatchQueue;
 use embedder::Command;
@@ -36,6 +37,7 @@ struct Frame {
     serial: u64,
     resets: bool,
     drawables: Vec<usize>,
+    published_at: Instant,
 }
 
 impl Drop for Frame {
@@ -71,6 +73,15 @@ impl Compositor {
             serial: state.serial,
             ..State::default()
         };
+    }
+
+    pub(crate) fn refresh_layers(&self, surface: u64) {
+        let mut state = self.lock();
+        if state.surface == surface {
+            state.layers.clear();
+            state.frame = None;
+            state.requested = None;
+        }
     }
 
     pub(crate) fn configured(&self, surface: u64) -> bool {
@@ -131,6 +142,7 @@ impl Compositor {
         let frame = Frame {
             serial: state.serial,
             resets,
+            published_at: Instant::now(),
             drawables: drawables
                 .into_iter()
                 .map(|drawable| Retained::into_raw(drawable).expose_provenance())
@@ -141,8 +153,11 @@ impl Compositor {
             "views": input::platform_views_value(views),
         })
         .to_string();
+        let serial = frame.serial;
         state.frame = Some(frame);
         drop(state);
+        tracing::event!(name: "uikit_publish", target: "impasto::render", tracing::Level::DEBUG,
+            trace_event = true, surface, serial);
         events.send(Event::ComposedFrame, surface, Some(&message));
         Ok(())
     }
@@ -202,17 +217,20 @@ pub unsafe extern "C" fn impasto_ios_compositor_finish(
         {
             return;
         }
-        if state
-            .frame
-            .take()
-            .is_some_and(|frame| frame.resets && submitted)
-        {
+        let Some(frame) = state.frame.take() else {
+            return;
+        };
+        if frame.resets && submitted {
             state.configured = false;
             state.layers.clear();
         }
         let first = submitted && !state.submitted;
         state.submitted |= submitted;
         drop(state);
+        let ack_us = u64::try_from(frame.published_at.elapsed().as_micros()).unwrap_or(u64::MAX);
+        tracing::event!(name: "uikit_ack", target: "impasto::platform", tracing::Level::DEBUG,
+            trace_event = true, surface, serial, ack_us, submitted);
+        drop(frame);
         if first {
             host.clock.events.send(Event::FrameSubmitted, surface, None);
         }

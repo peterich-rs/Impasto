@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 use crate::scene::Command;
 use crate::session::{FrameOutput, FrameTime, InputEvent, Key, KeyPress, Metrics, Session};
+use crate::text::test_support::mono_text;
 use crate::{
     input::{Phase, PointerEvent},
     semantics::{SemanticsFlags, SemanticsOp},
@@ -75,8 +76,9 @@ fn component_style_fragments_defaults_and_ref_lifetimes() {
     ] {
         let size = commands(&output).find_map(|command| match command {
             Command::Text {
-                utf8, font_size, ..
-            } if utf8.as_ref() == text => Some(*font_size),
+                shaped: Some(shaped),
+                ..
+            } if mono_text(shaped) == text => shaped.runs.first().map(|run| run.font_size),
             _ => None,
         });
         assert_eq!(size, Some(expected), "DrawList font size for {text}");
@@ -201,7 +203,11 @@ fn component_environment_inherits_direction_tokens_and_clears_semantics() {
         let output = frame(app.as_mut(), 16.0);
         for text in ["class-token", "object-token"] {
             let color = commands(&output).find_map(|command| match command {
-                Command::Text { utf8, color, .. } if utf8.as_ref() == text => Some(*color),
+                Command::Text {
+                    shaped: Some(shaped),
+                    color,
+                    ..
+                } if mono_text(shaped) == text => Some(*color),
                 _ => None,
             });
             assert_eq!(
@@ -241,8 +247,9 @@ fn component_overlays_react_and_revoke_refs_after_exit() {
             ] {
                 let size = commands(&output).find_map(|command| match command {
                     Command::Text {
-                        utf8, font_size, ..
-                    } if utf8.as_ref() == text => Some(*font_size),
+                        shaped: Some(shaped),
+                        ..
+                    } if mono_text(shaped) == text => shaped.runs.first().map(|run| run.font_size),
                     _ => None,
                 });
                 assert_eq!(size, Some(expected), "overlay author typography for {text}");

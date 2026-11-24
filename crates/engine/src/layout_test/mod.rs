@@ -36,7 +36,9 @@ pub(super) fn texts(tree: &mut Tree) -> Result<Vec<String>, crate::Error> {
         .commands
         .iter()
         .filter_map(|command| match command {
-            crate::scene::Command::Text { utf8, .. } => Some(utf8.to_string()),
+            crate::scene::Command::Text { shaped, .. } => {
+                shaped.as_deref().map(crate::text::test_support::mono_text)
+            }
             _ => None,
         })
         .collect())
@@ -156,8 +158,12 @@ pub(super) fn scene_marks_in_commands(
     for command in commands {
         let (ctm, clips) = stack.last().expect("frame").clone();
         match command {
-            crate::scene::Command::Text { utf8, x, y, .. } => {
-                push_mark(&mut marks, utf8.to_string(), *x, *y, ctm, &clips);
+            crate::scene::Command::Text { shaped, x, y, .. } => {
+                let text = shaped
+                    .as_deref()
+                    .map(crate::text::test_support::mono_text)
+                    .unwrap_or_default();
+                push_mark(&mut marks, text, *x, *y, ctm, &clips);
             }
             crate::scene::Command::Image { source, x, y, .. } => {
                 push_mark(&mut marks, source.to_string(), *x, *y, ctm, &clips);
@@ -165,7 +171,25 @@ pub(super) fn scene_marks_in_commands(
             crate::scene::Command::Rect { x, y, color, .. } => {
                 push_mark(&mut marks, format!("rect:{color:?}"), *x, *y, ctm, &clips);
             }
-            crate::scene::Command::PushClip { x, y, w, h, .. } => {
+            crate::scene::Command::ShapedRect {
+                bounds: [x, y, ..],
+                paint,
+                ..
+            } => {
+                push_mark(
+                    &mut marks,
+                    format!("rect:{:?}", paint.color),
+                    *x,
+                    *y,
+                    ctm,
+                    &clips,
+                );
+            }
+            crate::scene::Command::PushClip { x, y, w, h, .. }
+            | crate::scene::Command::PushCornerClip {
+                bounds: [x, y, w, h],
+                ..
+            } => {
                 let mut clips = clips;
                 clips.push(SceneClip {
                     ctm,
@@ -191,14 +215,18 @@ pub(super) fn scene_marks_in_commands(
             }
             crate::scene::Command::PushOpacity { .. }
             | crate::scene::Command::PushBlur { .. }
+            | crate::scene::Command::PushColorFilter { .. }
             | crate::scene::Command::PushBackdropBlur { .. }
+            | crate::scene::Command::PushBackdropMaterial { .. }
             | crate::scene::Command::PushBlend { .. } => {
                 stack.push((ctm, clips));
             }
             crate::scene::Command::Pop => {
                 stack.pop();
             }
-            crate::scene::Command::Fill { .. } | crate::scene::Command::Canvas { .. } => {}
+            crate::scene::Command::Fill { .. }
+            | crate::scene::Command::Canvas { .. }
+            | crate::scene::Command::ShaderEffect { .. } => {}
         }
     }
     marks
@@ -221,6 +249,20 @@ pub(super) fn scene_marks_in_layers(tree: &crate::scene::LayerTree) -> Vec<Mark>
             let child = layer.first_child;
             match layer.kind {
                 crate::scene::LayerKind::PlatformView { .. } => {}
+                crate::scene::LayerKind::Fill {
+                    bounds: [x, y, ..],
+                    color,
+                    ..
+                } => {
+                    push_mark(
+                        marks,
+                        format!("rect:{:?}", crate::scene::linear_color_bytes(color)),
+                        x,
+                        y,
+                        ctm,
+                        clips,
+                    );
+                }
                 crate::scene::LayerKind::Offset { x, y } => {
                     if let Some(child) = child {
                         walk(
@@ -250,7 +292,11 @@ pub(super) fn scene_marks_in_layers(tree: &crate::scene::LayerTree) -> Vec<Mark>
                         );
                     }
                 }
-                crate::scene::LayerKind::Clip { x, y, w, h, .. } => {
+                crate::scene::LayerKind::Clip { x, y, w, h, .. }
+                | crate::scene::LayerKind::CornerClip {
+                    bounds: [x, y, w, h],
+                    ..
+                } => {
                     if let Some(child) = child {
                         let mut clips = clips.to_vec();
                         clips.push(SceneClip { ctm, x, y, w, h });
@@ -259,7 +305,9 @@ pub(super) fn scene_marks_in_layers(tree: &crate::scene::LayerTree) -> Vec<Mark>
                 }
                 crate::scene::LayerKind::Opacity { .. }
                 | crate::scene::LayerKind::Blur { .. }
+                | crate::scene::LayerKind::ColorFilter { .. }
                 | crate::scene::LayerKind::BackdropBlur { .. }
+                | crate::scene::LayerKind::BackdropMaterial { .. }
                 | crate::scene::LayerKind::Blend { .. } => {
                     if let Some(child) = child {
                         walk(tree, child, ctm, clips, marks);

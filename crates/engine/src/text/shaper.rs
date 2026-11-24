@@ -106,6 +106,9 @@ pub struct CanvasMetrics {
 pub struct ParagraphMetrics {
     pub size: TextSize,
     pub lines: Arc<[TextLine]>,
+    /// Glyphs frozen at the final constraint. `None` for a shaper that only
+    /// measures, or for empty text.
+    pub shaped: Option<Arc<crate::scene::ShapedParagraph>>,
     /// Distance from the paragraph origin to the first line's baseline.
     /// Zero when the paragraph has no lines.
     first_baseline: f32,
@@ -116,13 +119,39 @@ impl ParagraphMetrics {
         self.first_baseline
     }
 
+    /// Metrics without frozen glyphs. A measuring-only shaper uses this.
     pub fn with_baseline(size: TextSize, lines: Arc<[TextLine]>, first_baseline: f32) -> Self {
         Self {
             size,
             lines,
+            shaped: None,
             first_baseline,
         }
     }
+
+    pub fn shaped(
+        size: TextSize,
+        lines: Arc<[TextLine]>,
+        first_baseline: f32,
+        shaped: Arc<crate::scene::ShapedParagraph>,
+    ) -> Self {
+        Self {
+            size,
+            lines,
+            shaped: Some(shaped),
+            first_baseline,
+        }
+    }
+}
+
+/// Width, font box, and glyphs for one canvas text run.
+///
+/// `shaped` is `None` for a shaper that cannot draw; the caller then has
+/// metrics but the raster skips the glyphs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanvasTextLayout {
+    pub metrics: CanvasMetrics,
+    pub shaped: Option<Arc<crate::scene::ShapedParagraph>>,
 }
 
 /// Line box height. A positive `style.height` is a multiple of `font_size`.
@@ -139,24 +168,37 @@ pub fn resolved_line_height(
     }
 }
 
-/// Paint identity. The metrics key is embedded, so a color change keeps the
-/// line boxes and still allocates a new [`crate::scene::ParagraphId`].
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct PaintKey {
-    pub metrics: MetricsKey,
-    pub color: [u8; 4],
-    pub span_paints: Arc<[crate::scene::SpanPaint]>,
+/// Builds the keys a text node retains. Empty span slices are a single run.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate::scene::{Command, DrawList};
+
+    /// Source text of one text command frozen by the [`super::MonoShaper`].
+    pub fn mono_text(shaped: &crate::scene::ShapedParagraph) -> String {
+        super::MonoShaper::text_of(shaped).unwrap_or_default()
+    }
+
+    /// Text of every text command in a recorded list, in order.
+    pub fn texts(list: &DrawList) -> Vec<String> {
+        list.commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Text { shaped, .. } => shaped.as_deref().map(mono_text),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
-/// Builds the keys a text node retains. Empty span slices are a single run.
-pub fn paint_key(
+/// Builds the geometry key a text node retains. Color is not part of the key:
+/// a color change reuses the lines and the frozen glyphs.
+pub fn metrics_key(
     text: Arc<str>,
     style: Arc<crate::scene::TextStyle>,
     spans: &[crate::scene::TextSpan],
     font_size: f32,
     max_width: f32,
-    color: [u8; 4],
-) -> PaintKey {
+) -> MetricsKey {
     let span_metrics: Vec<SpanMetrics> = spans
         .iter()
         .map(|span| SpanMetrics {
@@ -167,26 +209,25 @@ pub fn paint_key(
             line_through: span.line_through,
         })
         .collect();
-    let span_paints: Vec<crate::scene::SpanPaint> =
-        spans.iter().map(crate::scene::TextSpan::paint).collect();
-    PaintKey {
-        metrics: MetricsKey {
-            text,
-            style,
-            spans: Arc::from(span_metrics),
-            font_size: font_size.to_bits(),
-            max_width: max_width.to_bits(),
-        },
-        color,
-        span_paints: Arc::from(span_paints),
+    MetricsKey {
+        text,
+        style,
+        spans: Arc::from(span_metrics),
+        font_size: font_size.to_bits(),
+        max_width: max_width.to_bits(),
     }
+}
+
+/// Foreground paints of a paragraph's logical spans, in order.
+pub fn span_paints(spans: &[crate::scene::TextSpan]) -> Arc<[crate::scene::SpanPaint]> {
+    spans.iter().map(crate::scene::TextSpan::paint).collect()
 }
 
 /// Measures text for layout. One implementation is live per tree.
 ///
-/// `metrics` ignores color. Drawing shapes again on the gpu thread from the
-/// recorded payload. The trait is not `Send`: a typography context stays on
-/// the thread that created it.
+/// `metrics` ignores color. A color change keeps the lines and the frozen
+/// glyphs. The trait is not `Send`: a typography context stays on the
+/// thread that created it.
 ///
 /// [`Shaper::begin_frame`] and [`Shaper::end_frame`] bracket every layout and
 /// panel measure in one frame. The tree opens the bracket on the first call
@@ -199,7 +240,7 @@ pub trait Shaper {
         (0, 0)
     }
     /// Register a face used by later measurements. The default ignores it.
-    /// Hosts that draw register the same bytes on the gpu context separately.
+    /// A window shares one font library, so drawing needs no second copy.
     fn register_font(&mut self, _family: &str, _bytes: &[u8]) -> bool {
         false
     }
@@ -207,9 +248,9 @@ pub trait Shaper {
         self.register_font(family, &bytes)
     }
 
+    /// Size, lines, and frozen glyphs at the key's constraint.
     fn metrics(&mut self, key: &MetricsKey) -> Arc<ParagraphMetrics>;
-    /// Min-content width for this metrics identity. Color and the layout width
-    /// are ignored. The default splits on whitespace.
+    /// Intrinsic width for this geometry.
     fn intrinsic_width(&mut self, key: &MetricsKey) -> f32 {
         self.min_content_width(&key.text, f32::from_bits(key.font_size))
     }
@@ -236,22 +277,12 @@ pub trait Shaper {
         };
         self.metrics(&key).size.width
     }
-
-    /// Layout measurement. The default ignores color and uses [`Shaper::metrics`].
-    fn measure_paint(&mut self, key: &PaintKey) -> TextSize {
-        self.metrics(&key.metrics).size
-    }
-    /// Line boxes for the colored paragraph [`Shaper::measure_paint`] caches.
-    fn metrics_paint(&mut self, key: &PaintKey) -> Arc<ParagraphMetrics> {
-        self.metrics(&key.metrics)
-    }
-    /// Intrinsic width and the metrics of the unbounded paragraph. The caller
-    /// supplies an unbounded paint key so the same paragraph can serve both.
-    fn min_content_metrics(&mut self, key: &PaintKey) -> (f32, Arc<ParagraphMetrics>) {
-        (self.intrinsic_width(&key.metrics), self.metrics_paint(key))
+    /// Intrinsic width and the metrics of the unbounded paragraph.
+    fn min_content_metrics(&mut self, key: &MetricsKey) -> (f32, Arc<ParagraphMetrics>) {
+        (self.intrinsic_width(key), self.metrics(key))
     }
     /// The node still displays this key. Default does nothing.
-    fn touch(&mut self, _key: &PaintKey) {}
+    fn touch(&mut self, _key: &MetricsKey) {}
     fn caret_at_unit(&mut self, key: &MetricsKey, unit: u32, affinity: Affinity) -> Caret;
     fn caret_at_point(&mut self, key: &MetricsKey, x: f32, y: f32) -> Caret;
     fn word_range(&mut self, key: &MetricsKey, unit: u32) -> (u32, u32);
@@ -264,6 +295,20 @@ pub trait Shaper {
         _font_size: f32,
     ) -> Option<CanvasMetrics> {
         None
+    }
+    /// Single-line canvas metrics plus frozen glyphs. The default wraps
+    /// [`Shaper::canvas_metrics`] with no glyphs, for shapers that only measure.
+    fn shape_canvas(
+        &mut self,
+        text: &str,
+        style: &crate::scene::TextStyle,
+        size: f32,
+    ) -> Option<CanvasTextLayout> {
+        self.canvas_metrics(text, style, size)
+            .map(|metrics| CanvasTextLayout {
+                metrics,
+                shaped: None,
+            })
     }
 }
 
@@ -293,16 +338,10 @@ impl Shaper for Box<dyn Shaper> {
     fn min_content_width(&mut self, utf8: &str, font_size: f32) -> f32 {
         (**self).min_content_width(utf8, font_size)
     }
-    fn measure_paint(&mut self, key: &PaintKey) -> TextSize {
-        (**self).measure_paint(key)
-    }
-    fn metrics_paint(&mut self, key: &PaintKey) -> Arc<ParagraphMetrics> {
-        (**self).metrics_paint(key)
-    }
-    fn min_content_metrics(&mut self, key: &PaintKey) -> (f32, Arc<ParagraphMetrics>) {
+    fn min_content_metrics(&mut self, key: &MetricsKey) -> (f32, Arc<ParagraphMetrics>) {
         (**self).min_content_metrics(key)
     }
-    fn touch(&mut self, key: &PaintKey) {
+    fn touch(&mut self, key: &MetricsKey) {
         (**self).touch(key);
     }
     fn caret_at_unit(&mut self, key: &MetricsKey, unit: u32, affinity: Affinity) -> Caret {
@@ -322,6 +361,73 @@ impl Shaper for Box<dyn Shaper> {
     ) -> Option<CanvasMetrics> {
         (**self).canvas_metrics(text, style, font_size)
     }
+    fn shape_canvas(
+        &mut self,
+        text: &str,
+        style: &crate::scene::TextStyle,
+        size: f32,
+    ) -> Option<CanvasTextLayout> {
+        (**self).shape_canvas(text, style, size)
+    }
+}
+
+impl<S: Shaper> Shaper for std::rc::Rc<std::cell::RefCell<S>> {
+    fn begin_frame(&mut self) {
+        self.borrow_mut().begin_frame();
+    }
+    fn end_frame(&mut self) {
+        self.borrow_mut().end_frame();
+    }
+    fn measure_cache_counts(&self) -> (u32, u32) {
+        self.borrow().measure_cache_counts()
+    }
+    fn register_font(&mut self, family: &str, bytes: &[u8]) -> bool {
+        self.borrow_mut().register_font(family, bytes)
+    }
+
+    fn register_shared_font(&mut self, family: &str, bytes: Arc<[u8]>) -> bool {
+        self.borrow_mut().register_shared_font(family, bytes)
+    }
+    fn metrics(&mut self, key: &MetricsKey) -> Arc<ParagraphMetrics> {
+        self.borrow_mut().metrics(key)
+    }
+    fn intrinsic_width(&mut self, key: &MetricsKey) -> f32 {
+        self.borrow_mut().intrinsic_width(key)
+    }
+    fn min_content_width(&mut self, utf8: &str, font_size: f32) -> f32 {
+        self.borrow_mut().min_content_width(utf8, font_size)
+    }
+    fn min_content_metrics(&mut self, key: &MetricsKey) -> (f32, Arc<ParagraphMetrics>) {
+        self.borrow_mut().min_content_metrics(key)
+    }
+    fn touch(&mut self, key: &MetricsKey) {
+        self.borrow_mut().touch(key);
+    }
+    fn caret_at_unit(&mut self, key: &MetricsKey, unit: u32, affinity: Affinity) -> Caret {
+        self.borrow_mut().caret_at_unit(key, unit, affinity)
+    }
+    fn caret_at_point(&mut self, key: &MetricsKey, x: f32, y: f32) -> Caret {
+        self.borrow_mut().caret_at_point(key, x, y)
+    }
+    fn word_range(&mut self, key: &MetricsKey, unit: u32) -> (u32, u32) {
+        self.borrow_mut().word_range(key, unit)
+    }
+    fn canvas_metrics(
+        &mut self,
+        text: &str,
+        style: &crate::scene::TextStyle,
+        font_size: f32,
+    ) -> Option<CanvasMetrics> {
+        self.borrow_mut().canvas_metrics(text, style, font_size)
+    }
+    fn shape_canvas(
+        &mut self,
+        text: &str,
+        style: &crate::scene::TextStyle,
+        size: f32,
+    ) -> Option<CanvasTextLayout> {
+        self.borrow_mut().shape_canvas(text, style, size)
+    }
 }
 
 /// Test shaper. Each Unicode scalar advances `font_size * 0.5`. A line is one
@@ -329,7 +435,7 @@ impl Shaper for Box<dyn Shaper> {
 ///
 /// Hard breaks are `\n`, `\r`, and `\r\n`. Soft wrap keeps at least one cluster
 /// on a line and prefers to break after whitespace. This is not a font metric.
-/// The host measures with Impeller.
+/// The host measures with Parley.
 #[derive(Debug, Default)]
 pub struct MonoShaper {
     /// True between [`Shaper::begin_frame`] and [`Shaper::end_frame`].
@@ -343,6 +449,21 @@ pub struct MonoShaper {
 impl MonoShaper {
     pub fn new() -> Self {
         Self { open: false }
+    }
+
+    /// Source text of a paragraph the [`MonoShaper`] froze. Each glyph ID is
+    /// one UTF-16 unit of the original text. `None` for any other shaper.
+    #[cfg(test)]
+    pub fn text_of(shaped: &crate::scene::ShapedParagraph) -> Option<String> {
+        let units: Vec<u16> = shaped
+            .runs
+            .iter()
+            .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.id))
+            .collect();
+        if shaped.runs.iter().any(|run| run.face.0 != 0) {
+            return None;
+        }
+        String::from_utf16(&units).ok()
     }
 }
 
@@ -358,11 +479,44 @@ impl Shaper for MonoShaper {
     fn metrics(&mut self, key: &MetricsKey) -> Arc<ParagraphMetrics> {
         let laid = layout_key(key);
         let baseline = laid.lines.first().map_or(0.0, |line| line.baseline);
-        Arc::new(ParagraphMetrics::with_baseline(
-            laid.size,
-            Arc::from(laid.lines),
-            baseline,
-        ))
+        let shaped = (!key.text.is_empty()).then(|| {
+            let glyphs: Vec<_> = key
+                .text
+                .encode_utf16()
+                .map(|id| crate::scene::PositionedGlyph {
+                    id,
+                    x: 0.0,
+                    y: baseline,
+                })
+                .collect();
+            Arc::new(crate::scene::ShapedParagraph {
+                size: [laid.size.width, laid.size.height],
+                runs: Box::new([crate::scene::ShapedRun {
+                    face: Arc::new(crate::scene::FontFaceId(0)),
+                    font_size: f32::from_bits(key.font_size),
+                    normalized_coords: Box::new([]),
+                    embolden: false,
+                    skew_degrees: None,
+                    span_index: None,
+                    span_bounds: [0.0, 0.0, laid.size.width, laid.size.height],
+                    glyphs: glyphs.into(),
+                }]),
+                decorations: Box::new([]),
+            })
+        });
+        match shaped {
+            Some(shaped) => Arc::new(ParagraphMetrics::shaped(
+                laid.size,
+                Arc::from(laid.lines),
+                baseline,
+                shaped,
+            )),
+            None => Arc::new(ParagraphMetrics::with_baseline(
+                laid.size,
+                Arc::from(laid.lines),
+                baseline,
+            )),
+        }
     }
 
     /// Monospace: the widest word is its cluster count times half the font
@@ -494,8 +648,8 @@ fn layout_mono(
 }
 
 fn line_height(font_size: f32, style: &crate::scene::TextStyle) -> f32 {
-    // The mono font's own line box is one em. Impeller applies SetHeight itself,
-    // so this multiplier is only for the test shaper.
+    // The mono font's own line box is one em. Parley applies the line height
+    // itself, so this multiplier is only for the test shaper.
     resolved_line_height(style, font_size, font_size)
 }
 
@@ -847,15 +1001,7 @@ mod tests {
         max_width: f32,
         style: crate::scene::TextStyle,
     ) -> MetricsKey {
-        paint_key(
-            Arc::from(text),
-            Arc::new(style),
-            &[],
-            font_size,
-            max_width,
-            [0, 0, 0, 255],
-        )
-        .metrics
+        metrics_key(Arc::from(text), Arc::new(style), &[], font_size, max_width)
     }
 
     fn style_ellipsis(max_lines: u32) -> crate::scene::TextStyle {
@@ -924,20 +1070,29 @@ mod tests {
     }
 
     #[test]
-    fn color_change_keeps_metrics() {
+    fn a_color_free_key_keeps_metrics_and_freezes_glyphs() {
         let mut shaper = MonoShaper::new();
         let metrics = key("Hi", 16.0, 100.0, crate::scene::TextStyle::default());
-        let red = PaintKey {
-            metrics: metrics.clone(),
-            color: [255, 0, 0, 255],
-            span_paints: Arc::from([]),
-        };
-        let green = PaintKey {
-            metrics,
-            color: [0, 255, 0, 255],
-            span_paints: Arc::from([]),
-        };
-        let before = shaper.metrics(&red.metrics);
-        assert_eq!(before.size, shaper.metrics(&green.metrics).size);
+        let before = shaper.metrics(&metrics);
+        let shaped = before
+            .shaped
+            .as_ref()
+            .expect("non-empty text freezes glyphs");
+        assert!(!shaped.runs.is_empty());
+        assert_eq!(shaped.size[0], before.size.width);
+        assert_eq!(before.size, shaper.metrics(&metrics).size);
+        let empty = shaper.metrics(&key("", 16.0, 100.0, crate::scene::TextStyle::default()));
+        assert!(empty.shaped.is_none());
+    }
+
+    #[test]
+    fn mono_shaper_reports_no_canvas_glyphs() {
+        let mut shaper = MonoShaper::new();
+        let style = crate::scene::TextStyle::default();
+        let layout = shaper
+            .shape_canvas("Hi", &style, 16.0)
+            .expect("mono measures canvas text");
+        assert_eq!(layout.metrics.width, 16.0);
+        assert!(layout.shaped.is_none());
     }
 }

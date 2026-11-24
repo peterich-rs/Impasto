@@ -1,8 +1,7 @@
-import { onCleanup } from "solid-js";
+import { Show, createRenderEffect, createSignal, onCleanup } from "solid-js";
 import {
   directionFor,
   scene,
-  onFrame,
   overlayParent,
   removeNode,
   restoreFocus,
@@ -13,9 +12,11 @@ import {
 import { colorBytes } from "./colors.ts";
 import { sceneApi, nodeId } from "./scene-ext.ts";
 import { registerOverlay } from "./overlay/registry.ts";
-import { moveChildren, readFirstChild, restoreChildren } from "./overlay.ts";
 import type { SheetProps } from "./props.ts";
 import { Role } from "./semantics.ts";
+import { ScrollArea, bouncing } from "./ScrollArea.tsx";
+import { createScrollController } from "./ScrollController.ts";
+import { bindScrollStyle, interpolate } from "./scroll-style.ts";
 import { createNodeRef, createStyleTarget } from "./target.ts";
 import { useTheme } from "./use-theme.ts";
 
@@ -25,6 +26,14 @@ import { useTheme } from "./use-theme.ts";
  */
 export function Sheet(props: SheetProps): NodeHandle {
   const theme = useTheme();
+  const grip = createScrollController();
+  const dragPhysics = { ...bouncing, band: { linear: 1 }, chain: false };
+  function releaseGrip(): void {
+    const node = grip.node();
+    if (node !== 0 && scene.overscroll(node).y <= -48) {
+      props.onClose();
+    }
+  }
   const panelStyle = createStyleTarget(() => props, () => ({
     backgroundColor: colorBytes(theme().color.surface), borderRadius: theme().radius.m,
   }));
@@ -39,6 +48,7 @@ export function Sheet(props: SheetProps): NodeHandle {
   }));
   const panelRef = createNodeRef(() => props.ref);
   let placeholder = 0;
+  const [contentNode, setContentNode] = createSignal(0);
   let layer: Layer | null = null;
   let closing = false;
   let epoch = 0;
@@ -52,10 +62,18 @@ export function Sheet(props: SheetProps): NodeHandle {
     contentStyle.detach();
     titleStyle.detach();
     const current = layer;
+    current.stopDrag();
+    if (grip.node() !== 0) scene.setScrollOffset(grip.node(), 0, 0);
     layer = null;
     closing = false;
     try {
-      restoreChildren(current.slot, placeholder);
+      try {
+        if (placeholder !== 0 && contentNode() !== 0) {
+          scene.insert(placeholder, contentNode(), 0);
+        }
+      } catch {
+        // Owner disposal can remove the placeholder before this cleanup.
+      }
       if (current.focused) {
         scene.popFocusScope();
         restoreFocus(current.previous);
@@ -115,6 +133,8 @@ export function Sheet(props: SheetProps): NodeHandle {
       return;
     }
     closing = true;
+    const node = grip.node();
+    if (node !== 0 && scene.overscroll(node).y < 0) grip.stop();
     const token = ++epoch;
     play(true, () => {
       if (token === epoch) {
@@ -127,7 +147,8 @@ export function Sheet(props: SheetProps): NodeHandle {
     if (layer !== null) {
       return layer;
     }
-    if (placeholder === 0) {
+    const slot = contentNode();
+    if (placeholder === 0 || slot === 0) {
       return null;
     }
     const overlay = nodeId(overlayParent());
@@ -179,20 +200,28 @@ export function Sheet(props: SheetProps): NodeHandle {
     scene.insert(shell, column, 0);
     const fade = scene.createElement("stack", {
       style: {
+        width: "100%",
+        minWidth: 0,
         opacity: 0 / 255,
       },
     });
+    scene.setComponentStyle(fade, { gridTemplateColumns: "minmax(0, 1fr)" });
     scene.insert(column, fade, 0);
+    const drag = scene.createElement("stack");
+    scene.setComponentStyle(drag, { gridTemplateColumns: "minmax(0, 1fr)" });
     const panel = scene.createElement("stack", {
       style: {},
     });
+    scene.setComponentStyle(panel, { gridTemplateColumns: "minmax(0, 1fr)" });
+    scene.setTransitionSnapshot?.(panel, true);
     scene.insert(fade, panel, 0);
+    scene.insert(panel, drag, 0);
     const inner = scene.createElement("view", {
       style: {
         gap: theme().space.m,
       },
     });
-    scene.insert(panel, inner, 0);
+    scene.insert(drag, inner, 0);
     const title = props.title ?? "";
     let titleId = 0;
     if (title.length > 0) {
@@ -204,30 +233,39 @@ export function Sheet(props: SheetProps): NodeHandle {
       Role.Generic,
       title.length > 0 ? title : undefined,
     );
-    const slot = scene.createElement("view");
     scene.insert(inner, slot, 0);
-    panelStyle.attach(panel);
+    panelStyle.attach(drag);
     scrimStyle.attach(scrimPaint);
     contentStyle.attach(slot);
-    panelRef.attach(panel);
+    panelRef.attach(drag);
     if (titleId !== 0) titleStyle.attach(titleId);
     layer = {
       shell,
-      slot,
       panel,
       fade,
       titleId,
       previous: 0,
       focused: false,
       unregister: null,
+      stopDrag: (() => {
+        const stopMove = bindScrollStyle(drag, grip, {
+          source: "overscrollY",
+          translateY: interpolate([-96, 0], [96, 0]),
+        });
+        const stopScrim = bindScrollStyle(scrimPaint, grip, {
+          source: "overscrollY",
+          opacity: interpolate([-96, 0], [0, 1]),
+        });
+        return () => { stopMove(); stopScrim(); };
+      })(),
     };
     return layer;
   }
-  function sync(): void {
+  function sync(open: boolean): void {
     if (placeholder === 0) {
       return;
     }
-    if (!props.open) {
+    if (!open) {
       beginClose();
       return;
     }
@@ -240,15 +278,6 @@ export function Sheet(props: SheetProps): NodeHandle {
     const current = ensureLayer();
     if (current === null) {
       return;
-    }
-    const parked = readFirstChild(placeholder);
-    if (parked === null) {
-      placeholder = 0;
-      closeLayer();
-      return;
-    }
-    if (parked !== 0) {
-      moveChildren(placeholder, current.slot);
     }
     if (created) {
       try {
@@ -266,16 +295,15 @@ export function Sheet(props: SheetProps): NodeHandle {
       }
       armEnter();
     } else if (reopening) {
+      if (grip.node() !== 0) scene.setScrollOffset(grip.node(), 0, 0);
       armEnter();
     }
   }
-  const stop = onFrame(() => {
-    sync();
-  });
-  onCleanup(() => {
-    stop();
-    closeLayer();
-  });
+  createRenderEffect(
+    () => ({ open: props.open, mounted: contentNode() !== 0 }),
+    ({ open, mounted }) => { if (mounted) sync(open); },
+  );
+  onCleanup(closeLayer);
   return (
     <stack
       ref={(node) => {
@@ -298,17 +326,31 @@ export function Sheet(props: SheetProps): NodeHandle {
         maxHeight: 0,
       }}
     >
-      {props.children}
+      <view ref={(node) => setContentNode(node ?? 0)}>
+        <Show when={props.dragToDismiss !== false}>
+          <view style={{
+            width: "100%", height: 28, minHeight: 28, flexShrink: 0,
+            alignItems: "center", justifyContent: "center",
+          }}>
+            <view style={{ width: 28, height: 3, borderRadius: 2, backgroundColor: theme().color.textMuted }} />
+            <ScrollArea controller={grip} physics={dragPhysics} onDragEnd={releaseGrip}
+              style={{ position: "absolute", left: 0, top: 0, width: "100%", height: 28, minHeight: 28 }}>
+              <view style={{ width: "100%", height: 28, flexShrink: 0 }} />
+            </ScrollArea>
+          </view>
+        </Show>
+        {props.children}
+      </view>
     </stack>
   );
 }
 type Layer = {
   shell: number;
-  slot: number;
   panel: number;
   fade: number;
   titleId: number;
   previous: number;
   focused: boolean;
   unregister: (() => void) | null;
+  stopDrag: () => void;
 };

@@ -1,10 +1,15 @@
 //! Ring buffers with a monotonic revision per channel. Producers are the
-//! render thread, the net thread, and the log hook; the only reader is the
-//! devtools host module (render thread).
+//! UI, raster and IO queues, external network callbacks and the log hook.
+
+use super::telemetry::{ScheduleTiming, TelemetryProfile};
+use super::timeline::{CapturedSpan, SpanLoss, TimelineRecording, TraceDetail};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU8};
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::time::Duration;
 
 /// One filtered log event copied for the devtools console.
 #[derive(Clone, Debug, PartialEq)]
@@ -132,9 +137,17 @@ pub struct PhaseSample {
 }
 
 /// Per-frame timing sample, trimmed from [`crate::FrameTiming`].
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct FrameSample {
     pub seq: u64,
+    pub(crate) changed_at: u64,
+    pub schedule: ScheduleTiming,
+    pub raster: raster::SubmitStats,
+    pub gpu: raster::GpuSample,
+    pub gpu_timing: Option<Arc<raster::GpuFrameTiming>>,
+    pub updates: u32,
+    pub sets: u32,
+    pub runtime: Option<engine::session::RuntimeSample>,
     pub number: u64,
     pub at_ms: f64,
     pub work_ms: f64,
@@ -147,7 +160,7 @@ pub struct FrameSample {
     pub submit_ms: f64,
     pub present_ms: f64,
     pub layers: u32,
-    pub paragraphs: u32,
+    pub atlas_entries: u32,
     pub pictures: u32,
     pub textures: u32,
     pub shapes_built: u32,
@@ -155,7 +168,7 @@ pub struct FrameSample {
     pub shapes_measure_miss: u32,
     pub shapes_paint_hit: u32,
     pub shapes_paint_miss: u32,
-    pub shapes_bridged: u32,
+    pub atlas_hits: u32,
     pub picture_rebuilt: u32,
     pub picture_reused: u32,
     pub layout_cause: &'static str,
@@ -168,6 +181,14 @@ impl Default for FrameSample {
     fn default() -> Self {
         Self {
             seq: 0,
+            changed_at: 0,
+            schedule: ScheduleTiming::default(),
+            raster: raster::SubmitStats::default(),
+            gpu: raster::GpuSample::default(),
+            gpu_timing: None,
+            updates: 0,
+            sets: 0,
+            runtime: None,
             number: 0,
             at_ms: 0.0,
             work_ms: 0.0,
@@ -180,7 +201,7 @@ impl Default for FrameSample {
             submit_ms: 0.0,
             present_ms: 0.0,
             layers: 0,
-            paragraphs: 0,
+            atlas_entries: 0,
             pictures: 0,
             textures: 0,
             shapes_built: 0,
@@ -188,7 +209,7 @@ impl Default for FrameSample {
             shapes_measure_miss: 0,
             shapes_paint_hit: 0,
             shapes_paint_miss: 0,
-            shapes_bridged: 0,
+            atlas_hits: 0,
             picture_rebuilt: 0,
             picture_reused: 0,
             layout_cause: "none",
@@ -237,7 +258,7 @@ impl<T: SeqField> Ring<T> {
 
     /// Entries with `seq > since`.
     pub(crate) fn tail(&self, since: u64) -> impl Iterator<Item = &T> {
-        self.buf.iter().filter(move |entry| entry.seq() > since)
+        self.buf.iter().filter(move |entry| entry.cursor() > since)
     }
 
     pub(crate) fn clear(&mut self) {
@@ -245,15 +266,15 @@ impl<T: SeqField> Ring<T> {
     }
 }
 
-/// Every ring entry carries its sequence number as the `seq` field.
+/// The most recent channel revision that changed an entry.
 pub(crate) trait SeqField {
-    fn seq(&self) -> u64;
+    fn cursor(&self) -> u64;
 }
 
 macro_rules! seq_field {
     ($ty:ty) => {
         impl SeqField for $ty {
-            fn seq(&self) -> u64 {
+            fn cursor(&self) -> u64 {
                 self.seq
             }
         }
@@ -263,7 +284,11 @@ macro_rules! seq_field {
 seq_field!(LogEntry);
 seq_field!(DiagError);
 seq_field!(NetEntry);
-seq_field!(FrameSample);
+impl SeqField for FrameSample {
+    fn cursor(&self) -> u64 {
+        self.changed_at
+    }
+}
 
 pub const LOG_CAP: usize = 400;
 pub const ERROR_CAP: usize = 100;
@@ -272,8 +297,15 @@ pub const FRAME_CAP: usize = 240;
 /// Body preview cap for network entries.
 pub const PREVIEW_CAP: usize = 2048;
 
-/// Process-wide diagnostics sink. Every method takes the lock only to clone.
-pub struct DiagnosticsHub {
+/// Process-local telemetry store, shared by the host and its consumers.
+pub struct TelemetryHub {
+    profile: AtomicU8,
+    capture_phase: AtomicU8,
+    capture_gpu: AtomicBool,
+    capture: Mutex<Option<CaptureSlot>>,
+    capture_changed: Condvar,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    latest_capture: Mutex<Option<Arc<TraceCapture>>>,
     pub(crate) logs: Mutex<Ring<LogEntry>>,
     pub(crate) errors: Mutex<Ring<DiagError>>,
     pub(crate) network: Mutex<Ring<NetEntry>>,
@@ -293,15 +325,22 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-impl Default for DiagnosticsHub {
+impl Default for TelemetryHub {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl DiagnosticsHub {
+impl TelemetryHub {
     pub fn new() -> Self {
         Self {
+            profile: AtomicU8::new(TelemetryProfile::Counters as u8),
+            capture_phase: AtomicU8::new(CAPTURE_IDLE),
+            capture_gpu: AtomicBool::new(false),
+            capture: Mutex::new(None),
+            capture_changed: Condvar::new(),
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            latest_capture: Mutex::new(None),
             logs: Mutex::new(Ring::new(LOG_CAP)),
             errors: Mutex::new(Ring::new(ERROR_CAP)),
             network: Mutex::new(Ring::new(NET_CAP)),
@@ -382,10 +421,296 @@ impl DiagnosticsHub {
         lock(&self.network).tail(0).cloned().collect()
     }
 
-    pub fn push_frame(&self, sample: FrameSample) {
-        lock(&self.frames).push(|seq| FrameSample { seq, ..sample });
+    pub fn set_profile(&self, profile: TelemetryProfile) {
+        if profile != TelemetryProfile::Off {
+            let mut frames = lock(&self.frames);
+            if frames.buf.capacity() < FRAME_CAP {
+                let available = frames.buf.len();
+                frames.buf.reserve(FRAME_CAP - available);
+            }
+        }
+        self.profile.store(profile as u8, Ordering::Relaxed);
+    }
+
+    pub(crate) fn collects_frames(&self) -> bool {
+        self.profile.load(Ordering::Relaxed) != TelemetryProfile::Off as u8 || self.recording()
+    }
+
+    pub(crate) fn collects_gpu(&self) -> bool {
+        self.profile.load(Ordering::Relaxed) >= TelemetryProfile::GpuAndTimeline as u8
+            || (self.recording() && self.capture_gpu.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn recording(&self) -> bool {
+        self.capture_phase.load(Ordering::Acquire) == CAPTURE_RECORDING
+    }
+
+    pub(crate) fn start_trace(self: &Arc<Self>, path: PathBuf, overwrite: bool) -> Option<u64> {
+        let detail = match std::env::var("IMPASTO_TRACE_DETAIL").as_deref() {
+            Ok("detailed") => TraceDetail::Detailed,
+            _ => TraceDetail::Stages,
+        };
+        let gpu = std::env::var("IMPASTO_TRACE_GPU").as_deref() != Ok("0");
+        self.begin_capture(Some((path, overwrite)), CaptureOptions { detail, gpu })
+    }
+
+    pub(super) fn begin_capture(
+        &self,
+        destination: Option<(PathBuf, bool)>,
+        options: CaptureOptions,
+    ) -> Option<u64> {
+        static NEXT_TRACE: AtomicU64 = AtomicU64::new(1);
+        let mut capture = lock(&self.capture);
+        if capture.is_some() {
+            return None;
+        }
+        let id = NEXT_TRACE.fetch_add(1, Ordering::Relaxed);
+        let timeline = TimelineRecording::begin(id, options.detail)?;
+        *capture = Some(CaptureSlot {
+            archive: TraceCapture {
+                id,
+                destination,
+                started_ns: timeline.started_ns,
+                ..TraceCapture::default()
+            },
+            timeline,
+            in_flight: 0,
+        });
+        self.capture_gpu.store(options.gpu, Ordering::Relaxed);
+        self.capture_phase
+            .store(CAPTURE_RECORDING, Ordering::Release);
+        Some(id)
+    }
+
+    pub(crate) fn track_frame(self: &Arc<Self>, started_ns: u64) -> Option<CaptureFrame> {
+        if !self.recording() {
+            return None;
+        }
+        let mut slot = lock(&self.capture);
+        let capture = slot.as_mut()?;
+        if started_ns < capture.archive.started_ns || !capture.timeline.id_active() {
+            return None;
+        }
+        capture.in_flight += 1;
+        Some(CaptureFrame {
+            hub: Arc::downgrade(self),
+            id: capture.archive.id,
+        })
+    }
+
+    pub(crate) fn finish_trace(&self, id: u64) -> std::io::Result<PathBuf> {
+        let capture = self
+            .take_capture(id)
+            .ok_or_else(|| std::io::Error::other("trace recording expired"))?;
+        super::trace_export::write(&capture)
+    }
+
+    pub(super) fn take_capture(&self, id: u64) -> Option<Arc<TraceCapture>> {
+        let mut slot = lock(&self.capture);
+        let capture = slot.as_ref().filter(|capture| capture.archive.id == id)?;
+        let cutoff = capture.timeline.stop()?;
+        self.capture_phase
+            .store(CAPTURE_STOPPING, Ordering::Release);
+        (slot, _) = self
+            .capture_changed
+            .wait_timeout_while(slot, TRACE_DRAIN, |slot| {
+                slot.as_ref().is_some_and(|capture| {
+                    capture.in_flight > 0 || capture.archive.pending_gpu() > 0
+                })
+            })
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut capture = slot.take()?;
+        self.capture_phase.store(CAPTURE_IDLE, Ordering::Release);
+        drop(slot);
+        let (spans, loss) = capture.timeline.finish(cutoff);
+        capture.archive.spans = spans;
+        capture.archive.span_loss = loss;
+        capture.archive.stopped_ns = cutoff;
+        capture.archive.unfinished_frames = capture.in_flight;
+        let archive = Arc::new(capture.archive);
+        #[cfg(any(debug_assertions, feature = "devtools-server"))]
+        {
+            let mut latest = lock(&self.latest_capture);
+            if latest.as_ref().is_none_or(|old| old.id < id) {
+                *latest = Some(Arc::clone(&archive));
+            }
+        }
+        capture.timeline.release();
+        Some(archive)
+    }
+
+    pub(crate) fn cancel_capture(&self, id: u64) {
+        let mut slot = lock(&self.capture);
+        if let Some(capture) = slot.as_ref().filter(|capture| capture.archive.id == id)
+            && capture.timeline.stop().is_some()
+        {
+            capture.timeline.release();
+            self.capture_phase.store(CAPTURE_IDLE, Ordering::Release);
+            slot.take();
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn latest_capture(&self) -> Option<Arc<TraceCapture>> {
+        lock(&self.latest_capture).clone()
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn capture_status(&self) -> Option<(u64, bool)> {
+        lock(&self.capture)
+            .as_ref()
+            .map(|capture| (capture.archive.id, capture.timeline.id_active()))
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn frame_updates(&self, since: u64) -> (u64, bool, Vec<FrameSample>) {
+        let frames = lock(&self.frames);
+        let reset = since == 0
+            || since > frames.seq
+            || frames
+                .buf
+                .front()
+                .is_some_and(|oldest| since < oldest.seq.saturating_sub(1));
+        let samples = frames
+            .tail(if reset { 0 } else { since })
+            .cloned()
+            .collect();
+        (frames.seq, reset, samples)
+    }
+
+    pub fn push_frame(&self, mut sample: FrameSample) {
+        {
+            let mut frames = lock(&self.frames);
+            frames.push(|seq| {
+                sample.seq = seq;
+                sample.changed_at = seq;
+                sample.clone()
+            });
+        }
+        if self.capture_phase.load(Ordering::Acquire) != CAPTURE_IDLE
+            && let Some(capture) = lock(&self.capture).as_mut()
+            && sample.schedule.ui_start_ns >= capture.archive.started_ns
+            && sample.schedule.ui_start_ns <= capture.timeline.cutoff()
+        {
+            if capture.archive.frames.len() == TRACE_FRAME_CAP {
+                capture.archive.overwritten_frames += 1;
+            }
+            push_bounded(&mut capture.archive.frames, TRACE_FRAME_CAP, sample);
+        }
         self.bump();
     }
+
+    pub(crate) fn patch_gpu_timing(&self, update: raster::GpuTimingUpdate) {
+        let timing = update.timing.map(Arc::new);
+        let patch = |frame: &mut FrameSample| {
+            let key = update.sample;
+            if frame.number == key.frame_id
+                && frame.gpu.device_generation == key.device_generation
+                && frame.gpu.status == raster::GpuTimingStatus::Pending
+            {
+                frame.gpu = key;
+                frame.gpu_timing.clone_from(&timing);
+                true
+            } else {
+                false
+            }
+        };
+        let mut frames = lock(&self.frames);
+        let revision = frames.seq.saturating_add(1);
+        if let Some(frame) = frames
+            .buf
+            .iter_mut()
+            .rev()
+            .find(|frame| frame.number == update.sample.frame_id)
+            && patch(frame)
+        {
+            frame.changed_at = revision;
+            frames.seq = revision;
+            self.bump();
+        }
+        drop(frames);
+        if self.capture_phase.load(Ordering::Acquire) != CAPTURE_IDLE
+            && let Some(capture) = lock(&self.capture).as_mut()
+            && let Some(frame) = capture
+                .archive
+                .frames
+                .iter_mut()
+                .rev()
+                .find(|frame| frame.number == update.sample.frame_id)
+            && patch(frame)
+        {
+            self.capture_changed.notify_all();
+        }
+    }
+}
+
+pub type DiagnosticsHub = TelemetryHub;
+
+const CAPTURE_IDLE: u8 = 0;
+const CAPTURE_RECORDING: u8 = 1;
+const CAPTURE_STOPPING: u8 = 2;
+#[cfg(test)]
+pub(super) static CAPTURE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+const TRACE_FRAME_CAP: usize = 1024;
+const TRACE_DRAIN: Duration = Duration::from_millis(80);
+
+pub(super) struct CaptureOptions {
+    pub detail: TraceDetail,
+    pub gpu: bool,
+}
+
+struct CaptureSlot {
+    archive: TraceCapture,
+    timeline: Arc<TimelineRecording>,
+    in_flight: usize,
+}
+
+/// Holds the capture open while an admitted frame is in the host pipeline.
+pub(crate) struct CaptureFrame {
+    hub: Weak<TelemetryHub>,
+    id: u64,
+}
+
+impl Drop for CaptureFrame {
+    fn drop(&mut self) {
+        if let Some(hub) = self.hub.upgrade()
+            && let Some(capture) = lock(&hub.capture).as_mut()
+            && capture.archive.id == self.id
+        {
+            capture.in_flight -= 1;
+            hub.capture_changed.notify_all();
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct TraceCapture {
+    pub id: u64,
+    pub destination: Option<(PathBuf, bool)>,
+    pub started_ns: u64,
+    pub stopped_ns: u64,
+    pub overwritten_frames: u64,
+    pub unfinished_frames: usize,
+    pub span_loss: SpanLoss,
+    pub frames: VecDeque<FrameSample>,
+    pub spans: VecDeque<CapturedSpan>,
+}
+
+impl TraceCapture {
+    pub fn pending_gpu(&self) -> usize {
+        self.frames
+            .iter()
+            .filter(|frame| frame.gpu.status == raster::GpuTimingStatus::Pending)
+            .count()
+    }
+}
+
+fn push_bounded<T>(queue: &mut VecDeque<T>, capacity: usize, value: T) {
+    if queue.len() == capacity {
+        queue.pop_front();
+    }
+    queue.push_back(value);
 }
 #[cfg(test)]
 mod tests {
@@ -402,6 +727,97 @@ mod tests {
             fields: Vec::new(),
             frame: None,
         }
+    }
+
+    #[test]
+    fn stopping_capture_accepts_gpu_readback_from_an_admitted_frame() {
+        let _serial = CAPTURE_TEST_LOCK.lock().unwrap();
+        let hub = Arc::new(TelemetryHub::new());
+        let id = hub
+            .begin_capture(
+                None,
+                CaptureOptions {
+                    detail: TraceDetail::Stages,
+                    gpu: true,
+                },
+            )
+            .unwrap();
+        let started = super::super::telemetry::mono_ns();
+        let submitted = hub.track_frame(started).unwrap();
+        let sample = raster::GpuSample {
+            frame_id: 90,
+            device_generation: 4,
+            status: raster::GpuTimingStatus::Pending,
+        };
+        hub.push_frame(FrameSample {
+            number: 90,
+            schedule: ScheduleTiming {
+                ui_start_ns: started,
+                ..ScheduleTiming::default()
+            },
+            gpu: sample,
+            ..FrameSample::default()
+        });
+        let stopping = Arc::clone(&hub);
+        let worker = std::thread::spawn(move || stopping.take_capture(id).unwrap());
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while hub.recording() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "capture did not begin stopping"
+            );
+            std::thread::yield_now();
+        }
+        hub.patch_gpu_timing(raster::GpuTimingUpdate {
+            sample: raster::GpuSample {
+                status: raster::GpuTimingStatus::Ready,
+                ..sample
+            },
+            timing: None,
+        });
+        drop(submitted);
+        let capture = worker.join().unwrap();
+        assert_eq!(capture.frames[0].gpu.status, raster::GpuTimingStatus::Ready);
+        assert_eq!(capture.pending_gpu(), 0);
+        assert_eq!(capture.unfinished_frames, 0);
+    }
+
+    #[test]
+    fn late_gpu_update_keeps_frame_selection_and_advances_the_cursor() {
+        use raster::{GpuSample, GpuTimingStatus, GpuTimingUpdate};
+
+        let hub = TelemetryHub::new();
+        hub.push_frame(FrameSample {
+            number: 42,
+            gpu: GpuSample {
+                frame_id: 42,
+                device_generation: 7,
+                status: GpuTimingStatus::Pending,
+            },
+            ..FrameSample::default()
+        });
+        let patch = |generation| GpuTimingUpdate {
+            sample: GpuSample {
+                frame_id: 42,
+                device_generation: generation,
+                status: GpuTimingStatus::StaleDevice,
+            },
+            timing: None,
+        };
+        hub.patch_gpu_timing(patch(8));
+        assert_eq!(lock(&hub.frames).revision(), 1);
+        hub.push_frame(FrameSample {
+            number: 43,
+            ..FrameSample::default()
+        });
+        hub.patch_gpu_timing(patch(7));
+        let frames = lock(&hub.frames);
+        assert_eq!(frames.revision(), 3);
+        let updated: Vec<_> = frames.tail(2).collect();
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].seq, 1);
+        assert_eq!(updated[0].number, 42);
+        assert_eq!(updated[0].gpu.status, GpuTimingStatus::StaleDevice);
     }
 
     #[test]

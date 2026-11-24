@@ -446,6 +446,7 @@ fn websocket_packages_compat_and_max_sockets() {
 import {{ connect }} from "@impasto/websocket";
 import "@impasto/websocket/polyfill";
 
+console.log("opening native WebSocket");
 const ws = await connect("ws://{addr}/chat", {{ protocols: ["chat"] }});
 if (ws.protocol !== "chat") throw new Error("expected negotiated protocol chat, got " + ws.protocol);
 ws.send("ping");
@@ -458,10 +459,12 @@ got.push((await iter.next()).value);
 if (got[0] !== "echo:ping") throw new Error("text echo mismatch");
 const bin = got[1] as Uint8Array;
 if (bin.length !== 3 || bin[0] !== 4 || bin[2] !== 6) throw new Error("binary echo mismatch");
+console.log("closing native WebSocket after both echoes");
 const closeInfo = await ws.close(1000, "done");
 if (!closeInfo.wasClean || closeInfo.code !== 1000) throw new Error("expected clean close");
 
 // Verify WHATWG WebSocket polyfill + binary ArrayBuffer + events
+console.log("exercising WebSocket polyfill");
 await new Promise<void>((resolve, reject) => {{
   const compat = new WebSocket("ws://{addr}/compat");
   compat.binaryType = "arraybuffer";
@@ -484,6 +487,7 @@ await new Promise<void>((resolve, reject) => {{
 }});
 
 // Enforce MAX_SOCKETS = 8 and verify closing frees slots
+console.log("filling WebSocket slots");
 const pool = [];
 for (let i = 0; i < 8; i++) {{
   pool.push(await connect("ws://{addr}/pool"));
@@ -491,15 +495,20 @@ for (let i = 0; i < 8; i++) {{
 let ninthFailed = false;
 try {{
   await connect("ws://{addr}/pool");
-}} catch {{
+}} catch (error) {{
+  if (!String(error).includes("too many open WebSockets")) throw error;
   ninthFailed = true;
 }}
 if (!ninthFailed) throw new Error("9th concurrent socket should fail MAX_SOCKETS=8");
-await pool[0].close(1000, "free-slot");
-const replacement = await connect("ws://{addr}/pool");
-await replacement.close(1000, "bye");
-for (let i = 1; i < pool.length; i++) {{
-  await pool[i].close(1000, "bye");
+console.log("replacing closed WebSockets at capacity");
+for (let i = 0; i < pool.length; i++) {{
+  const closed = await pool[i].close(1000, "free-slot");
+  if (!closed.wasClean) throw new Error("expected clean slot close");
+  pool[i] = await connect("ws://{addr}/pool");
+}}
+console.log("closing remaining WebSockets");
+for (const socket of pool) {{
+  await socket.close(1000, "bye");
 }}
 "#,
     );
@@ -508,13 +517,19 @@ for (let i = 1; i < pool.length; i++) {{
     let hub = Arc::new(DiagnosticsHub::new());
     let outcome = run_bundled_module(&bundled, Some(Arc::clone(&hub)));
     let _ = stop_tx.send(true);
-    outcome.expect("websocket integration script failed");
 
     let socket_entries: Vec<_> = hub
         .network_snapshot()
         .into_iter()
         .filter(|e| e.kind == NetKind::Socket)
         .collect();
+    if let Err(error) = outcome {
+        let events: Vec<_> = socket_entries
+            .iter()
+            .map(|event| (event.token, &event.method, &event.url, &event.error))
+            .collect();
+        panic!("WebSocket integration failed: {error}\nnative socket events: {events:?}");
+    }
     assert!(
         !socket_entries.is_empty(),
         "expected WebSocket DevTools NetEntries"

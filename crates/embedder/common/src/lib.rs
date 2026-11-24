@@ -6,6 +6,7 @@ mod diagnostics;
 mod error;
 mod exec;
 mod files;
+mod gpu_view_gallery;
 mod host;
 mod http;
 mod images;
@@ -33,7 +34,8 @@ use std::sync::Arc;
 use engine::session::Metrics;
 
 pub use command::{Command, FrameToken, SurfaceId, SurfaceTarget};
-pub use diagnostics::{DiagnosticsHub, NetEntry, NetKind, wrap_if_devtools};
+pub use diagnostics::telemetry::{ScheduleTiming, TelemetryProfile};
+pub use diagnostics::{DiagnosticsHub, NetEntry, NetKind, TelemetryHub, wrap_if_devtools};
 pub use engine::session::{FrameTime, Lifecycle};
 pub use error::{BootError, SessionError};
 pub use exec::{RtExec, settle_factory};
@@ -44,8 +46,8 @@ pub use http::{
     HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, HttpResponse,
     OpenWireClient, RedirectMode, http_client,
 };
-pub use images::{ExternalFrame, ImportExternalFrame, pixel_count_ok};
-pub use images::{ImageDecoder, ImageError, ImageHandle, ImageReady};
+pub use images::{DecodeTarget, ImageDecoder, ImageError, ImageHandle, ImageReady};
+pub use images::{ExternalFrame, ImportExternalFrame, pixel_count_ok, unpremultiply_rgba};
 pub use log_sub::install as install_log;
 pub use log_sub::set_log_targets;
 pub use module_stubs::{
@@ -149,15 +151,17 @@ pub trait Services: Send {
 pub trait Surface {
     /// Retires a lost device and its surface. The next present can open the
     /// window again once the host resubmits its current layer tree.
-    fn recover_device(&mut self, _engine: &mut raster::Rasterizer) -> Result<(), raster::Status> {
+    fn recover_device(
+        &mut self,
+        _engine: &mut raster::Rasterizer,
+        _pixels: raster::PixelSize,
+    ) -> Result<(), raster::Status> {
         Err(raster::Status::DeviceLost)
     }
 
     /// Acquire, draw, and present.
     ///
-    /// `pixels` is the drawable size the host posted with the surface. Vulkan
-    /// copies it onto the swapchain before acquire. Metal reads the size from
-    /// the layer.
+    /// `pixels` is the current drawable size in physical pixels.
     fn present(
         &mut self,
         raster: &mut raster::Rasterizer,
@@ -174,9 +178,25 @@ pub trait Surface {
     }
 }
 
+/// Preferred display cadence for a compositor-owned frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FrameRateHint {
+    /// Use the display's interactive rate.
+    #[default]
+    Display,
+    /// Prefer 60 frames per second.
+    Hz60,
+    /// Prefer 30 frames per second.
+    Hz30,
+}
+
 pub trait Vsync: Send + Sync {
     fn bind(&self, sink: Arc<dyn Fn(FrameToken, FrameTime) + Send + Sync>);
     fn request_frame(&self, token: FrameToken);
+    fn request_frame_with_rate(&self, token: FrameToken, hint: FrameRateHint) {
+        let _ = hint;
+        self.request_frame(token);
+    }
     fn cancel(&self);
 }
 
@@ -190,6 +210,14 @@ pub enum ThreadTopology {
 }
 
 impl ThreadTopology {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::SharedRender => "shared",
+            Self::Split => "split",
+            Self::PlatformUi => "platform-ui",
+        }
+    }
+
     pub fn configured() -> Result<Self, BootError> {
         match std::env::var("IMPASTO_THREAD_TOPOLOGY") {
             Ok(mode) => mode.parse(),
@@ -228,7 +256,8 @@ pub struct Boot {
     /// Absent HTTP fails with `network is not linked`. Hosts inject [`http_client`].
     pub http: Option<Arc<dyn HttpClient>>,
     /// Creates the graphics context on the render thread.
-    pub open_raster: Box<dyn FnOnce() -> Result<raster::Rasterizer, raster::Status> + Send>,
+    pub open_raster:
+        Box<dyn FnOnce(raster::FontLibrary) -> Result<raster::Rasterizer, raster::Status> + Send>,
     pub open_surface: OpenSurface,
     /// Log one line of layer-tree shape after a frame records new layers.
     pub dump_list: bool,
@@ -250,6 +279,40 @@ impl Boot {
     pub fn with_module(mut self, module: engine::session::Module) -> Self {
         self.modules.push(module);
         self
+    }
+
+    /// Installs a native producer when the owning Raster queue opens.
+    pub fn with_gpu_view(
+        mut self,
+        id: raster::GpuViewId,
+        producer: impl raster::GpuViewProducer,
+    ) -> Self {
+        let open = self.open_raster;
+        self.open_raster = Box::new(move |fonts| {
+            let mut raster = open(fonts)?;
+            raster.register_gpu_view(id, producer).map_err(|error| {
+                tracing::error!(target: "impasto::effect", %error, "GPU view registration failed");
+                raster::Status::BadScene
+            })?;
+            Ok(raster)
+        });
+        self
+    }
+
+    /// Installs the bundled Gallery producer for the GPU lab.
+    #[doc(hidden)]
+    pub fn with_gallery_gpu_view(self, enabled: bool) -> Self {
+        let requested = matches!(
+            engine::session::shared_read(&self.launch_url).as_deref(),
+            Some("impasto://gpu-lab" | "impasto://gpu-lab/invalid")
+        );
+        if (enabled || requested)
+            && let Ok(id) = raster::GpuViewId::new("gallery-demo")
+        {
+            self.with_gpu_view(id, gpu_view_gallery::GalleryGpuView::default())
+        } else {
+            self
+        }
     }
 
     /// Turns devtools on. The caller keeps the hub to register the module

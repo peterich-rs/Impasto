@@ -505,28 +505,29 @@ fn a_click_inside_a_link_range_activates_it() -> Result<(), crate::Error> {
     let region = tree.pointer_region()?;
     let text = tree.text("hello", 16.0, [0, 0, 0, 255])?;
     tree.add_child(region, text)?;
+    let spans = vec![
+        crate::scene::TextSpan {
+            utf8: "he".into(),
+            color: [0, 0, 255, 255],
+            gradient: None,
+            weight: 700,
+            underline: true,
+            line_through: false,
+            family: Some("One".into()),
+        },
+        crate::scene::TextSpan {
+            utf8: "llo".into(),
+            color: [0, 0, 0, 255],
+            gradient: None,
+            weight: 400,
+            underline: false,
+            line_through: false,
+            family: Some("Two".into()),
+        },
+    ];
     tree.set_text_runs(
         text,
-        vec![
-            crate::scene::TextSpan {
-                utf8: "he".into(),
-                color: [0, 0, 255, 255],
-                gradient: None,
-                weight: 700,
-                underline: true,
-                line_through: false,
-                family: Some("One".into()),
-            },
-            crate::scene::TextSpan {
-                utf8: "llo".into(),
-                color: [0, 0, 0, 255],
-                gradient: None,
-                weight: 400,
-                underline: false,
-                line_through: false,
-                family: Some("Two".into()),
-            },
-        ],
+        spans.clone(),
         vec![crate::tree::TextLink {
             start: 0,
             end: 2,
@@ -536,26 +537,31 @@ fn a_click_inside_a_link_range_activates_it() -> Result<(), crate::Error> {
     tree.layout()?;
     let painted = tree.record()?;
     let command = painted.commands.iter().find_map(|command| match command {
-        crate::scene::Command::Text { utf8, spans, .. } => Some((utf8, spans)),
+        crate::scene::Command::Text {
+            shaped,
+            span_paints,
+            ..
+        } => Some((shaped, span_paints)),
         _ => None,
     });
-    let Some((utf8, spans)) = command else {
+    let Some((shaped, span_paints)) = command else {
         panic!("missing text");
     };
-    assert_eq!(utf8.as_ref(), "hello");
-    assert_eq!(spans.len(), 2);
+    assert_eq!(
+        crate::text::test_support::texts(&painted),
+        ["hello"],
+        "spans split the text into runs"
+    );
+    assert_eq!(span_paints.len(), 2);
+    assert!(shaped.is_some());
     let width = MonoShaper::default()
-        .metrics(
-            &crate::text::paint_key(
-                std::sync::Arc::from("hello"),
-                std::sync::Arc::new(crate::scene::TextStyle::default()),
-                spans.as_ref(),
-                16.0,
-                1_000_000.0,
-                [0, 0, 0, 255],
-            )
-            .metrics,
-        )
+        .metrics(&crate::text::metrics_key(
+            std::sync::Arc::from("hello"),
+            std::sync::Arc::new(crate::scene::TextStyle::default()),
+            spans.as_ref(),
+            16.0,
+            1_000_000.0,
+        ))
         .size;
     assert!((width.width - 40.0).abs() < 0.01, "{}", width.width);
     tree.pointer(event(Phase::Down, 2.0, 8.0));
@@ -735,7 +741,7 @@ fn a_span_color_change_repaints_without_layout() -> Result<(), crate::Error> {
     tree.layout()?;
     let painted = tree.record()?;
     let cleared = painted.commands.iter().any(
-        |command| matches!(command, crate::scene::Command::Text { spans, .. } if spans.is_empty()),
+        |command| matches!(command, crate::scene::Command::Text { span_paints, .. } if span_paints.is_empty()),
     );
     assert!(cleared);
     Ok(())

@@ -4,13 +4,15 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use engine::session::FrameTime;
 
 use super::{ImageLoader, Installed, elapsed_ms, lock};
 use crate::TaskRunner;
 use crate::command::SurfaceId;
+use crate::diagnostics::telemetry::{ScheduleTiming, mono_ns, mono_ns_at};
+use crate::diagnostics::{CaptureFrame, TelemetryHub};
 use crate::error::BootError;
 use crate::images::{self, ImageCache};
 use crate::present::{self, AfterPresent, after_present};
@@ -21,6 +23,8 @@ use crate::timing::FrameTiming;
 
 pub(super) struct RasterHost {
     pub(super) raster: Rc<RefCell<raster::Rasterizer>>,
+    pub(super) telemetry: Option<Arc<TelemetryHub>>,
+    pub(super) gpu_poll_pending: bool,
     pub(super) external_textures: HashMap<String, images::ExternalFrame>,
     pub(super) external_gpu: HashMap<String, images::ExternalGpuFrame>,
     pub(super) surfaces: SurfaceHost,
@@ -41,7 +45,6 @@ pub(super) struct RasterHost {
 
 impl Drop for RasterHost {
     fn drop(&mut self) {
-        // A Vulkan swapchain needs the graphics context while it retires.
         self.surfaces.clear();
         *lock(&self.upload) = None;
     }
@@ -106,10 +109,15 @@ impl RasterPort {
 }
 
 pub(super) struct FrameSubmission {
+    pub(super) capture_frame: Option<CaptureFrame>,
+    pub(super) sample_gpu: bool,
     pub(super) revision: u64,
     pub(super) number: u64,
     pub(super) time: FrameTime,
     pub(super) frame_started: Instant,
+    pub(super) schedule: Option<ScheduleTiming>,
+    pub(super) telemetry: Option<Arc<TelemetryHub>>,
+    pub(super) runtime_sample: Option<engine::session::RuntimeSample>,
     pub(super) session_ms: f64,
     pub(super) gesture_ms: f64,
     pub(super) phases: engine::session::FramePhases,
@@ -124,9 +132,12 @@ pub(super) struct FrameSubmission {
     pub(super) placements_changed: bool,
     pub(super) layers_changed: bool,
     pub(super) reloads: Vec<String>,
-    pub(super) fonts: Vec<(String, Arc<[u8]>)>,
     pub(super) census: Option<Arc<engine::semantics::ImageCensus>>,
     pub(super) hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
+    pub(super) compositor_epoch: Option<u64>,
+    pub(super) compositor_frame: bool,
+    pub(super) animated_effects: bool,
+    pub(super) gpu_views: bool,
 }
 
 pub(super) struct RasterOutput {
@@ -134,6 +145,8 @@ pub(super) struct RasterOutput {
     pub(super) stop: bool,
     pub(super) shown: bool,
     pub(super) timing: Option<FrameTiming>,
+    pub(super) gpu_pending: bool,
+    pub(super) renderer_work: bool,
 }
 
 impl RasterOutput {
@@ -143,6 +156,8 @@ impl RasterOutput {
             stop: false,
             shown: false,
             timing: None,
+            gpu_pending: false,
+            renderer_work: false,
         }
     }
 }
@@ -157,24 +172,59 @@ pub(super) struct RasterCompletion {
 pub(super) fn raster_frame(
     graphics: &mut RasterHost,
     mut submission: FrameSubmission,
-    separate: bool,
+    _separate: bool,
     before_present: impl FnOnce(),
 ) -> Result<RasterCompletion, BootError> {
-    let _trace = separate.then(|| {
-        let phase = engine::session::trace::Section::begin(c"Impasto raster frame");
-        engine::session::trace::Section::event(|| {
-            format!("Impasto raster frame id={}", submission.number)
-        });
-        phase
-    });
-    let span = tracing::error_span!(target: "impasto::render", "raster", frame = submission.number);
-    let _entered = span.enter();
+    let capture_frame = submission.capture_frame.take();
+    let span = tracing::info_span!(
+        target: "impasto::render",
+        "raster",
+        frame = submission.number,
+        queue = "raster"
+    );
+    let entered = span.enter();
+    tracing::debug!(target: "impasto::render", id = submission.number, "Impasto raster");
+    if let Some(schedule) = submission.schedule.as_mut() {
+        schedule.raster_start_ns = mono_ns();
+    }
+    if let Some(hub) = &submission.telemetry {
+        drain_gpu(graphics, hub);
+    }
     graphics.busy.enter("frame");
     let output = render_layers(graphics, &mut submission, before_present);
     graphics.busy.leave();
+    let mut output = output?;
+    if let Some(hub) = &submission.telemetry {
+        if let Some(timing) = output.timing.as_ref() {
+            crate::timing::record_frame(hub, timing, &submission.phases);
+        } else if let Some(mut schedule) = submission.schedule {
+            schedule.present_done_ns = mono_ns();
+            let phase = submission.phases;
+            crate::timing::record_frame(
+                hub,
+                &FrameTiming {
+                    number: submission.number,
+                    schedule,
+                    work_ms: schedule.e2e_ms(),
+                    interval_ms: submission.time.interval_ms,
+                    session_ms: submission.session_ms,
+                    gesture_ms: submission.gesture_ms,
+                    script_ms: phase.script_ms,
+                    layout_ms: phase.layout_ms,
+                    record_ms: phase.record_ms,
+                    runtime: submission.runtime_sample,
+                    ..FrameTiming::default()
+                },
+                &phase,
+            );
+        }
+        output.gpu_pending = graphics.raster.borrow().gpu_timings_pending();
+    }
+    drop(entered);
+    drop(capture_frame);
     Ok(RasterCompletion {
         submission,
-        output: output?,
+        output,
         surface: graphics.surfaces.id(),
         retry_at: graphics.frame_retry_at,
     })
@@ -185,8 +235,6 @@ fn render_layers(
     submission: &mut FrameSubmission,
     before_present: impl FnOnce(),
 ) -> Result<RasterOutput, BootError> {
-    use engine::session::trace::Section;
-
     let FrameSubmission {
         scale,
         number,
@@ -200,23 +248,37 @@ fn render_layers(
         ..
     } = *submission;
     let reloads = std::mem::take(&mut submission.reloads);
-    let fonts = std::mem::take(&mut submission.fonts);
     let census = submission.census.take();
     let reloaded = !reloads.is_empty();
     for source in reloads {
         graphics.images.reload(&source);
-    }
-    again |= reloaded;
-    if !fonts.is_empty() {
-        install_fonts(&mut graphics.raster.borrow_mut(), fonts);
+        graphics.raster.borrow_mut().forget_texture(&source);
         graphics.installed = None;
     }
+    again |= reloaded;
     let Some(tree) = submission.tree.as_ref() else {
         return Ok(RasterOutput::finish(again));
     };
-    if !images_ready(graphics, &submission.requirements, scale, census.as_deref()) {
+    if !submission.compositor_frame
+        && (layers_changed
+            || graphics
+                .installed
+                .as_ref()
+                .is_none_or(|installed| installed.scale != scale))
+    {
+        graphics
+            .images
+            .set_layout_targets(tree.image_decode_extents(), scale);
+    }
+    if !submission.compositor_frame
+        && !images_ready(graphics, &submission.requirements, scale, census.as_deref())
+    {
         return Ok(RasterOutput::finish(reloaded));
     }
+    let mut renderer_work = submission.animated_effects
+        || (submission.gpu_views && graphics.raster.borrow().has_registered_gpu_views_in_scene());
+    again |= renderer_work;
+    graphics.needs_present |= renderer_work;
     graphics.needs_present |= submission.placements_changed;
     if graphics
         .frame_retry_at
@@ -243,16 +305,29 @@ fn render_layers(
         before_present();
     }
     match step {
-        FrameStep::Cancel | FrameStep::Skip { again: false } => {
-            let _trace = Section::begin(c"Impasto skip present");
-            return Ok(RasterOutput::finish(false));
-        }
-        FrameStep::Skip { again: true } => {
-            let _trace = Section::begin(c"Impasto skip present");
-            return Ok(RasterOutput::finish(true));
+        FrameStep::Cancel | FrameStep::Skip { .. } => {
+            let status = if matches!(step, FrameStep::Cancel) {
+                "cancelled"
+            } else {
+                "unchanged"
+            };
+            tracing::event!(name: "present_skipped", target: "impasto::render", tracing::Level::DEBUG,
+                trace_event = true, status);
+            return Ok(RasterOutput::finish(matches!(
+                step,
+                FrameStep::Skip { again: true }
+            )));
         }
         FrameStep::Submit => {
-            let _trace = Section::begin(c"Impasto submit");
+            let _trace = tracing::debug_span!(target: "impasto::render", "submit").entered();
+            let bucket = images::scale_bucket(scale);
+            if graphics
+                .installed
+                .as_ref()
+                .is_some_and(|installed| images::scale_bucket(installed.scale) != bucket)
+            {
+                graphics.raster.borrow_mut().invalidate_textures();
+            }
             graphics.images.install_uploaded(
                 &mut graphics.raster.borrow_mut(),
                 images::scale_bucket(scale),
@@ -288,32 +363,48 @@ fn render_layers(
                         rgba,
                     })
             };
-            let submitted = graphics
-                .raster
-                .borrow_mut()
-                .submit_layers(tree, scale, resolve);
+            let submitted =
+                graphics
+                    .raster
+                    .borrow_mut()
+                    .submit_shared_layers(Arc::clone(tree), scale, resolve);
             submit_ms = elapsed_ms(started);
-            if let Err(status) = submitted {
-                tracing::error!(
-                    target: "impasto::render::present",
-                    %status,
-                    "scene submit failed"
-                );
-                if let Some(hub) = submission.hub.as_ref() {
-                    hub.error(
-                        "engine",
-                        &format!("scene submit failed: {status}"),
-                        None,
-                        Some(number),
+            let submitted = match submitted {
+                Ok(submitted) => submitted,
+                Err(status) => {
+                    if status == raster::Status::DeviceLost {
+                        recover_device(graphics)?;
+                        return Ok(RasterOutput::finish(true));
+                    }
+                    tracing::error!(
+                        target: "impasto::render::present",
+                        %status,
+                        "scene submit failed"
                     );
+                    if let Some(hub) = submission.hub.as_ref() {
+                        hub.error(
+                            "engine",
+                            &format!("scene submit failed: {status}"),
+                            None,
+                            Some(number),
+                        );
+                    }
+                    return Ok(RasterOutput::finish(again));
                 }
-                if status == raster::Status::NotLinked {
-                    return Err(BootError::Engine(status));
-                }
-                // A rejected list is not a lost surface. Do not force another vsync.
+            };
+            graphics.installed = Some(Installed { scale });
+            renderer_work = submission.animated_effects
+                || (submission.gpu_views
+                    && graphics.raster.borrow().has_registered_gpu_views_in_scene());
+            again |= renderer_work;
+            if submitted.stats.damage == raster::DamageRect::Empty
+                && graphics.gpu == Gpu::Live
+                && !graphics.needs_present
+            {
+                tracing::event!(name: "present_skipped", target: "impasto::render", tracing::Level::DEBUG,
+                    trace_event = true, status = "no_damage");
                 return Ok(RasterOutput::finish(again));
             }
-            graphics.installed = Some(Installed { scale });
             if graphics.gpu == Gpu::Flush {
                 graphics.gpu = Gpu::Live;
                 tracing::info!(target: "impasto::render::gpu", reason = "resume", "gpu live");
@@ -325,30 +416,122 @@ fn render_layers(
         return Ok(RasterOutput::finish(false));
     }
     let started = Instant::now();
+    let present_start_ns = submission.schedule.map(|_| mono_ns_at(started));
+    let gpu_frame = submission.sample_gpu.then_some(number);
     let presented = {
-        let _trace = Section::begin(c"Impasto present");
+        let _trace = tracing::debug_span!(target: "impasto::render", "present").entered();
         let mut raster = graphics.raster.borrow_mut();
-        graphics
+        raster.set_render_time_ms(submission.time.target_ms);
+        raster.begin_gpu_frame(gpu_frame);
+        let result = graphics
             .surfaces
-            .present(&mut raster, &submission.platform_views)
+            .present(&mut raster, &submission.platform_views);
+        for failure in raster.take_effect_failures() {
+            if let Some(hub) = &submission.hub {
+                let message = format!("Shader {}: {}", failure.shader.0, failure.reason);
+                hub.error("runtimeEffect", &message, None, Some(number));
+            }
+        }
+        result
     };
-    let present_ms = elapsed_ms(started);
-    let work_ms = elapsed_ms(frame_started);
-    let stats = graphics.raster.borrow().submit_stats();
-    if matches!(step, FrameStep::Submit) {
-        Section::event(|| {
-            format!(
-                "Impasto pictures rebuilt={} reused={} layers={} prepare_us={} compose_us={}",
-                stats.picture_rebuilt,
-                stats.picture_reused,
-                stats.layer_count,
-                stats.picture_prepare.as_micros(),
-                stats.compose.as_micros(),
-            )
-        });
+    let present_done = Instant::now();
+    let status = if presented.is_ok() {
+        "returned"
+    } else {
+        "failed"
+    };
+    tracing::event!(name: "present_outcome", target: "impasto::render", tracing::Level::DEBUG,
+        trace_event = true, status,
+        reason = presented.as_ref().err().map(ToString::to_string).as_deref());
+    let present_ms = present_done.duration_since(started).as_secs_f64() * 1000.0;
+    let work_ms = present_done.duration_since(frame_started).as_secs_f64() * 1000.0;
+    let (mut stats, mut gpu) = {
+        let raster = graphics.raster.borrow();
+        (raster.submit_stats(), raster.gpu_sample())
+    };
+    if !matches!(step, FrameStep::Submit) {
+        stats.picture_prepare = Duration::ZERO;
+        stats.picture_rebuilt = 0;
+        stats.picture_reused = 0;
+        stats.image_upload = raster::ImageUploadStats::default();
     }
-    let shapes = graphics.raster.borrow_mut().take_shape_stats();
+    if !presented.is_ok() && stats.submit_done.is_none() {
+        stats.render = raster::RenderStats::default();
+        stats.atlas = raster::AtlasStats::default();
+        stats.compose = Duration::ZERO;
+        stats.encode = Duration::ZERO;
+        stats.flush = Duration::ZERO;
+        stats.queue_submit = Duration::ZERO;
+    }
+    if presented.is_ok() {
+        if stats.render.transition_snapshot_bakes != 0 || stats.render.transition_snapshot_hits != 0
+        {
+            tracing::event!(
+                name: "transition_snapshot",
+                target: "impasto::render::gpu",
+                tracing::Level::DEBUG,
+                trace_event = true,
+                bakes = stats.render.transition_snapshot_bakes,
+                hits = stats.render.transition_snapshot_hits,
+            );
+        }
+        tracing::trace!(target: "impasto::render::gpu",
+            draws = stats.render.draws,
+            passes = stats.render.passes,
+            pooled_texture_bytes = stats.render.pooled_texture_bytes,
+            buffers_created = stats.render.buffers_created,
+            bind_groups_created = stats.render.bind_groups_created,
+            vertex_bytes = stats.render.vertex_bytes,
+            uniform_bytes = stats.render.uniform_bytes,
+            stop_bytes = stats.render.stop_bytes,
+            offscreen_passes = stats.render.offscreen_passes,
+            direct_present = stats.render.direct_present,
+            snapshot_bakes = stats.render.transition_snapshot_bakes,
+            snapshot_hits = stats.render.transition_snapshot_hits,
+            atlas_bytes = stats.atlas.bytes,
+            atlas_hits = stats.atlas.hits,
+            atlas_misses = stats.atlas.misses,
+            atlas_uploads = stats.atlas.uploads,
+            atlas_upload_calls = stats.atlas.upload_calls,
+            atlas_evictions = stats.atlas.evictions,
+            "render resources");
+    }
+    if matches!(step, FrameStep::Submit) {
+        tracing::debug!(
+            target: "impasto::render",
+            rebuilt = stats.picture_rebuilt,
+            reused = stats.picture_reused,
+            layers = stats.layer_count,
+            prepare_us = u64::try_from(stats.picture_prepare.as_micros()).unwrap_or(u64::MAX),
+            compose_us = u64::try_from(stats.compose.as_micros()).unwrap_or(u64::MAX),
+            "pictures_submitted"
+        );
+    }
+    let shapes = submission.measure;
+    let present_error = presented.as_ref().err().copied();
+    if present_error == Some(raster::Status::DeviceLost)
+        && gpu.status == raster::GpuTimingStatus::Pending
+    {
+        gpu.status = raster::GpuTimingStatus::StaleDevice;
+    }
+    let schedule = submission
+        .schedule
+        .map_or_else(ScheduleTiming::default, |mut schedule| {
+            schedule.present_start_ns = present_start_ns;
+            schedule.submit_done_ns = stats.submit_done.map(mono_ns_at);
+            schedule.present_done_ns = mono_ns_at(present_done);
+            schedule.missed_vsync = schedule.budget_ns > 0
+                && schedule
+                    .present_done_ns
+                    .saturating_sub(schedule.vsync_ns.unwrap_or(schedule.ui_start_ns))
+                    > schedule.budget_ns;
+            schedule
+        });
     let timing = FrameTiming {
+        schedule,
+        raster: stats,
+        gpu,
+        runtime: submission.runtime_sample,
         number,
         vsync_ms: time.vsync_ms,
         target_ms: time.target_ms,
@@ -364,20 +547,16 @@ fn render_layers(
         semantics_ms: phase.semantics_ms,
         submit_ms,
         present_ms,
-        shapes_built: shapes.built.saturating_add(submission.measure.built),
-        shapes_measure_hit: shapes
-            .measure_hit
-            .saturating_add(submission.measure.measure_hit),
-        shapes_measure_miss: shapes
-            .measure_miss
-            .saturating_add(submission.measure.measure_miss),
+        shapes_built: shapes.built,
+        shapes_measure_hit: shapes.measure_hit,
+        shapes_measure_miss: shapes.measure_miss,
         shapes_paint_hit: shapes.paint_hit,
         shapes_paint_miss: shapes.paint_miss,
-        shapes_bridged: shapes.bridged,
+        atlas_hits: stats.atlas.hits,
         picture_rebuilt: stats.picture_rebuilt,
         picture_reused: stats.picture_reused,
         layer_count: stats.layer_count,
-        paragraphs: stats.paragraphs,
+        atlas_entries: u32::try_from(stats.atlas.entries).unwrap_or(u32::MAX),
         pictures: stats.pictures,
         textures: stats.textures,
     };
@@ -386,36 +565,25 @@ fn render_layers(
         stop: false,
         shown: presented.is_ok(),
         timing: Some(timing),
+        gpu_pending: false,
+        renderer_work,
     };
-    let present_error = presented.as_ref().err().copied();
-    if present_error == Some(raster::Status::DeviceLost) && graphics.device_recoveries < 2 {
-        graphics.device_recoveries += 1;
-        tracing::warn!(target: "impasto::render::gpu", attempts = graphics.device_recoveries, "graphics device lost, rebuilding");
-        *lock(&graphics.upload) = None;
-        graphics.images.invalidate_gpu();
-        {
-            let mut raster = graphics.raster.borrow_mut();
-            graphics
-                .surfaces
-                .recover_device(&mut raster)
-                .map_err(BootError::Engine)?;
-            for frame in graphics.external_gpu.values_mut() {
-                frame.image = (frame.import)(&raster);
-            }
-            *lock(&graphics.upload) = raster.texture_factory();
-        }
-        graphics.installed = None;
-        graphics.gpu = Gpu::Flush;
-        graphics.needs_present = true;
+    if present_error == Some(raster::Status::DeviceLost) {
+        recover_device(graphics)?;
         return Ok(RasterOutput {
             again: true,
             ..output
         });
     }
+    if present_error == Some(raster::Status::OutOfMemory) {
+        graphics.raster.borrow_mut().trim();
+        graphics.images.trim();
+        graphics.installed = None;
+    }
     let after = after_present(presented, again);
     if after == AfterPresent::Fatal {
         return Err(BootError::Engine(
-            present_error.unwrap_or(raster::Status::NotLinked),
+            present_error.unwrap_or(raster::Status::DeviceLost),
         ));
     }
     if after == AfterPresent::Rejected {
@@ -469,6 +637,80 @@ fn render_layers(
     Ok(output)
 }
 
+pub(super) fn drain_gpu(graphics: &mut RasterHost, hub: &TelemetryHub) -> bool {
+    let mut raster = graphics.raster.borrow_mut();
+    if raster.gpu_timings_pending() {
+        for update in raster.drain_gpu_timings() {
+            hub.patch_gpu_timing(update);
+        }
+    }
+    raster.gpu_timings_pending()
+}
+
+/// Profiling must complete on Raster in split hosts, including between UI turns.
+pub(super) fn schedule_gpu_poll(slot: Arc<RunnerSlot<RasterHost>>, hub: Arc<TelemetryHub>) {
+    Arc::clone(slot.runner()).post(Box::new(move || {
+        let armed = slot.with(|graphics| {
+            if graphics.gpu_poll_pending || !graphics.raster.borrow().gpu_timings_pending() {
+                return false;
+            }
+            graphics.gpu_poll_pending = true;
+            true
+        });
+        if armed == Some(true) {
+            poll_gpu_later(&slot, hub);
+        }
+    }));
+}
+
+fn poll_gpu_later(slot: &Arc<RunnerSlot<RasterHost>>, hub: Arc<TelemetryHub>) {
+    let pending_slot = Arc::downgrade(slot);
+    slot.runner().post_delayed(
+        Duration::from_millis(8),
+        Box::new(move || {
+            let Some(slot) = pending_slot.upgrade() else {
+                return;
+            };
+            let pending = slot.with(|graphics| {
+                let pending = drain_gpu(graphics, &hub);
+                graphics.gpu_poll_pending = pending;
+                pending
+            });
+            if pending == Some(true) {
+                poll_gpu_later(&slot, hub);
+            }
+        }),
+    );
+}
+
+fn recover_device(graphics: &mut RasterHost) -> Result<(), BootError> {
+    if graphics.device_recoveries >= 2 {
+        return Err(BootError::Engine(raster::Status::DeviceLost));
+    }
+    if let Some(hub) = &graphics.telemetry {
+        for update in graphics.raster.borrow_mut().retire_gpu_timings() {
+            hub.patch_gpu_timing(update);
+        }
+    }
+    graphics.device_recoveries += 1;
+    tracing::warn!(target: "impasto::render::gpu", attempts = graphics.device_recoveries, "graphics device lost, rebuilding");
+    *lock(&graphics.upload) = None;
+    graphics.images.invalidate_gpu();
+    let mut raster = graphics.raster.borrow_mut();
+    graphics
+        .surfaces
+        .recover_device(&mut raster)
+        .map_err(BootError::Engine)?;
+    for frame in graphics.external_gpu.values_mut() {
+        frame.image = (frame.import)(&raster);
+    }
+    *lock(&graphics.upload) = raster.texture_factory();
+    graphics.installed = None;
+    graphics.gpu = Gpu::Flush;
+    graphics.needs_present = true;
+    Ok(())
+}
+
 fn images_ready(
     graphics: &mut RasterHost,
     requirements: &[(Arc<str>, bool)],
@@ -492,13 +734,9 @@ fn images_ready(
         if source.starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX) {
             continue;
         }
+        let ready = graphics.images.is_ready(source, bucket);
         if graphics.images.is_pending(source, bucket) {
-            if required {
-                waiting = true;
-            }
-            continue;
-        }
-        if graphics.images.resolve(source, bucket).is_some() {
+            waiting |= required && !ready;
             continue;
         }
         if graphics.images.is_negative(source, bucket) {
@@ -515,9 +753,7 @@ fn images_ready(
         {
             tracing::error!(target: "impasto::render::image", "image decoder stopped");
         }
-        if required {
-            waiting = true;
-        }
+        waiting |= required && !ready;
     }
     if blocked {
         return false;
@@ -532,16 +768,4 @@ fn note_step(runtime: &mut RasterHost, step: FrameStep) {
     }
     runtime.last_step = Some((step, gpu));
     tracing::debug!(target: "impasto::render", ?step, ?gpu, "frame step");
-}
-
-/// Registers queued faces before `submit`. A failure logs the family and status
-/// only, then the frame continues with the faces already on the raster.
-pub(super) fn install_fonts(raster: &mut raster::Rasterizer, fonts: Vec<(String, Arc<[u8]>)>) {
-    for (family, bytes) in fonts {
-        if let Err(status) = raster.register_shared_font(bytes, &family) {
-            tracing::warn!(target: "impasto::shell", %family, %status, "font registration failed");
-        } else {
-            tracing::info!(target: "impasto::shell", %family, "font registered");
-        }
-    }
 }

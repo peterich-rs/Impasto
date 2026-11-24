@@ -1,13 +1,12 @@
-import { createSignal, createTrackedEffect, onCleanup } from "solid-js";
+import { createSignal, createTrackedEffect } from "solid-js";
 import {
   scene,
   insert,
-  onFrame,
   type NodeHandle,
 } from "@impasto/solid-renderer";
 import { Dialog } from "@impasto/solid-ui";
 import { colorBytes } from "../colors.ts";
-import { useBinder } from "../state/quotes-provider.tsx";
+import { marketPulse } from "../state/quotes-provider.tsx";
 import { settingsSig, updateSettings } from "../state/settings.ts";
 import { accountRef } from "../state/account-ref.ts";
 import { showToast } from "../state/toast.ts";
@@ -21,7 +20,6 @@ const HAIR = colorBytes("#E8E8EC");
 const PRIMARY = colorBytes("#C8102E");
 export function ProfilePage(props: { router: Router }): NodeHandle {
   void props;
-  useBinder();
   const account = accountRef();
   const [updown, setUpdown] = createSignal(settingsSig().updown);
   const [speed, setSpeed] = createSignal(settingsSig().timeScale);
@@ -87,27 +85,21 @@ export function ProfilePage(props: { router: Router }): NodeHandle {
     },
   });
   scene.append(summary.body, posLine);
-  let lastPaint = -1;
-  onCleanup(
-    onFrame((targetMs) => {
-      if (lastPaint >= 0 && targetMs - lastPaint < 500) {
-        return;
-      }
-      lastPaint = targetMs;
-      const mv = account.marketValue();
-      scene.setText(
-        cashLine,
-        `${loc("总资产", "Equity")} ${fmtPrice(account.cash() + mv)}`,
-      );
-      scene.setText(
-        posLine,
-        loc(
-          `可用 ${fmtPrice(account.cash())} · 持仓 ${account.positions().length} 只`,
-          `Cash ${fmtPrice(account.cash())} · ${account.positions().length} positions`,
-        ),
-      );
-    }),
-  );
+  createTrackedEffect(() => {
+    marketPulse();
+    const mv = account.marketValue();
+    scene.setText(
+      cashLine,
+      `${loc("总资产", "Equity")} ${fmtPrice(account.cash() + mv)}`,
+    );
+    scene.setText(
+      posLine,
+      loc(
+        `可用 ${fmtPrice(account.cash())} · 持仓 ${account.positions().length} 只`,
+        `Cash ${fmtPrice(account.cash())} · ${account.positions().length} positions`,
+      ),
+    );
+  });
   const card1 = sectionCard();
   scene.append(page, card1.root);
   const cap1 = scene.createElement("text", {
@@ -387,6 +379,24 @@ export function ProfilePage(props: { router: Router }): NodeHandle {
   });
   scene.append(canvasBtn, canvasLabel);
   scene.append(card3.body, canvasBtn);
+  const gpuLab = scene.createElement("view", {
+    style: { paddingBottom: 12 },
+  });
+  scene.onClick(gpuLab, () => props.router.push("/gpu-lab"));
+  scene.append(gpuLab, scene.createElement("text", {
+    value: loc("GPU 实验室", "GPU Lab"),
+    style: { fontSize: 14, color: INK },
+  }));
+  scene.append(card3.body, gpuLab);
+  const compositorLab = scene.createElement("view", {
+    style: { paddingBottom: 12 },
+  });
+  scene.onClick(compositorLab, () => props.router.push("/compositor-lab"));
+  scene.append(compositorLab, scene.createElement("text", {
+    value: loc("合成动画", "Compositor animation"),
+    style: { fontSize: 14, color: INK },
+  }));
+  scene.append(card3.body, compositorLab);
   const about = scene.createElement("text", {
     value: loc(
       "Impasto Quotes · 模拟盘 · 数据均为虚构",

@@ -123,7 +123,7 @@ export function bindListRenderer<T>(
       render: (item: () => T, index: () => number) => UIChildren,
     ): Slot<T>;
     onChrome(chrome: ListChrome): void;
-    onEnd(): void;
+    onEnd?(): void;
   },
 ): () => void {
   const state: ListBindingState<T> = { live: new Map(), pools: new Map() };
@@ -163,7 +163,7 @@ export function bindListRenderer<T>(
       });
     },
     onChrome: options.onChrome,
-    onEnd: options.onEnd,
+    onEnd: options.onEnd ?? (() => {}),
   });
   return () => {
     unlisten();

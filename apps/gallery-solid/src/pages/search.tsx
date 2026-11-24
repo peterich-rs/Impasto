@@ -2,8 +2,6 @@ import { createSignal, createTrackedEffect, onCleanup } from "solid-js";
 import {
   scene,
   insert,
-  onFrame,
-  requestFrame,
   type NodeHandle,
 } from "@impasto/solid-renderer";
 import { Field, type FieldController } from "@impasto/solid-ui";
@@ -28,8 +26,7 @@ const DEBOUNCE_MS = 200;
 export function SearchPage(props: { router: Router }): NodeHandle {
   const { engine, binder } = useBinder();
   const [term, setTerm] = createSignal("");
-  let pending = "";
-  let dueAt = 0;
+  let debounce: ReturnType<typeof setTimeout> | undefined;
   let fieldCtl: FieldController | null = null;
   void loadSearchHistory();
   const page = scene.createElement("view", {
@@ -103,32 +100,16 @@ export function SearchPage(props: { router: Router }): NodeHandle {
       fieldCtl = ctl;
     },
     onChange: (value) => {
-      pending = value;
-      dueAt = -1;
-      requestFrame();
+      clearTimeout(debounce);
+      debounce = setTimeout(() => applyTerm(value, false), DEBOUNCE_MS);
     },
     onSubmit: (value) => {
-      pending = value;
-      dueAt = 0;
+      clearTimeout(debounce);
       applyTerm(value, true);
     },
   });
   insert(fieldPad, field);
-  onCleanup(
-    onFrame((targetMs) => {
-      if (dueAt < 0) {
-        dueAt = targetMs + DEBOUNCE_MS;
-      }
-      if (dueAt > 0 && targetMs >= dueAt) {
-        dueAt = 0;
-        applyTerm(pending, false);
-        return;
-      }
-      if (dueAt !== 0) {
-        requestFrame();
-      }
-    }),
-  );
+  onCleanup(() => clearTimeout(debounce));
   function applyTerm(value: string, remember: boolean): void {
     const next = value.trim();
     setTerm(next);

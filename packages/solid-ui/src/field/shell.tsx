@@ -228,11 +228,9 @@ export function FieldShell(props: FieldProps): NodeHandle {
     scrollIntoView(id, 0);
   }
   bindFocusRing(() => box, focused);
-  onCleanup(
-    onFrame((targetMs) => {
-      if (!focused()) {
-        return;
-      }
+  createTrackedEffect(() => {
+    if (!focused()) return;
+    onCleanup(onFrame((targetMs) => {
       const id = leaf();
       const raw = controller.text();
       if (id !== 0 && raw.length > 0) {
@@ -250,8 +248,8 @@ export function FieldShell(props: FieldProps): NodeHandle {
       }
       setBlink(Math.floor(targetMs / 500) % 2 === 0);
       requestFrame();
-    }),
-  );
+    }));
+  });
   createTrackedEffect(() => {
     const unit = controller.selection().end;
     const value = controller.text();

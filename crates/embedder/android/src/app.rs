@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use embedder::{
-    Boot, BootError, ClipboardHost, Command, Launch, LinkingHost, NativePtr, Services,
-    SessionError, StorageHost, SurfaceId, SurfaceTarget, Vsync,
+    Boot, BootError, ClipboardHost, Command, FrameRateHint, Launch, LinkingHost, NativePtr,
+    Services, SessionError, StorageHost, SurfaceId, SurfaceTarget, Vsync,
 };
 use engine::session::{InputEvent as EditEvent, Key, Metrics};
 use jni::Env;
@@ -33,6 +33,7 @@ const IME_UPDATE: i32 = 2;
 const IME_HIDE: i32 = 3;
 
 mod entrypoints;
+mod hardware_frame;
 mod platform_services;
 
 struct Bridge {
@@ -146,13 +147,21 @@ impl Bridge {
         }
     }
 
-    fn schedule_frame(&self, token: embedder::FrameToken) {
+    fn schedule_frame(&self, token: embedder::FrameToken, hint: FrameRateHint) {
+        let preferred_rate = match hint {
+            FrameRateHint::Display => 0,
+            FrameRateHint::Hz60 => 60,
+            FrameRateHint::Hz30 => 30,
+        };
         self.call(|env, view| {
             env.call_method(
                 view,
                 jni::jni_str!("scheduleFrame"),
-                jni::jni_sig!("(J)V"),
-                &[jni::objects::JValue::Long(token.0 as jlong)],
+                jni::jni_sig!("(JI)V"),
+                &[
+                    jni::objects::JValue::Long(token.0 as jlong),
+                    jni::objects::JValue::Int(preferred_rate),
+                ],
             )?;
             Ok(())
         });
@@ -884,8 +893,8 @@ fn attach(env: &mut Env, request: Attach) -> Result<jlong, String> {
         back_enabled: AtomicBool::new(false),
     });
     let bridge_for_clock = Arc::clone(&bridge);
-    let clock = FrameClock::new(Arc::new(move |token| {
-        bridge_for_clock.schedule_frame(token)
+    let clock = FrameClock::new(Arc::new(move |token, hint| {
+        bridge_for_clock.schedule_frame(token, hint)
     }));
     let platform_runner = crate::main_runner::main_runner()?;
     let settings = request.settings;
@@ -934,6 +943,10 @@ fn android_boot(
     platform_runner: Arc<dyn embedder::TaskRunner>,
 ) -> Result<Boot, BootError> {
     let bridge_for_surface = Arc::clone(&bridge);
+    let pipeline_cache = log_dir
+        .as_deref()
+        .and_then(std::path::Path::parent)
+        .map(std::path::Path::to_owned);
     let script_assets = Arc::clone(&bridge.assets);
     let launch_url = engine::session::shared(initial_url);
     let thread_topology = match decode::read_bytes(&script_assets, c"app.thread_topology") {
@@ -941,6 +954,7 @@ fn android_boot(
         None => embedder::ThreadTopology::configured()?,
     };
     let (name, script) = load_script(&script_assets, requested.as_deref())?;
+    let gallery = name == "quotes.js";
     let modules = decode::read_bytes(&script_assets, c"app.modules")
         .map(|bytes| String::from_utf8(bytes).map_err(|_| SessionError::Runtime))
         .transpose()?
@@ -992,8 +1006,15 @@ fn android_boot(
         thread_topology,
         launch_url: Arc::clone(&launch_url),
         http: Some(embedder::http_client().map_err(BootError::Platform)?),
-        open_raster: Box::new(move || renderer.create_raster()),
-        open_surface: renderer.surfaces(move |id| bridge_for_surface.first_frame(id)),
+        open_raster: Box::new(move |fonts| {
+            let mut raster = renderer.create_raster(fonts)?;
+            if let Some(directory) = &pipeline_cache {
+                // SAFETY: cache_log_dir derives this directory from Context.getCacheDir().
+                unsafe { raster.set_pipeline_cache_directory(directory.clone()) };
+            }
+            Ok(raster)
+        }),
+        open_surface: Renderer::surfaces(move |id| bridge_for_surface.first_frame(id)),
         dump_list: false,
         inspect: std::env::var_os("IMPASTO_INSPECT").map(std::path::PathBuf::from),
         devtools: Some(Arc::new(embedder::DiagnosticsHub::new())),
@@ -1005,7 +1026,8 @@ fn android_boot(
     .with_module(embedder::permissions(Arc::clone(&bridge) as _))
     .with_module(embedder::linking(Arc::clone(&bridge) as _, launch_url))
     .with_module(embedder::file_system(Arc::clone(&bridge) as _))
-    .with_module(embedder::async_storage(bridge as _)))
+    .with_module(embedder::async_storage(bridge as _))
+    .with_gallery_gpu_view(gallery))
 }
 
 fn detach(handle: jlong) {
@@ -1055,7 +1077,8 @@ fn destroy_surface(host: &Host) {
         return;
     };
     if let Some(id) = window.id {
-        let _trace = engine::session::trace::Section::begin(c"Impasto Android surface destroy");
+        let _trace =
+            tracing::debug_span!(target: "impasto::shell", "android_surface_destroy").entered();
         host.link.begin_destroy(id);
         // SurfaceHolder permits the producer to be torn down once its callback returns.
         host.link.drop_wait().wait(id);
@@ -1066,7 +1089,6 @@ fn open_surface(host: &Host, window: NativeWindow) {
     destroy_surface(host);
     let width = window.width();
     let height = window.height();
-    configure_window_buffers(&window, width, height);
     host.ui(|ui| {
         ui.window = Some(Window {
             native: window,
@@ -1103,31 +1125,6 @@ fn post_ready(host: &Host) -> bool {
         true
     } else {
         false
-    }
-}
-
-fn configure_window_buffers(window: &NativeWindow, width: i32, height: i32) {
-    if width <= 1 || height <= 1 {
-        tracing::error!(
-            target: "impasto::shell",
-            width,
-            height,
-            "window buffer is too small"
-        );
-        return;
-    }
-    if let Err(error) = window.set_buffers_geometry(
-        width,
-        height,
-        Some(ndk::hardware_buffer_format::HardwareBufferFormat::R8G8B8A8_UNORM),
-    ) {
-        tracing::error!(
-            target: "impasto::shell",
-            width,
-            height,
-            %error,
-            "buffer geometry failed"
-        );
     }
 }
 
@@ -1276,6 +1273,15 @@ impl embedder::ImageDecoder for AssetDecoder {
         source: &str,
         scale_bucket: u8,
     ) -> Result<embedder::ImageHandle, embedder::ImageError> {
+        self.decode_sized(source, scale_bucket, None)
+    }
+
+    fn decode_sized(
+        &self,
+        source: &str,
+        scale_bucket: u8,
+        target: Option<embedder::DecodeTarget>,
+    ) -> Result<embedder::ImageHandle, embedder::ImageError> {
         let paths = asset_image_path(source, scale_bucket);
         if paths.is_empty() {
             return Err(embedder::ImageError::Missing);
@@ -1285,10 +1291,7 @@ impl embedder::ImageDecoder for AssetDecoder {
                 Ok(bytes) => bytes,
                 Err(_) => continue,
             };
-            return match decode::decode_rgba(&bytes) {
-                Ok(rgba) => Ok(image_handle(source, rgba.width, rgba.height, rgba.pixels)),
-                Err(message) => Err(embedder::ImageError::Failed(message)),
-            };
+            return self.decode_bytes_sized(source, &bytes, target);
         }
         Err(embedder::ImageError::Missing)
     }
@@ -1298,7 +1301,16 @@ impl embedder::ImageDecoder for AssetDecoder {
         source: &str,
         bytes: &[u8],
     ) -> Result<embedder::ImageHandle, embedder::ImageError> {
-        match decode::decode_rgba(bytes) {
+        self.decode_bytes_sized(source, bytes, None)
+    }
+
+    fn decode_bytes_sized(
+        &self,
+        source: &str,
+        bytes: &[u8],
+        target: Option<embedder::DecodeTarget>,
+    ) -> Result<embedder::ImageHandle, embedder::ImageError> {
+        match decode::decode_rgba(bytes, target) {
             Ok(rgba) => Ok(image_handle(source, rgba.width, rgba.height, rgba.pixels)),
             Err(message) => Err(embedder::ImageError::Failed(message)),
         }

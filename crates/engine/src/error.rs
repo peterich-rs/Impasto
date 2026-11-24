@@ -28,4 +28,6 @@ pub enum Error {
     Style(#[from] crate::style::StyleError),
     #[error(transparent)]
     Canvas(#[from] crate::canvas::CanvasError),
+    #[error(transparent)]
+    Shader(#[from] crate::scene::ShaderError),
 }

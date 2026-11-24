@@ -38,12 +38,14 @@ fn record_omits_a_row_outside_the_scroll_viewport() -> Result<(), crate::Error> 
         .commands
         .iter()
         .filter_map(|command| match command {
-            crate::scene::Command::Text { utf8, .. } => Some(utf8.as_ref()),
+            crate::scene::Command::Text { shaped, .. } => {
+                shaped.as_deref().map(crate::text::test_support::mono_text)
+            }
             _ => None,
         })
         .collect();
-    assert!(labels.contains(&"near"), "{labels:?}");
-    assert!(!labels.contains(&"far"), "{labels:?}");
+    assert!(labels.iter().any(|label| label == "near"), "{labels:?}");
+    assert!(!labels.iter().any(|label| label == "far"), "{labels:?}");
     Ok(())
 }
 
@@ -114,7 +116,13 @@ fn scroll_offset_moves_paint_and_hits_without_moving_layout() -> Result<(), crat
 
     let list = tree.record()?;
     let text = list.commands.iter().find_map(|command| match command {
-        crate::scene::Command::Text { utf8, x, y, .. } if utf8.as_ref() == "B" => Some((*x, *y)),
+        crate::scene::Command::Text { shaped, x, y, .. }
+            if shaped
+                .as_deref()
+                .is_some_and(|shaped| crate::text::test_support::mono_text(shaped) == "B") =>
+        {
+            Some((*x, *y))
+        }
         _ => None,
     });
     assert_eq!(text, Some((label_box.x, label_box.y - 30.0)));

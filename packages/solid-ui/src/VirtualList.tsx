@@ -1,4 +1,4 @@
-import { Show, createSignal, createTrackedEffect, onCleanup } from "solid-js";
+import { Show, createSignal, createTrackedEffect, onCleanup, untrack } from "solid-js";
 import {
   Text,
   bindListRenderer,
@@ -17,6 +17,7 @@ import {
   refreshListener,
   type ScrollController,
 } from "./ScrollController.ts";
+import { useScrollThreshold } from "./scroll-rules.ts";
 import type { VirtualListProps } from "./props.ts";
 import { useTheme } from "./use-theme.ts";
 const restoredOffsets = new Map<
@@ -136,12 +137,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
           props.onPin?.(null);
         }
       },
-      onEnd() {
-        if ((props.error ?? "").length > 0) {
-          return;
-        }
-        props.onEndReached?.();
-      },
+
     }),
   );
   onCleanup(
@@ -155,6 +151,25 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
       restoredOffsets.set(key, scroll.offset());
     }
     native.release();
+  });
+  const nearEnd = useScrollThreshold(scroll, {
+    from: "end",
+    get value() {
+      return props.endReachedDistance ?? (props.overscan ?? 4) * props.estimatedHeight;
+    },
+    get enabled() {
+      return props.onEndReached !== undefined && props.items.length > 0 && !props.error;
+    },
+  });
+  let endLength = 0;
+  createTrackedEffect(() => {
+    if (!nearEnd()) return;
+    untrack(() => {
+      const length = props.items.length;
+      if (length === endLength) return;
+      endLength = length;
+      props.onEndReached?.();
+    });
   });
   const errored = () => (props.error ?? "").length > 0;
   const pinned = () => {
@@ -216,6 +231,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
                 flexShrink: 1,
                 minWidth: 0,
                 minHeight: 0,
+                overflow: "hidden",
                 gridTemplateColumns: "minmax(0, 1fr)",
                 gridTemplateRows: "minmax(0, 1fr)",
               },
@@ -262,17 +278,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
                   dragEnd = handlers.onDragEnd;
                 }}
               >
-                {(state) =>
-                  props.refresh?.indicator(state) ??
-                  (
-                    <view
-                      style={{
-                        width: 0,
-                        height: 0,
-                      }}
-                    />
-                  )
-                }
+                {props.refresh.indicator}
               </RefreshControl>
             ) : null}
             <view
@@ -319,7 +325,14 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
           </ScrollArea>
           <Show when={pinned()} keyed>
             {(box) => (
-              <stack
+              <view
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: "100%",
+                  alignItems: "stretch",
+                }}
                 ref={(node) => {
                   if (node === null) return;
                   pinNode = node;
@@ -332,7 +345,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
                       () => box.index,
                     )
                   : props.children?.(props.items[box.index] as T, box.index)}
-              </stack>
+              </view>
             )}
           </Show>
           <Show when={thumbOn()}>

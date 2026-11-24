@@ -56,6 +56,9 @@ pub(super) fn call<'js>(
             args.to_vec(),
         ),
         "createComponent" => {
+            #[cfg(debug_assertions)]
+            let _trace =
+                tracing::trace_span!(target: "impasto::script::solid", "component_mount").entered();
             let component = Function::from_value(value(ctx, args, 0))?;
             let props = if args.len() > 1 {
                 args[1].clone()

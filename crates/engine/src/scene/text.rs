@@ -1,27 +1,71 @@
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use super::paint::{ColorStop, Gradient};
 
-/// Slot and generation of a retained paragraph.
+/// Identity of one font face inside a window's shared font library.
 ///
-/// `generation` is 0 when the command has no live paragraph. The player then
-/// rebuilds from the payload and does not touch a released slot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ParagraphId {
-    pub index: u32,
-    pub generation: u32,
+/// The ID is pure data so a shaped paragraph can cross to the raster queue.
+/// Glyph IDs are resolved against the exact face file the library stored
+/// under this ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FontFaceId(pub u64);
+
+/// Glyphs of one laid-out paragraph, frozen after the final line break.
+///
+/// Coordinates are scene points relative to the paragraph's top-left, Y
+/// down. They already include visual order, line alignment, baseline and
+/// glyph offsets, so the raster only places and samples them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShapedParagraph {
+    pub size: [f32; 2],
+    pub runs: Box<[ShapedRun]>,
+    pub decorations: Box<[DecorationLine]>,
 }
 
-impl ParagraphId {
-    /// Rebuild from the command payload. Never matches a retained slot.
-    pub const NONE: Self = Self {
-        index: u32::MAX,
-        generation: 0,
-    };
-
-    pub const fn is_none(self) -> bool {
-        self.generation == 0
+impl ShapedParagraph {
+    /// False when there is nothing to draw.
+    pub fn is_empty(&self) -> bool {
+        self.runs.iter().all(|run| run.glyphs.is_empty())
     }
+}
+
+/// One run of glyphs that share a face and size.
+///
+/// `span_index` is the logical span whose brush paints this run. `None`
+/// uses the command's default color. `span_bounds` is that span's box in
+/// paragraph space, used for gradient coordinates when a fallback font
+/// splits one span into several runs on the same line.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShapedRun {
+    pub face: Arc<FontFaceId>,
+    pub font_size: f32,
+    /// Normalized variation coordinates, in the face's axis order.
+    pub normalized_coords: Box<[i16]>,
+    /// Synthetic bold requested by the shaper.
+    pub embolden: bool,
+    /// Synthetic oblique angle, clockwise degrees.
+    pub skew_degrees: Option<f32>,
+    pub span_index: Option<u32>,
+    pub span_bounds: [f32; 4],
+    pub glyphs: Box<[PositionedGlyph]>,
+}
+
+/// One glyph at its final position, baseline-relative to the paragraph.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PositionedGlyph {
+    pub id: u16,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// An underline or strike-through bar.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DecorationLine {
+    /// `[x, y, width, height]` in paragraph space.
+    pub rect: [f32; 4],
+    pub span_index: Option<u32>,
+    pub span_bounds: [f32; 4],
 }
 
 /// Horizontal alignment of one paragraph. The default is the left edge.

@@ -1,10 +1,20 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::Command;
+use super::{Command, shader};
 
 /// Media producer sources are supplied by the host.
 pub const EXTERNAL_TEXTURE_PREFIX: &str = "external:";
+/// A BlurHash decoded locally by the renderer.
+pub const BLURHASH_PREFIX: &str = "blurhash:";
+/// A base64 ThumbHash decoded locally by the renderer.
+pub const THUMBHASH_PREFIX: &str = "thumbhash:";
+/// Same-device producers managed by Raster use this external texture namespace.
+pub const GPU_VIEW_TEXTURE_PREFIX: &str = "external:gpuview:";
+
+pub fn is_inline_source(source: &str) -> bool {
+    source.starts_with(BLURHASH_PREFIX) || source.starts_with(THUMBHASH_PREFIX)
+}
 
 /// How an image is fitted into its layout box.
 ///
@@ -45,15 +55,17 @@ pub(super) fn requirements<'a>(
     dedup(commands.flat_map(uses))
 }
 
-fn uses(command: &Command) -> impl Iterator<Item = (&Arc<str>, bool)> {
-    let (image, canvas_images) = match command {
+pub(super) fn uses(command: &Command) -> impl Iterator<Item = (&Arc<str>, bool)> {
+    let (image, canvas_images, textures) = match command {
         Command::Image {
             source, required, ..
-        } => (Some((source, *required)), &[][..]),
-        Command::Canvas { list, .. } => (None, list.images()),
-        _ => (None, &[][..]),
+        } => (Some((source, *required)), &[][..], &[][..]),
+        Command::Canvas { list, .. } => (None, list.images(), &[][..]),
+        Command::ShaderEffect { textures, .. } => (None, &[][..], textures.as_ref()),
+        _ => (None, &[][..], &[][..]),
     };
     image
         .into_iter()
         .chain(canvas_images.iter().map(|image| (&image.source, false)))
+        .chain(shader::image_textures(textures).map(|source| (source, false)))
 }

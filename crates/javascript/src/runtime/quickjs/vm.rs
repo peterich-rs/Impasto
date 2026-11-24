@@ -6,6 +6,8 @@ use rquickjs::{Context, Ctx, Function, Object, Persistent, Runtime, Value};
 
 use crate::runtime::monotonic_ms;
 
+use super::sampling::{Sampler, StackSample};
+
 pub type Saved = Persistent<Value<'static>>;
 
 /// A script failure the UI maps onto its own fault record.
@@ -57,14 +59,20 @@ pub struct Vm {
     eval_budget_ms: i64,
     callback_budget_ms: i64,
     armed: Cell<bool>,
+    sampler: Option<Sampler>,
     #[cfg(test)]
     probes: [Option<AcquireProbe>; 2],
 }
 
 impl Vm {
+    pub(crate) fn heap_bytes(&self) -> Option<usize> {
+        usize::try_from(self.runtime.as_ref()?.memory_usage().memory_used_size).ok()
+    }
+
     pub(crate) fn configured(
         limits: &crate::runtime::RuntimeLimits,
         stop: Option<AcquireStop>,
+        sampling: Option<Box<dyn Fn() -> bool>>,
     ) -> Result<Self, &'static str> {
         if stop == Some(AcquireStop::Runtime) {
             return Err("runtime did not start");
@@ -95,6 +103,7 @@ impl Vm {
             eval_budget_ms: limits.eval_budget_ms,
             callback_budget_ms: limits.callback_budget_ms,
             armed: Cell::new(false),
+            sampler: sampling.map(Sampler::new),
             #[cfg(test)]
             probes: [Some(runtime_probe), Some(context_probe)],
         })
@@ -184,7 +193,12 @@ impl Vm {
         if let Some(runtime) = &vm.runtime {
             runtime.set_interrupt_handler(Some(Box::new(move || {
                 // SAFETY: `this` still addresses the armed `Vm`.
-                monotonic_ms() > unsafe { &*this }.deadline.get()
+                let vm = unsafe { &*this };
+                let expired = monotonic_ms() > vm.deadline.get();
+                if !expired && let (Some(sampler), Some(context)) = (&vm.sampler, &vm.context) {
+                    sampler.poll(context.as_raw());
+                }
+                expired
             })));
             runtime.set_host_promise_rejection_tracker(Some(Box::new(
                 move |ctx, promise, reason, handled| {
@@ -223,6 +237,9 @@ impl Vm {
         self.rejections.borrow_mut().clear();
         self.disarm();
         debug_assert!(self.active.get().is_null());
+        if let (Some(context), Some(sampler)) = (&self.context, &self.sampler) {
+            context.with(|ctx| sampler.clear(ctx.as_raw()));
+        }
         drop(self.context.take());
         #[cfg(test)]
         drop(self.probes[1].take());
@@ -249,6 +266,15 @@ impl Vm {
             let _active = self.enter(&ctx);
             body(ctx.clone())
         })
+    }
+
+    pub fn take_stack_samples(&self) -> Vec<StackSample> {
+        if let (Some(context), Some(sampler)) = (&self.context, &self.sampler)
+            && self.active.get().is_null()
+        {
+            return context.with(|ctx| sampler.take(ctx.as_raw()));
+        }
+        Vec::new()
     }
 
     pub fn budget(&self, kind: &'static str) -> Budget<'_> {

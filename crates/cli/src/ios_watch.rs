@@ -317,7 +317,6 @@ impl AppSnapshot {
             "crates/embedder/ios/template",
             "crates/embedder/common/Cargo.toml",
             "crates/embedder/common/src",
-            "crates/impeller-sys",
         ] {
             snapshot_path(&framework.join(directory), &mut native)?;
         }

@@ -20,8 +20,7 @@ export type TickListener = (symbol: string, price: number, t: number) => void;
 
 /**
  * Deterministic mock market. `step` advances the simulated clock; symbols whose
- * `nextTickAt` has passed emit one tick each. No timers: the provider drives
- * this from `onFrame`.
+ * `nextTickAt` has passed emit one tick each. The provider schedules steps.
  */
 export class QuoteEngine {
   readonly #syms = new Map<string, Sym>();

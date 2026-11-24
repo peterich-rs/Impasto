@@ -1,5 +1,8 @@
 package dev.impasto.host
 
+import android.os.Build
+import android.hardware.HardwareBuffer
+import androidx.annotation.RequiresApi
 import android.graphics.ImageFormat
 import android.graphics.PixelFormat
 import android.media.Image
@@ -9,6 +12,8 @@ import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
 import android.view.Surface
+import java.io.IOException
+import java.time.Duration
 
 /** One bounded producer surface for a scene image named external:<name>. */
 class ExternalTexture internal constructor(
@@ -27,7 +32,16 @@ class ExternalTexture internal constructor(
     private val lock = Any()
     private var closed = false
     private var reported = false
-    private val reader = ImageReader.newInstance(width, height, format.pixelFormat, 2)
+    private var hardwareFrames = 0
+    private var readerClosed = false
+    private val reader = if (Build.VERSION.SDK_INT >= 33) {
+        runCatching { hardwareReader(width, height, format) }.getOrElse { error ->
+            Log.d("Impasto", "HardwareBuffer ImageReader unavailable", error)
+            ImageReader.newInstance(width, height, format.pixelFormat, 2)
+        }
+    } else {
+        ImageReader.newInstance(width, height, format.pixelFormat, 2)
+    }
     val surface: Surface get() = reader.surface
 
     init {
@@ -36,18 +50,22 @@ class ExternalTexture internal constructor(
 
     private fun frameAvailable(reader: ImageReader) {
         try {
-            reader.acquireLatestImage()?.use { image ->
-                val area = image.cropRect
-                val pixels = when (image.format) {
-                    PixelFormat.RGBA_8888 -> readRgba(image)
-                    ImageFormat.YUV_420_888 -> readYuv(image)
-                    else -> return
+            val image = reader.acquireLatestImage() ?: return
+            var leased = false
+            try {
+                if (Build.VERSION.SDK_INT >= 33 && reader.maxImages > 2) {
+                    leased = postHardwareFrame(image)
+                    if (leased) return
                 }
+                val area = image.cropRect
+                val pixels = readPixels(image)
                 synchronized(lock) {
                     if (!closed) {
                         NativeBridge.nativeExternalTexture(owner, name, area.width(), area.height(), pixels)
                     }
                 }
+            } finally {
+                if (!leased) image.close()
             }
         } catch (error: RuntimeException) {
             if (!reported) {
@@ -65,8 +83,68 @@ class ExternalTexture internal constructor(
             NativeBridge.nativeExternalTexture(owner, name, 0, 0, null)
         }
         reader.setOnImageAvailableListener(null, null)
-        frames.post { reader.close() }
+        frames.post { closeReaderIfIdle() }
         removed()
+    }
+
+    private fun closeReaderIfIdle() {
+        synchronized(lock) {
+            if (closed && !readerClosed && hardwareFrames == 0) {
+                readerClosed = true
+                reader.close()
+            }
+        }
+    }
+
+    @RequiresApi(33)
+    private fun hardwareReader(width: Int, height: Int, format: Format): ImageReader =
+        ImageReader.newInstance(width, height, format.pixelFormat, 5,
+            HardwareBuffer.USAGE_CPU_READ_OFTEN or HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE)
+
+    @RequiresApi(33)
+    private fun postHardwareFrame(image: Image): Boolean {
+        val crop = image.cropRect
+        if (crop.left != 0 || crop.top != 0 || crop.width() != image.width || crop.height() != image.height) {
+            return false
+        }
+        val ready = try {
+            image.fence.use { !it.isValid || it.await(Duration.ofMillis(8)) }
+        } catch (error: IOException) {
+            Log.d("Impasto", "HardwareBuffer fence unavailable", error)
+            false
+        }
+        if (!ready) return false
+        synchronized(lock) {
+            if (closed) return false
+            val buffer = image.hardwareBuffer ?: return false
+            val lease = HardwareFrame(image, buffer)
+            if (NativeBridge.nativeHardwareTexture(owner, name, image.width, image.height, lease)) {
+                hardwareFrames++
+                return true
+            }
+            buffer.close()
+            return false
+        }
+    }
+
+    @RequiresApi(33)
+    private inner class HardwareFrame(private val image: Image, private val buffer: HardwareBuffer) {
+        fun buffer(): HardwareBuffer = buffer
+        fun rgba(): ByteArray = readPixels(image)
+        fun release() {
+            frames.post {
+                buffer.close()
+                image.close()
+                synchronized(lock) { hardwareFrames-- }
+                closeReaderIfIdle()
+            }
+        }
+    }
+
+    private fun readPixels(image: Image): ByteArray = when (image.format) {
+        PixelFormat.RGBA_8888 -> readRgba(image)
+        ImageFormat.YUV_420_888 -> readYuv(image)
+        else -> error("Unsupported external texture format " + image.format)
     }
 
     private fun readRgba(image: Image): ByteArray {

@@ -80,7 +80,8 @@ export function platform(): Platform {
 export function versions() {
   return {
     shell: "",
-    enginePin: "",
+    wgpu: "",
+    parley: "",
     quickjsPin: "",
   };
 }

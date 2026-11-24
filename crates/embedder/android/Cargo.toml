@@ -4,9 +4,6 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[features]
-impeller = ["raster/impeller"]
-
 [lib]
 name = "impasto"
 crate-type = ["cdylib", "rlib"]
@@ -21,9 +18,10 @@ embedder = { workspace = true }
 ndk = { version = "=0.9.0", default-features = false }
 ndk-sys = { version = "=0.6.0" }
 libc = "0.2"
+libloading = "0.8"
 jni = { version = "=0.22.4" }
 raster = { workspace = true }
-engine = { workspace = true, features = ["js", "android-trace"] }
+engine = { workspace = true, features = ["js"] }
 embedder = { workspace = true }
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 

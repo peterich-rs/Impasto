@@ -22,6 +22,8 @@ pub struct RuntimeBuilder {
     catalog: ModuleCatalog,
     duplicate: Option<String>,
     log: Log,
+    user_timing: Option<super::UserTimingHook>,
+    stack_sampling: Option<Box<dyn Fn() -> bool>>,
     wake: Option<Wake>,
     profile: StandardProfile,
     entropy: Arc<dyn EntropySource>,
@@ -59,6 +61,8 @@ impl RuntimeBuilder {
             catalog: ModuleCatalog::default(),
             duplicate: None,
             log: Box::new(|_, _| {}),
+            user_timing: None,
+            stack_sampling: None,
             wake: None,
             profile: StandardProfile,
             entropy: Arc::new(SystemEntropy),
@@ -73,6 +77,18 @@ impl RuntimeBuilder {
 
     pub fn log(mut self, log: impl Fn(u8, &str) + 'static) -> Self {
         self.log = Box::new(log);
+        self
+    }
+
+    /// Observes User Timing entries synchronously on the runtime owner thread.
+    pub fn user_timing(mut self, hook: impl Fn(super::UserTiming<'_>) + 'static) -> Self {
+        self.user_timing = Some(Rc::new(hook));
+        self
+    }
+
+    /// Enables cooperative module-stack sampling while the predicate is true.
+    pub fn stack_sampling(mut self, enabled: impl Fn() -> bool + 'static) -> Self {
+        self.stack_sampling = Some(Box::new(enabled));
         self
     }
 
@@ -213,7 +229,7 @@ impl RuntimeBuilder {
             Some(BootStop::Context) => Some(AcquireStop::Context),
             _ => None,
         };
-        let vm = Vm::configured(&limits, acquire)
+        let vm = Vm::configured(&limits, acquire, self.stack_sampling)
             .map_err(|message| JsError::new(ErrorKind::Configuration, message))?;
         static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
         let instance = NEXT_INSTANCE
@@ -239,6 +255,7 @@ impl RuntimeBuilder {
                 ticket_peak: Cell::new(0),
                 listener_peak: Cell::new(0),
                 log: self.log,
+                user_timing: self.user_timing,
                 inbox: Arc::new(Inbox::new(key, self.wake)),
                 local: RefCell::new(VecDeque::new()),
                 resources: RefCell::new(Resources::default()),

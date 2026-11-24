@@ -447,6 +447,23 @@ extension ImpastoViewController: UIGestureRecognizerDelegate {
     }
 }
 
+final class ImpastoDrawableLayer: CAMetalLayer {
+    private let observerLock = NSLock()
+    private var drawableObserver: ((any CAMetalDrawable) -> Void)?
+
+    @objc(impastoSetDrawableObserver:)
+    func setDrawableObserver(_ observer: @escaping (any CAMetalDrawable) -> Void) {
+        observerLock.withLock { drawableObserver = observer }
+    }
+
+    override func nextDrawable() -> (any CAMetalDrawable)? {
+        guard let drawable = super.nextDrawable() else { return nil }
+        let observer = observerLock.withLock { drawableObserver }
+        observer?(drawable)
+        return drawable
+    }
+}
+
 @MainActor
 final class MetalView: UIView {
     weak var owner: ImpastoViewController?
@@ -457,7 +474,7 @@ final class MetalView: UIView {
     private var lastHoverPoint: CGPoint?
     private var lastPinchScale: CGFloat = 1
 
-    override class var layerClass: AnyClass { CAMetalLayer.self }
+    override class var layerClass: AnyClass { ImpastoDrawableLayer.self }
     override var canBecomeFirstResponder: Bool { true }
 
     var metalLayer: CAMetalLayer {
@@ -470,10 +487,9 @@ final class MetalView: UIView {
         isOpaque = true
         isMultipleTouchEnabled = true
         metalLayer.device = MTLCreateSystemDefaultDevice()
-        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.pixelFormat = .bgra8Unorm_srgb
         metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
-        // Impeller can sample the drawable when implementing backdrop filters.
-        metalLayer.framebufferOnly = false
+        metalLayer.framebufferOnly = true
         metalLayer.allowsNextDrawableTimeout = true
 
         let hover = UIHoverGestureRecognizer(target: self, action: #selector(mouseHover(_:)))

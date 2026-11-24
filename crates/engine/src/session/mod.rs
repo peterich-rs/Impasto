@@ -12,11 +12,6 @@ mod modules;
 pub use input::*;
 pub use io::document_relative;
 pub use metrics::*;
-#[allow(
-    unsafe_code,
-    reason = "Android trace sections call Android NDK tracing APIs"
-)]
-pub mod trace;
 
 pub use javascript::host::{IoEvent, PluginResult, PluginValue, module_not_linked};
 pub use modules::{
@@ -25,6 +20,17 @@ pub use modules::{
     ScriptExecution, Settle, Shared, StreamSendError, StreamSink, SyncFn, Work, shared,
     shared_read, shared_write,
 };
+
+/// A low-frequency snapshot of script runtime resources.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RuntimeSample {
+    pub promises: usize,
+    pub timers: usize,
+    pub requests: usize,
+    pub queued_events: usize,
+    pub queued_bytes: usize,
+    pub heap_bytes: Option<usize>,
+}
 
 /// Durations inside one [`Session::frame`]. The host adds gesture time itself.
 ///
@@ -102,7 +108,6 @@ pub struct FrameOutput {
     pub ime: Option<ImeUpdate>,
     pub semantics: Option<crate::semantics::SemanticsPatch>,
     pub platform_views: Option<Arc<[crate::tree::PlatformViewPlacement]>>,
-    pub fonts: Vec<(String, Arc<[u8]>)>,
     pub reloads: Vec<String>,
     pub clipboard: Option<String>,
     pub exit: bool,
@@ -122,7 +127,6 @@ impl FrameOutput {
             ime: None,
             semantics: None,
             platform_views: None,
-            fonts: Vec::new(),
             reloads: Vec::new(),
             clipboard: None,
             exit: false,
@@ -151,10 +155,34 @@ pub struct ScriptFault {
 pub trait Session {
     /// Enable opt-in per-frame script counters on this render-thread session.
     fn set_trace(&mut self, _enabled: bool) {}
+    fn set_counters(&mut self, _enabled: bool) {}
+    fn runtime_sample(&self) -> Option<RuntimeSample> {
+        None
+    }
+    /// Registers an effect source for sessions with a paint tree.
+    ///
+    /// # Errors
+    /// Returns a shader registration error or an unsupported-session error.
+    fn register_shader_program(
+        &mut self,
+        _source: &str,
+        _clock: crate::scene::ShaderClock,
+    ) -> Result<crate::scene::ShaderProgramId, crate::scene::ShaderError> {
+        Err(crate::scene::ShaderError::Unsupported)
+    }
     fn metrics(&mut self, metrics: &Metrics);
     fn window_display(&mut self, _display: WindowDisplay) {}
     fn pointer(&mut self, event: crate::input::PointerEvent);
     fn frame(&mut self, time: FrameTime) -> FrameOutput;
+    /// Whether the current tree may animate on the compositor while UI is idle.
+    fn compositor_eligibility(
+        &self,
+        _tracks: &[crate::scene::CompositorTrack],
+    ) -> crate::scene::CompositorEligibility {
+        Err(crate::scene::CompositorBlockReason::PendingUiWork)
+    }
+    /// Restores the properties of the last compositor frame before input dispatch.
+    fn commit_compositor_state(&mut self, _snapshot: &crate::scene::CompositorSnapshot) {}
     /// True after the session asked for another frame, until the host takes it.
     ///
     /// Animation asks again inside each `frame`. One request schedules one frame.
@@ -216,13 +244,6 @@ pub trait Session {
     /// Whether the host currently needs semantics. Re-enabling must publish a fresh snapshot.
     fn set_semantics_enabled(&mut self, _enabled: bool) {}
     fn set_autofill_enabled(&mut self, _enabled: bool) {}
-    /// Font faces queued by the session since the last take.
-    ///
-    /// The host registers them on the render thread before `submit`. The default
-    /// is empty, so a session that does not load faces stays out of the cap.
-    fn take_fonts(&mut self) -> Vec<(String, Arc<[u8]>)> {
-        Vec::new()
-    }
     /// Image sources the session asked to fetch again. The host drops those cache
     /// keys on the render thread before it reads the cache. The default is empty.
     fn take_reloads(&mut self) -> Vec<String> {

@@ -30,6 +30,7 @@ pub(super) const GESTURES: &[(&str, i32)] = &[
     ("onLink", 17),
     ("onLongPress", 18),
     ("onZoom", 20),
+    ("observeScrollOffset", 22),
 ];
 const CORE_NAMES: &[&str] = &[
     "_insertNode",
@@ -43,6 +44,10 @@ const CORE_NAMES: &[&str] = &[
     "setImage",
     "setStyleSurface",
     "setFocusable",
+    "setRepaintBoundary",
+    "setTransitionSnapshot",
+    "setColorFilter",
+    "setBackdropMaterial",
     "setDragClaim",
     "setTextLimit",
     "setScrollOffset",
@@ -58,6 +63,12 @@ const CORE_NAMES: &[&str] = &[
     "clearStyle",
     "setComponentStyle",
     "onScrollState",
+    "onScrollThreshold",
+    "addScrollThreshold",
+    "removeScrollThreshold",
+    "bindScrollProp",
+    "bindBackProgressOpacity",
+    "unbindScrollProp",
     "requestFrame",
     "onFrame",
     "onLayout",
@@ -346,7 +357,9 @@ fn native<'js>(
             return Ok(undefined());
         }
         let callback = saved_function(ctx, args, 1)?;
-        apply(host, ctx, Mutation::PointerTarget(NodeId::from_raw(id)))?;
+        if name != "observeScrollOffset" {
+            apply(host, ctx, Mutation::PointerTarget(NodeId::from_raw(id)))?;
+        }
         host.refs
             .borrow_mut()
             .callbacks
@@ -417,6 +430,66 @@ fn native<'js>(
                 .ok_or_else(|| type_error(ctx, "unknown style surface"))?;
             apply(host, ctx, Mutation::SetStyleSurface { id, surface })?;
         }
+        "setRepaintBoundary" | "setTransitionSnapshot" => {
+            let id = node_id(ctx, args, 0)?;
+            let enabled = boolean(ctx, args, 1)?;
+            let change = if name == "setTransitionSnapshot" {
+                Mutation::TransitionSnapshot { id, enabled }
+            } else {
+                Mutation::RepaintBoundary { id, enabled }
+            };
+            apply(host, ctx, change)?;
+        }
+        "setColorFilter" => {
+            let id = node_id(ctx, args, 0)?;
+            let input = value(ctx, args, 1);
+            let matrix = if input.is_null() || input.is_undefined() {
+                None
+            } else {
+                let invalid =
+                    || type_error(ctx, "expected a color matrix with 20 finite coefficients");
+                let entries = input
+                    .as_array()
+                    .filter(|array| array.len() == 20)
+                    .ok_or_else(invalid)?;
+                let mut matrix = [[0.0; 5]; 4];
+                for (index, coefficient) in matrix.iter_mut().flatten().enumerate() {
+                    *coefficient = entries.get::<f32>(index)?;
+                    if !coefficient.is_finite() {
+                        return Err(invalid());
+                    }
+                }
+                Some(Arc::new(matrix))
+            };
+            apply(host, ctx, Mutation::ColorFilter { id, matrix })?;
+        }
+        "setBackdropMaterial" => {
+            let id = node_id(ctx, args, 0)?;
+            let input = value(ctx, args, 1);
+            let material = if input.is_null() || input.is_undefined() {
+                None
+            } else {
+                let entries = input
+                    .as_array()
+                    .filter(|array| array.len() == 8)
+                    .ok_or_else(|| {
+                        type_error(ctx, "expected eight backdrop material parameters")
+                    })?;
+                let mut values = [0.0; 8];
+                for (index, value) in values.iter_mut().enumerate() {
+                    *value = entries.get::<f32>(index)?;
+                }
+                let [sigma, saturation, brightness, taper, r, g, b, a] = values;
+                Some(Arc::new(crate::scene::BackdropMaterial {
+                    sigma,
+                    saturation,
+                    brightness,
+                    tint: [r, g, b, a],
+                    taper,
+                }))
+            };
+            apply(host, ctx, Mutation::BackdropMaterial { id, material })?;
+        }
         "setFocusable" | "setScrollChain" => {
             let id = node_id(ctx, args, 0)?;
             let enabled = boolean(ctx, args, 1)?;
@@ -448,6 +521,32 @@ fn native<'js>(
                     limit: u32::try_from(limit).ok(),
                 },
             )?;
+        }
+        "bindScrollProp" | "bindBackProgressOpacity" | "unbindScrollProp" => {
+            return scroll_rules::binding(host, ctx, name, args);
+        }
+        "addScrollThreshold" => {
+            let node = node_id(ctx, args, 0)?;
+            let source = crate::scene::ScrollSource::parse(&string(ctx, args, 1)?)
+                .ok_or_else(|| type_error(ctx, "unknown scroll channel"))?;
+            let rule = crate::scene::ScrollThreshold {
+                source,
+                value: num(ctx, args, 2)? as f32,
+                from_end: boolean(ctx, args, 3)?,
+                hysteresis: num(ctx, args, 4)? as f32,
+            };
+            let id = host
+                .inner()
+                .tree
+                .borrow_mut()
+                .add_scroll_threshold(node, rule)
+                .map_err(|_| type_error(ctx, "invalid scroll threshold"))?;
+            return id.into_js(ctx);
+        }
+        "removeScrollThreshold" => {
+            let id = u32::try_from(handle(ctx, args, 0)?)
+                .map_err(|_| type_error(ctx, "invalid scroll threshold id"))?;
+            host.inner().tree.borrow_mut().remove_scroll_threshold(id);
         }
         "setScrollOffset" => {
             let id = node_id(ctx, args, 0)?;
@@ -521,12 +620,18 @@ fn native<'js>(
             let source = StyleSourceId::from_raw(handle(ctx, args, 0)?);
             apply(host, ctx, Mutation::SourceRemove(source))?;
         }
-        "onFrame" | "onLayout" | "onScrollState" | "onDriver" | "onBackGesture" => {
+        "onFrame" | "onLayout" | "onScrollState" | "onScrollThreshold" | "onDriver"
+        | "onBackGesture" => {
+            if name == "onFrame" && args.first().is_none_or(|value| value.is_undefined()) {
+                host.refs.borrow_mut().hooks.remove("frame");
+                return Ok(Value::new_undefined(ctx.clone()));
+            }
             let callback = saved_function(ctx, args, 0)?;
             let key = match name {
                 "onFrame" => "frame",
                 "onLayout" => "layout",
                 "onDriver" => "driver",
+                "onScrollThreshold" => "scrollThreshold",
                 "onBackGesture" => "backGesture",
                 _ => "scroll",
             };
