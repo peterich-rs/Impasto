@@ -1,0 +1,22 @@
+[plugin]
+targets = ["ios", "android"]
+min_impasto_version = "0.1.0"
+
+[js]
+specifier = "@impasto/camera"
+entry = "ts/index.tsx"
+
+[ios]
+sources = ["ios/CameraBridge.swift"]
+frameworks = ["AVFoundation", "CoreMedia", "CoreVideo", "Metal"]
+min_version = "15.0"
+usage_description_keys = ["NSCameraUsageDescription"]
+
+[android]
+sources = ["android/src/main/kotlin"]
+permissions = ["android.permission.CAMERA"]
+min_sdk = 24
+
+[[android.uses_features]]
+name = "android.hardware.camera"
+required = false
