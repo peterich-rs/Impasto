@@ -143,6 +143,8 @@ export {
   onFrame,
   onLayout,
 } from "./frames.ts";
+export type { ScrollChannel } from "../src/scene.ts";
+export { listenScrollThreshold } from "./scroll-threshold.ts";
 export { onScrollState } from "./scroll-state.ts";
 export { listenRefresh } from "./driver.ts";
 export { bindListRenderer } from "./list-binding.ts";

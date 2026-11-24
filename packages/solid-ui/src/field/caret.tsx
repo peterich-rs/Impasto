@@ -1,4 +1,4 @@
-import { type NodeHandle } from "@impasto/solid-renderer";
+import { scene, type NodeHandle } from "@impasto/solid-renderer";
 import type { Accessor } from "solid-js";
 const HIDDEN = "transparent";
 
@@ -52,6 +52,9 @@ export function CaretLayer(props: {
         }}
       >
         <view
+          ref={(node) => {
+            if (node !== null) scene.setRepaintBoundary?.(node, true);
+          }}
           style={{
             backgroundColor: props.showCaret()
               ? props.accent()

@@ -22,6 +22,8 @@ export type PlatformSnapshot = {
   highContrast: boolean;
 };
 
+export type ScrollChannel = "scrollX" | "scrollY" | "overscrollX" | "overscrollY";
+
 type WindowInsets = { top: number; right: number; bottom: number; left: number };
 
 export type WindowMetrics = {
@@ -166,6 +168,10 @@ export interface SceneModule {
   scrollOffset(node: NodeHandle): { x: number; y: number };
   rect(node: NodeHandle): { x: number; y: number; w: number; h: number };
   setFocusable(node: NodeHandle, enabled: boolean): void;
+  setRepaintBoundary?(node: NodeHandle, enabled: boolean): void;
+  setTransitionSnapshot?(node: NodeHandle, enabled: boolean): void;
+  setColorFilter?(node: NodeHandle, matrix: readonly number[] | null): void;
+  setBackdropMaterial?(node: NodeHandle, parameters: readonly number[] | null): void;
   focus(node: NodeHandle): void;
   /** Clears focus. No argument: `Tree::focus(0)` is an unknown node. */
   blur(): void;
@@ -253,7 +259,18 @@ export interface SceneModule {
   onHover(node: NodeHandle, fn: () => void): void;
   onLeave(node: NodeHandle, fn: () => void): void;
   onWheel(node: NodeHandle, fn: (dx: number, dy: number) => void): void;
-  onScroll(node: NodeHandle, fn: (x: number, y: number) => void): void;
+  onScroll(node: NodeHandle, fn?: (x: number, y: number) => void): void;
+  observeScrollOffset(node: NodeHandle, fn?: (x: number, y: number) => void): void;
+  bindScrollProp(
+    source: NodeHandle, channel: ScrollChannel, target: NodeHandle, prop: string,
+    inputs: readonly number[] | number, outputs: readonly number[] | readonly string[] | number,
+    extrapolate: "clamp" | "extend" | "linear",
+  ): number;
+  bindBackProgressOpacity(target: NodeHandle, inputs: readonly number[], outputs: readonly number[]): number;
+  unbindScrollProp(id: number): void;
+  addScrollThreshold(node: NodeHandle, source: ScrollChannel, value: number, fromEnd: boolean, hysteresis: number): number;
+  removeScrollThreshold(id: number): void;
+  onScrollThreshold(fn: (id: number, active: boolean) => void): void;
   /** One callback, installed by `boot`. Phase is `idle` | `dragging` | `coasting` | `settling`. */
   onScrollState(
     fn: (

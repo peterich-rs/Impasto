@@ -1,6 +1,5 @@
 import { createTrackedEffect, onCleanup } from "solid-js";
 import {
-  onFrame,
   readMetrics,
   scrollIntoView,
   type NodeHandle,
@@ -38,15 +37,14 @@ export function KeyboardAvoidingView(props: KeyboardAvoidingProps): NodeHandle {
     behavior();
     apply(bottom);
   });
-  onCleanup(
-    onFrame(() => {
-      const metrics = readMetrics();
-      const next = metrics?.viewInsets.bottom ?? 0;
-      if (next !== bottom) {
-        apply(next);
-      }
-    }),
-  );
+  bottom = readMetrics()?.viewInsets.bottom ?? 0;
+  if (typeof scene.onWindowMetrics === "function") {
+    const listener = scene.onWindowMetrics((metrics) => {
+      const next = metrics.viewInsets.bottom;
+      if (next !== bottom) apply(next);
+    });
+    onCleanup(() => scene.offWindowMetrics(listener));
+  }
   return (
     <view
       ref={(node) => {

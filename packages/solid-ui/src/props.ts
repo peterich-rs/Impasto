@@ -1,3 +1,4 @@
+import type { PullState } from "./RefreshControl.tsx";
 import type { AutofillHint } from "@impasto/solid-renderer";
 import type {
   CanvasError,
@@ -115,6 +116,8 @@ export interface FieldProps extends ElementProps {
 export type TextAreaProps = Omit<FieldProps, "multiline">;
 
 export interface NavigationBarProps extends ViewProps {
+  scroll?: ScrollController;
+  scrollEffect?: "fade-backdrop";
   title: string;
   leading?: UIChildren;
   trailing?: UIChildren;
@@ -127,6 +130,8 @@ export interface TabItem {
 }
 
 export interface TabsProps extends ViewProps {
+  /** Horizontal ScrollArea whose pages follow the same order as tabs. */
+  pager?: ScrollController;
   tabs: readonly TabItem[];
   selected: string;
   onSelect: (id: string) => void;
@@ -168,6 +173,8 @@ export interface VirtualListProps<T> extends ElementProps {
   onRetry?: () => void;
   skeleton?: () => UIChildren;
   onEndReached?: () => void;
+  /** Distance in points from the end. Defaults to estimated overscan height. */
+  endReachedDistance?: number;
   sticky?: (item: T, index: number) => boolean;
   onPin?: (key: string | null) => void;
   restoreKey?: string;
@@ -175,10 +182,7 @@ export interface VirtualListProps<T> extends ElementProps {
   refresh?: {
     threshold?: number;
     onRefresh: () => void | Promise<void>;
-    indicator: (state: {
-      progress: () => number;
-      busy: () => boolean;
-    }) => UIChildren;
+    indicator?: (state: PullState) => UIChildren;
   };
   controller?: ScrollController;
   physics?: ScrollPhysics;
@@ -202,10 +206,7 @@ export interface RefreshControlProps extends ElementProps {
   edge?: "start" | "end";
   onRefresh: () => void | Promise<void>;
   gesture: (handlers: { onDragBy: () => void; onDragEnd: () => void }) => void;
-  children: (state: {
-    progress: () => number;
-    busy: () => boolean;
-  }) => UIChildren;
+  children?: (state: PullState) => UIChildren;
 }
 
 export interface DialogProps extends ElementProps {
@@ -221,7 +222,10 @@ export interface DialogProps extends ElementProps {
   titleProps?: StyleProps;
 }
 
-export type SheetProps = DialogProps;
+export type SheetProps = DialogProps & {
+  /** Enables a drag handle that dismisses the sheet on a downward pull. */
+  dragToDismiss?: boolean;
+};
 
 export interface MenuProps extends ElementProps {
   open: boolean;

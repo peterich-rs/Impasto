@@ -17,7 +17,7 @@ export { Button } from "./Button.tsx";
 export type { ButtonProps } from "./props.ts";
 export { Column } from "./Column.tsx";
 export type { ColumnProps } from "./props.ts";
-export { View } from "./View.tsx";
+export { RepaintBoundary, View } from "./View.tsx";
 export { ExternalTexture, type ExternalTextureProps } from "./ExternalTexture.tsx";
 export { GpuView, type GpuViewProps } from "./GpuView.tsx";
 export {
@@ -85,9 +85,11 @@ export {
   createScrollController,
   createScrollLink,
 } from "./ScrollController.ts";
-export type { ScrollController } from "./ScrollController.ts";
+export type { ScrollController, ScrollLinkOptions } from "./ScrollController.ts";
 export { consumeScrollOverflow } from "./ScrollGroup.tsx";
-export { RefreshControl } from "./RefreshControl.tsx";
+export { bindScrollStyle, interpolate, interpolateColor, type ScrollStyleBindings, type ScrollCurve, type ScrollColorCurve } from "./scroll-style.ts";
+export { useScrollThreshold, useScrollSegment, type ScrollThresholdOptions } from "./scroll-rules.ts";
+export { RefreshControl, type PullState } from "./RefreshControl.tsx";
 export { Sheet } from "./Sheet.tsx";
 export { Switch } from "./Switch.tsx";
 export { Tabs } from "./Tabs.tsx";
@@ -119,3 +121,10 @@ export {
 } from "./theme.ts";
 
 export type { NodeRef, UIChildren, ViewEvents, StyleProps, StyleInput, ViewStyle } from "@impasto/solid-renderer";
+
+export {
+  ColorFilter, EdgeBorder, HighlightBorder, ImageColorFilter, InsetShadow, Ripple, Shimmer, Vibrancy,
+  type ColorFilterProps, type ColorMatrix, type EdgeBorderProps, type HighlightBorderProps,
+  type ImageColorFilterProps, type InsetShadowProps, type MaterialColor, type RippleProps,
+  type ShimmerProps, type VibrancyProps,
+} from "./Materials.tsx";
