@@ -110,6 +110,10 @@ function rpc(method, params) {
 function addCells(row, values) {
   for (const value of values) row.insertCell().textContent = value;
 }
+function passLabel(pass) {
+  const id = pass.view_id ?? pass.shader_id;
+  return id == null ? pass.kind : pass.kind + " · " + id;
+}
 function renderDetail(frame, data) {
   const timeline = field("timeline");
   const scale = field("timelineScale");
@@ -126,7 +130,7 @@ function renderDetail(frame, data) {
         data?.omitted_spans ? data.omitted_spans + " additional slices omitted" : null,
         data && !data.spans.length ? "No CPU slices retained" : null].filter(Boolean).join(" · ");
   for (const pass of frame?.gpu.passes ?? []) {
-    addCells(field("passes").insertRow(), [pass.kind, pass.slice ?? "—", pass.draws, display(pass.duration_us)]);
+    addCells(field("passes").insertRow(), [passLabel(pass), pass.slice ?? "—", pass.draws, display(pass.duration_us)]);
   }
   if (!data) return;
   const extent = Math.max(1, (frame.ui_ms + frame.queue_ms + frame.raster_ms) * 1e6,
@@ -152,7 +156,7 @@ function renderDetail(frame, data) {
   if (frame.gpu.passes?.length) {
     const extent = Math.max(1, ...frame.gpu.passes.map(pass => pass.start_us + pass.duration_us)) * 1e3;
     drawLane("GPU · time from first pass", frame.gpu.passes.map(pass => ({
-      depth: 0, span: {name: pass.kind, offset_ns: pass.start_us * 1e3, duration_ns: pass.duration_us * 1e3,
+      depth: 0, span: {name: passLabel(pass), offset_ns: pass.start_us * 1e3, duration_ns: pass.duration_us * 1e3,
         fields: {draws: pass.draws, slice: pass.slice}},
     })), extent, true);
   }

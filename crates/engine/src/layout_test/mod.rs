@@ -222,7 +222,9 @@ pub(super) fn scene_marks_in_commands(
             crate::scene::Command::Pop => {
                 stack.pop();
             }
-            crate::scene::Command::Fill { .. } | crate::scene::Command::Canvas { .. } => {}
+            crate::scene::Command::Fill { .. }
+            | crate::scene::Command::Canvas { .. }
+            | crate::scene::Command::ShaderEffect { .. } => {}
         }
     }
     marks

@@ -2,6 +2,8 @@
 
 use std::sync::{Arc, mpsc};
 
+use engine::scene::ShaderProgramId;
+
 use crate::{RasterBackend, gpu::Gpu};
 
 const SLOT_COUNT: usize = 6;
@@ -19,6 +21,8 @@ pub enum GpuPassKind {
     ComputeBlur,
     Mipmap,
     Copy,
+    ShaderEffect,
+    GpuView,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -56,13 +60,41 @@ pub struct GpuSample {
     pub status: GpuTimingStatus,
 }
 
-#[derive(Clone, Copy, Debug)]
+/// Application source of an independently timed pass.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GpuPassSource {
+    ShaderEffect(ShaderProgramId),
+    GpuView(Arc<str>),
+}
+
+#[derive(Clone, Debug)]
 pub struct GpuPassTiming {
     pub kind: GpuPassKind,
+    pub source: Option<GpuPassSource>,
     pub slice_index: Option<usize>,
     pub draws: u32,
     pub start_us: f64,
     pub duration_us: f64,
+}
+
+impl GpuPassTiming {
+    /// The registered program associated with an application shader pass.
+    pub fn shader_id(&self) -> Option<ShaderProgramId> {
+        match self.source.as_ref()? {
+            GpuPassSource::ShaderEffect(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// The producer name associated with a native GPU view pass.
+    pub fn view_id(&self) -> Option<&str> {
+        match self.source.as_ref()? {
+            GpuPassSource::GpuView(source) => {
+                source.strip_prefix(engine::scene::image::GPU_VIEW_TEXTURE_PREFIX)
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -104,8 +136,15 @@ enum ReadbackState {
 pub(crate) struct Capture {
     buffers: Arc<Buffers>,
     sample: GpuSample,
-    passes: Vec<(GpuPassKind, Option<usize>, u32)>,
+    passes: Vec<Pass>,
     overflow: bool,
+}
+
+struct Pass {
+    kind: GpuPassKind,
+    source: Option<GpuPassSource>,
+    slice_index: Option<usize>,
+    draws: u32,
 }
 
 impl GpuProfiler {
@@ -259,12 +298,27 @@ impl Capture {
         slice: Option<usize>,
         draws: u32,
     ) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+        self.tagged_pass(kind, slice, draws, None)
+    }
+
+    pub fn tagged_pass(
+        &mut self,
+        kind: GpuPassKind,
+        slice_index: Option<usize>,
+        draws: u32,
+        source: Option<GpuPassSource>,
+    ) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
         let index = u32::try_from(self.passes.len()).ok()?;
         if index >= MAX_PASSES {
             self.overflow = true;
             return None;
         }
-        self.passes.push((kind, slice, draws));
+        self.passes.push(Pass {
+            kind,
+            source,
+            slice_index,
+            draws,
+        });
         Some(wgpu::RenderPassTimestampWrites {
             query_set: &self.buffers.queries,
             beginning_of_pass_write_index: Some(index * 2),
@@ -321,11 +375,7 @@ impl Capture {
     }
 }
 
-fn decode(
-    data: &[u8],
-    metadata: &[(GpuPassKind, Option<usize>, u32)],
-    period: f64,
-) -> Option<GpuFrameTiming> {
+fn decode(data: &[u8], metadata: &[Pass], period: f64) -> Option<GpuFrameTiming> {
     let stamps = bytemuck::try_cast_slice::<_, u64>(data).ok()?;
     // Drivers may overlap or reorder passes. Use the earliest and latest
     // samples for the envelope, and reject intervals that wrap.
@@ -339,12 +389,13 @@ fn decode(
         return None;
     }
     let mut passes = Vec::with_capacity(metadata.len());
-    for ((kind, slice_index, draws), pair) in metadata.iter().copied().zip(pairs) {
+    for (pass, pair) in metadata.iter().zip(pairs) {
         let duration = pair[1].checked_sub(pair[0])?;
         passes.push(GpuPassTiming {
-            kind,
-            slice_index,
-            draws,
+            kind: pass.kind,
+            source: pass.source.clone(),
+            slice_index: pass.slice_index,
+            draws: pass.draws,
             start_us: (pair[0] - first) as f64 * period,
             duration_us: duration as f64 * period,
         });

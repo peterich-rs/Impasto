@@ -159,6 +159,17 @@ pub trait Session {
     fn runtime_sample(&self) -> Option<RuntimeSample> {
         None
     }
+    /// Registers an effect source for sessions with a paint tree.
+    ///
+    /// # Errors
+    /// Returns a shader registration error or an unsupported-session error.
+    fn register_shader_program(
+        &mut self,
+        _source: &str,
+        _clock: crate::scene::ShaderClock,
+    ) -> Result<crate::scene::ShaderProgramId, crate::scene::ShaderError> {
+        Err(crate::scene::ShaderError::Unsupported)
+    }
     fn metrics(&mut self, metrics: &Metrics);
     fn window_display(&mut self, _display: WindowDisplay) {}
     fn pointer(&mut self, event: crate::input::PointerEvent);

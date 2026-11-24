@@ -118,6 +118,86 @@ fn native_component_contracts() {
 }
 
 #[test]
+fn native_gpu_components_record_owned_inputs_for_raster() {
+    use crate::scene::BACKDROP_TEXTURE;
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = root.join("target/native-gpu-effects.js");
+    let status = std::process::Command::new("node")
+        .arg(root.join("tools/pack.mjs"))
+        .arg(root.join("crates/engine/tests/fixtures/ui/gpu-effects.tsx"))
+        .arg(&output)
+        .status()
+        .expect("pack GPU component fixture");
+    assert!(status.success());
+    let source = std::fs::read_to_string(output).expect("read GPU component fixture");
+    let mut session = open(
+        &source,
+        "gpu-effects.js",
+        crate::text::MonoShaper::default(),
+        no_log(),
+    )
+    .expect("load GPU components");
+    session.metrics(&metrics());
+    let frame = session.frame(session::FrameTime::at(0.0));
+    let faults = session.take_faults();
+    assert!(faults.is_empty(), "{faults:?}");
+    let tree = frame.layers.as_deref().expect("GPU component layer tree");
+    assert!(tree.has_animated_effects());
+    assert!(tree.has_gpu_views());
+    let mut effects = 0;
+    visit_commands(&frame, &mut |command, _, _| {
+        if let Command::ShaderEffect {
+            bounds,
+            shader,
+            uniforms,
+            textures,
+        } = command
+        {
+            let program = tree.shader_program(*shader).expect("registered shader");
+            assert!(program.source.contains("effect_sample"));
+            assert_eq!(bounds[2..], [72.0, 32.0]);
+            assert_eq!(uniforms.as_ref(), [1, 2, 3, 4]);
+            assert_eq!(textures[0].as_ref(), "asset:fixture");
+            assert_eq!(textures[1].as_ref(), BACKDROP_TEXTURE);
+            effects += 1;
+        }
+    });
+    assert_eq!(effects, 1);
+    let images = tree.image_requirements();
+    assert!(
+        images
+            .iter()
+            .any(|(source, _)| source.as_ref() == "asset:fixture")
+    );
+    assert!(
+        images
+            .iter()
+            .any(|(source, _)| source.as_ref() == "external:gpuview:test-producer")
+    );
+    assert!(
+        !images
+            .iter()
+            .any(|(source, _)| source.as_ref() == BACKDROP_TEXTURE)
+    );
+
+    click(session.as_mut(), 40.0, 20.0);
+    let next = session.frame(session::FrameTime::at(16.0));
+    let tree = next
+        .layers
+        .as_deref()
+        .expect("updated GPU component layer tree");
+    assert!(!tree.has_animated_effects());
+    assert_eq!(
+        tree.image_requirements(),
+        [(
+            std::sync::Arc::from("external:gpuview:next-producer"),
+            false
+        )]
+    );
+}
+
+#[test]
 fn native_control_flow_preserves_owned_rows_and_catches_effect_errors() {
     {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

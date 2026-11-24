@@ -242,6 +242,7 @@ enum Globals {
     View,
     Paint { stops: usize, extra: usize },
     Params(usize),
+    RuntimeEffect(usize),
 }
 
 #[derive(Clone, Copy)]
@@ -249,6 +250,7 @@ pub enum Extra {
     None,
     Paint(PaintPage),
     Params(Address),
+    RuntimeEffect(Address),
 }
 
 /// Both pages are part of a paint batch's binding key.
@@ -518,6 +520,7 @@ impl FrameArena {
                 0,
             ),
             Extra::Params(params) => (Globals::Params(params.slab), params.offset),
+            Extra::RuntimeEffect(params) => (Globals::RuntimeEffect(params.slab), params.offset),
             Extra::None => (Globals::View, 0),
         };
         let key = (view.slab, kind);
@@ -570,6 +573,14 @@ impl FrameArena {
                         size_of::<ParamsUniform>() as u64,
                     ));
                     &layouts.effects
+                }
+                Globals::RuntimeEffect(slab) => {
+                    entries.push(binding(
+                        1,
+                        &self.uniforms.slabs[slab].buffer,
+                        size_of::<crate::runtime_effect::EffectParams>() as u64,
+                    ));
+                    &layouts.runtime_effect
                 }
             };
             gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {

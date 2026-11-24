@@ -273,6 +273,8 @@ bitflags::bitflags! {
         const PICTURE_OWNER = 1 << 10;
         /// Canvas list installed on this node. Independent of [`Self::PICTURE_OWNER`].
         const PICTURE_FROM_CANVAS = 1 << 11;
+        /// A shader owns its picture so scalar tracks can address it independently.
+        const PICTURE_FROM_SHADER = 1 << 12;
         /// `display: none`. Layout, paint, hit, and semantics skip the subtree.
         const HIDDEN = 1 << 13;
         /// Keep the node drawable while omitting its subtree from accessibility.

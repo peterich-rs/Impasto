@@ -178,6 +178,8 @@ pub enum AnimProp {
     Scale,
     OverscrollX,
     OverscrollY,
+    /// Indexed runtime effect uniform in the shader's own units.
+    ShaderUniform(u8),
 }
 
 impl AnimProp {
@@ -193,6 +195,7 @@ impl AnimProp {
             Self::Scale => "scale",
             Self::OverscrollX => "overscrollX",
             Self::OverscrollY => "overscrollY",
+            Self::ShaderUniform(_) => "shaderUniform",
         }
     }
 }

@@ -136,6 +136,8 @@ pub(super) struct FrameSubmission {
     pub(super) hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
     pub(super) compositor_epoch: Option<u64>,
     pub(super) compositor_frame: bool,
+    pub(super) animated_effects: bool,
+    pub(super) gpu_views: bool,
 }
 
 pub(super) struct RasterOutput {
@@ -144,6 +146,7 @@ pub(super) struct RasterOutput {
     pub(super) shown: bool,
     pub(super) timing: Option<FrameTiming>,
     pub(super) gpu_pending: bool,
+    pub(super) renderer_work: bool,
 }
 
 impl RasterOutput {
@@ -154,6 +157,7 @@ impl RasterOutput {
             shown: false,
             timing: None,
             gpu_pending: false,
+            renderer_work: false,
         }
     }
 }
@@ -260,6 +264,10 @@ fn render_layers(
     {
         return Ok(RasterOutput::finish(reloaded));
     }
+    let mut renderer_work = submission.animated_effects
+        || (submission.gpu_views && graphics.raster.borrow().has_registered_gpu_views_in_scene());
+    again |= renderer_work;
+    graphics.needs_present |= renderer_work;
     graphics.needs_present |= submission.placements_changed;
     if graphics
         .frame_retry_at
@@ -374,6 +382,10 @@ fn render_layers(
                 }
             };
             graphics.installed = Some(Installed { scale });
+            renderer_work = submission.animated_effects
+                || (submission.gpu_views
+                    && graphics.raster.borrow().has_registered_gpu_views_in_scene());
+            again |= renderer_work;
             if submitted.stats.damage == raster::DamageRect::Empty
                 && graphics.gpu == Gpu::Live
                 && !graphics.needs_present
@@ -398,10 +410,18 @@ fn render_layers(
     let presented = {
         let _trace = tracing::debug_span!(target: "impasto::render", "present").entered();
         let mut raster = graphics.raster.borrow_mut();
+        raster.set_render_time_ms(submission.time.target_ms);
         raster.begin_gpu_frame(gpu_frame);
-        graphics
+        let result = graphics
             .surfaces
-            .present(&mut raster, &submission.platform_views)
+            .present(&mut raster, &submission.platform_views);
+        for failure in raster.take_effect_failures() {
+            if let Some(hub) = &submission.hub {
+                let message = format!("Shader {}: {}", failure.shader.0, failure.reason);
+                hub.error("runtimeEffect", &message, None, Some(number));
+            }
+        }
+        result
     };
     let present_done = Instant::now();
     let status = if presented.is_ok() {
@@ -522,6 +542,7 @@ fn render_layers(
         shown: presented.is_ok(),
         timing: Some(timing),
         gpu_pending: false,
+        renderer_work,
     };
     if present_error == Some(raster::Status::DeviceLost) {
         recover_device(graphics)?;

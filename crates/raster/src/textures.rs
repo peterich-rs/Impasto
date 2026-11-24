@@ -48,6 +48,21 @@ impl std::fmt::Debug for GpuImage {
 }
 
 impl GpuImage {
+    pub(crate) fn from_rendered(texture: wgpu::Texture, device: u64) -> Self {
+        Self {
+            view: Arc::new(texture.create_view(&Default::default())),
+            #[cfg(target_os = "android")]
+            nv12: None,
+            material: Arc::default(),
+            width: texture.width(),
+            height: texture.height(),
+            device,
+            revision: NEXT_UPLOAD.fetch_add(1, Ordering::Relaxed),
+            premultiplied_srgb: false,
+            upload: ImageUploadStats::default(),
+        }
+    }
+
     /// Copies straight-alpha RGBA8 sRGB pixels into a new texture.
     pub(crate) fn upload(
         gpu: &Gpu,
@@ -279,6 +294,7 @@ struct Cached {
 /// Keeps the presented textures alive while replacements await a valid scene.
 pub struct TextureStore {
     active: HashMap<Arc<str>, Cached>,
+    gpu_views: HashMap<Arc<str>, GpuImage>,
     staged: HashMap<Arc<str>, Option<Cached>>,
     generation: u64,
     device: u64,
@@ -290,6 +306,7 @@ impl TextureStore {
     pub fn new(device: u64) -> Self {
         Self {
             active: HashMap::new(),
+            gpu_views: HashMap::new(),
             staged: HashMap::new(),
             generation: 0,
             device,
@@ -303,7 +320,19 @@ impl TextureStore {
     }
 
     pub fn get(&self, source: &str) -> Option<&GpuImage> {
-        self.active.get(source).map(|cached| &cached.image)
+        if source.starts_with(engine::scene::image::GPU_VIEW_TEXTURE_PREFIX) {
+            self.gpu_views.get(source)
+        } else {
+            self.active.get(source).map(|cached| &cached.image)
+        }
+    }
+
+    pub(crate) fn set_gpu_views(&mut self, views: HashMap<Arc<str>, GpuImage>) {
+        self.gpu_views = views;
+    }
+
+    pub(crate) fn has_gpu_views(&self) -> bool {
+        !self.gpu_views.is_empty()
     }
 
     fn candidate(&self, source: &str) -> Option<&GpuImage> {

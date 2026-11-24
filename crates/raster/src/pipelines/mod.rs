@@ -104,6 +104,8 @@ pub struct Layouts {
     pub view: wgpu::BindGroupLayout,
     pub paint: wgpu::BindGroupLayout,
     pub effects: wgpu::BindGroupLayout,
+    pub runtime_effect: wgpu::BindGroupLayout,
+    pub runtime_textures: wgpu::BindGroupLayout,
     pub material: wgpu::BindGroupLayout,
     pub image_array: Option<wgpu::BindGroupLayout>,
     pub external_image: Option<wgpu::BindGroupLayout>,
@@ -248,6 +250,15 @@ impl PipelineCache {
                 "impasto effects",
                 &[view, U(size_of::<ParamsUniform>() as u64)],
             ),
+            runtime_effect: layout(
+                gpu,
+                "impasto runtime effect",
+                &[
+                    view,
+                    U(size_of::<crate::runtime_effect::EffectParams>() as u64),
+                ],
+            ),
+            runtime_textures: layout(gpu, "impasto effect inputs", &[T, T, T, T, S]),
             material: layout(gpu, "impasto material", &[T, S]),
             image_array: gpu
                 .image_array()

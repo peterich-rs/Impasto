@@ -469,6 +469,22 @@ impl Tree {
                 list,
             });
         }
+        if node.content_w > 0.0
+            && node.content_h > 0.0
+            && let Some(effect) = self.shader_effects.get(&id)
+        {
+            commands.push(Command::ShaderEffect {
+                bounds: [
+                    x + node.content_x,
+                    y + node.content_y,
+                    node.content_w,
+                    node.content_h,
+                ],
+                shader: effect.shader,
+                uniforms: Arc::clone(&effect.uniforms),
+                textures: Arc::clone(&effect.textures),
+            });
+        }
         emit_text(commands, node, x, y, &marks);
         emit_image(commands, node, x, y);
         if !at.descend {
@@ -1477,6 +1493,21 @@ fn translate_command(command: &Command, dx: f32, dy: f32) -> Command {
             height,
             list,
         },
+        Command::ShaderEffect {
+            mut bounds,
+            shader,
+            uniforms,
+            textures,
+        } => {
+            bounds[0] += dx;
+            bounds[1] += dy;
+            Command::ShaderEffect {
+                bounds,
+                shader,
+                uniforms,
+                textures,
+            }
+        }
         other => other,
     }
 }
@@ -1489,12 +1520,17 @@ fn is_leaf_paint(command: &Command) -> bool {
             | Command::Text { .. }
             | Command::Image { .. }
             | Command::Canvas { .. }
+            | Command::ShaderEffect { .. }
     )
 }
 
 fn command_outside(command: &Command, clip: Option<PaintClip>) -> bool {
     match command {
         Command::ShapedRect {
+            bounds: [x, y, w, h],
+            ..
+        }
+        | Command::ShaderEffect {
             bounds: [x, y, w, h],
             ..
         }

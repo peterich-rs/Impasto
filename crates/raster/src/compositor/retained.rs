@@ -25,6 +25,7 @@ impl RetainedRoot {
         let bytes = u64::from(size[0]) * u64::from(size[1]) * texel;
         bytes <= POOL_BYTES
             && scene.slice.is_none()
+            && !scene.tree.has_renderer_work()
             && scene.tree.layers.iter().all(|layer| {
                 matches!(
                     layer.kind,

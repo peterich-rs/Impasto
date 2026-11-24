@@ -19,6 +19,11 @@ export { Column } from "./Column.tsx";
 export type { ColumnProps } from "./props.ts";
 export { View } from "./View.tsx";
 export { ExternalTexture, type ExternalTextureProps } from "./ExternalTexture.tsx";
+export { GpuView, type GpuViewProps } from "./GpuView.tsx";
+export {
+  ShaderEffect, createShaderProgram, shaderBackdropTexture,
+  type ShaderEffectController, type ShaderEffectProps, type ShaderProgram,
+} from "./ShaderEffect.tsx";
 export { PlatformView, type PlatformViewProps } from "./PlatformView.tsx";
 export type { ViewProps } from "./props.ts";
 export { Stack } from "./Stack.tsx";

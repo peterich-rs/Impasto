@@ -213,6 +213,22 @@ export interface SceneModule {
   graphemeCount(text: string): number;
   graphemeUnit(text: string, index: number): number;
   registerFont(family: string, bytes: Uint8Array): void;
+  /** Registers WGSL for this session and returns a handle to the source. */
+  registerShaderProgram(source: string, animated?: boolean): number;
+  /** Applies a program to the node's content box. Passing null clears it. */
+  setShaderEffect(
+    node: NodeHandle,
+    program: number | null,
+    uniforms?: Uint8Array,
+    textures?: readonly string[],
+  ): void;
+  animateShaderUniform(
+    node: NodeHandle,
+    index: number,
+    target: number,
+    durationMs: number,
+    easing?: "linear" | "ease-in-out",
+  ): void;
   reload(source: string): void;
   measureText(
     text: string,
@@ -256,7 +272,7 @@ export interface SceneModule {
     op: number,
     text?: string,
   ): { text: string; start: number; end: number };
-  onFrame(fn: (targetMs: number, intervalMs: number) => void): void;
+  onFrame(fn?: (targetMs: number, intervalMs: number) => void): void;
   /** One callback, installed by `boot`, run after layout. */
   onLayout(fn: () => void): void;
   setDragClaim(node: NodeHandle, claim: "none" | "horizontal" | "free"): void;

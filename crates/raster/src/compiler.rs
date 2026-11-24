@@ -218,6 +218,12 @@ pub enum Draw {
         instances: Vec<ImageInstance>,
         blend: BlendKey,
     },
+    ShaderEffect {
+        bounds: [f32; 4],
+        shader: engine::scene::ShaderProgramId,
+        uniforms: Arc<[u8]>,
+        textures: Arc<[Arc<str>]>,
+    },
     Mesh(Mesh),
 }
 
@@ -281,7 +287,7 @@ fn resident_candidate(draw: &Draw) -> bool {
                     .iter()
                     .all(|glyph| glyph.gradient.is_none() && glyph.decoration.is_none())
         }
-        Draw::Fill(_) | Draw::Mesh(_) => false,
+        Draw::Fill(_) | Draw::Mesh(_) | Draw::ShaderEffect { .. } => false,
     }
 }
 
@@ -291,6 +297,7 @@ impl Draw {
             Self::Rects(run) => run.blend == BlendKey::SrcOver,
             Self::Images { blend, .. } => *blend == BlendKey::SrcOver,
             Self::Mesh(mesh) => mesh.composite == CanvasComposite::SourceOver,
+            Self::ShaderEffect { .. } => false,
             Self::Fill(_) | Self::Glyphs(_) => true,
         }
     }
@@ -319,6 +326,7 @@ impl Draw {
                 .iter()
                 .fold(B::Empty, |bounds, image| bounds.union(rect(image.rect))),
             Self::Mesh(mesh) => rect(mesh.bounds),
+            Self::ShaderEffect { bounds, .. } => rect(*bounds),
         }
     }
 }
@@ -357,6 +365,7 @@ pub struct CompiledPicture {
     pub has_glyphs: bool,
     pub cache_safe: bool,
     pub cache_expensive: bool,
+    pub has_shader_effect: bool,
     pub supports_partial: bool,
     /// Picture origin in the parent layer's space.
     pub origin: (f32, f32),
@@ -501,6 +510,7 @@ pub fn prepare(
     }
     let mut has_resident_candidate = false;
     let mut has_glyphs = false;
+    let mut has_shader_effect = false;
     let mut supports_partial = compiler.groups.is_empty();
     let mut cache_safe = true;
     let mut shadows = 0usize;
@@ -516,6 +526,7 @@ pub fn prepare(
                     .count();
             }
             has_glyphs |= matches!(draw, Draw::Glyphs(_));
+            has_shader_effect |= matches!(draw, Draw::ShaderEffect { .. });
             supports_partial &= matches!(
                 draw,
                 Draw::Rects(_) | Draw::Images { .. } | Draw::Glyphs(_) | Draw::Fill(_)
@@ -585,11 +596,21 @@ pub fn prepare(
         has_glyphs,
         cache_safe,
         cache_expensive,
+        has_shader_effect,
         supports_partial,
         device: 0,
         bounds,
         mesh_buffer: compiler.meshes,
         reads_root: compiler.scopes.iter().any(|scope| {
+            use engine::scene::shader::BACKDROP_TEXTURE;
+            if scope.state.groups.is_empty()
+                && scope.draws.iter().any(|draw| {
+                    matches!(draw, Draw::ShaderEffect { textures, .. }
+                        if textures.iter().any(|source| source.as_ref() == BACKDROP_TEXTURE))
+                })
+            {
+                return true;
+            }
             scope.state.groups.first().is_some_and(|&id| {
                 matches!(
                     compiler.groups[id].effect,
@@ -800,6 +821,32 @@ impl Compiler<'_> {
                 mode,
                 required,
             } => self.image(*x, *y, *w, *h, source, *mode, *required)?,
+            Command::ShaderEffect {
+                bounds,
+                shader,
+                uniforms,
+                textures,
+            } => {
+                for source in textures.iter().filter(|source| {
+                    source.as_ref() != engine::scene::shader::BACKDROP_TEXTURE
+                        && !source.starts_with(engine::scene::image::GPU_VIEW_TEXTURE_PREFIX)
+                }) {
+                    match (self.load)(source) {
+                        Load::Ready { .. } => self.remember_image(source, false),
+                        Load::Empty | Load::Missing => {
+                            self.remember_image(source, false);
+                            self.waiting.push(Arc::clone(source));
+                        }
+                        Load::Failed => {}
+                    }
+                }
+                self.push_draw(Draw::ShaderEffect {
+                    bounds: *bounds,
+                    shader: *shader,
+                    uniforms: Arc::clone(uniforms),
+                    textures: Arc::clone(textures),
+                });
+            }
             Command::PushClip {
                 x,
                 y,
@@ -1020,6 +1067,21 @@ impl Compiler<'_> {
         mode: ContentMode,
         required: bool,
     ) -> Result<(), Status> {
+        if source.starts_with(engine::scene::image::GPU_VIEW_TEXTURE_PREFIX) {
+            if w > 0.0 && h > 0.0 && [x, y, w, h].iter().all(|value| value.is_finite()) {
+                self.push_draw(Draw::Images {
+                    source: Arc::clone(source),
+                    instances: vec![ImageInstance {
+                        rect: [x, y, w, h],
+                        uv: [0.0, 0.0, 1.0, 1.0],
+                        color: [1.0; 4],
+                        flags: batch::IMAGE_BASE_LEVEL,
+                    }],
+                    blend: BlendKey::SrcOver,
+                });
+            }
+            return Ok(());
+        }
         match (self.load)(source) {
             Load::Ready { width, height, .. } => {
                 let slices =

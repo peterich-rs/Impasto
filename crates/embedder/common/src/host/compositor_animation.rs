@@ -259,6 +259,8 @@ impl Plan {
             hub: self.hub.clone(),
             compositor_epoch: None,
             compositor_frame: true,
+            animated_effects: false,
+            gpu_views: false,
         }
     }
 }
@@ -288,7 +290,7 @@ pub(super) fn activate(runtime: &mut UiHost, completion: &RasterCompletion) -> b
     let Some(tree) = submission.tree.clone() else {
         return false;
     };
-    if tree.tracks.is_empty() {
+    if tree.tracks.is_empty() && !completion.output.renderer_work {
         return false;
     }
     let deadline_ms = runtime

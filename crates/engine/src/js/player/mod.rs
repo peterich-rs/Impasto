@@ -404,6 +404,16 @@ impl JsSession {
 }
 
 impl Session for JsSession {
+    fn register_shader_program(
+        &mut self,
+        source: &str,
+        clock: crate::scene::ShaderClock,
+    ) -> Result<crate::scene::ShaderProgramId, crate::scene::ShaderError> {
+        self.inner
+            .tree
+            .borrow_mut()
+            .register_shader_program(source, clock)
+    }
     fn set_counters(&mut self, enabled: bool) {
         self.inner.counters.set(enabled);
     }

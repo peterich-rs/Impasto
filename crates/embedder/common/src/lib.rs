@@ -264,6 +264,24 @@ impl Boot {
         self
     }
 
+    /// Installs a native producer when the owning Raster queue opens.
+    pub fn with_gpu_view(
+        mut self,
+        id: raster::GpuViewId,
+        producer: impl raster::GpuViewProducer,
+    ) -> Self {
+        let open = self.open_raster;
+        self.open_raster = Box::new(move |fonts| {
+            let mut raster = open(fonts)?;
+            raster.register_gpu_view(id, producer).map_err(|error| {
+                tracing::error!(target: "impasto::effect", %error, "GPU view registration failed");
+                raster::Status::BadScene
+            })?;
+            Ok(raster)
+        });
+        self
+    }
+
     /// Turns devtools on. The caller keeps the hub to register the module
     /// on its own; `start` wires recording and the panic hook.
     pub fn with_devtools(mut self) -> Arc<DiagnosticsHub> {

@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use super::{
-    BlendMode, BoxShadow, ContentMode, CornerShape, Gradient, Shadow, ShapedParagraph, SpanPaint,
+    BlendMode, BoxShadow, ContentMode, CornerShape, Gradient, ShaderProgramId, Shadow,
+    ShapedParagraph, SpanPaint,
 };
 
 /// One paint operation. Coordinates are absolute scene points.
@@ -119,6 +120,13 @@ pub enum Command {
         width: f32,
         height: f32,
         list: crate::scene::CanvasList,
+    },
+    /// Runs a registered fragment effect inside an absolute scene rectangle.
+    ShaderEffect {
+        bounds: [f32; 4],
+        shader: ShaderProgramId,
+        uniforms: Arc<[u8]>,
+        textures: Arc<[Arc<str>]>,
     },
 }
 

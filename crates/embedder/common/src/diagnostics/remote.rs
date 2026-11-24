@@ -443,6 +443,7 @@ fn frame_value(frame: &super::FrameSample, fields: FrameFields) -> Value {
             gpu.passes.iter().map(|pass| json!({
             "kind": format!("{:?}", pass.kind), "slice": pass.slice_index,
             "draws": pass.draws, "start_us": pass.start_us, "duration_us": pass.duration_us,
+            "shader_id": pass.shader_id().map(|id| id.0), "view_id": pass.view_id(),
         })).collect::<Vec<_>>()
         });
     json!({

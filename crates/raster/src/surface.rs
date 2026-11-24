@@ -144,9 +144,7 @@ impl Rasterizer {
         pixels: PixelSize,
     ) -> Result<(), Status> {
         surface.inner = None;
-        self.device = None;
-        self.frame = None;
-        self.invalidate_pictures();
+        self.discard_device();
         // SAFETY: the owner keeps the native target present until after this surface is dropped.
         *surface = unsafe { self.create_surface(surface.handle, pixels) }?;
         Ok(())

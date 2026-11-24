@@ -28,6 +28,7 @@ pub struct MetalSliceBatch {
     generation: u64,
     frame: u64,
     started: Instant,
+    producers: Vec<wgpu::CommandBuffer>,
     commands: Vec<wgpu::CommandBuffer>,
     capture: Option<Capture>,
     output: OutputFormat,
@@ -40,7 +41,8 @@ impl Rasterizer {
     }
 
     pub fn begin_metal_slices(&mut self, surface: &WgpuSurface) -> Result<MetalSliceBatch, Status> {
-        let capture = self.begin_gpu_capture();
+        let mut capture = self.begin_gpu_capture();
+        let producers = self.render_gpu_views(capture.as_mut())?;
         let device = self.device.as_mut().ok_or(Status::NotReady)?;
         if device.gpu.is_lost() {
             return Err(Status::DeviceLost);
@@ -53,6 +55,7 @@ impl Rasterizer {
             generation: device.generation,
             frame: self.frame_number,
             started: Instant::now(),
+            producers,
             commands: Vec::new(),
             capture,
             output: surface.output_format(),
@@ -165,8 +168,10 @@ impl Rasterizer {
             let flush = stage.elapsed();
             let stage = Instant::now();
             gpu.submit(
-                prelude
+                batch
+                    .producers
                     .into_iter()
+                    .chain(prelude)
                     .chain(batch.commands)
                     .chain([tail.finish()]),
             );

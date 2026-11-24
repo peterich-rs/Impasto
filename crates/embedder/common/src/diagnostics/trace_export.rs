@@ -741,6 +741,12 @@ impl Builder {
                     if let Some(slice) = pass.slice_index {
                         fields.push(("slice_index", FieldValue::U64(slice as u64)));
                     }
+                    if let Some(id) = pass.shader_id() {
+                        fields.push(("shader_id", FieldValue::U64(id.0)));
+                    }
+                    if let Some(id) = pass.view_id() {
+                        fields.push(("view_id", FieldValue::Str(id.to_owned())));
+                    }
                     self.instant(
                         GPU_SUMMARY_TRACK_UUID,
                         s.present_done_ns,
@@ -967,6 +973,7 @@ mod tests {
                 passes: vec![
                     GpuPassTiming {
                         kind: GpuPassKind::BackdropBlur,
+                        source: None,
                         slice_index: Some(0),
                         draws: 4,
                         start_us: 0.0,
@@ -974,6 +981,7 @@ mod tests {
                     },
                     GpuPassTiming {
                         kind: GpuPassKind::Main,
+                        source: None,
                         slice_index: Some(0),
                         draws: 8,
                         start_us: 100.0,

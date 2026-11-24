@@ -530,3 +530,5 @@ fn staged_texture_replacements_are_published_only_after_valid_submission() {
         [0, 255, 0, 255]
     );
 }
+
+mod gpu_extensions;

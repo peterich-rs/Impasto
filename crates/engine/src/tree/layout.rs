@@ -204,8 +204,11 @@ impl Tree {
 
     pub(super) fn is_picture_owner(&self, id: NodeId) -> bool {
         self.get(id).is_some_and(|node| {
-            node.flags
-                .intersects(NodeFlags::PICTURE_OWNER | NodeFlags::PICTURE_FROM_CANVAS)
+            node.flags.intersects(
+                NodeFlags::PICTURE_OWNER
+                    | NodeFlags::PICTURE_FROM_CANVAS
+                    | NodeFlags::PICTURE_FROM_SHADER,
+            )
         })
     }
 
@@ -259,6 +262,11 @@ impl Tree {
                 None => node.flags.remove(NodeFlags::PICTURE_FROM_CANVAS),
             }
         }
+        self.repaint_picture_owner(id, was_owner);
+        Ok(())
+    }
+
+    pub(super) fn repaint_picture_owner(&mut self, id: NodeId, was_owner: bool) {
         if was_owner == self.is_picture_owner(id) {
             self.mark_repaint(id);
         } else {
@@ -270,7 +278,6 @@ impl Tree {
             self.layer_epoch = self.layer_epoch.wrapping_add(1);
             self.mark_paint();
         }
-        Ok(())
     }
 
     pub(super) fn renders_layer_node(&self, id: NodeId) -> bool {
@@ -1104,6 +1111,9 @@ impl Tree {
             | crate::motion::AnimProp::Scale => self.apply_transform_prop(id, prop, value),
             crate::motion::AnimProp::OverscrollX | crate::motion::AnimProp::OverscrollY => {
                 self.apply_overscroll(id, prop, value)
+            }
+            crate::motion::AnimProp::ShaderUniform(index) => {
+                self.apply_shader_uniform(id, index, value)
             }
         };
         self.applying_motion = false;

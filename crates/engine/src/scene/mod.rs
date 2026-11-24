@@ -7,6 +7,7 @@ mod corners;
 pub mod image;
 mod layer;
 mod paint;
+pub mod shader;
 pub mod text;
 
 pub use canvas::{
@@ -23,6 +24,10 @@ pub use corners::CornerShape;
 pub use image::ContentMode;
 pub use layer::{Layer, LayerId, LayerKind, LayerTree, Picture, PictureId, SELF_PICTURE};
 pub use paint::{BlendMode, BoxShadow, ColorSpace, ColorStop, Gradient, Shadow};
+pub use shader::{
+    BACKDROP_TEXTURE, MAX_SHADER_SOURCE_BYTES, MAX_SHADER_TEXTURES, MAX_SHADER_UNIFORM_BYTES,
+    ShaderClock, ShaderEffect, ShaderError, ShaderProgram, ShaderProgramId,
+};
 pub use text::{
     DecorationLine, FontFaceId, FontSlant, PositionedGlyph, ShapedParagraph, ShapedRun, SpanPaint,
     TextAlign, TextOverflow, TextSpan, TextStyle,

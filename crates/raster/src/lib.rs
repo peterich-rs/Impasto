@@ -13,6 +13,7 @@ mod compute_blur;
 mod damage;
 mod fonts;
 mod gpu;
+mod gpu_view;
 mod gradient_lut;
 mod image_upload;
 mod outline;
@@ -22,6 +23,7 @@ mod pipelines;
 mod prepare;
 mod profiler;
 mod resident;
+mod runtime_effect;
 mod shaper;
 mod status;
 mod text_index;
@@ -29,12 +31,16 @@ mod textures;
 
 pub use damage::DamageRect;
 pub use fonts::{FontLibrary, ShapeStats};
+pub use gpu_view::{GpuContext, GpuViewError, GpuViewFormat, GpuViewId, GpuViewProducer};
 pub use image_upload::ImageUploadStats;
 pub use profiler::{
-    GpuFrameTiming, GpuPassKind, GpuPassTiming, GpuSample, GpuTimingStatus, GpuTimingUpdate,
+    GpuFrameTiming, GpuPassKind, GpuPassSource, GpuPassTiming, GpuSample, GpuTimingStatus,
+    GpuTimingUpdate,
 };
+pub use runtime_effect::EffectFailure;
 pub use shaper::ParleyShaper;
 pub use status::{RasterBackend, RasterOptions, Status, ValidationMode};
+pub use wgpu;
 
 /// Drawable size in physical pixels. A zero axis means the size is unknown.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -118,6 +124,9 @@ pub struct SubmitInfo {
 pub struct Rasterizer {
     options: RasterOptions,
     fonts: FontLibrary,
+    gpu_views: gpu_view::GpuViews,
+    render_time_ms: f64,
+    first_render_ms: Option<f64>,
     device: Option<DeviceState>,
     frame: Option<Frame>,
     stats: SubmitStats,
@@ -145,6 +154,8 @@ struct Frame {
     scale: f32,
     pictures: HashMap<PictureId, Arc<CompiledPicture>>,
     views: Arc<[u64]>,
+    gpu_view_requests: gpu_view::Requests,
+    shader_uniforms: runtime_effect::ShaderUniformOverrides,
     parallel_prepare: bool,
     damage: DamageRect,
     has_glyphs: bool,
@@ -160,6 +171,9 @@ impl Rasterizer {
         Ok(Self {
             options,
             fonts,
+            gpu_views: gpu_view::GpuViews::default(),
+            render_time_ms: 0.0,
+            first_render_ms: None,
             device: None,
             frame: None,
             stats: SubmitStats::default(),
@@ -233,6 +247,79 @@ impl Rasterizer {
     /// Configures timestamp capability before the first device is created.
     pub fn enable_gpu_timing(&mut self) {
         self.options.enable_gpu_timing = true;
+    }
+
+    /// Registers a same-device view producer on the Raster queue.
+    ///
+    /// # Errors
+    /// Fails if this producer ID is in use or producer capacity is exhausted.
+    pub fn register_gpu_view(
+        &mut self,
+        id: GpuViewId,
+        producer: impl GpuViewProducer,
+    ) -> Result<(), GpuViewError> {
+        self.gpu_views.register(id, producer)?;
+        self.invalidate_pictures();
+        Ok(())
+    }
+
+    /// Reports whether the submitted scene references a registered same-device producer.
+    pub fn has_registered_gpu_views_in_scene(&self) -> bool {
+        self.frame
+            .as_ref()
+            .is_some_and(|frame| !frame.gpu_view_requests.is_empty())
+    }
+
+    /// Updates the target timestamp used by runtime effects and native producers.
+    pub fn set_render_time_ms(&mut self, target_ms: f64) {
+        if target_ms.is_finite() && target_ms >= 0.0 {
+            let first = *self.first_render_ms.get_or_insert(target_ms);
+            self.render_time_ms = target_ms.max(first).max(self.render_time_ms);
+        }
+    }
+
+    /// Reads new shader diagnostics from the current device once.
+    pub fn take_effect_failures(&mut self) -> Vec<EffectFailure> {
+        self.device
+            .as_mut()
+            .map_or_else(Vec::new, |device| device.compositor.take_effect_failures())
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "WGSL accepts a single-precision relative clock"
+    )]
+    fn render_gpu_views(
+        &mut self,
+        capture: Option<&mut Capture>,
+    ) -> Result<Vec<wgpu::CommandBuffer>, Status> {
+        let device = self.device.as_mut().ok_or(Status::NotReady)?;
+        let frame = self.frame.as_ref().ok_or(Status::NotReady)?;
+        let time = self.render_time_ms;
+        device.compositor.effect_seconds = self.first_render_ms.map_or(0.0, |start| {
+            ((time - start) / 1000.0).min(f64::from(f32::MAX)) as f32
+        });
+        let mut commands = Vec::new();
+        if !frame.gpu_view_requests.is_empty() || device.textures.has_gpu_views() {
+            device.gpu.check_async_health()?;
+            let views = self.gpu_views.render(
+                &device.gpu,
+                device.generation,
+                &frame.gpu_view_requests,
+                time,
+                capture,
+                &mut commands,
+            );
+            device.textures.set_gpu_views(views);
+        }
+        Ok(commands)
+    }
+
+    fn discard_device(&mut self) {
+        self.gpu_views.device_lost();
+        self.device = None;
+        self.frame = None;
+        self.invalidate_pictures();
     }
 
     /// Arms one present attempt. With no ID the attempt skips GPU queries.
@@ -511,11 +598,14 @@ impl Rasterizer {
             return Err(Status::DeviceLost);
         }
         let platform_views: Arc<[u64]> = views.into();
+        let gpu_view_requests = self.gpu_views.requests(&tree, &scales, point_scale);
         let mut frame = Frame {
             tree,
             scale: point_scale,
             pictures,
             views: Arc::clone(&platform_views),
+            gpu_view_requests,
+            shader_uniforms: Default::default(),
             parallel_prepare: pool.is_some(),
             damage: DamageRect::Full,
             has_glyphs,
@@ -555,6 +645,7 @@ impl Rasterizer {
         pixels: PixelSize,
     ) -> Result<(), Status> {
         let mut capture = self.begin_gpu_capture();
+        let producers = self.render_gpu_views(capture.as_mut())?;
         let device = self.device.as_mut().ok_or(Status::NotReady)?;
         let frame = self.frame.as_ref().ok_or(Status::NotReady)?;
         surface::check_size(&device.gpu, pixels)?;
@@ -595,7 +686,7 @@ impl Rasterizer {
             {
                 let _submit_span =
                     tracing::debug_span!(target: "impasto::render", "queue_submit").entered();
-                gpu.submit(prelude.into_iter().chain([command]));
+                gpu.submit(producers.into_iter().chain(prelude).chain([command]));
                 compositor.submitted(gpu);
             }
             let done = Instant::now();
@@ -629,6 +720,7 @@ impl Frame {
             pictures: &self.pictures,
             fonts,
             textures,
+            shader_uniforms: &self.shader_uniforms,
             scale: self.scale,
             slice,
             parallel_prepare: self.parallel_prepare,

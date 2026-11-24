@@ -4,9 +4,11 @@ use std::sync::Arc;
 
 use crate::motion::{AnimProp, MotionCurve};
 use crate::scene::{
-    CompositorProp, CompositorSnapshot, CompositorTrack, CompositorTransform, LayerId,
+    Command, CompositorProp, CompositorSnapshot, CompositorTrack, CompositorTransform, LayerId,
+    LayerKind,
 };
 
+use super::picture_id::child_picture_id;
 use super::{ActiveMotion, NodeId, Tree};
 
 /// Links a motion's node to the actual outer/content layers emitted by recording.
@@ -78,6 +80,29 @@ impl Tree {
                     _ => CompositorProp::Scale,
                 };
                 (layer, prop, None, Some(base))
+            }
+            AnimProp::ShaderUniform(index) => {
+                if self.node(motion.node).ok()?.first_child.is_some() {
+                    return None;
+                }
+                let picture = self.pictures.get(&motion.node)?;
+                if !picture
+                    .commands()
+                    .iter()
+                    .any(|command| matches!(command, Command::ShaderEffect { .. }))
+                {
+                    return None;
+                }
+                let picture_id = child_picture_id(motion.node);
+                let layer = self.layers.layers.iter().position(|layer| {
+                    matches!(layer.kind, LayerKind::Picture { picture } if picture == picture_id)
+                })?;
+                (
+                    LayerId(crate::cast::u32_from_usize(layer)),
+                    CompositorProp::ShaderUniform(index),
+                    None,
+                    None,
+                )
             }
             AnimProp::OverscrollX | AnimProp::OverscrollY => return None,
         };

@@ -2,9 +2,11 @@
 
 use std::sync::Arc;
 
-use engine::scene::{CompositorSnapshot, apply_compositor_samples};
+use engine::scene::{
+    CompositorProp, CompositorSample, CompositorSnapshot, apply_compositor_samples,
+};
 
-use crate::{DamageRect, Rasterizer};
+use crate::{DamageRect, Frame, Rasterizer};
 
 impl Rasterizer {
     /// Samples a route's installed scene without validation, tessellation, or mesh uploads.
@@ -27,9 +29,24 @@ impl Rasterizer {
             if !apply_compositor_samples(&mut tree.layers, &tree.tracks, &samples) {
                 return None;
             }
+            frame.apply_shader_uniform_samples(&samples);
             frame.damage = DamageRect::Full;
             self.stats.damage = DamageRect::Full;
         }
         Some(CompositorSnapshot { target_ms, samples })
+    }
+}
+
+impl Frame {
+    fn apply_shader_uniform_samples(&mut self, samples: &[CompositorSample]) {
+        self.shader_uniforms.clear();
+        for (track, sample) in self.tree.tracks.iter().zip(samples) {
+            if let CompositorProp::ShaderUniform(index) = track.prop {
+                let values = self.shader_uniforms.entry(track.layer).or_default();
+                if let Some(value) = values.get_mut(usize::from(index)) {
+                    *value = Some(sample.value);
+                }
+            }
+        }
     }
 }

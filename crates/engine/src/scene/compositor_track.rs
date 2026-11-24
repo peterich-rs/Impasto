@@ -18,6 +18,8 @@ pub enum CompositorProp {
     Opacity,
     ScrollX,
     ScrollY,
+    /// Packed f32 slot in the effect belonging to the target picture.
+    ShaderUniform(u8),
 }
 
 impl CompositorProp {
@@ -203,6 +205,14 @@ fn apply_layer(
                     _ => return false,
                 }
             }
+        }
+        LayerKind::Picture { .. }
+            if tracks.iter().all(|track| {
+                matches!(track.prop, CompositorProp::ShaderUniform(index)
+                    if usize::from(index) < super::MAX_SHADER_UNIFORM_BYTES / size_of::<f32>())
+            }) =>
+        {
+            // Raster applies scalar samples to the draw uniforms for this picture.
         }
         _ => return false,
     }

@@ -124,6 +124,8 @@ pub(crate) fn between(
     if new.scale != old.scale
         || new.tree.root != old.tree.root
         || new.tree.layers.len() != old.tree.layers.len()
+        || new.tree.shader_programs != old.tree.shader_programs
+        || !new.gpu_view_requests.is_empty()
         || (!new.tree.tracks.is_empty() && new.tree.tracks != old.tree.tracks)
     {
         return DamageRect::Full;
@@ -168,6 +170,9 @@ pub(crate) fn between(
             let Some(new_picture) = new.pictures.get(new_id) else {
                 return DamageRect::Full;
             };
+            if new_picture.has_shader_effect {
+                return DamageRect::Full;
+            }
             let resource_damage = new_picture.images.iter().any(|(source, _)| {
                 source.starts_with(EXTERNAL_TEXTURE_PREFIX) || !textures.same_revision(source)
             });

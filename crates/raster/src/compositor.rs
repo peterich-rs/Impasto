@@ -7,8 +7,9 @@ mod retained;
 mod subtree_cache;
 
 pub use subtree_cache::SubtreeCacheStats;
+mod runtime_effect;
 
-use crate::profiler::{Capture, GpuPassKind};
+use crate::profiler::{Capture, GpuPassKind, GpuPassSource};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -53,6 +54,12 @@ pub(crate) struct Compositor {
     retained: Option<RetainedRoot>,
     retain_offscreen: bool,
     glyph_prefetch_revision: Option<u64>,
+    runtime_effects: crate::runtime_effect::RuntimeEffects,
+    runtime_texture_groups: HashMap<
+        [wgpu::TextureView; engine::scene::MAX_SHADER_TEXTURES],
+        runtime_effect::TextureGroup,
+    >,
+    pub(super) effect_seconds: f32,
     image_groups: HashMap<(Vec<wgpu::TextureView>, bool), wgpu::BindGroup>,
     composites: HashMap<(wgpu::TextureView, wgpu::TextureView), wgpu::BindGroup>,
     masks: HashMap<MaskKey, Image>,
@@ -118,6 +125,7 @@ pub(crate) struct Scene<'a> {
     pub pictures: &'a HashMap<PictureId, Arc<CompiledPicture>>,
     pub fonts: &'a FontLibrary,
     pub textures: &'a TextureStore,
+    pub shader_uniforms: &'a crate::runtime_effect::ShaderUniformOverrides,
     pub scale: f32,
     pub slice: Option<&'a HashSet<LayerId>>,
     pub parallel_prepare: bool,
@@ -310,6 +318,9 @@ impl Compositor {
             retained: None,
             retain_offscreen: std::env::var("IMPASTO_RETAIN_OFFSCREEN").as_deref() == Ok("1"),
             glyph_prefetch_revision: None,
+            runtime_effects: crate::runtime_effect::RuntimeEffects::default(),
+            runtime_texture_groups: HashMap::new(),
+            effect_seconds: 0.0,
             image_groups: HashMap::new(),
             composites: HashMap::new(),
             masks: HashMap::new(),
@@ -376,6 +387,13 @@ impl Compositor {
         };
         self.composites
             .retain(|(backdrop, mask), _| pooled(backdrop) && pooled(mask));
+        self.runtime_texture_groups.retain(|views, group| {
+            std::mem::take(&mut group.used)
+                && views
+                    .iter()
+                    .zip(group.backdrops)
+                    .all(|(view, backdrop)| !backdrop || pooled(view))
+        });
         self.blur_groups.retain(|(source, target, buffer), _| {
             pooled(source) && pooled(target) && self.arena.owns_uniform_buffer(buffer)
         });
@@ -427,6 +445,10 @@ impl Compositor {
         self.render_stats
     }
 
+    pub fn take_effect_failures(&mut self) -> Vec<crate::EffectFailure> {
+        self.runtime_effects.take_failures()
+    }
+
     pub fn trim(&mut self) {
         if self.frame_active {
             // Earlier UIKit slices can still reference data waiting for flush.
@@ -443,6 +465,7 @@ impl Compositor {
         self.pool.clear();
         self.image_groups.clear();
         self.composites.clear();
+        self.runtime_texture_groups.clear();
         self.blur_groups.clear();
         self.arena.trim();
         self.resident = ResidentPictures::default();
@@ -744,6 +767,7 @@ struct DrawPass {
     size: [u32; 2],
     calls: Vec<DrawCall>,
     draws: u32,
+    shader: Option<engine::scene::ShaderProgramId>,
 }
 
 enum DrawCall {
@@ -939,6 +963,7 @@ impl Frame<'_> {
             size: target.logical,
             calls: Vec::new(),
             draws: 0,
+            shader: None,
         })
     }
 
@@ -948,8 +973,19 @@ impl Frame<'_> {
         };
         self.count_pass(&batch.target);
         let load = self.load(&batch.target);
-        let kind = self.pass_kind(&batch.target, batch.format);
-        let stamps = pass_timestamps(&mut self.capture, kind, batch.draws);
+        let stamps = if let Some(shader) = batch.shader {
+            self.capture.as_mut().and_then(|(capture, slice)| {
+                capture.tagged_pass(
+                    GpuPassKind::ShaderEffect,
+                    *slice,
+                    batch.draws,
+                    Some(GpuPassSource::ShaderEffect(shader)),
+                )
+            })
+        } else {
+            let kind = self.pass_kind(&batch.target, batch.format);
+            pass_timestamps(&mut self.capture, kind, batch.draws)
+        };
         let mut pass = render(&mut self.command, &batch.target, load, stamps);
         let mut scissor = None;
         set_scissor(&mut pass, Some([0, 0, batch.size[0], batch.size[1]]));
@@ -1626,12 +1662,12 @@ impl Frame<'_> {
                                 (scope_index, first),
                             )?
                         {
-                            self.draws(target, transform, &coverage, draws)?;
+                            self.draws(replay.layer, target, transform, &coverage, draws)?;
                         }
                         first += count;
                     }
                 } else {
-                    self.draws(target, transform, &coverage, &scope.draws)?;
+                    self.draws(replay.layer, target, transform, &coverage, &scope.draws)?;
                 }
             }
         }
@@ -1999,6 +2035,7 @@ impl Frame<'_> {
 
     fn draws(
         &mut self,
+        layer: LayerId,
         target: &Image,
         transform: Affine,
         clip: &Coverage,
@@ -2140,6 +2177,23 @@ impl Frame<'_> {
                             *blend,
                         )?;
                     }
+                }
+                Draw::ShaderEffect {
+                    bounds,
+                    shader,
+                    uniforms,
+                    textures,
+                } => {
+                    self.shader_effect(
+                        target,
+                        transform,
+                        clip,
+                        *bounds,
+                        *shader,
+                        uniforms,
+                        textures,
+                        self.scene.shader_uniforms.get(&layer),
+                    )?;
                 }
                 Draw::Mesh(mesh) => {
                     let mut meshes = vec![mesh];

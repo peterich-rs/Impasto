@@ -873,6 +873,8 @@ pub(crate) struct UiHost {
     compositor_enabled: bool,
     compositor_epoch: u64,
     compositor_generation: Option<u64>,
+    animated_effects: bool,
+    gpu_views: bool,
     point_scale: f32,
     frame_number: u64,
     topology: ThreadTopology,
@@ -1197,6 +1199,8 @@ fn open_ui(
         compositor_enabled: split && std::env::var("IMPASTO_COMPOSITOR").as_deref() != Ok("0"),
         compositor_epoch: 0,
         compositor_generation: None,
+        animated_effects: false,
+        gpu_views: false,
         point_scale: 1.0,
         frame_number: 0,
         topology: boot.thread_topology,
@@ -1635,6 +1639,8 @@ fn on_frame(
                         );
                     }
                     runtime.image_requirements = tree.image_requirements().into();
+                    runtime.animated_effects = tree.has_animated_effects();
+                    runtime.gpu_views = tree.has_gpu_views();
                     runtime.latest = Some(tree);
                     layers_changed = true;
                 }
@@ -1643,8 +1649,9 @@ fn on_frame(
                     && !leave
                     && faults.is_empty()
                     && let Some(tree) = runtime.latest.as_ref()
-                    && again
-                    && !tree.tracks.is_empty()
+                    && ((again && !tree.tracks.is_empty())
+                        || runtime.animated_effects
+                        || runtime.gpu_views)
                 {
                     if session.compositor_ready(&tree.tracks) {
                         compositor_epoch = Some(runtime.compositor_epoch);
@@ -1741,6 +1748,8 @@ fn on_frame(
         hub: runtime.hub.clone(),
         compositor_epoch,
         compositor_frame: false,
+        animated_effects: runtime.animated_effects,
+        gpu_views: runtime.gpu_views,
     };
     drop(entered);
     if let Some(schedule) = submission.schedule.as_mut() {
@@ -2386,6 +2395,8 @@ mod tests {
                 compositor_enabled: false,
                 compositor_epoch: 0,
                 compositor_generation: None,
+                animated_effects: false,
+                gpu_views: false,
                 point_scale: 1.0,
                 frame_number: 0,
                 topology: crate::ThreadTopology::SharedRender,

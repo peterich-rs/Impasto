@@ -14,6 +14,7 @@ mod platform_view;
 mod record;
 mod scroll;
 mod semantics;
+mod shader;
 mod store;
 mod style;
 mod text;
@@ -109,6 +110,8 @@ pub struct Tree {
     layer_epoch: u64,
     canvas_geometry_epoch: u64,
     layers: crate::scene::LayerTree,
+    /// Shader effects are sparse. Regular nodes do not carry a shader slot.
+    shader_effects: HashMap<NodeId, crate::scene::ShaderEffect>,
     /// Last semantics nodes. A clean node reuses its strings.
     semantics_cache: HashMap<crate::semantics::SemanticsId, crate::semantics::SemanticsNode>,
     semantics_order: Vec<crate::semantics::SemanticsId>,

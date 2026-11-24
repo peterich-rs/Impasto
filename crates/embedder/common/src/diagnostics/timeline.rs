@@ -392,6 +392,9 @@ fn allowed(key: &str) -> bool {
             | "evictions"
             | "cache_bytes"
             | "damage_pct"
+            | "shader_id"
+            | "view_id"
+            | "gpu_pass_us"
     )
 }
 

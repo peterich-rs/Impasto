@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::Command;
+use super::{Command, shader};
 
 /// Media producer sources are supplied by the host.
 pub const EXTERNAL_TEXTURE_PREFIX: &str = "external:";
+/// Same-device producers managed by Raster use this external texture namespace.
+pub const GPU_VIEW_TEXTURE_PREFIX: &str = "external:gpuview:";
 
 /// How an image is fitted into its layout box.
 ///
@@ -46,14 +48,16 @@ pub(super) fn requirements<'a>(
 }
 
 fn uses(command: &Command) -> impl Iterator<Item = (&Arc<str>, bool)> {
-    let (image, canvas_images) = match command {
+    let (image, canvas_images, textures) = match command {
         Command::Image {
             source, required, ..
-        } => (Some((source, *required)), &[][..]),
-        Command::Canvas { list, .. } => (None, list.images()),
-        _ => (None, &[][..]),
+        } => (Some((source, *required)), &[][..], &[][..]),
+        Command::Canvas { list, .. } => (None, list.images(), &[][..]),
+        Command::ShaderEffect { textures, .. } => (None, &[][..], textures.as_ref()),
+        _ => (None, &[][..], &[][..]),
     };
     image
         .into_iter()
         .chain(canvas_images.iter().map(|image| (&image.source, false)))
+        .chain(shader::image_textures(textures).map(|source| (source, false)))
 }

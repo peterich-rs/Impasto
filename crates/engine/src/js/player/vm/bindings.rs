@@ -522,6 +522,10 @@ fn native<'js>(
             apply(host, ctx, Mutation::SourceRemove(source))?;
         }
         "onFrame" | "onLayout" | "onScrollState" | "onDriver" | "onBackGesture" => {
+            if name == "onFrame" && args.first().is_none_or(|value| value.is_undefined()) {
+                host.refs.borrow_mut().hooks.remove("frame");
+                return Ok(Value::new_undefined(ctx.clone()));
+            }
             let callback = saved_function(ctx, args, 0)?;
             let key = match name {
                 "onFrame" => "frame",
