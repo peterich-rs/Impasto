@@ -14,6 +14,25 @@ pub fn linear_premultiplied(color: [u8; 4], coverage: u8) -> Option<[f32; 4]> {
     ])
 }
 
+pub fn gradient_stop(stop: &engine::scene::ColorStop, coverage: u8) -> [f32; 4] {
+    use engine::scene::ColorSpace;
+    let [r, g, b, alpha] = stop.color;
+    let a = f32::from(scale_u8(alpha, coverage)) / 255.0;
+    let [r, g, b] = match stop.space {
+        ColorSpace::ExtendedLinear => [r, g, b].map(|channel| f32::from(channel) / 255.0),
+        ColorSpace::Srgb | ColorSpace::DisplayP3 => [r, g, b].map(srgb_to_linear),
+    };
+    let rgb = match stop.space {
+        ColorSpace::DisplayP3 => [
+            1.224_940_2 * r - 0.224_940_2 * g,
+            -0.042_056_955 * r + 1.042_056_9 * g,
+            -0.019_637_555 * r - 0.078_636_04 * g + 1.098_273_6 * b,
+        ],
+        ColorSpace::Srgb | ColorSpace::ExtendedLinear => [r, g, b],
+    };
+    [rgb[0] * a, rgb[1] * a, rgb[2] * a, a]
+}
+
 /// Encodes linear premultiplied pixels for an sRGB texture. Filtering then
 /// interpolates premultiplied texels, including at transparent image edges.
 pub fn premultiply_rgba(rgba: &[u8]) -> std::borrow::Cow<'_, [u8]> {

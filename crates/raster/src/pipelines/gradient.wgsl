@@ -13,7 +13,7 @@ fn sample_gradient(t: f32, first: u32, count: u32, ramp: u32) -> vec4<f32> {
         let low = i32(floor(index));
         let high = min(low + 1, 255);
         let layer = i32(ramp - 1u);
-        return mix(textureLoad(gradient_ramps, vec2(low, 0), layer, 0),
+        return mix_color(textureLoad(gradient_ramps, vec2(low, 0), layer, 0),
             textureLoad(gradient_ramps, vec2(high, 0), layer, 0), fract(index));
     }
     let last = count - 1u;
@@ -30,7 +30,7 @@ fn sample_gradient(t: f32, first: u32, count: u32, ramp: u32) -> vec4<f32> {
     let c1 = stops[first + j * 2u];
     let o1 = stops[first + j * 2u + 1u].x;
     let f = clamp((clamped - o0) / max(o1 - o0, 1e-6), 0.0, 1.0);
-    return mix(c0, c1, f);
+    return mix_color(c0, c1, f);
 }
 
 // Solve |p - lerp(c0, c1, t)| = lerp(r0, r1, t), using the largest

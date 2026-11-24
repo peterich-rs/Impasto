@@ -332,10 +332,11 @@ fn render_layers(
                         rgba,
                     })
             };
-            let submitted = graphics
-                .raster
-                .borrow_mut()
-                .submit_layers(tree, scale, resolve);
+            let submitted =
+                graphics
+                    .raster
+                    .borrow_mut()
+                    .submit_shared_layers(Arc::clone(tree), scale, resolve);
             submit_ms = elapsed_ms(started);
             if let Err(status) = submitted {
                 if status == raster::Status::DeviceLost {

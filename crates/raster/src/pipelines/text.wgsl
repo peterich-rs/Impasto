@@ -1,5 +1,4 @@
 // Glyphs and decoration bars.
-override simple_paint: bool = false;
 override text_gamma: bool = false;
 override unclipped: bool = false;
 @group(1) @binding(0) var mask_atlas: texture_2d_array<f32>;
@@ -27,16 +26,15 @@ struct VertexOut {
     @location(6) @interpolate(flat) radial_radii: vec2<f32>,
 };
 
-@vertex
-fn vs_main(@builtin(vertex_index) vertex: u32, data: GlyphVertex) -> VertexOut {
+fn glyph_unit(vertex: u32) -> vec2<f32> {
     let corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0)
     );
-    let unit = corners[vertex];
-    let scene = data.rect.xy + unit * data.rect.zw;
-    var out: VertexOut;
-    out.position = view.transform * vec4<f32>(scene, 0.0, 1.0);
+    return corners[vertex];
+}
+
+fn glyph_uv(unit: vec2<f32>, data: GlyphVertex) -> vec2<f32> {
     var scale = vec2(view.info.w);
     if (data.flags_and_layer & 32u) != 0u {
         if (data.flags_and_layer & 1u) != 0u {
@@ -45,8 +43,42 @@ fn vs_main(@builtin(vertex_index) vertex: u32, data: GlyphVertex) -> VertexOut {
             scale = 1.0 / vec2<f32>(textureDimensions(mask_atlas));
         }
     }
-    out.uv = mix(vec2<f32>(data.uv.xy), vec2<f32>(data.uv.zw), unit) * scale;
-    out.local = scene;
+    return mix(vec2<f32>(data.uv.xy), vec2<f32>(data.uv.zw), unit) * scale;
+}
+
+struct MaskOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) @interpolate(flat) color: vec4<f32>,
+    @location(2) @interpolate(flat) flags_and_layer: u32,
+};
+
+fn vs_mask_data(vertex: u32, data: GlyphVertex) -> MaskOut {
+    let unit = glyph_unit(vertex);
+    let scene = data.rect.xy + unit * data.rect.zw;
+    return MaskOut(view.transform * vec4(scene, 0.0, 1.0),
+        glyph_uv(unit, data), data.color, data.flags_and_layer);
+}
+
+@vertex
+fn vs_mask(@builtin(vertex_index) vertex: u32, data: GlyphVertex) -> MaskOut {
+    return vs_mask_data(vertex, data);
+}
+
+@fragment
+fn fs_mask(in: MaskOut) -> @location(0) vec4<f32> {
+    let flags = in.flags_and_layer & 255u;
+    let layer = i32(in.flags_and_layer >> 8u);
+    return in.color * glyph_coverage(in.uv, layer, flags) * clip_coverage(in.position.xy);
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex: u32, data: GlyphVertex) -> VertexOut {
+    let mask = vs_mask_data(vertex, data);
+    var out: VertexOut;
+    out.position = mask.position;
+    out.uv = mask.uv;
+    out.local = data.rect.xy + glyph_unit(vertex) * data.rect.zw;
     out.color = data.color;
     out.flags_and_layer = data.flags_and_layer;
     let extra = load_paint(data.paint_index);
@@ -76,9 +108,6 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var color = vec4<f32>(0.0);
     let flags = data.flags_and_layer & 255u;
     let layer = i32(data.flags_and_layer >> 8u);
-    if simple_paint {
-        return data.color * glyph_coverage(in.uv, layer, flags);
-    }
     if ((flags & 4u) != 0u) {
         // Decoration bar: a solid or gradient rectangle.
         if ((flags & 2u) != 0u) {

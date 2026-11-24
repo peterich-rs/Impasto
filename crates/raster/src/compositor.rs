@@ -1,5 +1,8 @@
 //! Ordered scene replay, clipping, and offscreen composition.
 
+mod image_array;
+mod resident;
+
 use crate::profiler::{Capture, GpuPassKind};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -17,9 +20,11 @@ use crate::compiler::{
 };
 use crate::compute_blur::{BlurParams, ComputeBlur};
 use crate::gpu::Gpu;
+use crate::outline::{Outlines, REFERENCE_PPEM};
 use crate::pipelines::{
     self, BlendKey, ParamsUniform, PipelineCache, PipelineKind, Target, ViewUniform,
 };
+use crate::resident::ResidentPictures;
 use crate::{FontLibrary, Status, textures::TextureStore};
 
 const POOL_LIMIT: usize = 16;
@@ -27,15 +32,17 @@ const POOL_BYTES: u64 = 64 * 1024 * 1024;
 
 pub(crate) struct Compositor {
     atlas: Atlas,
+    outlines: Outlines,
     pipelines: PipelineCache,
     pool: Vec<Image>,
     white: wgpu::TextureView,
     white_mask_group: wgpu::BindGroup,
     linear: wgpu::Sampler,
     nearest: wgpu::Sampler,
-    trilinear: wgpu::Sampler,
     render_stats: RenderStats,
     arena: FrameArena,
+    resident: ResidentPictures,
+    image_groups: HashMap<(Vec<wgpu::TextureView>, bool), wgpu::BindGroup>,
     composites: HashMap<(wgpu::TextureView, wgpu::TextureView), wgpu::BindGroup>,
     masks: HashMap<MaskKey, Image>,
     offscreen_live_bytes: u64,
@@ -43,6 +50,7 @@ pub(crate) struct Compositor {
     trim_pending: bool,
     specialize_paint: bool,
     compute_blur: Option<ComputeBlur>,
+    blur_groups: HashMap<(wgpu::TextureView, wgpu::TextureView, wgpu::Buffer), wgpu::BindGroup>,
     early_z: bool,
     canvas_stencil: bool,
     transient: bool,
@@ -211,6 +219,37 @@ impl Image {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct OutputFormat {
+    pub format: wgpu::TextureFormat,
+    space: wgpu::SurfaceColorSpace,
+    straight_alpha: bool,
+}
+
+impl OutputFormat {
+    pub fn surface(config: &wgpu::SurfaceConfiguration) -> Self {
+        Self {
+            format: config.format,
+            space: config.color_space,
+            straight_alpha: config.alpha_mode == wgpu::CompositeAlphaMode::PostMultiplied,
+        }
+    }
+}
+
+impl From<wgpu::TextureFormat> for OutputFormat {
+    fn from(format: wgpu::TextureFormat) -> Self {
+        Self {
+            format,
+            straight_alpha: false,
+            space: if format == wgpu::TextureFormat::Rgba16Float {
+                wgpu::SurfaceColorSpace::ExtendedSrgbLinear
+            } else {
+                wgpu::SurfaceColorSpace::Srgb
+            },
+        }
+    }
+}
+
 impl Compositor {
     pub fn new(gpu: &Gpu) -> Result<Self, Status> {
         let white = Image::new(gpu, [1, 1], wgpu::TextureFormat::Rgba8Unorm, 1);
@@ -221,8 +260,9 @@ impl Compositor {
             extent([1, 1]),
         );
         let mut pipelines = PipelineCache::new(gpu);
+        let specialize_paint = std::env::var("IMPASTO_SPECIALIZE_PAINT").as_deref() != Ok("0");
         if std::env::var("IMPASTO_PREWARM").as_deref() != Ok("0") {
-            pipelines.prewarm(gpu, wgpu::TextureFormat::Rgba8UnormSrgb, false)?;
+            pipelines.prewarm(gpu, wgpu::TextureFormat::Rgba8UnormSrgb, specialize_paint)?;
         }
         let linear = pipelines::linear_sampler(gpu);
         let white_mask_group = pipelines::bind_group(
@@ -235,28 +275,25 @@ impl Compositor {
         );
         Ok(Self {
             atlas: Atlas::new(gpu),
+            outlines: Outlines::default(),
             pipelines,
             pool: Vec::new(),
             white: white.view,
             white_mask_group,
             linear,
             nearest: pipelines::nearest_sampler(gpu),
-            trilinear: gpu.device.create_sampler(&wgpu::SamplerDescriptor {
-                label: Some("impasto image trilinear"),
-                mag_filter: wgpu::FilterMode::Linear,
-                min_filter: wgpu::FilterMode::Linear,
-                mipmap_filter: wgpu::MipmapFilterMode::Linear,
-                ..Default::default()
-            }),
             render_stats: RenderStats::default(),
             arena: FrameArena::new(gpu),
+            resident: ResidentPictures::default(),
+            image_groups: HashMap::new(),
             composites: HashMap::new(),
             masks: HashMap::new(),
             offscreen_live_bytes: 0,
             frame_active: false,
             trim_pending: false,
-            specialize_paint: std::env::var_os("IMPASTO_SPECIALIZE_PAINT").is_some(),
+            specialize_paint,
             compute_blur: ComputeBlur::new(gpu),
+            blur_groups: HashMap::new(),
             early_z: std::env::var("IMPASTO_EARLY_Z").as_deref() == Ok("1"),
             canvas_stencil: std::env::var("IMPASTO_CANVAS_STENCIL").as_deref() == Ok("1"),
             transient: match std::env::var("IMPASTO_TRANSIENT_ATTACHMENTS").as_deref() {
@@ -275,6 +312,16 @@ impl Compositor {
         }
     }
 
+    #[cfg(test)]
+    pub fn disable_residency(&mut self) {
+        self.pipelines.resident_pictures = false;
+    }
+
+    #[cfg(test)]
+    pub fn disable_glyph_outlines(&mut self) {
+        self.outlines.disable();
+    }
+
     pub fn begin_frame(&mut self) {
         // A new frame also closes a discarded encoding transaction.
         if self.trim_pending {
@@ -282,30 +329,38 @@ impl Compositor {
         }
         self.frame_active = true;
         self.atlas.begin_frame();
+        self.resident.begin_frame();
         self.arena.reset();
         self.recycle_masks();
         self.offscreen_live_bytes = 0;
         self.render_stats = RenderStats::default();
     }
 
-    pub fn flush(&mut self, gpu: &Gpu) -> AtlasStats {
-        self.atlas.flush(gpu);
-        self.arena.flush(gpu);
+    pub fn flush(
+        &mut self,
+        gpu: &Gpu,
+    ) -> Result<(AtlasStats, Option<wgpu::CommandBuffer>), Status> {
+        let mut prelude = None;
+        self.arena
+            .flush(gpu, &mut prelude, self.resident.uploads())?;
+        self.atlas.flush(gpu, &mut prelude);
         self.recycle_masks();
         let pooled = |view: &wgpu::TextureView| {
             *view == self.white || self.pool.iter().any(|image| image.view == *view)
         };
         self.composites
             .retain(|(backdrop, mask), _| pooled(backdrop) && pooled(mask));
+        self.blur_groups.retain(|(source, target, buffer), _| {
+            pooled(source) && pooled(target) && self.arena.owns_uniform_buffer(buffer)
+        });
         self.render_stats.pooled_texture_bytes = self.pool.iter().map(Image::bytes).sum();
         self.render_stats.buffers_created += self.arena.buffers_created;
         self.render_stats.bind_groups_created += self.arena.bind_groups_created;
-        [
-            self.render_stats.vertex_bytes,
-            self.render_stats.uniform_bytes,
-            self.render_stats.stop_bytes,
-            self.render_stats.extra_bytes,
-        ] = self.arena.bytes_uploaded();
+        let [vertex_bytes, uniform_bytes, stop_bytes, extra_bytes] = self.arena.bytes_uploaded();
+        self.render_stats.vertex_bytes += vertex_bytes;
+        self.render_stats.uniform_bytes += uniform_bytes + self.resident.uniform_bytes();
+        self.render_stats.stop_bytes += stop_bytes;
+        self.render_stats.extra_bytes += extra_bytes;
         self.render_stats.gradient_lut_bytes = self.arena.lut.upload_bytes;
         self.render_stats.gradient_lut_hits = self.arena.lut.hits;
         let atlas_stats = self.atlas.take_stats();
@@ -315,7 +370,12 @@ impl Compositor {
         if self.trim_pending {
             self.trim_resources();
         }
-        atlas_stats
+        Ok((atlas_stats, prelude.map(wgpu::CommandEncoder::finish)))
+    }
+
+    pub fn submitted(&mut self, gpu: &Gpu) {
+        self.arena.submitted(gpu);
+        self.resident.clear_uploads();
     }
 
     pub fn render_stats(&self) -> RenderStats {
@@ -334,9 +394,13 @@ impl Compositor {
     fn trim_resources(&mut self) {
         self.trim_pending = false;
         self.atlas.trim();
+        self.outlines = Outlines::default();
         self.pool.clear();
+        self.image_groups.clear();
         self.composites.clear();
+        self.blur_groups.clear();
         self.arena.trim();
+        self.resident = ResidentPictures::default();
         self.masks.clear();
     }
 
@@ -351,16 +415,31 @@ impl Compositor {
         gpu: &Gpu,
         scene: Scene<'_>,
         output: &wgpu::TextureView,
-        format: wgpu::TextureFormat,
+        output_format: impl Into<OutputFormat>,
         size: [u32; 2],
         capture: Option<(&mut Capture, Option<usize>)>,
     ) -> Result<wgpu::CommandEncoder, Status> {
+        let OutputFormat {
+            format,
+            space,
+            straight_alpha,
+        } = output_format.into();
+        let working = match space {
+            wgpu::SurfaceColorSpace::DisplayP3 | wgpu::SurfaceColorSpace::ExtendedSrgbLinear => {
+                wgpu::TextureFormat::Rgba16Float
+            }
+            _ => wgpu::TextureFormat::Rgba8UnormSrgb,
+        };
         let command = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("impasto frame"),
             });
-        let direct = format.is_srgb() && !scene_reads_root(&scene, Some(scene.tree.root));
+        let p3 = space == wgpu::SurfaceColorSpace::DisplayP3;
+        let linear = space == wgpu::SurfaceColorSpace::ExtendedSrgbLinear;
+        let direct = !straight_alpha
+            && (linear && format == working || !p3 && format.is_srgb())
+            && !scene_reads_root(&scene, Some(scene.tree.root));
         let dither_output = gpu.dither_output
             && !direct
             && matches!(
@@ -380,17 +459,20 @@ impl Compositor {
             command,
             pending: None,
             clears: HashMap::new(),
+            opaque: Vec::new(),
             root: output.view.clone(),
             main: output.view.clone(),
             capture,
             size,
+            working,
+            straight_alpha,
         };
         let main = if direct {
             output.clone()
         } else if dither_output {
             frame.take(size, wgpu::TextureFormat::Rgba16Float)
         } else {
-            frame.take(size, wgpu::TextureFormat::Rgba8UnormSrgb)
+            frame.take(size, working)
         };
         frame.main = main.view.clone();
         frame.clear(&main.view);
@@ -411,10 +493,14 @@ impl Compositor {
                 &Coverage::default(),
                 &output,
                 output.area(),
-                if dither_output {
+                if p3 {
+                    FullPass::DisplayP3
+                } else if dither_output {
                     FullPass::DitherOutput
-                } else {
+                } else if format.is_srgb() || linear {
                     FullPass::Copy
+                } else {
+                    FullPass::EncodeSrgb
                 },
             )?;
             frame.release(main);
@@ -468,7 +554,7 @@ enum ImageSource<'a> {
     Pooled(&'a Image),
 }
 
-impl ImageSource<'_> {
+impl<'a> ImageSource<'a> {
     fn material(self, frame: &mut Frame<'_>, nearest: bool) -> wgpu::BindGroup {
         let (view, cache) = match self {
             Self::External(image) => (image.view(), image.material.as_ref()),
@@ -477,20 +563,30 @@ impl ImageSource<'_> {
         let compositor = &mut frame.compositor;
         let sampler = if nearest {
             &compositor.nearest
-        } else if matches!(self, Self::External(image) if image.mipmapped) {
-            &compositor.trilinear
         } else {
             &compositor.linear
         };
-        let (group, created) = cache.get(
-            frame.gpu,
-            &compositor.pipelines.layouts.material,
-            view,
-            sampler,
-            nearest,
-        );
+        let (group, created) = match (self.nv12(), &compositor.pipelines.layouts.external_image) {
+            (Some(planes), Some(layout)) => {
+                cache.nv12(frame.gpu, layout, view, planes, sampler, nearest)
+            }
+            _ => cache.get(
+                frame.gpu,
+                &compositor.pipelines.layouts.material,
+                view,
+                sampler,
+                nearest,
+            ),
+        };
         compositor.render_stats.bind_groups_created += u32::from(created);
         group
+    }
+
+    fn nv12(self) -> Option<&'a crate::textures::Nv12Planes> {
+        match self {
+            Self::External(image) => image.nv12(),
+            Self::Pooled(_) => None,
+        }
     }
 
     fn premultiplied_srgb(self) -> bool {
@@ -499,6 +595,7 @@ impl ImageSource<'_> {
 }
 
 struct PictureReplay<'a> {
+    layer: LayerId,
     picture: &'a CompiledPicture,
     origin: Affine,
     group_bounds: Option<Vec<PictureBounds>>,
@@ -522,10 +619,13 @@ struct Frame<'a> {
     command: wgpu::CommandEncoder,
     pending: Option<DrawPass>,
     clears: HashMap<wgpu::TextureView, wgpu::Color>,
+    opaque: Vec<[f32; 4]>,
     root: wgpu::TextureView,
     main: wgpu::TextureView,
     capture: Option<(&'a mut Capture, Option<usize>)>,
     size: [u32; 2],
+    working: wgpu::TextureFormat,
+    straight_alpha: bool,
 }
 
 struct DrawPass {
@@ -533,9 +633,18 @@ struct DrawPass {
     target: wgpu::TextureView,
     size: [u32; 2],
     calls: Vec<DrawCall>,
+    draws: u32,
 }
 
-struct DrawCall {
+enum DrawCall {
+    Immediate(ImmediateDraw),
+    Resident {
+        bundle: wgpu::RenderBundle,
+        scissor: Option<[u32; 4]>,
+    },
+}
+
+struct ImmediateDraw {
     pipeline: wgpu::RenderPipeline,
     globals: DynamicGroup,
     material: wgpu::BindGroup,
@@ -549,12 +658,81 @@ struct DrawCall {
 enum FullPass {
     Copy,
     DitherOutput,
-    Over { blend: BlendKey, opacity: f32 },
-    Multiply { opacity: f32 },
+    DisplayP3,
+    EncodeSrgb,
+    Over {
+        blend: BlendKey,
+        opacity: f32,
+    },
+    Multiply {
+        opacity: f32,
+    },
     Backdrop,
-    BlurDown { radius: f32, backdrop: bool },
-    BlurUp { radius: f32, backdrop: bool },
+    BlurDown {
+        radius: f32,
+        backdrop: bool,
+    },
+    BlurUp {
+        radius: f32,
+        backdrop: bool,
+    },
+    Gaussian {
+        sigma: f32,
+        vertical: bool,
+        backdrop: bool,
+    },
     MaskIntersect,
+}
+
+#[derive(Clone, Copy)]
+struct GlyphTransform {
+    matrix: Affine,
+    scale: f32,
+    pixels: f32,
+    aligned: bool,
+}
+
+impl GlyphTransform {
+    fn new(matrix: Affine, scale: f32) -> Self {
+        let [a, b, c, d, ..] = matrix;
+        Self {
+            matrix,
+            scale,
+            pixels: scale * a.hypot(b).max(c.hypot(d)).max(0.001),
+            aligned: b.abs() < 0.0001 && c.abs() < 0.0001 && a > 0.0 && (a - d).abs() < 0.0001,
+        }
+    }
+
+    fn vector(self, size: f32) -> bool {
+        let pixels = size * self.pixels;
+        pixels > 96.0 || (pixels > 48.0 && (self.matrix[0] - 1.0).abs() > 0.01)
+    }
+
+    fn position(self, glyph: &compiler::GlyphDraw) -> Option<[f32; 2]> {
+        let (x, y) = compiler::apply(self.matrix, glyph.x, glyph.y);
+        self.aligned.then_some([x * self.scale, y * self.scale])
+    }
+
+    fn local_rect(
+        self,
+        glyph: &compiler::GlyphDraw,
+        position: Option<[f32; 2]>,
+        placement: crate::atlas::Placement,
+    ) -> [f32; 4] {
+        let [a, _, _, d, ..] = self.matrix;
+        let [dx, dy] = position.map_or([0.0; 2], |[x, y]| {
+            [
+                x.rem_euclid(1.0) / (self.scale * a),
+                y.rem_euclid(1.0) / (self.scale * d),
+            ]
+        });
+        [
+            glyph.x - dx + placement.left as f32 / self.pixels,
+            glyph.y - dy - placement.top as f32 / self.pixels,
+            placement.rect.w as f32 / self.pixels,
+            placement.rect.h as f32 / self.pixels,
+        ]
+    }
 }
 
 #[derive(Clone, Default)]
@@ -615,26 +793,13 @@ impl Frame<'_> {
         vertices: &[T],
         scissor: Option<[u32; 4]>,
     ) -> Result<(), Status> {
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|pass| pass.target != target.view)
-        {
-            self.flush_draws();
-        }
-        let pending = self.pending.get_or_insert_with(|| DrawPass {
-            format: target.format,
-            target: target.view.clone(),
-            size: target.logical,
-            calls: Vec::new(),
-        });
         let limit = FrameArena::vertex_limit::<T>(self.gpu);
         if limit == 0 {
             return Err(Status::OutOfMemory);
         }
         for chunk in vertices.chunks(limit) {
             self.compositor.render_stats.draws += 1;
-            pending.calls.push(DrawCall {
+            let call = DrawCall::Immediate(ImmediateDraw {
                 pipeline: pipeline.clone(),
                 globals: globals.clone(),
                 material: material.clone(),
@@ -643,8 +808,28 @@ impl Frame<'_> {
                 scissor: scissor.map(|area| target.local(area)),
                 instances: draw_count(chunk.len())?,
             });
+            let pass = self.pending_pass(target);
+            pass.calls.push(call);
+            pass.draws += 1;
         }
         Ok(())
+    }
+
+    fn pending_pass(&mut self, target: &Image) -> &mut DrawPass {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pass| pass.target != target.view)
+        {
+            self.flush_draws();
+        }
+        self.pending.get_or_insert_with(|| DrawPass {
+            format: target.format,
+            target: target.view.clone(),
+            size: target.logical,
+            calls: Vec::new(),
+            draws: 0,
+        })
     }
 
     fn flush_draws(&mut self) {
@@ -654,27 +839,63 @@ impl Frame<'_> {
         self.count_pass(&batch.target);
         let load = self.load(&batch.target);
         let kind = self.pass_kind(&batch.target, batch.format);
-        let stamps = pass_timestamps(
-            &mut self.capture,
-            kind,
-            u32::try_from(batch.calls.len()).unwrap_or(u32::MAX),
-        );
+        let stamps = pass_timestamps(&mut self.capture, kind, batch.draws);
         let mut pass = render(&mut self.command, &batch.target, load, stamps);
         let mut scissor = None;
         set_scissor(&mut pass, Some([0, 0, batch.size[0], batch.size[1]]));
-        for call in &batch.calls {
-            if call.scissor != scissor {
+        let mut last_pipeline = None;
+        let mut last_globals = None;
+        let mut last_material = None;
+        let mut last_mask = None;
+        let mut draws = batch.calls.iter().peekable();
+        while let Some(draw) = draws.next() {
+            let next = match draw {
+                DrawCall::Immediate(call) => call.scissor,
+                DrawCall::Resident { scissor, .. } => *scissor,
+            };
+            if next != scissor {
                 set_scissor(
                     &mut pass,
-                    Some(call.scissor.unwrap_or([0, 0, batch.size[0], batch.size[1]])),
+                    Some(next.unwrap_or([0, 0, batch.size[0], batch.size[1]])),
                 );
-                scissor = call.scissor;
+                scissor = next;
             }
-            pass.set_pipeline(&call.pipeline);
-            pass.set_bind_group(0, &call.globals.group, call.globals.offsets());
-            pass.set_bind_group(1, &call.material, &[]);
-            if let Some(mask) = &call.mask {
+            let call = match draw {
+                DrawCall::Immediate(call) => call,
+                DrawCall::Resident { bundle, .. } => {
+                    let adjacent = std::iter::from_fn(|| match draws.peek()? {
+                        DrawCall::Resident { bundle, scissor } if *scissor == next => {
+                            draws.next();
+                            Some(bundle)
+                        }
+                        _ => None,
+                    });
+                    pass.execute_bundles(std::iter::once(bundle).chain(adjacent));
+                    last_pipeline = None;
+                    last_globals = None;
+                    last_material = None;
+                    last_mask = None;
+                    continue;
+                }
+            };
+            if last_pipeline != Some(&call.pipeline) {
+                pass.set_pipeline(&call.pipeline);
+                last_pipeline = Some(&call.pipeline);
+            }
+            let globals = (&call.globals.group, call.globals.offsets());
+            if last_globals != Some(globals) {
+                pass.set_bind_group(0, globals.0, globals.1);
+                last_globals = Some(globals);
+            }
+            if last_material != Some(&call.material) {
+                pass.set_bind_group(1, &call.material, &[]);
+                last_material = Some(&call.material);
+            }
+            if let Some(mask) = &call.mask
+                && last_mask != Some(mask)
+            {
                 pass.set_bind_group(2, mask, &[]);
+                last_mask = Some(mask);
             }
             pass.set_vertex_buffer(0, call.vertices.slice());
             pass.draw(0..6, 0..call.instances);
@@ -882,6 +1103,40 @@ impl Frame<'_> {
         Ok(bounds)
     }
 
+    fn source_over_layers(&self, mut current: Option<LayerId>) -> bool {
+        while let Some(id) = current {
+            let Some(layer) = self.scene.tree.layers.get(id.0 as usize) else {
+                return false;
+            };
+            current = layer.next;
+            match layer.kind {
+                LayerKind::Picture { picture } => {
+                    if !self.scene.pictures.get(&picture).is_some_and(|picture| {
+                        picture.groups.is_empty()
+                            && picture
+                                .scopes
+                                .iter()
+                                .flat_map(|scope| &scope.draws)
+                                .all(Draw::source_over)
+                    }) {
+                        return false;
+                    }
+                }
+                LayerKind::Clip { .. }
+                | LayerKind::CornerClip { .. }
+                | LayerKind::Offset { .. }
+                | LayerKind::Transform { .. } => {
+                    if !self.source_over_layers(layer.first_child) {
+                        return false;
+                    }
+                }
+                LayerKind::PlatformView { .. } => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+
     fn layers(
         &mut self,
         mut current: Option<LayerId>,
@@ -911,6 +1166,7 @@ impl Frame<'_> {
                         translation(picture.origin.0, picture.origin.1),
                     );
                     let replay = PictureReplay {
+                        layer: id,
                         picture: &picture,
                         origin: local,
                         group_bounds: if picture.groups.is_empty() {
@@ -919,7 +1175,25 @@ impl Frame<'_> {
                             picture.bounds_in(local, self.scene.scale).1
                         },
                     };
-                    self.scopes(&replay, &picture.scopes, 0, target, clip)?;
+                    if picture.scope_blocks.is_empty()
+                        || local[..4] != IDENTITY[..4]
+                        || self.scene.scale < picture.scale
+                    {
+                        self.scopes(&replay, &picture.scopes, 0, target, clip, 0)?;
+                    } else {
+                        let block_size = compiler::SCOPES_PER_BLOCK;
+                        for (block, (&bounds, scopes)) in picture
+                            .scope_blocks
+                            .iter()
+                            .zip(picture.scopes.chunks(block_size))
+                            .enumerate()
+                        {
+                            let bounds = bounds.transform(local).expand(1.0 / self.scene.scale);
+                            if self.area(bounds, target).is_some() {
+                                self.scopes(&replay, scopes, 0, target, clip, block * block_size)?;
+                            }
+                        }
+                    }
                 }
                 LayerKind::Offset { .. } | LayerKind::Transform { .. } => {
                     let local = compiler::layer_transform(&layer.kind);
@@ -941,7 +1215,12 @@ impl Frame<'_> {
                     add_rect_clip(&mut nested, [x, y, w, h], corner_radius, transform);
                     self.layers(children, target, transform, &nested)?;
                 }
+                LayerKind::Opacity { alpha: 0, .. } => {}
                 LayerKind::Opacity { alpha, .. } => {
+                    if alpha == 255 && self.source_over_layers(children) {
+                        self.layers(children, target, transform, clip)?;
+                        continue;
+                    }
                     let group = Group {
                         effect: Effect::Opacity,
                         opacity: f32::from(alpha) / 255.0,
@@ -1021,9 +1300,12 @@ impl Frame<'_> {
         depth: usize,
         target: &Image,
         parent_clip: &Clip,
+        first_scope: usize,
     ) -> Result<(), Status> {
         let origin = replay.origin;
+        let scope_end = first_scope + scopes.len();
         while let Some((scope, rest)) = scopes.split_first() {
+            let scope_index = scope_end - scopes.len();
             let state = &scope.state;
             if let Some(id) = state.groups.get(depth) {
                 let length = scopes
@@ -1034,6 +1316,27 @@ impl Frame<'_> {
                 let group = replay.group(*id)?;
                 let transform = compiler::compose(origin, group.transform);
                 let clip = merge_clip(parent_clip, &state.clip, origin);
+                if group.effect == Effect::Opacity
+                    && group.opacity == 1.0
+                    && group_scopes
+                        .iter()
+                        .filter(|scope| !scope.draws.is_empty())
+                        .all(|scope| {
+                            scope.state.groups.len() == depth + 1
+                                && scope.draws.iter().all(Draw::source_over)
+                        })
+                {
+                    self.scopes(
+                        replay,
+                        group_scopes,
+                        depth + 1,
+                        target,
+                        parent_clip,
+                        scope_index,
+                    )?;
+                    scopes = remaining;
+                    continue;
+                }
                 if !self.fold_opacity(
                     group,
                     group_scopes,
@@ -1043,7 +1346,14 @@ impl Frame<'_> {
                     parent_clip,
                 )? {
                     self.group(target, transform, &clip, group, |frame, target| {
-                        frame.scopes(replay, group_scopes, depth + 1, target, parent_clip)
+                        frame.scopes(
+                            replay,
+                            group_scopes,
+                            depth + 1,
+                            target,
+                            parent_clip,
+                            scope_index,
+                        )
                     })?;
                 }
                 scopes = remaining;
@@ -1078,7 +1388,41 @@ impl Frame<'_> {
                 self.coverage(target, &clip)?
             };
             if !coverage.empty {
-                self.draws(target, transform, &coverage, &scope.draws)?;
+                if depth == 0
+                    && replay.picture.has_resident_candidate
+                    && !scope.resident_candidates.is_empty()
+                    && self.compositor.pipelines.resident_pictures
+                    && target.view == self.main
+                    && coverage.mask.is_none()
+                    && !self.compositor.early_z
+                    && !self.gpu.gradient_lut
+                {
+                    let mut first = 0;
+                    while let Some(draw) = scope.draws.get(first) {
+                        let kind = std::mem::discriminant(draw);
+                        let count = scope.draws[first..]
+                            .iter()
+                            .take_while(|next| std::mem::discriminant(*next) == kind)
+                            .count();
+                        let draws = &scope.draws[first..first + count];
+                        if count != 1
+                            || !scope.resident_candidates[first]
+                            || !self.try_resident_scope(
+                                target,
+                                transform,
+                                &coverage,
+                                draws,
+                                replay,
+                                (scope_index, first),
+                            )?
+                        {
+                            self.draws(target, transform, &coverage, draws)?;
+                        }
+                        first += count;
+                    }
+                } else {
+                    self.draws(target, transform, &coverage, &scope.draws)?;
+                }
             }
         }
         Ok(())
@@ -1267,58 +1611,173 @@ impl Frame<'_> {
         if group.effect != Effect::Opacity || group.opacity <= 0.0 {
             return Ok(false);
         }
-        let mut nonempty = scopes.iter().filter(|scope| !scope.draws.is_empty());
-        let Some(scope) = nonempty.next() else {
-            return Ok(true);
-        };
-        if nonempty.next().is_some() || scope.state.groups.len() != expected_groups {
-            return Ok(false);
-        }
-        let transform = compiler::compose(origin, scope.state.transform);
-        let clip = merge_clip(parent_clip, &scope.state.clip, origin);
-        match scope.draws.as_slice() {
-            [Draw::Rects(rects, stops, BlendKey::SrcOver)]
-                if rects.len() == 1 && rects[0].kind == batch::RECT_FILL =>
-            {
-                let mut rect = rects[0].clone();
-                rect.gradient_b[3] *= group.opacity;
-                let coverage = self.coverage(target, &clip)?;
-                if !coverage.empty {
-                    self.rects(
-                        target,
-                        transform,
-                        &coverage,
-                        &[rect],
-                        stops.as_deref().unwrap_or_default(),
-                    )?;
+        let mut bounds = Vec::new();
+        for scope in scopes.iter().filter(|scope| !scope.draws.is_empty()) {
+            if scope.state.groups.len() != expected_groups {
+                return Ok(false);
+            }
+            let transform = compiler::compose(origin, scope.state.transform);
+            let margin = 1.0 / self.scene.scale;
+            let mut add = |rect: [f32; 4], stroke: f32| {
+                if bounds.len() >= 32 {
+                    return false;
+                }
+                let PictureBounds::Rect(rect) = PictureBounds::rect(rect)
+                    .expand(stroke)
+                    .transform(transform)
+                    .expand(margin)
+                else {
+                    return false;
+                };
+                if bounds.iter().any(|&previous| {
+                    intersect(previous, rect)[2..]
+                        .iter()
+                        .all(|&size| size > 0.0)
+                }) {
+                    return false;
+                }
+                bounds.push(rect);
+                true
+            };
+            for draw in &scope.draws {
+                let compatible = match draw {
+                    Draw::Rects(run) if run.blend == BlendKey::SrcOver => {
+                        run.rects.iter().all(|rect| {
+                            matches!(rect.kind, batch::RECT_FILL | batch::RECT_STROKE)
+                                && add(rect.rect, rect.stroke_width * 0.5)
+                        })
+                    }
+                    Draw::Images {
+                        instances,
+                        blend: BlendKey::SrcOver,
+                        ..
+                    } => instances.iter().all(|instance| add(instance.rect, 0.0)),
+                    Draw::Glyphs(glyphs) => glyphs.iter().all(|glyph| {
+                        let pad = glyph.size * 2.0 + 1.0;
+                        glyph.gradient.is_none()
+                            && add(
+                                glyph.decoration.unwrap_or([
+                                    glyph.x - pad,
+                                    glyph.y - pad,
+                                    2.0 * pad,
+                                    2.0 * pad,
+                                ]),
+                                0.0,
+                            )
+                    }),
+                    _ => false,
+                };
+                if !compatible {
+                    return Ok(false);
                 }
             }
-            [
-                Draw::Images {
-                    source,
-                    instances,
-                    blend: BlendKey::SrcOver,
-                },
-            ] if instances.len() == 1 => {
-                if let Some(image) = self.scene.textures.get(source) {
-                    let mut instance = instances[0].clone();
-                    instance.color = instance.color.map(|channel| channel * group.opacity);
-                    let coverage = self.coverage(target, &clip)?;
-                    if !coverage.empty {
-                        self.images(
-                            target,
-                            transform,
-                            &coverage,
-                            &[instance],
-                            ImageSource::External(image),
-                            BlendKey::SrcOver,
-                        )?;
+        }
+        for scope in scopes.iter().filter(|scope| !scope.draws.is_empty()) {
+            let transform = compiler::compose(origin, scope.state.transform);
+            let clip = merge_clip(parent_clip, &scope.state.clip, origin);
+            let coverage = self.coverage(target, &clip)?;
+            if coverage.empty {
+                continue;
+            }
+            for draw in &scope.draws {
+                match draw {
+                    Draw::Rects(run) => {
+                        let mut rects = run.rects.clone();
+                        for rect in &mut rects {
+                            rect.gradient_b[3] *= group.opacity;
+                        }
+                        self.rects(target, transform, &coverage, &rects, run.stops())?;
+                    }
+                    Draw::Images {
+                        source, instances, ..
+                    } => {
+                        if let Some(image) = self.scene.textures.get(source) {
+                            let mut quads = instances.clone();
+                            for quad in &mut quads {
+                                quad.color = quad.color.map(|channel| channel * group.opacity);
+                            }
+                            self.images(
+                                target,
+                                transform,
+                                &coverage,
+                                &quads,
+                                ImageSource::External(image),
+                                BlendKey::SrcOver,
+                            )?;
+                        }
+                    }
+                    Draw::Glyphs(glyphs) => {
+                        let mut quads = glyphs.clone();
+                        for glyph in &mut quads {
+                            glyph.color = glyph.color.map(|bits| {
+                                half::f16::from_f32(
+                                    half::f16::from_bits(bits).to_f32() * group.opacity,
+                                )
+                                .to_bits()
+                            });
+                        }
+                        self.glyphs(target, transform, &coverage, &quads)?;
+                    }
+                    _ => return Err(Status::BadScene),
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn track_opaque(&mut self, target: &Image, transform: Affine, clip: &Coverage, draw: &Draw) {
+        if !self.gpu.caps.lcd || target.view != self.root {
+            return;
+        }
+        if !draw.source_over() {
+            self.opaque.clear();
+            return;
+        }
+        if clip.mask.is_some() || clip.count > 0 {
+            return;
+        }
+        let scale = self.scene.scale;
+        let scissor = clip
+            .scissor
+            .unwrap_or_else(|| target.area())
+            .map(|value| value as f32 / scale);
+        let mut add = |rect| {
+            let rect = intersect(rect, scissor);
+            if rect[2] > 0.0 && rect[3] > 0.0 {
+                if self.opaque.len() == 16 {
+                    self.opaque.remove(0);
+                }
+                self.opaque.push(rect);
+            }
+        };
+        match draw {
+            Draw::Fill(color) if color[3] == 1.0 => add(scissor),
+            Draw::Rects(run) if compiler::is_axis_aligned(transform) => {
+                for rect in &run.rects {
+                    if rect.color[3] != 1.0
+                        || rect.flags != 0
+                        || rect.kind != batch::RECT_FILL
+                        || rect.corners.is_some()
+                    {
+                        continue;
+                    }
+                    let [x, y, w, h] = rect.rect;
+                    let radius = rect.radius;
+                    let interior = PictureBounds::rect([
+                        x + radius,
+                        y + radius,
+                        w - 2.0 * radius,
+                        h - 2.0 * radius,
+                    ])
+                    .transform(transform)
+                    .expand(-1.0 / scale);
+                    if let PictureBounds::Rect(interior) = interior {
+                        add(interior);
                     }
                 }
             }
-            _ => return Ok(false),
+            _ => {}
         }
-        Ok(true)
     }
 
     fn draws(
@@ -1330,32 +1789,44 @@ impl Frame<'_> {
     ) -> Result<(), Status> {
         let mut draws = draws.iter().peekable();
         while let Some(draw) = draws.next() {
+            self.track_opaque(target, transform, clip, draw);
             match draw {
-                Draw::Rects(instances, stops, blend) => {
-                    let mut first = Some((instances, stops));
-                    let batches = std::iter::from_fn(|| {
-                        if let Some(first) = first.take() {
-                            return Some(first);
+                Draw::Rects(run) => {
+                    // Track adjacent runs before the iterator coalesces them.
+                    if self.gpu.caps.lcd && target.view == self.root {
+                        for next in draws.clone().take_while(
+                            |draw| matches!(draw, Draw::Rects(next) if next.blend == run.blend),
+                        ) {
+                            self.track_opaque(target, transform, clip, next);
                         }
-                        let Draw::Rects(rects, stops, next_blend) = *draws.peek()? else {
+                    }
+                    let blend = run.blend;
+                    let mut first = Some(run);
+                    let runs = std::iter::from_fn(|| {
+                        if first.is_some() {
+                            return first.take();
+                        }
+                        let Draw::Rects(next) = *draws.peek()? else {
                             return None;
                         };
-                        if next_blend != blend {
+                        if next.blend != blend {
                             return None;
                         }
                         draws.next();
-                        Some((rects, stops))
+                        Some(next)
                     });
-                    let batches = batches.map(|(rects, stops)| {
-                        (rects.as_slice(), stops.as_deref().unwrap_or_default())
-                    });
-                    if self.compositor.early_z && *blend == BlendKey::SrcOver {
-                        let batches: Vec<_> = batches.collect();
-                        if !self.try_early_z(target, transform, clip, &batches)? {
-                            self.rect_batches(target, transform, clip, *blend, batches)?;
+                    if self.compositor.early_z && blend == BlendKey::SrcOver {
+                        let runs: Vec<_> = runs.collect();
+                        let batches: Vec<_> = runs
+                            .iter()
+                            .map(|run| (run.rects.as_slice(), run.stops()))
+                            .collect();
+                        if self.try_early_z(target, transform, clip, &batches)? {
+                            continue;
                         }
+                        self.prepared_rects(target, transform, clip, blend, runs)?;
                     } else {
-                        self.rect_batches(target, transform, clip, *blend, batches)?;
+                        self.prepared_rects(target, transform, clip, blend, runs)?;
                     }
                 }
                 Draw::Fill(color) => {
@@ -1403,6 +1874,29 @@ impl Frame<'_> {
                     instances,
                     blend,
                 } => {
+                    let cacheable = |source: &str| {
+                        !source.starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX)
+                    };
+                    if self.gpu.image_array()
+                        && cacheable(source)
+                        && matches!(draws.peek(), Some(Draw::Images { source: next, blend: next_blend, .. }) if next != source && next_blend == blend && cacheable(next))
+                    {
+                        let mut images = vec![(source.as_ref(), instances.as_slice())];
+                        while let Some(Draw::Images {
+                            source,
+                            instances,
+                            blend: next_blend,
+                        }) = draws.peek()
+                        {
+                            if next_blend != blend || !cacheable(source) {
+                                break;
+                            }
+                            images.push((source.as_ref(), instances.as_slice()));
+                            draws.next();
+                        }
+                        self.image_array(target, transform, clip, *blend, &images)?;
+                        continue;
+                    }
                     let next = std::iter::from_fn(|| {
                         if let Some(Draw::Images {
                             source: next_source,
@@ -1459,6 +1953,83 @@ impl Frame<'_> {
         self.rect_batches(target, transform, clip, BlendKey::SrcOver, [(rects, stops)])
     }
 
+    fn prepared_rects<'a>(
+        &mut self,
+        target: &Image,
+        transform: Affine,
+        clip: &Coverage,
+        blend: BlendKey,
+        runs: impl IntoIterator<Item = &'a compiler::RectRun>,
+    ) -> Result<(), Status> {
+        let view = self.rect_view(target, transform, clip, blend)?;
+        let mut batch = Vec::new();
+        let mut active: Option<PaintPage> = None;
+        let mut addresses = Vec::new();
+        for run in runs {
+            let ramp = self.compositor.arena.lut.layer(self.gpu, run.stops());
+            let stops = self.stops(run.stops())?;
+            let empty = self.paint(stops, None)?;
+            addresses.clear();
+            addresses.resize(run.paints.len(), None);
+            for &vertex in &run.vertices {
+                let (page, index) = if vertex.paint == u32::MAX {
+                    if active.is_some_and(|page| page.same_bindings(empty.0)) {
+                        (active.unwrap_or(empty.0), u32::MAX)
+                    } else {
+                        empty
+                    }
+                } else {
+                    let offset = vertex.paint as usize;
+                    if let Some(address) = addresses[offset] {
+                        address
+                    } else {
+                        let mut paint = run.paints[offset];
+                        paint.gradient[1] = FrameArena::stop_index(stops);
+                        paint.gradient[3] = ramp as f32;
+                        let address = if self.gpu.caps.paint_storage {
+                            self.compositor
+                                .arena
+                                .compiled_paint(self.gpu, stops, paint)?
+                        } else {
+                            self.paint(stops, Some(paint))?
+                        };
+                        addresses[offset] = Some(address);
+                        address
+                    }
+                };
+                if let Some(previous) = active
+                    && !page.same_bindings(previous)
+                {
+                    self.rect_batch(target, clip, view, previous, &batch, blend)?;
+                    batch.clear();
+                }
+                active = Some(page);
+                batch.push(RectVertex {
+                    paint: index,
+                    ..vertex
+                });
+            }
+        }
+        if let Some(page) = active {
+            self.rect_batch(target, clip, view, page, &batch, blend)?;
+        }
+        Ok(())
+    }
+
+    fn rect_view(
+        &mut self,
+        target: &Image,
+        transform: Affine,
+        clip: &Coverage,
+        blend: BlendKey,
+    ) -> Result<Address, Status> {
+        let dither = self.gpu.dither_output
+            && target.view == self.root
+            && target.format.is_srgb()
+            && blend == BlendKey::SrcOver;
+        self.geometry_uniform(target, transform, clip, f32::from(dither))
+    }
+
     fn rect_batches<'a>(
         &mut self,
         target: &Image,
@@ -1467,14 +2038,7 @@ impl Frame<'_> {
         blend: BlendKey,
         batches: impl IntoIterator<Item = (&'a [RectInstance], &'a [[f32; 4]])>,
     ) -> Result<(), Status> {
-        let dither = self.gpu.dither_output
-            && target.view == self.root
-            && matches!(
-                target.format,
-                wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Rgba8UnormSrgb
-            )
-            && blend == BlendKey::SrcOver;
-        let view = self.geometry_uniform(target, transform, clip, f32::from(dither))?;
+        let view = self.rect_view(target, transform, clip, blend)?;
         let mut batch = Vec::new();
         let mut active = None;
         for (rects, stops) in batches {
@@ -1610,35 +2174,34 @@ impl Frame<'_> {
         vertices: &[RectVertex],
         blend: BlendKey,
     ) -> Result<(), Status> {
-        if vertices.is_empty() {
-            return Ok(());
+        for run in batch::rect_pipeline_runs(vertices) {
+            let kind = if batch::is_shadow(&run[0]) {
+                shadow_pipeline(run)
+            } else if self.compositor.specialize_paint
+                && run
+                    .iter()
+                    .all(|rect| rect.shape[2] == 0.0 && rect.paint == u32::MAX)
+            {
+                PipelineKind::RectSolid
+            } else {
+                PipelineKind::Rect
+            };
+            let mask = self.mask_group(clip);
+            let globals = self.globals(
+                view,
+                if kind == PipelineKind::RectSolid {
+                    Extra::None
+                } else {
+                    Extra::Paint(page)
+                },
+            );
+            let pipeline =
+                self.compositor
+                    .pipelines
+                    .get(self.gpu, single(target.format), kind, blend)?;
+            self.record(target, pipeline, globals, mask, None, run, clip.scissor)?;
         }
-        let globals = self.globals(view, Extra::Paint(page));
-        let mask = self.mask_group(clip);
-        let kind = if self.compositor.specialize_paint
-            && clip.mask.is_none()
-            && clip.count == 0
-            && vertices
-                .iter()
-                .all(|rect| rect.shape[2] == 0.0 && rect.paint == u32::MAX)
-        {
-            PipelineKind::RectSolid
-        } else {
-            PipelineKind::Rect
-        };
-        let pipeline =
-            self.compositor
-                .pipelines
-                .get(self.gpu, single(target.format), kind, blend)?;
-        self.record(
-            target,
-            pipeline,
-            globals,
-            mask,
-            None,
-            vertices,
-            clip.scissor,
-        )
+        Ok(())
     }
 
     fn meshes(
@@ -1663,13 +2226,28 @@ impl Frame<'_> {
         }
         let blend =
             BlendKey::from_mode(batch::canvas_composite(meshes[0].composite)).unwrap_or_default();
-        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let samples = if self.gpu.caps.msaa4_srgb { 4 } else { 1 };
-        let resolved = self.take_area(area, format, 1);
+        let mask_target = target.format == wgpu::TextureFormat::R8Unorm;
+        let (format, resolved) = if mask_target {
+            area = target.area();
+            (target.format, target.clone())
+        } else {
+            let format = self.working;
+            (format, self.take_area(area, format, 1))
+        };
+        let format_features = format.guaranteed_format_features(self.gpu.device.features());
+        let samples = if format_features.flags.contains(
+            wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4
+                | wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE,
+        ) {
+            4
+        } else {
+            1
+        };
         let multisample = (samples > 1).then(|| self.take_attachment(area, format, samples));
         let view = self.transform(&resolved, transform, &Coverage::default())?;
         let mask_group = self.mask_group(&Coverage::default());
         let mut calls = Vec::with_capacity(meshes.len());
+        let mut paints = Vec::with_capacity(meshes.len());
         for mesh in meshes {
             if mesh.indices.is_empty() {
                 continue;
@@ -1685,14 +2263,32 @@ impl Frame<'_> {
             let stops = self.stops(stops)?;
             let (page, index) =
                 self.paint(stops, paint.extra(FrameArena::stop_index(stops), ramp))?;
-            let data = self
-                .compositor
-                .arena
-                .vertices(self.gpu, &[paint.vertex(index)])?;
-            let globals = self.globals(view, Extra::Paint(page));
-            calls.push((mesh, data, globals));
+            paints.push(paint.vertex(index));
+            calls.push((mesh, page));
+        }
+        let capacity = FrameArena::vertex_limit::<RectVertex>(self.gpu);
+        let uploads = paints
+            .chunks(capacity)
+            .map(|chunk| self.compositor.arena.vertices(self.gpu, chunk))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut batches = Vec::new();
+        for chunk in calls.chunks(capacity) {
+            let mut groups = Vec::new();
+            let mut first = 0;
+            while let Some((_, page)) = chunk.get(first) {
+                let run = chunk[first..]
+                    .iter()
+                    .take_while(|(_, next)| next.same_bindings(*page))
+                    .count();
+                groups.push((first, first + run, self.globals(view, Extra::Paint(*page))));
+                first += run;
+            }
+            batches.push(groups);
         }
         self.flush_draws();
+        if mask_target {
+            self.clears.remove(&target.view);
+        }
         self.count_pass(&resolved.view);
         let stencil = (!clip.stencil.is_empty())
             .then(|| self.take_attachment(area, pipelines::CANVAS_STENCIL, samples));
@@ -1731,7 +2327,9 @@ impl Frame<'_> {
                 .as_ref()
                 .map_or(&resolved.view, |image| &image.view);
             let resolve_target = multisample.as_ref().map(|_| &resolved.view);
-            let kind = if resolve_target.is_some() {
+            let kind = if mask_target {
+                GpuPassKind::ClipMask
+            } else if resolve_target.is_some() {
                 GpuPassKind::CanvasMsaa
             } else {
                 self.pass_kind(&resolved.view, format)
@@ -1784,17 +2382,33 @@ impl Frame<'_> {
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(1, &mask_group, &[]);
             let mut last = None;
-            for (mesh, vertices, globals) in &calls {
-                let buffers = mesh.buffer.get().ok_or(Status::BadScene)?;
-                if last != Some(buffers) {
-                    pass.set_vertex_buffer(0, buffers.vertices.slice(..));
-                    pass.set_index_buffer(buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    last = Some(buffers);
-                }
-                pass.set_bind_group(0, &globals.group, globals.offsets());
+            for ((vertices, groups), chunk) in
+                uploads.iter().zip(&batches).zip(calls.chunks(capacity))
+            {
                 pass.set_vertex_buffer(1, vertices.slice());
-                pass.draw_indexed(mesh.indices.clone(), 0, 0..1);
+                for (first, end, globals) in groups {
+                    pass.set_bind_group(0, &globals.group, globals.offsets());
+                    for (index, (mesh, _)) in chunk.iter().enumerate().take(*end).skip(*first) {
+                        let buffers = mesh.buffer.get().ok_or(Status::BadScene)?;
+                        if last != Some(buffers) {
+                            pass.set_vertex_buffer(0, buffers.vertices.slice(..));
+                            pass.set_index_buffer(
+                                buffers.indices.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            last = Some(buffers);
+                        }
+                        let index = draw_count(index)?;
+                        pass.draw_indexed(mesh.indices.clone(), 0, index..index + 1);
+                    }
+                }
             }
+        }
+        if mask_target {
+            if let Some(multisample) = multisample {
+                self.release(multisample);
+            }
+            return Ok(());
         }
         let scale = self.scene.scale;
         self.images(
@@ -1841,7 +2455,11 @@ impl Frame<'_> {
         let pipeline = self.compositor.pipelines.get(
             self.gpu,
             single(target.format),
-            PipelineKind::Image,
+            if image.nv12().is_some() {
+                PipelineKind::ExternalImage
+            } else {
+                PipelineKind::Image
+            },
             blend,
         )?;
         let mut vertices = Vec::new();
@@ -1883,82 +2501,82 @@ impl Frame<'_> {
         let atlas_scale = self.compositor.atlas.inverse_page_size();
         let view = self.geometry_uniform(target, transform, clip, atlas_scale)?;
         let mut last_gradient: Option<(&batch::PackedGradient, PaintPage, u32)> = None;
-        let scale = self.scene.scale;
-        let [a, b, c, d, ..] = transform;
-        let pixel_scale = scale * a.hypot(b).max(c.hypot(d)).max(0.001);
-        let aligned = b.abs() < 0.0001 && c.abs() < 0.0001 && a > 0.0 && (a - d).abs() < 0.0001;
-        let lcd = aligned
+        let geometry = GlyphTransform::new(transform, self.scene.scale);
+        let lcd = geometry.aligned
             && self.gpu.caps.lcd
             && target.format.is_srgb()
             && target.view == self.root
             && clip.count == 0
             && clip.mask.is_none()
-            && self.pending.is_none()
-            && self
-                .clears
-                .get(&target.view)
-                .is_some_and(|color| color.a == 1.0);
+            && !self.opaque.is_empty();
+        let mut lcd_batch = false;
         for glyph in glyphs {
-            let (rect, uv, color, binding, layer, decoration) = if let Some(rect) = glyph.decoration
-            {
-                (rect, [0; 4], false, key, 0, true)
-            } else {
-                let (x, y) = compiler::apply(transform, glyph.x, glyph.y);
-                let (sx, sy) = if aligned {
-                    (x * scale, y * scale)
-                } else {
-                    (0.0, 0.0)
-                };
-                let Some(placement) = self.compositor.atlas.glyph(
-                    self.gpu,
-                    self.scene.fonts,
-                    glyph,
-                    glyph.size * pixel_scale,
-                    aligned.then_some([sx, sy]),
-                ) else {
-                    continue;
-                };
-                if placement.rect.w == 0 || placement.rect.h == 0 {
+            if glyph.decoration.is_none() && geometry.vector(glyph.size) {
+                let (mesh, uploaded) =
+                    self.compositor
+                        .outlines
+                        .glyph(self.gpu, self.scene.fonts, glyph)?;
+                if let Some(mut mesh) = mesh {
+                    self.glyph_batch(target, clip, view, active, &batch, key)?;
+                    batch.clear();
+                    if uploaded > 0 {
+                        self.compositor.render_stats.buffers_created += 2;
+                        self.compositor.render_stats.mesh_upload_bytes += uploaded;
+                    }
+                    let scale = glyph.size / REFERENCE_PPEM;
+                    mesh.brush = outline_brush(glyph, scale);
+                    let matrix =
+                        compiler::compose(transform, [scale, 0.0, 0.0, scale, glyph.x, glyph.y]);
+                    self.meshes(target, matrix, clip, &[&mesh])?;
                     continue;
                 }
-                let dx = if aligned {
-                    sx.rem_euclid(1.0) / (scale * a)
-                } else {
-                    0.0
-                };
-                let dy = if aligned {
-                    sy.rem_euclid(1.0) / (scale * d)
-                } else {
-                    0.0
-                };
-                let rect = [
-                    glyph.x - dx + placement.left as f32 / pixel_scale,
-                    glyph.y - dy - placement.top as f32 / pixel_scale,
-                    placement.rect.w as f32 / pixel_scale,
-                    placement.rect.h as f32 / pixel_scale,
-                ];
-                let (binding, layer) = self.compositor.atlas.binding(placement);
-                (
-                    rect,
-                    self.compositor
-                        .atlas
-                        .texels(placement)
-                        .ok_or(Status::BadScene)?,
-                    placement.color,
-                    binding,
-                    layer,
-                    false,
-                )
-            };
-            let mut flags = if color { batch::GLYPH_COLOR } else { 0 };
-            if decoration {
-                flags |= batch::GLYPH_DECORATION;
-            } else if !color && self.gpu.text_gamma && glyph.size * pixel_scale <= 14.0 {
-                flags |= batch::GLYPH_GAMMA;
             }
+            let (mut vertex, binding, placement) = if let Some(rect) = glyph.decoration {
+                (
+                    GlyphVertex {
+                        rect,
+                        uv: [0; 4],
+                        color: glyph.color,
+                        flags_and_layer: batch::GLYPH_DECORATION,
+                        paint: u32::MAX,
+                    },
+                    key,
+                    None,
+                )
+            } else {
+                let lcd = lcd && glyph.gradient.is_none();
+                let quad = if lcd {
+                    self.glyph_quad(glyph, geometry, true)?
+                        .filter(|(vertex, _, placement)| {
+                            if !placement.lcd {
+                                return true;
+                            }
+                            let PictureBounds::Rect(rect) =
+                                PictureBounds::rect(vertex.rect).transform(transform)
+                            else {
+                                return false;
+                            };
+                            self.opaque
+                                .iter()
+                                .any(|&opaque| intersect(rect, opaque) == rect)
+                        })
+                } else {
+                    None
+                };
+                let quad = match quad {
+                    Some(quad) => Some(quad),
+                    None => self.glyph_quad(glyph, geometry, false)?,
+                };
+                let Some((vertex, binding, placement)) = quad else {
+                    continue;
+                };
+                (vertex, binding, Some(placement))
+            };
+            let color = placement.is_some_and(|placement| placement.color);
+            let uses_lcd = placement.is_some_and(|placement| placement.lcd);
             let (page, index) = if let Some(gradient) = glyph.gradient.as_deref().filter(|_| !color)
             {
-                flags |= batch::GLYPH_GRADIENT;
+                vertex.flags_and_layer |= batch::GLYPH_GRADIENT;
                 match last_gradient {
                     Some((last, page, index))
                         if std::ptr::eq(last, gradient) && page.same_bindings(active) =>
@@ -1996,29 +2614,67 @@ impl Frame<'_> {
                 // Solid glyphs can share any currently bound page.
                 (active, u32::MAX)
             };
-            if lcd && flags & 7 == 0 {
-                flags |= batch::GLYPH_LCD;
-            }
-            if matches!(binding, AtlasBinding::Temporary { .. }) {
-                flags |= batch::GLYPH_TEMPORARY_PAGE;
-            }
-            if key != binding || !active.same_bindings(page) {
+            if key != binding || !active.same_bindings(page) || lcd_batch != uses_lcd {
                 self.glyph_batch(target, clip, view, active, &batch, key)?;
                 batch.clear();
             }
             key = binding;
             active = page;
-            batch.push(GlyphVertex {
-                rect,
-                uv,
-                color: glyph
-                    .color
-                    .map(|value| half::f16::from_f32(value).to_bits()),
-                flags_and_layer: flags | (layer << 8),
-                paint: index,
-            });
+            lcd_batch = uses_lcd;
+            vertex.paint = index;
+            batch.push(vertex);
         }
         self.glyph_batch(target, clip, view, active, &batch, key)
+    }
+
+    fn glyph_quad(
+        &mut self,
+        glyph: &compiler::GlyphDraw,
+        geometry: GlyphTransform,
+        lcd: bool,
+    ) -> Result<Option<(GlyphVertex, AtlasBinding, crate::atlas::Placement)>, Status> {
+        let position = geometry.position(glyph);
+        let size = glyph.size * geometry.pixels;
+        let Some(placement) =
+            self.compositor
+                .atlas
+                .glyph(self.gpu, self.scene.fonts, glyph, size, position, lcd)
+        else {
+            return Ok(None);
+        };
+        if placement.rect.w == 0 || placement.rect.h == 0 {
+            return Ok(None);
+        }
+        let (binding, layer) = self.compositor.atlas.binding(placement);
+        let mut flags = if placement.color {
+            batch::GLYPH_COLOR
+        } else {
+            0
+        };
+        if placement.lcd {
+            flags |= batch::GLYPH_LCD;
+        }
+        if !placement.color && self.gpu.text_gamma && size <= 14.0 {
+            flags |= batch::GLYPH_GAMMA;
+        }
+        if matches!(binding, AtlasBinding::Temporary { .. }) {
+            flags |= batch::GLYPH_TEMPORARY_PAGE;
+        }
+        Ok(Some((
+            GlyphVertex {
+                rect: geometry.local_rect(glyph, position, placement),
+                uv: self
+                    .compositor
+                    .atlas
+                    .texels(placement)
+                    .ok_or(Status::BadScene)?,
+                color: glyph.color,
+                flags_and_layer: flags | (layer << 8),
+                paint: u32::MAX,
+            },
+            binding,
+            placement,
+        )))
     }
 
     fn glyph_batch(
@@ -2040,7 +2696,6 @@ impl Frame<'_> {
             key,
         );
         self.compositor.render_stats.bind_groups_created += u32::from(created);
-        let globals = self.globals(view, Extra::Paint(page));
         let mask = self.mask_group(clip);
         let kind = if self.gpu.caps.lcd
             && glyphs
@@ -2049,8 +2704,6 @@ impl Frame<'_> {
         {
             PipelineKind::TextLcd
         } else if self.compositor.specialize_paint
-            && clip.mask.is_none()
-            && clip.count == 0
             && glyphs.iter().all(|glyph| glyph.flags_and_layer & 7 == 0)
         {
             PipelineKind::TextMask
@@ -2059,6 +2712,14 @@ impl Frame<'_> {
         } else {
             PipelineKind::Text
         };
+        let globals = self.globals(
+            view,
+            if matches!(kind, PipelineKind::TextMask | PipelineKind::TextLcd) {
+                Extra::None
+            } else {
+                Extra::Paint(page)
+            },
+        );
         let pipeline = self.compositor.pipelines.get(
             self.gpu,
             single(target.format),
@@ -2099,6 +2760,9 @@ impl Frame<'_> {
                 if !coverage.empty {
                     let dst = coverage.scissor.unwrap_or_else(|| target.area());
                     let src = expand_pixels(dst, radius, target.area());
+                    if target.view == self.root {
+                        self.opaque.clear();
+                    }
                     let snapshot = self.snapshot(target, src);
                     let blurred = self.blur(&snapshot, radius, true)?;
                     let kind = if coverage.mask.is_none() && coverage.count == 0 {
@@ -2125,7 +2789,7 @@ impl Frame<'_> {
         let Some(area) = self.area(content.expand(1.0 / self.scene.scale), target) else {
             return Ok(());
         };
-        let source = self.take_area(area, wgpu::TextureFormat::Rgba8UnormSrgb, 1);
+        let source = self.take_area(area, self.working, 1);
         self.clear(&source.view);
         children(self, &source)?;
         self.finish(&source.view);
@@ -2134,6 +2798,17 @@ impl Frame<'_> {
         } else {
             None
         };
+        if target.view == self.root
+            && matches!(
+                group.effect,
+                Effect::Canvas(
+                    engine::scene::CanvasComposite::DestinationOut
+                        | engine::scene::CanvasComposite::Xor
+                )
+            )
+        {
+            self.opaque.clear();
+        }
         let mode = match group.effect {
             Effect::Blend(mode) => batch::blend_mode(mode),
             Effect::Canvas(mode) => batch::canvas_composite(mode),
@@ -2201,7 +2876,7 @@ impl Frame<'_> {
         let mut remaining = radius;
         let origin = source.origin;
         let format = source.format;
-        while remaining > 2.0 && levels.len() < 4 && size[0].min(size[1]) > 1 {
+        while remaining > 8.0 && levels.len() < 8 && size[0].max(size[1]) > 1 {
             size = size.map(|dim| dim.div_ceil(2));
             let down = self.take_area([origin[0], origin[1], size[0], size[1]], format, 1);
             let from = levels.last().unwrap_or(source);
@@ -2214,7 +2889,8 @@ impl Frame<'_> {
                 },
             )?;
             levels.push(down);
-            remaining *= 0.5;
+            // Down/up sampling adds a small amount of variance.
+            remaining = (remaining * remaining - 1.5).sqrt() * 0.5;
         }
         let input = levels.last().unwrap_or(source);
         // The apron fits sigma <= 8 at this pyramid level. The render path
@@ -2224,15 +2900,27 @@ impl Frame<'_> {
         {
             self.compute_blur(&pipeline, input, remaining)?
         } else {
-            let image = self.take_area([origin[0], origin[1], size[0], size[1]], format, 1);
+            let scratch = self.take_area(input.area(), format, 1);
+            let image = self.take_area(input.area(), format, 1);
             self.blur_pass(
                 input,
-                &image,
-                FullPass::BlurDown {
-                    radius: remaining.clamp(0.1, 4.0),
+                &scratch,
+                FullPass::Gaussian {
+                    sigma: remaining,
+                    vertical: false,
                     backdrop,
                 },
             )?;
+            self.blur_pass(
+                &scratch,
+                &image,
+                FullPass::Gaussian {
+                    sigma: remaining,
+                    vertical: true,
+                    backdrop,
+                },
+            )?;
+            self.release(scratch);
             image
         };
         while let Some(level) = levels.pop() {
@@ -2280,15 +2968,24 @@ impl Frame<'_> {
                 .enumerate()
         {
             let pipeline = kernel.pipeline(axis);
-            let material = pipelines::bind_group(
-                self.gpu,
-                &pipeline.get_bind_group_layout(0),
-                &[
-                    wgpu::BindingResource::TextureView(input),
-                    wgpu::BindingResource::TextureView(target),
-                    self.compositor.arena.uniform_binding::<BlurParams>(params),
-                ],
-            );
+            let (buffer, offset) = self.compositor.arena.uniform_buffer(params);
+            let key = (input.clone(), target.clone(), buffer.clone());
+            let material = self.compositor.blur_groups.entry(key).or_insert_with(|| {
+                self.compositor.render_stats.bind_groups_created += 1;
+                pipelines::bind_group(
+                    self.gpu,
+                    &kernel.layout,
+                    &[
+                        wgpu::BindingResource::TextureView(input),
+                        wgpu::BindingResource::TextureView(target),
+                        wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer,
+                            offset: 0,
+                            size: wgpu::BufferSize::new(size_of::<BlurParams>() as u64),
+                        }),
+                    ],
+                )
+            });
             let stamps = pass_timestamps(&mut self.capture, GpuPassKind::ComputeBlur, 0);
             let mut pass = self
                 .command
@@ -2301,12 +2998,11 @@ impl Frame<'_> {
                     }),
                 });
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &material, &[]);
+            pass.set_bind_group(0, &*material, &[offset]);
             pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
             drop(pass);
             self.count_pass(target);
             self.compositor.render_stats.compute_passes += 1;
-            self.compositor.render_stats.bind_groups_created += 1;
             self.compositor.render_stats.blur_pixels += u64::from(w) * u64::from(h);
         }
         self.release(scratch);
@@ -2340,13 +3036,32 @@ impl Frame<'_> {
         let value = match kind {
             FullPass::Over { opacity, .. } | FullPass::Multiply { opacity } => opacity,
             FullPass::BlurDown { radius, .. } | FullPass::BlurUp { radius, .. } => radius,
+            FullPass::Gaussian { sigma, .. } => sigma,
             _ => 0.0,
         };
-        let params = self.uniform(&ParamsUniform {
-            values: [source.origin[0] as f32, source.origin[1] as f32, value, 0.0],
+        let params = ParamsUniform {
+            values: [
+                source.origin[0] as f32,
+                source.origin[1] as f32,
+                value,
+                f32::from(
+                    matches!(kind, FullPass::Gaussian { vertical: true, .. })
+                        || (target.view == self.root && self.straight_alpha),
+                ),
+            ],
             uv_bounds: source.uv_bounds(),
-        })?;
-        let globals = self.globals(view, Extra::Params(params));
+            backdrop_origin: backdrop.map_or([0.0; 4], |image| {
+                [image.origin[0] as f32, image.origin[1] as f32, 0.0, 0.0]
+            }),
+            backdrop_bounds: backdrop.map_or([0.0; 4], Image::uv_bounds),
+        };
+        let immediates = self.gpu.effect_immediates();
+        let extra = if immediates {
+            Extra::None
+        } else {
+            Extra::Params(self.uniform(&params)?)
+        };
+        let globals = self.globals(view, extra);
         let input = ImageSource::Pooled(source).material(self, false);
         let extra = matches!(
             kind,
@@ -2364,10 +3079,13 @@ impl Frame<'_> {
         let pipeline_kind = match kind {
             FullPass::DitherOutput if target.format.is_srgb() => PipelineKind::Dither,
             FullPass::DitherOutput => PipelineKind::DitherSrgb,
-            FullPass::Copy if !target.format.is_srgb() => PipelineKind::CopySrgb,
+            FullPass::DisplayP3 if target.format.is_srgb() => PipelineKind::P3Linear,
+            FullPass::DisplayP3 => PipelineKind::P3Encoded,
+            FullPass::EncodeSrgb => PipelineKind::CopySrgb,
             FullPass::Copy => PipelineKind::Copy,
             FullPass::BlurDown { .. } => PipelineKind::BlurDown,
             FullPass::BlurUp { .. } => PipelineKind::BlurUp,
+            FullPass::Gaussian { .. } => PipelineKind::Gaussian,
             FullPass::Over { .. } => PipelineKind::Over,
             FullPass::Multiply { .. } => PipelineKind::Multiply,
             FullPass::Backdrop => PipelineKind::Backdrop,
@@ -2379,7 +3097,9 @@ impl Frame<'_> {
                 .get(self.gpu, single(target.format), pipeline_kind, blend)?;
         let [x, y, w, h] = target.local(area);
         let kind = match kind {
-            FullPass::BlurDown { backdrop, .. } | FullPass::BlurUp { backdrop, .. } => {
+            FullPass::BlurDown { backdrop, .. }
+            | FullPass::BlurUp { backdrop, .. }
+            | FullPass::Gaussian { backdrop, .. } => {
                 self.compositor.render_stats.blur_pixels += u64::from(w) * u64::from(h);
                 if backdrop {
                     GpuPassKind::BackdropBlur
@@ -2389,7 +3109,10 @@ impl Frame<'_> {
             }
             FullPass::Backdrop => GpuPassKind::BackdropBlur,
             FullPass::MaskIntersect => GpuPassKind::ClipMask,
-            FullPass::Copy | FullPass::DitherOutput => {
+            FullPass::Copy
+            | FullPass::EncodeSrgb
+            | FullPass::DisplayP3
+            | FullPass::DitherOutput => {
                 self.compositor.render_stats.copy_pixels += u64::from(w) * u64::from(h);
                 GpuPassKind::Copy
             }
@@ -2401,6 +3124,9 @@ impl Frame<'_> {
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &globals.group, globals.offsets());
         pass.set_bind_group(1, &input, &[]);
+        if immediates {
+            pass.set_immediates(0, bytemuck::bytes_of(&params));
+        }
         if let Some(extra) = &extra {
             pass.set_bind_group(2, extra, &[]);
         }
@@ -2423,6 +3149,11 @@ impl Frame<'_> {
         clip: &Coverage,
         value: f32,
     ) -> Result<Address, Status> {
+        let view = self.geometry_view(target, t, clip, value);
+        self.uniform(&view)
+    }
+
+    fn geometry_view(&self, target: &Image, t: Affine, clip: &Coverage, value: f32) -> ViewUniform {
         let [w, h] = target.size.map(|v| v as f32);
         let sx = 2.0 * self.scene.scale / w;
         let sy = -2.0 * self.scene.scale / h;
@@ -2438,7 +3169,7 @@ impl Frame<'_> {
             ..clip.view(target, scale)
         };
         view.meta[3] = value;
-        self.uniform(&view)
+        view
     }
 
     fn stops(&mut self, stops: &[[f32; 4]]) -> Result<Address, Status> {
@@ -2555,6 +3286,25 @@ fn render<'a>(
     })
 }
 
+fn outline_brush(glyph: &compiler::GlyphDraw, scale: f32) -> batch::Brush {
+    let Some(gradient) = glyph.gradient.as_deref() else {
+        return batch::Brush::Solid(glyph.color.map(|bits| half::f16::from_bits(bits).to_f32()));
+    };
+    let mut local = gradient.clone();
+    local.a[0] = (local.a[0] - glyph.x) / scale;
+    local.a[1] = (local.a[1] - glyph.y) / scale;
+    match local.kind {
+        0 | 3 => {
+            local.a[2] = (local.a[2] - glyph.x) / scale;
+            local.a[3] = (local.a[3] - glyph.y) / scale;
+            local.radial_radii = local.radial_radii.map(|radius| radius / scale);
+        }
+        1 => local.a[2] /= scale,
+        _ => {}
+    }
+    batch::Brush::Gradient(local)
+}
+
 fn set_rect_gradient(rect: &mut RectInstance, gradient: &batch::PackedGradient) {
     rect.flags |= batch::RECT_GRADIENT;
     rect.gradient_a = gradient.a;
@@ -2565,6 +3315,14 @@ fn set_rect_gradient(rect: &mut RectInstance, gradient: &batch::PackedGradient) 
         (gradient.stops.len() / 2) as f32,
         1.0,
     ];
+}
+
+fn shadow_pipeline(rects: &[RectVertex]) -> PipelineKind {
+    if batch::has_shaped_shadow(rects) {
+        PipelineKind::RectShadow
+    } else {
+        PipelineKind::RectCircularShadow
+    }
 }
 
 fn draw_count(len: usize) -> Result<u32, Status> {

@@ -4,9 +4,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use engine::session::trace::Section;
-
 use crate::{RasterBackend, RasterOptions, Status, ValidationMode};
+
+pub(crate) const IMAGE_ARRAY_LEN: u32 = 32;
+const IMAGE_ARRAY_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_BINDING_ARRAY
+    .union(wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum GpuTier {
@@ -24,6 +26,7 @@ pub(crate) struct GpuCaps {
     pub max_texture_2d: u32,
     pub max_array_layers: u32,
     pub max_buffer_size: u64,
+    pub max_storage_binding: u64,
     pub msaa4_srgb: bool,
     pub has_vertex_storage: bool,
     pub has_fragment_storage: bool,
@@ -51,6 +54,7 @@ impl GpuCaps {
             max_texture_2d: limits.max_texture_dimension_2d,
             max_array_layers: limits.max_texture_array_layers,
             max_buffer_size: limits.max_buffer_size,
+            max_storage_binding: limits.max_storage_buffer_binding_size,
             msaa4_srgb: srgb
                 .flags
                 .contains(T::MULTISAMPLE_X4 | T::MULTISAMPLE_RESOLVE),
@@ -104,6 +108,10 @@ pub(crate) struct Gpu {
     validate_frames: bool,
     image_upload: Arc<OnceLock<Option<crate::image_upload::ImageUpload>>>,
     image_upload_mode: ImageUploadMode,
+    #[cfg(target_os = "android")]
+    pipeline_cache: Option<crate::pipeline_disk_cache::PipelineDiskCache>,
+    #[cfg(target_os = "android")]
+    pub external_queue: Option<crate::android_vulkan::ExternalQueue>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -130,6 +138,7 @@ impl Gpu {
         backend: RasterBackend,
         options: RasterOptions,
         surface: Option<&wgpu::Surface<'_>>,
+        cache_dir: Option<&std::path::Path>,
     ) -> Result<Self, Status> {
         let request = wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
@@ -139,7 +148,8 @@ impl Gpu {
         };
         let started = Instant::now();
         let adapter = {
-            let _trace = Section::begin(c"GPU adapter request");
+            let _trace =
+                tracing::debug_span!(target: "impasto::gpu", "gpu_adapter_request").entered();
             pollster::block_on(instance.request_adapter(&request)).map_err(|error| {
                 tracing::debug!(target: "impasto::gpu", ?backend, %error, "adapter unavailable");
                 Status::NoDevice(backend)
@@ -174,13 +184,30 @@ impl Gpu {
             baseline(wgpu::Limits::downlevel_webgl2_defaults())
         };
         let timestamps = wgpu::Features::TIMESTAMP_QUERY;
-        let request_device = |adapter: &wgpu::Adapter, required_features| {
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        let request_device = |adapter: &wgpu::Adapter, required_features: wgpu::Features| {
+            let mut limits = limits.clone();
+            if required_features.contains(wgpu::Features::IMMEDIATES) {
+                limits.max_immediate_size = advertised.max_immediate_size.min(128);
+            }
+            if required_features.contains(IMAGE_ARRAY_FEATURES) {
+                limits.max_binding_array_elements_per_shader_stage = IMAGE_ARRAY_LEN;
+                limits.max_sampled_textures_per_shader_stage = limits
+                    .max_sampled_textures_per_shader_stage
+                    .max(IMAGE_ARRAY_LEN + 1);
+            }
+            let descriptor = wgpu::DeviceDescriptor {
                 label: Some("impasto device"),
                 required_features,
-                required_limits: limits.clone(),
+                required_limits: limits,
                 ..Default::default()
-            }))
+            };
+            #[cfg(target_os = "android")]
+            if backend == RasterBackend::Vulkan
+                && let Some(opened) = crate::android_vulkan::open(adapter, &descriptor)
+            {
+                return opened;
+            }
+            pollster::block_on(adapter.request_device(&descriptor))
         };
         let support = adapter.features();
         let timing = if options.enable_gpu_timing && support.contains(timestamps) {
@@ -189,7 +216,25 @@ impl Gpu {
             wgpu::Features::empty()
         };
         let lcd = wgpu::Features::DUAL_SOURCE_BLENDING;
-        let mut requested = timing;
+        let modern = wgpu::Features::IMMEDIATES | wgpu::Features::SHADER_F16;
+        let mut requested = timing | (support & modern);
+        if cfg!(target_os = "android") && cache_dir.is_some() && backend == RasterBackend::Vulkan {
+            requested |= support & wgpu::Features::PIPELINE_CACHE;
+        }
+        let external_video = wgpu::Features::TEXTURE_FORMAT_NV12;
+        if cfg!(target_os = "android")
+            && backend == RasterBackend::Vulkan
+            && support.contains(external_video)
+        {
+            requested |= external_video;
+        }
+        if support.contains(IMAGE_ARRAY_FEATURES)
+            && advertised.max_binding_array_elements_per_shader_stage >= IMAGE_ARRAY_LEN
+            && advertised.max_sampled_textures_per_shader_stage > IMAGE_ARRAY_LEN
+            && std::env::var("IMPASTO_IMAGE_ARRAY").as_deref() != Ok("0")
+        {
+            requested |= IMAGE_ARRAY_FEATURES;
+        }
         if !cfg!(any(target_os = "ios", target_os = "android"))
             && std::env::var("IMPASTO_LCD_RGB").as_deref() == Ok("1")
             && support.contains(lcd)
@@ -200,14 +245,21 @@ impl Gpu {
         let device_started = Instant::now();
         let result = loop {
             let result = {
-                let _trace = Section::begin(c"GPU device request");
+                let _trace =
+                    tracing::debug_span!(target: "impasto::gpu", "gpu_device_request").entered();
                 request_device(&adapter, requested)
             };
             if result.is_ok() || requested.is_empty() {
                 break result;
             }
             tracing::warn!(target: "impasto::gpu", ?backend, ?requested, "retrying with fewer device features");
-            if requested.contains(lcd) {
+            if requested.contains(external_video) {
+                requested.remove(external_video);
+            } else if requested.contains(IMAGE_ARRAY_FEATURES) {
+                requested.remove(IMAGE_ARRAY_FEATURES);
+            } else if requested.intersects(modern) {
+                requested.remove(modern);
+            } else if requested.contains(lcd) {
                 requested.remove(lcd);
             } else {
                 requested = wgpu::Features::empty();
@@ -246,14 +298,24 @@ impl Gpu {
             tier = ?caps.tier, caps.min_uniform_align, caps.max_texture_2d,
             caps.max_array_layers, caps.msaa4_srgb, adapter_us, device_us,
             supported = ?caps.adapter_features, enabled = ?device.features(), "graphics device ready");
+        #[cfg(target_os = "android")]
+        let pipeline_cache = cache_dir.and_then(|dir| {
+            crate::pipeline_disk_cache::PipelineDiskCache::open(&device, &adapter, dir)
+        });
+        #[cfg(target_os = "android")]
+        let external_queue = crate::android_vulkan::ExternalQueue::new(&device, &adapter);
         Ok(Self {
+            #[cfg(target_os = "android")]
+            external_queue,
+            #[cfg(target_os = "android")]
+            pipeline_cache,
             instance,
             adapter,
             device,
             queue,
             backend,
             caps,
-            shadow_2d: std::env::var("IMPASTO_SHADOW_2D").as_deref() == Ok("1"),
+            shadow_2d: std::env::var("IMPASTO_SHADOW_2D").as_deref() != Ok("0"),
             text_gamma: std::env::var("IMPASTO_TEXT_GAMMA").as_deref() == Ok("1"),
             gradient_lut: std::env::var("IMPASTO_GRADIENT_LUT").as_deref() == Ok("1"),
             dither_output: std::env::var("IMPASTO_DITHER").as_deref() == Ok("1"),
@@ -275,6 +337,51 @@ impl Gpu {
                 ValidationMode::AsyncOnly => false,
             },
         })
+    }
+
+    pub fn submit(
+        &self,
+        commands: impl IntoIterator<Item = wgpu::CommandBuffer>,
+    ) -> wgpu::SubmissionIndex {
+        #[cfg(target_os = "android")]
+        let _guard = self
+            .external_queue
+            .as_ref()
+            .map(crate::android_vulkan::ExternalQueue::lock);
+        self.queue.submit(commands)
+    }
+
+    pub fn present(&self, texture: wgpu::SurfaceTexture) {
+        #[cfg(target_os = "android")]
+        let _guard = self
+            .external_queue
+            .as_ref()
+            .map(crate::android_vulkan::ExternalQueue::lock);
+        self.queue.present(texture);
+    }
+
+    pub fn pipeline_cache(&self) -> Option<&wgpu::PipelineCache> {
+        #[cfg(target_os = "android")]
+        if let Some(cache) = &self.pipeline_cache {
+            return Some(&cache.cache);
+        }
+        None
+    }
+
+    pub fn pipelines_updated(&self) {
+        #[cfg(target_os = "android")]
+        if let Some(cache) = &self.pipeline_cache {
+            cache.updated();
+        }
+    }
+
+    pub fn image_array(&self) -> bool {
+        self.device.features().contains(IMAGE_ARRAY_FEATURES)
+    }
+
+    pub fn effect_immediates(&self) -> bool {
+        self.device.features().contains(wgpu::Features::IMMEDIATES)
+            && self.device.limits().max_immediate_size >= crate::pipelines::ParamsUniform::BYTE_LEN
     }
 
     pub fn image_upload(&self) -> Option<&crate::image_upload::ImageUpload> {
@@ -334,7 +441,9 @@ impl Gpu {
         } else {
             operation()
         };
-        let _ = self.device.poll(wgpu::PollType::Poll);
+        if self.validate_frames || result.is_err() {
+            let _ = self.device.poll(wgpu::PollType::Poll);
+        }
         self.check_async_health()?;
         result
     }

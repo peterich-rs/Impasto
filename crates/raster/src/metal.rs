@@ -14,7 +14,11 @@ use objc2_metal::{
 use objc2_quartz_core::CAMetalDrawable;
 use wgpu::hal::api::Metal;
 
-use crate::{GpuImage, PixelSize, Rasterizer, Status, compositor::extent, surface::check_size};
+use crate::{
+    GpuImage, PixelSize, Rasterizer, Status, WgpuSurface,
+    compositor::{OutputFormat, extent},
+    surface::check_size,
+};
 
 type Texture = ProtocolObject<dyn MTLTexture>;
 type Drawable = ProtocolObject<dyn CAMetalDrawable>;
@@ -26,6 +30,7 @@ pub struct MetalSliceBatch {
     started: Instant,
     commands: Vec<wgpu::CommandBuffer>,
     capture: Option<Capture>,
+    output: OutputFormat,
     encode: Duration,
 }
 
@@ -34,7 +39,7 @@ impl Rasterizer {
         self.stats.acquire = elapsed;
     }
 
-    pub fn begin_metal_slices(&mut self) -> Result<MetalSliceBatch, Status> {
+    pub fn begin_metal_slices(&mut self, surface: &WgpuSurface) -> Result<MetalSliceBatch, Status> {
         let capture = self.begin_gpu_capture();
         let device = self.device.as_mut().ok_or(Status::NotReady)?;
         if device.gpu.is_lost() {
@@ -50,6 +55,7 @@ impl Rasterizer {
             started: Instant::now(),
             commands: Vec::new(),
             capture,
+            output: surface.output_format(),
             encode: Duration::ZERO,
         })
     }
@@ -88,9 +94,11 @@ impl Rasterizer {
         let format = match texture.pixelFormat() {
             MTLPixelFormat::BGRA8Unorm_sRGB => wgpu::TextureFormat::Bgra8UnormSrgb,
             MTLPixelFormat::BGRA8Unorm => wgpu::TextureFormat::Bgra8Unorm,
+            MTLPixelFormat::RGBA16Float => wgpu::TextureFormat::Rgba16Float,
             _ => return Err(Status::PresentFailed),
         };
-        if !matches_texture(&gpu.device, &texture, pixels)
+        if batch.output.format != format
+            || !matches_texture(&gpu.device, &texture, pixels)
             || !texture.usage().contains(MTLTextureUsage::RenderTarget)
         {
             return Err(Status::AcquireMiss);
@@ -109,9 +117,9 @@ impl Rasterizer {
                 .compositor
                 .encode(
                     gpu,
-                    frame.scene(&self.fonts, subset),
+                    frame.scene(&self.fonts, &device.textures, subset),
                     &texture.create_view(&Default::default()),
-                    format,
+                    batch.output,
                     [pixels.width, pixels.height],
                     batch.capture.as_mut().map(|capture| (capture, slice)),
                 )
@@ -153,11 +161,16 @@ impl Rasterizer {
         .ok_or(Status::PresentFailed)?;
         let (atlas, flush, (submit_done, submit_elapsed)) = gpu.hot_validation(|| {
             let stage = Instant::now();
-            let atlas = device.compositor.flush(gpu);
+            let (atlas, prelude) = device.compositor.flush(gpu)?;
             let flush = stage.elapsed();
             let stage = Instant::now();
-            gpu.queue
-                .submit(batch.commands.into_iter().chain([tail.finish()]));
+            gpu.submit(
+                prelude
+                    .into_iter()
+                    .chain(batch.commands)
+                    .chain([tail.finish()]),
+            );
+            device.compositor.submitted(gpu);
             let done = Instant::now();
             Ok((atlas, flush, (done, done.duration_since(stage))))
         })?;

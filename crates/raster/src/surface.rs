@@ -7,7 +7,6 @@ use crate::color::{srgb_to_linear, straight_srgb};
 use crate::compositor::extent;
 use crate::gpu::Gpu;
 use crate::{PixelSize, Rasterizer, Status};
-use engine::session::trace::Section;
 
 /// A native surface handle valid for the full life of its wgpu surface.
 #[derive(Clone, Copy, Debug)]
@@ -53,6 +52,12 @@ pub struct WgpuSurface {
     first_present_since: Option<std::time::Instant>,
 }
 
+#[cfg(target_os = "ios")]
+impl WgpuSurface {
+    pub(crate) fn output_format(&self) -> crate::compositor::OutputFormat {
+        crate::compositor::OutputFormat::surface(&self.config)
+    }
+}
 impl std::fmt::Debug for WgpuSurface {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -98,7 +103,13 @@ impl Rasterizer {
             let Ok(raw) = (unsafe { create_raw(&instance, handle) }) else {
                 continue;
             };
-            let gpu = match Gpu::request(instance, backend, self.options, Some(&raw)) {
+            let gpu = match Gpu::request(
+                instance,
+                backend,
+                self.options,
+                Some(&raw),
+                self.pipeline_cache_dir.as_deref(),
+            ) {
                 Ok(gpu) => gpu,
                 Err(error) => {
                     last = error;
@@ -178,7 +189,9 @@ impl Rasterizer {
         use wgpu::CurrentSurfaceTexture as Frame;
         let started = std::time::Instant::now();
         let acquired = {
-            let _trace = Section::begin(c"Surface acquire");
+            let _trace =
+                tracing::debug_span!(target: "impasto::render::surface", "surface_acquire")
+                    .entered();
             raw.get_current_texture()
         };
         self.stats.acquire = started.elapsed();
@@ -205,12 +218,18 @@ impl Rasterizer {
             Frame::Validation => return Err(Status::PresentFailed),
         };
         let view = texture.texture.create_view(&Default::default());
-        self.encode_and_submit(&view, surface.config.format, pixels)?;
+        self.encode_and_submit(
+            &view,
+            crate::compositor::OutputFormat::surface(&surface.config),
+            pixels,
+        )?;
         let state = self.device.as_ref().ok_or(Status::NotReady)?;
         let started = std::time::Instant::now();
         {
-            let _trace = Section::begin(c"Surface present");
-            state.gpu.queue.present(texture);
+            let _trace =
+                tracing::debug_span!(target: "impasto::render::surface", "surface_present")
+                    .entered();
+            state.gpu.present(texture);
         }
         self.stats.surface_present = started.elapsed();
         if state.gpu.is_lost() {
@@ -291,7 +310,7 @@ pub(crate) fn read_rgba(
         },
         size,
     );
-    let submitted = gpu.queue.submit([command.finish()]);
+    let submitted = gpu.submit([command.finish()]);
     let (send, receive) = std::sync::mpsc::channel();
     buffer
         .slice(..)
@@ -353,6 +372,33 @@ unsafe fn create_raw(
     })
 }
 
+fn preferred_color(
+    caps: &wgpu::SurfaceCapabilities,
+    preferred: Option<&str>,
+) -> Option<(wgpu::TextureFormat, wgpu::SurfaceColorSpace)> {
+    use wgpu::{SurfaceColorSpace as Space, SurfaceColorSpaces as Spaces, TextureFormat as Format};
+    if preferred == Some("hdr")
+        && caps
+            .color_spaces(Format::Rgba16Float)
+            .contains(Spaces::EXTENDED_SRGB_LINEAR)
+    {
+        return Some((Format::Rgba16Float, Space::ExtendedSrgbLinear));
+    }
+    if matches!(preferred, Some("p3" | "hdr")) {
+        for format in [
+            Format::Bgra8UnormSrgb,
+            Format::Rgba8UnormSrgb,
+            Format::Bgra8Unorm,
+            Format::Rgba8Unorm,
+        ] {
+            if caps.color_spaces(format).contains(Spaces::DISPLAY_P3) {
+                return Some((format, Space::DisplayP3));
+            }
+        }
+    }
+    None
+}
+
 fn configure(
     gpu: &Gpu,
     device: u64,
@@ -372,6 +418,13 @@ fn configure(
         .contains(wgpu::SurfaceColorSpaces::SRGB)
     {
         config.color_space = wgpu::SurfaceColorSpace::Srgb;
+    }
+    if let Some((format, space)) = preferred_color(
+        &caps,
+        std::env::var("IMPASTO_SURFACE_COLOR").ok().as_deref(),
+    ) {
+        config.format = format;
+        config.color_space = space;
     }
     config.desired_maximum_frame_latency = std::env::var("IMPASTO_SURFACE_LATENCY")
         .ok()

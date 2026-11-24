@@ -92,7 +92,7 @@ impl ImageUpload {
                         module: &module,
                         entry_point: Some(entry),
                         compilation_options: Default::default(),
-                        cache: None,
+                        cache: gpu.pipeline_cache(),
                     },
                 ))
             };
@@ -125,7 +125,7 @@ impl ImageUpload {
                         depth_stencil: None,
                         multisample: Default::default(),
                         multiview_mask: None,
-                        cache: None,
+                        cache: gpu.pipeline_cache(),
                     },
                 ))
             };
@@ -138,12 +138,12 @@ impl ImageUpload {
         }
     }
 
-    pub fn upload(
+    pub fn prepare(
         &self,
         gpu: &Gpu,
         size: [u32; 2],
         pixels: &[u8],
-    ) -> (wgpu::Texture, ImageUploadStats) {
+    ) -> (wgpu::Texture, ImageUploadStats, wgpu::CommandBuffer) {
         use wgpu::TextureUsages as U;
         let levels = size[0].max(size[1]).ilog2() + 1;
         let source = gpu.device.create_texture(&descriptor(
@@ -200,8 +200,7 @@ impl ImageUpload {
             }
             source = target;
         }
-        gpu.queue.submit([encoder.finish()]);
-        (dest, stats)
+        (dest, stats, encoder.finish())
     }
 }
 

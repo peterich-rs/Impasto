@@ -1,5 +1,7 @@
 //! wgpu raster and Parley typography for [`engine::scene::LayerTree`].
 
+#[cfg(target_os = "android")]
+mod android_vulkan;
 mod arena;
 mod atlas;
 mod batch;
@@ -11,8 +13,12 @@ mod fonts;
 mod gpu;
 mod gradient_lut;
 mod image_upload;
+mod outline;
+#[cfg(target_os = "android")]
+mod pipeline_disk_cache;
 mod pipelines;
 mod profiler;
+mod resident;
 mod shaper;
 mod status;
 mod text_index;
@@ -110,6 +116,7 @@ pub struct Rasterizer {
     frame: Option<Frame>,
     stats: SubmitStats,
     reuse_pictures: bool,
+    pipeline_cache_dir: Option<std::path::PathBuf>,
     prepared_buffers: u32,
     prepared_mesh_bytes: u64,
     gpu_frame: Option<u64>,
@@ -127,10 +134,9 @@ struct DeviceState {
 }
 
 struct Frame {
-    tree: LayerTree,
+    tree: Arc<LayerTree>,
     scale: f32,
     pictures: HashMap<PictureId, Arc<CompiledPicture>>,
-    textures: TextureStore,
     views: Arc<[u64]>,
     #[cfg(target_os = "ios")]
     slices: Vec<HashSet<LayerId>>,
@@ -146,6 +152,7 @@ impl Rasterizer {
             frame: None,
             stats: SubmitStats::default(),
             reuse_pictures: false,
+            pipeline_cache_dir: None,
             prepared_buffers: 0,
             prepared_mesh_bytes: 0,
             gpu_frame: None,
@@ -159,7 +166,7 @@ impl Rasterizer {
         let mut raster = Self::create(options, fonts)?;
         let mut last = Status::NotReady;
         for backend in raster.backends() {
-            match Gpu::request(Gpu::instance(backend), backend, options, None)
+            match Gpu::request(Gpu::instance(backend), backend, options, None, None)
                 .and_then(Self::new_device)
             {
                 Ok(device) => {
@@ -185,8 +192,7 @@ impl Rasterizer {
     fn new_device(gpu: Gpu) -> Result<DeviceState, Status> {
         let generation = NEXT_DEVICE.fetch_add(1, Ordering::Relaxed);
         let compositor = gpu.validation(|| Compositor::new(&gpu))?;
-        let mut textures = TextureStore::default();
-        textures.begin_frame(generation);
+        let textures = TextureStore::new(generation);
         Ok(DeviceState {
             gpu,
             generation,
@@ -194,6 +200,21 @@ impl Rasterizer {
             profiler: None,
             textures,
         })
+    }
+
+    /// Selects the Android app-private cache directory before surface attachment.
+    ///
+    /// # Safety
+    ///
+    /// The directory must be writable solely by the host application and its
+    /// files must come from this application. Android's Context.getCacheDir meets this contract.
+    #[cfg(target_os = "android")]
+    #[expect(
+        unsafe_code,
+        reason = "wgpu startup trusts opaque data produced by the application"
+    )]
+    pub unsafe fn set_pipeline_cache_directory(&mut self, directory: std::path::PathBuf) {
+        self.pipeline_cache_dir = Some(directory);
     }
 
     /// Configures timestamp capability before the first device is created.
@@ -266,7 +287,7 @@ impl Rasterizer {
 
     fn finish_render_stats(&mut self, mut stats: RenderStats) {
         stats.buffers_created += std::mem::take(&mut self.prepared_buffers);
-        stats.mesh_upload_bytes = std::mem::take(&mut self.prepared_mesh_bytes);
+        stats.mesh_upload_bytes += std::mem::take(&mut self.prepared_mesh_bytes);
         self.stats.render = stats;
     }
 
@@ -322,33 +343,39 @@ impl Rasterizer {
         &mut self,
         tree: &LayerTree,
         point_scale: f32,
+        resolve: impl FnMut(&str) -> Option<ImagePixels<'pixels>>,
+    ) -> Result<SubmitInfo, Status> {
+        self.submit_shared_layers(Arc::new(tree.clone()), point_scale, resolve)
+    }
+
+    /// Installs a scene already shared by the UI and raster queues.
+    pub fn submit_shared_layers<'pixels>(
+        &mut self,
+        tree: Arc<LayerTree>,
+        point_scale: f32,
         mut resolve: impl FnMut(&str) -> Option<ImagePixels<'pixels>>,
     ) -> Result<SubmitInfo, Status> {
         if !point_scale.is_finite() || point_scale <= 0.0 {
             return Err(Status::BadScene);
         }
         let started = Instant::now();
-        let order = paint_order(tree)?;
-        let scales = picture_scales(tree, &order, point_scale)?;
+        let _prepare_span =
+            tracing::debug_span!(target: "impasto::render", "prepare_pictures").entered();
+        let order = paint_order(&tree)?;
+        let scales = picture_scales(&tree, &order, point_scale)?;
         let device = self.device.as_mut().ok_or(Status::NotReady)?;
         if device.gpu.is_lost() {
             return Err(Status::DeviceLost);
         }
-        let mut textures = device.textures.clone();
-        textures.begin_frame(device.generation);
+        let mut textures = device.textures.begin_frame();
         let previous = self.frame.as_ref().filter(|_| self.reuse_pictures);
         let mut stats = SubmitStats::default();
         let mut pictures = HashMap::with_capacity(tree.pictures.len());
         for picture in &tree.pictures {
             let compile_scale = scales.get(&picture.id).copied().unwrap_or(point_scale);
             let cached = previous
-                .and_then(|frame| {
-                    frame
-                        .pictures
-                        .get(&picture.id)
-                        .map(|cached| (frame, cached))
-                })
-                .filter(|(frame, cached)| {
+                .and_then(|frame| frame.pictures.get(&picture.id))
+                .filter(|cached| {
                     cached.device == device.generation
                         && cached.generation == picture.generation
                         && cached.scale == compile_scale
@@ -356,18 +383,24 @@ impl Rasterizer {
                         && cached
                             .images
                             .iter()
-                            .all(|(source, _)| textures.same_geometry(source, &frame.textures))
+                            .all(|(source, _)| textures.same_geometry(source))
                         && cached.waiting.iter().all(|source| {
                             textures.get(source).is_none() && resolve(source).is_none()
                         })
                 });
-            let compiled = if let Some((_, cached)) = cached {
+            let compiled = if let Some(cached) = cached {
                 for (source, _) in &cached.images {
                     textures.touch(source);
                 }
                 stats.picture_reused = stats.picture_reused.saturating_add(1);
                 Arc::clone(cached)
             } else {
+                let _compile_span = tracing::trace_span!(
+                    target: "impasto::render",
+                    "compile_picture",
+                    id = picture.id.0
+                )
+                .entered();
                 let mut context = CompileContext {
                     gpu: &device.gpu,
                     device_generation: device.generation,
@@ -419,19 +452,16 @@ impl Rasterizer {
         if device.gpu.is_lost() {
             return Err(Status::DeviceLost);
         }
-        textures.evict_unused();
-        stats.image_upload = textures.take_uploads();
+        stats.image_upload = textures.commit(&device.gpu)?;
         let platform_views: Arc<[u64]> = views.into();
         stats.picture_prepare = started.elapsed();
         stats.layer_count = u32::try_from(tree.layers.len()).unwrap_or(u32::MAX);
         stats.pictures = u32::try_from(pictures.len()).unwrap_or(u32::MAX);
-        stats.textures = u32::try_from(textures.len()).unwrap_or(u32::MAX);
-        device.textures = textures.clone();
+        stats.textures = u32::try_from(device.textures.len()).unwrap_or(u32::MAX);
         self.frame = Some(Frame {
-            tree: tree.clone(),
+            tree,
             scale: point_scale,
             pictures,
-            textures,
             views: Arc::clone(&platform_views),
             #[cfg(target_os = "ios")]
             slices,
@@ -454,7 +484,7 @@ impl Rasterizer {
     fn encode_and_submit(
         &mut self,
         target: &wgpu::TextureView,
-        format: wgpu::TextureFormat,
+        format: impl Into<compositor::OutputFormat>,
         pixels: PixelSize,
     ) -> Result<(), Status> {
         let mut capture = self.begin_gpu_capture();
@@ -462,31 +492,45 @@ impl Rasterizer {
         let frame = self.frame.as_ref().ok_or(Status::NotReady)?;
         surface::check_size(&device.gpu, pixels)?;
         let started = Instant::now();
+        let _compose_span = tracing::debug_span!(target: "impasto::render", "compose").entered();
         let gpu = &device.gpu;
         let compositor = &mut device.compositor;
         compositor.begin_frame();
         let (atlas, encode, flush, submitted) = gpu.hot_validation(|| {
             let stage = Instant::now();
-            let mut command = compositor.encode(
-                gpu,
-                frame.scene(&self.fonts, None),
-                target,
-                format,
-                [pixels.width, pixels.height],
-                capture.as_mut().map(|capture| (capture, None)),
-            )?;
-            if gpu.backend != RasterBackend::Metal
-                && let Some(capture) = &capture
-            {
-                capture.resolve(&mut command);
-            }
-            let command = command.finish();
+            let command = {
+                let _encode_span =
+                    tracing::debug_span!(target: "impasto::render", "encode").entered();
+                let mut command = compositor.encode(
+                    gpu,
+                    frame.scene(&self.fonts, &device.textures, None),
+                    target,
+                    format,
+                    [pixels.width, pixels.height],
+                    capture.as_mut().map(|capture| (capture, None)),
+                )?;
+                if gpu.backend != RasterBackend::Metal
+                    && let Some(capture) = &capture
+                {
+                    capture.resolve(&mut command);
+                }
+                command.finish()
+            };
             let encode = stage.elapsed();
             let stage = Instant::now();
-            let atlas = compositor.flush(gpu);
+            let (atlas, prelude) = {
+                let _flush_span =
+                    tracing::debug_span!(target: "impasto::render", "flush_arena").entered();
+                compositor.flush(gpu)?
+            };
             let flush = stage.elapsed();
             let stage = Instant::now();
-            gpu.queue.submit([command]);
+            {
+                let _submit_span =
+                    tracing::debug_span!(target: "impasto::render", "queue_submit").entered();
+                gpu.submit(prelude.into_iter().chain([command]));
+                compositor.submitted(gpu);
+            }
             let done = Instant::now();
             Ok((atlas, encode, flush, (done, done.duration_since(stage))))
         })?;
@@ -510,13 +554,14 @@ impl Frame {
     fn scene<'a>(
         &'a self,
         fonts: &'a FontLibrary,
+        textures: &'a TextureStore,
         slice: Option<&'a HashSet<LayerId>>,
     ) -> Scene<'a> {
         Scene {
             tree: &self.tree,
             pictures: &self.pictures,
             fonts,
-            textures: &self.textures,
+            textures,
             scale: self.scale,
             slice,
         }

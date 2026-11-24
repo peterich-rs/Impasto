@@ -10,7 +10,10 @@
 //!
 //! Blank glyphs (whitespace, missing outlines) cache an empty entry.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use engine::scene::FontFaceId;
 use etagere::BucketedAtlasAllocator;
@@ -40,10 +43,11 @@ struct GlyphKey {
     size: u32,
     /// Subpixel bucket x and y, `0..SUBPIXEL_BUCKETS`.
     subpixel: [u32; 2],
-    coords: Box<[i16]>,
+    coords: Option<Arc<[i16]>>,
     embolden: bool,
     darken_stem: bool,
     hint: bool,
+    lcd: bool,
     skew: Option<u32>,
 }
 
@@ -66,6 +70,7 @@ pub struct Placement {
     /// Bitmap top edge relative to the baseline, in pixels. Negative is up.
     pub top: i32,
     pub color: bool,
+    pub lcd: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -96,6 +101,8 @@ impl AtlasTexture {
             dimension: wgpu::TextureDimension::D2,
             format: if color {
                 wgpu::TextureFormat::Rgba8UnormSrgb
+            } else if gpu.caps.lcd {
+                wgpu::TextureFormat::Rgba8Unorm
             } else {
                 wgpu::TextureFormat::R8Unorm
             },
@@ -162,6 +169,8 @@ pub struct Atlas {
     entries: HashMap<GlyphKey, Entry>,
     clock: u64,
     page_size: u32,
+    mask_channels: u32,
+    epoch: u64,
     blank: AtlasTexture,
     material: Option<wgpu::BindGroup>,
     stats: AtlasStats,
@@ -208,6 +217,8 @@ impl Atlas {
             entries: HashMap::new(),
             clock: 0,
             page_size: gpu.max_texture_size().min(PAGE_SIZE),
+            mask_channels: if gpu.caps.lcd { 4 } else { 1 },
+            epoch: 0,
             blank: AtlasTexture::new(gpu, true, [1, 1], 1),
             material: None,
             stats: AtlasStats::default(),
@@ -218,6 +229,7 @@ impl Atlas {
     }
 
     pub fn trim(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
         self.mask = AtlasArray::default();
         self.color = AtlasArray::default();
         self.material = None;
@@ -231,9 +243,15 @@ impl Atlas {
     /// Starts a transaction after the previous frame was submitted or discarded.
     pub fn begin_frame(&mut self) {
         self.pinned.clear();
-        // Retired arrays belonged to a submitted or discarded transaction.
-        self.mask.retired.clear();
-        self.color.retired.clear();
+        if self
+            .mask
+            .pages
+            .iter()
+            .chain(&self.color.pages)
+            .any(Page::temporary)
+        {
+            self.epoch = self.epoch.wrapping_add(1);
+        }
         let masks = retain_pages(&mut self.mask.pages);
         let colors = retain_pages(&mut self.color.pages);
         let before = self.entries.len();
@@ -258,7 +276,7 @@ impl Atlas {
             self.entries
                 .retain(|_, entry| entry.placement.rect.page != usize::MAX);
         }
-        self.stats.bytes = self.mask.bytes(1) + self.color.bytes(4);
+        self.stats.bytes = self.mask.bytes(self.mask_channels as usize) + self.color.bytes(4);
         self.stats.entries = self.entries.len();
     }
 
@@ -272,11 +290,15 @@ impl Atlas {
         ])
     }
 
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
     pub fn inverse_page_size(&self) -> f32 {
         1.0 / self.page_size as f32
     }
 
-    fn pin(&mut self, placement: Placement) {
+    pub fn pin(&mut self, placement: Placement) {
         if placement.rect.page != usize::MAX {
             self.pinned.insert((placement.color, placement.rect.page));
             let clock = self.clock;
@@ -289,11 +311,11 @@ impl Atlas {
     /// Counters since the last take.
     pub fn take_stats(&mut self) -> AtlasStats {
         let stats = self.stats;
-        self.stats.hits = 0;
-        self.stats.misses = 0;
-        self.stats.uploads = 0;
-        self.stats.upload_calls = 0;
-        self.stats.evictions = 0;
+        self.stats = AtlasStats {
+            entries: stats.entries,
+            bytes: stats.bytes,
+            ..AtlasStats::default()
+        };
         stats
     }
 
@@ -310,6 +332,7 @@ impl Atlas {
         draw: &GlyphDraw,
         size: f32,
         position: Option<[f32; 2]>,
+        lcd: bool,
     ) -> Option<Placement> {
         let size = quantize_size(size, gpu.max_texture_size())?;
         let key = GlyphKey {
@@ -317,10 +340,11 @@ impl Atlas {
             glyph: draw.glyph,
             size,
             subpixel: position.map_or([0, 0], |position| position.map(bucket)),
-            coords: draw.coords.to_vec().into(),
+            coords: draw.coords.clone(),
             embolden: draw.embolden,
             darken_stem: self.darken_small && position.is_some() && size <= 14 * 64,
             hint: position.is_some(),
+            lcd,
             skew: draw.skew.map(f32::to_bits),
         };
         self.clock = self.clock.wrapping_add(1);
@@ -354,7 +378,7 @@ impl Atlas {
             .builder(font)
             .size(ppem)
             .hint(key.hint)
-            .normalized_coords(key.coords.iter().copied())
+            .normalized_coords(key.coords.as_deref().unwrap_or_default().iter().copied())
             .build();
         let offset = Vector::new(
             key.subpixel[0] as f32 / SUBPIXEL_BUCKETS as f32,
@@ -375,7 +399,11 @@ impl Atlas {
             Source::Bitmap(swash::scale::StrikeWith::ExactSize),
         ]);
         render
-            .format(Format::Alpha)
+            .format(if key.lcd {
+                Format::Subpixel
+            } else {
+                Format::Alpha
+            })
             .style(Style::Fill(Fill::NonZero))
             .offset(offset);
         if key.embolden {
@@ -409,6 +437,7 @@ impl Atlas {
                 left: 0,
                 top: 0,
                 color: false,
+                lcd: false,
             },
             Bitmap::Mask(image) => self.store_image(gpu, false, image)?,
             Bitmap::Color(image) => self.store_image(gpu, true, image)?,
@@ -433,14 +462,21 @@ impl Atlas {
         {
             let (w, h) = (image.placement.width, image.placement.height);
             let rect = self.allocate(gpu, color, w, h)?;
+            let lcd = image.content == swash::scale::image::Content::SubpixelMask;
             if w > 0 && h > 0 {
-                self.upload(gpu, color, rect, &image.data)?;
+                if !color && !lcd && self.mask_channels == 4 {
+                    let rgba: Vec<_> = image.data.iter().flat_map(|&value| [value; 4]).collect();
+                    self.upload(gpu, color, rect, &rgba)?;
+                } else {
+                    self.upload(gpu, color, rect, &image.data)?;
+                }
             }
             Some(Placement {
                 rect,
                 left: image.placement.left,
                 top: image.placement.top,
                 color,
+                lcd,
             })
         }
     }
@@ -543,36 +579,17 @@ impl Atlas {
                 let layers = (layer + 1).next_power_of_two().min(max_layers);
                 let next = AtlasTexture::new(gpu, color, [page_size; 2], layers);
                 if let Some(old) = atlas.texture.replace(next) {
-                    let mut encoder =
-                        gpu.device
-                            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some("grow glyph atlas"),
-                            });
-                    if let Some(next) = &atlas.texture {
-                        encoder.copy_texture_to_texture(
-                            old.texture.as_image_copy(),
-                            next.texture.as_image_copy(),
-                            wgpu::Extent3d {
-                                width: page_size,
-                                height: page_size,
-                                depth_or_array_layers: old.layers,
-                            },
-                        );
-                    }
-                    self.stats.copy_pixels += u64::from(page_size).pow(2) * u64::from(old.layers);
-                    gpu.queue.submit([encoder.finish()]);
-                    if !color {
-                        atlas.retired.push(old);
-                    }
+                    atlas.retired.push(old);
                 }
                 self.material = None;
+                self.epoch = self.epoch.wrapping_add(1);
             }
             PageBacking::Resident {
                 layer,
                 shadow: if color {
                     Vec::new()
                 } else {
-                    vec![0; (page_size * page_size) as usize]
+                    vec![0; (page_size * page_size * self.mask_channels) as usize]
                 },
                 dirty: 0,
             }
@@ -584,7 +601,7 @@ impl Atlas {
             backing,
             age,
         });
-        self.stats.bytes = self.mask.bytes(1) + self.color.bytes(4);
+        self.stats.bytes = self.mask.bytes(self.mask_channels as usize) + self.color.bytes(4);
         index
     }
 
@@ -606,6 +623,7 @@ impl Atlas {
 
     fn recycle(&mut self, gpu: &Gpu, color: bool, index: usize) -> Option<()> {
         let size = self.pages_for_ref(color).get(index)?.size;
+        self.epoch = self.epoch.wrapping_add(1);
         if color {
             zero_scratch(&mut self.scratch, size, 4)?;
         }
@@ -634,7 +652,12 @@ impl Atlas {
         {
             shadow.fill(0);
             if color {
-                if let Some(texture) = &atlas.texture {
+                for texture in atlas
+                    .texture
+                    .iter()
+                    .chain(&atlas.retired)
+                    .filter(|t| *layer < t.layers)
+                {
                     let [w, h] = page.size;
                     self.stats.upload_bytes +=
                         write_texture(gpu, texture, [0, 0, *layer], [w, h], 4, &self.scratch);
@@ -648,7 +671,7 @@ impl Atlas {
     }
 
     fn upload(&mut self, gpu: &Gpu, color: bool, rect: AtlasRect, data: &[u8]) -> Option<()> {
-        let channels = if color { 4 } else { 1 };
+        let channels = if color { 4 } else { self.mask_channels };
         let row = (rect.w as usize).checked_mul(channels as usize)?;
         let atlas = if color {
             &mut self.color
@@ -659,11 +682,11 @@ impl Atlas {
         if data.len() < row.checked_mul(rect.h as usize)? {
             return None;
         }
-        let (texture, layer) = match &mut page.backing {
+        let (texture, layer, mirror) = match &mut page.backing {
             PageBacking::Resident { shadow, dirty, .. } if !color => {
-                let stride = page.size[0] as usize;
+                let stride = (page.size[0] * channels) as usize;
                 for (y, source) in data.chunks_exact(row).take(rect.h as usize).enumerate() {
-                    let start = (rect.y as usize + y) * stride + rect.x as usize;
+                    let start = (rect.y as usize + y) * stride + (rect.x * channels) as usize;
                     shadow[start..start + row].copy_from_slice(source);
                 }
                 for band in rect.y / BAND_HEIGHT..=(rect.y + rect.h - 1) / BAND_HEIGHT {
@@ -671,8 +694,8 @@ impl Atlas {
                 }
                 return Some(());
             }
-            PageBacking::Resident { layer, .. } => (atlas.texture.as_ref()?, *layer),
-            PageBacking::Temporary { texture, .. } => (&*texture, 0),
+            PageBacking::Resident { layer, .. } => (atlas.texture.as_ref()?, *layer, true),
+            PageBacking::Temporary { texture, .. } => (&*texture, 0, false),
         };
         let w = rect.w.checked_add(2 * GUTTER)?;
         let h = rect.h.checked_add(2 * GUTTER)?;
@@ -683,21 +706,28 @@ impl Atlas {
         }
         // Queue writes precede any draw using this placement, including writes
         // to a color array that is subsequently copied into a larger array.
-        self.stats.upload_bytes += write_texture(
-            gpu,
-            texture,
-            [rect.x - GUTTER, rect.y - GUTTER, layer],
-            [w, h],
-            channels,
-            &self.scratch,
-        );
-        self.stats.upload_calls += 1;
+        for target in std::iter::once(texture).chain(
+            atlas
+                .retired
+                .iter()
+                .filter(|target| mirror && layer < target.layers),
+        ) {
+            self.stats.upload_bytes += write_texture(
+                gpu,
+                target,
+                [rect.x - GUTTER, rect.y - GUTTER, layer],
+                [w, h],
+                channels,
+                &self.scratch,
+            );
+            self.stats.upload_calls += 1;
+        }
         Some(())
     }
 
     /// Upload once per contiguous band, mirroring patches to any array
     /// referenced by an earlier command buffer in the same transaction.
-    pub fn flush(&mut self, gpu: &Gpu) {
+    pub fn flush(&mut self, gpu: &Gpu, prelude: &mut Option<wgpu::CommandEncoder>) {
         if let Some(texture) = &self.mask.texture {
             for page in &mut self.mask.pages {
                 let PageBacking::Resident {
@@ -721,11 +751,18 @@ impl Atlas {
                         band += 1;
                     }
                     let end = (band * BAND_HEIGHT).min(h);
-                    let data = &shadow[(y * w) as usize..(end * w) as usize];
+                    let stride = w * self.mask_channels;
+                    let data = &shadow[(y * stride) as usize..(end * stride) as usize];
                     for target in std::iter::once(texture).chain(&self.mask.retired) {
                         if *layer < target.layers {
-                            self.stats.upload_bytes +=
-                                write_texture(gpu, target, [0, y, *layer], [w, end - y], 1, data);
+                            self.stats.upload_bytes += write_texture(
+                                gpu,
+                                target,
+                                [0, y, *layer],
+                                [w, end - y],
+                                self.mask_channels,
+                                data,
+                            );
                             self.stats.upload_calls += 1;
                         }
                     }
@@ -733,7 +770,27 @@ impl Atlas {
                 *dirty = 0;
             }
         }
-        self.mask.retired.clear();
+        for atlas in [&mut self.mask, &mut self.color] {
+            for (old, next) in atlas
+                .retired
+                .iter()
+                .zip(atlas.retired.iter().skip(1).chain(&atlas.texture))
+            {
+                // Writes are mirrored to both arrays before submit, so the copy
+                // preserves new glyphs and brings previously uploaded layers forward.
+                crate::arena::upload_encoder(gpu, prelude).copy_texture_to_texture(
+                    old.texture.as_image_copy(),
+                    next.texture.as_image_copy(),
+                    wgpu::Extent3d {
+                        width: self.page_size,
+                        height: self.page_size,
+                        depth_or_array_layers: old.layers,
+                    },
+                );
+                self.stats.copy_pixels += u64::from(self.page_size).pow(2) * u64::from(old.layers);
+            }
+            atlas.retired.clear();
+        }
     }
 
     pub fn binding(&self, placement: Placement) -> (AtlasBinding, u32) {
@@ -930,7 +987,7 @@ mod tests {
             },
             crate::compositor::extent([1, 1]),
         );
-        let submitted = gpu.queue.submit([encoder.finish()]);
+        let submitted = gpu.submit([encoder.finish()]);
         let (send, receive) = std::sync::mpsc::channel();
         buffer
             .slice(..)
@@ -959,7 +1016,7 @@ mod tests {
         let count = PAGE_LIMIT.min(gpu.caps.max_array_layers as usize);
         let initial = atlas.mask.texture.as_ref().unwrap().texture.clone();
         atlas.begin_frame();
-        let glyph = vec![200; 600 * 600];
+        let glyph = vec![200; 600 * 600 * atlas.mask_channels as usize];
         for layer in 0..count {
             let rect = atlas.allocate(gpu, false, 600, 600).unwrap();
             let placement = Placement {
@@ -967,6 +1024,7 @@ mod tests {
                 left: 0,
                 top: 0,
                 color: false,
+                lcd: false,
             };
             atlas.pin(placement);
             atlas.upload(gpu, false, rect, &glyph).unwrap();
@@ -974,7 +1032,9 @@ mod tests {
             assert!(binding == AtlasBinding::Resident);
             assert_eq!(index, u32::try_from(layer).unwrap());
         }
-        atlas.flush(gpu);
+        let mut prelude = None;
+        atlas.flush(gpu, &mut prelude);
+        gpu.submit(prelude.map(wgpu::CommandEncoder::finish));
         assert_eq!(sample(gpu, &initial, 2, 2, 0), 200);
         let expanded = atlas.mask.texture.as_ref().unwrap().texture.clone();
         assert_eq!(sample(gpu, &expanded, 2, 2, 0), 200);
@@ -987,9 +1047,16 @@ mod tests {
         let new = atlas.allocate(gpu, false, 520, 520).unwrap();
         assert_eq!(new.page, 0);
         atlas
-            .upload(gpu, false, new, &vec![100; 520 * 520])
+            .upload(
+                gpu,
+                false,
+                new,
+                &vec![100; 520 * 520 * atlas.mask_channels as usize],
+            )
             .unwrap();
-        atlas.flush(gpu);
+        let mut prelude = None;
+        atlas.flush(gpu, &mut prelude);
+        gpu.submit(prelude.map(wgpu::CommandEncoder::finish));
         assert_eq!(sample(gpu, &expanded, new.x + 3, new.y + 3, 0), 100);
         assert_eq!(sample(gpu, &expanded, new.x + new.w, new.y + 3, 0), 0);
         assert_eq!(sample(gpu, &expanded, 580, 580, 0), 0);

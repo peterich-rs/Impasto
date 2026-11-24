@@ -6,7 +6,10 @@
 //! Compiled pictures are cached by `PictureId + generation` and reused
 //! until the picture leaves the tree or its generation changes.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
 
 use engine::scene::{
     BlendMode, BoxShadow, CanvasBrush, CanvasComposite, CanvasIsolation, CanvasList, CanvasOp,
@@ -27,6 +30,8 @@ use crate::status::Status;
 /// Column-major 3x3 affine in scene points: `[a, b, c, d, e, f]` as
 /// `x' = a*x + c*y + e`, `y' = b*x + d*y + f`.
 pub type Affine = [f32; 6];
+
+static NEXT_COMPILED_PICTURE: AtomicU64 = AtomicU64::new(1);
 
 pub const IDENTITY: Affine = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
@@ -134,8 +139,6 @@ pub struct ScopeState {
     /// Picture space into the parent layer's space.
     pub transform: Affine,
     pub clip: Clip,
-    /// Product of every enclosing opacity group.
-    pub opacity: f32,
     /// Offscreen group this scope renders into. Scopes between a group's
     /// open and close share the id. `None` draws straight into the target.
     pub groups: Vec<usize>,
@@ -145,6 +148,7 @@ pub struct ScopeState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect {
     Opacity,
+    Isolation,
     Blur,
     BackdropBlur,
     Blend(BlendMode),
@@ -172,6 +176,7 @@ pub struct Scope {
     pub draws: Vec<Draw>,
     pub bounds: PictureBounds,
     has_rects: bool,
+    pub resident_candidates: Vec<bool>,
 }
 
 impl Scope {
@@ -201,7 +206,7 @@ impl Scope {
 /// Draw batches inside one scope. Adjacent draws of the same kind merge.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Draw {
-    Rects(Vec<RectInstance>, Option<Arc<[[f32; 4]]>>, BlendKey),
+    Rects(RectRun),
     Fill([f32; 4]),
     /// Glyph quads. Atlas pages are resolved when the frame is encoded, so
     /// a cache hit never re-rasterizes.
@@ -214,12 +219,87 @@ pub enum Draw {
     Mesh(Mesh),
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct RectRun {
+    pub rects: Vec<RectInstance>,
+    pub draws: u32,
+    pub stops: Option<Arc<[[f32; 4]]>>,
+    pub blend: BlendKey,
+    pub vertices: Vec<batch::RectVertex>,
+    pub paints: Vec<batch::PaintExtra>,
+}
+
+impl RectRun {
+    fn prepare(&mut self) -> Result<(), Status> {
+        use std::collections::{HashMap, hash_map::Entry};
+        let mut indices = HashMap::<[u32; size_of::<batch::PaintExtra>() / 4], u32>::new();
+        self.vertices.reserve(self.rects.len());
+        for rect in &self.rects {
+            let index = if let Some(paint) = rect.extra(0.0, 0) {
+                match indices.entry(bytemuck::cast(paint)) {
+                    Entry::Occupied(entry) => *entry.get(),
+                    Entry::Vacant(entry) => {
+                        let index =
+                            u32::try_from(self.paints.len()).map_err(|_| Status::OutOfMemory)?;
+                        self.paints.push(paint);
+                        *entry.insert(index)
+                    }
+                }
+            } else {
+                u32::MAX
+            };
+            self.vertices.push(rect.vertex(index));
+        }
+        self.draws = u32::try_from(batch::rect_pipeline_runs(&self.vertices).count())
+            .map_err(|_| Status::OutOfMemory)?;
+        Ok(())
+    }
+
+    pub fn stops(&self) -> &[[f32; 4]] {
+        self.stops.as_deref().unwrap_or_default()
+    }
+}
+
+fn resident_candidate(draw: &Draw) -> bool {
+    match draw {
+        Draw::Rects(run) => !run.rects.is_empty(),
+        Draw::Images {
+            source, instances, ..
+        } => {
+            !source.starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX)
+                && instances.first().is_some_and(|first| {
+                    instances
+                        .iter()
+                        .all(|instance| (instance.flags ^ first.flags) & batch::IMAGE_NEAREST == 0)
+                })
+        }
+        Draw::Glyphs(glyphs) => {
+            !glyphs.is_empty()
+                && glyphs
+                    .iter()
+                    .all(|glyph| glyph.gradient.is_none() && glyph.decoration.is_none())
+        }
+        Draw::Fill(_) | Draw::Mesh(_) => false,
+    }
+}
+
+impl Draw {
+    pub fn source_over(&self) -> bool {
+        match self {
+            Self::Rects(run) => run.blend == BlendKey::SrcOver,
+            Self::Images { blend, .. } => *blend == BlendKey::SrcOver,
+            Self::Mesh(mesh) => mesh.composite == CanvasComposite::SourceOver,
+            Self::Fill(_) | Self::Glyphs(_) => true,
+        }
+    }
+}
+
 impl Draw {
     fn bounds(&self) -> PictureBounds {
         use PictureBounds as B;
         let rect = B::rect;
         match self {
-            Self::Rects(rects, _, _) => rects.iter().fold(B::Empty, |bounds, draw| {
+            Self::Rects(run) => run.rects.iter().fold(B::Empty, |bounds, draw| {
                 bounds.union(rect(draw.rect).expand(draw.stroke_width * 0.5 + 1.0))
             }),
             Self::Fill(_) => B::Unbounded,
@@ -251,11 +331,11 @@ pub struct GlyphDraw {
     pub y: f32,
     /// Font size in scene points.
     pub size: f32,
-    pub coords: Arc<[i16]>,
+    pub coords: Option<Arc<[i16]>>,
     pub embolden: bool,
     pub skew: Option<f32>,
     /// Solid brush, or white for a gradient.
-    pub color: [f32; 4],
+    pub color: [u16; 4],
     pub gradient: Option<Arc<PackedGradient>>,
     /// Span box for gradient coordinates, in scene points.
     pub decoration: Option<[f32; 4]>,
@@ -264,15 +344,19 @@ pub struct GlyphDraw {
 /// A picture compiled for one point scale.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompiledPicture {
+    pub resident_id: u64,
     pub generation: u64,
     pub scale: f32,
     pub device: u64,
     pub bounds: PictureBounds,
     pub mesh_buffer: Arc<OnceLock<GpuMeshBuffer>>,
     pub reads_root: bool,
+    pub has_resident_candidate: bool,
     /// Picture origin in the parent layer's space.
     pub origin: (f32, f32),
     pub scopes: Vec<Scope>,
+    /// Bounds of consecutive scopes in picture space, used for translated replay.
+    pub scope_blocks: Vec<PictureBounds>,
     /// Image sources this picture references.
     pub images: Vec<(Arc<str>, bool)>,
     /// Images that were missing at compile time. The picture is rebuilt
@@ -280,6 +364,8 @@ pub struct CompiledPicture {
     pub waiting: Vec<Arc<str>>,
     pub groups: Vec<Group>,
 }
+
+pub const SCOPES_PER_BLOCK: usize = 32;
 
 impl CompiledPicture {
     pub fn bounds_in(
@@ -315,18 +401,18 @@ fn summarize_bounds(
 }
 
 /// Inputs used while resolving picture images.
-pub struct CompileContext<'a, 'pixels> {
+pub struct CompileContext<'a, 'store, 'pixels> {
     pub gpu: &'a Gpu,
     pub device_generation: u64,
     pub resolve: &'a mut dyn FnMut(&str) -> Option<crate::ImagePixels<'pixels>>,
-    pub textures: &'a mut crate::textures::TextureStore,
+    pub textures: &'a mut crate::textures::TextureTransaction<'store>,
     pub point_scale: f32,
 }
 
 /// Compiles one picture.
 pub fn compile(
     picture: &Picture,
-    context: &mut CompileContext<'_, '_>,
+    context: &mut CompileContext<'_, '_, '_>,
 ) -> Result<CompiledPicture, Status> {
     let point_scale = context.point_scale;
     let origin = picture.origin;
@@ -338,6 +424,7 @@ pub fn compile(
             draws: Vec::new(),
             bounds: PictureBounds::Empty,
             has_rects: false,
+            resident_candidates: Vec::new(),
         }],
         images: Vec::new(),
         waiting: Vec::new(),
@@ -373,13 +460,48 @@ pub fn compile(
         })?;
         compiler.meshes.set(mesh).map_err(|_| Status::BadScene)?;
     }
-    let (bounds, content_by_group) =
-        summarize_bounds(&compiler.scopes, &compiler.groups, IDENTITY, point_scale);
+    let mut has_resident_candidate = false;
+    for scope in &mut compiler.scopes {
+        for draw in &mut scope.draws {
+            if let Draw::Rects(run) = draw {
+                run.prepare()?;
+            }
+        }
+        if compiler.groups.is_empty() {
+            let candidates: Vec<_> = scope.draws.iter().map(resident_candidate).collect();
+            if candidates.contains(&true) {
+                scope.resident_candidates = candidates;
+                has_resident_candidate = true;
+            }
+        }
+    }
+    let scope_blocks = if compiler.groups.is_empty() && compiler.scopes.len() > SCOPES_PER_BLOCK {
+        compiler
+            .scopes
+            .chunks(SCOPES_PER_BLOCK)
+            .map(|scopes| summarize_bounds(scopes, &[], IDENTITY, point_scale).0)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let (bounds, content_by_group) = if scope_blocks.is_empty() {
+        summarize_bounds(&compiler.scopes, &compiler.groups, IDENTITY, point_scale)
+    } else {
+        (
+            scope_blocks
+                .iter()
+                .copied()
+                .fold(PictureBounds::Empty, PictureBounds::union),
+            Vec::new(),
+        )
+    };
     for (group, content) in compiler.groups.iter_mut().zip(content_by_group) {
         group.content = content;
     }
     Ok(CompiledPicture {
+        resident_id: NEXT_COMPILED_PICTURE.fetch_add(1, Ordering::Relaxed),
         generation: picture.generation,
+        has_resident_candidate,
         device: compiler.context.device_generation,
         bounds,
         mesh_buffer: compiler.meshes,
@@ -396,6 +518,7 @@ pub fn compile(
         scale: point_scale,
         origin,
         scopes: compiler.scopes,
+        scope_blocks,
         images: compiler.images,
         waiting: compiler.waiting,
         groups: compiler.groups,
@@ -429,8 +552,8 @@ fn group_output(content: PictureBounds, group: Group, origin: Affine) -> Picture
     }
 }
 
-struct Compiler<'c, 'a, 'pixels> {
-    context: &'c mut CompileContext<'a, 'pixels>,
+struct Compiler<'c, 'a, 'store, 'pixels> {
+    context: &'c mut CompileContext<'a, 'store, 'pixels>,
     stack: Vec<ScopeState>,
     scopes: Vec<Scope>,
     images: Vec<(Arc<str>, bool)>,
@@ -441,7 +564,7 @@ struct Compiler<'c, 'a, 'pixels> {
     indices: Vec<u32>,
 }
 
-impl Compiler<'_, '_, '_> {
+impl Compiler<'_, '_, '_, '_> {
     fn current(&self) -> &ScopeState {
         self.stack
             .last()
@@ -463,12 +586,46 @@ impl Compiler<'_, '_, '_> {
                 draws: Vec::new(),
                 bounds: PictureBounds::Empty,
                 has_rects: false,
+                resident_candidates: Vec::new(),
             });
         }
         if let Some(scope) = self.scopes.last_mut() {
             scope.bounds = scope.bounds.union(draw.bounds());
             scope.has_rects |= matches!(draw, Draw::Rects(..));
             scope.draws.push(draw);
+        }
+    }
+
+    fn push_rects(
+        &mut self,
+        rects: impl IntoIterator<Item = RectInstance>,
+        stops: Option<Arc<[[f32; 4]]>>,
+        blend: BlendKey,
+    ) {
+        let state = self.current();
+        if let Some(scope) = self.scopes.last()
+            && &scope.state == state
+            && let Some(Draw::Rects(run)) = scope.draws.last()
+            && run.blend == blend
+            && run.stops == stops
+            && let Some(scope) = self.scopes.last_mut()
+            && let Some(Draw::Rects(run)) = scope.draws.last_mut()
+        {
+            for rect in rects {
+                scope.bounds = scope
+                    .bounds
+                    .union(PictureBounds::rect(rect.rect).expand(rect.stroke_width * 0.5 + 1.0));
+                run.rects.push(rect);
+            }
+        } else {
+            self.push_draw(Draw::Rects(RectRun {
+                rects: rects.into_iter().collect(),
+                draws: 0,
+                stops,
+                blend,
+                vertices: Vec::new(),
+                paints: Vec::new(),
+            }));
         }
     }
 
@@ -481,6 +638,7 @@ impl Compiler<'_, '_, '_> {
             draws: Vec::new(),
             bounds: PictureBounds::Empty,
             has_rects: false,
+            resident_candidates: Vec::new(),
         });
     }
 
@@ -628,10 +786,9 @@ impl Compiler<'_, '_, '_> {
             return Ok(());
         }
         let corners = corners.map(|shape| shape.fitted(w, h));
-        let opacity = self.current().opacity;
         let mut instances = Vec::new();
         for shadow in box_shadows {
-            if let Some(mut instance) = box_shadow(x, y, w, h, corner_radius, shadow, opacity) {
+            if let Some(mut instance) = box_shadow(x, y, w, h, corner_radius, shadow) {
                 instance.corners = corners.map(|mut shape| {
                     shape.radii = shape.radii.map(|radius| (radius + shadow.spread).max(0.0));
                     shape.fitted(w + 2.0 * shadow.spread, h + 2.0 * shadow.spread)
@@ -642,7 +799,7 @@ impl Compiler<'_, '_, '_> {
         if let Some(shadow) = shadow
             && shadow.elevation.is_finite()
             && shadow.elevation > 0.0
-            && let Some(mut instance) = material_shadow(x, y, w, h, corner_radius, shadow, opacity)
+            && let Some(mut instance) = material_shadow(x, y, w, h, corner_radius, shadow)
         {
             instance.corners = corners;
             instances.push(instance);
@@ -655,7 +812,7 @@ impl Compiler<'_, '_, '_> {
             (true, false) => RECT_FILL,
             (false, false) => {
                 if !instances.is_empty() {
-                    self.push_draw(Draw::Rects(instances, None, BlendKey::SrcOver));
+                    self.push_rects(instances, None, BlendKey::SrcOver);
                 }
                 return Ok(());
             }
@@ -686,24 +843,24 @@ impl Compiler<'_, '_, '_> {
         let stroke_color = linear_premultiplied(*stroke_color, 255).unwrap_or([0.0; 4]);
         // Gradient stops are shared per draw batch; store them on the
         // compositor's stop buffer at encode time.
-        instances.push(RectInstance {
+        let fill = RectInstance {
             rect: [x, y, w, h],
             radius: clamped_radius(corner_radius, w, h),
             corners,
             stroke_width: if stroke { stroke_width } else { 0.0 },
             kind,
             flags,
-            color: scale_color(fill_color, opacity),
-            stroke_color: scale_color(stroke_color, opacity),
+            color: fill_color,
+            stroke_color,
             gradient_a,
-            gradient_b: [gradient_b[0], gradient_b[1], gradient_b[2], opacity],
+            gradient_b,
             shadow: [0.0; 4],
-        });
-        self.push_draw(Draw::Rects(
-            instances,
+        };
+        self.push_rects(
+            instances.into_iter().chain([fill]),
             stops.map(Arc::from),
             BlendKey::SrcOver,
-        ));
+        );
         Ok(())
     }
 
@@ -744,10 +901,10 @@ impl Compiler<'_, '_, '_> {
                 x: rect[0],
                 y: rect[1],
                 size: 0.0,
-                coords: Arc::from([]),
+                coords: None,
                 embolden: false,
                 skew: None,
-                color: paint.solid,
+                color: pack_glyph_color(paint.solid),
                 gradient: paint.gradient,
                 decoration: Some(rect),
             });
@@ -772,7 +929,6 @@ impl Compiler<'_, '_, '_> {
         mode: ContentMode,
         required: bool,
     ) -> Result<(), Status> {
-        let opacity = self.current().opacity;
         match self
             .context
             .textures
@@ -786,7 +942,7 @@ impl Compiler<'_, '_, '_> {
                     .map(|(rect, uv)| ImageInstance {
                         rect,
                         uv,
-                        color: [opacity; 4],
+                        color: [1.0; 4],
                         flags: if matches!(mode, ContentMode::NineSlice { .. }) {
                             batch::IMAGE_BASE_LEVEL
                         } else {
@@ -948,7 +1104,7 @@ impl Compiler<'_, '_, '_> {
         let entry = self.stack.len();
         let isolated = list.isolation() == CanvasIsolation::Isolated;
         if isolated {
-            self.push_effect(Effect::Opacity, 1.0, 0.0, None);
+            self.push_effect(Effect::Isolation, 1.0, 0.0, None);
         }
         self.push_clip(x, y, width, height, 0.0, None);
         self.push_transform(x, y, 0.0, 1.0, 1.0);
@@ -1085,8 +1241,7 @@ impl Compiler<'_, '_, '_> {
                         let mut state = self.current().clone();
                         state.transform = compose(state.transform, image.ctm);
                         self.stack.push(state);
-                        let opacity = self.current().opacity;
-                        let alpha = crate::color::coverage_alpha(image.alpha, opacity);
+                        let alpha = f32::from(image.alpha) / 255.0;
                         self.remember_image(&image.source, false);
                         self.push_draw(Draw::Images {
                             source: Arc::clone(&image.source),
@@ -1124,11 +1279,11 @@ impl Compiler<'_, '_, '_> {
                 let mut state = self.current().clone();
                 state.transform = compose(state.transform, *ctm);
                 self.stack.push(state);
-                self.push_draw(Draw::Rects(
-                    vec![solid_rect([*x, *y, *w, *h], [1.0; 4])],
+                self.push_rects(
+                    [solid_rect([*x, *y, *w, *h], [1.0; 4])],
                     None,
                     BlendKey::DstOut,
-                ));
+                );
                 self.pop();
             }
         }
@@ -1152,18 +1307,24 @@ pub fn solid_rect(rect: [f32; 4], color: [f32; 4]) -> RectInstance {
     }
 }
 
+fn pack_glyph_color(color: [f32; 4]) -> [u16; 4] {
+    color.map(|component| half::f16::from_f32(component).to_bits())
+}
+
 fn append_glyphs(out: &mut Vec<GlyphDraw>, run: &ShapedRun, x: f32, y: f32, paint: &RunPaint) {
-    let coords = Arc::<[i16]>::from(run.normalized_coords.as_ref());
+    let coords =
+        (!run.normalized_coords.is_empty()).then(|| Arc::from(run.normalized_coords.as_ref()));
+    let color = pack_glyph_color(paint.solid);
     out.extend(run.glyphs.iter().map(|glyph| GlyphDraw {
         face: Arc::clone(&run.face),
         glyph: glyph.id,
         x: x + glyph.x,
         y: y + glyph.y,
         size: run.font_size,
-        coords: Arc::clone(&coords),
+        coords: coords.clone(),
         embolden: run.embolden,
         skew: run.skew_degrees,
-        color: paint.solid,
+        color,
         gradient: paint.gradient.clone(),
         decoration: None,
     }));
@@ -1287,7 +1448,7 @@ fn canvas_image_sample(
 }
 
 /// Tessellates a path in canvas points into position+coverage vertices.
-fn tessellate(
+pub fn tessellate(
     canvas_path: &CanvasPath,
     tolerance: f32,
 ) -> Result<lyon_tessellation::VertexBuffers<[f32; 3], u32>, Status> {
@@ -1314,7 +1475,7 @@ fn tessellate(
     Ok(buffers)
 }
 
-fn mesh_bounds(vertices: &[[f32; 3]]) -> [f32; 4] {
+pub fn mesh_bounds(vertices: &[[f32; 3]]) -> [f32; 4] {
     let mut min = [f32::INFINITY; 2];
     let mut max = [f32::NEG_INFINITY; 2];
     for vertex in vertices {
@@ -1337,7 +1498,6 @@ fn box_shadow(
     h: f32,
     corner_radius: f32,
     shadow: &BoxShadow,
-    opacity: f32,
 ) -> Option<RectInstance> {
     if !shadow.blur_sigma.is_finite()
         || shadow.blur_sigma < 0.0
@@ -1347,10 +1507,11 @@ fn box_shadow(
     {
         return None;
     }
-    let (opacity, scissor, mask) = (opacity, [0.0; 4], [0.0; 4]);
-    let _ = (scissor, mask);
     let margin = shadow.blur_sigma * 3.0;
     let spread = shadow.spread;
+    if w + 2.0 * spread <= 0.0 || h + 2.0 * spread <= 0.0 {
+        return None;
+    }
     // The quad is the spread rect grown by the margin, shifted by the
     // offset. The shader recovers the spread box from the margin.
     let rect = [
@@ -1366,7 +1527,7 @@ fn box_shadow(
         stroke_width: 0.0,
         kind: RECT_SHADOW,
         flags: 0,
-        color: scale_color(linear_premultiplied(shadow.color, 255)?, opacity),
+        color: linear_premultiplied(shadow.color, 255)?,
         stroke_color: [0.0; 4],
         gradient_a: [0.0; 4],
         gradient_b: [0.0, 0.0, 0.0, 1.0],
@@ -1387,7 +1548,6 @@ fn material_shadow(
     h: f32,
     corner_radius: f32,
     shadow: &Shadow,
-    opacity: f32,
 ) -> Option<RectInstance> {
     let elevation = shadow.elevation;
     let sigma = elevation * 0.5;
@@ -1405,7 +1565,7 @@ fn material_shadow(
         stroke_width: 0.0,
         kind: RECT_SHADOW,
         flags: 0,
-        color: scale_color(linear_premultiplied(shadow.color, 255)?, opacity),
+        color: linear_premultiplied(shadow.color, 255)?,
         stroke_color: [0.0; 4],
         gradient_a: [0.0; 4],
         gradient_b: [0.0, 0.0, 0.0, 1.0],
@@ -1421,7 +1581,7 @@ fn gradient_solid(gradient: &Gradient) -> Option<[f32; 4]> {
     };
     stops
         .first()
-        .and_then(|stop| linear_premultiplied(stop.color, 255))
+        .map(|stop| crate::color::gradient_stop(stop, 255))
 }
 
 fn scale_color(color: [f32; 4], opacity: f32) -> [f32; 4] {
@@ -1441,7 +1601,7 @@ fn clamped_radius(radius: f32, w: f32, h: f32) -> f32 {
     }
 }
 
-fn is_axis_aligned(transform: Affine) -> bool {
+pub fn is_axis_aligned(transform: Affine) -> bool {
     transform[1] == 0.0 && transform[2] == 0.0
 }
 
@@ -1507,7 +1667,6 @@ pub fn root_state() -> ScopeState {
     ScopeState {
         transform: IDENTITY,
         clip: Clip::default(),
-        opacity: 1.0,
         groups: Vec::new(),
     }
 }

@@ -16,6 +16,8 @@ static NEXT_UPLOAD: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone)]
 pub struct GpuImage {
     view: Arc<wgpu::TextureView>,
+    #[cfg(target_os = "android")]
+    nv12: Option<Nv12Planes>,
     pub(crate) material: Arc<crate::pipelines::MaterialCache>,
     pub width: u32,
     pub height: u32,
@@ -25,8 +27,13 @@ pub struct GpuImage {
     pub revision: u64,
     /// Producer pixels are premultiplied in sRGB before upload.
     pub(crate) premultiplied_srgb: bool,
-    pub(crate) mipmapped: bool,
     pub upload: ImageUploadStats,
+}
+
+#[derive(Clone)]
+pub(crate) struct Nv12Planes {
+    pub chroma: wgpu::TextureView,
+    pub conversion: wgpu::Buffer,
 }
 
 impl std::fmt::Debug for GpuImage {
@@ -49,6 +56,24 @@ impl GpuImage {
         height: u32,
         rgba: &[u8],
     ) -> Option<Self> {
+        let (image, command) = Self::prepare(gpu, device, width, height, rgba)?;
+        if let Some(command) = command {
+            gpu.validation(|| {
+                gpu.submit([command]);
+                Ok(())
+            })
+            .ok()?;
+        }
+        Some(image)
+    }
+
+    fn prepare(
+        gpu: &Gpu,
+        device: u64,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Option<(Self, Option<wgpu::CommandBuffer>)> {
         if gpu.is_lost() || width == 0 || height == 0 || width.max(height) > gpu.max_texture_size()
         {
             return None;
@@ -61,47 +86,54 @@ impl GpuImage {
         }
         let size = [width, height];
         let rgba = &rgba[..bytes];
-        let converted = (width > 1 || height > 1)
+        let converted = (width.max(height) >= 128)
             .then(|| gpu.image_upload())
             .flatten()
-            .and_then(|upload| gpu.validation(|| Ok(upload.upload(gpu, size, rgba))).ok());
-        let (texture, upload) = converted.unwrap_or_else(|| {
-            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("impasto image"),
-                size: crate::compositor::extent(size),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
+            .and_then(|upload| gpu.validation(|| Ok(upload.prepare(gpu, size, rgba))).ok());
+        let (texture, upload, conversion) = converted
+            .map(|(image, stats, command)| (image, stats, Some(command)))
+            .unwrap_or_else(|| {
+                let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("impasto image"),
+                    size: crate::compositor::extent(size),
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                let pixels = crate::color::premultiply_rgba(rgba);
+                crate::image_upload::upload_rgba(gpu, &texture, size, &pixels);
+                (
+                    texture,
+                    ImageUploadStats {
+                        source_bytes: bytes as u64,
+                        resident_bytes: bytes as u64,
+                        ..Default::default()
+                    },
+                    None,
+                )
             });
-            let pixels = crate::color::premultiply_rgba(rgba);
-            crate::image_upload::upload_rgba(gpu, &texture, size, &pixels);
-            (
-                texture,
-                ImageUploadStats {
-                    source_bytes: bytes as u64,
-                    resident_bytes: bytes as u64,
-                    ..Default::default()
-                },
-            )
-        });
         if gpu.is_lost() {
             return None;
         }
         let view = texture.create_view(&Default::default());
-        Some(Self {
-            view: Arc::new(view),
-            material: Arc::default(),
-            width,
-            height,
-            device,
-            revision: NEXT_UPLOAD.fetch_add(1, Ordering::Relaxed),
-            premultiplied_srgb: false,
-            mipmapped: texture.mip_level_count() > 1,
-            upload,
-        })
+        Some((
+            Self {
+                view: Arc::new(view),
+                #[cfg(target_os = "android")]
+                nv12: None,
+                material: Arc::default(),
+                width,
+                height,
+                device,
+                revision: NEXT_UPLOAD.fetch_add(1, Ordering::Relaxed),
+                premultiplied_srgb: false,
+                upload,
+            },
+            conversion,
+        ))
     }
 
     #[cfg(target_os = "ios")]
@@ -119,9 +151,78 @@ impl GpuImage {
             device,
             revision: NEXT_UPLOAD.fetch_add(1, Ordering::Relaxed),
             premultiplied_srgb: true,
-            mipmapped: false,
             upload: ImageUploadStats::default(),
         }
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn from_android(
+        gpu: &Gpu,
+        texture: wgpu::Texture,
+        size: crate::PixelSize,
+        device: u64,
+        luma_weights: (f32, f32),
+        narrow: bool,
+        chroma_offset: [f32; 2],
+    ) -> Result<Self, crate::Status> {
+        let (view, nv12) = if texture.format() == wgpu::TextureFormat::NV12 {
+            let plane = |aspect| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    aspect,
+                    ..Default::default()
+                })
+            };
+            let (kr, kb) = luma_weights;
+            let kg = 1.0 - kr - kb;
+            let (luma, black, chroma, neutral) = if narrow {
+                (255.0 / 219.0, -16.0 / 219.0, 255.0 / 224.0, -128.0 / 224.0)
+            } else {
+                (1.0, 0.0, 1.0, -128.0 / 255.0)
+            };
+            let u = [0.0, -2.0 * kb * (1.0 - kb) / kg, 2.0 * (1.0 - kb)];
+            let v = [2.0 * (1.0 - kr), -2.0 * kr * (1.0 - kr) / kg, 0.0];
+            let offset: [f32; 3] = std::array::from_fn(|i| black + neutral * (u[i] + v[i]));
+            let constants = [
+                [luma, luma, luma, 0.0],
+                [u[0] * chroma, u[1] * chroma, u[2] * chroma, 0.0],
+                [v[0] * chroma, v[1] * chroma, v[2] * chroma, 0.0],
+                [offset[0], offset[1], offset[2], 0.0],
+                [chroma_offset[0], chroma_offset[1], 0.0, 0.0],
+            ];
+            let conversion = crate::pipelines::buffer_from(
+                gpu,
+                "impasto NV12 conversion",
+                bytemuck::bytes_of(&constants),
+                wgpu::BufferUsages::UNIFORM,
+            )?;
+            (
+                plane(wgpu::TextureAspect::Plane0),
+                Some(Nv12Planes {
+                    chroma: plane(wgpu::TextureAspect::Plane1),
+                    conversion,
+                }),
+            )
+        } else {
+            (texture.create_view(&Default::default()), None)
+        };
+        Ok(Self {
+            view: Arc::new(view),
+            premultiplied_srgb: nv12.is_none() && !texture.format().is_srgb(),
+            nv12,
+            material: Arc::default(),
+            width: size.width,
+            height: size.height,
+            device,
+            revision: NEXT_UPLOAD.fetch_add(1, Ordering::Relaxed),
+            upload: ImageUploadStats::default(),
+        })
+    }
+
+    pub(crate) fn nv12(&self) -> Option<&Nv12Planes> {
+        #[cfg(target_os = "android")]
+        return self.nv12.as_ref();
+        #[cfg(not(target_os = "android"))]
+        None
     }
 
     pub fn view(&self) -> &wgpu::TextureView {
@@ -170,55 +271,139 @@ pub enum Load {
     Failed,
 }
 
-#[derive(Clone)]
 struct Cached {
     image: GpuImage,
     used: u64,
 }
 
-/// Image textures the raster adopted this device generation.
-#[derive(Clone, Default)]
+/// Keeps the presented textures alive while replacements await a valid scene.
 pub struct TextureStore {
-    map: HashMap<String, Cached>,
+    active: HashMap<Arc<str>, Cached>,
+    staged: HashMap<Arc<str>, Option<Cached>>,
     generation: u64,
     device: u64,
+    invalidated: bool,
     uploads: ImageUploadStats,
 }
 
 impl TextureStore {
-    pub fn take_uploads(&mut self) -> ImageUploadStats {
-        std::mem::take(&mut self.uploads)
-    }
-
-    pub fn len(&self) -> usize {
-        self.map.len()
-    }
-
-    pub fn same_geometry(&self, source: &str, previous: &Self) -> bool {
-        let size = |store: &Self| store.get(source).map(|image| (image.width, image.height));
-        size(self) == size(previous)
-    }
-
-    pub fn touch(&mut self, source: &str) {
-        if let Some(cached) = self.map.get_mut(source) {
-            cached.used = self.generation;
+    pub fn new(device: u64) -> Self {
+        Self {
+            active: HashMap::new(),
+            staged: HashMap::new(),
+            generation: 0,
+            device,
+            invalidated: false,
+            uploads: ImageUploadStats::default(),
         }
     }
 
-    /// Looks up `source`, uploading pixels on a miss. `resolve` borrows
-    /// the decoded pixels for the duration of the call.
-    pub fn load<'a>(
+    pub fn len(&self) -> usize {
+        self.active.len()
+    }
+
+    pub fn get(&self, source: &str) -> Option<&GpuImage> {
+        self.active.get(source).map(|cached| &cached.image)
+    }
+
+    fn candidate(&self, source: &str) -> Option<&GpuImage> {
+        match self.staged.get(source) {
+            Some(entry) => entry.as_ref().map(|cached| &cached.image),
+            None if !self.invalidated => self.get(source),
+            None => None,
+        }
+    }
+
+    /// Adopts a texture uploaded on another thread. Stale generations and
+    /// older revisions are rejected.
+    pub fn install(&mut self, source: &str, image: GpuImage) {
+        if image.device != self.device
+            || self
+                .candidate(source)
+                .is_some_and(|old| old.revision >= image.revision)
+        {
+            return;
+        }
+        self.uploads.add(image.upload);
+        let entry = Some(Cached { image, used: 0 });
+        if let Some(slot) = self.staged.get_mut(source) {
+            *slot = entry;
+        } else {
+            self.staged.insert(Arc::from(source), entry);
+        }
+    }
+
+    pub fn forget(&mut self, source: &str) {
+        if let Some(slot) = self.staged.get_mut(source) {
+            *slot = None;
+        } else if let Some((key, _)) = self.active.get_key_value(source) {
+            self.staged.insert(Arc::clone(key), None);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.staged.clear();
+        self.invalidated = true;
+    }
+
+    pub fn begin_frame(&mut self) -> TextureTransaction<'_> {
+        self.generation = self.generation.wrapping_add(1);
+        TextureTransaction {
+            store: self,
+            added: HashMap::new(),
+            conversions: Vec::new(),
+        }
+    }
+}
+
+pub struct TextureTransaction<'a> {
+    store: &'a mut TextureStore,
+    added: HashMap<Arc<str>, Cached>,
+    conversions: Vec<wgpu::CommandBuffer>,
+}
+
+impl TextureTransaction<'_> {
+    pub fn get(&self, source: &str) -> Option<&GpuImage> {
+        self.added
+            .get(source)
+            .map(|cached| &cached.image)
+            .or_else(|| self.store.candidate(source))
+    }
+
+    pub fn same_geometry(&self, source: &str) -> bool {
+        let size = |image: &GpuImage| (image.width, image.height);
+        self.get(source).map(size) == self.store.get(source).map(size)
+    }
+
+    pub fn touch(&mut self, source: &str) {
+        let cached = if let Some(entry) = self.store.staged.get_mut(source) {
+            entry.as_mut()
+        } else if !self.store.invalidated {
+            self.store.active.get_mut(source)
+        } else {
+            None
+        };
+        if let Some(cached) = cached {
+            cached.used = self.store.generation;
+        }
+    }
+
+    /// Resolves a source during compilation. Only uploads made by a
+    /// successful transaction become visible to the next frame.
+    pub fn load<'pixels>(
         &mut self,
         gpu: &Gpu,
-        source: &str,
-        resolve: &mut dyn FnMut(&str) -> Option<crate::ImagePixels<'a>>,
+        source: &Arc<str>,
+        resolve: &mut dyn FnMut(&str) -> Option<crate::ImagePixels<'pixels>>,
     ) -> Load {
-        if let Some(cached) = self.map.get_mut(source) {
-            cached.used = self.generation;
-            return Load::Ready {
-                width: cached.image.width(),
-                height: cached.image.height(),
-            };
+        let ready = |image: &GpuImage| Load::Ready {
+            width: image.width(),
+            height: image.height(),
+        };
+        if let Some(image) = self.get(source) {
+            let result = ready(image);
+            self.touch(source);
+            return result;
         }
         let Some(image) = resolve(source) else {
             return if source.starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX) {
@@ -230,62 +415,53 @@ impl TextureStore {
         if image.width == 0 || image.height == 0 {
             return Load::Empty;
         }
-        match GpuImage::upload(gpu, self.device, image.width, image.height, image.rgba) {
-            Some(uploaded) => self.insert(source, uploaded),
-            None => Load::Failed,
-        }
-    }
-
-    fn insert(&mut self, source: &str, image: GpuImage) -> Load {
-        self.uploads.add(image.upload);
-        let load = Load::Ready {
-            width: image.width(),
-            height: image.height(),
+        let Some((image, conversion)) = GpuImage::prepare(
+            gpu,
+            self.store.device,
+            image.width,
+            image.height,
+            image.rgba,
+        ) else {
+            return Load::Failed;
         };
-        self.map.insert(
-            source.to_owned(),
+        self.conversions.extend(conversion);
+        let result = ready(&image);
+        self.added.insert(
+            Arc::clone(source),
             Cached {
                 image,
-                used: self.generation,
+                used: self.store.generation,
             },
         );
-        load
+        result
     }
 
-    /// Adopts a texture uploaded on another thread. Stale generations and
-    /// older revisions are rejected.
-    pub fn install(&mut self, source: &str, image: GpuImage) -> bool {
-        if image.device != self.device {
-            return false;
+    pub fn commit(self, gpu: &Gpu) -> Result<ImageUploadStats, crate::Status> {
+        if !self.conversions.is_empty() {
+            gpu.validation(|| {
+                gpu.submit(self.conversions);
+                Ok(())
+            })?;
         }
-        if let Some(cached) = self.map.get(source)
-            && cached.image.revision >= image.revision
-        {
-            return false;
+        let store = self.store;
+        let generation = store.generation;
+        if store.invalidated {
+            store.active.clear();
+        } else {
+            store.active.retain(|_, cached| cached.used == generation);
         }
-        self.insert(source, image);
-        true
-    }
-
-    pub fn get(&self, source: &str) -> Option<&GpuImage> {
-        self.map.get(source).map(|cached| &cached.image)
-    }
-
-    pub fn forget(&mut self, source: &str) {
-        self.map.remove(source);
-    }
-
-    pub fn begin_frame(&mut self, device: u64) {
-        self.generation = self.generation.wrapping_add(1);
-        self.device = device;
-    }
-
-    pub fn evict_unused(&mut self) {
-        let generation = self.generation;
-        self.map.retain(|_, cached| cached.used == generation);
-    }
-
-    pub fn clear(&mut self) {
-        self.map.clear();
+        for (source, entry) in store.staged.drain() {
+            if let Some(cached) = entry
+                && cached.used == generation
+            {
+                store.active.insert(source, cached);
+            }
+        }
+        for (source, cached) in self.added {
+            store.uploads.add(cached.image.upload);
+            store.active.insert(source, cached);
+        }
+        store.invalidated = false;
+        Ok(std::mem::take(&mut store.uploads))
     }
 }

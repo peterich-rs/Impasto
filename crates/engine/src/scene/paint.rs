@@ -1,8 +1,12 @@
-/// Color space of one gradient stop. Only sRGB is defined.
+/// RGB primaries and transfer function of a gradient stop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum ColorSpace {
     #[default]
     Srgb,
+    /// Display P3 primaries with the sRGB transfer function.
+    DisplayP3,
+    /// Linear sRGB. The byte representation covers zero through SDR white.
+    ExtendedLinear,
 }
 
 /// One color stop on a gradient. `offset` is in `[0, 1]`.

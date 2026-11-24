@@ -1,9 +1,13 @@
 //! Frame uploads shared by every command buffer in a presentation.
 use std::collections::HashMap;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use crate::{
     Status,
-    batch::PaintExtra,
+    batch::{PAINT_EXTRA_BYTES, PaintExtra},
     gpu::Gpu,
     pipelines::{EXTRA_BYTES, Layouts, ParamsUniform, ViewUniform},
 };
@@ -43,6 +47,7 @@ struct Pool {
     initial: usize,
     peak: usize,
     usage: wgpu::BufferUsages,
+    max_slab: usize,
 }
 
 impl Pool {
@@ -54,13 +59,15 @@ impl Pool {
             initial: block,
             peak: 0,
             usage,
+            max_slab: MAX_SLAB,
         }
     }
 
     fn reset(&mut self) -> bool {
-        let consolidate = self.block < MAX_SLAB && self.peak > self.block && self.slabs.len() > 1;
+        let consolidate =
+            self.block < self.max_slab && self.peak > self.block && self.slabs.len() > 1;
         if consolidate {
-            self.block = self.peak.next_multiple_of(self.block).min(MAX_SLAB);
+            self.block = self.peak.next_multiple_of(self.block).min(self.max_slab);
             self.slabs.clear();
         }
         self.peak = 0;
@@ -78,7 +85,7 @@ impl Pool {
         alignment: usize,
     ) -> Result<(Address, bool), Status> {
         let length = data.len();
-        let limit = Self::limit(gpu);
+        let limit = Self::limit(gpu).min(self.max_slab);
         if length > limit {
             return Err(Status::OutOfMemory);
         }
@@ -108,7 +115,7 @@ impl Pool {
                 let consumed = offset + length - slab.data.len();
                 slab.data.resize(offset, 0);
                 slab.data.extend_from_slice(data);
-                self.peak = self.peak.saturating_add(consumed).min(MAX_SLAB);
+                self.peak = self.peak.saturating_add(consumed).min(self.max_slab);
                 return Ok((
                     Address {
                         slab: self.active,
@@ -128,12 +135,104 @@ impl Pool {
             / 4
             * 4
     }
+}
 
-    fn flush(&self, queue: &wgpu::Queue) {
-        for slab in &self.slabs {
-            if !slab.data.is_empty() {
-                queue.write_buffer(&slab.buffer, 0, &slab.data);
+pub struct BufferUpload<'a> {
+    pub buffer: &'a wgpu::Buffer,
+    pub offset: u64,
+    pub data: &'a [u8],
+}
+
+pub fn upload_encoder<'a>(
+    gpu: &Gpu,
+    prelude: &'a mut Option<wgpu::CommandEncoder>,
+) -> &'a mut wgpu::CommandEncoder {
+    prelude.get_or_insert_with(|| {
+        gpu.device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("impasto frame uploads"),
+            })
+    })
+}
+
+struct UploadSlot {
+    belt: wgpu::util::StagingBelt,
+    busy: Arc<AtomicBool>,
+}
+
+struct FrameRing {
+    slots: [UploadSlot; 3],
+    next: usize,
+    submitted: Option<usize>,
+}
+
+impl FrameRing {
+    fn new(gpu: &Gpu) -> Self {
+        Self {
+            slots: std::array::from_fn(|_| UploadSlot {
+                belt: wgpu::util::StagingBelt::new(gpu.device.clone(), 256 * 1024),
+                busy: Arc::default(),
+            }),
+            next: 0,
+            submitted: None,
+        }
+    }
+
+    fn encode<'a>(
+        &mut self,
+        gpu: &Gpu,
+        prelude: &mut Option<wgpu::CommandEncoder>,
+        uploads: impl Iterator<Item = BufferUpload<'a>>,
+    ) -> Result<(), Status> {
+        let slots = self.slots.len();
+        let ready = (0..slots)
+            .map(|offset| (self.next + offset) % slots)
+            .find(|&index| !self.slots[index].busy.load(Ordering::Acquire));
+        if let Some(index) = ready {
+            let slot = &mut self.slots[index];
+            let mut any = false;
+            for upload in uploads {
+                if let Some(size) = wgpu::BufferSize::new(upload.data.len() as u64) {
+                    let slice = slot.belt.allocate(size, wgpu::BufferSize::MIN);
+                    let mapped = slice.get_mapped_range_mut();
+                    if let Ok(mut mapped) = mapped {
+                        mapped.copy_from_slice(upload.data);
+                        drop(mapped);
+                        upload_encoder(gpu, prelude).copy_buffer_to_buffer(
+                            slice.buffer(),
+                            slice.offset(),
+                            upload.buffer,
+                            upload.offset,
+                            size.get(),
+                        );
+                        any = true;
+                    } else {
+                        slot.belt = wgpu::util::StagingBelt::new(gpu.device.clone(), 256 * 1024);
+                        return Err(Status::PresentFailed);
+                    }
+                }
             }
+            if any {
+                slot.belt
+                    .finish_and_recall_on_submit(upload_encoder(gpu, prelude));
+                self.submitted = Some(index);
+                self.next = (index + 1) % slots;
+            }
+        } else {
+            // A saturated queue can still present without waiting for a slot.
+            for upload in uploads.filter(|upload| !upload.data.is_empty()) {
+                gpu.queue
+                    .write_buffer(upload.buffer, upload.offset, upload.data);
+            }
+        }
+        Ok(())
+    }
+
+    fn submitted(&mut self, queue: &wgpu::Queue) {
+        if let Some(index) = self.submitted.take() {
+            let busy = Arc::clone(&self.slots[index].busy);
+            busy.store(true, Ordering::Release);
+            queue.on_submitted_work_done(move || busy.store(false, Ordering::Release));
         }
     }
 }
@@ -179,6 +278,7 @@ impl DynamicGroup {
 }
 
 pub struct FrameArena {
+    ring: FrameRing,
     vertices: Pool,
     uniforms: Pool,
     stops: Pool,
@@ -192,18 +292,37 @@ pub struct FrameArena {
 
 impl FrameArena {
     pub fn new(gpu: &Gpu) -> Self {
+        let mut paint = Pool::new(
+            EXTRA_BYTES,
+            if gpu.caps.paint_storage {
+                wgpu::BufferUsages::STORAGE
+            } else {
+                wgpu::BufferUsages::UNIFORM
+            },
+        );
+        paint.max_slab = if gpu.caps.paint_storage {
+            usize::try_from(gpu.caps.max_storage_binding)
+                .unwrap_or(MAX_SLAB)
+                .min(MAX_SLAB)
+                / 16
+                * 16
+        } else {
+            EXTRA_BYTES
+        };
+        if gpu.caps.paint_storage {
+            paint.block = (64 * 1024).min(paint.max_slab);
+            paint.initial = paint.block;
+        }
+
         Self {
+            ring: FrameRing::new(gpu),
             vertices: Pool::new(256 * 1024, wgpu::BufferUsages::VERTEX),
             uniforms: Pool::new(64 * 1024, wgpu::BufferUsages::UNIFORM),
-            stops: Pool::new(STOPS_BYTES, wgpu::BufferUsages::UNIFORM),
-            paint: Pool::new(
-                EXTRA_BYTES,
-                if gpu.caps.paint_storage {
-                    wgpu::BufferUsages::STORAGE
-                } else {
-                    wgpu::BufferUsages::UNIFORM
-                },
-            ),
+            stops: Pool {
+                max_slab: STOPS_BYTES,
+                ..Pool::new(STOPS_BYTES, wgpu::BufferUsages::UNIFORM)
+            },
+            paint,
             paint_entries: HashMap::new(),
             lut: crate::gradient_lut::GradientLut::new(gpu),
             groups: HashMap::new(),
@@ -214,15 +333,12 @@ impl FrameArena {
 
     pub fn reset(&mut self) {
         self.vertices.reset();
-        if self.uniforms.reset() {
+        let uniforms_changed = self.uniforms.reset();
+        let paint_changed = self.paint.reset();
+        if uniforms_changed || paint_changed {
             self.groups.clear();
         }
-        for pool in [&mut self.stops, &mut self.paint] {
-            pool.active = 0;
-            for slab in &mut pool.slabs {
-                slab.data.clear();
-            }
-        }
+        self.stops.reset();
         self.paint_entries.clear();
         self.lut.reset();
         self.buffers_created = 0;
@@ -255,10 +371,25 @@ impl FrameArena {
         self.lut.trim();
     }
 
-    pub fn flush(&self, gpu: &Gpu) {
-        for pool in [&self.vertices, &self.uniforms, &self.stops, &self.paint] {
-            pool.flush(&gpu.queue);
-        }
+    pub fn flush<'a>(
+        &'a mut self,
+        gpu: &Gpu,
+        prelude: &mut Option<wgpu::CommandEncoder>,
+        resident: impl Iterator<Item = BufferUpload<'a>>,
+    ) -> Result<(), Status> {
+        let immediate = [&self.vertices, &self.uniforms, &self.stops, &self.paint]
+            .into_iter()
+            .flat_map(|pool| &pool.slabs)
+            .map(|slab| BufferUpload {
+                buffer: &slab.buffer,
+                offset: 0,
+                data: &slab.data,
+            });
+        self.ring.encode(gpu, prelude, immediate.chain(resident))
+    }
+
+    pub fn submitted(&mut self, gpu: &Gpu) {
+        self.ring.submitted(&gpu.queue);
     }
 
     pub fn bytes_uploaded(&self) -> [u64; 4] {
@@ -296,12 +427,15 @@ impl FrameArena {
         Ok(address)
     }
 
-    pub fn uniform_binding<T>(&self, address: Address) -> wgpu::BindingResource<'_> {
-        wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-            buffer: &self.uniforms.slabs[address.slab].buffer,
-            offset: u64::from(address.offset),
-            size: wgpu::BufferSize::new(size_of::<T>() as u64),
-        })
+    pub fn uniform_buffer(&self, address: Address) -> (&wgpu::Buffer, u32) {
+        (&self.uniforms.slabs[address.slab].buffer, address.offset)
+    }
+
+    pub fn owns_uniform_buffer(&self, buffer: &wgpu::Buffer) -> bool {
+        self.uniforms
+            .slabs
+            .iter()
+            .any(|slab| &slab.buffer == buffer)
     }
 
     pub fn stops(&mut self, gpu: &Gpu, values: &[[f32; 4]]) -> Result<Address, Status> {
@@ -331,12 +465,11 @@ impl FrameArena {
             let extra = if let Some(&address) = self.paint_entries.get(&key) {
                 address
             } else {
-                let (address, created) = self.paint.push(gpu, bytemuck::bytes_of(&value), 16)?;
-                self.buffers_created += u32::from(created);
+                let address = self.push_paint(gpu, &value)?;
                 self.paint_entries.insert(key, address);
                 address
             };
-            (extra, extra.offset / 80)
+            (extra, extra.offset / PAINT_EXTRA_BYTES)
         } else {
             if self.paint.slabs.is_empty() {
                 let (_, created) = self.paint.push(gpu, &[], 16)?;
@@ -351,6 +484,22 @@ impl FrameArena {
             )
         };
         Ok((PaintPage { stops, extra }, index))
+    }
+
+    fn push_paint(&mut self, gpu: &Gpu, value: &PaintExtra) -> Result<Address, Status> {
+        let (address, created) = self.paint.push(gpu, bytemuck::bytes_of(value), 16)?;
+        self.buffers_created += u32::from(created);
+        Ok(address)
+    }
+
+    pub fn compiled_paint(
+        &mut self,
+        gpu: &Gpu,
+        stops: Address,
+        value: PaintExtra,
+    ) -> Result<(PaintPage, u32), Status> {
+        let extra = self.push_paint(gpu, &value)?;
+        Ok((PaintPage { stops, extra }, extra.offset / PAINT_EXTRA_BYTES))
     }
 
     pub fn group(
@@ -406,7 +555,7 @@ impl FrameArena {
                     entries.push(binding(
                         2,
                         &self.paint.slabs[extra].buffer,
-                        EXTRA_BYTES as u64,
+                        self.paint.slabs[extra].capacity as u64,
                     ));
                     entries.push(wgpu::BindGroupEntry {
                         binding: 3,

@@ -27,6 +27,9 @@ wgpu = { version = "=30.0.2", default-features = false, features = ["metal"] }
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 wgpu = { version = "=30.0.2", default-features = false, features = ["vulkan", "gles"] }
 
+[target.'cfg(target_os = "android")'.dependencies]
+ash = { version = "0.38", default-features = false }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 wgpu = { version = "=30.0.2", default-features = false, features = ["dx12", "vulkan"] }
 

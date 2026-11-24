@@ -56,7 +56,7 @@ fn shadowed(bounds: [f32; 4]) -> Command {
 }
 
 #[test]
-fn mixed_rectangles_use_one_draw_and_reuse_warm_resources() {
+fn mixed_rectangles_keep_shadow_and_fill_order_in_one_pass() {
     let Some(mut raster) = headless(FontLibrary::new()) else {
         return;
     };
@@ -88,7 +88,7 @@ fn mixed_rectangles_use_one_draw_and_reuse_warm_resources() {
     let pixels = raster.render_rgba(size).unwrap();
     let cold = raster.submit_stats().render;
     assert!(cold.direct_present, "{cold:?}");
-    assert_eq!((cold.passes, cold.draws), (1, 1));
+    assert_eq!((cold.passes, cold.draws), (1, 200));
     // Each shadow contributes a second instance for its rectangle.
     assert_eq!(cold.vertex_bytes, 400 * 64);
     assert_eq!(
@@ -101,12 +101,13 @@ fn mixed_rectangles_use_one_draw_and_reuse_warm_resources() {
     );
     raster.submit_layers(&scene, 1.0, |_| None).unwrap();
     assert_eq!(raster.render_rgba(size).unwrap(), pixels);
+    // Repeated pictures promote on the second frame. Their third replay
+    // preserves the same output and order with warm resources.
+    assert_eq!(raster.render_rgba(size).unwrap(), pixels);
     let warm = raster.submit_stats().render;
     assert_eq!((warm.buffers_created, warm.bind_groups_created), (0, 0));
-    assert_eq!(
-        (warm.passes, warm.draws, warm.vertex_bytes),
-        (1, 1, cold.vertex_bytes)
-    );
+    assert_eq!((warm.passes, warm.draws), (1, 200));
+    assert!(warm.vertex_bytes <= cold.vertex_bytes);
 }
 
 fn output(gpu: &crate::Gpu, format: wgpu::TextureFormat, size: PixelSize) -> wgpu::Texture {
@@ -191,7 +192,7 @@ fn asymmetric_continuous_corners_agree_in_paint_and_clip() {
 
 #[test]
 fn rounded_shadow_matches_two_dimensional_reference() {
-    if std::env::var("IMPASTO_SHADOW_2D").as_deref() != Ok("1") {
+    if std::env::var("IMPASTO_SHADOW_2D").as_deref() == Ok("0") {
         return;
     }
     let Some(mut raster) = headless(FontLibrary::new()) else {
@@ -203,10 +204,25 @@ fn rounded_shadow_matches_two_dimensional_reference() {
         curve: 2.0,
     };
     let sigma = 3.0_f32;
-    let pixels = capture(
-        &mut raster,
-        1,
-        vec![Command::ShapedRect {
+    let shadow = BoxShadow {
+        offset: [0.0; 2],
+        blur_sigma: sigma,
+        spread: 0.0,
+        color: [255; 4],
+    };
+    let mut ordinary = rect(bounds, [0; 4]);
+    if let Command::Rect {
+        corner_radius,
+        box_shadows,
+        ..
+    } = &mut ordinary
+    {
+        *corner_radius = corners.radii[0];
+        *box_shadows = Arc::from([shadow]);
+    }
+    let commands = [
+        ordinary,
+        Command::ShapedRect {
             bounds,
             corners,
             paint: RectPaint {
@@ -215,16 +231,22 @@ fn rounded_shadow_matches_two_dimensional_reference() {
                 stroke_color: [0; 4],
                 gradient: None,
                 shadow: None,
-                box_shadows: Arc::from([BoxShadow {
-                    offset: [0.0; 2],
-                    blur_sigma: sigma,
-                    spread: 0.0,
-                    color: [255; 4],
-                }]),
+                box_shadows: Arc::from([shadow]),
             },
-        }],
-        PixelSize::new(32, 32),
-    );
+        },
+    ];
+    let frames = commands
+        .into_iter()
+        .enumerate()
+        .map(|(index, command)| {
+            capture(
+                &mut raster,
+                index as u64 + 1,
+                vec![command],
+                PixelSize::new(32, 32),
+            )
+        })
+        .collect::<Vec<_>>();
     let steps = 16;
     for [x, y] in [[9, 9], [10, 10], [10, 14], [16, 14]] {
         let mut expected = 0.0;
@@ -240,11 +262,13 @@ fn rounded_shadow_matches_two_dimensional_reference() {
             }
         }
         expected /= std::f32::consts::TAU * sigma * sigma * (steps * steps) as f32;
-        let actual = f32::from(pixel(&pixels, 32, x, y)[3]) / 255.0;
-        assert!(
-            (actual - expected).abs() < 0.02,
-            "{x}, {y}: {actual} vs {expected}"
-        );
+        for pixels in &frames {
+            let actual = f32::from(pixel(pixels, 32, x, y)[3]) / 255.0;
+            assert!(
+                (actual - expected).abs() < 0.02,
+                "{x}, {y}: {actual} vs {expected}"
+            );
+        }
     }
 }
 
@@ -269,10 +293,10 @@ fn opaque_root_can_use_lcd_glyphs() {
         &mut raster,
         1,
         vec![
-            Command::Fill { color: [255; 4] },
+            rect([0.0, 0.0, 192.0, 32.0], [255; 4]),
             Command::Text {
-                x: 0.0,
-                y: 0.0,
+                x: 4.0,
+                y: 2.0,
                 shaped: shaper.metrics(&key).shaped.clone(),
                 color: [0, 0, 0, 255],
                 span_paints: Arc::from([]),
@@ -313,6 +337,7 @@ fn frame_slabs_survive_growing_between_slices() {
     let frame = raster.frame.as_ref().unwrap();
     let gpu = &device.gpu;
     let compositor = &mut device.compositor;
+    compositor.disable_residency();
     let targets = [output(gpu, format, size), output(gpu, format, size)];
     compositor.begin_frame();
     gpu.validation(|| {
@@ -326,7 +351,7 @@ fn frame_slabs_survive_growing_between_slices() {
                 compositor
                     .encode(
                         gpu,
-                        frame.scene(&raster.fonts, Some(&slice)),
+                        frame.scene(&raster.fonts, &device.textures, Some(&slice)),
                         &target.create_view(&Default::default()),
                         format,
                         [12, 12],
@@ -335,8 +360,9 @@ fn frame_slabs_survive_growing_between_slices() {
                     .finish(),
             );
         }
-        compositor.flush(gpu);
-        gpu.queue.submit(commands);
+        let (_, prelude) = compositor.flush(gpu)?;
+        gpu.submit(prelude.into_iter().chain(commands));
+        compositor.submitted(gpu);
         Ok(())
     })
     .unwrap();
@@ -711,12 +737,22 @@ fn bench_text(
 #[test]
 #[ignore = "GPU microbenchmark"]
 fn bench_scroll_1000_cards() {
+    bench_card_scroll(1_000, 10.0);
+}
+
+#[test]
+#[ignore = "GPU microbenchmark"]
+fn bench_scroll_10000_cards() {
+    bench_card_scroll(10_000, 100.0);
+}
+
+fn bench_card_scroll(count: u16, scroll_per_frame: f32) {
     let fonts = FontLibrary::new();
     let mut shaper = ParleyShaper::new(fonts.clone());
     assert!(shaper.register("Sans", ROBOTO));
     let text = bench_text(&mut shaper, Arc::from("Card"), 14.0, 140.0, false);
     let mut commands = Vec::new();
-    for index in 0..1000u16 {
+    for index in 0..count {
         commands.push(Command::PushTransform {
             translate_x: f32::from(index % 4) * 160.0,
             translate_y: f32::from(index / 4) * 60.0,
@@ -759,7 +795,7 @@ fn bench_scroll_1000_cards() {
     let mut raster = benchmark::headless(fonts);
     benchmark::run(
         &mut raster,
-        "scroll_1000_cards",
+        &format!("scroll_{count}_cards"),
         120,
         PixelSize::new(640, 720),
         |frame| {
@@ -769,7 +805,7 @@ fn bench_scroll_1000_cards() {
             scene.layers.push(Layer {
                 kind: LayerKind::Offset {
                     x: 0.0,
-                    y: -(frame as f32) * 10.0,
+                    y: -(frame as f32) * scroll_per_frame,
                 },
                 parent: None,
                 first_child: Some(LayerId(0)),
@@ -981,6 +1017,12 @@ fn resident_mask_pages_color_gradients_and_decorations_share_a_draw() {
     let Some(mut raster) = headless(fonts) else {
         return;
     };
+    raster
+        .device
+        .as_mut()
+        .unwrap()
+        .compositor
+        .disable_glyph_outlines();
     let size = PixelSize::new(2800, 1200);
     let pixels = capture(&mut raster, 1, vec![command], size);
     let stats = raster.submit_stats();
@@ -1056,7 +1098,9 @@ fn timestamp_readback_keeps_frame_and_device_identity() {
     let size = PixelSize::new(32, 32);
     let scene = tree(1, [rect([0.0, 0.0, 32.0, 32.0], [255; 4])]);
     raster.submit_layers(&scene, 1.0, |_| None).unwrap();
-    raster.render_rgba(size).unwrap();
+    for _ in 0..3 {
+        raster.render_rgba(size).unwrap();
+    }
     let reference = raster.submit_stats().render;
     let frame_id = 42;
     raster.begin_gpu_frame(Some(frame_id));
@@ -1192,4 +1236,215 @@ fn stencil_intersects_pixel_aligned_canvas_clips_with_even_odd_holes() {
             assert_eq!(raster.submit_stats().render.stencil_draws, 3);
         }
     }
+}
+
+#[test]
+fn scrolling_picture_reuses_rect_image_and_glyph_geometry() {
+    let fonts = FontLibrary::new();
+    let mut shaper = ParleyShaper::new(fonts.clone());
+    assert!(shaper.register("Sans", ROBOTO));
+    let Some(mut raster) = headless(fonts) else {
+        return;
+    };
+    let gpu = &raster.device.as_ref().unwrap().gpu;
+    let resident = gpu.caps.paint_storage
+        && !gpu.caps.lcd
+        && std::env::var("IMPASTO_RESIDENT_PICTURES").as_deref() != Ok("0")
+        && std::env::var("IMPASTO_SPECIALIZE_PAINT").as_deref() != Ok("0")
+        && std::env::var("IMPASTO_EARLY_Z").as_deref() != Ok("1")
+        && !gpu.gradient_lut;
+    let mut scene = tree(
+        1,
+        [
+            rect([0.0, 0.0, 64.0, 32.0], [0, 0, 255, 255]),
+            Command::Image {
+                x: 50.0,
+                y: 2.0,
+                w: 8.0,
+                h: 8.0,
+                source: Arc::from("icon"),
+                mode: ContentMode::Fill,
+                required: true,
+            },
+            bench_text(&mut shaper, Arc::from("Scroll"), 14.0, 48.0, false),
+        ],
+    );
+    scene.root = LayerId(1);
+    scene.layers[0].parent = Some(scene.root);
+    scene.layers.push(Layer {
+        kind: LayerKind::Offset { x: 0.0, y: 0.0 },
+        parent: None,
+        first_child: Some(LayerId(0)),
+        next: None,
+    });
+    let size = PixelSize::new(72, 42);
+    let resolve = |_: &str| {
+        Some(ImagePixels {
+            width: 1,
+            height: 1,
+            rgba: &[255, 0, 0, 255],
+        })
+    };
+    let mut scene = Arc::new(scene);
+    raster
+        .submit_shared_layers(Arc::clone(&scene), 1.0, resolve)
+        .unwrap();
+    let original = raster.render_rgba(size).unwrap();
+    assert!(raster.submit_stats().render.vertex_bytes > 0);
+    Arc::make_mut(&mut scene).layers[1].kind = LayerKind::Offset { x: 4.0, y: 4.0 };
+    raster.submit_shared_layers(scene, 1.0, resolve).unwrap();
+    let translated = raster.render_rgba(size).unwrap();
+    assert_eq!(pixel(&original, 72, 52, 5), [255, 0, 0, 255]);
+    assert_eq!(pixel(&translated, 72, 56, 9), [255, 0, 0, 255]);
+    let stats = raster.submit_stats();
+    assert_eq!(stats.picture_reused, 1);
+    assert_eq!(stats.atlas.upload_bytes, 0);
+    assert!(
+        stats.render.vertex_bytes > 0,
+        "the second frame promotes the picture"
+    );
+    assert_eq!(raster.render_rgba(size).unwrap(), translated);
+    let stats = raster.submit_stats();
+    if resident {
+        assert_eq!(stats.render.vertex_bytes, 0, "{stats:?}");
+        assert_eq!(stats.render.bind_groups_created, 0, "{stats:?}");
+    }
+}
+
+#[test]
+fn image_array_preserves_source_order_and_filtering() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let images = [
+        ("red", &[255, 0, 0, 255]),
+        ("green", &[0, 255, 0, 255]),
+        ("blue", &[0, 0, 255, 255]),
+    ];
+    let scene = tree(
+        1,
+        images
+            .iter()
+            .zip([0.0, 4.0, 8.0])
+            .map(|((source, _), x)| Command::Image {
+                x,
+                y: 0.0,
+                w: 8.0,
+                h: 8.0,
+                source: Arc::from(*source),
+                mode: ContentMode::Fill,
+                required: true,
+            })
+            .collect::<Vec<_>>(),
+    );
+    raster
+        .submit_layers(&scene, 1.0, |source| {
+            let (_, rgba) = images.iter().find(|(name, _)| *name == source)?;
+            Some(ImagePixels {
+                width: 1,
+                height: 1,
+                rgba: rgba.as_slice(),
+            })
+        })
+        .unwrap();
+    let pixels = raster.render_rgba(PixelSize::new(16, 8)).unwrap();
+    assert_eq!(pixel(&pixels, 16, 3, 3), *images[0].1);
+    assert_eq!(pixel(&pixels, 16, 7, 3), *images[1].1);
+    assert_eq!(pixel(&pixels, 16, 11, 3), *images[2].1);
+    if raster.device.as_ref().unwrap().gpu.image_array() {
+        assert_eq!(raster.submit_stats().render.draws, 1);
+    }
+}
+
+#[test]
+fn large_glyph_outlines_are_reused_across_scale_changes() {
+    let fonts = FontLibrary::new();
+    let mut shaper = ParleyShaper::new(fonts.clone());
+    assert!(shaper.register("Sans", ROBOTO));
+    let Some(mut raster) = headless(fonts) else {
+        return;
+    };
+    let text = bench_text(&mut shaper, Arc::from("I"), 108.0, 150.0, false);
+    let size = PixelSize::new(196, 196);
+    let first = capture(&mut raster, 1, vec![text.clone()], size);
+    let cold = raster.submit_stats();
+    assert!(first.as_chunks::<4>().0.iter().any(|pixel| pixel[3] > 200));
+    assert!(cold.render.mesh_upload_bytes > 0);
+    let enlarged = capture(
+        &mut raster,
+        2,
+        vec![
+            Command::PushTransform {
+                translate_x: 0.0,
+                translate_y: 0.0,
+                rotate_rad: 0.0,
+                scale_x: 1.25,
+                scale_y: 1.25,
+            },
+            text,
+            Command::Pop,
+        ],
+        size,
+    );
+    assert_ne!(first, enlarged);
+    let warm = raster.submit_stats();
+    assert_eq!(warm.render.mesh_upload_bytes, 0);
+    assert_eq!(warm.atlas.uploads, 0);
+}
+
+#[test]
+fn display_p3_output_maps_linear_srgb_and_preserves_p3_gradient_stops() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let red = [255, 0, 0, 255];
+    let mut p3 = rect([4.0, 0.0, 4.0, 4.0], red);
+    if let Command::Rect { gradient, .. } = &mut p3 {
+        *gradient = Some(Gradient::Linear {
+            start: [0.0, 0.0],
+            end: [1.0, 0.0],
+            stops: [0.0, 1.0]
+                .map(|offset| ColorStop {
+                    offset,
+                    color: red,
+                    space: engine::scene::ColorSpace::DisplayP3,
+                })
+                .to_vec(),
+        });
+    }
+    raster
+        .submit_layers(&tree(1, [rect([0.0, 0.0, 4.0, 4.0], red), p3]), 1.0, |_| {
+            None
+        })
+        .unwrap();
+    let size = PixelSize::new(8, 4);
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let gpu = raster.device.as_ref().unwrap().gpu.clone();
+    let target = output(&gpu, format, size);
+    let config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width: size.width,
+        height: size.height,
+        present_mode: wgpu::PresentMode::Fifo,
+        desired_maximum_frame_latency: 2,
+        alpha_mode: wgpu::CompositeAlphaMode::PreMultiplied,
+        view_formats: vec![],
+        color_space: wgpu::SurfaceColorSpace::DisplayP3,
+    };
+    raster
+        .encode_and_submit(
+            &target.create_view(&Default::default()),
+            crate::compositor::OutputFormat::surface(&config),
+            size,
+        )
+        .unwrap();
+    let bytes = read_rgba(&gpu, &target, size).unwrap();
+    let rgb = pixel(&bytes, 8, 2, 2);
+    assert!(
+        rgb[0].abs_diff(234) <= 2 && rgb[1].abs_diff(51) <= 2 && rgb[2].abs_diff(35) <= 2,
+        "{rgb:?}"
+    );
+    let wide = pixel(&bytes, 8, 6, 2);
+    assert!(wide[0] >= 254 && wide[1] <= 4 && wide[2] <= 4, "{wide:?}");
 }

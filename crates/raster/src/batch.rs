@@ -24,7 +24,7 @@ pub struct RectInstance {
 
 /// Optional paint fields shared by glyphs, rectangles and mesh brushes.
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PaintExtra {
     pub geometry: [f32; 4],
     pub gradient: [f32; 4],
@@ -34,7 +34,7 @@ pub struct PaintExtra {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct RectVertex {
     pub rect: [f32; 4],
     pub shape: [f32; 4],
@@ -89,6 +89,20 @@ impl RectInstance {
 pub const RECT_FILL: u32 = 0;
 pub const RECT_STROKE: u32 = 1;
 pub const RECT_FILL_STROKE: u32 = 2;
+pub fn is_shadow(vertex: &RectVertex) -> bool {
+    vertex.shape[2] == RECT_SHADOW as f32
+}
+
+pub fn has_shaped_shadow(vertices: &[RectVertex]) -> bool {
+    vertices
+        .iter()
+        .any(|vertex| is_shadow(vertex) && vertex.shape[3] >= RECT_SHAPED as f32)
+}
+
+pub fn rect_pipeline_runs(vertices: &[RectVertex]) -> impl Iterator<Item = &[RectVertex]> {
+    vertices.chunk_by(|a, b| is_shadow(a) == is_shadow(b))
+}
+
 pub const RECT_SHADOW: u32 = 3;
 pub const RECT_GRADIENT: u32 = 1;
 pub const RECT_SHAPED: u32 = 2;
@@ -105,7 +119,8 @@ pub struct GlyphVertex {
 
 const _: () = assert!(size_of::<RectVertex>() == 64);
 const _: () = assert!(size_of::<GlyphVertex>() == 40);
-const _: () = assert!(size_of::<PaintExtra>() == 80);
+pub const PAINT_EXTRA_BYTES: u32 = 80;
+const _: () = assert!(size_of::<PaintExtra>() == PAINT_EXTRA_BYTES as usize);
 
 pub const GLYPH_COLOR: u32 = 1;
 pub const GLYPH_GRADIENT: u32 = 2;
@@ -308,7 +323,7 @@ pub fn pack_stops(stops: &[ColorStop], alpha: u8) -> Option<Vec<[f32; 4]>> {
         if !stop.offset.is_finite() {
             return None;
         }
-        packed.push(crate::color::linear_premultiplied(stop.color, alpha)?);
+        packed.push(crate::color::gradient_stop(stop, alpha));
         packed.push([stop.offset, 0.0, 0.0, 0.0]);
     }
     Some(packed)

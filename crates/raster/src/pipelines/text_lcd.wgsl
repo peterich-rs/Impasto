@@ -5,15 +5,12 @@ struct LcdOut {
 };
 
 @fragment
-fn fs_lcd(in: VertexOut) -> LcdOut {
+fn fs_lcd(in: MaskOut) -> LcdOut {
     let layer = i32(in.flags_and_layer >> 8u);
-    let uv = in.uv;
-    let third_pixel = dpdx(uv) / 3.0;
-    let masks = vec3(
-        glyph_coverage(uv - third_pixel, layer, in.flags_and_layer),
-        glyph_coverage(uv, layer, in.flags_and_layer),
-        glyph_coverage(uv + third_pixel, layer, in.flags_and_layer),
-    );
+    var masks = textureSample(mask_atlas, atlas_sampler, in.uv, layer).rgb;
+    if text_gamma && (in.flags_and_layer & 8u) != 0u {
+        masks = pow(masks, vec3(0.85));
+    }
     let covered = max(masks.r, max(masks.g, masks.b)) * in.color.a;
     return LcdOut(vec4(in.color.rgb * masks, covered), vec4(masks * in.color.a, covered));
 }

@@ -214,7 +214,7 @@ impl GpuProfiler {
                                     label: Some("impasto Metal timestamp resolve"),
                                 });
                         capture.resolve(&mut encoder);
-                        gpu.queue.submit([encoder.finish()]);
+                        gpu.submit([encoder.finish()]);
                         pending.state = capture.map();
                         return true;
                     }

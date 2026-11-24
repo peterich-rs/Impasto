@@ -390,8 +390,15 @@ fn odd_image_mips_average_linear_premultiplied_texels() {
     let Some(mut raster) = headless(FontLibrary::new()) else {
         return;
     };
-    let mut image = [[0, 0, 255, 0]; 9];
-    image[4] = [255, 0, 0, 255];
+    const SIDE: u32 = 129;
+    let width = SIDE as usize;
+    let mut image = vec![[0, 0, 255, 0]; width * width];
+    for (index, pixel) in image.iter_mut().enumerate() {
+        if index % width % 3 == 1 && index / width % 3 == 1 {
+            *pixel = [255, 0, 0, 255];
+        }
+    }
+    let levels = width.ilog2() + 1;
     let scene = tree(
         1,
         [Command::Image {
@@ -407,14 +414,18 @@ fn odd_image_mips_average_linear_premultiplied_texels() {
     raster
         .submit_layers(&scene, 1.0, |_| {
             Some(ImagePixels {
-                width: 3,
-                height: 3,
+                width: SIDE,
+                height: SIDE,
                 rgba: image.as_flattened(),
             })
         })
         .unwrap();
     let stats = raster.submit_stats().image_upload;
-    assert_eq!(stats.render_passes + stats.compute_passes, 2, "{stats:?}");
+    assert_eq!(
+        stats.render_passes + stats.compute_passes,
+        levels,
+        "{stats:?}"
+    );
     if std::env::var("IMPASTO_IMAGE_UPLOAD").as_deref() == Ok("compute")
         && raster.device.as_ref().unwrap().gpu.caps.has_compute
     {
@@ -424,7 +435,7 @@ fn odd_image_mips_average_linear_premultiplied_texels() {
             .flags
             .contains(wgpu::TextureFormatFeatureFlags::STORAGE_WRITE_ONLY)
         {
-            assert_eq!(stats.compute_passes, 2, "{stats:?}");
+            assert_eq!(stats.compute_passes, levels, "{stats:?}");
         }
     }
     let pixel = raster.render_rgba(PixelSize::new(1, 1)).unwrap();
@@ -465,4 +476,56 @@ fn compute_blur_writes_bounded_output_and_counts_both_axes() {
     }
     assert_eq!(pixel(&image, 64, 0, 0), [0; 4]);
     assert_eq!(pixel(&image, 64, 32, 32), [255; 4]);
+}
+
+#[test]
+fn staged_texture_replacements_are_published_only_after_valid_submission() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let scene = tree(
+        1,
+        [Command::Image {
+            x: 0.0,
+            y: 0.0,
+            w: 4.0,
+            h: 4.0,
+            source: Arc::from("preview"),
+            mode: ContentMode::Fill,
+            required: true,
+        }],
+    );
+    let size = PixelSize::new(4, 4);
+    raster
+        .submit_layers(&scene, 1.0, |_| {
+            Some(ImagePixels {
+                width: 1,
+                height: 1,
+                rgba: &[255, 0, 0, 255],
+            })
+        })
+        .unwrap();
+    let green = raster
+        .texture_factory()
+        .unwrap()
+        .upload_rgba(1, 1, &[0, 255, 0, 255])
+        .unwrap();
+    raster.install_uploaded("preview", &green);
+    let mut rejected = scene.clone();
+    rejected.layers[0].kind = LayerKind::Picture {
+        picture: PictureId(100),
+    };
+    assert_eq!(
+        raster.submit_layers(&rejected, 1.0, |_| None).unwrap_err(),
+        Status::BadScene
+    );
+    assert_eq!(
+        pixel(&raster.render_rgba(size).unwrap(), 4, 2, 2),
+        [255, 0, 0, 255]
+    );
+    raster.submit_layers(&scene, 1.0, |_| None).unwrap();
+    assert_eq!(
+        pixel(&raster.render_rgba(size).unwrap(), 4, 2, 2),
+        [0, 255, 0, 255]
+    );
 }

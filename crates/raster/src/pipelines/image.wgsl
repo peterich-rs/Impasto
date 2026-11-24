@@ -38,9 +38,13 @@ fn vs_main(@builtin(vertex_index) vertex: u32, data: ImageVertex) -> VertexOut {
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let data = in;
     let flags = u32(data.info.x);
-    var texel = textureSample(image_tex, image_sampler, in.uv);
+    let dx = dpdx(in.uv);
+    let dy = dpdy(in.uv);
+    var texel: vec4<f32>;
     if ((flags & 5u) != 0u) {
         texel = textureSampleLevel(image_tex, image_sampler, in.uv, 0.0);
+    } else {
+        texel = textureSampleGrad(image_tex, image_sampler, in.uv, dx, dy);
     }
     // Uploads and offscreen targets are already premultiplied in linear
     // space. Core Video BGRA surfaces are premultiplied in sRGB instead.

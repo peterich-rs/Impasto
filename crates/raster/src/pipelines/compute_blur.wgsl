@@ -8,7 +8,8 @@ struct BlurParams {
 @group(0) @binding(0) var source_tex: texture_2d<f32>;
 @group(0) @binding(1) var target_tex: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> params: BlurParams;
-var<workgroup> tile: array<vec4<f32>, 448>;
+alias TilePixel = vec4<f32>;
+var<workgroup> tile: array<TilePixel, 448>;
 
 @compute @workgroup_size(8, 8)
 fn blur(
@@ -24,7 +25,7 @@ fn blur(
         let offset = select(vec2(along, across), vec2(across, along), vertical);
         let pixel = clamp(vec2<i32>(group.xy * 8u) + offset,
             vec2(0), vec2<i32>(params.size) - vec2(1));
-        tile[i] = textureLoad(source_tex, pixel, 0);
+        tile[i] = TilePixel(textureLoad(source_tex, pixel, 0));
     }
     workgroupBarrier();
     if any(global.xy >= params.size) { return; }
@@ -36,7 +37,7 @@ fn blur(
     for (var tap = 0u; tap <= params.radius * 2u; tap++) {
         let distance = f32(i32(tap) - i32(params.radius)) / params.sigma;
         let weight = exp(-0.5 * distance * distance);
-        color += tile[row + position + tap] * weight;
+        color += vec4<f32>(tile[row + position + tap]) * weight;
         total += weight;
     }
     textureStore(target_tex, vec2<i32>(global.xy), color / total);

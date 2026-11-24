@@ -172,11 +172,11 @@ impl MetalSurface {
                 .iter()
                 .zip(views)
                 .all(|(expected, view)| *expected == view.node.to_raw());
+        engine.prepare_metal_surface(&mut self.surface, pixels)?;
         let count = if interleaved { views.len() } else { 0 };
         let Some(targets) = self.compositor.targets(id.0, count, &self.events)? else {
             return self.draw(engine, pixels);
         };
-        engine.prepare_metal_surface(&mut self.surface, pixels)?;
         let acquire_started = std::time::Instant::now();
         let drawables = std::iter::once(self.target.layer)
             .chain(targets.layers.iter().map(|layer| layer.ptr()))
@@ -187,7 +187,7 @@ impl MetalSurface {
         if !self.gate.allows(id) {
             return Err(Status::AcquireMiss);
         }
-        let mut batch = engine.begin_metal_slices()?;
+        let mut batch = engine.begin_metal_slices(&self.surface)?;
         for (index, drawable) in drawables.iter().enumerate() {
             let slice = (!targets.resets).then_some(index);
             // SAFETY: the drawable belongs to the same Metal device and remains
