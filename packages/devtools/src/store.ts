@@ -4,7 +4,6 @@
  * gated on the hub revision. Frame samples are pulled on demand.
  */
 import { createSignal, onCleanup } from "solid-js";
-import { onFrame } from "@impasto/solid-renderer";
 import { appendCapped } from "./cursor.ts";
 import type { HighlightBox } from "./highlight.tsx";
 import * as raw from "./native.js";
@@ -136,16 +135,12 @@ export const store = {
       return;
     }
     attached = true;
-    let elapsed = 200;
-    const stop = onFrame((_target, interval) => {
-      if (traceRecording()) return;
-      elapsed += interval;
-      if (elapsed < 200) return;
-      elapsed = 0;
-      pull();
-    });
+    pull();
+    const timer = setInterval(() => {
+      if (!traceRecording()) pull();
+    }, 200);
     onCleanup(() => {
-      stop();
+      clearInterval(timer);
       attached = false;
     });
   },
