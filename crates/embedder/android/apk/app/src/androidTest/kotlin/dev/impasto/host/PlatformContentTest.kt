@@ -3,6 +3,7 @@ package dev.impasto.host
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.media.ImageWriter
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -77,6 +78,18 @@ class PlatformContentTest(private val renderer: ImpastoHost.Renderer) {
                     stream.surface.unlockCanvasAndPost(canvas)
                     await { pixel(scenario, host.view, color) }
                 }
+                scenario.onActivity {
+                    stream.close()
+                    stream = host.view.openExternalTexture("camera", 16, 16, ExternalTexture.Format.CAMERA_YUV)
+                }
+                ImageWriter.newInstance(stream.surface, 2).use { writer ->
+                    queueYuv(writer, 128, 128, 128)
+                    await { pixel(scenario, host.view, Color.rgb(130, 130, 130), tolerance = 2) }
+                    queueYuv(writer, 81, 90, 240)
+                    await { pixel(scenario, host.view, Color.RED, tolerance = 40) }
+                    queueYuv(writer, 41, 240, 110)
+                    await { pixel(scenario, host.view, Color.BLUE, tolerance = 40) }
+                }
             } finally {
                 scenario.onActivity { host.close() }
             }
@@ -84,7 +97,23 @@ class PlatformContentTest(private val renderer: ImpastoHost.Renderer) {
         }
     }
 
-    private fun pixel(scenario: ActivityScenario<ImpastoActivity>, view: ImpastoView, color: Int): Boolean {
+    private fun queueYuv(writer: ImageWriter, y: Int, u: Int, v: Int) {
+        val image = writer.dequeueInputImage()
+        val values = intArrayOf(y, u, v)
+        for ((index, plane) in image.planes.withIndex()) {
+            val divisor = if (index == 0) 1 else 2
+            val data = plane.buffer
+            val start = data.position()
+            for (row in 0 until image.height / divisor) {
+                for (column in 0 until image.width / divisor) {
+                    data.put(start + row * plane.rowStride + column * plane.pixelStride, values[index].toByte())
+                }
+            }
+        }
+        writer.queueInputImage(image)
+    }
+
+    private fun pixel(scenario: ActivityScenario<ImpastoActivity>, view: ImpastoView, color: Int, tolerance: Int = 0): Boolean {
         val done = CountDownLatch(1)
         var matches = false
         scenario.onActivity {
@@ -95,7 +124,11 @@ class PlatformContentTest(private val renderer: ImpastoHost.Renderer) {
                 if (status == PixelCopy.SUCCESS) {
                     val x = (32 * view.density).toInt()
                     for (y in 0 until bitmap.height) {
-                        if (bitmap.getPixel(x, y) == color) {
+                        val pixel = bitmap.getPixel(x, y)
+                        if (kotlin.math.abs(Color.red(pixel) - Color.red(color)) <= tolerance &&
+                            kotlin.math.abs(Color.green(pixel) - Color.green(color)) <= tolerance &&
+                            kotlin.math.abs(Color.blue(pixel) - Color.blue(color)) <= tolerance
+                        ) {
                             matches = true
                             break
                         }

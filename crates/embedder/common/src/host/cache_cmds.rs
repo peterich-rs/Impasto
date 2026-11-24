@@ -63,6 +63,7 @@ fn reload(runtime: &mut UiHost, source: String) {
 fn external_texture(runtime: &mut UiHost, source: String, frame: Option<crate::ExternalFrame>) {
     let used = uses_texture(runtime, &source);
     runtime.graphics.post(move |graphics| {
+        graphics.external_gpu.remove(&source);
         if let Some(frame) = frame {
             graphics.external_textures.insert(source.clone(), frame);
         } else {
@@ -82,6 +83,7 @@ fn external_gpu_texture(
 ) {
     let used = uses_texture(runtime, &source);
     runtime.graphics.post(move |graphics| {
+        graphics.external_textures.remove(&source);
         if let Some(import) = frame {
             let image = import(&graphics.raster.borrow());
             graphics.external_gpu.insert(

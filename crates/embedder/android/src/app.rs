@@ -33,6 +33,7 @@ const IME_UPDATE: i32 = 2;
 const IME_HIDE: i32 = 3;
 
 mod entrypoints;
+mod hardware_frame;
 mod platform_services;
 
 struct Bridge {
@@ -934,6 +935,10 @@ fn android_boot(
     platform_runner: Arc<dyn embedder::TaskRunner>,
 ) -> Result<Boot, BootError> {
     let bridge_for_surface = Arc::clone(&bridge);
+    let pipeline_cache = log_dir
+        .as_deref()
+        .and_then(std::path::Path::parent)
+        .map(std::path::Path::to_owned);
     let script_assets = Arc::clone(&bridge.assets);
     let launch_url = engine::session::shared(initial_url);
     let thread_topology = match decode::read_bytes(&script_assets, c"app.thread_topology") {
@@ -992,7 +997,14 @@ fn android_boot(
         thread_topology,
         launch_url: Arc::clone(&launch_url),
         http: Some(embedder::http_client().map_err(BootError::Platform)?),
-        open_raster: Box::new(move |fonts| renderer.create_raster(fonts)),
+        open_raster: Box::new(move |fonts| {
+            let mut raster = renderer.create_raster(fonts)?;
+            if let Some(directory) = &pipeline_cache {
+                // SAFETY: cache_log_dir derives this directory from Context.getCacheDir().
+                unsafe { raster.set_pipeline_cache_directory(directory.clone()) };
+            }
+            Ok(raster)
+        }),
         open_surface: Renderer::surfaces(move |id| bridge_for_surface.first_frame(id)),
         dump_list: false,
         inspect: std::env::var_os("IMPASTO_INSPECT").map(std::path::PathBuf::from),
