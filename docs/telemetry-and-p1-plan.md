@@ -30,26 +30,30 @@ flowchart LR
 
 以进程内单调帧号和设备代次关联 GPU 样本。宿主时钟统一为单调纳秒，记录平台收到 vsync、UI 开始/完成、Raster 开始、提交完成、present 返回与帧预算。UI 和 Raster 的时间表示各自线程上的墙钟区间，包含其同步等待。端到端时间与 UI→Raster 排队单独呈现。平台提供的 vsync 时间戳属于平台时钟，平台回调到达时间使用宿主时钟。Present 返回表示宿主完成调用，UIKit 可另记事务确认。
 
-帧记录和五条泳道（Platform、UI、Raster、IO、GPU）采用有界缓冲。首次提交后 GPU 状态为 Pending，按帧号与设备代次回填并递增订阅 revision。设备重建、读回失败、槽位已满、能力缺失和关闭分别有显式状态。GPU 样本保存 Pass 类型、切片号、Draw 数、GPU 相对偏移与时长，分别报告包围区间与 Pass 耗时和。GPU 和 CPU 时钟没有校准时，Trace 中 GPU 使用独立相对时间轴；首尾 Pass 之间的 Copy 与调度空档可进入包围区间。仅启用 `TIMESTAMP_QUERY` 时，独立 Copy 命令没有单独时间戳。
+帧记录和五条泳道（Platform、UI、Raster、IO、GPU）采用有界缓冲。首次提交后 GPU 状态为 Pending，按帧号与设备代次回填并递增订阅 revision。设备重建、读回失败、槽位已满、能力缺失和关闭分别有显式状态。GPU 样本保存 Pass 类型、切片号、Draw 数、GPU 相对偏移与时长，分别报告包围区间与 Pass 耗时和。GPU 和 CPU 时钟未校准。Perfetto 在 GPU measurements 轨上记录带帧号、设备代次、帧内偏移及耗时的测量事件。DevTools 按首个 GPU Pass 为原点绘制独立的帧内时间轴。首尾 Pass 之间的 Copy 与调度空档可进入包围区间。仅启用 `TIMESTAMP_QUERY` 时，独立 Copy 命令没有单独时间戳。
 
 | 档位 | 采集 |
 | --- | --- |
 | Off | 预算边缘日志。热路径避开遥测环和 GPU 查询资源。 |
 | Counters | 有界帧环，存调度、UI、Raster 与 Atlas 计数。 |
-| GpuAndTimeline | 开启设备时间戳能力并采样，支持有界录制与 Trace 导出。 |
+| GpuAndTimeline | 开启设备时间戳能力并常驻采样。CPU 切片由录制会话开启。 |
 | DeepInspect | 目标为按需抓取 LayerTree、CompiledPicture、纹理池、QuickJS 堆或截图。 |
 
-系统 Profiler、Perfetto、基准报告、应用内 HUD 与进程外 DevTools 各自消费采集值。应用内面板录制期间暂停采样轮询，宿主 Trace 可在关闭面板时收集。Chrome Trace 使用微秒和具名泳道，支持 Perfetto 导入。系统 span 在 Android 走 ATrace，在 Apple 走 signpost。
+日志、系统 Profiler 和 Timeline 通过 `tracing_subscriber::Registry` 分发。Timeline 录制分为 Stages 和 Detailed，后者增加 TRACE 级切片及 QuickJS 模块栈样本。每条 CPU 切片保存父实例、逻辑队列、线程和关联帧。调度端点及图片 IO、UIKit 交接使用独立的 Flow ID。
+
+一个进程同一时刻只接受一个录制。停止时冻结 CPU 时间范围，汇总各线程已完成的批次，并最多等待 80 毫秒接收已进入流水线的帧摘要与 GPU 回填。归档保存最多 1,024 个帧摘要，切片存储预算为 8 MiB，各生产线程另有有界批次。导出带有覆盖、截断、未完成帧和 GPU Pending 计数。CPU 时间相对于录制起点。
+
+应用可以用 `performance.mark` 和 `performance.measure` 给时间轴加标记。详细录制会记录 Solid 组件创建与响应式 flush，还会以约 1 毫秒的限频在 QuickJS 中断检查点收集最多八层模块栈。样本覆盖到达检查点且保留文件名的 JS 字节码，函数名和行号需要运行时提供额外的栈 API。用户标记和模块标签有长度上限，常规日志消息、图片 URL 和请求正文不进入 Timeline。
 
 ## Stage 0 使用方式
 
 - `just bench` 串行执行四组 Release Raster 微基准，每组输出一行 `IMPASTO_BENCH_JSON`。JSON 保留首帧、暖帧、GPU 采样状态及 p50/p95。GPU 等待和读回在 CPU 计时区间外，保持同一提交深度。用 `IMPASTO_BENCH_GPU=0 just bench` 运行纯 CPU 对照。
 - `python3 tools/bench-compare.py /path/to/base /path/to/head --rounds 5 --out /tmp/impasto-ab.json` 预编译两个 checkout，交替执行 A/B 和 B/A。两个版本都需包含 Stage 0 的基准格式，且使用独立的 Cargo 目标目录。报告保留每轮原始样本、样本数及各分位的配对差值。直接执行 A/A 可以测当前主机的噪声水平。
-- `IMPASTO_TRACE=/tmp/impasto-trace.json just host` 从启动后录制约 5 秒。打开应用进行待测操作，日志出现 `trace exported` 后将文件导入 [Perfetto](https://ui.perfetto.dev)。调度泳道使用同一个宿主单调时钟，GPU 泳道使用设备相对时钟；用 `frame_id` 对齐记录。
+- `IMPASTO_TRACE=/tmp/impasto-trace.pftrace just host` 在宿主初始化前开始，并在初始化后约 5 秒收尾。日志出现 `trace exported` 后可以把文件导入 [Perfetto](https://ui.perfetto.dev)。加上 `IMPASTO_TRACE_DETAIL=detailed` 可采集详细切片。`IMPASTO_TRACE_GPU=0` 关闭由录制请求的 GPU 查询。文件使用 `.pftrace` 后缀，`.json` 目的地会返回格式错误。
 - `IMPASTO_TELEMETRY=off|counters|gpu` 选择常驻档位。Debug DevTools 默认记录 Counters，并预先协商时间戳 feature 供进程内录制使用。Release 默认 Off，运行时录制需要在创建设备前用 `gpu` 或 `IMPASTO_TRACE` 协商 GPU 能力。GPU 查询槽在首次采样时创建。
 - 应用内性能页可以查看帧的 GPU 状态和逐 Pass 时间，也能隐藏 Overlay 并录制约 5 秒。导出文件写入应用临时目录。尚未完成读回的样本显示 Pending，超过 256 个 Pass 的样本显示 DroppedPassLimit。IO 泳道在录制窗口有图片工作时显示 fetch、decode 或 upload。
 
-`missed_vsync` 表示从宿主接到 vsync 到 present 返回超过预算。UIKit 混排的事务确认单独记入系统 Trace。真实 scanout 与 GC 周期事件需要额外的平台或运行时测量。当前 QuickJS 内存统计是低频堆快照，DeepInspect 的单次抓取留在后续扩展。
+`missed_vsync` 表示从宿主接到 vsync 到 present 返回超过预算。UIKit 混排的事务确认有独立事件与 Flow。真实 scanout 与 GC 周期事件需要额外的平台或运行时测量。当前 QuickJS 内存统计是低频堆快照，DeepInspect 的单次抓取留在后续扩展。
 
 ## 交付阶段
 
@@ -99,7 +103,7 @@ flowchart LR
 
 **2.1 GPU 线性预乘。** 保持 `GpuImage` 和 `TextureFactory` 的公开上传入口，统一同步解析和后台上传。将直通 RGBA8 写入 sRGB 源纹理，用逐 texel 读取的 RenderPass 解码并线性预乘到 Level 0。保证转换提交排在首次采样前，提交失败与设备代次不匹配沿用可重试回退。后台只在取得上传工厂时持锁，上传数据和设备资源在所在线程持有到提交。保留 CPU 预乘路径用于 A/B 与能力回退。验收覆盖全透明带颜色的像素、低 Alpha、全不透明图、设备重建、同源重载和 iOS 外部 BGRA 纹理。单列上传字节、暂存纹理峰值、转换 Pass 与 CPU 时间。 [图片上传和外部纹理](../crates/raster/src/textures.rs) · [图像采样](../crates/raster/src/pipelines/image.wgsl) · [WebGPU sRGB 格式](https://gpuweb.github.io/gpuweb/#texture-formats)
 
-**2.2 Mipmap 与采样。** 延续 2.1 的线性预乘约定，为普通图片建 mip 链，读写视图限定在各自 mip 子资源。奇数尺寸按有效像素下采样，缩小采用专用三线性采样器。nearest、NineSlice 源子区和外部纹理先固定 Level 0，保证九宫格切片边缘与 Canvas 子区语义。首版不生成无需 mip 的资源链。验收包含奇数尺寸、高对比细纹连续缩放、透明边缘、九宫格和 Canvas 局部裁剪。记录冷上传、稳态缩略图、纹理驻留和临时分配峰值。
+**2.2 Mipmap 与采样。** 延续 2.1 的线性预乘约定，长边达到 128 px 的普通图片生成预乘 mip 链，奇数尺寸按有效像素下采样。缩小时按最近 mip 层做双线性过滤。nearest、NineSlice 源子区和 Canvas 子区固定采样 Level 0。场景内集中提交同步解析得到的 mip 转换。验收包含奇数尺寸、高对比细纹连续缩放、透明边缘、九宫格和 Canvas 局部裁剪。记录冷上传、稳态缩略图、纹理驻留和临时分配峰值。
 
 **2.3 Compute 对照。** 单独验证线性 storage 中间纹理。测完整链路，包括 sRGB 转换、临时纹理、提交及 mip 生成，按格式和设备协商。3.1 可复用格式能力检查，无需等待该实验有结论。 [WGSL storage 纹理格式](https://gpuweb.github.io/gpuweb/wgsl/#texel-formats)
 
@@ -137,24 +141,26 @@ flowchart LR
 
 **6.4 远程 DevTools。** 先定义只读且版本化的 JSON-RPC 帧订阅和 Trace 抓取。以稳定帧号与 revision 传送初始快照、增量和 GPU 回填，为慢客户端设有界队列与重同步入口。随后在 debug/profile 构建提供显式开启的本地监听和短期连接凭证，由 CLI 连接桌面、转发 Android，再针对 iOS 验证可用的设备连接方案。最后实现独立客户端的帧列表、逐 Pass 与导出。验收覆盖断连重连、慢客户端、版本不匹配、环覆盖、设备重建、Release 无监听，以及 Overlay 关闭场景。UIKit 事务确认、GC 周期和单次 DeepInspect 按各自信号成熟度独立接入。 [TelemetryHub](../crates/embedder/common/src/diagnostics/hub.rs) · [现有 DevTools](../packages/devtools/src/pages/performance.tsx)
 
-## P1 运行配置
+## P1–P2 运行配置
 
 默认使用共享渐变 WGSL、40 B Glyph 和 64 B Rect、图片 GPU 线性预乘和逐级 mip、独立四角和连续曲率，以及 latency 2 的 FIFO 表面。纯色 Glyph 和 Rect 无需冷字段上传。Tier 0 使用有界 Uniform PaintExtra 分页。普通直绘帧保持零根 Copy。
 
 | 配置 | 路径 |
 | --- | --- |
-| `IMPASTO_PAINT_UNIFORM=1`、`IMPASTO_SPECIALIZE_PAINT=1` | 强制 Uniform 分页，或启用简单画笔的 WGSL 特化。 |
+| `IMPASTO_PAINT_UNIFORM=1`、`IMPASTO_SPECIALIZE_PAINT=0` | 分别强制 Uniform 分页或关闭默认的纯色矩形、灰阶文字管线特化。 |
 | `IMPASTO_IMAGE_UPLOAD=cpu\|render\|compute` | 选择 CPU 基线、默认 RenderPass 或支持设备的 Compute 对照。Nearest、九宫格与 Canvas 子区域保持自己的采样约束。 |
 | `IMPASTO_COMPUTE_BLUR=1`、`IMPASTO_GRADIENT_LUT=1` | 在设备能力与像素误差允许时启用共享内存模糊与渐变纹理。 |
 | `IMPASTO_TRANSIENT_ATTACHMENTS=0\|1` | 强制关闭或开启瞬态附件。自动档使用适配器的内存节省提示。 |
 | `IMPASTO_CANVAS_STENCIL=1`、`IMPASTO_EARLY_Z=1` | 对齐且具有二值覆盖的 Canvas 路径可用 Stencil。连续不透明、轴对齐的实心段可用 Early-Z。 |
-| `IMPASTO_SHADOW_2D=1` | 启用二维阴影积分。默认使用距离近似，避免在密集阴影场景承担积分开销。 |
-| `IMPASTO_TEXT_GAMMA=1`、`IMPASTO_DARKEN_STEMS=1`、`IMPASTO_LCD_RGB=1` | 对照小字号灰阶，或在支持双源混合的桌面不透明直绘目标实验 RGB LCD。 |
+| `IMPASTO_SHADOW_2D=0` | 用距离近似对照默认的二维阴影积分。 |
+| `IMPASTO_TEXT_GAMMA=1`、`IMPASTO_DARKEN_STEMS=1`、`IMPASTO_LCD_RGB=1` | 对照小字号灰阶。LCD 使用 Swash RGB 三通道覆盖率，要求双源混合、轴对齐且字形落在可证明不透明的 SDR 区域。 |
+| `IMPASTO_RESIDENT_PICTURES=0`、`IMPASTO_IMAGE_ARRAY=0` | 分别关闭设备支持的 Picture RenderBundle 或 32 纹理数组合批。 |
+| `IMPASTO_SURFACE_COLOR=p3\|hdr` | 请求 Display P3 或 Extended Linear sRGB。HDR 优先选 Rgba16Float，按表面能力回退到 P3 或 SDR。 |
 | `IMPASTO_DITHER=1` | 在已有合成输出处量化 8-bit RGB。可证明完全覆盖的直绘不透明渐变在原 Pass 中抖动。 |
 | `IMPASTO_PREWARM=0\|1` | 延迟创建基础变体，或在已有基础变体外预热实际 surface 的常用变体。 |
 | `IMPASTO_SURFACE_LATENCY=1\|2\|3`、`IMPASTO_PRESENT_MODE=fifo\|mailbox\|fifo-relaxed`、`IMPASTO_SURFACE_ALPHA=opaque\|premultiplied\|postmultiplied` | 选择表面队列预算和能力协商选项。每次配置记录实际选项。 |
 
-启动日志或系统 Trace 分列 adapter、device、shader、pipeline、首个 surface present 返回，以及 UIKit 混排时的 ack。当前管线缓存属于设备代次。跨进程 Vulkan 磁盘缓存需要目标驱动上可复现的收益以及满足 wgpu 来源契约的加载设计。
+启动日志或系统 Trace 分列 adapter、device、shader、pipeline、首个 surface present 返回，以及 UIKit 混排时的 ack。具备 `SHADER_F16` 的设备在 SDR 渐变插值、描边颜色混合和 Dual-Kawase 滤波中使用半精度颜色运算，Compute 模糊用半精度工作组缓存和单精度累积。Android Vulkan 管线缓存以驱动和 shader 版本为键，保存在应用私有缓存目录。 [着色器精度](../crates/raster/src/pipelines/color_precision.wgsl) · [Vulkan 磁盘缓存](../crates/raster/src/pipeline_disk_cache.rs)
 
 ## 进程外 DevTools
 
@@ -167,6 +173,10 @@ impasto run -d macos
 ```
 
 在另一个终端运行 `impasto devtools --port 8765`，用浏览器打开命令给出的本地 HTML，填入当前会话的凭证。Android 在 `impasto run -d android` 安装调试 APK 时通过应用私有缓存配置该会话，再运行 `impasto devtools -d android --port 8765`。对特定 Android 设备可传入 adb serial。iOS Simulator 可直接连接本机端口，USB 真机用 `impasto devtools -d ios:<UDID> --port 8765`，转发需要系统可调用的 libusbmuxd `iproxy`。USB 命令按 Enter 关闭转发。可设置 `IMPASTO_TELEMETRY=gpu` 打开常驻 GPU 统计，录制也会在采集窗口请求 GPU 时间戳。 [Android adb 转发](https://developer.android.com/tools/adb#forwardports) · [iOS iproxy](https://github.com/libimobiledevice/libusbmuxd/blob/master/docs/iproxy.1)
+
+进程外面板可以选择 Stages 或 Detailed，并切换本次录制是否请求 GPU 查询。录制完成后从 Capture 视图查看单帧 CPU 调用树和相对 GPU Pass。**Open in Perfetto** 直接传递内存里的文件，**Download** 单独保存文件。JSON-RPC v1 的认证返回可用能力，`capture_status` 查询当前状态和最近一次归档，`get_frame_spans` 使用 `capture_id`、`frame_id` 查询单帧。录制或导出时帧订阅继续更新，重连可以访问宿主仍保留的最近归档。
+
+CI 使用固定版本的官方 Trace Processor 断言切片父子关系、跨队列 Flow、计数轨和导入状态。本地可运行 `IMPASTO_TRACE_PROCESSOR=/path/to/trace_processor tools/check-trace-export.sh`。
 
 ## 专题基准
 
@@ -196,3 +206,32 @@ Release、`AsyncOnly`、DPR 1。以 Stage 0 的 `cb0e7c5` 与 P1 渲染提交 `9
 - 64 层不透明重叠触发 64 个 Early-Z 实例，GPU 帧包围时间 p50 降低 96.8%。32 Stop 的平滑 LUT 令 GPU p50 降低 45.7%，编码 p50 增加 79.9%。这两条路径保留为显式实验开关。
 - Compute 模糊的 9 组面积 × σ 对照没有在此设备上测到稳定交叉点。Metal 默认使用 RenderPass。Android 真机的交叉点需要在目标 SoC 上测量。
 - Headless 基础预热对照中，Rasterizer 初始化中位数从 11.3 ms 到 11.7 ms，首帧场景安装至 GPU 完成从 10.4 ms 到 9.8 ms。两段耗时均保留在报告中。当前配置沿用基础预热，实际表面格式的附加预热显式开启。
+
+### Apple M4 Pro · P1.5 和 P2
+
+Release、Metal、`AsyncOnly`、DPR 1。当前实现与 `4ee12a4` 交替执行三轮，百分比取配对变化的中位数。图片上传用例每帧换一张 2,049 × 1,537 RGBA 图，两侧均生成 mip。 [列表、文字、模糊和 Canvas 基准](../crates/raster/src/tests/p0.rs) · [图片上传基准](../crates/raster/src/tests/p0/p1.rs)
+
+| 场景 | 编码 p50 / p95 | GPU 帧包围时间 p50 / p95 |
+| --- | ---: | ---: |
+| 1,000 卡片滚动 | −18.3% / +5.7% | +53.0% / +55.5% |
+| 密集渐变文字 | +12.2% / +1.4% | +1.5% / −1.3% |
+| 背景模糊叠层 | −25.3% / −24.0% | −26.1% / −24.3% |
+| Canvas 500 路径 | −35.0% / −26.6% | −9.1% / −5.6% |
+| 大图逐帧上传 | +143.8% / +131.7% | −6.4% / −1.4% |
+
+1,000 卡片的固定暖帧顶点和冷字段上传由 26,880 B 降为 0 B，GPU 时间仍高于基线。10,000 卡片用例的编码 p95 三轮为 0.305、0.325、0.354 ms，达到本机 0.5 ms 目标。背景模糊由 29 个 Pass 降至 20 个。大图额外编码约 23 μs（各侧编码 p50 的中位数之差），等待输出的 p95 下降 6.1%。
+
+Pixel 9 的 Vulkan 宿主确认了 RGBA HardwareBuffer 直接导入与磁盘管线缓存写入。测试中的 YUV 生产者返回厂商不透明格式 `external_format=238`，通过 Vulkan YCbCr 采样转换后通过像素检查，画面数据全程留在 GPU。macOS Gallery 已分别呈现 Display P3 和 Rgba16Float 扩展线性 sRGB 表面，HDR 亮度仍需在具备 EDR 的显示器上实测。
+
+### 二维阴影与驻留修复复测
+
+Apple M4 Pro · Metal · Release · AsyncOnly。沿用同一轨迹、DPR 1、单帧在途，交替运行修复前的 P2 二进制和修复后的构建，排除首帧。百分比为配对变化中位数，密集文字单独复测十一轮，其余场景五轮。
+
+| 场景 | 编码 p50 / p95 | GPU 帧包围时间 p50 / p95 |
+| --- | ---: | ---: |
+| 1,000 卡片滚动 | −4.8% / −18.4% | −28.4% / −28.2% |
+| 10,000 卡片滚动 | −20.2% / −19.2% | −28.8% / −28.3% |
+| 密集渐变文字 | +0.4% / +0.7% | +2.0% / −0.2% |
+| 2,049 × 1,537 图片逐帧上传 | −54.7% / −47.8% | −0.7% / +0.9% |
+
+千卡片滚动的 Uniform 上传 p95 从 76 KiB 降到 39 KiB，GPU 时间 p50/p95 从 155.5/716.8 μs 降到 111.0/518.3 μs。另与使用一维阴影的旧 P1 构建配对，新版默认二维阴影的 GPU 时间 p50/p95 仍高 9.6% / 12.6%。密集文字的 Picture 准备 p50 下降 9.4%。

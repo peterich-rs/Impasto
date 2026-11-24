@@ -2,13 +2,13 @@
 
 ## 1. 范围与架构约束
 
-本文以 `refactor/wgpu-rendering-pipeline` 的 `74fd743` 为实现基线，承接脱离 Impeller C API 后的性能、画质与能力演进。依赖基线为 `wgpu 30.0.2` 和 `parley 0.13.0`。继续采用方案三，普通 UI 由专用 Instanced RenderPass 绘制，文字使用 Glyph Atlas，矢量加速局限于 Canvas。本文的阶段交付和性能数字均为待验证目标，基线以第 5 节的测量为准。P0 实现见 [P0 落地设计](wgpu-p0-optimization.md)，P1 的交付拆分与当前遥测口径见 [Telemetry 和 P1 计划](telemetry-and-p1-plan.md)。 [渲染管线架构](wgpu-rendering-pipeline.md) · [依赖锁文件](../Cargo.lock)
+本文以 `refactor/wgpu-rendering-pipeline` 的 `74fd743` 为实现基线，承接脱离 Impeller C API 后的性能、画质与能力演进。依赖基线为 `wgpu 30.0.2` 和 `parley 0.13.0`。继续采用方案三，普通 UI 由专用 Instanced RenderPass 绘制，文字使用 Glyph Atlas，Canvas 和大字号文字使用缓存的矢量网格。本文的阶段交付和性能数字均为待验证目标，基线以第 5 节的测量为准。P0 实现见 [P0 落地设计](wgpu-p0-optimization.md)，P1 的交付拆分与当前遥测口径见 [Telemetry 和 P1 计划](telemetry-and-p1-plan.md)。 [渲染管线架构](wgpu-rendering-pipeline.md) · [依赖锁文件](../Cargo.lock)
 
 - `engine` 持有纯数据 `LayerTree`、`Picture` 和排版结果，`raster` 持有设备、资源、帧分析和编码，`embedder` 持有原生表面、调度和平台事务。跨队列传递自有数据，沿用 `SharedRender`、`Split`、`PlatformUi` 三种拓扑。P0–P2 的性能快路径保持现有渲染入口及场景语义，P2 色彩和 P3 功能的契约扩展随各自功能验收。 [仓库约束](../AGENTS.md) · [Raster 入口](../crates/raster/src/lib.rs#L89) · [宿主帧流水线](../crates/embedder/common/src/host.rs#L842)
 - 保持 `just boundaries` 通过。`engine` 默认构建保持图形库和 JS 运行时隔离，`raster` 保持与 QuickJS 隔离，`javascript` 的宿主契约保持纯 `std`。渲染器主体使用安全 Rust。原生互操作若必须使用局部 `unsafe`，按仓库要求限定在互操作边界，写明豁免理由及安全不变量。P0 可由安全 Rust 实现。 [依赖与 Rust lint 约束](../AGENTS.md)
 - 各后端共享绘制顺序、裁剪、Canvas 隔离、线性预乘合成及 SDR 输出语义。兼容路径使用同一组像素用例，在固定字体和输入下比较跨后端误差。新画质算法单独建立参考图和容差。Apple Metal、Android Vulkan/GLES、Linux Vulkan 作为主要验证路径，DX12 按功能验证目标设备。 [现有像素测试](../crates/raster/src/tests.rs) · [后端选择](../crates/raster/src/status.rs#L52)
 
-## 2. 当前实现与成本
+## 2. 基线实现与成本
 
 | 瓶颈 | 分支实现与可观测代价 |
 |---|---|
@@ -74,19 +74,19 @@ flowchart TD
 
 ### 3.4 Compute、图集与画质
 
-- **图集**。P0 将普通 Mask 和 Color 页迁移到各自的 `texture_2d_array<f32>`，实例携带页号和类型，跨普通页可在同一批中采样。按脏块或脏带合并为帧级 staging 上传，记录调用数与额外上传字节。`copy_buffer_to_texture` 路径遵守行对齐，确保被回收页的 gutter 清零。超大字形和预算溢出保留临时页，图集增长保障同帧已编码切片读到旧绑定对应的数据。P1 验证小字号 Gamma、Stem-Darkening 和输出条件允许时的双源 LCD 混合。LCD 限于已知 RGB 排列、对齐且背景适用的目标，其他场景继续用灰阶。连续缩放和超大字体可研究 MSDF 或矢量轮廓回退。 [现有图集](../crates/raster/src/atlas.rs) · [纹理拷贝布局](https://docs.rs/wgpu/30.0.2/wgpu/struct.TexelCopyBufferLayout.html)
+- **图集**。P0 将普通 Mask 和 Color 页迁移到各自的 `texture_2d_array<f32>`，实例携带页号和类型，跨普通页可在同一批中采样。按脏块或脏带合并为帧级 staging 上传，记录调用数与额外上传字节。`copy_buffer_to_texture` 路径遵守行对齐，确保被回收页的 gutter 清零。超大字形和预算溢出保留临时页，图集增长保障同帧已编码切片读到旧绑定对应的数据。P1 验证小字号 Gamma、Stem-Darkening 和输出条件允许时的双源 LCD 混合。LCD 限于已知 RGB 排列、对齐且背景适用的目标，其他场景继续用灰阶。大字号和较大缩放文字使用 Swash 轮廓与 Lyon 网格。彩色字形沿用图集。 [现有图集](../crates/raster/src/atlas.rs) · [纹理拷贝布局](https://docs.rs/wgpu/30.0.2/wgpu/struct.TexelCopyBufferLayout.html)
 - **滤波**。P1 先以 RenderPass 实现区分的 5-tap 下采样和 8-tap 加权上采样作为 Dual-Kawase 基线。对大半径局部模糊比较 Compute 的 workgroup 共享内存分离高斯，以及 Compute 版 Dual-Kawase。按边界、半径、格式和设备测得的交叉点选择路径，`SUBGROUP` 作为有实测收益时的独立变体。 [现有模糊核](../crates/raster/src/pipelines/blur.wgsl#L39)
-- **图片与渐变**。原始图片字节经 sRGB 采样解码后在线性空间预乘。Compute 写入支持 storage 用途的线性格式，或用 RenderPass 写 sRGB 渲染目标。分级生成预乘 mip，搭配三线性过滤，支持时评估各向异性。保留最近邻、九宫格边界和外部纹理的采样契约。多 Stop 渐变可缓存为 LUT，从 256 个采样点起验证色差、硬停靠点及重复 Stop，对精度不足的梯度保留逐 Stop 求值。大场景 GPU 剔除和 indirect draw 在 P2 独立基准验证，剔除后的合成顺序仍受第 3.3 节约束。 [图片上传](../crates/raster/src/textures.rs#L43) · [现有渐变求值](../crates/raster/src/pipelines/ui.wgsl#L81) · [适配器格式能力](https://docs.rs/wgpu/30.0.2/wgpu/struct.Adapter.html#method.get_texture_format_features)
+- **图片与渐变**。原始图片字节经 sRGB 采样解码后在线性空间预乘。Compute 写入支持 storage 用途的线性格式，或用 RenderPass 写 sRGB 渲染目标。长边至少 128 px 的普通图片生成预乘 mip，采用最近 mip 层上的双线性过滤。保留最近邻、九宫格边界和外部纹理的采样契约。多 Stop 渐变可缓存为 LUT，从 256 个采样点起验证色差、硬停靠点及重复 Stop，对精度不足的梯度保留逐 Stop 求值。大场景 GPU 剔除和 indirect draw 在 P2 独立基准验证，剔除后的合成顺序仍受第 3.3 节约束。 [图片上传](../crates/raster/src/textures.rs#L43) · [现有渐变求值](../crates/raster/src/pipelines/ui.wgsl#L81) · [适配器格式能力](https://docs.rs/wgpu/30.0.2/wgpu/struct.Adapter.html#method.get_texture_format_features)
 - **WGSL 与阴影**。将 View、渐变与 SDF 的共享逻辑统一拼装，利用 `override` 评估纯色、无复杂遮罩和支持 FP16 的变体。FP16 仅用于满足误差预算的运算。用 Evan Wallace 的二维高斯积分近似替换阴影的单距离近似，以小矩形、尖角及大半径对比参考。四角半径和连续曲率由明确的几何契约共享于绘制和裁剪。 [现有阴影核](../crates/raster/src/pipelines/ui.wgsl#L166) · [Evan Wallace 算法](https://madebyevan.com/shaders/fast-rounded-rectangle-shadows/) · [编译特化](https://docs.rs/wgpu/30.0.2/wgpu/struct.PipelineCompilationOptions.html)
 - **输出色彩**。P1 在可控制的最终 8-bit 输出阶段验证 IGN 抖动，只对 RGB 量化应用。测量抖动所需的额外 Pass 成本，P0 的普通直绘用例继续以零根 Copy 验收。P2 从 `SurfaceCapabilities::format_capabilities` 枚举显式宽色域格式，通过 `color_spaces(format)`、适配器格式能力和系统显示能力协商 Display P3 或 `Rgba16Float` / `ExtendedSrgbLinear`。为场景颜色补充原色、传递函数和参考范围契约，在线性工作空间做预乘与合成，明确色域转换、SDR 回退及 HDR 映射。`FLOAT32_FILTERABLE` 只影响使用 32 位浮点分量的过滤路径。 [现有颜色定义](../crates/engine/src/scene/paint.rs#L3) · [SurfaceCapabilities](https://docs.rs/wgpu-types/30.0.2/wgpu_types/struct.SurfaceCapabilities.html) · [SurfaceColorSpace](https://docs.rs/wgpu-types/30.0.2/wgpu_types/enum.SurfaceColorSpace.html)
 
 ### 3.5 可观测性、表面与应用扩展
 
 - **错误处理**。P0 将同步 scope 移出普通帧和 UIKit 切片的编码、提交路径，初始化、管线构建、冷路径分配和显式校验仍可使用严格 scope。由现有设备丢失回调与 uncaptured error 回调维护设备代次的状态，在帧边界处理 `DeviceLost`、`OutOfMemory`、`PresentFailed`，覆盖宿主 trim/recovery。异步错误可能晚于提交返回，记录其设备代次和可用的提交上下文。保留截图读回和 UIKit `waitUntilScheduled` 本身要求的同步。 [当前 scope](../crates/raster/src/gpu.rs#L95) · [宿主恢复入口](../crates/embedder/common/src/host/raster_host.rs#L399)
-- **管线缓存**。先缓存已创建的管线及有界预热常用变体，衡量冷启动和首次绘制。`wgpu 30.0.2` 的 `PIPELINE_CACHE` 当前列出 Vulkan 支持，`Device::create_pipeline_cache` 为 `unsafe`。P1 的磁盘缓存以具备安全 API 或满足仓库局部豁免和来源不变量为前提。磁盘数据由本应用的 `get_data` 生成，配合 wgpu 缓存键、驱动、版本和 shader 哈希校验，失配时回到内存缓存。 [wgpu PIPELINE_CACHE](https://docs.rs/wgpu/30.0.2/wgpu/struct.Features.html#associatedconstant.PIPELINE_CACHE) · [磁盘缓存安全契约](https://docs.rs/wgpu/30.0.2/wgpu/struct.Device.html#method.create_pipeline_cache)
+- **管线缓存**。Android Vulkan 在应用私有目录保存本进程由 `PipelineCache::get_data` 生成的数据。文件名结合适配器、驱动、版本和 shader 哈希，写入经后台原子替换，内容校验失败时从空缓存开始。 [wgpu PIPELINE_CACHE](https://docs.rs/wgpu/30.0.2/wgpu/struct.Features.html#associatedconstant.PIPELINE_CACHE) · [磁盘缓存安全契约](https://docs.rs/wgpu/30.0.2/wgpu/struct.Device.html#method.create_pipeline_cache)
 - **GPU 计时**。P1 用 `TIMESTAMP_QUERY` 在 Pass descriptor 配置起止时间戳，只有 Pass 内额外采样才请求 `TIMESTAMP_QUERY_INSIDE_PASSES`。Resolve 后异步 map 专用读回槽，按队列时间戳周期转换为 μs，关联帧号、设备代次和切片。通过宿主诊断数据送到 DevTools，显示 CPU 编码、GPU 包围耗时和逐 Pass 耗时。未采样、不支持及帧号过期的数据有明确的缺省状态，避免错配成当前帧的 0 μs。 [时间戳 API](https://docs.rs/wgpu/30.0.2/wgpu/struct.RenderPassTimestampWrites.html) · [诊断类型源](../crates/embedder/common/src/diagnostics/module.rs#L72) · [DevTools 性能面板](../packages/devtools/src/pages/performance.tsx)
 - **表面步调**。显式把 Surface `desired_maximum_frame_latency` 设为宿主双帧深度 2，这也是 `wgpu` 当前的默认提示值。桌面按支持情况评估 `Mailbox`，移动端默认 `Fifo` 并按实测评估 `FifoRelaxed`。透明窗口按支持的 `CompositeAlphaMode` 协商，验收预乘输出、实际排队延迟和掉帧。Surface 参数是后端提示，实际交换链队列深度由后端决定。 [SurfaceConfiguration](https://docs.rs/wgpu-types/30.0.2/wgpu_types/struct.SurfaceConfiguration.html) · [现有 Surface 配置](../crates/raster/src/surface.rs#L320)
-- **Android 外部纹理**。P2 探索 `AHardwareBuffer` 与 Vulkan 设备导入、同步 fence、所有权及设备恢复。`TEXTURE_FORMAT_NV12` 只覆盖格式能力，零拷贝还要求实际 HAL 导入、平面访问与同步契约成立。验证 Y/UV 双平面采样、色度位置、矩阵及 full/limited range，按设备能力保留现有纹理上传路径。复用外部图像代次和显式生命周期，原生互操作留在受审查边界。 [iOS 既有导入边界](../crates/raster/src/metal.rs#L169) · [NV12 格式能力](https://docs.rs/wgpu/30.0.2/wgpu/struct.Features.html#associatedconstant.TEXTURE_FORMAT_NV12) · [Vulkan AHardwareBuffer 扩展](https://registry.khronos.org/vulkan/specs/latest/man/html/VK_ANDROID_external_memory_android_hardware_buffer.html)
+- **Android 外部纹理**。Android 13 起使用 ImageReader 帧租约和生产者 fence。Vulkan 可直接采样整帧 RGBA 和支持双平面绑定的 NV12。厂商不透明 YUV 通过 `VkExternalFormatANDROID` 和不可变 YCbCr 采样器在同一条 GPU 队列中转换为 sRGB 纹理，转换使用驱动建议的模型、范围和色度位置。Vulkan 显式获取和归还外部队列所有权，转换或最后一次直接采样结束后释放 Image 租约。裁剪帧和不支持的格式保留 CPU 上传。 [Android 宿主导入](../crates/embedder/android/src/app/hardware_frame.rs) · [Vulkan 互操作](../crates/raster/src/android_vulkan.rs)
 - **应用层能力**。P3 的 Runtime Effect 由 `engine::scene` 表达效果标识、参数及受控输入，Raster 执行 WGSL 校验并限制 shader 入口、绑定、资源范围及执行预算。`<GpuView>` 在受控生产者接口内共享设备与队列，通过代次化纹理标识进入 `LayerTree`，约定生产提交、合成读取、回收及设备恢复。4×4 透视和合成线程动画扩展纯数据契约，先明确变换后的裁剪、命中和 UIKit 层行为，再对独立变换与透明度通道验证 120 Hz。 [现有图层契约](../crates/engine/src/scene/layer.rs) · [现有 ViewUniform](../crates/raster/src/pipelines/mod.rs#L49)
 
 ## 4. 四阶段交付
@@ -97,10 +97,20 @@ flowchart TD
 |---|---|---|
 | **Phase 1 / P0** | 先交付 `GpuCaps`、异步错误状态、帧计数和 `FrameArena`。再做分频绑定、Stop 池与 Rect 合批，直绘、解析裁剪、硬件混合、紧边界效果。最后接入 GPU Mesh 驻留、连续 Canvas MSAA 批次、图集数组与合并上传。每批改动都可使用基线渲染对照。 | 定义内暖帧的 `buffers_created` 和 `bind_groups_created` 均为 0。Gallery 首页 Draw Call 下降 70%–90%，通常为 1–3 个 RenderPass。固定的局部毛玻璃用例验证处理像素与离屏峰值下降目标 10×，GPU 耗时独立报告。500 条兼容 Canvas 路径目标为 1 个 MSAA Pass，回贴计入全帧 Pass。暖帧中复用的 Mesh 无重复几何上传。 |
 | **Phase 2 / P1** | 依赖 P0 的帧生命周期、Pass 划分和统计。交付瞬态深度模板、精选实心 Early-Z、实例压缩和 WGSL 特化。引入 Compute 滤波、图片预乘与 mip、渐变 LUT，验证二维阴影、四角圆角、文本与抖动。接入 DevTools GPU 计时，按第 3.5 节评估磁盘缓存和表面步调。 | 实例上传字节减少 60%–75%，固定不透明叠层用例的过绘降低 40%–60%。验证缩略图滚动稳定、12–14 px 文本锐度和最终输出量化。DevTools 可关联逐 Pass GPU μs 与同帧 CPU 编码。 |
-| **Phase 3 / P2** | 基于稳定的驻留资源和色彩语义，交付静态 RenderBundle、并行 CPU 剖分、绑定数组与推常量、P3/HDR、脏矩形和高成本子树缓存。验证 Android 外部纹理导入和 NV12，评估重度 Canvas 的 Stencil-then-Cover 或 Sparse Strips。 | 目标档设备在万级列表用例中的 Raster CPU 编码 p95 < 0.5 ms。兼容且容量足够的图片网格批次目标为 1 Draw Call。支持的系统与显示器验证色域及 EDR，支持的 Android 设备验证视频帧 CPU 拷贝次数为 0。 |
-| **Phase 4 / P3** | 在受控资源、颜色和同步契约具备后，提供 Runtime Effect、`<GpuView>`、透视变换及合成线程动画。 | 支持应用层自定义特效及同设备纹理合成。开启 120 Hz 的真机验证仅由合成线程驱动的动画达到 8.33 ms 帧预算，并记录错过的 vsync、UI 队列唤醒和平台视图行为。 |
+| **Phase 3 / P2** | 三槽 staging、Picture RenderBundle 与稳定的 Layer 状态槽、多纹理绑定数组、效果 immediates、SDR 颜色运算与 Compute 模糊缓存 FP16、Android Vulkan 磁盘缓存、AHardwareBuffer 与 NV12，以及 P3/HDR 表面与透明度协商。 | 目标档设备在万级列表用例中的 Raster CPU 编码 p95 < 0.5 ms。兼容且容量足够的图片网格批次目标为 1 Draw Call。支持的系统与显示器验证色域及 EDR，支持的 Android 设备验证视频帧 CPU 拷贝次数为 0。 |
+| **Phase 4 / P3** | 合成线程动画、并行 Picture 编译、脏矩形与高成本子树缓存、Runtime Effect 和 `<GpuView>`。 | 支持应用层自定义特效及同设备纹理合成。开启 120 Hz 的真机验证仅由合成线程驱动的动画达到 8.33 ms 帧预算，并记录错过的 vsync、UI 队列唤醒和平台视图行为。 |
 
-P2 的脏矩形重绘要求可靠的历史内容与损伤传播。Surface 图像无法提供上一帧内容时，使用可保留的合成目标或全量重绘。离屏特效、背景读取和外部纹理换帧都传播损伤，子树缓存受内存预算及内容、比例、色域、设备代次失效约束。
+P3 的脏矩形重绘要求可靠的历史内容与损伤传播。Surface 图像无法提供上一帧内容时，使用可保留的合成目标或全量重绘。离屏特效、背景读取和外部纹理换帧都传播损伤，子树缓存受内存预算及内容、比例、色域、设备代次失效约束。
+
+### Picture 驻留与兼容路径
+
+RenderBundle 缓存以编译代次、图层位置、目标格式和图片修订为键。矩形、单材质图片和灰阶文字在同一绘制范围与资源连续两帧命中后录制 Bundle。滚动只更新有变化的 Uniform 槽，连续脏槽与新顶点合并至同一帧的 staging 上传。没有暂存复制的帧直接提交绘制。阴影与填充在同一 Bundle 中保持画序，各自使用独立管线。平移长列表可按编译期的连续 Scope 边界剔除整个视口外分块。灰阶字形额外校验 Atlas 代次、线性变换、DPR 和分数像素位置，复用时固定本帧使用的图集页。动态媒体、复杂遮罩、渐变文字和效果组可以继续使用帧内上传。设备内存压力清理驻留缓存，设备恢复通过当前 LayerTree 重建 GPU 资源。 [Picture 驻留和回放](../crates/raster/src/compositor/resident.rs) · [GPU 分配器](../crates/raster/src/resident.rs)
+
+普通圆角阴影将采样点折叠到近角，超过 3σ 的角部积分按高斯尾部裁剪。非对称曲率继续逐角积分。编译器维持阴影和相邻绘制的顺序，连续同裁剪的 Bundle 可在一次调用中提交。 [阴影着色器](../crates/raster/src/pipelines/ui.wgsl)
+
+Android 转换 shader 的 GLSL 源与 Vulkan SPIR-V 位于 [android_vulkan](../crates/raster/src/android_vulkan)。修改 GLSL 后在该目录执行 `glslangValidator -V -Os yuv.vert -o yuv.vert.spv` 和 `glslangValidator -V -Os yuv.frag -o yuv.frag.spv`，再用 `spirv-val --target-env vulkan1.1` 验证两个产物。 [Vulkan ExternalFormat](https://docs.vulkan.org/refpages/latest/refpages/source/VkExternalFormatANDROID.html)
+
+Display P3 在线性 sRGB 浮点工作缓冲中合成，在输出时转换到 P3。HDR 表面输出线性扩展 sRGB。场景渐变的 `ExtendedLinear` 字节输入范围为 0 到 SDR 白点。透明表面按支持的 Alpha 模式协商，后乘模式在输出阶段转换为非预乘 RGB。 [颜色定义](../crates/engine/src/scene/paint.rs) · [表面配置](../crates/raster/src/surface.rs)
 
 ## 5. 基线、统计与验证
 
