@@ -1,13 +1,12 @@
-import { createSignal, createTrackedEffect, onCleanup } from "solid-js";
+import { createSignal, createTrackedEffect } from "solid-js";
 import {
   scene,
   insert,
-  onFrame,
   type NodeHandle,
 } from "@impasto/solid-renderer";
 import { Dialog } from "@impasto/solid-ui";
 import { colorBytes } from "../colors.ts";
-import { useBinder } from "../state/quotes-provider.tsx";
+import { marketPulse } from "../state/quotes-provider.tsx";
 import { settingsSig, updateSettings } from "../state/settings.ts";
 import { accountRef } from "../state/account-ref.ts";
 import { showToast } from "../state/toast.ts";
@@ -21,7 +20,6 @@ const HAIR = colorBytes("#E8E8EC");
 const PRIMARY = colorBytes("#C8102E");
 export function ProfilePage(props: { router: Router }): NodeHandle {
   void props;
-  useBinder();
   const account = accountRef();
   const [updown, setUpdown] = createSignal(settingsSig().updown);
   const [speed, setSpeed] = createSignal(settingsSig().timeScale);
@@ -87,27 +85,21 @@ export function ProfilePage(props: { router: Router }): NodeHandle {
     },
   });
   scene.append(summary.body, posLine);
-  let lastPaint = -1;
-  onCleanup(
-    onFrame((targetMs) => {
-      if (lastPaint >= 0 && targetMs - lastPaint < 500) {
-        return;
-      }
-      lastPaint = targetMs;
-      const mv = account.marketValue();
-      scene.setText(
-        cashLine,
-        `${loc("总资产", "Equity")} ${fmtPrice(account.cash() + mv)}`,
-      );
-      scene.setText(
-        posLine,
-        loc(
-          `可用 ${fmtPrice(account.cash())} · 持仓 ${account.positions().length} 只`,
-          `Cash ${fmtPrice(account.cash())} · ${account.positions().length} positions`,
-        ),
-      );
-    }),
-  );
+  createTrackedEffect(() => {
+    marketPulse();
+    const mv = account.marketValue();
+    scene.setText(
+      cashLine,
+      `${loc("总资产", "Equity")} ${fmtPrice(account.cash() + mv)}`,
+    );
+    scene.setText(
+      posLine,
+      loc(
+        `可用 ${fmtPrice(account.cash())} · 持仓 ${account.positions().length} 只`,
+        `Cash ${fmtPrice(account.cash())} · ${account.positions().length} positions`,
+      ),
+    );
+  });
   const card1 = sectionCard();
   scene.append(page, card1.root);
   const cap1 = scene.createElement("text", {

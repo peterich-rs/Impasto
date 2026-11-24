@@ -23,7 +23,7 @@ export function Tape(props: { ticks: readonly Tick[]; rows: number; dayStart: nu
       <Legend label={loc("内盘", "At bid")} value={compact(totals().sell)} color={colors.down} valueStyle={numberStyle()} />
       <Legend label={loc("大单", "Blocks")} value={String(totals().blocks)} color={colors.lime} valueStyle={numberStyle()} />
     </Row>
-    <Canvas deferWhenOffscreen style={{ width: "100%", height: 20 + 25 * Math.max(1, props.rows) }}
+    <Canvas style={{ width: "100%", height: 20 + 25 * Math.max(1, props.rows) }}
       accessibilityLabel={loc("逐笔成交明细：时间、价格和数量", "Trades: time, price and size")}
       draw={(ctx, { width }) => {
         const time = (tick: Tick) => clock(marketOpen * minute + tick.t - props.dayStart);
@@ -70,7 +70,7 @@ export function Flow(props: { data: Pick<Analytics, "buy" | "sell"> }) {
       <Label size={23} weight={600}>{signedQty(net())}</Label>
       <Label size={12} color={big() >= 0 ? colors.up : colors.down}>{loc(`净量 · ${signedQty(big())} 大单`, `net · ${signedQty(big())} large orders`)}</Label>
     </Row>
-    <Canvas deferWhenOffscreen style={{ width: "100%", height: 168 }} accessibilityLabel={loc("按成交量分档的买卖对比", "Buy and sell volume by trade size")}
+    <Canvas style={{ width: "100%", height: 168 }} accessibilityLabel={loc("按成交量分档的买卖对比", "Buy and sell volume by trade size")}
       draw={(ctx, { width }) => {
         const { buy, sell } = props.data;
         const half = width / 2;
@@ -119,7 +119,7 @@ export function historicalRange(bars: readonly Bar[], quote: Quote, days: number
 
 export function Ranges(props: { bars: readonly Bar[]; quote: Quote }) {
   return <Section title={loc("价格区间", "Ranges")} note={loc("最低 → 最高", "low → high")}>
-    <Canvas deferWhenOffscreen style={{ width: "100%", height: 154 }} accessibilityLabel={loc("5 日至 120 日价格区间", "5 to 120 day price ranges")}
+    <Canvas style={{ width: "100%", height: 154 }} accessibilityLabel={loc("5 日至 120 日价格区间", "5 to 120 day price ranges")}
       draw={(ctx, { width, height }) => {
         if (width < 100) return;
         const quote = props.quote;

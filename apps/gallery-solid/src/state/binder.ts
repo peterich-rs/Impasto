@@ -36,7 +36,7 @@ function cellCount(cells: QuoteCells): number {
 
 /**
  * Registry of mounted quote cells. The hot path never touches Solid: each
- * vsync, for every mounted row whose `revision` moved, write text and colors
+ * tick, for every mounted row whose `revision` moved, write text and colors
  * straight through `scene`. One symbol may have several bindings (index strip
  * and a list row). Unbind is by entry identity, so last and pct do not
  * overwrite each other. Rows that scrolled out are simply absent.
@@ -110,7 +110,7 @@ export class QuoteBinder {
     };
   }
 
-  /** Called once per vsync after `engine.step`. */
+  /** Called after each `engine.step`. */
   flush(): void {
     let written = 0;
     for (const entry of [...this.#bindings]) {
@@ -146,7 +146,7 @@ export class QuoteBinder {
     }
   }
 
-  /** A dead node must not throw: that removes the market `onFrame` and halts Solid. */
+  /** A stale binding can outlive its node until disposal runs. */
   #sync(entry: CellBinding): void {
     const q = this.#engine.quote(entry.symbol);
     try {

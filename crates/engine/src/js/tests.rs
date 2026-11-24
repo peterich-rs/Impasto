@@ -2178,6 +2178,56 @@ fn stocks_phone_crosshair_keeps_the_chart_picture() {
 }
 
 #[test]
+fn stock_detail_coasts_between_live_market_updates() {
+    let Some(mut session) = open_gallery() else {
+        return;
+    };
+    session.metrics(&phone());
+    let mut time = 0.0;
+    let first = wait_for_text(session.as_mut(), &mut time, "腾讯控股");
+    let (x, y) = text_spot(&first, "腾讯控股");
+    click(session.as_mut(), x, y);
+    let detail = wait_for_text(session.as_mut(), &mut time, "价格区间");
+    let (x, y) = text_spot(&detail, "分时");
+    let y = y + 80.0;
+    session.pointer(PointerEvent::new(Phase::Down, x, y, time));
+    for distance in [30.0, 70.0] {
+        time += 16.0;
+        session.pointer(PointerEvent::new(Phase::Move, x, y - distance, time));
+        session.frame(session::FrameTime::at(time));
+    }
+    time += 16.0;
+    session.pointer(PointerEvent::new(Phase::Up, x, y - 70.0, time));
+
+    let mut layers = None;
+    let mut eligibility = None;
+    for _ in 0..8 {
+        let frame = session.frame(session::FrameTime::at(time));
+        time += 16.0;
+        let faults = session.take_faults();
+        assert!(faults.is_empty(), "{faults:?}");
+        if let Some(next) = frame.layers {
+            layers = Some(next);
+        }
+        let Some(scene) = &layers else {
+            continue;
+        };
+        if scene.tracks.iter().any(|track| {
+            track.prop == crate::scene::CompositorProp::ScrollY && track.threshold_window.is_some()
+        }) {
+            let result = session.compositor_eligibility(&scene.tracks);
+            if result.is_ok() {
+                return;
+            }
+            eligibility = Some(result);
+        }
+    }
+    panic!(
+        "stock detail should coast with a section threshold window, eligibility: {eligibility:?}"
+    );
+}
+
+#[test]
 fn stocks_phone_opens_detail_and_order_ticket() {
     let Some(mut session) = open_gallery() else {
         return;

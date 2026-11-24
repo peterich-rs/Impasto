@@ -1,6 +1,6 @@
 import { createMemo, createSignal, createTrackedEffect, onCleanup, For, Show } from "solid-js";
 import { onLayout, scene, type CanvasRenderingContext2D, type NodeHandle } from "@impasto/solid-renderer";
-import { Canvas, Column, Row, View, type CanvasController } from "@impasto/solid-ui";
+import { Canvas, Column, RepaintBoundary, Row, View, type CanvasController } from "@impasto/solid-ui";
 import { loc } from "../../copy.ts";
 import { fmtPrice } from "../../format.ts";
 import { series, type MinuteBar, type Period } from "../../engine/analytics.ts";
@@ -141,7 +141,7 @@ export function StockChart(props: { snapshot: StockSnapshot; height: number }) {
     if (geo) paintChart(ctx, geo);
   };
 
-  const plot = <Canvas deferWhenOffscreen style={{ width: "100%", height: props.height }}
+  const plot = <Canvas style={{ width: "100%", height: props.height }}
     ref={(next) => { canvasNode = next; }}
     controller={(value) => { controller = value; }}
     draw={draw} />;
@@ -185,7 +185,7 @@ export function StockChart(props: { snapshot: StockSnapshot; height: number }) {
         }}
         onZoom={(scale) => { if (!intraday()) setSlot((value) => Math.max(3, Math.min(18, value * scale))); }}>
       {plot}
-      <View style={{ position: "absolute", top: 0, left: 0, width: "100%", height: props.height, opacity: readout() ? 1 : 0 }}>
+      <RepaintBoundary style={{ position: "absolute", top: 0, left: 0, width: "100%", height: props.height, opacity: readout() ? 1 : 0 }}>
         <View style={{ position: "absolute", left: 0, top: overlayBox().top,
           width: 1, height: overlayBox().volumeBottom - overlayBox().top,
           backgroundColor: colors.dim, translateX: lastReadout()?.x ?? 0 }} />
@@ -205,7 +205,7 @@ export function StockChart(props: { snapshot: StockSnapshot; height: number }) {
           </Show>
           <Label size={10} style={tooltipLine} color={colors.dim}>{lastReadout()?.volume ?? ""}</Label>
         </Column>
-      </View>
+      </RepaintBoundary>
     </View>
   </Section>;
 }

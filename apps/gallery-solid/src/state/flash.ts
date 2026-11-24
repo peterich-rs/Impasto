@@ -4,7 +4,7 @@ type RGBA = [number, number, number, number];
 /**
  * Price flash: on each new tick the text jumps to the tone color and decays
  * back to the base text color over 300ms. A newer tick on the same cell
- * restarts the decay. Runs on the frame clock, never `performance.now()`.
+ * restarts the decay. The market timer supplies the monotonic timestamp.
  */
 class FlashClock {
   readonly #active = new Map<
@@ -17,7 +17,7 @@ class FlashClock {
   #now = 0;
   #reduced = false;
 
-  /** The provider stamps the frame clock here before flushing. */
+  /** The provider stamps the market clock here before flushing. */
   stamp(targetMs: number): void {
     this.#now = targetMs;
   }

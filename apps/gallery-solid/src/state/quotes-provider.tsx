@@ -1,5 +1,4 @@
 import { createSignal, createTrackedEffect, onCleanup, untrack } from "solid-js";
-import { onFrame, requestFrame } from "@impasto/solid-renderer";
 import { QuoteEngine } from "../engine/engine.ts";
 import { QuoteBinder } from "./binder.ts";
 import { flash } from "./flash.ts";
@@ -15,15 +14,17 @@ const PUBLICATION_MS = 200;
  * App-scope engine and binder. One instance per boot; the gallery app is a
  * single-window process so module scope replaces context here. Pages call
  * `useQuotes()` to keep the market stepping; when the count drops to zero the
- * pipeline goes fully silent (no frame requests, no ticks). Binder flush runs
- * after `engine.step` because `runFrames` walks its map in insertion order
- * and the boot frame hook registers first.
+ * pipeline stops scheduling market ticks. Timer deadlines wake the UI queue
+ * for new data and leave scroll animation free to run between publications.
  */
 let engine: QuoteEngine | null = null;
 let binder: QuoteBinder | null = null;
-const [refs, setRefs] = createSignal(0);
+let refs = 0;
 const [running, setRunning] = createSignal(true);
 const [pulse, setPulse] = createSignal(0);
+let timer: ReturnType<typeof setTimeout> | undefined;
+let lastTick: number | undefined;
+let lastPublish = -Infinity;
 export const marketRunning = running;
 export const marketPulse = pulse;
 
@@ -40,9 +41,35 @@ export function useMarketPulse(active: () => boolean): () => number {
 export function toggleMarket(): void {
   setPulse((value) => value + 1);
   setRunning((value) => !value);
-  requestFrame();
+  syncMarketTimer();
 }
-let frameHooked = false;
+
+function tickMarket(): void {
+  timer = undefined;
+  if (refs === 0 || !untrack(running) || engine === null || binder === null) return;
+  const now = performance.now();
+  const elapsed = lastTick === undefined ? SIMULATION_TICK_MS : now - lastTick;
+  lastTick = now;
+  flash.stamp(now);
+  engine.setTimeScale(untrack(() => settingsSig().timeScale));
+  engine.step(Math.min(100, elapsed));
+  binder.flush();
+  if (now - lastPublish >= PUBLICATION_MS) {
+    lastPublish = now;
+    setPulse((value) => value + 1);
+  }
+  syncMarketTimer(Math.round(SIMULATION_TICK_MS));
+}
+
+function syncMarketTimer(delay = 0): void {
+  if (refs > 0 && untrack(running)) {
+    timer ??= setTimeout(tickMarket, delay);
+  } else {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    lastTick = undefined;
+  }
+}
 export type QuotesApi = {
   engine: QuoteEngine;
   binder: QuoteBinder;
@@ -66,34 +93,6 @@ export function wireQuotes(): QuotesApi {
       },
       () => settingsSig().updown,
     );
-    let lastTarget: number | undefined;
-    let lastPublish = -Infinity;
-    if (!frameHooked) {
-      frameHooked = true;
-      onFrame((targetMs) => {
-        flash.stamp(targetMs);
-        if (untrack(refs) > 0 && untrack(running)) {
-          const elapsed = lastTarget === undefined ? SIMULATION_TICK_MS : targetMs - lastTarget;
-          const step = elapsed >= SIMULATION_TICK_MS - 0.25;
-          if (step) {
-            lastTarget = targetMs;
-            engine!.setTimeScale(untrack(() => settingsSig().timeScale));
-            engine!.step(Math.min(100, elapsed));
-            binder!.flush();
-          }
-          const age = targetMs - lastPublish;
-          // Leave a frame for publication between simulation ticks. A slow
-          // display can step on every frame, so bound the deferral.
-          if (age >= PUBLICATION_MS && (!step || age >= PUBLICATION_MS + SIMULATION_TICK_MS)) {
-            lastPublish = targetMs;
-            setPulse((value) => value + 1);
-          }
-          requestFrame();
-        } else {
-          lastTarget = undefined;
-        }
-      });
-    }
   }
   return {
     engine: engine!,
@@ -104,8 +103,12 @@ export function wireQuotes(): QuotesApi {
 /** Marks this page as a live quote consumer; the market runs while any page needs it. */
 export function useQuotes(): QuotesApi {
   const api = wireQuotes();
-  setRefs((n) => n + 1);
-  onCleanup(() => setRefs((n) => n - 1));
+  refs++;
+  syncMarketTimer();
+  onCleanup(() => {
+    refs--;
+    syncMarketTimer();
+  });
   return api;
 }
 
