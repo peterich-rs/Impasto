@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use dispatch2::{DispatchQueue, DispatchTime};
 use embedder::{
-    Boot, BootError, Command, FrameToken, Lifecycle, Link, Restoration, Services, SurfaceId,
-    SurfaceTarget, Vsync, WindowSession,
+    Boot, BootError, Command, FrameRateHint, FrameToken, Lifecycle, Link, Restoration, Services,
+    SurfaceId, SurfaceTarget, Vsync, WindowSession,
 };
 use engine::input::{Button, Buttons, Modifiers, Phase, PointerEvent, PointerId, PointerKind};
 use engine::session::{Brightness, FrameTime, Insets, Metrics, PlatformSettings, WindowDisplay};
@@ -124,7 +124,16 @@ impl Vsync for DisplayLink {
     }
 
     fn request_frame(&self, token: FrameToken) {
-        self.events.send(Event::FrameRequested, token.0, None);
+        self.request_frame_with_rate(token, FrameRateHint::Display);
+    }
+
+    fn request_frame_with_rate(&self, token: FrameToken, hint: FrameRateHint) {
+        let message = match hint {
+            FrameRateHint::Display => None,
+            FrameRateHint::Hz60 => Some("60"),
+            FrameRateHint::Hz30 => Some("30"),
+        };
+        self.events.send(Event::FrameRequested, token.0, message);
     }
 
     fn cancel(&self) {

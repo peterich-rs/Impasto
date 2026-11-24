@@ -2,6 +2,8 @@ package dev.impasto.host
 
 import android.graphics.PixelFormat
 import android.graphics.Region
+import android.os.Build
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 
@@ -11,6 +13,7 @@ internal class ImpastoSurfaceView(private val host: ImpastoView) :
 
     private val location = IntArray(2)
     private var connected = false
+    private var preferredRate: Int? = null
 
     init {
         isFocusable = false
@@ -34,7 +37,15 @@ internal class ImpastoSurfaceView(private val host: ImpastoView) :
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         if (!connected) return
         connected = false
+        preferredRate = null
         NativeBridge.nativeSurfaceDestroyed(host.handle)
+    }
+
+    fun requestFrameRate(rate: Int) {
+        val surface = holder.surface
+        if (Build.VERSION.SDK_INT < 30 || rate == preferredRate || !surface.isValid) return
+        surface.setFrameRate(rate.toFloat(), Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
+        preferredRate = rate
     }
 
     fun release() {

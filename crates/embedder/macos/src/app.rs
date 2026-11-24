@@ -952,7 +952,7 @@ pub fn run(
             "AppKit must start on the main thread"
         )));
     };
-    let vsync = DisplayLink::new().map_err(RunError::Window)?;
+    let vsync = Arc::new(DisplayLink::new().map_err(RunError::Window)?);
     let inspect = std::env::var_os("IMPASTO_INSPECT").map(PathBuf::from);
     let dump = std::env::var_os("IMPASTO_DUMP")
         .map(PathBuf::from)
@@ -1013,7 +1013,7 @@ pub fn run(
                 font: font.to_vec(),
                 ime_view: Arc::clone(&ime_view),
             }),
-            vsync: Arc::new(vsync),
+            vsync: Arc::clone(&vsync) as Arc<dyn embedder::Vsync>,
             decoder,
             modules: Vec::new(),
             platform_runner: Some(embedder::PlatformTaskRunner::new(
@@ -1077,6 +1077,7 @@ pub fn run(
             false,
         )
     };
+    vsync.attach(&window, mtm);
     window.setTitle(&NSString::from_str("impasto counter"));
     window.setAcceptsMouseMovedEvents(true);
     // SAFETY: `HostState` keeps this window retained until the process leaves `run`.
@@ -1496,7 +1497,7 @@ fn dispatch_main_after(delay: std::time::Duration, work: embedder::Task) {
     }
 }
 
-fn on_main(work: embedder::Task) {
+pub(crate) fn on_main(work: embedder::Task) {
     if MainThreadMarker::new().is_some() {
         work();
     } else {

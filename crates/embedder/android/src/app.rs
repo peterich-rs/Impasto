@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use embedder::{
-    Boot, BootError, ClipboardHost, Command, Launch, LinkingHost, NativePtr, Services,
-    SessionError, StorageHost, SurfaceId, SurfaceTarget, Vsync,
+    Boot, BootError, ClipboardHost, Command, FrameRateHint, Launch, LinkingHost, NativePtr,
+    Services, SessionError, StorageHost, SurfaceId, SurfaceTarget, Vsync,
 };
 use engine::session::{InputEvent as EditEvent, Key, Metrics};
 use jni::Env;
@@ -147,13 +147,21 @@ impl Bridge {
         }
     }
 
-    fn schedule_frame(&self, token: embedder::FrameToken) {
+    fn schedule_frame(&self, token: embedder::FrameToken, hint: FrameRateHint) {
+        let preferred_rate = match hint {
+            FrameRateHint::Display => 0,
+            FrameRateHint::Hz60 => 60,
+            FrameRateHint::Hz30 => 30,
+        };
         self.call(|env, view| {
             env.call_method(
                 view,
                 jni::jni_str!("scheduleFrame"),
-                jni::jni_sig!("(J)V"),
-                &[jni::objects::JValue::Long(token.0 as jlong)],
+                jni::jni_sig!("(JI)V"),
+                &[
+                    jni::objects::JValue::Long(token.0 as jlong),
+                    jni::objects::JValue::Int(preferred_rate),
+                ],
             )?;
             Ok(())
         });
@@ -885,8 +893,8 @@ fn attach(env: &mut Env, request: Attach) -> Result<jlong, String> {
         back_enabled: AtomicBool::new(false),
     });
     let bridge_for_clock = Arc::clone(&bridge);
-    let clock = FrameClock::new(Arc::new(move |token| {
-        bridge_for_clock.schedule_frame(token)
+    let clock = FrameClock::new(Arc::new(move |token, hint| {
+        bridge_for_clock.schedule_frame(token, hint)
     }));
     let platform_runner = crate::main_runner::main_runner()?;
     let settings = request.settings;

@@ -178,9 +178,25 @@ pub trait Surface {
     }
 }
 
+/// Preferred display cadence for a compositor-owned frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FrameRateHint {
+    /// Use the display's interactive rate.
+    #[default]
+    Display,
+    /// Prefer 60 frames per second.
+    Hz60,
+    /// Prefer 30 frames per second.
+    Hz30,
+}
+
 pub trait Vsync: Send + Sync {
     fn bind(&self, sink: Arc<dyn Fn(FrameToken, FrameTime) + Send + Sync>);
     fn request_frame(&self, token: FrameToken);
+    fn request_frame_with_rate(&self, token: FrameToken, hint: FrameRateHint) {
+        let _ = hint;
+        self.request_frame(token);
+    }
     fn cancel(&self);
 }
 

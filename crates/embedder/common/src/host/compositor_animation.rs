@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
-use engine::scene::CompositorSnapshot;
+use engine::scene::{CompositorProp, CompositorSnapshot, CompositorTrack};
 use engine::session::FrameTime;
 
 use super::{
@@ -17,7 +17,7 @@ use crate::error::BootError;
 use crate::queue::Inbox;
 use crate::scheduler::Gpu;
 use crate::task_runner::RunnerSlot;
-use crate::{ThreadTopology, Vsync};
+use crate::{FrameRateHint, ThreadTopology, Vsync};
 
 // Keep callback tokens positive in platforms that transport them as signed longs.
 const RASTER_TOKEN: u64 = 1 << 62;
@@ -35,6 +35,9 @@ struct Active {
     plan: Arc<Plan>,
     latest: Option<Arc<CompositorSnapshot>>,
     last_vsync: Option<FrameTime>,
+    requested_rate: FrameRateHint,
+    candidate_rate: FrameRateHint,
+    rate_frames: u8,
 }
 
 struct Plan {
@@ -45,6 +48,51 @@ struct Plan {
     topology: ThreadTopology,
     telemetry: Option<Arc<crate::diagnostics::TelemetryHub>>,
     hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
+}
+
+impl Active {
+    fn frame_rate(&mut self, target_ms: f64) -> FrameRateHint {
+        let hint = frame_rate(&self.plan.tree.tracks, target_ms);
+        if hint != self.candidate_rate {
+            self.candidate_rate = hint;
+            self.rate_frames = 0;
+        }
+        self.rate_frames = self.rate_frames.saturating_add(1);
+        if hint != self.requested_rate && (hint == FrameRateHint::Display || self.rate_frames >= 3)
+        {
+            self.requested_rate = hint;
+            tracing::event!(
+                name: "compositor_cadence",
+                target: "impasto::compositor",
+                tracing::Level::DEBUG,
+                trace_event = true,
+                cadence = ?hint
+            );
+        }
+        self.requested_rate
+    }
+}
+
+fn frame_rate(tracks: &[CompositorTrack], target_ms: f64) -> FrameRateHint {
+    if tracks.is_empty() {
+        return FrameRateHint::Display;
+    }
+    let mut rate = FrameRateHint::Hz30;
+    for track in tracks {
+        let velocity = track.speed(target_ms);
+        match track.prop {
+            CompositorProp::ScrollX | CompositorProp::ScrollY if velocity < 80.0 => {
+                rate = FrameRateHint::Hz60;
+            }
+            CompositorProp::Opacity if velocity.is_finite() => {
+                if velocity > 90.0 {
+                    rate = FrameRateHint::Hz60;
+                }
+            }
+            _ => return FrameRateHint::Display,
+        }
+    }
+    rate
 }
 
 impl CompositorMode {
@@ -63,6 +111,9 @@ impl CompositorMode {
             plan: Arc::new(plan),
             latest: None,
             last_vsync: None,
+            requested_rate: FrameRateHint::Display,
+            candidate_rate: FrameRateHint::Display,
+            rate_frames: 0,
         });
         self.expected.store(token.0, Ordering::Release);
         token
@@ -183,10 +234,12 @@ impl CompositorMode {
                 Ok(end_frame(runtime, false, true))
             }));
         } else if output.shown {
+            let mut rate = FrameRateHint::Display;
             if let Some(run) = lock(&self.active).as_mut()
                 && run.generation == generation
             {
                 run.last_vsync = Some(time);
+                rate = run.frame_rate(time.target_ms);
                 if !snapshot.samples.is_empty() {
                     run.latest = Some(Arc::new(snapshot));
                 }
@@ -194,7 +247,7 @@ impl CompositorMode {
             if let Some(next) = self.continue_callback(token)
                 && let Some(vsync) = vsync.upgrade()
             {
-                vsync.request_frame(next);
+                vsync.request_frame_with_rate(next, rate);
             }
         } else {
             self.handoff(inbox, token, generation, None);

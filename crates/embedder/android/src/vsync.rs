@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use embedder::{FrameTime, FrameToken, Vsync};
+use embedder::{FrameRateHint, FrameTime, FrameToken, Vsync};
 
 type FrameSink = Arc<dyn Fn(FrameToken, FrameTime) + Send + Sync>;
 
@@ -14,11 +14,11 @@ struct ClockState {
 
 pub struct FrameClock {
     state: Mutex<ClockState>,
-    schedule: Arc<dyn Fn(FrameToken) + Send + Sync>,
+    schedule: Arc<dyn Fn(FrameToken, FrameRateHint) + Send + Sync>,
 }
 
 impl FrameClock {
-    pub fn new(schedule: Arc<dyn Fn(FrameToken) + Send + Sync>) -> Arc<Self> {
+    pub fn new(schedule: Arc<dyn Fn(FrameToken, FrameRateHint) + Send + Sync>) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(ClockState::default()),
             schedule,
@@ -75,11 +75,15 @@ impl Vsync for FrameClock {
     }
 
     fn request_frame(&self, token: FrameToken) {
+        self.request_frame_with_rate(token, FrameRateHint::Display);
+    }
+
+    fn request_frame_with_rate(&self, token: FrameToken, hint: FrameRateHint) {
         self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .pending = Some(token);
-        (self.schedule)(token);
+        (self.schedule)(token, hint);
     }
 
     fn cancel(&self) {
@@ -104,7 +108,7 @@ mod tests {
         let delivered = Arc::new(Mutex::new(Vec::new()));
         let schedule_log = Arc::clone(&scheduled);
         let frame_log = Arc::clone(&delivered);
-        let clock = FrameClock::new(Arc::new(move |token| {
+        let clock = FrameClock::new(Arc::new(move |token, _| {
             schedule_log
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())

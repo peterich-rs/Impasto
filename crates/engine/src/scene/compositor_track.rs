@@ -90,6 +90,15 @@ impl CompositorTrack {
         }
     }
 
+    /// Returns the current speed in the track's units per second.
+    pub fn speed(&self, target_ms: f64) -> f32 {
+        const SAMPLE_MS: f64 = 4.0;
+        let time = (target_ms - self.started_ms).max(0.0);
+        let (here, _) = self.curve.sample(time);
+        let (next, _) = self.curve.sample(time + SAMPLE_MS);
+        (next - here).abs() * 250.0
+    }
+
     /// A failed sample hands control back to UI at this timestamp.
     pub fn sample(self, target_ms: f64) -> Option<CompositorSample> {
         if !target_ms.is_finite() || target_ms >= self.expected_end_ms {

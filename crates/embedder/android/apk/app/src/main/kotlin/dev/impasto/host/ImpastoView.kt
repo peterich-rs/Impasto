@@ -233,7 +233,10 @@ class ImpastoView internal constructor(
     }
 
     // Called by the native Bridge. View updates are dispatched to the main thread.
-    fun scheduleFrame(token: Long) = onMain { frames.schedule(token) }
+    fun scheduleFrame(token: Long, rate: Int) = onMain {
+        surface.requestFrameRate(rate)
+        frames.schedule(token)
+    }
 
     fun onSessionStarted(status: Int) = onMain {
         if (status == 0) {

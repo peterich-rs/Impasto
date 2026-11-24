@@ -64,6 +64,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSDictionary",
     "NSLocale",
     "NSNotification",
+    "NSRunLoop",
     "NSDistributedNotificationCenter",
     "NSObject",
     "NSString",
@@ -88,6 +89,8 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
 ] }
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
     "std",
+    "CADisplayLink",
+    "CAFrameRateRange",
     "CALayer",
     "CAMetalLayer",
     "objc2-core-foundation",
