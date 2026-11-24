@@ -215,7 +215,9 @@ pub(super) fn scene_marks_in_commands(
             }
             crate::scene::Command::PushOpacity { .. }
             | crate::scene::Command::PushBlur { .. }
+            | crate::scene::Command::PushColorFilter { .. }
             | crate::scene::Command::PushBackdropBlur { .. }
+            | crate::scene::Command::PushBackdropMaterial { .. }
             | crate::scene::Command::PushBlend { .. } => {
                 stack.push((ctm, clips));
             }
@@ -247,6 +249,20 @@ pub(super) fn scene_marks_in_layers(tree: &crate::scene::LayerTree) -> Vec<Mark>
             let child = layer.first_child;
             match layer.kind {
                 crate::scene::LayerKind::PlatformView { .. } => {}
+                crate::scene::LayerKind::Fill {
+                    bounds: [x, y, ..],
+                    color,
+                    ..
+                } => {
+                    push_mark(
+                        marks,
+                        format!("rect:{:?}", crate::scene::linear_color_bytes(color)),
+                        x,
+                        y,
+                        ctm,
+                        clips,
+                    );
+                }
                 crate::scene::LayerKind::Offset { x, y } => {
                     if let Some(child) = child {
                         walk(
@@ -289,7 +305,9 @@ pub(super) fn scene_marks_in_layers(tree: &crate::scene::LayerTree) -> Vec<Mark>
                 }
                 crate::scene::LayerKind::Opacity { .. }
                 | crate::scene::LayerKind::Blur { .. }
+                | crate::scene::LayerKind::ColorFilter { .. }
                 | crate::scene::LayerKind::BackdropBlur { .. }
+                | crate::scene::LayerKind::BackdropMaterial { .. }
                 | crate::scene::LayerKind::Blend { .. } => {
                     if let Some(child) = child {
                         walk(tree, child, ctm, clips, marks);

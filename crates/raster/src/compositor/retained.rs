@@ -33,6 +33,7 @@ impl RetainedRoot {
                         | LayerKind::Transform { .. }
                         | LayerKind::Clip { .. }
                         | LayerKind::CornerClip { .. }
+                        | LayerKind::Opacity { .. }
                         | LayerKind::Picture { .. }
                 )
             })
@@ -42,9 +43,12 @@ impl RetainedRoot {
                 .all(|picture| picture.supports_partial)
     }
 
+    pub(super) fn is_small(damage: DamageRect, size: [u32; 2]) -> bool {
+        damage.fraction(PixelSize::new(size[0], size[1])) < PARTIAL_LIMIT
+    }
+
     pub(super) fn damage(&self, scene: &Scene<'_>) -> DamageRect {
-        let pixels = PixelSize::new(self.image.size[0], self.image.size[1]);
-        if self.revision == scene.previous_revision && scene.damage.fraction(pixels) < PARTIAL_LIMIT
+        if self.revision == scene.previous_revision && Self::is_small(scene.damage, self.image.size)
         {
             scene.damage
         } else {

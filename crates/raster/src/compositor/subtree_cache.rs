@@ -29,6 +29,7 @@ struct Key {
     scale: f32,
     pixel_alignment: Option<([f32; 2], [u32; 2])>,
     blur: Option<f32>,
+    image_revisions: Box<[u64]>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -226,7 +227,7 @@ impl Frame<'_> {
             || (!picture.cache_expensive && blur.is_none())
             || origin[..4] != IDENTITY[..4]
             || !clip.shapes.is_empty()
-            || (target.view == self.root && self.gpu.caps.lcd && self.scene.has_glyphs)
+            || (target.view == self.root && self.gpu.caps.lcd && picture.has_glyphs)
         {
             return Ok(false);
         }
@@ -255,6 +256,19 @@ impl Frame<'_> {
             let pixels = sigma * scale;
             pixels.is_finite() && pixels >= MIN_RESAMPLED_BLUR
         });
+        let image_revisions = picture
+            .images
+            .iter()
+            .map(|(source, _)| {
+                if source.starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX) {
+                    return None;
+                }
+                self.scene.textures.get(source).map(|image| image.revision)
+            })
+            .collect::<Option<Box<_>>>();
+        let Some(image_revisions) = image_revisions else {
+            return Ok(false);
+        };
         let key = Key {
             picture: picture_id,
             revision: picture.resident_id,
@@ -263,6 +277,7 @@ impl Frame<'_> {
             pixel_alignment: (!resample)
                 .then(|| (position.map(|value| value.rem_euclid(1.0)), logical)),
             blur,
+            image_revisions,
         };
         let cache = &mut self.compositor.subtrees;
         let entry = cache.observe(slot, key);

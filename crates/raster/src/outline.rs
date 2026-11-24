@@ -152,6 +152,7 @@ fn upload(gpu: &Gpu, path: &CanvasPath) -> Result<Option<Mesh>, Status> {
     Ok(Some(Mesh {
         buffer: Arc::new(OnceLock::from(buffers)),
         indices: 0..count,
+        stencil_fill: None,
         bounds,
         brush: Brush::Solid([1.0; 4]),
         composite: CanvasComposite::SourceOver,

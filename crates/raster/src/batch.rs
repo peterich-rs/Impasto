@@ -178,9 +178,16 @@ pub struct GpuMeshBuffer {
 pub struct Mesh {
     pub buffer: std::sync::Arc<std::sync::OnceLock<GpuMeshBuffer>>,
     pub indices: std::ops::Range<u32>,
+    pub stencil_fill: Option<StencilFill>,
     pub bounds: [f32; 4],
     pub brush: Brush,
     pub composite: engine::scene::CanvasComposite,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StencilFill {
+    pub rule: FillRule,
+    pub cover_indices: std::ops::Range<u32>,
 }
 
 /// Brush of a mesh or decoration.

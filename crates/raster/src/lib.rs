@@ -16,8 +16,8 @@ mod gpu;
 mod gpu_view;
 mod gradient_lut;
 mod image_upload;
+mod inline_image;
 mod outline;
-#[cfg(target_os = "android")]
 mod pipeline_disk_cache;
 mod pipelines;
 mod prepare;
@@ -151,16 +151,18 @@ struct DeviceState {
 
 struct Frame {
     tree: Arc<LayerTree>,
+    order: Vec<LayerId>,
     scale: f32,
     pictures: HashMap<PictureId, Arc<CompiledPicture>>,
     views: Arc<[u64]>,
     gpu_view_requests: gpu_view::Requests,
     shader_uniforms: runtime_effect::ShaderUniformOverrides,
-    parallel_prepare: bool,
+    prepare_glyphs: bool,
     damage: DamageRect,
     has_glyphs: bool,
     revision: u64,
     previous_revision: u64,
+    scene_revision: u64,
     #[cfg(target_os = "ios")]
     slices: Vec<HashSet<LayerId>>,
 }
@@ -193,9 +195,12 @@ impl Rasterizer {
         let mut raster = Self::create(options, fonts)?;
         let mut last = Status::NotReady;
         for backend in raster.backends() {
-            match Gpu::request(Gpu::instance(backend), backend, options, None, None)
-                .and_then(Self::new_device)
-            {
+            match Gpu::request(Gpu::instance(backend), backend, options, None, None).and_then(
+                |gpu| {
+                    let generation = NEXT_DEVICE.fetch_add(1, Ordering::Relaxed);
+                    Self::new_device(gpu, generation, None)
+                },
+            ) {
                 Ok(device) => {
                     raster.device = Some(device);
                     return Ok(raster);
@@ -216,9 +221,12 @@ impl Rasterizer {
             }))
     }
 
-    fn new_device(gpu: Gpu) -> Result<DeviceState, Status> {
-        let generation = NEXT_DEVICE.fetch_add(1, Ordering::Relaxed);
-        let compositor = gpu.validation(|| Compositor::new(&gpu))?;
+    fn new_device(
+        gpu: Gpu,
+        generation: u64,
+        surface: Option<wgpu::TextureFormat>,
+    ) -> Result<DeviceState, Status> {
+        let compositor = gpu.validation(|| Compositor::new(&gpu, surface))?;
         let textures = TextureStore::new(generation);
         Ok(DeviceState {
             gpu,
@@ -229,13 +237,12 @@ impl Rasterizer {
         })
     }
 
-    /// Selects the Android app-private cache directory before surface attachment.
+    /// Selects an app-private Vulkan pipeline cache directory before surface attachment.
     ///
     /// # Safety
     ///
     /// The directory must be writable solely by the host application and its
     /// files must come from this application. Android's Context.getCacheDir meets this contract.
-    #[cfg(target_os = "android")]
     #[expect(
         unsafe_code,
         reason = "wgpu startup trusts opaque data produced by the application"
@@ -507,6 +514,7 @@ impl Rasterizer {
         };
         let mut pictures = HashMap::with_capacity(tree.pictures.len());
         let mut has_glyphs = false;
+        let mut rebuilt_glyphs = false;
         for picture in &tree.pictures {
             let compile_scale = compile_scale(picture.id);
             let cached = previous
@@ -554,6 +562,7 @@ impl Rasterizer {
                     compiler::compile(picture, &mut context, pool)?
                 };
                 stats.picture_rebuilt = stats.picture_rebuilt.saturating_add(1);
+                rebuilt_glyphs |= result.has_glyphs;
                 if let Some(mesh) = result.mesh_buffer.get() {
                     stats.render.buffers_created += 2;
                     stats.render.mesh_upload_bytes += mesh.vertices.size() + mesh.indices.size();
@@ -580,7 +589,7 @@ impl Rasterizer {
                     return Err(Status::BadScene);
                 }
                 #[cfg(target_os = "ios")]
-                LayerKind::Picture { .. } => {
+                LayerKind::Picture { .. } | LayerKind::Fill { .. } => {
                     if let Some(slice) = slices.last_mut() {
                         let mut ancestor = Some(id);
                         while let Some(parent) = ancestor {
@@ -600,21 +609,23 @@ impl Rasterizer {
         let platform_views: Arc<[u64]> = views.into();
         let gpu_view_requests = self.gpu_views.requests(&tree, &scales, point_scale);
         let mut frame = Frame {
+            shader_uniforms: tree.shader_uniforms.clone(),
             tree,
+            order,
             scale: point_scale,
             pictures,
             views: Arc::clone(&platform_views),
             gpu_view_requests,
-            shader_uniforms: Default::default(),
-            parallel_prepare: pool.is_some(),
+            prepare_glyphs: self.parallel_prepare && rebuilt_glyphs,
             damage: DamageRect::Full,
             has_glyphs,
             revision: previous_revision.wrapping_add(1),
             previous_revision,
+            scene_revision: previous_revision.wrapping_add(1),
             #[cfg(target_os = "ios")]
             slices,
         };
-        frame.damage = damage::between(previous, &frame, &order, &textures);
+        frame.damage = damage::between(previous, &frame, &textures);
         stats.damage = frame.damage;
         stats.image_upload = textures.commit(&device.gpu)?;
         device.compositor.prune_subtrees(&frame.pictures);
@@ -723,10 +734,11 @@ impl Frame {
             shader_uniforms: &self.shader_uniforms,
             scale: self.scale,
             slice,
-            parallel_prepare: self.parallel_prepare,
+            prepare_glyphs: self.prepare_glyphs,
             damage: self.damage,
             has_glyphs: self.has_glyphs,
             revision: self.revision,
+            scene_revision: self.scene_revision,
             previous_revision: self.previous_revision,
         }
     }
@@ -787,7 +799,7 @@ fn paint_order(tree: &LayerTree) -> Result<Vec<LayerId>, Status> {
         if let Some(child) = layer.first_child {
             if matches!(
                 layer.kind,
-                LayerKind::Picture { .. } | LayerKind::PlatformView { .. }
+                LayerKind::Picture { .. } | LayerKind::PlatformView { .. } | LayerKind::Fill { .. }
             ) {
                 return Err(Status::BadScene);
             }

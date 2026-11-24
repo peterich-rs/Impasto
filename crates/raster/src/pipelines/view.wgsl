@@ -24,6 +24,17 @@ fn dither_srgb(pixel: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
     return vec4(rgb, pixel.a);
 }
 
+fn dither_linear(rgb: vec3<f32>, position: vec2<f32>) -> vec3<f32> {
+    // Approximate the local sRGB EOTF slope. At half a code of noise the
+    // two-term fit differs by less than a tenth of an SDR code.
+    let noise = fract(52.9829189 * fract(dot(floor(position),
+        vec2(0.06711056, 0.00583715)))) - 0.5;
+    let root = sqrt(max(rgb, vec3(0.0)));
+    let slope = select(vec3(1.0 / 12.92), (2.4 / 1.055) * root * (0.7 + 0.3 * root),
+        rgb > vec3(0.0031308));
+    return max(rgb + slope * (noise / 255.0), vec3(0.0));
+}
+
 fn sd_rounded_box(p: vec2<f32>, half: vec2<f32>, radius: f32) -> f32 {
     let r = min(radius, min(half.x, half.y));
     let q = abs(p) - half + vec2<f32>(r);

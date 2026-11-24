@@ -13,6 +13,7 @@ pub(crate) mod picture_id;
 mod platform_view;
 mod record;
 mod scroll;
+mod scroll_rules;
 mod semantics;
 mod shader;
 mod store;
@@ -80,7 +81,13 @@ pub struct Tree {
     /// Scroll friction and property springs, sampled by [`Tree::tick_motions`].
     motions: Vec<ActiveMotion>,
     next_motion_id: u64,
+    next_scroll_rule: u32,
+    back_progress: f32,
+    scroll_bindings:
+        HashMap<NodeId, std::collections::BTreeMap<u32, scroll_rules::NodeScrollBinding>>,
+    scroll_thresholds: std::collections::BTreeMap<u32, scroll_rules::ThresholdState>,
     motion_layers: HashMap<NodeId, compositor_motion::MotionLayers>,
+    list_compositor_windows: HashMap<NodeId, Option<compositor_motion::ListCompositorWindow>>,
     /// Motions that finished since the last [`Tree::take_motion_ends`].
     motion_ends: Vec<(NodeId, AnimProp)>,
     /// Last timestamp passed to [`Tree::tick_motions`]. New motions start here.

@@ -505,6 +505,13 @@ impl Session for JsSession {
     }
 
     fn back_gesture(&mut self, event: crate::session::BackGesture) -> bool {
+        use crate::session::BackGesture;
+        let progress = if let BackGesture::Progress(value) = event {
+            value
+        } else {
+            0.0
+        };
+        self.inner.tree.borrow_mut().set_back_progress(progress);
         match self.vm.host.back_gesture(event) {
             Ok(handled) => handled,
             Err(message) => {
@@ -835,6 +842,7 @@ impl Session for JsSession {
             } else {
                 tree.tick_motions(time.target_ms);
             }
+            tree.sync_scroll_offsets();
             let mut notices = tree.tick(time.target_ms);
             notices.extend(tree.take_scroll_notices());
             drop(tree);
@@ -943,6 +951,7 @@ impl Session for JsSession {
                 }
             }
             drop(tree);
+            inner.tree.borrow_mut().sync_scroll_offsets();
             let driver_trace =
                 tracing::debug_span!(target: "impasto::layout", "list_driver").entered();
             let mut list_ops = 0_u32;
@@ -999,6 +1008,45 @@ impl Session for JsSession {
                 }
             }
             drop(tree);
+            let thresholds = inner.tree.borrow_mut().update_scroll_thresholds();
+            if !thresholds.is_empty() {
+                for (id, active) in thresholds {
+                    if let Err(message) = host.scroll_threshold(id, active) {
+                        self.note_script_error(message);
+                    }
+                }
+                if let Err(error) = self.run_reactive() {
+                    return self.hold_frame(error);
+                }
+                let mut tree = inner.tree.borrow_mut();
+                let layout = tree.flush_styles().and_then(|()| {
+                    if tree.needs_layout() {
+                        tree.layout().map(|()| true)
+                    } else {
+                        Ok(false)
+                    }
+                });
+                drop(tree);
+                match layout {
+                    Err(error) => return self.hold_layout(error.to_string()),
+                    Ok(true) if !ran_layout => {
+                        let started = std::time::Instant::now();
+                        if let Err(error) = host.layout().and_then(|()| self.run_reactive()) {
+                            return self.hold_frame(error);
+                        }
+                        layout_cb_ms += elapsed_ms(started);
+                        let mut tree = inner.tree.borrow_mut();
+                        if tree.needs_layout()
+                            && let Err(error) = tree.layout()
+                        {
+                            let message = error.to_string();
+                            drop(tree);
+                            return self.hold_layout(message);
+                        }
+                    }
+                    _ => {}
+                }
+            }
             let canvas_stats = if paused {
                 CanvasStats::default()
             } else {
@@ -1262,24 +1310,28 @@ impl Session for JsSession {
         self.ui_work_pending || motion
     }
 
-    fn compositor_ready(&self, tracks: &[crate::scene::CompositorTrack]) -> bool {
+    fn compositor_eligibility(
+        &self,
+        tracks: &[crate::scene::CompositorTrack],
+    ) -> crate::scene::CompositorEligibility {
+        use crate::scene::CompositorBlockReason;
+
         let inner = &self.inner;
         let host = &self.vm.host;
-        if self.ui_work_pending
-            || inner.paused.get()
-            || host.observes_frame()
-            || inner.graph.has_updates()
-            || (!tracks.is_empty() && inner.canvas.borrow().observes_visibility())
-        {
-            return false;
+        if host.observes_frame() {
+            return Err(CompositorBlockReason::GlobalFrameHook);
         }
-        let drivers = inner.drivers.borrow();
+        if inner.canvas.borrow().observes_visibility() {
+            return Err(CompositorBlockReason::CanvasVisibilityObserver);
+        }
         inner
             .tree
             .borrow()
-            .compositor_motions_ready(tracks, |node| {
-                host.observes_scroll(node.to_raw()) || drivers.observes_scroll_window(node)
-            })
+            .compositor_eligibility(tracks, |node| host.observes_scroll(node.to_raw()))?;
+        if self.ui_work_pending || inner.paused.get() || inner.graph.has_updates() {
+            return Err(CompositorBlockReason::PendingUiWork);
+        }
+        Ok(())
     }
 
     fn commit_compositor_state(&mut self, snapshot: &crate::scene::CompositorSnapshot) {

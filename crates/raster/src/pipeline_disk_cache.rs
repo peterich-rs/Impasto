@@ -4,7 +4,6 @@ use std::{
     fs::{self, OpenOptions},
     hash::{DefaultHasher, Hash, Hasher},
     io::{Read, Write},
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -24,7 +23,7 @@ pub struct PipelineDiskCache {
 impl PipelineDiskCache {
     #[expect(
         unsafe_code,
-        reason = "only prior wgpu cache data from the Android app-private directory is read"
+        reason = "only prior wgpu cache data from the host app-private directory is read"
     )]
     pub fn open(device: &wgpu::Device, adapter: &wgpu::Adapter, root: &Path) -> Option<Self> {
         if !device.features().contains(wgpu::Features::PIPELINE_CACHE) {
@@ -51,13 +50,14 @@ impl PipelineDiskCache {
             include_str!("pipelines/color_precision.wgsl"),
             include_str!("pipelines/gradient.wgsl"),
             include_str!("pipelines/mod.rs"),
+            include_str!("../build.rs"),
         ]
         .hash(&mut fingerprint);
         let directory = root.join("impasto-wgpu");
         fs::create_dir_all(&directory).ok()?;
         let path = directory.join(format!("{adapter_key}-{:016x}", fingerprint.finish()));
         let data = load(&path);
-        // SAFETY: the embedder passes Context.getCacheDir(). The only file
+        // SAFETY: the embedder supplies a private directory. The only file
         // writer here serializes PipelineCache::get_data for this adapter.
         // The checksum detects corrupted writes and wgpu verifies the driver header.
         let cache = unsafe {
@@ -112,11 +112,14 @@ fn load(path: &Path) -> Option<Vec<u8>> {
 fn persist(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
     let temporary: PathBuf = path.with_extension(format!("{}-{serial}.tmp", std::process::id()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temporary)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)?;
     let result = (|| {
         file.write_all(&checksum(data))?;
         file.write_all(data)?;

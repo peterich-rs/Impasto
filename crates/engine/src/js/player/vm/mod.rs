@@ -18,6 +18,7 @@ mod canvas;
 mod drivers;
 mod modules;
 mod renderer;
+mod scroll_rules;
 mod turns;
 pub(super) use canvas::{
     CanvasSession, CanvasStats, begin_shutdown, deliver_errors, finish_shutdown, paint,

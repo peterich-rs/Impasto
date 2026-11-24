@@ -157,7 +157,13 @@ impl ImageUpload {
             "premultiplied image mips",
             size,
             self.format,
-            self.usage | U::TEXTURE_BINDING,
+            self.usage
+                | U::TEXTURE_BINDING
+                | if matches!(self.convert, Pipeline::Render(_)) {
+                    U::COPY_SRC
+                } else {
+                    U::empty()
+                },
             levels,
         ));
         upload_rgba(gpu, &source, size, pixels);

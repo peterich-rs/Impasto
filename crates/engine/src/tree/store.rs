@@ -31,7 +31,12 @@ impl Tree {
             scopes: Vec::new(),
             motions: Vec::new(),
             next_motion_id: 0,
+            next_scroll_rule: 0,
+            back_progress: 0.0,
+            scroll_bindings: HashMap::new(),
+            scroll_thresholds: Default::default(),
             motion_layers: HashMap::new(),
+            list_compositor_windows: HashMap::new(),
             motion_ends: Vec::new(),
             clock_ms: 0.0,
             applying_motion: false,
@@ -711,6 +716,7 @@ impl Tree {
         if let Some(generation) = generation {
             let id = NodeId { index, generation };
             self.remove_shader_effect(id);
+            self.forget_scroll_rules(id);
             self.pictures.remove(&id);
             self.runs.remove(&id);
             self.subtree_layers.remove(&id);

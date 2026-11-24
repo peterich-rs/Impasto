@@ -175,8 +175,11 @@ pub trait Session {
     fn pointer(&mut self, event: crate::input::PointerEvent);
     fn frame(&mut self, time: FrameTime) -> FrameOutput;
     /// Whether the current tree may animate on the compositor while UI is idle.
-    fn compositor_ready(&self, _tracks: &[crate::scene::CompositorTrack]) -> bool {
-        false
+    fn compositor_eligibility(
+        &self,
+        _tracks: &[crate::scene::CompositorTrack],
+    ) -> crate::scene::CompositorEligibility {
+        Err(crate::scene::CompositorBlockReason::PendingUiWork)
     }
     /// Restores the properties of the last compositor frame before input dispatch.
     fn commit_compositor_state(&mut self, _snapshot: &crate::scene::CompositorSnapshot) {}

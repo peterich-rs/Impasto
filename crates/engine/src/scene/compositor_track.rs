@@ -2,7 +2,49 @@
 
 use crate::motion::MotionCurve;
 
-use super::{Layer, LayerId, LayerKind};
+use super::{Layer, LayerId, LayerKind, ScrollBinding, ScrollValue};
+use std::{collections::HashMap, sync::Arc};
+
+/// Why an active motion must be updated by the UI queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompositorBlockReason {
+    ScrollCallback { node: u64 },
+    GlobalFrameHook,
+    CanvasVisibilityObserver,
+    PlatformViewPresent,
+    PendingUiWork,
+    ListWindowNotSettled { node: u64 },
+    UnsupportedTrack { node: u64 },
+    Disabled,
+    SharedTopology,
+}
+
+impl CompositorBlockReason {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ScrollCallback { .. } => "scroll_callback",
+            Self::GlobalFrameHook => "global_frame_hook",
+            Self::CanvasVisibilityObserver => "canvas_visibility_observer",
+            Self::PlatformViewPresent => "platform_view_present",
+            Self::PendingUiWork => "pending_ui_work",
+            Self::ListWindowNotSettled { .. } => "list_window_not_settled",
+            Self::UnsupportedTrack { .. } => "unsupported_track",
+            Self::Disabled => "disabled",
+            Self::SharedTopology => "shared_topology",
+        }
+    }
+
+    pub fn node(self) -> Option<u64> {
+        match self {
+            Self::ScrollCallback { node }
+            | Self::ListWindowNotSettled { node }
+            | Self::UnsupportedTrack { node } => Some(node),
+            _ => None,
+        }
+    }
+}
+
+pub type CompositorEligibility = Result<(), CompositorBlockReason>;
 
 /// Identity of one animation, changed when its property is retargeted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -18,6 +60,8 @@ pub enum CompositorProp {
     Opacity,
     ScrollX,
     ScrollY,
+    OverscrollX,
+    OverscrollY,
     /// Packed f32 slot in the effect belonging to the target picture.
     ShaderUniform(u8),
 }
@@ -25,7 +69,10 @@ pub enum CompositorProp {
 impl CompositorProp {
     /// Scroll tracks carry untransformed content offsets in scene points.
     pub fn is_scroll(self) -> bool {
-        matches!(self, Self::ScrollX | Self::ScrollY)
+        matches!(
+            self,
+            Self::ScrollX | Self::ScrollY | Self::OverscrollX | Self::OverscrollY
+        )
     }
 }
 
@@ -54,7 +101,7 @@ impl CompositorTransform {
 }
 
 /// Pure data required to evaluate one layer property at an absolute vsync target.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CompositorTrack {
     pub id: CompositorTrackId,
     pub layer: LayerId,
@@ -65,6 +112,18 @@ pub struct CompositorTrack {
     pub clamp: Option<[f32; 2]>,
     pub expected_end_ms: f64,
     pub transform: Option<CompositorTransform>,
+    /// Allow a raster snapshot of the subtree while this transition is active.
+    pub freeze_subtree: bool,
+    /// Absolute scroll base when the sampled channel is rubber-band displacement.
+    pub overscroll_base: f32,
+    /// Exclusive limits before the mounted list or its pinned row needs updating.
+    pub scroll_window: Option<[f32; 2]>,
+    /// Half-open bounds that preserve every discrete scroll observation.
+    pub threshold_window: Option<[f32; 2]>,
+    /// Mounted-window edges that can expand before a compositor handoff.
+    pub list_prefetch_edges: [Option<f32>; 2],
+    /// Visual properties that follow this scroll track.
+    pub scroll_bindings: Arc<[ScrollBinding]>,
 }
 
 impl CompositorTrack {
@@ -87,6 +146,12 @@ impl CompositorTrack {
             clamp,
             expected_end_ms: started_ms + curve.expected_end_ms(),
             transform,
+            freeze_subtree: false,
+            overscroll_base: 0.0,
+            scroll_window: None,
+            threshold_window: None,
+            list_prefetch_edges: [None; 2],
+            scroll_bindings: Arc::default(),
         }
     }
 
@@ -99,8 +164,41 @@ impl CompositorTrack {
         (next - here).abs() * 250.0
     }
 
+    /// Requests a UI update while the installed window still covers this frame.
+    pub fn needs_list_prefetch(&self, target_ms: f64, interval_ms: f64) -> bool {
+        let [low, high] = self.list_prefetch_edges;
+        if low.is_none() && high.is_none() {
+            return false;
+        }
+        let lookahead = (2.0 * interval_ms).clamp(8.0, 40.0);
+        let future = self
+            .curve
+            .sample((target_ms + lookahead - self.started_ms).max(0.0))
+            .0;
+        let future = match self.clamp {
+            Some([lo, hi]) if lo <= hi => future.clamp(lo, hi),
+            Some(_) => return false,
+            None => future,
+        };
+        low.is_some_and(|edge| future < edge) || high.is_some_and(|edge| future > edge)
+    }
+
+    /// Whether this vsync would leave a previously stable threshold state.
+    pub fn crosses_scroll_threshold(&self, target_ms: f64) -> bool {
+        let Some([low, high]) = self.threshold_window else {
+            return false;
+        };
+        let (value, _) = self.curve.sample((target_ms - self.started_ms).max(0.0));
+        let value = match self.clamp {
+            Some([min, max]) if min <= max => value.clamp(min, max),
+            Some(_) => return false,
+            None => value,
+        };
+        value < low || value >= high
+    }
+
     /// A failed sample hands control back to UI at this timestamp.
-    pub fn sample(self, target_ms: f64) -> Option<CompositorSample> {
+    pub fn sample(&self, target_ms: f64) -> Option<CompositorSample> {
         if !target_ms.is_finite() || target_ms >= self.expected_end_ms {
             return None;
         }
@@ -112,13 +210,47 @@ impl CompositorTrack {
             if min > max || !min.is_finite() || !max.is_finite() {
                 return None;
             }
-            if self.prop.is_scroll() && (value <= min || value >= max) {
+            if self.prop.is_scroll()
+                && (matches!(self.curve, MotionCurve::Friction { .. })
+                    && (value <= min || value >= max)
+                    || value < min - 0.5
+                    || value > max + 0.5)
+            {
                 return None;
             }
             value = value.clamp(min, max);
         }
+        if let Some([min, max]) = self.scroll_window
+            && !(min < value && value < max)
+        {
+            return None;
+        }
+        if let Some([min, max]) = self.threshold_window
+            && !(min <= value && value < max)
+        {
+            return None;
+        }
+        if matches!(
+            self.prop,
+            CompositorProp::OverscrollX | CompositorProp::OverscrollY
+        ) && let MotionCurve::Spring { x0, v0, .. } = self.curve
+        {
+            // At an edge, inertia can start the spring at zero with a nonzero derivative.
+            let side = if x0 == 0.0 { v0 } else { x0 };
+            if side * value < 0.0 {
+                return None;
+            }
+        }
         Some(CompositorSample { id: self.id, value })
     }
+}
+
+pub(crate) fn list_scroll_prediction(curve: MotionCurve, started_ms: f64, target_ms: f64) -> f32 {
+    // Leave about two 60 Hz frame intervals for the UI to mount and measure rows.
+    const PREFETCH_MS: f64 = 32.0;
+    curve
+        .sample((target_ms + PREFETCH_MS - started_ms).max(0.0))
+        .0
 }
 
 /// Latest presented value of a source motion, in its original scene units.
@@ -161,6 +293,47 @@ pub fn apply_compositor_samples(
         }
         start = end;
     }
+    let mut transforms = HashMap::new();
+    for (track, sample) in tracks.iter().zip(samples) {
+        for binding in track.scroll_bindings.iter() {
+            let value = binding.prop.evaluate(&binding.curve, sample.value);
+            let Some(layer) = layers.get_mut(binding.layer.0 as usize) else {
+                return false;
+            };
+            if let (Some(base), ScrollValue::Scalar(value)) = (binding.transform, value) {
+                let transform = transforms.entry(binding.layer).or_insert(base);
+                binding.prop.apply_transform(transform, value);
+            } else if !binding.apply(&mut layer.kind, value) {
+                return false;
+            }
+        }
+    }
+    for (id, transform) in transforms {
+        if !write_transform(&mut layers[id.0 as usize].kind, transform) {
+            return false;
+        }
+    }
+    true
+}
+
+fn write_transform(kind: &mut LayerKind, transform: CompositorTransform) -> bool {
+    let LayerKind::Transform {
+        translate_x,
+        translate_y,
+        rotate_rad,
+        scale_x,
+        scale_y,
+    } = kind
+    else {
+        return false;
+    };
+    let placed = transform.placed();
+    if !placed.into_iter().all(f32::is_finite) {
+        return false;
+    }
+    [*translate_x, *translate_y] = placed;
+    *rotate_rad = transform.rotate_rad;
+    [*scale_x, *scale_y] = transform.scale;
     true
 }
 
@@ -183,7 +356,6 @@ fn apply_layer(
                 scale: [*scale_x, *scale_y],
                 pivot: None,
             });
-            transform.scale[1] = transform.scale[0];
             for (track, sample) in tracks.iter().zip(samples) {
                 match track.prop {
                     CompositorProp::TranslateX => transform.translate[0] = sample.value,
@@ -193,13 +365,7 @@ fn apply_layer(
                     _ => return false,
                 }
             }
-            let placed = transform.placed();
-            if !placed.into_iter().all(f32::is_finite) {
-                return false;
-            }
-            [*translate_x, *translate_y] = placed;
-            *rotate_rad = transform.rotate_rad;
-            [*scale_x, *scale_y] = transform.scale;
+            return write_transform(kind, transform);
         }
         LayerKind::Opacity { alpha, .. }
             if tracks.len() == 1 && tracks[0].prop == CompositorProp::Opacity =>
@@ -211,6 +377,8 @@ fn apply_layer(
                 match track.prop {
                     CompositorProp::ScrollX => *x = -sample.value,
                     CompositorProp::ScrollY => *y = -sample.value,
+                    CompositorProp::OverscrollX => *x = -(track.overscroll_base + sample.value),
+                    CompositorProp::OverscrollY => *y = -(track.overscroll_base + sample.value),
                     _ => return false,
                 }
             }

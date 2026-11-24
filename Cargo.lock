@@ -2580,6 +2580,7 @@ name = "raster"
 version = "0.0.0"
 dependencies = [
  "ash",
+ "base64",
  "bytemuck",
  "engine",
  "etagere",
@@ -2588,6 +2589,7 @@ dependencies = [
  "lyon_geom",
  "lyon_path",
  "lyon_tessellation",
+ "naga",
  "objc2",
  "objc2-metal",
  "objc2-quartz-core",
@@ -2596,6 +2598,7 @@ dependencies = [
  "raw-window-handle",
  "rayon",
  "serde_json",
+ "slotmap",
  "swash",
  "thiserror 2.0.21",
  "tracing",

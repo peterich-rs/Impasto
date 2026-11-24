@@ -20,8 +20,8 @@ use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::batch::{
     self, Brush, GpuMeshBuffer, ImageInstance, Mesh, PackedGradient, RECT_FILL, RECT_FILL_STROKE,
-    RECT_GRADIENT, RECT_SHADOW, RECT_STROKE, RectInstance, image_slices, lyon_fill_rule,
-    pack_canvas_gradient, pack_gradient, tessellation_path,
+    RECT_GRADIENT, RECT_SHADOW, RECT_STROKE, RectInstance, StencilFill, image_slices,
+    lyon_fill_rule, pack_canvas_gradient, pack_gradient, tessellation_path,
 };
 use crate::color::linear_premultiplied;
 use crate::gpu::Gpu;
@@ -147,12 +147,17 @@ pub struct ScopeState {
 }
 
 /// An offscreen group the compositor renders into a texture.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Effect {
     Opacity,
     Isolation,
     Blur,
+    ColorFilter(engine::scene::ColorMatrix),
     BackdropBlur,
+    BackdropMaterial(
+        engine::scene::BackdropMaterial,
+        Option<engine::scene::CornerShape>,
+    ),
     Blend(BlendMode),
     Canvas(CanvasComposite),
 }
@@ -334,6 +339,7 @@ impl Draw {
 /// One glyph quad, before its atlas page is known.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GlyphDraw {
+    pub(crate) atlas_slot: crate::atlas::GlyphSlot,
     pub face: Arc<engine::scene::FontFaceId>,
     pub glyph: u16,
     /// Baseline position in scene points, after the scope transform.
@@ -515,6 +521,7 @@ pub fn prepare(
     let mut cache_safe = true;
     let mut shadows = 0usize;
     let mut paths = 0usize;
+    let mut glyph_count = 0usize;
     for scope in &mut compiler.scopes {
         for draw in &mut scope.draws {
             if let Draw::Rects(run) = draw {
@@ -525,15 +532,20 @@ pub fn prepare(
                     .filter(|rect| rect.kind == RECT_SHADOW)
                     .count();
             }
-            has_glyphs |= matches!(draw, Draw::Glyphs(_));
+            if let Draw::Glyphs(glyphs) = draw {
+                has_glyphs = true;
+                glyph_count += glyphs.len();
+            }
             has_shader_effect |= matches!(draw, Draw::ShaderEffect { .. });
             supports_partial &= matches!(
                 draw,
                 Draw::Rects(_) | Draw::Images { .. } | Draw::Glyphs(_) | Draw::Fill(_)
             ) && draw.source_over();
             paths += usize::from(matches!(draw, Draw::Mesh(_)));
-            cache_safe &= matches!(draw, Draw::Rects(_) | Draw::Mesh(_))
-                && (draw.source_over() || !scope.state.groups.is_empty());
+            cache_safe &= matches!(
+                draw,
+                Draw::Rects(_) | Draw::Mesh(_) | Draw::Glyphs(_) | Draw::Images { .. }
+            ) && (draw.source_over() || !scope.state.groups.is_empty());
         }
         if compiler.groups.is_empty() {
             let candidates: Vec<_> = scope.draws.iter().map(resident_candidate).collect();
@@ -566,22 +578,24 @@ pub fn prepare(
     for (group, content) in compiler.groups.iter_mut().zip(content_by_group) {
         group.content = content;
     }
-    cache_safe &= compiler
-        .groups
-        .iter()
-        .all(|group| group.effect != Effect::BackdropBlur)
-        && compiler.scopes.iter().all(|scope| {
-            scope.state.groups.first().is_none_or(|id| {
-                matches!(
-                    compiler.groups[*id].effect,
-                    Effect::Opacity
-                        | Effect::Isolation
-                        | Effect::Blur
-                        | Effect::Blend(BlendMode::SrcOver)
-                )
-            })
-        });
+    cache_safe &= compiler.groups.iter().all(|group| {
+        !matches!(
+            group.effect,
+            Effect::BackdropBlur | Effect::BackdropMaterial(..)
+        )
+    }) && compiler.scopes.iter().all(|scope| {
+        scope.state.groups.first().is_none_or(|id| {
+            matches!(
+                compiler.groups[*id].effect,
+                Effect::Opacity
+                    | Effect::Isolation
+                    | Effect::Blur
+                    | Effect::Blend(BlendMode::SrcOver)
+            )
+        })
+    });
     let cache_expensive = paths >= 32
+        || glyph_count >= 256
         || shadows >= 2
         || compiler.groups.iter().any(|group| {
             matches!(
@@ -615,6 +629,7 @@ pub fn prepare(
                 matches!(
                     compiler.groups[id].effect,
                     Effect::BackdropBlur
+                        | Effect::BackdropMaterial(..)
                         | Effect::Blend(BlendMode::Multiply)
                         | Effect::Canvas(CanvasComposite::Multiply)
                 )
@@ -653,7 +668,7 @@ fn group_output(content: PictureBounds, group: Group, origin: Affine) -> Picture
     let transform = compose(origin, group.transform);
     match group.effect {
         Effect::Blur => content.expand(3.0 * group.sigma.max(0.0) * effect_scale(transform)),
-        Effect::BackdropBlur => {
+        Effect::BackdropBlur | Effect::BackdropMaterial(..) => {
             content.union(group.bounds.map_or(PictureBounds::Empty, |bounds| {
                 PictureBounds::rect(bounds).transform(transform)
             }))
@@ -871,8 +886,23 @@ impl Compiler<'_> {
                 scale_y,
             } => self.push_transform(*translate_x, *translate_y, *rotate_rad, *scale_x, *scale_y),
             Command::PushBlur { sigma, .. } => self.push_effect(Effect::Blur, 1.0, *sigma, None),
+            Command::PushColorFilter { matrix } => {
+                self.push_effect(Effect::ColorFilter(**matrix), 1.0, 0.0, None);
+            }
             Command::PushBackdropBlur { x, y, w, h, sigma } => {
                 self.push_effect(Effect::BackdropBlur, 1.0, *sigma, Some([*x, *y, *w, *h]));
+            }
+            Command::PushBackdropMaterial {
+                bounds,
+                corners,
+                material,
+            } => {
+                self.push_effect(
+                    Effect::BackdropMaterial(**material, *corners),
+                    1.0,
+                    material.sigma,
+                    Some(*bounds),
+                );
             }
             Command::PushBlend { mode, .. } => {
                 self.push_effect(Effect::Blend(*mode), 1.0, 0.0, None)
@@ -1034,6 +1064,7 @@ impl Compiler<'_> {
                 line.rect[3],
             ];
             glyphs.push(GlyphDraw {
+                atlas_slot: Default::default(),
                 face: Arc::new(engine::scene::FontFaceId(u64::MAX)),
                 glyph: 0,
                 x: rect[0],
@@ -1259,6 +1290,8 @@ impl Compiler<'_> {
         self.push_transform(x, y, 0.0, 1.0, 1.0);
         let floor = self.stack.len();
         let ops = list.ops();
+        let stencil = std::env::var("IMPASTO_CANVAS_STENCIL").as_deref() != Ok("0")
+            && !ops.iter().any(|op| matches!(op, CanvasOp::Clip { .. }));
         if let Some(pool) = self.pool.filter(|_| crate::prepare::path_count(ops) >= 16) {
             // Canvas paths already contain their local transforms. Save/restore
             // and the remaining ops leave the enclosing scale unchanged.
@@ -1267,9 +1300,10 @@ impl Compiler<'_> {
                 ops.par_iter()
                     .map(|op| match op {
                         CanvasOp::Clip { path } if path.verbs.is_empty() => Ok(None),
-                        CanvasOp::Fill { path, .. } | CanvasOp::Clip { path } => {
-                            tessellate(path, tolerance).map(Some)
+                        CanvasOp::Fill { path, .. } => {
+                            prepare_path(path, tolerance, stencil).map(Some)
                         }
+                        CanvasOp::Clip { path } => prepare_path(path, tolerance, false).map(Some),
                         _ => Ok(None),
                     })
                     .collect()
@@ -1279,7 +1313,16 @@ impl Compiler<'_> {
             }
         } else {
             for op in ops {
-                self.canvas_op(op, floor, None)?;
+                let buffers = match op {
+                    CanvasOp::Fill { path, .. } => {
+                        Some(prepare_path(path, self.tessellation_tolerance(), stencil)?)
+                    }
+                    CanvasOp::Clip { path } if !path.verbs.is_empty() => {
+                        Some(prepare_path(path, self.tessellation_tolerance(), false)?)
+                    }
+                    _ => None,
+                };
+                self.canvas_op(op, floor, buffers)?;
             }
         }
         self.stack.truncate(entry);
@@ -1289,15 +1332,11 @@ impl Compiler<'_> {
 
     fn mesh(
         &mut self,
-        path: &CanvasPath,
         brush: Brush,
         composite: CanvasComposite,
-        buffers: Option<Tessellation>,
+        prepared: PreparedPath,
     ) -> Result<Mesh, Status> {
-        let buffers = match buffers {
-            Some(buffers) => buffers,
-            None => tessellate(path, self.tessellation_tolerance())?,
-        };
+        let PreparedPath { buffers, stencil } = prepared;
         let base = u32::try_from(self.vertices.len()).map_err(|_| Status::BadScene)?;
         let start = u32::try_from(self.indices.len()).map_err(|_| Status::BadScene)?;
         let bounds = mesh_bounds(&buffers.vertices);
@@ -1307,9 +1346,31 @@ impl Compiler<'_> {
         }
         let end = u32::try_from(self.indices.len()).map_err(|_| Status::BadScene)?;
         self.vertices.extend(buffers.vertices);
+        let stencil_fill = if let Some(rule) = stencil {
+            let base = u32::try_from(self.vertices.len()).map_err(|_| Status::BadScene)?;
+            let [x, y, w, h] = bounds;
+            self.vertices.extend([
+                [x, y, 1.0],
+                [x + w, y, 1.0],
+                [x + w, y + h, 1.0],
+                [x, y + h, 1.0],
+            ]);
+            for index in [0, 1, 2, 0, 2, 3] {
+                self.indices
+                    .push(base.checked_add(index).ok_or(Status::BadScene)?);
+            }
+            let cover_end = u32::try_from(self.indices.len()).map_err(|_| Status::BadScene)?;
+            Some(StencilFill {
+                rule,
+                cover_indices: end..cover_end,
+            })
+        } else {
+            None
+        };
         Ok(Mesh {
             buffer: Arc::clone(&self.meshes),
             indices: start..end,
+            stencil_fill,
             bounds,
             brush,
             composite,
@@ -1320,7 +1381,7 @@ impl Compiler<'_> {
         &mut self,
         op: &CanvasOp,
         floor: usize,
-        buffers: Option<Tessellation>,
+        buffers: Option<PreparedPath>,
     ) -> Result<(), Status> {
         match op {
             CanvasOp::Save => {
@@ -1340,10 +1401,9 @@ impl Compiler<'_> {
                     clip.hard_scissor = Some([0.0; 4]);
                 } else {
                     let mesh = self.mesh(
-                        path,
                         Brush::Solid([1.0; 4]),
                         CanvasComposite::SourceOver,
-                        buffers,
+                        buffers.ok_or(Status::BadScene)?,
                     )?;
                     self.current_mut().clip.shapes.push(ClipShape {
                         rect: mesh.bounds,
@@ -1356,7 +1416,7 @@ impl Compiler<'_> {
                 }
                 self.boundary();
             }
-            CanvasOp::Fill { path, paint } => {
+            CanvasOp::Fill { paint, .. } => {
                 let brush = match &paint.brush {
                     CanvasBrush::Color(color) => {
                         Brush::Solid(linear_premultiplied(*color, paint.alpha).unwrap_or([0.0; 4]))
@@ -1365,7 +1425,7 @@ impl Compiler<'_> {
                         pack_canvas_gradient(gradient, paint.alpha).ok_or(Status::BadScene)?,
                     ),
                 };
-                let mesh = self.mesh(path, brush, paint.composite, buffers)?;
+                let mesh = self.mesh(brush, paint.composite, buffers.ok_or(Status::BadScene)?)?;
                 let isolated = paint.composite == CanvasComposite::Multiply
                     && self.push_canvas_composite(paint.composite);
                 self.push_draw(Draw::Mesh(mesh));
@@ -1495,6 +1555,7 @@ fn append_glyphs(out: &mut Vec<GlyphDraw>, run: &ShapedRun, x: f32, y: f32, pain
         (!run.normalized_coords.is_empty()).then(|| Arc::from(run.normalized_coords.as_ref()));
     let color = pack_glyph_color(paint.solid);
     out.extend(run.glyphs.iter().map(|glyph| GlyphDraw {
+        atlas_slot: Default::default(),
         face: Arc::clone(&run.face),
         glyph: glyph.id,
         x: x + glyph.x,
@@ -1624,6 +1685,59 @@ fn canvas_image_sample(
     ];
     let uv = [left / width, top / height, right / width, bottom / height];
     Some((rect, uv))
+}
+
+struct PreparedPath {
+    buffers: Tessellation,
+    stencil: Option<engine::scene::FillRule>,
+}
+
+fn prepare_path(path: &CanvasPath, tolerance: f32, stencil: bool) -> Result<PreparedPath, Status> {
+    // Small shapes already tessellate cheaply. A bounded fan lets the GPU
+    // resolve the more complex overlaps without overflowing 8-bit winding.
+    if stencil
+        && path.verbs.len() >= 16
+        && let Some(buffers) = stencil_fan(path, tolerance)
+    {
+        return Ok(PreparedPath {
+            buffers,
+            stencil: Some(path.fill),
+        });
+    }
+    Ok(PreparedPath {
+        buffers: tessellate(path, tolerance)?,
+        stencil: None,
+    })
+}
+
+fn stencil_fan(path: &CanvasPath, tolerance: f32) -> Option<Tessellation> {
+    use lyon_path::{Event, iterator::PathIterator};
+
+    const MAX_TRIANGLES: usize = 255;
+    let mut buffers = Tessellation::new();
+    let geometry = tessellation_path(&path.verbs);
+    let mut first = 0;
+    for event in geometry.iter().flattened(tolerance) {
+        match event {
+            Event::Begin { at } => {
+                first = u32::try_from(buffers.vertices.len()).ok()?;
+                buffers.vertices.push([at.x, at.y, 1.0]);
+            }
+            Event::Line { to, .. } => {
+                let index = u32::try_from(buffers.vertices.len()).ok()?;
+                if index >= first + 2 {
+                    if buffers.indices.len() >= MAX_TRIANGLES * 3 {
+                        return None;
+                    }
+                    buffers.indices.extend([first, index - 1, index]);
+                }
+                buffers.vertices.push([to.x, to.y, 1.0]);
+            }
+            Event::End { .. } => {}
+            Event::Quadratic { .. } | Event::Cubic { .. } => return None,
+        }
+    }
+    (!buffers.indices.is_empty()).then_some(buffers)
 }
 
 /// Tessellates a path in canvas points into position+coverage vertices.

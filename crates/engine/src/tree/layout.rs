@@ -207,7 +207,8 @@ impl Tree {
             node.flags.intersects(
                 NodeFlags::PICTURE_OWNER
                     | NodeFlags::PICTURE_FROM_CANVAS
-                    | NodeFlags::PICTURE_FROM_SHADER,
+                    | NodeFlags::PICTURE_FROM_SHADER
+                    | NodeFlags::PICTURE_FROM_BOUNDARY,
             )
         })
     }
@@ -217,10 +218,37 @@ impl Tree {
     /// dirties `id` and its parent owner so the parent run drops the old commands.
     /// A repeat call does not.
     pub(crate) fn set_picture_owner(&mut self, id: NodeId, on: bool) -> Result<(), Error> {
-        if self.node(id)?.flags.contains(NodeFlags::PICTURE_OWNER) == on {
+        self.set_picture_flag(id, NodeFlags::PICTURE_OWNER, on)
+    }
+
+    /// Records this node's independent picture for application-driven repaints.
+    pub fn set_repaint_boundary(&mut self, id: NodeId, on: bool) -> Result<(), Error> {
+        self.set_picture_flag(id, NodeFlags::PICTURE_FROM_BOUNDARY, on)
+    }
+
+    /// Allows the rasterizer to cache this node's subtree during its transitions.
+    pub fn set_transition_snapshot(&mut self, id: NodeId, on: bool) -> Result<(), Error> {
+        if self
+            .node(id)?
+            .flags
+            .contains(NodeFlags::TRANSITION_SNAPSHOT)
+            != on
+        {
+            self.node_mut(id)?
+                .flags
+                .set(NodeFlags::TRANSITION_SNAPSHOT, on);
+            self.invalidate_subtree_layers(id);
+            self.layer_epoch = self.layer_epoch.wrapping_add(1);
+            self.mark_paint();
+        }
+        Ok(())
+    }
+
+    fn set_picture_flag(&mut self, id: NodeId, flag: NodeFlags, on: bool) -> Result<(), Error> {
+        if self.node(id)?.flags.contains(flag) == on {
             return Ok(());
         }
-        self.node_mut(id)?.flags.set(NodeFlags::PICTURE_OWNER, on);
+        self.node_mut(id)?.flags.set(flag, on);
         self.invalidate_subtree_layers(id);
         self.dirty_picture(id);
         if let Some(parent) = self.get(id).and_then(|node| node.parent) {
@@ -285,8 +313,11 @@ impl Tree {
             .subtree_layers
             .get(&id)
             .is_some_and(|value| value.requires_clip_layer());
-        self.get(id)
-            .is_some_and(|node| node.renders_layers(subtree))
+        self.get(id).is_some_and(|node| {
+            node.renders_layers(subtree) || node.flags.contains(NodeFlags::PICTURE_FROM_BOUNDARY)
+        }) || self.motion_layers.get(&id).is_some_and(|layers| {
+            layers.linked_transform || layers.transition_opacity || layers.linked_effect
+        })
     }
 
     pub(super) fn is_repaint_dirty(&self, id: NodeId) -> bool {

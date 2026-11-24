@@ -28,6 +28,14 @@ function rowsOf(frame: FrameSample): [string, string][] {
     ["picture", `${frame.pictureRebuilt ?? 0}/${frame.pictureReused ?? 0}`],
     ["cause", frame.layoutCause ?? ""],
   ];
+  if (frame.compositorOnly) {
+    rows.splice(1, 0, ["合成线程", `Raster 托管 · ${Math.round(1000 / frame.budgetMs)} Hz`]);
+  } else if (frame.compositorBlock) {
+    const node = frame.compositorBlockNode ? ` · 节点 #${frame.compositorBlockNode}` : "";
+    const hint = frame.compositorBlock === "scroll_callback"
+      ? " · 可使用 useScrollThreshold 或 bindScrollStyle" : "";
+    rows.splice(1, 0, ["合成回退", frame.compositorBlock + node + hint]);
+  }
   if (phase) {
     rows.push(
       ["motion", `${phase.motionMs.toFixed(2)}ms`],

@@ -80,14 +80,15 @@ impl Frame<'_> {
         {
             return Ok(false);
         }
-        let dither = self.gpu.dither_output
+        let dither = self.gpu.dither_gradients
             && target.view == self.root
             && target.format.is_srgb()
             && blend == BlendKey::SrcOver;
         let is_text = kind == PipelineKind::TextMask;
         let atlas_scale = self.compositor.atlas.inverse_page_size();
-        let [a, b, c, d, x, y] = transform;
+        let [a, b, c, d, ..] = transform;
         let scale = self.scene.scale;
+        let glyph_geometry = is_text.then(|| GlyphTransform::new(transform, scale));
         let mut key = Key {
             picture: replay.picture.resident_id,
             layer: replay.layer,
@@ -100,20 +101,16 @@ impl Frame<'_> {
             } else {
                 0
             },
-            glyph_transform: if is_text {
+            glyph_transform: glyph_geometry.map_or([0; 6], |geometry| {
                 [
-                    a,
-                    b,
-                    c,
-                    d,
-                    scale,
-                    (x * scale).rem_euclid(1.0),
-                    (y * scale).rem_euclid(1.0),
+                    a.to_bits(),
+                    b.to_bits(),
+                    c.to_bits(),
+                    d.to_bits(),
+                    scale.to_bits(),
+                    geometry.phase_x,
                 ]
-                .map(f32::to_bits)
-            } else {
-                [0; 7]
-            },
+            }),
         };
         let compositor = &mut self.compositor;
         let hit = compositor.resident.get(key, &mut compositor.atlas);
@@ -122,7 +119,7 @@ impl Frame<'_> {
         }
         let state = self.geometry_view(
             target,
-            transform,
+            glyph_geometry.map_or(transform, |geometry| geometry.matrix),
             clip,
             if is_text {
                 atlas_scale
@@ -137,8 +134,7 @@ impl Frame<'_> {
             self.compositor.resident.check_recording_device(self.gpu)?;
             let mut glyph_pages = Vec::<Placement>::new();
             let mut glyph_vertices = Vec::new();
-            if let [Draw::Glyphs(glyphs)] = draws {
-                let geometry = GlyphTransform::new(transform, scale);
+            if let ([Draw::Glyphs(glyphs)], Some(geometry)) = (draws, glyph_geometry) {
                 if glyphs.iter().any(|glyph| geometry.vector(glyph.size)) {
                     return Ok(false);
                 }

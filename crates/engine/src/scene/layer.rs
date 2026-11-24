@@ -2,7 +2,9 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use super::{BlendMode, Command, ShaderProgram, ShaderProgramId, image};
+use super::{
+    BackdropMaterial, BlendMode, ColorMatrix, Command, ShaderProgram, ShaderProgramId, image,
+};
 
 /// Distinguishes a node’s own picture from its child picture.
 pub const SELF_PICTURE: u64 = 1 << 63;
@@ -20,6 +22,8 @@ pub struct LayerTree {
     pub layers: Vec<Layer>,
     pub pictures: Vec<Arc<Picture>>,
     pub tracks: Arc<[super::CompositorTrack]>,
+    pub shader_uniforms:
+        HashMap<LayerId, [Option<f32>; super::MAX_SHADER_UNIFORM_BYTES / size_of::<f32>()]>,
     pub root: LayerId,
     pub epoch: u64,
     /// Programs in the session that recorded this tree.
@@ -32,6 +36,7 @@ impl LayerTree {
             layers: Vec::new(),
             pictures: Vec::new(),
             tracks: Arc::default(),
+            shader_uniforms: HashMap::new(),
             root: LayerId(0),
             epoch: 0,
             shader_programs: Arc::from([]),
@@ -163,6 +168,7 @@ impl LayerTree {
             picture
                 .images()
                 .iter()
+                .filter(|(source, _)| !image::is_inline_source(source))
                 .map(|(source, required)| (source, *required))
         }))
     }
@@ -178,6 +184,13 @@ pub struct Layer {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum LayerKind {
+    /// A solid background with a premultiplied linear color.
+    Fill {
+        bounds: [f32; 4],
+        radius: f32,
+        corners: Option<super::CornerShape>,
+        color: [f32; 4],
+    },
     Offset {
         x: f32,
         y: f32,
@@ -214,12 +227,20 @@ pub enum LayerKind {
         h: f32,
         sigma: f32,
     },
+    ColorFilter {
+        matrix: Arc<ColorMatrix>,
+    },
     BackdropBlur {
         x: f32,
         y: f32,
         w: f32,
         h: f32,
         sigma: f32,
+    },
+    BackdropMaterial {
+        bounds: [f32; 4],
+        corners: Option<super::CornerShape>,
+        material: Arc<BackdropMaterial>,
     },
     Blend {
         x: f32,

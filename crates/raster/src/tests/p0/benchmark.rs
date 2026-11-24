@@ -172,21 +172,14 @@ pub(super) fn run_in_format(
             }
         }
         let r = stats.render;
-        samples.push(json!({
-            "frame": frame_id,
-            "cpu_us": times.into_iter().collect::<BTreeMap<_, _>>(),
-            "gpu_status": status.name(),
-            "gpu_passes": gpu_passes,
-            "gpu_frame_span_us": timing.as_ref().map(|gpu| gpu.frame_span_us),
-            "gpu_passes_sum_us": timing.as_ref().map(|gpu| gpu.passes_sum_us),
-            "image_upload": {
-                "source_bytes": stats.image_upload.source_bytes, "temporary_bytes": stats.image_upload.temporary_bytes,
-                "resident_bytes": stats.image_upload.resident_bytes, "render_passes": stats.image_upload.render_passes,
-                "compute_passes": stats.image_upload.compute_passes,
-            },
-            "counters": {
+        let counters = json!({
                 "picture_workers": stats.picture_workers,
                 "prerasterized_glyphs": stats.atlas.prerasterized,
+                "atlas_region_reclaims": stats.atlas.region_reclaims,
+                "backdrop_cache_hits": r.backdrop_cache_hits,
+                "transition_snapshot_hits": r.transition_snapshot_hits,
+                "transition_snapshot_bakes": r.transition_snapshot_bakes,
+                "occluded_siblings": r.occluded_siblings,
                 "subtree_cache_hits": r.subtree_cache.hits,
                 "subtree_cache_bytes": r.subtree_cache.bytes,
                 "damage_pct": stats.damage.fraction(size) * 100.0,
@@ -202,7 +195,20 @@ pub(super) fn run_in_format(
                 "offscreen_peak_bytes": r.offscreen_peak_bytes, "pooled_texture_bytes": r.pooled_texture_bytes,
                 "stencil_draws": r.stencil_draws, "early_z_instances": r.early_z_instances,
                 "transient_bytes": r.transient_bytes,
+        });
+        samples.push(json!({
+            "frame": frame_id,
+            "cpu_us": times.into_iter().collect::<BTreeMap<_, _>>(),
+            "gpu_status": status.name(),
+            "gpu_passes": gpu_passes,
+            "gpu_frame_span_us": timing.as_ref().map(|gpu| gpu.frame_span_us),
+            "gpu_passes_sum_us": timing.as_ref().map(|gpu| gpu.passes_sum_us),
+            "image_upload": {
+                "source_bytes": stats.image_upload.source_bytes, "temporary_bytes": stats.image_upload.temporary_bytes,
+                "resident_bytes": stats.image_upload.resident_bytes, "render_passes": stats.image_upload.render_passes,
+                "compute_passes": stats.image_upload.compute_passes,
             },
+            "counters": counters,
         }));
     }
     let percentiles = metrics

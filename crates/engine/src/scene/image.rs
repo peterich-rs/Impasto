@@ -5,8 +5,16 @@ use super::{Command, shader};
 
 /// Media producer sources are supplied by the host.
 pub const EXTERNAL_TEXTURE_PREFIX: &str = "external:";
+/// A BlurHash decoded locally by the renderer.
+pub const BLURHASH_PREFIX: &str = "blurhash:";
+/// A base64 ThumbHash decoded locally by the renderer.
+pub const THUMBHASH_PREFIX: &str = "thumbhash:";
 /// Same-device producers managed by Raster use this external texture namespace.
 pub const GPU_VIEW_TEXTURE_PREFIX: &str = "external:gpuview:";
+
+pub fn is_inline_source(source: &str) -> bool {
+    source.starts_with(BLURHASH_PREFIX) || source.starts_with(THUMBHASH_PREFIX)
+}
 
 /// How an image is fitted into its layout box.
 ///

@@ -209,6 +209,16 @@ impl CompositorMode {
             .borrow_mut()
             .sample_compositor_tracks(plan.tree.epoch, time.target_ms);
         let Some(snapshot) = snapshot else {
+            if plan
+                .tree
+                .tracks
+                .iter()
+                .any(|track| track.crosses_scroll_threshold(time.target_ms))
+            {
+                tracing::event!(name: "compositor_threshold_handoff", target: "impasto::compositor",
+                    tracing::Level::DEBUG, trace_event = true, queue = "raster",
+                    ui_woken = true, target_ms = time.target_ms);
+            }
             self.handoff(inbox, token, generation, Some(time));
             return Ok(());
         };
@@ -243,6 +253,18 @@ impl CompositorMode {
                 if !snapshot.samples.is_empty() {
                     run.latest = Some(Arc::new(snapshot));
                 }
+            }
+            if plan
+                .tree
+                .tracks
+                .iter()
+                .any(|track| track.needs_list_prefetch(time.target_ms, time.interval_ms))
+            {
+                tracing::event!(name: "compositor_list_prefetch", target: "impasto::compositor",
+                    tracing::Level::DEBUG, trace_event = true, queue = "raster",
+                    ui_woken = true, target_ms = time.target_ms);
+                self.handoff(inbox, token, generation, Some(time));
+                return Ok(());
             }
             if let Some(next) = self.continue_callback(token)
                 && let Some(vsync) = vsync.upgrade()

@@ -91,6 +91,9 @@ export type FrameSample = {
   uiMs: number;
   rasterMs: number;
   queueMs: number;
+  compositorOnly?: boolean;
+  compositorBlock?: string | null;
+  compositorBlockNode?: string | null;
   e2eMs: number;
   draws: number;
   passes: number;
@@ -379,6 +382,27 @@ fn frames_channel(hub: &Arc<DiagnosticsHub>) -> Method {
                     ("uiMs", fnum(frame.schedule.ui_ms())),
                     ("rasterMs", fnum(frame.schedule.raster_ms())),
                     ("queueMs", fnum(frame.schedule.queue_ms())),
+                    (
+                        "compositorOnly",
+                        PluginValue::Bool(frame.schedule.compositor_only),
+                    ),
+                    (
+                        "compositorBlock",
+                        frame
+                            .schedule
+                            .compositor_block
+                            .map_or(PluginValue::Null, |reason| {
+                                PluginValue::Str(reason.name().into())
+                            }),
+                    ),
+                    (
+                        "compositorBlockNode",
+                        frame
+                            .schedule
+                            .compositor_block
+                            .and_then(engine::scene::CompositorBlockReason::node)
+                            .map_or(PluginValue::Null, |id| PluginValue::Str(id.to_string())),
+                    ),
                     ("e2eMs", fnum(frame.schedule.e2e_ms())),
                     ("draws", num(u64::from(frame.raster.render.draws))),
                     ("passes", num(u64::from(frame.raster.render.passes))),

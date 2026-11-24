@@ -99,12 +99,15 @@ fn write_layer(tree: &LayerTree, id: LayerId, out: &mut String, first: &mut bool
 
 fn kind_name(kind: &LayerKind) -> &'static str {
     match kind {
+        LayerKind::Fill { .. } => "fill",
         LayerKind::Offset { .. } => "offset",
         LayerKind::Transform { .. } => "transform",
         LayerKind::Clip { .. } | LayerKind::CornerClip { .. } => "clip",
         LayerKind::Opacity { .. } => "opacity",
         LayerKind::Blur { .. } => "blur",
+        LayerKind::ColorFilter { .. } => "colorFilter",
         LayerKind::BackdropBlur { .. } => "backdropBlur",
+        LayerKind::BackdropMaterial { .. } => "backdropMaterial",
         LayerKind::Blend { .. } => "blend",
         LayerKind::Picture { .. } => "picture",
         LayerKind::PlatformView { .. } => "platformView",

@@ -3,7 +3,8 @@
 //! Pipelines are keyed by target format and sample count. Each pipeline
 //! draws quads from instance vertex buffers and shares the frame uniform slabs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::{self, Receiver};
 use std::time::Instant;
 
 use crate::gpu::Gpu;
@@ -74,10 +75,15 @@ pub enum PipelineKind {
     RectShadow,
     RectCircularShadow,
     ImageArray,
+    SmallImages,
     ExternalImage,
     EarlyZ,
+    EarlyZEdges,
     Mesh,
     MeshStencil,
+    StencilNonZero,
+    StencilEvenOdd,
+    StencilCover,
     StencilWrite,
     Text,
     TextUnclipped,
@@ -96,10 +102,13 @@ pub enum PipelineKind {
     Over,
     Multiply,
     Backdrop,
+    BackdropMaterial,
+    ColorFilter,
     MaskIntersect,
 }
 
 /// Bind group layouts shared by every target.
+#[derive(Clone)]
 pub struct Layouts {
     pub view: wgpu::BindGroupLayout,
     pub paint: wgpu::BindGroupLayout,
@@ -108,9 +117,11 @@ pub struct Layouts {
     pub runtime_textures: wgpu::BindGroupLayout,
     pub material: wgpu::BindGroupLayout,
     pub image_array: Option<wgpu::BindGroupLayout>,
+    pub small_images: wgpu::BindGroupLayout,
     pub external_image: Option<wgpu::BindGroupLayout>,
     pub atlas: wgpu::BindGroupLayout,
     pub composite: wgpu::BindGroupLayout,
+    pub effect_values: wgpu::BindGroupLayout,
 }
 
 #[repr(C)]
@@ -134,6 +145,8 @@ pub struct ParamsUniform {
     pub backdrop_bounds: [f32; 4],
 }
 
+pub const EFFECT_VALUE_BYTES: u64 = size_of::<[[f32; 4]; 5]>() as u64;
+
 impl ParamsUniform {
     pub const BYTE_LEN: u32 = 64;
 }
@@ -145,83 +158,45 @@ pub const CANVAS_STENCIL: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus
 pub const EARLY_DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 pub const EXTRA_BYTES: usize = 128 * size_of::<crate::batch::PaintExtra>();
 
-const UI_WGSL: &str = include_str!("ui.wgsl");
-const TEXT_WGSL: &str = include_str!("text.wgsl");
-const IMAGE_WGSL: &str = include_str!("image.wgsl");
-const BLUR_WGSL: &str = include_str!("blur.wgsl");
+include!(concat!(env!("OUT_DIR"), "/pipeline_sources.rs"));
+
+pub(crate) const INLINE_IMAGE: &str = INLINE_IMAGE_SOURCES[0];
+
+type PipelineKey = (Target, PipelineKind, BlendKey);
 
 pub struct PipelineCache {
-    targets: HashMap<(Target, PipelineKind, BlendKey), wgpu::RenderPipeline>,
+    targets: HashMap<PipelineKey, wgpu::RenderPipeline>,
+    prewarmed: HashSet<wgpu::TextureFormat>,
+    warmers: Vec<Receiver<(PipelineKey, wgpu::RenderPipeline)>>,
+    shaders: Shaders,
+    pub layouts: Layouts,
+    pub resident_pictures: bool,
+}
+
+#[derive(Clone)]
+struct Shaders {
     ui: wgpu::ShaderModule,
     text: wgpu::ShaderModule,
     image: wgpu::ShaderModule,
     image_array: Option<wgpu::ShaderModule>,
+    small_images: wgpu::ShaderModule,
     external_image: Option<wgpu::ShaderModule>,
     blur: wgpu::ShaderModule,
-    pub layouts: Layouts,
-    pub resident_pictures: bool,
 }
 
 impl PipelineCache {
     pub fn new(gpu: &Gpu) -> Self {
         let _trace = tracing::debug_span!(target: "impasto::startup", "shader_modules").entered();
         let started = Instant::now();
-        let reduced_color = if gpu.device.features().contains(wgpu::Features::SHADER_F16) {
-            "enable f16;\nalias ReducedColor = vec4<f16>;\nalias ReducedScalar = f16;"
-        } else {
-            "alias ReducedColor = vec4<f32>;\nalias ReducedScalar = f32;"
-        };
-        let color_precision = include_str!("color_precision.wgsl");
-        let module = |label, source: &str, clipped: bool, gradients: bool| {
-            let view = include_str!("view.wgsl");
-            let clip = if clipped {
-                include_str!("clip.wgsl")
-            } else {
-                ""
-            };
-            let gradient = if gradients {
-                include_str!("gradient.wgsl")
-            } else {
-                ""
-            };
-            let source = if label == "impasto blur" && gpu.effect_immediates() {
-                std::borrow::Cow::Owned(
-                    source.replace("@group(0) @binding(1) var<uniform>", "var<immediate>"),
-                )
-            } else {
-                std::borrow::Cow::Borrowed(source)
-            };
-            let paint = if gradients {
-                if gpu.caps.paint_storage {
-                    "@group(0) @binding(2) var<storage, read> paint: array<PaintExtra>;"
-                } else {
-                    "@group(0) @binding(2) var<uniform> paint: array<PaintExtra, 128>;"
-                }
-            } else {
-                ""
-            };
-            let (enable, lcd) = if gpu.caps.lcd && label == "impasto text" {
-                (
-                    "enable dual_source_blending;",
-                    include_str!("text_lcd.wgsl"),
-                )
-            } else {
-                (
-                    if label == "impasto bindless images" {
-                        "enable wgpu_binding_array;"
-                    } else {
-                        ""
-                    },
-                    "",
-                )
-            };
+        let f16 = usize::from(gpu.device.features().contains(wgpu::Features::SHADER_F16));
+        let storage = usize::from(gpu.caps.paint_storage) << 1;
+        let lcd = usize::from(gpu.caps.lcd) << 2;
+        let immediates = usize::from(gpu.effect_immediates()) << 1;
+        let module = |label, source: &'static str| {
             gpu.device
                 .create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some(label),
-                    source: wgpu::ShaderSource::Wgsl(
-                        format!("{enable}\n{reduced_color}\n{color_precision}\n{view}\n{source}\n{clip}\n{gradient}\n{paint}\n{lcd}")
-                            .into(),
-                    ),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
                 })
         };
         let view = U(size_of::<ViewUniform>() as u64);
@@ -263,54 +238,49 @@ impl PipelineCache {
             image_array: gpu
                 .image_array()
                 .then(|| layout(gpu, "impasto image array", &[Slot::TextureBindingArray, S])),
+            small_images: layout(gpu, "impasto small images", &[Slot::Array, S]),
             atlas: layout(
                 gpu,
                 "impasto atlas",
                 &[Slot::GlyphArray, Slot::GlyphArray, S],
             ),
             composite: layout(gpu, "impasto composite", &[T, S, T]),
+            effect_values: gpu
+                .device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("impasto effect values"),
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(EFFECT_VALUE_BYTES),
+                        },
+                        count: None,
+                    }],
+                }),
         };
-        let cache = Self {
-            targets: HashMap::new(),
-            ui: module("impasto ui", UI_WGSL, true, true),
-            text: module("impasto text", TEXT_WGSL, true, true),
-            image: module("impasto image", IMAGE_WGSL, true, false),
-            image_array: gpu.image_array().then(|| {
-                let array = IMAGE_WGSL
-                    .replace(
-                        "var image_tex: texture_2d<f32>;",
-                        &format!(
-                            "var image_textures: binding_array<texture_2d<f32>, {}>;",
-                            crate::gpu::IMAGE_ARRAY_LEN
-                        ),
-                    )
-                    .replace(
-                        "textureSampleLevel(image_tex,",
-                        "textureSampleLevel(image_textures[u32(data.info.y)],",
-                    )
-                    .replace(
-                        "textureSampleGrad(image_tex,",
-                        "textureSampleGrad(image_textures[u32(data.info.y)],",
-                    );
-                module("impasto bindless images", &array, true, false)
-            }),
-            blur: module("impasto blur", BLUR_WGSL, false, false),
-            external_image: nv12.then(|| {
-                let vertex = IMAGE_WGSL
-                    .split_once("@fragment")
-                    .map_or(IMAGE_WGSL, |(vertex, _)| vertex);
-                module(
-                    "impasto NV12 image",
-                    &format!("{vertex}{}", include_str!("external_image.wgsl")),
-                    true,
-                    false,
-                )
-            }),
-            layouts,
-            resident_pictures: resident,
+        let shaders = Shaders {
+            ui: module("impasto ui", UI_SOURCES[f16 | storage]),
+            text: module("impasto text", TEXT_SOURCES[f16 | storage | lcd]),
+            image: module("impasto image", IMAGE_SOURCES[f16]),
+            image_array: gpu
+                .image_array()
+                .then(|| module("impasto bindless images", IMAGE_ARRAY_SOURCES[f16])),
+            small_images: module("impasto small images", SMALL_IMAGES_SOURCES[f16]),
+            blur: module("impasto blur", BLUR_SOURCES[f16 | immediates]),
+            external_image: nv12.then(|| module("impasto NV12 image", EXTERNAL_IMAGE_SOURCES[f16])),
         };
         tracing::debug!(target: "impasto::startup", shader_us = started.elapsed().as_secs_f64() * 1_000_000.0, "raster shader modules ready");
-        cache
+        Self {
+            targets: HashMap::new(),
+            prewarmed: HashSet::new(),
+            warmers: Vec::new(),
+            shaders,
+            layouts,
+            resident_pictures: resident,
+        }
     }
 
     /// Compile only the pipeline requested by this draw.
@@ -321,41 +291,111 @@ impl PipelineCache {
         kind: PipelineKind,
         blend: BlendKey,
     ) -> Result<wgpu::RenderPipeline, Status> {
-        use std::collections::hash_map::Entry;
         let key = (target, kind, blend);
-        match self.targets.entry(key) {
-            Entry::Occupied(entry) => Ok(entry.get().clone()),
-            Entry::Vacant(entry) => {
-                let _trace =
-                    tracing::debug_span!(target: "impasto::startup", "pipeline_create").entered();
-                let started = Instant::now();
-                let pipeline = gpu.validation(|| {
-                    let (ui, image, text) = match kind {
-                        PipelineKind::ExternalImage => (
-                            &self.ui,
-                            self.external_image.as_ref().ok_or(Status::NotReady)?,
-                            &self.text,
-                        ),
-                        PipelineKind::ImageArray => (
-                            &self.ui,
-                            self.image_array.as_ref().ok_or(Status::NotReady)?,
-                            &self.text,
-                        ),
-                        _ => (&self.ui, &self.image, &self.text),
-                    };
-                    Ok(build(
-                        gpu,
-                        &self.layouts,
-                        [ui, text, image, &self.blur],
-                        target,
-                        kind,
-                        blend,
-                    ))
-                })?;
-                tracing::debug!(target: "impasto::startup", ?target, ?kind, ?blend,
-                    pipeline_us = started.elapsed().as_secs_f64() * 1_000_000.0, "raster pipeline ready");
-                gpu.pipelines_updated();
-                Ok(entry.insert(pipeline).clone())
+        if let Some(pipeline) = self.targets.get(&key) {
+            return Ok(pipeline.clone());
+        }
+        self.install_warmed();
+        if let Some(pipeline) = self.targets.get(&key) {
+            return Ok(pipeline.clone());
+        }
+        let pipeline = self.shaders.compile(gpu, &self.layouts, key)?;
+        self.targets.insert(key, pipeline.clone());
+        Ok(pipeline)
+    }
+
+    pub fn install_warmed(&mut self) {
+        self.warmers.retain(|receiver| {
+            loop {
+                match receiver.try_recv() {
+                    Ok((key, pipeline)) => {
+                        self.targets.entry(key).or_insert(pipeline);
+                    }
+                    Err(mpsc::TryRecvError::Empty) => return true,
+                    Err(mpsc::TryRecvError::Disconnected) => return false,
+                }
+            }
+        });
+    }
+
+    pub fn prewarm_effects(&mut self, gpu: &Gpu, formats: &[wgpu::TextureFormat]) {
+        use PipelineKind as K;
+        let formats: Vec<_> = formats
+            .iter()
+            .copied()
+            .filter(|format| self.prewarmed.insert(*format))
+            .collect();
+        if formats.is_empty() {
+            return;
+        }
+        let mut keys = Vec::new();
+        for &format in &formats {
+            let target = Target { format, samples: 1 };
+            let variants = [
+                K::RectSolid,
+                K::Rect,
+                K::TextMask,
+                K::Image,
+                K::Copy,
+                K::Text,
+                K::Over,
+                K::Backdrop,
+                K::BackdropMaterial,
+                K::ColorFilter,
+                K::Multiply,
+                K::Gaussian,
+                K::BlurDown,
+                K::BlurUp,
+                K::RectShadow,
+                K::RectCircularShadow,
+            ];
+            keys.extend(
+                variants
+                    .into_iter()
+                    .map(|kind| (target, kind, BlendKey::SrcOver)),
+            );
+            keys.push((
+                target,
+                if self.shaders.image_array.is_some() {
+                    K::ImageArray
+                } else {
+                    K::SmallImages
+                },
+                BlendKey::SrcOver,
+            ));
+            if gpu.caps.lcd && format.is_srgb() {
+                keys.push((target, K::TextLcd, BlendKey::SrcOver));
+            }
+            if format == wgpu::TextureFormat::Rgba8UnormSrgb {
+                let samples = if gpu.caps.msaa4_srgb { 4 } else { 1 };
+                keys.push((Target { format, samples }, K::Mesh, BlendKey::SrcOver));
+            }
+        }
+        keys.retain(|key| !self.targets.contains_key(key));
+        let (send, receive) = mpsc::channel();
+        let gpu = gpu.clone();
+        let shaders = self.shaders.clone();
+        let layouts = self.layouts.clone();
+        match std::thread::Builder::new()
+            .name("impasto-pipelines".into())
+            .spawn(move || {
+                for key in keys {
+                    if gpu.is_lost() {
+                        break;
+                    }
+                    if let Ok(pipeline) = shaders.compile(&gpu, &layouts, key)
+                        && send.send((key, pipeline)).is_err()
+                    {
+                        break;
+                    }
+                }
+            }) {
+            Ok(_) => self.warmers.push(receive),
+            Err(error) => {
+                for format in formats {
+                    self.prewarmed.remove(&format);
+                }
+                tracing::debug!(target: "impasto::startup", %error, "effect prewarm unavailable");
             }
         }
     }
@@ -365,6 +405,7 @@ impl PipelineCache {
         gpu: &Gpu,
         format: wgpu::TextureFormat,
         specialize: bool,
+        surface: bool,
     ) -> Result<(), Status> {
         let _trace = tracing::debug_span!(target: "impasto::startup", "pipeline_prewarm").entered();
         let started = Instant::now();
@@ -378,9 +419,46 @@ impl PipelineCache {
         for kind in [rect, text, PipelineKind::Image] {
             self.get(gpu, target, kind, BlendKey::SrcOver)?;
         }
+        if surface {
+            for kind in [PipelineKind::Rect, PipelineKind::Copy] {
+                self.get(gpu, target, kind, BlendKey::SrcOver)?;
+            }
+        }
         tracing::debug!(target: "impasto::startup", ?format, variants = self.targets.len() - count,
             prewarm_us = started.elapsed().as_secs_f64() * 1_000_000.0, "pipeline prewarm complete");
         Ok(())
+    }
+}
+
+impl Shaders {
+    fn compile(
+        &self,
+        gpu: &Gpu,
+        layouts: &Layouts,
+        (target, kind, blend): PipelineKey,
+    ) -> Result<wgpu::RenderPipeline, Status> {
+        let _trace = tracing::debug_span!(target: "impasto::startup", "pipeline_create").entered();
+        let started = Instant::now();
+        let image = match kind {
+            PipelineKind::ExternalImage => self.external_image.as_ref().ok_or(Status::NotReady)?,
+            PipelineKind::ImageArray => self.image_array.as_ref().ok_or(Status::NotReady)?,
+            PipelineKind::SmallImages => &self.small_images,
+            _ => &self.image,
+        };
+        let pipeline = gpu.validation(|| {
+            Ok(build(
+                gpu,
+                layouts,
+                [&self.ui, &self.text, image, &self.blur],
+                target,
+                kind,
+                blend,
+            ))
+        })?;
+        tracing::debug!(target: "impasto::startup", ?target, ?kind, ?blend,
+            pipeline_us = started.elapsed().as_secs_f64() * 1_000_000.0, "raster pipeline ready");
+        gpu.pipelines_updated();
+        Ok(pipeline)
     }
 }
 
@@ -518,6 +596,7 @@ fn build(
         view,
         match kind {
             K::ImageArray => layouts.image_array.as_ref(),
+            K::SmallImages => Some(&layouts.small_images),
             K::ExternalImage => layouts.external_image.as_ref(),
             _ => Some(&layouts.material),
         },
@@ -534,17 +613,30 @@ fn build(
         Some(&layouts.material),
         Some(&layouts.composite),
     ];
+    let color_filter = [
+        Some(effect_globals),
+        Some(&layouts.material),
+        Some(&layouts.effect_values),
+    ];
+    let backdrop_material = [
+        composite[0],
+        composite[1],
+        composite[2],
+        Some(&layouts.effect_values),
+    ];
     let (module, groups, vertex, fragment) = match kind {
         K::Rect => (ui, paint.as_slice(), "vs_main", "fs_main"),
         K::RectSolid => (ui, solid.as_slice(), "vs_solid", "fs_solid"),
         K::RectShadow | K::RectCircularShadow => (ui, paint.as_slice(), "vs_shadow", "fs_shadow"),
         K::EarlyZ => (ui, view_only.as_slice(), "vs_depth_rect", "fs_depth_rect"),
+        K::EarlyZEdges => (ui, solid.as_slice(), "vs_depth_solid", "fs_solid"),
         K::StencilWrite => (ui, view_only.as_slice(), "vs_stencil", "fs_stencil"),
-        K::Mesh | K::MeshStencil => (ui, paint.as_slice(), "vs_mesh", "fs_mesh"),
+        K::StencilNonZero | K::StencilEvenOdd => (ui, paint.as_slice(), "vs_stencil", "fs_stencil"),
+        K::Mesh | K::MeshStencil | K::StencilCover => (ui, paint.as_slice(), "vs_mesh", "fs_mesh"),
         K::TextLcd => (text, text_mask.as_slice(), "vs_mask", "fs_lcd"),
         K::TextMask => (text, text_mask.as_slice(), "vs_mask", "fs_mask"),
         K::Text | K::TextUnclipped => (text, text_groups.as_slice(), "vs_main", "fs_main"),
-        K::Image | K::ImageArray | K::ExternalImage => {
+        K::Image | K::ImageArray | K::SmallImages | K::ExternalImage => {
             (image, image_groups.as_slice(), "vs_main", "fs_main")
         }
         K::BlurDown => (blur, effects.as_slice(), "vs_full", "fs_blur_down"),
@@ -559,6 +651,13 @@ fn build(
         K::Over => (blur, composite.as_slice(), "vs_full", "fs_over"),
         K::Multiply => (blur, composite.as_slice(), "vs_full", "fs_composite"),
         K::Backdrop => (blur, composite.as_slice(), "vs_full", "fs_backdrop"),
+        K::BackdropMaterial => (
+            blur,
+            backdrop_material.as_slice(),
+            "vs_full",
+            "fs_backdrop_material",
+        ),
+        K::ColorFilter => (blur, color_filter.as_slice(), "vs_full", "fs_color_filter"),
     };
     let rect_buffers = [rect.clone()];
     let stencil_buffers = [geometry.clone()];
@@ -566,13 +665,16 @@ fn build(
     let glyph_buffers = [glyph];
     let image_buffers = [quad];
     let buffers = match kind {
-        K::Rect | K::RectSolid | K::RectShadow | K::RectCircularShadow | K::EarlyZ => {
-            rect_buffers.as_slice()
-        }
-        K::Mesh | K::MeshStencil => mesh_buffers.as_slice(),
-        K::StencilWrite => stencil_buffers.as_slice(),
+        K::Rect
+        | K::RectSolid
+        | K::RectShadow
+        | K::RectCircularShadow
+        | K::EarlyZ
+        | K::EarlyZEdges => rect_buffers.as_slice(),
+        K::Mesh | K::MeshStencil | K::StencilCover => mesh_buffers.as_slice(),
+        K::StencilWrite | K::StencilNonZero | K::StencilEvenOdd => stencil_buffers.as_slice(),
         K::Text | K::TextUnclipped | K::TextMask | K::TextLcd => glyph_buffers.as_slice(),
-        K::Image | K::ImageArray | K::ExternalImage => image_buffers.as_slice(),
+        K::Image | K::ImageArray | K::SmallImages | K::ExternalImage => image_buffers.as_slice(),
         _ => &[],
     };
     let blend = match kind {
@@ -586,16 +688,20 @@ fn build(
         },
         K::Rect
         | K::RectSolid
+        | K::EarlyZEdges
         | K::RectShadow
         | K::RectCircularShadow
         | K::Mesh
         | K::MeshStencil
+        | K::StencilCover
         | K::Text
         | K::TextUnclipped
         | K::TextMask
         | K::Image
         | K::ImageArray
+        | K::SmallImages
         | K::ExternalImage
+        | K::ColorFilter
         | K::Over => blend.state(),
         K::MaskIntersect => wgpu::BlendState {
             color: wgpu::BlendComponent {
@@ -617,7 +723,7 @@ fn build(
     if gpu.text_gamma && matches!(kind, K::Text | K::TextUnclipped | K::TextMask | K::TextLcd) {
         constants.push(("text_gamma", 1.0));
     }
-    if gpu.dither_output && kind == K::Rect {
+    if gpu.dither_gradients && kind == K::Rect {
         constants.push(("output_dither", 1.0));
     }
     if gpu.device.features().contains(wgpu::Features::SHADER_F16)
@@ -630,6 +736,7 @@ fn build(
             K::Rect
                 | K::Mesh
                 | K::MeshStencil
+                | K::StencilCover
                 | K::Text
                 | K::TextUnclipped
                 | K::BlurDown
@@ -641,7 +748,7 @@ fn build(
     if gpu.gradient_lut
         && matches!(
             kind,
-            K::Rect | K::Mesh | K::MeshStencil | K::Text | K::TextUnclipped
+            K::Rect | K::Mesh | K::MeshStencil | K::StencilCover | K::Text | K::TextUnclipped
         )
     {
         constants.push(("use_gradient_ramps", 1.0));
@@ -681,7 +788,10 @@ fn build(
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target.format,
                     blend: Some(blend),
-                    write_mask: if kind == K::StencilWrite {
+                    write_mask: if matches!(
+                        kind,
+                        K::StencilWrite | K::StencilNonZero | K::StencilEvenOdd
+                    ) {
                         wgpu::ColorWrites::empty()
                     } else {
                         wgpu::ColorWrites::ALL
@@ -702,13 +812,49 @@ fn build(
 fn depth_stencil(kind: PipelineKind) -> Option<wgpu::DepthStencilState> {
     use wgpu::{CompareFunction, StencilOperation};
     match kind {
-        PipelineKind::EarlyZ => Some(wgpu::DepthStencilState {
+        PipelineKind::EarlyZ | PipelineKind::EarlyZEdges => Some(wgpu::DepthStencilState {
             format: EARLY_DEPTH,
-            depth_write_enabled: Some(true),
+            depth_write_enabled: Some(kind == PipelineKind::EarlyZ),
             depth_compare: Some(CompareFunction::Less),
             stencil: Default::default(),
             bias: Default::default(),
         }),
+        PipelineKind::StencilNonZero
+        | PipelineKind::StencilEvenOdd
+        | PipelineKind::StencilCover => {
+            let front = match kind {
+                PipelineKind::StencilNonZero => StencilOperation::IncrementWrap,
+                PipelineKind::StencilEvenOdd => StencilOperation::Invert,
+                _ => StencilOperation::Zero,
+            };
+            let back = if kind == PipelineKind::StencilNonZero {
+                StencilOperation::DecrementWrap
+            } else {
+                front
+            };
+            let compare = if kind == PipelineKind::StencilCover {
+                CompareFunction::NotEqual
+            } else {
+                CompareFunction::Always
+            };
+            let face = |pass_op| wgpu::StencilFaceState {
+                compare,
+                pass_op,
+                ..Default::default()
+            };
+            Some(wgpu::DepthStencilState {
+                format: CANVAS_STENCIL,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(CompareFunction::Always),
+                stencil: wgpu::StencilState {
+                    front: face(front),
+                    back: face(back),
+                    read_mask: 255,
+                    write_mask: 255,
+                },
+                bias: Default::default(),
+            })
+        }
         PipelineKind::StencilWrite | PipelineKind::MeshStencil => {
             let face = wgpu::StencilFaceState {
                 compare: CompareFunction::Equal,

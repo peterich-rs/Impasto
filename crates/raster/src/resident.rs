@@ -31,7 +31,7 @@ pub struct Key {
     pub format: wgpu::TextureFormat,
     pub revision: u64,
     pub atlas_epoch: u64,
-    pub glyph_transform: [u32; 7],
+    pub glyph_transform: [u32; 6],
 }
 
 pub struct ResidentBundle {
@@ -178,6 +178,19 @@ impl ResidentPictures {
         key: Key,
         atlas: &mut crate::atlas::Atlas,
     ) -> Option<(usize, wgpu::RenderBundle)> {
+        if let Some(entry) = self.bundles.get(&key)
+            && !entry
+                .glyph_pages
+                .iter()
+                .all(|&page| atlas.resident_page_valid(page))
+            && let Some(entry) = self.bundles.remove(&key)
+        {
+            self.slots[entry.slot] = None;
+            self.vacant.push(entry.slot);
+            self.vertex_pages[entry.vertices.page].release(entry.vertices.range);
+            self.bytes -= entry.bytes;
+            return None;
+        }
         let entry = self.bundles.get(&key)?;
         for &page in &entry.glyph_pages {
             atlas.pin(page);
@@ -505,7 +518,7 @@ mod tests {
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
             revision: 1,
             atlas_epoch: 0,
-            glyph_transform: [0; 7],
+            glyph_transform: [0; 6],
         };
         let updated = Key { revision: 2, ..key };
 

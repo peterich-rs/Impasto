@@ -3,6 +3,12 @@
 mod canvas;
 mod command;
 mod compositor_track;
+mod scroll;
+pub(crate) use scroll::linear_color_bytes;
+pub use scroll::{
+    Extrapolate, PiecewiseColorMap, PiecewiseMap, ScrollBinding, ScrollCurve, ScrollSource,
+    ScrollTargetProp, ScrollThreshold, ScrollValue,
+};
 mod corners;
 pub mod image;
 mod layer;
@@ -15,15 +21,18 @@ pub use canvas::{
     CanvasList, CanvasOp, CanvasPaint, CanvasPath, CanvasTextOp, FillRule, PathVerb,
 };
 pub use command::{Command, DrawList, RectPaint};
-pub(crate) use compositor_track::compositor_alpha;
 pub use compositor_track::{
-    CompositorProp, CompositorSample, CompositorSnapshot, CompositorTrack, CompositorTrackId,
-    CompositorTransform, apply_compositor_samples,
+    CompositorBlockReason, CompositorEligibility, CompositorProp, CompositorSample,
+    CompositorSnapshot, CompositorTrack, CompositorTrackId, CompositorTransform,
+    apply_compositor_samples,
 };
+pub(crate) use compositor_track::{compositor_alpha, list_scroll_prediction};
 pub use corners::CornerShape;
 pub use image::ContentMode;
 pub use layer::{Layer, LayerId, LayerKind, LayerTree, Picture, PictureId, SELF_PICTURE};
-pub use paint::{BlendMode, BoxShadow, ColorSpace, ColorStop, Gradient, Shadow};
+pub use paint::{
+    BackdropMaterial, BlendMode, BoxShadow, ColorMatrix, ColorSpace, ColorStop, Gradient, Shadow,
+};
 pub use shader::{
     BACKDROP_TEXTURE, MAX_SHADER_SOURCE_BYTES, MAX_SHADER_TEXTURES, MAX_SHADER_UNIFORM_BYTES,
     ShaderClock, ShaderEffect, ShaderError, ShaderProgram, ShaderProgramId,

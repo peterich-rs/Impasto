@@ -115,7 +115,9 @@ impl GpuImage {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_DST
+                        | wgpu::TextureUsages::COPY_SRC,
                     view_formats: &[],
                 });
                 let pixels = crate::color::premultiply_rgba(rgba);
@@ -439,24 +441,34 @@ impl TextureTransaction<'_> {
             self.touch(source);
             return result;
         }
-        let Some(image) = resolve(source) else {
-            return if source.starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX) {
-                Load::Empty
-            } else {
-                Load::Missing
+        let (image, conversion) = if engine::scene::image::is_inline_source(source) {
+            let Some((image, conversion)) =
+                crate::inline_image::prepare(gpu, self.store.device, source)
+            else {
+                return Load::Empty;
             };
-        };
-        if image.width == 0 || image.height == 0 {
-            return Load::Empty;
-        }
-        let Some((image, conversion)) = GpuImage::prepare(
-            gpu,
-            self.store.device,
-            image.width,
-            image.height,
-            image.rgba,
-        ) else {
-            return Load::Failed;
+            (image, Some(conversion))
+        } else {
+            let Some(image) = resolve(source) else {
+                return if source.starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX) {
+                    Load::Empty
+                } else {
+                    Load::Missing
+                };
+            };
+            if image.width == 0 || image.height == 0 {
+                return Load::Empty;
+            }
+            let Some(upload) = GpuImage::prepare(
+                gpu,
+                self.store.device,
+                image.width,
+                image.height,
+                image.rgba,
+            ) else {
+                return Load::Failed;
+            };
+            upload
         };
         self.conversions.extend(conversion);
         let result = ready(&image);

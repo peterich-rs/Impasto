@@ -55,9 +55,11 @@ impl Tree {
     pub(super) fn point_hits_node(&self, id: NodeId, scene_x: f32, scene_y: f32) -> bool {
         let Some((transformed, shaped, w, h, radius, corners, scale_x, scale_y)) =
             self.get(id).map(|node| {
-                let geom = node.transform();
+                let geom = self
+                    .effective_transform(id)
+                    .unwrap_or_else(|| node.transform());
                 (
-                    node.role.contains(super::node::Role::TRANSFORM),
+                    !geom.is_identity(),
                     radius_shapes_hit(node),
                     node.w,
                     node.h,
@@ -128,8 +130,11 @@ impl Tree {
         let abs_x = parent_x + node.x;
         let abs_y = parent_y + node.y;
         let mut child_query = query;
-        if node.role.contains(super::node::Role::TRANSFORM) {
-            let geom = node.transform().placed(abs_x, abs_y, node.w, node.h);
+        if let Some(geom) = self
+            .effective_transform(id)
+            .filter(|geom| !geom.is_identity())
+        {
+            let geom = geom.placed(abs_x, abs_y, node.w, node.h);
             if geom.scale_x.abs() < SCALE_EPSILON || geom.scale_y.abs() < SCALE_EPSILON {
                 return None;
             }
@@ -248,9 +253,12 @@ impl Tree {
             scroll_y,
             mut transforms,
         } = self.ancestor_paint(id)?;
-        if node.role.contains(super::node::Role::TRANSFORM) {
+        if let Some(geom) = self
+            .effective_transform(id)
+            .filter(|geom| !geom.is_identity())
+        {
             let (px, py) = self.layout_point(id).unwrap_or((0.0, 0.0));
-            transforms.insert(0, node.transform().placed(px, py, node.w, node.h));
+            transforms.insert(0, geom.placed(px, py, node.w, node.h));
         }
         let mut x = x - scroll_x;
         let mut y = y - scroll_y;
@@ -285,9 +293,12 @@ impl Tree {
             scroll_y,
             mut transforms,
         } = self.ancestor_paint(id)?;
-        if node.role.contains(super::node::Role::TRANSFORM) {
+        if let Some(geom) = self
+            .effective_transform(id)
+            .filter(|geom| !geom.is_identity())
+        {
             let (px, py) = self.layout_point(id).ok()?;
-            transforms.insert(0, node.transform().placed(px, py, node.w, node.h));
+            transforms.insert(0, geom.placed(px, py, node.w, node.h));
         }
         let mut x = scene_x;
         let mut y = scene_y;
@@ -321,9 +332,12 @@ impl Tree {
                 scroll_x += scroll.0;
                 scroll_y += scroll.1;
             }
-            if node.role.contains(super::node::Role::TRANSFORM) {
+            if let Some(geom) = self
+                .effective_transform(pid)
+                .filter(|geom| !geom.is_identity())
+            {
                 let (px, py) = self.layout_point(pid).unwrap_or((0.0, 0.0));
-                transforms.push(node.transform().placed(px, py, node.w, node.h));
+                transforms.push(geom.placed(px, py, node.w, node.h));
             }
             parent = node.parent;
         }

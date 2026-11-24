@@ -12,6 +12,8 @@ struct Params {
 @group(2) @binding(0) var backdrop: texture_2d<f32>;
 @group(2) @binding(1) var backdrop_sampler: sampler;
 @group(2) @binding(2) var clip_mask: texture_2d<f32>;
+@group(2) @binding(3) var<uniform> color_filter: array<vec4<f32>, 5>;
+@group(3) @binding(3) var<uniform> backdrop_material: array<vec4<f32>, 5>;
 
 struct VertexOut {
     @builtin(position) position: vec4<f32>,
@@ -41,6 +43,19 @@ fn read_source(uv: vec2<f32>) -> vec4<f32> {
 
 fn source_uv(position: vec2<f32>) -> vec2<f32> {
     return (position + view.target_info.xy - params.values.xy) / vec2<f32>(textureDimensions(source));
+}
+
+@fragment
+fn fs_color_filter(in: VertexOut) -> @location(0) vec4<f32> {
+    let pixel = read_source(source_uv(in.position.xy));
+    if pixel.a <= 0.0 {
+        return vec4(0.0);
+    }
+    let rgb = pixel.rgb / pixel.a;
+    let filtered = color_filter[0] * rgb.r + color_filter[1] * rgb.g
+        + color_filter[2] * rgb.b + color_filter[3] * pixel.a + color_filter[4];
+    let alpha = clamp(filtered.a, 0.0, 1.0);
+    return vec4(max(filtered.rgb, vec3(0.0)) * alpha, alpha);
 }
 
 fn filter_uv(in: VertexOut) -> vec2<f32> {
@@ -191,6 +206,24 @@ fn fs_backdrop(in: VertexOut) -> @location(0) vec4<f32> {
     let uv = source_uv(in.position.xy);
     let dst = read_backdrop(in.position.xy);
     return mix(dst, read_source(uv), coverage(in.position.xy));
+}
+
+@fragment
+fn fs_backdrop_material(in: VertexOut) -> @location(0) vec4<f32> {
+    let tint = backdrop_material[0];
+    let style = backdrop_material[1];
+    let top = backdrop_material[2].x;
+    let y = in.position.y + view.target_info.y - top;
+    let ramp = 1.0 - clamp(style.z, 0.0, 1.0) * clamp(y * style.w, 0.0, 1.0);
+    let dst = read_backdrop(in.position.xy);
+    let pixel = mix(dst, read_source(source_uv(in.position.xy)), ramp);
+    let rgb = pixel.rgb / max(pixel.a, 0.0001);
+    let luma = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+    let highlight = 0.045 * (1.0 - smoothstep(0.0, 1.5, y));
+    let treated = mix(mix(vec3(luma), rgb, style.x) * style.y,
+        tint.rgb, clamp(tint.a, 0.0, 1.0)) + highlight;
+    let filtered = vec4(dither_linear(treated, in.position.xy) * pixel.a, pixel.a);
+    return mix(dst, filtered, coverage(in.position.xy));
 }
 
 

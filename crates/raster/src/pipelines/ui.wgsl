@@ -68,6 +68,14 @@ fn vs_solid(@builtin(vertex_index) vertex: u32, data: RectVertex) -> SolidOut {
         p - (data.rect.xy + half), vec3(half, data.shape.x), data.color * data.opacity);
 }
 
+@vertex
+fn vs_depth_solid(@builtin(vertex_index) vertex: u32, data: RectVertex) -> SolidOut {
+    let p = rect_point(vertex, data);
+    let half = data.rect.zw * 0.5;
+    return SolidOut(view.transform * vec4(p, data.depth, 1.0),
+        p - (data.rect.xy + half), vec3(half, data.shape.x), data.color * data.opacity);
+}
+
 @fragment
 fn fs_solid(in: SolidOut) -> @location(0) vec4<f32> {
     let aa = max(length(dpdx(in.local)) + length(dpdy(in.local)), 1e-6) * 0.5;
@@ -289,7 +297,12 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 
     color = color * clip_coverage(in.position.xy) * data.opacity;
     if output_dither && view.info.w > 0.0 && color.a >= 1.0 && (u32(data.shape.w) & 1u) != 0u {
-        return vec4(to_linear(dither_srgb(color, in.position.xy).rgb), color.a);
+        let peak = max(color.r, max(color.g, color.b));
+        // Fade out dark-gradient dithering where the linear channels are bright.
+        if peak < 0.65 {
+            let strength = 1.0 - smoothstep(0.40, 0.65, peak);
+            return vec4(mix(color.rgb, dither_linear(color.rgb, in.position.xy), strength), color.a);
+        }
     }
     return color;
 }

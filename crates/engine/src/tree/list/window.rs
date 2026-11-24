@@ -28,7 +28,7 @@ pub fn thumb_length(viewport: f32, content: f32) -> f32 {
 pub fn thumb_offset(viewport: f32, content: f32, offset: f32) -> f32 {
     let thumb = thumb_length(viewport, content);
     let travel = (viewport - thumb).max(0.0);
-    (travel * offset) / (content - viewport).max(1.0)
+    offset * (travel / (content - viewport).max(1.0))
 }
 
 /// No next header stays at 0. Otherwise `min(0, nextStart - offset - headerHeight)`.
@@ -36,7 +36,7 @@ pub fn sticky_translate(next_start: Option<f32>, offset: f32, header_height: f32
     let Some(next_start) = next_start else {
         return 0.0;
     };
-    (next_start - offset - header_height).min(0.0)
+    (-offset + (next_start - header_height)).min(0.0)
 }
 
 /// Finger position, including distance already past the edge.

@@ -7,15 +7,25 @@ use crate::scene::{Command, RectPaint as SceneRectPaint};
 use super::super::node::{Node, Role};
 use super::{PreparedGradient, RectPaint, positive_sigma, prepared_gradient, rect_paint};
 
-pub(super) fn emit_rect(commands: &mut Vec<Command>, node: &Node, x: f32, y: f32) {
+pub(super) fn emit_rect(
+    commands: &mut Vec<Command>,
+    node: &Node,
+    x: f32,
+    y: f32,
+    replace_background: bool,
+) {
     let RectPaint {
-        fill,
+        mut fill,
         stroke_width,
         stroke_color,
-        gradient,
+        mut gradient,
         shadow,
         box_shadows,
     } = rect_paint(node);
+    if replace_background {
+        fill = None;
+        gradient = None;
+    }
     if node.w <= 0.0
         || node.h <= 0.0
         || (fill.is_none()

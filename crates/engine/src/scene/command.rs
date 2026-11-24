@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use super::{
-    BlendMode, BoxShadow, ContentMode, CornerShape, Gradient, ShaderProgramId, Shadow,
-    ShapedParagraph, SpanPaint,
+    BackdropMaterial, BlendMode, BoxShadow, ColorMatrix, ContentMode, CornerShape, Gradient,
+    ShaderProgramId, Shadow, ShapedParagraph, SpanPaint,
 };
 
 /// One paint operation. Coordinates are absolute scene points.
@@ -93,6 +93,10 @@ pub enum Command {
         h: f32,
         sigma: f32,
     },
+    /// Filters the composited subtree until the next pop.
+    PushColorFilter {
+        matrix: Arc<ColorMatrix>,
+    },
     /// Blur the backdrop behind this layer. `sigma` is scene points.
     PushBackdropBlur {
         x: f32,
@@ -100,6 +104,11 @@ pub enum Command {
         w: f32,
         h: f32,
         sigma: f32,
+    },
+    PushBackdropMaterial {
+        bounds: [f32; 4],
+        corners: Option<CornerShape>,
+        material: Arc<BackdropMaterial>,
     },
     /// Composite this layer with Multiply or Screen. [`BlendMode::SrcOver`] is a no-op.
     PushBlend {

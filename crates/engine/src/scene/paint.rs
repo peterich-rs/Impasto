@@ -76,3 +76,27 @@ pub enum BlendMode {
     Multiply,
     Screen,
 }
+/// Four rows of straight linear RGBA coefficients, with a bias in each row.
+pub type ColorMatrix = [[f32; 5]; 4];
+
+/// Blur and color treatment for a first-class backdrop material.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BackdropMaterial {
+    pub sigma: f32,
+    pub saturation: f32,
+    pub brightness: f32,
+    /// Straight linear RGBA. Alpha controls tint strength.
+    pub tint: [f32; 4],
+    /// Proportion of the blur that fades into the sharp backdrop at the bottom.
+    pub taper: f32,
+}
+
+impl BackdropMaterial {
+    pub fn is_valid(self) -> bool {
+        self.sigma >= 0.0
+            && [self.sigma, self.saturation, self.brightness, self.taper]
+                .into_iter()
+                .chain(self.tint)
+                .all(f32::is_finite)
+    }
+}

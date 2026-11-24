@@ -102,13 +102,14 @@ pub(crate) struct Gpu {
     pub text_gamma: bool,
     pub gradient_lut: bool,
     pub dither_output: bool,
+    pub dither_gradients: bool,
     lost: Arc<AtomicBool>,
     oom: Arc<AtomicBool>,
     uncaptured_error: Arc<AtomicBool>,
     validate_frames: bool,
     image_upload: Arc<OnceLock<Option<crate::image_upload::ImageUpload>>>,
+    pub(crate) inline_image_pipeline: Arc<OnceLock<Option<wgpu::RenderPipeline>>>,
     image_upload_mode: ImageUploadMode,
-    #[cfg(target_os = "android")]
     pipeline_cache: Option<crate::pipeline_disk_cache::PipelineDiskCache>,
     #[cfg(target_os = "android")]
     pub external_queue: Option<crate::android_vulkan::ExternalQueue>,
@@ -218,7 +219,7 @@ impl Gpu {
         let lcd = wgpu::Features::DUAL_SOURCE_BLENDING;
         let modern = wgpu::Features::IMMEDIATES | wgpu::Features::SHADER_F16;
         let mut requested = timing | (support & modern);
-        if cfg!(target_os = "android") && cache_dir.is_some() && backend == RasterBackend::Vulkan {
+        if cache_dir.is_some() && backend == RasterBackend::Vulkan {
             requested |= support & wgpu::Features::PIPELINE_CACHE;
         }
         let external_video = wgpu::Features::TEXTURE_FORMAT_NV12;
@@ -298,7 +299,6 @@ impl Gpu {
             tier = ?caps.tier, caps.min_uniform_align, caps.max_texture_2d,
             caps.max_array_layers, caps.msaa4_srgb, adapter_us, device_us,
             supported = ?caps.adapter_features, enabled = ?device.features(), "graphics device ready");
-        #[cfg(target_os = "android")]
         let pipeline_cache = cache_dir.and_then(|dir| {
             crate::pipeline_disk_cache::PipelineDiskCache::open(&device, &adapter, dir)
         });
@@ -307,7 +307,6 @@ impl Gpu {
         Ok(Self {
             #[cfg(target_os = "android")]
             external_queue,
-            #[cfg(target_os = "android")]
             pipeline_cache,
             instance,
             adapter,
@@ -316,13 +315,15 @@ impl Gpu {
             backend,
             caps,
             shadow_2d: std::env::var("IMPASTO_SHADOW_2D").as_deref() != Ok("0"),
-            text_gamma: std::env::var("IMPASTO_TEXT_GAMMA").as_deref() == Ok("1"),
+            text_gamma: std::env::var("IMPASTO_TEXT_GAMMA").as_deref() != Ok("0"),
             gradient_lut: std::env::var("IMPASTO_GRADIENT_LUT").as_deref() == Ok("1"),
             dither_output: std::env::var("IMPASTO_DITHER").as_deref() == Ok("1"),
+            dither_gradients: std::env::var("IMPASTO_DITHER").as_deref() != Ok("0"),
             lost,
             oom,
             uncaptured_error,
             image_upload: Arc::default(),
+            inline_image_pipeline: Arc::default(),
             image_upload_mode: match std::env::var("IMPASTO_IMAGE_UPLOAD").as_deref() {
                 Ok("cpu") => ImageUploadMode::Cpu,
                 Ok("compute") => ImageUploadMode::Compute,
@@ -361,15 +362,10 @@ impl Gpu {
     }
 
     pub fn pipeline_cache(&self) -> Option<&wgpu::PipelineCache> {
-        #[cfg(target_os = "android")]
-        if let Some(cache) = &self.pipeline_cache {
-            return Some(&cache.cache);
-        }
-        None
+        self.pipeline_cache.as_ref().map(|cache| &cache.cache)
     }
 
     pub fn pipelines_updated(&self) {
-        #[cfg(target_os = "android")]
         if let Some(cache) = &self.pipeline_cache {
             cache.updated();
         }

@@ -464,6 +464,17 @@ fn render_layers(
         stats.queue_submit = Duration::ZERO;
     }
     if presented.is_ok() {
+        if stats.render.transition_snapshot_bakes != 0 || stats.render.transition_snapshot_hits != 0
+        {
+            tracing::event!(
+                name: "transition_snapshot",
+                target: "impasto::render::gpu",
+                tracing::Level::DEBUG,
+                trace_event = true,
+                bakes = stats.render.transition_snapshot_bakes,
+                hits = stats.render.transition_snapshot_hits,
+            );
+        }
         tracing::trace!(target: "impasto::render::gpu",
             draws = stats.render.draws,
             passes = stats.render.passes,
@@ -475,6 +486,8 @@ fn render_layers(
             stop_bytes = stats.render.stop_bytes,
             offscreen_passes = stats.render.offscreen_passes,
             direct_present = stats.render.direct_present,
+            snapshot_bakes = stats.render.transition_snapshot_bakes,
+            snapshot_hits = stats.render.transition_snapshot_hits,
             atlas_bytes = stats.atlas.bytes,
             atlas_hits = stats.atlas.hits,
             atlas_misses = stats.atlas.misses,

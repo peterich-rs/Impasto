@@ -116,13 +116,16 @@ impl Rasterizer {
                     continue;
                 }
             };
-            match Self::new_device(gpu).and_then(|mut device| {
-                let surface = configure(&device.gpu, device.generation, handle, raw, pixels)?;
+            match (|| {
+                let generation =
+                    crate::NEXT_DEVICE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let surface = configure(&gpu, generation, handle, raw, pixels)?;
+                let mut device = Self::new_device(gpu, generation, Some(surface.config.format))?;
                 device
                     .compositor
                     .prewarm_surface(&device.gpu, surface.config.format);
                 Ok((surface, device))
-            }) {
+            })() {
                 Ok((surface, device)) => {
                     self.device = Some(device);
                     return Ok(surface);

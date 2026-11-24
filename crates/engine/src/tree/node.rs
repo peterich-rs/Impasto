@@ -279,6 +279,9 @@ bitflags::bitflags! {
         const HIDDEN = 1 << 13;
         /// Keep the node drawable while omitting its subtree from accessibility.
         const SEMANTICS_HIDDEN = 1 << 14;
+        /// App-requested picture boundary, independent of list/canvas ownership.
+        const PICTURE_FROM_BOUNDARY = 1 << 15;
+        const TRANSITION_SNAPSHOT = 1 << 16;
     }
 }
 
@@ -364,6 +367,8 @@ pub(super) struct PaintProps {
     pub(super) box_shadows: Arc<[crate::scene::BoxShadow]>,
     pub(super) blur: f32,
     pub(super) backdrop: f32,
+    pub(super) backdrop_material: Option<Arc<crate::scene::BackdropMaterial>>,
+    pub(super) color_filter: Option<Arc<crate::scene::ColorMatrix>>,
     pub(super) blend: crate::scene::BlendMode,
     pub(super) alpha: Option<u8>,
 }
@@ -402,6 +407,8 @@ impl Default for PaintProps {
             box_shadows: Arc::from([]),
             blur: 0.0,
             backdrop: 0.0,
+            backdrop_material: None,
+            color_filter: None,
             blend: crate::scene::BlendMode::SrcOver,
             alpha: None,
         }
@@ -712,6 +719,8 @@ impl Node {
         let live = |sigma: f32| sigma.is_finite() && sigma > 0.0;
         live(self.blur())
             || live(self.backdrop())
+            || self.backdrop_material().is_some()
+            || self.color_filter().is_some()
             || self.blend() != crate::scene::BlendMode::SrcOver
     }
 
@@ -826,6 +835,14 @@ impl Node {
             .as_ref()
             .map(|paint| paint.backdrop)
             .unwrap_or(0.0)
+    }
+
+    pub(super) fn color_filter(&self) -> Option<&Arc<crate::scene::ColorMatrix>> {
+        self.paint.as_ref()?.color_filter.as_ref()
+    }
+
+    pub(super) fn backdrop_material(&self) -> Option<&Arc<crate::scene::BackdropMaterial>> {
+        self.paint.as_ref()?.backdrop_material.as_ref()
     }
 
     pub(super) fn blend(&self) -> crate::scene::BlendMode {

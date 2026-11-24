@@ -382,3 +382,394 @@ fn bench_p3_retained_offscreen_cursor() {
         wgpu::TextureFormat::Bgra8Unorm,
     );
 }
+
+#[test]
+fn independent_effects_keep_one_main_pass_and_preserve_paint_order() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let mut commands = vec![rect([0.0, 0.0, 140.0, 96.0], [0, 32, 89, 255])];
+    for idx in 0..5u8 {
+        let x = 8.0 + f32::from(idx) * 22.0;
+        commands.extend([
+            Command::PushOpacity {
+                x,
+                y: 4.0,
+                w: 20.0,
+                h: 64.0,
+                alpha: 180,
+            },
+            rect([x, 4.0, 20.0, 64.0], [120, 240, 12, 255]),
+            rect([x, 20.0, 20.0, 48.0], [200, 20, 30, 255]),
+            Command::Pop,
+            rect([x + 8.0, 10.0, 4.0, 58.0], [255, 255, 255, 255]),
+        ]);
+    }
+    raster
+        .submit_layers(&tree(1, commands), 1.0, |_| None)
+        .unwrap();
+    let size = PixelSize::new(140, 96);
+    let pixels = raster.render_rgba(size).unwrap();
+    let render = raster.submit_stats().render;
+    assert_eq!(render.passes - render.offscreen_passes, 1);
+    assert_eq!(render.offscreen_passes, 5);
+    for idx in 0..5usize {
+        let x = 8 + idx * 22;
+        let shadow = pixel(&pixels, 140, x + 4, 24);
+        assert!(shadow[0] > shadow[1]);
+        assert_eq!(pixel(&pixels, 140, x + 9, 24), [255; 4]);
+    }
+}
+
+#[test]
+fn stable_picture_addition_does_not_expand_damage_to_a_distant_backdrop() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let mut before = tree(1, [rect([0.0, 0.0, 160.0, 160.0], [16, 32, 120, 255])]);
+    before.layers[0].next = Some(LayerId(1));
+    before.layers.push(Layer {
+        kind: LayerKind::BackdropBlur {
+            x: 25.0,
+            y: 120.0,
+            w: 110.0,
+            h: 26.0,
+            sigma: 3.0,
+        },
+        parent: None,
+        first_child: None,
+        next: None,
+    });
+    raster.submit_layers(&before, 1.0, |_| None).unwrap();
+    let size = PixelSize::new(160, 160);
+    let original_pixels = raster.render_rgba(size).unwrap();
+    assert_eq!(raster.submit_stats().render.backdrop_cache_hits, 0);
+    let mut after = before.clone();
+    let new = PictureId(7);
+    after.pictures.push(Arc::new(Picture::new(
+        new,
+        1,
+        (0.0, 0.0),
+        Arc::from([rect([10.0, 5.0, 6.0, 8.0], [220, 110, 30, 255])]),
+    )));
+    after.layers[0].next = Some(LayerId(2));
+    after.layers.push(Layer {
+        kind: LayerKind::Picture { picture: new },
+        parent: None,
+        first_child: None,
+        next: Some(LayerId(1)),
+    });
+    let inserted = raster
+        .submit_layers(&after, 1.0, |_| None)
+        .unwrap()
+        .stats
+        .damage;
+    let with_new_picture = raster.render_rgba(size).unwrap();
+    assert_ne!(with_new_picture, original_pixels);
+    let removed = raster
+        .submit_layers(&before, 1.0, |_| None)
+        .unwrap()
+        .stats
+        .damage;
+    let restored = raster.render_rgba(size).unwrap();
+    assert_eq!(restored, original_pixels);
+    assert_eq!(raster.submit_stats().render.backdrop_cache_hits, 1);
+    assert_eq!(inserted, removed);
+    let DamageRect::Rect([_, _, _, bottom]) = inserted else {
+        panic!("stable addition must damage its own pixels: {inserted:?}");
+    };
+    assert!(bottom <= 16, "unrelated backdrop enlarged damage");
+}
+
+#[test]
+fn active_opacity_reuses_a_snapshot_and_keeps_new_alpha() {
+    use engine::{
+        motion::MotionCurve,
+        scene::{CompositorProp, CompositorTrack, CompositorTrackId},
+    };
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let mut scene = tree(
+        1,
+        [
+            rect([8.0, 8.0, 88.0, 64.0], [200, 12, 40, 255]),
+            rect([16.0, 24.0, 60.0, 40.0], [20, 120, 230, 255]),
+        ],
+    );
+    scene.root = LayerId(1);
+    scene.layers[0].parent = Some(scene.root);
+    scene.layers.push(Layer {
+        kind: LayerKind::Opacity {
+            alpha: 230,
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 90.0,
+        },
+        parent: None,
+        first_child: Some(LayerId(0)),
+        next: None,
+    });
+    scene.tracks = Arc::from([CompositorTrack::new(
+        CompositorTrackId(1),
+        scene.root,
+        CompositorProp::Opacity,
+        0.0,
+        MotionCurve::Tween {
+            from: 230.0,
+            to: 10.0,
+            duration_ms: 100.0,
+            easing: engine::motion::Easing::Linear,
+        },
+        Some([0.0, 255.0]),
+        None,
+    )]);
+    raster.submit_layers(&scene, 1.0, |_| None).unwrap();
+    let size = PixelSize::new(100, 90);
+    let first = raster.render_rgba(size).unwrap();
+    assert_eq!(raster.submit_stats().render.transition_snapshot_bakes, 1);
+    raster.sample_compositor_tracks(scene.epoch, 50.0).unwrap();
+    let second = raster.render_rgba(size).unwrap();
+    let render = raster.submit_stats().render;
+    assert_eq!(render.transition_snapshot_hits, 1);
+    assert_eq!(render.offscreen_passes, 0);
+    assert_eq!(pixel(&first, 100, 22, 42)[3], 230);
+    assert_eq!(pixel(&second, 100, 22, 42)[3], 120);
+}
+
+#[test]
+fn marked_snapshot_keeps_content_that_moves_on_screen() {
+    use engine::{
+        motion::{Easing, MotionCurve},
+        scene::{CompositorProp, CompositorTrack, CompositorTrackId, CompositorTransform},
+    };
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let mut scene = moved_picture(0.0, 1, Arc::from([rect([-12.0, 8.0, 8.0, 8.0], [255; 4])]));
+    scene.layers[1].kind = LayerKind::Transform {
+        translate_x: 0.0,
+        translate_y: 0.0,
+        rotate_rad: 0.0,
+        scale_x: 1.0,
+        scale_y: 1.0,
+    };
+    let mut track = CompositorTrack::new(
+        CompositorTrackId(1),
+        scene.root,
+        CompositorProp::TranslateX,
+        0.0,
+        MotionCurve::Tween {
+            from: 0.0,
+            to: 40.0,
+            duration_ms: 100.0,
+            easing: Easing::Linear,
+        },
+        None,
+        Some(CompositorTransform {
+            translate: [0.0, 0.0],
+            rotate_rad: 0.0,
+            scale: [1.0, 1.0],
+            pivot: None,
+        }),
+    );
+    track.freeze_subtree = true;
+    scene.tracks = Arc::from([track]);
+    raster.submit_layers(&scene, 1.0, |_| None).unwrap();
+    let size = PixelSize::new(32, 32);
+    let first = raster.render_rgba(size).unwrap();
+    assert_eq!(pixel(&first, 32, 10, 10)[3], 0);
+    assert_eq!(raster.submit_stats().render.transition_snapshot_bakes, 1);
+    raster.sample_compositor_tracks(scene.epoch, 50.0).unwrap();
+    let second = raster.render_rgba(size).unwrap();
+    assert_eq!(pixel(&second, 32, 10, 10), [255; 4]);
+    assert_eq!(raster.submit_stats().render.transition_snapshot_hits, 1);
+}
+
+#[test]
+fn small_image_atlas_samples_mips_without_sampling_adjacent_images() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let image = |x, source: &'static str| Command::Image {
+        x,
+        y: 0.0,
+        w: 32.0,
+        h: 32.0,
+        source: Arc::from(source),
+        mode: ContentMode::Fill,
+        required: true,
+    };
+    let texture = |rgb: [u8; 3]| {
+        (0..128 * 128)
+            .flat_map(|index| {
+                let [r, g, b] = rgb;
+                if (index / 128 + index % 128) % 2 == 0 {
+                    [r, g, b, 255]
+                } else {
+                    [0, 0, 0, 255]
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let red = texture([255, 0, 0]);
+    let blue = texture([0, 0, 255]);
+    let resolve = |source: &str| {
+        Some(ImagePixels {
+            width: 128,
+            height: 128,
+            rgba: if source == "red" { &red } else { &blue },
+        })
+    };
+    let size = PixelSize::new(64, 32);
+    let left = image(0.0, "red");
+    let right = image(32.0, "blue");
+    // In the reference, the clip separates the images into two image runs.
+    let standalone = tree(
+        1,
+        [
+            left.clone(),
+            super::rounded([32.0, 0.0, 32.0, 32.0], 0.0),
+            right.clone(),
+            Command::Pop,
+        ],
+    );
+    raster.submit_layers(&standalone, 1.0, resolve).unwrap();
+    let expected = raster.render_rgba(size).unwrap();
+    raster
+        .submit_layers(&tree(2, [left, right]), 1.0, resolve)
+        .unwrap();
+    let actual = raster.render_rgba(size).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(pixel(&actual, 64, 31, 14)[2], 0);
+    assert_eq!(pixel(&actual, 64, 32, 14)[0], 0);
+    if std::env::var("IMPASTO_IMAGE_ARRAY").as_deref() == Ok("0")
+        && std::env::var("IMPASTO_IMAGE_UPLOAD").is_err()
+        && std::env::var("IMPASTO_SMALL_IMAGES").is_err()
+    {
+        assert_eq!(raster.submit_stats().render.draws, 1);
+    }
+}
+
+#[test]
+fn inline_blurhash_reuses_its_gpu_decoded_texture() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let scene = tree(
+        1,
+        [Command::Image {
+            x: 0.0,
+            y: 0.0,
+            w: 32.0,
+            h: 32.0,
+            source: Arc::from("blurhash:LEHV6nWB2yk8pyo0adR*.7kCMdnj"),
+            mode: ContentMode::Fill,
+            required: true,
+        }],
+    );
+    assert!(scene.image_requirements().is_empty());
+    let resolve = |_: &str| panic!("an inline BlurHash must not request a decoded asset");
+    let first = raster.submit_layers(&scene, 1.0, resolve).unwrap();
+    assert_eq!(first.stats.image_upload.render_passes, 1);
+    let size = PixelSize::new(32, 32);
+    let pixels = raster.render_rgba(size).unwrap();
+    assert_eq!(pixel(&pixels, 32, 6, 6)[3], 255);
+    assert_ne!(pixel(&pixels, 32, 6, 6), pixel(&pixels, 32, 25, 25));
+    let reused = raster.submit_layers(&scene, 1.0, resolve).unwrap();
+    assert_eq!(reused.stats.image_upload.render_passes, 0);
+    assert_eq!(raster.render_rgba(size).unwrap(), pixels);
+}
+
+#[test]
+fn inline_thumbhash_reconstructs_alpha_and_aspect_ratio() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    // Reference ThumbHash decoder gives 32 × 13 and RGBA [125, 121, 87, 120]
+    // at (10, 8). Exercise aspect fitting inside a wider picture.
+    let scene = tree(
+        1,
+        [Command::Image {
+            x: 0.0,
+            y: 0.0,
+            w: 32.0,
+            h: 25.0,
+            source: Arc::from("thumbhash:XWmGEooooIeSiIigkgjad3B3hoiHeHg="),
+            mode: ContentMode::Fit,
+            required: true,
+        }],
+    );
+    assert!(scene.image_requirements().is_empty());
+    let submitted = raster
+        .submit_layers(&scene, 1.0, |_| panic!("ThumbHash is raster-owned"))
+        .unwrap();
+    assert_eq!(submitted.stats.image_upload.render_passes, 1);
+    assert_eq!(submitted.stats.image_upload.resident_bytes, 32 * 13 * 4);
+    let pixels = raster.render_rgba(PixelSize::new(32, 25)).unwrap();
+    assert_eq!(pixel(&pixels, 32, 10, 5)[3], 0);
+    let sampled = pixel(&pixels, 32, 10, 14);
+    assert!(
+        sampled
+            .iter()
+            .zip([125, 121, 87, 120])
+            .all(|(actual, expected)| actual.abs_diff(expected) <= 3),
+        "unexpected pixel {sampled:?}"
+    );
+}
+
+#[test]
+fn opaque_translated_sibling_culls_only_the_subtree_inside_its_cover() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let mut scene = tree(1, [rect([9.0, 9.0, 4.0, 4.0], [255, 0, 0, 255])]);
+    scene.layers[0].next = Some(LayerId(1));
+    for (id, commands) in [
+        (
+            PictureId(2),
+            [rect([1.0, 1.0, 17.0, 3.0], [20, 220, 20, 255])],
+        ),
+        (
+            PictureId(3),
+            [rect([0.0, 0.0, 19.0, 19.0], [20, 42, 220, 255])],
+        ),
+    ] {
+        scene.pictures.push(Arc::new(Picture::new(
+            id,
+            1,
+            (0.0, 0.0),
+            Arc::from(commands),
+        )));
+    }
+    scene.layers.extend([
+        Layer {
+            kind: LayerKind::Picture {
+                picture: PictureId(2),
+            },
+            parent: None,
+            first_child: None,
+            next: Some(LayerId(2)),
+        },
+        Layer {
+            kind: LayerKind::Offset { x: 6.0, y: 6.0 },
+            parent: None,
+            first_child: Some(LayerId(3)),
+            next: None,
+        },
+        Layer {
+            kind: LayerKind::Picture {
+                picture: PictureId(3),
+            },
+            parent: Some(LayerId(2)),
+            first_child: None,
+            next: None,
+        },
+    ]);
+    raster.submit_layers(&scene, 1.0, |_| None).unwrap();
+    let pixels = raster.render_rgba(PixelSize::new(32, 32)).unwrap();
+    assert_eq!(pixel(&pixels, 32, 10, 10), [20, 42, 220, 255]);
+    assert_eq!(pixel(&pixels, 32, 3, 2), [20, 220, 20, 255]);
+    assert_eq!(raster.submit_stats().render.occluded_siblings, 1);
+}

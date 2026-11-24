@@ -1486,7 +1486,7 @@ fn on_frame(
         .as_ref()
         .is_some_and(|hub| hub.collects_frames());
     let inspect = runtime.inspect.is_some() || runtime.inspect_dir.is_some();
-    let schedule = (counters || inspect).then(|| {
+    let mut schedule = (counters || inspect).then(|| {
         let ui_start_ns = mono_ns_at(frame_started);
         // FrameTime::mono_ms was stamped when the callback posted to the
         // inbox. Use that runner's elapsed time so custom epochs also work.
@@ -1644,21 +1644,38 @@ fn on_frame(
                     runtime.latest = Some(tree);
                     layers_changed = true;
                 }
-                if runtime.compositor_enabled
-                    && !frame.paused
+                if !frame.paused
                     && !leave
                     && faults.is_empty()
                     && let Some(tree) = runtime.latest.as_ref()
-                    && ((again && !tree.tracks.is_empty())
-                        || runtime.animated_effects
-                        || runtime.gpu_views)
+                    && (again || runtime.animated_effects || runtime.gpu_views)
                 {
-                    if session.compositor_ready(&tree.tracks) {
-                        compositor_epoch = Some(runtime.compositor_epoch);
-                    } else {
-                        tracing::event!(name: "compositor_deferred", target: "impasto::compositor",
-                            tracing::Level::DEBUG, trace_event = true, queue = "ui",
-                            status = "ui_work", active_tracks = tree.tracks.len());
+                    use engine::scene::CompositorBlockReason;
+                    let has_compositor_work =
+                        !tree.tracks.is_empty() || runtime.animated_effects || runtime.gpu_views;
+                    let eligible = session.compositor_eligibility(&tree.tracks).and({
+                        if !has_compositor_work || runtime.compositor_enabled {
+                            Ok(())
+                        } else if matches!(runtime.graphics, RasterPort::Local(_)) {
+                            Err(CompositorBlockReason::SharedTopology)
+                        } else {
+                            Err(CompositorBlockReason::Disabled)
+                        }
+                    });
+                    match eligible {
+                        Ok(()) if has_compositor_work => {
+                            compositor_epoch = Some(runtime.compositor_epoch);
+                        }
+                        Ok(()) => {}
+                        Err(reason) => {
+                            if let Some(schedule) = schedule.as_mut() {
+                                schedule.compositor_block = Some(reason);
+                            }
+                            tracing::event!(name: "compositor_deferred", target: "impasto::compositor",
+                                tracing::Level::DEBUG, trace_event = true, queue = "ui",
+                                status = reason.name(), node = reason.node(),
+                                active_tracks = tree.tracks.len());
+                        }
                     }
                 }
                 if plan.arm_extra {

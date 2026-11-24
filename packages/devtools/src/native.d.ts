@@ -85,6 +85,9 @@ export type FrameSample = {
   uiMs: number;
   rasterMs: number;
   queueMs: number;
+  compositorOnly?: boolean;
+  compositorBlock?: string | null;
+  compositorBlockNode?: string | null;
   e2eMs: number;
   draws: number;
   passes: number;

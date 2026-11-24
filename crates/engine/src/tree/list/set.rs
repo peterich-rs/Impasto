@@ -55,13 +55,6 @@ impl DriverSet {
         self.pending
     }
 
-    /// Whether motion of this viewport can change which virtualized rows are mounted.
-    pub fn observes_scroll_window(&self, node: NodeId) -> bool {
-        self.lists
-            .iter()
-            .any(|entry| entry.value.as_ref().and_then(ListDriver::viewport) == Some(node))
-    }
-
     pub fn take_events(&mut self) -> Vec<DriverEvent> {
         std::mem::take(&mut self.events)
     }
@@ -292,6 +285,7 @@ impl DriverSet {
         }
 
         self.pending = false;
+        tree.list_compositor_windows.clear();
         let mut listed = Vec::new();
         for index in 0..self.lists.len() {
             let Some(entry) = self.lists.get_mut(index) else {
@@ -302,6 +296,14 @@ impl DriverSet {
                 continue;
             };
             let (ops, chrome, end, pending) = driver.tick(tree);
+            if let Some(node) = driver.viewport() {
+                let window = if !pending && ops.is_empty() && chrome.is_none() {
+                    driver.compositor_window(tree)
+                } else {
+                    None
+                };
+                tree.list_compositor_windows.insert(node, window);
+            }
             let id = DriverId {
                 index: crate::cast::u32_from_usize(index),
                 generation,

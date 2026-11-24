@@ -5,21 +5,24 @@
 //! bitmaps ahead of replay. A glyph's key covers every input
 //! that changes its bitmap: face, glyph ID, physical size, subpixel
 //! position bucket, variation coordinates, and synthetic bold or skew.
-//! Entries are shelf-packed. The shelf allocator cannot free one rect, so
-//! eviction is per page: when every page is full and the page budget is
-//! reached, the oldest page is cleared and its entries dropped.
+//! Entries are shelf-packed. Under pressure, reclaim cold buckets on a page
+//! that no draw has referenced in the current transaction.
 //!
 //! Blank glyphs (whitespace, missing outlines) cache an empty entry.
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use engine::scene::FontFaceId;
 use etagere::BucketedAtlasAllocator;
 use etagere::size2;
-use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+use rayon::prelude::{ParallelIterator, ParallelSlice};
+use slotmap::{DefaultKey, Key, KeyData, SlotMap};
 use swash::scale::{Render, ScaleContext, Source};
 use swash::zeno::{Angle, Fill, Format, Style, Transform, Vector};
 use swash::{CacheKey, FontRef, GlyphId};
@@ -28,11 +31,11 @@ use crate::compiler::GlyphDraw;
 use crate::fonts::FontLibrary;
 use crate::gpu::Gpu;
 
-/// Subpixel buckets on each axis: quarter-pixel positioning.
-const SUBPIXEL_BUCKETS: u32 = 4;
-const PAGE_SIZE: u32 = 1024;
-/// Pages per atlas above which the oldest page is recycled.
-const PAGE_LIMIT: usize = 6;
+/// Quarter-pixel horizontal positions.
+pub(crate) const SUBPIXEL_BUCKETS: u32 = 4;
+const PAGE_SIZE: u32 = 2048;
+/// Upper bound on simultaneously resident pages on small adapters.
+const PAGE_LIMIT: u32 = 6;
 /// One-texel gutter between glyphs so bilinear sampling never bleeds.
 const GUTTER: u32 = 1;
 
@@ -41,16 +44,62 @@ const GUTTER: u32 = 1;
 pub(crate) struct GlyphKey {
     face: FontFaceId,
     glyph: u16,
-    /// Physical font size in 1/64 pixel steps.
-    size: u32,
-    /// Subpixel bucket x and y, `0..SUBPIXEL_BUCKETS`.
-    subpixel: [u32; 2],
+    variant: GlyphVariant,
     coords: Option<Arc<[i16]>>,
     embolden: bool,
+    skew: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct GlyphVariant {
+    /// Physical font size in 1/64 pixel steps.
+    size: u32,
+    /// Horizontal subpixel bucket, `0..SUBPIXEL_BUCKETS`.
+    subpixel: u32,
     darken_stem: bool,
     hint: bool,
     lcd: bool,
-    skew: Option<u32>,
+}
+
+impl GlyphKey {
+    fn new(draw: &GlyphDraw, variant: GlyphVariant) -> Self {
+        Self {
+            face: *draw.face,
+            glyph: draw.glyph,
+            variant,
+            coords: draw.coords.clone(),
+            embolden: draw.embolden,
+            skew: draw.skew.map(f32::to_bits),
+        }
+    }
+}
+
+/// Each compiled glyph remembers the last slot it used on its Raster device.
+/// The generational key prevents reused slots from aliasing evicted entries.
+#[derive(Debug, Default)]
+pub(crate) struct GlyphSlot(AtomicU64);
+
+impl GlyphSlot {
+    fn get(&self) -> DefaultKey {
+        KeyData::from_ffi(self.0.load(Ordering::Relaxed)).into()
+    }
+
+    fn set(&self, slot: DefaultKey) {
+        self.0.store(slot.data().as_ffi(), Ordering::Relaxed);
+    }
+}
+
+impl Clone for GlyphSlot {
+    fn clone(&self) -> Self {
+        Self(AtomicU64::new(self.0.load(Ordering::Relaxed)))
+    }
+}
+
+impl PartialEq for GlyphSlot {
+    fn eq(&self, _other: &Self) -> bool {
+        // The hint is not part of the compiled picture's visual identity.
+        true
+    }
 }
 
 /// Texel rectangle of a glyph in one atlas page.
@@ -61,6 +110,7 @@ pub struct AtlasRect {
     pub y: u32,
     pub w: u32,
     pub h: u32,
+    allocation: Option<etagere::AllocId>,
 }
 
 /// Where a glyph's bitmap landed, for the encoder.
@@ -73,10 +123,12 @@ pub struct Placement {
     pub top: i32,
     pub color: bool,
     pub lcd: bool,
+    page_generation: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct Entry {
+    variant: GlyphVariant,
     placement: Placement,
     used: u64,
 }
@@ -137,13 +189,14 @@ struct Page {
     size: [u32; 2],
     backing: PageBacking,
     age: u64,
+    generation: u64,
 }
 
 enum PageBacking {
     Resident {
         layer: u32,
         shadow: Vec<u8>,
-        dirty: u16,
+        dirty: u32,
     },
     Temporary {
         texture: AtlasTexture,
@@ -167,7 +220,8 @@ pub struct Atlas {
     prepared: HashMap<GlyphKey, Bitmap>,
     mask: AtlasArray,
     color: AtlasArray,
-    entries: HashMap<GlyphKey, Entry>,
+    entries: HashMap<GlyphKey, DefaultKey>,
+    slots: SlotMap<DefaultKey, Entry>,
     clock: u64,
     page_size: u32,
     mask_channels: u32,
@@ -189,6 +243,7 @@ pub struct AtlasStats {
     pub upload_bytes: u64,
     pub copy_pixels: u64,
     pub evictions: u32,
+    pub region_reclaims: u32,
     pub prerasterized: u32,
     /// Live entries across both atlases.
     pub entries: usize,
@@ -212,6 +267,7 @@ impl Atlas {
             },
             color: AtlasArray::default(),
             entries: HashMap::new(),
+            slots: SlotMap::new(),
             clock: 0,
             page_size: gpu.max_texture_size().min(PAGE_SIZE),
             mask_channels: if gpu.caps.lcd { 4 } else { 1 },
@@ -220,7 +276,7 @@ impl Atlas {
             material: None,
             stats: AtlasStats::default(),
             scratch: Vec::new(),
-            darken_small: std::env::var("IMPASTO_DARKEN_STEMS").as_deref() == Ok("1"),
+            darken_small: std::env::var("IMPASTO_DARKEN_STEMS").as_deref() != Ok("0"),
             pinned: HashSet::new(),
         }
     }
@@ -231,6 +287,7 @@ impl Atlas {
         self.color = AtlasArray::default();
         self.material = None;
         self.entries.clear();
+        self.slots.clear();
         self.rasterizer.font_keys.clear();
         self.prepared.clear();
         self.scratch = Vec::new();
@@ -242,38 +299,42 @@ impl Atlas {
     pub fn begin_frame(&mut self) {
         self.prepared.clear();
         self.pinned.clear();
-        if self
+        let has_temporary = self
             .mask
             .pages
             .iter()
             .chain(&self.color.pages)
-            .any(Page::temporary)
-        {
-            self.epoch = self.epoch.wrapping_add(1);
-        }
-        let masks = retain_pages(&mut self.mask.pages);
-        let colors = retain_pages(&mut self.color.pages);
+            .any(Page::temporary);
         let before = self.entries.len();
-        self.entries.retain(|_, entry| {
-            let rect = &mut entry.placement.rect;
-            if rect.page == usize::MAX {
-                return true;
-            }
-            let pages = if entry.placement.color {
-                &colors
-            } else {
-                &masks
-            };
-            let Some(index) = pages.get(rect.page).copied().flatten() else {
-                return false;
-            };
-            rect.page = index;
-            true
-        });
+        if has_temporary {
+            self.epoch = self.epoch.wrapping_add(1);
+            let masks = retain_pages(&mut self.mask.pages);
+            let colors = retain_pages(&mut self.color.pages);
+            self.slots.retain(|_, entry| {
+                let rect = &mut entry.placement.rect;
+                if rect.page == usize::MAX {
+                    return true;
+                }
+                let pages = if entry.placement.color {
+                    &colors
+                } else {
+                    &masks
+                };
+                let Some(index) = pages.get(rect.page).copied().flatten() else {
+                    return false;
+                };
+                rect.page = index;
+                true
+            });
+            self.entries
+                .retain(|_, slot| self.slots.contains_key(*slot));
+        }
         self.stats.evictions = u32::try_from(before - self.entries.len()).unwrap_or(u32::MAX);
         if self.entries.len() > 32768 {
-            self.entries
+            self.slots
                 .retain(|_, entry| entry.placement.rect.page != usize::MAX);
+            self.entries
+                .retain(|_, slot| self.slots.contains_key(*slot));
         }
         self.stats.bytes = self.mask.bytes(self.mask_channels as usize) + self.color.bytes(4);
         self.stats.entries = self.entries.len();
@@ -295,6 +356,12 @@ impl Atlas {
 
     pub fn inverse_page_size(&self) -> f32 {
         1.0 / self.page_size as f32
+    }
+
+    pub fn resident_page_valid(&self, placement: Placement) -> bool {
+        self.pages_for_ref(placement.color)
+            .get(placement.rect.page)
+            .is_some_and(|page| !page.temporary() && page.generation == placement.page_generation)
     }
 
     pub fn pin(&mut self, placement: Placement) {
@@ -333,21 +400,28 @@ impl Atlas {
         position: Option<[f32; 2]>,
         lcd: bool,
     ) -> Option<Placement> {
-        let key = self.glyph_key(gpu, draw, size, position, lcd)?;
+        let variant = self.variant(gpu, size, position, lcd)?;
         self.clock = self.clock.wrapping_add(1);
-        if let Some(entry) = self.entries.get_mut(&key) {
-            entry.used = self.clock;
-            self.stats.hits = self.stats.hits.saturating_add(1);
-            let placement = entry.placement;
-            self.pin(placement);
-            return Some(placement);
+        let slot = draw.atlas_slot.get();
+        if self
+            .slots
+            .get(slot)
+            .is_some_and(|entry| entry.variant == variant)
+        {
+            return self.hit(slot);
+        }
+        let key = GlyphKey::new(draw, variant);
+        if let Some(&slot) = self.entries.get(&key) {
+            draw.atlas_slot.set(slot);
+            return self.hit(slot);
         }
         self.stats.misses = self.stats.misses.saturating_add(1);
         let bitmap = self
             .prepared
             .remove(&key)
             .or_else(|| self.rasterizer.glyph(library, &key))?;
-        let placement = self.store(gpu, key, bitmap)?;
+        let (slot, placement) = self.store(gpu, key, bitmap)?;
+        draw.atlas_slot.set(slot);
         if placement.rect.page != usize::MAX {
             self.stats.uploads = self.stats.uploads.saturating_add(1);
         }
@@ -355,26 +429,32 @@ impl Atlas {
         Some(placement)
     }
 
-    fn glyph_key(
+    fn hit(&mut self, slot: DefaultKey) -> Option<Placement> {
+        let entry = self.slots.get_mut(slot)?;
+        entry.used = self.clock;
+        self.stats.hits = self.stats.hits.saturating_add(1);
+        let mut placement = entry.placement;
+        if let Some(page) = self.pages_for_ref(placement.color).get(placement.rect.page) {
+            placement.page_generation = page.generation;
+        }
+        self.pin(placement);
+        Some(placement)
+    }
+
+    fn variant(
         &self,
         gpu: &Gpu,
-        draw: &GlyphDraw,
         size: f32,
         position: Option<[f32; 2]>,
         lcd: bool,
-    ) -> Option<GlyphKey> {
+    ) -> Option<GlyphVariant> {
         let size = quantize_size(size, gpu.max_texture_size())?;
-        Some(GlyphKey {
-            face: *draw.face,
-            glyph: draw.glyph,
+        Some(GlyphVariant {
             size,
-            subpixel: position.map_or([0, 0], |position| position.map(bucket)),
-            coords: draw.coords.clone(),
-            embolden: draw.embolden,
+            subpixel: position.map_or(0, |[x, _]| horizontal_bucket(x)),
             darken_stem: self.darken_small && position.is_some() && size <= 14 * 64,
             hint: position.is_some(),
             lcd,
-            skew: draw.skew.map(f32::to_bits),
         })
     }
 
@@ -386,7 +466,15 @@ impl Atlas {
         position: Option<[f32; 2]>,
         lcd: bool,
     ) -> Option<GlyphKey> {
-        let key = self.glyph_key(gpu, draw, size, position, lcd)?;
+        let variant = self.variant(gpu, size, position, lcd)?;
+        if self
+            .slots
+            .get(draw.atlas_slot.get())
+            .is_some_and(|entry| entry.variant == variant)
+        {
+            return None;
+        }
+        let key = GlyphKey::new(draw, variant);
         (!self.entries.contains_key(&key) && !self.prepared.contains_key(&key)).then_some(key)
     }
 
@@ -410,12 +498,18 @@ impl Atlas {
         );
         let _entered = span.enter();
         let started = std::time::Instant::now();
+        let keys: Vec<_> = keys.into_iter().collect();
+        let chunk_size = keys.len().div_ceil(pool.current_num_threads());
         let prepared = pool.install(|| {
-            keys.into_par_iter()
-                .map_init(GlyphRasterizer::default, |worker, key| {
-                    worker.glyph(library, &key).map(|bitmap| (key, bitmap))
+            keys.par_chunks(chunk_size)
+                .flat_map_iter(|chunk| {
+                    let mut worker = GlyphRasterizer::default();
+                    chunk.iter().filter_map(move |key| {
+                        worker
+                            .glyph(library, key)
+                            .map(|bitmap| (key.clone(), bitmap))
+                    })
                 })
-                .flatten()
                 .collect::<Vec<_>>()
         });
         self.stats.prerasterized += u32::try_from(prepared.len()).unwrap_or(u32::MAX);
@@ -426,7 +520,12 @@ impl Atlas {
         );
     }
 
-    fn store(&mut self, gpu: &Gpu, key: GlyphKey, bitmap: Bitmap) -> Option<Placement> {
+    fn store(
+        &mut self,
+        gpu: &Gpu,
+        key: GlyphKey,
+        bitmap: Bitmap,
+    ) -> Option<(DefaultKey, Placement)> {
         let placement = match bitmap {
             Bitmap::Empty => Placement {
                 rect: AtlasRect {
@@ -435,24 +534,32 @@ impl Atlas {
                     y: 0,
                     w: 0,
                     h: 0,
+                    allocation: None,
                 },
                 left: 0,
                 top: 0,
                 color: false,
                 lcd: false,
+                page_generation: 0,
             },
             Bitmap::Mask(image) => self.store_image(gpu, false, image)?,
             Bitmap::Color(image) => self.store_image(gpu, true, image)?,
         };
-        self.entries.insert(
-            key,
-            Entry {
-                placement,
-                used: self.clock,
-            },
-        );
+        let slot = self.insert(key, placement, self.clock);
         self.stats.entries = self.entries.len();
-        Some(placement)
+        Some((slot, placement))
+    }
+
+    fn insert(&mut self, key: GlyphKey, placement: Placement, used: u64) -> DefaultKey {
+        let slot = self.slots.insert(Entry {
+            variant: key.variant,
+            placement,
+            used,
+        });
+        if let Some(old) = self.entries.insert(key, slot) {
+            self.slots.remove(old);
+        }
+        slot
     }
 
     fn store_image(
@@ -479,6 +586,10 @@ impl Atlas {
                 top: image.placement.top,
                 color,
                 lcd,
+                page_generation: self
+                    .pages_for_ref(color)
+                    .get(rect.page)
+                    .map_or(0, |page| page.generation),
             })
         }
     }
@@ -490,6 +601,7 @@ impl Atlas {
             y: 0,
             w: 0,
             h: 0,
+            allocation: None,
         };
         if w == 0 || h == 0 {
             return Some(empty);
@@ -507,6 +619,7 @@ impl Atlas {
                 y: GUTTER,
                 w,
                 h,
+                allocation: None,
             });
         }
         let wanted = size2(w as i32 + GUTTER as i32 * 2, h as i32 + GUTTER as i32 * 2);
@@ -516,6 +629,7 @@ impl Atlas {
             y: allocation.rectangle.min.y as u32 + GUTTER,
             w,
             h,
+            allocation: Some(allocation.id),
         };
         // Try existing pages.
         {
@@ -528,29 +642,25 @@ impl Atlas {
                 }
             }
         }
-        // Every page is full. Recycle the one whose entries were used
-        // longest ago, or add a page while under the budget.
         let pages = self.pages_for_ref(color);
-        let limit = PAGE_LIMIT.min(gpu.caps.max_array_layers as usize);
+        let limit = self.page_limit(gpu) as usize;
         let full = pages.iter().filter(|page| !page.temporary()).count() >= limit;
-        let recycle = full
-            .then(|| {
-                pages
-                    .iter()
-                    .enumerate()
-                    .filter(|(index, page)| {
-                        !page.temporary() && !self.pinned.contains(&(color, *index))
-                    })
-                    .min_by_key(|(_, page)| page.age)
-                    .map(|(index, _)| index)
-            })
-            .flatten();
-        let index = if let Some(index) = recycle {
-            self.recycle(gpu, color, index)?;
-            index
-        } else {
-            self.add_page(gpu, color, [page_size; 2], full)
-        };
+        if full {
+            let oldest = pages
+                .iter()
+                .enumerate()
+                .filter(|(index, page)| {
+                    !page.temporary() && !self.pinned.contains(&(color, *index))
+                })
+                .min_by_key(|(_, page)| page.age)
+                .map(|(index, _)| index);
+            if let Some(index) = oldest
+                && let Some(allocation) = self.reclaim(color, index, wanted)
+            {
+                return Some(place(allocation, index));
+            }
+        }
+        let index = self.add_page(gpu, color, [page_size; 2], full);
         let allocation = self
             .pages_for(color)
             .get_mut(index)?
@@ -559,7 +669,16 @@ impl Atlas {
         Some(place(allocation, index))
     }
 
+    fn page_limit(&self, gpu: &Gpu) -> u32 {
+        // Budget each array for at most three full 2048-square layers.
+        let area = self.page_size * self.page_size;
+        (3 * PAGE_SIZE * PAGE_SIZE / area)
+            .min(gpu.caps.max_array_layers)
+            .min(PAGE_LIMIT)
+    }
+
     fn add_page(&mut self, gpu: &Gpu, color: bool, size: [u32; 2], temporary: bool) -> usize {
+        let max_layers = self.page_limit(gpu);
         let page_size = self.page_size;
         let age = self.clock;
         let atlas = if color {
@@ -577,7 +696,6 @@ impl Atlas {
             let layer = u32::try_from(layer).unwrap_or(0);
             let current_layers = atlas.texture.as_ref().map_or(0, |texture| texture.layers);
             if layer >= current_layers {
-                let max_layers = gpu.caps.max_array_layers.min(6);
                 let layers = (layer + 1).next_power_of_two().min(max_layers);
                 let next = AtlasTexture::new(gpu, color, [page_size; 2], layers);
                 if let Some(old) = atlas.texture.replace(next) {
@@ -602,6 +720,7 @@ impl Atlas {
             size,
             backing,
             age,
+            generation: 0,
         });
         self.stats.bytes = self.mask.bytes(self.mask_channels as usize) + self.color.bytes(4);
         index
@@ -623,53 +742,48 @@ impl Atlas {
         }
     }
 
-    fn recycle(&mut self, gpu: &Gpu, color: bool, index: usize) -> Option<()> {
-        let size = self.pages_for_ref(color).get(index)?.size;
-        self.epoch = self.epoch.wrapping_add(1);
-        if color {
-            zero_scratch(&mut self.scratch, size, 4)?;
+    fn reclaim(
+        &mut self,
+        color: bool,
+        index: usize,
+        wanted: etagere::Size,
+    ) -> Option<etagere::Allocation> {
+        // A bucket is reused once its last glyph leaves. Bound the work per
+        // attempt to leave enough time for a temporary page in this frame.
+        const RECLAIM_BATCH: usize = 32;
+        const RECLAIM_LIMIT: usize = 512;
+        let mut victims: Vec<_> = self
+            .entries
+            .iter()
+            .filter_map(|(key, slot)| {
+                let entry = self.slots.get(*slot)?;
+                let placement = entry.placement;
+                (placement.color == color && placement.rect.page == index)
+                    .then(|| Some((entry.used, key.clone(), placement.rect.allocation?)))
+                    .flatten()
+            })
+            .collect();
+        victims.sort_unstable_by_key(|(used, _, _)| *used);
+        if victims.is_empty() {
+            return None;
         }
-        let before = self.entries.len();
-        self.entries.retain(|_, entry| {
-            entry.placement.color != color || entry.placement.rect.page != index
-        });
-        self.stats.evictions = self
-            .stats
-            .evictions
-            .saturating_add(u32::try_from(before - self.entries.len()).unwrap_or(u32::MAX));
-        self.stats.entries = self.entries.len();
-        let atlas = if color {
-            &mut self.color
-        } else {
-            &mut self.mask
-        };
-        let page = &mut atlas.pages[index];
-        page.alloc.clear();
-        page.age = self.clock;
-        if let PageBacking::Resident {
-            layer,
-            shadow,
-            dirty,
-        } = &mut page.backing
-        {
-            shadow.fill(0);
-            if color {
-                for texture in atlas
-                    .texture
-                    .iter()
-                    .chain(&atlas.retired)
-                    .filter(|t| *layer < t.layers)
-                {
-                    let [w, h] = page.size;
-                    self.stats.upload_bytes +=
-                        write_texture(gpu, texture, [0, 0, *layer], [w, h], 4, &self.scratch);
-                    self.stats.upload_calls += 1;
+        let page = self.pages_for(color).get_mut(index)?;
+        page.generation = page.generation.wrapping_add(1);
+        for batch in victims[..victims.len().min(RECLAIM_LIMIT)].chunks(RECLAIM_BATCH) {
+            for (_, key, allocation) in batch {
+                if let Some(slot) = self.entries.remove(key) {
+                    self.slots.remove(slot);
                 }
-            } else {
-                *dirty = u16::MAX;
+                self.pages_for(color)[index].alloc.deallocate(*allocation);
+            }
+            self.stats.evictions += u32::try_from(batch.len()).unwrap_or(u32::MAX);
+            self.stats.region_reclaims += 1;
+            self.stats.entries = self.entries.len();
+            if let Some(allocation) = self.pages_for(color)[index].alloc.allocate(wanted) {
+                return Some(allocation);
             }
         }
-        Some(())
+        None
     }
 
     fn upload(&mut self, gpu: &Gpu, color: bool, rect: AtlasRect, data: &[u8]) -> Option<()> {
@@ -687,11 +801,23 @@ impl Atlas {
         let (texture, layer, mirror) = match &mut page.backing {
             PageBacking::Resident { shadow, dirty, .. } if !color => {
                 let stride = (page.size[0] * channels) as usize;
-                for (y, source) in data.chunks_exact(row).take(rect.h as usize).enumerate() {
-                    let start = (rect.y as usize + y) * stride + (rect.x * channels) as usize;
-                    shadow[start..start + row].copy_from_slice(source);
+                let gutter = GUTTER as usize * channels as usize;
+                let padded_row = row + 2 * gutter;
+                for y in rect.y - GUTTER..rect.y + rect.h + GUTTER {
+                    let start = y as usize * stride + ((rect.x - GUTTER) * channels) as usize;
+                    let padded = &mut shadow[start..start + padded_row];
+                    padded.fill(0);
+                    if let Some(row_index) = y
+                        .checked_sub(rect.y)
+                        .filter(|row_index| *row_index < rect.h)
+                    {
+                        let source = row_index as usize * row;
+                        padded[gutter..gutter + row].copy_from_slice(&data[source..source + row]);
+                    }
                 }
-                for band in rect.y / BAND_HEIGHT..=(rect.y + rect.h - 1) / BAND_HEIGHT {
+                for band in
+                    (rect.y - GUTTER) / BAND_HEIGHT..=(rect.y + rect.h + GUTTER - 1) / BAND_HEIGHT
+                {
                     *dirty |= 1 << band;
                 }
                 return Some(());
@@ -938,18 +1064,15 @@ impl GlyphRasterizer {
             self.font_keys.clear();
         }
         font.key = *self.font_keys.entry(key.face).or_insert(font.key);
-        let ppem = key.size as f32 / 64.0;
+        let ppem = key.variant.size as f32 / 64.0;
         let mut scaler = self
             .context
             .builder(font)
             .size(ppem)
-            .hint(key.hint)
+            .hint(key.variant.hint)
             .normalized_coords(key.coords.as_deref().unwrap_or_default().iter().copied())
             .build();
-        let offset = Vector::new(
-            key.subpixel[0] as f32 / SUBPIXEL_BUCKETS as f32,
-            -(key.subpixel[1] as f32) / SUBPIXEL_BUCKETS as f32,
-        );
+        let offset = Vector::new(key.variant.subpixel as f32 / SUBPIXEL_BUCKETS as f32, 0.0);
         let id = GlyphId::from(key.glyph);
         // Color sources first: emoji and COLR glyphs keep their own pixels.
         let mut image = swash::scale::image::Image::new();
@@ -969,7 +1092,7 @@ impl GlyphRasterizer {
             Source::Bitmap(swash::scale::StrikeWith::ExactSize),
         ]);
         render
-            .format(if key.lcd {
+            .format(if key.variant.lcd {
                 Format::Subpixel
             } else {
                 Format::Alpha
@@ -978,7 +1101,7 @@ impl GlyphRasterizer {
             .offset(offset);
         if key.embolden {
             render.embolden(ppem / 24.0);
-        } else if key.darken_stem {
+        } else if key.variant.darken_stem {
             render.embolden(0.12);
         }
         if let Some(skew) = key.skew.map(f32::from_bits) {
@@ -1036,7 +1159,7 @@ fn quantize_size(size: f32, max_size: u32) -> Option<u32> {
     clippy::cast_possible_truncation,
     reason = "subpixel offsets are quantized to four buckets"
 )]
-fn bucket(fraction: f32) -> u32 {
+pub(crate) fn horizontal_bucket(fraction: f32) -> u32 {
     let value = (fraction.rem_euclid(1.0) * SUBPIXEL_BUCKETS as f32).floor();
     (value as i32).clamp(0, SUBPIXEL_BUCKETS as i32 - 1) as u32
 }
@@ -1083,13 +1206,16 @@ mod tests {
     }
 
     #[test]
-    fn atlas_growth_patches_old_views_and_recycling_zeros_the_full_layer() {
+    fn atlas_growth_patches_old_views_and_reclaims_a_cold_bucket() {
         let Some(raster) = crate::tests::headless(FontLibrary::new()) else {
             return;
         };
         let gpu = &raster.device.as_ref().unwrap().gpu;
         let mut atlas = Atlas::new(gpu);
-        let count = PAGE_LIMIT.min(gpu.caps.max_array_layers as usize);
+        // Exercise growth and recycling with small pages and full-page glyphs.
+        atlas.page_size = 1024;
+        atlas.mask.texture = Some(AtlasTexture::new(gpu, false, [1024; 2], 1));
+        let count = atlas.page_limit(gpu);
         let initial = atlas.mask.texture.as_ref().unwrap().texture.clone();
         atlas.begin_frame();
         let glyph = vec![200; 600 * 600 * atlas.mask_channels as usize];
@@ -1101,12 +1227,31 @@ mod tests {
                 top: 0,
                 color: false,
                 lcd: false,
+                page_generation: 0,
             };
+            atlas.insert(
+                GlyphKey {
+                    face: FontFaceId(u64::from(layer)),
+                    glyph: 0,
+                    variant: GlyphVariant {
+                        size: 1,
+                        subpixel: 0,
+                        darken_stem: false,
+                        hint: false,
+                        lcd: false,
+                    },
+                    coords: None,
+                    embolden: false,
+                    skew: None,
+                },
+                placement,
+                u64::from(layer),
+            );
             atlas.pin(placement);
             atlas.upload(gpu, false, rect, &glyph).unwrap();
             let (binding, index) = atlas.binding(placement);
             assert!(binding == AtlasBinding::Resident);
-            assert_eq!(index, u32::try_from(layer).unwrap());
+            assert_eq!(index, layer);
         }
         let mut prelude = None;
         atlas.flush(gpu, &mut prelude);
@@ -1114,10 +1259,7 @@ mod tests {
         assert_eq!(sample(gpu, &initial, 2, 2, 0), 200);
         let expanded = atlas.mask.texture.as_ref().unwrap().texture.clone();
         assert_eq!(sample(gpu, &expanded, 2, 2, 0), 200);
-        assert_eq!(
-            sample(gpu, &expanded, 2, 2, u32::try_from(count - 1).unwrap()),
-            200
-        );
+        assert_eq!(sample(gpu, &expanded, 2, 2, count - 1), 200);
 
         atlas.begin_frame();
         let new = atlas.allocate(gpu, false, 520, 520).unwrap();
@@ -1135,6 +1277,7 @@ mod tests {
         gpu.submit(prelude.map(wgpu::CommandEncoder::finish));
         assert_eq!(sample(gpu, &expanded, new.x + 3, new.y + 3, 0), 100);
         assert_eq!(sample(gpu, &expanded, new.x + new.w, new.y + 3, 0), 0);
-        assert_eq!(sample(gpu, &expanded, 580, 580, 0), 0);
+        assert_eq!(atlas.stats.region_reclaims, 1);
+        assert_eq!(atlas.entries.len(), (count - 1) as usize);
     }
 }

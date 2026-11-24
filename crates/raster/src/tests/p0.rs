@@ -846,6 +846,50 @@ fn bench_dense_text_wall() {
 }
 
 #[test]
+#[ignore = "3x GPU glyph atlas workload"]
+fn bench_cjk_atlas_scroll_3x() {
+    let fonts = FontLibrary::new();
+    let mut shaper = ParleyShaper::new(fonts.clone());
+    assert!(shaper.register("Sans", ROBOTO));
+    let text: String = (0x4e00..0x5600).filter_map(char::from_u32).collect();
+    let commands = Arc::from([bench_text(&mut shaper, text.into(), 14.0, 300.0, false)]);
+    let mut raster = headless(fonts).unwrap();
+    let gpu = raster.device.as_ref().unwrap().gpu.clone();
+    let pixels = PixelSize::new(900, 1800);
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let output = output(&gpu, format, pixels).create_view(&Default::default());
+    let mut uploads = 0;
+    let mut evictions = 0;
+    let mut reclaim = 0;
+    let mut live_entries = 0;
+    for step in 0..24u16 {
+        let mut scene = tree(1, Arc::clone(&commands));
+        scene.root = LayerId(1);
+        scene.layers[0].parent = Some(scene.root);
+        scene.layers.push(Layer {
+            kind: LayerKind::Offset {
+                x: 0.0,
+                y: -f32::from(step) * 24.5,
+            },
+            parent: None,
+            first_child: Some(LayerId(0)),
+            next: None,
+        });
+        raster.submit_layers(&scene, 3.0, |_| None).unwrap();
+        raster.encode_and_submit(&output, format, pixels).unwrap();
+        let atlas = raster.submit_stats().atlas;
+        uploads += atlas.uploads;
+        evictions += atlas.evictions;
+        reclaim += atlas.region_reclaims;
+        live_entries = atlas.entries;
+    }
+    println!(
+        "CJK 3x atlas uploads={uploads} entries={live_entries} evictions={evictions} region_reclaims={reclaim}"
+    );
+    assert_ne!(uploads, 0);
+}
+
+#[test]
 #[ignore = "GPU microbenchmark"]
 fn bench_backdrop_blur_overlays() {
     let mut raster = benchmark::headless(FontLibrary::new());
@@ -1183,6 +1227,106 @@ fn opaque_depth_segments_preserve_painter_order() {
 }
 
 #[test]
+fn rounded_depth_interiors_leave_antialiased_edges_in_painter_order() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let mut back = rect([3.0, 3.0, 23.0, 23.0], [255, 0, 0, 255]);
+    let mut front = rect([6.25, 6.5, 23.0, 23.0], [0, 0, 255, 255]);
+    for command in [&mut back, &mut front] {
+        if let Command::Rect { corner_radius, .. } = command {
+            *corner_radius = 6.0;
+        }
+    }
+    let mut commands = vec![back; 64];
+    commands.push(front);
+    let size = PixelSize::new(32, 32);
+    // The rectangular scissor excludes the depth path without clipping the cards.
+    let mut reference = vec![rounded([0.0, 0.0, 31.0, 31.0], 0.0)];
+    reference.extend_from_slice(&commands);
+    reference.push(Command::Pop);
+    let expected = capture(&mut raster, 1, reference, size);
+    let actual = capture(&mut raster, 2, commands, size);
+    assert!(expected.iter().zip(actual).all(|(a, b)| a.abs_diff(b) <= 2));
+    if std::env::var("IMPASTO_EARLY_Z").as_deref() == Ok("1") {
+        assert_eq!(raster.submit_stats().render.early_z_instances, 65);
+    }
+}
+
+#[test]
+fn color_matrix_filters_composited_children_and_keeps_holes_clear() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let matrix = Arc::new([
+        [0.0, 0.0, 1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.5, 0.0],
+    ]);
+    let children = [
+        rect([0.0, 0.0, 12.0, 12.0], [255, 0, 0, 255]),
+        rect([8.0, 8.0, 12.0, 12.0], [0, 0, 255, 255]),
+    ];
+    let size = PixelSize::new(24, 24);
+    let mut commands = vec![Command::PushColorFilter {
+        matrix: Arc::clone(&matrix),
+    }];
+    commands.extend_from_slice(&children);
+    commands.push(Command::Pop);
+    let pixels = capture(&mut raster, 1, commands, size);
+    assert!(pixel(&pixels, 24, 4, 4)[2] > 180);
+    assert_eq!(pixel(&pixels, 24, 9, 9)[3], 128);
+    assert!(pixel(&pixels, 24, 9, 9)[0] > 180);
+    assert_eq!(pixel(&pixels, 24, 2, 18), [0; 4]);
+
+    let mut scene = tree(2, children);
+    scene.root = LayerId(1);
+    scene.layers[0].parent = Some(scene.root);
+    scene.layers.push(Layer {
+        kind: LayerKind::ColorFilter { matrix },
+        parent: None,
+        first_child: Some(LayerId(0)),
+        next: None,
+    });
+    raster.submit_layers(&scene, 1.0, |_| None).unwrap();
+    assert_eq!(raster.render_rgba(size).unwrap(), pixels);
+}
+
+#[test]
+fn backdrop_material_tapers_blur_and_clips_its_corners() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let commands = vec![
+        rect([0.0, 0.0, 24.0, 48.0], [255, 0, 0, 255]),
+        rect([24.0, 0.0, 24.0, 48.0], [0, 0, 255, 255]),
+        Command::PushBackdropMaterial {
+            bounds: [4.0, 4.0, 40.0, 40.0],
+            corners: Some(CornerShape {
+                radii: [8.0; 4],
+                curve: 2.0,
+            }),
+            material: Arc::new(engine::scene::BackdropMaterial {
+                sigma: 5.0,
+                saturation: 1.0,
+                brightness: 1.0,
+                tint: [0.0; 4],
+                taper: 1.0,
+            }),
+        },
+        Command::Pop,
+    ];
+    let pixels = capture(&mut raster, 1, commands, PixelSize::new(48, 48));
+    assert_eq!(pixel(&pixels, 48, 4, 4), [255, 0, 0, 255]);
+    let upper = pixel(&pixels, 48, 23, 12);
+    let lower = pixel(&pixels, 48, 23, 39);
+    assert!(upper[2] > lower[2] + 50, "{upper:?} {lower:?}");
+    assert!(lower[0] > upper[0]);
+    assert_eq!(pixel(&pixels, 48, 23, 45), [255, 0, 0, 255]);
+}
+
+#[test]
 fn stencil_intersects_pixel_aligned_canvas_clips_with_even_odd_holes() {
     let Some(mut raster) = headless(FontLibrary::new()) else {
         return;
@@ -1236,6 +1380,69 @@ fn stencil_intersects_pixel_aligned_canvas_clips_with_even_odd_holes() {
         {
             assert_eq!(raster.submit_stats().render.stencil_draws, 3);
         }
+    }
+}
+
+#[test]
+fn winding_stencil_matches_tessellated_holes_and_resets_between_fills() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let ring = |fill| {
+        let mut verbs = Vec::new();
+        for ([x, y, w, h], reverse) in [
+            ([4.0, 4.0, 24.0, 24.0], false),
+            ([11.0, 11.0, 10.0, 10.0], fill == FillRule::NonZero),
+        ] {
+            let mut outline = [
+                [x, y],
+                [x + w * 0.5, y],
+                [x + w, y],
+                [x + w, y + h * 0.5],
+                [x + w, y + h],
+                [x + w * 0.5, y + h],
+                [x, y + h],
+                [x, y + h * 0.5],
+            ];
+            if reverse {
+                outline.reverse();
+            }
+            verbs.push(PathVerb::Move(outline[0][0], outline[0][1]));
+            verbs.extend(outline[1..].iter().map(|&[x, y]| PathVerb::Line(x, y)));
+            verbs.push(PathVerb::Close);
+        }
+        CanvasPath {
+            verbs: verbs.into(),
+            fill,
+        }
+    };
+    let commands = |force_lyon, fill| {
+        let mut ops = Vec::new();
+        if force_lyon {
+            ops.push(CanvasOp::Clip {
+                path: path([0.0, 0.0, 32.0, 32.0]),
+            });
+        }
+        ops.push(fill_path(
+            ring(fill),
+            [225, 30, 56, 255],
+            CanvasComposite::SourceOver,
+        ));
+        ops.push(fill_path(
+            path([13.0, 13.0, 3.0, 3.0]),
+            [50, 110, 200, 255],
+            CanvasComposite::SourceOver,
+        ));
+        vec![canvas(ops, 32.0, 32.0)]
+    };
+    let size = PixelSize::new(32, 32);
+    for (i, rule) in (1..).zip([FillRule::NonZero, FillRule::EvenOdd]) {
+        let expected = capture(&mut raster, i * 2, commands(true, rule), size);
+        let actual = capture(&mut raster, i * 2 + 1, commands(false, rule), size);
+        assert_eq!(expected, actual);
+        assert_eq!(raster.submit_stats().render.stencil_draws, 1);
+        assert_eq!(pixel(&actual, 32, 13, 13), [50, 110, 200, 255]);
+        assert_eq!(pixel(&actual, 32, 16, 16), [0; 4]);
     }
 }
 
@@ -1352,7 +1559,12 @@ fn image_array_preserves_source_order_and_filtering() {
     assert_eq!(pixel(&pixels, 16, 3, 3), *images[0].1);
     assert_eq!(pixel(&pixels, 16, 7, 3), *images[1].1);
     assert_eq!(pixel(&pixels, 16, 11, 3), *images[2].1);
-    if raster.device.as_ref().unwrap().gpu.image_array() {
+    let gpu = &raster.device.as_ref().unwrap().gpu;
+    if gpu.image_array()
+        || gpu.max_texture_size() >= 1024
+            && gpu.caps.max_array_layers >= 2
+            && std::env::var("IMPASTO_SMALL_IMAGES").as_deref() != Ok("0")
+    {
         assert_eq!(raster.submit_stats().render.draws, 1);
     }
 }
@@ -1448,4 +1660,113 @@ fn display_p3_output_maps_linear_srgb_and_preserves_p3_gradient_stops() {
     );
     let wide = pixel(&bytes, 8, 6, 2);
     assert!(wide[0] >= 254 && wide[1] <= 4 && wide[2] <= 4, "{wide:?}");
+}
+
+#[test]
+fn declarative_scroll_bindings_render_identical_pixels_on_ui_and_raster() {
+    use engine::motion::{AnimProp, Easing, Tween};
+    use engine::scene::{
+        Extrapolate, PiecewiseColorMap, PiecewiseMap, ScrollCurve, ScrollSource, ScrollTargetProp,
+    };
+    use engine::text::MonoShaper;
+    use engine::tree::Tree;
+
+    let Some(mut compositor) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let Some(mut ui) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let size = PixelSize::new(80, 80);
+    let mut tree = Tree::new(MonoShaper::default());
+    tree.set_viewport(0.0, 0.0, 80.0, 80.0).unwrap();
+    let root = tree.stack().unwrap();
+    tree.set_size(root, 80.0, 80.0).unwrap();
+    let scroll = tree.scroll().unwrap();
+    tree.set_max_size(scroll, 80.0, 80.0).unwrap();
+    tree.add_child(root, scroll).unwrap();
+    let list = tree.view().unwrap();
+    tree.add_child(scroll, list).unwrap();
+    for index in 0..10 {
+        let color = if index % 2 == 0 {
+            [255, 168, 94, 255]
+        } else {
+            [18, 77, 112, 255]
+        };
+        let row = tree.decorated(color, 0.0).unwrap();
+        tree.set_size(row, 80.0, 40.0).unwrap();
+        tree.add_child(list, row).unwrap();
+    }
+    let header = tree.sized(44.0, 30.0).unwrap();
+    tree.add_child(root, header).unwrap();
+    for (prop, output) in [
+        (ScrollTargetProp::TranslateX, [0.0, 24.0]),
+        (ScrollTargetProp::ScaleX, [1.0, 0.7]),
+        (ScrollTargetProp::Rotate, [0.0, 0.11]),
+        (ScrollTargetProp::Opacity, [1.0, 0.6]),
+        (ScrollTargetProp::BlurSigma, [0.0, 1.0]),
+        (ScrollTargetProp::BackdropBlurSigma, [0.0, 3.0]),
+    ] {
+        tree.add_scroll_binding(
+            scroll,
+            ScrollSource::Y,
+            header,
+            prop,
+            ScrollCurve::Scalar(
+                PiecewiseMap::new(Box::new([5.0, 175.0]), Box::new(output), Extrapolate::Clamp)
+                    .unwrap(),
+            ),
+        )
+        .unwrap();
+    }
+    tree.add_scroll_binding(
+        scroll,
+        ScrollSource::Y,
+        header,
+        ScrollTargetProp::BackgroundColor,
+        ScrollCurve::Color(
+            PiecewiseColorMap::new(
+                Box::new([5.0, 175.0]),
+                Box::new([[0.8, 0.24, 0.1, 0.8], [0.12, 0.35, 0.7, 0.7]]),
+                Extrapolate::Clamp,
+            )
+            .unwrap(),
+        ),
+    )
+    .unwrap();
+    tree.layout().unwrap();
+    tree.tick_motions(100.0);
+    tree.set_scroll_offset(scroll, 0.0, 5.0).unwrap();
+    tree.animate(
+        scroll,
+        AnimProp::ScrollY,
+        Box::new(Tween {
+            from: 5.0,
+            to: 205.0,
+            duration_ms: 400.0,
+            easing: Easing::Linear,
+        }),
+    );
+    tree.record_layers().unwrap();
+    let installed = tree.layer_tree();
+    assert_eq!(installed.tracks.len(), 1);
+    assert_eq!(installed.tracks[0].scroll_bindings.len(), 7);
+    compositor.submit_layers(&installed, 1.0, |_| None).unwrap();
+
+    let mut previous = vec![];
+    for target in [100.0, 135.0, 200.0, 370.0, 499.0] {
+        compositor
+            .sample_compositor_tracks(installed.epoch, target)
+            .unwrap();
+        let actual = compositor.render_rgba(size).unwrap();
+        assert_ne!(previous, actual, "test scene must change at {target} ms");
+        tree.tick_motions(target);
+        tree.record_layers().unwrap();
+        ui.submit_layers(&tree.layer_tree(), 1.0, |_| None).unwrap();
+        assert!(
+            actual == ui.render_rgba(size).unwrap(),
+            "pixel mismatch at {target} ms"
+        );
+        previous = actual;
+    }
 }

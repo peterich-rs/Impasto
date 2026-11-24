@@ -123,7 +123,7 @@ impl Frame<'_> {
         // effect gets timestamp boundaries so its cost can be attributed.
         let measuring = self.capture.is_some();
         if measuring {
-            self.flush_draws();
+            self.flush_target(&target.view);
         }
         self.record(
             target,
@@ -138,7 +138,7 @@ impl Frame<'_> {
             self.pending_pass(target).shader = Some(id);
         }
         if measuring || backdrop.is_some() {
-            self.flush_draws();
+            self.flush_target(&target.view);
         }
         if let Some(backdrop) = backdrop {
             self.release(backdrop);

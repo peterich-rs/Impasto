@@ -434,10 +434,13 @@ fn layer_kind(kind: &engine::scene::LayerKind) -> &'static str {
         }
         engine::scene::LayerKind::Opacity { .. } => "opacity",
         engine::scene::LayerKind::Blur { .. } => "blur",
+        engine::scene::LayerKind::ColorFilter { .. } => "colorFilter",
         engine::scene::LayerKind::BackdropBlur { .. } => "backdrop",
+        engine::scene::LayerKind::BackdropMaterial { .. } => "backdropMaterial",
         engine::scene::LayerKind::Blend { .. } => "blend",
         engine::scene::LayerKind::Picture { .. } => "picture",
         engine::scene::LayerKind::PlatformView { .. } => "platformView",
+        engine::scene::LayerKind::Fill { .. } => "fill",
     }
 }
 

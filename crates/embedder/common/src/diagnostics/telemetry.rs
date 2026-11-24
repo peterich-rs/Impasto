@@ -39,6 +39,7 @@ pub struct ScheduleTiming {
     pub missed_vsync: bool,
     /// Raster received the display-link callback directly from the platform.
     pub compositor_only: bool,
+    pub compositor_block: Option<engine::scene::CompositorBlockReason>,
     pub topology: ThreadTopology,
 }
 
