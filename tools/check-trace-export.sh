@@ -32,7 +32,7 @@ SELECT CASE WHEN
     AND NOT EXISTS (SELECT 1 FROM stats WHERE value > 0 AND severity IN ('error', 'data_loss'))
   THEN 'trace-ok' ELSE 'trace-invalid' END AS result;
 "
-result="$("$processor" query --format csv "$trace" "$query")"
+result="$("$processor" query "$trace" "$query")"
 if [[ "$result" != *trace-ok* ]]; then
   printf '%s\n' "$result" >&2
   exit 1
