@@ -193,6 +193,14 @@ pub enum ThreadTopology {
 }
 
 impl ThreadTopology {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::SharedRender => "shared",
+            Self::Split => "split",
+            Self::PlatformUi => "platform-ui",
+        }
+    }
+
     pub fn configured() -> Result<Self, BootError> {
         match std::env::var("IMPASTO_THREAD_TOPOLOGY") {
             Ok(mode) => mode.parse(),

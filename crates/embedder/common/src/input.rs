@@ -576,16 +576,11 @@ pub(crate) fn push_coalesced(commands: &mut VecDeque<Command>, command: Command)
     {
         commands.remove(index);
     }
-    if let Command::ExternalTexture { source, .. } = &command
+    if let Command::ExternalTexture { source, .. } | Command::ExternalGpuTexture { source, .. } =
+        &command
         && let Some(index) = commands.iter().rposition(|queued| {
-            matches!(queued, Command::ExternalTexture { source: queued, .. } if source == queued)
-        })
-    {
-        commands.remove(index);
-    }
-    if let Command::ExternalGpuTexture { source, .. } = &command
-        && let Some(index) = commands.iter().rposition(|queued| {
-            matches!(queued, Command::ExternalGpuTexture { source: queued, .. } if source == queued)
+            matches!(queued, Command::ExternalTexture { source: queued, .. }
+                | Command::ExternalGpuTexture { source: queued, .. } if source == queued)
         })
     {
         commands.remove(index);

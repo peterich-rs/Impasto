@@ -102,6 +102,9 @@ impl Tree {
         if self.layout_cause == LayoutCause::None {
             self.layout_cause = cause;
         }
+        if self.pending_layout_cause == LayoutCause::None {
+            self.pending_layout_cause = cause;
+        }
     }
 
     pub fn trace_text_probes(&mut self, enabled: bool) {
@@ -1187,6 +1190,10 @@ impl Tree {
         if !self.needs_layout && self.laid_out {
             return Ok(());
         }
+        let pass = self.layout_passes.saturating_add(1);
+        let _trace = tracing::debug_span!(target: "impasto::layout", "layout_pass",
+            pass, cause = self.pending_layout_cause.name())
+        .entered();
         let root = self.root.ok_or(Error::NoRoot)?;
         let root_taffy = self.node(root)?.taffy.ok_or(Error::NoRoot)?;
         let available = match self.viewport {
@@ -1199,10 +1206,15 @@ impl Tree {
         let started = Instant::now();
         let mut measured = Vec::new();
         self.open_measure();
-        self.check_changed_text()?;
+        {
+            let _span =
+                tracing::trace_span!(target: "impasto::layout", "check_changed_text").entered();
+            self.check_changed_text()?;
+        }
         self.taffy.begin_layout();
         let taffy_started = Instant::now();
         let (root_trigger, local) = {
+            let _span = tracing::debug_span!(target: "impasto::layout", "taffy_compute").entered();
             let mut env = MeasureEnv {
                 slots: &self.slots,
                 shaper: &mut *self.shaper,
@@ -1227,13 +1239,16 @@ impl Tree {
         for id in measured {
             self.note_text(id);
         }
-        if let Some(trigger) = root_trigger {
-            self.place_boundary(root)?;
-            self.root_layout_trigger.get_or_insert(trigger);
-            self.root_layouts = self.root_layouts.saturating_add(1);
-        } else {
-            for &id in &local {
-                self.place_boundary(id)?;
+        {
+            let _span = tracing::trace_span!(target: "impasto::layout", "place_boundary").entered();
+            if let Some(trigger) = root_trigger {
+                self.place_boundary(root)?;
+                self.root_layout_trigger.get_or_insert(trigger);
+                self.root_layouts = self.root_layouts.saturating_add(1);
+            } else {
+                for &id in &local {
+                    self.place_boundary(id)?;
+                }
             }
         }
         self.local_layouts = self
@@ -1247,7 +1262,11 @@ impl Tree {
         self.needs_layout = false;
         self.needs_paint = true;
         self.laid_out = true;
-        self.sync_metrics();
+        self.pending_layout_cause = LayoutCause::None;
+        {
+            let _span = tracing::trace_span!(target: "impasto::layout", "sync_metrics").entered();
+            self.sync_metrics();
+        }
         self.layout_work_ms += started.elapsed().as_secs_f64() * 1000.0;
         if self.debug.scan_overflow {
             self.scan_overflow();
@@ -1420,6 +1439,7 @@ impl Tree {
         height: AvailableSpace,
         measured: &mut Vec<NodeId>,
     ) -> Result<Size<f32>, Error> {
+        let _trace = tracing::trace_span!(target: "impasto::layout", "measure_subtree").entered();
         let shaper = &mut *self.shaper;
         let mut env = MeasureEnv {
             slots: &self.slots,

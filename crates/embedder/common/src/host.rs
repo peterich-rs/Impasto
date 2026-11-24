@@ -12,9 +12,7 @@ use engine::session::FrameTime;
 
 use crate::command::{Command, SurfaceId, SurfaceTarget};
 use crate::diagnostics::TelemetryHub;
-use crate::diagnostics::telemetry::{
-    IoSpan, ScheduleTiming, TelemetryProfile, mono_ns, mono_ns_at,
-};
+use crate::diagnostics::telemetry::{ScheduleTiming, TelemetryProfile, mono_ns, mono_ns_at};
 use crate::error::BootError;
 use crate::images::{self, ImageCache, ImageDecoder, ImageError, ImageReady, ImageRequest};
 use crate::input::{FrameInput, Input};
@@ -675,7 +673,6 @@ fn run_boot(
     runners: TaskRunners,
     startup: &Startup,
 ) -> Result<UiHost, BootError> {
-    crate::diagnostics::telemetry::install_system_trace();
     let trace_path =
         std::env::var_os("IMPASTO_TRACE").filter(|path| !path.is_empty() && path != "1");
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
@@ -731,23 +728,26 @@ fn run_boot(
         let http = http.clone();
         let upload = Arc::clone(&upload);
         let io = Arc::clone(&runners.io);
-        let telemetry = telemetry.clone();
         move |request| {
             let decoder = Arc::clone(&decoder);
             let inbox = Arc::clone(&inbox);
             let http = http.clone();
             let upload = Arc::clone(&upload);
-            let telemetry = telemetry.clone();
+            let request_id = request.generation;
+            tracing::event!(name: "image_requested", target: "impasto::io", tracing::Level::DEBUG,
+                trace_event = true, request_id);
             io.post(Box::new(move || {
-                inbox.post(Command::ImageReady(decode_one(
-                    decoder.as_ref(),
-                    http.as_deref(),
-                    &request,
-                    &upload,
-                    telemetry.as_deref(),
-                )));
+                let _job = tracing::debug_span!(target: "impasto::io", "image_job", request_id, queue = "io").entered();
+                let result = decode_one(decoder.as_ref(), http.as_deref(), &request, &upload);
+                tracing::event!(name: "image_ready", target: "impasto::io", tracing::Level::DEBUG,
+                    trace_event = true, request_id);
+                inbox.post(Command::ImageReady(result));
             }))
         }
+    });
+    let startup_capture = trace_path.zip(telemetry.clone()).and_then(|(path, hub)| {
+        let id = hub.start_trace(path.into(), true)?;
+        Some((id, hub))
     });
     let runtime = open_ui(
         boot,
@@ -759,23 +759,25 @@ fn run_boot(
             load_image,
             http,
             upload,
-            telemetry: telemetry.clone(),
+            telemetry,
             enable_gpu_timing,
             #[cfg(any(debug_assertions, feature = "devtools-server"))]
             remote,
         },
-    )?;
-    if let (Some(path), Some(hub)) = (trace_path, telemetry)
-        && let Some(id) = hub.start_trace(path.into(), true)
-    {
-        capture_runner.post_delayed(Duration::from_secs(5), Box::new(move || {
-            match hub.finish_trace(id) {
-                Ok(path) => tracing::info!(target: "impasto::trace", path = %path.display(), "trace exported"),
-                Err(error) => tracing::warn!(target: "impasto::trace", %error, "trace export failed"),
-            }
-        }));
+    );
+    if let Some((id, hub)) = startup_capture {
+        if runtime.is_ok() {
+            capture_runner.post_delayed(Duration::from_secs(5), Box::new(move || {
+                match hub.finish_trace(id) {
+                    Ok(path) => tracing::info!(target: "impasto::trace", path = %path.display(), "trace exported"),
+                    Err(error) => tracing::warn!(target: "impasto::trace", %error, "trace export failed"),
+                }
+            }));
+        } else {
+            hub.cancel_capture(id);
+        }
     }
-    Ok(runtime)
+    runtime
 }
 
 type ImageLoader = Arc<dyn Fn(ImageRequest) -> bool + Send + Sync>;
@@ -785,23 +787,17 @@ fn decode_one(
     http: Option<&dyn crate::http::HttpClient>,
     request: &ImageRequest,
     upload: &Mutex<Option<raster::TextureFactory>>,
-    telemetry: Option<&TelemetryHub>,
 ) -> ImageReady {
-    let span_start = || telemetry.filter(|hub| hub.recording()).map(|_| mono_ns());
-    let note = |name, start| {
-        if let (Some(hub), Some(start_ns)) = (telemetry, start) {
-            hub.note_io(IoSpan {
-                name,
-                start_ns,
-                end_ns: mono_ns(),
-            });
-        }
-    };
-    let mut decode_start = span_start();
     let result = if request.source.starts_with("https://") {
-        let body = crate::http::fetch_image_body(http, &request.source);
-        note("Image fetch", decode_start);
-        decode_start = span_start();
+        let body = {
+            let _span =
+                tracing::debug_span!(target: "impasto::io", "image_fetch", request_id = request.generation)
+                    .entered();
+            crate::http::fetch_image_body(http, &request.source)
+        };
+        let _span =
+            tracing::debug_span!(target: "impasto::io", "image_decode", request_id = request.generation)
+                .entered();
         match body {
             Ok(bytes) => decoder.decode_bytes(&request.source, &bytes),
             Err(error) => Err(ImageError::Failed(error)),
@@ -809,9 +805,11 @@ fn decode_one(
     } else if request.source.starts_with("http://") {
         Err(ImageError::Failed("image URL must be https".into()))
     } else {
+        let _span =
+            tracing::debug_span!(target: "impasto::io", "image_decode", request_id = request.generation)
+                .entered();
         decoder.decode_at(&request.source, request.scale_bucket)
     };
-    note("Image decode", decode_start);
     match result {
         Ok(mut handle) => {
             if !images::pixel_count_ok(handle.size) {
@@ -823,10 +821,16 @@ fn decode_one(
             }
             handle.source = Arc::clone(&request.source);
             handle.generation = request.generation;
-            let upload_start = span_start();
-            let factory = lock(upload).clone();
-            images::attach_upload(&mut handle, factory.as_ref());
-            note("Image upload", upload_start);
+            {
+                let _span = tracing::debug_span!(
+                    target: "impasto::io",
+                    "image_upload",
+                    request_id = request.generation
+                )
+                .entered();
+                let factory = lock(upload).clone();
+                images::attach_upload(&mut handle, factory.as_ref());
+            }
             ImageReady::Decoded(handle)
         }
         Err(ImageError::Missing) => ImageReady::Missing {
@@ -1403,9 +1407,6 @@ fn on_frame(
     from_vsync: bool,
     acks: &Acks,
 ) -> Result<bool, BootError> {
-    use engine::session::trace::Section;
-
-    let _frame_trace = Section::begin(c"Impasto frame");
     let frame_started = Instant::now();
     let counters = runtime
         .telemetry
@@ -1429,6 +1430,7 @@ fn on_frame(
         }
     });
     if !runtime.frames.has_room() {
+        skipped_frame("queue_full");
         return Ok(end_frame(runtime, false, false));
     }
     let attempt = if runtime.try_surface || matches!(runtime.graphics, RasterPort::Local(_)) {
@@ -1447,11 +1449,39 @@ fn on_frame(
                     acks.signal(old);
                 }
             }
-            OpenedSurface::Waiting => return Ok(end_frame(runtime, false, false)),
+            OpenedSurface::Waiting => {
+                skipped_frame("surface_waiting");
+                return Ok(end_frame(runtime, false, false));
+            }
         }
     }
     if runtime.active_surface.is_none() {
+        skipped_frame("no_surface");
         return Ok(end_frame(runtime, false, false));
+    }
+    static NEXT_FRAME: AtomicU64 = AtomicU64::new(1);
+    runtime.frame_number = NEXT_FRAME.fetch_add(1, Ordering::Relaxed);
+    let capture_frame = schedule.and_then(|schedule| {
+        runtime
+            .telemetry
+            .as_ref()?
+            .track_frame(schedule.ui_start_ns)
+    });
+    let frame_span = tracing::info_span!(
+        target: "impasto::frame",
+        "frame",
+        frame = runtime.frame_number,
+        queue = "ui",
+        topology = runtime.topology.name(),
+        vsync_ms = time.vsync_ms,
+        target_ms = time.target_ms
+    );
+    let entered = frame_span.enter();
+    if from_vsync {
+        let vsync_us = ms_to_ns(time.mono_ms) / 1_000;
+        tracing::debug!(target: "impasto::frame", id = runtime.frame_number, vsync_us, "Impasto frame");
+    } else {
+        tracing::debug!(target: "impasto::frame", id = runtime.frame_number, "Impasto frame");
     }
     let frame = runtime.input.begin_frame();
     if let Some(metrics) = frame.metrics {
@@ -1461,7 +1491,7 @@ fn on_frame(
         }
     }
     let gesture_started = Instant::now();
-    let input_trace = Section::begin(c"Impasto input");
+    let input_trace = tracing::debug_span!(target: "impasto::frame", "input").entered();
     let mut leave = false;
     if let Some(session) = runtime.session.as_mut() {
         for event in frame.events {
@@ -1489,26 +1519,6 @@ fn on_frame(
     }
     let gesture_ms = gesture_started.elapsed().as_secs_f64() * 1000.0;
     drop(input_trace);
-    static NEXT_FRAME: AtomicU64 = AtomicU64::new(1);
-    runtime.frame_number = NEXT_FRAME.fetch_add(1, Ordering::Relaxed);
-    Section::event(|| {
-        if time.target_ms > time.vsync_ms {
-            format!(
-                "Impasto frame id={} vsync_us={:.0} target_us={:.0}",
-                runtime.frame_number,
-                time.vsync_ms * 1000.0,
-                time.target_ms * 1000.0,
-            )
-        } else {
-            format!("Impasto frame id={}", runtime.frame_number)
-        }
-    });
-    let frame_span = tracing::error_span!(
-        target: "impasto::render",
-        "frame",
-        frame = runtime.frame_number
-    );
-    let _entered = frame_span.enter();
     let session_started = Instant::now();
     let mut again;
     let mut reloads = Vec::new();
@@ -1521,7 +1531,7 @@ fn on_frame(
     if let Some(session) = runtime.session.as_mut() {
         session.set_counters(counters);
         let framed = {
-            let _trace = Section::begin(c"Impasto session");
+            let _trace = tracing::debug_span!(target: "impasto::frame", "session").entered();
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.frame(time)))
         };
         match framed {
@@ -1575,7 +1585,8 @@ fn on_frame(
                     crate::ime::publish_update(&update, &runtime.services);
                 }
                 if let Some(patch) = output.semantics.take() {
-                    let _trace = Section::begin(c"Impasto accessibility");
+                    let _trace =
+                        tracing::debug_span!(target: "impasto::frame", "accessibility").entered();
                     fold_semantics(&mut runtime.semantics, &patch);
                     if let Some(update) = runtime.semantics.as_ref() {
                         let services = runtime.services.borrow();
@@ -1614,15 +1625,17 @@ fn on_frame(
     if leave {
         runtime.services.borrow().request_exit();
     }
-    let submission = FrameSubmission {
+    let mut submission = FrameSubmission {
+        capture_frame,
+        sample_gpu: runtime
+            .telemetry
+            .as_ref()
+            .is_some_and(|hub| hub.collects_gpu()),
         revision: runtime.revision,
         number: runtime.frame_number,
         time,
         frame_started,
-        schedule: schedule.map(|schedule| ScheduleTiming {
-            ui_done_ns: mono_ns(),
-            ..schedule
-        }),
+        schedule,
         telemetry: runtime.telemetry.clone().filter(|_| counters),
         runtime_sample,
         session_ms: elapsed_ms(session_started),
@@ -1642,6 +1655,10 @@ fn on_frame(
         census,
         hub: runtime.hub.clone(),
     };
+    drop(entered);
+    if let Some(schedule) = submission.schedule.as_mut() {
+        schedule.ui_done_ns = mono_ns();
+    }
     match &mut runtime.graphics {
         RasterPort::Local(graphics) => {
             let completion = raster_frame(graphics, submission, false, || {
@@ -1666,6 +1683,7 @@ fn on_frame(
                 }));
             }));
             if !run {
+                skipped_frame("raster_closed");
                 return Err(BootError::Panicked);
             }
             Ok(end_frame(
@@ -1675,6 +1693,11 @@ fn on_frame(
             ))
         }
     }
+}
+
+fn skipped_frame(status: &'static str) {
+    tracing::event!(name: "frame_skipped", target: "impasto::frame", tracing::Level::DEBUG,
+        trace_event = true, queue = "ui", status);
 }
 
 fn finish_raster_frame(

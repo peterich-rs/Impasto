@@ -11,14 +11,28 @@ from pathlib import Path
 from perfetto.trace_processor import TraceProcessor
 
 FRAME_SQL = """
-SELECT f.ts, f.dur, f.track_id, f.id,
+WITH ui AS (
+  SELECT f.*,
+    (SELECT SUBSTR(m.name, 18, INSTR(SUBSTR(m.name, 18) || ' ', ' ') - 1)
+      FROM slice m WHERE m.parent_id = f.id AND m.name GLOB 'Impasto frame id=*' LIMIT 1) AS frame_number
+  FROM slice f WHERE f.name = 'Impasto frame' AND f.dur > 0
+), raster AS (
+  SELECT r.*,
+    (SELECT SUBSTR(m.name, 19)
+      FROM slice m WHERE m.parent_id = r.id AND m.name GLOB 'Impasto raster id=*' LIMIT 1) AS frame_number
+  FROM slice r WHERE r.name = 'Impasto raster' AND r.dur > 0
+)
+SELECT f.ts, f.dur, f.track_id, f.id, r.ts AS raster_ts, r.dur AS raster_dur,
+  r.track_id AS raster_track,
   (SELECT MIN(p.ts) FROM slice p WHERE p.parent_id = f.id AND p.name = 'Impasto input') AS input_ts,
-  EXISTS(SELECT 1 FROM slice p WHERE p.parent_id = f.id AND p.name = 'Impasto submit') AS install,
-  EXISTS(SELECT 1 FROM slice p WHERE p.parent_id = f.id AND p.name = 'Impasto present') AS present,
+  EXISTS(SELECT 1 FROM slice p WHERE p.parent_id = COALESCE(r.id, f.id) AND p.name = 'Impasto submit') AS install,
+  EXISTS(SELECT 1 FROM slice p WHERE p.parent_id = COALESCE(r.id, f.id) AND p.name = 'Impasto present') AS present,
   (SELECT MIN(q.ts) FROM slice q JOIN slice k ON q.parent_id = k.id
     WHERE q.name = 'queueBuffer' AND k.name IN ('QueuePresentKHR', 'eglSwapBuffers', 'Impasto GLES draw and swap')
-      AND q.track_id = f.track_id AND q.ts BETWEEN f.ts AND f.ts + f.dur) AS queued
-FROM slice f WHERE f.name = 'Impasto frame' AND f.dur > 0 ORDER BY f.ts
+      AND q.track_id = COALESCE(r.track_id, f.track_id)
+      AND q.ts BETWEEN COALESCE(r.ts, f.ts) AND COALESCE(r.ts + r.dur, f.ts + f.dur)) AS queued
+FROM ui f LEFT JOIN raster r ON f.frame_number = r.frame_number
+ORDER BY f.ts
 """
 CLOCK_SQL = """
 SELECT ts - clock_value AS offset FROM clock_snapshot
@@ -157,7 +171,10 @@ def load(path):
     if not frames:
         raise ValueError(f"{path} has no Impasto frames")
     begin = frames[0].ts
-    end = frames[-1].ts + frames[-1].dur
+    end = max(
+        max(frame.ts + frame.dur, (frame.raster_ts or 0) + (frame.raster_dur or 0))
+        for frame in frames
+    )
     offset = clocks[0].offset if clocks else None
     presented, refreshes = read_presentations(path.with_suffix(".presentation"), offset, begin, end)
     desired = [item[0] for item in presented]
@@ -170,12 +187,22 @@ def load(path):
     chart_markers = {}
     frame_events = defaultdict(dict)
     starts = [frame.ts for frame in frames]
+    raster_frames = sorted(
+        (frame for frame in frames if frame.raster_ts is not None),
+        key=lambda frame: frame.raster_ts,
+    )
+    raster_starts = [frame.raster_ts for frame in raster_frames]
 
     def containing_frame(marker):
         index = bisect.bisect_right(starts, marker.ts) - 1
         if index >= 0:
             frame = frames[index]
             if frame.track_id == marker.track_id and marker.ts < frame.ts + frame.dur:
+                return frame
+        index = bisect.bisect_right(raster_starts, marker.ts) - 1
+        if index >= 0:
+            frame = raster_frames[index]
+            if frame.raster_track == marker.track_id and marker.ts < frame.raster_ts + frame.raster_dur:
                 return frame
         return None
 

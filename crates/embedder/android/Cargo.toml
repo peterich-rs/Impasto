@@ -21,7 +21,7 @@ libc = "0.2"
 libloading = "0.8"
 jni = { version = "=0.22.4" }
 raster = { workspace = true }
-engine = { workspace = true, features = ["js", "android-trace"] }
+engine = { workspace = true, features = ["js"] }
 embedder = { workspace = true }
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 

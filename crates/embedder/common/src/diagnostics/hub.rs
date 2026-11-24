@@ -1,13 +1,15 @@
 //! Ring buffers with a monotonic revision per channel. Producers are the
 //! UI, raster and IO queues, external network callbacks and the log hook.
 
-use super::telemetry::{IoSpan, ScheduleTiming, TelemetryProfile, mono_ns};
+use super::telemetry::{ScheduleTiming, TelemetryProfile};
+use super::timeline::{CapturedSpan, SpanLoss, TimelineRecording, TraceDetail};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8};
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::time::Duration;
 
 /// One filtered log event copied for the devtools console.
 #[derive(Clone, Debug, PartialEq)]
@@ -298,8 +300,12 @@ pub const PREVIEW_CAP: usize = 2048;
 /// Process-local telemetry store, shared by the host and its consumers.
 pub struct TelemetryHub {
     profile: AtomicU8,
-    recording: AtomicBool,
-    capture: Mutex<Option<TraceCapture>>,
+    capture_phase: AtomicU8,
+    capture_gpu: AtomicBool,
+    capture: Mutex<Option<CaptureSlot>>,
+    capture_changed: Condvar,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    latest_capture: Mutex<Option<Arc<TraceCapture>>>,
     pub(crate) logs: Mutex<Ring<LogEntry>>,
     pub(crate) errors: Mutex<Ring<DiagError>>,
     pub(crate) network: Mutex<Ring<NetEntry>>,
@@ -329,8 +335,12 @@ impl TelemetryHub {
     pub fn new() -> Self {
         Self {
             profile: AtomicU8::new(TelemetryProfile::Counters as u8),
-            recording: AtomicBool::new(false),
+            capture_phase: AtomicU8::new(CAPTURE_IDLE),
+            capture_gpu: AtomicBool::new(false),
             capture: Mutex::new(None),
+            capture_changed: Condvar::new(),
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            latest_capture: Mutex::new(None),
             logs: Mutex::new(Ring::new(LOG_CAP)),
             errors: Mutex::new(Ring::new(ERROR_CAP)),
             network: Mutex::new(Ring::new(NET_CAP)),
@@ -423,39 +433,69 @@ impl TelemetryHub {
     }
 
     pub(crate) fn collects_frames(&self) -> bool {
-        self.profile.load(Ordering::Relaxed) != TelemetryProfile::Off as u8
-            || self.recording.load(Ordering::Acquire)
+        self.profile.load(Ordering::Relaxed) != TelemetryProfile::Off as u8 || self.recording()
     }
 
     pub(crate) fn collects_gpu(&self) -> bool {
         self.profile.load(Ordering::Relaxed) >= TelemetryProfile::GpuAndTimeline as u8
-            || self.recording.load(Ordering::Acquire)
+            || (self.recording() && self.capture_gpu.load(Ordering::Relaxed))
     }
 
     pub(crate) fn recording(&self) -> bool {
-        self.recording.load(Ordering::Acquire)
+        self.capture_phase.load(Ordering::Acquire) == CAPTURE_RECORDING
     }
 
-    pub(crate) fn start_trace(&self, path: PathBuf, overwrite: bool) -> Option<u64> {
-        self.begin_capture(Some((path, overwrite)))
+    pub(crate) fn start_trace(self: &Arc<Self>, path: PathBuf, overwrite: bool) -> Option<u64> {
+        let detail = match std::env::var("IMPASTO_TRACE_DETAIL").as_deref() {
+            Ok("detailed") => TraceDetail::Detailed,
+            _ => TraceDetail::Stages,
+        };
+        let gpu = std::env::var("IMPASTO_TRACE_GPU").as_deref() != Ok("0");
+        self.begin_capture(Some((path, overwrite)), CaptureOptions { detail, gpu })
     }
 
-    pub(super) fn begin_capture(&self, destination: Option<(PathBuf, bool)>) -> Option<u64> {
+    pub(super) fn begin_capture(
+        &self,
+        destination: Option<(PathBuf, bool)>,
+        options: CaptureOptions,
+    ) -> Option<u64> {
         static NEXT_TRACE: AtomicU64 = AtomicU64::new(1);
         let mut capture = lock(&self.capture);
         if capture.is_some() {
             return None;
         }
         let id = NEXT_TRACE.fetch_add(1, Ordering::Relaxed);
-        *capture = Some(TraceCapture {
-            id,
-            destination,
-            started_ns: mono_ns(),
-            frames: VecDeque::with_capacity(TRACE_FRAME_CAP),
-            io: VecDeque::with_capacity(TRACE_IO_CAP),
+        let timeline = TimelineRecording::begin(id, options.detail)?;
+        *capture = Some(CaptureSlot {
+            archive: TraceCapture {
+                id,
+                destination,
+                started_ns: timeline.started_ns,
+                ..TraceCapture::default()
+            },
+            timeline,
+            in_flight: 0,
         });
-        self.recording.store(true, Ordering::Release);
+        self.capture_gpu.store(options.gpu, Ordering::Relaxed);
+        self.capture_phase
+            .store(CAPTURE_RECORDING, Ordering::Release);
         Some(id)
+    }
+
+    pub(crate) fn track_frame(self: &Arc<Self>, started_ns: u64) -> Option<CaptureFrame> {
+        if !self.recording() {
+            return None;
+        }
+        let mut slot = lock(&self.capture);
+        let capture = slot.as_mut()?;
+        if started_ns < capture.archive.started_ns || !capture.timeline.id_active() {
+            return None;
+        }
+        capture.in_flight += 1;
+        Some(CaptureFrame {
+            hub: Arc::downgrade(self),
+            id: capture.archive.id,
+        })
     }
 
     pub(crate) fn finish_trace(&self, id: u64) -> std::io::Result<PathBuf> {
@@ -465,13 +505,61 @@ impl TelemetryHub {
         super::trace_export::write(&capture)
     }
 
-    pub(super) fn take_capture(&self, id: u64) -> Option<TraceCapture> {
+    pub(super) fn take_capture(&self, id: u64) -> Option<Arc<TraceCapture>> {
         let mut slot = lock(&self.capture);
-        if slot.as_ref().is_none_or(|capture| capture.id != id) {
-            return None;
+        let capture = slot.as_ref().filter(|capture| capture.archive.id == id)?;
+        let cutoff = capture.timeline.stop()?;
+        self.capture_phase
+            .store(CAPTURE_STOPPING, Ordering::Release);
+        (slot, _) = self
+            .capture_changed
+            .wait_timeout_while(slot, TRACE_DRAIN, |slot| {
+                slot.as_ref().is_some_and(|capture| {
+                    capture.in_flight > 0 || capture.archive.pending_gpu() > 0
+                })
+            })
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut capture = slot.take()?;
+        self.capture_phase.store(CAPTURE_IDLE, Ordering::Release);
+        drop(slot);
+        let (spans, loss) = capture.timeline.finish(cutoff);
+        capture.archive.spans = spans;
+        capture.archive.span_loss = loss;
+        capture.archive.stopped_ns = cutoff;
+        capture.archive.unfinished_frames = capture.in_flight;
+        let archive = Arc::new(capture.archive);
+        #[cfg(any(debug_assertions, feature = "devtools-server"))]
+        {
+            let mut latest = lock(&self.latest_capture);
+            if latest.as_ref().is_none_or(|old| old.id < id) {
+                *latest = Some(Arc::clone(&archive));
+            }
         }
-        self.recording.store(false, Ordering::Release);
-        slot.take()
+        capture.timeline.release();
+        Some(archive)
+    }
+
+    pub(crate) fn cancel_capture(&self, id: u64) {
+        let mut slot = lock(&self.capture);
+        if let Some(capture) = slot.as_ref().filter(|capture| capture.archive.id == id)
+            && capture.timeline.stop().is_some()
+        {
+            capture.timeline.release();
+            self.capture_phase.store(CAPTURE_IDLE, Ordering::Release);
+            slot.take();
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn latest_capture(&self) -> Option<Arc<TraceCapture>> {
+        lock(&self.latest_capture).clone()
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(super) fn capture_status(&self) -> Option<(u64, bool)> {
+        lock(&self.capture)
+            .as_ref()
+            .map(|capture| (capture.archive.id, capture.timeline.id_active()))
     }
 
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
@@ -490,15 +578,6 @@ impl TelemetryHub {
         (frames.seq, reset, samples)
     }
 
-    pub(crate) fn note_io(&self, span: IoSpan) {
-        if self.recording()
-            && let Some(capture) = lock(&self.capture).as_mut()
-            && span.start_ns >= capture.started_ns
-        {
-            push_bounded(&mut capture.io, TRACE_IO_CAP, span);
-        }
-    }
-
     pub fn push_frame(&self, mut sample: FrameSample) {
         {
             let mut frames = lock(&self.frames);
@@ -508,11 +587,15 @@ impl TelemetryHub {
                 sample.clone()
             });
         }
-        if self.recording()
+        if self.capture_phase.load(Ordering::Acquire) != CAPTURE_IDLE
             && let Some(capture) = lock(&self.capture).as_mut()
-            && sample.schedule.ui_start_ns >= capture.started_ns
+            && sample.schedule.ui_start_ns >= capture.archive.started_ns
+            && sample.schedule.ui_start_ns <= capture.timeline.cutoff()
         {
-            push_bounded(&mut capture.frames, TRACE_FRAME_CAP, sample);
+            if capture.archive.frames.len() == TRACE_FRAME_CAP {
+                capture.archive.overwritten_frames += 1;
+            }
+            push_bounded(&mut capture.archive.frames, TRACE_FRAME_CAP, sample);
         }
         self.bump();
     }
@@ -546,30 +629,81 @@ impl TelemetryHub {
             self.bump();
         }
         drop(frames);
-        if self.recording()
+        if self.capture_phase.load(Ordering::Acquire) != CAPTURE_IDLE
             && let Some(capture) = lock(&self.capture).as_mut()
             && let Some(frame) = capture
+                .archive
                 .frames
                 .iter_mut()
                 .rev()
                 .find(|frame| frame.number == update.sample.frame_id)
+            && patch(frame)
         {
-            patch(frame);
+            self.capture_changed.notify_all();
         }
     }
 }
 
 pub type DiagnosticsHub = TelemetryHub;
 
-const TRACE_FRAME_CAP: usize = 1024;
-const TRACE_IO_CAP: usize = 2048;
+const CAPTURE_IDLE: u8 = 0;
+const CAPTURE_RECORDING: u8 = 1;
+const CAPTURE_STOPPING: u8 = 2;
+#[cfg(test)]
+pub(super) static CAPTURE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-pub(super) struct TraceCapture {
+const TRACE_FRAME_CAP: usize = 1024;
+const TRACE_DRAIN: Duration = Duration::from_millis(80);
+
+pub(super) struct CaptureOptions {
+    pub detail: TraceDetail,
+    pub gpu: bool,
+}
+
+struct CaptureSlot {
+    archive: TraceCapture,
+    timeline: Arc<TimelineRecording>,
+    in_flight: usize,
+}
+
+/// Holds the capture open while an admitted frame is in the host pipeline.
+pub(crate) struct CaptureFrame {
+    hub: Weak<TelemetryHub>,
     id: u64,
+}
+
+impl Drop for CaptureFrame {
+    fn drop(&mut self) {
+        if let Some(hub) = self.hub.upgrade()
+            && let Some(capture) = lock(&hub.capture).as_mut()
+            && capture.archive.id == self.id
+        {
+            capture.in_flight -= 1;
+            hub.capture_changed.notify_all();
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct TraceCapture {
+    pub id: u64,
     pub destination: Option<(PathBuf, bool)>,
     pub started_ns: u64,
+    pub stopped_ns: u64,
+    pub overwritten_frames: u64,
+    pub unfinished_frames: usize,
+    pub span_loss: SpanLoss,
     pub frames: VecDeque<FrameSample>,
-    pub io: VecDeque<IoSpan>,
+    pub spans: VecDeque<CapturedSpan>,
+}
+
+impl TraceCapture {
+    pub fn pending_gpu(&self) -> usize {
+        self.frames
+            .iter()
+            .filter(|frame| frame.gpu.status == raster::GpuTimingStatus::Pending)
+            .count()
+    }
 }
 
 fn push_bounded<T>(queue: &mut VecDeque<T>, capacity: usize, value: T) {
@@ -593,6 +727,59 @@ mod tests {
             fields: Vec::new(),
             frame: None,
         }
+    }
+
+    #[test]
+    fn stopping_capture_accepts_gpu_readback_from_an_admitted_frame() {
+        let _serial = CAPTURE_TEST_LOCK.lock().unwrap();
+        let hub = Arc::new(TelemetryHub::new());
+        let id = hub
+            .begin_capture(
+                None,
+                CaptureOptions {
+                    detail: TraceDetail::Stages,
+                    gpu: true,
+                },
+            )
+            .unwrap();
+        let started = super::super::telemetry::mono_ns();
+        let submitted = hub.track_frame(started).unwrap();
+        let sample = raster::GpuSample {
+            frame_id: 90,
+            device_generation: 4,
+            status: raster::GpuTimingStatus::Pending,
+        };
+        hub.push_frame(FrameSample {
+            number: 90,
+            schedule: ScheduleTiming {
+                ui_start_ns: started,
+                ..ScheduleTiming::default()
+            },
+            gpu: sample,
+            ..FrameSample::default()
+        });
+        let stopping = Arc::clone(&hub);
+        let worker = std::thread::spawn(move || stopping.take_capture(id).unwrap());
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while hub.recording() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "capture did not begin stopping"
+            );
+            std::thread::yield_now();
+        }
+        hub.patch_gpu_timing(raster::GpuTimingUpdate {
+            sample: raster::GpuSample {
+                status: raster::GpuTimingStatus::Ready,
+                ..sample
+            },
+            timing: None,
+        });
+        drop(submitted);
+        let capture = worker.join().unwrap();
+        assert_eq!(capture.frames[0].gpu.status, raster::GpuTimingStatus::Ready);
+        assert_eq!(capture.pending_gpu(), 0);
+        assert_eq!(capture.unfinished_frames, 0);
     }
 
     #[test]

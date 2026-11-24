@@ -40,6 +40,14 @@ fn image_ready(runtime: &mut UiHost, ready: ImageReady) {
     let decoded =
         matches!(&ready, ImageReady::Decoded(handle) if uses_texture(runtime, &handle.source));
     runtime.graphics.post(move |graphics| {
+        let request_id = match &ready {
+            ImageReady::Decoded(handle) => handle.generation,
+            ImageReady::Missing { generation, .. } | ImageReady::Failed { generation, .. } => {
+                *generation
+            }
+        };
+        tracing::event!(name: "image_cache_apply", target: "impasto::io", tracing::Level::DEBUG,
+            trace_event = true, queue = "raster", request_id);
         if decoded {
             graphics.installed = None;
         }

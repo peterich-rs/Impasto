@@ -138,6 +138,7 @@ pub struct Tree {
     same_text_layouts: u32,
     /// First reason `needs_layout` became true since the last trace.
     layout_cause: LayoutCause,
+    pending_layout_cause: LayoutCause,
     text_reused: Cell<u32>,
     text_shaped: Cell<u32>,
     trace_text_probes: bool,

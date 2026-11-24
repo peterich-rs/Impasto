@@ -364,7 +364,7 @@ pub(super) fn mutate(host: &Host, mutation: Mutation) -> Result<u64, crate::Erro
 /// Commits pending style and layout work before reading a rectangle.
 pub(super) fn flush_for_read(host: &Host) -> bool {
     let inner = host.inner();
-    let _trace = crate::session::trace::Section::begin(c"Impasto synchronous geometry");
+    let _trace = tracing::debug_span!(target: "impasto::layout", "sync_geometry").entered();
     let notices = {
         let mut tree = inner.tree.borrow_mut();
         if tree.flush_styles().is_err() {

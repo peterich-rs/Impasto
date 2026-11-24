@@ -1067,7 +1067,8 @@ fn destroy_surface(host: &Host) {
         return;
     };
     if let Some(id) = window.id {
-        let _trace = engine::session::trace::Section::begin(c"Impasto Android surface destroy");
+        let _trace =
+            tracing::debug_span!(target: "impasto::shell", "android_surface_destroy").entered();
         host.link.begin_destroy(id);
         // SurfaceHolder permits the producer to be torn down once its callback returns.
         host.link.drop_wait().wait(id);

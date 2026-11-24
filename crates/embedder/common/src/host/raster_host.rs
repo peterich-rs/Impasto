@@ -11,8 +11,8 @@ use engine::session::FrameTime;
 use super::{ImageLoader, Installed, elapsed_ms, lock};
 use crate::TaskRunner;
 use crate::command::SurfaceId;
-use crate::diagnostics::TelemetryHub;
 use crate::diagnostics::telemetry::{ScheduleTiming, mono_ns, mono_ns_at};
+use crate::diagnostics::{CaptureFrame, TelemetryHub};
 use crate::error::BootError;
 use crate::images::{self, ImageCache};
 use crate::present::{self, AfterPresent, after_present};
@@ -108,6 +108,8 @@ impl RasterPort {
 }
 
 pub(super) struct FrameSubmission {
+    pub(super) capture_frame: Option<CaptureFrame>,
+    pub(super) sample_gpu: bool,
     pub(super) revision: u64,
     pub(super) number: u64,
     pub(super) time: FrameTime,
@@ -163,18 +165,18 @@ pub(super) struct RasterCompletion {
 pub(super) fn raster_frame(
     graphics: &mut RasterHost,
     mut submission: FrameSubmission,
-    separate: bool,
+    _separate: bool,
     before_present: impl FnOnce(),
 ) -> Result<RasterCompletion, BootError> {
-    let _trace = separate.then(|| {
-        let phase = engine::session::trace::Section::begin(c"Impasto raster frame");
-        engine::session::trace::Section::event(|| {
-            format!("Impasto raster frame id={}", submission.number)
-        });
-        phase
-    });
-    let span = tracing::error_span!(target: "impasto::render", "raster", frame = submission.number);
-    let _entered = span.enter();
+    let capture_frame = submission.capture_frame.take();
+    let span = tracing::info_span!(
+        target: "impasto::render",
+        "raster",
+        frame = submission.number,
+        queue = "raster"
+    );
+    let entered = span.enter();
+    tracing::debug!(target: "impasto::render", id = submission.number, "Impasto raster");
     if let Some(schedule) = submission.schedule.as_mut() {
         schedule.raster_start_ns = mono_ns();
     }
@@ -211,6 +213,8 @@ pub(super) fn raster_frame(
         }
         output.gpu_pending = graphics.raster.borrow().gpu_timings_pending();
     }
+    drop(entered);
+    drop(capture_frame);
     Ok(RasterCompletion {
         submission,
         output,
@@ -224,8 +228,6 @@ fn render_layers(
     submission: &mut FrameSubmission,
     before_present: impl FnOnce(),
 ) -> Result<RasterOutput, BootError> {
-    use engine::session::trace::Section;
-
     let FrameSubmission {
         scale,
         number,
@@ -279,16 +281,21 @@ fn render_layers(
         before_present();
     }
     match step {
-        FrameStep::Cancel | FrameStep::Skip { again: false } => {
-            let _trace = Section::begin(c"Impasto skip present");
-            return Ok(RasterOutput::finish(false));
-        }
-        FrameStep::Skip { again: true } => {
-            let _trace = Section::begin(c"Impasto skip present");
-            return Ok(RasterOutput::finish(true));
+        FrameStep::Cancel | FrameStep::Skip { .. } => {
+            let status = if matches!(step, FrameStep::Cancel) {
+                "cancelled"
+            } else {
+                "unchanged"
+            };
+            tracing::event!(name: "present_skipped", target: "impasto::render", tracing::Level::DEBUG,
+                trace_event = true, status);
+            return Ok(RasterOutput::finish(matches!(
+                step,
+                FrameStep::Skip { again: true }
+            )));
         }
         FrameStep::Submit => {
-            let _trace = Section::begin(c"Impasto submit");
+            let _trace = tracing::debug_span!(target: "impasto::render", "submit").entered();
             let bucket = images::scale_bucket(scale);
             if graphics
                 .installed
@@ -372,13 +379,9 @@ fn render_layers(
     }
     let started = Instant::now();
     let present_start_ns = submission.schedule.map(|_| mono_ns_at(started));
-    let gpu_frame = submission
-        .telemetry
-        .as_ref()
-        .filter(|hub| hub.collects_gpu())
-        .map(|_| number);
+    let gpu_frame = submission.sample_gpu.then_some(number);
     let presented = {
-        let _trace = Section::begin(c"Impasto present");
+        let _trace = tracing::debug_span!(target: "impasto::render", "present").entered();
         let mut raster = graphics.raster.borrow_mut();
         raster.begin_gpu_frame(gpu_frame);
         graphics
@@ -386,6 +389,13 @@ fn render_layers(
             .present(&mut raster, &submission.platform_views)
     };
     let present_done = Instant::now();
+    let status = if presented.is_ok() {
+        "returned"
+    } else {
+        "failed"
+    };
+    tracing::event!(name: "present_outcome", target: "impasto::render", tracing::Level::DEBUG,
+        trace_event = true, status);
     let present_ms = present_done.duration_since(started).as_secs_f64() * 1000.0;
     let work_ms = present_done.duration_since(frame_started).as_secs_f64() * 1000.0;
     let (mut stats, mut gpu) = {
@@ -427,16 +437,15 @@ fn render_layers(
             "render resources");
     }
     if matches!(step, FrameStep::Submit) {
-        Section::event(|| {
-            format!(
-                "Impasto pictures rebuilt={} reused={} layers={} prepare_us={} compose_us={}",
-                stats.picture_rebuilt,
-                stats.picture_reused,
-                stats.layer_count,
-                stats.picture_prepare.as_micros(),
-                stats.compose.as_micros(),
-            )
-        });
+        tracing::debug!(
+            target: "impasto::render",
+            rebuilt = stats.picture_rebuilt,
+            reused = stats.picture_reused,
+            layers = stats.layer_count,
+            prepare_us = u64::try_from(stats.picture_prepare.as_micros()).unwrap_or(u64::MAX),
+            compose_us = u64::try_from(stats.compose.as_micros()).unwrap_or(u64::MAX),
+            "pictures_submitted"
+        );
     }
     let shapes = submission.measure;
     let present_error = presented.as_ref().err().copied();

@@ -513,3 +513,79 @@ fn repeated_completion_and_cancellation_release_requests() {
     assert!(!weak.is_open());
     assert_eq!(runtime.counts(), RuntimeCounts::default());
 }
+
+#[test]
+fn user_timing_uses_the_runtime_clock_and_notifies_the_owner() {
+    use javascript::runtime::UserTimingKind;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let entries = Rc::new(RefCell::new(Vec::new()));
+    let observed = Rc::clone(&entries);
+    let mut runtime = javascript::runtime::Runtime::builder()
+        .user_timing(move |entry| {
+            observed
+                .borrow_mut()
+                .push((entry.name.to_owned(), entry.kind, entry.start, entry.end));
+        })
+        .build()
+        .unwrap();
+    runtime.eval_script(r#"
+        const details = { count: 2 };
+        const mark = performance.mark("first", {detail: details});
+        details.count = 99;
+        if (mark.detail.count !== 2 || mark.entryType !== "mark" || mark.startTime !== performance.now())
+            throw Error("mark contents");
+        const measure = performance.measure("work", "first");
+        if (measure.entryType !== "measure" || performance.getEntriesByName("work").length !== 1)
+            throw Error("measure contents");
+        const explicit = performance.measure("explicit", {start: 2, duration: 3});
+        if (explicit.startTime !== 2 || explicit.duration !== 3) throw Error("duration");
+        let rejected = false;
+        try { performance.measure("unknown", "missing"); } catch (error) {
+            rejected = error.name === "SyntaxError";
+        }
+        if (!rejected) throw Error("missing mark must fail");
+        performance.clearMarks();
+        if (performance.getEntriesByType("mark").length !== 0) throw Error("clear marks");
+    "#, "user-timing.js").unwrap();
+    let entries = entries.borrow();
+    assert_eq!(entries[0].1, UserTimingKind::Mark);
+    assert_eq!(entries[1].1, UserTimingKind::Measure);
+    assert_eq!(entries[1].2, entries[0].2);
+    assert!(entries[1].3 >= entries[1].2);
+}
+
+#[test]
+fn quickjs_interrupt_checkpoints_capture_bounded_module_stacks() {
+    let mut runtime = javascript::runtime::Runtime::builder()
+        .stack_sampling(|| true)
+        .build()
+        .unwrap();
+    runtime
+        .eval_script(
+            r#"
+        function outer() { inner(); }
+        function inner() {
+            const limit = Date.now() + 15;
+            while (Date.now() < limit) {}
+        }
+        outer();
+    "#,
+            "stack-sample.js",
+        )
+        .unwrap();
+    let samples = runtime.take_stack_samples();
+    assert!(samples.len() <= 32);
+    assert!(
+        samples.iter().any(|sample| sample
+            .modules
+            .iter()
+            .flatten()
+            .filter(|module| *module == "stack-sample.js")
+            .count()
+            >= 2),
+        "{samples:?}"
+    );
+    assert!(runtime.take_stack_samples().is_empty());
+}

@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use raster::ImagePixels;
@@ -134,7 +135,6 @@ pub fn source_log(source: &str) -> String {
 pub struct ImageCache {
     entries: HashMap<CacheKey, Entry>,
     pending: HashMap<CacheKey, u64>,
-    generation: u64,
     frame: u64,
     logged_missing: HashSet<CacheKey>,
     logged_over_budget: bool,
@@ -147,7 +147,6 @@ impl ImageCache {
         Self {
             entries: HashMap::new(),
             pending: HashMap::new(),
-            generation: 0,
             frame: 0,
             logged_missing: HashSet::new(),
             logged_over_budget: false,
@@ -301,8 +300,8 @@ impl ImageCache {
         }
         self.entries.remove(&key);
         self.logged_missing.remove(&key);
-        self.generation = self.generation.wrapping_add(1);
-        let generation = self.generation;
+        static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+        let generation = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
         self.pending.insert(key.clone(), generation);
         Some(ImageRequest {
             source: key.source,
@@ -461,7 +460,6 @@ impl ImageCache {
         self.pending.clear();
         self.logged_missing.clear();
         self.pinned.clear();
-        self.generation = self.generation.wrapping_add(1);
     }
 
     /// CPU-only entries can still be uploaded. GPU-only entries are requested
@@ -474,7 +472,7 @@ impl ImageCache {
         self.pending.clear();
     }
 
-    /// Drop cache entries for `source` and bump generation so an in-flight decode is stale.
+    /// Drop cache entries and retire in-flight tickets for `source`.
     ///
     /// The shell posts [`crate::Command::ReloadImage`], which also arms one frame.
     pub fn reload(&mut self, source: &str) {
@@ -482,11 +480,9 @@ impl ImageCache {
         self.pending.retain(|key, _| key.source.as_ref() != source);
         self.logged_missing
             .retain(|key| key.source.as_ref() != source);
-        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Cancel in-flight decodes for sources whose live count became 0.
-    /// Does not bump generation when `counts` is unused.
     pub fn sync_counts(&mut self, counts: &HashMap<Arc<str>, u32>) {
         let previous = std::mem::take(&mut self.counts);
         for (source, count) in counts {
@@ -504,18 +500,7 @@ impl ImageCache {
     }
 
     fn cancel_source(&mut self, source: &str) {
-        let mut cancelled = false;
-        self.pending.retain(|key, _| {
-            if key.source.as_ref() == source {
-                cancelled = true;
-                false
-            } else {
-                true
-            }
-        });
-        if cancelled {
-            self.generation = self.generation.wrapping_add(1);
-        }
+        self.pending.retain(|key, _| key.source.as_ref() != source);
     }
 }
 

@@ -69,6 +69,7 @@ impl Tree {
             local_layouts: 0,
             same_text_layouts: 0,
             layout_cause: super::LayoutCause::None,
+            pending_layout_cause: super::LayoutCause::None,
             text_reused: Cell::new(0),
             text_shaped: Cell::new(0),
             trace_text_probes: false,

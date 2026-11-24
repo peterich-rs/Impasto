@@ -3,24 +3,31 @@
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::Path;
+use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
+use futures_util::future::{self, Either};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
-use tokio::time::{sleep, timeout};
+use tokio::time::{interval, sleep, timeout};
 use tokio_tungstenite::{
     WebSocketStream, accept_hdr_async_with_config,
     tungstenite::{
-        Message,
+        Error as SocketError, Message,
         handshake::server::{ErrorResponse, Request, Response},
         protocol::WebSocketConfig,
     },
 };
 
 use super::TelemetryHub;
+use super::hub::{CaptureOptions, TraceCapture};
+use super::timeline::{FieldValue, TraceDetail};
+
+const FRAME_SPAN_LIMIT: usize = 512;
 
 const REQUEST_LIMIT: usize = 4096;
 const CLIENT_LIMIT: usize = 4;
@@ -176,130 +183,280 @@ async fn serve(stream: TcpStream, token: Arc<str>, hub: Arc<TelemetryHub>) {
         send(&mut socket, error(id, -32001, "authentication failed")).await;
         return;
     }
-    if !send(&mut socket, response(id, json!({ "version": VERSION }))).await {
+    if !send(&mut socket, response(id, json!({ "version": VERSION, "capabilities": ["frame_spans", "capture_status", "trace_detail", "capture_gpu"] }))).await {
         return;
     }
     let mut cursor = None;
+    let mut captures = JoinSet::new();
+    let mut updates = interval(UPDATE_INTERVAL);
+    enum Next {
+        Incoming(Option<Result<Message, SocketError>>),
+        Finished(Option<Value>),
+        Update,
+    }
     loop {
-        let message = match timeout(UPDATE_INTERVAL, socket.next()).await {
-            Ok(Some(Ok(Message::Text(message)))) => message,
-            Ok(Some(Ok(Message::Ping(data)))) => {
-                if timeout(IO_TIMEOUT, socket.send(Message::Pong(data)))
+        let next = {
+            let incoming = pin!(socket.next());
+            let capture = pin!(async {
+                if captures.is_empty() {
+                    future::pending().await
+                } else {
+                    captures.join_next().await.and_then(Result::ok)
+                }
+            });
+            let actions = pin!(future::select(incoming, capture));
+            match future::select(pin!(updates.tick()), actions).await {
+                Either::Left(_) => Next::Update,
+                Either::Right((Either::Left((message, _)), _)) => Next::Incoming(message),
+                Either::Right((Either::Right((result, _)), _)) => Next::Finished(result),
+            }
+        };
+        let result = match next {
+            Next::Incoming(Some(Ok(Message::Text(message)))) => {
+                request(&hub, &message, &mut cursor, &mut captures)
+            }
+            Next::Incoming(Some(Ok(Message::Ping(data)))) => {
+                if !timeout(IO_TIMEOUT, socket.send(Message::Pong(data)))
                     .await
                     .is_ok_and(|result| result.is_ok())
                 {
-                    continue;
-                }
-                break;
-            }
-            Ok(Some(Ok(Message::Pong(_)))) => continue,
-            Ok(_) => break,
-            Err(_) => {
-                if let Some(since) = cursor {
-                    let (revision, reset, samples) = hub.frame_updates(since);
-                    if revision != since {
-                        let update = json!({
-                            "jsonrpc": "2.0", "method": "frames",
-                            "params": frame_update(revision, reset, &samples),
-                        });
-                        if !send(&mut socket, update).await {
-                            break;
-                        }
-                        cursor = Some(revision);
-                    }
+                    break;
                 }
                 continue;
             }
+            Next::Incoming(Some(Ok(Message::Pong(_)))) => continue,
+            Next::Incoming(_) => break,
+            Next::Finished(result) => result,
+            Next::Update => cursor.and_then(|since| {
+                let (revision, reset, samples) = hub.frame_updates(since);
+                if revision == since {
+                    return None;
+                }
+                cursor = Some(revision);
+                Some(json!({
+                    "jsonrpc": "2.0", "method": "frames",
+                    "params": frame_update(revision, reset, &samples),
+                }))
+            }),
         };
-        let result = request(&hub, &message, &mut cursor).await;
-        if !send(&mut socket, result).await {
+        if let Some(result) = result
+            && !send(&mut socket, result).await
+        {
             break;
         }
     }
 }
 
-async fn request(hub: &TelemetryHub, message: &str, cursor: &mut Option<u64>) -> Value {
+fn request(
+    hub: &Arc<TelemetryHub>,
+    message: &str,
+    cursor: &mut Option<u64>,
+    captures: &mut JoinSet<Value>,
+) -> Option<Value> {
     let Ok(rpc) = serde_json::from_str::<Value>(message) else {
-        return error(None, -32700, "invalid JSON");
+        return Some(error(None, -32700, "invalid JSON"));
     };
     let id = rpc["id"].as_u64();
     if rpc["jsonrpc"] != "2.0" || id.is_none() || !rpc["method"].is_string() {
-        return error(id, -32600, "invalid request");
+        return Some(error(id, -32600, "invalid request"));
     }
-    match rpc["method"].as_str() {
+    let params = &rpc["params"];
+    Some(match rpc["method"].as_str() {
         Some("subscribe") => {
-            let since = rpc["params"]["since"].as_u64().unwrap_or_default();
+            let since = params["since"].as_u64().unwrap_or_default();
             let (revision, reset, samples) = hub.frame_updates(since);
             *cursor = Some(revision);
             response(id, frame_update(revision, reset, &samples))
         }
-        Some("capture") => {
-            let duration = rpc["params"]["duration_ms"].as_u64().unwrap_or(5000);
-            if !(100..=5000).contains(&duration) {
-                return error(id, -32602, "capture must run for 100 to 5000 milliseconds");
-            }
-            match capture(hub, Duration::from_millis(duration)).await {
-                Some(trace) => response(id, trace),
-                None => error(id, -32002, "trace capture unavailable"),
+        Some("capture_status") => {
+            let last = hub.latest_capture();
+            response(
+                id,
+                json!({
+                    "active": hub.capture_status().map(|(id, recording)| json!({
+                        "id": id, "state": if recording { "recording" } else { "stopping" },
+                    })),
+                    "latest": last.as_ref().map(|archive| capture_summary(archive)),
+                }),
+            )
+        }
+        Some("get_frame_spans") => {
+            match (params["capture_id"].as_u64(), params["frame_id"].as_u64()) {
+                (Some(capture_id), Some(frame_id)) => {
+                    if let Some(capture) = hub
+                        .latest_capture()
+                        .filter(|capture| capture.id == capture_id)
+                        && let Some(details) = frame_spans(&capture, frame_id)
+                    {
+                        response(id, details)
+                    } else {
+                        error(id, -32003, "frame is outside the retained capture")
+                    }
+                }
+                _ => error(id, -32602, "expected capture_id and frame_id"),
             }
         }
+        Some("capture") => {
+            let duration = params["duration_ms"].as_u64().unwrap_or(5000);
+            if !(100..=5000).contains(&duration) {
+                return Some(error(
+                    id,
+                    -32602,
+                    "capture must run for 100 to 5000 milliseconds",
+                ));
+            }
+            let detail = match params["detail"].as_str() {
+                Some("detailed") => TraceDetail::Detailed,
+                Some("stages") | None => TraceDetail::Stages,
+                _ => return Some(error(id, -32602, "detail must be stages or detailed")),
+            };
+            if !captures.is_empty() {
+                return Some(error(id, -32002, "trace capture busy"));
+            }
+            let gpu = match params["gpu"] {
+                Value::Bool(gpu) => gpu,
+                Value::Null => true,
+                _ => return Some(error(id, -32602, "gpu must be boolean")),
+            };
+            let Some(capture_id) = hub.begin_capture(None, CaptureOptions { detail, gpu }) else {
+                return Some(error(id, -32002, "trace capture busy"));
+            };
+            let capture = Capture {
+                hub: Arc::clone(hub),
+                id: capture_id,
+            };
+            captures.spawn(async move {
+                match capture.finish(Duration::from_millis(duration)).await {
+                    Some(trace) => response(id, trace),
+                    None => error(id, -32002, "trace capture unavailable"),
+                }
+            });
+            return None;
+        }
         _ => error(id, -32601, "unknown method"),
-    }
+    })
 }
 
-struct Capture<'a> {
-    hub: &'a TelemetryHub,
+fn capture_summary(capture: &TraceCapture) -> Value {
+    json!({
+        "id": capture.id,
+        "frame_ids": capture.frames.iter().map(|frame| frame.number).collect::<Vec<_>>(),
+        "frames": capture.frames.iter().map(|frame| {
+            frame_value(frame, FrameFields::Summary)
+        }).collect::<Vec<_>>(),
+        "overwritten_frames": capture.overwritten_frames,
+        "unfinished_frames": capture.unfinished_frames,
+        "overwritten_spans": capture.span_loss.overwritten,
+        "open_spans_at_stop": capture.span_loss.open_at_stop,
+        "producer_limit": capture.span_loss.producer_limit,
+        "pending_gpu": capture.pending_gpu(),
+    })
+}
+
+fn frame_spans(capture: &TraceCapture, frame_id: u64) -> Option<Value> {
+    let frame = capture
+        .frames
+        .iter()
+        .find(|frame| frame.number == frame_id)?;
+    let mut candidates: Vec<_> = capture
+        .spans
+        .iter()
+        .filter(|span| span.frame_id == Some(frame_id))
+        .collect();
+    candidates.sort_by_key(|span| (span.start_ns, span.id));
+    let omitted = candidates.len().saturating_sub(FRAME_SPAN_LIMIT);
+    let spans: Vec<_> = candidates.into_iter().take(FRAME_SPAN_LIMIT).map(|span| {
+        let fields: serde_json::Map<String, Value> = span.fields.iter().map(|(key, value)| {
+            let value = match value {
+                FieldValue::I64(value) => json!(value),
+                FieldValue::U64(value) => json!(value),
+                FieldValue::F64(value) => json!(value),
+                FieldValue::Bool(value) => json!(value),
+                FieldValue::Str(value) => json!(value),
+            };
+            ((*key).to_owned(), value)
+        }).collect();
+        json!({
+            "id": span.id, "parent_id": span.parent_id, "name": span.name,
+            "queue": span.queue.name(), "thread": span.thread_name.as_ref(), "target": span.target,
+            "offset_ns": span.start_ns.saturating_sub(frame.schedule.ui_start_ns),
+            "duration_ns": span.end_ns.saturating_sub(span.start_ns),
+            "instant": span.is_instant, "fields": fields,
+        })
+    }).collect();
+    Some(json!({
+        "capture_id": capture.id, "frame": frame_value(frame, FrameFields::Full),
+        "spans": spans, "omitted_spans": omitted,
+    }))
+}
+
+struct Capture {
+    hub: Arc<TelemetryHub>,
     id: u64,
 }
 
-impl Drop for Capture<'_> {
+impl Drop for Capture {
     fn drop(&mut self) {
-        self.hub.take_capture(self.id);
+        self.hub.cancel_capture(self.id);
     }
 }
 
-async fn capture(hub: &TelemetryHub, duration: Duration) -> Option<Value> {
-    let capture = Capture {
-        hub,
-        id: hub.begin_capture(None)?,
-    };
-    sleep(duration).await;
-    let archive = hub.take_capture(capture.id)?;
-    tokio::task::spawn_blocking(move || super::trace_export::document(&archive))
+impl Capture {
+    async fn finish(self, duration: Duration) -> Option<Value> {
+        sleep(duration).await;
+        tokio::task::spawn_blocking(move || {
+            let capture = self.hub.take_capture(self.id)?;
+            let bytes = super::trace_export::encode(&capture);
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let summary = capture_summary(&capture);
+            Some(json!({
+                "format": "pftrace", "encoding": "base64", "bytes": bytes.len(),
+                "data": encoded, "capture": summary,
+            }))
+        })
         .await
-        .ok()
+        .ok()?
+    }
 }
 
 fn frame_update(revision: u64, reset: bool, samples: &[super::FrameSample]) -> Value {
     let frames: Vec<_> = samples
         .iter()
-        .map(|frame| {
-            let render = frame.raster.render;
-            let passes = frame.gpu_timing.as_ref().map(|gpu| {
-                gpu.passes
-                    .iter()
-                    .map(|pass| {
-                        json!({
-                            "kind": format!("{:?}", pass.kind), "slice": pass.slice_index,
-                            "draws": pass.draws, "start_us": pass.start_us, "duration_us": pass.duration_us,
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            });
-            json!({
-                "id": frame.number, "revision": frame.changed_at, "budget_ms": frame.budget_ms,
-                "ui_ms": frame.schedule.ui_ms(), "raster_ms": frame.schedule.raster_ms(),
-                "queue_ms": frame.schedule.queue_ms(), "e2e_ms": frame.schedule.e2e_ms(),
-                "over_budget": frame.over_budget, "draws": render.draws, "passes": render.passes,
-                "gpu": {
-                    "state": frame.gpu.status.name(), "generation": frame.gpu.device_generation,
-                    "frame_span_us": frame.gpu_timing.as_ref().map(|gpu| gpu.frame_span_us),
-                    "passes_sum_us": frame.gpu_timing.as_ref().map(|gpu| gpu.passes_sum_us), "passes": passes,
-                },
-            })
-        })
+        .map(|frame| frame_value(frame, FrameFields::Full))
         .collect();
     json!({ "cursor": revision, "reset": reset, "frames": frames })
+}
+
+#[derive(Clone, Copy)]
+enum FrameFields {
+    Summary,
+    Full,
+}
+
+fn frame_value(frame: &super::FrameSample, fields: FrameFields) -> Value {
+    let render = frame.raster.render;
+    let passes = frame
+        .gpu_timing
+        .as_ref()
+        .filter(|_| matches!(fields, FrameFields::Full))
+        .map(|gpu| {
+            gpu.passes.iter().map(|pass| json!({
+            "kind": format!("{:?}", pass.kind), "slice": pass.slice_index,
+            "draws": pass.draws, "start_us": pass.start_us, "duration_us": pass.duration_us,
+        })).collect::<Vec<_>>()
+        });
+    json!({
+        "id": frame.number, "revision": frame.changed_at, "budget_ms": frame.budget_ms,
+        "ui_ms": frame.schedule.ui_ms(), "raster_ms": frame.schedule.raster_ms(),
+        "queue_ms": frame.schedule.queue_ms(), "e2e_ms": frame.schedule.e2e_ms(),
+        "topology": frame.schedule.topology.name(),
+        "over_budget": frame.over_budget, "draws": render.draws, "passes": render.passes,
+        "gpu": {
+            "state": frame.gpu.status.name(), "generation": frame.gpu.device_generation,
+            "frame_span_us": frame.gpu_timing.as_ref().map(|gpu| gpu.frame_span_us),
+            "passes_sum_us": frame.gpu_timing.as_ref().map(|gpu| gpu.passes_sum_us), "passes": passes,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -341,6 +498,7 @@ mod tests {
 
     #[test]
     fn subscription_backfills_gpu_and_exports_a_trace() {
+        let _capture = super::super::hub::CAPTURE_TEST_LOCK.lock().unwrap();
         crate::rt::rt().unwrap().handle().block_on(async {
             let hub = Arc::new(TelemetryHub::new());
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -406,8 +564,55 @@ mod tests {
             assert_eq!(update["params"]["frames"][0]["id"], 42);
             assert_eq!(update["params"]["frames"][0]["gpu"]["frame_span_us"], 20.0);
 
-            let reply = call(&mut client, 4, "capture", json!({ "duration_ms": 100 })).await;
-            assert_eq!(reply["result"]["traceEvents"].as_array().unwrap().len(), 5);
+            client.send(Message::Text(json!({
+                "jsonrpc": "2.0", "id": 4, "method": "capture", "params": { "duration_ms": 500 }
+            }).to_string().into())).await.unwrap();
+            let status = call(&mut client, 5, "capture_status", json!({})).await;
+            assert_eq!(status["result"]["active"]["state"], "recording");
+            hub.push_frame(super::super::FrameSample {
+                number: 43,
+                schedule: super::super::telemetry::ScheduleTiming {
+                    ui_start_ns: super::super::telemetry::mono_ns(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            let update = read(&mut client).await;
+            assert_eq!(update["method"], "frames");
+            assert_eq!(update["params"]["frames"][0]["id"], 43);
+            let reply = read(&mut client).await;
+            assert_eq!(reply["id"], 4);
+            let trace = &reply["result"];
+            assert_eq!(trace["format"], "pftrace");
+            assert_eq!(trace["capture"]["frame_ids"], json!([43]));
+            let detail = call(
+                &mut client,
+                6,
+                "get_frame_spans",
+                json!({
+                    "capture_id": trace["capture"]["id"], "frame_id": 43,
+                }),
+            )
+            .await;
+            assert_eq!(detail["result"]["frame"]["id"], 43);
+            assert_eq!(reply["result"]["encoding"], "base64");
+            let encoded = reply["result"]["data"].as_str().unwrap();
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap();
+            assert_eq!(
+                reply["result"]["bytes"].as_u64().unwrap(),
+                bytes.len() as u64
+            );
+            let decoded =
+                <super::super::pftrace::Trace as prost::Message>::decode(&bytes[..]).unwrap();
+            assert!(!decoded.packet.is_empty());
+            assert!(
+                decoded
+                    .packet
+                    .iter()
+                    .any(|packet| packet.track_descriptor.is_some())
+            );
             assert!(!hub.recording());
             for number in 43..400 {
                 hub.push_frame(super::super::FrameSample {

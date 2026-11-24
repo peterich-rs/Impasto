@@ -153,8 +153,11 @@ impl Compositor {
             "views": input::platform_views_value(views),
         })
         .to_string();
+        let serial = frame.serial;
         state.frame = Some(frame);
         drop(state);
+        tracing::event!(name: "uikit_publish", target: "impasto::render", tracing::Level::DEBUG,
+            trace_event = true, surface, serial);
         events.send(Event::ComposedFrame, surface, Some(&message));
         Ok(())
     }
@@ -224,8 +227,9 @@ pub unsafe extern "C" fn impasto_ios_compositor_finish(
         let first = submitted && !state.submitted;
         state.submitted |= submitted;
         drop(state);
-        let ack_us = frame.published_at.elapsed().as_micros();
-        engine::session::trace::Section::event(|| format!("UIKit ack: {ack_us} us ({submitted})"));
+        let ack_us = u64::try_from(frame.published_at.elapsed().as_micros()).unwrap_or(u64::MAX);
+        tracing::event!(name: "uikit_ack", target: "impasto::platform", tracing::Level::DEBUG,
+            trace_event = true, surface, serial, ack_us, submitted);
         drop(frame);
         if first {
             host.clock.events.send(Event::FrameSubmitted, surface, None);

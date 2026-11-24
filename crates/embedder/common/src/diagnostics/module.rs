@@ -466,7 +466,7 @@ fn start_trace(hub: &Arc<DiagnosticsHub>) -> Method {
     Method::sync("startTrace", move |_| {
         let at = super::telemetry::mono_ns();
         let path =
-            std::env::temp_dir().join(format!("impasto-trace-{}-{at}.json", std::process::id()));
+            std::env::temp_dir().join(format!("impasto-trace-{}-{at}.pftrace", std::process::id()));
         hub.start_trace(path, false)
             .map(num)
             .ok_or_else(|| "trace recording already active".into())

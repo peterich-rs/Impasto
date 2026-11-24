@@ -41,6 +41,12 @@ jobs:
           RUSTFLAGS: "-D warnings"
       - name: clippy
         run: cargo clippy --workspace --exclude embedder-macos --all-targets -- -D warnings
+      - name: Perfetto Trace Processor import
+        run: |
+          processor="$RUNNER_TEMP/trace_processor"
+          curl --fail --silent --show-error --location https://raw.githubusercontent.com/google/perfetto/1e9c61e9844affd7dccd3d42d9ea9f3a3d10cf6d/tools/trace_processor --output "$processor"
+          chmod +x "$processor"
+          IMPASTO_TRACE_PROCESSOR="$processor" tools/check-trace-export.sh
       - name: JavaScript feature boundaries
         run: python3 tools/check-javascript-boundaries.py
       - name: generated native module declarations

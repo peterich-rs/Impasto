@@ -12,11 +12,6 @@ mod modules;
 pub use input::*;
 pub use io::document_relative;
 pub use metrics::*;
-#[allow(
-    unsafe_code,
-    reason = "Android trace sections call Android NDK tracing APIs"
-)]
-pub mod trace;
 
 pub use javascript::host::{IoEvent, PluginResult, PluginValue, module_not_linked};
 pub use modules::{

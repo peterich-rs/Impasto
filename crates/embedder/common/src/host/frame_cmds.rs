@@ -21,6 +21,7 @@ fn wake(runtime: &mut UiHost, acks: &Acks) -> Result<bool, BootError> {
         return Ok(false);
     }
     if runtime.scheduler.busy() {
+        super::skipped_frame("wake_coalesced");
         arm(runtime);
         return Ok(false);
     }
@@ -28,6 +29,7 @@ fn wake(runtime: &mut UiHost, acks: &Acks) -> Result<bool, BootError> {
     // used to cancel that callback and leave the scheduler holding a token the
     // platform can never echo, so later `arm` calls freeze until resume.
     if runtime.scheduler.token_armed() {
+        super::skipped_frame("wake_coalesced");
         return Ok(false);
     }
     let Some(token) = runtime.scheduler.request() else {
@@ -57,6 +59,7 @@ fn frame(
     acks: &Acks,
 ) -> Result<bool, BootError> {
     if !runtime.scheduler.accept(token) {
+        super::skipped_frame("stale_vsync");
         return Ok(false);
     }
     on_frame(runtime, time, true, acks)

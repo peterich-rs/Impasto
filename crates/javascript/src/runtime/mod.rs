@@ -6,7 +6,7 @@ use std::fmt;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::host::{
     CreditPool, CreditUsage, Delivery, HostEvent, IoEvent, NativeResource, PluginValue, RequestKey,
@@ -31,7 +31,7 @@ pub(crate) mod scheduler;
 pub use builder::RuntimeBuilder;
 pub use catalog::{CatalogError, ModuleCatalog};
 pub use modules::NativeFactory;
-pub use quickjs::{ExtensionContext, JsDiagnostic, Saved, TrustedBytecode};
+pub use quickjs::{ExtensionContext, JsDiagnostic, Saved, StackSample, TrustedBytecode};
 pub use scheduler::{DrivePolicy, RuntimeLimits};
 
 /// QuickJS capabilities available to trusted native extensions.
@@ -183,6 +183,7 @@ struct State {
     ticket_peak: Cell<usize>,
     listener_peak: Cell<usize>,
     log: Log,
+    user_timing: Option<UserTimingHook>,
     inbox: Arc<Inbox>,
     local: RefCell<VecDeque<Delivery>>,
     resources: RefCell<Resources>,
@@ -190,6 +191,22 @@ struct State {
     ingress: Arc<CreditPool>,
     outbound: Arc<CreditPool>,
 }
+
+/// A User Timing entry expressed on the process monotonic clock.
+pub struct UserTiming<'a> {
+    pub name: &'a str,
+    pub kind: UserTimingKind,
+    pub start: Instant,
+    pub end: Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserTimingKind {
+    Mark,
+    Measure,
+}
+
+pub(crate) type UserTimingHook = Rc<dyn Fn(UserTiming<'_>)>;
 
 pub struct Runtime {
     state: Box<State>,
@@ -231,6 +248,11 @@ impl fmt::Debug for EnqueueError {
 impl Runtime {
     pub fn builder() -> RuntimeBuilder {
         RuntimeBuilder::new()
+    }
+
+    /// Drains module-stack samples from completed VM turns on the owner thread.
+    pub fn take_stack_samples(&self) -> Vec<StackSample> {
+        self.state.vm.take_stack_samples()
     }
 
     pub fn key(&self) -> RuntimeKey {
@@ -867,10 +889,14 @@ impl Runtime {
         unsafe {
             crate::standard::install_timers(ctx, scheduler, self.state.limits.timers, on_zero_delay)
         }?;
-        crate::standard::install_performance(ctx, move || {
-            // SAFETY: the context and these callbacks are owned by boxed state.
-            unsafe { &*state }.scheduler.now()
-        })
+        crate::standard::install_user_timing(
+            ctx,
+            move || {
+                // SAFETY: the context and these callbacks are owned by boxed state.
+                unsafe { &*state }.scheduler.now()
+            },
+            self.state.user_timing.clone(),
+        )
     }
 
     pub fn install_modules(

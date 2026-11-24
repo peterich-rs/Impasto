@@ -305,14 +305,59 @@ pub(in crate::js::player) enum ProgramKind<'a> {
     Trusted(javascript::runtime::TrustedBytecode<'a>),
 }
 
+fn trace_user_timing(entry: javascript::runtime::UserTiming<'_>) {
+    let now = std::time::Instant::now();
+    let Some(age) = now.checked_duration_since(entry.start) else {
+        return;
+    };
+    let Some(duration) = entry.end.checked_duration_since(entry.start) else {
+        return;
+    };
+    if entry.end > now {
+        return;
+    }
+    let age_ns = u64::try_from(age.as_nanos()).unwrap_or(u64::MAX);
+    match entry.kind {
+        javascript::runtime::UserTimingKind::Mark => tracing::event!(
+            name: "performance_mark", target: "impasto::user_timing", tracing::Level::DEBUG,
+            trace_event = true, queue = "ui", label = entry.name, age_ns, kind = "mark"
+        ),
+        javascript::runtime::UserTimingKind::Measure => {
+            let duration_ns = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+            tracing::event!(name: "performance_measure", target: "impasto::user_timing", tracing::Level::DEBUG,
+                trace_event = true, queue = "ui", label = entry.name, age_ns, duration_ns, kind = "measure");
+        }
+    }
+}
+
 pub(in crate::js::player) struct JsVm {
     pub(super) host: Rc<Host>,
 }
 impl JsVm {
+    pub(super) fn record_stack_samples(&self) {
+        for sample in self.host.runtime.take_stack_samples() {
+            let age_ns = u64::try_from(sample.at.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            let modules = sample
+                .modules
+                .iter()
+                .map(|module| module.as_deref().unwrap_or("[native or unnamed]"))
+                .collect::<Vec<_>>()
+                .join(" ← ");
+            tracing::event!(name: "js_module_stack_sample", target: "impasto::js_profile",
+                tracing::Level::TRACE, trace_event = true, queue = "ui", age_ns, modules = modules.as_str());
+        }
+    }
+
     pub(super) fn new(inner: Rc<Inner>, app_dir: Option<&str>) -> Result<Self, Error> {
         let log = Rc::clone(&inner.log);
-        let mut builder =
-            javascript::runtime::Runtime::builder().log(move |level, text| log(level, text));
+        let mut builder = javascript::runtime::Runtime::builder()
+            .log(move |level, text| log(level, text))
+            .user_timing(trace_user_timing)
+            .stack_sampling(|| {
+                tracing::event_enabled!(
+                    target: "impasto::js_profile", tracing::Level::TRACE, trace_event
+                )
+            });
         if let Some(clock) = &inner.config.transport_clock {
             builder = builder.transport_clock(Arc::clone(clock));
         }

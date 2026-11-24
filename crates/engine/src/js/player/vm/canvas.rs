@@ -748,7 +748,7 @@ fn commit(host: &Host, index: u32, generation: u32) {
     note_record(host, elapsed_ms(started));
     let started = std::time::Instant::now();
     host.inner().canvas.borrow_mut().stats.preparations += 1;
-    let prepare_trace = crate::session::trace::Section::begin(c"Impasto Canvas prepare");
+    let prepare_trace = tracing::debug_span!(target: "impasto::canvas", "canvas_prepare").entered();
     let prepared = host
         .inner()
         .tree
@@ -766,13 +766,18 @@ fn commit(host: &Host, index: u32, generation: u32) {
             match mutation::mutate(host, mutation) {
                 Ok(_) => {
                     note_redraw(host, ops, segments);
-                    crate::session::trace::Section::event(|| {
+                    let height = {
                         let tree = host.inner().tree.borrow();
-                        let height = tree
-                            .canvas_surface(NodeId::from_raw(node))
-                            .map_or(0.0, |surface| surface.height);
-                        format!("Impasto Canvas commit node={node} h={height} ops={ops}")
-                    });
+                        tree.canvas_surface(NodeId::from_raw(node))
+                            .map_or(0.0, |surface| surface.height)
+                    };
+                    tracing::debug!(
+                        target: "impasto::canvas",
+                        node,
+                        height,
+                        ops,
+                        "canvas_commit"
+                    );
                 }
                 Err(error) => queue_parts(
                     host,
@@ -885,7 +890,7 @@ fn paint_binding(host: &Host, ctx: &Ctx<'_>, index: u32, generation: u32) {
     host.retarget("canvas", node);
     let started = std::time::Instant::now();
     host.inner().canvas.borrow_mut().stats.callbacks += 1;
-    let draw_trace = crate::session::trace::Section::begin(c"Impasto Canvas draw");
+    let draw_trace = tracing::debug_span!(target: "impasto::canvas", "canvas_draw").entered();
     let called = (|| -> rquickjs::Result<Value<'_>> {
         let function = Function::from_value(draw.restore(ctx)?)?;
         let context = Class::instance(
