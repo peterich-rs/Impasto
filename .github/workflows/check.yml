@@ -66,10 +66,22 @@ jobs:
         run: node tools/check-native-module-types.mjs
       - name: standard library contract
         run: node tools/check-standard-library.mjs
-      - name: test
+      - name: Rust logic tests
+        id: logic-tests
+        run: cargo test --workspace --exclude embedder-macos --exclude raster
+      - name: Raster headless tests (software Vulkan)
+        if: ${{ !cancelled() && (steps.logic-tests.outcome == 'success' || steps.logic-tests.outcome == 'failure') }}
         env:
           IMPASTO_TEST_GPU: "1"
-        run: cargo test --workspace --exclude embedder-macos
+        run: |
+          shopt -s nullglob
+          icds=(/usr/share/vulkan/icd.d/lvp_icd*.json)
+          if [[ ${#icds[@]} -ne 1 ]]; then
+            echo "Expected one Mesa lavapipe Vulkan ICD" >&2
+            exit 1
+          fi
+          export VK_DRIVER_FILES="${icds[0]}"
+          cargo test --locked -p raster -- --test-threads=1
 
   rust-macos:
     name: cargo test (macos)

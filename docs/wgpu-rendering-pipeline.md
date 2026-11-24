@@ -12,7 +12,7 @@
 
 | 范围 | 入口 |
 |---|---|
-| 离屏像素与排版 | `IMPASTO_TEST_GPU=1 cargo test -p raster`。macOS 使用 Metal，Linux CI 安装软件 Vulkan ICD |
+| 离屏像素与排版 | `IMPASTO_TEST_GPU=1 cargo test -p raster`。macOS 使用 Metal，Linux CI 用 Mesa lavapipe 软件 Vulkan 逐个运行 Raster 用例 |
 | macOS Gallery | `just host`。设置 `IMPASTO_DUMP=/tmp/impasto.png` 可导出首帧的 straight-alpha sRGB RGBA |
 | iOS Gallery 和 UIKit 切片 | `just ios-sim-test --debug --udid <UDID>` 与 `just ios-composition-test <UDID>` |
 | Android APK 与设备 | `just android-build-check` 与 `just android-device-test`。在 Vulkan 驱动不兼容的模拟器上设置 `IMPASTO_TEST_VULKAN=false` |
