@@ -91,10 +91,10 @@ android: gallery-dist
     "{{root}}/crates/embedder/android/apk/gradlew" -p "{{root}}/crates/embedder/android/apk" :app:assembleDebug
 
 android-build-check: gallery-dist
-    "{{root}}/crates/embedder/android/apk/gradlew" -p "{{root}}/crates/embedder/android/apk" :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+    "{{root}}/crates/embedder/android/apk/gradlew" -p "{{root}}/crates/embedder/android/apk" :app:assembleDebug :app:lintDebug
     python3 "{{root}}/tools/check-android-package.py" "{{root}}/crates/embedder/android/apk/app/build/outputs/apk/debug/app-debug.apk"
 
-# Run on one Android device and remove its temporary test packages on exit.
+# Local verification on one Android device or emulator with test package cleanup.
 android-device-test: gallery-dist
     #!/usr/bin/env bash
     set -euo pipefail

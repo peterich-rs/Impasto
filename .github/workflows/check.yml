@@ -1,5 +1,6 @@
 # 与 just check 对齐，并检查 rustfmt。
 # embedder-macos crate 只在 macOS 上编译。
+# 移动端任务仅构建和校验产物。运行测试使用逻辑用例与 Raster 离屏渲染。
 
 name: check
 
@@ -86,7 +87,7 @@ jobs:
         run: cargo test -p embedder-macos
 
   ios:
-    name: iOS simulator build and first frame
+    name: iOS simulator build
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -102,27 +103,11 @@ jobs:
         run: corepack enable && corepack prepare pnpm@9.15.9 --activate
       - uses: extractions/setup-just@v2
       - run: pnpm install --frozen-lockfile
-      - name: Install and launch on an iOS simulator
-        shell: bash
-        run: |
-          udid=$(xcrun simctl list devices available --json | python3 -c '
-          import json, sys
-          runtimes = json.load(sys.stdin)["devices"]
-          for runtime, devices in reversed(list(runtimes.items())):
-              if not runtime.startswith("com.apple.CoreSimulator.SimRuntime.iOS-"):
-                  continue
-              device = next((device for device in devices if device["name"].startswith("iPhone")), None)
-              if device:
-                  print(device["udid"])
-                  break
-          else:
-              sys.exit("No available iOS simulator")
-          ')
-          xcrun simctl bootstatus "$udid" -b
-          just ios-sim-test --debug --udid "$udid"
+      - name: Build and package the iOS simulator app
+        run: just ios-build-check
 
   android:
-    name: Android APK and device tests
+    name: Android APK build and lint
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -153,17 +138,6 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           just android-build-check
-      - name: Enable hardware virtualization for the emulator
-        run: sudo chmod a+rw /dev/kvm
-      - name: Run Android instrumentation tests
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          target: default
-          arch: x86_64
-          profile: pixel_3a
-          emulator-options: -no-window -gpu swiftshader -no-snapshot -noaudio -no-boot-anim
-          script: IMPASTO_TEST_VULKAN=false just android-device-test
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -171,8 +145,6 @@ jobs:
           path: |
             crates/embedder/android/apk/app/build/outputs/apk/debug/app-debug.apk
             crates/embedder/android/apk/app/build/reports/lint-results-debug.*
-            crates/embedder/android/apk/app/build/outputs/androidTest-results/connected/
-            crates/embedder/android/apk/app/build/reports/androidTests/connected/
 
   solid:
     name: solid

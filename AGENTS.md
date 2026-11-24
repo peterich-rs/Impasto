@@ -58,9 +58,11 @@ workspace lint 见 [`Cargo.toml`](Cargo.toml) 与 [`clippy.toml`](clippy.toml)�
 - **注意 `just check` 未覆盖的 CI 项**：`cargo run --locked -p embedder --bin module-stubs -- --check`、`node tools/check-native-module-types.mjs`，以及 macOS 下的 `embedder-macos` 检查（`just clippy` 与 Linux CI 保持一致，默认排除 `embedder-macos`）
 - **光栅后端**：在可用 Metal 或 Vulkan/GLES 设备上运行 `cargo test -p raster`
 - **macOS 宿主**：`cargo clippy -p embedder-macos --all-targets -- -D warnings`、`cargo test -p embedder-macos`；界面或渲染改动用 `just host`（可设 `IMPASTO_DUMP=/tmp/frame.png` 导出首帧）验证画面
-- **iOS 宿主**：`just ios-build-check`、`just ios-sim-test --debug --udid <UDID>`（构建与嵌入细则见 [iOS README](crates/embedder/ios/README.md)）
-- **Android 宿主**：`just android-build-check`，连真机或模拟器时跑 `just android-device-test`
+- **iOS 宿主**：`just ios-build-check` 构建模拟器包。本地启动模拟器后，用 `just ios-sim-test --debug --udid <UDID>` 验证首帧。构建与嵌入细则见 [iOS README](crates/embedder/ios/README.md)
+- **Android 宿主**：`just android-build-check` 构建、lint 并校验 APK。本地连接真机或模拟器时，用 `just android-device-test` 运行仪器测试
 - **JS / Solid 包**：`just solid`、`just solid-app`
+
+CI 的运行测试限于逻辑用例与 `raster` 的 headless 渲染，移动端任务只构建和校验产物。真机和模拟器的运行结果及性能样本仅用于本地平台验收和调优。
 
 ## 工作约定
 

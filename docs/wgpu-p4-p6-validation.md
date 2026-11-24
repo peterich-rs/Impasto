@@ -119,15 +119,15 @@ Canvas 500 路径的总 Pass 为 28 → 15，离屏 Pass 均为 14，主目标 P
 
 同样运行 `--filter tests::p0::p3::bench_` 补测了三组既有场景。Canvas 路由的 GPU p95 为 770.67 → 612.04 µs。缓存模糊滚动的编码 p95 为 28.04 → 205.75 µs，轮间波动较大。P3 光标基准使用 Headless 目标，默认不会启用窗口的保留工作纹理，该场景的 GPU p95 为 251.25 → 248.58 µs。局部渲染的正确性单独由保留纹理的像素回归覆盖。
 
-## 首轮运行门禁
+## 首轮本地验证
 
-| 门禁 | 结果 |
+| 检查 | 结果 |
 | --- | --- |
 | `just check`、`cargo fmt --all -- --check`、`git diff --check` | 通过 |
 | 原生模块声明与类型一致性检查 | 通过 |
 | `IMPASTO_TEST_GPU=1 cargo test --locked -p raster --lib` | Metal，68 通过，12 个基准或诊断用例默认忽略 |
 | `cargo clippy --locked -p embedder-macos --all-targets -- -D warnings`、`cargo test -p embedder-macos` | 通过，20 个宿主测试 |
-| `just android-build-check` | Debug、instrumentation、lint 及 arm64/x86_64 APK 对齐检查通过 |
+| `just android-build-check` | Debug APK 构建、lint 及 arm64/x86_64 对齐检查通过 |
 | `just android-device-test` | Pixel 9 实机，25 个 instrumentation 测试 |
 | `just ios-sim-test --debug` | iPhone Air 模拟器，可见首帧与进程检查通过 |
 | Gallery 画面检查 | macOS Metal 与 Pixel 9 Vulkan 的材质页、Pixel 9 的虚拟列表 |
