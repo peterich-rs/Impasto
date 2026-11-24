@@ -23,6 +23,8 @@ function Main() {
 boot(Main);
 ```
 
+滚动 API 的选择、合成回退原因和验收入口见 [滚动与合成线程](docs/scroll-compositor.md)。
+
 ## 环境要求
 
 - Rust stable（见 [`rust-toolchain.toml`](rust-toolchain.toml)）

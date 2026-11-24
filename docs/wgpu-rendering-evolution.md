@@ -1,5 +1,7 @@
 # Impasto `wgpu` 渲染管线演进设计
 
+后续 P4–P6 的实现范围和 Gallery 配对测量见 [渲染优化与实测](wgpu-p4-p6-validation.md)。
+
 ## 1. 范围与架构约束
 
 本文以 `refactor/wgpu-rendering-pipeline` 的 `74fd743` 为实现基线，承接脱离 Impeller C API 后的性能、画质与能力演进。依赖基线为 `wgpu 30.0.2` 和 `parley 0.13.0`。继续采用方案三，普通 UI 由专用 Instanced RenderPass 绘制，文字使用 Glyph Atlas，Canvas 和大字号文字使用缓存的矢量网格。本文的阶段交付和性能数字均为待验证目标，基线以第 5 节的测量为准。P0 实现见 [P0 落地设计](wgpu-p0-optimization.md)，P1 的交付拆分与当前遥测口径见 [Telemetry 和 P1 计划](telemetry-and-p1-plan.md)。 [渲染管线架构](wgpu-rendering-pipeline.md) · [依赖锁文件](../Cargo.lock)

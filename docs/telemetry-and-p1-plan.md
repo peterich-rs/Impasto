@@ -1,5 +1,7 @@
 # 性能基线、遥测与 P1 渲染计划
 
+后续 P4–P6 的实现范围和 Gallery 配对测量见 [渲染优化与实测](wgpu-p4-p6-validation.md)。
+
 以 Impasto 的 P0 渲染流水线（`4462fb3`）为起点。Stage 0 提供测量能力，Stage 1–6 分别交付和验证。性能结论应附场景、视口、DPR、字体、能力档、设备与采样设置。
 
 ## 三层性能基线
@@ -238,7 +240,7 @@ Apple M4 Pro · Metal · Release · AsyncOnly。沿用同一轨迹、DPR 1、单
 
 ## P3.1 合成线程验收
 
-Split 和 PlatformUi 拓扑可以把下一次 vsync 交给 Raster。可托管通道包括二维平移、旋转、缩放、透明度和着色器标量，以及没有滚动订阅和虚拟窗口且处于滚动范围内的普通惯性滚动。存在原生 PlatformView 时由 UI 驱动动画。完成、触边、输入和到期的应用工作会交还 UI，并同步最后已呈现的采样值。使用 `IMPASTO_COMPOSITOR=0` 可在同一宿主切回逐帧 UI 驱动。 [调度实现](../crates/embedder/common/src/host/compositor_animation.rs) · [图层准入](../crates/engine/src/tree/compositor_motion.rs)
+Split 和 PlatformUi 拓扑可以把下一次 vsync 交给 Raster。可托管的滚动包括普通惯性、回弹、分页吸附和处于已挂载窗口内的虚拟列表。工况与 API 见 [滚动与合成线程](scroll-compositor.md)。存在原生 PlatformView 时由 UI 驱动动画。完成、触边、输入和到期的应用工作会交还 UI，并同步最后已呈现的采样值。使用 `IMPASTO_COMPOSITOR=0` 可在同一宿主切回逐帧 UI 驱动。 [调度实现](../crates/embedder/common/src/host/compositor_animation.rs) · [图层准入](../crates/engine/src/tree/compositor_motion.rs)
 
 Pixel 9 · Mali-G715 Vulkan · Release · Split。用 Gallery 的 `impasto://compositor-lab/transform` 和 `impasto://compositor-lab/scroll` 启动自运行场景，用 `tools/android-frame-trace.sh` 抓取系统 Perfetto。耗时是 `compositor_frame` 的 Raster 墙钟时间，帧间隔取相邻合成帧起点。
 
