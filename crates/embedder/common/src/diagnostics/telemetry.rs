@@ -37,6 +37,8 @@ pub struct ScheduleTiming {
     pub present_done_ns: u64,
     pub budget_ns: u64,
     pub missed_vsync: bool,
+    /// Raster received the display-link callback directly from the platform.
+    pub compositor_only: bool,
     pub topology: ThreadTopology,
 }
 

@@ -528,11 +528,9 @@ impl Builder {
         if capture.frames.is_empty() {
             return;
         }
-        if capture
-            .frames
-            .iter()
-            .any(|frame| !roots.contains_key(&(frame.number, Queue::Ui)))
-        {
+        if capture.frames.iter().any(|frame| {
+            !frame.schedule.compositor_only && !roots.contains_key(&(frame.number, Queue::Ui))
+        }) {
             self.push_named_track(FALLBACK_UI_TRACK_UUID, PROCESS_TRACK_UUID, "UI summary", 3);
         }
         if capture
@@ -625,7 +623,7 @@ impl Builder {
             let raster = roots.get(&(frame.number, Queue::Raster)).copied();
             let ui_track = ui.unwrap_or(FALLBACK_UI_TRACK_UUID);
             let raster_track = raster.unwrap_or(FALLBACK_RASTER_TRACK_UUID);
-            if ui.is_none() {
+            if ui.is_none() && !s.compositor_only {
                 let annotations = self.debug_annotations(&[
                     fields[0].clone(),
                     ("script_ms", FieldValue::F64(frame.script_ms)),
@@ -666,44 +664,45 @@ impl Builder {
                     &fields,
                     (Some(flow), None),
                 );
+                let (track, timestamp, name) = if s.compositor_only {
+                    (raster_track, s.raster_start_ns, "Raster started")
+                } else {
+                    (ui_track, s.ui_start_ns, "UI started")
+                };
+                self.instant(track, timestamp, name, &fields, (None, Some(flow)));
+            }
+            if !s.compositor_only {
+                let enqueue = self.flow();
+                let dequeue = self.flow();
                 self.instant(
                     ui_track,
-                    s.ui_start_ns,
-                    "UI started",
+                    s.ui_done_ns,
+                    "UI submitted",
                     &fields,
-                    (None, Some(flow)),
+                    (Some(enqueue), None),
+                );
+                let queue_fields = [
+                    fields[0].clone(),
+                    (
+                        "wait_ns",
+                        FieldValue::U64(s.raster_start_ns.saturating_sub(s.ui_done_ns)),
+                    ),
+                ];
+                self.instant(
+                    QUEUE_TRACK_UUID,
+                    s.ui_done_ns,
+                    "Submission queued",
+                    &queue_fields,
+                    (Some(dequeue), Some(enqueue)),
+                );
+                self.instant(
+                    raster_track,
+                    s.raster_start_ns,
+                    "Raster started",
+                    &fields,
+                    (None, Some(dequeue)),
                 );
             }
-            let enqueue = self.flow();
-            let dequeue = self.flow();
-            self.instant(
-                ui_track,
-                s.ui_done_ns,
-                "UI submitted",
-                &fields,
-                (Some(enqueue), None),
-            );
-            let queue_fields = [
-                fields[0].clone(),
-                (
-                    "wait_ns",
-                    FieldValue::U64(s.raster_start_ns.saturating_sub(s.ui_done_ns)),
-                ),
-            ];
-            self.instant(
-                QUEUE_TRACK_UUID,
-                s.ui_done_ns,
-                "Submission queued",
-                &queue_fields,
-                (Some(dequeue), Some(enqueue)),
-            );
-            self.instant(
-                raster_track,
-                s.raster_start_ns,
-                "Raster started",
-                &fields,
-                (None, Some(dequeue)),
-            );
             if s.present_start_ns.is_some() {
                 self.instant(
                     raster_track,

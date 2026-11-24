@@ -19,6 +19,7 @@ pub struct LayerId(pub u32);
 pub struct LayerTree {
     pub layers: Vec<Layer>,
     pub pictures: Vec<Arc<Picture>>,
+    pub tracks: Arc<[super::CompositorTrack]>,
     pub root: LayerId,
     pub epoch: u64,
 }
@@ -28,6 +29,7 @@ impl LayerTree {
         Self {
             layers: Vec::new(),
             pictures: Vec::new(),
+            tracks: Arc::default(),
             root: LayerId(0),
             epoch: 0,
         }

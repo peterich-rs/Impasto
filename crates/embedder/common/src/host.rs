@@ -27,6 +27,7 @@ use crate::{
 };
 
 mod cache_cmds;
+mod compositor_animation;
 mod frame_cmds;
 mod raster_host;
 use raster_host::{FrameSubmission, RasterCompletion, RasterHost, RasterPort, raster_frame};
@@ -867,6 +868,11 @@ pub(crate) struct UiHost {
     input: Input,
     scheduler: FrameScheduler,
     vsync: Arc<dyn crate::Vsync>,
+    last_vsync: Option<FrameTime>,
+    compositor_mode: Arc<compositor_animation::CompositorMode>,
+    compositor_enabled: bool,
+    compositor_epoch: u64,
+    compositor_generation: Option<u64>,
     point_scale: f32,
     frame_number: u64,
     topology: ThreadTopology,
@@ -920,6 +926,7 @@ impl UiHost {
 
 impl Drop for UiHost {
     fn drop(&mut self) {
+        self.compositor_mode.cancel();
         self.vsync.cancel();
         self.session.take();
         self.graphics.retire();
@@ -1031,6 +1038,7 @@ fn open_ui(
         Ok::<_, BootError>(RasterHost {
             raster: Rc::new(RefCell::new(raster)),
             telemetry: raster_telemetry,
+            gpu_poll_pending: false,
             surfaces: SurfaceHost::new(),
             open_surface,
             external_textures: Default::default(),
@@ -1148,9 +1156,22 @@ fn open_ui(
     };
     let inbox_frames = Arc::clone(inbox);
     let frame_clock = Arc::clone(&runners.ui);
+    let compositor_mode = Arc::new(compositor_animation::CompositorMode::default());
+    let route_mode = Arc::clone(&compositor_mode);
+    let render_queue = match &graphics {
+        RasterPort::Remote(slot) => Some(Arc::downgrade(slot)),
+        RasterPort::Local(_) => None,
+    };
+    let frame_vsync = Arc::downgrade(&boot.vsync);
     boot.vsync.bind(Arc::new(move |token, mut time| {
         time.mono_ms = frame_clock.monotonic_ms();
-        inbox_frames.post(Command::Frame { token, time });
+        if compositor_animation::CompositorMode::is_raster_token(token) {
+            if let Some(slot) = render_queue.as_ref().and_then(std::sync::Weak::upgrade) {
+                route_mode.route(&slot, &inbox_frames, &frame_vsync, token, time);
+            }
+        } else {
+            inbox_frames.post(Command::Frame { token, time });
+        }
     }));
     let busy = Arc::new(crate::watchdog::Busy::new());
     crate::watchdog::spawn("ui", Arc::downgrade(&busy), boot.devtools.clone());
@@ -1171,6 +1192,11 @@ fn open_ui(
         input: Input::new(),
         scheduler: FrameScheduler::new(),
         vsync: boot.vsync,
+        last_vsync: None,
+        compositor_mode,
+        compositor_enabled: split && std::env::var("IMPASTO_COMPOSITOR").as_deref() != Ok("0"),
+        compositor_epoch: 0,
+        compositor_generation: None,
         point_scale: 1.0,
         frame_number: 0,
         topology: boot.thread_topology,
@@ -1295,7 +1321,25 @@ fn fault_followup(diag_armed: bool, faults: &[engine::session::ScriptFault]) -> 
 
 fn on_command(runtime: &mut UiHost, command: Command, acks: &Acks) -> Result<bool, BootError> {
     runtime.busy.enter(crate::command::command_tag(&command));
+    let wake_command = matches!(command, Command::Wake);
+    let interrupted = if matches!(
+        command,
+        Command::Frame { .. } | Command::CommitCompositorState { .. }
+    ) {
+        false
+    } else {
+        runtime.compositor_epoch = runtime.compositor_epoch.wrapping_add(1);
+        compositor_animation::stop(runtime, None)?
+    };
     let result = dispatch_command(runtime, command, acks);
+    if interrupted
+        && !wake_command
+        && matches!(result, Ok(false))
+        && !runtime.input.is_paused()
+        && !runtime.scheduler.token_armed()
+    {
+        arm(runtime);
+    }
     runtime.busy.leave();
     result
 }
@@ -1338,6 +1382,26 @@ fn dispatch_command(
         | Command::ReloadImage(_)) => cache_cmds::handle(runtime, command),
         command @ (Command::Wake | Command::Frame { .. }) => {
             frame_cmds::handle(runtime, command, acks)
+        }
+        Command::CommitCompositorState {
+            generation,
+            snapshot,
+            time,
+        } => {
+            if runtime.compositor_generation != Some(generation) {
+                return Ok(false);
+            }
+            compositor_animation::stop(runtime, snapshot)?;
+            if runtime.input.is_paused() {
+                return Ok(false);
+            }
+            if let Some(time) = time
+                && let Some(token) = runtime.scheduler.request()
+            {
+                return frame_cmds::handle(runtime, Command::Frame { token, time }, acks);
+            }
+            arm(runtime);
+            Ok(false)
         }
     }
 }
@@ -1401,6 +1465,11 @@ fn ms_to_ns(ms: f64) -> u64 {
         .unwrap_or_default()
 }
 
+fn next_frame_number() -> u64 {
+    static NEXT_FRAME: AtomicU64 = AtomicU64::new(1);
+    NEXT_FRAME.fetch_add(1, Ordering::Relaxed)
+}
+
 fn on_frame(
     runtime: &mut UiHost,
     time: FrameTime,
@@ -1459,8 +1528,7 @@ fn on_frame(
         skipped_frame("no_surface");
         return Ok(end_frame(runtime, false, false));
     }
-    static NEXT_FRAME: AtomicU64 = AtomicU64::new(1);
-    runtime.frame_number = NEXT_FRAME.fetch_add(1, Ordering::Relaxed);
+    runtime.frame_number = next_frame_number();
     let capture_frame = schedule.and_then(|schedule| {
         runtime
             .telemetry
@@ -1528,6 +1596,7 @@ fn on_frame(
     let mut phases = None;
     let mut runtime_sample = None;
     let mut layout_report = None;
+    let mut compositor_epoch = None;
     if let Some(session) = runtime.session.as_mut() {
         session.set_counters(counters);
         let framed = {
@@ -1557,9 +1626,6 @@ fn on_frame(
                         );
                     }
                 }
-                if plan.arm_extra {
-                    arm(runtime);
-                }
                 if let Some(tree) = output.layers.take() {
                     if runtime.dump_list {
                         tracing::debug!(
@@ -1571,6 +1637,25 @@ fn on_frame(
                     runtime.image_requirements = tree.image_requirements().into();
                     runtime.latest = Some(tree);
                     layers_changed = true;
+                }
+                if runtime.compositor_enabled
+                    && !frame.paused
+                    && !leave
+                    && faults.is_empty()
+                    && let Some(tree) = runtime.latest.as_ref()
+                    && again
+                    && !tree.tracks.is_empty()
+                {
+                    if session.compositor_ready(&tree.tracks) {
+                        compositor_epoch = Some(runtime.compositor_epoch);
+                    } else {
+                        tracing::event!(name: "compositor_deferred", target: "impasto::compositor",
+                            tracing::Level::DEBUG, trace_event = true, queue = "ui",
+                            status = "ui_work", active_tracks = tree.tracks.len());
+                    }
+                }
+                if plan.arm_extra {
+                    arm(runtime);
                 }
                 if let Some(text) = output.clipboard.take()
                     && let Err(message) = runtime.registry.call(
@@ -1654,6 +1739,8 @@ fn on_frame(
         reloads,
         census,
         hub: runtime.hub.clone(),
+        compositor_epoch,
+        compositor_frame: false,
     };
     drop(entered);
     if let Some(schedule) = submission.schedule.as_mut() {
@@ -1688,7 +1775,9 @@ fn on_frame(
             }
             Ok(end_frame(
                 runtime,
-                again && runtime.frames.in_flight < FramePipeline::DEPTH,
+                compositor_epoch.is_none()
+                    && again
+                    && runtime.frames.in_flight < FramePipeline::DEPTH,
                 false,
             ))
         }
@@ -1706,13 +1795,15 @@ fn finish_raster_frame(
     split: bool,
 ) -> Result<bool, BootError> {
     let waiting = split && runtime.frames.complete();
+    let completion = completion?;
+    let activated = split && compositor_animation::activate(runtime, &completion);
     let RasterCompletion {
         submission,
         output,
         surface,
         retry_at,
-    } = completion?;
-    if output.gpu_pending {
+    } = completion;
+    if !activated && output.gpu_pending {
         schedule_gpu_poll(runtime);
     }
     if let Some(timing) = output.timing {
@@ -1768,6 +1859,9 @@ fn finish_raster_frame(
                 runtime.published_views = Some((surface, views));
             }
         }
+    }
+    if activated {
+        return Ok(false);
     }
     let again = (waiting || output.again) && !runtime.input.is_paused();
     if split {
@@ -2009,6 +2103,10 @@ fn schedule_gpu_poll(runtime: &mut UiHost) {
     let Some(hub) = runtime.telemetry.clone() else {
         return;
     };
+    if let RasterPort::Remote(slot) = &runtime.graphics {
+        raster_host::schedule_gpu_poll(Arc::clone(slot), hub);
+        return;
+    }
     if runtime.gpu_poll {
         return;
     }
@@ -2247,6 +2345,7 @@ mod tests {
                 graphics: RasterPort::Local(Box::new(RasterHost {
                     raster,
                     telemetry: None,
+                    gpu_poll_pending: false,
                     load_image: Arc::new(|_| true),
                     busy: Arc::new(crate::watchdog::Busy::new()),
                     frame_retry_at: None,
@@ -2282,6 +2381,11 @@ mod tests {
                 input: crate::input::Input::new(),
                 scheduler: FrameScheduler::new(),
                 vsync: Arc::clone(&vsync) as Arc<dyn Vsync>,
+                last_vsync: None,
+                compositor_mode: Arc::default(),
+                compositor_enabled: false,
+                compositor_epoch: 0,
+                compositor_generation: None,
                 point_scale: 1.0,
                 frame_number: 0,
                 topology: crate::ThreadTopology::SharedRender,

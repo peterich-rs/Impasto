@@ -412,8 +412,9 @@ export function installMockHost(): MockHost {
     onWheel: (node: number, fn: (dx: number, dy: number) => void) => {
       calls.push({ name: "onWheel", args: [node, typeof fn] });
     },
-    onFrame: (fn: (targetMs: number, intervalMs: number) => void) => {
-      frames.push(fn);
+    onFrame: (fn?: (targetMs: number, intervalMs: number) => void) => {
+      frames.length = 0;
+      if (fn) frames.push(fn);
       calls.push({ name: "onFrame", args: [typeof fn] });
       return frames.length;
     },

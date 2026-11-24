@@ -30,6 +30,8 @@ impl Tree {
             focused: None,
             scopes: Vec::new(),
             motions: Vec::new(),
+            next_motion_id: 0,
+            motion_layers: HashMap::new(),
             motion_ends: Vec::new(),
             clock_ms: 0.0,
             applying_motion: false,

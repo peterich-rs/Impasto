@@ -25,6 +25,13 @@ pub(super) struct SubtreeLayers {
     pub(super) picture_owners: bool,
 }
 
+impl SubtreeLayers {
+    pub(super) fn requires_clip_layer(self) -> bool {
+        // A descendant's picture boundary closes the current command run.
+        self.effects || self.picture_owners
+    }
+}
+
 /// Axis-aligned clip in paint space. `None` means a transform ancestor made culling unsafe.
 #[derive(Clone, Copy)]
 pub(super) struct PaintClip {
@@ -197,6 +204,7 @@ impl Tree {
         self.layer_tail.clear();
         self.layer_top = None;
         self.finished_owners.clear();
+        self.begin_compositor_record();
         let root = self.root.ok_or(Error::NoRoot)?;
         let _ = self.sweep_subtree_layers(root);
         self.run = RunState {
@@ -212,6 +220,7 @@ impl Tree {
         self.emit_node(root, &mut out, self.origin, (0.0, 0.0), None);
         self.close_run();
         self.leave_owner(root);
+        self.finish_compositor_record();
         self.runs.retain(|id, _| self.finished_owners.contains(id));
         debug_assert!(self.layer_stack.is_empty());
         self.layers.epoch = self.layer_epoch;
@@ -631,7 +640,8 @@ impl Tree {
         let corners = node.corners();
         let alpha = node.alpha();
         let scroll = node.scroll_paint();
-        let geom = node.transform().placed(abs.0, abs.1, w, h);
+        let base = node.transform();
+        let geom = base.placed(abs.0, abs.1, w, h);
         let transform = (
             geom.translate_x,
             geom.translate_y,
@@ -656,8 +666,9 @@ impl Tree {
             mirror: at,
             segment: if saved.owner == id { saved.segment } else { 0 },
         });
+        let track_base = base.compositor_transform(abs.0, abs.1, w, h);
         let mut pushed = self.push_effect_layers(
-            effect, abs, w, h, radius, alpha, scroll, transform, blur, backdrop, blend,
+            id, effect, abs, w, h, alpha, transform, blur, backdrop, blend, track_base,
         );
         if pushes_matrix {
             out.push(Command::PushTransform {
@@ -729,7 +740,8 @@ impl Tree {
         if let Some(scope) = self.run.scope.as_mut() {
             scope.mirror = (abs.0 - next_scroll.0, abs.1 - next_scroll.1);
         }
-        pushed += self.push_content_layers(effect, [abs.0, abs.1, w, h], radius, corners, scroll);
+        pushed +=
+            self.push_content_layers(id, effect, [abs.0, abs.1, w, h], radius, corners, scroll);
         let hosts_rows = self
             .subtree_layers
             .get(&id)
@@ -822,7 +834,7 @@ impl Tree {
                     .unwrap_or_default();
                 let renders = self
                     .get(current)
-                    .is_some_and(|node| node.renders_layers(stored.effects));
+                    .is_some_and(|node| node.renders_layers(stored.requires_clip_layer()));
                 any |= stored.effects || renders;
                 owners |= stored.picture_owners || self.is_picture_owner(current);
                 child = self.get(current).and_then(|node| node.next);
@@ -1148,9 +1160,10 @@ impl Tree {
         self.layer_tail[slot] = Some(child);
     }
 
-    fn push_layer(&mut self, kind: crate::scene::LayerKind) {
+    fn push_layer(&mut self, kind: crate::scene::LayerKind) -> crate::scene::LayerId {
         let id = self.note_layer(kind);
         self.layer_stack.push(id);
+        id
     }
 
     fn pop_layers(&mut self, count: usize) {
@@ -1165,17 +1178,17 @@ impl Tree {
     )]
     fn push_effect_layers(
         &mut self,
+        node: NodeId,
         effect: PaintKind,
         abs: (f32, f32),
         w: f32,
         h: f32,
-        _radius: f32,
         alpha: Option<u8>,
-        _scroll: (f32, f32),
         transform: (f32, f32, f32, f32, f32),
         blur: Option<f32>,
         backdrop: Option<f32>,
         blend: Option<crate::scene::BlendMode>,
+        track_base: crate::scene::CompositorTransform,
     ) -> usize {
         let mut pushed = 0;
         let identity = transform.0 == 0.0
@@ -1184,23 +1197,29 @@ impl Tree {
             && transform.3 == 1.0
             && transform.4 == 1.0;
         if !identity && effect.transform {
-            self.push_layer(crate::scene::LayerKind::Transform {
+            let layer = self.push_layer(crate::scene::LayerKind::Transform {
                 translate_x: transform.0,
                 translate_y: transform.1,
                 rotate_rad: transform.2,
                 scale_x: transform.3,
                 scale_y: transform.4,
             });
+            if let Some(links) = self.motion_layers.get_mut(&node) {
+                links.transform = Some((layer, track_base));
+            }
             pushed += 1;
         }
         if effect.opacity && alpha.unwrap_or(255) != 255 {
-            self.push_layer(crate::scene::LayerKind::Opacity {
+            let layer = self.push_layer(crate::scene::LayerKind::Opacity {
                 alpha: alpha.unwrap_or(255),
                 x: abs.0,
                 y: abs.1,
                 w,
                 h,
             });
+            if let Some(links) = self.motion_layers.get_mut(&node) {
+                links.opacity = Some(layer);
+            }
             pushed += 1;
         }
         if let Some(mode) = blend {
@@ -1238,6 +1257,7 @@ impl Tree {
 
     fn push_content_layers(
         &mut self,
+        node: NodeId,
         effect: PaintKind,
         bounds: [f32; 4],
         radius: f32,
@@ -1254,10 +1274,13 @@ impl Tree {
                 h,
                 corner_radius: 0.0,
             });
-            self.push_layer(crate::scene::LayerKind::Offset {
+            let layer = self.push_layer(crate::scene::LayerKind::Offset {
                 x: -scroll.0,
                 y: -scroll.1,
             });
+            if let Some(links) = self.motion_layers.get_mut(&node) {
+                links.scroll = Some(layer);
+            }
             pushed += 2;
         } else if effect.clip {
             self.push_layer(if let Some(corners) = corners {

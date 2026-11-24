@@ -163,6 +163,12 @@ pub trait Session {
     fn window_display(&mut self, _display: WindowDisplay) {}
     fn pointer(&mut self, event: crate::input::PointerEvent);
     fn frame(&mut self, time: FrameTime) -> FrameOutput;
+    /// Whether the current tree may animate on the compositor while UI is idle.
+    fn compositor_ready(&self, _tracks: &[crate::scene::CompositorTrack]) -> bool {
+        false
+    }
+    /// Restores the properties of the last compositor frame before input dispatch.
+    fn commit_compositor_state(&mut self, _snapshot: &crate::scene::CompositorSnapshot) {}
     /// True after the session asked for another frame, until the host takes it.
     ///
     /// Animation asks again inside each `frame`. One request schedules one frame.

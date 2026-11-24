@@ -475,21 +475,29 @@ impl TransformGeom {
     /// node's border box, whose top-left is `(x, y)` in the same space as the
     /// commands being transformed.
     pub(super) fn placed(&self, x: f32, y: f32, w: f32, h: f32) -> Self {
-        let Some((ox, oy, rx, ry)) = self.pivot else {
-            return *self;
-        };
-        let px = x + ox + rx * w;
-        let py = y + oy + ry * h;
-        let (sin, cos) = self.rotate_rad.sin_cos();
-        let scaled_x = px * self.scale_x;
-        let scaled_y = py * self.scale_y;
-        let rotated_x = scaled_x * cos - scaled_y * sin;
-        let rotated_y = scaled_x * sin + scaled_y * cos;
+        let [translate_x, translate_y] = self.compositor_transform(x, y, w, h).placed();
         Self {
-            translate_x: self.translate_x + px - rotated_x,
-            translate_y: self.translate_y + py - rotated_y,
+            translate_x,
+            translate_y,
             pivot: None,
             ..*self
+        }
+    }
+
+    pub(super) fn compositor_transform(
+        &self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> crate::scene::CompositorTransform {
+        crate::scene::CompositorTransform {
+            translate: [self.translate_x, self.translate_y],
+            rotate_rad: self.rotate_rad,
+            scale: [self.scale_x, self.scale_y],
+            pivot: self
+                .pivot
+                .map(|(ox, oy, rx, ry)| [x + ox + rx * w, y + oy + ry * h]),
         }
     }
 

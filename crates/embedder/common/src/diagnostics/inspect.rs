@@ -340,6 +340,7 @@ mod tests {
             pictures: vec![picture(7, 3)],
             root: LayerId(0),
             epoch: 1,
+            ..LayerTree::empty()
         };
         let dir =
             std::env::temp_dir().join(format!("impasto-inspect-layers-{}", std::process::id()));

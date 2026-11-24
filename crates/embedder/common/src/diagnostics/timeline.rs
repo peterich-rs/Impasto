@@ -380,6 +380,9 @@ fn allowed(key: &str) -> bool {
             | "generation"
             | "components"
             | "computed"
+            | "active_tracks"
+            | "ui_woken"
+            | "missed_vsync"
     )
 }
 

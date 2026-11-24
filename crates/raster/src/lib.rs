@@ -8,6 +8,7 @@ mod batch;
 mod color;
 mod compiler;
 mod compositor;
+mod compositor_tracks;
 mod compute_blur;
 mod fonts;
 mod gpu;

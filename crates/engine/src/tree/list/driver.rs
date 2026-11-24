@@ -122,6 +122,10 @@ pub struct ListDriver {
 }
 
 impl ListDriver {
+    pub(super) fn viewport(&self) -> Option<NodeId> {
+        self.nodes.viewport
+    }
+
     pub fn new(overscan: i32, estimate: f32) -> Self {
         Self {
             overscan: overscan.max(0) as usize,

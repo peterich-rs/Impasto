@@ -11,6 +11,11 @@ pub trait Simulation {
     /// Value the motion approaches. A spring returns its target. Friction returns
     /// `x0 + v0 * tau`.
     fn terminal(&self) -> f32;
+
+    /// Copies the pure parameters when another queue can sample this simulation.
+    fn compositor_curve(&self) -> Option<MotionCurve> {
+        None
+    }
 }
 
 /// Exponential decay. `tau_ms` is the time constant. Scroll uses 500.
@@ -48,6 +53,15 @@ impl Simulation for Friction {
         }
         self.x0 + self.v0 * self.tau_ms
     }
+
+    fn compositor_curve(&self) -> Option<MotionCurve> {
+        (self.x0.is_finite() && self.v0.is_finite() && self.tau_ms.is_finite() && self.tau_ms > 0.0)
+            .then_some(MotionCurve::Friction {
+                x0: self.x0,
+                v0: self.v0,
+                tau_ms: self.tau_ms,
+            })
+    }
 }
 
 /// Damped spring toward `target`. `stiffness` is per second squared and
@@ -79,7 +93,26 @@ impl Simulation for Spring {
     fn terminal(&self) -> f32 {
         self.target
     }
+
+    fn compositor_curve(&self) -> Option<MotionCurve> {
+        ([self.x0, self.v0, self.target, self.stiffness, self.damping]
+            .into_iter()
+            .all(f32::is_finite)
+            && self.stiffness > 0.0
+            && self.damping > 0.0)
+            .then_some(MotionCurve::Spring {
+                x0: self.x0,
+                v0: self.v0,
+                target: self.target,
+                stiffness: self.stiffness,
+                damping: self.damping,
+            })
+    }
 }
+
+mod curve;
+
+pub use curve::{Easing, MotionCurve, Tween};
 
 fn spring_sample(spring: &Spring, t_ms: f32) -> (f32, f32) {
     if !(spring.stiffness.is_finite() && spring.stiffness > 0.0) || !t_ms.is_finite() || t_ms <= 0.0

@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use engine::session::FrameTime;
 
@@ -24,6 +24,7 @@ use crate::timing::FrameTiming;
 pub(super) struct RasterHost {
     pub(super) raster: Rc<RefCell<raster::Rasterizer>>,
     pub(super) telemetry: Option<Arc<TelemetryHub>>,
+    pub(super) gpu_poll_pending: bool,
     pub(super) external_textures: HashMap<String, images::ExternalFrame>,
     pub(super) external_gpu: HashMap<String, images::ExternalGpuFrame>,
     pub(super) surfaces: SurfaceHost,
@@ -133,6 +134,8 @@ pub(super) struct FrameSubmission {
     pub(super) reloads: Vec<String>,
     pub(super) census: Option<Arc<engine::semantics::ImageCensus>>,
     pub(super) hub: Option<Arc<crate::diagnostics::DiagnosticsHub>>,
+    pub(super) compositor_epoch: Option<u64>,
+    pub(super) compositor_frame: bool,
 }
 
 pub(super) struct RasterOutput {
@@ -252,7 +255,9 @@ fn render_layers(
     let Some(tree) = submission.tree.as_ref() else {
         return Ok(RasterOutput::finish(again));
     };
-    if !images_ready(graphics, &submission.requirements, scale, census.as_deref()) {
+    if !submission.compositor_frame
+        && !images_ready(graphics, &submission.requirements, scale, census.as_deref())
+    {
         return Ok(RasterOutput::finish(reloaded));
     }
     graphics.needs_present |= submission.placements_changed;
@@ -395,7 +400,8 @@ fn render_layers(
         "failed"
     };
     tracing::event!(name: "present_outcome", target: "impasto::render", tracing::Level::DEBUG,
-        trace_event = true, status);
+        trace_event = true, status,
+        reason = presented.as_ref().err().map(ToString::to_string).as_deref());
     let present_ms = present_done.duration_since(started).as_secs_f64() * 1000.0;
     let work_ms = present_done.duration_since(frame_started).as_secs_f64() * 1000.0;
     let (mut stats, mut gpu) = {
@@ -403,7 +409,7 @@ fn render_layers(
         (raster.submit_stats(), raster.gpu_sample())
     };
     if !matches!(step, FrameStep::Submit) {
-        stats.picture_prepare = std::time::Duration::ZERO;
+        stats.picture_prepare = Duration::ZERO;
         stats.picture_rebuilt = 0;
         stats.picture_reused = 0;
         stats.image_upload = raster::ImageUploadStats::default();
@@ -411,10 +417,10 @@ fn render_layers(
     if !presented.is_ok() && stats.submit_done.is_none() {
         stats.render = raster::RenderStats::default();
         stats.atlas = raster::AtlasStats::default();
-        stats.compose = std::time::Duration::ZERO;
-        stats.encode = std::time::Duration::ZERO;
-        stats.flush = std::time::Duration::ZERO;
-        stats.queue_submit = std::time::Duration::ZERO;
+        stats.compose = Duration::ZERO;
+        stats.encode = Duration::ZERO;
+        stats.flush = Duration::ZERO;
+        stats.queue_submit = Duration::ZERO;
     }
     if presented.is_ok() {
         tracing::trace!(target: "impasto::render::gpu",
@@ -584,6 +590,42 @@ pub(super) fn drain_gpu(graphics: &mut RasterHost, hub: &TelemetryHub) -> bool {
         }
     }
     raster.gpu_timings_pending()
+}
+
+/// Profiling must complete on Raster in split hosts, including between UI turns.
+pub(super) fn schedule_gpu_poll(slot: Arc<RunnerSlot<RasterHost>>, hub: Arc<TelemetryHub>) {
+    Arc::clone(slot.runner()).post(Box::new(move || {
+        let armed = slot.with(|graphics| {
+            if graphics.gpu_poll_pending || !graphics.raster.borrow().gpu_timings_pending() {
+                return false;
+            }
+            graphics.gpu_poll_pending = true;
+            true
+        });
+        if armed == Some(true) {
+            poll_gpu_later(&slot, hub);
+        }
+    }));
+}
+
+fn poll_gpu_later(slot: &Arc<RunnerSlot<RasterHost>>, hub: Arc<TelemetryHub>) {
+    let pending_slot = Arc::downgrade(slot);
+    slot.runner().post_delayed(
+        Duration::from_millis(8),
+        Box::new(move || {
+            let Some(slot) = pending_slot.upgrade() else {
+                return;
+            };
+            let pending = slot.with(|graphics| {
+                let pending = drain_gpu(graphics, &hub);
+                graphics.gpu_poll_pending = pending;
+                pending
+            });
+            if pending == Some(true) {
+                poll_gpu_later(&slot, hub);
+            }
+        }),
+    );
 }
 
 fn recover_device(graphics: &mut RasterHost) -> Result<(), BootError> {

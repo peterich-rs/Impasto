@@ -55,6 +55,13 @@ impl DriverSet {
         self.pending
     }
 
+    /// Whether motion of this viewport can change which virtualized rows are mounted.
+    pub fn observes_scroll_window(&self, node: NodeId) -> bool {
+        self.lists
+            .iter()
+            .any(|entry| entry.value.as_ref().and_then(ListDriver::viewport) == Some(node))
+    }
+
     pub fn take_events(&mut self) -> Vec<DriverEvent> {
         std::mem::take(&mut self.events)
     }

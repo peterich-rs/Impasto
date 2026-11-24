@@ -38,6 +38,14 @@ fn dispatch_kind(kind: i32) -> &'static str {
 }
 
 impl Host {
+    pub(in crate::js::player) fn observes_frame(&self) -> bool {
+        self.refs.borrow().hooks.contains_key("frame")
+    }
+
+    pub(in crate::js::player) fn observes_scroll(&self, id: u64) -> bool {
+        self.refs.borrow().callbacks.contains_key(&(id, 15))
+    }
+
     pub(in crate::js::player) fn dispatch(
         &self,
         id: u64,

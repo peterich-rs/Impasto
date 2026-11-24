@@ -2,6 +2,7 @@
 
 mod canvas;
 mod command;
+mod compositor_track;
 mod corners;
 pub mod image;
 mod layer;
@@ -13,6 +14,11 @@ pub use canvas::{
     CanvasList, CanvasOp, CanvasPaint, CanvasPath, CanvasTextOp, FillRule, PathVerb,
 };
 pub use command::{Command, DrawList, RectPaint};
+pub(crate) use compositor_track::compositor_alpha;
+pub use compositor_track::{
+    CompositorProp, CompositorSample, CompositorSnapshot, CompositorTrack, CompositorTrackId,
+    CompositorTransform, apply_compositor_samples,
+};
 pub use corners::CornerShape;
 pub use image::ContentMode;
 pub use layer::{Layer, LayerId, LayerKind, LayerTree, Picture, PictureId, SELF_PICTURE};

@@ -237,6 +237,7 @@ pub struct JsSession {
     exit: Cell<bool>,
     /// A failed frame must not schedule another frame by itself.
     suppress_demand: Cell<bool>,
+    ui_work_pending: bool,
     reload_frame: Option<crate::session::FrameOutput>,
     record_failing: bool,
     record_frames: u32,
@@ -303,6 +304,7 @@ impl JsSession {
             script_error: RefCell::new(None),
             exit: Cell::new(false),
             suppress_demand: Cell::new(false),
+            ui_work_pending: false,
             reload_frame: None,
             record_failing: false,
             record_frames: 0,
@@ -1229,23 +1231,52 @@ impl Session for JsSession {
     fn wants_frame(&mut self) -> bool {
         let inner = &self.inner;
         if self.suppress_demand.replace(false) {
+            self.ui_work_pending = true;
             inner.settings_frame.set(false);
             self.vm.host.take_wants_frame();
             return false;
         }
-        let visual = {
+        let (visual, motion) = {
             let tree = inner.tree.borrow();
-            tree.needs_layout()
-                || tree.needs_paint()
-                || tree.motion_active()
-                || tree.pending_long_press()
+            (
+                tree.needs_layout() || tree.needs_paint() || tree.pending_long_press(),
+                tree.motion_active(),
+            )
         };
         let jobs = self.vm.host.jobs_pending();
         let soon = self.vm.host.needs_frame();
         let explicit = inner.settings_frame.take() || self.vm.host.take_wants_frame();
         let driver = inner.driver_frame.get();
         let paints = !inner.paused.get() && inner.graph.has_paints();
-        explicit || visual || jobs || soon || driver || paints
+        self.ui_work_pending = explicit || visual || jobs || soon || driver || paints;
+        self.ui_work_pending || motion
+    }
+
+    fn compositor_ready(&self, tracks: &[crate::scene::CompositorTrack]) -> bool {
+        let inner = &self.inner;
+        let host = &self.vm.host;
+        if self.ui_work_pending
+            || inner.paused.get()
+            || host.observes_frame()
+            || inner.graph.has_updates()
+            || (!tracks.is_empty() && inner.canvas.borrow().observes_visibility())
+        {
+            return false;
+        }
+        let drivers = inner.drivers.borrow();
+        inner
+            .tree
+            .borrow()
+            .compositor_motions_ready(tracks, |node| {
+                host.observes_scroll(node.to_raw()) || drivers.observes_scroll_window(node)
+            })
+    }
+
+    fn commit_compositor_state(&mut self, snapshot: &crate::scene::CompositorSnapshot) {
+        self.inner
+            .tree
+            .borrow_mut()
+            .commit_compositor_state(snapshot);
     }
 
     fn lifecycle(&mut self, event: crate::session::Lifecycle) {

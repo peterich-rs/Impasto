@@ -450,6 +450,7 @@ fn frame_value(frame: &super::FrameSample, fields: FrameFields) -> Value {
         "ui_ms": frame.schedule.ui_ms(), "raster_ms": frame.schedule.raster_ms(),
         "queue_ms": frame.schedule.queue_ms(), "e2e_ms": frame.schedule.e2e_ms(),
         "topology": frame.schedule.topology.name(),
+        "compositor_only": frame.schedule.compositor_only,
         "over_budget": frame.over_budget, "draws": render.draws, "passes": render.passes,
         "gpu": {
             "state": frame.gpu.status.name(), "generation": frame.gpu.device_generation,

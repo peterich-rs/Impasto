@@ -1,5 +1,6 @@
 //! Render tree. Layout goes through Taffy. Positions, hits, and gestures stay on this type.
 
+mod compositor_motion;
 mod debug;
 mod geometry;
 mod gesture;
@@ -33,6 +34,7 @@ pub use text::TextLink;
 use crate::motion::{AnimProp, Simulation};
 
 struct ActiveMotion {
+    id: crate::scene::CompositorTrackId,
     started_ms: f64,
     node: NodeId,
     prop: AnimProp,
@@ -76,6 +78,8 @@ pub struct Tree {
     scopes: Vec<NodeId>,
     /// Scroll friction and property springs, sampled by [`Tree::tick_motions`].
     motions: Vec<ActiveMotion>,
+    next_motion_id: u64,
+    motion_layers: HashMap<NodeId, compositor_motion::MotionLayers>,
     /// Motions that finished since the last [`Tree::take_motion_ends`].
     motion_ends: Vec<(NodeId, AnimProp)>,
     /// Last timestamp passed to [`Tree::tick_motions`]. New motions start here.

@@ -39,6 +39,7 @@ fn tree(generation: u64, commands: impl Into<Arc<[Command]>>) -> LayerTree {
         ))],
         root: LayerId(0),
         epoch: generation,
+        ..LayerTree::empty()
     }
 }
 

@@ -277,7 +277,7 @@ impl Tree {
         let subtree = self
             .subtree_layers
             .get(&id)
-            .is_some_and(|value| value.effects);
+            .is_some_and(|value| value.requires_clip_layer());
         self.get(id)
             .is_some_and(|node| node.renders_layers(subtree))
     }
@@ -1055,7 +1055,9 @@ impl Tree {
     ) {
         self.motions
             .retain(|motion| !(motion.node == id && motion.prop == prop));
+        self.next_motion_id = self.next_motion_id.wrapping_add(1);
         self.motions.push(super::ActiveMotion {
+            id: crate::scene::CompositorTrackId(self.next_motion_id),
             started_ms: self.clock_ms,
             node: id,
             prop,
@@ -1093,12 +1095,7 @@ impl Tree {
                 self.apply_scroll(id, prop, value)
             }
             crate::motion::AnimProp::Opacity => {
-                let rounded = value.round().clamp(0.0, 255.0);
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "rounded and clamped into the closed range 0..=255"
-                )]
-                let alpha = rounded as u8;
+                let alpha = crate::scene::compositor_alpha(value);
                 self.write_alpha(id, alpha).is_err()
             }
             crate::motion::AnimProp::TranslateX

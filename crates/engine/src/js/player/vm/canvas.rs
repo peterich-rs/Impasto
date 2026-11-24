@@ -958,6 +958,14 @@ fn paint_binding(host: &Host, ctx: &Ctx<'_>, index: u32, generation: u32) {
     }
 }
 
+impl CanvasSession {
+    pub(in crate::js::player) fn observes_visibility(&self) -> bool {
+        self.bindings
+            .iter()
+            .any(|binding| binding.alive && binding.defer_when_offscreen)
+    }
+}
+
 /// Run invalidated screen canvases. A paused or closed session does not paint.
 pub(in crate::js::player) fn paint(host: &Host) -> CanvasStats {
     if host.paused.get() || host.inner().paused.get() || host.inner().canvas.borrow().closed {

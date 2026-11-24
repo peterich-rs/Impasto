@@ -32,13 +32,14 @@ pub struct DisplayLink {
     unsafe_code,
     reason = "Send follows the CVDisplayLink contract on the next line"
 )]
-// SAFETY: Start and Stop run on the render thread, and Stop waits until the callback returns.
+// SAFETY: The host hands start/request ownership between UI and raster serial queues.
+// CoreVideo's stop waits until the callback has returned before the context is released.
 unsafe impl Send for DisplayLink {}
 #[allow(
     unsafe_code,
     reason = "Sync follows the CVDisplayLink contract on the next line"
 )]
-// SAFETY: The shell starts and stops the link on the render thread; the callback only locks the mutex.
+// SAFETY: The host serializes start and stop, and all callback state is protected by mutexes.
 unsafe impl Sync for DisplayLink {}
 
 impl DisplayLink {
