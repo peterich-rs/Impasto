@@ -292,7 +292,14 @@ fn build_framework(
     )?;
     let mut binaries = Vec::new();
     for slice in slices {
-        let linker = build_rust(framework, rust_target_dir, slice.rust, options)?;
+        let linker = build_rust(
+            framework,
+            rust_target_dir,
+            slice.rust,
+            options,
+            "embedder-ios",
+            "15.0",
+        )?;
         let platform = if slice.simulator {
             "iphonesimulator"
         } else {

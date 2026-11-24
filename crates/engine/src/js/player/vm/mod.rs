@@ -389,8 +389,8 @@ impl JsVm {
         host.runtime
             .extension()
             .install_loader(
-                modules::AppResolver::new(app_dir),
-                modules::AppLoader::new(app_dir),
+                modules::AppResolver::new(app_dir, Arc::clone(&host.inner.config.registry)),
+                modules::AppLoader::new(app_dir, Arc::clone(&host.inner.config.registry)),
             )
             .map_err(|_| Error::Runtime)?;
         Ok(Self { host })

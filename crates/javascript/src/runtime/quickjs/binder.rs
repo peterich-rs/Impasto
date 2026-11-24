@@ -14,7 +14,7 @@ use rquickjs::object::Property;
 use rquickjs::{Ctx, Exception, Function, JsLifetime, Object, Persistent, Value};
 
 use super::Saved;
-use super::codec::{decode_args, encode};
+use super::codec::{decode_args_with, encode};
 
 #[derive(Clone)]
 pub struct ModuleBindings {
@@ -121,6 +121,7 @@ impl ModuleDef for BoundModule {
             let runtime = Rc::clone(&binder.runtime);
             let invoke = method.invoke;
             let awaits_user = method.awaits_user;
+            let strict = method.strict_arguments;
             let function =
                 Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
                     let _active = runtime.enter(&ctx);
@@ -129,7 +130,7 @@ impl ModuleDef for BoundModule {
                     let signal = matches!(&invoke, Invoke::Stream(_))
                         .then(|| crate::standard::native_stream::signal(&mut args))
                         .flatten();
-                    let args = decode_args(&ctx, args)?;
+                    let args = decode_args_with(&ctx, args, strict)?;
                     call(&ctx, &*runtime, &*exec, &invoke, args, signal, awaits_user)
                 })?;
             export_function(exports, object.as_ref(), method.name, function)?;
@@ -201,6 +202,33 @@ fn export_function<'js>(
     }
     exports.export(name, function)?;
     Ok(())
+}
+
+pub(super) fn call_resource<'js>(
+    ctx: &Ctx<'js>,
+    method: crate::host::Method,
+    mut args: Vec<Value<'js>>,
+) -> rquickjs::Result<Value<'js>> {
+    let binder = ctx
+        .userdata::<Binder>()
+        .map(|binder| (*binder).clone())
+        .ok_or_else(|| Exception::throw_type(ctx, "module binder is not installed"))?;
+    let runtime = &*binder.runtime;
+    let _active = runtime.enter(ctx);
+    runtime.before(ctx, false)?;
+    let signal = matches!(&method.invoke, Invoke::Stream(_))
+        .then(|| crate::standard::native_stream::signal(&mut args))
+        .flatten();
+    let args = decode_args_with(ctx, args, method.strict_arguments)?;
+    call(
+        ctx,
+        runtime,
+        &*binder.bindings.exec,
+        &method.invoke,
+        args,
+        signal,
+        method.awaits_user,
+    )
 }
 
 fn call<'js>(

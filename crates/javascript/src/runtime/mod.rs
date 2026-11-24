@@ -777,7 +777,14 @@ impl Runtime {
         let _budget = state.vm.budget("delivery");
         let id = delivery.event.id();
         state.vm.with(|ctx| {
-            if let Err(error) = delivery::apply(&state.vm, &ctx, delivery.event, delivery.credit) {
+            if let Err(error) = delivery::apply(
+                &state.vm,
+                &ctx,
+                delivery.event,
+                delivery.credit,
+                &state.native_resources,
+                state.limits.requests,
+            ) {
                 let diagnostic = state.script_error(&ctx, error);
                 if let Some(id) = id {
                     let _ = delivery::reject_bad_completion(&state.vm, &ctx, id);
@@ -1012,6 +1019,7 @@ impl ModuleRuntime for BoundRuntime {
         let (id, promise) = state.vm.make_promise(ctx)?;
         let deadline = (!awaits_user).then(|| state.deadline());
         let route = state.register(id, Kind::Plugin, None, deadline);
+        let cancel = route.cancellation();
         let settle = if let Some(factory) = &self.completion
             && self.post.is_none()
         {
@@ -1036,7 +1044,7 @@ impl ModuleRuntime for BoundRuntime {
                 }
             })
         };
-        Ok((promise, settle))
+        Ok((promise, settle.with_cancellation(cancel)))
     }
 
     fn open_resource<'js>(

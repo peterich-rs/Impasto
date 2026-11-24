@@ -45,10 +45,37 @@ impl Inbox {
     }
 
     pub fn post(&self, command: Command) {
+        self.post_if(command, |_| true);
+    }
+
+    pub(crate) fn post_plugin_event(&self, event: impasto::abi::HostEvent) -> bool {
+        let bytes = event
+            .module
+            .len()
+            .saturating_add(event.event.len())
+            .saturating_add(event.payload.payload_bytes());
+        bytes <= 256 * 1024
+            && self.post_if(
+                Command::Io(engine::session::IoEvent::Host(event)),
+                |state| {
+                    state
+                        .commands
+                        .iter()
+                        .filter(|command| {
+                            matches!(command, Command::Io(engine::session::IoEvent::Host(_)))
+                        })
+                        .take(64)
+                        .count()
+                        < 64
+                },
+            )
+    }
+
+    fn post_if(&self, command: Command, accept: impl FnOnce(&State) -> bool) -> bool {
         let notify = {
             let mut state = lock(&self.state);
-            if state.closed {
-                return;
+            if state.closed || !accept(&state) {
+                return false;
             }
             let notify = (state.commands.is_empty() && state.completions.is_empty())
                 .then(|| state.notify.clone())
@@ -59,6 +86,7 @@ impl Inbox {
         if let Some(notify) = notify {
             notify();
         }
+        true
     }
 
     pub(crate) fn complete(&self, completion: Completion) {

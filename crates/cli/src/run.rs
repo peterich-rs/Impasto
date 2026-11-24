@@ -55,13 +55,24 @@ pub fn run(options: RunOptions) -> Result<()> {
         };
         let mut snapshot = files(&app)?;
         let mut installed = None;
+        let mut installed_manifest: Option<Vec<u8>> = None;
         loop {
             let source_only = settings.debug
                 && installed
                     .as_ref()
                     .is_some_and(|previous| script_only(&app, previous, &snapshot));
             let artifact = if source_only {
-                build::bundle(&app, &settings)
+                build::bundle_update(
+                    &app,
+                    &settings,
+                    "android",
+                    &app.root.join("build/android/update"),
+                    installed_manifest.as_deref(),
+                )
+                .map(|path| build::PlatformArtifact {
+                    path,
+                    plugin_manifest: None,
+                })
             } else {
                 build::apk(&app, &settings)
             };
@@ -82,9 +93,9 @@ pub fn run(options: RunOptions) -> Result<()> {
                             continue;
                         }
                         let deployed = if source_only {
-                            update_android(&adb, &app.android_id(), &revision, &artifact)
+                            update_android(&adb, &app.android_id(), &revision, &artifact.path)
                         } else {
-                            install_android(&adb, &app.android_id(), &artifact, settings.debug)
+                            install_android(&adb, &app.android_id(), &artifact.path, settings.debug)
                         };
                         match deployed {
                             Err(_) if installed.is_some() && !connected() => continue,
@@ -97,6 +108,9 @@ pub fn run(options: RunOptions) -> Result<()> {
                                     eprintln!("impasto: 正在监听应用文件。Ctrl-C 退出");
                                 }
                                 installed = Some(snapshot.clone());
+                                if !source_only {
+                                    installed_manifest = artifact.plugin_manifest;
+                                }
                             }
                         }
                         break;
@@ -125,34 +139,47 @@ pub fn run(options: RunOptions) -> Result<()> {
     }
     app.require("macos")?;
     let mut snapshot = files(&app)?;
+    let application = build::macos(&app, &settings)?;
+    let mut child = launch_macos(&app, &application, options.trace)?;
     loop {
-        let application = build::macos(&app, &settings)?;
-        let executable = application.join("Contents/MacOS/impasto");
-        let mut command = Command::new(executable);
-        command.current_dir(&app.root);
-        if options.trace {
-            command.env("IMPASTO_TRACE", "1");
-        }
-        let mut child = command.spawn()?;
-        loop {
-            if let Some(status) = child.try_wait()? {
-                if !status.success() {
-                    bail!("应用退出 ({status})");
-                }
-                return Ok(());
+        if let Some(status) = child.try_wait()? {
+            if !status.success() {
+                bail!("应用退出 ({status})");
             }
-            std::thread::sleep(Duration::from_millis(250));
-            let next = files(&app)?;
-            if next != snapshot {
-                snapshot = next;
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+        let next = files(&app)?;
+        if next == snapshot {
+            continue;
+        }
+        snapshot = next;
+        let next = App::current().and_then(|app| {
+            let application = build::macos(&app, &settings)?;
+            Ok((app, application))
+        });
+        match next {
+            Ok((next_app, application)) => {
                 child.kill()?;
                 child.wait()?;
-                app = App::current()?;
-                break;
+                child = launch_macos(&next_app, &application, options.trace)?;
+                app = next_app;
+                snapshot = files(&app)?;
             }
+            Err(error) => eprintln!("impasto: 更新构建失败，继续运行上一个版本。{error:#}"),
         }
     }
 }
+
+fn launch_macos(app: &App, application: &Path, trace: bool) -> Result<std::process::Child> {
+    let mut command = Command::new(application.join("Contents/MacOS/impasto"));
+    command.current_dir(&app.root);
+    if trace {
+        command.env("IMPASTO_TRACE", "1");
+    }
+    Ok(command.spawn()?)
+}
+
 pub(crate) type Snapshot = BTreeMap<PathBuf, (SystemTime, u64)>;
 
 pub(crate) fn script_only(app: &App, previous: &Snapshot, current: &Snapshot) -> bool {
@@ -162,9 +189,18 @@ pub(crate) fn script_only(app: &App, previous: &Snapshot, current: &Snapshot) ->
             .filter(|(file, _)| file.starts_with(path))
             .eq(current.iter().filter(|(file, _)| file.starts_with(path)))
     };
-    ["assets", "app.toml", "package.json"]
-        .into_iter()
-        .all(|name| unchanged(&app.root.join(name)))
+    let native_unchanged = crate::plugins::watched_paths(app).into_iter().all(|path| {
+        let is_native =
+            |file: &Path| file.starts_with(&path) && !crate::plugins::is_wrapper_source(file);
+        previous
+            .iter()
+            .filter(|(file, _)| is_native(file))
+            .eq(current.iter().filter(|(file, _)| is_native(file)))
+    });
+    native_unchanged
+        && ["assets", "app.toml", "package.json"]
+            .into_iter()
+            .all(|name| unchanged(&app.root.join(name)))
 }
 
 fn install_android(
@@ -252,6 +288,9 @@ pub(crate) fn files(app: &App) -> Result<Snapshot> {
         "package.json",
     ] {
         snapshot_path(&app.root.join(name), &mut out)?;
+    }
+    for path in crate::plugins::watched_paths(app) {
+        snapshot_path(&path, &mut out)?;
     }
     if app.gallery {
         snapshot_path(&toolchain::framework()?.join("packages"), &mut out)?;

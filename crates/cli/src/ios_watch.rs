@@ -11,10 +11,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use super::{RunDevice, build, bundle_id, delivery::session_id, require_output};
+use super::{RunDevice, build_artifact, bundle_id, delivery::session_id, require_output};
 use crate::{
     app::App,
-    build::{BuildOptions, bundle_in},
+    build::{BuildOptions, bundle_update},
     run::{Snapshot, files, script_only, snapshot_path},
     toolchain,
 };
@@ -29,6 +29,7 @@ struct DevelopmentSession {
     output: PathBuf,
     package: String,
     revision: u64,
+    plugin_manifest: Option<Vec<u8>>,
 }
 
 impl DevelopmentSession {
@@ -36,19 +37,26 @@ impl DevelopmentSession {
         let token = session_id()?;
         let output = app.root.join("build/ios/development").join(&token);
         fs::create_dir_all(&output)?;
+        let built = build_artifact(app, options, device.platform())?;
         let session = Self {
             token,
             output,
             package: bundle_id(app),
             revision: 0,
+            plugin_manifest: built.plugin_manifest,
         };
-        let path = build(app, options, device.platform())?;
-        device.install_and_launch(&path, &session.package, options, Some(&session.token))?;
+        device.install_and_launch(&built.path, &session.package, options, Some(&session.token))?;
         Ok(session)
     }
 
     fn update(&mut self, app: &App, options: &BuildOptions, device: &RunDevice) -> Result<()> {
-        let source = bundle_in(app, options, Some("ios"), &self.output.join("bundle"))?;
+        let source = bundle_update(
+            app,
+            options,
+            "ios",
+            &self.output.join("bundle"),
+            self.plugin_manifest.as_deref(),
+        )?;
         let size = fs::metadata(&source)?.len();
         if size > MAX_SOURCE_BYTES as u64 {
             bail!("调试脚本超过 {MAX_SOURCE_BYTES} 字节");

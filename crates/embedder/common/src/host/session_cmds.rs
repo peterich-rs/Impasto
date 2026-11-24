@@ -131,6 +131,9 @@ fn metrics_cmd(runtime: &mut UiHost, metrics: Metrics) {
 }
 
 fn lifecycle(runtime: &mut UiHost, state: engine::session::Lifecycle) {
+    if let Some(plugins) = &runtime.plugins {
+        plugins.lifecycle(state);
+    }
     let deadline = runtime.session.as_mut().map(|session| {
         session_call(|| session.lifecycle(state));
         session.next_wake_ms().map(crate::timing::ms_i64)

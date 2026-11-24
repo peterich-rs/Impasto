@@ -66,14 +66,15 @@ impl Budget {
     }
 }
 
-pub fn decode_args<'js>(
+pub(super) fn decode_args_with<'js>(
     ctx: &Ctx<'js>,
     args: Vec<Value<'js>>,
+    strict: bool,
 ) -> rquickjs::Result<Vec<PluginValue>> {
     let mut budget = Budget::default();
     let mut path = Vec::new();
     args.into_iter()
-        .map(|value| decode_value(ctx, value, &mut budget, &mut path))
+        .map(|value| decode_value(ctx, value, &mut budget, &mut path, strict))
         .collect()
 }
 
@@ -82,6 +83,7 @@ fn decode_value<'js>(
     value: Value<'js>,
     budget: &mut Budget,
     path: &mut Vec<Value<'js>>,
+    strict: bool,
 ) -> rquickjs::Result<PluginValue> {
     budget.visit(ctx, path.len())?;
     if let Some(value) = value.as_bool() {
@@ -98,8 +100,21 @@ fn decode_value<'js>(
         budget.charge(ctx, value.len())?;
         return Ok(PluginValue::Bytes(value));
     }
+    if strict && value.is_function() {
+        return Err(Exception::throw_type(
+            ctx,
+            "native method argument cannot be a function",
+        ));
+    }
     let Some(object) = value.as_object() else {
-        return Ok(PluginValue::Null);
+        return if strict && !value.is_null() && !value.is_undefined() {
+            Err(Exception::throw_type(
+                ctx,
+                "unsupported native method argument",
+            ))
+        } else {
+            Ok(PluginValue::Null)
+        };
     };
     if path.contains(&value) {
         return Err(Exception::throw_type(ctx, "cyclic module value"));
@@ -114,7 +129,7 @@ fn decode_value<'js>(
         }
         array
             .iter::<Value>()
-            .map(|item| decode_value(ctx, item?, budget, path))
+            .map(|item| decode_value(ctx, item?, budget, path, strict))
             .collect::<rquickjs::Result<_>>()
             .map(PluginValue::List)
     } else {
@@ -124,7 +139,7 @@ fn decode_value<'js>(
                 let key = key?;
                 let name = key.to_js_string()?;
                 let name = bounded_string(ctx, &name, budget)?;
-                let item = decode_value(ctx, object.get(key)?, budget, path)?;
+                let item = decode_value(ctx, object.get(key)?, budget, path, strict)?;
                 Ok((name, item))
             })
             .collect::<rquickjs::Result<_>>()

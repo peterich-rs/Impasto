@@ -12,3 +12,10 @@ mod bundle;
     reason = "Metal drawables and the CAMetalLayer ownership lease"
 )]
 mod surface;
+
+pub fn install_plugins(
+    register: embedder::PluginRegister,
+    expected: &'static str,
+) -> Result<(), embedder::BootError> {
+    embedder::install_plugins(register, expected)
+}

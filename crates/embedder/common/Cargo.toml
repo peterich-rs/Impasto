@@ -8,6 +8,7 @@ publish.workspace = true
 devtools-server = []
 
 [dependencies]
+impasto.workspace = true
 raster = { workspace = true }
 thiserror = { workspace = true }
 engine = { workspace = true }
@@ -16,6 +17,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 http = "1"
 http-body-util = "0.1"
 openwire = "0.1.2"
+pollster = "0.4"
 serde_json = "1"
 tokio = { version = "1", features = ["io-util", "net", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }

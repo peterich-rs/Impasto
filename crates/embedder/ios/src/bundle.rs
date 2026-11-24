@@ -41,6 +41,7 @@ pub(crate) struct Bundle {
     pub modules: Vec<Module>,
     pub http: Option<Arc<dyn HttpClient>>,
     pub devtools: bool,
+    pub plugin_services: embedder::PluginServices,
 }
 
 #[allow(
@@ -54,6 +55,7 @@ pub(crate) fn prepare(
 ) -> Result<Bundle, BootError> {
     objc2::rc::autoreleasepool(|_| {
         let enabled = enabled_modules(&root)?;
+        let plugin_http = is_enabled(&enabled, "http");
         let devtools = is_enabled(&enabled, "devtools");
         let modules = native_modules(&enabled, launch_url, &services)?;
         let program = load_program(&root)?;
@@ -92,6 +94,18 @@ pub(crate) fn prepare(
             modules,
             http: Some(Arc::new(http::Http)),
             devtools,
+            plugin_services: embedder::PluginServices {
+                http: plugin_http,
+                paths: embedder::AppPaths::new(
+                    sandbox_directory(NSSearchPathDirectory::DocumentDirectory)
+                        .ok()
+                        .map(PathBuf::from),
+                    sandbox_directory(NSSearchPathDirectory::CachesDirectory)
+                        .ok()
+                        .map(PathBuf::from),
+                    Some(std::env::temp_dir()),
+                ),
+            },
         })
     })
 }

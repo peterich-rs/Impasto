@@ -5,7 +5,7 @@ use super::{PluginResult, PluginValue};
 #[path = "io_credit.rs"]
 mod credit;
 pub use credit::{Credit, CreditPool, CreditUsage, Delivery, RequestKey, Route, RuntimeKey};
-pub(super) use credit::{register_waker, wake_all};
+pub(super) use credit::{Waiter, Waiters};
 
 /// One owned IO completion. The host chooses the thread that delivers it.
 pub enum IoEvent {
@@ -44,10 +44,7 @@ impl IoEvent {
 
     pub fn payload_bytes(&self) -> usize {
         match self {
-            Self::Plugin { result, .. } => match result {
-                PluginResult::Done(value) => value.payload_bytes(),
-                PluginResult::Failed { message } => message.len(),
-            },
+            Self::Plugin { result, .. } => result.payload_bytes(),
             Self::NativeStream { event, .. } => match event {
                 super::StreamEvent::Item(value) => value.payload_bytes(),
                 super::StreamEvent::Finished => 0,

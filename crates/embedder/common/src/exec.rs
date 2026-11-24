@@ -15,6 +15,12 @@ pub struct RtExec {
 }
 
 impl MethodExec for RtExec {
+    fn spawn(&self, task: engine::session::HostFuture) {
+        if let Ok(handle) = crate::rt::handle() {
+            drop(handle.spawn(task));
+        }
+    }
+
     fn worker(&self, settle: Settle, work: Work) {
         self.io.post(Box::new(move || settle.send(work())));
     }

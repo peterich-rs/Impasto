@@ -8,6 +8,7 @@ mod create;
 mod devtools;
 mod ios;
 mod packages;
+mod plugins;
 mod run;
 mod test;
 mod toolchain;
@@ -53,6 +54,9 @@ enum Command {
     Build {
         /// `bundle`, `apk`, `appbundle`, `aar`, `ios`, `ios-archive`, `ipa`, `ios-xcframework`, or `macos`.
         target: String,
+        /// Select the native plugin platform for build bundle.
+        #[arg(long)]
+        platform: Option<String>,
         /// Build an iOS Simulator app without device signing.
         #[arg(long)]
         ios_simulator: bool,
@@ -67,7 +71,11 @@ enum Command {
         verbose: bool,
     },
     /// Type-check the app.
-    Analyze,
+    Analyze {
+        /// Select the plugin platform for type checking.
+        #[arg(long)]
+        platform: Option<String>,
+    },
     /// Run tests without opening a window.
     Test {
         /// Source file or trusted bytecode produced by this version of `impasto build`.
@@ -112,6 +120,7 @@ fn main() -> ExitCode {
         })),
         Command::Build {
             target,
+            platform,
             ios_simulator,
             export_options,
             debug,
@@ -119,6 +128,7 @@ fn main() -> ExitCode {
             verbose,
         } => finish(build::build(
             &target,
+            platform.as_deref(),
             build::BuildOptions {
                 debug,
                 verbose,
@@ -127,7 +137,7 @@ fn main() -> ExitCode {
             ios_simulator,
             export_options.as_deref(),
         )),
-        Command::Analyze => finish(analyze::analyze()),
+        Command::Analyze { platform } => finish(analyze::analyze(platform.as_deref())),
         Command::Test { bundle } => finish(test::test(bundle)),
         Command::Clean => finish(clean::clean()),
         Command::Devtools(options) => finish(devtools::run(options)),

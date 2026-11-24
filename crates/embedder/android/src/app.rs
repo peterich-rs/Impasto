@@ -32,7 +32,7 @@ const IME_SHOW: i32 = 1;
 const IME_UPDATE: i32 = 2;
 const IME_HIDE: i32 = 3;
 
-mod entrypoints;
+pub(crate) mod entrypoints;
 mod hardware_frame;
 mod platform_services;
 
@@ -964,6 +964,9 @@ fn android_boot(
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
         });
+    let plugin_http = modules
+        .as_ref()
+        .is_some_and(|enabled| enabled.iter().any(|name| name == "http"));
     let trace = decode::read_bytes(&script_assets, c"app.trace").is_some();
     Ok(Boot {
         font_family: FONT_FAMILY.to_string(),
@@ -1002,6 +1005,18 @@ fn android_boot(
             assets: Arc::clone(&bridge.assets),
         }),
         modules: Vec::new(),
+        plugin_services: embedder::PluginServices {
+            android: Some(embedder::AndroidContext::new(bridge.vm.clone(), {
+                let bridge = Arc::downgrade(&bridge);
+                move || bridge.upgrade()?.current_view()
+            })),
+            http: plugin_http,
+            paths: embedder::AppPaths::new(
+                bridge.document_dir.as_ref().map(std::path::PathBuf::from),
+                pipeline_cache.clone(),
+                pipeline_cache.clone(),
+            ),
+        },
         platform_runner: Some(platform_runner),
         thread_topology,
         launch_url: Arc::clone(&launch_url),
