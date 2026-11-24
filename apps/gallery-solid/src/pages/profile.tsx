@@ -387,6 +387,24 @@ export function ProfilePage(props: { router: Router }): NodeHandle {
   });
   scene.append(canvasBtn, canvasLabel);
   scene.append(card3.body, canvasBtn);
+  const gpuLab = scene.createElement("view", {
+    style: { paddingBottom: 12 },
+  });
+  scene.onClick(gpuLab, () => props.router.push("/gpu-lab"));
+  scene.append(gpuLab, scene.createElement("text", {
+    value: loc("GPU 实验室", "GPU Lab"),
+    style: { fontSize: 14, color: INK },
+  }));
+  scene.append(card3.body, gpuLab);
+  const compositorLab = scene.createElement("view", {
+    style: { paddingBottom: 12 },
+  });
+  scene.onClick(compositorLab, () => props.router.push("/compositor-lab"));
+  scene.append(compositorLab, scene.createElement("text", {
+    value: loc("合成动画", "Compositor animation"),
+    style: { fontSize: 14, color: INK },
+  }));
+  scene.append(card3.body, compositorLab);
   const about = scene.createElement("text", {
     value: loc(
       "Impasto Quotes · 模拟盘 · 数据均为虚构",

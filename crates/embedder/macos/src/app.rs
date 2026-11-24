@@ -2,7 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
@@ -843,7 +843,7 @@ struct MacServices {
 const SOURCE_MAP_CAP: u64 = 512 * 1024;
 
 fn load_source_map(script: &str) -> Option<Arc<String>> {
-    let path = std::path::Path::new(script).with_extension("js.map");
+    let path = Path::new(script).with_extension("js.map");
     let meta = std::fs::metadata(&path).ok()?;
     if meta.len() > SOURCE_MAP_CAP {
         return None;
@@ -965,6 +965,9 @@ pub fn run(
         modules,
     } = launch;
     let devtools_source_map = load_source_map(&name);
+    let gallery = Path::new(&name)
+        .file_name()
+        .is_some_and(|name| name == "quotes.js");
     let inspect_dir = std::env::var_os("IMPASTO_INSPECT").map(PathBuf::from);
     let embedder_launch = EmbedderLaunch::Session(Box::new(move |open, host| {
         let host = modules
@@ -1050,7 +1053,8 @@ pub fn run(
         ))
         .with_module(embedder::file_system(Arc::clone(&mac) as _))
         .with_module(embedder::async_storage(Arc::clone(&mac) as _))
-        .with_module(embedder::permissions(mac as _)),
+        .with_module(embedder::permissions(mac as _))
+        .with_gallery_gpu_view(gallery),
     )
     .map_err(RunError::Boot)?;
 

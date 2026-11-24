@@ -19,6 +19,8 @@ import { ProfilePage } from "./pages/profile.tsx";
 import { SearchPage } from "./pages/search.tsx";
 import { OrderSheetHost } from "./pages/order.tsx";
 import { CanvasPage } from "./pages/canvas.tsx";
+import { GpuLabPage } from "./pages/gpu-lab.tsx";
+import { CompositorLabPage } from "./pages/compositor-lab.tsx";
 import { closeToast, toastOpen, toastText } from "./state/toast.ts";
 export function App(): NodeHandle {
   const router = createRouter(
@@ -89,6 +91,14 @@ export function App(): NodeHandle {
         path: "/canvas",
         component: () => CanvasPage(),
       },
+      {
+        path: "/gpu-lab",
+        component: () => GpuLabPage({ onBack: () => router.pop() }),
+      },
+      {
+        path: "/compositor-lab",
+        component: () => CompositorLabPage({ launchUrl: null, onBack: () => router.pop() }),
+      },
     ],
     {
       initial: "/stocks",
@@ -141,7 +151,8 @@ export function App(): NodeHandle {
     // Keep the bar clamped until the exiting page unmounts. Unhiding it on the
     // first pop frame relayouts both stacked pages and hitchs the transition.
     const path = router.stack().at(-1)?.path ?? "";
-    const hidden = router.depth() > 1 || path === "/stocks" || path.startsWith("/stock/") || path.startsWith("/order/");
+    const hidden = router.depth() > 1 || path === "/stocks" || path === "/gpu-lab" || path === "/compositor-lab"
+      || path.startsWith("/stock/") || path.startsWith("/order/");
     scene.patchStyle(barWrap, { display: hidden ? "none" : "flex" });
     bar.sync();
   });

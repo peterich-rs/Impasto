@@ -946,6 +946,7 @@ fn android_boot(
         None => embedder::ThreadTopology::configured()?,
     };
     let (name, script) = load_script(&script_assets, requested.as_deref())?;
+    let gallery = name == "quotes.js";
     let modules = decode::read_bytes(&script_assets, c"app.modules")
         .map(|bytes| String::from_utf8(bytes).map_err(|_| SessionError::Runtime))
         .transpose()?
@@ -1017,7 +1018,8 @@ fn android_boot(
     .with_module(embedder::permissions(Arc::clone(&bridge) as _))
     .with_module(embedder::linking(Arc::clone(&bridge) as _, launch_url))
     .with_module(embedder::file_system(Arc::clone(&bridge) as _))
-    .with_module(embedder::async_storage(bridge as _)))
+    .with_module(embedder::async_storage(bridge as _))
+    .with_gallery_gpu_view(gallery))
 }
 
 fn detach(handle: jlong) {

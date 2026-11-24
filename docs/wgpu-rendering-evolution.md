@@ -87,7 +87,25 @@ flowchart TD
 - **GPU 计时**。P1 用 `TIMESTAMP_QUERY` 在 Pass descriptor 配置起止时间戳，只有 Pass 内额外采样才请求 `TIMESTAMP_QUERY_INSIDE_PASSES`。Resolve 后异步 map 专用读回槽，按队列时间戳周期转换为 μs，关联帧号、设备代次和切片。通过宿主诊断数据送到 DevTools，显示 CPU 编码、GPU 包围耗时和逐 Pass 耗时。未采样、不支持及帧号过期的数据有明确的缺省状态，避免错配成当前帧的 0 μs。 [时间戳 API](https://docs.rs/wgpu/30.0.2/wgpu/struct.RenderPassTimestampWrites.html) · [诊断类型源](../crates/embedder/common/src/diagnostics/module.rs#L72) · [DevTools 性能面板](../packages/devtools/src/pages/performance.tsx)
 - **表面步调**。显式把 Surface `desired_maximum_frame_latency` 设为宿主双帧深度 2，这也是 `wgpu` 当前的默认提示值。桌面按支持情况评估 `Mailbox`，移动端默认 `Fifo` 并按实测评估 `FifoRelaxed`。透明窗口按支持的 `CompositeAlphaMode` 协商，验收预乘输出、实际排队延迟和掉帧。Surface 参数是后端提示，实际交换链队列深度由后端决定。 [SurfaceConfiguration](https://docs.rs/wgpu-types/30.0.2/wgpu_types/struct.SurfaceConfiguration.html) · [现有 Surface 配置](../crates/raster/src/surface.rs#L320)
 - **Android 外部纹理**。Android 13 起使用 ImageReader 帧租约和生产者 fence。Vulkan 可直接采样整帧 RGBA 和支持双平面绑定的 NV12。厂商不透明 YUV 通过 `VkExternalFormatANDROID` 和不可变 YCbCr 采样器在同一条 GPU 队列中转换为 sRGB 纹理，转换使用驱动建议的模型、范围和色度位置。Vulkan 显式获取和归还外部队列所有权，转换或最后一次直接采样结束后释放 Image 租约。裁剪帧和不支持的格式保留 CPU 上传。 [Android 宿主导入](../crates/embedder/android/src/app/hardware_frame.rs) · [Vulkan 互操作](../crates/raster/src/android_vulkan.rs)
-- **应用层能力**。P3 的 Runtime Effect 由 `engine::scene` 表达效果标识、参数及受控输入，Raster 执行 WGSL 校验并限制 shader 入口、绑定、资源范围及执行预算。`<GpuView>` 在受控生产者接口内共享设备与队列，通过代次化纹理标识进入 `LayerTree`，约定生产提交、合成读取、回收及设备恢复。4×4 透视和合成线程动画扩展纯数据契约，先明确变换后的裁剪、命中和 UIKit 层行为，再对独立变换与透明度通道验证 120 Hz。 [现有图层契约](../crates/engine/src/scene/layer.rs) · [现有 ViewUniform](../crates/raster/src/pipelines/mod.rs#L49)
+- **应用层能力与合成调度**。Runtime Effect 由 `engine::scene` 表达效果标识、参数及受控输入，Raster 在管线编译前校验 WGSL 入口和执行预算。`<GpuView>` 的生产者向同设备纹理提交命令，Raster 把该纹理作为普通场景内容合成。Split 和 PlatformUi 拓扑中的 Raster 可以直接处理满足准入条件的二维变换、透明度、滚动惯性和着色器标量。4×4 透视单独安排，涉及投影裁剪、命中反投影与 UIKit 层合成。 [图层契约](../crates/engine/src/scene/layer.rs) · [合成线程验收](telemetry-and-p1-plan.md#p31-合成线程验收)
+
+### Runtime Effect 与 GPU View
+
+应用从 `@impasto/solid-ui` 调用 `createShaderProgram(source, { animated: true })` 并把句柄交给 `<ShaderEffect program={program} />`。同一 Session 内相同源码和时钟选项共享句柄。组件的布局内容盒决定 WGSL 参数 `local_pos` 和 `size`，单位为逻辑点。程序返回线性 sRGB 非预乘颜色，Raster 负责裁剪覆盖、预乘和最终输出色彩转换。 [场景契约](../crates/engine/src/scene/shader.rs) · [应用组件](../packages/solid-ui/src/ShaderEffect.tsx)
+
+WGSL 定义 `fn effect_main(local_pos: vec2<f32>, size: vec2<f32>) -> vec4<f32>`，通过 `effect_uniform(index)` 读取打包的小端 f32 参数，通过 `effect_sample(index, uv)` 读取最多四个纹理。普通输入使用 Image 地址，`shaderBackdropTexture` 读取当前目标中在效果之前绘制的像素。`uv` 使用 0–1 归一化坐标，输入暂缺时返回透明。`animated: true` 按预测呈现时间更新 `effect_time()`，单位为秒，静态程序的时钟值为 0。源码编译失败时保留底下的正常 UI，并记录 shader 标识和诊断。 [WGSL 包装](../crates/raster/src/pipelines/runtime_effect.wgsl) · [校验](../crates/raster/src/runtime_effect.rs)
+
+通过 `<ShaderEffect controller={setController} />` 获取控制器后，可以调用 `animateUniform(index, target, durationMs, easing?)`。动画从当前参数值开始，以 `CompositorTrack` 写入目标 Picture 的 Uniform。结束或交接时，UI 同步最后呈现的值，同一动画在 UI 回退时使用相同曲线。 [控制器接口](../packages/solid-ui/src/ShaderEffect.tsx) · [动画写回](../crates/engine/src/tree/shader.rs)
+
+`<GpuView producer="my-id" />` 的内容来自宿主通过 `boot.with_gpu_view(GpuViewId::new("my-id")?, producer)` 注册的同设备生产者。生产者使用 `GpuContext` 的设备和队列上传资源，从 `prepare_or_render` 返回绘图命令缓冲，输出线性预乘颜色。Raster 使用物理像素尺寸分配目标纹理。纹理首次绘制和重建时单独提交并同步验证，暖帧将生产者命令放在主帧命令之前，同批提交。GPU 计时使用 1×1 临时附件。设备代次改变后，生产者通过 `on_device_lost` 释放上一代资源，并在下一次绘制中建立新资源。 [生产者接口](../crates/raster/src/gpu_view.rs) · [应用组件](../packages/solid-ui/src/GpuView.tsx)
+
+Gallery 的「GPU 实验室」可从「我的」页进入，也可直接启动。直接启动只挂载验收页，宿主仍可采集独立的 Perfetto trace。默认画面包含基于合成时钟的 WGSL 衍射条纹与叠加背景模糊的同设备生产者。用 `--url impasto://gpu-lab/invalid` 直接进入无效 WGSL 用例，预览保留应用背景。省略 `IMPASTO_DUMP` 可在窗口中切换着色器、暂停条纹、调整条纹强度、关闭背景模糊或调整窗口尺寸。
+
+```sh
+just gallery-dist
+IMPASTO_DUMP=/tmp/impasto-gpu-lab.png cargo run --locked -p embedder-macos -- \
+  --js apps/gallery-solid/dist/quotes.js --url impasto://gpu-lab
+```
 
 ## 4. 四阶段交付
 
