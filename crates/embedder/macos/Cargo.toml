@@ -74,6 +74,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 objc2-image-io = { version = "0.3.2", default-features = false, features = [
     "std",
     "CGImageDestination",
+    "CGImageProperties",
     "CGImageSource",
     "objc2-core-graphics",
 ] }

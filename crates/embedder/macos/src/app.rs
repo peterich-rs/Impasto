@@ -1154,11 +1154,20 @@ impl embedder::ImageDecoder for PngDecoder {
         source: &str,
         scale_bucket: u8,
     ) -> Result<embedder::ImageHandle, embedder::ImageError> {
+        self.decode_sized(source, scale_bucket, None)
+    }
+
+    fn decode_sized(
+        &self,
+        source: &str,
+        scale_bucket: u8,
+        target: Option<embedder::DecodeTarget>,
+    ) -> Result<embedder::ImageHandle, embedder::ImageError> {
         let scale = f32::from(scale_bucket.max(1));
         let Some(path) = crate::assets::resolve_asset_path(&self.directory, source, scale) else {
             return Err(embedder::ImageError::Missing);
         };
-        let rgba = crate::pixels::load_rgba_png(&path)
+        let rgba = crate::pixels::load_rgba_png(&path, target)
             .map_err(|error| embedder::ImageError::Failed(error.to_string()))?;
         Ok(image_handle(source, rgba))
     }
@@ -1168,7 +1177,16 @@ impl embedder::ImageDecoder for PngDecoder {
         source: &str,
         bytes: &[u8],
     ) -> Result<embedder::ImageHandle, embedder::ImageError> {
-        let rgba = crate::pixels::load_rgba_bytes(bytes)
+        self.decode_bytes_sized(source, bytes, None)
+    }
+
+    fn decode_bytes_sized(
+        &self,
+        source: &str,
+        bytes: &[u8],
+        target: Option<embedder::DecodeTarget>,
+    ) -> Result<embedder::ImageHandle, embedder::ImageError> {
+        let rgba = crate::pixels::load_rgba_bytes(bytes, target)
             .map_err(|error| embedder::ImageError::Failed(error.to_string()))?;
         Ok(image_handle(source, rgba))
     }

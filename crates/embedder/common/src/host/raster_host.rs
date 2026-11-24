@@ -260,6 +260,17 @@ fn render_layers(
         return Ok(RasterOutput::finish(again));
     };
     if !submission.compositor_frame
+        && (layers_changed
+            || graphics
+                .installed
+                .as_ref()
+                .is_none_or(|installed| installed.scale != scale))
+    {
+        graphics
+            .images
+            .set_layout_targets(tree.image_decode_extents(), scale);
+    }
+    if !submission.compositor_frame
         && !images_ready(graphics, &submission.requirements, scale, census.as_deref())
     {
         return Ok(RasterOutput::finish(reloaded));
@@ -710,13 +721,9 @@ fn images_ready(
         if source.starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX) {
             continue;
         }
+        let ready = graphics.images.is_ready(source, bucket);
         if graphics.images.is_pending(source, bucket) {
-            if required {
-                waiting = true;
-            }
-            continue;
-        }
-        if graphics.images.resolve(source, bucket).is_some() {
+            waiting |= required && !ready;
             continue;
         }
         if graphics.images.is_negative(source, bucket) {
@@ -733,9 +740,7 @@ fn images_ready(
         {
             tracing::error!(target: "impasto::render::image", "image decoder stopped");
         }
-        if required {
-            waiting = true;
-        }
+        waiting |= required && !ready;
     }
     if blocked {
         return false;

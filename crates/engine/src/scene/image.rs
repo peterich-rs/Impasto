@@ -47,7 +47,7 @@ pub(super) fn requirements<'a>(
     dedup(commands.flat_map(uses))
 }
 
-fn uses(command: &Command) -> impl Iterator<Item = (&Arc<str>, bool)> {
+pub(super) fn uses(command: &Command) -> impl Iterator<Item = (&Arc<str>, bool)> {
     let (image, canvas_images, textures) = match command {
         Command::Image {
             source, required, ..

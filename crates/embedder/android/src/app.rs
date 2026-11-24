@@ -1265,6 +1265,15 @@ impl embedder::ImageDecoder for AssetDecoder {
         source: &str,
         scale_bucket: u8,
     ) -> Result<embedder::ImageHandle, embedder::ImageError> {
+        self.decode_sized(source, scale_bucket, None)
+    }
+
+    fn decode_sized(
+        &self,
+        source: &str,
+        scale_bucket: u8,
+        target: Option<embedder::DecodeTarget>,
+    ) -> Result<embedder::ImageHandle, embedder::ImageError> {
         let paths = asset_image_path(source, scale_bucket);
         if paths.is_empty() {
             return Err(embedder::ImageError::Missing);
@@ -1274,10 +1283,7 @@ impl embedder::ImageDecoder for AssetDecoder {
                 Ok(bytes) => bytes,
                 Err(_) => continue,
             };
-            return match decode::decode_rgba(&bytes) {
-                Ok(rgba) => Ok(image_handle(source, rgba.width, rgba.height, rgba.pixels)),
-                Err(message) => Err(embedder::ImageError::Failed(message)),
-            };
+            return self.decode_bytes_sized(source, &bytes, target);
         }
         Err(embedder::ImageError::Missing)
     }
@@ -1287,7 +1293,16 @@ impl embedder::ImageDecoder for AssetDecoder {
         source: &str,
         bytes: &[u8],
     ) -> Result<embedder::ImageHandle, embedder::ImageError> {
-        match decode::decode_rgba(bytes) {
+        self.decode_bytes_sized(source, bytes, None)
+    }
+
+    fn decode_bytes_sized(
+        &self,
+        source: &str,
+        bytes: &[u8],
+        target: Option<embedder::DecodeTarget>,
+    ) -> Result<embedder::ImageHandle, embedder::ImageError> {
+        match decode::decode_rgba(bytes, target) {
             Ok(rgba) => Ok(image_handle(source, rgba.width, rgba.height, rgba.pixels)),
             Err(message) => Err(embedder::ImageError::Failed(message)),
         }

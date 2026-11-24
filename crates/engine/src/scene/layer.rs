@@ -1,6 +1,6 @@
 //! Compositing layers. Pictures keep commands relative to their own origin.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use super::{BlendMode, Command, ShaderProgram, ShaderProgramId, image};
 
@@ -74,6 +74,86 @@ impl LayerTree {
     /// Returns whether drawing may change on vsync without a new UI tree.
     pub fn has_renderer_work(&self) -> bool {
         self.has_animated_effects() || self.has_gpu_views()
+    }
+
+    /// Destination sizes in scene points for sources that can be decoded smaller.
+    /// Canvas, shaders and pixel-addressed images require the original source.
+    pub fn image_decode_extents(&self) -> HashMap<Arc<str>, [f32; 2]> {
+        let mut scales = HashMap::<PictureId, f32>::new();
+        let mut pending = vec![(self.root, 1.0_f32)];
+        let mut visited = vec![false; self.layers.len()];
+        while let Some((id, scale)) = pending.pop() {
+            let Some(layer) = self.layers.get(id.0 as usize) else {
+                return HashMap::new();
+            };
+            if std::mem::replace(&mut visited[id.0 as usize], true) {
+                return HashMap::new();
+            }
+            if let Some(next) = layer.next {
+                pending.push((next, scale));
+            }
+            let scale = match layer.kind {
+                LayerKind::Transform {
+                    scale_x, scale_y, ..
+                } => scale * scale_x.abs().max(scale_y.abs()).max(1.0),
+                LayerKind::Picture { picture } => {
+                    scales
+                        .entry(picture)
+                        .and_modify(|value| *value = value.max(scale))
+                        .or_insert(scale);
+                    scale
+                }
+                _ => scale,
+            };
+            if let Some(child) = layer.first_child {
+                pending.push((child, scale));
+            }
+        }
+        let mut extents = HashMap::<Arc<str>, Option<[f32; 2]>>::new();
+        for picture in &self.pictures {
+            let Some(&scale) = scales.get(&picture.id) else {
+                continue;
+            };
+            let can_resize = !picture.commands.iter().any(|command| {
+                matches!(
+                    command, Command::PushTransform { scale_x, scale_y, .. }
+                    if scale_x.abs() > 1.0 || scale_y.abs() > 1.0
+                )
+            });
+            for command in &*picture.commands {
+                for (source, _) in image::uses(command) {
+                    let size = match command {
+                        Command::Image {
+                            w: width,
+                            h: height,
+                            mode,
+                            ..
+                        } if can_resize
+                            && !matches!(mode, image::ContentMode::NineSlice { .. })
+                            && width.is_finite()
+                            && height.is_finite()
+                            && *width > 0.0
+                            && *height > 0.0 =>
+                        {
+                            Some([width * scale, height * scale])
+                        }
+                        _ => None,
+                    };
+                    extents
+                        .entry(Arc::clone(source))
+                        .and_modify(|existing| {
+                            *existing = existing
+                                .zip(size)
+                                .map(|([a, b], [c, d])| [a.max(c), b.max(d)]);
+                        })
+                        .or_insert(size);
+                }
+            }
+        }
+        extents
+            .into_iter()
+            .filter_map(|(key, extent)| extent.map(|extent| (key, extent)))
+            .collect()
     }
 
     /// Image sources that will be drawn into some picture, including ones a

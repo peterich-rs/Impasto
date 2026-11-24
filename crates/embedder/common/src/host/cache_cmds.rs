@@ -48,7 +48,13 @@ fn image_ready(runtime: &mut UiHost, ready: ImageReady) {
         };
         tracing::event!(name: "image_cache_apply", target: "impasto::io", tracing::Level::DEBUG,
             trace_event = true, queue = "raster", request_id);
-        if decoded {
+        if decoded
+            && let ImageReady::Decoded(handle) = &ready
+            && graphics.images.accepts(&handle.source, handle.generation)
+        {
+            if handle.gpu.is_none() {
+                graphics.raster.borrow_mut().forget_texture(&handle.source);
+            }
             graphics.installed = None;
         }
         if let Some(message) = graphics.images.apply(ready) {

@@ -800,7 +800,7 @@ fn decode_one(
             tracing::debug_span!(target: "impasto::io", "image_decode", request_id = request.generation)
                 .entered();
         match body {
-            Ok(bytes) => decoder.decode_bytes(&request.source, &bytes),
+            Ok(bytes) => decoder.decode_bytes_sized(&request.source, &bytes, request.target),
             Err(error) => Err(ImageError::Failed(error)),
         }
     } else if request.source.starts_with("http://") {
@@ -809,7 +809,7 @@ fn decode_one(
         let _span =
             tracing::debug_span!(target: "impasto::io", "image_decode", request_id = request.generation)
                 .entered();
-        decoder.decode_at(&request.source, request.scale_bucket)
+        decoder.decode_sized(&request.source, request.scale_bucket, request.target)
     };
     match result {
         Ok(mut handle) => {

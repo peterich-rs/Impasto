@@ -46,8 +46,8 @@ pub use http::{
     HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, HttpResponse,
     OpenWireClient, RedirectMode, http_client,
 };
+pub use images::{DecodeTarget, ImageDecoder, ImageError, ImageHandle, ImageReady};
 pub use images::{ExternalFrame, ImportExternalFrame, pixel_count_ok, unpremultiply_rgba};
-pub use images::{ImageDecoder, ImageError, ImageHandle, ImageReady};
 pub use log_sub::install as install_log;
 pub use log_sub::set_log_targets;
 pub use module_stubs::{

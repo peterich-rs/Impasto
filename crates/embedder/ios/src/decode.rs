@@ -14,9 +14,9 @@ use objc2_core_graphics::{
     CGImageByteOrderInfo, kCGColorSpaceSRGB,
 };
 use objc2_image_io::{
-    CGImageSource, kCGImagePropertyPixelHeight, kCGImagePropertyPixelWidth,
-    kCGImageSourceCreateThumbnailFromImageAlways, kCGImageSourceCreateThumbnailWithTransform,
-    kCGImageSourceThumbnailMaxPixelSize,
+    CGImageSource, kCGImagePropertyOrientation, kCGImagePropertyPixelHeight,
+    kCGImagePropertyPixelWidth, kCGImageSourceCreateThumbnailFromImageAlways,
+    kCGImageSourceCreateThumbnailWithTransform, kCGImageSourceThumbnailMaxPixelSize,
 };
 
 const EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
@@ -37,6 +37,15 @@ impl ImageDecoder for Decoder {
     }
 
     fn decode_at(&self, source: &str, scale_bucket: u8) -> Result<ImageHandle, ImageError> {
+        self.decode_sized(source, scale_bucket, None)
+    }
+
+    fn decode_sized(
+        &self,
+        source: &str,
+        scale_bucket: u8,
+        target: Option<embedder::DecodeTarget>,
+    ) -> Result<ImageHandle, ImageError> {
         let relative = source.strip_prefix("asset:").ok_or(ImageError::Missing)?;
         let relative =
             engine::session::document_relative(relative).map_err(|_| ImageError::Missing)?;
@@ -49,7 +58,7 @@ impl ImageDecoder for Decoder {
             for extension in EXTENSIONS {
                 let path = self.root.join(format!("{relative}{density}.{extension}"));
                 match fs::read(&path) {
-                    Ok(bytes) => return self.decode_bytes(source, &bytes),
+                    Ok(bytes) => return self.decode_bytes_sized(source, &bytes, target),
                     Err(error) if error.kind() == ErrorKind::NotFound => {}
                     Err(error) => {
                         return Err(ImageError::Failed(format!(
@@ -64,7 +73,16 @@ impl ImageDecoder for Decoder {
     }
 
     fn decode_bytes(&self, source: &str, bytes: &[u8]) -> Result<ImageHandle, ImageError> {
-        objc2::rc::autoreleasepool(|_| decode(source, bytes))
+        self.decode_bytes_sized(source, bytes, None)
+    }
+
+    fn decode_bytes_sized(
+        &self,
+        source: &str,
+        bytes: &[u8],
+        target: Option<embedder::DecodeTarget>,
+    ) -> Result<ImageHandle, ImageError> {
+        objc2::rc::autoreleasepool(|_| decode(source, bytes, target))
     }
 }
 
@@ -72,7 +90,11 @@ impl ImageDecoder for Decoder {
     unsafe_code,
     reason = "ImageIO and Core Graphics require native handles and bitmap buffers"
 )]
-fn decode(source: &str, bytes: &[u8]) -> Result<ImageHandle, ImageError> {
+fn decode(
+    source: &str,
+    bytes: &[u8],
+    target: Option<embedder::DecodeTarget>,
+) -> Result<ImageHandle, ImageError> {
     let data = CFData::from_bytes(bytes);
     // SAFETY: data remains retained during source creation; no options are supplied.
     let image_source = unsafe { CGImageSource::with_data(&data, None) }
@@ -85,15 +107,23 @@ fn decode(source: &str, bytes: &[u8]) -> Result<ImageHandle, ImageError> {
     // SAFETY: ImageIO provides both initialized constant keys for the process lifetime.
     let (width_key, height_key) =
         unsafe { (kCGImagePropertyPixelWidth, kCGImagePropertyPixelHeight) };
-    let source_size = [
+    let mut source_size = [
         size_property(properties, width_key)?,
         size_property(properties, height_key)?,
     ];
-    if source_size.contains(&0) || !pixel_count_ok(source_size) {
+    if source_size.contains(&0) {
+        return Err(failed("图像没有尺寸"));
+    }
+    // SAFETY: ImageIO provides the orientation key for the process lifetime.
+    if size_property(properties, unsafe { kCGImagePropertyOrientation }).is_ok_and(|exif| exif >= 5)
+    {
+        source_size.swap(0, 1);
+    }
+    let requested = target.map_or(source_size, |target| target.fit(source_size));
+    if !pixel_count_ok(requested) {
         return Err(failed("图像超过像素预算"));
     }
-
-    let max_side = CFNumber::new_i64(i64::from(source_size[0].max(source_size[1])));
+    let max_side = CFNumber::new_i64(i64::from(requested[0].max(requested[1])));
     let flag = CFBoolean::new(true);
     // SAFETY: ImageIO provides these initialized constant keys for the process lifetime.
     let keys = unsafe {
