@@ -32,8 +32,19 @@ pub fn compile_with_registry(
     module: bool,
     registry: ModuleRegistry,
 ) -> Result<CompiledBytecode, Error> {
+    compile_with_native_exports(source, name, module, registry, &[])
+}
+
+pub fn compile_with_native_exports(
+    source: &str,
+    name: &str,
+    module: bool,
+    registry: ModuleRegistry,
+    modules: &[(&str, &[&str])],
+) -> Result<CompiledBytecode, Error> {
     let catalog = ModuleCatalog::new(registry).map_err(|error| Error::Script(error.to_string()))?;
-    let extensions = player::compile_declarations();
+    let mut extensions = player::compile_declarations().to_vec();
+    extensions.extend_from_slice(modules);
     compiler::compile_with_extensions(source, name, module, &catalog, &extensions)
         .map_err(map_bytecode)
 }

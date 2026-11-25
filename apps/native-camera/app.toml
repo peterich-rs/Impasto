@@ -1,0 +1,15 @@
+name = "native-camera"
+version = "0.1.0"
+targets = ["ios", "android"]
+
+[permissions]
+permissions = true
+
+[plugins]
+camera = { path = "../../plugins/camera" }
+
+[ios]
+bundle_id = "dev.impasto.native-camera"
+
+[ios.usage_descriptions]
+NSCameraUsageDescription = "Show the camera preview, scan QR codes, and take photos."

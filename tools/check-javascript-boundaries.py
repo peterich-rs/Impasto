@@ -54,6 +54,13 @@ def main():
     }:
         raise SystemExit(f"engine reaches platform or raster crates: {sorted(forbidden)}")
 
+    sdk_deps = dependencies("impasto")
+    if forbidden := {
+        name for name in sdk_deps if name in UI_CRATES
+        or name.startswith(("embedder-", "rquickjs", "quickjs-jit", "tokio", *RASTER_PREFIXES))
+    }:
+        raise SystemExit(f"Impasto plugin SDK reaches its host implementation: {sorted(forbidden)}")
+
     for module in ("host", "compiler", "runtime", "standard"):
         for path in (SOURCE / module).rglob("*.rs"):
             if match := UI_IMPORT.search(path.read_text()):

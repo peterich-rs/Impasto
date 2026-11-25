@@ -15,6 +15,7 @@ mod input;
 mod log_sub;
 mod module_stubs;
 mod modules;
+mod plugins;
 mod present;
 mod ptr;
 mod queue;
@@ -48,6 +49,9 @@ pub use http::{
 };
 pub use images::{DecodeTarget, ImageDecoder, ImageError, ImageHandle, ImageReady};
 pub use images::{ExternalFrame, ImportExternalFrame, pixel_count_ok, unpremultiply_rgba};
+#[cfg(target_os = "android")]
+pub use impasto::os::android::AndroidContext;
+pub use impasto::{AppPaths, Register as PluginRegister};
 pub use log_sub::install as install_log;
 pub use log_sub::set_log_targets;
 pub use module_stubs::{
@@ -59,6 +63,7 @@ pub use modules::{
     file_system, http as http_module, linking, memory, native_plugins, permission_results,
     permissions, picked_document, websocket as websocket_module,
 };
+pub use plugins::{PluginServices, install_plugins};
 pub use present::{AfterPresent, after_present};
 pub use ptr::NativePtr;
 pub use restoration::Restoration;
@@ -249,6 +254,7 @@ pub struct Boot {
     pub vsync: Arc<dyn Vsync>,
     pub decoder: Arc<dyn ImageDecoder>,
     pub modules: Vec<engine::session::Module>,
+    pub plugin_services: PluginServices,
     pub platform_runner: Option<Arc<dyn TaskRunner>>,
     pub thread_topology: ThreadTopology,
     /// Written before `start` so `Linking.getInitialURL` is visible during eval.

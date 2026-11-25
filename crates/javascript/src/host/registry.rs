@@ -1,6 +1,6 @@
 //! Module lookup. This registry does not know any package prefix.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::{fmt, sync::Arc};
 
 use super::declaration::{is_binding_identifier, is_identifier_name};
@@ -9,6 +9,7 @@ use super::{Invoke, Method, Module, PluginValue, module_not_linked};
 #[derive(Clone, Default)]
 pub struct ModuleRegistry {
     modules: Arc<[Module]>,
+    extensions: Arc<BTreeSet<&'static str>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,6 +75,7 @@ impl ModuleRegistry {
     pub fn new(modules: Vec<Module>) -> Self {
         Self {
             modules: modules.into(),
+            extensions: Arc::default(),
         }
     }
 
@@ -81,6 +83,20 @@ impl ModuleRegistry {
         let registry = Self::new(modules);
         registry.validate()?;
         Ok(registry)
+    }
+
+    pub fn with_extensions(
+        modules: Vec<Module>,
+        extensions: Vec<Module>,
+    ) -> Result<Self, RegistryError> {
+        let specifiers = extensions.iter().map(|module| module.specifier).collect();
+        let mut registry = Self::try_new(modules.into_iter().chain(extensions).collect())?;
+        registry.extensions = Arc::new(specifiers);
+        Ok(registry)
+    }
+
+    pub fn is_extension(&self, specifier: &str) -> bool {
+        self.extensions.contains(specifier)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Module> {
@@ -139,13 +155,15 @@ impl ModuleRegistry {
     /// Callbacks stay in their existing [`Arc`]s. Entries are not deduplicated
     /// or reordered, so the first match still wins a later lookup.
     pub fn filtered(&self, mut keep: impl FnMut(&Module) -> bool) -> Self {
-        Self::new(
-            self.modules
+        Self {
+            modules: self
+                .modules
                 .iter()
                 .filter(|module| keep(module))
                 .cloned()
                 .collect(),
-        )
+            extensions: Arc::clone(&self.extensions),
+        }
     }
 }
 

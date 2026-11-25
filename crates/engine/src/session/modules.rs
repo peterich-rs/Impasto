@@ -3,8 +3,8 @@
 use std::sync::{Arc, RwLock};
 
 pub use javascript::host::{
-    CancelToken, EventType, ImmediateExec, Invoke, Method, MethodExec, MethodTypes, Module,
-    ModuleExports, ModuleRegistry, NativeExtension, NativeResource, PromiseFn, Settle,
+    CancelToken, EventType, HostFuture, ImmediateExec, Invoke, Method, MethodExec, MethodTypes,
+    Module, ModuleExports, ModuleRegistry, NativeExtension, NativeResource, PromiseFn, Settle,
     StreamSendError, StreamSink, SyncFn, Work,
 };
 
@@ -33,10 +33,11 @@ pub struct ModuleConfig {
 impl ModuleConfig {
     pub fn restrict(mut self, packages: &[String]) -> Self {
         self.registry = Arc::new(self.registry.filtered(|module| {
-            module
-                .specifier
-                .strip_prefix("@impasto/")
-                .is_some_and(|name| packages.iter().any(|package| package == name))
+            self.registry.is_extension(module.specifier)
+                || module
+                    .specifier
+                    .strip_prefix("@impasto/")
+                    .is_some_and(|name| packages.iter().any(|package| package == name))
         }));
         self
     }

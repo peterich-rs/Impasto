@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::future::poll_fn;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
@@ -17,6 +17,42 @@ pub(in crate::host) fn register_waker(wakers: &mut Vec<Waker>, waker: &Waker) {
 pub(in crate::host) fn wake_all(wakers: Vec<Waker>) {
     for waker in wakers {
         waker.wake();
+    }
+}
+
+/// A single cancellation future owns its waker. Its queues keep weak
+/// registrations so dropping a completed future also releases its task.
+#[derive(Debug, Default)]
+pub(in crate::host) struct Waiter(Mutex<Option<Waker>>);
+
+#[derive(Debug, Default)]
+pub(in crate::host) struct Waiters(Vec<Weak<Waiter>>);
+
+impl Waiters {
+    pub(in crate::host) fn register(&mut self, waiter: &Arc<Waiter>, waker: &Waker) {
+        let weak = Arc::downgrade(waiter);
+        self.0.retain(|entry| entry.strong_count() > 0);
+        if !self.0.iter().any(|entry| Weak::ptr_eq(entry, &weak)) {
+            self.0.push(weak);
+        }
+        let mut slot = waiter.0.lock().unwrap_or_else(|error| error.into_inner());
+        match slot.as_mut() {
+            Some(saved) => saved.clone_from(waker),
+            None => *slot = Some(waker.clone()),
+        }
+    }
+
+    pub(in crate::host) fn wake_all(self) {
+        for waiter in self.0.into_iter().filter_map(|waiter| waiter.upgrade()) {
+            let waker = waiter
+                .0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
     }
 }
 
@@ -46,7 +82,7 @@ struct State {
     usage: CreditUsage,
     resources: HashMap<u64, (usize, usize)>,
     wakers: Vec<Waker>,
-    close_wakers: Vec<Waker>,
+    close_wakers: Waiters,
 }
 
 #[derive(Debug)]
@@ -67,7 +103,7 @@ impl CreditPool {
                 usage: CreditUsage::default(),
                 resources: HashMap::new(),
                 wakers: Vec::new(),
-                close_wakers: Vec::new(),
+                close_wakers: Waiters::default(),
             }),
             changed: Condvar::new(),
             bytes,
@@ -89,7 +125,7 @@ impl CreditPool {
         drop(state);
         self.changed.notify_all();
         wake_all(wakers);
-        wake_all(close_wakers);
+        close_wakers.wake_all();
     }
 
     pub fn notify_cancel(&self) {
@@ -105,12 +141,12 @@ impl CreditPool {
         self.lock().open
     }
 
-    pub(in crate::host) fn poll_closed(&self, waker: &Waker) -> Poll<()> {
+    pub(in crate::host) fn poll_closed(&self, waiter: &Arc<Waiter>, waker: &Waker) -> Poll<()> {
         let mut state = self.lock();
         if !state.open {
             return Poll::Ready(());
         }
-        register_waker(&mut state.close_wakers, waker);
+        state.close_wakers.register(waiter, waker);
         Poll::Pending
     }
 

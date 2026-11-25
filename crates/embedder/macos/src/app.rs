@@ -969,6 +969,9 @@ pub fn run(
         .file_name()
         .is_some_and(|name| name == "quotes.js");
     let inspect_dir = std::env::var_os("IMPASTO_INSPECT").map(PathBuf::from);
+    let plugin_http = modules
+        .as_ref()
+        .is_some_and(|enabled| enabled.iter().any(|name| name == "http"));
     let embedder_launch = EmbedderLaunch::Session(Box::new(move |open, host| {
         let host = modules
             .as_ref()
@@ -1016,6 +1019,14 @@ pub fn run(
             vsync: Arc::clone(&vsync) as Arc<dyn embedder::Vsync>,
             decoder,
             modules: Vec::new(),
+            plugin_services: embedder::PluginServices {
+                http: plugin_http,
+                paths: embedder::AppPaths::new(
+                    document_dir_main().ok().map(PathBuf::from),
+                    None,
+                    Some(std::env::temp_dir()),
+                ),
+            },
             platform_runner: Some(embedder::PlatformTaskRunner::new(
                 Arc::new(dispatch_main),
                 dispatch_main_after,

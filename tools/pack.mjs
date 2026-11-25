@@ -15,7 +15,10 @@ export function assertNoScheduler(code, inputs = []) {
   }
 }
 
-export function packOptions({ absWorkingDir, entryPoints, outfile, release = false, sourceMap = !release }) {
+export function packOptions({ absWorkingDir, entryPoints, outfile, release = false, sourceMap = !release, pluginsManifest }) {
+  const native = new Set(pluginsManifest?.modules.map(module => module.specifier));
+  const wrappers = new Map(Object.entries(pluginsManifest?.entries ?? {}));
+  const disabled = new Set(pluginsManifest?.disabledEntries);
   return {
     absWorkingDir, entryPoints, outfile, bundle: true, format: "esm",
     platform: "neutral", conditions: ["browser"], target: "es2022",
@@ -25,6 +28,15 @@ export function packOptions({ absWorkingDir, entryPoints, outfile, release = fal
     plugins: [{
       name: "impasto",
       setup(build) {
+        if (pluginsManifest) {
+          build.onResolve({ filter: /^[^./]/ }, args => {
+            if (wrappers.has(args.path)) return { path: wrappers.get(args.path) };
+            if (native.has(args.path)) return { path: args.path, external: true };
+            if (disabled.has(args.path)) return {
+              errors: [{ text: `Plugin "${args.path}" is unavailable on ${pluginsManifest.platform}` }],
+            };
+          });
+        }
         build.onResolve({ filter: /^solid-js$/ }, () => ({ path: join(packages, "reactive/src/index.ts") }));
         build.onResolve({ filter: /^@impasto\// }, args => {
           const [name, ...rest] = args.path.slice(9).split("/");
@@ -68,5 +80,12 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
   if (!entry || !outfile) throw new Error("usage: pack <entry.tsx> <outfile.js> [--release] [--source-map]");
   const release = flags.includes("--release");
   const sourceMap = flags.includes("--source-map") ? "external" : !release;
-  await esbuild.build(packOptions({ absWorkingDir: dirname(resolve(entry)), entryPoints: [resolve(entry)], outfile: resolve(outfile), release, sourceMap }));
+  const manifestFlag = flags.indexOf("--plugins-manifest");
+  const pluginsManifest = manifestFlag === -1
+    ? undefined
+    : JSON.parse(readFileSync(resolve(flags[manifestFlag + 1]), "utf8"));
+  if (pluginsManifest && pluginsManifest.schemaVersion !== 1) {
+    throw new Error("Unsupported plugins manifest schema");
+  }
+  await esbuild.build(packOptions({ absWorkingDir: dirname(resolve(entry)), entryPoints: [resolve(entry)], outfile: resolve(outfile), release, sourceMap, pluginsManifest }));
 }

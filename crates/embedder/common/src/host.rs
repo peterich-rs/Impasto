@@ -861,6 +861,7 @@ pub(crate) struct UiHost {
     services: Rc<RefCell<Box<dyn Services>>>,
     session: Option<Box<dyn engine::session::Session>>,
     registry: Arc<engine::session::ModuleRegistry>,
+    plugins: Option<crate::plugins::PluginSession>,
     // WindowSession keeps a weak subscription to this poster.
     _window: Arc<Poster>,
     latest: Option<Arc<engine::scene::LayerTree>>,
@@ -931,6 +932,7 @@ impl Drop for UiHost {
         self.compositor_mode.cancel();
         self.vsync.cancel();
         self.session.take();
+        self.plugins.take();
         self.graphics.retire();
     }
 }
@@ -1090,6 +1092,7 @@ fn open_ui(
         services.borrow().restoration(),
         window_session,
     )];
+    let plugin_http = links.http.clone();
     let has_http = boot.modules.iter().any(|m| m.specifier == "@impasto/http");
     let has_ws = boot
         .modules
@@ -1118,7 +1121,17 @@ fn open_ui(
         ));
     }
     modules.extend(boot.modules);
-    let registry = Arc::new(engine::session::ModuleRegistry::new(modules));
+    let (registry, plugins) = crate::plugins::attach(
+        modules,
+        boot.plugin_services,
+        plugin_http,
+        inbox,
+        Arc::clone(&runners.io),
+        boot.platform_runner
+            .as_ref()
+            .map(|_| Arc::clone(&runners.platform)),
+    )?;
+    let registry = Arc::new(registry);
     let host = engine::session::ModuleConfig {
         registry: Arc::clone(&registry),
         exec: Arc::new(crate::RtExec {
@@ -1188,6 +1201,7 @@ fn open_ui(
         services,
         session,
         registry,
+        plugins,
         _window: window,
         latest: None,
         image_requirements: Arc::default(),
@@ -2398,6 +2412,7 @@ mod tests {
                 session: Some(Box::new(MockSession {
                     log: Rc::clone(&log),
                 })),
+                plugins: None,
                 registry: Arc::new(engine::session::ModuleRegistry::new(Vec::new())),
                 _window: Arc::new(super::Poster {
                     inbox: Arc::new(Inbox::new()),

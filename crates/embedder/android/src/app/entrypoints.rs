@@ -1,5 +1,13 @@
 //! JNI methods declared by Android's Kotlin NativeBridge.
 
+#![cfg_attr(
+    feature = "app-entry",
+    allow(
+        non_snake_case,
+        reason = "the generated application entry forwards the same JNI method names"
+    )
+)]
+
 use std::ffi::c_char;
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -85,7 +93,7 @@ fn with_env<'local, T: Default>(
         .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeCreateWindowSession(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -98,7 +106,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeCreateWindowSess
     id
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeCloseWindowSession(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -110,7 +118,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeCloseWindowSessi
         .remove(&id);
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeAttach<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
@@ -190,7 +198,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeAttach<'local>(
     })
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSavedState<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
@@ -203,7 +211,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSavedState<'loca
     })
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativePermissionResult<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
@@ -232,7 +240,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativePermissionResult
     );
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeDetach(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -241,7 +249,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeDetach(
     detach(handle);
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeReleaseWindow(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -253,7 +261,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeReleaseWindow(
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeAttachWindow<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
@@ -298,7 +306,7 @@ fn valid_texture_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeHardwareTexture<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
@@ -334,7 +342,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeHardwareTexture<
     })
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeExternalTexture<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
@@ -377,7 +385,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeExternalTexture<
     });
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeUpdateSource<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
@@ -413,7 +421,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeUpdateSource<'lo
     });
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSessionReady(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -428,7 +436,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSessionReady(
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeDocumentPicked<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
@@ -451,7 +459,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeDocumentPicked<'
     });
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeIsCurrentSurface(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -466,7 +474,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeIsCurrentSurface
     })
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeResume(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -478,7 +486,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeResume(
     host.link.post(Command::Lifecycle(Lifecycle::Resumed));
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeInactive(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -490,7 +498,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeInactive(
     host.link.post(Command::Lifecycle(Lifecycle::Inactive));
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeHidden(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -502,7 +510,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeHidden(
     host.link.post(Command::Lifecycle(Lifecycle::Hidden));
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeTrimMemory(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -514,7 +522,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeTrimMemory(
     host.link.post(Command::MemoryWarning);
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeDismissIme(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -525,7 +533,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeDismissIme(
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeFocus(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -538,7 +546,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeFocus(
     host.link.post(Command::WindowFocus(focused));
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeBack(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -556,7 +564,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeBack(
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeBackGesture(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -580,7 +588,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeBackGesture(
     host.link.post(Command::BackGesture(event));
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeWindowDisplay<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
@@ -638,7 +646,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeWindowDisplay<'l
     }));
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSettings<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
@@ -667,7 +675,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSettings<'local>
     });
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeLaunchUrl<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
@@ -685,7 +693,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeLaunchUrl<'local
     });
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeInvalidate(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -696,7 +704,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeInvalidate(
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSurfaceCreated<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
@@ -721,7 +729,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSurfaceCreated<'
     })
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSurfaceChanged(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -743,7 +751,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSurfaceChanged(
     publish_metrics(&host);
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSurfaceDestroyed(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -755,7 +763,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSurfaceDestroyed
     destroy_surface(&host);
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeMetrics(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -804,7 +812,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeMetrics(
     publish_metrics(&host);
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativePointer(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -883,7 +891,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativePointer(
         }));
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeZoom(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -908,7 +916,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeZoom(
     host.link.post(Command::Pointer(event));
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeKey(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -971,7 +979,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeKey(
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSync<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
@@ -1010,7 +1018,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSync<'local>(
     });
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeAction(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -1025,7 +1033,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeAction(
     )));
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeContext(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -1051,7 +1059,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeContext(
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeAccept<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
@@ -1099,7 +1107,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeAccept<'local>(
     })
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeOnVsync(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -1120,7 +1128,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeOnVsync(
     );
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSemanticsEnabled(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -1134,7 +1142,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSemanticsEnabled
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeActivate(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -1149,7 +1157,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeActivate(
     ));
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeScroll(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
@@ -1184,7 +1192,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeScroll(
     ));
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSetText<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
@@ -1207,7 +1215,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSetText<'local>(
     });
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeAutofill<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
@@ -1230,7 +1238,7 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeAutofill<'local>
     });
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
 pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSetSelection(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,

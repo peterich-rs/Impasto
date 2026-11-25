@@ -287,11 +287,13 @@ fn rejected(ctx: &Ctx<'_>) -> rquickjs::Error {
 }
 pub(super) struct AppResolver {
     directory: Option<PathBuf>,
+    registry: Arc<crate::session::ModuleRegistry>,
 }
 impl AppResolver {
-    pub(super) fn new(dir: Option<&str>) -> Self {
+    pub(super) fn new(dir: Option<&str>, registry: Arc<crate::session::ModuleRegistry>) -> Self {
         Self {
             directory: dir.map(PathBuf::from),
+            registry,
         }
     }
 }
@@ -303,7 +305,10 @@ impl Resolver for AppResolver {
         name: &str,
         _attributes: Option<ImportAttributes<'js>>,
     ) -> rquickjs::Result<String> {
-        if matches!(name, "scene" | "reactive" | "#reactive") || is_host(name) {
+        if matches!(name, "scene" | "reactive" | "#reactive")
+            || self.registry.by_specifier(name).is_some()
+            || is_host(name)
+        {
             return Ok(name.to_owned());
         }
         if name.starts_with("@impasto/") {
@@ -370,12 +375,14 @@ impl Resolver for AppResolver {
 pub(super) struct AppLoader {
     directory: Option<PathBuf>,
     canonical_directory: Option<PathBuf>,
+    registry: Arc<crate::session::ModuleRegistry>,
 }
 impl AppLoader {
-    pub(super) fn new(dir: Option<&str>) -> Self {
+    pub(super) fn new(dir: Option<&str>, registry: Arc<crate::session::ModuleRegistry>) -> Self {
         Self {
             directory: dir.map(PathBuf::from),
             canonical_directory: None,
+            registry,
         }
     }
 }
@@ -392,7 +399,7 @@ impl Loader for AppLoader {
             "#reactive" => return Module::declare_def::<GraphModule, _>(ctx.clone(), name),
             _ => {}
         }
-        if is_host(name) {
+        if self.registry.by_specifier(name).is_some() || is_host(name) {
             return javascript::runtime::extension::declare_host_module(ctx, name);
         }
         let app = self.directory.as_ref().ok_or_else(|| rejected(ctx))?;

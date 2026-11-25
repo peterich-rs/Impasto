@@ -6,12 +6,13 @@ use std::rc::Rc;
 
 use rquickjs::class::Trace;
 use rquickjs::function::{Rest, This};
-use rquickjs::{Class, Ctx, Exception, JsLifetime, Result, Value};
+use rquickjs::object::Property;
+use rquickjs::{Class, Ctx, Exception, Function, JsLifetime, Result, Value};
 
 use crate::host::{CancelToken, NativeResource};
 use crate::runtime::resources::next_id;
 
-use super::codec::{decode_args, encode};
+use super::codec::{decode_args_with, encode};
 
 #[derive(Default)]
 pub(crate) struct ResourceTable {
@@ -50,6 +51,26 @@ impl ResourceTable {
         let id = next_id()
             .ok_or_else(|| Exception::throw_range(ctx, "native resource IDs exhausted"))?;
         let value = native_call(ctx, create)?;
+        let methods = value.methods();
+        let lease = Lease {
+            id,
+            table: Rc::clone(self),
+        };
+        let object = Class::instance(ctx.clone(), NativeHandle { lease })?.into_value();
+        let properties = object
+            .as_object()
+            .ok_or_else(|| Exception::throw_type(ctx, "resource is not an object"))?;
+        for &name in methods {
+            let function = Function::new(
+                ctx.clone(),
+                move |This(handle): This<Class<'js, NativeHandle>>,
+                      ctx: Ctx<'js>,
+                      args: Rest<Value<'js>>| {
+                    NativeHandle::invoke(handle, ctx, name, args.0)
+                },
+            )?;
+            properties.prop(name, Property::from(function).enumerable())?;
+        }
         self.entries.borrow_mut().insert(
             id,
             Entry {
@@ -57,11 +78,7 @@ impl ResourceTable {
                 cancel: CancelToken::default(),
             },
         );
-        let lease = Lease {
-            id,
-            table: Rc::clone(self),
-        };
-        Class::instance(ctx.clone(), NativeHandle { lease }).map(Class::into_value)
+        Ok(object)
     }
 
     fn remove(&self, id: u64) {
@@ -105,9 +122,19 @@ impl NativeHandle {
         method: String,
         Rest(args): Rest<Value<'js>>,
     ) -> Result<Value<'js>> {
-        let args = decode_args(&ctx, args)?;
-        let handle = handle.try_borrow()?;
-        let value = {
+        Self::invoke(handle, ctx, &method, args)
+    }
+}
+
+impl NativeHandle {
+    fn invoke<'js>(
+        handle: Class<'js, Self>,
+        ctx: Ctx<'js>,
+        method: &str,
+        args: Vec<Value<'js>>,
+    ) -> Result<Value<'js>> {
+        let (dispatch, typed) = {
+            let handle = handle.try_borrow()?;
             let mut entries = handle
                 .lease
                 .table
@@ -117,7 +144,28 @@ impl NativeHandle {
             let entry = entries
                 .get_mut(&handle.lease.id)
                 .ok_or_else(|| Exception::throw_type(&ctx, "native resource is closed"))?;
-            native_call(&ctx, || entry.value.call(&method, &args, &entry.cancel))?
+            let typed = entry.value.methods().contains(&method);
+            (
+                native_call(&ctx, || Ok(entry.value.method(method, &entry.cancel)))?,
+                typed,
+            )
+        };
+        if let Some(dispatch) = dispatch {
+            return super::binder::call_resource(&ctx, dispatch, args);
+        }
+        let args = decode_args_with(&ctx, args, typed)?;
+        let value = {
+            let handle = handle.try_borrow()?;
+            let mut entries = handle
+                .lease
+                .table
+                .entries
+                .try_borrow_mut()
+                .map_err(|_| Exception::throw_type(&ctx, "native resource is in use"))?;
+            let entry = entries
+                .get_mut(&handle.lease.id)
+                .ok_or_else(|| Exception::throw_type(&ctx, "native resource is closed"))?;
+            native_call(&ctx, || entry.value.call(method, &args, &entry.cancel))?
         };
         encode(&ctx, &value)
     }

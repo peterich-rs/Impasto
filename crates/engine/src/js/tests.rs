@@ -278,6 +278,52 @@ fn bytecode_round_trip_uses_the_native_modules() {
 }
 
 #[test]
+fn bytecode_links_registered_application_exports() {
+    let source = r#"
+        import { amount } from '@app/order/native';
+        import { createElement, insert } from 'scene';
+        const root = createElement('view', {});
+        insert(root, amount());
+    "#;
+    let methods = &[("@app/order/native", &["amount"][..])];
+    let bytecode = super::compile_with_native_exports(
+        source,
+        "app.js",
+        true,
+        ModuleRegistry::default(),
+        methods,
+    )
+    .expect("compile against owned extension declarations");
+    let module = Module {
+        name: "Order",
+        specifier: "@app/order/native",
+        methods: vec![Method::sync("amount", |_| {
+            Ok(PluginValue::Str("2599".into()))
+        })],
+        exports: Default::default(),
+    };
+    let config = ModuleConfig {
+        registry: std::sync::Arc::new(
+            ModuleRegistry::with_extensions(Vec::new(), vec![module]).expect("register order"),
+        ),
+        ..ModuleConfig::disconnected()
+    }
+    .restrict(&[]);
+    let mut session = super::open_compiled(
+        &bytecode,
+        "app.bin",
+        crate::text::MonoShaper::default(),
+        no_log(),
+        config,
+    )
+    .expect("load against the registered extension");
+    session.metrics(&metrics());
+    let frame = session.frame(session::FrameTime::at(0.0));
+    assert!(texts(&frame).iter().any(|text| text == "2599"));
+    assert!(session.take_faults().is_empty());
+}
+
+#[test]
 fn context_is_owned_and_children_unwrap_accessors() {
     let source = r#"
             import * as r from 'reactive';

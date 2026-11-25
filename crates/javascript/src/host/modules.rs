@@ -1,25 +1,51 @@
 //! Native module ABI. Sync runs inline; Promise methods pick a [`MethodExec`].
 
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
-use super::{NativeResource, PluginResult, PluginValue, StreamSink};
+use super::{CancelToken, NativeResource, PluginResult, PluginValue, StreamSink};
+
+pub type HostFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 pub type Work = Box<dyn FnOnce() -> PluginResult + Send>;
 
 /// One-shot completion. Drop without [`Settle::send`] fails the promise.
 pub struct Settle {
     send: Option<Box<dyn FnOnce(PluginResult) + Send>>,
+    cancellation: CancelToken,
+    scope: Option<CancelToken>,
 }
 
 impl Settle {
     pub fn new(send: impl FnOnce(PluginResult) + Send + 'static) -> Self {
         Self {
             send: Some(Box::new(send)),
+            cancellation: CancelToken::new(),
+            scope: None,
         }
     }
 
-    pub fn send(mut self, result: PluginResult) {
+    pub fn with_cancellation(mut self, cancellation: CancelToken) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
+
+    pub fn cancellation(&self) -> CancelToken {
+        self.cancellation.clone()
+    }
+
+    pub fn with_scope(mut self, scope: Option<CancelToken>) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    pub fn send(mut self, mut result: PluginResult) {
         if let Some(send) = self.send.take() {
+            if let Some(cancel) = self.scope.take() {
+                result = PluginResult::Scoped {
+                    cancel,
+                    result: Box::new(result),
+                };
+            }
             send(result);
         }
     }
@@ -36,6 +62,10 @@ impl Drop for Settle {
 }
 
 pub trait MethodExec: Send + Sync {
+    fn spawn(&self, task: HostFuture) {
+        drop(task);
+    }
+
     fn worker(&self, settle: Settle, work: Work);
     fn main_thread(&self, settle: Settle, work: Work);
     fn now(&self, settle: Settle, result: PluginResult);
@@ -78,6 +108,7 @@ pub struct Method {
     pub invoke: Invoke,
     pub types: Option<MethodTypes>,
     pub(crate) awaits_user: bool,
+    pub(crate) strict_arguments: bool,
 }
 
 /// The JavaScript parameters and resolved return type of a native method.
@@ -97,6 +128,7 @@ impl Method {
             invoke: Invoke::Sync(Arc::new(f)),
             types: None,
             awaits_user: false,
+            strict_arguments: false,
         }
     }
 
@@ -109,6 +141,7 @@ impl Method {
             invoke: Invoke::Promise(Arc::new(f)),
             types: None,
             awaits_user: false,
+            strict_arguments: false,
         }
     }
 
@@ -122,6 +155,7 @@ impl Method {
             invoke: Invoke::Resource(Arc::new(open)),
             types: None,
             awaits_user: false,
+            strict_arguments: false,
         }
     }
 
@@ -160,7 +194,15 @@ impl Method {
             invoke: Invoke::Stream(Arc::new(start)),
             types: None,
             awaits_user: false,
+            strict_arguments: false,
         }
+    }
+
+    /// Reject JavaScript values without a representation in the host codec.
+    #[must_use]
+    pub fn strict_arguments(mut self) -> Self {
+        self.strict_arguments = true;
+        self
     }
 
     /// A platform prompt completes when the user responds or the owner detaches.

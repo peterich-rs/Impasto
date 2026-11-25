@@ -6,6 +6,9 @@ use anyhow::{Result, bail};
 use std::{fs, path::Path};
 pub fn test(bundle: Option<std::path::PathBuf>) -> Result<()> {
     let app = App::current()?;
+    if crate::plugins::configured(&app) {
+        bail!("impasto test 的无头宿主暂不装配 Rust 插件，请使用 cargo test 或目标平台构建");
+    }
     if let Some(bundle) = bundle {
         return run_bundle(&bundle, &app);
     }

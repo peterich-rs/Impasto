@@ -79,3 +79,18 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(target_os = "android", feature = "app-entry"))]
+pub use embedder::install_plugins;
+
+#[cfg(all(target_os = "android", feature = "app-entry"))]
+#[doc(hidden)]
+pub mod app_jni {
+    pub use crate::app::entrypoints::*;
+    pub use jni;
+    pub use jni::{
+        EnvUnowned,
+        objects::{JIntArray, JObject, JObjectArray, JString},
+        sys::{jboolean, jint, jlong},
+    };
+}

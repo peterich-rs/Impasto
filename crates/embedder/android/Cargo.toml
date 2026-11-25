@@ -8,6 +8,9 @@ publish.workspace = true
 name = "impasto"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+app-entry = []
+
 [dependencies]
 engine = { workspace = true }
 

@@ -455,3 +455,26 @@ fn stream_with_exec_drives_async_sink_and_cancels_cleanly() {
         Some(ModuleOutcome::Fulfilled)
     );
 }
+
+#[test]
+fn dropping_a_cancel_wait_releases_its_task_before_the_scope_closes() {
+    struct Task(AtomicUsize);
+    impl std::task::Wake for Task {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let token = CancelToken::new();
+    let task = Arc::new(Task(AtomicUsize::new(0)));
+    let waker = std::task::Waker::from(Arc::clone(&task));
+    let mut context = std::task::Context::from_waker(&waker);
+    for _ in 0..10 {
+        {
+            let wait = std::pin::pin!(token.cancelled());
+            assert!(wait.poll(&mut context).is_pending());
+        }
+        assert_eq!(Arc::strong_count(&task), 2);
+    }
+    assert!(!token.is_cancelled());
+}

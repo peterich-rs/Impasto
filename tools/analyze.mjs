@@ -23,7 +23,10 @@ const parsed=ts.parseJsonConfigFileContent(input.config,ts.sys,config ? dirname(
   jsxImportSource:"solid-js",allowImportingTsExtensions:true, skipLibCheck:true,
   strict:true, paths, baseUrl:framework,types:[],
 });
-const rootNames=[...parsed.fileNames,join(packages,"reactive/src/modules.d.ts"),join(packages,"solid-renderer/src/jsx.ts")];
+const manifest=process.argv[3] ? JSON.parse(readFileSync(process.argv[3],"utf8")) : undefined;
+if (manifest && manifest.schemaVersion !== 1) throw new Error("Unsupported plugins manifest schema");
+for (const [name, entry] of Object.entries(manifest?.entries ?? {})) paths[name] = [entry];
+const rootNames=[...parsed.fileNames,...(manifest?.types ?? []),join(packages,"reactive/src/modules.d.ts"),join(packages,"solid-renderer/src/jsx.ts")];
 const program=ts.createProgram(rootNames,parsed.options);
 const diagnostics=[...parsed.errors,...ts.getPreEmitDiagnostics(program)];
 if(diagnostics.length) {

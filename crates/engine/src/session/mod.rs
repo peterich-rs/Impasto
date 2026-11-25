@@ -15,9 +15,9 @@ pub use metrics::*;
 
 pub use javascript::host::{IoEvent, PluginResult, PluginValue, module_not_linked};
 pub use modules::{
-    CancelToken, EventType, ImmediateExec, Invoke, Method, MethodExec, MethodTypes, Module,
-    ModuleConfig, ModuleExports, ModuleRegistry, NativeExtension, NativeResource, PromiseFn,
-    ScriptExecution, Settle, Shared, StreamSendError, StreamSink, SyncFn, Work, shared,
+    CancelToken, EventType, HostFuture, ImmediateExec, Invoke, Method, MethodExec, MethodTypes,
+    Module, ModuleConfig, ModuleExports, ModuleRegistry, NativeExtension, NativeResource,
+    PromiseFn, ScriptExecution, Settle, Shared, StreamSendError, StreamSink, SyncFn, Work, shared,
     shared_read, shared_write,
 };
 

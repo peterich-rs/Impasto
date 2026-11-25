@@ -305,6 +305,7 @@ impl ImpastoIOSHost {
                     vsync: boot_clock,
                     decoder: app.decoder,
                     modules: app.modules,
+                    plugin_services: app.plugin_services,
                     platform_runner: Some(embedder::PlatformTaskRunner::new(
                         Arc::new(|work| DispatchQueue::main().exec_async(work)),
                         |delay, work| {

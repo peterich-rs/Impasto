@@ -18,8 +18,8 @@ pub use declaration::DeclarationError;
 pub use extensions::{CancelToken, NativeResource, StreamEvent, StreamSendError, StreamSink};
 pub use modules::Module as NativeExtension;
 pub use modules::{
-    EventType, ImmediateExec, Invoke, LISTENER_EXPORTS, Method, MethodExec, MethodTypes, Module,
-    ModuleExports, PromiseFn, Settle, SyncFn, Work, module_not_linked,
+    EventType, HostFuture, ImmediateExec, Invoke, LISTENER_EXPORTS, Method, MethodExec,
+    MethodTypes, Module, ModuleExports, PromiseFn, Settle, SyncFn, Work, module_not_linked,
 };
 pub use registry::{ModuleRegistry, RegistryError, valid_specifier};
-pub use value::{PluginResult, PluginValue};
+pub use value::{PluginResult, PluginValue, ResourceFactory};

@@ -11,10 +11,53 @@ pub enum PluginValue {
 }
 
 /// Completion of one token allocated for a promise.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub enum PluginResult {
     Done(PluginValue),
-    Failed { message: String },
+    Resource(ResourceFactory),
+    Failed {
+        message: String,
+    },
+    Rejected {
+        message: String,
+    },
+    Scoped {
+        cancel: super::CancelToken,
+        result: Box<Self>,
+    },
+}
+
+impl PluginResult {
+    pub(super) fn payload_bytes(&self) -> usize {
+        let mut result = self;
+        loop {
+            match result {
+                Self::Done(value) => return value.payload_bytes(),
+                Self::Resource(_) => return 0,
+                Self::Failed { message } | Self::Rejected { message } => return message.len(),
+                Self::Scoped { result: inner, .. } => result = inner,
+            }
+        }
+    }
+}
+
+/// Owned state that is consumed to create a resource on the VM queue.
+pub struct ResourceFactory(Box<dyn FnOnce() -> Box<dyn super::NativeResource> + Send>);
+
+impl ResourceFactory {
+    pub fn new(create: impl FnOnce() -> Box<dyn super::NativeResource> + Send + 'static) -> Self {
+        Self(Box::new(create))
+    }
+
+    pub fn open(self) -> Box<dyn super::NativeResource> {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for ResourceFactory {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str("ResourceFactory")
+    }
 }
 
 impl PluginValue {

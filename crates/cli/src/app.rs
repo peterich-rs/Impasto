@@ -16,6 +16,47 @@ struct Manifest {
     android: AndroidConfig,
     #[serde(default)]
     ios: IosConfig,
+    #[serde(default)]
+    macos: MacConfig,
+    native: Option<crate::plugins::Local>,
+    #[serde(default)]
+    plugins: BTreeMap<String, crate::plugins::Dependency>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MacConfig {
+    pub usage_descriptions: BTreeMap<String, String>,
+    pub entitlements: BTreeMap<String, bool>,
+}
+
+impl MacConfig {
+    fn validate(&self) -> Result<()> {
+        for (name, value) in &self.usage_descriptions {
+            if !name.starts_with("NS")
+                || !name.ends_with("UsageDescription")
+                || !name.bytes().all(|byte| byte.is_ascii_alphanumeric())
+                || value.trim().is_empty()
+            {
+                bail!(
+                    "macos.usage_descriptions 的 {name} 需要有效的 UsageDescription 键和非空说明"
+                );
+            }
+        }
+        for name in self.entitlements.keys() {
+            if !name.starts_with("com.apple.")
+                || name.split('.').any(|part| {
+                    part.is_empty()
+                        || !part
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                })
+            {
+                bail!("无效的 macOS entitlement {name}");
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -109,7 +150,10 @@ pub struct App {
     pub gallery: bool,
     pub android: AndroidConfig,
     pub ios: IosConfig,
+    pub macos: MacConfig,
     permissions: BTreeMap<String, Permission>,
+    pub native: Option<crate::plugins::Local>,
+    pub plugins: BTreeMap<String, crate::plugins::Dependency>,
 }
 impl App {
     pub fn current() -> Result<Self> {
@@ -127,7 +171,10 @@ impl App {
                 gallery: true,
                 android: AndroidConfig::default(),
                 ios: IosConfig::default(),
+                macos: MacConfig::default(),
                 permissions: BTreeMap::new(),
+                native: None,
+                plugins: BTreeMap::new(),
             });
         }
         bail!("当前目录没有 app.toml");
@@ -142,6 +189,7 @@ impl App {
         validate_name(&manifest.name)?;
         manifest.android.validate()?;
         manifest.ios.validate()?;
+        manifest.macos.validate()?;
         if manifest.version.split('.').count() != 3
             || !manifest
                 .version
@@ -202,7 +250,10 @@ impl App {
             gallery: false,
             android: manifest.android,
             ios: manifest.ios,
+            macos: manifest.macos,
             permissions: manifest.permissions,
+            native: manifest.native,
+            plugins: manifest.plugins,
         })
     }
     pub fn require(&self, target: &str) -> Result<()> {

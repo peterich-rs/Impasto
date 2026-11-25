@@ -1,21 +1,38 @@
 //! Settlement and bridge hooks on the JavaScript thread.
 
 use crate::host::{Credit, IoEvent, PluginResult};
-use rquickjs::{Ctx, IntoJs, Value};
+use rquickjs::{Ctx, Exception, IntoJs, Value};
 
-use crate::runtime::quickjs::{Vm, codec};
+use crate::runtime::quickjs::{Vm, codec, native_resource::ResourceTable};
 
 pub(crate) fn apply(
     vm: &Vm,
     ctx: &Ctx<'_>,
     event: IoEvent,
     credit: Option<Credit>,
+    resources: &std::rc::Rc<ResourceTable>,
+    cap: usize,
 ) -> rquickjs::Result<()> {
     match event {
         IoEvent::Plugin { token, result } => {
-            let (ok, value) = match result {
-                PluginResult::Done(value) => (true, codec::encode(ctx, &value)),
-                PluginResult::Failed { message } => (false, message.into_js(ctx)),
+            let mut outcome = result;
+            let (ok, value) = loop {
+                break match outcome {
+                    PluginResult::Done(value) => (true, codec::encode(ctx, &value)),
+                    PluginResult::Resource(factory) => {
+                        (true, resources.open(ctx, cap, || Ok(factory.open())))
+                    }
+                    PluginResult::Failed { message } => (false, message.into_js(ctx)),
+                    PluginResult::Rejected { message } => (false, error_value(ctx, &message)),
+                    PluginResult::Scoped { cancel, result } => {
+                        if cancel.is_cancelled() {
+                            (false, error_value(ctx, "native resource is closed"))
+                        } else {
+                            outcome = *result;
+                            continue;
+                        }
+                    }
+                };
             };
             settle(vm, ctx, token, ok, value)
         }
@@ -24,6 +41,11 @@ pub(crate) fn apply(
         }
         IoEvent::Host(_) => Ok(()),
     }
+}
+
+fn error_value<'js>(ctx: &Ctx<'js>, message: &str) -> rquickjs::Result<Value<'js>> {
+    Exception::from_message(ctx.clone(), message)
+        .map(|error| error.as_object().clone().into_value())
 }
 
 fn settle<'js>(

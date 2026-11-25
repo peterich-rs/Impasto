@@ -3,17 +3,17 @@
 use std::future::poll_fn;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Poll, Waker};
+use std::task::Poll;
 use std::thread::{self, ThreadId};
 use std::time::Duration;
 
-use super::io::{register_waker, wake_all};
+use super::io::{Waiter, Waiters};
 use super::{CreditPool, Delivery, IoEvent, PluginValue, Route, TERMINAL_PAYLOAD_LIMIT};
 
 #[derive(Debug, Default)]
 struct CancelInner {
     flag: Arc<AtomicBool>,
-    wakers: Mutex<Vec<Waker>>,
+    wakers: Mutex<Waiters>,
     pools: Option<(Arc<CreditPool>, Arc<CreditPool>)>,
 }
 
@@ -35,7 +35,7 @@ impl CancelToken {
         Self {
             inner: Arc::new(CancelInner {
                 flag,
-                wakers: Mutex::new(Vec::new()),
+                wakers: Mutex::default(),
                 pools: Some((ingress, outbound)),
             }),
         }
@@ -55,7 +55,7 @@ impl CancelToken {
                 .unwrap_or_else(|error| error.into_inner());
             std::mem::take(&mut *guard)
         };
-        wake_all(wakers);
+        wakers.wake_all();
         if let Some((ingress, outbound)) = &self.inner.pools {
             ingress.notify_cancel();
             outbound.notify_cancel();
@@ -63,12 +63,13 @@ impl CancelToken {
     }
 
     pub async fn cancelled(&self) {
+        let waiter = Arc::new(Waiter::default());
         poll_fn(|cx| {
             if self.is_cancelled() {
                 return Poll::Ready(());
             }
             if let Some((ingress, _)) = &self.inner.pools
-                && ingress.poll_closed(cx.waker()).is_ready()
+                && ingress.poll_closed(&waiter, cx.waker()).is_ready()
             {
                 return Poll::Ready(());
             }
@@ -80,7 +81,7 @@ impl CancelToken {
             if self.is_cancelled() {
                 return Poll::Ready(());
             }
-            register_waker(&mut wakers, cx.waker());
+            wakers.register(&waiter, cx.waker());
             Poll::Pending
         })
         .await;
@@ -121,7 +122,8 @@ pub enum StreamEvent {
 /// reader consumes or drops it. Dropping the producer closes the stream.
 pub struct StreamSink {
     route: Route,
-    deliver: Box<dyn Fn(Delivery) + Send + Sync>,
+    deliver: Arc<dyn Fn(Delivery) + Send + Sync>,
+    finish_on_drop: bool,
     ended: bool,
     consumer: ThreadId,
 }
@@ -131,7 +133,8 @@ impl StreamSink {
     pub(crate) fn new(route: Route, deliver: impl Fn(Delivery) + Send + Sync + 'static) -> Self {
         Self {
             route,
-            deliver: Box::new(deliver),
+            deliver: Arc::new(deliver),
+            finish_on_drop: true,
             ended: false,
             consumer: thread::current().id(),
         }
@@ -139,6 +142,18 @@ impl StreamSink {
 
     pub fn cancellation(&self) -> CancelToken {
         self.route.cancellation()
+    }
+
+    /// Retain terminal delivery while moving the producer into an async call.
+    pub fn terminal_guard(&mut self) -> Self {
+        self.finish_on_drop = false;
+        Self {
+            route: self.route.clone(),
+            deliver: Arc::clone(&self.deliver),
+            ended: false,
+            consumer: self.consumer,
+            finish_on_drop: true,
+        }
     }
 
     pub fn max_piece_bytes(&self) -> usize {
@@ -227,13 +242,25 @@ impl StreamSink {
 
 impl Drop for StreamSink {
     fn drop(&mut self) {
-        self.terminal(StreamEvent::Finished);
+        if self.finish_on_drop {
+            self.terminal(StreamEvent::Finished);
+        }
     }
 }
 
 /// A thread-affine native resource. Drop releases local state. cancel also
 /// signals any work the resource started with the supplied token.
 pub trait NativeResource: 'static {
+    /// Named JS methods supplied by a typed object. Legacy resources use call().
+    fn methods(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Prepare an owned call while the resource is borrowed on its owner.
+    fn method(&mut self, _name: &str, _cancel: &CancelToken) -> Option<super::Method> {
+        None
+    }
+
     fn call(
         &mut self,
         method: &str,

@@ -148,7 +148,8 @@ androidComponents {
             if (!envNdk.isNullOrBlank()) {
                 ndkOverride.set(File(envNdk))
             }
-            repoPath.set(repoRoot.path)
+            manifestPath.set(providers.gradleProperty("impastoCargoManifest").orElse(repoRoot.resolve("Cargo.toml").path))
+            packageName.set(providers.gradleProperty("impastoCargoPackage").orElse("embedder-android"))
             // Cargo fingerprints sources. Gradle must not, because a repo-wide file tree overlaps APK outputs.
             outputs.upToDateWhen { false }
         }
@@ -190,7 +191,10 @@ abstract class CargoImpasto : DefaultTask() {
     abstract val ndkOverride: DirectoryProperty
 
     @get:Input
-    abstract val repoPath: Property<String>
+    abstract val manifestPath: Property<String>
+
+    @get:Input
+    abstract val packageName: Property<String>
 
     @get:OutputDirectory
     abstract val jniLibs: DirectoryProperty
@@ -199,7 +203,7 @@ abstract class CargoImpasto : DefaultTask() {
     fun build() {
         val ndk = resolveNdk()
         val bin = llvmBin(ndk)
-        val root = File(repoPath.get())
+        val root = File(manifestPath.get()).parentFile
         val libraries = jniLibs.get().asFile
         if (!libraries.deleteRecursively()) {
             throw GradleException("could not clear ${libraries.path}")
@@ -221,11 +225,11 @@ abstract class CargoImpasto : DefaultTask() {
             "build",
             "--locked",
             "--manifest-path",
-            root.resolve("Cargo.toml").path,
+            manifestPath.get(),
             "--target",
             target,
             "-p",
-            "embedder-android",
+            packageName.get(),
         )
         if (release.get()) {
             command.add("--release")
