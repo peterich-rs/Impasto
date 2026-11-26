@@ -12,7 +12,7 @@ use crate::{
     Status,
     arena::BufferUpload,
     gpu::Gpu,
-    pipelines::{self, ViewUniform},
+    pipelines::{self, PipelineKind, ViewUniform},
 };
 
 const SLOTS_PER_PAGE: usize = 128;
@@ -29,6 +29,7 @@ pub struct Key {
     pub scope: usize,
     pub draw: usize,
     pub format: wgpu::TextureFormat,
+    pub pipeline: PipelineKind,
     pub revision: u64,
     pub atlas_epoch: u64,
     pub glyph_transform: [u32; 6],
@@ -116,6 +117,7 @@ struct PaintEntry {
 pub struct ResidentPictures {
     bundles: HashMap<Key, ResidentBundle>,
     paints: HashMap<u64, PaintEntry>,
+    empty_stops: Option<wgpu::Buffer>,
     previous: HashSet<Key>,
     seen: HashSet<Key>,
     slots: Vec<Option<OccupiedSlot>>,
@@ -141,6 +143,19 @@ pub struct LayerSlot {
 }
 
 impl ResidentPictures {
+    pub fn evict_images(&mut self, revisions: &HashSet<u64>) {
+        self.bundles.retain(|key, entry| {
+            if !revisions.contains(&key.revision) {
+                return true;
+            }
+            self.slots[entry.slot] = None;
+            self.vacant.push(entry.slot);
+            self.vertex_pages[entry.vertices.page].release(entry.vertices.range.clone());
+            self.bytes -= entry.bytes;
+            false
+        });
+    }
+
     pub fn begin_frame(&mut self) {
         self.frame = self.frame.wrapping_add(1);
         self.checked_device = false;
@@ -345,7 +360,7 @@ impl ResidentPictures {
         lut: &wgpu::TextureView,
         stops: &[[f32; 4]],
         paints: &[crate::batch::PaintExtra],
-    ) -> Result<(wgpu::BindGroup, [u64; 2]), Status> {
+    ) -> Result<(wgpu::BindGroup, u32, [u64; 2]), Status> {
         let stop_bytes: &[u8] = bytemuck::cast_slice(stops);
         let paint_bytes: &[u8] = bytemuck::cast_slice(paints);
         let mut hasher = DefaultHasher::new();
@@ -356,16 +371,31 @@ impl ResidentPictures {
             && *entry.stops == *stop_bytes
             && *entry.paints == *paint_bytes
         {
-            return Ok((entry.group.clone(), [0; 2]));
+            return Ok((entry.group.clone(), 0, [0; 2]));
         }
-        let mut stops = stop_bytes.to_vec();
-        stops.resize(pipelines::MAX_STOPS * 32, 0);
-        let stops = pipelines::buffer_from(
-            gpu,
-            "resident gradient stops",
-            &stops,
-            wgpu::BufferUsages::UNIFORM,
-        )?;
+        let stop_capacity = pipelines::MAX_STOPS * 32;
+        let (stops, stop_buffers, stop_uploaded) = if stop_bytes.is_empty() {
+            let created = u32::from(self.empty_stops.is_none());
+            let buffer = self.empty_stops.get_or_insert_with(|| {
+                gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("empty resident gradient stops"),
+                    size: stop_capacity as u64,
+                    usage: wgpu::BufferUsages::UNIFORM,
+                    mapped_at_creation: false,
+                })
+            });
+            (buffer.clone(), created, 0)
+        } else {
+            let mut data = stop_bytes.to_vec();
+            data.resize(stop_capacity, 0);
+            let buffer = pipelines::buffer_from(
+                gpu,
+                "resident gradient stops",
+                &data,
+                wgpu::BufferUsages::UNIFORM,
+            )?;
+            (buffer, 1, stop_capacity as u64)
+        };
         let paints = pipelines::buffer_from(
             gpu,
             "resident rectangle paints",
@@ -388,7 +418,7 @@ impl ResidentPictures {
         {
             self.paints.remove(&old);
         }
-        let bytes = [stops.size(), paints.size()];
+        let bytes = [stop_uploaded, paints.size()];
         self.paints.insert(
             key,
             PaintEntry {
@@ -398,7 +428,7 @@ impl ResidentPictures {
                 group: material.clone(),
             },
         );
-        Ok((material, bytes))
+        Ok((material, 1 + stop_buffers, bytes))
     }
 
     pub fn insert(
@@ -516,6 +546,7 @@ mod tests {
             scope: 0,
             draw: 0,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            pipeline: PipelineKind::Rect,
             revision: 1,
             atlas_epoch: 0,
             glyph_transform: [0; 6],

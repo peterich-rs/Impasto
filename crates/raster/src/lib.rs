@@ -132,6 +132,7 @@ pub struct Rasterizer {
     stats: SubmitStats,
     reuse_pictures: bool,
     parallel_prepare: bool,
+    late_acquire: bool,
     pipeline_cache_dir: Option<std::path::PathBuf>,
     prepared_buffers: u32,
     prepared_mesh_bytes: u64,
@@ -149,6 +150,21 @@ struct DeviceState {
     textures: TextureStore,
 }
 
+#[derive(Default)]
+struct FrameWork {
+    capture: Option<Capture>,
+    producers: Vec<wgpu::CommandBuffer>,
+    encode_elapsed: Duration,
+    prepare_elapsed: Duration,
+}
+
+struct PreparedSurfaceFrame {
+    work: FrameWork,
+    output: compositor::PreparedOutput,
+}
+
+type EncodedFrame = (Vec<wgpu::CommandBuffer>, wgpu::CommandEncoder);
+
 struct Frame {
     tree: Arc<LayerTree>,
     order: Vec<LayerId>,
@@ -157,7 +173,6 @@ struct Frame {
     views: Arc<[u64]>,
     gpu_view_requests: gpu_view::Requests,
     shader_uniforms: runtime_effect::ShaderUniformOverrides,
-    prepare_glyphs: bool,
     damage: DamageRect,
     has_glyphs: bool,
     revision: u64,
@@ -181,6 +196,7 @@ impl Rasterizer {
             stats: SubmitStats::default(),
             reuse_pictures: false,
             parallel_prepare: std::env::var("IMPASTO_PARALLEL_PREPARE").as_deref() != Ok("0"),
+            late_acquire: std::env::var("IMPASTO_LATE_ACQUIRE").as_deref() != Ok("0"),
             pipeline_cache_dir: None,
             prepared_buffers: 0,
             prepared_mesh_bytes: 0,
@@ -412,6 +428,7 @@ impl Rasterizer {
     pub fn forget_texture(&mut self, source: &str) {
         if let Some(device) = self.device.as_mut() {
             device.textures.forget(source);
+            device.compositor.evict_images(device.textures.evictions());
         }
     }
 
@@ -420,6 +437,7 @@ impl Rasterizer {
     pub fn invalidate_textures(&mut self) {
         if let Some(device) = self.device.as_mut() {
             device.textures.clear();
+            device.compositor.evict_images(device.textures.evictions());
         }
     }
 
@@ -432,6 +450,7 @@ impl Rasterizer {
         self.invalidate_pictures();
         if let Some(device) = self.device.as_mut() {
             device.textures.clear();
+            drop(device.textures.evictions());
             device.compositor.trim();
         }
         self.fonts.sweep();
@@ -514,7 +533,7 @@ impl Rasterizer {
         };
         let mut pictures = HashMap::with_capacity(tree.pictures.len());
         let mut has_glyphs = false;
-        let mut rebuilt_glyphs = false;
+        let mut rebuilt_glyphs = HashSet::new();
         for picture in &tree.pictures {
             let compile_scale = compile_scale(picture.id);
             let cached = previous
@@ -570,7 +589,9 @@ impl Rasterizer {
                     compiler::compile(picture, &mut context, pool)?
                 };
                 stats.picture_rebuilt = stats.picture_rebuilt.saturating_add(1);
-                rebuilt_glyphs |= result.has_glyphs;
+                if self.parallel_prepare && result.has_glyphs {
+                    rebuilt_glyphs.insert(picture.id);
+                }
                 if let Some(mesh) = result
                     .mesh_buffer
                     .get()
@@ -628,7 +649,6 @@ impl Rasterizer {
             pictures,
             views: Arc::clone(&platform_views),
             gpu_view_requests,
-            prepare_glyphs: self.parallel_prepare && rebuilt_glyphs,
             damage: DamageRect::Full,
             has_glyphs,
             revision: previous_revision.wrapping_add(1),
@@ -640,6 +660,14 @@ impl Rasterizer {
         frame.damage = damage::between(previous, &frame, &textures);
         stats.damage = frame.damage;
         stats.image_upload = textures.commit(&device.gpu)?;
+        device.compositor.evict_images(device.textures.evictions());
+        if !rebuilt_glyphs.is_empty() {
+            device.compositor.prepare_glyphs(
+                &device.gpu,
+                frame.scene(&self.fonts, &device.textures, None),
+                &rebuilt_glyphs,
+            );
+        }
         device.compositor.prune_subtrees(&frame.pictures);
         stats.picture_prepare = started.elapsed();
         stats.layer_count = u32::try_from(frame.tree.layers.len()).unwrap_or(u32::MAX);
@@ -669,64 +697,147 @@ impl Rasterizer {
     ) -> Result<(), Status> {
         let mut capture = self.begin_gpu_capture();
         let producers = self.render_gpu_views(capture.as_mut())?;
+        let work = FrameWork {
+            capture,
+            producers,
+            ..FrameWork::default()
+        };
+        self.submit_frame(work, |compositor, gpu, scene, capture| {
+            surface::check_size(gpu, pixels)?;
+            compositor.begin_frame();
+            let command = compositor.encode(
+                gpu,
+                scene,
+                target,
+                format,
+                [pixels.width, pixels.height],
+                capture.map(|capture| (capture, None)),
+            )?;
+            Ok((Vec::new(), command))
+        })
+    }
+
+    fn prepare_surface_frame(
+        &mut self,
+        format: compositor::OutputFormat,
+        pixels: PixelSize,
+    ) -> Result<PreparedSurfaceFrame, Status> {
+        let mut capture = self.begin_gpu_capture();
+        let producers = self.render_gpu_views(capture.as_mut())?;
+        let started = Instant::now();
         let device = self.device.as_mut().ok_or(Status::NotReady)?;
         let frame = self.frame.as_ref().ok_or(Status::NotReady)?;
         surface::check_size(&device.gpu, pixels)?;
-        let started = Instant::now();
-        let _compose_span = tracing::debug_span!(target: "impasto::render", "compose").entered();
-        let gpu = &device.gpu;
-        let compositor = &mut device.compositor;
-        compositor.begin_frame();
-        let (atlas, encode, flush, submitted) = gpu.hot_validation(|| {
-            let stage = Instant::now();
-            let command = {
-                let _encode_span =
-                    tracing::debug_span!(target: "impasto::render", "encode").entered();
-                let mut command = compositor.encode(
-                    gpu,
+        device.compositor.begin_frame();
+        let encode_started = Instant::now();
+        let _span = tracing::debug_span!(target: "impasto::render", "encode").entered();
+        let output = device
+            .gpu
+            .hot_validation(|| {
+                device.compositor.prepare_surface(
+                    &device.gpu,
                     frame.scene(&self.fonts, &device.textures, None),
-                    target,
                     format,
                     [pixels.width, pixels.height],
-                    capture.as_mut().map(|capture| (capture, None)),
-                )?;
-                if gpu.backend != RasterBackend::Metal
-                    && let Some(capture) = &capture
+                    capture.as_mut(),
+                )
+            })
+            .inspect_err(|_| device.compositor.discard_frame())?;
+        let encode_elapsed = encode_started.elapsed();
+        self.stats.encode = encode_elapsed;
+        Ok(PreparedSurfaceFrame {
+            output,
+            work: FrameWork {
+                capture,
+                producers,
+                encode_elapsed,
+                prepare_elapsed: started.elapsed(),
+            },
+        })
+    }
+
+    fn submit_surface_frame(
+        &mut self,
+        target: &wgpu::TextureView,
+        prepared: PreparedSurfaceFrame,
+    ) -> Result<(), Status> {
+        self.submit_frame(prepared.work, |compositor, _, _, _| {
+            Ok(prepared.output.finish(target, compositor))
+        })
+    }
+
+    fn submit_frame(
+        &mut self,
+        work: FrameWork,
+        encode: impl FnOnce(
+            &mut Compositor,
+            &Gpu,
+            Scene<'_>,
+            Option<&mut Capture>,
+        ) -> Result<EncodedFrame, Status>,
+    ) -> Result<(), Status> {
+        let FrameWork {
+            mut capture,
+            producers,
+            prepare_elapsed,
+            encode_elapsed,
+        } = work;
+        let started = Instant::now();
+        let _compose = tracing::debug_span!(target: "impasto::render", "compose").entered();
+        let device = self.device.as_mut().ok_or(Status::NotReady)?;
+        let gpu = &device.gpu;
+        let compositor = &mut device.compositor;
+        let (atlas, encode, flush, submit_done, queue_submit) = gpu
+            .hot_validation(|| {
+                let stage = Instant::now();
+                let (passes, command) = {
+                    let _span = tracing::debug_span!(target: "impasto::render", "encode").entered();
+                    let frame = self.frame.as_ref().ok_or(Status::NotReady)?;
+                    let scene = frame.scene(&self.fonts, &device.textures, None);
+                    let (passes, mut tail) = encode(compositor, gpu, scene, capture.as_mut())?;
+                    if gpu.backend != RasterBackend::Metal
+                        && let Some(capture) = &capture
+                    {
+                        capture.resolve(&mut tail);
+                    }
+                    (passes, tail.finish())
+                };
+                let encode = encode_elapsed + stage.elapsed();
+                let stage = Instant::now();
+                let (atlas, prelude) = {
+                    let _span =
+                        tracing::debug_span!(target: "impasto::render", "flush_arena").entered();
+                    compositor.flush(gpu)?
+                };
+                let flush = stage.elapsed();
+                let stage = Instant::now();
                 {
-                    capture.resolve(&mut command);
+                    let _span =
+                        tracing::debug_span!(target: "impasto::render", "queue_submit").entered();
+                    gpu.submit(
+                        producers
+                            .into_iter()
+                            .chain(prelude)
+                            .chain(passes)
+                            .chain([command]),
+                    );
+                    compositor.submitted(gpu);
                 }
-                command.finish()
-            };
-            let encode = stage.elapsed();
-            let stage = Instant::now();
-            let (atlas, prelude) = {
-                let _flush_span =
-                    tracing::debug_span!(target: "impasto::render", "flush_arena").entered();
-                compositor.flush(gpu)?
-            };
-            let flush = stage.elapsed();
-            let stage = Instant::now();
-            {
-                let _submit_span =
-                    tracing::debug_span!(target: "impasto::render", "queue_submit").entered();
-                gpu.submit(producers.into_iter().chain(prelude).chain([command]));
-                compositor.submitted(gpu);
-            }
-            let done = Instant::now();
-            Ok((atlas, encode, flush, (done, done.duration_since(stage))))
-        })?;
-        let (submit_done, submit_elapsed) = submitted;
+                let done = Instant::now();
+                Ok((atlas, encode, flush, done, done.duration_since(stage)))
+            })
+            .inspect_err(|_| compositor.discard_frame())?;
         if let (Some(profiler), Some(capture)) = (&mut device.profiler, capture) {
             self.gpu_sample = profiler.submitted(gpu, capture);
         }
         self.stats.atlas = atlas;
         self.stats.encode = encode;
         self.stats.flush = flush;
-        self.stats.queue_submit = submit_elapsed;
+        self.stats.queue_submit = queue_submit;
         self.stats.submit_done = Some(submit_done);
         let render = compositor.render_stats();
         self.finish_render_stats(render);
-        self.stats.compose = started.elapsed();
+        self.stats.compose = prepare_elapsed + started.elapsed();
         Ok(())
     }
 }
@@ -746,7 +857,6 @@ impl Frame {
             shader_uniforms: &self.shader_uniforms,
             scale: self.scale,
             slice,
-            prepare_glyphs: self.prepare_glyphs,
             damage: self.damage,
             has_glyphs: self.has_glyphs,
             revision: self.revision,

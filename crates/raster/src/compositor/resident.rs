@@ -36,11 +36,7 @@ impl Frame<'_> {
                         as u64
                 };
                 (
-                    if solid {
-                        PipelineKind::RectSolid
-                    } else {
-                        PipelineKind::Rect
-                    },
+                    self.rect_pipeline(target, clip, &run.vertices, run.blend, solid),
                     run.blend,
                     run.vertices.len(),
                     0,
@@ -57,8 +53,15 @@ impl Frame<'_> {
                 let Some(image) = self.scene.textures.get(source) else {
                     return Ok(false);
                 };
+                if image.nv12().is_some() {
+                    return Ok(false);
+                }
                 (
-                    PipelineKind::Image,
+                    if clip.count == 0 {
+                        PipelineKind::ImageUnclipped
+                    } else {
+                        PipelineKind::Image
+                    },
                     *blend,
                     instances.len(),
                     image.revision,
@@ -95,6 +98,7 @@ impl Frame<'_> {
             scope: position.0,
             draw: position.1,
             format: target.format,
+            pipeline: kind,
             revision,
             atlas_epoch: if is_text {
                 self.compositor.atlas.epoch()
@@ -298,7 +302,10 @@ impl Frame<'_> {
         encoder.set_vertex_buffer(0, vertices.slice());
         match draws {
             [Draw::Rects(run)] => {
-                let (group, offsets, count) = if kind == PipelineKind::RectSolid {
+                let (group, offsets, count) = if matches!(
+                    kind,
+                    PipelineKind::RectSolid | PipelineKind::RectSolidUnclipped
+                ) {
                     (slot.group.clone(), [slot.offset, 0], 1)
                 } else {
                     let layout = &compositor.pipelines.layouts.paint;
@@ -307,16 +314,17 @@ impl Frame<'_> {
                     } else {
                         &run.paints
                     };
-                    let (group, [stop_bytes, extra_bytes]) = compositor.resident.paint_group(
-                        gpu,
-                        layout,
-                        &slot.buffer,
-                        &compositor.arena.lut.view,
-                        run.stops(),
-                        paints,
-                    )?;
-                    if extra_bytes != 0 {
-                        compositor.render_stats.buffers_created += 2;
+                    let (group, buffers, [stop_bytes, extra_bytes]) =
+                        compositor.resident.paint_group(
+                            gpu,
+                            layout,
+                            &slot.buffer,
+                            &compositor.arena.lut.view,
+                            run.stops(),
+                            paints,
+                        )?;
+                    if buffers != 0 {
+                        compositor.render_stats.buffers_created += buffers;
                         compositor.render_stats.bind_groups_created += 1;
                         compositor.render_stats.stop_bytes += stop_bytes;
                         compositor.render_stats.extra_bytes += extra_bytes;
@@ -329,14 +337,14 @@ impl Frame<'_> {
                 encoder.set_bind_group(1, &compositor.white_mask_group, &[]);
                 let mut start = 0;
                 for vertices in batch::rect_pipeline_runs(&run.vertices) {
-                    let pipeline = if batch::is_shadow(&vertices[0]) {
-                        shadow.as_ref().unwrap_or(&pipeline)
+                    let (pipeline, count) = if batch::is_shadow(&vertices[0]) {
+                        (shadow.as_ref().unwrap_or(&pipeline), gpu.shadow_vertices())
                     } else {
-                        &pipeline
+                        (&pipeline, 6)
                     };
                     let end = start + draw_count(vertices.len())?;
                     encoder.set_pipeline(pipeline);
-                    encoder.draw(0..6, start..end);
+                    encoder.draw(0..count, start..end);
                     start = end;
                 }
             }

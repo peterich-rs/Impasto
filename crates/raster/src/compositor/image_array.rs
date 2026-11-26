@@ -143,6 +143,7 @@ impl Frame<'_> {
             Some(mask.clone()),
             vertices,
             scissor,
+            6,
         )
     }
 }

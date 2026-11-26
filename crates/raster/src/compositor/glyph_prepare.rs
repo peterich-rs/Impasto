@@ -1,114 +1,41 @@
-//! Finds exact glyph variants before replay consumes atlas placements.
+//! Finds the exact glyph variants for new pictures before the next present.
 
-use super::{Frame, GlyphTransform, Image};
-use crate::compiler::{self, Draw, IDENTITY};
-use engine::scene::LayerKind;
+use super::{Compositor, GlyphTransform, Scene};
+use crate::compiler::{self, Draw, IDENTITY, PictureBounds};
+use crate::gpu::Gpu;
+use engine::scene::{LayerKind, PictureId};
 use std::collections::HashSet;
 
 // Bound speculative CPU work and temporary bitmap memory on text-heavy pages.
-const PREFETCH_LIMIT: usize = 768;
+const PREFETCH_LIMIT: usize = 2048;
 
-impl Frame<'_> {
-    pub(super) fn prepare_glyphs(&mut self, target: &Image) {
-        if !self.scene.prepare_glyphs {
-            return;
-        }
+impl Compositor {
+    pub(crate) fn prepare_glyphs(
+        &mut self,
+        gpu: &Gpu,
+        scene: Scene<'_>,
+        rebuilt: &HashSet<PictureId>,
+    ) {
         let Some(pool) = crate::prepare::pool() else {
             return;
         };
-        if self.scene.slice.is_none() {
-            if self.compositor.glyph_prefetch_revision == Some(self.scene.scene_revision) {
-                return;
-            }
-            self.compositor.glyph_prefetch_revision = Some(self.scene.scene_revision);
-        }
+        self.atlas.clear_prepared();
+        let viewport = self.last_viewport.map(|[width, height]| {
+            [
+                0.0,
+                0.0,
+                width as f32 / scene.scale,
+                height as f32 / scene.scale,
+            ]
+        });
         let mut keys = HashSet::new();
-        let mut remaining = vec![(self.scene.tree.root, IDENTITY)];
-        while let Some((id, parent)) = remaining.pop() {
-            let Some(layer) = self.scene.tree.layers.get(id.0 as usize) else {
+        let mut remaining = vec![(scene.tree.root, IDENTITY)];
+        'layers: while let Some((id, parent)) = remaining.pop() {
+            let Some(layer) = scene.tree.layers.get(id.0 as usize) else {
                 continue;
             };
             if let Some(next) = layer.next {
                 remaining.push((next, parent));
-            }
-            if self.scene.slice.is_some_and(|slice| !slice.contains(&id)) {
-                continue;
-            }
-            if let LayerKind::Picture { picture } = layer.kind
-                && let Some(picture) = self.scene.pictures.get(&picture)
-                && picture.has_glyphs
-            {
-                let origin = compiler::compose(
-                    parent,
-                    [1.0, 0.0, 0.0, 1.0, picture.origin.0, picture.origin.1],
-                );
-                let scale = self.scene.scale;
-                let bounds = (origin[..4] == IDENTITY[..4] && scale >= picture.scale)
-                    .then_some(picture.scope_blocks.as_slice());
-                for (index, scopes) in picture
-                    .scopes
-                    .chunks(compiler::SCOPES_PER_BLOCK)
-                    .enumerate()
-                {
-                    if bounds
-                        .and_then(|bounds| bounds.get(index))
-                        .is_some_and(|bounds| {
-                            self.area(bounds.transform(origin).expand(1.0 / scale), target)
-                                .is_none()
-                        })
-                    {
-                        continue;
-                    }
-                    for scope in scopes {
-                        if self
-                            .area(scope.bounds_in(origin, self.scene.scale), target)
-                            .is_none()
-                        {
-                            continue;
-                        }
-                        let transform = GlyphTransform::new(
-                            compiler::compose(origin, scope.state.transform),
-                            self.scene.scale,
-                        );
-                        for glyph in scope
-                            .draws
-                            .iter()
-                            .filter_map(|draw| match draw {
-                                Draw::Glyphs(glyphs) => Some(glyphs),
-                                _ => None,
-                            })
-                            .flatten()
-                        {
-                            if glyph.decoration.is_some() || transform.vector(glyph.size) {
-                                continue;
-                            }
-                            let position = transform.position(glyph);
-                            let size = glyph.size * transform.pixels;
-                            let mut add = |lcd| {
-                                if let Some(key) = self
-                                    .compositor
-                                    .atlas
-                                    .missing_glyph(self.gpu, glyph, size, position, lcd)
-                                {
-                                    keys.insert(key);
-                                }
-                            };
-                            add(false);
-                            if transform.aligned
-                                && self.gpu.caps.lcd
-                                && target.format.is_srgb()
-                                && target.view == self.root
-                                && glyph.gradient.is_none()
-                            {
-                                add(true);
-                            }
-                            if keys.len() >= PREFETCH_LIMIT {
-                                self.compositor.atlas.prepare(pool, self.scene.fonts, keys);
-                                return;
-                            }
-                        }
-                    }
-                }
             }
             if let Some(child) = layer.first_child {
                 remaining.push((
@@ -116,7 +43,62 @@ impl Frame<'_> {
                     compiler::compose(parent, compiler::layer_transform(&layer.kind)),
                 ));
             }
+            let LayerKind::Picture { picture } = layer.kind else {
+                continue;
+            };
+            if !rebuilt.contains(&picture) {
+                continue;
+            }
+            let Some(picture) = scene.pictures.get(&picture) else {
+                continue;
+            };
+            let origin = compiler::compose(
+                parent,
+                [1.0, 0.0, 0.0, 1.0, picture.origin.0, picture.origin.1],
+            );
+            for scope in &picture.scopes {
+                if viewport.is_some_and(|viewport| {
+                    scope
+                        .bounds_in(origin, scene.scale)
+                        .expand(1.0 / scene.scale)
+                        .clip(viewport)
+                        == PictureBounds::Empty
+                }) {
+                    continue;
+                }
+                let transform = GlyphTransform::new(
+                    compiler::compose(origin, scope.state.transform),
+                    scene.scale,
+                );
+                for glyph in scope
+                    .draws
+                    .iter()
+                    .filter_map(|draw| match draw {
+                        Draw::Glyphs(glyphs) => Some(glyphs),
+                        _ => None,
+                    })
+                    .flatten()
+                {
+                    if glyph.decoration.is_some() || transform.vector(glyph.size) {
+                        continue;
+                    }
+                    let position = transform.position(glyph);
+                    let size = glyph.size * transform.pixels;
+                    // The output is unknown at submit, so LCD-capable devices
+                    // also prefetch the optional LCD variant for plain text.
+                    let lcd = transform.aligned && gpu.caps.lcd && glyph.gradient.is_none();
+                    for lcd in [false, lcd].into_iter().take(1 + usize::from(lcd)) {
+                        if let Some(key) = self.atlas.missing_glyph(gpu, glyph, size, position, lcd)
+                        {
+                            keys.insert(key);
+                        }
+                        if keys.len() >= PREFETCH_LIMIT {
+                            break 'layers;
+                        }
+                    }
+                }
+            }
         }
-        self.compositor.atlas.prepare(pool, self.scene.fonts, keys);
+        self.atlas.prepare(pool, scene.fonts, keys);
     }
 }

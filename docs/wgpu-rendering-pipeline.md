@@ -214,7 +214,7 @@ flowchart TD
      - **圆角裁剪（`PushClip`）**：轴对齐裁剪收紧硬件 scissor。最多四层轴对齐、等比正缩放的圆角由着色器解析求交。其余圆角与路径生成紧边界覆盖率遮罩，同一帧内可复用。
 2. **Text Atlas Pass（文字图集管线）**：
    - **双图集管理**：灰阶覆盖与彩色字形各使用一张按需扩层的二维数组纹理。常驻字形按实例选择图集和层，普通文字、彩色字形与装饰线可共用一批。图集按页回收，超限字形使用临时页。
-   - **字形光栅化**：消费 UI 线程传入的 `Arc<ShapedParagraph>`；Swash 在字形键未命中时生成位图。灰阶常驻层合并连续脏带后上传，彩色字形使用复用的暂存区。回收页清零，包括字形间的采样边距。
+   - **字形光栅化**。提交新 Picture 时，预先用 Swash 光栅化去重后的常用字形，回放时按需补齐。等比单位变换的字号以 1/8 px 分桶，其他变换以 1/4 px 分桶。按 DPR 使用 4、2 或 1 个水平亚像素桶。常驻灰阶和彩色页按 128×128 瓦片汇总脏矩形，上传覆盖字形之间的采样边距。
    - **前景与装饰**：支持单色前景、`SpanPaint::Gradient`（在 Shader 内按段落局部坐标采样渐变）以及下划线/删除线矩形实例合批。
 3. **Image Pass（图像绘制管线）**：
    - 处理 `Command::Image`、`CanvasImageOp` 与异步上传的 `GpuImage`，直接在 Vertex/Fragment Shader 中映射 `ContentMode::Fill`、`Fit`、`Crop` 的 UV 采样框；对于 `NineSlice` 拆分为最多 9 个 Instanced Quad 在同一批次绘制。
@@ -519,9 +519,13 @@ impl Rasterizer {
 | `Validation` | 返回带操作上下文的失败并送诊断。设备内存不足使用现有资源压力路径回报 |
 
 - `SubmitInfo` 含诊断和 `LayerKind::PlatformView` 的有序 node ID。`PresentCached` 重用该帧元数据。测试宿主通过现有开表面回调注入失败/录制，可用尚未初始化 GPU 的 Rasterizer 测调度；需要验证像素时使用真实 headless 设备。
+- 普通窗口在获取 drawable 前准备 GPU View、帧数据和离屏命令。获取成功后绑定主目标、flush 上传并提交。涉及纹理池复用的主目标分段按原有顺序排在各自的离屏命令之后。`IMPASTO_LATE_ACQUIRE=0` 可用于同一二进制的 A/B 对照。
+- 图片缓存为非当前场景的纹理保留最多 180 次成功场景提交，默认预算 48 MiB，可用 `IMPASTO_IMAGE_CACHE_MB` 配置。当前已安装场景持有其图片，宿主收到内存警告时立即清理闲置项。
 - `render_rgba` 渲染至同一合成器的 RGBA8 sRGB 目标，使用拷贝到 `MAP_READ`、等待该次 submission 和 map callback。按 `COPY_BYTES_PER_ROW_ALIGNMENT` 分配行，回读后去 padding、在适用时将线性预乘恢复为 straight alpha，并生成从顶行起、紧密排列的 RGBA8。宽高和长度使用 checked 运算，GPU 错误沿 Result 返回。macOS `IMPASTO_DUMP` 复用此入口，首帧输出后沿现有停止路径退出。
 
 常规宿主调用顺序为 `create(options, fonts) → create_surface(target, size) → submit_layers(tree, scale, resolve) → present(surface, size)`。离屏走 `headless(options, fonts) → submit_layers(...) → render_rgba(size)`。平台 host 统一按 `SurfaceId` 处理 resize、退役和恢复。
+
+`just bench-wave` 运行异构卡片、模态叠层、缩放与混排文字、模糊与 mip 上传、混合 Canvas 五组合成负载。用 `tools/bench-compare.py --filter tests::p0::wave::bench_` 对照两个包含该基准的构建。可追加 `--limit-counter hetero_cards_50/counters.bind_groups_created=0` 以检查候选暖帧的计数。设备的获取等待和呈递间隔由宿主时序采样记录。
 
 ### 7.8 iOS UIKit 事务合成与可行性验证
 

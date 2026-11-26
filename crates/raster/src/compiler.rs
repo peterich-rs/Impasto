@@ -237,6 +237,7 @@ pub struct RectRun {
     pub rects: Vec<RectInstance>,
     pub draws: u32,
     pub stops: Option<Arc<[[f32; 4]]>>,
+    pub ramp: Option<Arc<crate::gradient_lut::PreparedRamp>>,
     pub blend: BlendKey,
     pub vertices: Vec<batch::RectVertex>,
     pub paints: Vec<batch::PaintExtra>,
@@ -735,6 +736,7 @@ impl Compiler<'_> {
         &mut self,
         rects: impl IntoIterator<Item = RectInstance>,
         stops: Option<Arc<[[f32; 4]]>>,
+        ramp: Option<Arc<crate::gradient_lut::PreparedRamp>>,
         blend: BlendKey,
     ) {
         let state = self.current();
@@ -757,6 +759,7 @@ impl Compiler<'_> {
                 rects: rects.into_iter().collect(),
                 draws: 0,
                 stops,
+                ramp,
                 blend,
                 vertices: Vec::new(),
                 paints: Vec::new(),
@@ -988,34 +991,64 @@ impl Compiler<'_> {
             (true, false) => RECT_FILL,
             (false, false) => {
                 if !instances.is_empty() {
-                    self.push_rects(instances, None, BlendKey::SrcOver);
+                    self.push_rects(instances, None, None, BlendKey::SrcOver);
                 }
                 return Ok(());
             }
         };
-        let (flags, gradient_a, gradient_b, stops) = match gradient {
+        let (flags, gradient_a, gradient_b, stops, inline, ramp) = match gradient {
             Some(gradient) => {
                 let Some(packed) = pack_gradient(gradient, x, y, w, h, 255) else {
                     return Ok(());
                 };
+                let inline = packed.inline_pair();
                 (
                     RECT_GRADIENT,
                     packed.a,
                     [
-                        packed.kind as f32,
+                        inline.map_or(packed.kind, |_| batch::INLINE_LINEAR_GRADIENT) as f32,
                         0.0,
-                        packed.stops.len() as f32 / 2.0,
+                        if inline.is_none() {
+                            packed.stops.len() as f32 / 2.0
+                        } else {
+                            0.0
+                        },
                         1.0,
                     ],
-                    Some(packed.stops),
+                    inline.is_none().then_some(packed.stops),
+                    inline,
+                    packed.ramp,
                 )
             }
-            None => (0, [0.0; 4], [0.0, 0.0, 0.0, 1.0], None),
+            None => (0, [0.0; 4], [0.0, 0.0, 0.0, 1.0], None, None, None),
         };
         let fill_color = match gradient {
             Some(gradient) => gradient_solid(gradient).unwrap_or([0.0; 4]),
             None => linear_premultiplied(*color, 255).unwrap_or([0.0; 4]),
         };
+        let opaque_fill = stops.as_ref().map_or(
+            fill_color[3] == 1.0 && inline.is_none_or(|[_, end]| end[3] == 1.0),
+            |stops| {
+                stops
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .all(|[color, _]| color[3] == 1.0)
+            },
+        );
+        if opaque_fill {
+            let radius = corners.map_or_else(
+                || clamped_radius(corner_radius, w, h),
+                |shape| shape.radii.into_iter().fold(0.0, f32::max),
+            );
+            let inset = radius * (1.0 - std::f32::consts::FRAC_1_SQRT_2);
+            for shadow in &mut instances {
+                let dx = x - shadow.rect[0];
+                let dy = y - shadow.rect[1];
+                shadow.gradient_a = [dx + inset, dy + inset, dx + w - inset, dy + h - inset];
+                shadow.stroke_color[3] = 1.0;
+            }
+        }
         let stroke_color = linear_premultiplied(*stroke_color, 255).unwrap_or([0.0; 4]);
         // Gradient stops are shared per draw batch; store them on the
         // compositor's stop buffer at encode time.
@@ -1030,11 +1063,12 @@ impl Compiler<'_> {
             stroke_color,
             gradient_a,
             gradient_b,
-            shadow: [0.0; 4],
+            shadow: inline.map_or([0.0; 4], |[_, end]| end),
         };
         self.push_rects(
             instances.into_iter().chain([fill]),
             stops.map(Arc::from),
+            ramp,
             BlendKey::SrcOver,
         );
         Ok(())
@@ -1453,7 +1487,7 @@ impl Compiler<'_> {
                 {
                     let mut instance = solid_rect(*bounds, color);
                     instance.radius = radius.clamp(0.0, w.min(h) * 0.5);
-                    self.push_rects([instance], None, BlendKey::SrcOver);
+                    self.push_rects([instance], None, None, BlendKey::SrcOver);
                 }
             }
             CanvasOp::Text(text) => {
@@ -1549,6 +1583,7 @@ impl Compiler<'_> {
                 self.stack.push(state);
                 self.push_rects(
                     [solid_rect([*x, *y, *w, *h], [1.0; 4])],
+                    None,
                     None,
                     BlendKey::DstOut,
                 );

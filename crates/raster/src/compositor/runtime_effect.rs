@@ -51,7 +51,8 @@ impl Frame<'_> {
             .iter()
             .take(MAX_SHADER_TEXTURES)
             .any(|source| source.as_ref() == BACKDROP_TEXTURE)
-            .then(|| self.snapshot(target, area));
+            .then(|| self.snapshot(target, area))
+            .transpose()?;
         let mut params = EffectParams::zeroed();
         let (uniform_words, _) = uniforms.as_chunks::<4>();
         for (value, bytes) in params.uniforms.iter_mut().flatten().zip(uniform_words) {
@@ -133,6 +134,7 @@ impl Frame<'_> {
             Some(mask),
             &[bounds],
             clip.scissor,
+            6,
         )?;
         if measuring {
             self.pending_pass(target).shader = Some(id);

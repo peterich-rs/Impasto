@@ -23,7 +23,8 @@ struct VertexOut {
     @location(3) @interpolate(flat) flags_and_layer: u32,
     @location(4) @interpolate(flat) gradient_geometry: vec4<f32>,
     @location(5) @interpolate(flat) gradient_parameters: vec4<u32>,
-    @location(6) @interpolate(flat) radial_radii: vec2<f32>,
+    @location(6) @interpolate(flat) gradient_end: vec4<f32>,
+    @location(7) @interpolate(flat) gradient_start: vec4<f32>,
 };
 
 fn glyph_unit(vertex: u32) -> vec2<f32> {
@@ -84,7 +85,8 @@ fn vs_main(@builtin(vertex_index) vertex: u32, data: GlyphVertex) -> VertexOut {
     let extra = load_paint(data.paint_index);
     out.gradient_geometry = extra.geometry;
     out.gradient_parameters = vec4<u32>(extra.gradient);
-    out.radial_radii = extra.shadow.xy;
+    out.gradient_end = extra.shadow;
+    out.gradient_start = extra.stroke;
     return out;
 }
 
@@ -98,8 +100,11 @@ fn glyph_coverage(uv: vec2<f32>, layer: i32, flags: u32) -> f32 {
 
 fn glyph_gradient(in: VertexOut) -> vec4<f32> {
     let parameters = in.gradient_parameters;
+    if parameters.x == 4u {
+        return inline_gradient(in.local, in.gradient_geometry, in.gradient_start, in.gradient_end);
+    }
     return gradient_color(in.local, parameters.x, parameters.y, parameters.z,
-        in.gradient_geometry, in.radial_radii, parameters.w);
+        in.gradient_geometry, in.gradient_end.xy, parameters.w, atlas_sampler);
 }
 
 @fragment

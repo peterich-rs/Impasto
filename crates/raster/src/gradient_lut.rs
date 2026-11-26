@@ -1,6 +1,12 @@
 //! Optional device-local ramp atlas for long, smoothly interpolated gradients.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex, OnceLock, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use crate::gpu::Gpu;
 
@@ -9,14 +15,68 @@ const SIZE: usize = WIDTH as usize;
 const LAYERS: u32 = 64;
 const MAX_ERROR: f32 = 0.002;
 type Ramp = [[u16; 4]; SIZE];
+type RampCache = HashMap<Box<[[u32; 4]]>, Weak<PreparedRamp>>;
+const PREPARED_RAMP_LIMIT: usize = 1024;
+
+pub(crate) fn enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("IMPASTO_GRADIENT_LUT").as_deref() == Ok("1"))
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedRamp {
+    id: u64,
+    pixels: Ramp,
+}
+
+impl PreparedRamp {
+    pub fn new(pairs: &[[f32; 4]]) -> Option<Arc<Self>> {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        static CACHE: OnceLock<Mutex<RampCache>> = OnceLock::new();
+        if !enabled() || pairs.len() < 16 {
+            return None;
+        }
+        let cache = CACHE.get_or_init(Mutex::default);
+        let key: &[[u32; 4]] = bytemuck::cast_slice(pairs);
+        if let Some(ramp) = cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(key)?.upgrade())
+        {
+            return Some(ramp);
+        }
+        let ramp = Arc::new(Self {
+            pixels: bake(pairs)?,
+            id: NEXT.fetch_add(1, Ordering::Relaxed),
+        });
+        if let Ok(mut cache) = cache.lock() {
+            if let Some(existing) = cache.get(key).and_then(Weak::upgrade) {
+                return Some(existing);
+            }
+            if cache.len() >= PREPARED_RAMP_LIMIT {
+                cache.retain(|_, ramp| ramp.strong_count() != 0);
+            }
+            if cache.len() < PREPARED_RAMP_LIMIT {
+                cache.insert(key.into(), Arc::downgrade(&ramp));
+            }
+        }
+        Some(ramp)
+    }
+}
+
+impl PartialEq for PreparedRamp {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id || self.pixels == other.pixels
+    }
+}
 
 pub(crate) struct GradientLut {
     texture: wgpu::Texture,
     pub view: wgpu::TextureView,
-    enabled: bool,
     layers: u32,
     used_layers: u32,
-    ramps: HashMap<Vec<[u32; 4]>, u32>,
+    overflowed: bool,
+    ramps: HashMap<u64, u32>,
     pub upload_bytes: u64,
     pub hits: u32,
 }
@@ -50,9 +110,9 @@ impl GradientLut {
         Self {
             texture,
             view,
-            enabled,
             layers,
             used_layers: 0,
+            overflowed: false,
             ramps: HashMap::new(),
             upload_bytes: 0,
             hits: 0,
@@ -62,7 +122,7 @@ impl GradientLut {
     pub fn reset(&mut self) {
         self.upload_bytes = 0;
         self.hits = 0;
-        if self.used_layers == self.layers || self.ramps.len() >= 2 * self.layers as usize {
+        if self.overflowed {
             // All prior slices have been submitted or discarded. Queue writes
             // in the next frame can now replace these layers safely.
             self.trim();
@@ -72,27 +132,22 @@ impl GradientLut {
     pub fn trim(&mut self) {
         self.ramps.clear();
         self.used_layers = 0;
+        self.overflowed = false;
     }
 
-    pub fn layer(&mut self, gpu: &Gpu, pairs: &[[f32; 4]]) -> u32 {
-        if !self.enabled || pairs.len() < 16 {
-            return 0;
-        }
-        let key = bytemuck::cast_slice(pairs);
-        if let Some(&id) = self.ramps.get(key) {
-            self.hits += u32::from(id != 0);
-            return id;
-        }
-        let layer = self.used_layers;
-        if layer == self.layers || self.ramps.len() >= 2 * self.layers as usize {
-            return 0;
-        }
-        let Some(ramp) = bake(pairs) else {
-            // Retain the analytic fallback until this generation's ramp pages
-            // recycle, such as for a gradient with hard stops.
-            self.ramps.insert(key.to_vec(), 0);
+    pub fn layer(&mut self, gpu: &Gpu, ramp: Option<&PreparedRamp>) -> u32 {
+        let Some(ramp) = ramp else {
             return 0;
         };
+        if let Some(&layer) = self.ramps.get(&ramp.id) {
+            self.hits += 1;
+            return layer;
+        }
+        let layer = self.used_layers;
+        if layer == self.layers {
+            self.overflowed = true;
+            return 0;
+        }
         gpu.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
@@ -104,7 +159,7 @@ impl GradientLut {
                 },
                 aspect: wgpu::TextureAspect::All,
             },
-            bytemuck::cast_slice(&ramp),
+            bytemuck::cast_slice(&ramp.pixels),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(WIDTH * 8),
@@ -117,7 +172,7 @@ impl GradientLut {
             },
         );
         let id = layer + 1;
-        self.ramps.insert(key.to_vec(), id);
+        self.ramps.insert(ramp.id, id);
         self.used_layers += 1;
         self.upload_bytes += size_of::<Ramp>() as u64;
         id
@@ -180,6 +235,11 @@ mod tests {
             *pair = [[value; 4], [value, 0.0, 0.0, 0.0]];
         }
         assert!(bake(&stops).is_some());
+        if enabled() {
+            let first = PreparedRamp::new(&stops).unwrap();
+            let second = PreparedRamp::new(&stops).unwrap();
+            assert!(Arc::ptr_eq(&first, &second));
+        }
         stops[3][0] = 0.0;
         assert!(bake(&stops).is_none());
     }

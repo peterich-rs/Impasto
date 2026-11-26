@@ -9,6 +9,7 @@ use super::{
     ROBOTO, bench_text, benchmark, canvas, fill_path, headless, output, pixel, read_rgba, rect,
     tree,
 };
+use crate::compositor::OutputFormat;
 use crate::{DamageRect, FontLibrary, ImagePixels, ParleyShaper, PixelSize, Rasterizer};
 
 fn moved_picture(dx: f32, generation: u64, commands: Arc<[Command]>) -> LayerTree {
@@ -477,6 +478,79 @@ fn independent_effects_keep_one_main_pass_and_preserve_paint_order() {
         let shadow = pixel(&pixels, 140, x + 4, 24);
         assert!(shadow[0] > shadow[1]);
         assert_eq!(pixel(&pixels, 140, x + 9, 24), [255; 4]);
+    }
+}
+
+#[test]
+fn late_surface_retry_preserves_pooled_effects_and_draw_order() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let size = PixelSize::new(96, 80);
+    let gpu = raster.device.as_ref().unwrap().gpu.clone();
+    for (format, backdrop) in [
+        (wgpu::TextureFormat::Rgba8UnormSrgb, false),
+        (wgpu::TextureFormat::Rgba8UnormSrgb, true),
+        (wgpu::TextureFormat::Rgba8Unorm, false),
+    ] {
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size.width,
+            height: size.height,
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::PreMultiplied,
+            view_formats: Vec::new(),
+            color_space: wgpu::SurfaceColorSpace::Srgb,
+        };
+        let format = OutputFormat::surface(&config);
+        let texture = output(&gpu, config.format, size);
+        let view = texture.create_view(&Default::default());
+        let mut commands = vec![rect([0.0, 0.0, 96.0, 80.0], [0, 32, 89, 255])];
+        commands.extend((0..64u8).map(|i| rect([4.0, 4.0, 88.0, 72.0], [i, 150, 40, 255])));
+        for idx in 0..60u8 {
+            let x = f32::from(idx % 10) * 9.0;
+            let y = f32::from(idx / 10) * 12.0;
+            commands.extend([
+                Command::PushOpacity {
+                    x,
+                    y,
+                    w: 8.0,
+                    h: 9.0,
+                    alpha: 180,
+                },
+                rect([x, y, 8.0, 9.0], [idx * 4, 240, 12, 255]),
+                rect([x + 1.0, y + 2.0, 4.0, 5.0], [200, 20, 30, 255]),
+                Command::Pop,
+            ]);
+        }
+        if backdrop {
+            commands.extend([
+                Command::PushBackdropBlur {
+                    x: 2.0,
+                    y: 3.0,
+                    w: 32.0,
+                    h: 34.0,
+                    sigma: 2.0,
+                },
+                Command::Pop,
+            ]);
+        }
+        raster
+            .submit_layers(&tree(if backdrop { 2 } else { 1 }, commands), 1.0, |_| None)
+            .unwrap();
+        raster.encode_and_submit(&view, format, size).unwrap();
+        let reference = read_rgba(&gpu, &texture, size).unwrap();
+        let counts = raster.stats.render;
+        assert_eq!(counts.direct_present, config.format.is_srgb() && !backdrop);
+        let missed = raster.prepare_surface_frame(format, size).unwrap();
+        drop(missed);
+        let prepared = raster.prepare_surface_frame(format, size).unwrap();
+        raster.submit_surface_frame(&view, prepared).unwrap();
+        assert_eq!(read_rgba(&gpu, &texture, size).unwrap(), reference);
+        assert_eq!(raster.stats.render.direct_present, counts.direct_present);
+        assert_eq!(raster.stats.render.passes, counts.passes);
     }
 }
 

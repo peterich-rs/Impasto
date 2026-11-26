@@ -8,6 +8,7 @@ use crate::{DamageRect, PixelSize};
 
 const PARTIAL_LIMIT: f64 = 0.15;
 
+#[derive(Clone)]
 pub(super) struct RetainedRoot {
     pub image: Image,
     pub output: OutputFormat,
@@ -63,7 +64,7 @@ impl Frame<'_> {
         let [width, height] = target.size.map(|value| value as f32 / scale);
         // A scissored draw replaces the damaged pixels while retaining the
         // contents around them. The solid quad covers the entire scissor.
-        self.rect_batches(
+        self.rect_batch_from_paint(
             target,
             IDENTITY,
             &Coverage {
@@ -71,10 +72,11 @@ impl Frame<'_> {
                 ..Coverage::default()
             },
             BlendKey::DstOut,
-            [(
-                &[solid_rect([0.0, 0.0, width, height], [1.0; 4])][..],
-                &[][..],
-            )],
+            (
+                &[solid_rect([0.0, 0.0, width, height], [1.0; 4])],
+                &[],
+                None,
+            ),
         )?;
         self.damage_scissor = Some(area);
         Ok(Clip::default())

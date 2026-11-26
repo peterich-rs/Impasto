@@ -16,6 +16,9 @@ check: style-check boundaries clippy test solid standard-check
 bench:
     cargo test --locked --manifest-path "{{root}}/Cargo.toml" -p raster --lib --release -- bench_ --ignored --nocapture --test-threads=1
 
+bench-wave:
+    cargo test --locked --manifest-path "{{root}}/Cargo.toml" -p raster --lib --release -- tests::p0::wave::bench_ --ignored --nocapture --test-threads=1
+
 test: gallery-dist
     cargo test --manifest-path "{{root}}/Cargo.toml" --workspace
 

@@ -33,6 +33,12 @@ use crate::gpu::Gpu;
 
 /// Quarter-pixel horizontal positions.
 pub(crate) const SUBPIXEL_BUCKETS: u32 = 4;
+
+#[derive(Clone, Copy)]
+pub(crate) struct SubpixelPosition {
+    pub point: [f32; 2],
+    pub buckets: u32,
+}
 const PAGE_SIZE: u32 = 2048;
 /// Upper bound on simultaneously resident pages on small adapters.
 const PAGE_LIMIT: u32 = 6;
@@ -133,7 +139,7 @@ struct Entry {
     used: u64,
 }
 
-const BAND_HEIGHT: u32 = 64;
+const TILE_SIDE: u32 = 128;
 
 struct AtlasTexture {
     texture: wgpu::Texture,
@@ -195,13 +201,73 @@ struct Page {
 enum PageBacking {
     Resident {
         layer: u32,
-        shadow: Vec<u8>,
-        dirty: u32,
+        tiles: AtlasTiles,
     },
     Temporary {
         texture: AtlasTexture,
         material: Option<wgpu::BindGroup>,
     },
+}
+
+struct AtlasTiles {
+    columns: u32,
+    tiles: Box<[Option<AtlasTile>]>,
+}
+
+struct AtlasTile {
+    pixels: Box<[u8]>,
+    dirty: Option<[u32; 4]>,
+}
+
+impl AtlasTiles {
+    fn new([width, height]: [u32; 2]) -> Self {
+        let columns = width.div_ceil(TILE_SIDE);
+        let rows = height.div_ceil(TILE_SIDE);
+        Self {
+            columns,
+            tiles: std::iter::repeat_with(|| None)
+                .take((columns * rows) as usize)
+                .collect(),
+        }
+    }
+
+    fn write(&mut self, [x, y]: [u32; 2], [width, height]: [u32; 2], channels: u32, data: &[u8]) {
+        let right = x + width;
+        let bottom = y + height;
+        let stride = TILE_SIDE * channels;
+        for ty in y / TILE_SIDE..=(bottom - 1) / TILE_SIDE {
+            for tx in x / TILE_SIDE..=(right - 1) / TILE_SIDE {
+                let origin_x = tx * TILE_SIDE;
+                let origin_y = ty * TILE_SIDE;
+                let x0 = x.max(origin_x);
+                let y0 = y.max(origin_y);
+                let x1 = right.min(origin_x + TILE_SIDE);
+                let y1 = bottom.min(origin_y + TILE_SIDE);
+                let tile = self.tiles[(ty * self.columns + tx) as usize].get_or_insert_with(|| {
+                    AtlasTile {
+                        pixels: vec![0; (stride * TILE_SIDE) as usize].into_boxed_slice(),
+                        dirty: None,
+                    }
+                });
+                let bytes = ((x1 - x0) * channels) as usize;
+                for row in y0..y1 {
+                    let source = (((row - y) * width + (x0 - x)) * channels) as usize;
+                    let target = ((row - origin_y) * stride + (x0 - origin_x) * channels) as usize;
+                    tile.pixels[target..target + bytes]
+                        .copy_from_slice(&data[source..source + bytes]);
+                }
+                let patch = [x0 - origin_x, y0 - origin_y, x1 - origin_x, y1 - origin_y];
+                tile.dirty = Some(tile.dirty.map_or(patch, |[left, top, right, bottom]| {
+                    [
+                        left.min(patch[0]),
+                        top.min(patch[1]),
+                        right.max(patch[2]),
+                        bottom.max(patch[3]),
+                    ]
+                }));
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -297,7 +363,6 @@ impl Atlas {
 
     /// Starts a transaction after the previous frame was submitted or discarded.
     pub fn begin_frame(&mut self) {
-        self.prepared.clear();
         self.pinned.clear();
         let has_temporary = self
             .mask
@@ -397,7 +462,7 @@ impl Atlas {
         library: &FontLibrary,
         draw: &GlyphDraw,
         size: f32,
-        position: Option<[f32; 2]>,
+        position: Option<SubpixelPosition>,
         lcd: bool,
     ) -> Option<Placement> {
         let variant = self.variant(gpu, size, position, lcd)?;
@@ -445,13 +510,13 @@ impl Atlas {
         &self,
         gpu: &Gpu,
         size: f32,
-        position: Option<[f32; 2]>,
+        position: Option<SubpixelPosition>,
         lcd: bool,
     ) -> Option<GlyphVariant> {
-        let size = quantize_size(size, gpu.max_texture_size())?;
+        let size = quantize_size(size, gpu.max_texture_size(), position.is_some())?;
         Some(GlyphVariant {
             size,
-            subpixel: position.map_or(0, |[x, _]| horizontal_bucket(x)),
+            subpixel: position.map_or(0, |pos| horizontal_bucket(pos.point[0], pos.buckets)),
             darken_stem: self.darken_small && position.is_some() && size <= 14 * 64,
             hint: position.is_some(),
             lcd,
@@ -463,7 +528,7 @@ impl Atlas {
         gpu: &Gpu,
         draw: &GlyphDraw,
         size: f32,
-        position: Option<[f32; 2]>,
+        position: Option<SubpixelPosition>,
         lcd: bool,
     ) -> Option<GlyphKey> {
         let variant = self.variant(gpu, size, position, lcd)?;
@@ -518,6 +583,10 @@ impl Atlas {
             "glyph_pre_us",
             u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
         );
+    }
+
+    pub(crate) fn clear_prepared(&mut self) {
+        self.prepared.clear();
     }
 
     fn store(
@@ -706,12 +775,7 @@ impl Atlas {
             }
             PageBacking::Resident {
                 layer,
-                shadow: if color {
-                    Vec::new()
-                } else {
-                    vec![0; (page_size * page_size * self.mask_channels) as usize]
-                },
-                dirty: 0,
+                tiles: AtlasTiles::new(size),
             }
         };
         let index = atlas.pages.len();
@@ -798,33 +862,6 @@ impl Atlas {
         if data.len() < row.checked_mul(rect.h as usize)? {
             return None;
         }
-        let (texture, layer, mirror) = match &mut page.backing {
-            PageBacking::Resident { shadow, dirty, .. } if !color => {
-                let stride = (page.size[0] * channels) as usize;
-                let gutter = GUTTER as usize * channels as usize;
-                let padded_row = row + 2 * gutter;
-                for y in rect.y - GUTTER..rect.y + rect.h + GUTTER {
-                    let start = y as usize * stride + ((rect.x - GUTTER) * channels) as usize;
-                    let padded = &mut shadow[start..start + padded_row];
-                    padded.fill(0);
-                    if let Some(row_index) = y
-                        .checked_sub(rect.y)
-                        .filter(|row_index| *row_index < rect.h)
-                    {
-                        let source = row_index as usize * row;
-                        padded[gutter..gutter + row].copy_from_slice(&data[source..source + row]);
-                    }
-                }
-                for band in
-                    (rect.y - GUTTER) / BAND_HEIGHT..=(rect.y + rect.h + GUTTER - 1) / BAND_HEIGHT
-                {
-                    *dirty |= 1 << band;
-                }
-                return Some(());
-            }
-            PageBacking::Resident { layer, .. } => (atlas.texture.as_ref()?, *layer, true),
-            PageBacking::Temporary { texture, .. } => (&*texture, 0, false),
-        };
         let w = rect.w.checked_add(2 * GUTTER)?;
         let h = rect.h.checked_add(2 * GUTTER)?;
         let stride = zero_scratch(&mut self.scratch, [w, h], channels)?;
@@ -832,70 +869,64 @@ impl Atlas {
             let start = (y + GUTTER as usize) * stride + (GUTTER * channels) as usize;
             self.scratch[start..start + row].copy_from_slice(source);
         }
-        // Queue writes precede any draw using this placement, including writes
-        // to a color array that is subsequently copied into a larger array.
-        for target in std::iter::once(texture).chain(
-            atlas
-                .retired
-                .iter()
-                .filter(|target| mirror && layer < target.layers),
-        ) {
-            self.stats.upload_bytes += write_texture(
-                gpu,
-                target,
-                [rect.x - GUTTER, rect.y - GUTTER, layer],
-                [w, h],
-                channels,
-                &self.scratch,
-            );
-            self.stats.upload_calls += 1;
+        let origin = [rect.x - GUTTER, rect.y - GUTTER];
+        match &mut page.backing {
+            PageBacking::Resident { tiles, .. } => {
+                tiles.write(origin, [w, h], channels, &self.scratch);
+            }
+            PageBacking::Temporary { texture, .. } => {
+                let [x, y] = origin;
+                self.stats.upload_bytes += write_texture(
+                    gpu,
+                    texture,
+                    [x, y, 0],
+                    [w, h],
+                    channels,
+                    w * channels,
+                    &self.scratch,
+                );
+                self.stats.upload_calls += 1;
+            }
         }
         Some(())
     }
 
-    /// Upload once per contiguous band, mirroring patches to any array
-    /// referenced by an earlier command buffer in the same transaction.
+    /// Upload the changed rectangle of each dirty tile to every referenced array.
     pub fn flush(&mut self, gpu: &Gpu, prelude: &mut Option<wgpu::CommandEncoder>) {
-        if let Some(texture) = &self.mask.texture {
-            for page in &mut self.mask.pages {
-                let PageBacking::Resident {
-                    layer,
-                    shadow,
-                    dirty,
-                } = &mut page.backing
-                else {
+        for (atlas, channels) in [(&mut self.mask, self.mask_channels), (&mut self.color, 4)] {
+            let Some(texture) = &atlas.texture else {
+                continue;
+            };
+            for page in &mut atlas.pages {
+                let PageBacking::Resident { layer, tiles } = &mut page.backing else {
                     continue;
                 };
-                let [w, h] = page.size;
-                let bands = h.div_ceil(BAND_HEIGHT);
-                let mut band = 0;
-                while band < bands {
-                    if *dirty & (1 << band) == 0 {
-                        band += 1;
+                let row_stride = TILE_SIDE * channels;
+                for (index, slot) in (0..).zip(&mut tiles.tiles) {
+                    let Some(tile) = slot else {
                         continue;
-                    }
-                    let y = band * BAND_HEIGHT;
-                    while band < bands && *dirty & (1 << band) != 0 {
-                        band += 1;
-                    }
-                    let end = (band * BAND_HEIGHT).min(h);
-                    let stride = w * self.mask_channels;
-                    let data = &shadow[(y * stride) as usize..(end * stride) as usize];
-                    for target in std::iter::once(texture).chain(&self.mask.retired) {
+                    };
+                    let Some([x0, y0, x1, y1]) = tile.dirty.take() else {
+                        continue;
+                    };
+                    let x = index % tiles.columns * TILE_SIDE + x0;
+                    let y = index / tiles.columns * TILE_SIDE + y0;
+                    let start = (y0 * row_stride + x0 * channels) as usize;
+                    for target in std::iter::once(texture).chain(&atlas.retired) {
                         if *layer < target.layers {
                             self.stats.upload_bytes += write_texture(
                                 gpu,
                                 target,
-                                [0, y, *layer],
-                                [w, end - y],
-                                self.mask_channels,
-                                data,
+                                [x, y, *layer],
+                                [x1 - x0, y1 - y0],
+                                channels,
+                                row_stride,
+                                &tile.pixels[start..],
                             );
                             self.stats.upload_calls += 1;
                         }
                     }
                 }
-                *dirty = 0;
             }
         }
         for atlas in [&mut self.mask, &mut self.color] {
@@ -1006,6 +1037,7 @@ fn write_texture(
     origin: [u32; 3],
     size: [u32; 2],
     channels: u32,
+    row_stride: u32,
     data: &[u8],
 ) -> u64 {
     let [x, y, z] = origin;
@@ -1019,7 +1051,7 @@ fn write_texture(
         data,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(size[0] * channels),
+            bytes_per_row: Some(row_stride),
             rows_per_image: Some(size[1]),
         },
         crate::compositor::extent(size),
@@ -1148,20 +1180,21 @@ fn retain_pages(pages: &mut Vec<Page>) -> Vec<Option<usize>> {
     clippy::cast_possible_truncation,
     reason = "finite physical sizes are quantized to a fixed-size bucket"
 )]
-fn quantize_size(size: f32, max_size: u32) -> Option<u32> {
+fn quantize_size(size: f32, max_size: u32, hinted: bool) -> Option<u32> {
     if !size.is_finite() || size <= 0.0 || size > max_size as f32 {
         return None;
     }
-    Some((size * 64.0).round().max(1.0) as u32)
+    let steps = if hinted { 8 } else { 4 };
+    Some((size * steps as f32).round().max(1.0) as u32 * (64 / steps))
 }
 
 #[expect(
     clippy::cast_possible_truncation,
     reason = "subpixel offsets are quantized to four buckets"
 )]
-pub(crate) fn horizontal_bucket(fraction: f32) -> u32 {
-    let value = (fraction.rem_euclid(1.0) * SUBPIXEL_BUCKETS as f32).floor();
-    (value as i32).clamp(0, SUBPIXEL_BUCKETS as i32 - 1) as u32
+pub(crate) fn horizontal_bucket(fraction: f32, buckets: u32) -> u32 {
+    let value = (fraction.rem_euclid(1.0) * buckets as f32).floor() as u32;
+    value.min(buckets - 1) * (SUBPIXEL_BUCKETS / buckets)
 }
 
 #[cfg(test)]

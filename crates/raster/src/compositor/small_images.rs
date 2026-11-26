@@ -312,6 +312,7 @@ impl Frame<'_> {
             Some(mask.clone()),
             vertices,
             clip.scissor,
+            6,
         )?;
         vertices.clear();
         Ok(())

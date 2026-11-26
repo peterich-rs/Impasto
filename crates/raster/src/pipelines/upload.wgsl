@@ -25,19 +25,3 @@ fn downsample(pixel: vec2<i32>) -> vec4<f32> {
     }
     return color / ((high.x - low.x) * (high.y - low.y));
 }
-
-@vertex
-fn vs_upload(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
-    let corners = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
-    return vec4(corners[i], 0.0, 1.0);
-}
-
-@fragment
-fn fs_premultiply(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-    return premultiply(vec2<i32>(position.xy));
-}
-
-@fragment
-fn fs_downsample(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-    return downsample(vec2<i32>(position.xy));
-}

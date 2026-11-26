@@ -1,9 +1,18 @@
 // Analytic rectangles and tessellated paths in linear premultiplied color.
 override two_dimensional_shadow: bool = false;
 override circular_shadow: bool = false;
+override hollow_shadow: bool = false;
 override output_dither: bool = false;
+override unclipped: bool = false;
 @group(1) @binding(0) var clip_mask_tex: texture_2d<f32>;
 @group(1) @binding(1) var clip_mask_sampler: sampler;
+
+fn geometry_aa(local: vec2<f32>) -> f32 {
+    if view.target_info.z > 0.0 {
+        return view.target_info.z;
+    }
+    return max(length(dpdx(local)) + length(dpdy(local)), 1e-6) * 0.5;
+}
 
 struct RectVertex {
     @location(1) rect: vec4<f32>,
@@ -78,9 +87,11 @@ fn vs_depth_solid(@builtin(vertex_index) vertex: u32, data: RectVertex) -> Solid
 
 @fragment
 fn fs_solid(in: SolidOut) -> @location(0) vec4<f32> {
-    let aa = max(length(dpdx(in.local)) + length(dpdy(in.local)), 1e-6) * 0.5;
+    let aa = geometry_aa(in.local);
     let d = sd_rounded_box(in.local, in.half_radius.xy, in.half_radius.z);
-    return in.color * clamp(0.5 - d / aa, 0.0, 1.0) * clip_coverage(in.position.xy);
+    let color = in.color * clamp(0.5 - d / aa, 0.0, 1.0);
+    if unclipped { return color; }
+    return color * clip_coverage(in.position.xy);
 }
 
 @vertex
@@ -192,8 +203,42 @@ struct ShadowOut {
 
 @vertex
 fn vs_shadow(@builtin(vertex_index) vertex: u32, data: RectVertex) -> ShadowOut {
-    let p = rect_point(vertex, data);
     let extra = load_paint(data.paint_index);
+    var p = rect_point(vertex % 6u, data);
+    if hollow_shadow {
+        let margin = vec2(1.0 / max(view.info.x, 0.001));
+        let outer_min = data.rect.xy - margin;
+        let outer_max = data.rect.xy + data.rect.zw + margin;
+        var hole_min = outer_max;
+        var hole_max = outer_max;
+        // A fractional mask makes even an opaque fill translucent. Restrict
+        // the hole to full coverage using the local width of a pixel.
+        if extra.stroke.w > 0.0 && data.opacity == 1.0 && view.info.y == 0.0 && view.info.z == 0.0 &&
+            view.target_info.z > 0.0 {
+            let pixel = vec2(view.target_info.z);
+            let candidate_min = clamp(data.rect.xy + extra.geometry.xy + pixel, outer_min, outer_max);
+            let candidate_max = clamp(data.rect.xy + extra.geometry.zw - pixel, candidate_min, outer_max);
+            let span = candidate_max - candidate_min;
+            let outer = outer_max - outer_min;
+            if span.x * span.y > 0.2 * outer.x * outer.y {
+                hole_min = candidate_min;
+                hole_max = candidate_max;
+            }
+        }
+        var low = outer_min;
+        var high = vec2(outer_max.x, hole_min.y);
+        switch (vertex / 6u) {
+            case 1u: { low = vec2(outer_min.x, hole_max.y); high = outer_max; }
+            case 2u: { low = vec2(outer_min.x, hole_min.y); high = vec2(hole_min.x, hole_max.y); }
+            case 3u: { low = vec2(hole_max.x, hole_min.y); high = vec2(outer_max.x, hole_max.y); }
+            default: {}
+        }
+        let corners = array(
+            vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
+            vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0),
+        );
+        p = mix(low, high, corners[vertex % 6u]);
+    }
     let sigma = max(extra.shadow.w, 0.0);
     let half = data.rect.zw * 0.5 - vec2(3.0 * sigma);
     let r = clamp(data.shape.x + extra.shadow.z, 0.0, max(0.0, min(half.x, half.y)));
@@ -262,7 +307,7 @@ fn fs_shadow(in: ShadowOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let data = in;
-    let aa = max(length(dpdx(in.local_coverage.xy)) + length(dpdy(in.local_coverage.xy)), 1e-6) * 0.5;
+    let aa = geometry_aa(in.local_coverage.xy);
     let p = in.local_coverage.xy;
     let extra = load_paint(data.paint_index);
     let kind = u32(data.shape.z);
@@ -282,7 +327,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             let coverage = clamp(0.5 - d / aa, 0.0, 1.0);
             var brush = data.color;
             if ((u32(data.shape.w) & 1u) != 0u) {
-                brush = paint_gradient(extra, p);
+                brush = paint_gradient(extra, p, data.color, clip_mask_sampler);
             }
             color = brush * coverage;
         }
@@ -295,7 +340,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         }
     }
 
-    color = color * clip_coverage(in.position.xy) * data.opacity;
+    if !unclipped {
+        color = color * clip_coverage(in.position.xy);
+    }
+    color = color * data.opacity;
     if output_dither && view.info.w > 0.0 && color.a >= 1.0 && (u32(data.shape.w) & 1u) != 0u {
         let peak = max(color.r, max(color.g, color.b));
         // Fade out dark-gradient dithering where the linear channels are bright.
@@ -311,7 +359,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 fn fs_mesh(in: VertexOut) -> @location(0) vec4<f32> {
     var color = in.color;
     if ((u32(in.shape.w) & 1u) != 0u) {
-        color = paint_gradient(load_paint(in.paint_index), in.local_coverage.xy) * in.opacity;
+        color = paint_gradient(load_paint(in.paint_index), in.local_coverage.xy, in.color, clip_mask_sampler) * in.opacity;
     }
     return color * in.local_coverage.z * clip_coverage(in.position.xy);
 }

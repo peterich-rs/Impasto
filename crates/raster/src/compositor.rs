@@ -21,7 +21,7 @@ use engine::scene::{LayerId, LayerKind, LayerTree, PictureId};
 use bytemuck::Zeroable;
 
 use crate::arena::{Address, DynamicGroup, Extra, FrameArena, PaintPage, VertexSlice};
-use crate::atlas::{Atlas, AtlasBinding, AtlasStats};
+use crate::atlas::{Atlas, AtlasBinding, AtlasStats, SubpixelPosition};
 use crate::batch::{self, GlyphVertex, ImageInstance, Mesh, PaintExtra, RectInstance, RectVertex};
 use crate::compiler::{
     self, Affine, Clip, ClipShape, CompiledPicture, Draw, Effect, Group, IDENTITY, PictureBounds,
@@ -29,6 +29,7 @@ use crate::compiler::{
 };
 use crate::compute_blur::{BlurParams, ComputeBlur};
 use crate::gpu::Gpu;
+use crate::gradient_lut::PreparedRamp;
 use crate::outline::{Outlines, REFERENCE_PPEM};
 use crate::pipelines::{
     self, BlendKey, ParamsUniform, PipelineCache, PipelineKind, Target, ViewUniform,
@@ -60,7 +61,7 @@ pub(crate) struct Compositor {
     transition_snapshots: transition_snapshot::TransitionSnapshots,
     retained: Option<RetainedRoot>,
     retain_offscreen: Option<bool>,
-    glyph_prefetch_revision: Option<u64>,
+    last_viewport: Option<[u32; 2]>,
     runtime_effects: crate::runtime_effect::RuntimeEffects,
     runtime_texture_groups: HashMap<
         [wgpu::TextureView; engine::scene::MAX_SHADER_TEXTURES],
@@ -75,7 +76,7 @@ pub(crate) struct Compositor {
     frame_active: bool,
     trim_pending: bool,
     specialize_paint: bool,
-    compute_blur: Option<ComputeBlur>,
+    compute_blur: [Option<ComputeBlur>; 2],
     blur_groups: HashMap<(wgpu::TextureView, wgpu::TextureView, wgpu::Buffer), wgpu::BindGroup>,
     early_z: bool,
     adaptive_early_z: bool,
@@ -147,7 +148,6 @@ pub(crate) struct Scene<'a> {
     pub shader_uniforms: &'a crate::runtime_effect::ShaderUniformOverrides,
     pub scale: f32,
     pub slice: Option<&'a HashSet<LayerId>>,
-    pub prepare_glyphs: bool,
     pub damage: crate::DamageRect,
     pub has_glyphs: bool,
     pub revision: u64,
@@ -159,6 +159,7 @@ pub(crate) struct Scene<'a> {
 struct Image {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    storage_view: Option<wgpu::TextureView>,
     size: [u32; 2],
     logical: [u32; 2],
     origin: [u32; 2],
@@ -190,20 +191,41 @@ impl Image {
         samples: u32,
         usage: wgpu::TextureUsages,
     ) -> Self {
+        let storage_srgb = format.is_srgb() && usage.contains(wgpu::TextureUsages::STORAGE_BINDING);
+        let srgb_view = [format];
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("impasto offscreen"),
             size: extent(size),
             mip_level_count: 1,
             sample_count: samples,
             dimension: wgpu::TextureDimension::D2,
-            format,
+            format: if storage_srgb {
+                format.remove_srgb_suffix()
+            } else {
+                format
+            },
             usage,
-            view_formats: &[],
+            view_formats: if storage_srgb { &srgb_view } else { &[] },
         });
-        let view = texture.create_view(&Default::default());
+        let (view, storage_view) = if storage_srgb {
+            (
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    format: Some(format),
+                    usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
+                    ..Default::default()
+                }),
+                Some(texture.create_view(&wgpu::TextureViewDescriptor {
+                    usage: Some(wgpu::TextureUsages::STORAGE_BINDING),
+                    ..Default::default()
+                })),
+            )
+        } else {
+            (texture.create_view(&Default::default()), None)
+        };
         Self {
             texture,
             view,
+            storage_view,
             size,
             logical: size,
             origin: [0; 2],
@@ -219,6 +241,7 @@ impl Image {
         Self {
             texture: view.texture().clone(),
             view: view.clone(),
+            storage_view: None,
             size,
             logical: size,
             origin: [0; 2],
@@ -344,12 +367,12 @@ impl Compositor {
             backdrops: backdrop_cache::BackdropCache::default(),
             transition_snapshots: transition_snapshot::TransitionSnapshots::default(),
             retained: None,
+            last_viewport: None,
             retain_offscreen: match std::env::var("IMPASTO_RETAIN_OFFSCREEN").as_deref() {
                 Ok("0") => Some(false),
                 Ok("1") => Some(true),
                 _ => None,
             },
-            glyph_prefetch_revision: None,
             runtime_effects: crate::runtime_effect::RuntimeEffects::default(),
             runtime_texture_groups: HashMap::new(),
             effect_seconds: 0.0,
@@ -361,7 +384,11 @@ impl Compositor {
             frame_active: false,
             trim_pending: false,
             specialize_paint,
-            compute_blur: ComputeBlur::new(gpu),
+            compute_blur: [
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                wgpu::TextureFormat::Rgba16Float,
+            ]
+            .map(|format| ComputeBlur::new(gpu, format)),
             blur_groups: HashMap::new(),
             early_z: depth_mode.as_deref() == Ok("1"),
             adaptive_early_z: depth_mode.is_err()
@@ -431,10 +458,15 @@ impl Compositor {
         self.atlas.flush(gpu, &mut prelude);
         self.recycle_masks();
         let pooled = |view: &wgpu::TextureView| {
-            *view == self.white || self.pool.iter().any(|image| image.view == *view)
+            *view == self.white
+                || self
+                    .pool
+                    .iter()
+                    .any(|image| image.view == *view || image.storage_view.as_ref() == Some(view))
         };
-        self.composites
-            .retain(|(backdrop, mask), _| pooled(backdrop) && pooled(mask));
+        self.composites.retain(|(backdrop, mask), _| {
+            (pooled(backdrop) || self.backdrops.contains(backdrop)) && pooled(mask)
+        });
         self.runtime_texture_groups.retain(|views, group| {
             std::mem::take(&mut group.used)
                 && views
@@ -491,6 +523,19 @@ impl Compositor {
         self.subtrees.prune(pictures);
     }
 
+    pub fn evict_images(&mut self, evictions: impl Iterator<Item = crate::textures::EvictedImage>) {
+        let (views, revisions): (HashSet<_>, HashSet<_>) =
+            evictions.map(|image| (image.view, image.revision)).unzip();
+        if views.is_empty() {
+            return;
+        }
+        self.image_groups
+            .retain(|(group, _), _| group.iter().all(|view| !views.contains(view)));
+        self.runtime_texture_groups
+            .retain(|group, _| group.iter().all(|view| !views.contains(view)));
+        self.resident.evict_images(&revisions);
+    }
+
     #[cfg(test)]
     pub fn disable_subtree_cache(&mut self) {
         self.subtrees.disable();
@@ -518,6 +563,13 @@ impl Compositor {
         }
     }
 
+    pub fn discard_frame(&mut self) {
+        self.frame_active = false;
+        if self.trim_pending {
+            self.trim_resources();
+        }
+    }
+
     fn trim_resources(&mut self) {
         self.trim_pending = false;
         self.atlas.trim();
@@ -534,7 +586,6 @@ impl Compositor {
         self.backdrops = backdrop_cache::BackdropCache::default();
         self.transition_snapshots = transition_snapshot::TransitionSnapshots::default();
         self.retained = None;
-        self.glyph_prefetch_revision = None;
         self.masks.clear();
     }
 
@@ -553,7 +604,46 @@ impl Compositor {
         size: [u32; 2],
         capture: Option<(&mut Capture, Option<usize>)>,
     ) -> Result<wgpu::CommandEncoder, Status> {
-        let output_format = output_format.into();
+        let prepared = self.prepare_output(
+            gpu,
+            scene,
+            Some(output),
+            output_format.into(),
+            size,
+            capture,
+        )?;
+        self.retained = prepared.retained;
+        Ok(prepared.tail)
+    }
+
+    pub fn prepare_surface(
+        &mut self,
+        gpu: &Gpu,
+        scene: Scene<'_>,
+        output_format: OutputFormat,
+        size: [u32; 2],
+        capture: Option<&mut Capture>,
+    ) -> Result<PreparedOutput, Status> {
+        self.prepare_output(
+            gpu,
+            scene,
+            None,
+            output_format,
+            size,
+            capture.map(|capture| (capture, None)),
+        )
+    }
+
+    fn prepare_output(
+        &mut self,
+        gpu: &Gpu,
+        scene: Scene<'_>,
+        output: Option<&wgpu::TextureView>,
+        output_format: OutputFormat,
+        size: [u32; 2],
+        capture: Option<(&mut Capture, Option<usize>)>,
+    ) -> Result<PreparedOutput, Status> {
+        self.last_viewport = Some(size);
         self.pipelines.install_warmed();
         self.subtrees.output(output_format);
         let OutputFormat {
@@ -574,11 +664,7 @@ impl Compositor {
             scale: scene.scale,
             format: working,
         });
-        let command = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("impasto frame"),
-            });
+        let command = frame_encoder(gpu);
         let p3 = space == wgpu::SurfaceColorSpace::DisplayP3;
         let linear = space == wgpu::SurfaceColorSpace::ExtendedSrgbLinear;
         let direct_candidate =
@@ -619,13 +705,24 @@ impl Compositor {
             && !direct
             && !reads_root
             && RetainedRoot::eligible(&scene, size, main_format);
-        let retained = self.retained.take().filter(|root| {
+        let previous = if output.is_some() {
+            self.retained.take()
+        } else {
+            self.retained.clone()
+        };
+        let retained = previous.filter(|root| {
             retain && root.submitted && root.output == output_format && root.image.size == size
         });
         let damage = retained
             .as_ref()
             .map_or(crate::DamageRect::Full, |root| root.damage(&scene));
-        let output = Image::output(output, format, size);
+        let deferred_root = output.is_none().then(RootPlan::default);
+        let mut output = Image::output(output.unwrap_or(&self.white), format, size);
+        if deferred_root.is_some() {
+            // The white view is a unique target identity while the window view
+            // is unavailable. Deferred passes never attach or read that view.
+            output.usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        }
         let mut frame = Frame {
             gpu,
             scene,
@@ -635,6 +732,7 @@ impl Compositor {
             main_pass: None,
             main_inputs: HashSet::new(),
             main_releases: Vec::new(),
+            deferred_root,
             main_release_bytes: 0,
             clears: HashMap::new(),
             opaque: Vec::new(),
@@ -646,6 +744,7 @@ impl Compositor {
             baking_subtree: false,
             working,
             straight_alpha,
+            finishing_output: false,
         };
         let main = if let Some(retained) = retained {
             retained.image
@@ -673,10 +772,11 @@ impl Compositor {
         if let Some(clip) = clip
             && !frame.scene.tree.layers.is_empty()
         {
-            frame.prepare_glyphs(&main);
             frame.layers(Some(visible_root), &main, IDENTITY, &clip)?;
         }
+        frame.finishing_output = true;
         frame.finish(&main.view);
+        let mut retained = None;
         if !direct {
             frame.clear(&output.view);
             frame.full(
@@ -696,7 +796,7 @@ impl Compositor {
                 },
             )?;
             if retain {
-                frame.compositor.retained = Some(RetainedRoot {
+                retained = Some(RetainedRoot {
                     image: main,
                     output: output_format,
                     revision: frame.scene.revision,
@@ -723,8 +823,19 @@ impl Compositor {
             cache_bytes = cache.bytes,
             damage_pct
         );
-        Ok(frame.command)
+        Ok(PreparedOutput {
+            root: frame.deferred_root.unwrap_or_default(),
+            tail: frame.command,
+            retained,
+        })
     }
+}
+
+fn frame_encoder(gpu: &Gpu) -> wgpu::CommandEncoder {
+    gpu.device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("impasto frame"),
+        })
 }
 
 fn opaque_tail(scene: &Scene<'_>, size: [u32; 2]) -> (LayerId, u32) {
@@ -909,6 +1020,7 @@ struct Frame<'a> {
     main_inputs: HashSet<wgpu::TextureView>,
     main_releases: Vec<Image>,
     main_release_bytes: u64,
+    deferred_root: Option<RootPlan>,
     clears: HashMap<wgpu::TextureView, wgpu::Color>,
     opaque: Vec<[f32; 4]>,
     root: wgpu::TextureView,
@@ -919,6 +1031,7 @@ struct Frame<'a> {
     baking_subtree: bool,
     working: wgpu::TextureFormat,
     straight_alpha: bool,
+    finishing_output: bool,
 }
 
 struct DrawPass {
@@ -928,6 +1041,152 @@ struct DrawPass {
     calls: Vec<DrawCall>,
     draws: u32,
     shader: Option<engine::scene::ShaderProgramId>,
+}
+
+/// Encoded offscreen work with ordered points that still need the drawable.
+pub(crate) struct PreparedOutput {
+    root: RootPlan,
+    tail: wgpu::CommandEncoder,
+    retained: Option<RetainedRoot>,
+}
+
+impl PreparedOutput {
+    pub fn finish(
+        mut self,
+        output: &wgpu::TextureView,
+        compositor: &mut Compositor,
+    ) -> (Vec<wgpu::CommandBuffer>, wgpu::CommandEncoder) {
+        let commands = self
+            .root
+            .prefixes
+            .into_iter()
+            .map(|(mut prefix, pass)| {
+                pass.encode(&mut prefix, output);
+                prefix.finish()
+            })
+            .collect();
+        if let Some(pass) = self.root.final_pass {
+            pass.encode(&mut self.tail, output);
+        }
+        compositor.retained = self.retained;
+        (commands, self.tail)
+    }
+}
+
+#[derive(Default)]
+struct RootPlan {
+    // A later offscreen pass can reuse this segment's pooled attachments.
+    // Keep each prefix paired with its consumer to preserve queue order.
+    prefixes: Vec<(wgpu::CommandEncoder, DeferredRootPass)>,
+    final_pass: Option<DeferredRootPass>,
+}
+
+struct DeferredRootPass {
+    segment: RootSegment,
+    load: wgpu::LoadOp<wgpu::Color>,
+    stamps: Option<PassStamps>,
+}
+
+impl DeferredRootPass {
+    fn encode(self, command: &mut wgpu::CommandEncoder, output: &wgpu::TextureView) {
+        let stamps = self
+            .stamps
+            .as_ref()
+            .map(|stamps| wgpu::RenderPassTimestampWrites {
+                query_set: &stamps.queries,
+                beginning_of_pass_write_index: stamps.begin,
+                end_of_pass_write_index: stamps.end,
+            });
+        self.segment.encode(command, output, self.load, stamps);
+    }
+}
+
+struct PassStamps {
+    queries: wgpu::QuerySet,
+    begin: Option<u32>,
+    end: Option<u32>,
+}
+
+enum RootSegment {
+    Ordered(DrawPass),
+    EarlyZ(Box<EarlyZBatch>),
+    Composite(CompositeDraw),
+    Clear,
+}
+
+impl RootSegment {
+    fn encode(
+        self,
+        command: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        load: wgpu::LoadOp<wgpu::Color>,
+        stamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) {
+        match self {
+            Self::EarlyZ(batch) => batch.encode(command, target, load, stamps),
+            segment => {
+                let mut pass = render(command, target, load, stamps);
+                match segment {
+                    Self::Ordered(batch) => batch.encode(&mut pass, target),
+                    Self::Composite(call) => call.encode(&mut pass),
+                    Self::Clear | Self::EarlyZ(_) => {}
+                }
+            }
+        }
+    }
+}
+
+struct EarlyZBatch {
+    depth: wgpu::TextureView,
+    pipeline: wgpu::RenderPipeline,
+    globals: DynamicGroup,
+    vertices: VertexSlice,
+    count: u32,
+    edges: Option<(wgpu::RenderPipeline, VertexSlice, u32)>,
+    mask: wgpu::BindGroup,
+}
+
+impl EarlyZBatch {
+    fn encode(
+        &self,
+        command: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        load: wgpu::LoadOp<wgpu::Color>,
+        stamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) {
+        let mut pass = command.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("impasto opaque front-to-back"),
+            timestamp_writes: stamps,
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Discard,
+                }),
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.globals.group, self.globals.offsets());
+        pass.set_vertex_buffer(0, self.vertices.slice());
+        pass.draw(0..6, 0..self.count);
+        if let Some((pipeline, vertices, count)) = &self.edges {
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(1, &self.mask, &[]);
+            pass.set_vertex_buffer(0, vertices.slice());
+            pass.draw(0..6, 0..*count);
+        }
+    }
 }
 
 enum DrawCall {
@@ -946,6 +1205,7 @@ struct ImmediateDraw {
     mask: Option<wgpu::BindGroup>,
     vertices: VertexSlice,
     scissor: Option<[u32; 4]>,
+    vertex_count: u32,
     instances: u32,
 }
 
@@ -954,7 +1214,7 @@ struct CompositeDraw {
     globals: DynamicGroup,
     source: wgpu::BindGroup,
     composite: Option<wgpu::BindGroup>,
-    effect_values: Option<wgpu::BindGroup>,
+    effect_values: Option<(u32, DynamicGroup)>,
     immediates: Option<ParamsUniform>,
     viewport: [u32; 4],
 }
@@ -972,14 +1232,94 @@ impl CompositeDraw {
         if let Some(composite) = &self.composite {
             pass.set_bind_group(2, composite, &[]);
         }
-        if let Some(values) = &self.effect_values {
-            pass.set_bind_group(3, values, &[]);
+        if let Some((slot, values)) = &self.effect_values {
+            pass.set_bind_group(*slot, &values.group, values.offsets());
         }
         pass.draw(0..6, 0..1);
     }
 }
 
 impl DrawPass {
+    fn encode(&self, pass: &mut wgpu::RenderPass<'_>, target: &wgpu::TextureView) {
+        let mut scissor = None;
+        set_scissor(pass, Some([0, 0, self.size[0], self.size[1]]));
+        let mut last_pipeline = None;
+        let mut last_globals = None;
+        let mut last_material = None;
+        let mut last_mask = None;
+        let mut draws = self.calls.iter().peekable();
+        while let Some(draw) = draws.next() {
+            let next = match draw {
+                DrawCall::Immediate(call) => call.scissor,
+                DrawCall::Composite(_) => None,
+                DrawCall::Resident { scissor, .. } => *scissor,
+            };
+            if next != scissor {
+                set_scissor(
+                    pass,
+                    Some(next.unwrap_or([0, 0, self.size[0], self.size[1]])),
+                );
+                scissor = next;
+            }
+            let call = match draw {
+                DrawCall::Immediate(call) => call,
+                DrawCall::Composite(call) => {
+                    call.encode(pass);
+                    pass.set_viewport(
+                        0.0,
+                        0.0,
+                        target.texture().width() as f32,
+                        target.texture().height() as f32,
+                        0.0,
+                        1.0,
+                    );
+                    last_pipeline = None;
+                    last_globals = None;
+                    last_material = None;
+                    last_mask = None;
+                    continue;
+                }
+
+                DrawCall::Resident { bundle, .. } => {
+                    let adjacent = std::iter::from_fn(|| match draws.peek()? {
+                        DrawCall::Resident { bundle, scissor } if *scissor == next => {
+                            draws.next();
+                            Some(bundle)
+                        }
+                        _ => None,
+                    });
+                    pass.execute_bundles(std::iter::once(bundle).chain(adjacent));
+                    last_pipeline = None;
+                    last_globals = None;
+                    last_material = None;
+                    last_mask = None;
+                    continue;
+                }
+            };
+            if last_pipeline != Some(&call.pipeline) {
+                pass.set_pipeline(&call.pipeline);
+                last_pipeline = Some(&call.pipeline);
+            }
+            let globals = (&call.globals.group, call.globals.offsets());
+            if last_globals != Some(globals) {
+                pass.set_bind_group(0, globals.0, globals.1);
+                last_globals = Some(globals);
+            }
+            if last_material != Some(&call.material) {
+                pass.set_bind_group(1, &call.material, &[]);
+                last_material = Some(&call.material);
+            }
+            if let Some(mask) = &call.mask
+                && last_mask != Some(mask)
+            {
+                pass.set_bind_group(2, mask, &[]);
+                last_mask = Some(mask);
+            }
+            pass.set_vertex_buffer(0, call.vertices.slice());
+            pass.draw(0..call.vertex_count, 0..call.instances);
+        }
+    }
+
     fn new(target: &Image) -> Self {
         Self {
             format: target.format,
@@ -1035,17 +1375,28 @@ struct GlyphTransform {
     pixels: f32,
     aligned: bool,
     phase_x: u32,
+    buckets: u32,
 }
 
 impl GlyphTransform {
     fn new(mut matrix: Affine, scale: f32) -> Self {
         let [a, b, c, d, x, y] = matrix;
-        let aligned = b.abs() < 0.0001 && c.abs() < 0.0001 && a > 0.0 && (a - d).abs() < 0.0001;
+        let aligned = b.abs() < 0.0001
+            && c.abs() < 0.0001
+            && (a - 1.0).abs() <= 0.001
+            && (a - d).abs() < 0.0001;
+        let buckets = if scale < 2.0 {
+            4
+        } else if scale < 2.75 {
+            2
+        } else {
+            1
+        };
         let mut phase_x = 0;
         if aligned {
-            let steps = crate::atlas::SUBPIXEL_BUCKETS as f32;
+            let steps = buckets as f32;
             let snapped_x = (x * scale * steps).round() / steps;
-            phase_x = crate::atlas::horizontal_bucket(snapped_x);
+            phase_x = crate::atlas::horizontal_bucket(snapped_x, buckets);
             matrix[4] = snapped_x / scale;
             matrix[5] = (y * scale + 0.5).floor() / scale;
         }
@@ -1055,6 +1406,7 @@ impl GlyphTransform {
             pixels: scale * a.hypot(b).max(c.hypot(d)).max(0.001),
             aligned,
             phase_x,
+            buckets,
         }
     }
 
@@ -1063,26 +1415,28 @@ impl GlyphTransform {
         pixels > 96.0 || (pixels > 48.0 && (self.matrix[0] - 1.0).abs() > 0.01)
     }
 
-    fn position(self, glyph: &compiler::GlyphDraw) -> Option<[f32; 2]> {
+    fn position(self, glyph: &compiler::GlyphDraw) -> Option<SubpixelPosition> {
         let [a, b, c, d, ..] = self.matrix;
         // Relative positions keep the same fractional bits across integer translations.
-        self.aligned.then(|| {
-            [
+        self.aligned.then(|| SubpixelPosition {
+            point: [
                 (a * glyph.x + c * glyph.y) * self.scale
                     + self.phase_x as f32 / crate::atlas::SUBPIXEL_BUCKETS as f32,
                 (b * glyph.x + d * glyph.y) * self.scale,
-            ]
+            ],
+            buckets: self.buckets,
         })
     }
 
     fn local_rect(
         self,
         glyph: &compiler::GlyphDraw,
-        position: Option<[f32; 2]>,
+        position: Option<SubpixelPosition>,
         placement: crate::atlas::Placement,
     ) -> [f32; 4] {
         let [a, _, _, d, ..] = self.matrix;
-        let [dx, dy] = position.map_or([0.0; 2], |[x, y]| {
+        let [dx, dy] = position.map_or([0.0; 2], |position| {
+            let [x, y] = position.point;
             [
                 x.rem_euclid(1.0) / (self.scale * a),
                 (y - (y + 0.5).floor()) / (self.scale * d),
@@ -1118,12 +1472,7 @@ impl Coverage {
                 f32::from(self.mask.is_some()),
                 0.0,
             ],
-            target_info: [
-                target.origin[0] as f32,
-                target.origin[1] as f32,
-                target.size[0] as f32,
-                target.size[1] as f32,
-            ],
+            target_info: [target.origin[0] as f32, target.origin[1] as f32, 0.0, 0.0],
             mask_rect: self.mask.as_ref().map_or([0.0; 4], |mask| {
                 [
                     mask.origin[0] as f32,
@@ -1154,6 +1503,7 @@ impl Frame<'_> {
         mask: Option<wgpu::BindGroup>,
         vertices: &[T],
         scissor: Option<[u32; 4]>,
+        vertex_count: u32,
     ) -> Result<(), Status> {
         let limit = FrameArena::vertex_limit::<T>(self.gpu);
         if limit == 0 {
@@ -1168,6 +1518,7 @@ impl Frame<'_> {
                 mask: mask.clone(),
                 vertices: self.compositor.arena.vertices(self.gpu, chunk)?,
                 scissor: scissor.map(|area| target.local(area)),
+                vertex_count,
                 instances: draw_count(chunk.len())?,
             });
             let pass = self.pending_pass(target);
@@ -1193,7 +1544,7 @@ impl Frame<'_> {
 
     fn flush_draws(&mut self) {
         if let Some(batch) = self.pending.take() {
-            self.encode_draws(&batch);
+            self.encode_draws(batch);
         }
     }
 
@@ -1206,7 +1557,7 @@ impl Frame<'_> {
 
     fn flush_main(&mut self) {
         if let Some(batch) = self.main_pass.take() {
-            self.encode_draws(&batch);
+            self.encode_draws(batch);
         }
         self.main_inputs.clear();
         self.main_release_bytes = 0;
@@ -1216,99 +1567,56 @@ impl Frame<'_> {
         }
     }
 
-    fn encode_draws(&mut self, batch: &DrawPass) {
-        self.count_pass(&batch.target);
-        let load = self.load(&batch.target);
-        let stamps = if let Some(shader) = batch.shader {
-            self.capture.as_mut().and_then(|(capture, slice)| {
-                capture.tagged_pass(
-                    GpuPassKind::ShaderEffect,
-                    *slice,
-                    batch.draws,
-                    Some(GpuPassSource::ShaderEffect(shader)),
-                )
-            })
-        } else {
-            let kind = self.pass_kind(&batch.target, batch.format);
-            pass_timestamps(&mut self.capture, kind, batch.draws)
-        };
-        let mut pass = render(&mut self.command, &batch.target, load, stamps);
-        let mut scissor = None;
-        set_scissor(&mut pass, Some([0, 0, batch.size[0], batch.size[1]]));
-        let mut last_pipeline = None;
-        let mut last_globals = None;
-        let mut last_material = None;
-        let mut last_mask = None;
-        let mut draws = batch.calls.iter().peekable();
-        while let Some(draw) = draws.next() {
-            let next = match draw {
-                DrawCall::Immediate(call) => call.scissor,
-                DrawCall::Composite(_) => None,
-                DrawCall::Resident { scissor, .. } => *scissor,
-            };
-            if next != scissor {
-                set_scissor(
-                    &mut pass,
-                    Some(next.unwrap_or([0, 0, batch.size[0], batch.size[1]])),
-                );
-                scissor = next;
-            }
-            let call = match draw {
-                DrawCall::Immediate(call) => call,
-                DrawCall::Composite(call) => {
-                    call.encode(&mut pass);
-                    pass.set_viewport(
-                        0.0,
-                        0.0,
-                        batch.target.texture().width() as f32,
-                        batch.target.texture().height() as f32,
-                        0.0,
-                        1.0,
-                    );
-                    last_pipeline = None;
-                    last_globals = None;
-                    last_material = None;
-                    last_mask = None;
-                    continue;
-                }
+    fn encode_draws(&mut self, batch: DrawPass) {
+        let kind = self.pass_kind(&batch.target, batch.format);
+        let target = batch.target.clone();
+        let draws = batch.draws;
+        let shader = batch.shader;
+        self.encode_pass(&target, RootSegment::Ordered(batch), kind, draws, shader);
+    }
 
-                DrawCall::Resident { bundle, .. } => {
-                    let adjacent = std::iter::from_fn(|| match draws.peek()? {
-                        DrawCall::Resident { bundle, scissor } if *scissor == next => {
-                            draws.next();
-                            Some(bundle)
-                        }
-                        _ => None,
-                    });
-                    pass.execute_bundles(std::iter::once(bundle).chain(adjacent));
-                    last_pipeline = None;
-                    last_globals = None;
-                    last_material = None;
-                    last_mask = None;
-                    continue;
-                }
+    fn encode_pass(
+        &mut self,
+        target: &wgpu::TextureView,
+        segment: RootSegment,
+        kind: GpuPassKind,
+        draws: u32,
+        shader: Option<engine::scene::ShaderProgramId>,
+    ) {
+        self.count_pass(target);
+        let load = self.load(target);
+        let stamps = self.capture.as_mut().and_then(|(capture, slice)| {
+            capture.tagged_pass(
+                if shader.is_some() {
+                    GpuPassKind::ShaderEffect
+                } else {
+                    kind
+                },
+                *slice,
+                draws,
+                shader.map(GpuPassSource::ShaderEffect),
+            )
+        });
+        if let Some(root) = &mut self.deferred_root
+            && *target == self.root
+        {
+            let pass = DeferredRootPass {
+                segment,
+                load,
+                stamps: stamps.map(|stamps| PassStamps {
+                    queries: stamps.query_set.clone(),
+                    begin: stamps.beginning_of_pass_write_index,
+                    end: stamps.end_of_pass_write_index,
+                }),
             };
-            if last_pipeline != Some(&call.pipeline) {
-                pass.set_pipeline(&call.pipeline);
-                last_pipeline = Some(&call.pipeline);
+            if self.finishing_output {
+                root.final_pass = Some(pass);
+            } else {
+                let prefix = std::mem::replace(&mut self.command, frame_encoder(self.gpu));
+                root.prefixes.push((prefix, pass));
             }
-            let globals = (&call.globals.group, call.globals.offsets());
-            if last_globals != Some(globals) {
-                pass.set_bind_group(0, globals.0, globals.1);
-                last_globals = Some(globals);
-            }
-            if last_material != Some(&call.material) {
-                pass.set_bind_group(1, &call.material, &[]);
-                last_material = Some(&call.material);
-            }
-            if let Some(mask) = &call.mask
-                && last_mask != Some(mask)
-            {
-                pass.set_bind_group(2, mask, &[]);
-                last_mask = Some(mask);
-            }
-            pass.set_vertex_buffer(0, call.vertices.slice());
-            pass.draw(0..6, 0..call.instances);
+        } else {
+            segment.encode(&mut self.command, target, load, stamps);
         }
     }
 
@@ -1339,20 +1647,9 @@ impl Frame<'_> {
 
     fn finish(&mut self, view: &wgpu::TextureView) {
         self.flush_target(view);
-        if let Some(color) = self.clears.remove(view) {
-            self.count_pass(view);
-            let kind = if *view == self.main {
-                GpuPassKind::Main
-            } else {
-                GpuPassKind::OffscreenEffect
-            };
-            let stamps = pass_timestamps(&mut self.capture, kind, 0);
-            drop(render(
-                &mut self.command,
-                view,
-                wgpu::LoadOp::Clear(color),
-                stamps,
-            ));
+        if self.clears.contains_key(view) {
+            let kind = self.pass_kind(view, wgpu::TextureFormat::Rgba8UnormSrgb);
+            self.encode_pass(view, RootSegment::Clear, kind, 0, None);
         }
     }
 
@@ -1386,14 +1683,16 @@ impl Frame<'_> {
     ) -> Image {
         let [x, y, w, h] = area;
         let compositor = &mut self.compositor;
-        let index = compositor.pool.iter().position(|image| {
+        // Reusing the most recently released attachment keeps material roles
+        // stable in a repeated scene and avoids rotating bind-group keys.
+        let index = compositor.pool.iter().rposition(|image| {
             image.size == size
                 && image.format == format
                 && image.samples == samples
                 && image.usage == usage
         });
         let mut image = if let Some(index) = index {
-            compositor.pool.swap_remove(index)
+            compositor.pool.remove(index)
         } else {
             let image = Image::with_usage(self.gpu, size, format, samples, usage);
             compositor.render_stats.offscreen_alloc_bytes += image.bytes();
@@ -1612,6 +1911,7 @@ impl Frame<'_> {
                                 shadow: [0.0; 4],
                             }],
                             &[],
+                            None,
                         )?;
                     }
                 }
@@ -2372,7 +2672,7 @@ impl Frame<'_> {
                 let mut rect = compiler::solid_rect(shape.rect, [1.0; 4]);
                 rect.radius = shape.radius;
                 rect.corners = shape.corners;
-                self.rects(&next, shape.transform, &unclipped, &[rect], &[])?;
+                self.rects(&next, shape.transform, &unclipped, &[rect], &[], None)?;
             }
             self.finish(&next.view);
             if let Some(accumulated) = &intersection {
@@ -2507,7 +2807,14 @@ impl Frame<'_> {
                         for rect in &mut rects {
                             rect.gradient_b[3] *= group.opacity;
                         }
-                        self.rects(target, transform, &coverage, &rects, run.stops())?;
+                        self.rects(
+                            target,
+                            transform,
+                            &coverage,
+                            &rects,
+                            run.stops(),
+                            run.ramp.as_deref(),
+                        )?;
                     }
                     Draw::Images {
                         source, instances, ..
@@ -2684,7 +2991,7 @@ impl Frame<'_> {
                         ],
                         *color,
                     );
-                    self.rects(target, IDENTITY, clip, &[rect], &[])?;
+                    self.rects(target, IDENTITY, clip, &[rect], &[], None)?;
                 }
                 Draw::Glyphs(glyphs) => {
                     let next = std::iter::from_fn(|| {
@@ -2801,8 +3108,15 @@ impl Frame<'_> {
         clip: &Coverage,
         rects: &[RectInstance],
         stops: &[[f32; 4]],
+        ramp: Option<&PreparedRamp>,
     ) -> Result<(), Status> {
-        self.rect_batches(target, transform, clip, BlendKey::SrcOver, [(rects, stops)])
+        self.rect_batch_from_paint(
+            target,
+            transform,
+            clip,
+            BlendKey::SrcOver,
+            (rects, stops, ramp),
+        )
     }
 
     fn prepared_rects<'a>(
@@ -2818,7 +3132,11 @@ impl Frame<'_> {
         let mut active: Option<PaintPage> = None;
         let mut addresses = Vec::new();
         for run in runs {
-            let ramp = self.compositor.arena.lut.layer(self.gpu, run.stops());
+            let ramp = self
+                .compositor
+                .arena
+                .lut
+                .layer(self.gpu, run.ramp.as_deref());
             let stops = self.stops(run.stops())?;
             let empty = self.paint(stops, None)?;
             addresses.clear();
@@ -2882,33 +3200,30 @@ impl Frame<'_> {
         self.geometry_uniform(target, transform, clip, f32::from(dither))
     }
 
-    fn rect_batches<'a>(
+    fn rect_batch_from_paint(
         &mut self,
         target: &Image,
         transform: Affine,
         clip: &Coverage,
         blend: BlendKey,
-        batches: impl IntoIterator<Item = (&'a [RectInstance], &'a [[f32; 4]])>,
+        (rects, stops, ramp): (&[RectInstance], &[[f32; 4]], Option<&PreparedRamp>),
     ) -> Result<(), Status> {
         let view = self.rect_view(target, transform, clip, blend)?;
         let mut batch = Vec::new();
         let mut active = None;
-        for (rects, stops) in batches {
-            let ramp = self.compositor.arena.lut.layer(self.gpu, stops);
-            let stops = self.stops(stops)?;
-
-            for rect in rects {
-                let (page, index) =
-                    self.paint(stops, rect.extra(FrameArena::stop_index(stops), ramp))?;
-                if let Some(previous) = active
-                    && !page.same_bindings(previous)
-                {
-                    self.rect_batch(target, clip, view, previous, &batch, blend)?;
-                    batch.clear();
-                }
-                active = Some(page);
-                batch.push(rect.vertex(index));
+        let ramp = self.compositor.arena.lut.layer(self.gpu, ramp);
+        let stops = self.stops(stops)?;
+        for rect in rects {
+            let (page, index) =
+                self.paint(stops, rect.extra(FrameArena::stop_index(stops), ramp))?;
+            if let Some(previous) = active
+                && !page.same_bindings(previous)
+            {
+                self.rect_batch(target, clip, view, previous, &batch, blend)?;
+                batch.clear();
             }
+            active = Some(page);
+            batch.push(rect.vertex(index));
         }
         if let Some(page) = active {
             self.rect_batch(target, clip, view, page, &batch, blend)?;
@@ -3017,47 +3332,28 @@ impl Frame<'_> {
         };
         self.flush_target(&target.view);
         let depth = self.take_exact_attachment(target.area(), pipelines::EARLY_DEPTH);
-        let load = self.load(&target.view);
-        self.count_pass(&target.view);
         let draws = 1 + u32::from(rounded);
         self.compositor.render_stats.draws += draws;
         let count = draw_count(interiors.len())?;
         self.compositor.render_stats.early_z_instances += count;
-        let stamps = pass_timestamps(&mut self.capture, GpuPassKind::EarlyZ, draws);
-        {
-            let mut pass = self.command.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("impasto opaque front-to-back"),
-                timestamp_writes: stamps,
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth.view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                    stencil_ops: None,
-                }),
-                ..Default::default()
-            });
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &globals.group, globals.offsets());
-            pass.set_vertex_buffer(0, vertices.slice());
-            pass.draw(0..6, 0..count);
-            if let Some((pipeline, vertices)) = edge_draw {
-                pass.set_pipeline(&pipeline);
-                pass.set_bind_group(1, &self.compositor.white_mask_group, &[]);
-                pass.set_vertex_buffer(0, vertices.slice());
-                pass.draw(0..6, 0..draw_count(edges.len())?);
-            }
-        }
+        let edges = edge_draw
+            .map(|(pipeline, vertices)| Ok((pipeline, vertices, draw_count(edges.len())?)))
+            .transpose()?;
+        self.encode_pass(
+            &target.view,
+            RootSegment::EarlyZ(Box::new(EarlyZBatch {
+                depth: depth.view.clone(),
+                pipeline,
+                globals,
+                vertices,
+                count,
+                edges,
+                mask: self.compositor.white_mask_group.clone(),
+            })),
+            GpuPassKind::EarlyZ,
+            draws,
+            None,
+        );
         self.release(depth);
         Ok(true)
     }
@@ -3072,21 +3368,19 @@ impl Frame<'_> {
         blend: BlendKey,
     ) -> Result<(), Status> {
         for run in batch::rect_pipeline_runs(vertices) {
-            let kind = if batch::is_shadow(&run[0]) {
-                shadow_pipeline(run)
-            } else if self.compositor.specialize_paint
+            let solid = self.compositor.specialize_paint
                 && run
                     .iter()
-                    .all(|rect| rect.shape[2] == 0.0 && rect.paint == u32::MAX)
-            {
-                PipelineKind::RectSolid
+                    .all(|rect| rect.shape[2] == 0.0 && rect.paint == u32::MAX);
+            let kind = if batch::is_shadow(&run[0]) {
+                shadow_pipeline(run)
             } else {
-                PipelineKind::Rect
+                self.rect_pipeline(target, clip, run, blend, solid)
             };
             let mask = self.mask_group(clip);
             let globals = self.globals(
                 view,
-                if kind == PipelineKind::RectSolid {
+                if solid {
                     Extra::None
                 } else {
                     Extra::Paint(page)
@@ -3096,9 +3390,52 @@ impl Frame<'_> {
                 self.compositor
                     .pipelines
                     .get(self.gpu, single(target.format), kind, blend)?;
-            self.record(target, pipeline, globals, mask, None, run, clip.scissor)?;
+            let vertex_count = if batch::is_shadow(&run[0]) {
+                self.gpu.shadow_vertices()
+            } else {
+                6
+            };
+            self.record(
+                target,
+                pipeline,
+                globals,
+                mask,
+                None,
+                run,
+                clip.scissor,
+                vertex_count,
+            )?;
         }
         Ok(())
+    }
+
+    fn rect_pipeline(
+        &self,
+        target: &Image,
+        clip: &Coverage,
+        vertices: &[RectVertex],
+        blend: BlendKey,
+        solid: bool,
+    ) -> PipelineKind {
+        let unclipped = clip.count == 0 && clip.mask.is_none();
+        if solid {
+            return if unclipped {
+                PipelineKind::RectSolidUnclipped
+            } else {
+                PipelineKind::RectSolid
+            };
+        }
+        let dither = self.gpu.dither_gradients
+            && target.view == self.root
+            && target.format.is_srgb()
+            && blend == BlendKey::SrcOver
+            && vertices.iter().any(batch::has_gradient);
+        match (unclipped, dither) {
+            (false, false) => PipelineKind::Rect,
+            (true, false) => PipelineKind::RectUnclipped,
+            (false, true) => PipelineKind::RectDither,
+            (true, true) => PipelineKind::RectDitherUnclipped,
+        }
     }
 
     fn meshes(
@@ -3150,13 +3487,13 @@ impl Frame<'_> {
                 continue;
             }
             let mut paint = compiler::solid_rect([0.0; 4], mesh.brush.solid());
-            let stops = if let batch::Brush::Gradient(gradient) = &mesh.brush {
+            let (stops, ramp) = if let batch::Brush::Gradient(gradient) = &mesh.brush {
                 set_rect_gradient(&mut paint, gradient);
-                gradient.stops.as_slice()
+                (gradient.stops.as_slice(), gradient.ramp.as_deref())
             } else {
-                &[]
+                (&[][..], None)
             };
-            let ramp = self.compositor.arena.lut.layer(self.gpu, stops);
+            let ramp = self.compositor.arena.lut.layer(self.gpu, ramp);
             let stops = self.stops(stops)?;
             let (page, index) =
                 self.paint(stops, paint.extra(FrameArena::stop_index(stops), ramp))?;
@@ -3409,6 +3746,8 @@ impl Frame<'_> {
             single(target.format),
             if image.nv12().is_some() {
                 PipelineKind::ExternalImage
+            } else if clip.count == 0 && clip.mask.is_none() {
+                PipelineKind::ImageUnclipped
             } else {
                 PipelineKind::Image
             },
@@ -3433,6 +3772,7 @@ impl Frame<'_> {
                 Some(mask.clone()),
                 &vertices,
                 clip.scissor,
+                6,
             )?;
             vertices.clear();
         }
@@ -3536,25 +3876,35 @@ impl Frame<'_> {
                         (page, index)
                     }
                     _ => {
-                        let stops = self.stops(&gradient.stops)?;
-                        let ramp = self.compositor.arena.lut.layer(self.gpu, &gradient.stops);
+                        let inline = gradient.inline_pair();
+                        let pairs = if inline.is_some() {
+                            &[][..]
+                        } else {
+                            gradient.stops.as_slice()
+                        };
+                        let stops = self.stops(pairs)?;
+                        let ramp = self
+                            .compositor
+                            .arena
+                            .lut
+                            .layer(self.gpu, gradient.ramp.as_deref());
+                        let [start, end] = inline.unwrap_or([
+                            [0.0; 4],
+                            [gradient.radial_radii[0], gradient.radial_radii[1], 0.0, 0.0],
+                        ]);
                         let (page, index) = self.paint(
                             stops,
                             Some(PaintExtra {
                                 geometry: gradient.a,
                                 gradient: [
-                                    gradient.kind as f32,
+                                    inline.map_or(gradient.kind, |_| batch::INLINE_LINEAR_GRADIENT)
+                                        as f32,
                                     FrameArena::stop_index(stops),
-                                    (gradient.stops.len() / 2) as f32,
+                                    (pairs.len() / 2) as f32,
                                     ramp as f32,
                                 ],
-                                shadow: [
-                                    gradient.radial_radii[0],
-                                    gradient.radial_radii[1],
-                                    0.0,
-                                    0.0,
-                                ],
-                                stroke: [0.0; 4],
+                                shadow: end,
+                                stroke: start,
                                 corners: [0.0; 4],
                             }),
                         )?;
@@ -3686,6 +4036,7 @@ impl Frame<'_> {
             Some(mask),
             glyphs,
             clip.scissor,
+            6,
         )
     }
 
@@ -3779,7 +4130,10 @@ impl Frame<'_> {
             _ => 0,
         };
         let blend = BlendKey::from_mode(mode);
-        let snapshot = blend.is_none().then(|| self.snapshot(target, area));
+        let snapshot = blend
+            .is_none()
+            .then(|| self.snapshot(target, area))
+            .transpose()?;
         let coverage = if filter {
             self.coverage(target, &group_clip)?
         } else {
@@ -3823,7 +4177,10 @@ impl Frame<'_> {
         Ok(())
     }
 
-    fn snapshot(&mut self, target: &Image, area: [u32; 4]) -> Image {
+    fn snapshot(&mut self, target: &Image, area: [u32; 4]) -> Result<Image, Status> {
+        if self.deferred_root.is_some() && target.view == self.root {
+            return Err(Status::BadScene);
+        }
         self.finish(&target.view);
         let snapshot = self.take_area(area, target.format, 1);
         let [x, y, w, h] = target.local(area);
@@ -3835,7 +4192,7 @@ impl Frame<'_> {
             snapshot.texture.as_image_copy(),
             extent([w, h]),
         );
-        snapshot
+        Ok(snapshot)
     }
 
     fn blur(&mut self, source: &Image, radius: f32, backdrop: bool) -> Result<Image, Status> {
@@ -3863,8 +4220,11 @@ impl Frame<'_> {
         let input = levels.last().unwrap_or(source);
         // The apron fits sigma <= 8 at this pyramid level. The render path
         // is retained for larger kernels and for capabilities without storage.
-        let mut filtered = if (0.25..=8.0).contains(&remaining)
-            && let Some(pipeline) = self.compositor.compute_blur.clone()
+        let [width, height] = input.logical;
+        let hdr = format == wgpu::TextureFormat::Rgba16Float;
+        let mut filtered = if (2.5..=8.0).contains(&remaining)
+            && width.saturating_mul(height) >= 4096
+            && let Some(pipeline) = self.compositor.compute_blur[usize::from(hdr)].clone()
         {
             self.compute_blur(&pipeline, input, remaining)?
         } else {
@@ -3912,7 +4272,7 @@ impl Frame<'_> {
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
-        reason = "sigma is between 0.25 and 8 at the call site"
+        reason = "sigma is between 2.5 and 8 at the call site"
     )]
     fn compute_blur(
         &mut self,
@@ -3920,20 +4280,23 @@ impl Frame<'_> {
         source: &Image,
         sigma: f32,
     ) -> Result<Image, Status> {
-        let format = wgpu::TextureFormat::Rgba16Float;
         let usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING;
-        let scratch = self.take_area_with_usage(source.area(), format, 1, usage);
-        let output = self.take_area_with_usage(source.area(), format, 1, usage);
+        let scratch = self.take_area_with_usage(source.area(), kernel.format, 1, usage);
+        let output = self.take_area_with_usage(source.area(), kernel.format, 1, usage);
         let [w, h] = source.logical;
         let params = self.uniform(&BlurParams {
             size: [w, h],
             radius: (sigma * 3.0).ceil() as u32,
             sigma,
         })?;
-        for (axis, (input, target)) in
-            [(&source.view, &scratch.view), (&scratch.view, &output.view)]
-                .into_iter()
-                .enumerate()
+        let scratch_storage = scratch.storage_view.as_ref().unwrap_or(&scratch.view);
+        let output_storage = output.storage_view.as_ref().unwrap_or(&output.view);
+        for (axis, (input, target)) in [
+            (&source.view, scratch_storage),
+            (&scratch.view, output_storage),
+        ]
+        .into_iter()
+        .enumerate()
         {
             let pipeline = kernel.pipeline(axis);
             let (buffer, offset) = self.compositor.arena.uniform_buffer(params);
@@ -3967,7 +4330,8 @@ impl Frame<'_> {
                 });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &*material, &[offset]);
-            pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
+            let [tile_width, tile_height] = if axis == 0 { [16, 8] } else { [8, 16] };
+            pass.dispatch_workgroups(w.div_ceil(tile_width), h.div_ceil(tile_height), 1);
             drop(pass);
             self.count_pass(target);
             self.compositor.render_stats.compute_passes += 1;
@@ -4032,11 +4396,6 @@ impl Frame<'_> {
         let globals = self.globals(view, extra);
         let input = ImageSource::Pooled(source).material(self, false);
         let composite = match kind {
-            FullPass::ColorFilter(matrix) => {
-                let columns: [[f32; 4]; 5] =
-                    std::array::from_fn(|col| std::array::from_fn(|row| matrix[row][col]));
-                Some(self.effect_values(&columns)?)
-            }
             FullPass::Over { .. }
             | FullPass::Multiply { .. }
             | FullPass::Backdrop
@@ -4045,26 +4404,32 @@ impl Frame<'_> {
             }
             _ => None,
         };
-        let effect_values = if let FullPass::BackdropMaterial {
-            material,
-            top,
-            inverse_height,
-        } = kind
-        {
-            Some(self.effect_values(&[
-                material.tint,
-                [
-                    material.saturation,
-                    material.brightness,
-                    material.taper,
-                    inverse_height,
-                ],
-                [top, 0.0, 0.0, 0.0],
-                [0.0; 4],
-                [0.0; 4],
-            ])?)
-        } else {
-            None
+        let effect_values = match kind {
+            FullPass::ColorFilter(matrix) => {
+                let columns =
+                    std::array::from_fn(|col| std::array::from_fn(|row| matrix[row][col]));
+                Some((2, self.effect_values(&columns)?))
+            }
+            FullPass::BackdropMaterial {
+                material,
+                top,
+                inverse_height,
+            } => Some((
+                3,
+                self.effect_values(&[
+                    material.tint,
+                    [
+                        material.saturation,
+                        material.brightness,
+                        material.taper,
+                        inverse_height,
+                    ],
+                    [top, 0.0, 0.0, 0.0],
+                    [0.0; 4],
+                    [0.0; 4],
+                ])?,
+            )),
+            _ => None,
         };
         self.compositor.render_stats.draws += 1;
         let blend = if let FullPass::Over { blend, .. } = kind {
@@ -4137,11 +4502,7 @@ impl Frame<'_> {
             pass.draws += 1;
             pass.calls.push(DrawCall::Composite(call));
         } else {
-            let load = self.load(&target.view);
-            self.count_pass(&target.view);
-            let stamps = pass_timestamps(&mut self.capture, kind, 1);
-            let mut pass = render(&mut self.command, &target.view, load, stamps);
-            call.encode(&mut pass);
+            self.encode_pass(&target.view, RootSegment::Composite(call), kind, 1, None);
         }
         Ok(())
     }
@@ -4150,25 +4511,10 @@ impl Frame<'_> {
         self.compositor.arena.uniform(self.gpu, value)
     }
 
-    fn effect_values(&mut self, values: &[[f32; 4]; 5]) -> Result<wgpu::BindGroup, Status> {
-        let slice = self.uniform(values)?;
-        let (buffer, offset) = self.compositor.arena.uniform_buffer(slice);
-        self.compositor.render_stats.bind_groups_created += 1;
-        Ok(self
-            .gpu
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("impasto effect values"),
-                layout: &self.compositor.pipelines.layouts.effect_values,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer,
-                        offset: u64::from(offset),
-                        size: wgpu::BufferSize::new(pipelines::EFFECT_VALUE_BYTES),
-                    }),
-                }],
-            }))
+    fn effect_values(&mut self, values: &[[f32; 4]; 5]) -> Result<DynamicGroup, Status> {
+        self.compositor
+            .arena
+            .effect_values(self.gpu, &self.compositor.pipelines.layouts, values)
     }
 
     fn transform(&mut self, target: &Image, t: Affine, clip: &Coverage) -> Result<Address, Status> {
@@ -4192,6 +4538,13 @@ impl Frame<'_> {
         let sy = -2.0 * self.scene.scale / h;
         let [x, y] = target.origin.map(|v| v as f32 / self.scene.scale);
         let scale = compiler::primitive_scale(t, self.scene.scale);
+        let [a, b, c, d, ..] = t;
+        let determinant = (a * d - b * c).abs();
+        let aa = if a == d && b == -c {
+            scale.recip()
+        } else {
+            (d.hypot(b) + c.hypot(a)) / (2.0 * determinant * self.scene.scale)
+        };
         let mut view = ViewUniform {
             transform: [
                 [t[0] * sx, t[1] * sy, 0.0, 0.0],
@@ -4202,6 +4555,9 @@ impl Frame<'_> {
             ..clip.view(target, scale)
         };
         view.meta[3] = value;
+        if aa.is_finite() && determinant > 1e-6 {
+            view.target_info[2] = aa.max(0.5e-6);
+        }
         view
     }
 

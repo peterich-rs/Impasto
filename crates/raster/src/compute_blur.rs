@@ -6,6 +6,7 @@ use crate::gpu::Gpu;
 pub(crate) struct ComputeBlur {
     pipelines: [wgpu::ComputePipeline; 2],
     pub layout: wgpu::BindGroupLayout,
+    pub format: wgpu::TextureFormat,
 }
 
 #[repr(C)]
@@ -17,14 +18,23 @@ pub(crate) struct BlurParams {
 }
 
 impl ComputeBlur {
-    pub fn new(gpu: &Gpu) -> Option<Self> {
-        let format = wgpu::TextureFormat::Rgba16Float;
-        let features = format.guaranteed_format_features(gpu.device.features());
+    pub fn new(gpu: &Gpu, format: wgpu::TextureFormat) -> Option<Self> {
+        let storage_format = format.remove_srgb_suffix();
+        let features = storage_format.guaranteed_format_features(gpu.device.features());
         let limits = gpu.device.limits();
         let f16_tile = gpu.device.features().contains(wgpu::Features::SHADER_F16);
         if std::env::var("IMPASTO_COMPUTE_BLUR").as_deref() != Ok("1")
             || !gpu.caps.has_compute
-            || limits.max_compute_workgroup_storage_size < 448 * if f16_tile { 8 } else { 16 }
+            || format.is_srgb()
+                && !gpu
+                    .caps
+                    .downlevel_flags
+                    .contains(wgpu::DownlevelFlags::VIEW_FORMATS)
+            || limits.max_compute_invocations_per_workgroup < 128
+            || limits.max_compute_workgroup_size_x < 16
+            || limits.max_compute_workgroup_size_y < 8
+            || limits.max_compute_workgroup_storage_size
+                < 512 * if f16_tile { 8 } else { 16 } + 25 * 4
             || !features.allowed_usages.contains(
                 wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
             )
@@ -37,6 +47,11 @@ impl ComputeBlur {
         }
         gpu.validation(|| {
             let base = include_str!("pipelines/compute_blur.wgsl");
+            let base = if format.is_srgb() {
+                std::borrow::Cow::Owned(base.replace("rgba16float, write", "rgba8unorm, write"))
+            } else {
+                std::borrow::Cow::Borrowed(base)
+            };
             let source = if f16_tile {
                 std::borrow::Cow::Owned(format!(
                     "enable f16;
@@ -47,7 +62,7 @@ impl ComputeBlur {
                     )
                 ))
             } else {
-                std::borrow::Cow::Borrowed(base)
+                base
             };
             let module = gpu
                 .device
@@ -78,7 +93,7 @@ impl ComputeBlur {
                             1,
                             wgpu::BindingType::StorageTexture {
                                 access: wgpu::StorageTextureAccess::WriteOnly,
-                                format,
+                                format: storage_format,
                                 view_dimension: wgpu::TextureViewDimension::D2,
                             },
                         ),
@@ -109,13 +124,20 @@ impl ComputeBlur {
                         module: &module,
                         entry_point: Some("blur"),
                         compilation_options: wgpu::PipelineCompilationOptions {
-                            constants: &[("vertical", vertical)],
+                            constants: &[
+                                ("vertical", vertical),
+                                ("output_srgb", f64::from(format.is_srgb())),
+                            ],
                             ..Default::default()
                         },
                         cache: gpu.pipeline_cache(),
                     })
             });
-            Ok(Self { pipelines, layout })
+            Ok(Self {
+                pipelines,
+                layout,
+                format,
+            })
         })
         .ok()
     }

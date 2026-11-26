@@ -186,6 +186,13 @@ impl Rasterizer {
             *surface = configure(gpu, state.generation, surface.handle, replacement, pixels)?;
         }
         resize_if_needed(gpu, surface, pixels)?;
+        let format = crate::compositor::OutputFormat::surface(&surface.config);
+        let mut prepared = self
+            .late_acquire
+            .then(|| self.prepare_surface_frame(format, pixels))
+            .transpose()?;
+        let state = self.device.as_mut().ok_or(Status::NotReady)?;
+        let gpu = &state.gpu;
         let raw = surface.inner.as_ref().ok_or(Status::SurfaceLost)?;
         use wgpu::CurrentSurfaceTexture as Frame;
         let started = std::time::Instant::now();
@@ -196,6 +203,12 @@ impl Rasterizer {
             raw.get_current_texture()
         };
         self.stats.acquire = started.elapsed();
+        if !matches!(&acquired, Frame::Success(_) | Frame::Suboptimal(_))
+            && let Some(discarded) = prepared.take()
+        {
+            drop(discarded);
+            state.compositor.discard_frame();
+        }
         let texture = match acquired {
             Frame::Success(texture) => texture,
             Frame::Suboptimal(texture) => {
@@ -219,11 +232,11 @@ impl Rasterizer {
             Frame::Validation => return Err(Status::PresentFailed),
         };
         let view = texture.texture.create_view(&Default::default());
-        self.encode_and_submit(
-            &view,
-            crate::compositor::OutputFormat::surface(&surface.config),
-            pixels,
-        )?;
+        if let Some(prepared) = prepared {
+            self.submit_surface_frame(&view, prepared)?;
+        } else {
+            self.encode_and_submit(&view, format, pixels)?;
+        }
         let state = self.device.as_ref().ok_or(Status::NotReady)?;
         let started = std::time::Instant::now();
         {

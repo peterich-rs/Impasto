@@ -1,7 +1,7 @@
 struct View {
     transform: mat4x4<f32>,
     info: vec4<f32>,
-    target_info: vec4<f32>,
+    target_info: vec4<f32>, // target origin in pixels, local AA width, reserved
     mask_rect: vec4<f32>,
     clip_boxes: array<vec4<f32>, 4>,
     clip_radii: array<vec4<f32>, 4>,

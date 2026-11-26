@@ -1,4 +1,5 @@
 // Textured quads, including external images and resolved paths.
+override unclipped: bool = false;
 @group(1) @binding(0) var image_tex: texture_2d<f32>;
 @group(1) @binding(1) var image_sampler: sampler;
 @group(2) @binding(0) var clip_mask_tex: texture_2d<f32>;
@@ -54,7 +55,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let linear = select(straight / 12.92, pow((straight + 0.055) / 1.055, vec3<f32>(2.4)), straight > vec3<f32>(0.04045));
         rgb = linear * texel.a;
     }
-    var color = vec4<f32>(rgb, texel.a) * data.color;
-    color = color * clip_coverage(in.position.xy);
-    return color;
+    let color = vec4<f32>(rgb, texel.a) * data.color;
+    if unclipped { return color; }
+    return color * clip_coverage(in.position.xy);
 }

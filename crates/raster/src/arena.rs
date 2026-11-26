@@ -9,7 +9,7 @@ use crate::{
     Status,
     batch::{GpuMeshBuffer, MeshBuffer, PAINT_EXTRA_BYTES, PaintExtra},
     gpu::Gpu,
-    pipelines::{EXTRA_BYTES, Layouts, ParamsUniform, ViewUniform},
+    pipelines::{EFFECT_VALUE_BYTES, EXTRA_BYTES, Layouts, ParamsUniform, ViewUniform},
 };
 
 const MAX_SLAB: usize = 16 * 1024 * 1024;
@@ -305,6 +305,7 @@ pub struct FrameArena {
     pub lut: crate::gradient_lut::GradientLut,
     paint_entries: HashMap<[u32; size_of::<PaintExtra>() / 4], Address>,
     groups: HashMap<(usize, Globals), wgpu::BindGroup>,
+    effect_value_groups: HashMap<usize, wgpu::BindGroup>,
     pub buffers_created: u32,
     pub bind_groups_created: u32,
 }
@@ -351,6 +352,7 @@ impl FrameArena {
             paint_entries: HashMap::new(),
             lut: crate::gradient_lut::GradientLut::new(gpu),
             groups: HashMap::new(),
+            effect_value_groups: HashMap::new(),
             buffers_created: 0,
             bind_groups_created: 0,
         }
@@ -364,6 +366,9 @@ impl FrameArena {
         self.vertices.reset();
         let uniforms_changed = self.uniforms.reset();
         let paint_changed = self.paint.reset();
+        if uniforms_changed {
+            self.effect_value_groups.clear();
+        }
         if uniforms_changed || paint_changed {
             self.groups.clear();
         }
@@ -398,6 +403,7 @@ impl FrameArena {
             }
         }
         self.groups.clear();
+        self.effect_value_groups.clear();
         self.paint_entries.clear();
         self.lut.trim();
     }
@@ -494,6 +500,38 @@ impl FrameArena {
 
     pub fn uniform_buffer(&self, address: Address) -> (&wgpu::Buffer, u32) {
         (&self.uniforms.slabs[address.slab].buffer, address.offset)
+    }
+
+    pub fn effect_values(
+        &mut self,
+        gpu: &Gpu,
+        layouts: &Layouts,
+        values: &[[f32; 4]; 5],
+    ) -> Result<DynamicGroup, Status> {
+        let address = self.uniform(gpu, values)?;
+        let group = self
+            .effect_value_groups
+            .entry(address.slab)
+            .or_insert_with(|| {
+                self.bind_groups_created += 1;
+                gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("impasto effect values"),
+                    layout: &layouts.effect_values,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &self.uniforms.slabs[address.slab].buffer,
+                            offset: 0,
+                            size: wgpu::BufferSize::new(EFFECT_VALUE_BYTES),
+                        }),
+                    }],
+                })
+            });
+        Ok(DynamicGroup {
+            group: group.clone(),
+            offsets: [address.offset, 0],
+            count: 1,
+        })
     }
 
     pub fn owns_uniform_buffer(&self, buffer: &wgpu::Buffer) -> bool {

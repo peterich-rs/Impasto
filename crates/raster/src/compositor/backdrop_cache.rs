@@ -36,6 +36,13 @@ pub(super) struct BackdropCache {
 }
 
 impl BackdropCache {
+    pub(super) fn contains(&self, view: &wgpu::TextureView) -> bool {
+        self.entries
+            .iter()
+            .flatten()
+            .any(|entry| entry.source.view == *view)
+    }
+
     pub(super) fn begin(&mut self) {
         self.entries.truncate(self.cursor);
         self.cursor = 0;
@@ -98,7 +105,7 @@ impl Frame<'_> {
             }
         });
         if radius <= 0.0 {
-            let snapshot = self.snapshot(target, src);
+            let snapshot = self.snapshot(target, src)?;
             self.full(&snapshot, Some(&snapshot), coverage, target, dst, kind)?;
             self.release(snapshot);
             return Ok(());
@@ -146,7 +153,7 @@ impl Frame<'_> {
         } else {
             None
         };
-        let snapshot = self.snapshot(target, src);
+        let snapshot = self.snapshot(target, src)?;
         let blurred = self.blur(&snapshot, radius, true)?;
         self.full(&blurred, Some(&snapshot), coverage, target, dst, kind)?;
         if let Some((slot, key)) = slot

@@ -71,7 +71,11 @@ impl BlendKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PipelineKind {
     Rect,
+    RectUnclipped,
+    RectDither,
+    RectDitherUnclipped,
     RectSolid,
+    RectSolidUnclipped,
     RectShadow,
     RectCircularShadow,
     ImageArray,
@@ -90,6 +94,7 @@ pub enum PipelineKind {
     TextMask,
     TextLcd,
     Image,
+    ImageUnclipped,
     BlurDown,
     BlurUp,
     Gaussian,
@@ -254,7 +259,7 @@ impl PipelineCache {
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
+                            has_dynamic_offset: true,
                             min_binding_size: wgpu::BufferSize::new(EFFECT_VALUE_BYTES),
                         },
                         count: None,
@@ -334,6 +339,9 @@ impl PipelineCache {
             let variants = [
                 K::RectSolid,
                 K::Rect,
+                K::RectUnclipped,
+                K::RectDither,
+                K::RectDitherUnclipped,
                 K::TextMask,
                 K::Image,
                 K::Copy,
@@ -424,11 +432,11 @@ impl PipelineCache {
         let target = Target { format, samples: 1 };
         let count = self.targets.len();
         let [rect, text] = if specialize {
-            [PipelineKind::RectSolid, PipelineKind::TextMask]
+            [PipelineKind::RectSolidUnclipped, PipelineKind::TextMask]
         } else {
-            [PipelineKind::Rect, PipelineKind::TextUnclipped]
+            [PipelineKind::RectUnclipped, PipelineKind::TextUnclipped]
         };
-        for kind in [rect, text, PipelineKind::Image] {
+        for kind in [rect, text, PipelineKind::ImageUnclipped] {
             self.get(gpu, target, kind, BlendKey::SrcOver)?;
         }
         if surface {
@@ -637,8 +645,10 @@ fn build(
         Some(&layouts.effect_values),
     ];
     let (module, groups, vertex, fragment) = match kind {
-        K::Rect => (ui, paint.as_slice(), "vs_main", "fs_main"),
-        K::RectSolid => (ui, solid.as_slice(), "vs_solid", "fs_solid"),
+        K::Rect | K::RectUnclipped | K::RectDither | K::RectDitherUnclipped => {
+            (ui, paint.as_slice(), "vs_main", "fs_main")
+        }
+        K::RectSolid | K::RectSolidUnclipped => (ui, solid.as_slice(), "vs_solid", "fs_solid"),
         K::RectShadow | K::RectCircularShadow => (ui, paint.as_slice(), "vs_shadow", "fs_shadow"),
         K::EarlyZ => (ui, view_only.as_slice(), "vs_depth_rect", "fs_depth_rect"),
         K::EarlyZEdges => (ui, solid.as_slice(), "vs_depth_solid", "fs_solid"),
@@ -648,7 +658,7 @@ fn build(
         K::TextLcd => (text, text_mask.as_slice(), "vs_mask", "fs_lcd"),
         K::TextMask => (text, text_mask.as_slice(), "vs_mask", "fs_mask"),
         K::Text | K::TextUnclipped => (text, text_groups.as_slice(), "vs_main", "fs_main"),
-        K::Image | K::ImageArray | K::SmallImages | K::ExternalImage => {
+        K::Image | K::ImageUnclipped | K::ImageArray | K::SmallImages | K::ExternalImage => {
             (image, image_groups.as_slice(), "vs_main", "fs_main")
         }
         K::BlurDown => (blur, effects.as_slice(), "vs_full", "fs_blur_down"),
@@ -678,7 +688,11 @@ fn build(
     let image_buffers = [quad];
     let buffers = match kind {
         K::Rect
+        | K::RectUnclipped
+        | K::RectDither
+        | K::RectDitherUnclipped
         | K::RectSolid
+        | K::RectSolidUnclipped
         | K::RectShadow
         | K::RectCircularShadow
         | K::EarlyZ
@@ -686,7 +700,9 @@ fn build(
         K::Mesh | K::MeshStencil | K::StencilCover => mesh_buffers.as_slice(),
         K::StencilWrite | K::StencilNonZero | K::StencilEvenOdd => stencil_buffers.as_slice(),
         K::Text | K::TextUnclipped | K::TextMask | K::TextLcd => glyph_buffers.as_slice(),
-        K::Image | K::ImageArray | K::SmallImages | K::ExternalImage => image_buffers.as_slice(),
+        K::Image | K::ImageUnclipped | K::ImageArray | K::SmallImages | K::ExternalImage => {
+            image_buffers.as_slice()
+        }
         _ => &[],
     };
     let blend = match kind {
@@ -699,7 +715,11 @@ fn build(
             alpha: BlendKey::SrcOver.state().alpha,
         },
         K::Rect
+        | K::RectUnclipped
+        | K::RectDither
+        | K::RectDitherUnclipped
         | K::RectSolid
+        | K::RectSolidUnclipped
         | K::EarlyZEdges
         | K::RectShadow
         | K::RectCircularShadow
@@ -710,6 +730,7 @@ fn build(
         | K::TextUnclipped
         | K::TextMask
         | K::Image
+        | K::ImageUnclipped
         | K::ImageArray
         | K::SmallImages
         | K::ExternalImage
@@ -729,14 +750,26 @@ fn build(
     if gpu.shadow_2d && matches!(kind, K::RectShadow | K::RectCircularShadow) {
         constants.push(("two_dimensional_shadow", 1.0));
     }
+    let hollow = gpu.hollow_shadows && matches!(kind, K::RectShadow | K::RectCircularShadow);
+    let vertex_constants: &[(&str, f64)] = if hollow {
+        &[("hollow_shadow", 1.0)]
+    } else {
+        &[]
+    };
     if kind == K::RectCircularShadow {
         constants.push(("circular_shadow", 1.0));
     }
     if gpu.text_gamma && matches!(kind, K::Text | K::TextUnclipped | K::TextMask | K::TextLcd) {
         constants.push(("text_gamma", 1.0));
     }
-    if gpu.dither_gradients && kind == K::Rect {
+    if matches!(kind, K::RectDither | K::RectDitherUnclipped) {
         constants.push(("output_dither", 1.0));
+    }
+    if matches!(
+        kind,
+        K::RectUnclipped | K::RectDitherUnclipped | K::RectSolidUnclipped | K::ImageUnclipped
+    ) {
+        constants.push(("unclipped", 1.0));
     }
     if gpu.device.features().contains(wgpu::Features::SHADER_F16)
         && matches!(
@@ -746,6 +779,9 @@ fn build(
         && matches!(
             kind,
             K::Rect
+                | K::RectUnclipped
+                | K::RectDither
+                | K::RectDitherUnclipped
                 | K::Mesh
                 | K::MeshStencil
                 | K::StencilCover
@@ -760,7 +796,15 @@ fn build(
     if gpu.gradient_lut
         && matches!(
             kind,
-            K::Rect | K::Mesh | K::MeshStencil | K::StencilCover | K::Text | K::TextUnclipped
+            K::Rect
+                | K::RectUnclipped
+                | K::RectDither
+                | K::RectDitherUnclipped
+                | K::Mesh
+                | K::MeshStencil
+                | K::StencilCover
+                | K::Text
+                | K::TextUnclipped
         )
     {
         constants.push(("use_gradient_ramps", 1.0));
@@ -788,7 +832,10 @@ fn build(
                 module,
                 entry_point: Some(vertex),
                 buffers,
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: vertex_constants,
+                    ..Default::default()
+                },
             },
             fragment: Some(wgpu::FragmentState {
                 module,

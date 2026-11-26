@@ -3,18 +3,14 @@
 override use_gradient_ramps: bool = false;
 
 // Stops are stored in pairs: even = premultiplied color, odd = (offset, 0, 0, 0).
-fn sample_gradient(t: f32, first: u32, count: u32, ramp: u32) -> vec4<f32> {
+fn sample_gradient(t: f32, first: u32, count: u32, ramp: u32, ramp_sampler: sampler) -> vec4<f32> {
     if (count == 0u) {
         return vec4<f32>(0.0);
     }
     let clamped = clamp(t, 0.0, 1.0);
     if use_gradient_ramps && ramp > 0u {
-        let index = clamped * 255.0;
-        let low = i32(floor(index));
-        let high = min(low + 1, 255);
-        let layer = i32(ramp - 1u);
-        return mix_color(textureLoad(gradient_ramps, vec2(low, 0), layer, 0),
-            textureLoad(gradient_ramps, vec2(high, 0), layer, 0), fract(index));
+        let uv = vec2((clamped * 255.0 + 0.5) / 256.0, 0.5);
+        return textureSampleLevel(gradient_ramps, ramp_sampler, uv, i32(ramp - 1u), 0.0);
     }
     let last = count - 1u;
     var i = 0u;
@@ -57,8 +53,17 @@ fn conical_position(p: vec2<f32>, centers: vec4<f32>, radii: vec2<f32>) -> vec2<
     return vec2<f32>(t, select(0.0, 1.0, radii.x + t * dr >= 0.0));
 }
 
+fn linear_gradient_position(p: vec2<f32>, geometry: vec4<f32>) -> f32 {
+    let d = geometry.zw - geometry.xy;
+    return dot(p - geometry.xy, d) / max(dot(d, d), 1e-6);
+}
+
+fn inline_gradient(p: vec2<f32>, geometry: vec4<f32>, start: vec4<f32>, end: vec4<f32>) -> vec4<f32> {
+    return mix_color(start, end, clamp(linear_gradient_position(p, geometry), 0.0, 1.0));
+}
+
 fn gradient_color(
-    p: vec2<f32>, kind: u32, first: u32, count: u32, geometry: vec4<f32>, radii: vec2<f32>, ramp: u32,
+    p: vec2<f32>, kind: u32, first: u32, count: u32, geometry: vec4<f32>, radii: vec2<f32>, ramp: u32, ramp_sampler: sampler,
 ) -> vec4<f32> {
     var t = 0.0;
     if (kind == 1u) {
@@ -67,7 +72,7 @@ fn gradient_color(
         t = length(p - center) / max(radius, 1e-6);
     } else if (kind == 3u) {
         let conical = conical_position(p, geometry, radii);
-        return sample_gradient(conical.x, first, count, ramp) * conical.y;
+        return sample_gradient(conical.x, first, count, ramp, ramp_sampler) * conical.y;
     } else if (kind == 2u) {
         let center = geometry.xy;
         let start = geometry.z;
@@ -76,12 +81,9 @@ fn gradient_color(
         let wrapped = angle - 6.28318530718 * floor(angle / 6.28318530718);
         t = wrapped / max(end - start, 1e-6);
     } else {
-        let start = geometry.xy;
-        let end = geometry.zw;
-        let d = end - start;
-        t = dot(p - start, d) / max(dot(d, d), 1e-6);
+        t = linear_gradient_position(p, geometry);
     }
-    return sample_gradient(t, first, count, ramp);
+    return sample_gradient(t, first, count, ramp, ramp_sampler);
 }
 
 
@@ -100,7 +102,10 @@ fn load_paint(index: u32) -> PaintExtra {
     return paint[index];
 }
 
-fn paint_gradient(data: PaintExtra, p: vec2<f32>) -> vec4<f32> {
+fn paint_gradient(data: PaintExtra, p: vec2<f32>, color: vec4<f32>, ramp_sampler: sampler) -> vec4<f32> {
     let indices = vec3<u32>(data.gradient.xyz);
-    return gradient_color(p, indices.x, indices.y, indices.z, data.geometry, data.shadow.xy, u32(data.gradient.w));
+    if indices.x == 4u {
+        return inline_gradient(p, data.geometry, color, data.shadow);
+    }
+    return gradient_color(p, indices.x, indices.y, indices.z, data.geometry, data.shadow.xy, u32(data.gradient.w), ramp_sampler);
 }

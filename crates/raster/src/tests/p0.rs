@@ -8,6 +8,7 @@ use crate::{compositor::extent, surface::read_rgba};
 mod benchmark;
 mod p1;
 mod p3;
+mod wave;
 
 fn capture(
     raster: &mut Rasterizer,
@@ -270,6 +271,68 @@ fn rounded_shadow_matches_two_dimensional_reference() {
                 "{x}, {y}: {actual} vs {expected}"
             );
         }
+    }
+}
+
+#[test]
+fn hollow_shadows_preserve_clipped_and_translucent_edges() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let device = raster.device.as_ref().unwrap();
+    if !device.gpu.hollow_shadows {
+        return;
+    }
+    let mut gpu = device.gpu.clone();
+    gpu.hollow_shadows = false;
+    let mut reference = Rasterizer::create(raster.options, FontLibrary::new()).unwrap();
+    reference.device = Some(Rasterizer::new_device(gpu, device.generation, None).unwrap());
+    let mut opaque = shadowed([12.0, 12.0, 80.0, 56.0]);
+    if let Command::Rect { corner_radius, .. } = &mut opaque {
+        *corner_radius = 18.0;
+    }
+    let mut translucent = opaque.clone();
+    if let Command::Rect { color, .. } = &mut translucent {
+        color[3] = 128;
+    }
+    let size = PixelSize::new(128, 96);
+    for (generation, commands) in (1..).zip([
+        vec![opaque.clone()],
+        vec![translucent],
+        vec![
+            rounded([20.0, 20.0, 70.0, 54.0], 16.0),
+            opaque,
+            Command::Pop,
+        ],
+    ]) {
+        let expected = capture(&mut reference, generation, commands.clone(), size);
+        let actual = capture(&mut raster, generation, commands, size);
+        // Straight readback divides by alpha. Compare in the premultiplied
+        // space where moving the shadow triangle seam can change rounding.
+        let premultiply = |rgba| crate::color::linear_premultiplied(rgba, 255).unwrap_or([0.0; 4]);
+        let (offset, delta) = actual
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(expected.as_chunks::<4>().0)
+            .map(|(&actual, &expected)| {
+                premultiply(actual)
+                    .into_iter()
+                    .zip(premultiply(expected))
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0, f32::max)
+            })
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .unwrap();
+        let x = offset % 128;
+        let y = offset / 128;
+        assert!(
+            delta <= 1.0 / 255.0 + f32::EPSILON,
+            "scene {generation}, pixel ({x}, {y}): {:?} vs {:?}",
+            pixel(&actual, 128, x, y),
+            pixel(&expected, 128, x, y)
+        );
     }
 }
 
@@ -698,11 +761,11 @@ fn dense_mask_glyphs_share_a_draw_and_coalesce_uploads() {
     let stats = raster.submit_stats();
     assert_eq!(stats.render.draws, 1);
     assert!(
-        stats.atlas.uploads >= 50 && stats.atlas.upload_calls <= 2,
+        stats.atlas.uploads >= 50 && stats.atlas.upload_calls <= 8,
         "{stats:?}"
     );
     assert_eq!(stats.render.atlas_upload_bytes, stats.atlas.upload_bytes);
-    assert!(stats.render.atlas_upload_bytes > 0);
+    assert!((1..2048 * 64).contains(&stats.render.atlas_upload_bytes));
 }
 
 fn bench_text(
@@ -1291,6 +1354,9 @@ fn color_matrix_filters_composited_children_and_keeps_holes_clear() {
     });
     raster.submit_layers(&scene, 1.0, |_| None).unwrap();
     assert_eq!(raster.render_rgba(size).unwrap(), pixels);
+    assert_eq!(raster.render_rgba(size).unwrap(), pixels);
+    let warm = raster.submit_stats().render;
+    assert_eq!((warm.buffers_created, warm.bind_groups_created), (0, 0));
 }
 
 #[test]
@@ -1317,13 +1383,22 @@ fn backdrop_material_tapers_blur_and_clips_its_corners() {
         },
         Command::Pop,
     ];
-    let pixels = capture(&mut raster, 1, commands, PixelSize::new(48, 48));
+    let size = PixelSize::new(48, 48);
+    let scene = tree(1, commands);
+    raster.submit_layers(&scene, 1.0, |_| None).unwrap();
+    let pixels = raster.render_rgba(size).unwrap();
     assert_eq!(pixel(&pixels, 48, 4, 4), [255, 0, 0, 255]);
     let upper = pixel(&pixels, 48, 23, 12);
     let lower = pixel(&pixels, 48, 23, 39);
     assert!(upper[2] > lower[2] + 50, "{upper:?} {lower:?}");
     assert!(lower[0] > upper[0]);
     assert_eq!(pixel(&pixels, 48, 23, 45), [255, 0, 0, 255]);
+    raster.submit_layers(&scene, 1.0, |_| None).unwrap();
+    assert_eq!(raster.render_rgba(size).unwrap(), pixels);
+    assert_eq!(raster.render_rgba(size).unwrap(), pixels);
+    let warm = raster.submit_stats().render;
+    assert_eq!(warm.backdrop_cache_hits, 1);
+    assert_eq!((warm.buffers_created, warm.bind_groups_created), (0, 0));
 }
 
 #[test]

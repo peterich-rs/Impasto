@@ -15,13 +15,21 @@ SCENES = {
     "scroll_1000_cards", "scroll_10000_cards", "dense_text_wall",
     "backdrop_blur_overlays", "canvas_500_paths",
 }
+WAVE_SCENES = {
+    "hetero_cards_50", "opaque_modal_stack", "text_scale_and_cjk",
+    "blur_and_mip_matrix", "canvas_mixed_paths",
+}
+SUITES = {
+    "tests::p0::bench_": SCENES,
+    "tests::p0::wave::bench_": WAVE_SCENES,
+}
 PREFIX = "IMPASTO_BENCH_JSON "
 EXPERIMENTS = {
     "IMPASTO_CANVAS_STENCIL", "IMPASTO_COMPUTE_BLUR", "IMPASTO_DARKEN_STEMS",
     "IMPASTO_DITHER", "IMPASTO_EARLY_Z", "IMPASTO_GRADIENT_LUT",
-    "IMPASTO_IMAGE_UPLOAD", "IMPASTO_LCD_RGB", "IMPASTO_PAINT_UNIFORM",
+    "IMPASTO_IMAGE_CACHE_MB", "IMPASTO_IMAGE_UPLOAD", "IMPASTO_LCD_RGB", "IMPASTO_PAINT_UNIFORM",
     "IMPASTO_PREWARM", "IMPASTO_RETAIN_OFFSCREEN", "IMPASTO_SHADOW_2D",
-    "IMPASTO_SPECIALIZE_PAINT",
+    "IMPASTO_SHADOW_HOLLOW", "IMPASTO_SPECIALIZE_PAINT", "IMPASTO_PARALLEL_PREPARE",
     "IMPASTO_TEXT_GAMMA", "IMPASTO_TRANSIENT_ATTACHMENTS",
 }
 
@@ -78,8 +86,8 @@ def run(checkout, prepared, backend, gpu, test_filter, experiments):
             reports[scene] = report
     if not reports:
         raise ValueError(f"no benchmarks matched {test_filter} in {checkout}")
-    if test_filter == "tests::p0::bench_" and reports.keys() != SCENES:
-        raise ValueError(f"{checkout} must have the Stage 0 harness, got scenes {sorted(reports)}")
+    if test_filter in SUITES and reports.keys() != SUITES[test_filter]:
+        raise ValueError(f"{checkout} has unexpected benchmark scenes {sorted(reports)}")
     return reports
 
 
@@ -136,6 +144,39 @@ def configuration(argument):
     return key, value
 
 
+def counter_limit(argument):
+    selector, equals, value = argument.partition("=")
+    scene, slash, path = selector.partition("/")
+    fields = path.split(".")
+    try:
+        maximum = int(value)
+    except ValueError:
+        maximum = -1
+    if not (equals and slash and scene and all(fields) and maximum >= 0):
+        raise argparse.ArgumentTypeError("expected SCENE/FIELD=MAX, e.g. hetero_cards_50/counters.draws=8")
+    return scene, fields, maximum
+
+
+def check_counters(pairs, limits, warmup):
+    for scene, fields, maximum in limits:
+        for round_number, pair in enumerate(pairs, start=1):
+            report = pair["head"].get(scene)
+            if report is None or len(report["samples"]) <= warmup:
+                raise ValueError(f"{scene}: no samples after {warmup} warm-up frames")
+            for sample in report["samples"][warmup:]:
+                value = sample
+                for key in fields:
+                    value = value.get(key) if isinstance(value, dict) else None
+                field = ".".join(fields)
+                if type(value) is not int:
+                    raise ValueError(f"{scene}: integer counter {field} is missing")
+                if value > maximum:
+                    raise ValueError(
+                        f"{scene} round {round_number} frame {sample['frame']}: "
+                        f"{field} is {value}, limit is {maximum}"
+                    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("base", type=Path, help="checkout containing the baseline")
@@ -146,10 +187,15 @@ def main():
     parser.add_argument("--filter", default="tests::p0::bench_", help="Rust libtest filter")
     parser.add_argument("--base-env", action="append", type=configuration, default=[], metavar="KEY=VALUE")
     parser.add_argument("--head-env", action="append", type=configuration, default=[], metavar="KEY=VALUE")
+    parser.add_argument("--limit-counter", action="append", type=counter_limit, default=[],
+                        metavar="SCENE/FIELD=MAX", help="fail on a candidate warm-frame counter")
+    parser.add_argument("--warmup-frames", type=int, default=3, help="initial frames skipped by counter gates")
     parser.add_argument("--out", type=Path, required=True, help="JSON report path")
     args = parser.parse_args()
     if args.rounds < 1:
         parser.error("--rounds must be positive")
+    if args.warmup_frames < 0:
+        parser.error("--warmup-frames must be nonnegative")
     checkouts = {"base": args.base.resolve(), "head": args.head.resolve()}
     shared = {key: os.environ[key] for key in EXPERIMENTS if key in os.environ}
     experiments = {
@@ -188,6 +234,7 @@ def main():
                 pieces.append(f"{metric} {value:+.1f}%")
         print(f"{scene}: {', '.join(pieces)}")
     print(args.out)
+    check_counters(pairs, args.limit_counter, args.warmup_frames)
 
 
 if __name__ == "__main__":

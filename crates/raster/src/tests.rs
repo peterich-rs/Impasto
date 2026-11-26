@@ -424,7 +424,7 @@ fn odd_image_mips_average_linear_premultiplied_texels() {
     let stats = raster.submit_stats().image_upload;
     assert_eq!(
         stats.render_passes + stats.compute_passes,
-        levels,
+        if stats.compute_passes == 0 { levels } else { 1 },
         "{stats:?}"
     );
     if std::env::var("IMPASTO_IMAGE_UPLOAD").as_deref() == Ok("compute")
@@ -436,13 +436,50 @@ fn odd_image_mips_average_linear_premultiplied_texels() {
             .flags
             .contains(wgpu::TextureFormatFeatureFlags::STORAGE_WRITE_ONLY)
         {
-            assert_eq!(stats.compute_passes, levels, "{stats:?}");
+            assert_eq!(stats.compute_passes, 1, "{stats:?}");
         }
     }
     let pixel = raster.render_rgba(PixelSize::new(1, 1)).unwrap();
     assert!(
         pixel[0] >= 250 && pixel[1] == 0 && pixel[2] == 0 && pixel[3].abs_diff(28) <= 1,
         "{pixel:?}"
+    );
+}
+
+#[test]
+fn three_texel_mip_keeps_the_two_edge_texels() {
+    if std::env::var("IMPASTO_IMAGE_UPLOAD").as_deref() == Ok("cpu") {
+        return;
+    }
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let mut pixels = [[0; 4]; 192];
+    pixels[..64].fill([255, 0, 0, 255]);
+    let scene = tree(
+        1,
+        [Command::Image {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+            source: Arc::from("left-third"),
+            mode: ContentMode::Fill,
+            required: true,
+        }],
+    );
+    raster
+        .submit_layers(&scene, 1.0, |_| {
+            Some(ImagePixels {
+                width: 192,
+                height: 1,
+                rgba: pixels.as_flattened(),
+            })
+        })
+        .unwrap();
+    assert_eq!(
+        raster.render_rgba(PixelSize::new(1, 1)).unwrap(),
+        [255, 0, 0, 85]
     );
 }
 
@@ -454,29 +491,83 @@ fn compute_blur_writes_bounded_output_and_counts_both_axes() {
     let Some(mut raster) = headless(FontLibrary::new()) else {
         return;
     };
-    let size = PixelSize::new(64, 64);
+    let size = PixelSize::new(112, 104);
     let scene = tree(
         1,
         [
             Command::PushBlur {
                 x: 16.0,
                 y: 16.0,
-                w: 32.0,
-                h: 32.0,
+                w: 79.0,
+                h: 71.0,
                 sigma: 3.0,
             },
-            rect([16.0, 16.0, 32.0, 32.0], [255; 4]),
+            rect([16.0, 16.0, 79.0, 71.0], [5, 5, 5, 255]),
             Command::Pop,
         ],
     );
     raster.submit_layers(&scene, 1.0, |_| None).unwrap();
     let image = raster.render_rgba(size).unwrap();
     let stats = raster.submit_stats().render;
-    if raster.device.as_ref().unwrap().gpu.caps.has_compute {
+    let gpu = &raster.device.as_ref().unwrap().gpu;
+    if gpu.caps.has_compute
+        && gpu
+            .caps
+            .downlevel_flags
+            .contains(wgpu::DownlevelFlags::VIEW_FORMATS)
+    {
         assert_eq!(stats.compute_passes, 2, "{stats:?}");
     }
-    assert_eq!(pixel(&image, 64, 0, 0), [0; 4]);
-    assert_eq!(pixel(&image, 64, 32, 32), [255; 4]);
+    assert_eq!(pixel(&image, 112, 0, 0), [0; 4]);
+    assert_eq!(pixel(&image, 112, 55, 51), [5, 5, 5, 255]);
+    let alpha = |x, y| pixel(&image, 112, x, y)[3];
+    assert_eq!(alpha(15, 51), alpha(55, 15));
+    assert_eq!(alpha(95, 51), alpha(55, 87));
+}
+
+#[test]
+fn compute_upload_fuses_mips_without_losing_the_smallest_image() {
+    if std::env::var("IMPASTO_IMAGE_UPLOAD").as_deref() != Ok("compute") {
+        return;
+    }
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let gpu = &raster.device.as_ref().unwrap().gpu;
+    if !gpu.caps.has_compute {
+        return;
+    }
+    let side = 1024;
+    let scene = tree(
+        1,
+        [Command::Image {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+            source: Arc::from("four-quadrants"),
+            mode: ContentMode::Fill,
+            required: true,
+        }],
+    );
+    let mut pixels = vec![[0, 0, 255, 0]; side * side];
+    for row in pixels.chunks_mut(side).take(side / 2) {
+        row[..side / 2].fill([255, 0, 0, 255]);
+    }
+    let stats = raster
+        .submit_layers(&scene, 1.0, |_| {
+            Some(ImagePixels {
+                width: u32::try_from(side).unwrap(),
+                height: u32::try_from(side).unwrap(),
+                rgba: pixels.as_flattened(),
+            })
+        })
+        .unwrap()
+        .stats
+        .image_upload;
+    assert_eq!((stats.compute_passes, stats.render_passes), (1, 0));
+    let image = raster.render_rgba(PixelSize::new(1, 1)).unwrap();
+    assert_eq!(image, [255, 0, 0, 64]);
 }
 
 #[test]

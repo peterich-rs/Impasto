@@ -175,6 +175,9 @@ pub(super) fn run_in_format(
         let counters = json!({
                 "picture_workers": stats.picture_workers,
                 "prerasterized_glyphs": stats.atlas.prerasterized,
+                "atlas_misses": stats.atlas.misses,
+                "atlas_upload_calls": stats.atlas.upload_calls,
+                "texture_entries": stats.textures,
                 "atlas_region_reclaims": stats.atlas.region_reclaims,
                 "backdrop_cache_hits": r.backdrop_cache_hits,
                 "transition_snapshot_hits": r.transition_snapshot_hits,

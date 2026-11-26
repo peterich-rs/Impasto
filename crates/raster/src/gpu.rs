@@ -99,6 +99,7 @@ pub(crate) struct Gpu {
     pub backend: RasterBackend,
     pub caps: GpuCaps,
     pub shadow_2d: bool,
+    pub hollow_shadows: bool,
     pub text_gamma: bool,
     pub gradient_lut: bool,
     pub dither_output: bool,
@@ -315,8 +316,9 @@ impl Gpu {
             backend,
             caps,
             shadow_2d: std::env::var("IMPASTO_SHADOW_2D").as_deref() != Ok("0"),
+            hollow_shadows: std::env::var("IMPASTO_SHADOW_HOLLOW").as_deref() != Ok("0"),
             text_gamma: std::env::var("IMPASTO_TEXT_GAMMA").as_deref() != Ok("0"),
-            gradient_lut: std::env::var("IMPASTO_GRADIENT_LUT").as_deref() == Ok("1"),
+            gradient_lut: crate::gradient_lut::enabled(),
             dither_output: std::env::var("IMPASTO_DITHER").as_deref() == Ok("1"),
             dither_gradients: std::env::var("IMPASTO_DITHER").as_deref() != Ok("0"),
             lost,
@@ -372,6 +374,10 @@ impl Gpu {
 
     pub fn image_array(&self) -> bool {
         self.device.features().contains(IMAGE_ARRAY_FEATURES)
+    }
+
+    pub fn shadow_vertices(&self) -> u32 {
+        if self.hollow_shadows { 24 } else { 6 }
     }
 
     pub fn effect_immediates(&self) -> bool {
@@ -441,6 +447,25 @@ impl Gpu {
         }
         self.check_async_health()?;
         result
+    }
+
+    /// Upload factories can run on IO threads. Leave device-wide asynchronous
+    /// errors pending for the owning raster queue, which handles recovery.
+    pub fn upload_validation<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, Status>,
+    ) -> Result<T, Status> {
+        if self.validate_frames {
+            return self.validation(operation);
+        }
+        if self.is_lost() {
+            return Err(Status::DeviceLost);
+        }
+        let value = operation()?;
+        if self.is_lost() {
+            return Err(Status::DeviceLost);
+        }
+        Ok(value)
     }
 
     pub fn validation<T>(
