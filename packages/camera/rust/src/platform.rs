@@ -5,11 +5,13 @@ use impasto::PluginContext;
 use crate::{CameraError, Facing};
 
 #[cfg(target_os = "android")]
+#[expect(unsafe_code, reason = "JNI registers the camera frame callbacks")]
 mod android;
 #[cfg(target_os = "android")]
 pub use android::Camera;
 
 #[cfg(target_os = "ios")]
+#[expect(unsafe_code, reason = "the Swift camera bridge uses a C ABI")]
 mod ios;
 #[cfg(target_os = "ios")]
 pub use ios::Camera;
