@@ -186,10 +186,14 @@ pub trait Vsync: Send + Sync {
 }
 
 /// Maps the UI and raster roles to physical queues.
+///
+/// `IMPASTO_THREAD_TOPOLOGY` selects `shared`, `split`, or `platform-ui`.
+/// An unset variable uses [`Self::Split`]: the UI queue and the raster queue
+/// each get their own thread. The platform main thread stays separate.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ThreadTopology {
-    #[default]
     SharedRender,
+    #[default]
     Split,
     PlatformUi,
 }

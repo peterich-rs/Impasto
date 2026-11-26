@@ -18,7 +18,7 @@ Impasto 是跨平台 UI 框架。下表按职责与现有目录对应；具体�
 
 - **运行时与宿主分离**：`crates/javascript` 默认提供独立运行时；关闭默认 feature 后仅保留纯 `std` 的 `javascript::host`。运行时仅内置语言与 Web 基础原语（`console`、定时器、`performance`、`events`、`encoding`、`url`、`streams`），不包含网络实现；`engine::js` 通过可选 `js` feature 接入该运行时，提交树变更并将 UI 事件交给脚本。`embedder` 负责窗口、渲染资源与遥测。
 - **原生扩展与宿主原语**：官方包、第三方插件和应用 Rust 通过 `#[impasto::module]` 及导出宏绑定 JavaScript。包使用 `PluginContext` 的调度、目录、窗口事件、平台容器、合成和泛型扩展原语。应用网络、权限、剪贴板等能力由 `packages/*` 中的插件实现。
-- **线程与帧流水线**：平台线程通过队列交付自有数据（输入、生命周期、视口、vsync）。UI 队列通过 `engine::session::Session` 同步推进脚本、响应式图、布局与录制，产出不可变 `engine::scene::LayerTree`。Raster 队列消费层树并实现 `engine::text::Shaper`。公共宿主支持 `shared`（默认）、`split`、`platform-ui` 三种线程拓扑（环境变量 `IMPASTO_THREAD_TOPOLOGY`），跨线程传递一律使用自有数据。
+- **线程与帧流水线**：平台线程通过队列交付自有数据（输入、生命周期、视口、vsync）。UI 队列通过 `engine::session::Session` 同步推进脚本、响应式图、布局与录制，产出不可变 `engine::scene::LayerTree`。Raster 队列消费层树并实现 `engine::text::Shaper`。公共宿主支持 `shared`、`split`（默认）、`platform-ui` 三种线程拓扑（环境变量 `IMPASTO_THREAD_TOPOLOGY`），跨线程传递一律使用自有数据。
 - **TSX 编译与响应式**：[Bundler](crates/bundler) 通过 Oxc 降级显式导入的 JSX 组件，由 Rolldown 将 `solid-js` 解析到 `@impasto/reactive`，保留 `scene`、`reactive` 与插件原生模块。编译器和测试驱动仅用于开发宿主。
 
 ### 应用与插件

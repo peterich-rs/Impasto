@@ -235,6 +235,15 @@ impl Input {
         !self.paused
     }
 
+    /// Limits the render backlog through the final samples of a pointer gesture.
+    pub fn is_interacting(&self) -> bool {
+        !self.active.is_empty()
+            || self.events.iter().any(|input| {
+                matches!(input, FrameInput::Pointer(event)
+                    if matches!(event.phase, Phase::Up | Phase::Cancel | Phase::Wheel | Phase::Zoom))
+            })
+    }
+
     /// Queues a key or text event. Returns whether the platform should arm vsync.
     /// Paused input stays queued until resume, matching [`Input::push_pointer`].
     pub fn push_input(&mut self, event: InputEvent) -> bool {

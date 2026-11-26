@@ -13,11 +13,22 @@ internal class FrameScheduler(private val view: ImpastoView) {
     }
     private val timeline = if (Build.VERSION.SDK_INT >= 33) Api33(choreographer) else null
     private var pending: Long? = null
+    private var posted = false
+    private var primedByTouch = false
 
     fun schedule(token: Long) {
-        val alreadyPosted = pending != null
         pending = token
-        if (alreadyPosted) return
+        postCallback()
+    }
+
+    fun primeTouch() {
+        primedByTouch = true
+        postCallback()
+    }
+
+    private fun postCallback() {
+        if (posted) return
+        posted = true
         if (Build.VERSION.SDK_INT >= 33 && timeline != null) {
             timeline.post { frame, target -> deliver(frame, target, frameInterval()) }
         } else {
@@ -26,7 +37,9 @@ internal class FrameScheduler(private val view: ImpastoView) {
     }
 
     fun cancel() {
-        if (pending == null) return
+        if (!posted) return
+        posted = false
+        primedByTouch = false
         pending = null
         if (Build.VERSION.SDK_INT >= 33 && timeline != null) {
             timeline.cancel()
@@ -36,8 +49,12 @@ internal class FrameScheduler(private val view: ImpastoView) {
     }
 
     private fun deliver(frame: Long, target: Long, interval: Long) {
-        val token = pending ?: return
+        posted = false
+        // Rust can have armed a newer token while its Handler message is still queued.
+        val token = if (primedByTouch) 0L else pending
+        primedByTouch = false
         pending = null
+        if (token == null) return
         if (view.handle != 0L) NativeBridge.nativeOnVsync(view.handle, token, frame, target, interval)
     }
 

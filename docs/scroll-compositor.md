@@ -49,11 +49,11 @@ const section = useScrollSegment(scroll, () => [180, 420, 860]);
 
 ## 诊断与验收
 
-DevTools 性能页选中目标帧后，合成帧显示 Raster 托管和该帧的刷新率，回退帧显示阻断原因与可定位的节点。 `scroll_callback` 指向注册通用回调的滚动节点及其联动目标，`global_frame_hook` 指向活跃的逐帧 JavaScript 监听，`list_window_not_settled` 表示已挂载窗口还在测量或更新。普通输入、到期定时器和外部更新会唤醒 UI，并先回写屏幕上最后实际呈现的位置。
+DevTools 性能页选中目标帧后，合成帧显示 Raster 托管和该帧的刷新率，回退帧显示阻断原因与可定位的节点。 `scroll_callback` 指向注册通用回调的滚动节点及其联动目标，`global_frame_hook` 指向活跃的逐帧 JavaScript 监听，`list_window_not_settled` 表示已挂载窗口还在测量或更新。普通输入、到期定时器和外部更新会唤醒 UI。UI 取消 Raster 的下一次回调，并回写最近完成呈现的位置。已经提交的 Raster 帧可以继续上屏。Android 主线程收到触摸时会预先注册 Choreographer 回调，手势期间 UI 到 Raster 的新提交按一帧在途限流。
 
 惯性滚动、刷新指示器和吸顶项直接在 Gallery 自选列表上验证：拖动列表后观察 `compositor_frame` 的时间间隔，并区分阈值、预挂载和惯性尾段的主动降频。
 
-macOS 可用 `just host` 打开 Gallery。Android Profile 版用 Gradle 参数 `-PimpastoProfile=true -PimpastoThreadTopology=split` 构建，再用 `tools/android-frame-trace.sh OUTPUT dev.impasto.host.profile 6` 采样 Perfetto。像素回归测试 `declarative_scroll_bindings_render_identical_pixels_on_ui_and_raster` 在相同轨迹与时间戳上逐像素比较同一设备生成的两帧。
+macOS 可用 `just host` 打开 Gallery。Android Profile 版用 Gradle 参数 `-PimpastoProfile=true -PimpastoThreadTopology=split` 构建。构建环境变量 `IMPASTO_SURFACE_LATENCY` 可指定交换链延迟提示值。用 `tools/android-frame-trace.sh OUTPUT dev.impasto.host.profile 6` 采样 Perfetto。像素回归测试 `declarative_scroll_bindings_render_identical_pixels_on_ui_and_raster` 在相同轨迹与时间戳上逐像素比较同一设备生成的两帧。
 
 ### Pixel 9 Split 采样
 

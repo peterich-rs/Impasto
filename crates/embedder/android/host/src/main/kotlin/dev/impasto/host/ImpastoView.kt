@@ -183,7 +183,11 @@ class ImpastoView internal constructor(
             requestFocus()
             requestUnbufferedDispatch(event)
         }
-        return pointer.touch(event) || super.onTouchEvent(event)
+        if (pointer.touch(event)) {
+            frames.primeTouch()
+            return true
+        }
+        return super.onTouchEvent(event)
     }
 
     override fun dispatchHoverEvent(event: MotionEvent): Boolean {

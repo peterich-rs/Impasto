@@ -938,8 +938,8 @@ struct FramePipeline {
 impl FramePipeline {
     const DEPTH: usize = 2;
 
-    fn has_room(&mut self) -> bool {
-        let room = self.in_flight < Self::DEPTH;
+    fn has_room(&mut self, depth: usize) -> bool {
+        let room = self.in_flight < depth;
         self.waiting |= !room;
         room
     }
@@ -1330,7 +1330,7 @@ fn on_command(runtime: &mut UiHost, command: Command, acks: &Acks) -> Result<boo
         false
     } else {
         runtime.compositor_epoch = runtime.compositor_epoch.wrapping_add(1);
-        compositor_animation::stop(runtime, None)?
+        compositor_animation::stop(runtime, None)
     };
     let result = dispatch_command(runtime, command, acks);
     if interrupted
@@ -1392,7 +1392,7 @@ fn dispatch_command(
             if runtime.compositor_generation != Some(generation) {
                 return Ok(false);
             }
-            compositor_animation::stop(runtime, snapshot)?;
+            compositor_animation::stop(runtime, snapshot);
             if runtime.input.is_paused() {
                 return Ok(false);
             }
@@ -1499,7 +1499,12 @@ fn on_frame(
             ..ScheduleTiming::default()
         }
     });
-    if !runtime.frames.has_room() {
+    let frame_depth = if cfg!(target_os = "android") && runtime.input.is_interacting() {
+        1
+    } else {
+        FramePipeline::DEPTH
+    };
+    if !runtime.frames.has_room(frame_depth) {
         skipped_frame("queue_full");
         return Ok(end_frame(runtime, false, false));
     }
@@ -1802,9 +1807,7 @@ fn on_frame(
             }
             Ok(end_frame(
                 runtime,
-                compositor_epoch.is_none()
-                    && again
-                    && runtime.frames.in_flight < FramePipeline::DEPTH,
+                compositor_epoch.is_none() && again && runtime.frames.in_flight < frame_depth,
                 false,
             ))
         }
@@ -2484,9 +2487,9 @@ mod tests {
     fn a_full_frame_pipeline_defers_ui_work_until_raster_releases_capacity() {
         let mut harness = TestHarness::new();
         harness.open_dummy();
-        assert!(harness.runtime.frames.has_room());
+        assert!(harness.runtime.frames.has_room(FramePipeline::DEPTH));
         harness.runtime.frames.submit();
-        assert!(harness.runtime.frames.has_room());
+        assert!(harness.runtime.frames.has_room(FramePipeline::DEPTH));
         harness.runtime.frames.submit();
         let token = harness
             .vsync
@@ -2495,7 +2498,7 @@ mod tests {
         assert!(!harness.command(Command::Frame { token, time: now() }));
         assert_eq!(harness.frame_count(), 0);
         assert!(harness.runtime.frames.complete());
-        assert!(harness.runtime.frames.has_room());
+        assert!(harness.runtime.frames.has_room(FramePipeline::DEPTH));
         assert!(!harness.runtime.frames.complete());
     }
 
