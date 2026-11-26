@@ -9,7 +9,9 @@ use engine::session::FrameTime;
 
 use super::{
     FrameSubmission, RasterCompletion, RasterHost, UiHost, end_frame, lock, ms_to_ns,
-    next_frame_number, raster_frame, refresh_wake,
+    next_frame_number, raster_frame,
+    raster_host::{images_ready, install_scene},
+    refresh_wake,
 };
 use crate::command::{Command, FrameToken, SurfaceId};
 use crate::diagnostics::telemetry::{ScheduleTiming, mono_ns_at};
@@ -35,6 +37,7 @@ struct Active {
     plan: Arc<Plan>,
     latest: Option<Arc<CompositorSnapshot>>,
     last_vsync: Option<FrameTime>,
+    window: ListWindow,
     surface: Option<SurfaceId>,
     retry_at: Option<i64>,
     requested_rate: FrameRateHint,
@@ -42,10 +45,17 @@ struct Active {
     rate_frames: u8,
 }
 
+enum ListWindow {
+    Idle,
+    Preparing,
+    Ready(Box<FrameSubmission>),
+}
+
 struct Plan {
     tree: Arc<engine::scene::LayerTree>,
     deadline_ms: Option<f64>,
     revision: u64,
+    requirements: Arc<[(Arc<str>, bool)]>,
     scale: f32,
     topology: ThreadTopology,
     telemetry: Option<Arc<crate::diagnostics::TelemetryHub>>,
@@ -113,6 +123,7 @@ impl CompositorMode {
             plan: Arc::new(plan),
             latest: None,
             last_vsync: None,
+            window: ListWindow::Idle,
             surface,
             retry_at: None,
             requested_rate: FrameRateHint::Display,
@@ -190,7 +201,7 @@ impl CompositorMode {
         if !self.expects(token) {
             return Ok(());
         }
-        let Some((generation, plan)) = lock(&self.active)
+        let Some((generation, mut plan)) = lock(&self.active)
             .as_ref()
             .map(|run| (run.generation, Arc::clone(&run.plan)))
         else {
@@ -208,10 +219,16 @@ impl CompositorMode {
             self.handoff(inbox, token, generation, None);
             return Ok(());
         }
-        let snapshot = graphics
-            .raster
-            .borrow_mut()
-            .sample_compositor_tracks(plan.tree.epoch, time.target_ms);
+        let installed_window = self.install_window(graphics, token, generation, time)?;
+        let snapshot = {
+            let mut raster = graphics.raster.borrow_mut();
+            if let Some(window) = installed_window {
+                plan = window;
+                raster.sample_compositor_window(plan.tree.epoch, time.target_ms)
+            } else {
+                raster.sample_compositor_tracks(plan.tree.epoch, time.target_ms)
+            }
+        };
         let Some(snapshot) = snapshot else {
             if plan
                 .tree
@@ -228,6 +245,14 @@ impl CompositorMode {
         };
         if !self.expects(token) {
             return Ok(());
+        }
+        if plan
+            .tree
+            .tracks
+            .iter()
+            .any(|track| track.needs_list_prefetch(time.target_ms, time.interval_ms))
+        {
+            self.request_window(inbox, generation, time);
         }
         let submission = plan.submission(time, posted_at);
         let span = tracing::info_span!(target: "impasto::compositor", "compositor_frame",
@@ -262,18 +287,6 @@ impl CompositorMode {
                 Ok(end_frame(runtime, false, true))
             }));
         } else if output.shown {
-            if plan
-                .tree
-                .tracks
-                .iter()
-                .any(|track| track.needs_list_prefetch(time.target_ms, time.interval_ms))
-            {
-                tracing::event!(name: "compositor_list_prefetch", target: "impasto::compositor",
-                    tracing::Level::DEBUG, trace_event = true, queue = "raster",
-                    ui_woken = true, target_ms = time.target_ms);
-                self.handoff(inbox, token, generation, Some(time));
-                return Ok(());
-            }
             // Serialize the platform request with UI cancellation. The active
             // lock is never held while Raster prepares, submits, or presents.
             let active = lock(&self.active);
@@ -291,6 +304,136 @@ impl CompositorMode {
         Ok(())
     }
 
+    fn request_window(&self, inbox: &Inbox, generation: u64, time: FrameTime) {
+        let requested = {
+            let mut active = lock(&self.active);
+            active.as_mut().is_some_and(|run| {
+                if run.generation != generation || !matches!(run.window, ListWindow::Idle) {
+                    return false;
+                }
+                run.window = ListWindow::Preparing;
+                true
+            })
+        };
+        if requested {
+            tracing::event!(name: "compositor_list_prefetch", target: "impasto::compositor",
+                tracing::Level::DEBUG, trace_event = true, queue = "raster",
+                ui_woken = true, target_ms = time.target_ms);
+            inbox.post(Command::PrefetchCompositorWindow { generation, time });
+        }
+    }
+
+    pub(super) fn running(&self) -> bool {
+        self.expected.load(Ordering::Acquire) != 0
+    }
+
+    /// Publish one UI-built window for installation at the next compositor vsync.
+    pub(super) fn publish_window(
+        &self,
+        generation: u64,
+        epoch: u64,
+        submission: FrameSubmission,
+    ) -> bool {
+        let mut active = lock(&self.active);
+        let Some(run) = active.as_mut().filter(|run| run.generation == generation) else {
+            return false;
+        };
+        if !matches!(run.window, ListWindow::Preparing) {
+            return false;
+        }
+        run.window = ListWindow::Idle;
+        if submission.compositor_epoch != Some(epoch)
+            || submission.revision != run.plan.revision
+            || submission.placements_changed
+            || !submission.reloads.is_empty()
+            || !self.running()
+            || submission.tree.as_ref().is_none_or(|tree| {
+                tree.tracks.len() != run.plan.tree.tracks.len()
+                    || tree
+                        .tracks
+                        .iter()
+                        .any(|track| !run.plan.tree.tracks.iter().any(|old| old.id == track.id))
+            })
+        {
+            return false;
+        }
+        if submission.layers_changed {
+            run.window = ListWindow::Ready(Box::new(submission));
+        }
+        true
+    }
+
+    fn install_window(
+        &self,
+        graphics: &mut RasterHost,
+        token: FrameToken,
+        generation: u64,
+        time: FrameTime,
+    ) -> Result<Option<Arc<Plan>>, BootError> {
+        let Some((old_plan, mut submission)) = lock(&self.active)
+            .as_mut()
+            .filter(|run| {
+                run.generation == generation && matches!(run.window, ListWindow::Ready(_))
+            })
+            .and_then(|run| {
+                if let ListWindow::Ready(pending) =
+                    std::mem::replace(&mut run.window, ListWindow::Idle)
+                {
+                    Some((Arc::clone(&run.plan), pending))
+                } else {
+                    None
+                }
+            })
+        else {
+            return Ok(None);
+        };
+        let Some(tree) = submission.tree.clone() else {
+            return Ok(None);
+        };
+        if !tree
+            .tracks
+            .iter()
+            .all(|track| track.sample(time.target_ms).is_some())
+        {
+            return Ok(None);
+        }
+        graphics
+            .images
+            .set_layout_targets(tree.image_decode_extents(), submission.scale);
+        if !images_ready(
+            graphics,
+            &submission.requirements,
+            submission.scale,
+            submission.census.take().as_deref(),
+        ) {
+            if let Some(run) = lock(&self.active).as_mut()
+                && run.generation == generation
+            {
+                run.window = ListWindow::Ready(submission);
+            }
+            return Ok(None);
+        }
+        if !self.expects(token) || install_scene(graphics, &submission)?.0.is_none() {
+            return Ok(None);
+        }
+        let plan = Arc::new(Plan {
+            tree,
+            revision: submission.revision,
+            scale: submission.scale,
+            requirements: submission.requirements,
+            topology: old_plan.topology,
+            telemetry: old_plan.telemetry.clone(),
+            hub: old_plan.hub.clone(),
+            deadline_ms: old_plan.deadline_ms,
+        });
+        if let Some(run) = lock(&self.active).as_mut()
+            && run.generation == generation
+        {
+            run.plan = Arc::clone(&plan);
+        }
+        Ok(Some(plan))
+    }
+
     fn handoff(&self, inbox: &Inbox, token: FrameToken, generation: u64, time: Option<FrameTime>) {
         if self.cancel_callback(token) {
             let snapshot = lock(&self.active)
@@ -303,6 +446,29 @@ impl CompositorMode {
             });
         }
     }
+}
+
+/// Allows the next raster sample to request another UI turn while rows settle.
+pub(super) fn defer_window(runtime: &UiHost, generation: u64) {
+    if let Some(run) = lock(&runtime.compositor_mode.active).as_mut()
+        && run.generation == generation
+        && matches!(run.window, ListWindow::Preparing)
+    {
+        run.window = ListWindow::Idle;
+    }
+}
+
+/// A newly decoded asset for a pending window can be installed without stopping the old one.
+pub(super) fn prefetch_image(runtime: &UiHost, source: &str) -> bool {
+    let active = lock(&runtime.compositor_mode.active);
+    active.as_ref().is_some_and(|run| {
+        runtime.compositor_generation == Some(run.generation)
+            && !run
+                .plan
+                .requirements
+                .iter()
+                .any(|(key, _)| key.as_ref() == source)
+    })
 }
 
 impl Plan {
@@ -398,6 +564,7 @@ pub(super) fn activate(runtime: &mut UiHost, completion: &RasterCompletion) -> b
             tree,
             deadline_ms,
             revision: submission.revision,
+            requirements: Arc::clone(&submission.requirements),
             scale: submission.scale,
             topology: runtime.topology,
             telemetry: runtime.telemetry.clone(),
@@ -452,18 +619,49 @@ mod tests {
 
     use engine::scene::LayerTree;
 
-    use super::{CompositorMode, Plan, ThreadTopology};
+    use super::{CompositorMode, ListWindow, Plan, ThreadTopology};
 
     fn plan() -> Plan {
         Plan {
             tree: Arc::new(LayerTree::empty()),
             deadline_ms: None,
             revision: 0,
+            requirements: Arc::default(),
             scale: 1.0,
             topology: ThreadTopology::Split,
             telemetry: None,
             hub: None,
         }
+    }
+
+    #[test]
+    fn publishing_a_new_window_keeps_raster_vsync_ownership() {
+        use engine::session::FrameTime;
+        use std::time::Instant;
+
+        let mode = CompositorMode::default();
+        let first = mode.begin(plan(), None);
+        let make_window = || {
+            let mut next = plan().submission(FrameTime::at(100.0), Instant::now());
+            next.layers_changed = true;
+            next.compositor_epoch = Some(1);
+            next
+        };
+        let preparing =
+            || super::lock(&mode.active).as_mut().unwrap().window = ListWindow::Preparing;
+        preparing();
+        assert!(!mode.publish_window(first.0 + 1, 1, make_window()));
+        assert!(!mode.publish_window(first.0, 2, make_window()));
+        preparing();
+        assert!(mode.publish_window(first.0, 1, make_window()));
+        assert!(mode.expects(first));
+        assert!(matches!(
+            super::lock(&mode.active).as_ref().unwrap().window,
+            ListWindow::Ready(_)
+        ));
+        assert!(mode.continue_callback(first).is_some());
+        mode.cancel();
+        assert!(!mode.publish_window(first.0, 1, make_window()));
     }
 
     #[test]

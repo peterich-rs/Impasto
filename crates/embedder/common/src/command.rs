@@ -94,6 +94,11 @@ pub enum Command {
     Io(IoEvent),
     /// A timer deadline arrived. The render thread runs one frame.
     Wake,
+    /// Raster is approaching a list window edge and still owns vsync.
+    PrefetchCompositorWindow {
+        generation: u64,
+        time: FrameTime,
+    },
     /// Raster reached a motion or scheduling boundary and returned frame ownership to UI.
     CommitCompositorState {
         generation: u64,
@@ -139,6 +144,7 @@ pub(crate) fn command_tag(command: &Command) -> &'static str {
         Command::Io(IoEvent::Host(_)) => "host event",
         Command::Wake => "wake",
         Command::CommitCompositorState { .. } => "animation handoff",
+        Command::PrefetchCompositorWindow { .. } => "list prefetch",
         Command::Frame { .. } => "frame",
         Command::Shutdown => "shutdown",
     }

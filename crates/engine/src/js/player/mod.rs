@@ -243,6 +243,7 @@ pub struct JsSession {
     /// A failed frame must not schedule another frame by itself.
     suppress_demand: Cell<bool>,
     ui_work_pending: bool,
+    prefetching_list: bool,
     reload_frame: Option<crate::session::FrameOutput>,
     record_failing: bool,
     record_frames: u32,
@@ -312,6 +313,7 @@ impl JsSession {
             exit: Cell::new(false),
             suppress_demand: Cell::new(false),
             ui_work_pending: false,
+            prefetching_list: false,
             reload_frame: None,
             record_failing: false,
             record_frames: 0,
@@ -1066,6 +1068,9 @@ impl Session for JsSession {
             };
             let mut tree = inner.tree.borrow_mut();
             let record_started = std::time::Instant::now();
+            if self.prefetching_list {
+                inner.drivers.borrow().refresh_compositor_windows(&mut tree);
+            }
             if tree.needs_paint() {
                 let _trace =
                     tracing::debug_span!(target: "impasto::render::record", "record_layers")
@@ -1306,6 +1311,16 @@ impl Session for JsSession {
             }
         }
     }
+    fn prefetch_compositor_window(
+        &mut self,
+        time: crate::session::FrameTime,
+    ) -> crate::session::FrameOutput {
+        self.prefetching_list = true;
+        let output = self.frame(time);
+        self.prefetching_list = false;
+        output
+    }
+
     fn wants_frame(&mut self) -> bool {
         let inner = &self.inner;
         if self.suppress_demand.replace(false) {
@@ -1326,8 +1341,9 @@ impl Session for JsSession {
         let explicit = inner.settings_frame.take() || self.vm.host.take_wants_frame();
         let driver = inner.driver_frame.get();
         let paints = !inner.paused.get() && inner.graph.has_paints();
-        self.ui_work_pending = explicit || visual || jobs || soon || driver || paints;
-        self.ui_work_pending || motion
+        self.ui_work_pending =
+            explicit || visual || jobs || soon || (!self.prefetching_list && driver) || paints;
+        self.ui_work_pending || driver || motion
     }
 
     fn compositor_eligibility(

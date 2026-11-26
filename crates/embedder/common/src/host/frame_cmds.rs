@@ -39,7 +39,13 @@ fn wake(runtime: &mut UiHost, acks: &Acks) -> Result<bool, BootError> {
         return Ok(false);
     }
     let now = runtime.wake.runner.monotonic_ms();
-    on_frame(runtime, wake_time(now, runtime.last_vsync), false, acks)
+    on_frame(
+        runtime,
+        wake_time(now, runtime.last_vsync),
+        false,
+        None,
+        acks,
+    )
 }
 
 fn wake_time(now: f64, last_vsync: Option<FrameTime>) -> FrameTime {
@@ -71,7 +77,7 @@ fn frame(
         return Ok(false);
     }
     runtime.last_vsync = Some(time);
-    on_frame(runtime, time, true, acks)
+    on_frame(runtime, time, true, None, acks)
 }
 
 #[cfg(test)]

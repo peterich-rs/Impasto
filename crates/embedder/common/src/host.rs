@@ -1323,10 +1323,17 @@ fn fault_followup(diag_armed: bool, faults: &[engine::session::ScriptFault]) -> 
 fn on_command(runtime: &mut UiHost, command: Command, acks: &Acks) -> Result<bool, BootError> {
     runtime.busy.enter(crate::command::command_tag(&command));
     let wake_command = matches!(command, Command::Wake);
-    let interrupted = if matches!(
-        command,
-        Command::Frame { .. } | Command::CommitCompositorState { .. }
-    ) {
+    let prefetch_image = match &command {
+        Command::ImageReady(ready) => compositor_animation::prefetch_image(runtime, ready.source()),
+        _ => false,
+    };
+    let interrupted = if prefetch_image
+        || matches!(
+            command,
+            Command::Frame { .. }
+                | Command::CommitCompositorState { .. }
+                | Command::PrefetchCompositorWindow { .. }
+        ) {
         false
     } else {
         runtime.compositor_epoch = runtime.compositor_epoch.wrapping_add(1);
@@ -1383,6 +1390,16 @@ fn dispatch_command(
         | Command::ReloadImage(_)) => cache_cmds::handle(runtime, command),
         command @ (Command::Wake | Command::Frame { .. }) => {
             frame_cmds::handle(runtime, command, acks)
+        }
+        Command::PrefetchCompositorWindow { generation, time } => {
+            if runtime.compositor_generation == Some(generation)
+                && runtime.compositor_mode.running()
+                && !runtime.input.is_paused()
+            {
+                on_frame(runtime, time, false, Some(generation), acks)
+            } else {
+                Ok(false)
+            }
         }
         Command::CommitCompositorState {
             generation,
@@ -1475,6 +1492,7 @@ fn on_frame(
     runtime: &mut UiHost,
     time: FrameTime,
     from_vsync: bool,
+    prefetch_generation: Option<u64>,
     acks: &Acks,
 ) -> Result<bool, BootError> {
     let frame_started = Instant::now();
@@ -1504,11 +1522,13 @@ fn on_frame(
     } else {
         FramePipeline::DEPTH
     };
-    if !runtime.frames.has_room(frame_depth) {
+    if prefetch_generation.is_none() && !runtime.frames.has_room(frame_depth) {
         skipped_frame("queue_full");
         return Ok(end_frame(runtime, false, false));
     }
-    let attempt = if runtime.try_surface || matches!(runtime.graphics, RasterPort::Local(_)) {
+    let attempt = if prefetch_generation.is_none()
+        && (runtime.try_surface || matches!(runtime.graphics, RasterPort::Local(_)))
+    {
         let attempt = runtime
             .graphics
             .with(|graphics| graphics.surfaces.take_attempt())?;
@@ -1604,11 +1624,15 @@ fn on_frame(
     let mut runtime_sample = None;
     let mut layout_report = None;
     let mut compositor_epoch = None;
+    let mut prefetch_wait = false;
     if let Some(session) = runtime.session.as_mut() {
         session.set_counters(counters);
         let framed = {
             let _trace = tracing::debug_span!(target: "impasto::frame", "session").entered();
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.frame(time)))
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match prefetch_generation {
+                Some(_) => session.prefetch_compositor_window(time),
+                None => session.frame(time),
+            }))
         };
         match framed {
             Ok(mut output) => {
@@ -1665,7 +1689,10 @@ fn on_frame(
                     && !leave
                     && faults.is_empty()
                     && let Some(tree) = runtime.latest.as_ref()
-                    && (again || runtime.animated_effects || runtime.gpu_views)
+                    && (again
+                        || runtime.animated_effects
+                        || runtime.gpu_views
+                        || prefetch_generation.is_some())
                 {
                     use engine::scene::CompositorBlockReason;
                     let has_compositor_work =
@@ -1685,6 +1712,10 @@ fn on_frame(
                         }
                         Ok(()) => {}
                         Err(reason) => {
+                            prefetch_wait = matches!(
+                                reason,
+                                CompositorBlockReason::ListWindowNotSettled { .. }
+                            );
                             if let Some(schedule) = schedule.as_mut() {
                                 schedule.compositor_block = Some(reason);
                             }
@@ -1789,6 +1820,28 @@ fn on_frame(
     drop(entered);
     if let Some(schedule) = submission.schedule.as_mut() {
         schedule.ui_done_ns = mono_ns();
+    }
+    if let Some(generation) = prefetch_generation {
+        if prefetch_wait && !leave && !placements_changed && submission.reloads.is_empty() {
+            compositor_animation::defer_window(runtime, generation);
+            return Ok(false);
+        }
+        if !leave
+            && runtime.compositor_mode.publish_window(
+                generation,
+                runtime.compositor_epoch,
+                submission,
+            )
+        {
+            refresh_wake(runtime);
+            return Ok(false);
+        }
+        compositor_animation::stop(runtime, None);
+        if leave {
+            return Ok(end_frame(runtime, false, true));
+        }
+        arm(runtime);
+        return Ok(false);
     }
     match &mut runtime.graphics {
         RasterPort::Local(graphics) => {
@@ -2102,7 +2155,9 @@ fn note_wake(runtime: &UiHost, deadline: Option<i64>) {
 }
 
 fn arm(runtime: &mut UiHost) {
-    if let Some(token) = runtime.scheduler.request() {
+    if runtime.compositor_generation.is_none()
+        && let Some(token) = runtime.scheduler.request()
+    {
         runtime.vsync.request_frame(token);
     }
 }
@@ -2731,11 +2786,11 @@ mod tests {
         assert_eq!(harness.runtime.graphics.local().gpu, Gpu::Flush);
         assert!(harness.runtime.graphics.local().installed.is_none());
         assert!(harness.runtime.input.is_paused());
-        assert!(!on_frame(&mut harness.runtime, now(), false, &harness.acks).unwrap());
+        assert!(!on_frame(&mut harness.runtime, now(), false, None, &harness.acks).unwrap());
         assert_eq!(presents.load(Ordering::Relaxed), 0);
         harness.runtime.graphics.local().gpu = Gpu::Dead;
         harness.runtime.input.resume();
-        assert!(!on_frame(&mut harness.runtime, now(), false, &harness.acks).unwrap());
+        assert!(!on_frame(&mut harness.runtime, now(), false, None, &harness.acks).unwrap());
         assert_eq!(presents.load(Ordering::Relaxed), 0);
     }
 
@@ -2755,7 +2810,7 @@ mod tests {
         harness.runtime.graphics.local().installed = Some(Installed { scale: 2.0 });
         harness.runtime.point_scale = 2.0;
         harness.runtime.graphics.local().needs_present = true;
-        assert!(!on_frame(&mut harness.runtime, now(), false, &harness.acks).unwrap());
+        assert!(!on_frame(&mut harness.runtime, now(), false, None, &harness.acks).unwrap());
         assert_eq!(*lock(&seen), raster::PixelSize::new(720, 1280));
     }
 

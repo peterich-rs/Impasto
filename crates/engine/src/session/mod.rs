@@ -187,6 +187,10 @@ pub trait Session {
     fn window_display(&mut self, _display: WindowDisplay) {}
     fn pointer(&mut self, event: crate::input::PointerEvent);
     fn frame(&mut self, time: FrameTime) -> FrameOutput;
+    /// Prepares a replacement list window while the installed scene keeps presenting.
+    fn prefetch_compositor_window(&mut self, time: FrameTime) -> FrameOutput {
+        self.frame(time)
+    }
     /// Whether the current tree may animate on the compositor while UI is idle.
     fn compositor_eligibility(
         &self,

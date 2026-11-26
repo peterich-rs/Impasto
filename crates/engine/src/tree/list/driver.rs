@@ -147,19 +147,11 @@ impl ListDriver {
         }
         let top = top?;
         let slack = (view.h * 0.25).min(((bottom - top - view.h).max(0.0)) * 0.5);
-        let mut low = if self.range.start == 0 {
-            top
-        } else {
-            top + slack
-        };
-        let mut high = if self.range.end == self.items.len() {
-            bottom - view.h
-        } else {
-            bottom - view.h - slack
-        };
+        let mut low = top;
+        let mut high = bottom - view.h;
         let prefetch_edges = [
-            (self.range.start > 0).then_some(low),
-            (self.range.end < self.items.len()).then_some(high),
+            (self.range.start > 0).then_some(low + slack),
+            (self.range.end < self.items.len()).then_some(high - slack),
         ];
         let pin = usize::try_from(self.chrome.pin_index).ok();
         let next_start = self

@@ -37,8 +37,8 @@ fn memory_warning(runtime: &mut UiHost) {
 }
 
 fn image_ready(runtime: &mut UiHost, ready: ImageReady) {
-    let decoded =
-        matches!(&ready, ImageReady::Decoded(handle) if uses_texture(runtime, &handle.source));
+    let decoded = !super::compositor_animation::prefetch_image(runtime, ready.source())
+        && matches!(&ready, ImageReady::Decoded(handle) if uses_texture(runtime, &handle.source));
     runtime.graphics.post(move |graphics| {
         let request_id = match &ready {
             ImageReady::Decoded(handle) => handle.generation,

@@ -170,7 +170,7 @@ impl CompositorTrack {
         if low.is_none() && high.is_none() {
             return false;
         }
-        let lookahead = (2.0 * interval_ms).clamp(8.0, 40.0);
+        let lookahead = (2.0 * interval_ms).clamp(32.0, 48.0);
         let future = self
             .curve
             .sample((target_ms + lookahead - self.started_ms).max(0.0))
@@ -403,4 +403,40 @@ pub(crate) fn compositor_alpha(value: f32) -> u8 {
     )]
     let alpha = value.round().clamp(0.0, 255.0) as u8;
     alpha
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CompositorProp, CompositorTrack, CompositorTrackId, LayerId};
+    use crate::motion::{Easing, MotionCurve};
+
+    #[test]
+    fn prefetch_does_not_end_sampling_until_coverage_is_exhausted() {
+        let mut track = CompositorTrack::new(
+            CompositorTrackId(1),
+            LayerId(0),
+            CompositorProp::ScrollY,
+            0.0,
+            MotionCurve::Tween {
+                from: 0.0,
+                to: 200.0,
+                duration_ms: 200.0,
+                easing: Easing::Linear,
+            },
+            None,
+            None,
+        );
+        track.scroll_window = Some([0.0, 100.0]);
+        track.list_prefetch_edges = [None, Some(75.0)];
+
+        assert!(track.needs_list_prefetch(50.0, 8.33));
+        assert!(track.sample(50.0).is_some());
+        assert!(track.sample(99.0).is_some());
+        assert!(track.sample(101.0).is_none());
+
+        track.scroll_window = Some([60.0, 180.0]);
+        track.list_prefetch_edges = [Some(65.0), Some(155.0)];
+        assert!(track.sample(99.0).is_some());
+        assert!(!track.needs_list_prefetch(99.0, 8.33));
+    }
 }
