@@ -1,16 +1,32 @@
+override encoded_srgb: bool = false;
+
+fn stored_color(color: vec4<f32>) -> vec4<f32> {
+    if !encoded_srgb {
+        return color;
+    }
+    let linear = clamp(color.rgb, vec3(0.0), vec3(1.0));
+    let encoded = select(12.92 * linear,
+        1.055 * pow(linear, vec3(1.0 / 2.4)) - 0.055, linear > vec3(0.0031308));
+    return vec4(encoded, color.a);
+}
+
+fn tile_color(color: vec4<f32>) -> vec4<f32> {
+    return select(quantizeToF16(color), color, encoded_srgb);
+}
+
 @group(0) @binding(1) var destination: texture_storage_2d<rgba16float, write>;
 
 @compute @workgroup_size(8, 8)
 fn cs_premultiply(@builtin(global_invocation_id) id: vec3<u32>) {
     if all(id.xy < textureDimensions(destination)) {
-        textureStore(destination, vec2<i32>(id.xy), premultiply(vec2<i32>(id.xy)));
+        textureStore(destination, vec2<i32>(id.xy), stored_color(premultiply(vec2<i32>(id.xy))));
     }
 }
 
 @compute @workgroup_size(8, 8)
 fn cs_downsample(@builtin(global_invocation_id) id: vec3<u32>) {
     if all(id.xy < textureDimensions(destination)) {
-        textureStore(destination, vec2<i32>(id.xy), downsample(vec2<i32>(id.xy)));
+        textureStore(destination, vec2<i32>(id.xy), stored_color(downsample(vec2<i32>(id.xy))));
     }
 }
 
@@ -26,24 +42,24 @@ fn average_quad(index: u32, step: u32) -> vec4<f32> {
 
 fn write_mips(pixel: vec2<u32>, local: vec2<u32>, color: vec4<f32>) {
     let index = local.y * 8u + local.x;
-    textureStore(destination, vec2<i32>(pixel), color);
-    // Match the precision of a separate store/load at each level.
-    tile[index] = quantizeToF16(color);
+    textureStore(destination, vec2<i32>(pixel), stored_color(color));
+    // Keep linear light in shared memory so internal levels avoid sRGB round trips.
+    tile[index] = tile_color(color);
     workgroupBarrier();
     if all(local % 2u == vec2(0u)) {
         let next = average_quad(index, 1u);
-        textureStore(mip1, vec2<i32>(pixel / 2u), next);
-        tile[index] = quantizeToF16(next);
+        textureStore(mip1, vec2<i32>(pixel / 2u), stored_color(next));
+        tile[index] = tile_color(next);
     }
     workgroupBarrier();
     if all(local % 4u == vec2(0u)) {
         let next = average_quad(index, 2u);
-        textureStore(mip2, vec2<i32>(pixel / 4u), next);
-        tile[index] = quantizeToF16(next);
+        textureStore(mip2, vec2<i32>(pixel / 4u), stored_color(next));
+        tile[index] = tile_color(next);
     }
     workgroupBarrier();
     if index == 0u {
-        textureStore(mip3, vec2<i32>(pixel / 8u), average_quad(0u, 4u));
+        textureStore(mip3, vec2<i32>(pixel / 8u), stored_color(average_quad(0u, 4u)));
     }
 }
 

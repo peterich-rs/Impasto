@@ -537,6 +537,10 @@ fn compute_upload_fuses_mips_without_losing_the_smallest_image() {
     if !gpu.caps.has_compute {
         return;
     }
+    let srgb_views = gpu
+        .caps
+        .downlevel_flags
+        .contains(wgpu::DownlevelFlags::VIEW_FORMATS);
     let side = 1024;
     let scene = tree(
         1,
@@ -566,8 +570,11 @@ fn compute_upload_fuses_mips_without_losing_the_smallest_image() {
         .stats
         .image_upload;
     assert_eq!((stats.compute_passes, stats.render_passes), (1, 0));
+    let bytes_per_texel = if srgb_views { 4 } else { 8 };
+    assert_eq!(stats.resident_bytes, 1_398_101 * bytes_per_texel);
     let image = raster.render_rgba(PixelSize::new(1, 1)).unwrap();
-    assert_eq!(image, [255, 0, 0, 64]);
+    assert!(image[0] >= 254, "{image:?}");
+    assert_eq!(&image[1..], &[0, 0, 64]);
 }
 
 #[test]

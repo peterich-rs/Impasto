@@ -48,6 +48,7 @@ pub(crate) struct ImageUpload {
     pipelines: Pipelines,
     format: wgpu::TextureFormat,
     usage: wgpu::TextureUsages,
+    srgb_storage: bool,
 }
 
 fn descriptor(
@@ -84,11 +85,19 @@ pub(crate) fn upload_rgba(gpu: &Gpu, texture: &wgpu::Texture, size: [u32; 2], pi
 
 impl ImageUpload {
     pub fn new(gpu: &Gpu, compute: bool) -> Self {
+        let srgb_storage = compute
+            && gpu
+                .caps
+                .downlevel_flags
+                .contains(wgpu::DownlevelFlags::VIEW_FORMATS);
         let source = if compute {
-            format!(
-                "{SOURCE}\n{}",
-                include_str!("pipelines/upload_compute.wgsl")
-            )
+            let shader = include_str!("pipelines/upload_compute.wgsl");
+            let shader = if srgb_storage {
+                shader.replace("rgba16float", "rgba8unorm")
+            } else {
+                shader.to_owned()
+            };
+            format!("{SOURCE}\n{shader}")
         } else {
             format!("{SOURCE}\n{}", include_str!("pipelines/upload_render.wgsl"))
         };
@@ -107,7 +116,10 @@ impl ImageUpload {
                             layout: None,
                             module: &module,
                             entry_point: Some(entry),
-                            compilation_options: Default::default(),
+                            compilation_options: wgpu::PipelineCompilationOptions {
+                                constants: &[("encoded_srgb", f64::from(srgb_storage))],
+                                ..Default::default()
+                            },
                             cache: gpu.pipeline_cache(),
                         });
                 let layout = pipeline.get_bind_group_layout(0);
@@ -127,7 +139,12 @@ impl ImageUpload {
                             ]
                         }),
                 },
-                format: wgpu::TextureFormat::Rgba16Float,
+                format: if srgb_storage {
+                    wgpu::TextureFormat::Rgba8Unorm
+                } else {
+                    wgpu::TextureFormat::Rgba16Float
+                },
+                srgb_storage,
                 usage: wgpu::TextureUsages::STORAGE_BINDING,
             }
         } else {
@@ -172,6 +189,7 @@ impl ImageUpload {
                 },
                 format,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                srgb_storage,
             }
         }
     }
@@ -181,7 +199,7 @@ impl ImageUpload {
         gpu: &Gpu,
         size: [u32; 2],
         pixels: &[u8],
-    ) -> (wgpu::Texture, ImageUploadStats, wgpu::CommandBuffer) {
+    ) -> (wgpu::TextureView, ImageUploadStats, wgpu::CommandBuffer) {
         use wgpu::TextureUsages as U;
         let levels = size[0].max(size[1]).ilog2() + 1;
         let source = gpu.device.create_texture(&descriptor(
@@ -191,7 +209,7 @@ impl ImageUpload {
             U::COPY_DST | U::TEXTURE_BINDING,
             1,
         ));
-        let dest = gpu.device.create_texture(&descriptor(
+        let mut destination = descriptor(
             "premultiplied image mips",
             size,
             self.format,
@@ -203,7 +221,11 @@ impl ImageUpload {
                     U::empty()
                 },
             levels,
-        ));
+        );
+        if self.srgb_storage {
+            destination.view_formats = &[wgpu::TextureFormat::Rgba8UnormSrgb];
+        }
+        let dest = gpu.device.create_texture(&destination);
         upload_rgba(gpu, &source, size, pixels);
         let view = |texture: &wgpu::Texture, level| {
             texture.create_view(&wgpu::TextureViewDescriptor {
@@ -214,6 +236,17 @@ impl ImageUpload {
         };
         let source = view(&source, 0);
         let targets: Vec<_> = (0..levels).map(|level| view(&dest, level)).collect();
+        let sampled = |mip: Option<u32>| {
+            dest.create_view(&wgpu::TextureViewDescriptor {
+                format: self
+                    .srgb_storage
+                    .then_some(wgpu::TextureFormat::Rgba8UnormSrgb),
+                usage: Some(U::TEXTURE_BINDING),
+                base_mip_level: mip.unwrap_or(0),
+                mip_level_count: mip.map(|_| 1),
+                ..Default::default()
+            })
+        };
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -252,7 +285,7 @@ impl ImageUpload {
                     label: Some("impasto compute image mips"),
                     timestamp_writes: None,
                 });
-                let mut source = &source;
+                let mut input = source;
                 let mut level = 0;
                 while level < levels {
                     let extent = size.map(|side| (side >> level).max(1));
@@ -268,12 +301,14 @@ impl ImageUpload {
                         _ => (if base { convert } else { downsample }, 1),
                     };
                     let outputs = &remaining[..count];
-                    pipeline.dispatch(gpu, &mut pass, source, outputs, extent);
-                    source = &outputs[count - 1];
+                    pipeline.dispatch(gpu, &mut pass, &input, outputs, extent);
                     level += if count == 4 { 4 } else { 1 };
+                    if level < levels {
+                        input = sampled(Some(level - 1));
+                    }
                 }
                 stats.compute_passes = 1;
-                8
+                if self.srgb_storage { 4 } else { 8 }
             }
         };
         stats.resident_bytes = (0..levels)
@@ -282,7 +317,7 @@ impl ImageUpload {
                 u64::from(w) * u64::from(h) * bytes_per_pixel
             })
             .sum();
-        (dest, stats, encoder.finish())
+        (sampled(None), stats, encoder.finish())
     }
 }
 

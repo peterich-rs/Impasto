@@ -117,7 +117,7 @@ impl GpuImage {
         } else {
             None
         };
-        let (texture, upload, conversion) = converted
+        let (view, upload, conversion) = converted
             .map(|(image, stats, command)| (image, stats, Some(command)))
             .unwrap_or_else(|| {
                 let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -135,7 +135,7 @@ impl GpuImage {
                 let pixels = crate::color::premultiply_rgba(rgba);
                 crate::image_upload::upload_rgba(gpu, &texture, size, &pixels);
                 (
-                    texture,
+                    texture.create_view(&Default::default()),
                     ImageUploadStats {
                         source_bytes: bytes as u64,
                         resident_bytes: bytes as u64,
@@ -147,7 +147,6 @@ impl GpuImage {
         if gpu.is_lost() {
             return None;
         }
-        let view = texture.create_view(&Default::default());
         Some((
             Self {
                 view: Arc::new(view),
