@@ -37,7 +37,12 @@ pub(crate) fn pool() -> Option<&'static ThreadPool> {
 
 pub(crate) fn path_count(ops: &[CanvasOp]) -> usize {
     ops.iter()
-        .filter(|op| matches!(op, CanvasOp::Fill { .. } | CanvasOp::Clip { .. }))
+        .filter(|op| {
+            matches!(
+                op,
+                CanvasOp::Fill { .. } | CanvasOp::Vector { .. } | CanvasOp::Clip { .. }
+            )
+        })
         .count()
 }
 

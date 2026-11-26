@@ -539,7 +539,7 @@ impl Rasterizer {
         };
         let mut pictures = HashMap::with_capacity(tree.pictures.len());
         let mut has_glyphs = false;
-        let mut rebuilt_glyphs = HashSet::new();
+        let mut rebuilt_atlas_pictures = HashSet::new();
         for picture in &tree.pictures {
             let compile_scale = compile_scale(picture.id);
             let cached = previous
@@ -595,8 +595,8 @@ impl Rasterizer {
                     compiler::compile(picture, &mut context, pool)?
                 };
                 stats.picture_rebuilt = stats.picture_rebuilt.saturating_add(1);
-                if self.parallel_prepare && result.has_glyphs {
-                    rebuilt_glyphs.insert(picture.id);
+                if self.parallel_prepare && (result.has_glyphs || result.has_vector_fields) {
+                    rebuilt_atlas_pictures.insert(picture.id);
                 }
                 if let Some(mesh) = result
                     .mesh_buffer
@@ -669,7 +669,7 @@ impl Rasterizer {
             let upload = textures.commit(gpu)?;
             Ok((damage, upload))
         };
-        let (damage, upload) = if !rebuilt_glyphs.is_empty()
+        let (damage, upload) = if !rebuilt_atlas_pictures.is_empty()
             && let Some(pool) = prepare::pool()
         {
             let compositor = &mut device.compositor;
@@ -682,7 +682,7 @@ impl Rasterizer {
             // Installed picture geometry determines the exact glyph keys.
             // Its CPU prefetch can overlap damage and texture submission.
             pool.in_place_scope(|scope| {
-                scope.spawn(|_| compositor.prepare_glyphs(pool, gpu, glyph_scene, &rebuilt_glyphs));
+                scope.spawn(|_| compositor.prepare_glyphs(pool, gpu, glyph_scene, &rebuilt_atlas_pictures));
                 install()
             })
         } else {

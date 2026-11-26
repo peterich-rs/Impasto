@@ -370,6 +370,7 @@ pub struct CompiledPicture {
     pub reads_root: bool,
     pub has_resident_candidate: bool,
     pub has_glyphs: bool,
+    pub has_vector_fields: bool,
     pub cache_safe: bool,
     pub cache_expensive: bool,
     pub has_shader_effect: bool,
@@ -527,6 +528,7 @@ pub fn prepare(
     }
     let mut has_resident_candidate = false;
     let mut has_glyphs = false;
+    let mut has_vector_fields = false;
     let mut has_shader_effect = false;
     let mut supports_partial = compiler.groups.is_empty();
     let mut cache_safe = true;
@@ -556,7 +558,10 @@ pub fn prepare(
                     | Draw::Fill(_)
                     | Draw::Mesh(_)
             ) && draw.source_over();
-            paths += usize::from(matches!(draw, Draw::Mesh(_)));
+            if let Draw::Mesh(mesh) = draw {
+                paths += 1;
+                has_vector_fields |= mesh.vector.is_some();
+            }
             cache_safe &= matches!(
                 draw,
                 Draw::Rects(_) | Draw::Mesh(_) | Draw::Glyphs(_) | Draw::Images { .. }
@@ -623,6 +628,7 @@ pub fn prepare(
         generation: picture.generation,
         has_resident_candidate,
         has_glyphs,
+        has_vector_fields,
         cache_safe,
         cache_expensive,
         has_shader_effect,
@@ -1353,7 +1359,7 @@ impl Compiler<'_> {
                 ops.par_iter()
                     .map(|op| match op {
                         CanvasOp::Clip { path } if path.verbs.is_empty() => Ok(None),
-                        CanvasOp::Fill { path, .. } => {
+                        CanvasOp::Fill { path, .. } | CanvasOp::Vector { path, .. } => {
                             prepare_path(path, tolerance, stencil, direct, analytic_curves)
                                 .map(Some)
                         }
@@ -1370,13 +1376,15 @@ impl Compiler<'_> {
         } else {
             for op in ops {
                 let buffers = match op {
-                    CanvasOp::Fill { path, .. } => Some(prepare_path(
-                        path,
-                        self.tessellation_tolerance(),
-                        stencil,
-                        direct,
-                        analytic_curves,
-                    )?),
+                    CanvasOp::Fill { path, .. } | CanvasOp::Vector { path, .. } => {
+                        Some(prepare_path(
+                            path,
+                            self.tessellation_tolerance(),
+                            stencil,
+                            direct,
+                            analytic_curves,
+                        )?)
+                    }
                     CanvasOp::Clip { path } if !path.verbs.is_empty() => Some(prepare_path(
                         path,
                         self.tessellation_tolerance(),
@@ -1441,6 +1449,7 @@ impl Compiler<'_> {
             indices: start..end,
             stencil_fill,
             fringe,
+            vector: None,
             bounds,
             brush,
             composite,
@@ -1486,7 +1495,7 @@ impl Compiler<'_> {
                 }
                 self.boundary();
             }
-            CanvasOp::Fill { paint, .. } => {
+            CanvasOp::Fill { paint, .. } | CanvasOp::Vector { paint, .. } => {
                 let brush = match &paint.brush {
                     CanvasBrush::Color(color) => {
                         Brush::Solid(linear_premultiplied(*color, paint.alpha).unwrap_or([0.0; 4]))
@@ -1495,7 +1504,14 @@ impl Compiler<'_> {
                         pack_canvas_gradient(gradient, paint.alpha).ok_or(Status::BadScene)?,
                     ),
                 };
-                let mesh = self.mesh(brush, paint.composite, buffers.ok_or(Status::BadScene)?)?;
+                let mut mesh =
+                    self.mesh(brush, paint.composite, buffers.ok_or(Status::BadScene)?)?;
+                if let CanvasOp::Vector {
+                    asset, transform, ..
+                } = op
+                {
+                    mesh.vector = crate::msdf::VectorField::new(asset, *transform);
+                }
                 let isolated = paint.composite == CanvasComposite::Multiply
                     && self.push_canvas_composite(paint.composite);
                 self.push_draw(Draw::Mesh(mesh));
@@ -1638,7 +1654,7 @@ pub fn solid_rect(rect: [f32; 4], color: [f32; 4]) -> RectInstance {
     }
 }
 
-fn pack_glyph_color(color: [f32; 4]) -> [u16; 4] {
+pub(crate) fn pack_glyph_color(color: [f32; 4]) -> [u16; 4] {
     color.map(|component| half::f16::from_f32(component).to_bits())
 }
 

@@ -3773,10 +3773,15 @@ impl Frame<'_> {
                     )?;
                 }
                 Draw::Mesh(mesh) => {
+                    if self.vector_field(target, transform, clip, mesh)? {
+                        continue;
+                    }
                     let mut meshes = vec![mesh];
                     if mesh.composite == engine::scene::CanvasComposite::SourceOver {
                         while let Some(Draw::Mesh(next)) = draws.peek() {
-                            if next.composite != mesh.composite {
+                            if next.composite != mesh.composite
+                                || (self.compositor.use_msdf && next.vector.is_some())
+                            {
                                 break;
                             }
                             meshes.push(next);
@@ -4623,6 +4628,60 @@ impl Frame<'_> {
             vertices.clear();
         }
         Ok(())
+    }
+
+    fn vector_field(
+        &mut self,
+        target: &Image,
+        transform: Affine,
+        clip: &Coverage,
+        mesh: &Mesh,
+    ) -> Result<bool, Status> {
+        let (Some(asset), batch::Brush::Solid(color)) = (&mesh.vector, &mesh.brush) else {
+            return Ok(false);
+        };
+        if !self.compositor.use_msdf
+            || !clip.stencil.is_empty()
+            || mesh.composite != engine::scene::CanvasComposite::SourceOver
+        {
+            return Ok(false);
+        }
+        let PictureBounds::Rect([_, _, w, h]) =
+            PictureBounds::rect(mesh.bounds).transform(transform)
+        else {
+            return Ok(false);
+        };
+        let scale = self.scene.scale;
+        if w.min(h) * scale < 8.0 || w.max(h) * scale > 256.0 {
+            return Ok(false);
+        }
+        let Some((vertex, created)) = self.compositor.msdf.vector(
+            self.gpu,
+            &self.compositor.pipelines.layouts,
+            &self.compositor.linear,
+            asset,
+            compiler::pack_glyph_color(*color),
+        ) else {
+            return Ok(false);
+        };
+        self.compositor.render_stats.bind_groups_created += u32::from(created);
+        let view = self.geometry_view(
+            target,
+            compiler::compose(transform, asset.transform),
+            clip,
+            self.compositor.atlas.inverse_page_size(),
+        );
+        let empty = self.stops(&[])?;
+        let (page, _) = self.paint(empty, None)?;
+        self.glyph_batch(
+            target,
+            clip,
+            view,
+            page,
+            &[vertex],
+            AtlasBinding::DistanceField,
+        )?;
+        Ok(true)
     }
 
     fn glyphs<'a>(

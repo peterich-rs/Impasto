@@ -1,6 +1,9 @@
-//! Size-independent distance fields for large and transformed glyphs.
+//! Size-independent distance fields for glyphs and reusable vector assets.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    hash::{DefaultHasher, Hash, Hasher},
+};
 
 use engine::scene::{CanvasPath, PathVerb};
 use etagere::{AllocId, AtlasAllocator, size2};
@@ -17,7 +20,7 @@ use crate::{
     FontLibrary,
     atlas::AtlasStats,
     batch::{GLYPH_MSDF, GlyphVertex},
-    compiler::GlyphDraw,
+    compiler::{Affine, GlyphDraw},
     gpu::Gpu,
     outline::{OutlineKey, REFERENCE_PPEM},
     pipelines,
@@ -31,8 +34,8 @@ const LAYERS: u32 = 2;
 #[derive(Default)]
 pub(crate) struct MsdfAtlas {
     backing: Option<Backing>,
-    prepared: HashMap<OutlineKey, Option<Bitmap>>,
-    unavailable: HashSet<OutlineKey>,
+    prepared: HashMap<DistanceField, Option<Bitmap>>,
+    unavailable: HashSet<DistanceField>,
     frame: u64,
     stats: AtlasStats,
 }
@@ -41,7 +44,76 @@ struct Backing {
     texture: wgpu::Texture,
     groups: wgpu::BindGroup,
     pages: [AtlasAllocator; LAYERS as usize],
-    entries: HashMap<OutlineKey, Entry>,
+    entries: HashMap<DistanceField, Entry>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum DistanceField {
+    Glyph(OutlineKey),
+    Vector(VectorKey),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct VectorKey {
+    hash: u64,
+    path: CanvasPath,
+}
+
+impl PartialEq for VectorKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash && self.path == other.path
+    }
+}
+
+impl Eq for VectorKey {}
+
+impl Hash for VectorKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.hash.hash(state);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct VectorField {
+    key: VectorKey,
+    pub transform: Affine,
+    scale: f32,
+}
+
+impl VectorField {
+    pub(crate) fn asset(&self) -> (VectorKey, f32) {
+        (self.key.clone(), self.scale)
+    }
+
+    pub(crate) fn new(path: &CanvasPath, transform: Affine) -> Option<Self> {
+        let (min, max) = bounds(path);
+        let [w, h] = extent(min, max);
+        let scale = 64.0 / w.max(h);
+        if !scale.is_finite() || w.min(h) * scale < 4.0 {
+            return None;
+        }
+        let mut hasher = DefaultHasher::new();
+        path.fill.hash(&mut hasher);
+        for verb in path.verbs.iter() {
+            std::mem::discriminant(verb).hash(&mut hasher);
+            for point in points(*verb).into_iter().flatten() {
+                for coord in point {
+                    if !coord.is_finite() {
+                        return None;
+                    }
+                    (if coord == 0.0 { 0 } else { coord.to_bits() }).hash(&mut hasher);
+                }
+            }
+        }
+        Some(Self {
+            key: VectorKey {
+                hash: hasher.finish(),
+                path: path.clone(),
+            },
+            transform,
+            scale,
+        })
+    }
 }
 
 struct Entry {
@@ -69,12 +141,22 @@ impl MsdfAtlas {
         &mut self,
         pool: &rayon::ThreadPool,
         fonts: &FontLibrary,
-        keys: HashSet<OutlineKey>,
+        glyphs: HashSet<OutlineKey>,
+        vectors: HashMap<VectorKey, f32>,
     ) {
-        self.prepared.retain(|key, _| keys.contains(key));
-        let missing: Vec<_> = keys
+        self.prepared.retain(|key, _| match key {
+            DistanceField::Glyph(key) => glyphs.contains(key),
+            DistanceField::Vector(key) => vectors.contains_key(key),
+        });
+        let missing: Vec<_> = glyphs
             .into_iter()
-            .filter(|key| {
+            .map(|key| (DistanceField::Glyph(key), PPEM / REFERENCE_PPEM))
+            .chain(
+                vectors
+                    .into_iter()
+                    .map(|(key, scale)| (DistanceField::Vector(key), scale)),
+            )
+            .filter(|(key, _)| {
                 !self.prepared.contains_key(key)
                     && !self.unavailable.contains(key)
                     && self
@@ -86,8 +168,13 @@ impl MsdfAtlas {
         let prepared = pool.install(|| {
             missing
                 .into_par_iter()
-                .map_init(ScaleContext::new, |scale, key| {
-                    let bitmap = key.path(fonts, scale).and_then(|path| rasterize(&path));
+                .map_init(ScaleContext::new, |context, (key, scale)| {
+                    let bitmap = match &key {
+                        DistanceField::Glyph(outline) => outline
+                            .path(fonts, context)
+                            .and_then(|path| rasterize(&path, scale)),
+                        DistanceField::Vector(asset) => rasterize(&asset.path, scale),
+                    };
                     (key, bitmap)
                 })
                 .collect::<Vec<_>>()
@@ -103,7 +190,48 @@ impl MsdfAtlas {
         sampler: &wgpu::Sampler,
         glyph: &GlyphDraw,
     ) -> Option<(GlyphVertex, bool)> {
-        let key = OutlineKey::new(glyph);
+        let outline = OutlineKey::new(glyph);
+        self.lookup(
+            gpu,
+            layouts,
+            sampler,
+            DistanceField::Glyph(outline.clone()),
+            || {
+                outline
+                    .path(fonts, &mut ScaleContext::new())
+                    .and_then(|path| rasterize(&path, PPEM / REFERENCE_PPEM))
+            },
+            |entry| entry.vertex([glyph.x, glyph.y], glyph.size / PPEM, glyph.color),
+        )
+    }
+
+    pub(crate) fn vector(
+        &mut self,
+        gpu: &Gpu,
+        layouts: &pipelines::Layouts,
+        sampler: &wgpu::Sampler,
+        asset: &VectorField,
+        color: [u16; 4],
+    ) -> Option<(GlyphVertex, bool)> {
+        self.lookup(
+            gpu,
+            layouts,
+            sampler,
+            DistanceField::Vector(asset.key.clone()),
+            || rasterize(&asset.key.path, asset.scale),
+            |entry| entry.vertex([0.0; 2], asset.scale.recip(), color),
+        )
+    }
+
+    fn lookup(
+        &mut self,
+        gpu: &Gpu,
+        layouts: &pipelines::Layouts,
+        sampler: &wgpu::Sampler,
+        key: DistanceField,
+        bitmap: impl FnOnce() -> Option<Bitmap>,
+        vertex: impl FnOnce(&Entry) -> GlyphVertex,
+    ) -> Option<(GlyphVertex, bool)> {
         if let Some(entry) = self
             .backing
             .as_mut()
@@ -111,16 +239,12 @@ impl MsdfAtlas {
         {
             self.stats.hits += 1;
             entry.used = self.frame;
-            return Some((entry.vertex(glyph), false));
+            return Some((vertex(entry), false));
         }
         if self.unavailable.contains(&key) {
             return None;
         }
-        let bitmap = self.prepared.remove(&key).unwrap_or_else(|| {
-            key.path(fonts, &mut ScaleContext::new())
-                .and_then(|path| rasterize(&path))
-        });
-        let Some(bitmap) = bitmap else {
+        let Some(bitmap) = self.prepared.remove(&key).unwrap_or_else(bitmap) else {
             if self.unavailable.len() >= 2048 {
                 self.unavailable.clear();
             }
@@ -132,7 +256,7 @@ impl MsdfAtlas {
             .backing
             .get_or_insert_with(|| Backing::new(gpu, layouts, sampler));
         let entry = backing.place(gpu, self.frame, &bitmap)?;
-        let vertex = entry.vertex(glyph);
+        let vertex = vertex(&entry);
         self.stats.misses += 1;
         self.stats.uploads += 1;
         self.stats.upload_bytes += bitmap.pixels.len() as u64;
@@ -241,23 +365,49 @@ impl Backing {
 }
 
 impl Entry {
-    fn vertex(&self, glyph: &GlyphDraw) -> GlyphVertex {
-        let scale = glyph.size / PPEM;
+    fn vertex(&self, [px, py]: [f32; 2], scale: f32, color: [u16; 4]) -> GlyphVertex {
         let [x, y] = self.origin;
         let [w, h] = self.size;
         GlyphVertex {
             rect: [
-                glyph.x + self.bearing[0] * scale,
-                glyph.y + self.bearing[1] * scale,
+                px + self.bearing[0] * scale,
+                py + self.bearing[1] * scale,
                 f32::from(w) * scale,
                 f32::from(h) * scale,
             ],
             uv: [x, y, x + w, y + h],
-            color: glyph.color,
+            color,
             flags_and_layer: GLYPH_MSDF | (self.layer << 8),
             paint: u32::MAX,
         }
     }
+}
+
+fn points(verb: PathVerb) -> [Option<[f32; 2]>; 3] {
+    match verb {
+        PathVerb::Move(x, y) | PathVerb::Line(x, y) => [Some([x, y]), None, None],
+        PathVerb::Quad(x, y, a, b) => [Some([x, y]), Some([a, b]), None],
+        PathVerb::Cubic(x, y, a, b, c, d) => [Some([x, y]), Some([a, b]), Some([c, d])],
+        PathVerb::Close => [None; 3],
+    }
+}
+
+fn bounds(path: &CanvasPath) -> ([f32; 2], [f32; 2]) {
+    let mut min = [f32::INFINITY; 2];
+    let mut max = [f32::NEG_INFINITY; 2];
+    for [x, y] in path
+        .verbs
+        .iter()
+        .flat_map(|verb| points(*verb).into_iter().flatten())
+    {
+        min = [min[0].min(x), min[1].min(y)];
+        max = [max[0].max(x), max[1].max(y)];
+    }
+    (min, max)
+}
+
+fn extent(min: [f32; 2], max: [f32; 2]) -> [f32; 2] {
+    [max[0] - min[0], max[1] - min[1]]
 }
 
 #[expect(
@@ -265,22 +415,10 @@ impl Entry {
     clippy::cast_sign_loss,
     reason = "raster bounds are clamped before conversion"
 )]
-fn rasterize(path: &CanvasPath) -> Option<Bitmap> {
-    let scale = PPEM / REFERENCE_PPEM;
-    let mut min = [f32::INFINITY; 2];
-    let mut max = [f32::NEG_INFINITY; 2];
-    for verb in path.verbs.iter() {
-        let points = match *verb {
-            PathVerb::Move(x, y) | PathVerb::Line(x, y) => [[x, y]; 3],
-            PathVerb::Quad(x, y, x1, y1) => [[x, y], [x1, y1], [x1, y1]],
-            PathVerb::Cubic(x, y, x1, y1, x2, y2) => [[x, y], [x1, y1], [x2, y2]],
-            PathVerb::Close => continue,
-        };
-        for [x, y] in points {
-            min = [min[0].min(x * scale), min[1].min(y * scale)];
-            max = [max[0].max(x * scale), max[1].max(y * scale)];
-        }
-    }
+fn rasterize(path: &CanvasPath, scale: f32) -> Option<Bitmap> {
+    let (min, max) = bounds(path);
+    let min = min.map(|value| value * scale);
+    let max = max.map(|value| value * scale);
     let bearing = min.map(|value| value.floor() - MARGIN);
     let extent = [
         (max[0] - bearing[0]).ceil() + MARGIN,
@@ -343,7 +481,11 @@ fn rasterize(path: &CanvasPath) -> Option<Bitmap> {
     let mut image = image::RgbaImage::new(size[0].into(), size[1].into());
     let shape = Shape::edge_coloring_simple(shape, 0.03, 0).prepare();
     generate_mtsdf(&shape, f64::from(MARGIN * 2.0), &mut image);
-    correct_sign_mtsdf(&mut image, &shape, FillRule::Nonzero);
+    let rule = match path.fill {
+        engine::scene::FillRule::NonZero => FillRule::Nonzero,
+        engine::scene::FillRule::EvenOdd => FillRule::Odd,
+    };
+    correct_sign_mtsdf(&mut image, &shape, rule);
     Some(Bitmap {
         size,
         bearing,

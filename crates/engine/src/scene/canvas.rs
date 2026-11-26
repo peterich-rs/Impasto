@@ -142,6 +142,13 @@ pub enum CanvasOp {
         paint: CanvasPaint,
     },
     /// Solid source-over rectangle in canvas space, optionally with circular corners.
+    /// A reusable vector asset with both canonical and mapped geometry.
+    Vector {
+        path: CanvasPath,
+        asset: CanvasPath,
+        transform: [f32; 6],
+        paint: CanvasPaint,
+    },
     SolidRect {
         bounds: [f32; 4],
         radius: f32,

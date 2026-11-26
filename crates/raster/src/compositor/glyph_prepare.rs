@@ -11,6 +11,7 @@ use std::{
 
 // Bound speculative CPU work and temporary bitmap memory on text-heavy pages.
 const PREFETCH_LIMIT: usize = 2048;
+const VECTOR_PREFETCH_LIMIT: usize = 128;
 
 pub(crate) struct GlyphScene<'scene> {
     pub tree: &'scene LayerTree,
@@ -38,6 +39,7 @@ impl Compositor {
         });
         let mut keys = HashSet::new();
         let mut distance = HashSet::new();
+        let mut vectors = HashMap::new();
         let mut remaining = vec![(scene.tree.root, IDENTITY)];
         'layers: while let Some((id, parent)) = remaining.pop() {
             let Some(layer) = scene.tree.layers.get(id.0 as usize) else {
@@ -74,6 +76,18 @@ impl Compositor {
                         == PictureBounds::Empty
                 }) {
                     continue;
+                }
+                if self.use_msdf && vectors.len() < VECTOR_PREFETCH_LIMIT {
+                    for asset in scope.draws.iter().filter_map(|draw| match draw {
+                        Draw::Mesh(mesh) => mesh.vector.as_ref(),
+                        _ => None,
+                    }) {
+                        let (key, scale) = asset.asset();
+                        vectors.entry(key).or_insert(scale);
+                        if vectors.len() == VECTOR_PREFETCH_LIMIT {
+                            break;
+                        }
+                    }
                 }
                 let transform = GlyphTransform::new(
                     compiler::compose(origin, scope.state.transform),
@@ -121,7 +135,7 @@ impl Compositor {
         pool.install(|| {
             rayon::join(
                 || atlas.prepare(pool, scene.fonts, keys),
-                || msdf.prepare(pool, scene.fonts, distance),
+                || msdf.prepare(pool, scene.fonts, distance, vectors),
             )
         });
     }

@@ -257,6 +257,7 @@ pub struct Mesh {
     pub indices: std::ops::Range<u32>,
     pub stencil_fill: Option<StencilFill>,
     pub fringe: Option<Box<[[f32; 2]]>>,
+    pub(crate) vector: Option<crate::msdf::VectorField>,
     pub bounds: [f32; 4],
     pub brush: Brush,
     pub composite: engine::scene::CanvasComposite,

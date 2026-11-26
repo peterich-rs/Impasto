@@ -231,6 +231,7 @@ pub(crate) enum RecOp {
     },
     Fill {
         path: BezPath,
+        asset_space: bool,
         fill: FillRule,
         paint: PaintSource,
         alpha: f64,
@@ -245,6 +246,7 @@ pub(crate) enum RecOp {
     },
     Stroke {
         path: BezPath,
+        asset_space: bool,
         style: StrokeSnap,
         paint: PaintSource,
         alpha: f64,
@@ -825,6 +827,7 @@ impl<'a> Recorder<'a> {
         let path = self.path.clone();
         self.push_only(RecOp::Fill {
             path,
+            asset_space: false,
             fill: rule,
             paint: self.state.fill.bake(),
             alpha: self.state.alpha,
@@ -838,9 +841,17 @@ impl<'a> Recorder<'a> {
             return Ok(());
         }
         self.charge(path.segments().saturating_mul(32))?;
-        let device = transform_path(&self.state.ctm, path.path());
+        let asset_space = path.svg_asset()
+            && self.state.composite == CanvasComposite::SourceOver
+            && matches!(self.state.fill, LivePaint::Color(_));
+        let path = if asset_space {
+            path.path().clone()
+        } else {
+            transform_path(&self.state.ctm, path.path())
+        };
         self.push_only(RecOp::Fill {
-            path: device,
+            path,
+            asset_space,
             fill: rule,
             paint: self.state.fill.bake(),
             alpha: self.state.alpha,
@@ -854,11 +865,20 @@ impl<'a> Recorder<'a> {
             self.charge(64)?;
             return self.push_only(op);
         }
-        self.stroke_device(self.path.clone())
+        self.record_stroke(self.path.clone(), false)
     }
 
     pub fn stroke_path(&mut self, path: &Path2D) -> Result<(), CanvasError> {
-        self.stroke_device(transform_path(&self.state.ctm, path.path()))
+        let asset_space = path.svg_asset()
+            && self.state.dash.is_empty()
+            && self.state.composite == CanvasComposite::SourceOver
+            && matches!(self.state.stroke, LivePaint::Color(_));
+        let path = if asset_space {
+            path.path().clone()
+        } else {
+            transform_path(&self.state.ctm, path.path())
+        };
+        self.record_stroke(path, asset_space)
     }
 
     pub fn clip(&mut self, rule: FillRule) -> Result<(), CanvasError> {
@@ -923,7 +943,7 @@ impl<'a> Recorder<'a> {
         let Some(path) = self.user_rect(x, y, w, h) else {
             return Ok(());
         };
-        self.stroke_device(transform_path(&self.state.ctm, &path))
+        self.record_stroke(transform_path(&self.state.ctm, &path), false)
     }
 
     pub fn clear_rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> Result<(), CanvasError> {
@@ -1085,6 +1105,7 @@ impl<'a> Recorder<'a> {
         }
         RecOp::Fill {
             path: transform_path(&self.state.ctm, &rect.to_path(0.1)),
+            asset_space: false,
             fill: FillRule::NonZero,
             paint: paint.clone(),
             alpha: self.state.alpha,
@@ -1133,13 +1154,14 @@ impl<'a> Recorder<'a> {
         self.solid_rect(rect, 0.0, &self.state.stroke)
     }
 
-    fn stroke_device(&mut self, path: BezPath) -> Result<(), CanvasError> {
+    fn record_stroke(&mut self, path: BezPath, asset_space: bool) -> Result<(), CanvasError> {
         if path.is_empty() {
             return Ok(());
         }
         self.charge(path.elements().len().saturating_mul(32))?;
         self.push_only(RecOp::Stroke {
             path,
+            asset_space,
             style: self.state.stroke_snap(),
             paint: self.state.stroke.bake(),
             alpha: self.state.alpha,

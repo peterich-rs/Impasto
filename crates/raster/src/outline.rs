@@ -165,6 +165,7 @@ fn upload(gpu: &Gpu, path: &CanvasPath) -> Result<Option<Mesh>, Status> {
         indices: 0..count,
         stencil_fill: None,
         fringe: None,
+        vector: None,
         bounds,
         brush: Brush::Solid([1.0; 4]),
         composite: CanvasComposite::SourceOver,

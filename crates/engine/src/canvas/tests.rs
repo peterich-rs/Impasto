@@ -522,3 +522,30 @@ fn tiny_dash_is_rejected_before_stroke_expansion() {
     };
     assert_eq!(error.code, CanvasErrorCode::LimitExceeded);
 }
+
+#[test]
+fn svg_assets_keep_canonical_fill_and_stroke_under_canvas_transforms() {
+    let budget = Budget::session();
+    let path = Path2D::from_svg("M 1 2 L 18 2 L 18 15 Z");
+    let mut recorder = new_recorder(&budget);
+    ok(recorder.fill_path(&path, FillRule::EvenOdd));
+    ok(recorder.stroke_path(&path));
+    recorder.translate(22.0, 13.0);
+    ok(recorder.fill_path(&path, FillRule::EvenOdd));
+    ok(recorder.stroke_path(&path));
+    let list = finish(recorder, &mut MonoShaper::new());
+    for pair in [[0, 2], [1, 3]] {
+        let [first, second] = pair.map(|index| match &list.ops()[index] {
+            CanvasOp::Vector {
+                path,
+                asset,
+                transform,
+                ..
+            } => (path, asset, transform),
+            other => panic!("expected vector asset, got {other:?}"),
+        });
+        assert_eq!(first.1, second.1);
+        assert_ne!(first.0, second.0);
+        assert_ne!(first.2, second.2);
+    }
+}

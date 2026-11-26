@@ -630,3 +630,82 @@ fn staged_texture_replacements_are_published_only_after_valid_submission() {
 }
 
 mod gpu_extensions;
+
+#[test]
+fn reusable_canvas_path_keeps_even_odd_holes_and_reuses_the_distance_field() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    if std::env::var("IMPASTO_TEXT_MSDF").as_deref() == Ok("0") {
+        return;
+    }
+    let asset = CanvasPath {
+        verbs: Arc::from([
+            PathVerb::Move(0.0, 0.0),
+            PathVerb::Line(20.0, 0.0),
+            PathVerb::Line(20.0, 20.0),
+            PathVerb::Line(0.0, 20.0),
+            PathVerb::Close,
+            PathVerb::Move(6.0, 6.0),
+            PathVerb::Line(14.0, 6.0),
+            PathVerb::Line(14.0, 14.0),
+            PathVerb::Line(6.0, 14.0),
+            PathVerb::Close,
+        ]),
+        fill: FillRule::EvenOdd,
+    };
+    let size = PixelSize::new(64, 64);
+    for (generation, translate, scale) in [(1, 4.0, 1.0), (2, 10.0, 1.5)] {
+        let transform = [scale, 0.0, 0.0, scale, translate, translate];
+        let mapped = CanvasPath {
+            verbs: asset
+                .verbs
+                .iter()
+                .map(|verb| {
+                    let coord = |value| value * scale + translate;
+                    match *verb {
+                        PathVerb::Move(x, y) => PathVerb::Move(coord(x), coord(y)),
+                        PathVerb::Line(x, y) => PathVerb::Line(coord(x), coord(y)),
+                        other => other,
+                    }
+                })
+                .collect(),
+            fill: asset.fill,
+        };
+        let command = Command::Canvas {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 64.0,
+            list: CanvasList {
+                body: Arc::new(CanvasBody {
+                    ops: Box::new([CanvasOp::Vector {
+                        path: mapped,
+                        asset: asset.clone(),
+                        transform,
+                        paint: CanvasPaint {
+                            brush: CanvasBrush::Color([255, 0, 0, 255]),
+                            alpha: 255,
+                            composite: CanvasComposite::SourceOver,
+                        },
+                    }]),
+                    images: Box::new([]),
+                    isolation: CanvasIsolation::Shared,
+                    bytes: 0,
+                }),
+            },
+        };
+        raster
+            .submit_layers(&tree(generation, [command]), 1.0, |_| None)
+            .unwrap();
+        let pixels = raster.render_rgba(size).unwrap();
+        let (solid, hole) = if generation == 1 { (7, 14) } else { (14, 25) };
+        assert_eq!(pixels[(solid * 64 + solid) * 4 + 3], 255);
+        assert_eq!(pixels[(hole * 64 + hole) * 4 + 3], 0);
+        assert_eq!(
+            raster.submit_stats().render.msdf_misses,
+            u32::from(generation == 1)
+        );
+        assert_eq!(raster.submit_stats().render.offscreen_passes, 0);
+    }
+}
