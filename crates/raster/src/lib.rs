@@ -90,7 +90,7 @@ use std::time::{Duration, Instant};
 use engine::scene::{LayerId, LayerKind, LayerTree, PictureId};
 
 use compiler::{Affine, CompileContext, CompiledPicture, IDENTITY, compose, layer_transform};
-use compositor::{Compositor, Scene};
+use compositor::{Compositor, GlyphScene, Scene};
 use gpu::Gpu;
 use profiler::{Capture, GpuProfiler};
 use textures::TextureStore;
@@ -663,17 +663,35 @@ impl Rasterizer {
             #[cfg(target_os = "ios")]
             slices,
         };
-        frame.damage = damage::between(previous, &frame, &textures);
-        stats.damage = frame.damage;
-        stats.image_upload = textures.commit(&device.gpu)?;
+        let gpu = &device.gpu;
+        let install = || {
+            let damage = damage::between(previous, &frame, &textures);
+            let upload = textures.commit(gpu)?;
+            Ok((damage, upload))
+        };
+        let (damage, upload) = if !rebuilt_glyphs.is_empty()
+            && let Some(pool) = prepare::pool()
+        {
+            let compositor = &mut device.compositor;
+            let glyph_scene = GlyphScene {
+                tree: &frame.tree,
+                pictures: &frame.pictures,
+                fonts: &self.fonts,
+                scale: frame.scale,
+            };
+            // Installed picture geometry determines the exact glyph keys.
+            // Its CPU prefetch can overlap damage and texture submission.
+            pool.in_place_scope(|scope| {
+                scope.spawn(|_| compositor.prepare_glyphs(pool, gpu, glyph_scene, &rebuilt_glyphs));
+                install()
+            })
+        } else {
+            install()
+        }?;
+        frame.damage = damage;
+        stats.damage = damage;
+        stats.image_upload = upload;
         device.compositor.evict_images(device.textures.evictions());
-        if !rebuilt_glyphs.is_empty() {
-            device.compositor.prepare_glyphs(
-                &device.gpu,
-                frame.scene(&self.fonts, &device.textures, None),
-                &rebuilt_glyphs,
-            );
-        }
         device.compositor.prune_subtrees(&frame.pictures);
         stats.picture_prepare = started.elapsed();
         stats.layer_count = u32::try_from(frame.tree.layers.len()).unwrap_or(u32::MAX);

@@ -662,4 +662,4 @@ Apple M2 Max、Metal、Release、Headless。表内耗时变化取三轮配对百
 
 缩放文字的编码 p95 中位数由 314 µs 降至 144 µs。五组负载均通过暖帧 buffer、BindGroup 和同步 PSO 创建数为零的检查。单独切换不透明叠层的 Early-Z 时，主 Pass GPU p50 下降 45.1%，p95 下降 67.0%。异构卡片的 GPU p95 在三轮配对中的变化中位数为 +2.7%。混合 Canvas 与模糊矩阵的 GPU p95 分别增加约 12% 和 11%。样本记录在 `.metrics/wave2-metal-ab.json` 与 `.metrics/wave2-depth-ab.json`。
 
-附件计划目前使用物理纹理租约和消费依赖。全图虚拟纹理区间预分配仍待实现。Canvas 资产图标沿用路径绘制，MSDF 图集当前覆盖轮廓字形。Compute 图片上传仍保留 RGBA16Float 与 1×1 尾级 mip，图片编译及字形准备仍有各自的完成点。Pixel 9 与 iPhone 真机的高刷帧步调须单独采集。
+附件计划目前使用物理纹理租约和消费依赖。全图虚拟纹理区间预分配仍待实现。Canvas 资产图标沿用路径绘制，MSDF 图集当前覆盖轮廓字形。Compute 图片上传在支持 sRGB 视图的设备上使用每像素 4 字节的存储，保留 1×1 尾级 mip 供极小缩略图采样。字形准备在 Picture 生成后与损伤计算和图片提交并行。Pixel 9 与 iPhone 真机的高刷帧步调须单独采集。

@@ -1,24 +1,32 @@
 //! Finds the exact glyph variants for new pictures before the next present.
 
-use super::{Compositor, GlyphTransform, Scene};
-use crate::compiler::{self, Draw, IDENTITY, PictureBounds};
+use super::{Compositor, GlyphTransform};
+use crate::compiler::{self, CompiledPicture, Draw, IDENTITY, PictureBounds};
 use crate::gpu::Gpu;
-use engine::scene::{LayerKind, PictureId};
-use std::collections::HashSet;
+use engine::scene::{LayerKind, LayerTree, PictureId};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 // Bound speculative CPU work and temporary bitmap memory on text-heavy pages.
 const PREFETCH_LIMIT: usize = 2048;
 
+pub(crate) struct GlyphScene<'scene> {
+    pub tree: &'scene LayerTree,
+    pub pictures: &'scene HashMap<PictureId, Arc<CompiledPicture>>,
+    pub fonts: &'scene crate::FontLibrary,
+    pub scale: f32,
+}
+
 impl Compositor {
     pub(crate) fn prepare_glyphs(
         &mut self,
+        pool: &rayon::ThreadPool,
         gpu: &Gpu,
-        scene: Scene<'_>,
+        scene: GlyphScene<'_>,
         rebuilt: &HashSet<PictureId>,
     ) {
-        let Some(pool) = crate::prepare::pool() else {
-            return;
-        };
         self.atlas.clear_prepared();
         let viewport = self.last_viewport.map(|[width, height]| {
             [

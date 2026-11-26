@@ -44,6 +44,7 @@ use crate::resident::ResidentPictures;
 use crate::{FontLibrary, Status, textures::TextureStore};
 use canvas_pass::CanvasPass;
 use depth::DepthPass;
+pub(crate) use glyph_prepare::GlyphScene;
 use retained::RetainedRoot;
 use subtree_cache::{CacheCandidate, CacheSlot, MIN_RESAMPLED_BLUR, SubtreeCache};
 
