@@ -2,7 +2,6 @@
 use std::{fs, path::Path};
 
 use anyhow::{Context, Result, bail};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::json;
 
 pub(crate) fn module(assets: &Path, path: &Path) -> Result<Option<String>> {
@@ -10,14 +9,17 @@ pub(crate) fn module(assets: &Path, path: &Path) -> Result<Option<String>> {
         return Ok(None);
     };
     match extension {
-        "png" | "jpg" | "jpeg" | "webp" => image(assets, path).map(Some),
-        "ttf" | "otf" => font(path).map(Some),
+        "png" | "jpg" | "jpeg" | "webp" => Ok(Some(format!(
+            "export default /* @__PURE__ */ Object.freeze({});",
+            image(assets, path)?
+        ))),
+        "ttf" | "otf" => font(assets, path).map(Some),
         "svg" => crate::svg::compile(path).map(Some),
         _ => Ok(None),
     }
 }
 
-fn image(assets: &Path, path: &Path) -> Result<String> {
+pub(crate) fn image(assets: &Path, path: &Path) -> Result<serde_json::Value> {
     let asset_root = assets
         .canonicalize()
         .with_context(|| format!("{}: put imported images under assets/", path.display()))?;
@@ -50,16 +52,23 @@ fn image(assets: &Path, path: &Path) -> Result<String> {
         }
     }
     let uri = format!("asset:{}", relative.to_string_lossy().replace('\\', "/"));
-    Ok(format!(
-        "export default {};",
-        json!({
-            "uri": uri, "width": size.width, "height": size.height, "scales": scales,
-        })
-    ))
+    Ok(json!({
+        "uri": uri, "width": size.width, "height": size.height, "scales": scales,
+    }))
 }
 
-fn font(path: &Path) -> Result<String> {
-    let bytes = fs::read(path)?;
+fn font(assets: &Path, path: &Path) -> Result<String> {
+    let outside = || format!("{}: put imported fonts under assets/", path.display());
+    let assets = assets.canonicalize().with_context(outside)?;
+    let path = path.canonicalize()?;
+    let relative = path.strip_prefix(&assets).with_context(outside)?;
+    if fs::metadata(&path)?.len() > engine::text::MAX_APP_FONT_BYTES as u64 {
+        bail!("{}: font exceeds the runtime size limit", path.display());
+    }
+    let bytes = fs::read(&path)?;
+    if bytes.len() > engine::text::MAX_APP_FONT_BYTES {
+        bail!("{}: font exceeds the runtime size limit", path.display());
+    }
     let face = ttf_parser::Face::parse(&bytes, 0)
         .with_context(|| format!("invalid font {}", path.display()))?;
     let family = face
@@ -72,29 +81,10 @@ fn font(path: &Path) -> Result<String> {
         .find_map(|name| name.to_string())
         .with_context(|| format!("{}: font has no Unicode family name", path.display()))?;
     let descriptor = json!({"family": family, "weight": face.weight().to_number()});
-    let payload = STANDARD.encode(bytes);
-    let data = serde_json::to_string(&payload)?;
-    let family = serde_json::to_string(&family)?;
-    // Decode a known build-time base64 string. The runtime module deliberately
-    // keeps browser-only globals out of application code.
+    let uri = format!("asset:{}", relative.to_string_lossy().replace('\\', "/"));
     Ok(format!(
-        r#"
-import {{ scene }} from "scene";
-const source = {data};
-const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-const size = source.length / 4 * 3 - (source.endsWith("==") ? 2 : source.endsWith("=") ? 1 : 0);
-const bytes = new Uint8Array(size);
-for (let i = 0, out = 0; i < source.length; i += 4) {{
-  const bits = (alphabet.indexOf(source[i]) << 18) |
-    (alphabet.indexOf(source[i + 1]) << 12) |
-    (Math.max(alphabet.indexOf(source[i + 2]), 0) << 6) |
-    Math.max(alphabet.indexOf(source[i + 3]), 0);
-  bytes[out++] = bits >> 16;
-  if (out < size) bytes[out++] = bits >> 8;
-  if (out < size) bytes[out++] = bits;
-}}
-scene.registerFont({family}, bytes);
-export default {descriptor};
-"#
+        "import {{ scene }} from 'scene'; scene.registerFontAsset({}, {}); export default {descriptor};",
+        serde_json::to_string(&family)?,
+        serde_json::to_string(&uri)?,
     ))
 }

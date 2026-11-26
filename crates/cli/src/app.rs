@@ -18,6 +18,10 @@ struct Manifest {
     macos: MacConfig,
     #[serde(default, rename = "dependencies")]
     _dependencies: BTreeMap<String, toml::Value>,
+    #[serde(default, rename = "theme")]
+    _theme: toml::Table,
+    #[serde(default, rename = "i18n")]
+    _i18n: toml::Table,
 }
 
 #[derive(Default, Deserialize)]
@@ -143,6 +147,7 @@ pub struct App {
     pub macos: MacConfig,
     pub native: Option<crate::plugins::Local>,
     pub plugins: BTreeMap<String, crate::plugins::Dependency>,
+    pub sources: BTreeMap<String, PathBuf>,
 }
 impl App {
     pub fn current() -> Result<Self> {
@@ -158,20 +163,25 @@ impl App {
         bail!("当前目录没有 app.toml");
     }
     pub(crate) fn for_plugin(root: PathBuf) -> Result<Self> {
+        let root = root.canonicalize()?;
         let (native, targets) = crate::plugins::plugin_crate(&root)?;
-        let plugins = crate::plugins::discover(&root)?;
+        let discovered = crate::plugins::discover(&root, None)?;
+        let package: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("package.json"))?)?;
+        let entry = root.join(package["exports"]["."].as_str().context("插件缺少主导出")?);
         Ok(Self {
             root,
             name: String::new(),
             version: impasto::VERSION.to_owned(),
             targets,
-            entry: PathBuf::new(),
+            entry,
             gallery: false,
             android: AndroidConfig::default(),
             ios: IosConfig::default(),
             macos: MacConfig::default(),
             native: Some(native),
-            plugins,
+            plugins: discovered.plugins,
+            sources: discovered.sources,
         })
     }
 
@@ -206,7 +216,7 @@ impl App {
         if !entry.is_file() {
             bail!("缺少 {}", entry.display());
         }
-        let plugins = crate::plugins::discover(&root)?;
+        let discovered = crate::plugins::discover(&root, None)?;
         let native = root
             .join("rust/Cargo.toml")
             .is_file()
@@ -224,7 +234,8 @@ impl App {
             ios: manifest.ios,
             macos: manifest.macos,
             native,
-            plugins,
+            plugins: discovered.plugins,
+            sources: discovered.sources,
         })
     }
     pub fn require(&self, target: &str) -> Result<()> {

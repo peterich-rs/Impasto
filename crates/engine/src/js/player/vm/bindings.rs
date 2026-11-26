@@ -90,6 +90,7 @@ const CORE_NAMES: &[&str] = &[
     "debugSetScan",
     "debugSetPointerTrace",
     "debugSetOwned",
+    "debugSetSource",
     "debugMemory",
     "settings",
     "onSettings",
@@ -424,6 +425,7 @@ fn native<'js>(
                     id,
                     source,
                     intrinsic,
+                    required: Option::<bool>::from_js(ctx, value(ctx, args, 4))?,
                 },
             )?;
         }
@@ -826,6 +828,29 @@ fn native<'js>(
                 Some(text) => text.into_js(ctx),
                 None => Ok(Value::new_null(ctx.clone())),
             };
+        }
+        "debugSetSource" => {
+            let id = node_id(ctx, args, 0)?;
+            let path = string(ctx, args, 1)?;
+            let line = u32::from_js(ctx, value(ctx, args, 2))?;
+            let column = u32::from_js(ctx, value(ctx, args, 3))?;
+            let component = string(ctx, args, 4)?;
+            if path.len() > 4096 || component.len() > 1024 || line == 0 || column == 0 {
+                return Err(type_error(ctx, "invalid source location"));
+            }
+            host.inner()
+                .tree
+                .borrow_mut()
+                .set_debug_source(
+                    id,
+                    crate::tree::SourceLocation {
+                        path,
+                        line,
+                        column,
+                        component,
+                    },
+                )
+                .map_err(|_| type_error(ctx, "invalid source node"))?;
         }
         "debugSetScan" | "debugSetPointerTrace" | "debugSetOwned" => {
             let a = boolean(ctx, args, 0)?;

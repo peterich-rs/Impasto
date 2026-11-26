@@ -98,8 +98,20 @@ impl Host {
     fn stash(&self, ctx: &Ctx<'_>, error: rquickjs::Error) {
         self.runtime.extension().stash(ctx, error);
     }
-    fn record_fault(&self, source: &'static str) -> String {
-        let diagnostic = self.runtime.extension().diagnostic();
+    fn record_fault(&self, source: &'static str, ctx: Option<&Ctx<'_>>) -> String {
+        let mut diagnostic = self.runtime.extension().diagnostic();
+        if let Some(ctx) = ctx
+            && let Ok(Some(hot)) = ctx.globals().get::<_, Option<Object>>("__impasto_hot")
+            && let Ok(symbolize) = hot.get::<_, Function>("symbolize")
+        {
+            match symbolize.call::<_, String>((diagnostic.stack.as_str(),)) {
+                Ok(stack) => diagnostic.stack = stack,
+                Err(error) if error.is_exception() => {
+                    let _ = ctx.catch();
+                }
+                Err(_) => {}
+            }
+        }
         let display = super::display_fault(&diagnostic.message, &diagnostic.stack);
         self.inner
             .faults
@@ -113,7 +125,7 @@ impl Host {
     }
 
     fn report(&self, source: &'static str) {
-        (self.inner.log)(3, &self.record_fault(source));
+        (self.inner.log)(3, &self.record_fault(source, None));
     }
 
     fn finish<T>(
@@ -127,7 +139,7 @@ impl Host {
 
     fn stash_fault(&self, ctx: &Ctx<'_>, source: &'static str, error: rquickjs::Error) -> String {
         self.stash(ctx, error);
-        self.record_fault(source)
+        self.record_fault(source, Some(ctx))
     }
 
     fn call<'js>(
@@ -481,7 +493,8 @@ impl JsVm {
                 let _budget = self.host.budget("eval", 0);
                 let promise = self
                     .host
-                    .with(|ctx| bytecode.load(&ctx))
+                    .runtime
+                    .load_trusted(bytecode)
                     .map_err(compiler::map_bytecode)?;
                 self.host.drain()?;
                 if let Some(promise) = promise {

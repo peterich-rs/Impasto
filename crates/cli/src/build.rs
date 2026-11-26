@@ -32,7 +32,11 @@ pub fn build(
     ios_simulator: bool,
     export_options: Option<&Path>,
     installed_manifest: Option<&Path>,
+    size_request: crate::size::Request<'_>,
 ) -> Result<()> {
+    if size_request.enabled() && target != "bundle" {
+        bail!("--analyze-size 仅适用于 build bundle");
+    }
     if platform.is_some() && target != "bundle" {
         bail!("--platform 仅适用于 build bundle");
     }
@@ -63,27 +67,37 @@ pub fn build(
                     .join("bundle")
                     .join(profile(&options));
             }
+            let manifest = native.as_ref().map(NativeBuild::linker_manifest);
+            let linked = link_source(&app.root, &app.entry, &options, manifest.clone(), None)?;
             if let Some(installed) = installed_manifest {
-                let target = descriptor_target.context("更新包需要目标平台")?;
-                // Release and development updates use the same compatibility check.
-                let native = native.as_ref().context("缺少当前目标的原生契约")?;
-                let linked = link_source(
-                    &app.root,
-                    &app.entry,
-                    &options,
-                    Some(native.linker_manifest()),
-                    None,
-                )?;
-                native.validate_update(&fs::read(installed)?, &linked)?;
-                write_bundle(
-                    &options,
-                    Some(target),
-                    &directory,
-                    owned_exports(native.linker_manifest()),
-                    linked,
-                )?;
+                native
+                    .as_ref()
+                    .context("缺少当前目标的原生契约")?
+                    .validate_update(&fs::read(installed)?, &linked)?;
+            }
+            let contract = native
+                .as_ref()
+                .map(|native| native.snapshot_for(&linked))
+                .transpose()?;
+            let exports = manifest.map_or_else(Vec::new, owned_exports);
+            let output_platform = if installed_manifest.is_some() {
+                descriptor_target
             } else {
-                bundle_in(&app, &options, platform, &directory, native.as_ref())?;
+                platform
+            };
+            write_bundle(
+                &options,
+                output_platform,
+                &directory,
+                exports,
+                linked,
+                size_request.enabled().then_some(crate::size::Output {
+                    request: size_request,
+                    app: &app.root,
+                }),
+            )?;
+            if let Some(contract) = contract {
+                fs::write(directory.join("plugins-manifest.json"), contract)?;
             }
         }
         "apk" => {
@@ -117,9 +131,6 @@ pub fn build(
             println!("{}", ipa.display());
         }
         "ios-xcframework" => {
-            if plugins::configured(&app) {
-                bail!("build ios-xcframework 暂不支持带 Rust 插件的应用");
-            }
             let sdk = crate::ios::xcframework(&app, &options)?;
             println!("{}", sdk.display());
         }
@@ -182,46 +193,10 @@ pub(crate) fn bundle_for_host(
         native.prune(app, &linked)?;
     }
     let exports = owned_exports(native.linker_manifest());
-    let output = write_bundle(options, Some(target), directory, exports, linked)?;
-    fs::write(directory.join("plugins-manifest.json"), native.snapshot()?)?;
+    let contract = native.snapshot_for(&linked)?;
+    let output = write_bundle(options, Some(target), directory, exports, linked, None)?;
+    fs::write(directory.join("plugins-manifest.json"), contract)?;
     Ok(output)
-}
-
-pub(crate) fn bundle_in(
-    app: &App,
-    options: &BuildOptions,
-    target: Option<&str>,
-    directory: &Path,
-    native: Option<&NativeBuild>,
-) -> Result<PathBuf> {
-    pack_bundle(
-        app,
-        options,
-        target,
-        directory,
-        native.map(NativeBuild::linker_manifest),
-    )
-}
-
-fn pack_bundle(
-    app: &App,
-    options: &BuildOptions,
-    target: Option<&str>,
-    directory: &Path,
-    manifest: Option<bundler::PluginManifest>,
-) -> Result<PathBuf> {
-    let exports = manifest
-        .iter()
-        .flat_map(bundler::PluginManifest::exports)
-        .map(|(module, names)| {
-            (
-                module.to_owned(),
-                names.into_iter().map(str::to_owned).collect::<Vec<_>>(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let linked = link_source(&app.root, &app.entry, options, manifest, None)?;
-    write_bundle(options, target, directory, exports, linked)
 }
 
 fn write_bundle(
@@ -230,13 +205,15 @@ fn write_bundle(
     directory: &Path,
     exports: Vec<(String, Vec<String>)>,
     linked: bundler::Bundle,
+    report: Option<crate::size::Output<'_>>,
 ) -> Result<PathBuf> {
     fs::create_dir_all(directory)?;
     let esm = directory.join("app.js");
     let bytecode = directory.join("app.bin");
     let map = directory.join("app.js.map");
+    let mut sizes = std::collections::BTreeMap::new();
     let output = if options.debug {
-        fs::write(&esm, linked.code)?;
+        fs::write(&esm, &linked.code)?;
         remove_file_if_exists(&bytecode)?;
         esm
     } else {
@@ -257,31 +234,54 @@ fn write_bundle(
             .iter()
             .map(|(module, names)| (*module, names.as_slice()))
             .collect::<Vec<_>>();
-        let bytes = engine::js::compile_with_native_exports(
-            &linked.code,
-            "app.js",
-            true,
-            registry,
-            &exports,
-        )?;
-        fs::write(&bytecode, bytes)?;
+        let bytes = if linked.chunks.is_empty() {
+            engine::js::compile_with_native_exports(
+                &linked.code,
+                "app.js",
+                true,
+                registry,
+                &exports,
+            )?
+        } else {
+            let sources = std::iter::once(("app.js".to_owned(), linked.code.clone()))
+                .chain(
+                    linked
+                        .chunks
+                        .iter()
+                        .map(|(name, chunk)| (name.clone(), chunk.code.clone())),
+                )
+                .collect();
+            engine::js::compile_archive("app.js", sources, registry, &exports)?
+        };
+        if report.is_some() {
+            sizes.clone_from(bytes.module_sizes());
+        }
+        fs::write(&bytecode, &bytes)?;
         remove_file_if_exists(&esm)?;
         bytecode
     };
     if !options.debug
         && let Some(source_map) = &linked.source_map
     {
-        crate::symbols::write(&directory.join("app.sym"), source_map)?;
+        if linked.chunks.is_empty() {
+            crate::symbols::write(&directory.join("app.sym"), source_map)?;
+        } else {
+            crate::symbols::write_chunks(&directory.join("app.sym"), source_map, &linked.chunks)?;
+        }
     } else {
         remove_file_if_exists(&directory.join("app.sym"))?;
     }
     if let Some(source_map) = linked
         .source_map
+        .as_ref()
         .filter(|_| options.debug || matches!(target, Some("android" | "ios")))
     {
         fs::write(map, source_map)?;
     } else {
         remove_file_if_exists(&map)?;
+    }
+    if let Some(report) = report {
+        crate::size::write(report, &output, &linked, &sizes)?;
     }
     Ok(output)
 }
@@ -301,6 +301,17 @@ pub(crate) fn link_source(
     plugins: Option<bundler::PluginManifest>,
     freeze_stock: Option<&str>,
 ) -> Result<bundler::Bundle> {
+    link_source_mode(root, entry, options, plugins, freeze_stock, !options.debug)
+}
+
+fn link_source_mode(
+    root: &Path,
+    entry: &Path,
+    options: &BuildOptions,
+    plugins: Option<bundler::PluginManifest>,
+    freeze_stock: Option<&str>,
+    split: bool,
+) -> Result<bundler::Bundle> {
     let framework = toolchain::framework()?;
     let mut defines = std::collections::BTreeMap::new();
     if let Some(mode) = freeze_stock {
@@ -317,6 +328,7 @@ pub(crate) fn link_source(
         entry: entry.to_path_buf(),
         framework,
         release: !options.debug,
+        split,
         hot: options.hot.is_some(),
         plugins,
         defines,
@@ -340,7 +352,7 @@ pub(crate) fn pack(
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let entry = cwd.join(entry);
-    let linked = link_source(&cwd, &entry, options, None, freeze_stock)?;
+    let linked = link_source_mode(&cwd, &entry, options, None, freeze_stock, false)?;
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)?;
     }

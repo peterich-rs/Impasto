@@ -10,15 +10,15 @@ mod metrics;
 mod modules;
 
 pub use input::*;
-pub use io::document_relative;
+pub use io::{document_relative, read_asset_bytes};
 pub use metrics::*;
 
 pub use javascript::host::{IoEvent, PluginResult, PluginValue, module_not_linked};
 pub use modules::{
-    CancelToken, EventType, HostFuture, ImmediateExec, Invoke, Method, MethodExec, MethodTypes,
-    Module, ModuleConfig, ModuleExports, ModuleRegistry, NativeExtension, NativeResource,
-    PromiseFn, ScriptExecution, Settle, Shared, StreamSendError, StreamSink, SyncFn, Work, shared,
-    shared_read, shared_write,
+    AssetReader, CancelToken, EventType, HostFuture, ImmediateExec, Invoke, Method, MethodExec,
+    MethodTypes, Module, ModuleConfig, ModuleExports, ModuleRegistry, NativeExtension,
+    NativeResource, PromiseFn, ScriptExecution, Settle, Shared, StreamSendError, StreamSink,
+    SyncFn, Work, shared, shared_read, shared_write,
 };
 
 /// A low-frequency snapshot of script runtime resources.
@@ -271,6 +271,10 @@ pub trait Session {
     }
     /// Absolute monotonic milliseconds of the next timer, if one is armed.
     fn next_wake_ms(&mut self) -> Option<f64> {
+        None
+    }
+    /// A bounded scene snapshot for the host's developer inspector.
+    fn inspector_snapshot(&self) -> Option<String> {
         None
     }
     /// The URL that opened this process, if the host has one.

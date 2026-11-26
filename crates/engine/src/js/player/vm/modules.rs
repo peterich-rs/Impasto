@@ -54,10 +54,14 @@ const SCENE_ADAPTER_NAMES: &[&str] = &[
     "setProp",
     "defineStyle",
     "applyStaticStyle",
+    "patchInlineStyle",
+    "patchScalarStyle",
     "defineClass",
     "applyStaticClass",
+    "applyStaticClassList",
     "defineTemplate",
     "instantiateTemplate",
+    "compileHotFactory",
     "insertNode",
     "effect",
     "memo",
@@ -117,10 +121,14 @@ impl ModuleDef for SceneModule {
                     | "setProp"
                     | "defineStyle"
                     | "applyStaticStyle"
+                    | "patchInlineStyle"
+                    | "patchScalarStyle"
                     | "defineClass"
                     | "applyStaticClass"
+                    | "applyStaticClassList"
                     | "defineTemplate"
                     | "instantiateTemplate"
+                    | "compileHotFactory"
                     | "insertNode"
                     | "effect"
                     | "memo"

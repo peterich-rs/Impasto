@@ -229,14 +229,14 @@ impl Host {
         self.reactive_failed.set(false);
         self.with(|_| self.inner().graph.run_updates(reactive::JsEval));
         if self.reactive_failed.get() {
-            Err(self.record_fault("reactive"))
+            Err(self.record_fault("reactive", None))
         } else {
             Ok(())
         }
     }
 
     pub(in crate::js::player) fn drain_jobs(&self) -> Result<(), String> {
-        self.drain().map_err(|_| self.record_fault("jobs"))
+        self.drain().map_err(|_| self.record_fault("jobs", None))
     }
 
     pub(in crate::js::player) fn jobs_pending(&self) -> bool {
@@ -430,7 +430,7 @@ impl Host {
             self.runtime
                 .extension()
                 .record_error(error.message, String::new());
-            result = Err(self.record_fault("timer"));
+            result = Err(self.record_fault("timer", None));
         }
         if self.runtime.due_timer_next_turn() {
             self.wants_frame.set(true);

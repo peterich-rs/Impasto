@@ -314,6 +314,10 @@ pub struct TelemetryHub {
     metrics: Mutex<engine::session::Metrics>,
     /// Overflow report JSON from the last frame that scanned, or `"[]"`.
     layout_report: Mutex<String>,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    inspector_enabled: AtomicBool,
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    inspector: Mutex<Option<(std::time::Instant, Arc<str>)>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -346,7 +350,42 @@ impl TelemetryHub {
             flags: Mutex::new(DevtoolsFlags::default()),
             metrics: Mutex::new(engine::session::Metrics::new(0.0, 0.0, 1.0)),
             layout_report: Mutex::new("[]".to_owned()),
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            inspector_enabled: AtomicBool::new(false),
+            #[cfg(any(debug_assertions, feature = "devtools-server"))]
+            inspector: Mutex::new(None),
         }
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn enable_inspector(&self) {
+        self.inspector_enabled.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn refresh_inspector(
+        &self,
+        settled: bool,
+        snapshot: impl FnOnce() -> Option<String>,
+    ) {
+        if !self.inspector_enabled.load(Ordering::Relaxed)
+            || (!settled
+                && lock(&self.inspector)
+                    .as_ref()
+                    .is_some_and(|(updated, _)| updated.elapsed() < Duration::from_millis(200)))
+        {
+            return;
+        }
+        if let Some(snapshot) = snapshot() {
+            *lock(&self.inspector) = Some((std::time::Instant::now(), snapshot.into()));
+        }
+    }
+
+    #[cfg(any(debug_assertions, feature = "devtools-server"))]
+    pub(crate) fn inspector(&self) -> Option<Arc<str>> {
+        lock(&self.inspector)
+            .as_ref()
+            .map(|(_, snapshot)| Arc::clone(snapshot))
     }
 
     pub fn note_metrics(&self, metrics: engine::session::Metrics) {
@@ -879,6 +918,15 @@ mod tests {
         assert_eq!(updated[0].seq, 1);
         assert_eq!(updated[0].number, 42);
         assert_eq!(updated[0].gpu.status, GpuTimingStatus::StaleDevice);
+    }
+
+    #[test]
+    fn settled_inspector_frames_replace_a_recent_snapshot() {
+        let hub = DiagnosticsHub::new();
+        hub.enable_inspector();
+        hub.refresh_inspector(false, || Some("initial".to_owned()));
+        hub.refresh_inspector(true, || Some("settled".to_owned()));
+        assert_eq!(hub.inspector().as_deref(), Some("settled"));
     }
 
     #[test]

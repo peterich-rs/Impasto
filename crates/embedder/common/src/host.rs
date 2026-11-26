@@ -1116,6 +1116,10 @@ fn open_ui(
             let clock = Arc::clone(&runners.ui);
             move || crate::timing::ms_i64(clock.monotonic_ms())
         })),
+        asset_reader: Some(Arc::new({
+            let decoder = Arc::clone(&boot.decoder);
+            move |relative, limit| decoder.read_packaged_asset(relative, limit)
+        })),
         script_execution: if boot.thread_topology == ThreadTopology::PlatformUi {
             engine::session::ScriptExecution::PlatformUi
         } else {
@@ -1602,6 +1606,10 @@ fn on_frame(
         };
         match framed {
             Ok(mut output) => {
+                #[cfg(any(debug_assertions, feature = "devtools-server"))]
+                if let Some(hub) = runtime.telemetry.as_ref() {
+                    hub.refresh_inspector(!output.again, || session.inspector_snapshot());
+                }
                 if counters && runtime.frame_number.is_multiple_of(30) {
                     runtime_sample = session.runtime_sample();
                 }

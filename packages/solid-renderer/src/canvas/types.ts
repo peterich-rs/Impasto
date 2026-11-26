@@ -30,6 +30,17 @@ export interface CanvasSize {
   readonly reduceMotion: boolean;
 }
 
+export interface VectorIconDrawOptions {
+  color?: string | readonly [number, number, number, number];
+  opacity?: number;
+}
+
+export interface VectorAsset {
+  readonly width: number;
+  readonly height: number;
+  draw(context: CanvasRenderingContext2D, options?: VectorIconDrawOptions): void;
+}
+
 export interface CanvasError {
   name: "CanvasError";
   code: string;

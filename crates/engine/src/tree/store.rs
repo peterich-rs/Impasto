@@ -495,6 +495,142 @@ impl Tree {
         Ok(InsertPlan::Place { before })
     }
 
+    /// Batch a range within one parent. Cross-parent moves use the general insertion path.
+    #[cfg(feature = "js")]
+    pub(crate) fn reconcile_range(
+        &mut self,
+        parent: NodeId,
+        previous: &[NodeId],
+        next: &[NodeId],
+        before: Option<NodeId>,
+    ) -> Result<Vec<Gesture>, Error> {
+        use std::collections::HashSet;
+
+        let retained = next.iter().copied().collect::<HashSet<_>>();
+        let mut attached = Vec::new();
+        let mut fallback =
+            retained.len() != next.len() || before.is_some_and(|anchor| retained.contains(&anchor));
+        for &child in next {
+            match self.node(child)?.parent {
+                None => attached.push(child),
+                Some(owner) => fallback |= owner != parent,
+            }
+        }
+        let mut removed = Vec::new();
+        let mut removed_set = HashSet::new();
+        for &child in previous {
+            if !retained.contains(&child)
+                && self.node(child)?.parent == Some(parent)
+                && removed_set.insert(child)
+            {
+                removed.push(child);
+            }
+        }
+        if fallback || before.is_some_and(|anchor| removed_set.contains(&anchor)) {
+            let mut gestures = Vec::new();
+            for child in removed {
+                gestures.extend(self.remove(parent, child)?);
+            }
+            let mut anchor = before;
+            for &child in next.iter().rev() {
+                if self.parent(child)? != Some(parent) || self.next_sibling(child)? != anchor {
+                    self.insert(parent, child, anchor)?;
+                }
+                anchor = Some(child);
+            }
+            return Ok(gestures);
+        }
+        if !can_parent(self.node(parent)?.kind) {
+            return Err(Error::NotAParent);
+        }
+        if let Some(anchor) = before
+            && self.node(anchor)?.parent != Some(parent)
+        {
+            return Err(Error::NotAChild);
+        }
+        for &child in &attached {
+            if self.is_under(parent, child)? {
+                return Err(Error::NotAChild);
+            }
+        }
+        let mut desired = Vec::new();
+        let mut existing = Vec::new();
+        let mut cursor = self.first_child(parent)?;
+        while let Some(child) = cursor {
+            if Some(child) == before {
+                desired.extend_from_slice(next);
+            }
+            if !retained.contains(&child) && !removed_set.contains(&child) {
+                desired.push(child);
+            }
+            existing.push(child);
+            cursor = self.next_sibling(child)?;
+        }
+        if before.is_none() {
+            desired.extend_from_slice(next);
+        }
+        if desired == existing {
+            return Ok(Vec::new());
+        }
+        let previous_root = self.root;
+        self.revive(parent)?;
+        for &child in &attached {
+            self.revive(child)?;
+            self.pin_stack_child(parent, child)?;
+        }
+        let layout_id = |id| self.node(id)?.taffy.ok_or(Error::UnknownNode);
+        let parent_layout = layout_id(parent)?;
+        let children_layout = desired
+            .iter()
+            .copied()
+            .map(layout_id)
+            .collect::<Result<Vec<_>, _>>()?;
+        let removed_layout = removed
+            .iter()
+            .copied()
+            .map(layout_id)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.taffy
+            .reconcile_children(parent_layout, children_layout, &removed_layout)?;
+
+        let mut gestures = Vec::new();
+        for child in removed {
+            self.drop_scopes_under(child);
+            self.detach_links(child)?;
+            gestures.extend(self.blur_contained(child));
+            self.drop_routes_in(child);
+            self.pending_discard.push(child);
+        }
+        let node = self.node_mut(parent)?;
+        node.first_child = desired.first().copied();
+        node.last_child = desired.last().copied();
+        let mut prev = None;
+        for (index, &child) in desired.iter().enumerate() {
+            let node = self.node_mut(child)?;
+            node.parent = Some(parent);
+            node.prev = prev;
+            node.next = desired.get(index + 1).copied();
+            prev = Some(child);
+        }
+        for child in attached {
+            if self.root == Some(child) {
+                self.root = None;
+            }
+            self.node_mut(child)?.flags.insert(NodeFlags::LAYOUT_DIRTY);
+            self.note_text_tree(child);
+        }
+        self.invalidate_subtree_layers(parent);
+        self.mark_layout_from(parent);
+        self.promote(parent);
+        if previous_root != self.root {
+            self.laid_out = false;
+        }
+        self.mark_structure();
+        self.pending_discard.retain(|id| !retained.contains(id));
+        gestures.extend(self.drain_pending());
+        Ok(gestures)
+    }
+
     /// Detaches `child` from `parent` and queues it for [`Tree::discard_detached`].
     ///
     /// Taffy nodes, paint paragraphs, and picture cache entries stay with the
@@ -685,6 +821,7 @@ impl Tree {
 
     /// Drops whatever occupies `index` and recycles it until the generation cap.
     pub(super) fn retire(&mut self, index: u32) {
+        self.debug.sources.remove(&index);
         if let Some(slot) = self.slots.get_mut(index as usize)
             && let Some(node) = slot.node.as_mut()
             && let Some(text) = node.text_mut()

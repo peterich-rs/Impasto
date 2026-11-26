@@ -1247,6 +1247,7 @@ fn test_host_with_launch_url(url: Option<String>) -> (ModuleConfig, PluginComple
         }) as Arc<dyn Fn(u64) -> session::Settle + Send + Sync>
     };
     let config = ModuleConfig {
+        asset_reader: None,
         registry: Arc::new(ModuleRegistry::new(vec![
             Module {
                 name: "Clipboard",
@@ -1607,6 +1608,7 @@ fn wait_for_text(
 /// panel does not change the page the assertions read.
 fn gallery_host() -> ModuleConfig {
     ModuleConfig {
+        asset_reader: None,
         registry: std::sync::Arc::new(ModuleRegistry::new(vec![
             Module {
                 name: "AsyncStorage",

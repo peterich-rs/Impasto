@@ -38,6 +38,12 @@
   tr[data-late] td:last-child { color: light-dark(#a23513, #ff9a7a); }
   td button { padding: 1px 5px; }
   #playground { margin-block: 24px; }
+  #bundle-size { margin-block: 24px; }
+  #bundleMap { position: relative; height: clamp(240px, 40vh, 440px); }
+  .bundle-tile { position: absolute; box-sizing: border-box; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; border: 1px solid Canvas; color: CanvasText; font-size: 12px;
+    background: color-mix(in srgb, var(--tile, #74a4c9) 55%, Canvas); text-align: left; }
+  .bundle-tile:focus-visible { outline: 2px solid Highlight; outline-offset: -2px; z-index: 1; }
   #playground label { margin-block: 8px; }
   #tsx, #compiled { font: 13px/1.5 ui-monospace, monospace; }
   #tsx { box-sizing: border-box; width: 100%; resize: vertical; }
@@ -92,6 +98,17 @@
     </div>
   </section>
 </main>
+<section aria-label="Scene Inspector">
+  <h2>Scene Inspector</h2>
+  <button id="refreshScene" disabled>Refresh tree</button>
+  <ul id="sceneNodes"></ul>
+</section>
+<details id="bundle-size">
+  <summary>Bundle size</summary>
+  <label>Size report <input id="sizeReport" type="file" accept=".json,application/json"></label>
+  <p id="bundleInfo" role="status"></p>
+  <div id="bundleMap" hidden aria-label="Module size treemap"></div>
+</details>
 <section id="playground" hidden aria-label="TSX Playground">
   <h2>TSX Playground</h2>
   <main>
@@ -154,12 +171,109 @@ let archive;
 let archivedFrames = new Map();
 let selectionRequest = 0;
 const display = (value, digits = 2) => value == null ? "—" : value.toFixed(digits);
+const bytes = value => new Intl.NumberFormat(undefined).format(value) + " bytes";
+field("sizeReport").addEventListener("change", async (event) => {
+  const file = event.target.files[0];
+  if (!file) return;
+  const map = field("bundleMap");
+  const info = field("bundleInfo");
+  map.replaceChildren();
+  map.hidden = true;
+  try {
+    const report = JSON.parse(await file.text());
+    if (report.schemaVersion !== 1 || !report.chunks || !Number.isSafeInteger(report.artifactBytes)) {
+      throw new Error("Expected an Impasto bundle-size.json report");
+    }
+    const rows = Object.entries(report.chunks).flatMap(([chunk, entry]) => entry.modules.map(module => ({
+      ...module, chunk, size: module.apportionedBytecodeBytes ?? module.renderedBytes,
+    }))).filter(module => Number.isSafeInteger(module.size) && module.size > 0);
+    rows.sort((a, b) => b.size - a.size);
+    const summary = bytes(report.artifactBytes) + " in " + Object.keys(report.chunks).length + " chunks";
+    info.textContent = summary;
+    const palette = { application: "#7cb8a0", framework: "#74a4c9", dependency: "#a49cc9",
+      staticPool: "#ceab73", compiledAsset: "#ce8c81" };
+    function layout(start, end, total, left, top, width, height) {
+      if (start >= end) return;
+      if (start + 1 === end) {
+        const module = rows[start];
+        const tile = document.createElement("button");
+        const label = module.path.split("/").pop();
+        tile.className = "bundle-tile";
+        tile.textContent = label;
+        const details = module.path + " · " + module.chunk + " · " + bytes(module.size);
+        tile.title = details;
+        tile.setAttribute("aria-label", details);
+        tile.addEventListener("click", () => { info.textContent = details; });
+        for (const [key, value] of Object.entries({ left, top, width, height })) tile.style[key] = value + "%";
+        if (Object.hasOwn(palette, module.group)) tile.style.setProperty("--tile", palette[module.group]);
+        map.append(tile);
+        return;
+      }
+      let split = start + 1, subtotal = rows[start].size;
+      while (split < end - 1 && subtotal + rows[split].size / 2 < total / 2) subtotal += rows[split++].size;
+      const fraction = subtotal / total;
+      if (width * map.clientWidth >= height * map.clientHeight) {
+        const edge = width * fraction;
+        layout(start, split, subtotal, left, top, edge, height);
+        layout(split, end, total - subtotal, left + edge, top, width - edge, height);
+      } else {
+        const edge = height * fraction;
+        layout(start, split, subtotal, left, top, width, edge);
+        layout(split, end, total - subtotal, left, top + edge, width, height - edge);
+      }
+    }
+    map.hidden = !rows.length;
+    layout(0, rows.length, rows.reduce((sum, module) => sum + module.size, 0), 0, 0, 100, 100);
+  } catch (error) {
+    map.hidden = true;
+    info.textContent = String(error);
+  }
+});
 function rpc(method, params) {
   if (socket?.readyState !== WebSocket.OPEN) return Promise.reject(new Error("Disconnected"));
   const id = ++nextId;
   socket.send(JSON.stringify({jsonrpc: "2.0", id, method, params}));
   return new Promise((resolve, reject) => pending.set(id, {resolve, reject}));
 }
+const sourceRoots = JSON.parse(new TextDecoder().decode(
+  Uint8Array.from(atob("%%SOURCE_ROOTS%%"), character => character.charCodeAt(0))));
+function editorLink(source) {
+  if (!source || !Number.isSafeInteger(source.line) || source.line < 1
+    || !Number.isSafeInteger(source.column) || source.column < 1) return;
+  const fromFramework = source.path.startsWith("@framework/");
+  const relative = fromFramework ? source.path.slice(11) : source.path;
+  const parts = relative.split("/");
+  if (parts.some(part => !part || part === "." || part === ".." || /[\\:\u0000-\u001f]/.test(part))) return;
+  const root = (fromFramework ? sourceRoots.framework : sourceRoots.project).replaceAll("\\", "/");
+  const file = [root, relative].join("/").split("/").map(encodeURIComponent).join("/");
+  return sourceRoots.editor + "://file" + (file.startsWith("/") ? file : "/" + file) + ":" + source.line + ":" + source.column;
+}
+field("refreshScene").addEventListener("click", async () => {
+  const list = field("sceneNodes");
+  list.replaceChildren();
+  try {
+    const snapshot = await rpc("inspector", {});
+    const pending = snapshot?.root ? [[snapshot.root, 0]] : [];
+    while (pending.length) {
+      const [node, depth] = pending.pop();
+      if (!node) continue;
+      const item = document.createElement("li");
+      item.style.marginInlineStart = 12 * Math.min(depth, 20) + "px";
+      item.textContent = [node.kind, node.text].filter(Boolean).join(" ");
+      const href = editorLink(node.source);
+      if (href) {
+        const link = document.createElement("a");
+        link.href = href;
+        link.textContent = node.source.path + ":" + node.source.line + ":" + node.source.column;
+        item.append(" ", link);
+      }
+      list.append(item);
+      for (let index = node.children.length - 1; index >= 0; index--) pending.push([node.children[index], depth + 1]);
+    }
+  } catch (error) {
+    list.textContent = String(error);
+  }
+});
 function addCells(row, values) {
   for (const value of values) row.insertCell().textContent = value;
 }
@@ -173,9 +287,11 @@ const symbols = symbolBytes ? JSON.parse(new TextDecoder().decode(
 
 function sourceStack(stack) {
   if (!symbols) return stack;
-  const [sources, mappings, functions] = symbols;
-  return stack.replace(/(\bat [^\n]*?)(app\.(?:js|bin)):(\d+):(\d+)(?=\)|$)/gm,
+  return stack.replace(/(\bat [^\n]*?)(app\.(?:js|bin)|chunks\/[^\s:()]+\.js):(\d+):(\d+)(?=\)|$)/gm,
     (frame, prefix, file, line, column) => {
+      const module = symbols[file === "app.bin" ? "app.js" : file];
+      if (!module) return frame;
+      const [sources, mappings, functions] = module;
       const row = Number(line) - 1;
       const col = Number(column) - 1;
       let start = 0, end = mappings.length;
@@ -392,6 +508,7 @@ field("connection").addEventListener("submit", event => {
       authenticated = true;
       field("status").textContent = "Connected to port " + port;
       field("capture").disabled = false;
+      field("refreshScene").disabled = !auth.capabilities?.includes("inspector");
     } catch (error) {
       field("status").textContent = error.message;
       connection.close();
@@ -406,6 +523,8 @@ field("connection").addEventListener("submit", event => {
     socket = undefined;
     field("connect").textContent = "Connect";
     field("capture").disabled = true;
+    field("refreshScene").disabled = true;
+    field("sceneNodes").replaceChildren();
     if (authenticated) field("status").textContent = "Disconnected";
     authenticated = false;
     field("traceDetail").disabled = true;

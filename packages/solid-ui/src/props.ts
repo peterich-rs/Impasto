@@ -9,6 +9,8 @@ import type {
   StyleProps,
   TextProps,
   UIChildren,
+  VectorAsset,
+  VectorIconDrawOptions,
   ViewEvents,
 } from "@impasto/solid-renderer";
 import type { InputMask } from "./field/mask.ts";
@@ -73,6 +75,9 @@ export type ButtonProps = Omit<
 
 export interface IconProps extends ViewProps {
   mirror?: boolean;
+  asset?: VectorAsset;
+  size?: number;
+  color?: VectorIconDrawOptions["color"];
 }
 
 export interface SwitchProps extends ElementProps {

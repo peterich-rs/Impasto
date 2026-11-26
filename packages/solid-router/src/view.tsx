@@ -21,6 +21,8 @@ import {
   PageActiveContext,
   PageKeepContext,
   type RouteEntry,
+  type LazyRouteLoader,
+  type RouteComponent,
   type RoutePhase,
   type Router,
 } from "./stack.ts";
@@ -42,6 +44,47 @@ export type RouterViewProps = {
   /** Default is the package's plain error page. */
   errorFallback?: (error: unknown, reset: () => void) => NodeHandle;
 };
+
+type LazyPage = { page?: RouteComponent; loading: Promise<RouteComponent> };
+const lazyPages = new WeakMap<LazyRouteLoader, LazyPage>();
+
+function LazyPageContent(props: {
+  load: LazyRouteLoader;
+  fallback?: () => NodeHandle;
+  params: RouteEntry["params"];
+  phase: RoutePhase;
+}): unknown {
+  let entry = lazyPages.get(props.load);
+  if (!entry) {
+    const load = props.load;
+    const record: LazyPage = { loading: Promise.resolve().then(load).then(
+      module => {
+        if (typeof module.default !== "function") throw new TypeError("lazy route requires a default component");
+        record.page = module.default;
+        return module.default;
+      },
+    ) };
+    void record.loading.catch(() => { if (lazyPages.get(load) === record) lazyPages.delete(load); });
+    lazyPages.set(load, record);
+    entry = record;
+  }
+  const [page, setPage] = createSignal<RouteComponent | undefined>(entry.page);
+  const [failure, setFailure] = createSignal<{ error: unknown } | undefined>();
+  if (!entry.page) {
+    let active = true;
+    onCleanup(() => { active = false; });
+    void entry.loading.then(
+      page => { if (active) setPage(() => page); },
+      error => { if (active) setFailure({ error }); },
+    );
+  }
+  return () => {
+    const failed = failure();
+    if (failed) throw failed.error;
+    const Page = page();
+    return Page ? <Page params={props.params} phase={props.phase} /> : props.fallback?.();
+  };
+}
 function pageDistance(mover: number): number {
   const measured = scene.rect(mover).w;
   const width = scene.metrics?.().width ?? 0;
@@ -242,7 +285,7 @@ function RouteHost(props: {
   onCleanup(() => {
     if (scope !== undefined && scene.popFocusScope?.(scope)) restoreFocus(previous);
   });
-  const { component: Page, keepAlive } = untrack(props.entry);
+  const { component: Page, lazy, fallback, keepAlive } = untrack(props.entry);
   const params = createMemo(() => props.entry().params);
   const transitionEnd = createMemo((previous?: { entry: RouteEntry; done: () => void }) => {
     const entry = props.entry();
@@ -323,7 +366,11 @@ function RouteHost(props: {
                     return fallback(error, () => reset());
                   }}
                 >
-                  <Page params={params()} phase={props.entry().phase} />
+                  {Page
+                    ? <Page params={params()} phase={props.entry().phase} />
+                    : lazy
+                      ? <LazyPageContent load={lazy} fallback={fallback} params={params()} phase={props.entry().phase} />
+                      : 0}
                 </Errored>
               );
             },

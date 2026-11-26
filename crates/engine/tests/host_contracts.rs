@@ -428,6 +428,7 @@ fn module_config_literal_and_shared_slots_keep_their_defaults() {
         "clip",
     )]));
     let config = ModuleConfig {
+        asset_reader: None,
         registry: Arc::clone(&registry),
         exec: Arc::new(ImmediateExec),
         post_delivery: None,

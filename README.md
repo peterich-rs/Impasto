@@ -62,13 +62,13 @@ cd my-app
 
 # 以下假设 impasto 已加入 PATH（run 默认 debug ESM，build 默认 release QuickJS 字节码）
 impasto run                         # 在 macOS 启动（可用 -d android / -d ios 指定设备）
-impasto build bundle --platform macos   # 打包指定平台的独立字节码
+impasto build bundle --platform macos --analyze-size
 impasto build macos                 # 生成 macOS .app
 impasto build apk --debug           # 生成 Android APK（另支持 appbundle / aar）
 impasto build ios --ios-simulator   # 生成 iOS 模拟器包（另支持 ios-archive / ipa / ios-xcframework）
 impasto sync --platform macos       # 生成该平台的插件清单与 IDE 类型
-impasto analyze --platform macos    # TypeScript 7 与框架契约检查
-impasto test --trace                # 在 QuickJS UI Session 中运行无头测试
+impasto analyze --all-targets --deny-warnings
+impasto test --watch -k "payment"   # 监听相关文件并按用例名过滤
 # impasto init-rust                   # 按需添加应用 Rust crate
 ```
 
@@ -76,11 +76,13 @@ impasto test --trace                # 在 QuickJS UI Session 中运行无头测�
 
 在仓库根目录直接执行 `cargo run -p cli -- run` 会启动内置的 Gallery 示例。
 
-应用的 TSX 由 Oxc 降级并由 Rolldown 链接。显式导入 PascalCase JSX 组件，例如 `import { View } from "@impasto/solid-ui"`。Release 构建直接生成 IQJS 和 `app.sym`，可用 `impasto symbolicate build/app.sym <line> <column>` 解析 QuickJS 位置。
+应用的 TSX 由 Oxc 降级并由 Rolldown 链接。显式导入 PascalCase JSX 组件，例如 `import { View } from "@impasto/solid-ui"`。Release 构建生成 `app.bin` 和 `app.sym`。字面量 `import()` 对应的字节码按需从 `app.bin` 加载。路由可用 `lazy: () => import("./settings.tsx")` 加载默认导出的组件。用 `impasto symbolicate <app.sym> --stack <堆栈>` 解析带模块名的 QuickJS 调用栈。`--analyze-size` 生成 `bundle-size.json`，列出实际分包大小、按模块分摊的字节码大小与共享样式池归因。用 `--size-json <路径>` 指定报告位置。
 
-`impasto analyze` 首次运行会安装并校验固定版本的原生 TypeScript 7。可使用 `--tsc` 或 `IMPASTO_TSC` 指定已有的原生检查器。CLI 发布包附带检查器和框架源码。
+`impasto analyze` 首次运行会安装并校验固定版本的原生 TypeScript 7。可使用 `--tsc` 或 `IMPASTO_TSC` 指定已有的原生检查器。`--all-targets` 检查应用声明的各平台，`--deny-warnings` 将项目编译警告视为错误。CLI 发布包附带检查器、框架源码和 DevTools Wasm 编译器。调试时用 `impasto run --watch` 生成 Inspector 源码位置，在独立客户端用 `impasto devtools --source-root <项目路径> --editor cursor` 指定编辑器和本地源码。将 `bundle-size.json` 导入独立客户端的 Bundle size 面板可查看模块体积图。
 
-`impasto test` 发现 `src/` 与 `tests/` 中的 `*.test.ts` 和 `*.test.tsx`。从 `impasto:test` 导入 `test`、`screen` 与 `fire`，用 `await screen.mount(...)` 挂载组件，再等待查询或输入驱动。测试宿主提供隔离的临时目录，支持链接应用自己的 Rust 插件。`just solid` 和 `just solid-app` 分别运行框架包和 Gallery 的无头测试。
+`impasto test` 发现 `src/` 与 `tests/` 中的 `*.test.ts` 和 `*.test.tsx`。从 `impasto:test` 导入 `test`、`screen` 与 `fire`，用 `await screen.mount(...)` 挂载组件，再等待查询或输入驱动。用 `clock.install()` 接管会话时间，再用 `await clock.advance(ms)` 驱动定时器和帧。测试宿主提供隔离的临时目录，支持链接应用自己的 Rust 插件。`just solid` 和 `just solid-app` 分别运行框架包和 Gallery 的无头测试。
+
+`impasto sync` 为 `locales/*.json` 和自定义主题 Token 生成类型声明。词条可嵌套，插值使用 `{name}`。用 `t("app.welcome", { name })` 读取词条，在 `[i18n]` 中用 `default_locale` 设置回退语言。Release 按引用保留静态词条。键带有可静态识别的命名空间时，动态查询仅保留对应命名空间。主题可在 `[theme.tokens]` 或 `src/theme.ts` 中声明 `colors` 和 `lengths` 键列表。TS 文件须导出 `const themeTokens` 字面量。通过 `extendThemeTokens` 提供当前值，再用 `style={{ gap: { token: "space.trade" } }}` 绑定原生样式。
 
 ## 仓库结构
 

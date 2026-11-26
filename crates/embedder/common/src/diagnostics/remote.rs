@@ -85,6 +85,7 @@ impl Server {
         let socket = std::net::TcpListener::bind(address)?;
         socket.set_nonblocking(true)?;
         let listener = TcpListener::from_std(socket)?;
+        hub.enable_inspector();
         tracing::info!(target: "impasto::devtools", %address, "DevTools listening");
         Ok(Self(runtime.spawn(listen(listener, config.token, hub))))
     }
@@ -183,7 +184,7 @@ async fn serve(stream: TcpStream, token: Arc<str>, hub: Arc<TelemetryHub>) {
         send(&mut socket, error(id, -32001, "authentication failed")).await;
         return;
     }
-    if !send(&mut socket, response(id, json!({ "version": VERSION, "capabilities": ["frame_spans", "capture_status", "trace_detail", "capture_gpu"] }))).await {
+    if !send(&mut socket, response(id, json!({ "version": VERSION, "capabilities": ["frame_spans", "capture_status", "trace_detail", "capture_gpu", "inspector"] }))).await {
         return;
     }
     let mut cursor = None;
@@ -262,6 +263,12 @@ fn request(
     }
     let params = &rpc["params"];
     Some(match rpc["method"].as_str() {
+        Some("inspector") => response(
+            id,
+            hub.inspector()
+                .and_then(|snapshot| serde_json::from_str(&snapshot).ok())
+                .unwrap_or(Value::Null),
+        ),
         Some("subscribe") => {
             let since = params["since"].as_u64().unwrap_or_default();
             let (revision, reset, samples) = hub.frame_updates(since);

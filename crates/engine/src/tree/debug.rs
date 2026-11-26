@@ -47,8 +47,16 @@ pub(crate) struct DebugState {
     pub(crate) last_pointer: Option<(f32, f32, &'static str)>,
     /// Subtrees owned by the devtool layer itself; probes skip them.
     pub(crate) debug_owned: Vec<NodeId>,
+    pub(crate) sources: std::collections::HashMap<u32, SourceLocation>,
     /// Scratch for the scan walk.
     pub(crate) walk_stack: Vec<WalkFrame>,
+}
+
+pub(crate) struct SourceLocation {
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
+    pub component: String,
 }
 
 pub(crate) struct WalkFrame {
@@ -312,20 +320,36 @@ impl Tree {
     /// The render tree with scene rects as JSON, for the inspector page.
     /// Debug-owned subtrees are cut.
     pub fn debug_snapshot(&self) -> String {
+        self.debug_snapshot_limited(usize::MAX)
+    }
+
+    pub(crate) fn debug_snapshot_limited(&self, mut remaining: usize) -> String {
         let mut out = String::from("{\"root\":");
         match self.root {
-            Some(root) => self.write_snapshot_node(root, &mut out),
+            Some(root) => self.write_snapshot_node(root, &mut out, &mut remaining),
             None => out.push_str("null"),
         }
         out.push('}');
         out
     }
 
-    fn write_snapshot_node(&self, id: NodeId, out: &mut String) {
+    #[cfg(feature = "js")]
+    pub(crate) fn set_debug_source(
+        &mut self,
+        id: NodeId,
+        source: SourceLocation,
+    ) -> Result<(), crate::Error> {
+        self.node(id)?;
+        self.debug.sources.insert(id.index, source);
+        Ok(())
+    }
+
+    fn write_snapshot_node(&self, id: NodeId, out: &mut String, remaining: &mut usize) {
         let Ok(node) = self.node(id) else {
             out.push_str("null");
             return;
         };
+        *remaining = remaining.saturating_sub(1);
         let rect = self.rect(id).unwrap_or(super::Rect {
             x: 0.0,
             y: 0.0,
@@ -347,6 +371,18 @@ impl Tree {
         let focusable = node.flags.contains(super::node::NodeFlags::FOCUSABLE);
         out.push_str(",\"focusable\":");
         out.push_str(if focusable { "true" } else { "false" });
+        if let Some(source) = self.debug.sources.get(&id.index) {
+            use std::fmt::Write as _;
+            out.push_str(",\"source\":{\"path\":\"");
+            push_escaped(out, &source.path);
+            let _ = write!(
+                out,
+                "\",\"line\":{},\"column\":{},\"component\":\"",
+                source.line, source.column
+            );
+            push_escaped(out, &source.component);
+            out.push_str("\"}");
+        }
         if let Some(text) = node.text() {
             out.push_str(",\"text\":\"");
             let prefix: String = text.utf8.chars().take(80).collect();
@@ -363,6 +399,9 @@ impl Tree {
         let mut child = node.first_child;
         let mut first = true;
         while let Some(cid) = child {
+            if *remaining == 0 {
+                break;
+            }
             let Ok(child_node) = self.node(cid) else {
                 break;
             };
@@ -374,7 +413,7 @@ impl Tree {
                 // Skip the devtool layer itself but keep walking siblings.
                 out.push_str("null");
             } else {
-                self.write_snapshot_node(cid, out);
+                self.write_snapshot_node(cid, out, remaining);
             }
             child = child_node.next;
         }

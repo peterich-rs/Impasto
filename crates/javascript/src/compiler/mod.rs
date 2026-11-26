@@ -110,6 +110,29 @@ pub fn compile_with_extensions(
     bytecode::compile(source, name, module, &CatalogEnvironment(state))
 }
 
+/// Compile each bundled module and place their bytecode in one indexed archive.
+pub fn compile_archive(
+    entry: &str,
+    sources: BTreeMap<String, String>,
+    mut catalog: ModuleCatalog,
+    extensions: &[(&str, &[&str])],
+) -> Result<CompiledBytecode, BytecodeError> {
+    for (name, source) in sources {
+        catalog
+            .add_source(name, source)
+            .map_err(|error| BytecodeError::Script(error.to_string()))?;
+    }
+    let modules = catalog
+        .sources
+        .iter()
+        .map(|(name, source)| {
+            compile_with_extensions(source, name, true, &catalog, extensions)
+                .map(|compiled| (name.clone(), compiled))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    bytecode::archive(entry, &modules)
+}
+
 struct CompileState {
     root: Option<String>,
     sources: Arc<BTreeMap<String, String>>,

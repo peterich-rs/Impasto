@@ -40,7 +40,9 @@ pub use exec::{RtExec, settle_factory};
 pub use host::{
     DropWait, Link, Poster, console_log, start, start_async, start_async_with_exit, start_on,
 };
-pub use images::{DecodeTarget, ImageDecoder, ImageError, ImageHandle, ImageReady};
+pub use images::{
+    DecodeTarget, ImageDecoder, ImageError, ImageHandle, ImageReady, read_packaged_file,
+};
 pub use images::{ExternalFrame, ImportExternalFrame, pixel_count_ok, unpremultiply_rgba};
 #[cfg(target_os = "android")]
 pub use impasto::os::android::AndroidContext;

@@ -29,6 +29,30 @@ export type ImageProps = StyleProps & {
   required?: boolean;
 };
 
+type ImageSource = [ImageProps["source"], ImageProps["intrinsicSize"], ImageProps["alt"]];
+
+export function bindImageSource(node: Node, read: () => ImageSource, required?: boolean): void {
+  let labeled = false;
+  createRenderEffect(
+    () => {
+      const [source, size, alt] = read();
+      const asset = typeof source === "object" ? source : undefined;
+      return {
+        uri: asset?.uri ?? (typeof source === "string" ? source : ""),
+        width: size?.width ?? asset?.width,
+        height: size?.height ?? asset?.height,
+        alt,
+      };
+    },
+    ({ uri, width, height, alt }) => {
+      scene.setImage(node, uri, width, height, required);
+      required = undefined;
+      if (alt || labeled) scene.setSemantics(node, 3, alt || undefined);
+      labeled = !!alt;
+    },
+  );
+}
+
 /** An image leaf. Author size lives on `style`; `intrinsicSize` is only the measure fallback. */
 export function Image(props: ImageProps): Node {
   const node = options.createElement("image", {
@@ -37,22 +61,6 @@ export function Image(props: ImageProps): Node {
   });
   bindNodeRef(node, () => props.ref);
   bindStyleTo(options.styles, node, props);
-  createRenderEffect(
-    () => {
-      const asset = typeof props.source === "object" ? props.source : undefined;
-      return {
-        source: asset?.uri ?? (typeof props.source === "string" ? props.source : ""),
-        width: props.intrinsicSize?.width ?? asset?.width,
-        height: props.intrinsicSize?.height ?? asset?.height,
-        alt: props.alt ?? "",
-      };
-    },
-    (next) => {
-      scene.setImage(node, next.source, next.width, next.height);
-      if (next.alt !== "") {
-        scene.setSemantics(node, 3, next.alt);
-      }
-    },
-  );
+  bindImageSource(node, () => [props.source, props.intrinsicSize, props.alt]);
   return node;
 }

@@ -148,7 +148,6 @@ fn android(app: &App, framework: &Path) -> Result<()> {
             "    <uses-permission android:name=\"android.permission.INTERNET\" />\n",
             &permissions,
         )
-        .replace("impasto counter", "${impastoAppLabel}")
         .replace(
             "dev.impasto.host.ImpastoActivity",
             "dev.impasto.runner.MainActivity",
@@ -280,4 +279,168 @@ fn write_new(path: &Path, content: &str) -> Result<()> {
         fs::write(path, content)?;
     }
     Ok(())
+}
+
+pub(crate) fn plugin(name: &str, platforms: &[String]) -> Result<()> {
+    validate_name(name)?;
+    let root = Path::new(name);
+    if root.exists() {
+        bail!("{} 已存在", root.display());
+    }
+    let defaults = ["ios", "android", "macos"].map(str::to_owned);
+    let platforms = if platforms.is_empty() {
+        &defaults
+    } else {
+        platforms
+    };
+    let unique = platforms
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    if unique.len() != platforms.len()
+        || unique
+            .iter()
+            .any(|name| !matches!(*name, "ios" | "android" | "macos"))
+    {
+        bail!("--platforms 需要使用不重复的 ios、android 或 macos");
+    }
+    let framework = toolchain::framework()?;
+    fs::create_dir(root)?;
+    let package = format!("@plugins/{name}");
+    let crate_name = crate::plugins::crate_name(&package);
+    let swift_module = format!(
+        "Impasto{}",
+        name.split(['-', '_'])
+            .map(|part| {
+                let mut chars = part.chars();
+                chars.next().map_or_else(String::new, |first| {
+                    format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
+                })
+            })
+            .collect::<String>()
+    );
+    let android_package = format!("dev.impasto.plugins.{}", name.replace('-', "_"));
+    let mut manifest = format!(
+        "[plugin]\nplatforms = {platforms:?}\nmin_impasto_version = {:?}\n\n[rust]\npath = \"rust\"\n",
+        impasto::VERSION
+    );
+    for target in platforms {
+        if target == "android" {
+            writeln!(
+                manifest,
+                "\n[android]\npath = \"android\"\npackage = {android_package:?}\nplugin_class = \"Plugin\""
+            )?;
+            plugin_android(root, &android_package, &framework)?;
+        } else {
+            writeln!(
+                manifest,
+                "\n[{target}]\npath = {target:?}\npackage = {swift_module:?}\nmodule = {swift_module:?}\nplugin_class = \"Plugin\""
+            )?;
+            plugin_swift(root, target, &swift_module, &package)?;
+        }
+    }
+    write_new(&root.join("plugin.toml"), &manifest)?;
+    write_new(
+        &root.join("package.json"),
+        &serde_json::to_string_pretty(&serde_json::json!({
+            "name": package, "version": "0.1.0", "type": "module", "exports": { ".": "./src/index.ts" },
+        }))?,
+    )?;
+    write_new(
+        &root.join(".gitignore"),
+        ".impasto/\n.cargo/config.toml\nrust/Cargo.lock\nbuild/\n.gradle/\n.build/\nlocal.properties\n",
+    )?;
+    write_new(
+        &root.join("tsconfig.json"),
+        r#"{
+  "extends": "./.impasto/tsconfig.plugin.json",
+  "include": ["src/**/*", "tests/**/*"]
+}
+"#,
+    )?;
+    write_new(
+        &root.join("rust/Cargo.toml"),
+        &format!(
+            "[package]\nname = {crate_name:?}\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\nimpasto = {{ version = {:?}, registry = \"impasto\" }}\n",
+            impasto::VERSION,
+        ),
+    )?;
+    write_new(
+        &root.join("rust/src/lib.rs"),
+        &format!(
+            "#[impasto::module(name = \"{swift_module}\", specifier = \"{package}/native\")]\nstruct Plugin;\n\n#[impasto::export]\nimpl Plugin {{\n    pub fn greet() -> String {{\n        \"Hello from {name}\".into()\n    }}\n}}\n\npub fn register(registrar: &mut impasto::PluginRegistrar) {{\n    registrar.add(Plugin::plugin());\n}}\n"
+        ),
+    )?;
+    write_new(
+        &root.join("src/index.ts"),
+        &format!("export {{ greet }} from \"{package}/native\";\n"),
+    )?;
+    write_new(
+        &root.join("tests/plugin.test.ts"),
+        &format!(
+            "import {{ assert, test }} from \"impasto:test\";\nimport {{ greet }} from \"../src/index.ts\";\n\ntest(\"native greet\", () => assert.equal(greet(), \"Hello from {name}\"));\n"
+        ),
+    )?;
+    sync::sync(&App::for_plugin(root.to_path_buf())?, None)
+}
+
+fn plugin_swift(root: &Path, target: &str, module: &str, package: &str) -> Result<()> {
+    let platform = if target == "ios" {
+        ".iOS(.v15)"
+    } else {
+        ".macOS(.v13)"
+    };
+    let root = root.join(target);
+    write_new(
+        &root.join("Package.swift"),
+        &format!(
+            r#"// swift-tools-version: 5.9
+import Foundation
+import PackageDescription
+
+let host = ProcessInfo.processInfo.environment["IMPASTO_ROOT"].map {{
+    "\($0)/crates/embedder/{target}/ImpastoHost"
+}} ?? "../../crates/embedder/{target}/ImpastoHost"
+
+let package = Package(
+    name: "{module}",
+    platforms: [{platform}],
+    products: [.library(name: "{module}", targets: ["{module}"])],
+    dependencies: [.package(name: "ImpastoHost", path: host)],
+    targets: [
+        .target(name: "{module}", dependencies: [.product(name: "ImpastoHost", package: "ImpastoHost")])
+    ]
+)
+"#
+        ),
+    )?;
+    write_new(
+        &root.join(format!("Sources/{module}/Plugin.swift")),
+        &format!(
+            "import ImpastoHost\n\n@MainActor\npublic final class Plugin: ImpastoPlugin {{\n    public let identifier = {package:?}\n\n    public static func register(with host: ImpastoHost) {{\n        host.registerPlugin(Plugin())\n    }}\n}}\n"
+        ),
+    )
+}
+
+fn plugin_android(root: &Path, package: &str, framework: &Path) -> Result<()> {
+    let root = root.join("android");
+    let template = framework.join("packages/camera/android");
+    for file in ["settings.gradle.kts", "build.gradle.kts"] {
+        let original = fs::read_to_string(template.join(file))?;
+        let contents = original
+            .replace("impasto-camera", "impasto-plugin")
+            .replace("dev.impasto.plugins.camera", package);
+        write_new(&root.join(file), &contents)?;
+    }
+    write_new(&root.join("consumer-rules.pro"), "")?;
+    write_new(&root.join("src/main/AndroidManifest.xml"), "<manifest />\n")?;
+    write_new(
+        &root.join(format!(
+            "src/main/kotlin/{}/Plugin.kt",
+            package.replace('.', "/")
+        )),
+        &format!(
+            "package {package}\n\nimport dev.impasto.host.ImpastoAndroidPlugin\nimport dev.impasto.host.ImpastoHost\n\nobject Plugin : ImpastoAndroidPlugin {{\n    override fun register(host: ImpastoHost) {{}}\n}}\n"
+        ),
+    )
 }

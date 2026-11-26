@@ -6,6 +6,7 @@ import { bindBox } from "./element.tsx";
 import { t } from "./i18n.ts";
 import type { ErrorPageProps } from "./props.ts";
 import { useTheme } from "./use-theme.ts";
+import { symbolizeStack } from "./errors.ts";
 export {
   installErrorHooks,
   messageOf,
@@ -43,7 +44,7 @@ export function ErrorPage(props: ErrorPageProps): NodeHandle {
             color: theme().color.textMuted,
           }}
         >
-          {props.stack}
+          {symbolizeStack(props.stack)}
         </Text>
       ) : null}
       <Button

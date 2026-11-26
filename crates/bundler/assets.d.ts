@@ -30,10 +30,6 @@ declare module "*.otf" {
   export default font;
 }
 declare module "*.svg" {
-  const icon: {
-    readonly width: number;
-    readonly height: number;
-    draw(context: import("@impasto/solid-renderer").CanvasRenderingContext2D): void;
-  };
+  const icon: import("@impasto/solid-renderer").VectorAsset;
   export default icon;
 }

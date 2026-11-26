@@ -106,7 +106,6 @@ pub(super) fn anim_prop(name: &str) -> Option<crate::motion::AnimProp> {
 }
 
 const FONT_LIMIT: usize = 8;
-const FONT_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 
 pub(super) struct FontBook {
     queued: Vec<(String, Arc<[u8]>)>,
@@ -123,19 +122,19 @@ impl FontBook {
 
     /// Queues one face. The same family replaces bytes and does not take another slot.
     /// `Sans` and `SansCJK` do not count toward the eight-name cap.
-    pub(super) fn enqueue(&mut self, family: String, bytes: Vec<u8>) -> Result<(), ()> {
-        if family.is_empty() || bytes.len() > FONT_BYTE_LIMIT {
+    pub(super) fn enqueue(&mut self, family: String, bytes: Arc<[u8]>) -> Result<(), ()> {
+        if family.is_empty() || bytes.len() > crate::text::MAX_APP_FONT_BYTES {
             return Err(());
         }
         if let Some(slot) = self.queued.iter_mut().find(|(name, _)| name == &family) {
-            slot.1 = bytes.into();
+            slot.1 = bytes;
             return Ok(());
         }
         let seen = self.handed.contains(&family);
         if !seen && !startup_font(&family) && self.occupied() >= FONT_LIMIT {
             return Err(());
         }
-        self.queued.push((family, bytes.into()));
+        self.queued.push((family, bytes));
         Ok(())
     }
 

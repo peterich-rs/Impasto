@@ -127,6 +127,7 @@ export interface SceneModule {
     source: string,
     width?: number,
     height?: number,
+    required?: boolean,
   ): void;
   /** `"list-content"` restricts author layout on a driver-owned content node. */
   setStyleSurface(
@@ -219,6 +220,7 @@ export interface SceneModule {
   graphemeCount(text: string): number;
   graphemeUnit(text: string, index: number): number;
   registerFont(family: string, bytes: Uint8Array): void;
+  registerFontAsset(family: string, assetUri: string): void;
   /** Registers WGSL for this session and returns a handle to the source. */
   registerShaderProgram(source: string, animated?: boolean): number;
   /** Applies a program to the node's content box. Passing null clears it. */
@@ -377,6 +379,7 @@ export interface SceneModule {
   debugSetScan(on: boolean): void;
   debugSetPointerTrace(on: boolean, suppress: boolean): void;
   debugSetOwned(node: NodeHandle, on: boolean): void;
+  debugSetSource(node: NodeHandle, path: string, line: number, column: number, component: string): void;
   debugMemory(): string | null;
   metrics(): {
     width: number;
@@ -475,6 +478,7 @@ export interface StyleEnvironment {
   spacing: number;
   rootRem: number;
   colors: Readonly<Record<string, string>>;
+  lengths?: Readonly<Record<string, number>>;
   radii: readonly [number, number, number, number, number, number, number];
   fontSizes: readonly [number, number, number, number, number, number, number, number];
   roles: Readonly<Record<"display" | "headline" | "title" | "body" | "label" | "caption", {

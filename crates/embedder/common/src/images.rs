@@ -105,6 +105,10 @@ fn covers(existing: Option<DecodeTarget>, target: Option<DecodeTarget>) -> bool 
 
 /// Reads one source. Called only on the `io` thread.
 pub trait ImageDecoder: Send + Sync {
+    fn read_packaged_asset(&self, _relative: &str, _limit: usize) -> Result<Arc<[u8]>, String> {
+        Err("the host has no packaged assets".to_owned())
+    }
+
     fn decode(&self, source: &str) -> Result<ImageHandle, ImageError>;
 
     fn decode_at(&self, source: &str, scale_bucket: u8) -> Result<ImageHandle, ImageError> {
@@ -136,6 +140,28 @@ pub trait ImageDecoder: Send + Sync {
             "image bytes decoder is not linked".into(),
         ))
     }
+}
+
+/// Read a bounded resource from a directory-backed application bundle.
+pub fn read_packaged_file(
+    root: &std::path::Path,
+    relative: &str,
+    limit: usize,
+) -> Result<Arc<[u8]>, String> {
+    use std::fs::File;
+
+    let root = root.canonicalize().map_err(|error| error.to_string())?;
+    let path = root
+        .join(relative)
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if !path.starts_with(&root) || !path.is_file() {
+        return Err("asset is outside the package".to_owned());
+    }
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let length = file.metadata().map_err(|error| error.to_string())?.len();
+    let length = usize::try_from(length).map_err(|error| error.to_string())?;
+    engine::session::read_asset_bytes(file, length, limit)
 }
 
 #[derive(Clone, Debug)]

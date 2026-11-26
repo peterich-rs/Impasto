@@ -9,6 +9,7 @@ pub(crate) mod buffer;
 pub mod codec;
 mod entry;
 mod extension;
+pub(crate) use entry::TrustedArchive;
 pub use entry::TrustedBytecode;
 pub(crate) mod native_resource;
 mod sampling;

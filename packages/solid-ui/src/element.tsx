@@ -36,6 +36,37 @@ export function eventsOf(props: ViewEvents): ViewEvents {
   };
 }
 
+type PressEvents = Required<Pick<ViewEvents,
+  "onPress" | "onRelease" | "onClick" | "onFocus" | "onBlur" | "onKey" | "onText"
+>>;
+
+const forwardedPressEvents = [
+  "onTextReplaced", "onLink", "onComposing", "onDragBegin", "onDragBy", "onDragEnd",
+  "onHover", "onLeave", "onSecondaryClick", "onZoom", "onLongPress", "onWheel", "recognizers",
+] as const satisfies readonly (keyof ViewEvents)[];
+
+export function bindViewEvents(node: NodeHandle, props: ViewEvents, press: PressEvents): void {
+  scene.onPress(node, press.onPress);
+  scene.onRelease(node, press.onRelease);
+  scene.onClick(node, press.onClick);
+  scene.onFocus(node, press.onFocus);
+  scene.onBlur(node, press.onBlur);
+  scene.onKey(node, press.onKey);
+  scene.onText(node, press.onText);
+  let previous: unknown[] = [];
+  createRenderEffect(
+    () => forwardedPressEvents.map(name => props[name]),
+    (next) => {
+      for (let index = 0; index < next.length; index++) {
+        if (next[index] !== previous[index]) {
+          scene.setProp(node, forwardedPressEvents[index], next[index]);
+        }
+      }
+      previous = next;
+    },
+  );
+}
+
 export function bindBox(
   node: NodeHandle | null,
   props: ViewProps,

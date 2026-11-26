@@ -50,15 +50,17 @@ NSPhotoLibraryUsageDescription = "用于选取用户选择的照片。"
 
 ## 消费嵌入 SDK
 
-安装设备和两种模拟器架构的 Rust 目标，使用 `impasto build ios-xcframework` 打包 SDK。SDK 包含设备 arm64 与模拟器 arm64/x86_64 两个平台切片及 Swift 模块接口。Xcode 应用 target 的 Frameworks, Libraries, and Embedded Content 中选择 Embed & Sign。应用提供自己的资源目录及授权配置。
+在应用目录安装设备和两种模拟器架构的 Rust 目标，运行 `impasto build ios-xcframework`。构建目录包含静态 `ImpastoHost.xcframework`、配套 `Package.swift`、`AppResources/` 与 `integration.json`。XCFramework 提供设备 arm64、模拟器 arm64/x86_64 切片和 Swift 模块接口，链接编译实际需要的 Rust 插件。使用 SwiftPM 时把构建目录作为本地 Package 加入 Xcode，链接 `ImpastoGeneratedPlugins` 产品，并将构建目录的绝对路径设为 Xcode 进程的 `IMPASTO_ROOT`。将 `AppResources` 作为文件夹资源随应用复制，并按 `integration.json` 设置 Info.plist。手动链接静态 XCFramework 时在 Xcode 选择 Do Not Embed，并使用接入清单中的系统库链接参数。
 
 ```swift
 import UIKit
-import ImpastoHost
+import ImpastoGeneratedPlugins
 
 @MainActor
 func installImpasto(in parent: UIViewController, resources: URL) {
+    precondition(GeneratedPluginRegistrant.prepare())
     let host = ImpastoHost(resources: resources)
+    GeneratedPluginRegistrant.register(with: host)
     let content = host.makeViewController()
     parent.addChild(content)
     content.view.translatesAutoresizingMaskIntoConstraints = false

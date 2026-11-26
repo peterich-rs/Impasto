@@ -20,6 +20,7 @@ const BINDING_VERSION: &str = "quickjs-jit-0.14.2";
 const NG_REVISION: &str = "0fdea21";
 pub(crate) const BC_VERSION: u8 = 28;
 const MAGIC: &[u8; 4] = b"IQJS";
+const ARCHIVE_MAGIC: &[u8; 4] = b"IQJB";
 
 const _: () = assert!(qjs::JS_READ_OBJ_ROM_DATA == 0);
 
@@ -45,6 +46,7 @@ impl std::error::Error for BytecodeError {}
 pub struct CompiledBytecode {
     bytes: Vec<u8>,
     kind: Kind,
+    module_sizes: std::collections::BTreeMap<String, usize>,
 }
 
 impl CompiledBytecode {
@@ -54,6 +56,11 @@ impl CompiledBytecode {
 
     pub fn kind(&self) -> Kind {
         self.kind
+    }
+
+    /// Module payload sizes before the archive index and alignment padding.
+    pub fn module_sizes(&self) -> &std::collections::BTreeMap<String, usize> {
+        &self.module_sizes
     }
 }
 
@@ -68,6 +75,7 @@ impl AsRef<[u8]> for CompiledBytecode {
 pub enum Kind {
     Script,
     Module,
+    Archive,
 }
 
 impl Kind {
@@ -75,6 +83,7 @@ impl Kind {
         match self {
             Self::Script => 0,
             Self::Module => 1,
+            Self::Archive => 2,
         }
     }
 
@@ -82,6 +91,7 @@ impl Kind {
         match tag {
             0 => Some(Self::Script),
             1 => Some(Self::Module),
+            2 => Some(Self::Archive),
             _ => None,
         }
     }
@@ -112,18 +122,21 @@ pub fn compile(
             Ok(payload)
         }
         Kind::Script => compile_script(ctx, source, name),
+        Kind::Archive => Err(BytecodeError::Runtime),
     })?;
     let version = bytecode_version()?;
     Ok(CompiledBytecode {
         bytes: encode(&version, kind, &payload)?,
         kind,
+        module_sizes: std::collections::BTreeMap::from([(name.to_owned(), payload.len())]),
     })
 }
 
 /// Rejects a missing magic, a different engine id, an unknown mode, or an empty payload.
 pub fn open(bytes: &[u8]) -> Result<Envelope<'_>, BytecodeError> {
+    let archive = bytes.starts_with(ARCHIVE_MAGIC);
     let rest = bytes
-        .strip_prefix(MAGIC)
+        .strip_prefix(if archive { ARCHIVE_MAGIC } else { MAGIC })
         .ok_or_else(|| BytecodeError::Script("bytecode envelope is missing".to_owned()))?;
     if rest.len() < 2 {
         return Err(BytecodeError::Script(
@@ -156,7 +169,63 @@ pub fn open(bytes: &[u8]) -> Result<Envelope<'_>, BytecodeError> {
             "bytecode payload is empty".to_owned(),
         ));
     }
+    if archive != (kind == Kind::Archive) {
+        return Err(BytecodeError::Script(
+            "bytecode magic and mode disagree".to_owned(),
+        ));
+    }
     Ok(Envelope { kind, payload })
+}
+
+/// Build an indexed archive from individually compiled modules.
+pub(crate) fn archive(
+    entry: &str,
+    modules: &std::collections::BTreeMap<String, CompiledBytecode>,
+) -> Result<CompiledBytecode, BytecodeError> {
+    use std::io::Write as _;
+
+    let invalid = || BytecodeError::Script("invalid bytecode archive".to_owned());
+    let count = u32::try_from(modules.len()).map_err(|_| invalid())?;
+    if !modules.contains_key(entry) {
+        return Err(invalid());
+    }
+    let mut directory = Vec::new();
+    let mut bodies = Vec::new();
+    let put_name = |out: &mut Vec<u8>, name: &str| -> Result<(), BytecodeError> {
+        let len = u16::try_from(name.len()).map_err(|_| invalid())?;
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        Ok(())
+    };
+    put_name(&mut directory, entry)?;
+    directory.extend_from_slice(&count.to_le_bytes());
+    let mut module_sizes = std::collections::BTreeMap::new();
+    for (name, module) in modules {
+        let body = open_kind(module.as_bytes(), Kind::Module)?;
+        put_name(&mut directory, name)?;
+        bodies.resize(bodies.len().next_multiple_of(8), 0);
+        directory.extend_from_slice(
+            &u64::try_from(bodies.len())
+                .map_err(|_| invalid())?
+                .to_le_bytes(),
+        );
+        directory.extend_from_slice(
+            &u64::try_from(body.len())
+                .map_err(|_| invalid())?
+                .to_le_bytes(),
+        );
+        bodies.write_all(body).map_err(|_| invalid())?;
+        module_sizes.insert(name.clone(), body.len());
+    }
+    directory.resize(directory.len().next_multiple_of(8), 0);
+    directory.extend_from_slice(&bodies);
+    let mut bytes = encode(&bytecode_version()?, Kind::Archive, &directory)?;
+    bytes[..4].copy_from_slice(ARCHIVE_MAGIC);
+    Ok(CompiledBytecode {
+        bytes,
+        kind: Kind::Archive,
+        module_sizes,
+    })
 }
 
 /// Opens an envelope and requires `kind`.

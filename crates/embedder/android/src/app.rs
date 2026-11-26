@@ -1150,6 +1150,16 @@ struct AssetDecoder {
 }
 
 impl embedder::ImageDecoder for AssetDecoder {
+    fn read_packaged_asset(&self, relative: &str, limit: usize) -> Result<Arc<[u8]>, String> {
+        let path = CString::new(format!("images/{relative}")).map_err(|error| error.to_string())?;
+        let asset = self
+            .assets
+            .open(&path)
+            .ok_or_else(|| "missing packaged asset".to_owned())?;
+        let length = asset.length();
+        engine::session::read_asset_bytes(asset, length, limit)
+    }
+
     fn decode(&self, source: &str) -> Result<embedder::ImageHandle, embedder::ImageError> {
         self.decode_at(source, 1)
     }

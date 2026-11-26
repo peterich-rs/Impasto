@@ -40,6 +40,10 @@ declare module "impasto:test" {
     toBeVisible(): void;
   };
   export function advanceFrames(count?: number, step?: number): Promise<void>;
+  export const clock: {
+    install(): Promise<void>;
+    advance(milliseconds: number): Promise<void>;
+  };
   export const screen: {
     mount(render: () => unknown): Promise<void>;
     byRole(role: Role, options?: { name?: string }): Promise<Node>;

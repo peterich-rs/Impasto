@@ -93,42 +93,68 @@ export function Switch(props: {
 export function For<T>(props: { each: MaybeAccessor<readonly T[] | undefined | null>; keyed?: true; fallback?: Child; children: (item: T, index: () => number) => Child }): JSX.Element;
 export function For<T>(props: { each: MaybeAccessor<readonly T[] | undefined | null>; keyed: false; fallback?: Child; children: (item: () => T, index: number) => Child }): JSX.Element;
 export function For<T>(props: { each: MaybeAccessor<readonly T[] | undefined | null>; keyed: (item: T) => unknown; fallback?: Child; children: (item: () => T, index: () => number) => Child }): JSX.Element;
-export function For<T>(props: {
+export function For<T>(props: ForProps<T>): JSX.Element {
+  return createMemo(mapFor(props)) as unknown as JSX.Element;
+}
+
+type ForProps<T> = {
   each: MaybeAccessor<readonly T[] | undefined | null>;
   keyed?: boolean | ((item: T) => unknown);
   fallback?: Child;
   children: Function;
-}): JSX.Element {
+};
+
+export function mapFor<T>(props: ForProps<T>): () => Child {
   const owner = getOwner();
-  type Row = { key: unknown; value: Child; write: (value: () => T) => void; index: (index: number) => void; dispose: () => void };
+  type Row = { key: unknown; item: T; position: number; value: Child; write: (value: () => T) => void; index: (index: number) => void; dispose: () => void };
+  const negativeZero = Symbol();
+  const mapKey = (key: unknown) => Object.is(key, -0) ? negativeZero : key;
   let rows: Row[] = [];
   onCleanup(() => { for (const row of rows) row.dispose(); rows = []; });
-  return createMemo(() => {
+  return () => {
     const values = read(props.each) ?? [];
-    const remaining = rows.slice();
+    const remaining = new Map<unknown, { rows: Row[]; next: number }>();
+    const retained = new Set<Row>();
+    for (const row of rows) {
+      const key = mapKey(row.key);
+      const bucket = remaining.get(key);
+      if (bucket) bucket.rows.push(row);
+      else remaining.set(key, { rows: [row], next: 0 });
+    }
+    const keyed = props.keyed;
     const next: Row[] = [];
     for (let index = 0; index < values.length; index++) {
       const item = values[index];
-      const key = props.keyed === false ? index : typeof props.keyed === "function" ? props.keyed(item) : item;
-      const at = remaining.findIndex(row => Object.is(row.key, key));
-      let row = at < 0 ? undefined : remaining.splice(at, 1)[0];
+      const key = keyed === false ? index : typeof keyed === "function" ? keyed(item) : item;
+      const bucket = remaining.get(mapKey(key));
+      let row = bucket && bucket.next < bucket.rows.length ? bucket.rows[bucket.next++] : undefined;
       if (!row) {
         row = runWithOwner(owner, () => createRoot(dispose => {
           const [state, writeItem] = createSignal({ value:item });
           const readItem = () => state().value;
           const write = (next:()=>T) => { writeItem({value:next()}); };
           const [readIndex, writeIndex] = createSignal(index);
-          const accessor = props.keyed === false || typeof props.keyed === "function";
-          const value = untrack(() => props.children(accessor ? readItem : item, props.keyed === false ? index : readIndex));
-          return { key, value, write, index: writeIndex, dispose };
+          const accessor = keyed === false || typeof keyed === "function";
+          const value = untrack(() => props.children(accessor ? readItem : item, keyed === false ? index : readIndex));
+          return { key, item, position: index, value, write, index: writeIndex, dispose };
         }));
-      } else { row.write(() => item); row.index(index); }
+      } else {
+        retained.add(row);
+        if (!Object.is(row.item, item)) {
+          row.item = item;
+          row.write(() => item);
+        }
+        if (row.position !== index) {
+          row.position = index;
+          row.index(index);
+        }
+      }
       next.push(row);
     }
-    for (const row of remaining) row.dispose();
+    for (const row of rows) if (!retained.has(row)) row.dispose();
     rows = next;
     return rows.length ? rows.map(row => row.value) : props.fallback;
-  }) as unknown as JSX.Element;
+  };
 }
 
 export function Errored(props: {

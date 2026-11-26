@@ -1,17 +1,21 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use anyhow::{Context, Result, bail};
 use oxc::{
     allocator::Allocator,
-    ast::ast::{ImportDeclarationSpecifier, Statement},
+    ast::{
+        AstKind,
+        ast::{Expression, ImportDeclarationSpecifier, Statement, UnaryOperator},
+    },
     ast_visit::{Visit, walk},
     parser::Parser,
-    span::SourceType,
+    semantic::SemanticBuilder,
+    span::{GetSpan, SourceType, Span},
 };
 use rolldown::{
     Bundler, BundlerOptions, ExperimentalOptions, InputItem, ModuleType, OutputFormat, Platform,
@@ -37,6 +41,8 @@ pub struct BundleOptions {
     pub framework: PathBuf,
     /// Enable release definitions and minification.
     pub release: bool,
+    /// Split dynamic imports into loadable ES modules.
+    pub split: bool,
     /// Emit reloadable module factories for a debug watch session.
     pub hot: bool,
     /// Installed or prepared plugin contract. Omit for framework fixtures.
@@ -108,6 +114,28 @@ pub struct Bundle {
     pub source_map: Option<String>,
     /// Surviving plugin imports. An omitted symbol set denotes namespace use.
     pub native_use: BTreeMap<String, Option<BTreeSet<String>>>,
+    /// Files in the linked module graph.
+    pub inputs: BTreeSet<PathBuf>,
+    /// Extra modules referenced by the entry or another chunk.
+    pub chunks: BTreeMap<String, ChunkOutput>,
+    /// Native uses originating in the entry chunk.
+    pub entry_native_use: NativeUse,
+    /// Static dependencies loaded with the entry.
+    pub entry_imports: Vec<String>,
+    /// Rendered source bytes by input module in the entry.
+    pub rendered_modules: BTreeMap<String, usize>,
+    /// Source modules that originally imported each compiled pool entry.
+    pub pool_consumers: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// One secondary output of a split build.
+#[derive(Debug)]
+pub struct ChunkOutput {
+    pub code: String,
+    pub source_map: Option<String>,
+    pub native_use: NativeUse,
+    pub rendered_modules: BTreeMap<String, usize>,
+    pub imports: Vec<String>,
 }
 
 /// Build a single ES module entirely in memory.
@@ -116,9 +144,21 @@ pub struct Bundle {
 ///
 /// Reports resolution failures, compiler diagnostics, or incompatible native imports.
 pub fn bundle(options: BundleOptions) -> Result<Bundle> {
+    bundle_with_cache(options, None)
+}
+
+/// Compile multiple entries with a shared cache of framework source transforms.
+///
+/// # Errors
+/// Reports the same resolution and compilation errors as [bundle].
+pub fn bundle_with_cache(options: BundleOptions, cache: Option<&ModuleCache>) -> Result<Bundle> {
     tokio::runtime::Builder::new_current_thread()
         .build()?
-        .block_on(async { Linker::new(&options, false)?.link(None).await })
+        .block_on(async {
+            Linker::new(&options, false, cache.cloned())?
+                .link(None)
+                .await
+        })
 }
 
 /// Incremental graph for a single debug watch session.
@@ -138,19 +178,33 @@ impl WatchLinker {
     /// # Errors
     /// Reports the same input and compilation errors as [bundle].
     pub fn bundle(&mut self, options: BundleOptions) -> Result<Bundle> {
+        self.bundle_with_cache(options, None)
+    }
+
+    /// Reuse the link graph and share framework transforms across entry points.
+    /// # Errors
+    /// Reports the same input and compilation errors as [bundle].
+    pub fn bundle_with_cache(
+        &mut self,
+        options: BundleOptions,
+        cache: Option<&ModuleCache>,
+    ) -> Result<Bundle> {
         let changed = self.changes.take();
         let runtime = tokio::runtime::Builder::new_current_thread().build()?;
         if let Some((previous, mut linker)) = self.current.take()
             && previous == options
             && let Some(changed) = changed
             && !changed.is_empty()
-            && changed.iter().all(|path| linker.modules.contains(path))
+            && changed
+                .iter()
+                .all(|path| linker.modules.contains(path) && !linker.config_inputs.contains(path))
+            && let Ok(changed) = linker.with_folded_dependents(changed)
             && let Ok(bundle) = runtime.block_on(linker.link(Some(changed)))
         {
             self.current = Some((options, linker));
             return Ok(bundle);
         }
-        let mut linker = runtime.block_on(async { Linker::new(&options, true) })?;
+        let mut linker = runtime.block_on(async { Linker::new(&options, true, cache.cloned()) })?;
         let bundle = runtime.block_on(linker.link(None))?;
         self.current = Some((options, linker));
         Ok(bundle)
@@ -159,6 +213,8 @@ impl WatchLinker {
 
 type NativeExports = BTreeMap<String, BTreeSet<String>>;
 type HotMetadata = BTreeMap<String, crate::hot::ComponentModule>;
+type FoldedInputs = BTreeMap<PathBuf, BTreeSet<PathBuf>>;
+type ModulePools = BTreeMap<String, BTreeSet<String>>;
 
 struct Linker {
     graph: Bundler,
@@ -169,10 +225,14 @@ struct Linker {
     hot_metadata: Arc<Mutex<HotMetadata>>,
     hot_externals: Arc<Mutex<BTreeSet<String>>>,
     modules: BTreeSet<PathBuf>,
+    scanned: Arc<Mutex<BTreeSet<PathBuf>>>,
+    config_inputs: BTreeSet<PathBuf>,
+    folded: Arc<Mutex<FoldedInputs>>,
+    module_pools: Arc<Mutex<ModulePools>>,
 }
 
 impl Linker {
-    fn new(options: &BundleOptions, incremental: bool) -> Result<Self> {
+    fn new(options: &BundleOptions, incremental: bool, cache: Option<ModuleCache>) -> Result<Self> {
         let entry = options
             .entry
             .canonicalize()
@@ -188,6 +248,18 @@ impl Linker {
             );
         }
         let tsconfig = root.join("tsconfig.json");
+        let locales = Arc::new(crate::i18n::Locales::load(&root)?);
+        let scanned = Arc::new(Mutex::new(BTreeSet::new()));
+        let theme = crate::ThemeTokens::load(&root)?;
+        let config_inputs = locales
+            .inputs
+            .iter()
+            .cloned()
+            .chain([root.join("app.toml"), root.join("src/theme.ts")])
+            .filter(|path| path.is_file())
+            .collect();
+        let mut virtual_modules = options.virtual_modules.clone();
+        virtual_modules.insert(crate::i18n::MODULE.to_owned(), locales.source()?);
         let assets = root.join("assets");
         let mut config = BundlerOptions {
             input: Some(vec![InputItem {
@@ -199,7 +271,7 @@ impl Linker {
             } else {
                 TsConfig::Auto(false)
             }),
-            cwd: Some(root),
+            cwd: Some(root.clone()),
             platform: Some(Platform::Browser),
             format: Some(if options.hot {
                 OutputFormat::Cjs
@@ -207,8 +279,11 @@ impl Linker {
                 OutputFormat::Esm
             }),
             minify: Some(RawMinifyOptions::Bool(options.release)),
-            sourcemap: (!options.hot).then_some(SourceMapType::Hidden),
-            code_splitting: (!options.hot).then_some(CodeSplittingMode::Bool(false)),
+            sourcemap: Some(SourceMapType::Hidden),
+            code_splitting: (!options.hot).then_some(CodeSplittingMode::Bool(options.split)),
+            entry_filenames: (!options.hot && options.split).then(|| "app.js".to_owned().into()),
+            chunk_filenames: (!options.hot && options.split)
+                .then(|| "chunks/[name]-[hash].js".to_owned().into()),
             preserve_modules: options.hot.then_some(true),
             experimental: incremental.then_some(ExperimentalOptions {
                 incremental_build: Some(true),
@@ -245,14 +320,26 @@ impl Linker {
         let warnings = Arc::new(Mutex::new(BTreeMap::new()));
         let hot_metadata = Arc::new(Mutex::new(BTreeMap::new()));
         let hot_externals = Arc::new(Mutex::new(BTreeSet::new()));
+        let folded = Arc::new(Mutex::new(FoldedInputs::new()));
+        let module_pools = Arc::new(Mutex::new(ModulePools::new()));
         let graph = Bundler::with_plugins(
             config,
             vec![Pluginable::new_shared(ImpastoPlugin {
                 packages,
                 assets,
+                root,
+                framework: options.framework.canonicalize()?,
                 manifest: options.plugins.clone(),
                 externals: options.externals.clone(),
-                virtual_modules: options.virtual_modules.clone(),
+                virtual_modules,
+                scanned: Arc::clone(&scanned),
+                locales: Arc::clone(&locales),
+                theme,
+                release: options.release,
+                folded: Arc::clone(&folded),
+                module_pools: Arc::clone(&module_pools),
+                cache: if options.hot { None } else { cache },
+                pools: Mutex::default(),
                 warnings: Arc::clone(&warnings),
                 hot: options.hot,
                 hot_metadata: Arc::clone(&hot_metadata),
@@ -269,7 +356,26 @@ impl Linker {
             hot_metadata,
             hot_externals,
             modules: BTreeSet::new(),
+            scanned,
+            config_inputs,
+            folded,
+            module_pools,
         })
+    }
+
+    fn with_folded_dependents(&self, changed: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+        let folded = self
+            .folded
+            .lock()
+            .map_err(|_| anyhow::anyhow!("folded inputs unavailable"))?;
+        let changed = changed.into_iter().collect::<BTreeSet<_>>();
+        let mut all = changed.clone();
+        for (importer, sources) in folded.iter() {
+            if !sources.is_disjoint(&changed) {
+                all.insert(importer.clone());
+            }
+        }
+        Ok(all.into_iter().collect())
     }
 
     async fn link(&mut self, changed: Option<Vec<PathBuf>>) -> Result<Bundle> {
@@ -295,6 +401,11 @@ impl Linker {
                 .join("\n");
             anyhow::anyhow!("{formatted}")
         })?;
+        for asset in &output.assets {
+            if let Output::Chunk(chunk) = asset {
+                check_browser_globals(&chunk.code, &chunk.filename, chunk.map.as_ref())?;
+            }
+        }
         self.modules = output
             .assets
             .iter()
@@ -304,7 +415,22 @@ impl Linker {
             })
             .flatten()
             .map(|id| PathBuf::from(id.as_str()))
+            .chain(self.config_inputs.iter().cloned())
             .collect();
+        self.modules.extend(
+            self.scanned
+                .lock()
+                .map_err(|_| anyhow::anyhow!("scanned inputs unavailable"))?
+                .iter()
+                .cloned(),
+        );
+        {
+            let folded = self
+                .folded
+                .lock()
+                .map_err(|_| anyhow::anyhow!("folded inputs unavailable"))?;
+            self.modules.extend(folded.values().flatten().cloned());
+        }
         let warnings = self
             .warnings
             .lock()
@@ -312,6 +438,12 @@ impl Linker {
             .values()
             .flatten()
             .cloned()
+            .chain(
+                output
+                    .warnings
+                    .iter()
+                    .map(|warning| warning.to_diagnostic().convert_to_string(false)),
+            )
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
@@ -328,6 +460,12 @@ impl Linker {
                 code: crate::hot::script(&output.assets, &metadata, &externals)?,
                 warnings,
                 source_map: None,
+                inputs: self.modules.clone(),
+                chunks: BTreeMap::new(),
+                entry_native_use: BTreeMap::new(),
+                entry_imports: Vec::new(),
+                rendered_modules: BTreeMap::new(),
+                pool_consumers: BTreeMap::new(),
                 native_use: externals
                     .iter()
                     .filter(|name| self.native_exports.contains_key(*name))
@@ -335,32 +473,166 @@ impl Linker {
                     .collect(),
             });
         }
-        let chunk = output
-            .assets
-            .into_iter()
-            .find_map(|asset| match asset {
-                Output::Chunk(chunk) if chunk.is_entry => Some(chunk),
-                _ => None,
-            })
-            .context("application did not produce an entry module")?;
-        let chunk = Arc::unwrap_or_clone(chunk);
-        let native_use = native_uses(&chunk.code, &self.native_exports)?;
+        let mut entry = None;
+        let mut native_use = NativeUse::new();
+        let mut chunks = BTreeMap::new();
+        for asset in output.assets {
+            let Output::Chunk(chunk) = asset else {
+                continue;
+            };
+            let chunk = Arc::unwrap_or_clone(chunk);
+            let uses = native_uses(&chunk.code, &self.native_exports)?;
+            for (name, names) in &uses {
+                let aggregate = native_use
+                    .entry(name.clone())
+                    .or_insert_with(|| Some(BTreeSet::new()));
+                match (aggregate.as_mut(), names) {
+                    (Some(all), Some(names)) => all.extend(names.iter().cloned()),
+                    (_, None) => *aggregate = None,
+                    (None, Some(_)) => {}
+                }
+            }
+            let rendered_modules = chunk
+                .modules
+                .keys
+                .iter()
+                .zip(&chunk.modules.values)
+                .map(|(id, module)| {
+                    (
+                        id.as_str().trim_start_matches('\0').to_owned(),
+                        module.rendered_length(),
+                    )
+                })
+                .collect();
+            let item = ChunkOutput {
+                code: chunk.code,
+                source_map: chunk.map.map(|map| map.to_json_string()),
+                native_use: uses,
+                rendered_modules,
+                imports: chunk.imports.iter().map(ToString::to_string).collect(),
+            };
+            if chunk.is_entry {
+                entry = Some(item);
+            } else {
+                chunks.insert(chunk.filename.to_string(), item);
+            }
+        }
+        let entry = entry.context("application did not produce an entry module")?;
+        let mut pool_consumers = ModulePools::new();
+        for (source, pools) in self
+            .module_pools
+            .lock()
+            .map_err(|_| anyhow::anyhow!("pool consumers unavailable"))?
+            .iter()
+        {
+            if self.modules.contains(Path::new(source)) {
+                for pool in pools {
+                    pool_consumers
+                        .entry(pool.clone())
+                        .or_default()
+                        .insert(source.clone());
+                }
+            }
+        }
         Ok(Bundle {
-            code: chunk.code,
+            code: entry.code,
             warnings,
-            source_map: chunk.map.map(|map| map.to_json_string()),
+            source_map: entry.source_map,
             native_use,
+            inputs: self.modules.clone(),
+            chunks,
+            entry_native_use: entry.native_use,
+            entry_imports: entry.imports,
+            rendered_modules: entry.rendered_modules,
+            pool_consumers,
         })
     }
+}
+
+type CachedTransform = Arc<OnceLock<Result<Arc<LinkedTransform>, String>>>;
+type TransformKey = (String, SourceType, String);
+
+#[derive(Debug)]
+struct LinkedTransform {
+    output: crate::CompiledModule,
+    pools: crate::pools::PoolModules,
+}
+
+/// Framework transforms shared by the independent entries in one test run.
+#[derive(Clone, Debug, Default)]
+pub struct ModuleCache {
+    entries: Arc<Mutex<HashMap<TransformKey, CachedTransform>>>,
+}
+
+impl ModuleCache {
+    fn transform(
+        &self,
+        id: &str,
+        source: &str,
+        source_type: SourceType,
+    ) -> Result<Arc<LinkedTransform>> {
+        const MAX_ENTRIES: usize = 512;
+        let slot = {
+            let mut entries = self
+                .entries
+                .lock()
+                .map_err(|_| anyhow::anyhow!("transform cache unavailable"))?;
+            let key = (id.to_owned(), source_type, source.to_owned());
+            if let Some(slot) = entries.get(&key) {
+                Some(Arc::clone(slot))
+            } else if entries.len() < MAX_ENTRIES {
+                Some(Arc::clone(entries.entry(key).or_default()))
+            } else {
+                None
+            }
+        };
+        if let Some(slot) = slot {
+            return slot
+                .get_or_init(|| linked_transform(id, source, source_type, None).map(Arc::new))
+                .clone()
+                .map_err(anyhow::Error::msg);
+        }
+        linked_transform(id, source, source_type, None)
+            .map(Arc::new)
+            .map_err(anyhow::Error::msg)
+    }
+}
+
+fn linked_transform(
+    id: &str,
+    source: &str,
+    source_type: SourceType,
+    link: Option<crate::LinkContext<'_>>,
+) -> Result<LinkedTransform, String> {
+    let mut pools = crate::pools::PoolModules::default();
+    let (output, _) = crate::compile_inner(
+        Path::new(id),
+        source,
+        source_type,
+        false,
+        Some(&mut pools),
+        link,
+    )?;
+    Ok(LinkedTransform { output, pools })
 }
 
 #[derive(Debug)]
 struct ImpastoPlugin {
     packages: PathBuf,
     assets: PathBuf,
+    root: PathBuf,
+    framework: PathBuf,
     manifest: Option<PluginManifest>,
     externals: BTreeSet<String>,
     virtual_modules: BTreeMap<String, String>,
+    scanned: Arc<Mutex<BTreeSet<PathBuf>>>,
+    locales: Arc<crate::i18n::Locales>,
+    theme: crate::ThemeTokens,
+    release: bool,
+    folded: Arc<Mutex<FoldedInputs>>,
+    module_pools: Arc<Mutex<ModulePools>>,
+    cache: Option<ModuleCache>,
+    pools: Mutex<crate::pools::PoolModules>,
     warnings: Arc<Mutex<BTreeMap<String, Vec<String>>>>,
     hot: bool,
     hot_metadata: Arc<Mutex<HotMetadata>>,
@@ -394,7 +666,9 @@ impl Plugin for ImpastoPlugin {
         args: &HookResolveIdArgs<'_>,
     ) -> HookResolveIdReturn {
         let specifier = args.specifier;
-        if self.virtual_modules.contains_key(specifier) {
+        if specifier.starts_with(crate::pools::PREFIX)
+            || self.virtual_modules.contains_key(specifier)
+        {
             return Ok(Some(HookResolveIdOutput::from_id(format!("\0{specifier}"))));
         }
         if matches!(specifier, "scene" | "reactive") || self.externals.contains(specifier) {
@@ -481,6 +755,27 @@ impl Plugin for ImpastoPlugin {
     }
 
     async fn load(&self, _: SharedLoadPluginContext, args: &HookLoadArgs<'_>) -> HookLoadReturn {
+        let path = Path::new(args.id);
+        if path.is_absolute() && path.is_file() {
+            self.scanned
+                .lock()
+                .map_err(|_| anyhow::anyhow!("scanned inputs unavailable"))?
+                .insert(path.to_owned());
+        }
+        if let Some(id) = args.id.strip_prefix('\0')
+            && id.starts_with(crate::pools::PREFIX)
+        {
+            let pools = self
+                .pools
+                .lock()
+                .map_err(|_| anyhow::anyhow!("scene pool unavailable"))?;
+            let source = pools.get(id).context("unknown scene pool module")?;
+            return Ok(Some(HookLoadOutput {
+                code: source.to_owned().into(),
+                module_type: Some(ModuleType::Js),
+                ..Default::default()
+            }));
+        }
         if let Some(code) = crate::assets::module(&self.assets, Path::new(args.id))? {
             return Ok(Some(HookLoadOutput {
                 code: code.into(),
@@ -521,30 +816,104 @@ impl Plugin for ImpastoPlugin {
         let source_type = match args.module_type {
             ModuleType::Tsx => SourceType::tsx(),
             ModuleType::Jsx => SourceType::jsx(),
-            ModuleType::Ts if args.code.contains("createShaderProgram") => SourceType::ts(),
+            ModuleType::Ts
+                if Path::new(args.id).starts_with(&self.root)
+                    && !Path::new(args.id).starts_with(&self.packages)
+                    && !Path::new(args.id).starts_with(self.root.join("node_modules"))
+                    || args.code.contains("@impasto/i18n")
+                    || args.code.contains("createShaderProgram")
+                    || (args.code.contains("await")
+                        && (args.code.contains("onCleanup")
+                            || args.code.contains("createRenderEffect"))) =>
+            {
+                SourceType::ts()
+            }
+            ModuleType::Js if args.code.contains("@impasto/i18n") => SourceType::mjs(),
             _ => return Ok(None),
         };
-        let (mut output, metadata) =
-            crate::compile_inner(Path::new(args.id), args.code, source_type, self.hot)
-                .map_err(anyhow::Error::msg)?;
-        if self.hot {
-            metadata.instrument(args.id, &mut output.code);
+        let mut dependencies = BTreeSet::new();
+        let package_entry = |name: &str| {
+            if let Some(manifest) = &self.manifest {
+                if let Some(entry) = manifest.entries.get(name) {
+                    return entry.canonicalize().ok();
+                }
+                if manifest
+                    .disabled_entries
+                    .iter()
+                    .any(|package| package_match(name, package))
+                {
+                    return None;
+                }
+            }
+            crate::styles::builtin_export(name, &self.packages)
+        };
+        let link = crate::LinkContext {
+            assets: &self.assets,
+            root: &self.root,
+            framework: &self.framework,
+            locales: &self.locales,
+            theme: &self.theme,
+            package_entry: &package_entry,
+            release: self.release,
+            dependencies: &mut dependencies,
+        };
+        let (code, warnings, map) = if self.hot {
+            let (mut output, metadata) = crate::compile_inner(
+                Path::new(args.id),
+                args.code,
+                source_type,
+                true,
+                None,
+                Some(link),
+            )
+            .map_err(anyhow::Error::msg)?;
+            metadata.instrument(args.id, &mut output.code, &mut output.map);
             self.hot_metadata
                 .lock()
                 .map_err(|_| anyhow::anyhow!("component metadata unavailable"))?
                 .insert(args.id.to_owned(), metadata);
-        }
+            (output.code, output.warnings, output.map.into())
+        } else {
+            let compiled = if let Some(cache) = &self.cache
+                && Path::new(args.id).starts_with(&self.packages)
+                && !args.code.contains("@impasto/i18n")
+            {
+                cache.transform(args.id, args.code, source_type)?
+            } else {
+                Arc::new(
+                    linked_transform(args.id, args.code, source_type, Some(link))
+                        .map_err(anyhow::Error::msg)?,
+                )
+            };
+            self.pools
+                .lock()
+                .map_err(|_| anyhow::anyhow!("scene pool unavailable"))?
+                .extend(&compiled.pools)
+                .map_err(anyhow::Error::msg)?;
+            self.module_pools
+                .lock()
+                .map_err(|_| anyhow::anyhow!("pool consumers unavailable"))?
+                .insert(
+                    args.id.to_owned(),
+                    compiled.pools.ids().map(str::to_owned).collect(),
+                );
+            (
+                compiled.output.code.clone(),
+                compiled.output.warnings.clone(),
+                compiled.output.map.clone().into(),
+            )
+        };
         self.warnings
             .lock()
             .map_err(|_| anyhow::anyhow!("compiler diagnostics unavailable"))?
-            .insert(args.id.to_owned(), output.warnings);
+            .insert(args.id.to_owned(), warnings);
+        self.folded
+            .lock()
+            .map_err(|_| anyhow::anyhow!("folded inputs unavailable"))?
+            .insert(PathBuf::from(args.id), dependencies);
         Ok(Some(HookTransformOutput {
-            code: Some(output.code),
-            map: if self.hot {
-                Default::default()
-            } else {
-                output.map.into()
-            },
+            code: Some(code),
+            map,
             module_type: Some(ModuleType::Js),
             ..Default::default()
         }))
@@ -637,7 +1006,102 @@ fn is_node_builtin(specifier: &str) -> bool {
         )
 }
 
-type NativeUse = BTreeMap<String, Option<BTreeSet<String>>>;
+fn check_browser_globals(
+    code: &str,
+    filename: &str,
+    map: Option<&oxc_sourcemap::SourceMap<'_>>,
+) -> Result<()> {
+    const UNAVAILABLE: &[&str] = &[
+        "document",
+        "window",
+        "XMLHttpRequest",
+        "localStorage",
+        "sessionStorage",
+        "navigator",
+    ];
+    if !UNAVAILABLE.iter().any(|name| code.contains(name)) {
+        return Ok(());
+    }
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, code, SourceType::mjs()).parse();
+    if let Some(error) = parsed.diagnostics.into_iter().next() {
+        bail!("invalid linked module: {error}");
+    }
+    let semantic = SemanticBuilder::new()
+        .with_build_nodes(true)
+        .build(&parsed.program)
+        .semantic;
+    let scoping = semantic.scoping();
+    let nodes = semantic.nodes();
+    let mut unsupported = Vec::new();
+    for (name, references) in scoping.root_unresolved_references() {
+        if name.as_str() != "globalThis" && !UNAVAILABLE.contains(&name.as_str()) {
+            continue;
+        }
+        for reference in references {
+            let mut node = nodes.get_node(scoping.get_reference(*reference).node_id());
+            let mut name = name.as_str();
+            if name == "globalThis" {
+                node = nodes.parent_node(node.id());
+                let property = match node.kind() {
+                    AstKind::StaticMemberExpression(member) => member.property.name.as_str(),
+                    AstKind::ComputedMemberExpression(member) => {
+                        let Expression::StringLiteral(property) =
+                            member.expression.get_inner_expression()
+                        else {
+                            continue;
+                        };
+                        property.value.as_str()
+                    }
+                    _ => continue,
+                };
+                if !UNAVAILABLE.contains(&property) {
+                    continue;
+                }
+                name = property;
+            }
+            if matches!(nodes.parent_kind(node.id()), AstKind::UnaryExpression(unary)
+                if unary.operator == UnaryOperator::Typeof)
+            {
+                continue;
+            }
+            unsupported.push((node.span(), name));
+        }
+    }
+    if let Some((span, name)) = unsupported.into_iter().min_by_key(|(span, _)| span.start) {
+        let location = linked_location(code, span, filename, map);
+        bail!("{location}: browser global \"{name}\" is unavailable in Impasto's QuickJS runtime");
+    }
+    Ok(())
+}
+
+fn linked_location(
+    code: &str,
+    span: Span,
+    filename: &str,
+    map: Option<&oxc_sourcemap::SourceMap<'_>>,
+) -> String {
+    let preceding = &code[..span.start as usize];
+    let line =
+        u32::try_from(preceding.bytes().filter(|&byte| byte == b'\n').count()).unwrap_or(u32::MAX);
+    let column = preceding.rsplit('\n').next().map_or(0, |line| {
+        u32::try_from(line.encode_utf16().count()).unwrap_or(u32::MAX)
+    });
+    if let Some(map) = map
+        && let Some(token) =
+            map.lookup_source_view_token(&map.generate_lookup_table(), line, column)
+        && let Some(source) = token.get_source()
+    {
+        return format!(
+            "{source}:{}:{}",
+            token.get_src_line() + 1,
+            token.get_src_col() + 1
+        );
+    }
+    format!("{filename}:{}:{}", line + 1, column + 1)
+}
+
+pub type NativeUse = BTreeMap<String, Option<BTreeSet<String>>>;
 
 fn native_uses(code: &str, available: &BTreeMap<String, BTreeSet<String>>) -> Result<NativeUse> {
     let allocator = Allocator::default();
@@ -702,7 +1166,7 @@ fn native_uses(code: &str, available: &BTreeMap<String, BTreeSet<String>>) -> Re
     impl<'a> Visit<'a> for DynamicImports<'_> {
         fn visit_import_expression(&mut self, import: &oxc::ast::ast::ImportExpression<'a>) {
             match import.source.without_parentheses() {
-                oxc::ast::ast::Expression::StringLiteral(source) => {
+                Expression::StringLiteral(source) => {
                     if self.available.contains_key(source.value.as_str()) {
                         self.uses.insert(source.value.to_string(), None);
                     }

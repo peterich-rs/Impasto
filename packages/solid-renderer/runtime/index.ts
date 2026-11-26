@@ -1,6 +1,7 @@
 import type { Node } from "../src/tree.ts";
 import { scene } from "./scene.ts";
 import { createRoot, onCleanup, untrack } from "solid-js";
+import { mapFor } from "@impasto/reactive";
 import { bindText } from "./text.ts";
 import { bindImage } from "./image.ts";
 import {
@@ -64,7 +65,7 @@ export function applyRef(value: unknown, element: Node): void {
     if (typeof ref === "function") ref(element);
 }
 export function ref(read: () => unknown, element: Node): void {
-  applyRef(untrack(read), element);
+  untrack(() => applyRef(read(), element));
 }
 export function spread(
   node: Node,
@@ -93,10 +94,99 @@ export function spread(
   });
   if (!skipChildren) scene.insert(node, () => read().children);
 }
-import { insert, effect as sceneEffect, createComponent } from "scene";
+import {
+  insert,
+  effect as sceneEffect,
+  createComponent,
+  setProp,
+  patchInlineStyle,
+  patchScalarStyle,
+  applyStaticClass,
+  applyStaticClassList,
+  instantiateTemplate,
+  insert as insertRange,
+} from "scene";
 
-export { Text, type TextGradient, type TextProps, type TextRun } from "./text.ts";
-export { Image, type ImageAsset, type ImageProps } from "./image.ts";
+export { patchScalarStyle };
+
+export function insertKeyedList<T>(parent: Node, props: Parameters<typeof mapFor<T>>[0], marker: Node): void {
+  insertRange(parent, mapFor(props), marker);
+}
+
+export function bindTemplate(
+  template: number | readonly unknown[],
+  bind: (nodes: Node[]) => void,
+): Node {
+  const nodes = instantiateTemplate(template, true);
+  bind(nodes);
+  return nodes[0]!;
+}
+
+export function bindProp(node: Node, name: string, read: () => unknown): void {
+  sceneEffect(read, (next, previous) => {
+    if (next !== undefined || previous !== undefined) setProp(node, name, next, previous);
+  });
+}
+
+export function bindTextValue(node: Node, read: () => string): void {
+  sceneEffect(read, (next) => scene.setText(node, next));
+}
+
+export function bindInlineStyle(
+  node: Node,
+  selector: string | readonly string[],
+  read: () => unknown,
+): void {
+  sceneEffect(read, (next) => patchInlineStyle(node, selector, next));
+}
+
+export function bindScalarStyle(node: Node, op: number, read: () => unknown): void {
+  sceneEffect(read, next => patchScalarStyle(node, op, next));
+}
+
+export function bindStaticClass(node: Node, read: () => number): void {
+  sceneEffect(read, (next) => applyStaticClass(node, next));
+}
+
+export function bindStaticClassList(
+  node: Node,
+  read: () => (number | undefined)[],
+): void {
+  sceneEffect(read, (next, previous) => {
+    if (!previous || next.some((id, i) => id !== previous[i])) {
+      applyStaticClassList(node, next);
+    }
+  });
+}
+
+export { Text, textContent, type TextGradient, type TextProps, type TextRun } from "./text.ts";
+export { Image, bindImageSource, type ImageAsset, type ImageProps } from "./image.ts";
+
+type BoxSemantics = [role?: number, label?: string, hint?: string];
+
+export function setBoxSemantics(
+  node: Node,
+  role?: number,
+  label?: string,
+  hint?: string,
+): void {
+  if (role === undefined && label === undefined && hint === undefined) return;
+  scene.setSemantics(node, role ?? 0, label, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, hint);
+}
+
+export function bindBoxSemantics(node: Node, read: () => BoxSemantics): void {
+  let installed = false;
+  sceneEffect(read, ([role, label, hint]) => {
+    const labeled = role !== undefined || label !== undefined || hint !== undefined;
+    if (labeled || installed) {
+      scene.setSemantics(node, role ?? 0, label, undefined, undefined, undefined,
+        undefined, undefined, undefined, undefined, hint);
+    }
+    installed = labeled;
+  });
+}
+
 export { bindNodeRef } from "./ref.ts";
 export type { NodeRef, UIChildren, ViewEvents } from "../src/jsx.ts";
 import type { Path2DConstructor } from "../src/canvas/types.ts";
@@ -112,6 +202,8 @@ export type {
   CanvasPaint,
   CanvasPath,
   CanvasRenderingContext2D,
+  VectorAsset,
+  VectorIconDrawOptions,
   CanvasSize,
   FillRule,
   Matrix2D,

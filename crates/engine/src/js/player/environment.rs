@@ -32,6 +32,16 @@ pub(super) fn apply(tree: &mut Tree, value: &Value) -> Result<(), Error> {
         })
         .collect::<Result<Vec<_>, Error>>()?;
     env.install_palette(&palette);
+    if let Some(lengths) = value.field("lengths") {
+        let Value::Object(lengths) = lengths else {
+            return Err(Error::BadNumber);
+        };
+        let entries = lengths
+            .iter()
+            .map(|(name, value)| Ok((name.as_str(), number(value)?)))
+            .collect::<Result<Vec<_>, Error>>()?;
+        env.install_lengths(entries);
+    }
     let [none, sm, md, lg, xl, xl2, full] = numbers(field(value, "radii")?)?;
     env.radii = Radii {
         none,

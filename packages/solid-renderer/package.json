@@ -10,7 +10,8 @@
     "./palette": "./src/palette.ts",
     "./jsx": "./src/jsx.ts",
     "./host": "./runtime/host.ts",
-    "./style": "./src/style.ts"
+    "./style": "./src/style.ts",
+    "./vector": "./runtime/vector.ts"
   },
   "dependencies": {
     "@impasto/reactive": "workspace:*"

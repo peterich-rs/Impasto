@@ -503,6 +503,7 @@ pub(crate) fn source(
         dump,
     };
     DiagnosticsSource::new(move |operation, args| match operation {
+        "openSource" => open_source(args),
         "sourceMap" => Ok(context
             .source_map
             .as_deref()
@@ -523,4 +524,60 @@ pub(crate) fn source(
         "versions" => versions_method(),
         _ => Err(format!("unknown diagnostics operation {operation}")),
     })
+}
+
+fn open_source(args: &[PluginValue]) -> Result<PluginValue, String> {
+    let [
+        PluginValue::Str(path),
+        PluginValue::F64(line),
+        PluginValue::F64(column),
+    ] = args
+    else {
+        return Err("expected a source path, line and column".to_owned());
+    };
+    if !cfg!(target_os = "macos") {
+        return Ok(PluginValue::Bool(false));
+    }
+    let (key, path) = if let Some(path) = path.strip_prefix("@framework/") {
+        ("IMPASTO_DEVTOOLS_FRAMEWORK", path)
+    } else {
+        ("IMPASTO_DEVTOOLS_PROJECT", path.as_str())
+    };
+    let Some(root) = std::env::var_os(key).map(std::path::PathBuf::from) else {
+        return Ok(PluginValue::Bool(false));
+    };
+    if ![line, column]
+        .into_iter()
+        .all(|number| number.fract() == 0. && (1. ..=f64::from(u32::MAX)).contains(number))
+    {
+        return Err("invalid source position".to_owned());
+    }
+    let root = root.canonicalize().map_err(|error| error.to_string())?;
+    let file = root
+        .join(path)
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if !file.starts_with(&root) || !file.is_file() {
+        return Err("source must be inside the project".to_owned());
+    }
+    let mut command;
+    if let Some(editor) = std::env::var_os("VISUAL") {
+        command = std::process::Command::new(editor);
+        command.arg(format!("{}:{line}:{column}", file.display()));
+    } else {
+        let scheme = match std::env::var("IMPASTO_EDITOR").as_deref() {
+            Ok("cursor") => "cursor",
+            Ok("zed") => "zed",
+            _ => "vscode",
+        };
+        let absolute =
+            url::Url::from_file_path(file).map_err(|()| "invalid source URL".to_owned())?;
+        command = std::process::Command::new("open");
+        command.arg(format!(
+            "{scheme}://file{}:{line}:{column}",
+            absolute.path()
+        ));
+    }
+    command.spawn().map_err(|error| error.to_string())?;
+    Ok(PluginValue::Bool(true))
 }

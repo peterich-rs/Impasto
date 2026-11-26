@@ -19,6 +19,9 @@ export function enabled(): boolean {
 export function sourceMap(): string | null {
   return null;
 }
+export function openSource(_path: string, _line: number, _column: number): boolean {
+  return false;
+}
 export function revision(): number {
   return 0;
 }

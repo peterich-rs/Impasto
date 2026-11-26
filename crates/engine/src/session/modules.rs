@@ -17,6 +17,9 @@ pub enum ScriptExecution {
     HeadlessTest,
 }
 
+/// Read a validated package-relative asset with a byte limit.
+pub type AssetReader = Arc<dyn Fn(&str, usize) -> Result<Arc<[u8]>, String> + Send + Sync>;
+
 /// Registry, executor, and shared slots installed on a language session.
 #[derive(Clone)]
 pub struct ModuleConfig {
@@ -28,6 +31,7 @@ pub struct ModuleConfig {
     /// Without a host clock the session uses its explicitly driven frame clock.
     pub transport_clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
     pub script_execution: ScriptExecution,
+    pub asset_reader: Option<AssetReader>,
 }
 
 impl ModuleConfig {
@@ -52,6 +56,7 @@ impl ModuleConfig {
             post_delivery: None,
             transport_clock: None,
             script_execution: ScriptExecution::default(),
+            asset_reader: None,
         }
     }
 }

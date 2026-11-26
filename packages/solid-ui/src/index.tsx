@@ -102,6 +102,7 @@ export { autoFocus, bindFocusRing, useFocus } from "./focus.ts";
 export { t, messagesFor } from "./i18n.ts";
 export { decimal, phone, currency } from "./field/mask.ts";
 export { useTheme } from "./use-theme.ts";
+export { extendThemeTokens } from "./theme-bind.ts";
 export {
   createTheme,
   currentLocale,

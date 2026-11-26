@@ -22,6 +22,8 @@ pub(super) struct NodeStyle {
     class_text: Arc<str>,
     compiled_class: Option<Arc<ParsedClass>>,
     class_list: String,
+    compiled_class_list: Vec<Arc<ParsedClass>>,
+    compiled_class_list_bytes: usize,
     inline: Style,
     imperative: Style,
     animation: Style,
@@ -327,6 +329,14 @@ impl Tree {
         let Some(id) = self.source_owner(source) else {
             return Ok(());
         };
+        let style = self.style_slot_mut(id)?;
+        if let Some(index) = style.extra.iter().position(|extra| {
+            extra.source == source && extra.style.is_empty() && extra.class_text.is_empty()
+        }) {
+            style.extra.remove(index);
+            self.style_source_owners.remove(&source);
+            return Ok(());
+        }
         self.update_sources(id, |next| {
             next.extra.retain(|extra| extra.source != source);
             Ok(())
@@ -366,6 +376,20 @@ impl Tree {
         })
     }
 
+    #[cfg(feature = "js")]
+    pub(crate) fn patch_inline_style(
+        &mut self,
+        id: NodeId,
+        keys: &[Key],
+        declarations: Vec<crate::style::Declaration>,
+    ) -> Result<(), Error> {
+        self.update_sources(id, |next| {
+            clear_keys(&mut next.inline, keys);
+            next.inline.push_fragment(declarations)?;
+            Ok(())
+        })
+    }
+
     /// Resolve and validate the complete candidate before accepting its source.
     fn update_sources(
         &mut self,
@@ -376,9 +400,18 @@ impl Tree {
         let mut next = self.style_slot_mut(id)?.clone();
         write(&mut next)?;
         let env = self.style_env.clone();
-        let _ = self.prepare_style(id, &next, &env)?;
+        let prepared = self.prepare_style(id, &next, &env)?;
+        let can_apply = self.style_queue.is_empty() && !self.style_applying;
+        let inherited = inherited_changed(&next.computed, &prepared.resolved);
         self.style_nodes.insert(id.index, next);
-        self.enqueue_style(id);
+        if can_apply {
+            self.style_applying = true;
+            let result = self.apply_prepared(id, prepared, inherited);
+            self.style_applying = false;
+            result?;
+        } else {
+            self.enqueue_style(id);
+        }
         self.flush_styles()
     }
 
@@ -425,6 +458,48 @@ impl Tree {
         })
     }
 
+    #[cfg(feature = "js")]
+    pub(crate) fn set_compiled_class_list(
+        &mut self,
+        id: NodeId,
+        classes: Vec<Arc<ParsedClass>>,
+        bytes: usize,
+    ) -> Result<(), Error> {
+        self.update_sources(id, |next| {
+            next.class_list.clear();
+            next.compiled_class_list = classes;
+            next.compiled_class_list_bytes = bytes;
+            Ok(())
+        })
+    }
+
+    #[cfg(feature = "js")]
+    pub(crate) fn initialize_template_style(
+        &mut self,
+        id: NodeId,
+        defaults: Option<&Style>,
+        inline: Option<&Style>,
+        class: Option<&crate::style::StaticClass>,
+    ) -> Result<(), Error> {
+        if defaults.is_none() && inline.is_none() && class.is_none() {
+            return Ok(());
+        }
+        self.update_sources(id, |next| {
+            if let Some(defaults) = defaults {
+                next.component = defaults.clone();
+            }
+            if let Some(inline) = inline {
+                next.inline = inline.clone();
+            }
+            if let Some(class) = class {
+                let (text, parsed) = class.clone().into_parts();
+                next.class_text = text;
+                next.compiled_class = Some(parsed);
+            }
+            Ok(())
+        })
+    }
+
     /// Register a style surface. Existing author declarations are checked first.
     ///
     /// A rejected registration leaves the previous surface in place and does not
@@ -449,6 +524,8 @@ impl Tree {
     pub fn set_class_list(&mut self, id: NodeId, text: &str) -> Result<(), Error> {
         self.update_sources(id, |next| {
             next.class_list = text.to_owned();
+            next.compiled_class_list.clear();
+            next.compiled_class_list_bytes = 0;
             Ok(())
         })
     }
@@ -600,17 +677,36 @@ impl Tree {
         env: &crate::style::Environment,
     ) -> Result<Prepared, Error> {
         self.style_resolves = self.style_resolves.saturating_add(1);
-        let (class_style, mut deps) = if let Some(parsed) = &sources.compiled_class
+        let list_bytes = sources.compiled_class_list_bytes;
+        if list_bytes != 0
+            && !sources.class_text.is_empty()
+            && sources
+                .class_text
+                .len()
+                .saturating_add(list_bytes)
+                .saturating_add(1)
+                > crate::style::CLASS_BYTE_LIMIT
+        {
+            return Err(StyleError::ClassTooLong { node: None }.into());
+        }
+        let base_class = if let Some(parsed) = &sources.compiled_class
             && sources.class_list.is_empty()
         {
-            (parsed.select(env, self.interaction(id))?, parsed.deps)
+            Some(Arc::clone(parsed))
         } else if !sources.class_text.is_empty() || !sources.class_list.is_empty() {
             let class_text = combined_class(&sources.class_text, &sources.class_list);
-            let parsed = self.class_cache.get(&class_text)?;
-            (parsed.select(env, self.interaction(id))?, parsed.deps)
+            Some(self.class_cache.get(&class_text)?)
         } else {
-            (Style::new(), crate::style::DepMask::empty())
+            None
         };
+        let classes = base_class.iter().chain(&sources.compiled_class_list);
+        let mut deps = classes
+            .clone()
+            .fold(crate::style::DepMask::empty(), |deps, class| {
+                deps | class.deps
+            });
+        let class_style =
+            ParsedClass::select_sources(classes.map(Arc::as_ref), env, self.interaction(id))?;
         let mut sources = sources.clone();
         for extra in &mut sources.extra {
             if !extra.class_text.is_empty() {
@@ -660,12 +756,21 @@ impl Tree {
         };
         let env = self.style_env.clone();
         let prepared = self.prepare_style(id, &sources, &env)?;
+        let inherited = inherited_changed(&sources.computed, &prepared.resolved);
+        self.apply_prepared(id, prepared, inherited)
+    }
+
+    fn apply_prepared(
+        &mut self,
+        id: NodeId,
+        prepared: Prepared,
+        inherited: bool,
+    ) -> Result<(), Error> {
         if prepared.layout != self.node(id)?.style {
             self.write_style(id, prepared.layout)?;
         }
         self.apply_presentation(id, prepared.presentation)?;
         self.apply_box_flags(id, &prepared.resolved)?;
-        let inherited = inherited_changed(&sources.computed, &prepared.resolved);
         if let Some(slot) = self.style_nodes.get_mut(&id.index) {
             slot.computed = prepared.resolved;
             slot.computed_ready = true;
@@ -877,6 +982,8 @@ impl Tree {
                 class_text: Arc::default(),
                 compiled_class: None,
                 class_list: String::new(),
+                compiled_class_list: Vec::new(),
+                compiled_class_list_bytes: 0,
                 inline: Style::new(),
                 imperative: Style::new(),
                 animation: Style::new(),

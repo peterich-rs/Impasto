@@ -32,6 +32,10 @@ impl Decoder {
 }
 
 impl ImageDecoder for Decoder {
+    fn read_packaged_asset(&self, relative: &str, limit: usize) -> Result<Arc<[u8]>, String> {
+        embedder::read_packaged_file(&self.root, relative, limit)
+    }
+
     fn decode(&self, source: &str) -> Result<ImageHandle, ImageError> {
         self.decode_at(source, 1)
     }

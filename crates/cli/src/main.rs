@@ -14,6 +14,7 @@ mod local_registry;
 mod packages;
 mod plugins;
 mod run;
+mod size;
 mod symbols;
 mod sync;
 mod test;
@@ -41,6 +42,12 @@ enum Command {
         name: String,
         #[arg(long)]
         with_rust: bool,
+        /// Generate a native plugin instead of an application.
+        #[arg(long, conflicts_with = "with_rust")]
+        plugin: bool,
+        /// Platform projects to generate for a plugin.
+        #[arg(long, value_delimiter = ',', requires = "plugin")]
+        platforms: Vec<String>,
     },
     /// Add an application-local Rust crate.
     InitRust,
@@ -75,6 +82,12 @@ enum Command {
         /// Check a bundle update against the native manifest from an installed app.
         #[arg(long)]
         installed_manifest: Option<PathBuf>,
+        /// Write bytecode chunk sizes and rendered module contributions as JSON.
+        #[arg(long)]
+        analyze_size: bool,
+        /// Save the bundle size report to this JSON path.
+        #[arg(long)]
+        size_json: Option<PathBuf>,
         /// Build an iOS Simulator app without device signing.
         #[arg(long)]
         ios_simulator: bool,
@@ -111,14 +124,28 @@ enum Command {
         #[arg(long)]
         tsc: Option<PathBuf>,
         /// Check the TypeScript fixture against the runtime's standard declarations.
-        #[arg(long, conflicts_with = "platform")]
+        #[arg(long, conflicts_with_all = ["platform", "all_targets", "deny_warnings"])]
         standard: bool,
+        /// Check each target declared by the project.
+        #[arg(long, conflicts_with = "platform")]
+        all_targets: bool,
+        /// Treat compiler warnings as errors.
+        #[arg(long)]
+        deny_warnings: bool,
     },
     /// Add an Impasto package and optionally its corresponding Rust dependency.
     Add {
         package: String,
         #[arg(long)]
         rust: bool,
+    },
+    /// Remove an explicitly declared package and refresh generated glue.
+    Remove { package: String },
+    /// Refresh the locked revisions of Git dependencies.
+    Update {
+        package: Option<String>,
+        #[arg(long, requires = "package")]
+        tag: Option<String>,
     },
     /// Run tests without opening a window.
     Test {
@@ -137,6 +164,12 @@ enum Command {
         /// Explicitly update the references used by screen.snapshot.
         #[arg(long, requires = "gpu")]
         update_snapshots: bool,
+        /// Re-run affected test entries when a source file changes.
+        #[arg(long)]
+        watch: bool,
+        /// Run test cases whose full names contain this text.
+        #[arg(short = 'k', long)]
+        filter: Option<String>,
     },
     /// Assemble a relocatable SDK from the current Impasto executable.
     SdkDist { output: PathBuf },
@@ -161,7 +194,7 @@ enum Command {
     Clean,
     /// Open a standalone diagnostics client, optionally forwarding a USB device.
     Devtools(devtools::Options),
-    /// Package-manager commands. Only `get` is implemented.
+    /// Package-manager commands.
     Packages {
         #[command(subcommand)]
         command: PackagesCommand,
@@ -176,7 +209,16 @@ enum PackagesCommand {
 
 fn main() -> ExitCode {
     match Cli::parse().command {
-        Command::Create { name, with_rust } => finish(create::create(&name, with_rust)),
+        Command::Create {
+            name,
+            with_rust,
+            plugin,
+            platforms,
+        } => finish(if plugin {
+            create::plugin(&name, &platforms)
+        } else {
+            create::create(&name, with_rust)
+        }),
         Command::InitRust => finish(create::init_rust()),
         Command::Run {
             device,
@@ -196,6 +238,8 @@ fn main() -> ExitCode {
             target,
             platform,
             installed_manifest,
+            analyze_size,
+            size_json,
             ios_simulator,
             export_options,
             debug,
@@ -213,6 +257,10 @@ fn main() -> ExitCode {
             ios_simulator,
             export_options.as_deref(),
             installed_manifest.as_deref(),
+            size::Request {
+                summary: analyze_size,
+                path: size_json.as_deref(),
+            },
         )),
         Command::Pack {
             entry,
@@ -235,12 +283,23 @@ fn main() -> ExitCode {
             platform,
             tsc,
             standard,
+            all_targets,
+            deny_warnings,
         } => finish(if standard {
             analyze::standard(tsc.as_deref())
         } else {
-            analyze::analyze(platform.as_deref(), tsc.as_deref())
+            analyze::analyze(
+                platform.as_deref(),
+                tsc.as_deref(),
+                all_targets,
+                deny_warnings,
+            )
         }),
         Command::Add { package, rust } => finish(packages::add(&package, rust)),
+        Command::Remove { package } => finish(packages::remove(&package)),
+        Command::Update { package, tag } => {
+            finish(packages::update(package.as_deref(), tag.as_deref()))
+        }
         Command::Test {
             bundle,
             framework,
@@ -248,13 +307,19 @@ fn main() -> ExitCode {
             trace,
             gpu,
             update_snapshots,
+            watch,
+            filter,
         } => finish(test::test(
             bundle,
             framework,
             platform.as_deref(),
-            trace,
-            gpu,
-            update_snapshots,
+            test::Options {
+                trace,
+                gpu,
+                update: update_snapshots,
+                watch,
+                filter,
+            },
         )),
         Command::SdkDist { output } => finish(distribute::write(&output)),
         Command::Symbolicate {

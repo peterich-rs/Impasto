@@ -35,6 +35,7 @@ pub fn install_console<'js>(
         ("warn", 2),
         ("error", 3),
         ("debug", 4),
+        ("trace", 4),
     ] {
         let function = Function::new(
             ctx.clone(),
@@ -43,6 +44,12 @@ pub fn install_console<'js>(
                 for arg in args.0 {
                     let text = rquickjs::Coerced::<String>::from_js(&ctx, arg)?;
                     parts.push(text.0);
+                }
+                if name == "trace"
+                    && let Some(stack) =
+                        rquickjs::Exception::from_message(ctx.clone(), "trace")?.stack()
+                {
+                    parts.push(stack);
                 }
                 log(level, &parts.join(" "));
                 Ok(())
@@ -234,6 +241,7 @@ declare const console: {
   warn(...values: unknown[]): void;
   error(...values: unknown[]): void;
   debug(...values: unknown[]): void;
+  trace(...values: unknown[]): void;
   time(label?: string): void;
   timeLog(label?: string): void;
   timeEnd(label?: string): void;

@@ -2,6 +2,7 @@
 
 use rquickjs::qjs::{self, size_t};
 use rquickjs::{Ctx, Module, Persistent, Promise};
+use std::{collections::BTreeMap, ops::Range, sync::Arc};
 
 use crate::compiler::bytecode::{self, BytecodeError, CompiledBytecode, Kind};
 
@@ -37,14 +38,106 @@ impl<'a> TrustedBytecode<'a> {
                 Ok(None)
             }
             Kind::Module => {
-                // SAFETY: the validated mode matches the trusted module payload.
-                let module = unsafe { Module::load(ctx.clone(), envelope.payload) }
+                let module = TrustedModule(envelope.payload)
+                    .declare(ctx)
                     .map_err(|error| caught(ctx, error))?;
                 let (_, promise) = module.eval().map_err(|error| caught(ctx, error))?;
                 Ok(Some(Persistent::save(ctx, promise)))
             }
+            Kind::Archive => Err(BytecodeError::Script(
+                "an archive needs the in-memory module loader".to_owned(),
+            )),
         }
     }
+
+    pub(crate) fn archive(self) -> Result<Option<TrustedArchive>, BytecodeError> {
+        let envelope = bytecode::open(self.0)?;
+        if envelope.kind == Kind::Archive {
+            TrustedArchive::read(envelope.payload).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+pub(crate) struct TrustedModule<'a>(&'a [u8]);
+
+impl TrustedModule<'_> {
+    pub(crate) fn declare<'js>(&self, ctx: &Ctx<'js>) -> rquickjs::Result<Module<'js>> {
+        // SAFETY: this wrapper is only created from the trusted module or archive envelope.
+        unsafe { Module::load(ctx.clone(), self.0) }
+    }
+}
+
+pub(crate) struct TrustedArchive {
+    pub(crate) entry: String,
+    modules: BTreeMap<String, Range<usize>>,
+    bytes: Arc<[u8]>,
+}
+
+impl TrustedArchive {
+    fn read(bytes: &[u8]) -> Result<Self, BytecodeError> {
+        let invalid = || BytecodeError::Script("invalid bytecode archive directory".to_owned());
+        let (entry, mut rest) = take_name(bytes).ok_or_else(invalid)?;
+        let (count, tail) = rest.split_at_checked(4).ok_or_else(invalid)?;
+        rest = tail;
+        let count = u32::from_le_bytes(count.try_into().map_err(|_| invalid())?);
+        if usize::try_from(count).map_err(|_| invalid())? > rest.len() / 18 {
+            return Err(invalid());
+        }
+        let mut modules = BTreeMap::new();
+        let mut previous_end = 0usize;
+        for _ in 0..count {
+            let (name, tail) = take_name(rest).ok_or_else(invalid)?;
+            let (pair, tail) = tail.split_at_checked(16).ok_or_else(invalid)?;
+            rest = tail;
+            let read = |data: &[u8]| {
+                usize::try_from(u64::from_le_bytes(data.try_into().map_err(|_| invalid())?))
+                    .map_err(|_| invalid())
+            };
+            let offset = read(&pair[..8])?;
+            let size = read(&pair[8..])?;
+            let end = offset.checked_add(size).ok_or_else(invalid)?;
+            if size == 0
+                || Some(offset) != previous_end.checked_next_multiple_of(8)
+                || modules
+                    .last_key_value()
+                    .is_some_and(|(previous, _): (&String, _)| previous.as_str() >= name)
+            {
+                return Err(invalid());
+            }
+            modules.insert(name.to_owned(), offset..end);
+            previous_end = end;
+        }
+        let data = (bytes.len() - rest.len()).next_multiple_of(8);
+        let payload = bytes.get(data..).ok_or_else(invalid)?;
+        if payload.len() != previous_end || !modules.contains_key(entry) {
+            return Err(invalid());
+        }
+        Ok(Self {
+            entry: entry.to_owned(),
+            modules,
+            bytes: Arc::from(payload),
+        })
+    }
+
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        self.modules.keys().map(String::as_str)
+    }
+
+    pub(crate) fn module(&self, name: &str) -> Option<TrustedModule<'_>> {
+        self.bytes
+            .get(self.modules.get(name)?.clone())
+            .map(TrustedModule)
+    }
+}
+
+fn take_name(bytes: &[u8]) -> Option<(&str, &[u8])> {
+    let (length, bytes) = bytes.split_at_checked(2)?;
+    let length = usize::from(u16::from_le_bytes(length.try_into().ok()?));
+    let (name, bytes) = bytes.split_at_checked(length)?;
+    let name = std::str::from_utf8(name).ok()?;
+    crate::host::valid_specifier(name).then_some((name, bytes))
 }
 
 /// # Safety

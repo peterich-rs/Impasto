@@ -52,9 +52,15 @@ struct JavaScriptPackage {
     exports: BTreeMap<String, String>,
 }
 
-pub fn discover(root: &Path) -> Result<BTreeMap<String, Dependency>> {
+pub(crate) struct Discovery {
+    pub plugins: BTreeMap<String, Dependency>,
+    pub sources: BTreeMap<String, PathBuf>,
+}
+
+pub(crate) fn discover(root: &Path, refresh: Option<Option<&str>>) -> Result<Discovery> {
     let framework = toolchain::framework()?;
     let root = root.canonicalize()?;
+    let mut resolver = crate::dependencies::Resolver::new(&root, &framework, refresh)?;
     let mut found = BTreeMap::<String, Dependency>::new();
     let mut edges = BTreeMap::<PathBuf, BTreeSet<PathBuf>>::new();
     let mut pending = vec![root.clone()];
@@ -69,7 +75,7 @@ pub fn discover(root: &Path) -> Result<BTreeMap<String, Dependency>> {
         } else {
             serde_json::Value::Null
         };
-        let explicit = crate::dependencies::declared(&owner, &framework)?;
+        let explicit = resolver.dependencies(&owner)?;
         let mut manifest_entries = manifest
             .get("dependencies")
             .and_then(serde_json::Value::as_object)
@@ -159,7 +165,11 @@ pub fn discover(root: &Path) -> Result<BTreeMap<String, Dependency>> {
             }
         }
     }
-    Ok(found)
+    ordered_plugins(&found)?;
+    Ok(Discovery {
+        plugins: found,
+        sources: resolver.finish()?,
+    })
 }
 
 fn ordered_plugins(plugins: &BTreeMap<String, Dependency>) -> Result<Vec<&str>> {
@@ -396,7 +406,7 @@ struct InstalledContract {
 }
 
 // Increment when generated JavaScript requires a new scene or runtime binding.
-const SCRIPT_ABI: u32 = 2;
+const SCRIPT_ABI: u32 = 4;
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -444,6 +454,19 @@ impl NativeBuild {
                 })
                 .collect(),
         };
+        Ok(serde_json::to_vec_pretty(&contract)?)
+    }
+
+    pub(crate) fn snapshot_for(&self, linked: &bundler::Bundle) -> Result<Vec<u8>> {
+        let mut contract: serde_json::Value = serde_json::from_slice(&self.snapshot()?)?;
+        let mut chunks = BTreeMap::from([("app.js", &linked.entry_native_use)]);
+        chunks.extend(
+            linked
+                .chunks
+                .iter()
+                .map(|(name, chunk)| (name.as_str(), &chunk.native_use)),
+        );
+        contract["nativeUseByChunk"] = serde_json::to_value(chunks)?;
         Ok(serde_json::to_vec_pretty(&contract)?)
     }
 
@@ -634,7 +657,7 @@ pub(crate) fn cargo_package(root: &Path) -> Result<(PathBuf, String)> {
 fn resolve(app: &App, target: &str) -> Result<Resolved> {
     let mut result = Resolved::default();
     let framework = toolchain::framework()?;
-    for (name, root) in crate::dependencies::declared(&app.root, &framework)? {
+    for (name, root) in &app.sources {
         if root.join("plugin.toml").is_file() || root.starts_with(framework.join("packages")) {
             continue;
         }
@@ -651,7 +674,7 @@ fn resolve(app: &App, target: &str) -> Result<Resolved> {
             validate_specifier(&specifier)?;
             result
                 .entries
-                .insert(specifier, under(&root, Path::new(&entry))?);
+                .insert(specifier, under(root, Path::new(&entry))?);
         }
     }
     for alias in ordered_plugins(&app.plugins)? {
@@ -1666,6 +1689,12 @@ mod permission_tests {
         };
         let retained = BTreeSet::from([owner]);
         let bundle = |export: Option<&str>| bundler::Bundle {
+            inputs: Default::default(),
+            chunks: Default::default(),
+            rendered_modules: Default::default(),
+            entry_native_use: Default::default(),
+            entry_imports: Vec::new(),
+            pool_consumers: Default::default(),
             code: String::new(),
             warnings: Vec::new(),
             source_map: None,

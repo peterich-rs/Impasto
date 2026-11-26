@@ -10,7 +10,7 @@ import type { Node, SceneOptions } from "../src/tree.ts";
 export type TextGradient = SpanGradient;
 export type TextRun = TextSpanData;
 
-function textContent(value: unknown): string {
+export function textContent(value: unknown): string {
   if (typeof value === "function") {
     return textContent((value as () => unknown)());
   }

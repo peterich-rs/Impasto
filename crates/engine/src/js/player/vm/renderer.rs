@@ -5,10 +5,10 @@ use super::bindings::{
 };
 use super::*;
 use crate::motion::ScrollAxis;
-use crate::style::StyleOrigin;
+use crate::scene::template::{self, TemplateImage, TemplateKind};
+use crate::style::{Declaration, DisplayMode, FlexDir, Property, Style, StyleOrigin, codec};
 use crate::tree::NodeId;
 use rquickjs::{Coerced, FromJs};
-use std::collections::HashSet;
 
 pub(super) fn call<'js>(
     host: &Host,
@@ -29,24 +29,10 @@ pub(super) fn call<'js>(
             },
         ),
         "setProp" => set_prop(host, ctx, args),
-        "defineStyle" => {
-            let source = value(ctx, args, 0);
-            let style = if source.is_string() {
-                crate::style::static_pool::decode_style(&String::from_js(ctx, source)?)
-            } else {
-                let value = decode_style(ctx, source, 0, &mut 0)?;
-                crate::style::codec::from_value(&value).map_err(|error| error.to_string())
-            }
-            .map_err(|error| type_error(ctx, &error))?;
-            let mut styles = host.inner().static_styles.borrow_mut();
-            let index = u16::try_from(styles.len())
-                .map_err(|_| type_error(ctx, "static style pool is full"))?;
-            styles.push(style);
-            index.into_js(ctx)
-        }
+        "defineStyle" => define_style(host, ctx, value(ctx, args, 0))?.into_js(ctx),
         "applyStaticStyle" => {
             let id = node_id(ctx, args, 0)?;
-            let index = u16::from_js(ctx, value(ctx, args, 1))?;
+            let index = style_handle(host, ctx, value(ctx, args, 1))?;
             let mut style = host
                 .inner()
                 .static_styles
@@ -56,7 +42,7 @@ pub(super) fn call<'js>(
                 .ok_or_else(|| type_error(ctx, "unknown static style"))?;
             if let Some(opacity) = args.get(2) {
                 let opacity = decode_style(ctx, opacity.clone(), 0, &mut 0)?;
-                let declarations = crate::style::codec::declarations("opacity", &opacity)
+                let declarations = codec::declarations("opacity", &opacity)
                     .map_err(|error| type_error(ctx, &error.to_string()))?;
                 style
                     .push_fragment(declarations)
@@ -70,6 +56,78 @@ pub(super) fn call<'js>(
                     origin: StyleOrigin::Inline,
                     replace: true,
                     style,
+                },
+            )?;
+            Ok(Value::new_undefined(ctx.clone()))
+        }
+        "patchInlineStyle" => {
+            let id = node_id(ctx, args, 0)?;
+            let selector = value(ctx, args, 1);
+            let style = decode_style(ctx, value(ctx, args, 2), 0, &mut 0)?;
+            let error = |error: crate::style::StyleError| type_error(ctx, &error.to_string());
+            let (keys, declarations): (Vec<_>, _) = if selector.is_array() {
+                let properties = Vec::<String>::from_js(ctx, selector)?;
+                let mut keys = Vec::new();
+                for key in properties {
+                    keys.extend(
+                        codec::declarations(&key, &codec::Value::Null)
+                            .map_err(error)?
+                            .iter()
+                            .map(Declaration::key),
+                    );
+                }
+                let declarations =
+                    crate::style::flatten(&codec::from_value(&style).map_err(error)?);
+                if declarations.keys().any(|key| !keys.contains(key)) {
+                    return Err(type_error(
+                        ctx,
+                        "style patch defines a key outside its selector",
+                    ));
+                }
+                (keys, declarations.into_values().collect())
+            } else {
+                let name = String::from_js(ctx, selector)?;
+                let keys = codec::declarations(&name, &codec::Value::Null)
+                    .map_err(error)?
+                    .iter()
+                    .map(Declaration::key)
+                    .collect();
+                let declarations = codec::declarations(&name, &style).map_err(error)?;
+                (keys, declarations)
+            };
+            apply(
+                host,
+                ctx,
+                Mutation::InlinePatch {
+                    id,
+                    keys: keys.into(),
+                    declarations,
+                },
+            )?;
+            Ok(Value::new_undefined(ctx.clone()))
+        }
+        "patchScalarStyle" => {
+            let id = node_id(ctx, args, 0)?;
+            let selector = value(ctx, args, 1);
+            let op = selector
+                .as_int()
+                .and_then(|code| u8::try_from(code).ok())
+                .and_then(codec::ScalarStyleOp::from_code)
+                .ok_or_else(|| type_error(ctx, "invalid scalar style opcode"))?;
+            let style = value(ctx, args, 2);
+            let declarations = if let Some(number) = style.as_number() {
+                op.number(number)
+            } else {
+                codec::declarations(op.name(), &decode_style(ctx, style, 0, &mut 0)?)
+            }
+            .map_err(|error| type_error(ctx, &error.to_string()))?;
+            apply(
+                host,
+                ctx,
+                Mutation::InlinePatch {
+                    id,
+                    keys: op.keys().into(),
+                    declarations,
                 },
             )?;
             Ok(Value::new_undefined(ctx.clone()))
@@ -97,52 +155,68 @@ pub(super) fn call<'js>(
             apply(host, ctx, Mutation::StaticClass(id, class))?;
             Ok(Value::new_undefined(ctx.clone()))
         }
-        "defineTemplate" => {
-            let rows = Vec::<rquickjs::Array>::from_js(ctx, value(ctx, args, 0))?;
-            if rows.is_empty() || rows.len() > 256 {
-                return Err(type_error(ctx, "invalid template size"));
-            }
-            let mut template = Vec::with_capacity(rows.len());
-            for (index, row) in rows.into_iter().enumerate() {
-                let tag: String = row.get(0)?;
-                let parent: usize = row.get(1)?;
-                if (index == 0 && parent != 0) || (index != 0 && parent >= index) {
-                    return Err(type_error(ctx, "invalid template parent"));
+        "applyStaticClassList" => {
+            let id = node_id(ctx, args, 0)?;
+            let indices = Vec::<Option<u16>>::from_js(ctx, value(ctx, args, 1))?;
+            let pool = host.inner().static_classes.borrow();
+            let mut bytes = 0usize;
+            let mut classes = Vec::new();
+            for index in indices.into_iter().flatten() {
+                let (text, parsed) = pool
+                    .get(usize::from(index))
+                    .cloned()
+                    .ok_or_else(|| type_error(ctx, "unknown static class"))?
+                    .into_parts();
+                if !text.is_empty() {
+                    bytes = bytes
+                        .saturating_add(text.len())
+                        .saturating_add(usize::from(bytes != 0));
+                    if bytes > crate::style::CLASS_BYTE_LIMIT {
+                        return Err(type_error(ctx, "static class list is too long"));
+                    }
                 }
-                let create = match tag.as_str() {
-                    "view" => TemplateCreate::View,
-                    "stack" => TemplateCreate::Stack,
-                    "scroll" => TemplateCreate::Scroll,
-                    "text" => TemplateCreate::Text(row.get(2)?),
-                    _ => return Err(type_error(ctx, "unknown template element")),
-                };
-                let style = row
-                    .get::<Option<String>>(3)?
-                    .as_deref()
-                    .map(crate::style::static_pool::decode_style)
-                    .transpose()
-                    .map_err(|error| type_error(ctx, &error))?;
-                let class = row
-                    .get::<Option<String>>(4)?
-                    .as_deref()
-                    .map(crate::style::decode_static_class)
-                    .transpose()
-                    .map_err(|error| type_error(ctx, &error))?;
-                template.push(TemplateNode {
-                    create,
-                    parent,
-                    style,
-                    class,
-                });
+                classes.push(parsed);
             }
-            let mut templates = host.inner().static_templates.borrow_mut();
-            let index = u16::try_from(templates.len())
-                .map_err(|_| type_error(ctx, "static template pool is full"))?;
-            templates.push(template.into_boxed_slice());
-            index.into_js(ctx)
+            drop(pool);
+            apply(host, ctx, Mutation::StaticClassList { id, classes, bytes })?;
+            Ok(Value::new_undefined(ctx.clone()))
+        }
+        "defineTemplate" => {
+            let source = value(ctx, args, 0);
+            let template = if let Some(encoded) = source.as_string() {
+                decode_template(
+                    host,
+                    ctx,
+                    &encoded.to_string()?,
+                    value(ctx, args, 1),
+                    value(ctx, args, 2),
+                )?
+            } else {
+                legacy_template(ctx, source)?
+            };
+            store_template(host, ctx, template)?.into_js(ctx)
         }
         "instantiateTemplate" => {
-            let index = u16::from_js(ctx, value(ctx, args, 0))?;
+            let source = value(ctx, args, 0);
+            let index = if let Some(descriptor) = source.as_array() {
+                if let Some(index) = descriptor.get::<Option<u16>>(3)? {
+                    index
+                } else {
+                    let encoded: String = descriptor.get(0)?;
+                    let template = decode_template(
+                        host,
+                        ctx,
+                        &encoded,
+                        descriptor.get(1)?,
+                        descriptor.get(2)?,
+                    )?;
+                    let index = store_template(host, ctx, template)?;
+                    descriptor.set(3, index)?;
+                    index
+                }
+            } else {
+                u16::from_js(ctx, source)?
+            };
             let with_bindings =
                 Option::<bool>::from_js(ctx, value(ctx, args, 1))?.unwrap_or_default();
             let inner = host.inner();
@@ -170,6 +244,17 @@ pub(super) fn call<'js>(
                     .into_js(ctx);
             }
             (root.to_raw() as f64).into_js(ctx)
+        }
+        "compileHotFactory" => {
+            let filename = string(ctx, args, 0)?;
+            let body = string(ctx, args, 1)?;
+            let mut options = rquickjs::context::EvalOptions::default();
+            options.filename = Some(filename);
+            options.strict = false;
+            ctx.eval_with_options(
+                format!("(function(module, exports, require) {{\n{body}\n}})"),
+                options,
+            )
         }
         "insertNode" => {
             if args.len() < 2 {
@@ -219,57 +304,244 @@ pub(super) fn call<'js>(
         _ => Err(type_error(ctx, "unknown renderer primitive")),
     }
 }
+fn define_style<'js>(host: &Host, ctx: &Ctx<'js>, source: Value<'js>) -> rquickjs::Result<u16> {
+    let style = if source.is_string() {
+        crate::style::static_pool::decode_style(&String::from_js(ctx, source)?)
+    } else {
+        let value = decode_style(ctx, source, 0, &mut 0)?;
+        codec::from_value(&value).map_err(|error| error.to_string())
+    }
+    .map_err(|error| type_error(ctx, &error))?;
+    let mut styles = host.inner().static_styles.borrow_mut();
+    let index =
+        u16::try_from(styles.len()).map_err(|_| type_error(ctx, "static style pool is full"))?;
+    styles.push(style);
+    Ok(index)
+}
+
+fn style_handle<'js>(host: &Host, ctx: &Ctx<'js>, source: Value<'js>) -> rquickjs::Result<u16> {
+    let Some(descriptor) = source.as_array() else {
+        return u16::from_js(ctx, source);
+    };
+    if let Some(index) = descriptor.get::<Option<u16>>(1)? {
+        return Ok(index);
+    }
+    let index = define_style(host, ctx, descriptor.get(0)?)?;
+    descriptor.set(1, index)?;
+    Ok(index)
+}
+
+fn store_template(
+    host: &Host,
+    ctx: &Ctx<'_>,
+    template: Vec<TemplateNode>,
+) -> rquickjs::Result<u16> {
+    let mut templates = host.inner().static_templates.borrow_mut();
+    let index = u16::try_from(templates.len())
+        .map_err(|_| type_error(ctx, "static template pool is full"))?;
+    templates.push(template.into_boxed_slice());
+    Ok(index)
+}
+
+fn template_create(
+    ctx: &Ctx<'_>,
+    kind: TemplateKind,
+    text: Option<String>,
+    image: Option<TemplateImage>,
+) -> rquickjs::Result<(TemplateCreate, Option<Style>)> {
+    let preset = match kind {
+        TemplateKind::Row => Some(Property::FlexDirection(FlexDir::Row)),
+        TemplateKind::Column => Some(Property::FlexDirection(FlexDir::Column)),
+        TemplateKind::Grid => Some(Property::Display(DisplayMode::Grid)),
+        _ => None,
+    };
+    let defaults = preset
+        .map(|property| Style::fragment(vec![Declaration::Set(property)]))
+        .transpose()
+        .map_err(|error| type_error(ctx, &error.to_string()))?;
+    let create = match kind {
+        TemplateKind::View | TemplateKind::Row | TemplateKind::Column | TemplateKind::Grid => {
+            TemplateCreate::View
+        }
+        TemplateKind::RepaintBoundary => TemplateCreate::RepaintBoundary,
+        TemplateKind::Stack => TemplateCreate::Stack,
+        TemplateKind::Scroll => TemplateCreate::Scroll,
+        TemplateKind::Image => TemplateCreate::Image(image),
+        TemplateKind::Text => {
+            TemplateCreate::Text(text.ok_or_else(|| type_error(ctx, "missing template text"))?)
+        }
+    };
+    Ok((create, defaults))
+}
+
+fn legacy_template<'js>(ctx: &Ctx<'js>, source: Value<'js>) -> rquickjs::Result<Vec<TemplateNode>> {
+    let rows = Vec::<rquickjs::Array>::from_js(ctx, source)?;
+    if rows.is_empty() || rows.len() > 256 {
+        return Err(type_error(ctx, "invalid template size"));
+    }
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let tag: String = row.get(0)?;
+            let parent: usize = row.get(1)?;
+            if (index == 0 && parent != 0) || (index != 0 && parent >= index) {
+                return Err(type_error(ctx, "invalid template parent"));
+            }
+            let kind = TemplateKind::parse(&tag)
+                .ok_or_else(|| type_error(ctx, "unknown template element"))?;
+            let text = if kind == TemplateKind::Text {
+                Some(row.get(2)?)
+            } else {
+                None
+            };
+            let image = row
+                .get::<Option<Object>>(5)?
+                .map(|record| {
+                    let size = record
+                        .get::<_, Option<rquickjs::Array>>("intrinsic_size_bits")?
+                        .map(|bits| Ok::<_, rquickjs::Error>((bits.get(0)?, bits.get(1)?)))
+                        .transpose()?;
+                    if size.is_some_and(|(w, h)| {
+                        [w, h].into_iter().any(|bits| {
+                            let value = f32::from_bits(bits);
+                            !value.is_finite() || value < 0.
+                        })
+                    }) {
+                        return Err(type_error(ctx, "invalid template image dimensions"));
+                    }
+                    Ok(TemplateImage {
+                        uri: record.get("uri")?,
+                        intrinsic_size_bits: size,
+                        required: record.get("required")?,
+                        alt: record.get("alt")?,
+                    })
+                })
+                .transpose()?;
+            if image.is_some() && kind != TemplateKind::Image {
+                return Err(type_error(ctx, "invalid template image slot"));
+            }
+            let (create, defaults) = template_create(ctx, kind, text, image)?;
+            let style = row
+                .get::<Option<String>>(3)?
+                .as_deref()
+                .map(crate::style::static_pool::decode_style)
+                .transpose()
+                .map_err(|error| type_error(ctx, &error))?;
+            let class = row
+                .get::<Option<String>>(4)?
+                .as_deref()
+                .map(crate::style::decode_static_class)
+                .transpose()
+                .map_err(|error| type_error(ctx, &error))?;
+            Ok(TemplateNode {
+                create,
+                parent,
+                style,
+                defaults,
+                class,
+            })
+        })
+        .collect()
+}
+
+fn decode_template<'js>(
+    host: &Host,
+    ctx: &Ctx<'js>,
+    encoded: &str,
+    style_handles: Value<'js>,
+    class_handles: Value<'js>,
+) -> rquickjs::Result<Vec<TemplateNode>> {
+    let template::Template { rows, images } =
+        template::decode(encoded).map_err(|error| type_error(ctx, &error))?;
+    let style_handles =
+        template_handles(ctx, style_handles, |value| style_handle(host, ctx, value))?;
+    let class_handles = template_handles(ctx, class_handles, |value| {
+        if let Some(get) = value.as_function() {
+            get.call(())
+        } else {
+            u16::from_js(ctx, value)
+        }
+    })?;
+    let inner = host.inner();
+    let styles = inner.static_styles.borrow();
+    let classes = inner.static_classes.borrow();
+    rows.into_iter()
+        .map(|row| {
+            let image = row
+                .image
+                .and_then(|slot| images.get(usize::from(slot)))
+                .cloned();
+            let (create, defaults) = template_create(ctx, row.kind, row.text, image)?;
+            let style = template_dependency(ctx, &style_handles, &styles, row.style)?;
+            let class = template_dependency(ctx, &class_handles, &classes, row.class)?;
+            Ok(TemplateNode {
+                create,
+                parent: usize::from(row.parent),
+                style,
+                defaults,
+                class,
+            })
+        })
+        .collect()
+}
+
+fn template_handles<'js>(
+    ctx: &Ctx<'js>,
+    value: Value<'js>,
+    get: impl Fn(Value<'js>) -> rquickjs::Result<u16>,
+) -> rquickjs::Result<Vec<u16>> {
+    let array = rquickjs::Array::from_js(ctx, value)?;
+    if array.len() > 256 {
+        return Err(type_error(ctx, "too many template dependencies"));
+    }
+    array.iter::<Value>().map(|value| get(value?)).collect()
+}
+
+fn template_dependency<'js, T: Clone>(
+    ctx: &Ctx<'js>,
+    handles: &[u16],
+    pool: &[T],
+    slot: Option<u8>,
+) -> rquickjs::Result<Option<T>> {
+    slot.map(|slot| {
+        let handle = handles
+            .get(usize::from(slot))
+            .ok_or_else(|| type_error(ctx, "missing template dependency"))?;
+        pool.get(usize::from(*handle))
+            .cloned()
+            .ok_or_else(|| type_error(ctx, "unknown template dependency"))
+    })
+    .transpose()
+}
+
 pub(super) fn reconcile_range<'js>(
     host: &Host,
     ctx: &Ctx<'js>,
     args: &[Value<'js>],
 ) -> rquickjs::Result<Value<'js>> {
+    canvas::side_effect(ctx)?;
     let parent = node_id(ctx, args, 0)?;
     let list = |index| {
-        Vec::<Value>::from_js(ctx, value(ctx, args, index))?
-            .iter()
-            .map(|value| handle(ctx, std::slice::from_ref(value), 0))
+        rquickjs::Array::from_js(ctx, value(ctx, args, index))?
+            .iter::<Value>()
+            .map(|value| value.and_then(|value| node_id(ctx, &[value], 0)))
             .collect::<rquickjs::Result<Vec<_>>>()
     };
     let previous = list(1)?;
     let next = list(2)?;
     let anchor = handle(ctx, args, 3)?;
-    let mut before = (anchor != 0).then(|| NodeId::from_raw(anchor));
-    let inner = host.inner();
-    let tree = &inner.tree;
-    let invalid = |_| type_error(ctx, "invalid scene range");
-
-    let retained = next.iter().copied().collect::<HashSet<_>>();
-    for raw in previous {
-        if !retained.contains(&raw) {
-            let child = NodeId::from_raw(raw);
-            let attached = tree.borrow().parent(child).map_err(invalid)? == Some(parent);
-            if attached {
-                apply(host, ctx, Mutation::Remove { parent, child })?;
-            }
-        }
-    }
-    for raw in next.into_iter().rev() {
-        let child = NodeId::from_raw(raw);
-        let already_placed = {
-            let tree = tree.borrow();
-            tree.parent(child).map_err(invalid)? == Some(parent)
-                && tree.next_sibling(child).map_err(invalid)? == before
-        };
-        if !already_placed {
-            apply(
-                host,
-                ctx,
-                Mutation::Insert {
-                    parent,
-                    child,
-                    before,
-                },
-            )?;
-        }
-        before = Some(child);
-    }
-    super::super::frame::bump(&inner.marks.ffi_batches);
+    let before = (anchor != 0).then(|| NodeId::from_raw(anchor));
+    apply(
+        host,
+        ctx,
+        Mutation::ReconcileRange {
+            parent,
+            previous,
+            next,
+            before,
+        },
+    )?;
+    super::super::frame::bump(&host.inner().marks.ffi_batches);
     Ok(Value::new_undefined(ctx.clone()))
 }
 

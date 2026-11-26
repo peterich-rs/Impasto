@@ -1386,6 +1386,10 @@ impl Session for JsSession {
         }
         self.vm.host.next_deadline().map(|deadline| deadline as f64)
     }
+
+    fn inspector_snapshot(&self) -> Option<String> {
+        Some(self.inner.tree.borrow().debug_snapshot_limited(512))
+    }
 }
 
 fn display_fault(message: &str, stack: &str) -> String {

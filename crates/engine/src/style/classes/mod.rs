@@ -81,14 +81,23 @@ pub struct ParsedClass {
 
 impl ParsedClass {
     pub fn select(&self, env: &Environment, state: Interaction) -> Result<Style, StyleError> {
-        let mut matched: Vec<&ClassRule> = self
-            .rules
-            .iter()
-            .filter(|rule| variant_matches(rule.mask, env, state))
-            .collect();
-        matched.sort_by_key(|rule| (rank_key(rule.mask), rule.order));
+        Self::select_sources(std::iter::once(self), env, state)
+    }
+
+    pub(crate) fn select_sources<'a>(
+        sources: impl IntoIterator<Item = &'a Self>,
+        env: &Environment,
+        state: Interaction,
+    ) -> Result<Style, StyleError> {
+        let mut matched = sources
+            .into_iter()
+            .enumerate()
+            .flat_map(|(source, parsed)| parsed.rules.iter().map(move |rule| (source, rule)))
+            .filter(|(_, rule)| variant_matches(rule.mask, env, state))
+            .collect::<Vec<_>>();
+        matched.sort_by_key(|(source, rule)| (rank_key(rule.mask), *source, rule.order));
         let mut style = Style::new();
-        for rule in matched {
+        for (_, rule) in matched {
             style.push_fragment(resolve_tokens(&rule.decls, env)?)?;
         }
         Ok(style)

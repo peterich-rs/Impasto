@@ -54,3 +54,64 @@ export function formatDate(_locale: string, epochMs: number): string {
   const date = new Date(epochMs);
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
+
+import { scene } from "scene";
+import { createSignal } from "solid-js";
+import { defaultLocale, messages } from "virtual:impasto-locales";
+
+declare global {
+  interface ImpastoMessages {}
+}
+
+export type MessageKey = keyof ImpastoMessages extends never ? string : keyof ImpastoMessages;
+type MessageParams = Record<string, string | number>;
+type ArgumentsFor<K> = K extends keyof ImpastoMessages
+  ? keyof ImpastoMessages[K] extends never ? [] : [params: ImpastoMessages[K]]
+  : [params?: MessageParams];
+type Forms = string | { one: string; other: string; zero?: string };
+
+const [locale, setLocale] = createSignal<string | undefined>();
+const [systemLocale, setSystemLocale] = createSignal<string | undefined>();
+
+/** Override the system locale. Pass undefined to follow system settings. */
+export function setLanguage(language: string | undefined): void {
+  setLocale(language?.toLowerCase());
+}
+
+function activeLocale(): string {
+  const selected = locale();
+  if (selected) return selected;
+  if (systemLocale() === undefined) {
+    setSystemLocale(scene.settings().locale.toLowerCase());
+    scene.onSettings(settings => setSystemLocale(settings.locale.toLowerCase()));
+  }
+  return systemLocale() ?? defaultLocale;
+}
+
+/** Format one compiler-indexed message using the active language. */
+export function translateMessage(catalog: Record<string, Forms>, params: MessageParams = {}): string {
+  let language = activeLocale();
+  while (!Object.hasOwn(catalog, language) && language.includes("-")) {
+    language = language.slice(0, language.lastIndexOf("-"));
+  }
+  if (!Object.hasOwn(catalog, language)) language = defaultLocale;
+  const message = catalog[language];
+  const count = params.count;
+  const text = typeof message === "string"
+    ? message
+    : message && (count === 0 && message.zero !== undefined
+      ? message.zero : plural(language, typeof count === "number" ? count : NaN, message));
+  return text?.replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (placeholder, name: string) =>
+    Object.hasOwn(params, name) ? String(params[name]) : placeholder) ?? "";
+}
+
+/** Translate an application message and interpolate its named parameters. */
+export function t<K extends MessageKey>(key: K, ...args: ArgumentsFor<K>): string;
+export function t(key: string, params?: MessageParams): string {
+  return translateCatalog(messages, key, params);
+}
+
+/** Resolve a dynamic key in the catalog selected by the compiler. */
+export function translateCatalog(catalog: Record<string, Record<string, Forms>>, key: string, params?: MessageParams): string {
+  return Object.hasOwn(catalog, key) ? translateMessage(catalog[key], params) : key;
+}

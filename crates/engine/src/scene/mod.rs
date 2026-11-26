@@ -14,6 +14,8 @@ pub mod image;
 mod layer;
 mod paint;
 pub mod shader;
+#[cfg(feature = "style-binary")]
+pub mod template;
 pub mod text;
 
 pub use canvas::{

@@ -14,7 +14,7 @@ export {
   useContext,
 } from "./native.ts";
 
-export { Errored, For, Match, Show, Switch } from "./flow.ts";
+export { Errored, For, Match, Show, Switch, mapFor } from "./flow.ts";
 export type { Accessor, JSX } from "./types.ts";
 
 export { merge } from "./signals.ts";

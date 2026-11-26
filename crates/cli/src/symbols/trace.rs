@@ -6,11 +6,13 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use super::Symbols;
-
 const MAX_PACKET_BYTES: usize = 64 * 1024 * 1024;
 
-pub(super) fn symbolicate(input: &Path, output: &Path, symbols: &Symbols<'_>) -> Result<()> {
+pub(super) fn symbolicate(
+    input: &Path,
+    output: &Path,
+    remap: &impl Fn(&str) -> String,
+) -> Result<()> {
     let mut input = BufReader::new(File::open(input)?);
     let directory = output
         .parent()
@@ -30,7 +32,7 @@ pub(super) fn symbolicate(input: &Path, output: &Path, symbols: &Symbols<'_>) ->
             ensure!(len <= MAX_PACKET_BYTES, "Perfetto packet exceeds 64 MiB");
             packet.resize(len, 0);
             input.read_exact(&mut packet)?;
-            let rewritten = annotate_packet(&packet, symbols)?;
+            let rewritten = annotate_packet(&packet, remap)?;
             delimited(&mut writer, 1, rewritten.as_deref().unwrap_or(&packet))?;
         }
         writer.flush()?;
@@ -39,14 +41,14 @@ pub(super) fn symbolicate(input: &Path, output: &Path, symbols: &Symbols<'_>) ->
     Ok(())
 }
 
-fn annotate_packet(bytes: &[u8], symbols: &Symbols<'_>) -> Result<Option<Vec<u8>>> {
+fn annotate_packet(bytes: &[u8], remap: &impl Fn(&str) -> String) -> Result<Option<Vec<u8>>> {
     let mut input = bytes;
     while !input.is_empty() {
         let start = bytes.len() - input.len();
         let (tag, value) = field(&mut input)?;
         if tag == 11
             && let Some(event) = value
-            && let Some(stack) = source_stack(event, symbols)?
+            && let Some(stack) = source_stack(event, remap)?
         {
             let mut annotation = Vec::new();
             delimited(&mut annotation, 10, b"js_source_stack")?;
@@ -62,7 +64,7 @@ fn annotate_packet(bytes: &[u8], symbols: &Symbols<'_>) -> Result<Option<Vec<u8>
     Ok(None)
 }
 
-fn source_stack(mut event: &[u8], symbols: &Symbols<'_>) -> Result<Option<String>> {
+fn source_stack(mut event: &[u8], remap: &impl Fn(&str) -> String) -> Result<Option<String>> {
     let mut stack = None;
     while !event.is_empty() {
         let (tag, value) = field(&mut event)?;
@@ -87,7 +89,7 @@ fn source_stack(mut event: &[u8], symbols: &Symbols<'_>) -> Result<Option<String
     }
     let Some(stack) = stack else { return Ok(None) };
     let generated = std::str::from_utf8(stack)?;
-    let original = symbols.stack(generated);
+    let original = remap(generated);
     Ok((original != generated).then_some(original))
 }
 
@@ -151,7 +153,10 @@ mod tests {
         let names = super::super::FunctionNames {
             functions: vec![vec![("OriginalWidget".into(), [1, 0, 3, 0])]],
         };
-        let symbols = Symbols::new(&map, &names);
+        let symbols = super::super::Symbols::new(&map, &names);
+        let remap = |input: &str| {
+            super::super::remap_stack(input, |_, line, column| symbols.lookup(line, column))
+        };
         let mut annotation = Vec::new();
         delimited(&mut annotation, 10, b"js_stack")?;
         delimited(
@@ -166,7 +171,7 @@ mod tests {
         delimited(&mut packet, 11, &event)?;
         delimited(&mut packet, 99, b"unrecognized packet field")?;
 
-        let mapped = annotate_packet(&packet, &symbols)?.context("expected a mapped packet")?;
+        let mapped = annotate_packet(&packet, &remap)?.context("expected a mapped packet")?;
         for preserved in [
             event.as_slice(),
             b"unrecognized packet field",
@@ -178,7 +183,7 @@ mod tests {
                     .any(|slice| slice == preserved)
             );
         }
-        assert!(annotate_packet(&mapped, &symbols)?.is_none());
+        assert!(annotate_packet(&mapped, &remap)?.is_none());
         Ok(())
     }
 }
