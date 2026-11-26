@@ -127,6 +127,7 @@ pub(super) struct FrameSubmission {
     pub(super) paused: bool,
     pub(super) again: bool,
     pub(super) tree: Option<Arc<engine::scene::LayerTree>>,
+    pub(super) scene_delta: Option<engine::scene::SceneDelta>,
     pub(super) requirements: Arc<[(Arc<str>, bool)]>,
     pub(super) platform_views: Arc<[engine::tree::PlatformViewPlacement]>,
     pub(super) placements_changed: bool,
@@ -259,21 +260,39 @@ fn render_layers(
     let Some(tree) = submission.tree.as_ref() else {
         return Ok(RasterOutput::finish(again));
     };
-    if !submission.compositor_frame
-        && (layers_changed
+    let scene_delta = submission.scene_delta.as_ref().filter(|_| {
+        layers_changed
+            && !reloaded
+            && census.is_none()
+            && graphics.installed.is_some()
+            && graphics.gpu == Gpu::Live
+            && graphics.surfaces.is_open()
+            && !submission.paused
+    });
+    let incremental = if let Some(delta) = scene_delta {
+        graphics
+            .raster
+            .borrow_mut()
+            .submit_layer_delta(tree, scale, delta)
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    if !submission.compositor_frame && incremental.is_none() {
+        if layers_changed
             || graphics
                 .installed
                 .as_ref()
-                .is_none_or(|installed| installed.scale != scale))
-    {
-        graphics
-            .images
-            .set_layout_targets(tree.image_decode_extents(), scale);
-    }
-    if !submission.compositor_frame
-        && !images_ready(graphics, &submission.requirements, scale, census.as_deref())
-    {
-        return Ok(RasterOutput::finish(reloaded));
+                .is_none_or(|installed| installed.scale != scale)
+        {
+            graphics
+                .images
+                .set_layout_targets(tree.image_decode_extents(), scale);
+        }
+        if !images_ready(graphics, &submission.requirements, scale, census.as_deref()) {
+            return Ok(RasterOutput::finish(reloaded));
+        }
     }
     let mut renderer_work = submission.animated_effects
         || (submission.gpu_views && graphics.raster.borrow().has_registered_gpu_views_in_scene());
@@ -319,80 +338,16 @@ fn render_layers(
             )));
         }
         FrameStep::Submit => {
-            let _trace = tracing::debug_span!(target: "impasto::render", "submit").entered();
-            let bucket = images::scale_bucket(scale);
-            if graphics
-                .installed
-                .as_ref()
-                .is_some_and(|installed| images::scale_bucket(installed.scale) != bucket)
-            {
-                graphics.raster.borrow_mut().invalidate_textures();
-            }
-            graphics.images.install_uploaded(
-                &mut graphics.raster.borrow_mut(),
-                images::scale_bucket(scale),
-            );
-            {
-                let mut raster = graphics.raster.borrow_mut();
-                for (source, frame) in &graphics.external_gpu {
-                    if let Some(image) = &frame.image {
-                        raster.install_uploaded(source, image);
-                    }
-                }
-            }
-            let started = Instant::now();
-            let pixels = graphics
-                .images
-                .snapshot_requirements(&submission.requirements, images::scale_bucket(scale));
-            let resolve = |source: &str| {
-                if source.starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX) {
-                    return graphics.external_textures.get(source).map(|frame| {
-                        raster::ImagePixels {
-                            width: frame.size[0],
-                            height: frame.size[1],
-                            rgba: &frame.pixels,
-                        }
-                    });
-                }
-                pixels
-                    .iter()
-                    .find(|(name, ..)| name == source)
-                    .map(|(_, width, height, rgba)| raster::ImagePixels {
-                        width: *width,
-                        height: *height,
-                        rgba,
-                    })
+            let (submitted, elapsed) = if let Some(incremental) = incremental {
+                let elapsed = incremental.stats.picture_prepare.as_secs_f64() * 1_000.0;
+                (Some(incremental), elapsed)
+            } else {
+                install_scene(graphics, submission)?
             };
-            let submitted =
-                graphics
-                    .raster
-                    .borrow_mut()
-                    .submit_shared_layers(Arc::clone(tree), scale, resolve);
-            submit_ms = elapsed_ms(started);
-            let submitted = match submitted {
-                Ok(submitted) => submitted,
-                Err(status) => {
-                    if status == raster::Status::DeviceLost {
-                        recover_device(graphics)?;
-                        return Ok(RasterOutput::finish(true));
-                    }
-                    tracing::error!(
-                        target: "impasto::render::present",
-                        %status,
-                        "scene submit failed"
-                    );
-                    if let Some(hub) = submission.hub.as_ref() {
-                        hub.error(
-                            "engine",
-                            &format!("scene submit failed: {status}"),
-                            None,
-                            Some(number),
-                        );
-                    }
-                    return Ok(RasterOutput::finish(again));
-                }
+            submit_ms = elapsed;
+            let Some(submitted) = submitted else {
+                return Ok(RasterOutput::finish(again || graphics.gpu == Gpu::Flush));
             };
-            graphics.installed = Some(Installed { scale });
             renderer_work = submission.animated_effects
                 || (submission.gpu_views
                     && graphics.raster.borrow().has_registered_gpu_views_in_scene());
@@ -711,7 +666,94 @@ fn recover_device(graphics: &mut RasterHost) -> Result<(), BootError> {
     Ok(())
 }
 
-fn images_ready(
+pub(super) fn install_scene(
+    graphics: &mut RasterHost,
+    submission: &FrameSubmission,
+) -> Result<(Option<raster::SubmitInfo>, f64), BootError> {
+    let Some(tree) = submission.tree.as_ref() else {
+        return Ok((None, 0.0));
+    };
+    let FrameSubmission { scale, number, .. } = *submission;
+    let _trace = tracing::debug_span!(target: "impasto::render", "submit").entered();
+    let bucket = images::scale_bucket(scale);
+    if graphics
+        .installed
+        .as_ref()
+        .is_some_and(|installed| images::scale_bucket(installed.scale) != bucket)
+    {
+        graphics.raster.borrow_mut().invalidate_textures();
+    }
+    graphics.images.install_uploaded(
+        &mut graphics.raster.borrow_mut(),
+        images::scale_bucket(scale),
+    );
+    {
+        let mut raster = graphics.raster.borrow_mut();
+        for (source, frame) in &graphics.external_gpu {
+            if let Some(image) = &frame.image {
+                raster.install_uploaded(source, image);
+            }
+        }
+    }
+    let started = Instant::now();
+    let pixels = graphics
+        .images
+        .snapshot_requirements(&submission.requirements, images::scale_bucket(scale));
+    let resolve = |source: &str| {
+        if source.starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX) {
+            return graphics
+                .external_textures
+                .get(source)
+                .map(|frame| raster::ImagePixels {
+                    width: frame.size[0],
+                    height: frame.size[1],
+                    rgba: &frame.pixels,
+                });
+        }
+        pixels
+            .iter()
+            .find(|(name, ..)| name == source)
+            .map(|(_, width, height, rgba)| raster::ImagePixels {
+                width: *width,
+                height: *height,
+                rgba,
+            })
+    };
+    let submitted = graphics.raster.borrow_mut().submit_scene(
+        Arc::clone(tree),
+        scale,
+        submission.scene_delta.as_ref(),
+        resolve,
+    );
+    let submit_ms = elapsed_ms(started);
+    let submitted = match submitted {
+        Ok(submitted) => submitted,
+        Err(status) => {
+            if status == raster::Status::DeviceLost {
+                recover_device(graphics)?;
+                return Ok((None, submit_ms));
+            }
+            tracing::error!(
+                target: "impasto::render::present",
+                %status,
+                "scene submit failed"
+            );
+            if let Some(hub) = submission.hub.as_ref() {
+                hub.error(
+                    "engine",
+                    &format!("scene submit failed: {status}"),
+                    None,
+                    Some(number),
+                );
+            }
+            return Ok((None, submit_ms));
+        }
+    };
+    graphics.installed = Some(Installed { scale });
+    Ok((Some(submitted), submit_ms))
+}
+
+pub(super) fn images_ready(
     graphics: &mut RasterHost,
     requirements: &[(Arc<str>, bool)],
     scale: f32,

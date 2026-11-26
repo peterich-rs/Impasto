@@ -1107,6 +1107,7 @@ impl Session for JsSession {
             } else {
                 None
             };
+            let scene_delta = tree.take_scene_delta();
             let generation = tree.image_generation();
             let images = if generation != self.image_generation {
                 self.image_generation = generation;
@@ -1275,6 +1276,7 @@ impl Session for JsSession {
             let again = self.wants_frame();
             crate::session::FrameOutput {
                 layers,
+                scene_delta,
                 again,
                 ime: self.take_ime(),
                 semantics,

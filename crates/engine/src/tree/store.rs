@@ -53,6 +53,7 @@ impl Tree {
             layer_epoch: 0,
             canvas_geometry_epoch: 0,
             layers: crate::scene::LayerTree::empty(),
+            retained_layers: Default::default(),
             shader_effects: HashMap::new(),
             semantics_cache: HashMap::new(),
             semantics_order: Vec::new(),
@@ -855,6 +856,7 @@ impl Tree {
         if let Some(generation) = generation {
             let id = NodeId { index, generation };
             self.remove_shader_effect(id);
+            self.forget_paint_slot(id);
             self.forget_scroll_rules(id);
             self.pictures.remove(&id);
             self.runs.remove(&id);

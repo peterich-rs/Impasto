@@ -662,4 +662,14 @@ Apple M2 Max、Metal、Release、Headless。表内耗时变化取三轮配对百
 
 缩放文字的编码 p95 中位数由 314 µs 降至 144 µs。五组负载均通过暖帧 buffer、BindGroup 和同步 PSO 创建数为零的检查。单独切换不透明叠层的 Early-Z 时，主 Pass GPU p50 下降 45.1%，p95 下降 67.0%。异构卡片的 GPU p95 在三轮配对中的变化中位数为 +2.7%。混合 Canvas 与模糊矩阵的 GPU p95 分别增加约 12% 和 11%。样本记录在 `.metrics/wave2-metal-ab.json` 与 `.metrics/wave2-depth-ab.json`。
 
-附件计划目前使用物理纹理租约和消费依赖。全图虚拟纹理区间预分配仍待实现。Canvas 资产图标沿用路径绘制，MSDF 图集当前覆盖轮廓字形。Compute 图片上传在支持 sRGB 视图的设备上使用每像素 4 字节的存储，保留 1×1 尾级 mip 供极小缩略图采样。字形准备在 Picture 生成后与损伤计算和图片提交并行。Pixel 9 与 iPhone 真机的高刷帧步调须单独采集。
+以上样本采自虚拟附件、Canvas 资产距离场和增量场景提交合入前的版本。Pixel 9 与 iPhone 真机的持续高刷和功耗数据须单独采集。
+
+### 11.2 虚拟附件和场景增量
+
+RenderGraph 为每个临时附件分配帧内身份。排序结束后根据各附件的首次写入和最后一次读取确定区间。区间互不相交且尺寸桶、格式、采样数和用法一致时，共享一个物理纹理。复合、遮罩、Compute 和 Canvas 在编码阶段解析对应视图和 BindGroup。需跨帧保留的内容拥有独立的物理纹理。UIKit 各切片分别排程，命令提交顺序和共享帧上传协议由宿主保持。 [RenderGraph](../crates/raster/src/graph.rs) · [合成器](../crates/raster/src/compositor.rs)
+
+Canvas 可复用的 SVG `Path2D` 保留原坐标的填充或描边轮廓。适合距离场采样的纯色图标与字形共享 MSDF 图集，按几何及填充规则缓存，缩放、位置与着色由实例提供。渐变、目标相关混合、复杂裁剪以及超出距离场尺寸范围的操作沿用原路径绘制。 [Canvas 预处理](../crates/engine/src/canvas/prepare.rs) · [MSDF](../crates/raster/src/msdf.rs)
+
+场景更新带有基线 epoch 和受影响的旧、新层。常用颜色、边框、圆角、裁剪、透明度和变换通过可复用的层属性更新。独立 Picture 的内容变更可就地替换，Raster 仅编译需要更新的 Picture。拓扑变更通过节点和 Picture 的稳定身份关联旧、新层，再用新的检查点校验顺序。基线缺失、图片依赖需要重算、缩放影响编译或场景读取背景时，走对应的完整准备或损伤计算。 [Engine 增量记录](../crates/engine/src/tree/record/retained.rs) · [Raster 提交](../crates/raster/src/lib.rs)
+
+Compute 图片上传在支持 sRGB 视图的设备上使用每像素 4 字节的存储，保留 1×1 尾级 mip 供极小缩略图采样。字形和图标的预处理可在 Picture 生成后与损伤计算及图片提交并行。

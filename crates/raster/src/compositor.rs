@@ -2440,6 +2440,9 @@ impl Frame<'_> {
         Ok(match layer.kind {
             LayerKind::PlatformView { .. } => PictureBounds::Empty,
             LayerKind::Fill { bounds, .. } => PictureBounds::rect(bounds).transform(transform),
+            LayerKind::Paint(slot) => PictureBounds::rect(slot.bounds)
+                .expand(slot.stroke_width * 0.5 + self.scene.scale.recip())
+                .transform(transform),
             LayerKind::Picture { picture } => {
                 let picture = self.scene.pictures.get(&picture).ok_or(Status::BadScene)?;
                 let origin =
@@ -2513,7 +2516,7 @@ impl Frame<'_> {
                         return false;
                     }
                 }
-                LayerKind::PlatformView { .. } | LayerKind::Fill { .. } => {}
+                LayerKind::PlatformView { .. } | LayerKind::Fill { .. } | LayerKind::Paint(_) => {}
                 _ => return false,
             }
         }
@@ -2542,6 +2545,12 @@ impl Frame<'_> {
             let children = layer.first_child;
             match layer.kind {
                 LayerKind::PlatformView { .. } => {}
+                LayerKind::Paint(slot) => {
+                    if let Some(rect) = compiler::paint_slot_rect(slot) {
+                        let coverage = self.coverage(target, clip)?;
+                        self.rects(target, transform, &coverage, &[rect], &[], None)?;
+                    }
+                }
                 LayerKind::Fill {
                     bounds,
                     radius,

@@ -1598,6 +1598,7 @@ fn on_frame(
     let mut reloads = Vec::new();
     let mut census = None;
     let mut layers_changed = false;
+    let mut scene_delta = None;
     let mut placements_changed = false;
     let mut phases = None;
     let mut runtime_sample = None;
@@ -1644,9 +1645,19 @@ fn on_frame(
                             layer_tree_line(&tree)
                         );
                     }
-                    runtime.image_requirements = tree.image_requirements().into();
-                    runtime.animated_effects = tree.has_animated_effects();
-                    runtime.gpu_views = tree.has_gpu_views();
+                    scene_delta = output.scene_delta.take().filter(|delta| {
+                        runtime
+                            .latest
+                            .as_ref()
+                            .is_some_and(|old| old.epoch == delta.base_epoch)
+                    });
+                    if scene_delta.as_ref().is_none_or(|delta| {
+                        !matches!(delta.changes, engine::scene::SceneChanges::LayerValues)
+                    }) {
+                        runtime.image_requirements = tree.image_requirements().into();
+                        runtime.animated_effects = tree.has_animated_effects();
+                        runtime.gpu_views = tree.has_gpu_views();
+                    }
                     runtime.latest = Some(tree);
                     layers_changed = true;
                 }
@@ -1762,6 +1773,7 @@ fn on_frame(
         paused: frame.paused,
         again,
         tree: runtime.latest.clone(),
+        scene_delta,
         requirements: Arc::clone(&runtime.image_requirements),
         platform_views: Arc::clone(&runtime.platform_views),
         placements_changed,

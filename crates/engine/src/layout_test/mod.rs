@@ -249,6 +249,12 @@ pub(super) fn scene_marks_in_layers(tree: &crate::scene::LayerTree) -> Vec<Mark>
             let child = layer.first_child;
             match layer.kind {
                 crate::scene::LayerKind::PlatformView { .. } => {}
+                crate::scene::LayerKind::Paint(slot) => {
+                    let [x, y, ..] = slot.bounds;
+                    if slot.color[3] > 0 || slot.stroke_width > 0.0 {
+                        push_mark(marks, format!("rect:{:?}", slot.color), x, y, ctm, clips);
+                    }
+                }
                 crate::scene::LayerKind::Fill {
                     bounds: [x, y, ..],
                     color,

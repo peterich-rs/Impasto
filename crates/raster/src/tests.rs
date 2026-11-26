@@ -632,6 +632,53 @@ fn staged_texture_replacements_are_published_only_after_valid_submission() {
 mod gpu_extensions;
 
 #[test]
+fn retained_paint_slots_change_pixels_without_picture_compilation() {
+    use engine::scene::SceneChanges;
+    use engine::text::MonoShaper;
+    use engine::tree::Tree;
+
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let mut ui = Tree::new(MonoShaper::default());
+    let rect = ui.decorated([255, 0, 0, 255], 0.0).unwrap();
+    ui.set_size(rect, 20.0, 20.0).unwrap();
+    ui.layout().unwrap();
+    ui.record_layers().unwrap();
+    ui.clear_paint();
+    ui.set_color(rect, [0, 255, 0, 255]).unwrap();
+    ui.record_layers().unwrap();
+    ui.clear_paint();
+    let base = ui.layer_tree();
+    raster.submit_layers(&base, 1.0, |_| None).unwrap();
+    let size = PixelSize::new(64, 64);
+    let green = raster.render_rgba(size).unwrap();
+    assert_eq!(&green[(4 * 64 + 4) * 4..][..4], &[0, 255, 0, 255]);
+
+    ui.set_color(rect, [0, 0, 255, 255]).unwrap();
+    ui.record_layers().unwrap();
+    let delta = ui.take_scene_delta().unwrap();
+    assert_eq!(delta.changes, SceneChanges::LayerValues);
+    assert_eq!(ui.layer_record_visits(), 0);
+    let next = Arc::new(ui.layer_tree());
+    let stats = raster
+        .submit_layer_delta(&next, 1.0, &delta)
+        .unwrap()
+        .unwrap()
+        .stats;
+    assert_eq!(stats.picture_rebuilt, 0);
+    assert!(matches!(stats.damage, crate::DamageRect::Rect(_)));
+    let blue = raster.render_rgba(size).unwrap();
+    assert_eq!(&blue[(4 * 64 + 4) * 4..][..4], &[0, 0, 255, 255]);
+    assert!(
+        raster
+            .submit_layer_delta(&next, 1.0, &delta)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn reusable_canvas_path_keeps_even_odd_holes_and_reuses_the_distance_field() {
     let Some(mut raster) = headless(FontLibrary::new()) else {
         return;

@@ -114,6 +114,8 @@ pub struct FrameOutput {
     /// `Some` when the layer epoch changed. The host submits that tree.
     /// `None` means the host may present the installed tree again.
     pub layers: Option<Arc<crate::scene::LayerTree>>,
+    /// Optional incremental description of the new layer snapshot.
+    pub scene_delta: Option<crate::scene::SceneDelta>,
     pub again: bool,
     pub ime: Option<ImeUpdate>,
     pub semantics: Option<crate::semantics::SemanticsPatch>,
@@ -133,6 +135,7 @@ impl FrameOutput {
     pub fn unchanged() -> Self {
         Self {
             layers: None,
+            scene_delta: None,
             again: false,
             ime: None,
             semantics: None,

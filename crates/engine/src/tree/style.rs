@@ -792,6 +792,23 @@ impl Tree {
         picture_paint.backdrop = next.paint.backdrop;
         picture_paint.blend = next.paint.blend;
         let picture_changed = picture_paint != next.paint;
+        let same_layer_effects = old_paint.blur == next.paint.blur
+            && old_paint.backdrop == next.paint.backdrop
+            && old_paint.blend == next.paint.blend;
+        let alpha = next
+            .paint
+            .alpha
+            .filter(|_| paint_changed && !picture_changed && same_layer_effects);
+        picture_paint.fill = next.paint.fill;
+        picture_paint.stroke_color = next.paint.stroke_color;
+        picture_paint.stroke_width = next.paint.stroke_width;
+        picture_paint.corner_radius = next.paint.corner_radius;
+        picture_paint.corner_radii = next.paint.corner_radii;
+        picture_paint.corner_curve = next.paint.corner_curve;
+        let rect_only = paint_changed
+            && same_layer_effects
+            && old_paint.alpha == next.paint.alpha
+            && picture_paint == next.paint;
         let topology_changed = alpha_bucket(old_paint.alpha.unwrap_or(255))
             != alpha_bucket(next.paint.alpha.unwrap_or(255))
             || (old_paint.blur > 0.0) != (next.paint.blur > 0.0)
@@ -803,6 +820,11 @@ impl Tree {
                     .transform
                     .unwrap_or_else(TransformGeom::identity)
                     .is_identity();
+        let clip_only = rect_only
+            && old_paint.fill.is_none()
+            && next.paint.fill.is_none()
+            && old_paint.stroke_width <= 0.0
+            && next.paint.stroke_width <= 0.0;
         let transform_changed = node.transform.as_deref().copied() != next.transform;
         let mut measure_changed = false;
         let mut text_changed = false;
@@ -838,6 +860,18 @@ impl Tree {
         }
         if measure_changed {
             self.touch_measure(id)?;
+        }
+        if !topology_changed && !text_changed && !image_changed {
+            let patched = if transform_changed {
+                !paint_changed && self.update_transform_slot(id)
+            } else {
+                rect_only && self.update_rect_slot(id)
+                    || clip_only && self.update_clip_radius(id)
+                    || alpha.is_some_and(|alpha| self.update_opacity_slot(id, alpha))
+            };
+            if patched {
+                return Ok(());
+            }
         }
         if picture_changed || text_changed || image_changed {
             self.mark_repaint(id);
@@ -889,7 +923,7 @@ impl Tree {
         let was_hidden = self.node(id)?.flags.contains(NodeFlags::HIDDEN);
         if hidden != was_hidden {
             self.node_mut(id)?.flags.set(NodeFlags::HIDDEN, hidden);
-            self.mark_repaint(id);
+            self.repaint_ancestors(id);
             if hidden {
                 let notices = self.conceal(id);
                 self.style_gestures.extend(notices);
@@ -901,11 +935,7 @@ impl Tree {
         };
         if self.node(id)?.z_index != z {
             self.node_mut(id)?.z_index = z;
-            if let Some(parent) = self.node(id)?.parent {
-                self.mark_repaint(parent);
-            } else {
-                self.mark_repaint(id);
-            }
+            self.repaint_ancestors(id);
         }
         let initial_clip = self
             .style_nodes

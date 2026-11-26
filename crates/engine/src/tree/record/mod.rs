@@ -11,7 +11,11 @@ use super::{NodeId, Tree};
 use crate::Error;
 
 mod pass;
+mod retained;
+
 use pass::{RecordFrame, emit_image, emit_rect, emit_text};
+pub(super) use retained::RetainedLayers;
+use retained::{LayerKey, RecordedOwner, clip_kind, rect_slot};
 
 /// One node in the iterative layer sweep. `expanded` means its children are already stacked.
 #[derive(Clone, Copy)]
@@ -199,10 +203,19 @@ impl Tree {
         self.sync_scroll_offsets();
         self.sync_metrics();
         self.finish_measure();
+        if out.0.is_none() && self.apply_layer_patches() {
+            return Ok(());
+        }
+        let mut previous = std::mem::take(&mut self.retained_layers.spare);
+        std::mem::swap(&mut previous.layers, &mut self.layers.layers);
+        std::mem::swap(&mut previous.pictures, &mut self.layers.pictures);
+        std::mem::swap(&mut previous.keys, &mut self.retained_layers.keys);
+        self.retained_layers.begin();
         self.picture_writes = 0;
         self.layer_record_visits = 0;
         self.layers.layers.clear();
         self.layers.pictures.clear();
+        self.retained_layers.keys.clear();
         self.layers.shader_uniforms.clear();
         self.layer_stack.clear();
         self.layer_tail.clear();
@@ -227,7 +240,15 @@ impl Tree {
         self.finish_compositor_record();
         self.runs.retain(|id, _| self.finished_owners.contains(id));
         debug_assert!(self.layer_stack.is_empty());
+        if self.layers.epoch != self.layer_epoch {
+            self.retained_layers.delta = previous.changes(&self.layers, &self.retained_layers.keys);
+        }
+        previous.layers.clear();
+        previous.pictures.clear();
+        previous.keys.clear();
+        self.retained_layers.spare = previous;
         self.layers.epoch = self.layer_epoch;
+        self.retained_layers.invalid = false;
         Ok(())
     }
 
@@ -336,7 +357,9 @@ impl Tree {
         }
         let is_identity = self.node(id)?.transform().is_identity();
         if was_identity == is_identity {
-            self.paint_layer_value();
+            if !self.update_transform_slot(id) {
+                self.paint_layer_value();
+            }
         } else {
             self.repaint_ancestors(id);
         }
@@ -352,7 +375,9 @@ impl Tree {
                 paint.stroke_color = color;
             });
         }
-        self.mark_repaint(id);
+        if !self.update_rect_slot(id) {
+            self.mark_repaint(id);
+        }
         Ok(())
     }
 
@@ -521,7 +546,9 @@ impl Tree {
                 .values()
                 .any(|rule| rule.prop == ScrollTargetProp::BackgroundColor)
         });
-        emit_rect(commands, node, x, y, replace_background);
+        if at.descend || !self.uses_paint_slot(id) {
+            emit_rect(commands, node, x, y, replace_background);
+        }
         pass::emit_outline(commands, node, x, y);
         if at.descend {
             frame.push_content(commands);
@@ -650,7 +677,7 @@ impl Tree {
             self.emit_layer(id, out, parent_abs, ancestor_scroll, clip);
             return;
         }
-        if self.platform_views.is_empty() && self.is_picture_owner(id) {
+        if self.platform_views.is_empty() && self.is_picture_owner(id) && self.subtree_flat(id) {
             self.emit_picture_owner(id, out, parent_abs, ancestor_scroll, clip);
             return;
         }
@@ -855,11 +882,14 @@ impl Tree {
                     curve: 2.0,
                 })
             });
-            self.push_layer(crate::scene::LayerKind::BackdropMaterial {
-                bounds: [abs.0, abs.1, w, h],
-                corners,
-                material: Arc::clone(material),
-            });
+            self.push_layer(
+                id,
+                crate::scene::LayerKind::BackdropMaterial {
+                    bounds: [abs.0, abs.1, w, h],
+                    corners,
+                    material: Arc::clone(material),
+                },
+            );
             pushed += 1;
             out.push(Command::PushBackdropMaterial {
                 bounds: [at.0, at.1, w, h],
@@ -868,12 +898,15 @@ impl Tree {
             });
         }
         if let Some(color) = fill {
-            let layer = self.note_layer(crate::scene::LayerKind::Fill {
-                bounds: [abs.0, abs.1, w, h],
-                radius,
-                corners,
-                color,
-            });
+            let layer = self.note_layer(
+                id,
+                crate::scene::LayerKind::Fill {
+                    bounds: [abs.0, abs.1, w, h],
+                    radius,
+                    corners,
+                    color,
+                },
+            );
             if let Some(links) = self.motion_layers.get_mut(&id) {
                 links.fill = Some(layer);
             }
@@ -888,6 +921,29 @@ impl Tree {
                 }
                 .command([at.0, at.1, w, h], radius, corners),
             );
+        }
+        if self.uses_paint_slot(id)
+            && let Some(node) = self.get(id)
+        {
+            let slot = rect_slot(node, [abs.0, abs.1, w, h]);
+            let layer = self.note_layer(id, crate::scene::LayerKind::Paint(slot));
+            self.retained_layers.paint.insert(id, layer);
+            if slot.bounds[2] > 0.0
+                && slot.bounds[3] > 0.0
+                && (slot.color[3] > 0 || slot.stroke_width > 0.0)
+            {
+                out.push(
+                    crate::scene::RectPaint {
+                        color: slot.color,
+                        stroke_width: slot.stroke_width,
+                        stroke_color: slot.stroke_color,
+                        gradient: None,
+                        shadow: None,
+                        box_shadows: Arc::from([]),
+                    }
+                    .command([at.0, at.1, w, h], radius, corners),
+                );
+            }
         }
         self.capture(id, parent_abs, out, clip);
         if uniforms.iter().any(Option::is_some) {
@@ -1021,7 +1077,10 @@ impl Tree {
                 let renders = self
                     .get(current)
                     .is_some_and(|node| node.renders_layers(stored.requires_clip_layer()));
-                any |= stored.effects || renders || self.scroll_bindings.contains_key(&current);
+                any |= stored.effects
+                    || renders
+                    || self.scroll_bindings.contains_key(&current)
+                    || self.uses_paint_slot(current);
                 owners |= stored.picture_owners || self.is_picture_owner(current);
                 child = self.get(current).and_then(|node| node.next);
             }
@@ -1239,11 +1298,23 @@ impl Tree {
         // Scroll clips in scene space and only translates by the scroll offset.
         // `local_xy` is relative to that scroll, so using it parks the row above
         // the clip by whatever chrome sits over the list.
-        self.push_layer(crate::scene::LayerKind::Offset { x: abs.0, y: abs.1 });
+        self.push_layer(id, crate::scene::LayerKind::Offset { x: abs.0, y: abs.1 });
+        let picture_index = self.layers.pictures.len();
+        let layer_index = self.layers.layers.len();
         if !self.picture_fresh(id) {
             self.fill_owner(id, abs);
         } else if let Some(picture) = self.pictures.get(&id).cloned() {
             self.adopt_picture(picture);
+        }
+        if self.layers.pictures.len() > picture_index {
+            self.retained_layers.owners.insert(
+                id,
+                RecordedOwner {
+                    picture: picture_index,
+                    layer: crate::scene::LayerId(crate::cast::u32_from_usize(layer_index)),
+                    origin: abs,
+                },
+            );
         }
         let dx = abs.0 - ancestor_scroll.0;
         let dy = abs.1 - ancestor_scroll.1;
@@ -1253,12 +1324,18 @@ impl Tree {
 
     /// Row-local commands. The caller's `Offset` layer places the picture.
     fn fill_owner(&mut self, id: NodeId, abs: (f32, f32)) {
+        let commands = self.record_owner(id, abs);
+        // The offset layer places these commands in the scene.
+        self.store_picture(id, commands, (0.0, 0.0));
+    }
+
+    fn record_owner(&mut self, id: NodeId, abs: (f32, f32)) -> Vec<Command> {
         let Some((x, y)) = self.get(id).map(|node| (node.x, node.y)) else {
-            return;
+            return Vec::new();
         };
         let parent = (abs.0 - x, abs.1 - y);
         let mut commands = Vec::new();
-        let _ = self.record_node(
+        let visits = self.record_node(
             id,
             &mut commands,
             RecordAt {
@@ -1269,9 +1346,10 @@ impl Tree {
                 descend: true,
             },
         );
-        // Commands are local to the row. The Offset layer above is already the
-        // scene position, so a non-zero origin would double the gap between rows.
-        self.store_picture(id, commands, (0.0, 0.0));
+        self.layer_record_visits = self
+            .layer_record_visits
+            .saturating_add(crate::cast::u32_from_usize(visits));
+        commands
     }
 
     fn store_picture(&mut self, id: NodeId, commands: Vec<Command>, origin: (f32, f32)) {
@@ -1298,13 +1376,19 @@ impl Tree {
     fn adopt_picture(&mut self, picture: Arc<crate::scene::Picture>) {
         let id = picture.id;
         self.layers.pictures.push(picture);
-        self.note_layer(crate::scene::LayerKind::Picture { picture: id });
+        self.append_layer(
+            LayerKey::Picture(id),
+            crate::scene::LayerKind::Picture { picture: id },
+        );
     }
 
     fn emit_platform_view(&mut self, id: NodeId) {
         if self.records_platform_view(id) {
             self.close_run();
-            self.note_layer(crate::scene::LayerKind::PlatformView { node: id.to_raw() });
+            self.note_layer(
+                id,
+                crate::scene::LayerKind::PlatformView { node: id.to_raw() },
+            );
         }
     }
 
@@ -1314,7 +1398,16 @@ impl Tree {
         }
     }
 
-    fn note_layer(&mut self, kind: crate::scene::LayerKind) -> crate::scene::LayerId {
+    fn note_layer(&mut self, node: NodeId, kind: crate::scene::LayerKind) -> crate::scene::LayerId {
+        self.append_layer(LayerKey::Node(node, std::mem::discriminant(&kind)), kind)
+    }
+
+    fn append_layer(
+        &mut self,
+        key: LayerKey,
+        kind: crate::scene::LayerKind,
+    ) -> crate::scene::LayerId {
+        self.retained_layers.keys.push(key);
         let id = crate::scene::LayerId(crate::cast::u32_from_usize(self.layers.layers.len()));
         let parent = self.layer_stack.last().copied();
         self.layers.layers.push(crate::scene::Layer {
@@ -1346,8 +1439,8 @@ impl Tree {
         self.layer_tail[slot] = Some(child);
     }
 
-    fn push_layer(&mut self, kind: crate::scene::LayerKind) -> crate::scene::LayerId {
-        let id = self.note_layer(kind);
+    fn push_layer(&mut self, node: NodeId, kind: crate::scene::LayerKind) -> crate::scene::LayerId {
+        let id = self.note_layer(node, kind);
         self.layer_stack.push(id);
         id
     }
@@ -1389,13 +1482,19 @@ impl Tree {
                 .get(&node)
                 .is_some_and(|layers| layers.linked_transform)
         {
-            let layer = self.push_layer(crate::scene::LayerKind::Transform {
-                translate_x: transform.0,
-                translate_y: transform.1,
-                rotate_rad: transform.2,
-                scale_x: transform.3,
-                scale_y: transform.4,
-            });
+            let layer = self.push_layer(
+                node,
+                crate::scene::LayerKind::Transform {
+                    translate_x: transform.0,
+                    translate_y: transform.1,
+                    rotate_rad: transform.2,
+                    scale_x: transform.3,
+                    scale_y: transform.4,
+                },
+            );
+            self.retained_layers
+                .transforms
+                .insert(node, (layer, [abs.0, abs.1, w, h]));
             if let Some(links) = self.motion_layers.get_mut(&node) {
                 links.transform = Some((layer, track_base));
             }
@@ -1407,55 +1506,71 @@ impl Tree {
                 .get(&node)
                 .is_some_and(|layers| layers.transition_opacity)
         {
-            let layer = self.push_layer(crate::scene::LayerKind::Opacity {
-                alpha: alpha.unwrap_or(255),
-                x: abs.0,
-                y: abs.1,
-                w,
-                h,
-            });
+            let layer = self.push_layer(
+                node,
+                crate::scene::LayerKind::Opacity {
+                    alpha: alpha.unwrap_or(255),
+                    x: abs.0,
+                    y: abs.1,
+                    w,
+                    h,
+                },
+            );
+            self.retained_layers.opacity.insert(node, layer);
             if let Some(links) = self.motion_layers.get_mut(&node) {
                 links.opacity = Some(layer);
             }
             pushed += 1;
         }
         if let Some(mode) = blend {
-            self.push_layer(crate::scene::LayerKind::Blend {
-                x: abs.0,
-                y: abs.1,
-                w,
-                h,
-                mode,
-            });
+            self.push_layer(
+                node,
+                crate::scene::LayerKind::Blend {
+                    x: abs.0,
+                    y: abs.1,
+                    w,
+                    h,
+                    mode,
+                },
+            );
             pushed += 1;
         }
         if let Some(sigma) = backdrop {
-            let layer = self.push_layer(crate::scene::LayerKind::BackdropBlur {
-                x: abs.0,
-                y: abs.1,
-                w,
-                h,
-                sigma,
-            });
+            let layer = self.push_layer(
+                node,
+                crate::scene::LayerKind::BackdropBlur {
+                    x: abs.0,
+                    y: abs.1,
+                    w,
+                    h,
+                    sigma,
+                },
+            );
             if let Some(links) = self.motion_layers.get_mut(&node) {
                 links.backdrop = Some(layer);
             }
             pushed += 1;
         }
         if let Some(matrix) = color_filter {
-            self.push_layer(crate::scene::LayerKind::ColorFilter {
-                matrix: Arc::clone(matrix),
-            });
+            self.push_layer(
+                node,
+                crate::scene::LayerKind::ColorFilter {
+                    matrix: Arc::clone(matrix),
+                },
+            );
             pushed += 1;
         }
         if let Some(sigma) = blur {
-            let layer = self.push_layer(crate::scene::LayerKind::Blur {
-                x: abs.0,
-                y: abs.1,
-                w,
-                h,
-                sigma,
-            });
+            let layer = self.push_layer(
+                node,
+                crate::scene::LayerKind::Blur {
+                    x: abs.0,
+                    y: abs.1,
+                    w,
+                    h,
+                    sigma,
+                },
+            );
             if let Some(links) = self.motion_layers.get_mut(&node) {
                 links.blur = Some(layer);
             }
@@ -1476,33 +1591,30 @@ impl Tree {
         let [x, y, w, h] = bounds;
         let mut pushed = 0;
         if effect.scroll {
-            self.push_layer(crate::scene::LayerKind::Clip {
-                x,
-                y,
-                w,
-                h,
-                corner_radius: 0.0,
-            });
-            let layer = self.push_layer(crate::scene::LayerKind::Offset {
-                x: -scroll.0,
-                y: -scroll.1,
-            });
-            if let Some(links) = self.motion_layers.get_mut(&node) {
-                links.scroll = Some(layer);
-            }
-            pushed += 2;
-        } else if effect.clip {
-            self.push_layer(if let Some(corners) = corners {
-                crate::scene::LayerKind::CornerClip { bounds, corners }
-            } else {
+            self.push_layer(
+                node,
                 crate::scene::LayerKind::Clip {
                     x,
                     y,
                     w,
                     h,
-                    corner_radius: radius,
-                }
-            });
+                    corner_radius: 0.0,
+                },
+            );
+            let layer = self.push_layer(
+                node,
+                crate::scene::LayerKind::Offset {
+                    x: -scroll.0,
+                    y: -scroll.1,
+                },
+            );
+            if let Some(links) = self.motion_layers.get_mut(&node) {
+                links.scroll = Some(layer);
+            }
+            pushed += 2;
+        } else if effect.clip {
+            let layer = self.push_layer(node, clip_kind(bounds, radius, corners));
+            self.retained_layers.clips.insert(node, (layer, bounds));
             pushed += 1;
         }
         pushed

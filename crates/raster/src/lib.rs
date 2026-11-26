@@ -179,6 +179,9 @@ struct Frame {
     gpu_view_requests: gpu_view::Requests,
     shader_uniforms: runtime_effect::ShaderUniformOverrides,
     damage: DamageRect,
+    complex_damage: bool,
+    pending_images: bool,
+    has_images: bool,
     has_glyphs: bool,
     revision: u64,
     previous_revision: u64,
@@ -484,6 +487,17 @@ impl Rasterizer {
         &mut self,
         tree: Arc<LayerTree>,
         point_scale: f32,
+        resolve: impl FnMut(&str) -> Option<ImagePixels<'pixels>>,
+    ) -> Result<SubmitInfo, Status> {
+        self.submit_scene(tree, point_scale, None, resolve)
+    }
+
+    /// Installs a checkpoint with an optional incremental damage description.
+    pub fn submit_scene<'pixels>(
+        &mut self,
+        tree: Arc<LayerTree>,
+        point_scale: f32,
+        delta: Option<&engine::scene::SceneDelta>,
         mut resolve: impl FnMut(&str) -> Option<ImagePixels<'pixels>>,
     ) -> Result<SubmitInfo, Status> {
         if !point_scale.is_finite() || point_scale <= 0.0 {
@@ -539,6 +553,8 @@ impl Rasterizer {
         };
         let mut pictures = HashMap::with_capacity(tree.pictures.len());
         let mut has_glyphs = false;
+        let mut pending_images = false;
+        let mut has_images = false;
         let mut rebuilt_atlas_pictures = HashSet::new();
         for picture in &tree.pictures {
             let compile_scale = compile_scale(picture.id);
@@ -609,6 +625,8 @@ impl Rasterizer {
                 Arc::new(result)
             };
             has_glyphs |= compiled.has_glyphs;
+            pending_images |= !compiled.waiting.is_empty();
+            has_images |= !picture.images().is_empty();
             if pictures.insert(picture.id, compiled).is_some() {
                 return Err(Status::BadScene);
             }
@@ -628,7 +646,7 @@ impl Rasterizer {
                     return Err(Status::BadScene);
                 }
                 #[cfg(target_os = "ios")]
-                LayerKind::Picture { .. } | LayerKind::Fill { .. } => {
+                LayerKind::Picture { .. } | LayerKind::Fill { .. } | LayerKind::Paint(_) => {
                     if let Some(slice) = slices.last_mut() {
                         let mut ancestor = Some(id);
                         while let Some(parent) = ancestor {
@@ -647,6 +665,21 @@ impl Rasterizer {
         }
         let platform_views: Arc<[u64]> = views.into();
         let gpu_view_requests = self.gpu_views.requests(&tree, &scales, point_scale);
+        let complex_damage = !platform_views.is_empty()
+            || pictures
+                .values()
+                .any(|picture| picture.has_shader_effect || picture.reads_root)
+            || tree.layers.iter().any(|layer| {
+                matches!(
+                    layer.kind,
+                    LayerKind::BackdropBlur { .. }
+                        | LayerKind::BackdropMaterial { .. }
+                        | LayerKind::Blend {
+                            mode: engine::scene::BlendMode::Multiply,
+                            ..
+                        }
+                )
+            });
         let mut frame = Frame {
             shader_uniforms: tree.shader_uniforms.clone(),
             tree,
@@ -656,6 +689,9 @@ impl Rasterizer {
             views: Arc::clone(&platform_views),
             gpu_view_requests,
             damage: DamageRect::Full,
+            complex_damage,
+            pending_images,
+            has_images,
             has_glyphs,
             revision: previous_revision.wrapping_add(1),
             previous_revision,
@@ -665,7 +701,23 @@ impl Rasterizer {
         };
         let gpu = &device.gpu;
         let install = || {
-            let damage = damage::between(previous, &frame, &textures);
+            let damage = match (previous, delta) {
+                (Some(old), Some(delta))
+                    if old.tree.epoch == delta.base_epoch
+                        && old.scale == point_scale
+                        && !old.has_images
+                        && !frame.has_images =>
+                {
+                    damage::changed_layers(
+                        old,
+                        &frame.tree,
+                        |id| frame.pictures.get(&id).map(Arc::as_ref),
+                        frame.complex_damage,
+                        delta,
+                    )
+                }
+                _ => damage::between(previous, &frame, &textures),
+            };
             let upload = textures.commit(gpu)?;
             Ok((damage, upload))
         };
@@ -682,7 +734,9 @@ impl Rasterizer {
             // Installed picture geometry determines the exact glyph keys.
             // Its CPU prefetch can overlap damage and texture submission.
             pool.in_place_scope(|scope| {
-                scope.spawn(|_| compositor.prepare_glyphs(pool, gpu, glyph_scene, &rebuilt_atlas_pictures));
+                scope.spawn(|_| {
+                    compositor.prepare_glyphs(pool, gpu, glyph_scene, &rebuilt_atlas_pictures)
+                });
                 install()
             })
         } else {
@@ -711,6 +765,132 @@ impl Rasterizer {
             stats,
             platform_views,
         })
+    }
+
+    /// Installs layer values and picture replacements over a matching checkpoint.
+    ///
+    /// Returns `None` when the base is stale or the changes require full picture
+    /// preparation. The caller must then submit the full snapshot.
+    pub fn submit_layer_delta(
+        &mut self,
+        tree: &Arc<LayerTree>,
+        scale: f32,
+        delta: &engine::scene::SceneDelta,
+    ) -> Result<Option<SubmitInfo>, Status> {
+        use engine::scene::SceneChanges;
+        let started = Instant::now();
+        let updates = match &delta.changes {
+            SceneChanges::LayerValues => &[][..],
+            SceneChanges::Pictures(updates) => updates,
+            SceneChanges::Topology => return Ok(None),
+        };
+        let device = self.device.as_ref().ok_or(Status::NotReady)?;
+        if device.gpu.is_lost() {
+            return Err(Status::DeviceLost);
+        }
+        let Some(frame) = self.frame.as_mut().filter(|frame| {
+            self.reuse_pictures
+                && frame.tree.epoch == delta.base_epoch
+                && frame.scale == scale
+                && frame.tree.layers.len() == tree.layers.len()
+                && frame.tree.tracks.is_empty()
+                && tree.tracks.is_empty()
+                && frame.gpu_view_requests.is_empty()
+                && !frame.pending_images
+                && delta.removed_or_changed == delta.inserted_or_changed
+        }) else {
+            return Ok(None);
+        };
+        if delta.inserted_or_changed.iter().any(|id| {
+            let index = id.0 as usize;
+            match (frame.tree.layers.get(index), tree.layers.get(index)) {
+                (Some(before), Some(after)) => {
+                    before.parent != after.parent
+                        || before.next != after.next
+                        || before.first_child != after.first_child
+                        || !patch_preserves_picture_scale(&before.kind, &after.kind)
+                }
+                _ => true,
+            }
+        }) {
+            return Ok(None);
+        }
+        let mut stats = SubmitStats::default();
+        let mut prepared = HashMap::with_capacity(updates.len());
+        let pool = self.parallel_prepare.then(prepare::pool).flatten();
+        for update in updates {
+            let Some(picture) = tree.pictures.get(update.index) else {
+                return Ok(None);
+            };
+            let Some(before) = frame.pictures.get(&update.id) else {
+                return Ok(None);
+            };
+            if picture.id != update.id || !picture.images().is_empty() || !before.images.is_empty()
+            {
+                return Ok(None);
+            }
+            let compiled = compiler::prepare(
+                picture,
+                before.scale,
+                pool,
+                device.gpu.analytic_canvas_curves(),
+                &mut |_| textures::Load::Failed,
+            )?
+            .install(&device.gpu, device.generation, true)?;
+            if let Some(mesh) = compiled
+                .mesh_buffer
+                .get()
+                .and_then(batch::MeshBuffer::resident)
+            {
+                stats.render.buffers_created += 2;
+                stats.render.mesh_upload_bytes += mesh.vertices.size() + mesh.indices.size();
+            }
+            prepared.insert(picture.id, Arc::new(compiled));
+        }
+        let complex_damage = frame.complex_damage
+            || prepared
+                .values()
+                .any(|picture| picture.has_shader_effect || picture.reads_root);
+        let damage = damage::changed_layers(
+            frame,
+            tree,
+            |id| {
+                prepared
+                    .get(&id)
+                    .or_else(|| frame.pictures.get(&id))
+                    .map(Arc::as_ref)
+            },
+            complex_damage,
+            delta,
+        );
+        frame.complex_damage = complex_damage;
+        frame.has_glyphs |= prepared.values().any(|picture| picture.has_glyphs);
+        frame.pictures.extend(prepared);
+        frame.shader_uniforms.clone_from(&tree.shader_uniforms);
+        frame.tree = Arc::clone(tree);
+        frame.damage = damage;
+        frame.previous_revision = frame.revision;
+        frame.revision = frame.revision.wrapping_add(1);
+        frame.scene_revision = frame.revision;
+        let pictures = u32::try_from(frame.pictures.len()).unwrap_or(u32::MAX);
+        stats.damage = damage;
+        stats.pictures = pictures;
+        stats.picture_rebuilt = u32::try_from(updates.len()).unwrap_or(u32::MAX);
+        stats.picture_reused = pictures.saturating_sub(stats.picture_rebuilt);
+        stats.layer_count = u32::try_from(tree.layers.len()).unwrap_or(u32::MAX);
+        stats.textures = u32::try_from(device.textures.len()).unwrap_or(u32::MAX);
+        stats.picture_prepare = started.elapsed();
+        self.stats = stats;
+        self.prepared_buffers = stats.render.buffers_created;
+        self.prepared_mesh_bytes = stats.render.mesh_upload_bytes;
+        #[cfg(target_os = "ios")]
+        {
+            self.frame_number = self.frame_number.wrapping_add(1);
+        }
+        Ok(Some(SubmitInfo {
+            stats: self.stats,
+            platform_views: Arc::clone(&frame.views),
+        }))
     }
 
     fn encode_and_submit(
@@ -890,6 +1070,25 @@ impl Frame {
     }
 }
 
+fn patch_preserves_picture_scale(before: &LayerKind, after: &LayerKind) -> bool {
+    match (before, after) {
+        (LayerKind::Transform { .. }, LayerKind::Transform { .. }) => {
+            let [a, b, c, d, ..] = layer_transform(before);
+            let [x, y, z, w, ..] = layer_transform(after);
+            [a, b, c, d] == [x, y, z, w]
+        }
+        (LayerKind::Picture { picture: a }, LayerKind::Picture { picture: b }) => a == b,
+        (LayerKind::Paint(_), LayerKind::Paint(_))
+        | (LayerKind::Opacity { .. }, LayerKind::Opacity { .. })
+        | (
+            LayerKind::Clip { .. } | LayerKind::CornerClip { .. },
+            LayerKind::Clip { .. } | LayerKind::CornerClip { .. },
+        )
+        | (LayerKind::Offset { .. }, LayerKind::Offset { .. }) => true,
+        _ => false,
+    }
+}
+
 fn picture_scales(
     tree: &LayerTree,
     order: &[LayerId],
@@ -945,7 +1144,10 @@ fn paint_order(tree: &LayerTree) -> Result<Vec<LayerId>, Status> {
         if let Some(child) = layer.first_child {
             if matches!(
                 layer.kind,
-                LayerKind::Picture { .. } | LayerKind::PlatformView { .. } | LayerKind::Fill { .. }
+                LayerKind::Picture { .. }
+                    | LayerKind::PlatformView { .. }
+                    | LayerKind::Fill { .. }
+                    | LayerKind::Paint(_)
             ) {
                 return Err(Status::BadScene);
             }

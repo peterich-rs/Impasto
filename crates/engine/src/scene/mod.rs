@@ -31,7 +31,10 @@ pub use compositor_track::{
 pub(crate) use compositor_track::{compositor_alpha, list_scroll_prediction};
 pub use corners::CornerShape;
 pub use image::ContentMode;
-pub use layer::{Layer, LayerId, LayerKind, LayerTree, Picture, PictureId, SELF_PICTURE};
+pub use layer::{
+    Layer, LayerId, LayerKind, LayerTree, PaintSlot, Picture, PictureId, PictureUpdate,
+    SELF_PICTURE, SceneChanges, SceneDelta,
+};
 pub use paint::{
     BackdropMaterial, BlendMode, BoxShadow, ColorMatrix, ColorSpace, ColorStop, Gradient, Shadow,
 };

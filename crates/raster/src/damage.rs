@@ -219,6 +219,11 @@ impl SceneDamage {
                     );
                     damage.fills.push((id, bounds, state.affected));
                 }
+                LayerKind::Paint(slot) => {
+                    damage
+                        .fills
+                        .push((id, slot_bounds(slot, state, frame.scale), state.affected));
+                }
                 LayerKind::PlatformView { .. } => damage.dynamic = true,
                 _ => {}
             }
@@ -290,6 +295,96 @@ fn resolve(
         }
     }
     DamageRect::from_bounds(bounds, scale)
+}
+
+fn slot_bounds(slot: engine::scene::PaintSlot, state: PaintState, scale: f32) -> PictureBounds {
+    state.clipped(
+        PictureBounds::rect(slot.bounds)
+            .expand(slot.stroke_width * 0.5 + 2.0 / scale)
+            .transform(state.transform)
+            .expand(state.blur),
+    )
+}
+
+/// Damage for a retained scene update. Visit the changed subtrees and their
+/// ancestors only. Destination-dependent effects require full replay.
+pub(crate) fn changed_layers<'next>(
+    old: &Frame,
+    next: &LayerTree,
+    next_picture: impl Fn(PictureId) -> Option<&'next crate::CompiledPicture>,
+    complex_damage: bool,
+    delta: &engine::scene::SceneDelta,
+) -> DamageRect {
+    if old.complex_damage || complex_damage {
+        return DamageRect::Full;
+    }
+    let before = changed_bounds(
+        &old.tree,
+        |id| old.pictures.get(&id).map(std::sync::Arc::as_ref),
+        &delta.removed_or_changed,
+        old.scale,
+    );
+    let after = changed_bounds(next, next_picture, &delta.inserted_or_changed, old.scale);
+    DamageRect::from_bounds(before.union(after), old.scale)
+}
+
+fn changed_bounds<'picture>(
+    tree: &LayerTree,
+    picture: impl Fn(PictureId) -> Option<&'picture crate::CompiledPicture>,
+    layers: &[LayerId],
+    scale: f32,
+) -> PictureBounds {
+    let mut bounds = PictureBounds::Empty;
+    let mut ancestors = Vec::new();
+    let mut pending = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    for &id in layers {
+        if visited.contains(&id) {
+            continue;
+        }
+        let Some(layer) = tree.layers.get(id.0 as usize) else {
+            return PictureBounds::Unbounded;
+        };
+        let mut parent = layer.parent;
+        while let Some(id) = parent {
+            let layer = &tree.layers[id.0 as usize];
+            ancestors.push(&layer.kind);
+            parent = layer.parent;
+        }
+        let state = ancestors
+            .drain(..)
+            .rev()
+            .fold(PaintState::default(), |state, kind| {
+                state.child(kind, false)
+            });
+        pending.push((id, state));
+        while let Some((id, state)) = pending.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            let layer = &tree.layers[id.0 as usize];
+            let state = state.child(&layer.kind, false);
+            bounds = bounds.union(match layer.kind {
+                LayerKind::Paint(slot) => slot_bounds(slot, state, scale),
+                LayerKind::Fill { bounds, .. } => state.clipped(
+                    PictureBounds::rect(bounds)
+                        .transform(state.transform)
+                        .expand(state.blur),
+                ),
+                LayerKind::Picture { picture: id } => picture(id)
+                    .map_or(PictureBounds::Unbounded, |picture| {
+                        state.bounds(picture, scale)
+                    }),
+                _ => PictureBounds::Empty,
+            });
+            let mut child = layer.first_child;
+            while let Some(id) = child {
+                pending.push((id, state));
+                child = tree.layers[id.0 as usize].next;
+            }
+        }
+    }
+    bounds
 }
 
 pub(crate) fn between(

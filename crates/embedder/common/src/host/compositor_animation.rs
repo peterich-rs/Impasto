@@ -339,6 +339,7 @@ impl Plan {
             paused: false,
             again: true,
             tree: Some(Arc::clone(&self.tree)),
+            scene_delta: None,
             requirements: Arc::default(),
             platform_views: Arc::default(),
             placements_changed: false,

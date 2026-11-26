@@ -2120,6 +2120,32 @@ pub fn apply(transform: Affine, x: f32, y: f32) -> (f32, f32) {
 }
 
 /// `outer ∘ inner`: apply `inner` first, then `outer`.
+pub(crate) fn paint_slot_rect(slot: engine::scene::PaintSlot) -> Option<RectInstance> {
+    let [x, y, w, h] = slot.bounds;
+    if !positive_box(x, y, w, h) {
+        return None;
+    }
+    let color = linear_premultiplied(slot.color, 255);
+    let stroke = slot.stroke_width.is_finite() && slot.stroke_width > 0.0;
+    if color.is_none() && !stroke {
+        return None;
+    }
+    let has_fill = color.is_some();
+    let mut rect = solid_rect(slot.bounds, color.unwrap_or([0.0; 4]));
+    rect.radius = clamped_radius(slot.radius, w, h);
+    rect.corners = slot.corners.map(|shape| shape.fitted(w, h));
+    if stroke {
+        rect.kind = if has_fill {
+            RECT_FILL_STROKE
+        } else {
+            RECT_STROKE
+        };
+        rect.stroke_width = slot.stroke_width;
+        rect.stroke_color = linear_premultiplied(slot.stroke_color, 255).unwrap_or([0.0; 4]);
+    }
+    Some(rect)
+}
+
 pub fn layer_transform(kind: &engine::scene::LayerKind) -> Affine {
     use engine::scene::LayerKind;
     match *kind {

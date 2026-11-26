@@ -35,6 +35,7 @@ impl RetainedRoot {
                         | LayerKind::Clip { .. }
                         | LayerKind::CornerClip { .. }
                         | LayerKind::Opacity { .. }
+                        | LayerKind::Paint(_)
                         | LayerKind::Picture { .. }
                 )
             })
