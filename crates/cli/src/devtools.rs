@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::Args;
 
 #[derive(Args)]
@@ -19,6 +20,12 @@ pub(crate) struct Options {
     /// Path for the standalone HTML client.
     #[arg(long)]
     client: Option<PathBuf>,
+    /// Directory containing bundler.js and bundler_bg.wasm from wasm-bindgen --target web.
+    #[arg(long)]
+    compiler: Option<PathBuf>,
+    /// Release symbol sidecar used to resolve captured JavaScript frames.
+    #[arg(long)]
+    symbols: Option<PathBuf>,
 }
 
 pub(crate) fn config() -> Result<Option<(u16, String)>> {
@@ -138,6 +145,24 @@ fn forward(options: &Options) -> Result<(u16, Option<Tunnel>)> {
 }
 
 pub(crate) fn run(options: Options) -> Result<()> {
+    let compiler = options
+        .compiler
+        .as_ref()
+        .map(|directory| -> Result<_> {
+            Ok((
+                STANDARD.encode(std::fs::read(directory.join("bundler.js"))?),
+                STANDARD.encode(std::fs::read(directory.join("bundler_bg.wasm"))?),
+            ))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let symbols = options
+        .symbols
+        .as_deref()
+        .map(crate::symbols::browser_index)
+        .transpose()?
+        .map(|index| STANDARD.encode(index))
+        .unwrap_or_default();
     let (port, tunnel) = forward(&options)?;
     let path = options.client.unwrap_or_else(|| {
         std::env::temp_dir().join(format!("impasto-devtools-{}.html", std::process::id()))
@@ -150,6 +175,9 @@ pub(crate) fn run(options: Options) -> Result<()> {
         .write_all(
             include_str!("devtools.html")
                 .replace("%%PORT%%", &port.to_string())
+                .replace("%%COMPILER_JS%%", &compiler.0)
+                .replace("%%COMPILER_WASM%%", &compiler.1)
+                .replace("%%SYMBOLS%%", &symbols)
                 .as_bytes(),
         )?;
     println!("Open {} in a browser", path.canonicalize()?.display());

@@ -1,0 +1,4 @@
+{
+  "extends": "./.impasto/tsconfig.plugin.json",
+  "include": ["src"]
+}

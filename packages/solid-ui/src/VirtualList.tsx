@@ -1,3 +1,4 @@
+import { View as HostView, Stack as HostStack } from "@impasto/solid-renderer/host";
 import { Show, createSignal, createTrackedEffect, onCleanup, untrack } from "solid-js";
 import {
   Text,
@@ -110,7 +111,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
         return (
           props.children?.(item(), index()) ??
           (
-            <view
+            <HostView
               style={{
                 width: 0,
                 height: 0,
@@ -183,7 +184,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
     <Show
       when={!errored()}
       fallback={
-        <view
+        <HostView
           style={{
             gap: theme().space.s,
           }}
@@ -200,18 +201,18 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
           <Show when={props.onRetry}>
             <Button label="Retry" onClick={() => props.onRetry?.()} />
           </Show>
-        </view>
+        </HostView>
       }
     >
       <Show
         when={props.items.length > 0}
         fallback={
           props.skeleton ? (
-            <view>{props.skeleton()}</view>
+            <HostView>{props.skeleton()}</HostView>
           ) : props.empty ? (
-            <view>{props.empty()}</view>
+            <HostView>{props.empty()}</HostView>
           ) : (
-            <view
+            <HostView
               style={{
                 width: 0,
                 height: 0,
@@ -220,7 +221,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
           )
         }
       >
-        <stack
+        <HostStack
           ref={(node) => {
             if (node === null) return;
             bindStyle(node, {
@@ -281,7 +282,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
                 {props.refresh.indicator}
               </RefreshControl>
             ) : null}
-            <view
+            <HostView
               ref={(node) => {
                 if (node === null) return;
                 top = node;
@@ -292,7 +293,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
                 height: 0,
               }}
             />
-            <view
+            <HostView
               ref={(node) => {
                 if (node === null) return;
                 rows = node;
@@ -311,7 +312,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
                 syncNodes();
               }}
             />
-            <view
+            <HostView
               ref={(node) => {
                 if (node === null) return;
                 bottom = node;
@@ -325,7 +326,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
           </ScrollArea>
           <Show when={pinned()} keyed>
             {(box) => (
-              <view
+              <HostView
                 style={{
                   position: "absolute",
                   top: 0,
@@ -345,11 +346,11 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
                       () => box.index,
                     )
                   : props.children?.(props.items[box.index] as T, box.index)}
-              </view>
+              </HostView>
             )}
           </Show>
           <Show when={thumbOn()}>
-            <view
+            <HostView
               style={{
                 width: "100%",
                 height: "100%",
@@ -361,25 +362,25 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
                 justifyContent: "end",
               }}
             >
-              <view
+              <HostView
                 style={{
                   paddingRight: theme().space.s,
                 }}
               >
-                <stack
+                <HostStack
                   ref={(node) => {
                     if (node === null) return;
                     vThumb = node;
                     syncNodes();
                   }}
                 >
-                  <view
+                  <HostView
                     style={{
                       backgroundColor: theme().color.textMuted,
                       borderRadius: theme().radius.s,
                     }}
                   >
-                    <view
+                    <HostView
                       ref={(node) => {
                         if (node === null) return;
                         vSize = node;
@@ -390,13 +391,13 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
                         height: thumbH(),
                       }}
                     />
-                  </view>
-                </stack>
-              </view>
-            </view>
+                  </HostView>
+                </HostStack>
+              </HostView>
+            </HostView>
           </Show>
           <Show when={hThumbOn()}>
-            <view
+            <HostView
               style={{
                 width: "100%",
                 height: "100%",
@@ -407,25 +408,25 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
                 justifyContent: "end",
               }}
             >
-              <view
+              <HostView
                 style={{
                   paddingBottom: theme().space.s,
                 }}
               >
-                <stack
+                <HostStack
                   ref={(node) => {
                     if (node === null) return;
                     hThumb = node;
                     syncNodes();
                   }}
                 >
-                  <view
+                  <HostView
                     style={{
                       backgroundColor: theme().color.textMuted,
                       borderRadius: theme().radius.s,
                     }}
                   >
-                    <view
+                    <HostView
                       ref={(node) => {
                         if (node === null) return;
                         hSize = node;
@@ -436,12 +437,12 @@ export function VirtualList<T>(props: VirtualListProps<T>): NodeHandle {
                         height: 3,
                       }}
                     />
-                  </view>
-                </stack>
-              </view>
-            </view>
+                  </HostView>
+                </HostStack>
+              </HostView>
+            </HostView>
           </Show>
-        </stack>
+        </HostStack>
       </Show>
     </Show>
   );

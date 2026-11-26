@@ -81,8 +81,8 @@ function flatten(value, out) {
 }
 function children(fn) {
   const memo = createMemo(() => flatten(fn(), []));
-  const read = () => { const list = memo(); return list.length === 1 ? list[0] : list; };
-  read.toArray = () => memo().slice();
+  const read = () => { const list = memo() ?? []; return list.length === 1 ? list[0] : list; };
+  read.toArray = () => (memo() ?? []).slice();
   return read;
 }
 const errors = new Map();

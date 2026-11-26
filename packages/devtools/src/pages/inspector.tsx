@@ -1,3 +1,4 @@
+import { View as HostView } from "@impasto/solid-renderer/host";
 /** Inspector page: tree snapshot plus pointer probe with breadcrumbs. */
 import { createSignal, For, Show } from "solid-js";
 import { Text, useTheme } from "@impasto/solid-ui";
@@ -127,7 +128,7 @@ export function InspectorPage() {
   const current = () =>
     rows().find((row) => row.node.id === selected()) ?? null;
   return (
-    <view
+    <HostView
       style={{
         width: "100%",
         height: "100%",
@@ -137,20 +138,20 @@ export function InspectorPage() {
         minHeight: 0,
       }}
     >
-      <view
+      <HostView
         style={{
           flexDirection: "row",
           gap: 8,
         }}
       >
-        <view onClick={refresh} focusable>
-          <view
+        <HostView onClick={refresh} focusable>
+          <HostView
             style={{
               backgroundColor: theme().color.primary,
               borderRadius: 6,
             }}
           >
-            <view
+            <HostView
               style={{
                 padding: 6,
               }}
@@ -163,14 +164,14 @@ export function InspectorPage() {
               >
                 树
               </Text>
-            </view>
-          </view>
-        </view>
-        <view
+            </HostView>
+          </HostView>
+        </HostView>
+        <HostView
           onClick={() => (probing() ? stopProbe() : startProbe())}
           focusable
         >
-          <view
+          <HostView
             style={{
               backgroundColor: probing()
                 ? theme().color.danger
@@ -178,7 +179,7 @@ export function InspectorPage() {
               borderRadius: 6,
             }}
           >
-            <view
+            <HostView
               style={{
                 padding: 6,
               }}
@@ -193,10 +194,10 @@ export function InspectorPage() {
               >
                 {probing() ? "点屏幕…" : "选点"}
               </Text>
-            </view>
-          </view>
-        </view>
-      </view>
+            </HostView>
+          </HostView>
+        </HostView>
+      </HostView>
       <Show when={chain() !== ""}>
         <Text
           style={{
@@ -207,7 +208,7 @@ export function InspectorPage() {
           {chain()}
         </Text>
       </Show>
-      <view
+      <HostView
         style={{
           gap: 1,
           flex: 1,
@@ -215,13 +216,13 @@ export function InspectorPage() {
       >
         <For each={rows().slice(0, 200)}>
           {(row) => (
-            <view
+            <HostView
               onClick={() => {
                 setSelected(row.node.id);
                 boxOf(row.node.id, "#ff3b30");
               }}
             >
-              <view
+              <HostView
                 style={{
                   backgroundColor:
                     selected() === row.node.id
@@ -230,7 +231,7 @@ export function InspectorPage() {
                   borderRadius: 4,
                 }}
               >
-                <view
+                <HostView
                   style={{
                     padding: 4,
                   }}
@@ -248,12 +249,12 @@ export function InspectorPage() {
                     {row.node.h.toFixed(0)}
                     {row.node.text !== undefined ? ` "${row.node.text}"` : ""}
                   </Text>
-                </view>
-              </view>
-            </view>
+                </HostView>
+              </HostView>
+            </HostView>
           )}
         </For>
-      </view>
+      </HostView>
       <Show when={current() !== null}>
         <Text
           style={{
@@ -266,6 +267,6 @@ export function InspectorPage() {
           {current()!.node.focusable ? "focusable" : "not focusable"}
         </Text>
       </Show>
-    </view>
+    </HostView>
   );
 }

@@ -1,3 +1,4 @@
+import { View as HostView, Stack as HostStack } from "@impasto/solid-renderer/host";
 /**
  * Devtools top layer: floating button, error banner, and the panel shell.
  * Everything renders with the ordinary solid-ui controls; no second UI stack.
@@ -71,13 +72,13 @@ function DevtoolsButton(props: { open(): void }) {
   const [hidden, setHidden] = createSignal(false);
   return (
     <Show when={!hidden()}>
-      <stack
+      <HostStack
         style={{
           translateX: spot().x,
           translateY: spot().y,
         }}
       >
-        <view
+        <HostView
           style={{
             backgroundColor: theme().color.primary,
             borderRadius: BUTTON_SIZE / 2,
@@ -110,21 +111,21 @@ function DevtoolsButton(props: { open(): void }) {
           >
             ◈
           </Text>
-        </view>
+        </HostView>
         <Show when={unseenErrors() > 0}>
-          <stack
+          <HostStack
             style={{
               translateX: BUTTON_SIZE - 18,
               translateY: -2,
             }}
           >
-            <view
+            <HostView
               style={{
                 backgroundColor: theme().color.danger,
                 borderRadius: 9,
               }}
             >
-              <view
+              <HostView
                 style={{
                   alignItems: "center",
                   justifyContent: "center",
@@ -140,11 +141,11 @@ function DevtoolsButton(props: { open(): void }) {
                 >
                   {unseenErrors() > 9 ? "9+" : String(unseenErrors())}
                 </Text>
-              </view>
-            </view>
-          </stack>
+              </HostView>
+            </HostView>
+          </HostStack>
         </Show>
-      </stack>
+      </HostStack>
     </Show>
   );
 }
@@ -160,18 +161,18 @@ function ErrorBanner(props: { open(): void }) {
   });
   return (
     <Show when={message() !== null}>
-      <view
+      <HostView
         onClick={() => {
           setMessage(null);
           props.open();
         }}
       >
-        <view
+        <HostView
           style={{
             backgroundColor: "#c0392b",
           }}
         >
-          <view
+          <HostView
             style={{
               width: "100%",
               flex: 1,
@@ -193,9 +194,9 @@ function ErrorBanner(props: { open(): void }) {
             >
               {message()}
             </Text>
-          </view>
-        </view>
-      </view>
+          </HostView>
+        </HostView>
+      </HostView>
     </Show>
   );
 }
@@ -205,7 +206,7 @@ function Panel(props: { close(): void; page: () => string; selectPage(page: stri
   const pages = devtoolPages();
   const current = () => pages.find((entry) => entry.id === page()) ?? pages[0];
   return (
-    <stack
+    <HostStack
       ref={(node) => {
         if (node === null) return;
         scene.setComponentStyle(node, {
@@ -222,8 +223,8 @@ function Panel(props: { close(): void; page: () => string; selectPage(page: stri
         minHeight: 0,
       }}
     >
-      <view onClick={() => props.close()}>
-        <view
+      <HostView onClick={() => props.close()}>
+        <HostView
           style={{
             width: "100%",
             height: "100%",
@@ -234,20 +235,20 @@ function Panel(props: { close(): void; page: () => string; selectPage(page: stri
             backgroundColor: theme().color.scrim,
           }}
         />
-      </view>
-      <view
+      </HostView>
+      <HostView
         style={{
           padding: 24,
         }}
       >
-        <view
+        <HostView
           style={{
             backgroundColor: theme().color.background,
             borderRadius: 12,
             flex: 1,
           }}
         >
-          <view
+          <HostView
             style={{
               width: "100%",
               height: "100%",
@@ -257,7 +258,7 @@ function Panel(props: { close(): void; page: () => string; selectPage(page: stri
               minHeight: 0,
             }}
           >
-            <view
+            <HostView
               style={{
                 flexDirection: "row",
                 gap: 4,
@@ -265,8 +266,8 @@ function Panel(props: { close(): void; page: () => string; selectPage(page: stri
             >
               <For each={pages}>
                 {(entry: DevtoolPage) => (
-                  <view onClick={() => props.selectPage(entry.id)} focusable>
-                    <view
+                  <HostView onClick={() => props.selectPage(entry.id)} focusable>
+                    <HostView
                       style={{
                         backgroundColor:
                           page() === entry.id
@@ -275,7 +276,7 @@ function Panel(props: { close(): void; page: () => string; selectPage(page: stri
                         borderRadius: 6,
                       }}
                     >
-                      <view
+                      <HostView
                         style={{
                           padding: 6,
                         }}
@@ -288,21 +289,21 @@ function Panel(props: { close(): void; page: () => string; selectPage(page: stri
                         >
                           {entry.title}
                         </Text>
-                      </view>
-                    </view>
-                  </view>
+                      </HostView>
+                    </HostView>
+                  </HostView>
                 )}
               </For>
-            </view>
+            </HostView>
             <Show when={current()} keyed>
               {(entry) => (
                 <ScrollArea axis="vertical">{entry.render()}</ScrollArea>
               )}
             </Show>
-          </view>
-        </view>
-      </view>
-    </stack>
+          </HostView>
+        </HostView>
+      </HostView>
+    </HostStack>
   );
 }
 
@@ -311,7 +312,7 @@ export function DevtoolsLayer(props: { launcher?: boolean } = {}): NodeHandle {
   store.attach();
   const [page, setPage] = createSignal("console");
   const root = (
-    <stack
+    <HostStack
       ref={(node) => {
         if (node === null) return;
         scene.setComponentStyle(node, {
@@ -340,7 +341,7 @@ export function DevtoolsLayer(props: { launcher?: boolean } = {}): NodeHandle {
       <Show when={!traceRecording()}>
         <HighlightLayer boxes={highlights()} />
       </Show>
-    </stack>
+    </HostStack>
   );
   scene.debugSetOwned?.(root, true);
   return root;

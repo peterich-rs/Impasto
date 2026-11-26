@@ -1,0 +1,3 @@
+{
+  "extends": "./.impasto/tsconfig.generated.json"
+}

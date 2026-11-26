@@ -63,6 +63,16 @@ pub struct ScriptPhases {
 /// Layout and input counts for one frame. Zeros mean that stage did not run.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameTrace {
+    /// Nodes allocated by the script, including allocations in compiled templates.
+    pub nodes_created: u32,
+    /// Batched JavaScript scene mounts and range updates.
+    pub ffi_batches: u32,
+    /// JavaScript calls into the native scene bindings.
+    pub ffi_calls: u32,
+    /// Source cascades resolved against the node environment.
+    pub style_resolves: u32,
+    /// Explicit repaint boundaries newly marked dirty.
+    pub repaint_boundaries_dirtied: u32,
     /// All `layout` calls this frame, including those made from script.
     pub laywork_ms: f64,
     pub layout_passes: u32,
@@ -232,6 +242,10 @@ pub trait Session {
     }
     /// An accessibility action. The default ignores it.
     fn semantics_action(&mut self, _action: crate::semantics::SemanticsAction) {}
+    /// Attempts to apply compiler-generated changes within the current runtime.
+    fn apply_source_patch(&mut self, _source: &str) -> Result<bool, String> {
+        Ok(false)
+    }
     /// Builds a candidate script runtime and swaps it in after a valid first frame.
     fn update_source(
         &mut self,

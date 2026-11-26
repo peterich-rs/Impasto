@@ -39,13 +39,13 @@ const section = useScrollSegment(scroll, () => [180, 420, 860]);
 
 曲线的输入点严格递增，输出与输入一一对应。外推默认钳制到端点，数值曲线可用 `"extend"` 延伸首尾线段。旋转使用弧度，透明度使用 `0..1`，模糊使用逻辑点的标准差。颜色在预乘线性 RGBA 空间求值。规则拥有绑定期间的目标属性，释放规则后恢复普通样式。每个属性同时由一条规则驱动。控制器联动默认映射 Y，可选 `axis: "x"` 或 `"both"`。用函数参数可以表达非线性控制逻辑或多级滚动联动。
 
-`RefreshControl` 内置指示器用 overscroll 规则驱动。自定义指示器可使用 `ready()` 和 `busy()`，需要连续 `progress()` 时 JS 只在手势和回弹活跃期间采样。`NavigationBar` 接受 `scroll` 和 `scrollEffect="fade-backdrop"`。`Tabs` 接受一个水平 `pager` 控制器，以页面偏移驱动指示条。`Sheet` 默认带可下拉关闭的手柄，设置 `dragToDismiss={false}` 可隐藏。Sheet、Dialog 和默认路由转场在满足内容缓存条件时复用 GPU 快照。 [场景滚动契约](../crates/engine/src/scene/scroll.rs) · [组件示例](../apps/gallery-solid/src/pages/compositor-lab.tsx)
+`RefreshControl` 内置指示器用 overscroll 规则驱动。自定义指示器可使用 `ready()` 和 `busy()`，需要连续 `progress()` 时 JS 只在手势和回弹活跃期间采样。`NavigationBar` 接受 `scroll` 和 `scrollEffect="fade-backdrop"`。`Tabs` 接受一个水平 `pager` 控制器，以页面偏移驱动指示条。`Sheet` 默认带可下拉关闭的手柄，设置 `dragToDismiss={false}` 可隐藏。Sheet、Dialog 和默认路由转场在满足内容缓存条件时复用 GPU 快照。 [场景滚动契约](../crates/engine/src/scene/scroll.rs) · [组件示例](../examples/gallery-solid/src/pages/compositor-lab.tsx)
 
 ## Gallery 业务页
 
-行情、自选和市场列表由 `VirtualList` 管理挂载窗口。行情行内的迷你图随该行预挂载，按行情发布批次更新。股票详情的主栏和分栏独立滚动。每次布局后由区块位置和视口高度生成两个 `useScrollThreshold` 边界，让快照在进入视口前 48 个逻辑点恢复接收行情。十字线读数和底部实时价格通过 `RepaintBoundary` 各自录制。 [详情区块](../apps/gallery-solid/src/widgets/stocks/section-visibility.ts) · [分时与 K 线](../apps/gallery-solid/src/widgets/stocks/chart.tsx)
+行情、自选和市场列表由 `VirtualList` 管理挂载窗口。行情行内的迷你图随该行预挂载，按行情发布批次更新。股票详情的主栏和分栏独立滚动。每次布局后由区块位置和视口高度生成两个 `useScrollThreshold` 边界，让快照在进入视口前 48 个逻辑点恢复接收行情。十字线读数和底部实时价格通过 `RepaintBoundary` 各自录制。 [详情区块](../examples/gallery-solid/src/widgets/stocks/section-visibility.ts) · [分时与 K 线](../examples/gallery-solid/src/widgets/stocks/chart.tsx)
 
-模拟行情使用单调时钟和定时器推进。行情列表仅在分批发布行数据时监听帧，股票详情仅在分批挂载区块时监听帧。Raster 可以在这些 UI 工作之间接管惯性滚动。`virtual-list-observed` 实验页保留连续偏移回调，用于复现 `scroll_callback`。 [行情时钟](../apps/gallery-solid/src/state/quotes-provider.tsx)
+模拟行情使用单调时钟和定时器推进。行情列表仅在分批发布行数据时监听帧，股票详情仅在分批挂载区块时监听帧。Raster 可以在这些 UI 工作之间接管惯性滚动。`virtual-list-observed` 实验页保留连续偏移回调，用于复现 `scroll_callback`。 [行情时钟](../examples/gallery-solid/src/state/quotes-provider.tsx)
 
 ## 诊断与验收
 

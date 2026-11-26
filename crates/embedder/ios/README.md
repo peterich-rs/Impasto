@@ -4,7 +4,7 @@
 
 ## 构建和安装
 
-在应用根目录执行命令。构建目录中的 Xcode 工程由 CLI 生成。直接运行使用 debug 源码，构建缺省为 release IQJS 字节码。
+在应用根目录执行命令。CLI 同步应用的 Xcode 工程依赖。直接运行使用 debug 源码，构建缺省为 release IQJS 字节码。
 
 ```sh
 impasto run -d ios
@@ -21,14 +21,13 @@ impasto build ipa --export-options ExportOptions.plist
 - 归档输出带签名的 `.xcarchive`。同一目录包含 JavaScript source map 和标记 app/dSYM UUID 的 `build.json`。IPA 导出使用 Xcode 本地导出设置，`destination` 省略或设为 `export`。 [Apple 应用分发](https://developer.apple.com/documentation/xcode/distributing-your-app-for-beta-testing-and-releases)
 - iOS Release 构建保留编译阶段过程宏的符号，避免 Xcode 27 的 strip 产物在宿主 dyld 上加载失败。应用和 dSYM 仍由 Xcode 按目标配置生成。 [Rust 工具链问题](https://github.com/rust-lang/rust/issues/157750)
 
+在应用目录用 Xcode 打开 `ios/Runner.xcodeproj`。先运行 `impasto sync --platform ios` 更新 SwiftPM 伞包，更改插件或 Rust 源码后用 CLI 构建选定的设备与 profile。Runner 的 Info.plist、启动画面和隐私清单可在 Xcode 直接编辑。
+
 ## 应用配置
 
-```toml
-[permissions]
-permissions = ["ios"]
-linking = ["ios"]
-native-plugins = ["ios"]
+将 `@impasto/permissions` 和 `@impasto/linking` 加入 `package.json` 以在应用中使用对应插件。
 
+```toml
 [ios]
 bundle_id = "com.example.impasto"
 development_team = "ABCDE12345"
@@ -80,44 +79,8 @@ func installImpasto(in parent: UIViewController, resources: URL) {
 - 在主 actor 调用 `try host.captureSnapshot()` 获取当前控制器的 sRGB 图像。画面包含上次提交的原生视图和媒体，尺寸为当前 drawable 像素。可开启 `content.hidesContentInAppSwitcher` 在场景失活时覆盖内容。
 - `just ios-sim-test --debug --udid <UDID>` 验证 Gallery 调试包的可见首帧，传 `--release` 验证 IQJS 包。已构建的模拟器应用可用 `--app <路径>` 复验。
 
-### JavaScript 调用宿主插件
+### 接入 Swift 插件
 
-在应用的 `[permissions]` 中显式设置 `native-plugins = ["ios"]`，然后在调用
-`prepare()` 或显示控制器之前，给对应的 `ImpastoHost` 注册 Swift 插件。直接管理
-SDK 资源目录的 UIKit 应用在 `app.modules` 中加入 `native-plugins`。每个宿主拥有
-自己的插件注册表。省略授权或设为 `false` 时，应用不加载该模块。
+插件在自己的 `ios/Package.swift` 中声明产品、Framework 链接与资源，并按需引用 SDK 的 `crates/embedder/ios/ImpastoHost`。应用通过 `package.json` 依赖插件，`impasto sync --platform ios` 在 `.impasto/darwin/ios/` 生成本地 `ImpastoGeneratedPlugins`。应用的 `ios/Runner.xcodeproj` 引用该包。
 
-```swift
-import Foundation
-import ImpastoHost
-
-@MainActor
-final class EchoPlugin: ImpastoPlugin {
-    let identifier = "echo"
-
-    func handle(_ call: ImpastoPluginCall) async throws -> Data {
-        guard call.method == "repeat" else { throw EchoError.unsupportedMethod }
-        return call.payload
-    }
-
-    enum EchoError: LocalizedError {
-        case unsupportedMethod
-        var errorDescription: String? { "EchoPlugin 不提供这个方法" }
-    }
-}
-
-// 在宿主启动前调用。每个 identifier 只能注册一次。
-host.registerPlugin(EchoPlugin())
-```
-
-```ts
-import { invokeNativePlugin } from "@impasto/native-plugins";
-
-const echoed = await invokeNativePlugin("echo", "repeat", { message: "你好" });
-```
-
-Swift 在主 actor 执行 `handle`，可以通过 `JSONDecoder` 读取 `call.payload`，
-通过 `JSONEncoder` 返回结果。省略参数时传入 JSON `null`。请求和返回分别限制为
-32 KiB 和 32 层 JSON 嵌套。每个宿主最多保留 32 个调用。未知插件、未提供方法、
-超时或无效 JSON 会拒绝 Promise。10 秒超时、旧场景解除绑定或宿主关闭都会取消
-原生任务，迟到的返回会被丢弃。插件在异步执行副作用前应检查任务是否取消。
+在 `Runner/App.swift` 中调用 `GeneratedPluginRegistrant.prepare()` 安装 Rust registry，并在 `registerPlugins(with:)` 中调用 `GeneratedPluginRegistrant.register(with:)`。Swift 插件实现 `ImpastoPlugin`，由宿主在主线程交付控制器和生命周期事件。JS 方法由插件的 Rust 导出声明，跨语言平台实现由插件自行封装。

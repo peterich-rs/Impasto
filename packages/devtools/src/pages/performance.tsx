@@ -1,3 +1,4 @@
+import { View as HostView } from "@impasto/solid-renderer/host";
 /** Performance page: frame bars plus the selected frame's phase table. */
 import { createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { Button, Text, useTheme } from "@impasto/solid-ui";
@@ -82,7 +83,7 @@ export function PerformancePage() {
   onCleanup(() => clearTimeout(poll));
   const overCount = () => frames().filter((frame) => frame.overBudget).length;
   return (
-    <view
+    <HostView
       style={{
         width: "100%",
         height: "100%",
@@ -105,7 +106,7 @@ export function PerformancePage() {
       >
         {frames().length} 帧 · 超预算 {overCount()} · 峰值 {peak().toFixed(1)}ms
       </Text>
-      <view
+      <HostView
         style={{
           flexDirection: "row",
           gap: 1,
@@ -116,8 +117,8 @@ export function PerformancePage() {
           {(frame) => {
             const height = Math.max(2, Math.round((frame.e2eMs / peak()) * BAR_MAX));
             return (
-              <view onClick={() => { setSelected(frame.seq); refreshPending(); }} focusable={false}>
-                <view
+              <HostView onClick={() => { setSelected(frame.seq); refreshPending(); }} focusable={false}>
+                <HostView
                   style={{
                     backgroundColor: frame.overBudget
                       ? theme().color.danger
@@ -125,21 +126,21 @@ export function PerformancePage() {
                     borderRadius: 1,
                   }}
                 >
-                  <view
+                  <HostView
                     style={{
                       width: 4,
                       height: height,
                     }}
                   />
-                </view>
-              </view>
+                </HostView>
+              </HostView>
             );
           }}
         </For>
-      </view>
+      </HostView>
       <Show when={current()} keyed>
         {(frame) => (
-          <view
+          <HostView
             style={{
               gap: 1,
               flex: 1,
@@ -147,7 +148,7 @@ export function PerformancePage() {
           >
             <Show when={gpu()} keyed>
               {(timing) => (
-                <view>
+                <HostView>
                   <Text>GPU 区间 {timing.frameSpanUs.toFixed(1)} μs · Pass 合计 {timing.passesSumUs.toFixed(1)} μs</Text>
                   <For each={timing.passes}>
                     {(pass) => (
@@ -156,7 +157,7 @@ export function PerformancePage() {
                       </Text>
                     )}
                   </For>
-                </view>
+                </HostView>
               )}
             </Show>
             <For each={rowsOf(frame)}>
@@ -171,9 +172,9 @@ export function PerformancePage() {
                 </Text>
               )}
             </For>
-          </view>
+          </HostView>
         )}
       </Show>
-    </view>
+    </HostView>
   );
 }

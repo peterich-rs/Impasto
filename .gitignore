@@ -1,7 +1,7 @@
 build/
 node_modules/
 target/
-apps/gallery-solid/dist/
+examples/gallery-solid/dist/
 .metrics/
 __pycache__/
 crates/embedder/android/apk/.gradle/
@@ -17,3 +17,8 @@ third_party/solid/
 cmake-build-*/
 compile_commands.json
 .vscode/
+.impasto/
+.build/
+.swiftpm/
+.kotlin/
+local.properties

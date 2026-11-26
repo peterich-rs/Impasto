@@ -68,7 +68,7 @@ fn duration_ms(start: u64, end: u64) -> f64 {
     end.saturating_sub(start) as f64 / 1_000_000.0
 }
 
-pub(crate) fn mono_ns() -> u64 {
+pub fn mono_ns() -> u64 {
     mono_ns_at(Instant::now())
 }
 

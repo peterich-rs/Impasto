@@ -1,3 +1,4 @@
+import { View as HostView, Scroll as HostScroll } from "@impasto/solid-renderer/host";
 import { createTrackedEffect, onCleanup } from "solid-js";
 import {
   bindNodeRef,
@@ -150,7 +151,7 @@ export function ScrollArea(props: ScrollAreaProps): NodeHandle {
     applyContentMin();
   });
   return (
-    <scroll
+    <HostScroll
       axis={props.axis ?? "vertical"}
       ref={(node) => {
         if (node === null) return;
@@ -199,7 +200,7 @@ export function ScrollArea(props: ScrollAreaProps): NodeHandle {
         props.onDragEnd === undefined ? undefined : () => props.onDragEnd?.()
       }
     >
-      <view
+      <HostView
         ref={(node) => {
           if (node === null) return;
           content = node;
@@ -220,7 +221,7 @@ export function ScrollArea(props: ScrollAreaProps): NodeHandle {
         }}
       >
         {props.children}
-      </view>
-    </scroll>
+      </HostView>
+    </HostScroll>
   );
 }

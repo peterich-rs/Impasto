@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+import { assert } from "impasto:test";
 import { messagesFor, t } from "./i18n.ts";
 
 assert.deepEqual(messagesFor("zh-CN"), {

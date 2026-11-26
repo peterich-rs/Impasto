@@ -1,8 +1,8 @@
-import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { assert } from "impasto:test";
+import { readText } from "impasto:test/fixtures";
 
 function source(name: string): string {
-  return readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
+  return readText(`./${name}`);
 }
 
 const button = source("Button.tsx");
@@ -20,10 +20,7 @@ assert.match(field, /errorProps/);
 assert.match(dialog, /panelRef\.clear\(\)/);
 assert.match(dialog, /panelRef\.attach\(content\)/);
 assert.match(source("focus.ts"), /createStyleSource\(node, "component"\)/);
-const image = readFileSync(
-  new URL("../../solid-renderer/runtime/image.ts", import.meta.url),
-  "utf8",
-);
+const image = readText("../../solid-renderer/runtime/image.ts");
 assert.match(image, /intrinsicSize/);
 assert.doesNotMatch(image, /props\.w/);
 

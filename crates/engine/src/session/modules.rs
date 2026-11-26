@@ -13,6 +13,8 @@ pub enum ScriptExecution {
     #[default]
     DedicatedUi,
     PlatformUi,
+    /// Developer tests may exercise large fixtures and drain longer promise chains.
+    HeadlessTest,
 }
 
 /// Registry, executor, and shared slots installed on a language session.
@@ -26,8 +28,6 @@ pub struct ModuleConfig {
     /// Without a host clock the session uses its explicitly driven frame clock.
     pub transport_clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
     pub script_execution: ScriptExecution,
-    pub app_state: Shared<String>,
-    pub launch_url: Shared<Option<String>>,
 }
 
 impl ModuleConfig {
@@ -37,6 +37,7 @@ impl ModuleConfig {
                 || module
                     .specifier
                     .strip_prefix("@impasto/")
+                    .map(|name| name.strip_suffix("/native").unwrap_or(name))
                     .is_some_and(|name| packages.iter().any(|package| package == name))
         }));
         self
@@ -51,8 +52,6 @@ impl ModuleConfig {
             post_delivery: None,
             transport_clock: None,
             script_execution: ScriptExecution::default(),
-            app_state: shared("active".to_owned()),
-            launch_url: shared(None),
         }
     }
 }

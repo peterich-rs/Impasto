@@ -1,3 +1,4 @@
+import { View as HostView } from "@impasto/solid-renderer/host";
 import { scene, type NodeHandle } from "@impasto/solid-renderer";
 import { createRenderEffect, onCleanup } from "solid-js";
 import { bindBox } from "./element.tsx";
@@ -48,7 +49,7 @@ export function ShaderEffect(props: ShaderEffectProps): NodeHandle {
   });
   return (
     <View {...props}>
-      <view ref={(node) => {
+      <HostView ref={(node) => {
         if (node === null) return;
         surface = node;
         bindBox(node, {}, { width: "100%", height: "100%" });

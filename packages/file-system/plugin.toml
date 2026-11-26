@@ -1,0 +1,16 @@
+[plugin]
+platforms = ["macos", "ios", "android"]
+min_impasto_version = "0.1.0"
+
+[rust]
+path = "rust"
+
+[ios]
+path = "ios"
+package = "ImpastoFileSystem"
+plugin_class = "ImpastoFileSystemPlugin"
+
+[android]
+path = "android"
+package = "dev.impasto.plugins.filesystem"
+plugin_class = "FileSystemPlugin"

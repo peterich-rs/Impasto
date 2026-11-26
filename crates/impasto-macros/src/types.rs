@@ -414,11 +414,58 @@ pub fn derive_events(input: DeriveInput) -> Result<TokenStream> {
         ));
     }
     let ident = &input.ident;
-    let variants = variants(data, &Names::parse(&input.attrs)?, "type")?;
-    let metadata = variants.iter().map(|variant| {
-        let key = &variant.key;
-        let declarations = variant.fields.iter().map(Field::declaration);
-        quote! {
+    let naming = Names::parse(&input.attrs)?;
+    let mut seen = BTreeSet::new();
+    let mut metadata = Vec::new();
+    let mut declarations = Vec::new();
+    let mut encode = Vec::new();
+    for variant in &data.variants {
+        let ident = &variant.ident;
+        let options = Names::parse(&variant.attrs)?;
+        let key = name(ident, &options, &naming);
+        if !seen.insert(key.clone()) {
+            return Err(Error::new_spanned(
+                ident,
+                format!("duplicate event {key:?}"),
+            ));
+        }
+        let payload = if let Fields::Unnamed(fields) = &variant.fields {
+            let mut fields = fields.unnamed.iter();
+            let Some(field) = fields.next().filter(|_| fields.next().is_none()) else {
+                return Err(Error::new_spanned(
+                    variant,
+                    "an event can have only one positional field",
+                ));
+            };
+            let ty = &field.ty;
+            let value = quote!(<#ty as ::impasto::ImpastoType>::typescript(types));
+            declarations.push(value.clone());
+            encode.push(quote!(
+                Self::#ident(value) => Ok((#key, ::impasto::IntoPluginValue::into_value(value)?))
+            ));
+            value
+        } else {
+            let fields = fields(&variant.fields, &naming, None)?;
+            let types = fields.iter().map(Field::declaration).collect::<Vec<_>>();
+            declarations.extend(types.iter().cloned());
+            let pattern = if matches!(variant.fields, Fields::Unit) {
+                quote!(Self::#ident)
+            } else {
+                let idents = capture_fields(&fields);
+                quote!(Self::#ident { #(#idents),* })
+            };
+            let values = encode_fields(&fields);
+            encode.push(quote!(#pattern => {
+                let mut fields = Vec::new();
+                #(#values)*
+                Ok((#key, ::impasto::abi::PluginValue::Map(fields)))
+            }));
+            quote!({
+                let fields: Vec<String> = vec![#(#types),*];
+                format!("{{ {} }}", fields.join("; "))
+            })
+        };
+        metadata.push(quote! {
             ::impasto::abi::EventType {
                 name: #key,
                 payload: {
@@ -427,36 +474,12 @@ pub fn derive_events(input: DeriveInput) -> Result<TokenStream> {
                         let mut types = ::impasto::TsTypes::default();
                         let types = &mut types;
                         let _ = &types;
-                        let fields: Vec<String> = vec![#(#declarations),*];
-                        format!("{{ {} }}", fields.join("; "))
+                        #payload
                     })
                 },
             }
-        }
-    });
-    let declarations = variants
-        .iter()
-        .flat_map(|variant| variant.fields.iter().map(Field::declaration));
-    let encode = variants.iter().map(|variant| {
-        let Variant {
-            ident,
-            key,
-            fields,
-            unit,
-        } = variant;
-        let pattern = if *unit {
-            quote!(Self::#ident)
-        } else {
-            let idents = capture_fields(fields);
-            quote!(Self::#ident { #(#idents),* })
-        };
-        let fields = encode_fields(fields);
-        quote!(#pattern => {
-            let mut fields = Vec::new();
-            #(#fields)*
-            Ok((#key, ::impasto::abi::PluginValue::Map(fields)))
-        })
-    });
+        });
+    }
     Ok(quote! {
         impl ::impasto::ImpastoEvents for #ident {
             fn define_types(types: &mut ::impasto::TsTypes) {

@@ -1,0 +1,33 @@
+[package]
+name = "bundler"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["bundle", "wgsl"]
+bundle = ["dep:anyhow", "dep:rolldown", "dep:rolldown_common", "dep:tokio", "dep:serde", "dep:imagesize", "dep:ttf-parser", "dep:base64", "dep:usvg", "dep:tiny-skia-path", "dep:roxmltree"]
+wgsl = ["dep:shader"]
+wasm = ["dep:wasm-bindgen"]
+
+[dependencies]
+oxc.workspace = true
+oxc_sourcemap = "9"
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+anyhow = { version = "1", optional = true }
+rolldown = { workspace = true, optional = true, features = ["experimental"] }
+rolldown_common = { workspace = true, optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+shader = { path = "../shader", features = ["portability"], optional = true }
+engine = { workspace = true, features = ["style-binary"] }
+imagesize = { version = "0.15", optional = true }
+ttf-parser = { version = "0.25", optional = true }
+base64 = { version = "0.22", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+usvg = { version = "0.46", default-features = false, optional = true }
+tiny-skia-path = { version = "0.11", optional = true }
+roxmltree = { version = "0.21", optional = true }
+
+[lints]
+workspace = true

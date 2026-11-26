@@ -10,6 +10,16 @@ pub struct WindowSession {
     windows: Arc<Mutex<Vec<Weak<Poster>>>>,
 }
 
+impl impasto::WindowState for WindowSession {
+    fn get(&self, key: &str) -> Option<String> {
+        self.get(key)
+    }
+
+    fn set(&self, key: &str, value: Option<&str>) -> Result<(), String> {
+        self.set(key, value)
+    }
+}
+
 impl Default for WindowSession {
     fn default() -> Self {
         Self {
@@ -29,11 +39,11 @@ impl WindowSession {
         windows.push(Arc::downgrade(window));
     }
 
-    pub(crate) fn get(&self, key: &str) -> Option<String> {
+    pub fn get(&self, key: &str) -> Option<String> {
         self.values.get(key)
     }
 
-    pub(crate) fn set(&self, key: &str, value: Option<&str>) -> Result<(), String> {
+    pub fn set(&self, key: &str, value: Option<&str>) -> Result<(), String> {
         let mut windows = self
             .windows
             .lock()

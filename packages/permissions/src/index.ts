@@ -5,9 +5,9 @@ import {
   shouldShowRequestPermissionRationale,
   type PermissionStatus,
   type ServiceStatus,
-} from "./native.js";
+} from "@impasto/permissions/native";
 
-export { openAppSettings, type PermissionStatus, type ServiceStatus } from "./native.js";
+export { openAppSettings, type PermissionStatus, type ServiceStatus } from "@impasto/permissions/native";
 
 /** Names follow permission_handler 11.3.1. The scene maps each name. */
 const NAMES = [

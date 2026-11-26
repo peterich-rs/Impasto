@@ -1,5 +1,5 @@
-// The Node fixture passes official Solid 2.0.0 and the QuickJS test passes the
-// native graph's adapter. Both compare the printed lines with order.txt.
+// The QuickJS test passes the native graph's adapter and compares the
+// printed lines with order.txt, recorded from Solid 2.0.0.
 export function runProbe(log, solid) {
   const {
     createMemo,

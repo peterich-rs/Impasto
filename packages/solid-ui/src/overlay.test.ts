@@ -1,10 +1,10 @@
-import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { installMockHost } from "../testing/renderTest.ts";
+import { assert, screen, test } from "impasto:test";
+import { readText } from "impasto:test/fixtures";
+import { scene } from "@impasto/solid-renderer";
 import { readFirstChild, restoreChildren } from "./overlay.ts";
 
 function source(name: string): string {
-  return readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
+  return readText(`./${name}`);
 }
 
 const dialog = source("Dialog.tsx");
@@ -20,24 +20,15 @@ assert.equal(toast.includes("setAlign("), false);
 assert.ok(toast.includes('alignItems: "end"'));
 assert.ok(button.includes("minTarget(size(), theme().density) * scale()"));
 
-const mock = installMockHost();
-const reparent = mock.host.reparentChildren as (
-  from: number,
-  to: number,
-) => void;
-mock.host.reparentChildren = () => {
-  throw new Error("reparentChildren failed");
-};
-assert.doesNotThrow(() => restoreChildren(1, 2));
-assert.doesNotThrow(() => restoreChildren(0, 2));
-mock.host.reparentChildren = reparent;
-
-const first = mock.host.firstChild as (node: number) => number;
-mock.host.firstChild = () => {
-  throw new Error("firstChild failed");
-};
-assert.equal(readFirstChild(4), null);
-mock.host.firstChild = first;
-assert.equal(readFirstChild(mock.host.createElement("view")), 0);
-
-console.log("overlay.test.ts ok");
+test("cleans up an overlay with an already disposed child", async () => {
+  const parent = scene.createElement("view");
+  const child = scene.createElement("view");
+  scene.insertNode(parent, child);
+  await screen.mount(() => parent);
+  assert.equal(readFirstChild(parent), child);
+  scene.remove(parent, child);
+  assert.doesNotThrow(() => restoreChildren(child, parent));
+  assert.doesNotThrow(() => restoreChildren(0, parent));
+  assert.equal(readFirstChild(child), 0);
+  assert.equal(readFirstChild(parent), 0);
+});

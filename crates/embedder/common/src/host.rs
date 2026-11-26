@@ -719,27 +719,21 @@ fn run_boot(
     if let Some(hub) = boot.devtools.as_ref() {
         install_panic_hook(Arc::clone(hub));
     }
-    let http = boot
-        .http
-        .clone()
-        .map(|inner| crate::diagnostics::wrap_if_devtools(inner, boot.devtools.clone()));
     let load_image: ImageLoader = Arc::new({
         let decoder = Arc::clone(&boot.decoder);
         let inbox = Arc::clone(inbox);
-        let http = http.clone();
         let upload = Arc::clone(&upload);
         let io = Arc::clone(&runners.io);
         move |request| {
             let decoder = Arc::clone(&decoder);
             let inbox = Arc::clone(&inbox);
-            let http = http.clone();
             let upload = Arc::clone(&upload);
             let request_id = request.generation;
             tracing::event!(name: "image_requested", target: "impasto::io", tracing::Level::DEBUG,
                 trace_event = true, request_id);
             io.post(Box::new(move || {
                 let _job = tracing::debug_span!(target: "impasto::io", "image_job", request_id, queue = "io").entered();
-                let result = decode_one(decoder.as_ref(), http.as_deref(), &request, &upload);
+                let result = decode_one(decoder.as_ref(), &request, &upload);
                 tracing::event!(name: "image_ready", target: "impasto::io", tracing::Level::DEBUG,
                     trace_event = true, request_id);
                 inbox.post(Command::ImageReady(result));
@@ -758,7 +752,6 @@ fn run_boot(
         runners,
         RenderLinks {
             load_image,
-            http,
             upload,
             telemetry,
             enable_gpu_timing,
@@ -785,7 +778,6 @@ type ImageLoader = Arc<dyn Fn(ImageRequest) -> bool + Send + Sync>;
 
 fn decode_one(
     decoder: &dyn ImageDecoder,
-    http: Option<&dyn crate::http::HttpClient>,
     request: &ImageRequest,
     upload: &Mutex<Option<raster::TextureFactory>>,
 ) -> ImageReady {
@@ -794,7 +786,7 @@ fn decode_one(
             let _span =
                 tracing::debug_span!(target: "impasto::io", "image_fetch", request_id = request.generation)
                     .entered();
-            crate::http::fetch_image_body(http, &request.source)
+            images::remote::fetch(&request.source)
         };
         let _span =
             tracing::debug_span!(target: "impasto::io", "image_decode", request_id = request.generation)
@@ -968,7 +960,6 @@ struct RenderLinks {
     enable_gpu_timing: bool,
     #[cfg(any(debug_assertions, feature = "devtools-server"))]
     remote: Option<crate::diagnostics::remote::Server>,
-    http: Option<Arc<dyn crate::http::HttpClient>>,
     upload: Arc<Mutex<Option<raster::TextureFactory>>>,
 }
 
@@ -1080,51 +1071,26 @@ fn open_ui(
         shaper: Box::new(Rc::clone(&shaper)),
         log: console_log(),
     };
-    let app_state = engine::session::shared("active".to_owned());
-    let launch_url = Arc::clone(&boot.launch_url);
     let window_session = services.borrow().window_session();
     let window = Arc::new(Poster {
         inbox: Arc::clone(inbox),
     });
     window_session.connect(&window);
-    let mut modules = vec![crate::modules::app_state::with_restoration(
-        Arc::clone(&app_state),
-        services.borrow().restoration(),
-        window_session,
-    )];
-    let plugin_http = links.http.clone();
-    let has_http = boot.modules.iter().any(|m| m.specifier == "@impasto/http");
-    let has_ws = boot
-        .modules
-        .iter()
-        .any(|m| m.specifier == "@impasto/websocket");
-    if !has_http {
-        modules.push(crate::modules::http(links.http));
-    }
-    if !has_ws {
-        modules.push(crate::modules::websocket(
-            services.borrow().websocket_transport(),
-            boot.devtools.clone(),
-        ));
-    }
-    if let Some(hub) = boot.devtools.as_ref() {
-        modules.push(crate::diagnostics::module(
-            Arc::clone(hub),
-            crate::diagnostics::DevtoolsContext {
-                enabled: true,
-                source_map: boot.devtools_source_map.clone(),
-                app_state: Arc::clone(&app_state),
-                os: std::env::consts::OS,
-                os_version: host_os_version(),
-                dump: std::env::var("IMPASTO_DUMP").ok(),
-            },
-        ));
-    }
-    modules.extend(boot.modules);
+    let bindings = crate::plugins::WindowBindings {
+        initial_url: engine::session::shared_read(&boot.launch_url),
+        session: window_session,
+        restoration: services.borrow().restoration(),
+        os_version: boot
+            .devtools
+            .as_ref()
+            .map_or_else(String::new, |_| host_os_version()),
+        diagnostics: boot.devtools.clone(),
+        source_map: boot.devtools_source_map,
+    };
     let (registry, plugins) = crate::plugins::attach(
-        modules,
+        boot.modules,
         boot.plugin_services,
-        plugin_http,
+        bindings,
         inbox,
         Arc::clone(&runners.io),
         boot.platform_runner
@@ -1155,8 +1121,6 @@ fn open_ui(
         } else {
             engine::session::ScriptExecution::DedicatedUi
         },
-        app_state,
-        launch_url,
     };
     startup.checkpoint()?;
     let session = open(parts, host);
@@ -1244,6 +1208,21 @@ fn update_source(runtime: &mut UiHost, revision: &str, source: &str) {
     let Some(session) = runtime.session.as_mut() else {
         return;
     };
+    match session.apply_source_patch(source) {
+        Ok(false) => {}
+        Ok(true) => {
+            arm(runtime);
+            runtime.services.borrow().source_updated(revision, Ok(()));
+            return;
+        }
+        Err(error) => {
+            runtime
+                .services
+                .borrow()
+                .source_updated(revision, Err(&error));
+            return;
+        }
+    }
     let restoration = runtime.services.borrow().restoration();
     let staged = restoration.as_ref().map(crate::Restoration::stage_update);
     let now = runtime.wake.runner.monotonic_ms();
@@ -2223,7 +2202,7 @@ mod tests {
     use crate::scheduler::FrameScheduler;
     use crate::scheduler::Gpu;
     use crate::surface::{SURFACE_OPEN_ATTEMPTS, SurfaceHost};
-    use crate::{ClipboardHost, NativePtr, Presented, Surface, Vsync};
+    use crate::{NativePtr, Presented, Surface, Vsync};
 
     #[test]
     fn a_rejected_font_is_logged_without_its_bytes() {
@@ -3074,11 +3053,14 @@ mod tests {
 
     #[test]
     fn editor_copy_calls_clipboard_set_string() {
-        let clip = crate::memory::MemoryClipboard::new("");
+        let mut registrar = impasto::PluginRegistrar::default();
+        impasto_clipboard::register(&mut registrar);
+        let modules = registrar.build(&impasto::PluginContext::default());
+        let Ok(modules) = modules else {
+            panic!("build clipboard modules");
+        };
         let mut harness = TestHarness::new();
-        harness.runtime.registry = Arc::new(engine::session::ModuleRegistry::new(vec![
-            crate::clipboard(Arc::clone(&clip) as _),
-        ]));
+        harness.runtime.registry = Arc::new(engine::session::ModuleRegistry::new(modules));
         harness.open_dummy();
         harness.session.borrow_mut().clipboard = Some("copied".into());
         let token = match harness.vsync.last_token() {
@@ -3086,7 +3068,10 @@ mod tests {
             None => panic!("SurfaceReady arms one vsync token"),
         };
         assert!(!harness.command(Command::Frame { token, time: now() }));
-        assert_eq!(clip.read_clipboard(), "copied");
+        match harness.runtime.registry.call("Clipboard", "getString", &[]) {
+            Ok(engine::session::PluginValue::Str(text)) => assert_eq!(text, "copied"),
+            other => panic!("unexpected clipboard contents {other:?}"),
+        }
     }
 
     struct Capture(Arc<Mutex<Vec<String>>>);

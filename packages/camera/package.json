@@ -1,0 +1,11 @@
+{
+  "name": "@impasto/camera",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.tsx"
+  },
+  "dependencies": {
+    "@impasto/solid-ui": "workspace:*"
+  }
+}

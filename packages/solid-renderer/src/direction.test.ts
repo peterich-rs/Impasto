@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+import { assert } from "impasto:test";
 import { directionFor } from "./direction.ts";
 
 for (const locale of ["ar", "he", "fa", "ur", "ar-EG"]) {

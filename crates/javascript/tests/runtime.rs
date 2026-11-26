@@ -557,7 +557,7 @@ fn user_timing_uses_the_runtime_clock_and_notifies_the_owner() {
 }
 
 #[test]
-fn quickjs_interrupt_checkpoints_capture_bounded_module_stacks() {
+fn quickjs_interrupt_checkpoints_capture_bounded_source_stacks() {
     let mut runtime = javascript::runtime::Runtime::builder()
         .stack_sampling(|| true)
         .build()
@@ -565,6 +565,9 @@ fn quickjs_interrupt_checkpoints_capture_bounded_module_stacks() {
     runtime
         .eval_script(
             r#"
+        Error.stackTraceLimit = 0;
+        Error.prepareStackTrace = () => { throw new Error("profiler called app code"); };
+        Object.defineProperty(Error.prototype, "stack", {get() { throw new Error("app getter"); }});
         function outer() { inner(); }
         function inner() {
             const limit = Date.now() + 15;
@@ -578,13 +581,13 @@ fn quickjs_interrupt_checkpoints_capture_bounded_module_stacks() {
     let samples = runtime.take_stack_samples();
     assert!(samples.len() <= 32);
     assert!(
-        samples.iter().any(|sample| sample
-            .modules
+        samples
             .iter()
-            .flatten()
-            .filter(|module| *module == "stack-sample.js")
-            .count()
-            >= 2),
+            .any(|sample| sample.stack.contains("outer (stack-sample.js:5:")
+                && sample
+                    .stack
+                    .lines()
+                    .any(|frame| frame.contains("inner (stack-sample.js:8:"))),
         "{samples:?}"
     );
     assert!(runtime.take_stack_samples().is_empty());

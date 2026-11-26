@@ -1,3 +1,4 @@
+import { View as HostView } from "@impasto/solid-renderer/host";
 import { createTrackedEffect, createSignal } from "solid-js";
 import {
   Text,
@@ -73,7 +74,7 @@ export function Switch(props: SwitchProps): NodeHandle {
     writeSemantics();
   });
   return (
-    <view
+    <HostView
       ref={(handle) => {
         if (handle === null) return;
         node = handle;
@@ -92,7 +93,7 @@ export function Switch(props: SwitchProps): NodeHandle {
       onKey={press.onKey}
       onText={press.onText}
     >
-      <view
+      <HostView
         ref={(handle) => {
           if (handle === null) return;
           box = handle;
@@ -124,7 +125,7 @@ export function Switch(props: SwitchProps): NodeHandle {
         >
           {phrase()}
         </Text>
-      </view>
-    </view>
+      </HostView>
+    </HostView>
   );
 }

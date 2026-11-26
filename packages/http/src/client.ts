@@ -1,4 +1,4 @@
-import type { NativeHttpEvent, NativeHttpRequest } from "./native.js";
+import type { NativeHttpEvent, NativeHttpRequest } from "@impasto/http/native";
 import { FormData } from "./form-data.ts";
 import { Headers, type HeadersInit } from "./headers.ts";
 

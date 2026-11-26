@@ -1,3 +1,4 @@
+import { View as HostView } from "@impasto/solid-renderer/host";
 /** Network page: request list with status, timing, and redacted headers. */
 import { createSignal, For, Show } from "solid-js";
 import { Text, useTheme } from "@impasto/solid-ui";
@@ -37,7 +38,7 @@ export function NetworkPage() {
       return true;
     });
   return (
-    <view
+    <HostView
       style={{
         width: "100%",
         height: "100%",
@@ -47,13 +48,13 @@ export function NetworkPage() {
         minHeight: 0,
       }}
     >
-      <view
+      <HostView
         style={{
           flexDirection: "row",
           gap: 8,
         }}
       >
-        <view onClick={() => setOnlyFailures((prev) => !prev)}>
+        <HostView onClick={() => setOnlyFailures((prev) => !prev)}>
           <Text
             style={{
               fontSize: 11,
@@ -64,8 +65,8 @@ export function NetworkPage() {
           >
             {onlyFailures() ? "只看失败" : "全部"}
           </Text>
-        </view>
-        <view onClick={() => setOnlyStream((prev) => !prev)}>
+        </HostView>
+        <HostView onClick={() => setOnlyStream((prev) => !prev)}>
           <Text
             style={{
               fontSize: 11,
@@ -76,7 +77,7 @@ export function NetworkPage() {
           >
             {onlyStream() ? "流/套接字" : "含 HTTP"}
           </Text>
-        </view>
+        </HostView>
         <Text
           style={{
             fontSize: 11,
@@ -85,8 +86,8 @@ export function NetworkPage() {
         >
           {network().length} 条
         </Text>
-      </view>
-      <view
+      </HostView>
+      <HostView
         style={{
           gap: 2,
           flex: 1,
@@ -94,14 +95,14 @@ export function NetworkPage() {
       >
         <For each={visible().slice(-50)}>
           {(entry) => (
-            <view onClick={() => setSelected(entry.seq)}>
-              <view
+            <HostView onClick={() => setSelected(entry.seq)}>
+              <HostView
                 style={{
                   backgroundColor: theme().color.surface,
                   borderRadius: 4,
                 }}
               >
-                <view
+                <HostView
                   style={{
                     padding: 4,
                   }}
@@ -122,15 +123,15 @@ export function NetworkPage() {
                     [{entry.kind}] {entry.method || "GET"} {entry.url}
                     {entry.status !== null ? ` → ${entry.status}` : ""}
                   </Text>
-                </view>
-              </view>
-            </view>
+                </HostView>
+              </HostView>
+            </HostView>
           )}
         </For>
-      </view>
+      </HostView>
       <Show when={current()} keyed>
         {(entry) => (
-          <view
+          <HostView
             style={{
               gap: 2,
             }}
@@ -213,9 +214,9 @@ export function NetworkPage() {
                 {entry.error}
               </Text>
             </Show>
-          </view>
+          </HostView>
         )}
       </Show>
-    </view>
+    </HostView>
   );
 }

@@ -7,8 +7,5 @@
     ".": "./src/index.ts",
     "./compat": "./src/compat.ts",
     "./polyfill": "./src/polyfill.ts"
-  },
-  "scripts": {
-    "test": "node --experimental-strip-types src/index.test.ts"
   }
 }

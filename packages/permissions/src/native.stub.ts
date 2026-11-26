@@ -1,4 +1,4 @@
-import type { PermissionStatus, ServiceStatus } from "./native.js";
+import type { PermissionStatus, ServiceStatus } from "@impasto/permissions/native";
 
 export function checkPermissionStatus(_permission: string): Promise<PermissionStatus> {
   return Promise.resolve("denied");

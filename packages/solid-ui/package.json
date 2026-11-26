@@ -7,14 +7,7 @@
     ".": "./src/index.tsx",
     "./testing": "./testing/index.ts"
   },
-  "scripts": {
-    "test": "set -e; pnpm run typecheck; for t in src/*.test.ts src/field/*.test.ts; do node --import ../../tools/register.mjs --conditions=browser --experimental-strip-types \"$t\"; done",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.types.json"
-  },
   "dependencies": {
     "@impasto/solid-renderer": "workspace:*"
-  },
-  "devDependencies": {
-    "solid-js": "2.0.0"
   }
 }

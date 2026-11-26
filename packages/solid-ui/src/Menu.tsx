@@ -1,3 +1,4 @@
+import { Stack as HostStack } from "@impasto/solid-renderer/host";
 import { onCleanup } from "solid-js";
 import {
   scene,
@@ -123,7 +124,7 @@ function Floating(props: MenuProps & { place: (panel: number) => void }): NodeHa
     closeLayer();
   });
   return (
-    <stack
+    <HostStack
       ref={(node) => {
         if (node === null) return;
         placeholder = node;
@@ -137,7 +138,7 @@ function Floating(props: MenuProps & { place: (panel: number) => void }): NodeHa
       }}
     >
       {props.children}
-    </stack>
+    </HostStack>
   );
 }
 export function Menu(props: MenuProps): NodeHandle {

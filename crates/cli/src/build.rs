@@ -6,13 +6,13 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use std::{
     fs,
-    io::Write as _,
     path::{Path, PathBuf},
     process::Command,
 };
 
 pub struct BuildOptions {
     pub debug: bool,
+    pub hot: Option<std::cell::RefCell<bundler::WatchLinker>>,
     pub verbose: bool,
     pub trace: bool,
 }
@@ -31,6 +31,7 @@ pub fn build(
     options: BuildOptions,
     ios_simulator: bool,
     export_options: Option<&Path>,
+    installed_manifest: Option<&Path>,
 ) -> Result<()> {
     if platform.is_some() && target != "bundle" {
         bail!("--platform 仅适用于 build bundle");
@@ -41,6 +42,9 @@ pub fn build(
     if export_options.is_some() && target != "ipa" {
         bail!("--export-options 仅适用于 build ipa");
     }
+    if installed_manifest.is_some() && target != "bundle" {
+        bail!("--installed-manifest 仅适用于 build bundle");
+    }
     if options.debug && matches!(target, "ios-archive" | "ipa" | "ios-xcframework") {
         bail!("{target} 仅提供 release 产物");
     }
@@ -48,10 +52,10 @@ pub fn build(
     match target {
         "bundle" => {
             let platform = plugins::standalone(&app, platform)?;
-            let native = platform
+            let descriptor_target = platform.or_else(|| app.targets.first().map(String::as_str));
+            let native = descriptor_target
                 .map(|target| plugins::prepare(&app, target, options.verbose))
-                .transpose()?
-                .flatten();
+                .transpose()?;
             let mut directory = app.root.join("build");
             if let Some(platform) = platform {
                 directory = directory
@@ -59,7 +63,28 @@ pub fn build(
                     .join("bundle")
                     .join(profile(&options));
             }
-            bundle_in(&app, &options, platform, &directory, native.as_ref())?;
+            if let Some(installed) = installed_manifest {
+                let target = descriptor_target.context("更新包需要目标平台")?;
+                // Release and development updates use the same compatibility check.
+                let native = native.as_ref().context("缺少当前目标的原生契约")?;
+                let linked = link_source(
+                    &app.root,
+                    &app.entry,
+                    &options,
+                    Some(native.linker_manifest()),
+                    None,
+                )?;
+                native.validate_update(&fs::read(installed)?, &linked)?;
+                write_bundle(
+                    &options,
+                    Some(target),
+                    &directory,
+                    owned_exports(native.linker_manifest()),
+                    linked,
+                )?;
+            } else {
+                bundle_in(&app, &options, platform, &directory, native.as_ref())?;
+            }
         }
         "apk" => {
             android(&app, &options, AndroidArtifact::Apk, false)?;
@@ -104,38 +129,62 @@ pub fn build(
     }
     Ok(())
 }
-pub fn bundle(app: &App, options: &BuildOptions) -> Result<PathBuf> {
-    bundle_in(app, options, None, &app.root.join("build"), None)
-}
-
 pub(crate) fn bundle_update(
     app: &App,
     options: &BuildOptions,
     target: &str,
-    directory: &Path,
     installed: Option<&[u8]>,
-) -> Result<PathBuf> {
-    let manifest = installed
-        .map(|bytes| -> Result<_> {
-            let mut file = tempfile::NamedTempFile::new()?;
-            file.write_all(bytes)?;
-            Ok(file)
-        })
-        .transpose()?;
-    pack_bundle(
-        app,
+) -> Result<String> {
+    let installed = installed.context("缺少已安装壳的原生契约，请重新构建并安装应用")?;
+    let native = plugins::watch_manifest(app, target, options.verbose)?;
+    let linked = link_source(
+        &app.root,
+        &app.entry,
         options,
-        Some(target),
-        directory,
-        manifest.as_ref().map(|file| file.path()),
-        &[],
-    )
+        Some(native.linker_manifest()),
+        None,
+    )?;
+    native.validate_update(installed, &linked)?;
+    Ok(linked.code)
+}
+
+fn owned_exports(manifest: bundler::PluginManifest) -> Vec<(String, Vec<String>)> {
+    manifest
+        .exports()
+        .map(|(module, names)| {
+            (
+                module.to_owned(),
+                names.into_iter().map(str::to_owned).collect(),
+            )
+        })
+        .collect()
 }
 
 pub(crate) fn manifest_snapshot(native: Option<&NativeBuild>) -> Result<Option<Vec<u8>>> {
-    Ok(native
-        .map(|native| fs::read(&native.manifest))
-        .transpose()?)
+    native.map(NativeBuild::snapshot).transpose()
+}
+
+pub(crate) fn bundle_for_host(
+    app: &App,
+    options: &BuildOptions,
+    target: &str,
+    directory: &Path,
+    native: &mut NativeBuild,
+) -> Result<PathBuf> {
+    let linked = link_source(
+        &app.root,
+        &app.entry,
+        options,
+        Some(native.linker_manifest()),
+        None,
+    )?;
+    if !options.debug {
+        native.prune(app, &linked)?;
+    }
+    let exports = owned_exports(native.linker_manifest());
+    let output = write_bundle(options, Some(target), directory, exports, linked)?;
+    fs::write(directory.join("plugins-manifest.json"), native.snapshot()?)?;
+    Ok(output)
 }
 
 pub(crate) fn bundle_in(
@@ -150,8 +199,7 @@ pub(crate) fn bundle_in(
         options,
         target,
         directory,
-        native.map(|build| build.manifest.as_path()),
-        native.map_or(&[], NativeBuild::descriptors),
+        native.map(NativeBuild::linker_manifest),
     )
 }
 
@@ -160,89 +208,149 @@ fn pack_bundle(
     options: &BuildOptions,
     target: Option<&str>,
     directory: &Path,
-    manifest: Option<&Path>,
-    descriptors: &[plugins::Descriptor],
+    manifest: Option<bundler::PluginManifest>,
+) -> Result<PathBuf> {
+    let exports = manifest
+        .iter()
+        .flat_map(bundler::PluginManifest::exports)
+        .map(|(module, names)| {
+            (
+                module.to_owned(),
+                names.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let linked = link_source(&app.root, &app.entry, options, manifest, None)?;
+    write_bundle(options, target, directory, exports, linked)
+}
+
+fn write_bundle(
+    options: &BuildOptions,
+    target: Option<&str>,
+    directory: &Path,
+    exports: Vec<(String, Vec<String>)>,
+    linked: bundler::Bundle,
 ) -> Result<PathBuf> {
     fs::create_dir_all(directory)?;
     let esm = directory.join("app.js");
     let bytecode = directory.join("app.bin");
     let map = directory.join("app.js.map");
-    let mut command = pack_command(&app.entry, &esm, options)?;
-    if let Some(manifest) = manifest {
-        command.arg("--plugins-manifest").arg(manifest);
-    }
-    if matches!(target, Some("android" | "ios")) && !options.debug {
-        command.arg("--source-map");
-    }
-    toolchain::run(command, "打包 TSX")?;
-    if options.debug {
-        if bytecode.is_file() {
-            fs::remove_file(bytecode)?;
-        }
-        return Ok(esm);
-    }
-    let code = fs::read_to_string(&esm)?;
-    let registry = compile_registry(app, target);
-    let exports = descriptors
-        .iter()
-        .map(|module| {
-            (
-                module.specifier.as_str(),
-                module
-                    .exports
+    let output = if options.debug {
+        fs::write(&esm, linked.code)?;
+        remove_file_if_exists(&bytecode)?;
+        esm
+    } else {
+        let registry = engine::session::ModuleRegistry::new(Vec::new());
+        let names = exports
+            .iter()
+            .filter_map(|(module, names)| {
+                let used = linked.native_use.get(module)?;
+                let required = names
                     .iter()
+                    .filter(|name| used.as_ref().is_none_or(|used| used.contains(*name)))
                     .map(String::as_str)
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let exports = exports
-        .iter()
-        .map(|(specifier, names)| (*specifier, names.as_slice()))
-        .collect::<Vec<_>>();
-    let bytes = engine::js::compile_with_native_exports(&code, "app.js", true, registry, &exports)?;
-    fs::write(&bytecode, bytes)?;
-    fs::remove_file(esm)?;
-    if map.is_file() && !matches!(target, Some("android" | "ios")) {
-        fs::remove_file(map)?;
-    }
-    Ok(bytecode)
-}
-
-fn compile_registry(app: &App, target: Option<&str>) -> engine::session::ModuleRegistry {
-    let modules = embedder::first_party_modules();
-    let Some(target) = target else {
-        // A standalone bundle can be linked by a caller supplying its own
-        // module registry. The platform package checks its own capabilities.
-        return engine::session::ModuleRegistry::new(modules);
+                    .collect::<Vec<_>>();
+                Some((module.as_str(), required))
+            })
+            .collect::<Vec<_>>();
+        let exports = names
+            .iter()
+            .map(|(module, names)| (*module, names.as_slice()))
+            .collect::<Vec<_>>();
+        let bytes = engine::js::compile_with_native_exports(
+            &linked.code,
+            "app.js",
+            true,
+            registry,
+            &exports,
+        )?;
+        fs::write(&bytecode, bytes)?;
+        remove_file_if_exists(&esm)?;
+        bytecode
     };
-    let enabled = app.modules(target);
-    if !matches!(target, "macos" | "android" | "ios") {
-        return engine::session::ModuleRegistry::new(Vec::new());
+    if !options.debug
+        && let Some(source_map) = &linked.source_map
+    {
+        crate::symbols::write(&directory.join("app.sym"), source_map)?;
+    } else {
+        remove_file_if_exists(&directory.join("app.sym"))?;
     }
-    let modules = modules
-        .into_iter()
-        .filter(|module| {
-            let Some(package) = embedder::package_folder(module.specifier) else {
-                return false;
-            };
-            enabled.split(',').any(|name| name == package)
-        })
-        .collect();
-    engine::session::ModuleRegistry::new(modules)
+    if let Some(source_map) = linked
+        .source_map
+        .filter(|_| options.debug || matches!(target, Some("android" | "ios")))
+    {
+        fs::write(map, source_map)?;
+    } else {
+        remove_file_if_exists(&map)?;
+    }
+    Ok(output)
 }
 
-pub fn pack(entry: &Path, output: &Path, options: &BuildOptions) -> Result<()> {
-    toolchain::run(pack_command(entry, output, options)?, "打包 TSX")
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
-fn pack_command(entry: &Path, output: &Path, options: &BuildOptions) -> Result<Command> {
-    let mut command = toolchain::tool("pack.mjs", options.verbose)?;
-    command.arg(entry).arg(output);
-    if !options.debug {
-        command.arg("--release");
+pub(crate) fn link_source(
+    root: &Path,
+    entry: &Path,
+    options: &BuildOptions,
+    plugins: Option<bundler::PluginManifest>,
+    freeze_stock: Option<&str>,
+) -> Result<bundler::Bundle> {
+    let framework = toolchain::framework()?;
+    let mut defines = std::collections::BTreeMap::new();
+    if let Some(mode) = freeze_stock {
+        defines.insert(
+            "__STOCK_REPLAY_FREEZE__".to_owned(),
+            serde_json::to_string(mode)?,
+        );
     }
-    Ok(command)
+    if options.verbose {
+        eprintln!("impasto: Oxc + Rolldown {}", entry.display());
+    }
+    let link = bundler::BundleOptions {
+        root: root.to_path_buf(),
+        entry: entry.to_path_buf(),
+        framework,
+        release: !options.debug,
+        hot: options.hot.is_some(),
+        plugins,
+        defines,
+        ..Default::default()
+    };
+    let linked = match &options.hot {
+        Some(watch) => watch.borrow_mut().bundle(link)?,
+        None => bundler::bundle(link)?,
+    };
+    for warning in &linked.warnings {
+        eprintln!("{warning}");
+    }
+    Ok(linked)
+}
+
+pub(crate) fn pack(
+    entry: &Path,
+    output: &Path,
+    options: &BuildOptions,
+    freeze_stock: Option<&str>,
+) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let entry = cwd.join(entry);
+    let linked = link_source(&cwd, &entry, options, None, freeze_stock)?;
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(output, linked.code)?;
+    if let Some(map) = linked.source_map {
+        let mut name = output.as_os_str().to_os_string();
+        name.push(".map");
+        fs::write(name, map)?;
+    }
+    Ok(())
 }
 
 enum AndroidArtifact {
@@ -263,158 +371,29 @@ fn android(
 ) -> Result<PlatformArtifact> {
     app.require("android")?;
     let framework = toolchain::framework()?;
-    let native = plugins::prepare(app, "android", options.verbose)?;
-    let linked = native.as_ref().filter(|native| native.links_native());
-    if linked.is_some() && matches!(artifact, AndroidArtifact::Library) {
-        bail!("build aar 暂不支持带 Rust 插件的应用");
-    }
-    let bundle = bundle_in(
+    crate::create::scaffold(app)?;
+    let mut native = plugins::prepare(app, "android", options.verbose)?;
+
+    let bundle = bundle_for_host(
         app,
         options,
-        Some("android"),
+        "android",
         &app.root.join("build/android/bundle").join(profile(options)),
-        native.as_ref(),
+        &mut native,
     )?;
-    let generated = app.root.join("build/android");
-    // Replace the generated source sets so removed or renamed host files
-    // cannot survive an upgrade. Keep Gradle output and caches reusable.
-    for source_set in ["app/src", "host/src"] {
-        let old = generated.join(source_set);
-        if old.exists() {
-            fs::remove_dir_all(&old).with_context(|| format!("清理 {}", old.display()))?;
-        }
-    }
-    copy_tree(
-        &framework.join("crates/embedder/android/apk"),
-        &generated,
-        &["build", ".gradle", "local.properties"],
+    let project = app.root.join("android");
+    let resources = app
+        .root
+        .join(".impasto/android/assets")
+        .join(profile(options));
+    stage_assets(
+        app,
+        &framework,
+        &resources,
+        &bundle,
+        "android",
+        options.trace,
     )?;
-    let gradle = generated.join("app/build.gradle.kts");
-    let text=fs::read_to_string(&gradle)?
-        .replace("rootProject.projectDir.resolve(\"../../../..\").canonicalFile",&format!("file({})",kotlin(&framework)))
-        .replace("repoRoot.resolve(\"apps/gallery-solid/dist/quotes.js\")",&format!("file({})",kotlin(&bundle)))
-        .replace("repoRoot.resolve(\"crates/embedder/macos/assets/logo.png\")",&format!("file({})",kotlin(&framework.join("crates/embedder/macos/assets/logo.png"))))
-        .replace("applicationId = \"dev.impasto.host\"",&format!("applicationId = \"{}\"",app.android_id()))
-        .replace("        minSdk = 24",&format!("        versionName = \"{}\"\n        versionCode = {}\n        minSdk = 24",app.version, app.android.version_code.unwrap_or(1)))
-        .replace("script.copyTo(root.resolve(\"quotes.js\"), overwrite = true)","script.copyTo(root.resolve(if (script.extension == \"bin\") \"app.bin\" else \"app.js\"), overwrite = true)");
-    let text = if let Some(native) = linked {
-        let inputs = native.inputs();
-        let sources = inputs
-            .sources
-            .iter()
-            .map(|path| {
-                format!(
-                    "    sourceSets.getByName(\"main\").java.srcDir(file({}))",
-                    kotlin(path)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let dependencies = inputs
-            .gradle_dependencies
-            .iter()
-            .map(|entry| format!("    implementation({entry:?})"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        text.replace("android {", &format!("android {{\n{sources}"))
-            .replace(
-                "dependencies {",
-                &format!("dependencies {{\n{dependencies}"),
-            )
-            .replace(
-                "minSdk = 24",
-                &format!("minSdk = {}", inputs.min_sdk.unwrap_or(24).max(24)),
-            )
-    } else {
-        text
-    };
-    fs::write(&gradle, text)?;
-    let stage = generated.join("app/src/main/app-assets");
-    for profile in ["debug", "release"] {
-        let old = generated.join(format!(
-            "app/build/generated/assets/stageApkAssets{}/",
-            if profile == "debug" {
-                "Debug"
-            } else {
-                "Release"
-            }
-        ));
-        if old.exists() {
-            fs::remove_dir_all(old)?;
-        }
-    }
-    if stage.exists() {
-        fs::remove_dir_all(&stage)?;
-    }
-    fs::create_dir_all(stage.join("images"))?;
-    copy_tree(&app.assets(), &stage.join("images"), &[])?;
-    fs::write(stage.join("app.modules"), app.modules("android"))?;
-    let trace = stage.join("app.trace");
-    if options.trace {
-        fs::write(trace, "1")?;
-    } else if trace.exists() {
-        fs::remove_file(trace)?;
-    }
-    let text = fs::read_to_string(&gradle)?.replace(
-        "assets.setSrcDirs(emptyList<String>())",
-        "assets.setSrcDirs(listOf(\"src/main/app-assets\"))",
-    );
-    fs::write(&gradle, text)?;
-    let manifest = generated.join("app/src/main/AndroidManifest.xml");
-    let mut filters = String::new();
-    for link in &app.android.deep_links {
-        let path = link
-            .path_prefix
-            .as_deref()
-            .map_or_else(String::new, |prefix| {
-                format!(" android:pathPrefix=\"{}\"", escape_xml(prefix))
-            });
-        filters.push_str(&format!(
-            "            <intent-filter>\n                <action android:name=\"android.intent.action.VIEW\" />\n                <category android:name=\"android.intent.category.DEFAULT\" />\n                <category android:name=\"android.intent.category.BROWSABLE\" />\n                <data android:scheme=\"{}\" android:host=\"{}\"{path} />\n            </intent-filter>\n",
-            link.scheme, link.host,
-        ));
-    }
-    let permissions: String = app
-        .android
-        .permissions
-        .iter()
-        .chain(
-            native
-                .iter()
-                .flat_map(|native| native.inputs().permissions.iter()),
-        )
-        .filter(|name| name.as_str() != "android.permission.INTERNET")
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .map(|name| {
-            format!(
-                "    <uses-permission android:name=\"{}\" />\n",
-                escape_xml(name)
-            )
-        })
-        .collect();
-    let features = native
-        .iter()
-        .flat_map(|native| &native.inputs().uses_features)
-        .map(|feature| {
-            format!(
-                "    <uses-feature android:name=\"{}\" android:required=\"{}\" />\n",
-                escape_xml(&feature.name),
-                feature.required
-            )
-        })
-        .collect::<String>();
-    let xml = fs::read_to_string(&manifest)?
-        .replace("impasto counter", &app.name)
-        .replace(
-            "    <application",
-            &format!("{permissions}{features}    <application"),
-        )
-        .replace(
-            "        </activity>",
-            &format!("{filters}        </activity>"),
-        );
-    fs::write(manifest, xml)?;
     let mode = if options.debug { "Debug" } else { "Release" };
     // The wrapper pins the default. Developers can explicitly use an installed
     // Gradle to build offline after dependencies have been cached.
@@ -425,42 +404,45 @@ fn android(
         }
         executable
     } else {
-        generated.join("gradlew")
+        project.join("gradlew")
     };
     let mut command = Command::new(gradle);
+    command.env("IMPASTO_NATIVE_EXPORTS", native.native_exports());
     let task = match artifact {
         AndroidArtifact::Apk => ":app:assemble",
         AndroidArtifact::Bundle => ":app:bundle",
-        AndroidArtifact::Library => ":host:assemble",
+        AndroidArtifact::Library => ":impasto-host:assemble",
     };
-    command
-        .arg("-p")
-        .arg(&generated)
-        .arg(format!("{task}{mode}"));
-    if let Some(native) = linked {
-        command.arg(format!(
-            "-PimpastoCargoManifest={}",
-            native.workspace.join("Cargo.toml").display()
-        ));
-        command.arg(format!("-PimpastoCargoPackage={}", native.package));
-    }
-    if !app.android.abis.is_empty() {
-        command.arg(format!("-PimpastoAbis={}", app.android.abis.join(",")));
-    }
+    command.arg("-p").arg(&project).arg(format!("{task}{mode}"));
     if local_install {
         command.arg("-PimpastoLocalSigning=true");
     }
+    let companion_modules = native
+        .inputs()
+        .projects
+        .iter()
+        .map(|plugin| plugin.gradle_module.as_str())
+        .chain(
+            (!native.inputs().android_permissions.is_empty())
+                .then_some(crate::sync::ANDROID_PERMISSIONS_MODULE),
+        )
+        .collect::<Vec<_>>();
+    if matches!(artifact, AndroidArtifact::Library) {
+        command.arg(format!(":app:cargoImpasto{mode}"));
+        for module in &companion_modules {
+            command.arg(format!(":{module}:assemble{mode}"));
+        }
+    }
     toolchain::run(command, "构建 Android 应用")?;
     let profile = mode.to_lowercase();
+    let output = app.root.join("build/android/gradle");
     let artifact = match artifact {
-        AndroidArtifact::Apk => {
-            gradle_apk(&generated.join("app/build/outputs/apk").join(&profile))?
+        AndroidArtifact::Apk => gradle_apk(&output.join("app/outputs/apk").join(&profile))?,
+        AndroidArtifact::Bundle => {
+            output.join(format!("app/outputs/bundle/{profile}/app-{profile}.aab"))
         }
-        AndroidArtifact::Bundle => generated.join(format!(
-            "app/build/outputs/bundle/{profile}/app-{profile}.aab"
-        )),
         AndroidArtifact::Library => {
-            generated.join(format!("host/build/outputs/aar/host-{profile}.aar"))
+            package_aar(&app.root, &output, &resources, mode, &companion_modules)?
         }
     };
     if !artifact.is_file() {
@@ -469,8 +451,66 @@ fn android(
     println!("{}", artifact.display());
     Ok(PlatformArtifact {
         path: artifact,
-        plugin_manifest: manifest_snapshot(native.as_ref())?,
+        plugin_manifest: manifest_snapshot(Some(&native))?,
     })
+}
+
+fn package_aar(
+    app: &Path,
+    gradle: &Path,
+    assets: &Path,
+    mode: &str,
+    modules: &[&str],
+) -> Result<PathBuf> {
+    let profile = mode.to_ascii_lowercase();
+    let stage = tempfile::tempdir_in(gradle)?;
+    let aar = stage.path().join("app.aar");
+    fs::copy(
+        gradle.join(format!(
+            "impasto-host/outputs/aar/impasto-host-{profile}.aar"
+        )),
+        &aar,
+    )?;
+    copy_tree(assets, &stage.path().join("assets"), &[])?;
+    copy_tree(
+        &gradle.join(format!("app/generated/jniLibs/cargoImpasto{mode}")),
+        &stage.path().join("jni"),
+        &[],
+    )?;
+    let mut zip = Command::new("zip");
+    zip.current_dir(stage.path())
+        .args(["-q", "-r", "app.aar", "assets", "jni"]);
+    toolchain::run(zip, "打包 Android 宿主 AAR")?;
+    let directory = app.join("build/android/aar");
+    fs::create_dir_all(&directory)?;
+    let mut companions = std::collections::BTreeSet::new();
+    for module in modules {
+        let filename = format!("{module}-{profile}.aar");
+        let source = gradle.join(module).join("outputs/aar").join(&filename);
+        let companion = format!("plugin-{filename}");
+        fs::copy(&source, stage.path().join(&companion))
+            .with_context(|| format!("读取插件 AAR {}", source.display()))?;
+        companions.insert(companion);
+    }
+    for filename in &companions {
+        fs::rename(stage.path().join(filename), directory.join(filename))?;
+    }
+    for entry in fs::read_dir(&directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with("plugin-")
+            && name.ends_with(&format!("-{profile}.aar"))
+            && !companions.contains(name)
+        {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    let output = directory.join(format!("app-{profile}.aar"));
+    fs::rename(aar, &output)?;
+    Ok(output)
 }
 
 fn gradle_apk(directory: &Path) -> Result<PathBuf> {
@@ -500,202 +540,170 @@ pub(crate) fn escape_xml(value: &str) -> String {
         .replace('<', "&lt;")
         .replace('"', "&quot;")
 }
-pub fn macos(app: &App, options: &BuildOptions) -> Result<PathBuf> {
+pub fn macos(app: &App, options: &BuildOptions) -> Result<PlatformArtifact> {
     app.require("macos")?;
     if !cfg!(target_os = "macos") {
         bail!("macos 构建需要 macOS");
     }
     let framework = toolchain::framework()?;
-    let native = plugins::prepare(app, "macos", options.verbose)?;
-    let bundle = bundle_in(
-        app,
+    crate::create::scaffold(app)?;
+    let mut native = plugins::prepare(app, "macos", options.verbose)?;
+    crate::ios::verify_runner_privacy(
+        &app.root.join("macos/Runner/Info.plist"),
+        &native.inputs().usage_description_keys,
+    )?;
+    crate::ios::verify_runner_entitlements(
+        &app.root.join("macos/Runner/Runner.entitlements"),
+        &native.inputs().required_entitlements,
+    )?;
+    let profile = profile(options);
+    let project = app.root.join("build/macos").join(profile);
+    let bundle = bundle_for_host(app, options, "macos", &project.join("bundle"), &mut native)?;
+    let rust_target_dir = toolchain::target_dir(&framework.join("target"))?;
+    let archive_lock = crate::ios::lock_directory(&rust_target_dir.join(".impasto-macos"))?;
+    let (target, architecture) = match std::env::consts::ARCH {
+        "aarch64" => ("aarch64-apple-darwin", "arm64"),
+        "x86_64" => ("x86_64-apple-darwin", "x86_64"),
+        arch => bail!("macOS 不支持主机架构 {arch}"),
+    };
+    let flags = crate::ios::build_rust(
+        &native.workspace,
+        &rust_target_dir,
+        target,
         options,
-        Some("macos"),
-        &app.root.join("build/macos/bundle").join(profile(options)),
-        native.as_ref(),
+        &native.package,
+        "13.0",
+        native.native_exports(),
     )?;
-    let project = app.root.join("build/macos");
-    fs::create_dir_all(&project)?;
-    let mut command = Command::new("cargo");
-    let linked = native.as_ref().filter(|native| native.links_native());
-    let (workspace, package, executable) =
-        linked.map_or((framework.as_path(), "embedder-macos", "macos"), |native| {
-            (
-                native.workspace.as_path(),
-                native.package.as_str(),
-                "impasto-app",
-            )
-        });
+    let library = project.join("libimpasto_app.a");
+    fs::copy(
+        rust_target_dir.join(profile).join("libimpasto_app.a"),
+        &library,
+    )?;
+    drop(archive_lock);
+    let resources = project.join("resources");
+    stage_assets(app, &framework, &resources, &bundle, "macos", options.trace)?;
+    let configuration = if options.debug { "Debug" } else { "Release" };
+    let settings = darwin_settings(&library, &resources, &flags)?;
+    let config = app
+        .root
+        .join(".impasto/darwin/macos")
+        .join(format!("{configuration}.xcconfig"));
+    plugins::write(&config, &settings)?;
+    let mut command = Command::new("xcodebuild");
     command
-        .current_dir(workspace)
-        .arg(if linked.is_some() { "rustc" } else { "build" })
-        .arg("--manifest-path")
-        .arg(workspace.join("Cargo.toml"))
-        .args(["--locked", "-p", package]);
-    if !options.debug {
-        command.arg("--release");
+        .current_dir(app.root.join("macos"))
+        .env("IMPASTO_ROOT", framework)
+        .args(["-project", "Runner.xcodeproj", "-scheme", "Runner"])
+        .arg("-destination")
+        .arg(format!("platform=macOS,arch={architecture}"))
+        .arg(format!("ARCHS={architecture}"))
+        .args(["-configuration", configuration, "-derivedDataPath"])
+        .arg(project.join("xcode"));
+    if !options.verbose {
+        command.arg("-quiet");
     }
-    if let Some(native) = linked {
-        command.arg("--");
-        add_macos_linker_inputs(&mut command, native, &project)?;
-    }
-    toolchain::run(command, "构建 macOS 宿主")?;
-    let application = project.join(format!("{}.app", app.name));
-    let staging = tempfile::tempdir_in(&project)?;
-    let built = staging.path().join(format!("{}.app", app.name));
-    let contents = built.join("Contents");
-    let resources = contents.join("Resources");
-    fs::create_dir_all(contents.join("MacOS"))?;
-    fs::create_dir_all(&resources)?;
-    let profile = if options.debug { "debug" } else { "release" };
-    fs::copy(
-        workspace.join("target").join(profile).join(executable),
-        contents.join("MacOS/impasto"),
-    )?;
-    fs::copy(
-        bundle,
-        resources.join(if options.debug { "app.js" } else { "app.bin" }),
-    )?;
-    copy_tree(&app.assets(), &resources.join("assets"), &[])?;
-    fs::write(resources.join("app.modules"), app.modules("macos"))?;
-    for notice in ["LICENSE", "NOTICE"] {
-        fs::copy(framework.join(notice), resources.join(notice))?;
-    }
-    let mut plist_entries = app
-        .macos
-        .usage_descriptions
-        .iter()
-        .map(|(name, value)| format!("<key>{name}</key><string>{}</string>", escape_xml(value)))
-        .collect::<String>();
-    if let Some(minimum) = native
-        .as_ref()
-        .and_then(|native| native.inputs().min_version.as_deref())
-    {
-        use std::fmt::Write as _;
-        write!(
-            plist_entries,
-            "<key>LSMinimumSystemVersion</key><string>{}</string>",
-            escape_xml(minimum)
-        )?;
-    }
-    fs::write(
-        contents.join("Info.plist"),
-        format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>CFBundleExecutable</key><string>impasto</string><key>CFBundleIdentifier</key><string>dev.impasto.{}</string><key>CFBundleName</key><string>{}</string><key>CFBundleShortVersionString</key><string>{}</string><key>CFBundlePackageType</key><string>APPL</string><key>NSHighResolutionCapable</key><true/>{plist_entries}</dict></plist>",
-            app.name.replace('-', "_"),
-            app.name,
-            app.version
-        ),
-    )?;
-    let mut sign = Command::new("codesign");
-    sign.args(["--force", "--deep", "--sign", "-"]);
-    if !app.macos.entitlements.is_empty() {
-        let path = project.join("Impasto.entitlements");
-        let entries = app
-            .macos
-            .entitlements
-            .iter()
-            .map(|(name, value)| format!("<key>{name}</key><{value}/>"))
-            .collect::<String>();
-        fs::write(&path, crate::ios::plist_xml(&entries))?;
-        sign.arg("--entitlements").arg(path);
-    }
-    sign.arg(&built);
-    toolchain::run(sign, "本地签名 macOS 应用")?;
-    let previous = staging.path().join("previous.app");
-    if application.exists() {
-        fs::rename(&application, &previous)?;
-    }
-    if let Err(error) = fs::rename(built, &application) {
-        if previous.exists() {
-            fs::rename(previous, &application).context("恢复上一个 macOS 应用包")?;
-        }
-        return Err(error.into());
+    command.arg("build");
+    toolchain::run(command, "构建 macOS 应用")?;
+    let application = project
+        .join("xcode/Build/Products")
+        .join(configuration)
+        .join(format!("{}.app", app.name));
+    if !application.join("Contents/MacOS/impasto").is_file() {
+        bail!("没有生成完整的 macOS 应用 {}", application.display());
     }
     println!("{}", application.display());
-    Ok(application)
+    Ok(PlatformArtifact {
+        path: application,
+        plugin_manifest: manifest_snapshot(Some(&native))?,
+    })
 }
-fn add_macos_linker_inputs(
-    command: &mut Command,
-    native: &NativeBuild,
-    project: &Path,
+
+pub(crate) fn darwin_settings(library: &Path, resources: &Path, flags: &str) -> Result<String> {
+    let xcconfig_path = |path: &Path| -> Result<String> {
+        // xcconfig parses consecutive slashes as a comment outside a variable expansion.
+        let path = path.to_str().context("Xcode 构建路径需要 UTF-8")?;
+        if path.contains(['\n', '\r', '"']) {
+            bail!("Xcode 构建路径包含不支持的字符 {path:?}");
+        }
+        Ok(path.to_owned())
+    };
+    let library = xcconfig_path(library)?;
+    let resources = xcconfig_path(resources)?;
+    Ok(format!(
+        "IMPASTO_RESOURCES = {resources}\nOTHER_LDFLAGS = $(inherited) \"{library}\" {flags}\n"
+    ))
+}
+
+pub(crate) fn stage_assets(
+    app: &App,
+    framework: &Path,
+    resources: &Path,
+    bundle: &Path,
+    platform: &str,
+    trace: bool,
 ) -> Result<()> {
-    let inputs = native.inputs();
-    if !inputs.sources.is_empty() {
-        command.arg("--check-cfg=cfg(impasto_metadata)");
+    let directory = resources.parent().context("缺少应用资源目录")?;
+    fs::create_dir_all(directory)?;
+    let staging = tempfile::tempdir_in(directory)?;
+    let stage = staging.path().join("resources");
+    fs::create_dir_all(&stage)?;
+    let script = bundle.file_name().context("缺少应用脚本名")?;
+    fs::copy(bundle, stage.join(script))?;
+    if let Some(manifest) = bundle
+        .parent()
+        .map(|parent| parent.join("plugins-manifest.json"))
+        && manifest.is_file()
+    {
+        fs::copy(manifest, stage.join("plugins-manifest.json"))?;
     }
-    if let Some(minimum) = &inputs.min_version {
-        command.env("MACOSX_DEPLOYMENT_TARGET", minimum);
-    }
-    let mut swift = Vec::new();
-    for (index, source) in inputs.sources.iter().enumerate() {
-        match source.extension().and_then(|part| part.to_str()) {
-            Some("swift") => swift.push(source),
-            Some("m" | "c") => {
-                let object = project.join(format!("plugin-{index}.o"));
-                let mut clang = Command::new("xcrun");
-                clang
-                    .args(["--sdk", "macosx", "clang", "-c"])
-                    .arg(source)
-                    .arg("-o")
-                    .arg(&object);
-                if let Some(minimum) = &inputs.min_version {
-                    clang.env("MACOSX_DEPLOYMENT_TARGET", minimum);
-                }
-                toolchain::run(clang, "编译 macOS 插件桥接源码")?;
-                command
-                    .arg("-C")
-                    .arg(format!("link-arg={}", object.display()));
-            }
-            _ => bail!("macOS 插件源码格式无效: {}", source.display()),
+    if bundle
+        .extension()
+        .is_some_and(|extension| extension == "js")
+    {
+        let map = bundle.with_extension("js.map");
+        if map.is_file() {
+            fs::copy(&map, stage.join("app.js.map"))?;
         }
     }
-    if !swift.is_empty() {
-        let library = project.join("libImpastoPlugins.a");
-        let mut swiftc = Command::new("xcrun");
-        swiftc
-            .args([
-                "--sdk",
-                "macosx",
-                "swiftc",
-                "-parse-as-library",
-                "-emit-library",
-                "-static",
-                "-module-name",
-                "ImpastoPlugins",
-            ])
-            .arg("-o")
-            .arg(&library)
-            .args(swift);
-        if let Some(minimum) = &inputs.min_version {
-            swiftc.env("MACOSX_DEPLOYMENT_TARGET", minimum);
+    fs::write(stage.join("app.modules"), app.modules(platform)?)?;
+    let asset_directory = if platform == "android" {
+        "images"
+    } else {
+        "assets"
+    };
+    fs::create_dir(stage.join(asset_directory))?;
+    copy_tree(&app.assets(), &stage.join(asset_directory), &[])?;
+    for notice in ["LICENSE", "NOTICE"] {
+        fs::copy(framework.join(notice), stage.join(notice))?;
+    }
+    if platform == "android" {
+        fs::create_dir(stage.join("fonts"))?;
+        for file in ["Sans.ttf", "NOTICE"] {
+            fs::copy(
+                framework
+                    .join("crates/embedder/android/assets/fonts")
+                    .join(file),
+                stage.join("fonts").join(file),
+            )?;
         }
-        toolchain::run(swiftc, "编译 macOS Swift 插件桥接源码")?;
-        command
-            .arg("-C")
-            .arg(format!("link-arg={}", library.display()));
-        command.args(["-C", "link-arg=-L/usr/lib/swift"]);
+        if trace {
+            fs::write(stage.join("app.trace"), "1")?;
+        }
     }
-    for framework in &inputs.frameworks {
-        command.arg("-l").arg(format!("framework={framework}"));
+    let previous = staging.path().join("previous");
+    if resources.exists() {
+        fs::rename(resources, &previous)?;
     }
-    for framework in &inputs.weak_frameworks {
-        command
-            .args(["-C", "link-arg=-weak_framework", "-C"])
-            .arg(format!("link-arg={framework}"));
+    if let Err(error) = fs::rename(stage, resources) {
+        if previous.exists() {
+            fs::rename(previous, resources).context("恢复上一版应用资源")?;
+        }
+        return Err(error.into());
     }
     Ok(())
 }
 
-fn kotlin(path: &Path) -> String {
-    format!(
-        "\"{}\"",
-        path.to_string_lossy()
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('$', "\\$")
-    )
-}
 pub fn copy_tree(from: &Path, to: &Path, skip: &[&str]) -> Result<()> {
     fs::create_dir_all(to)?;
     for entry in fs::read_dir(from).with_context(|| format!("读取 {}", from.display()))? {

@@ -96,7 +96,7 @@ export function spread(
 import { insert, effect as sceneEffect, createComponent } from "scene";
 
 export { Text, type TextGradient, type TextProps, type TextRun } from "./text.ts";
-export { Image, type ImageProps } from "./image.ts";
+export { Image, type ImageAsset, type ImageProps } from "./image.ts";
 export { bindNodeRef } from "./ref.ts";
 export type { NodeRef, UIChildren, ViewEvents } from "../src/jsx.ts";
 import type { Path2DConstructor } from "../src/canvas/types.ts";

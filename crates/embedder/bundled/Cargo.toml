@@ -1,0 +1,20 @@
+[package]
+name = "impasto-bundled-plugins"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+impasto.workspace = true
+impasto-app-state = { path = "../../../packages/app-state/rust" }
+impasto-async-storage = { path = "../../../packages/async-storage/rust" }
+impasto-clipboard = { path = "../../../packages/clipboard/rust" }
+impasto-devtools = { path = "../../../packages/devtools/rust" }
+impasto-file-system = { path = "../../../packages/file-system/rust" }
+impasto-http = { path = "../../../packages/http/rust" }
+impasto-linking = { path = "../../../packages/linking/rust" }
+impasto-permissions = { path = "../../../packages/permissions/rust" }
+impasto-websocket = { path = "../../../packages/websocket/rust" }
+
+[lints]
+workspace = true

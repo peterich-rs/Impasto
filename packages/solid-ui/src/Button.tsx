@@ -1,3 +1,4 @@
+import { View as HostView } from "@impasto/solid-renderer/host";
 import { createTrackedEffect, createSignal } from "solid-js";
 import {
   Text,
@@ -89,7 +90,7 @@ export function Button(props: ButtonProps): NodeHandle {
     writeSemantics();
   });
   return (
-    <view
+    <HostView
       {...eventsOf(props)}
       ref={(handle) => {
         if (handle === null) return;
@@ -143,6 +144,6 @@ export function Button(props: ButtonProps): NodeHandle {
       >
         {props.label}
       </Text>
-    </view>
+    </HostView>
   );
 }

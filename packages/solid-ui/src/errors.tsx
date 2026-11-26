@@ -1,3 +1,4 @@
+import { View as HostView } from "@impasto/solid-renderer/host";
 import { Text, bindStyle, type NodeHandle } from "@impasto/solid-renderer";
 import { StyledText } from "./styled-text.ts";
 import { Button } from "./Button.tsx";
@@ -15,7 +16,7 @@ export {
 export function ErrorPage(props: ErrorPageProps): NodeHandle {
   const theme = useTheme();
   return (
-    <view
+    <HostView
       ref={(node) =>
         bindBox(node, props, () => ({
           gap: theme().space.l,
@@ -59,6 +60,6 @@ export function ErrorPage(props: ErrorPageProps): NodeHandle {
       {props.onBack ? (
         <Button label={t("back")} onClick={() => props.onBack?.()} />
       ) : null}
-    </view>
+    </HostView>
   );
 }

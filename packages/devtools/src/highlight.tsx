@@ -1,3 +1,4 @@
+import { View as HostView, Stack as HostStack } from "@impasto/solid-renderer/host";
 /**
  * Scene-space outlines drawn over the app. No pointer, so they do not take
  * hits. Each box is four thin bars: a filled rectangle would hide the node.
@@ -16,85 +17,85 @@ function Outline(props: { box: HighlightBox }) {
   const width = () => Math.max(EDGE, props.box.w);
   const height = () => Math.max(EDGE, props.box.h);
   return (
-    <stack
+    <HostStack
       style={{
         translateX: props.box.x,
         translateY: props.box.y,
       }}
     >
-      <stack
+      <HostStack
         style={{
           width: width(),
           height: height(),
         }}
       >
-        <view
+        <HostView
           style={{
             backgroundColor: props.box.color,
           }}
         >
-          <view
+          <HostView
             style={{
               width: width(),
               height: EDGE,
             }}
           />
-        </view>
-        <stack
+        </HostView>
+        <HostStack
           style={{
             translateY: height() - EDGE,
           }}
         >
-          <view
+          <HostView
             style={{
               backgroundColor: props.box.color,
             }}
           >
-            <view
+            <HostView
               style={{
                 width: width(),
                 height: EDGE,
               }}
             />
-          </view>
-        </stack>
-        <view
+          </HostView>
+        </HostStack>
+        <HostView
           style={{
             backgroundColor: props.box.color,
           }}
         >
-          <view
+          <HostView
             style={{
               width: EDGE,
               height: height(),
             }}
           />
-        </view>
-        <stack
+        </HostView>
+        <HostStack
           style={{
             translateX: width() - EDGE,
           }}
         >
-          <view
+          <HostView
             style={{
               backgroundColor: props.box.color,
             }}
           >
-            <view
+            <HostView
               style={{
                 width: EDGE,
                 height: height(),
               }}
             />
-          </view>
-        </stack>
-      </stack>
-    </stack>
+          </HostView>
+        </HostStack>
+      </HostStack>
+    </HostStack>
   );
 }
 export function HighlightLayer(props: { boxes: HighlightBox[] }) {
   return (
-    <stack
+    <HostStack
       ref={(node) => {
         if (node === null) return;
         scene.setComponentStyle(node, {
@@ -112,6 +113,6 @@ export function HighlightLayer(props: { boxes: HighlightBox[] }) {
       }}
     >
       <For each={props.boxes}>{(box) => <Outline box={box} />}</For>
-    </stack>
+    </HostStack>
   );
 }

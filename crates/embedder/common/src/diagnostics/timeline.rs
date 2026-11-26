@@ -372,7 +372,7 @@ fn allowed(key: &str) -> bool {
             | "kind"
             | "status"
             | "updates"
-            | "modules"
+            | "js_stack"
             | "passes"
             | "shaped"
             | "ok"
@@ -448,8 +448,8 @@ impl Visit for SpanFields {
                     _ => None,
                 }
             }
-            "modules" => {
-                let end = value.floor_char_boundary(640.min(value.len()));
+            "js_stack" => {
+                let end = value.floor_char_boundary(2048.min(value.len()));
                 self.set(key, FieldValue::Str(value[..end].to_owned()));
             }
             _ if allowed(key) => self.set(key, FieldValue::Str(limited(value))),

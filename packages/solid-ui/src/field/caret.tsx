@@ -1,3 +1,4 @@
+import { View as HostView, Stack as HostStack } from "@impasto/solid-renderer/host";
 import { scene, type NodeHandle } from "@impasto/solid-renderer";
 import type { Accessor } from "solid-js";
 const HIDDEN = "transparent";
@@ -23,35 +24,35 @@ export function CaretLayer(props: {
   transparent: Accessor<string>;
 }): NodeHandle {
   return (
-    <stack>
+    <HostStack>
       {props.rects().map((rect) => (
-        <stack
+        <HostStack
           style={{
             translateX: rect.x,
             translateY: rect.y,
           }}
         >
-          <view
+          <HostView
             style={{
               backgroundColor: `${props.accent()}66`,
             }}
           >
-            <view
+            <HostView
               style={{
                 width: rect.w,
                 height: rect.h,
               }}
             />
-          </view>
-        </stack>
+          </HostView>
+        </HostStack>
       ))}
-      <stack
+      <HostStack
         style={{
           translateX: props.caretX(),
           translateY: props.caretY(),
         }}
       >
-        <view
+        <HostView
           ref={(node) => {
             if (node !== null) scene.setRepaintBoundary?.(node, true);
           }}
@@ -61,14 +62,14 @@ export function CaretLayer(props: {
               : props.transparent() || HIDDEN,
           }}
         >
-          <view
+          <HostView
             style={{
               width: 2,
               height: props.caretH(),
             }}
           />
-        </view>
-      </stack>
-    </stack>
+        </HostView>
+      </HostStack>
+    </HostStack>
   );
 }

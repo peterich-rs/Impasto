@@ -70,6 +70,7 @@ pub struct DecorationLine {
 
 /// Horizontal alignment of one paragraph. The default is the left edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum TextAlign {
     Left,
     Center,
@@ -90,6 +91,7 @@ pub enum FontSlant {
 /// visible line. `Visible` keeps every line, and a line may be wider than the
 /// constraint when soft wrap is off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum TextOverflow {
     #[default]
     Clip,

@@ -31,7 +31,6 @@ coverage:
     cargo llvm-cov --manifest-path "{{root}}/Cargo.toml" --lcov --output-path "{{root}}/target/coverage/rust/lcov.info" --workspace
 
 gen:
-    cargo run -p embedder --bin module-stubs
     cargo run -p engine --bin style-types -- --root "{{root}}"
 
 # Fail when generated style types or the utility list drift.
@@ -39,38 +38,24 @@ style-check:
     cargo run -p engine --bin style-types -- --check --root "{{root}}"
 
 solid:
-    pnpm -C "{{root}}" install --frozen-lockfile
-    pnpm -C "{{root}}" -r test
+    cargo run --locked --manifest-path "{{root}}/Cargo.toml" -p cli -- test --framework
 
 boundaries:
     python3 "{{root}}/tools/check-javascript-boundaries.py"
 
 standard-check:
-    node "{{root}}/tools/check-standard-library.mjs"
+    cargo test --locked --manifest-path "{{root}}/Cargo.toml" -p javascript --test standard_contract
+    cargo run --locked --manifest-path "{{root}}/Cargo.toml" -p cli -- analyze --standard
 
-solid-app:
-    pnpm -C "{{root}}" --filter @impasto/gallery-solid run build
-    pnpm -C "{{root}}" --filter @impasto/gallery-solid run test:node
-    pnpm -C "{{root}}" --filter @impasto/gallery-solid run test:esm
+solid-app: gallery-dist
+    cd "{{root}}" && cargo run --locked -p cli -- test
 
-# Build the gallery ESM bundle when its sources or the lockfile change. The
-# bundle is not committed; JavaScript UI tests fail with instructions when it is
-# absent (`just test` builds it first).
+# Build the untracked Gallery ESM before running Rust engine tests.
 gallery-dist:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    src="{{root}}/apps/gallery-solid"
-    out="$src/dist/quotes.js"
-    if [[ -f "$out" && ! "{{root}}/pnpm-lock.yaml" -nt "$out" ]]; then
-      newer=$(find "{{root}}/packages" "{{root}}/tools" "$src" -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.mjs' \) \
-        -not -path '*/node_modules/*' -not -path '*/dist/*' -not -name '*.test.ts' \
-        -newer "$out" -print -quit)
-      [[ -z "$newer" ]] && exit 0
-    fi
-    pnpm -C "$src" install && pnpm -C "$src" run build
+    cargo run --locked --manifest-path "{{root}}/Cargo.toml" -p cli -- pack "{{root}}/examples/gallery-solid/src/quotes.tsx" "{{root}}/examples/gallery-solid/dist/quotes.js"
 
 host: gallery-dist
-    cargo run --manifest-path "{{root}}/Cargo.toml" -p embedder-macos -- --js "{{root}}/apps/gallery-solid/dist/quotes.js" "{{logo}}"
+    cargo run --manifest-path "{{root}}/Cargo.toml" -p embedder-macos -- --js "{{root}}/examples/gallery-solid/dist/quotes.js" "{{logo}}"
 
 host-js: host
 
@@ -104,7 +89,7 @@ android-device-test: gallery-dist
         local installed
         trap - EXIT
         if ! installed="$(adb -s "$serial" shell pm list packages)"; then
-            echo "无法连接 $serial，未能清理 Android 测试包" >&2
+            echo "无法连接 ${serial}，未能清理 Android 测试包" >&2
             exit 1
         fi
         for package in dev.impasto.host.verification.test dev.impasto.host.verification; do
@@ -125,10 +110,10 @@ android-device-test: gallery-dist
 android-release: gallery-dist
     "{{root}}/crates/embedder/android/apk/gradlew" -p "{{root}}/crates/embedder/android/apk" -PimpastoLocalSigning=true :app:assembleRelease
 
-# Relocatable CLI distribution, including the pinned Node/compiler toolchain.
+# Relocatable CLI, framework sources and pinned native TypeScript.
 cli-dist:
-    node "{{root}}/tools/distribute.mjs"
+    cargo run --locked --release --manifest-path "{{root}}/Cargo.toml" -p cli -- sdk-dist "{{root}}/target/cli-dist"
 
 # Identical gallery click and wheel scenarios before/after the native toolchain.
-toolchain-baseline: gallery-dist
-    python3 "{{root}}/tools/toolchain-baseline.py"
+toolchain-baseline *args: gallery-dist
+    python3 "{{root}}/tools/toolchain-baseline.py" {{args}}

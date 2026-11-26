@@ -94,3 +94,21 @@ pub mod app_jni {
         sys::{jboolean, jint, jlong},
     };
 }
+
+#[cfg(all(
+    target_os = "android",
+    feature = "bundled-plugins",
+    not(feature = "app-entry")
+))]
+#[expect(unsafe_code, reason = "JNI loads this process entry point by symbol")]
+#[unsafe(no_mangle)]
+pub extern "system" fn JNI_OnLoad(
+    _: *mut std::ffi::c_void,
+    _: *mut std::ffi::c_void,
+) -> jni::sys::jint {
+    if embedder::install_bundled_plugins(impasto_bundled_plugins::register).is_ok() {
+        0x0001_0006
+    } else {
+        -1
+    }
+}

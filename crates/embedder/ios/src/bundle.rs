@@ -5,30 +5,12 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use embedder::{BootError, HttpClient, ImageDecoder, Launch, SessionError};
-use engine::session::{Module, Shared};
+use embedder::{BootError, ImageDecoder, Launch, SessionError};
+use engine::session::Module;
 use objc2_foundation::{NSBundle, NSFileManager, NSSearchPathDirectory, NSSearchPathDomainMask};
 
-#[path = "clipboard.rs"]
-mod clipboard;
 #[path = "decode.rs"]
 mod decode;
-#[path = "http.rs"]
-#[allow(unsafe_code, reason = "Foundation URL loading delegate")]
-mod http;
-#[path = "platform_services.rs"]
-mod platform_services;
-#[path = "websocket.rs"]
-#[allow(unsafe_code, reason = "Foundation WebSocket delegate callbacks")]
-mod websocket;
-
-pub(crate) fn websocket_transport() -> Arc<dyn embedder::WebSocketTransport> {
-    Arc::new(websocket::WebSocket)
-}
-
-pub(crate) use platform_services::PlatformServices;
-use platform_services::SandboxStorage;
-
 const FONT_FAMILY: &str = "Sans";
 // This is the same Apache-2.0 licensed Roboto font shipped in Android.
 const FONT: &[u8] = include_bytes!("../../android/assets/fonts/Sans.ttf");
@@ -39,7 +21,6 @@ pub(crate) struct Bundle {
     pub font: Vec<u8>,
     pub decoder: Arc<dyn ImageDecoder>,
     pub modules: Vec<Module>,
-    pub http: Option<Arc<dyn HttpClient>>,
     pub devtools: bool,
     pub plugin_services: embedder::PluginServices,
 }
@@ -50,14 +31,22 @@ pub(crate) struct Bundle {
 )]
 pub(crate) fn prepare(
     root: PathBuf,
-    launch_url: Shared<Option<String>>,
-    services: Arc<PlatformServices>,
+    native_channel: impasto::os::NativeChannel,
 ) -> Result<Bundle, BootError> {
     objc2::rc::autoreleasepool(|_| {
         let enabled = enabled_modules(&root)?;
-        let plugin_http = is_enabled(&enabled, "http");
         let devtools = is_enabled(&enabled, "devtools");
-        let modules = native_modules(&enabled, launch_url, &services)?;
+        #[cfg(feature = "bundled-plugins")]
+        {
+            static INSTALLED: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+            INSTALLED
+                .get_or_init(|| {
+                    embedder::install_bundled_plugins(impasto_bundled_plugins::register)
+                        .map_err(|error| error.to_string())
+                })
+                .as_ref()
+                .map_err(|error| BootError::Platform(error.clone()))?;
+        }
         let program = load_program(&root)?;
 
         let launch = Launch::Session(Box::new(move |open, host| {
@@ -91,11 +80,11 @@ pub(crate) fn prepare(
             font_family: FONT_FAMILY.into(),
             font: FONT.to_vec(),
             decoder: Arc::new(decode::Decoder::new(root.join("assets"))),
-            modules,
-            http: Some(Arc::new(http::Http)),
+            modules: Vec::new(),
             devtools,
             plugin_services: embedder::PluginServices {
-                http: plugin_http,
+                initial_lifecycle: Default::default(),
+                native_channel: Some(native_channel),
                 paths: embedder::AppPaths::new(
                     sandbox_directory(NSSearchPathDirectory::DocumentDirectory)
                         .ok()
@@ -104,6 +93,11 @@ pub(crate) fn prepare(
                         .ok()
                         .map(PathBuf::from),
                     Some(std::env::temp_dir()),
+                )
+                .with_data_dir(
+                    sandbox_directory(NSSearchPathDirectory::ApplicationSupportDirectory)
+                        .ok()
+                        .map(PathBuf::from),
                 ),
             },
         })
@@ -163,63 +157,16 @@ fn enabled_modules(root: &Path) -> Result<Vec<String>, BootError> {
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(read_error(&path, error)),
     };
-    manifest
+    Ok(manifest
         .split(',')
         .map(str::trim)
         .filter(|name| !name.is_empty())
-        .map(|name| match name {
-            "file-system" | "async-storage" | "app-state" | "clipboard" | "linking"
-            | "devtools" | "permissions" | "native-plugins" | "http" | "websocket" => {
-                Ok(name.to_owned())
-            }
-            name => Err(BootError::Platform(format!("iOS 尚未提供 {name} 模块"))),
-        })
-        .collect()
+        .map(str::to_owned)
+        .collect())
 }
 
 fn is_enabled(enabled: &[String], name: &str) -> bool {
     enabled.iter().any(|item| item == name)
-}
-
-fn native_modules(
-    enabled: &[String],
-    launch_url: Shared<Option<String>>,
-    services: &Arc<PlatformServices>,
-) -> Result<Vec<Module>, BootError> {
-    let mut modules = Vec::new();
-    if is_enabled(enabled, "file-system") {
-        let dir = sandbox_directory(NSSearchPathDirectory::DocumentDirectory)?;
-        modules.push(embedder::file_system(Arc::new(SandboxStorage {
-            root: dir,
-            platform: Arc::clone(services),
-        })));
-    }
-    if is_enabled(enabled, "async-storage") {
-        let dir = sandbox_directory(NSSearchPathDirectory::ApplicationSupportDirectory)?;
-        modules.push(embedder::async_storage(Arc::new(SandboxStorage {
-            root: dir,
-            platform: Arc::clone(services),
-        })));
-    }
-    if is_enabled(enabled, "clipboard") {
-        modules.push(embedder::clipboard(Arc::new(clipboard::Clipboard)));
-    }
-    if is_enabled(enabled, "linking") {
-        modules.push(embedder::linking(Arc::clone(services) as _, launch_url));
-    }
-    if is_enabled(enabled, "permissions") {
-        modules.push(embedder::permissions(Arc::clone(services) as _));
-    }
-    if is_enabled(enabled, "native-plugins") {
-        let services = Arc::clone(services);
-        modules.push(embedder::native_plugins(
-            move |identifier, method, payload, settle| {
-                services.invoke_native_plugin(identifier, method, payload, settle);
-            },
-        ));
-    }
-    // The common host supplies AppState, and Devtools when enabled in Boot.
-    Ok(modules)
 }
 
 fn sandbox_directory(directory: NSSearchPathDirectory) -> Result<String, BootError> {

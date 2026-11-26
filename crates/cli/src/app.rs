@@ -11,16 +11,13 @@ struct Manifest {
     version: String,
     targets: Vec<String>,
     #[serde(default)]
-    permissions: BTreeMap<String, Permission>,
-    #[serde(default)]
     android: AndroidConfig,
     #[serde(default)]
     ios: IosConfig,
     #[serde(default)]
     macos: MacConfig,
-    native: Option<crate::plugins::Local>,
-    #[serde(default)]
-    plugins: BTreeMap<String, crate::plugins::Dependency>,
+    #[serde(default, rename = "dependencies")]
+    _dependencies: BTreeMap<String, toml::Value>,
 }
 
 #[derive(Default, Deserialize)]
@@ -134,13 +131,6 @@ impl AndroidConfig {
         Ok(())
     }
 }
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Permission {
-    Enabled(bool),
-    Targets(Vec<String>),
-}
-
 pub struct App {
     pub root: PathBuf,
     pub name: String,
@@ -151,7 +141,6 @@ pub struct App {
     pub android: AndroidConfig,
     pub ios: IosConfig,
     pub macos: MacConfig,
-    permissions: BTreeMap<String, Permission>,
     pub native: Option<crate::plugins::Local>,
     pub plugins: BTreeMap<String, crate::plugins::Dependency>,
 }
@@ -162,23 +151,30 @@ impl App {
             return Self::load(&cwd);
         }
         if let Some(framework) = crate::framework_root().filter(|root| root == &cwd) {
-            return Ok(Self {
-                root: framework.join("apps/gallery-solid"),
-                name: "gallery".into(),
-                version: "0.1.0".into(),
-                targets: vec!["macos".into(), "android".into(), "ios".into()],
-                entry: framework.join("apps/gallery-solid/src/quotes.tsx"),
-                gallery: true,
-                android: AndroidConfig::default(),
-                ios: IosConfig::default(),
-                macos: MacConfig::default(),
-                permissions: BTreeMap::new(),
-                native: None,
-                plugins: BTreeMap::new(),
-            });
+            let mut app = Self::load(&framework.join(crate::GALLERY_DIR))?;
+            app.gallery = true;
+            return Ok(app);
         }
         bail!("当前目录没有 app.toml");
     }
+    pub(crate) fn for_plugin(root: PathBuf) -> Result<Self> {
+        let (native, targets) = crate::plugins::plugin_crate(&root)?;
+        let plugins = crate::plugins::discover(&root)?;
+        Ok(Self {
+            root,
+            name: String::new(),
+            version: impasto::VERSION.to_owned(),
+            targets,
+            entry: PathBuf::new(),
+            gallery: false,
+            android: AndroidConfig::default(),
+            ios: IosConfig::default(),
+            macos: MacConfig::default(),
+            native: Some(native),
+            plugins,
+        })
+    }
+
     pub fn load(root: &Path) -> Result<Self> {
         let root = root.canonicalize()?;
         let path = root.join("app.toml");
@@ -206,41 +202,17 @@ impl App {
         {
             bail!("targets 只能包含 macos、android、ios");
         }
-        let entry = root.join("lib/main.tsx");
+        let entry = root.join("src/main.tsx");
         if !entry.is_file() {
             bail!("缺少 {}", entry.display());
         }
-        for (name, permission) in &manifest.permissions {
-            if name == "native-plugins"
-                && match permission {
-                    Permission::Enabled(enabled) => *enabled,
-                    Permission::Targets(targets) => targets != &["ios"],
-                }
-            {
-                bail!(r#"启用 native-plugins 需要显式设置为 ["ios"]"#);
-            }
-            if ![
-                "clipboard",
-                "linking",
-                "file-system",
-                "async-storage",
-                "app-state",
-                "permissions",
-                "native-plugins",
-                "devtools",
-                "http",
-                "websocket",
-            ]
-            .contains(&name.as_str())
-            {
-                bail!("未知能力模块 {name}");
-            }
-            if let Permission::Targets(targets) = permission
-                && targets.iter().any(|t| !manifest.targets.contains(t))
-            {
-                bail!("{name} 的目标不在 targets 中");
-            }
-        }
+        let plugins = crate::plugins::discover(&root)?;
+        let native = root
+            .join("rust/Cargo.toml")
+            .is_file()
+            .then(|| crate::plugins::Local {
+                path: "rust".into(),
+            });
         Ok(Self {
             root,
             name: manifest.name,
@@ -251,9 +223,8 @@ impl App {
             android: manifest.android,
             ios: manifest.ios,
             macos: manifest.macos,
-            permissions: manifest.permissions,
-            native: manifest.native,
-            plugins: manifest.plugins,
+            native,
+            plugins,
         })
     }
     pub fn require(&self, target: &str) -> Result<()> {
@@ -269,24 +240,20 @@ impl App {
             .clone()
             .unwrap_or_else(|| format!("dev.impasto.{}", self.name.replace('-', "_")))
     }
-    pub fn modules(&self, target: &str) -> String {
-        if self.gallery {
-            if target == "ios" {
-                return crate::ios::MODULES.join(",");
+    pub fn modules(&self, target: &str) -> Result<String> {
+        let mut modules = Vec::new();
+        for (name, dependency) in &self.plugins {
+            let Some(name) = name.strip_prefix("@impasto/") else {
+                continue;
+            };
+            let (_, platforms) = crate::plugins::plugin_crate(&dependency.path)?;
+            if platforms.iter().any(|platform| platform == target) {
+                modules.push(name);
             }
-            return "clipboard,linking,file-system,async-storage,app-state,permissions,devtools,http,websocket"
-                .into();
         }
-        self.permissions
-            .iter()
-            .filter(|(_, p)| match p {
-                Permission::Enabled(on) => *on,
-                Permission::Targets(targets) => targets.iter().any(|t| t == target),
-            })
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join(",")
+        Ok(modules.join(","))
     }
+
     pub fn assets(&self) -> PathBuf {
         if self.gallery {
             crate::framework_root().map_or_else(

@@ -1,0 +1,11 @@
+name = "gallery"
+version = "0.1.0"
+targets = ["macos", "android", "ios"]
+
+[dependencies]
+"@impasto/async-storage" = "builtin"
+"@impasto/devtools" = "builtin"
+"@impasto/linking" = "builtin"
+"@impasto/solid-renderer" = "builtin"
+"@impasto/solid-router" = "builtin"
+"@impasto/solid-ui" = "builtin"

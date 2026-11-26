@@ -1,3 +1,4 @@
+import { View as HostView } from "@impasto/solid-renderer/host";
 import { createRenderEffect, createSignal, onCleanup } from "solid-js";
 import { bindNodeRef, bindStyle, createSlot } from "@impasto/solid-renderer";
 import type { RecyclerProps } from "./props.ts";
@@ -83,7 +84,7 @@ export function Recycler<T>(props: RecyclerProps<T>) {
     discardRecycler(state);
   });
   return (
-    <view
+    <HostView
       ref={(node) => {
         if (node === null) return;
         setParent(node);

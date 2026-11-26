@@ -56,13 +56,10 @@ void impasto_ios_window_group_free(ImpastoIOSWindowGroup *group);
 /// Returns required UTF-8 byte count. Pass NULL to query the size.
 size_t impasto_ios_restoration_copy(ImpastoIOSHost *host, uint8_t *buffer, size_t capacity);
 bool impasto_ios_service_pending(ImpastoIOSHost *host, uint64_t request);
-void impasto_ios_cancel_native_plugins(ImpastoIOSHost *host);
-void impasto_ios_service_result(ImpastoIOSHost *host, uint64_t request, uint32_t status,
+bool impasto_ios_service_result(ImpastoIOSHost *host, uint64_t request, uint32_t status,
                                 const char *payload);
-#if defined(IMPASTO_IOS_DEVELOPMENT)
 bool impasto_ios_update_source(ImpastoIOSHost *host, uint64_t revision,
                                const uint8_t *bytes, size_t length);
-#endif
 bool impasto_ios_compositor_layers(ImpastoIOSHost *host, uint64_t surface,
                                    const void *const *layers, size_t count);
 void impasto_ios_compositor_finish(ImpastoIOSHost *host, uint64_t surface,

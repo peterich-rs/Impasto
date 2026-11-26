@@ -1,0 +1,11 @@
+{
+  "name": "native-camera",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@impasto/camera": "workspace:*",
+    "@impasto/permissions": "workspace:*",
+    "@impasto/solid-renderer": "workspace:*",
+    "@impasto/solid-ui": "workspace:*"
+  }
+}

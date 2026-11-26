@@ -14,6 +14,16 @@ pub struct Restoration {
     notify: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
+impl impasto::WindowState for Restoration {
+    fn get(&self, key: &str) -> Option<String> {
+        self.get(key)
+    }
+
+    fn set(&self, key: &str, value: Option<&str>) -> Result<(), String> {
+        self.set(key, value)
+    }
+}
+
 struct Store {
     committed: Snapshot,
     candidate: Option<(std::thread::ThreadId, Snapshot)>,

@@ -1,4 +1,4 @@
-import type { NativeWebSocketEvent, NativeWebSocketHandle } from "./native.d.ts";
+import type { NativeWebSocketEvent, NativeWebSocketHandle } from "@impasto/websocket/native";
 
 export function open(_url: string, _protocols?: string[]): NativeWebSocketHandle {
   throw new Error("WebSocket is not linked");

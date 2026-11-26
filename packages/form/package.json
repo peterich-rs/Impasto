@@ -5,11 +5,5 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
-  },
-  "scripts": {
-    "test": "node --experimental-strip-types src/index.test.ts"
-  },
-  "devDependencies": {
-    "solid-js": "2.0.0"
   }
 }

@@ -32,6 +32,66 @@ pub(super) enum Create {
     },
 }
 
+pub(super) struct TemplateNode {
+    pub create: TemplateCreate,
+    pub parent: usize,
+    pub style: Option<crate::style::Style>,
+    pub class: Option<crate::style::StaticClass>,
+}
+
+#[derive(Clone)]
+pub(super) enum TemplateCreate {
+    View,
+    Stack,
+    Scroll,
+    Text(String),
+}
+
+pub(super) fn mount_template(
+    tree: &mut Tree,
+    nodes: &[TemplateNode],
+) -> Result<Vec<NodeId>, crate::Error> {
+    let mut created = Vec::with_capacity(nodes.len());
+    let result = (|| {
+        for (index, node) in nodes.iter().enumerate() {
+            let create = match &node.create {
+                TemplateCreate::View => Create::View,
+                TemplateCreate::Stack => Create::Stack,
+                TemplateCreate::Scroll => Create::Scroll(ScrollAxis::Both),
+                TemplateCreate::Text(text) => Create::Text { text: text.clone() },
+            };
+            let id = create_node(tree, create)?;
+            created.push(id);
+            if let Some(style) = &node.style {
+                tree.commit_style_snapshot(
+                    id,
+                    crate::style::StyleOrigin::Inline,
+                    style.clone(),
+                    true,
+                )?;
+            }
+            if let Some(class) = &node.class {
+                tree.set_compiled_class(id, class.clone())?;
+            }
+            if index > 0 {
+                let parent = created
+                    .get(node.parent)
+                    .copied()
+                    .ok_or(crate::Error::BadNumber)?;
+                tree.insert(parent, id, None)?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        for id in created.into_iter().rev() {
+            let _ = tree.discard(id);
+        }
+        return Err(error);
+    }
+    Ok(created)
+}
+
 pub(super) enum Mutation {
     StyleEnvironment(Value),
     Create(Create),
@@ -116,6 +176,7 @@ pub(super) enum Mutation {
         text: String,
         list: bool,
     },
+    StaticClass(NodeId, crate::style::StaticClass),
     PointerTarget(NodeId),
     ClearStyle {
         id: NodeId,
@@ -208,6 +269,7 @@ pub(super) fn apply(tree: &mut Tree, mutation: Mutation) -> Result<Applied, crat
                 tree.set_class(id, &text)?
             }
         }
+        Mutation::StaticClass(id, class) => tree.set_compiled_class(id, class)?,
         Mutation::PointerTarget(id) => tree.set_pointer_target(id)?,
         Mutation::ClearStyle { id, keys } => tree.clear_style(id, keys.as_deref())?,
         Mutation::SourceClass { source, text } => tree.replace_style_source_class(source, &text)?,
@@ -344,6 +406,7 @@ fn apply_now(host: &Host, mutation: Mutation) -> Result<Applied, crate::Error> {
             | Mutation::SetStyleSurface { .. }
     );
     let text_write = trace && matches!(mutation, Mutation::SetText { .. });
+    let creates_node = matches!(mutation, Mutation::Create(_));
     let applied = {
         let mut tree = inner.tree.borrow_mut();
         apply(&mut tree, mutation)?
@@ -357,6 +420,9 @@ fn apply_now(host: &Host, mutation: Mutation) -> Result<Applied, crate::Error> {
             .marks
             .mutation_time
             .set(inner.marks.mutation_time.get() + started.elapsed());
+    }
+    if creates_node {
+        super::frame::bump(&inner.marks.nodes_created);
     }
     if styled {
         super::frame::bump(&inner.marks.sets);

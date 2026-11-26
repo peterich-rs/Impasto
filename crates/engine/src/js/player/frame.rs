@@ -4,6 +4,9 @@ use std::cell::Cell;
 use std::time::Duration;
 
 pub(super) struct FrameMarks {
+    pub(super) nodes_created: Cell<u32>,
+    pub(super) ffi_batches: Cell<u32>,
+    pub(super) ffi_calls: Cell<u32>,
     pub(super) pointers: Cell<u32>,
     pub(super) keys: Cell<u32>,
     pub(super) edits: Cell<u32>,
@@ -26,6 +29,9 @@ pub(super) struct FrameMarks {
 
 impl FrameMarks {
     pub(super) fn reset(&self) {
+        self.nodes_created.set(0);
+        self.ffi_batches.set(0);
+        self.ffi_calls.set(0);
         self.pointers.set(0);
         self.keys.set(0);
         self.edits.set(0);
@@ -51,6 +57,9 @@ impl FrameMarks {
 impl Default for FrameMarks {
     fn default() -> Self {
         Self {
+            nodes_created: Cell::new(0),
+            ffi_batches: Cell::new(0),
+            ffi_calls: Cell::new(0),
             pointers: Cell::new(0),
             keys: Cell::new(0),
             edits: Cell::new(0),

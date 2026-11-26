@@ -4,12 +4,11 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::session::{InputEvent, Key, Metrics, ModuleConfig, PluginValue, Session};
+use crate::session::{InputEvent, Key, Metrics, ModuleConfig, Session};
 use crate::{
     text::{Affinity, Shaper},
     tree::{FocusDirection, NodeId, Rect, Tree},
 };
-use javascript::host::HostEvent;
 
 use crate::js::Error;
 
@@ -72,6 +71,9 @@ struct Inner {
     /// Sources passed to `reload` since the last [`Session::take_reloads`].
     pub(super) reloads: RefCell<Vec<String>>,
     pub(super) marks: FrameMarks,
+    pub(super) static_styles: RefCell<Vec<crate::style::Style>>,
+    pub(super) static_classes: RefCell<Vec<crate::style::StaticClass>>,
+    pub(super) static_templates: RefCell<Vec<Box<[mutation::TemplateNode]>>>,
     pub(super) drivers: RefCell<crate::tree::list::DriverSet>,
     pub(super) driver_frame: Cell<bool>,
     pub(super) last_pen: Cell<Option<crate::input::PointerEvent>>,
@@ -108,6 +110,9 @@ impl Inner {
             fonts: RefCell::new(FontBook::new()),
             reloads: RefCell::new(Vec::new()),
             marks: FrameMarks::default(),
+            static_styles: RefCell::new(Vec::new()),
+            static_classes: RefCell::new(Vec::new()),
+            static_templates: RefCell::new(Vec::new()),
             drivers: RefCell::new(crate::tree::list::DriverSet::new()),
             driver_frame: Cell::new(false),
             last_pen: Cell::new(None),
@@ -291,7 +296,9 @@ impl JsSession {
         config: ModuleConfig,
     ) -> Result<Self, Error> {
         let inner = Rc::new(Inner::new(shaper, log, config));
-        let vm = JsVm::new(Rc::clone(&inner), app_directory(name))?;
+        let development = cfg!(debug_assertions)
+            && matches!(&program, ProgramKind::Source(bytes) if bytes.starts_with(b"// impasto:hot/1\n"));
+        let vm = JsVm::new(Rc::clone(&inner), app_directory(name), development)?;
         vm.install(bootstrap::SCENE_JS)?;
         vm.start(program, name)?;
         sweep_detached(&vm.host);
@@ -726,6 +733,10 @@ impl Session for JsSession {
         }
     }
 
+    fn apply_source_patch(&mut self, source: &str) -> Result<bool, String> {
+        self.vm.apply_source_patch(source)
+    }
+
     fn update_source(
         &mut self,
         source: &str,
@@ -1121,6 +1132,8 @@ impl Session for JsSession {
             let (sync_visited, sync_synced) = tree.sync_stats();
             let scroll_paint_updates = tree.take_scroll_paint_updates();
             let layout_trace = tree.take_layout_trace();
+            let style_resolves = tree.take_style_resolves();
+            let repaint_boundaries_dirtied = tree.take_repaint_boundaries_dirtied();
             if let Some(trigger) = layout_trace.root_trigger {
                 let node = trigger.node.map_or(0, NodeId::to_raw);
                 if let Some(rect) = trigger.node.and_then(|id| tree.rect(id).ok()) {
@@ -1147,6 +1160,11 @@ impl Session for JsSession {
             drop(tree);
             self.vm.record_stack_samples();
             let trace = crate::session::FrameTrace {
+                nodes_created: inner.marks.nodes_created.take(),
+                ffi_batches: inner.marks.ffi_batches.take(),
+                ffi_calls: inner.marks.ffi_calls.take(),
+                style_resolves,
+                repaint_boundaries_dirtied,
                 laywork_ms: layout_trace.laywork_ms,
                 layout_passes: layout_trace.passes,
                 root_layouts: layout_trace.root_layouts,
@@ -1348,36 +1366,6 @@ impl Session for JsSession {
             crate::session::Lifecycle::Hidden | crate::session::Lifecycle::Paused
         );
         inner.paused.set(paused);
-        let name = match event {
-            crate::session::Lifecycle::Resumed => "resumed",
-            crate::session::Lifecycle::Inactive => "inactive",
-            crate::session::Lifecycle::Hidden => "hidden",
-            crate::session::Lifecycle::Paused => "paused",
-            crate::session::Lifecycle::Detached => "detached",
-        };
-        let state = bootstrap::app_state(name);
-        crate::session::shared_write(&inner.config.app_state, state.to_owned());
-        self.vm.emit_host_event(HostEvent {
-            module: "AppState".into(),
-            event: "change".into(),
-            payload: PluginValue::Str(state.into()),
-        });
-    }
-
-    fn window_focus(&mut self, focused: bool) {
-        self.vm.emit_host_event(HostEvent {
-            module: "AppState".into(),
-            event: "focus".into(),
-            payload: PluginValue::Str(focused.to_string()),
-        });
-    }
-
-    fn window_state_changed(&mut self, key: String) {
-        self.vm.emit_host_event(HostEvent {
-            module: "AppState".into(),
-            event: "windowState".into(),
-            payload: PluginValue::Str(key),
-        });
     }
 
     fn io_event(&mut self, event: crate::session::IoEvent) {
@@ -1397,16 +1385,6 @@ impl Session for JsSession {
             return None;
         }
         self.vm.host.next_deadline().map(|deadline| deadline as f64)
-    }
-
-    fn set_launch_url(&mut self, url: &str) {
-        let inner = &self.inner;
-        crate::session::shared_write(&inner.config.launch_url, Some(url.to_owned()));
-        self.vm.emit_host_event(HostEvent {
-            module: "Linking".into(),
-            event: "url".into(),
-            payload: PluginValue::Map(vec![("url".into(), PluginValue::Str(url.into()))]),
-        });
     }
 }
 

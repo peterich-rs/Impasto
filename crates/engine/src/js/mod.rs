@@ -108,3 +108,17 @@ mod component_tests;
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "engine behavior assertions")]
 mod tests;
+
+#[cfg(test)]
+fn fixture_bundle(name: &str) -> String {
+    let framework = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let entry = framework.join("crates/engine/tests/fixtures/ui").join(name);
+    bundler::bundle(bundler::BundleOptions {
+        root: framework.clone(),
+        entry,
+        framework,
+        ..Default::default()
+    })
+    .unwrap_or_else(|error| panic!("compile fixture {name}: {error:#}"))
+    .code
+}

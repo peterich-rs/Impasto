@@ -299,6 +299,7 @@ fn build_framework(
             options,
             "embedder-ios",
             "15.0",
+            "",
         )?;
         let platform = if slice.simulator {
             "iphonesimulator"

@@ -1,3 +1,4 @@
+import { View as HostView } from "@impasto/solid-renderer/host";
 import { Show, createTrackedEffect, onCleanup } from "solid-js";
 import { Text, type NodeHandle } from "@impasto/solid-renderer";
 import { bindScrollStyle, interpolate } from "./scroll-style.ts";
@@ -9,7 +10,7 @@ import { useTheme } from "./use-theme.ts";
 export function NavigationBar(props: NavigationBarProps): NodeHandle {
   const theme = useTheme();
   return (
-    <view
+    <HostView
       {...eventsOf(props)}
       ref={(node) =>
         bindBox(node, props, () => ({
@@ -26,7 +27,7 @@ export function NavigationBar(props: NavigationBarProps): NodeHandle {
       }
     >
       <Show when={props.scrollEffect === "fade-backdrop" && props.scroll}>
-        <view
+        <HostView
           ref={(node) => {
             if (node === null) return;
             createTrackedEffect(() => {
@@ -38,7 +39,7 @@ export function NavigationBar(props: NavigationBarProps): NodeHandle {
           }}
           style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%" }}
         >
-          <view
+          <HostView
             ref={(node) => {
               if (node === null) return;
               createTrackedEffect(() => {
@@ -50,7 +51,7 @@ export function NavigationBar(props: NavigationBarProps): NodeHandle {
             }}
             style={{ width: "100%", height: "100%", backgroundColor: theme().color.surface }}
           />
-        </view>
+        </HostView>
       </Show>
       {props.leading}
       <Text
@@ -61,6 +62,6 @@ export function NavigationBar(props: NavigationBarProps): NodeHandle {
         {props.title}
       </Text>
       {props.trailing}
-    </view>
+    </HostView>
   );
 }

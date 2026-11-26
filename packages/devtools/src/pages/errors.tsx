@@ -1,10 +1,11 @@
+import { View as HostView } from "@impasto/solid-renderer/host";
 /** Error page: list plus stack detail with sourcemap lines. */
 import { createRenderEffect, createSignal, For, Show } from "solid-js";
 import { Clipboard } from "@impasto/clipboard";
 import { Text, useTheme } from "@impasto/solid-ui";
 import { errors, setUnseenErrors } from "../store.ts";
 import { SourceMap } from "../source-map.ts";
-import * as raw from "../native.js";
+import * as raw from "@impasto/devtools/native";
 
 /** QuickJS stack frames look like `at fn (file.js:12:34)`. */
 const FRAME = /at\s+(?:(\S+)\s+)?\(?(.+?):(\d+):(\d+)\)?/g;
@@ -61,7 +62,7 @@ export function ErrorsPage() {
     return out;
   };
   return (
-    <view
+    <HostView
       style={{
         width: "100%",
         height: "100%",
@@ -79,7 +80,7 @@ export function ErrorsPage() {
       >
         {errors().length} 条错误
       </Text>
-      <view
+      <HostView
         style={{
           gap: 2,
           flex: 1,
@@ -87,14 +88,14 @@ export function ErrorsPage() {
       >
         <For each={errors().slice(-40)}>
           {(error) => (
-            <view onClick={() => select(error.seq)}>
-              <view
+            <HostView onClick={() => select(error.seq)}>
+              <HostView
                 style={{
                   backgroundColor: theme().color.surface,
                   borderRadius: 4,
                 }}
               >
-                <view
+                <HostView
                   style={{
                     padding: 4,
                   }}
@@ -109,20 +110,20 @@ export function ErrorsPage() {
                   >
                     [{error.source}] {error.message.split("\n")[0]}
                   </Text>
-                </view>
-              </view>
-            </view>
+                </HostView>
+              </HostView>
+            </HostView>
           )}
         </For>
-      </view>
+      </HostView>
       <Show when={current()} keyed>
         {(error) => (
-          <view
+          <HostView
             style={{
               gap: 2,
             }}
           >
-            <view
+            <HostView
               style={{
                 flexDirection: "row",
                 gap: 8,
@@ -136,7 +137,7 @@ export function ErrorsPage() {
               >
                 {error.message.split("\n")[0]}
               </Text>
-              <view
+              <HostView
                 onClick={() => {
                   Clipboard.setString(error.stack ?? error.message);
                 }}
@@ -149,11 +150,11 @@ export function ErrorsPage() {
                 >
                   复制
                 </Text>
-              </view>
-            </view>
+              </HostView>
+            </HostView>
             <For each={frames()}>
               {(frame) => (
-                <view
+                <HostView
                   style={{
                     gap: 1,
                   }}
@@ -176,12 +177,12 @@ export function ErrorsPage() {
                       {frame.context}
                     </Text>
                   </Show>
-                </view>
+                </HostView>
               )}
             </For>
-          </view>
+          </HostView>
         )}
       </Show>
-    </view>
+    </HostView>
   );
 }

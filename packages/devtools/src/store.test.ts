@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import { test } from "node:test";
+import { assert, test } from "impasto:test";
 import { appendCapped } from "./cursor.ts";
 
 test("append keeps the tail and ignores an empty page", () => {

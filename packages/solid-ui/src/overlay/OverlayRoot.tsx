@@ -1,3 +1,4 @@
+import { Stack as HostStack } from "@impasto/solid-renderer/host";
 import { createContext, useContext } from "solid-js";
 import type { NodeHandle } from "@impasto/solid-renderer";
 import { bindBox } from "../element.tsx";
@@ -24,7 +25,7 @@ const OverlayContext = createContext<OverlayApi>(api);
 export function OverlayRoot(props: OverlayRootProps): NodeHandle {
   return (
     <OverlayContext value={api}>
-      <stack
+      <HostStack
         ref={(node) =>
           bindBox(node, props, {
             width: "100%",
@@ -39,7 +40,7 @@ export function OverlayRoot(props: OverlayRootProps): NodeHandle {
         }
       >
         {props.children}
-      </stack>
+      </HostStack>
     </OverlayContext>
   );
 }

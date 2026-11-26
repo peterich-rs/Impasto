@@ -1,3 +1,4 @@
+import ImpastoGeneratedPlugins
 import CoreGraphics
 import CoreVideo
 import QuartzCore

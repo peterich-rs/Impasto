@@ -55,7 +55,7 @@
           <key>UISceneConfigurationName</key>
           <string>Impasto</string>
           <key>UISceneDelegateClassName</key>
-          <string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
+          <string>ImpastoSceneDelegate</string>
         </dict>
       </array>
     </dict>

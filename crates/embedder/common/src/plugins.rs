@@ -1,4 +1,4 @@
-//! Internal adapter from plugin factories to a window's host services.
+//! Attaches the native plugin registry to a window session.
 
 use std::sync::{Arc, OnceLock};
 
@@ -12,7 +12,7 @@ use crate::{BootError, Command, TaskRunner, queue::Inbox};
 
 struct Installed {
     register: Register,
-    expected: &'static str,
+    expected: Option<&'static str>,
 }
 
 static PLUGINS: OnceLock<Installed> = OnceLock::new();
@@ -20,7 +20,20 @@ static PLUGINS: OnceLock<Installed> = OnceLock::new();
 /// Process entry points install their linked registrar before creating windows.
 pub fn install_plugins(register: Register, expected: &'static str) -> Result<(), BootError> {
     PLUGINS
-        .set(Installed { register, expected })
+        .set(Installed {
+            register,
+            expected: Some(expected),
+        })
+        .map_err(|_| BootError::Platform("native plugins are already installed".into()))
+}
+
+/// Installs plugins for a framework-owned development host that loads source directly.
+pub fn install_bundled_plugins(register: Register) -> Result<(), BootError> {
+    PLUGINS
+        .set(Installed {
+            register,
+            expected: None,
+        })
         .map_err(|_| BootError::Platform("native plugins are already installed".into()))
 }
 
@@ -29,7 +42,17 @@ pub struct PluginServices {
     #[cfg(target_os = "android")]
     pub android: Option<impasto::os::android::AndroidContext>,
     pub paths: AppPaths,
-    pub http: bool,
+    pub initial_lifecycle: impasto::Lifecycle,
+    pub native_channel: Option<impasto::os::NativeChannel>,
+}
+
+pub(crate) struct WindowBindings {
+    pub(crate) initial_url: Option<String>,
+    pub(crate) session: crate::WindowSession,
+    pub(crate) restoration: Option<crate::Restoration>,
+    pub(crate) diagnostics: Option<Arc<crate::DiagnosticsHub>>,
+    pub(crate) source_map: Option<Arc<String>>,
+    pub(crate) os_version: String,
 }
 
 struct Backend {
@@ -71,6 +94,18 @@ impl PluginSession {
             Host::Detached => Lifecycle::Detached,
         });
     }
+
+    pub(crate) fn window_focus(&self, focused: bool) {
+        self.context.dispatch_window_focus(focused);
+    }
+
+    pub(crate) fn open_url(&self, url: &str) {
+        self.context.dispatch_open_url(url);
+    }
+
+    pub(crate) fn window_state_changed(&self, key: &str) {
+        self.context.dispatch_window_state(key);
+    }
 }
 
 impl Drop for PluginSession {
@@ -83,7 +118,7 @@ impl Drop for PluginSession {
 pub(crate) fn attach(
     modules: Vec<impasto::abi::Module>,
     services: PluginServices,
-    http: Option<Arc<dyn crate::HttpClient>>,
+    bindings: WindowBindings,
     inbox: &Arc<Inbox>,
     io: Arc<dyn TaskRunner>,
     main: Option<Arc<dyn TaskRunner>>,
@@ -94,33 +129,28 @@ pub(crate) fn attach(
     let mut registrar = PluginRegistrar::default();
     (plugins.register)(&mut registrar);
     let descriptions = registrar.describe().map_err(plugin_error)?;
-    let actual = descriptions
-        .iter()
-        .map(|entry| {
-            json!({
-                "name": entry.name,
-                "specifier": entry.specifier,
-                "exports": entry.exports,
-                "typescript": entry.typescript,
+    if let Some(expected) = plugins.expected {
+        let expected: Vec<Value> = serde_json::from_str(expected).map_err(plugin_error)?;
+        if descriptions.len() != expected.len()
+            || descriptions.iter().zip(expected).any(|(actual, expected)| {
+                expected["name"] != actual.name
+                    || expected["specifier"] != actual.specifier
+                    || expected["exports"] != json!(actual.exports)
+                    || expected["typescript"]
+                        .as_str()
+                        .is_some_and(|typescript| typescript != actual.typescript)
             })
-        })
-        .collect::<Vec<_>>();
-    let expected: Vec<Value> = serde_json::from_str(plugins.expected).map_err(plugin_error)?;
-    if actual != expected {
-        return Err(BootError::Platform(
-            "linked plugin descriptors differ from the application bundle".into(),
-        ));
-    }
-    let reserved = crate::first_party_modules();
-    for entry in descriptions {
-        if reserved
-            .iter()
-            .any(|module| module.name == entry.name || module.specifier == entry.specifier)
-            || matches!(
-                entry.specifier,
-                "scene" | "reactive" | "#reactive" | "settings"
-            )
         {
+            return Err(BootError::Platform(
+                "linked plugin descriptors differ from the application bundle".into(),
+            ));
+        }
+    }
+    for entry in descriptions {
+        if matches!(
+            entry.specifier,
+            "scene" | "reactive" | "#reactive" | "settings"
+        ) {
             return Err(BootError::Platform(format!(
                 "native module {} uses a reserved name",
                 entry.specifier
@@ -129,12 +159,28 @@ pub(crate) fn attach(
     }
     let runtime = Runtime::new(Backend { io, main });
     let queue = Arc::downgrade(inbox);
-    let mut context = PluginContext::new(runtime.clone(), services.paths, move |event| {
+    let mut context = PluginContext::new(runtime, services.paths, move |event| {
         let Some(queue) = queue.upgrade() else {
             return false;
         };
         queue.post_plugin_event(event)
     });
+    context = context
+        .with_initial_url(bindings.initial_url)
+        .with_window_state(bindings.session, bindings.restoration);
+    if let Some(hub) = bindings.diagnostics {
+        context = context.with_diagnostics(Arc::clone(&hub) as _);
+        context.insert_extension(crate::diagnostics::snapshot::source(
+            hub,
+            bindings.source_map,
+            context.clone(),
+            bindings.os_version,
+            std::env::var("IMPASTO_DUMP").ok(),
+        ));
+    }
+    if let Some(channel) = services.native_channel {
+        context.insert_extension(channel);
+    }
     let queue = Arc::downgrade(inbox);
     context = context.with_textures(impasto::ExternalTextureRegistry::new(move |name, frame| {
         let Some(queue) = queue.upgrade() else {
@@ -167,78 +213,20 @@ pub(crate) fn attach(
     if let Some(android) = services.android {
         context = context.with_android(android);
     }
-    if let Some(http) = http.filter(|_| services.http) {
-        let stream = Arc::clone(&http);
-        let client = impasto::HttpClient::new(runtime, move |request, cancel| {
-            let result = http
-                .perform(&host_request(request, cancel))
-                .map_err(http_error)?;
-            Ok(impasto::HttpResponse {
-                status: result.status,
-                url: result.url,
-                redirected: result.redirected,
-                headers: result.headers,
-                body: result.body,
-            })
-        })
-        .with_stream(move |request, cancel, mut output| {
-            // This closure runs in the host's blocking pool. Async workers
-            // stay free while the producer waits for queue credit.
-            let request = host_request(request, cancel);
-            let result = stream.stream(&request, &mut |piece| {
-                let piece = match piece {
-                    crate::http::HttpPiece::Head {
-                        status,
-                        url,
-                        redirected,
-                        headers,
-                    } => impasto::HttpChunk::Head {
-                        status,
-                        url: url.to_owned(),
-                        redirected,
-                        headers: headers.to_owned(),
-                    },
-                    crate::http::HttpPiece::Chunk(bytes, _) => {
-                        impasto::HttpChunk::Bytes(bytes.to_vec())
-                    }
-                };
-                pollster::block_on(output.send(Ok(piece)))
-            });
-            if let Err(error) = result {
-                let _ = pollster::block_on(output.send(Err(http_error(error))));
-            }
-        });
-        context = context.with_http(client);
-    }
+    context.dispatch_lifecycle(services.initial_lifecycle);
     let session = PluginSession { context };
     let extensions = registrar.build(&session.context).map_err(plugin_error)?;
-    let registry =
-        impasto::abi::ModuleRegistry::with_extensions(modules, extensions).map_err(plugin_error)?;
+    let registry = if plugins.expected.is_some() {
+        impasto::abi::ModuleRegistry::with_extensions(modules, extensions).map_err(plugin_error)?
+    } else {
+        impasto::abi::ModuleRegistry::try_new(modules.into_iter().chain(extensions).collect())
+            .map_err(plugin_error)?
+    };
     Ok((registry, Some(session)))
 }
 
 fn plugin_error(error: impl std::fmt::Display) -> BootError {
     BootError::Platform(error.to_string())
-}
-
-fn host_request(request: impasto::HttpRequest, cancel: impasto::CancelToken) -> crate::HttpRequest {
-    crate::HttpRequest {
-        method: request.method,
-        url: request.url,
-        headers: request.headers,
-        body: request.body,
-        cancel,
-        timeout_ms: request.timeout_ms,
-        redirect: crate::RedirectMode::Follow,
-        max_body_bytes: Some(request.max_body_bytes),
-    }
-}
-
-fn http_error(error: crate::HttpError) -> impasto::HttpError {
-    impasto::HttpError {
-        code: error.kind.code(),
-        message: error.message,
-    }
 }
 
 #[cfg(target_os = "ios")]

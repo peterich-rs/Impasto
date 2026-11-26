@@ -1,3 +1,4 @@
+import { Stack as HostStack } from "@impasto/solid-renderer/host";
 import { onCleanup } from "solid-js";
 import {
   directionFor,
@@ -118,7 +119,7 @@ export function Tooltip(props: TooltipProps): NodeHandle {
     dismiss();
   });
   return (
-    <stack
+    <HostStack
       style={{
         overflow: "clip",
         minWidth: 0,

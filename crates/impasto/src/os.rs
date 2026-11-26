@@ -1,5 +1,7 @@
 //! Access to window-specific services on their platform queue.
 
+pub use crate::os_channel::NativeChannel;
+
 #[cfg(target_os = "android")]
 pub mod android {
     use std::sync::Arc;
@@ -34,12 +36,36 @@ pub mod android {
             action: impl FnOnce(&mut Env<'_>, &JObject<'_>) -> jni::errors::Result<T> + Send + 'static,
         ) -> Task<Result<T, String>> {
             let platform = self.clone();
-            runtime.spawn_main(move || {
-                let view = (platform.view)().ok_or("the Android view is detached")?;
-                platform
-                    .vm
-                    .attach_current_thread_for_scope(|env| action(env, view.as_obj()))
-                    .map_err(|error| error.to_string())
+            runtime.spawn_main(move || platform.with_view_now(action))
+        }
+
+        /// Borrows the current JNI view for operations safe on the calling thread.
+        pub fn with_view_now<T>(
+            &self,
+            action: impl FnOnce(&mut Env<'_>, &JObject<'_>) -> jni::errors::Result<T>,
+        ) -> Result<T, String> {
+            let view = (self.view)().ok_or("the Android view is detached")?;
+            self.vm
+                .attach_current_thread_for_scope(|env| action(env, view.as_obj()))
+                .map_err(|error| error.to_string())
+        }
+
+        /// Runs an action against the Activity attached to this window.
+        pub fn with_activity<T: Send + 'static>(
+            &self,
+            runtime: &Runtime,
+            action: impl FnOnce(&mut Env<'_>, &JObject<'_>) -> jni::errors::Result<T> + Send + 'static,
+        ) -> Task<Result<T, String>> {
+            self.with_view(runtime, move |env, view| {
+                let activity = env
+                    .call_method(
+                        view,
+                        jni::jni_str!("getActivity"),
+                        jni::jni_sig!("()Landroid/app/Activity;"),
+                        &[],
+                    )?
+                    .l()?;
+                action(env, &activity)
             })
         }
     }

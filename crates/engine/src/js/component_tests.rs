@@ -16,16 +16,7 @@ use crate::{
 };
 
 fn fixture(name: &str, log: crate::js::ConsoleLog) -> Box<dyn Session> {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let output = root.join(format!("target/{name}.js"));
-    let status = std::process::Command::new("node")
-        .arg(root.join("tools/pack.mjs"))
-        .arg(root.join(format!("crates/engine/tests/fixtures/ui/{name}.tsx")))
-        .arg(&output)
-        .status()
-        .expect("pack component regression fixture");
-    assert!(status.success(), "failed to pack {name}");
-    let source = std::fs::read_to_string(output).expect("read component regression fixture");
+    let source = super::fixture_bundle(&format!("{name}.tsx"));
     let mut app = super::open(&source, name, crate::text::MonoShaper::default(), log)
         .unwrap_or_else(|error| panic!("open {name}: {error}"));
     app.metrics(&Metrics::new(360.0, 640.0, 1.0));

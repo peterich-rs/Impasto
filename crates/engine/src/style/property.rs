@@ -24,6 +24,7 @@ bitflags::bitflags! {
 /// Stable index used inside the style system.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u16)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum Key {
     Width = 1,
     Height = 2,
@@ -382,6 +383,7 @@ pub(super) const KEYS: &[Key] = &[
 /// One longhand value. Shorthands expand before a declaration is stored.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum Property {
     Width(SizeValue),
     Height(SizeValue),

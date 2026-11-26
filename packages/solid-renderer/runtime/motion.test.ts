@@ -1,37 +1,20 @@
-import assert from "node:assert/strict";
-import { flushMotion, spring } from "./motion.ts";
+import { advanceFrames, assert, screen, test } from "impasto:test";
+import { scene } from "./scene.ts";
+import { spring } from "./motion.ts";
 
-(globalThis as { core: { requestFrame: () => void } }).core = {
-  requestFrame: () => {},
-};
+test("spring completes on a native frame and cancellation removes the handler", async () => {
+  const node = scene.createElement("view");
+  await screen.mount(() => node);
+  let settled = false;
+  spring({ id: node, prop: "opacity", from: 0, to: 255, onDone: () => { settled = true; } });
+  assert.equal(settled, false);
+  await advanceFrames(120);
+  assert.equal(settled, true);
 
-let written = -1;
-let settled = false;
-spring({
-  id: 3,
-  prop: "opacity",
-  from: 0,
-  to: 255,
-  write: (value) => {
-    written = value;
-  },
-  onDone: () => {
-    settled = true;
-  },
+  const cancel = spring({
+    id: node, prop: "opacity", from: 255, to: 0,
+    onDone: () => assert.fail("cancelled motion completed"),
+  });
+  cancel();
+  await advanceFrames(120);
 });
-assert.equal(written, 255);
-assert.equal(settled, false);
-flushMotion();
-assert.equal(settled, true);
-
-const cancel = spring({
-  id: 3,
-  prop: "opacity",
-  from: 255,
-  to: 0,
-  onDone: () => assert.fail("cancelled motion completed"),
-});
-cancel();
-flushMotion();
-
-console.log("motion.test.ts ok");

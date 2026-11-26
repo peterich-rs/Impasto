@@ -1,0 +1,10 @@
+{
+  "name": "native-order",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@impasto/solid-renderer": "workspace:*",
+    "@impasto/solid-ui": "workspace:*",
+    "@impasto/http": "workspace:*"
+  }
+}

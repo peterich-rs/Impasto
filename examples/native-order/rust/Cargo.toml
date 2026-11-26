@@ -1,0 +1,9 @@
+[package]
+name = "native-order"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+impasto = { version = "0.1.0", registry = "impasto" }
+impasto-http = { version = "0.1.0", registry = "impasto" }

@@ -1,3 +1,4 @@
+import { View as HostView, Stack as HostStack } from "@impasto/solid-renderer/host";
 import { For, Show, createSignal, onCleanup } from "solid-js";
 import { onLayout, scene, type NodeHandle } from "@impasto/solid-renderer";
 import { bindBox, eventsOf } from "./element.tsx";
@@ -51,7 +52,7 @@ export function Tabs(props: TabsProps): NodeHandle {
     stopBinding();
   });
   return (
-    <view
+    <HostView
       {...eventsOf(props)}
       ref={(node) => bindBox(node, props, () => ({ gap: theme().space.s }))}
     >
@@ -78,7 +79,7 @@ export function Tabs(props: TabsProps): NodeHandle {
           )}
         </For>
         <Show when={props.pager}>
-          <view
+          <HostView
             ref={(node) => { marker = node ?? 0; }}
             style={{
               position: "absolute", bottom: 0, left: 0, height: 2,
@@ -88,9 +89,9 @@ export function Tabs(props: TabsProps): NodeHandle {
           />
         </Show>
       </Row>
-      <stack class={props.panelProps?.class} classList={props.panelProps?.classList} style={props.panelProps?.style}>
+      <HostStack class={props.panelProps?.class} classList={props.panelProps?.classList} style={props.panelProps?.style}>
         {props.children}
-      </stack>
-    </view>
+      </HostStack>
+    </HostView>
   );
 }

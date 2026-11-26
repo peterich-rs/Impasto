@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+import { assert } from "impasto:test";
 import { matchPath, routePath } from "./path.ts";
 
 assert.equal(routePath("https://example.test/nav/2?x=1"), "/nav/2");

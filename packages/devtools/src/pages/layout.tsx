@@ -1,3 +1,4 @@
+import { View as HostView } from "@impasto/solid-renderer/host";
 /** Layout page: overflow list with parent/child highlight. */
 import { createSignal, For, Show } from "solid-js";
 import { Text, useTheme } from "@impasto/solid-ui";
@@ -68,7 +69,7 @@ export function LayoutPage() {
     setNote(notes.join("  "));
   };
   return (
-    <view
+    <HostView
       style={{
         width: "100%",
         height: "100%",
@@ -78,20 +79,20 @@ export function LayoutPage() {
         minHeight: 0,
       }}
     >
-      <view
+      <HostView
         style={{
           flexDirection: "row",
           gap: 8,
         }}
       >
-        <view onClick={refresh} focusable>
-          <view
+        <HostView onClick={refresh} focusable>
+          <HostView
             style={{
               backgroundColor: theme().color.primary,
               borderRadius: 6,
             }}
           >
-            <view
+            <HostView
               style={{
                 padding: 6,
               }}
@@ -104,9 +105,9 @@ export function LayoutPage() {
               >
                 刷新
               </Text>
-            </view>
-          </view>
-        </view>
+            </HostView>
+          </HostView>
+        </HostView>
         <Text
           style={{
             fontSize: 11,
@@ -115,8 +116,8 @@ export function LayoutPage() {
         >
           {issues().length} 处溢出
         </Text>
-      </view>
-      <view
+      </HostView>
+      <HostView
         style={{
           gap: 2,
           flex: 1,
@@ -124,8 +125,8 @@ export function LayoutPage() {
       >
         <For each={issues()}>
           {(issue) => (
-            <view onClick={() => focus(issue)}>
-              <view
+            <HostView onClick={() => focus(issue)}>
+              <HostView
                 style={{
                   backgroundColor:
                     selected() === issue
@@ -134,7 +135,7 @@ export function LayoutPage() {
                   borderRadius: 4,
                 }}
               >
-                <view
+                <HostView
                   style={{
                     padding: 4,
                   }}
@@ -149,12 +150,12 @@ export function LayoutPage() {
                     {issue.excess.toFixed(1)}pt（内容 {issue.used.toFixed(0)} /
                     容器 {issue.parentSize.toFixed(0)}）
                   </Text>
-                </view>
-              </view>
-            </view>
+                </HostView>
+              </HostView>
+            </HostView>
           )}
         </For>
-      </view>
+      </HostView>
       <Show when={note() !== ""}>
         <Text
           style={{
@@ -173,6 +174,6 @@ export function LayoutPage() {
       >
         Scroll 内容、Visible 文本、Clip 子树的溢出按设计跳过。
       </Text>
-    </view>
+    </HostView>
   );
 }

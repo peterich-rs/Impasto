@@ -305,4 +305,4 @@ IMPASTO_RETAIN_OFFSCREEN=1 \
 | `ShaderEffect` | 185.96 µs | 193.84 µs |
 | `GpuView` | 45.75 µs | 118.15 µs |
 
-合并暖帧提交前的 Pixel 9 Vulkan Release 基线在有效 WGSL 场景中连续合成 665 帧，其间 UI 线程没有运行记录。Raster p95 为 6.16 ms，其中 `gpu_view_render` 的 CPU 墙钟 p95 为 1.18 ms。首次 shader 编译耗时 18.86 ms。无效 WGSL 用例在记录诊断后继续呈现 GpuView。Metal 像素测试覆盖暖帧同批采样与计时、缩放时重建、圆角、透明度、背景模糊、延迟到达的输入图像，以及模拟设备丢失后的生产者回调和新代次纹理。 [Gallery 页面](../apps/gallery-solid/src/pages/gpu-lab.tsx) · [GPU 扩展像素测试](../crates/raster/src/tests/gpu_extensions.rs)
+合并暖帧提交前的 Pixel 9 Vulkan Release 基线在有效 WGSL 场景中连续合成 665 帧，其间 UI 线程没有运行记录。Raster p95 为 6.16 ms，其中 `gpu_view_render` 的 CPU 墙钟 p95 为 1.18 ms。首次 shader 编译耗时 18.86 ms。无效 WGSL 用例在记录诊断后继续呈现 GpuView。Metal 像素测试覆盖暖帧同批采样与计时、缩放时重建、圆角、透明度、背景模糊、延迟到达的输入图像，以及模拟设备丢失后的生产者回调和新代次纹理。 [Gallery 页面](../examples/gallery-solid/src/pages/gpu-lab.tsx) · [GPU 扩展像素测试](../crates/raster/src/tests/gpu_extensions.rs)

@@ -1,0 +1,14 @@
+name = "native-order"
+version = "0.1.0"
+targets = ["macos", "ios", "android"]
+
+[ios]
+bundle_id = "dev.impasto.native-order"
+
+[android]
+permissions = ["android.permission.INTERNET"]
+
+[dependencies]
+"@impasto/http" = "builtin"
+"@impasto/solid-renderer" = "builtin"
+"@impasto/solid-ui" = "builtin"

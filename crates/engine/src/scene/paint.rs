@@ -1,5 +1,6 @@
 /// RGB primaries and transfer function of a gradient stop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum ColorSpace {
     #[default]
     Srgb,
@@ -11,6 +12,7 @@ pub enum ColorSpace {
 
 /// One color stop on a gradient. `offset` is in `[0, 1]`.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub struct ColorStop {
     pub offset: f32,
     pub color: [u8; 4],
@@ -30,6 +32,7 @@ impl ColorStop {
 /// Fill gradient in the rectangle's unit square. `(0, 0)` is the top-left.
 /// Sweep angles are radians, clockwise from the positive x axis.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum Gradient {
     Linear {
         start: [f32; 2],
@@ -51,6 +54,7 @@ pub enum Gradient {
 
 /// Material shadow. `elevation` is scene points.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub struct Shadow {
     pub color: [u8; 4],
     pub elevation: f32,
@@ -61,6 +65,7 @@ pub struct Shadow {
 /// `offset` and `blur_sigma` are scene points. The player does not multiply
 /// `blur_sigma` by `point_scale`.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub struct BoxShadow {
     pub offset: [f32; 2],
     pub blur_sigma: f32,
@@ -70,6 +75,7 @@ pub struct BoxShadow {
 
 /// Layer blend. [`BlendMode::SrcOver`] is a no-op at record time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum BlendMode {
     #[default]
     SrcOver,

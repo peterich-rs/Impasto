@@ -46,16 +46,25 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    struct ReadyExec;
+
+    impl impasto::abi::MethodExec for ReadyExec {
+        fn spawn(&self, task: impasto::abi::HostFuture) {
+            pollster::block_on(task);
+        }
+        fn worker(&self, settle: impasto::abi::Settle, work: impasto::abi::Work) {
+            settle.send(work());
+        }
+        fn main_thread(&self, settle: impasto::abi::Settle, work: impasto::abi::Work) {
+            settle.send(work());
+        }
+        fn now(&self, settle: impasto::abi::Settle, result: impasto::abi::PluginResult) {
+            settle.send(result);
+        }
+    }
+
     #[test]
     fn external_app_builds_checks_and_runs_without_a_window() {
-        let framework = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        if !framework
-            .join("node_modules/typescript/package.json")
-            .is_file()
-        {
-            eprintln!("CLI compiler integration requires pnpm install; skipping without JS tools");
-            return;
-        }
         let mut sandbox = Sandbox::new();
         success(sandbox.cli(&["create", "sample"]));
         sandbox.0.push("sample");
@@ -70,9 +79,22 @@ mod tests {
             })
             .collect::<Vec<_>>();
         names.sort();
-        assert_eq!(names, ["app.toml", "assets", "lib", "package.json"]);
+        assert_eq!(
+            names,
+            [
+                ".gitignore",
+                ".impasto",
+                "android",
+                "app.toml",
+                "assets",
+                "ios",
+                "macos",
+                "src",
+                "tsconfig.json"
+            ]
+        );
         success(sandbox.cli(&["analyze"]));
-        fs::write(sandbox.0.join("lib/probe.test.ts"),"import {createSignal,batch} from 'solid-js'; const [get,set]=createSignal(1); batch(()=>set(2)); if(get()!==2)throw new Error('signal');").expect("test source");
+        fs::write(sandbox.0.join("src/probe.test.ts"),"import {createSignal,batch} from 'solid-js'; const [get,set]=createSignal(1); batch(()=>set(2)); if(get()!==2)throw new Error('signal');").expect("test source");
         success(sandbox.cli(&["build", "bundle", "--debug"]));
         assert!(sandbox.0.join("build/app.js").is_file());
         let native = sandbox.cli(&["test"]);
@@ -84,7 +106,7 @@ mod tests {
             assert!(!sandbox.0.join("build/app.js").exists());
             success(sandbox.cli(&["test", "build/app.bin"]));
             fs::write(
-                sandbox.0.join("lib/probe.test.ts"),
+                sandbox.0.join("src/probe.test.ts"),
                 "throw new Error('intentional failure');",
             )
             .expect("failure test");
@@ -102,24 +124,53 @@ mod tests {
         assert!(String::from_utf8_lossy(&ios.stderr).contains(reason));
         success(sandbox.cli(&["clean"]));
         assert!(!sandbox.0.join("build").exists());
-        assert!(sandbox.0.join("lib/main.tsx").is_file());
+        assert!(sandbox.0.join("src/main.tsx").is_file());
         assert!(sandbox.0.join("app.toml").is_file());
     }
     #[test]
+    fn native_ui_test_runs_real_pointer_hit_testing_and_layout() {
+        let mut sandbox = Sandbox::new();
+        success(sandbox.cli(&["create", "counter"]));
+        sandbox.0.push("counter");
+        fs::write(
+            sandbox.0.join("src/counter.test.tsx"),
+            r#"
+import { test, expect, screen, fire, trace } from "impasto:test";
+import { Button, Text } from "@impasto/solid-ui";
+import { View } from "@impasto/solid-renderer/host";
+import { createSignal } from "solid-js";
+
+function Counter() {
+    const [count, setCount] = createSignal(0);
+    return <View style={{ padding: 12 }}>
+        <Button accessibilityLabel="increment" onClick={() => setCount(count() + 1)}>
+            <Text>Increment</Text>
+        </Button>
+        <Text>{`Count ${count()}`}</Text>
+    </View>;
+}
+
+test("click re-renders text", async () => {
+    await screen.mount(() => <Counter />);
+    const button = await screen.byLabel("increment");
+    expect(screen.rect(button).w).toBeGreaterThan(5);
+    const stats = await trace(() => fire.click(button));
+    expect(stats.pointers).toBe(2);
+    expect(await screen.byText("Count 1")).toBeVisible();
+});
+"#,
+        )
+        .expect("write test source");
+        success(sandbox.cli(&["test", "--trace"]));
+    }
+
+    #[test]
     fn native_capabilities_typecheck_and_link_from_the_public_packages() {
-        let framework = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        if !framework
-            .join("node_modules/typescript/package.json")
-            .is_file()
-        {
-            eprintln!("CLI compiler integration requires pnpm install; skipping without JS tools");
-            return;
-        }
         let mut sandbox = Sandbox::new();
         success(sandbox.cli(&["create", "capabilities"]));
         sandbox.0.push("capabilities");
         fs::write(
-            sandbox.0.join("lib/main.tsx"),
+            sandbox.0.join("src/main.tsx"),
             r#"
 import { AppState } from "@impasto/app-state";
 import { AsyncStorage } from "@impasto/async-storage";
@@ -129,8 +180,9 @@ import { FileSystem } from "@impasto/file-system";
 import { Linking } from "@impasto/linking";
 import { Permission } from "@impasto/permissions";
 import { boot } from "@impasto/solid-renderer";
+import { View } from "@impasto/solid-ui";
 
-boot(() => <view />);
+boot(() => <View />);
 Clipboard.setString("copied");
 const copied: string = Clipboard.getString();
 if (copied !== "copied" || AppState.currentState !== "active" || !store.available()) {
@@ -174,24 +226,53 @@ void check();
 "#,
         )
         .expect("capabilities app");
-        success(sandbox.cli(&["analyze"]));
+        let package = sandbox.0.join("package.json");
+        let mut manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(&package).unwrap_or_else(|_| b"{\"dependencies\":{}}".to_vec()),
+        )
+        .expect("JSON");
+        for name in [
+            "app-state",
+            "async-storage",
+            "clipboard",
+            "devtools",
+            "file-system",
+            "linking",
+            "permissions",
+        ] {
+            manifest["dependencies"][format!("@impasto/{name}")] = "0.1.0".into();
+        }
+        fs::write(
+            package,
+            serde_json::to_vec(&manifest).expect("package JSON"),
+        )
+        .expect("dependencies");
+        success(sandbox.cli(&["analyze", "--platform", "macos"]));
         fs::write(sandbox.0.join("16.bin"), [65; 16]).expect("small file");
         fs::write(sandbox.0.join("8192.bin"), [65; 8192]).expect("large file");
         for debug in [true, false] {
-            let mut args = vec!["build", "bundle"];
+            let mut args = vec!["build", "bundle", "--platform", "macos"];
             if debug {
                 args.push("--debug");
             }
             success(sandbox.cli(&args));
             let (tx, rx) = mpsc::channel();
-            let storage = embedder::memory::MemoryStorage::new(sandbox.0.to_string_lossy());
-            let mut modules = embedder::first_party_modules();
-            modules.retain(|module| !matches!(module.name, "FileSystem" | "AsyncStorage"));
-            modules.push(embedder::file_system(Arc::clone(&storage) as _));
-            modules.push(embedder::async_storage(storage));
+            let mut registrar = impasto::PluginRegistrar::default();
+            impasto_bundled_plugins::register(&mut registrar);
+            let publish = tx.clone();
+            let context = impasto::PluginContext::new(
+                impasto::Runtime::default(),
+                impasto::AppPaths::new(Some(sandbox.0.clone()), None, None),
+                move |event| publish.send(engine::session::IoEvent::Host(event)).is_ok(),
+            );
+            context.insert_extension(impasto::DiagnosticsSource::new(|_, _| {
+                Ok(impasto::abi::PluginValue::Null)
+            }));
+            let modules = registrar.build(&context).expect("capability registry");
             let config = engine::session::ModuleConfig {
                 registry: Arc::new(engine::session::ModuleRegistry::new(modules)),
                 post_delivery: None,
+                exec: Arc::new(ReadyExec),
                 settle: Arc::new(move |token| {
                     let tx = tx.clone();
                     engine::session::Settle::new(move |result| {
@@ -211,10 +292,12 @@ void check();
             });
             let shaper = engine::text::MonoShaper::default();
             let mut session = if debug {
-                let source = fs::read(sandbox.0.join("build/app.js")).expect("ESM bundle");
+                let source = fs::read(sandbox.0.join("build/macos/bundle/debug/app.js"))
+                    .expect("ESM bundle");
                 engine::js::open_program(&source, "app.js", shaper, log, config)
             } else {
-                let source = fs::read(sandbox.0.join("build/app.bin")).expect("bytecode bundle");
+                let source = fs::read(sandbox.0.join("build/macos/bundle/release/app.bin"))
+                    .expect("bytecode bundle");
                 // SAFETY: this test loads only the artifact built above by the pinned CLI.
                 #[expect(unsafe_code, reason = "loads this test's own compiled artifact")]
                 unsafe {
@@ -223,9 +306,10 @@ void check();
             }
             .expect("link capability imports");
             session.metrics(&engine::session::Metrics::new(360.0, 640.0, 1.0));
-            session.set_launch_url("demo://open");
-            session.lifecycle(engine::session::Lifecycle::Inactive);
-            session.window_focus(false);
+            context.dispatch_open_url("demo://open");
+            context.dispatch_lifecycle(impasto::Lifecycle::Inactive);
+            context.dispatch_window_focus(true);
+            context.dispatch_window_focus(false);
             for step in 0..8 {
                 for event in rx.try_iter() {
                     session.io_event(event);
@@ -259,6 +343,227 @@ void check();
         assert!(!result.status.success());
         assert!(!sandbox.0.join("valid/build").exists());
     }
+    #[test]
+    fn sync_preserves_platform_sources_and_keeps_unsupported_plugins_disabled() {
+        let mut sandbox = Sandbox::new();
+        success(sandbox.cli(&["create", "managed", "--with-rust"]));
+        sandbox.0.push("managed");
+        assert!(sandbox.0.join("rust/Cargo.toml").is_file());
+        let activity = sandbox
+            .0
+            .join("android/app/src/main/kotlin/dev/impasto/runner/MainActivity.kt");
+        let customized = fs::read_to_string(&activity).expect("Android entry")
+            + "\n// Application customization\n";
+        fs::write(&activity, &customized).expect("custom activity");
+        let package = sandbox.0.join("package.json");
+        let mut manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(&package).unwrap_or_else(|_| b"{\"dependencies\":{}}".to_vec()),
+        )
+        .expect("JSON");
+        manifest["dependencies"]["@impasto/camera"] = "0.1.0".into();
+        fs::write(
+            package,
+            serde_json::to_vec(&manifest).expect("package JSON"),
+        )
+        .expect("dependencies");
+
+        success(sandbox.cli(&["sync", "--platform", "macos"]));
+        let generated = sandbox.0.join(".impasto/plugins-manifest.macos.json");
+        let first = fs::read(&generated).expect("macOS manifest");
+        success(sandbox.cli(&["sync", "--platform", "macos"]));
+        assert_eq!(fs::read(&generated).expect("synced manifest"), first);
+        assert_eq!(
+            fs::read_to_string(activity).expect("custom entry"),
+            customized
+        );
+        let contents: serde_json::Value = serde_json::from_slice(&first).expect("plugin manifest");
+        assert_eq!(
+            contents["disabledEntries"],
+            serde_json::json!(["@impasto/camera"])
+        );
+        assert_eq!(contents["modules"][0]["specifier"], "@app/managed/native");
+        let entry = fs::read_to_string(sandbox.0.join(".impasto/cargo/entry-macos/Cargo.toml"))
+            .expect("generated macOS crate");
+        assert!(entry.contains("default-features = false"));
+
+        let stale = sandbox.0.join(".impasto/cargo/registry-ios/Cargo.toml");
+        let registry = fs::read_to_string(&stale).expect("iOS registry");
+        fs::write(
+            &stale,
+            registry + "\nremoved = { path = \"/impasto-test-removed-plugin\" }\n",
+        )
+        .expect("stale dependency");
+        success(sandbox.cli(&["sync", "--platform", "macos"]));
+        let workspace = fs::read_to_string(sandbox.0.join(".impasto/cargo/Cargo.toml"))
+            .expect("generated workspace");
+        assert!(!workspace.contains("registry-ios"));
+    }
+
+    #[test]
+    fn add_bundled_package_updates_source_and_cargo_manifests() {
+        let mut sandbox = Sandbox::new();
+        success(sandbox.cli(&["create", "withhttp"]));
+        sandbox.0.push("withhttp");
+        success(sandbox.cli(&["add", "@impasto/http", "--rust"]));
+        let manifest = fs::read_to_string(sandbox.0.join("app.toml")).expect("app manifest");
+        assert!(manifest.contains("@impasto/http"));
+        let manifest =
+            fs::read_to_string(sandbox.0.join("rust/Cargo.toml")).expect("Cargo manifest");
+        assert!(manifest.contains("impasto-http") && manifest.contains("registry = \"impasto\""));
+    }
+
+    #[test]
+    fn local_registry_resolves_rust_plugins_offline_and_initializes_dependencies_first() {
+        let mut sandbox = Sandbox::new();
+        success(sandbox.cli(&["create", "closure"]));
+        sandbox.0.push("closure");
+        let plugins = sandbox.0.join("plugins");
+        let base = plugins.join("base");
+        let consumer = plugins.join("consumer");
+        for (root, name, extra, package_deps) in [
+            (&base, "z-base", "", serde_json::json!({})),
+            (
+                &consumer,
+                "a-consumer",
+                "fixture-z-base = { version = \"0.1.0\", registry = \"impasto\" }",
+                serde_json::json!({"@fixture/z-base": "file:../base"}),
+            ),
+        ] {
+            fs::create_dir_all(root.join("rust/src")).expect("plugin sources");
+            fs::create_dir_all(root.join("src")).expect("plugin JS");
+            fs::write(root.join("src/index.ts"), "export {};").expect("JS entry");
+            fs::write(
+                root.join("plugin.toml"),
+                "[plugin]\nplatforms = [\"macos\"]\n[rust]\npath = \"rust\"\n",
+            )
+            .expect("plugin manifest");
+            fs::write(
+                root.join("package.json"),
+                serde_json::json!({
+                    "name": format!("@fixture/{name}"),
+                    "version": "0.1.0",
+                    "exports": { ".": "./src/index.ts" },
+                    "dependencies": package_deps,
+                })
+                .to_string(),
+            )
+            .expect("npm manifest");
+            fs::write(root.join("rust/Cargo.toml"), format!(
+                "[package]\nname = \"fixture-{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[dependencies]\nimpasto = {{ version = \"0.1.0\", registry = \"impasto\" }}\n{extra}\n"
+            )).expect("Cargo manifest");
+        }
+        fs::write(
+            base.join("rust/src/lib.rs"),
+            r#"
+pub struct Value(pub u32);
+#[impasto::module(specifier = "@fixture/z-base/native", init = init)]
+struct Provider;
+impl Provider {
+    fn init(ctx: &impasto::PluginContext) -> Result<Self, impasto::PluginInitError> {
+        ctx.insert_extension(Value(42));
+        Ok(Self)
+    }
+}
+#[impasto::export]
+impl Provider {
+    pub fn ready() -> bool { true }
+}
+pub fn register(registrar: &mut impasto::PluginRegistrar) {
+    registrar.add(Provider::plugin());
+}
+"#,
+        )
+        .expect("provider source");
+        fs::write(
+            consumer.join("rust/src/lib.rs"),
+            r#"
+#[impasto::module(specifier = "@fixture/a-consumer/native", init = init)]
+struct Consumer(u32);
+impl Consumer {
+    fn init(ctx: &impasto::PluginContext) -> Result<Self, impasto::PluginInitError> {
+        let value = ctx.extension::<fixture_z_base::Value>()
+            .ok_or_else(|| impasto::PluginInitError::new("base plugin must initialize first"))?;
+        Ok(Self(value.0))
+    }
+}
+#[impasto::export]
+impl Consumer {
+    pub fn answer(&self) -> u32 { self.0 }
+}
+pub fn register(registrar: &mut impasto::PluginRegistrar) {
+    registrar.add(Consumer::plugin());
+}
+"#,
+        )
+        .expect("consumer source");
+        let app_manifest = sandbox.0.join("app.toml");
+        let mut app = fs::read_to_string(&app_manifest).expect("app manifest");
+        app.push_str(
+            r#"
+
+[dependencies]
+"@fixture/a-consumer" = { path = "./plugins/consumer" }
+"@fixture/z-base" = { path = "./plugins/base" }
+"#,
+        );
+        fs::write(app_manifest, app).expect("app dependencies");
+        let sync = || {
+            Command::new(env!("CARGO_BIN_EXE_impasto"))
+                .args(["sync", "--platform", "macos"])
+                .current_dir(&sandbox.0)
+                .env("CARGO_NET_OFFLINE", "true")
+                .output()
+                .expect("offline impasto sync")
+        };
+        success(sync());
+        let workspace = sandbox.0.join(".impasto/cargo");
+        let tests = workspace.join("registry-macos/tests");
+        fs::create_dir(&tests).expect("registry tests");
+        fs::write(
+            tests.join("registry_order.rs"),
+            r#"
+#[test]
+fn builds_dependency_first() {
+    let mut registrar = impasto::PluginRegistrar::default();
+    impasto_registry_macos::register(&mut registrar);
+    let modules = registrar.build(&impasto::PluginContext::default()).expect("build modules");
+    let registry = impasto::abi::ModuleRegistry::new(modules);
+    assert_eq!(registry.call("Consumer", "answer", &[]), Ok(impasto::abi::PluginValue::F64(42.0)));
+}
+"#,
+        )
+        .expect("registry test");
+        success(
+            Command::new("cargo")
+                .current_dir(&workspace)
+                .args([
+                    "test",
+                    "--offline",
+                    "-p",
+                    "impasto-registry-macos",
+                    "--test",
+                    "registry_order",
+                ])
+                .output()
+                .expect("run local registry"),
+        );
+        let package_path = consumer.join("package.json");
+        let mut package: serde_json::Value =
+            serde_json::from_slice(&fs::read(&package_path).expect("plugin manifest"))
+                .expect("JSON");
+        package["dependencies"] = serde_json::json!({});
+        fs::write(package_path, package.to_string()).expect("remove npm dependency");
+        let result = sync();
+        assert!(!result.status.success());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            stderr.contains("fixture-a-consumer")
+                && stderr.contains("fixture-z-base")
+                && stderr.contains("package.json"),
+            "{stderr}"
+        );
+    }
+
     #[test]
     fn ios_manifest_and_options_are_validated_before_staging() {
         let mut sandbox = Sandbox::new();

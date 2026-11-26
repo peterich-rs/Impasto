@@ -5,16 +5,12 @@ mod command;
 mod diagnostics;
 mod error;
 mod exec;
-mod files;
 mod gpu_view_gallery;
 mod host;
-mod http;
 mod images;
 mod ime;
 mod input;
 mod log_sub;
-mod module_stubs;
-mod modules;
 mod plugins;
 mod present;
 mod ptr;
@@ -27,7 +23,6 @@ mod surface;
 mod task_runner;
 mod timing;
 mod watchdog;
-mod websocket;
 mod window_session;
 
 use std::sync::Arc;
@@ -35,17 +30,15 @@ use std::sync::Arc;
 use engine::session::Metrics;
 
 pub use command::{Command, FrameToken, SurfaceId, SurfaceTarget};
-pub use diagnostics::telemetry::{ScheduleTiming, TelemetryProfile};
-pub use diagnostics::{DiagnosticsHub, NetEntry, NetKind, TelemetryHub, wrap_if_devtools};
+pub use diagnostics::telemetry::{ScheduleTiming, TelemetryProfile, mono_ns};
+pub use diagnostics::{
+    DiagnosticsHub, FrameSample, LogEntry, LogSource, NetEntry, NetKind, PhaseSample, TelemetryHub,
+};
 pub use engine::session::{FrameTime, Lifecycle};
 pub use error::{BootError, SessionError};
 pub use exec::{RtExec, settle_factory};
 pub use host::{
     DropWait, Link, Poster, console_log, start, start_async, start_async_with_exit, start_on,
-};
-pub use http::{
-    HTTP_BODY_LIMIT, HttpClient, HttpError, HttpFailure, HttpPiece, HttpRequest, HttpResponse,
-    OpenWireClient, RedirectMode, http_client,
 };
 pub use images::{DecodeTarget, ImageDecoder, ImageError, ImageHandle, ImageReady};
 pub use images::{ExternalFrame, ImportExternalFrame, pixel_count_ok, unpremultiply_rgba};
@@ -53,17 +46,8 @@ pub use images::{ExternalFrame, ImportExternalFrame, pixel_count_ok, unpremultip
 pub use impasto::os::android::AndroidContext;
 pub use impasto::{AppPaths, Register as PluginRegister};
 pub use log_sub::install as install_log;
-pub use log_sub::set_log_targets;
-pub use module_stubs::{
-    check_module_stubs, first_party_modules, module_stub_path, module_stub_source, package_folder,
-    write_module_stubs,
-};
-pub use modules::{
-    ClipboardHost, LinkingHost, PermissionsHost, StorageHost, app_state, async_storage, clipboard,
-    file_system, http as http_module, linking, memory, native_plugins, permission_results,
-    permissions, picked_document, websocket as websocket_module,
-};
-pub use plugins::{PluginServices, install_plugins};
+pub use log_sub::{log_filter_text, set_log_targets};
+pub use plugins::{PluginServices, install_bundled_plugins, install_plugins};
 pub use present::{AfterPresent, after_present};
 pub use ptr::NativePtr;
 pub use restoration::Restoration;
@@ -75,7 +59,6 @@ pub use task_runner::{
 };
 pub use timing::FrameTiming;
 pub use tracing_subscriber::filter::{LevelFilter, Targets};
-pub use websocket::{WebSocketCommand, WebSocketEvent, WebSocketTransport};
 pub use window_session::WindowSession;
 
 /// QuickJS console callback. Level 3 is an error.
@@ -121,10 +104,6 @@ pub trait Services: Send {
     fn back_enabled(&self, _enabled: bool) {}
     fn window_session(&self) -> WindowSession {
         WindowSession::default()
-    }
-    /// Platform WebSockets, if the host uses a different network stack.
-    fn websocket_transport(&self) -> Option<Arc<dyn WebSocketTransport>> {
-        None
     }
     fn source_updated(&self, _revision: &str, _result: Result<(), &str>) {}
     fn unhandled_back(&self) {
@@ -259,8 +238,6 @@ pub struct Boot {
     pub thread_topology: ThreadTopology,
     /// Written before `start` so `Linking.getInitialURL` is visible during eval.
     pub launch_url: engine::session::Shared<Option<String>>,
-    /// Absent HTTP fails with `network is not linked`. Hosts inject [`http_client`].
-    pub http: Option<Arc<dyn HttpClient>>,
     /// Creates the graphics context on the render thread.
     pub open_raster:
         Box<dyn FnOnce(raster::FontLibrary) -> Result<raster::Rasterizer, raster::Status> + Send>,

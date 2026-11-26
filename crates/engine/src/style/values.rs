@@ -17,6 +17,7 @@ pub fn is_finite(value: f32) -> bool {
 
 /// Theme length name. The environment owns the numeric value.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub struct LengthToken(Arc<str>);
 
 impl LengthToken {
@@ -34,6 +35,7 @@ impl LengthToken {
 /// `Fraction(1.0)` is 100% of the parent on the axis Taffy resolves.
 /// `Steps(4)` is four spacing units (`p-4`), not 4 points.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum Length {
     Points(f32),
     Fraction(f32),
@@ -80,6 +82,7 @@ impl Length {
 
 /// Font size and other lengths that are not a parent percentage.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum AbsoluteLength {
     Points(f32),
     Rem(f32),
@@ -110,6 +113,7 @@ impl AbsoluteLength {
 
 /// `width` / `height`. `content` is not a member; flex basis has its own type.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum SizeValue {
     Auto,
     Length(Length),
@@ -137,6 +141,7 @@ impl SizeValue {
 /// `min-*` and `max-*`. `none` on a max axis is [`LimitValue::Auto`].
 /// Intrinsic keywords are not representable here.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum LimitValue {
     Auto,
     Length(Length),
@@ -154,6 +159,7 @@ impl LimitValue {
 
 /// Margin. Negative points are legal. `auto` is not a length.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum MarginValue {
     Auto,
     Length(Length),
@@ -171,6 +177,7 @@ impl MarginValue {
 
 /// Inset edge. Percentages and negative points are legal.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum InsetValue {
     Auto,
     Length(Length),
@@ -188,6 +195,7 @@ impl InsetValue {
 
 /// Flex basis. `content` is distinct from [`SizeValue`].
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum BasisValue {
     Size(SizeValue),
     Content,
@@ -209,6 +217,7 @@ impl BasisValue {
 
 /// Specified line height. A bare number is a multiplier of the font size.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum LineHeightValue {
     Normal,
     Factor(f32),
@@ -223,6 +232,7 @@ impl LineHeightValue {
 
 /// One bound inside a grid track. `MinMax` cannot nest another `MinMax`.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum TrackBound {
     Auto,
     MinContent,
@@ -236,6 +246,7 @@ pub enum TrackBound {
 
 /// One grid track. `grid-cols-N` expands to `N` copies of `minmax(0, 1fr)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum GridTrack {
     Bound(TrackBound),
     MinMax { min: TrackBound, max: TrackBound },
@@ -252,6 +263,7 @@ impl GridTrack {
 
 /// Typed tracks, or a source string parsed by Taffy's published parser.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum TrackList {
     Tracks(Vec<GridTrack>),
     Source(Arc<str>),
@@ -269,6 +281,7 @@ impl TrackList {
 
 /// Grid line. `Line(0)` and `Span(0)` are rejected at validation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum GridPlacement {
     Auto,
     Line(i16),
@@ -290,6 +303,7 @@ pub enum FlexShorthand {
 
 /// Box display. `Block` is Taffy's block layout, not a flex column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum DisplayMode {
     Flex,
     Grid,
@@ -299,6 +313,7 @@ pub enum DisplayMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum FlexDir {
     Row,
     Column,
@@ -307,6 +322,7 @@ pub enum FlexDir {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum FlexWrapMode {
     NoWrap,
     Wrap,
@@ -315,6 +331,7 @@ pub enum FlexWrapMode {
 
 /// Item alignment. `Start` is logical. `FlexStart` is flex-relative.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum ItemAlign {
     Auto,
     Normal,
@@ -328,6 +345,7 @@ pub enum ItemAlign {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum ContentAlign {
     Start,
     End,
@@ -341,12 +359,14 @@ pub enum ContentAlign {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum PositionMode {
     Relative,
     Absolute,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum OverflowMode {
     Visible,
     Clip,
@@ -354,18 +374,21 @@ pub enum OverflowMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum BoxSizingMode {
     BorderBox,
     ContentBox,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum DirectionMode {
     Ltr,
     Rtl,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum GridFlow {
     Row,
     Column,
@@ -375,6 +398,7 @@ pub enum GridFlow {
 
 /// A color that may still name a theme token. Tokens resolve with the environment.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum PaintColor {
     Rgba([u8; 4]),
     Token(Arc<str>),

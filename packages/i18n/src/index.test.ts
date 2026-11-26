@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+import { assert } from "impasto:test";
 import { formatDate, formatNumber, plural } from "./index.ts";
 
 assert.equal(plural("en", 1, { one: "item", other: "items" }), "item");

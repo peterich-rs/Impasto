@@ -9,15 +9,18 @@ name = "impasto"
 crate-type = ["cdylib", "rlib"]
 
 [features]
+default = ["bundled-plugins"]
+bundled-plugins = ["dep:impasto-bundled-plugins"]
 app-entry = []
 
 [dependencies]
 engine = { workspace = true }
 
 [dev-dependencies]
-embedder = { workspace = true }
+embedder.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
+impasto-bundled-plugins = { path = "../bundled", optional = true }
 ndk = { version = "=0.9.0", default-features = false }
 ndk-sys = { version = "=0.6.0" }
 libc = "0.2"
@@ -25,7 +28,8 @@ libloading = "0.8"
 jni = { version = "=0.22.4" }
 raster = { workspace = true }
 engine = { workspace = true, features = ["js"] }
-embedder = { workspace = true }
+embedder.workspace = true
+impasto.workspace = true
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 
 [lints]

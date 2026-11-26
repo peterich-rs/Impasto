@@ -335,21 +335,51 @@ pub(in crate::js::player) struct JsVm {
     pub(super) host: Rc<Host>,
 }
 impl JsVm {
+    pub(super) fn apply_source_patch(&self, source: &str) -> Result<bool, String> {
+        let delta = source.strip_prefix("// impasto:hot-patch/1\n");
+        if delta.is_none() && !source.starts_with("// impasto:hot/1\n") {
+            return Ok(false);
+        }
+        let state = delta
+            .or_else(|| {
+                source
+                    .split_once("\n// impasto:hot-state\n")
+                    .and_then(|(_, state)| state.split_once("\n// impasto:hot-state-end\n"))
+                    .map(|(state, _)| state)
+            })
+            .ok_or_else(|| "missing development module state".to_owned())?;
+        let _budget = self.host.budget("source patch", 0);
+        let applied = self.host.with(|ctx| {
+            let hot = ctx.globals().get::<_, Option<Object>>("__impasto_hot");
+            let result = hot.and_then(|hot| {
+                let Some(hot) = hot else {
+                    return Ok(false);
+                };
+                let update: Function = hot.get(if delta.is_some() { "patch" } else { "update" })?;
+                let state = ctx.json_parse(state)?;
+                update.call((rquickjs::function::This(hot), state))
+            });
+            result.map_err(|error| self.host.stash_fault(&ctx, "source patch", error))
+        })?;
+        if delta.is_some() && !applied {
+            return Err("development patch does not match the running module graph".to_owned());
+        }
+        Ok(applied)
+    }
+
     pub(super) fn record_stack_samples(&self) {
         for sample in self.host.runtime.take_stack_samples() {
             let age_ns = u64::try_from(sample.at.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            let modules = sample
-                .modules
-                .iter()
-                .map(|module| module.as_deref().unwrap_or("[native or unnamed]"))
-                .collect::<Vec<_>>()
-                .join(" ← ");
-            tracing::event!(name: "js_module_stack_sample", target: "impasto::js_profile",
-                tracing::Level::TRACE, trace_event = true, queue = "ui", age_ns, modules = modules.as_str());
+            tracing::event!(name: "js_stack_sample", target: "impasto::js_profile",
+                tracing::Level::TRACE, trace_event = true, queue = "ui", age_ns, js_stack = sample.stack.as_str());
         }
     }
 
-    pub(super) fn new(inner: Rc<Inner>, app_dir: Option<&str>) -> Result<Self, Error> {
+    pub(super) fn new(
+        inner: Rc<Inner>,
+        app_dir: Option<&str>,
+        development: bool,
+    ) -> Result<Self, Error> {
         let log = Rc::clone(&inner.log);
         let mut builder = javascript::runtime::Runtime::builder()
             .log(move |level, text| log(level, text))
@@ -362,16 +392,27 @@ impl JsVm {
         if let Some(clock) = &inner.config.transport_clock {
             builder = builder.transport_clock(Arc::clone(clock));
         }
-        if matches!(
-            inner.config.script_execution,
-            crate::session::ScriptExecution::PlatformUi
-        ) {
-            builder = builder.limits(javascript::runtime::RuntimeLimits {
+        let mut limits = match inner.config.script_execution {
+            crate::session::ScriptExecution::DedicatedUi => Default::default(),
+            crate::session::ScriptExecution::PlatformUi => javascript::runtime::RuntimeLimits {
                 eval_budget_ms: 500,
                 callback_budget_ms: 32,
                 ..Default::default()
-            });
+            },
+            crate::session::ScriptExecution::HeadlessTest => javascript::runtime::RuntimeLimits {
+                heap_bytes: 128 << 20,
+                eval_budget_ms: 5_000,
+                callback_budget_ms: 5_000,
+                job_batch: 256,
+                ..Default::default()
+            },
+        };
+        if development {
+            // Source factories initialize their dependency graph on the first
+            // turn. The frame callback limit remains the host's normal limit.
+            limits.eval_budget_ms = 5_000;
         }
+        builder = builder.limits(limits);
         let runtime = builder.build_unstarted().map_err(|_| Error::Runtime)?;
         let host = Rc::new_cyclic(|weak| Host {
             runtime,
@@ -539,6 +580,7 @@ mod tests {
                 crate::session::ModuleConfig::disconnected(),
             )),
             None,
+            false,
         )
         .expect("allocate extension owner");
         let weak = vm.host.runtime.downgrade();

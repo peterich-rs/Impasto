@@ -1,3 +1,4 @@
+import { View as HostView } from "@impasto/solid-renderer/host";
 import { createSignal, onCleanup, type Accessor } from "solid-js";
 import {
   animate,
@@ -166,7 +167,7 @@ export function RefreshControl(props: RefreshControlProps): NodeHandle {
     props.gesture({ onDragBy: () => {}, onDragEnd: () => {} });
   });
   return (
-    <view
+    <HostView
       ref={(node) => {
         if (node === null) return;
         bindStyle(node, {
@@ -195,7 +196,7 @@ export function RefreshControl(props: RefreshControlProps): NodeHandle {
       }}
     >
       {props.children?.({ progress: readProgress, busy, ready }) ?? (
-        <view
+        <HostView
           ref={(node) => {
             if (node === null) return;
             const start = edge() === "start";
@@ -214,8 +215,8 @@ export function RefreshControl(props: RefreshControlProps): NodeHandle {
               ? (busy() ? "正在刷新" : ready() ? "松开刷新" : "下拉刷新")
               : (busy() ? "Refreshing…" : ready() ? "Release to refresh" : "Pull to refresh")}
           </Text>
-        </view>
+        </HostView>
       )}
-    </view>
+    </HostView>
   ) as unknown as NodeHandle;
 }

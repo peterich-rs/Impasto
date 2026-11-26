@@ -3,15 +3,30 @@ resolver = "3"
 members = [
     "crates/engine",
     "crates/raster",
+    "crates/shader",
     "crates/javascript",
     "crates/embedder/common",
     "crates/embedder/android",
     "crates/embedder/macos",
     "crates/embedder/ios",
     "crates/cli",
+    "crates/bundler",
+    "crates/testing",
     "crates/impasto",
     "crates/impasto-macros",
+    "crates/embedder/bundled",
+    "packages/app-state/rust",
+    "packages/async-storage/rust",
+    "packages/clipboard/rust",
+    "packages/camera/rust",
+    "packages/devtools/rust",
+    "packages/file-system/rust",
+    "packages/http/rust",
+    "packages/linking/rust",
+    "packages/permissions/rust",
+    "packages/websocket/rust",
 ]
+exclude = ["examples/native-order/rust"]
 
 [workspace.package]
 edition = "2024"
@@ -19,6 +34,9 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+oxc = { version = "=0.153.0", features = ["ast_visit", "codegen", "semantic", "transformer"] }
+rolldown = "=1.2.13"
+rolldown_common = "=1.2.13"
 thiserror = "2"
 impasto = { path = "crates/impasto" }
 engine = { path = "crates/engine" }

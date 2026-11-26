@@ -21,6 +21,7 @@ pub fn is_inline_source(source: &str) -> bool {
 /// [`ContentMode::NineSlice`] insets are source pixels. The player slices the
 /// decoded image; record still emits one image command.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum ContentMode {
     #[default]
     Fill,

@@ -1,0 +1,24 @@
+[package]
+name = "testing"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["linker"]
+linker = ["dep:bundler"]
+headless-gpu = ["dep:raster", "dep:png"]
+
+[dependencies]
+anyhow = "1"
+bundler = { path = "../bundler", optional = true }
+engine = { workspace = true, features = ["js"] }
+raster = { workspace = true, optional = true }
+png = { version = "0.18", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

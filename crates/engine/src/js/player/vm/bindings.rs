@@ -34,6 +34,7 @@ pub(super) const GESTURES: &[(&str, i32)] = &[
 ];
 const CORE_NAMES: &[&str] = &[
     "_insertNode",
+    "_reconcileRange",
     "_createTextNode",
     "remove",
     "detach",
@@ -184,6 +185,7 @@ fn bind<'js>(
     let function = Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
         let host = host_from_ctx(&ctx)?;
         host.with_current(&ctx, || {
+            super::super::frame::bump(&host.inner().marks.ffi_calls);
             canvas::check_side_effect(&host, &ctx)?;
             call(&host, &ctx, name, &args.0)
         })
@@ -277,7 +279,7 @@ pub(super) fn class_snapshot<'js>(
     Ok(())
 }
 
-fn decode_style<'js>(
+pub(super) fn decode_style<'js>(
     ctx: &Ctx<'js>,
     value: Value<'js>,
     depth: usize,
@@ -368,6 +370,7 @@ fn native<'js>(
     }
     match name {
         "_insertNode" => return renderer::call(host, ctx, "insertNode", args),
+        "_reconcileRange" => return renderer::reconcile_range(host, ctx, args),
         "_createTextNode" => return renderer::call(host, ctx, "createTextNode", args),
         "remove" | "detach" => {
             let parent = node_id(ctx, args, 0)?;

@@ -8,12 +8,6 @@ public enum ImpastoSceneActivity: Sendable {
     case background
 }
 
-/// A method invocation and its UTF-8 JSON payload from the current script session.
-public struct ImpastoPluginCall: Sendable {
-    public let method: String
-    public let payload: Data
-}
-
 /// Native plugins are installed per host. UIKit lifecycle callbacks run on
 /// the main actor and receive only the controller owned by that host.
 @MainActor
@@ -23,13 +17,10 @@ public protocol ImpastoPlugin: AnyObject {
     func attached(to controller: ImpastoViewController)
     func detached()
     func sceneActivityChanged(_ activity: ImpastoSceneActivity)
+    func handle(_ request: ImpastoNativeRequest) -> Bool
     func open(_ url: URL) -> Bool
     func handleMemoryWarning()
 
-    /// Runs on the main actor. Return UTF-8 JSON or throw to reject the script promise.
-    /// A scene change, teardown or timeout cancels the task. Observe task cancellation
-    /// before performing asynchronous side effects.
-    func handle(_ call: ImpastoPluginCall) async throws -> Data
     func uninstalled()
 }
 
@@ -38,15 +29,36 @@ public extension ImpastoPlugin {
     func attached(to controller: ImpastoViewController) {}
     func detached() {}
     func sceneActivityChanged(_ activity: ImpastoSceneActivity) {}
+    func handle(_ request: ImpastoNativeRequest) -> Bool { false }
     func open(_ url: URL) -> Bool { false }
     func handleMemoryWarning() {}
-    func handle(_ call: ImpastoPluginCall) async throws -> Data {
-        throw UnimplementedPluginMethod(method: call.method)
-    }
     func uninstalled() {}
 }
 
-private struct UnimplementedPluginMethod: LocalizedError {
-    let method: String
-    var errorDescription: String? { "Native plugin does not provide method '\(method)'" }
+
+/// A one-shot call from a Rust module to an installed platform plugin.
+@MainActor
+public struct ImpastoNativeRequest {
+    public let id: UInt64
+    public let operation: String
+    public let payload: String
+    private let pending: () -> Bool
+    private let finish: (UInt32, String?) -> Bool
+
+    init(id: UInt64, operation: String, payload: String,
+         pending: @escaping () -> Bool, finish: @escaping (UInt32, String?) -> Bool) {
+        self.id = id
+        self.operation = operation
+        self.payload = payload
+        self.pending = pending
+        self.finish = finish
+    }
+
+    public var isPending: Bool { pending() }
+
+    @discardableResult
+    public func resolve(_ payload: String? = nil) -> Bool { finish(0, payload) }
+
+    @discardableResult
+    public func fail(_ message: String) -> Bool { finish(2, message) }
 }

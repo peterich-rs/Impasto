@@ -5,15 +5,9 @@
   "exports": {
     ".": "./src/index.ts"
   },
-  "scripts": {
-    "test": "node --conditions=browser --experimental-strip-types src/store.test.ts && node --experimental-strip-types src/source-map.test.ts"
-  },
   "dependencies": {
     "@impasto/clipboard": "workspace:*",
     "@impasto/solid-renderer": "workspace:*",
     "@impasto/solid-ui": "workspace:*"
-  },
-  "devDependencies": {
-    "solid-js": "2.0.0"
   }
 }

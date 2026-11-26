@@ -1,3 +1,4 @@
+import { View as HostView } from "@impasto/solid-renderer/host";
 import { batch, createRoot, createSignal } from "solid-js";
 import { scene, bindStyle, Text } from "@impasto/solid-renderer";
 import { Button } from "@impasto/solid-ui";
@@ -5,9 +6,9 @@ const assert = (condition: unknown, message: string) => {
   if (!condition) throw new Error(message);
 };
 createRoot((dispose) => {
-  const root = <view style={{ width: 240, height: 320 }} />;
+  const root = <HostView style={{ width: 240, height: 320 }} />;
   const box = (
-    <view style={[{ width: 10 }, false, { width: 20, height: undefined }]} />
+    <HostView style={[{ width: 10 }, false, { width: 20, height: undefined }]} />
   );
   scene.append(root, box);
   assert(scene.rect(box).w === 20, "array snapshot and synchronous rect");
@@ -21,9 +22,9 @@ createRoot((dispose) => {
   scene.clearStyle(box, ["width"]);
   assert(scene.rect(box).w === 20, "clear did not reveal inline width");
   const padded = (
-    <view>
-      <view style={{ width: 10, height: 10 }} />
-    </view>
+    <HostView>
+      <HostView style={{ width: 10, height: 10 }} />
+    </HostView>
   );
   scene.append(root, padded);
   scene.setStyle(padded, { padding: 4, width: "max-content" });
@@ -34,7 +35,7 @@ createRoot((dispose) => {
     "clear shorthand did not remove its longhands",
   );
   const grid = (
-    <view
+    <HostView
       style={{
         display: "grid",
         gridTemplateColumns: [
@@ -46,7 +47,7 @@ createRoot((dispose) => {
   );
   scene.append(root, grid);
   const effects = (
-    <view
+    <HostView
       style={{
         width: 12,
         height: 12,
@@ -71,10 +72,10 @@ createRoot((dispose) => {
     />
   );
   scene.append(root, effects);
-  const utility = <view class="blur-sm shadow-md bg-accent/50" />;
+  const utility = <HostView class="blur-sm shadow-md bg-accent/50" />;
   scene.append(root, utility);
   const [width, setWidth] = createSignal(11);
-  const owned = <view />;
+  const owned = <HostView />;
   scene.append(root, owned);
   let stop = () => {};
   createRoot((done) => {
@@ -93,7 +94,7 @@ createRoot((dispose) => {
   stop();
   assert(scene.rect(owned).h === 9, "cleanup removed another source");
   scene.removeStyleSource(independent);
-  const classes = <view class="w-4" />;
+  const classes = <HostView class="w-4" />;
   scene.append(root, classes);
   assert(scene.rect(classes).w === 16, "class resolution");
   scene.setProp(classes, "class", "");
@@ -128,7 +129,7 @@ createRoot((dispose) => {
     scene.rect(button).w === 120,
     "button inline style overrides class and defaults",
   );
-  const wideRow = <view style={{ width: 240, flexDirection: "row" }} />;
+  const wideRow = <HostView style={{ width: 240, flexDirection: "row" }} />;
   const wideA = (
     <Button
       style={{ width: "100%", flexShrink: 1 }}
@@ -152,7 +153,7 @@ createRoot((dispose) => {
   );
   let blurred = 0;
   const focusable = (
-    <view
+    <HostView
       onBlur={() => {
         blurred++;
       }}

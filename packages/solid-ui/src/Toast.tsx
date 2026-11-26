@@ -1,3 +1,4 @@
+import { Stack as HostStack } from "@impasto/solid-renderer/host";
 import { createTrackedEffect, onCleanup, untrack } from "solid-js";
 import {
   directionFor,
@@ -202,7 +203,7 @@ export function Toast(props: ToastProps): NodeHandle {
   });
   onCleanup(dismiss);
   return (
-    <stack
+    <HostStack
       style={{
         overflow: "clip",
         minWidth: 0,

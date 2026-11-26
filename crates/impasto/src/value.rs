@@ -282,6 +282,41 @@ impl<T: ImpastoType> ImpastoType for Vec<T> {
     }
 }
 
+impl<A: FromPluginValue, B: FromPluginValue> FromPluginValue for (A, B) {
+    fn from_value(value: PluginValue) -> Result<Self, String> {
+        let PluginValue::List(items) = value else {
+            return Err("expected a two-element tuple".into());
+        };
+        let [first, second] =
+            <[PluginValue; 2]>::try_from(items).map_err(|_| "expected a two-element tuple")?;
+        Ok((A::from_value(first)?, B::from_value(second)?))
+    }
+}
+
+impl<A: IntoPluginValue, B: IntoPluginValue> IntoPluginValue for (A, B) {
+    fn into_value(self) -> Result<PluginValue, String> {
+        let (first, second) = self;
+        Ok(PluginValue::List(vec![
+            first.into_value()?,
+            second.into_value()?,
+        ]))
+    }
+}
+
+impl<A: ImpastoType, B: ImpastoType> ImpastoType for (A, B) {
+    fn typescript(types: &mut TsTypes) -> String {
+        format!("[{}, {}]", A::typescript(types), B::typescript(types))
+    }
+
+    fn input_typescript(types: &mut TsTypes) -> String {
+        format!(
+            "[{}, {}]",
+            A::input_typescript(types),
+            B::input_typescript(types)
+        )
+    }
+}
+
 macro_rules! string_map {
     ($map:ident) => {
         impl<T: FromPluginValue> FromPluginValue for $map<String, T> {
@@ -358,6 +393,23 @@ impl<T: IntoPluginValue> TypedSink<T> {
 
     pub fn cancellation(&self) -> crate::CancelToken {
         self.sink.cancellation()
+    }
+
+    /// Returns the byte budget of one encoded stream item.
+    pub fn max_piece_bytes(&self) -> usize {
+        self.sink.max_piece_bytes()
+    }
+
+    /// Sends from a blocking platform callback and waits for stream credit.
+    pub fn send_blocking(
+        &mut self,
+        item: T,
+        timeout: std::time::Duration,
+    ) -> Result<(), TypedSendError> {
+        let value = item.into_value().map_err(TypedSendError::Encode)?;
+        self.sink
+            .send(value, timeout)
+            .map_err(TypedSendError::Transport)
     }
 
     pub async fn send(&mut self, item: T) -> Result<(), TypedSendError> {

@@ -86,7 +86,7 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Enables cooperative module-stack sampling while the predicate is true.
+    /// Enables cooperative stack sampling while the predicate is true.
     pub fn stack_sampling(mut self, enabled: impl Fn() -> bool + 'static) -> Self {
         self.stack_sampling = Some(Box::new(enabled));
         self
