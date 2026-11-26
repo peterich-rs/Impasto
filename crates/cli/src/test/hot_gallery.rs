@@ -2,7 +2,7 @@ use std::{fs, path::Path};
 
 use anyhow::{Context, Result, ensure};
 use engine::{
-    input::{Phase, PointerEvent},
+    input::PointerEvent,
     js::JsSession,
     semantics::{SemanticsAction, SemanticsNode, SemanticsRole},
     session::{FrameTime, Metrics, ModuleConfig, ModuleRegistry, Session},
@@ -50,16 +50,15 @@ fn gallery_patch_preserves_the_tab_scroll_and_focused_field() -> Result<()> {
     let mut clock = 0.0;
     let session = &mut session;
     session.set_semantics_enabled(true);
-    session.metrics(&Metrics::new(430.0, 640.0, 1.0));
+    session.metrics(&Metrics::new(430.0, 440.0, 1.0));
     advance(session, &mut clock)?;
-    click(session, &mut clock, "⋯")?;
-    click(session, &mut clock, "自选")?;
     let scroll = node(session, |node| {
         node.role == SemanticsRole::Scroll
             && node
                 .scroll_content
                 .is_some_and(|(_, height)| height > node.rect.h + 1.0)
-    })?;
+    })
+    .context("the watchlist needs a scrollable viewport")?;
     let x = scroll.rect.x + scroll.rect.w * 0.5;
     let y = scroll.rect.y + scroll.rect.h * 0.5;
     session.pointer(PointerEvent::wheel(x, y, clock, 0.0, 212.0));
@@ -70,8 +69,9 @@ fn gallery_patch_preserves_the_tab_scroll_and_focused_field() -> Result<()> {
         "watchlist did not scroll: {offset:?}"
     );
 
-    click(session, &mut clock, "搜索")?;
-    let field = node(session, |node| node.role == SemanticsRole::SearchField)?;
+    activate(session, &mut clock, "搜索")?;
+    let field = node(session, |node| node.role == SemanticsRole::SearchField)
+        .context("opening search did not mount its field")?;
     session.semantics_action(SemanticsAction::Focus(field.id));
     session.semantics_action(SemanticsAction::SetText {
         id: field.id,
@@ -87,10 +87,10 @@ fn gallery_patch_preserves_the_tab_scroll_and_focused_field() -> Result<()> {
     let file = root.join("src/pages/search.tsx").canonicalize()?;
     let previous = fs::read_to_string(&file)?;
     let next = previous.replace(
-        r#"<HostText value={loc("搜索", "Search")} style={{ fontSize: 20"#,
-        r#"<HostText value={loc("搜索证券", "Find a stock")} style={{ fontSize: 21"#,
+        r#"<Label size={15} weight={600}>{code(props.instrument.symbol)}</Label>"#,
+        r#"<Label size={16} weight={600}>{code(props.instrument.symbol)} 更新</Label>"#,
     );
-    ensure!(next != previous, "missing Gallery title edit point");
+    ensure!(next != previous, "missing Gallery search result edit point");
     fs::write(&file, next)?;
     linker.set_changes(Some(vec![file]));
     let after = linker.bundle(options())?.code;
@@ -102,14 +102,15 @@ fn gallery_patch_preserves_the_tab_scroll_and_focused_field() -> Result<()> {
         "patch was ignored"
     );
     advance(session, &mut clock)?;
-    node(session, |node| node.label == "搜索证券")?;
+    node(session, |node| node.label == "00700 更新")?;
     let retained = node(session, |node| node.id == field.id)?;
     assert_eq!(retained.value, edited.value);
     assert_eq!(retained.caret, edited.caret);
 
-    click(session, &mut clock, "‹ 返回")?;
-    node(session, |node| node.label == "自选")?;
-    assert_eq!(node(session, |node| node.id == scroll.id)?.scroll, offset);
+    activate(session, &mut clock, "返回")?;
+    let restored = node(session, |node| node.id == scroll.id)
+        .context("returning to the watchlist did not restore its scroll node")?;
+    assert_eq!(restored.scroll, offset);
     Ok(())
 }
 
@@ -158,11 +159,11 @@ fn node(session: &mut JsSession, pick: impl Fn(&SemanticsNode) -> bool) -> Resul
         })
 }
 
-fn click(session: &mut JsSession, time: &mut f64, label: &str) -> Result<()> {
-    let rect = node(session, |node| node.label == label)?.rect;
-    let x = rect.x + rect.w * 0.5;
-    let y = rect.y + rect.h * 0.5;
-    session.pointer(PointerEvent::new(Phase::Down, x, y, *time));
-    session.pointer(PointerEvent::new(Phase::Up, x, y, *time + 1.0));
+fn activate(session: &mut JsSession, time: &mut f64, label: &str) -> Result<()> {
+    let button = node(session, |node| {
+        node.role == SemanticsRole::Button && node.label == label
+    })
+    .with_context(|| format!("missing Gallery button {label}"))?;
+    session.semantics_action(SemanticsAction::Activate(button.id));
     advance(session, time)
 }

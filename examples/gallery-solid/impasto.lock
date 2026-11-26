@@ -1,0 +1,19 @@
+version = 2
+roots = [
+    "@impasto/async-storage",
+    "@impasto/devtools",
+    "@impasto/linking",
+    "@impasto/solid-renderer",
+    "@impasto/solid-router",
+    "@impasto/solid-ui",
+]
+
+[graph]
+"@impasto/async-storage" = []
+"@impasto/devtools" = []
+"@impasto/linking" = []
+"@impasto/solid-renderer" = []
+"@impasto/solid-router" = []
+"@impasto/solid-ui" = []
+
+[packages]

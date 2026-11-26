@@ -1,5 +1,4 @@
-import { createTrackedEffect } from "solid-js";
-import { directionFor, scene, insert, type NodeHandle } from "@impasto/solid-renderer";
+import { directionFor, scene, type NodeHandle } from "@impasto/solid-renderer";
 import {
   Column,
   ErrorPage as UiErrorPage,
@@ -9,100 +8,58 @@ import {
 } from "@impasto/solid-ui";
 import { settingsSig } from "./state/settings.ts";
 import { RouterView, createRouter } from "@impasto/solid-router";
-import { TabBar } from "./widgets/tab-bar.tsx";
-import { WatchlistPage } from "./pages/watchlist.tsx";
-import { MarketPage } from "./pages/market.tsx";
-import { StockPage } from "./pages/stock.tsx";
-import { StocksPage } from "./pages/stocks.tsx";
-import { TradePage } from "./pages/trade.tsx";
-import { ProfilePage } from "./pages/profile.tsx";
-import { SearchPage } from "./pages/search.tsx";
-import { OrderSheetHost } from "./pages/order.tsx";
-import { CanvasPage } from "./pages/canvas.tsx";
-import { GpuLabPage } from "./pages/gpu-lab.tsx";
-import { CompositorLabPage } from "./pages/compositor-lab.tsx";
+import { TabPill } from "./widgets/tab-pill.tsx";
+import { MarketsPage, WatchlistPage } from "./pages/stocks.tsx";
 import { closeToast, toastOpen, toastText } from "./state/toast.ts";
-export function App(): NodeHandle {
+import { colors } from "./widgets/stocks/theme.ts";
+import { loc } from "./copy.ts";
+
+const TAB_PATHS = ["/watchlist", "/account", "/settings"];
+
+/** Deep links open on the matching route; anything else lands on the watchlist. */
+export function initialPath(url: string | null): string {
+  const path = url?.replace(/^impasto:\/\//, "/") ?? "";
+  return path.startsWith("/stock/") || path.startsWith("/search") || TAB_PATHS.includes(path) ? path : "/watchlist";
+}
+
+export function App(props: { initial?: string }): NodeHandle {
   const router = createRouter(
     [
+      { path: "/watchlist", component: () => WatchlistPage({
+        router, title: loc("自选", "Watchlist"), empty: loc("还没有自选，去搜索添加", "Nothing here yet. Search to add symbols"),
+        emptyAction: loc("去搜索", "Search"), onEmpty: () => router.push("/search"),
+      }) },
+      { path: "/markets", component: () => MarketsPage({ router, title: loc("行情", "Markets"), empty: loc("暂无证券", "No symbols") }) },
       {
-        path: "/stocks",
-        component: () => StocksPage({ router }),
-        keepAlive: true,
+        path: "/account",
+        lazy: () => import("./pages/account.tsx").then(({ AccountPage }) => ({ default: () => AccountPage({ router }) })),
       },
       {
-        path: "/watchlist",
-        component: () =>
-          WatchlistPage({
-            router,
-          }),
-        keepAlive: true,
-      },
-      {
-        path: "/market",
-        component: () =>
-          MarketPage({
-            router,
-          }),
-        keepAlive: true,
-      },
-      {
-        path: "/trade",
-        component: () =>
-          TradePage({
-            router,
-          }),
-        keepAlive: true,
-      },
-      {
-        path: "/profile",
-        component: () =>
-          ProfilePage({
-            router,
-          }),
+        path: "/settings",
+        lazy: () => import("./pages/settings.tsx").then(({ SettingsPage }) => ({ default: () => SettingsPage({ router }) })),
       },
       {
         path: "/search",
-        component: () =>
-          SearchPage({
-            router,
-          }),
+        lazy: () => import("./pages/search.tsx").then(({ SearchPage }) => ({ default: () => SearchPage({ router }) })),
       },
       {
         path: "/stock/:symbol",
-        component: (p) =>
-          StockPage({
+        lazy: () => import("./pages/stock.tsx").then(({ StockPage }) => ({
+          default: (p) => StockPage({
             router,
             symbol: p.params.symbol ?? "",
-            get transitioning() {
-              return p.phase !== "live";
-            },
+            get transitioning() { return p.phase !== "live"; },
           }),
+        })),
       },
       {
         path: "/order/:symbol",
-        component: (p) =>
-          OrderSheetHost({
-            router,
-            symbol: p.params.symbol ?? "",
-          }),
-      },
-      {
-        path: "/canvas",
-        component: () => CanvasPage(),
-      },
-      {
-        path: "/gpu-lab",
-        component: () => GpuLabPage({ onBack: () => router.pop() }),
-      },
-      {
-        path: "/compositor-lab",
-        component: () => CompositorLabPage({ launchUrl: null, onBack: () => router.pop() }),
+        lazy: () => import("./pages/order.tsx").then(({ OrderSheetHost }) => ({
+          default: (p) => OrderSheetHost({ router, symbol: p.params.symbol ?? "" }),
+        })),
       },
     ],
-    {
-      initial: "/stocks",
-    },
+    { initial: props.initial ?? "/watchlist" },
   );
   const shell = Column({
     style: {
@@ -115,18 +72,12 @@ export function App(): NodeHandle {
       layoutDirection: directionFor(settingsSig().locale) === "rtl" ? "rtl" : "ltr",
     },
   });
-  const content = scene.createElement("view", {
-    style: {
-      gap: 0,
-    },
-  });
-  scene.patchStyle(content, {
-    flex: 1,
-  });
+  // Plain flex column. The router view fills it; the capsule floats above.
+  const content = Column({ style: { flex: 1, width: "100%", minHeight: 0, minWidth: 0, gap: 0 } });
   scene.append(shell, content);
   const view = RouterView({
     router,
-    background: "#F5F6F8",
+    background: colors.bg,
     opaque: true,
     errorFallback: (err, reset) =>
       UiErrorPage({
@@ -137,34 +88,13 @@ export function App(): NodeHandle {
       }),
   });
   scene.append(content, view);
-  const bar = TabBar({
-    router,
-  });
-  const barWrap = scene.createElement("view", {
-    style: {
-      gap: 0,
-    },
-  });
-  scene.append(barWrap, bar.node);
-  scene.append(content, barWrap);
-  createTrackedEffect(() => {
-    // Keep the bar clamped until the exiting page unmounts. Unhiding it on the
-    // first pop frame relayouts both stacked pages and hitchs the transition.
-    const path = router.stack().at(-1)?.path ?? "";
-    const hidden = router.depth() > 1 || path === "/stocks" || path === "/gpu-lab" || path === "/compositor-lab"
-      || path.startsWith("/stock/") || path.startsWith("/order/");
-    scene.patchStyle(barWrap, { display: hidden ? "none" : "flex" });
-    bar.sync();
-  });
+  const pill = TabPill({ router });
+  scene.append(content, pill);
   const toast = Toast({
-    get open() {
-      return toastOpen();
-    },
-    get text() {
-      return toastText();
-    },
+    get open() { return toastOpen(); },
+    get text() { return toastText(); },
     onClose: closeToast,
   });
-  insert(shell, toast);
+  scene.append(shell, toast);
   return shell;
 }

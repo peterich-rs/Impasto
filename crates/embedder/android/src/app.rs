@@ -833,7 +833,6 @@ fn android_boot(
         None => embedder::ThreadTopology::configured()?,
     };
     let (name, script) = load_script(&script_assets, requested.as_deref())?;
-    let gallery = name == "quotes.js";
     let modules = decode::read_bytes(&script_assets, c"app.modules")
         .map(|bytes| String::from_utf8(bytes).map_err(|_| SessionError::Runtime))
         .transpose()?
@@ -914,8 +913,7 @@ fn android_boot(
         devtools_source_map: None,
         inspect_dir: None,
         log_dir,
-    }
-    .with_gallery_gpu_view(gallery))
+    })
 }
 
 fn detach(handle: jlong) {

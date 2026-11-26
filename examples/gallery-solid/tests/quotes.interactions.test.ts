@@ -6,6 +6,10 @@ async function shown(...labels: string[]) {
   for (const label of labels) assert.ok(visible.has(label), `Missing ${label}`);
 }
 
+async function absent(label: string) {
+  assert.equal((await screen.nodes("", label)).length, 0, `Unexpected ${label}`);
+}
+
 async function click(label: string) {
   const matches = await screen.nodes("button", label);
   const nodes = matches.length ? matches : await screen.nodes("", label);
@@ -14,36 +18,62 @@ async function click(label: string) {
   await screen.advanceFrames(24);
 }
 
-test("navigates the live markets, stock details and account tabs", async () => {
+/** Buttons whose label carries data (position rows) are found by prefix. */
+async function clickButtonStartingWith(prefix: string) {
+  const nodes = (await screen.nodes("button")).filter(node => node.label.startsWith(prefix));
+  assert.ok(nodes.length, `No button starting with ${prefix}`);
+  await fire.click(nodes[0].id);
+  await screen.advanceFrames(24);
+}
+
+test("watchlist opens details and returns without leaving a detail behind", async () => {
   await screen.viewport(430, 932);
   await screen.advanceFrames(8);
-  await shown("综合指数", "全部", "上涨", "下跌", "活跃", "腾讯控股");
+  await shown("综合指数", "全部", "上涨", "下跌", "活跃", "腾讯控股", "自选", "账户", "设置");
+
   await click("综合指数");
   await shown("科技", "消费", "工业");
   await click("综合指数");
-  assert.equal((await screen.nodes("text", "科技")).length, 0);
+  await absent("科技");
 
-  await click("上涨");
-  await click("下跌");
-  await click("活跃");
-  await click("全部");
+  for (const filter of ["上涨", "下跌", "活跃", "全部"]) await click(filter);
   await click("腾讯控股");
   await screen.advanceFrames(100);
   await shown("分时", "盘口", "买入", "卖出");
+  await absent("账户");
 
-  await click("5m");
-  await shown("MA5", "MA10", "MA20");
-  await click("分时");
-  await shown("均价");
-
-  await click("‹ 返回");
+  await click("返回");
   await screen.advanceFrames(80);
   await shown("综合指数");
-  await click("⋯");
-  await click("市场");
-  await shown("涨幅榜");
-  await click("交易");
-  await shown("持仓", "待成交", "已成交");
-  await click("我的");
-  await shown("涨跌配色", "行情速度", "语言");
+});
+
+test("tabs switch the root page and hide the capsule on pushed pages", async () => {
+  await screen.viewport(430, 932);
+  await screen.advanceFrames(8);
+  await click("账户");
+  await shown("总资产", "可用资金", "持仓市值", "累计盈亏", "成本价", "仓位", "今日盈亏", "00700");
+  await absent("综合指数");
+  await click("设置");
+  await shown("涨跌配色", "行情速度", "语言", "重置模拟账户");
+  await absent("总资产");
+  await click("自选");
+  await shown("综合指数");
+  await click("搜索");
+  await shown("热门");
+  await absent("自选");
+  await click("返回");
+  await screen.advanceFrames(80);
+  await shown("综合指数", "自选");
+});
+
+test("a position row opens the matching detail", async () => {
+  await screen.viewport(430, 932);
+  await screen.advanceFrames(8);
+  await click("账户");
+  await clickButtonStartingWith("NVDA");
+  await screen.advanceFrames(60);
+  await shown("返回");
+  await click("返回");
+  await screen.advanceFrames(80);
+  await shown("总资产");
 });

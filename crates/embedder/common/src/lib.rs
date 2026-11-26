@@ -5,7 +5,6 @@ mod command;
 mod diagnostics;
 mod error;
 mod exec;
-mod gpu_view_gallery;
 mod host;
 mod images;
 mod ime;
@@ -282,22 +281,6 @@ impl Boot {
             Ok(raster)
         });
         self
-    }
-
-    /// Installs the bundled Gallery producer for the GPU lab.
-    #[doc(hidden)]
-    pub fn with_gallery_gpu_view(self, enabled: bool) -> Self {
-        let requested = matches!(
-            engine::session::shared_read(&self.launch_url).as_deref(),
-            Some("impasto://gpu-lab" | "impasto://gpu-lab/invalid")
-        );
-        if (enabled || requested)
-            && let Ok(id) = raster::GpuViewId::new("gallery-demo")
-        {
-            self.with_gpu_view(id, gpu_view_gallery::GalleryGpuView::default())
-        } else {
-            self
-        }
     }
 
     /// Turns devtools on. The caller keeps the hub to register the module

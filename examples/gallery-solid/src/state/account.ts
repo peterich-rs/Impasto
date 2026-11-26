@@ -2,7 +2,7 @@ import { createSignal } from "solid-js";
 import type { QuoteEngine } from "../engine/engine.ts";
 import type { Order, OrderSide, OrderType, Position } from "../engine/types.ts";
 import { round2 } from "../engine/universe.ts";
-const START_CASH = 1_000_000;
+import { SEED_CASH, SEED_POSITIONS } from "./portfolio.ts";
 const FEE_RATE = 0.0003;
 const MIN_FEE = 5;
 const SPLIT_QTY = 4000;
@@ -27,8 +27,8 @@ export type SubmitResult =
  * limit orders sit in the book until a tick crosses them.
  */
 export function createAccount(engine: QuoteEngine) {
-  const [cash, setCash] = createSignal(START_CASH);
-  const [positions, setPositions] = createSignal<Position[]>([]);
+  const [cash, setCash] = createSignal(SEED_CASH);
+  const [positions, setPositions] = createSignal<Position[]>(SEED_POSITIONS.map((position) => ({ ...position })));
   const [orders, setOrders] = createSignal<Order[]>([]);
   const feeOf = (amount: number): number =>
     Math.max(MIN_FEE, round2(amount * FEE_RATE));
@@ -209,9 +209,10 @@ export function createAccount(engine: QuoteEngine) {
     );
     void persist();
   }
+  /** Back to the opening book. Watchlist and settings are untouched. */
   function reset(): void {
-    setCash(START_CASH);
-    setPositions([]);
+    setCash(SEED_CASH);
+    setPositions(SEED_POSITIONS.map((position) => ({ ...position })));
     setOrders([]);
     void persist();
   }

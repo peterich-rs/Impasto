@@ -10,6 +10,7 @@ import { marketPulse, useQuotes } from "../state/quotes-provider.tsx";
 import { accountRef } from "../state/account-ref.ts";
 import { showToast } from "../state/toast.ts";
 import { Action, code, colors, Label, Rule, Segments } from "../widgets/stocks/ui.tsx";
+import { Glyph } from "../widgets/stocks/icons.tsx";
 
 export type TicketSeed = { side: OrderSide; price: number };
 const sides = ["buy", "sell"] as const;
@@ -60,7 +61,7 @@ function OrderTicket(props: { engine: QuoteEngine; symbol: string; seed: TicketS
     <Row style={{ alignItems: "center", gap: 8 }}>
       <Label size={20} weight={600} style={{ flex: 1 }}>{`${sideLabel(side())} ${code(props.symbol)}`}</Label>
       <Label size={11} color={colors.faint}>{loc("模拟下单", "Paper order")}</Label>
-      <Action label="×" title={loc("关闭", "Close")} onClick={props.onClose} />
+      <Glyph name="close" title={loc("关闭", "Close")} onClick={props.onClose} size={18} color={colors.dim} style={{ backgroundColor: "#00000000" }} />
     </Row>
     <Show when={!review()} fallback={<Column style={{ gap: 8 }}>
       <Rule />
@@ -80,11 +81,11 @@ function OrderTicket(props: { engine: QuoteEngine; symbol: string; seed: TicketS
       </Row>
       <Show when={type() === "limit"}>
         <Row style={{ alignItems: "center", gap: 8 }}>
-          <Action label="−" title={loc("降低价格", "Lower price")} onClick={() => setCents((value) => Math.max(1, value - 1))} style={{ width: 40, height: 38 }} />
+          <Glyph name="minus" title={loc("降低价格", "Lower price")} onClick={() => setCents((value) => Math.max(1, value - 1))} style={{ width: 40, height: 40, borderRadius: 8 }} />
           <View style={{ flex: 1, minHeight: 38, justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: colors.line, borderRadius: 7 }}>
             <Label size={18} weight={600}>{fmtPrice(price())}</Label>
           </View>
-          <Action label="+" title={loc("提高价格", "Raise price")} onClick={() => setCents((value) => value + 1)} style={{ width: 40, height: 38 }} />
+          <Glyph name="plus" title={loc("提高价格", "Raise price")} onClick={() => setCents((value) => value + 1)} style={{ width: 40, height: 40, borderRadius: 8 }} />
         </Row>
       </Show>
       </Show>

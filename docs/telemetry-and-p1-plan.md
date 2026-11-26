@@ -242,7 +242,7 @@ Apple M4 Pro · Metal · Release · AsyncOnly。沿用同一轨迹、DPR 1、单
 
 Split 和 PlatformUi 拓扑可以把下一次 vsync 交给 Raster。可托管的滚动包括普通惯性、回弹、分页吸附和处于已挂载窗口内的虚拟列表。工况与 API 见 [滚动与合成线程](scroll-compositor.md)。存在原生 PlatformView 时由 UI 驱动动画。完成、触边、输入和到期的应用工作会交还 UI，并同步最后已呈现的采样值。使用 `IMPASTO_COMPOSITOR=0` 可在同一宿主切回逐帧 UI 驱动。 [调度实现](../crates/embedder/common/src/host/compositor_animation.rs) · [图层准入](../crates/engine/src/tree/compositor_motion.rs)
 
-Pixel 9 · Mali-G715 Vulkan · Release · Split。用 Gallery 的 `impasto://compositor-lab/transform` 和 `impasto://compositor-lab/scroll` 启动自运行场景，用 `tools/android-frame-trace.sh` 抓取系统 Perfetto。耗时是 `compositor_frame` 的 Raster 墙钟时间，帧间隔取相邻合成帧起点。
+Pixel 9 · Mali-G715 Vulkan · Release · Split。下表为移除实验页前的历史采样，当时通过专用深链启动变换与滚动场景，用 `tools/android-frame-trace.sh` 抓取系统 Perfetto。耗时是 `compositor_frame` 的 Raster 墙钟时间，帧间隔取相邻合成帧起点。现在复测惯性滚动直接在 Gallery 自选列表上拖动。
 
 | 场景 | 合成帧 | Raster p95 | 帧间隔 p50 / p95 | 超 8.33 ms | UI 未运行的最长连续区间 |
 |---|---:|---:|---:|---:|---:|
@@ -298,11 +298,11 @@ IMPASTO_RETAIN_OFFSCREEN=1 \
 
 ## P3.3 GPU 实验室
 
-在 Apple M4 Pro 的 60 Hz 显示器上，以 Metal Debug 版运行 Gallery「GPU 实验室」并抓取 Perfetto。排除启动的两个 UI 帧，205 个合成帧之间的平均间隔为 16.65 ms，Raster 墙钟 p95 为 5.61 ms。该区间的 UI 泳道没有运行记录。相同采样窗口内的 GPU Pass 时间如下。
+在 Apple M4 Pro 的 60 Hz 显示器上，以 Metal Debug 版运行当时 Gallery 内置的 GPU 验收页（已移除）并抓取 Perfetto。排除启动的两个 UI 帧，205 个合成帧之间的平均间隔为 16.65 ms，Raster 墙钟 p95 为 5.61 ms。该区间的 UI 泳道没有运行记录。相同采样窗口内的 GPU Pass 时间如下。
 
 | Pass | GPU p50 | GPU p95 |
 |---|---:|---:|
 | `ShaderEffect` | 185.96 µs | 193.84 µs |
 | `GpuView` | 45.75 µs | 118.15 µs |
 
-合并暖帧提交前的 Pixel 9 Vulkan Release 基线在有效 WGSL 场景中连续合成 665 帧，其间 UI 线程没有运行记录。Raster p95 为 6.16 ms，其中 `gpu_view_render` 的 CPU 墙钟 p95 为 1.18 ms。首次 shader 编译耗时 18.86 ms。无效 WGSL 用例在记录诊断后继续呈现 GpuView。Metal 像素测试覆盖暖帧同批采样与计时、缩放时重建、圆角、透明度、背景模糊、延迟到达的输入图像，以及模拟设备丢失后的生产者回调和新代次纹理。 [Gallery 页面](../examples/gallery-solid/src/pages/gpu-lab.tsx) · [GPU 扩展像素测试](../crates/raster/src/tests/gpu_extensions.rs)
+合并暖帧提交前的 Pixel 9 Vulkan Release 基线在有效 WGSL 场景中连续合成 665 帧，其间 UI 线程没有运行记录。Raster p95 为 6.16 ms，其中 `gpu_view_render` 的 CPU 墙钟 p95 为 1.18 ms。首次 shader 编译耗时 18.86 ms。无效 WGSL 用例在记录诊断后继续呈现 GpuView。Metal 像素测试覆盖暖帧同批采样与计时、缩放时重建、圆角、透明度、背景模糊、延迟到达的输入图像，以及模拟设备丢失后的生产者回调和新代次纹理。 [GPU 扩展像素测试](../crates/raster/src/tests/gpu_extensions.rs)

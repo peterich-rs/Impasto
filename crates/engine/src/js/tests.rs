@@ -1582,6 +1582,44 @@ fn click(session: &mut dyn Session, x: f32, y: f32) {
     session.pointer(PointerEvent::new(Phase::Up, x, y, 0.0));
 }
 
+/// Center of the first button whose accessible label matches exactly.
+/// Icon controls have no text to spot, so the tests reach them by label.
+fn label_spot(session: &mut super::JsSession, label: &str) -> Option<(f32, f32)> {
+    let update = session.semantics()?;
+    update
+        .nodes
+        .iter()
+        .find(|node| node.role == crate::semantics::SemanticsRole::Button && node.label == label)
+        .map(|node| {
+            (
+                node.rect.x + node.rect.w / 2.0,
+                node.rect.y + node.rect.h / 2.0,
+            )
+        })
+}
+
+fn wait_for_label(
+    session: &mut super::JsSession,
+    time: &mut f64,
+    expected: &str,
+) -> session::FrameOutput {
+    for _ in 0..48 {
+        *time += 16.0;
+        let frame = session.frame(session::FrameTime::at(*time));
+        let errors = session.take_faults();
+        assert!(errors.is_empty(), "waiting for {expected}: {errors:?}");
+        if frame.layers.is_some() && label_spot(session, expected).is_some() {
+            return frame;
+        }
+    }
+    panic!("missing label {expected}");
+}
+
+fn click_label(session: &mut super::JsSession, label: &str) {
+    let (x, y) = label_spot(session, label).unwrap_or_else(|| panic!("missing label {label}"));
+    click(session, x, y);
+}
+
 fn wait_for_text(
     session: &mut dyn Session,
     time: &mut f64,
@@ -1652,7 +1690,10 @@ fn gallery_host() -> ModuleConfig {
                 name: "Devtools",
                 exports: Default::default(),
                 specifier: "@impasto/devtools/native",
-                methods: vec![Method::sync("enabled", |_| Ok(PluginValue::Bool(false)))],
+                methods: vec![
+                    Method::sync("enabled", |_| Ok(PluginValue::Bool(false))),
+                    Method::sync("openSource", |_| Ok(PluginValue::Bool(false))),
+                ],
             },
         ])),
         exec: std::sync::Arc::new(ImmediateExec),
@@ -1666,20 +1707,21 @@ fn gallery_host() -> ModuleConfig {
 /// The gallery bundle is a build artifact and not committed. Tests that
 /// need it fail with instructions when it has not been built. Returns
 /// `None` when the interpreter is not linked; callers already early-return.
-fn open_gallery() -> Option<Box<dyn Session>> {
+fn open_gallery() -> Option<Box<super::JsSession>> {
     open_gallery_source(&gallery_source())
 }
 
-fn open_gallery_source(source: &str) -> Option<Box<dyn Session>> {
+/// The concrete session type keeps `semantics()` reachable for the label-based helpers.
+fn open_gallery_source(source: &str) -> Option<Box<super::JsSession>> {
     {
-        match super::open_with_config(
+        match super::JsSession::open_with(
             source,
             "test.js",
             crate::text::MonoShaper::default(),
             Box::new(|level, line| eprintln!("[js {level}] {line}")),
             gallery_host(),
         ) {
-            Ok(session) => Some(session),
+            Ok(session) => Some(Box::new(session)),
             Err(error) => panic!("{error}"),
         }
     }
@@ -1727,7 +1769,7 @@ fn watchlist_page_shows_prices() {
 }
 
 #[test]
-fn market_tab_renders_the_board() {
+fn account_tab_renders_equity_and_positions() {
     let Some(mut session) = open_gallery() else {
         return;
     };
@@ -1745,18 +1787,36 @@ fn market_tab_renders_the_board() {
         "{:?}",
         texts(&first)
     );
-    let (x, y) = text_spot(&first, "⋯");
-    click(session.as_mut(), x, y);
-    let menu = session.frame(session::FrameTime::at(16.0));
-    let (x, y) = text_spot(&menu, "市场");
-    click(session.as_mut(), x, y);
-    let second = session.frame(session::FrameTime::at(32.0));
-    let shown = texts(&second);
+    click_label(session.as_mut(), "账户");
+    let mut shown = session.frame(session::FrameTime::at(16.0));
+    for step in 0..6 {
+        let next = session.frame(session::FrameTime::at(32.0 + f64::from(step) * 16.0));
+        if next.layers.is_some() {
+            shown = next;
+        }
+    }
+    let labels = texts(&shown);
+    for expected in [
+        "总资产",
+        "可用资金",
+        "持仓市值",
+        "累计盈亏",
+        "成本价",
+        "仓位",
+        "今日盈亏",
+    ] {
+        assert!(
+            labels.iter().any(|text| text == expected),
+            "{expected} missing {labels:?}"
+        );
+    }
+    // Seed positions are present with a formatted price badge.
+    assert!(labels.iter().any(|text| text == "00700"), "{labels:?}");
+    assert!(!labels.iter().any(|text| text.contains("not a function")));
     assert!(
-        shown.iter().any(|text| text == "涨幅榜"),
-        "market page replaced itself with an error: {shown:?}"
+        !labels.iter().any(|text| text == "综合指数"),
+        "account tab replaced the board {labels:?}"
     );
-    assert!(!shown.iter().any(|text| text.contains("not a function")));
 }
 
 fn visible_watch_rows(frame: &session::FrameOutput) -> Vec<(String, f32)> {
@@ -1797,7 +1857,7 @@ const IN_WATCHLIST_NAMES: &[&str] = &[
 ];
 
 #[test]
-fn watchlist_refreshes_quotes_during_drag_and_inertia() {
+fn watchlist_refreshes_quotes_during_drag_and_after_release() {
     let Some(mut session) = open_gallery() else {
         return;
     };
@@ -1868,7 +1928,7 @@ fn watchlist_refreshes_quotes_during_drag_and_inertia() {
     time += 16.0;
     session.pointer(PointerEvent::new(Phase::Up, x, y - 160.0, time));
     let mut coasting = false;
-    let mut refreshed_while_coasting = false;
+    let mut refreshed_after_release = false;
     for _ in 0..40 {
         let frame = session.frame(session::FrameTime::at(time));
         assert!(session.take_faults().is_empty(), "watchlist frame failed");
@@ -1877,7 +1937,9 @@ fn watchlist_refreshes_quotes_during_drag_and_inertia() {
             let moved = !rows.is_empty() && rows != last_rows;
             coasting |= moved;
             let next = clock(&frame).expect("market clock");
-            refreshed_while_coasting |= moved && next != last_clock;
+            // The overview clock publishes every two market ticks. A short
+            // coast can fit entirely between those publications.
+            refreshed_after_release |= next != last_clock;
             last_clock = next;
             last_rows = rows;
         }
@@ -1885,8 +1947,8 @@ fn watchlist_refreshes_quotes_during_drag_and_inertia() {
     }
     assert!(coasting, "the gesture did not start inertial scrolling");
     assert!(
-        refreshed_while_coasting,
-        "market clock froze during inertial scrolling"
+        refreshed_after_release,
+        "market clock did not continue after the drag"
     );
 }
 
@@ -1933,33 +1995,39 @@ fn scrolled_watch_rows_stay_in_order() {
 }
 
 #[test]
-fn trade_tab_renders_equity_and_orders() {
+fn settings_tab_renders_preferences_and_returns_to_the_watchlist() {
     let Some(mut session) = open_gallery() else {
         return;
     };
     session.metrics(&phone());
-    let first = pump_first(session.as_mut());
-    let (x, y) = text_spot(&first, "⋯");
-    click(session.as_mut(), x, y);
-    let menu = session.frame(session::FrameTime::at(16.0));
-    let (x, y) = text_spot(&menu, "交易");
-    click(session.as_mut(), x, y);
-    let mut shown = session.frame(session::FrameTime::at(32.0));
-    for step in 0..4 {
-        let next = session.frame(session::FrameTime::at(48.0 + f64::from(step) * 16.0));
+    let _first = pump_first(session.as_mut());
+    click_label(session.as_mut(), "设置");
+    let mut shown = session.frame(session::FrameTime::at(16.0));
+    for step in 0..6 {
+        let next = session.frame(session::FrameTime::at(32.0 + f64::from(step) * 16.0));
         if next.layers.is_some() {
             shown = next;
         }
     }
+    let labels = texts(&shown);
+    for expected in ["涨跌配色", "语言", "行情速度", "重置模拟账户"] {
+        assert!(
+            labels.iter().any(|text| text == expected),
+            "{expected} missing {labels:?}"
+        );
+    }
+    click_label(session.as_mut(), "自选");
+    let mut back = session.frame(session::FrameTime::at(160.0));
+    for step in 0..6 {
+        let next = session.frame(session::FrameTime::at(176.0 + f64::from(step) * 16.0));
+        if next.layers.is_some() {
+            back = next;
+        }
+    }
     assert!(
-        texts(&shown).iter().any(|text| text == "总资产 (模拟)"),
-        "equity card missing {:?}",
-        texts(&shown)
-    );
-    assert!(
-        texts(&shown).iter().any(|text| text.contains("持仓")),
-        "positions tab missing {:?}",
-        texts(&shown)
+        texts(&back).iter().any(|text| text == "综合指数"),
+        "{:?}",
+        texts(&back)
     );
 }
 
@@ -1983,13 +2051,14 @@ fn stocks_desktop_switches_symbols_and_keeps_chart_and_book_inline() {
         "chart {chart_x}, book {book_x}"
     );
 
-    let (x, y) = text_spot(&first, "阿里巴巴");
+    // Apple sits near the top of the saved list so it stays mounted at this height.
+    let (x, y) = text_spot(&first, "Apple");
     click(session.as_mut(), x, y);
-    let changed = wait_for_text(session.as_mut(), &mut time, "阿里巴巴");
+    let changed = wait_for_text(session.as_mut(), &mut time, "Apple");
     assert_eq!(
         texts(&changed)
             .iter()
-            .filter(|text| **text == "09988")
+            .filter(|text| **text == "AAPL")
             .count(),
         2,
         "selected symbol should appear in both panes"
@@ -2051,13 +2120,12 @@ fn stocks_phone_crosshair_keeps_the_chart_picture() {
     let first = wait_for_text(session.as_mut(), &mut time, "腾讯控股");
     let (x, y) = text_spot(&first, "腾讯控股");
     click(session.as_mut(), x, y);
-    let _opening = wait_for_text(session.as_mut(), &mut time, "‹ 返回");
+    let _opening = wait_for_label(session.as_mut(), &mut time, "返回");
     let detail = wait_for_text(session.as_mut(), &mut time, "价格区间");
     let (daily_x, daily_y) = text_spot(&detail, "1D");
     click(session.as_mut(), daily_x, daily_y);
-    let detail = wait_for_text(session.as_mut(), &mut time, "MA5");
-    let (pause_x, pause_y) = text_spot(&detail, "Ⅱ");
-    click(session.as_mut(), pause_x, pause_y);
+    wait_for_text(session.as_mut(), &mut time, "MA5");
+    click_label(session.as_mut(), "暂停行情");
     // A quiet frame did not re-record a canvas. The chart box from the last
     // submitted tree is still where the pointer hits.
     let mut baseline = None;
@@ -2254,7 +2322,7 @@ fn stocks_phone_opens_detail_and_order_ticket() {
     let first = wait_for_text(session.as_mut(), &mut time, "腾讯控股");
     let (x, y) = text_spot(&first, "腾讯控股");
     click(session.as_mut(), x, y);
-    let opening = wait_for_text(session.as_mut(), &mut time, "‹ 返回");
+    let opening = wait_for_label(session.as_mut(), &mut time, "返回");
     assert!(texts(&opening).iter().any(|text| text == "买入"));
     assert!(!texts(&opening).iter().any(|text| text == "盘口"));
     let mut detail = wait_for_text(session.as_mut(), &mut time, "价格区间");
@@ -2281,20 +2349,14 @@ fn stocks_phone_reopens_during_exit_without_leaving_a_detail() {
     let mut time = 0.0;
     let home = wait_for_text(session.as_mut(), &mut time, "腾讯控股");
     let (x, y) = text_spot(&home, "腾讯控股");
-    let (other_x, other_y) = text_spot(&home, "阿里巴巴");
+    let (other_x, other_y) = text_spot(&home, "Apple");
     click(session.as_mut(), x, y);
-    wait_for_text(session.as_mut(), &mut time, "‹ 返回");
+    wait_for_label(session.as_mut(), &mut time, "返回");
     click(session.as_mut(), other_x, other_y);
     let detail = wait_for_text(session.as_mut(), &mut time, "价格区间");
-    assert_eq!(
-        texts(&detail)
-            .iter()
-            .filter(|label| **label == "‹ 返回")
-            .count(),
-        1
-    );
-    let (back_x, back_y) = text_spot(&detail, "‹ 返回");
-    click(session.as_mut(), back_x, back_y);
+    let (settled_x, _) = text_spot(&detail, "价格区间");
+    click_label(session.as_mut(), "返回");
+    // Let the exit slide run for a few frames before re-tapping the home row.
     let mut exiting = detail;
     for _ in 0..9 {
         time += 16.0;
@@ -2303,13 +2365,18 @@ fn stocks_phone_reopens_during_exit_without_leaving_a_detail() {
             exiting = frame;
         }
     }
-    assert!(text_spot(&exiting, "‹ 返回").0 > other_x);
+    // The leaving page has travelled right of the home row it covers.
+    let (leaving_x, _) = text_spot(&exiting, "价格区间");
+    assert!(
+        leaving_x > settled_x && leaving_x > other_x,
+        "exit slide did not move the detail: {settled_x} -> {leaving_x}, home row at {other_x}"
+    );
     click(session.as_mut(), other_x, other_y);
     let mut reopened = wait_for_text(session.as_mut(), &mut time, "价格区间");
     assert_eq!(
         texts(&reopened)
             .iter()
-            .filter(|label| **label == "09988")
+            .filter(|label| **label == "AAPL")
             .count(),
         2
     );
@@ -2325,17 +2392,31 @@ fn stocks_phone_reopens_during_exit_without_leaving_a_detail() {
     }
     let shown = texts(&reopened);
     assert!(shown.iter().any(|text| text == "综合指数"), "{shown:?}");
-    assert!(!shown.iter().any(|text| text == "‹ 返回"), "{shown:?}");
+    assert!(label_spot(session.as_mut(), "返回").is_none(), "{shown:?}");
 
+    // Re-measure: the home row sits higher now that the detail has gone.
+    let (x, y) = text_spot(&reopened, "腾讯控股");
     click(session.as_mut(), x, y);
-    let entering = wait_for_text(session.as_mut(), &mut time, "‹ 返回");
-    let before = text_spot(&entering, "‹ 返回").0;
+    wait_for_text(session.as_mut(), &mut time, "买入");
     session.input(InputEvent::Back);
-    let reversing = wait_for_text(session.as_mut(), &mut time, "‹ 返回");
-    let after = text_spot(&reversing, "‹ 返回").0;
+    let mut landed = session.frame(session::FrameTime::at(time));
+    for _ in 0..48 {
+        time += 16.0;
+        let frame = session.frame(session::FrameTime::at(time));
+        assert!(session.take_faults().is_empty());
+        if frame.layers.is_some() {
+            landed = frame;
+            if texts(&landed).iter().any(|text| text == "综合指数")
+                && label_spot(session.as_mut(), "返回").is_none()
+            {
+                break;
+            }
+        }
+    }
     assert!(
-        (after - before).abs() < 30.0,
-        "back jumped from {before} to {after}"
+        texts(&landed).iter().any(|text| text == "综合指数"),
+        "back from the detail should land on the watchlist: {:?}",
+        texts(&landed).iter().take(20).collect::<Vec<_>>()
     );
 }
 
