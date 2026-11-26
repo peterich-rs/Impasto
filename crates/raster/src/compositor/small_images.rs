@@ -4,13 +4,13 @@ use std::collections::HashMap;
 
 use etagere::{AllocId, AllocatorOptions, AtlasAllocator, size2};
 
-use super::{Coverage, Frame, Image, ImageSource, single};
+use super::{Coverage, Frame, Image, ImageSource};
 use crate::Status;
-use crate::arena::{DynamicGroup, Extra};
+use crate::arena::Extra;
 use crate::batch::{self, ImageInstance, ImageVertex};
 use crate::compiler::Affine;
 use crate::gpu::Gpu;
-use crate::pipelines::{self, BlendKey, PipelineKind};
+use crate::pipelines::{self, BlendKey, PipelineKind, ViewUniform};
 use crate::textures::GpuImage;
 
 const PAGE: u32 = 1024;
@@ -194,6 +194,25 @@ fn eligible(image: &GpuImage) -> bool {
         && image.nv12().is_none()
 }
 
+// Standalone minification can need mip levels beyond the atlas page.
+pub(super) fn eligible_to_batch(
+    image: &GpuImage,
+    instances: &[ImageInstance],
+    transform: Affine,
+    scale: f32,
+) -> bool {
+    let [a, b, c, d, ..] = transform;
+    eligible(image)
+        && b == 0.0
+        && c == 0.0
+        && instances.iter().all(|instance| {
+            let [_, _, width, height] = instance.rect;
+            let [u0, v0, u1, v1] = instance.uv;
+            width * a.abs() * scale >= (u1 - u0) * image.width as f32
+                && height * d.abs() * scale >= (v1 - v0) * image.height as f32
+        })
+}
+
 impl Frame<'_> {
     pub(super) fn small_image_batch(
         &mut self,
@@ -203,8 +222,8 @@ impl Frame<'_> {
         blend: BlendKey,
         images: &[(&str, &[ImageInstance])],
     ) -> Result<(), Status> {
-        let view = self.transform(target, transform, clip)?;
-        let globals = self.globals(view, Extra::None);
+        let view = self.geometry_view(target, transform, clip, 0.0);
+        self.read_mask(target, clip);
         let mask = self.mask_group(clip);
         let mut vertices = Vec::new();
         let mut sampler = 0;
@@ -226,15 +245,7 @@ impl Frame<'_> {
                 None
             };
             let Some(entry) = entry else {
-                self.flush_small_images(
-                    target,
-                    clip,
-                    blend,
-                    &globals,
-                    &mask,
-                    sampler,
-                    &mut vertices,
-                )?;
+                self.flush_small_images(target, clip, blend, view, &mask, sampler, &mut vertices)?;
                 self.images(
                     target,
                     transform,
@@ -252,26 +263,23 @@ impl Frame<'_> {
                         target,
                         clip,
                         blend,
-                        &globals,
+                        view,
                         &mask,
                         sampler,
                         &mut vertices,
                     )?;
                     sampler = next;
                 }
-                let pack = |[x, y]: [u32; 2]| (x + y * UV_PACK_STRIDE) as f32;
+                let pack = |[x, y]: [u32; 2]| x + y * UV_PACK_STRIDE;
                 let mut vertex = instance.vertex(false);
-                // The shared image flag word uses bits 0 through 2.
-                vertex.meta[0] = (instance.flags | ((entry.levels - 1) << 3)) as f32;
-                vertex.meta[1..].copy_from_slice(&[
-                    entry.layer as f32,
-                    pack(entry.origin),
-                    pack([image.width, image.height]),
-                ]);
-                vertices.push(vertex);
+                // The lower eight bits hold the flags and mip count.
+                vertex.meta[0] = instance.flags | ((entry.levels - 1) << 3) | (entry.layer << 8);
+                vertex.meta[2] = pack(entry.origin);
+                vertex.meta[3] = pack([image.width, image.height]);
+                vertices.push(vertex.with_opacity_proof(image.opaque));
             }
         }
-        self.flush_small_images(target, clip, blend, &globals, &mask, sampler, &mut vertices)
+        self.flush_small_images(target, clip, blend, view, &mask, sampler, &mut vertices)
     }
 
     #[expect(
@@ -283,7 +291,7 @@ impl Frame<'_> {
         target: &Image,
         clip: &Coverage,
         blend: BlendKey,
-        globals: &DynamicGroup,
+        view: ViewUniform,
         mask: &wgpu::BindGroup,
         sampler: usize,
         vertices: &mut Vec<ImageVertex>,
@@ -298,20 +306,16 @@ impl Frame<'_> {
             .as_ref()
             .ok_or(Status::BadScene)?;
         let material = atlas.groups[sampler].clone();
-        let pipeline = self.compositor.pipelines.get(
-            self.gpu,
-            single(target.format),
+        self.record_instances(
+            target,
+            view,
+            clip.scissor,
             PipelineKind::SmallImages,
             blend,
-        )?;
-        self.record(
-            target,
-            pipeline,
-            globals.clone(),
+            Extra::None,
             material,
             Some(mask.clone()),
             vertices,
-            clip.scissor,
             6,
         )?;
         vertices.clear();

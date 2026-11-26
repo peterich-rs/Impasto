@@ -30,6 +30,7 @@ pub struct GpuImage {
     pub revision: u64,
     /// Producer pixels are premultiplied in sRGB before upload.
     pub(crate) premultiplied_srgb: bool,
+    pub(crate) opaque: bool,
     pub upload: ImageUploadStats,
 }
 
@@ -62,6 +63,7 @@ impl GpuImage {
             device,
             revision: NEXT_UPLOAD.fetch_add(1, Ordering::Relaxed),
             premultiplied_srgb: false,
+            opaque: false,
             upload: ImageUploadStats::default(),
         }
     }
@@ -157,6 +159,7 @@ impl GpuImage {
                 device,
                 revision: NEXT_UPLOAD.fetch_add(1, Ordering::Relaxed),
                 premultiplied_srgb: false,
+                opaque: rgba.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255),
                 upload,
             },
             conversion,
@@ -178,6 +181,7 @@ impl GpuImage {
             device,
             revision: NEXT_UPLOAD.fetch_add(1, Ordering::Relaxed),
             premultiplied_srgb: true,
+            opaque: false,
             upload: ImageUploadStats::default(),
         }
     }
@@ -235,6 +239,7 @@ impl GpuImage {
         Ok(Self {
             view: Arc::new(view),
             premultiplied_srgb: nv12.is_none() && !texture.format().is_srgb(),
+            opaque: false,
             nv12,
             material: Arc::default(),
             width: size.width,
@@ -375,6 +380,12 @@ impl TextureStore {
         } else {
             self.active.get(source).map(|cached| &cached.image)
         }
+    }
+
+    pub(crate) fn active_images(&self) -> impl Iterator<Item = (&str, &GpuImage)> {
+        self.active.iter().filter_map(|(source, cached)| {
+            (cached.used == self.generation).then_some((source.as_ref(), &cached.image))
+        })
     }
 
     pub(crate) fn set_gpu_views(&mut self, views: HashMap<Arc<str>, GpuImage>) {

@@ -23,7 +23,7 @@ pub const REFERENCE_PPEM: f32 = 128.0;
 const CACHE_LIMIT: usize = 512;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-struct Key {
+pub(crate) struct OutlineKey {
     face: FontFaceId,
     glyph: u16,
     coords: Option<Arc<[i16]>>,
@@ -33,7 +33,7 @@ struct Key {
 
 #[derive(Default)]
 pub struct Outlines {
-    cache: HashMap<Key, Option<Mesh>>,
+    cache: HashMap<OutlineKey, Option<Mesh>>,
     scale: ScaleContext,
     #[cfg(test)]
     disabled: bool,
@@ -55,19 +55,13 @@ impl Outlines {
         if self.disabled {
             return Ok((None, 0));
         }
-        let key = Key {
-            face: *glyph.face,
-            glyph: glyph.glyph,
-            coords: glyph.coords.clone(),
-            embolden: glyph.embolden,
-            skew: glyph.skew.map(f32::to_bits),
-        };
+        let key = OutlineKey::new(glyph);
         if let Some(mesh) = self.cache.get(&key) {
             return Ok((mesh.clone(), 0));
         }
         let mesh = library
             .with_face(&key.face, |bytes, index| {
-                self.path(bytes, index, &key)
+                outline_path(&mut self.scale, bytes, index, &key)
                     .map(|path| upload(gpu, &path))
                     .transpose()
             })
@@ -87,41 +81,69 @@ impl Outlines {
         self.cache.insert(key, mesh.clone());
         Ok((mesh, bytes))
     }
+}
 
-    fn path(&mut self, bytes: &[u8], index: u32, key: &Key) -> Option<CanvasPath> {
-        let font = FontRef::from_index(bytes, index as usize)?;
-        let mut scaler = self
-            .scale
-            .builder(font)
-            .size(REFERENCE_PPEM)
-            .normalized_coords(key.coords.as_deref().unwrap_or_default().iter().copied())
-            .build();
-        if scaler.has_color_bitmaps() || scaler.has_color_outlines() {
-            return None;
+impl OutlineKey {
+    pub(crate) fn new(glyph: &GlyphDraw) -> Self {
+        Self {
+            face: *glyph.face,
+            glyph: glyph.glyph,
+            coords: glyph.coords.clone(),
+            embolden: glyph.embolden,
+            skew: glyph.skew.map(f32::to_bits),
         }
-        let mut outline = scaler.scale_outline(key.glyph)?;
-        if key.embolden {
-            outline.embolden(REFERENCE_PPEM / 24.0, REFERENCE_PPEM / 24.0);
-        }
-        if let Some(skew) = key.skew.map(f32::from_bits) {
-            outline.transform(&Transform::skew(Angle::from_degrees(-skew), Angle::ZERO));
-        }
-        let verbs = outline
-            .path()
-            .commands()
-            .map(|command| match command {
-                Command::MoveTo(p) => PathVerb::Move(p.x, -p.y),
-                Command::LineTo(p) => PathVerb::Line(p.x, -p.y),
-                Command::QuadTo(c, p) => PathVerb::Quad(c.x, -c.y, p.x, -p.y),
-                Command::CurveTo(c1, c2, p) => PathVerb::Cubic(c1.x, -c1.y, c2.x, -c2.y, p.x, -p.y),
-                Command::Close => PathVerb::Close,
-            })
-            .collect();
-        Some(CanvasPath {
-            verbs,
-            fill: FillRule::NonZero,
-        })
     }
+
+    pub(crate) fn path(
+        &self,
+        library: &FontLibrary,
+        scale: &mut ScaleContext,
+    ) -> Option<CanvasPath> {
+        library
+            .with_face(&self.face, |bytes, index| {
+                outline_path(scale, bytes, index, self)
+            })
+            .flatten()
+    }
+}
+
+fn outline_path(
+    scale: &mut ScaleContext,
+    bytes: &[u8],
+    index: u32,
+    key: &OutlineKey,
+) -> Option<CanvasPath> {
+    let font = FontRef::from_index(bytes, index as usize)?;
+    let mut scaler = scale
+        .builder(font)
+        .size(REFERENCE_PPEM)
+        .normalized_coords(key.coords.as_deref().unwrap_or_default().iter().copied())
+        .build();
+    if scaler.has_color_bitmaps() || scaler.has_color_outlines() {
+        return None;
+    }
+    let mut outline = scaler.scale_outline(key.glyph)?;
+    if key.embolden {
+        outline.embolden(REFERENCE_PPEM / 24.0, REFERENCE_PPEM / 24.0);
+    }
+    if let Some(skew) = key.skew.map(f32::from_bits) {
+        outline.transform(&Transform::skew(Angle::from_degrees(-skew), Angle::ZERO));
+    }
+    let verbs = outline
+        .path()
+        .commands()
+        .map(|command| match command {
+            Command::MoveTo(p) => PathVerb::Move(p.x, -p.y),
+            Command::LineTo(p) => PathVerb::Line(p.x, -p.y),
+            Command::QuadTo(c, p) => PathVerb::Quad(c.x, -c.y, p.x, -p.y),
+            Command::CurveTo(c1, c2, p) => PathVerb::Cubic(c1.x, -c1.y, c2.x, -c2.y, p.x, -p.y),
+            Command::Close => PathVerb::Close,
+        })
+        .collect();
+    Some(CanvasPath {
+        verbs,
+        fill: FillRule::NonZero,
+    })
 }
 
 fn upload(gpu: &Gpu, path: &CanvasPath) -> Result<Option<Mesh>, Status> {
@@ -142,6 +164,7 @@ fn upload(gpu: &Gpu, path: &CanvasPath) -> Result<Option<Mesh>, Status> {
         buffer: Arc::new(OnceLock::from(buffers)),
         indices: 0..count,
         stencil_fill: None,
+        fringe: None,
         bounds,
         brush: Brush::Solid([1.0; 4]),
         composite: CanvasComposite::SourceOver,

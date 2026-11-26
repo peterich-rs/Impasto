@@ -1,8 +1,11 @@
 //! Ordered scene replay, clipping, and offscreen composition.
 
 mod backdrop_cache;
+mod canvas_pass;
+mod depth;
 mod glyph_prepare;
 mod image_array;
+mod instances;
 mod resident;
 mod retained;
 mod small_images;
@@ -23,6 +26,7 @@ use bytemuck::Zeroable;
 use crate::arena::{Address, DynamicGroup, Extra, FrameArena, PaintPage, VertexSlice};
 use crate::atlas::{Atlas, AtlasBinding, AtlasStats, SubpixelPosition};
 use crate::batch::{self, GlyphVertex, ImageInstance, Mesh, PaintExtra, RectInstance, RectVertex};
+use crate::batcher::{Bounds, OverlapRows, SpatialBatcher};
 use crate::compiler::{
     self, Affine, Clip, ClipShape, CompiledPicture, Draw, Effect, Group, IDENTITY, PictureBounds,
     Scope,
@@ -30,12 +34,16 @@ use crate::compiler::{
 use crate::compute_blur::{BlurParams, ComputeBlur};
 use crate::gpu::Gpu;
 use crate::gradient_lut::PreparedRamp;
+use crate::graph::{AttachmentLifetimes, RenderGraph, SurfaceGraph};
+use crate::msdf::MsdfAtlas;
 use crate::outline::{Outlines, REFERENCE_PPEM};
 use crate::pipelines::{
     self, BlendKey, ParamsUniform, PipelineCache, PipelineKind, Target, ViewUniform,
 };
 use crate::resident::ResidentPictures;
 use crate::{FontLibrary, Status, textures::TextureStore};
+use canvas_pass::CanvasPass;
+use depth::DepthPass;
 use retained::RetainedRoot;
 use subtree_cache::{CacheCandidate, CacheSlot, MIN_RESAMPLED_BLUR, SubtreeCache};
 
@@ -46,9 +54,11 @@ const POOL_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) struct Compositor {
     atlas: Atlas,
     outlines: Outlines,
+    msdf: MsdfAtlas,
+    use_msdf: bool,
     pipelines: PipelineCache,
     warm_formats: Vec<wgpu::TextureFormat>,
-    pool: Vec<Image>,
+    pool: AttachmentPool,
     white: wgpu::TextureView,
     white_mask_group: wgpu::BindGroup,
     linear: wgpu::Sampler,
@@ -78,6 +88,9 @@ pub(crate) struct Compositor {
     specialize_paint: bool,
     compute_blur: [Option<ComputeBlur>; 2],
     blur_groups: HashMap<(wgpu::TextureView, wgpu::TextureView, wgpu::Buffer), wgpu::BindGroup>,
+    spatial_batch: bool,
+    prefer_spatial: bool,
+    render_graph: bool,
     early_z: bool,
     adaptive_early_z: bool,
     canvas_stencil: bool,
@@ -132,6 +145,10 @@ pub struct RenderStats {
     pub transient_bytes: u64,
     pub early_z_instances: u32,
     pub stencil_draws: u32,
+    pub stencil_batches: u32,
+    pub spatial_merges: u32,
+    pub msdf_misses: u32,
+    pub synchronous_pipeline_compiles: u32,
     pub subtree_cache: SubtreeCacheStats,
     pub partial_redraw: bool,
     pub backdrop_cache_hits: u32,
@@ -353,9 +370,11 @@ impl Compositor {
         Ok(Self {
             atlas: Atlas::new(gpu),
             outlines: Outlines::default(),
+            msdf: MsdfAtlas::default(),
+            use_msdf: std::env::var("IMPASTO_TEXT_MSDF").as_deref() != Ok("0"),
             pipelines,
             warm_formats: Vec::new(),
-            pool: Vec::new(),
+            pool: AttachmentPool::default(),
             white: white.view,
             white_mask_group,
             linear,
@@ -390,6 +409,9 @@ impl Compositor {
             ]
             .map(|format| ComputeBlur::new(gpu, format)),
             blur_groups: HashMap::new(),
+            render_graph: std::env::var("IMPASTO_RENDER_GRAPH").as_deref() != Ok("0"),
+            prefer_spatial: false,
+            spatial_batch: std::env::var("IMPASTO_SPATIAL_BATCH").as_deref() != Ok("0"),
             early_z: depth_mode.as_deref() == Ok("1"),
             adaptive_early_z: depth_mode.is_err()
                 && gpu.adapter.get_info().transient_saves_memory == Some(true),
@@ -428,6 +450,7 @@ impl Compositor {
     #[cfg(test)]
     pub fn disable_glyph_outlines(&mut self) {
         self.outlines.disable();
+        self.use_msdf = false;
     }
 
     pub fn begin_frame(&mut self) {
@@ -437,6 +460,7 @@ impl Compositor {
         }
         self.frame_active = true;
         self.atlas.begin_frame();
+        self.msdf.begin();
         self.resident.begin_frame();
         self.subtrees.begin();
         self.backdrops.begin();
@@ -446,6 +470,7 @@ impl Compositor {
         self.recycle_masks();
         self.offscreen_live_bytes = 0;
         self.render_stats = RenderStats::default();
+        self.pipelines.reset_frame_compiles();
     }
 
     pub fn flush(
@@ -477,7 +502,7 @@ impl Compositor {
         self.blur_groups.retain(|(source, target, buffer), _| {
             pooled(source) && pooled(target) && self.arena.owns_uniform_buffer(buffer)
         });
-        self.render_stats.pooled_texture_bytes = self.pool.iter().map(Image::bytes).sum();
+        self.render_stats.pooled_texture_bytes = self.pool.bytes;
         self.render_stats.buffers_created += self.arena.buffers_created;
         self.render_stats.mesh_upload_bytes += self.arena.mesh_upload_bytes;
         self.render_stats.bind_groups_created += self.arena.bind_groups_created;
@@ -488,7 +513,14 @@ impl Compositor {
         self.render_stats.extra_bytes += extra_bytes;
         self.render_stats.gradient_lut_bytes = self.arena.lut.upload_bytes;
         self.render_stats.gradient_lut_hits = self.arena.lut.hits;
-        let atlas_stats = self.atlas.take_stats();
+        self.render_stats.synchronous_pipeline_compiles = self.pipelines.frame_compiles();
+        let mut atlas_stats = self.atlas.take_stats();
+        let msdf = self.msdf.stats();
+        atlas_stats.uploads += msdf.uploads;
+        atlas_stats.upload_bytes += msdf.upload_bytes;
+        atlas_stats.hits += msdf.hits;
+        atlas_stats.misses += msdf.misses;
+        self.render_stats.msdf_misses = msdf.misses;
         self.render_stats.atlas_upload_bytes = atlas_stats.upload_bytes;
         self.render_stats.subtree_cache = self.subtrees.stats();
         self.render_stats.copy_pixels += atlas_stats.copy_pixels;
@@ -500,6 +532,10 @@ impl Compositor {
     }
 
     pub fn submitted(&mut self, gpu: &Gpu) {
+        // Repeatedly amortizing one draw across nearby pictures is cheaper
+        // than promoting each of those pictures to an individual bundle.
+        self.prefer_spatial = self.render_stats.spatial_merges >= 8
+            && self.render_stats.spatial_merges >= self.render_stats.draws / 4;
         self.arena.submitted(gpu);
         // Drive StagingBelt recall callbacks even without strict frame validation.
         let _ = gpu.device.poll(wgpu::PollType::Poll);
@@ -546,6 +582,22 @@ impl Compositor {
         self.retain_offscreen = Some(enabled);
     }
 
+    #[cfg(test)]
+    pub fn set_spatial_batch(&mut self, enabled: bool) -> bool {
+        std::mem::replace(&mut self.spatial_batch, enabled)
+    }
+
+    #[cfg(test)]
+    pub fn force_early_depth(&mut self) -> bool {
+        self.early_z = true;
+        self.pipelines.layouts.state.is_some()
+    }
+
+    #[cfg(test)]
+    pub fn set_render_graph(&mut self, enabled: bool) -> bool {
+        std::mem::replace(&mut self.render_graph, enabled)
+    }
+
     pub fn render_stats(&self) -> RenderStats {
         self.render_stats
     }
@@ -574,6 +626,7 @@ impl Compositor {
         self.trim_pending = false;
         self.atlas.trim();
         self.outlines = Outlines::default();
+        self.msdf = MsdfAtlas::default();
         self.pool.clear();
         self.image_groups.clear();
         self.small_images = small_images::SmallImages::default();
@@ -591,7 +644,7 @@ impl Compositor {
 
     fn recycle_masks(&mut self) {
         for (_, image) in self.masks.drain() {
-            release_image(&mut self.pool, image);
+            self.pool.recycle(image, self.render_graph);
         }
     }
 
@@ -716,7 +769,7 @@ impl Compositor {
         let damage = retained
             .as_ref()
             .map_or(crate::DamageRect::Full, |root| root.damage(&scene));
-        let deferred_root = output.is_none().then(RootPlan::default);
+        let deferred_root = output.is_none().then(SurfaceGraph::default);
         let mut output = Image::output(output.unwrap_or(&self.white), format, size);
         if deferred_root.is_some() {
             // The white view is a unique target identity while the window view
@@ -728,23 +781,24 @@ impl Compositor {
             scene,
             compositor: self,
             command,
+            graph: RenderGraph::default(),
             pending: None,
             main_pass: None,
-            main_inputs: HashSet::new(),
-            main_releases: Vec::new(),
+            main_inputs: AttachmentLifetimes::new(),
             deferred_root,
-            main_release_bytes: 0,
             clears: HashMap::new(),
             opaque: Vec::new(),
             root: output.view.clone(),
             main: output.view.clone(),
             capture,
+            frame_images: None,
             size,
             damage_scissor: None,
             baking_subtree: false,
             working,
             straight_alpha,
             finishing_output: false,
+            encode_error: None,
         };
         let main = if let Some(retained) = retained {
             retained.image
@@ -805,6 +859,10 @@ impl Compositor {
             } else {
                 frame.release(main);
             }
+        }
+        frame.flush_graph();
+        if let Some(error) = frame.encode_error {
+            return Err(error);
         }
         let cache = frame.compositor.subtrees.stats();
         let damage_pct = frame
@@ -984,6 +1042,10 @@ impl<'a> ImageSource<'a> {
         }
     }
 
+    fn opaque(self) -> bool {
+        matches!(self, Self::External(image) if image.opaque)
+    }
+
     fn premultiplied_srgb(self) -> bool {
         matches!(self, Self::External(image) if image.premultiplied_srgb)
     }
@@ -1013,25 +1075,26 @@ struct Frame<'a> {
     scene: Scene<'a>,
     compositor: &'a mut Compositor,
     command: wgpu::CommandEncoder,
+    graph: RenderGraph<PlannedOperation>,
     pending: Option<DrawPass>,
     // Keep the main target open logically while encoding its input textures.
     // A target read or an incompatible attachment ends the current segment.
     main_pass: Option<DrawPass>,
-    main_inputs: HashSet<wgpu::TextureView>,
-    main_releases: Vec<Image>,
-    main_release_bytes: u64,
-    deferred_root: Option<RootPlan>,
+    main_inputs: AttachmentLifetimes<wgpu::TextureView, Image>,
+    deferred_root: Option<SurfaceGraph<DeferredRootPass>>,
     clears: HashMap<wgpu::TextureView, wgpu::Color>,
     opaque: Vec<[f32; 4]>,
     root: wgpu::TextureView,
     main: wgpu::TextureView,
     capture: Option<(&'a mut Capture, Option<usize>)>,
+    frame_images: Option<image_array::FrameImages<'a>>,
     size: [u32; 2],
     damage_scissor: Option<[u32; 4]>,
     baking_subtree: bool,
     working: wgpu::TextureFormat,
     straight_alpha: bool,
     finishing_output: bool,
+    encode_error: Option<Status>,
 }
 
 struct DrawPass {
@@ -1039,13 +1102,15 @@ struct DrawPass {
     target: wgpu::TextureView,
     size: [u32; 2],
     calls: Vec<DrawCall>,
+    reads: Vec<wgpu::Texture>,
+    spatial: Option<Box<SpatialBatcher<DrawBindings>>>,
     draws: u32,
     shader: Option<engine::scene::ShaderProgramId>,
 }
 
 /// Encoded offscreen work with ordered points that still need the drawable.
 pub(crate) struct PreparedOutput {
-    root: RootPlan,
+    root: SurfaceGraph<DeferredRootPass>,
     tail: wgpu::CommandEncoder,
     retained: Option<RetainedRoot>,
 }
@@ -1058,27 +1123,34 @@ impl PreparedOutput {
     ) -> (Vec<wgpu::CommandBuffer>, wgpu::CommandEncoder) {
         let commands = self
             .root
-            .prefixes
-            .into_iter()
-            .map(|(mut prefix, pass)| {
-                pass.encode(&mut prefix, output);
-                prefix.finish()
-            })
-            .collect();
-        if let Some(pass) = self.root.final_pass {
-            pass.encode(&mut self.tail, output);
-        }
+            .encode(&mut self.tail, |pass, command| pass.encode(command, output));
         compositor.retained = self.retained;
         (commands, self.tail)
     }
 }
 
-#[derive(Default)]
-struct RootPlan {
-    // A later offscreen pass can reuse this segment's pooled attachments.
-    // Keep each prefix paired with its consumer to preserve queue order.
-    prefixes: Vec<(wgpu::CommandEncoder, DeferredRootPass)>,
-    final_pass: Option<DeferredRootPass>,
+enum PlannedOperation {
+    Render(PlannedPass),
+    Canvas(Box<CanvasPass>),
+    Copy {
+        source: wgpu::Texture,
+        origin: wgpu::Origin3d,
+        target: wgpu::Texture,
+        size: wgpu::Extent3d,
+    },
+    Compute {
+        pipeline: wgpu::ComputePipeline,
+        material: wgpu::BindGroup,
+        offset: u32,
+        groups: [u32; 2],
+        stamps: Option<PassStamps>,
+    },
+}
+
+struct PlannedPass {
+    target: wgpu::TextureView,
+    pass: DeferredRootPass,
+    final_output: bool,
 }
 
 struct DeferredRootPass {
@@ -1089,14 +1161,7 @@ struct DeferredRootPass {
 
 impl DeferredRootPass {
     fn encode(self, command: &mut wgpu::CommandEncoder, output: &wgpu::TextureView) {
-        let stamps = self
-            .stamps
-            .as_ref()
-            .map(|stamps| wgpu::RenderPassTimestampWrites {
-                query_set: &stamps.queries,
-                beginning_of_pass_write_index: stamps.begin,
-                end_of_pass_write_index: stamps.end,
-            });
+        let stamps = self.stamps.as_ref().map(PassStamps::render);
         self.segment.encode(command, output, self.load, stamps);
     }
 }
@@ -1107,14 +1172,44 @@ struct PassStamps {
     end: Option<u32>,
 }
 
+impl From<wgpu::RenderPassTimestampWrites<'_>> for PassStamps {
+    fn from(stamps: wgpu::RenderPassTimestampWrites<'_>) -> Self {
+        Self {
+            queries: stamps.query_set.clone(),
+            begin: stamps.beginning_of_pass_write_index,
+            end: stamps.end_of_pass_write_index,
+        }
+    }
+}
+
+impl PassStamps {
+    fn render(&self) -> wgpu::RenderPassTimestampWrites<'_> {
+        wgpu::RenderPassTimestampWrites {
+            query_set: &self.queries,
+            beginning_of_pass_write_index: self.begin,
+            end_of_pass_write_index: self.end,
+        }
+    }
+}
+
 enum RootSegment {
     Ordered(DrawPass),
     EarlyZ(Box<EarlyZBatch>),
+    Depth(Box<DepthPass>),
     Composite(CompositeDraw),
     Clear,
 }
 
 impl RootSegment {
+    fn take_reads(&mut self) -> Vec<wgpu::Texture> {
+        match self {
+            Self::Ordered(pass) => std::mem::take(&mut pass.reads),
+            Self::Composite(pass) => std::mem::take(&mut pass.reads),
+            Self::Depth(pass) => std::mem::take(&mut pass.reads),
+            _ => Vec::new(),
+        }
+    }
+
     fn encode(
         self,
         command: &mut wgpu::CommandEncoder,
@@ -1124,12 +1219,13 @@ impl RootSegment {
     ) {
         match self {
             Self::EarlyZ(batch) => batch.encode(command, target, load, stamps),
+            Self::Depth(batch) => batch.encode(command, target, load, stamps),
             segment => {
                 let mut pass = render(command, target, load, stamps);
                 match segment {
                     Self::Ordered(batch) => batch.encode(&mut pass, target),
                     Self::Composite(call) => call.encode(&mut pass),
-                    Self::Clear | Self::EarlyZ(_) => {}
+                    Self::Clear | Self::EarlyZ(_) | Self::Depth(_) => {}
                 }
             }
         }
@@ -1191,6 +1287,8 @@ impl EarlyZBatch {
 
 enum DrawCall {
     Immediate(ImmediateDraw),
+    Table(TableDraw),
+    Mesh(DirectMesh),
     Composite(CompositeDraw),
     Resident {
         bundle: wgpu::RenderBundle,
@@ -1198,18 +1296,89 @@ enum DrawCall {
     },
 }
 
-struct ImmediateDraw {
+#[derive(Clone)]
+struct DirectMesh {
+    pipeline: wgpu::RenderPipeline,
+    globals: DynamicGroup,
+    material: wgpu::BindGroup,
+    geometry: batch::GpuMeshBuffer,
+    paint: VertexSlice,
+    indices: u32,
+    scissor: Option<[u32; 4]>,
+}
+
+impl DirectMesh {
+    fn encode(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.globals.group, self.globals.offsets());
+        pass.set_bind_group(1, &self.material, &[]);
+        pass.set_vertex_buffer(0, self.geometry.vertices.slice());
+        pass.set_vertex_buffer(1, self.paint.slice());
+        pass.set_index_buffer(self.geometry.indices.slice(), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..self.indices, 0, 0..1);
+    }
+}
+
+struct TableDraw {
+    bindings: DrawBindings,
+    bytes: Vec<u8>,
+    instances: u32,
+    bounds: Vec<Bounds>,
+    kind: PipelineKind,
+    blend: BlendKey,
+    core: Option<OpaqueCore>,
+}
+
+struct OpaqueCore {
+    bytes: Vec<u8>,
+    bounds: Vec<Bounds>,
+    area: f32,
+    complete: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum OpaqueClass {
+    Ordered,
+    Complete,
+    Fringe,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct DrawBindings {
     pipeline: wgpu::RenderPipeline,
     globals: DynamicGroup,
     material: wgpu::BindGroup,
     mask: Option<wgpu::BindGroup>,
+    vertex_count: u32,
+    opaque: OpaqueClass,
+}
+
+struct ImmediateDraw {
+    bindings: DrawBindings,
     vertices: VertexSlice,
     scissor: Option<[u32; 4]>,
-    vertex_count: u32,
     instances: u32,
 }
 
+impl ImmediateDraw {
+    fn encode(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let bindings = &self.bindings;
+        pass.set_pipeline(&bindings.pipeline);
+        pass.set_bind_group(0, &bindings.globals.group, bindings.globals.offsets());
+        pass.set_bind_group(1, &bindings.material, &[]);
+        if let Some(mask) = &bindings.mask {
+            pass.set_bind_group(2, mask, &[]);
+        }
+        pass.set_vertex_buffer(0, self.vertices.slice());
+        pass.draw(0..bindings.vertex_count, 0..self.instances);
+    }
+}
+
+#[derive(Clone)]
 struct CompositeDraw {
+    kind: PipelineKind,
+    blend: BlendKey,
+    reads: Vec<wgpu::Texture>,
     pipeline: wgpu::RenderPipeline,
     globals: DynamicGroup,
     source: wgpu::BindGroup,
@@ -1221,8 +1390,12 @@ struct CompositeDraw {
 
 impl CompositeDraw {
     fn encode(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.encode_depth_range(pass, [0.0, 1.0]);
+    }
+
+    fn encode_depth_range(&self, pass: &mut wgpu::RenderPass<'_>, [min, max]: [f32; 2]) {
         let [x, y, w, h] = self.viewport.map(|value| value as f32);
-        pass.set_viewport(x, y, w, h, 0.0, 1.0);
+        pass.set_viewport(x, y, w, h, min, max);
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.globals.group, self.globals.offsets());
         pass.set_bind_group(1, &self.source, &[]);
@@ -1240,6 +1413,18 @@ impl CompositeDraw {
 }
 
 impl DrawPass {
+    fn read(&mut self, image: &Image) {
+        if !self.reads.contains(&image.texture) {
+            self.reads.push(image.texture.clone());
+        }
+    }
+
+    fn barrier(&mut self, next: usize) {
+        if let Some(spatial) = &mut self.spatial {
+            spatial.barrier(next);
+        }
+    }
+
     fn encode(&self, pass: &mut wgpu::RenderPass<'_>, target: &wgpu::TextureView) {
         let mut scissor = None;
         set_scissor(pass, Some([0, 0, self.size[0], self.size[1]]));
@@ -1251,7 +1436,8 @@ impl DrawPass {
         while let Some(draw) = draws.next() {
             let next = match draw {
                 DrawCall::Immediate(call) => call.scissor,
-                DrawCall::Composite(_) => None,
+                DrawCall::Mesh(call) => call.scissor,
+                DrawCall::Composite(_) | DrawCall::Table(_) => None,
                 DrawCall::Resident { scissor, .. } => *scissor,
             };
             if next != scissor {
@@ -1263,6 +1449,15 @@ impl DrawPass {
             }
             let call = match draw {
                 DrawCall::Immediate(call) => call,
+                DrawCall::Table(_) => continue,
+                DrawCall::Mesh(call) => {
+                    call.encode(pass);
+                    last_pipeline = None;
+                    last_globals = None;
+                    last_material = None;
+                    last_mask = None;
+                    continue;
+                }
                 DrawCall::Composite(call) => {
                     call.encode(pass);
                     pass.set_viewport(
@@ -1296,27 +1491,30 @@ impl DrawPass {
                     continue;
                 }
             };
-            if last_pipeline != Some(&call.pipeline) {
-                pass.set_pipeline(&call.pipeline);
-                last_pipeline = Some(&call.pipeline);
+            if last_pipeline != Some(&call.bindings.pipeline) {
+                pass.set_pipeline(&call.bindings.pipeline);
+                last_pipeline = Some(&call.bindings.pipeline);
             }
-            let globals = (&call.globals.group, call.globals.offsets());
+            let globals = (
+                &call.bindings.globals.group,
+                call.bindings.globals.offsets(),
+            );
             if last_globals != Some(globals) {
                 pass.set_bind_group(0, globals.0, globals.1);
                 last_globals = Some(globals);
             }
-            if last_material != Some(&call.material) {
-                pass.set_bind_group(1, &call.material, &[]);
-                last_material = Some(&call.material);
+            if last_material != Some(&call.bindings.material) {
+                pass.set_bind_group(1, &call.bindings.material, &[]);
+                last_material = Some(&call.bindings.material);
             }
-            if let Some(mask) = &call.mask
+            if let Some(mask) = &call.bindings.mask
                 && last_mask != Some(mask)
             {
                 pass.set_bind_group(2, mask, &[]);
                 last_mask = Some(mask);
             }
             pass.set_vertex_buffer(0, call.vertices.slice());
-            pass.draw(0..call.vertex_count, 0..call.instances);
+            pass.draw(0..call.bindings.vertex_count, 0..call.instances);
         }
     }
 
@@ -1326,6 +1524,8 @@ impl DrawPass {
             target: target.view.clone(),
             size: target.logical,
             calls: Vec::new(),
+            reads: Vec::new(),
+            spatial: None,
             draws: 0,
             shader: None,
         }
@@ -1408,6 +1608,10 @@ impl GlyphTransform {
             phase_x,
             buckets,
         }
+    }
+
+    fn distance_field(self, size: f32) -> bool {
+        size * self.pixels > 36.0 || !self.aligned || (self.matrix[0] - 1.0).abs() > 0.001
     }
 
     fn vector(self, size: f32) -> bool {
@@ -1512,20 +1716,30 @@ impl Frame<'_> {
         for chunk in vertices.chunks(limit) {
             self.compositor.render_stats.draws += 1;
             let call = DrawCall::Immediate(ImmediateDraw {
-                pipeline: pipeline.clone(),
-                globals: globals.clone(),
-                material: material.clone(),
-                mask: mask.clone(),
+                bindings: DrawBindings {
+                    pipeline: pipeline.clone(),
+                    globals: globals.clone(),
+                    material: material.clone(),
+                    mask: mask.clone(),
+                    vertex_count,
+                    opaque: OpaqueClass::Ordered,
+                },
                 vertices: self.compositor.arena.vertices(self.gpu, chunk)?,
                 scissor: scissor.map(|area| target.local(area)),
-                vertex_count,
                 instances: draw_count(chunk.len())?,
             });
             let pass = self.pending_pass(target);
+            pass.barrier(pass.calls.len() + 1);
             pass.calls.push(call);
             pass.draws += 1;
         }
         Ok(())
+    }
+
+    fn read_mask(&mut self, target: &Image, clip: &Coverage) {
+        if let Some(mask) = &clip.mask {
+            self.pending_pass(target).read(mask);
+        }
     }
 
     fn pending_pass(&mut self, target: &Image) -> &mut DrawPass {
@@ -1559,15 +1773,52 @@ impl Frame<'_> {
         if let Some(batch) = self.main_pass.take() {
             self.encode_draws(batch);
         }
-        self.main_inputs.clear();
-        self.main_release_bytes = 0;
-        for image in self.main_releases.drain(..) {
+        for image in self.main_inputs.finish() {
             self.compositor.offscreen_live_bytes -= image.bytes();
-            release_image(&mut self.compositor.pool, image);
+            self.compositor
+                .pool
+                .recycle(image, self.compositor.render_graph);
         }
     }
 
-    fn encode_draws(&mut self, batch: DrawPass) {
+    fn encode_draws(&mut self, mut batch: DrawPass) {
+        match self.prepare_depth(&batch) {
+            Ok(Some((depth, draws))) => {
+                let attachment = depth.depth.clone();
+                self.encode_pass(
+                    &batch.target,
+                    RootSegment::Depth(Box::new(depth)),
+                    GpuPassKind::Main,
+                    draws,
+                    batch.shader,
+                );
+                self.release(attachment);
+                return;
+            }
+            Err(error) => {
+                self.encode_error = Some(error);
+                return;
+            }
+            Ok(None) => {}
+        }
+        for call in &mut batch.calls {
+            if let DrawCall::Table(table) = call {
+                match self.compositor.arena.vertices(self.gpu, &table.bytes) {
+                    Ok(vertices) => {
+                        *call = DrawCall::Immediate(ImmediateDraw {
+                            bindings: table.bindings.clone(),
+                            vertices,
+                            scissor: None,
+                            instances: table.instances,
+                        });
+                    }
+                    Err(error) => {
+                        self.encode_error = Some(error);
+                        return;
+                    }
+                }
+            }
+        }
         let kind = self.pass_kind(&batch.target, batch.format);
         let target = batch.target.clone();
         let draws = batch.draws;
@@ -1585,38 +1836,115 @@ impl Frame<'_> {
     ) {
         self.count_pass(target);
         let load = self.load(target);
-        let stamps = self.capture.as_mut().and_then(|(capture, slice)| {
-            capture.tagged_pass(
-                if shader.is_some() {
-                    GpuPassKind::ShaderEffect
-                } else {
-                    kind
-                },
-                *slice,
-                draws,
-                shader.map(GpuPassSource::ShaderEffect),
-            )
-        });
+        let stamps = self
+            .capture
+            .as_mut()
+            .and_then(|(capture, slice)| {
+                capture.tagged_pass(
+                    if shader.is_some() {
+                        GpuPassKind::ShaderEffect
+                    } else {
+                        kind
+                    },
+                    *slice,
+                    draws,
+                    shader.map(GpuPassSource::ShaderEffect),
+                )
+            })
+            .map(|stamps| PassStamps {
+                queries: stamps.query_set.clone(),
+                begin: stamps.beginning_of_pass_write_index,
+                end: stamps.end_of_pass_write_index,
+            });
+        let pass = DeferredRootPass {
+            segment,
+            load,
+            stamps,
+        };
+        let mut node = PlannedPass {
+            target: target.clone(),
+            pass,
+            final_output: self.finishing_output,
+        };
+        if self.compositor.render_graph {
+            let inputs = node.pass.segment.take_reads();
+            self.graph.record(
+                PlannedOperation::Render(node),
+                *target == self.main || *target == self.root,
+                inputs,
+                [target.texture().clone()],
+            );
+        } else {
+            self.encode_planned(node);
+        }
+    }
+
+    fn flush_graph(&mut self) {
+        let passes = self.graph.schedule();
+        for pass in passes {
+            self.encode_operation(pass);
+        }
+    }
+
+    fn encode_operation(&mut self, op: PlannedOperation) {
+        match op {
+            PlannedOperation::Render(pass) => self.encode_planned(pass),
+            PlannedOperation::Canvas(pass) => pass.encode(&mut self.command),
+            PlannedOperation::Copy {
+                source,
+                origin,
+                target,
+                size,
+            } => {
+                self.command.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        origin,
+                        ..source.as_image_copy()
+                    },
+                    target.as_image_copy(),
+                    size,
+                );
+            }
+            PlannedOperation::Compute {
+                pipeline,
+                material,
+                offset,
+                groups,
+                stamps,
+            } => {
+                let timestamp_writes =
+                    stamps
+                        .as_ref()
+                        .map(|stamps| wgpu::ComputePassTimestampWrites {
+                            query_set: &stamps.queries,
+                            beginning_of_pass_write_index: stamps.begin,
+                            end_of_pass_write_index: stamps.end,
+                        });
+                let mut pass = self
+                    .command
+                    .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("impasto compute blur"),
+                        timestamp_writes,
+                    });
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &material, &[offset]);
+                pass.dispatch_workgroups(groups[0], groups[1], 1);
+            }
+        }
+    }
+
+    fn encode_planned(&mut self, node: PlannedPass) {
         if let Some(root) = &mut self.deferred_root
-            && *target == self.root
+            && node.target == self.root
         {
-            let pass = DeferredRootPass {
-                segment,
-                load,
-                stamps: stamps.map(|stamps| PassStamps {
-                    queries: stamps.query_set.clone(),
-                    begin: stamps.beginning_of_pass_write_index,
-                    end: stamps.end_of_pass_write_index,
-                }),
-            };
-            if self.finishing_output {
-                root.final_pass = Some(pass);
+            if node.final_output {
+                root.finish(node.pass);
             } else {
                 let prefix = std::mem::replace(&mut self.command, frame_encoder(self.gpu));
-                root.prefixes.push((prefix, pass));
+                root.segment(prefix, node.pass);
             }
         } else {
-            segment.encode(&mut self.command, target, load, stamps);
+            node.pass.encode(&mut self.command, &node.target);
         }
     }
 
@@ -1685,19 +2013,14 @@ impl Frame<'_> {
         let compositor = &mut self.compositor;
         // Reusing the most recently released attachment keeps material roles
         // stable in a repeated scene and avoids rotating bind-group keys.
-        let index = compositor.pool.iter().rposition(|image| {
-            image.size == size
-                && image.format == format
-                && image.samples == samples
-                && image.usage == usage
-        });
-        let mut image = if let Some(index) = index {
-            compositor.pool.remove(index)
-        } else {
-            let image = Image::with_usage(self.gpu, size, format, samples, usage);
-            compositor.render_stats.offscreen_alloc_bytes += image.bytes();
-            image
-        };
+        let mut image = compositor
+            .pool
+            .take(size, format, samples, usage)
+            .unwrap_or_else(|| {
+                let image = Image::with_usage(self.gpu, size, format, samples, usage);
+                compositor.render_stats.offscreen_alloc_bytes += image.bytes();
+                image
+            });
         compositor.offscreen_live_bytes += image.bytes();
         compositor.render_stats.offscreen_peak_bytes = compositor
             .render_stats
@@ -1741,15 +2064,22 @@ impl Frame<'_> {
 
     fn release(&mut self, image: Image) {
         if self.main_inputs.contains(&image.view) {
-            self.main_release_bytes += image.bytes();
-            self.main_releases.push(image);
-            if self.main_releases.len() >= POOL_LIMIT || self.main_release_bytes >= POOL_BYTES {
+            let bytes = image.bytes();
+            self.main_inputs.retire(image, bytes);
+            let max_inputs = if self.compositor.render_graph {
+                usize::MAX
+            } else {
+                POOL_LIMIT
+            };
+            if self.main_inputs.exceeds(max_inputs, POOL_BYTES) {
                 self.flush_target(&self.main.clone());
             }
             return;
         }
         self.compositor.offscreen_live_bytes -= image.bytes();
-        release_image(&mut self.compositor.pool, image);
+        self.compositor
+            .pool
+            .recycle(image, self.compositor.render_graph);
     }
 
     fn layer_bounds(
@@ -2656,7 +2986,7 @@ impl Frame<'_> {
         };
         if let Some(image) = self.compositor.masks.get(&key) {
             if target.view == self.main {
-                self.main_inputs.insert(image.view.clone());
+                self.main_inputs.read(image.view.clone());
             }
             coverage.mask = Some(image.clone());
             return Ok(coverage);
@@ -2699,7 +3029,7 @@ impl Frame<'_> {
                 self.release(evicted);
             }
             if target.view == self.main {
-                self.main_inputs.insert(image.view.clone());
+                self.main_inputs.read(image.view.clone());
             }
             self.compositor.masks.insert(key, image.clone());
             coverage.mask = Some(image);
@@ -2953,7 +3283,11 @@ impl Frame<'_> {
                             .iter()
                             .map(|run| (run.rects.as_slice(), run.stops()))
                             .collect();
-                        if self.try_early_z(target, transform, clip, &batches)? {
+                        let use_local = !self.global_depth(&target.view)
+                            || batches.iter().any(|(rects, _)| {
+                                rects.len() > 1 && rects.iter().any(|rect| rect.radius > 0.0)
+                            });
+                        if use_local && self.try_early_z(target, transform, clip, &batches)? {
                             continue;
                         }
                         self.prepared_rects(target, transform, clip, blend, runs)?;
@@ -3010,11 +3344,39 @@ impl Frame<'_> {
                     instances,
                     blend,
                 } => {
-                    let cacheable = |source: &str| {
-                        !source.starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX)
-                    };
+                    use image_array::cacheable;
                     let use_array = self.gpu.image_array();
                     let use_atlas = !use_array && small_images::supports(self.gpu);
+                    let spatial_images = self.compositor.spatial_batch
+                        && self.compositor.pipelines.layouts.state.is_some()
+                        && cacheable(source);
+                    if spatial_images
+                        && use_array
+                        && self
+                            .frame_image_array(target, transform, clip, *blend, source, instances)?
+                    {
+                        continue;
+                    }
+                    if spatial_images
+                        && use_atlas
+                        && self.scene.textures.get(source).is_some_and(|image| {
+                            small_images::eligible_to_batch(
+                                image,
+                                instances,
+                                transform,
+                                self.scene.scale,
+                            )
+                        })
+                    {
+                        self.small_image_batch(
+                            target,
+                            transform,
+                            clip,
+                            *blend,
+                            &[(source, instances)],
+                        )?;
+                        continue;
+                    }
                     if (use_array || use_atlas)
                         && cacheable(source)
                         && matches!(draws.peek(), Some(Draw::Images { source: next, blend: next_blend, .. }) if next != source && next_blend == blend && cacheable(next))
@@ -3127,7 +3489,7 @@ impl Frame<'_> {
         blend: BlendKey,
         runs: impl IntoIterator<Item = &'a compiler::RectRun>,
     ) -> Result<(), Status> {
-        let view = self.rect_view(target, transform, clip, blend)?;
+        let view = self.rect_view(target, transform, clip, blend);
         let mut batch = Vec::new();
         let mut active: Option<PaintPage> = None;
         let mut addresses = Vec::new();
@@ -3192,12 +3554,12 @@ impl Frame<'_> {
         transform: Affine,
         clip: &Coverage,
         blend: BlendKey,
-    ) -> Result<Address, Status> {
+    ) -> ViewUniform {
         let dither = self.gpu.dither_gradients
             && target.view == self.root
             && target.format.is_srgb()
             && blend == BlendKey::SrcOver;
-        self.geometry_uniform(target, transform, clip, f32::from(dither))
+        self.geometry_view(target, transform, clip, f32::from(dither))
     }
 
     fn rect_batch_from_paint(
@@ -3208,7 +3570,7 @@ impl Frame<'_> {
         blend: BlendKey,
         (rects, stops, ramp): (&[RectInstance], &[[f32; 4]], Option<&PreparedRamp>),
     ) -> Result<(), Status> {
-        let view = self.rect_view(target, transform, clip, blend)?;
+        let view = self.rect_view(target, transform, clip, blend);
         let mut batch = Vec::new();
         let mut active = None;
         let ramp = self.compositor.arena.lut.layer(self.gpu, ramp);
@@ -3362,12 +3724,21 @@ impl Frame<'_> {
         &mut self,
         target: &Image,
         clip: &Coverage,
-        view: Address,
+        view: ViewUniform,
         page: PaintPage,
         vertices: &[RectVertex],
         blend: BlendKey,
     ) -> Result<(), Status> {
-        for run in batch::rect_pipeline_runs(vertices) {
+        let split_depth = self.global_depth(&target.view) && blend == BlendKey::SrcOver;
+        let early_z = self.compositor.early_z;
+        let runs = batch::rect_pipeline_runs(vertices).flat_map(|run| {
+            let split =
+                split_depth && (early_z || instances::large_opaque_core(run, &view, target.size));
+            run.chunk_by(move |a, b| {
+                !split || instances::same_depth_class(*a, *b, &view, target.size)
+            })
+        });
+        for run in runs {
             let solid = self.compositor.specialize_paint
                 && run
                     .iter()
@@ -3377,32 +3748,27 @@ impl Frame<'_> {
             } else {
                 self.rect_pipeline(target, clip, run, blend, solid)
             };
+            self.read_mask(target, clip);
             let mask = self.mask_group(clip);
-            let globals = self.globals(
-                view,
-                if solid {
-                    Extra::None
-                } else {
-                    Extra::Paint(page)
-                },
-            );
-            let pipeline =
-                self.compositor
-                    .pipelines
-                    .get(self.gpu, single(target.format), kind, blend)?;
             let vertex_count = if batch::is_shadow(&run[0]) {
                 self.gpu.shadow_vertices()
             } else {
                 6
             };
-            self.record(
+            self.record_instances(
                 target,
-                pipeline,
-                globals,
+                view,
+                clip.scissor,
+                kind,
+                blend,
+                if solid {
+                    Extra::None
+                } else {
+                    Extra::Paint(page)
+                },
                 mask,
                 None,
                 run,
-                clip.scissor,
                 vertex_count,
             )?;
         }
@@ -3439,6 +3805,135 @@ impl Frame<'_> {
     }
 
     fn meshes(
+        &mut self,
+        target: &Image,
+        transform: Affine,
+        clip: &Coverage,
+        meshes: &[&Mesh],
+    ) -> Result<(), Status> {
+        if clip.count != 0
+            || clip.mask.is_some()
+            || !clip.stencil.is_empty()
+            || target.format == wgpu::TextureFormat::R8Unorm
+        {
+            return self.meshes_msaa(target, transform, clip, meshes);
+        }
+        let mut pending = Vec::new();
+        let mut pending_bounds = OverlapRows::new(target.size[1]);
+        let mut view = None;
+        let mut direct = None;
+        let scale = self.scene.scale;
+        let screen = |bounds: [f32; 4], padding: f32| {
+            raster_bounds(
+                PictureBounds::rect(bounds)
+                    .transform(transform)
+                    .expand(padding),
+                target,
+                scale,
+            )
+        };
+        for &mesh in meshes {
+            let geometry = if mesh.composite == engine::scene::CanvasComposite::SourceOver {
+                mesh.fringe
+                    .as_deref()
+                    .and_then(|points| crate::fringe::mesh(points, transform, self.scene.scale))
+            } else {
+                None
+            };
+            let Some(geometry) = geometry else {
+                pending.push(mesh);
+                pending_bounds.insert(screen(mesh.bounds, 1.0 / scale));
+                continue;
+            };
+            let bounds = screen(compiler::mesh_bounds(&geometry.vertices), 0.0);
+            if pending_bounds.overlaps(bounds) {
+                self.flush_direct_mesh(target, view, clip, direct.take())?;
+                self.meshes_msaa(target, transform, clip, &pending)?;
+                pending.clear();
+                pending_bounds.clear();
+            }
+            let address = if let Some(address) = view {
+                address
+            } else {
+                let address = self.transform(target, transform, clip)?;
+                view = Some(address);
+                address
+            };
+            if let Some((brush, combined)) = &mut direct
+                && *brush == &mesh.brush
+                && combined.vertices.len() + geometry.vertices.len()
+                    <= FrameArena::vertex_limit::<[f32; 3]>(self.gpu)
+                && combined.indices.len() + geometry.indices.len()
+                    <= FrameArena::vertex_limit::<u32>(self.gpu)
+            {
+                let base = draw_count(combined.vertices.len())?;
+                combined.vertices.extend(geometry.vertices);
+                combined
+                    .indices
+                    .extend(geometry.indices.into_iter().map(|index| index + base));
+            } else {
+                self.flush_direct_mesh(target, Some(address), clip, direct.take())?;
+                direct = Some((&mesh.brush, geometry));
+            }
+        }
+        self.flush_direct_mesh(target, view, clip, direct)?;
+        if !pending.is_empty() {
+            self.meshes_msaa(target, transform, clip, &pending)?;
+        }
+        Ok(())
+    }
+
+    fn flush_direct_mesh(
+        &mut self,
+        target: &Image,
+        view: Option<Address>,
+        clip: &Coverage,
+        batch: Option<(&batch::Brush, compiler::Tessellation)>,
+    ) -> Result<(), Status> {
+        let Some((brush, geometry)) = batch else {
+            return Ok(());
+        };
+        let view = view.ok_or(Status::BadScene)?;
+        let mut paint = compiler::solid_rect([0.0; 4], brush.solid());
+        let (stops, ramp) = if let batch::Brush::Gradient(gradient) = brush {
+            set_rect_gradient(&mut paint, gradient);
+            (gradient.stops.as_slice(), gradient.ramp.as_deref())
+        } else {
+            (&[][..], None)
+        };
+        let ramp = self.compositor.arena.lut.layer(self.gpu, ramp);
+        let stops = self.stops(stops)?;
+        let (page, index) = self.paint(stops, paint.extra(FrameArena::stop_index(stops), ramp))?;
+        let globals = self.globals(view, Extra::Paint(page));
+        let material = self.mask_group(clip);
+        let pipeline = self.compositor.pipelines.get(
+            self.gpu,
+            single(target.format),
+            PipelineKind::Mesh,
+            BlendKey::SrcOver,
+        )?;
+        let arena = &mut self.compositor.arena;
+        let vertices = arena.vertices(self.gpu, &geometry.vertices)?;
+        let indices = arena.vertices(self.gpu, &geometry.indices)?;
+        self.compositor.render_stats.mesh_upload_bytes += vertices.size() + indices.size();
+        let call = DirectMesh {
+            pipeline,
+            globals,
+            material,
+            geometry: batch::GpuMeshBuffer { vertices, indices },
+            paint: arena.vertices(self.gpu, &[paint.vertex(index)])?,
+            indices: draw_count(geometry.indices.len())?,
+            scissor: clip.scissor.map(|area| target.local(area)),
+        };
+        let pass = self.pending_pass(target);
+        pass.barrier(pass.calls.len() + 1);
+        pass.calls.push(DrawCall::Mesh(call));
+        pass.draws += 1;
+        self.compositor.render_stats.draws += 1;
+        Ok(())
+    }
+
+    fn meshes_msaa(
         &mut self,
         target: &Image,
         transform: Affine,
@@ -3482,7 +3977,7 @@ impl Frame<'_> {
         let mask_group = self.mask_group(&Coverage::default());
         let mut calls = Vec::with_capacity(meshes.len());
         let mut paints = Vec::with_capacity(meshes.len());
-        for mesh in meshes {
+        for &mesh in meshes {
             if mesh.indices.is_empty() {
                 continue;
             }
@@ -3565,13 +4060,10 @@ impl Frame<'_> {
             },
             BlendKey::SrcOver,
         )?;
-        let mut winding = [None, None];
+        let mut winding = [None, None, None, None];
         for (mesh, _, _) in &calls {
             if let Some(fill) = &mesh.stencil_fill {
-                let (index, kind) = match fill.rule {
-                    engine::scene::FillRule::NonZero => (0, PipelineKind::StencilNonZero),
-                    engine::scene::FillRule::EvenOdd => (1, PipelineKind::StencilEvenOdd),
-                };
+                let (index, kind) = stencil_writer(fill);
                 if winding[index].is_none() {
                     winding[index] = Some(self.compositor.pipelines.get(
                         self.gpu,
@@ -3595,99 +4087,113 @@ impl Frame<'_> {
         let draw_total = draw_count(calls.len() + clip_triangles.len() + filled)?;
         self.compositor.render_stats.draws += draw_total;
         self.compositor.render_stats.stencil_draws += draw_count(clip_triangles.len() + filled)?;
+        let mut pass = CanvasPass::new(&resolved, multisample.as_ref(), stencil.as_ref(), area);
+        let kind = if mask_target {
+            GpuPassKind::ClipMask
+        } else if multisample.is_some() {
+            GpuPassKind::CanvasMsaa
+        } else {
+            self.pass_kind(&resolved.view, format)
+        };
+        pass.stamps = pass_timestamps(&mut self.capture, kind, draw_total).map(PassStamps::from);
         {
-            let view = multisample
-                .as_ref()
-                .map_or(&resolved.view, |image| &image.view);
-            let resolve_target = multisample.as_ref().map(|_| &resolved.view);
-            let kind = if mask_target {
-                GpuPassKind::ClipMask
-            } else if resolve_target.is_some() {
-                GpuPassKind::CanvasMsaa
-            } else {
-                self.pass_kind(&resolved.view, format)
-            };
-            let timestamp_writes = pass_timestamps(&mut self.capture, kind, draw_total);
-            let mut pass = self.command.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("canvas path batch"),
-                timestamp_writes,
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    depth_slice: None,
-                    resolve_target,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: if resolve_target.is_some() {
-                            wgpu::StoreOp::Discard
-                        } else {
-                            wgpu::StoreOp::Store
-                        },
-                    },
-                })],
-                depth_stencil_attachment: stencil.as_ref().map(|image| {
-                    wgpu::RenderPassDepthStencilAttachment {
-                        view: &image.view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Discard,
-                        }),
-                        stencil_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(0),
-                            store: wgpu::StoreOp::Discard,
-                        }),
-                    }
-                }),
-                ..Default::default()
-            });
-            set_scissor(&mut pass, Some([0, 0, area[2], area[3]]));
             if let Some(writer) = &clip_writer {
-                pass.set_pipeline(writer);
+                pass.pipeline(writer);
                 for (reference, (mesh, globals, buffers)) in (0u32..).zip(&clip_triangles) {
-                    pass.set_stencil_reference(reference);
-                    pass.set_bind_group(0, &globals.group, globals.offsets());
-                    pass.set_vertex_buffer(0, buffers.vertices.slice());
-                    pass.set_index_buffer(buffers.indices.slice(), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(mesh.indices.clone(), 0, 0..1);
+                    pass.stencil(reference);
+                    pass.globals(globals);
+                    pass.geometry(buffers);
+                    pass.draw(mesh.indices.clone(), 0);
                 }
-                pass.set_stencil_reference(draw_count(clip_triangles.len())?);
+                pass.stencil(draw_count(clip_triangles.len())?);
             }
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(1, &mask_group, &[]);
+            pass.pipeline(&pipeline);
+            pass.material(&mask_group);
             let mut last = None;
+            let mut batch_bounds = OverlapRows::new(resolved.size[1]);
             for ((vertices, groups), chunk) in
                 uploads.iter().zip(&batches).zip(calls.chunks(capacity))
             {
-                pass.set_vertex_buffer(1, vertices.slice());
+                pass.paint(vertices);
                 for (first, end, globals) in groups {
-                    pass.set_bind_group(0, &globals.group, globals.offsets());
-                    for (index, (mesh, _, buffers)) in
-                        chunk.iter().enumerate().take(*end).skip(*first)
-                    {
-                        if last != Some(buffers) {
-                            pass.set_vertex_buffer(0, buffers.vertices.slice());
-                            pass.set_index_buffer(
-                                buffers.indices.slice(),
-                                wgpu::IndexFormat::Uint32,
-                            );
-                            last = Some(buffers);
+                    pass.globals(globals);
+                    let mut next = *first;
+                    while next < *end {
+                        let (mesh, _, _) = &chunk[next];
+                        let Some(fill) = &mesh.stencil_fill else {
+                            stencil_geometry(
+                                &mut pass,
+                                &mut last,
+                                chunk,
+                                next,
+                                mesh.indices.clone(),
+                            )?;
+                            next += 1;
+                            continue;
+                        };
+                        let rule = fill.rule;
+                        let (index_of_rule, _) = stencil_writer(fill);
+                        let write = winding[index_of_rule].as_ref().ok_or(Status::BadScene)?;
+                        let cover = cover.as_ref().ok_or(Status::BadScene)?;
+                        let screen = |mesh: &Mesh| {
+                            raster_bounds(
+                                PictureBounds::rect(mesh.bounds).transform(transform),
+                                &resolved,
+                                self.scene.scale,
+                            )
+                        };
+                        batch_bounds.clear();
+                        batch_bounds.insert(screen(mesh));
+                        let mut end_of_batch = next + 1;
+                        while end_of_batch < (*end).min(next + 64) {
+                            let candidate = chunk[end_of_batch].0;
+                            let bounds = screen(candidate);
+                            if candidate.stencil_fill.as_ref().is_none_or(|candidate| {
+                                candidate.rule != rule || candidate.analytic != fill.analytic
+                            }) || batch_bounds.overlaps(bounds)
+                            {
+                                break;
+                            }
+                            batch_bounds.insert(bounds);
+                            end_of_batch += 1;
                         }
-                        let index = draw_count(index)?;
-                        if let Some(fill) = &mesh.stencil_fill {
-                            let index_of_rule =
-                                usize::from(fill.rule == engine::scene::FillRule::EvenOdd);
-                            let write = winding[index_of_rule].as_ref().ok_or(Status::BadScene)?;
-                            let cover = cover.as_ref().ok_or(Status::BadScene)?;
-                            pass.set_pipeline(write);
-                            pass.draw_indexed(mesh.indices.clone(), 0, index..index + 1);
-                            pass.set_pipeline(cover);
-                            pass.draw_indexed(fill.cover_indices.clone(), 0, index..index + 1);
-                            pass.set_pipeline(&pipeline);
-                        } else {
-                            pass.draw_indexed(mesh.indices.clone(), 0, index..index + 1);
+                        self.compositor.render_stats.stencil_batches += 1;
+                        pass.pipeline(write);
+                        for index in next..end_of_batch {
+                            stencil_geometry(
+                                &mut pass,
+                                &mut last,
+                                chunk,
+                                index,
+                                chunk[index].0.indices.clone(),
+                            )?;
                         }
+                        pass.pipeline(cover);
+                        for index in next..end_of_batch {
+                            let range = chunk[index]
+                                .0
+                                .stencil_fill
+                                .as_ref()
+                                .ok_or(Status::BadScene)?
+                                .cover_indices
+                                .clone();
+                            stencil_geometry(&mut pass, &mut last, chunk, index, range)?;
+                        }
+                        pass.pipeline(&pipeline);
+                        next = end_of_batch;
                     }
                 }
             }
+        }
+        let op = PlannedOperation::Canvas(Box::new(pass));
+        if self.compositor.render_graph {
+            let writes = std::iter::once(&resolved.texture)
+                .chain(multisample.as_ref().map(|image| &image.texture))
+                .chain(stencil.as_ref().map(|image| &image.texture))
+                .cloned();
+            self.graph.record(op, false, [], writes);
+        } else {
+            self.encode_operation(op);
         }
         if mask_target {
             if let Some(multisample) = multisample {
@@ -3715,7 +4221,7 @@ impl Frame<'_> {
             blend,
         )?;
         if target.view == self.main {
-            self.main_inputs.insert(resolved.view.clone());
+            self.main_inputs.read(resolved.view.clone());
         } else {
             self.flush_draws();
         }
@@ -3738,40 +4244,47 @@ impl Frame<'_> {
         image: ImageSource<'_>,
         blend: BlendKey,
     ) -> Result<(), Status> {
-        let view = self.transform(target, transform, clip)?;
+        let view = self.geometry_view(target, transform, clip, 0.0);
         let mask = self.mask_group(clip);
-        let globals = self.globals(view, Extra::None);
-        let pipeline = self.compositor.pipelines.get(
-            self.gpu,
-            single(target.format),
-            if image.nv12().is_some() {
-                PipelineKind::ExternalImage
-            } else if clip.count == 0 && clip.mask.is_none() {
-                PipelineKind::ImageUnclipped
-            } else {
-                PipelineKind::Image
-            },
-            blend,
-        )?;
+        let kind = if image.nv12().is_some() {
+            PipelineKind::ExternalImage
+        } else if clip.count == 0 && clip.mask.is_none() {
+            PipelineKind::ImageUnclipped
+        } else {
+            PipelineKind::Image
+        };
         let mut vertices = Vec::new();
         let mut images = images.into_iter().peekable();
         while let Some(first) = images.next() {
             let nearest = first.flags & batch::IMAGE_NEAREST;
-            vertices.push(first.vertex(image.premultiplied_srgb()));
+            vertices.push(
+                first
+                    .vertex(image.premultiplied_srgb())
+                    .with_opacity_proof(image.opaque()),
+            );
             while let Some(next) =
                 images.next_if(|next| next.flags & batch::IMAGE_NEAREST == nearest)
             {
-                vertices.push(next.vertex(image.premultiplied_srgb()));
+                vertices.push(
+                    next.vertex(image.premultiplied_srgb())
+                        .with_opacity_proof(image.opaque()),
+                );
             }
+            if let ImageSource::Pooled(input) = image {
+                self.pending_pass(target).read(input);
+            }
+            self.read_mask(target, clip);
             let material = image.material(self, nearest != 0);
-            self.record(
+            self.record_instances(
                 target,
-                pipeline.clone(),
-                globals.clone(),
+                view,
+                clip.scissor,
+                kind,
+                blend,
+                Extra::None,
                 material,
                 Some(mask.clone()),
                 &vertices,
-                clip.scissor,
                 6,
             )?;
             vertices.clear();
@@ -3792,7 +4305,7 @@ impl Frame<'_> {
         let (mut active, _) = self.paint(empty, None)?;
         let atlas_scale = self.compositor.atlas.inverse_page_size();
         let geometry = GlyphTransform::new(transform, self.scene.scale);
-        let view = self.geometry_uniform(target, geometry.matrix, clip, atlas_scale)?;
+        let view = self.geometry_view(target, geometry.matrix, clip, atlas_scale);
         let mut last_gradient: Option<(&batch::PackedGradient, PaintPage, u32)> = None;
         let lcd = geometry.aligned
             && self.gpu.caps.lcd
@@ -3803,7 +4316,27 @@ impl Frame<'_> {
             && !self.opaque.is_empty();
         let mut lcd_batch = false;
         for glyph in glyphs {
-            if glyph.decoration.is_none() && geometry.vector(glyph.size) {
+            let distance = if self.compositor.use_msdf
+                && glyph.decoration.is_none()
+                && geometry.distance_field(glyph.size)
+            {
+                self.compositor
+                    .msdf
+                    .glyph(
+                        self.gpu,
+                        self.scene.fonts,
+                        &self.compositor.pipelines.layouts,
+                        &self.compositor.linear,
+                        glyph,
+                    )
+                    .map(|(vertex, created)| {
+                        self.compositor.render_stats.bind_groups_created += u32::from(created);
+                        vertex
+                    })
+            } else {
+                None
+            };
+            if distance.is_none() && glyph.decoration.is_none() && geometry.vector(glyph.size) {
                 let (mesh, uploaded) =
                     self.compositor
                         .outlines
@@ -3835,6 +4368,8 @@ impl Frame<'_> {
                     key,
                     None,
                 )
+            } else if let Some(vertex) = distance {
+                (vertex, AtlasBinding::DistanceField, None)
             } else {
                 let lcd = lcd && glyph.gradient.is_none();
                 let quad = if lcd {
@@ -3983,7 +4518,7 @@ impl Frame<'_> {
         &mut self,
         target: &Image,
         clip: &Coverage,
-        view: Address,
+        view: ViewUniform,
         page: PaintPage,
         glyphs: &[GlyphVertex],
         key: AtlasBinding,
@@ -3991,13 +4526,21 @@ impl Frame<'_> {
         if glyphs.is_empty() {
             return Ok(());
         }
-        let (material, created) = self.compositor.atlas.material(
-            self.gpu,
-            &self.compositor.pipelines.layouts.atlas,
-            &self.compositor.linear,
-            key,
-        );
+        let (material, created) = if key == AtlasBinding::DistanceField {
+            (
+                self.compositor.msdf.material().ok_or(Status::BadScene)?,
+                false,
+            )
+        } else {
+            self.compositor.atlas.material(
+                self.gpu,
+                &self.compositor.pipelines.layouts.atlas,
+                &self.compositor.linear,
+                key,
+            )
+        };
         self.compositor.render_stats.bind_groups_created += u32::from(created);
+        self.read_mask(target, clip);
         let mask = self.mask_group(clip);
         let kind = if self.gpu.caps.lcd
             && glyphs
@@ -4006,7 +4549,9 @@ impl Frame<'_> {
         {
             PipelineKind::TextLcd
         } else if self.compositor.specialize_paint
-            && glyphs.iter().all(|glyph| glyph.flags_and_layer & 7 == 0)
+            && glyphs
+                .iter()
+                .all(|glyph| glyph.flags_and_layer & (7 | batch::GLYPH_MSDF) == 0)
         {
             PipelineKind::TextMask
         } else if clip.count == 0 && clip.mask.is_none() {
@@ -4014,28 +4559,20 @@ impl Frame<'_> {
         } else {
             PipelineKind::Text
         };
-        let globals = self.globals(
+        self.record_instances(
+            target,
             view,
+            clip.scissor,
+            kind,
+            BlendKey::SrcOver,
             if matches!(kind, PipelineKind::TextMask | PipelineKind::TextLcd) {
                 Extra::None
             } else {
                 Extra::Paint(page)
             },
-        );
-        let pipeline = self.compositor.pipelines.get(
-            self.gpu,
-            single(target.format),
-            kind,
-            BlendKey::SrcOver,
-        )?;
-        self.record(
-            target,
-            pipeline,
-            globals,
             material,
             Some(mask),
             glyphs,
-            clip.scissor,
             6,
         )
     }
@@ -4184,14 +4721,23 @@ impl Frame<'_> {
         self.finish(&target.view);
         let snapshot = self.take_area(area, target.format, 1);
         let [x, y, w, h] = target.local(area);
-        let mut from = target.texture.as_image_copy();
-        from.origin = wgpu::Origin3d { x, y, z: 0 };
         self.compositor.render_stats.copy_pixels += u64::from(w) * u64::from(h);
-        self.command.copy_texture_to_texture(
-            from,
-            snapshot.texture.as_image_copy(),
-            extent([w, h]),
-        );
+        let op = PlannedOperation::Copy {
+            source: target.texture.clone(),
+            origin: wgpu::Origin3d { x, y, z: 0 },
+            target: snapshot.texture.clone(),
+            size: extent([w, h]),
+        };
+        if self.compositor.render_graph {
+            self.graph.record(
+                op,
+                false,
+                [target.texture.clone()],
+                [snapshot.texture.clone()],
+            );
+        } else {
+            self.encode_operation(op);
+        }
         Ok(snapshot)
     }
 
@@ -4317,22 +4863,32 @@ impl Frame<'_> {
                     ],
                 )
             });
-            let stamps = pass_timestamps(&mut self.capture, GpuPassKind::ComputeBlur, 0);
-            let mut pass = self
-                .command
-                .begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("impasto compute blur"),
-                    timestamp_writes: stamps.map(|writes| wgpu::ComputePassTimestampWrites {
-                        query_set: writes.query_set,
-                        beginning_of_pass_write_index: writes.beginning_of_pass_write_index,
-                        end_of_pass_write_index: writes.end_of_pass_write_index,
-                    }),
+            let stamps =
+                pass_timestamps(&mut self.capture, GpuPassKind::ComputeBlur, 0).map(|writes| {
+                    PassStamps {
+                        queries: writes.query_set.clone(),
+                        begin: writes.beginning_of_pass_write_index,
+                        end: writes.end_of_pass_write_index,
+                    }
                 });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &*material, &[offset]);
-            let [tile_width, tile_height] = if axis == 0 { [16, 8] } else { [8, 16] };
-            pass.dispatch_workgroups(w.div_ceil(tile_width), h.div_ceil(tile_height), 1);
-            drop(pass);
+            let [tw, th] = if axis == 0 { [16, 8] } else { [8, 16] };
+            let op = PlannedOperation::Compute {
+                pipeline: pipeline.clone(),
+                material: material.clone(),
+                offset,
+                stamps,
+                groups: [w.div_ceil(tw), h.div_ceil(th)],
+            };
+            if self.compositor.render_graph {
+                self.graph.record(
+                    op,
+                    false,
+                    [input.texture().clone()],
+                    [target.texture().clone()],
+                );
+            } else {
+                self.encode_operation(op);
+            }
             self.count_pass(target);
             self.compositor.render_stats.compute_passes += 1;
             self.compositor.render_stats.blur_pixels += u64::from(w) * u64::from(h);
@@ -4481,7 +5037,15 @@ impl Frame<'_> {
             }
             _ => GpuPassKind::OffscreenEffect,
         };
+        let reads = std::iter::once(&source.texture)
+            .chain(backdrop.map(|image| &image.texture))
+            .chain(coverage.mask.as_ref().map(|image| &image.texture))
+            .cloned()
+            .collect::<Vec<_>>();
         let call = CompositeDraw {
+            kind: pipeline_kind,
+            blend,
+            reads,
             pipeline,
             globals,
             source: input,
@@ -4491,15 +5055,17 @@ impl Frame<'_> {
             viewport: [x, y, w, h],
         };
         if target.view == self.main {
-            self.main_inputs.insert(source.view.clone());
+            self.main_inputs.read(source.view.clone());
             if let Some(backdrop) = backdrop {
-                self.main_inputs.insert(backdrop.view.clone());
+                self.main_inputs.read(backdrop.view.clone());
             }
             if let Some(mask) = &coverage.mask {
-                self.main_inputs.insert(mask.view.clone());
+                self.main_inputs.read(mask.view.clone());
             }
             let pass = self.pending_pass(target);
             pass.draws += 1;
+            pass.barrier(pass.calls.len() + 1);
+            pass.reads.extend(call.reads.iter().cloned());
             pass.calls.push(DrawCall::Composite(call));
         } else {
             self.encode_pass(&target.view, RootSegment::Composite(call), kind, 1, None);
@@ -4618,18 +5184,51 @@ impl Frame<'_> {
     }
 }
 
-fn release_image(pool: &mut Vec<Image>, image: Image) {
-    let bytes = image.bytes();
-    if bytes > POOL_BYTES {
-        return;
+#[derive(Default)]
+struct AttachmentPool {
+    images: Vec<Image>,
+    bytes: u64,
+}
+
+impl AttachmentPool {
+    fn take(
+        &mut self,
+        size: [u32; 2],
+        format: wgpu::TextureFormat,
+        samples: u32,
+        usage: wgpu::TextureUsages,
+    ) -> Option<Image> {
+        let index = self.images.iter().rposition(|image| {
+            image.size == size
+                && image.format == format
+                && image.samples == samples
+                && image.usage == usage
+        })?;
+        let image = self.images.remove(index);
+        self.bytes -= image.bytes();
+        Some(image)
     }
-    while !pool.is_empty()
-        && (pool.len() >= POOL_LIMIT
-            || bytes + pool.iter().map(Image::bytes).sum::<u64>() > POOL_BYTES)
-    {
-        pool.remove(0);
+
+    fn recycle(&mut self, image: Image, graph: bool) {
+        let bytes = image.bytes();
+        if bytes > POOL_BYTES {
+            return;
+        }
+        while (!graph && self.images.len() >= POOL_LIMIT) || self.bytes + bytes > POOL_BYTES {
+            self.bytes -= self.images.remove(0).bytes();
+        }
+        self.images.push(image);
+        self.bytes += bytes;
     }
-    pool.push(image);
+
+    fn iter(&self) -> impl Iterator<Item = &Image> {
+        self.images.iter()
+    }
+
+    fn clear(&mut self) {
+        self.images.clear();
+        self.bytes = 0;
+    }
 }
 
 fn single(format: wgpu::TextureFormat) -> Target {
@@ -4903,4 +5502,52 @@ fn set_scissor(pass: &mut wgpu::RenderPass<'_>, bounds: Option<[u32; 4]>) {
     if let Some([x, y, w, h]) = bounds {
         pass.set_scissor_rect(x, y, w, h);
     }
+}
+
+fn raster_bounds(bounds: PictureBounds, target: &Image, scale: f32) -> Bounds {
+    match bounds {
+        PictureBounds::Empty => Bounds([0.0; 4]),
+        PictureBounds::Unbounded => Bounds([
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+            f32::INFINITY,
+        ]),
+        PictureBounds::Rect([x, y, w, h]) => {
+            let [ox, oy] = target.origin;
+            Bounds([
+                x * scale - ox as f32,
+                y * scale - oy as f32,
+                (x + w) * scale - ox as f32,
+                (y + h) * scale - oy as f32,
+            ])
+        }
+    }
+}
+
+fn stencil_writer(fill: &batch::StencilFill) -> (usize, PipelineKind) {
+    use engine::scene::FillRule::{EvenOdd, NonZero};
+    match (fill.rule, fill.analytic) {
+        (NonZero, false) => (0, PipelineKind::StencilNonZero),
+        (EvenOdd, false) => (1, PipelineKind::StencilEvenOdd),
+        (NonZero, true) => (2, PipelineKind::StencilCurveNonZero),
+        (EvenOdd, true) => (3, PipelineKind::StencilCurveEvenOdd),
+    }
+}
+
+fn stencil_geometry<'a>(
+    pass: &mut CanvasPass,
+    last: &mut Option<&'a batch::GpuMeshBuffer>,
+    chunk: &'a [(&Mesh, PaintPage, batch::GpuMeshBuffer)],
+    index: usize,
+    indices: std::ops::Range<u32>,
+) -> Result<(), Status> {
+    let (_, _, buffers) = &chunk[index];
+    if *last != Some(buffers) {
+        pass.geometry(buffers);
+        *last = Some(buffers);
+    }
+    let index = draw_count(index)?;
+    pass.draw(indices, index);
+    Ok(())
 }

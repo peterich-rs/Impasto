@@ -90,7 +90,15 @@ fn mixed_rectangles_keep_shadow_and_fill_order_in_one_pass() {
     let pixels = raster.render_rgba(size).unwrap();
     let cold = raster.submit_stats().render;
     assert!(cold.direct_present, "{cold:?}");
-    assert_eq!((cold.passes, cold.draws), (1, 200));
+    assert_eq!(cold.passes, 1);
+    let table = raster.device.as_ref().unwrap().gpu.caps.paint_storage
+        && std::env::var("IMPASTO_STATE_TABLE").as_deref() != Ok("0")
+        && std::env::var("IMPASTO_SPATIAL_BATCH").as_deref() != Ok("0");
+    if table {
+        assert!(cold.draws <= 200, "{cold:?}");
+    } else {
+        assert_eq!(cold.draws, 200);
+    }
     // Each shadow contributes a second instance for its rectangle.
     assert_eq!(cold.vertex_bytes, 400 * 64);
     assert_eq!(
@@ -108,7 +116,8 @@ fn mixed_rectangles_keep_shadow_and_fill_order_in_one_pass() {
     assert_eq!(raster.render_rgba(size).unwrap(), pixels);
     let warm = raster.submit_stats().render;
     assert_eq!((warm.buffers_created, warm.bind_groups_created), (0, 0));
-    assert_eq!((warm.passes, warm.draws), (1, 200));
+    assert_eq!(warm.passes, 1);
+    assert!(warm.draws <= 200);
     assert!(warm.vertex_bytes <= cold.vertex_bytes);
 }
 
@@ -533,7 +542,10 @@ fn consecutive_meshes_resolve_once_and_reuse_picture_geometry() {
     let pixels = raster.render_rgba(size).unwrap();
     assert_eq!(pixel(&pixels, 64, 44, 34), [0, 255, 0, 255]);
     assert_eq!(pixel(&pixels, 64, 55, 51), [0; 4]);
-    assert_eq!(raster.stats.render.offscreen_passes, 1);
+    assert_eq!(
+        raster.stats.render.offscreen_passes,
+        u32::from(std::env::var("IMPASTO_CANVAS_DIRECT").as_deref() == Ok("0")),
+    );
     raster.submit_layers(&scene, 1.0, |_| None).unwrap();
     assert_eq!(raster.render_rgba(size).unwrap(), pixels);
     assert_eq!(raster.stats.picture_reused, 1);
@@ -1281,7 +1293,21 @@ fn opaque_depth_segments_preserve_painter_order() {
     assert_eq!(stats.passes, 1);
     assert_eq!(
         stats.early_z_instances,
-        if std::env::var("IMPASTO_EARLY_Z").as_deref() == Ok("1") {
+        if std::env::var("IMPASTO_EARLY_Z").as_deref() == Ok("1")
+            || (std::env::var_os("IMPASTO_EARLY_Z").is_none()
+                && std::env::var("IMPASTO_RENDER_GRAPH").as_deref() != Ok("0")
+                && std::env::var("IMPASTO_STATE_TABLE").as_deref() != Ok("0")
+                && raster.device.as_ref().unwrap().gpu.caps.paint_storage
+                && raster
+                    .device
+                    .as_ref()
+                    .unwrap()
+                    .gpu
+                    .adapter
+                    .get_info()
+                    .transient_saves_memory
+                    == Some(true))
+        {
             25
         } else {
             0
@@ -1657,7 +1683,12 @@ fn large_glyph_outlines_are_reused_across_scale_changes() {
     let first = capture(&mut raster, 1, vec![text.clone()], size);
     let cold = raster.submit_stats();
     assert!(first.as_chunks::<4>().0.iter().any(|pixel| pixel[3] > 200));
-    assert!(cold.render.mesh_upload_bytes > 0);
+    if std::env::var("IMPASTO_TEXT_MSDF").as_deref() == Ok("0") {
+        assert!(cold.render.mesh_upload_bytes > 0);
+    } else {
+        assert!(cold.atlas.uploads > 0);
+        assert_eq!(cold.render.offscreen_passes, 0);
+    }
     let enlarged = capture(
         &mut raster,
         2,
@@ -1843,5 +1874,242 @@ fn declarative_scroll_bindings_render_identical_pixels_on_ui_and_raster() {
             "pixel mismatch at {target} ms"
         );
         previous = actual;
+    }
+}
+
+#[test]
+fn spatial_batches_preserve_overlapping_draws_across_transforms_and_clips() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let size = PixelSize::new(256, 64);
+    let mut draws = Vec::new();
+    for x in [10.0, 65.0, 120.0, 175.0] {
+        draws.push(Command::PushTransform {
+            translate_x: x,
+            translate_y: 12.0,
+            rotate_rad: 0.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+        });
+        draws.push(shadowed([0.0, 0.0, 22.0, 24.0]));
+        draws.push(rounded([0.0, 0.0, 22.0, 24.0], 5.0));
+        draws.push(rect([0.0, 0.0, 22.0, 24.0], [255, 44, 32, 168]));
+        draws.push(Command::Pop);
+        draws.push(Command::Pop);
+    }
+    let compositor = &mut raster.device.as_mut().unwrap().compositor;
+    compositor.disable_residency();
+    let spatial = compositor.set_spatial_batch(false);
+    let expected = capture(&mut raster, 1, draws.clone(), size);
+    let ordered = raster.submit_stats().render;
+    raster
+        .device
+        .as_mut()
+        .unwrap()
+        .compositor
+        .set_spatial_batch(spatial);
+    let actual = capture(&mut raster, 2, draws, size);
+    let batched = raster.submit_stats().render;
+    assert_eq!(expected, actual);
+    assert_eq!(batched.passes, 1);
+    if spatial
+        && raster.device.as_ref().unwrap().gpu.caps.paint_storage
+        && std::env::var("IMPASTO_STATE_TABLE").as_deref() != Ok("0")
+    {
+        assert!(batched.draws < ordered.draws, "{batched:?}");
+    }
+}
+
+#[test]
+fn independent_offscreen_producers_keep_one_main_pass() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let size = PixelSize::new(384, 384);
+    let mut draws = Vec::new();
+    for index in 0u16..64 {
+        let x = f32::from(index % 8) * 48.0 + 8.0;
+        let y = f32::from(index / 8) * 48.0 + 8.0;
+        draws.extend([
+            Command::PushBlur {
+                x,
+                y,
+                w: 24.0,
+                h: 24.0,
+                sigma: 1.0,
+            },
+            rect([x + 4.0, y + 4.0, 16.0, 16.0], [255, 50, 30, 255]),
+            Command::Pop,
+        ]);
+    }
+    let graph = raster
+        .device
+        .as_mut()
+        .unwrap()
+        .compositor
+        .set_render_graph(false);
+    let expected = capture(&mut raster, 1, draws.clone(), size);
+    let unplanned = raster.submit_stats().render;
+    raster
+        .device
+        .as_mut()
+        .unwrap()
+        .compositor
+        .set_render_graph(graph);
+    let actual = capture(&mut raster, 2, draws, size);
+    let planned = raster.submit_stats().render;
+    assert_eq!(expected, actual);
+    if graph {
+        assert_eq!(planned.passes - planned.offscreen_passes, 1);
+        assert!(unplanned.passes > planned.passes);
+    }
+}
+
+#[test]
+fn disjoint_stencil_fills_share_writes_and_covers() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let ops = (0u16..5)
+        .map(|index| {
+            let x = f32::from(index) * 16.0;
+            let mut verbs = Vec::new();
+            for (left, right) in [(x + 1.0, x + 14.0), (x + 4.0, x + 11.0)] {
+                let center = (left + right) * 0.5;
+                verbs.extend([
+                    PathVerb::Move(left, 1.0),
+                    PathVerb::Line(center, 1.0),
+                    PathVerb::Quad(right, 1.0, right, 4.0),
+                    PathVerb::Line(right, 8.0),
+                    PathVerb::Line(right, 13.0),
+                    PathVerb::Line(center, 13.0),
+                    PathVerb::Line(left, 13.0),
+                    PathVerb::Line(left, 8.0),
+                    PathVerb::Close,
+                ]);
+            }
+            fill_path(
+                CanvasPath {
+                    fill: FillRule::EvenOdd,
+                    verbs: verbs.into(),
+                },
+                [20, 210, 20, 255],
+                CanvasComposite::SourceOver,
+            )
+        })
+        .collect();
+    let pixels = capture(
+        &mut raster,
+        1,
+        vec![canvas(ops, 80.0, 16.0)],
+        PixelSize::new(80, 16),
+    );
+    assert_eq!(pixel(&pixels, 80, 2, 8), [20, 210, 20, 255]);
+    assert_eq!(pixel(&pixels, 80, 7, 8), [0; 4]);
+    let stats = raster.submit_stats().render;
+    if std::env::var("IMPASTO_CANVAS_STENCIL").as_deref() != Ok("0") {
+        assert_eq!((stats.stencil_draws, stats.stencil_batches), (5, 1));
+    }
+}
+
+#[test]
+fn global_depth_keeps_translucent_edges_in_painter_order() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let size = PixelSize::new(80, 80);
+    let mut back = rect([2.0, 2.0, 76.0, 76.0], [14, 100, 80, 255]);
+    let mut front = rect([7.25, 11.0, 66.0, 62.0], [20, 40, 180, 255]);
+    for command in [&mut back, &mut front] {
+        if let Command::Rect { corner_radius, .. } = command {
+            *corner_radius = 8.0;
+        }
+    }
+    let commands = vec![
+        back,
+        Command::PushColorFilter {
+            matrix: Arc::new([
+                [1.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.9, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0, 0.0],
+            ]),
+        },
+        rect([3.0, 20.0, 76.0, 8.0], [255, 190, 0, 150]),
+        Command::Pop,
+        front,
+        canvas(
+            vec![fill_path(
+                path([10.0, 11.0, 10.0, 6.0]),
+                [150, 0, 0, 120],
+                CanvasComposite::SourceOver,
+            )],
+            80.0,
+            80.0,
+        ),
+        rect([10.0, 10.0, 10.0, 12.0], [220, 10, 0, 120]),
+    ];
+    let compositor = &mut raster.device.as_mut().unwrap().compositor;
+    if !compositor.force_early_depth() {
+        return;
+    }
+    compositor.set_render_graph(false);
+    let expected = capture(&mut raster, 1, commands.clone(), size);
+    assert_eq!(raster.submit_stats().render.early_z_instances, 0);
+    raster
+        .device
+        .as_mut()
+        .unwrap()
+        .compositor
+        .set_render_graph(true);
+    let actual = capture(&mut raster, 2, commands, size);
+    assert!(expected.iter().zip(actual).all(|(a, b)| a.abs_diff(b) <= 2));
+    let stats = raster.submit_stats().render;
+    assert_eq!(stats.passes - stats.offscreen_passes, 1);
+    assert_eq!(stats.early_z_instances, 2);
+}
+
+#[test]
+fn doubled_convex_outline_respects_winding_and_alpha() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let color = [218, 102, 15, 128];
+    let size = PixelSize::new(24, 24);
+    let outline = [
+        PathVerb::Line(18.0, 4.0),
+        PathVerb::Line(18.0, 18.0),
+        PathVerb::Line(4.0, 18.0),
+        PathVerb::Line(4.0, 4.0),
+    ];
+    for (id, fill) in [(1, FillRule::EvenOdd), (2, FillRule::NonZero)] {
+        let path = CanvasPath {
+            fill,
+            verbs: std::iter::once(PathVerb::Move(4.0, 4.0))
+                .chain(outline)
+                .chain(outline)
+                .chain(std::iter::once(PathVerb::Close))
+                .collect(),
+        };
+        let pixels = capture(
+            &mut raster,
+            id,
+            vec![canvas(
+                vec![fill_path(path, color, CanvasComposite::SourceOver)],
+                24.0,
+                24.0,
+            )],
+            size,
+        );
+        let alpha = pixel(&pixels, 24, 8, 8)[3];
+        assert_eq!(
+            alpha,
+            if fill == FillRule::EvenOdd {
+                0
+            } else {
+                color[3]
+            }
+        );
     }
 }

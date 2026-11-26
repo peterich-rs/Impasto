@@ -376,6 +376,15 @@ impl Gpu {
         self.device.features().contains(IMAGE_ARRAY_FEATURES)
     }
 
+    pub fn analytic_canvas_curves(&self) -> bool {
+        self.adapter.get_info().backend != wgpu::Backend::Gl
+            && self
+                .caps
+                .downlevel_flags
+                .contains(wgpu::DownlevelFlags::MULTISAMPLED_SHADING)
+            && std::env::var("IMPASTO_CANVAS_CURVES").as_deref() != Ok("0")
+    }
+
     pub fn shadow_vertices(&self) -> u32 {
         if self.hollow_shadows { 24 } else { 6 }
     }

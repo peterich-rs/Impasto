@@ -9,14 +9,15 @@ struct ImageVertex {
     @location(0) rect: vec4<f32>,
     @location(1) uv: vec4<f32>,
     @location(2) color: vec4<f32>,
-    @location(3) info: vec4<f32>,
+    @location(3) info: vec4<u32>,
 };
 
 struct VertexOut {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) @interpolate(flat) color: vec4<f32>,
-    @location(2) @interpolate(flat) info: vec4<f32>,
+    @location(2) @interpolate(flat) info: vec4<u32>,
+    @location(3) @interpolate(flat) state: u32,
 };
 
 @vertex
@@ -28,17 +29,21 @@ fn vs_main(@builtin(vertex_index) vertex: u32, data: ImageVertex) -> VertexOut {
     let unit = corners[vertex];
     let scene = data.rect.xy + unit * data.rect.zw;
     var out: VertexOut;
+    let state = data.info.y;
+    vertex_view(state);
     out.position = view.transform * vec4<f32>(scene, 0.0, 1.0);
     out.uv = mix(data.uv.xy, data.uv.zw, unit);
     out.color = data.color;
     out.info = data.info;
+    out.state = state;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    fragment_view(in.state);
     let data = in;
-    let flags = u32(data.info.x);
+    let flags = data.info.x & 255u;
     let dx = dpdx(in.uv);
     let dy = dpdy(in.uv);
     var texel: vec4<f32>;

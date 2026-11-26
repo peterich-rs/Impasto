@@ -17,6 +17,8 @@ lyon_tessellation = "1"
 lyon_path = "1"
 lyon_geom = "1"
 etagere = "0.2"
+fdsm = "0.8"
+image = { version = "0.25", default-features = false }
 slotmap = "1"
 rayon = "1.12"
 half = { version = "2", default-features = false }

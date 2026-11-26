@@ -126,6 +126,10 @@ impl Frame<'_> {
         if measuring {
             self.flush_target(&target.view);
         }
+        self.read_mask(target, clip);
+        if let Some(backdrop) = &backdrop {
+            self.pending_pass(target).read(backdrop);
+        }
         self.record(
             target,
             pipeline,

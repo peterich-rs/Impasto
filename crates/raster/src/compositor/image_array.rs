@@ -1,13 +1,15 @@
 //! Batches ordered image runs with one texture binding array per sampler.
 
-use super::{Coverage, Frame, Image, single};
+use std::collections::HashMap;
+
+use super::{Coverage, Frame, Image, draw_count};
 use crate::{
     Status,
-    arena::{DynamicGroup, Extra},
+    arena::Extra,
     batch::{self, ImageInstance},
     compiler::Affine,
     gpu::IMAGE_ARRAY_LEN,
-    pipelines::{self, BlendKey, PipelineKind},
+    pipelines::{self, BlendKey, PipelineKind, ViewUniform},
 };
 
 impl Frame<'_> {
@@ -19,15 +21,9 @@ impl Frame<'_> {
         blend: BlendKey,
         images: &[(&str, &[ImageInstance])],
     ) -> Result<(), Status> {
-        let view = self.transform(target, transform, clip)?;
-        let globals = self.globals(view, Extra::None);
+        let view = self.geometry_view(target, transform, clip, 0.0);
+        self.read_mask(target, clip);
         let mask = self.mask_group(clip);
-        let pipeline = self.compositor.pipelines.get(
-            self.gpu,
-            single(target.format),
-            PipelineKind::ImageArray,
-            blend,
-        )?;
         let mut views = Vec::new();
         let mut vertices = Vec::new();
         let mut nearest = false;
@@ -43,8 +39,8 @@ impl Frame<'_> {
                     self.image_array_batch(
                         target,
                         clip.scissor,
-                        &pipeline,
-                        &globals,
+                        view,
+                        blend,
                         &mask,
                         &views,
                         nearest,
@@ -62,21 +58,94 @@ impl Frame<'_> {
                         views.push(image.view().clone());
                         index
                     });
-                let mut vertex = instance.vertex(image.premultiplied_srgb);
-                vertex.meta[1] = index as f32;
+                let mut vertex = instance
+                    .vertex(image.premultiplied_srgb)
+                    .with_opacity_proof(image.opaque);
+                vertex.meta[0] |= draw_count(index)? << 8;
                 vertices.push(vertex);
             }
         }
         self.image_array_batch(
             target,
             clip.scissor,
-            &pipeline,
-            &globals,
+            view,
+            blend,
             &mask,
             &views,
             nearest,
             &vertices,
         )
+    }
+
+    pub(super) fn frame_image_array(
+        &mut self,
+        target: &Image,
+        transform: Affine,
+        clip: &Coverage,
+        blend: BlendKey,
+        source: &str,
+        instances: &[ImageInstance],
+    ) -> Result<bool, Status> {
+        let images = self.frame_images.get_or_insert_with(|| {
+            let mut sources: Vec<_> = self
+                .scene
+                .textures
+                .active_images()
+                .filter(|(source, image)| cacheable(source) && image.nv12().is_none())
+                .collect();
+            sources.sort_unstable_by_key(|&(key, _)| key);
+            let mut images = FrameImages::default();
+            for chunk in sources.chunks(IMAGE_ARRAY_LEN as usize) {
+                let page = images.pages.len();
+                images.pages.push(
+                    chunk
+                        .iter()
+                        .enumerate()
+                        .map(|(slot, &(key, image))| {
+                            images.slots.insert(key, (page, slot));
+                            image.view().clone()
+                        })
+                        .collect(),
+                );
+            }
+            images
+        });
+        let Some(&(page, slot)) = images.slots.get(source) else {
+            return Ok(false);
+        };
+        let views = images.pages[page].clone();
+        let slot = draw_count(slot)?;
+        let Some(image) = self.scene.textures.get(source) else {
+            return Ok(false);
+        };
+        let view = self.geometry_view(target, transform, clip, 0.0);
+        self.read_mask(target, clip);
+        let mask = self.mask_group(clip);
+        for run in instances
+            .chunk_by(|a, b| a.flags & batch::IMAGE_NEAREST == b.flags & batch::IMAGE_NEAREST)
+        {
+            let vertices: Vec<_> = run
+                .iter()
+                .map(|image_instance| {
+                    let mut vertex = image_instance
+                        .vertex(image.premultiplied_srgb)
+                        .with_opacity_proof(image.opaque);
+                    vertex.meta[0] |= slot << 8;
+                    vertex
+                })
+                .collect();
+            self.image_array_batch(
+                target,
+                clip.scissor,
+                view,
+                blend,
+                &mask,
+                &views,
+                run[0].flags & batch::IMAGE_NEAREST != 0,
+                &vertices,
+            )?;
+        }
+        Ok(true)
     }
 
     #[expect(
@@ -87,8 +156,8 @@ impl Frame<'_> {
         &mut self,
         target: &Image,
         scissor: Option<[u32; 4]>,
-        pipeline: &wgpu::RenderPipeline,
-        globals: &DynamicGroup,
+        view: ViewUniform,
+        blend: BlendKey,
         mask: &wgpu::BindGroup,
         views: &[wgpu::TextureView],
         nearest: bool,
@@ -135,15 +204,28 @@ impl Frame<'_> {
                 )
             })
             .clone();
-        self.record(
+        self.record_instances(
             target,
-            pipeline.clone(),
-            globals.clone(),
+            view,
+            scissor,
+            PipelineKind::ImageArray,
+            blend,
+            Extra::None,
             material,
             Some(mask.clone()),
             vertices,
-            scissor,
             6,
         )
     }
+}
+
+#[derive(Default)]
+pub(super) struct FrameImages<'a> {
+    slots: HashMap<&'a str, (usize, usize)>,
+    pages: Vec<Vec<wgpu::TextureView>>,
+}
+
+pub(super) fn cacheable(source: &str) -> bool {
+    !source.starts_with(engine::scene::image::EXTERNAL_TEXTURE_PREFIX)
+        && !source.starts_with(engine::scene::image::GPU_VIEW_TEXTURE_PREFIX)
 }

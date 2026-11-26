@@ -10,6 +10,10 @@ struct View {
 
 @group(0) @binding(0) var<uniform> view: View;
 
+fn vertex_view(_id: u32) {}
+fn fragment_view(_id: u32) {}
+fn table_scissor(_position: vec2<f32>) -> f32 { return 1.0; }
+
 fn to_srgb(value: vec3<f32>) -> vec3<f32> {
     return select(12.92 * value, 1.055 * pow(value, vec3(1.0 / 2.4)) - 0.055, value > vec3(0.0031308));
 }

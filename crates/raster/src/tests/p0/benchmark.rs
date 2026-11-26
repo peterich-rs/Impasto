@@ -196,7 +196,10 @@ pub(super) fn run_in_format(
                 "gradient_lut_hits": r.gradient_lut_hits, "copy_pixels": r.copy_pixels,
                 "blur_pixels": r.blur_pixels, "offscreen_alloc_bytes": r.offscreen_alloc_bytes,
                 "offscreen_peak_bytes": r.offscreen_peak_bytes, "pooled_texture_bytes": r.pooled_texture_bytes,
-                "stencil_draws": r.stencil_draws, "early_z_instances": r.early_z_instances,
+                "stencil_draws": r.stencil_draws, "stencil_batches": r.stencil_batches,
+                "spatial_merges": r.spatial_merges, "msdf_misses": r.msdf_misses,
+                "early_z_instances": r.early_z_instances,
+                "synchronous_pipeline_compiles": r.synchronous_pipeline_compiles,
                 "transient_bytes": r.transient_bytes,
         });
         samples.push(json!({

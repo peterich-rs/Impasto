@@ -17,12 +17,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = env::var_os("OUT_DIR").ok_or_else(|| io::Error::other("missing OUT_DIR"))?;
     let mut declarations = String::new();
     for (name, variants) in [
-        ("UI", 4),
-        ("TEXT", 8),
-        ("IMAGE", 2),
-        ("IMAGE_ARRAY", 2),
-        ("SMALL_IMAGES", 2),
-        ("EXTERNAL_IMAGE", 2),
+        ("UI", 16),
+        ("TEXT", 16),
+        ("IMAGE", 4),
+        ("IMAGE_ARRAY", 4),
+        ("SMALL_IMAGES", 4),
+        ("EXTERNAL_IMAGE", 4),
         ("BLUR", 4),
         ("INLINE_IMAGE", 1),
     ] {
@@ -69,7 +69,17 @@ fn assemble(name: &str, variant: usize) -> String {
     let mut enable = "";
     let mut suffix = "";
     let source = match name {
-        "UI" => include_str!("src/pipelines/ui.wgsl").to_owned(),
+        "UI" => {
+            let ui = include_str!("src/pipelines/ui.wgsl");
+            if variant & 8 == 0 {
+                ui.replace(
+                    "@interpolate(perspective, sample)",
+                    "@interpolate(perspective, center)",
+                )
+            } else {
+                ui.to_owned()
+            }
+        }
         "TEXT" => {
             if variant & 4 != 0 {
                 enable = "enable dual_source_blending;";
@@ -87,11 +97,11 @@ fn assemble(name: &str, variant: usize) -> String {
                 )
                 .replace(
                     "textureSampleLevel(image_tex,",
-                    "textureSampleLevel(image_textures[u32(data.info.y)],",
+                    "textureSampleLevel(image_textures[data.info.x >> 8u],",
                 )
                 .replace(
                     "textureSampleGrad(image_tex,",
-                    "textureSampleGrad(image_textures[u32(data.info.y)],",
+                    "textureSampleGrad(image_textures[data.info.x >> 8u],",
                 )
         }
         "SMALL_IMAGES" => {
@@ -122,7 +132,37 @@ fn assemble(name: &str, variant: usize) -> String {
         }
         _ => BLUR.to_owned(),
     };
-    let clip = if name == "BLUR" { "" } else { CLIP };
+    let state = match name {
+        "UI" => variant & 4 != 0,
+        "TEXT" => variant & 8 != 0,
+        "BLUR" => false,
+        _ => variant & 2 != 0,
+    };
+    let view = if state {
+        let (header, rest) = VIEW.split_once("@group(0)").unwrap_or((VIEW, ""));
+        let (_, common) = rest.split_once("fn to_srgb").unwrap_or((rest, ""));
+        format!(
+            "{header}{}\nfn to_srgb{common}",
+            include_str!("src/pipelines/state_table.wgsl")
+        )
+    } else {
+        VIEW.to_owned()
+    };
+    let source = if state {
+        source.replace(
+            "const USE_STATE_TABLE = false",
+            "const USE_STATE_TABLE = true",
+        )
+    } else {
+        source
+    };
+    let clip = if name == "BLUR" {
+        ""
+    } else if state {
+        include_str!("src/pipelines/state_clip.wgsl")
+    } else {
+        CLIP
+    };
     let (gradient, paints) = if matches!(name, "UI" | "TEXT") {
         let storage = if variant & 2 != 0 {
             "@group(0) @binding(2) var<storage, read> paint: array<PaintExtra>;"
@@ -134,6 +174,6 @@ fn assemble(name: &str, variant: usize) -> String {
         ("", "")
     };
     format!(
-        "{enable}\n{reduced}\n{COLOR}\n{VIEW}\n{source}\n{clip}\n{gradient}\n{paints}\n{suffix}"
+        "{enable}\n{reduced}\n{COLOR}\n{view}\n{source}\n{clip}\n{gradient}\n{paints}\n{suffix}"
     )
 }

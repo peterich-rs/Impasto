@@ -280,7 +280,7 @@ impl PaintPage {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct DynamicGroup {
     pub group: wgpu::BindGroup,
     pub offsets: [u32; 2],
@@ -302,9 +302,12 @@ pub struct FrameArena {
     uniforms: Pool,
     stops: Pool,
     paint: Pool,
+    states: Pool,
+    transforms: HashMap<[[u32; 4]; 2], u16>,
+    clips: HashMap<Vec<[u32; 4]>, u16>,
     pub lut: crate::gradient_lut::GradientLut,
     paint_entries: HashMap<[u32; size_of::<PaintExtra>() / 4], Address>,
-    groups: HashMap<(usize, Globals), wgpu::BindGroup>,
+    groups: HashMap<(usize, Globals, bool), wgpu::BindGroup>,
     effect_value_groups: HashMap<usize, wgpu::BindGroup>,
     pub buffers_created: u32,
     pub bind_groups_created: u32,
@@ -349,6 +352,13 @@ impl FrameArena {
                 ..Pool::new(STOPS_BYTES, wgpu::BufferUsages::UNIFORM)
             },
             paint,
+            states: Pool {
+                max_slab: (1024 * 1024)
+                    .min(usize::try_from(gpu.caps.max_storage_binding).unwrap_or(MAX_SLAB)),
+                ..Pool::new(64 * 1024, wgpu::BufferUsages::STORAGE)
+            },
+            transforms: HashMap::new(),
+            clips: HashMap::new(),
             paint_entries: HashMap::new(),
             lut: crate::gradient_lut::GradientLut::new(gpu),
             groups: HashMap::new(),
@@ -366,10 +376,13 @@ impl FrameArena {
         self.vertices.reset();
         let uniforms_changed = self.uniforms.reset();
         let paint_changed = self.paint.reset();
+        let state_changed = self.states.reset();
+        self.transforms.clear();
+        self.clips.clear();
         if uniforms_changed {
             self.effect_value_groups.clear();
         }
-        if uniforms_changed || paint_changed {
+        if uniforms_changed || paint_changed || state_changed {
             self.groups.clear();
         }
         self.stops.reset();
@@ -387,6 +400,7 @@ impl FrameArena {
             &mut self.uniforms,
             &mut self.stops,
             &mut self.paint,
+            &mut self.states,
         ] {
             pool.block = pool.initial;
             pool.peak = 0;
@@ -405,6 +419,8 @@ impl FrameArena {
         self.groups.clear();
         self.effect_value_groups.clear();
         self.paint_entries.clear();
+        self.transforms.clear();
+        self.clips.clear();
         self.lut.trim();
     }
 
@@ -414,14 +430,20 @@ impl FrameArena {
         prelude: &mut Option<wgpu::CommandEncoder>,
         resident: impl Iterator<Item = BufferUpload<'a>>,
     ) -> Result<(), Status> {
-        let immediate = [&self.vertices, &self.uniforms, &self.stops, &self.paint]
-            .into_iter()
-            .flat_map(|pool| &pool.slabs)
-            .map(|slab| BufferUpload {
-                buffer: &slab.buffer,
-                offset: 0,
-                data: &slab.data,
-            });
+        let immediate = [
+            &self.vertices,
+            &self.uniforms,
+            &self.stops,
+            &self.paint,
+            &self.states,
+        ]
+        .into_iter()
+        .flat_map(|pool| &pool.slabs)
+        .map(|slab| BufferUpload {
+            buffer: &slab.buffer,
+            offset: 0,
+            data: &slab.data,
+        });
         self.ring.encode(gpu, prelude, immediate.chain(resident))
     }
 
@@ -430,8 +452,15 @@ impl FrameArena {
     }
 
     pub fn bytes_uploaded(&self) -> [u64; 4] {
-        [&self.vertices, &self.uniforms, &self.stops, &self.paint]
-            .map(|pool| pool.slabs.iter().map(|slab| slab.data.len() as u64).sum())
+        let mut bytes = [&self.vertices, &self.uniforms, &self.stops, &self.paint]
+            .map(|pool| pool.slabs.iter().map(|slab| slab.data.len() as u64).sum());
+        bytes[1] += self
+            .states
+            .slabs
+            .iter()
+            .map(|slab| slab.data.len() as u64)
+            .sum::<u64>();
+        bytes
     }
 
     pub fn vertex_limit<T: bytemuck::Pod>(gpu: &Gpu) -> usize {
@@ -605,12 +634,91 @@ impl FrameArena {
         Ok((PaintPage { stops, extra }, extra.offset / PAINT_EXTRA_BYTES))
     }
 
+    pub fn state(
+        &mut self,
+        gpu: &Gpu,
+        transform: [[f32; 4]; 2],
+        clip: Vec<[f32; 4]>,
+    ) -> Result<(Address, u32), Status> {
+        let transform_key = bytemuck::cast(transform);
+        let clip_key = bytemuck::cast_slice::<_, [u32; 4]>(&clip);
+        let clip_index = |clips: &HashMap<Vec<[u32; 4]>, u16>| {
+            if clip.is_empty() {
+                Some(0)
+            } else {
+                clips.get(clip_key).copied()
+            }
+        };
+        let mut transform_id = self.transforms.get(&transform_key).copied();
+        let mut clip_id = clip_index(&self.clips);
+        let new_words = usize::from(transform_id.is_none()) * 2
+            + if clip_id.is_none() { clip.len() } else { 0 };
+        if new_words != 0 {
+            if self
+                .states
+                .slabs
+                .get(self.states.active)
+                .is_some_and(|slab| slab.data.len() + new_words * 16 > slab.capacity)
+            {
+                self.states.active += 1;
+                self.transforms.clear();
+                self.clips.clear();
+                transform_id = None;
+                clip_id = clip_index(&self.clips);
+            }
+            // A new storage page always starts with a transform. Clip word
+            // zero can therefore mean no clip without allocating a sentinel.
+            let mut words = Vec::with_capacity(14);
+            if transform_id.is_none() {
+                words.extend(transform);
+            }
+            if clip_id.is_none() {
+                words.extend_from_slice(&clip);
+            }
+            let (address, created) = self.states.push(gpu, bytemuck::cast_slice(&words), 16)?;
+            self.buffers_created += u32::from(created);
+            let start = u16::try_from(address.offset / 16).map_err(|_| Status::OutOfMemory)?;
+            let mut next = start;
+            if transform_id.is_none() {
+                self.transforms.insert(transform_key, start);
+                transform_id = Some(start);
+                if clip_id.is_none() {
+                    next = start.checked_add(2).ok_or(Status::OutOfMemory)?;
+                }
+            }
+            if clip_id.is_none() {
+                self.clips.insert(clip_key.to_vec(), next);
+                clip_id = Some(next);
+            }
+        }
+        let transform = u32::from(transform_id.ok_or(Status::BadScene)?);
+        let clip = u32::from(clip_id.ok_or(Status::BadScene)?);
+        Ok((
+            Address {
+                slab: self.states.active,
+                offset: 0,
+            },
+            transform | (clip << 16),
+        ))
+    }
+
     pub fn group(
         &mut self,
         gpu: &Gpu,
         layouts: &Layouts,
         view: Address,
         extra: Extra,
+    ) -> DynamicGroup {
+        self.draw_group(gpu, layouts, view, extra, false)
+    }
+
+    pub fn draw_group(
+        &mut self,
+        gpu: &Gpu,
+        layouts: &Layouts,
+        view: Address,
+        extra: Extra,
+        state: bool,
     ) -> DynamicGroup {
         let (kind, offset) = match extra {
             Extra::Paint(page) => (
@@ -624,7 +732,7 @@ impl FrameArena {
             Extra::RuntimeEffect(params) => (Globals::RuntimeEffect(params.slab), params.offset),
             Extra::None => (Globals::View, 0),
         };
-        let key = (view.slab, kind);
+        let key = (view.slab, kind, state);
         if self.groups.len() >= MAX_GLOBAL_GROUPS
             && !self.groups.contains_key(&key)
             && let Some(evicted) = self.groups.keys().next().copied()
@@ -642,12 +750,16 @@ impl FrameArena {
                     size: wgpu::BufferSize::new(size),
                 }),
             };
-            let view = binding(
-                0,
-                &self.uniforms.slabs[view.slab].buffer,
-                size_of::<ViewUniform>() as u64,
-            );
-            let mut entries = vec![view];
+            let mut entries = if state {
+                let slab = &self.states.slabs[view.slab];
+                vec![binding(4, &slab.buffer, slab.capacity as u64)]
+            } else {
+                vec![binding(
+                    0,
+                    &self.uniforms.slabs[view.slab].buffer,
+                    size_of::<ViewUniform>() as u64,
+                )]
+            };
             let layout = match kind {
                 Globals::View => &layouts.view,
                 Globals::Paint { stops, extra } => {
@@ -686,14 +798,20 @@ impl FrameArena {
             };
             gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("impasto frame globals"),
-                layout,
+                layout: layouts
+                    .state
+                    .as_ref()
+                    .filter(|_| state)
+                    .map_or(layout, |layouts| {
+                        &layouts[usize::from(kind != Globals::View)]
+                    }),
                 entries: &entries,
             })
         });
         DynamicGroup {
             group: group.clone(),
-            offsets: [view.offset, offset],
-            count: if kind == Globals::View { 1 } else { 2 },
+            offsets: [if state { 0 } else { view.offset }, offset],
+            count: (if kind == Globals::View { 1 } else { 2 }) - usize::from(state),
         }
     }
 }

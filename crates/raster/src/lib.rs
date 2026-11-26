@@ -5,6 +5,7 @@ mod android_vulkan;
 mod arena;
 mod atlas;
 mod batch;
+mod batcher;
 mod color;
 mod compiler;
 mod compositor;
@@ -12,11 +13,14 @@ mod compositor_tracks;
 mod compute_blur;
 mod damage;
 mod fonts;
+mod fringe;
 mod gpu;
 mod gpu_view;
 mod gradient_lut;
+mod graph;
 mod image_upload;
 mod inline_image;
+mod msdf;
 mod outline;
 mod pipeline_disk_cache;
 mod pipelines;
@@ -25,6 +29,7 @@ mod profiler;
 mod resident;
 mod runtime_effect;
 mod shaper;
+mod state_table;
 mod status;
 mod text_index;
 mod textures;
@@ -521,6 +526,7 @@ impl Rasterizer {
                         .get(source)
                         .map(|image| (image.width(), image.height()))
                 },
+                device.gpu.analytic_canvas_curves(),
             )
         } else {
             (None, HashMap::new())

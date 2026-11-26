@@ -5,5 +5,5 @@ fn clip_coverage(position: vec2<f32>) -> f32 {
         let uv = (window_px - view.mask_rect.xy) * view.mask_rect.zw;
         coverage *= textureSampleLevel(clip_mask_tex, clip_mask_sampler, uv, 0.0).r;
     }
-    return coverage;
+    return coverage * table_scissor(position);
 }

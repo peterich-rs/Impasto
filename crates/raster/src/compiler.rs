@@ -13,8 +13,8 @@ use std::sync::{
 
 use engine::scene::{
     BlendMode, BoxShadow, CanvasBrush, CanvasComposite, CanvasIsolation, CanvasList, CanvasOp,
-    CanvasPath, Command, ContentMode, Gradient, Picture, Shadow, ShapedParagraph, ShapedRun,
-    SpanPaint,
+    CanvasPath, Command, ContentMode, Gradient, PathVerb, Picture, Shadow, ShapedParagraph,
+    ShapedRun, SpanPaint,
 };
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 
@@ -438,13 +438,17 @@ pub fn compile(
     context: &mut CompileContext<'_, '_, '_>,
     pool: Option<&rayon::ThreadPool>,
 ) -> Result<CompiledPicture, Status> {
-    let prepared = prepare(picture, context.point_scale, pool, &mut |source| {
-        context.textures.load(context.gpu, source, context.resolve)
-    })?;
+    let prepared = prepare(
+        picture,
+        context.point_scale,
+        pool,
+        context.gpu.analytic_canvas_curves(),
+        &mut |source| context.textures.load(context.gpu, source, context.resolve),
+    )?;
     prepared.install(context.gpu, context.device_generation, context.stream_mesh)
 }
 
-type Tessellation = lyon_tessellation::VertexBuffers<[f32; 3], u32>;
+pub(crate) type Tessellation = lyon_tessellation::VertexBuffers<[f32; 3], u32>;
 
 /// Upload-free geometry prepared on a worker and installed in paint order.
 pub struct PreparedPicture {
@@ -490,6 +494,7 @@ pub fn prepare(
     picture: &Picture,
     point_scale: f32,
     pool: Option<&rayon::ThreadPool>,
+    analytic_curves: bool,
     load: &mut dyn FnMut(&Arc<str>) -> Load,
 ) -> Result<PreparedPicture, Status> {
     let origin = picture.origin;
@@ -497,6 +502,7 @@ pub fn prepare(
         load,
         pool,
         point_scale,
+        analytic_curves,
         stack: vec![root_state()],
         scopes: vec![Scope {
             state: root_state(),
@@ -690,6 +696,7 @@ struct Compiler<'a> {
     load: &'a mut dyn FnMut(&Arc<str>) -> Load,
     pool: Option<&'a rayon::ThreadPool>,
     point_scale: f32,
+    analytic_curves: bool,
     stack: Vec<ScopeState>,
     scopes: Vec<Scope>,
     images: Vec<(Arc<str>, bool)>,
@@ -1334,6 +1341,10 @@ impl Compiler<'_> {
         let ops = list.ops();
         let stencil = std::env::var("IMPASTO_CANVAS_STENCIL").as_deref() != Ok("0")
             && !ops.iter().any(|op| matches!(op, CanvasOp::Clip { .. }));
+        let direct = std::env::var("IMPASTO_CANVAS_DIRECT").as_deref() != Ok("0");
+        let analytic_curves = self.analytic_curves
+            && (self.point_scale >= 2.0
+                || std::env::var("IMPASTO_CANVAS_CURVES").as_deref() == Ok("1"));
         if let Some(pool) = self.pool.filter(|_| crate::prepare::path_count(ops) >= 16) {
             // Canvas paths already contain their local transforms. Save/restore
             // and the remaining ops leave the enclosing scale unchanged.
@@ -1343,9 +1354,12 @@ impl Compiler<'_> {
                     .map(|op| match op {
                         CanvasOp::Clip { path } if path.verbs.is_empty() => Ok(None),
                         CanvasOp::Fill { path, .. } => {
-                            prepare_path(path, tolerance, stencil).map(Some)
+                            prepare_path(path, tolerance, stencil, direct, analytic_curves)
+                                .map(Some)
                         }
-                        CanvasOp::Clip { path } => prepare_path(path, tolerance, false).map(Some),
+                        CanvasOp::Clip { path } => {
+                            prepare_path(path, tolerance, false, false, false).map(Some)
+                        }
                         _ => Ok(None),
                     })
                     .collect()
@@ -1356,12 +1370,20 @@ impl Compiler<'_> {
         } else {
             for op in ops {
                 let buffers = match op {
-                    CanvasOp::Fill { path, .. } => {
-                        Some(prepare_path(path, self.tessellation_tolerance(), stencil)?)
-                    }
-                    CanvasOp::Clip { path } if !path.verbs.is_empty() => {
-                        Some(prepare_path(path, self.tessellation_tolerance(), false)?)
-                    }
+                    CanvasOp::Fill { path, .. } => Some(prepare_path(
+                        path,
+                        self.tessellation_tolerance(),
+                        stencil,
+                        direct,
+                        analytic_curves,
+                    )?),
+                    CanvasOp::Clip { path } if !path.verbs.is_empty() => Some(prepare_path(
+                        path,
+                        self.tessellation_tolerance(),
+                        false,
+                        false,
+                        false,
+                    )?),
                     _ => None,
                 };
                 self.canvas_op(op, floor, buffers)?;
@@ -1378,7 +1400,11 @@ impl Compiler<'_> {
         composite: CanvasComposite,
         prepared: PreparedPath,
     ) -> Result<Mesh, Status> {
-        let PreparedPath { buffers, stencil } = prepared;
+        let PreparedPath {
+            buffers,
+            stencil,
+            fringe,
+        } = prepared;
         let base = u32::try_from(self.vertices.len()).map_err(|_| Status::BadScene)?;
         let start = u32::try_from(self.indices.len()).map_err(|_| Status::BadScene)?;
         let bounds = mesh_bounds(&buffers.vertices);
@@ -1388,7 +1414,7 @@ impl Compiler<'_> {
         }
         let end = u32::try_from(self.indices.len()).map_err(|_| Status::BadScene)?;
         self.vertices.extend(buffers.vertices);
-        let stencil_fill = if let Some(rule) = stencil {
+        let stencil_fill = if let Some((rule, analytic)) = stencil {
             let base = u32::try_from(self.vertices.len()).map_err(|_| Status::BadScene)?;
             let [x, y, w, h] = bounds;
             self.vertices.extend([
@@ -1404,6 +1430,7 @@ impl Compiler<'_> {
             let cover_end = u32::try_from(self.indices.len()).map_err(|_| Status::BadScene)?;
             Some(StencilFill {
                 rule,
+                analytic,
                 cover_indices: end..cover_end,
             })
         } else {
@@ -1413,6 +1440,7 @@ impl Compiler<'_> {
             buffer: Arc::clone(&self.meshes),
             indices: start..end,
             stencil_fill,
+            fringe,
             bounds,
             brush,
             composite,
@@ -1753,28 +1781,134 @@ fn canvas_image_sample(
 
 struct PreparedPath {
     buffers: Tessellation,
-    stencil: Option<engine::scene::FillRule>,
+    stencil: Option<(engine::scene::FillRule, bool)>,
+    fringe: Option<Box<[[f32; 2]]>>,
 }
 
-fn prepare_path(path: &CanvasPath, tolerance: f32, stencil: bool) -> Result<PreparedPath, Status> {
+fn prepare_path(
+    path: &CanvasPath,
+    tolerance: f32,
+    stencil: bool,
+    direct: bool,
+    analytic_curves: bool,
+) -> Result<PreparedPath, Status> {
+    let fringe = direct
+        .then(|| crate::fringe::convex(path, tolerance))
+        .flatten();
     // Small shapes already tessellate cheaply. A bounded fan lets the GPU
     // resolve the more complex overlaps without overflowing 8-bit winding.
     if stencil
-        && path.verbs.len() >= 16
-        && let Some(buffers) = stencil_fan(path, tolerance)
+        && fringe.is_none()
+        && (path.verbs.len() >= 16
+            || analytic_curves
+                && path
+                    .verbs
+                    .iter()
+                    .any(|verb| matches!(verb, PathVerb::Quad(..) | PathVerb::Cubic(..))))
+        && let Some(buffers) = stencil_fan(path, tolerance, analytic_curves)
     {
         return Ok(PreparedPath {
             buffers,
-            stencil: Some(path.fill),
+            stencil: Some((path.fill, analytic_curves)),
+            fringe: None,
         });
     }
     Ok(PreparedPath {
         buffers: tessellate(path, tolerance)?,
         stencil: None,
+        fringe,
     })
 }
 
-fn stencil_fan(path: &CanvasPath, tolerance: f32) -> Option<Tessellation> {
+fn stencil_fan(path: &CanvasPath, tolerance: f32, analytic_curves: bool) -> Option<Tessellation> {
+    if !analytic_curves {
+        return flattened_stencil_fan(path, tolerance);
+    }
+    use lyon_geom::{CubicBezierSegment, Point, QuadraticBezierSegment};
+    use lyon_path::Event;
+
+    // The counter wraps at 256. Parity uses inversion and has no winding limit.
+    let limit: usize = match path.fill {
+        engine::scene::FillRule::NonZero => 255,
+        engine::scene::FillRule::EvenOdd => 16_384,
+    };
+    let mut mesh = Tessellation::new();
+    let mut patches = Vec::new();
+    let mut first = 0u32;
+    let mut previous = 0u32;
+    let mut length = 0usize;
+    for event in tessellation_path(&path.verbs).iter() {
+        let remaining = limit.checked_sub(mesh.indices.len() / 3 + patches.len())?;
+        if remaining == 0 {
+            return None;
+        }
+        if let Event::Begin { at } = event {
+            first = u32::try_from(mesh.vertices.len()).ok()?;
+            previous = first;
+            length = 1;
+            mesh.vertices.push([at.x, at.y, 1.0]);
+            continue;
+        }
+        let mut append = |to: Point<f32>| -> Option<()> {
+            let index = u32::try_from(mesh.vertices.len()).ok()?;
+            if length >= 2 {
+                mesh.indices.extend([first, previous, index]);
+            }
+            mesh.vertices.push([to.x, to.y, 1.0]);
+            previous = index;
+            length += 1;
+            Some(())
+        };
+        match event {
+            Event::Line { to, .. } => append(to)?,
+            Event::Quadratic { from, ctrl, to } => {
+                append(to)?;
+                patches.push(QuadraticBezierSegment { from, ctrl, to });
+            }
+            Event::Cubic {
+                from,
+                ctrl1,
+                ctrl2,
+                to,
+            } => {
+                // Store curve patches in scene coordinates so this subdivision
+                // is independent of the layer's presentation transform.
+                let cubic = CubicBezierSegment {
+                    from,
+                    ctrl1,
+                    ctrl2,
+                    to,
+                };
+                let segments = usize::try_from(cubic.num_quadratics(0.01)).ok()?;
+                if segments > remaining / 2 {
+                    return None;
+                }
+                let start = patches.len();
+                cubic.for_each_quadratic_bezier(0.01, &mut |quad| patches.push(*quad));
+                // Each sub-curve contributes a chord to the contour fan.
+                for quad in &patches[start..] {
+                    append(quad.to)?;
+                }
+            }
+            Event::End { .. } | Event::Begin { .. } => {}
+        }
+    }
+    for patch in patches {
+        let index = u32::try_from(mesh.vertices.len()).ok()?;
+        mesh.vertices.extend([
+            [patch.from.x, patch.from.y, 2.0],
+            [patch.ctrl.x, patch.ctrl.y, 3.0],
+            [patch.to.x, patch.to.y, 4.0],
+        ]);
+        mesh.indices.extend([index, index + 1, index + 2]);
+    }
+    if mesh.indices.is_empty() || mesh.indices.len() / 3 > limit {
+        return None;
+    }
+    Some(mesh)
+}
+
+fn flattened_stencil_fan(path: &CanvasPath, tolerance: f32) -> Option<Tessellation> {
     use lyon_path::{Event, iterator::PathIterator};
 
     const MAX_TRIANGLES: usize = 255;

@@ -274,6 +274,7 @@ impl AtlasTiles {
 pub enum AtlasBinding {
     #[default]
     Resident,
+    DistanceField,
     Temporary {
         color: bool,
         page: usize,
@@ -986,7 +987,7 @@ impl Atlas {
         };
         let blank = &self.blank.view;
         let (slot, mask, color) = match binding {
-            AtlasBinding::Resident => (
+            AtlasBinding::Resident | AtlasBinding::DistanceField => (
                 &mut self.material,
                 self.mask
                     .texture

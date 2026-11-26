@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use engine::scene::{
-    BackdropMaterial, CanvasComposite, CanvasOp, CanvasPath, Command, ContentMode, CornerShape,
-    FillRule, Layer, LayerId, LayerKind, LayerTree, PathVerb, Picture, PictureId,
+    BackdropMaterial, CanvasComposite, CanvasPath, Command, ContentMode, CornerShape, FillRule,
+    Layer, LayerId, LayerKind, LayerTree, PathVerb, Picture, PictureId,
 };
 
 use super::{
@@ -310,9 +310,7 @@ fn bench_canvas_mixed_paths() {
         60,
         PixelSize::new(800, 600),
         |frame| {
-            let mut ops = vec![CanvasOp::Clip {
-                path: path([0.0, 0.0, 800.0, 600.0]),
-            }];
+            let mut ops = Vec::with_capacity(400);
             for index in 0..200u16 {
                 let x = f32::from(index % 20) * 40.0;
                 let y = f32::from(index / 20) * 58.0;

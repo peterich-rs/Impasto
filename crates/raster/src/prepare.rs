@@ -46,6 +46,7 @@ pub(crate) fn path_count(ops: &[CanvasOp]) -> usize {
 pub(crate) fn pictures<'a>(
     pending: impl Iterator<Item = (&'a Picture, f32)>,
     dimensions: impl Fn(&str) -> Option<(f32, f32)>,
+    analytic_curves: bool,
 ) -> (
     Option<&'static ThreadPool>,
     HashMap<PictureId, Result<PreparedPicture, Status>>,
@@ -97,15 +98,16 @@ pub(crate) fn pictures<'a>(
         eligible
             .into_par_iter()
             .map(|(picture, scale, sources)| {
-                let prepared = compiler::prepare(picture, scale, Some(pool), &mut |source| {
-                    sources.iter().find(|(known, _)| known == source).map_or(
-                        Load::Failed,
-                        |(_, (width, height))| Load::Ready {
-                            width: *width,
-                            height: *height,
-                        },
-                    )
-                });
+                let prepared =
+                    compiler::prepare(picture, scale, Some(pool), analytic_curves, &mut |source| {
+                        sources.iter().find(|(known, _)| known == source).map_or(
+                            Load::Failed,
+                            |(_, (width, height))| Load::Ready {
+                                width: *width,
+                                height: *height,
+                            },
+                        )
+                    });
                 (picture.id, prepared)
             })
             .collect()

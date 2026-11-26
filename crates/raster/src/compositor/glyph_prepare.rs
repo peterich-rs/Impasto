@@ -29,6 +29,7 @@ impl Compositor {
             ]
         });
         let mut keys = HashSet::new();
+        let mut distance = HashSet::new();
         let mut remaining = vec![(scene.tree.root, IDENTITY)];
         'layers: while let Some((id, parent)) = remaining.pop() {
             let Some(layer) = scene.tree.layers.get(id.0 as usize) else {
@@ -79,7 +80,16 @@ impl Compositor {
                     })
                     .flatten()
                 {
-                    if glyph.decoration.is_some() || transform.vector(glyph.size) {
+                    if glyph.decoration.is_some() {
+                        continue;
+                    }
+                    if self.use_msdf && transform.distance_field(glyph.size) {
+                        if distance.len() < PREFETCH_LIMIT {
+                            distance.insert(crate::outline::OutlineKey::new(glyph));
+                        }
+                        continue;
+                    }
+                    if transform.vector(glyph.size) {
                         continue;
                     }
                     let position = transform.position(glyph);
@@ -99,6 +109,12 @@ impl Compositor {
                 }
             }
         }
-        self.atlas.prepare(pool, scene.fonts, keys);
+        let (atlas, msdf) = (&mut self.atlas, &mut self.msdf);
+        pool.install(|| {
+            rayon::join(
+                || atlas.prepare(pool, scene.fonts, keys),
+                || msdf.prepare(pool, scene.fonts, distance),
+            )
+        });
     }
 }

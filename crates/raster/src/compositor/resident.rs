@@ -77,7 +77,8 @@ impl Frame<'_> {
             ),
             _ => return Ok(false),
         };
-        if len == 0
+        if (self.compositor.prefer_spatial && len < 64)
+            || len == 0
             || len > FrameArena::vertex_limit::<RectVertex>(self.gpu)
             || paint_bytes > self.gpu.caps.max_storage_binding
         {
@@ -139,7 +140,10 @@ impl Frame<'_> {
             let mut glyph_pages = Vec::<Placement>::new();
             let mut glyph_vertices = Vec::new();
             if let ([Draw::Glyphs(glyphs)], Some(geometry)) = (draws, glyph_geometry) {
-                if glyphs.iter().any(|glyph| geometry.vector(glyph.size)) {
+                if glyphs.iter().any(|glyph| {
+                    geometry.vector(glyph.size)
+                        || self.compositor.use_msdf && geometry.distance_field(glyph.size)
+                }) {
                     return Ok(false);
                 }
                 for glyph in glyphs {
@@ -242,6 +246,7 @@ impl Frame<'_> {
         self.compositor.render_stats.draws += count;
         let pass = self.pending_pass(target);
         pass.draws += count;
+        pass.barrier(pass.calls.len() + 1);
         pass.calls.push(DrawCall::Resident {
             bundle,
             scissor: clip.scissor.map(|area| target.local(area)),

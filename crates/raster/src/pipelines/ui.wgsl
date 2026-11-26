@@ -7,9 +7,9 @@ override unclipped: bool = false;
 @group(1) @binding(0) var clip_mask_tex: texture_2d<f32>;
 @group(1) @binding(1) var clip_mask_sampler: sampler;
 
-fn geometry_aa(local: vec2<f32>) -> f32 {
-    if view.target_info.z > 0.0 {
-        return view.target_info.z;
+fn geometry_aa(local: vec2<f32>, width: f32) -> f32 {
+    if width > 0.0 {
+        return width;
     }
     return max(length(dpdx(local)) + length(dpdy(local)), 1e-6) * 0.5;
 }
@@ -20,7 +20,7 @@ struct RectVertex {
     @location(3) color: vec4<f32>,
     @location(4) opacity: f32,
     @location(5) paint_index: u32,
-    @location(6) depth: f32,
+    @location(6) depth: u32,
     @location(7) curve: f32,
 };
 
@@ -33,6 +33,8 @@ struct VertexOut {
     @location(4) @interpolate(flat) opacity: f32,
     @location(5) @interpolate(flat) paint_index: u32,
     @location(6) @interpolate(flat) curve: f32,
+    @location(7) @interpolate(flat) state: u32,
+    @location(8) @interpolate(flat) aa: f32,
 };
 
 fn vertex_out(data: RectVertex, p: vec3<f32>) -> VertexOut {
@@ -45,6 +47,8 @@ fn vertex_out(data: RectVertex, p: vec3<f32>) -> VertexOut {
     out.opacity = data.opacity;
     out.paint_index = data.paint_index;
     out.curve = data.curve;
+    out.state = data.depth;
+    out.aa = view.target_info.z;
     return out;
 }
 
@@ -59,6 +63,7 @@ fn rect_point(vertex: u32, data: RectVertex) -> vec2<f32> {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex: u32, data: RectVertex) -> VertexOut {
+    vertex_view(data.depth);
     return vertex_out(data, vec3<f32>(rect_point(vertex, data), 1.0));
 }
 
@@ -67,27 +72,31 @@ struct SolidOut {
     @location(0) local: vec2<f32>,
     @location(1) @interpolate(flat) half_radius: vec3<f32>,
     @location(2) @interpolate(flat) color: vec4<f32>,
+    @location(3) @interpolate(flat) state: u32,
+    @location(4) @interpolate(flat) aa: f32,
 };
 
 @vertex
 fn vs_solid(@builtin(vertex_index) vertex: u32, data: RectVertex) -> SolidOut {
+    vertex_view(data.depth);
     let p = rect_point(vertex, data);
     let half = data.rect.zw * 0.5;
     return SolidOut(view.transform * vec4(p, 0.0, 1.0),
-        p - (data.rect.xy + half), vec3(half, data.shape.x), data.color * data.opacity);
+        p - (data.rect.xy + half), vec3(half, data.shape.x), data.color * data.opacity, data.depth, view.target_info.z);
 }
 
 @vertex
 fn vs_depth_solid(@builtin(vertex_index) vertex: u32, data: RectVertex) -> SolidOut {
     let p = rect_point(vertex, data);
     let half = data.rect.zw * 0.5;
-    return SolidOut(view.transform * vec4(p, data.depth, 1.0),
-        p - (data.rect.xy + half), vec3(half, data.shape.x), data.color * data.opacity);
+    return SolidOut(view.transform * vec4(p, bitcast<f32>(data.depth), 1.0),
+        p - (data.rect.xy + half), vec3(half, data.shape.x), data.color * data.opacity, data.depth, view.target_info.z);
 }
 
 @fragment
 fn fs_solid(in: SolidOut) -> @location(0) vec4<f32> {
-    let aa = geometry_aa(in.local);
+    fragment_view(in.state);
+    let aa = geometry_aa(in.local, in.aa);
     let d = sd_rounded_box(in.local, in.half_radius.xy, in.half_radius.z);
     let color = in.color * clamp(0.5 - d / aa, 0.0, 1.0);
     if unclipped { return color; }
@@ -199,10 +208,12 @@ struct ShadowOut {
     @location(2) @interpolate(flat) radii: vec4<f32>,
     @location(3) @interpolate(flat) shape: vec3<f32>,
     @location(4) @interpolate(flat) color: vec4<f32>,
+    @location(5) @interpolate(flat) state: u32,
 };
 
 @vertex
 fn vs_shadow(@builtin(vertex_index) vertex: u32, data: RectVertex) -> ShadowOut {
+    vertex_view(data.depth);
     let extra = load_paint(data.paint_index);
     var p = rect_point(vertex % 6u, data);
     if hollow_shadow {
@@ -247,7 +258,7 @@ fn vs_shadow(@builtin(vertex_index) vertex: u32, data: RectVertex) -> ShadowOut 
     let curve = select(2.0, data.curve, shaped);
     return ShadowOut(view.transform * vec4(p, 0.0, 1.0),
         p - (data.rect.xy + data.rect.zw * 0.5), half, radii,
-        vec3(sigma, curve, f32(shaped)), data.color * data.opacity);
+        vec3(sigma, curve, f32(shaped)), data.color * data.opacity, data.depth);
 }
 
 fn shadow_alpha(in: ShadowOut) -> f32 {
@@ -301,13 +312,15 @@ fn shadow_alpha(in: ShadowOut) -> f32 {
 
 @fragment
 fn fs_shadow(in: ShadowOut) -> @location(0) vec4<f32> {
+    fragment_view(in.state);
     return in.color * shadow_alpha(in) * clip_coverage(in.position.xy);
 }
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    fragment_view(in.state);
     let data = in;
-    let aa = geometry_aa(in.local_coverage.xy);
+    let aa = geometry_aa(in.local_coverage.xy, in.aa);
     let p = in.local_coverage.xy;
     let extra = load_paint(data.paint_index);
     let kind = u32(data.shape.z);
@@ -344,7 +357,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         color = color * clip_coverage(in.position.xy);
     }
     color = color * data.opacity;
-    if output_dither && view.info.w > 0.0 && color.a >= 1.0 && (u32(data.shape.w) & 1u) != 0u {
+    if output_dither && color.a >= 1.0 && (u32(data.shape.w) & 1u) != 0u {
         let peak = max(color.r, max(color.g, color.b));
         // Fade out dark-gradient dithering where the linear channels are bright.
         if peak < 0.65 {
@@ -377,7 +390,18 @@ fn vs_depth_rect(@builtin(vertex_index) vertex: u32, data: RectVertex) -> DepthO
         vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0),
     );
     let scene = data.rect.xy + corners[vertex] * data.rect.zw;
-    return DepthOut(view.transform * vec4(scene, data.depth, 1.0), data.color);
+    return DepthOut(view.transform * vec4(scene, bitcast<f32>(data.depth), 1.0), data.color);
+}
+
+@vertex
+fn vs_core_rect(@builtin(vertex_index) vertex: u32, data: RectVertex) -> DepthOut {
+    vertex_view(data.depth);
+    let corners = array<vec2<f32>, 6>(
+        vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
+        vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0),
+    );
+    let scene = data.rect.xy + corners[vertex] * data.rect.zw;
+    return DepthOut(view.transform * vec4(scene, 0.0, 1.0), data.color);
 }
 
 @fragment
@@ -393,5 +417,25 @@ fn vs_stencil(@location(0) vertex: vec3<f32>) -> @builtin(position) vec4<f32> {
 
 @fragment
 fn fs_stencil() -> @location(0) vec4<f32> {
+    return vec4(0.0);
+}
+
+struct WindingOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(perspective, sample) uv: vec2<f32>,
+    @location(1) @interpolate(flat) curve: u32,
+};
+
+@vertex
+fn vs_winding(@location(0) vertex: vec3<f32>) -> WindingOut {
+    let uv = vec2(clamp((vertex.z - 2.0) * 0.5, 0.0, 1.0), select(0.0, 1.0, vertex.z == 4.0));
+    return WindingOut(view.transform * vec4(vertex.xy, 0.0, 1.0), uv, u32(vertex.z >= 2.0));
+}
+
+@fragment
+fn fs_winding(in: WindingOut) -> @location(0) vec4<f32> {
+    if in.curve != 0u && in.uv.x * in.uv.x > in.uv.y {
+        discard;
+    }
     return vec4(0.0);
 }

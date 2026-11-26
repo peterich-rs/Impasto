@@ -137,6 +137,7 @@ pub const GLYPH_DECORATION: u32 = 4;
 pub const GLYPH_GAMMA: u32 = 8;
 pub const GLYPH_LCD: u32 = 16;
 pub const GLYPH_TEMPORARY_PAGE: u32 = 32;
+pub const GLYPH_MSDF: u32 = 64;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageInstance {
@@ -152,7 +153,7 @@ pub struct ImageVertex {
     pub rect: [f32; 4],
     pub uv: [f32; 4],
     pub color: [f32; 4],
-    pub meta: [f32; 4],
+    pub meta: [u32; 4],
 }
 
 impl ImageInstance {
@@ -167,7 +168,7 @@ impl ImageInstance {
             rect: self.rect,
             uv: self.uv,
             color: self.color,
-            meta: [flags as f32, 0.0, 0.0, 0.0],
+            meta: [flags, 0, 0, 0],
         }
     }
 }
@@ -175,6 +176,17 @@ impl ImageInstance {
 pub const IMAGE_NEAREST: u32 = 1;
 pub const IMAGE_PREMULTIPLIED_SRGB: u32 = 2;
 pub const IMAGE_BASE_LEVEL: u32 = 4;
+// This CPU proof is independent of the mip flags in bits 3 and 4.
+pub(crate) const IMAGE_OPAQUE: u32 = 64;
+
+impl ImageVertex {
+    pub(crate) fn with_opacity_proof(mut self, opaque: bool) -> Self {
+        if opaque {
+            self.meta[0] |= IMAGE_OPAQUE;
+        }
+        self
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GpuMeshBuffer {
@@ -244,6 +256,7 @@ pub struct Mesh {
     pub buffer: std::sync::Arc<std::sync::OnceLock<MeshBuffer>>,
     pub indices: std::ops::Range<u32>,
     pub stencil_fill: Option<StencilFill>,
+    pub fringe: Option<Box<[[f32; 2]]>>,
     pub bounds: [f32; 4],
     pub brush: Brush,
     pub composite: engine::scene::CanvasComposite,
@@ -252,6 +265,7 @@ pub struct Mesh {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StencilFill {
     pub rule: FillRule,
+    pub analytic: bool,
     pub cover_indices: std::ops::Range<u32>,
 }
 
