@@ -1,4 +1,4 @@
-import type { NativeHttpEvent, NativeHttpRequest } from "./native.d.ts";
+import type { NativeHttpEvent, NativeHttpRequest } from "@impasto/http/native";
 
 export function send(
   _request: NativeHttpRequest,

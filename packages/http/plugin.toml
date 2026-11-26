@@ -1,0 +1,13 @@
+[plugin]
+platforms = ["macos", "ios", "android"]
+min_impasto_version = "0.1.0"
+
+[rust]
+path = "rust"
+
+[android]
+path = "android"
+package = "dev.impasto.plugins.http"
+
+[android.permissions]
+"android.permission.INTERNET" = ["@impasto/http/native#send"]

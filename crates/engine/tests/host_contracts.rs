@@ -434,8 +434,6 @@ fn module_config_literal_and_shared_slots_keep_their_defaults() {
         transport_clock: None,
         script_execution: Default::default(),
         settle: Arc::new(|_token| Settle::new(|_result| {})),
-        app_state: shared("active".to_owned()),
-        launch_url: shared(Some("impasto://open".to_owned())),
     };
     match config.registry.call("Clipboard", "getString", &[]) {
         Ok(PluginValue::Str(text)) => assert_eq!(text, "clip"),
@@ -445,8 +443,6 @@ fn module_config_literal_and_shared_slots_keep_their_defaults() {
     assert!(narrowed.registry.module("Clipboard").is_none());
 
     let disconnected = ModuleConfig::disconnected();
-    assert_eq!(shared_read(&disconnected.app_state), "active");
-    assert!(shared_read(&disconnected.launch_url).is_none());
     (disconnected.settle)(1).send(PluginResult::Failed {
         message: "ignored".into(),
     });

@@ -1,8 +1,9 @@
+import { View as HostView } from "@impasto/solid-renderer/host";
 /** Info page: platform, versions, memory. */
 import { createRenderEffect, createSignal, For, Show } from "solid-js";
 import { Text, useTheme } from "@impasto/solid-ui";
 import { scene, readMetrics } from "@impasto/solid-renderer";
-import * as raw from "../native.js";
+import * as raw from "@impasto/devtools/native";
 type Row = [string, string];
 function readIfAvailable<T>(read: () => T): T | null {
   try {
@@ -71,7 +72,7 @@ export function InfoPage() {
     },
   );
   return (
-    <view
+    <HostView
       style={{
         width: "100%",
         height: "100%",
@@ -104,6 +105,6 @@ export function InfoPage() {
           读取中…
         </Text>
       </Show>
-    </view>
+    </HostView>
   );
 }

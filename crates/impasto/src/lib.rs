@@ -1,18 +1,20 @@
 //! Rust API for modules linked into an Impasto application.
 
 mod context;
-mod http;
+mod diagnostics;
 pub mod os;
+mod os_channel;
 mod runtime;
 mod texture;
 mod value;
 
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
-pub use context::{AppPaths, EventEmitter, Lifecycle, PathError, PluginContext, Subscription};
-#[doc(hidden)]
-pub use http::HttpStreamSender;
-pub use http::{HttpChunk, HttpClient, HttpError, HttpRequest, HttpResponse, HttpStream};
+pub use context::{
+    AppPaths, DiagnosticsSink, EventEmitter, Lifecycle, PathError, PluginContext, Subscription,
+    WindowState,
+};
+pub use diagnostics::DiagnosticsSource;
 pub use impasto_macros::{ImpastoEvents, ImpastoType, export, method, module, object};
 pub use javascript::host::CancelToken;
 pub use runtime::{BlockingTask, FutureTask, Runtime, RuntimeBackend, Task, TaskError};
@@ -38,6 +40,10 @@ pub struct ModuleDescriptor {
     pub specifier: &'static str,
     pub typescript: String,
     pub exports: Vec<&'static str>,
+    /// Calling conventions indexed by JavaScript export.
+    pub export_signatures: BTreeMap<&'static str, String>,
+    #[doc(hidden)]
+    pub selectable_exports: bool,
 }
 
 impl ModuleDescriptor {
@@ -49,6 +55,8 @@ impl ModuleDescriptor {
                 .typescript_declaration()
                 .map_err(PluginInitError::new)?,
             exports: module.export_names().collect(),
+            export_signatures: module.export_signatures().map_err(PluginInitError::new)?,
+            selectable_exports: false,
         })
     }
 }
@@ -79,6 +87,11 @@ pub trait ImpastoError {
 pub trait ImpastoPlugin: Send + Sync + 'static {
     fn describe(&self) -> Result<ModuleDescriptor, PluginInitError>;
     fn build_module(&self, ctx: &PluginContext) -> Result<abi::Module, PluginInitError>;
+
+    #[doc(hidden)]
+    fn selectable_exports(&self) -> bool {
+        false
+    }
 }
 
 pub trait ImpastoEvents: 'static {
@@ -105,7 +118,8 @@ impl PluginRegistrar {
         self.plugins
             .iter()
             .map(|plugin| {
-                let module = plugin.describe()?;
+                let mut module = plugin.describe()?;
+                module.selectable_exports = plugin.selectable_exports();
                 if !names.insert(module.name) || !specifiers.insert(module.specifier) {
                     return Err(PluginInitError::new(format!(
                         "duplicate native module {} ({})",
@@ -128,7 +142,9 @@ impl PluginRegistrar {
                     .map_err(|error| {
                         PluginInitError::new(format!("{}: {error}", expected.specifier))
                     })?;
-                if ModuleDescriptor::from_module(&module)? != expected {
+                let mut actual = ModuleDescriptor::from_module(&module)?;
+                actual.selectable_exports = plugin.selectable_exports();
+                if actual != expected {
                     return Err(PluginInitError::new(format!(
                         "{}: runtime exports differ from the declaration",
                         expected.specifier
@@ -144,6 +160,67 @@ impl PluginRegistrar {
 pub mod macro_support {
     pub use crate::runtime::scoped;
     pub use crate::value::{decode_arg, decode_field, encode_error, finish_value};
+
+    pub trait ExportSelection {
+        const SPECIFIER: &'static str;
+        const TABLE: Option<&'static str> = None;
+    }
+
+    pub struct AllExports;
+
+    impl ExportSelection for AllExports {
+        const SPECIFIER: &'static str = "";
+    }
+
+    /// The generated table lists only modules whose bindings should be trimmed.
+    pub const fn native_export_enabled<S: ExportSelection>(name: &str) -> bool {
+        let Some(table) = S::TABLE else {
+            return true;
+        };
+        let bytes = table.as_bytes();
+        let specifier = S::SPECIFIER.as_bytes();
+        let name = name.as_bytes();
+        let mut cursor = 0;
+        let mut selected = false;
+        while cursor < bytes.len() {
+            let start = cursor;
+            while cursor < bytes.len() && bytes[cursor] != b'\t' && bytes[cursor] != b'\n' {
+                cursor += 1;
+            }
+            let module = same_bytes(bytes, start, cursor, specifier);
+            if cursor == bytes.len() || bytes[cursor] == b'\n' {
+                cursor += 1;
+                continue;
+            }
+            cursor += 1;
+            let start = cursor;
+            while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                cursor += 1;
+            }
+            if module {
+                selected = true;
+                if same_bytes(bytes, start, cursor, name) {
+                    return true;
+                }
+            }
+            cursor += 1;
+        }
+        !selected
+    }
+
+    const fn same_bytes(bytes: &[u8], start: usize, end: usize, expected: &[u8]) -> bool {
+        if end - start != expected.len() {
+            return false;
+        }
+        let mut index = 0;
+        while index < expected.len() {
+            if bytes[start + index] != expected[index] {
+                return false;
+            }
+            index += 1;
+        }
+        true
+    }
 }
 
 #[doc(hidden)]

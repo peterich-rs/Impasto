@@ -56,30 +56,12 @@ export type ViewEvents = ClickEvent &
   ZoomEvent &
   GestureEvent &
   WheelEvent;
-type ViewProps = Children & StyleProps & ViewEvents & { ref?: NodeRef };
+export type HostProps = Children & StyleProps & ViewEvents & { ref?: NodeRef };
 
 export namespace JSX {
-  interface Elements {
-    view: ViewProps;
-    stack: ViewProps;
-    scroll: ViewProps & {
-      onScroll?: (x: number, y: number) => void;
-      axis?: "vertical" | "horizontal" | "both";
-    };
-    image: ViewProps & {
-      source?: string;
-      w?: number;
-      h?: number;
-      alt?: string;
-      mode?: "fill" | "fit" | "crop";
-      required?: boolean;
-    };
-  }
   export type Element = Node;
-  export type ElementType = keyof IntrinsicElements | ((props: any) => unknown);
-  export type IntrinsicElements = {
-    [K in keyof Elements]: Elements[K] & { ref?: NodeRef };
-  };
+  export type ElementType = (props: any) => unknown;
+  export interface IntrinsicElements {}
   export interface ElementChildrenAttribute {
     children: unknown;
   }
@@ -88,10 +70,9 @@ export namespace JSX {
   }
 }
 
-type NativeElements = JSX.IntrinsicElements;
 declare global {
   namespace JSX {
-    interface IntrinsicElements extends NativeElements {}
+    interface IntrinsicElements {}
     interface ElementChildrenAttribute {
       children: unknown;
     }
@@ -99,6 +80,6 @@ declare global {
       ref?: NodeRef;
     }
     type Element = Node;
-    type ElementType = keyof NativeElements | ((props: any) => unknown);
+    type ElementType = (props: any) => unknown;
   }
 }

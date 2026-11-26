@@ -1,4 +1,4 @@
-import type { NativeWebSocketEvent, NativeWebSocketHandle } from "./native.js";
+import type { NativeWebSocketEvent, NativeWebSocketHandle } from "@impasto/websocket/native";
 
 export const READY_STATE_CONNECTING = 0;
 export const READY_STATE_OPEN = 1;
@@ -80,7 +80,7 @@ export class WebSocketClient {
   get readyState(): number {
     if (this.#handleReleased) return this.#readyState;
     try {
-      return this.#handle.call("readyState");
+      return this.#handle.readyState();
     } catch {
       return this.#readyState;
     }
@@ -89,7 +89,7 @@ export class WebSocketClient {
   get protocol(): string {
     if (this.#handleReleased) return this.#protocol;
     try {
-      return this.#handle.call("protocol");
+      return this.#handle.protocol();
     } catch {
       return this.#protocol;
     }
@@ -98,7 +98,7 @@ export class WebSocketClient {
   get bufferedAmount(): number {
     if (this.#handleReleased) return this.#bufferedAfterClose;
     try {
-      return this.#handle.call("bufferedAmount");
+      return this.#handle.bufferedAmount();
     } catch {
       return this.#bufferedAfterClose;
     }
@@ -112,11 +112,11 @@ export class WebSocketClient {
   }
 
   sendText(text: string): number {
-    return this.#handle.call("sendText", text);
+    return this.#handle.sendText(text);
   }
 
   sendBinary(data: ArrayBuffer | ArrayBufferView): number {
-    return this.#handle.call("sendBinary", toUint8Array(data));
+    return this.#handle.sendBinary(toUint8Array(data));
   }
 
   async close(code?: number, reason?: string): Promise<WebSocketCloseInfo> {
@@ -126,7 +126,7 @@ export class WebSocketClient {
     this.#readyState = READY_STATE_CLOSING;
     this.#drainingClose = true;
     if (!this.#handleReleased) {
-      this.#handle.call("close", code ?? null, reason);
+      this.#handle.closeSocket(code ?? null, reason);
     }
     void this.#ensureDrainUntilClose();
     return this.closed;
@@ -252,7 +252,7 @@ export function openClient(
   const protocols = normalizeProtocols(options.protocols);
   const handle = transport.open(url, protocols);
   try {
-    const id = handle.call("id");
+    const id = handle.id();
     const stream = transport.events(id, options.signal);
     return new WebSocketClient(url, handle, stream);
   } catch (err) {

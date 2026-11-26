@@ -1,3 +1,4 @@
+import { View as HostView, Stack as HostStack } from "@impasto/solid-renderer/host";
 import { batch, createRoot, createSignal } from "solid-js";
 import { scene } from "@impasto/solid-renderer";
 import { Button, Column, Image, Row, Text } from "@impasto/solid-ui";
@@ -6,7 +7,7 @@ const assert = (condition: unknown, message: string) => {
   if (!condition) throw new Error(message);
 };
 
-const root = <view style={{ width: 240, height: 640, alignItems: "start" }} />;
+const root = <HostView style={{ width: 240, height: 640, alignItems: "start" }} />;
 
 createRoot((dispose) => {
   const [width, setWidth] = createSignal(10);
@@ -21,9 +22,9 @@ createRoot((dispose) => {
   function Probe(props: { onClick: () => void; onclick: number }) {
     assert(clicks === 0, "JSX must pass onClick as a callback");
     props.onClick();
-    return <view {...{ style: { width: 1 } }} ref={ref()} style={{ width: props.onclick, height: 10 }}>
-      {props.onclick > 10 && <view style={{ width: props.onclick, height: 1 }} />}
-    </view>;
+    return <HostView {...{ style: { width: 1 } }} ref={ref()} style={{ width: props.onclick, height: 10 }}>
+      {props.onclick > 10 && <HostView style={{ width: props.onclick, height: 1 }} />}
+    </HostView>;
   }
 
   const node = <Probe {...{ onclick: 0 }} onClick={() => { clicks++; }} onclick={width()} />;
@@ -65,7 +66,7 @@ createRoot(() => {
   );
   scene.append(root, page);
   assert(scene.rect(page).w === 240, "column keeps its author width");
-  const stack = <stack style={{ width: 20, height: 20 }} />;
+  const stack = <HostStack style={{ width: 20, height: 20 }} />;
   let rejected = false;
   try {
     scene.setStyle(stack, { gridTemplateColumns: [{ fr: 1 }] });
@@ -74,7 +75,7 @@ createRoot(() => {
   }
   assert(rejected, "stack track override must fail");
   scene.setStyle(stack, { display: "none" });
-  const rows = <view />;
+  const rows = <HostView />;
   const rowDefaults = scene.createStyleSource(rows, "component");
   scene.setStyleSource(rowDefaults, { width: 10, height: 10 });
   scene.append(root, rows);

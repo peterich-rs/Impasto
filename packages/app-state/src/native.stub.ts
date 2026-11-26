@@ -1,4 +1,4 @@
-import type * as native from "./native.js";
+import type * as native from "@impasto/app-state/native";
 
 export function getCurrentState(): string {
   return "active";

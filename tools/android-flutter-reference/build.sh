@@ -14,7 +14,13 @@ fi
 mkdir -p "$out/assets"
 cp "$src/main.dart" "$out/lib/main.dart"
 cp "$src/pubspec.yaml" "$out/pubspec.yaml"
-node --experimental-strip-types "$src/export-market.ts" > "$out/assets/market.json"
+(
+  cd "$repo"
+  cargo run --locked --quiet -p cli -- pack "$src/export-market.ts" "$out/market.js"
+  cargo run --locked --quiet -p cli -- test "$out/market.js" 2>"$out/market.log"
+)
+sed -n 's/^IMPASTO_MARKET //p' "$out/market.log" > "$out/assets/market.json"
+test -s "$out/assets/market.json"
 cd "$out"
 "$flutter" --version --machine > flutter-version.json
 "$flutter" build apk --profile --target-platform android-arm64,android-x64

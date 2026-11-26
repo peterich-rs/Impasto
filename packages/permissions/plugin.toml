@@ -1,0 +1,16 @@
+[plugin]
+platforms = ["macos", "ios", "android"]
+min_impasto_version = "0.1.0"
+
+[rust]
+path = "rust"
+
+[ios]
+path = "ios"
+package = "ImpastoPermissions"
+plugin_class = "ImpastoPermissionsPlugin"
+
+[android]
+path = "android"
+package = "dev.impasto.plugins.permissions"
+plugin_class = "PermissionsPlugin"

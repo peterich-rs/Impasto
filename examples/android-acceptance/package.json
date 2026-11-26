@@ -1,0 +1,14 @@
+{
+  "name": "android-acceptance",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@impasto/app-state": "workspace:*",
+    "@impasto/async-storage": "workspace:*",
+    "@impasto/file-system": "workspace:*",
+    "@impasto/linking": "workspace:*",
+    "@impasto/permissions": "workspace:*",
+    "@impasto/solid-renderer": "workspace:*",
+    "@impasto/solid-ui": "workspace:*"
+  }
+}

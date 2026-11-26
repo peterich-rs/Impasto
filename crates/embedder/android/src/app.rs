@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use embedder::{
-    Boot, BootError, ClipboardHost, Command, FrameRateHint, Launch, LinkingHost, NativePtr,
-    Services, SessionError, StorageHost, SurfaceId, SurfaceTarget, Vsync,
+    Boot, BootError, Command, FrameRateHint, Launch, NativePtr, Services, SessionError, SurfaceId,
+    SurfaceTarget, Vsync,
 };
 use engine::session::{InputEvent as EditEvent, Key, Metrics};
 use jni::Env;
@@ -34,7 +34,6 @@ const IME_HIDE: i32 = 3;
 
 pub(crate) mod entrypoints;
 mod hardware_frame;
-mod platform_services;
 
 struct Bridge {
     vm: jni::JavaVM,
@@ -43,80 +42,13 @@ struct Bridge {
     document_dir: Option<String>,
     font: OnceLock<Vec<u8>>,
     semantics: Mutex<Vec<embedder::ProjectedNode>>,
-    document_pick: Mutex<Option<DocumentPick>>,
-    permission_request: Mutex<Option<platform_services::PermissionRequest>>,
+    native_channel: impasto::os::NativeChannel,
     restoration: embedder::Restoration,
     window_session: embedder::WindowSession,
     back_enabled: AtomicBool,
 }
 
-struct DocumentPick {
-    id: jlong,
-    settle: engine::session::Settle,
-}
-
 impl Bridge {
-    fn open_document_picker(&self, settle: engine::session::Settle) {
-        static NEXT_PICK: AtomicI64 = AtomicI64::new(1);
-        let id = NEXT_PICK.fetch_add(1, Ordering::Relaxed);
-        {
-            let mut pending = self
-                .document_pick
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if pending.is_some() {
-                drop(pending);
-                settle.send(embedder::picked_document(Err(
-                    "a document picker is already open".into(),
-                )));
-                return;
-            }
-            *pending = Some(DocumentPick { id, settle });
-        }
-        let mut posted = false;
-        self.call(|env, view| {
-            posted = env
-                .call_method(
-                    view,
-                    jni::jni_str!("requestDocument"),
-                    jni::jni_sig!("(J)Z"),
-                    &[jni::objects::JValue::Long(id)],
-                )?
-                .z()?;
-            Ok(())
-        });
-        if !posted {
-            self.finish_document_picker(id, Err("document picker could not reach the host".into()));
-        }
-    }
-
-    fn finish_document_picker(&self, id: jlong, result: Result<Option<String>, String>) {
-        let pick = {
-            let mut pending = self
-                .document_pick
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if pending.as_ref().is_none_or(|request| request.id != id) {
-                return;
-            }
-            pending.take()
-        };
-        if let Some(pick) = pick {
-            pick.settle.send(embedder::picked_document(result));
-        }
-    }
-
-    fn cancel_document_picker(&self) {
-        let pending = self
-            .document_pick
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
-        if let Some(pick) = pending {
-            pick.settle.send(embedder::picked_document(Ok(None)));
-        }
-    }
-
     fn font_bytes(&self) -> Option<&[u8]> {
         let bytes = self
             .font
@@ -206,44 +138,6 @@ impl Bridge {
             env.call_method(view, jni::jni_str!("finishHost"), jni::jni_sig!("()V"), &[])?;
             Ok(())
         });
-    }
-
-    fn write_clipboard_now(&self, text: &str) {
-        self.call(|env, view| {
-            let text = env.new_string(text)?;
-            env.call_method(
-                view,
-                jni::jni_str!("writeClipboardNow"),
-                jni::jni_sig!("(Ljava/lang/String;)V"),
-                &[jni::objects::JValue::Object(&text)],
-            )?;
-            Ok(())
-        });
-    }
-
-    fn invoke_text_action(
-        &self,
-        method: &jni::strings::JNIStr,
-        text: &str,
-        failed: &str,
-    ) -> Result<(), String> {
-        let Some(view) = self.current_view() else {
-            return Err("Android session has no attached View".into());
-        };
-        self.vm
-            .attach_current_thread(|env| {
-                let text = env.new_string(text)?;
-                env.call_method(
-                    view.as_obj(),
-                    method,
-                    jni::jni_sig!("(Ljava/lang/String;)Z"),
-                    &[jni::objects::JValue::Object(&text)],
-                )?
-                .z()
-            })
-            .map_err(|error| error.to_string())?
-            .then_some(())
-            .ok_or_else(|| failed.into())
     }
 
     fn clipboard_text(&self) -> String {
@@ -504,50 +398,6 @@ impl ImeCall {
             input_type: input_type(engine::session::KeyboardType::Text),
             ime_action: ime_action(engine::session::TextInputAction::Done),
         }
-    }
-}
-
-impl ClipboardHost for Bridge {
-    fn read_clipboard(&self) -> String {
-        self.clipboard_text()
-    }
-
-    fn write_clipboard(&self, text: &str) {
-        self.write_clipboard_now(text);
-    }
-}
-
-impl LinkingHost for Bridge {
-    fn open_url(&self, url: &str) -> Result<(), String> {
-        self.invoke_text_action(
-            jni::jni_str!("openUrl"),
-            url,
-            "Android could not open the URL",
-        )
-    }
-
-    fn share_text(&self, text: &str) -> Result<(), String> {
-        self.invoke_text_action(
-            jni::jni_str!("shareText"),
-            text,
-            "Android could not open the Sharesheet",
-        )
-    }
-}
-
-impl StorageHost for Bridge {
-    fn document_dir(&self) -> Result<String, String> {
-        self.document_dir
-            .clone()
-            .ok_or_else(|| "Android files directory is unavailable".into())
-    }
-
-    fn pick_document_async(
-        self: Arc<Self>,
-        settle: engine::session::Settle,
-        _exec: &dyn engine::session::MethodExec,
-    ) {
-        self.open_document_picker(settle);
     }
 }
 
@@ -879,15 +729,44 @@ fn attach(env: &mut Env, request: Attach) -> Result<jlong, String> {
     let launch_url = request
         .launch_url
         .filter(|_| !request.replayed_intent || !restoration.has_entries());
-    let bridge = Arc::new(Bridge {
-        vm: env.get_java_vm().map_err(|error| error.to_string())?,
+    let vm = env.get_java_vm().map_err(|error| error.to_string())?;
+    let bridge = Arc::new_cyclic(|bridge: &std::sync::Weak<Bridge>| Bridge {
+        vm,
         view: Mutex::new(Some(Arc::new(request.view))),
         assets: Arc::clone(&request.assets),
         document_dir: (!document_dir.is_empty()).then_some(document_dir),
         font: OnceLock::new(),
         semantics: Mutex::new(Vec::new()),
-        document_pick: Mutex::new(None),
-        permission_request: Mutex::new(None),
+        native_channel: impasto::os::NativeChannel::new({
+            let bridge = bridge.clone();
+            move |id, operation, payload| {
+                let Some(bridge) = bridge.upgrade() else {
+                    return false;
+                };
+                let Ok(id) = i64::try_from(id) else {
+                    return false;
+                };
+                let mut accepted = false;
+                bridge.call(|env, view| {
+                    let operation = env.new_string(operation)?;
+                    let payload = env.new_string(payload)?;
+                    accepted = env
+                        .call_method(
+                            view,
+                            jni::jni_str!("dispatchNativeRequest"),
+                            jni::jni_sig!("(JLjava/lang/String;Ljava/lang/String;)Z"),
+                            &[
+                                jni::objects::JValue::Long(id),
+                                jni::objects::JValue::Object(&operation),
+                                jni::objects::JValue::Object(&payload),
+                            ],
+                        )?
+                        .z()?;
+                    Ok(())
+                });
+                accepted
+            }
+        }),
         restoration,
         window_session: request.window_session,
         back_enabled: AtomicBool::new(false),
@@ -964,15 +843,14 @@ fn android_boot(
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
         });
-    let plugin_http = modules
+    let devtools = modules
         .as_ref()
-        .is_some_and(|enabled| enabled.iter().any(|name| name == "http"));
+        .is_none_or(|enabled| enabled.iter().any(|name| name == "devtools"));
     let trace = decode::read_bytes(&script_assets, c"app.trace").is_some();
     Ok(Boot {
         font_family: FONT_FAMILY.to_string(),
         launch: Launch::Session(Box::new(move |open, host| {
             // ActivityHost publishes the first focused resume after the view is attached.
-            engine::session::shared_write(&host.app_state, "inactive".to_owned());
             let host = if let Some(modules) = modules {
                 host.restrict(&modules)
             } else {
@@ -1010,7 +888,8 @@ fn android_boot(
                 let bridge = Arc::downgrade(&bridge);
                 move || bridge.upgrade()?.current_view()
             })),
-            http: plugin_http,
+            initial_lifecycle: impasto::Lifecycle::Inactive,
+            native_channel: Some(bridge.native_channel.clone()),
             paths: embedder::AppPaths::new(
                 bridge.document_dir.as_ref().map(std::path::PathBuf::from),
                 pipeline_cache.clone(),
@@ -1020,7 +899,6 @@ fn android_boot(
         platform_runner: Some(platform_runner),
         thread_topology,
         launch_url: Arc::clone(&launch_url),
-        http: Some(embedder::http_client().map_err(BootError::Platform)?),
         open_raster: Box::new(move |fonts| {
             let mut raster = renderer.create_raster(fonts)?;
             if let Some(directory) = &pipeline_cache {
@@ -1032,16 +910,11 @@ fn android_boot(
         open_surface: Renderer::surfaces(move |id| bridge_for_surface.first_frame(id)),
         dump_list: false,
         inspect: std::env::var_os("IMPASTO_INSPECT").map(std::path::PathBuf::from),
-        devtools: Some(Arc::new(embedder::DiagnosticsHub::new())),
+        devtools: devtools.then(|| Arc::new(embedder::DiagnosticsHub::new())),
         devtools_source_map: None,
         inspect_dir: None,
         log_dir,
     }
-    .with_module(embedder::clipboard(Arc::clone(&bridge) as _))
-    .with_module(embedder::permissions(Arc::clone(&bridge) as _))
-    .with_module(embedder::linking(Arc::clone(&bridge) as _, launch_url))
-    .with_module(embedder::file_system(Arc::clone(&bridge) as _))
-    .with_module(embedder::async_storage(bridge as _))
     .with_gallery_gpu_view(gallery))
 }
 
@@ -1053,15 +926,14 @@ fn detach(handle: jlong) {
     else {
         return;
     };
-    host.bridge.cancel_document_picker();
-    host.bridge.cancel_permission_request();
+    host.bridge.native_channel.close();
     host.link
         .post(Command::Lifecycle(embedder::Lifecycle::Detached));
     destroy_surface(&host);
     host.link.request_shutdown();
 }
 
-fn release_window(host: &Host, keep_permission_result: bool) {
+fn release_window(host: &Host, keep_plugin_state: bool) {
     let prior = host
         .bridge
         .view
@@ -1069,9 +941,8 @@ fn release_window(host: &Host, keep_permission_result: bool) {
         .unwrap_or_else(|error| error.into_inner())
         .take();
     drop(prior);
-    host.bridge.cancel_document_picker();
-    if !keep_permission_result {
-        host.bridge.cancel_permission_request();
+    if !keep_plugin_state {
+        host.bridge.native_channel.cancel_pending();
     }
     host.link.post(Command::WindowFocus(false));
     host.link.post(Command::ImeDismissed);

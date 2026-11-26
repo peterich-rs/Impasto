@@ -612,6 +612,7 @@ pub(super) fn install<'js>(ctx: &Ctx<'js>, globals: &Object<'js>) -> Result<()> 
         "ReadableStream",
         constructor::<ReadableStream<'js>, _, _>(ctx, source::construct)?,
     )?;
+    ctx.eval::<(), _>(include_str!("streams/tee.js"))?;
     globals.set(
         "ReadableStreamDefaultController",
         constructor::<source::Controller<'js>, _, _>(ctx, |ctx: Ctx<'js>| {
@@ -653,6 +654,7 @@ declare class ReadableStream<T = unknown> {
   constructor(underlyingSource?: UnderlyingSource<T>, strategy?: QueuingStrategy<T>);
   readonly locked: boolean;
   getReader(): ReadableStreamDefaultReader<T>;
+  tee(): [ReadableStream<T>, ReadableStream<T>];
   cancel(reason?: unknown): Promise<void>;
 }
 

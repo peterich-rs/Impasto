@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+import { assert } from "impasto:test";
 import { STACK_EXIT_ALPHA, stackMotion, travelDistance } from "./transition.ts";
 
 assert.deepEqual(stackMotion("enter"), [

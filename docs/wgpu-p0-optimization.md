@@ -666,7 +666,7 @@ P0 改造规则：
 |---|---|---|
 | **代码格式与零告警** | `cargo fmt --all -- --check` 与 `RUSTFLAGS="-D warnings" cargo check --workspace --exclude embedder-macos` | 全 workspace（含 lint `unwrap_used` / `unsafe_code`） |
 | **边界与常规门禁** | `just check`（含 `style-check`、`boundaries`、`clippy`、`test`、`solid`、`standard-check`） | Rust/JS 边界与核心测试 |
-| **生成声明校验** | `cargo run --locked -p embedder --bin module-stubs -- --check`、`node tools/check-native-module-types.mjs` | Devtools/原生模块声明一致性 |
+| **生成声明校验** | `impasto analyze --platform macos`、`cargo test -p cli` | Devtools/原生模块声明一致性 |
 | **GPU 离屏像素全集** | `IMPASTO_TEST_GPU=1 cargo test -p raster` | Metal / Linux Vulkan 像素级回归 |
 | **macOS 宿主与首帧对比** | `cargo clippy -p embedder-macos --all-targets -- -D warnings`、`cargo test -p embedder-macos`、`IMPASTO_DUMP=/tmp/p0.png just host` | macOS Metal 渲染与首帧像素对比（改造前后 diff 验证） |
 | **iOS 模拟器与多切片事务** | `just ios-build-check`、`just ios-sim-test --debug --udid <UDID>`、`just ios-composition-test <UDID>` | `MetalSliceBatch`、UIKit 交错切片与外部纹理 |

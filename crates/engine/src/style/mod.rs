@@ -11,6 +11,8 @@ pub(crate) mod defaults;
 mod environment;
 mod property;
 mod resolve;
+#[cfg(feature = "style-binary")]
+pub mod static_pool;
 pub(crate) mod taffy;
 mod values;
 
@@ -22,6 +24,8 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 pub use classes::{ClassCache, ParsedClass, parse_class};
+#[cfg(feature = "style-binary")]
+pub use classes::{StaticClass, decode_static_class, encode_static_class};
 pub use environment::{
     BREAKPOINTS, CLASS_BYTE_LIMIT, DepMask, Environment, FontSizes, Interaction, Radii, TypeRole,
 };
@@ -236,6 +240,7 @@ pub use values::{
 /// `Reset` blocks lower sources and inheritance. `Inherit` asks the parent
 /// even when a lower source set the key. Omitting a key drops only this source.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 pub enum Declaration {
     Set(Property),
     Reset(Key),
@@ -273,7 +278,7 @@ impl Declaration {
 /// One source layer. Later fragments replace keys they contain and leave the rest.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Style {
-    fragments: Vec<Vec<Declaration>>,
+    fragments: std::sync::Arc<Vec<Vec<Declaration>>>,
 }
 
 impl Style {
@@ -296,7 +301,7 @@ impl Style {
             declaration.validate()?;
         }
         if !declarations.is_empty() {
-            self.fragments.push(declarations);
+            std::sync::Arc::make_mut(&mut self.fragments).push(declarations);
         }
         Ok(())
     }
@@ -370,7 +375,7 @@ pub type LayerMap = BTreeMap<Key, Declaration>;
 /// Flatten one layer. Later declarations of the same key replace earlier ones.
 pub fn flatten(style: &Style) -> LayerMap {
     let mut map = LayerMap::new();
-    for fragment in &style.fragments {
+    for fragment in style.fragments() {
         for declaration in fragment {
             map.insert(declaration.key(), declaration.clone());
         }

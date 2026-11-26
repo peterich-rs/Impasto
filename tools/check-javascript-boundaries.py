@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check that the host contracts and standalone runtime build independently."""
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -61,12 +62,35 @@ def main():
     }:
         raise SystemExit(f"Impasto plugin SDK reaches its host implementation: {sorted(forbidden)}")
 
+    metadata = subprocess.check_output(
+        ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+        cwd=ROOT,
+        text=True,
+    )
+    crates = {Path(p["manifest_path"]): p["name"] for p in json.loads(metadata)["packages"]}
+    for manifest in sorted((ROOT / "packages").glob("*/rust/Cargo.toml")):
+        if manifest not in crates:
+            raise SystemExit(f"{manifest.relative_to(ROOT)} is missing from the workspace")
+        name = crates[manifest]
+        if forbidden := {
+            dep for dep in dependencies(name)
+            if dep in UI_CRATES or dep.startswith(("embedder-", "rquickjs", "quickjs-jit", *RASTER_PREFIXES))
+        }:
+            raise SystemExit(f"{name} reaches VM, renderer or host crates: {sorted(forbidden)}")
+
+    toolchain_crates = {"bundler", "testing"}
+    runtime_crates = UI_CRATES | {"javascript", "impasto", "impasto-macros"}
+    for package in sorted(set(crates.values())):
+        if package in runtime_crates or package.startswith(("embedder-", "impasto-")):
+            if forbidden := dependencies(package) & toolchain_crates:
+                raise SystemExit(f"{package} reaches host-only tools: {sorted(forbidden)}")
+
     for module in ("host", "compiler", "runtime", "standard"):
         for path in (SOURCE / module).rglob("*.rs"):
             if match := UI_IMPORT.search(path.read_text()):
                 raise SystemExit(f"{path.relative_to(ROOT)} contains {match[0]}")
 
-    print("JavaScript host, standalone runtime, engine and raster dependency boundaries passed.")
+    print("JavaScript host, standalone runtime, engine, raster, and plugin dependency boundaries passed.")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,6 @@
 #if DEBUG
+import Darwin
+import Dispatch
 import Foundation
 
 /// Reads development updates from the app container. The CLI grants access
@@ -30,7 +32,7 @@ final class ImpastoDevelopmentSession {
     private let directory: URL
     private weak var owner: AnyObject?
     private var submit: ((UInt64, [UInt8]) -> Bool)?
-    private var timer: Timer?
+    private var watcher: DispatchSourceFileSystemObject?
     private var pending: UInt64?
     private var latest: UInt64 = 0
     private var reading = false
@@ -56,14 +58,24 @@ final class ImpastoDevelopmentSession {
             NSLog("Impasto development directory is unavailable: %@", error.localizedDescription)
             return
         }
+        let descriptor = open(directory.path, O_EVTONLY)
+        guard descriptor >= 0 else {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent("ready"))
+            NSLog("Impasto development directory could not be watched")
+            return
+        }
         self.owner = owner
         self.submit = submit
-        timer?.invalidate()
-        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+        let watcher = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: descriptor, eventMask: .write, queue: .main
+        )
+        watcher.setEventHandler { [weak self] in
             Task { @MainActor in self?.poll() }
         }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
+        watcher.setCancelHandler { close(descriptor) }
+        self.watcher = watcher
+        watcher.resume()
+        poll()
     }
 
     func detach(owner: AnyObject) {
@@ -73,8 +85,8 @@ final class ImpastoDevelopmentSession {
         }
         self.owner = nil
         submit = nil
-        timer?.invalidate()
-        timer = nil
+        watcher?.cancel()
+        watcher = nil
         try? FileManager.default.removeItem(at: directory.appendingPathComponent("ready"))
     }
 
@@ -93,8 +105,9 @@ final class ImpastoDevelopmentSession {
 
     private func poll() {
         guard let owner, pending == nil, !reading else { return }
-        reading = true
         let path = directory.appendingPathComponent("update.json")
+        guard FileManager.default.fileExists(atPath: path.path) else { return }
+        reading = true
         Task { [weak self, weak owner] in
             let update = await Task.detached(priority: .utility) {
                 guard let size = try? path.resourceValues(forKeys: [.fileSizeKey]).fileSize,

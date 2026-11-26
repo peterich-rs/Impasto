@@ -106,7 +106,7 @@ Gallery 的「GPU 实验室」可从「我的」页进入，也可直接启动�
 ```sh
 just gallery-dist
 IMPASTO_DUMP=/tmp/impasto-gpu-lab.png cargo run --locked -p embedder-macos -- \
-  --js apps/gallery-solid/dist/quotes.js --url impasto://gpu-lab
+  --js examples/gallery-solid/dist/quotes.js --url impasto://gpu-lab
 ```
 
 ## 4. 四阶段交付

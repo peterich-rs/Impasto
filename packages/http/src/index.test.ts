@@ -1,10 +1,9 @@
-import assert from "node:assert/strict";
-import { test } from "node:test";
+import { advanceFrames, assert, test } from "impasto:test";
 import { createClient, createLatest, HttpError, type HttpTransport } from "./client.ts";
 import { createFetch, Request, Response } from "./fetch-impl.ts";
 import { FormData } from "./form-data.ts";
 import { Headers } from "./headers.ts";
-import type { NativeHttpEvent, NativeHttpRequest } from "./native.d.ts";
+import type { NativeHttpEvent, NativeHttpRequest } from "@impasto/http/native";
 
 function mockTransport(
   handler: (
@@ -23,6 +22,7 @@ function mockTransport(
             })();
       return new ReadableStream<NativeHttpEvent>({
         async pull(controller) {
+          await advanceFrames();
           if (signal?.aborted) {
             controller.error(signal.reason ?? Object.assign(new Error("aborted"), { name: "AbortError" }));
             return;
@@ -78,7 +78,7 @@ test("HttpClient normalizes ArrayBuffer chunks and throws HttpError on 4xx/5xx",
     if (url.pathname === "/err") {
       return [
         { type: "head", status: 404, url: req.url, redirected: false, headers: [] },
-        { type: "chunk", data: new Uint8Array(Buffer.from("missing")).buffer },
+        { type: "chunk", data: new TextEncoder().encode("missing").buffer },
       ];
     }
     return [
@@ -89,8 +89,8 @@ test("HttpClient normalizes ArrayBuffer chunks and throws HttpError on 4xx/5xx",
         redirected: false,
         headers: [["Content-Type", "application/json"]],
       },
-      { type: "chunk", data: new Uint8Array(Buffer.from('{"ok":')).buffer },
-      { type: "chunk", data: new Uint8Array(Buffer.from("true}")).buffer },
+      { type: "chunk", data: new TextEncoder().encode('{"ok":').buffer },
+      { type: "chunk", data: new TextEncoder().encode("true}").buffer },
     ];
   });
 
@@ -103,9 +103,11 @@ test("HttpClient normalizes ArrayBuffer chunks and throws HttpError on 4xx/5xx",
     query: { page: 2, tag: null },
     json: { name: "box" },
   });
+  await advanceFrames();
   assert.equal(res.status, 201);
   assert.equal(res.ok, true);
   assert.deepEqual(await res.json(), { ok: true });
+  await advanceFrames();
   assert.equal(seenRequest?.url, "https://api.example.test/items?page=2");
   assert.equal(seenRequest?.method, "POST");
   assert.deepEqual(JSON.parse(new TextDecoder().decode(seenRequest?.body)), { name: "box" });
@@ -169,11 +171,13 @@ test("createFetch maps wire errors, handles Request/Response/clone, and resolves
   const r2 = r1.clone();
   assert.deepEqual(await r1.json(), { v: 1 });
   assert.equal(await r2.text(), '{"v":1}');
+  await advanceFrames();
 
   const r404 = await fetchImpl("https://example.test/404");
   assert.equal(r404.status, 404);
   assert.equal(r404.ok, false);
   assert.equal(await r404.text(), "nope");
+  await advanceFrames();
 
   await assert.rejects(
     () => fetchImpl("https://example.test/timeout"),

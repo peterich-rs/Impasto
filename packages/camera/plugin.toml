@@ -1,0 +1,21 @@
+[plugin]
+platforms = ["ios", "android"]
+min_impasto_version = "0.1.0"
+
+[rust]
+path = "rust"
+
+[android]
+path = "android"
+package = "dev.impasto.plugins.camera"
+plugin_class = "CameraPlugin"
+
+[ios]
+path = "ios"
+package = "ImpastoCamera"
+module = "ImpastoCamera"
+plugin_class = "CameraPlugin"
+usage_description_keys = ["NSCameraUsageDescription"]
+
+[android.permissions]
+"android.permission.CAMERA" = ["@impasto/camera/native#openCamera"]

@@ -167,10 +167,6 @@ impl Services for HostServices {
         self.window_group.clone()
     }
 
-    fn websocket_transport(&self) -> Option<Arc<dyn embedder::WebSocketTransport>> {
-        Some(bundle::websocket_transport())
-    }
-
     fn surface_attached(&self, surface: SurfaceId) {
         self.surface.set(surface.0);
         if let Some(ime) = self.ime.borrow().as_deref() {
@@ -243,7 +239,7 @@ pub struct ImpastoIOSHost {
     layers: Arc<Mutex<HashMap<SurfaceId, LayerLease>>>,
     viewport: RefCell<Option<Metrics>>,
     restoration: Restoration,
-    platform: Arc<bundle::PlatformServices>,
+    platform: impasto::os::NativeChannel,
     compositor: Arc<compositor::Compositor>,
 }
 
@@ -279,14 +275,17 @@ impl ImpastoIOSHost {
         });
         let boot_restoration = restoration.clone();
         let platform_events = Arc::clone(&events);
-        let platform = Arc::new(bundle::PlatformServices::new(move |id, request| {
-            platform_events.send(Event::ServiceRequest, id, Some(request));
-        }));
-        let boot_platform = Arc::clone(&platform);
-        let exit_platform = Arc::clone(&platform);
+        let platform = impasto::os::NativeChannel::new(move |id, operation, payload| {
+            let request =
+                serde_json::json!({ "operation": operation, "payload": payload }).to_string();
+            platform_events.send(Event::ServiceRequest, id, Some(&request));
+            true
+        });
+        let boot_platform = platform.clone();
+        let exit_platform = platform.clone();
         let link = embedder::start_async_with_exit(
             move || {
-                let app = bundle::prepare(root, Arc::clone(&launch_url), boot_platform)?;
+                let app = bundle::prepare(root, boot_platform)?;
                 Ok(Boot {
                     font_family: app.font_family.clone(),
                     launch: app.launch,
@@ -317,7 +316,6 @@ impl ImpastoIOSHost {
                     )),
                     thread_topology: embedder::ThreadTopology::configured()?,
                     launch_url,
-                    http: app.http,
                     open_raster: Box::new(|fonts| {
                         Rasterizer::create(raster::RasterOptions::default(), fonts)
                     }),
@@ -349,7 +347,7 @@ impl ImpastoIOSHost {
                 Err(error) => ready_events.failed(&error),
             },
             move |result| {
-                exit_platform.cancel_all();
+                exit_platform.close();
                 // The common host has stopped using all surface pointers.
                 exit_layers
                     .lock()
@@ -490,7 +488,7 @@ pub unsafe extern "C" fn impasto_ios_close(host: *mut ImpastoIOSHost) {
     if MainThreadMarker::new().is_some() && !host.is_null() {
         // SAFETY: close consumes the caller's sole handle on the UIKit thread.
         let host = unsafe { Box::from_raw(host) };
-        host.platform.cancel_all();
+        host.platform.close();
         host.compositor.reset(0);
         host.gate.visible.store(false, Ordering::Release);
         host.gate.active.store(0, Ordering::Release);
@@ -828,22 +826,22 @@ pub unsafe extern "C" fn impasto_ios_service_pending(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn impasto_ios_cancel_native_plugins(host: *mut ImpastoIOSHost) {
-    with_host(host, |host| host.platform.cancel_native_plugins());
-}
-
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn impasto_ios_service_result(
     host: *mut ImpastoIOSHost,
     request: u64,
     status: u32,
     payload: *const c_char,
-) {
+) -> bool {
     with_host(host, |host| {
-        // SAFETY: payload is borrowed from native for this call only.
-        host.platform
-            .complete(request, status, unsafe { string(payload) });
-    });
+        // SAFETY: payload is borrowed from Swift for this call only.
+        let payload = unsafe { string(payload) };
+        let result = if status == 0 {
+            Ok(payload)
+        } else {
+            Err(payload.unwrap_or_else(|| "iOS platform request failed".into()))
+        };
+        host.platform.complete(request, result)
+    })
 }
 
 struct TextureOwner {

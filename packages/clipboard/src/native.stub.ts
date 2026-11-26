@@ -1,4 +1,4 @@
-import type { Clipboard as ClipboardApi } from "./native.js";
+import type { Clipboard as ClipboardApi } from "@impasto/clipboard/native";
 
 let text = "";
 

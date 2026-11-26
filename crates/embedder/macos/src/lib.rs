@@ -19,22 +19,36 @@ mod surface;
 mod text_client;
 mod vsync;
 
+use std::ffi::c_char;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Context;
 
 pub fn main() -> ExitCode {
-    match launch() {
-        Ok(()) => ExitCode::SUCCESS,
+    ExitCode::from(exit_status())
+}
+
+/// Launches the host on the AppKit main thread and reports its process status.
+pub fn exit_status() -> u8 {
+    exit_status_with_url_handler(None)
+}
+
+#[doc(hidden)]
+pub type OpenUrl = extern "C" fn(*const c_char) -> bool;
+
+/// Launches with a native URL interceptor invoked on the AppKit main thread.
+pub fn exit_status_with_url_handler(open_url: Option<OpenUrl>) -> u8 {
+    match launch(open_url) {
+        Ok(()) => 0,
         Err(error) => {
             eprintln!("{error}");
-            ExitCode::from(app::exit_code(&error))
+            app::exit_code(&error)
         }
     }
 }
 
-fn launch() -> Result<(), app::RunError> {
+fn launch(open_url: Option<OpenUrl>) -> Result<(), app::RunError> {
     let loaded = load().map_err(app::RunError::Window)?;
     objc2::rc::autoreleasepool(|_| {
         app::run(
@@ -43,6 +57,7 @@ fn launch() -> Result<(), app::RunError> {
             &loaded.font,
             loaded.dump_list,
             loaded.url,
+            open_url,
         )
     })
 }

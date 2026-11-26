@@ -1,4 +1,4 @@
-import * as native from "./native.js";
+import * as native from "@impasto/app-state/native";
 
 export const AppState = {
   get currentState() {

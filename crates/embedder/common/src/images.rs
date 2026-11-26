@@ -1,5 +1,7 @@
 //! Image bytes decoded on `io` and installed on the render thread.
 
+pub(crate) mod remote;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

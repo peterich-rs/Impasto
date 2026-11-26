@@ -1,3 +1,4 @@
+import { View as HostView } from "@impasto/solid-renderer/host";
 import { createTrackedEffect, onCleanup } from "solid-js";
 import {
   readMetrics,
@@ -46,7 +47,7 @@ export function KeyboardAvoidingView(props: KeyboardAvoidingProps): NodeHandle {
     onCleanup(() => scene.offWindowMetrics(listener));
   }
   return (
-    <view
+    <HostView
       ref={(node) => {
         if (node === null) return;
         pad = node;
@@ -55,6 +56,6 @@ export function KeyboardAvoidingView(props: KeyboardAvoidingProps): NodeHandle {
       }}
     >
       {props.children}
-    </view>
+    </HostView>
   );
 }

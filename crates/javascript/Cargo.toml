@@ -19,8 +19,12 @@ name = "js-headless"
 path = "src/bin/js-headless.rs"
 required-features = ["runtime"]
 
-[[example]]
-name = "standard-contract"
+[dev-dependencies]
+oxc.workspace = true
+serde_json = "1"
+
+[[test]]
+name = "standard_contract"
 required-features = ["runtime"]
 
 [lints]

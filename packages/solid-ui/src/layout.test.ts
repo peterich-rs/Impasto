@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+import { assert } from "impasto:test";
 import { resolvePadding } from "./layout.ts";
 
 assert.deepEqual(resolvePadding("ltr", 8, 4), { left: 8, right: 4 });

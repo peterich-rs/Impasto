@@ -88,6 +88,10 @@ impl Vm {
         let context = Context::full(&runtime).map_err(|_| "context did not start")?;
         #[cfg(test)]
         let context_probe = AcquireProbe::new(1);
+        let sampler = sampling
+            .map(|enabled| Sampler::new(&runtime, enabled))
+            .transpose()
+            .map_err(|_| "sampling context did not start")?;
         Ok(Self {
             context: Some(context),
             runtime: Some(runtime),
@@ -103,7 +107,7 @@ impl Vm {
             eval_budget_ms: limits.eval_budget_ms,
             callback_budget_ms: limits.callback_budget_ms,
             armed: Cell::new(false),
-            sampler: sampling.map(Sampler::new),
+            sampler,
             #[cfg(test)]
             probes: [Some(runtime_probe), Some(context_probe)],
         })
@@ -195,8 +199,8 @@ impl Vm {
                 // SAFETY: `this` still addresses the armed `Vm`.
                 let vm = unsafe { &*this };
                 let expired = monotonic_ms() > vm.deadline.get();
-                if !expired && let (Some(sampler), Some(context)) = (&vm.sampler, &vm.context) {
-                    sampler.poll(context.as_raw());
+                if !expired && let Some(sampler) = &vm.sampler {
+                    sampler.poll();
                 }
                 expired
             })));
@@ -237,9 +241,7 @@ impl Vm {
         self.rejections.borrow_mut().clear();
         self.disarm();
         debug_assert!(self.active.get().is_null());
-        if let (Some(context), Some(sampler)) = (&self.context, &self.sampler) {
-            context.with(|ctx| sampler.clear(ctx.as_raw()));
-        }
+        drop(self.sampler.take());
         drop(self.context.take());
         #[cfg(test)]
         drop(self.probes[1].take());
@@ -269,10 +271,10 @@ impl Vm {
     }
 
     pub fn take_stack_samples(&self) -> Vec<StackSample> {
-        if let (Some(context), Some(sampler)) = (&self.context, &self.sampler)
+        if let Some(sampler) = &self.sampler
             && self.active.get().is_null()
         {
-            return context.with(|ctx| sampler.take(ctx.as_raw()));
+            return sampler.take();
         }
         Vec::new()
     }

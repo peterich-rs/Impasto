@@ -1,3 +1,4 @@
+import { View as HostView, Stack as HostStack } from "@impasto/solid-renderer/host";
 import { Show, createRenderEffect, createSignal, onCleanup } from "solid-js";
 import {
   directionFor,
@@ -305,7 +306,7 @@ export function Sheet(props: SheetProps): NodeHandle {
   );
   onCleanup(closeLayer);
   return (
-    <stack
+    <HostStack
       ref={(node) => {
         if (node === null) return;
         placeholder = node;
@@ -326,22 +327,22 @@ export function Sheet(props: SheetProps): NodeHandle {
         maxHeight: 0,
       }}
     >
-      <view ref={(node) => setContentNode(node ?? 0)}>
+      <HostView ref={(node) => setContentNode(node ?? 0)}>
         <Show when={props.dragToDismiss !== false}>
-          <view style={{
+          <HostView style={{
             width: "100%", height: 28, minHeight: 28, flexShrink: 0,
             alignItems: "center", justifyContent: "center",
           }}>
-            <view style={{ width: 28, height: 3, borderRadius: 2, backgroundColor: theme().color.textMuted }} />
+            <HostView style={{ width: 28, height: 3, borderRadius: 2, backgroundColor: theme().color.textMuted }} />
             <ScrollArea controller={grip} physics={dragPhysics} onDragEnd={releaseGrip}
               style={{ position: "absolute", left: 0, top: 0, width: "100%", height: 28, minHeight: 28 }}>
-              <view style={{ width: "100%", height: 28, flexShrink: 0 }} />
+              <HostView style={{ width: "100%", height: 28, flexShrink: 0 }} />
             </ScrollArea>
-          </view>
+          </HostView>
         </Show>
         {props.children}
-      </view>
-    </stack>
+      </HostView>
+    </HostStack>
   );
 }
 type Layer = {

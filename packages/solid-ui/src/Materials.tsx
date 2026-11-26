@@ -1,3 +1,4 @@
+import { View as HostView } from "@impasto/solid-renderer/host";
 import { createTrackedEffect } from "solid-js";
 import { scene, type NodeHandle, type StyleInput } from "@impasto/solid-renderer";
 import { bindBox } from "./element.tsx";
@@ -77,7 +78,7 @@ export function Ripple(props: RippleProps): NodeHandle {
   return (
     <View {...props} style={clipped()} onPress={onPress}>
       {props.children}
-      <view ref={(node) => {
+      <HostView ref={(node) => {
         surface = node;
         bindBox(node, {}, { position: "absolute", top: 0, left: 0, width: "100%", height: "100%" });
       }} />

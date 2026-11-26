@@ -1,4 +1,4 @@
-import * as native from "./native.js";
+import * as native from "@impasto/http/native";
 import {
   createFetch,
   Request,

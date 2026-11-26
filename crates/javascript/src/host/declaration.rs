@@ -1,5 +1,6 @@
 //! Pure TypeScript projection of a host module's export metadata.
 
+use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 
 use super::registry::validate_module;
@@ -35,6 +36,40 @@ impl std::error::Error for DeclarationError {
 }
 
 impl Module {
+    /// Describes the calling convention of each export for native compatibility checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a method lacks its TypeScript signature.
+    pub fn export_signatures(&self) -> Result<BTreeMap<&'static str, String>, DeclarationError> {
+        let mut exports = BTreeMap::<_, String>::new();
+        for (name, signature) in signatures(self)? {
+            let contract = exports
+                .entry(name)
+                .or_insert_with(|| self.exports.typescript.to_owned());
+            let _ = writeln!(contract, "{signature}");
+        }
+        for method in &self.methods {
+            if let Some(contract) = exports.get_mut(method.name) {
+                let invoke = match method.invoke {
+                    Invoke::Sync(_) => "sync",
+                    Invoke::Promise(_) => "promise",
+                    Invoke::Resource(_) => "resource",
+                    Invoke::Stream(_) => "stream",
+                };
+                let _ = writeln!(contract, "{invoke}:{}", method.strict_arguments);
+            }
+        }
+        if self.exports.object {
+            let mut object = String::new();
+            for (name, contract) in &exports {
+                let _ = writeln!(object, "{name}\n{contract}");
+            }
+            exports.insert(self.name, object);
+        }
+        Ok(exports)
+    }
+
     /// Renders the declaration body, independently of package paths and I/O.
     pub fn typescript_declaration(&self) -> Result<String, DeclarationError> {
         validate_module(self).map_err(DeclarationError::Registry)?;

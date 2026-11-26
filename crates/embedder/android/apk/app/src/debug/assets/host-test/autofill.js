@@ -1,5 +1,5 @@
 import * as scene from "scene";
-import { setRestorationState } from "@impasto/app-state";
+import { setRestorationState } from "@impasto/app-state/native";
 
 const column = scene.createElement("view");
 const field = scene.createElement("view");

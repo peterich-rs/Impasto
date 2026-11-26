@@ -1,3 +1,4 @@
+import { View as HostView } from "@impasto/solid-renderer/host";
 import { createSignal } from "solid-js";
 import { type NodeHandle } from "@impasto/solid-renderer";
 import { bindBox, eventsOf } from "./element.tsx";
@@ -20,7 +21,7 @@ export function Pressable(props: PressableProps): NodeHandle {
     events: props,
   });
   return (
-    <view
+    <HostView
       {...eventsOf(props)}
       focusable={!blocked()}
       ref={(handle) => {
@@ -37,6 +38,6 @@ export function Pressable(props: PressableProps): NodeHandle {
       onText={press.onText}
     >
       {props.children}
-    </view>
+    </HostView>
   );
 }

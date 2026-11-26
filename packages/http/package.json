@@ -7,8 +7,5 @@
     ".": "./src/index.ts",
     "./fetch": "./src/fetch.ts",
     "./polyfill": "./src/polyfill.ts"
-  },
-  "scripts": {
-    "test": "node --experimental-strip-types src/index.test.ts"
   }
 }

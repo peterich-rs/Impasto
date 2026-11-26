@@ -1,8 +1,8 @@
-import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { assert } from "impasto:test";
+import { readText } from "impasto:test/fixtures";
 
 function source(name: string): string {
-  return readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
+  return readText(`./${name}`);
 }
 
 const index = source("index.tsx");
@@ -41,7 +41,7 @@ for (const name of names) {
 assert.doesNotMatch(index, /resetThemeForTests/);
 assert.doesNotMatch(index, /setDensityForTests/);
 assert.match(
-  readFileSync(new URL("../testing/index.ts", import.meta.url), "utf8"),
+  readText("../testing/index.ts"),
   /resetThemeForTests/,
 );
 assert.doesNotMatch(source("Button.tsx"), /\bwide\b/);

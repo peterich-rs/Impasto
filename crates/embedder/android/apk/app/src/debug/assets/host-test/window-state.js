@@ -4,7 +4,7 @@ import {
   getWindowState,
   setRestorationState,
   setWindowState,
-} from "@impasto/app-state";
+} from "@impasto/app-state/native";
 
 scene.createElement("text", { value: "Window state", style: { fontSize: 16, color: "#ffffff" } });
 const refresh = () => setRestorationState("shared", getWindowState("selection"));

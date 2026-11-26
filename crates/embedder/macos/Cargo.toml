@@ -8,7 +8,12 @@ publish.workspace = true
 name = "macos"
 path = "src/main.rs"
 
+[features]
+default = ["bundled-plugins"]
+bundled-plugins = ["dep:impasto-bundled-plugins"]
+
 [dependencies]
+impasto-bundled-plugins = { path = "../bundled", optional = true }
 anyhow = "1"
 engine = { workspace = true, features = ["js"] }
 raster = { workspace = true }
@@ -59,6 +64,8 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSArray",
+    "NSFileManager",
+    "NSPathUtilities",
     "NSDate",
     "NSGeometry",
     "NSDictionary",

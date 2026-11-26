@@ -48,9 +48,9 @@ if xcrun simctl get_app_container "$udid" "$bundle" app >/dev/null 2>&1; then
 fi
 
 app="$scratch/app"
-mkdir -p "$app/lib" "$app/assets"
+mkdir -p "$app/src" "$app/assets"
 cp "$fixture/app.toml" "$app/app.toml"
-cp "$fixture/lib/main.tsx" "$app/lib/main.tsx"
+cp "$fixture/src/main.tsx" "$app/src/main.tsx"
 printf '\n[ios]\nbundle_id = "%s"\n' "$bundle" >> "$app/app.toml"
 (
     cd "$app"
@@ -60,8 +60,8 @@ printf '\n[ios]\nbundle_id = "%s"\n' "$bundle" >> "$app/app.toml"
 project="$app/build/ios/iphonesimulator/debug"
 product="$project/xcode/Build/Products/Debug-iphonesimulator/Impasto.app"
 architecture="$(xcrun lipo -archs "$product/Impasto")"
-cp "$fixture/App.swift" "$project/host/App.swift"
-xcodebuild -project "$project/Impasto.xcodeproj" -scheme Impasto -configuration Debug \
+cp "$fixture/App.swift" "$app/ios/Runner/App.swift"
+xcodebuild -project "$app/ios/Runner.xcodeproj" -scheme Runner -configuration Debug \
     -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$project/xcode" \
     "ARCHS=$architecture" CODE_SIGNING_ALLOWED=NO -quiet build
 

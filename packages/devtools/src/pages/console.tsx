@@ -1,3 +1,4 @@
+import { View as HostView } from "@impasto/solid-renderer/host";
 /** Console page: filterable log list. */
 import { createSignal, For } from "solid-js";
 import { Field, Text, useTheme } from "@impasto/solid-ui";
@@ -19,7 +20,7 @@ export function ConsolePage() {
         (query() === "" || line.text.includes(query())),
     );
   return (
-    <view
+    <HostView
       style={{
         width: "100%",
         height: "100%",
@@ -29,13 +30,13 @@ export function ConsolePage() {
         minHeight: 0,
       }}
     >
-      <view
+      <HostView
         style={{
           flexDirection: "row",
           gap: 6,
         }}
       >
-        <view
+        <HostView
           onClick={() => {
             const index = LEVELS.indexOf(level() as (typeof LEVELS)[number]);
             setLevel(LEVELS[(index + 1) % LEVELS.length] ?? "");
@@ -49,8 +50,8 @@ export function ConsolePage() {
           >
             {level() === "" ? "级别" : level()}
           </Text>
-        </view>
-        <view
+        </HostView>
+        <HostView
           onClick={() => {
             const index = SOURCES.indexOf(source());
             setSource(SOURCES[(index + 1) % SOURCES.length] ?? "");
@@ -64,8 +65,8 @@ export function ConsolePage() {
           >
             {source() === "" ? "来源" : source()}
           </Text>
-        </view>
-        <view onClick={() => store.clear()}>
+        </HostView>
+        <HostView onClick={() => store.clear()}>
           <Text
             style={{
               fontSize: 11,
@@ -74,8 +75,8 @@ export function ConsolePage() {
           >
             清空
           </Text>
-        </view>
-      </view>
+        </HostView>
+      </HostView>
       <Field value={target()} placeholder="target" onChange={setTarget} />
       <Field value={query()} placeholder="搜索" onChange={setQuery} />
       <Text
@@ -86,7 +87,7 @@ export function ConsolePage() {
       >
         {logs().length} 行
       </Text>
-      <view
+      <HostView
         style={{
           gap: 2,
           flex: 1,
@@ -94,7 +95,7 @@ export function ConsolePage() {
       >
         <For each={visible().slice(-60)}>
           {(line: LogLine) => (
-            <view
+            <HostView
               style={{
                 backgroundColor:
                   line.level === "ERROR"
@@ -105,7 +106,7 @@ export function ConsolePage() {
                 borderRadius: 4,
               }}
             >
-              <view
+              <HostView
                 style={{
                   padding: 4,
                 }}
@@ -118,11 +119,11 @@ export function ConsolePage() {
                 >
                   [{line.level}] {line.target} {line.text}
                 </Text>
-              </view>
-            </view>
+              </HostView>
+            </HostView>
           )}
         </For>
-      </view>
-    </view>
+      </HostView>
+    </HostView>
   );
 }

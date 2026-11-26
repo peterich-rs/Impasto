@@ -97,6 +97,10 @@ impl Runtime {
         }
     }
 
+    pub(crate) fn has_backend(&self) -> bool {
+        self.backend.is_some()
+    }
+
     fn task<T>(&self) -> (Task<T>, oneshot::Sender<T>, Option<Lease>) {
         let (sender, result) = oneshot::channel();
         let cancel = CancelToken::new();

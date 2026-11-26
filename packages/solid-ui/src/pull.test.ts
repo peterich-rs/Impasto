@@ -7,8 +7,7 @@ import {
 } from "./pull.ts";
 
 function fail(message: string): never {
-  console.error(message);
-  process.exit(1);
+  throw new Error(message);
 }
 
 if (

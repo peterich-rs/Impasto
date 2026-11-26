@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use crate::Error;
 use crate::style::{
-    Interaction, Key, LineHeightValue, Patch, Property, Style, StyleError, StyleOrigin,
-    StyleSourceId, StyleSurface, WinningDeclaration, author_key_allowed, flatten, merge_layers,
+    Interaction, Key, LineHeightValue, ParsedClass, Patch, Property, Style, StyleError,
+    StyleOrigin, StyleSourceId, StyleSurface, WinningDeclaration, author_key_allowed, flatten,
+    merge_layers,
 };
 
 use super::NodeId;
@@ -18,7 +19,8 @@ pub(super) struct NodeStyle {
     pub(super) generation: u32,
     pub(super) preset: taffy::Style,
     component: Style,
-    class_text: String,
+    class_text: Arc<str>,
+    compiled_class: Option<Arc<ParsedClass>>,
     class_list: String,
     inline: Style,
     imperative: Style,
@@ -403,7 +405,22 @@ impl Tree {
 
     pub fn set_class(&mut self, id: NodeId, text: &str) -> Result<(), Error> {
         self.update_sources(id, |next| {
-            next.class_text = text.to_owned();
+            next.class_text = Arc::from(text);
+            next.compiled_class = None;
+            Ok(())
+        })
+    }
+
+    #[cfg(feature = "js")]
+    pub(crate) fn set_compiled_class(
+        &mut self,
+        id: NodeId,
+        class: crate::style::StaticClass,
+    ) -> Result<(), Error> {
+        let (text, parsed) = class.into_parts();
+        self.update_sources(id, |next| {
+            next.class_text = text;
+            next.compiled_class = Some(parsed);
             Ok(())
         })
     }
@@ -530,6 +547,12 @@ impl Tree {
     }
 
     /// Gestures produced while hiding a subtree. The session dispatches them
+    /// Returns the number of style resolutions since the last drain.
+    #[cfg(feature = "js")]
+    pub(crate) fn take_style_resolves(&mut self) -> u32 {
+        std::mem::take(&mut self.style_resolves)
+    }
+
     /// after it releases the tree borrow.
     pub fn take_style_gestures(&mut self) -> Vec<super::Gesture> {
         std::mem::take(&mut self.style_gestures)
@@ -576,12 +599,17 @@ impl Tree {
         sources: &NodeStyle,
         env: &crate::style::Environment,
     ) -> Result<Prepared, Error> {
-        let class_text = combined_class(&sources.class_text, &sources.class_list);
-        let (class_style, mut deps) = if class_text.is_empty() {
-            (Style::new(), crate::style::DepMask::empty())
-        } else {
+        self.style_resolves = self.style_resolves.saturating_add(1);
+        let (class_style, mut deps) = if let Some(parsed) = &sources.compiled_class
+            && sources.class_list.is_empty()
+        {
+            (parsed.select(env, self.interaction(id))?, parsed.deps)
+        } else if !sources.class_text.is_empty() || !sources.class_list.is_empty() {
+            let class_text = combined_class(&sources.class_text, &sources.class_list);
             let parsed = self.class_cache.get(&class_text)?;
             (parsed.select(env, self.interaction(id))?, parsed.deps)
+        } else {
+            (Style::new(), crate::style::DepMask::empty())
         };
         let mut sources = sources.clone();
         for extra in &mut sources.extra {
@@ -846,7 +874,8 @@ impl Tree {
                 generation,
                 preset,
                 component: Style::new(),
-                class_text: String::new(),
+                class_text: Arc::default(),
+                compiled_class: None,
                 class_list: String::new(),
                 inline: Style::new(),
                 imperative: Style::new(),

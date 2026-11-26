@@ -14,7 +14,9 @@ import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 import org.gradle.process.ExecOperations
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 import java.io.File
+import java.util.Properties
 import javax.inject.Inject
 
 plugins {
@@ -26,7 +28,20 @@ kotlin {
     jvmToolchain(17)
 }
 
+val glue = rootProject.file("../.impasto/android")
+val config = Properties()
+glue.resolve("plugins.properties").takeIf { it.isFile }?.reader()?.use { config.load(it) }
+
 dependencies {
+    implementation(project(":impasto-host"))
+    if (!config.containsKey("framework")) {
+        implementation(project(":impasto_file_system"))
+        implementation(project(":impasto_linking"))
+        implementation(project(":impasto_permissions"))
+    }
+    config.getProperty("plugin.modules", "").split(',').filter(String::isNotBlank).forEach {
+        implementation(project(it))
+    }
     implementation("androidx.activity:activity:1.10.1")
     implementation("androidx.core:core:1.15.0")
     implementation("androidx.window:window-java:1.2.0")
@@ -42,7 +57,9 @@ val cargoGate = gradle.sharedServices.registerIfAbsent("impastoCargo", CargoGate
     maxParallelUsages.set(1)
 }
 
-val repoRoot: File = rootProject.projectDir.resolve("../../../..").canonicalFile
+val repoRoot: File = config.getProperty("framework")?.let(::file)
+    ?: rootProject.projectDir.resolve("../../../..").canonicalFile
+val generatedApp = config.containsKey("framework")
 val profileGallery = providers.gradleProperty("impastoProfile").orNull == "true"
 val verificationGallery = providers.gradleProperty("impastoVerification").orNull == "true"
 val localSigning = profileGallery || providers.gradleProperty("impastoLocalSigning").orNull == "true"
@@ -60,14 +77,16 @@ val rustTargets = mapOf(
     "x86_64" to "x86_64-linux-android",
 )
 val selectedAbis = providers.gradleProperty("impastoAbis").orNull
-    ?.split(',')?.map(String::trim)?.toSet() ?: rustTargets.keys
+    ?.split(',')?.map(String::trim)?.toSet()
+    ?: config.getProperty("abis", "").takeUnless(String::isBlank)?.split(',')?.toSet()
+    ?: rustTargets.keys
 val unknownAbis = selectedAbis - rustTargets.keys
 if (unknownAbis.isNotEmpty()) {
     throw GradleException("unsupported Android ABIs: ${unknownAbis.joinToString()}; use ${rustTargets.keys.joinToString()}")
 }
 
 android {
-    namespace = "dev.impasto.host"
+    namespace = "dev.impasto.runner"
     compileSdk = 35
     ndkVersion = androidNdkVersion
 
@@ -81,7 +100,10 @@ android {
     }
 
     defaultConfig {
-        applicationId = "dev.impasto.host"
+        applicationId = config.getProperty("applicationId", "dev.impasto.host")
+        versionName = config.getProperty("versionName", "0.1.0")
+        versionCode = config.getProperty("versionCode", "1").toInt()
+        manifestPlaceholders["impastoAppLabel"] = config.getProperty("appName", "Impasto")
         // libvulkan.so requires 24. The Cargo linker uses this same API level.
         minSdk = 24
         targetSdk = 35
@@ -116,9 +138,10 @@ android {
     }
 
     // Staged by the tasks below. src/main/assets and src/main/jniLibs are not inputs.
-    sourceSets.getByName("main") {
-        assets.setSrcDirs(emptyList<String>())
-        jniLibs.setSrcDirs(emptyList<String>())
+    if (generatedApp) {
+        sourceSets.getByName("main") {
+            java.srcDir(glue.resolve("kotlin"))
+        }
     }
 }
 
@@ -148,15 +171,21 @@ androidComponents {
             if (!envNdk.isNullOrBlank()) {
                 ndkOverride.set(File(envNdk))
             }
-            manifestPath.set(providers.gradleProperty("impastoCargoManifest").orElse(repoRoot.resolve("Cargo.toml").path))
-            packageName.set(providers.gradleProperty("impastoCargoPackage").orElse("embedder-android"))
+            manifestPath.set(if (generatedApp) glue.resolve("../cargo/Cargo.toml").path else repoRoot.resolve("Cargo.toml").path)
+            packageName.set(if (generatedApp) "impasto-app-android" else "embedder-android")
+            val defaultCargoOutput = if (generatedApp) rootProject.file("../build/target") else repoRoot.resolve("target")
+            cargoOutput.set(providers.environmentVariable("CARGO_TARGET_DIR").orNull?.let(::file) ?: defaultCargoOutput)
             // Cargo fingerprints sources. Gradle must not, because a repo-wide file tree overlaps APK outputs.
             outputs.upToDateWhen { false }
         }
         variant.sources.jniLibs?.addGeneratedSourceDirectory(cargo, CargoImpasto::jniLibs)
 
+        if (generatedApp) {
+            variant.sources.assets?.addStaticSourceDirectory(glue.resolve("assets/${variant.buildType}").path)
+            return@onVariants
+        }
         val assets = tasks.register<StageApkAssets>("stageApkAssets$capital") {
-            quotes.set(repoRoot.resolve("apps/gallery-solid/dist/quotes.js"))
+            quotes.set(repoRoot.resolve("examples/gallery-solid/dist/quotes.js"))
             font.set(repoRoot.resolve("crates/embedder/android/assets/fonts/Sans.ttf"))
             logo.set(repoRoot.resolve("crates/embedder/macos/assets/logo.png"))
             fontNotice.set(repoRoot.resolve("crates/embedder/android/assets/fonts/NOTICE"))
@@ -165,6 +194,16 @@ androidComponents {
             threadTopology.set(providers.gradleProperty("impastoThreadTopology").orElse(""))
         }
         variant.sources.assets?.addGeneratedSourceDirectory(assets, StageApkAssets::output)
+    }
+}
+
+if (!generatedApp) {
+    // Instrumentation tests exercise host internals without widening the SDK API.
+    val hostClasses = project(":impasto-host").layout.buildDirectory.file(
+        "intermediates/compile_library_classes_jar/debug/bundleLibCompileToJarDebug/classes.jar",
+    )
+    tasks.withType<KotlinCompile>().matching { it.name == "compileDebugAndroidTestKotlin" }.configureEach {
+        compilerOptions.freeCompilerArgs.add(hostClasses.map { "-Xfriend-paths=${it.asFile.path}" })
     }
 }
 
@@ -195,6 +234,9 @@ abstract class CargoImpasto : DefaultTask() {
 
     @get:Input
     abstract val packageName: Property<String>
+
+    @get:Internal
+    abstract val cargoOutput: DirectoryProperty
 
     @get:OutputDirectory
     abstract val jniLibs: DirectoryProperty
@@ -228,6 +270,8 @@ abstract class CargoImpasto : DefaultTask() {
             manifestPath.get(),
             "--target",
             target,
+            "--target-dir",
+            cargoOutput.get().asFile.path,
             "-p",
             packageName.get(),
         )
@@ -251,7 +295,7 @@ abstract class CargoImpasto : DefaultTask() {
         }.assertNormalExitValue()
 
         val profile = if (release.get()) "release" else "debug"
-        val built = root.resolve("target/$target/$profile/libimpasto.so")
+        val built = cargoOutput.get().asFile.resolve("$target/$profile/libimpasto.so")
         if (!built.isFile) {
             throw GradleException("cargo did not write ${built.path}")
         }

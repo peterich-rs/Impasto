@@ -1,4 +1,4 @@
-import * as native from "./native.js";
+import * as native from "@impasto/file-system/native";
 
 export interface FileSystem extends Omit<typeof native, "read"> {
   read(...args: Parameters<typeof native.read>): Promise<Uint8Array>;

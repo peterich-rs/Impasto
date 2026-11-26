@@ -6,8 +6,8 @@
 import { createSignal, onCleanup } from "solid-js";
 import { appendCapped } from "./cursor.ts";
 import type { HighlightBox } from "./highlight.tsx";
-import * as raw from "./native.js";
-import type { DiagError, FrameSample, GpuFrameTiming, LogLine, NetEntry } from "./native.js";
+import * as raw from "@impasto/devtools/native";
+import type { DiagError, FrameSample, GpuFrameTiming, LogLine, NetEntry } from "@impasto/devtools/native";
 export type {
   DiagError,
   FrameSample,
@@ -16,7 +16,7 @@ export type {
   LogSource,
   NetEntry,
   PhaseSample,
-} from "./native.js";
+} from "@impasto/devtools/native";
 
 export const [logs, setLogs] = createSignal<LogLine[]>([]);
 export const [errors, setErrors] = createSignal<DiagError[]>([]);

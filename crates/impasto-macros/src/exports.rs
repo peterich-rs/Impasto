@@ -4,7 +4,7 @@ use heck::ToLowerCamelCase;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    Error, FnArg, ImplItem, ImplItemFn, ItemImpl, ItemStruct, LitStr, Pat, Path, Result,
+    Error, FnArg, ImplItem, ImplItemFn, ItemImpl, ItemStruct, LitBool, LitStr, Pat, Path, Result,
     ReturnType, Type,
 };
 
@@ -16,6 +16,7 @@ struct ModuleOptions {
     specifier: Option<LitStr>,
     init: Option<syn::Ident>,
     events: Option<Path>,
+    object: bool,
 }
 
 pub fn module(args: TokenStream, item: ItemStruct) -> Result<TokenStream> {
@@ -30,6 +31,8 @@ pub fn module(args: TokenStream, item: ItemStruct) -> Result<TokenStream> {
                 options.init = Some(meta.value()?.parse()?);
             } else if meta.path.is_ident("events") {
                 options.events = Some(meta.value()?.parse()?);
+            } else if meta.path.is_ident("object") {
+                options.object = meta.value()?.parse::<LitBool>()?.value;
             } else {
                 return Err(meta.error("unknown module option"));
             }
@@ -69,11 +72,23 @@ pub fn module(args: TokenStream, item: ItemStruct) -> Result<TokenStream> {
         .as_ref()
         .map(|events| quote!(<#events as ::impasto::ImpastoEvents>::define_types(&mut types);));
     let plugin = format_ident!("__{}ImpastoPlugin", ident);
+    let object = options.object;
+    let selectable = !object && options.events.is_none();
+    let table = if selectable {
+        quote!(option_env!("IMPASTO_NATIVE_EXPORTS"))
+    } else {
+        quote!(None)
+    };
     Ok(quote! {
         #item
 
         #[doc(hidden)]
         struct #plugin;
+
+        impl ::impasto::macro_support::ExportSelection for #plugin {
+            const SPECIFIER: &'static str = #specifier;
+            const TABLE: Option<&'static str> = #table;
+        }
 
         impl #ident {
             pub fn plugin() -> impl ::impasto::ImpastoPlugin {
@@ -82,7 +97,7 @@ pub fn module(args: TokenStream, item: ItemStruct) -> Result<TokenStream> {
 
             fn __impasto_module(owner: Option<::std::sync::Arc<Self>>) -> Result<::impasto::abi::Module, ::impasto::PluginInitError> {
                 let mut types = ::impasto::TsTypes::default();
-                let methods = Self::__impasto_bindings(owner, None, &mut types);
+                let methods = Self::__impasto_bindings::<#plugin>(owner, None, &mut types);
                 #event_types
                 let declarations = types.render()?;
                 static DECLARATIONS: ::std::sync::OnceLock<String> = ::std::sync::OnceLock::new();
@@ -93,13 +108,17 @@ pub fn module(args: TokenStream, item: ItemStruct) -> Result<TokenStream> {
                     exports: ::impasto::abi::ModuleExports {
                         typescript: DECLARATIONS.get_or_init(|| declarations),
                         events: #events,
-                        object: false,
+                        object: #object,
                     },
                 })
             }
         }
 
         impl ::impasto::ImpastoPlugin for #plugin {
+            fn selectable_exports(&self) -> bool {
+                #selectable
+            }
+
             fn describe(&self) -> Result<::impasto::ModuleDescriptor, ::impasto::PluginInitError> {
                 ::impasto::ModuleDescriptor::from_module(&#ident::__impasto_module(None)?)
             }
@@ -129,7 +148,7 @@ pub fn object(item: ItemStruct, local: bool) -> Result<TokenStream> {
                 Box::new(::impasto::BoundResource::new(
                     Self::__IMPASTO_METHODS,
                     move |cancel| {
-                        Self::__impasto_bindings(
+                        Self::__impasto_bindings::<::impasto::macro_support::AllExports>(
                             Some(owner),
                             Some(cancel),
                             &mut ::impasto::TsTypes::default(),
@@ -137,7 +156,9 @@ pub fn object(item: ItemStruct, local: bool) -> Result<TokenStream> {
                     },
                 ))
             }),
-            quote!(Self::__impasto_bindings(None, None, types)),
+            quote!(Self::__impasto_bindings::<
+                ::impasto::macro_support::AllExports,
+            >(None, None, types)),
         )
     };
     Ok(quote! {
@@ -200,7 +221,15 @@ pub fn export(mut item: ItemImpl, local: bool) -> Result<TokenStream> {
         return Ok(local_object(item, &entries));
     }
     let names = entries.iter().map(|entry| &entry.name);
-    let methods = entries.iter().map(Binding::build);
+    let methods = entries.iter().map(|entry| {
+        let name = &entry.name;
+        let method = entry.build();
+        quote! {
+            if const { ::impasto::macro_support::native_export_enabled::<Selection>(#name) } {
+                methods.push(#method);
+            }
+        }
+    });
     let owner = &item.self_ty;
     Ok(quote! {
         #item
@@ -208,13 +237,16 @@ pub fn export(mut item: ItemImpl, local: bool) -> Result<TokenStream> {
         impl #owner {
             const __IMPASTO_METHODS: &'static [&'static str] = &[#(#names),*];
 
-            fn __impasto_bindings(
+            #[allow(clippy::vec_init_then_push, reason = "each native export has a compile-time selection")]
+            fn __impasto_bindings<Selection: ::impasto::macro_support::ExportSelection>(
                 owner: Option<::std::sync::Arc<Self>>,
                 lifetime: Option<::impasto::CancelToken>,
                 types: &mut ::impasto::TsTypes,
             ) -> Vec<::impasto::abi::Method> {
                 let _ = (&owner, &lifetime, &types);
-                vec![#(#methods),*]
+                let mut methods = Vec::new();
+                #(#methods)*
+                methods
             }
         }
     })

@@ -1,4 +1,4 @@
-import type { AsyncStorage as AsyncStorageApi } from "./native.js";
+import type { AsyncStorage as AsyncStorageApi } from "@impasto/async-storage/native";
 
 export function multiGet(_keys: string[]): Promise<[string, string | null][]> {
   return Promise.resolve([]);

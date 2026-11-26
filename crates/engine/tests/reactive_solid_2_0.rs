@@ -1,9 +1,7 @@
 //! Observable behavior of the synchronous Solid 2.0.0 APIs Impasto supports.
 //!
-//! The fixture is a small Node script, `fixtures/order.mjs`, run once against
-//! the installed `solid-js`. It prints the order of memo, render-effect, and
-//! tracked-effect updates. This file asserts the same order. It does not copy
-//! Solid's source.
+//! The QuickJS adapter also runs `fixtures/probe.mjs` against the recorded
+//! Solid 2.0.0 order in `fixtures/order.txt`.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -307,35 +305,6 @@ fn effect_cleanup_runs_before_the_next_run() {
     assert!(take_log().is_empty());
     graph.run_updates(RustEval);
     assert_eq!(take_log(), ["cleanup 1", "run 2"]);
-}
-
-#[test]
-fn pinned_node_reference_matches_the_fixture() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    if !root
-        .join("packages/reactive/node_modules/solid-js")
-        .exists()
-    {
-        eprintln!("run pnpm install to compare the saved fixture with Solid 2.0.0");
-        return;
-    }
-    let output = std::process::Command::new("node")
-        .args([
-            "--conditions=browser",
-            "crates/engine/tests/fixtures/order.mjs",
-        ])
-        .current_dir(root)
-        .output()
-        .expect("Node runs the pinned Solid reference");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        include_str!("fixtures/order.txt")
-    );
 }
 
 #[test]

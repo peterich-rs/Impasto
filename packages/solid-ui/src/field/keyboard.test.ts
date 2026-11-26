@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+import { assert } from "impasto:test";
 import { enterInsertsNewline, imeConfig } from "./keyboard.ts";
 
 assert.deepEqual(imeConfig(undefined, undefined, false), {

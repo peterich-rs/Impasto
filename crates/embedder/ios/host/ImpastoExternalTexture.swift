@@ -1,3 +1,6 @@
+#if SWIFT_PACKAGE
+import CImpastoIOS
+#endif
 import AVFoundation
 import CoreGraphics
 import CoreImage

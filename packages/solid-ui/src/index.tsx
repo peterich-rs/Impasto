@@ -32,7 +32,7 @@ export { Grid } from "./Grid.tsx";
 export type { GridProps } from "./props.ts";
 export { Pressable } from "./Pressable.tsx";
 export type { PressableProps } from "./props.ts";
-export { Image, type ImageProps } from "@impasto/solid-renderer";
+export { Image, type ImageAsset, type ImageProps } from "@impasto/solid-renderer";
 export { Dialog } from "./Dialog.tsx";
 export {
   ErrorPage,

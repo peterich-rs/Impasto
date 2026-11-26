@@ -52,6 +52,12 @@ const SCENE_ADAPTER_NAMES: &[&str] = &[
     "createElement",
     "createTextNode",
     "setProp",
+    "defineStyle",
+    "applyStaticStyle",
+    "defineClass",
+    "applyStaticClass",
+    "defineTemplate",
+    "instantiateTemplate",
     "insertNode",
     "effect",
     "memo",
@@ -106,10 +112,22 @@ impl ModuleDef for SceneModule {
                     continue;
                 }
                 let value = match name {
-                    "createElement" | "createTextNode" | "setProp" | "insertNode" | "effect"
-                    | "memo" | "createComponent" => {
+                    "createElement"
+                    | "createTextNode"
+                    | "setProp"
+                    | "defineStyle"
+                    | "applyStaticStyle"
+                    | "defineClass"
+                    | "applyStaticClass"
+                    | "defineTemplate"
+                    | "instantiateTemplate"
+                    | "insertNode"
+                    | "effect"
+                    | "memo"
+                    | "createComponent" => {
                         Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
                             let host = host_from_ctx(&ctx)?;
+                            super::super::frame::bump(&host.inner().marks.ffi_calls);
                             host.with_current(&ctx, || renderer::call(&host, &ctx, name, &args.0))
                         })?
                         .into_value()

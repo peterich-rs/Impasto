@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use embedder::{Command, FrameToken, Lifecycle};
 use engine::session::{InputEvent as EditEvent, Key};
-use jni::objects::{JIntArray, JObject, JObjectArray, JString};
+use jni::objects::{JIntArray, JObject, JString};
 use jni::sys::{jboolean, jint, jlong};
 use jni::{Env, EnvUnowned};
 use ndk::asset::AssetManager;
@@ -212,32 +212,15 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSavedState<'loca
 }
 
 #[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
-pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativePermissionResult<'local>(
-    mut env: EnvUnowned<'local>,
-    _class: JObject<'local>,
+pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativePlatformPending(
+    _env: EnvUnowned<'_>,
+    _class: JObject<'_>,
     handle: jlong,
-    id: jlong,
-    statuses: JObjectArray<'local, JString<'local>>,
-    error: JString<'local>,
-) {
-    let Some(host) = host(handle) else {
-        return;
-    };
-    let result = env
-        .with_env(|env| -> jni::errors::Result<_> {
-            if let Some(message) = java_string(env, &error)? {
-                return Ok(Some(Err(message)));
-            }
-            let statuses = (0..statuses.len(env)?)
-                .map(|index| statuses.get_element(env, index)?.try_to_string(env))
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(Some(Ok(statuses)))
-        })
-        .resolve::<jni::errors::LogErrorAndDefault>();
-    host.bridge.finish_permission_request(
-        id,
-        result.unwrap_or_else(|| Err("could not read Android permission result".into())),
-    );
+    request: jlong,
+) -> jboolean {
+    host(handle).is_some_and(|host| {
+        u64::try_from(request).is_ok_and(|id| host.bridge.native_channel.contains(id))
+    })
 }
 
 #[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
@@ -254,10 +237,10 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeReleaseWindow(
     _env: EnvUnowned<'_>,
     _class: JObject<'_>,
     handle: jlong,
-    keep_permission_result: jboolean,
+    keep_plugin_state: jboolean,
 ) {
     if let Some(host) = host(handle) {
-        release_window(&host, keep_permission_result);
+        release_window(&host, keep_plugin_state);
     }
 }
 
@@ -437,26 +420,25 @@ pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeSessionReady(
 }
 
 #[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]
-pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativeDocumentPicked<'local>(
+pub extern "system" fn Java_dev_impasto_host_NativeBridge_nativePlatformResult<'local>(
     mut env: EnvUnowned<'local>,
     _class: JObject<'local>,
     handle: jlong,
     request: jlong,
-    path: JString<'local>,
+    payload: JString<'local>,
     error: JString<'local>,
-) {
+) -> jboolean {
     with_env(&mut env, |env| {
-        let Some(host) = host(handle) else {
-            return Ok(());
+        let (Some(host), Ok(id)) = (host(handle), u64::try_from(request)) else {
+            return Ok(false);
         };
         let result = if let Some(error) = java_string(env, &error)? {
             Err(error)
         } else {
-            Ok(java_string(env, &path)?)
+            Ok(java_string(env, &payload)?)
         };
-        host.bridge.finish_document_picker(request, result);
-        Ok(())
-    });
+        Ok(host.bridge.native_channel.complete(id, result))
+    })
 }
 
 #[cfg_attr(not(feature = "app-entry"), unsafe(no_mangle))]

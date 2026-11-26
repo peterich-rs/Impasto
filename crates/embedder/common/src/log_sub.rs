@@ -423,7 +423,7 @@ pub fn set_log_targets(targets: Targets) {
 }
 
 /// `info`, or `info,impasto::render=warn` when a prefix is set. For display.
-pub(crate) fn log_filter_text() -> String {
+pub fn log_filter_text() -> String {
     format_targets(&lock(shared_filter()))
 }
 

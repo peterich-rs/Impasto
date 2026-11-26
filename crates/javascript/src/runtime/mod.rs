@@ -250,7 +250,7 @@ impl Runtime {
         RuntimeBuilder::new()
     }
 
-    /// Drains module-stack samples from completed VM turns on the owner thread.
+    /// Drains stack samples from completed VM turns on the owner thread.
     pub fn take_stack_samples(&self) -> Vec<StackSample> {
         self.state.vm.take_stack_samples()
     }

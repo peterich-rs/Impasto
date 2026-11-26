@@ -1,7 +1,6 @@
-//! A distribution carries its Node runtime, compiler scripts, packages and
-//! native hosts next to impasto. Checkout fallback is explicit in --verbose.
+//! Locate the framework sources and run platform build tools.
 use anyhow::{Context, Result, bail};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub fn distribution() -> Option<PathBuf> {
@@ -20,32 +19,13 @@ pub fn framework() -> Result<PathBuf> {
     }
     crate::framework_root().context("安装包缺少 framework；请重新生成 CLI 发布包")
 }
-pub fn tool(script: &str, verbose: bool) -> Result<Command> {
-    if let Some(root) = distribution() {
-        let node = root.join(if cfg!(windows) { "node.exe" } else { "node" });
-        let script = root.join("framework/tools").join(script);
-        if !node.is_file() || !script.is_file() {
-            bail!("CLI 发布包缺少 Node 或 {}", script.display());
-        }
-        if verbose {
-            eprintln!("impasto: 内置 {} {}", node.display(), script.display());
-        }
-        let mut command = Command::new(node);
-        command.arg(script);
-        return Ok(command);
+pub fn target_dir(default: &Path) -> Result<PathBuf> {
+    match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(path) => Ok(std::env::current_dir()?.join(path)),
+        None => Ok(default.to_owned()),
     }
-    let root =
-        crate::framework_root().context("安装包缺少工具链，且当前二进制没有可用的源码检出")?;
-    if verbose {
-        eprintln!(
-            "impasto: 回退到本机 node {}",
-            root.join("tools").join(script).display()
-        );
-    }
-    let mut command = Command::new("node");
-    command.arg(root.join("tools").join(script));
-    Ok(command)
 }
+
 pub fn run(mut command: Command, action: &str) -> Result<()> {
     let status = command
         .status()

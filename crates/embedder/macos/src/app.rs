@@ -1,15 +1,14 @@
 //! AppKit window. The render thread owns the engine and the session.
 
 use std::cell::{Cell, RefCell};
-use std::ffi::c_void;
+use std::ffi::{CString, c_void};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
 use embedder::{
-    Boot, BootError, ClipboardHost, Command, Launch as EmbedderLaunch, Link, LinkingHost,
-    NativePtr, PermissionsHost, Poster, Services, SessionError, StorageHost, SurfaceTarget,
-    metrics,
+    Boot, BootError, Command, Launch as EmbedderLaunch, Link, NativePtr, Poster, Services,
+    SessionError, SurfaceTarget, metrics,
 };
 use engine::session::{InputEvent, Key};
 use objc2::AnyThread;
@@ -508,6 +507,7 @@ struct HostState {
     link: Link,
     /// `--url` at process start. `set_launch_url` does not overwrite this copy.
     initial_url: Option<String>,
+    open_url: Option<crate::OpenUrl>,
     launched: Cell<bool>,
 }
 
@@ -544,8 +544,12 @@ define_class!(
                 ) {
                     continue;
                 }
+                if self.ivars().open_url.is_some_and(|intercept| {
+                    CString::new(url.as_str()).is_ok_and(|url| intercept(url.as_ptr()))
+                }) {
+                    continue;
+                }
                 self.ivars().link.post(Command::LaunchUrl(url));
-                return;
             }
         }
 
@@ -837,6 +841,7 @@ fn command_key(selector: &str) -> Option<engine::session::KeyPress> {
 struct MacServices {
     font: Vec<u8>,
     ime_view: Arc<AtomicPtr<c_void>>,
+    update_mailbox: Option<PathBuf>,
 }
 
 /// Source maps larger than this stay off the panel. The bundle's map is small.
@@ -902,6 +907,22 @@ impl Services for MacServices {
         wake_main();
     }
 
+    fn source_updated(&self, revision: &str, result: Result<(), &str>) {
+        if let Some(directory) = self.update_mailbox.as_deref().and_then(Path::parent) {
+            let receipt = directory.join(format!("{revision}.result"));
+            let pending = receipt.with_extension("pending");
+            let contents = match result {
+                Ok(()) => "ok".to_owned(),
+                Err(error) => format!("脚本验证失败，仍在运行上一版本。{error}"),
+            };
+            if let Err(error) =
+                std::fs::write(&pending, contents).and_then(|()| std::fs::rename(pending, receipt))
+            {
+                eprintln!("impasto: {error}");
+            }
+        }
+    }
+
     fn request_exit(&self) {
         wake_main();
     }
@@ -946,6 +967,7 @@ pub fn run(
     font: &[u8],
     dump_list: bool,
     initial_url: Option<String>,
+    open_url: Option<crate::OpenUrl>,
 ) -> Result<(), RunError> {
     let Some(mtm) = MainThreadMarker::new() else {
         return Err(RunError::Window(anyhow::anyhow!(
@@ -964,14 +986,18 @@ pub fn run(
         bytecode,
         modules,
     } = launch;
+    let update_mailbox = (!bytecode)
+        .then(|| std::env::var_os("IMPASTO_SOURCE_MAILBOX"))
+        .flatten()
+        .map(PathBuf::from);
     let devtools_source_map = load_source_map(&name);
     let gallery = Path::new(&name)
         .file_name()
         .is_some_and(|name| name == "quotes.js");
     let inspect_dir = std::env::var_os("IMPASTO_INSPECT").map(PathBuf::from);
-    let plugin_http = modules
+    let diagnostics = modules
         .as_ref()
-        .is_some_and(|enabled| enabled.iter().any(|name| name == "http"));
+        .is_none_or(|enabled| enabled.iter().any(|name| name == "devtools"));
     let embedder_launch = EmbedderLaunch::Session(Box::new(move |open, host| {
         let host = modules
             .as_ref()
@@ -1000,8 +1026,7 @@ pub fn run(
     let ime_view = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
     let decoder = Arc::new(PngDecoder { directory: assets });
     let launch_url = engine::session::shared(initial_url.clone());
-    let mac = Arc::new(MacBridge);
-    let devtools = Some(Arc::new(embedder::DiagnosticsHub::new()));
+    let devtools = diagnostics.then(|| Arc::new(embedder::DiagnosticsHub::new()));
     fn log_directory() -> Option<PathBuf> {
         let home = std::env::var_os("HOME")?;
         let dir = PathBuf::from(home).join("Library/Logs/impasto");
@@ -1013,6 +1038,7 @@ pub fn run(
             font_family: FONT_FAMILY.to_string(),
             launch: embedder_launch,
             services: Box::new(MacServices {
+                update_mailbox: update_mailbox.clone(),
                 font: font.to_vec(),
                 ime_view: Arc::clone(&ime_view),
             }),
@@ -1020,10 +1046,11 @@ pub fn run(
             decoder,
             modules: Vec::new(),
             plugin_services: embedder::PluginServices {
-                http: plugin_http,
+                initial_lifecycle: Default::default(),
+                native_channel: None,
                 paths: embedder::AppPaths::new(
-                    document_dir_main().ok().map(PathBuf::from),
-                    None,
+                    sandbox_directory(objc2_foundation::NSSearchPathDirectory::DocumentDirectory),
+                    sandbox_directory(objc2_foundation::NSSearchPathDirectory::CachesDirectory),
                     Some(std::env::temp_dir()),
                 ),
             },
@@ -1035,10 +1062,6 @@ pub fn run(
             thread_topology: embedder::ThreadTopology::configured()
                 .map_err(|error| RunError::Window(error.into()))?,
             launch_url: Arc::clone(&launch_url),
-            http: Some(
-                embedder::http_client()
-                    .map_err(|message| RunError::Window(anyhow::anyhow!(message)))?,
-            ),
             open_raster: Box::new(|fonts| {
                 raster::Rasterizer::create(raster::RasterOptions::default(), fonts)
             }),
@@ -1057,17 +1080,14 @@ pub fn run(
             inspect_dir,
             log_dir: log_directory(),
         }
-        .with_module(embedder::clipboard(Arc::clone(&mac) as _))
-        .with_module(embedder::linking(
-            Arc::clone(&mac) as _,
-            Arc::clone(&launch_url),
-        ))
-        .with_module(embedder::file_system(Arc::clone(&mac) as _))
-        .with_module(embedder::async_storage(Arc::clone(&mac) as _))
-        .with_module(embedder::permissions(mac as _))
         .with_gallery_gpu_view(gallery),
     )
     .map_err(RunError::Boot)?;
+
+    let _update_mailbox = update_mailbox
+        .map(|path| SourceMailbox::start(path, link.poster()))
+        .transpose()
+        .map_err(|error| RunError::Window(error.into()))?;
 
     let app = NSApplication::sharedApplication(mtm);
     let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
@@ -1114,6 +1134,7 @@ pub fn run(
             layer,
             link,
             initial_url,
+            open_url,
             launched: Cell::new(false),
         },
     );
@@ -1127,6 +1148,63 @@ pub fn run(
         return Err(RunError::Dump);
     }
     Ok(())
+}
+
+struct SourceMailbox {
+    stop: std::sync::mpsc::Sender<()>,
+    watcher: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SourceMailbox {
+    fn start(path: PathBuf, poster: Poster) -> std::io::Result<Self> {
+        let (stop, stopped) = std::sync::mpsc::channel();
+        let watcher = std::thread::Builder::new()
+            .name("impasto-source-mailbox".into())
+            .spawn(move || {
+                let mut last = None;
+                while stopped.recv_timeout(std::time::Duration::from_millis(10))
+                    == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                {
+                    let Ok(metadata) = std::fs::metadata(&path) else {
+                        continue;
+                    };
+                    let Ok(modified) = metadata.modified() else {
+                        continue;
+                    };
+                    let stamp = (modified, metadata.len());
+                    if last == Some(stamp) {
+                        continue;
+                    }
+                    let Ok(message) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    let Some((revision, source)) = message.split_once('\n') else {
+                        continue;
+                    };
+                    let Ok(version) = revision.parse::<u128>() else {
+                        continue;
+                    };
+                    last = Some(stamp);
+                    poster.post(Command::UpdateSource {
+                        revision: version.to_string(),
+                        source: source.to_owned(),
+                    });
+                }
+            })?;
+        Ok(Self {
+            stop,
+            watcher: Some(watcher),
+        })
+    }
+}
+
+impl Drop for SourceMailbox {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(watcher) = self.watcher.take() {
+            let _ = watcher.join();
+        }
+    }
 }
 
 fn watch_appearance(host: &Host) {
@@ -1310,146 +1388,17 @@ mod url_tests {
     }
 }
 
-struct MacBridge;
-
-impl ClipboardHost for MacBridge {
-    fn read_clipboard(&self) -> String {
-        read_pasteboard()
-    }
-
-    fn write_clipboard(&self, text: &str) {
-        write_pasteboard(text);
-    }
-}
-
-impl LinkingHost for MacBridge {
-    fn open_url(&self, url: &str) -> Result<(), String> {
-        open_url_main(url)
-    }
-}
-
-impl StorageHost for MacBridge {
-    fn document_dir(&self) -> Result<String, String> {
-        document_dir_main()
-    }
-
-    fn pick_document(&self) -> Result<Option<String>, String> {
-        Ok(None)
-    }
-}
-
-impl PermissionsHost for MacBridge {
-    fn permission_status(&self, name: &str) -> String {
-        permission_status_main(name)
-    }
-
-    fn permission_rationale(&self, _name: &str) -> bool {
-        false
-    }
-
-    fn service_status(&self, _name: &str) -> String {
-        "notApplicable".to_owned()
-    }
-
-    fn open_app_settings(&self) -> bool {
-        open_settings_main().is_ok()
-    }
-}
-
-fn document_dir_main() -> Result<String, String> {
-    let Some(manager) = objc2::runtime::AnyClass::get(c"NSFileManager") else {
-        return Err("module \"FileSystem\" is not linked".to_owned());
-    };
-    // SAFETY: `NSFileManager` was looked up; `defaultManager` returns the process-wide manager.
-    let shared: *mut AnyObject = unsafe { msg_send![manager, defaultManager] };
-    if shared.is_null() {
-        return Err("module \"FileSystem\" is not linked".to_owned());
-    }
-    // SAFETY: directory 9 domain 1 is the user document directory. A null error pointer reports failure as null.
-    let url: *mut AnyObject = unsafe {
-        msg_send![shared, URLForDirectory: 9usize, inDomain: 1usize, appropriateForURL: std::ptr::null::<AnyObject>(), create: true, error: std::ptr::null_mut::<*mut AnyObject>()]
-    };
-    if url.is_null() {
-        return Err("module \"FileSystem\" is not linked".to_owned());
-    }
-    // SAFETY: `url` is the non-null file URL from the previous call.
-    let path: *mut AnyObject = unsafe { msg_send![url, path] };
-    if path.is_null() {
-        return Err("module \"FileSystem\" is not linked".to_owned());
-    }
-    // SAFETY: `path` is the non-null NSString returned by NSURL.path.
-    let text = unsafe { &*path.cast::<NSString>() };
-    Ok(text.to_string())
-}
-
-fn permission_status_main(name: &str) -> String {
-    match name {
-        "camera" | "microphone" => media_status(name),
-        _ => "denied".to_owned(),
-    }
-}
-
-fn media_status(name: &str) -> String {
-    let Some(device) = objc2::runtime::AnyClass::get(c"AVCaptureDevice") else {
-        return "denied".to_owned();
-    };
-    let media = NSString::from_str(if name == "camera" { "vide" } else { "soun" });
-    // SAFETY: `media` is `vide` or `soun`, the AVMediaType values this query accepts.
-    let status: i64 = unsafe { msg_send![device, authorizationStatusForMediaType: &*media] };
-    match status {
-        3 => "granted".to_owned(),
-        1 => "restricted".to_owned(),
-        2 => "denied".to_owned(),
-        _ => "denied".to_owned(),
-    }
-}
-
-fn open_settings_main() -> Result<(), String> {
-    open_url_main("x-apple.systempreferences:com.apple.preference.security?Privacy")
-}
-
-fn open_url_main(url: &str) -> Result<(), String> {
-    let Some(workspace) = objc2::runtime::AnyClass::get(c"NSWorkspace") else {
-        return Err("openURL is not linked".to_owned());
-    };
-    let Some(urls) = objc2::runtime::AnyClass::get(c"NSURL") else {
-        return Err("openURL is not linked".to_owned());
-    };
-    // SAFETY: `NSWorkspace` was looked up; `sharedWorkspace` returns the process-wide workspace.
-    let shared: *mut AnyObject = unsafe { msg_send![workspace, sharedWorkspace] };
-    if shared.is_null() {
-        return Err("openURL is not linked".to_owned());
-    }
-    let text = NSString::from_str(url);
-    // SAFETY: `text` is the URL string, and `NSURL` was looked up above.
-    let nsurl: *mut AnyObject = unsafe { msg_send![urls, URLWithString: &*text] };
-    if nsurl.is_null() {
-        return Err("unsupported URL".to_owned());
-    }
-    // SAFETY: `shared` and `nsurl` are the non-null objects from the calls above.
-    let opened: bool = unsafe { msg_send![shared, openURL: nsurl] };
-    if opened {
-        Ok(())
-    } else {
-        Err("openURL failed".to_owned())
-    }
-}
-
-fn write_pasteboard(text: &str) {
-    let Some(class) = objc2::runtime::AnyClass::get(c"NSPasteboard") else {
-        return;
-    };
-    // SAFETY: `NSPasteboard` was looked up; `generalPasteboard` returns the process pasteboard.
-    let pasteboard: *mut AnyObject = unsafe { msg_send![class, generalPasteboard] };
-    if pasteboard.is_null() {
-        return;
-    }
-    let value = NSString::from_str(text);
-    let kind = NSString::from_str("public.utf8-plain-text");
-    // SAFETY: `pasteboard` is the non-null general pasteboard.
-    let _: () = unsafe { msg_send![pasteboard, clearContents] };
-    // SAFETY: `value` and `kind` are NSStrings that outlive this call.
-    let _: bool = unsafe { msg_send![pasteboard, setString: &*value, forType: &*kind] };
+fn sandbox_directory(directory: objc2_foundation::NSSearchPathDirectory) -> Option<PathBuf> {
+    use objc2_foundation::{NSFileManager, NSSearchPathDomainMask};
+    let url = NSFileManager::defaultManager()
+        .URLForDirectory_inDomain_appropriateForURL_create_error(
+            directory,
+            NSSearchPathDomainMask::UserDomainMask,
+            None,
+            true,
+        )
+        .ok()?;
+    url.path().map(|path| PathBuf::from(path.to_string()))
 }
 
 fn read_pasteboard_html() -> Option<String> {

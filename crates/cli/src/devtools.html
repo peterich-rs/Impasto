@@ -37,6 +37,12 @@
   tr[aria-selected="true"] { background: color-mix(in srgb, Highlight 17%, Canvas); }
   tr[data-late] td:last-child { color: light-dark(#a23513, #ff9a7a); }
   td button { padding: 1px 5px; }
+  #playground { margin-block: 24px; }
+  #playground label { margin-block: 8px; }
+  #tsx, #compiled { font: 13px/1.5 ui-monospace, monospace; }
+  #tsx { box-sizing: border-box; width: 100%; resize: vertical; }
+  #compiled { margin: 0; padding: 12px; min-height: 7em; max-height: 30vh; overflow: auto;
+    background: color-mix(in srgb, CanvasText 6%, Canvas); }
   @media (max-width: 820px) {
     body { padding: 16px; }
     main { grid-template-columns: minmax(0, 1fr); }
@@ -86,6 +92,53 @@
     </div>
   </section>
 </main>
+<section id="playground" hidden aria-label="TSX Playground">
+  <h2>TSX Playground</h2>
+  <main>
+    <label>TSX
+      <textarea id="tsx" rows="8" spellcheck="false">import { View } from "@impasto/solid-renderer/host";
+
+export function Card() {
+  return &lt;View style={{ padding: 12, opacity: 0.8 }} /&gt;;
+}</textarea>
+    </label>
+    <div>
+      <p id="compiled-label">Compiler output</p>
+      <pre id="compiled" tabindex="0" aria-labelledby="compiled-label"></pre>
+    </div>
+  </main>
+</section>
+<script type="module">
+const glue = "%%COMPILER_JS%%";
+if (glue) {
+  const playground = document.getElementById("playground");
+  const source = document.getElementById("tsx");
+  const output = document.getElementById("compiled");
+  playground.hidden = false;
+  output.textContent = "Loading compiler…";
+  try {
+    const compiler = await import("data:text/javascript;base64," + glue);
+    const wasm = Uint8Array.from(atob("%%COMPILER_WASM%%"), character => character.charCodeAt(0));
+    await compiler.default({ module_or_path: wasm });
+    function compile() {
+      try {
+        const result = JSON.parse(compiler.compile_tsx("playground.tsx", source.value));
+        output.textContent = [...result.warnings, result.code].join("\n");
+      } catch (error) {
+        output.textContent = String(error);
+      }
+    }
+    let pending;
+    source.addEventListener("input", () => {
+      clearTimeout(pending);
+      pending = setTimeout(compile, 150);
+    });
+    compile();
+  } catch (error) {
+    output.textContent = String(error);
+  }
+}
+</script>
 <script>
 "use strict";
 const field = id => document.getElementById(id);
@@ -114,6 +167,35 @@ function passLabel(pass) {
   const id = pass.view_id ?? pass.shader_id;
   return id == null ? pass.kind : pass.kind + " · " + id;
 }
+const symbolBytes = "%%SYMBOLS%%";
+const symbols = symbolBytes ? JSON.parse(new TextDecoder().decode(
+  Uint8Array.from(atob(symbolBytes), character => character.charCodeAt(0)))) : null;
+
+function sourceStack(stack) {
+  if (!symbols) return stack;
+  const [sources, mappings, functions] = symbols;
+  return stack.replace(/(\bat [^\n]*?)(app\.(?:js|bin)):(\d+):(\d+)(?=\)|$)/gm,
+    (frame, prefix, file, line, column) => {
+      const row = Number(line) - 1;
+      const col = Number(column) - 1;
+      let start = 0, end = mappings.length;
+      while (start < end) {
+        const middle = Math.floor((start + end) / 2);
+        const [mappedRow, mappedCol] = mappings[middle];
+        if (mappedRow < row || (mappedRow === row && mappedCol <= col)) start = middle + 1;
+        else end = middle;
+      }
+      const match = mappings[start - 1];
+      if (!match || match[0] !== row || !sources[match[2]]) return frame;
+      const [, , id, sourceLine, sourceCol] = match;
+      const named = functions[id]?.findLast(([, [firstLine, firstCol, lastLine, lastCol]]) =>
+        (firstLine < sourceLine || (firstLine === sourceLine && firstCol <= sourceCol)) &&
+        (lastLine > sourceLine || (lastLine === sourceLine && lastCol > sourceCol)));
+      const heading = named && prefix.endsWith("(") ? "at " + named[0] + " (" : prefix;
+      return heading + sources[id] + ":" + (sourceLine + 1) + ":" + (sourceCol + 1);
+    });
+}
+
 function renderDetail(frame, data) {
   const timeline = field("timeline");
   const scale = field("timelineScale");
@@ -183,11 +265,19 @@ function renderDetail(frame, data) {
       button.style.left = Math.min(99.9, span.offset_ns / extent * 100) + "%";
       button.style.width = span.duration_ns / extent * 100 + "%";
       button.textContent = span.instant ? "" : span.name;
-      const fields = Object.entries(span.fields).map(([name, value]) => name + "=" + value);
+      const fields = Object.entries(span.fields).filter(([name]) => name !== "js_stack")
+        .map(([name, value]) => name + "=" + value);
       const label = [span.name, display(span.duration_ns / 1e3) + " µs", ...fields].join(" · ");
       button.title = label;
       button.setAttribute("aria-label", label);
-      button.addEventListener("click", () => { info.textContent = label; });
+      button.addEventListener("click", () => {
+        info.textContent = label;
+        if (typeof span.fields.js_stack === "string") {
+          const stack = document.createElement("pre");
+          stack.textContent = sourceStack(span.fields.js_stack);
+          info.append(stack);
+        }
+      });
       row.append(button);
     }
     for (const row of rows) if (row) timeline.append(row);

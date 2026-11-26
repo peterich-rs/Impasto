@@ -192,6 +192,8 @@ pub struct Tree {
     style_env: crate::style::Environment,
     class_cache: crate::style::ClassCache,
     style_gestures: Vec<Gesture>,
+    style_resolves: u32,
+    repaint_boundaries_dirtied: u32,
 }
 
 #[cfg(test)]

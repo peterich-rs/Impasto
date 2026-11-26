@@ -13,6 +13,10 @@ declare module "scene" {
   export function createTextNode(value: string | number): Node;
   export function insert(parent: Node, children: unknown, marker?: Node | null): void;
   export function insertNode(parent: Node, child: Node, anchor?: Node): void;
+  export function defineStyle(input: unknown): number;
+  export function defineTemplate(input: unknown): number;
+  export function instantiateTemplate(id: number): Node;
+  export function applyStaticStyle(node: Node, id: number): void;
   export function setProp(node: Node, name: string, value: unknown): void;
   export { createRenderEffect as effect, createMemo as memo } from "reactive";
   export function createComponent<P, T>(component: (props: P) => T, props: P): T;

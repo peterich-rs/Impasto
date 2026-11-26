@@ -8,14 +8,11 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use embedder::{
-    DiagnosticsHub, NetKind, OpenWireClient, http_module, websocket_module, wrap_if_devtools,
-};
+use embedder::{DiagnosticsHub, NetKind};
 use futures_util::future::{Either, select};
 use futures_util::{SinkExt as _, StreamExt as _};
 use javascript::host::{MethodExec, ModuleRegistry, PluginResult, Settle, Work};
@@ -38,22 +35,16 @@ impl TempBundle {
         let _guard = Self { dir: dir.clone() };
 
         let entry = dir.join(format!("{name}.ts"));
-        let outfile = dir.join(format!("{name}.mjs"));
         fs::write(&entry, entry_ts).expect("write test entrypoint");
 
-        let output = Command::new("node")
-            .arg(root.join("tools/pack.mjs"))
-            .arg(&entry)
-            .arg(&outfile)
-            .output()
-            .expect("invoke tools/pack.mjs");
-        assert!(
-            output.status.success(),
-            "pack.mjs failed for {name}:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-        fs::read_to_string(&outfile).expect("read bundled output")
+        bundler::bundle(bundler::BundleOptions {
+            root: dir,
+            entry,
+            framework: root,
+            ..Default::default()
+        })
+        .unwrap_or_else(|error| panic!("compile {name}: {error:#}"))
+        .code
     }
 }
 
@@ -66,6 +57,10 @@ impl Drop for TempBundle {
 struct TestExec;
 
 impl MethodExec for TestExec {
+    fn spawn(&self, task: javascript::host::HostFuture) {
+        drop(tokio::runtime::Handle::current().spawn(task));
+    }
+
     fn worker(&self, settle: Settle, work: Work) {
         std::thread::spawn(move || settle.send(work()));
     }
@@ -80,10 +75,20 @@ impl MethodExec for TestExec {
 }
 
 fn run_bundled_module(bundled_js: &str, hub: Option<Arc<DiagnosticsHub>>) -> Result<(), String> {
-    let client = Arc::new(OpenWireClient::new()?);
-    let client = wrap_if_devtools(client, hub.clone());
-    let registry =
-        ModuleRegistry::new(vec![http_module(Some(client)), websocket_module(None, hub)]);
+    let worker = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
+    let _runtime = worker.enter();
+    let mut context = impasto::PluginContext::default();
+    if let Some(hub) = hub {
+        context = context.with_diagnostics(hub);
+    }
+    let mut registrar = impasto::PluginRegistrar::default();
+    impasto_http::register(&mut registrar);
+    impasto_websocket::register(&mut registrar);
+    let registry = ModuleRegistry::new(
+        registrar
+            .build(&context)
+            .map_err(|error| error.to_string())?,
+    );
     let catalog = ModuleCatalog::new(registry).map_err(|e| format!("{e:?}"))?;
 
     let (wake_tx, wake_rx) = mpsc::channel();

@@ -1,3 +1,4 @@
+import { View as HostView, Stack as HostStack } from "@impasto/solid-renderer/host";
 import {
   For,
   Show,
@@ -49,16 +50,16 @@ function pageDistance(mover: number): number {
 function plainError(error: unknown, reset: () => void): NodeHandle {
   const message = error instanceof Error ? error.message : String(error);
   return (
-    <view
+    <HostView
       style={{
         gap: 8,
       }}
     >
       <Text>{message}</Text>
-      <view onClick={() => reset()}>
+      <HostView onClick={() => reset()}>
         <Text>retry</Text>
-      </view>
-    </view>
+      </HostView>
+    </HostView>
   );
 }
 function unwrapError(error: unknown): unknown {
@@ -136,7 +137,7 @@ export function StackTransition(
     }
   });
   const body = (
-    <view
+    <HostView
       style={{
         width: "100%",
         height: "100%",
@@ -147,10 +148,10 @@ export function StackTransition(
       }}
     >
       {props.children}
-    </view>
+    </HostView>
   );
   return (
-    <stack
+    <HostStack
       ref={(node) => {
         if (node === null) return;
         scene.setComponentStyle(node, {
@@ -171,7 +172,7 @@ export function StackTransition(
         opacity: 1,
       }}
     >
-      <stack
+      <HostStack
         ref={(node) => {
           if (node === null) return;
         scene.setComponentStyle(node, {
@@ -193,7 +194,7 @@ export function StackTransition(
         {props.background === undefined ? (
           body
         ) : (
-          <view
+          <HostView
             style={{
               width: "100%",
               height: "100%",
@@ -205,10 +206,10 @@ export function StackTransition(
             }}
           >
             {body}
-          </view>
+          </HostView>
         )}
-      </stack>
-    </stack>
+      </HostStack>
+    </HostStack>
   );
 }
 function RouteHost(props: {
@@ -262,7 +263,7 @@ function RouteHost(props: {
   return (
     <PageActiveContext value={active}>
       <PageKeepContext value={() => keepAlive}>
-        <stack
+        <HostStack
           ref={(node) => {
             if (node === null) return;
             scene.setComponentStyle(node, {
@@ -302,7 +303,7 @@ function RouteHost(props: {
         >
           {/* The entering page can receive taps while the exposed lower page is blocked. */}
           <Show when={props.entry().phase === "enter"}>
-            <view style={{ width: "100%", height: "100%" }} onClick={() => {}} />
+            <HostView style={{ width: "100%", height: "100%" }} onClick={() => {}} />
           </Show>
           {transition({
             // The transition tracks its phase; the route's content keeps its owner.
@@ -328,7 +329,7 @@ function RouteHost(props: {
             },
           })}
           <Show when={showsBackScrim()}>
-            <view
+            <HostView
               ref={(node) => {
                 if (node === null || typeof scene.bindBackProgressOpacity !== "function") return;
                 const rule = scene.bindBackProgressOpacity(node, [0, 1], [0.24, 0]);
@@ -340,14 +341,14 @@ function RouteHost(props: {
               }}
             />
           </Show>
-        </stack>
+        </HostStack>
       </PageKeepContext>
     </PageActiveContext>
   );
 }
 export function RouterView(props: RouterViewProps): NodeHandle {
   return (
-    <stack
+    <HostStack
       ref={(node) => {
         if (node === null) return;
         scene.setComponentStyle(node, {
@@ -377,6 +378,6 @@ export function RouterView(props: RouterViewProps): NodeHandle {
           />
         )}
       </For>
-    </stack>
+    </HostStack>
   );
 }

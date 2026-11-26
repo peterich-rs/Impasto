@@ -67,16 +67,7 @@ fn toolchain_baseline_counts() {
 #[test]
 fn native_style_contracts_and_single_view_button() {
     {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let output = root.join("target/native-style.js");
-        let status = std::process::Command::new("node")
-            .arg(root.join("tools/pack.mjs"))
-            .arg(root.join("crates/engine/tests/fixtures/ui/style.tsx"))
-            .arg(&output)
-            .status()
-            .expect("pack style fixture");
-        assert!(status.success());
-        let source = std::fs::read_to_string(output).expect("read style fixture");
+        let source = super::fixture_bundle("style.tsx");
         let mut session = open(
             &source,
             "style.js",
@@ -93,16 +84,7 @@ fn native_style_contracts_and_single_view_button() {
 #[test]
 fn native_component_contracts() {
     {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let output = root.join("target/native-components.js");
-        let status = std::process::Command::new("node")
-            .arg(root.join("tools/pack.mjs"))
-            .arg(root.join("crates/engine/tests/fixtures/ui/components.tsx"))
-            .arg(&output)
-            .status()
-            .expect("pack components fixture");
-        assert!(status.success());
-        let source = std::fs::read_to_string(output).expect("read components fixture");
+        let source = super::fixture_bundle("components.tsx");
         let mut session = open(
             &source,
             "components.js",
@@ -121,16 +103,7 @@ fn native_component_contracts() {
 fn native_gpu_components_record_owned_inputs_for_raster() {
     use crate::scene::BACKDROP_TEXTURE;
 
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let output = root.join("target/native-gpu-effects.js");
-    let status = std::process::Command::new("node")
-        .arg(root.join("tools/pack.mjs"))
-        .arg(root.join("crates/engine/tests/fixtures/ui/gpu-effects.tsx"))
-        .arg(&output)
-        .status()
-        .expect("pack GPU component fixture");
-    assert!(status.success());
-    let source = std::fs::read_to_string(output).expect("read GPU component fixture");
+    let source = super::fixture_bundle("gpu-effects.tsx");
     let mut session = open(
         &source,
         "gpu-effects.js",
@@ -200,16 +173,7 @@ fn native_gpu_components_record_owned_inputs_for_raster() {
 #[test]
 fn native_control_flow_preserves_owned_rows_and_catches_effect_errors() {
     {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let output = root.join("target/native-flow.js");
-        let status = std::process::Command::new("node")
-            .arg(root.join("tools/pack.mjs"))
-            .arg(root.join("crates/engine/tests/fixtures/ui/flow.ts"))
-            .arg(&output)
-            .status()
-            .expect("build native fixture");
-        assert!(status.success());
-        let source = std::fs::read_to_string(&output).expect("native fixture");
+        let source = super::fixture_bundle("flow.ts");
         let mut session = open(
             &source,
             "flow.js",
@@ -822,7 +786,7 @@ fn module_listener_mutations_take_effect_after_the_snapshot() {
     let (host, _pending) = test_host();
     let mut session = super::JsSession::open_with(
         r#"
-                import { addEventListener, removeEventListener } from "@impasto/linking";
+                import { addEventListener, removeEventListener } from "@impasto/linking/native";
                 const later = ({url}) => console.log("later:" + url);
                 const duplicate = ({url}) => console.log("duplicate:" + url);
                 const first = (event) => {
@@ -851,7 +815,14 @@ fn module_listener_mutations_take_effect_after_the_snapshot() {
             PluginValue::Str("impasto://first".into()),
         )]),
     }));
-    session.set_launch_url("impasto://second");
+    session.io_event(IoEvent::Host(javascript::host::HostEvent {
+        module: "Linking".into(),
+        event: "url".into(),
+        payload: PluginValue::Map(vec![(
+            "url".into(),
+            PluginValue::Str("impasto://second".into()),
+        )]),
+    }));
     assert_eq!(
         logs.borrow().as_slice(),
         [
@@ -1246,7 +1217,7 @@ fn no_log() -> super::ConsoleLog {
 /// need it fail with instructions when it has not been built.
 fn gallery_source() -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../apps/gallery-solid/dist/quotes.js");
+        .join("../../examples/gallery-solid/dist/quotes.js");
     std::fs::read_to_string(&path)
         .unwrap_or_else(|_| panic!("run `just gallery-dist` to build the gallery bundle"))
 }
@@ -1283,7 +1254,7 @@ fn test_host_with_launch_url(url: Option<String>) -> (ModuleConfig, PluginComple
                     object: true,
                     ..Default::default()
                 },
-                specifier: "@impasto/clipboard",
+                specifier: "@impasto/clipboard/native",
                 methods: vec![
                     Method::sync("getString", {
                         let clipboard = Arc::clone(&clipboard);
@@ -1348,7 +1319,7 @@ fn test_host_with_launch_url(url: Option<String>) -> (ModuleConfig, PluginComple
                     events: LINKING_EVENTS,
                     ..Default::default()
                 },
-                specifier: "@impasto/linking",
+                specifier: "@impasto/linking/native",
                 methods: vec![Method::sync("getInitialURL", {
                     let launch_url = Arc::clone(&launch_url);
                     move |_| {
@@ -1365,8 +1336,6 @@ fn test_host_with_launch_url(url: Option<String>) -> (ModuleConfig, PluginComple
         post_delivery: None,
         transport_clock: None,
         script_execution: Default::default(),
-        app_state,
-        launch_url,
     };
     (config, pending)
 }
@@ -1645,7 +1614,7 @@ fn gallery_host() -> ModuleConfig {
                     object: true,
                     ..Default::default()
                 },
-                specifier: "@impasto/async-storage",
+                specifier: "@impasto/async-storage/native",
                 methods: vec![
                     Method::sync("multiGet", |_| Ok(PluginValue::List(Vec::new()))),
                     Method::sync("multiSet", |_| Ok(PluginValue::Null)),
@@ -1658,7 +1627,7 @@ fn gallery_host() -> ModuleConfig {
                     events: LINKING_EVENTS,
                     ..Default::default()
                 },
-                specifier: "@impasto/linking",
+                specifier: "@impasto/linking/native",
                 methods: vec![
                     Method::sync("getInitialURL", |_| Ok(PluginValue::Null)),
                     Method::sync("openURL", |_| Ok(PluginValue::Null)),
@@ -1671,7 +1640,7 @@ fn gallery_host() -> ModuleConfig {
                     object: true,
                     ..Default::default()
                 },
-                specifier: "@impasto/clipboard",
+                specifier: "@impasto/clipboard/native",
                 methods: vec![
                     Method::sync("getString", |_| Ok(PluginValue::Str(String::new()))),
                     Method::sync("setString", |_| Ok(PluginValue::Null)),
@@ -1680,7 +1649,7 @@ fn gallery_host() -> ModuleConfig {
             Module {
                 name: "Devtools",
                 exports: Default::default(),
-                specifier: "@impasto/devtools",
+                specifier: "@impasto/devtools/native",
                 methods: vec![Method::sync("enabled", |_| Ok(PluginValue::Bool(false)))],
             },
         ])),
@@ -1689,8 +1658,6 @@ fn gallery_host() -> ModuleConfig {
         post_delivery: None,
         transport_clock: None,
         script_execution: Default::default(),
-        app_state: session::shared("active".to_owned()),
-        launch_url: session::shared(None),
     }
 }
 
@@ -1698,11 +1665,13 @@ fn gallery_host() -> ModuleConfig {
 /// need it fail with instructions when it has not been built. Returns
 /// `None` when the interpreter is not linked; callers already early-return.
 fn open_gallery() -> Option<Box<dyn Session>> {
+    open_gallery_source(&gallery_source())
+}
+
+fn open_gallery_source(source: &str) -> Option<Box<dyn Session>> {
     {
-        let body = gallery_source();
-        let source = body;
         match super::open_with_config(
-            &source,
+            source,
             "test.js",
             crate::text::MonoShaper::default(),
             Box::new(|level, line| eprintln!("[js {level}] {line}")),
@@ -4117,7 +4086,7 @@ fn timers_and_modules_run_inside_the_frame() {
                 .push(text.to_owned());
         });
         let source = r#"
-                import * as clipboard from "@impasto/clipboard";
+                import * as clipboard from "@impasto/clipboard/native";
                 import { addEventListener } from "@impasto/app-state";
                 if ("addEventListener" in clipboard || "removeEventListener" in clipboard) {
                     throw new Error("clipboard has no native events");
@@ -4148,6 +4117,11 @@ fn timers_and_modules_run_inside_the_frame() {
         let _ = session.frame(session::FrameTime::at(0.0));
         let _ = session.frame(session::FrameTime::at(20.0));
         session.lifecycle(session::Lifecycle::Paused);
+        session.io_event(IoEvent::Host(javascript::host::HostEvent {
+            module: "AppState".into(),
+            event: "change".into(),
+            payload: PluginValue::Str("background".into()),
+        }));
         let text = lines
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -4174,7 +4148,7 @@ fn get_initial_url_is_visible_during_eval() {
                 .push(text.to_owned());
         });
         let source = r#"
-                import { getInitialURL } from "@impasto/linking";
+                import { getInitialURL } from "@impasto/linking/native";
                 console.log("initial:" + String(getInitialURL()));
             "#;
         let (host, _pending) =

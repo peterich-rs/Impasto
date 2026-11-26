@@ -4,6 +4,6 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/native.d.ts"
+    ".": "./src/index.ts"
   }
 }

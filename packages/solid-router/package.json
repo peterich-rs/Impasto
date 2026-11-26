@@ -6,14 +6,8 @@
   "exports": {
     ".": "./src/index.ts"
   },
-  "scripts": {
-    "test": "node --experimental-strip-types src/path.test.ts && node --experimental-strip-types src/transition.test.ts && node --conditions=browser --experimental-strip-types --import ../../tools/register.mjs src/router.test.ts"
-  },
   "dependencies": {
     "@impasto/linking": "workspace:*",
     "@impasto/solid-renderer": "workspace:*"
-  },
-  "devDependencies": {
-    "solid-js": "2.0.0"
   }
 }

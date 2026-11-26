@@ -17,22 +17,10 @@ pub(crate) use delivery::{archive, export_ipa, xcframework};
 
 use crate::{
     app::App,
-    build::{BuildOptions, PlatformArtifact, bundle_in, copy_tree, escape_xml, manifest_snapshot},
+    build::{BuildOptions, PlatformArtifact, bundle_for_host, escape_xml, manifest_snapshot},
     plugins::{self, NativeBuild},
     toolchain,
 };
-
-pub(crate) const MODULES: &[&str] = &[
-    "app-state",
-    "async-storage",
-    "clipboard",
-    "devtools",
-    "file-system",
-    "http",
-    "linking",
-    "permissions",
-    "websocket",
-];
 
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -237,27 +225,32 @@ fn build_artifact(
 
 struct PreparedApplication {
     path: PathBuf,
+    project: PathBuf,
+    framework: PathBuf,
     configuration: &'static str,
     platform: IosPlatform,
     architecture: &'static str,
     verbose: bool,
     plugin_manifest: Option<Vec<u8>>,
     _lock: fs::File,
+    _native: NativeBuild,
 }
 
 impl PreparedApplication {
     fn xcodebuild(&self) -> Command {
         let mut command = Command::new("xcodebuild");
         command
-            .current_dir(&self.path)
-            .args(["-project", "Impasto.xcodeproj", "-scheme", "Impasto"])
+            .current_dir(&self.project)
+            .env("IMPASTO_ROOT", &self.framework)
+            .args(["-project", "Runner.xcodeproj", "-scheme", "Runner"])
             .args(["-configuration", self.configuration])
             .args(["-sdk", self.platform.sdk(), "-destination"])
             .arg(match self.platform {
                 IosPlatform::Device => "generic/platform=iOS",
                 IosPlatform::Simulator => "generic/platform=iOS Simulator",
             })
-            .args(["-derivedDataPath", "xcode"])
+            .arg("-derivedDataPath")
+            .arg(self.path.join("xcode"))
             .arg(format!("ARCHS={}", self.architecture));
         if !self.verbose {
             command.arg("-quiet");
@@ -278,85 +271,93 @@ fn prepare_application(
     if platform == IosPlatform::Device && app.ios.development_team.is_none() {
         bail!("构建 iOS 真机应用需配置 app.toml 的 ios.development_team；模拟器用 --ios-simulator");
     }
-    let modules = app.modules("ios");
-    for module in modules.split(',').filter(|name| !name.is_empty()) {
-        if !MODULES.contains(&module) && module != "native-plugins" {
-            bail!("iOS 宿主尚未实现 {module} 模块");
-        }
-    }
     let framework = toolchain::framework()?;
-    let host = framework.join("crates/embedder/ios");
+    crate::create::scaffold(app)?;
     let (target, architecture) = platform.target()?;
     let profile = if options.debug { "debug" } else { "release" };
     let configuration = if options.debug { "Debug" } else { "Release" };
     let base = app.root.join("build/ios");
     let path = base.join(platform.sdk()).join(profile);
     let lock = lock_directory(&path)?;
-
-    let native = plugins::prepare(app, "ios", options.verbose)?;
-    let minimum = native
-        .as_ref()
-        .map_or(Ok("15.0"), |native| native.inputs().ios_version())?;
-    let bundle = bundle_in(
-        app,
-        options,
-        Some("ios"),
-        &path.join("bundle"),
-        native.as_ref(),
+    let mut native = plugins::prepare(app, "ios", options.verbose)?;
+    verify_runner_privacy(
+        &app.root.join("ios/Runner/Info.plist"),
+        &native.inputs().usage_description_keys,
     )?;
-    let rust_target_dir = base.join("target");
-    let linked = native.as_ref().filter(|native| native.links_native());
-    let (workspace, package) = linked.map_or((framework.as_path(), "embedder-ios"), |native| {
-        (native.workspace.as_path(), native.package.as_str())
-    });
-    let mut native_flags = build_rust(
-        workspace,
+    let minimum = "15.0";
+    let bundle = bundle_for_host(app, options, "ios", &path.join("bundle"), &mut native)?;
+    let rust_target_dir = toolchain::target_dir(&base.join("target"))?;
+    let archive_lock = lock_directory(&rust_target_dir.join(".impasto-ios"))?;
+    let flags = build_rust(
+        &native.workspace,
         &rust_target_dir,
         target,
         options,
-        package,
+        &native.package,
         minimum,
+        native.native_exports(),
     )?;
-    if let Some(native) = &native {
-        use std::fmt::Write as _;
-        for framework in &native.inputs().frameworks {
-            write!(native_flags, " -framework {framework}")?;
-        }
-        for framework in &native.inputs().weak_frameworks {
-            write!(native_flags, " -weak_framework {framework}")?;
-        }
-    }
-    let library = rust_target_dir
-        .join(target)
-        .join(profile)
-        .join("libembedder_ios.a");
-    let script = if options.debug { "app.js" } else { "app.bin" };
-    stage(
-        &path,
-        &host,
-        app,
-        BuildInputs {
-            bundle: &bundle,
-            library: &library,
-            script,
-            modules: &modules,
-            native_flags: &native_flags,
-            native: linked,
-            minimum,
-        },
+    let library = path.join("libimpasto_app.a");
+    fs::copy(
+        rust_target_dir
+            .join(target)
+            .join(profile)
+            .join("libimpasto_app.a"),
+        &library,
     )?;
+    drop(archive_lock);
+    let resources = path.join("resources");
+    crate::build::stage_assets(app, &framework, &resources, &bundle, "ios", options.trace)?;
+    let glue = app.root.join(".impasto/darwin/ios");
+    let sdk = platform.sdk();
+    let settings = crate::build::darwin_settings(&library, &resources, &flags)?;
+    let signing = app.ios.provisioning_profile.as_ref().map_or_else(
+        || "CODE_SIGN_STYLE = Automatic\n".to_owned(),
+        |profile| {
+            let certificate = app.ios.signing_certificate.as_deref().unwrap_or("Apple Development");
+            format!("CODE_SIGN_STYLE = Manual\nPROVISIONING_PROFILE_SPECIFIER = {profile}\nCODE_SIGN_IDENTITY = {certificate}\n")
+        }
+    );
+    let families = match app.ios.device_families.as_slice() {
+        [] => "1,2".to_owned(),
+        values => values
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
+    };
+    let domains = write_associated_domains(&glue, &app.ios.associated_domains)?;
+    let team = app.ios.development_team.as_deref().unwrap_or_default();
+    let sdk_settings = settings
+        .lines()
+        .map(|line| line.replacen(" = ", &format!("[sdk={sdk}*] = "), 1) + "\n")
+        .collect::<String>();
+    plugins::write(
+        &glue.join(format!("{configuration}.{sdk}.xcconfig")),
+        &sdk_settings,
+    )?;
+    plugins::write(
+        &glue.join(format!("{configuration}.xcconfig")),
+        &format!(
+            "DEVELOPMENT_TEAM = {team}\nTARGETED_DEVICE_FAMILY = {families}\n{signing}{domains}#include? \"{configuration}.iphoneos.xcconfig\"\n#include? \"{configuration}.iphonesimulator.xcconfig\"\n",
+        ),
+    )?;
+    let plugin_manifest = manifest_snapshot(Some(&native))?;
     Ok(PreparedApplication {
         path,
+        project: app.root.join("ios"),
+        framework,
         configuration,
         platform,
         architecture,
         verbose: options.verbose,
-        plugin_manifest: manifest_snapshot(native.as_ref())?,
+        plugin_manifest,
         _lock: lock,
+        _native: native,
     })
 }
 
-fn lock_directory(path: &Path) -> Result<fs::File> {
+pub(crate) fn lock_directory(path: &Path) -> Result<fs::File> {
     fs::create_dir_all(path)?;
     let lock = fs::OpenOptions::new()
         .create(true)
@@ -394,13 +395,14 @@ fn verify_signature(application: &Path) -> Result<()> {
     toolchain::run(command, "校验 iOS 应用签名")
 }
 
-fn build_rust(
+pub(crate) fn build_rust(
     framework: &Path,
     target_dir: &Path,
     target: &str,
     options: &BuildOptions,
     package: &str,
     minimum: &str,
+    native_exports: &str,
 ) -> Result<String> {
     // rustc bundles the native static archives into libembedder_ios.a. The
     // Swift application's link step still needs the system frameworks/libraries.
@@ -408,13 +410,22 @@ fn build_rust(
     let mut command = Command::new("cargo");
     command
         .current_dir(framework)
-        .args([
-            "rustc", "--color", "never", "--locked", "-p", package, "--target", target,
-        ])
+        .args(["rustc", "--color", "never", "--locked", "-p", package])
         .arg("--target-dir")
         .arg(target_dir)
         .env_remove("SDKROOT")
-        .env("IPHONEOS_DEPLOYMENT_TARGET", minimum);
+        .env("IMPASTO_NATIVE_EXPORTS", native_exports)
+        .env(
+            if target.ends_with("apple-darwin") {
+                "MACOSX_DEPLOYMENT_TARGET"
+            } else {
+                "IPHONEOS_DEPLOYMENT_TARGET"
+            },
+            minimum,
+        );
+    if !target.ends_with("apple-darwin") {
+        command.args(["--target", target]);
+    }
     if !options.debug {
         // Xcode 27's strip can leave host proc-macro dylibs unloadable by dyld.
         command.args([
@@ -451,21 +462,11 @@ fn build_rust(
     Ok(flags.to_owned())
 }
 
-fn bundle_id(app: &App) -> String {
+pub(crate) fn bundle_id(app: &App) -> String {
     app.ios
         .bundle_id
         .clone()
         .unwrap_or_else(|| format!("dev.impasto.{}", app.name.replace('_', "-")))
-}
-
-struct BuildInputs<'a> {
-    bundle: &'a Path,
-    library: &'a Path,
-    script: &'a str,
-    modules: &'a str,
-    native_flags: &'a str,
-    native: Option<&'a NativeBuild>,
-    minimum: &'a str,
 }
 
 fn swift_sources(directory: &Path) -> Result<Vec<PathBuf>> {
@@ -477,52 +478,37 @@ fn swift_sources(directory: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn add_swift_sources(mut pbx: String, files: &[PathBuf]) -> Result<String> {
-    let mut buildfiles = String::new();
-    let mut references = String::new();
-    let mut group = String::new();
-    let mut sources = String::new();
-    for (index, path) in files.iter().enumerate() {
-        use std::fmt::Write as _;
-
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .context("iOS Swift 文件名无效")?;
-        if !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-        {
-            bail!("iOS Swift 文件名包含不支持的字符 {name}");
+pub(crate) fn verify_runner_privacy(
+    plist: &Path,
+    keys: &std::collections::BTreeSet<String>,
+) -> Result<()> {
+    if !keys.is_empty() {
+        let document = plist_json(plist)?;
+        for key in keys {
+            if !document[key]
+                .as_str()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                bail!("{} 缺少插件所需的用途说明 {key}", plist.display());
+            }
         }
-        let file_type = match path.extension().and_then(|part| part.to_str()) {
-            Some("swift") => "sourcecode.swift",
-            Some("m") => "sourcecode.c.objc",
-            Some("c") => "sourcecode.c.c",
-            _ => bail!("不支持的 iOS 插件源码: {}", path.display()),
-        };
-        let file = format!("B2{index:022X}");
-        let build = format!("B1{index:022X}");
-        writeln!(
-            buildfiles,
-            "\t\t{build} = {{isa = PBXBuildFile; fileRef = {file}; }};"
-        )?;
-        writeln!(
-            references,
-            "\t\t{file} = {{isa = PBXFileReference; lastKnownFileType = {file_type}; path = \"host/{name}\"; sourceTree = \"<group>\"; }};"
-        )?;
-        writeln!(group, "\t\t\t\t{file},")?;
-        writeln!(sources, "\t\t\t\t{build},")?;
     }
-    for (token, value) in [
-        ("@HOST_SWIFT_BUILDFILES@", buildfiles),
-        ("@HOST_SWIFT_REFERENCES@", references),
-        ("@HOST_SWIFT_GROUP@", group),
-        ("@HOST_SWIFT_SOURCES@", sources),
-    ] {
-        pbx = pbx.replace(token, value.trim_end());
+    Ok(())
+}
+
+pub(crate) fn verify_runner_entitlements(
+    plist: &Path,
+    keys: &std::collections::BTreeSet<String>,
+) -> Result<()> {
+    if !keys.is_empty() {
+        let document = plist_json(plist)?;
+        for key in keys {
+            if document[key].as_bool() != Some(true) {
+                bail!("{} 缺少插件所需的 entitlement {key}", plist.display());
+            }
+        }
     }
-    Ok(pbx)
+    Ok(())
 }
 
 fn plist_json(path: &Path) -> Result<Value> {
@@ -534,7 +520,11 @@ fn plist_json(path: &Path) -> Result<Value> {
     serde_json::from_str(&data).with_context(|| format!("解析 {}", path.display()))
 }
 
-fn write_privacy_manifest(template: &Path, custom: Option<&Path>, output: &Path) -> Result<()> {
+pub(crate) fn write_privacy_manifest(
+    template: &Path,
+    custom: Option<&Path>,
+    output: &Path,
+) -> Result<()> {
     let Some(custom) = custom else {
         fs::copy(template, output)?;
         return Ok(());
@@ -607,7 +597,7 @@ fn write_associated_domains(project: &Path, domains: &[String]) -> Result<&'stat
             "<key>com.apple.developer.associated-domains</key><array>{domains}</array>"
         )),
     )?;
-    Ok("CODE_SIGN_ENTITLEMENTS = Impasto.entitlements\n")
+    Ok("CODE_SIGN_ENTITLEMENTS = $(SRCROOT)/../.impasto/darwin/ios/Impasto.entitlements\n")
 }
 
 pub(crate) fn plist_xml(entries: &str) -> String {
@@ -616,81 +606,8 @@ pub(crate) fn plist_xml(entries: &str) -> String {
     )
 }
 
-fn stage(project: &Path, host: &Path, app: &App, inputs: BuildInputs<'_>) -> Result<()> {
-    let xcode = project.join("Impasto.xcodeproj");
-    fs::create_dir_all(xcode.join("xcshareddata/xcschemes"))?;
-    let template = host.join("template");
-    let pbx = fs::read_to_string(template.join("project.pbxproj"))?.replace(
-        "IPHONEOS_DEPLOYMENT_TARGET = 15.0;",
-        &format!("IPHONEOS_DEPLOYMENT_TARGET = {};", inputs.minimum),
-    );
-    let mut swift = swift_sources(&host.join("host"))?;
-    copy_tree(&host.join("host"), &project.join("host"), &[])?;
-    if let Some(native) = inputs.native {
-        let staged = project.join("host/ImpastoHost.swift");
-        let mut source = fs::read_to_string(&staged)?;
-        source.push_str("\n@_silgen_name(\"impasto_install_app_plugins\")\nprivate func impastoInstallAppPlugins() -> Bool\n");
-        source = source.replace(
-            "        let context = Unmanaged.passRetained",
-            "        _ = impastoInstallAppPlugins()\n        let context = Unmanaged.passRetained",
-        );
-        fs::write(staged, source)?;
-        for (index, path) in native.inputs().sources.iter().enumerate() {
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .context("无效 Swift 文件名")?;
-            let destination = project.join("host").join(format!("Plugin{index}_{name}"));
-            fs::copy(path, &destination)?;
-            swift.push(destination);
-        }
-    }
-    fs::write(
-        xcode.join("project.pbxproj"),
-        add_swift_sources(pbx, &swift)?.replace("@APP_SCRIPT@", inputs.script),
-    )?;
-    fs::copy(
-        template.join("Impasto.xcscheme"),
-        xcode.join("xcshareddata/xcschemes/Impasto.xcscheme"),
-    )?;
-    if let Some(storyboard) = &app.ios.launch_storyboard {
-        let storyboard = app.root.join(storyboard);
-        fs::copy(&storyboard, project.join("host/LaunchScreen.storyboard"))
-            .with_context(|| format!("复制 iOS 启动画面 {}", storyboard.display()))?;
-    }
-    fs::create_dir_all(project.join("native"))?;
-    fs::copy(
-        host.join("include/impasto_ios.h"),
-        project.join("native/impasto_ios.h"),
-    )?;
-    fs::copy(inputs.library, project.join("native/libembedder_ios.a"))?;
-
-    let resources = project.join("resources");
-    if resources.exists() {
-        fs::remove_dir_all(&resources)?;
-    }
-    fs::create_dir(&resources)?;
-    copy_tree(&app.assets(), &resources.join("assets"), &[])?;
-    fs::write(resources.join("app.modules"), inputs.modules)?;
-    fs::copy(inputs.bundle, resources.join(inputs.script))?;
-    let font_notice = fs::read_to_string(host.join("../android/assets/fonts/NOTICE"))?;
-    let license = fs::read_to_string(host.join("../../../LICENSE"))?;
-    let notice = fs::read_to_string(host.join("../../../NOTICE"))?;
-    fs::write(
-        resources.join("ThirdParty-NOTICE"),
-        format!("{notice}\n{font_notice}\n{license}"),
-    )?;
-
-    write_privacy_manifest(
-        &template.join("PrivacyInfo.xcprivacy"),
-        app.ios
-            .privacy_manifest
-            .as_ref()
-            .map(|path| app.root.join(path))
-            .as_deref(),
-        &resources.join("PrivacyInfo.xcprivacy"),
-    )?;
-    let mut plist = fs::read_to_string(template.join("Info.plist"))?;
+pub(crate) fn app_plist(app: &App, host: &Path) -> Result<String> {
+    let mut plist = fs::read_to_string(host.join("template/Info.plist"))?;
     let url_types = if app.ios.url_schemes.is_empty() {
         String::new()
     } else {
@@ -725,35 +642,7 @@ fn stage(project: &Path, host: &Path, app: &App, inputs: BuildInputs<'_>) -> Res
             "<key>ImpastoPresentOnExternalDisplay</key><true/>",
         );
     }
-    fs::write(project.join("Info.plist"), plist)?;
-    let domains = write_associated_domains(project, &app.ios.associated_domains)?;
-    let signing = app.ios.provisioning_profile.as_ref().map_or_else(
-        || "CODE_SIGN_STYLE = Automatic\n".to_owned(),
-        |profile| {
-            let certificate = app.ios.signing_certificate.as_deref().unwrap_or("Apple Development");
-            format!("CODE_SIGN_STYLE = Manual\nPROVISIONING_PROFILE_SPECIFIER = {profile}\nCODE_SIGN_IDENTITY = {certificate}\n")
-        }
-    );
-    let families = match app.ios.device_families.as_slice() {
-        [] => "1,2".to_owned(),
-        values => values
-            .iter()
-            .map(u8::to_string)
-            .collect::<Vec<_>>()
-            .join(","),
-    };
-    let build_number = app.ios.build_number.unwrap_or(1);
-    let team = app.ios.development_team.as_deref().unwrap_or_default();
-    fs::write(
-        project.join("BuildSettings.xcconfig"),
-        format!(
-            "PRODUCT_BUNDLE_IDENTIFIER = {}\nMARKETING_VERSION = {}\nCURRENT_PROJECT_VERSION = {build_number}\nDEVELOPMENT_TEAM = {team}\nTARGETED_DEVICE_FAMILY = {families}\n{signing}{domains}OTHER_LDFLAGS = $(inherited) {}\n",
-            bundle_id(app),
-            app.version,
-            inputs.native_flags,
-        ),
-    )?;
-    Ok(())
+    Ok(plist)
 }
 
 #[derive(Deserialize)]

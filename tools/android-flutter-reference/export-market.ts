@@ -1,6 +1,6 @@
-import { QuoteEngine } from "../../apps/gallery-solid/src/engine/engine.ts";
-import { stockSnapshot } from "../../apps/gallery-solid/src/engine/stock-snapshot.ts";
-import { downsampleTicks } from "../../apps/gallery-solid/src/engine/universe.ts";
+import { QuoteEngine } from "../../examples/gallery-solid/src/engine/engine.ts";
+import { stockSnapshot } from "../../examples/gallery-solid/src/engine/stock-snapshot.ts";
+import { downsampleTicks } from "../../examples/gallery-solid/src/engine/universe.ts";
 
 const engine = new QuoteEngine({ timeScale: 60, warmupMinutes: 50, dayMs: 6.5 * 3_600_000 });
 const instruments = engine.instruments().filter((instrument) => !instrument.index);
@@ -25,7 +25,7 @@ const frames = Array.from({ length: 75 }, (_, index) => {
   };
 });
 
-process.stdout.write(JSON.stringify({
+console.error("IMPASTO_MARKET " + JSON.stringify({
   instruments: instruments.map(({ symbol, name }) => ({ symbol, name })),
   detailIndex: instruments.findIndex((item) => item.symbol === symbol),
   daily: daily.map((bar) => [bar.o, bar.h, bar.l, bar.c]),

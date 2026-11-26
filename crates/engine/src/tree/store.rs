@@ -107,6 +107,8 @@ impl Tree {
             style_env: crate::style::Environment::default(),
             class_cache: crate::style::ClassCache::default(),
             style_gestures: Vec::new(),
+            style_resolves: 0,
+            repaint_boundaries_dirtied: 0,
         }
     }
 

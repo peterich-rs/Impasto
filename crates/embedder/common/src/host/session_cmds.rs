@@ -76,9 +76,15 @@ fn session(runtime: &mut UiHost, command: Command) -> Result<bool, BootError> {
         }
         Command::Settings(settings) => settings_cmd(runtime, &settings),
         Command::WindowStateChanged(key) => {
+            if let Some(plugins) = &runtime.plugins {
+                plugins.window_state_changed(&key);
+            }
             io_done(runtime, |session| session.window_state_changed(key));
         }
         Command::WindowFocus(focused) => {
+            if let Some(plugins) = &runtime.plugins {
+                plugins.window_focus(focused);
+            }
             if let Some(session) = runtime.session.as_mut() {
                 session_call(|| session.window_focus(focused));
             }
@@ -191,6 +197,9 @@ fn settings_cmd(runtime: &mut UiHost, settings: &PlatformSettings) {
 fn launch_url(runtime: &mut UiHost, url: String) {
     if url.is_empty() {
         return;
+    }
+    if let Some(plugins) = &runtime.plugins {
+        plugins.open_url(&url);
     }
     if let Some(session) = runtime.session.as_mut() {
         session_call(|| session.set_launch_url(&url));

@@ -81,13 +81,14 @@ pub(super) fn install_node_check<'js>(ctx: &Ctx<'js>, scene: &Object<'js>) -> rq
     let check = Function::new(
         ctx.clone(),
         |ctx: Ctx<'js>, value: Value<'js>| -> rquickjs::Result<bool> {
+            let host = host_from_ctx(&ctx)?;
+            super::super::super::frame::bump(&host.inner().marks.ffi_calls);
             let Some(n) = value
                 .as_number()
                 .filter(|n| (4294967296.0..9007199254740992.0).contains(n) && n.fract() == 0.0)
             else {
                 return Ok(false);
             };
-            let host = host_from_ctx(&ctx)?;
             host.with_current(&ctx, || {
                 canvas::check_side_effect(&host, &ctx)?;
                 Ok(host

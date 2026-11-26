@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import { test } from "node:test";
+import { assert, test } from "impasto:test";
 import {
   connectWith,
   READY_STATE_CLOSED,
@@ -7,7 +6,7 @@ import {
   type WebSocketTransport,
 } from "./client.ts";
 import { createWebSocketClass } from "./compat-impl.ts";
-import type { NativeWebSocketEvent, NativeWebSocketHandle } from "./native.d.ts";
+import type { NativeWebSocketEvent, NativeWebSocketHandle } from "@impasto/websocket/native";
 
 interface HarnessHandle {
   sentText: string[];
@@ -51,40 +50,22 @@ function mockWebSocketTransport(): {
       latest = state;
 
       const handle: NativeWebSocketHandle & { streamController?: ReadableStreamDefaultController<NativeWebSocketEvent> } = {
-        call(method: string, ...args: unknown[]): unknown {
-          switch (method) {
-            case "id":
-              return 1;
-            case "readyState":
-              return readyState;
-            case "protocol":
-              return readyState >= 1 ? protocol : "";
-            case "bufferedAmount":
-              return 0;
-            case "sendText":
-              state.sentText.push(args[0] as string);
-              return 0;
-            case "sendBinary": {
-              const raw = args[0] as Uint8Array | ArrayBuffer;
-              state.sentBinary.push(raw instanceof Uint8Array ? raw : new Uint8Array(raw));
-              return 0;
-            }
-            case "close":
-              readyState = 2;
-              state.closedArgs.push({
-                code: (args[0] as number | null) ?? null,
-                reason: args[1] as string | undefined,
-              });
-              state.pushEvent({
-                type: "close",
-                code: (args[0] as number | null) ?? 1000,
-                reason: (args[1] as string | undefined) ?? "",
-                clean: true,
-              });
-              return undefined;
-            default:
-              throw new Error(`unexpected method ${method}`);
-          }
+        id: () => 1,
+        readyState: () => readyState,
+        protocol: () => readyState >= 1 ? protocol : "",
+        bufferedAmount: () => 0,
+        sendText(text) {
+          state.sentText.push(text);
+          return 0;
+        },
+        sendBinary(data) {
+          state.sentBinary.push(data instanceof Uint8Array ? data : new Uint8Array(data));
+          return 0;
+        },
+        closeSocket(code, reason) {
+          readyState = 2;
+          state.closedArgs.push({ code: code ?? null, reason: reason ?? undefined });
+          state.pushEvent({ type: "close", code: code ?? 1000, reason: reason ?? "", clean: true });
         },
         close() {
           if (!closedFlag) {

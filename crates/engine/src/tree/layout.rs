@@ -173,9 +173,7 @@ impl Tree {
         self.invalidate_subtree_layers(id);
         let mut current = Some(id);
         while let Some(node_id) = current {
-            if let Ok(node) = self.node_mut(node_id) {
-                node.flags.insert(NodeFlags::REPAINT_DIRTY);
-            }
+            self.mark_picture_dirty(node_id);
             current = self.get(node_id).and_then(|node| node.parent);
         }
         self.layer_epoch = self.layer_epoch.wrapping_add(1);
@@ -190,9 +188,7 @@ impl Tree {
             };
             let stop = parent.is_none() || self.renders_layer_node(id) || self.is_picture_owner(id);
             if stop {
-                if let Ok(node) = self.node_mut(id) {
-                    node.flags.insert(NodeFlags::REPAINT_DIRTY);
-                }
+                self.mark_picture_dirty(id);
                 return;
             }
             let Some(parent) = parent else {
@@ -325,6 +321,21 @@ impl Tree {
             .is_some_and(|node| node.flags.contains(NodeFlags::REPAINT_DIRTY))
     }
 
+    fn mark_picture_dirty(&mut self, id: NodeId) {
+        let Ok(node) = self.node_mut(id) else { return };
+        let starts_repaint = node.flags.contains(NodeFlags::PICTURE_FROM_BOUNDARY)
+            && !node.flags.contains(NodeFlags::REPAINT_DIRTY);
+        node.flags.insert(NodeFlags::REPAINT_DIRTY);
+        if starts_repaint {
+            self.repaint_boundaries_dirtied = self.repaint_boundaries_dirtied.saturating_add(1);
+        }
+    }
+
+    #[cfg(feature = "js")]
+    pub(crate) fn take_repaint_boundaries_dirtied(&mut self) -> u32 {
+        std::mem::take(&mut self.repaint_boundaries_dirtied)
+    }
+
     pub(super) fn dirty_every_picture(&mut self) {
         let Some(root) = self.root else {
             return;
@@ -350,9 +361,7 @@ impl Tree {
             })
             .collect();
         for id in owners {
-            if let Ok(node) = self.node_mut(id) {
-                node.flags.insert(NodeFlags::REPAINT_DIRTY);
-            }
+            self.mark_picture_dirty(id);
         }
     }
 

@@ -1,0 +1,29 @@
+name = "android-acceptance"
+version = "0.1.0"
+targets = ["macos", "android", "ios"]
+
+[android]
+application_id = "dev.impasto.fieldnotes"
+version_code = 1
+permissions = ["android.permission.CAMERA"]
+
+[[android.deep_links]]
+scheme = "impasto-demo"
+host = "record"
+
+[ios]
+bundle_id = "dev.impasto.fieldnotes"
+url_schemes = ["impasto-demo"]
+share_window_state = true
+
+[ios.usage_descriptions]
+NSCameraUsageDescription = "用于拍摄并附加本次现场检查的照片。"
+
+[dependencies]
+"@impasto/app-state" = "builtin"
+"@impasto/async-storage" = "builtin"
+"@impasto/file-system" = "builtin"
+"@impasto/linking" = "builtin"
+"@impasto/permissions" = "builtin"
+"@impasto/solid-renderer" = "builtin"
+"@impasto/solid-ui" = "builtin"

@@ -8,7 +8,7 @@ import type {
   NetEntry,
   Page,
   Platform,
-} from "./native.js";
+} from "@impasto/devtools/native";
 
 function emptyPage<T>(): Page<T> {
   return { revision: 0, entries: [] };

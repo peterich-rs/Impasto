@@ -123,6 +123,8 @@ pub(crate) struct DebugAnnotation {
     pub double_value: Option<f64>,
     #[prost(string, optional, tag = "6")]
     pub string_value: Option<String>,
+    #[prost(string, optional, tag = "10")]
+    pub name: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Message)]

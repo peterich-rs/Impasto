@@ -1,3 +1,6 @@
+#if SWIFT_PACKAGE
+import CImpastoIOS
+#endif
 import QuartzCore
 import UIKit
 import os.signpost
@@ -42,7 +45,6 @@ public final class ImpastoHost {
     private let initialURL: URL?
     private let restoredState: String?
     private let windowGroup: ImpastoWindowGroup?
-    private let platformServices = ImpastoPlatformServices()
     private var plugins: [any ImpastoPlugin] = []
     private var installedPlugins: [any ImpastoPlugin] = []
     private var attachedPlugins: [any ImpastoPlugin] = []
@@ -52,6 +54,7 @@ public final class ImpastoHost {
     private var preparationWaiters: [UUID: CheckedContinuation<Void, any Error>] = [:]
     private var sessionGeneration: UInt64 = 0
     private weak var controller: ImpastoViewController?
+    public var viewController: ImpastoViewController? { controller }
     private weak var display: UIScreen?
     private var displayID: Int32 = 0
     private var refreshRate: Int?
@@ -130,10 +133,6 @@ public final class ImpastoHost {
     }
 
     /// Presents an app-owned file through the current scene's system share sheet.
-    public func shareFile(at url: URL, completion: @escaping (Result<Bool, Error>) -> Void) {
-        platformServices.share(file: url, presenter: { [weak self] in self?.controller }, complete: completion)
-    }
-
     /// Registers a native plugin before starting the host. Each host assigns
     /// one plugin per identifier, in registration order.
     @discardableResult
@@ -258,7 +257,6 @@ public final class ImpastoHost {
 
     public func close() {
         guard state != .closed, state != .closing else { return }
-        platformServices.cancel()
         externalTextures.close()
         controller?.cancelPointers()
         controller?.clearPlatformInput()
@@ -288,8 +286,6 @@ public final class ImpastoHost {
     }
 
     private func dropAttachment() {
-        if controller != nil { cancelNativePluginRequests() }
-        platformServices.cancel()
         controller?.cancelPointers()
         setLifecycle(.detached, focused: false)
         retireSurface()
@@ -506,7 +502,6 @@ public final class ImpastoHost {
 #if DEBUG
             ImpastoDevelopmentSession.current?.detach(owner: self)
 #endif
-            platformServices.cancel()
             externalTextures.close()
             controller?.clearPlatformInput()
             platformViews.detach()
@@ -554,7 +549,6 @@ public final class ImpastoHost {
     }
 
     private func finishPlugins(permanently: Bool = false) {
-        cancelNativePluginRequests()
         let installed = installedPlugins
         installedPlugins.removeAll()
         if permanently { plugins.removeAll() }
@@ -562,35 +556,30 @@ public final class ImpastoHost {
         for plugin in installed { plugin.uninstalled() }
     }
 
-    private func receiveService(_ request: UInt64, message: String) {
-        guard let handle = connection.handle else { return }
-        let owningSurface = surface?.id
-        platformServices.accept(
-            request, message: message,
-            isPending: { [weak self] in
-                guard let self, connection.handle == handle, surface?.id == owningSurface else { return false }
-                return impasto_ios_service_pending(handle, request)
-            },
-            presenter: { [weak self] in self?.controller },
-            plugin: { [weak self] identifier in
-                self?.installedPlugins.first { $0.identifier == identifier }
-            },
-            pluginIsPending: { [weak self] in
-                guard self?.connection.handle == handle else { return false }
-                return impasto_ios_service_pending(handle, request)
+    private func receiveService(_ id: UInt64, message: String) {
+        struct Payload: Decodable {
+            let operation: String
+            let payload: String
+        }
+        guard let handle = connection.handle,
+              let payload = try? JSONDecoder().decode(Payload.self, from: Data(message.utf8))
+        else { return }
+        let request = ImpastoNativeRequest(
+            id: id, operation: payload.operation, payload: payload.payload,
+            pending: { [weak self] in
+                self?.connection.handle == handle && impasto_ios_service_pending(handle, id)
             },
             finish: { [weak self] status, payload in
-                guard self?.connection.handle == handle else { return }
-                withOptionalCString(payload) {
-                    impasto_ios_service_result(handle, request, status, $0)
+                guard self?.connection.handle == handle else { return false }
+                return withOptionalCString(payload) {
+                    impasto_ios_service_result(handle, id, status, $0)
                 }
             }
         )
-    }
-
-    private func cancelNativePluginRequests() {
-        platformServices.cancelNativePlugins()
-        if let handle = connection.handle { impasto_ios_cancel_native_plugins(handle) }
+        guard request.isPending else { return }
+        if !installedPlugins.contains(where: { $0.handle(request) }) {
+            request.fail("No platform plugin handles \(payload.operation)")
+        }
     }
 
     func pointer(_ candidate: ImpastoViewController, _ sample: PointerSample) -> Bool {
@@ -703,7 +692,6 @@ public final class ImpastoHost {
         if changed {
             lifecycle = state
             if state == .detached || state == .hidden || state == .paused {
-                cancelNativePluginRequests()
             }
             impasto_ios_lifecycle(handle, state.rawValue)
         }
@@ -725,12 +713,10 @@ public final class ImpastoHost {
     }
 
     private func retireSurface() {
-        platformServices.cancel()
         externalTextures.setActive(false)
         frameClock.disconnect()
         display = nil
         guard let surface, let handle = connection.handle else { return }
-        cancelNativePluginRequests()
         self.surface = nil
         platformViews.detach()
         controller?.clearPlatformInput()

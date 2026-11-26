@@ -20,10 +20,55 @@ use super::{Declaration, Property, Style, StyleError};
 const SYNTAX_VERSION: u32 = 1;
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "style-binary", derive(serde::Serialize, serde::Deserialize))]
 struct ClassRule {
     order: u32,
     mask: u32,
     decls: Vec<Declaration>,
+}
+
+#[cfg(feature = "style-binary")]
+pub fn encode_static_class(text: &str) -> Result<String, String> {
+    let parsed = parse_class(text).map_err(|error| error.to_string())?;
+    super::static_pool::encode(&(text, parsed.rules))
+}
+
+#[cfg(feature = "style-binary")]
+#[derive(Clone, Debug)]
+pub struct StaticClass {
+    text: Arc<str>,
+    parsed: Arc<ParsedClass>,
+}
+
+#[cfg(feature = "style-binary")]
+impl StaticClass {
+    /// Returns the author text and already parsed conditional rules.
+    pub fn into_parts(self) -> (Arc<str>, Arc<ParsedClass>) {
+        (self.text, self.parsed)
+    }
+}
+
+#[cfg(feature = "style-binary")]
+pub fn decode_static_class(blob: &str) -> Result<StaticClass, String> {
+    let (text, rules): (Arc<str>, Vec<ClassRule>) = super::static_pool::decode(blob)?;
+    if text.len() > CLASS_BYTE_LIMIT {
+        return Err(StyleError::ClassTooLong { node: None }.to_string());
+    }
+    let mut deps = DepMask::empty();
+    for rule in &rules {
+        deps |= deps_for(rule.mask);
+        for declaration in &rule.decls {
+            declaration.validate().map_err(|error| error.to_string())?;
+            if let Declaration::Set(property) = declaration {
+                deps |= super::dependencies(property);
+            }
+        }
+    }
+    let bytes = text.len().saturating_add(estimate_rules(&rules));
+    Ok(StaticClass {
+        text,
+        parsed: Arc::new(ParsedClass { rules, deps, bytes }),
+    })
 }
 
 /// Parsed rules for one class string. Nodes hold this in an `Arc`.

@@ -564,7 +564,7 @@ impl Rasterizer {
 | macOS | `cargo clippy -p embedder-macos --all-targets -- -D warnings`、`cargo test -p embedder-macos`、`just host` 与 `IMPASTO_DUMP=/tmp/frame.png just host`。检查 Gallery、滚动、DPI 与窗口重建 |
 | iOS | `just ios-build-check`、`just ios-sim-test --debug --udid <UDID>`、`just ios-composition-test <UDID>`，真机复跑事务、透明 overlay、首帧事件、前后台、替换 surface 和 CoreVideo 纹理 |
 | Android | `just android-build-check`、`just android-device-test` 及 APK/AAB 检查。Vulkan 与 GLES 分别跑 `SurfaceLifecycleTest`、`PlatformContentTest`、`HardwareTextTest`、`SharedWindowsTest`、`CanvasRenderingTest`，追加 auto 候选失败、旋转、retire ack、前后台、外部图像与设备恢复 |
-| 仓库与分发 | `just check`、`cargo fmt --all -- --check`、`RUSTFLAGS="-D warnings"` 构建、`cargo run --locked -p embedder --bin module-stubs -- --check` 和 `node tools/check-native-module-types.mjs`。从干净目录构建 macOS app、iOS XCFramework 和 Android 包，检查链接库、包内文件、依赖树与生产源码是否已移除 Impeller |
+| 仓库与分发 | `just check`、`cargo fmt --all -- --check`、`RUSTFLAGS="-D warnings"` 构建和 `cargo test -p cli`。从干净目录构建 macOS app、iOS XCFramework 和 Android 包，检查链接库、包内文件、依赖树与生产源码是否已移除 Impeller |
 
 ## 9. 架构约束
 
@@ -585,7 +585,7 @@ impl Rasterizer {
 | `crates/embedder/common/src/host/{raster_host,surface_cmds,cache_cmds}.rs` | 删除帧字体载荷，发布新设备工厂和提交元数据 |
 | `crates/embedder/common/src/{timing,diagnostics/{module,hub,inspect}}.rs` | 通用渲染统计、版本与声明来源 |
 | `crates/embedder/ios/Cargo.toml`、`src/{bridge,surface,compositor}.rs` | Metal 互操作、标准 present、事务切片、恢复与外部纹理 |
-| `crates/embedder/ios/host/{ImpastoViewController,ImpastoPlatformViews,ImpastoExternalTexture}.swift`、`template/project.pbxproj` | 首帧观察、UIKit 交错、设备一致性与 bundle 链接清理 |
+| `crates/embedder/ios/host/{ImpastoViewController,ImpastoPlatformViews,ImpastoExternalTexture}.swift`、`crates/cli/templates/darwin/project.pbxproj` | 首帧观察、UIKit 交错、设备一致性与 bundle 链接清理 |
 | `crates/embedder/macos/Cargo.toml`、`build.rs`、`src/{app,surface,pixels}.rs` | 新 surface opener、RGBA 截图、链接和启动调整 |
 | `crates/engine/src/{scene/{text,mod,command,canvas},text/shaper,tree/{node,text,layout,style,record/mod,record/pass}}.rs` | 文字场景传输、约束同步、纯重绘、字形与画刷数据分离 |
 | `crates/engine/src/{canvas/{prepare,text,tests},session/mod,js/{player/{bridge,mod,vm/canvas},tests}}.rs` | Canvas、字体 drain、会话契约与回归测试更新 |
@@ -596,4 +596,4 @@ impl Rasterizer {
 | `packages/devtools/src/{native.d.ts,native.stub.ts,pages/{info,performance}.tsx}` | 从 Module 元数据生成声明，迁移诊断展示 |
 | `.github/workflows/{check,impeller-sdk}.yml`、`justfile`、`AGENTS.md`、`README.md`、`.gitignore` | 更新检查、工作区说明和产物配置，移除 SDK 作业 |
 | `tools/{impeller_sdk,build_impeller,test_impeller_sdk}.py` | 删除 SDK 工具与专用测试 |
-| `tools/{check-javascript-boundaries.py,check-android-package.py,distribute.mjs,android-frame-replay.sh}` | 依赖隔离、包体检查、分发及录制元数据迁移 |
+| `tools/{check-javascript-boundaries.py,check-android-package.py,android-frame-replay.sh}` | 依赖隔离、包体检查及录制元数据迁移 |

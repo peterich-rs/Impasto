@@ -1,6 +1,6 @@
 import * as scene from "scene";
-import { getRestorationState, setRestorationState } from "@impasto/app-state";
-import { Linking } from "@impasto/linking";
+import { getRestorationState, setRestorationState } from "@impasto/app-state/native";
+import { Linking } from "@impasto/linking/native";
 
 const summary = scene.createElement("text", { value: "Android task", style: { fontSize: 18, color: "#ffffff" } });
 setRestorationState("starts", String(Number(getRestorationState("starts")) + 1));

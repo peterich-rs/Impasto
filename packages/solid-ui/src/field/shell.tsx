@@ -1,3 +1,4 @@
+import { View as HostView, Stack as HostStack, Scroll as HostScroll } from "@impasto/solid-renderer/host";
 import { createTrackedEffect, createSignal, onCleanup } from "solid-js";
 import {
   Text,
@@ -330,7 +331,7 @@ export function FieldShell(props: FieldProps): NodeHandle {
     return theme().color.outline;
   };
   return (
-    <view
+    <HostView
       ref={(handle) => {
         if (handle === null) return;
         bindStyle(handle, {
@@ -360,7 +361,7 @@ export function FieldShell(props: FieldProps): NodeHandle {
           {props.label}
         </Text>
       ) : null}
-      <view
+      <HostView
         ref={(handle) => {
           if (handle === null) return;
           node = handle;
@@ -498,7 +499,7 @@ export function FieldShell(props: FieldProps): NodeHandle {
           paint();
         }}
       >
-        <view
+        <HostView
           ref={(handle) => {
             if (handle === null) return;
             box = handle;
@@ -515,24 +516,24 @@ export function FieldShell(props: FieldProps): NodeHandle {
             minHeight: minHeight(),
           }}
         >
-          <stack
+          <HostStack
             style={{
               opacity: (blocked() ? 102 : 255) / 255,
             }}
           >
-            <view
+            <HostView
               style={{
                 padding: theme().space.l,
                 width: "100%",
               }}
             >
-              <scroll axis={multiline() ? "vertical" : "horizontal"}>
-                <view
+              <HostScroll axis={multiline() ? "vertical" : "horizontal"}>
+                <HostView
                   style={{
                     paddingRight: 2,
                   }}
                 >
-                  <stack>
+                  <HostStack>
                     <StyledText
                       class={props.textProps?.class}
                       classList={props.textProps?.classList}
@@ -564,13 +565,13 @@ export function FieldShell(props: FieldProps): NodeHandle {
                       accent={() => theme().color.accent}
                       transparent={() => theme().color.transparent}
                     />
-                  </stack>
-                </view>
-              </scroll>
-            </view>
-          </stack>
-        </view>
-      </view>
+                  </HostStack>
+                </HostView>
+              </HostScroll>
+            </HostView>
+          </HostStack>
+        </HostView>
+      </HostView>
       {shownError() ? (
         <StyledText
           class={props.errorProps?.class}
@@ -585,6 +586,6 @@ export function FieldShell(props: FieldProps): NodeHandle {
           {shownError()}
         </StyledText>
       ) : null}
-    </view>
+    </HostView>
   );
 }

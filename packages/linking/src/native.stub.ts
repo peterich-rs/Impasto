@@ -1,4 +1,4 @@
-import type { Linking as LinkingApi } from "./native.js";
+import type { Linking as LinkingApi } from "@impasto/linking/native";
 
 export const state: {
   initialUrl: string | null;

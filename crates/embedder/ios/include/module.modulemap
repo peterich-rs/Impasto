@@ -1,0 +1,4 @@
+module CImpastoIOS {
+    header "impasto_ios.h"
+    export *
+}

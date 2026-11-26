@@ -294,9 +294,6 @@ pub const LOG_CAP: usize = 400;
 pub const ERROR_CAP: usize = 100;
 pub const NET_CAP: usize = 150;
 pub const FRAME_CAP: usize = 240;
-/// Body preview cap for network entries.
-pub const PREVIEW_CAP: usize = 2048;
-
 /// Process-local telemetry store, shared by the host and its consumers.
 pub struct TelemetryHub {
     profile: AtomicU8,
@@ -417,6 +414,51 @@ impl TelemetryHub {
         self.bump();
     }
 
+    /// Returns the current logs revision and entries newer than the supplied cursor.
+    pub fn logs_since(&self, since: u64) -> (u64, Vec<LogEntry>) {
+        let ring = self.logs.lock().unwrap_or_else(|error| error.into_inner());
+        (ring.revision(), ring.tail(since).cloned().collect())
+    }
+
+    /// Returns the current errors revision and entries newer than the supplied cursor.
+    pub fn errors_since(&self, since: u64) -> (u64, Vec<DiagError>) {
+        let ring = self
+            .errors
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        (ring.revision(), ring.tail(since).cloned().collect())
+    }
+
+    /// Returns the current network revision and entries newer than the supplied cursor.
+    pub fn network_since(&self, since: u64) -> (u64, Vec<NetEntry>) {
+        let ring = self
+            .network
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        (ring.revision(), ring.tail(since).cloned().collect())
+    }
+
+    /// Returns the current frames revision and entries newer than the supplied cursor.
+    pub fn frames_since(&self, since: u64) -> (u64, Vec<FrameSample>) {
+        let ring = self
+            .frames
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        (ring.revision(), ring.tail(since).cloned().collect())
+    }
+
+    /// Clears the session's recorded logs and script errors.
+    pub fn clear_logs(&self) {
+        self.logs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        self.errors
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+
     pub fn network_snapshot(&self) -> Vec<NetEntry> {
         lock(&self.network).tail(0).cloned().collect()
     }
@@ -445,7 +487,7 @@ impl TelemetryHub {
         self.capture_phase.load(Ordering::Acquire) == CAPTURE_RECORDING
     }
 
-    pub(crate) fn start_trace(self: &Arc<Self>, path: PathBuf, overwrite: bool) -> Option<u64> {
+    pub fn start_trace(self: &Arc<Self>, path: PathBuf, overwrite: bool) -> Option<u64> {
         let detail = match std::env::var("IMPASTO_TRACE_DETAIL").as_deref() {
             Ok("detailed") => TraceDetail::Detailed,
             _ => TraceDetail::Stages,
@@ -498,7 +540,7 @@ impl TelemetryHub {
         })
     }
 
-    pub(crate) fn finish_trace(&self, id: u64) -> std::io::Result<PathBuf> {
+    pub fn finish_trace(&self, id: u64) -> std::io::Result<PathBuf> {
         let capture = self
             .take_capture(id)
             .ok_or_else(|| std::io::Error::other("trace recording expired"))?;
@@ -645,6 +687,25 @@ impl TelemetryHub {
 }
 
 pub type DiagnosticsHub = TelemetryHub;
+
+impl impasto::DiagnosticsSink for TelemetryHub {
+    fn record(&self, source: &str, event: &str, payload: impasto::abi::PluginValue) {
+        if event == "network" {
+            super::plugin_record::network(self, source, payload);
+            return;
+        }
+        self.push_log(LogEntry {
+            seq: 0,
+            at_ms: super::telemetry::mono_ns() as f64 / 1_000_000.0,
+            level: tracing::Level::INFO,
+            source: LogSource::Host,
+            target: "impasto::plugin",
+            message: format!("{source}: {event}"),
+            fields: vec![("payload", format!("{payload:?}"))],
+            frame: None,
+        });
+    }
+}
 
 const CAPTURE_IDLE: u8 = 0;
 const CAPTURE_RECORDING: u8 = 1;

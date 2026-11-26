@@ -1,3 +1,4 @@
+import { View as HostView, Stack as HostStack } from "@impasto/solid-renderer/host";
 import { createRenderEffect, createSignal, onCleanup } from "solid-js";
 import {
   directionFor,
@@ -248,7 +249,7 @@ export function Dialog(props: DialogProps): NodeHandle {
   );
   onCleanup(closeLayer);
   return (
-    <stack
+    <HostStack
       ref={(node) => {
         if (node === null) return;
         placeholder = node;
@@ -269,8 +270,8 @@ export function Dialog(props: DialogProps): NodeHandle {
         maxHeight: 0,
       }}
     >
-      <view ref={(node) => setContentNode(node ?? 0)}>{props.children}</view>
-    </stack>
+      <HostView ref={(node) => setContentNode(node ?? 0)}>{props.children}</HostView>
+    </HostStack>
   );
 }
 type Layer = {

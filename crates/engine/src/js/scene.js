@@ -21,7 +21,7 @@
     if (Array.isArray(value)) {
       for (var i = 0; i < value.length; i++) normalize(value[i], out, texts, previous, previousTexts, depth + 1);
     } else if (value !== undefined && value !== null && typeof value !== "boolean") {
-      var native = core._isNode(value);
+      var native = typeof value === "number" && core._isNode(value);
       var node;
       if (native) node = value;
       else if (previousTexts[out.length] && core._isNode(previous[out.length])) {
@@ -41,15 +41,8 @@
       state.texts = texts;
       return out;
     }, function (nodes) {
-      for (var i = 0; i < state.current.length; i++) {
-        var node = state.current[i];
-        if (nodes.indexOf(node) < 0 && core.parent(node) === parent) core.remove(parent, node);
-      }
-      var before = marker || 0;
-      for (var i = nodes.length - 1; i >= 0; i--) {
-        var node = nodes[i];
-        if (core.parent(node) !== parent || core.nextSibling(node) !== before) core._insertNode(parent, node, before);
-        before = node;
+      if (state.current.length || nodes.length) {
+        core._reconcileRange(parent, state.current, nodes, marker || 0);
       }
       state.current = nodes;
     });

@@ -2,15 +2,22 @@ import CryptoKit
 import Foundation
 import UIKit
 
-@main
-final class AppDelegate: UIResponder, UIApplicationDelegate {
+@MainActor
+open class ImpastoAppDelegate: UIResponder, UIApplicationDelegate {
     private let sharedWindows: ImpastoWindowGroup? =
         (Bundle.main.object(forInfoDictionaryKey: "ImpastoSharedWindowState") as? Bool) == true
         ? ImpastoWindowGroup() : nil
 
+    open func registerPlugins(with host: ImpastoHost) {}
+
+    open func application(
+        _ application: UIApplication,
+        willFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+    ) -> Bool { true }
+
     var windowGroup: ImpastoWindowGroup? { sharedWindows }
 
-    func application(
+    public func application(
         _ application: UIApplication,
         configurationForConnecting session: UISceneSession,
         options: UIScene.ConnectionOptions
@@ -21,13 +28,14 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         return configuration
     }
 
-    func application(_ application: UIApplication, didDiscardSceneSessions sessions: Set<UISceneSession>) {
+    public func application(_ application: UIApplication, didDiscardSceneSessions sessions: Set<UISceneSession>) {
         for session in sessions {
             SceneRestorationStorage.discard(session.persistentIdentifier)
         }
     }
 }
 
+@objc(ImpastoSceneDelegate)
 final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
     private var host: ImpastoHost?
@@ -56,11 +64,12 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         let restored = SceneRestorationStorage.read(identifier)
             ?? SceneRestorationStorage.restore(session.stateRestorationActivity, identifier: identifier)
         lastSavedState = restored
-        let windowGroup = (UIApplication.shared.delegate as? AppDelegate)?.windowGroup
+        let windowGroup = (UIApplication.shared.delegate as? ImpastoAppDelegate)?.windowGroup
         let host = ImpastoHost(
             resources: resources, initialURL: initialLinks.first,
             restoredState: restored, windowGroup: windowGroup
         )
+        (UIApplication.shared.delegate as? ImpastoAppDelegate)?.registerPlugins(with: host)
         host.onRestorationChanged = { [weak self] in self?.saveSnapshot() }
         let window = UIWindow(windowScene: scene)
         let content = host.makeViewController()

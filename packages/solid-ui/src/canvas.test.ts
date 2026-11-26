@@ -1,65 +1,30 @@
-import assert from "node:assert/strict";
-import { createRoot, flush } from "solid-js";
+import { assert, screen, test } from "impasto:test";
 import { Canvas } from "./Canvas.tsx";
 
-const calls: number[] = [];
-const returns: unknown[] = [];
-const errorHandlers: Array<((error: unknown) => unknown) | undefined> = [];
-let released = 0;
-let controller: { release(): void } | null = null;
-(globalThis as { core: Record<string, unknown> }).core = {
-  createElement: () => 7,
-  createStyleSource: () => 1,
-  setStyleSource: () => {},
-  removeStyleSource: () => {},
-  bindCanvas: (
-    node: number,
-    draw: (context: unknown, size: { width: number; height: number }) => unknown,
-    onError?: (error: unknown) => unknown,
-  ) => {
-    calls.push(node);
-    returns.push(draw(null, { width: 1, height: 1 }));
-    errorHandlers.push(onError);
-    return {
-      invalidate() {},
-      toLocal() {
-        return null;
-      },
-      release() {
-        released += 1;
-      },
-    };
-  },
-};
-
-createRoot((dispose) => {
-  const node = Canvas({
-    draw: () => "sync",
-    onDrawError: () => {},
-    controller: (next) => {
-      controller = next;
+test("Canvas delivers a native drawing context and releases the controller", async () => {
+  let size = 0;
+  let controller: { release(): void } | null = null;
+  await screen.mount(() => Canvas({
+    style: { width: 50, height: 40 },
+    draw(ctx, bounds) {
+      size = bounds.width * bounds.height;
+      ctx.fillRect(0, 0, 10, 10);
     },
-  });
-  let handled = 0;
-  let handler: (() => void) | undefined;
-  Canvas({
-    draw: async () => "later",
-    get onDrawError() { return handler; },
-  });
-  flush();
-  assert.equal(node, 7);
-  assert.deepEqual(calls, [7, 7]);
-  assert.equal(returns[0], "sync");
-  assert.equal(typeof (returns[1] as Promise<string>)?.then, "function");
-  assert.equal(errorHandlers[0]?.({}), undefined);
-  assert.equal(errorHandlers[1]?.({}), false);
-  handler = () => { handled += 1; };
-  assert.equal(errorHandlers[1]?.({}), undefined);
-  assert.equal(handled, 1);
-  assert.equal(typeof controller?.release, "function");
-  dispose();
+    controller(next) { controller = next; },
+  }));
+  assert.equal(size, 50 * 40);
+  assert.ok(controller);
+  await screen.mount(() => null);
+  assert.equal(controller, null);
 });
 
-assert.equal(released, 2);
-assert.equal(controller, null);
-console.log("canvas.test.ts ok");
+test("Canvas reports an asynchronous draw callback", async () => {
+  let error: { message: string } | undefined;
+  await screen.mount(() => Canvas({
+    style: { width: 50, height: 40 },
+    async draw() {},
+    onDrawError(value) { error = value; },
+  }));
+  await screen.advanceFrames(2);
+  assert.match(error?.message ?? "", /sync/i);
+});

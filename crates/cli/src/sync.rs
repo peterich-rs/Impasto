@@ -1,0 +1,396 @@
+//! Synchronizes generated platform imports and TypeScript contracts for an app.
+
+use std::{
+    collections::BTreeMap,
+    fmt::Write as _,
+    fs,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Context, Result};
+use serde_json::{Map, Value, json};
+
+use crate::{
+    app::App,
+    plugins::{self, Platform, write},
+};
+
+pub(crate) const ANDROID_PERMISSIONS_MODULE: &str = "impasto-generated-permissions";
+
+pub fn run(platform: Option<&str>) -> Result<()> {
+    let root = std::env::current_dir()?;
+    if !root.join("app.toml").is_file() && root.join("plugin.toml").is_file() {
+        return sync(&App::for_plugin(root)?, platform);
+    }
+    let app = App::current()?;
+    crate::create::scaffold(&app)?;
+    sync(&app, platform)
+}
+
+pub(crate) fn sync(app: &App, target: Option<&str>) -> Result<()> {
+    if let Some(target) = target {
+        app.require(target)?;
+        plugins::prepare(app, target, false)?;
+    } else {
+        for target in &app.targets {
+            plugins::prepare(app, target, false)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn typescript(
+    app: &Path,
+    framework: &Path,
+    entries: &BTreeMap<String, PathBuf>,
+    types: &[PathBuf],
+) -> Result<()> {
+    let packages = framework.join("packages");
+    let mut paths = Map::new();
+    for directory in fs::read_dir(&packages)? {
+        let root = directory?.path();
+        let manifest = root.join("package.json");
+        if !manifest.is_file() || root.join("plugin.toml").is_file() {
+            continue;
+        }
+        let value: Value = serde_json::from_slice(&fs::read(manifest)?)?;
+        if let (Some(name), Some(exports)) = (value["name"].as_str(), value["exports"].as_object())
+        {
+            for (key, entry) in exports {
+                if let Some(entry) = entry.as_str() {
+                    let suffix = if key == "." {
+                        ""
+                    } else {
+                        key.trim_start_matches('.')
+                    };
+                    paths.insert(format!("{name}{suffix}"), json!([root.join(entry)]));
+                }
+            }
+        }
+    }
+    paths.insert(
+        "solid-js".into(),
+        json!([packages.join("reactive/src/api.d.ts")]),
+    );
+    paths.insert(
+        "solid-js/jsx-runtime".into(),
+        json!([packages.join("solid-renderer/src/jsx.ts")]),
+    );
+    paths.extend(
+        entries
+            .iter()
+            .map(|(name, path)| (name.clone(), json!([path]))),
+    );
+    let shader_types = app.join(".impasto/types/shaders.d.ts");
+    fs::create_dir_all(app.join(".impasto/types"))?;
+    write(&shader_types, &bundler::shader_declarations(app)?)?;
+    let files = types
+        .iter()
+        .cloned()
+        .chain([
+            packages.join("reactive/src/modules.d.ts"),
+            packages.join("solid-renderer/src/jsx.ts"),
+            framework.join("crates/testing/src/test.d.ts"),
+            framework.join("crates/bundler/assets.d.ts"),
+            shader_types,
+        ])
+        .collect::<Vec<_>>();
+    let config = json!({
+        "compilerOptions": {
+            "target": "ES2022", "module": "ESNext", "moduleResolution": "Bundler",
+            "jsx": "preserve", "jsxImportSource": "solid-js", "noEmit": true,
+            "allowImportingTsExtensions": true, "strict": true, "skipLibCheck": true,
+            "types": [], "paths": paths,
+        },
+        "files": files,
+        "include": ["../src/**/*"],
+    });
+    let file = if app.join("plugin.toml").is_file() {
+        ".impasto/tsconfig.plugin.json"
+    } else {
+        ".impasto/tsconfig.generated.json"
+    };
+    write(&app.join(file), &serde_json::to_string_pretty(&config)?)
+}
+
+pub(crate) fn platform(app: &App, target: &str, framework: &Path, inputs: &Platform) -> Result<()> {
+    match target {
+        "android" => android(app, framework, inputs),
+        "ios" | "macos" => darwin(app, target, framework, inputs),
+        _ => anyhow::bail!("未知平台 {target}"),
+    }
+}
+
+fn android(app: &App, framework: &Path, inputs: &Platform) -> Result<()> {
+    let directory = app.root.join(".impasto/android");
+    fs::create_dir_all(directory.join("kotlin"))?;
+    let mut settings = String::new();
+    let mut calls = String::new();
+    let mut modules = Vec::new();
+    for plugin in &inputs.projects {
+        let name = format!(":{}", plugin.gradle_module);
+        let path = serde_json::to_string(&plugin.path)?;
+        writeln!(
+            settings,
+            "include({name:?})\nproject({name:?}).projectDir = file({})",
+            path.replace('$', "\\$")
+        )?;
+        if let Some(class) = &plugin.plugin_class {
+            writeln!(calls, "        {}.{class}.register(host)", plugin.package)?;
+        }
+        modules.push(name);
+    }
+    if !inputs.android_permissions.is_empty() {
+        let name = format!(":{ANDROID_PERMISSIONS_MODULE}");
+        let project = directory.join("permissions");
+        let manifest = project.join("src/main");
+        fs::create_dir_all(&manifest)?;
+        write(
+            &project.join("build.gradle.kts"),
+            r#"plugins { id("com.android.library") }
+android {
+    namespace = "dev.impasto.generated.permissions"
+    compileSdk = 35
+    defaultConfig { minSdk = 24 }
+}
+"#,
+        )?;
+        let mut xml = String::from(
+            "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">\n",
+        );
+        for permission in &inputs.android_permissions {
+            writeln!(xml, "    <uses-permission android:name={permission:?} />")?;
+        }
+        xml.push_str("</manifest>\n");
+        write(&manifest.join("AndroidManifest.xml"), &xml)?;
+        let path = serde_json::to_string(&project)?;
+        writeln!(
+            settings,
+            "include({name:?})\nproject({name:?}).projectDir = file({})",
+            path.replace('$', "\\$")
+        )?;
+        modules.push(name);
+    }
+    write(
+        &directory.join("settings-plugins.settings.gradle.kts"),
+        &settings,
+    )?;
+    write(
+        &directory.join("kotlin/GeneratedPluginRegistrant.kt"),
+        &format!(
+            "package dev.impasto.runner\n\nimport dev.impasto.host.ImpastoHost\n\ninternal object GeneratedPluginRegistrant {{\n    @Suppress(\"UNUSED_PARAMETER\")\n    fun register(host: ImpastoHost) {{\n{calls}    }}\n}}\n"
+        ),
+    )?;
+    let props = [
+        (
+            "framework",
+            framework.to_str().context("SDK 路径需要 UTF-8")?.to_owned(),
+        ),
+        ("plugin.modules", modules.join(",")),
+        ("applicationId", app.android_id()),
+        ("appName", app.name.clone()),
+        ("versionName", app.version.clone()),
+        (
+            "versionCode",
+            app.android.version_code.unwrap_or(1).to_string(),
+        ),
+        ("abis", app.android.abis.join(",")),
+    ]
+    .into_iter()
+    .fold(String::new(), |mut source, (key, value)| {
+        source.push_str(key);
+        source.push('=');
+        source.push_str(
+            &value
+                .replace('\\', "\\\\")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r"),
+        );
+        source.push('\n');
+        source
+    });
+    write(&directory.join("plugins.properties"), &props)?;
+    let local = app.root.join("android/local.properties");
+    if local.parent().is_some_and(Path::is_dir) {
+        let mut lines = match fs::read_to_string(&local) {
+            Ok(text) => text
+                .lines()
+                .filter(|line| !line.starts_with("impasto.sdk="))
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        if !lines.iter().any(|line| line.starts_with("sdk.dir="))
+            && let Some(sdk) =
+                std::env::var_os("ANDROID_HOME").or_else(|| std::env::var_os("ANDROID_SDK_ROOT"))
+        {
+            lines.push(format!(
+                "sdk.dir={}",
+                sdk.to_string_lossy().replace('\\', "\\\\")
+            ));
+        }
+        lines.push(format!(
+            "impasto.sdk={}",
+            framework.display().to_string().replace('\\', "\\\\")
+        ));
+        write(&local, &(lines.join("\n") + "\n"))?;
+    }
+    Ok(())
+}
+
+fn darwin(app: &App, target: &str, framework: &Path, inputs: &Platform) -> Result<()> {
+    let dir = app.root.join(".impasto/darwin").join(target);
+    let package = dir.join("ImpastoGeneratedPlugins");
+    let sources = package.join("Sources/ImpastoGeneratedPlugins");
+    fs::create_dir_all(&sources)?;
+    let aliases = dir.join("packages");
+    fs::create_dir_all(&aliases)?;
+    let host = framework
+        .join("crates/embedder")
+        .join(target)
+        .join("ImpastoHost");
+    let host_path = swift_string(host.to_str().context("SwiftPM 宿主路径需要 UTF-8")?);
+    let mut packages = format!("        .package(path: {host_path}),\n");
+    let mut products = String::from(
+        "                .product(name: \"ImpastoHost\", package: \"ImpastoHost\"),\n",
+    );
+    let mut imports = String::from("@_exported import ImpastoHost\n");
+    let mut calls = String::new();
+    for plugin in &inputs.projects {
+        let alias = aliases.join(&plugin.package);
+        symlink(&plugin.path, &alias)?;
+        let path = swift_string(alias.to_str().context("SwiftPM 插件路径需要 UTF-8")?);
+        let identity = swift_string(&plugin.package);
+        let product = swift_string(&plugin.package);
+        writeln!(packages, "        .package(path: {path}),")?;
+        writeln!(
+            products,
+            "                .product(name: {product}, package: {identity}),"
+        )?;
+        writeln!(imports, "import {}", plugin.module)?;
+        let class = plugin
+            .plugin_class
+            .as_deref()
+            .context("缺少 Swift 插件注册类")?;
+        writeln!(
+            calls,
+            "        {}.{class}.register(with: host)",
+            plugin.module
+        )?;
+    }
+    for entry in fs::read_dir(&aliases)? {
+        let entry = entry?;
+        if entry.file_type()?.is_symlink()
+            && !inputs
+                .projects
+                .iter()
+                .any(|plugin| entry.file_name() == plugin.package.as_str())
+        {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    let platform = if target == "ios" {
+        ".iOS(.v15)"
+    } else {
+        ".macOS(.v13)"
+    };
+    write(
+        &package.join("Package.swift"),
+        &format!(
+            r#"// swift-tools-version: 5.9
+import PackageDescription
+
+let package = Package(
+    name: "ImpastoGeneratedPlugins",
+    platforms: [{platform}],
+    products: [.library(name: "ImpastoGeneratedPlugins", targets: ["ImpastoGeneratedPlugins"])],
+    dependencies: [
+{packages}    ],
+    targets: [
+        .target(
+            name: "ImpastoGeneratedPlugins",
+            dependencies: [
+{products}            ]
+        ),
+    ]
+)
+"#
+        ),
+    )?;
+    let install = if target == "ios" {
+        "\n@_silgen_name(\"impasto_install_app_plugins\")\nprivate func installRustPlugins() -> Bool\n"
+    } else {
+        ""
+    };
+    let prepare = if target == "ios" {
+        "    public static func prepare() -> Bool { installRustPlugins() }\n\n"
+    } else {
+        ""
+    };
+    write(
+        &sources.join("GeneratedPluginRegistrant.swift"),
+        &format!(
+            "{imports}{install}\n@MainActor\npublic enum GeneratedPluginRegistrant {{\n{prepare}    public static func register(with host: ImpastoHost) {{\n{calls}    }}\n}}\n"
+        ),
+    )?;
+    let (bundle_id, build_number, signing) = if target == "ios" {
+        (
+            crate::ios::bundle_id(app),
+            app.ios.build_number.unwrap_or(1),
+            "",
+        )
+    } else {
+        (
+            format!("dev.impasto.{}", app.name.replace('_', "-")),
+            1,
+            "CODE_SIGN_IDENTITY = -\n",
+        )
+    };
+    write(
+        &dir.join("Generated.xcconfig"),
+        &format!(
+            "PRODUCT_BUNDLE_IDENTIFIER = {bundle_id}\nMARKETING_VERSION = {}\nCURRENT_PROJECT_VERSION = {build_number}\n{signing}",
+            app.version,
+        ),
+    )
+}
+
+fn swift_string(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
+    format!("\"{escaped}\"")
+}
+
+#[cfg(unix)]
+fn symlink(source: &Path, alias: &Path) -> Result<()> {
+    if fs::read_link(alias)
+        .as_deref()
+        .is_ok_and(|current| current == source)
+    {
+        return Ok(());
+    }
+    if fs::symlink_metadata(alias).is_ok() {
+        fs::remove_file(alias)?;
+    }
+    std::os::unix::fs::symlink(source, alias)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn symlink(source: &Path, alias: &Path) -> Result<()> {
+    if fs::read_link(alias)
+        .as_deref()
+        .is_ok_and(|current| current == source)
+    {
+        return Ok(());
+    }
+    if fs::symlink_metadata(alias).is_ok() {
+        fs::remove_dir(alias)?;
+    }
+    std::os::windows::fs::symlink_dir(source, alias)?;
+    Ok(())
+}

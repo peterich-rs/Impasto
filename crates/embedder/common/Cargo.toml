@@ -17,10 +17,11 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 http = "1"
 http-body-util = "0.1"
 openwire = "0.1.2"
+url = "2"
 pollster = "0.4"
 serde_json = "1"
 tokio = { version = "1", features = ["io-util", "net", "rt-multi-thread", "sync", "time"] }
-tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "registry"] }
 base64 = "0.22"
@@ -36,6 +37,10 @@ mars-xlog = { git = "https://github.com/peterich-rs/xlog-rs", rev = "cdedbdf4086
 cc = "1"
 
 [dev-dependencies]
+bundler = { path = "../../bundler" }
+impasto-clipboard = { path = "../../../packages/clipboard/rust" }
+impasto-http = { path = "../../../packages/http/rust" }
+impasto-websocket = { path = "../../../packages/websocket/rust" }
 javascript = { path = "../../javascript", features = ["runtime"] }
 
 [lints]

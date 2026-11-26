@@ -15,13 +15,13 @@ use super::{RunDevice, build_artifact, bundle_id, delivery::session_id, require_
 use crate::{
     app::App,
     build::{BuildOptions, bundle_update},
-    run::{Snapshot, files, script_only, snapshot_path},
+    run::{Snapshot, files, script_only, set_watch_changes, snapshot_path},
     toolchain,
 };
 
 const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_UPDATE_BYTES: usize = 16 * 1024 * 1024;
-const POLL_INTERVAL: Duration = Duration::from_millis(250);
+const WATCH_INTERVAL: Duration = Duration::from_millis(10);
 const ACK_TIMEOUT: Duration = Duration::from_secs(12);
 
 struct DevelopmentSession {
@@ -30,6 +30,8 @@ struct DevelopmentSession {
     package: String,
     revision: u64,
     plugin_manifest: Option<Vec<u8>>,
+    source: Option<String>,
+    local_channel: Option<PathBuf>,
 }
 
 impl DevelopmentSession {
@@ -38,35 +40,43 @@ impl DevelopmentSession {
         let output = app.root.join("build/ios/development").join(&token);
         fs::create_dir_all(&output)?;
         let built = build_artifact(app, options, device.platform())?;
-        let session = Self {
+        let source = fs::read_to_string(built.path.join("app.js")).ok();
+        let mut session = Self {
             token,
             output,
             package: bundle_id(app),
             revision: 0,
             plugin_manifest: built.plugin_manifest,
+            source,
+            local_channel: None,
         };
         device.install_and_launch(&built.path, &session.package, options, Some(&session.token))?;
+        if let Channel::Local(path) = session.channel(device)? {
+            session.local_channel = Some(path);
+        }
         Ok(session)
     }
 
     fn update(&mut self, app: &App, options: &BuildOptions, device: &RunDevice) -> Result<()> {
-        let source = bundle_update(
-            app,
-            options,
-            "ios",
-            &self.output.join("bundle"),
-            self.plugin_manifest.as_deref(),
-        )?;
-        let size = fs::metadata(&source)?.len();
-        if size > MAX_SOURCE_BYTES as u64 {
+        let source = bundle_update(app, options, "ios", self.plugin_manifest.as_deref())?;
+        let patch = self
+            .source
+            .as_deref()
+            .and_then(|before| bundler::delta(before, &source));
+        self.send_source(device, patch.as_deref().unwrap_or(&source))?;
+        self.source = Some(source);
+        Ok(())
+    }
+
+    fn send_source(&mut self, device: &RunDevice, source: &str) -> Result<()> {
+        if source.len() > MAX_SOURCE_BYTES {
             bail!("调试脚本超过 {MAX_SOURCE_BYTES} 字节");
         }
-        let source = fs::read_to_string(&source)?;
         self.revision = self.revision.checked_add(1).context("iOS 更新序号用尽")?;
         let data = serde_json::to_vec(&Update {
             token: &self.token,
             revision: self.revision,
-            source: &source,
+            source,
         })?;
         if data.len() > MAX_UPDATE_BYTES {
             bail!("调试更新传输包超过 {MAX_UPDATE_BYTES} 字节");
@@ -74,6 +84,9 @@ impl DevelopmentSession {
         let path = self.output.join("update.json");
         fs::write(&path, data)?;
 
+        if self.local_channel.is_some() {
+            return self.send_and_wait(device, &path);
+        }
         loop {
             await_connection(device);
             match self.send_and_wait(device, &path) {
@@ -91,7 +104,7 @@ impl DevelopmentSession {
             if Instant::now() > deadline {
                 bail!("iOS 应用未建立调试会话，请确认其正在前台运行");
             }
-            thread::sleep(POLL_INTERVAL);
+            channel.pause();
         }
         channel.write_update(path)?;
         let deadline = Instant::now() + ACK_TIMEOUT;
@@ -116,11 +129,14 @@ impl DevelopmentSession {
                     self.revision
                 );
             }
-            thread::sleep(POLL_INTERVAL);
+            channel.pause();
         }
     }
 
     fn channel<'a>(&'a self, device: &'a RunDevice) -> Result<Channel<'a>> {
+        if let Some(path) = &self.local_channel {
+            return Ok(Channel::Local(path.clone()));
+        }
         let remote = format!("Library/Caches/ImpastoUpdates/{}", self.token);
         match device {
             RunDevice::Simulator(device) => {
@@ -212,6 +228,14 @@ enum Channel<'a> {
 }
 
 impl Channel<'_> {
+    fn pause(&self) {
+        let interval = match self {
+            Self::Local(_) => Duration::from_millis(5),
+            Self::Remote { .. } => Duration::from_millis(250),
+        };
+        thread::sleep(interval);
+    }
+
     fn ready(&self, token: &str) -> Result<bool> {
         Ok(self
             .read("ready")?
@@ -336,25 +360,29 @@ impl AppSnapshot {
 }
 
 pub(super) fn run(mut app: App, options: &BuildOptions, device: RunDevice) -> Result<()> {
-    let mut snapshot = AppSnapshot::read(&app)?;
     let mut session = DevelopmentSession::launch(&app, options, &device)?;
+    let mut snapshot = AppSnapshot::read(&app)?;
     let mut installed = snapshot.clone();
     eprintln!("impasto: 正在监听 iOS 应用文件。Ctrl-C 退出");
     loop {
-        thread::sleep(POLL_INTERVAL);
+        thread::sleep(WATCH_INTERVAL);
         let next = AppSnapshot::read(&app)?;
         if next == snapshot {
             continue;
         }
+        let source_only =
+            installed.native == next.native && script_only(&app, &installed.written, &next.written);
         snapshot = next;
-        app = match App::current() {
-            Ok(app) => app,
-            Err(error) => {
-                eprintln!("impasto: 应用配置无效，等待修正。{error:#}");
-                continue;
-            }
-        };
-        snapshot = AppSnapshot::read(&app)?;
+        if !source_only {
+            app = match App::current() {
+                Ok(app) => app,
+                Err(error) => {
+                    eprintln!("impasto: 应用配置无效，等待修正。{error:#}");
+                    continue;
+                }
+            };
+            snapshot = AppSnapshot::read(&app)?;
+        }
         let result = deploy(&mut session, &app, options, &device, &installed, &snapshot);
         match result {
             Ok(()) => installed = snapshot.clone(),
@@ -373,6 +401,7 @@ fn deploy(
 ) -> Result<()> {
     if installed.native == current.native && script_only(app, &installed.written, &current.written)
     {
+        set_watch_changes(options, &installed.written, &current.written);
         return session.update(app, options, device);
     }
     await_connection(device);

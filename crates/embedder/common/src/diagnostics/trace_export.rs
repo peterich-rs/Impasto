@@ -231,6 +231,15 @@ impl Builder {
         fields
             .iter()
             .map(|(key, value)| {
+                // Keep the JavaScript sample annotation self-describing so a
+                // host tool can enrich it without rewriting interning state.
+                if let ("js_stack", FieldValue::Str(stack)) = (*key, value) {
+                    return DebugAnnotation {
+                        name: Some((*key).to_owned()),
+                        string_value: Some(stack.clone()),
+                        ..Default::default()
+                    };
+                }
                 let name_iid = Some(self.intern.annotation(key));
                 match value {
                     FieldValue::I64(v) => DebugAnnotation {
