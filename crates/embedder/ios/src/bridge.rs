@@ -336,8 +336,7 @@ impl ImpastoIOSHost {
                         .then(|| Arc::new(embedder::DiagnosticsHub::new())),
                     devtools_source_map: None,
                     inspect_dir: None,
-                }
-                .with_gallery_gpu_view(false))
+                })
             },
             move |result| match result {
                 Ok(()) => {

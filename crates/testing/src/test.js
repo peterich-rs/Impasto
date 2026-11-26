@@ -1,6 +1,6 @@
 import { boot, scene } from "@impasto/solid-renderer";
 import { createSignal } from "reactive";
-import { command, report } from "impasto:test/driver";
+import { command, filter, report } from "impasto:test/driver";
 
 const cases = [];
 let scope = "";
@@ -8,8 +8,10 @@ let setContent;
 
 report("start");
 Promise.resolve().then(async () => {
+  const pattern = filter();
   try {
     for (const [name, run] of cases) {
+      if (pattern !== null && !name.includes(pattern)) continue;
       report("case", name);
       await advanceFrames(1);
       await run();
@@ -17,6 +19,7 @@ Promise.resolve().then(async () => {
         setContent(() => null);
         await advanceFrames(1);
       }
+      await command("clockReset");
       report("pass");
     }
     report("done");
@@ -113,6 +116,11 @@ function equal(left, right, seen = new Map()) {
 export function advanceFrames(count = 1, step = 16) {
   return command("frames", count, step);
 }
+
+export const clock = {
+  install() { return command("clockInstall"); },
+  advance(milliseconds) { return command("clockAdvance", milliseconds); },
+};
 
 export const screen = {
   async mount(render) {

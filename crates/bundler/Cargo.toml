@@ -6,7 +6,7 @@ publish.workspace = true
 
 [features]
 default = ["bundle", "wgsl"]
-bundle = ["dep:anyhow", "dep:rolldown", "dep:rolldown_common", "dep:tokio", "dep:serde", "dep:imagesize", "dep:ttf-parser", "dep:base64", "dep:usvg", "dep:tiny-skia-path", "dep:roxmltree"]
+bundle = ["dep:anyhow", "dep:rolldown", "dep:rolldown_common", "dep:tokio", "dep:serde", "dep:imagesize", "dep:ttf-parser", "dep:usvg", "dep:tiny-skia-path", "dep:roxmltree", "dep:toml"]
 wgsl = ["dep:shader"]
 wasm = ["dep:wasm-bindgen"]
 
@@ -23,11 +23,11 @@ shader = { path = "../shader", features = ["portability"], optional = true }
 engine = { workspace = true, features = ["style-binary"] }
 imagesize = { version = "0.15", optional = true }
 ttf-parser = { version = "0.25", optional = true }
-base64 = { version = "0.22", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 usvg = { version = "0.46", default-features = false, optional = true }
 tiny-skia-path = { version = "0.11", optional = true }
 roxmltree = { version = "0.21", optional = true }
+toml = { version = "0.9", optional = true }
 
 [lints]
 workspace = true

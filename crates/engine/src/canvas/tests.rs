@@ -84,6 +84,41 @@ fn dash_repeats_odd_lengths_and_rejects_negatives() {
 }
 
 #[test]
+fn simple_canvas_primitives_keep_their_geometry_and_paint_order() {
+    let budget = Budget::session();
+    let mut recorder = new_recorder(&budget);
+    recorder.translate(2.0, 4.0);
+    ok(recorder.fill_rects(&[6.0, 3.0, -4.0, 2.0, 4.0, 6.0, 2.0, 3.0]));
+    ok(recorder.move_to(3.0, 4.0));
+    ok(recorder.line_to(9.0, 4.0));
+    ok(recorder.stroke());
+    recorder.begin_path();
+    ok(recorder.arc(9.0, 7.0, 2.0, 0.0, std::f64::consts::TAU, false));
+    recorder.reset_transform();
+    ok(recorder.fill(FillRule::EvenOdd));
+    ok(recorder.rect(0.0, 0.0, 5.0, 5.0));
+    ok(recorder.fill(FillRule::EvenOdd));
+
+    let list = finish(recorder, &mut MonoShaper::new());
+    let [first, second, line, circle, compound] = list.ops() else {
+        panic!("expected one operation per draw");
+    };
+    for (op, expected_bounds, expected_radius) in [
+        (first, [4.0, 7.0, 4.0, 2.0], 0.0),
+        (second, [6.0, 10.0, 2.0, 3.0], 0.0),
+        (line, [5.0, 7.5, 6.0, 1.0], 0.0),
+        (circle, [9.0, 9.0, 4.0, 4.0], 2.0),
+    ] {
+        let CanvasOp::SolidRect { bounds, radius, .. } = op else {
+            panic!("expected a solid rectangle");
+        };
+        assert_eq!(*bounds, expected_bounds);
+        assert_eq!(*radius, expected_radius);
+    }
+    assert!(matches!(compound, CanvasOp::Fill { .. }));
+}
+
+#[test]
 fn translate_is_baked_once() {
     let budget = Budget::session();
     let mut recorder = new_recorder(&budget);
@@ -430,7 +465,7 @@ fn empty_clip_stays_in_the_list() {
         panic!("clip");
     };
     assert!(path.verbs.is_empty());
-    assert!(matches!(list.ops()[2], CanvasOp::Fill { .. }));
+    assert!(matches!(list.ops()[2], CanvasOp::SolidRect { .. }));
     assert!(matches!(list.ops()[3], CanvasOp::Restore));
 }
 

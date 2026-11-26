@@ -1,19 +1,37 @@
 import { For, Show, createMemo, createSignal, createTrackedEffect, onCleanup, untrack } from "solid-js";
-import { View as HostView, Text as HostText } from "@impasto/solid-renderer/host";
 import { onFrame, onLayout, requestFrame, scene } from "@impasto/solid-renderer";
 import { Canvas, Column, Pressable, Role, Row, View, VirtualList, createScrollController } from "@impasto/solid-ui";
 import type { Router } from "@impasto/solid-router";
-import { store as devtools } from "@impasto/devtools";
-import { fmtPrice } from "../format.ts";
+import { fmtPrice, fmtSigned } from "../format.ts";
 import { loc } from "../copy.ts";
 import { marketOpen, minute, sectorOf, sectors } from "../engine/analytics.ts";
 import { downsampleTicks } from "../engine/universe.ts";
 import type { QuoteEngine } from "../engine/engine.ts";
 import type { Instrument } from "../engine/types.ts";
 import { useMarketPulse, useQuotes } from "../state/quotes-provider.tsx";
+import { inWatchlist, toggleWatch, watchlistSig } from "../state/watchlist.ts";
 import { dot, stroke } from "../widgets/stocks/chart.tsx";
-import { Action, change, ClockButton, clock, code, colors, filling, Label, Rule, sectorLabel, Segments, sign, tone } from "../widgets/stocks/ui.tsx";
-import { StockView } from "./stock.tsx";
+import { Action, change, ClockButton, clock, code, colors, filling, Label, PriceTag, Rule, sectorLabel, Segments, sign, tone } from "../widgets/stocks/ui.tsx";
+import { Glyph, Icon } from "../widgets/stocks/icons.tsx";
+
+type StockView = typeof import("./stock.tsx").StockView;
+
+function InlineStock(props: Parameters<StockView>[0]) {
+  const [view, setView] = createSignal<StockView>();
+  const [fault, setFault] = createSignal<{ error: unknown }>();
+  let mounted = true;
+  onCleanup(() => { mounted = false; });
+  void import("./stock.tsx").then(
+    ({ StockView }) => { if (mounted) setView(() => StockView); },
+    error => { if (mounted) setFault({ error }); },
+  );
+  return () => {
+    const failed = fault();
+    if (failed) throw failed.error;
+    const StockView = view();
+    return StockView ? <StockView {...props} /> : 0;
+  };
+}
 
 const filters = ["all", "gainers", "losers", "active"] as const;
 type Filter = typeof filters[number];
@@ -79,9 +97,8 @@ function marketSummary(engine: QuoteEngine, instruments: readonly Instrument[]) 
     groups: groups.map(({ sum, count }) => count === 0 ? undefined : sum / count) };
 }
 
-function MarketStrip(props: { time: number; summary: ReturnType<typeof marketSummary>; count: number; router: Router; selected: Filter; onSelect: (value: Filter) => void }) {
+function BoardHeader(props: { time: number; summary: ReturnType<typeof marketSummary>; count: number; router: Router; selected: Filter; onSelect: (value: Filter) => void; onSearch: () => void }) {
   const [expanded, setExpanded] = createSignal(false);
-  const [menu, setMenu] = createSignal(false);
   const scale = () => Math.max(0.5, ...props.summary.groups.map((value) => Math.abs(value ?? 0))) * 1.1;
   const width = (value: number) => `${value * 100 / Math.max(1, props.count)}%` as const;
   return <Column style={{ gap: 8, padding: 12, flexShrink: 0 }}>
@@ -92,7 +109,7 @@ function MarketStrip(props: { time: number; summary: ReturnType<typeof marketSum
         <Label size={12} color={colors.dim}>{loc("综合指数", "Composite")}</Label>
         <Label size={16} weight={600}>{fmtPrice(initialIndex * (1 + props.summary.change / 100))}</Label>
         <Label size={12} color={tone(props.summary.change)}>{`${sign(props.summary.change)}%`}</Label>
-        <Label size={12} color={colors.faint}>{expanded() ? "⌃" : "⌄"}</Label>
+        <Icon name={expanded() ? "chevronUp" : "chevronDown"} size={16} color={colors.faint} />
       </Pressable>
       <Label size={11} color={colors.faint}>{clock(props.time)}</Label>
       <ClockButton />
@@ -127,23 +144,13 @@ function MarketStrip(props: { time: number; summary: ReturnType<typeof marketSum
     <Row style={{ gap: 5, alignItems: "center", justifyContent: "space-between" }}>
       <Segments options={filters} selected={props.selected} label={filterLabel} onSelect={props.onSelect}
         count={(filter) => filter === "all" ? props.count : filter === "gainers" ? props.summary.up : filter === "losers" ? props.summary.down : undefined} />
-      <Action label="⋯" onClick={() => setMenu((value) => !value)} title={loc("更多页面", "More pages")} style={{ minHeight: 28, backgroundColor: "#00000000", padding: 6 }} />
+      <Glyph name="search" title={loc("搜索", "Search")} onClick={props.onSearch} size={18} color={colors.dim} compact />
     </Row>
-    <Show when={menu()}>
-      <Row style={{ gap: 5, flexWrap: "wrap" }}>
-        <Action label={loc("搜索", "Search")} onClick={() => props.router.push("/search")} />
-        <Action label={loc("自选", "Watchlist")} onClick={() => props.router.reset("/watchlist")} />
-        <Action label={loc("市场", "Market")} onClick={() => props.router.reset("/market")} />
-        <Action label={loc("交易", "Trades")} onClick={() => props.router.reset("/trade")} />
-        <Action label={loc("我的", "Profile")} onClick={() => props.router.reset("/profile")} />
-        <Show when={devtools.available()}><Action label={loc("调试", "Devtools")} onClick={() => devtools.open()} /></Show>
-      </Row>
-    </Show>
   </Column>;
 }
 
 function Spark(props: { engine: QuoteEngine; symbol: string; revision: number }) {
-  return <Canvas style={{ width: 96, maxWidth: "34%", flexShrink: 1, height: 36 }} draw={(ctx, { width, height }) => {
+  return <Canvas style={{ width: 96, maxWidth: "26%", minWidth: 0, flexShrink: 4, height: 36 }} draw={(ctx, { width, height }) => {
     props.revision;
     const prices = downsampleTicks(props.engine.ring(props.symbol), 24);
     if (!prices.length || width < 18) return;
@@ -185,76 +192,118 @@ function Spark(props: { engine: QuoteEngine; symbol: string; revision: number })
   }} />;
 }
 
-function StockRow(props: { instrument: Instrument; engine: QuoteEngine; revision: number; sparkRevision: number; selected: boolean; onClick: () => void }) {
+/**
+ * Two-band row shared by the market and watchlist boards. Upper band:
+ * identity, spark, price badge. Lower band: change and percent on one line.
+ */
+function StockRow(props: { instrument: Instrument; engine: QuoteEngine; revision: number; sparkRevision: number; selected: boolean; onClick: () => void; saved?: boolean; onSave?: () => void }) {
   const quote = createMemo(() => { props.revision; return { ...props.engine.quote(props.instrument.symbol) }; });
   const percent = createMemo(() => change(quote()));
   const color = createMemo(() => tone(percent()));
-  return <HostView style={{ flexDirection: "column", height: 61, gap: 0 }}>
+  return <Column style={{ height: 72, gap: 0 }}>
     <Pressable role={Role.Button} onClick={props.onClick} accessibilityLabel={`${code(props.instrument.symbol)} ${props.instrument.name}`}
-      style={{ flex: 1, minHeight: 0, paddingLeft: 14, paddingRight: 14, flexDirection: "row", gap: 8, alignItems: "center",
+      style={{ flex: 1, minHeight: 0, paddingLeft: 14, paddingRight: 14, paddingTop: 10, flexDirection: "column", gap: 4,
         backgroundColor: props.selected ? colors.raised : colors.bg }}>
       <Show when={props.selected}><View style={{ position: "absolute", left: 0, top: 12, bottom: 12, width: 3, borderRadius: 2, backgroundColor: colors.lime }} /></Show>
-      <HostView style={{ flexDirection: "column", flex: 1, minWidth: 0, gap: 3 }}>
-        <HostText value={code(props.instrument.symbol)} style={{ color: colors.ink, fontSize: 15, fontWeight: 600, maxLines: 1, textOverflow: "ellipsis", minWidth: 0 }} />
-        <HostText value={props.instrument.name} style={{ color: colors.dim, fontSize: 12, maxLines: 1, textOverflow: "ellipsis", minWidth: 0 }} />
-      </HostView>
-      <Spark engine={props.engine} symbol={props.instrument.symbol} revision={props.sparkRevision} />
-      <HostView style={{ flexDirection: "column", minWidth: 65, alignItems: "end", gap: 3 }}>
-        <HostText value={fmtPrice(quote().last)} style={{ color: colors.ink, fontSize: 15, fontWeight: 600, maxLines: 1, textOverflow: "ellipsis", minWidth: 0 }} />
-        <HostText value={`${sign(percent())}%`} style={{ color: color(), fontSize: 12, maxLines: 1, textOverflow: "ellipsis", minWidth: 0 }} />
-      </HostView>
+      <Row style={{ flex: 1, minHeight: 0, minWidth: 0, gap: 8, alignItems: "center" }}>
+        <Column style={{ flex: 1, minWidth: 96, gap: 3 }}>
+          <Row style={{ gap: 6, alignItems: "baseline", minWidth: 0 }}>
+            <Label size={15} weight={600} style={{ flexShrink: 0 }}>{code(props.instrument.symbol)}</Label>
+            <Label size={12} color={colors.dim} style={{ flex: 1 }}>{props.instrument.name}</Label>
+          </Row>
+          <Row style={{ gap: 10, alignItems: "baseline" }}>
+            <Label size={12} color={color()}>{fmtSigned(quote().last - quote().prevClose)}</Label>
+            <Label size={12} color={color()}>{`${sign(percent())}%`}</Label>
+          </Row>
+        </Column>
+        <Show when={props.onSave}><Glyph name={props.saved ? "starFilled" : "star"} title={props.saved ? loc("移出自选", "Remove from watchlist") : loc("加入自选", "Add to watchlist")}
+          onClick={props.onSave!} size={18} color={props.saved ? colors.amber : colors.faint} compact style={{ backgroundColor: "#00000000" }} /></Show>
+        <Spark engine={props.engine} symbol={props.instrument.symbol} revision={props.sparkRevision} />
+        <PriceTag value={fmtPrice(quote().last)} change={percent()} />
+      </Row>
     </Pressable>
-    <HostView style={{ height: 1, backgroundColor: colors.line, flexShrink: 0 }} />
-  </HostView>;
+    <Rule />
+  </Column>;
 }
 
-export function StocksPage(props: { router: Router }) {
+export type BoardProps = { router: Router; title: string; empty: string; emptyAction?: string; onEmpty?: () => void };
+
+/** Market board over the full universe. */
+export function MarketsPage(props: BoardProps) {
   const { engine } = useQuotes();
-  const instruments = engine.instruments().filter((instrument) => !instrument.index);
+  return <QuoteBoard {...props} engine={engine} instruments={() => engine.instruments().filter((instrument) => !instrument.index)} scrollKey="markets" />;
+}
+
+/** Watchlist board: same rows and cadence, sourced from the saved symbols. */
+export function WatchlistPage(props: BoardProps) {
+  const { engine } = useQuotes();
+  // Indices stay out of the list; the board header already shows the composite.
+  const instruments = createMemo(() => {
+    const all = engine.instruments();
+    return watchlistSig().flatMap((symbol) => {
+      const instrument = all.find((item) => item.symbol === symbol && !item.index);
+      return instrument ? [instrument] : [];
+    });
+  });
+  return <QuoteBoard {...props} engine={engine} instruments={instruments} scrollKey="watchlist" savable />;
+}
+
+function QuoteBoard(props: BoardProps & { engine: QuoteEngine; instruments: () => readonly Instrument[]; scrollKey: string; savable?: boolean }) {
+  const instruments = () => props.instruments();
   const [width, setWidth] = createSignal(scene.metrics().width);
   onCleanup(onLayout(() => setWidth(scene.metrics().width)));
   const [filter, setFilter] = createSignal<Filter>("all");
-  const [selected, setSelected] = createSignal(instruments[0]!.symbol);
+  const [selected, setSelected] = createSignal<string | null>(null);
   const controller = createScrollController();
   const wide = () => width() >= 800;
   const split = () => width() >= 1240;
   const canPublish = () => {
     const top = props.router.stack().at(-1);
-    return top?.path === "/stocks" && top.phase === "live";
+    return top?.path === `/${props.scrollKey === "watchlist" ? "watchlist" : "markets"}` && top.phase === "live";
   };
   const revision = useMarketPulse(canPublish);
   const rowRevision = useRowPublications(revision, canPublish);
-  const publicationIndex = new Map(instruments.map(({ symbol }, index) => [symbol, index]));
   const overviewRevision = createMemo(() => Math.floor(revision() / 2));
-  const time = createMemo(() => { overviewRevision(); return engine.simNow() - engine.dayStart(); });
+  const time = createMemo(() => { overviewRevision(); return engineTime(props.engine); });
   const rankAt = createMemo(() => Math.floor(revision() / 5));
-  const summary = createMemo(() => { overviewRevision(); return marketSummary(engine, instruments); });
+  const summary = createMemo(() => { overviewRevision(); return marketSummary(props.engine, instruments()); });
   const items = createMemo<readonly Instrument[]>((previous) => {
+    const source = instruments();
     const choice = filter();
-    if (choice === "all") return instruments;
+    if (choice === "all") return source;
     rankAt();
-    const percent = (instrument: Instrument) => change(engine.quote(instrument.symbol));
-    const turnover = (instrument: Instrument) => engine.analytics(instrument.symbol).turnover;
-    const ranked = choice === "active" ? [...instruments].sort((a, b) => turnover(b) - turnover(a)).slice(0, 10)
-      : instruments.filter((instrument) => choice === "gainers" ? percent(instrument) > 0 : percent(instrument) < 0)
+    const percent = (instrument: Instrument) => change(props.engine.quote(instrument.symbol));
+    const turnover = (instrument: Instrument) => props.engine.analytics(instrument.symbol).turnover;
+    const ranked = choice === "active" ? [...source].sort((a, b) => turnover(b) - turnover(a)).slice(0, 10)
+      : source.filter((instrument) => choice === "gainers" ? percent(instrument) > 0 : percent(instrument) < 0)
         .sort((a, b) => choice === "gainers" ? percent(b) - percent(a) : percent(a) - percent(b));
     return previous && previous.length === ranked.length && ranked.every((item, index) => item === previous[index]) ? previous : ranked;
   });
+  const publicationIndex = new Map(instruments().map(({ symbol }, index) => [symbol, index]));
+  const current = () => (selected() ?? instruments()[0]?.symbol ?? "") as string;
   return <Row style={[filling, { backgroundColor: colors.bg }]}>
     <Column style={[filling, wide() ? { flex: 0, width: "28%", minWidth: 280, maxWidth: 380 } : { width: "100%" }]}>
-      <MarketStrip time={marketOpen * minute + time()} summary={summary()} count={instruments.length} router={props.router} selected={filter()}
+      <BoardHeader time={time()} summary={summary()} count={instruments().length} router={props.router} selected={filter()}
+        onSearch={() => props.router.push("/search")}
         onSelect={(value) => { if (filter() !== value) { setFilter(value); controller.scrollTo(0, 0); } }} />
       <Rule />
-      <VirtualList items={items()} itemKey={(instrument) => instrument.symbol} controller={controller} estimatedHeight={61} overscan={8}
-        style={filling} empty={() => <Label color={colors.dim} style={{ padding: 20, textAlign: "center" }}>{loc("暂无符合条件的证券", "Nothing here right now")}</Label>}
+      <VirtualList items={items()} itemKey={(instrument) => instrument.symbol} controller={controller} estimatedHeight={72} overscan={8}
+        restoreKey={props.scrollKey}
+        style={filling} empty={() => <Column style={{ gap: 12, padding: 24, alignItems: "center" }}>
+          <Label color={colors.dim} style={{ textAlign: "center" }}>{props.empty}</Label>
+          <Show when={props.onEmpty}><Action label={props.emptyAction ?? loc("去搜索", "Search")} onClick={props.onEmpty!} primary /></Show>
+        </Column>}
         recycle={{
           typeOf: () => "stock",
           poolSize: 16,
           render: (instrument) => {
-            const index = () => publicationIndex.get(instrument().symbol)!;
+            const index = () => publicationIndex.get(instrument().symbol) ?? 0;
             const row = () => rowRevision(index());
             const spark = createMemo(() => Math.floor((row() + index() % 3) / 3));
-            return <StockRow instrument={instrument()} engine={engine} revision={row()} sparkRevision={spark()} selected={wide() && selected() === instrument().symbol}
+            return <StockRow instrument={instrument()} engine={props.engine} revision={row()} sparkRevision={spark()}
+              selected={wide() && current() === instrument().symbol}
+              saved={props.savable && inWatchlist(instrument().symbol)}
+              onSave={props.savable ? () => toggleWatch(instrument().symbol) : undefined}
               onClick={() => {
                 const symbol = instrument().symbol;
                 setSelected(symbol);
@@ -262,10 +311,16 @@ export function StocksPage(props: { router: Router }) {
               }} />;
           },
         }} />
+      {/* The route capsule floats over this strip; keep the last row clear of it. */}
+      <Show when={!wide()}><View style={{ height: 96, flexShrink: 0 }} /></Show>
     </Column>
     <Show when={wide()}>
       <Rule vertical />
-      <StockView engine={engine} symbol={selected()} wide split={split()} />
+      <InlineStock engine={props.engine} symbol={current()} wide split={split()} />
     </Show>
   </Row>;
+}
+
+function engineTime(engine: QuoteEngine): number {
+  return marketOpen * minute + engine.simNow() - engine.dayStart();
 }

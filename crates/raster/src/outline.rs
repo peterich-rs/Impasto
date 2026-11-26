@@ -14,10 +14,9 @@ use swash::{
 
 use crate::{
     FontLibrary, Status,
-    batch::{Brush, GpuMeshBuffer, Mesh},
+    batch::{Brush, GpuMeshBuffer, Mesh, MeshBuffer},
     compiler::{GlyphDraw, mesh_bounds, tessellate},
     gpu::Gpu,
-    pipelines,
 };
 
 pub const REFERENCE_PPEM: f32 = 128.0;
@@ -78,6 +77,7 @@ impl Outlines {
         let bytes = mesh
             .as_ref()
             .and_then(|mesh| mesh.buffer.get())
+            .and_then(MeshBuffer::resident)
             .map_or(0, |buffer| buffer.vertices.size() + buffer.indices.size());
         if self.cache.len() >= CACHE_LIMIT
             && let Some(old) = self.cache.keys().next().cloned()
@@ -133,22 +133,11 @@ fn upload(gpu: &Gpu, path: &CanvasPath) -> Result<Option<Mesh>, Status> {
     }
     let bounds = mesh_bounds(&geometry.vertices);
     let count = u32::try_from(geometry.indices.len()).map_err(|_| Status::OutOfMemory)?;
-    let buffers = gpu.validation(|| {
-        Ok(GpuMeshBuffer {
-            vertices: pipelines::buffer_from(
-                gpu,
-                "glyph outline vertices",
-                bytemuck::cast_slice(&geometry.vertices),
-                wgpu::BufferUsages::VERTEX,
-            )?,
-            indices: pipelines::buffer_from(
-                gpu,
-                "glyph outline indices",
-                bytemuck::cast_slice(&geometry.indices),
-                wgpu::BufferUsages::INDEX,
-            )?,
-        })
-    })?;
+    let buffers = MeshBuffer::Resident(GpuMeshBuffer::upload(
+        gpu,
+        &geometry.vertices,
+        &geometry.indices,
+    )?);
     Ok(Some(Mesh {
         buffer: Arc::new(OnceLock::from(buffers)),
         indices: 0..count,

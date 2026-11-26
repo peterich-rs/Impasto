@@ -22,7 +22,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let mut modules = registrar.build(&context)?;
     modules.push(testing::fixture_module(&root, &entry)?);
-    let report = testing::run(&std::fs::read_to_string(script)?, &entry.to_string_lossy(), modules, snapshots)?;
+    let report = testing::run_filtered(
+        &std::fs::read_to_string(script)?, &entry.to_string_lossy(), modules, snapshots,
+        Some(root.join("assets")),
+        env::var("IMPASTO_TEST_FILTER").ok(),
+    )?;
     println!("{}", testing::format_report(&entry, &report, trace));
     Ok(())
 }

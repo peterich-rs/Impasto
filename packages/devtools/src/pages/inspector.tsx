@@ -9,6 +9,7 @@ import {
   requestFrame,
 } from "@impasto/solid-renderer";
 import { setHighlights } from "../store.ts";
+import { openSource } from "@impasto/devtools/native";
 type SnapshotNode = {
   id: number;
   kind: string;
@@ -18,6 +19,7 @@ type SnapshotNode = {
   h: number;
   focusable: boolean;
   text?: string;
+  source?: { path: string; line: number; column: number; component: string };
   debugOwned: boolean;
   children: (SnapshotNode | null)[];
 };
@@ -266,6 +268,16 @@ export function InspectorPage() {
           {current()!.node.y.toFixed(0)}) ·{" "}
           {current()!.node.focusable ? "focusable" : "not focusable"}
         </Text>
+      </Show>
+      <Show when={current()?.node.source}>
+        <HostView focusable onClick={() => {
+          const source = current()?.node.source;
+          if (source) openSource(source.path, source.line, source.column);
+        }}>
+          <Text style={{ fontSize: 10, color: theme().color.primary }}>
+            {current()!.node.source!.path}:{current()!.node.source!.line}:{current()!.node.source!.column}
+          </Text>
+        </HostView>
       </Show>
     </HostView>
   );

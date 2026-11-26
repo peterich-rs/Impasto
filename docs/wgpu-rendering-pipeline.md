@@ -39,7 +39,7 @@ Android 的 `auto` 按 Vulkan、GLES 顺序选择。Android 模拟器上报告�
 2. **安全编码规范**：
    - 遵循工作区 `unsafe_code = "deny"`、`unwrap_used = "deny"`、`expect_used = "deny"`（仅测试放行）。切换到纯 Rust 生态（`parley` + `wgpu`）后，原生表面句柄和 iOS Metal 互操作使用局部豁免，渲染器主体使用安全 Rust。
 3. **线程拓扑与帧流水线**：
-   - 必须完整支持 [`ThreadTopology`](../crates/embedder/common/src/lib.rs#L184-L190) 的三种模式：`SharedRender`（默认，UI 与 Raster 同线程）、`Split`（UI 与 Raster 分线程）、`PlatformUi`（UI 跑在平台主循环，Raster 独立线程），以及双帧流水线（[`FramePipeline::DEPTH = 2`](../crates/embedder/common/src/host.rs#L850)）。
+   - 必须完整支持 [`ThreadTopology`](../crates/embedder/common/src/lib.rs#L188-L199) 的三种模式：`Split`（默认，UI 与 Raster 分线程）、`SharedRender`（UI 与 Raster 同线程）、`PlatformUi`（UI 跑在平台主循环，Raster 独立线程），以及双帧流水线（[`FramePipeline::DEPTH = 2`](../crates/embedder/common/src/host.rs#L850)）。
 
 ---
 
@@ -250,7 +250,7 @@ flowchart TD
 
 ### 6.1 多线程渲染在 `wgpu` 下的实现路径
 
-Impasto 现有的 [`crates/embedder/common`](../crates/embedder/common/src/lib.rs#L184-L190) 已经实现了 `SharedRender`、`Split`、`PlatformUi` 三种线程拓扑和双帧流水线（[`FramePipeline::DEPTH = 2`](../crates/embedder/common/src/host.rs#L850)）。换用 `wgpu` + `parley` 后，多线程能力可以从以下三个层面彻底释放：
+Impasto 现有的 [`crates/embedder/common`](../crates/embedder/common/src/lib.rs#L188-L199) 已经实现了 `SharedRender`、`Split`（默认）、`PlatformUi` 三种线程拓扑和双帧流水线（[`FramePipeline::DEPTH = 2`](../crates/embedder/common/src/host.rs#L850)）。换用 `wgpu` + `parley` 后，多线程能力可以从以下三个层面彻底释放：
 
 1. **UI 线程与 Raster 线程完全解耦且无重复工作**：
    - `FontLibrary` 在同一窗口的队列间共享不可变字体数据。Parley 上下文与缓存由 UI 持有。

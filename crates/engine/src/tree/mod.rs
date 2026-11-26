@@ -21,6 +21,8 @@ mod style;
 mod text;
 
 pub use crate::geometry::{NodeId, Rect};
+#[cfg(feature = "js")]
+pub(crate) use debug::SourceLocation;
 pub use debug::{DebugAxis, LayoutIssue};
 #[cfg(test)]
 pub(crate) use hit::Affine;

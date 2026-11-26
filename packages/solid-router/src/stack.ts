@@ -10,11 +10,13 @@ import {
 import { onBack, onFrame, type NodeHandle } from "@impasto/solid-renderer";
 import { matchPath, routePath } from "./path.ts";
 export type RouteParams = Record<string, string>;
+export type RouteComponent = (props: { params: RouteParams; phase: RoutePhase }) => NodeHandle;
+export type LazyRouteLoader = () => Promise<{ default: RouteComponent }>;
 export type RouteDef = {
   path: string;
-  component: (props: { params: RouteParams; phase: RoutePhase }) => NodeHandle;
+  fallback?: () => NodeHandle;
   keepAlive?: boolean;
-};
+} & ({ component: RouteComponent; lazy?: never } | { lazy: LazyRouteLoader; component?: never });
 export type RoutePhase = "enter" | "live" | "exit" | "cover";
 export type RouteEntry = {
   key: string;
@@ -24,6 +26,8 @@ export type RouteEntry = {
   phase: RoutePhase;
   keepAlive: boolean;
   component: RouteDef["component"];
+  lazy?: LazyRouteLoader;
+  fallback?: RouteDef["fallback"];
 };
 export type Router = {
   stack: Accessor<RouteEntry[]>;
@@ -75,6 +79,8 @@ function resolved(
         params,
         keepAlive: !!def.keepAlive,
         component: def.component,
+        lazy: def.lazy,
+        fallback: def.fallback,
       };
     }
   }

@@ -25,21 +25,32 @@ pub fn decode_style(blob: &str) -> Result<Style, String> {
     Ok(style)
 }
 
-pub(super) fn encode<T: Serialize + ?Sized>(value: &T) -> Result<String, String> {
+pub(crate) fn encode<T: Serialize + ?Sized>(value: &T) -> Result<String, String> {
+    encode_version(value, VERSION)
+}
+
+pub(crate) fn encode_version<T: Serialize + ?Sized>(
+    value: &T,
+    version: &str,
+) -> Result<String, String> {
     let bytes = postcard::to_allocvec(value).map_err(|error| error.to_string())?;
-    let blob = format!("{VERSION}{}", STANDARD_NO_PAD.encode(bytes));
+    let blob = format!("{version}{}", STANDARD_NO_PAD.encode(bytes));
     if blob.len() > MAX_ENCODED_BYTES {
         return Err("compiled style exceeds the pool entry size limit".into());
     }
     Ok(blob)
 }
 
-pub(super) fn decode<T: DeserializeOwned>(blob: &str) -> Result<T, String> {
+pub(crate) fn decode<T: DeserializeOwned>(blob: &str) -> Result<T, String> {
+    decode_version(blob, VERSION)
+}
+
+pub(crate) fn decode_version<T: DeserializeOwned>(blob: &str, version: &str) -> Result<T, String> {
     if blob.len() > MAX_ENCODED_BYTES {
         return Err("compiled style exceeds the pool entry size limit".into());
     }
     let blob = blob
-        .strip_prefix(VERSION)
+        .strip_prefix(version)
         .ok_or_else(|| "unknown compiled style format".to_owned())?;
     let bytes = STANDARD_NO_PAD
         .decode(blob)

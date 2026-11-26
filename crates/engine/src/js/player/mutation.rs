@@ -36,15 +36,18 @@ pub(super) struct TemplateNode {
     pub create: TemplateCreate,
     pub parent: usize,
     pub style: Option<crate::style::Style>,
+    pub defaults: Option<crate::style::Style>,
     pub class: Option<crate::style::StaticClass>,
 }
 
 #[derive(Clone)]
 pub(super) enum TemplateCreate {
     View,
+    RepaintBoundary,
     Stack,
     Scroll,
     Text(String),
+    Image(Option<crate::scene::template::TemplateImage>),
 }
 
 pub(super) fn mount_template(
@@ -55,24 +58,48 @@ pub(super) fn mount_template(
     let result = (|| {
         for (index, node) in nodes.iter().enumerate() {
             let create = match &node.create {
-                TemplateCreate::View => Create::View,
+                TemplateCreate::View | TemplateCreate::RepaintBoundary => Create::View,
                 TemplateCreate::Stack => Create::Stack,
                 TemplateCreate::Scroll => Create::Scroll(ScrollAxis::Both),
                 TemplateCreate::Text(text) => Create::Text { text: text.clone() },
+                TemplateCreate::Image(image) => {
+                    let (width, height) = image
+                        .as_ref()
+                        .and_then(|image| image.intrinsic_size_bits)
+                        .map_or((0., 0.), |(w, h)| (f32::from_bits(w), f32::from_bits(h)));
+                    Create::Image {
+                        source: image
+                            .as_ref()
+                            .map_or_else(String::new, |image| image.uri.clone()),
+                        width,
+                        height,
+                        required: image.as_ref().is_some_and(|image| image.required),
+                    }
+                }
             };
             let id = create_node(tree, create)?;
             created.push(id);
-            if let Some(style) = &node.style {
-                tree.commit_style_snapshot(
+            if matches!(node.create, TemplateCreate::RepaintBoundary) {
+                tree.set_repaint_boundary(id, true)?;
+            }
+            if let TemplateCreate::Image(Some(image)) = &node.create
+                && let Some(label) = image.alt.as_ref().filter(|label| !label.is_empty())
+            {
+                tree.set_semantics(
                     id,
-                    crate::style::StyleOrigin::Inline,
-                    style.clone(),
-                    true,
+                    crate::semantics::SemanticsHint {
+                        role: Some(crate::semantics::SemanticsRole::Image),
+                        label: Some(label.clone()),
+                        ..Default::default()
+                    },
                 )?;
             }
-            if let Some(class) = &node.class {
-                tree.set_compiled_class(id, class.clone())?;
-            }
+            tree.initialize_template_style(
+                id,
+                node.defaults.as_ref(),
+                node.style.as_ref(),
+                node.class.as_ref(),
+            )?;
             if index > 0 {
                 let parent = created
                     .get(node.parent)
@@ -100,6 +127,12 @@ pub(super) enum Mutation {
         child: NodeId,
         before: Option<NodeId>,
     },
+    ReconcileRange {
+        parent: NodeId,
+        previous: Vec<NodeId>,
+        next: Vec<NodeId>,
+        before: Option<NodeId>,
+    },
     Remove {
         parent: NodeId,
         child: NodeId,
@@ -117,6 +150,7 @@ pub(super) enum Mutation {
         id: NodeId,
         source: String,
         intrinsic: Option<(f32, f32)>,
+        required: Option<bool>,
     },
     SetStyleSurface {
         id: NodeId,
@@ -177,6 +211,11 @@ pub(super) enum Mutation {
         list: bool,
     },
     StaticClass(NodeId, crate::style::StaticClass),
+    StaticClassList {
+        id: NodeId,
+        classes: Vec<Arc<crate::style::ParsedClass>>,
+        bytes: usize,
+    },
     PointerTarget(NodeId),
     ClearStyle {
         id: NodeId,
@@ -191,6 +230,11 @@ pub(super) enum Mutation {
         origin: crate::style::StyleOrigin,
         replace: bool,
         style: crate::style::Style,
+    },
+    InlinePatch {
+        id: NodeId,
+        keys: std::borrow::Cow<'static, [crate::style::Key]>,
+        declarations: Vec<crate::style::Declaration>,
     },
     SourceCreate {
         id: NodeId,
@@ -270,6 +314,9 @@ pub(super) fn apply(tree: &mut Tree, mutation: Mutation) -> Result<Applied, crat
             }
         }
         Mutation::StaticClass(id, class) => tree.set_compiled_class(id, class)?,
+        Mutation::StaticClassList { id, classes, bytes } => {
+            tree.set_compiled_class_list(id, classes, bytes)?
+        }
         Mutation::PointerTarget(id) => tree.set_pointer_target(id)?,
         Mutation::ClearStyle { id, keys } => tree.clear_style(id, keys.as_deref())?,
         Mutation::SourceClass { source, text } => tree.replace_style_source_class(source, &text)?,
@@ -280,6 +327,13 @@ pub(super) fn apply(tree: &mut Tree, mutation: Mutation) -> Result<Applied, crat
             style,
         } => {
             tree.commit_style_snapshot(id, origin, style, replace)?;
+        }
+        Mutation::InlinePatch {
+            id,
+            keys,
+            declarations,
+        } => {
+            tree.patch_inline_style(id, &keys, declarations)?;
         }
         Mutation::SourceCreate { id, origin } => {
             applied.source = Some(tree.create_style_source(id, origin)?)
@@ -294,6 +348,14 @@ pub(super) fn apply(tree: &mut Tree, mutation: Mutation) -> Result<Applied, crat
             child,
             before,
         } => tree.insert(parent, child, before)?,
+        Mutation::ReconcileRange {
+            parent,
+            previous,
+            next,
+            before,
+        } => {
+            applied.gestures = tree.reconcile_range(parent, &previous, &next, before)?;
+        }
         Mutation::Remove { parent, child } => {
             applied.gestures = tree.remove(parent, child)?;
         }
@@ -310,8 +372,12 @@ pub(super) fn apply(tree: &mut Tree, mutation: Mutation) -> Result<Applied, crat
             id,
             source,
             intrinsic,
+            required,
         } => {
             tree.set_image(id, &source, intrinsic)?;
+            if let Some(required) = required {
+                tree.set_image_mode(id, ContentMode::Fill, required)?;
+            }
         }
         Mutation::SetStyleSurface { id, surface } => tree.set_style_surface(id, surface)?,
         Mutation::TextRuns { id, spans } => tree.set_text_spans(id, spans)?,

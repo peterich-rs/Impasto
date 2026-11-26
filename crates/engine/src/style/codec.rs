@@ -244,6 +244,94 @@ pub fn declarations(name: &str, value: &Value) -> Result<Vec<Declaration>, Style
     }
 }
 
+/// Numeric wire selector for one compiler-generated inline style patch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScalarStyleOp(u8);
+
+const SCALAR_STYLES: &[(&str, &[Key])] = &[
+    ("opacity", &[Key::Opacity]),
+    ("translateX", &[Key::TranslateX]),
+    ("translateY", &[Key::TranslateY]),
+    ("scale", &[Key::ScaleX, Key::ScaleY]),
+    ("scaleX", &[Key::ScaleX]),
+    ("scaleY", &[Key::ScaleY]),
+    ("rotate", &[Key::Rotate]),
+    ("width", &[Key::Width]),
+    ("height", &[Key::Height]),
+    ("borderRadius", &[Key::BorderRadius]),
+    ("zIndex", &[Key::ZIndex]),
+    ("backgroundColor", &[Key::BackgroundColor]),
+    ("color", &[Key::Color]),
+    ("borderColor", &[Key::BorderColor]),
+];
+
+impl ScalarStyleOp {
+    /// Select a fast path for a known JSX style property.
+    pub fn parse(name: &str) -> Option<Self> {
+        let index = SCALAR_STYLES.iter().position(|(key, _)| *key == name)?;
+        Self::from_code(u8::try_from(index).ok()?)
+    }
+
+    /// Validate the decoded byte before using it as a selector.
+    pub fn from_code(code: u8) -> Option<Self> {
+        SCALAR_STYLES.get(usize::from(code)).map(|_| Self(code))
+    }
+
+    /// The byte written into an inline patch call.
+    pub const fn code(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(feature = "js")]
+    pub(crate) fn name(self) -> &'static str {
+        SCALAR_STYLES[usize::from(self.0)].0
+    }
+
+    #[cfg(feature = "js")]
+    pub(crate) fn keys(self) -> &'static [Key] {
+        SCALAR_STYLES[usize::from(self.0)].1
+    }
+
+    #[cfg(feature = "js")]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "packed color range and integrality are checked"
+    )]
+    pub(crate) fn number(self, value: f64) -> Result<Vec<Declaration>, StyleError> {
+        if self.0 >= 11 {
+            if !(0. ..=f64::from(u32::MAX)).contains(&value) || value.fract() != 0. {
+                return Err(invalid(self.name(), "expected a packed RGBA integer"));
+            }
+            return color_value(self.name(), PaintColor::Rgba((value as u32).to_be_bytes()));
+        }
+        let value = finite_f32(self.name(), value)?;
+        let points = Length::points(value);
+        set(match self.0 {
+            0 => Property::Opacity(value),
+            1 => Property::TranslateX(points),
+            2 => Property::TranslateY(points),
+            3 => return scale(value),
+            4 => Property::ScaleX(value),
+            5 => Property::ScaleY(value),
+            6 => Property::Rotate(value),
+            7 => Property::Width(SizeValue::Length(points)),
+            8 => Property::Height(SizeValue::Length(points)),
+            9 => Property::BorderRadius(points),
+            10 => Property::ZIndex(whole_i32(self.name(), value)?),
+            _ => return Err(unknown(self.name())),
+        })
+    }
+}
+
+fn scale(value: f32) -> Result<Vec<Declaration>, StyleError> {
+    let x = Property::ScaleX(value);
+    let y = Property::ScaleY(value);
+    x.validate()?;
+    y.validate()?;
+    Ok(vec![Declaration::set(x), Declaration::set(y)])
+}
+
 fn object_length(value: &Value) -> Result<Length, StyleError> {
     match value {
         Value::Number(value) => Ok(Length::points(finite_f32("length", *value)?)),
@@ -371,6 +459,7 @@ fn resets(name: &str) -> Result<Vec<Declaration>, StyleError> {
         "gap" => &[Key::RowGap, Key::ColumnGap],
         "flex" => &[Key::FlexGrow, Key::FlexShrink, Key::FlexBasis],
         "inset" => &[Key::Top, Key::Right, Key::Bottom, Key::Left],
+        "scale" => &[Key::ScaleX, Key::ScaleY],
         _ => return Ok(vec![Declaration::reset(key_of(name)?)]),
     };
     Ok(keys.iter().copied().map(Declaration::reset).collect())
@@ -398,6 +487,7 @@ fn number_value(name: &str, value: f32) -> Result<Vec<Declaration>, StyleError> 
         "opacity" => set(Property::Opacity(value)),
         "zIndex" => set(Property::ZIndex(whole_i32(name, value)?)),
         "rotate" => set(Property::Rotate(value)),
+        "scale" => scale(value),
         "scaleX" => set(Property::ScaleX(value)),
         "scaleY" => set(Property::ScaleY(value)),
         "aspectRatio" => set(Property::AspectRatio(value)),

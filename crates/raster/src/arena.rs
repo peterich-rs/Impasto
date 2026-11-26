@@ -1,5 +1,5 @@
 //! Frame uploads shared by every command buffer in a presentation.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -7,7 +7,7 @@ use std::sync::{
 
 use crate::{
     Status,
-    batch::{PAINT_EXTRA_BYTES, PaintExtra},
+    batch::{GpuMeshBuffer, MeshBuffer, PAINT_EXTRA_BYTES, PaintExtra},
     gpu::Gpu,
     pipelines::{EXTRA_BYTES, Layouts, ParamsUniform, ViewUniform},
 };
@@ -28,6 +28,7 @@ pub struct Address {
     offset: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct VertexSlice {
     buffer: wgpu::Buffer,
     start: u64,
@@ -35,6 +36,19 @@ pub struct VertexSlice {
 }
 
 impl VertexSlice {
+    pub fn whole(buffer: wgpu::Buffer) -> Self {
+        let end = buffer.size();
+        Self {
+            buffer,
+            start: 0,
+            end,
+        }
+    }
+
+    pub fn size(&self) -> u64 {
+        self.end - self.start
+    }
+
     pub fn slice(&self) -> wgpu::BufferSlice<'_> {
         self.buffer.slice(self.start..self.end)
     }
@@ -282,6 +296,9 @@ impl DynamicGroup {
 pub struct FrameArena {
     ring: FrameRing,
     vertices: Pool,
+    streamed_meshes: HashMap<u64, GpuMeshBuffer>,
+    previous_meshes: HashSet<u64>,
+    pub mesh_upload_bytes: u64,
     uniforms: Pool,
     stops: Pool,
     paint: Pool,
@@ -318,7 +335,13 @@ impl FrameArena {
 
         Self {
             ring: FrameRing::new(gpu),
-            vertices: Pool::new(256 * 1024, wgpu::BufferUsages::VERTEX),
+            vertices: Pool::new(
+                256 * 1024,
+                wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::INDEX,
+            ),
+            streamed_meshes: HashMap::new(),
+            previous_meshes: HashSet::new(),
+            mesh_upload_bytes: 0,
             uniforms: Pool::new(64 * 1024, wgpu::BufferUsages::UNIFORM),
             stops: Pool {
                 max_slab: STOPS_BYTES,
@@ -334,6 +357,10 @@ impl FrameArena {
     }
 
     pub fn reset(&mut self) {
+        self.previous_meshes.clear();
+        self.previous_meshes
+            .extend(self.streamed_meshes.drain().map(|(id, _)| id));
+        self.mesh_upload_bytes = 0;
         self.vertices.reset();
         let uniforms_changed = self.uniforms.reset();
         let paint_changed = self.paint.reset();
@@ -348,6 +375,8 @@ impl FrameArena {
     }
 
     pub fn trim(&mut self) {
+        self.streamed_meshes.clear();
+        self.previous_meshes.clear();
         for pool in [
             &mut self.vertices,
             &mut self.uniforms,
@@ -417,6 +446,40 @@ impl FrameArena {
             start,
             end: start + bytes.len() as u64,
         })
+    }
+
+    pub fn mesh(&mut self, gpu: &Gpu, buffer: &MeshBuffer) -> Result<GpuMeshBuffer, Status> {
+        if let Some(resident) = buffer.resident() {
+            return Ok(resident.clone());
+        }
+        let MeshBuffer::Streamed {
+            id,
+            vertices,
+            indices,
+            resident,
+        } = buffer
+        else {
+            return Err(Status::BadScene);
+        };
+        if let Some(upload) = self.streamed_meshes.get(id) {
+            return Ok(upload.clone());
+        }
+        // A picture replayed across frames benefits from persistent geometry.
+        let upload = if self.previous_meshes.contains(id) {
+            let upload = GpuMeshBuffer::upload(gpu, vertices, indices)?;
+            resident.set(upload.clone()).map_err(|_| Status::BadScene)?;
+            self.buffers_created += 2;
+            upload
+        } else {
+            let upload = GpuMeshBuffer {
+                vertices: self.vertices(gpu, vertices)?,
+                indices: self.vertices(gpu, indices)?,
+            };
+            self.streamed_meshes.insert(*id, upload.clone());
+            upload
+        };
+        self.mesh_upload_bytes += upload.vertices.size() + upload.indices.size();
+        Ok(upload)
     }
 
     pub fn uniform<T: bytemuck::Pod>(&mut self, gpu: &Gpu, value: &T) -> Result<Address, Status> {

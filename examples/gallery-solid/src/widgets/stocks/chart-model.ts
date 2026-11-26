@@ -241,13 +241,8 @@ function shading(ctx: CanvasRenderingContext2D, width: number, from: number, top
 
 /** Main plot only. The crosshair is an overlay and is not read here. */
 export function paintChart(ctx: CanvasRenderingContext2D, geo: ChartGeometry): void {
-  ctx.font = "10px Sans";
-  ctx.textBaseline = "middle";
-  ctx.textAlign = "right";
   for (const line of geo.grid) {
     stroke(ctx, colors.line, 0, line.y, geo.plot, line.y);
-    ctx.fillStyle = colors.faint;
-    ctx.fillText(line.label, geo.width, line.y, 49);
   }
   if (geo.shadeFrom !== null) {
     shading(ctx, geo.plot, geo.shadeFrom, geo.top, geo.bottom - geo.top);
@@ -321,7 +316,13 @@ export function paintChart(ctx: CanvasRenderingContext2D, geo: ChartGeometry): v
     first = end;
   }
   stroke(ctx, colors.line, 0, geo.volumeBottom, geo.plot, geo.volumeBottom);
+  ctx.font = "10px Sans";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "right";
   ctx.fillStyle = colors.faint;
+  for (const line of geo.grid) {
+    ctx.fillText(line.label, geo.width, line.y, 49);
+  }
   for (const label of geo.times) {
     ctx.textAlign = label.align;
     ctx.fillText(label.text, label.x, geo.height - 7, geo.plot / 3);

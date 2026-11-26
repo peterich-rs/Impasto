@@ -51,7 +51,7 @@ Pixel 9 Vulkan、Release、Split 拓扑的补测各采集一条 6 秒 Trace。UI
 
 虚拟列表合成帧占 97.2%。滚过分组边界后，Android 截图确认第 2 组吸顶标题铺满视口。材质页已在 Android Vulkan 和 macOS Metal 核对画面。上一版捕获还记录到慢速透明度的 `Hz30` 和惯性尾段的 `Hz60`。首轮配对中的第一组滚动 Trace 显示，P3 → 候选的 `surface_acquire` p95 由 0.40 ms 升至 5.65 ms，`encode` p95 由 1.14 ms 降至 1.02 ms。以上是应用帧节奏和 CPU 等待数据。
 
-同一台 Pixel 9 另用 `impasto://compositor-lab/transitions/{router,sheet,dialog}` 分别冷启动。每条深链打开和关闭一次图文页面或弹层。截图确认目标页面、全宽 Sheet 和居中 Dialog 均正常呈现。
+同一台 Pixel 9 另对路由 Push、全宽 Sheet 和居中 Dialog 各冷启动一次并开合一次（采样时的实验页已移除，现在在 Gallery 的详情页与下单面板上复测）。截图确认目标页面、全宽 Sheet 和居中 Dialog 均正常呈现。
 
 | 场景 | 合成帧 / UI 帧 | 快照烘焙次数 | 快照命中次数 |
 | --- | ---: | ---: | ---: |
@@ -99,7 +99,7 @@ Pixel 9、Android 17、Mali-G715 Vulkan、1080×2424、屏幕最高 120 Hz。使
 
 采样单位是 Perfetto 中 `compositor_frame` 的墙钟耗时。帧间隔取相邻合成帧的起点，包含 UI 接管和平台节奏转换的间隔。UI 帧计数取首尾合成帧之间的 `Impasto frame`。表中数据描述应用的 CPU 帧流水线，SurfaceFlinger 的实际呈现间隔、GPU 耗时与耗电需要各自的测量口径。
 
-用 `tools/android-frame-trace.sh OUTPUT dev.impasto.host.profile 6` 采集。启动应用时使用 `adb shell am start -S -W`，动作是 `android.intent.action.VIEW`，地址为 `impasto://compositor-lab/{scroll,transform,virtual-list,materials}`。共用场景按 `base-scroll-1.perfetto-trace`、`head-transform-1.perfetto-trace` 等方式命名，单次场景使用 `head-virtual-list.perfetto-trace` 和 `head-materials.perfetto-trace`。安装 Python `perfetto` 后用 `python3 tools/compositor-trace-summary.py <trace directory>` 生成汇总。
+用 `tools/android-frame-trace.sh OUTPUT dev.impasto.host.profile 6` 采集。采样时启动应用使用 `adb shell am start -S -W`，动作是 `android.intent.action.VIEW`，地址为当时实验页的深链；该页已移除，惯性滚动与虚拟列表场景改为在 Gallery 自选列表上手动拖动复测。共用场景按 `base-scroll-1.perfetto-trace`、`head-transform-1.perfetto-trace` 等方式命名，单次场景使用 `head-virtual-list.perfetto-trace` 和 `head-materials.perfetto-trace`。安装 Python `perfetto` 后用 `python3 tools/compositor-trace-summary.py <trace directory>` 生成汇总。
 
 本机保留了 14 条 Perfetto Trace、APK 指纹和汇总，位于 `/tmp/impasto-p4/final-gallery/`。Metal 原始样本位于 `/tmp/impasto-p4/metal-verified.json` 和 `/tmp/impasto-p4/metal-p3-scenarios.json`。
 

@@ -32,13 +32,17 @@ impl FrameClock {
         target_nanos: i64,
         interval_nanos: i64,
     ) {
-        let post = {
+        const TOUCH_VSYNC: FrameToken = FrameToken(0);
+        let (token, post) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            if state.pending != Some(token) {
+            let Some(pending) = state.pending else {
+                return;
+            };
+            if token != TOUCH_VSYNC && pending != token {
                 return;
             }
             state.pending = None;
-            state.post.clone()
+            (pending, state.post.clone())
         };
         let Some(post) = post else { return };
         let vsync_ms = frame_time_nanos as f64 / 1_000_000.0;

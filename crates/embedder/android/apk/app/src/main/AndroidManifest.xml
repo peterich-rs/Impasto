@@ -3,7 +3,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application
-        android:label="impasto counter"
+        android:label="${impastoAppLabel}"
         android:hasCode="true">
         <activity
             android:name="dev.impasto.runner.MainActivity"

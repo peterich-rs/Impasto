@@ -159,6 +159,36 @@ impl LayoutStore {
         Ok(())
     }
 
+    #[cfg(feature = "js")]
+    pub(super) fn reconcile_children(
+        &mut self,
+        parent: NodeId,
+        children: Vec<NodeId>,
+        removed: &[NodeId],
+    ) -> Result<()> {
+        for &child in &children {
+            let node = self.get_mut(child)?;
+            if node.parent != Some(parent) {
+                node.parent = Some(parent);
+                node.latest_layout = None;
+                node.queries = Queries::default();
+            }
+        }
+        for &child in removed {
+            let node = self.get_mut(child)?;
+            node.parent = None;
+            let containing = node.containing.take();
+            node.latest_layout = None;
+            self.pending.remove(&child);
+            if let Some(containing) = containing.filter(|&id| id != parent) {
+                self.invalidate(containing, parent, "structure");
+            }
+        }
+        self.get_mut(parent)?.children = children;
+        self.invalidate(parent, parent, "structure");
+        Ok(())
+    }
+
     pub(super) fn remove_child(&mut self, parent: NodeId, child: NodeId) -> Result<()> {
         self.get_mut(parent)?.children.retain(|&id| id != child);
         let removed = self.get_mut(child)?;

@@ -260,7 +260,7 @@ impl Runtime {
     }
 
     pub fn extension(&self) -> ExtensionContext<'_> {
-        ExtensionContext::new(&self.state.vm)
+        ExtensionContext::new(&self.state.vm, &self.state.modules)
     }
 
     pub fn finish_installation(&self) {
@@ -396,7 +396,7 @@ impl Runtime {
         name: &str,
     ) -> Result<ModuleTicket, JsError> {
         self.state.ensure_open()?;
-        if compiled.kind() != crate::compiler::bytecode::Kind::Module {
+        if compiled.kind() == crate::compiler::bytecode::Kind::Script {
             return Err(JsError::new(
                 ErrorKind::Configuration,
                 "expected compiled module",
@@ -405,19 +405,44 @@ impl Runtime {
         let id = self.ticket_id()?;
         let _budget = self.state.vm.budget("eval");
         let entry = TrustedBytecode::from_compiled(compiled);
+        let promise = self
+            .load_trusted(entry)
+            .map_err(|error| JsError::new(ErrorKind::Script, error.to_string()))?
+            .ok_or_else(|| {
+                JsError::new(ErrorKind::Script, "compiled module returned no promise")
+            })?;
         let saved = self.state.vm.with(|ctx| {
-            let promise = entry
-                .load(&ctx)
-                .map_err(|error| JsError::new(ErrorKind::Script, error.to_string()))?
-                .ok_or_else(|| {
-                    JsError::new(ErrorKind::Script, "compiled module returned no promise")
-                })?;
             let value = promise
                 .restore(&ctx)
                 .map_err(|error| self.state.script_error(&ctx, error))?;
             Ok(Persistent::save(&ctx, value.into_value()))
         })?;
         Ok(self.track_module(id, saved, name))
+    }
+
+    /// Execute trusted bytecode. Archive modules are declared only when imported.
+    pub fn load_trusted(
+        &self,
+        bytecode: TrustedBytecode<'_>,
+    ) -> Result<Option<Persistent<rquickjs::Promise<'static>>>, crate::compiler::BytecodeError>
+    {
+        use crate::compiler::BytecodeError;
+
+        let Some(archive) = bytecode.archive()? else {
+            return self.state.vm.with(|ctx| bytecode.load(&ctx));
+        };
+        let entry = self.state.modules.register_archive(archive)?;
+        self.state.vm.with(|ctx| {
+            let module = self
+                .state
+                .modules
+                .declare_archive(&ctx, &entry)
+                .ok_or_else(|| BytecodeError::Script(format!("missing archive entry {entry}")))?;
+            let (_, promise) = module.and_then(rquickjs::Module::eval).map_err(|error| {
+                BytecodeError::Script(self.state.script_error(&ctx, error).to_string())
+            })?;
+            Ok(Some(Persistent::save(&ctx, promise)))
+        })
     }
 
     fn ticket_id(&self) -> Result<u64, JsError> {

@@ -5,7 +5,6 @@ mod command;
 mod diagnostics;
 mod error;
 mod exec;
-mod gpu_view_gallery;
 mod host;
 mod images;
 mod ime;
@@ -40,7 +39,9 @@ pub use exec::{RtExec, settle_factory};
 pub use host::{
     DropWait, Link, Poster, console_log, start, start_async, start_async_with_exit, start_on,
 };
-pub use images::{DecodeTarget, ImageDecoder, ImageError, ImageHandle, ImageReady};
+pub use images::{
+    DecodeTarget, ImageDecoder, ImageError, ImageHandle, ImageReady, read_packaged_file,
+};
 pub use images::{ExternalFrame, ImportExternalFrame, pixel_count_ok, unpremultiply_rgba};
 #[cfg(target_os = "android")]
 pub use impasto::os::android::AndroidContext;
@@ -185,10 +186,14 @@ pub trait Vsync: Send + Sync {
 }
 
 /// Maps the UI and raster roles to physical queues.
+///
+/// `IMPASTO_THREAD_TOPOLOGY` selects `shared`, `split`, or `platform-ui`.
+/// An unset variable uses [`Self::Split`]: the UI queue and the raster queue
+/// each get their own thread. The platform main thread stays separate.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ThreadTopology {
-    #[default]
     SharedRender,
+    #[default]
     Split,
     PlatformUi,
 }
@@ -280,22 +285,6 @@ impl Boot {
             Ok(raster)
         });
         self
-    }
-
-    /// Installs the bundled Gallery producer for the GPU lab.
-    #[doc(hidden)]
-    pub fn with_gallery_gpu_view(self, enabled: bool) -> Self {
-        let requested = matches!(
-            engine::session::shared_read(&self.launch_url).as_deref(),
-            Some("impasto://gpu-lab" | "impasto://gpu-lab/invalid")
-        );
-        if (enabled || requested)
-            && let Ok(id) = raster::GpuViewId::new("gallery-demo")
-        {
-            self.with_gpu_view(id, gpu_view_gallery::GalleryGpuView::default())
-        } else {
-            self
-        }
     }
 
     /// Turns devtools on. The caller keeps the hub to register the module

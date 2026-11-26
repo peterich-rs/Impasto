@@ -3,6 +3,7 @@ export {
   createRouter,
   usePageFrame,
   type RouteDef,
+  type LazyRouteLoader,
   type RouteEntry,
   type RouteParams,
   type RoutePhase,

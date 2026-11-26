@@ -4,13 +4,15 @@
 //! not treat `scene`, `reactive`, or `@impasto/` as built-in modules. A host
 //! that wants those modules registers them.
 
-use std::collections::HashMap;
-use std::rc::Rc;
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use rquickjs::loader::{ImportAttributes, Loader, Resolver};
 use rquickjs::{Ctx, Module};
 
-use crate::runtime::{CatalogError, ModuleCatalog};
+use crate::{
+    compiler::BytecodeError,
+    runtime::{CatalogError, ModuleCatalog, quickjs::TrustedArchive},
+};
 
 /// Declares one native module on the JavaScript thread.
 pub trait NativeFactory {
@@ -24,6 +26,7 @@ pub trait NativeFactory {
 pub(crate) struct ModuleTable {
     catalog: ModuleCatalog,
     natives: HashMap<String, Box<dyn NativeFactory>>,
+    archive: RefCell<Option<TrustedArchive>>,
 }
 
 impl ModuleTable {
@@ -38,15 +41,96 @@ impl ModuleTable {
         for name in natives.keys() {
             catalog.check_available(name)?;
         }
-        Ok(Self { catalog, natives })
+        Ok(Self {
+            catalog,
+            natives,
+            archive: RefCell::default(),
+        })
     }
 
     pub(crate) fn contains(&self, name: &str) -> bool {
-        self.catalog.contains(name) || self.natives.contains_key(name)
+        self.catalog.contains(name)
+            || self.natives.contains_key(name)
+            || self
+                .archive
+                .borrow()
+                .as_ref()
+                .is_some_and(|archive| archive.module(name).is_some())
     }
 
     pub(crate) fn source(&self, name: &str) -> Option<&str> {
         self.catalog.sources.get(name).map(String::as_str)
+    }
+
+    pub(crate) fn register_archive(
+        &self,
+        archive: TrustedArchive,
+    ) -> Result<String, BytecodeError> {
+        if archive.names().any(|name| self.contains(name)) {
+            return Err(BytecodeError::Script(
+                "archive module is already registered".to_owned(),
+            ));
+        }
+        let entry = archive.entry.clone();
+        self.archive.replace(Some(archive));
+        Ok(entry)
+    }
+
+    pub(crate) fn declare_archive<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        name: &str,
+    ) -> Option<rquickjs::Result<Module<'js>>> {
+        self.archive
+            .borrow()
+            .as_ref()?
+            .module(name)
+            .map(|module| module.declare(ctx))
+    }
+
+    fn archive_contains(&self, name: &str) -> bool {
+        self.archive
+            .borrow()
+            .as_ref()
+            .is_some_and(|archive| archive.module(name).is_some())
+    }
+}
+
+pub(crate) struct ArchiveResolver<R>(pub(crate) Rc<ModuleTable>, pub(crate) R);
+
+impl<R: Resolver> Resolver for ArchiveResolver<R> {
+    fn resolve<'js>(
+        &mut self,
+        ctx: &Ctx<'js>,
+        base: &str,
+        name: &str,
+        attributes: Option<ImportAttributes<'js>>,
+    ) -> rquickjs::Result<String> {
+        if let Some(resolved) = normalize(base, name)
+            && self.0.archive_contains(&resolved)
+        {
+            return Ok(resolved);
+        }
+        if self.0.archive_contains(base) && name.starts_with(['.', '/']) {
+            return Err(unresolved(ctx, name));
+        }
+        self.1.resolve(ctx, base, name, attributes)
+    }
+}
+
+pub(crate) struct ArchiveLoader<L>(pub(crate) Rc<ModuleTable>, pub(crate) L);
+
+impl<L: Loader> Loader for ArchiveLoader<L> {
+    fn load<'js>(
+        &mut self,
+        ctx: &Ctx<'js>,
+        name: &str,
+        attributes: Option<ImportAttributes<'js>>,
+    ) -> rquickjs::Result<Module<'js>> {
+        if let Some(module) = self.0.declare_archive(ctx, name) {
+            return module;
+        }
+        self.1.load(ctx, name, attributes)
     }
 }
 
@@ -80,6 +164,9 @@ impl Loader for MemoryLoader {
     ) -> rquickjs::Result<Module<'js, rquickjs::module::Declared>> {
         if let Some(source) = self.0.source(name) {
             return Module::declare(ctx.clone(), name, source);
+        }
+        if let Some(module) = self.0.declare_archive(ctx, name) {
+            return module;
         }
         declare_native(&self.0, ctx, name)
     }

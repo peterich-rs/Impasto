@@ -11,7 +11,7 @@ use super::{
     FrameSubmission, RasterCompletion, RasterHost, UiHost, end_frame, lock, ms_to_ns,
     next_frame_number, raster_frame, refresh_wake,
 };
-use crate::command::{Command, FrameToken};
+use crate::command::{Command, FrameToken, SurfaceId};
 use crate::diagnostics::telemetry::{ScheduleTiming, mono_ns_at};
 use crate::error::BootError;
 use crate::queue::Inbox;
@@ -35,6 +35,8 @@ struct Active {
     plan: Arc<Plan>,
     latest: Option<Arc<CompositorSnapshot>>,
     last_vsync: Option<FrameTime>,
+    surface: Option<SurfaceId>,
+    retry_at: Option<i64>,
     requested_rate: FrameRateHint,
     candidate_rate: FrameRateHint,
     rate_frames: u8,
@@ -104,13 +106,15 @@ impl CompositorMode {
         FrameToken(RASTER_TOKEN | (self.next.fetch_add(1, Ordering::Relaxed) & (RASTER_TOKEN - 1)))
     }
 
-    fn begin(&self, plan: Plan) -> FrameToken {
+    fn begin(&self, plan: Plan, surface: Option<SurfaceId>) -> FrameToken {
         let token = self.next_token();
         *lock(&self.active) = Some(Active {
             generation: token.0,
             plan: Arc::new(plan),
             latest: None,
             last_vsync: None,
+            surface,
+            retry_at: None,
             requested_rate: FrameRateHint::Display,
             candidate_rate: FrameRateHint::Display,
             rate_frames: 0,
@@ -237,6 +241,20 @@ impl CompositorMode {
             time.interval_ms > 0.0 && posted_at.elapsed().as_secs_f64() * 1000.0 > time.interval_ms;
         span.record("missed_vsync", missed);
         let output = completion.output;
+        let mut rate = FrameRateHint::Display;
+        if let Some(run) = lock(&self.active).as_mut()
+            && run.generation == generation
+        {
+            run.surface = completion.surface;
+            run.retry_at = completion.retry_at;
+            if output.shown {
+                run.last_vsync = Some(time);
+                rate = run.frame_rate(time.target_ms);
+                if !snapshot.samples.is_empty() {
+                    run.latest = Some(Arc::new(snapshot));
+                }
+            }
+        }
         if output.stop {
             self.cancel_callback(token);
             inbox.complete(Box::new(|runtime| {
@@ -244,16 +262,6 @@ impl CompositorMode {
                 Ok(end_frame(runtime, false, true))
             }));
         } else if output.shown {
-            let mut rate = FrameRateHint::Display;
-            if let Some(run) = lock(&self.active).as_mut()
-                && run.generation == generation
-            {
-                run.last_vsync = Some(time);
-                rate = run.frame_rate(time.target_ms);
-                if !snapshot.samples.is_empty() {
-                    run.latest = Some(Arc::new(snapshot));
-                }
-            }
             if plan
                 .tree
                 .tracks
@@ -266,7 +274,13 @@ impl CompositorMode {
                 self.handoff(inbox, token, generation, Some(time));
                 return Ok(());
             }
-            if let Some(next) = self.continue_callback(token)
+            // Serialize the platform request with UI cancellation. The active
+            // lock is never held while Raster prepares, submits, or presents.
+            let active = lock(&self.active);
+            if active
+                .as_ref()
+                .is_some_and(|run| run.generation == generation)
+                && let Some(next) = self.continue_callback(token)
                 && let Some(vsync) = vsync.upgrade()
             {
                 vsync.request_frame_with_rate(next, rate);
@@ -378,51 +392,43 @@ pub(super) fn activate(runtime: &mut UiHost, completion: &RasterCompletion) -> b
         runtime.scheduler.cancel();
         runtime.vsync.cancel();
     }
-    let token = runtime.compositor_mode.begin(Plan {
-        tree,
-        deadline_ms,
-        revision: submission.revision,
-        scale: submission.scale,
-        topology: runtime.topology,
-        telemetry: runtime.telemetry.clone(),
-        hub: runtime.hub.clone(),
-    });
+    let token = runtime.compositor_mode.begin(
+        Plan {
+            tree,
+            deadline_ms,
+            revision: submission.revision,
+            scale: submission.scale,
+            topology: runtime.topology,
+            telemetry: runtime.telemetry.clone(),
+            hub: runtime.hub.clone(),
+        },
+        completion.surface,
+    );
     runtime.compositor_generation = Some(token.0);
     refresh_wake(runtime);
     runtime.vsync.request_frame(token);
     true
 }
 
-/// Cancel callbacks and synchronize the visible sample before UI touches the source tree.
-pub(super) fn stop(
-    runtime: &mut UiHost,
-    announced: Option<Arc<CompositorSnapshot>>,
-) -> Result<bool, BootError> {
+/// Cancel callbacks and commit the latest completed sample without waiting for Raster.
+pub(super) fn stop(runtime: &mut UiHost, announced: Option<Arc<CompositorSnapshot>>) -> bool {
     let Some(generation) = runtime.compositor_generation.take() else {
-        return Ok(false);
+        return false;
     };
-    let mode = Arc::clone(&runtime.compositor_mode);
-    mode.cancel();
-    let (active, surface, retry_at) = runtime.graphics.with(move |graphics| {
-        let active = lock(&mode.active)
-            .take()
-            .filter(|active| active.generation == generation);
-        if active
-            .as_ref()
-            .is_some_and(|active| !active.plan.tree.tracks.is_empty())
-        {
-            // The last sampled layers are private to Raster. The next submit reconciles
-            // the installed tree even when a rounded property did not mark UI dirty.
-            graphics.installed = None;
-        }
-        (active, graphics.surfaces.id(), graphics.frame_retry_at)
-    })?;
+    runtime.compositor_mode.cancel();
+    let active = lock(&runtime.compositor_mode.active)
+        .take()
+        .filter(|active| active.generation == generation);
     runtime.vsync.cancel();
-    runtime.active_surface = surface;
-    runtime.present_retry_at = retry_at;
     let latest = active.and_then(|active| {
+        runtime.active_surface = active.surface;
+        runtime.present_retry_at = active.retry_at;
         if let Some(last_vsync) = active.last_vsync {
             runtime.last_vsync = Some(last_vsync);
+        }
+        if !active.plan.tree.tracks.is_empty() {
+            // The raster queue invalidates its sampled tree before the next UI submission.
+            runtime.graphics.post(|graphics| graphics.installed = None);
         }
         active.latest
     });
@@ -436,7 +442,7 @@ pub(super) fn stop(
     {
         session.commit_compositor_state(&snapshot);
     }
-    Ok(true)
+    true
 }
 
 #[cfg(test)]
@@ -462,7 +468,7 @@ mod tests {
     #[test]
     fn stale_and_cancelled_callbacks_cannot_rearm_raster() {
         let mode = CompositorMode::default();
-        let first = mode.begin(plan());
+        let first = mode.begin(plan(), None);
         assert!(CompositorMode::is_raster_token(first));
         assert!(mode.expects(first));
         let second = mode.continue_callback(first).expect("next raster callback");
@@ -472,7 +478,7 @@ mod tests {
         assert!(!mode.expects(second));
         assert!(mode.continue_callback(second).is_none());
 
-        let resumed = mode.begin(plan());
+        let resumed = mode.begin(plan(), None);
         assert_ne!(resumed, second);
         assert!(!mode.cancel_callback(second));
         assert!(mode.expects(resumed));

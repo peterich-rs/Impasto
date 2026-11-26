@@ -368,7 +368,19 @@ impl PipelineCache {
             }
             if format == wgpu::TextureFormat::Rgba8UnormSrgb {
                 let samples = if gpu.caps.msaa4_srgb { 4 } else { 1 };
-                keys.push((Target { format, samples }, K::Mesh, BlendKey::SrcOver));
+                let target = Target { format, samples };
+                keys.extend(
+                    [
+                        K::Mesh,
+                        K::MeshStencil,
+                        K::StencilNonZero,
+                        K::StencilEvenOdd,
+                        K::StencilCover,
+                        K::StencilWrite,
+                    ]
+                    .into_iter()
+                    .map(|kind| (target, kind, BlendKey::SrcOver)),
+                );
             }
         }
         keys.retain(|key| !self.targets.contains_key(key));

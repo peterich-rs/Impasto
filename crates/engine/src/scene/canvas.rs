@@ -141,6 +141,13 @@ pub enum CanvasOp {
         path: CanvasPath,
         paint: CanvasPaint,
     },
+    /// Solid source-over rectangle in canvas space, optionally with circular corners.
+    SolidRect {
+        bounds: [f32; 4],
+        radius: f32,
+        color: [u8; 4],
+        alpha: u8,
+    },
     Text(CanvasTextOp),
     Image(CanvasImageOp),
     /// Punch a hole. Ignores fill, alpha, and the blend mode.

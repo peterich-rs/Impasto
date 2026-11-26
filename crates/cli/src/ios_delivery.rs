@@ -13,7 +13,8 @@ use super::{
 };
 use crate::{
     app::App,
-    build::{BuildOptions, copy_tree},
+    build::{BuildOptions, bundle_for_host, copy_tree},
+    plugins::{self, NativeBuild},
     toolchain,
 };
 
@@ -200,6 +201,17 @@ impl FrameworkSources {
             &swift,
             &["App.swift", "LaunchScreen.storyboard"],
         )?;
+        fs::write(
+            swift.join("ImpastoRustPlugins.swift"),
+            r#"
+@_silgen_name("impasto_install_app_plugins")
+private func installAppPlugins() -> Bool
+
+public enum ImpastoRustPlugins {
+    public static func install() -> Bool { installAppPlugins() }
+}
+"#,
+        )?;
         let header = directory.join("impasto_ios.h");
         fs::copy(host.join("include/impasto_ios.h"), &header)?;
         let privacy = directory.join("PrivacyInfo.xcprivacy");
@@ -221,27 +233,40 @@ impl FrameworkSources {
 pub(crate) fn xcframework(app: &App, options: &BuildOptions) -> Result<PathBuf> {
     require_platform(app)?;
     let framework = toolchain::framework()?;
-    let rust_target_dir = app.root.join("build/ios/target");
+    let rust_target_dir = toolchain::target_dir(&app.root.join("build/ios/target"))?;
     let output = app.root.join("build/ios/sdk");
     let _lock = lock_directory(&output)?;
     let staging = unique_directory(&output)?;
-    let sources = FrameworkSources::stage(&framework, &staging.join("sources"))?;
-    let device = build_framework(
+    let mut native = plugins::prepare(app, "ios", options.verbose)?;
+    let app_bundle = bundle_for_host(app, options, "ios", &staging.join("Bundle"), &mut native)?;
+    crate::build::stage_assets(
+        app,
         &framework,
+        &staging.join("AppResources"),
+        &app_bundle,
+        "ios",
+        options.trace,
+    )?;
+    let temporary = tempfile::tempdir_in(&staging)?;
+    let sources = FrameworkSources::stage(&framework, &temporary.path().join("sources"))?;
+    let _archive_lock = lock_directory(&rust_target_dir.join(".impasto-ios"))?;
+    let (device, mut flags) = build_framework(
+        &native,
         &sources,
         &rust_target_dir,
-        &staging.join("device"),
+        &temporary.path().join("device"),
         &[DEVICE],
         options,
     )?;
-    let simulator = build_framework(
-        &framework,
+    let (simulator, simulator_flags) = build_framework(
+        &native,
         &sources,
         &rust_target_dir,
-        &staging.join("simulator"),
+        &temporary.path().join("simulator"),
         &[SIM_ARM, SIM_INTEL],
         options,
     )?;
+    flags.extend(simulator_flags);
     let result = staging.join("ImpastoHost.xcframework");
     let mut command = Command::new("xcodebuild");
     command
@@ -254,17 +279,18 @@ pub(crate) fn xcframework(app: &App, options: &BuildOptions) -> Result<PathBuf> 
         .arg(&result);
     toolchain::run(command, "组装 ImpastoHost.xcframework")?;
     verify_xcframework(&result)?;
+    write_integration(app, &staging, &native, &flags)?;
     Ok(result)
 }
 
 fn build_framework(
-    framework: &Path,
+    native: &NativeBuild,
     sources: &FrameworkSources,
     rust_target_dir: &Path,
     output: &Path,
     slices: &[Slice],
     options: &BuildOptions,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, std::collections::BTreeSet<String>)> {
     let bundle = output.join("ImpastoHost.framework");
     let modules = bundle.join("Modules/ImpastoHost.swiftmodule");
     let headers = bundle.join("Headers");
@@ -291,15 +317,16 @@ fn build_framework(
         ),
     )?;
     let mut binaries = Vec::new();
+    let mut flags = std::collections::BTreeSet::new();
     for slice in slices {
         let linker = build_rust(
-            framework,
+            &native.workspace,
             rust_target_dir,
             slice.rust,
             options,
-            "embedder-ios",
+            &native.package,
             "15.0",
-            "",
+            native.native_exports(),
         )?;
         let platform = if slice.simulator {
             "iphonesimulator"
@@ -308,8 +335,9 @@ fn build_framework(
         };
         let library = rust_target_dir
             .join(slice.rust)
-            .join("release/libembedder_ios.a");
+            .join("release/libimpasto_app.a");
         let binary = output.join(slice.swift_module);
+        let swift_archive = output.join(format!("{}.a", slice.swift_module));
         let mut command = Command::new("xcrun");
         command
             .args([
@@ -325,6 +353,7 @@ fn build_framework(
                 "-O",
                 "-emit-module",
                 "-emit-library",
+                "-static",
                 "-enable-library-evolution",
             ])
             .args(["-module-name", FRAMEWORK, "-emit-module-interface-path"])
@@ -333,18 +362,18 @@ fn build_framework(
             .arg(modules.join(format!("{}.swiftmodule", slice.swift_module)))
             .arg("-internal-import-bridging-header")
             .arg(&header)
-            .args([
-                "-Xlinker",
-                "-install_name",
-                "-Xlinker",
-                "@rpath/ImpastoHost.framework/ImpastoHost",
-            ])
             .args(&sources.swift)
-            .arg(library)
-            .args(linker.split_ascii_whitespace())
             .arg("-o")
-            .arg(&binary);
+            .arg(&swift_archive);
         toolchain::run(command, "链接 Swift iOS SDK")?;
+        let mut combine = Command::new("xcrun");
+        combine
+            .args(["libtool", "-static", "-o"])
+            .arg(&binary)
+            .arg(&swift_archive)
+            .arg(&library);
+        toolchain::run(combine, "合并 Swift 与 Rust 静态库")?;
+        flags.insert(linker);
         binaries.push(binary);
     }
     let binary = bundle.join(FRAMEWORK);
@@ -359,7 +388,133 @@ fn build_framework(
             .arg(&binary);
         toolchain::run(command, "合并 iOS 模拟器架构")?;
     }
-    Ok(bundle)
+    Ok((bundle, flags))
+}
+
+fn write_integration(
+    app: &App,
+    output: &Path,
+    native: &NativeBuild,
+    flags: &std::collections::BTreeSet<String>,
+) -> Result<()> {
+    use std::fmt::Write as _;
+
+    let host = output.join("crates/embedder/ios/ImpastoHost");
+    fs::create_dir_all(&host)?;
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        "../../../../ImpastoHost.xcframework",
+        host.join("ImpastoHost.xcframework"),
+    )?;
+    #[cfg(not(unix))]
+    copy_tree(
+        &output.join("ImpastoHost.xcframework"),
+        &host.join("ImpastoHost.xcframework"),
+        &[],
+    )?;
+    fs::write(
+        host.join("Package.swift"),
+        r#"// swift-tools-version: 5.9
+import PackageDescription
+
+let package = Package(
+    name: "ImpastoHost",
+    platforms: [.iOS(.v15)],
+    products: [.library(name: "ImpastoHost", targets: ["ImpastoHost"])],
+    targets: [.binaryTarget(name: "ImpastoHost", path: "ImpastoHost.xcframework")]
+)
+"#,
+    )?;
+    let mut packages =
+        ".package(name: \"ImpastoHost\", path: \"crates/embedder/ios/ImpastoHost\"),".to_owned();
+    let mut products = ".product(name: \"ImpastoHost\", package: \"ImpastoHost\"),".to_owned();
+    let mut source = String::from("@_exported import ImpastoHost\n");
+    let mut calls = String::new();
+    for project in &native.inputs().projects {
+        let relative = format!("NativePackages/{}", project.package);
+        copy_tree(
+            &project.path,
+            &output.join(&relative),
+            &[".build", ".swiftpm", ".git"],
+        )?;
+        writeln!(
+            packages,
+            ".package(name: {:?}, path: {relative:?}),",
+            project.package
+        )?;
+        writeln!(
+            products,
+            ".product(name: {name:?}, package: {name:?}),",
+            name = project.package
+        )?;
+        writeln!(source, "import {}", project.module)?;
+        let class = project
+            .plugin_class
+            .as_deref()
+            .context("缺少 Swift 插件注册类")?;
+        writeln!(
+            calls,
+            "        {}.{class}.register(with: host)",
+            project.module
+        )?;
+    }
+    let mut settings = std::collections::BTreeSet::new();
+    for linker in flags {
+        let mut arguments = linker.split_ascii_whitespace();
+        while let Some(argument) = arguments.next() {
+            if argument == "-framework"
+                && let Some(name) = arguments.next()
+            {
+                settings.insert(format!(".linkedFramework({name:?})"));
+            } else if let Some(name) = argument.strip_prefix("-l") {
+                settings.insert(format!(".linkedLibrary({name:?})"));
+            }
+        }
+    }
+    let settings = settings.into_iter().collect::<Vec<_>>().join(", ");
+    fs::write(
+        output.join("Package.swift"),
+        format!(
+            r#"// swift-tools-version: 5.9
+import PackageDescription
+let package = Package(
+    name: "ImpastoGeneratedPlugins",
+    platforms: [.iOS(.v15)],
+    products: [.library(name: "ImpastoGeneratedPlugins", targets: ["ImpastoGeneratedPlugins"])],
+    dependencies: [{packages}],
+    targets: [.target(name: "ImpastoGeneratedPlugins", dependencies: [{products}], linkerSettings: [{settings}])]
+)
+"#
+        ),
+    )?;
+    writeln!(
+        source,
+        r#"
+@MainActor
+public enum GeneratedPluginRegistrant {{
+    public static func prepare() -> Bool {{ ImpastoRustPlugins.install() }}
+    public static func register(with host: ImpastoHost) {{
+{calls}    }}
+}}
+"#
+    )?;
+    let source_path = output.join("Sources/ImpastoGeneratedPlugins");
+    fs::create_dir_all(&source_path)?;
+    fs::write(source_path.join("GeneratedPluginRegistrant.swift"), source)?;
+    fs::write(
+        output.join("integration.json"),
+        serde_json::to_vec_pretty(&json!({
+            "resources": "AppResources",
+            "package": "Package.swift",
+            "host": "ImpastoHost.xcframework",
+            "nativeLinkFlags": flags,
+            "impastoRoot": ".",
+            "infoPlist": app.ios.usage_descriptions.iter()
+                .filter(|(key, _)| native.inputs().usage_description_keys.contains(*key))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        }))?,
+    )?;
+    Ok(())
 }
 
 fn verify_xcframework(framework: &Path) -> Result<()> {

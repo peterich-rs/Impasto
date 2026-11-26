@@ -8,7 +8,7 @@ import {
   type NodeHandle,
   type ViewStyle,
 } from "@impasto/solid-renderer";
-import { eventsOf } from "./element.tsx";
+import { bindViewEvents } from "./element.tsx";
 import { bindFocusRing } from "./focus.ts";
 import { bindPressable } from "./pressable.ts";
 import type { ButtonProps } from "./props.ts";
@@ -91,10 +91,10 @@ export function Button(props: ButtonProps): NodeHandle {
   });
   return (
     <HostView
-      {...eventsOf(props)}
       ref={(handle) => {
         if (handle === null) return;
         node = handle;
+        bindViewEvents(handle, props, press);
         bindStyle(handle, {
           get defaults(): ViewStyle {
             return {
@@ -128,13 +128,6 @@ export function Button(props: ButtonProps): NodeHandle {
         bindNodeRef(handle, () => props.ref);
         writeSemantics();
       }}
-      onPress={press.onPress}
-      onRelease={press.onRelease}
-      onClick={press.onClick}
-      onFocus={press.onFocus}
-      onBlur={press.onBlur}
-      onKey={press.onKey}
-      onText={press.onText}
     >
       {props.icon}
       <Text

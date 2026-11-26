@@ -19,13 +19,13 @@ use engine::scene::{
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::batch::{
-    self, Brush, GpuMeshBuffer, ImageInstance, Mesh, PackedGradient, RECT_FILL, RECT_FILL_STROKE,
-    RECT_GRADIENT, RECT_SHADOW, RECT_STROKE, RectInstance, StencilFill, image_slices,
-    lyon_fill_rule, pack_canvas_gradient, pack_gradient, tessellation_path,
+    self, Brush, GpuMeshBuffer, ImageInstance, Mesh, MeshBuffer, PackedGradient, RECT_FILL,
+    RECT_FILL_STROKE, RECT_GRADIENT, RECT_SHADOW, RECT_STROKE, RectInstance, StencilFill,
+    image_slices, lyon_fill_rule, pack_canvas_gradient, pack_gradient, tessellation_path,
 };
 use crate::color::linear_premultiplied;
 use crate::gpu::Gpu;
-use crate::pipelines::{self, BlendKey};
+use crate::pipelines::BlendKey;
 use crate::status::Status;
 use crate::textures::Load;
 
@@ -365,7 +365,7 @@ pub struct CompiledPicture {
     pub scale: f32,
     pub device: u64,
     pub bounds: PictureBounds,
-    pub mesh_buffer: Arc<OnceLock<GpuMeshBuffer>>,
+    pub mesh_buffer: Arc<OnceLock<MeshBuffer>>,
     pub reads_root: bool,
     pub has_resident_candidate: bool,
     pub has_glyphs: bool,
@@ -428,6 +428,7 @@ pub struct CompileContext<'a, 'store, 'pixels> {
     pub resolve: &'a mut dyn FnMut(&str) -> Option<crate::ImagePixels<'pixels>>,
     pub textures: &'a mut crate::textures::TextureTransaction<'store>,
     pub point_scale: f32,
+    pub stream_mesh: bool,
 }
 
 /// Compiles one picture.
@@ -439,7 +440,7 @@ pub fn compile(
     let prepared = prepare(picture, context.point_scale, pool, &mut |source| {
         context.textures.load(context.gpu, source, context.resolve)
     })?;
-    prepared.install(context.gpu, context.device_generation)
+    prepared.install(context.gpu, context.device_generation, context.stream_mesh)
 }
 
 type Tessellation = lyon_tessellation::VertexBuffers<[f32; 3], u32>;
@@ -452,31 +453,34 @@ pub struct PreparedPicture {
 }
 
 impl PreparedPicture {
-    pub fn install(mut self, gpu: &Gpu, device: u64) -> Result<CompiledPicture, Status> {
+    pub fn install(
+        mut self,
+        gpu: &Gpu,
+        device: u64,
+        stream_mesh: bool,
+    ) -> Result<CompiledPicture, Status> {
+        self.compiled.device = device;
+        self.compiled.resident_id = NEXT_COMPILED_PICTURE.fetch_add(1, Ordering::Relaxed);
         if !self.indices.is_empty() {
-            let mesh = gpu.validation(|| {
-                Ok(GpuMeshBuffer {
-                    vertices: pipelines::buffer_from(
-                        gpu,
-                        "picture mesh vertices",
-                        bytemuck::cast_slice(&self.vertices),
-                        wgpu::BufferUsages::VERTEX,
-                    )?,
-                    indices: pipelines::buffer_from(
-                        gpu,
-                        "picture mesh indices",
-                        bytemuck::cast_slice(&self.indices),
-                        wgpu::BufferUsages::INDEX,
-                    )?,
-                })
-            })?;
+            use crate::arena::FrameArena;
+            let mesh = if stream_mesh
+                && self.vertices.len() <= FrameArena::vertex_limit::<[f32; 3]>(gpu)
+                && self.indices.len() <= FrameArena::vertex_limit::<u32>(gpu)
+            {
+                MeshBuffer::Streamed {
+                    id: self.compiled.resident_id,
+                    vertices: self.vertices.into_boxed_slice(),
+                    indices: self.indices.into_boxed_slice(),
+                    resident: OnceLock::new(),
+                }
+            } else {
+                MeshBuffer::Resident(GpuMeshBuffer::upload(gpu, &self.vertices, &self.indices)?)
+            };
             self.compiled
                 .mesh_buffer
                 .set(mesh)
                 .map_err(|_| Status::BadScene)?;
         }
-        self.compiled.device = device;
-        self.compiled.resident_id = NEXT_COMPILED_PICTURE.fetch_add(1, Ordering::Relaxed);
         Ok(self.compiled)
     }
 }
@@ -539,7 +543,11 @@ pub fn prepare(
             has_shader_effect |= matches!(draw, Draw::ShaderEffect { .. });
             supports_partial &= matches!(
                 draw,
-                Draw::Rects(_) | Draw::Images { .. } | Draw::Glyphs(_) | Draw::Fill(_)
+                Draw::Rects(_)
+                    | Draw::Images { .. }
+                    | Draw::Glyphs(_)
+                    | Draw::Fill(_)
+                    | Draw::Mesh(_)
             ) && draw.source_over();
             paths += usize::from(matches!(draw, Draw::Mesh(_)));
             cache_safe &= matches!(
@@ -686,7 +694,7 @@ struct Compiler<'a> {
     images: Vec<(Arc<str>, bool)>,
     waiting: Vec<Arc<str>>,
     groups: Vec<Group>,
-    meshes: Arc<OnceLock<GpuMeshBuffer>>,
+    meshes: Arc<OnceLock<MeshBuffer>>,
     vertices: Vec<[f32; 3]>,
     indices: Vec<u32>,
 }
@@ -1433,6 +1441,21 @@ impl Compiler<'_> {
                     self.pop();
                 }
             }
+            CanvasOp::SolidRect {
+                bounds,
+                radius,
+                color,
+                alpha,
+            } => {
+                let [x, y, w, h] = *bounds;
+                if positive_box(x, y, w, h)
+                    && let Some(color) = linear_premultiplied(*color, *alpha)
+                {
+                    let mut instance = solid_rect(*bounds, color);
+                    instance.radius = radius.clamp(0.0, w.min(h) * 0.5);
+                    self.push_rects([instance], None, BlendKey::SrcOver);
+                }
+            }
             CanvasOp::Text(text) => {
                 if let Some(shaped) = &text.shaped {
                     let Some(paint) = canvas_brush(&text.paint.brush, text.paint.alpha, 1.0) else {
@@ -1448,8 +1471,12 @@ impl Compiler<'_> {
                         text.anchor_x * (1.0 - text.compress),
                         0.0,
                     ];
-                    state.transform = compose(state.transform, compose(text.ctm, squeeze));
-                    self.stack.push(state);
+                    let transform = compose(state.transform, compose(text.ctm, squeeze));
+                    let transformed = state.transform != transform;
+                    if transformed {
+                        state.transform = transform;
+                        self.stack.push(state);
+                    }
                     let mut glyphs = Vec::new();
                     for run in &shaped.runs {
                         append_glyphs(&mut glyphs, run, text.x, text.y, &paint);
@@ -1457,7 +1484,9 @@ impl Compiler<'_> {
                     if !glyphs.is_empty() {
                         self.push_draw(Draw::Glyphs(glyphs));
                     }
-                    self.pop();
+                    if transformed {
+                        self.pop();
+                    }
                     if isolated {
                         self.pop();
                     }

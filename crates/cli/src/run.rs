@@ -312,6 +312,8 @@ fn launch_macos(
     }
     if let Some(update) = update {
         command.env("IMPASTO_SOURCE_MAILBOX", update);
+        command.env("IMPASTO_DEVTOOLS_PROJECT", &app.root);
+        command.env("IMPASTO_DEVTOOLS_FRAMEWORK", toolchain::framework()?);
     }
     Ok(command.spawn()?)
 }
@@ -501,6 +503,7 @@ pub(crate) fn files(app: &App) -> Result<Snapshot> {
     for name in [
         "src",
         "assets",
+        "locales",
         "app.toml",
         "package.json",
         "pnpm-lock.yaml",

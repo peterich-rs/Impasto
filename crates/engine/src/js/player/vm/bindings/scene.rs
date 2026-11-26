@@ -65,6 +65,7 @@ pub(super) const NAMES: &[&str] = &[
     "setRecognizers",
     "setScrollPhysics",
     "registerFont",
+    "registerFontAsset",
     "registerShaderProgram",
     "setShaderEffect",
     "animateShaderUniform",
@@ -468,6 +469,32 @@ pub(super) fn call<'js>(
             require_args(ctx, args, 2, "registerFont(family, bytes)")?;
             let family = text_arg(ctx, args, 0)?;
             let bytes = read_bytes(ctx, &value(ctx, args, 1))?.unwrap_or_default();
+            inner
+                .fonts
+                .borrow_mut()
+                .enqueue(family, bytes.into())
+                .map_err(|()| error())?;
+        }
+        "registerFontAsset" => {
+            require_args(ctx, args, 2, "registerFontAsset(family, asset_uri)")?;
+            let family = text_arg(ctx, args, 0)?;
+            let source = text_arg(ctx, args, 1)?;
+            let relative = source
+                .strip_prefix("asset:")
+                .ok_or_else(|| type_error(ctx, "font requires a packaged asset URI"))?;
+            let relative = crate::session::document_relative(relative)
+                .map_err(|message| type_error(ctx, &message))?;
+            if !(relative.ends_with(".ttf") || relative.ends_with(".otf")) {
+                return Err(type_error(ctx, "expected a TTF or OTF asset"));
+            }
+            let read = inner
+                .config
+                .asset_reader
+                .as_ref()
+                .ok_or_else(|| type_error(ctx, "the host has no packaged asset reader"))?;
+            let bytes = read(&relative, crate::text::MAX_APP_FONT_BYTES).map_err(|message| {
+                type_error(ctx, &format!("could not read font {source}: {message}"))
+            })?;
             inner
                 .fonts
                 .borrow_mut()

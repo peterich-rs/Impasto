@@ -49,6 +49,19 @@ pub fn compile_with_native_exports(
         .map_err(map_bytecode)
 }
 
+/// Compile an application entry and its lazy modules into one IQJS archive.
+pub fn compile_archive(
+    entry: &str,
+    sources: std::collections::BTreeMap<String, String>,
+    registry: ModuleRegistry,
+    modules: &[(&str, &[&str])],
+) -> Result<CompiledBytecode, Error> {
+    let catalog = ModuleCatalog::new(registry).map_err(|error| Error::Script(error.to_string()))?;
+    let mut extensions = player::compile_declarations().to_vec();
+    extensions.extend_from_slice(modules);
+    compiler::compile_archive(entry, sources, catalog, &extensions).map_err(map_bytecode)
+}
+
 pub(crate) fn map_bytecode(error: BytecodeError) -> Error {
     match error {
         BytecodeError::Runtime => Error::Runtime,

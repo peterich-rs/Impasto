@@ -2,6 +2,9 @@
 
 use rquickjs::loader::{Loader, Resolver};
 use rquickjs::{Coerced, Ctx, FromJs, Value};
+use std::rc::Rc;
+
+use crate::runtime::modules::{ArchiveLoader, ArchiveResolver, ModuleTable};
 
 use super::vm::{Budget, JsDiagnostic, Saved, Vm};
 
@@ -11,11 +14,12 @@ use super::vm::{Budget, JsDiagnostic, Saved, Vm};
 #[derive(Clone, Copy)]
 pub struct ExtensionContext<'a> {
     vm: &'a Vm,
+    modules: &'a Rc<ModuleTable>,
 }
 
 impl<'a> ExtensionContext<'a> {
-    pub(crate) fn new(vm: &'a Vm) -> Self {
-        Self { vm }
+    pub(crate) fn new(vm: &'a Vm, modules: &'a Rc<ModuleTable>) -> Self {
+        Self { vm, modules }
     }
 
     pub fn is_open(self) -> bool {
@@ -65,7 +69,10 @@ impl<'a> ExtensionContext<'a> {
         let runtime = self.vm.runtime().ok_or_else(|| {
             rquickjs::Error::new_loading_message("extension loader", "runtime is closed")
         })?;
-        runtime.set_loader(resolver, loader);
+        runtime.set_loader(
+            ArchiveResolver(Rc::clone(self.modules), resolver),
+            ArchiveLoader(Rc::clone(self.modules), loader),
+        );
         Ok(())
     }
 

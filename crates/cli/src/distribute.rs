@@ -1,5 +1,5 @@
 //! Package the CLI executable, its framework sources, and the native checker.
-use std::{env, fs, path::Path};
+use std::{env, fs, path::Path, process::Command};
 
 use anyhow::{Context, Result, bail};
 
@@ -64,6 +64,8 @@ pub(crate) fn write(output: &Path) -> Result<()> {
     ] {
         fs::copy(framework.join(file), destination.join(file))?;
     }
+    let compiler = root.join("impasto-tools/compiler");
+    package_compiler(&framework, &compiler, staging.path())?;
     let previous = staging.path().join("previous");
     if output.exists() {
         if !output.join(binary).is_file() || !output.join("impasto-tools").is_dir() {
@@ -79,6 +81,95 @@ pub(crate) fn write(output: &Path) -> Result<()> {
     }
     println!("{}", output.display());
     Ok(())
+}
+
+fn package_compiler(framework: &Path, output: &Path, staging: &Path) -> Result<()> {
+    const TARGET: &str = "wasm32-unknown-unknown";
+    let status = Command::new("rustc")
+        .current_dir(framework)
+        .args(["--print", "target-libdir", "--target", TARGET])
+        .output()?;
+    if !status.status.success() {
+        bail!("无法查询 {TARGET} Rust 工具链");
+    }
+    if !Path::new(std::str::from_utf8(&status.stdout)?.trim()).is_dir() {
+        let mut install = Command::new("rustup");
+        install
+            .current_dir(framework)
+            .args(["target", "add", TARGET]);
+        crate::toolchain::run(install, "安装 SDK 使用的 Wasm Rust 目标")?;
+    }
+    let target_dir = crate::toolchain::target_dir(&framework.join("target"))?;
+    let mut cargo = Command::new("cargo");
+    cargo
+        .current_dir(framework)
+        .args([
+            "rustc",
+            "--locked",
+            "-p",
+            "bundler",
+            "--lib",
+            "--crate-type",
+            "cdylib",
+            "--no-default-features",
+            "--features",
+            "wasm,wgsl",
+            "--release",
+            "--target",
+            TARGET,
+            "--target-dir",
+        ])
+        .arg(&target_dir);
+    crate::toolchain::run(cargo, "构建 DevTools Wasm 编译器")?;
+
+    let lock: toml::Value = toml::from_str(&fs::read_to_string(framework.join("Cargo.lock"))?)?;
+    let version = lock
+        .get("package")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|package| package.get("name").and_then(toml::Value::as_str) == Some("wasm-bindgen"))
+        .and_then(|package| package.get("version"))
+        .and_then(toml::Value::as_str)
+        .context("Cargo.lock 缺少 wasm-bindgen 版本")?;
+    let available = Command::new("wasm-bindgen")
+        .arg("--version")
+        .output()
+        .ok()
+        .is_some_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).trim()
+                    == format!("wasm-bindgen {version}")
+        });
+    let mut bindgen = if available {
+        Command::new("wasm-bindgen")
+    } else {
+        let root = staging.join("wasm-bindgen");
+        let mut install = Command::new("cargo");
+        install
+            .args(["install", "--locked", "--version", version, "--root"])
+            .arg(&root)
+            .arg("wasm-bindgen-cli");
+        crate::toolchain::run(install, "安装 SDK 使用的 wasm-bindgen")?;
+        Command::new(root.join("bin").join(if cfg!(windows) {
+            "wasm-bindgen.exe"
+        } else {
+            "wasm-bindgen"
+        }))
+    };
+    fs::create_dir_all(output)?;
+    bindgen
+        .args([
+            "--target",
+            "web",
+            "--no-typescript",
+            "--out-name",
+            "bundler",
+            "--out-dir",
+        ])
+        .arg(output)
+        .arg(target_dir.join(TARGET).join("release/bundler.wasm"));
+    crate::toolchain::run(bindgen, "生成 DevTools 浏览器绑定")
 }
 
 fn copy_sources(framework: &Path, source: &Path, destination: &Path, skip: &[&str]) -> Result<()> {

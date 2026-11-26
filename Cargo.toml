@@ -56,6 +56,33 @@ opt-level = 2
 [profile.dev.package.engine]
 opt-level = 2
 
+[profile.dev.package.raster]
+opt-level = 2
+
+[profile.dev.package.wgpu]
+opt-level = 2
+
+[profile.dev.package.wgpu-core]
+opt-level = 2
+
+[profile.dev.package.wgpu-hal]
+opt-level = 2
+
+[profile.dev.package.naga]
+opt-level = 2
+
+[profile.dev.package.parley]
+opt-level = 2
+
+[profile.dev.package.swash]
+opt-level = 2
+
+[profile.dev.package.lyon_tessellation]
+opt-level = 2
+
+[profile.dev.package.kurbo]
+opt-level = 2
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 unused_qualifications = "deny"

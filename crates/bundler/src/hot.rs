@@ -8,11 +8,12 @@ use std::{
 use oxc::{
     allocator::Allocator,
     ast::ast::{
-        Declaration, ExportDefaultDeclarationKind, Expression, Function, Program, Statement,
-        VariableDeclaration, VariableDeclarationKind,
+        BindingPattern, Declaration, ExportDefaultDeclarationKind, Expression, Function, Program,
+        Statement, VariableDeclaration, VariableDeclarationKind,
     },
     ast_visit::{Visit, walk},
     parser::Parser,
+    semantic::Semantic,
     span::{GetSpan, SourceType, Span},
 };
 use rolldown_common::Output;
@@ -30,6 +31,7 @@ pub(crate) struct ComponentModule {
     boundary: Option<String>,
     functions: BTreeMap<String, String>,
     values: BTreeMap<String, Initializer>,
+    default: Option<String>,
 }
 
 #[derive(Debug)]
@@ -38,10 +40,15 @@ enum Initializer {
     Preserve,
 }
 
-pub(crate) fn components(program: &Program<'_>, source: &str) -> ComponentModule {
+pub(crate) fn components(
+    program: &Program<'_>,
+    source: &str,
+    semantic: &Semantic<'_>,
+) -> ComponentModule {
     let mut metadata = ComponentModule::default();
     let mut components = Vec::new();
     let mut safe = true;
+    let mut helpers = BTreeMap::new();
     for statement in &program.body {
         match statement {
             Statement::ImportDeclaration(_)
@@ -50,18 +57,34 @@ pub(crate) fn components(program: &Program<'_>, source: &str) -> ComponentModule
             | Statement::ExportNamedDeclaration(_)
             | Statement::TSInterfaceDeclaration(_)
             | Statement::TSTypeAliasDeclaration(_) => {}
-            Statement::FunctionDeclaration(function) => register(function, &mut components),
+            Statement::FunctionDeclaration(function) => {
+                if !register(function, &mut components)
+                    && let Some(id) = &function.id
+                    && let Some(symbol) = id.symbol_id.get()
+                {
+                    helpers.insert(symbol, (id.name.to_string(), function.span));
+                }
+            }
             Statement::ExportDefaultDeclaration(export) => {
                 if let ExportDefaultDeclarationKind::FunctionDeclaration(function) =
                     &export.declaration
                 {
                     register(function, &mut components);
+                } else if let Some(expression) = export.declaration.as_expression()
+                    && let Expression::ArrowFunctionExpression(arrow) =
+                        expression.get_inner_expression()
+                    && !arrow.r#async
+                    && has_jsx(expression)
+                {
+                    components.push(("default".to_owned(), expression.span(), false));
                 } else {
                     safe = false;
                 }
             }
             Statement::ExportDeclaration(export) => match &export.declaration {
-                Declaration::FunctionDeclaration(function) => register(function, &mut components),
+                Declaration::FunctionDeclaration(function) => {
+                    register(function, &mut components);
+                }
                 Declaration::VariableDeclaration(declaration) => {
                     safe &= initializers(declaration, &mut components, &mut metadata);
                 }
@@ -71,20 +94,100 @@ pub(crate) fn components(program: &Program<'_>, source: &str) -> ComponentModule
             },
             Statement::VariableDeclaration(declaration) => {
                 safe &= initializers(declaration, &mut components, &mut metadata);
+                if safe && declaration.kind == VariableDeclarationKind::Const {
+                    for item in &declaration.declarations {
+                        let BindingPattern::BindingIdentifier(id) = &item.id else {
+                            continue;
+                        };
+                        let Some(value) = &item.init else { continue };
+                        if matches!(
+                            value.get_inner_expression(),
+                            Expression::ArrowFunctionExpression(_)
+                                | Expression::FunctionExpression(_)
+                        ) && !components
+                            .iter()
+                            .any(|(name, _, _)| name == id.name.as_str())
+                            && let Some(symbol) = id.symbol_id.get()
+                        {
+                            helpers.insert(symbol, (id.name.to_string(), value.span()));
+                        }
+                    }
+                }
             }
             _ => safe = false,
         }
     }
+    let references = |symbol| {
+        semantic
+            .scoping()
+            .get_resolved_references(symbol)
+            .filter(|reference| !reference.is_type())
+            .map(|reference| semantic.nodes().get_node(reference.node_id()).span())
+    };
+    loop {
+        let escaped = helpers
+            .keys()
+            .copied()
+            .filter(|symbol| {
+                references(*symbol).any(|reference| {
+                    !components
+                        .iter()
+                        .any(|(_, span, _)| covers(*span, reference))
+                        && !helpers.values().any(|(_, span)| covers(*span, reference))
+                })
+            })
+            .collect::<Vec<_>>();
+        if escaped.is_empty() {
+            break;
+        }
+        for symbol in escaped {
+            helpers.remove(&symbol);
+        }
+    }
+    let callers = helpers
+        .iter()
+        .map(|(&symbol, (name, span))| (name, *span, references(symbol).collect::<Vec<_>>()))
+        .collect::<Vec<_>>();
+    let mut ranges = components
+        .iter()
+        .map(|(name, span, _)| (name, *span))
+        .chain(helpers.values().map(|(name, span)| (name, *span)))
+        .collect::<Vec<_>>();
+    ranges.sort_unstable_by_key(|(_, span)| span.start);
     let mut rest = DefaultHasher::new();
     let mut start = 0;
-    for (name, span, is_function) in components {
+    for (name, span) in ranges {
         source.get(start..span.start as usize).hash(&mut rest);
         name.hash(&mut rest);
         start = span.end as usize;
+    }
+    for (name, span, is_function) in components {
         let mut body = DefaultHasher::new();
-        source.get(span.start as usize..start).hash(&mut body);
+        source
+            .get(span.start as usize..span.end as usize)
+            .hash(&mut body);
+        let mut queue = vec![span];
+        let mut dependencies = BTreeMap::new();
+        while let Some(caller) = queue.pop() {
+            for (name, span, references) in &callers {
+                if !dependencies.contains_key(*name)
+                    && references
+                        .iter()
+                        .any(|reference| covers(caller, *reference))
+                {
+                    dependencies.insert(*name, *span);
+                    queue.push(*span);
+                }
+            }
+        }
+        for (name, span) in dependencies {
+            name.hash(&mut body);
+            span.source_text(source).hash(&mut body);
+        }
         let signature = format!("{:016x}", body.finish());
-        if is_function {
+        if name == "default" {
+            metadata.default = Some(signature);
+        } else if is_function {
             metadata.functions.insert(name, signature);
         } else {
             metadata
@@ -94,13 +197,38 @@ pub(crate) fn components(program: &Program<'_>, source: &str) -> ComponentModule
     }
     source.get(start..).hash(&mut rest);
     metadata.boundary = (safe
-        && (!metadata.functions.is_empty()
+        && (metadata.default.is_some()
+            || !metadata.functions.is_empty()
             || metadata
                 .values
                 .values()
                 .any(|value| matches!(value, Initializer::Component(_)))))
     .then(|| format!("{:016x}", rest.finish()));
     metadata
+}
+
+fn covers(outer: Span, inner: Span) -> bool {
+    outer.start <= inner.start && inner.end <= outer.end
+}
+
+fn has_jsx(expression: &Expression<'_>) -> bool {
+    let mut jsx = ContainsJsx(false);
+    match expression.get_inner_expression() {
+        Expression::ArrowFunctionExpression(function) => {
+            if let Some(body) = function.body.as_expression() {
+                jsx.visit_expression(body);
+            } else if let Some(body) = function.body.as_function_body() {
+                jsx.visit_function_body(body);
+            }
+        }
+        Expression::FunctionExpression(function) => {
+            if let Some(body) = &function.body {
+                jsx.visit_function_body(body);
+            }
+        }
+        _ => {}
+    }
+    jsx.0
 }
 
 fn binding_names(item: &oxc::ast::ast::VariableDeclarator<'_>) -> String {
@@ -124,23 +252,7 @@ fn initializers(
             continue;
         };
         let key = binding_names(item);
-        let mut jsx = ContainsJsx(false);
-        match value.without_parentheses() {
-            Expression::ArrowFunctionExpression(function) => {
-                if let Some(body) = function.body.as_expression() {
-                    jsx.visit_expression(body);
-                } else if let Some(body) = function.body.as_function_body() {
-                    jsx.visit_function_body(body);
-                }
-            }
-            Expression::FunctionExpression(function) => {
-                if let Some(body) = &function.body {
-                    jsx.visit_function_body(body);
-                }
-            }
-            _ => {}
-        }
-        if jsx.0 && item.id.is_binding_identifier() && component_name(&key) {
+        if has_jsx(value) && item.id.is_binding_identifier() && component_name(&key) {
             components.push((key, value.span(), false));
             continue;
         }
@@ -167,10 +279,10 @@ fn component_name(name: &str) -> bool {
     name.starts_with(|ch: char| ch.is_ascii_uppercase())
 }
 
-fn register(function: &Function<'_>, components: &mut Vec<(String, Span, bool)>) {
-    let Some(id) = &function.id else { return };
+fn register(function: &Function<'_>, components: &mut Vec<(String, Span, bool)>) -> bool {
+    let Some(id) = &function.id else { return false };
     if !component_name(&id.name) || function.r#async || function.generator {
-        return;
+        return false;
     }
     let mut jsx = ContainsJsx(false);
     if let Some(body) = &function.body {
@@ -179,6 +291,7 @@ fn register(function: &Function<'_>, components: &mut Vec<(String, Span, bool)>)
     if jsx.0 {
         components.push((id.name.to_string(), function.span(), true));
     }
+    jsx.0
 }
 
 struct ContainsJsx(bool);
@@ -206,16 +319,32 @@ impl<'a> Visit<'a> for ContainsAwait {
 }
 
 impl ComponentModule {
-    pub(crate) fn instrument(&self, id: &str, code: &mut String) {
+    pub(crate) fn instrument(
+        &self,
+        id: &str,
+        code: &mut String,
+        map: &mut oxc_sourcemap::SourceMap<'static>,
+    ) {
         if self.boundary.is_none() {
             return;
         }
-        if !self.values.is_empty() {
+        if !self.values.is_empty() || self.default.is_some() {
             let allocator = Allocator::default();
             let parsed = Parser::new(&allocator, code, SourceType::mjs()).parse();
             let mut edits = Vec::new();
             for statement in &parsed.program.body {
                 let declaration = match statement {
+                    Statement::ExportDefaultDeclaration(export) => {
+                        if let Some(signature) = &self.default
+                            && let Some(expression) = export.declaration.as_expression()
+                        {
+                            let span = expression.span();
+                            edits.push((span, format!(
+                                "globalThis.__impasto_hot.component({id:?}, \"default\", {signature:?}, ("
+                            )));
+                        }
+                        continue;
+                    }
                     Statement::VariableDeclaration(declaration) => declaration,
                     Statement::ExportDeclaration(export) => match &export.declaration {
                         Declaration::VariableDeclaration(declaration) => declaration,
@@ -227,21 +356,22 @@ impl ComponentModule {
                     let Some(value) = &item.init else { continue };
                     let name = binding_names(item);
                     let span = value.span();
-                    let expression = span.source_text(code);
-                    let replacement = match self.values.get(&name) {
+                    let prefix = match self.values.get(&name) {
                         Some(Initializer::Component(signature)) => format!(
-                            "globalThis.__impasto_hot.component({id:?}, {name:?}, {signature:?}, ({expression}))"
+                            "globalThis.__impasto_hot.component({id:?}, {name:?}, {signature:?}, ("
                         ),
-                        Some(Initializer::Preserve) => format!(
-                            "globalThis.__impasto_hot.keep({id:?}, {name:?}, () => ({expression}))"
-                        ),
+                        Some(Initializer::Preserve) => {
+                            format!("globalThis.__impasto_hot.keep({id:?}, {name:?}, () => (")
+                        }
                         None => continue,
                     };
-                    edits.push((span, replacement));
+                    edits.push((span, prefix));
                 }
             }
-            for (span, replacement) in edits.into_iter().rev() {
-                code.replace_range(span.start as usize..span.end as usize, &replacement);
+            shift_map(code, map, &edits);
+            for (span, prefix) in edits.into_iter().rev() {
+                code.insert_str(span.end as usize, "))");
+                code.insert_str(span.start as usize, &prefix);
             }
         }
         for (name, signature) in &self.functions {
@@ -254,9 +384,66 @@ impl ComponentModule {
     }
 }
 
+fn shift_map(code: &str, map: &mut oxc_sourcemap::SourceMap<'static>, edits: &[(Span, String)]) {
+    use oxc_sourcemap::{SourceMap, Token};
+    if edits.is_empty() {
+        return;
+    }
+    let starts = std::iter::once(0usize)
+        .chain(code.match_indices('\n').map(|(index, _)| index + 1))
+        .collect::<Vec<_>>();
+    let mut offsets = BTreeMap::<u32, Vec<(u32, u32)>>::new();
+    for (span, prefix) in edits {
+        for (position, width) in [
+            (span.start as usize, prefix.encode_utf16().count()),
+            (span.end as usize, 2),
+        ] {
+            let line = starts.partition_point(|start| *start <= position) - 1;
+            let column = code[starts[line]..position].encode_utf16().count();
+            if let (Ok(line), Ok(column), Ok(width)) = (
+                u32::try_from(line),
+                u32::try_from(column),
+                u32::try_from(width),
+            ) {
+                offsets.entry(line).or_default().push((column, width));
+            }
+        }
+    }
+    let mut parts = std::mem::take(map).into_parts();
+    for token in &mut parts.tokens {
+        let line = token.get_dst_line();
+        let col = token.get_dst_col();
+        if let Some(offsets) = offsets.get(&line) {
+            let shift: u32 = offsets
+                .iter()
+                .filter(|(at, _)| *at <= col)
+                .map(|(_, width)| width)
+                .sum();
+            *token = Token::new(
+                line,
+                col.saturating_add(shift),
+                token.get_src_line(),
+                token.get_src_col(),
+                token.get_source_id(),
+                token.get_name_id(),
+            );
+        }
+    }
+    *map = SourceMap::from_parts(parts);
+}
+
+#[derive(Serialize)]
+struct FactoryMap {
+    sources: Vec<String>,
+    mappings: String,
+}
+
 #[derive(Serialize)]
 struct Factory<'a> {
     body: &'a str,
+    location: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    map: Option<FactoryMap>,
     boundary: Option<&'a str>,
     dependencies: BTreeMap<&'a str, &'a str>,
 }
@@ -278,6 +465,7 @@ pub(crate) fn script(
     use std::fmt::Write as _;
     let mut code = MARKER.to_owned();
     code.push_str("import { createMemo, createSignal, untrack } from 'reactive';\n");
+    code.push_str("import { compileHotFactory } from 'scene';\n");
     let mut native = String::new();
     for (index, name) in externals.iter().enumerate() {
         writeln!(
@@ -309,6 +497,7 @@ pub(crate) fn script(
         let dependencies = chunk
             .imports
             .iter()
+            .chain(&chunk.dynamic_imports)
             .filter_map(|import| {
                 let import = import.as_str();
                 output
@@ -322,10 +511,28 @@ pub(crate) fn script(
                     .map(|id| (import, id))
             })
             .collect();
+        let mut location = DefaultHasher::new();
+        filename.hash(&mut location);
+        chunk.code.hash(&mut location);
+        let location = format!("impasto-hot-{:016x}", location.finish());
         factories.insert(
             filename,
             Factory {
                 body: &chunk.code,
+                location,
+                map: chunk.map.as_ref().map(|map| {
+                    let mut map = map.to_json();
+                    if let [source] = map.sources.as_mut_slice()
+                        && let [module] = chunk.module_ids.as_slice()
+                        && std::path::Path::new(module.as_str()).is_absolute()
+                    {
+                        *source = module.as_str().to_owned();
+                    }
+                    FactoryMap {
+                        sources: map.sources,
+                        mappings: map.mappings,
+                    }
+                }),
                 boundary,
                 dependencies,
             },
@@ -338,6 +545,11 @@ pub(crate) fn script(
     for (id, factory) in &factories {
         id.hash(&mut version);
         factory.body.hash(&mut version);
+        factory
+            .map
+            .as_ref()
+            .map(|map| (&map.sources, &map.mappings))
+            .hash(&mut version);
         factory.boundary.hash(&mut version);
         factory.dependencies.hash(&mut version);
     }
@@ -371,13 +583,13 @@ pub fn delta(previous: &str, next: &str) -> Option<String> {
     for (name, replacement) in next.factories {
         let original = previous.factories.get(&name)?;
         if original.get() != replacement.get() {
-            let boundary = serde_json::from_str::<Boundary>(original.get())
-                .ok()?
-                .boundary?;
-            let updated = serde_json::from_str::<Boundary>(replacement.get())
-                .ok()?
-                .boundary?;
-            if name == next.entry || boundary != updated {
+            let before = serde_json::from_str::<Boundary>(original.get()).ok()?;
+            let after = serde_json::from_str::<Boundary>(replacement.get()).ok()?;
+            if before.body.get() != after.body.get()
+                && (name == next.entry
+                    || before.boundary.is_none()
+                    || before.boundary != after.boundary)
+            {
                 return None;
             }
             changed.insert(name, replacement);
@@ -403,6 +615,7 @@ struct StateView<'a> {
 
 #[derive(Deserialize)]
 struct Boundary<'a> {
+    body: &'a RawValue,
     boundary: Option<&'a str>,
 }
 

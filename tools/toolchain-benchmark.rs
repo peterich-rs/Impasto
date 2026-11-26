@@ -5,7 +5,8 @@ fn sample_gallery_frames() {
         .expect("read the requested Gallery ESM")
         .unwrap_or_else(gallery_source);
     let started = std::time::Instant::now();
-    let empty = open("", "empty.js", crate::text::MonoShaper::default(), no_log()).expect("empty UI");
+    let empty =
+        open("", "empty.js", crate::text::MonoShaper::default(), no_log()).expect("empty UI");
     println!(
         "SAMPLE ui-start {:.3}",
         started.elapsed().as_secs_f64() * 1_000_000.0
@@ -29,14 +30,17 @@ fn sample_gallery_frames() {
             (first_phase.script_ms + first_phase.layout_cb_ms) * 1000.0
         );
         let target = if scenario == "click" {
-            let (navigation, next_frame) = if texts(&first).iter().any(|text| text == "市场") {
-                (first, 16.0)
+            let shown = texts(&first);
+            let (navigation, label, next_frame) = if shown.iter().any(|text| text == "市场") {
+                (first, "市场", 16.0)
+            } else if shown.iter().any(|text| text == "账户") {
+                (first, "账户", 16.0)
             } else {
                 let (x, y) = text_spot(&first, "⋯");
                 click(session.as_mut(), x, y);
-                (session.frame(session::FrameTime::at(16.0)), 32.0)
+                (session.frame(session::FrameTime::at(16.0)), "市场", 32.0)
             };
-            let (x, y) = text_spot(&navigation, "市场");
+            let (x, y) = text_spot(&navigation, label);
             click(session.as_mut(), x, y);
             next_frame
         } else {

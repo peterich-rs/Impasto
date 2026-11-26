@@ -26,6 +26,12 @@ pub(crate) struct Options {
     /// Release symbol sidecar used to resolve captured JavaScript frames.
     #[arg(long)]
     symbols: Option<PathBuf>,
+    /// Local app root for Inspector source links.
+    #[arg(long)]
+    source_root: Option<PathBuf>,
+    /// Editor to open when an Inspector source link is followed.
+    #[arg(long, default_value = "vscode", value_parser = ["vscode", "cursor", "zed"])]
+    editor: String,
 }
 
 pub(crate) fn config() -> Result<Option<(u16, String)>> {
@@ -145,8 +151,31 @@ fn forward(options: &Options) -> Result<(u16, Option<Tunnel>)> {
 }
 
 pub(crate) fn run(options: Options) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project = options.source_root.clone().unwrap_or_else(|| {
+        if cwd.join("app.toml").is_file() || cwd.join("plugin.toml").is_file() {
+            cwd
+        } else if let Some(framework) =
+            crate::framework_root().filter(|framework| framework == &cwd)
+        {
+            framework.join(crate::GALLERY_DIR)
+        } else {
+            cwd
+        }
+    });
+    let locations = STANDARD.encode(serde_json::to_vec(&serde_json::json!({
+        "project": project.canonicalize()?,
+        "framework": crate::toolchain::framework()?,
+        "editor": options.editor,
+    }))?);
     let compiler = options
         .compiler
+        .clone()
+        .or_else(|| {
+            crate::toolchain::distribution()
+                .map(|root| root.join("compiler"))
+                .filter(|path| path.join("bundler_bg.wasm").is_file())
+        })
         .as_ref()
         .map(|directory| -> Result<_> {
             Ok((
@@ -178,6 +207,7 @@ pub(crate) fn run(options: Options) -> Result<()> {
                 .replace("%%COMPILER_JS%%", &compiler.0)
                 .replace("%%COMPILER_WASM%%", &compiler.1)
                 .replace("%%SYMBOLS%%", &symbols)
+                .replace("%%SOURCE_ROOTS%%", &locations)
                 .as_bytes(),
         )?;
     println!("Open {} in a browser", path.canonicalize()?.display());

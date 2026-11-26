@@ -13,9 +13,9 @@ use engine::{
     js::JsSession,
     semantics::{SemanticsRole, SemanticsUpdate},
     session::{
-        BackGesture, FrameTime, FrameTrace, HostFuture, InputEvent, IoEvent, Method, MethodExec,
-        Metrics, Module, ModuleConfig, ModuleExports, ModuleRegistry, PluginResult, PluginValue,
-        ScriptExecution, Session, Settle, Work,
+        AssetReader, BackGesture, Delivery, FrameTime, FrameTrace, HostFuture, InputEvent, IoEvent,
+        Method, MethodExec, Metrics, Module, ModuleConfig, ModuleExports, ModuleRegistry,
+        PluginResult, PluginValue, ScriptExecution, Session, Settle, Work,
     },
     text::MonoShaper,
 };
@@ -120,22 +120,54 @@ pub fn format_report(path: &Path, report: &Report, trace: bool) -> String {
 pub fn run(
     code: &str,
     name: &str,
+    modules: Vec<Module>,
+    snapshots: Option<SnapshotOptions>,
+) -> Result<Report> {
+    run_with_assets(code, name, modules, snapshots, None)
+}
+
+/// Run an application test with its packaged asset directory.
+///
+/// # Errors
+/// Returns the same script or driver failures as [run].
+pub fn run_with_assets(
+    code: &str,
+    name: &str,
+    modules: Vec<Module>,
+    snapshots: Option<SnapshotOptions>,
+    assets: Option<PathBuf>,
+) -> Result<Report> {
+    run_filtered(code, name, modules, snapshots, assets, None)
+}
+
+/// Run a test entry and select case names containing the supplied substring.
+///
+/// # Errors
+/// Returns the same script or driver failures as [run].
+pub fn run_filtered(
+    code: &str,
+    name: &str,
     mut modules: Vec<Module>,
     snapshots: Option<SnapshotOptions>,
+    assets: Option<PathBuf>,
+    filter: Option<String>,
 ) -> Result<Report> {
     #[cfg(not(feature = "headless-gpu"))]
     if snapshots.is_some() {
         bail!("GPU snapshots require the headless-gpu feature");
     }
     let (actions, pending) = mpsc::channel();
-    let (io, deliveries) = mpsc::channel();
-    let (routed, packets) = mpsc::channel();
+    let io = actions.clone();
+    let routed = actions.clone();
     let (_runtime, methods) = TestExecutor::new()?;
     let report = actions.clone();
     modules.push(Module {
         name: "ImpastoTestDriver",
         specifier: DRIVER_MODULE,
         methods: vec![
+            Method::sync("filter", move |_| {
+                Ok(filter.clone().map_or(PluginValue::Null, PluginValue::Str))
+            }),
             Method::sync("report", move |args| {
                 let event = Command::Report {
                     kind: text(args, 0)?.to_owned(),
@@ -153,17 +185,34 @@ pub fn run(
         ],
         exports: ModuleExports::default(),
     });
+    let asset_reader: Option<AssetReader> = assets.map(|assets| {
+        Arc::new(move |name: &str, limit: usize| {
+            let root = assets.canonicalize().map_err(|error| error.to_string())?;
+            let path = root
+                .join(name)
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            if !path.starts_with(&root) || !path.is_file() {
+                return Err("asset is outside the package".to_owned());
+            }
+            let file = fs::File::open(path).map_err(|error| error.to_string())?;
+            let length = file.metadata().map_err(|error| error.to_string())?.len();
+            let length = usize::try_from(length).map_err(|error| error.to_string())?;
+            engine::session::read_asset_bytes(file, length, limit)
+        }) as AssetReader
+    });
     let config = ModuleConfig {
+        asset_reader,
         registry: ModuleRegistry::new(modules).into(),
         script_execution: ScriptExecution::HeadlessTest,
         exec: Arc::new(methods),
         post_delivery: Some(Arc::new(move |delivery| {
-            let _ = routed.send(delivery);
+            let _ = routed.send(Command::Delivery(delivery));
         })),
         settle: Arc::new(move |token| {
             let io = io.clone();
             Settle::new(move |result| {
-                let _ = io.send(IoEvent::Plugin { token, result });
+                let _ = io.send(Command::Event(IoEvent::Plugin { token, result }));
             })
         }),
         ..ModuleConfig::disconnected()
@@ -194,6 +243,9 @@ pub fn run(
     let mut driver = Driver {
         session,
         now: 0.,
+        presented: 0.,
+        virtual_clock: false,
+        again: false,
         frames: FrameTrace::default(),
         #[cfg(feature = "headless-gpu")]
         snapshots,
@@ -203,18 +255,47 @@ pub fn run(
     let mut report = Report::default();
     let mut current = String::new();
     let mut trace = FrameTrace::default();
-    for step in 0.. {
-        for packet in packets.try_iter() {
-            driver.session.io_delivery(packet);
+    let limit = Duration::from_secs(10);
+    driver.frame(0.)?;
+    let mut smoke_frames = 0;
+    loop {
+        let remaining = limit.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            bail!("{current}: test timed out");
         }
-        for delivery in deliveries.try_iter() {
-            driver.session.io_event(delivery);
-        }
-        if step == 0 {
-            driver.frame(16.)?;
-        }
-        match pending.try_recv() {
-            Ok(Command::Report { kind, value }) => match kind.as_str() {
+        let command = match pending.try_recv() {
+            Ok(command) => command,
+            Err(_) if !registered && smoke_frames < 4 => {
+                smoke_frames += 1;
+                driver.frame(16.)?;
+                continue;
+            }
+            Err(_) if !registered => break,
+            Err(_) => {
+                if !driver.virtual_clock && driver.again {
+                    driver.frame(16.).with_context(|| current.clone())?;
+                    continue;
+                }
+                let next = (!driver.virtual_clock)
+                    .then(|| driver.session.next_wake_ms())
+                    .flatten();
+                if let Some(deadline) = next {
+                    driver
+                        .frame((deadline - driver.now).max(0.))
+                        .with_context(|| current.clone())?;
+                    continue;
+                }
+                match pending.recv_timeout(remaining) {
+                    Ok(command) => command,
+                    Err(mpsc::RecvTimeoutError::Timeout) => bail!("{current}: test timed out"),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        bail!("{current}: test driver disconnected")
+                    }
+                }
+            }
+        };
+        match command {
+            Command::Report { kind, value } => match kind.as_str() {
                 "start" => registered = true,
                 "case" => current = value,
                 "pass" => report.passed += 1,
@@ -222,7 +303,7 @@ pub fn run(
                 "fail" => bail!("{current}: {value}"),
                 _ => bail!("invalid test event {kind}"),
             },
-            Ok(Command::Request { args, settle }) => {
+            Command::Request { args, settle } => {
                 let result = match text(&args, 0) {
                     Ok("traceReset") => {
                         trace = driver.frames;
@@ -235,18 +316,18 @@ pub fn run(
                     Ok(value) => PluginResult::Done(value),
                     Err(message) => PluginResult::Failed { message },
                 });
-                driver.frame(16.).with_context(|| current.clone())?;
-            }
-            Err(_) if step >= 4 && !registered => break,
-            Err(_) => {
-                driver.frame(16.).with_context(|| current.clone())?;
-                if registered {
-                    std::thread::sleep(Duration::from_millis(1));
+                if !driver.virtual_clock {
+                    driver.frame(16.).with_context(|| current.clone())?;
                 }
             }
-        }
-        if start.elapsed() > Duration::from_secs(10) {
-            bail!("{current}: test timed out");
+            Command::Event(event) => {
+                driver.session.io_event(event);
+                driver.flush_delivery().with_context(|| current.clone())?;
+            }
+            Command::Delivery(delivery) => {
+                driver.session.io_delivery(delivery);
+                driver.flush_delivery().with_context(|| current.clone())?;
+            }
         }
     }
     report.frames = driver.frames;
@@ -295,6 +376,8 @@ impl MethodExec for AsyncMethods {
 }
 
 enum Command {
+    Event(IoEvent),
+    Delivery(Delivery),
     Report {
         kind: String,
         value: String,
@@ -308,6 +391,9 @@ enum Command {
 struct Driver {
     session: JsSession,
     now: f64,
+    presented: f64,
+    virtual_clock: bool,
+    again: bool,
     frames: FrameTrace,
     #[cfg(feature = "headless-gpu")]
     snapshots: Option<snapshots::Snapshots>,
@@ -328,9 +414,25 @@ fn number(args: &[PluginValue], index: usize) -> Result<f64, String> {
 }
 
 impl Driver {
+    fn flush_delivery(&mut self) -> Result<()> {
+        self.frame(if self.virtual_clock { 0. } else { 16. })
+    }
+
     fn frame(&mut self, interval: f64) -> Result<()> {
-        let frame = self.session.frame(FrameTime::at(self.now));
-        self.now += interval;
+        let time = if self.virtual_clock {
+            self.now += interval;
+            FrameTime {
+                interval_ms: interval,
+                ..FrameTime::at(self.now)
+            }
+        } else {
+            let time = FrameTime::at(self.now);
+            self.now += interval;
+            time
+        };
+        let frame = self.session.frame(time);
+        self.presented = time.target_ms;
+        self.again = frame.again;
         #[cfg(feature = "headless-gpu")]
         if let Some(snapshots) = &mut self.snapshots
             && let Some(layers) = frame.layers
@@ -371,6 +473,32 @@ impl Driver {
     )]
     fn command(&mut self, args: &[PluginValue]) -> Result<PluginValue, String> {
         match text(args, 0)? {
+            "clockInstall" => {
+                self.now = self.presented;
+                self.virtual_clock = true;
+            }
+            "clockReset" => self.virtual_clock = false,
+            "clockAdvance" => {
+                let delta = number(args, 1)?;
+                let target = self.now + delta;
+                if !self.virtual_clock || !delta.is_finite() || delta < 0. || !target.is_finite() {
+                    return Err("clock.advance requires an installed clock and a finite non-negative duration".to_owned());
+                }
+                let limit = Instant::now() + Duration::from_secs(10);
+                while let Some(deadline) = self
+                    .session
+                    .next_wake_ms()
+                    .filter(|deadline| *deadline <= target)
+                {
+                    if Instant::now() >= limit {
+                        return Err("virtual clock advance timed out".to_owned());
+                    }
+                    self.frame((deadline - self.now).max(0.))
+                        .map_err(|error| error.to_string())?;
+                }
+                self.frame(target - self.now)
+                    .map_err(|error| error.to_string())?;
+            }
             "frames" => {
                 let count = number(args, 1)?;
                 let step = number(args, 2)?;

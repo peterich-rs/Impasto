@@ -545,15 +545,23 @@ impl Rasterizer {
                     id = picture.id.0
                 )
                 .entered();
+                let stream_mesh = previous
+                    .and_then(|frame| frame.pictures.get(&picture.id))
+                    .is_some_and(|old| old.generation != picture.generation);
                 let mut context = CompileContext {
                     gpu: &device.gpu,
                     device_generation: device.generation,
                     textures: &mut textures,
                     resolve: &mut resolve,
                     point_scale: compile_scale,
+                    stream_mesh,
                 };
                 let result = if let Some(prepared) = prepared.remove(&picture.id) {
-                    let compiled = prepared?.install(context.gpu, context.device_generation)?;
+                    let compiled = prepared?.install(
+                        context.gpu,
+                        context.device_generation,
+                        context.stream_mesh,
+                    )?;
                     for (source, _) in picture.images() {
                         context.textures.touch(source);
                     }
@@ -563,7 +571,11 @@ impl Rasterizer {
                 };
                 stats.picture_rebuilt = stats.picture_rebuilt.saturating_add(1);
                 rebuilt_glyphs |= result.has_glyphs;
-                if let Some(mesh) = result.mesh_buffer.get() {
+                if let Some(mesh) = result
+                    .mesh_buffer
+                    .get()
+                    .and_then(batch::MeshBuffer::resident)
+                {
                     stats.render.buffers_created += 2;
                     stats.render.mesh_upload_bytes += mesh.vertices.size() + mesh.indices.size();
                 }

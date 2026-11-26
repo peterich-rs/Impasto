@@ -67,6 +67,7 @@ pub struct Environment {
     pub root_rem: f32,
     pub breakpoints: [f32; 5],
     colors: HashMap<Arc<str>, [u8; 4]>,
+    lengths: HashMap<Arc<str>, f32>,
     pub radii: Radii,
     pub font_sizes: FontSizes,
     roles: HashMap<&'static str, TypeRole>,
@@ -141,6 +142,7 @@ impl Environment {
         if values
             .iter()
             .chain(self.breakpoints.iter())
+            .chain(self.lengths.values())
             .any(|value| !value.is_finite() || *value < 0.0)
         {
             return Err(StyleError::Invalid {
@@ -154,6 +156,7 @@ impl Environment {
 
     pub(crate) fn same_theme(&self, other: &Self) -> bool {
         self.colors == other.colors
+            && self.lengths == other.lengths
             && self.radii == other.radii
             && self.font_sizes == other.font_sizes
             && self.roles == other.roles
@@ -190,6 +193,7 @@ impl Environment {
             root_rem: 16.0,
             breakpoints: BREAKPOINTS,
             colors: HashMap::new(),
+            lengths: HashMap::new(),
             radii: Radii::default(),
             font_sizes: FontSizes::default(),
             roles,
@@ -217,6 +221,25 @@ impl Environment {
 
     pub fn color(&self, name: &str) -> Option<[u8; 4]> {
         self.colors.get(name).copied()
+    }
+
+    /// Replace the named lengths provided by the active theme.
+    pub fn install_lengths<'a>(&mut self, entries: impl IntoIterator<Item = (&'a str, f32)>) {
+        self.lengths = entries
+            .into_iter()
+            .map(|(name, value)| (Arc::from(name), value))
+            .collect();
+    }
+
+    /// Whether a color is supplied by the framework palettes.
+    pub fn is_builtin_color(name: &str) -> bool {
+        matches!(name, "foreground" | "black" | "white" | "transparent")
+            || LIGHT_PALETTE.iter().any(|(key, _)| *key == name)
+    }
+
+    /// Whether a length is supplied by the standard UI theme.
+    pub fn is_builtin_length(name: &str) -> bool {
+        default_length(name).is_some()
     }
 
     pub fn resolve_length(
@@ -266,6 +289,14 @@ impl Environment {
     }
 
     fn length_token(&self, name: &str) -> Result<f32, StyleError> {
+        if let Some(value) = self
+            .lengths
+            .get(name)
+            .copied()
+            .or_else(|| default_length(name))
+        {
+            return Ok(value);
+        }
         let radius = match name {
             "radius.none" => Some(self.radii.none),
             "radius.sm" => Some(self.radii.sm),
@@ -284,6 +315,14 @@ impl Environment {
     }
 
     fn font_token(&self, name: &str) -> Result<f32, StyleError> {
+        if let Some(value) = self
+            .lengths
+            .get(name)
+            .copied()
+            .or_else(|| default_length(name))
+        {
+            return Ok(value);
+        }
         let size = match name {
             "text.xs" => Some(self.font_sizes.xs),
             "text.sm" => Some(self.font_sizes.sm),
@@ -332,6 +371,25 @@ impl Environment {
             .get(index)
             .is_some_and(|min| self.window_width >= *min)
     }
+}
+
+fn default_length(name: &str) -> Option<f32> {
+    Some(match name {
+        "shape.none" => 0.,
+        "shape.xs" => 2.,
+        "space.s" | "radius.s" | "shape.s" => 4.,
+        "radius.m" | "shape.m" => 6.,
+        "space.m" => 8.,
+        "shape.l" => 12.,
+        "space.l" | "fontSize.body" | "typography.body.size" => 16.,
+        "fontSize.title" | "typography.title.size" => 20.,
+        "typography.label.size" => 14.,
+        "typography.caption.size" => 12.,
+        "typography.headline.size" => 24.,
+        "typography.display.size" => 32.,
+        "shape.full" => 999.,
+        _ => return None,
+    })
 }
 
 fn role(size: f32, weight: u16) -> TypeRole {

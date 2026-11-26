@@ -1,104 +1,254 @@
 use crate::{app::App, plugins, toolchain};
 use anyhow::{Context, Result, bail};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
+
+pub(crate) struct Options {
+    pub trace: bool,
+    pub gpu: bool,
+    pub update: bool,
+    pub watch: bool,
+    pub filter: Option<String>,
+}
 
 pub fn test(
     bundle: Option<PathBuf>,
     framework_suite: bool,
     platform: Option<&str>,
-    trace: bool,
-    gpu: bool,
-    update: bool,
+    options: Options,
 ) -> Result<()> {
     if framework_suite {
         let root = toolchain::framework()?;
-        let mut entries = Vec::new();
-        collect(&root.join("packages"), &mut entries)?;
-        entries.sort();
-        return run_sources(&root, &root, None, trace, None, entries);
+        return run_project(&root, &root, None, &options, None, None);
     }
-    let app = App::current()?;
-    let snapshots = gpu.then(|| testing::SnapshotOptions {
+    let root = std::env::current_dir()?;
+    let app = if !root.join("app.toml").is_file() && root.join("plugin.toml").is_file() {
+        App::for_plugin(root)?
+    } else {
+        App::current()?
+    };
+    let snapshots = options.gpu.then(|| testing::SnapshotOptions {
         root: app.root.join("tests/__snapshots__"),
-        update,
+        update: options.update,
     });
-    if gpu && !cfg!(feature = "headless-gpu") {
+    if options.gpu && !cfg!(feature = "headless-gpu") {
         bail!("impasto test --gpu 需要启用 headless-gpu 特性");
     }
-    if let Some(bundle) = bundle {
+    if let Some(bundle) = bundle.as_ref() {
         if bundle
             .extension()
             .is_some_and(|extension| extension == "bin")
         {
-            return run_bytecode(&bundle);
+            if options.watch || options.filter.is_some() {
+                bail!("--watch 与 --filter 需要测试源码");
+            }
+            return run_bytecode(bundle);
         }
         if bundle
             .extension()
             .is_some_and(|extension| extension == "js")
         {
-            let code = fs::read_to_string(&bundle)?;
+            if options.watch {
+                bail!("--watch 需要测试源码入口");
+            }
+            let code = fs::read_to_string(bundle)?;
             let sandbox = tempfile::tempdir()?;
-            let report = testing::run(
+            let report = testing::run_filtered(
                 &code,
                 &bundle.to_string_lossy(),
                 modules(sandbox.path())?,
                 snapshots,
+                Some(app.assets()),
+                options.filter,
             )?;
-            print_report(&bundle, &report, trace);
+            print_report(bundle, &report, options.trace);
             return Ok(());
         }
-        return test_sources(&app, platform, trace, snapshots.as_ref(), vec![bundle]);
     }
-    let mut entries = Vec::new();
-    collect(&app.root.join("src"), &mut entries)?;
-    collect(&app.root.join("tests"), &mut entries)?;
-    if entries.is_empty() {
-        entries.push(app.entry.clone());
-    }
-    entries.sort();
-    test_sources(&app, platform, trace, snapshots.as_ref(), entries)
-}
-
-fn test_sources(
-    app: &App,
-    platform: Option<&str>,
-    trace: bool,
-    snapshots: Option<&testing::SnapshotOptions>,
-    entries: Vec<PathBuf>,
-) -> Result<()> {
     let framework = toolchain::framework()?;
     let target = platform
         .or_else(|| app.targets.first().map(String::as_str))
         .context("no test target")?;
     app.require(target)?;
-    let native = plugins::prepare(app, target, false)?;
-    run_sources(
+    let native = plugins::prepare(&app, target, false)?;
+    run_project(
         &app.root,
         &framework,
-        Some(&native),
-        trace,
-        snapshots,
-        entries,
+        Some((&app, &native)),
+        &options,
+        snapshots.as_ref(),
+        bundle,
     )
 }
 
-fn run_sources(
+fn entries(root: &Path, app: Option<&App>, single: Option<&Path>) -> Result<Vec<PathBuf>> {
+    if let Some(entry) = single {
+        return Ok(vec![root.join(entry)]);
+    }
+    let mut entries = Vec::new();
+    if let Some(app) = app {
+        collect(&root.join("src"), &mut entries)?;
+        collect(&root.join("tests"), &mut entries)?;
+        if entries.is_empty() {
+            entries.push(app.entry.clone());
+        }
+    } else {
+        collect(&root.join("packages"), &mut entries)?;
+    }
+    entries.sort();
+    Ok(entries)
+}
+
+type Inputs = BTreeMap<PathBuf, BTreeSet<PathBuf>>;
+type TestLinkers = Mutex<BTreeMap<PathBuf, bundler::WatchLinker>>;
+
+fn run_project(
     root: &Path,
     framework: &Path,
-    native: Option<&plugins::NativeBuild>,
-    trace: bool,
+    native: Option<(&App, &plugins::NativeBuild)>,
+    options: &Options,
     snapshots: Option<&testing::SnapshotOptions>,
-    entries: Vec<PathBuf>,
+    single: Option<PathBuf>,
 ) -> Result<()> {
+    let app = native.map(|(app, _)| app);
+    let native = native.map(|(_, native)| native);
     let runner = native
         .map(|native| native.test_runner(framework, snapshots.is_some()))
         .transpose()?
         .flatten();
+    let compiler_cache = bundler::ModuleCache::default();
+    let linkers = options.watch.then(TestLinkers::default);
+    let mut changes = Vec::new();
+    let mut inputs = Inputs::new();
+    let mut known = entries(root, app, single.as_deref())?;
+    let mut selected = known.clone();
+    let snapshot = |inputs: &Inputs| {
+        let mut paths = BTreeMap::new();
+        for name in [
+            "src",
+            "tests",
+            "assets",
+            "locales",
+            "tsconfig.json",
+            "app.toml",
+        ] {
+            crate::run::snapshot_path(&root.join(name), &mut paths)?;
+        }
+        if app.is_none() {
+            crate::run::snapshot_path(&root.join("packages"), &mut paths)?;
+        }
+        for path in inputs.values().flatten() {
+            crate::run::snapshot_path(path, &mut paths)?;
+        }
+        Ok::<_, anyhow::Error>(paths)
+    };
+    let mut previous = if options.watch {
+        snapshot(&inputs)?
+    } else {
+        BTreeMap::new()
+    };
+    loop {
+        if let Err(error) = run_sources(
+            &TestBatch {
+                root,
+                framework,
+                native,
+                runner: runner.as_deref(),
+                options,
+                snapshots,
+                compiler_cache: &compiler_cache,
+                linkers: linkers.as_ref(),
+                changes: &changes,
+            },
+            &selected,
+            &mut inputs,
+        ) {
+            if !options.watch {
+                return Err(error);
+            }
+            eprintln!("{error:#}");
+        }
+        if !options.watch {
+            return Ok(());
+        }
+        for (path, stamp) in snapshot(&inputs)? {
+            previous.entry(path).or_insert(stamp);
+        }
+
+        selected.clear();
+        while selected.is_empty() {
+            std::thread::sleep(Duration::from_millis(20));
+            let current = snapshot(&inputs)?;
+            if current == previous {
+                continue;
+            }
+            let changed = current
+                .iter()
+                .filter(|(path, stamp)| previous.get(*path) != Some(*stamp))
+                .map(|(path, _)| path)
+                .chain(previous.keys().filter(|path| !current.contains_key(*path)))
+                .collect::<BTreeSet<_>>();
+            let rescan_all = changed.iter().any(|path| {
+                path.starts_with(root.join("locales"))
+                    || path.file_name().is_some_and(|name| {
+                        matches!(name.to_str(), Some("app.toml" | "tsconfig.json"))
+                    })
+            });
+            let all = entries(root, app, single.as_deref())?;
+            inputs.retain(|entry, _| all.contains(entry));
+            selected.extend(
+                all.iter()
+                    .filter(|entry| {
+                        rescan_all
+                            || !known.contains(entry)
+                            || changed.contains(entry)
+                            || inputs
+                                .get(*entry)
+                                .is_none_or(|deps| changed.iter().any(|path| deps.contains(*path)))
+                    })
+                    .cloned(),
+            );
+            known = all;
+            changes = changed.into_iter().cloned().collect();
+            previous = current;
+        }
+    }
+}
+
+struct TestBatch<'a> {
+    root: &'a Path,
+    framework: &'a Path,
+    native: Option<&'a plugins::NativeBuild>,
+    runner: Option<&'a Path>,
+    options: &'a Options,
+    snapshots: Option<&'a testing::SnapshotOptions>,
+    compiler_cache: &'a bundler::ModuleCache,
+    linkers: Option<&'a TestLinkers>,
+    changes: &'a [PathBuf],
+}
+
+fn run_sources(batch: &TestBatch<'_>, entries: &[PathBuf], inputs: &mut Inputs) -> Result<()> {
+    let TestBatch {
+        root,
+        framework,
+        native,
+        runner,
+        options,
+        snapshots,
+        compiler_cache,
+        linkers,
+        changes,
+    } = *batch;
+    let trace = options.trace;
     let workers = std::thread::available_parallelism()
         .map_or(1, |parallel| parallel.get())
         .min(4)
@@ -107,13 +257,12 @@ fn run_sources(
     let results = std::thread::scope(|scope| {
         let workers = (0..workers)
             .map(|_| {
-                let entries = &entries;
-                let runner = runner.as_deref();
                 let next = &next;
                 scope.spawn(move || {
                     let mut reports = Vec::new();
                     while let Some(entry) = entries.get(next.fetch_add(1, Ordering::Relaxed)) {
-                        let test = || {
+                        let mut dependencies = None;
+                        let mut test = || {
                             let sandbox = tempfile::tempdir()?;
                             let entry = root.join(entry);
                             let modules = if runner.is_some() {
@@ -121,7 +270,7 @@ fn run_sources(
                             } else {
                                 modules(sandbox.path())?
                             };
-                            let mut options = bundler::BundleOptions {
+                            let mut link_options = bundler::BundleOptions {
                                 root: root.to_path_buf(),
                                 entry: entry.clone(),
                                 framework: framework.to_path_buf(),
@@ -132,9 +281,28 @@ fn run_sources(
                                     .collect(),
                                 ..Default::default()
                             };
-                            testing::install(&mut options);
-                            options.externals.insert("impasto:test/fixtures".to_owned());
-                            let code = bundler::bundle(options)?.code;
+                            testing::install(&mut link_options);
+                            link_options
+                                .externals
+                                .insert("impasto:test/fixtures".to_owned());
+                            let linked = if let Some(linkers) = linkers {
+                                let mut linkers = linkers
+                                    .lock()
+                                    .map_err(|_| anyhow::anyhow!("test linker unavailable"))?;
+                                let linker = linkers.entry(entry.clone()).or_default();
+                                linker.set_changes(Some(changes.to_vec()));
+                                linker.bundle_with_cache(link_options, Some(compiler_cache))?
+                            } else {
+                                bundler::bundle_with_cache(link_options, Some(compiler_cache))?
+                            };
+                            dependencies = Some(
+                                linked
+                                    .inputs
+                                    .into_iter()
+                                    .filter(|path| path.is_absolute())
+                                    .collect(),
+                            );
+                            let code = linked.code;
                             let snapshots = snapshots.cloned().map(|mut options| {
                                 if let Ok(relative) = entry.strip_prefix(root) {
                                     options.root.push(relative);
@@ -159,6 +327,10 @@ fn run_sources(
                                         "compare"
                                     });
                                 }
+                                command.env_remove("IMPASTO_TEST_FILTER");
+                                if let Some(filter) = &options.filter {
+                                    command.env("IMPASTO_TEST_FILTER", filter);
+                                }
                                 let output =
                                     command.output().context("运行应用 Rust 无头测试宿主")?;
                                 if !output.status.success() {
@@ -168,11 +340,18 @@ fn run_sources(
                             }
                             let mut modules = modules;
                             modules.push(testing::fixture_module(root, &entry)?);
-                            let report =
-                                testing::run(&code, &entry.to_string_lossy(), modules, snapshots)?;
+                            let report = testing::run_filtered(
+                                &code,
+                                &entry.to_string_lossy(),
+                                modules,
+                                snapshots,
+                                Some(root.join("assets")),
+                                options.filter.clone(),
+                            )?;
                             Ok(testing::format_report(&entry, &report, trace))
                         };
-                        reports.push((entry, test()));
+                        let report = test();
+                        reports.push((entry, dependencies, report));
                     }
                     reports
                 })
@@ -189,9 +368,14 @@ fn run_sources(
         Ok::<_, anyhow::Error>(results)
     })?;
     let mut results = results;
-    results.sort_by_key(|(entry, _)| *entry);
+    results.sort_by_key(|(entry, _, _)| *entry);
     let mut failures = Vec::new();
-    for (entry, result) in results {
+    for (entry, dependencies, result) in results {
+        if let Some(dependencies) = dependencies {
+            inputs.insert(entry.clone(), dependencies);
+        } else {
+            inputs.remove(entry);
+        }
         match result {
             Ok(report) => println!("{report}"),
             Err(error) => failures.push(format!("{}: {error:#}", entry.display())),

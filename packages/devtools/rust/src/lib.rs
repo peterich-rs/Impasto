@@ -120,6 +120,19 @@ impl DevtoolsPlugin {
             Ok(None)
         }
     }
+    pub fn open_source(&self, path: String, line: u32, column: u32) -> Result<bool, DevtoolsError> {
+        if self.source.is_none() {
+            return Ok(false);
+        }
+        self.query(
+            "openSource",
+            &[
+                PluginValue::Str(path),
+                PluginValue::F64(f64::from(line)),
+                PluginValue::F64(f64::from(column)),
+            ],
+        )
+    }
     pub fn revision(&self) -> Result<f64, DevtoolsError> {
         if self.source.is_some() {
             self.query("revision", &[])

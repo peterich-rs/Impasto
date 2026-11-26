@@ -15,6 +15,7 @@ import { dot, StockChart, stroke } from "../widgets/stocks/chart.tsx";
 import { Depth, OrderBook } from "../widgets/stocks/order-book.tsx";
 import { trackStockSections } from "../widgets/stocks/section-visibility.ts";
 import { Action, change, ClockButton, clock, code, colors, compact, filling, Label, Rule, Section, sectorLabel, sign, tone } from "../widgets/stocks/ui.tsx";
+import { BackButton, Glyph } from "../widgets/stocks/icons.tsx";
 import { TicketOverlay, type TicketSeed } from "./order.tsx";
 
 declare const __STOCK_REPLAY_FREEZE__: "" | "book" | "chart";
@@ -96,8 +97,9 @@ function QuoteHeader(props: { engine: QuoteEngine; data: StockSnapshot; time: st
 
 function Favorite(props: { symbol: string }) {
   const saved = () => inWatchlist(props.symbol);
-  return <Action label={saved() ? "★" : "☆"} title={saved() ? loc("移出自选", "Remove from watchlist") : loc("加入自选", "Add to watchlist")}
-    onClick={() => toggleWatch(props.symbol)} style={{ backgroundColor: "#00000000" }} />;
+  return <Glyph name={saved() ? "starFilled" : "star"} title={saved() ? loc("移出自选", "Remove from watchlist") : loc("加入自选", "Add to watchlist")}
+    onClick={() => toggleWatch(props.symbol)} size={20} color={saved() ? colors.amber : colors.dim}
+    style={{ backgroundColor: "#00000000" }} />;
 }
 
 export function StockView(props: { engine: QuoteEngine; symbol: string; wide?: boolean; split?: boolean; transitioning?: boolean }) {
@@ -220,8 +222,8 @@ export function StockView(props: { engine: QuoteEngine; symbol: string; wide?: b
 export function StockPage(props: { router: Router; symbol: string; transitioning: boolean }) {
   const { engine } = useQuotes();
   return <Column style={[filling, { backgroundColor: colors.bg }]}>
-    <Row style={{ minHeight: 48, paddingLeft: 8, paddingRight: 12, alignItems: "center", gap: 8 }}>
-      <Action label={loc("‹ 返回", "‹ Back")} onClick={() => props.router.pop()} style={{ backgroundColor: "#00000000" }} />
+    <Row style={{ minHeight: 52, paddingLeft: 4, paddingRight: 8, alignItems: "center", gap: 4 }}>
+      <BackButton onClick={() => props.router.pop()} />
       <Label size={18} weight={600} style={{ flex: 1 }}>{code(props.symbol)}</Label>
       <Favorite symbol={props.symbol} />
       <ClockButton />

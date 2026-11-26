@@ -101,13 +101,7 @@ WGSL 定义 `fn effect_main(local_pos: vec2<f32>, size: vec2<f32>) -> vec4<f32>`
 
 `<GpuView producer="my-id" />` 的内容来自宿主通过 `boot.with_gpu_view(GpuViewId::new("my-id")?, producer)` 注册的同设备生产者。生产者使用 `GpuContext` 的设备和队列上传资源，从 `prepare_or_render` 返回绘图命令缓冲，输出线性预乘颜色。Raster 使用物理像素尺寸分配目标纹理。纹理首次绘制和重建时单独提交并同步验证，暖帧将生产者命令放在主帧命令之前，同批提交。GPU 计时使用 1×1 临时附件。设备代次改变后，生产者通过 `on_device_lost` 释放上一代资源，并在下一次绘制中建立新资源。 [生产者接口](../crates/raster/src/gpu_view.rs) · [应用组件](../packages/solid-ui/src/GpuView.tsx)
 
-Gallery 的「GPU 实验室」可从「我的」页进入，也可直接启动。直接启动只挂载验收页，宿主仍可采集独立的 Perfetto trace。默认画面包含基于合成时钟的 WGSL 衍射条纹与叠加背景模糊的同设备生产者。用 `--url impasto://gpu-lab/invalid` 直接进入无效 WGSL 用例，预览保留应用背景。省略 `IMPASTO_DUMP` 可在窗口中切换着色器、暂停条纹、调整条纹强度、关闭背景模糊或调整窗口尺寸。
-
-```sh
-just gallery-dist
-IMPASTO_DUMP=/tmp/impasto-gpu-lab.png cargo run --locked -p embedder-macos -- \
-  --js examples/gallery-solid/dist/quotes.js --url impasto://gpu-lab
-```
+`GpuView` 与 `ShaderEffect` 的录入与像素契约由 `crates/engine/src/js/tests.rs` 的 `native_gpu_components_record_owned_inputs_for_raster` 和 `crates/raster/src/tests/gpu_extensions.rs` 覆盖；应用侧通过 `<GpuView producer="my-id" />` 与 `<ShaderEffect program={program} />` 使用。
 
 ## 4. 四阶段交付
 

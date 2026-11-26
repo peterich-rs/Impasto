@@ -126,6 +126,8 @@ impasto-permissions = { version = "0.1.0", registry = "impasto" }
 
 `impasto add @impasto/http --rust` 在应用清单中声明内置包，更新 Rust 清单并同步。提供 Rust API 的包包含 `plugin.toml` 和 Rust 源码。运行 `impasto sync` 后，CLI 在 `.impasto/cargo/index/` 生成 Cargo 本地索引，在工作区用 `[patch.impasto]` 指向解析到的 SDK 和插件源码。使用 `cargo --offline` 时，其他 crates.io 和 Git 依赖需要已进入 Cargo 缓存。
 
+`impasto create example-plugin --plugin --platforms ios,android` 生成插件骨架、Rust 导出和可运行的无头测试。在插件的 `plugin.toml` 中用 `[dependencies]` 声明传递依赖，路径以该插件为基准。CLI 在 `impasto.lock` 中记录已解析的依赖边和 Git 提交，报告循环和同名包的来源冲突。用 `impasto update [包名]` 刷新 Git 提交，指定单包时可用 `--tag` 更新标签。`impasto remove <包名>` 移除应用直接声明的依赖，其他插件仍使用的包继续留在依赖图中。
+
 IDE 可以加载应用 `rust/Cargo.toml` 或 `.impasto/cargo/Cargo.toml`。应用自带 `.cargo/config.toml` 时，加载生成的工作区以使用 Impasto 自带的注册表配置。Rust 子工程可以省略空 `[workspace]`。
 
 CLI 校验 Rust 依赖对应的 Impasto 插件位于消费方的依赖闭包中，并已启用目标平台。依赖图的拓扑序决定注册顺序。宿主按此顺序构建每个窗口的模块，因此消费方在 `init` 中可以获得依赖包写入的扩展。应用自带的 Rust 模块在插件之后初始化。

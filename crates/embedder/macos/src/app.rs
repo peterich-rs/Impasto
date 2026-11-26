@@ -991,9 +991,6 @@ pub fn run(
         .flatten()
         .map(PathBuf::from);
     let devtools_source_map = load_source_map(&name);
-    let gallery = Path::new(&name)
-        .file_name()
-        .is_some_and(|name| name == "quotes.js");
     let inspect_dir = std::env::var_os("IMPASTO_INSPECT").map(PathBuf::from);
     let diagnostics = modules
         .as_ref()
@@ -1033,55 +1030,52 @@ pub fn run(
         std::fs::create_dir_all(&dir).ok()?;
         Some(dir)
     }
-    let link = embedder::start(
-        Boot {
-            font_family: FONT_FAMILY.to_string(),
-            launch: embedder_launch,
-            services: Box::new(MacServices {
-                update_mailbox: update_mailbox.clone(),
-                font: font.to_vec(),
-                ime_view: Arc::clone(&ime_view),
-            }),
-            vsync: Arc::clone(&vsync) as Arc<dyn embedder::Vsync>,
-            decoder,
-            modules: Vec::new(),
-            plugin_services: embedder::PluginServices {
-                initial_lifecycle: Default::default(),
-                native_channel: None,
-                paths: embedder::AppPaths::new(
-                    sandbox_directory(objc2_foundation::NSSearchPathDirectory::DocumentDirectory),
-                    sandbox_directory(objc2_foundation::NSSearchPathDirectory::CachesDirectory),
-                    Some(std::env::temp_dir()),
-                ),
-            },
-            platform_runner: Some(embedder::PlatformTaskRunner::new(
-                Arc::new(dispatch_main),
-                dispatch_main_after,
-                || MainThreadMarker::new().is_some(),
-            )),
-            thread_topology: embedder::ThreadTopology::configured()
-                .map_err(|error| RunError::Window(error.into()))?,
-            launch_url: Arc::clone(&launch_url),
-            open_raster: Box::new(|fonts| {
-                raster::Rasterizer::create(raster::RasterOptions::default(), fonts)
-            }),
-            open_surface: Box::new(move |raster, target| {
-                Ok(Box::new(MetalSurface::open(
-                    raster,
-                    target,
-                    dump_for_surface.clone(),
-                    Arc::clone(&exit_for_surface),
-                )?))
-            }),
-            dump_list,
-            inspect,
-            devtools,
-            devtools_source_map,
-            inspect_dir,
-            log_dir: log_directory(),
-        }
-        .with_gallery_gpu_view(gallery),
-    )
+    let link = embedder::start(Boot {
+        font_family: FONT_FAMILY.to_string(),
+        launch: embedder_launch,
+        services: Box::new(MacServices {
+            update_mailbox: update_mailbox.clone(),
+            font: font.to_vec(),
+            ime_view: Arc::clone(&ime_view),
+        }),
+        vsync: Arc::clone(&vsync) as Arc<dyn embedder::Vsync>,
+        decoder,
+        modules: Vec::new(),
+        plugin_services: embedder::PluginServices {
+            initial_lifecycle: Default::default(),
+            native_channel: None,
+            paths: embedder::AppPaths::new(
+                sandbox_directory(objc2_foundation::NSSearchPathDirectory::DocumentDirectory),
+                sandbox_directory(objc2_foundation::NSSearchPathDirectory::CachesDirectory),
+                Some(std::env::temp_dir()),
+            ),
+        },
+        platform_runner: Some(embedder::PlatformTaskRunner::new(
+            Arc::new(dispatch_main),
+            dispatch_main_after,
+            || MainThreadMarker::new().is_some(),
+        )),
+        thread_topology: embedder::ThreadTopology::configured()
+            .map_err(|error| RunError::Window(error.into()))?,
+        launch_url: Arc::clone(&launch_url),
+        open_raster: Box::new(|fonts| {
+            raster::Rasterizer::create(raster::RasterOptions::default(), fonts)
+        }),
+        open_surface: Box::new(move |raster, target| {
+            Ok(Box::new(MetalSurface::open(
+                raster,
+                target,
+                dump_for_surface.clone(),
+                Arc::clone(&exit_for_surface),
+            )?))
+        }),
+        dump_list,
+        inspect,
+        devtools,
+        devtools_source_map,
+        inspect_dir,
+        log_dir: log_directory(),
+    })
     .map_err(RunError::Boot)?;
 
     let _update_mailbox = update_mailbox
@@ -1109,7 +1103,7 @@ pub fn run(
         )
     };
     vsync.attach(&window, mtm);
-    window.setTitle(&NSString::from_str("impasto counter"));
+    window.setTitle(&NSString::from_str("Impasto Gallery"));
     window.setAcceptsMouseMovedEvents(true);
     // SAFETY: `HostState` keeps this window retained until the process leaves `run`.
     unsafe { window.setReleasedWhenClosed(false) };
@@ -1235,6 +1229,10 @@ struct PngDecoder {
 }
 
 impl embedder::ImageDecoder for PngDecoder {
+    fn read_packaged_asset(&self, relative: &str, limit: usize) -> Result<Arc<[u8]>, String> {
+        embedder::read_packaged_file(&self.directory, relative, limit)
+    }
+
     fn decode(&self, source: &str) -> Result<embedder::ImageHandle, embedder::ImageError> {
         self.decode_at(source, 1)
     }

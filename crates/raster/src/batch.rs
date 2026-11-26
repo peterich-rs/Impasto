@@ -167,16 +167,72 @@ pub const IMAGE_NEAREST: u32 = 1;
 pub const IMAGE_PREMULTIPLIED_SRGB: u32 = 2;
 pub const IMAGE_BASE_LEVEL: u32 = 4;
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GpuMeshBuffer {
-    pub vertices: wgpu::Buffer,
-    pub indices: wgpu::Buffer,
+    pub vertices: crate::arena::VertexSlice,
+    pub indices: crate::arena::VertexSlice,
 }
 
-/// A tessellated path's range in its picture's resident buffers.
+impl GpuMeshBuffer {
+    pub fn upload(
+        gpu: &crate::gpu::Gpu,
+        vertices: &[[f32; 3]],
+        indices: &[u32],
+    ) -> Result<Self, crate::Status> {
+        use crate::{arena::VertexSlice, pipelines};
+        gpu.hot_validation(|| {
+            Ok(Self {
+                vertices: VertexSlice::whole(pipelines::buffer_from(
+                    gpu,
+                    "mesh vertices",
+                    bytemuck::cast_slice(vertices),
+                    wgpu::BufferUsages::VERTEX,
+                )?),
+                indices: VertexSlice::whole(pipelines::buffer_from(
+                    gpu,
+                    "mesh indices",
+                    bytemuck::cast_slice(indices),
+                    wgpu::BufferUsages::INDEX,
+                )?),
+            })
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum MeshBuffer {
+    Resident(GpuMeshBuffer),
+    Streamed {
+        id: u64,
+        vertices: Box<[[f32; 3]]>,
+        indices: Box<[u32]>,
+        resident: std::sync::OnceLock<GpuMeshBuffer>,
+    },
+}
+
+impl PartialEq for MeshBuffer {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Resident(a), Self::Resident(b)) => a == b,
+            (Self::Streamed { id: a, .. }, Self::Streamed { id: b, .. }) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl MeshBuffer {
+    pub fn resident(&self) -> Option<&GpuMeshBuffer> {
+        match self {
+            Self::Resident(buffer) => Some(buffer),
+            Self::Streamed { resident, .. } => resident.get(),
+        }
+    }
+}
+
+/// A tessellated path's range in its picture's geometry.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mesh {
-    pub buffer: std::sync::Arc<std::sync::OnceLock<GpuMeshBuffer>>,
+    pub buffer: std::sync::Arc<std::sync::OnceLock<MeshBuffer>>,
     pub indices: std::ops::Range<u32>,
     pub stencil_fill: Option<StencilFill>,
     pub bounds: [f32; 4],

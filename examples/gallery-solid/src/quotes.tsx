@@ -1,6 +1,6 @@
-import { installDevtools } from "@impasto/devtools";
-import { getInitialURL } from "@impasto/linking";
+import { enabled as hasDevtools } from "@impasto/devtools/native";
 import { boot, scene } from "@impasto/solid-renderer";
+import { getInitialURL } from "@impasto/linking";
 import {
   installThemePort,
   OverlayRoot,
@@ -11,43 +11,38 @@ import { createAccount } from "./state/account.ts";
 import { setAccount } from "./state/account-ref.ts";
 import { loadSettings } from "./state/settings.ts";
 import { loadWatchlist } from "./state/watchlist.ts";
-import { loadSearchHistory } from "./state/search-history.ts";
-import { App } from "./app.tsx";
-import { COMPOSITOR_LAB_URL, CompositorLabPage } from "./pages/compositor-lab.tsx";
-import { GPU_LAB_URL, GpuLabPage } from "./pages/gpu-lab.tsx";
+import { App, initialPath } from "./app.tsx";
 type SettingsHost = {
   settings(): PlatformSnapshot;
   onSettings(fn: (snap: PlatformSnapshot) => void): number;
   offSettings(id: number): void;
 };
 
-// Quotes paints a light surface. System dark mode must not turn Field and
-// Dialog into black controls on that page.
+// The app paints a dark surface. System light mode must not turn Field and
+// Dialog into white controls on top of it.
 const settingsHost = scene as unknown as SettingsHost;
-const light = (snap: PlatformSnapshot): PlatformSnapshot => ({
+const dark = (snap: PlatformSnapshot): PlatformSnapshot => ({
   ...snap,
-  brightness: "light",
+  brightness: "dark",
 });
 installThemePort({
-  settings: () => light(settingsHost.settings()),
-  onSettings: (fn) => settingsHost.onSettings((snap) => fn(light(snap))),
+  settings: () => dark(settingsHost.settings()),
+  onSettings: (fn) => settingsHost.onSettings((snap) => fn(dark(snap))),
   offSettings: (id) => settingsHost.offSettings(id),
 });
-const launchUrl = getInitialURL();
-if (launchUrl === GPU_LAB_URL || launchUrl === `${GPU_LAB_URL}/invalid`) {
-  boot(() => GpuLabPage({ invalidOnLaunch: launchUrl.endsWith("/invalid") }));
-} else if (launchUrl === COMPOSITOR_LAB_URL || launchUrl?.startsWith(`${COMPOSITOR_LAB_URL}/`)) {
-  boot(() => CompositorLabPage({ launchUrl }));
+void loadSettings();
+void loadWatchlist();
+const { engine } = wireQuotes();
+setAccount(createAccount(engine));
+const bootGallery = () => boot(() => (
+  <OverlayRoot>
+    <App initial={initialPath(getInitialURL())} />
+  </OverlayRoot>
+));
+if (hasDevtools()) {
+  void import("@impasto/devtools").then(({ installDevtools }) => {
+    installDevtools({ launcher: false });
+  }).catch(error => { console.error(error); }).then(bootGallery);
 } else {
-  void loadSettings();
-  void loadWatchlist();
-  void loadSearchHistory();
-  const { engine } = wireQuotes();
-  setAccount(createAccount(engine));
-  installDevtools({ launcher: false });
-  boot(() => (
-    <OverlayRoot>
-      <App />
-    </OverlayRoot>
-  ));
+  bootGallery();
 }

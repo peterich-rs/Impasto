@@ -427,8 +427,15 @@ fn configure(
         config.format = format;
         config.color_space = space;
     }
-    config.desired_maximum_frame_latency = std::env::var("IMPASTO_SURFACE_LATENCY")
-        .ok()
+    let latency = std::env::var("IMPASTO_SURFACE_LATENCY").ok();
+    // Android launches from the system runtime and does not inherit the build shell.
+    #[cfg(target_os = "android")]
+    let build_latency = option_env!("IMPASTO_SURFACE_LATENCY");
+    #[cfg(not(target_os = "android"))]
+    let build_latency = None;
+    config.desired_maximum_frame_latency = latency
+        .as_deref()
+        .or(build_latency)
         .and_then(|value| value.parse::<u32>().ok())
         .filter(|value| (1..=3).contains(value))
         .unwrap_or(2);

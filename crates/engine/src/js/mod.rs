@@ -12,7 +12,7 @@ mod player;
 
 pub use player::JsSession;
 
-pub use compiler::{compile, compile_with_native_exports, compile_with_registry};
+pub use compiler::{compile, compile_archive, compile_with_native_exports, compile_with_registry};
 pub use error::Error;
 pub use javascript::compiler::CompiledBytecode;
 

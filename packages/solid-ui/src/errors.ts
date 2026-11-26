@@ -11,7 +11,7 @@ export function formatError(error: unknown): string {
   if (!(error instanceof Error)) {
     return String(error);
   }
-  const stack = typeof error.stack === "string" ? error.stack : "";
+  const stack = stackOf(error);
   if (stack.length === 0) {
     return error.message;
   }
@@ -23,11 +23,17 @@ export function messageOf(error: unknown): string {
   }
   return String(error);
 }
+export function symbolizeStack(stack: string): string {
+  const hot = (globalThis as {
+    __impasto_hot?: { symbolize?: (stack: string) => string };
+  }).__impasto_hot;
+  return hot?.symbolize?.(stack) ?? stack;
+}
+
 export function stackOf(error: unknown): string {
-  if (error instanceof Error && typeof error.stack === "string") {
-    return error.stack;
-  }
-  return "";
+  return error instanceof Error && typeof error.stack === "string"
+    ? symbolizeStack(error.stack)
+    : "";
 }
 
 /** `window.onerror` and unhandled rejections. Safe to call more than once. */
@@ -50,7 +56,7 @@ export function installErrorHooks(): () => void {
     // QuickJS: the glue-layer rejection checker calls this hook with the
     // formatted reason and stack instead of a DOM event.
     global.__reportUnhandled = (text: string) => {
-      log("error", text);
+      log("error", symbolizeStack(text));
     };
   }
   return () => {

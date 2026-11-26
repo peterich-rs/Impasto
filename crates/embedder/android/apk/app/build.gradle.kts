@@ -103,7 +103,10 @@ android {
         applicationId = config.getProperty("applicationId", "dev.impasto.host")
         versionName = config.getProperty("versionName", "0.1.0")
         versionCode = config.getProperty("versionCode", "1").toInt()
-        manifestPlaceholders["impastoAppLabel"] = config.getProperty("appName", "Impasto")
+        manifestPlaceholders["impastoAppLabel"] = config.getProperty(
+            "appName",
+            if (generatedApp) "Impasto" else "Impasto Gallery",
+        )
         // libvulkan.so requires 24. The Cargo linker uses this same API level.
         minSdk = 24
         targetSdk = 35

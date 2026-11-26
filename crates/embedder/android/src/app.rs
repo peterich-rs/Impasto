@@ -833,7 +833,6 @@ fn android_boot(
         None => embedder::ThreadTopology::configured()?,
     };
     let (name, script) = load_script(&script_assets, requested.as_deref())?;
-    let gallery = name == "quotes.js";
     let modules = decode::read_bytes(&script_assets, c"app.modules")
         .map(|bytes| String::from_utf8(bytes).map_err(|_| SessionError::Runtime))
         .transpose()?
@@ -847,9 +846,14 @@ fn android_boot(
         .as_ref()
         .is_none_or(|enabled| enabled.iter().any(|name| name == "devtools"));
     let trace = decode::read_bytes(&script_assets, c"app.trace").is_some();
+    let ui_vm = bridge.vm.clone();
+    let raster_vm = bridge.vm.clone();
     Ok(Boot {
         font_family: FONT_FAMILY.to_string(),
         launch: Launch::Session(Box::new(move |open, host| {
+            if thread_topology == embedder::ThreadTopology::Split {
+                set_display_priority(&ui_vm, jni::jni_str!("ui"));
+            }
             // ActivityHost publishes the first focused resume after the view is attached.
             let host = if let Some(modules) = modules {
                 host.restrict(&modules)
@@ -900,6 +904,12 @@ fn android_boot(
         thread_topology,
         launch_url: Arc::clone(&launch_url),
         open_raster: Box::new(move |fonts| {
+            let name = if thread_topology == embedder::ThreadTopology::SharedRender {
+                jni::jni_str!("render")
+            } else {
+                jni::jni_str!("raster")
+            };
+            set_display_priority(&raster_vm, name);
             let mut raster = renderer.create_raster(fonts)?;
             if let Some(directory) = &pipeline_cache {
                 // SAFETY: cache_log_dir derives this directory from Context.getCacheDir().
@@ -914,8 +924,30 @@ fn android_boot(
         devtools_source_map: None,
         inspect_dir: None,
         log_dir,
+    })
+}
+
+fn set_display_priority(vm: &jni::JavaVM, name: &jni::strings::JNIStr) {
+    const THREAD_PRIORITY_DISPLAY: i32 = -4;
+    let result = vm.attach_current_thread_with_config(
+        || jni::AttachConfig::default().thread_name(name),
+        Some(8),
+        |env| {
+            let result = env.call_static_method(
+                jni::jni_str!("android/os/Process"),
+                jni::jni_str!("setThreadPriority"),
+                jni::jni_sig!("(I)V"),
+                &[jni::objects::JValue::Int(THREAD_PRIORITY_DISPLAY)],
+            );
+            if result.is_err() && env.exception_check() {
+                env.exception_clear();
+            }
+            result.map(|_| ())
+        },
+    );
+    if let Err(error) = result {
+        tracing::debug!(target: "impasto::shell", %error, "display thread priority unavailable");
     }
-    .with_gallery_gpu_view(gallery))
 }
 
 fn detach(handle: jlong) {
@@ -1150,6 +1182,16 @@ struct AssetDecoder {
 }
 
 impl embedder::ImageDecoder for AssetDecoder {
+    fn read_packaged_asset(&self, relative: &str, limit: usize) -> Result<Arc<[u8]>, String> {
+        let path = CString::new(format!("images/{relative}")).map_err(|error| error.to_string())?;
+        let asset = self
+            .assets
+            .open(&path)
+            .ok_or_else(|| "missing packaged asset".to_owned())?;
+        let length = asset.length();
+        engine::session::read_asset_bytes(asset, length, limit)
+    }
+
     fn decode(&self, source: &str) -> Result<embedder::ImageHandle, embedder::ImageError> {
         self.decode_at(source, 1)
     }
