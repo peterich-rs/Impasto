@@ -306,6 +306,65 @@ fn retained_offscreen_redraws_only_dirty_pixels_and_keeps_direct_present() {
 }
 
 #[test]
+fn changing_canvas_meshes_stream_and_partially_replay_through_a_path_clip() {
+    let Some(mut raster) = headless(FontLibrary::new()) else {
+        return;
+    };
+    let device = raster.device.as_mut().unwrap();
+    device.compositor.set_retain_offscreen(true);
+    let gpu = device.gpu.clone();
+    let size = PixelSize::new(160, 128);
+    let format = wgpu::TextureFormat::Bgra8Unorm;
+    let target = output(&gpu, format, size);
+    let view = target.create_view(&Default::default());
+    let make_commands = |color| {
+        let triangle = CanvasPath {
+            fill: FillRule::NonZero,
+            verbs: Arc::from([
+                PathVerb::Move(1.0, 1.0),
+                PathVerb::Line(16.0, 1.0),
+                PathVerb::Line(12.0, 17.0),
+                PathVerb::Close,
+            ]),
+        };
+        Arc::from([canvas(
+            vec![
+                CanvasOp::Clip {
+                    path: triangle.clone(),
+                },
+                fill_path(triangle, color, CanvasComposite::SourceOver),
+            ],
+            20.0,
+            20.0,
+        )])
+    };
+    let before = moved_picture(0.0, 1, make_commands([210, 50, 25, 255]));
+    let after = moved_picture(8.0, 2, make_commands([25, 50, 210, 255]));
+    raster.submit_layers(&before, 1.0, |_| None).unwrap();
+    raster.encode_and_submit(&view, format, size).unwrap();
+
+    let submit = raster.submit_layers(&after, 1.0, |_| None).unwrap();
+    assert_eq!(submit.stats.render.mesh_upload_bytes, 0);
+    raster.encode_and_submit(&view, format, size).unwrap();
+    assert!(raster.stats.render.partial_redraw);
+    assert!(raster.stats.render.mesh_upload_bytes > 0);
+    let partial = read_rgba(&gpu, &target, size).unwrap();
+    assert_eq!(pixel(&partial, 160, 4, 3), [0; 4]);
+    assert_eq!(pixel(&partial, 160, 19, 3), [210, 50, 25, 255]);
+
+    raster
+        .device
+        .as_mut()
+        .unwrap()
+        .compositor
+        .set_retain_offscreen(false);
+    raster.encode_and_submit(&view, format, size).unwrap();
+    assert_eq!(read_rgba(&gpu, &target, size).unwrap(), partial);
+    raster.encode_and_submit(&view, format, size).unwrap();
+    assert_eq!(raster.stats.render.mesh_upload_bytes, 0);
+}
+
+#[test]
 #[ignore = "GPU microbenchmark"]
 fn bench_p3_cold_canvas_route() {
     let mut raster = benchmark::headless(FontLibrary::new());

@@ -75,6 +75,27 @@ fn build(
                 };
                 ops.push(CanvasOp::Fill { path, paint });
             }
+            RecOp::SolidRect {
+                rect,
+                radius,
+                color,
+                alpha,
+            } => {
+                if let (Some(x), Some(y), Some(w), Some(h), Some(radius)) = (
+                    narrow(rect.x0),
+                    narrow(rect.y0),
+                    narrow(rect.width()),
+                    narrow(rect.height()),
+                    narrow(*radius),
+                ) {
+                    ops.push(CanvasOp::SolidRect {
+                        bounds: [x, y, w, h],
+                        radius,
+                        color: *color,
+                        alpha: super::paint::alpha_byte(*alpha),
+                    });
+                }
+            }
             RecOp::Stroke {
                 path,
                 style,
@@ -540,7 +561,10 @@ fn list_bytes(ops: &[CanvasOp], images: &[CanvasImageRef]) -> usize {
             CanvasOp::Image(image) => {
                 bytes = bytes.saturating_add(image.source.len());
             }
-            CanvasOp::Save | CanvasOp::Restore | CanvasOp::Clear { .. } => {}
+            CanvasOp::Save
+            | CanvasOp::Restore
+            | CanvasOp::Clear { .. }
+            | CanvasOp::SolidRect { .. } => {}
         }
     }
     for image in images {

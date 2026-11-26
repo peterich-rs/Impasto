@@ -35,6 +35,15 @@ type SpanBrush = Option<u32>;
 
 const SHAPE_CAP: usize = 2048;
 const FROZEN_CAP: usize = 16;
+const CANVAS_SHAPE_CAP: usize = 1024;
+const CANVAS_SHAPE_MAX_BYTES: usize = 256;
+
+#[derive(PartialEq, Eq, Hash)]
+struct CanvasShapeStyle {
+    revision: u64,
+    style: TextStyle,
+    size: u32,
+}
 
 /// Geometry a shaping cache entry depends on. Width and color are excluded.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -73,6 +82,8 @@ pub struct ParleyShaper {
     layout: LayoutContext<SpanBrush>,
     fonts: FontContext,
     shapes: HashMap<ShapeId, ShapeEntry>,
+    canvas_shapes: HashMap<CanvasShapeStyle, HashMap<String, CanvasTextLayout>>,
+    canvas_shape_count: usize,
     stats: ShapeStats,
 }
 
@@ -92,6 +103,8 @@ impl ParleyShaper {
             layout: LayoutContext::new(),
             fonts: FontContext::new(),
             shapes: HashMap::new(),
+            canvas_shapes: HashMap::new(),
+            canvas_shape_count: 0,
             stats: ShapeStats::default(),
         }
     }
@@ -113,6 +126,8 @@ impl ParleyShaper {
         match self.library.register(&mut self.fonts, bytes, family) {
             Ok(_) => {
                 self.shapes.clear();
+                self.canvas_shapes.clear();
+                self.canvas_shape_count = 0;
                 true
             }
             Err(status) => {
@@ -876,6 +891,23 @@ impl Shaper for ParleyShaper {
         if !font_size.is_finite() || font_size <= 0.0 {
             return None;
         }
+        let key = (text.len() <= CANVAS_SHAPE_MAX_BYTES).then(|| CanvasShapeStyle {
+            revision: self.library.revision(),
+            style: style.clone(),
+            size: font_size.to_bits(),
+        });
+        if let Some(cached) = key
+            .as_ref()
+            .and_then(|key| self.canvas_shapes.get(key))
+            .and_then(|by_text| by_text.get(text))
+        {
+            self.stats.note_shape(true);
+            self.stats.note_freeze(true);
+            return Some(cached.clone());
+        }
+        self.stats.note_shape(false);
+        self.stats.note_freeze(false);
+
         // Canvas text is one unbreakable line. An empty string still reports
         // the font box, measured on a space, and no glyphs.
         let probe = if text.is_empty() { " " } else { text };
@@ -900,10 +932,22 @@ impl Shaper for ParleyShaper {
         } else {
             freeze_paragraph(&layout, &self.library, &[])
         };
-        Some(CanvasTextLayout {
+        let result = CanvasTextLayout {
             metrics: result,
             shaped,
-        })
+        };
+        if let Some(key) = key {
+            if self.canvas_shape_count >= CANVAS_SHAPE_CAP {
+                self.canvas_shapes.clear();
+                self.canvas_shape_count = 0;
+            }
+            self.canvas_shapes
+                .entry(key)
+                .or_default()
+                .insert(text.to_owned(), result.clone());
+            self.canvas_shape_count += 1;
+        }
+        Some(result)
     }
 }
 
@@ -913,6 +957,26 @@ mod tests {
     use engine::scene::TextStyle;
     use engine::text::{MetricsKey, Shaper};
     use std::sync::Arc;
+
+    #[test]
+    fn canvas_text_reuses_frozen_glyphs_and_separates_size_and_direction() {
+        let mut shaper = ParleyShaper::new(crate::FontLibrary::new());
+        let style = TextStyle::default();
+        let first = shaper.shape_canvas("交易", &style, 12.0).unwrap();
+        let cached = shaper.shape_canvas("交易", &style, 12.0).unwrap();
+        assert_eq!(cached, first);
+        let stats = shaper.take_shape_stats();
+        assert_eq!(stats.built, 1);
+        assert_eq!(stats.paint_hit, 1);
+
+        shaper.shape_canvas("交易", &style, 13.0).unwrap();
+        let rtl = TextStyle {
+            direction_rtl: true,
+            ..style
+        };
+        shaper.shape_canvas("交易", &rtl, 12.0).unwrap();
+        assert_eq!(shaper.take_shape_stats().built, 2);
+    }
 
     #[cfg(target_os = "macos")]
     fn macos_font(path: &str) -> Option<Arc<[u8]>> {

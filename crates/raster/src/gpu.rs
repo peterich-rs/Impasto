@@ -331,8 +331,7 @@ impl Gpu {
             },
             validate_frames: match options.validation {
                 ValidationMode::Auto => {
-                    cfg!(any(test, debug_assertions))
-                        || std::env::var("IMPASTO_GPU_VALIDATE").as_deref() == Ok("1")
+                    cfg!(test) || std::env::var("IMPASTO_GPU_VALIDATE").as_deref() == Ok("1")
                 }
                 ValidationMode::Strict => true,
                 ValidationMode::AsyncOnly => false,

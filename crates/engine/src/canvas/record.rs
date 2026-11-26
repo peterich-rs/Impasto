@@ -237,6 +237,12 @@ pub(crate) enum RecOp {
         composite: CanvasComposite,
         ctm: Affine,
     },
+    SolidRect {
+        rect: Rect,
+        radius: f64,
+        color: [u8; 4],
+        alpha: f64,
+    },
     Stroke {
         path: BezPath,
         style: StrokeSnap,
@@ -305,6 +311,8 @@ impl Recording<'_> {
 /// Records one draw. The path survives `save` / `restore`.
 pub struct Recorder<'a> {
     path: BezPath,
+    /// A single primitive stays valid until a new path segment is recorded.
+    fill_primitive: Option<(usize, Rect, f64)>,
     state: DrawState,
     stack: Vec<DrawState>,
     ops: Vec<RecOp>,
@@ -325,6 +333,7 @@ impl<'a> Recorder<'a> {
     pub fn new(size: CanvasSize, env: PaintEnv, budget: &'a Budget) -> Self {
         Self {
             path: BezPath::new(),
+            fill_primitive: None,
             state: DrawState::new(env.direction_rtl),
             stack: Vec::new(),
             ops: Vec::new(),
@@ -382,6 +391,7 @@ impl<'a> Recorder<'a> {
 
     pub fn begin_path(&mut self) {
         self.path.truncate(0);
+        self.fill_primitive = None;
     }
 
     pub fn close_path(&mut self) -> Result<(), CanvasError> {
@@ -488,10 +498,11 @@ impl<'a> Recorder<'a> {
     }
 
     pub fn rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> Result<(), CanvasError> {
-        let Some(path) = self.user_rect(x, y, w, h) else {
+        let Some((x, y, w, h)) = normalize_rect(x, y, w, h) else {
             return Ok(());
         };
-        self.append_user(&path, false)
+        let rect = Rect::new(x, y, x + w, y + h);
+        self.append_primitive(&rect.to_path(0.1), false, rect, 0.0)
     }
 
     pub fn round_rect(
@@ -515,7 +526,12 @@ impl<'a> Recorder<'a> {
             Rect::new(x, y, x + w, y + h),
             RoundedRectRadii::new(fitted[0], fitted[1], fitted[2], fitted[3]),
         );
-        self.append_user(&rect.to_path(self.tolerance()), false)
+        let path = rect.to_path(self.tolerance());
+        if fitted.iter().all(|radius| *radius == fitted[0]) {
+            self.append_primitive(&path, false, rect.rect(), fitted[0])
+        } else {
+            self.append_user(&path, false)
+        }
     }
 
     pub fn arc(
@@ -538,7 +554,13 @@ impl<'a> Recorder<'a> {
         }
         let sweep = path::arc_sweep(start, end, ccw);
         let arc = kurbo::Arc::new((cx, cy), (radius, radius), start, sweep, 0.0);
-        self.append_user(&arc.to_path(self.tolerance()), true)
+        let path = arc.to_path(self.tolerance());
+        if radius > 0.0 && sweep.abs() == std::f64::consts::TAU {
+            let rect = Rect::new(cx - radius, cy - radius, cx + radius, cy + radius);
+            self.append_primitive(&path, true, rect, radius)
+        } else {
+            self.append_user(&path, true)
+        }
     }
 
     #[expect(
@@ -791,7 +813,15 @@ impl<'a> Recorder<'a> {
         if self.path.is_empty() {
             return Ok(());
         }
-        self.charge(self.path.elements().len().saturating_mul(32))?;
+        let bytes = self.path.elements().len().saturating_mul(32);
+        if let Some((segments, rect, radius)) = self.fill_primitive
+            && segments == self.segments
+            && let Some(op) = self.solid_rect(rect, radius, &self.state.fill)
+        {
+            self.charge(bytes)?;
+            return self.push_only(op);
+        }
+        self.charge(bytes)?;
         let path = self.path.clone();
         self.push_only(RecOp::Fill {
             path,
@@ -820,6 +850,10 @@ impl<'a> Recorder<'a> {
     }
 
     pub fn stroke(&mut self) -> Result<(), CanvasError> {
+        if let Some(op) = self.stroke_line_rect(self.path.elements()) {
+            self.charge(64)?;
+            return self.push_only(op);
+        }
         self.stroke_device(self.path.clone())
     }
 
@@ -846,19 +880,12 @@ impl<'a> Recorder<'a> {
     }
 
     pub fn fill_rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> Result<(), CanvasError> {
-        let Some(path) = self.user_rect(x, y, w, h) else {
+        let Some((x, y, w, h)) = normalize_rect(x, y, w, h) else {
             return Ok(());
         };
-        let device = transform_path(&self.state.ctm, &path);
         self.charge(64)?;
-        self.push_only(RecOp::Fill {
-            path: device,
-            fill: FillRule::NonZero,
-            paint: self.state.fill.bake(),
-            alpha: self.state.alpha,
-            composite: self.state.composite,
-            ctm: self.state.ctm,
-        })
+        let rect = Rect::new(x, y, x + w, y + h);
+        self.push_only(self.fill_rect_op(rect, &self.state.fill.bake()))
     }
 
     /// Fills the rectangles in input order with the current paint.
@@ -884,15 +911,9 @@ impl<'a> Recorder<'a> {
         self.charge(count * 64)?;
         let paint = self.state.fill.bake();
         for rect in paths {
-            if let Some(path) = self.user_rect(rect[0], rect[1], rect[2], rect[3]) {
-                self.ops.push(RecOp::Fill {
-                    path: transform_path(&self.state.ctm, &path),
-                    fill: FillRule::NonZero,
-                    paint: paint.clone(),
-                    alpha: self.state.alpha,
-                    composite: self.state.composite,
-                    ctm: self.state.ctm,
-                });
+            if let Some((x, y, w, h)) = normalize_rect(rect[0], rect[1], rect[2], rect[3]) {
+                let rect = Rect::new(x, y, x + w, y + h);
+                self.ops.push(self.fill_rect_op(rect, &paint));
             }
         }
         Ok(())
@@ -1056,6 +1077,62 @@ impl<'a> Recorder<'a> {
         })
     }
 
+    fn fill_rect_op(&self, rect: Rect, paint: &PaintSource) -> RecOp {
+        if let Some((rect, radius)) = map_primitive(self.state.ctm, rect, 0.0)
+            && let Some(op) = self.solid_rect(rect, radius, &self.state.fill)
+        {
+            return op;
+        }
+        RecOp::Fill {
+            path: transform_path(&self.state.ctm, &rect.to_path(0.1)),
+            fill: FillRule::NonZero,
+            paint: paint.clone(),
+            alpha: self.state.alpha,
+            composite: self.state.composite,
+            ctm: self.state.ctm,
+        }
+    }
+
+    fn solid_rect(&self, rect: Rect, radius: f64, paint: &LivePaint) -> Option<RecOp> {
+        let LivePaint::Color(color) = paint else {
+            return None;
+        };
+        (self.state.composite == CanvasComposite::SourceOver).then_some(RecOp::SolidRect {
+            rect,
+            radius,
+            color: *color,
+            alpha: self.state.alpha,
+        })
+    }
+
+    fn stroke_line_rect(&self, elements: &[PathEl]) -> Option<RecOp> {
+        let [PathEl::MoveTo(start), PathEl::LineTo(end)] = elements else {
+            return None;
+        };
+        let [a, b, c, d, ..] = self.state.ctm.as_coeffs();
+        if b != 0.0
+            || c != 0.0
+            || a == 0.0
+            || d == 0.0
+            || path::invertible(self.state.ctm).is_none()
+            || !self.state.dash.is_empty()
+            || self.state.cap != LineCap::Butt
+        {
+            return None;
+        }
+        let width = self.state.line_width * 0.5;
+        let rect = if start.x == end.x && start.y != end.y {
+            let half = width * a.abs();
+            Rect::from_points((start.x - half, start.y), (start.x + half, end.y))
+        } else if start.y == end.y && start.x != end.x {
+            let half = width * d.abs();
+            Rect::from_points((start.x, start.y - half), (end.x, start.y + half))
+        } else {
+            return None;
+        };
+        self.solid_rect(rect, 0.0, &self.state.stroke)
+    }
+
     fn stroke_device(&mut self, path: BezPath) -> Result<(), CanvasError> {
         if path.is_empty() {
             return Ok(());
@@ -1105,6 +1182,22 @@ impl<'a> Recorder<'a> {
     fn user_rect(&self, x: f64, y: f64, w: f64, h: f64) -> Option<BezPath> {
         let (x, y, w, h) = normalize_rect(x, y, w, h)?;
         Some(Rect::new(x, y, x + w, y + h).to_path(0.1))
+    }
+
+    fn append_primitive(
+        &mut self,
+        path: &BezPath,
+        connect: bool,
+        rect: Rect,
+        radius: f64,
+    ) -> Result<(), CanvasError> {
+        let empty = self.path.is_empty();
+        self.append_user(path, connect)?;
+        if empty {
+            self.fill_primitive = map_primitive(self.state.ctm, rect, radius)
+                .map(|(rect, radius)| (self.segments, rect, radius));
+        }
+        Ok(())
     }
 
     fn append_user(&mut self, path: &BezPath, connect: bool) -> Result<(), CanvasError> {
@@ -1172,6 +1265,18 @@ impl<'a> Recorder<'a> {
         self.ops.push(op);
         Ok(())
     }
+}
+
+fn map_primitive(ctm: Affine, rect: Rect, radius: f64) -> Option<(Rect, f64)> {
+    let [a, b, c, d, ..] = ctm.as_coeffs();
+    if b != 0.0 || c != 0.0 || a == 0.0 || d == 0.0 || (radius > 0.0 && a.abs() != d.abs()) {
+        return None;
+    }
+    let mapped = Rect::from_points(
+        ctm * Point::new(rect.x0, rect.y0),
+        ctm * Point::new(rect.x1, rect.y1),
+    );
+    Some((mapped, radius * a.abs()))
 }
 
 pub(crate) fn kurbo_stroke(style: &StrokeSnap) -> kurbo::Stroke {

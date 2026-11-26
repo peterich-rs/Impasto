@@ -190,9 +190,9 @@ pub(crate) struct GpuCaps {
 
 #### 3.2.3 热路径同步 Error Scope 移除
 
-当前 [`encode_and_submit`](../crates/raster/src/lib.rs#L357) 和 [`encode_metal_slice` / `wait_for_metal_schedule`](../crates/raster/src/metal.rs#L88-L142) 每帧都会执行 `gpu.validation(...)`，每次展开 3 层 `push_error_scope` 并执行 3 次 `pollster::block_on(pop())`，造成不必要的主线程驱动轮询与同步毛刺。
+普通帧编码、提交和 Canvas Mesh 上传通过 `gpu.hot_validation(...)` 检查异步 GPU 状态。严格模式逐次检查三个 error scope。每次提交后调用一次非阻塞 `device.poll(Poll)` 推进 StagingBelt 的回收回调。
 
-改造方式：
+错误处理路径：
 
 1. 在 `Gpu` 内增加原子状态：`oom: Arc<AtomicBool>` 与 `uncaptured_error: Arc<AtomicBool>`。
 2. 在 `device.on_uncaptured_error` 回调中：
@@ -205,7 +205,7 @@ pub(crate) struct GpuCaps {
    - 若调用方明确调用了 `device.destroy()` 后进入渲染（如 [`tests.rs:348`](../crates/raster/src/tests.rs#L348)），`is_lost()` 在编码/提交后通过一次非阻塞 `self.device.poll(wgpu::PollType::Poll)`（仅在 `cfg!(test)` 或出错前触发，或在 `render_rgba` / `present` 返回后轮询）仍可立即捕获 `Status::DeviceLost`。
 4. **保留严格 `gpu.validation(...)` 的位置**：
    - 冷路径：`create_surface`、`resize`、`PipelineCache::get`、`render_rgba` 创建临时截图纹理时继续保留；
-   - 调试开关：当 `cfg!(debug_assertions)`、`cfg!(test)` 或环境变量 `IMPASTO_GPU_VALIDATE=1` 启用时，热路径依然可通过 `gpu.hot_validation(...)` 走同步检查，开发期和 CI 测试零盲区，Release 生产帧零同步等待。
+   - 调试开关：当 `cfg!(test)` 或环境变量 `IMPASTO_GPU_VALIDATE=1` 启用时，热路径依然可通过 `gpu.hot_validation(...)` 走同步检查，开发期和 CI 测试零盲区，Release 生产帧零同步等待。
 
 ---
 
@@ -684,7 +684,7 @@ P0 改造规则：
 | **64px 分桶离屏纹理引发边缘垃圾像素渗色** | 复用池中曾被更大图层写过的内容落在当前逻辑区之外，被 `linear_sampler` 采入 | 所有 `blur.wgsl` 采样均强制带入精确 `uv_min/uv_max`（内缩半 texel）进行硬件坐标钳位；子目标严格按逻辑大小设置 `set_scissor_rect` |
 | **iOS 多切片编码时 Slab 或图集扩层导致前切片引用断裂** | 同一帧 Slice 0 完成后，Slice 1 触发 `FrameArena` 或 `AtlasArray` 扩容 | `FrameArena` 采用只追加 Chunked Slab 且仅在 `begin_frame` 重置；`AtlasArray` 扩层时立刻拷贝旧层并保留 `retired_this_frame` 到 `flush` 双写 |
 | **`Opacity`/`Blur`/`Blend` 错用布局框裁掉溢出内容** | 带 `box_shadows`、负 `margin` 子元素或 `outline` 的组件开启透明度/模糊 | 严禁信任节点布局 `x, y, w, h`；统一由 `CompiledPicture` 编译期计算的保守绘制边界 `PictureBounds` 驱动紧边界分配 |
-| **移除热路径 `push_error_scope` 后测试难以及时感知设备丢失/OOM** | `device.destroy()` 紧跟 `render_rgba` 或持续内存溢出 | `on_uncaptured_error` 设置原子标志 + `poll(Poll)` 按需推进状态，并在 `cfg!(test)` / `debug_assertions` / `IMPASTO_GPU_VALIDATE=1` 保留严格逐帧作用域校验 |
+| **移除热路径 `push_error_scope` 后测试难以及时感知设备丢失/OOM** | `device.destroy()` 紧跟 `render_rgba` 或持续内存溢出 | `on_uncaptured_error` 设置原子标志 + `poll(Poll)` 按需推进状态，并在 `cfg!(test)` / `IMPASTO_GPU_VALIDATE=1` 保留严格逐帧作用域校验 |
 | **图集回收后 `1px` gutter 残影渗色** | 长期滚动或字体切换导致页满触发 `recycle` | `recycle` 时强制 `shadow.fill(0)` 并标记 `dirty_bands = u16::MAX` 整页写回清零 GPU 纹理 |
 
 ### 7.2 与 P1 阶段的平滑衔接

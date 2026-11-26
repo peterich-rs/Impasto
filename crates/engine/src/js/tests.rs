@@ -5041,7 +5041,13 @@ fn canvas_fills(frame: &session::FrameOutput) -> usize {
             count += list
                 .ops()
                 .iter()
-                .filter(|op| matches!(op, crate::scene::CanvasOp::Fill { .. }))
+                .filter(|op| {
+                    matches!(
+                        op,
+                        crate::scene::CanvasOp::Fill { .. }
+                            | crate::scene::CanvasOp::SolidRect { .. }
+                    )
+                })
                 .count();
         }
     });
@@ -5469,7 +5475,7 @@ import * as core from "scene";
                     crate::scene::CanvasOp::Clip { path } if path.verbs.is_empty() => {
                         saw_clip = true;
                     }
-                    crate::scene::CanvasOp::Fill { .. } if saw_clip => fill_after = true,
+                    crate::scene::CanvasOp::SolidRect { .. } if saw_clip => fill_after = true,
                     _ => {}
                 }
             }

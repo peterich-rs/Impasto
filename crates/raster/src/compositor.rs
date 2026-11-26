@@ -38,7 +38,8 @@ use crate::{FontLibrary, Status, textures::TextureStore};
 use retained::RetainedRoot;
 use subtree_cache::{CacheCandidate, CacheSlot, MIN_RESAMPLED_BLUR, SubtreeCache};
 
-const POOL_LIMIT: usize = 16;
+const POOL_LIMIT: usize = 48;
+const MASK_LIMIT: usize = 16;
 const POOL_BYTES: u64 = 64 * 1024 * 1024;
 
 pub(crate) struct Compositor {
@@ -95,7 +96,13 @@ struct MaskShapeKey {
     radius: u32,
     corners: Option<[u32; 5]>,
     transform: [u32; 6],
-    mesh: Option<(wgpu::Buffer, std::ops::Range<u32>)>,
+    mesh: Option<(MaskMeshKey, std::ops::Range<u32>)>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum MaskMeshKey {
+    Resident(VertexSlice),
+    Streamed(u64),
 }
 
 /// CPU-side encoding counters from the last rendered frame.
@@ -440,6 +447,7 @@ impl Compositor {
         });
         self.render_stats.pooled_texture_bytes = self.pool.iter().map(Image::bytes).sum();
         self.render_stats.buffers_created += self.arena.buffers_created;
+        self.render_stats.mesh_upload_bytes += self.arena.mesh_upload_bytes;
         self.render_stats.bind_groups_created += self.arena.bind_groups_created;
         let [vertex_bytes, uniform_bytes, stop_bytes, extra_bytes] = self.arena.bytes_uploaded();
         self.render_stats.vertex_bytes += vertex_bytes;
@@ -461,6 +469,8 @@ impl Compositor {
 
     pub fn submitted(&mut self, gpu: &Gpu) {
         self.arena.submitted(gpu);
+        // Drive StagingBelt recall callbacks even without strict frame validation.
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
         self.resident.clear_uploads();
         self.subtrees.submitted();
         self.backdrops.submitted();
@@ -1434,7 +1444,7 @@ impl Frame<'_> {
         if self.main_inputs.contains(&image.view) {
             self.main_release_bytes += image.bytes();
             self.main_releases.push(image);
-            if self.main_release_bytes >= POOL_BYTES {
+            if self.main_releases.len() >= POOL_LIMIT || self.main_release_bytes >= POOL_BYTES {
                 self.flush_target(&self.main.clone());
             }
             return;
@@ -2239,10 +2249,14 @@ impl Frame<'_> {
         }) {
             return None;
         }
+        let target_area = self
+            .damage_scissor
+            .filter(|_| target.view == self.main)
+            .unwrap_or_else(|| target.area());
         let area = match clip.scissor {
             Some(bounds) => scissor(bounds, self.scene.scale, self.size)
-                .and_then(|bounds| intersect_pixels(bounds, target.area())),
-            None => Some(target.area()),
+                .and_then(|bounds| intersect_pixels(bounds, target_area)),
+            None => Some(target_area),
         };
         let Some(area) = area else {
             return Some(Coverage {
@@ -2329,7 +2343,13 @@ impl Frame<'_> {
                     }),
                     transform: shape.transform.map(f32::to_bits),
                     mesh: shape.mesh.as_deref().and_then(|mesh| {
-                        Some((mesh.buffer.get()?.indices.clone(), mesh.indices.clone()))
+                        let key = match mesh.buffer.get()? {
+                            batch::MeshBuffer::Resident(buffer) => {
+                                MaskMeshKey::Resident(buffer.indices.clone())
+                            }
+                            batch::MeshBuffer::Streamed { id, .. } => MaskMeshKey::Streamed(*id),
+                        };
+                        Some((key, mesh.indices.clone()))
                     }),
                 })
                 .collect(),
@@ -2372,7 +2392,7 @@ impl Frame<'_> {
             }
         }
         if let Some(image) = intersection {
-            if self.compositor.masks.len() >= POOL_LIMIT
+            if self.compositor.masks.len() >= MASK_LIMIT
                 && let Some(old) = self.compositor.masks.keys().next().cloned()
                 && let Some(evicted) = self.compositor.masks.remove(&old)
             {
@@ -3141,7 +3161,11 @@ impl Frame<'_> {
             let (page, index) =
                 self.paint(stops, paint.extra(FrameArena::stop_index(stops), ramp))?;
             paints.push(paint.vertex(index));
-            calls.push((mesh, page));
+            let geometry = self
+                .compositor
+                .arena
+                .mesh(self.gpu, mesh.buffer.get().ok_or(Status::BadScene)?)?;
+            calls.push((mesh, page, geometry));
         }
         let capacity = FrameArena::vertex_limit::<RectVertex>(self.gpu);
         let uploads = paints
@@ -3152,10 +3176,10 @@ impl Frame<'_> {
         for chunk in calls.chunks(capacity) {
             let mut groups = Vec::new();
             let mut first = 0;
-            while let Some((_, page)) = chunk.get(first) {
+            while let Some((_, page, _)) = chunk.get(first) {
                 let run = chunk[first..]
                     .iter()
-                    .take_while(|(_, next)| next.same_bindings(*page))
+                    .take_while(|(_, next, _)| next.same_bindings(*page))
                     .count();
                 groups.push((first, first + run, self.globals(view, Extra::Paint(*page))));
                 first += run;
@@ -3169,7 +3193,7 @@ impl Frame<'_> {
         self.count_pass(&resolved.view);
         let filled = calls
             .iter()
-            .filter(|(mesh, _)| mesh.stencil_fill.is_some())
+            .filter(|(mesh, _, _)| mesh.stencil_fill.is_some())
             .count();
         let stencil = (filled != 0 || !clip.stencil.is_empty())
             .then(|| self.take_attachment(area, pipelines::CANVAS_STENCIL, samples));
@@ -3177,7 +3201,11 @@ impl Frame<'_> {
         for shape in &clip.stencil {
             let mesh = shape.mesh.as_ref().ok_or(Status::BadScene)?;
             let view = self.transform(&resolved, shape.transform, &Coverage::default())?;
-            clip_triangles.push((mesh, self.globals(view, Extra::None)));
+            let geometry = self
+                .compositor
+                .arena
+                .mesh(self.gpu, mesh.buffer.get().ok_or(Status::BadScene)?)?;
+            clip_triangles.push((mesh, self.globals(view, Extra::None), geometry));
         }
         let target_state = Target { format, samples };
         let clip_writer = if !clip_triangles.is_empty() {
@@ -3201,7 +3229,7 @@ impl Frame<'_> {
             BlendKey::SrcOver,
         )?;
         let mut winding = [None, None];
-        for &(mesh, _) in &calls {
+        for (mesh, _, _) in &calls {
             if let Some(fill) = &mesh.stencil_fill {
                 let (index, kind) = match fill.rule {
                     engine::scene::FillRule::NonZero => (0, PipelineKind::StencilNonZero),
@@ -3277,12 +3305,11 @@ impl Frame<'_> {
             set_scissor(&mut pass, Some([0, 0, area[2], area[3]]));
             if let Some(writer) = &clip_writer {
                 pass.set_pipeline(writer);
-                for (reference, (mesh, globals)) in (0u32..).zip(&clip_triangles) {
-                    let buffers = mesh.buffer.get().ok_or(Status::BadScene)?;
+                for (reference, (mesh, globals, buffers)) in (0u32..).zip(&clip_triangles) {
                     pass.set_stencil_reference(reference);
                     pass.set_bind_group(0, &globals.group, globals.offsets());
-                    pass.set_vertex_buffer(0, buffers.vertices.slice(..));
-                    pass.set_index_buffer(buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.set_vertex_buffer(0, buffers.vertices.slice());
+                    pass.set_index_buffer(buffers.indices.slice(), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(mesh.indices.clone(), 0, 0..1);
                 }
                 pass.set_stencil_reference(draw_count(clip_triangles.len())?);
@@ -3296,12 +3323,13 @@ impl Frame<'_> {
                 pass.set_vertex_buffer(1, vertices.slice());
                 for (first, end, globals) in groups {
                     pass.set_bind_group(0, &globals.group, globals.offsets());
-                    for (index, (mesh, _)) in chunk.iter().enumerate().take(*end).skip(*first) {
-                        let buffers = mesh.buffer.get().ok_or(Status::BadScene)?;
+                    for (index, (mesh, _, buffers)) in
+                        chunk.iter().enumerate().take(*end).skip(*first)
+                    {
                         if last != Some(buffers) {
-                            pass.set_vertex_buffer(0, buffers.vertices.slice(..));
+                            pass.set_vertex_buffer(0, buffers.vertices.slice());
                             pass.set_index_buffer(
-                                buffers.indices.slice(..),
+                                buffers.indices.slice(),
                                 wgpu::IndexFormat::Uint32,
                             );
                             last = Some(buffers);
