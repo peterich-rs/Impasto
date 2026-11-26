@@ -1,13 +1,14 @@
 //! Owned draw commands for a Canvas pass with MSAA resolve and optional stencil.
 
-use super::{Image, PassStamps, set_scissor};
+use super::{Attachment, Frame, Image, PassBinding, PassStamps, PhysicalAttachments, set_scissor};
+use crate::Status;
 use crate::arena::{DynamicGroup, VertexSlice};
 use crate::batch::GpuMeshBuffer;
 
 pub(super) struct CanvasPass {
-    resolved: wgpu::TextureView,
-    multisample: Option<wgpu::TextureView>,
-    stencil: Option<wgpu::TextureView>,
+    resolved: Attachment,
+    multisample: Option<Attachment>,
+    stencil: Option<Attachment>,
     pub(super) stamps: Option<PassStamps>,
     area: [u32; 4],
     commands: Vec<Command>,
@@ -16,7 +17,7 @@ pub(super) struct CanvasPass {
 enum Command {
     Pipeline(wgpu::RenderPipeline),
     Globals(DynamicGroup),
-    Material(wgpu::BindGroup),
+    Material(PassBinding),
     Geometry(GpuMeshBuffer),
     Paint(VertexSlice),
     Stencil(u32),
@@ -48,7 +49,7 @@ impl CanvasPass {
         self.commands.push(Command::Globals(globals.clone()));
     }
 
-    pub(super) fn material(&mut self, group: &wgpu::BindGroup) {
+    pub(super) fn material(&mut self, group: &PassBinding) {
         self.commands.push(Command::Material(group.clone()));
     }
 
@@ -68,15 +69,43 @@ impl CanvasPass {
         self.commands.push(Command::Draw(indices, instance));
     }
 
-    pub(super) fn encode(self, encoder: &mut wgpu::CommandEncoder) {
+    pub(super) fn resolve(
+        &mut self,
+        frame: &mut Frame<'_>,
+        physical: &PhysicalAttachments,
+    ) -> Result<(), Status> {
+        for command in &mut self.commands {
+            if let Command::Material(group) = command {
+                frame.resolve_binding(group, physical)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn encode(
+        self,
+        encoder: &mut wgpu::CommandEncoder,
+        physical: &PhysicalAttachments,
+    ) -> Result<(), Status> {
+        let resolved = physical.view(&self.resolved)?;
+        let multisample = self
+            .multisample
+            .as_ref()
+            .map(|view| physical.view(view))
+            .transpose()?;
+        let stencil = self
+            .stencil
+            .as_ref()
+            .map(|view| physical.view(view))
+            .transpose()?;
         let timestamp_writes = self.stamps.as_ref().map(PassStamps::render);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("canvas path batch"),
             timestamp_writes,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: self.multisample.as_ref().unwrap_or(&self.resolved),
+                view: multisample.unwrap_or(resolved),
                 depth_slice: None,
-                resolve_target: self.multisample.as_ref().map(|_| &self.resolved),
+                resolve_target: multisample.map(|_| resolved),
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     store: if self.multisample.is_some() {
@@ -86,18 +115,16 @@ impl CanvasPass {
                     },
                 },
             })],
-            depth_stencil_attachment: self.stencil.as_ref().map(|view| {
-                wgpu::RenderPassDepthStencilAttachment {
-                    view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                    stencil_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(0),
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                }
+            depth_stencil_attachment: stencil.map(|view| wgpu::RenderPassDepthStencilAttachment {
+                view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Discard,
+                }),
+                stencil_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(0),
+                    store: wgpu::StoreOp::Discard,
+                }),
             }),
             ..Default::default()
         });
@@ -108,7 +135,7 @@ impl CanvasPass {
                 Command::Globals(globals) => {
                     pass.set_bind_group(0, &globals.group, globals.offsets())
                 }
-                Command::Material(material) => pass.set_bind_group(1, material, &[]),
+                Command::Material(material) => pass.set_bind_group(1, material.ready(), &[]),
                 Command::Geometry(geometry) => {
                     pass.set_vertex_buffer(0, geometry.vertices.slice());
                     pass.set_index_buffer(geometry.indices.slice(), wgpu::IndexFormat::Uint32);
@@ -120,5 +147,6 @@ impl CanvasPass {
                 }
             }
         }
+        Ok(())
     }
 }

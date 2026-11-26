@@ -1,8 +1,8 @@
 //! Single-pass opaque pre-draw and painter-ordered translucent replay.
 
 use super::{
-    CompositeDraw, DirectMesh, DrawBindings, DrawCall, DrawPass, Frame, Image, ImmediateDraw,
-    set_scissor, single,
+    Attachment, CompositeDraw, DirectMesh, DrawBindings, DrawCall, DrawPass, Frame, Image,
+    ImmediateDraw, PhysicalAttachments, set_scissor, single,
 };
 use crate::{
     Status,
@@ -15,7 +15,7 @@ pub(super) struct DepthPass {
     pub(super) depth: Image,
     size: [u32; 2],
     draws: Vec<DepthDraw>,
-    pub(super) reads: Vec<wgpu::Texture>,
+    pub(super) reads: Vec<Attachment>,
 }
 
 struct DepthDraw {
@@ -59,6 +59,9 @@ impl DepthPass {
         load: wgpu::LoadOp<wgpu::Color>,
         stamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
+        let Some(depth_view) = self.depth.view.physical() else {
+            return;
+        };
         let mut pass = command.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("impasto main depth"),
             timestamp_writes: stamps,
@@ -72,7 +75,7 @@ impl DepthPass {
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.depth.view,
+                view: depth_view,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.0),
                     store: wgpu::StoreOp::Discard,
@@ -99,7 +102,33 @@ impl DepthPass {
 }
 
 impl Frame<'_> {
-    pub(super) fn global_depth(&self, target: &wgpu::TextureView) -> bool {
+    pub(super) fn resolve_depth(
+        &mut self,
+        batch: &mut DepthPass,
+        physical: &PhysicalAttachments,
+    ) -> Result<(), Status> {
+        batch.depth.view = Attachment::Physical(physical.view(&batch.depth.view)?.clone());
+        for draw in &mut batch.draws {
+            if let Some(core) = &mut draw.core {
+                self.resolve_bindings(&mut core.bindings, physical)?;
+            }
+            match &mut draw.ordered {
+                Some(OrderedDepthDraw::Immediate(call)) => {
+                    self.resolve_bindings(&mut call.bindings, physical)?
+                }
+                Some(OrderedDepthDraw::Composite(call)) => {
+                    self.resolve_composite(call, physical)?
+                }
+                Some(OrderedDepthDraw::Mesh(call)) => {
+                    self.resolve_binding(&mut call.material, physical)?
+                }
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn global_depth(&self, target: &Attachment) -> bool {
         *target == self.root
             && *target == self.main
             && self.compositor.render_graph

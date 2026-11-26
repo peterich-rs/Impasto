@@ -5,7 +5,7 @@ use std::sync::Arc;
 use bytemuck::Zeroable;
 use engine::scene::{BACKDROP_TEXTURE, MAX_SHADER_TEXTURES, ShaderProgramId};
 
-use super::{Coverage, Frame, Image, pipelines};
+use super::{Attachment, Coverage, Frame, Image, PassBinding, RuntimeBinding, pipelines};
 use crate::Status;
 use crate::arena::Extra;
 use crate::compiler::{Affine, PictureBounds};
@@ -69,12 +69,12 @@ impl Frame<'_> {
             }
         }
         let compositor = &mut self.compositor;
-        let mut views = [&compositor.white; MAX_SHADER_TEXTURES];
+        let mut views = std::array::from_fn(|_| Attachment::Physical(compositor.white.clone()));
         let mut backdrops = [false; MAX_SHADER_TEXTURES];
         for (index, source) in textures.iter().take(MAX_SHADER_TEXTURES).enumerate() {
             if source.as_ref() == BACKDROP_TEXTURE {
                 if let Some(backdrop) = &backdrop {
-                    views[index] = &backdrop.view;
+                    views[index] = backdrop.view.clone();
                     backdrops[index] = true;
                     params.mappings[index] = backdrop.uv_bounds();
                     params.sample_modes[index] = 1;
@@ -82,34 +82,12 @@ impl Frame<'_> {
             } else if let Some(image) = self.scene.textures.get(source)
                 && image.nv12().is_none()
             {
-                views[index] = image.view();
+                views[index] = Attachment::Physical(image.view().clone());
                 params.mappings[index] = [0.0, 0.0, 1.0, 1.0];
                 params.sample_modes[index] = if image.premultiplied_srgb { 2 } else { 1 };
             }
         }
-        let cached = compositor
-            .runtime_texture_groups
-            .entry(views.map(Clone::clone))
-            .or_insert_with_key(|views| {
-                compositor.render_stats.bind_groups_created += 1;
-                TextureGroup {
-                    group: pipelines::bind_group(
-                        self.gpu,
-                        &compositor.pipelines.layouts.runtime_textures,
-                        &[
-                            wgpu::BindingResource::TextureView(&views[0]),
-                            wgpu::BindingResource::TextureView(&views[1]),
-                            wgpu::BindingResource::TextureView(&views[2]),
-                            wgpu::BindingResource::TextureView(&views[3]),
-                            wgpu::BindingResource::Sampler(&compositor.linear),
-                        ],
-                    ),
-                    used: false,
-                    backdrops,
-                }
-            });
-        cached.used = true;
-        let material = cached.group.clone();
+        let material = PassBinding::Runtime(Box::new(RuntimeBinding { views, backdrops }));
         let time = if program.animated {
             self.compositor.effect_seconds
         } else {
@@ -150,5 +128,35 @@ impl Frame<'_> {
             self.release(backdrop);
         }
         Ok(())
+    }
+    pub(super) fn runtime_texture_group(
+        &mut self,
+        views: [wgpu::TextureView; MAX_SHADER_TEXTURES],
+        backdrops: [bool; MAX_SHADER_TEXTURES],
+    ) -> wgpu::BindGroup {
+        let compositor = &mut self.compositor;
+        let cached = compositor
+            .runtime_texture_groups
+            .entry(views)
+            .or_insert_with_key(|views| {
+                compositor.render_stats.bind_groups_created += 1;
+                TextureGroup {
+                    group: pipelines::bind_group(
+                        self.gpu,
+                        &compositor.pipelines.layouts.runtime_textures,
+                        &[
+                            wgpu::BindingResource::TextureView(&views[0]),
+                            wgpu::BindingResource::TextureView(&views[1]),
+                            wgpu::BindingResource::TextureView(&views[2]),
+                            wgpu::BindingResource::TextureView(&views[3]),
+                            wgpu::BindingResource::Sampler(&compositor.linear),
+                        ],
+                    ),
+                    used: false,
+                    backdrops,
+                }
+            });
+        cached.used = true;
+        cached.group.clone()
     }
 }

@@ -1,7 +1,8 @@
 //! Typed instance packing and spatial batching for the storage-table path.
 
 use super::{
-    DrawBindings, DrawCall, Frame, Image, OpaqueClass, OpaqueCore, TableDraw, draw_count, single,
+    DrawBindings, DrawCall, Frame, Image, OpaqueClass, OpaqueCore, PassBinding, TableDraw,
+    draw_count, single,
 };
 use crate::{
     Status,
@@ -25,14 +26,15 @@ impl Frame<'_> {
         kind: PipelineKind,
         blend: BlendKey,
         extra: Extra,
-        material: wgpu::BindGroup,
-        mask: Option<wgpu::BindGroup>,
+        material: impl Into<PassBinding>,
+        mask: Option<PassBinding>,
         vertices: &[T],
         vertex_count: u32,
     ) -> Result<(), Status> {
         if vertices.is_empty() {
             return Ok(());
         }
+        let material = material.into();
         let mut scissor_local = scissor.map(|area| target.local(area));
         let table =
             self.compositor.pipelines.layouts.state.is_some() && kind != PipelineKind::TextLcd;
@@ -113,6 +115,7 @@ impl Frame<'_> {
                         ..bindings.clone()
                     };
                     let pass = self.pending_pass(target);
+                    pass.read_bindings(&bindings);
                     let bounds = bounds.unwrap_or(Bounds([0.0, 0.0, f32::INFINITY, f32::INFINITY]));
                     let index = if spatial {
                         let calls = &pass.calls;

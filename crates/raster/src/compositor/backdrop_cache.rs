@@ -37,10 +37,10 @@ pub(super) struct BackdropCache {
 
 impl BackdropCache {
     pub(super) fn contains(&self, view: &wgpu::TextureView) -> bool {
-        self.entries
-            .iter()
-            .flatten()
-            .any(|entry| entry.source.view == *view)
+        self.entries.iter().flatten().any(|entry| {
+            entry.source.view.physical() == Some(view)
+                || entry.blurred.view.physical() == Some(view)
+        })
     }
 
     pub(super) fn begin(&mut self) {
@@ -155,21 +155,25 @@ impl Frame<'_> {
         };
         let snapshot = self.snapshot(target, src)?;
         let blurred = self.blur(&snapshot, radius, true)?;
-        self.full(&blurred, Some(&snapshot), coverage, target, dst, kind)?;
         if let Some((slot, key)) = slot
-            && self.compositor.backdrops.insert(
+            && self.compositor.backdrops.bytes + snapshot.bytes() + blurred.bytes() <= CACHE_BUDGET
+        {
+            let source = self.retain_attachment(&snapshot)?;
+            let filtered = self.retain_attachment(&blurred)?;
+            self.full(&filtered, Some(&source), coverage, target, dst, kind)?;
+            self.compositor.offscreen_live_bytes -= source.bytes() + filtered.bytes();
+            self.compositor.backdrops.insert(
                 slot,
                 Entry {
                     key,
                     revision: self.scene.revision,
-                    source: snapshot.clone(),
-                    blurred: blurred.clone(),
+                    source,
+                    blurred: filtered,
                     submitted: false,
                 },
-            )
-        {
-            self.compositor.offscreen_live_bytes -= snapshot.bytes() + blurred.bytes();
+            );
         } else {
+            self.full(&blurred, Some(&snapshot), coverage, target, dst, kind)?;
             self.release(blurred);
             self.release(snapshot);
         }

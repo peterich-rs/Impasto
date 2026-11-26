@@ -34,7 +34,9 @@ use crate::compiler::{
 use crate::compute_blur::{BlurParams, ComputeBlur};
 use crate::gpu::Gpu;
 use crate::gradient_lut::PreparedRamp;
-use crate::graph::{AttachmentLifetimes, RenderGraph, SurfaceGraph};
+use crate::graph::{
+    Attachment, AttachmentLifetimes, RenderGraph, SurfaceGraph, VirtualTexture, allocate_intervals,
+};
 use crate::msdf::MsdfAtlas;
 use crate::outline::{Outlines, REFERENCE_PPEM};
 use crate::pipelines::{
@@ -137,6 +139,7 @@ pub struct RenderStats {
     pub mesh_upload_bytes: u64,
     pub atlas_upload_bytes: u64,
     pub offscreen_alloc_bytes: u64,
+    pub attachment_aliases: u64,
     pub offscreen_peak_bytes: u64,
     pub copy_pixels: u64,
     pub blur_pixels: u64,
@@ -175,8 +178,7 @@ pub(crate) struct Scene<'a> {
 
 #[derive(Clone)]
 struct Image {
-    texture: wgpu::Texture,
-    view: wgpu::TextureView,
+    view: Attachment,
     storage_view: Option<wgpu::TextureView>,
     size: [u32; 2],
     logical: [u32; 2],
@@ -185,7 +187,7 @@ struct Image {
     format: wgpu::TextureFormat,
     samples: u32,
     usage: wgpu::TextureUsages,
-    material: Arc<pipelines::MaterialCache>,
+    material: Option<Arc<pipelines::MaterialCache>>,
 }
 
 impl Image {
@@ -241,8 +243,7 @@ impl Image {
             (texture.create_view(&Default::default()), None)
         };
         Self {
-            texture,
-            view,
+            view: Attachment::Physical(view),
             storage_view,
             size,
             logical: size,
@@ -251,14 +252,13 @@ impl Image {
             format,
             samples,
             usage,
-            material: Arc::default(),
+            material: Some(Arc::default()),
         }
     }
 
     fn output(view: &wgpu::TextureView, format: wgpu::TextureFormat, size: [u32; 2]) -> Self {
         Self {
-            texture: view.texture().clone(),
-            view: view.clone(),
+            view: Attachment::Physical(view.clone()),
             storage_view: None,
             size,
             logical: size,
@@ -267,7 +267,7 @@ impl Image {
             format,
             samples: 1,
             usage: view.texture().usage(),
-            material: Arc::default(),
+            material: Some(Arc::default()),
         }
     }
 
@@ -346,8 +346,11 @@ impl From<wgpu::TextureFormat> for OutputFormat {
 impl Compositor {
     pub fn new(gpu: &Gpu, surface_format: Option<wgpu::TextureFormat>) -> Result<Self, Status> {
         let white = Image::new(gpu, [1, 1], wgpu::TextureFormat::Rgba8Unorm, 1);
+        let Attachment::Physical(white_view) = white.view else {
+            return Err(Status::BadScene);
+        };
         gpu.queue.write_texture(
-            white.texture.as_image_copy(),
+            white_view.texture().as_image_copy(),
             &[255; 4],
             Default::default(),
             extent([1, 1]),
@@ -364,7 +367,7 @@ impl Compositor {
             gpu,
             &pipelines.layouts.material,
             &[
-                wgpu::BindingResource::TextureView(&white.view),
+                wgpu::BindingResource::TextureView(&white_view),
                 wgpu::BindingResource::Sampler(&linear),
             ],
         );
@@ -376,7 +379,7 @@ impl Compositor {
             pipelines,
             warm_formats: Vec::new(),
             pool: AttachmentPool::default(),
-            white: white.view,
+            white: white_view,
             white_mask_group,
             linear,
             nearest: pipelines::nearest_sampler(gpu),
@@ -485,10 +488,9 @@ impl Compositor {
         self.recycle_masks();
         let pooled = |view: &wgpu::TextureView| {
             *view == self.white
-                || self
-                    .pool
-                    .iter()
-                    .any(|image| image.view == *view || image.storage_view.as_ref() == Some(view))
+                || self.pool.iter().any(|image| {
+                    image.view.physical() == Some(view) || image.storage_view.as_ref() == Some(view)
+                })
         };
         self.composites.retain(|(backdrop, mask), _| {
             (pooled(backdrop) || self.backdrops.contains(backdrop)) && pooled(mask)
@@ -645,6 +647,9 @@ impl Compositor {
 
     fn recycle_masks(&mut self) {
         for (_, image) in self.masks.drain() {
+            if image.view.physical().is_none() {
+                continue;
+            }
             self.pool.recycle(image, self.render_graph);
         }
     }
@@ -777,12 +782,15 @@ impl Compositor {
             // is unavailable. Deferred passes never attach or read that view.
             output.usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
         }
+        self.masks
+            .retain(|_, image| image.view.physical().is_some());
         let mut frame = Frame {
             gpu,
             scene,
             compositor: self,
             command,
             graph: RenderGraph::default(),
+            attachments: Vec::new(),
             pending: None,
             main_pass: None,
             main_inputs: AttachmentLifetimes::new(),
@@ -861,7 +869,7 @@ impl Compositor {
                 frame.release(main);
             }
         }
-        frame.flush_graph();
+        frame.flush_graph()?;
         if let Some(error) = frame.encode_error {
             return Err(error);
         }
@@ -1009,11 +1017,12 @@ enum ImageSource<'a> {
 }
 
 impl<'a> ImageSource<'a> {
-    fn material(self, frame: &mut Frame<'_>, nearest: bool) -> wgpu::BindGroup {
-        let (view, cache) = match self {
-            Self::External(image) => (image.view(), image.material.as_ref()),
-            Self::Pooled(image) => (&image.view, image.material.as_ref()),
+    fn material(self, frame: &mut Frame<'_>, nearest: bool) -> PassBinding {
+        let image = match self {
+            Self::External(image) => image,
+            Self::Pooled(image) => return frame.sample_attachment(image, nearest),
         };
+        let (view, cache) = (image.view(), image.material.as_ref());
         let compositor = &mut frame.compositor;
         let sampler = if nearest {
             &compositor.nearest
@@ -1033,7 +1042,7 @@ impl<'a> ImageSource<'a> {
             ),
         };
         compositor.render_stats.bind_groups_created += u32::from(created);
-        group
+        PassBinding::Ready(group)
     }
 
     fn nv12(self) -> Option<&'a crate::textures::Nv12Planes> {
@@ -1077,16 +1086,17 @@ struct Frame<'a> {
     compositor: &'a mut Compositor,
     command: wgpu::CommandEncoder,
     graph: RenderGraph<PlannedOperation>,
+    attachments: Vec<AttachmentSpec>,
     pending: Option<DrawPass>,
     // Keep the main target open logically while encoding its input textures.
     // A target read or an incompatible attachment ends the current segment.
     main_pass: Option<DrawPass>,
-    main_inputs: AttachmentLifetimes<wgpu::TextureView, Image>,
+    main_inputs: AttachmentLifetimes<Attachment, Image>,
     deferred_root: Option<SurfaceGraph<DeferredRootPass>>,
-    clears: HashMap<wgpu::TextureView, wgpu::Color>,
+    clears: HashMap<Attachment, wgpu::Color>,
     opaque: Vec<[f32; 4]>,
-    root: wgpu::TextureView,
-    main: wgpu::TextureView,
+    root: Attachment,
+    main: Attachment,
     capture: Option<(&'a mut Capture, Option<usize>)>,
     frame_images: Option<image_array::FrameImages<'a>>,
     size: [u32; 2],
@@ -1100,10 +1110,10 @@ struct Frame<'a> {
 
 struct DrawPass {
     format: wgpu::TextureFormat,
-    target: wgpu::TextureView,
+    target: Attachment,
     size: [u32; 2],
     calls: Vec<DrawCall>,
-    reads: Vec<wgpu::Texture>,
+    reads: Vec<Attachment>,
     spatial: Option<Box<SpatialBatcher<DrawBindings>>>,
     draws: u32,
     shader: Option<engine::scene::ShaderProgramId>,
@@ -1131,25 +1141,126 @@ impl PreparedOutput {
 }
 
 enum PlannedOperation {
-    Render(PlannedPass),
+    Render(Box<PlannedPass>),
     Canvas(Box<CanvasPass>),
     Copy {
-        source: wgpu::Texture,
+        source: Attachment,
         origin: wgpu::Origin3d,
-        target: wgpu::Texture,
+        target: Attachment,
         size: wgpu::Extent3d,
     },
     Compute {
         pipeline: wgpu::ComputePipeline,
-        material: wgpu::BindGroup,
+        material: BlurBinding,
         offset: u32,
         groups: [u32; 2],
         stamps: Option<PassStamps>,
     },
 }
 
+struct BlurBinding {
+    input: Attachment,
+    target: Attachment,
+    layout: wgpu::BindGroupLayout,
+    buffer: wgpu::Buffer,
+    storage: Option<wgpu::TextureView>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum PassBinding {
+    Ready(wgpu::BindGroup),
+    Sample(ImageBinding),
+    Composite(Option<Attachment>, Option<Attachment>),
+    Runtime(Box<RuntimeBinding>),
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RuntimeBinding {
+    views: [Attachment; engine::scene::MAX_SHADER_TEXTURES],
+    backdrops: [bool; engine::scene::MAX_SHADER_TEXTURES],
+}
+
+#[derive(Clone)]
+struct ImageBinding {
+    view: Attachment,
+    cache: Option<Arc<pipelines::MaterialCache>>,
+    nearest: bool,
+}
+
+impl PartialEq for ImageBinding {
+    fn eq(&self, other: &Self) -> bool {
+        self.view == other.view && self.nearest == other.nearest
+    }
+}
+
+impl Eq for ImageBinding {}
+
+impl std::hash::Hash for ImageBinding {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.view.hash(state);
+        self.nearest.hash(state);
+    }
+}
+
+impl From<wgpu::BindGroup> for PassBinding {
+    fn from(group: wgpu::BindGroup) -> Self {
+        Self::Ready(group)
+    }
+}
+
+impl PassBinding {
+    fn sampled_attachment(&self) -> Option<&Attachment> {
+        if let Self::Sample(sample) = self {
+            Some(&sample.view)
+        } else {
+            None
+        }
+    }
+
+    fn ready(&self) -> Option<&wgpu::BindGroup> {
+        match self {
+            Self::Ready(group) => Some(group),
+            _ => {
+                debug_assert!(
+                    false,
+                    "attachment bindings must be resolved before encoding"
+                );
+                None
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct AttachmentSpec {
+    size: [u32; 2],
+    format: wgpu::TextureFormat,
+    samples: u32,
+    usage: wgpu::TextureUsages,
+}
+
+#[derive(Default)]
+struct PhysicalAttachments {
+    slots: Vec<Image>,
+    assigned: Vec<Option<usize>>,
+}
+
+impl PhysicalAttachments {
+    fn image(&self, attachment: &Attachment) -> Option<&Image> {
+        let VirtualTexture(id) = attachment.virtual_id()?;
+        self.slots.get(self.assigned.get(id).copied().flatten()?)
+    }
+
+    fn view<'a>(&'a self, attachment: &'a Attachment) -> Result<&'a wgpu::TextureView, Status> {
+        attachment
+            .physical()
+            .or_else(|| self.image(attachment)?.view.physical())
+            .ok_or(Status::BadScene)
+    }
+}
+
 struct PlannedPass {
-    target: wgpu::TextureView,
+    target: Attachment,
     pass: DeferredRootPass,
     final_output: bool,
 }
@@ -1197,12 +1308,12 @@ enum RootSegment {
     Ordered(DrawPass),
     EarlyZ(Box<EarlyZBatch>),
     Depth(Box<DepthPass>),
-    Composite(CompositeDraw),
+    Composite(Box<CompositeDraw>),
     Clear,
 }
 
 impl RootSegment {
-    fn take_reads(&mut self) -> Vec<wgpu::Texture> {
+    fn take_reads(&mut self) -> Vec<Attachment> {
         match self {
             Self::Ordered(pass) => std::mem::take(&mut pass.reads),
             Self::Composite(pass) => std::mem::take(&mut pass.reads),
@@ -1234,7 +1345,7 @@ impl RootSegment {
 }
 
 struct EarlyZBatch {
-    depth: wgpu::TextureView,
+    depth: Attachment,
     pipeline: wgpu::RenderPipeline,
     globals: DynamicGroup,
     vertices: VertexSlice,
@@ -1251,6 +1362,9 @@ impl EarlyZBatch {
         load: wgpu::LoadOp<wgpu::Color>,
         stamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
+        let Some(depth) = self.depth.physical() else {
+            return;
+        };
         let mut pass = command.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("impasto opaque front-to-back"),
             timestamp_writes: stamps,
@@ -1264,7 +1378,7 @@ impl EarlyZBatch {
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.depth,
+                view: depth,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.0),
                     store: wgpu::StoreOp::Discard,
@@ -1301,7 +1415,7 @@ enum DrawCall {
 struct DirectMesh {
     pipeline: wgpu::RenderPipeline,
     globals: DynamicGroup,
-    material: wgpu::BindGroup,
+    material: PassBinding,
     geometry: batch::GpuMeshBuffer,
     paint: VertexSlice,
     indices: u32,
@@ -1312,7 +1426,7 @@ impl DirectMesh {
     fn encode(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.globals.group, self.globals.offsets());
-        pass.set_bind_group(1, &self.material, &[]);
+        pass.set_bind_group(1, self.material.ready(), &[]);
         pass.set_vertex_buffer(0, self.geometry.vertices.slice());
         pass.set_vertex_buffer(1, self.paint.slice());
         pass.set_index_buffer(self.geometry.indices.slice(), wgpu::IndexFormat::Uint32);
@@ -1348,8 +1462,8 @@ enum OpaqueClass {
 struct DrawBindings {
     pipeline: wgpu::RenderPipeline,
     globals: DynamicGroup,
-    material: wgpu::BindGroup,
-    mask: Option<wgpu::BindGroup>,
+    material: PassBinding,
+    mask: Option<PassBinding>,
     vertex_count: u32,
     opaque: OpaqueClass,
 }
@@ -1366,9 +1480,9 @@ impl ImmediateDraw {
         let bindings = &self.bindings;
         pass.set_pipeline(&bindings.pipeline);
         pass.set_bind_group(0, &bindings.globals.group, bindings.globals.offsets());
-        pass.set_bind_group(1, &bindings.material, &[]);
+        pass.set_bind_group(1, bindings.material.ready(), &[]);
         if let Some(mask) = &bindings.mask {
-            pass.set_bind_group(2, mask, &[]);
+            pass.set_bind_group(2, mask.ready(), &[]);
         }
         pass.set_vertex_buffer(0, self.vertices.slice());
         pass.draw(0..bindings.vertex_count, 0..self.instances);
@@ -1379,11 +1493,11 @@ impl ImmediateDraw {
 struct CompositeDraw {
     kind: PipelineKind,
     blend: BlendKey,
-    reads: Vec<wgpu::Texture>,
+    reads: Vec<Attachment>,
     pipeline: wgpu::RenderPipeline,
     globals: DynamicGroup,
-    source: wgpu::BindGroup,
-    composite: Option<wgpu::BindGroup>,
+    source: PassBinding,
+    composite: Option<PassBinding>,
     effect_values: Option<(u32, DynamicGroup)>,
     immediates: Option<ParamsUniform>,
     viewport: [u32; 4],
@@ -1399,12 +1513,12 @@ impl CompositeDraw {
         pass.set_viewport(x, y, w, h, min, max);
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.globals.group, self.globals.offsets());
-        pass.set_bind_group(1, &self.source, &[]);
+        pass.set_bind_group(1, self.source.ready(), &[]);
         if let Some(params) = &self.immediates {
             pass.set_immediates(0, bytemuck::bytes_of(params));
         }
         if let Some(composite) = &self.composite {
-            pass.set_bind_group(2, composite, &[]);
+            pass.set_bind_group(2, composite.ready(), &[]);
         }
         if let Some((slot, values)) = &self.effect_values {
             pass.set_bind_group(*slot, &values.group, values.offsets());
@@ -1415,8 +1529,23 @@ impl CompositeDraw {
 
 impl DrawPass {
     fn read(&mut self, image: &Image) {
-        if !self.reads.contains(&image.texture) {
-            self.reads.push(image.texture.clone());
+        self.read_attachment(&image.view);
+    }
+
+    fn read_attachment(&mut self, attachment: &Attachment) {
+        if !self.reads.contains(attachment) {
+            self.reads.push(attachment.clone());
+        }
+    }
+
+    fn read_bindings(&mut self, bindings: &DrawBindings) {
+        for attachment in bindings.material.sampled_attachment().into_iter().chain(
+            bindings
+                .mask
+                .as_ref()
+                .and_then(PassBinding::sampled_attachment),
+        ) {
+            self.read_attachment(attachment);
         }
     }
 
@@ -1505,13 +1634,13 @@ impl DrawPass {
                 last_globals = Some(globals);
             }
             if last_material != Some(&call.bindings.material) {
-                pass.set_bind_group(1, &call.bindings.material, &[]);
+                pass.set_bind_group(1, call.bindings.material.ready(), &[]);
                 last_material = Some(&call.bindings.material);
             }
             if let Some(mask) = &call.bindings.mask
                 && last_mask != Some(mask)
             {
-                pass.set_bind_group(2, mask, &[]);
+                pass.set_bind_group(2, mask.ready(), &[]);
                 last_mask = Some(mask);
             }
             pass.set_vertex_buffer(0, call.vertices.slice());
@@ -1704,12 +1833,13 @@ impl Frame<'_> {
         target: &Image,
         pipeline: wgpu::RenderPipeline,
         globals: DynamicGroup,
-        material: wgpu::BindGroup,
-        mask: Option<wgpu::BindGroup>,
+        material: impl Into<PassBinding>,
+        mask: Option<PassBinding>,
         vertices: &[T],
         scissor: Option<[u32; 4]>,
         vertex_count: u32,
     ) -> Result<(), Status> {
+        let material = material.into();
         let limit = FrameArena::vertex_limit::<T>(self.gpu);
         if limit == 0 {
             return Err(Status::OutOfMemory);
@@ -1730,6 +1860,9 @@ impl Frame<'_> {
                 instances: draw_count(chunk.len())?,
             });
             let pass = self.pending_pass(target);
+            if let DrawCall::Immediate(immediate) = &call {
+                pass.read_bindings(&immediate.bindings);
+            }
             pass.barrier(pass.calls.len() + 1);
             pass.calls.push(call);
             pass.draws += 1;
@@ -1763,7 +1896,7 @@ impl Frame<'_> {
         }
     }
 
-    fn flush_target(&mut self, view: &wgpu::TextureView) {
+    fn flush_target(&mut self, view: &Attachment) {
         self.flush_draws();
         if *view == self.main {
             self.flush_main();
@@ -1829,7 +1962,7 @@ impl Frame<'_> {
 
     fn encode_pass(
         &mut self,
-        target: &wgpu::TextureView,
+        target: &Attachment,
         segment: RootSegment,
         kind: GpuPassKind,
         draws: u32,
@@ -1869,28 +2002,176 @@ impl Frame<'_> {
         };
         if self.compositor.render_graph {
             let inputs = node.pass.segment.take_reads();
+            let depth = match &node.pass.segment {
+                RootSegment::EarlyZ(batch) => Some(batch.depth.clone()),
+                RootSegment::Depth(batch) => Some(batch.depth.view.clone()),
+                _ => None,
+            };
             self.graph.record(
-                PlannedOperation::Render(node),
+                PlannedOperation::Render(Box::new(node)),
                 *target == self.main || *target == self.root,
                 inputs,
-                [target.texture().clone()],
+                std::iter::once(target.clone()).chain(depth),
             );
         } else {
-            self.encode_planned(node);
+            let result = self.encode_operation(
+                PlannedOperation::Render(Box::new(node)),
+                &PhysicalAttachments::default(),
+            );
+            if let Err(error) = result {
+                self.encode_error = Some(error);
+            }
         }
     }
 
-    fn flush_graph(&mut self) {
-        let passes = self.graph.schedule();
-        for pass in passes {
-            self.encode_operation(pass);
+    fn flush_graph(&mut self) -> Result<(), Status> {
+        let passes = self.graph.schedule().ok_or(Status::BadScene)?;
+        let uses = passes
+            .iter()
+            .enumerate()
+            .flat_map(|(index, node)| node.attachments.iter().map(move |&id| (index, id)));
+        let (specs, assigned, used) = allocate_intervals(&self.attachments, uses);
+        self.compositor.render_stats.attachment_aliases += used.saturating_sub(specs.len() as u64);
+        let slots = specs
+            .into_iter()
+            .map(|spec| self.take_physical([0, 0, spec.size[0], spec.size[1]], spec))
+            .collect();
+        let physical = PhysicalAttachments { slots, assigned };
+        for node in passes {
+            self.encode_operation(node.pass, &physical)?;
         }
+        // The pool takes the last matching image. Reverse the return order to
+        // keep the assignment and its cached bind groups stable next frame.
+        for image in physical.slots.into_iter().rev() {
+            self.release(image);
+        }
+        Ok(())
     }
 
-    fn encode_operation(&mut self, op: PlannedOperation) {
+    fn resolve_binding(
+        &mut self,
+        binding: &mut PassBinding,
+        physical: &PhysicalAttachments,
+    ) -> Result<(), Status> {
+        *binding = match binding {
+            PassBinding::Ready(_) => return Ok(()),
+            PassBinding::Sample(sample) => {
+                let cache = physical
+                    .image(&sample.view)
+                    .and_then(|image| image.material.as_deref())
+                    .or(sample.cache.as_deref())
+                    .ok_or(Status::BadScene)?;
+                let view = physical.view(&sample.view)?;
+                let (group, created) = cache.get(
+                    self.gpu,
+                    &self.compositor.pipelines.layouts.material,
+                    view,
+                    if sample.nearest {
+                        &self.compositor.nearest
+                    } else {
+                        &self.compositor.linear
+                    },
+                    sample.nearest,
+                );
+                self.compositor.render_stats.bind_groups_created += u32::from(created);
+                PassBinding::Ready(group)
+            }
+            PassBinding::Composite(backdrop, mask) => {
+                let resolve = |attachment: &Option<Attachment>| {
+                    attachment
+                        .as_ref()
+                        .map(|attachment| physical.view(attachment).cloned())
+                        .transpose()
+                };
+                PassBinding::Ready(self.composite_group(resolve(backdrop)?, resolve(mask)?))
+            }
+            PassBinding::Runtime(binding) => {
+                let [a, b, c, d] = &binding.views;
+                let views = [
+                    physical.view(a)?.clone(),
+                    physical.view(b)?.clone(),
+                    physical.view(c)?.clone(),
+                    physical.view(d)?.clone(),
+                ];
+                PassBinding::Ready(self.runtime_texture_group(views, binding.backdrops))
+            }
+        };
+        Ok(())
+    }
+
+    fn resolve_bindings(
+        &mut self,
+        bindings: &mut DrawBindings,
+        physical: &PhysicalAttachments,
+    ) -> Result<(), Status> {
+        self.resolve_binding(&mut bindings.material, physical)?;
+        if let Some(mask) = &mut bindings.mask {
+            self.resolve_binding(mask, physical)?;
+        }
+        Ok(())
+    }
+
+    fn resolve_composite(
+        &mut self,
+        call: &mut CompositeDraw,
+        physical: &PhysicalAttachments,
+    ) -> Result<(), Status> {
+        self.resolve_binding(&mut call.source, physical)?;
+        if let Some(composite) = &mut call.composite {
+            self.resolve_binding(composite, physical)?;
+        }
+        Ok(())
+    }
+
+    fn encode_operation(
+        &mut self,
+        op: PlannedOperation,
+        physical: &PhysicalAttachments,
+    ) -> Result<(), Status> {
         match op {
-            PlannedOperation::Render(pass) => self.encode_planned(pass),
-            PlannedOperation::Canvas(pass) => pass.encode(&mut self.command),
+            PlannedOperation::Render(mut node) => {
+                match &mut node.pass.segment {
+                    RootSegment::Ordered(batch) => {
+                        for call in &mut batch.calls {
+                            match call {
+                                DrawCall::Immediate(call) => {
+                                    self.resolve_bindings(&mut call.bindings, physical)?
+                                }
+                                DrawCall::Mesh(call) => {
+                                    self.resolve_binding(&mut call.material, physical)?
+                                }
+                                DrawCall::Composite(call) => {
+                                    self.resolve_composite(call, physical)?
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    RootSegment::Composite(call) => self.resolve_composite(call, physical)?,
+                    RootSegment::EarlyZ(batch) => {
+                        batch.depth = Attachment::Physical(physical.view(&batch.depth)?.clone())
+                    }
+                    RootSegment::Depth(batch) => self.resolve_depth(batch, physical)?,
+                    RootSegment::Clear => {}
+                }
+                if let Some(root) = &mut self.deferred_root
+                    && node.target == self.root
+                {
+                    if node.final_output {
+                        root.finish(node.pass);
+                    } else {
+                        let prefix = std::mem::replace(&mut self.command, frame_encoder(self.gpu));
+                        root.segment(prefix, node.pass);
+                    }
+                } else {
+                    node.pass
+                        .encode(&mut self.command, physical.view(&node.target)?);
+                }
+            }
+            PlannedOperation::Canvas(mut pass) => {
+                pass.resolve(self, physical)?;
+                pass.encode(&mut self.command, physical)?;
+            }
             PlannedOperation::Copy {
                 source,
                 origin,
@@ -1900,9 +2181,9 @@ impl Frame<'_> {
                 self.command.copy_texture_to_texture(
                     wgpu::TexelCopyTextureInfo {
                         origin,
-                        ..source.as_image_copy()
+                        ..physical.view(&source)?.texture().as_image_copy()
                     },
-                    target.as_image_copy(),
+                    physical.view(&target)?.texture().as_image_copy(),
                     size,
                 );
             }
@@ -1913,43 +2194,52 @@ impl Frame<'_> {
                 groups,
                 stamps,
             } => {
-                let timestamp_writes =
-                    stamps
-                        .as_ref()
-                        .map(|stamps| wgpu::ComputePassTimestampWrites {
-                            query_set: &stamps.queries,
-                            beginning_of_pass_write_index: stamps.begin,
-                            end_of_pass_write_index: stamps.end,
-                        });
+                let input = physical.view(&material.input)?;
+                let target = physical
+                    .image(&material.target)
+                    .and_then(|image| image.storage_view.as_ref())
+                    .or(material.storage.as_ref())
+                    .unwrap_or(physical.view(&material.target)?);
+                let key = (input.clone(), target.clone(), material.buffer);
+                let group = self.compositor.blur_groups.entry(key).or_insert_with_key(
+                    |(input, target, buffer)| {
+                        self.compositor.render_stats.bind_groups_created += 1;
+                        pipelines::bind_group(
+                            self.gpu,
+                            &material.layout,
+                            &[
+                                wgpu::BindingResource::TextureView(input),
+                                wgpu::BindingResource::TextureView(target),
+                                wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                    buffer,
+                                    offset: 0,
+                                    size: wgpu::BufferSize::new(size_of::<BlurParams>() as u64),
+                                }),
+                            ],
+                        )
+                    },
+                );
                 let mut pass = self
                     .command
                     .begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: Some("impasto compute blur"),
-                        timestamp_writes,
+                        timestamp_writes: stamps.as_ref().map(|writes| {
+                            wgpu::ComputePassTimestampWrites {
+                                query_set: &writes.queries,
+                                beginning_of_pass_write_index: writes.begin,
+                                end_of_pass_write_index: writes.end,
+                            }
+                        }),
                     });
                 pass.set_pipeline(&pipeline);
-                pass.set_bind_group(0, &material, &[offset]);
+                pass.set_bind_group(0, &*group, &[offset]);
                 pass.dispatch_workgroups(groups[0], groups[1], 1);
             }
         }
+        Ok(())
     }
 
-    fn encode_planned(&mut self, node: PlannedPass) {
-        if let Some(root) = &mut self.deferred_root
-            && node.target == self.root
-        {
-            if node.final_output {
-                root.finish(node.pass);
-            } else {
-                let prefix = std::mem::replace(&mut self.command, frame_encoder(self.gpu));
-                root.segment(prefix, node.pass);
-            }
-        } else {
-            node.pass.encode(&mut self.command, &node.target);
-        }
-    }
-
-    fn pass_kind(&self, view: &wgpu::TextureView, format: wgpu::TextureFormat) -> GpuPassKind {
+    fn pass_kind(&self, view: &Attachment, format: wgpu::TextureFormat) -> GpuPassKind {
         if *view == self.main {
             GpuPassKind::Main
         } else if format == wgpu::TextureFormat::R8Unorm {
@@ -1959,22 +2249,22 @@ impl Frame<'_> {
         }
     }
 
-    fn count_pass(&mut self, target: &wgpu::TextureView) {
+    fn count_pass(&mut self, target: &Attachment) {
         self.compositor.render_stats.passes += 1;
         self.compositor.render_stats.offscreen_passes += u32::from(target != &self.root);
     }
 
-    fn load(&mut self, target: &wgpu::TextureView) -> wgpu::LoadOp<wgpu::Color> {
+    fn load(&mut self, target: &Attachment) -> wgpu::LoadOp<wgpu::Color> {
         self.clears
             .remove(target)
             .map_or(wgpu::LoadOp::Load, wgpu::LoadOp::Clear)
     }
 
-    fn clear(&mut self, view: &wgpu::TextureView) {
+    fn clear(&mut self, view: &Attachment) {
         self.clears.insert(view.clone(), wgpu::Color::TRANSPARENT);
     }
 
-    fn finish(&mut self, view: &wgpu::TextureView) {
+    fn finish(&mut self, view: &Attachment) {
         self.flush_target(view);
         if self.clears.contains_key(view) {
             let kind = self.pass_kind(view, wgpu::TextureFormat::Rgba8UnormSrgb);
@@ -2010,6 +2300,39 @@ impl Frame<'_> {
         samples: u32,
         usage: wgpu::TextureUsages,
     ) -> Image {
+        let spec = AttachmentSpec {
+            size,
+            format,
+            samples,
+            usage,
+        };
+        if self.compositor.render_graph {
+            let [x, y, w, h] = area;
+            let id = VirtualTexture(self.attachments.len());
+            self.attachments.push(spec);
+            return Image {
+                view: Attachment::Virtual(id),
+                storage_view: None,
+                size,
+                logical: [w, h],
+                origin: [x, y],
+                sample_offset: [0.0; 2],
+                format,
+                samples,
+                usage,
+                material: None,
+            };
+        }
+        self.take_physical(area, spec)
+    }
+
+    fn take_physical(&mut self, area: [u32; 4], spec: AttachmentSpec) -> Image {
+        let AttachmentSpec {
+            size,
+            format,
+            samples,
+            usage,
+        } = spec;
         let [x, y, w, h] = area;
         let compositor = &mut self.compositor;
         // Reusing the most recently released attachment keeps material roles
@@ -2064,6 +2387,9 @@ impl Frame<'_> {
     }
 
     fn release(&mut self, image: Image) {
+        if image.view.virtual_id().is_some() {
+            return;
+        }
         if self.main_inputs.contains(&image.view) {
             let bytes = image.bytes();
             self.main_inputs.retire(image, bytes);
@@ -3926,6 +4252,7 @@ impl Frame<'_> {
             indices: draw_count(geometry.indices.len())?,
             scissor: clip.scissor.map(|area| target.local(area)),
         };
+        self.read_mask(target, clip);
         let pass = self.pending_pass(target);
         pass.barrier(pass.calls.len() + 1);
         pass.calls.push(DrawCall::Mesh(call));
@@ -4188,13 +4515,18 @@ impl Frame<'_> {
         }
         let op = PlannedOperation::Canvas(Box::new(pass));
         if self.compositor.render_graph {
-            let writes = std::iter::once(&resolved.texture)
-                .chain(multisample.as_ref().map(|image| &image.texture))
-                .chain(stencil.as_ref().map(|image| &image.texture))
+            let writes = std::iter::once(&resolved.view)
+                .chain(multisample.as_ref().map(|image| &image.view))
+                .chain(stencil.as_ref().map(|image| &image.view))
                 .cloned();
-            self.graph.record(op, false, [], writes);
+            self.graph.record(
+                op,
+                false,
+                clip.mask.as_ref().map(|mask| mask.view.clone()),
+                writes,
+            );
         } else {
-            self.encode_operation(op);
+            self.encode_operation(op, &PhysicalAttachments::default())?;
         }
         if mask_target {
             if let Some(multisample) = multisample {
@@ -4721,25 +5053,57 @@ impl Frame<'_> {
         }
         self.finish(&target.view);
         let snapshot = self.take_area(area, target.format, 1);
-        let [x, y, w, h] = target.local(area);
+        self.copy_attachment(target, &snapshot, area)?;
+        Ok(snapshot)
+    }
+
+    fn retain_attachment(&mut self, source: &Image) -> Result<Image, Status> {
+        if source.view.physical().is_some() {
+            return Ok(source.clone());
+        }
+        let mut image = Image::new(self.gpu, source.size, source.format, 1);
+        image.logical = source.logical;
+        image.origin = source.origin;
+        image.sample_offset = source.sample_offset;
+        self.compositor.render_stats.offscreen_alloc_bytes += image.bytes();
+        self.compositor.offscreen_live_bytes += image.bytes();
+        if source.usage.contains(wgpu::TextureUsages::COPY_SRC) {
+            self.copy_attachment(source, &image, source.area())?;
+        } else {
+            self.clear(&image.view);
+            self.full(
+                source,
+                None,
+                &Coverage::default(),
+                &image,
+                source.area(),
+                FullPass::Copy,
+            )?;
+        }
+        Ok(image)
+    }
+
+    fn copy_attachment(
+        &mut self,
+        source: &Image,
+        target: &Image,
+        area: [u32; 4],
+    ) -> Result<(), Status> {
+        let [x, y, w, h] = source.local(area);
         self.compositor.render_stats.copy_pixels += u64::from(w) * u64::from(h);
         let op = PlannedOperation::Copy {
-            source: target.texture.clone(),
+            source: source.view.clone(),
             origin: wgpu::Origin3d { x, y, z: 0 },
-            target: snapshot.texture.clone(),
+            target: target.view.clone(),
             size: extent([w, h]),
         };
         if self.compositor.render_graph {
-            self.graph.record(
-                op,
-                false,
-                [target.texture.clone()],
-                [snapshot.texture.clone()],
-            );
+            self.graph
+                .record(op, false, [source.view.clone()], [target.view.clone()]);
         } else {
-            self.encode_operation(op);
+            self.encode_operation(op, &PhysicalAttachments::default())?;
         }
-        Ok(snapshot)
+        Ok(())
     }
 
     fn blur(&mut self, source: &Image, radius: f32, backdrop: bool) -> Result<Image, Status> {
@@ -4836,34 +5200,12 @@ impl Frame<'_> {
             radius: (sigma * 3.0).ceil() as u32,
             sigma,
         })?;
-        let scratch_storage = scratch.storage_view.as_ref().unwrap_or(&scratch.view);
-        let output_storage = output.storage_view.as_ref().unwrap_or(&output.view);
-        for (axis, (input, target)) in [
-            (&source.view, scratch_storage),
-            (&scratch.view, output_storage),
-        ]
-        .into_iter()
-        .enumerate()
+        for (axis, (input, target)) in [(source, &scratch), (&scratch, &output)]
+            .into_iter()
+            .enumerate()
         {
             let pipeline = kernel.pipeline(axis);
             let (buffer, offset) = self.compositor.arena.uniform_buffer(params);
-            let key = (input.clone(), target.clone(), buffer.clone());
-            let material = self.compositor.blur_groups.entry(key).or_insert_with(|| {
-                self.compositor.render_stats.bind_groups_created += 1;
-                pipelines::bind_group(
-                    self.gpu,
-                    &kernel.layout,
-                    &[
-                        wgpu::BindingResource::TextureView(input),
-                        wgpu::BindingResource::TextureView(target),
-                        wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer,
-                            offset: 0,
-                            size: wgpu::BufferSize::new(size_of::<BlurParams>() as u64),
-                        }),
-                    ],
-                )
-            });
             let stamps =
                 pass_timestamps(&mut self.capture, GpuPassKind::ComputeBlur, 0).map(|writes| {
                     PassStamps {
@@ -4875,22 +5217,24 @@ impl Frame<'_> {
             let [tw, th] = if axis == 0 { [16, 8] } else { [8, 16] };
             let op = PlannedOperation::Compute {
                 pipeline: pipeline.clone(),
-                material: material.clone(),
+                material: BlurBinding {
+                    input: input.view.clone(),
+                    target: target.view.clone(),
+                    layout: kernel.layout.clone(),
+                    buffer: buffer.clone(),
+                    storage: target.storage_view.clone(),
+                },
                 offset,
                 stamps,
                 groups: [w.div_ceil(tw), h.div_ceil(th)],
             };
             if self.compositor.render_graph {
-                self.graph.record(
-                    op,
-                    false,
-                    [input.texture().clone()],
-                    [target.texture().clone()],
-                );
+                self.graph
+                    .record(op, false, [input.view.clone()], [target.view.clone()]);
             } else {
-                self.encode_operation(op);
+                self.encode_operation(op, &PhysicalAttachments::default())?;
             }
-            self.count_pass(target);
+            self.count_pass(&target.view);
             self.compositor.render_stats.compute_passes += 1;
             self.compositor.render_stats.blur_pixels += u64::from(w) * u64::from(h);
         }
@@ -4951,14 +5295,15 @@ impl Frame<'_> {
             Extra::Params(self.uniform(&params)?)
         };
         let globals = self.globals(view, extra);
-        let input = ImageSource::Pooled(source).material(self, false);
+        let input = self.sample_attachment(source, false);
         let composite = match kind {
             FullPass::Over { .. }
             | FullPass::Multiply { .. }
             | FullPass::Backdrop
-            | FullPass::BackdropMaterial { .. } => {
-                Some(self.composite_group(backdrop, coverage.mask.as_ref()))
-            }
+            | FullPass::BackdropMaterial { .. } => Some(PassBinding::Composite(
+                backdrop.map(|image| image.view.clone()),
+                coverage.mask.as_ref().map(|image| image.view.clone()),
+            )),
             _ => None,
         };
         let effect_values = match kind {
@@ -5038,9 +5383,9 @@ impl Frame<'_> {
             }
             _ => GpuPassKind::OffscreenEffect,
         };
-        let reads = std::iter::once(&source.texture)
-            .chain(backdrop.map(|image| &image.texture))
-            .chain(coverage.mask.as_ref().map(|image| &image.texture))
+        let reads = std::iter::once(&source.view)
+            .chain(backdrop.map(|image| &image.view))
+            .chain(coverage.mask.as_ref().map(|image| &image.view))
             .cloned()
             .collect::<Vec<_>>();
         let call = CompositeDraw {
@@ -5069,7 +5414,13 @@ impl Frame<'_> {
             pass.reads.extend(call.reads.iter().cloned());
             pass.calls.push(DrawCall::Composite(call));
         } else {
-            self.encode_pass(&target.view, RootSegment::Composite(call), kind, 1, None);
+            self.encode_pass(
+                &target.view,
+                RootSegment::Composite(Box::new(call)),
+                kind,
+                1,
+                None,
+            );
         }
         Ok(())
     }
@@ -5146,23 +5497,31 @@ impl Frame<'_> {
             .group(self.gpu, &self.compositor.pipelines.layouts, view, extra)
     }
 
-    fn mask_group(&mut self, coverage: &Coverage) -> wgpu::BindGroup {
+    fn mask_group(&self, coverage: &Coverage) -> PassBinding {
         match &coverage.mask {
-            Some(mask) => ImageSource::Pooled(mask).material(self, false),
-            None => self.compositor.white_mask_group.clone(),
+            Some(mask) => self.sample_attachment(mask, false),
+            None => PassBinding::Ready(self.compositor.white_mask_group.clone()),
         }
+    }
+
+    fn sample_attachment(&self, image: &Image, nearest: bool) -> PassBinding {
+        PassBinding::Sample(ImageBinding {
+            view: image.view.clone(),
+            cache: image.material.clone(),
+            nearest,
+        })
     }
 
     fn composite_group(
         &mut self,
-        backdrop: Option<&Image>,
-        mask: Option<&Image>,
+        backdrop: Option<wgpu::TextureView>,
+        mask: Option<wgpu::TextureView>,
     ) -> wgpu::BindGroup {
         let compositor = &mut self.compositor;
-        let view = |image: Option<&Image>| {
-            image.map_or_else(|| compositor.white.clone(), |image| image.view.clone())
-        };
-        let key = (view(backdrop), view(mask));
+        let key = (
+            backdrop.unwrap_or_else(|| compositor.white.clone()),
+            mask.unwrap_or_else(|| compositor.white.clone()),
+        );
         if compositor.composites.len() >= 128 && !compositor.composites.contains_key(&key) {
             compositor.composites.clear();
         }

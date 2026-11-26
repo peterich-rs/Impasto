@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use super::{Coverage, Frame, Image, draw_count};
+use super::{Coverage, Frame, Image, PassBinding, draw_count};
 use crate::{
     Status,
     arena::Extra,
@@ -22,7 +22,6 @@ impl Frame<'_> {
         images: &[(&str, &[ImageInstance])],
     ) -> Result<(), Status> {
         let view = self.geometry_view(target, transform, clip, 0.0);
-        self.read_mask(target, clip);
         let mask = self.mask_group(clip);
         let mut views = Vec::new();
         let mut vertices = Vec::new();
@@ -119,7 +118,6 @@ impl Frame<'_> {
             return Ok(false);
         };
         let view = self.geometry_view(target, transform, clip, 0.0);
-        self.read_mask(target, clip);
         let mask = self.mask_group(clip);
         for run in instances
             .chunk_by(|a, b| a.flags & batch::IMAGE_NEAREST == b.flags & batch::IMAGE_NEAREST)
@@ -158,7 +156,7 @@ impl Frame<'_> {
         scissor: Option<[u32; 4]>,
         view: ViewUniform,
         blend: BlendKey,
-        mask: &wgpu::BindGroup,
+        mask: &PassBinding,
         views: &[wgpu::TextureView],
         nearest: bool,
         vertices: &[batch::ImageVertex],

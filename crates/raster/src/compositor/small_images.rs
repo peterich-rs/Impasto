@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use etagere::{AllocId, AllocatorOptions, AtlasAllocator, size2};
 
-use super::{Coverage, Frame, Image, ImageSource};
+use super::{Coverage, Frame, Image, ImageSource, PassBinding};
 use crate::Status;
 use crate::arena::Extra;
 use crate::batch::{self, ImageInstance, ImageVertex};
@@ -223,7 +223,6 @@ impl Frame<'_> {
         images: &[(&str, &[ImageInstance])],
     ) -> Result<(), Status> {
         let view = self.geometry_view(target, transform, clip, 0.0);
-        self.read_mask(target, clip);
         let mask = self.mask_group(clip);
         let mut vertices = Vec::new();
         let mut sampler = 0;
@@ -292,7 +291,7 @@ impl Frame<'_> {
         clip: &Coverage,
         blend: BlendKey,
         view: ViewUniform,
-        mask: &wgpu::BindGroup,
+        mask: &PassBinding,
         sampler: usize,
         vertices: &mut Vec<ImageVertex>,
     ) -> Result<(), Status> {
