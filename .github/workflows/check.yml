@@ -71,6 +71,9 @@ jobs:
           fi
           export VK_DRIVER_FILES="${icds[0]}"
           cargo test --locked -p raster -- --test-threads=1
+          IMPASTO_EARLY_Z=1 cargo test --locked -p raster --lib depth_ -- --test-threads=1
+          IMPASTO_PAINT_UNIFORM=1 IMPASTO_RENDER_GRAPH=0 IMPASTO_TEXT_MSDF=0 IMPASTO_CANVAS_DIRECT=0 \
+            cargo test --locked -p raster -- --test-threads=1
 
   rust-macos:
     name: cargo test (macos)

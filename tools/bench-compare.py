@@ -25,12 +25,13 @@ SUITES = {
 }
 PREFIX = "IMPASTO_BENCH_JSON "
 EXPERIMENTS = {
-    "IMPASTO_CANVAS_STENCIL", "IMPASTO_COMPUTE_BLUR", "IMPASTO_DARKEN_STEMS",
+    "IMPASTO_CANVAS_CURVES", "IMPASTO_CANVAS_DIRECT", "IMPASTO_CANVAS_STENCIL", "IMPASTO_COMPUTE_BLUR", "IMPASTO_DARKEN_STEMS",
     "IMPASTO_DITHER", "IMPASTO_EARLY_Z", "IMPASTO_GRADIENT_LUT",
     "IMPASTO_IMAGE_CACHE_MB", "IMPASTO_IMAGE_UPLOAD", "IMPASTO_LCD_RGB", "IMPASTO_PAINT_UNIFORM",
     "IMPASTO_PREWARM", "IMPASTO_RETAIN_OFFSCREEN", "IMPASTO_SHADOW_2D",
     "IMPASTO_SHADOW_HOLLOW", "IMPASTO_SPECIALIZE_PAINT", "IMPASTO_PARALLEL_PREPARE",
-    "IMPASTO_TEXT_GAMMA", "IMPASTO_TRANSIENT_ATTACHMENTS",
+    "IMPASTO_LATE_ACQUIRE", "IMPASTO_RENDER_GRAPH", "IMPASTO_SPATIAL_BATCH", "IMPASTO_STATE_TABLE",
+    "IMPASTO_TEXT_GAMMA", "IMPASTO_TEXT_MSDF", "IMPASTO_TRANSIENT_ATTACHMENTS",
 }
 
 
@@ -189,6 +190,8 @@ def main():
     parser.add_argument("--head-env", action="append", type=configuration, default=[], metavar="KEY=VALUE")
     parser.add_argument("--limit-counter", action="append", type=counter_limit, default=[],
                         metavar="SCENE/FIELD=MAX", help="fail on a candidate warm-frame counter")
+    parser.add_argument("--require-warm-resources", action="store_true",
+                        help="require zero buffer, bind group and synchronous pipeline creation on warm frames")
     parser.add_argument("--warmup-frames", type=int, default=3, help="initial frames skipped by counter gates")
     parser.add_argument("--out", type=Path, required=True, help="JSON report path")
     args = parser.parse_args()
@@ -234,7 +237,12 @@ def main():
                 pieces.append(f"{metric} {value:+.1f}%")
         print(f"{scene}: {', '.join(pieces)}")
     print(args.out)
-    check_counters(pairs, args.limit_counter, args.warmup_frames)
+    limits = list(args.limit_counter)
+    if args.require_warm_resources:
+        limits.extend((scene, ["counters", counter], 0)
+                      for scene in summary
+                      for counter in ("buffers_created", "bind_groups_created", "synchronous_pipeline_compiles"))
+    check_counters(pairs, limits, args.warmup_frames)
 
 
 if __name__ == "__main__":

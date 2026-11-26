@@ -601,3 +601,65 @@ impl Rasterizer {
 | `.github/workflows/{check,impeller-sdk}.yml`、`justfile`、`AGENTS.md`、`README.md`、`.gitignore` | 更新检查、工作区说明和产物配置，移除 SDK 作业 |
 | `tools/{impeller_sdk,build_impeller,test_impeller_sdk}.py` | 删除 SDK 工具与专用测试 |
 | `tools/{check-javascript-boundaries.py,check-android-package.py,android-frame-replay.sh}` | 依赖隔离、包体检查及录制元数据迁移 |
+
+## 11. 帧级状态、合批和 Pass 调度
+
+普通窗口先准备场景、录制离屏生产者和主目标绘制，再获取交换链纹理。获取失败可丢弃命令和待呈现结果。帧上传及缓存提交在成功获取后执行。UIKit 多切片沿用宿主的 drawable 事务，所有切片共用该帧的上传区。
+
+支持顶点和片元 Storage Buffer 的设备把 32 B 仿射变换和可变长裁剪记录放在同一帧级页。矩形、图片及字形实例保留原有字节宽度，通过两个 16 位索引选择变换和裁剪。完全落在安全内区的实例使用空裁剪记录。空间批次只能越过无重叠的绘制，遇到独立的合成、原生着色器或常驻 Bundle 绘制时结束当前重排范围。高合批收益场景优先复用帧批次，几何密集 Picture 仍可晋升常驻 Bundle。下限设备沿用动态 uniform 和硬件 scissor。
+
+RenderGraph 为渲染、Canvas resolve、Compute 模糊和纹理拷贝记录资源读写。它按依赖安排命令，并优先排入可以前置的离屏节点。物理附件在录制期间按规格租用，在最后一个消费者之后回池。同一物理纹理的新写入依赖此前的消费者。根目标无需快照且待采样附件低于内存水位时，独立离屏工作可共用一次根 Pass。读目标、跨切片和附件水位可能形成额外的 Pass 边界。
+
+主目标 Early-Z 对可证明全不透明的核心从前往后写颜色和深度，再按画家顺序绘制透明区、抗锯齿边缘、Canvas 直绘和离屏回贴。默认仅在支持节省瞬态内存、覆盖面积充足且不透明核心明显重叠的设备和场景启用。需要自定义着色器或兼容旧 Bundle 的段使用有序绘制。
+
+小字号静态正文使用 Swash 位图。大字号和动态变换的轮廓字形使用 48 px 基准的距离场，彩色字形和缺少有效轮廓的字体继续走原有路径。共享 Canvas 的凸形可在主目标使用像素宽度渐变网格。需要路径裁剪、特殊混合或保留细小结构时仍使用原有离屏覆盖。分离的复杂路径共用模板写入阶段和覆盖阶段。支持逐样本插值的非 GLES 后端可以使用二次贝塞尔片元测试，默认用于至少 2× 的编译比例。
+
+| 开关 | 用途 |
+| --- | --- |
+| `IMPASTO_LATE_ACQUIRE=0` | 对照提前获取交换链纹理 |
+| `IMPASTO_STATE_TABLE=0` | 使用动态 uniform |
+| `IMPASTO_SPATIAL_BATCH=0` | 保持实例批次提交顺序 |
+| `IMPASTO_RENDER_GRAPH=0` | 使用原有 Pass 顺序和附件预算 |
+| `IMPASTO_EARLY_Z=0` 或 `1` | 关闭或强制尝试深度路径 |
+| `IMPASTO_TEXT_MSDF=0` | 使用原有位图和轮廓文字 |
+| `IMPASTO_CANVAS_DIRECT=0` | 使用原有 Canvas 覆盖路径 |
+| `IMPASTO_CANVAS_CURVES=0` 或 `1` | 关闭或在受支持设备上强制解析曲线 |
+
+正交基准运行于独立的 Headless 目标。以下命令使用同一二进制对照，跳过图片矩阵中四帧的冷上传，随后检查 buffer、BindGroup 和同步 PSO 计数。
+
+```sh
+python3 tools/bench-compare.py . . --backend metal \
+  --filter tests::p0::wave::bench_ \
+  --base-env IMPASTO_STATE_TABLE=0 --base-env IMPASTO_RENDER_GRAPH=0 \
+  --base-env IMPASTO_TEXT_MSDF=0 --base-env IMPASTO_CANVAS_DIRECT=0 \
+  --base-env IMPASTO_CANVAS_CURVES=0 --warmup-frames 4 --require-warm-resources \
+  --limit-counter hetero_cards_50/counters.draws=8 \
+  --limit-counter hetero_cards_50/counters.passes=1 \
+  --limit-counter text_scale_and_cjk/counters.msdf_misses=0 \
+  --limit-counter text_scale_and_cjk/counters.offscreen_passes=0 \
+  --out .metrics/wave2-metal-ab.json
+```
+
+在 Android 真机上，可用 `tools/android-frame-trace.sh` 分别采集基线和候选的 300 秒 Trace。以 `base-scroll-1.perfetto-trace` 和 `head-scroll-1.perfetto-trace` 方式保存三组配对文件。只对已确认处于 120 Hz 的区间应用以下门禁，按需要指定区间的起点和长度。
+
+```sh
+python3 tools/compositor-trace-summary.py <trace-directory> --scene scroll \
+  --skip-seconds <start> --duration-seconds <length> \
+  --max-acquire-p95-ms 1.2 --max-cadence-p95-ms 8.8
+```
+
+### 11.1 Metal 合成基准
+
+Apple M2 Max、Metal、Release、Headless。表内耗时变化取三轮配对百分比的中位数。结构计数取跳过四帧冷启动后的中位数。
+
+| 场景 | 绘制与 Pass | 编码 p50 | GPU 帧跨度 p50 |
+| --- | --- | ---: | ---: |
+| 50 张异构卡片 | 250 → 5 次绘制，1 个 Pass | −6.3% | −22.9% |
+| 不透明叠层 | 1,608 → 28 次绘制，1 个 Pass | −34.9% | −76.3% |
+| 混排文字与缩放 | 17 → 1 个 Pass，暖帧 MSDF miss 为 0 | −55.4% | −91.5% |
+| 模糊与 mip | 约 59 个 Pass | +0.5% | −0.1% |
+| 混合 Canvas | 401 → 202 次绘制，2 个 Pass | +12.3% | +3.8% |
+
+缩放文字的编码 p95 中位数由 314 µs 降至 144 µs。五组负载均通过暖帧 buffer、BindGroup 和同步 PSO 创建数为零的检查。单独切换不透明叠层的 Early-Z 时，主 Pass GPU p50 下降 45.1%，p95 下降 67.0%。异构卡片的 GPU p95 在三轮配对中的变化中位数为 +2.7%。混合 Canvas 与模糊矩阵的 GPU p95 分别增加约 12% 和 11%。样本记录在 `.metrics/wave2-metal-ab.json` 与 `.metrics/wave2-depth-ab.json`。
+
+附件计划目前使用物理纹理租约和消费依赖。全图虚拟纹理区间预分配仍待实现。Canvas 资产图标沿用路径绘制，MSDF 图集当前覆盖轮廓字形。Compute 图片上传仍保留 RGBA16Float 与 1×1 尾级 mip，图片编译及字形准备仍有各自的完成点。Pixel 9 与 iPhone 真机的高刷帧步调须单独采集。
