@@ -220,7 +220,6 @@ pub fn run_filtered(
                 let _ = io.send(Command::Event(IoEvent::Plugin { token, result }));
             })
         }),
-        ..ModuleConfig::disconnected()
     };
     let log = Box::new(|level, line: &str| {
         if level >= 3 {
