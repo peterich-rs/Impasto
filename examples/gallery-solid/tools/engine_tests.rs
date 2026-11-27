@@ -122,9 +122,6 @@ fn chart_recorded_volume(frame: &session::FrameOutput, height: f32) -> bool {
     found
 }
 
-/// Pumps frames until the first screen lands. The quotes app mounts a
-/// heavier first screen than the old counter.
-
 /// Center of the first button whose accessible label matches exactly.
 /// Icon controls have no text to spot, so the tests reach them by label.
 fn label_spot(session: &mut JsSession, label: &str) -> Option<(f32, f32)> {
@@ -288,6 +285,10 @@ fn watchlist_page_shows_prices() {
         session.take_faults()
     );
     assert!(shown.iter().any(|text| text == "腾讯控股"), "{shown:?}");
+    assert!(
+        shown.iter().any(|text| text == "42"),
+        "the default watchlist should show all 42 stocks: {shown:?}"
+    );
     let mut sparks = 0;
     visit_commands(&first, &mut |command, _, _| {
         if matches!(command, Command::Canvas { list, .. } if !list.ops().is_empty()) {
@@ -396,7 +397,7 @@ const IN_WATCHLIST_NAMES: &[&str] = &[
 ];
 
 #[test]
-fn watchlist_publishes_the_latest_quotes_after_scrolling_settles() {
+fn watchlist_publishes_quotes_during_drag_and_coast() {
     let Some(mut session) = open_gallery() else {
         return;
     };
@@ -404,8 +405,7 @@ fn watchlist_publishes_the_latest_quotes_after_scrolling_settles() {
     let mut time = 0.0;
     let first = wait_for_text(session.as_mut(), &mut time, "腾讯控股");
     let start = visible_watch_rows(&first);
-    let x = 180.0;
-    let y = start[start.len() / 2].1 + 4.0;
+    let (x, y) = text_spot(&first, "宁德时代");
     session.pointer(PointerEvent::new(Phase::Down, x, y, time));
     let mut dragged = first;
     for step in 1u16..=3 {
@@ -426,64 +426,77 @@ fn watchlist_publishes_the_latest_quotes_after_scrolling_settles() {
         start.iter().any(|(name, y)| moved
             .iter()
             .any(|(row, offset)| name == row && y - offset > 8.0)),
-        "the gesture did not scroll the watchlist"
+        "the gesture at ({x}, {y}) did not scroll the watchlist: {start:?} -> {moved:?}"
     );
     let clock = |frame: &session::FrameOutput| {
         texts(frame).into_iter().find(|text| {
             text.len() == 8 && text.as_bytes()[2] == b':' && text.as_bytes()[5] == b':'
         })
     };
-    let held_clock = clock(&dragged).expect("market clock");
-    for _ in 0..60 {
-        time += 16.0;
-        let frame = session.frame(session::FrameTime::at(time));
-        assert!(session.take_faults().is_empty(), "watchlist frame failed");
-        if let Some(next) = clock(&frame) {
-            assert_eq!(next, held_clock, "publication changed during the drag");
-        }
-    }
-
-    let mut last_rows = moved;
-    for step in 4u16..=8 {
+    let mut last_clock = clock(&dragged).expect("market clock");
+    let mut updated_while_dragging = false;
+    let mut drag_sparks_redrawn = false;
+    for step in 1u16..=40 {
         time += 16.0;
         session.pointer(PointerEvent::new(
             Phase::Move,
             x,
-            y - 20.0 * f32::from(step),
+            y - 60.0 - f32::from(step),
             time,
         ));
         let frame = session.frame(session::FrameTime::at(time));
-        if frame.layers.is_some() {
+        assert!(session.take_faults().is_empty(), "watchlist frame failed");
+        if let Some(next) = clock(&frame) {
+            if next != last_clock {
+                updated_while_dragging = true;
+                drag_sparks_redrawn |= redraws(&frame) > 0;
+                last_clock = next;
+            }
+            dragged = frame;
+        }
+    }
+    assert!(
+        updated_while_dragging,
+        "market clock stalled during the drag"
+    );
+    assert!(drag_sparks_redrawn, "sparklines stalled during the drag");
+
+    let mut last_rows = visible_watch_rows(&dragged);
+    for step in 1u16..=4 {
+        time += 16.0;
+        session.pointer(PointerEvent::new(
+            Phase::Move,
+            x,
+            y - 100.0 - 20.0 * f32::from(step),
+            time,
+        ));
+        let frame = session.frame(session::FrameTime::at(time));
+        if let Some(next) = clock(&frame) {
+            last_clock = next;
             last_rows = visible_watch_rows(&frame);
         }
     }
     time += 16.0;
-    session.pointer(PointerEvent::new(Phase::Up, x, y - 160.0, time));
+    session.pointer(PointerEvent::new(Phase::Up, x, y - 180.0, time));
     let mut coasting = false;
-    let mut refreshed_after_release = false;
-    let mut charts_redrawn = false;
-    for _ in 0..120 {
+    let mut updated_while_coasting = false;
+    for _ in 0..40 {
         let frame = session.frame(session::FrameTime::at(time));
         assert!(session.take_faults().is_empty(), "watchlist frame failed");
-        if frame.layers.is_some() {
+        if let Some(next) = clock(&frame) {
             let rows = visible_watch_rows(&frame);
             let moved = !rows.is_empty() && rows != last_rows;
             coasting |= moved;
-            let next = clock(&frame).expect("market clock");
-            refreshed_after_release |= next != held_clock;
-            charts_redrawn |= refreshed_after_release && redraws(&frame) > 0;
+            updated_while_coasting |= moved && next != last_clock && redraws(&frame) > 0;
+            last_clock = next;
             last_rows = rows;
         }
         time += 16.0;
     }
     assert!(coasting, "the gesture did not start inertial scrolling");
     assert!(
-        refreshed_after_release,
-        "market clock did not resume after scrolling settled"
-    );
-    assert!(
-        charts_redrawn,
-        "sparklines did not publish the new market data"
+        updated_while_coasting,
+        "quotes did not update while the list was coasting"
     );
 }
 
@@ -507,8 +520,7 @@ fn scrolled_watch_rows_stay_in_order() {
         "need visible rows, texts {:?}",
         texts(&shown)
     );
-    let x = 180.0;
-    let y = start[start.len() / 2].1 + 4.0;
+    let (x, y) = text_spot(&shown, "宁德时代");
     for step in 0..6 {
         let time = 200.0 + f64::from(step) * 80.0;
         session.pointer(PointerEvent::new(Phase::Down, x, y, time));

@@ -729,23 +729,19 @@ impl Tree {
     /// sign as pointer movement. A positive finger speed decreases offset, so
     /// the overscroll derivative is the negation times the band slope.
     pub(super) fn arm_overscroll_spring(&mut self, id: NodeId, finger_vx: f32, finger_vy: f32) {
-        let Ok((x, y)) = self.node(id).map(|node| node.overscroll()) else {
+        let Ok(node) = self.node(id) else {
             return;
         };
+        let (x, y) = node.overscroll();
+        let (view_w, view_h) = (node.w, node.h);
         let axis = self.axis_of(id);
         let physics = self.scroll_physics(id).unwrap_or_default();
-        let (view_w, view_h) = {
-            let Ok(node) = self.node(id) else {
-                return;
-            };
-            (node.w, node.h)
-        };
         if axis.allows_x() && x.abs() > f32::EPSILON {
             self.arm_overscroll_axis(
                 id,
                 crate::motion::AnimProp::OverscrollX,
                 x,
-                -finger_vx * physics.band.slope(x, view_w),
+                -finger_vx * physics.band.slope_at_stretch(x, view_w),
                 physics,
             );
         }
@@ -754,7 +750,7 @@ impl Tree {
                 id,
                 crate::motion::AnimProp::OverscrollY,
                 y,
-                -finger_vy * physics.band.slope(y, view_h),
+                -finger_vy * physics.band.slope_at_stretch(y, view_h),
                 physics,
             );
         }

@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal, createTrackedEffect, onCleanup, untrack } from "solid-js";
+import { For, Show, createMemo, createSignal, onCleanup } from "solid-js";
 import { onLayout, scene } from "@impasto/solid-renderer";
 import { Canvas, Column, Pressable, Role, Row, View, VirtualList, createScrollController } from "@impasto/solid-ui";
 import { usePageActive, type Router } from "@impasto/solid-router";
@@ -115,11 +115,11 @@ function BoardHeader(props: { time: number; summary: ReturnType<typeof marketSum
   </Column>;
 }
 
-function Spark(props: { prices: readonly number[]; change: number }) {
+function Spark(props: { prices: readonly number[]; color: string }) {
   return <Canvas style={{ width: 96, maxWidth: "26%", minWidth: 0, flexShrink: 4, height: 36 }} draw={(ctx, { width, height }) => {
     const prices = props.prices;
     if (prices.length < 2 || width < 18) return;
-    const color = tone(props.change);
+    const color = props.color;
     const min = Math.min(...prices);
     const max = Math.max(...prices);
     const span = Math.max(0.01, max - min);
@@ -193,7 +193,7 @@ function StockRow(props: { instrument: Instrument; engine: QuoteEngine; revision
         </Column>
         <Show when={props.onSave}><Glyph name={props.saved ? "starFilled" : "star"} title={props.saved ? loc("移出自选", "Remove from watchlist") : loc("加入自选", "Add to watchlist")}
           onClick={props.onSave!} size={18} color={props.saved ? colors.amber : colors.faint} compact style={{ backgroundColor: "#00000000" }} /></Show>
-        <Spark prices={prices()} change={percent()} />
+        <Spark prices={prices()} color={color()} />
         <PriceTag value={fmtPrice(quote().last)} change={percent()} />
       </Row>
     </Pressable>
@@ -213,13 +213,13 @@ export function MarketsPage(props: BoardProps) {
 export function WatchlistPage(props: BoardProps) {
   const { engine } = useQuotes();
   // Indices stay out of the list; the board header already shows the composite.
-  const instruments = createMemo(() => {
-    const all = engine.instruments();
-    return watchlistSig().flatMap((symbol) => {
-      const instrument = all.find((item) => item.symbol === symbol && !item.index);
-      return instrument ? [instrument] : [];
-    });
-  });
+  const bySymbol = new Map(engine.instruments()
+    .filter((instrument) => !instrument.index)
+    .map((instrument) => [instrument.symbol, instrument]));
+  const instruments = createMemo(() => watchlistSig().flatMap((symbol) => {
+    const instrument = bySymbol.get(symbol);
+    return instrument ? [instrument] : [];
+  }));
   return <QuoteBoard {...props} engine={engine} instruments={instruments} scrollKey="watchlist" savable />;
 }
 
@@ -232,8 +232,7 @@ function QuoteBoard(props: BoardProps & { engine: QuoteEngine; instruments: () =
   const controller = createScrollController();
   const wide = () => width() >= 800;
   const split = () => width() >= 1240;
-  const active = usePageActive();
-  const revision = useMarketPulse(() => active() && controller.phase() === "idle");
+  const revision = useMarketPulse(usePageActive());
   const time = createMemo(() => { revision(); return engineTime(props.engine); });
   const summary = createMemo(() => { revision(); return marketSummary(props.engine, instruments()); });
   const items = createMemo<readonly Instrument[]>((previous) => {

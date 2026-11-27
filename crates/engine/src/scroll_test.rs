@@ -394,6 +394,33 @@ fn overscroll_spring_returns_to_idle_at_zero() -> Result<(), crate::Error> {
 }
 
 #[test]
+fn overscroll_return_builds_speed_then_eases_into_the_edge() -> Result<(), crate::Error> {
+    let (mut tree, scroll) = filled_scroll(200.0)?;
+    tree.pointer(event(Phase::Down, 10.0, 10.0, 0.0));
+    tree.pointer(event(Phase::Move, 10.0, 75.0, 16.0));
+    tree.tick_motions(16.0);
+    let pulled = tree.overscroll(scroll)?.1.abs();
+    assert!(pulled > 10.0, "the gesture stretched only {pulled} points");
+    tree.pointer(event(Phase::Cancel, 10.0, 75.0, 16.0));
+
+    let mut samples = [0.0; 4];
+    for (sample, elapsed) in samples.iter_mut().zip([16.0, 64.0, 80.0, 160.0]) {
+        tree.tick_motions(16.0 + elapsed);
+        *sample = tree.overscroll(scroll)?.1.abs();
+    }
+    let [early, mid_start, mid_end, late] = samples;
+    assert!(
+        pulled - early < mid_start - mid_end,
+        "the first frame moved too far: {pulled} -> {early}, then {mid_start} -> {mid_end}"
+    );
+    assert!(mid_end > late && late > 0.5, "return samples {samples:?}");
+    tree.tick_motions(656.0);
+    assert_eq!(tree.overscroll(scroll)?.1, 0.0);
+    assert_eq!(tree.scroll_phase(scroll)?, ScrollPhase::Idle);
+    Ok(())
+}
+
+#[test]
 fn a_new_drag_takes_the_overscroll_spring() -> Result<(), crate::Error> {
     let mut tree = Tree::new(mono());
     tree.set_viewport(0.0, 0.0, 100.0, 80.0)?;
@@ -727,10 +754,9 @@ fn curve_band_stretches_less_per_point_the_deeper_it_goes() {
     // d(x) = D * c * x / (c * x + D)... the slope must shrink: the second
     // ten points add less stretch than the first ten.
     assert!(second - first < first, "{first} then {second}");
-    // The asymptote is D / c: any input stays under it.
+    // The band approaches one viewport of stretch.
     let deep = band.stretch(10_000.0, dimension);
-    let ceiling = dimension / 0.55;
-    assert!(deep < ceiling, "{deep} must stay under {ceiling}");
+    assert!(deep < dimension, "{deep} must stay under {dimension}");
     // The linear band is unchanged behavior: factor * over.
     let linear = Band::Linear { factor: 0.55 };
     assert!((linear.stretch(20.0, dimension) - 11.0).abs() < 1e-4);
